@@ -33,8 +33,7 @@ func newTopic(nodeCount int) *Topic {
 		nodes = append(nodes, n)
 	}
 
-	leader := waitLeader(nodes)
-	fmt.Printf("Leader is node %v\n", leader)
+	waitLeader(nodes)
 
 	return &Topic{Nodes: nodes, network: nt}
 }
@@ -60,7 +59,6 @@ func (t *Topic) up() bool {
 // Append a proposal to the topic
 func (t *Topic) Append(ctx context.Context, proposal string) {
 	n := t.Nodes[0]
-	fmt.Printf("** [topic] Proposing \"%v\" to node: %+v\n", proposal, n.id)
 	n.Propose(ctx, []byte(proposal))
 }
 

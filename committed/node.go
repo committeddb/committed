@@ -2,7 +2,6 @@ package committed
 
 import (
 	"context"
-	"fmt"
 	"io/ioutil"
 	"log"
 	"sync"
@@ -65,13 +64,7 @@ func (n *node) start() {
 					n.mu.Unlock()
 					n.storage.SetHardState(n.state)
 				}
-				for _, e := range rd.Entries {
-					fmt.Printf("[node ready] Appending [%v] of type {%v} to node %v\n", string(e.Data), e.Type, n.id)
-				}
 				n.storage.Append(rd.Entries)
-				if len(rd.Entries) > 0 {
-					fmt.Printf("[node ready] ...Node %v finished appending into storage\n", n.id)
-				}
 				time.Sleep(time.Millisecond)
 				// TODO: make send async, more like real world...
 				for _, m := range rd.Messages {
