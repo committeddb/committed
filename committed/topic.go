@@ -89,32 +89,13 @@ func (t *Topic) ReadIndex(ctx context.Context, index uint64) string {
 	return ""
 }
 
-// type Topic struct {
-// 	nodes []raft.Node
-// }
+// Sync the contents of the topic into a Syncable
+func (t *Topic) Sync(ctx context.Context, s Syncable) {
+	s.Sync(ctx, []byte(t.ReadIndex(ctx, 0)))
+}
 
-// func (t *Topic) stop() {
-// 	for i := 0; i < len(t.nodes); i++ {
-// 		t.nodes[i].Stop()
-// 	}
-// }
-
-// func (t *Topic) up() bool {
-// 	v := false
-
-// 	for i := 0; i < len(t.nodes); i++ {
-// 		if t.nodes[i].Status().ID > 0 {
-// 			v = true
-// 		}
-// 	}
-
-// 	return v
-// }
-
-// func (t *Topic) append(ctx context.Context, proposal string) {
-// 	go func() {
-// 		n := t.nodes[0]
-// 		fmt.Printf("appending to node: %+v\n\n", n)
-// 		n.Propose(ctx, []byte(proposal))
-// 	}()
-// }
+// Syncable represents a synchable concept
+type Syncable interface {
+	Sync(ctx context.Context, bytes []byte) error
+	Close() error
+}
