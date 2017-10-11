@@ -3,6 +3,7 @@ package syncable
 import (
 	"bytes"
 	"context"
+	"os"
 	"testing"
 
 	bolt "github.com/coreos/bbolt"
@@ -17,6 +18,8 @@ func TestCreate(t *testing.T) {
 		t.Fatal("Database is not open")
 	}
 
+	defer delete()
+
 	err = s.Db.Close()
 	if err != nil {
 		t.Fatalf("Failed with error %v", err)
@@ -29,6 +32,7 @@ func TestCreate(t *testing.T) {
 func TestSync(t *testing.T) {
 	s, _ := NewBBolt("my.db", "keyName", "bucket")
 	defer s.Close()
+	defer delete()
 
 	key := "key"
 	value := "{\"keyName\": \"key\",\"value\": \"value\"}"
@@ -40,6 +44,7 @@ func TestSync(t *testing.T) {
 func TestSyncMultipleItems(t *testing.T) {
 	s, _ := NewBBolt("my.db", "keyName", "bucket")
 	defer s.Close()
+	defer delete()
 
 	v1 := "{\"keyName\": \"k1\",\"value\": \"v1\"}"
 	v2 := "{\"keyName\": \"k2\",\"value\": \"v2\"}"
@@ -51,18 +56,9 @@ func TestSyncMultipleItems(t *testing.T) {
 	view("k2", v2, s.Bucket, s.Db, t)
 }
 
-func view(key string, value string, bucket string, db *bolt.DB, t *testing.T) {
-	db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte(bucket))
-		v := b.Get([]byte(key))
-		if !bytes.Equal(v, []byte(value)) {
-			t.Fatalf("Expected %v but was %v", value, v)
-		}
-		return nil
-	})
-}
-
 func TestClose(t *testing.T) {
+	defer delete()
+
 	s, _ := NewBBolt("my.db", "", "bucket")
 
 	if s.Db.Path() == "" {
@@ -76,4 +72,17 @@ func TestClose(t *testing.T) {
 	}
 }
 
-// TODO We should delete the database between runs by maybe using - defer os.Remove(dbName)
+func view(key string, value string, bucket string, db *bolt.DB, t *testing.T) {
+	db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(bucket))
+		v := b.Get([]byte(key))
+		if !bytes.Equal(v, []byte(value)) {
+			t.Fatalf("Expected %v but was %v", value, v)
+		}
+		return nil
+	})
+}
+
+func delete() {
+	os.Remove("my.db")
+}
