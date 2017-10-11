@@ -26,16 +26,34 @@ func TestCreate(t *testing.T) {
 	}
 }
 
-func TestSynch(t *testing.T) {
-	s, _ := NewBBolt("my.db", "", "bucket")
+func TestSync(t *testing.T) {
+	s, _ := NewBBolt("my.db", "keyName", "bucket")
 	defer s.Close()
 
 	key := "key"
 	value := "{\"keyName\": \"key\",\"value\": \"value\"}"
 	s.Sync(context.TODO(), []byte(value))
 
-	s.Db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte(s.Bucket))
+	view(key, value, s.Bucket, s.Db, t)
+}
+
+func TestSyncMultipleItems(t *testing.T) {
+	s, _ := NewBBolt("my.db", "keyName", "bucket")
+	defer s.Close()
+
+	v1 := "{\"keyName\": \"k1\",\"value\": \"v1\"}"
+	v2 := "{\"keyName\": \"k2\",\"value\": \"v2\"}"
+
+	s.Sync(context.TODO(), []byte(v1))
+	s.Sync(context.TODO(), []byte(v2))
+
+	view("k1", v1, s.Bucket, s.Db, t)
+	view("k2", v2, s.Bucket, s.Db, t)
+}
+
+func view(key string, value string, bucket string, db *bolt.DB, t *testing.T) {
+	db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(bucket))
 		v := b.Get([]byte(key))
 		if !bytes.Equal(v, []byte(value)) {
 			t.Fatalf("Expected %v but was %v", value, v)

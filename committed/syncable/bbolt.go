@@ -2,6 +2,7 @@ package syncable
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/coreos/bbolt"
 )
@@ -36,7 +37,13 @@ func NewBBolt(dbName string, KeyName string, bucketName string) (*BBolt, error) 
 // Sync performs a sync operation on a BBolt database
 func (b *BBolt) Sync(ctx context.Context, bytes []byte) error {
 	// TODO We need to use the keyName to parse the key from the bytes
-	key := "key"
+	var f interface{}
+	err := json.Unmarshal(bytes, &f)
+	if err != nil {
+		return err
+	}
+	m := f.(map[string]interface{})
+	key := m[b.KeyName].(string)
 
 	b.Db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket([]byte(b.Bucket))
