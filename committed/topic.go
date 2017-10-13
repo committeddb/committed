@@ -123,11 +123,12 @@ func (t *Topic) Sync(ctx context.Context, s Syncable) {
 }
 
 func syncNode(ctx context.Context, s Syncable, n *node) {
+	subc := n.syncp.Sub("StoredData")
 	go func() {
 		for {
 			select {
-			case e := <-n.syncc:
-				s.Sync(ctx, e.Data)
+			case e := <-subc:
+				s.Sync(ctx, e.(raftpb.Entry).Data)
 			default:
 				time.Sleep(time.Millisecond * 1)
 			}

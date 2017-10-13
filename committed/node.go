@@ -10,6 +10,7 @@ import (
 
 	"github.com/coreos/etcd/raft"
 	"github.com/coreos/etcd/raft/raftpb"
+	"github.com/cskr/pubsub"
 )
 
 type node struct {
@@ -18,7 +19,7 @@ type node struct {
 	iface  iface
 	stopc  chan struct{}
 	pausec chan bool
-	syncc  chan raftpb.Entry
+	syncp  *pubsub.PubSub
 
 	// stable
 	storage *raft.MemoryStorage
@@ -45,7 +46,7 @@ func startNode(id uint64, peers []raft.Peer, iface iface) *node {
 		storage: st,
 		iface:   iface,
 		pausec:  make(chan bool),
-		syncc:   make(chan raftpb.Entry),
+		syncp:   pubsub.New(0),
 	}
 	n.start()
 	return n
@@ -72,7 +73,7 @@ func (n *node) start() {
 				if n.isLeader() {
 					for _, e := range rd.Entries {
 						if e.Type == raftpb.EntryNormal && len(e.Data) != 0 {
-							go func() { n.syncc <- e }()
+							go func() { n.syncp.Pub(e, "StoredData") }()
 							fmt.Printf("Node %v is storing: %v\n", n.id, e.Index)
 						}
 					}
