@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"testing"
+	"time"
 
 	bolt "github.com/coreos/bbolt"
 	"github.com/philborlin/committed/committed/syncable"
@@ -41,7 +42,7 @@ func TestSize(t *testing.T) {
 	topic.Append(context.TODO(), "p1")
 	topic.Append(context.TODO(), "p2")
 
-	if !waitCommitConverge(topic.Nodes, uint64(nodeCount+1)) {
+	if !waitCommitConverge(topic.Nodes, uint64(nodeCount+2)) {
 		t.Fatal("Commits did not converge")
 	}
 
@@ -87,9 +88,66 @@ func TestMultipleHistoricalSync(t *testing.T) {
 	}
 
 	topic.Sync(context.TODO(), s)
+	time.Sleep(50 * time.Millisecond)
 
 	view("k1", v1, s.Bucket, s.Db, t)
 	view("k2", v2, s.Bucket, s.Db, t)
+}
+
+func TestMultipleFutureSync(t *testing.T) {
+	nodeCount := 3
+	topic := NewCluster().CreateTopic(nodeCount)
+	s, _ := syncable.NewBBolt("my.db", "keyName", "bucket")
+	defer topic.stop()
+	defer s.Close()
+	defer delete()
+
+	v1 := "{\"keyName\": \"k1\",\"value\": \"v1\"}"
+	v2 := "{\"keyName\": \"k2\",\"value\": \"v2\"}"
+
+	go func() { topic.Sync(context.TODO(), s) }()
+
+	topic.Append(context.TODO(), v1)
+	topic.Append(context.TODO(), v2)
+	if !waitCommitConverge(topic.Nodes, uint64(nodeCount+2)) {
+		t.Fatal("Commits did not converge")
+	}
+
+	time.Sleep(time.Millisecond)
+
+	view("k1", v1, s.Bucket, s.Db, t)
+	view("k2", v2, s.Bucket, s.Db, t)
+}
+
+func TestMultipleFutureSyncsWithMultipleSyncables(t *testing.T) {
+	// nodeCount := 3
+	// topic := NewCluster().CreateTopic(nodeCount)
+	// s1, _ := syncable.NewBBolt("my.db", "keyName", "bucket")
+	// s2, _ := syncable.NewBBolt("my2.db", "keyName", "bucket")
+	// defer topic.stop()
+	// defer s1.Close()
+	// defer s2.Close()
+	// defer delete()
+	// defer os.Remove("my2.db")
+
+	// v1 := "{\"keyName\": \"k1\",\"value\": \"v1\"}"
+	// v2 := "{\"keyName\": \"k2\",\"value\": \"v2\"}"
+
+	// go func() { topic.Sync(context.TODO(), s1) }()
+	// go func() { topic.Sync(context.TODO(), s2) }()
+
+	// topic.Append(context.TODO(), v1)
+	// topic.Append(context.TODO(), v2)
+	// if !waitCommitConverge(topic.Nodes, uint64(nodeCount+2)) {
+	// 	t.Fatal("Commits did not converge")
+	// }
+
+	// time.Sleep(time.Millisecond)
+
+	// view("k1", v1, s1.Bucket, s1.Db, t)
+	// view("k2", v2, s1.Bucket, s1.Db, t)
+	// view("k1", v1, s2.Bucket, s2.Db, t)
+	// view("k2", v2, s2.Bucket, s2.Db, t)
 }
 
 func view(key string, value string, bucket string, db *bolt.DB, t *testing.T) {
@@ -106,3 +164,6 @@ func view(key string, value string, bucket string, db *bolt.DB, t *testing.T) {
 func delete() {
 	os.Remove("my.db")
 }
+
+// TODO Ideas - Sync multiple syncables simultaneously
+// Close a syncable and stop the for loop

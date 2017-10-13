@@ -2,6 +2,7 @@ package committed
 
 import (
 	"context"
+	"fmt"
 	"io/ioutil"
 	"log"
 	"sync"
@@ -17,6 +18,7 @@ type node struct {
 	iface  iface
 	stopc  chan struct{}
 	pausec chan bool
+	syncc  chan raftpb.Entry
 
 	// stable
 	storage *raft.MemoryStorage
@@ -43,6 +45,7 @@ func startNode(id uint64, peers []raft.Peer, iface iface) *node {
 		storage: st,
 		iface:   iface,
 		pausec:  make(chan bool),
+		syncc:   make(chan raftpb.Entry),
 	}
 	n.start()
 	return n
@@ -65,6 +68,16 @@ func (n *node) start() {
 					n.storage.SetHardState(n.state)
 				}
 				n.storage.Append(rd.Entries)
+
+				if n.isLeader() {
+					for _, e := range rd.Entries {
+						if e.Type == raftpb.EntryNormal && len(e.Data) != 0 {
+							go func() { n.syncc <- e }()
+							fmt.Printf("Node %v is storing: %v\n", n.id, e.Index)
+						}
+					}
+				}
+
 				time.Sleep(time.Millisecond)
 				// TODO: make send async, more like real world...
 				for _, m := range rd.Messages {
@@ -95,6 +108,10 @@ func (n *node) start() {
 			}
 		}
 	}()
+}
+
+func (n *node) isLeader() bool {
+	return n.Status().SoftState.Lead == n.id
 }
 
 // stop stops the node. stop a stopped node might panic.

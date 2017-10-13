@@ -3,6 +3,7 @@ package committed
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/coreos/etcd/raft/raftpb"
 
@@ -115,6 +116,23 @@ func (t *Topic) Sync(ctx context.Context, s Syncable) {
 	for i := uint64(0); i < size; i++ {
 		s.Sync(ctx, []byte(t.ReadIndex(ctx, uint64(i))))
 	}
+
+	for _, n := range t.Nodes {
+		syncNode(ctx, s, n)
+	}
+}
+
+func syncNode(ctx context.Context, s Syncable, n *node) {
+	go func() {
+		for {
+			select {
+			case e := <-n.syncc:
+				s.Sync(ctx, e.Data)
+			default:
+				time.Sleep(time.Millisecond * 1)
+			}
+		}
+	}()
 }
 
 // Syncable represents a synchable concept
