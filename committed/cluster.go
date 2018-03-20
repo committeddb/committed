@@ -18,7 +18,7 @@ type Cluster struct {
 }
 
 // NewCluster creates a new cluster
-func NewCluster(nodes []string) *Cluster {
+func NewCluster(nodes []string, port int) *Cluster {
 	c := &Cluster{
 		topics: make(map[string]*Topic),
 		nodes:  nodes,
@@ -31,7 +31,8 @@ func NewCluster(nodes []string) *Cluster {
 		http.Handle("/cluster/topics", newClusterTopicHandler(c))
 		http.Handle("/cluster/topics/posts", newClusterTopicPostHandler(c))
 		fmt.Printf("Starting http server.\n")
-		if err := http.ListenAndServe(":8080", nil); err != nil {
+		addr := fmt.Sprintf(":%d", port)
+		if err := http.ListenAndServe(addr, nil); err != nil {
 			fmt.Printf("Panicking.\n")
 			panic(err)
 		}
