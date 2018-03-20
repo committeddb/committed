@@ -14,7 +14,7 @@ import (
 // Append should propose a change to raft and continue to propose it until a timeout period
 func TestAppend(t *testing.T) {
 	nodeCount := 3
-	topic := NewCluster().CreateTopic(nodeCount)
+	topic := NewCluster().CreateTopic("", nodeCount)
 	proposal := "Hello World"
 
 	defer topic.stop()
@@ -35,7 +35,7 @@ func TestAppend(t *testing.T) {
 // TestSize tests an internal size functions used during syncing
 func TestSize(t *testing.T) {
 	nodeCount := 3
-	topic := NewCluster().CreateTopic(nodeCount)
+	topic := NewCluster().CreateTopic("", nodeCount)
 
 	defer topic.stop()
 
@@ -55,7 +55,7 @@ func TestSize(t *testing.T) {
 // TestHistoricalSync tests whether an item that has been committed prior to the sync action is persisted by the syncable
 func TestHistoricalSync(t *testing.T) {
 	nodeCount := 3
-	topic := NewCluster().CreateTopic(nodeCount)
+	topic := NewCluster().CreateTopic("", nodeCount)
 	s, _ := syncable.NewBBolt("my.db", "keyName", "bucket")
 	defer topic.stop()
 	defer s.Close()
@@ -73,7 +73,7 @@ func TestHistoricalSync(t *testing.T) {
 
 func TestMultipleHistoricalSync(t *testing.T) {
 	nodeCount := 3
-	topic := NewCluster().CreateTopic(nodeCount)
+	topic := NewCluster().CreateTopic("", nodeCount)
 	s, _ := syncable.NewBBolt("my.db", "keyName", "bucket")
 	defer topic.stop()
 	defer s.Close()
@@ -96,7 +96,7 @@ func TestMultipleHistoricalSync(t *testing.T) {
 
 func TestMultipleFutureSync(t *testing.T) {
 	nodeCount := 3
-	topic := NewCluster().CreateTopic(nodeCount)
+	topic := NewCluster().CreateTopic("", nodeCount)
 	s, _ := syncable.NewBBolt("my.db", "keyName", "bucket")
 	defer topic.stop()
 	defer s.Close()
@@ -121,7 +121,7 @@ func TestMultipleFutureSync(t *testing.T) {
 
 func TestMultipleFutureSyncsWithMultipleSyncables(t *testing.T) {
 	nodeCount := 3
-	topic := NewCluster().CreateTopic(nodeCount)
+	topic := NewCluster().CreateTopic("", nodeCount)
 	s1, _ := syncable.NewBBolt("my.db", "keyName", "bucket")
 	s2, _ := syncable.NewBBolt("my2.db", "keyName", "bucket")
 	defer topic.stop()
