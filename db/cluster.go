@@ -1,41 +1,61 @@
-package committed
+package db
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"log"
-	"math/rand"
 	"net/http"
+
+	"github.com/philborlin/committed/transport"
+	"github.com/philborlin/committed/util"
 )
 
 // Cluster is an engine that spawns and maintains topics
 // Cluster is a controller that manages nodes and balances resources among them
 type Cluster struct {
-	topics map[string]*Topic
-	nodes  []string
+	topics    map[string]*Topic
+	nodes     []string
+	httpstopc chan struct{}
+	httpdonec chan struct{}
+	transport *transport.MultiTransport
 }
 
 // NewCluster creates a new cluster
 func NewCluster(nodes []string, port int) *Cluster {
 	c := &Cluster{
-		topics: make(map[string]*Topic),
-		nodes:  nodes,
+		topics:    make(map[string]*Topic),
+		nodes:     nodes,
+		httpstopc: make(chan struct{}),
+		httpdonec: make(chan struct{}),
 	}
 	fmt.Printf("Created new cluster.\n")
 
 	go func() {
-		fmt.Printf("Adding http handlers.\n")
-		http.Handle("/node/topics", newNodeTopicHandler(c))
-		http.Handle("/cluster/topics", newClusterTopicHandler(c))
-		http.Handle("/cluster/topics/posts", newClusterTopicPostHandler(c))
-		fmt.Printf("Starting http server.\n")
 		addr := fmt.Sprintf(":%d", port)
-		if err := http.ListenAndServe(addr, nil); err != nil {
-			fmt.Printf("Panicking.\n")
-			panic(err)
+		mux := http.NewServeMux()
+		fmt.Printf("Adding http handlers.\n")
+		c.transport = transport.NewMultiTransport(mux)
+		mux.Handle("/node/topics", newNodeTopicHandler(c))
+		mux.Handle("/cluster/topics", newClusterTopicHandler(c))
+		mux.Handle("/cluster/topics/posts", newClusterTopicPostHandler(c))
+		listener, err := newStoppableListener(addr, c.httpstopc)
+		if err != nil {
+			log.Fatalf("committed: Failed to create listener in API http (%v)", err)
 		}
+
+		log.Printf("Starting API http server on: %s\n", addr)
+		err = (&http.Server{Handler: mux}).Serve(listener)
+		if err != nil {
+			log.Fatalf("committed: Failed to serve http in API http (%v)", err)
+		}
+
+		select {
+		case <-c.httpstopc:
+		default:
+			log.Fatalf("committed: Failed to serve http in API http (%v)", err)
+		}
+		close(c.httpdonec)
 	}()
 
 	// TODO Wait for all nodes to startup?
@@ -48,24 +68,18 @@ func NewCluster(nodes []string, port int) *Cluster {
 func (c *Cluster) CreateTopic(name string, nodeCount int) error {
 	// TODO We want some error handling if nodeCount > nodes
 	fmt.Printf("CreateTopic [%s] %d\n", name, nodeCount)
-	requestTopic(name, c.nodes, randomPort())
+	requestTopic(name, c.nodes)
 	return nil
 }
 
-func randomPort() int {
-	max := 65535 - 49152 - 1
-	return rand.Intn(max) + 49152 + 1
-}
-
 func (c *Cluster) createTopicCallback(t *Topic) {
-	fmt.Printf("createTopicCallback [%v]\n", t.Name)
 	c.topics[t.Name] = t
 }
 
 func (c *Cluster) config() {
 	name := "config"
 	if c.topics[name] == nil {
-		requestTopic(name, c.nodes, 49152)
+		requestTopic(name, c.nodes)
 	}
 }
 
@@ -93,11 +107,15 @@ type clusterTopicHandler struct {
 
 func (c *clusterTopicHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
+	log.Printf("Received: %s %s\n", r.Method, r.RequestURI)
 	if r.Method == "POST" {
 		n := newClusterTopicRequest{}
-		unmarshall(r, &n)
+		util.Unmarshall(r, &n)
 		c.c.CreateTopic(n.Name, n.NodeCount)
+		w.Write(nil)
 	} else if r.Method == "GET" {
+		log.Printf("Processing GET\n")
+		log.Printf("Found topics %v GET\n", c.c.topics)
 		keys := make([]string, 0, len(c.c.topics))
 		for key := range c.c.topics {
 			keys = append(keys, key)
@@ -124,17 +142,8 @@ func (c *clusterTopicPostHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 	defer r.Body.Close()
 	if r.Method == "POST" {
 		n := newClusterTopicPostRequest{}
-		unmarshall(r, &n)
+		util.Unmarshall(r, &n)
 		c.c.Append(context.TODO(), n.Topic, n.Proposal)
+		w.Write(nil)
 	}
-}
-
-func unmarshall(r *http.Request, v interface{}) error {
-	body, err := ioutil.ReadAll(r.Body)
-	log.Printf("Body %v\n", string(body))
-	if err != nil {
-		return err
-	}
-	err = json.Unmarshal(body, &v)
-	return err
 }

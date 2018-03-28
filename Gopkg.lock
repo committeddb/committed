@@ -5,7 +5,7 @@
   branch = "master"
   name = "github.com/beorn7/perks"
   packages = ["quantile"]
-  revision = "4c0e84591b9aa9e6dcfdf3e020114cd81f89d5f9"
+  revision = "3a771d992973f24aa725d07868b467d1ddfceafb"
 
 [[projects]]
   name = "github.com/coreos/bbolt"
@@ -121,7 +121,7 @@
     "nfs",
     "xfs"
   ]
-  revision = "54d17b57dd7d4a3aa092476596b3f8a933bde349"
+  revision = "780932d4fbbe0e69b84c34c20f5c8d0981e109ea"
 
 [[projects]]
   name = "github.com/xiang90/probing"
@@ -133,19 +133,19 @@
   branch = "master"
   name = "golang.org/x/net"
   packages = ["context"]
-  revision = "892bf7b0c6e2f93b51166bf3882e50277fa5afc6"
+  revision = "6078986fec03a1dcc236c34816c71b0e05018fda"
 
 [[projects]]
   branch = "master"
   name = "golang.org/x/sys"
   packages = ["unix"]
-  revision = "c28acc882ebcbfbe8ce9f0f14b9ac26ee138dd51"
+  revision = "c488ab1dd8481ef762f96a79a9577c27825be697"
 
 [[projects]]
   branch = "master"
   name = "golang.org/x/time"
   packages = ["rate"]
-  revision = "6dc17368e09b0e8634d71cac8168d853e869a0c7"
+  revision = "26559e0f760e39c24d730d3224364aef164ee23f"
 
 [[projects]]
   name = "google.golang.org/grpc"
@@ -156,6 +156,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "79a651958cd17d017f0bfab887b1c91d02bda722e4c0c196017954352ec2d52e"
+  inputs-digest = "f8a19e6c94b56ed166074744c757e10210880ea0fc917520b6339a54a0c53c08"
   solver-name = "gps-cdcl"
   solver-version = 1

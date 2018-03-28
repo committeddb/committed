@@ -1,14 +1,18 @@
-package committed
+package db
 
 import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"time"
 
 	"github.com/coreos/etcd/raft/raftpb"
+	"github.com/philborlin/committed/transport"
+	"github.com/philborlin/committed/util"
 )
 
 // Topic represents a named raft cluster that can be proposed to or synched
@@ -18,6 +22,7 @@ type Topic struct {
 	errorC      <-chan error
 	proposeC    chan string
 	confChangeC <-chan raftpb.ConfChange
+	kvstore     *kvstore
 }
 
 type newNodeTopicRequest struct {
@@ -27,12 +32,17 @@ type newNodeTopicRequest struct {
 	Join  bool
 }
 
-func requestTopic(name string, nodes []string, port int) error {
+func randomPort() int {
+	max := 65535 - 49152 - 1
+	return rand.Intn(max) + 49152 + 1
+}
+
+func requestTopic(name string, nodes []string) error {
 	fmt.Printf("requestTopic [%s]\n", name)
 	var peers []string
 	for _, node := range nodes {
 		u, _ := url.Parse(node)
-		url := fmt.Sprintf("%s://%s:%d", u.Scheme, u.Hostname(), port)
+		url := fmt.Sprintf("%s://%s:%d", u.Scheme, u.Hostname(), randomPort())
 		peers = append(peers, url)
 	}
 
@@ -41,36 +51,62 @@ func requestTopic(name string, nodes []string, port int) error {
 	}
 
 	for i := 0; i < len(nodes); i++ {
-		request, _ := json.Marshal(newNodeTopicRequest{Name: name, ID: i + 1, Peers: peers, Join: false})
-		fmt.Printf("json: %s\n", string(request[:]))
-		r := bytes.NewReader(request)
-		resp, err := http.Post(fmt.Sprintf("%s/node/topics", nodes[i]), "application/json", r)
-		if err != nil {
-			fmt.Printf("%v\n", err)
-			return err
-		}
-		fmt.Printf("requestTopic POST is successful\n")
-		defer resp.Body.Close()
-		// TODO Handle response
+		go func(node string, id int) {
+			request, _ := json.Marshal(newNodeTopicRequest{Name: name, ID: id, Peers: peers, Join: false})
+			log.Printf("[%d]: json: %s\n", id, string(request[:]))
+			r := bytes.NewReader(request)
+			url := fmt.Sprintf("%s/node/topics", node)
+			log.Printf("[%d]: POSTing to %s\n", id, url)
+			resp, err := http.Post(url, "application/json", r)
+			if err != nil {
+				fmt.Printf("[%d]: %v\n", id, err)
+				// return err
+			}
+			defer closeBody(resp)
+			fmt.Printf("[%d]: node %s requestTopic POST is successful\n", id, node)
+			// TODO Handle response
+		}(nodes[i], i+1)
 	}
 
 	return nil
 }
 
-func newTopic(name string, id int, peers []string, join bool) *Topic {
-	fmt.Printf("newTopic [%v]\n", name)
+func closeBody(resp *http.Response) {
+	if resp != nil {
+		if resp.Body != nil {
+			resp.Body.Close()
+		}
+	}
+}
+
+func newTopic(name string, id int, peers []string, join bool, transport *transport.MultiTransport) *Topic {
+	log.Printf("[%d] newTopic [%v]\n", id, name)
 	proposeC := make(chan string)
 	// defer close(proposeC)
 	confChangeC := make(chan raftpb.ConfChange)
 	// defer close(confChangeC)
 
-	commitC, errorC := newRaftNode(id, name, peers, join, proposeC, confChangeC)
+	var kvs *kvstore
+	getSnapshot := func() ([]byte, error) { return kvs.getSnapshot() }
+	commitC, errorC, snapshotterReady := newRaftNode(id, name, peers, join, getSnapshot, proposeC, confChangeC, transport)
+
+	kvs = newKVStore(<-snapshotterReady, proposeC, commitC, errorC)
+
+	go func(errorC <-chan error) {
+		if err, ok := <-errorC; ok {
+			log.Fatal(err)
+		}
+	}(errorC)
+
+	log.Printf("[%d] Returning topic\n", id)
+
 	return &Topic{
 		Name:        name,
 		commitC:     commitC,
 		errorC:      errorC,
 		proposeC:    proposeC,
 		confChangeC: confChangeC,
+		kvstore:     kvs,
 	}
 }
 
@@ -185,9 +221,13 @@ func (c *nodeTopicHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	if r.Method == "POST" {
 		n := newNodeTopicRequest{}
-		unmarshall(r, &n)
-		t := newTopic(n.Name, n.ID, n.Peers, n.Join)
-		c.c.createTopicCallback(t)
+		util.Unmarshall(r, &n)
+		go func(c *Cluster, n newNodeTopicRequest) {
+			t := newTopic(n.Name, n.ID, n.Peers, n.Join, c.transport)
+			c.createTopicCallback(t)
+		}(c.c, n)
+		w.WriteHeader(http.StatusAccepted)
+		w.Write(nil)
 	}
 }
 

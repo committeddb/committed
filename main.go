@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/philborlin/committed/committed"
+	"github.com/philborlin/committed/db"
 )
 
 func main() {
@@ -13,9 +13,11 @@ func main() {
 	port := flag.Int("port", 8080, "http server port")
 	flag.Parse()
 
-	committed.NewCluster(strings.Split(*cluster, ","), *port)
+	db.NewCluster(strings.Split(*cluster, ","), *port)
 	fmt.Printf("Starting committed.\n")
 
-	fmt.Scanln()
+	for true {
+	}
+
 	fmt.Println("done")
 }

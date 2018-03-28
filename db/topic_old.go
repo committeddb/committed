@@ -1,4 +1,4 @@
-package committed
+package db
 
 // // Topic is a replicated state machine that accepts a partitioned type of data
 // type Topic struct {
