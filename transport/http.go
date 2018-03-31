@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -32,9 +33,9 @@ type MultiTransporter interface {
 	// will be ignored.
 	Send(raftID types.ID, m []raftpb.Message)
 	// AddRaft adds a raft to the transport
-	AddRaft(raftID types.ID, peerID types.ID, raft *Raft)
+	AddRaft(topic string, raft *Raft)
 	// RemoveRaft removes a raft from the transport
-	RemoveRaft(raftID types.ID)
+	RemoveRaft(topic string)
 	// AddPeer adds a peer with given peer urls into the transport.
 	// It is the caller's responsibility to ensure the urls are all valid,
 	// or it panics.
@@ -46,15 +47,10 @@ type MultiTransporter interface {
 	Stop()
 }
 
-type peerRaft struct {
-	peerID types.ID
-	raftID types.ID
-}
-
 // MultiTransport struct
 type MultiTransport struct {
 	mu    sync.RWMutex
-	rafts map[peerRaft]Raft
+	rafts map[string]Raft
 	peers map[types.ID]string
 	mux   *http.ServeMux
 	serve bool
@@ -63,6 +59,8 @@ type MultiTransport struct {
 // NewMultiTransport creates a new MultiTransport
 func NewMultiTransport(mux *http.ServeMux) *MultiTransport {
 	t := &MultiTransport{
+		rafts: make(map[string]Raft),
+		peers: make(map[types.ID]string),
 		mux:   mux,
 		serve: false,
 	}
@@ -78,54 +76,54 @@ func (t *MultiTransport) Start() error {
 }
 
 // Send implements MultiTransporter interface
-func (t *MultiTransport) Send(raftID types.ID, ms []raftpb.Message) {
+func (t *MultiTransport) Send(topic string, ms []raftpb.Message) {
 	for _, m := range ms {
 		peerID := types.ID(m.To)
+
+		log.Printf("[%v] Sending: %s\n", peerID, m.Type.String())
 
 		var peer string
 		var raft Raft
 		{
 			t.mu.RLock()
 			defer t.mu.RUnlock()
-			raft = t.rafts[peerRaft{peerID: peerID, raftID: raftID}]
+			raft = t.rafts[topic]
 			peer = t.peers[peerID]
 		}
 
 		if peer == "" {
-			fmt.Printf("Peer cannot be found. Message [%v] not delivered\n", m)
+			fmt.Printf("Peer cannot be found. Message [%v] not delivered\n", m.Type.String())
 			return
 		}
 
 		if raft == nil {
-			fmt.Printf("Raft cannot be found. Message [%v] not delivered\n", m)
+			fmt.Printf("Raft cannot be found. Message [%v] not delivered\n", m.Type.String())
 			return
 		}
 
 		r, err := json.Marshal(m)
-		if err == nil {
-			fmt.Printf("Message %v errored out while marshaling. Message not delivered\n", m)
+		if err != nil {
+			fmt.Printf("Message %v errored out while marshaling. Message not delivered\nreason: %v\n", m.Type.String(), err)
 			return
 		}
 
-		url := peer + "/gossip/" + raftID.String()
+		url := peer + "/gossip/" + topic
 		http.Post(url, "application/json", bytes.NewReader(r))
 	}
 }
 
 // AddRaft implements MultiTransporter interface
-func (t *MultiTransport) AddRaft(raftID types.ID, peerID types.ID, raft *Raft) {
-	peerRaft := peerRaft{peerID: peerID, raftID: raftID}
+func (t *MultiTransport) AddRaft(topic string, raft Raft) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.rafts[peerRaft] = *raft
+	t.rafts[topic] = raft
 }
 
 // RemoveRaft implements MultiTransporter interface
-func (t *MultiTransport) RemoveRaft(raftID types.ID, peerID types.ID) {
-	peerRaft := peerRaft{peerID: peerID, raftID: raftID}
+func (t *MultiTransport) RemoveRaft(topic string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.rafts[peerRaft] = nil
+	t.rafts[topic] = nil
 }
 
 // AddPeer implements MultiTransporter interface
@@ -157,13 +155,11 @@ func (c *multiTransportHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 		m := raftpb.Message{}
 		util.Unmarshall(r, &m)
 		splits := strings.Split(r.RequestURI, "/")
-		peerID := types.ID(m.To)
-		raftID, _ := types.IDFromString(splits[len(splits)-1])
-		peerRaft := peerRaft{peerID: peerID, raftID: raftID}
+		topic := splits[len(splits)-1]
 
 		t.mu.RLock()
 		defer t.mu.RUnlock()
-		r := t.rafts[peerRaft]
+		r := t.rafts[topic]
 		r.Process(context.Background(), m)
 	}
 }

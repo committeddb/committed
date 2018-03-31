@@ -18,7 +18,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"math/rand"
 	"net/url"
 	"os"
 	"time"
@@ -67,7 +66,7 @@ type raftNode struct {
 	httpstopc chan struct{} // signals http server to shutdown
 	httpdonec chan struct{} // signals http server shutdown complete
 
-	raftID types.ID
+	topic string
 }
 
 var defaultSnapCount uint64 = 10000
@@ -77,8 +76,8 @@ var defaultSnapCount uint64 = 10000
 // provided the proposal channel. All log entries are replayed over the
 // commit channel, followed by a nil message (to indicate the channel is
 // current), then new log entries. To shutdown, close proposeC and read errorC.
-func newRaftNode(id int, name string, peers []string, join bool, getSnapshot func() ([]byte, error), proposeC <-chan string,
-	confChangeC <-chan raftpb.ConfChange, transport *transport.MultiTransport) (<-chan *string, <-chan error, <-chan *snap.Snapshotter) {
+func newRaftNode(id int, topic string, peers []string, join bool, getSnapshot func() ([]byte, error), proposeC <-chan string,
+	confChangeC <-chan raftpb.ConfChange, transport *transport.MultiTransport) (<-chan *string, <-chan error, <-chan *snap.Snapshotter, raftNode) {
 
 	commitC := make(chan *string)
 	errorC := make(chan error)
@@ -91,8 +90,8 @@ func newRaftNode(id int, name string, peers []string, join bool, getSnapshot fun
 		id:          id,
 		peers:       peers,
 		join:        join,
-		waldir:      fmt.Sprintf("data-%s-%d", name, id),
-		snapdir:     fmt.Sprintf("data-%s-%d-snap", name, id),
+		waldir:      fmt.Sprintf("data-%s-%d", topic, id),
+		snapdir:     fmt.Sprintf("data-%s-%d-snap", topic, id),
 		getSnapshot: getSnapshot,
 		snapCount:   defaultSnapCount,
 
@@ -102,13 +101,13 @@ func newRaftNode(id int, name string, peers []string, join bool, getSnapshot fun
 		httpstopc: make(chan struct{}),
 		httpdonec: make(chan struct{}),
 
-		raftID: types.ID(rand.Uint64()),
+		topic: topic,
 
 		snapshotterReady: make(chan *snap.Snapshotter, 1),
 		// rest of structure populated after WAL replay
 	}
 	go rc.startRaft()
-	return commitC, errorC, rc.snapshotterReady
+	return commitC, errorC, rc.snapshotterReady, *rc
 }
 
 func (rc *raftNode) saveSnap(snap raftpb.Snapshot) error {
@@ -309,7 +308,10 @@ func (rc *raftNode) startRaft() {
 	rc.transport.Start()
 	for i := range rc.peers {
 		if i+1 != rc.id {
-			rc.transport.AddPeer(types.ID(i+1), rc.peers[i])
+			id := types.ID(i + 1)
+			peer := rc.peers[i]
+			log.Printf("Adding peer %d %v\n", id, peer)
+			rc.transport.AddPeer(id, peer)
 		}
 	}
 
@@ -441,7 +443,7 @@ func (rc *raftNode) serveChannels() {
 				rc.publishSnapshot(rd.Snapshot)
 			}
 			rc.raftStorage.Append(rd.Entries)
-			rc.transport.Send(rc.raftID, rd.Messages)
+			rc.transport.Send(rc.topic, rd.Messages)
 			if ok := rc.publishEntries(rc.entriesToApply(rd.CommittedEntries)); !ok {
 				rc.stop()
 				return

@@ -88,7 +88,9 @@ func newTopic(name string, id int, peers []string, join bool, transport *transpo
 
 	var kvs *kvstore
 	getSnapshot := func() ([]byte, error) { return kvs.getSnapshot() }
-	commitC, errorC, snapshotterReady := newRaftNode(id, name, peers, join, getSnapshot, proposeC, confChangeC, transport)
+	commitC, errorC, snapshotterReady, raft := newRaftNode(id, name, peers, join, getSnapshot, proposeC, confChangeC, transport)
+
+	transport.AddRaft(name, &raft)
 
 	kvs = newKVStore(<-snapshotterReady, proposeC, commitC, errorC)
 
