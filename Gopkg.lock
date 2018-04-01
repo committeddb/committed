@@ -16,33 +16,20 @@
 [[projects]]
   name = "github.com/coreos/etcd"
   packages = [
-    "etcdserver/stats",
     "pkg/crc",
     "pkg/fileutil",
-    "pkg/httputil",
     "pkg/ioutil",
-    "pkg/logutil",
     "pkg/pbutil",
-    "pkg/tlsutil",
-    "pkg/transport",
     "pkg/types",
     "raft",
     "raft/raftpb",
-    "rafthttp",
     "snap",
     "snap/snappb",
-    "version",
     "wal",
     "wal/walpb"
   ]
   revision = "c9d46ab3799b7f2174268e75f72d01e6d6aac953"
   version = "v3.3.2"
-
-[[projects]]
-  name = "github.com/coreos/go-semver"
-  packages = ["semver"]
-  revision = "8ab6407b697782a06568d4b7f1db25550ec2e4c6"
-  version = "v0.2.0"
 
 [[projects]]
   name = "github.com/coreos/go-systemd"
@@ -55,18 +42,6 @@
   packages = ["capnslog"]
   revision = "3ac0863d7acf3bc44daf49afef8919af12f704ef"
   version = "v3"
-
-[[projects]]
-  name = "github.com/cskr/pubsub"
-  packages = ["."]
-  revision = "bbadc4de95998f07a2e0d607cf90c4377832fe32"
-  version = "v1.0.0"
-
-[[projects]]
-  branch = "master"
-  name = "github.com/dustin/go-humanize"
-  packages = ["."]
-  revision = "bb3d318650d48840a39aa21a027c6630e198e626"
 
 [[projects]]
   name = "github.com/gogo/protobuf"
@@ -124,38 +99,14 @@
   revision = "780932d4fbbe0e69b84c34c20f5c8d0981e109ea"
 
 [[projects]]
-  name = "github.com/xiang90/probing"
-  packages = ["."]
-  revision = "07dd2e8dfe18522e9c447ba95f2fe95262f63bb2"
-  version = "0.0.1"
-
-[[projects]]
-  branch = "master"
-  name = "golang.org/x/net"
-  packages = ["context"]
-  revision = "6078986fec03a1dcc236c34816c71b0e05018fda"
-
-[[projects]]
   branch = "master"
   name = "golang.org/x/sys"
   packages = ["unix"]
   revision = "c488ab1dd8481ef762f96a79a9577c27825be697"
 
-[[projects]]
-  branch = "master"
-  name = "golang.org/x/time"
-  packages = ["rate"]
-  revision = "26559e0f760e39c24d730d3224364aef164ee23f"
-
-[[projects]]
-  name = "google.golang.org/grpc"
-  packages = ["grpclog"]
-  revision = "8e4536a86ab602859c20df5ebfd0bd4228d08655"
-  version = "v1.10.0"
-
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "f8a19e6c94b56ed166074744c757e10210880ea0fc917520b6339a54a0c53c08"
+  inputs-digest = "3b6ddf5cd474b977ae973e8ac0aa0da4f3ef8d1695411d0deb198be5b5d6e56c"
   solver-name = "gps-cdcl"
   solver-version = 1

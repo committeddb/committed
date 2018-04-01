@@ -310,7 +310,7 @@ func (rc *raftNode) startRaft() {
 		if i+1 != rc.id {
 			id := types.ID(i + 1)
 			peer := rc.peers[i]
-			log.Printf("Adding peer %d %v\n", id, peer)
+			log.Printf("[%v] Adding peer %d %v\n", rc.id, id, peer)
 			rc.transport.AddPeer(id, peer)
 		}
 	}
@@ -436,19 +436,19 @@ func (rc *raftNode) serveChannels() {
 		// store raft entries to wal, then publish over commit channel
 		case rd := <-rc.node.Ready():
 			log.Printf("[%d] Storing entry in wal\n", rc.id)
-			rc.wal.Save(rd.HardState, rd.Entries)
-			if !raft.IsEmptySnap(rd.Snapshot) {
-				rc.saveSnap(rd.Snapshot)
-				rc.raftStorage.ApplySnapshot(rd.Snapshot)
-				rc.publishSnapshot(rd.Snapshot)
-			}
+			// rc.wal.Save(rd.HardState, rd.Entries)
+			// if !raft.IsEmptySnap(rd.Snapshot) {
+			// 	rc.saveSnap(rd.Snapshot)
+			// 	rc.raftStorage.ApplySnapshot(rd.Snapshot)
+			// 	rc.publishSnapshot(rd.Snapshot)
+			// }
 			rc.raftStorage.Append(rd.Entries)
 			rc.transport.Send(rc.topic, rd.Messages)
 			if ok := rc.publishEntries(rc.entriesToApply(rd.CommittedEntries)); !ok {
 				rc.stop()
 				return
 			}
-			rc.maybeTriggerSnapshot()
+			// rc.maybeTriggerSnapshot()
 			rc.node.Advance()
 
 			// TODO Add error handling

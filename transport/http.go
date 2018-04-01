@@ -77,10 +77,9 @@ func (t *MultiTransport) Start() error {
 
 // Send implements MultiTransporter interface
 func (t *MultiTransport) Send(topic string, ms []raftpb.Message) {
+	log.Printf("[%s] Sending %d messages\n", topic, len(ms))
 	for _, m := range ms {
-		peerID := types.ID(m.To)
-
-		log.Printf("[%v] Sending: %s\n", peerID, m.Type.String())
+		log.Printf("[%s#%v] Sending: %s to %d\n", topic, m.From, m.Type.String(), m.To)
 
 		var peer string
 		var raft Raft
@@ -88,7 +87,7 @@ func (t *MultiTransport) Send(topic string, ms []raftpb.Message) {
 			t.mu.RLock()
 			defer t.mu.RUnlock()
 			raft = t.rafts[topic]
-			peer = t.peers[peerID]
+			peer = t.peers[types.ID(m.To)]
 		}
 
 		if peer == "" {
@@ -108,6 +107,7 @@ func (t *MultiTransport) Send(topic string, ms []raftpb.Message) {
 		}
 
 		url := peer + "/gossip/" + topic
+		log.Printf("[%s#%v] Posting to : %s\n", topic, m.From, url)
 		http.Post(url, "application/json", bytes.NewReader(r))
 	}
 }
@@ -150,12 +150,16 @@ type multiTransportHandler struct {
 }
 
 func (c *multiTransportHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	log.Printf("/gossip endpoint received an HTTP request")
+
 	t := c.t
 	if t.serve {
 		m := raftpb.Message{}
 		util.Unmarshall(r, &m)
 		splits := strings.Split(r.RequestURI, "/")
 		topic := splits[len(splits)-1]
+
+		log.Printf("[%s] Received message %s", topic, m.Type.String())
 
 		t.mu.RLock()
 		defer t.mu.RUnlock()
