@@ -1,13 +1,10 @@
 package transport
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
-	"strings"
 	"sync"
 
 	"github.com/philborlin/committed/util"
@@ -33,7 +30,7 @@ type MultiTransporter interface {
 	// will be ignored.
 	Send(raftID types.ID, m []raftpb.Message)
 	// AddRaft adds a raft to the transport
-	AddRaft(topic string, raft *Raft)
+	AddRaft(topic string, raft Raft)
 	// RemoveRaft removes a raft from the transport
 	RemoveRaft(topic string)
 	// AddPeer adds a peer with given peer urls into the transport.
@@ -80,14 +77,12 @@ func (t *MultiTransport) Send(topic string, ms []raftpb.Message) {
 	for _, m := range ms {
 		peerID := types.ID(m.To)
 
-		log.Printf("[%v] Sending: %s\n", peerID, m.Type.String())
+		log.Printf("[%v] Sending %s to %d\n", m.From, m.Type.String(), m.To)
 
 		var peer string
-		var raft Raft
 		{
 			t.mu.RLock()
 			defer t.mu.RUnlock()
-			raft = t.rafts[topic]
 			peer = t.peers[peerID]
 		}
 
@@ -96,19 +91,8 @@ func (t *MultiTransport) Send(topic string, ms []raftpb.Message) {
 			return
 		}
 
-		if raft == nil {
-			fmt.Printf("Raft cannot be found. Message [%v] not delivered\n", m.Type.String())
-			return
-		}
-
-		r, err := json.Marshal(m)
-		if err != nil {
-			fmt.Printf("Message %v errored out while marshaling. Message not delivered\nreason: %v\n", m.Type.String(), err)
-			return
-		}
-
-		url := peer + "/gossip/" + topic
-		http.Post(url, "application/json", bytes.NewReader(r))
+		url := peer + "/gossip/?topic=" + topic
+		util.PostJSON(url, m)
 	}
 }
 
@@ -154,8 +138,9 @@ func (c *multiTransportHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 	if t.serve {
 		m := raftpb.Message{}
 		util.Unmarshall(r, &m)
-		splits := strings.Split(r.RequestURI, "/")
-		topic := splits[len(splits)-1]
+		topic := r.URL.Query().Get("topic")
+
+		log.Printf("[%s] Received %s", topic, m.Type.String())
 
 		t.mu.RLock()
 		defer t.mu.RUnlock()

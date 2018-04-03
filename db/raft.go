@@ -77,7 +77,7 @@ var defaultSnapCount uint64 = 10000
 // commit channel, followed by a nil message (to indicate the channel is
 // current), then new log entries. To shutdown, close proposeC and read errorC.
 func newRaftNode(id int, topic string, peers []string, join bool, getSnapshot func() ([]byte, error), proposeC <-chan string,
-	confChangeC <-chan raftpb.ConfChange, transport *transport.MultiTransport) (<-chan *string, <-chan error, <-chan *snap.Snapshotter, raftNode) {
+	confChangeC <-chan raftpb.ConfChange, transport *transport.MultiTransport) (<-chan *string, <-chan error, <-chan *snap.Snapshotter, *raftNode) {
 
 	commitC := make(chan *string)
 	errorC := make(chan error)
@@ -107,7 +107,7 @@ func newRaftNode(id int, topic string, peers []string, join bool, getSnapshot fu
 		// rest of structure populated after WAL replay
 	}
 	go rc.startRaft()
-	return commitC, errorC, rc.snapshotterReady, *rc
+	return commitC, errorC, rc.snapshotterReady, rc
 }
 
 func (rc *raftNode) saveSnap(snap raftpb.Snapshot) error {
@@ -485,6 +485,7 @@ func (rc *raftNode) serveRaft() {
 }
 
 func (rc *raftNode) Process(ctx context.Context, m raftpb.Message) error {
+	log.Printf("Processing message %s\n", m.Type.String())
 	return rc.node.Step(ctx, m)
 }
 func (rc *raftNode) IsIDRemoved(id uint64) bool                           { return false }

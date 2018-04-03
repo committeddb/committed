@@ -7,7 +7,6 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
-	"net/url"
 	"time"
 
 	"github.com/coreos/etcd/raft/raftpb"
@@ -39,12 +38,12 @@ func randomPort() int {
 
 func requestTopic(name string, nodes []string) error {
 	fmt.Printf("requestTopic [%s]\n", name)
-	var peers []string
-	for _, node := range nodes {
-		u, _ := url.Parse(node)
-		url := fmt.Sprintf("%s://%s:%d", u.Scheme, u.Hostname(), randomPort())
-		peers = append(peers, url)
-	}
+	// var peers []string
+	// for _, node := range nodes {
+	// 	u, _ := url.Parse(node)
+	// 	url := fmt.Sprintf("%s://%s:%d", u.Scheme, u.Hostname(), randomPort())
+	// 	peers = append(peers, url)
+	// }
 
 	var http = &http.Client{
 		Timeout: time.Second * 10,
@@ -52,7 +51,8 @@ func requestTopic(name string, nodes []string) error {
 
 	for i := 0; i < len(nodes); i++ {
 		go func(node string, id int) {
-			request, _ := json.Marshal(newNodeTopicRequest{Name: name, ID: id, Peers: peers, Join: false})
+			// request, _ := json.Marshal(newNodeTopicRequest{Name: name, ID: id, Peers: peers, Join: false})
+			request, _ := json.Marshal(newNodeTopicRequest{Name: name, ID: id, Peers: nodes, Join: false})
 			log.Printf("[%d]: json: %s\n", id, string(request[:]))
 			r := bytes.NewReader(request)
 			url := fmt.Sprintf("%s/node/topics", node)
@@ -90,7 +90,7 @@ func newTopic(name string, id int, peers []string, join bool, transport *transpo
 	getSnapshot := func() ([]byte, error) { return kvs.getSnapshot() }
 	commitC, errorC, snapshotterReady, raft := newRaftNode(id, name, peers, join, getSnapshot, proposeC, confChangeC, transport)
 
-	transport.AddRaft(name, &raft)
+	transport.AddRaft(name, raft)
 
 	kvs = newKVStore(<-snapshotterReady, proposeC, commitC, errorC)
 
