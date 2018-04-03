@@ -7,7 +7,6 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/philborlin/committed/transport"
 	"github.com/philborlin/committed/util"
 )
 
@@ -18,7 +17,7 @@ type Cluster struct {
 	nodes     []string
 	httpstopc chan struct{}
 	httpdonec chan struct{}
-	transport *transport.MultiTransport
+	transport *MultiTransport
 }
 
 // NewCluster creates a new cluster
@@ -35,7 +34,7 @@ func NewCluster(nodes []string, port int) *Cluster {
 		addr := fmt.Sprintf(":%d", port)
 		mux := http.NewServeMux()
 		fmt.Printf("Adding http handlers.\n")
-		c.transport = transport.NewMultiTransport(mux)
+		c.transport = NewMultiTransport(mux)
 		mux.Handle("/node/topics", newNodeTopicHandler(c))
 		mux.Handle("/cluster/topics", newClusterTopicHandler(c))
 		mux.Handle("/cluster/topics/posts", newClusterTopicPostHandler(c))

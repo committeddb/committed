@@ -1,16 +1,12 @@
 package db
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"log"
 	"math/rand"
 	"net/http"
-	"time"
 
 	"github.com/coreos/etcd/raft/raftpb"
-	"github.com/philborlin/committed/transport"
 	"github.com/philborlin/committed/util"
 )
 
@@ -38,48 +34,20 @@ func randomPort() int {
 
 func requestTopic(name string, nodes []string) error {
 	fmt.Printf("requestTopic [%s]\n", name)
-	// var peers []string
-	// for _, node := range nodes {
-	// 	u, _ := url.Parse(node)
-	// 	url := fmt.Sprintf("%s://%s:%d", u.Scheme, u.Hostname(), randomPort())
-	// 	peers = append(peers, url)
-	// }
-
-	var http = &http.Client{
-		Timeout: time.Second * 10,
-	}
 
 	for i := 0; i < len(nodes); i++ {
 		go func(node string, id int) {
-			// request, _ := json.Marshal(newNodeTopicRequest{Name: name, ID: id, Peers: peers, Join: false})
-			request, _ := json.Marshal(newNodeTopicRequest{Name: name, ID: id, Peers: nodes, Join: false})
-			log.Printf("[%d]: json: %s\n", id, string(request[:]))
-			r := bytes.NewReader(request)
+			v := newNodeTopicRequest{Name: name, ID: id, Peers: nodes, Join: false}
 			url := fmt.Sprintf("%s/node/topics", node)
-			log.Printf("[%d]: POSTing to %s\n", id, url)
-			resp, err := http.Post(url, "application/json", r)
-			if err != nil {
-				fmt.Printf("[%d]: %v\n", id, err)
-				// return err
-			}
-			defer closeBody(resp)
-			fmt.Printf("[%d]: node %s requestTopic POST is successful\n", id, node)
-			// TODO Handle response
+			util.PostJSONAndClose(url, v)
+			fmt.Printf("[%d] %s requestTopic POST is successful\n", id, node)
 		}(nodes[i], i+1)
 	}
 
 	return nil
 }
 
-func closeBody(resp *http.Response) {
-	if resp != nil {
-		if resp.Body != nil {
-			resp.Body.Close()
-		}
-	}
-}
-
-func newTopic(name string, id int, peers []string, join bool, transport *transport.MultiTransport) *Topic {
+func newTopic(name string, id int, peers []string, join bool, transport *MultiTransport) *Topic {
 	log.Printf("[%d] newTopic [%v]\n", id, name)
 	proposeC := make(chan string)
 	// defer close(proposeC)

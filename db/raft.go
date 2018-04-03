@@ -29,7 +29,6 @@ import (
 	"github.com/coreos/etcd/snap"
 	"github.com/coreos/etcd/wal"
 	"github.com/coreos/etcd/wal/walpb"
-	"github.com/philborlin/committed/transport"
 )
 
 // A key-value stream backed by raft
@@ -61,7 +60,7 @@ type raftNode struct {
 
 	snapCount uint64
 	// transport *rafthttp.Transport
-	transport *transport.MultiTransport
+	transport *MultiTransport
 	stopc     chan struct{} // signals proposal channel closed
 	httpstopc chan struct{} // signals http server to shutdown
 	httpdonec chan struct{} // signals http server shutdown complete
@@ -77,7 +76,7 @@ var defaultSnapCount uint64 = 10000
 // commit channel, followed by a nil message (to indicate the channel is
 // current), then new log entries. To shutdown, close proposeC and read errorC.
 func newRaftNode(id int, topic string, peers []string, join bool, getSnapshot func() ([]byte, error), proposeC <-chan string,
-	confChangeC <-chan raftpb.ConfChange, transport *transport.MultiTransport) (<-chan *string, <-chan error, <-chan *snap.Snapshotter, *raftNode) {
+	confChangeC <-chan raftpb.ConfChange, transport *MultiTransport) (<-chan *string, <-chan error, <-chan *snap.Snapshotter, *raftNode) {
 
 	commitC := make(chan *string)
 	errorC := make(chan error)
@@ -436,19 +435,20 @@ func (rc *raftNode) serveChannels() {
 		// store raft entries to wal, then publish over commit channel
 		case rd := <-rc.node.Ready():
 			log.Printf("[%d] Storing entry in wal\n", rc.id)
-			// rc.wal.Save(rd.HardState, rd.Entries)
-			// if !raft.IsEmptySnap(rd.Snapshot) {
-			// 	rc.saveSnap(rd.Snapshot)
-			// 	rc.raftStorage.ApplySnapshot(rd.Snapshot)
-			// 	rc.publishSnapshot(rd.Snapshot)
-			// }
+			rc.wal.Save(rd.HardState, rd.Entries)
+			if !raft.IsEmptySnap(rd.Snapshot) {
+				rc.saveSnap(rd.Snapshot)
+				rc.raftStorage.ApplySnapshot(rd.Snapshot)
+				rc.publishSnapshot(rd.Snapshot)
+			}
 			rc.raftStorage.Append(rd.Entries)
 			rc.transport.Send(rc.topic, rd.Messages)
 			if ok := rc.publishEntries(rc.entriesToApply(rd.CommittedEntries)); !ok {
 				rc.stop()
 				return
 			}
-			// rc.maybeTriggerSnapshot()
+
+			rc.maybeTriggerSnapshot()
 			rc.node.Advance()
 
 			// TODO Add error handling

@@ -1,4 +1,4 @@
-package transport
+package db
 
 import (
 	"context"
@@ -30,7 +30,7 @@ type MultiTransporter interface {
 	// will be ignored.
 	Send(raftID types.ID, m []raftpb.Message)
 	// AddRaft adds a raft to the transport
-	AddRaft(topic string, raft Raft)
+	AddRaft(topic string, raft raftNode)
 	// RemoveRaft removes a raft from the transport
 	RemoveRaft(topic string)
 	// AddPeer adds a peer with given peer urls into the transport.
@@ -47,7 +47,7 @@ type MultiTransporter interface {
 // MultiTransport struct
 type MultiTransport struct {
 	mu    sync.RWMutex
-	rafts map[string]Raft
+	rafts map[string]*raftNode
 	peers map[types.ID]string
 	mux   *http.ServeMux
 	serve bool
@@ -56,7 +56,7 @@ type MultiTransport struct {
 // NewMultiTransport creates a new MultiTransport
 func NewMultiTransport(mux *http.ServeMux) *MultiTransport {
 	t := &MultiTransport{
-		rafts: make(map[string]Raft),
+		rafts: make(map[string]*raftNode),
 		peers: make(map[types.ID]string),
 		mux:   mux,
 		serve: false,
@@ -93,12 +93,12 @@ func (t *MultiTransport) Send(topic string, ms []raftpb.Message) {
 		}
 
 		url := peer + "/gossip/?topic=" + topic
-		util.PostJSON(url, m)
+		util.PostJSONAndClose(url, m)
 	}
 }
 
 // AddRaft implements MultiTransporter interface
-func (t *MultiTransport) AddRaft(topic string, raft Raft) {
+func (t *MultiTransport) AddRaft(topic string, raft *raftNode) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.rafts[topic] = raft
