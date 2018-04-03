@@ -3,7 +3,6 @@ package util
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -35,7 +34,7 @@ func PostJSON(url string, v interface{}) (resp *http.Response, err error) {
 
 	r, err := json.Marshal(v)
 	if err != nil {
-		fmt.Printf("%v failed to marshal. Reason: %v\n", v, err)
+		log.Printf("%v failed to marshal. Reason: %v\n", v, err)
 		return nil, err
 	}
 
@@ -43,7 +42,13 @@ func PostJSON(url string, v interface{}) (resp *http.Response, err error) {
 
 	resp, err = http.Post(url, "application/json", bytes.NewReader(r))
 	if err != nil {
-		fmt.Printf("Error: %v\n", err)
+		log.Printf("Error: %v\n", err)
+	}
+
+	if resp == nil {
+		log.Printf("%s responded with nil\n", url)
+	} else {
+		log.Printf("%s responded with a %d\n", url, resp.StatusCode)
 	}
 
 	return resp, err

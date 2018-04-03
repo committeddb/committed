@@ -62,7 +62,7 @@ func NewMultiTransport(mux *http.ServeMux) *MultiTransport {
 		serve: false,
 	}
 
-	mux.Handle("/gossip", &multiTransportHandler{t})
+	mux.Handle("/gossip/", &multiTransportHandler{t})
 	return t
 }
 
@@ -92,7 +92,9 @@ func (t *MultiTransport) Send(topic string, ms []raftpb.Message) {
 			return
 		}
 
-		url := peer + "/gossip/?topic=" + topic
+		// url := peer + "/gossip/?topic=" + topic
+		url := fmt.Sprintf("%s/gossip/?topic=%s", peer, topic)
+		// url := fmt.Sprintf("%s/gossip", peer)
 		util.PostJSONAndClose(url, m)
 	}
 }
