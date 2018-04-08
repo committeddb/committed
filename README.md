@@ -10,7 +10,7 @@ Committed is specifically NOT a databse designed for querying.
 
 ## Road Map
 
-The MVP will be delivered by June 30th.
+The MVP will be delivered by April 30th.
 
 It will include:
 
