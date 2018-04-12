@@ -28,13 +28,13 @@ func main() {
 	join := flag.Bool("join", false, "join an existing cluster")
 	flag.Parse()
 
-	nodes := strings.Split(*cluster, ",")
-	c := NewCluster(nodes, *id)
-
 	proposeC := make(chan string)
 	defer close(proposeC)
 	confChangeC := make(chan raftpb.ConfChange)
 	defer close(confChangeC)
+
+	nodes := strings.Split(*cluster, ",")
+	c := NewCluster(nodes, *id, proposeC)
 
 	// raft provides a commit stream for the proposals from the http api
 	var kvs *kvstore

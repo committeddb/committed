@@ -22,16 +22,17 @@ type Proposal struct {
 }
 
 // NewCluster creates a new Cluster
-func NewCluster(nodes []string, id int) *Cluster {
-	return &Cluster{id: id, topics: make(map[string]*Topic), nodes: nodes}
+func NewCluster(nodes []string, id int, proposeC chan<- string) *Cluster {
+	return &Cluster{id: id, topics: make(map[string]*Topic), nodes: nodes, proposeC: proposeC}
 }
 
 // Append proposes an addition to the raft
-func (c *Cluster) Append(proposal *Proposal) {
+func (c *Cluster) Append(proposal Proposal) {
 	var buf bytes.Buffer
 	if err := gob.NewEncoder(&buf).Encode(proposal); err != nil {
 		log.Fatal(err)
 	}
+	log.Printf("[%d] Appending: %s to %v", c.id, buf.String(), c.proposeC)
 	c.proposeC <- buf.String()
 }
 

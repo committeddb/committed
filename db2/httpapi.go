@@ -87,10 +87,11 @@ type clusterTopicPostHandler struct {
 
 func (c *clusterTopicPostHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
+	log.Printf("Received: %s %s\n", r.Method, r.RequestURI)
 	if r.Method == "POST" {
 		n := newClusterTopicPostRequest{}
 		util.Unmarshall(r, &n)
-		c.c.Append(&Proposal{n.Topic, n.Proposal})
+		c.c.Append(Proposal{n.Topic, n.Proposal})
 		w.Write(nil)
 	}
 }

@@ -390,11 +390,14 @@ func (rc *raftNode) serveChannels() {
 
 	// send proposals over raft
 	go func() {
+		log.Printf("[%d] Serving Raft", rc.id)
 		var confChangeCount uint64 = 0
 
 		for rc.proposeC != nil && rc.confChangeC != nil {
+			log.Printf("[%d] Selecting Raft", rc.id)
 			select {
 			case prop, ok := <-rc.proposeC:
+				log.Printf("[%d] Received proposeC %s", rc.id, prop)
 				if !ok {
 					rc.proposeC = nil
 				} else {
@@ -403,6 +406,7 @@ func (rc *raftNode) serveChannels() {
 				}
 
 			case cc, ok := <-rc.confChangeC:
+				log.Printf("[%d] Received confChangeC %v", rc.id, cc)
 				if !ok {
 					rc.confChangeC = nil
 				} else {
