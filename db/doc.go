@@ -13,4 +13,4 @@
 // limitations under the License.
 
 // raftexample is a simple KV store using the raft and rafthttp libraries.
-package db2
+package db

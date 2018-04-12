@@ -4,7 +4,7 @@ import (
 	"flag"
 	"strings"
 
-	"github.com/philborlin/committed/db2"
+	"github.com/philborlin/committed/db"
 )
 
 func main() {
@@ -16,5 +16,5 @@ func main() {
 
 	nodes := strings.Split(*cluster, ",")
 
-	db2.NewCluster2(nodes, *id, *apiPort, *join)
+	db.NewCluster2(nodes, *id, *apiPort, *join)
 }

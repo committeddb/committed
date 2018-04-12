@@ -80,14 +80,21 @@ func (s *kvstore) readCommits(commitC <-chan *string, errorC <-chan error) {
 			continue
 		}
 
-		var dataKv kv
+		var p Proposal
 		dec := gob.NewDecoder(bytes.NewBufferString(*data))
-		if err := dec.Decode(&dataKv); err != nil {
+		if err := dec.Decode(&p); err != nil {
 			log.Fatalf("raftexample: could not decode message (%v)", err)
 		}
-		s.mu.Lock()
-		s.kvStore[dataKv.Key] = dataKv.Val
-		s.mu.Unlock()
+		log.Printf("Received proposal: %v", p)
+
+		// var dataKv kv
+		// dec := gob.NewDecoder(bytes.NewBufferString(*data))
+		// if err := dec.Decode(&dataKv); err != nil {
+		// 	log.Fatalf("raftexample: could not decode message (%v)", err)
+		// }
+		// s.mu.Lock()
+		// s.kvStore[dataKv.Key] = dataKv.Val
+		// s.mu.Unlock()
 	}
 	if err, ok := <-errorC; ok {
 		log.Fatal(err)

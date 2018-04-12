@@ -1,147 +1,72 @@
 package db
 
 import (
-	"context"
-	"encoding/json"
-	"fmt"
+	"bytes"
+	"encoding/gob"
 	"log"
-	"net/http"
 
-	"github.com/philborlin/committed/util"
+	"github.com/coreos/etcd/raft/raftpb"
 )
 
-// Cluster is an engine that spawns and maintains topics
-// Cluster is a controller that manages nodes and balances resources among them
+// Cluster represents a cluster for the committeddb. It manages a raft cluster
+// and n number of topics
 type Cluster struct {
-	topics    map[string]*Topic
-	nodes     []string
-	httpstopc chan struct{}
-	httpdonec chan struct{}
-	transport *MultiTransport
+	id       int
+	topics   map[string]*Topic
+	nodes    []string
+	proposeC chan<- string
 }
 
-// NewCluster creates a new cluster
-func NewCluster(nodes []string, port int) *Cluster {
-	c := &Cluster{
-		topics:    make(map[string]*Topic),
-		nodes:     nodes,
-		httpstopc: make(chan struct{}),
-		httpdonec: make(chan struct{}),
-	}
-
-	go func() {
-		addr := fmt.Sprintf(":%d", port)
-		mux := http.NewServeMux()
-		c.transport = NewMultiTransport(mux)
-		mux.Handle("/node/topics", newNodeTopicHandler(c))
-		mux.Handle("/cluster/topics", newClusterTopicHandler(c))
-		mux.Handle("/cluster/topics/posts", newClusterTopicPostHandler(c))
-		listener, err := newStoppableListener(addr, c.httpstopc)
-		if err != nil {
-			log.Fatalf("committed: Failed to create listener in API http (%v)", err)
-		}
-
-		log.Printf("Starting API http server on: %s\n", addr)
-		err = (&http.Server{Handler: mux}).Serve(listener)
-		if err != nil {
-			log.Fatalf("committed: Failed to serve http in API http (%v)", err)
-		}
-
-		select {
-		case <-c.httpstopc:
-		default:
-			log.Fatalf("committed: Failed to serve http in API http (%v)", err)
-		}
-		close(c.httpdonec)
-	}()
-
-	// TODO Wait for all nodes to startup?
-
-	return c
-}
-
-// CreateTopic creates a new topic with node (replica) count
-// TODO We can create a callback so the caller can get access to the topic if needed
-func (c *Cluster) CreateTopic(name string, nodeCount int) error {
-	// TODO We want some error handling if nodeCount > nodes
-	fmt.Printf("CreateTopic [%s] %d\n", name, nodeCount)
-	requestTopic(name, c.nodes)
-	return nil
-}
-
-func (c *Cluster) createTopicCallback(t *Topic) {
-	c.topics[t.Name] = t
-}
-
-func (c *Cluster) config() {
-	name := "config"
-	if c.topics[name] == nil {
-		requestTopic(name, c.nodes)
-	}
-}
-
-// Append finds the appropriate topic and then appends the proposal to that topic
-func (c *Cluster) Append(ctx context.Context, topic string, proposal string) {
-	log.Printf("Appending %v to %s\n", c.topics[topic], proposal)
-	c.topics[topic].proposeC <- proposal
-}
-
-type newClusterTopicRequest struct {
-	Name      string
-	NodeCount int
-}
-
-type clusterTopicGetResponse struct {
-	Topics []string
-}
-
-func newClusterTopicHandler(c *Cluster) http.Handler {
-	return &clusterTopicHandler{c}
-}
-
-type clusterTopicHandler struct {
-	c *Cluster
-}
-
-func (c *clusterTopicHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	defer r.Body.Close()
-	log.Printf("Received: %s %s\n", r.Method, r.RequestURI)
-	if r.Method == "POST" {
-		n := newClusterTopicRequest{}
-		util.Unmarshall(r, &n)
-		c.c.CreateTopic(n.Name, n.NodeCount)
-		w.Write(nil)
-	} else if r.Method == "GET" {
-		log.Printf("Processing GET\n")
-		log.Printf("Found topics %v GET\n", c.c.topics)
-		keys := make([]string, 0, len(c.c.topics))
-		for key := range c.c.topics {
-			keys = append(keys, key)
-		}
-		response, _ := json.Marshal(clusterTopicGetResponse{keys})
-		w.Write(response)
-	}
-}
-
-type newClusterTopicPostRequest struct {
+// Proposal is an item to put on a raft log
+type Proposal struct {
 	Topic    string
 	Proposal string
 }
 
-func newClusterTopicPostHandler(c *Cluster) http.Handler {
-	return &clusterTopicPostHandler{c}
+// NewCluster creates a new Cluster
+func NewCluster(nodes []string, id int, proposeC chan<- string) *Cluster {
+	return &Cluster{id: id, topics: make(map[string]*Topic), nodes: nodes, proposeC: proposeC}
 }
 
-type clusterTopicPostHandler struct {
-	c *Cluster
+// NewCluster2 creates a new Cluster
+func NewCluster2(nodes []string, id int, apiPort int, join bool) *Cluster {
+	proposeC := make(chan string)
+	defer close(proposeC)
+	confChangeC := make(chan raftpb.ConfChange)
+	defer close(confChangeC)
+
+	c := NewCluster(nodes, id, proposeC)
+
+	// raft provides a commit stream for the proposals from the http api
+	var kvs *kvstore
+	getSnapshot := func() ([]byte, error) { return kvs.getSnapshot() }
+	commitC, errorC, snapshotterReady := newRaftNode(id, nodes, join, getSnapshot, proposeC, confChangeC)
+	// _, errorC, _ := newRaftNode(*id, nodes, *join, getSnapshot, proposeC, confChangeC)
+
+	// We can't get rid of this until we have a select statement to take care of commitC
+	kvs = newKVStore(<-snapshotterReady, proposeC, commitC, errorC)
+
+	// the key-value http handler will propose updates to raft
+	serveAPI(c, apiPort, confChangeC, errorC)
+
+	return c
 }
 
-func (c *clusterTopicPostHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	defer r.Body.Close()
-	if r.Method == "POST" {
-		n := newClusterTopicPostRequest{}
-		util.Unmarshall(r, &n)
-		c.c.Append(context.TODO(), n.Topic, n.Proposal)
-		w.Write(nil)
+// Append proposes an addition to the raft
+func (c *Cluster) Append(proposal Proposal) {
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(proposal); err != nil {
+		log.Fatal(err)
 	}
+	log.Printf("[%d] Appending: %s to %v", c.id, buf.String(), c.proposeC)
+	c.proposeC <- buf.String()
+}
+
+// CreateTopic appends a topic to the raft and returns a Topic object if successful
+func (c *Cluster) CreateTopic(name string) *Topic {
+	t := newTopic(name)
+	// We need to append it to the raft
+
+	c.topics[name] = t
+	return t
 }
