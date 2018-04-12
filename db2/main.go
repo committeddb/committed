@@ -16,7 +16,6 @@ package main
 
 import (
 	"flag"
-	"log"
 	"strings"
 
 	"github.com/coreos/etcd/raft/raftpb"
@@ -32,8 +31,6 @@ func main() {
 	nodes := strings.Split(*cluster, ",")
 	c := NewCluster(nodes, *id)
 
-	log.Printf("Unused port %v", kvport)
-
 	proposeC := make(chan string)
 	defer close(proposeC)
 	confChangeC := make(chan raftpb.ConfChange)
@@ -42,10 +39,11 @@ func main() {
 	// raft provides a commit stream for the proposals from the http api
 	var kvs *kvstore
 	getSnapshot := func() ([]byte, error) { return kvs.getSnapshot() }
-	// commitC, errorC, snapshotterReady := newRaftNode(*id, nodes, *join, getSnapshot, proposeC, confChangeC)
-	_, errorC, _ := newRaftNode(*id, nodes, *join, getSnapshot, proposeC, confChangeC)
+	commitC, errorC, snapshotterReady := newRaftNode(*id, nodes, *join, getSnapshot, proposeC, confChangeC)
+	// _, errorC, _ := newRaftNode(*id, nodes, *join, getSnapshot, proposeC, confChangeC)
 
-	// kvs = newKVStore(<-snapshotterReady, proposeC, commitC, errorC)
+	// We can't get rid of this until we have a select statement to take care of commitC
+	kvs = newKVStore(<-snapshotterReady, proposeC, commitC, errorC)
 
 	// the key-value http handler will propose updates to raft
 	serveAPI(c, *kvport, confChangeC, errorC)
