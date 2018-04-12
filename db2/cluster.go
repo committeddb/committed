@@ -1,9 +1,11 @@
-package main
+package db2
 
 import (
 	"bytes"
 	"encoding/gob"
 	"log"
+
+	"github.com/coreos/etcd/raft/raftpb"
 )
 
 // Cluster represents a cluster for the committeddb. It manages a raft cluster
@@ -24,6 +26,30 @@ type Proposal struct {
 // NewCluster creates a new Cluster
 func NewCluster(nodes []string, id int, proposeC chan<- string) *Cluster {
 	return &Cluster{id: id, topics: make(map[string]*Topic), nodes: nodes, proposeC: proposeC}
+}
+
+// NewCluster2 creates a new Cluster
+func NewCluster2(nodes []string, id int, apiPort int, join bool) *Cluster {
+	proposeC := make(chan string)
+	defer close(proposeC)
+	confChangeC := make(chan raftpb.ConfChange)
+	defer close(confChangeC)
+
+	c := NewCluster(nodes, id, proposeC)
+
+	// raft provides a commit stream for the proposals from the http api
+	var kvs *kvstore
+	getSnapshot := func() ([]byte, error) { return kvs.getSnapshot() }
+	commitC, errorC, snapshotterReady := newRaftNode(id, nodes, join, getSnapshot, proposeC, confChangeC)
+	// _, errorC, _ := newRaftNode(*id, nodes, *join, getSnapshot, proposeC, confChangeC)
+
+	// We can't get rid of this until we have a select statement to take care of commitC
+	kvs = newKVStore(<-snapshotterReady, proposeC, commitC, errorC)
+
+	// the key-value http handler will propose updates to raft
+	serveAPI(c, apiPort, confChangeC, errorC)
+
+	return c
 }
 
 // Append proposes an addition to the raft

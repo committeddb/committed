@@ -1,4 +1,4 @@
-package main
+package db2
 
 // Topic represents a topic in the system
 type Topic struct {
