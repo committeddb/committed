@@ -28,12 +28,10 @@ func NewCluster(nodes []string, port int) *Cluster {
 		httpstopc: make(chan struct{}),
 		httpdonec: make(chan struct{}),
 	}
-	fmt.Printf("Created new cluster.\n")
 
 	go func() {
 		addr := fmt.Sprintf(":%d", port)
 		mux := http.NewServeMux()
-		fmt.Printf("Adding http handlers.\n")
 		c.transport = NewMultiTransport(mux)
 		mux.Handle("/node/topics", newNodeTopicHandler(c))
 		mux.Handle("/cluster/topics", newClusterTopicHandler(c))
@@ -84,6 +82,7 @@ func (c *Cluster) config() {
 
 // Append finds the appropriate topic and then appends the proposal to that topic
 func (c *Cluster) Append(ctx context.Context, topic string, proposal string) {
+	log.Printf("Appending %v to %s\n", c.topics[topic], proposal)
 	c.topics[topic].proposeC <- proposal
 }
 

@@ -74,11 +74,12 @@ func (t *MultiTransport) Start() error {
 
 // Send implements MultiTransporter interface
 func (t *MultiTransport) Send(topic string, ms []raftpb.Message) {
-	log.Printf("[%s] Sending %d messages\n", topic, len(ms))
 	for _, m := range ms {
 		peerID := types.ID(m.To)
 
-		log.Printf("[%v] Sending %s to %d\n", m.From, m.Type.String(), m.To)
+		if util.LogMessage(m) {
+			log.Printf("[%v@%d] Sending %s to %d\n", m.From, m.Term, m.Type.String(), m.To)
+		}
 
 		var peer string
 		{
@@ -137,21 +138,24 @@ type multiTransportHandler struct {
 }
 
 func (c *multiTransportHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	log.Printf("/gossip endpoint received an HTTP request")
-
 	t := c.t
+
 	if t.serve {
-		m := raftpb.Message{}
-		util.Unmarshall(r, &m)
-		topic := r.URL.Query().Get("topic")
+		go func(r *http.Request, t *MultiTransport) {
+			m := raftpb.Message{}
+			util.Unmarshall(r, &m)
+			topic := r.URL.Query().Get("topic")
 
-		log.Printf("[%s] Received %s", topic, m.Type.String())
+			if util.LogMessage(m) {
+				log.Printf("[%s@%d] /gossip Received message %s", topic, m.Term, m.Type.String())
+			}
 
-		log.Printf("[%s] Received message %s", topic, m.Type.String())
-
-		t.mu.RLock()
-		defer t.mu.RUnlock()
-		r := t.rafts[topic]
-		r.Process(context.Background(), m)
+			// t.mu.RLock()
+			// defer t.mu.RUnlock()
+			raft := t.rafts[topic]
+			raft.Process(context.Background(), m)
+		}(r, t)
 	}
+
+	w.WriteHeader(http.StatusOK)
 }
