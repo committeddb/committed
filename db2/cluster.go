@@ -9,6 +9,8 @@ import (
 // Cluster represents a cluster for the committeddb. It manages a raft cluster
 // and n number of topics
 type Cluster struct {
+	id       int
+	topics   map[string]*Topic
 	nodes    []string
 	proposeC chan<- string
 }
@@ -21,7 +23,7 @@ type Proposal struct {
 
 // NewCluster creates a new Cluster
 func NewCluster(nodes []string, id int) *Cluster {
-	return &Cluster{nodes: nodes}
+	return &Cluster{id: id, topics: make(map[string]*Topic), nodes: nodes}
 }
 
 // Append proposes an addition to the raft
@@ -31,4 +33,13 @@ func (c *Cluster) Append(proposal *Proposal) {
 		log.Fatal(err)
 	}
 	c.proposeC <- buf.String()
+}
+
+// CreateTopic appends a topic to the raft and returns a Topic object if successful
+func (c *Cluster) CreateTopic(name string) *Topic {
+	t := newTopic(name)
+	// We need to append it to the raft
+
+	c.topics[name] = t
+	return t
 }
