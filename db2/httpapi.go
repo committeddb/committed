@@ -15,99 +15,27 @@
 package main
 
 import (
-	"io/ioutil"
+	"encoding/json"
 	"log"
 	"net/http"
 	"strconv"
 
 	"github.com/coreos/etcd/raft/raftpb"
+	"github.com/philborlin/committed/util"
 )
 
-// Handler for a http based key-value store backed by raft
-type httpKVAPI struct {
-	store       *kvstore
-	confChangeC chan<- raftpb.ConfChange
+func createMux(c *Cluster) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/cluster/topics", newClusterTopicHandler(c))
+	mux.Handle("/cluster/posts", newClusterTopicPostHandler(c))
+	return mux
 }
 
-func (h *httpKVAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	key := r.RequestURI
-	switch {
-	case r.Method == "PUT":
-		v, err := ioutil.ReadAll(r.Body)
-		if err != nil {
-			log.Printf("Failed to read on PUT (%v)\n", err)
-			http.Error(w, "Failed on PUT", http.StatusBadRequest)
-			return
-		}
-
-		h.store.Propose(key, string(v))
-
-		// Optimistic-- no waiting for ack from raft. Value is not yet
-		// committed so a subsequent GET on the key may return old value
-		w.WriteHeader(http.StatusNoContent)
-	case r.Method == "GET":
-		if v, ok := h.store.Lookup(key); ok {
-			w.Write([]byte(v))
-		} else {
-			http.Error(w, "Failed to GET", http.StatusNotFound)
-		}
-	case r.Method == "POST":
-		url, err := ioutil.ReadAll(r.Body)
-		if err != nil {
-			log.Printf("Failed to read on POST (%v)\n", err)
-			http.Error(w, "Failed on POST", http.StatusBadRequest)
-			return
-		}
-
-		nodeId, err := strconv.ParseUint(key[1:], 0, 64)
-		if err != nil {
-			log.Printf("Failed to convert ID for conf change (%v)\n", err)
-			http.Error(w, "Failed on POST", http.StatusBadRequest)
-			return
-		}
-
-		cc := raftpb.ConfChange{
-			Type:    raftpb.ConfChangeAddNode,
-			NodeID:  nodeId,
-			Context: url,
-		}
-		h.confChangeC <- cc
-
-		// As above, optimistic that raft will apply the conf change
-		w.WriteHeader(http.StatusNoContent)
-	case r.Method == "DELETE":
-		nodeId, err := strconv.ParseUint(key[1:], 0, 64)
-		if err != nil {
-			log.Printf("Failed to convert ID for conf change (%v)\n", err)
-			http.Error(w, "Failed on DELETE", http.StatusBadRequest)
-			return
-		}
-
-		cc := raftpb.ConfChange{
-			Type:   raftpb.ConfChangeRemoveNode,
-			NodeID: nodeId,
-		}
-		h.confChangeC <- cc
-
-		// As above, optimistic that raft will apply the conf change
-		w.WriteHeader(http.StatusNoContent)
-	default:
-		w.Header().Set("Allow", "PUT")
-		w.Header().Add("Allow", "GET")
-		w.Header().Add("Allow", "POST")
-		w.Header().Add("Allow", "DELETE")
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-// serveHttpKVAPI starts a key-value server with a GET/PUT API and listens.
-func serveHttpKVAPI(kv *kvstore, port int, confChangeC chan<- raftpb.ConfChange, errorC <-chan error) {
+// serveHTTPKVAPI starts a key-value server with a GET/PUT API and listens.
+func serveHTTPKVAPI(c *Cluster, kv *kvstore, port int, confChangeC chan<- raftpb.ConfChange, errorC <-chan error) {
 	srv := http.Server{
-		Addr: ":" + strconv.Itoa(port),
-		Handler: &httpKVAPI{
-			store:       kv,
-			confChangeC: confChangeC,
-		},
+		Addr:    ":" + strconv.Itoa(port),
+		Handler: createMux(c),
 	}
 	go func() {
 		if err := srv.ListenAndServe(); err != nil {
@@ -118,5 +46,65 @@ func serveHttpKVAPI(kv *kvstore, port int, confChangeC chan<- raftpb.ConfChange,
 	// exit when raft goes down
 	if err, ok := <-errorC; ok {
 		log.Fatal(err)
+	}
+}
+
+type newClusterTopicRequest struct {
+	Name      string
+	NodeCount int
+}
+
+type clusterTopicGetResponse struct {
+	Topics []string
+}
+
+func newClusterTopicHandler(c *Cluster) http.Handler {
+	return &clusterTopicHandler{c}
+}
+
+type clusterTopicHandler struct {
+	c *Cluster
+}
+
+func (c *clusterTopicHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+	log.Printf("Received: %s %s\n", r.Method, r.RequestURI)
+	if r.Method == "POST" {
+		n := newClusterTopicRequest{}
+		util.Unmarshall(r, &n)
+		// c.c.CreateTopic(n.Name, n.NodeCount)
+		w.Write(nil)
+	} else if r.Method == "GET" {
+		log.Printf("Processing GET\n")
+		// log.Printf("Found topics %v GET\n", c.c.topics)
+		// keys := make([]string, 0, len(c.c.topics))
+		// for key := range c.c.topics {
+		// 	keys = append(keys, key)
+		// }
+		response, _ := json.Marshal(clusterTopicGetResponse{nil})
+		w.Write(response)
+	}
+}
+
+type newClusterTopicPostRequest struct {
+	Topic    string
+	Proposal string
+}
+
+func newClusterTopicPostHandler(c *Cluster) http.Handler {
+	return &clusterTopicPostHandler{c}
+}
+
+type clusterTopicPostHandler struct {
+	c *Cluster
+}
+
+func (c *clusterTopicPostHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+	if r.Method == "POST" {
+		n := newClusterTopicPostRequest{}
+		util.Unmarshall(r, &n)
+		c.c.Append(&Proposal{n.Topic, n.Proposal})
+		w.Write(nil)
 	}
 }
