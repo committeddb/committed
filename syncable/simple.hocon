@@ -1,0 +1,15 @@
+# Determines what the rest of the config will look like
+db.type = sql
+
+sql {
+    connectionString = "postgres://pqgotest:password@localhost/pqgotest"
+
+    topic {
+        name = "test1"
+
+        mapping [
+            { jsonPath = key, table = foo, column = key }
+            { jsonPath = one, table = foo, column = two }
+        ]
+    }
+}
