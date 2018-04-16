@@ -1,0 +1,20 @@
+# Determines what the rest of the config will look like
+[db]
+type = "sql"
+
+[sql]
+driver = "postgres"
+connectionString = "postgres://pqgotest:password@localhost/pqgotest"
+
+[sql.topic]
+name = "test1"
+
+[[sql.topic.mapping]]
+jsonPath = "key"
+table = "foo"
+column = "key"
+
+[[sql.topic.mapping]]
+jsonPath = "one"
+table = "foo"
+column = "two"

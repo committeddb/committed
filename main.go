@@ -4,6 +4,8 @@ import (
 	"flag"
 	"strings"
 
+	"github.com/philborlin/committed/syncable"
+
 	"github.com/philborlin/committed/db"
 )
 
@@ -17,4 +19,6 @@ func main() {
 	nodes := strings.Split(*cluster, ",")
 
 	db.NewCluster2(nodes, *id, *apiPort, *join)
+
+	syncable.Parse("", nil)
 }
