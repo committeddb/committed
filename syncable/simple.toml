@@ -3,18 +3,18 @@
 type = "sql"
 
 [sql]
-driver = "postgres"
-connectionString = "postgres://pqgotest:password@localhost/pqgotest"
+driver = "ql"
+connectionString = "memory://foo"
 
 [sql.topic]
 name = "test1"
 
 [[sql.topic.mapping]]
-jsonPath = "key"
+jsonPath = "$.Key"
 table = "foo"
 column = "key"
 
 [[sql.topic.mapping]]
-jsonPath = "one"
+jsonPath = "$.One"
 table = "foo"
 column = "two"

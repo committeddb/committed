@@ -10,7 +10,11 @@ import (
 )
 
 func TestParseWithSQLToml(t *testing.T) {
-	dat, _ := ioutil.ReadFile("./simple.toml")
+	dat, err := ioutil.ReadFile("./simple.toml")
+	if err != nil {
+		t.Fatalf("Failed with error %v", err)
+	}
+
 	actual := Parse("toml", dat).(*sqlSyncable).config
 	expected := simpleConfig()
 
@@ -39,8 +43,8 @@ func TestSQLParser(t *testing.T) {
 }
 
 func simpleConfig() sqlConfig {
-	m1 := sqlMapping{"key", "foo", "key"}
-	m2 := sqlMapping{"one", "foo", "two"}
+	m1 := sqlMapping{"$.Key", "foo", "key"}
+	m2 := sqlMapping{"$.One", "foo", "two"}
 	m := []sqlMapping{m1, m2}
-	return sqlConfig{"postgres", "postgres://pqgotest:password@localhost/pqgotest", "test1", m}
+	return sqlConfig{"ql", "memory://foo", "test1", m}
 }

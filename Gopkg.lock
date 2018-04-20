@@ -58,9 +58,76 @@
 
 [[projects]]
   branch = "master"
+  name = "github.com/cznic/b"
+  packages = ["."]
+  revision = "35e9bbe41f07452a183c517a5fc5f3c9f45eaa0f"
+
+[[projects]]
+  branch = "master"
+  name = "github.com/cznic/fileutil"
+  packages = ["."]
+  revision = "6a051e75936f623600b67c2b1116b6b6c0ffb936"
+
+[[projects]]
+  name = "github.com/cznic/internal"
+  packages = [
+    "buffer",
+    "file",
+    "slice"
+  ]
+  revision = "cef02a853c3a93623c42eacd574e7ea05f55531b"
+  version = "1.0.0"
+
+[[projects]]
+  name = "github.com/cznic/lldb"
+  packages = ["."]
+  revision = "bea8611dd5c407f3c5eab9f9c68e887a27dc6f0e"
+  version = "v1.1.0"
+
+[[projects]]
+  branch = "master"
+  name = "github.com/cznic/mathutil"
+  packages = ["."]
+  revision = "7764e6a2216aaa02c36f75aad62538d39c2962c2"
+
+[[projects]]
+  name = "github.com/cznic/ql"
+  packages = [
+    ".",
+    "vendored/github.com/camlistore/go4/lock"
+  ]
+  revision = "7a63cd7aa46ecd9f549b96983029576af2178f60"
+  version = "v1.1.0"
+
+[[projects]]
+  branch = "master"
+  name = "github.com/cznic/sortutil"
+  packages = ["."]
+  revision = "4c7342852e65c2088c981288f2c5610d10b9f7f4"
+
+[[projects]]
+  branch = "master"
+  name = "github.com/cznic/strutil"
+  packages = ["."]
+  revision = "529a34b1c186b483642a7a230c67521d9aa4b0fb"
+
+[[projects]]
+  branch = "master"
+  name = "github.com/cznic/zappy"
+  packages = ["."]
+  revision = "2533cb5b45cc6c07421468ce262899ddc9d53fb7"
+
+[[projects]]
+  branch = "master"
   name = "github.com/dustin/go-humanize"
   packages = ["."]
   revision = "bb3d318650d48840a39aa21a027c6630e198e626"
+
+[[projects]]
+  branch = "master"
+  name = "github.com/edsrzf/mmap-go"
+  packages = ["."]
+  revision = "0bce6a6887123b67a60366d2c9fe2dfb74289d2e"
 
 [[projects]]
   name = "github.com/fsnotify/fsnotify"
@@ -127,6 +194,12 @@
   name = "github.com/mitchellh/mapstructure"
   packages = ["."]
   revision = "00c29f56e2386353d58c599509e8dc3801b0d716"
+
+[[projects]]
+  branch = "master"
+  name = "github.com/oliveagle/jsonpath"
+  packages = ["."]
+  revision = "46faf33da13527c9ef82205c0ee188f6fc98b13e"
 
 [[projects]]
   name = "github.com/pelletier/go-toml"
@@ -252,6 +325,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "4817960b1ee2d2843d50c9894c06c8dd9602bbfcb13f556962f8004cde4aaf14"
+  inputs-digest = "14c666986f8535c9fe5269b55c97e8cddb9d31a73dce1742ec24a973cc78a1d2"
   solver-name = "gps-cdcl"
   solver-version = 1
