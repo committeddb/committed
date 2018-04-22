@@ -27,7 +27,7 @@ func (c *clusterPostHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "POST" {
 		n := newClusterTopicPostRequest{}
 		util.Unmarshall(r, &n)
-		c.c.Append(Proposal{n.Topic, n.Proposal})
+		c.c.Append(util.Proposal{n.Topic, n.Proposal})
 		w.Write(nil)
 	}
 }

@@ -22,6 +22,7 @@ import (
 	"sync"
 
 	"github.com/coreos/etcd/snap"
+	"github.com/philborlin/committed/util"
 )
 
 // a key-value store backed by raft
@@ -80,7 +81,7 @@ func (s *kvstore) readCommits(commitC <-chan *string, errorC <-chan error) {
 			continue
 		}
 
-		var p Proposal
+		var p util.Proposal
 		dec := gob.NewDecoder(bytes.NewBufferString(*data))
 		if err := dec.Decode(&p); err != nil {
 			log.Fatalf("raftexample: could not decode message (%v)", err)

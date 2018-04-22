@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/cznic/ql"
+	"github.com/spf13/viper"
 	// The driver will be loaded through reflection
 	_ "github.com/lib/pq"
 
@@ -37,6 +38,22 @@ type sqlSyncable struct {
 type sqlInsert struct {
 	stmt     *sql.Stmt
 	jsonPath []string
+}
+
+func sqlParser(v *viper.Viper) TopicSyncable {
+	driver := v.GetString("sql.driver")
+	connectionString := v.GetString("sql.connectionString")
+	topic := v.GetString("sql.topic.name")
+
+	var mappings []sqlMapping
+	for _, item := range v.Get("sql.topic.mapping").([]interface{}) {
+		m := item.(map[string]interface{})
+		mapping := sqlMapping{m["jsonPath"].(string), m["table"].(string), m["column"].(string)}
+		mappings = append(mappings, mapping)
+	}
+
+	config := sqlConfig{driver, connectionString, topic, mappings}
+	return newSQLSyncable(config)
 }
 
 // NewSQLSyncable creates a new syncable
@@ -146,7 +163,7 @@ func (s sqlSyncable) Sync(ctx context.Context, bytes []byte) error {
 	return nil
 }
 
-func (s sqlSyncable) Topics() []string {
+func (s sqlSyncable) topics() []string {
 	return []string{s.config.topic}
 }
 

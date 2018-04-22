@@ -11,7 +11,7 @@ var parsers = map[string]func(*viper.Viper) TopicSyncable{
 }
 
 // Parse parses configuration files
-func Parse(style string, file []byte) (TopicSyncable, error) {
+func Parse(style string, file []byte) (Syncable, error) {
 	var v = viper.New()
 
 	v.SetConfigType(style)
@@ -21,21 +21,8 @@ func Parse(style string, file []byte) (TopicSyncable, error) {
 	}
 
 	dbType := v.GetString("db.type")
-	return parsers[dbType](v), nil
-}
 
-func sqlParser(v *viper.Viper) TopicSyncable {
-	driver := v.GetString("sql.driver")
-	connectionString := v.GetString("sql.connectionString")
-	topic := v.GetString("sql.topic.name")
+	sync := newSyncableWrapper(parsers[dbType](v))
 
-	var mappings []sqlMapping
-	for _, item := range v.Get("sql.topic.mapping").([]interface{}) {
-		m := item.(map[string]interface{})
-		mapping := sqlMapping{m["jsonPath"].(string), m["table"].(string), m["column"].(string)}
-		mappings = append(mappings, mapping)
-	}
-
-	config := sqlConfig{driver, connectionString, topic, mappings}
-	return newSQLSyncable(config)
+	return sync, nil
 }
