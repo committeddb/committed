@@ -33,6 +33,7 @@ import (
 	"github.com/coreos/etcd/snap"
 	"github.com/coreos/etcd/wal"
 	"github.com/coreos/etcd/wal/walpb"
+	"github.com/cskr/pubsub"
 )
 
 // A key-value stream backed by raft
@@ -56,11 +57,12 @@ type raftNode struct {
 
 	// raft backing for the commit/error channel
 	node        raft.Node
+	syncp       *pubsub.PubSub
 	raftStorage *raft.MemoryStorage
 	wal         *wal.WAL
 
-	snapshotter      *raftsnap.Snapshotter
-	snapshotterReady chan *raftsnap.Snapshotter // signals when snapshotter is ready
+	snapshotter      *snap.Snapshotter
+	snapshotterReady chan *snap.Snapshotter // signals when snapshotter is ready
 
 	snapCount uint64
 	transport *rafthttp.Transport
@@ -93,12 +95,13 @@ func newRaftNode(id int, peers []string, join bool, getSnapshot func() ([]byte, 
 		waldir:      fmt.Sprintf("raftexample-%d", id),
 		snapdir:     fmt.Sprintf("raftexample-%d-snap", id),
 		getSnapshot: getSnapshot,
+		syncp:       pubsub.New(0),
 		snapCount:   defaultSnapCount,
 		stopc:       make(chan struct{}),
 		httpstopc:   make(chan struct{}),
 		httpdonec:   make(chan struct{}),
 
-		snapshotterReady: make(chan *raftsnap.Snapshotter, 1),
+		snapshotterReady: make(chan *snap.Snapshotter, 1),
 		// rest of structure populated after WAL replay
 	}
 	go rc.startRaft()
@@ -188,7 +191,7 @@ func (rc *raftNode) publishEntries(ents []raftpb.Entry) bool {
 
 func (rc *raftNode) loadSnapshot() *raftpb.Snapshot {
 	snapshot, err := rc.snapshotter.Load()
-	if err != nil && err != raftsnap.ErrNoSnapshot {
+	if err != nil && err != snap.ErrNoSnapshot {
 		log.Fatalf("raftexample: error loading snapshot (%v)", err)
 	}
 	return snapshot
@@ -261,7 +264,7 @@ func (rc *raftNode) startRaft() {
 			log.Fatalf("raftexample: cannot create dir for snapshot (%v)", err)
 		}
 	}
-	rc.snapshotter = raftsnap.New(rc.snapdir)
+	rc.snapshotter = snap.New(rc.snapdir)
 	rc.snapshotterReady <- rc.snapshotter
 
 	oldwal := wal.Exist(rc.waldir)
@@ -435,6 +438,16 @@ func (rc *raftNode) serveChannels() {
 				rc.publishSnapshot(rd.Snapshot)
 			}
 			rc.raftStorage.Append(rd.Entries)
+
+			if rc.transport.LeaderStats.Leader == strconv.Itoa(rc.id) {
+				for _, e := range rd.Entries {
+					if e.Type == raftpb.EntryNormal && len(e.Data) != 0 {
+						go func() { rc.syncp.Pub(e, "StoredData") }()
+						fmt.Printf("Node %v is storing: %v\n", rc.id, e.Index)
+					}
+				}
+			}
+
 			rc.transport.Send(rd.Messages)
 			if ok := rc.publishEntries(rc.entriesToApply(rd.CommittedEntries)); !ok {
 				rc.stop()

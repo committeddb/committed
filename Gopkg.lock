@@ -57,6 +57,12 @@
   version = "v3"
 
 [[projects]]
+  name = "github.com/cskr/pubsub"
+  packages = ["."]
+  revision = "bbadc4de95998f07a2e0d607cf90c4377832fe32"
+  version = "v1.0.0"
+
+[[projects]]
   branch = "master"
   name = "github.com/cznic/b"
   packages = ["."]
@@ -325,6 +331,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "14c666986f8535c9fe5269b55c97e8cddb9d31a73dce1742ec24a973cc78a1d2"
+  inputs-digest = "9bb8e9e2a1c85ca6f97cadf40b95a38c4ed22804d3d65ff1f1c95f1aa06c3abf"
   solver-name = "gps-cdcl"
   solver-version = 1

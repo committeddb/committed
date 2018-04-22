@@ -5,16 +5,19 @@ import (
 	"encoding/gob"
 	"log"
 
+	"github.com/philborlin/committed/syncable"
+
 	"github.com/coreos/etcd/raft/raftpb"
 )
 
 // Cluster represents a cluster for the committeddb. It manages a raft cluster
 // and n number of topics
 type Cluster struct {
-	id       int
-	topics   map[string]*Topic
-	nodes    []string
-	proposeC chan<- string
+	id        int
+	topics    map[string]*Topic
+	syncables map[string][]syncable.Syncable
+	nodes     []string
+	proposeC  chan<- string
 }
 
 // Proposal is an item to put on a raft log
@@ -24,18 +27,13 @@ type Proposal struct {
 }
 
 // NewCluster creates a new Cluster
-func NewCluster(nodes []string, id int, proposeC chan<- string) *Cluster {
-	return &Cluster{id: id, topics: make(map[string]*Topic), nodes: nodes, proposeC: proposeC}
-}
-
-// NewCluster2 creates a new Cluster
-func NewCluster2(nodes []string, id int, apiPort int, join bool) *Cluster {
+func NewCluster(nodes []string, id int, apiPort int, join bool) *Cluster {
 	proposeC := make(chan string)
 	defer close(proposeC)
 	confChangeC := make(chan raftpb.ConfChange)
 	defer close(confChangeC)
 
-	c := NewCluster(nodes, id, proposeC)
+	c := &Cluster{id: id, topics: make(map[string]*Topic), nodes: nodes, proposeC: proposeC}
 
 	// raft provides a commit stream for the proposals from the http api
 	var kvs *kvstore
@@ -65,8 +63,57 @@ func (c *Cluster) Append(proposal Proposal) {
 // CreateTopic appends a topic to the raft and returns a Topic object if successful
 func (c *Cluster) CreateTopic(name string) *Topic {
 	t := newTopic(name)
-	// We need to append it to the raft
+
+	c.Append(Proposal{Topic: "topic", Proposal: name})
 
 	c.topics[name] = t
 	return t
 }
+
+// CreateSyncable creates a Syncable, appends the original file to the raft, starts the syncable,
+// and returns it if successful
+func (c *Cluster) CreateSyncable(style string, syncableFile string) syncable.Syncable {
+	s, err := syncable.Parse(style, []byte(syncableFile))
+	if err != nil {
+		log.Printf("Failed to create syncable: %v", err)
+		return nil
+	}
+
+	c.Append(Proposal{Topic: "syncable", Proposal: syncableFile})
+
+	for _, t := range s.Topics() {
+		syncs := append(c.syncables[t], s)
+		c.syncables[t] = syncs
+	}
+
+	// Add to the pub/sub
+
+	return s
+}
+
+// Sync the contents of the topic into a Syncable
+// func (c *Cluster) Sync(ctx context.Context, s syncable.Syncable) {
+// 	size := t.size(ctx)
+
+// 	for i := uint64(0); i < size; i++ {
+// 		s.Sync(ctx, []byte(t.ReadIndex(ctx, uint64(i))))
+// 	}
+
+// 	for _, n := range t.Nodes {
+// 		syncNode(ctx, s, n)
+// 	}
+// }
+
+// func syncNode(ctx context.Context, s syncable.Syncable) {
+// 	subc := n.syncp.Sub("StoredData")
+// 	go func() {
+// 		for {
+// 			select {
+// 			case e := <-subc:
+// 				s.Sync(ctx, e.(raftpb.Entry).Data)
+// 			default:
+// 				time.Sleep(time.Millisecond * 1)
+// 			}
+// 		}
+// 	}()
+// }

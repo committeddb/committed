@@ -6,22 +6,25 @@ import (
 	"github.com/spf13/viper"
 )
 
-var parsers = map[string]func(*viper.Viper) Syncable{
+var parsers = map[string]func(*viper.Viper) TopicSyncable{
 	"sql": sqlParser,
 }
 
 // Parse parses configuration files
-func Parse(style string, file []byte) Syncable {
+func Parse(style string, file []byte) (TopicSyncable, error) {
 	var v = viper.New()
 
 	v.SetConfigType(style)
-	v.ReadConfig(bytes.NewBuffer(file))
+	err := v.ReadConfig(bytes.NewBuffer(file))
+	if err != nil {
+		return nil, err
+	}
 
 	dbType := v.GetString("db.type")
-	return parsers[dbType](v)
+	return parsers[dbType](v), nil
 }
 
-func sqlParser(v *viper.Viper) Syncable {
+func sqlParser(v *viper.Viper) TopicSyncable {
 	driver := v.GetString("sql.driver")
 	connectionString := v.GetString("sql.connectionString")
 	topic := v.GetString("sql.topic.name")

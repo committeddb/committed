@@ -33,7 +33,8 @@ func TestSyncPutsValuesInDB(t *testing.T) {
 		t.Fatalf("Failed with error %v", err)
 	}
 
-	syncable := Parse("toml", dat).(*sqlSyncable)
+	parsed, _ := Parse("toml", dat)
+	syncable := parsed.(*sqlSyncable)
 	defer syncable.Close()
 
 	execInTransaction(syncable.db, "CREATE TABLE foo (key string, two string);", t)

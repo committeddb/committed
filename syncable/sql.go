@@ -146,6 +146,10 @@ func (s sqlSyncable) Sync(ctx context.Context, bytes []byte) error {
 	return nil
 }
 
+func (s sqlSyncable) Topics() []string {
+	return []string{s.config.topic}
+}
+
 func (s sqlSyncable) Close() error {
 	return s.db.Close()
 }

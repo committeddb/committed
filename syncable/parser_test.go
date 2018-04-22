@@ -15,7 +15,8 @@ func TestParseWithSQLToml(t *testing.T) {
 		t.Fatalf("Failed with error %v", err)
 	}
 
-	actual := Parse("toml", dat).(*sqlSyncable).config
+	syncable, _ := Parse("toml", dat)
+	actual := syncable.(*sqlSyncable).config
 	expected := simpleConfig()
 
 	if !reflect.DeepEqual(actual, expected) {

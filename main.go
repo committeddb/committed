@@ -18,7 +18,7 @@ func main() {
 
 	nodes := strings.Split(*cluster, ",")
 
-	db.NewCluster2(nodes, *id, *apiPort, *join)
+	db.NewCluster(nodes, *id, *apiPort, *join)
 
 	syncable.Parse("", nil)
 }
