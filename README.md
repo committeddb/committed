@@ -12,18 +12,18 @@ Committed is specifically NOT a databse designed for querying.
 
 The MVP will be delivered by April 30th.
 
-It will include:
+It will include (Strikethrough items are alread completed):
 
 Backend
 * A solid SQL syncable including a DSL for describing it
 * A generic method for adding a transform to a syncable
-* Permanent Storage of data
+* ~~Permanent Storage of data~~
 
 UI
 * View topics
 * View syncables
 
 API
-* Add a new topic
+* ~~Add a new topic~~
 * Add a new SQL syncable to a topic
-* Post to a topic
+* ~~Post to a topic~~

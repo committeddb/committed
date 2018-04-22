@@ -1,0 +1,20 @@
+# Determines what the rest of the config will look like
+[db]
+type = "sql"
+
+[sql]
+driver = "ql"
+connectionString = "memory://foo"
+
+[sql.topic]
+name = "test1"
+
+[[sql.topic.mapping]]
+jsonPath = "$.Key"
+table = "foo"
+column = "key"
+
+[[sql.topic.mapping]]
+jsonPath = "$.One"
+table = "foo"
+column = "two"
