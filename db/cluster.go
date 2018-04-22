@@ -93,22 +93,24 @@ func (c *Cluster) sync(ctx context.Context, s syncable.Syncable) {
 	// then start reading the WAL until we hit that next append
 	// lastly we want to drain the queue and stay up to date
 
-	// size := t.size(ctx)
+	wait := make(chan bool)
+	c.syncNode(ctx, s, wait)
 
-	// for i := uint64(0); i < size; i++ {
-	// 	s.Sync(ctx, []byte(t.ReadIndex(ctx, uint64(i))))
-	// }
+	// How do we do the peek? Maybe we process twice and it is ok? Probably fine for the first pass
 
-	// for _, n := range t.Nodes {
-	// 	syncNode(ctx, s)
-	// }
+	// Now we need to read the WAL
+
+	wait <- true
 }
 
-func (c *Cluster) syncNode(ctx context.Context, s syncable.Syncable) {
-	// We need a way to pause the syncing of the appends until the WAL crawler is up to date
-
+func (c *Cluster) syncNode(ctx context.Context, s syncable.Syncable, wait <-chan bool) {
 	subc := c.syncp.Sub("StoredData")
-	go func() {
+	go func(chan interface{}, <-chan bool) {
+		// We wait until we are ready to start processing the subscription
+		select {
+		case _ = <-wait:
+		}
+
 		for {
 			select {
 			case e := <-subc:
@@ -117,5 +119,5 @@ func (c *Cluster) syncNode(ctx context.Context, s syncable.Syncable) {
 				time.Sleep(time.Millisecond * 1)
 			}
 		}
-	}()
+	}(subc, wait)
 }
