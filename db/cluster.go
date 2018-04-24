@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/gob"
+	"fmt"
 	"log"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/philborlin/committed/syncable"
 	"github.com/philborlin/committed/util"
 
+	"github.com/coreos/etcd/raft"
 	"github.com/coreos/etcd/raft/raftpb"
 )
 
@@ -22,32 +24,64 @@ type Cluster struct {
 	nodes    []string
 	proposeC chan<- string
 	syncp    *pubsub.PubSub
+	storage  *raft.MemoryStorage
+
+	apiPort int
+	join    bool
+
+	commitC <-chan *string
+	errorC  <-chan error
+	api     *httpAPI
 }
 
 // NewCluster creates a new Cluster
 func NewCluster(nodes []string, id int, apiPort int, join bool) *Cluster {
-	proposeC := make(chan string)
-	defer close(proposeC)
-	confChangeC := make(chan raftpb.ConfChange)
-	defer close(confChangeC)
-	syncp := pubsub.New(0)
-	defer syncp.Shutdown()
+	c := &Cluster{id: id, topics: make(map[string]*Topic), nodes: nodes, apiPort: apiPort, join: join}
 
-	c := &Cluster{id: id, topics: make(map[string]*Topic), nodes: nodes, proposeC: proposeC}
+	return c
+}
+
+// Start starts the cluster
+func (c *Cluster) Start() {
+	proposeC := make(chan string)
+	confChangeC := make(chan raftpb.ConfChange)
+	syncp := pubsub.New(0)
+
+	c.proposeC = proposeC
+	c.syncp = syncp
 
 	// raft provides a commit stream for the proposals from the http api
 	var kvs *kvstore
 	getSnapshot := func() ([]byte, error) { return kvs.getSnapshot() }
-	commitC, errorC, snapshotterReady := newRaftNode(id, nodes, join, getSnapshot, proposeC, confChangeC, syncp)
-	// _, errorC, _ := newRaftNode(*id, nodes, *join, getSnapshot, proposeC, confChangeC)
+	commitC, errorC, snapshotterReady, storage := newRaftNode(
+		c.id, c.nodes, c.join, getSnapshot, proposeC, confChangeC, syncp)
+
+	c.storage = storage
+	c.commitC = commitC
+	c.errorC = errorC
 
 	// We can't get rid of this until we have a select statement to take care of commitC
 	kvs = newKVStore(<-snapshotterReady, proposeC, commitC, errorC)
 
 	// the key-value http handler will propose updates to raft
-	serveAPI(c, apiPort, confChangeC, errorC)
+	c.api = serveAPI(c, c.apiPort, confChangeC, errorC)
+}
 
-	return c
+// Shutdown shutdowns the cluster including closing server ports
+func (c *Cluster) Shutdown() (err error) {
+	log.Printf("Shutting down...")
+	c.syncp.Shutdown()
+	close(c.proposeC)
+	// close(c.confChangeC)
+	for range c.commitC {
+		// drain pending commits
+	}
+	// wait for channel to close
+	if erri := <-c.errorC; erri != nil {
+		err = erri
+	}
+
+	return err
 }
 
 // Append proposes an addition to the raft
@@ -60,11 +94,19 @@ func (c *Cluster) Append(proposal util.Proposal) {
 	c.proposeC <- buf.String()
 }
 
+func decodeProposal(b []byte) (util.Proposal, error) {
+	p := &util.Proposal{}
+	err := gob.NewDecoder(bytes.NewReader(b)).Decode(p)
+	return *p, err
+}
+
 // CreateTopic appends a topic to the raft and returns a Topic object if successful
 func (c *Cluster) CreateTopic(name string) *Topic {
 	t := newTopic(name)
 
+	log.Printf("About to append topic: %s...\n", name)
 	c.Append(util.Proposal{Topic: "topic", Proposal: name})
+	log.Printf("...Appeneded topic: %s\n", name)
 
 	c.topics[name] = t
 	return t
@@ -80,11 +122,52 @@ func (c *Cluster) CreateSyncable(style string, syncableFile string) syncable.Syn
 	}
 
 	c.Append(util.Proposal{Topic: "syncable", Proposal: syncableFile})
-
-	// Add to the pub/sub
 	c.sync(context.Background(), s)
 
 	return s
+}
+
+func size(ctx context.Context, storage *raft.MemoryStorage) uint64 {
+	first, _ := storage.FirstIndex()
+	last, _ := storage.LastIndex()
+
+	entries, error := storage.Entries(first, last+1, uint64(1024*1024))
+	if error != nil {
+		fmt.Println("[topic] Error retrieving entries from storage")
+	}
+
+	count := uint64(0)
+	for _, e := range entries {
+		if e.Type == raftpb.EntryNormal && len(e.Data) != 0 {
+			count++
+		}
+	}
+
+	return count
+}
+
+func readIndex(ctx context.Context, storage *raft.MemoryStorage, index uint64) string {
+	first, _ := storage.FirstIndex()
+	last, _ := storage.LastIndex()
+
+	entries, error := storage.Entries(first, last+1, uint64(1024*1024))
+	if error != nil {
+		fmt.Println("[topic] Error retrieving entries from storage")
+	}
+
+	count := uint64(0)
+	for _, e := range entries {
+		if e.Type == raftpb.EntryNormal && len(e.Data) != 0 {
+			if count == index {
+				return string(e.Data[:])
+			}
+			count++
+		}
+	}
+
+	// TODO This should be an error
+	fmt.Println("[topic] Could not find index")
+	return ""
 }
 
 // Sync the contents of the topic into a Syncable
@@ -97,10 +180,21 @@ func (c *Cluster) sync(ctx context.Context, s syncable.Syncable) {
 	c.syncNode(ctx, s, wait)
 
 	// How do we do the peek? Maybe we process twice and it is ok? Probably fine for the first pass
+	// Is there a way to just do continuous processing where we keep the last index processed
+	// and we just get notified when a new index is ready for processing so if we hit the end of
+	// the WAL we know when to try again.
 
 	// Now we need to read the WAL
 
-	wait <- true
+	var storage *raft.MemoryStorage
+
+	size := size(ctx, storage)
+
+	for i := uint64(0); i < size; i++ {
+		s.Sync(ctx, []byte(readIndex(ctx, storage, uint64(i))))
+	}
+
+	wait <- false
 }
 
 func (c *Cluster) syncNode(ctx context.Context, s syncable.Syncable, wait <-chan bool) {

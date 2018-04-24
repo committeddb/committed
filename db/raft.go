@@ -80,7 +80,7 @@ var defaultSnapCount uint64 = 10000
 // current), then new log entries. To shutdown, close proposeC and read errorC.
 func newRaftNode(id int, peers []string, join bool, getSnapshot func() ([]byte, error),
 	proposeC <-chan string, confChangeC <-chan raftpb.ConfChange,
-	syncp *pubsub.PubSub) (<-chan *string, <-chan error, <-chan *snap.Snapshotter) {
+	syncp *pubsub.PubSub) (<-chan *string, <-chan error, <-chan *snap.Snapshotter, *raft.MemoryStorage) {
 
 	commitC := make(chan *string)
 	errorC := make(chan error)
@@ -93,8 +93,8 @@ func newRaftNode(id int, peers []string, join bool, getSnapshot func() ([]byte, 
 		id:          id,
 		peers:       peers,
 		join:        join,
-		waldir:      fmt.Sprintf("raftexample-%d", id),
-		snapdir:     fmt.Sprintf("raftexample-%d-snap", id),
+		waldir:      fmt.Sprintf("raft-%d", id),
+		snapdir:     fmt.Sprintf("raft-%d-snap", id),
 		getSnapshot: getSnapshot,
 		syncp:       syncp,
 		snapCount:   defaultSnapCount,
@@ -105,8 +105,9 @@ func newRaftNode(id int, peers []string, join bool, getSnapshot func() ([]byte, 
 		snapshotterReady: make(chan *snap.Snapshotter, 1),
 		// rest of structure populated after WAL replay
 	}
+	rc.raftStorage = raft.NewMemoryStorage()
 	go rc.startRaft()
-	return commitC, errorC, rc.snapshotterReady
+	return commitC, errorC, rc.snapshotterReady, rc.raftStorage
 }
 
 func (rc *raftNode) saveSnap(snap raftpb.Snapshot) error {
@@ -234,7 +235,7 @@ func (rc *raftNode) replayWAL() *wal.WAL {
 	if err != nil {
 		log.Fatalf("raftexample: failed to read WAL (%v)", err)
 	}
-	rc.raftStorage = raft.NewMemoryStorage()
+	// rc.raftStorage = raft.NewMemoryStorage()
 	if snapshot != nil {
 		rc.raftStorage.ApplySnapshot(*snapshot)
 	}
@@ -443,7 +444,12 @@ func (rc *raftNode) serveChannels() {
 			if rc.transport.LeaderStats.Leader == strconv.Itoa(rc.id) {
 				for _, e := range rd.Entries {
 					if e.Type == raftpb.EntryNormal && len(e.Data) != 0 {
-						go func() { rc.syncp.Pub(e, "StoredData") }()
+						go func() {
+							// The raftexample_test will fail without this nil check
+							if rc.syncp != nil {
+								rc.syncp.Pub(e, "StoredData")
+							}
+						}()
 						fmt.Printf("Node %v is storing: %v\n", rc.id, e.Index)
 					}
 				}
