@@ -21,7 +21,7 @@ type Syncable interface {
 }
 
 type syncableWrapper struct {
-	syncable TopicSyncable
+	Syncable TopicSyncable
 	topics   map[string]struct{}
 }
 
@@ -39,15 +39,20 @@ func (s syncableWrapper) containsTopic(t string) bool {
 }
 
 func (s syncableWrapper) Sync(ctx context.Context, byteSlice []byte) error {
-	p := util.Proposal{}
-	err := gob.NewDecoder(bytes.NewReader(byteSlice)).Decode(p)
+	p, err := decode(byteSlice)
 	if err == nil && s.containsTopic(p.Topic) {
-		return s.syncable.Sync(ctx, byteSlice)
+		return s.Syncable.Sync(ctx, []byte(p.Proposal))
 	}
 
-	return nil
+	return err
 }
 
 func (s syncableWrapper) Close() error {
 	return s.Close()
+}
+
+func decode(byteSlice []byte) (util.Proposal, error) {
+	p := util.Proposal{}
+	err := gob.NewDecoder(bytes.NewReader(byteSlice)).Decode(&p)
+	return p, err
 }

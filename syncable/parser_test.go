@@ -15,8 +15,10 @@ func TestParseWithSQLToml(t *testing.T) {
 		t.Fatalf("Failed with error %v", err)
 	}
 
-	syncable, _ := Parse("toml", dat)
-	actual := syncable.(*sqlSyncable).config
+	parsed, _ := Parse("toml", dat)
+	sqlSyncable := parsed.(*syncableWrapper).Syncable.(*SQLSyncable)
+
+	actual := sqlSyncable.config
 	expected := simpleConfig()
 
 	if !reflect.DeepEqual(actual, expected) {
@@ -35,7 +37,7 @@ func TestSQLParser(t *testing.T) {
 	v.SetConfigType("toml")
 	v.ReadConfig(bytes.NewBuffer(dat))
 
-	actual := sqlParser(v).(*sqlSyncable).config
+	actual := sqlParser(v).(*SQLSyncable).config
 	expected := simpleConfig()
 
 	if !reflect.DeepEqual(actual, expected) {

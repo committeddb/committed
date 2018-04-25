@@ -4,8 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io/ioutil"
-	"log"
 	"testing"
 )
 
@@ -34,10 +34,10 @@ func TestSyncPutsValuesInDB(t *testing.T) {
 	}
 
 	parsed, _ := Parse("toml", dat)
-	syncable := parsed.(*sqlSyncable)
+	syncable := parsed.(*syncableWrapper).Syncable.(*SQLSyncable)
 	defer syncable.Close()
 
-	execInTransaction(syncable.db, "CREATE TABLE foo (key string, two string);", t)
+	execInTransaction(syncable.DB, "CREATE TABLE foo (key string, two string);", t)
 
 	data := testReturn{Key: "lock", One: "two"}
 	bytes, err := json.Marshal(&data)
@@ -47,28 +47,34 @@ func TestSyncPutsValuesInDB(t *testing.T) {
 
 	syncable.Sync(context.Background(), bytes)
 
-	rows, err := syncable.db.Query("SELECT * FROM foo")
+	var value testReturn
+	err = SelectOneRowFromDB(syncable.DB, "SELECT * FROM foo", &value.Key, &value.One)
 	if err != nil {
-		log.Fatal(err)
+		t.Fatal(err)
+	}
+	if value.Key != "lock" || value.One != "two" {
+		t.Fatalf("Expected %v but was %v", data, value)
+	}
+}
+
+func SelectOneRowFromDB(db *sql.DB, table string, dest ...interface{}) error {
+	rows, err := db.Query("SELECT * FROM foo")
+	if err != nil {
+		return err
 	}
 	defer rows.Close()
 	var rowCount int
 	for rows.Next() {
 		rowCount++
-		var value testReturn
-		if err := rows.Scan(&value.Key, &value.One); err != nil {
-			t.Fatal(err)
-		}
-		if value.Key != "lock" || value.One != "two" {
-			t.Fatalf("Expected %v but was %v", testReturn{"lock", "two"}, value)
+		if err := rows.Scan(dest...); err != nil {
+			return err
 		}
 	}
 	if rowCount != 1 {
-		t.Fatalf("Data is not in the database")
+		return errors.New("Data is not in the database")
 	}
-	if err := rows.Err(); err != nil {
-		t.Fatal(err)
-	}
+
+	return rows.Err()
 }
 
 func execInTransaction(db *sql.DB, sqlString string, t *testing.T) {

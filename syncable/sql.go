@@ -29,10 +29,11 @@ type sqlConfig struct {
 	mappings         []sqlMapping
 }
 
-type sqlSyncable struct {
+// SQLSyncable struct
+type SQLSyncable struct {
 	config  sqlConfig
 	inserts []sqlInsert
-	db      *sql.DB
+	DB      *sql.DB
 }
 
 type sqlInsert struct {
@@ -57,7 +58,7 @@ func sqlParser(v *viper.Viper) TopicSyncable {
 }
 
 // NewSQLSyncable creates a new syncable
-func newSQLSyncable(sqlConfig sqlConfig) *sqlSyncable {
+func newSQLSyncable(sqlConfig sqlConfig) *SQLSyncable {
 	if sqlConfig.driver == "ql" {
 		ql.RegisterDriver()
 	}
@@ -69,7 +70,7 @@ func newSQLSyncable(sqlConfig sqlConfig) *sqlSyncable {
 
 	inserts := unwrapMappings(db, sqlConfig.mappings)
 
-	return &sqlSyncable{sqlConfig, inserts, db}
+	return &SQLSyncable{sqlConfig, inserts, db}
 }
 
 func unwrapMappings(db *sql.DB, mappings []sqlMapping) []sqlInsert {
@@ -126,7 +127,8 @@ func createSQL(table string, sqlMappings []sqlMapping) string {
 	return sql.String()
 }
 
-func (s sqlSyncable) Sync(ctx context.Context, bytes []byte) error {
+// Sync syncs
+func (s SQLSyncable) Sync(ctx context.Context, bytes []byte) error {
 	var jsonData interface{}
 	json.Marshal(string(bytes))
 	err := json.Unmarshal(bytes, &jsonData)
@@ -147,7 +149,7 @@ func (s sqlSyncable) Sync(ctx context.Context, bytes []byte) error {
 			values = append(values, res)
 		}
 
-		tx, err := s.db.BeginTx(context.Background(), &sql.TxOptions{Isolation: 0, ReadOnly: false})
+		tx, err := s.DB.BeginTx(context.Background(), &sql.TxOptions{Isolation: 0, ReadOnly: false})
 		defer tx.Commit()
 		if err != nil {
 			log.Printf("Error while creating transaction: %v", err)
@@ -163,10 +165,10 @@ func (s sqlSyncable) Sync(ctx context.Context, bytes []byte) error {
 	return nil
 }
 
-func (s sqlSyncable) topics() []string {
+func (s SQLSyncable) topics() []string {
 	return []string{s.config.topic}
 }
 
-func (s sqlSyncable) Close() error {
-	return s.db.Close()
+func (s SQLSyncable) Close() error {
+	return s.DB.Close()
 }

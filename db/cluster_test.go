@@ -1,12 +1,18 @@
 package db
 
 import (
+	"context"
+	"database/sql"
+	"errors"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"os"
+	"reflect"
 	"testing"
 	"time"
 
+	"github.com/philborlin/committed/syncable"
 	"github.com/philborlin/committed/util"
 )
 
@@ -53,7 +59,7 @@ func TestAppendToTopic(t *testing.T) {
 		expected := util.Proposal{Topic: "test1", Proposal: "Hello World"}
 		c.Append(expected)
 		time.Sleep(2 * time.Second)
-		log.Printf("About to check storage: %v", c.storage)
+
 		lastIndex, err := c.storage.LastIndex()
 		if err != nil {
 			t.Fatalf("Error: %v", err)
@@ -72,11 +78,78 @@ func TestAppendToTopic(t *testing.T) {
 	clusterTest(t, f)
 }
 
+type testReturn struct {
+	Key string
+	One string
+}
+
 func TestAddSQLSyncableToCluster(t *testing.T) {
 	f := func(c *Cluster) (interface{}, interface{}, error) {
+		dat, err := ioutil.ReadFile("../syncable/simple.toml")
+		if err != nil {
+			return nil, nil, err
+		}
 
-		return nil, nil, nil
+		s := c.CreateSyncable("toml", string(dat))
+
+		time.Sleep(2 * time.Second)
+
+		e1 := reflect.ValueOf(s).Elem()
+		sqlSyncable := e1.FieldByName("Syncable").Interface().(*syncable.SQLSyncable)
+		e2 := reflect.ValueOf(sqlSyncable).Elem()
+		db := e2.FieldByName("DB").Interface().(*sql.DB)
+		defer db.Close()
+
+		execInTransaction(db, "CREATE TABLE foo (key string, two string);", t)
+
+		proposal := util.Proposal{Topic: "test1", Proposal: "{\"Key\": \"lock\", \"One\": \"two\"}"}
+		c.Append(proposal)
+
+		time.Sleep(2 * time.Second)
+
+		expected := testReturn{Key: "lock", One: "two"}
+		var actual testReturn
+		err = SelectOneRowFromDB(db, "SELECT * FROM foo", &actual.Key, &actual.One)
+
+		return expected, actual, err
 	}
 
 	clusterTest(t, f)
+}
+
+func execInTransaction(db *sql.DB, sqlString string, t *testing.T) {
+	tx, err := db.BeginTx(context.Background(), &sql.TxOptions{Isolation: 0, ReadOnly: false})
+	if err != nil {
+		t.Fatalf("Failed to Begin Transaction: %v", err)
+	}
+
+	_, err = tx.ExecContext(context.Background(), sqlString)
+	if err != nil {
+		t.Fatalf("Failed to create table foo: %v", err)
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		t.Fatalf("Failed to commit transaction: %v", err)
+	}
+}
+
+func SelectOneRowFromDB(db *sql.DB, table string, dest ...interface{}) error {
+	rows, err := db.Query("SELECT * FROM foo")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var rowCount int
+	for rows.Next() {
+		rowCount++
+		if err := rows.Scan(dest...); err != nil {
+			return err
+		}
+	}
+	if rowCount != 1 {
+		return errors.New("Data is not in the database")
+	}
+
+	return rows.Err()
 }

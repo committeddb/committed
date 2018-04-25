@@ -395,14 +395,14 @@ func (rc *raftNode) serveChannels() {
 
 	// send proposals over raft
 	go func() {
-		log.Printf("[%d] Serving Raft", rc.id)
+		// log.Printf("[%d] Serving Raft", rc.id)
 		var confChangeCount uint64 = 0
 
 		for rc.proposeC != nil && rc.confChangeC != nil {
-			log.Printf("[%d] Selecting Raft", rc.id)
+			// log.Printf("[%d] Selecting Raft", rc.id)
 			select {
 			case prop, ok := <-rc.proposeC:
-				log.Printf("[%d] Received proposeC %s", rc.id, prop)
+				// log.Printf("[%d] Received proposeC %s", rc.id, prop)
 				if !ok {
 					rc.proposeC = nil
 				} else {
@@ -450,7 +450,6 @@ func (rc *raftNode) serveChannels() {
 								rc.syncp.Pub(e, "StoredData")
 							}
 						}()
-						fmt.Printf("Node %v is storing: %v\n", rc.id, e.Index)
 					}
 				}
 			}

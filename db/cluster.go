@@ -86,11 +86,12 @@ func (c *Cluster) Shutdown() (err error) {
 
 // Append proposes an addition to the raft
 func (c *Cluster) Append(proposal util.Proposal) {
-	var buf bytes.Buffer
-	if err := gob.NewEncoder(&buf).Encode(proposal); err != nil {
+	// var buf bytes.Buffer
+	buf := bytes.NewBufferString("")
+	if err := gob.NewEncoder(buf).Encode(proposal); err != nil {
 		log.Fatal(err)
 	}
-	log.Printf("[%d] Appending: %s to %v", c.id, buf.String(), c.proposeC)
+	// log.Printf("[%d] Appending: %s to %v", c.id, buf.String(), c.proposeC)
 	c.proposeC <- buf.String()
 }
 
@@ -122,7 +123,7 @@ func (c *Cluster) CreateSyncable(style string, syncableFile string) syncable.Syn
 	}
 
 	c.Append(util.Proposal{Topic: "syncable", Proposal: syncableFile})
-	c.sync(context.Background(), s)
+	go c.sync(context.Background(), s)
 
 	return s
 }
@@ -186,12 +187,10 @@ func (c *Cluster) sync(ctx context.Context, s syncable.Syncable) {
 
 	// Now we need to read the WAL
 
-	var storage *raft.MemoryStorage
-
-	size := size(ctx, storage)
+	size := size(ctx, c.storage)
 
 	for i := uint64(0); i < size; i++ {
-		s.Sync(ctx, []byte(readIndex(ctx, storage, uint64(i))))
+		s.Sync(ctx, []byte(readIndex(ctx, c.storage, uint64(i))))
 	}
 
 	wait <- false
@@ -208,7 +207,9 @@ func (c *Cluster) syncNode(ctx context.Context, s syncable.Syncable, wait <-chan
 		for {
 			select {
 			case e := <-subc:
-				s.Sync(ctx, e.(raftpb.Entry).Data)
+				if e != nil {
+					s.Sync(ctx, e.(raftpb.Entry).Data)
+				}
 			default:
 				time.Sleep(time.Millisecond * 1)
 			}
