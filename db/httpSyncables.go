@@ -1,6 +1,8 @@
 package db
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"log"
 	"net/http"
 
@@ -10,6 +12,10 @@ import (
 type newClusterSyncableRequest struct {
 	Style    string
 	Syncable string
+}
+
+type clusterSyncableGetResponse struct {
+	Syncables []string
 }
 
 // NewClusterSyncableHandler creates a new handler for Cluster Sycnables
@@ -27,7 +33,19 @@ func (c *clusterSyncableHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 	if r.Method == "POST" {
 		n := newClusterSyncableRequest{}
 		util.Unmarshall(r, &n)
-		c.c.CreateSyncable(n.Style, n.Syncable)
-		w.Write(nil)
+		decoded, err := base64.StdEncoding.DecodeString(n.Syncable)
+		if err != nil {
+			w.WriteHeader(500)
+		} else {
+			c.c.CreateSyncable(n.Style, string(decoded))
+			w.Write(nil)
+		}
+	} else if r.Method == "GET" {
+		keys := make([]string, 0, len(c.c.syncables))
+		for _, key := range c.c.syncables {
+			keys = append(keys, key)
+		}
+		response, _ := json.Marshal(clusterSyncableGetResponse{keys})
+		w.Write(response)
 	}
 }

@@ -19,12 +19,13 @@ import (
 // Cluster represents a cluster for the committeddb. It manages a raft cluster
 // and n number of topics
 type Cluster struct {
-	id       int
-	topics   map[string]*Topic
-	nodes    []string
-	proposeC chan<- string
-	syncp    *pubsub.PubSub
-	storage  *raft.MemoryStorage
+	id        int
+	topics    map[string]*Topic
+	syncables []string
+	nodes     []string
+	proposeC  chan<- string
+	syncp     *pubsub.PubSub
+	storage   *raft.MemoryStorage
 
 	apiPort int
 	join    bool
@@ -124,6 +125,8 @@ func (c *Cluster) CreateSyncable(style string, syncableFile string) syncable.Syn
 
 	c.Append(util.Proposal{Topic: "syncable", Proposal: syncableFile})
 	go c.sync(context.Background(), s)
+
+	c.syncables = append(c.syncables, syncableFile)
 
 	return s
 }
