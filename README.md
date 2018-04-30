@@ -8,22 +8,56 @@ A final way to think of Committed is as a functional database with powerful data
 
 Committed is specifically NOT a databse designed for querying.
 
+## Version 0.1
+This is the MVP of Committed. You can spin up a cluster. See the included Procfile for an example of how to run the server or just run the Procfile directly using goreman or something similar that can execute Procfiles.
+
+Once the server is running you should see 3 leader elections (if you change the number of nodes you should see every node come to consensus). When the server is working your terminal should look something like this:
+
+```
+08:13:19 committed1 | raft2018/04/30 08:13:19 INFO: raft.node: 1 elected leader 1 at term 2  
+08:13:19 committed2 | raft2018/04/30 08:13:19 INFO: raft.node: 2 elected leader 1 at term 2  
+08:13:19 committed3 | raft2018/04/30 08:13:19 INFO: raft.node: 3 elected leader 1 at term 2  
+```
+
+The term number doesn't matter and who got elected leader doesn't matter either.
+
+Once started committed will create two folders per node. The first node will be called raft-node# and raft-node#-snap. These folders contain all of your data. To clear the data in the server you can simply delete the folders.
+
+The MVP has three things you can do:
+
+* Add a topic
+* Append to a topic
+* Add a SQL syncable
+
+To Add a topic POST to http://localhost:port/cluster/topics with an HTTP body that looks like:  
+{  
+	"Name" : "test",  
+	"NodeCount" : 1  
+}  
+Node count does not do anything in the MVP so the value doesn't matter
+
+To Append to a topic POST to http://localhost:port/cluster/posts with an HTTP body that looks like:  
+{  
+	"Topic" : "test",  
+	"Proposal" : "My Data"  
+}  
+
+To Add a syncable POST to http://localhost:port/cluster/syncables with an HTTP body that looks like:  
+{  
+	"Style": "toml",  
+	"Syncable": "IyBEZXRlcm1pbmVzIHdoYXQgdGhlIHJlc3Qgb2YgdGhlIGNvbmZpZyB3aWxsIGxvb2sgbGlrZQ0KW2RiXQ0KdHlwZSA9ICJzcWwiDQoNCltzcWxdDQpkcml2ZXIgPSAicWwiDQpjb25uZWN0aW9uU3RyaW5nID0gIm1lbW9yeTovL2ZvbyINCg0KW3NxbC50b3BpY10NCm5hbWUgPSAidGVzdDEiDQoNCltbc3FsLnRvcGljLm1hcHBpbmddXQ0KanNvblBhdGggPSAiJC5LZXkiDQp0YWJsZSA9ICJmb28iDQpjb2x1bW4gPSAia2V5Ig0KDQpbW3NxbC50b3BpYy5tYXBwaW5nXV0NCmpzb25QYXRoID0gIiQuT25lIg0KdGFibGUgPSAiZm9vIg0KY29sdW1uID0gInR3byI="  
+}  
+The Syncable is a Base64 encode of a file. The file can be any type that Viper supports which at this time is JSON, TOML, YAML, HCL, and Java properties config files. In the Style field put what file type you have encoded. For an example of what a syncable looks like look at the simple.toml file in the syncable folder of this project.
+
+The workflow would look like: Add a topic, Append some proposals, Add a syncable, look at your SQL database and see the proposals get applied to the DB, Add some more proposals and then read the database and do something useful.
+
 ## Road Map
 
-The MVP will be delivered by April 30th.
+Version 0.2 will be delivered by May 31st.
 
 It will include (Strikethrough items are alread completed):
 
 Backend
-* ~~A solid SQL syncable including a DSL for describing it~~
-* ~~A generic method for adding a transform to a syncable~~
-* ~~Permanent Storage of data~~
+* A topic syncable that allows you to transform data on one topic and write the transformed data to a new topic
 
-UI
-* View topics
-* View syncables
-
-API
-* ~~Add a new topic~~
-* ~~Add a new SQL syncable to a topic~~
-* ~~Post to a topic~~
+Also before May 31st I will setup an online sandbox that will allow users to play with a shared server without having to download the database by themselves.

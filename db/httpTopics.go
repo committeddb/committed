@@ -41,6 +41,7 @@ func (c *clusterTopicHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		for key := range c.c.topics {
 			keys = append(keys, key)
 		}
+		w.Header().Set("Content-Type", "application/json")
 		response, _ := json.Marshal(clusterTopicGetResponse{keys})
 		w.Write(response)
 	}

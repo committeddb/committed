@@ -45,6 +45,7 @@ func (c *clusterSyncableHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		for _, key := range c.c.syncables {
 			keys = append(keys, key)
 		}
+		w.Header().Set("Content-Type", "application/json")
 		response, _ := json.Marshal(clusterSyncableGetResponse{keys})
 		w.Write(response)
 	}

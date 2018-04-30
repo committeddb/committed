@@ -19,12 +19,15 @@ const MenuComponent = () => (
                 <NavLink to="/syncables"><MenuItem>Syncables</MenuItem></NavLink>
             </Drawer>
 
-            <GridList>
+            <Route path="/topics" component={TopicsComponent} />
+            <Route path="/syncables" component={SyncablesComponent} />
+
+            {/* <GridList>
                 <GridTile>
                     <Route path="/topics" component={TopicsComponent} />
                     <Route path="/syncables" component={SyncablesComponent} />
                 </GridTile>
-            </GridList>
+            </GridList> */}
         </div>
     </Router>
 );

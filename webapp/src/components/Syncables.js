@@ -19,7 +19,7 @@ export default class SyncablesComponent extends React.Component {
         return (
             <List>
                 {this.state.Syncables.map(function(syncable) {
-                    return <ListItem primaryText={syncable} />;
+                    return <pre><ListItem primaryText={syncable} /></pre>;
                 })}
             </List>
         );
