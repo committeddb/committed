@@ -3,6 +3,12 @@
 
 [[projects]]
   branch = "master"
+  name = "github.com/AndrewBurian/powermux"
+  packages = ["."]
+  revision = "593c0f2b2e9f99b4aa366ebaa44323169458724d"
+
+[[projects]]
+  branch = "master"
   name = "github.com/beorn7/perks"
   packages = ["quantile"]
   revision = "3a771d992973f24aa725d07868b467d1ddfceafb"
@@ -247,6 +253,12 @@
   revision = "780932d4fbbe0e69b84c34c20f5c8d0981e109ea"
 
 [[projects]]
+  name = "github.com/rakyll/statik"
+  packages = ["fs"]
+  revision = "fd36b3595eb2ec8da4b8153b107f7ea08504899d"
+  version = "v0.1.1"
+
+[[projects]]
   name = "github.com/spf13/afero"
   packages = [
     ".",
@@ -331,6 +343,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "9bb8e9e2a1c85ca6f97cadf40b95a38c4ed22804d3d65ff1f1c95f1aa06c3abf"
+  inputs-digest = "90b3fbbf16ff3e703300b800e8992cd0cc180ffd5d547d996b95af9041d72293"
   solver-name = "gps-cdcl"
   solver-version = 1

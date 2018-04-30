@@ -1,0 +1,24 @@
+{
+  "name": "webapp",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {
+    "effects-as-data": "^2.16.0",
+    "effects-as-data-redux": "^1.0.3",
+    "effects-as-data-universal": "^4.6.0",
+    "react": "^16.3.2",
+    "react-dom": "^16.3.2",
+    "react-redux": "^5.0.6",
+    "react-router-dom": "^4.2.2",
+    "react-scripts": "1.1.4",
+    "redux": "^3.7.2",
+    "regenerator-runtime": "^0.11.1",
+    "material-ui": "^0.20.0"
+  },
+  "scripts": {
+    "start": "react-scripts start",
+    "build": "react-scripts build",
+    "test": "react-scripts test --env=jsdom",
+    "eject": "react-scripts eject"
+  }
+}

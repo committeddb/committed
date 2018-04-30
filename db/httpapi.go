@@ -7,13 +7,23 @@ import (
 	"strconv"
 
 	"github.com/coreos/etcd/raft/raftpb"
+	"github.com/rakyll/statik/fs"
+
+	// This imports the static http files for the React App
+	_ "github.com/philborlin/committed/statik"
 )
 
 func createMux(c *Cluster) http.Handler {
+	fs, err := fs.New()
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	mux := http.NewServeMux()
 	mux.Handle("/cluster/topics", NewClusterTopicHandler(c))
 	mux.Handle("/cluster/posts", NewClusterPostHandler(c))
 	mux.Handle("/cluster/syncables", NewClusterSyncableHandler(c))
+	mux.Handle("/", http.FileServer(fs))
 	return mux
 }
 
