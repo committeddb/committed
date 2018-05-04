@@ -26,7 +26,7 @@ env:
   - secure: a1WydTyErH4qoSADPBLXchfovEwaAHN1RRObMToGtw6MWM1A5hrzsuuDTAtA9VcW3z853Xhh2lYjuf4wfWrRd6KkMnx6hiMmDYlWGPhR6b9no59cWHUe+mfD57bON6Z6HNXcRZK6heDHUwNr3jPRPo9BgxuDIRjX8QGckqBNbgcHj0wCIsbiL6cWkdJKzmdOzp1ROSo+Lqsny+cwLQNwmVaUM3OvQOXtl1TwaEA9rpvjRJHQXAuwplMj15pZ60Fm9ADO2CEWMbKLP8D1Qf66zwGSu1iPBkai3k17JxxdrmDkwqwP4Wc3K9JOJxY+6CR+pbnZ2gCqylcHAU5t6qpxwgvbls8eVU327TZLtLWZas2aHai2NM8Jjw9nSGZImo2VHSmYvNnZ1dX+Ifu3u4+/Qc7HZDO0+12Rb3qie20gcH1RI1xBRdUAC6OMEMAPVuC1cIXMn5i3BSmsrx/XKR2E1FcJ2zIUEFIYGnLAQH4cF977hCrFtymjQbkwLzq4aOzzQQj557c8nPBGiGeMW2ROnL+ZuipGXLOSmo8owoAPMZ89RK3TtpAumO+U/JkxYg7B85CFpnUREmgwwqAzy2E2GYDoZ8IK3hUIHooqWSPwGSdc0J8ei7VPCRRd9YFc57j7oO+XAtJRhlowQFynwNdNqt9Xxbb6rgisAHqgJ5bzlWE=
 
 after_success:
-- docker login -e $DOCKER_EMAIL -u $DOCKER_USER -p $DOCKER_PASS
+- docker login -u $DOCKER_USER -p $DOCKER_PASS
 - export REPO=rancidfishbreath/committed
 - export TAG=`if [ "$TRAVIS_BRANCH" == "master" ]; then echo "latest"; else echo $TRAVIS_BRANCH; fi`
 - docker build -f Dockerfile -t $REPO:$COMMIT .
