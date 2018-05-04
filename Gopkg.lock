@@ -3,12 +3,6 @@
 
 [[projects]]
   branch = "master"
-  name = "github.com/AndrewBurian/powermux"
-  packages = ["."]
-  revision = "593c0f2b2e9f99b4aa366ebaa44323169458724d"
-
-[[projects]]
-  branch = "master"
   name = "github.com/beorn7/perks"
   packages = ["quantile"]
   revision = "3a771d992973f24aa725d07868b467d1ddfceafb"
@@ -343,6 +337,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "90b3fbbf16ff3e703300b800e8992cd0cc180ffd5d547d996b95af9041d72293"
+  inputs-digest = "dd715365e14e7284dfcd4b77d94c54342eff00f3e5230c34b481e024c51a25cf"
   solver-name = "gps-cdcl"
   solver-version = 1
