@@ -1,21 +1,36 @@
 language: go
 
 go:
-  - "1.10.x"
+- 1.10.x
 
 sudo: required
 
 services:
-  - docker
+- docker
 
 before_install:
-  # Setup dependency management tool
-  - curl -L -s https://github.com/golang/dep/releases/download/v0.4.1/dep-linux-amd64 -o $GOPATH/bin/dep
-  - chmod +x $GOPATH/bin/dep
+- curl -L -s https://github.com/golang/dep/releases/download/v0.4.1/dep-linux-amd64
+  -o $GOPATH/bin/dep
+- chmod +x $GOPATH/bin/dep
 
 script:
-  - dep ensure
-  - go test ./...
-  - go build
-  - docker build -t committed:v0.1-alpha .
+- dep ensure
+- go test ./...
+- go build
 
+env:
+  global:
+  - COMMIT=${TRAVIS_COMMIT::8}
+  - secure: WirWlNaEMSZogy97o4vm1Af0ve8OscLP2pdpzdeHH+kXQ4W4qDrNHm6ys4R1Qj3t3gKEsJCMlenS83xT4q21BqjNZoST9b9vWg9brHS1GUaMRmUEfXFRf8BAeEZoXv+pjLzavExQ5U3noJx7vXbGRnIXfU7soiITKgJSgXyq39SzUnGbhXiVCd0AF4LOYOjNtKE9/IQfOh4yPsD3ghG7Ijxuse4I/HuvKzBasJJeQC6c/PjNLNlhbA7/rcRkI4ek8BWMOAQZc2CuLIvMS6IuxEF70DkkiNQQsVaM5zGbQlty7rEA+EwD1hx3X+miALEjJ37RLRSw+UerOeHx9WiS6b+m/ctrk5QD9Mf8IhEvNvCf3ZxhKtyDqLABeAlNLjVjxte2B/vMVGm43XQF2bcqzVKw5+6i509LETmIUGSLZnE1mLnTWTudwFJY59Syf4/btCupn9LMNjh5up0dl8Ut9eS/+0ODDBDWnEizoSmSWznB1seaga0teZXlhXPPPVR63Z4D7IDUbhoXLv8nL3dCAYpPPCtB91YetJ5MVCd0/GsOD1a647pHM8W1UWHIH74zVj8j7fa2/I4Jwpst/TXKBQdhF+wZAqb45Rjp7BWF5xKu97npy2F4rlRu2MWlx/vSVTbhhFOGXHNhFz1DmTKmGauFAnNx6IH+WT9bCeFZbXc=
+  - secure: hrGmZKj2jwdFpujyOS8CXjGpw3ZdTBZUTivFhH5sLvbvxcOkDCbyVvcGzIFwmNYuDP0w50Rzax9YAa6XJFsIWQ5vfTAagOc8HD3iFRmbcwo1anuipAoZQhj3zRmZ7wN1uiI59fEeMxFg1KDkIqmUeWefBCwW5IecN0MkL1HkHZyRZA3jfvjTbxLOgkAq6gKi5dEZb6wxMiU4xTwCDRNc4eR9MNuKq7tQAJqOI7gJ6vGBavOQt2bhSD8eukayKFIz8P5KlUb2iLWbWTBaEQIRgDTmmXeCiyDzYnrnKt24+pxqhn4/Xujz6eCBSevwIxYUVD7Hd1gsMLlooLGIHr1Eejq6NY3lHvhhoe4pue0LUA480SHZWE67TXyGNGmQjM1JIlZFgRdPUq++euibxZ/xYRuntyo2WsOEbj4YF9//1DSpg5c9XX7Y+LENIjMozKmtrLjV/B+neq3AYvGBUKjAuXfV0Y6hVtihczFRwXWA3POAs5NO/WDPrkWIxj41eaN+luyKL4fWKPLcS+z5zMfzTm5TD2CN6kV9e2pp0rm47zlo/diqQyYMGJ9ebXFYnDTlRZ22PvIrRSBQPc98vJSKBerrK8NoscPwalgzGAbysKVBKtsstaALrKh7xjDrdDennYPs/ZDeY73OlU3spuP4/k+4hfqSE3hXOFjl+oIukQg=
+  - secure: a1WydTyErH4qoSADPBLXchfovEwaAHN1RRObMToGtw6MWM1A5hrzsuuDTAtA9VcW3z853Xhh2lYjuf4wfWrRd6KkMnx6hiMmDYlWGPhR6b9no59cWHUe+mfD57bON6Z6HNXcRZK6heDHUwNr3jPRPo9BgxuDIRjX8QGckqBNbgcHj0wCIsbiL6cWkdJKzmdOzp1ROSo+Lqsny+cwLQNwmVaUM3OvQOXtl1TwaEA9rpvjRJHQXAuwplMj15pZ60Fm9ADO2CEWMbKLP8D1Qf66zwGSu1iPBkai3k17JxxdrmDkwqwP4Wc3K9JOJxY+6CR+pbnZ2gCqylcHAU5t6qpxwgvbls8eVU327TZLtLWZas2aHai2NM8Jjw9nSGZImo2VHSmYvNnZ1dX+Ifu3u4+/Qc7HZDO0+12Rb3qie20gcH1RI1xBRdUAC6OMEMAPVuC1cIXMn5i3BSmsrx/XKR2E1FcJ2zIUEFIYGnLAQH4cF977hCrFtymjQbkwLzq4aOzzQQj557c8nPBGiGeMW2ROnL+ZuipGXLOSmo8owoAPMZ89RK3TtpAumO+U/JkxYg7B85CFpnUREmgwwqAzy2E2GYDoZ8IK3hUIHooqWSPwGSdc0J8ei7VPCRRd9YFc57j7oO+XAtJRhlowQFynwNdNqt9Xxbb6rgisAHqgJ5bzlWE=
+
+after_success:
+- docker login -e $DOCKER_EMAIL -u $DOCKER_USER -p $DOCKER_PASS
+- export REPO=rancidfishbreath/committed
+- export TAG=`if [ "$TRAVIS_BRANCH" == "master" ]; then echo "latest"; else echo $TRAVIS_BRANCH; fi`
+- docker build -f Dockerfile -t $REPO:$COMMIT .
+- docker tag $REPO:$COMMIT $REPO:$TAG
+- docker tag $REPO:$COMMIT $REPO:travis-$TRAVIS_BUILD_NUMBER
+- docker push $REPO
+  
