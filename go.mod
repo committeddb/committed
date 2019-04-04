@@ -1,0 +1,51 @@
+module github.com/philborlin/committed
+
+go 1.12
+
+require (
+	github.com/beorn7/perks v0.0.0-20180321164747-3a771d992973
+	github.com/coreos/bbolt v1.3.0
+	github.com/coreos/etcd v3.3.2+incompatible
+	github.com/coreos/go-semver v0.2.0
+	github.com/coreos/go-systemd v0.0.0-20180202092358-40e2722dffea
+	github.com/coreos/pkg v0.0.0-20160727233714-3ac0863d7acf
+	github.com/cskr/pubsub v1.0.0
+	github.com/cznic/b v0.0.0-20180115125044-35e9bbe41f07
+	github.com/cznic/fileutil v0.0.0-20180108211300-6a051e75936f
+	github.com/cznic/internal v0.0.0-20160905094039-cef02a853c3a
+	github.com/cznic/lldb v1.1.0
+	github.com/cznic/mathutil v0.0.0-20180221133535-7764e6a2216a
+	github.com/cznic/ql v1.1.0
+	github.com/cznic/sortutil v0.0.0-20150617083342-4c7342852e65
+	github.com/cznic/strutil v0.0.0-20171016134553-529a34b1c186
+	github.com/cznic/zappy v0.0.0-20160723133515-2533cb5b45cc
+	github.com/dustin/go-humanize v0.0.0-20171111073723-bb3d318650d4
+	github.com/edsrzf/mmap-go v0.0.0-20170320065105-0bce6a688712
+	github.com/fsnotify/fsnotify v1.4.7
+	github.com/gogo/protobuf v1.0.0
+	github.com/golang/protobuf v1.0.0
+	github.com/hashicorp/hcl v0.0.0-20180404174102-ef8a98b0bbce
+	github.com/lib/pq v0.0.0-20180327071824-d34b9ff171c2
+	github.com/magiconair/properties v1.7.6
+	github.com/matttproud/golang_protobuf_extensions v1.0.0
+	github.com/mitchellh/mapstructure v0.0.0-20180220230111-00c29f56e238
+	github.com/oliveagle/jsonpath v0.0.0-20180314032104-46faf33da135
+	github.com/pelletier/go-toml v1.1.0
+	github.com/prometheus/client_golang v0.8.0
+	github.com/prometheus/client_model v0.0.0-20171117100541-99fa1f4be8e5
+	github.com/prometheus/common v0.0.0-20180312112859-e4aa40a9169a
+	github.com/prometheus/procfs v0.0.0-20180321230812-780932d4fbbe
+	github.com/rakyll/statik v0.1.1
+	github.com/spf13/afero v1.1.0
+	github.com/spf13/cast v1.2.0
+	github.com/spf13/jwalterweatherman v0.0.0-20180109140146-7c0cea34c8ec
+	github.com/spf13/pflag v1.0.1
+	github.com/spf13/viper v1.0.2
+	github.com/xiang90/probing v0.0.0-20160813154853-07dd2e8dfe18
+	golang.org/x/net v0.0.0-20180406214816-61147c48b25b
+	golang.org/x/sys v0.0.0-20180925112736-b09afc3d579e
+	golang.org/x/text v0.3.0
+	golang.org/x/time v0.0.0-20180314180208-26559e0f760e
+	google.golang.org/grpc v1.11.3
+	gopkg.in/yaml.v2 v2.2.1
+)
