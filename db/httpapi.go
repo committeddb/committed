@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -20,11 +21,25 @@ func createMux(c *Cluster) http.Handler {
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/cluster/topics", NewClusterTopicHandler(c))
-	mux.Handle("/cluster/posts", NewClusterPostHandler(c))
-	mux.Handle("/cluster/syncables", NewClusterSyncableHandler(c))
+	mux.Handle("/cluster/topics", newLoggingHandler(NewClusterTopicHandler(c)))
+	mux.Handle("/cluster/posts", newLoggingHandler(NewClusterPostHandler(c)))
+	mux.Handle("/cluster/syncables", newLoggingHandler(NewClusterSyncableHandler(c)))
 	mux.Handle("/", http.FileServer(fs))
 	return mux
+}
+
+type loggingHandler struct {
+	handler http.Handler
+}
+
+func newLoggingHandler(handler http.Handler) http.Handler {
+	return &loggingHandler{handler: handler}
+}
+
+// ServeHTTP implements Handler
+func (h *loggingHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	fmt.Printf("%v -> %v", r.RemoteAddr, r.RequestURI)
+	h.handler.ServeHTTP(w, r)
 }
 
 // HTTPAPI is a placeholder that allows us to shutdown the HTTP API
