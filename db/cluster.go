@@ -10,6 +10,7 @@ import (
 
 	"github.com/cskr/pubsub"
 	"github.com/philborlin/committed/syncable"
+	"github.com/philborlin/committed/types"
 	"github.com/philborlin/committed/util"
 
 	"github.com/coreos/etcd/raft"
@@ -20,30 +21,29 @@ import (
 // and n number of topics
 type Cluster struct {
 	id        int
-	topics    map[string]*Topic
-	syncables []string
+	Databases map[string]types.Database
+	Topics    map[string]*Topic
+	Syncables []string
 	nodes     []string
 	proposeC  chan<- string
 	syncp     *pubsub.PubSub
 	storage   *raft.MemoryStorage
 
-	apiPort int
-	join    bool
+	join bool
 
 	commitC <-chan *string
 	errorC  <-chan error
-	api     *httpAPI
 }
 
 // NewCluster creates a new Cluster
-func NewCluster(nodes []string, id int, apiPort int, join bool) *Cluster {
-	c := &Cluster{id: id, topics: make(map[string]*Topic), nodes: nodes, apiPort: apiPort, join: join}
+func NewCluster(nodes []string, id int, join bool) *Cluster {
+	c := &Cluster{id: id, Topics: make(map[string]*Topic), nodes: nodes, join: join}
 
 	return c
 }
 
 // Start starts the cluster
-func (c *Cluster) Start() {
+func (c *Cluster) Start() (chan raftpb.ConfChange, <-chan error) {
 	proposeC := make(chan string)
 	confChangeC := make(chan raftpb.ConfChange)
 	syncp := pubsub.New(0)
@@ -64,8 +64,7 @@ func (c *Cluster) Start() {
 	// We can't get rid of this until we have a select statement to take care of commitC
 	kvs = newKVStore(<-snapshotterReady, proposeC, commitC, errorC)
 
-	// the key-value http handler will propose updates to raft
-	c.api = serveAPI(c, c.apiPort, confChangeC, errorC)
+	return confChangeC, c.errorC
 }
 
 // Shutdown shutdowns the cluster including closing server ports
@@ -108,16 +107,16 @@ func (c *Cluster) CreateTopic(name string) *Topic {
 
 	log.Printf("About to append topic: %s...\n", name)
 	c.Append(util.Proposal{Topic: "topic", Proposal: name})
-	log.Printf("...Appeneded topic: %s\n", name)
+	log.Printf("...Appended topic: %s\n", name)
 
-	c.topics[name] = t
+	c.Topics[name] = t
 	return t
 }
 
 // CreateSyncable creates a Syncable, appends the original file to the raft, starts the syncable,
 // and returns it if successful
 func (c *Cluster) CreateSyncable(style string, syncableFile string) syncable.Syncable {
-	s, err := syncable.Parse(style, []byte(syncableFile))
+	s, err := syncable.Parse(style, []byte(syncableFile), c.Databases)
 	if err != nil {
 		log.Printf("Failed to create syncable: %v", err)
 		return nil
@@ -126,7 +125,7 @@ func (c *Cluster) CreateSyncable(style string, syncableFile string) syncable.Syn
 	c.Append(util.Proposal{Topic: "syncable", Proposal: syncableFile})
 	go c.sync(context.Background(), s)
 
-	c.syncables = append(c.syncables, syncableFile)
+	c.Syncables = append(c.Syncables, syncableFile)
 
 	return s
 }

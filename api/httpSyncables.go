@@ -1,4 +1,4 @@
-package db
+package api
 
 import (
 	"encoding/base64"
@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/philborlin/committed/db"
 	"github.com/philborlin/committed/util"
 )
 
@@ -19,12 +20,12 @@ type clusterSyncableGetResponse struct {
 }
 
 // NewClusterSyncableHandler creates a new handler for Cluster Sycnables
-func NewClusterSyncableHandler(c *Cluster) http.Handler {
+func NewClusterSyncableHandler(c *db.Cluster) http.Handler {
 	return &clusterSyncableHandler{c}
 }
 
 type clusterSyncableHandler struct {
-	c *Cluster
+	c *db.Cluster
 }
 
 func (c *clusterSyncableHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -41,8 +42,8 @@ func (c *clusterSyncableHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 			w.Write(nil)
 		}
 	} else if r.Method == "GET" {
-		keys := make([]string, 0, len(c.c.syncables))
-		for _, key := range c.c.syncables {
+		keys := make([]string, 0, len(c.c.Syncables))
+		for _, key := range c.c.Syncables {
 			keys = append(keys, key)
 		}
 		w.Header().Set("Content-Type", "application/json")

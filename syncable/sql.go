@@ -8,8 +8,9 @@ import (
 	"log"
 	"strings"
 
-	"github.com/cznic/ql"
+	"github.com/philborlin/committed/types"
 	"github.com/spf13/viper"
+
 	// The driver will be loaded through reflection
 	_ "github.com/lib/pq"
 
@@ -23,10 +24,9 @@ type sqlMapping struct {
 }
 
 type sqlConfig struct {
-	driver           string
-	connectionString string
-	topic            string
-	mappings         []sqlMapping
+	sqlDB    string
+	topic    string
+	mappings []sqlMapping
 }
 
 // SQLSyncable struct
@@ -41,9 +41,10 @@ type sqlInsert struct {
 	jsonPath []string
 }
 
-func sqlParser(v *viper.Viper) TopicSyncable {
-	driver := v.GetString("sql.driver")
-	connectionString := v.GetString("sql.connectionString")
+func sqlParser(v *viper.Viper, databases map[string]types.Database) TopicSyncable {
+	// driver := v.GetString("sql.driver")
+	// connectionString := v.GetString("sql.connectionString")
+	sqlDB := v.GetString("sql.db")
 	topic := v.GetString("sql.topic.name")
 
 	var mappings []sqlMapping
@@ -53,17 +54,27 @@ func sqlParser(v *viper.Viper) TopicSyncable {
 		mappings = append(mappings, mapping)
 	}
 
-	config := sqlConfig{driver, connectionString, topic, mappings}
-	return newSQLSyncable(config)
+	config := sqlConfig{sqlDB, topic, mappings}
+	return newSQLSyncable(config, databases)
 }
 
 // NewSQLSyncable creates a new syncable
-func newSQLSyncable(sqlConfig sqlConfig) *SQLSyncable {
-	if sqlConfig.driver == "ql" {
-		ql.RegisterDriver()
-	}
+func newSQLSyncable(sqlConfig sqlConfig, databases map[string]types.Database) *SQLSyncable {
+	// if sqlConfig.driver == "ql" {
+	// 	ql.RegisterDriver()
+	// }
 
-	db, err := sql.Open(sqlConfig.driver, sqlConfig.connectionString)
+	// db, err := sql.Open(sqlConfig.driver, sqlConfig.connectionString)
+
+	database := databases[sqlConfig.sqlDB]
+	if database == nil {
+		log.Fatal(fmt.Errorf("Database %s is not setup", sqlConfig.sqlDB))
+	}
+	if database.Type() != "sql" {
+		log.Fatal(fmt.Errorf("Database %s is not a sql database", sqlConfig.sqlDB))
+	}
+	sqlDB := database.(*types.SQLDB)
+	db, err := sqlDB.Open()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -169,6 +180,7 @@ func (s SQLSyncable) topics() []string {
 	return []string{s.config.topic}
 }
 
+// Close closes the db
 func (s SQLSyncable) Close() error {
 	return s.DB.Close()
 }

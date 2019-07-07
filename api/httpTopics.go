@@ -1,10 +1,11 @@
-package db
+package api
 
 import (
 	"encoding/json"
 	"log"
 	"net/http"
 
+	"github.com/philborlin/committed/db"
 	"github.com/philborlin/committed/util"
 )
 
@@ -18,12 +19,12 @@ type clusterTopicGetResponse struct {
 }
 
 // NewClusterTopicHandler is the handler for Cluster Topics
-func NewClusterTopicHandler(c *Cluster) http.Handler {
+func NewClusterTopicHandler(c *db.Cluster) http.Handler {
 	return &clusterTopicHandler{c}
 }
 
 type clusterTopicHandler struct {
-	c *Cluster
+	c *db.Cluster
 }
 
 func (c *clusterTopicHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -36,9 +37,9 @@ func (c *clusterTopicHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		w.Write(nil)
 	} else if r.Method == "GET" {
 		log.Printf("Processing GET\n")
-		log.Printf("Found topics %v GET\n", c.c.topics)
-		keys := make([]string, 0, len(c.c.topics))
-		for key := range c.c.topics {
+		log.Printf("Found topics %v GET\n", c.c.Topics)
+		keys := make([]string, 0, len(c.c.Topics))
+		for key := range c.c.Topics {
 			keys = append(keys, key)
 		}
 		w.Header().Set("Content-Type", "application/json")

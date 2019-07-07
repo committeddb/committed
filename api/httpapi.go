@@ -1,4 +1,4 @@
-package db
+package api
 
 import (
 	"context"
@@ -11,10 +11,11 @@ import (
 	"github.com/rakyll/statik/fs"
 
 	// This imports the static http files for the React App
+	"github.com/philborlin/committed/db"
 	_ "github.com/philborlin/committed/statik"
 )
 
-func createMux(c *Cluster) http.Handler {
+func createMux(c *db.Cluster) http.Handler {
 	fs, err := fs.New()
 	if err != nil {
 		log.Fatal(err)
@@ -47,8 +48,8 @@ type httpAPI struct {
 	server *http.Server
 }
 
-// serveAPI starts the committed API.
-func serveAPI(c *Cluster, port int, confChangeC chan<- raftpb.ConfChange, errorC <-chan error) *httpAPI {
+// ServeAPI starts the committed API.
+func ServeAPI(c *db.Cluster, port int, confChangeC chan<- raftpb.ConfChange, errorC <-chan error) *httpAPI {
 	srv := http.Server{
 		Addr:    ":" + strconv.Itoa(port),
 		Handler: createMux(c),

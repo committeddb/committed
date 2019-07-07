@@ -1,9 +1,10 @@
-package db
+package api
 
 import (
 	"log"
 	"net/http"
 
+	"github.com/philborlin/committed/db"
 	"github.com/philborlin/committed/util"
 )
 
@@ -13,12 +14,12 @@ type newClusterTopicPostRequest struct {
 }
 
 // NewClusterPostHandler creates a new handler for Cluster Topics
-func NewClusterPostHandler(c *Cluster) http.Handler {
+func NewClusterPostHandler(c *db.Cluster) http.Handler {
 	return &clusterPostHandler{c}
 }
 
 type clusterPostHandler struct {
-	c *Cluster
+	c *db.Cluster
 }
 
 func (c *clusterPostHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {

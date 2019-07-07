@@ -33,7 +33,7 @@ func TestSyncPutsValuesInDB(t *testing.T) {
 		t.Fatalf("Failed with error %v", err)
 	}
 
-	parsed, _ := Parse("toml", dat)
+	parsed, _ := Parse("toml", dat, databases())
 	syncable := parsed.(*syncableWrapper).Syncable.(*SQLSyncable)
 	defer syncable.Close()
 

@@ -4,6 +4,7 @@ import (
 	"flag"
 	"strings"
 
+	"github.com/philborlin/committed/api"
 	"github.com/philborlin/committed/syncable"
 
 	"github.com/philborlin/committed/db"
@@ -18,8 +19,11 @@ func main() {
 
 	nodes := strings.Split(*cluster, ",")
 
-	c := db.NewCluster(nodes, *id, *apiPort, *join)
-	c.Start()
+	c := db.NewCluster(nodes, *id, *join)
+	confChangeC, errorC := c.Start()
 
-	syncable.Parse("", nil)
+	// the key-value http handler will propose updates to raft
+	api.ServeAPI(c, *apiPort, confChangeC, errorC)
+
+	syncable.Parse("", nil, nil)
 }

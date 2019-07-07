@@ -3,8 +3,9 @@
 type = "sql"
 
 [sql]
-driver = "ql"
-connectionString = "memory://foo"
+# driver = "ql"
+# connectionString = "memory://foo"
+db = "testdb"
 
 [sql.topic]
 name = "test1"

@@ -17,7 +17,7 @@ import (
 )
 
 func clusterTest(t *testing.T, f func(*Cluster) (expected interface{}, actual interface{}, err error)) {
-	c := NewCluster([]string{"http://127.0.0.1:12379"}, 1, 12380, false)
+	c := NewCluster([]string{"http://127.0.0.1:12379"}, 1, false)
 
 	time.AfterFunc(2*time.Second, func() {
 		log.Printf("Starting test function")
@@ -47,7 +47,7 @@ func TestCreateTopic(t *testing.T) {
 	f := func(c *Cluster) (interface{}, interface{}, error) {
 		topicName := "test1"
 		expected := c.CreateTopic(topicName)
-		actual := c.topics[topicName]
+		actual := c.Topics[topicName]
 		return expected, actual, nil
 	}
 
