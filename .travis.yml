@@ -8,6 +8,9 @@ sudo: required
 services:
 - docker
 
+script:
+- go test ./...
+
 env:
   global:
   - COMMIT=${TRAVIS_COMMIT::8}
