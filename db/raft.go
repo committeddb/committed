@@ -321,6 +321,7 @@ func (rc *raftNode) stop() {
 	close(rc.commitC)
 	close(rc.errorC)
 	rc.node.Stop()
+	rc.wal.Close()
 }
 
 func (rc *raftNode) stopHTTP() {
@@ -396,7 +397,7 @@ func (rc *raftNode) serveChannels() {
 	// send proposals over raft
 	go func() {
 		// log.Printf("[%d] Serving Raft", rc.id)
-		var confChangeCount uint64 = 0
+		var confChangeCount uint64
 
 		for rc.proposeC != nil && rc.confChangeC != nil {
 			// log.Printf("[%d] Selecting Raft", rc.id)
@@ -415,7 +416,7 @@ func (rc *raftNode) serveChannels() {
 				if !ok {
 					rc.confChangeC = nil
 				} else {
-					confChangeCount += 1
+					confChangeCount++
 					cc.ID = confChangeCount
 					rc.node.ProposeConfChange(context.TODO(), cc)
 				}

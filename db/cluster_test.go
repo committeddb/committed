@@ -21,29 +21,42 @@ func clusterTest(t *testing.T, f func(*Cluster) (expected interface{}, actual in
 
 	time.AfterFunc(2*time.Second, func() {
 		log.Printf("Starting test function")
-		defer c.Shutdown()
-		defer os.RemoveAll(fmt.Sprintf("raft-%d", 1))
-		defer os.RemoveAll(fmt.Sprintf("raft-%d-snap", 1))
+		after := func(c *Cluster) {
+			if err := c.Shutdown(); err != nil {
+				fmt.Println("Error shutting down the cluster")
+			}
+			file := fmt.Sprintf("raft-%d", 1)
+			if err := os.RemoveAll(file); err != nil {
+				fmt.Printf("Error removing %s", file)
+			}
+			file = fmt.Sprintf("raft-%d-snap", 1)
+			if err := os.RemoveAll(file); err != nil {
+				fmt.Printf("Error removing %s", file)
+			}
+		}
 
 		expected, actual, err := f(c)
 
 		log.Printf("[%v][%v][%v]", expected, actual, err)
 
 		if err != nil {
+			after(c)
 			t.Fatalf("Error: %v", err)
 		}
 
 		if expected != actual {
+			after(c)
 			t.Fatalf("Expected %v but was %v", expected, actual)
 		}
 
-		time.Sleep(2 * time.Second)
+		after(c)
 	})
 
-	c.Start()
+	go c.Start()
 }
 
 func TestCreateTopic(t *testing.T) {
+	fmt.Println("TestCreateTopic")
 	f := func(c *Cluster) (interface{}, interface{}, error) {
 		topicName := "test1"
 		expected := c.CreateTopic(topicName)
@@ -55,6 +68,7 @@ func TestCreateTopic(t *testing.T) {
 }
 
 func TestAppendToTopic(t *testing.T) {
+	fmt.Println("TestAppendToTopic")
 	f := func(c *Cluster) (interface{}, interface{}, error) {
 		expected := util.Proposal{Topic: "test1", Proposal: "Hello World"}
 		c.Append(expected)
@@ -84,6 +98,7 @@ type testReturn struct {
 }
 
 func TestAddSQLSyncableToCluster(t *testing.T) {
+	fmt.Println("TestAddSQLSyncableToCluster")
 	f := func(c *Cluster) (interface{}, interface{}, error) {
 		dat, err := ioutil.ReadFile("../syncable/simple.toml")
 		if err != nil {
