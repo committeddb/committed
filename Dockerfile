@@ -1,6 +1,12 @@
-FROM alpine
+FROM golang:1.12.7-alpine3.10
+RUN apk add --update git make gcc g++ bash
 
-WORKDIR /app
-ADD committed /app/
+ENV APPLICATION /go/committed
 
-ENTRYPOINT ["./committed"]
+RUN mkdir -p ${APPLICATION}
+ADD . ${APPLICATION}
+WORKDIR ${APPLICATION}
+
+RUN go build -o main .
+
+CMD ${APPLICATION}/main

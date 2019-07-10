@@ -1,0 +1,6 @@
+- name: Tests
+  type: parallel
+  steps:
+    -name: Unit & Integration
+      service: app
+      command: "go test ./..."
