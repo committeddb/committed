@@ -9,6 +9,7 @@ services:
 - docker
 
 script:
+- go get
 - go test ./...
 
 env:
