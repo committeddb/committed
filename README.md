@@ -1,6 +1,6 @@
 # Committed
 
-![alt text](https://travis-ci.org/philborlin/committed.svg?branch=master "Build Status")
+![Build Status](https://app.codeship.com/projects/28313820-8549-0137-dc4f-2289976f1a49/status?branch=master)
 
 Committed is a distributed commit log designed to store data long term in a log structure. Instead of the typical implementation where you are given simple read and write primitives and have to build, use adddons, or 3rd party software to aid in your read activites, Committed's two primitives are write and sync. The sync primitive is designed to move your data somewhere else. The purpose of this is to make it easy to transform or multiplex streams of data in a value added manner, or to move data into a system that has efficient querying (like a traditional SQL or NoSQL database). Committed even works with ephemeral data storage because it provides an efficient way to recreate the ephemeral storage if it fails (think Redis).
 
