@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/base64"
 	"encoding/json"
-	"log"
 	"net/http"
 
 	"github.com/philborlin/committed/db"
@@ -28,9 +27,9 @@ type clusterSyncableHandler struct {
 	c *db.Cluster
 }
 
+// ServeHTTP implements http.Handler
 func (c *clusterSyncableHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
-	log.Printf("Received: %s %s\n", r.Method, r.RequestURI)
 	if r.Method == "POST" {
 		n := newClusterSyncableRequest{}
 		util.Unmarshall(r, &n)

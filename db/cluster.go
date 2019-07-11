@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/gob"
+	"encoding/json"
 	"fmt"
 	"log"
 	"time"
@@ -111,6 +112,17 @@ func (c *Cluster) CreateTopic(name string) *Topic {
 
 	c.Topics[name] = t
 	return t
+}
+
+// CreateDatabase creates a database
+func (c *Cluster) CreateDatabase(name string, database types.Database) {
+	log.Printf("About to append database: %s...\n", name)
+	databaseJSON, _ := json.Marshal(database)
+	c.Append(util.Proposal{Topic: "database", Proposal: string(databaseJSON)})
+	database.Init()
+	log.Printf("...Appended database: %s\n", name)
+
+	c.Databases[name] = database
 }
 
 // CreateSyncable creates a Syncable, appends the original file to the raft, starts the syncable,

@@ -10,9 +10,8 @@ import (
 	"github.com/coreos/etcd/raft/raftpb"
 	"github.com/rakyll/statik/fs"
 
-	// This imports the static http files for the React App
 	"github.com/philborlin/committed/db"
-	_ "github.com/philborlin/committed/statik"
+	_ "github.com/philborlin/committed/statik" // This imports the static http files for the React App
 )
 
 func createMux(c *db.Cluster) http.Handler {
@@ -39,6 +38,7 @@ func newLoggingHandler(handler http.Handler) http.Handler {
 
 // ServeHTTP implements Handler
 func (h *loggingHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	log.Printf("Received: %s %s\n", r.Method, r.RequestURI)
 	fmt.Printf("%v -> %v", r.RemoteAddr, r.RequestURI)
 	h.handler.ServeHTTP(w, r)
 }

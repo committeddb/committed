@@ -55,7 +55,7 @@ func simpleConfig() sqlConfig {
 }
 
 func databases() map[string]types.Database {
-	sqlDB := types.NewSQLDB("foo", "ql", "memory://foo")
+	sqlDB := types.NewSQLDB("ql", "memory://foo")
 	err := sqlDB.Init()
 	if err != nil {
 		return nil

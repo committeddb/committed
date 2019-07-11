@@ -14,14 +14,13 @@ type Database interface {
 
 // SQLDB represents an sql query database
 type SQLDB struct {
-	Name             string
 	driver           string
 	connectionString string
 }
 
 // NewSQLDB creates a new SQLDB
-func NewSQLDB(name string, driver string, connectionString string) *SQLDB {
-	return &SQLDB{Name: name, driver: driver, connectionString: connectionString}
+func NewSQLDB(driver string, connectionString string) *SQLDB {
+	return &SQLDB{driver: driver, connectionString: connectionString}
 }
 
 // Init implements Database

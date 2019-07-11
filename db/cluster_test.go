@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/philborlin/committed/syncable"
+	"github.com/philborlin/committed/types"
 	"github.com/philborlin/committed/util"
 )
 
@@ -62,6 +63,20 @@ func TestCreateTopic(t *testing.T) {
 		expected := c.CreateTopic(topicName)
 		actual := c.Topics[topicName]
 		return expected, actual, nil
+	}
+
+	clusterTest(t, f)
+}
+
+func TestAddDatabase(t *testing.T) {
+	fmt.Println("TestAddDatabase")
+
+	f := func(c *Cluster) (interface{}, interface{}, error) {
+		name := "foo"
+		database := types.NewSQLDB("", "")
+		c.CreateDatabase(name, database)
+		actual := c.Databases[name]
+		return database, actual, nil
 	}
 
 	clusterTest(t, f)
