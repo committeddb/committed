@@ -12,7 +12,6 @@ import (
 	"github.com/cskr/pubsub"
 	"github.com/philborlin/committed/syncable"
 	"github.com/philborlin/committed/types"
-	"github.com/philborlin/committed/util"
 
 	"github.com/coreos/etcd/raft"
 	"github.com/coreos/etcd/raft/raftpb"
@@ -86,7 +85,7 @@ func (c *Cluster) Shutdown() (err error) {
 }
 
 // Append proposes an addition to the raft
-func (c *Cluster) Append(proposal util.Proposal) {
+func (c *Cluster) Append(proposal types.Proposal) {
 	// var buf bytes.Buffer
 	buf := bytes.NewBufferString("")
 	if err := gob.NewEncoder(buf).Encode(proposal); err != nil {
@@ -96,8 +95,8 @@ func (c *Cluster) Append(proposal util.Proposal) {
 	c.proposeC <- buf.String()
 }
 
-func decodeProposal(b []byte) (util.Proposal, error) {
-	p := &util.Proposal{}
+func decodeProposal(b []byte) (types.Proposal, error) {
+	p := &types.Proposal{}
 	err := gob.NewDecoder(bytes.NewReader(b)).Decode(p)
 	return *p, err
 }
@@ -107,7 +106,7 @@ func (c *Cluster) CreateTopic(name string) *Topic {
 	t := newTopic(name)
 
 	log.Printf("About to append topic: %s...\n", name)
-	c.Append(util.Proposal{Topic: "topic", Proposal: name})
+	c.Append(types.Proposal{Topic: "topic", Proposal: name})
 	log.Printf("...Appended topic: %s\n", name)
 
 	c.Topics[name] = t
@@ -119,7 +118,7 @@ func (c *Cluster) CreateDatabase(name string, database types.Database) error {
 	log.Printf("About to append database: %s...\n", name)
 	databaseJSON, _ := json.Marshal(database)
 	// TODO We need a protobuf with name, type, and databaseJSON
-	c.Append(util.Proposal{Topic: "database", Proposal: string(databaseJSON)})
+	c.Append(types.Proposal{Topic: "database", Proposal: string(databaseJSON)})
 	if err := database.Init(); err != nil {
 		return err
 	}
@@ -135,7 +134,7 @@ func (c *Cluster) CreateSyncable(name string, syncable syncable.Syncable) error 
 	log.Printf("About to append syncable: %s...\n", name)
 	syncableJSON, _ := json.Marshal(syncable)
 	// TODO We need a protobuf with name, type, and syncableJSON
-	c.Append(util.Proposal{Topic: "syncable", Proposal: string(syncableJSON)})
+	c.Append(types.Proposal{Topic: "syncable", Proposal: string(syncableJSON)})
 	if err := syncable.Init(); err != nil {
 		return err
 	}

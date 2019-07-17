@@ -5,7 +5,6 @@ import (
 	"net/http"
 
 	"github.com/philborlin/committed/db"
-	"github.com/philborlin/committed/util"
 )
 
 type newClusterTopicRequest struct {
@@ -31,7 +30,7 @@ func (c *clusterTopicHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	defer r.Body.Close()
 	if r.Method == "POST" {
 		n := newClusterTopicRequest{}
-		util.Unmarshall(r, &n)
+		Unmarshall(r, &n)
 		c.c.CreateTopic(n.Name)
 		w.Write(nil)
 	} else if r.Method == "GET" {

@@ -4,7 +4,7 @@ import (
 	"net/http"
 
 	"github.com/philborlin/committed/db"
-	"github.com/philborlin/committed/util"
+	"github.com/philborlin/committed/types"
 )
 
 type newClusterTopicPostRequest struct {
@@ -26,8 +26,8 @@ func (c *clusterPostHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	if r.Method == "POST" {
 		n := newClusterTopicPostRequest{}
-		util.Unmarshall(r, &n)
-		c.c.Append(util.Proposal{Topic: n.Topic, Proposal: n.Proposal})
+		Unmarshall(r, &n)
+		c.c.Append(types.Proposal{Topic: n.Topic, Proposal: n.Proposal})
 		w.Write(nil)
 	}
 }

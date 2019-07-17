@@ -3,8 +3,6 @@ package syncable
 import (
 	"bytes"
 	"io/ioutil"
-	"reflect"
-	"testing"
 
 	"github.com/philborlin/committed/types"
 	"github.com/spf13/viper"
@@ -42,59 +40,22 @@ var _ = Describe("Syncable Parser", func() {
 
 			Expect(actual).To(Equal(expected))
 		})
+
+		It("should parse with sql parser", func() {
+			var v = viper.New()
+			v.SetConfigType("toml")
+			v.ReadConfig(bytes.NewBuffer(data))
+
+			topicSyncable, err := sqlParser(v, dbs)
+			Expect(err).To(BeNil())
+
+			actual := topicSyncable.(*SQLSyncable).config
+			expected := simpleConfig()
+
+			Expect(actual).To(Equal(expected))
+		})
 	})
 })
-
-// func TestParseWithSQLToml(t *testing.T) {
-// 	dat, err := ioutil.ReadFile("./simple.toml")
-// 	if err != nil {
-// 		t.Fatalf("Failed with error %v", err)
-// 	}
-
-// 	_, parsed, err := Parse("toml", bytes.NewReader(dat), databases())
-// 	if err != nil {
-
-// 	}
-// 	fmt.Printf("%T\n", parsed)
-// 	wrapper := parsed.(*syncableWrapper)
-// 	sqlSyncable := wrapper.Syncable.(*SQLSyncable)
-
-// 	actual := sqlSyncable.config
-// 	expected := simpleConfig()
-
-// 	if !reflect.DeepEqual(actual, expected) {
-// 		t.Fatalf("Expected %v but was %v", expected, actual)
-// 	}
-// }
-
-func TestSQLParser(t *testing.T) {
-	dat, err := ioutil.ReadFile("./simple.toml")
-	if err != nil {
-		t.Fatalf("Failed with error %v", err)
-	}
-
-	var v = viper.New()
-
-	v.SetConfigType("toml")
-	v.ReadConfig(bytes.NewBuffer(dat))
-
-	dbs, err := databases()
-	if err != nil {
-		t.Fatalf("Failed with error %v", err)
-	}
-	topicSyncable, err := sqlParser(v, dbs)
-	if err != nil {
-		t.Fatalf("Failed with error %v", err)
-	}
-
-	actual := topicSyncable.(*SQLSyncable).config
-
-	expected := simpleConfig()
-
-	if !reflect.DeepEqual(actual, expected) {
-		t.Fatalf("Expected %v but was %v", expected, actual)
-	}
-}
 
 func simpleConfig() *sqlConfig {
 	m1 := sqlMapping{jsonPath: "$.Key", column: "pk", sqlType: "TEXT"}

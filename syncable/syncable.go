@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/gob"
 
-	"github.com/philborlin/committed/util"
+	"github.com/philborlin/committed/types"
 )
 
 // TopicSyncable is a Syncable that includes the topics it syncs on
@@ -59,8 +59,8 @@ func (s syncableWrapper) Close() error {
 	return s.Close()
 }
 
-func decode(byteSlice []byte) (util.Proposal, error) {
-	p := util.Proposal{}
+func decode(byteSlice []byte) (types.Proposal, error) {
+	p := types.Proposal{}
 	err := gob.NewDecoder(bytes.NewReader(byteSlice)).Decode(&p)
 	return p, err
 }

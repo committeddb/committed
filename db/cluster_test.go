@@ -15,7 +15,6 @@ import (
 
 	"github.com/philborlin/committed/syncable"
 	"github.com/philborlin/committed/types"
-	"github.com/philborlin/committed/util"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
@@ -89,7 +88,7 @@ func TestAddDatabase(t *testing.T) {
 func TestAppendToTopic(t *testing.T) {
 	fmt.Println("TestAppendToTopic")
 	f := func(c *Cluster) (interface{}, interface{}, error) {
-		expected := util.Proposal{Topic: "test1", Proposal: "Hello World"}
+		expected := types.Proposal{Topic: "test1", Proposal: "Hello World"}
 		c.Append(expected)
 		time.Sleep(2 * time.Second)
 
@@ -154,7 +153,7 @@ var _ = Describe("Cluster", func() {
 			Expect(err).To(BeNil())
 		})
 
-		It("should correctly add a Syncable to the cluster", func() {
+		It("should correctly add a Syncable", func() {
 			f := func(c *Cluster) (interface{}, interface{}, error) {
 				name, sync, err := syncable.Parse("toml", bytes.NewReader(data), c.Databases)
 				Expect(err).To(BeNil())
@@ -173,7 +172,7 @@ var _ = Describe("Cluster", func() {
 
 				execInTransaction(db, "CREATE TABLE foo (key string, two string);")
 
-				proposal := util.Proposal{Topic: "test1", Proposal: "{\"Key\": \"lock\", \"One\": \"two\"}"}
+				proposal := types.Proposal{Topic: "test1", Proposal: "{\"Key\": \"lock\", \"One\": \"two\"}"}
 				c.Append(proposal)
 
 				time.Sleep(2 * time.Second)
