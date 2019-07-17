@@ -34,50 +34,61 @@ The MVP has three things you can do:
 * Add a SQL syncable
 
 To Add a topic POST to http://server:port/cluster/topics with an HTTP body that looks like:  
-```{  
+```
+{  
 	"Name" : "test",  
-}  ```
+}
+```
 
 To Append to a topic POST to http://server:port/cluster/posts with an HTTP body that looks like:  
-```{  
+```
+{  
 	"Topic" : "test",  
 	"Proposal" : "My Data"  
-}  ```
+}
+```
 
 To add a database POST to http://server:port/cluster/databases with an HTTP body that looks like:
-```{  
-	[database]
-	name = "testdb"
-	type = "sql"
+```
+[database]
+name = "testdb"
+type = "sql"
 
-	[sql]
-	dialect = "mysql"
-	connectionString = "myConnectionString"
-}  ```
+[sql]
+dialect = "mysql"
+connectionString = "myConnectionString"
+```
 
 The Database is a TOML configuration file. Currently the only type supported is sql and the only dialect supported is mysql.
 
 To Add a syncable POST to http://server:port/cluster/syncables with an HTTP body that looks like:  
-```{  
-	[syncable]  
-	name = "test1"  
-	type = "sql"  
+```
+name="foo"
 
-	[sql]  
-	topic = "test"  
-	database = "testdb"  
-	table = "foo"  
+# Determines what the rest of the config will look like
+[db]
+type = "sql"
 
-	[[sql.mapping]]  
-	jsonPath = "$.Key"  
-	sqlType = "TEXT"
-	column = "key"  
+[sql]
+topic = "test1"
+db = "testdb"
+table = "foo"
+primaryKey = "pk"
 
-	[[sql.mapping]]  
-	jsonPath = "$.One"  
-	sqlType = "TEXT"
-	column = "two"  
-}  ```
+[[sql.indexes]]
+name = "firstIndex"
+index = "one"
+
+[[sql.mappings]]
+jsonPath = "$.Key"
+column = "pk"
+type = "TEXT"
+
+[[sql.mappings]]
+jsonPath = "$.One"
+column = "one"
+type = "TEXT"
+```
 
 The Syncable is a TOML configuration file.
 

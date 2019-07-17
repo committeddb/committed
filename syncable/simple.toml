@@ -1,12 +1,10 @@
-# Determines what the rest of the config will look like
 name="foo"
 
+# Determines what the rest of the config will look like
 [db]
 type = "sql"
 
 [sql]
-# driver = "ql"
-# connectionString = "memory://foo"
 topic = "test1"
 db = "testdb"
 table = "foo"
