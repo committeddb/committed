@@ -44,7 +44,9 @@ To Append to a topic POST to http://server:port/cluster/posts with an HTTP body 
 ```
 {  
 	"Topic" : "test1",  
-	"Proposal" : "My Data"  
+	"Proposal" : {
+		Key: "baz", One: "qux"
+	}
 }
 ```
 
@@ -63,11 +65,10 @@ The Database is a TOML configuration file. Currently the only type supported is 
 
 To Add a syncable POST to http://server:port/cluster/syncables with an HTTP body that looks like:  
 ```
+[syncable]
 name="foo"
-
 # Determines what the rest of the config will look like
-[db]
-type = "sql"
+dbType="sql"
 
 [sql]
 topic = "test1"

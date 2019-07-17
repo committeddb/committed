@@ -1,8 +1,7 @@
+[syncable]
 name="foo"
-
 # Determines what the rest of the config will look like
-[db]
-type = "sql"
+dbType="sql"
 
 [sql]
 topic = "test1"

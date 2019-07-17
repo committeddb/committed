@@ -19,8 +19,8 @@ func Parse(style string, reader io.Reader, dbs map[string]types.Database) (name 
 		return "", nil, err
 	}
 
-	name = v.GetString("name")
-	dbType := v.GetString("db.type")
+	name = v.GetString("syncable.name")
+	dbType := v.GetString("syncable.dbType")
 	switch dbType {
 	case "sql":
 		syncable, err := sqlParser(v, dbs)
