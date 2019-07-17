@@ -3,7 +3,8 @@ package types
 import (
 	"database/sql"
 
-	"github.com/cznic/ql"
+	_ "github.com/go-sql-driver/mysql"    // mysql driver
+	_ "github.com/proullon/ramsql/driver" // ramsql driver
 )
 
 // Database represents a query database
@@ -16,6 +17,7 @@ type Database interface {
 type SQLDB struct {
 	driver           string
 	connectionString string
+	DB               *sql.DB
 }
 
 // NewSQLDB creates a new SQLDB
@@ -25,9 +27,14 @@ func NewSQLDB(driver string, connectionString string) *SQLDB {
 
 // Init implements Database
 func (d *SQLDB) Init() error {
-	if d.driver == "ql" {
-		ql.RegisterDriver()
+	// TODO If the connection string is the same lets cache and return. Also let's check if it is active and allow
+	// successive calls to Init() to refresh closed db connections.
+	// Maybe, but what happens if the syncable closes and we try to clean up a shared database connection? Sounds bad...
+	db, err := sql.Open(d.driver, d.connectionString)
+	if err != nil {
+		return err
 	}
+	d.DB = db
 
 	return nil
 }

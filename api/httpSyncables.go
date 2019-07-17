@@ -1,21 +1,15 @@
 package api
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
 
 	"github.com/philborlin/committed/db"
-	"github.com/philborlin/committed/util"
+	"github.com/philborlin/committed/syncable"
 )
 
-type newClusterSyncableRequest struct {
-	Style    string
-	Syncable string
-}
-
 type clusterSyncableGetResponse struct {
-	Syncables []string
+	Syncables map[string]syncable.Syncable
 }
 
 // NewClusterSyncableHandler creates a new handler for Cluster Sycnables
@@ -31,22 +25,18 @@ type clusterSyncableHandler struct {
 func (c *clusterSyncableHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	if r.Method == "POST" {
-		n := newClusterSyncableRequest{}
-		util.Unmarshall(r, &n)
-		decoded, err := base64.StdEncoding.DecodeString(n.Syncable)
+		name, syncable, err := syncable.Parse("toml", r.Body, c.c.Databases)
 		if err != nil {
+			w.Write([]byte(err.Error()))
 			w.WriteHeader(500)
-		} else {
-			c.c.CreateSyncable(n.Style, string(decoded))
-			w.Write(nil)
+			return
 		}
+
+		c.c.CreateSyncable(name, syncable)
+		w.Write(nil)
 	} else if r.Method == "GET" {
-		keys := make([]string, 0, len(c.c.Syncables))
-		for _, key := range c.c.Syncables {
-			keys = append(keys, key)
-		}
 		w.Header().Set("Content-Type", "application/json")
-		response, _ := json.Marshal(clusterSyncableGetResponse{keys})
+		response, _ := json.Marshal(clusterSyncableGetResponse{c.c.Syncables})
 		w.Write(response)
 	}
 }

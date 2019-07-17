@@ -21,9 +21,10 @@ func createMux(c *db.Cluster) http.Handler {
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/cluster/topics", newLoggingHandler(NewClusterTopicHandler(c)))
+	mux.Handle("/cluster/databases", newLoggingHandler(NewClusterDatabaseHandler(c)))
 	mux.Handle("/cluster/posts", newLoggingHandler(NewClusterPostHandler(c)))
 	mux.Handle("/cluster/syncables", newLoggingHandler(NewClusterSyncableHandler(c)))
+	mux.Handle("/cluster/topics", newLoggingHandler(NewClusterTopicHandler(c)))
 	mux.Handle("/", http.FileServer(fs))
 	return mux
 }
@@ -44,12 +45,12 @@ func (h *loggingHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // HTTPAPI is a placeholder that allows us to shutdown the HTTP API
-type httpAPI struct {
+type HTTPAPI struct {
 	server *http.Server
 }
 
 // ServeAPI starts the committed API.
-func ServeAPI(c *db.Cluster, port int, confChangeC chan<- raftpb.ConfChange, errorC <-chan error) *httpAPI {
+func ServeAPI(c *db.Cluster, port int, confChangeC chan<- raftpb.ConfChange, errorC <-chan error) *HTTPAPI {
 	srv := http.Server{
 		Addr:    ":" + strconv.Itoa(port),
 		Handler: createMux(c),
@@ -65,10 +66,10 @@ func ServeAPI(c *db.Cluster, port int, confChangeC chan<- raftpb.ConfChange, err
 		log.Printf("HTTP API error: %v", err)
 	}
 
-	return &httpAPI{&srv}
+	return &HTTPAPI{&srv}
 }
 
 // Shutdown shuts the server down
-func (a *httpAPI) Shutdown() error {
+func (a *HTTPAPI) Shutdown() error {
 	return a.server.Shutdown(context.Background())
 }

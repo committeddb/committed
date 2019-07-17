@@ -8,32 +8,38 @@ import (
 	"log"
 	"strings"
 
+	"github.com/oliveagle/jsonpath"
 	"github.com/philborlin/committed/types"
 	"github.com/spf13/viper"
-
-	// The driver will be loaded through reflection
-	_ "github.com/lib/pq"
-
-	"github.com/oliveagle/jsonpath"
 )
+
+type index struct {
+	indexName   string
+	columnNames string // comma separated list of columns
+}
 
 type sqlMapping struct {
 	jsonPath string
-	table    string
 	column   string
+	sqlType  string
+	// TODO Add a concept of an optional mapping that doesn't error if it is missing
 }
 
 type sqlConfig struct {
-	sqlDB    string
-	topic    string
-	mappings []sqlMapping
+	sqlDB      string
+	topic      string
+	table      string
+	mappings   []sqlMapping
+	indexes    []index
+	primaryKey string // comma separated list of columns
 }
 
 // SQLSyncable struct
 type SQLSyncable struct {
-	config  sqlConfig
-	inserts []sqlInsert
-	DB      *sql.DB
+	config   *sqlConfig
+	insert   *sqlInsert
+	database *types.SQLDB
+	DB       *sql.DB
 }
 
 type sqlInsert struct {
@@ -41,77 +47,133 @@ type sqlInsert struct {
 	jsonPath []string
 }
 
-func sqlParser(v *viper.Viper, databases map[string]types.Database) TopicSyncable {
-	// driver := v.GetString("sql.driver")
-	// connectionString := v.GetString("sql.connectionString")
+func sqlParser(v *viper.Viper, databases map[string]types.Database) (TopicSyncable, error) {
+	topic := v.GetString("sql.topic")
 	sqlDB := v.GetString("sql.db")
-	topic := v.GetString("sql.topic.name")
+	table := v.GetString("sql.table")
+	primaryKey := v.GetString("sql.primaryKey")
 
 	var mappings []sqlMapping
-	for _, item := range v.Get("sql.topic.mapping").([]interface{}) {
+	for _, item := range v.Get("sql.mappings").([]interface{}) {
 		m := item.(map[string]interface{})
-		mapping := sqlMapping{m["jsonPath"].(string), m["table"].(string), m["column"].(string)}
+		mapping := sqlMapping{
+			jsonPath: m["jsonPath"].(string),
+			column:   m["column"].(string),
+			sqlType:  m["type"].(string),
+		}
 		mappings = append(mappings, mapping)
 	}
 
-	config := sqlConfig{sqlDB, topic, mappings}
+	var indexes []index
+	for _, item := range v.Get("sql.indexes").([]interface{}) {
+		m := item.(map[string]interface{})
+		i := index{
+			indexName:   m["name"].(string),
+			columnNames: m["index"].(string),
+		}
+		indexes = append(indexes, i)
+	}
+
+	config := &sqlConfig{
+		sqlDB:      sqlDB,
+		topic:      topic,
+		table:      table,
+		mappings:   mappings,
+		indexes:    indexes,
+		primaryKey: primaryKey,
+	}
 	return newSQLSyncable(config, databases)
 }
 
 // NewSQLSyncable creates a new syncable
-func newSQLSyncable(sqlConfig sqlConfig, databases map[string]types.Database) *SQLSyncable {
-	// if sqlConfig.driver == "ql" {
-	// 	ql.RegisterDriver()
-	// }
-
-	// db, err := sql.Open(sqlConfig.driver, sqlConfig.connectionString)
-
+func newSQLSyncable(sqlConfig *sqlConfig, databases map[string]types.Database) (*SQLSyncable, error) {
 	database := databases[sqlConfig.sqlDB]
 	if database == nil {
-		log.Fatal(fmt.Errorf("Database %s is not setup", sqlConfig.sqlDB))
+		return nil, fmt.Errorf("Database %s is not setup", sqlConfig.sqlDB)
 	}
 	if database.Type() != "sql" {
-		log.Fatal(fmt.Errorf("Database %s is not a sql database", sqlConfig.sqlDB))
+		return nil, fmt.Errorf("Database %s is not a sql database", sqlConfig.sqlDB)
 	}
 	sqlDB := database.(*types.SQLDB)
-	db, err := sqlDB.Open()
-	if err != nil {
-		log.Fatal(err)
-	}
 
-	inserts := unwrapMappings(db, sqlConfig.mappings)
-
-	return &SQLSyncable{sqlConfig, inserts, db}
+	return &SQLSyncable{config: sqlConfig, database: sqlDB}, nil
 }
 
-func unwrapMappings(db *sql.DB, mappings []sqlMapping) []sqlInsert {
-	var tables = make(map[string][]sqlMapping)
-
-	for _, item := range mappings {
-		if tables[item.table] == nil {
-			tables[item.table] = []sqlMapping{item}
-		} else {
-			tables[item.table] = append(tables[item.table], item)
-		}
+// Sync syncs implements Syncable
+func (s *SQLSyncable) Sync(ctx context.Context, bytes []byte) error {
+	var jsonData interface{}
+	json.Marshal(string(bytes))
+	err := json.Unmarshal(bytes, &jsonData)
+	if err != nil {
+		log.Printf("Error Unmarshalling json: %v", err)
+		return err
 	}
 
-	var sqlInserts []sqlInsert
-	for table, sqlMappings := range tables {
-		var jsonPaths []string
-		for _, item := range sqlMappings {
-			jsonPaths = append(jsonPaths, item.jsonPath)
-		}
-
-		sql := createSQL(table, sqlMappings)
-
-		stmt, err := db.Prepare(sql)
+	var values []interface{}
+	for _, path := range s.insert.jsonPath {
+		res, err := jsonpath.JsonPathLookup(jsonData, path)
 		if err != nil {
-			log.Fatalf("Error Preparing sql [%s]: %v", sql, err)
+			log.Printf("Error while parsing [%v] in [%v]: %v\n", path, jsonData, err)
+			return err
 		}
-		sqlInserts = append(sqlInserts, sqlInsert{stmt, jsonPaths})
+		values = append(values, res)
 	}
 
-	return sqlInserts
+	tx, err := s.DB.BeginTx(context.Background(), &sql.TxOptions{Isolation: 0, ReadOnly: false})
+
+	if err != nil {
+		log.Printf("Error while creating transaction: %v", err)
+		return err
+	}
+	_, err = tx.Stmt(s.insert.stmt).ExecContext(ctx, values...)
+	if err != nil {
+		log.Printf("Error while executing statement: %v", err)
+		return err
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		log.Printf("Error while executing commit: %v", err)
+		return err
+	}
+
+	return nil
+}
+
+func createDDL(config *sqlConfig) string {
+	var ddl strings.Builder
+	ddl.WriteString(fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (", config.table))
+	for i, column := range config.mappings {
+		ddl.WriteString(fmt.Sprintf("%s %s", column.column, column.sqlType))
+		if i < len(config.mappings)-1 {
+			ddl.WriteString(",")
+		}
+	}
+	if config.primaryKey != "" {
+		ddl.WriteString(fmt.Sprintf(",PRIMARY KEY (%s)", config.primaryKey))
+	}
+	for _, index := range config.indexes {
+		ddl.WriteString(fmt.Sprintf(",INDEX %s (%s)", index.indexName, index.columnNames))
+	}
+	ddl.WriteString(");")
+
+	return ddl.String()
+}
+
+func unwrapMappings(db *sql.DB, table string, mappings []sqlMapping) (*sqlInsert, error) {
+	sql := createSQL(table, mappings)
+
+	stmt, err := db.Prepare(sql)
+	if err != nil {
+		log.Fatalf("Error Preparing sql [%s]: %v", sql, err)
+	}
+
+	var jsonPaths []string
+	for _, mapping := range mappings {
+		jsonPaths = append(jsonPaths, mapping.jsonPath)
+	}
+
+	return &sqlInsert{stmt, jsonPaths}, nil
 }
 
 func createSQL(table string, sqlMappings []sqlMapping) string {
@@ -138,49 +200,33 @@ func createSQL(table string, sqlMappings []sqlMapping) string {
 	return sql.String()
 }
 
-// Sync syncs
-func (s SQLSyncable) Sync(ctx context.Context, bytes []byte) error {
-	var jsonData interface{}
-	json.Marshal(string(bytes))
-	err := json.Unmarshal(bytes, &jsonData)
+// Init implements Syncable
+func (s *SQLSyncable) Init() error {
+	if err := s.database.Init(); err != nil {
+		return err
+	}
+	s.DB = s.database.DB
+
+	_, err := s.DB.Exec(createDDL(s.config))
 	if err != nil {
-		log.Printf("Error Unmarshalling json: %v", err)
 		return err
 	}
 
-	for _, insert := range s.inserts {
-		var values []interface{}
-
-		for _, path := range insert.jsonPath {
-			res, err := jsonpath.JsonPathLookup(jsonData, path)
-			if err != nil {
-				log.Printf("Error while parsing [%v] in [%v]: %v\n", path, jsonData, err)
-				res = ""
-			}
-			values = append(values, res)
-		}
-
-		tx, err := s.DB.BeginTx(context.Background(), &sql.TxOptions{Isolation: 0, ReadOnly: false})
-		defer tx.Commit()
-		if err != nil {
-			log.Printf("Error while creating transaction: %v", err)
-			return err
-		}
-		_, err = tx.Stmt(insert.stmt).ExecContext(ctx, values...)
-		if err != nil {
-			log.Printf("Error while executing statement: %v", err)
-			return err
-		}
+	insert, err := unwrapMappings(s.DB, s.config.table, s.config.mappings)
+	if err != nil {
+		return err
 	}
+	s.insert = insert
 
 	return nil
 }
 
-func (s SQLSyncable) topics() []string {
-	return []string{s.config.topic}
+// Close implements Syncable
+func (s *SQLSyncable) Close() error {
+	return s.DB.Close()
 }
 
-// Close closes the db
-func (s SQLSyncable) Close() error {
-	return s.DB.Close()
+// topics implements TopicSyncable
+func (s *SQLSyncable) topics() []string {
+	return []string{s.config.topic}
 }

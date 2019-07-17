@@ -5,15 +5,9 @@ import (
 	"net/http"
 
 	"github.com/philborlin/committed/db"
+	"github.com/philborlin/committed/syncable"
 	"github.com/philborlin/committed/types"
-	"github.com/philborlin/committed/util"
 )
-
-type newClusterDatabaseRequest struct {
-	Name string
-	Type string
-	JSON string
-}
 
 type clusterDatabasesGetResponse struct {
 	Databases map[string]types.Database
@@ -32,17 +26,14 @@ type clusterDatabaseHandler struct {
 func (c *clusterDatabaseHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	if r.Method == "POST" {
-		n := newClusterDatabaseRequest{}
-		util.Unmarshall(r, &n)
-
-		if n.Type == "SQL" {
-			database := &types.SQLDB{}
-			if err := json.Unmarshal([]byte(n.JSON), database); err != nil {
-				http.Error(w, "", 500)
-			}
-			c.c.CreateDatabase(n.Name, database)
+		name, database, err := syncable.ParseDatabase("toml", r.Body)
+		if err != nil {
+			w.Write([]byte(err.Error()))
+			w.WriteHeader(500)
+			return
 		}
 
+		c.c.CreateDatabase(name, database)
 		w.Write(nil)
 	} else if r.Method == "GET" {
 		w.Header().Set("Content-Type", "application/json")

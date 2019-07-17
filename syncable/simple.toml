@@ -1,21 +1,27 @@
 # Determines what the rest of the config will look like
+name="foo"
+
 [db]
 type = "sql"
 
 [sql]
 # driver = "ql"
 # connectionString = "memory://foo"
+topic = "test1"
 db = "testdb"
+table = "foo"
+primaryKey = "pk"
 
-[sql.topic]
-name = "test1"
+[[sql.indexes]]
+name = "firstIndex"
+index = "one"
 
-[[sql.topic.mapping]]
+[[sql.mappings]]
 jsonPath = "$.Key"
-table = "foo"
-column = "key"
+column = "pk"
+type = "TEXT"
 
-[[sql.topic.mapping]]
+[[sql.mappings]]
 jsonPath = "$.One"
-table = "foo"
-column = "two"
+column = "one"
+type = "TEXT"

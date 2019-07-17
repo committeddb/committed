@@ -1,6 +1,7 @@
 package db
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -15,6 +16,9 @@ import (
 	"github.com/philborlin/committed/syncable"
 	"github.com/philborlin/committed/types"
 	"github.com/philborlin/committed/util"
+
+	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/gomega"
 )
 
 func clusterTest(t *testing.T, f func(*Cluster) (expected interface{}, actual interface{}, err error)) {
@@ -112,56 +116,134 @@ type testReturn struct {
 	One string
 }
 
-func TestAddSQLSyncableToCluster(t *testing.T) {
-	fmt.Println("TestAddSQLSyncableToCluster")
-	f := func(c *Cluster) (interface{}, interface{}, error) {
-		dat, err := ioutil.ReadFile("../syncable/simple.toml")
-		if err != nil {
-			return nil, nil, err
-		}
+var _ = Describe("Cluster", func() {
+	clusterTest := func(f func(*Cluster) (expected interface{}, actual interface{}, err error)) {
+		c := NewCluster([]string{"http://127.0.0.1:12379"}, 1, false)
 
-		s := c.CreateSyncable("toml", string(dat))
+		time.AfterFunc(2*time.Second, func() {
+			log.Printf("Starting test function")
+			after := func(c *Cluster) {
+				err := c.Shutdown()
+				Expect(err).To(BeNil())
+				file := fmt.Sprintf("raft-%d", 1)
+				err = os.RemoveAll(file)
+				Expect(err).To(BeNil())
+				file = fmt.Sprintf("raft-%d-snap", 1)
+				err = os.RemoveAll(file)
+				Expect(err).To(BeNil())
+			}
 
-		time.Sleep(2 * time.Second)
+			expected, actual, err := f(c)
+			after(c)
 
-		e1 := reflect.ValueOf(s).Elem()
-		sqlSyncable := e1.FieldByName("Syncable").Interface().(*syncable.SQLSyncable)
-		e2 := reflect.ValueOf(sqlSyncable).Elem()
-		db := e2.FieldByName("DB").Interface().(*sql.DB)
-		defer db.Close()
+			Expect(err).To(BeNil())
+			Expect(expected).To(Equal(actual))
+		})
 
-		execInTransaction(db, "CREATE TABLE foo (key string, two string);", t)
-
-		proposal := util.Proposal{Topic: "test1", Proposal: "{\"Key\": \"lock\", \"One\": \"two\"}"}
-		c.Append(proposal)
-
-		time.Sleep(2 * time.Second)
-
-		expected := testReturn{Key: "lock", One: "two"}
-		var actual testReturn
-		err = SelectOneRowFromDB(db, "SELECT * FROM foo", &actual.Key, &actual.One)
-
-		return expected, actual, err
+		go c.Start()
 	}
 
-	clusterTest(t, f)
-}
+	Describe("Cluster", func() {
+		var (
+			data []byte
+			err  error
+		)
 
-func execInTransaction(db *sql.DB, sqlString string, t *testing.T) {
+		JustBeforeEach(func() {
+			data, err = ioutil.ReadFile("../syncable/simple.toml")
+			Expect(err).To(BeNil())
+		})
+
+		It("should correctly add a Syncable to the cluster", func() {
+			f := func(c *Cluster) (interface{}, interface{}, error) {
+				name, sync, err := syncable.Parse("toml", bytes.NewReader(data), c.Databases)
+				Expect(err).To(BeNil())
+
+				err = c.CreateSyncable(name, sync)
+				Expect(err).To(BeNil())
+
+				time.Sleep(2 * time.Second)
+
+				sqlSyncable, ok := sync.(*syncable.SQLSyncable)
+				Expect(ok).To(BeTrue())
+
+				e2 := reflect.ValueOf(sqlSyncable).Elem()
+				db := e2.FieldByName("DB").Interface().(*sql.DB)
+				defer db.Close()
+
+				execInTransaction(db, "CREATE TABLE foo (key string, two string);")
+
+				proposal := util.Proposal{Topic: "test1", Proposal: "{\"Key\": \"lock\", \"One\": \"two\"}"}
+				c.Append(proposal)
+
+				time.Sleep(2 * time.Second)
+
+				expected := testReturn{Key: "lock", One: "two"}
+				var actual testReturn
+				err = SelectOneRowFromDB(db, "SELECT * FROM foo", &actual.Key, &actual.One)
+
+				return expected, actual, err
+			}
+
+			clusterTest(f)
+		})
+	})
+})
+
+// func TestAddSQLSyncableToCluster(t *testing.T) {
+// 	fmt.Println("TestAddSQLSyncableToCluster")
+// 	f := func(c *Cluster) (interface{}, interface{}, error) {
+// 		dat, err := ioutil.ReadFile("../syncable/simple.toml")
+// 		if err != nil {
+// 			return nil, nil, err
+// 		}
+
+// 		name, syncable, err := syncable.Parse("toml", bytes.NewReader(dat), c.Databases)
+// 		if err != nil {
+// 			return nil, nil, err
+// 		}
+
+// 		err = c.CreateSyncable(name, syncable)
+// 		if err != nil {
+// 			return nil, nil, err
+// 		}
+
+// 		time.Sleep(2 * time.Second)
+
+// 		sqlSyncable, ok := syncable.(*syncable.SQLSyncable)
+// 		if !ok {
+// 			return nil, nil, err
+// 		}
+// 		e2 := reflect.ValueOf(sqlSyncable).Elem()
+// 		db := e2.FieldByName("DB").Interface().(*sql.DB)
+// 		defer db.Close()
+
+// 		execInTransaction(db, "CREATE TABLE foo (key string, two string);", t)
+
+// 		proposal := util.Proposal{Topic: "test1", Proposal: "{\"Key\": \"lock\", \"One\": \"two\"}"}
+// 		c.Append(proposal)
+
+// 		time.Sleep(2 * time.Second)
+
+// 		expected := testReturn{Key: "lock", One: "two"}
+// 		var actual testReturn
+// 		err = SelectOneRowFromDB(db, "SELECT * FROM foo", &actual.Key, &actual.One)
+
+// 		return expected, actual, err
+// 	}
+
+// 	clusterTest(t, f)
+// }
+
+func execInTransaction(db *sql.DB, sqlString string) {
 	tx, err := db.BeginTx(context.Background(), &sql.TxOptions{Isolation: 0, ReadOnly: false})
-	if err != nil {
-		t.Fatalf("Failed to Begin Transaction: %v", err)
-	}
+	Expect(err).To(BeNil())
 
 	_, err = tx.ExecContext(context.Background(), sqlString)
-	if err != nil {
-		t.Fatalf("Failed to create table foo: %v", err)
-	}
+	Expect(err).To(BeNil())
 
 	err = tx.Commit()
-	if err != nil {
-		t.Fatalf("Failed to commit transaction: %v", err)
-	}
+	Expect(err).To(BeNil())
 }
 
 func SelectOneRowFromDB(db *sql.DB, table string, dest ...interface{}) error {

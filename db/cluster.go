@@ -24,7 +24,7 @@ type Cluster struct {
 	id        int
 	Databases map[string]types.Database
 	Topics    map[string]*Topic
-	Syncables []string
+	Syncables map[string]syncable.Syncable
 	nodes     []string
 	proposeC  chan<- string
 	syncp     *pubsub.PubSub
@@ -115,31 +115,36 @@ func (c *Cluster) CreateTopic(name string) *Topic {
 }
 
 // CreateDatabase creates a database
-func (c *Cluster) CreateDatabase(name string, database types.Database) {
+func (c *Cluster) CreateDatabase(name string, database types.Database) error {
 	log.Printf("About to append database: %s...\n", name)
 	databaseJSON, _ := json.Marshal(database)
+	// TODO We need a protobuf with name, type, and databaseJSON
 	c.Append(util.Proposal{Topic: "database", Proposal: string(databaseJSON)})
-	database.Init()
+	if err := database.Init(); err != nil {
+		return err
+	}
 	log.Printf("...Appended database: %s\n", name)
 
 	c.Databases[name] = database
+	return nil
 }
 
 // CreateSyncable creates a Syncable, appends the original file to the raft, starts the syncable,
 // and returns it if successful
-func (c *Cluster) CreateSyncable(style string, syncableFile string) syncable.Syncable {
-	s, err := syncable.Parse(style, []byte(syncableFile), c.Databases)
-	if err != nil {
-		log.Printf("Failed to create syncable: %v", err)
-		return nil
+func (c *Cluster) CreateSyncable(name string, syncable syncable.Syncable) error {
+	log.Printf("About to append syncable: %s...\n", name)
+	syncableJSON, _ := json.Marshal(syncable)
+	// TODO We need a protobuf with name, type, and syncableJSON
+	c.Append(util.Proposal{Topic: "syncable", Proposal: string(syncableJSON)})
+	if err := syncable.Init(); err != nil {
+		return err
 	}
+	log.Printf("...Appended syncable: %s\n", name)
 
-	c.Append(util.Proposal{Topic: "syncable", Proposal: syncableFile})
-	go c.sync(context.Background(), s)
+	c.Syncables[name] = syncable
+	go c.sync(context.Background(), syncable)
 
-	c.Syncables = append(c.Syncables, syncableFile)
-
-	return s
+	return nil
 }
 
 func size(ctx context.Context, storage *raft.MemoryStorage) uint64 {

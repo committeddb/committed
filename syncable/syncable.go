@@ -16,6 +16,7 @@ type TopicSyncable interface {
 
 // Syncable represents a synchable concept
 type Syncable interface {
+	Init() error
 	Sync(ctx context.Context, bytes []byte) error
 	Close() error
 }
@@ -38,6 +39,12 @@ func (s syncableWrapper) containsTopic(t string) bool {
 	return ok
 }
 
+// Init implements Syncable
+func (s syncableWrapper) Init() error {
+	return nil
+}
+
+// Sync implements Syncable
 func (s syncableWrapper) Sync(ctx context.Context, byteSlice []byte) error {
 	p, err := decode(byteSlice)
 	if err == nil && s.containsTopic(p.Topic) {
@@ -47,6 +54,7 @@ func (s syncableWrapper) Sync(ctx context.Context, byteSlice []byte) error {
 	return err
 }
 
+// Close implements Syncable
 func (s syncableWrapper) Close() error {
 	return s.Close()
 }
