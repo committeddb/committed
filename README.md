@@ -36,14 +36,14 @@ The MVP has three things you can do:
 To Add a topic POST to http://server:port/cluster/topics with an HTTP body that looks like:  
 ```
 {  
-	"Name" : "test",  
+	"Name" : "test1",  
 }
 ```
 
 To Append to a topic POST to http://server:port/cluster/posts with an HTTP body that looks like:  
 ```
 {  
-	"Topic" : "test",  
+	"Topic" : "test1",  
 	"Proposal" : "My Data"  
 }
 ```
