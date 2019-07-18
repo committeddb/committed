@@ -95,8 +95,6 @@ The Syncable is a TOML configuration file.
 
 The workflow would look like: Add a topic, Append some proposals, Add a database, Add a syncable, look at your SQL database and see the proposals get applied to the DB, Add some more proposals and then read the database and do something useful.
 
-Lastly there is a web UI that can be accessed by hitting the root of the server. For instance if you are running on localhost port 12380 you can point a web browser at http://localhost:12380/ to see the UI. The UI purposefully is read only. To interact with the server please use the web API described above.
-
 ## Road Map
 
 Next up is version 0.3.
