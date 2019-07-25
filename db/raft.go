@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -33,7 +34,6 @@ import (
 	"github.com/coreos/etcd/snap"
 	"github.com/coreos/etcd/wal"
 	"github.com/coreos/etcd/wal/walpb"
-	"github.com/cskr/pubsub"
 )
 
 // A key-value stream backed by raft
@@ -57,7 +57,6 @@ type raftNode struct {
 
 	// raft backing for the commit/error channel
 	node        raft.Node
-	syncp       *pubsub.PubSub
 	raftStorage *raft.MemoryStorage
 	wal         *wal.WAL
 
@@ -73,14 +72,13 @@ type raftNode struct {
 
 var defaultSnapCount uint64 = 10000
 
-// newRaftNode initiates a raft instance and returns a committed log entry
+// NewRaftNode initiates a raft instance and returns a committed log entry
 // channel and error channel. Proposals for log updates are sent over the
 // provided the proposal channel. All log entries are replayed over the
 // commit channel, followed by a nil message (to indicate the channel is
 // current), then new log entries. To shutdown, close proposeC and read errorC.
-func newRaftNode(id int, peers []string, join bool, getSnapshot func() ([]byte, error),
-	proposeC <-chan string, confChangeC <-chan raftpb.ConfChange,
-	syncp *pubsub.PubSub) (<-chan *string, <-chan error, <-chan *snap.Snapshotter, *raft.MemoryStorage) {
+func NewRaftNode(id int, peers []string, join bool, dataDir string, getSnapshot func() ([]byte, error), proposeC <-chan string,
+	confChangeC <-chan raftpb.ConfChange) (<-chan *string, <-chan error, <-chan *snap.Snapshotter) {
 
 	commitC := make(chan *string)
 	errorC := make(chan error)
@@ -93,10 +91,9 @@ func newRaftNode(id int, peers []string, join bool, getSnapshot func() ([]byte, 
 		id:          id,
 		peers:       peers,
 		join:        join,
-		waldir:      fmt.Sprintf("raft-%d", id),
-		snapdir:     fmt.Sprintf("raft-%d-snap", id),
+		waldir:      filepath.Join(dataDir, fmt.Sprintf("raft-%d", id)),
+		snapdir:     filepath.Join(dataDir, fmt.Sprintf("cluster-snap-%d", id)),
 		getSnapshot: getSnapshot,
-		syncp:       syncp,
 		snapCount:   defaultSnapCount,
 		stopc:       make(chan struct{}),
 		httpstopc:   make(chan struct{}),
@@ -105,9 +102,8 @@ func newRaftNode(id int, peers []string, join bool, getSnapshot func() ([]byte, 
 		snapshotterReady: make(chan *snap.Snapshotter, 1),
 		// rest of structure populated after WAL replay
 	}
-	rc.raftStorage = raft.NewMemoryStorage()
 	go rc.startRaft()
-	return commitC, errorC, rc.snapshotterReady, rc.raftStorage
+	return commitC, errorC, rc.snapshotterReady
 }
 
 func (rc *raftNode) saveSnap(snap raftpb.Snapshot) error {
@@ -235,7 +231,7 @@ func (rc *raftNode) replayWAL() *wal.WAL {
 	if err != nil {
 		log.Fatalf("raftexample: failed to read WAL (%v)", err)
 	}
-	// rc.raftStorage = raft.NewMemoryStorage()
+	rc.raftStorage = raft.NewMemoryStorage()
 	if snapshot != nil {
 		rc.raftStorage.ApplySnapshot(*snapshot)
 	}
@@ -321,7 +317,6 @@ func (rc *raftNode) stop() {
 	close(rc.commitC)
 	close(rc.errorC)
 	rc.node.Stop()
-	rc.wal.Close()
 }
 
 func (rc *raftNode) stopHTTP() {
@@ -396,14 +391,11 @@ func (rc *raftNode) serveChannels() {
 
 	// send proposals over raft
 	go func() {
-		// log.Printf("[%d] Serving Raft", rc.id)
-		var confChangeCount uint64
+		var confChangeCount uint64 = 0
 
 		for rc.proposeC != nil && rc.confChangeC != nil {
-			// log.Printf("[%d] Selecting Raft", rc.id)
 			select {
 			case prop, ok := <-rc.proposeC:
-				// log.Printf("[%d] Received proposeC %s", rc.id, prop)
 				if !ok {
 					rc.proposeC = nil
 				} else {
@@ -412,11 +404,10 @@ func (rc *raftNode) serveChannels() {
 				}
 
 			case cc, ok := <-rc.confChangeC:
-				log.Printf("[%d] Received confChangeC %v", rc.id, cc)
 				if !ok {
 					rc.confChangeC = nil
 				} else {
-					confChangeCount++
+					confChangeCount += 1
 					cc.ID = confChangeCount
 					rc.node.ProposeConfChange(context.TODO(), cc)
 				}
@@ -441,20 +432,6 @@ func (rc *raftNode) serveChannels() {
 				rc.publishSnapshot(rd.Snapshot)
 			}
 			rc.raftStorage.Append(rd.Entries)
-
-			if rc.transport.LeaderStats.Leader == strconv.Itoa(rc.id) {
-				for _, e := range rd.Entries {
-					if e.Type == raftpb.EntryNormal && len(e.Data) != 0 {
-						go func() {
-							// The raftexample_test will fail without this nil check
-							if rc.syncp != nil {
-								rc.syncp.Pub(e, "StoredData")
-							}
-						}()
-					}
-				}
-			}
-
 			rc.transport.Send(rd.Messages)
 			if ok := rc.publishEntries(rc.entriesToApply(rd.CommittedEntries)); !ok {
 				rc.stop()

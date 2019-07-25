@@ -31,11 +31,16 @@ func (c *clusterTopicHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	if r.Method == "POST" {
 		n := newClusterTopicRequest{}
 		Unmarshall(r, &n)
-		c.c.CreateTopic(n.Name)
+		_, err := c.c.CreateTopic(n.Name)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(err.Error()))
+			return
+		}
 		w.Write(nil)
 	} else if r.Method == "GET" {
-		keys := make([]string, 0, len(c.c.Topics))
-		for key := range c.c.Topics {
+		keys := make([]string, 0, len(c.c.Data.Topics))
+		for key := range c.c.Data.Topics {
 			keys = append(keys, key)
 		}
 		w.Header().Set("Content-Type", "application/json")

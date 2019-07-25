@@ -2,10 +2,12 @@ package main
 
 import (
 	"flag"
+	"log"
+	"os"
 	"strings"
 
+	"github.com/coreos/etcd/raft/raftpb"
 	"github.com/philborlin/committed/api"
-	"github.com/philborlin/committed/syncable"
 
 	"github.com/philborlin/committed/db"
 )
@@ -17,13 +19,25 @@ func main() {
 	join := flag.Bool("join", false, "join an existing cluster")
 	flag.Parse()
 
+	proposeC := make(chan string)
+	defer close(proposeC)
+	confChangeC := make(chan raftpb.ConfChange)
+	defer close(confChangeC)
+
+	// raft provides a commit stream for the proposals from the http api
+	var c *db.Cluster
+	getSnapshot := func() ([]byte, error) { return c.GetSnapshot() }
+
 	nodes := strings.Split(*cluster, ",")
+	dataDir := "data"
+	if _, err := os.Stat(dataDir); err != nil {
+		if err := os.MkdirAll(dataDir, 0750); err != nil {
+			log.Fatal("cannot create data dir")
+		}
+	}
+	commitC, errorC, snapshotterReady := db.NewRaftNode(*id, nodes, *join, dataDir, getSnapshot, proposeC, confChangeC)
 
-	c := db.NewCluster(nodes, *id, *join)
-	confChangeC, errorC := c.Start()
+	c = db.NewCluster(<-snapshotterReady, proposeC, commitC, errorC)
 
-	// the key-value http handler will propose updates to raft
-	api.ServeAPI(c, *apiPort, confChangeC, errorC)
-
-	syncable.Parse("", nil, nil)
+	api.ServeAPI(c, *apiPort, errorC)
 }

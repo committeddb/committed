@@ -8,6 +8,7 @@ import (
 	"log"
 	"strings"
 
+	"github.com/coreos/etcd/raft/raftpb"
 	"github.com/oliveagle/jsonpath"
 	"github.com/philborlin/committed/types"
 	"github.com/spf13/viper"
@@ -100,7 +101,8 @@ func newSQLSyncable(sqlConfig *sqlConfig, databases map[string]types.Database) (
 }
 
 // Sync syncs implements Syncable
-func (s *SQLSyncable) Sync(ctx context.Context, bytes []byte) error {
+func (s *SQLSyncable) Sync(ctx context.Context, entry raftpb.Entry) error {
+	bytes := entry.Data
 	var jsonData interface{}
 	json.Marshal(string(bytes))
 	err := json.Unmarshal(bytes, &jsonData)
@@ -202,13 +204,17 @@ func createSQL(table string, sqlMappings []sqlMapping) string {
 
 // Init implements Syncable
 func (s *SQLSyncable) Init() error {
+	return s.init(false)
+}
+
+func (s *SQLSyncable) init(ignoreCreateDDLError bool) error {
 	if err := s.database.Init(); err != nil {
 		return err
 	}
 	s.DB = s.database.DB
 
 	_, err := s.DB.Exec(createDDL(s.config))
-	if err != nil {
+	if err != nil && !ignoreCreateDDLError {
 		return err
 	}
 

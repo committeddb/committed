@@ -7,8 +7,6 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/coreos/etcd/raft/raftpb"
-
 	"github.com/philborlin/committed/db"
 )
 
@@ -42,7 +40,7 @@ type HTTPAPI struct {
 }
 
 // ServeAPI starts the committed API.
-func ServeAPI(c *db.Cluster, port int, confChangeC chan<- raftpb.ConfChange, errorC <-chan error) *HTTPAPI {
+func ServeAPI(c *db.Cluster, port int, errorC <-chan error) *HTTPAPI {
 	srv := http.Server{
 		Addr:    ":" + strconv.Itoa(port),
 		Handler: createMux(c),
@@ -55,7 +53,7 @@ func ServeAPI(c *db.Cluster, port int, confChangeC chan<- raftpb.ConfChange, err
 
 	// exit when raft goes down
 	if err, ok := <-errorC; ok {
-		log.Printf("HTTP API error: %v", err)
+		log.Fatalf("Shutting down http server: Raft error: %v", err)
 	}
 
 	return &HTTPAPI{&srv}

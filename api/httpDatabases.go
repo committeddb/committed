@@ -37,7 +37,7 @@ func (c *clusterDatabaseHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		w.Write(nil)
 	} else if r.Method == "GET" {
 		w.Header().Set("Content-Type", "application/json")
-		response, _ := json.Marshal(clusterDatabasesGetResponse{c.c.Databases})
+		response, _ := json.Marshal(clusterDatabasesGetResponse{c.c.Data.Databases})
 		w.Write(response)
 	}
 }

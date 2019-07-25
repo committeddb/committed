@@ -26,6 +26,10 @@ var _ = Describe("Syncable Parser", func() {
 			Expect(err).To(BeNil())
 		})
 
+		JustAfterEach(func() {
+			dbs["testdb"].Close()
+		})
+
 		It("should parse with SQL toml", func() {
 			name, parsed, err := Parse("toml", bytes.NewReader(data), dbs)
 			Expect(err).To(BeNil())

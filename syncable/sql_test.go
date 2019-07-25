@@ -7,25 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"io/ioutil"
-	"testing"
 
+	"github.com/coreos/etcd/raft/raftpb"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	"github.com/philborlin/committed/types"
 )
-
-func TestCreateSQL(t *testing.T) {
-	var mappings []sqlMapping
-	mappings = append(mappings, sqlMapping{jsonPath: "", column: "bar", sqlType: "TEXT"})
-	mappings = append(mappings, sqlMapping{jsonPath: "", column: "baz", sqlType: "TEXT"})
-
-	expected := "INSERT INTO foo(bar,baz) VALUES ($1,$2)"
-	actual := createSQL("foo", mappings)
-
-	if expected != actual {
-		t.Fatalf("Expected %v but was %v", expected, actual)
-	}
-}
 
 type testReturn struct {
 	Key string
@@ -51,8 +38,20 @@ var _ = Describe("SQL Syncable", func() {
 		syncable = parsed.(*SQLSyncable)
 		// RamSql does not support indexes
 		syncable.config.indexes = nil
-		err = syncable.Init()
+		// RamSql does not support "if not exists" for tables
+		err = syncable.init(true)
 		Expect(err).To(BeNil())
+	})
+
+	It("should create sql", func() {
+		var mappings []sqlMapping
+		mappings = append(mappings, sqlMapping{jsonPath: "", column: "bar", sqlType: "TEXT"})
+		mappings = append(mappings, sqlMapping{jsonPath: "", column: "baz", sqlType: "TEXT"})
+
+		expected := "INSERT INTO foo(bar,baz) VALUES ($1,$2)"
+		actual := createSQL("foo", mappings)
+
+		Expect(expected).To(Equal(actual))
 	})
 
 	It("should put values into the db", func() {
@@ -65,7 +64,8 @@ var _ = Describe("SQL Syncable", func() {
 		bytes, err := json.Marshal(&data)
 		Expect(err).To(BeNil())
 
-		syncable.Sync(context.Background(), bytes)
+		entry := raftpb.Entry{Data: bytes}
+		syncable.Sync(context.Background(), entry)
 
 		var value testReturn
 		err = SelectOneRowFromDB(syncable.DB, "SELECT * FROM foo", &value.Key, &value.One)

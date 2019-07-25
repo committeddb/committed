@@ -11,6 +11,7 @@ import (
 type Database interface {
 	Init() error
 	Type() string
+	Close() error
 }
 
 // SQLDB represents an sql query database
@@ -42,6 +43,11 @@ func (d *SQLDB) Init() error {
 // Type implements Database
 func (d *SQLDB) Type() string {
 	return "sql"
+}
+
+// Close implements Database
+func (d *SQLDB) Close() error {
+	return d.DB.Close()
 }
 
 // Open returns a db connection

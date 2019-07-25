@@ -26,7 +26,7 @@ The term number doesn't matter and who got elected leader doesn't matter either.
 
 Once started committed will create two folders per node. The first node will be called raft-node# and raft-node#-snap. These folders contain all of your data. To clear the data in the server you can simply delete the folders.
 
-The MVP has three things you can do:
+The beta has four things you can do:
 
 * Add a topic
 * Append to a topic
@@ -36,7 +36,7 @@ The MVP has three things you can do:
 To Add a topic POST to http://server:port/cluster/topics with an HTTP body that looks like:  
 ```
 {  
-	"Name" : "test1",  
+	"Name" : "test1"  
 }
 ```
 
