@@ -37,7 +37,7 @@ func main() {
 	}
 	commitC, errorC, snapshotterReady := db.NewRaftNode(*id, nodes, *join, dataDir, getSnapshot, proposeC, confChangeC)
 
-	c = db.NewCluster(<-snapshotterReady, proposeC, commitC, errorC)
+	c = db.NewCluster(<-snapshotterReady, proposeC, commitC, errorC, dataDir)
 
 	api.ServeAPI(c, *apiPort, errorC)
 }

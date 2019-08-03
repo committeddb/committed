@@ -11,6 +11,11 @@ import (
 	"github.com/philborlin/committed/types"
 )
 
+// TODO A couple of things:
+//    1. We need the actual topic so we can read from the wal
+//    2. We need to store the last synced segment and index numbers of the wal
+//    3. We should take part in the global snapshot
+
 // TopicSyncable is a Syncable that includes the topics it syncs on
 type TopicSyncable interface {
 	Syncable

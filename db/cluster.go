@@ -4,22 +4,24 @@ import (
 	"bytes"
 	"encoding/gob"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"strings"
 	"sync"
 
 	"github.com/philborlin/committed/syncable"
+	"github.com/philborlin/committed/topic"
 	"github.com/philborlin/committed/types"
+	"github.com/pkg/errors"
 
 	"github.com/coreos/etcd/snap"
 )
 
 // Cluster represents a cluster for the committeddb and manages data for that cluster
 type Cluster struct {
-	proposeC    chan<- string // channel for proposing updates
+	dataDir     string
 	mu          sync.RWMutex
+	proposeC    chan<- string // channel for proposing updates
 	snapshotter *snap.Snapshotter
 	Data        *ClusterData
 }
@@ -28,20 +30,21 @@ type Cluster struct {
 type ClusterData struct {
 	Databases map[string]types.Database
 	Syncables map[string]syncable.Syncable
-	Topics    map[string]*Topic
+	Topics    map[string]*topic.Topic
 }
 
 // NewCluster creates a new Cluster
-func NewCluster(snapshotter *snap.Snapshotter, proposeC chan<- string, commitC <-chan *string, errorC <-chan error) *Cluster {
+func NewCluster(snapshotter *snap.Snapshotter, proposeC chan<- string, commitC <-chan *string, errorC <-chan error, dataDir string) *Cluster {
 	data := &ClusterData{
 		Databases: make(map[string]types.Database),
 		Syncables: make(map[string]syncable.Syncable),
-		Topics:    make(map[string]*Topic),
+		Topics:    make(map[string]*topic.Topic),
 	}
 
 	c := &Cluster{
-		snapshotter: snapshotter,
+		dataDir:     dataDir,
 		proposeC:    proposeC,
+		snapshotter: snapshotter,
 		Data:        data,
 	}
 
@@ -53,6 +56,8 @@ func NewCluster(snapshotter *snap.Snapshotter, proposeC chan<- string, commitC <
 	return c
 }
 
+// TODO Instead of just the data string we need the whole entry so we can get the index and term to
+// store in the topic wals
 func (c *Cluster) readCommits(commitC <-chan *string, errorC <-chan error) {
 	for data := range commitC {
 		if data == nil {
@@ -72,29 +77,38 @@ func (c *Cluster) readCommits(commitC <-chan *string, errorC <-chan error) {
 			continue
 		}
 
-		var proposal types.Proposal
+		var ap types.AcceptedProposal
 		dec := gob.NewDecoder(bytes.NewBufferString(*data))
-		if err := dec.Decode(&proposal); err != nil {
-			log.Fatalf("raftexample: could not decode message (%v)", err)
+		if err := dec.Decode(&ap); err != nil {
+			log.Printf("rcould not decode message (%v)", err)
 		}
 
-		c.route(proposal)
+		c.route(ap)
 	}
 	if err, ok := <-errorC; ok {
 		log.Fatal(err)
 	}
 }
 
-func (c *Cluster) route(entry types.Proposal) error {
-	switch entry.Topic {
+func (c *Cluster) route(ap types.AcceptedProposal) error {
+	switch ap.Topic {
 	case "database":
-		// TODO How do know the name?
+		// TODO How do know the name? - Should we send the toml instead of the object?
 	case "syncable":
-		// TODO How do know the name?
+		// TODO How do know the name? - Should we send the toml instead of the object?
 	case "topic":
 		c.mu.Lock()
-		c.Data.Topics[entry.Proposal] = &Topic{Name: entry.Proposal}
+		t, err := topic.New(ap.Data, c.dataDir)
+		if err != nil {
+			return errors.Wrapf(err, "Error creating new topic")
+		}
+		c.Data.Topics[ap.Data] = t
 		c.mu.Unlock()
+	default:
+		if t, ok := c.Data.Topics[ap.Topic]; ok != false {
+			t.Append(topic.Data{Index: ap.Index, Term: ap.Term, Data: ap.Data})
+		}
+		// TODO We may want to alert any synables listening to this topic so they can sync more data without polling.
 	}
 
 	return nil
@@ -116,29 +130,28 @@ func decodeProposal(b []byte) (types.Proposal, error) {
 }
 
 // CreateTopic appends a topic to the raft and returns a Topic object if successful
-func (c *Cluster) CreateTopic(name string) (*Topic, error) {
+func (c *Cluster) CreateTopic(name string) error {
 	if len(strings.TrimSpace(name)) == 0 {
-		return nil, errors.New("name is empty")
+		return fmt.Errorf("name is empty")
 	}
 
 	if name == "database" || name == "syncable" || name == "topic" {
-		return nil, fmt.Errorf("%s is a reserved name", name)
+		return fmt.Errorf("%s is a reserved name", name)
 	}
 
 	if _, ok := c.Data.Topics[name]; ok {
-		return nil, fmt.Errorf("topic %s already exists", name)
+		return fmt.Errorf("topic %s already exists", name)
 	}
-
-	t := newTopic(name)
 
 	log.Printf("About to append topic: %s...\n", name)
 	c.Propose(types.Proposal{Topic: "topic", Proposal: name})
 	log.Printf("...Appended topic: %s\n", name)
 
-	return t, nil
+	return nil
 }
 
 // CreateDatabase creates a database
+// This should be about validating the toml and then sending that to the raft instead of the database object
 func (c *Cluster) CreateDatabase(name string, database types.Database) error {
 	if _, ok := c.Data.Databases[name]; ok {
 		return fmt.Errorf("database %s already exists", name)
@@ -160,6 +173,7 @@ func (c *Cluster) CreateDatabase(name string, database types.Database) error {
 
 // CreateSyncable creates a Syncable, appends the original file to the raft, starts the syncable,
 // and returns it if successful
+// This should be about validating the toml and then sending that to the raft instead of the syncable object
 func (c *Cluster) CreateSyncable(name string, syncable syncable.Syncable) error {
 	if _, ok := c.Data.Syncables[name]; ok {
 		return fmt.Errorf("syncable %s already exists", name)
@@ -187,7 +201,6 @@ func (c *Cluster) GetSnapshot() ([]byte, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return json.Marshal(c.Data)
-	return nil, nil
 }
 
 // recoverFromSnapshot loads the latest data struct from the given snapshot

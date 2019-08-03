@@ -31,7 +31,7 @@ func (c *clusterTopicHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	if r.Method == "POST" {
 		n := newClusterTopicRequest{}
 		Unmarshall(r, &n)
-		_, err := c.c.CreateTopic(n.Name)
+		err := c.c.CreateTopic(n.Name)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			w.Write([]byte(err.Error()))

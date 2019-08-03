@@ -15,7 +15,9 @@
 package db
 
 import (
+	"bytes"
 	"context"
+	"encoding/gob"
 	"fmt"
 	"log"
 	"net/http"
@@ -24,6 +26,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"time"
+
+	ctypes "github.com/philborlin/committed/types"
 
 	"github.com/coreos/etcd/etcdserver/stats"
 	"github.com/coreos/etcd/pkg/fileutil"
@@ -137,6 +141,25 @@ func (rc *raftNode) entriesToApply(ents []raftpb.Entry) (nents []raftpb.Entry) {
 	return nents
 }
 
+func (rc *raftNode) createEncodedAcceptedProposal(ent raftpb.Entry) (string, bool) {
+	var p ctypes.Proposal
+	dec := gob.NewDecoder(bytes.NewBuffer(ent.Data))
+	if err := dec.Decode(&p); err != nil {
+		log.Printf("could not decode message (%v)", err)
+		return "", false
+	}
+
+	// TODO This is really silly, commitC should just send Accepted Proposals instead of strings
+	ap := &ctypes.AcceptedProposal{Topic: p.Topic, Data: p.Proposal, Index: ent.Index, Term: ent.Term}
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(ap); err != nil {
+		log.Printf("could not encode accepted proposal (%v)", err)
+		return "", false
+	}
+
+	return buf.String(), true
+}
+
 // publishEntries writes committed log entries to commit channel and returns
 // whether all entries could be published.
 func (rc *raftNode) publishEntries(ents []raftpb.Entry) bool {
@@ -147,6 +170,7 @@ func (rc *raftNode) publishEntries(ents []raftpb.Entry) bool {
 				// ignore empty messages
 				break
 			}
+
 			s := string(ents[i].Data)
 			select {
 			case rc.commitC <- &s:
