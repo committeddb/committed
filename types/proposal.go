@@ -8,7 +8,7 @@ import (
 // Proposal is an proposal to the raft system
 type Proposal struct {
 	Topic    string
-	Proposal string
+	Proposal []byte
 }
 
 // AcceptedProposal is a proposal accepted by the raft system
@@ -16,7 +16,7 @@ type AcceptedProposal struct {
 	Topic string
 	Index uint64
 	Term  uint64
-	Data  string
+	Data  []byte
 }
 
 // NewAcceptedProposal decodes an AcceptedProposal from a byte slice

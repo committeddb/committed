@@ -8,7 +8,6 @@ import (
 	"errors"
 	"io/ioutil"
 
-	"github.com/coreos/etcd/raft/raftpb"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	"github.com/philborlin/committed/types"
@@ -32,7 +31,7 @@ var _ = Describe("SQL Syncable", func() {
 		Expect(err).To(BeNil())
 		dbs, err = databases()
 		Expect(err).To(BeNil())
-		_, parsed, err := Parse("toml", bytes.NewReader(data), dbs)
+		_, parsed, err := ParseSyncable("toml", bytes.NewReader(data), dbs)
 		Expect(err).To(BeNil())
 
 		syncable = parsed.(*SQLSyncable)
@@ -64,7 +63,8 @@ var _ = Describe("SQL Syncable", func() {
 		bytes, err := json.Marshal(&data)
 		Expect(err).To(BeNil())
 
-		entry := raftpb.Entry{Data: bytes}
+		// entry := raftpb.Entry{Data: bytes}
+		entry := &types.AcceptedProposal{Data: bytes}
 		syncable.Sync(context.Background(), entry)
 
 		var value testReturn

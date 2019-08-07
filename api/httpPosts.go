@@ -9,7 +9,7 @@ import (
 
 type newClusterTopicPostRequest struct {
 	Topic    string
-	Proposal string
+	Proposal []byte
 }
 
 // NewClusterPostHandler creates a new handler for Cluster Topics

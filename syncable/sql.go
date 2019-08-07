@@ -8,7 +8,6 @@ import (
 	"log"
 	"strings"
 
-	"github.com/coreos/etcd/raft/raftpb"
 	"github.com/oliveagle/jsonpath"
 	"github.com/philborlin/committed/types"
 	"github.com/spf13/viper"
@@ -101,8 +100,8 @@ func newSQLSyncable(sqlConfig *sqlConfig, databases map[string]types.Database) (
 }
 
 // Sync syncs implements Syncable
-func (s *SQLSyncable) Sync(ctx context.Context, entry raftpb.Entry) error {
-	bytes := entry.Data
+func (s *SQLSyncable) Sync(ctx context.Context, entry *types.AcceptedProposal) error {
+	bytes := []byte(entry.Data)
 	var jsonData interface{}
 	json.Marshal(string(bytes))
 	err := json.Unmarshal(bytes, &jsonData)
@@ -203,7 +202,7 @@ func createSQL(table string, sqlMappings []sqlMapping) string {
 }
 
 // Init implements Syncable
-func (s *SQLSyncable) Init() error {
+func (s *SQLSyncable) Init(ctx context.Context) error {
 	return s.init(false)
 }
 

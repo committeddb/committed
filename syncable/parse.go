@@ -12,8 +12,8 @@ var parsers = map[string]func(*viper.Viper, map[string]types.Database) (TopicSyn
 	"sql": sqlParser,
 }
 
-// Parse turns a toml file into a Syncable
-func Parse(style string, reader io.Reader, dbs map[string]types.Database) (name string, syncable Syncable, err error) {
+// ParseSyncable turns a toml file into a Syncable
+func ParseSyncable(style string, reader io.Reader, dbs map[string]types.Database) (name string, syncable Syncable, err error) {
 	v, err := parseBytes(style, reader)
 	if err != nil {
 		return "", nil, err

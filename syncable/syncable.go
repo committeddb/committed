@@ -6,15 +6,12 @@ import (
 	"encoding/gob"
 	"fmt"
 
-	"github.com/coreos/etcd/raft/raftpb"
-	"github.com/coreos/etcd/snap"
+	"github.com/philborlin/committed/topic"
 	"github.com/philborlin/committed/types"
+	"github.com/pkg/errors"
 )
 
-// TODO A couple of things:
-//    1. We need the actual topic so we can read from the wal
-//    2. We need to store the last synced segment and index numbers of the wal
-//    3. We should take part in the global snapshot
+// TODO We need to store the index of the last synced accepted proposal in the global snapshot
 
 // TopicSyncable is a Syncable that includes the topics it syncs on
 type TopicSyncable interface {
@@ -24,82 +21,110 @@ type TopicSyncable interface {
 
 // Syncable represents a synchable concept
 type Syncable interface {
-	Init() error
-	Sync(ctx context.Context, entry raftpb.Entry) error
+	Init(ctx context.Context) error
+	Sync(ctx context.Context, entry *types.AcceptedProposal) error
 	Close() error
 }
 
-type syncableWrapper struct {
-	Syncable    TopicSyncable
-	topics      map[string]struct{}
-	snapshotter *snap.Snapshotter
+// Bridge manages the interactions between a topic and a syncable
+type Bridge struct {
+	Name      string
+	Syncable  Syncable
+	topics    map[string]*topic.Topic
+	lastIndex uint64
 }
 
-func newSyncableWrapper(name string, s TopicSyncable, snapshotDir string) *syncableWrapper {
-	var topics = make(map[string]struct{})
+// BridgeSnapshot is the snapshot struct
+type BridgeSnapshot struct {
+	LastIndex uint64
+}
+
+// NewBridge creates a wrapper that will
+func NewBridge(name string, s TopicSyncable, topics map[string]*topic.Topic) *Bridge {
+	// Create a map that only has entries for the topics we are listening to
+	var tmap = make(map[string]*topic.Topic)
 	for _, item := range s.topics() {
-		topics[item] = struct{}{}
+		tmap[item] = topics[item]
 	}
-	snapshotter := snap.New(snapshotDir + "/" + name)
-	return &syncableWrapper{Syncable: s, topics: topics, snapshotter: snapshotter}
+
+	return &Bridge{Name: name, Syncable: s, topics: tmap}
 }
 
-func (s *syncableWrapper) containsTopic(t string) bool {
-	_, ok := s.topics[t]
-	return ok
+// GetSnapshot implements Snapshotter
+func (b *Bridge) GetSnapshot() ([]byte, error) {
+	s := &BridgeSnapshot{LastIndex: b.lastIndex}
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(s); err != nil {
+		return nil, errors.Wrapf(err, "Could not encode snapshot %v", s)
+	}
+
+	return buf.Bytes(), nil
+}
+
+// ApplySnapshot implements Snapshotter
+func (b *Bridge) ApplySnapshot(snap []byte) error {
+	var s BridgeSnapshot
+	dec := gob.NewDecoder(bytes.NewBuffer(snap))
+	if err := dec.Decode(&s); err != nil {
+		return errors.Wrap(err, "Could not decode snapshot")
+	}
+
+	b.lastIndex = s.LastIndex
+
+	return nil
 }
 
 // Init implements Syncable
-func (s *syncableWrapper) Init() error {
-	return s.Syncable.Init()
-}
-
-// Sync implements Syncable
-// During Sync maintain a record of applied entry index and terms and save those in snapshots.
-// Maybe don't sync the data but just use this as a message that there is more data and that
-// we need to go and read more from the wal. This allows us to drop messages if we aren't caught
-// up with the wal (since we will pick them up in the wal), and prevents us from monitoring the
-// wal because we will have a notification when there is more data.
-
-// We will also want to keep track of an applied index so if a message gets delivered twice, we
-// don't apply it twice. We also need to watch out for go routines to make sure messages get
-// applied in order. Does that mean we need a buffer? Probably, and it needs to be user
-// configurable. This way we block new appends if we can't keep up while syncing. [Theory] The
-// larger the io cababilities of the system the larger the buffer can be.
-func (s *syncableWrapper) Sync(ctx context.Context, entry raftpb.Entry) error {
-	byteSlice := entry.Data
-	p, err := decode(byteSlice)
-	if err == nil && s.containsTopic(p.Topic) {
-		entry.Data = []byte(p.Proposal)
-		if err = s.Syncable.Sync(ctx, entry); err != nil {
-			return err
-		}
-
-		// Mandatory - we have to send this through the raft so that all nodes get the snapshot, not just the leader
-
-		// TODO Do we want to set a timer so we don't snapshot on ever sync, but maybe snapshot in x seconds?
-		if err = s.saveSnap(entry); err != nil {
-			// Just log, this is not a critical error
-			fmt.Printf("[Warning] Snapshot failed: %v", err)
-		}
+// To close the syncable send a message to the ctx.Done() channel
+// It is the caller's responsibility to listen to any errors on the errorC channel passed in
+func (b *Bridge) Init(ctx context.Context, errorC chan<- error) error {
+	if len(b.topics) == 0 {
+		return fmt.Errorf("[%s.bridge]No topics so there is nothing to sync", b.Name)
 	}
 
-	return err
-}
+	if len(b.topics) > 1 {
+		// There is going to be some serious syncronization work that needs to happen to support multiple
+		// topics. Deferring this until later.
+		return fmt.Errorf("[%s.bridge] We don't support more than one topic in a syncable yet", b.Name)
+	}
 
-func (s *syncableWrapper) saveSnap(entry raftpb.Entry) error {
-	metadata := raftpb.SnapshotMetadata{Index: entry.Index, Term: entry.Term}
-	snapshot := raftpb.Snapshot{Metadata: metadata}
-	return s.snapshotter.SaveSnap(snapshot)
-}
+	err := b.Syncable.Init(ctx)
+	if err != nil {
+		return errors.Wrapf(err, "[%s.bridge] Init of internal syncable failed", b.Name)
+	}
 
-// Close implements Syncable
-func (s *syncableWrapper) Close() error {
-	return s.Syncable.Close()
-}
+	for _, t := range b.topics {
+		reader, err := t.NewReader(0)
+		if err != nil {
+			return errors.Wrapf(err, "[%s.bridge] Could not create reader", b.Name)
+		}
 
-func decode(byteSlice []byte) (types.Proposal, error) {
-	p := types.Proposal{}
-	err := gob.NewDecoder(bytes.NewReader(byteSlice)).Decode(&p)
-	return p, err
+		go func(t *topic.Topic) {
+			for {
+				select {
+				case <-ctx.Done():
+					if ctx.Err() != nil {
+						errorC <- errors.Wrapf(err, "[%s.bridge] Context had an error", ctx.Err())
+					}
+					err := b.Syncable.Close()
+					if err != nil {
+						errorC <- errors.Wrapf(err, "[%s.bridge] Problem closing wrapped syncable", err)
+					}
+					return
+				default:
+					ap, err := reader.Next(ctx)
+					if err != nil {
+						errorC <- errors.Wrapf(err,
+							"[%s.bridge] Problem getting the next accepted proposal from topic %s",
+							err,
+							t.Name)
+					}
+					b.Syncable.Sync(ctx, ap)
+					b.lastIndex = ap.Index
+				}
+			}
+		}(t)
+	}
+
+	return nil
 }

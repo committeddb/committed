@@ -28,7 +28,7 @@ var _ = Describe("Topic", func() {
 	)
 
 	JustBeforeEach(func() {
-		fakeData = Data{Index: 0, Term: 0, Data: "baz"}
+		fakeData = Data{Index: 0, Term: 0, Data: []byte("baz")}
 		fakeWal = &typesfakes.FakeWAL{}
 		fakeWALFactory = &typesfakes.FakeWALFactory{}
 		walFactory = fakeWALFactory
@@ -44,7 +44,7 @@ var _ = Describe("Topic", func() {
 			topic, err := New(fakeName, fakeBaseDir)
 			Expect(err).To(BeNil())
 			Expect(topic.Name).To(Equal(fakeName))
-			Expect(topic.WalDir).To(Equal(fakeWalDir))
+			Expect(topic.walDir).To(Equal(fakeWalDir))
 			Expect(topic.wal).To(Equal(fakeWal))
 			Expect(fakeWALFactory.NewSizeCallCount()).To(Equal(1))
 		})
@@ -64,7 +64,7 @@ var _ = Describe("Topic", func() {
 			topic, err := Restore(fakeName, fakeWalDir)
 			Expect(err).To(BeNil())
 			Expect(topic.Name).To(Equal(fakeName))
-			Expect(topic.WalDir).To(Equal(fakeWalDir))
+			Expect(topic.walDir).To(Equal(fakeWalDir))
 			Expect(topic.wal).To(Equal(fakeWal))
 			Expect(fakeWALFactory.OpenCallCount()).To(Equal(1))
 		})
@@ -142,7 +142,7 @@ var _ = Describe("Topic", func() {
 
 		JustBeforeEach(func() {
 			m = make(map[int]uint64)
-			topic = &Topic{wal: fakeWal, FirstIndexInSegment: m}
+			topic = &Topic{wal: fakeWal, firstIndexInSegment: m}
 		})
 
 		It("should return a reader when successful", func() {
@@ -206,11 +206,11 @@ var _ = Describe("Topic", func() {
 			fakeWALFactory.NewLiveReaderReturns(fakeLiveReader)
 
 			m = make(map[int]uint64)
-			topic = &Topic{wal: fakeWal, FirstIndexInSegment: m}
+			topic = &Topic{wal: fakeWal, firstIndexInSegment: m}
 			reader, err = topic.NewReader(0)
 			Expect(err).To(BeNil())
 
-			ap1 = &types.AcceptedProposal{Topic: "foo", Index: 2, Term: 2, Data: "bar"}
+			ap1 = &types.AcceptedProposal{Topic: "foo", Index: 2, Term: 2, Data: []byte("bar")}
 			ap1Bytes, err = ap1.Encode()
 			Expect(err).To(BeNil())
 		})
@@ -252,7 +252,7 @@ var _ = Describe("Topic", func() {
 			Expect(fakeLiveReader.NextCallCount()).To(Equal(2))
 			Expect(fakeLiveReader.ErrCallCount()).To(Equal(1))
 			Expect(fakeWal.SegmentsCallCount()).To(Equal(3))
-			Expect(topic.FirstIndexInSegment[1]).To(Equal(ap1.Index))
+			Expect(topic.firstIndexInSegment[1]).To(Equal(ap1.Index))
 		})
 
 		It("should return error if Segments within next() returns an error", func() {

@@ -2,6 +2,7 @@ package db
 
 import (
 	"bytes"
+	"context"
 	"encoding/gob"
 	"encoding/json"
 	"fmt"
@@ -80,7 +81,7 @@ func (c *Cluster) readCommits(commitC <-chan *string, errorC <-chan error) {
 		var ap types.AcceptedProposal
 		dec := gob.NewDecoder(bytes.NewBufferString(*data))
 		if err := dec.Decode(&ap); err != nil {
-			log.Printf("rcould not decode message (%v)", err)
+			log.Printf("could not decode message (%v)", err)
 		}
 
 		c.route(ap)
@@ -97,12 +98,13 @@ func (c *Cluster) route(ap types.AcceptedProposal) error {
 	case "syncable":
 		// TODO How do know the name? - Should we send the toml instead of the object?
 	case "topic":
-		c.mu.Lock()
-		t, err := topic.New(ap.Data, c.dataDir)
+		name := string(ap.Data)
+		t, err := topic.New(name, c.dataDir)
 		if err != nil {
 			return errors.Wrapf(err, "Error creating new topic")
 		}
-		c.Data.Topics[ap.Data] = t
+		c.mu.Lock()
+		c.Data.Topics[name] = t
 		c.mu.Unlock()
 	default:
 		if t, ok := c.Data.Topics[ap.Topic]; ok != false {
@@ -144,7 +146,7 @@ func (c *Cluster) CreateTopic(name string) error {
 	}
 
 	log.Printf("About to append topic: %s...\n", name)
-	c.Propose(types.Proposal{Topic: "topic", Proposal: name})
+	c.Propose(types.Proposal{Topic: "topic", Proposal: []byte(name)})
 	log.Printf("...Appended topic: %s\n", name)
 
 	return nil
@@ -160,7 +162,7 @@ func (c *Cluster) CreateDatabase(name string, database types.Database) error {
 	log.Printf("About to append database: %s...\n", name)
 	databaseJSON, _ := json.Marshal(database)
 	// TODO We need a protobuf with name, type, and databaseJSON
-	c.Propose(types.Proposal{Topic: "database", Proposal: string(databaseJSON)})
+	c.Propose(types.Proposal{Topic: "database", Proposal: databaseJSON})
 	if err := database.Init(); err != nil {
 		return err
 	}
@@ -182,8 +184,8 @@ func (c *Cluster) CreateSyncable(name string, syncable syncable.Syncable) error 
 	log.Printf("About to append syncable: %s...\n", name)
 	syncableJSON, _ := json.Marshal(syncable)
 	// TODO We need a protobuf with name, type, and syncableJSON
-	c.Propose(types.Proposal{Topic: "syncable", Proposal: string(syncableJSON)})
-	if err := syncable.Init(); err != nil {
+	c.Propose(types.Proposal{Topic: "syncable", Proposal: syncableJSON})
+	if err := syncable.Init(context.Background()); err != nil {
 		return err
 	}
 	log.Printf("...Appended syncable: %s\n", name)

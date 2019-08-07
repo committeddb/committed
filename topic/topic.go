@@ -19,7 +19,7 @@ var walFactory types.WALFactory = &types.TSDBWALFactory{}
 // Topic represents a topic in the system
 type Topic struct {
 	Name         string
-	WalDir       string
+	walDir       string
 	wal          types.WAL
 	reg          prometheus.Registerer
 	readerAlerts []*topicReaderAlert
@@ -27,14 +27,14 @@ type Topic struct {
 	// Provides a lookup table that given a segment, returns the first raft index in that segment
 	// This is used to find which segment to start with when NewReader is given an index
 	// This needs to be in the snapshot
-	FirstIndexInSegment map[int]uint64
+	firstIndexInSegment map[int]uint64
 }
 
 // Data represets the data that will be stored in the topic wal
 type Data struct {
 	Index uint64
 	Term  uint64
-	Data  string
+	Data  []byte
 }
 
 // New creates a new topic
@@ -45,7 +45,7 @@ func New(name string, baseDir string) (*Topic, error) {
 	if err != nil {
 		return nil, errors.Wrapf(err, "Could not create wal for topic %s", name)
 	}
-	return &Topic{Name: name, WalDir: walDir, wal: w}, nil
+	return &Topic{Name: name, walDir: walDir, wal: w}, nil
 }
 
 // Restore creates a topic with an existing wal
@@ -54,7 +54,7 @@ func Restore(name string, walDir string) (*Topic, error) {
 	if err != nil {
 		return nil, errors.Wrapf(err, "Could no open wal for topic %s", name)
 	}
-	return &Topic{Name: name, WalDir: walDir, wal: w}, nil
+	return &Topic{Name: name, walDir: walDir, wal: w}, nil
 }
 
 // Close closes the underlying wal
@@ -82,6 +82,9 @@ func (t *Topic) Append(data Data) error {
 }
 
 // NewReader gets a reader of a wal
+// TODO The index might not exist in this wal so we want to find either the index or the next index after the one given
+// This is because during recovery in a multi-topic syncable we may not know exactly what we are looking for and
+// we are just checking to make sure we didn't miss anything.
 func (t *Topic) NewReader(index uint64) (Reader, error) {
 	return t.newWalReader(index)
 }
@@ -112,8 +115,8 @@ func (t *Topic) newWalReader(index uint64) (*walTopicReader, error) {
 	// TODO Find the segment with the highest index that doesn't go over index
 	firstSegment := 0
 	highestIndexWithoutGoingOver := uint64(0)
-	for k := range t.FirstIndexInSegment {
-		nextIndex := t.FirstIndexInSegment[k]
+	for k := range t.firstIndexInSegment {
+		nextIndex := t.firstIndexInSegment[k]
 		if nextIndex > highestIndexWithoutGoingOver && nextIndex <= index {
 			highestIndexWithoutGoingOver = nextIndex
 			firstSegment = k
@@ -147,7 +150,7 @@ func (r *walTopicReader) next(ctx context.Context, newSegment bool) (*types.Acce
 		}
 
 		if newSegment {
-			r.topic.FirstIndexInSegment[r.currentSegment] = ap.Index
+			r.topic.firstIndexInSegment[r.currentSegment] = ap.Index
 		}
 
 		return ap, nil
@@ -170,6 +173,7 @@ func (r *walTopicReader) next(ctx context.Context, newSegment bool) (*types.Acce
 			return r.next(ctx, true)
 		}
 
+		// TODO Figure out how to handle ctx.Done()
 		r.alert.waiting = true
 		<-r.alert.appendC
 		return r.next(ctx, false)
@@ -184,8 +188,8 @@ func (r *walTopicReader) newLiveReader(firstSegment int) (types.LiveReader, erro
 		return nil, errors.Wrapf(err, "[Topic: %s] newLiveReader() could not get the number of segments", r.topic.Name)
 	}
 
-	// Look for the highest segment in the FirstIndexInSegment map
-	m := r.topic.FirstIndexInSegment
+	// Look for the highest segment in the firstIndexInSegment map
+	m := r.topic.firstIndexInSegment
 	for !inMap(m, lastSegment) {
 		if lastSegment == firstSegment {
 			break
@@ -193,7 +197,7 @@ func (r *walTopicReader) newLiveReader(firstSegment int) (types.LiveReader, erro
 		lastSegment = lastSegment - 1
 	}
 
-	sr := wal.SegmentRange{Dir: r.topic.WalDir, First: firstSegment, Last: lastSegment}
+	sr := wal.SegmentRange{Dir: r.topic.walDir, First: firstSegment, Last: lastSegment}
 	srr, err := walFactory.NewSegmentsRangeReader(sr)
 	if err != nil {
 		return nil, errors.Wrapf(err, "[Topic: %s] could not create NewSegmentsRangeReader", r.topic.Name)
