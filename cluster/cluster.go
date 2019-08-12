@@ -22,7 +22,7 @@ import (
 type Cluster struct {
 	dataDir     string
 	mu          sync.RWMutex
-	proposeC    chan<- string // channel for proposing updates
+	proposeC    chan<- []byte // channel for proposing updates
 	snapshotter *snap.Snapshotter
 	Data        *Data
 }
@@ -35,7 +35,7 @@ type Data struct {
 }
 
 // New creates a new Cluster
-func New(snapshotter *snap.Snapshotter, proposeC chan<- string, commitC <-chan *string,
+func New(snapshotter *snap.Snapshotter, proposeC chan<- []byte, commitC <-chan []byte,
 	errorC <-chan error, dataDir string) *Cluster {
 	data := &Data{
 		Databases: make(map[string]types.Database),
@@ -60,7 +60,7 @@ func New(snapshotter *snap.Snapshotter, proposeC chan<- string, commitC <-chan *
 
 // TODO Instead of just the data string we need the whole entry so we can get the index and term to
 // store in the topic wals
-func (c *Cluster) readCommits(commitC <-chan *string, errorC <-chan error) {
+func (c *Cluster) readCommits(commitC <-chan []byte, errorC <-chan error) {
 	for data := range commitC {
 		if data == nil {
 			// done replaying log; new data incoming
@@ -79,9 +79,8 @@ func (c *Cluster) readCommits(commitC <-chan *string, errorC <-chan error) {
 			continue
 		}
 
-		var ap types.AcceptedProposal
-		dec := gob.NewDecoder(bytes.NewBufferString(*data))
-		if err := dec.Decode(&ap); err != nil {
+		ap, err := types.NewAcceptedProposal(data)
+		if err != nil {
 			log.Printf("could not decode message (%v)", err)
 		}
 
@@ -92,7 +91,7 @@ func (c *Cluster) readCommits(commitC <-chan *string, errorC <-chan error) {
 	}
 }
 
-func (c *Cluster) route(ap types.AcceptedProposal) error {
+func (c *Cluster) route(ap *types.AcceptedProposal) error {
 	switch ap.Topic {
 	case "database":
 		// TODO How do know the name? - Should we send the toml instead of the object?
@@ -123,7 +122,7 @@ func (c *Cluster) Propose(proposal types.Proposal) {
 	if err := gob.NewEncoder(&buf).Encode(proposal); err != nil {
 		log.Fatal(err)
 	}
-	c.proposeC <- buf.String()
+	c.proposeC <- buf.Bytes()
 }
 
 func decodeProposal(b []byte) (types.Proposal, error) {
