@@ -1,4 +1,4 @@
-package db
+package cluster
 
 import (
 	"bytes"
@@ -24,19 +24,20 @@ type Cluster struct {
 	mu          sync.RWMutex
 	proposeC    chan<- string // channel for proposing updates
 	snapshotter *snap.Snapshotter
-	Data        *ClusterData
+	Data        *Data
 }
 
-// ClusterData stores core primitives that will be stored in snapshots
-type ClusterData struct {
+// Data stores core primitives that will be stored in snapshots
+type Data struct {
 	Databases map[string]types.Database
 	Syncables map[string]syncable.Syncable
 	Topics    map[string]topic.Topic
 }
 
-// NewCluster creates a new Cluster
-func NewCluster(snapshotter *snap.Snapshotter, proposeC chan<- string, commitC <-chan *string, errorC <-chan error, dataDir string) *Cluster {
-	data := &ClusterData{
+// New creates a new Cluster
+func New(snapshotter *snap.Snapshotter, proposeC chan<- string, commitC <-chan *string,
+	errorC <-chan error, dataDir string) *Cluster {
+	data := &Data{
 		Databases: make(map[string]types.Database),
 		Syncables: make(map[string]syncable.Syncable),
 		Topics:    make(map[string]topic.Topic),
@@ -207,7 +208,7 @@ func (c *Cluster) GetSnapshot() ([]byte, error) {
 
 // recoverFromSnapshot loads the latest data struct from the given snapshot
 func (c *Cluster) recoverFromSnapshot(snapshot []byte) error {
-	var data *ClusterData
+	var data *Data
 	if err := json.Unmarshal(snapshot, data); err != nil {
 		return err
 	}

@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/philborlin/committed/db"
+	"github.com/philborlin/committed/cluster"
 )
 
 type newClusterTopicRequest struct {
@@ -17,12 +17,12 @@ type clusterTopicGetResponse struct {
 }
 
 // NewClusterTopicHandler is the handler for Cluster Topics
-func NewClusterTopicHandler(c *db.Cluster) http.Handler {
+func NewClusterTopicHandler(c *cluster.Cluster) http.Handler {
 	return &clusterTopicHandler{c}
 }
 
 type clusterTopicHandler struct {
-	c *db.Cluster
+	c *cluster.Cluster
 }
 
 // ServeHTTP implements http.Handler

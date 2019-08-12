@@ -1,4 +1,4 @@
-package db
+package cluster
 
 import (
 	"testing"
@@ -9,5 +9,5 @@ import (
 
 func TestDB(t *testing.T) {
 	RegisterFailHandler(Fail)
-	RunSpecs(t, "DB Suite")
+	RunSpecs(t, "Cluster Suite")
 }

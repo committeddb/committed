@@ -7,10 +7,10 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/philborlin/committed/db"
+	"github.com/philborlin/committed/cluster"
 )
 
-func createMux(c *db.Cluster) http.Handler {
+func createMux(c *cluster.Cluster) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/cluster/databases", newLoggingHandler(NewClusterDatabaseHandler(c)))
 	mux.Handle("/cluster/posts", newLoggingHandler(NewClusterPostHandler(c)))
@@ -40,7 +40,7 @@ type HTTPAPI struct {
 }
 
 // ServeAPI starts the committed API.
-func ServeAPI(c *db.Cluster, port int, errorC <-chan error) *HTTPAPI {
+func ServeAPI(c *cluster.Cluster, port int, errorC <-chan error) *HTTPAPI {
 	srv := http.Server{
 		Addr:    ":" + strconv.Itoa(port),
 		Handler: createMux(c),

@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/philborlin/committed/db"
+	"github.com/philborlin/committed/cluster"
 	"github.com/philborlin/committed/syncable"
 	"github.com/philborlin/committed/types"
 )
@@ -14,12 +14,12 @@ type clusterDatabasesGetResponse struct {
 }
 
 // NewClusterDatabaseHandler is the handler for Cluster Databases
-func NewClusterDatabaseHandler(c *db.Cluster) http.Handler {
+func NewClusterDatabaseHandler(c *cluster.Cluster) http.Handler {
 	return &clusterDatabaseHandler{c}
 }
 
 type clusterDatabaseHandler struct {
-	c *db.Cluster
+	c *cluster.Cluster
 }
 
 // ServeHTTP implements http.Handler

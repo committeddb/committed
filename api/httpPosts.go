@@ -3,7 +3,7 @@ package api
 import (
 	"net/http"
 
-	"github.com/philborlin/committed/db"
+	"github.com/philborlin/committed/cluster"
 	"github.com/philborlin/committed/types"
 )
 
@@ -13,12 +13,12 @@ type newClusterTopicPostRequest struct {
 }
 
 // NewClusterPostHandler creates a new handler for Cluster Topics
-func NewClusterPostHandler(c *db.Cluster) http.Handler {
+func NewClusterPostHandler(c *cluster.Cluster) http.Handler {
 	return &clusterPostHandler{c}
 }
 
 type clusterPostHandler struct {
-	c *db.Cluster
+	c *cluster.Cluster
 }
 
 // ServeHTTP implements http.Handler

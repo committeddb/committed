@@ -9,11 +9,12 @@ import (
 	"github.com/coreos/etcd/raft/raftpb"
 	"github.com/philborlin/committed/api"
 
-	"github.com/philborlin/committed/db"
+	"github.com/philborlin/committed/cluster"
+	"github.com/philborlin/committed/raft"
 )
 
 func main() {
-	cluster := flag.String("cluster", "http://127.0.0.1:9021", "comma separated cluster peers")
+	nodeURLs := flag.String("cluster", "http://127.0.0.1:9021", "comma separated cluster peers")
 	id := flag.Int("id", 1, "node ID")
 	apiPort := flag.Int("port", 9121, "API server port")
 	join := flag.Bool("join", false, "join an existing cluster")
@@ -24,20 +25,19 @@ func main() {
 	confChangeC := make(chan raftpb.ConfChange)
 	defer close(confChangeC)
 
-	// raft provides a commit stream for the proposals from the http api
-	var c *db.Cluster
+	var c *cluster.Cluster
 	getSnapshot := func() ([]byte, error) { return c.GetSnapshot() }
 
-	nodes := strings.Split(*cluster, ",")
+	nodes := strings.Split(*nodeURLs, ",")
 	dataDir := "data"
 	if _, err := os.Stat(dataDir); err != nil {
 		if err := os.MkdirAll(dataDir, 0750); err != nil {
 			log.Fatal("cannot create data dir")
 		}
 	}
-	commitC, errorC, snapshotterReady := db.NewRaftNode(*id, nodes, *join, dataDir, getSnapshot, proposeC, confChangeC)
+	commitC, errorC, snapshotterReady := raft.NewRaftNode(*id, nodes, *join, dataDir, getSnapshot, proposeC, confChangeC)
 
-	c = db.NewCluster(<-snapshotterReady, proposeC, commitC, errorC, dataDir)
+	c = cluster.New(<-snapshotterReady, proposeC, commitC, errorC, dataDir)
 
 	api.ServeAPI(c, *apiPort, errorC)
 }
