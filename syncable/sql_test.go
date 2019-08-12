@@ -63,7 +63,6 @@ var _ = Describe("SQL Syncable", func() {
 		bytes, err := json.Marshal(&data)
 		Expect(err).To(BeNil())
 
-		// entry := raftpb.Entry{Data: bytes}
 		entry := &types.AcceptedProposal{Data: bytes}
 		syncable.Sync(context.Background(), entry)
 

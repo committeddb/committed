@@ -4,6 +4,9 @@ define test
 	rm .coverage.tmp
 endef
 
+test:
+	go test ./... -cover
+
 test/topic:
 	$(call test,"github.com/philborlin/committed/topic")
 
@@ -12,3 +15,6 @@ test/cluster:
 
 test/sync:
 	$(call test,"github.com/philborlin/committed/syncable")
+
+test/bridge:
+	$(call test,"github.com/philborlin/committed/bridge")

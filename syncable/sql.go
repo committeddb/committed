@@ -47,7 +47,7 @@ type sqlInsert struct {
 	jsonPath []string
 }
 
-func sqlParser(v *viper.Viper, databases map[string]types.Database) (TopicSyncable, error) {
+func sqlParser(v *viper.Viper, databases map[string]types.Database) (Syncable, error) {
 	topic := v.GetString("sql.topic")
 	sqlDB := v.GetString("sql.db")
 	table := v.GetString("sql.table")
@@ -231,7 +231,7 @@ func (s *SQLSyncable) Close() error {
 	return s.DB.Close()
 }
 
-// topics implements TopicSyncable
-func (s *SQLSyncable) topics() []string {
+// Topics implements Syncable
+func (s *SQLSyncable) Topics() []string {
 	return []string{s.config.topic}
 }

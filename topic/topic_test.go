@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"time"
 
 	"github.com/philborlin/committed/types"
 	"github.com/philborlin/committed/types/typesfakes"
@@ -43,7 +42,7 @@ var _ = Describe("Topic", func() {
 			fakeWALFactory.NewSizeReturns(fakeWal, nil)
 			topic, err := New(fakeName, fakeBaseDir)
 			Expect(err).To(BeNil())
-			Expect(topic.Name).To(Equal(fakeName))
+			Expect(topic.Name()).To(Equal(fakeName))
 			Expect(topic.walDir).To(Equal(fakeWalDir))
 			Expect(topic.wal).To(Equal(fakeWal))
 			Expect(fakeWALFactory.NewSizeCallCount()).To(Equal(1))
@@ -63,7 +62,7 @@ var _ = Describe("Topic", func() {
 			fakeWALFactory.OpenReturns(fakeWal, nil)
 			topic, err := Restore(fakeName, fakeWalDir)
 			Expect(err).To(BeNil())
-			Expect(topic.Name).To(Equal(fakeName))
+			Expect(topic.Name()).To(Equal(fakeName))
 			Expect(topic.walDir).To(Equal(fakeWalDir))
 			Expect(topic.wal).To(Equal(fakeWal))
 			Expect(fakeWALFactory.OpenCallCount()).To(Equal(1))
@@ -79,10 +78,10 @@ var _ = Describe("Topic", func() {
 	})
 
 	Describe("Close()", func() {
-		var topic *Topic
+		var topic *WALTopic
 
 		JustBeforeEach(func() {
-			topic = &Topic{wal: fakeWal}
+			topic = &WALTopic{wal: fakeWal}
 		})
 
 		It("should return nil when successful", func() {
@@ -96,10 +95,10 @@ var _ = Describe("Topic", func() {
 	})
 
 	Describe("Append()", func() {
-		var topic *Topic
+		var topic *WALTopic
 
 		JustBeforeEach(func() {
-			topic = &Topic{wal: fakeWal}
+			topic = &WALTopic{wal: fakeWal}
 		})
 
 		It("should return nil when successful", func() {
@@ -137,12 +136,12 @@ var _ = Describe("Topic", func() {
 	Describe("NewReader()", func() {
 		var (
 			m     map[int]uint64
-			topic *Topic
+			topic *WALTopic
 		)
 
 		JustBeforeEach(func() {
 			m = make(map[int]uint64)
-			topic = &Topic{wal: fakeWal, firstIndexInSegment: m}
+			topic = &WALTopic{wal: fakeWal, firstIndexInSegment: m}
 		})
 
 		It("should return a reader when successful", func() {
@@ -194,7 +193,7 @@ var _ = Describe("Topic", func() {
 		var (
 			err            error
 			m              map[int]uint64
-			topic          *Topic
+			topic          *WALTopic
 			reader         Reader
 			fakeLiveReader *typesfakes.FakeLiveReader
 			ap1            *types.AcceptedProposal
@@ -206,7 +205,7 @@ var _ = Describe("Topic", func() {
 			fakeWALFactory.NewLiveReaderReturns(fakeLiveReader)
 
 			m = make(map[int]uint64)
-			topic = &Topic{wal: fakeWal, firstIndexInSegment: m}
+			topic = &WALTopic{wal: fakeWal, firstIndexInSegment: m}
 			reader, err = topic.NewReader(0)
 			Expect(err).To(BeNil())
 
@@ -289,9 +288,6 @@ var _ = Describe("Topic", func() {
 			alert := walTopicReader.alert
 
 			go func() {
-				fmt.Println("\nSleeping for a bit")
-				time.Sleep(100 * time.Millisecond)
-				fmt.Println("Alerting")
 				alert.appendC <- true
 			}()
 

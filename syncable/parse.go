@@ -8,7 +8,7 @@ import (
 	"github.com/spf13/viper"
 )
 
-var parsers = map[string]func(*viper.Viper, map[string]types.Database) (TopicSyncable, error){
+var parsers = map[string]func(*viper.Viper, map[string]types.Database) (Syncable, error){
 	"sql": sqlParser,
 }
 

@@ -31,7 +31,7 @@ type Cluster struct {
 type ClusterData struct {
 	Databases map[string]types.Database
 	Syncables map[string]syncable.Syncable
-	Topics    map[string]*topic.Topic
+	Topics    map[string]topic.Topic
 }
 
 // NewCluster creates a new Cluster
@@ -39,7 +39,7 @@ func NewCluster(snapshotter *snap.Snapshotter, proposeC chan<- string, commitC <
 	data := &ClusterData{
 		Databases: make(map[string]types.Database),
 		Syncables: make(map[string]syncable.Syncable),
-		Topics:    make(map[string]*topic.Topic),
+		Topics:    make(map[string]topic.Topic),
 	}
 
 	c := &Cluster{
