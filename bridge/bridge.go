@@ -24,8 +24,8 @@ type Snapshot struct {
 	LastIndex uint64
 }
 
-// NewBridge creates a wrapper that will
-func NewBridge(name string, s syncable.Syncable, topics map[string]topic.Topic) (*Bridge, error) {
+// New creates a wrapper
+func New(name string, s syncable.Syncable, topics map[string]topic.Topic) (*Bridge, error) {
 	if len(s.Topics()) == 0 {
 		return nil, fmt.Errorf("[%s.bridge] No topics so there is nothing to sync", name)
 	}

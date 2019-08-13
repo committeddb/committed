@@ -29,14 +29,18 @@ type clusterTopicHandler struct {
 func (c *clusterTopicHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	if r.Method == "POST" {
-		n := newClusterTopicRequest{}
-		Unmarshall(r, &n)
-		err := c.c.CreateTopic(n.Name)
+		toml, err := ReaderToString(r.Body)
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(err.Error()))
+			ErrorTo500(w, err)
 			return
 		}
+
+		err = c.c.CreateTopic(toml)
+		if err != nil {
+			ErrorTo500(w, err)
+			return
+		}
+
 		w.Write(nil)
 	} else if r.Method == "GET" {
 		keys := make([]string, 0, len(c.c.Data.Topics))

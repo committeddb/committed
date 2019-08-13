@@ -42,7 +42,7 @@ var _ = Describe("Topic", func() {
 	Describe("NewBridge()", func() {
 		It("should create a new bridge", func() {
 			fakeSyncable.TopicsReturns([]string{"foo"})
-			b, err := NewBridge(bridgeName, fakeSyncable, topics)
+			b, err := New(bridgeName, fakeSyncable, topics)
 			Expect(err).To(BeNil())
 			Expect(len(b.topics)).To(Equal(1))
 			Expect(b.topics["foo"]).To(Equal(fooFakeTopic))
@@ -53,21 +53,21 @@ var _ = Describe("Topic", func() {
 
 		It("should error if there are no topics", func() {
 			fakeSyncable.TopicsReturns([]string{})
-			b, err := NewBridge(bridgeName, fakeSyncable, topics)
+			b, err := New(bridgeName, fakeSyncable, topics)
 			Expect(b).To(BeNil())
 			Expect(err.Error()).To(ContainSubstring("No topics so there is nothing to sync"))
 		})
 
 		It("should error if there are too many topics", func() {
 			fakeSyncable.TopicsReturns([]string{"foo", "bar"})
-			b, err := NewBridge(bridgeName, fakeSyncable, topics)
+			b, err := New(bridgeName, fakeSyncable, topics)
 			Expect(b).To(BeNil())
 			Expect(err.Error()).To(ContainSubstring("We don't support more than one topic in a syncable yet"))
 		})
 
 		It("should error if topic does not exist", func() {
 			fakeSyncable.TopicsReturns([]string{"baz"})
-			b, err := NewBridge(bridgeName, fakeSyncable, topics)
+			b, err := New(bridgeName, fakeSyncable, topics)
 			Expect(b).To(BeNil())
 			Expect(err.Error()).To(ContainSubstring("is trying to listen to topic"))
 		})
@@ -81,7 +81,7 @@ var _ = Describe("Topic", func() {
 
 		JustBeforeEach(func() {
 			fakeSyncable.TopicsReturns([]string{"foo"})
-			b, err = NewBridge(bridgeName, fakeSyncable, topics)
+			b, err = New(bridgeName, fakeSyncable, topics)
 			Expect(err).To(BeNil())
 		})
 
@@ -115,7 +115,7 @@ var _ = Describe("Topic", func() {
 			errorC = make(chan error)
 			fakeError = fmt.Errorf("fake error")
 			fakeSyncable.TopicsReturns([]string{"foo"})
-			b, err = NewBridge(bridgeName, fakeSyncable, topics)
+			b, err = New(bridgeName, fakeSyncable, topics)
 			Expect(err).To(BeNil())
 			ctx = context.Background()
 		})

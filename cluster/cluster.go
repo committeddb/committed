@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/philborlin/committed/bridge"
 	"github.com/philborlin/committed/syncable"
 	"github.com/philborlin/committed/topic"
 	"github.com/philborlin/committed/types"
@@ -22,6 +23,7 @@ import (
 type Cluster struct {
 	dataDir     string
 	mu          sync.RWMutex
+	errorC      chan error
 	proposeC    chan<- []byte // channel for proposing updates
 	snapshotter *snap.Snapshotter
 	Data        *Data
@@ -45,6 +47,7 @@ func New(snapshotter *snap.Snapshotter, proposeC chan<- []byte, commitC <-chan [
 
 	c := &Cluster{
 		dataDir:     dataDir,
+		errorC:      make(chan error),
 		proposeC:    proposeC,
 		snapshotter: snapshotter,
 		Data:        data,
@@ -82,7 +85,10 @@ func (c *Cluster) readCommits(commitC <-chan []byte, errorC <-chan error) {
 			log.Printf("could not decode message (%v)", err)
 		}
 
-		c.route(ap)
+		err = c.route(ap)
+		if err != nil {
+			log.Printf("could not route message (%v)", err)
+		}
 	}
 	if err, ok := <-errorC; ok {
 		log.Fatal(err)
@@ -121,7 +127,17 @@ func (c *Cluster) route(ap *types.AcceptedProposal) error {
 		c.mu.Lock()
 		c.Data.Syncables[name] = syncable
 		c.mu.Unlock()
-		// TODO Create a bridge
+
+		bridge, err := bridge.New("", syncable, c.Data.Topics)
+		if err != nil {
+			return errors.Wrap(err, "Router could not create bridge")
+		}
+		go func() {
+			err := bridge.Init(context.Background(), c.errorC)
+			if err != nil {
+				c.errorC <- err
+			}
+		}()
 	case "topic":
 		name, topic, err := topic.ParseTopic("toml", strings.NewReader(string(ap.Data)), c.dataDir)
 		if err != nil {
