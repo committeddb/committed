@@ -128,7 +128,7 @@ func (c *Cluster) route(ap *types.AcceptedProposal) error {
 		c.Data.Syncables[name] = syncable
 		c.mu.Unlock()
 
-		bridge, err := bridge.New("", syncable, c.Data.Topics)
+		bridge, err := bridge.New(name, syncable, c.Data.Topics)
 		if err != nil {
 			return errors.Wrap(err, "Router could not create bridge")
 		}
