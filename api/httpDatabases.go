@@ -25,18 +25,7 @@ type clusterDatabaseHandler struct {
 func (c *clusterDatabaseHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	if r.Method == "POST" {
-		toml, err := ReaderToString(r.Body)
-		if err != nil {
-			ErrorTo500(w, err)
-			return
-		}
-
-		err = c.c.ProposeDatabase(toml)
-		if err != nil {
-			ErrorTo500(w, err)
-			return
-		}
-		w.Write(nil)
+		proposeToml(w, r, c.c.ProposeDatabase)
 	} else if r.Method == "GET" {
 		w.Header().Set("Content-Type", "application/json")
 		response, _ := json.Marshal(clusterDatabasesGetResponse{c.c.Data.Databases})

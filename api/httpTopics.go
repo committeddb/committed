@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/philborlin/committed/cluster"
+	"github.com/philborlin/committed/topic"
 )
 
 type newClusterTopicRequest struct {
@@ -13,7 +14,7 @@ type newClusterTopicRequest struct {
 }
 
 type clusterTopicGetResponse struct {
-	Topics []string
+	Topics map[string]topic.Topic
 }
 
 // NewClusterTopicHandler is the handler for Cluster Topics
@@ -29,26 +30,10 @@ type clusterTopicHandler struct {
 func (c *clusterTopicHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	if r.Method == "POST" {
-		toml, err := ReaderToString(r.Body)
-		if err != nil {
-			ErrorTo500(w, err)
-			return
-		}
-
-		err = c.c.ProposeTopic(toml)
-		if err != nil {
-			ErrorTo500(w, err)
-			return
-		}
-
-		w.Write(nil)
+		proposeToml(w, r, c.c.ProposeTopic)
 	} else if r.Method == "GET" {
-		keys := make([]string, 0, len(c.c.Data.Topics))
-		for key := range c.c.Data.Topics {
-			keys = append(keys, key)
-		}
 		w.Header().Set("Content-Type", "application/json")
-		response, _ := json.Marshal(clusterTopicGetResponse{keys})
+		response, _ := json.Marshal(clusterTopicGetResponse{c.c.Data.Topics})
 		w.Write(response)
 	}
 }
