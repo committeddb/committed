@@ -5,7 +5,6 @@ import (
 	"net/http"
 
 	"github.com/philborlin/committed/cluster"
-	"github.com/philborlin/committed/syncable"
 	"github.com/philborlin/committed/types"
 )
 
@@ -26,14 +25,17 @@ type clusterDatabaseHandler struct {
 func (c *clusterDatabaseHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	if r.Method == "POST" {
-		name, database, err := syncable.ParseDatabase("toml", r.Body)
+		toml, err := ReaderToString(r.Body)
 		if err != nil {
-			w.Write([]byte(err.Error()))
-			w.WriteHeader(500)
+			ErrorTo500(w, err)
 			return
 		}
 
-		c.c.CreateDatabase(name, database)
+		err = c.c.CreateDatabase(toml)
+		if err != nil {
+			ErrorTo500(w, err)
+			return
+		}
 		w.Write(nil)
 	} else if r.Method == "GET" {
 		w.Header().Set("Content-Type", "application/json")

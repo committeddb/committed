@@ -58,8 +58,6 @@ func New(snapshotter *snap.Snapshotter, proposeC chan<- []byte, commitC <-chan [
 	return c
 }
 
-// TODO Instead of just the data string we need the whole entry so we can get the index and term to
-// store in the topic wals
 func (c *Cluster) readCommits(commitC <-chan []byte, errorC <-chan error) {
 	for data := range commitC {
 		if data == nil {
@@ -73,7 +71,7 @@ func (c *Cluster) readCommits(commitC <-chan []byte, errorC <-chan error) {
 				log.Panic(err)
 			}
 			log.Printf("loading snapshot at term %d and index %d", snapshot.Metadata.Term, snapshot.Metadata.Index)
-			if err := c.recoverFromSnapshot(snapshot.Data); err != nil {
+			if err := c.ApplySnapshot(snapshot.Data); err != nil {
 				log.Panic(err)
 			}
 			continue
@@ -94,23 +92,52 @@ func (c *Cluster) readCommits(commitC <-chan []byte, errorC <-chan error) {
 func (c *Cluster) route(ap *types.AcceptedProposal) error {
 	switch ap.Topic {
 	case "database":
-		// TODO How do know the name? - Should we send the toml instead of the object?
-	case "syncable":
-		// TODO How do know the name? - Should we send the toml instead of the object?
-	case "topic":
-		name := string(ap.Data)
-		t, err := topic.New(name, c.dataDir)
+		name, database, err := syncable.ParseDatabase("toml", strings.NewReader(string(ap.Data)))
 		if err != nil {
-			return errors.Wrapf(err, "Error creating new topic")
+			return errors.Wrap(err, "Router could not create database")
 		}
+
+		log.Printf("About to initialize database: %s...\n", name)
+		if err := database.Init(); err != nil {
+			return errors.Wrapf(err, "could not initialize database %s", name)
+		}
+		log.Printf("...Initialized database: %s\n", name)
+
 		c.mu.Lock()
-		c.Data.Topics[name] = t
+		c.Data.Databases[name] = database
+		c.mu.Unlock()
+	case "syncable":
+		name, syncable, err := syncable.ParseSyncable("toml", strings.NewReader(string(ap.Data)), c.Data.Databases)
+		if err != nil {
+			return errors.Wrap(err, "Router could not create syncable")
+		}
+
+		log.Printf("About to initialize syncable: %s...\n", name)
+		if err := syncable.Init(context.Background()); err != nil {
+			return errors.Wrapf(err, "could not initialize syncable %s", name)
+		}
+		log.Printf("...Initialized syncable: %s\n", name)
+
+		c.mu.Lock()
+		c.Data.Syncables[name] = syncable
+		c.mu.Unlock()
+		// TODO Create a bridge
+	case "topic":
+		name, topic, err := topic.ParseTopic("toml", strings.NewReader(string(ap.Data)), c.dataDir)
+		if err != nil {
+			return errors.Wrap(err, "Router could not create topic")
+		}
+
+		c.mu.Lock()
+		c.Data.Topics[name] = topic
 		c.mu.Unlock()
 	default:
-		if t, ok := c.Data.Topics[ap.Topic]; ok != false {
-			t.Append(topic.Data{Index: ap.Index, Term: ap.Term, Data: ap.Data})
+		t, ok := c.Data.Topics[ap.Topic]
+		if !ok {
+			return fmt.Errorf("Attempting to append to topic %s which was not found", c.dataDir)
 		}
-		// TODO We may want to alert any synables listening to this topic so they can sync more data without polling.
+
+		t.Append(topic.Data{Index: ap.Index, Term: ap.Term, Data: ap.Data})
 	}
 
 	return nil
@@ -132,9 +159,10 @@ func decodeProposal(b []byte) (types.Proposal, error) {
 }
 
 // CreateTopic appends a topic to the raft and returns a Topic object if successful
-func (c *Cluster) CreateTopic(name string) error {
-	if len(strings.TrimSpace(name)) == 0 {
-		return fmt.Errorf("name is empty")
+func (c *Cluster) CreateTopic(toml string) error {
+	name, err := topic.PreParseTopic("toml", strings.NewReader(toml), c.dataDir)
+	if err != nil {
+		return errors.Wrap(err, "Could not create topic")
 	}
 
 	if name == "database" || name == "syncable" || name == "topic" {
@@ -145,68 +173,53 @@ func (c *Cluster) CreateTopic(name string) error {
 		return fmt.Errorf("topic %s already exists", name)
 	}
 
-	log.Printf("About to append topic: %s...\n", name)
-	c.Propose(types.Proposal{Topic: "topic", Proposal: []byte(name)})
-	log.Printf("...Appended topic: %s\n", name)
+	c.Propose(types.Proposal{Topic: "topic", Proposal: []byte(toml)})
 
 	return nil
 }
 
 // CreateDatabase creates a database
-// This should be about validating the toml and then sending that to the raft instead of the database object
-func (c *Cluster) CreateDatabase(name string, database types.Database) error {
+func (c *Cluster) CreateDatabase(toml string) error {
+	name, _, err := syncable.ParseDatabase("toml", strings.NewReader(toml))
+	if err != nil {
+		return errors.Wrap(err, "Could not create database")
+	}
+
 	if _, ok := c.Data.Databases[name]; ok {
 		return fmt.Errorf("database %s already exists", name)
 	}
 
-	log.Printf("About to append database: %s...\n", name)
-	databaseJSON, _ := json.Marshal(database)
-	// TODO We need a protobuf with name, type, and databaseJSON
-	c.Propose(types.Proposal{Topic: "database", Proposal: databaseJSON})
-	if err := database.Init(); err != nil {
-		return err
-	}
-	log.Printf("...Appended database: %s\n", name)
+	c.Propose(types.Proposal{Topic: "database", Proposal: []byte(toml)})
 
-	// TODO Should this happen through the message_router?
-	c.Data.Databases[name] = database
 	return nil
 }
 
-// CreateSyncable creates a Syncable, appends the original file to the raft, starts the syncable,
-// and returns it if successful
-// This should be about validating the toml and then sending that to the raft instead of the syncable object
-func (c *Cluster) CreateSyncable(name string, syncable syncable.Syncable) error {
+// CreateSyncable creates a Syncable
+func (c *Cluster) CreateSyncable(toml string) error {
+	name, _, err := syncable.ParseSyncable("toml", strings.NewReader(toml), c.Data.Databases)
+	if err != nil {
+		return errors.Wrap(err, "Could not create syncable")
+	}
+
 	if _, ok := c.Data.Syncables[name]; ok {
 		return fmt.Errorf("syncable %s already exists", name)
 	}
 
-	log.Printf("About to append syncable: %s...\n", name)
-	syncableJSON, _ := json.Marshal(syncable)
-	// TODO We need a protobuf with name, type, and syncableJSON
-	c.Propose(types.Proposal{Topic: "syncable", Proposal: syncableJSON})
-	if err := syncable.Init(context.Background()); err != nil {
-		return err
-	}
-	log.Printf("...Appended syncable: %s\n", name)
-
-	// TODO Should this happen through the message_router?
-	c.Data.Syncables[name] = syncable
-	// TODO Syncables know how to update themselves
-	// go c.sync(context.Background(), syncable)
+	c.Propose(types.Proposal{Topic: "syncable", Proposal: []byte(toml)})
 
 	return nil
 }
 
-// GetSnapshot gets a snapshot of the current data struct
+// GetSnapshot implements Snapshotter and gets a snapshot of the current data struct
 func (c *Cluster) GetSnapshot() ([]byte, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return json.Marshal(c.Data)
 }
 
-// recoverFromSnapshot loads the latest data struct from the given snapshot
-func (c *Cluster) recoverFromSnapshot(snapshot []byte) error {
+// ApplySnapshot implements Snapshotter
+func (c *Cluster) ApplySnapshot(snapshot []byte) error {
+	// TODO This has to setup the bridges
 	var data *Data
 	if err := json.Unmarshal(snapshot, data); err != nil {
 		return err

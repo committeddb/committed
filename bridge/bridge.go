@@ -98,6 +98,7 @@ func (b *Bridge) Init(ctx context.Context, errorC chan<- error) error {
 				// }
 				// return
 				default:
+					// TODO This should only run when this node is the leader
 					ap, err := reader.Next(ctx)
 					if err != nil {
 						errorC <- errors.Wrapf(err,

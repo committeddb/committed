@@ -35,9 +35,8 @@ The beta has four things you can do:
 
 To Add a topic POST to http://server:port/cluster/topics with an HTTP body that looks like:  
 ```
-{  
-	"Name" : "test1"  
-}
+[topic]
+name = "test1"
 ```
 
 To Append to a topic POST to http://server:port/cluster/posts with an HTTP body that looks like:  

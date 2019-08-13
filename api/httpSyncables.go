@@ -25,14 +25,18 @@ type clusterSyncableHandler struct {
 func (c *clusterSyncableHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	if r.Method == "POST" {
-		name, syncable, err := syncable.ParseSyncable("toml", r.Body, c.c.Data.Databases)
+		toml, err := ReaderToString(r.Body)
 		if err != nil {
-			w.Write([]byte(err.Error()))
-			w.WriteHeader(500)
+			ErrorTo500(w, err)
 			return
 		}
 
-		c.c.CreateSyncable(name, syncable)
+		err = c.c.CreateSyncable(toml)
+		if err != nil {
+			ErrorTo500(w, err)
+			return
+		}
+
 		w.Write(nil)
 	} else if r.Method == "GET" {
 		w.Header().Set("Content-Type", "application/json")

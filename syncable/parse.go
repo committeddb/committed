@@ -13,13 +13,13 @@ var parsers = map[string]func(*viper.Viper, map[string]types.Database) (Syncable
 }
 
 // ParseSyncable turns a toml file into a Syncable
-func ParseSyncable(style string, reader io.Reader, dbs map[string]types.Database) (name string, syncable Syncable, err error) {
+func ParseSyncable(style string, reader io.Reader, dbs map[string]types.Database) (string, Syncable, error) {
 	v, err := parseBytes(style, reader)
 	if err != nil {
 		return "", nil, err
 	}
 
-	name = v.GetString("syncable.name")
+	name := v.GetString("syncable.name")
 	dbType := v.GetString("syncable.dbType")
 	switch dbType {
 	case "sql":
@@ -34,13 +34,13 @@ func ParseSyncable(style string, reader io.Reader, dbs map[string]types.Database
 }
 
 // ParseDatabase turns a toml file into a Database
-func ParseDatabase(style string, reader io.Reader) (name string, db types.Database, err error) {
+func ParseDatabase(style string, reader io.Reader) (string, types.Database, error) {
 	v, err := parseBytes(style, reader)
 	if err != nil {
 		return "", nil, err
 	}
 
-	name = v.GetString("database.name")
+	name := v.GetString("database.name")
 	dbType := v.GetString("database.type")
 
 	switch dbType {

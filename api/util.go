@@ -94,3 +94,20 @@ func CloseResponseBody(resp *http.Response) {
 		}
 	}
 }
+
+// ReaderToString gets a string from a reader
+func ReaderToString(r io.Reader) (string, error) {
+	buf := new(bytes.Buffer)
+	_, err := buf.ReadFrom(r)
+	if err != nil {
+		return "", err
+	}
+
+	return buf.String(), nil
+}
+
+// ErrorTo500 writes the error and sets the header to 500
+func ErrorTo500(w http.ResponseWriter, err error) {
+	w.Write([]byte(err.Error()))
+	w.WriteHeader(500)
+}
