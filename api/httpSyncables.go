@@ -31,7 +31,7 @@ func (c *clusterSyncableHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 			return
 		}
 
-		err = c.c.CreateSyncable(toml)
+		err = c.c.ProposeSyncable(toml)
 		if err != nil {
 			ErrorTo500(w, err)
 			return

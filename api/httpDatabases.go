@@ -31,7 +31,7 @@ func (c *clusterDatabaseHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 			return
 		}
 
-		err = c.c.CreateDatabase(toml)
+		err = c.c.ProposeDatabase(toml)
 		if err != nil {
 			ErrorTo500(w, err)
 			return

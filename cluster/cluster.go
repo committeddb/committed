@@ -174,8 +174,8 @@ func decodeProposal(b []byte) (types.Proposal, error) {
 	return *p, err
 }
 
-// CreateTopic appends a topic to the raft and returns a Topic object if successful
-func (c *Cluster) CreateTopic(toml string) error {
+// ProposeTopic appends a topic to the raft
+func (c *Cluster) ProposeTopic(toml string) error {
 	name, err := topic.PreParseTopic("toml", strings.NewReader(toml), c.dataDir)
 	if err != nil {
 		return errors.Wrap(err, "Could not create topic")
@@ -194,8 +194,8 @@ func (c *Cluster) CreateTopic(toml string) error {
 	return nil
 }
 
-// CreateDatabase creates a database
-func (c *Cluster) CreateDatabase(toml string) error {
+// ProposeDatabase appends a database to the raft
+func (c *Cluster) ProposeDatabase(toml string) error {
 	name, _, err := syncable.ParseDatabase("toml", strings.NewReader(toml))
 	if err != nil {
 		return errors.Wrap(err, "Could not create database")
@@ -210,8 +210,8 @@ func (c *Cluster) CreateDatabase(toml string) error {
 	return nil
 }
 
-// CreateSyncable creates a Syncable
-func (c *Cluster) CreateSyncable(toml string) error {
+// ProposeSyncable appends a syncable to the raft
+func (c *Cluster) ProposeSyncable(toml string) error {
 	name, _, err := syncable.ParseSyncable("toml", strings.NewReader(toml), c.Data.Databases)
 	if err != nil {
 		return errors.Wrap(err, "Could not create syncable")

@@ -35,7 +35,7 @@ func (c *clusterTopicHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 
-		err = c.c.CreateTopic(toml)
+		err = c.c.ProposeTopic(toml)
 		if err != nil {
 			ErrorTo500(w, err)
 			return
