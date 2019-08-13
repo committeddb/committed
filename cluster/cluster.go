@@ -1,20 +1,13 @@
 package cluster
 
 import (
-	"bytes"
-	"context"
-	"encoding/gob"
-	"encoding/json"
 	"fmt"
 	"log"
-	"strings"
 	"sync"
 
-	"github.com/philborlin/committed/bridge"
 	"github.com/philborlin/committed/syncable"
 	"github.com/philborlin/committed/topic"
 	"github.com/philborlin/committed/types"
-	"github.com/pkg/errors"
 
 	"github.com/coreos/etcd/snap"
 )
@@ -98,55 +91,11 @@ func (c *Cluster) readCommits(commitC <-chan []byte, errorC <-chan error) {
 func (c *Cluster) route(ap *types.AcceptedProposal) error {
 	switch ap.Topic {
 	case "database":
-		name, database, err := syncable.ParseDatabase("toml", strings.NewReader(string(ap.Data)))
-		if err != nil {
-			return errors.Wrap(err, "Router could not create database")
-		}
-
-		log.Printf("About to initialize database: %s...\n", name)
-		if err := database.Init(); err != nil {
-			return errors.Wrapf(err, "could not initialize database %s", name)
-		}
-		log.Printf("...Initialized database: %s\n", name)
-
-		c.mu.Lock()
-		c.Data.Databases[name] = database
-		c.mu.Unlock()
+		c.AddDatabase(ap.Data)
 	case "syncable":
-		name, syncable, err := syncable.ParseSyncable("toml", strings.NewReader(string(ap.Data)), c.Data.Databases)
-		if err != nil {
-			return errors.Wrap(err, "Router could not create syncable")
-		}
-
-		log.Printf("About to initialize syncable: %s...\n", name)
-		if err := syncable.Init(context.Background()); err != nil {
-			return errors.Wrapf(err, "could not initialize syncable %s", name)
-		}
-		log.Printf("...Initialized syncable: %s\n", name)
-
-		c.mu.Lock()
-		c.Data.Syncables[name] = syncable
-		c.mu.Unlock()
-
-		bridge, err := bridge.New(name, syncable, c.Data.Topics)
-		if err != nil {
-			return errors.Wrap(err, "Router could not create bridge")
-		}
-		go func() {
-			err := bridge.Init(context.Background(), c.errorC)
-			if err != nil {
-				c.errorC <- err
-			}
-		}()
+		c.AddSyncable(ap.Data)
 	case "topic":
-		name, topic, err := topic.ParseTopic("toml", strings.NewReader(string(ap.Data)), c.dataDir)
-		if err != nil {
-			return errors.Wrap(err, "Router could not create topic")
-		}
-
-		c.mu.Lock()
-		c.Data.Topics[name] = topic
-		c.mu.Unlock()
+		c.AddTopic(ap.Data)
 	default:
 		t, ok := c.Data.Topics[ap.Topic]
 		if !ok {
@@ -156,92 +105,5 @@ func (c *Cluster) route(ap *types.AcceptedProposal) error {
 		t.Append(topic.Data{Index: ap.Index, Term: ap.Term, Data: ap.Data})
 	}
 
-	return nil
-}
-
-// Propose proposes an addition to the raft
-func (c *Cluster) Propose(proposal types.Proposal) {
-	var buf bytes.Buffer
-	if err := gob.NewEncoder(&buf).Encode(proposal); err != nil {
-		log.Fatal(err)
-	}
-	c.proposeC <- buf.Bytes()
-}
-
-func decodeProposal(b []byte) (types.Proposal, error) {
-	p := &types.Proposal{}
-	err := gob.NewDecoder(bytes.NewReader(b)).Decode(p)
-	return *p, err
-}
-
-// ProposeTopic appends a topic to the raft
-func (c *Cluster) ProposeTopic(toml string) error {
-	name, err := topic.PreParseTopic("toml", strings.NewReader(toml), c.dataDir)
-	if err != nil {
-		return errors.Wrap(err, "Could not create topic")
-	}
-
-	if name == "database" || name == "syncable" || name == "topic" {
-		return fmt.Errorf("%s is a reserved name", name)
-	}
-
-	if _, ok := c.Data.Topics[name]; ok {
-		return fmt.Errorf("topic %s already exists", name)
-	}
-
-	c.Propose(types.Proposal{Topic: "topic", Proposal: []byte(toml)})
-
-	return nil
-}
-
-// ProposeDatabase appends a database to the raft
-func (c *Cluster) ProposeDatabase(toml string) error {
-	name, _, err := syncable.ParseDatabase("toml", strings.NewReader(toml))
-	if err != nil {
-		return errors.Wrap(err, "Could not create database")
-	}
-
-	if _, ok := c.Data.Databases[name]; ok {
-		return fmt.Errorf("database %s already exists", name)
-	}
-
-	c.Propose(types.Proposal{Topic: "database", Proposal: []byte(toml)})
-
-	return nil
-}
-
-// ProposeSyncable appends a syncable to the raft
-func (c *Cluster) ProposeSyncable(toml string) error {
-	name, _, err := syncable.ParseSyncable("toml", strings.NewReader(toml), c.Data.Databases)
-	if err != nil {
-		return errors.Wrap(err, "Could not create syncable")
-	}
-
-	if _, ok := c.Data.Syncables[name]; ok {
-		return fmt.Errorf("syncable %s already exists", name)
-	}
-
-	c.Propose(types.Proposal{Topic: "syncable", Proposal: []byte(toml)})
-
-	return nil
-}
-
-// GetSnapshot implements Snapshotter and gets a snapshot of the current data struct
-func (c *Cluster) GetSnapshot() ([]byte, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return json.Marshal(c.Data)
-}
-
-// ApplySnapshot implements Snapshotter
-func (c *Cluster) ApplySnapshot(snapshot []byte) error {
-	// TODO This has to setup the bridges
-	var data *Data
-	if err := json.Unmarshal(snapshot, data); err != nil {
-		return err
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.Data = data
 	return nil
 }
