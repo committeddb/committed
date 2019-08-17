@@ -6,6 +6,7 @@ import (
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
+	"github.com/philborlin/committed/syncable"
 	"github.com/philborlin/committed/syncable/syncablefakes"
 	"github.com/philborlin/committed/topic"
 	"github.com/philborlin/committed/topic/topicfakes"
@@ -24,6 +25,7 @@ var _ = Describe("Topic", func() {
 
 		topics       map[string]topic.Topic
 		fakeSyncable *syncablefakes.FakeSyncable
+		bridgeFactory Factory
 	)
 
 	JustBeforeEach(func() {
@@ -37,12 +39,21 @@ var _ = Describe("Topic", func() {
 
 		topics = map[string]topic.Topic{"foo": fooFakeTopic, "bar": barFakeTopic}
 		fakeSyncable = &syncablefakes.FakeSyncable{}
+		bridgeFactory = &TopicSyncableBridgeFactory{}
 	})
+
+	new := func(name string, s syncable.Syncable, topics map[string]topic.Topic) (*TopicSyncableBridge, error) {
+		b, err := bridgeFactory.New(name, fakeSyncable, topics)
+		if err != nil {
+			return nil, err
+		}
+		return b.(*TopicSyncableBridge), err
+	}
 
 	Describe("NewBridge()", func() {
 		It("should create a new bridge", func() {
 			fakeSyncable.TopicsReturns([]string{"foo"})
-			b, err := New(bridgeName, fakeSyncable, topics)
+			b, err := new(bridgeName, fakeSyncable, topics)
 			Expect(err).To(BeNil())
 			Expect(len(b.topics)).To(Equal(1))
 			Expect(b.topics["foo"]).To(Equal(fooFakeTopic))
@@ -53,21 +64,21 @@ var _ = Describe("Topic", func() {
 
 		It("should error if there are no topics", func() {
 			fakeSyncable.TopicsReturns([]string{})
-			b, err := New(bridgeName, fakeSyncable, topics)
+			b, err := new(bridgeName, fakeSyncable, topics)
 			Expect(b).To(BeNil())
 			Expect(err.Error()).To(ContainSubstring("No topics so there is nothing to sync"))
 		})
 
 		It("should error if there are too many topics", func() {
 			fakeSyncable.TopicsReturns([]string{"foo", "bar"})
-			b, err := New(bridgeName, fakeSyncable, topics)
+			b, err := new(bridgeName, fakeSyncable, topics)
 			Expect(b).To(BeNil())
 			Expect(err.Error()).To(ContainSubstring("We don't support more than one topic in a syncable yet"))
 		})
 
 		It("should error if topic does not exist", func() {
 			fakeSyncable.TopicsReturns([]string{"baz"})
-			b, err := New(bridgeName, fakeSyncable, topics)
+			b, err := new(bridgeName, fakeSyncable, topics)
 			Expect(b).To(BeNil())
 			Expect(err.Error()).To(ContainSubstring("is trying to listen to topic"))
 		})
@@ -75,13 +86,13 @@ var _ = Describe("Topic", func() {
 
 	Describe("GetSnapshot()/ApplySnapshot()", func() {
 		var (
-			b   *Bridge
+			b   *TopicSyncableBridge
 			err error
 		)
 
 		JustBeforeEach(func() {
 			fakeSyncable.TopicsReturns([]string{"foo"})
-			b, err = New(bridgeName, fakeSyncable, topics)
+			b, err = new(bridgeName, fakeSyncable, topics)
 			Expect(err).To(BeNil())
 		})
 
@@ -107,7 +118,7 @@ var _ = Describe("Topic", func() {
 			errorC    chan error
 			fakeError error
 			err       error
-			b         *Bridge
+			b         *TopicSyncableBridge
 			ctx       context.Context
 		)
 
@@ -115,7 +126,7 @@ var _ = Describe("Topic", func() {
 			errorC = make(chan error)
 			fakeError = fmt.Errorf("fake error")
 			fakeSyncable.TopicsReturns([]string{"foo"})
-			b, err = New(bridgeName, fakeSyncable, topics)
+			b, err = new(bridgeName, fakeSyncable, topics)
 			Expect(err).To(BeNil())
 			ctx = context.Background()
 		})

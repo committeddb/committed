@@ -5,11 +5,11 @@ import (
 	"net/http"
 
 	"github.com/philborlin/committed/cluster"
-	"github.com/philborlin/committed/types"
+	"github.com/philborlin/committed/syncable"
 )
 
 type clusterDatabasesGetResponse struct {
-	Databases map[string]types.Database
+	Databases map[string]syncable.Database
 }
 
 // NewClusterDatabaseHandler is the handler for Cluster Databases
