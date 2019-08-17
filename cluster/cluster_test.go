@@ -1,171 +1,104 @@
 package cluster
 
-// import (
-// 	"bytes"
-// 	"context"
-// 	"database/sql"
-// 	"errors"
-// 	"fmt"
-// 	"io/ioutil"
-// 	"log"
-// 	"os"
-// 	"reflect"
-// 	"time"
+import (
+	"github.com/philborlin/committed/bridge/bridgefakes"
+	"github.com/philborlin/committed/syncable"
+	"github.com/philborlin/committed/topic"
+	"github.com/philborlin/committed/topic/topicfakes"
+	"github.com/philborlin/committed/types"
 
-// 	"github.com/philborlin/committed/syncable"
-// 	"github.com/philborlin/committed/types"
+	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/gomega"
+)
 
-// 	. "github.com/onsi/ginkgo"
-// 	. "github.com/onsi/gomega"
-// )
+var _ = Describe("Cluster", func() {
+	var (
+		fakeBridge        *bridgefakes.FakeBridge
+		fakeBridgeFactory *bridgefakes.FakeFactory
+	)
 
-// type testReturn struct {
-// 	Key string
-// 	One string
-// }
+	JustBeforeEach(func() {
+		fakeBridge = &bridgefakes.FakeBridge{}
+		fakeBridgeFactory = &bridgefakes.FakeFactory{}
+		fakeBridgeFactory.NewReturns(fakeBridge, nil)
+		bridgeFactory = fakeBridgeFactory
+	})
 
-// var _ = Describe("Cluster", func() {
-// 	var (
-// 		data []byte
-// 		err  error
-// 	)
+	Describe("route()", func() {
+		var (
+			c         *Cluster
+			fakeTopic *topicfakes.FakeTopic
+		)
 
-// 	JustBeforeEach(func() {
-// 		data, err = ioutil.ReadFile("../syncable/simple.toml")
-// 		Expect(err).To(BeNil())
-// 	})
+		JustBeforeEach(func() {
+			data := &Data{
+				Databases: make(map[string]syncable.Database),
+				Syncables: make(map[string]syncable.Syncable),
+				Topics:    make(map[string]topic.Topic),
+			}
+			c = &Cluster{Data: data}
+			fakeTopic = &topicfakes.FakeTopic{}
+		})
 
-// 	It("should correctly add a Syncable", func() {
-// 		f := func(c *Cluster) (interface{}, interface{}, error) {
-// 			name, sync, err := syncable.Parse("toml", bytes.NewReader(data), c.Data.Databases)
-// 			Expect(err).To(BeNil())
+		It("should correctly add a Topic", func() {
+			toml := `[topic]
+			name = "test1"`
+			ap := &types.AcceptedProposal{Topic: "topic", Data: []byte(toml)}
+			Expect(len(c.Data.Topics)).To(Equal(0))
 
-// 			err = c.CreateSyncable(name, sync)
-// 			Expect(err).To(BeNil())
+			err := c.route(ap)
+			Expect(err).To(BeNil())
+			Expect(len(c.Data.Topics)).To(Equal(1))
+			Expect(c.Data.Topics).To(HaveKey("test1"))
+			Expect(c.Data.Topics["test1"].Name()).To(Equal("test1"))
+		})
 
-// 			time.Sleep(2 * time.Second)
+		It("should correctly add a Database", func() {
+			toml := `[database]
+			name = "testdb"
+			type = "test"`
+			ap := &types.AcceptedProposal{Topic: "database", Data: []byte(toml)}
 
-// 			sqlSyncable, ok := sync.(*syncable.SQLSyncable)
-// 			Expect(ok).To(BeTrue())
+			Expect(len(c.Data.Databases)).To(Equal(0))
+			err := c.route(ap)
+			Expect(err).To(BeNil())
+			Expect(len(c.Data.Databases)).To(Equal(1))
+			Expect(c.Data.Databases).To(HaveKey("testdb"))
+		})
 
-// 			e2 := reflect.ValueOf(sqlSyncable).Elem()
-// 			db := e2.FieldByName("DB").Interface().(*sql.DB)
-// 			defer db.Close()
+		It("should correctly add a Syncable", func() {
+			c.Data.Topics["test1"] = fakeTopic
 
-// 			execInTransaction(db, "CREATE TABLE foo (key string, two string);")
+			toml := `[syncable]
+			name="foo"
+			dbType = "test"
+			[test]
+			topic = "test1"`
+			ap := &types.AcceptedProposal{Topic: "syncable", Data: []byte(toml)}
 
-// 			proposal := types.Proposal{Topic: "test1", Proposal: "{\"Key\": \"lock\", \"One\": \"two\"}"}
-// 			c.Propose(proposal)
+			Expect(len(c.Data.Syncables)).To(Equal(0))
+			err := c.route(ap)
+			Expect(err).To(BeNil())
+			Expect(len(c.Data.Syncables)).To(Equal(1))
+			Expect(c.Data.Syncables).To(HaveKey("foo"))
+		})
 
-// 			time.Sleep(2 * time.Second)
+		It("should append data when not using a reserved topic name", func() {
+			c.Data.Topics["test1"] = fakeTopic
 
-// 			expected := testReturn{Key: "lock", One: "two"}
-// 			var actual testReturn
-// 			err = SelectOneRowFromDB(db, "SELECT * FROM foo", &actual.Key, &actual.One)
+			ap := &types.AcceptedProposal{Topic: "test1", Index: 1, Term: 2, Data: []byte("bar")}
+			err := c.route(ap)
+			Expect(err).To(BeNil())
+			Expect(fakeTopic.AppendCallCount()).To(Equal(1))
+			topicData := topic.Data{Index: ap.Index, Term: ap.Term, Data: ap.Data}
+			Expect(fakeTopic.AppendArgsForCall(0)).To(Equal(topicData))
+		})
 
-// 			return expected, actual, err
-// 		}
-
-// 		clusterTest(f)
-// 	})
-
-// 	It("should correctly add a topic", func() {
-// 		f := func(c *Cluster) (interface{}, interface{}, error) {
-// 			topicName := "test1"
-// 			expected, err := c.CreateTopic(topicName)
-// 			actual := c.Data.Topics[topicName]
-// 			return expected, actual, err
-// 		}
-
-// 		clusterTest(f)
-// 	})
-
-// 	It("should correctly add a database", func() {
-// 		f := func(c *Cluster) (interface{}, interface{}, error) {
-// 			name := "foo"
-// 			database := types.NewSQLDB("", "")
-// 			err := c.CreateDatabase(name, database)
-// 			actual := c.Data.Databases[name]
-// 			return database, actual, err
-// 		}
-
-// 		clusterTest(f)
-// 	})
-
-// 	It("should correctly append to a topic", func() {
-// 		f := func(c *Cluster) (interface{}, interface{}, error) {
-// 			expected := types.Proposal{Topic: "test1", Proposal: "Hello World"}
-// 			c.Propose(expected)
-// 			time.Sleep(2 * time.Second)
-
-// 			lastIndex, err := c.storage.LastIndex()
-// 			Expect(err).To(BeNil())
-
-// 			entries, err := c.storage.Entries(lastIndex, lastIndex+1, 1)
-// 			Expect(err).To(BeNil())
-
-// 			actual, err := decodeProposal(entries[0].Data)
-
-// 			return expected, actual, err
-// 		}
-
-// 		clusterTest(f)
-// 	})
-// })
-
-// func clusterTest(f func(*Cluster) (expected interface{}, actual interface{}, err error)) {
-// 	c := NewCluster([]string{"http://127.0.0.1:12379"}, 1, false)
-
-// 	time.AfterFunc(2*time.Second, func() {
-// 		log.Printf("Starting test function")
-// 		after := func(c *Cluster) {
-// 			err := c.Shutdown()
-// 			Expect(err).To(BeNil())
-// 			file := fmt.Sprintf("raft-%d", 1)
-// 			err = os.RemoveAll(file)
-// 			Expect(err).To(BeNil())
-// 			file = fmt.Sprintf("raft-%d-snap", 1)
-// 			err = os.RemoveAll(file)
-// 			Expect(err).To(BeNil())
-// 		}
-
-// 		expected, actual, err := f(c)
-// 		after(c)
-
-// 		Expect(err).To(BeNil())
-// 		Expect(expected).To(Equal(actual))
-// 	})
-
-// 	go c.Start()
-// }
-
-// func execInTransaction(db *sql.DB, sqlString string) {
-// 	tx, err := db.BeginTx(context.Background(), &sql.TxOptions{Isolation: 0, ReadOnly: false})
-// 	Expect(err).To(BeNil())
-
-// 	_, err = tx.ExecContext(context.Background(), sqlString)
-// 	Expect(err).To(BeNil())
-
-// 	err = tx.Commit()
-// 	Expect(err).To(BeNil())
-// }
-
-// func SelectOneRowFromDB(db *sql.DB, table string, dest ...interface{}) error {
-// 	rows, err := db.Query("SELECT * FROM foo")
-// 	if err != nil {
-// 		return err
-// 	}
-// 	defer rows.Close()
-// 	var rowCount int
-// 	for rows.Next() {
-// 		rowCount++
-// 		if err := rows.Scan(dest...); err != nil {
-// 			return err
-// 		}
-// 	}
-// 	if rowCount != 1 {
-// 		return errors.New("Data is not in the database")
-// 	}
-
-// 	return rows.Err()
-// }
+		It("should error when appending to a topic that doesn't exist", func() {
+			ap := &types.AcceptedProposal{Topic: "bogusTopic"}
+			err := c.route(ap)
+			Expect(err).ToNot(BeNil())
+			Expect(err.Error()).To(ContainSubstring("Attempting to append to topic"))
+		})
+	})
+})

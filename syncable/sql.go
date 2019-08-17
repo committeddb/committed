@@ -38,7 +38,7 @@ type sqlConfig struct {
 type SQLSyncable struct {
 	config   *sqlConfig
 	insert   *sqlInsert
-	database *types.SQLDB
+	database *SQLDB
 	DB       *sql.DB
 }
 
@@ -47,7 +47,7 @@ type sqlInsert struct {
 	jsonPath []string
 }
 
-func sqlParser(v *viper.Viper, databases map[string]types.Database) (Syncable, error) {
+func sqlParser(v *viper.Viper, databases map[string]Database) (Syncable, error) {
 	topic := v.GetString("sql.topic")
 	sqlDB := v.GetString("sql.db")
 	table := v.GetString("sql.table")
@@ -86,7 +86,7 @@ func sqlParser(v *viper.Viper, databases map[string]types.Database) (Syncable, e
 }
 
 // NewSQLSyncable creates a new syncable
-func newSQLSyncable(sqlConfig *sqlConfig, databases map[string]types.Database) (*SQLSyncable, error) {
+func newSQLSyncable(sqlConfig *sqlConfig, databases map[string]Database) (*SQLSyncable, error) {
 	database := databases[sqlConfig.sqlDB]
 	if database == nil {
 		return nil, fmt.Errorf("Database %s is not setup", sqlConfig.sqlDB)
@@ -94,7 +94,7 @@ func newSQLSyncable(sqlConfig *sqlConfig, databases map[string]types.Database) (
 	if database.Type() != "sql" {
 		return nil, fmt.Errorf("Database %s is not a sql database", sqlConfig.sqlDB)
 	}
-	sqlDB := database.(*types.SQLDB)
+	sqlDB := database.(*SQLDB)
 
 	return &SQLSyncable{config: sqlConfig, database: sqlDB}, nil
 }

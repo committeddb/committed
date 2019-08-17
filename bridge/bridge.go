@@ -11,8 +11,26 @@ import (
 	"github.com/pkg/errors"
 )
 
+//go:generate go run github.com/maxbrunsfeld/counterfeiter/v6 -generate
+
+// Factory creates a new Bridge
+//counterfeiter:generate . Factory
+type Factory interface {
+	New(name string, s syncable.Syncable, topics map[string]topic.Topic) (Bridge, error)
+}
+
+// TopicSyncableBridgeFactory creates TopicSyncableBridges
+type TopicSyncableBridgeFactory struct {
+}
+
 // Bridge manages the interactions between a topic and a syncable
-type Bridge struct {
+//counterfeiter:generate . Bridge
+type Bridge interface {
+	Init(ctx context.Context, errorC chan<- error) error
+}
+
+// TopicSyncableBridge is an implementation of the Bridge interface
+type TopicSyncableBridge struct {
 	Name      string
 	Syncable  syncable.Syncable
 	topics    map[string]topic.Topic
@@ -25,7 +43,8 @@ type Snapshot struct {
 }
 
 // New creates a wrapper
-func New(name string, s syncable.Syncable, topics map[string]topic.Topic) (*Bridge, error) {
+func (f *TopicSyncableBridgeFactory) New(name string, s syncable.Syncable,
+	topics map[string]topic.Topic) (Bridge, error) {
 	if len(s.Topics()) == 0 {
 		return nil, fmt.Errorf("[%s.bridge] No topics so there is nothing to sync", name)
 	}
@@ -46,11 +65,11 @@ func New(name string, s syncable.Syncable, topics map[string]topic.Topic) (*Brid
 		tmap[item] = t
 	}
 
-	return &Bridge{Name: name, Syncable: s, topics: tmap}, nil
+	return &TopicSyncableBridge{Name: name, Syncable: s, topics: tmap}, nil
 }
 
 // GetSnapshot implements Snapshotter
-func (b *Bridge) GetSnapshot() ([]byte, error) {
+func (b *TopicSyncableBridge) GetSnapshot() ([]byte, error) {
 	s := &Snapshot{LastIndex: b.lastIndex}
 	var buf bytes.Buffer
 	_ = gob.NewEncoder(&buf).Encode(s)
@@ -59,7 +78,7 @@ func (b *Bridge) GetSnapshot() ([]byte, error) {
 }
 
 // ApplySnapshot implements Snapshotter
-func (b *Bridge) ApplySnapshot(snap []byte) error {
+func (b *TopicSyncableBridge) ApplySnapshot(snap []byte) error {
 	var s Snapshot
 	dec := gob.NewDecoder(bytes.NewBuffer(snap))
 	if err := dec.Decode(&s); err != nil {
@@ -71,10 +90,10 @@ func (b *Bridge) ApplySnapshot(snap []byte) error {
 	return nil
 }
 
-// Init implements Syncable
+// Init initializes the bridge and starts it up
 // To close the syncable send a message to the ctx.Done() channel
 // It is the caller's responsibility to listen to any errors on the errorC channel passed in
-func (b *Bridge) Init(ctx context.Context, errorC chan<- error) error {
+func (b *TopicSyncableBridge) Init(ctx context.Context, errorC chan<- error) error {
 	err := b.Syncable.Init(ctx)
 	if err != nil {
 		return errors.Wrapf(err, "[%s.bridge] Init of internal syncable failed", b.Name)

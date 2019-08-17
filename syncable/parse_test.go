@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"io/ioutil"
 
-	"github.com/philborlin/committed/types"
 	"github.com/spf13/viper"
 
 	. "github.com/onsi/ginkgo"
@@ -16,7 +15,7 @@ var _ = Describe("Syncable Parser", func() {
 		var (
 			data []byte
 			err  error
-			dbs  map[string]types.Database
+			dbs  map[string]Database
 		)
 
 		JustBeforeEach(func() {
@@ -71,13 +70,13 @@ func simpleConfig() *sqlConfig {
 	return &sqlConfig{sqlDB: "testdb", topic: "test1", table: "foo", mappings: m, indexes: i, primaryKey: "pk"}
 }
 
-func databases() (map[string]types.Database, error) {
-	sqlDB := types.NewSQLDB("ramsql", "memory://foo")
+func databases() (map[string]Database, error) {
+	sqlDB := NewSQLDB("ramsql", "memory://foo")
 	err := sqlDB.Init()
 	if err != nil {
 		return nil, err
 	}
-	m := make(map[string]types.Database)
+	m := make(map[string]Database)
 	m["testdb"] = sqlDB
 	return m, nil
 }

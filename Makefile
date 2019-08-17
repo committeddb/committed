@@ -11,7 +11,7 @@ test/topic:
 	$(call test,"github.com/philborlin/committed/topic")
 
 test/cluster:
-	$(call test,"github.com/philborlin/committed/db")
+	$(call test,"github.com/philborlin/committed/cluster")
 
 test/sync:
 	$(call test,"github.com/philborlin/committed/syncable")

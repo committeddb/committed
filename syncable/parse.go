@@ -4,16 +4,16 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/philborlin/committed/types"
 	"github.com/spf13/viper"
 )
 
-var parsers = map[string]func(*viper.Viper, map[string]types.Database) (Syncable, error){
-	"sql": sqlParser,
+var parsers = map[string]func(*viper.Viper, map[string]Database) (Syncable, error){
+	"sql":  sqlParser,
+	"test": testParser,
 }
 
 // ParseSyncable turns a toml file into a Syncable
-func ParseSyncable(style string, reader io.Reader, dbs map[string]types.Database) (string, Syncable, error) {
+func ParseSyncable(style string, reader io.Reader, dbs map[string]Database) (string, Syncable, error) {
 	v, err := parseBytes(style, reader)
 	if err != nil {
 		return "", nil, err
@@ -21,20 +21,21 @@ func ParseSyncable(style string, reader io.Reader, dbs map[string]types.Database
 
 	name := v.GetString("syncable.name")
 	dbType := v.GetString("syncable.dbType")
-	switch dbType {
-	case "sql":
-		syncable, err := sqlParser(v, dbs)
-		if err != nil {
-			return "", nil, err
-		}
-		return name, syncable, nil
-	default:
+	parser, ok := parsers[dbType]
+
+	if !ok {
 		return "", nil, fmt.Errorf("Cannot parse database of type: %s", dbType)
 	}
+
+	syncable, err := parser(v, dbs)
+	if err != nil {
+		return "", nil, err
+	}
+	return name, syncable, nil
 }
 
 // ParseDatabase turns a toml file into a Database
-func ParseDatabase(style string, reader io.Reader) (string, types.Database, error) {
+func ParseDatabase(style string, reader io.Reader) (string, Database, error) {
 	v, err := parseBytes(style, reader)
 	if err != nil {
 		return "", nil, err
@@ -47,8 +48,10 @@ func ParseDatabase(style string, reader io.Reader) (string, types.Database, erro
 	case "sql":
 		driver := v.GetString("database.sql.dialect")
 		connectionString := v.GetString("database.sql.connectionString")
-		db := types.NewSQLDB(driver, connectionString)
+		db := NewSQLDB(driver, connectionString)
 		return name, db, nil
+	case "test":
+		return name, &TestDB{}, nil
 	default:
 		return "", nil, fmt.Errorf("Cannot parse database of type: %s", dbType)
 	}

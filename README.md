@@ -65,9 +65,9 @@ The Database is a TOML configuration file. Currently the only type supported is 
 To Add a syncable POST to http://server:port/cluster/syncables with an HTTP body that looks like:  
 ```
 [syncable]
-name="foo"
+name = "foo"
 # Determines what the rest of the config will look like
-dbType="sql"
+dbType = "sql"
 
 [sql]
 topic = "test1"

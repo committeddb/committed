@@ -24,7 +24,7 @@ type Cluster struct {
 
 // Data stores core primitives that will be stored in snapshots
 type Data struct {
-	Databases map[string]types.Database
+	Databases map[string]syncable.Database
 	Syncables map[string]syncable.Syncable
 	Topics    map[string]topic.Topic
 }
@@ -33,7 +33,7 @@ type Data struct {
 func New(snapshotter *snap.Snapshotter, proposeC chan<- []byte, commitC <-chan []byte,
 	errorC <-chan error, dataDir string) *Cluster {
 	data := &Data{
-		Databases: make(map[string]types.Database),
+		Databases: make(map[string]syncable.Database),
 		Syncables: make(map[string]syncable.Syncable),
 		Topics:    make(map[string]topic.Topic),
 	}
@@ -91,11 +91,11 @@ func (c *Cluster) readCommits(commitC <-chan []byte, errorC <-chan error) {
 func (c *Cluster) route(ap *types.AcceptedProposal) error {
 	switch ap.Topic {
 	case "database":
-		c.AddDatabase(ap.Data)
+		return c.AddDatabase(ap.Data)
 	case "syncable":
-		c.AddSyncable(ap.Data)
+		return c.AddSyncable(ap.Data)
 	case "topic":
-		c.AddTopic(ap.Data)
+		return c.AddTopic(ap.Data)
 	default:
 		t, ok := c.Data.Topics[ap.Topic]
 		if !ok {

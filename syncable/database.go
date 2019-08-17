@@ -1,4 +1,4 @@
-package types
+package syncable
 
 import (
 	"database/sql"
@@ -8,6 +8,7 @@ import (
 )
 
 // Database represents a query database
+//counterfeiter:generate . Database
 type Database interface {
 	Init() error
 	Type() string
@@ -54,4 +55,23 @@ func (d *SQLDB) Close() error {
 func (d *SQLDB) Open() (*sql.DB, error) {
 	// In the future we probably want to reuse connections
 	return sql.Open(d.driver, d.connectionString)
+}
+
+// TestDB returns a test implementation of the Database interface
+type TestDB struct {
+}
+
+// Init implements Database
+func (d *TestDB) Init() error {
+	return nil
+}
+
+// Type implements Database
+func (d *TestDB) Type() string {
+	return "test"
+}
+
+// Close implements Database
+func (d *TestDB) Close() error {
+	return nil
 }

@@ -22,7 +22,7 @@ var _ = Describe("SQL Syncable", func() {
 	var (
 		data     []byte
 		err      error
-		dbs      map[string]types.Database
+		dbs      map[string]Database
 		syncable *SQLSyncable
 	)
 

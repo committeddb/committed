@@ -11,6 +11,8 @@ import (
 	"github.com/pkg/errors"
 )
 
+var bridgeFactory bridge.Factory = &bridge.TopicSyncableBridgeFactory{}
+
 // AddDatabase creates a database
 func (c *Cluster) AddDatabase(toml []byte) error {
 	name, database, err := syncable.ParseDatabase("toml", strings.NewReader(string(toml)))
@@ -48,7 +50,7 @@ func (c *Cluster) AddSyncable(toml []byte) error {
 	c.Data.Syncables[name] = syncable
 	c.mu.Unlock()
 
-	bridge, err := bridge.New(name, syncable, c.Data.Topics)
+	bridge, err := bridgeFactory.New(name, syncable, c.Data.Topics)
 	if err != nil {
 		return errors.Wrap(err, "Router could not create bridge")
 	}

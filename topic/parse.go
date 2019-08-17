@@ -30,7 +30,7 @@ func PreParseTopic(style string, reader io.Reader, baseDir string) (string, erro
 		return "", err
 	}
 
-	name := v.GetString("syncable.name")
+	name := v.GetString("topic.name")
 
 	if len(strings.TrimSpace(name)) == 0 {
 		return "", fmt.Errorf("topic name is empty")
