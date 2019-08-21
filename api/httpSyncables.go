@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"net/http"
 
 	"github.com/philborlin/committed/cluster"
@@ -27,8 +26,9 @@ func (c *clusterSyncableHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 	if r.Method == "POST" {
 		proposeToml(w, r, c.c.ProposeSyncable)
 	} else if r.Method == "GET" {
-		w.Header().Set("Content-Type", "application/json")
-		response, _ := json.Marshal(clusterSyncableGetResponse{c.c.Data.Syncables})
-		w.Write(response)
+		writeMultipartAndHandleError(nil, w)
+		// w.Header().Set("Content-Type", "application/json")
+		// response, _ := json.Marshal(clusterSyncableGetResponse{c.c.Data.Syncables})
+		// w.Write(response)
 	}
 }

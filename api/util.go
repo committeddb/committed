@@ -2,8 +2,10 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"io/ioutil"
+	"mime/multipart"
 	"net/http"
 )
 
@@ -47,4 +49,30 @@ func readerToString(r io.Reader) (string, error) {
 func errorTo500(w http.ResponseWriter, err error) {
 	w.Write([]byte(err.Error()))
 	w.WriteHeader(500)
+}
+
+func writeMultipartAndHandleError(tomlFiles []string, w http.ResponseWriter) {
+	err := writeMultipart(tomlFiles, w)
+	if err != nil {
+		errorTo500(w, err)
+	}
+}
+
+func writeMultipart(tomlFiles []string, w http.ResponseWriter) error {
+	mw := multipart.NewWriter(w)
+	w.Header().Set("Content-Type", fmt.Sprintf("multipart/mixed;boundary=%s", mw.Boundary()))
+	for _, tomlFile := range tomlFiles {
+		part, err := mw.CreatePart(nil)
+		if err != nil {
+			return err
+		}
+		_, err = part.Write([]byte(tomlFile))
+		if err != nil {
+			return err
+		}
+	}
+	if err := mw.Close(); err != nil {
+		return err
+	}
+	return nil
 }

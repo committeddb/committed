@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"net/http"
 
 	"github.com/philborlin/committed/cluster"
@@ -27,8 +26,9 @@ func (c *clusterDatabaseHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 	if r.Method == "POST" {
 		proposeToml(w, r, c.c.ProposeDatabase)
 	} else if r.Method == "GET" {
-		w.Header().Set("Content-Type", "application/json")
-		response, _ := json.Marshal(clusterDatabasesGetResponse{c.c.Data.Databases})
-		w.Write(response)
+		writeMultipartAndHandleError(nil, w)
+		// w.Header().Set("Content-Type", "application/json")
+		// response, _ := json.Marshal(clusterDatabasesGetResponse{c.c.Data.Databases})
+		// w.Write(response)
 	}
 }

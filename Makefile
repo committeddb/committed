@@ -5,7 +5,7 @@ define test
 endef
 
 test:
-	go test ./... -cover
+	go test -short ./... -cover
 
 test/topic:
 	$(call test,"github.com/philborlin/committed/topic")
@@ -18,3 +18,6 @@ test/sync:
 
 test/bridge:
 	$(call test,"github.com/philborlin/committed/bridge")
+
+test/e2e:
+	go test -v -p=1 "github.com/philborlin/committed/e2e"

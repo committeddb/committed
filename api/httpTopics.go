@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"net/http"
 
 	"github.com/philborlin/committed/cluster"
@@ -32,8 +31,9 @@ func (c *clusterTopicHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	if r.Method == "POST" {
 		proposeToml(w, r, c.c.ProposeTopic)
 	} else if r.Method == "GET" {
-		w.Header().Set("Content-Type", "application/json")
-		response, _ := json.Marshal(clusterTopicGetResponse{c.c.Data.Topics})
-		w.Write(response)
+		writeMultipartAndHandleError(nil, w)
+		// w.Header().Set("Content-Type", "application/json")
+		// response, _ := json.Marshal(clusterTopicGetResponse{c.c.Data.Topics})
+		// w.Write(response)
 	}
 }
