@@ -4,12 +4,7 @@ import (
 	"net/http"
 
 	"github.com/philborlin/committed/cluster"
-	"github.com/philborlin/committed/syncable"
 )
-
-type clusterDatabasesGetResponse struct {
-	Databases map[string]syncable.Database
-}
 
 // NewClusterDatabaseHandler is the handler for Cluster Databases
 func NewClusterDatabaseHandler(c *cluster.Cluster) http.Handler {
@@ -26,9 +21,6 @@ func (c *clusterDatabaseHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 	if r.Method == "POST" {
 		proposeToml(w, r, c.c.ProposeDatabase)
 	} else if r.Method == "GET" {
-		writeMultipartAndHandleError(nil, w)
-		// w.Header().Set("Content-Type", "application/json")
-		// response, _ := json.Marshal(clusterDatabasesGetResponse{c.c.Data.Databases})
-		// w.Write(response)
+		writeMultipartAndHandleError(c.c.TOML.Databases, w)
 	}
 }

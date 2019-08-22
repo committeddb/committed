@@ -28,6 +28,7 @@ import (
 	"time"
 
 	ctypes "github.com/philborlin/committed/types"
+	"github.com/pkg/errors"
 
 	"github.com/coreos/etcd/etcdserver/stats"
 	"github.com/coreos/etcd/pkg/fileutil"
@@ -42,10 +43,10 @@ import (
 
 // A key-value stream backed by raft
 type raftNode struct {
-	proposeC    <-chan []byte            // proposed messages (k,v)
-	confChangeC <-chan raftpb.ConfChange // proposed cluster config changes
-	commitC     chan<- []byte            // entries committed to log (k,v)
-	errorC      chan<- error             // errors from raft session
+	proposeC    <-chan []byte                   // proposed messages (k,v)
+	confChangeC <-chan raftpb.ConfChange        // proposed cluster config changes
+	commitC     chan<- *ctypes.AcceptedProposal // entries committed to log (k,v)
+	errorC      chan<- error                    // errors from raft session
 
 	id          int      // client ID for raft session
 	peers       []string // raft peer URLs
@@ -82,9 +83,9 @@ var defaultSnapCount uint64 = 10000
 // commit channel, followed by a nil message (to indicate the channel is
 // current), then new log entries. To shutdown, close proposeC and read errorC.
 func NewRaftNode(id int, peers []string, join bool, dataDir string, getSnapshot func() ([]byte, error), proposeC <-chan []byte,
-	confChangeC <-chan raftpb.ConfChange) (<-chan []byte, <-chan error, <-chan *snap.Snapshotter) {
+	confChangeC <-chan raftpb.ConfChange) (<-chan *ctypes.AcceptedProposal, <-chan error, <-chan *snap.Snapshotter) {
 
-	commitC := make(chan []byte)
+	commitC := make(chan *ctypes.AcceptedProposal)
 	errorC := make(chan error)
 
 	rc := &raftNode{
@@ -141,23 +142,15 @@ func (rc *raftNode) entriesToApply(ents []raftpb.Entry) (nents []raftpb.Entry) {
 	return nents
 }
 
-func (rc *raftNode) createEncodedAcceptedProposal(ent raftpb.Entry) (string, bool) {
+func (rc *raftNode) createAcceptedProposal(ent raftpb.Entry) (*ctypes.AcceptedProposal, error) {
 	var p ctypes.Proposal
 	dec := gob.NewDecoder(bytes.NewBuffer(ent.Data))
 	if err := dec.Decode(&p); err != nil {
-		log.Printf("could not decode message (%v)", err)
-		return "", false
+		return nil, errors.Wrap(err, "could not decode message")
 	}
 
-	// TODO This is really silly, commitC should just send Accepted Proposals instead of strings
 	ap := &ctypes.AcceptedProposal{Topic: p.Topic, Data: p.Proposal, Index: ent.Index, Term: ent.Term}
-	var buf bytes.Buffer
-	if err := gob.NewEncoder(&buf).Encode(ap); err != nil {
-		log.Printf("could not encode accepted proposal (%v)", err)
-		return "", false
-	}
-
-	return buf.String(), true
+	return ap, nil
 }
 
 // publishEntries writes committed log entries to commit channel and returns
@@ -171,8 +164,15 @@ func (rc *raftNode) publishEntries(ents []raftpb.Entry) bool {
 				break
 			}
 
+			ap, err := rc.createAcceptedProposal(ents[i])
+			if err != nil {
+				// Log and ignore
+				fmt.Println(errors.Wrap(err, "could not decode message"))
+				continue
+			}
+
 			select {
-			case rc.commitC <- ents[i].Data:
+			case rc.commitC <- ap:
 			case <-rc.stopc:
 				return false
 			}
@@ -213,7 +213,7 @@ func (rc *raftNode) publishEntries(ents []raftpb.Entry) bool {
 func (rc *raftNode) loadSnapshot() *raftpb.Snapshot {
 	snapshot, err := rc.snapshotter.Load()
 	if err != nil && err != snap.ErrNoSnapshot {
-		log.Fatalf("raftexample: error loading snapshot (%v)", err)
+		log.Fatalf("raft: error loading snapshot (%v)", err)
 	}
 	return snapshot
 }
@@ -222,12 +222,12 @@ func (rc *raftNode) loadSnapshot() *raftpb.Snapshot {
 func (rc *raftNode) openWAL(snapshot *raftpb.Snapshot) *wal.WAL {
 	if !wal.Exist(rc.waldir) {
 		if err := os.Mkdir(rc.waldir, 0750); err != nil {
-			log.Fatalf("raftexample: cannot create dir for wal (%v)", err)
+			log.Fatalf("raft: cannot create dir for wal (%v)", err)
 		}
 
 		w, err := wal.Create(rc.waldir, nil)
 		if err != nil {
-			log.Fatalf("raftexample: create wal error (%v)", err)
+			log.Fatalf("raft: create wal error (%v)", err)
 		}
 		w.Close()
 	}
@@ -239,7 +239,7 @@ func (rc *raftNode) openWAL(snapshot *raftpb.Snapshot) *wal.WAL {
 	log.Printf("loading WAL at term %d and index %d", walsnap.Term, walsnap.Index)
 	w, err := wal.Open(rc.waldir, walsnap)
 	if err != nil {
-		log.Fatalf("raftexample: error loading wal (%v)", err)
+		log.Fatalf("raft: error loading wal (%v)", err)
 	}
 
 	return w
@@ -252,7 +252,7 @@ func (rc *raftNode) replayWAL() *wal.WAL {
 	w := rc.openWAL(snapshot)
 	_, st, ents, err := w.ReadAll()
 	if err != nil {
-		log.Fatalf("raftexample: failed to read WAL (%v)", err)
+		log.Fatalf("raft: failed to read WAL (%v)", err)
 	}
 	rc.raftStorage = raft.NewMemoryStorage()
 	if snapshot != nil {
@@ -282,7 +282,7 @@ func (rc *raftNode) writeError(err error) {
 func (rc *raftNode) startRaft() {
 	if !fileutil.Exist(rc.snapdir) {
 		if err := os.Mkdir(rc.snapdir, 0750); err != nil {
-			log.Fatalf("raftexample: cannot create dir for snapshot (%v)", err)
+			log.Fatalf("raft: cannot create dir for snapshot (%v)", err)
 		}
 	}
 	rc.snapshotter = snap.New(rc.snapdir)
@@ -477,19 +477,19 @@ func (rc *raftNode) serveChannels() {
 func (rc *raftNode) serveRaft() {
 	url, err := url.Parse(rc.peers[rc.id-1])
 	if err != nil {
-		log.Fatalf("raftexample: Failed parsing URL (%v)", err)
+		log.Fatalf("raft: Failed parsing URL (%v)", err)
 	}
 
 	ln, err := newStoppableListener(url.Host, rc.httpstopc)
 	if err != nil {
-		log.Fatalf("raftexample: Failed to listen rafthttp (%v)", err)
+		log.Fatalf("raft: Failed to listen rafthttp (%v)", err)
 	}
 
 	err = (&http.Server{Handler: rc.transport.Handler()}).Serve(ln)
 	select {
 	case <-rc.httpstopc:
 	default:
-		log.Fatalf("raftexample: Failed to serve rafthttp (%v)", err)
+		log.Fatalf("raft: Failed to serve rafthttp (%v)", err)
 	}
 	close(rc.httpdonec)
 }

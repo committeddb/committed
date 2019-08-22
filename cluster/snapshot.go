@@ -6,18 +6,19 @@ import "encoding/json"
 func (c *Cluster) GetSnapshot() ([]byte, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return json.Marshal(c.Data)
+	// TODO We need to add bridge indexes to the snapshot
+	return json.Marshal(c.TOML)
 }
 
 // ApplySnapshot implements Snapshotter
 func (c *Cluster) ApplySnapshot(snapshot []byte) error {
 	// TODO This has to setup the bridges
-	var data *Data
-	if err := json.Unmarshal(snapshot, data); err != nil {
+	var toml *TOML
+	if err := json.Unmarshal(snapshot, toml); err != nil {
 		return err
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.Data = data
+	c.TOML = toml
 	return nil
 }

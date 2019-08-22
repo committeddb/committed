@@ -22,12 +22,6 @@ func (c *Cluster) Propose(proposal types.Proposal) {
 	c.proposeC <- buf.Bytes()
 }
 
-func decodeProposal(b []byte) (types.Proposal, error) {
-	p := &types.Proposal{}
-	err := gob.NewDecoder(bytes.NewReader(b)).Decode(p)
-	return *p, err
-}
-
 // ProposeTopic appends a topic to the raft
 func (c *Cluster) ProposeTopic(toml string) error {
 	name, err := topic.PreParseTopic("toml", strings.NewReader(toml), c.dataDir)

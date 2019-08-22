@@ -36,7 +36,8 @@ var _ = Describe("Cluster", func() {
 				Syncables: make(map[string]syncable.Syncable),
 				Topics:    make(map[string]topic.Topic),
 			}
-			c = &Cluster{Data: data, dataDir: "data/"}
+			toml := &TOML{}
+			c = &Cluster{Data: data, TOML: toml, dataDir: "data/"}
 			fakeTopic = &topicfakes.FakeTopic{}
 		})
 

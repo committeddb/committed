@@ -27,6 +27,7 @@ func (c *Cluster) AddDatabase(toml []byte) error {
 	log.Printf("...Initialized database: %s\n", name)
 
 	c.mu.Lock()
+	c.TOML.Databases = append(c.TOML.Databases, string(toml))
 	c.Data.Databases[name] = database
 	c.mu.Unlock()
 
@@ -47,6 +48,7 @@ func (c *Cluster) AddSyncable(toml []byte) error {
 	log.Printf("...Initialized syncable: %s\n", name)
 
 	c.mu.Lock()
+	c.TOML.Syncables = append(c.TOML.Syncables, string(toml))
 	c.Data.Syncables[name] = syncable
 	c.mu.Unlock()
 
@@ -72,6 +74,7 @@ func (c *Cluster) AddTopic(toml []byte) error {
 	}
 
 	c.mu.Lock()
+	c.TOML.Topics = append(c.TOML.Topics, string(toml))
 	c.Data.Topics[name] = topic
 	c.mu.Unlock()
 

@@ -56,8 +56,6 @@ type Control struct {
 }
 
 func (c *Control) shutdown(deleteData bool) error {
-	// time.Sleep(20 * time.Second)
-
 	for _, node := range c.nodes {
 		err := node.cmd.Process.Kill()
 		if err != nil {

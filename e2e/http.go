@@ -9,10 +9,14 @@ import (
 	"mime/multipart"
 	"net/http"
 	"strings"
+	"time"
 )
 
 func (c *Control) post(path string, data string) ([]byte, error) {
-	return body(http.Post(c.url(path), "application/toml", strings.NewReader(data)))
+	b, err := body(http.Post(c.url(path), "application/toml", strings.NewReader(data)))
+	// Wait for raft consensus
+	time.Sleep(1 * time.Second)
+	return b, err
 }
 
 func (c *Control) get(path string) ([]string, error) {
@@ -40,8 +44,6 @@ func parseMultipart(resp *http.Response, err error) ([]string, error) {
 	}
 
 	contentType := resp.Header.Get("Content-Type")
-	fmt.Printf("\n[%v] Content-Type: [%s]", resp.StatusCode, contentType)
-
 	_, params, err := mime.ParseMediaType(contentType)
 	if err != nil {
 		return nil, err

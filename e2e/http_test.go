@@ -6,6 +6,11 @@ import (
 )
 
 var _ = Describe("Cluster", func() {
+	const (
+		topicTOML = `[topic]
+name = "test1"`
+	)
+
 	var (
 		err     error
 		control *Control
@@ -35,5 +40,28 @@ var _ = Describe("Cluster", func() {
 		topics, err := control.getTopics()
 		Expect(err).To(BeNil())
 		Expect(len(topics)).To(Equal(0))
+	})
+
+	It("adds topics", func() {
+		err = control.postTopic(topicTOML)
+		Expect(err).To(BeNil())
+		topics, err := control.getTopics()
+		Expect(err).To(BeNil())
+		Expect(len(topics)).To(Equal(1))
+		Expect(topics[0]).To(Equal(topicTOML))
+	})
+
+	It("loads topic on reload", func() {
+		err = control.postTopic(topicTOML)
+		Expect(err).To(BeNil())
+
+		control.shutdown(false)
+		control, err = startup()
+		Expect(err).To(BeNil())
+
+		topics, err := control.getTopics()
+		Expect(err).To(BeNil())
+		Expect(len(topics)).To(Equal(1))
+		Expect(topics[0]).To(Equal(topicTOML))
 	})
 })

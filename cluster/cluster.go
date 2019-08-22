@@ -20,17 +20,25 @@ type Cluster struct {
 	proposeC    chan<- []byte // channel for proposing updates
 	snapshotter *snap.Snapshotter
 	Data        *Data
+	TOML        *TOML
 }
 
-// Data stores core primitives that will be stored in snapshots
+// Data stores core primitives
 type Data struct {
 	Databases map[string]syncable.Database
 	Syncables map[string]syncable.Syncable
 	Topics    map[string]topic.Topic
 }
 
+// TOML stores the toml config files for each primitive. The snapshot will be based on these plus some additional data
+type TOML struct {
+	Databases []string
+	Syncables []string
+	Topics    []string
+}
+
 // New creates a new Cluster
-func New(snapshotter *snap.Snapshotter, proposeC chan<- []byte, commitC <-chan []byte,
+func New(snapshotter *snap.Snapshotter, proposeC chan<- []byte, commitC <-chan *types.AcceptedProposal,
 	errorC <-chan error, dataDir string) *Cluster {
 	data := &Data{
 		Databases: make(map[string]syncable.Database),
@@ -38,12 +46,15 @@ func New(snapshotter *snap.Snapshotter, proposeC chan<- []byte, commitC <-chan [
 		Topics:    make(map[string]topic.Topic),
 	}
 
+	toml := &TOML{}
+
 	c := &Cluster{
 		dataDir:     dataDir,
 		errorC:      make(chan error),
 		proposeC:    proposeC,
 		snapshotter: snapshotter,
 		Data:        data,
+		TOML:        toml,
 	}
 
 	// replay log into cluster
@@ -54,9 +65,9 @@ func New(snapshotter *snap.Snapshotter, proposeC chan<- []byte, commitC <-chan [
 	return c
 }
 
-func (c *Cluster) readCommits(commitC <-chan []byte, errorC <-chan error) {
-	for data := range commitC {
-		if data == nil {
+func (c *Cluster) readCommits(commitC <-chan *types.AcceptedProposal, errorC <-chan error) {
+	for ap := range commitC {
+		if ap == nil {
 			// done replaying log; new data incoming
 			// OR signaled to load snapshot
 			snapshot, err := c.snapshotter.Load()
@@ -73,12 +84,7 @@ func (c *Cluster) readCommits(commitC <-chan []byte, errorC <-chan error) {
 			continue
 		}
 
-		ap, err := types.NewAcceptedProposal(data)
-		if err != nil {
-			log.Printf("could not decode message (%v)", err)
-		}
-
-		err = c.route(ap)
+		err := c.route(ap)
 		if err != nil {
 			log.Printf("could not route message (%v)", err)
 		}
