@@ -26,7 +26,7 @@ func startup() (*Control, error) {
 		return nil, err
 	}
 
-	time.Sleep(3 * time.Second)
+	time.Sleep(5 * time.Second)
 
 	return &Control{nodes: []*node{node1, node2, node3}}, nil
 }

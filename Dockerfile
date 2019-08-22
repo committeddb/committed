@@ -7,6 +7,6 @@ RUN mkdir -p ${APPLICATION}
 ADD . ${APPLICATION}
 WORKDIR ${APPLICATION}
 
-RUN go build -o main .
+RUN go build -o committed .
 
-CMD ${APPLICATION}/main
+CMD ${APPLICATION}/committed
