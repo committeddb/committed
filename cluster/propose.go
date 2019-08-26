@@ -29,7 +29,7 @@ func (c *Cluster) ProposeTopic(toml string) error {
 		return errors.Wrap(err, "Could not create proposed topic")
 	}
 
-	if name == "database" || name == "syncable" || name == "topic" {
+	if name == "database" || name == "syncable" || name == "topic" || strings.HasPrefix(name, "bridge") {
 		return fmt.Errorf("%s is a reserved name", name)
 	}
 

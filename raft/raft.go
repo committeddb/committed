@@ -82,8 +82,9 @@ var defaultSnapCount uint64 = 10000
 // provided the proposal channel. All log entries are replayed over the
 // commit channel, followed by a nil message (to indicate the channel is
 // current), then new log entries. To shutdown, close proposeC and read errorC.
-func NewRaftNode(id int, peers []string, join bool, dataDir string, getSnapshot func() ([]byte, error), proposeC <-chan []byte,
-	confChangeC <-chan raftpb.ConfChange) (<-chan *ctypes.AcceptedProposal, <-chan error, <-chan *snap.Snapshotter) {
+func NewRaftNode(id int, peers []string, join bool, dataDir string, getSnapshot func() ([]byte, error),
+	proposeC <-chan []byte, confChangeC <-chan raftpb.ConfChange) (<-chan *ctypes.AcceptedProposal,
+	<-chan error, <-chan *snap.Snapshotter, ctypes.Leader) {
 
 	commitC := make(chan *ctypes.AcceptedProposal)
 	errorC := make(chan error)
@@ -108,7 +109,7 @@ func NewRaftNode(id int, peers []string, join bool, dataDir string, getSnapshot 
 		// rest of structure populated after WAL replay
 	}
 	go rc.startRaft()
-	return commitC, errorC, rc.snapshotterReady
+	return commitC, errorC, rc.snapshotterReady, rc
 }
 
 func (rc *raftNode) saveSnap(snap raftpb.Snapshot) error {
@@ -149,8 +150,7 @@ func (rc *raftNode) createAcceptedProposal(ent raftpb.Entry) (*ctypes.AcceptedPr
 		return nil, errors.Wrap(err, "could not decode message")
 	}
 
-	ap := &ctypes.AcceptedProposal{Topic: p.Topic, Data: p.Proposal, Index: ent.Index, Term: ent.Term}
-	return ap, nil
+	return &ctypes.AcceptedProposal{Topic: p.Topic, Data: p.Proposal, Index: ent.Index, Term: ent.Term}, nil
 }
 
 // publishEntries writes committed log entries to commit channel and returns
@@ -456,6 +456,7 @@ func (rc *raftNode) serveChannels() {
 			}
 			rc.raftStorage.Append(rd.Entries)
 			rc.transport.Send(rd.Messages)
+
 			if ok := rc.publishEntries(rc.entriesToApply(rd.CommittedEntries)); !ok {
 				rc.stop()
 				return
@@ -500,3 +501,7 @@ func (rc *raftNode) Process(ctx context.Context, m raftpb.Message) error {
 func (rc *raftNode) IsIDRemoved(id uint64) bool                           { return false }
 func (rc *raftNode) ReportUnreachable(id uint64)                          {}
 func (rc *raftNode) ReportSnapshot(id uint64, status raft.SnapshotStatus) {}
+
+func (rc *raftNode) IsLeader() bool {
+	return rc.node.Status().SoftState.RaftState == raft.StateType(2)
+}

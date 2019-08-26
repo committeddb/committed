@@ -35,9 +35,10 @@ func main() {
 			log.Fatal("cannot create data dir")
 		}
 	}
-	commitC, errorC, snapshotterReady := raft.NewRaftNode(*id, nodes, *join, dataDir, getSnapshot, proposeC, confChangeC)
+	commitC, errorC, snapshotterReady, leader := raft.NewRaftNode(
+		*id, nodes, *join, dataDir, getSnapshot, proposeC, confChangeC)
 
-	c = cluster.New(<-snapshotterReady, proposeC, commitC, errorC, dataDir)
+	c = cluster.New(<-snapshotterReady, proposeC, commitC, errorC, dataDir, leader)
 
 	api.ServeAPI(c, *apiPort, errorC)
 }

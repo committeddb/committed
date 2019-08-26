@@ -3,6 +3,7 @@ package cluster
 import (
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 
 	"github.com/philborlin/committed/syncable"
@@ -21,6 +22,7 @@ type Cluster struct {
 	snapshotter *snap.Snapshotter
 	Data        *Data
 	TOML        *TOML
+	leader      types.Leader
 }
 
 // Data stores core primitives
@@ -39,7 +41,7 @@ type TOML struct {
 
 // New creates a new Cluster
 func New(snapshotter *snap.Snapshotter, proposeC chan<- []byte, commitC <-chan *types.AcceptedProposal,
-	errorC <-chan error, dataDir string) *Cluster {
+	errorC <-chan error, dataDir string, leader types.Leader) *Cluster {
 	data := &Data{
 		Databases: make(map[string]syncable.Database),
 		Syncables: make(map[string]syncable.Syncable),
@@ -55,6 +57,7 @@ func New(snapshotter *snap.Snapshotter, proposeC chan<- []byte, commitC <-chan *
 		snapshotter: snapshotter,
 		Data:        data,
 		TOML:        toml,
+		leader:      leader,
 	}
 
 	// replay log into cluster
@@ -103,6 +106,9 @@ func (c *Cluster) route(ap *types.AcceptedProposal) error {
 	case "topic":
 		return c.AddTopic(ap.Data)
 	default:
+		if strings.HasPrefix(ap.Topic, "bridge") {
+			// TODO Deal with bridge hard state
+		}
 		t, ok := c.Data.Topics[ap.Topic]
 		if !ok {
 			return fmt.Errorf("Attempting to append to topic %s which was not found", c.dataDir)

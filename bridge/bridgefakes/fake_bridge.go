@@ -4,16 +4,18 @@ package bridgefakes
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/philborlin/committed/bridge"
 )
 
 type FakeBridge struct {
-	InitStub        func(context.Context, chan<- error) error
+	InitStub        func(context.Context, chan<- error, time.Duration) error
 	initMutex       sync.RWMutex
 	initArgsForCall []struct {
 		arg1 context.Context
 		arg2 chan<- error
+		arg3 time.Duration
 	}
 	initReturns struct {
 		result1 error
@@ -25,17 +27,18 @@ type FakeBridge struct {
 	invocationsMutex sync.RWMutex
 }
 
-func (fake *FakeBridge) Init(arg1 context.Context, arg2 chan<- error) error {
+func (fake *FakeBridge) Init(arg1 context.Context, arg2 chan<- error, arg3 time.Duration) error {
 	fake.initMutex.Lock()
 	ret, specificReturn := fake.initReturnsOnCall[len(fake.initArgsForCall)]
 	fake.initArgsForCall = append(fake.initArgsForCall, struct {
 		arg1 context.Context
 		arg2 chan<- error
-	}{arg1, arg2})
-	fake.recordInvocation("Init", []interface{}{arg1, arg2})
+		arg3 time.Duration
+	}{arg1, arg2, arg3})
+	fake.recordInvocation("Init", []interface{}{arg1, arg2, arg3})
 	fake.initMutex.Unlock()
 	if fake.InitStub != nil {
-		return fake.InitStub(arg1, arg2)
+		return fake.InitStub(arg1, arg2, arg3)
 	}
 	if specificReturn {
 		return ret.result1
@@ -50,17 +53,17 @@ func (fake *FakeBridge) InitCallCount() int {
 	return len(fake.initArgsForCall)
 }
 
-func (fake *FakeBridge) InitCalls(stub func(context.Context, chan<- error) error) {
+func (fake *FakeBridge) InitCalls(stub func(context.Context, chan<- error, time.Duration) error) {
 	fake.initMutex.Lock()
 	defer fake.initMutex.Unlock()
 	fake.InitStub = stub
 }
 
-func (fake *FakeBridge) InitArgsForCall(i int) (context.Context, chan<- error) {
+func (fake *FakeBridge) InitArgsForCall(i int) (context.Context, chan<- error, time.Duration) {
 	fake.initMutex.RLock()
 	defer fake.initMutex.RUnlock()
 	argsForCall := fake.initArgsForCall[i]
-	return argsForCall.arg1, argsForCall.arg2
+	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3
 }
 
 func (fake *FakeBridge) InitReturns(result1 error) {

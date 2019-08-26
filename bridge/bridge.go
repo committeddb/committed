@@ -5,9 +5,12 @@ import (
 	"context"
 	"encoding/gob"
 	"fmt"
+	"sync"
+	"time"
 
 	"github.com/philborlin/committed/syncable"
 	"github.com/philborlin/committed/topic"
+	"github.com/philborlin/committed/types"
 	"github.com/pkg/errors"
 )
 
@@ -16,7 +19,7 @@ import (
 // Factory creates a new Bridge
 //counterfeiter:generate . Factory
 type Factory interface {
-	New(name string, s syncable.Syncable, topics map[string]topic.Topic) (Bridge, error)
+	New(name string, s syncable.Syncable, topics map[string]topic.Topic, leader types.Leader) (Bridge, error)
 }
 
 // TopicSyncableBridgeFactory creates TopicSyncableBridges
@@ -26,15 +29,18 @@ type TopicSyncableBridgeFactory struct {
 // Bridge manages the interactions between a topic and a syncable
 //counterfeiter:generate . Bridge
 type Bridge interface {
-	Init(ctx context.Context, errorC chan<- error) error
+	Init(ctx context.Context, errorC chan<- error, leaderCheck time.Duration) error
 }
 
 // TopicSyncableBridge is an implementation of the Bridge interface
 type TopicSyncableBridge struct {
-	Name      string
-	Syncable  syncable.Syncable
-	topics    map[string]topic.Topic
-	lastIndex uint64
+	Name          string
+	Syncable      syncable.Syncable
+	topics        map[string]topic.Topic
+	lastIndex     uint64
+	leaderChecker types.Leader
+	leader        bool
+	mu            sync.RWMutex
 }
 
 // Snapshot is the snapshot struct
@@ -44,7 +50,7 @@ type Snapshot struct {
 
 // New creates a wrapper
 func (f *TopicSyncableBridgeFactory) New(name string, s syncable.Syncable,
-	topics map[string]topic.Topic) (Bridge, error) {
+	topics map[string]topic.Topic, leaderChecker types.Leader) (Bridge, error) {
 	if len(s.Topics()) == 0 {
 		return nil, fmt.Errorf("[%s.bridge] No topics so there is nothing to sync", name)
 	}
@@ -65,7 +71,7 @@ func (f *TopicSyncableBridgeFactory) New(name string, s syncable.Syncable,
 		tmap[item] = t
 	}
 
-	return &TopicSyncableBridge{Name: name, Syncable: s, topics: tmap}, nil
+	return &TopicSyncableBridge{Name: name, Syncable: s, topics: tmap, leaderChecker: leaderChecker}, nil
 }
 
 // GetSnapshot implements Snapshotter
@@ -90,17 +96,44 @@ func (b *TopicSyncableBridge) ApplySnapshot(snap []byte) error {
 	return nil
 }
 
-// Init initializes the bridge and starts it up
-// To close the syncable send a message to the ctx.Done() channel
+// Init initializes the bridge and starts it up if this is the leader node
+// This will start and stop synchronization as this node goes in and out of being the leader
 // It is the caller's responsibility to listen to any errors on the errorC channel passed in
-func (b *TopicSyncableBridge) Init(ctx context.Context, errorC chan<- error) error {
+func (b *TopicSyncableBridge) Init(ctx context.Context, errorC chan<- error, leaderCheck time.Duration) error {
+	ticker := time.NewTicker(leaderCheck)
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				if b.leaderChecker.IsLeader() {
+					b.mu.Lock()
+					// defer b.mu.Unlock()
+					if !b.leader {
+						b.leader = true
+						err := b.sync(ctx, errorC)
+						if err != nil {
+							errorC <- err
+						}
+					}
+					b.mu.Unlock()
+					// TODO check if hard state has changed and if it has, send it to the raft
+					// TODO Listen to the raft and set the lastIndex to the value of the hardstate
+				}
+			}
+		}
+	}()
+
+	return nil
+}
+
+func (b *TopicSyncableBridge) sync(ctx context.Context, errorC chan<- error) error {
 	err := b.Syncable.Init(ctx)
 	if err != nil {
 		return errors.Wrapf(err, "[%s.bridge] Init of internal syncable failed", b.Name)
 	}
 
 	for _, t := range b.topics {
-		reader, err := t.NewReader(0)
+		reader, err := t.NewReader(b.lastIndex)
 		if err != nil {
 			return errors.Wrapf(err, "[%s.bridge] Could not create reader", b.Name)
 		}
@@ -117,7 +150,19 @@ func (b *TopicSyncableBridge) Init(ctx context.Context, errorC chan<- error) err
 				// }
 				// return
 				default:
-					// TODO This should only run when this node is the leader
+					// If we aren't the leader then we exit go routine with extreme prejudice
+					// The tsdb wal reader doesn't provide a close which seems like an oversight
+					if !b.leaderChecker.IsLeader() {
+						b.mu.Lock()
+						b.leader = false
+						b.mu.Unlock()
+						err := b.Syncable.Close()
+						if err != nil {
+							errorC <- errors.Wrapf(err, "[%s.bridge] Problem closing syncable", b.Name)
+						}
+						return
+					}
+
 					ap, err := reader.Next(ctx)
 					if err != nil {
 						errorC <- errors.Wrapf(err,

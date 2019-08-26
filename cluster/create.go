@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/philborlin/committed/bridge"
 	"github.com/philborlin/committed/syncable"
@@ -52,12 +53,13 @@ func (c *Cluster) AddSyncable(toml []byte) error {
 	c.Data.Syncables[name] = syncable
 	c.mu.Unlock()
 
-	bridge, err := bridgeFactory.New(name, syncable, c.Data.Topics)
+	bridge, err := bridgeFactory.New(name, syncable, c.Data.Topics, c.leader)
 	if err != nil {
 		return errors.Wrap(err, "Router could not create bridge")
 	}
 	go func() {
-		err := bridge.Init(context.Background(), c.errorC)
+		// TODO Make the 5 seconds tunable in the config file
+		err := bridge.Init(context.Background(), c.errorC, 5 * time.Second)
 		if err != nil {
 			c.errorC <- err
 		}
