@@ -25,10 +25,15 @@ var _ = Describe("Topic", func() {
 		barFakeTopic *topicfakes.FakeTopic
 		fakeReader   *topicfakes.FakeReader
 		fakeLeader   *typesfakes.FakeLeader
+		fakeProposer *typesfakes.FakeProposer
 
 		topics        map[string]topic.Topic
 		fakeSyncable  *syncablefakes.FakeSyncable
 		bridgeFactory Factory
+
+		zeroIndex types.Index
+		oneIndex  types.Index
+		twoIndex  types.Index
 	)
 
 	JustBeforeEach(func() {
@@ -41,14 +46,19 @@ var _ = Describe("Topic", func() {
 		fooFakeTopic.NewReaderReturns(fakeReader, nil)
 		fakeLeader = &typesfakes.FakeLeader{}
 		fakeLeader.IsLeaderReturns(true)
+		fakeProposer = &typesfakes.FakeProposer{}
 
 		topics = map[string]topic.Topic{"foo": fooFakeTopic, "bar": barFakeTopic}
 		fakeSyncable = &syncablefakes.FakeSyncable{}
 		bridgeFactory = &TopicSyncableBridgeFactory{}
+
+		zeroIndex = types.Index{Index: 0, Term: 0}
+		oneIndex = types.Index{Index: 1, Term: 1}
+		twoIndex = types.Index{Index: 2, Term: 2}
 	})
 
 	new := func(name string, s syncable.Syncable, topics map[string]topic.Topic) (*TopicSyncableBridge, error) {
-		b, err := bridgeFactory.New(name, fakeSyncable, topics, fakeLeader)
+		b, err := bridgeFactory.New(name, fakeSyncable, topics, fakeLeader, fakeProposer)
 		if err != nil {
 			return nil, err
 		}
@@ -64,7 +74,7 @@ var _ = Describe("Topic", func() {
 			Expect(b.topics["foo"]).To(Equal(fooFakeTopic))
 			Expect(b.Name).To(Equal(bridgeName))
 			Expect(b.Syncable).To(Equal(fakeSyncable))
-			Expect(b.lastIndex).To(Equal(uint64(0)))
+			Expect(b.lastIndex).To(Equal(zeroIndex))
 		})
 
 		It("should error if there are no topics", func() {
@@ -102,14 +112,15 @@ var _ = Describe("Topic", func() {
 		})
 
 		It("should create and restore a snapshot", func() {
-			b.lastIndex = 1
+			b.appliedIndex = oneIndex
 			s, err := b.GetSnapshot()
 			Expect(err).To(BeNil())
 
-			b.lastIndex = 0
+			b.lastIndex = zeroIndex
 			err = b.ApplySnapshot(s)
 			Expect(err).To(BeNil())
-			Expect(b.lastIndex).To(Equal(uint64(1)))
+			Expect(b.lastIndex).To(Equal(oneIndex))
+			Expect(b.appliedIndex).To(Equal(oneIndex))
 		})
 
 		It("should error if snapshot is corrupt", func() {
@@ -207,11 +218,11 @@ var _ = Describe("Topic", func() {
 		}, 0.2)
 
 		It("should update lastIndex if a successful sync occurs", func(done Done) {
-			ap := &types.AcceptedProposal{Index: 2}
+			ap := &types.AcceptedProposal{Index: 1, Term: 1}
 			fakeReader.NextReturnsOnCall(0, ap, nil)
 			fakeReader.NextReturns(ap, fakeError)
 
-			Expect(b.lastIndex).To(Equal(uint64(0)))
+			Expect(b.lastIndex).To(Equal(zeroIndex))
 
 			go func() {
 				_ = b.Init(ctx, errorC, tick)
@@ -219,7 +230,7 @@ var _ = Describe("Topic", func() {
 
 			err = <-errorC
 			Expect(err.Error()).To(ContainSubstring("Problem getting the next accepted proposal from topic"))
-			Expect(b.lastIndex).To(Equal(uint64(2)))
+			Expect(b.lastIndex).To(Equal(oneIndex))
 			Expect(fakeReader.NextCallCount()).To(Equal(3))
 
 			close(done)
@@ -262,5 +273,23 @@ var _ = Describe("Topic", func() {
 			Expect(fakeReader.NextCallCount()).To(Equal(2))
 			close(done)
 		}, 0.2)
+
+		It("should update the applied index but not the lastIndex if this is the leader", func() {
+			b.lastIndex = twoIndex
+			Expect(b.appliedIndex).To(Equal(zeroIndex))
+			b.UpdateIndex(oneIndex)
+			Expect(b.appliedIndex).To(Equal(oneIndex))
+			Expect(b.lastIndex).To(Equal(twoIndex))
+		})
+
+		It("should update the applied index and the lastIndex if this is not the leader", func() {
+			fakeLeader.IsLeaderReturns(false)
+			b.lastIndex = twoIndex
+			Expect(b.appliedIndex).To(Equal(zeroIndex))
+			b.UpdateIndex(oneIndex)
+			Expect(b.appliedIndex).To(Equal(oneIndex))
+			Expect(b.lastIndex).To(Equal(oneIndex))
+			fakeLeader.IsLeaderReturns(true)
+		})
 	})
 })

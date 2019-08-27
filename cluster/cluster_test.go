@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"github.com/philborlin/committed/bridge"
 	"github.com/philborlin/committed/bridge/bridgefakes"
 	"github.com/philborlin/committed/syncable"
 	"github.com/philborlin/committed/topic"
@@ -35,6 +36,7 @@ var _ = Describe("Cluster", func() {
 				Databases: make(map[string]syncable.Database),
 				Syncables: make(map[string]syncable.Syncable),
 				Topics:    make(map[string]topic.Topic),
+				Bridges:   make(map[string]bridge.Bridge),
 			}
 			toml := &TOML{}
 			c = &Cluster{Data: data, TOML: toml, dataDir: "data/"}

@@ -11,13 +11,14 @@ import (
 )
 
 type FakeFactory struct {
-	NewStub        func(string, syncable.Syncable, map[string]topic.Topic, types.Leader) (bridge.Bridge, error)
+	NewStub        func(string, syncable.Syncable, map[string]topic.Topic, types.Leader, types.Proposer) (bridge.Bridge, error)
 	newMutex       sync.RWMutex
 	newArgsForCall []struct {
 		arg1 string
 		arg2 syncable.Syncable
 		arg3 map[string]topic.Topic
 		arg4 types.Leader
+		arg5 types.Proposer
 	}
 	newReturns struct {
 		result1 bridge.Bridge
@@ -31,7 +32,7 @@ type FakeFactory struct {
 	invocationsMutex sync.RWMutex
 }
 
-func (fake *FakeFactory) New(arg1 string, arg2 syncable.Syncable, arg3 map[string]topic.Topic, arg4 types.Leader) (bridge.Bridge, error) {
+func (fake *FakeFactory) New(arg1 string, arg2 syncable.Syncable, arg3 map[string]topic.Topic, arg4 types.Leader, arg5 types.Proposer) (bridge.Bridge, error) {
 	fake.newMutex.Lock()
 	ret, specificReturn := fake.newReturnsOnCall[len(fake.newArgsForCall)]
 	fake.newArgsForCall = append(fake.newArgsForCall, struct {
@@ -39,11 +40,12 @@ func (fake *FakeFactory) New(arg1 string, arg2 syncable.Syncable, arg3 map[strin
 		arg2 syncable.Syncable
 		arg3 map[string]topic.Topic
 		arg4 types.Leader
-	}{arg1, arg2, arg3, arg4})
-	fake.recordInvocation("New", []interface{}{arg1, arg2, arg3, arg4})
+		arg5 types.Proposer
+	}{arg1, arg2, arg3, arg4, arg5})
+	fake.recordInvocation("New", []interface{}{arg1, arg2, arg3, arg4, arg5})
 	fake.newMutex.Unlock()
 	if fake.NewStub != nil {
-		return fake.NewStub(arg1, arg2, arg3, arg4)
+		return fake.NewStub(arg1, arg2, arg3, arg4, arg5)
 	}
 	if specificReturn {
 		return ret.result1, ret.result2
@@ -58,17 +60,17 @@ func (fake *FakeFactory) NewCallCount() int {
 	return len(fake.newArgsForCall)
 }
 
-func (fake *FakeFactory) NewCalls(stub func(string, syncable.Syncable, map[string]topic.Topic, types.Leader) (bridge.Bridge, error)) {
+func (fake *FakeFactory) NewCalls(stub func(string, syncable.Syncable, map[string]topic.Topic, types.Leader, types.Proposer) (bridge.Bridge, error)) {
 	fake.newMutex.Lock()
 	defer fake.newMutex.Unlock()
 	fake.NewStub = stub
 }
 
-func (fake *FakeFactory) NewArgsForCall(i int) (string, syncable.Syncable, map[string]topic.Topic, types.Leader) {
+func (fake *FakeFactory) NewArgsForCall(i int) (string, syncable.Syncable, map[string]topic.Topic, types.Leader, types.Proposer) {
 	fake.newMutex.RLock()
 	defer fake.newMutex.RUnlock()
 	argsForCall := fake.newArgsForCall[i]
-	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3, argsForCall.arg4
+	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3, argsForCall.arg4, argsForCall.arg5
 }
 
 func (fake *FakeFactory) NewReturns(result1 bridge.Bridge, result2 error) {

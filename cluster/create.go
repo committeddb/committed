@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/philborlin/committed/bridge"
 	"github.com/philborlin/committed/syncable"
 	"github.com/philborlin/committed/topic"
+	"github.com/philborlin/committed/types"
 	"github.com/pkg/errors"
 )
 
@@ -48,22 +50,23 @@ func (c *Cluster) AddSyncable(toml []byte) error {
 	}
 	log.Printf("...Initialized syncable: %s\n", name)
 
-	c.mu.Lock()
-	c.TOML.Syncables = append(c.TOML.Syncables, string(toml))
-	c.Data.Syncables[name] = syncable
-	c.mu.Unlock()
-
-	bridge, err := bridgeFactory.New(name, syncable, c.Data.Topics, c.leader)
+	bridge, err := bridgeFactory.New(name, syncable, c.Data.Topics, c.leader, c)
 	if err != nil {
 		return errors.Wrap(err, "Router could not create bridge")
 	}
 	go func() {
 		// TODO Make the 5 seconds tunable in the config file
-		err := bridge.Init(context.Background(), c.errorC, 5 * time.Second)
+		err := bridge.Init(context.Background(), c.errorC, 5*time.Second)
 		if err != nil {
 			c.errorC <- err
 		}
 	}()
+
+	c.mu.Lock()
+	c.TOML.Syncables = append(c.TOML.Syncables, string(toml))
+	c.Data.Syncables[name] = syncable
+	c.Data.Bridges[name] = bridge
+	c.mu.Unlock()
 
 	return nil
 }
@@ -79,6 +82,21 @@ func (c *Cluster) AddTopic(toml []byte) error {
 	c.TOML.Topics = append(c.TOML.Topics, string(toml))
 	c.Data.Topics[name] = topic
 	c.mu.Unlock()
+
+	return nil
+}
+
+func (c *Cluster) UpdateBridge(ap *types.AcceptedProposal) error {
+	name := ap.Topic[7:len(ap.Topic)]
+	b, ok := c.Data.Bridges[name]
+	if !ok {
+		return fmt.Errorf("Couldn't find bridge for %s", ap.Topic)
+	}
+	i, err := types.NewIndex(ap.Data)
+	if err != nil {
+		return errors.Wrapf(err, "Couldn't decode index for %s", ap.Topic)
+	}
+	b.UpdateIndex(*i)
 
 	return nil
 }

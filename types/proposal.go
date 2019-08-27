@@ -5,6 +5,12 @@ import (
 	"encoding/gob"
 )
 
+// Proposer provides a means to make proposals to the raft
+//counterfeiter:generate . Proposer
+type Proposer interface {
+	Propose(proposal Proposal)
+}
+
 // Proposal is an proposal to the raft system
 type Proposal struct {
 	Topic    string
@@ -36,4 +42,26 @@ func (p *AcceptedProposal) Encode() ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// Index represents an Index plus a Term
+type Index struct {
+	Index uint64
+	Term  uint64
+}
+
+func NewIndex(data []byte) (*Index, error) {
+	var i Index
+	dec := gob.NewDecoder(bytes.NewBuffer(data))
+	if err := dec.Decode(&i); err != nil {
+		return nil, err
+	}
+	return &i, nil
+}
+
+// Encode encodes an Index
+func (i *Index) Encode() []byte {
+	var buf bytes.Buffer
+	_ = gob.NewEncoder(&buf).Encode(i)
+	return buf.Bytes()
 }

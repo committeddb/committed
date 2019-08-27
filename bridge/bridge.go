@@ -19,7 +19,8 @@ import (
 // Factory creates a new Bridge
 //counterfeiter:generate . Factory
 type Factory interface {
-	New(name string, s syncable.Syncable, topics map[string]topic.Topic, leader types.Leader) (Bridge, error)
+	New(name string, s syncable.Syncable, topics map[string]topic.Topic,
+		leader types.Leader, proposer types.Proposer) (Bridge, error)
 }
 
 // TopicSyncableBridgeFactory creates TopicSyncableBridges
@@ -30,6 +31,7 @@ type TopicSyncableBridgeFactory struct {
 //counterfeiter:generate . Bridge
 type Bridge interface {
 	Init(ctx context.Context, errorC chan<- error, leaderCheck time.Duration) error
+	UpdateIndex(index types.Index)
 }
 
 // TopicSyncableBridge is an implementation of the Bridge interface
@@ -37,20 +39,22 @@ type TopicSyncableBridge struct {
 	Name          string
 	Syncable      syncable.Syncable
 	topics        map[string]topic.Topic
-	lastIndex     uint64
+	lastIndex     types.Index
 	leaderChecker types.Leader
 	leader        bool
 	mu            sync.RWMutex
+	appliedIndex  types.Index
+	proposer      types.Proposer
 }
 
 // Snapshot is the snapshot struct
 type Snapshot struct {
-	LastIndex uint64
+	LastIndex types.Index
 }
 
 // New creates a wrapper
 func (f *TopicSyncableBridgeFactory) New(name string, s syncable.Syncable,
-	topics map[string]topic.Topic, leaderChecker types.Leader) (Bridge, error) {
+	topics map[string]topic.Topic, leaderChecker types.Leader, proposer types.Proposer) (Bridge, error) {
 	if len(s.Topics()) == 0 {
 		return nil, fmt.Errorf("[%s.bridge] No topics so there is nothing to sync", name)
 	}
@@ -71,12 +75,13 @@ func (f *TopicSyncableBridgeFactory) New(name string, s syncable.Syncable,
 		tmap[item] = t
 	}
 
-	return &TopicSyncableBridge{Name: name, Syncable: s, topics: tmap, leaderChecker: leaderChecker}, nil
+	return &TopicSyncableBridge{Name: name, Syncable: s, topics: tmap,
+		leaderChecker: leaderChecker, proposer: proposer}, nil
 }
 
 // GetSnapshot implements Snapshotter
 func (b *TopicSyncableBridge) GetSnapshot() ([]byte, error) {
-	s := &Snapshot{LastIndex: b.lastIndex}
+	s := &Snapshot{LastIndex: b.appliedIndex}
 	var buf bytes.Buffer
 	_ = gob.NewEncoder(&buf).Encode(s)
 
@@ -91,6 +96,7 @@ func (b *TopicSyncableBridge) ApplySnapshot(snap []byte) error {
 		return errors.Wrap(err, "Could not decode snapshot")
 	}
 
+	b.appliedIndex = s.LastIndex
 	b.lastIndex = s.LastIndex
 
 	return nil
@@ -107,7 +113,6 @@ func (b *TopicSyncableBridge) Init(ctx context.Context, errorC chan<- error, lea
 			case <-ticker.C:
 				if b.leaderChecker.IsLeader() {
 					b.mu.Lock()
-					// defer b.mu.Unlock()
 					if !b.leader {
 						b.leader = true
 						err := b.sync(ctx, errorC)
@@ -116,14 +121,27 @@ func (b *TopicSyncableBridge) Init(ctx context.Context, errorC chan<- error, lea
 						}
 					}
 					b.mu.Unlock()
-					// TODO check if hard state has changed and if it has, send it to the raft
-					// TODO Listen to the raft and set the lastIndex to the value of the hardstate
+
+					if b.lastIndex.Index > b.appliedIndex.Index || b.lastIndex.Term != b.appliedIndex.Term {
+						t := fmt.Sprintf("bridge.%s", b.Name)
+						p := types.Proposal{Topic: t, Proposal: b.lastIndex.Encode()}
+						b.proposer.Propose(p)
+					}
 				}
 			}
 		}
 	}()
 
 	return nil
+}
+
+// UpdateIndex implements Bridge
+func (b *TopicSyncableBridge) UpdateIndex(index types.Index) {
+	b.appliedIndex = index
+
+	if !b.leaderChecker.IsLeader() {
+		b.lastIndex = index
+	}
 }
 
 func (b *TopicSyncableBridge) sync(ctx context.Context, errorC chan<- error) error {
@@ -133,7 +151,7 @@ func (b *TopicSyncableBridge) sync(ctx context.Context, errorC chan<- error) err
 	}
 
 	for _, t := range b.topics {
-		reader, err := t.NewReader(b.lastIndex)
+		reader, err := t.NewReader(b.lastIndex.Index)
 		if err != nil {
 			return errors.Wrapf(err, "[%s.bridge] Could not create reader", b.Name)
 		}
@@ -173,7 +191,7 @@ func (b *TopicSyncableBridge) sync(ctx context.Context, errorC chan<- error) err
 						errorC <- errors.Wrapf(err, "[%s.bridge] Problem syncing", b.Name)
 						continue
 					}
-					b.lastIndex = ap.Index
+					b.lastIndex = types.Index{Index: ap.Index, Term: ap.Term}
 				}
 			}
 		}(t)

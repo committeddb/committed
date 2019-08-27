@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/philborlin/committed/bridge"
+	"github.com/philborlin/committed/types"
 )
 
 type FakeBridge struct {
@@ -22,6 +23,11 @@ type FakeBridge struct {
 	}
 	initReturnsOnCall map[int]struct {
 		result1 error
+	}
+	UpdateIndexStub        func(types.Index)
+	updateIndexMutex       sync.RWMutex
+	updateIndexArgsForCall []struct {
+		arg1 types.Index
 	}
 	invocations      map[string][][]interface{}
 	invocationsMutex sync.RWMutex
@@ -89,11 +95,44 @@ func (fake *FakeBridge) InitReturnsOnCall(i int, result1 error) {
 	}{result1}
 }
 
+func (fake *FakeBridge) UpdateIndex(arg1 types.Index) {
+	fake.updateIndexMutex.Lock()
+	fake.updateIndexArgsForCall = append(fake.updateIndexArgsForCall, struct {
+		arg1 types.Index
+	}{arg1})
+	fake.recordInvocation("UpdateIndex", []interface{}{arg1})
+	fake.updateIndexMutex.Unlock()
+	if fake.UpdateIndexStub != nil {
+		fake.UpdateIndexStub(arg1)
+	}
+}
+
+func (fake *FakeBridge) UpdateIndexCallCount() int {
+	fake.updateIndexMutex.RLock()
+	defer fake.updateIndexMutex.RUnlock()
+	return len(fake.updateIndexArgsForCall)
+}
+
+func (fake *FakeBridge) UpdateIndexCalls(stub func(types.Index)) {
+	fake.updateIndexMutex.Lock()
+	defer fake.updateIndexMutex.Unlock()
+	fake.UpdateIndexStub = stub
+}
+
+func (fake *FakeBridge) UpdateIndexArgsForCall(i int) types.Index {
+	fake.updateIndexMutex.RLock()
+	defer fake.updateIndexMutex.RUnlock()
+	argsForCall := fake.updateIndexArgsForCall[i]
+	return argsForCall.arg1
+}
+
 func (fake *FakeBridge) Invocations() map[string][][]interface{} {
 	fake.invocationsMutex.RLock()
 	defer fake.invocationsMutex.RUnlock()
 	fake.initMutex.RLock()
 	defer fake.initMutex.RUnlock()
+	fake.updateIndexMutex.RLock()
+	defer fake.updateIndexMutex.RUnlock()
 	copiedInvocations := map[string][][]interface{}{}
 	for key, value := range fake.invocations {
 		copiedInvocations[key] = value

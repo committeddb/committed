@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/philborlin/committed/bridge"
 	"github.com/philborlin/committed/syncable"
 	"github.com/philborlin/committed/topic"
 	"github.com/philborlin/committed/types"
@@ -30,6 +31,7 @@ type Data struct {
 	Databases map[string]syncable.Database
 	Syncables map[string]syncable.Syncable
 	Topics    map[string]topic.Topic
+	Bridges   map[string]bridge.Bridge
 }
 
 // TOML stores the toml config files for each primitive. The snapshot will be based on these plus some additional data
@@ -46,6 +48,7 @@ func New(snapshotter *snap.Snapshotter, proposeC chan<- []byte, commitC <-chan *
 		Databases: make(map[string]syncable.Database),
 		Syncables: make(map[string]syncable.Syncable),
 		Topics:    make(map[string]topic.Topic),
+		Bridges:   make(map[string]bridge.Bridge),
 	}
 
 	toml := &TOML{}
@@ -106,8 +109,8 @@ func (c *Cluster) route(ap *types.AcceptedProposal) error {
 	case "topic":
 		return c.AddTopic(ap.Data)
 	default:
-		if strings.HasPrefix(ap.Topic, "bridge") {
-			// TODO Deal with bridge hard state
+		if strings.HasPrefix(ap.Topic, "bridge.") {
+			return c.UpdateBridge(ap)
 		}
 		t, ok := c.Data.Topics[ap.Topic]
 		if !ok {
