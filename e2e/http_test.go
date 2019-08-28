@@ -64,4 +64,9 @@ name = "test1"`
 		Expect(len(topics)).To(Equal(1))
 		Expect(topics[0]).To(Equal(topicTOML))
 	})
+
+	It("Catches up after dropping from the quorum", func() {
+		// TODO We need to drop a node from the quorum, add a proposal to the raft, and then
+		// have the node rejoin the quorum and make sure it catches up propoerly
+	})
 })

@@ -1,9 +1,7 @@
 package bridge
 
 import (
-	"bytes"
 	"context"
-	"encoding/gob"
 	"fmt"
 	"sync"
 	"time"
@@ -20,7 +18,7 @@ import (
 //counterfeiter:generate . Factory
 type Factory interface {
 	New(name string, s syncable.Syncable, topics map[string]topic.Topic,
-		leader types.Leader, proposer types.Proposer) (Bridge, error)
+		leader types.Leader, proposer types.Proposer, snapshot *Snapshot) (Bridge, error)
 }
 
 // TopicSyncableBridgeFactory creates TopicSyncableBridges
@@ -32,6 +30,7 @@ type TopicSyncableBridgeFactory struct {
 type Bridge interface {
 	Init(ctx context.Context, errorC chan<- error, leaderCheck time.Duration) error
 	UpdateIndex(index types.Index)
+	GetSnapshot() *Snapshot
 }
 
 // TopicSyncableBridge is an implementation of the Bridge interface
@@ -54,7 +53,8 @@ type Snapshot struct {
 
 // New creates a wrapper
 func (f *TopicSyncableBridgeFactory) New(name string, s syncable.Syncable,
-	topics map[string]topic.Topic, leaderChecker types.Leader, proposer types.Proposer) (Bridge, error) {
+	topics map[string]topic.Topic, leaderChecker types.Leader,
+	proposer types.Proposer, snapshot *Snapshot) (Bridge, error) {
 	if len(s.Topics()) == 0 {
 		return nil, fmt.Errorf("[%s.bridge] No topics so there is nothing to sync", name)
 	}
@@ -75,31 +75,23 @@ func (f *TopicSyncableBridgeFactory) New(name string, s syncable.Syncable,
 		tmap[item] = t
 	}
 
-	return &TopicSyncableBridge{Name: name, Syncable: s, topics: tmap,
-		leaderChecker: leaderChecker, proposer: proposer}, nil
-}
-
-// GetSnapshot implements Snapshotter
-func (b *TopicSyncableBridge) GetSnapshot() ([]byte, error) {
-	s := &Snapshot{LastIndex: b.appliedIndex}
-	var buf bytes.Buffer
-	_ = gob.NewEncoder(&buf).Encode(s)
-
-	return buf.Bytes(), nil
-}
-
-// ApplySnapshot implements Snapshotter
-func (b *TopicSyncableBridge) ApplySnapshot(snap []byte) error {
-	var s Snapshot
-	dec := gob.NewDecoder(bytes.NewBuffer(snap))
-	if err := dec.Decode(&s); err != nil {
-		return errors.Wrap(err, "Could not decode snapshot")
+	bridge := &TopicSyncableBridge{Name: name, Syncable: s, topics: tmap,
+		leaderChecker: leaderChecker, proposer: proposer}
+	if snapshot != nil {
+		bridge.ApplySnapshot(*snapshot)
 	}
+	return bridge, nil
+}
 
+// GetSnapshot implements Bridge
+func (b *TopicSyncableBridge) GetSnapshot() *Snapshot {
+	return &Snapshot{LastIndex: b.appliedIndex}
+}
+
+// ApplySnapshot implements Bridge
+func (b *TopicSyncableBridge) ApplySnapshot(s Snapshot) {
 	b.appliedIndex = s.LastIndex
 	b.lastIndex = s.LastIndex
-
-	return nil
 }
 
 // Init initializes the bridge and starts it up if this is the leader node

@@ -38,7 +38,7 @@ func (c *Cluster) AddDatabase(toml []byte) error {
 }
 
 // AddSyncable creates a syncable
-func (c *Cluster) AddSyncable(toml []byte) error {
+func (c *Cluster) AddSyncable(toml []byte, snap *bridge.Snapshot) error {
 	name, syncable, err := syncable.ParseSyncable("toml", strings.NewReader(string(toml)), c.Data.Databases)
 	if err != nil {
 		return errors.Wrap(err, "Router could not create syncable")
@@ -50,7 +50,7 @@ func (c *Cluster) AddSyncable(toml []byte) error {
 	}
 	log.Printf("...Initialized syncable: %s\n", name)
 
-	bridge, err := bridgeFactory.New(name, syncable, c.Data.Topics, c.leader, c)
+	bridge, err := bridgeFactory.New(name, syncable, c.Data.Topics, c.leader, c, snap)
 	if err != nil {
 		return errors.Wrap(err, "Router could not create bridge")
 	}
@@ -63,7 +63,7 @@ func (c *Cluster) AddSyncable(toml []byte) error {
 	}()
 
 	c.mu.Lock()
-	c.TOML.Syncables = append(c.TOML.Syncables, string(toml))
+	c.TOML.Syncables[name] = string(toml)
 	c.Data.Syncables[name] = syncable
 	c.Data.Bridges[name] = bridge
 	c.mu.Unlock()

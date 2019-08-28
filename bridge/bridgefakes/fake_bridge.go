@@ -11,6 +11,16 @@ import (
 )
 
 type FakeBridge struct {
+	GetSnapshotStub        func() *bridge.Snapshot
+	getSnapshotMutex       sync.RWMutex
+	getSnapshotArgsForCall []struct {
+	}
+	getSnapshotReturns struct {
+		result1 *bridge.Snapshot
+	}
+	getSnapshotReturnsOnCall map[int]struct {
+		result1 *bridge.Snapshot
+	}
 	InitStub        func(context.Context, chan<- error, time.Duration) error
 	initMutex       sync.RWMutex
 	initArgsForCall []struct {
@@ -31,6 +41,58 @@ type FakeBridge struct {
 	}
 	invocations      map[string][][]interface{}
 	invocationsMutex sync.RWMutex
+}
+
+func (fake *FakeBridge) GetSnapshot() *bridge.Snapshot {
+	fake.getSnapshotMutex.Lock()
+	ret, specificReturn := fake.getSnapshotReturnsOnCall[len(fake.getSnapshotArgsForCall)]
+	fake.getSnapshotArgsForCall = append(fake.getSnapshotArgsForCall, struct {
+	}{})
+	fake.recordInvocation("GetSnapshot", []interface{}{})
+	fake.getSnapshotMutex.Unlock()
+	if fake.GetSnapshotStub != nil {
+		return fake.GetSnapshotStub()
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	fakeReturns := fake.getSnapshotReturns
+	return fakeReturns.result1
+}
+
+func (fake *FakeBridge) GetSnapshotCallCount() int {
+	fake.getSnapshotMutex.RLock()
+	defer fake.getSnapshotMutex.RUnlock()
+	return len(fake.getSnapshotArgsForCall)
+}
+
+func (fake *FakeBridge) GetSnapshotCalls(stub func() *bridge.Snapshot) {
+	fake.getSnapshotMutex.Lock()
+	defer fake.getSnapshotMutex.Unlock()
+	fake.GetSnapshotStub = stub
+}
+
+func (fake *FakeBridge) GetSnapshotReturns(result1 *bridge.Snapshot) {
+	fake.getSnapshotMutex.Lock()
+	defer fake.getSnapshotMutex.Unlock()
+	fake.GetSnapshotStub = nil
+	fake.getSnapshotReturns = struct {
+		result1 *bridge.Snapshot
+	}{result1}
+}
+
+func (fake *FakeBridge) GetSnapshotReturnsOnCall(i int, result1 *bridge.Snapshot) {
+	fake.getSnapshotMutex.Lock()
+	defer fake.getSnapshotMutex.Unlock()
+	fake.GetSnapshotStub = nil
+	if fake.getSnapshotReturnsOnCall == nil {
+		fake.getSnapshotReturnsOnCall = make(map[int]struct {
+			result1 *bridge.Snapshot
+		})
+	}
+	fake.getSnapshotReturnsOnCall[i] = struct {
+		result1 *bridge.Snapshot
+	}{result1}
 }
 
 func (fake *FakeBridge) Init(arg1 context.Context, arg2 chan<- error, arg3 time.Duration) error {
@@ -129,6 +191,8 @@ func (fake *FakeBridge) UpdateIndexArgsForCall(i int) types.Index {
 func (fake *FakeBridge) Invocations() map[string][][]interface{} {
 	fake.invocationsMutex.RLock()
 	defer fake.invocationsMutex.RUnlock()
+	fake.getSnapshotMutex.RLock()
+	defer fake.getSnapshotMutex.RUnlock()
 	fake.initMutex.RLock()
 	defer fake.initMutex.RUnlock()
 	fake.updateIndexMutex.RLock()

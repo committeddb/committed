@@ -57,8 +57,9 @@ var _ = Describe("Topic", func() {
 		twoIndex = types.Index{Index: 2, Term: 2}
 	})
 
-	new := func(name string, s syncable.Syncable, topics map[string]topic.Topic) (*TopicSyncableBridge, error) {
-		b, err := bridgeFactory.New(name, fakeSyncable, topics, fakeLeader, fakeProposer)
+	new := func(name string, s syncable.Syncable, topics map[string]topic.Topic,
+		snap *Snapshot) (*TopicSyncableBridge, error) {
+		b, err := bridgeFactory.New(name, fakeSyncable, topics, fakeLeader, fakeProposer, snap)
 		if err != nil {
 			return nil, err
 		}
@@ -68,7 +69,7 @@ var _ = Describe("Topic", func() {
 	Describe("NewBridge()", func() {
 		It("should create a new bridge", func() {
 			fakeSyncable.TopicsReturns([]string{"foo"})
-			b, err := new(bridgeName, fakeSyncable, topics)
+			b, err := new(bridgeName, fakeSyncable, topics, nil)
 			Expect(err).To(BeNil())
 			Expect(len(b.topics)).To(Equal(1))
 			Expect(b.topics["foo"]).To(Equal(fooFakeTopic))
@@ -77,23 +78,36 @@ var _ = Describe("Topic", func() {
 			Expect(b.lastIndex).To(Equal(zeroIndex))
 		})
 
+		It("should apply the snapshot if there is one", func() {
+			snap := &Snapshot{LastIndex: oneIndex}
+
+			fakeSyncable.TopicsReturns([]string{"foo"})
+			b, err := new(bridgeName, fakeSyncable, topics, snap)
+			Expect(err).To(BeNil())
+			Expect(len(b.topics)).To(Equal(1))
+			Expect(b.topics["foo"]).To(Equal(fooFakeTopic))
+			Expect(b.Name).To(Equal(bridgeName))
+			Expect(b.Syncable).To(Equal(fakeSyncable))
+			Expect(b.lastIndex).To(Equal(oneIndex))
+		})
+
 		It("should error if there are no topics", func() {
 			fakeSyncable.TopicsReturns([]string{})
-			b, err := new(bridgeName, fakeSyncable, topics)
+			b, err := new(bridgeName, fakeSyncable, topics, nil)
 			Expect(b).To(BeNil())
 			Expect(err.Error()).To(ContainSubstring("No topics so there is nothing to sync"))
 		})
 
 		It("should error if there are too many topics", func() {
 			fakeSyncable.TopicsReturns([]string{"foo", "bar"})
-			b, err := new(bridgeName, fakeSyncable, topics)
+			b, err := new(bridgeName, fakeSyncable, topics, nil)
 			Expect(b).To(BeNil())
 			Expect(err.Error()).To(ContainSubstring("We don't support more than one topic in a syncable yet"))
 		})
 
 		It("should error if topic does not exist", func() {
 			fakeSyncable.TopicsReturns([]string{"baz"})
-			b, err := new(bridgeName, fakeSyncable, topics)
+			b, err := new(bridgeName, fakeSyncable, topics, nil)
 			Expect(b).To(BeNil())
 			Expect(err.Error()).To(ContainSubstring("is trying to listen to topic"))
 		})
@@ -107,25 +121,18 @@ var _ = Describe("Topic", func() {
 
 		JustBeforeEach(func() {
 			fakeSyncable.TopicsReturns([]string{"foo"})
-			b, err = new(bridgeName, fakeSyncable, topics)
+			b, err = new(bridgeName, fakeSyncable, topics, nil)
 			Expect(err).To(BeNil())
 		})
 
 		It("should create and restore a snapshot", func() {
 			b.appliedIndex = oneIndex
-			s, err := b.GetSnapshot()
-			Expect(err).To(BeNil())
+			s := b.GetSnapshot()
 
 			b.lastIndex = zeroIndex
-			err = b.ApplySnapshot(s)
-			Expect(err).To(BeNil())
+			b.ApplySnapshot(*s)
 			Expect(b.lastIndex).To(Equal(oneIndex))
 			Expect(b.appliedIndex).To(Equal(oneIndex))
-		})
-
-		It("should error if snapshot is corrupt", func() {
-			err := b.ApplySnapshot([]byte{})
-			Expect(err.Error()).To(ContainSubstring("Could not decode snapshot"))
 		})
 	})
 
@@ -143,7 +150,7 @@ var _ = Describe("Topic", func() {
 			errorC = make(chan error)
 			fakeError = fmt.Errorf("fake error")
 			fakeSyncable.TopicsReturns([]string{"foo"})
-			b, err = new(bridgeName, fakeSyncable, topics)
+			b, err = new(bridgeName, fakeSyncable, topics, nil)
 			Expect(err).To(BeNil())
 			ctx = context.Background()
 			tick = 2 * time.Millisecond

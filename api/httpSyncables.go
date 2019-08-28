@@ -21,6 +21,10 @@ func (c *clusterSyncableHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 	if r.Method == "POST" {
 		proposeToml(w, r, c.c.ProposeSyncable)
 	} else if r.Method == "GET" {
-		writeMultipartAndHandleError(c.c.TOML.Syncables, w)
+		syncables := []string{}
+		for _, v := range c.c.TOML.Syncables { 
+			syncables = append(syncables, v)
+		}
+		writeMultipartAndHandleError(syncables, w)
 	}
 }

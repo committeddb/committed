@@ -37,7 +37,7 @@ type Data struct {
 // TOML stores the toml config files for each primitive. The snapshot will be based on these plus some additional data
 type TOML struct {
 	Databases []string
-	Syncables []string
+	Syncables map[string]string
 	Topics    []string
 }
 
@@ -105,7 +105,7 @@ func (c *Cluster) route(ap *types.AcceptedProposal) error {
 	case "database":
 		return c.AddDatabase(ap.Data)
 	case "syncable":
-		return c.AddSyncable(ap.Data)
+		return c.AddSyncable(ap.Data, nil)
 	case "topic":
 		return c.AddTopic(ap.Data)
 	default:
@@ -117,8 +117,6 @@ func (c *Cluster) route(ap *types.AcceptedProposal) error {
 			return fmt.Errorf("Attempting to append to topic %s which was not found", c.dataDir)
 		}
 
-		t.Append(topic.Data{Index: ap.Index, Term: ap.Term, Data: ap.Data})
+		return t.Append(topic.Data{Index: ap.Index, Term: ap.Term, Data: ap.Data})
 	}
-
-	return nil
 }
