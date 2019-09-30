@@ -49,7 +49,7 @@ func (c *Cluster) ApplySnapshot(snapshot []byte) error {
 		}
 	}
 	for _, v := range c.TOML.Topics {
-		if err := c.AddTopic([]byte(v)); err != nil {
+		if err := c.RestoreTopic([]byte(v)); err != nil {
 			return errors.Wrap(err, "Error while applying snapshot")
 		}
 	}
@@ -62,6 +62,6 @@ func (c *Cluster) ApplySnapshot(snapshot []byte) error {
 			return errors.Wrap(err, "Error while applying snapshot")
 		}
 	}
-	
+
 	return nil
 }

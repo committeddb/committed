@@ -27,6 +27,8 @@ type WALTopic struct {
 	// Provides a lookup table that given a segment, returns the first raft index in that segment
 	// This is used to find which segment to start with when NewReader is given an index
 	// This needs to be in the snapshot
+	// This should not be published over the raft because different nodes may record their entries
+	// in different segments depending on when truncations occur based on node restarts and/or flushes.
 	firstIndexInSegment map[int]uint64
 }
 
@@ -38,7 +40,8 @@ func New(name string, baseDir string) (*WALTopic, error) {
 	if err != nil {
 		return nil, errors.Wrapf(err, "Could not create wal for topic %s", name)
 	}
-	return &WALTopic{name: name, walDir: walDir, wal: w}, nil
+	m := make(map[int]uint64)
+	return &WALTopic{name: name, walDir: walDir, wal: w, firstIndexInSegment: m}, nil
 }
 
 // Restore creates a topic with an existing wal
@@ -47,7 +50,8 @@ func Restore(name string, walDir string) (*WALTopic, error) {
 	if err != nil {
 		return nil, errors.Wrapf(err, "Could no open wal for topic %s", name)
 	}
-	return &WALTopic{name: name, walDir: walDir, wal: w}, nil
+	m := make(map[int]uint64)
+	return &WALTopic{name: name, walDir: walDir, wal: w, firstIndexInSegment: m}, nil
 }
 
 // Append appends to the wal of this topic
@@ -106,25 +110,25 @@ type topicReaderAlert struct {
 
 func (t *WALTopic) newWalReader(index uint64) (*walTopicReader, error) {
 	// TODO Find the segment with the highest index that doesn't go over index
-	firstSegment := 0
+	currentSegment := 0
 	highestIndexWithoutGoingOver := uint64(0)
 	for k := range t.firstIndexInSegment {
 		nextIndex := t.firstIndexInSegment[k]
 		if nextIndex > highestIndexWithoutGoingOver && nextIndex <= index {
 			highestIndexWithoutGoingOver = nextIndex
-			firstSegment = k
+			currentSegment = k
 		}
 	}
 
 	alert := &topicReaderAlert{appendC: make(chan bool)}
 	t.addReaderAlert(alert)
 	walTopicReader := &walTopicReader{topic: t, alert: alert}
-	lr, err := walTopicReader.newLiveReader(firstSegment)
+	lr, err := walTopicReader.newLiveReader(currentSegment)
 	if err != nil {
 		return nil, errors.Wrap(err, "Could not create walTopicReader")
 	}
 	walTopicReader.r = lr
-	walTopicReader.currentSegment = firstSegment
+	walTopicReader.currentSegment = currentSegment
 
 	return walTopicReader, nil
 }
@@ -141,6 +145,7 @@ func (r *walTopicReader) next(ctx context.Context, newSegment bool) (*types.Acce
 			fmt.Print(errors.Wrapf(err, "[Topic: %s] found a wal record that could not be decoded, skipping", r.topic.name))
 			return r.next(ctx, newSegment)
 		}
+		ap.Topic = r.topic.name
 
 		if newSegment {
 			r.topic.firstIndexInSegment[r.currentSegment] = ap.Index
@@ -190,7 +195,11 @@ func (r *walTopicReader) newLiveReader(firstSegment int) (types.LiveReader, erro
 		lastSegment = lastSegment - 1
 	}
 
-	sr := wal.SegmentRange{Dir: r.topic.walDir, First: firstSegment, Last: lastSegment}
+	// sr := wal.SegmentRange{Dir: r.topic.walDir, First: firstSegment, Last: lastSegment}
+	// We want to do one segment at a time because we can't track which segment we are on
+	// to update the currentSegment. If we lose the current segment we will unnecessarily
+	// replay the same data to each syncable attached to the topic
+	sr := wal.SegmentRange{Dir: r.topic.walDir, First: firstSegment, Last: firstSegment}
 	srr, err := walFactory.NewSegmentsRangeReader(sr)
 	if err != nil {
 		return nil, errors.Wrapf(err, "[Topic: %s] could not create NewSegmentsRangeReader", r.topic.name)

@@ -1,5 +1,10 @@
 package e2e
 
+import (
+	"fmt"
+	"log"
+)
+
 func (c *Control) postDatabase(toml string) error {
 	_, err := c.post("/cluster/databases", toml)
 	return err
@@ -9,7 +14,9 @@ func (c *Control) getDatabases() ([]string, error) {
 	return c.get("/cluster/databases")
 }
 
-func (c *Control) postPost(post string) error {
+func (c *Control) postPost(topic, data string) error {
+	post := fmt.Sprintf("{\"Topic\":\"%s\",\"Proposal\":\"%s\"}", topic, data)
+	log.Printf("Sending: %s", post)
 	_, err := c.post("/cluster/posts", post)
 	return err
 }

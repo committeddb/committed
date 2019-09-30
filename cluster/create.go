@@ -23,11 +23,11 @@ func (c *Cluster) AddDatabase(toml []byte) error {
 		return errors.Wrap(err, "Router could not create database")
 	}
 
-	log.Printf("About to initialize database: %s...\n", name)
+	log.Printf("[node %d] About to initialize database: %s...\n", c.id, name)
 	if err := database.Init(); err != nil {
 		return errors.Wrapf(err, "could not initialize database %s", name)
 	}
-	log.Printf("...Initialized database: %s\n", name)
+	log.Printf(".[node %d] ..Initialized database: %s\n", c.id, name)
 
 	c.mu.Lock()
 	c.TOML.Databases = append(c.TOML.Databases, string(toml))
@@ -44,11 +44,11 @@ func (c *Cluster) AddSyncable(toml []byte, snap *bridge.Snapshot) error {
 		return errors.Wrap(err, "Router could not create syncable")
 	}
 
-	log.Printf("About to initialize syncable: %s...\n", name)
+	log.Printf("[node %d] About to initialize syncable: %s...\n", c.id, name)
 	if err := syncable.Init(context.Background()); err != nil {
 		return errors.Wrapf(err, "could not initialize syncable %s", name)
 	}
-	log.Printf("...Initialized syncable: %s\n", name)
+	log.Printf("[node %d] ...Initialized syncable: %s\n", c.id, name)
 
 	bridge, err := bridgeFactory.New(name, syncable, c.Data.Topics, c.leader, c, snap)
 	if err != nil {
@@ -73,7 +73,16 @@ func (c *Cluster) AddSyncable(toml []byte, snap *bridge.Snapshot) error {
 
 // AddTopic creates a topic
 func (c *Cluster) AddTopic(toml []byte) error {
-	name, topic, err := topic.ParseTopic("toml", strings.NewReader(string(toml)), c.dataDir)
+	return c.createTopic(toml, false)
+}
+
+// RestoreTopic restores a topic
+func (c *Cluster) RestoreTopic(toml []byte) error {
+	return c.createTopic(toml, true)
+}
+
+func (c *Cluster) createTopic(toml []byte, restore bool) error {
+	name, topic, err := topic.ParseTopic("toml", strings.NewReader(string(toml)), c.dataDir, restore)
 	if err != nil {
 		return errors.Wrap(err, "Router could not create topic")
 	}
@@ -83,9 +92,16 @@ func (c *Cluster) AddTopic(toml []byte) error {
 	c.Data.Topics[name] = topic
 	c.mu.Unlock()
 
+	a := "Added"
+	if restore {
+		a = "Restored"
+	}
+	log.Printf("[node %d] %s topic: %s\n", c.id, a, name)
+
 	return nil
 }
 
+// UpdateBridge updates the index of a bridge
 func (c *Cluster) UpdateBridge(ap *types.AcceptedProposal) error {
 	name := ap.Topic[7:len(ap.Topic)]
 	b, ok := c.Data.Bridges[name]
@@ -98,5 +114,25 @@ func (c *Cluster) UpdateBridge(ap *types.AcceptedProposal) error {
 	}
 	b.UpdateIndex(*i)
 
+	log.Printf("[node %d] Updated bridge [%s] to index: %v\n", c.id, name, i)
+
+	return nil
+}
+
+// AppendData appends data to a topic
+func (c *Cluster) AppendData(ap *types.AcceptedProposal) error {
+	log.Printf("[node %d] Received data: %d,%d [%s] - %s\n", c.id, ap.Index, ap.Term, ap.Topic, string(ap.Data))
+
+	t, ok := c.Data.Topics[ap.Topic]
+	if !ok {
+		return fmt.Errorf("Attempting to append to topic %s which was not found", c.dataDir)
+	}
+
+	return t.Append(topic.Data{Index: ap.Index, Term: ap.Term, Data: ap.Data})
+}
+
+// Empty handles empty topics
+func (c *Cluster) Empty(ap *types.AcceptedProposal) error {
+	log.Printf("[node %d] Received data with empty topic: %d,%d [%s] - %s\n", c.id, ap.Index, ap.Term, ap.Topic, string(ap.Data))
 	return nil
 }

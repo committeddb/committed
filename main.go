@@ -4,7 +4,9 @@ import (
 	"flag"
 	"log"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/coreos/etcd/raft/raftpb"
 	"github.com/philborlin/committed/api"
@@ -29,16 +31,30 @@ func main() {
 	getSnapshot := func() ([]byte, error) { return c.GetSnapshot() }
 
 	nodes := strings.Split(*nodeURLs, ",")
-	dataDir := "data"
-	if _, err := os.Stat(dataDir); err != nil {
-		if err := os.MkdirAll(dataDir, 0750); err != nil {
+	baseDir := "data"
+	if _, err := os.Stat(baseDir); err != nil {
+		if err := os.MkdirAll(baseDir, 0750); err != nil {
 			log.Fatal("cannot create data dir")
 		}
 	}
 	commitC, errorC, snapshotterReady, leader := raft.NewRaftNode(
-		*id, nodes, *join, dataDir, getSnapshot, proposeC, confChangeC)
+		*id, nodes, *join, baseDir, getSnapshot, proposeC, confChangeC)
 
-	c = cluster.New(<-snapshotterReady, proposeC, commitC, errorC, dataDir, leader)
+	c = cluster.New(<-snapshotterReady, proposeC, commitC, errorC, baseDir, leader, *id)
+
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		<-sigs
+		log.Println("Received a signal to shutdown. Shutting down...")
+		err := c.Shutdown()
+		if err != nil {
+			log.Println(err)
+		}
+		log.Println("Graceful shutdown complete. Exiting...")
+		os.Exit(0)
+	}()
 
 	api.ServeAPI(c, *apiPort, errorC)
 }

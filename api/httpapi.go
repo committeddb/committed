@@ -30,7 +30,7 @@ func newLoggingHandler(handler http.Handler) http.Handler {
 // ServeHTTP implements Handler
 func (h *loggingHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Received: %s %s\n", r.Method, r.RequestURI)
-	fmt.Printf("%v -> %v", r.RemoteAddr, r.RequestURI)
+	fmt.Printf("%v -> %v\n", r.RemoteAddr, r.RequestURI)
 	h.handler.ServeHTTP(w, r)
 }
 

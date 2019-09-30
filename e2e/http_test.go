@@ -1,6 +1,14 @@
 package e2e
 
 import (
+	"bufio"
+	"bytes"
+	"fmt"
+	"io"
+	"log"
+	"os"
+	"time"
+
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 )
@@ -23,6 +31,7 @@ name = "test1"`
 
 	JustAfterEach(func() {
 		control.shutdown(true)
+		// control.shutdown(false)
 	})
 
 	It("starts uninitialized", func() {
@@ -51,7 +60,7 @@ name = "test1"`
 		Expect(topics[0]).To(Equal(topicTOML))
 	})
 
-	It("loads topic on reload", func() {
+	It("loads topic on reload (applies snapshot)", func() {
 		err = control.postTopic(topicTOML)
 		Expect(err).To(BeNil())
 
@@ -66,7 +75,100 @@ name = "test1"`
 	})
 
 	It("Catches up after dropping from the quorum", func() {
-		// TODO We need to drop a node from the quorum, add a proposal to the raft, and then
-		// have the node rejoin the quorum and make sure it catches up propoerly
+		err = control.postTopic(topicTOML)
+		Expect(err).To(BeNil())
+
+		topic := "test1"
+		syncableTOML := fileTOML("foo", topic, "./data/foo.txt")
+		fmt.Println(syncableTOML)
+		err = control.postSyncable(syncableTOML)
+		Expect(err).To(BeNil())
+
+		fmt.Println("[http_test.go] Shutdown node")
+
+		err = control.shutdownNode()
+		Expect(err).To(BeNil())
+
+		time.Sleep(5 * time.Second)
+
+		fmt.Println("[http_test.go] Posting")
+
+		data := "bar"
+		err := control.postPost(topic, data)
+		Expect(err).To(BeNil())
+
+		fmt.Println("[http_test.go] Waiting 5 seconds")
+
+		time.Sleep(5 * time.Second)
+
+		fmt.Println("[http_test.go] Done waiting, attempting to startup node")
+
+		err = control.startupNode(1)
+		if err != nil {
+			fmt.Println(err)
+		}
+		Expect(err).To(BeNil())
+
+		time.Sleep(5 * time.Second)
+
+		// Pages do not get flushed until they are full. This forces a page flush on the wal
+		err = control.shutdownNode()
+		Expect(err).To(BeNil())
+
+		time.Sleep(10 * time.Second)
+
+		err = findStringInTopic(topic, 3, data)
+		Expect(err).To(BeNil())
+
+		err = findStringInTopic(topic, 2, data)
+		Expect(err).To(BeNil())
+
+		err = findStringInTopic(topic, 1, data)
+		Expect(err).To(BeNil())
+
+		err = printFile("./data/foo.txt")
+		Expect(err).To(BeNil())
 	})
 })
+
+func fileTOML(name string, topic string, path string) string {
+	return fmt.Sprintf("[syncable]\nname=\"%s\"\ndbType=\"file\"\n\n[file]\ntopic=\"%s\"\npath=\"%s\"",
+		name, topic, path)
+}
+
+func printFile(name string) error {
+	s, err := getFileContents(name)
+	if err != nil {
+		return err
+	}
+	log.Printf("FileSyncable\n: %s\n", s)
+	return nil
+}
+
+func getFileContents(name string) (string, error) {
+	file, err := os.Open(name)
+	if err != nil {
+		return "", err
+	}
+
+	br := bufio.NewReader(file)
+	var buf bytes.Buffer
+
+	for {
+		ba, isPrefix, err := br.ReadLine()
+
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return "", err
+		}
+
+		buf.Write(ba)
+		if !isPrefix {
+			buf.WriteByte('\n')
+		}
+
+	}
+	return buf.String(), nil
+}

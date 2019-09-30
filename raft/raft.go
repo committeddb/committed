@@ -138,6 +138,7 @@ func (rc *raftNode) entriesToApply(ents []raftpb.Entry) (nents []raftpb.Entry) {
 		log.Fatalf("first index of committed entry[%d] should <= progress.appliedIndex[%d] 1", firstIdx, rc.appliedIndex)
 	}
 	if rc.appliedIndex-firstIdx+1 < uint64(len(ents)) {
+		fmt.Printf("[raft.go][%d][%d] applying ents: %v\n", rc.id, rc.appliedIndex, ents[rc.appliedIndex-firstIdx+1:])
 		nents = ents[rc.appliedIndex-firstIdx+1:]
 	}
 	return nents
@@ -170,6 +171,8 @@ func (rc *raftNode) publishEntries(ents []raftpb.Entry) bool {
 				fmt.Println(errors.Wrap(err, "could not decode message"))
 				continue
 			}
+
+			fmt.Printf("\n[raft.go][%d] sending accepted proposal:\n%v\n\n", rc.id, ap)
 
 			select {
 			case rc.commitC <- ap:
@@ -212,6 +215,7 @@ func (rc *raftNode) publishEntries(ents []raftpb.Entry) bool {
 
 func (rc *raftNode) loadSnapshot() *raftpb.Snapshot {
 	snapshot, err := rc.snapshotter.Load()
+	fmt.Printf("[raft.go][%d] Loaded snapshot: %v\n", rc.id, snapshot)
 	if err != nil && err != snap.ErrNoSnapshot {
 		log.Fatalf("raft: error loading snapshot (%v)", err)
 	}
@@ -423,7 +427,9 @@ func (rc *raftNode) serveChannels() {
 					rc.proposeC = nil
 				} else {
 					// blocks until accepted by raft state machine
+					fmt.Printf("[raft.go] proposing %v\n", prop)
 					rc.node.Propose(context.TODO(), prop)
+					fmt.Printf("[raft.go] proposal %v accepted\n", prop)
 				}
 
 			case cc, ok := <-rc.confChangeC:

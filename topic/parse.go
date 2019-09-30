@@ -9,13 +9,18 @@ import (
 )
 
 // ParseTopic turns a toml file into a Topic
-func ParseTopic(style string, reader io.Reader, baseDir string) (string, Topic, error) {
+func ParseTopic(style string, reader io.Reader, baseDir string, restore bool) (string, Topic, error) {
 	name, err := PreParseTopic(style, reader, baseDir)
 	if err != nil {
 		return "", nil, err
 	}
 
-	topic, err := New(name, baseDir)
+	var topic Topic
+	if restore {
+		topic, err = Restore(name, baseDir)
+	} else {
+		topic, err = New(name, baseDir)
+	}
 	if err != nil {
 		return "", nil, err
 	}

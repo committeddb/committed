@@ -3,6 +3,7 @@ package cluster
 import (
 	"fmt"
 	"log"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -24,6 +25,7 @@ type Cluster struct {
 	Data        *Data
 	TOML        *TOML
 	leader      types.Leader
+	id          int
 }
 
 // Data stores core primitives
@@ -43,7 +45,7 @@ type TOML struct {
 
 // New creates a new Cluster
 func New(snapshotter *snap.Snapshotter, proposeC chan<- []byte, commitC <-chan *types.AcceptedProposal,
-	errorC <-chan error, dataDir string, leader types.Leader) *Cluster {
+	errorC <-chan error, baseDir string, leader types.Leader, id int) *Cluster {
 	data := &Data{
 		Databases: make(map[string]syncable.Database),
 		Syncables: make(map[string]syncable.Syncable),
@@ -51,16 +53,19 @@ func New(snapshotter *snap.Snapshotter, proposeC chan<- []byte, commitC <-chan *
 		Bridges:   make(map[string]bridge.Bridge),
 	}
 
-	toml := &TOML{}
+	toml := &TOML{
+		Syncables: make(map[string]string),
+	}
 
 	c := &Cluster{
-		dataDir:     dataDir,
+		dataDir:     filepath.Join(baseDir, fmt.Sprintf("raft-%d", id)),
 		errorC:      make(chan error),
 		proposeC:    proposeC,
 		snapshotter: snapshotter,
 		Data:        data,
 		TOML:        toml,
 		leader:      leader,
+		id:          id,
 	}
 
 	// replay log into cluster
@@ -102,6 +107,8 @@ func (c *Cluster) readCommits(commitC <-chan *types.AcceptedProposal, errorC <-c
 
 func (c *Cluster) route(ap *types.AcceptedProposal) error {
 	switch ap.Topic {
+	case "":
+		return c.Empty(ap)
 	case "database":
 		return c.AddDatabase(ap.Data)
 	case "syncable":
@@ -112,11 +119,31 @@ func (c *Cluster) route(ap *types.AcceptedProposal) error {
 		if strings.HasPrefix(ap.Topic, "bridge.") {
 			return c.UpdateBridge(ap)
 		}
-		t, ok := c.Data.Topics[ap.Topic]
-		if !ok {
-			return fmt.Errorf("Attempting to append to topic %s which was not found", c.dataDir)
-		}
-
-		return t.Append(topic.Data{Index: ap.Index, Term: ap.Term, Data: ap.Data})
+		return c.AppendData(ap)
 	}
+}
+
+// Shutdown attempts to shut down the cluster gracefully.
+func (c *Cluster) Shutdown() error {
+	var err error
+	for _, b := range c.Data.Bridges {
+		err = b.Close()
+	}
+
+	for _, s := range c.Data.Syncables {
+		err = s.Close()
+	}
+
+	for _, t := range c.Data.Topics {
+		err = t.Close()
+	}
+
+	for _, d := range c.Data.Databases {
+		err = d.Close()
+	}
+
+	close(c.proposeC)
+	close(c.errorC)
+
+	return err
 }

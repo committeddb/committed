@@ -3,6 +3,7 @@ package types
 import (
 	"bytes"
 	"encoding/gob"
+	"fmt"
 )
 
 // Proposer provides a means to make proposals to the raft
@@ -44,12 +45,18 @@ func (p *AcceptedProposal) Encode() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// String is a string representation of an AcceptedProposal
+func (p *AcceptedProposal) String() string {
+	return fmt.Sprintf("[%d][%d] %s - %s", p.Term, p.Index, p.Topic, string(p.Data))
+}
+
 // Index represents an Index plus a Term
 type Index struct {
 	Index uint64
 	Term  uint64
 }
 
+// NewIndex creates a new Index
 func NewIndex(data []byte) (*Index, error) {
 	var i Index
 	dec := gob.NewDecoder(bytes.NewBuffer(data))

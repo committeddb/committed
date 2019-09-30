@@ -1,6 +1,7 @@
 package api
 
 import (
+	"log"
 	"net/http"
 
 	"github.com/philborlin/committed/cluster"
@@ -9,7 +10,7 @@ import (
 
 type newClusterTopicPostRequest struct {
 	Topic    string
-	Proposal []byte
+	Proposal string
 }
 
 // NewClusterPostHandler creates a new handler for Cluster Topics
@@ -25,9 +26,16 @@ type clusterPostHandler struct {
 func (c *clusterPostHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	if r.Method == "POST" {
+		// TODO We should set a content-type on the topic and handle the proposal based
+		// on the content type. Default is json right now, but we can handle avro,
+		// protobuf, etc. later on
 		n := newClusterTopicPostRequest{}
 		_ = unmarshall(r, &n)
-		c.c.Propose(types.Proposal{Topic: n.Topic, Proposal: n.Proposal})
+		log.Printf("[api.httpPosts] received %v", n)
+		go func() {
+			c.c.Propose(types.Proposal{Topic: n.Topic, Proposal: []byte(n.Proposal)})
+			log.Printf("[api.httpPosts] posted %v", n)
+		}()
 		w.Write(nil)
 	}
 }

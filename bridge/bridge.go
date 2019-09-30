@@ -31,6 +31,7 @@ type Bridge interface {
 	Init(ctx context.Context, errorC chan<- error, leaderCheck time.Duration) error
 	UpdateIndex(index types.Index)
 	GetSnapshot() *Snapshot
+	Close() error
 }
 
 // TopicSyncableBridge is an implementation of the Bridge interface
@@ -44,6 +45,8 @@ type TopicSyncableBridge struct {
 	mu            sync.RWMutex
 	appliedIndex  types.Index
 	proposer      types.Proposer
+	ticker        *time.Ticker
+	done          chan bool
 }
 
 // Snapshot is the snapshot struct
@@ -98,11 +101,11 @@ func (b *TopicSyncableBridge) ApplySnapshot(s Snapshot) {
 // This will start and stop synchronization as this node goes in and out of being the leader
 // It is the caller's responsibility to listen to any errors on the errorC channel passed in
 func (b *TopicSyncableBridge) Init(ctx context.Context, errorC chan<- error, leaderCheck time.Duration) error {
-	ticker := time.NewTicker(leaderCheck)
+	b.ticker = time.NewTicker(leaderCheck)
 	go func() {
 		for {
 			select {
-			case <-ticker.C:
+			case <-b.ticker.C:
 				if b.leaderChecker.IsLeader() {
 					b.mu.Lock()
 					if !b.leader {
@@ -123,6 +126,17 @@ func (b *TopicSyncableBridge) Init(ctx context.Context, errorC chan<- error, lea
 			}
 		}
 	}()
+
+	return nil
+}
+
+// Close implements Bridge
+func (b *TopicSyncableBridge) Close() error {
+	if b.ticker != nil {
+		b.ticker.Stop()
+	}
+
+	b.done <- true
 
 	return nil
 }
@@ -151,6 +165,9 @@ func (b *TopicSyncableBridge) sync(ctx context.Context, errorC chan<- error) err
 		go func(t topic.Topic) {
 			for {
 				select {
+				case <-b.done:
+					return
+
 				// TODO In order for done to work,
 				// walTopicReader has to implement it also since calls to next just block
 				// case <-ctx.Done():

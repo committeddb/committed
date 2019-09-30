@@ -16,28 +16,3 @@ type Syncable interface {
 	Close() error
 	Topics() []string
 }
-
-// TestSyncable returns a test implementation of the Syncable interface
-type TestSyncable struct {
-	topics []string
-}
-
-// Init implements Syncable
-func (s *TestSyncable) Init(ctx context.Context) error {
-	return nil
-}
-
-// Sync implements Syncable
-func (s *TestSyncable) Sync(ctx context.Context, entry *types.AcceptedProposal) error {
-	return nil
-}
-
-// Close implements Syncable
-func (s *TestSyncable) Close() error {
-	return nil
-}
-
-// Topics implements Syncable
-func (s *TestSyncable) Topics() []string {
-	return s.topics
-}

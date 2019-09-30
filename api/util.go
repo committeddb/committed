@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"mime/multipart"
 	"net/http"
 )
@@ -15,6 +16,7 @@ func unmarshall(r *http.Request, v interface{}) error {
 	if err != nil {
 		return err
 	}
+	log.Printf("Unmarshalling %s", string(body))
 	err = json.Unmarshal(body, &v)
 	return err
 }
@@ -47,8 +49,8 @@ func readerToString(r io.Reader) (string, error) {
 
 // errorTo500 writes the error and sets the header to 500
 func errorTo500(w http.ResponseWriter, err error) {
-	w.Write([]byte(err.Error()))
 	w.WriteHeader(500)
+	w.Write([]byte(err.Error()))
 }
 
 func writeMultipartAndHandleError(tomlFiles []string, w http.ResponseWriter) {

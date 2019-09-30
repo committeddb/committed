@@ -10,6 +10,7 @@ import (
 var parsers = map[string]func(*viper.Viper, map[string]Database) (Syncable, error){
 	"sql":  sqlParser,
 	"test": testParser,
+	"file": fileParser,
 }
 
 // ParseSyncable turns a toml file into a Syncable

@@ -13,9 +13,13 @@ import (
 )
 
 func (c *Control) post(path string, data string) ([]byte, error) {
-	b, err := body(http.Post(c.url(path), "application/toml", strings.NewReader(data)))
+	url := c.url(path)
+	fmt.Printf("[http.go] Posting to %s\n", url)
+	b, err := body(http.Post(url, "application/toml", strings.NewReader(data)))
+	fmt.Println("[http.go] Waiting for raft consensus")
 	// Wait for raft consensus
 	time.Sleep(1 * time.Second)
+	fmt.Println("[http.go] Returning")
 	return b, err
 }
 
@@ -71,6 +75,7 @@ func parseMultipart(resp *http.Response, err error) ([]string, error) {
 }
 
 func (c *Control) url(path string) string {
+	fmt.Printf("Choosing from nodes: %v\n", c.nodes)
 	n := c.nodes[rand.Intn(len(c.nodes))]
 	return fmt.Sprintf("%s%s", n.url, path)
 }
