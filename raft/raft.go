@@ -138,7 +138,6 @@ func (rc *raftNode) entriesToApply(ents []raftpb.Entry) (nents []raftpb.Entry) {
 		log.Fatalf("first index of committed entry[%d] should <= progress.appliedIndex[%d] 1", firstIdx, rc.appliedIndex)
 	}
 	if rc.appliedIndex-firstIdx+1 < uint64(len(ents)) {
-		fmt.Printf("[raft.go][%d][%d] applying ents: %v\n", rc.id, rc.appliedIndex, ents[rc.appliedIndex-firstIdx+1:])
 		nents = ents[rc.appliedIndex-firstIdx+1:]
 	}
 	return nents
@@ -425,9 +424,7 @@ func (rc *raftNode) serveChannels() {
 					rc.proposeC = nil
 				} else {
 					// blocks until accepted by raft state machine
-					fmt.Printf("[raft.go] proposing %v\n", prop)
 					rc.node.Propose(context.TODO(), prop)
-					fmt.Printf("[raft.go] proposal %v accepted\n", prop)
 				}
 
 			case cc, ok := <-rc.confChangeC:
