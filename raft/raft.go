@@ -172,8 +172,6 @@ func (rc *raftNode) publishEntries(ents []raftpb.Entry) bool {
 				continue
 			}
 
-			fmt.Printf("\n[raft.go][%d] sending accepted proposal:\n%v\n\n", rc.id, ap)
-
 			select {
 			case rc.commitC <- ap:
 			case <-rc.stopc:

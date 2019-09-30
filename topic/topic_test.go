@@ -168,7 +168,8 @@ var _ = Describe("Topic", func() {
 			sr := fakeWALFactory.NewSegmentsRangeReaderArgsForCall(0)
 			Expect(len(sr)).To(Equal(1))
 			Expect(sr[0].First).To(Equal(1))
-			Expect(sr[0].Last).To(Equal(2))
+			Expect(sr[0].Last).To(Equal(1))
+			// Expect(sr[0].Last).To(Equal(2))
 		})
 
 		It("should return an error when Segments() returns an erroru", func() {

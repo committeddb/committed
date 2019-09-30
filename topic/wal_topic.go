@@ -145,7 +145,6 @@ func (r *walTopicReader) next(ctx context.Context, newSegment bool) (*types.Acce
 			fmt.Print(errors.Wrapf(err, "[Topic: %s] found a wal record that could not be decoded, skipping", r.topic.name))
 			return r.next(ctx, newSegment)
 		}
-		ap.Topic = r.topic.name
 
 		if newSegment {
 			r.topic.firstIndexInSegment[r.currentSegment] = ap.Index
