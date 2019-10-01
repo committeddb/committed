@@ -1,8 +1,6 @@
 package syncable
 
 import (
-	"database/sql"
-
 	_ "github.com/go-sql-driver/mysql"    // mysql driver
 	_ "github.com/proullon/ramsql/driver" // ramsql driver
 )
@@ -13,65 +11,4 @@ type Database interface {
 	Init() error
 	Type() string
 	Close() error
-}
-
-// SQLDB represents an sql query database
-type SQLDB struct {
-	driver           string
-	connectionString string
-	DB               *sql.DB
-}
-
-// NewSQLDB creates a new SQLDB
-func NewSQLDB(driver string, connectionString string) *SQLDB {
-	return &SQLDB{driver: driver, connectionString: connectionString}
-}
-
-// Init implements Database
-func (d *SQLDB) Init() error {
-	// TODO If the connection string is the same lets cache and return. Also let's check if it is active and allow
-	// successive calls to Init() to refresh closed db connections.
-	// Maybe, but what happens if the syncable closes and we try to clean up a shared database connection? Sounds bad...
-	db, err := sql.Open(d.driver, d.connectionString)
-	if err != nil {
-		return err
-	}
-	d.DB = db
-
-	return nil
-}
-
-// Type implements Database
-func (d *SQLDB) Type() string {
-	return "sql"
-}
-
-// Close implements Database
-func (d *SQLDB) Close() error {
-	return d.DB.Close()
-}
-
-// Open returns a db connection
-func (d *SQLDB) Open() (*sql.DB, error) {
-	// In the future we probably want to reuse connections
-	return sql.Open(d.driver, d.connectionString)
-}
-
-// TestDB returns a test implementation of the Database interface
-type TestDB struct {
-}
-
-// Init implements Database
-func (d *TestDB) Init() error {
-	return nil
-}
-
-// Type implements Database
-func (d *TestDB) Type() string {
-	return "test"
-}
-
-// Close implements Database
-func (d *TestDB) Close() error {
-	return nil
 }

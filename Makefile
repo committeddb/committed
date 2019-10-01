@@ -7,6 +7,10 @@ endef
 test:
 	go test -short ./... -cover
 
+test/ci:
+	go build
+	go test ./... -cover
+
 test/topic:
 	$(call test,"github.com/philborlin/committed/topic")
 

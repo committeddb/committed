@@ -1,9 +1,10 @@
-package syncable
+package sql
 
 import (
 	"bytes"
 	"io/ioutil"
 
+	"github.com/philborlin/committed/syncable"
 	"github.com/spf13/viper"
 
 	. "github.com/onsi/ginkgo"
@@ -15,7 +16,7 @@ var _ = Describe("Syncable Parser", func() {
 		var (
 			data []byte
 			err  error
-			dbs  map[string]Database
+			dbs  map[string]syncable.Database
 		)
 
 		JustBeforeEach(func() {
@@ -30,13 +31,13 @@ var _ = Describe("Syncable Parser", func() {
 		})
 
 		It("should parse with SQL toml", func() {
-			name, parsed, err := ParseSyncable("toml", bytes.NewReader(data), dbs)
+			name, parsed, err := syncable.ParseSyncable("toml", bytes.NewReader(data), dbs)
 			Expect(err).To(BeNil())
 			Expect(name).To(Equal("foo"))
 
 			// wrapper := parsed.(*syncableWrapper)
 			// sqlSyncable := wrapper.Syncable.(*SQLSyncable)
-			syncable := parsed.(*SQLSyncable)
+			syncable := parsed.(*Syncable)
 
 			actual := syncable.config
 			expected := simpleConfig()
@@ -52,7 +53,7 @@ var _ = Describe("Syncable Parser", func() {
 			topicSyncable, err := sqlParser(v, dbs)
 			Expect(err).To(BeNil())
 
-			actual := topicSyncable.(*SQLSyncable).config
+			actual := topicSyncable.(*Syncable).config
 			expected := simpleConfig()
 
 			Expect(actual).To(Equal(expected))
@@ -70,13 +71,13 @@ func simpleConfig() *sqlConfig {
 	return &sqlConfig{sqlDB: "testdb", topic: "test1", table: "foo", mappings: m, indexes: i, primaryKey: "pk"}
 }
 
-func databases() (map[string]Database, error) {
-	sqlDB := NewSQLDB("ramsql", "memory://foo")
+func databases() (map[string]syncable.Database, error) {
+	sqlDB := NewDB("ramsql", "memory://foo")
 	err := sqlDB.Init()
 	if err != nil {
 		return nil, err
 	}
-	m := make(map[string]Database)
+	m := make(map[string]syncable.Database)
 	m["testdb"] = sqlDB
 	return m, nil
 }

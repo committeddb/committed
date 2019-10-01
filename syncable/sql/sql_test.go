@@ -1,4 +1,4 @@
-package syncable
+package sql
 
 import (
 	"bytes"
@@ -10,6 +10,7 @@ import (
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
+	"github.com/philborlin/committed/syncable"
 	"github.com/philborlin/committed/types"
 )
 
@@ -20,10 +21,10 @@ type testReturn struct {
 
 var _ = Describe("SQL Syncable", func() {
 	var (
-		data     []byte
-		err      error
-		dbs      map[string]Database
-		syncable *SQLSyncable
+		data []byte
+		err  error
+		dbs  map[string]syncable.Database
+		sync *Syncable
 	)
 
 	JustBeforeEach(func() {
@@ -31,14 +32,14 @@ var _ = Describe("SQL Syncable", func() {
 		Expect(err).To(BeNil())
 		dbs, err = databases()
 		Expect(err).To(BeNil())
-		_, parsed, err := ParseSyncable("toml", bytes.NewReader(data), dbs)
+		_, parsed, err := syncable.ParseSyncable("toml", bytes.NewReader(data), dbs)
 		Expect(err).To(BeNil())
 
-		syncable = parsed.(*SQLSyncable)
+		sync = parsed.(*Syncable)
 		// RamSql does not support indexes
-		syncable.config.indexes = nil
+		sync.config.indexes = nil
 		// RamSql does not support "if not exists" for tables
-		err = syncable.init(true)
+		err = sync.init(true)
 		Expect(err).To(BeNil())
 	})
 
@@ -47,7 +48,7 @@ var _ = Describe("SQL Syncable", func() {
 		mappings = append(mappings, sqlMapping{jsonPath: "", column: "bar", sqlType: "TEXT"})
 		mappings = append(mappings, sqlMapping{jsonPath: "", column: "baz", sqlType: "TEXT"})
 
-		expected := "INSERT INTO foo(bar,baz) VALUES ($1,$2)"
+		expected := "INSERT INTO foo(bar,baz) VALUES ($1,$2) ON DUPLICATE KEY UPDATE bar=$1,baz=$2"
 		actual := createSQL("foo", mappings)
 
 		Expect(expected).To(Equal(actual))
@@ -55,7 +56,7 @@ var _ = Describe("SQL Syncable", func() {
 
 	It("should put values into the db", func() {
 		defer func() {
-			err = syncable.Close()
+			err = sync.Close()
 			Expect(err).To(BeNil())
 		}()
 
@@ -64,10 +65,10 @@ var _ = Describe("SQL Syncable", func() {
 		Expect(err).To(BeNil())
 
 		entry := &types.AcceptedProposal{Data: bytes}
-		syncable.Sync(context.Background(), entry)
+		sync.Sync(context.Background(), entry)
 
 		var value testReturn
-		err = SelectOneRowFromDB(syncable.DB, "SELECT * FROM foo", &value.Key, &value.One)
+		err = SelectOneRowFromDB(sync.DB, "SELECT * FROM foo", &value.Key, &value.One)
 		Expect(err).To(BeNil())
 		Expect(value.Key).To(Equal("lock"))
 		Expect(value.One).To(Equal("two"))

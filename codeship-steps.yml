@@ -3,4 +3,4 @@
   steps:
   - name: Unit & Integration
     service: app
-    command: "go test ./... -cover"
+    command: "make test/ci"

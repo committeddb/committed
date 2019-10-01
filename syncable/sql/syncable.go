@@ -1,17 +1,29 @@
-package syncable
+package sql
 
 import (
 	"context"
 	"database/sql"
+	gosql "database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
 
 	"github.com/oliveagle/jsonpath"
+	"github.com/philborlin/committed/syncable"
 	"github.com/philborlin/committed/types"
 	"github.com/spf13/viper"
 )
+
+type parser struct{}
+
+func (p *parser) Parse(v *viper.Viper, dbs map[string]syncable.Database) (syncable.Syncable, error) {
+	return sqlParser(v, dbs)
+}
+
+func init() {
+	syncable.RegisterParser("sql", &parser{})
+}
 
 type index struct {
 	indexName   string
@@ -34,12 +46,12 @@ type sqlConfig struct {
 	primaryKey string // comma separated list of columns
 }
 
-// SQLSyncable struct
-type SQLSyncable struct {
+// Syncable struct
+type Syncable struct {
 	config   *sqlConfig
 	insert   *sqlInsert
-	database *SQLDB
-	DB       *sql.DB
+	database *DB
+	DB       *gosql.DB
 }
 
 type sqlInsert struct {
@@ -47,7 +59,7 @@ type sqlInsert struct {
 	jsonPath []string
 }
 
-func sqlParser(v *viper.Viper, databases map[string]Database) (Syncable, error) {
+func sqlParser(v *viper.Viper, databases map[string]syncable.Database) (syncable.Syncable, error) {
 	topic := v.GetString("sql.topic")
 	sqlDB := v.GetString("sql.db")
 	table := v.GetString("sql.table")
@@ -82,25 +94,26 @@ func sqlParser(v *viper.Viper, databases map[string]Database) (Syncable, error) 
 		indexes:    indexes,
 		primaryKey: primaryKey,
 	}
-	return newSQLSyncable(config, databases)
+	return newSyncable(config, databases)
 }
 
-// NewSQLSyncable creates a new syncable
-func newSQLSyncable(sqlConfig *sqlConfig, databases map[string]Database) (*SQLSyncable, error) {
+// NewSyncable creates a new syncable
+// TODO Move zero back into this package
+func newSyncable(sqlConfig *sqlConfig, databases map[string]syncable.Database) (syncable.Syncable, error) {
 	database := databases[sqlConfig.sqlDB]
 	if database == nil {
-		return nil, fmt.Errorf("Database %s is not setup", sqlConfig.sqlDB)
+		return &syncable.ZeroSyncable{}, fmt.Errorf("Database %s is not setup", sqlConfig.sqlDB)
 	}
 	if database.Type() != "sql" {
-		return nil, fmt.Errorf("Database %s is not a sql database", sqlConfig.sqlDB)
+		return &syncable.ZeroSyncable{}, fmt.Errorf("Database %s is not a sql database", sqlConfig.sqlDB)
 	}
-	sqlDB := database.(*SQLDB)
+	sqlDB := database.(*DB)
 
-	return &SQLSyncable{config: sqlConfig, database: sqlDB}, nil
+	return &Syncable{config: sqlConfig, database: sqlDB}, nil
 }
 
 // Sync syncs implements Syncable
-func (s *SQLSyncable) Sync(ctx context.Context, entry *types.AcceptedProposal) error {
+func (s *Syncable) Sync(ctx context.Context, entry *types.AcceptedProposal) error {
 	bytes := []byte(entry.Data)
 	var jsonData interface{}
 	json.Marshal(string(bytes))
@@ -196,17 +209,24 @@ func createSQL(table string, sqlMappings []sqlMapping) string {
 			fmt.Fprintf(&sql, ",$%d", i+1)
 		}
 	}
-	fmt.Fprint(&sql, ")")
+	fmt.Fprint(&sql, ") ON DUPLICATE KEY UPDATE ")
+	for i, item := range sqlMappings {
+		if i == 0 {
+			fmt.Fprintf(&sql, "%s=$%d", item.column, i+1)
+		} else {
+			fmt.Fprintf(&sql, ",%s=$%d", item.column, i+1)
+		}
+	}
 
 	return sql.String()
 }
 
 // Init implements Syncable
-func (s *SQLSyncable) Init(ctx context.Context) error {
+func (s *Syncable) Init(ctx context.Context) error {
 	return s.init(false)
 }
 
-func (s *SQLSyncable) init(ignoreCreateDDLError bool) error {
+func (s *Syncable) init(ignoreCreateDDLError bool) error {
 	if err := s.database.Init(); err != nil {
 		return err
 	}
@@ -227,11 +247,11 @@ func (s *SQLSyncable) init(ignoreCreateDDLError bool) error {
 }
 
 // Close implements Syncable
-func (s *SQLSyncable) Close() error {
+func (s *Syncable) Close() error {
 	return s.DB.Close()
 }
 
 // Topics implements Syncable
-func (s *SQLSyncable) Topics() []string {
+func (s *Syncable) Topics() []string {
 	return []string{s.config.topic}
 }

@@ -1,18 +1,25 @@
-package syncable
+package file
 
 import (
 	"context"
 	"fmt"
 	"os"
 
+	"github.com/philborlin/committed/syncable"
 	"github.com/philborlin/committed/types"
 	"github.com/spf13/viper"
 )
 
-func fileParser(v *viper.Viper, databases map[string]Database) (Syncable, error) {
+type parser struct{}
+
+func (p *parser) Parse(v *viper.Viper, dbs map[string]syncable.Database) (syncable.Syncable, error) {
 	topic := v.GetString("file.topic")
 	path := v.GetString("file.path")
 	return &FileSyncable{topics: []string{topic}, path: path}, nil
+}
+
+func init() {
+	syncable.RegisterParser("file", &parser{})
 }
 
 // FileSyncable is a syncable that syncs to a file
