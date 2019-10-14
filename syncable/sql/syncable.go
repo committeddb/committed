@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"strings"
 
 	"github.com/oliveagle/jsonpath"
 	"github.com/philborlin/committed/syncable"
@@ -154,71 +153,20 @@ func (s *Syncable) Sync(ctx context.Context, entry *types.AcceptedProposal) erro
 	return nil
 }
 
-func createDDL(config *sqlConfig) string {
-	var ddl strings.Builder
-	ddl.WriteString(fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (", config.table))
-	for i, column := range config.mappings {
-		ddl.WriteString(fmt.Sprintf("%s %s", column.column, column.sqlType))
-		if i < len(config.mappings)-1 {
-			ddl.WriteString(",")
-		}
-	}
-	if config.primaryKey != "" {
-		ddl.WriteString(fmt.Sprintf(",PRIMARY KEY (%s)", config.primaryKey))
-	}
-	for _, index := range config.indexes {
-		ddl.WriteString(fmt.Sprintf(",INDEX %s (%s)", index.indexName, index.columnNames))
-	}
-	ddl.WriteString(");")
+func unwrapMappings(db *DB, config *sqlConfig) (*sqlInsert, error) {
+	sql := db.dialect.CreateSQL(config.table, config.mappings)
 
-	return ddl.String()
-}
-
-func unwrapMappings(db *sql.DB, table string, mappings []sqlMapping) (*sqlInsert, error) {
-	sql := createSQL(table, mappings)
-
-	stmt, err := db.Prepare(sql)
+	stmt, err := db.DB.Prepare(sql)
 	if err != nil {
 		log.Fatalf("Error Preparing sql [%s]: %v", sql, err)
 	}
 
 	var jsonPaths []string
-	for _, mapping := range mappings {
+	for _, mapping := range config.mappings {
 		jsonPaths = append(jsonPaths, mapping.jsonPath)
 	}
 
 	return &sqlInsert{stmt, jsonPaths}, nil
-}
-
-func createSQL(table string, sqlMappings []sqlMapping) string {
-	var sql strings.Builder
-
-	fmt.Fprintf(&sql, "INSERT INTO %s(", table)
-	for i, item := range sqlMappings {
-		if i == 0 {
-			fmt.Fprintf(&sql, "%s", item.column)
-		} else {
-			fmt.Fprintf(&sql, ",%s", item.column)
-		}
-	}
-	fmt.Fprint(&sql, ") VALUES (")
-	for i := range sqlMappings {
-		if i == 0 {
-			fmt.Fprintf(&sql, "$%d", i+1)
-		} else {
-			fmt.Fprintf(&sql, ",$%d", i+1)
-		}
-	}
-	fmt.Fprint(&sql, ") ON DUPLICATE KEY UPDATE ")
-	for i, item := range sqlMappings {
-		if i == 0 {
-			fmt.Fprintf(&sql, "%s=$%d", item.column, i+1)
-		} else {
-			fmt.Fprintf(&sql, ",%s=$%d", item.column, i+1)
-		}
-	}
-
-	return sql.String()
 }
 
 // Init implements Syncable
@@ -232,12 +180,12 @@ func (s *Syncable) init(ignoreCreateDDLError bool) error {
 	}
 	s.DB = s.database.DB
 
-	_, err := s.DB.Exec(createDDL(s.config))
+	_, err := s.DB.Exec(s.database.dialect.CreateDDL(s.config))
 	if err != nil && !ignoreCreateDDLError {
 		return err
 	}
 
-	insert, err := unwrapMappings(s.DB, s.config.table, s.config.mappings)
+	insert, err := unwrapMappings(s.database, s.config)
 	if err != nil {
 		return err
 	}

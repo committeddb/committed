@@ -22,6 +22,7 @@ func init() {
 
 // DB represents an sql query database
 type DB struct {
+	dialect          Dialect
 	driver           string
 	connectionString string
 	DB               *sql.DB
@@ -29,7 +30,7 @@ type DB struct {
 
 // NewDB creates a new SQLDB
 func NewDB(driver string, connectionString string) *DB {
-	return &DB{driver: driver, connectionString: connectionString}
+	return &DB{dialect: dialects[driver], driver: driver, connectionString: connectionString}
 }
 
 // Init implements Database

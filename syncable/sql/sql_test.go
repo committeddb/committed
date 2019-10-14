@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/ioutil"
 
 	. "github.com/onsi/ginkgo"
@@ -43,15 +44,38 @@ var _ = Describe("SQL Syncable", func() {
 		Expect(err).To(BeNil())
 	})
 
-	It("should create sql", func() {
-		var mappings []sqlMapping
-		mappings = append(mappings, sqlMapping{jsonPath: "", column: "bar", sqlType: "TEXT"})
-		mappings = append(mappings, sqlMapping{jsonPath: "", column: "baz", sqlType: "TEXT"})
+	Describe("Dialect", func() {
+		var (
+			dialect  Dialect
+			expected string
+		)
 
-		expected := "INSERT INTO foo(bar,baz) VALUES ($1,$2) ON DUPLICATE KEY UPDATE bar=$1,baz=$2"
-		actual := createSQL("foo", mappings)
+		JustBeforeEach(func() {
+			var mappings []sqlMapping
+			mappings = append(mappings, sqlMapping{jsonPath: "", column: "bar", sqlType: "TEXT"})
+			mappings = append(mappings, sqlMapping{jsonPath: "", column: "baz", sqlType: "TEXT"})
 
-		Expect(expected).To(Equal(actual))
+			fmt.Printf("Dialect: %v - SQL: [%s]\n", dialect, expected)
+			actual := dialect.CreateSQL("foo", mappings)
+			Expect(expected).To(Equal(actual))
+		})
+
+		Context("mysql", func() {
+			BeforeEach(func() {
+				dialect = &mySQLDialect{}
+				expected = "INSERT INTO foo(bar,baz) VALUES ($1,$2) ON DUPLICATE KEY UPDATE bar=$1,baz=$2"
+			})
+
+			It("should create mysql sql", func() {})
+		})
+
+		Context("ramsql", func() {
+			BeforeEach(func() {
+				dialect = &ramsqlDialect{}
+				expected = "INSERT INTO foo(bar,baz) VALUES ($1,$2)"
+			})
+			It("should create ramsql sql", func() {})
+		})
 	})
 
 	It("should put values into the db", func() {
