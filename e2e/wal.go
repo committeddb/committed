@@ -11,9 +11,9 @@ import (
 )
 
 func findStringInTopic(topicName string, node int, s string) error {
-	t, err := topic.Restore(topicName, fmt.Sprintf("./Data/raft-%d/%s", node, topicName))
+	t, err := topic.Restore(topicName, fmt.Sprintf("./data/raft-%d/%s", node, topicName))
 	if err != nil {
-		return errors.Wrapf(err, "Error restoring %s", fmt.Sprintf("./Data/raft-%d/%s", node, topicName))
+		return errors.Wrapf(err, "Error restoring %s", fmt.Sprintf("./data/raft-%d/%s", node, topicName))
 	}
 
 	r, err := t.NewReader(0)
