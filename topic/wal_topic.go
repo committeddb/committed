@@ -125,7 +125,7 @@ func (t *WALTopic) newWalReader(index uint64) (*walTopicReader, error) {
 	walTopicReader := &walTopicReader{topic: t, alert: alert}
 	lr, err := walTopicReader.newLiveReader(currentSegment)
 	if err != nil {
-		return nil, errors.Wrap(err, "Could not create walTopicReader")
+		return nil, errors.Wrapf(err, "Could not create walTopicReader with currentSegment = %v", currentSegment)
 	}
 	walTopicReader.r = lr
 	walTopicReader.currentSegment = currentSegment
