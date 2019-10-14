@@ -119,16 +119,18 @@ name = "test1"`
 
 		time.Sleep(10 * time.Second)
 
+		printDir("./data/raft-3")
 		err = findStringInTopic(topic, 3, data)
 		Expect(err).To(BeNil())
 
+		printDir("./data/raft-2")
 		err = findStringInTopic(topic, 2, data)
 		Expect(err).To(BeNil())
 
+		printDir("./data/raft-1")
 		err = findStringInTopic(topic, 1, data)
 		Expect(err).To(BeNil())
 
-		printDir("./data")
 		err = printFile("./data/foo.txt")
 		Expect(err).To(BeNil())
 	})
