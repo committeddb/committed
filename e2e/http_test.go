@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"os"
 	"time"
@@ -84,6 +85,7 @@ name = "test1"`
 		err = control.postSyncable(syncableTOML)
 		Expect(err).To(BeNil())
 
+		// time.Sleep(5 * time.Second)
 		fmt.Println("[http_test.go] Shutdown node")
 
 		err = control.shutdownNode()
@@ -126,6 +128,7 @@ name = "test1"`
 		err = findStringInTopic(topic, 1, data)
 		Expect(err).To(BeNil())
 
+		printDir("./data")
 		err = printFile("./data/foo.txt")
 		Expect(err).To(BeNil())
 	})
@@ -134,6 +137,20 @@ name = "test1"`
 func fileTOML(name string, topic string, path string) string {
 	return fmt.Sprintf("[syncable]\nname=\"%s\"\ndbType=\"file\"\n\n[file]\ntopic=\"%s\"\npath=\"%s\"",
 		name, topic, path)
+}
+
+func printDir(name string) error {
+	fmt.Printf("Dir: %v\n", name)
+	files, err := ioutil.ReadDir(name)
+	if err != nil {
+		return err
+	}
+
+	for _, file := range files {
+		fmt.Printf("  %v\n", file.Name())
+	}
+
+	return nil
 }
 
 func printFile(name string) error {

@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io/ioutil"
 
 	. "github.com/onsi/ginkgo"
@@ -55,7 +54,6 @@ var _ = Describe("SQL Syncable", func() {
 			mappings = append(mappings, sqlMapping{jsonPath: "", column: "bar", sqlType: "TEXT"})
 			mappings = append(mappings, sqlMapping{jsonPath: "", column: "baz", sqlType: "TEXT"})
 
-			fmt.Printf("Dialect: %v - SQL: [%s]\n", dialect, expected)
 			actual := dialect.CreateSQL("foo", mappings)
 			Expect(expected).To(Equal(actual))
 		})
