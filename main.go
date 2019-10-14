@@ -15,6 +15,7 @@ import (
 	"github.com/philborlin/committed/raft"
 
 	// Ensures that init() functions run
+	_ "github.com/philborlin/committed/syncable"
 	_ "github.com/philborlin/committed/syncable/file"
 	_ "github.com/philborlin/committed/syncable/sql"
 )
