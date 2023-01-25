@@ -6,7 +6,7 @@ import (
 	"log"
 	"strings"
 
-	"github.com/philborlin/committed/topic"
+	"github.com/philborlin/committed/internal/node/topic"
 	"github.com/pkg/errors"
 )
 

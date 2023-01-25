@@ -9,15 +9,15 @@ import (
 	"syscall"
 
 	"github.com/coreos/etcd/raft/raftpb"
-	"github.com/philborlin/committed/api"
+	"github.com/philborlin/committed/internal/node/api"
 
-	"github.com/philborlin/committed/cluster"
-	"github.com/philborlin/committed/raft"
+	"github.com/philborlin/committed/internal/node/cluster"
+	"github.com/philborlin/committed/internal/node/raft"
 
 	// Ensures that init() functions run
-	_ "github.com/philborlin/committed/syncable"
-	_ "github.com/philborlin/committed/syncable/file"
-	_ "github.com/philborlin/committed/syncable/sql"
+	_ "github.com/philborlin/committed/internal/node/syncable"
+	_ "github.com/philborlin/committed/internal/node/syncable/file"
+	_ "github.com/philborlin/committed/internal/node/syncable/sql"
 )
 
 func main() {
