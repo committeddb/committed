@@ -1,42 +1,28 @@
 package authn_test
 
 import (
-	"crypto/rand"
-	"math/big"
 	"testing"
 
 	"github.com/philborlin/committed/authn"
 	"github.com/stretchr/testify/assert"
 )
 
-func generateRandomString(n int) ([]byte, error) {
-	const letters = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-"
-	ret := make([]byte, n)
-	for i := 0; i < n; i++ {
-		num, err := rand.Int(rand.Reader, big.NewInt(int64(len(letters))))
-		if err != nil {
-			return nil, err
-		}
-		ret[i] = letters[num.Int64()]
-	}
-
-	return ret, nil
-}
-
 func TestGenerate(t *testing.T) {
-	signingKey, err := generateRandomString(32)
-	assert.NoError(t, err)
+	signingKey := []byte("foo")
+	badSigningKey := ""
 
 	key := "foo"
 	value := "bar"
 
 	tests := map[string]struct {
-		key        string
-		value      string
-		signingKey any
-		err        string
+		key            string
+		value          string
+		signingKey     any
+		generateError  string
+		getClaimsError string
 	}{
-		"simple": {key: key, value: value, signingKey: signingKey, err: ""},
+		"simple":          {key: key, value: value, signingKey: signingKey, generateError: "", getClaimsError: ""},
+		"bad signing key": {key: key, value: value, signingKey: badSigningKey, generateError: "key is of invalid type", getClaimsError: "token contains an invalid number of segments"},
 	}
 
 	for name, tc := range tests {
@@ -45,22 +31,27 @@ func TestGenerate(t *testing.T) {
 			claims[tc.key] = tc.value
 
 			a := authn.New(tc.signingKey)
-			ts, err := a.Generate(claims)
-			assert.NoError(t, err)
+			ts, generateError := a.Generate(claims)
+			assertError(t, generateError, tc.generateError)
 
-			c, err := a.GetClaims(ts)
-			if tc.err == "" {
-				assert.NoError(t, err)
-			} else {
-				assert.Error(t, err)
-				if err != nil {
-					assert.Contains(t, err.Error(), tc.err)
-				}
+			c, getClaimsError := a.GetClaims(ts)
+			assertError(t, getClaimsError, tc.getClaimsError)
+
+			if getClaimsError == nil {
+				val, ok := c[tc.key]
+				assert.True(t, ok)
+				assert.Equal(t, tc.value, val)
 			}
-
-			val, ok := c[tc.key]
-			assert.True(t, ok)
-			assert.Equal(t, tc.value, val)
 		})
+	}
+}
+
+func assertError(t *testing.T, err error, errorString string) {
+	if errorString == "" {
+		assert.NoError(t, err)
+	} else if err != nil {
+		assert.Contains(t, err.Error(), errorString)
+	} else {
+		assert.Error(t, err)
 	}
 }
