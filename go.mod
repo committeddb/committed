@@ -48,7 +48,7 @@ require (
 	github.com/spf13/pflag v1.0.3 // indirect
 	github.com/xiang90/probing v0.0.0-20160813154853-07dd2e8dfe18 // indirect
 	golang.org/x/net v0.0.0-20190628185345-da137c7871d7 // indirect
-	golang.org/x/sys v0.0.0-20190626221950-04f50cda93cb // indirect
+	golang.org/x/sys v0.1.0 // indirect
 	golang.org/x/text v0.3.2 // indirect
 	golang.org/x/time v0.0.0-20180314180208-26559e0f760e // indirect
 	golang.org/x/tools v0.0.0-20190706070813-72ffa07ba3db // indirect
