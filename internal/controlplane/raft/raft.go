@@ -176,9 +176,12 @@ func Raft(replicaID int) {
 		signal.Ignore(syscall.Signal(0xd))
 	}
 
+	fmt.Println("setupLogging")
 	setupLogging()
+	fmt.Println("getNodeSetup")
 	ns := getNodeSetup(replicaID)
 
+	fmt.Println("createNodeHost")
 	nh, err := createNodeHost(ns)
 	if err != nil {
 		panic(err)
@@ -196,6 +199,7 @@ func Raft(replicaID int) {
 	// we use ExampleStateMachine as the IStateMachine for this cluster, its
 	// behaviour is identical to the one used in the Hello World example.
 	ns.rc.ShardID = shardID1
+	fmt.Println("StartReplica")
 	if err := nh.StartReplica(ns.initialMembers, false, NewExampleStateMachine(nh), ns.rc); err != nil {
 		// if err := nh.StartReplica(ns.initialMembers, false, NewUserStateMachine, ns.rc); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to add cluster, %v\n", err)
@@ -210,8 +214,22 @@ func Raft(replicaID int) {
 	// }
 	raftStopper := syncutil.NewStopper()
 	ch := make(chan string, 16)
+	fmt.Println("createConsoleStopper")
 	createConsoleStopper(raftStopper, ch, nh)
+	fmt.Println("createRunWorker")
 	createRunWorker(raftStopper, ch, nh)
+
+	// lr, err := nh.GetLogReader(shardID1)
+	// if err != nil {
+	// 	panic(err)
+	// }
+	// es, err := lr.Entries(0, 7, 8000)
+	// if err != nil {
+	// 	panic(err)
+	// }
+	// for _, e := range es {
+	// 	fmt.Println(e)
+	// }
 
 	raftStopper.Wait()
 }

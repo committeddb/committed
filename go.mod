@@ -3,10 +3,10 @@ module github.com/philborlin/committed
 go 1.20
 
 require (
-	github.com/cockroachdb/pebble v0.0.0-20221207173255-0f086d933dac
 	github.com/coreos/etcd v3.3.13+incompatible
 	github.com/go-kit/kit v0.8.0
 	github.com/go-sql-driver/mysql v1.4.1
+	github.com/google/go-cmp v0.5.5
 	github.com/lni/goutils v1.3.1-0.20220604063047-388d67b4dbc4
 	github.com/maxbrunsfeld/counterfeiter/v6 v6.2.2
 	github.com/oliveagle/jsonpath v0.0.0-20180314032104-46faf33da135
@@ -16,6 +16,7 @@ require (
 	github.com/prometheus/client_golang v1.0.0
 	github.com/prometheus/tsdb v0.10.0
 	github.com/proullon/ramsql v0.0.0-20181213202341-817cee58a244
+	github.com/spf13/cobra v1.6.1
 	github.com/spf13/viper v1.3.2
 	github.com/stretchr/testify v1.7.0
 )
@@ -28,6 +29,7 @@ require (
 	github.com/cespare/xxhash/v2 v2.1.2 // indirect
 	github.com/cockroachdb/errors v1.9.0 // indirect
 	github.com/cockroachdb/logtags v0.0.0-20211118104740-dabe8e521a4f // indirect
+	github.com/cockroachdb/pebble v0.0.0-20221207173255-0f086d933dac // indirect
 	github.com/cockroachdb/redact v1.1.3 // indirect
 	github.com/getsentry/sentry-go v0.12.0 // indirect
 	github.com/google/btree v1.0.0 // indirect
@@ -49,7 +51,6 @@ require (
 	github.com/pierrec/lz4/v4 v4.1.14 // indirect
 	github.com/rogpeppe/go-internal v1.8.1 // indirect
 	github.com/sean-/seed v0.0.0-20170313163322-e2103e2c3529 // indirect
-	github.com/spf13/cobra v1.6.1 // indirect
 	github.com/valyala/fastrand v1.1.0 // indirect
 	github.com/valyala/histogram v1.2.0 // indirect
 	golang.org/x/crypto v0.0.0-20211117183948-ae814b36b871 // indirect
