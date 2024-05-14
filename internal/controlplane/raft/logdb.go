@@ -1,9 +1,11 @@
 package raft
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -17,9 +19,25 @@ type FileWriter interface {
 	Open(name string) (io.WriteCloser, error)
 }
 
+type Wal interface {
+	Write(p []byte) error
+	Read(firstIndex uint64, lastIndex uint64) ([]pb.Update, error)
+}
+
+type WalOpener interface {
+	Open(dir string) (Wal, error)
+}
+
+type key struct {
+	replicaID uint64
+	shardID   uint64
+}
+
 type WALLogDB struct {
 	fsys fs.FS
 	fw   FileWriter
+	wo   WalOpener
+	wals map[key]Wal
 }
 
 func NewWALLogDB(f fs.FS, w FileWriter) (*WALLogDB, error) {
@@ -87,6 +105,20 @@ func getBootstrapFile(shardIw uint64, replicaIw uint64) string {
 	return fmt.Sprintf("replicas/%v/%v/bootstrap", replicaIw, shardIw)
 }
 
+func (w *WALLogDB) getWal(shardIw uint64, replicaIw uint64) (Wal, error) {
+	var err error
+	wal, ok := w.wals[key{replicaID: replicaIw, shardID: shardIw}]
+	if !ok {
+		dir := fmt.Sprintf("replicas/%v/%v/log", replicaIw, shardIw)
+		wal, err = w.wo.Open(dir)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return wal, nil
+}
+
 // SaveBootstrapInfo saves the specified bootstrap info to the log DB.
 func (w *WALLogDB) SaveBootstrapInfo(
 	shardIw uint64,
@@ -151,6 +183,24 @@ func (w *WALLogDB) GetBootstrapInfo(
 // accesses the log DB from its own thread, SaveRaftState will never be
 // concurrently callew with the same shardID.
 func (w *WALLogDB) SaveRaftState(updates []pb.Update, shardIw uint64) error {
+	for _, u := range updates {
+		// TODO There is probably a more memory efficient way to do this
+		buf, err := u.Marshal()
+		if err != nil {
+			return err
+		}
+
+		wal, err := w.getWal(u.ShardID, u.ReplicaID)
+		if err != nil {
+			return err
+		}
+
+		err = wal.Write(buf)
+		if err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -176,7 +226,31 @@ func (w *WALLogDB) ReadRaftState(
 	replicaIw uint64,
 	lastIndex uint64,
 ) (raftio.RaftState, error) {
-	return raftio.RaftState{}, nil
+	wal, err := w.getWal(shardIw, replicaIw)
+	if err != nil {
+		return raftio.RaftState{}, err
+	}
+
+	// Do we want to read everything or just expose a LastIndex function on the Wal
+	us, err := wal.Read(lastIndex, uint64(math.MaxUint64))
+	if err != nil {
+		return raftio.RaftState{}, err
+	}
+
+	if len(us) == 0 {
+		return raftio.RaftState{}, fmt.Errorf("no updates with index of %v", lastIndex)
+	}
+
+	var st raftio.RaftState
+	if pb.IsEmptyState(us[0].State) {
+		return raftio.RaftState{}, errors.New("empty state")
+	}
+
+	st.State = us[0].State
+	st.FirstIndex = lastIndex + 1
+	st.EntryCount = lastIndex + uint64(len(us)) - st.FirstIndex + 1
+
+	return st, nil
 }
 
 // RemoveEntriesTo removes entries with indexes between (0, index].
