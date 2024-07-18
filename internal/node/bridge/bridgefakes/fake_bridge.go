@@ -58,15 +58,16 @@ func (fake *FakeBridge) Close() error {
 	ret, specificReturn := fake.closeReturnsOnCall[len(fake.closeArgsForCall)]
 	fake.closeArgsForCall = append(fake.closeArgsForCall, struct {
 	}{})
+	stub := fake.CloseStub
+	fakeReturns := fake.closeReturns
 	fake.recordInvocation("Close", []interface{}{})
 	fake.closeMutex.Unlock()
-	if fake.CloseStub != nil {
-		return fake.CloseStub()
+	if stub != nil {
+		return stub()
 	}
 	if specificReturn {
 		return ret.result1
 	}
-	fakeReturns := fake.closeReturns
 	return fakeReturns.result1
 }
 
@@ -110,15 +111,16 @@ func (fake *FakeBridge) GetSnapshot() *bridge.Snapshot {
 	ret, specificReturn := fake.getSnapshotReturnsOnCall[len(fake.getSnapshotArgsForCall)]
 	fake.getSnapshotArgsForCall = append(fake.getSnapshotArgsForCall, struct {
 	}{})
+	stub := fake.GetSnapshotStub
+	fakeReturns := fake.getSnapshotReturns
 	fake.recordInvocation("GetSnapshot", []interface{}{})
 	fake.getSnapshotMutex.Unlock()
-	if fake.GetSnapshotStub != nil {
-		return fake.GetSnapshotStub()
+	if stub != nil {
+		return stub()
 	}
 	if specificReturn {
 		return ret.result1
 	}
-	fakeReturns := fake.getSnapshotReturns
 	return fakeReturns.result1
 }
 
@@ -165,15 +167,16 @@ func (fake *FakeBridge) Init(arg1 context.Context, arg2 chan<- error, arg3 time.
 		arg2 chan<- error
 		arg3 time.Duration
 	}{arg1, arg2, arg3})
+	stub := fake.InitStub
+	fakeReturns := fake.initReturns
 	fake.recordInvocation("Init", []interface{}{arg1, arg2, arg3})
 	fake.initMutex.Unlock()
-	if fake.InitStub != nil {
-		return fake.InitStub(arg1, arg2, arg3)
+	if stub != nil {
+		return stub(arg1, arg2, arg3)
 	}
 	if specificReturn {
 		return ret.result1
 	}
-	fakeReturns := fake.initReturns
 	return fakeReturns.result1
 }
 
@@ -224,9 +227,10 @@ func (fake *FakeBridge) UpdateIndex(arg1 types.Index) {
 	fake.updateIndexArgsForCall = append(fake.updateIndexArgsForCall, struct {
 		arg1 types.Index
 	}{arg1})
+	stub := fake.UpdateIndexStub
 	fake.recordInvocation("UpdateIndex", []interface{}{arg1})
 	fake.updateIndexMutex.Unlock()
-	if fake.UpdateIndexStub != nil {
+	if stub != nil {
 		fake.UpdateIndexStub(arg1)
 	}
 }

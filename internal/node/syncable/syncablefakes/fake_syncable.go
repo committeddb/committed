@@ -62,15 +62,16 @@ func (fake *FakeSyncable) Close() error {
 	ret, specificReturn := fake.closeReturnsOnCall[len(fake.closeArgsForCall)]
 	fake.closeArgsForCall = append(fake.closeArgsForCall, struct {
 	}{})
+	stub := fake.CloseStub
+	fakeReturns := fake.closeReturns
 	fake.recordInvocation("Close", []interface{}{})
 	fake.closeMutex.Unlock()
-	if fake.CloseStub != nil {
-		return fake.CloseStub()
+	if stub != nil {
+		return stub()
 	}
 	if specificReturn {
 		return ret.result1
 	}
-	fakeReturns := fake.closeReturns
 	return fakeReturns.result1
 }
 
@@ -115,15 +116,16 @@ func (fake *FakeSyncable) Init(arg1 context.Context) error {
 	fake.initArgsForCall = append(fake.initArgsForCall, struct {
 		arg1 context.Context
 	}{arg1})
+	stub := fake.InitStub
+	fakeReturns := fake.initReturns
 	fake.recordInvocation("Init", []interface{}{arg1})
 	fake.initMutex.Unlock()
-	if fake.InitStub != nil {
-		return fake.InitStub(arg1)
+	if stub != nil {
+		return stub(arg1)
 	}
 	if specificReturn {
 		return ret.result1
 	}
-	fakeReturns := fake.initReturns
 	return fakeReturns.result1
 }
 
@@ -176,15 +178,16 @@ func (fake *FakeSyncable) Sync(arg1 context.Context, arg2 *types.AcceptedProposa
 		arg1 context.Context
 		arg2 *types.AcceptedProposal
 	}{arg1, arg2})
+	stub := fake.SyncStub
+	fakeReturns := fake.syncReturns
 	fake.recordInvocation("Sync", []interface{}{arg1, arg2})
 	fake.syncMutex.Unlock()
-	if fake.SyncStub != nil {
-		return fake.SyncStub(arg1, arg2)
+	if stub != nil {
+		return stub(arg1, arg2)
 	}
 	if specificReturn {
 		return ret.result1
 	}
-	fakeReturns := fake.syncReturns
 	return fakeReturns.result1
 }
 
@@ -235,15 +238,16 @@ func (fake *FakeSyncable) Topics() []string {
 	ret, specificReturn := fake.topicsReturnsOnCall[len(fake.topicsArgsForCall)]
 	fake.topicsArgsForCall = append(fake.topicsArgsForCall, struct {
 	}{})
+	stub := fake.TopicsStub
+	fakeReturns := fake.topicsReturns
 	fake.recordInvocation("Topics", []interface{}{})
 	fake.topicsMutex.Unlock()
-	if fake.TopicsStub != nil {
-		return fake.TopicsStub()
+	if stub != nil {
+		return stub()
 	}
 	if specificReturn {
 		return ret.result1
 	}
-	fakeReturns := fake.topicsReturns
 	return fakeReturns.result1
 }
 

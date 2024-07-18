@@ -62,15 +62,16 @@ func (fake *FakeTopic) Append(arg1 topic.Data) error {
 	fake.appendArgsForCall = append(fake.appendArgsForCall, struct {
 		arg1 topic.Data
 	}{arg1})
+	stub := fake.AppendStub
+	fakeReturns := fake.appendReturns
 	fake.recordInvocation("Append", []interface{}{arg1})
 	fake.appendMutex.Unlock()
-	if fake.AppendStub != nil {
-		return fake.AppendStub(arg1)
+	if stub != nil {
+		return stub(arg1)
 	}
 	if specificReturn {
 		return ret.result1
 	}
-	fakeReturns := fake.appendReturns
 	return fakeReturns.result1
 }
 
@@ -121,15 +122,16 @@ func (fake *FakeTopic) Close() error {
 	ret, specificReturn := fake.closeReturnsOnCall[len(fake.closeArgsForCall)]
 	fake.closeArgsForCall = append(fake.closeArgsForCall, struct {
 	}{})
+	stub := fake.CloseStub
+	fakeReturns := fake.closeReturns
 	fake.recordInvocation("Close", []interface{}{})
 	fake.closeMutex.Unlock()
-	if fake.CloseStub != nil {
-		return fake.CloseStub()
+	if stub != nil {
+		return stub()
 	}
 	if specificReturn {
 		return ret.result1
 	}
-	fakeReturns := fake.closeReturns
 	return fakeReturns.result1
 }
 
@@ -173,15 +175,16 @@ func (fake *FakeTopic) Name() string {
 	ret, specificReturn := fake.nameReturnsOnCall[len(fake.nameArgsForCall)]
 	fake.nameArgsForCall = append(fake.nameArgsForCall, struct {
 	}{})
+	stub := fake.NameStub
+	fakeReturns := fake.nameReturns
 	fake.recordInvocation("Name", []interface{}{})
 	fake.nameMutex.Unlock()
-	if fake.NameStub != nil {
-		return fake.NameStub()
+	if stub != nil {
+		return stub()
 	}
 	if specificReturn {
 		return ret.result1
 	}
-	fakeReturns := fake.nameReturns
 	return fakeReturns.result1
 }
 
@@ -226,15 +229,16 @@ func (fake *FakeTopic) NewReader(arg1 uint64) (topic.Reader, error) {
 	fake.newReaderArgsForCall = append(fake.newReaderArgsForCall, struct {
 		arg1 uint64
 	}{arg1})
+	stub := fake.NewReaderStub
+	fakeReturns := fake.newReaderReturns
 	fake.recordInvocation("NewReader", []interface{}{arg1})
 	fake.newReaderMutex.Unlock()
-	if fake.NewReaderStub != nil {
-		return fake.NewReaderStub(arg1)
+	if stub != nil {
+		return stub(arg1)
 	}
 	if specificReturn {
 		return ret.result1, ret.result2
 	}
-	fakeReturns := fake.newReaderReturns
 	return fakeReturns.result1, fakeReturns.result2
 }
 

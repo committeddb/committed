@@ -99,15 +99,16 @@ func (fake *FakeWALFactory) New(arg1 log.Logger, arg2 prometheus.Registerer, arg
 		arg3 string
 		arg4 bool
 	}{arg1, arg2, arg3, arg4})
+	stub := fake.NewStub
+	fakeReturns := fake.newReturns
 	fake.recordInvocation("New", []interface{}{arg1, arg2, arg3, arg4})
 	fake.newMutex.Unlock()
-	if fake.NewStub != nil {
-		return fake.NewStub(arg1, arg2, arg3, arg4)
+	if stub != nil {
+		return stub(arg1, arg2, arg3, arg4)
 	}
 	if specificReturn {
 		return ret.result1, ret.result2
 	}
-	fakeReturns := fake.newReturns
 	return fakeReturns.result1, fakeReturns.result2
 }
 
@@ -164,15 +165,16 @@ func (fake *FakeWALFactory) NewLiveReader(arg1 log.Logger, arg2 prometheus.Regis
 		arg2 prometheus.Registerer
 		arg3 io.Reader
 	}{arg1, arg2, arg3})
+	stub := fake.NewLiveReaderStub
+	fakeReturns := fake.newLiveReaderReturns
 	fake.recordInvocation("NewLiveReader", []interface{}{arg1, arg2, arg3})
 	fake.newLiveReaderMutex.Unlock()
-	if fake.NewLiveReaderStub != nil {
-		return fake.NewLiveReaderStub(arg1, arg2, arg3)
+	if stub != nil {
+		return stub(arg1, arg2, arg3)
 	}
 	if specificReturn {
 		return ret.result1
 	}
-	fakeReturns := fake.newLiveReaderReturns
 	return fakeReturns.result1
 }
 
@@ -224,15 +226,16 @@ func (fake *FakeWALFactory) NewSegmentsRangeReader(arg1 ...wal.SegmentRange) (io
 	fake.newSegmentsRangeReaderArgsForCall = append(fake.newSegmentsRangeReaderArgsForCall, struct {
 		arg1 []wal.SegmentRange
 	}{arg1})
+	stub := fake.NewSegmentsRangeReaderStub
+	fakeReturns := fake.newSegmentsRangeReaderReturns
 	fake.recordInvocation("NewSegmentsRangeReader", []interface{}{arg1})
 	fake.newSegmentsRangeReaderMutex.Unlock()
-	if fake.NewSegmentsRangeReaderStub != nil {
-		return fake.NewSegmentsRangeReaderStub(arg1...)
+	if stub != nil {
+		return stub(arg1...)
 	}
 	if specificReturn {
 		return ret.result1, ret.result2
 	}
-	fakeReturns := fake.newSegmentsRangeReaderReturns
 	return fakeReturns.result1, fakeReturns.result2
 }
 
@@ -291,15 +294,16 @@ func (fake *FakeWALFactory) NewSize(arg1 log.Logger, arg2 prometheus.Registerer,
 		arg4 int
 		arg5 bool
 	}{arg1, arg2, arg3, arg4, arg5})
+	stub := fake.NewSizeStub
+	fakeReturns := fake.newSizeReturns
 	fake.recordInvocation("NewSize", []interface{}{arg1, arg2, arg3, arg4, arg5})
 	fake.newSizeMutex.Unlock()
-	if fake.NewSizeStub != nil {
-		return fake.NewSizeStub(arg1, arg2, arg3, arg4, arg5)
+	if stub != nil {
+		return stub(arg1, arg2, arg3, arg4, arg5)
 	}
 	if specificReturn {
 		return ret.result1, ret.result2
 	}
-	fakeReturns := fake.newSizeReturns
 	return fakeReturns.result1, fakeReturns.result2
 }
 
@@ -356,15 +360,16 @@ func (fake *FakeWALFactory) Open(arg1 log.Logger, arg2 prometheus.Registerer, ar
 		arg2 prometheus.Registerer
 		arg3 string
 	}{arg1, arg2, arg3})
+	stub := fake.OpenStub
+	fakeReturns := fake.openReturns
 	fake.recordInvocation("Open", []interface{}{arg1, arg2, arg3})
 	fake.openMutex.Unlock()
-	if fake.OpenStub != nil {
-		return fake.OpenStub(arg1, arg2, arg3)
+	if stub != nil {
+		return stub(arg1, arg2, arg3)
 	}
 	if specificReturn {
 		return ret.result1, ret.result2
 	}
-	fakeReturns := fake.openReturns
 	return fakeReturns.result1, fakeReturns.result2
 }
 

@@ -4,3 +4,5 @@ raft-*
 debug
 data
 example-data
+entry-log
+state-log

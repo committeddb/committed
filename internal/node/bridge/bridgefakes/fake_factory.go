@@ -44,15 +44,16 @@ func (fake *FakeFactory) New(arg1 string, arg2 syncable.Syncable, arg3 map[strin
 		arg5 types.Proposer
 		arg6 *bridge.Snapshot
 	}{arg1, arg2, arg3, arg4, arg5, arg6})
+	stub := fake.NewStub
+	fakeReturns := fake.newReturns
 	fake.recordInvocation("New", []interface{}{arg1, arg2, arg3, arg4, arg5, arg6})
 	fake.newMutex.Unlock()
-	if fake.NewStub != nil {
-		return fake.NewStub(arg1, arg2, arg3, arg4, arg5, arg6)
+	if stub != nil {
+		return stub(arg1, arg2, arg3, arg4, arg5, arg6)
 	}
 	if specificReturn {
 		return ret.result1, ret.result2
 	}
-	fakeReturns := fake.newReturns
 	return fakeReturns.result1, fakeReturns.result2
 }
 

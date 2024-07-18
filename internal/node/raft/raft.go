@@ -29,16 +29,17 @@ import (
 
 	ctypes "github.com/philborlin/committed/internal/node/types"
 	"github.com/pkg/errors"
+	"go.uber.org/zap"
 
-	"github.com/coreos/etcd/etcdserver/stats"
-	"github.com/coreos/etcd/pkg/fileutil"
-	"github.com/coreos/etcd/pkg/types"
-	"github.com/coreos/etcd/raft"
-	"github.com/coreos/etcd/raft/raftpb"
-	"github.com/coreos/etcd/rafthttp"
-	"github.com/coreos/etcd/snap"
-	"github.com/coreos/etcd/wal"
-	"github.com/coreos/etcd/wal/walpb"
+	"go.etcd.io/etcd/client/pkg/v3/fileutil"
+	"go.etcd.io/etcd/client/pkg/v3/types"
+	"go.etcd.io/etcd/raft/v3"
+	"go.etcd.io/etcd/raft/v3/raftpb"
+	"go.etcd.io/etcd/server/v3/etcdserver/api/rafthttp"
+	"go.etcd.io/etcd/server/v3/etcdserver/api/snap"
+	stats "go.etcd.io/etcd/server/v3/etcdserver/api/v2stats"
+	"go.etcd.io/etcd/server/v3/wal"
+	"go.etcd.io/etcd/server/v3/wal/walpb"
 )
 
 // A key-value stream backed by raft
@@ -73,6 +74,8 @@ type raftNode struct {
 	stopc     chan struct{} // signals proposal channel closed
 	httpstopc chan struct{} // signals http server to shutdown
 	httpdonec chan struct{} // signals http server shutdown complete
+
+	logger *zap.Logger
 }
 
 var defaultSnapCount uint64 = 10000
@@ -107,6 +110,7 @@ func NewRaftNode(id int, peers []string, join bool, dataDir string, getSnapshot 
 
 		snapshotterReady: make(chan *snap.Snapshotter, 1),
 		// rest of structure populated after WAL replay
+		logger: zap.NewExample(),
 	}
 	go rc.startRaft()
 	return commitC, errorC, rc.snapshotterReady, rc
@@ -226,7 +230,7 @@ func (rc *raftNode) openWAL(snapshot *raftpb.Snapshot) *wal.WAL {
 			log.Fatalf("raft: cannot create dir for wal (%v)", err)
 		}
 
-		w, err := wal.Create(rc.waldir, nil)
+		w, err := wal.Create(rc.logger, rc.waldir, nil)
 		if err != nil {
 			log.Fatalf("raft: create wal error (%v)", err)
 		}
@@ -238,7 +242,7 @@ func (rc *raftNode) openWAL(snapshot *raftpb.Snapshot) *wal.WAL {
 		walsnap.Index, walsnap.Term = snapshot.Metadata.Index, snapshot.Metadata.Term
 	}
 	log.Printf("loading WAL at term %d and index %d", walsnap.Term, walsnap.Index)
-	w, err := wal.Open(rc.waldir, walsnap)
+	w, err := wal.Open(rc.logger, rc.waldir, walsnap)
 	if err != nil {
 		log.Fatalf("raft: error loading wal (%v)", err)
 	}
@@ -286,7 +290,7 @@ func (rc *raftNode) startRaft() {
 			log.Fatalf("raft: cannot create dir for snapshot (%v)", err)
 		}
 	}
-	rc.snapshotter = snap.New(rc.snapdir)
+	rc.snapshotter = snap.New(rc.logger, rc.snapdir)
 	rc.snapshotterReady <- rc.snapshotter
 
 	oldwal := wal.Exist(rc.waldir)
@@ -320,7 +324,7 @@ func (rc *raftNode) startRaft() {
 		ClusterID:   0x1000,
 		Raft:        rc,
 		ServerStats: stats.NewServerStats("", ""),
-		LeaderStats: stats.NewLeaderStats(strconv.Itoa(rc.id)),
+		LeaderStats: stats.NewLeaderStats(rc.logger, strconv.Itoa(rc.id)),
 		ErrorC:      make(chan error),
 	}
 

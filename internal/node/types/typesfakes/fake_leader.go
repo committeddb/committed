@@ -27,15 +27,16 @@ func (fake *FakeLeader) IsLeader() bool {
 	ret, specificReturn := fake.isLeaderReturnsOnCall[len(fake.isLeaderArgsForCall)]
 	fake.isLeaderArgsForCall = append(fake.isLeaderArgsForCall, struct {
 	}{})
+	stub := fake.IsLeaderStub
+	fakeReturns := fake.isLeaderReturns
 	fake.recordInvocation("IsLeader", []interface{}{})
 	fake.isLeaderMutex.Unlock()
-	if fake.IsLeaderStub != nil {
-		return fake.IsLeaderStub()
+	if stub != nil {
+		return stub()
 	}
 	if specificReturn {
 		return ret.result1
 	}
-	fakeReturns := fake.isLeaderReturns
 	return fakeReturns.result1
 }
 

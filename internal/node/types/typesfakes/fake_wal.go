@@ -62,15 +62,16 @@ func (fake *FakeWAL) Close() error {
 	ret, specificReturn := fake.closeReturnsOnCall[len(fake.closeArgsForCall)]
 	fake.closeArgsForCall = append(fake.closeArgsForCall, struct {
 	}{})
+	stub := fake.CloseStub
+	fakeReturns := fake.closeReturns
 	fake.recordInvocation("Close", []interface{}{})
 	fake.closeMutex.Unlock()
-	if fake.CloseStub != nil {
-		return fake.CloseStub()
+	if stub != nil {
+		return stub()
 	}
 	if specificReturn {
 		return ret.result1
 	}
-	fakeReturns := fake.closeReturns
 	return fakeReturns.result1
 }
 
@@ -115,15 +116,16 @@ func (fake *FakeWAL) Log(arg1 ...[]byte) error {
 	fake.logArgsForCall = append(fake.logArgsForCall, struct {
 		arg1 [][]byte
 	}{arg1})
+	stub := fake.LogStub
+	fakeReturns := fake.logReturns
 	fake.recordInvocation("Log", []interface{}{arg1})
 	fake.logMutex.Unlock()
-	if fake.LogStub != nil {
-		return fake.LogStub(arg1...)
+	if stub != nil {
+		return stub(arg1...)
 	}
 	if specificReturn {
 		return ret.result1
 	}
-	fakeReturns := fake.logReturns
 	return fakeReturns.result1
 }
 
@@ -174,15 +176,16 @@ func (fake *FakeWAL) NextSegment() error {
 	ret, specificReturn := fake.nextSegmentReturnsOnCall[len(fake.nextSegmentArgsForCall)]
 	fake.nextSegmentArgsForCall = append(fake.nextSegmentArgsForCall, struct {
 	}{})
+	stub := fake.NextSegmentStub
+	fakeReturns := fake.nextSegmentReturns
 	fake.recordInvocation("NextSegment", []interface{}{})
 	fake.nextSegmentMutex.Unlock()
-	if fake.NextSegmentStub != nil {
-		return fake.NextSegmentStub()
+	if stub != nil {
+		return stub()
 	}
 	if specificReturn {
 		return ret.result1
 	}
-	fakeReturns := fake.nextSegmentReturns
 	return fakeReturns.result1
 }
 
@@ -226,15 +229,16 @@ func (fake *FakeWAL) Segments() (int, int, error) {
 	ret, specificReturn := fake.segmentsReturnsOnCall[len(fake.segmentsArgsForCall)]
 	fake.segmentsArgsForCall = append(fake.segmentsArgsForCall, struct {
 	}{})
+	stub := fake.SegmentsStub
+	fakeReturns := fake.segmentsReturns
 	fake.recordInvocation("Segments", []interface{}{})
 	fake.segmentsMutex.Unlock()
-	if fake.SegmentsStub != nil {
-		return fake.SegmentsStub()
+	if stub != nil {
+		return stub()
 	}
 	if specificReturn {
 		return ret.result1, ret.result2, ret.result3
 	}
-	fakeReturns := fake.segmentsReturns
 	return fakeReturns.result1, fakeReturns.result2, fakeReturns.result3
 }
 

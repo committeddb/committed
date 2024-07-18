@@ -47,15 +47,16 @@ func (fake *FakeLiveReader) Err() error {
 	ret, specificReturn := fake.errReturnsOnCall[len(fake.errArgsForCall)]
 	fake.errArgsForCall = append(fake.errArgsForCall, struct {
 	}{})
+	stub := fake.ErrStub
+	fakeReturns := fake.errReturns
 	fake.recordInvocation("Err", []interface{}{})
 	fake.errMutex.Unlock()
-	if fake.ErrStub != nil {
-		return fake.ErrStub()
+	if stub != nil {
+		return stub()
 	}
 	if specificReturn {
 		return ret.result1
 	}
-	fakeReturns := fake.errReturns
 	return fakeReturns.result1
 }
 
@@ -99,15 +100,16 @@ func (fake *FakeLiveReader) Next() bool {
 	ret, specificReturn := fake.nextReturnsOnCall[len(fake.nextArgsForCall)]
 	fake.nextArgsForCall = append(fake.nextArgsForCall, struct {
 	}{})
+	stub := fake.NextStub
+	fakeReturns := fake.nextReturns
 	fake.recordInvocation("Next", []interface{}{})
 	fake.nextMutex.Unlock()
-	if fake.NextStub != nil {
-		return fake.NextStub()
+	if stub != nil {
+		return stub()
 	}
 	if specificReturn {
 		return ret.result1
 	}
-	fakeReturns := fake.nextReturns
 	return fakeReturns.result1
 }
 
@@ -151,15 +153,16 @@ func (fake *FakeLiveReader) Record() []byte {
 	ret, specificReturn := fake.recordReturnsOnCall[len(fake.recordArgsForCall)]
 	fake.recordArgsForCall = append(fake.recordArgsForCall, struct {
 	}{})
+	stub := fake.RecordStub
+	fakeReturns := fake.recordReturns
 	fake.recordInvocation("Record", []interface{}{})
 	fake.recordMutex.Unlock()
-	if fake.RecordStub != nil {
-		return fake.RecordStub()
+	if stub != nil {
+		return stub()
 	}
 	if specificReturn {
 		return ret.result1
 	}
-	fakeReturns := fake.recordReturns
 	return fakeReturns.result1
 }
 

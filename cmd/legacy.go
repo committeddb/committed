@@ -10,8 +10,8 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/coreos/etcd/raft/raftpb"
 	"github.com/philborlin/committed/internal/node/api"
+	"go.etcd.io/etcd/raft/v3/raftpb"
 
 	"github.com/philborlin/committed/internal/node/cluster"
 	"github.com/philborlin/committed/internal/node/raft"

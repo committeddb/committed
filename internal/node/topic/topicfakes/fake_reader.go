@@ -33,15 +33,16 @@ func (fake *FakeReader) Next(arg1 context.Context) (*types.AcceptedProposal, err
 	fake.nextArgsForCall = append(fake.nextArgsForCall, struct {
 		arg1 context.Context
 	}{arg1})
+	stub := fake.NextStub
+	fakeReturns := fake.nextReturns
 	fake.recordInvocation("Next", []interface{}{arg1})
 	fake.nextMutex.Unlock()
-	if fake.NextStub != nil {
-		return fake.NextStub(arg1)
+	if stub != nil {
+		return stub(arg1)
 	}
 	if specificReturn {
 		return ret.result1, ret.result2
 	}
-	fakeReturns := fake.nextReturns
 	return fakeReturns.result1, fakeReturns.result2
 }
 

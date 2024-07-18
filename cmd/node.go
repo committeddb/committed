@@ -1,8 +1,12 @@
 package cmd
 
 import (
+	"flag"
 	"fmt"
+	"log"
 
+	"github.com/philborlin/committed/internal/cluster/db"
+	"github.com/philborlin/committed/internal/cluster/db/wal"
 	"github.com/spf13/cobra"
 )
 
@@ -17,6 +21,22 @@ This application is a tool to generate the needed files
 to quickly create a Cobra application.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		fmt.Println("node called")
+
+		url := flag.String("url", "http://127.0.0.1:9022", "url with port")
+		id := flag.Uint64("id", 1, "node ID")
+
+		s, err := wal.Open(".")
+		if err != nil {
+			log.Fatalf("cannot open storage: %v", err)
+		}
+
+		peers := make(db.Peers)
+		peers[*id] = *url
+
+		db := db.New(*id, peers, s)
+		if err, ok := <-db.ErrorC; ok {
+			log.Fatalf("raft error: %v", err)
+		}
 	},
 }
 

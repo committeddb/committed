@@ -12,7 +12,7 @@ import (
 	"github.com/philborlin/committed/internal/node/topic"
 	"github.com/philborlin/committed/internal/node/types"
 
-	"github.com/coreos/etcd/snap"
+	"go.etcd.io/etcd/server/v3/etcdserver/api/snap"
 )
 
 // Cluster represents a cluster for the committeddb and manages data for that cluster
