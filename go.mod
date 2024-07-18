@@ -5,7 +5,6 @@ go 1.21
 toolchain go1.22.3
 
 require (
-	github.com/coreos/etcd v3.3.13+incompatible
 	github.com/go-kit/kit v0.9.0
 	github.com/go-sql-driver/mysql v1.4.1
 	github.com/google/go-cmp v0.6.0
@@ -77,8 +76,6 @@ require (
 	github.com/alexedwards/argon2id v0.0.0-20211130144151-3585854a6387
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/coreos/go-semver v0.3.0 // indirect
-	github.com/coreos/go-systemd v0.0.0-20190620071333-e64a0ec8b42a // indirect
-	github.com/coreos/pkg v0.0.0-20180928190104-399ea9e2e55f // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/fsnotify/fsnotify v1.4.9 // indirect
 	github.com/go-chi/chi/v5 v5.0.12
