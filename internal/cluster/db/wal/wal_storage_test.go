@@ -1,6 +1,8 @@
 package wal_test
 
 import (
+	"bytes"
+	"encoding/gob"
 	"fmt"
 	"math"
 	"os"
@@ -50,6 +52,20 @@ type StorageWrapper struct {
 	path string
 }
 
+func (s *StorageWrapper) CloseAndReopen() (*StorageWrapper, error) {
+	err := s.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	wal, err := wal.Open(s.path)
+	if err != nil {
+		return nil, err
+	}
+
+	return &StorageWrapper{wal, s.path}, nil
+}
+
 func (s *StorageWrapper) Cleanup() error {
 	_ = s.Close()
 	return os.RemoveAll(s.path)
@@ -82,6 +98,43 @@ func (s *StorageWrapper) ents(t *testing.T) []pb.Entry {
 		e := pb.Entry{}
 		err = e.Unmarshal(data)
 		if err != nil {
+			t.Error(err)
+			return nil
+		}
+
+		es = append(es, e)
+	}
+
+	return es
+}
+
+func (s *StorageWrapper) states(t *testing.T) []wal.State {
+	fi, err := s.StateLog.FirstIndex()
+	if err != nil {
+		t.Error(err)
+		return nil
+	}
+
+	li, err := s.StateLog.LastIndex()
+	if err != nil {
+		t.Error(err)
+		return nil
+	}
+
+	var es []wal.State
+	fmt.Printf("fi: %d, li: %d \n", fi, li)
+
+	for i := fi; i <= li; i++ {
+		fmt.Printf("  read: %d\n", i)
+		data, err := s.StateLog.Read(i)
+		if err != nil {
+			t.Error(err)
+			return nil
+		}
+
+		e := wal.State{}
+		dec := gob.NewDecoder(bytes.NewBuffer(data))
+		if err := dec.Decode(&e); err != nil {
 			t.Error(err)
 			return nil
 		}
@@ -365,3 +418,70 @@ func TestStorageAppend(t *testing.T) {
 // 	tt = tests[i]
 // 	require.Equal(t, raft.ErrSnapOutOfDate, s.ApplySnapshot(tt))
 // }
+
+func TestStateStorage(t *testing.T) {
+	tests := []struct {
+		st   pb.HardState
+		snap pb.Snapshot
+	}{
+		{st: defaultHardState, snap: defaultSnap},
+		{st: pb.HardState{
+			Term:   1,
+			Vote:   1,
+			Commit: 1,
+		}, snap: pb.Snapshot{
+			Data: []byte("Foo"),
+			Metadata: pb.SnapshotMetadata{
+				ConfState: pb.ConfState{
+					Voters:         []uint64{1},
+					Learners:       []uint64{1},
+					VotersOutgoing: []uint64{1},
+					LearnersNext:   []uint64{1},
+					AutoLeave:      true,
+				},
+				Index: 1,
+				Term:  1,
+			},
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run("", func(t *testing.T) {
+			s := NewStorage(t, nil)
+			defer s.Cleanup()
+			s.Save(tt.st, nil, tt.snap)
+
+			stb, err := tt.st.Marshal()
+			require.Equal(t, nil, err)
+
+			snapb, err := tt.snap.Marshal()
+			require.Equal(t, nil, err)
+
+			states := []wal.State{
+				{Type: wal.HardState, Data: stb},
+				{Type: wal.Snapshot, Data: snapb},
+			}
+			require.Equal(t, states, s.states(t))
+		})
+	}
+}
+
+func TestStartupWithExistingLogs(t *testing.T) {
+	tests := []struct {
+		entries []pb.Entry
+	}{
+		{index(3).terms(3, 4, 5)},
+	}
+
+	for _, tt := range tests {
+		t.Run("", func(t *testing.T) {
+			s := NewStorage(t, tt.entries)
+
+			s, err := s.CloseAndReopen()
+			defer s.Cleanup()
+			require.Equal(t, nil, err)
+
+			require.Equal(t, tt.entries, s.ents(t))
+		})
+	}
+}

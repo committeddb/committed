@@ -268,7 +268,7 @@ func (s *WalStorage) appendState(st pb.HardState, snap pb.Snapshot) error {
 	if err != nil {
 		return err
 	}
-	ss = append(ss, State{Type: HardState, Data: snapData})
+	ss = append(ss, State{Type: Snapshot, Data: snapData})
 
 	for _, e := range ss {
 		var buf bytes.Buffer
@@ -339,7 +339,7 @@ func (s *WalStorage) entry(i uint64) (*pb.Entry, uint64, error) {
 
 func (s *WalStorage) state(li uint64) (*State, error) {
 	e := &State{}
-	data, err := s.EntryLog.Read(li)
+	data, err := s.StateLog.Read(li)
 	if err != nil {
 		return nil, err
 	}
