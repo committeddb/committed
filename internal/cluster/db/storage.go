@@ -10,5 +10,4 @@ type Storage interface {
 	raft.Storage
 	Close() error
 	Save(st raftpb.HardState, ents []raftpb.Entry, snap raftpb.Snapshot) error
-	Exists() bool
 }

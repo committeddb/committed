@@ -36,7 +36,7 @@ func New(id uint64, peers Peers, s Storage) *DB {
 }
 
 func NewWithDefaultStorage(id uint64, peers Peers) (*DB, error) {
-	s, err := wal.Open(".")
+	s, err := wal.Open("./data")
 	if err != nil {
 		return nil, fmt.Errorf("cannot open storage: %w", err)
 	}

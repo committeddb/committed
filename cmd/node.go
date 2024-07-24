@@ -25,7 +25,7 @@ to quickly create a Cobra application.`,
 		url := flag.String("url", "http://127.0.0.1:9022", "url with port")
 		id := flag.Uint64("id", 1, "node ID")
 
-		s, err := wal.Open(".")
+		s, err := wal.Open("./data")
 		if err != nil {
 			log.Fatalf("cannot open storage: %v", err)
 		}

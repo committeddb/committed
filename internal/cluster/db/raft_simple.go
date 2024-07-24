@@ -62,7 +62,13 @@ func (n *node) startRaft(id uint64, ps []raft.Peer) {
 		MaxUncommittedEntriesSize: 1 << 30,
 	}
 
-	if n.storage.Exists() {
+	hs, _, err := n.storage.InitialState()
+	if err != nil {
+		// Send to the error channel
+		fmt.Println(err)
+	}
+
+	if hs.Term > 0 {
 		fmt.Printf("Restarting Node %d\n", id)
 		n.node = raft.RestartNode(c)
 	} else {

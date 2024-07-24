@@ -410,7 +410,3 @@ func (s *WalStorage) Compact(compactIndex uint64) error {
 
 	return nil
 }
-
-func (s *WalStorage) Exists() bool {
-	return s.lastIndex > s.firstIndex
-}
