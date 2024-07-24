@@ -20,8 +20,8 @@ require (
 	github.com/spf13/cobra v1.6.1
 	github.com/spf13/viper v1.3.2
 	github.com/stretchr/testify v1.8.4
-	go.etcd.io/etcd/client/pkg/v3 v3.5.14
-	go.etcd.io/etcd/raft/v3 v3.5.14
+	go.etcd.io/etcd/client/pkg/v3 v3.5.15
+	go.etcd.io/etcd/raft/v3 v3.5.15
 )
 
 require (

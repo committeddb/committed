@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 
@@ -29,9 +30,7 @@ type node struct {
 	logger *zap.Logger
 }
 
-type Peers map[uint64]string
-
-func newRaft(id uint64, peers Peers, s Storage, proposeC <-chan []byte, proposeConfC <-chan raftpb.ConfChange) (<-chan []byte, <-chan error) {
+func newRaft(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, proposeConfC <-chan raftpb.ConfChange) (<-chan []byte, <-chan error) {
 	commitC := make(chan []byte)
 	errorC := make(chan error)
 
@@ -47,18 +46,14 @@ func newRaft(id uint64, peers Peers, s Storage, proposeC <-chan []byte, proposeC
 
 		logger: zap.NewExample(),
 	}
-	go n.startRaft(id, peers)
+	go n.startRaft(id, ps)
 
 	return commitC, errorC
 }
 
-func (n *node) startRaft(id uint64, peers Peers) {
-	rpeers := make([]raft.Peer, len(peers))
-	for i := range rpeers {
-		rpeers[i] = raft.Peer{ID: uint64(i)}
-	}
+func (n *node) startRaft(id uint64, ps []raft.Peer) {
 	c := &raft.Config{
-		ID:                        uint64(id),
+		ID:                        id,
 		ElectionTick:              10,
 		HeartbeatTick:             1,
 		Storage:                   n.storage,
@@ -67,29 +62,16 @@ func (n *node) startRaft(id uint64, peers Peers) {
 		MaxUncommittedEntriesSize: 1 << 30,
 	}
 
-	snap, err := n.storage.Snapshot()
-	if err != nil {
-		// TODO These should publish to the errorC
-		log.Fatalf("cannot get snapshot (%v)", err)
-	}
-
-	confState := snap.Metadata.ConfState
-	if len(confState.Voters) == 0 {
+	if n.storage.Exists() {
+		fmt.Printf("Restarting Node %d\n", id)
 		n.node = raft.RestartNode(c)
 	} else {
-		n.node = raft.StartNode(c, rpeers)
+		fmt.Printf("Starting Node %d\n", id)
+		n.node = raft.StartNode(c, ps)
 	}
 
-	n.transport = httptransport.New(uint64(id), httptransport.Peers(peers), n.logger, n)
+	n.transport = httptransport.New(id, ps, n.logger, n)
 
-	// n.transport.Start()
-	// for i := range peers {
-	// 	if i+1 != id {
-	// 		n.transport.AddPeer(types.ID(i+1), []string{peers[i]})
-	// 	}
-	// }
-
-	// go n.serveRaft(id, peers)
 	go n.serveRaft()
 	go n.serveChannels()
 }

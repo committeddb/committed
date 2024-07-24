@@ -359,6 +359,10 @@ func (s *WalStorage) state(li uint64) (*State, error) {
 func (s *WalStorage) Term(i uint64) (uint64, error) {
 	fmt.Printf("index: %d, fi: %d, li: %d\n", i, s.firstIndex, s.lastIndex)
 
+	if s.firstIndex == 0 && s.lastIndex == 0 {
+		return uint64(0), nil
+	}
+
 	if i < s.firstIndex {
 		return 0, raft.ErrCompacted
 	}
@@ -370,7 +374,7 @@ func (s *WalStorage) Term(i uint64) (uint64, error) {
 	logIndex := i - s.firstIndex + 1
 	e, _, err := s.entry(logIndex)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("wal index %d: %w", logIndex, err)
 	}
 
 	return e.Term, nil
@@ -405,4 +409,8 @@ func (s *WalStorage) Compact(compactIndex uint64) error {
 	s.firstIndex = compactIndex
 
 	return nil
+}
+
+func (s *WalStorage) Exists() bool {
+	return s.lastIndex > s.firstIndex
 }

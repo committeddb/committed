@@ -24,13 +24,11 @@ type Raft interface {
 
 type HttpTransport struct {
 	id        uint64
-	peers     Peers
+	peers     []raft.Peer
 	transport *rafthttp.Transport
 }
 
-type Peers map[uint64]string
-
-func New(id uint64, peers Peers, l *zap.Logger, r Raft) *HttpTransport {
+func New(id uint64, ps []raft.Peer, l *zap.Logger, r Raft) *HttpTransport {
 	t := &rafthttp.Transport{
 		Logger:      l,
 		ID:          types.ID(id),
@@ -41,7 +39,7 @@ func New(id uint64, peers Peers, l *zap.Logger, r Raft) *HttpTransport {
 		ErrorC:      make(chan error),
 	}
 
-	return &HttpTransport{id: id, peers: peers, transport: t}
+	return &HttpTransport{id: id, peers: ps, transport: t}
 }
 
 func (t *HttpTransport) GetErrorC() chan error {
@@ -50,13 +48,16 @@ func (t *HttpTransport) GetErrorC() chan error {
 
 func (t *HttpTransport) Start(stopC <-chan struct{}) error {
 	t.transport.Start()
-	for k, v := range t.peers {
-		if k != t.id {
-			t.transport.AddPeer(types.ID(k), []string{v})
+	rawURL := ""
+	for _, p := range t.peers {
+		if p.ID != t.id {
+			t.transport.AddPeer(types.ID(p.ID), []string{string(p.Context)})
+		} else {
+			rawURL = string(p.Context)
 		}
 	}
 
-	url, err := url.Parse(t.peers[t.id])
+	url, err := url.Parse(rawURL)
 	if err != nil {
 		log.Fatalf("raftexample: Failed parsing URL (%v)", err)
 	}

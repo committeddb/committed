@@ -174,6 +174,10 @@ func TestNewStorage(t *testing.T) {
 	last, err := s.LastIndex()
 	require.Equal(t, nil, err)
 	require.Equal(t, uint64(0), last)
+
+	term, err := s.Term(uint64(0))
+	require.Equal(t, nil, err)
+	require.Equal(t, uint64(0), term)
 }
 
 func TestStorageTerm(t *testing.T) {

@@ -34,6 +34,16 @@ type FakeStorage struct {
 		result1 []raftpb.Entry
 		result2 error
 	}
+	ExistsStub        func() bool
+	existsMutex       sync.RWMutex
+	existsArgsForCall []struct {
+	}
+	existsReturns struct {
+		result1 bool
+	}
+	existsReturnsOnCall map[int]struct {
+		result1 bool
+	}
 	FirstIndexStub        func() (uint64, error)
 	firstIndexMutex       sync.RWMutex
 	firstIndexArgsForCall []struct {
@@ -231,6 +241,59 @@ func (fake *FakeStorage) EntriesReturnsOnCall(i int, result1 []raftpb.Entry, res
 		result1 []raftpb.Entry
 		result2 error
 	}{result1, result2}
+}
+
+func (fake *FakeStorage) Exists() bool {
+	fake.existsMutex.Lock()
+	ret, specificReturn := fake.existsReturnsOnCall[len(fake.existsArgsForCall)]
+	fake.existsArgsForCall = append(fake.existsArgsForCall, struct {
+	}{})
+	stub := fake.ExistsStub
+	fakeReturns := fake.existsReturns
+	fake.recordInvocation("Exists", []interface{}{})
+	fake.existsMutex.Unlock()
+	if stub != nil {
+		return stub()
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeStorage) ExistsCallCount() int {
+	fake.existsMutex.RLock()
+	defer fake.existsMutex.RUnlock()
+	return len(fake.existsArgsForCall)
+}
+
+func (fake *FakeStorage) ExistsCalls(stub func() bool) {
+	fake.existsMutex.Lock()
+	defer fake.existsMutex.Unlock()
+	fake.ExistsStub = stub
+}
+
+func (fake *FakeStorage) ExistsReturns(result1 bool) {
+	fake.existsMutex.Lock()
+	defer fake.existsMutex.Unlock()
+	fake.ExistsStub = nil
+	fake.existsReturns = struct {
+		result1 bool
+	}{result1}
+}
+
+func (fake *FakeStorage) ExistsReturnsOnCall(i int, result1 bool) {
+	fake.existsMutex.Lock()
+	defer fake.existsMutex.Unlock()
+	fake.ExistsStub = nil
+	if fake.existsReturnsOnCall == nil {
+		fake.existsReturnsOnCall = make(map[int]struct {
+			result1 bool
+		})
+	}
+	fake.existsReturnsOnCall[i] = struct {
+		result1 bool
+	}{result1}
 }
 
 func (fake *FakeStorage) FirstIndex() (uint64, error) {
@@ -599,6 +662,8 @@ func (fake *FakeStorage) Invocations() map[string][][]interface{} {
 	defer fake.closeMutex.RUnlock()
 	fake.entriesMutex.RLock()
 	defer fake.entriesMutex.RUnlock()
+	fake.existsMutex.RLock()
+	defer fake.existsMutex.RUnlock()
 	fake.firstIndexMutex.RLock()
 	defer fake.firstIndexMutex.RUnlock()
 	fake.initialStateMutex.RLock()
