@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"time"
 
@@ -30,7 +31,7 @@ type node struct {
 	logger *zap.Logger
 }
 
-func newRaft(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, proposeConfC <-chan raftpb.ConfChange) (<-chan []byte, <-chan error) {
+func NewRaft(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, proposeConfC <-chan raftpb.ConfChange) (<-chan []byte, <-chan error, io.Closer) {
 	commitC := make(chan []byte)
 	errorC := make(chan error)
 
@@ -48,7 +49,7 @@ func newRaft(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, propo
 	}
 	go n.startRaft(id, ps)
 
-	return commitC, errorC
+	return commitC, errorC, n
 }
 
 func (n *node) startRaft(id uint64, ps []raft.Peer) {
@@ -124,6 +125,7 @@ func (n *node) serveChannels() {
 				n.processSnapshot(rd.Snapshot)
 			}
 			for _, entry := range rd.CommittedEntries {
+				fmt.Printf("committedEntries(%d): %v - %s\n", entry.Index, entry.Type, string(entry.Data))
 				n.processCommittedEntry(entry)
 				if entry.Type == raftpb.EntryConfChange {
 					var cc raftpb.ConfChange
@@ -158,6 +160,11 @@ func (n *node) stopTransport() {
 	<-n.transportDoneC
 }
 
+func (n *node) Close() error {
+	n.stopTransport()
+	return nil
+}
+
 func (n *node) serveRaft() {
 	err := n.transport.Start(n.transportStopC)
 	select {
@@ -168,32 +175,12 @@ func (n *node) serveRaft() {
 	close(n.transportDoneC)
 }
 
-// func (n *node) serveRaft(id int, peers []string) {
-// 	url, err := url.Parse(peers[id-1])
-// 	if err != nil {
-// 		log.Fatalf("raftexample: Failed parsing URL (%v)", err)
-// 	}
-
-// 	ln, err := newStoppableListener(url.Host, n.transportStopC)
-// 	if err != nil {
-// 		log.Fatalf("raftexample: Failed to listen rafthttp (%v)", err)
-// 	}
-
-// 	err = (&http.Server{Handler: n.transport.Handler()}).Serve(ln)
-// 	select {
-// 	case <-n.transportStopC:
-// 	default:
-// 		log.Fatalf("raftexample: Failed to serve rafthttp (%v)", err)
-// 	}
-// 	close(n.transportDoneC)
-// }
-
 func (n *node) processSnapshot(ms raftpb.Snapshot) {
 	// Nothing to do yet
 }
 
 func (n *node) processCommittedEntry(e raftpb.Entry) {
-	if e.Type == raftpb.EntryNormal {
+	if e.Type == raftpb.EntryNormal && e.Data != nil {
 		n.commitC <- e.Data
 	}
 }

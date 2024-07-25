@@ -4,7 +4,9 @@ package db
 
 import (
 	"fmt"
+	"io"
 
+	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/db/wal"
 	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/raft/v3/raftpb"
@@ -17,9 +19,9 @@ type DB struct {
 	ErrorC      <-chan error
 	proposeC    chan<- []byte
 	confChangeC chan<- raftpb.ConfChange
+	closer      io.Closer
 }
 
-// id needs to be in peers
 func New(id uint64, peers Peers, s Storage) *DB {
 	proposeC := make(chan []byte)
 	confChangeC := make(chan raftpb.ConfChange)
@@ -31,8 +33,8 @@ func New(id uint64, peers Peers, s Storage) *DB {
 		i++
 	}
 
-	commitC, errorC := newRaft(id, rpeers, s, proposeC, confChangeC)
-	return &DB{CommitC: commitC, ErrorC: errorC, proposeC: proposeC, confChangeC: confChangeC}
+	commitC, errorC, closer := NewRaft(id, rpeers, s, proposeC, confChangeC)
+	return &DB{CommitC: commitC, ErrorC: errorC, proposeC: proposeC, confChangeC: confChangeC, closer: closer}
 }
 
 func NewWithDefaultStorage(id uint64, peers Peers) (*DB, error) {
@@ -44,7 +46,21 @@ func NewWithDefaultStorage(id uint64, peers Peers) (*DB, error) {
 	return New(id, peers, s), nil
 }
 
-func (db *DB) Propose(b []byte) error {
+func (db *DB) Propose(p *cluster.LogProposal) error {
+	bs, err := p.Marshal()
+	if err != nil {
+		return err
+	}
+
+	return db.propose(bs)
+}
+
+func (db *DB) propose(b []byte) error {
 	db.proposeC <- b
 	return nil
+}
+
+func (db *DB) Close() error {
+	close(db.proposeC)
+	return db.closer.Close()
 }

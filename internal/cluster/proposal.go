@@ -66,6 +66,17 @@ func Marshal(p *LogProposal) ([]byte, error) {
 	return buffer.Bytes(), nil
 }
 
+func (lp *LogProposal) Marshal() ([]byte, error) {
+	var buffer bytes.Buffer
+	enc := gob.NewEncoder(&buffer)
+	err := enc.Encode(lp)
+	if err != nil {
+		return nil, err
+	}
+
+	return buffer.Bytes(), nil
+}
+
 // TODO Write a test and unmarshal StateAppendProposal and then convert into Proposal
 // func Unmarshal(b []byte) (*Proposal, error) {
 // 	var p *Proposal
