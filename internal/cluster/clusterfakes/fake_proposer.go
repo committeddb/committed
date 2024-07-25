@@ -8,10 +8,10 @@ import (
 )
 
 type FakeProposer struct {
-	ProposeStub        func([]byte) error
+	ProposeStub        func(*cluster.LogProposal) error
 	proposeMutex       sync.RWMutex
 	proposeArgsForCall []struct {
-		arg1 []byte
+		arg1 *cluster.LogProposal
 	}
 	proposeReturns struct {
 		result1 error
@@ -23,20 +23,15 @@ type FakeProposer struct {
 	invocationsMutex sync.RWMutex
 }
 
-func (fake *FakeProposer) Propose(arg1 []byte) error {
-	var arg1Copy []byte
-	if arg1 != nil {
-		arg1Copy = make([]byte, len(arg1))
-		copy(arg1Copy, arg1)
-	}
+func (fake *FakeProposer) Propose(arg1 *cluster.LogProposal) error {
 	fake.proposeMutex.Lock()
 	ret, specificReturn := fake.proposeReturnsOnCall[len(fake.proposeArgsForCall)]
 	fake.proposeArgsForCall = append(fake.proposeArgsForCall, struct {
-		arg1 []byte
-	}{arg1Copy})
+		arg1 *cluster.LogProposal
+	}{arg1})
 	stub := fake.ProposeStub
 	fakeReturns := fake.proposeReturns
-	fake.recordInvocation("Propose", []interface{}{arg1Copy})
+	fake.recordInvocation("Propose", []interface{}{arg1})
 	fake.proposeMutex.Unlock()
 	if stub != nil {
 		return stub(arg1)
@@ -53,13 +48,13 @@ func (fake *FakeProposer) ProposeCallCount() int {
 	return len(fake.proposeArgsForCall)
 }
 
-func (fake *FakeProposer) ProposeCalls(stub func([]byte) error) {
+func (fake *FakeProposer) ProposeCalls(stub func(*cluster.LogProposal) error) {
 	fake.proposeMutex.Lock()
 	defer fake.proposeMutex.Unlock()
 	fake.ProposeStub = stub
 }
 
-func (fake *FakeProposer) ProposeArgsForCall(i int) []byte {
+func (fake *FakeProposer) ProposeArgsForCall(i int) *cluster.LogProposal {
 	fake.proposeMutex.RLock()
 	defer fake.proposeMutex.RUnlock()
 	argsForCall := fake.proposeArgsForCall[i]
