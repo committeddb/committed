@@ -125,7 +125,6 @@ func (n *node) serveChannels() {
 				n.processSnapshot(rd.Snapshot)
 			}
 			for _, entry := range rd.CommittedEntries {
-				fmt.Printf("committedEntries(%d): %v - %s\n", entry.Index, entry.Type, string(entry.Data))
 				n.processCommittedEntry(entry)
 				if entry.Type == raftpb.EntryConfChange {
 					var cc raftpb.ConfChange
