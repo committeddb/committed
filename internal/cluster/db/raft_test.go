@@ -71,7 +71,7 @@ func TestRaftRestart(t *testing.T) {
 			r := rafts[0]
 
 			for _, input := range tc.inputs1 {
-				propose(t, r, input)
+				propose(r, input)
 			}
 
 			lastIndex(t, r)
@@ -92,7 +92,7 @@ func TestRaftRestart(t *testing.T) {
 			fmt.Printf("hard state: %v, conf state: %v\n", hs, cs)
 
 			for _, input := range tc.inputs2 {
-				propose(t, r, input)
+				propose(r, input)
 			}
 
 			c := <-r.commitC
@@ -123,7 +123,7 @@ func TestRaftRestart(t *testing.T) {
 }
 
 func proposeAndCheck(t *testing.T, r *Raft, input string) {
-	proposeWithoutClearing(t, r, input)
+	r.proposeC <- []byte(input)
 	got := <-r.commitC
 	diff := cmp.Diff([]byte(input), got)
 	if diff != "" {
@@ -131,15 +131,11 @@ func proposeAndCheck(t *testing.T, r *Raft, input string) {
 	}
 }
 
-func propose(t *testing.T, r *Raft, input string) {
+func propose(r *Raft, input string) {
 	fmt.Printf("proposing: %s\n", input)
-	proposeWithoutClearing(t, r, input)
+	r.proposeC <- []byte(input)
 	c := <-r.commitC
 	fmt.Printf("committed: %s\n", string(c))
-}
-
-func proposeWithoutClearing(t *testing.T, r *Raft, input string) {
-	r.proposeC <- []byte(input)
 }
 
 func lastIndex(t *testing.T, r *Raft) uint64 {
