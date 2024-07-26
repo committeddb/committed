@@ -1,8 +1,7 @@
 package cluster
 
 import (
-	"bytes"
-	"encoding/gob"
+	"google.golang.org/protobuf/proto"
 )
 
 var delete []byte = []byte("7ec589c2-3318-4a3c-839b-a9af9c9443be")
@@ -36,46 +35,75 @@ func (p *Proposal) Validate() error {
 	return nil
 }
 
-func (p *Proposal) convert() *LogProposal {
+func (p *Proposal) Marshal() ([]byte, error) {
 	var es []*LogEntity
 	for _, e := range p.Entities {
 		es = append(es, &LogEntity{TypeID: e.Type.ID, Key: e.Key, Data: e.Data})
 	}
 
-	return &LogProposal{LogEntities: es}
+	lp := &LogProposal{LogEntities: es}
+
+	return proto.Marshal(lp)
 }
 
-type LogProposal struct {
-	LogEntities []*LogEntity
-}
-
-type LogEntity struct {
-	TypeID string
-	Key    []byte
-	Data   []byte
-}
-
-func Marshal(p *LogProposal) ([]byte, error) {
-	var buffer bytes.Buffer
-	enc := gob.NewEncoder(&buffer)
-	err := enc.Encode(p)
+func (p *Proposal) Unmarshal(bs []byte) error {
+	lp := &LogProposal{}
+	err := proto.Unmarshal(bs, lp)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	return buffer.Bytes(), nil
-}
-
-func (lp *LogProposal) Marshal() ([]byte, error) {
-	var buffer bytes.Buffer
-	enc := gob.NewEncoder(&buffer)
-	err := enc.Encode(lp)
-	if err != nil {
-		return nil, err
+	for _, e := range lp.LogEntities {
+		// TODO Get the type from a map of types
+		t := &Type{ID: e.TypeID}
+		p.Entities = append(p.Entities, &Entity{Type: t, Key: e.Key, Data: e.Data})
 	}
 
-	return buffer.Bytes(), nil
+	return nil
 }
+
+// type LogProposal struct {
+// 	LogEntities []*LogEntity
+// }
+
+// type LogEntity struct {
+// 	TypeID string
+// 	Key    []byte
+// 	Data   []byte
+// }
+
+// func Marshal(p *LogProposal) ([]byte, error) {
+// 	var buffer bytes.Buffer
+// 	enc := gob.NewEncoder(&buffer)
+// 	err := enc.Encode(p)
+// 	if err != nil {
+// 		return nil, err
+// 	}
+
+// 	return buffer.Bytes(), nil
+// }
+
+// func (lp *LogProposal) Marshal() ([]byte, error) {
+// 	var buffer bytes.Buffer
+// 	enc := gob.NewEncoder(&buffer)
+// 	err := enc.Encode(lp)
+// 	if err != nil {
+// 		return nil, err
+// 	}
+
+// 	return buffer.Bytes(), nil
+// }
+
+// func (lp *LogProposal) Unmarshal([]byte) error {
+// 	var buffer bytes.Buffer
+// 	dec := gob.NewDecoder(&buffer)
+// 	err := dec.Decode(lp)
+// 	if err != nil {
+// 		return err
+// 	}
+
+// 	return nil
+// }
 
 // TODO Write a test and unmarshal StateAppendProposal and then convert into Proposal
 // func Unmarshal(b []byte) (*Proposal, error) {

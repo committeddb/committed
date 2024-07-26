@@ -1,0 +1,14 @@
+syntax = "proto3";
+package clusterpb;
+
+option go_package = "github.com/philborlin/committed/internal/cluster";
+
+message LogEntity {
+    string typeID = 1;
+	bytes Key = 2;
+	bytes Data = 3;
+}
+
+message LogProposal {
+    repeated LogEntity logEntities = 1;
+}

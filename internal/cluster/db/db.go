@@ -46,17 +46,14 @@ func NewWithDefaultStorage(id uint64, peers Peers) (*DB, error) {
 	return New(id, peers, s), nil
 }
 
-func (db *DB) Propose(p *cluster.LogProposal) error {
+func (db *DB) Propose(p *cluster.Proposal) error {
 	bs, err := p.Marshal()
 	if err != nil {
 		return err
 	}
 
-	return db.propose(bs)
-}
+	db.proposeC <- bs
 
-func (db *DB) propose(b []byte) error {
-	db.proposeC <- b
 	return nil
 }
 
