@@ -154,7 +154,9 @@ func (n *node) writeError(err error) {
 }
 
 func (n *node) stopTransport() {
-	n.transport.Stop()
+	if n.transport != nil {
+		n.transport.Stop()
+	}
 	close(n.transportStopC)
 	<-n.transportDoneC
 }

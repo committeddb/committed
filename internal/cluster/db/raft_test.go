@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/db"
 	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/raft/v3/raftpb"
@@ -272,4 +273,8 @@ func (ms *MemoryStorage) Save(st raftpb.HardState, ents []raftpb.Entry, snap raf
 	}
 
 	return ms.SetHardState(st)
+}
+
+func (ms *MemoryStorage) Type(id string) (*cluster.Type, error) {
+	return nil, nil
 }

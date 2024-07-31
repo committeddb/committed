@@ -12,3 +12,16 @@ message LogEntity {
 message LogProposal {
     repeated LogEntity logEntities = 1;
 }
+
+enum LogValidationStrategy {
+    NoValidation = 0;
+}
+
+message LogType {
+    string ID = 1;
+    string Name = 2;
+    int32 Version = 3;
+    string SchemaType = 4;
+    bytes Schema = 5;
+    LogValidationStrategy Validate = 6;
+}

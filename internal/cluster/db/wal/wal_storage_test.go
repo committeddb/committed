@@ -8,6 +8,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/db/wal"
 	"github.com/stretchr/testify/require"
 
@@ -488,4 +489,54 @@ func TestStartupWithExistingLogs(t *testing.T) {
 			require.Equal(t, tt.entries, s.ents(t))
 		})
 	}
+}
+
+func TestType(t *testing.T) {
+	tests := []struct {
+		types []*cluster.Type
+	}{
+		{[]*cluster.Type{{ID: "foo", Name: "foo"}}},
+		{[]*cluster.Type{{ID: "foo", Name: "foo"}, {ID: "bar", Name: "bar"}}},
+	}
+
+	for _, tt := range tests {
+		t.Run("", func(t *testing.T) {
+			s := NewStorage(t, index(3).terms(3, 4, 5))
+			defer s.Cleanup()
+
+			currentIndex := uint64(6)
+			currentTerm := uint64(6)
+			for i, tipe := range tt.types {
+				e, err := cluster.NewUpsertTypeEntity(tipe)
+				require.Equal(t, nil, err)
+
+				p := &cluster.Proposal{Entities: []*cluster.Entity{e}}
+				bs, err := p.Marshal()
+				require.Equal(t, nil, err)
+
+				ent := pb.Entry{Term: currentTerm, Index: currentIndex + uint64(i), Data: bs}
+
+				err = s.Save(defaultHardState, []pb.Entry{ent}, defaultSnap)
+				require.Equal(t, nil, err)
+			}
+
+			for _, expected := range tt.types {
+				got, err := s.Type(expected.ID)
+				require.Equal(t, nil, err)
+				require.Equal(t, expected, got)
+			}
+		})
+	}
+}
+
+// TODO The next test
+// func TestTypeAfterRestart(t *testing.T) {
+// }
+
+func TestTypeError(t *testing.T) {
+	s := NewStorage(t, index(3).terms(3, 4, 5))
+	defer s.Cleanup()
+
+	_, err := s.Type("none")
+	require.Equal(t, wal.ErrTypeMissing, err)
 }

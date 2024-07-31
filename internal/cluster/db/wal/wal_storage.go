@@ -8,12 +8,14 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/philborlin/committed/internal/cluster"
 	"github.com/tidwall/wal"
 	"go.etcd.io/etcd/raft/v3"
 	pb "go.etcd.io/etcd/raft/v3/raftpb"
 )
 
 var ErrOutOfBounds = errors.New("requested index is greater than last index")
+var ErrTypeMissing = errors.New("type not found")
 
 type StateType int
 
@@ -35,6 +37,7 @@ type WalStorage struct {
 	firstIndex uint64
 	lastIndex  uint64
 	stateIndex uint64
+	types      map[string]*cluster.Type
 }
 
 // Returns a *WalStorage, whether this storage existed already, or an error
@@ -62,7 +65,8 @@ func Open(dir string) (*WalStorage, error) {
 		return nil, err
 	}
 
-	ws := &WalStorage{EntryLog: entryLog, StateLog: stateLog}
+	types := make(map[string]*cluster.Type)
+	ws := &WalStorage{EntryLog: entryLog, StateLog: stateLog, types: types}
 
 	fi, err := entryLog.FirstIndex()
 	if err != nil {
@@ -183,6 +187,27 @@ func (w *WalStorage) Save(st pb.HardState, ents []pb.Entry, snap pb.Snapshot) er
 	err := w.appendEntries(ents)
 	if err != nil {
 		return err
+	}
+
+	for _, ent := range ents {
+		if ent.Type == pb.EntryNormal {
+			p := &cluster.Proposal{}
+			err := p.Unmarshal(ent.Data)
+			if err != nil {
+				continue
+			}
+
+			for _, entity := range p.Entities {
+				if cluster.IsType(entity.ID) {
+					t := &cluster.Type{}
+					err := t.Unmarshal(entity.Data)
+					if err != nil {
+						continue
+					}
+					w.types[t.ID] = t
+				}
+			}
+		}
 	}
 
 	return w.appendState(st, snap)
@@ -409,4 +434,13 @@ func (s *WalStorage) Compact(compactIndex uint64) error {
 	s.firstIndex = compactIndex
 
 	return nil
+}
+
+func (s *WalStorage) Type(id string) (*cluster.Type, error) {
+	t, ok := s.types[id]
+	if !ok {
+		return nil, ErrTypeMissing
+	}
+
+	return t, nil
 }

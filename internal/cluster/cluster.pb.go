@@ -20,6 +20,49 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type LogValidationStrategy int32
+
+const (
+	LogValidationStrategy_NoValidation LogValidationStrategy = 0
+)
+
+// Enum value maps for LogValidationStrategy.
+var (
+	LogValidationStrategy_name = map[int32]string{
+		0: "NoValidation",
+	}
+	LogValidationStrategy_value = map[string]int32{
+		"NoValidation": 0,
+	}
+)
+
+func (x LogValidationStrategy) Enum() *LogValidationStrategy {
+	p := new(LogValidationStrategy)
+	*p = x
+	return p
+}
+
+func (x LogValidationStrategy) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (LogValidationStrategy) Descriptor() protoreflect.EnumDescriptor {
+	return file_cluster_proto_enumTypes[0].Descriptor()
+}
+
+func (LogValidationStrategy) Type() protoreflect.EnumType {
+	return &file_cluster_proto_enumTypes[0]
+}
+
+func (x LogValidationStrategy) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use LogValidationStrategy.Descriptor instead.
+func (LogValidationStrategy) EnumDescriptor() ([]byte, []int) {
+	return file_cluster_proto_rawDescGZIP(), []int{0}
+}
+
 type LogEntity struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
@@ -130,6 +173,93 @@ func (x *LogProposal) GetLogEntities() []*LogEntity {
 	return nil
 }
 
+type LogType struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	ID         string                `protobuf:"bytes,1,opt,name=ID,proto3" json:"ID,omitempty"`
+	Name       string                `protobuf:"bytes,2,opt,name=Name,proto3" json:"Name,omitempty"`
+	Version    int32                 `protobuf:"varint,3,opt,name=Version,proto3" json:"Version,omitempty"`
+	SchemaType string                `protobuf:"bytes,4,opt,name=SchemaType,proto3" json:"SchemaType,omitempty"`
+	Schema     []byte                `protobuf:"bytes,5,opt,name=Schema,proto3" json:"Schema,omitempty"`
+	Validate   LogValidationStrategy `protobuf:"varint,6,opt,name=Validate,proto3,enum=clusterpb.LogValidationStrategy" json:"Validate,omitempty"`
+}
+
+func (x *LogType) Reset() {
+	*x = LogType{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_cluster_proto_msgTypes[2]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *LogType) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LogType) ProtoMessage() {}
+
+func (x *LogType) ProtoReflect() protoreflect.Message {
+	mi := &file_cluster_proto_msgTypes[2]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LogType.ProtoReflect.Descriptor instead.
+func (*LogType) Descriptor() ([]byte, []int) {
+	return file_cluster_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *LogType) GetID() string {
+	if x != nil {
+		return x.ID
+	}
+	return ""
+}
+
+func (x *LogType) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *LogType) GetVersion() int32 {
+	if x != nil {
+		return x.Version
+	}
+	return 0
+}
+
+func (x *LogType) GetSchemaType() string {
+	if x != nil {
+		return x.SchemaType
+	}
+	return ""
+}
+
+func (x *LogType) GetSchema() []byte {
+	if x != nil {
+		return x.Schema
+	}
+	return nil
+}
+
+func (x *LogType) GetValidate() LogValidationStrategy {
+	if x != nil {
+		return x.Validate
+	}
+	return LogValidationStrategy_NoValidation
+}
+
 var File_cluster_proto protoreflect.FileDescriptor
 
 var file_cluster_proto_rawDesc = []byte{
@@ -143,11 +273,26 @@ var file_cluster_proto_rawDesc = []byte{
 	0x6f, 0x73, 0x61, 0x6c, 0x12, 0x36, 0x0a, 0x0b, 0x6c, 0x6f, 0x67, 0x45, 0x6e, 0x74, 0x69, 0x74,
 	0x69, 0x65, 0x73, 0x18, 0x01, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x14, 0x2e, 0x63, 0x6c, 0x75, 0x73,
 	0x74, 0x65, 0x72, 0x70, 0x62, 0x2e, 0x4c, 0x6f, 0x67, 0x45, 0x6e, 0x74, 0x69, 0x74, 0x79, 0x52,
-	0x0b, 0x6c, 0x6f, 0x67, 0x45, 0x6e, 0x74, 0x69, 0x74, 0x69, 0x65, 0x73, 0x42, 0x32, 0x5a, 0x30,
-	0x67, 0x69, 0x74, 0x68, 0x75, 0x62, 0x2e, 0x63, 0x6f, 0x6d, 0x2f, 0x70, 0x68, 0x69, 0x6c, 0x62,
-	0x6f, 0x72, 0x6c, 0x69, 0x6e, 0x2f, 0x63, 0x6f, 0x6d, 0x6d, 0x69, 0x74, 0x74, 0x65, 0x64, 0x2f,
-	0x69, 0x6e, 0x74, 0x65, 0x72, 0x6e, 0x61, 0x6c, 0x2f, 0x63, 0x6c, 0x75, 0x73, 0x74, 0x65, 0x72,
-	0x62, 0x06, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x33,
+	0x0b, 0x6c, 0x6f, 0x67, 0x45, 0x6e, 0x74, 0x69, 0x74, 0x69, 0x65, 0x73, 0x22, 0xbd, 0x01, 0x0a,
+	0x07, 0x4c, 0x6f, 0x67, 0x54, 0x79, 0x70, 0x65, 0x12, 0x0e, 0x0a, 0x02, 0x49, 0x44, 0x18, 0x01,
+	0x20, 0x01, 0x28, 0x09, 0x52, 0x02, 0x49, 0x44, 0x12, 0x12, 0x0a, 0x04, 0x4e, 0x61, 0x6d, 0x65,
+	0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x04, 0x4e, 0x61, 0x6d, 0x65, 0x12, 0x18, 0x0a, 0x07,
+	0x56, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x18, 0x03, 0x20, 0x01, 0x28, 0x05, 0x52, 0x07, 0x56,
+	0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x12, 0x1e, 0x0a, 0x0a, 0x53, 0x63, 0x68, 0x65, 0x6d, 0x61,
+	0x54, 0x79, 0x70, 0x65, 0x18, 0x04, 0x20, 0x01, 0x28, 0x09, 0x52, 0x0a, 0x53, 0x63, 0x68, 0x65,
+	0x6d, 0x61, 0x54, 0x79, 0x70, 0x65, 0x12, 0x16, 0x0a, 0x06, 0x53, 0x63, 0x68, 0x65, 0x6d, 0x61,
+	0x18, 0x05, 0x20, 0x01, 0x28, 0x0c, 0x52, 0x06, 0x53, 0x63, 0x68, 0x65, 0x6d, 0x61, 0x12, 0x3c,
+	0x0a, 0x08, 0x56, 0x61, 0x6c, 0x69, 0x64, 0x61, 0x74, 0x65, 0x18, 0x06, 0x20, 0x01, 0x28, 0x0e,
+	0x32, 0x20, 0x2e, 0x63, 0x6c, 0x75, 0x73, 0x74, 0x65, 0x72, 0x70, 0x62, 0x2e, 0x4c, 0x6f, 0x67,
+	0x56, 0x61, 0x6c, 0x69, 0x64, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x53, 0x74, 0x72, 0x61, 0x74, 0x65,
+	0x67, 0x79, 0x52, 0x08, 0x56, 0x61, 0x6c, 0x69, 0x64, 0x61, 0x74, 0x65, 0x2a, 0x29, 0x0a, 0x15,
+	0x4c, 0x6f, 0x67, 0x56, 0x61, 0x6c, 0x69, 0x64, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x53, 0x74, 0x72,
+	0x61, 0x74, 0x65, 0x67, 0x79, 0x12, 0x10, 0x0a, 0x0c, 0x4e, 0x6f, 0x56, 0x61, 0x6c, 0x69, 0x64,
+	0x61, 0x74, 0x69, 0x6f, 0x6e, 0x10, 0x00, 0x42, 0x32, 0x5a, 0x30, 0x67, 0x69, 0x74, 0x68, 0x75,
+	0x62, 0x2e, 0x63, 0x6f, 0x6d, 0x2f, 0x70, 0x68, 0x69, 0x6c, 0x62, 0x6f, 0x72, 0x6c, 0x69, 0x6e,
+	0x2f, 0x63, 0x6f, 0x6d, 0x6d, 0x69, 0x74, 0x74, 0x65, 0x64, 0x2f, 0x69, 0x6e, 0x74, 0x65, 0x72,
+	0x6e, 0x61, 0x6c, 0x2f, 0x63, 0x6c, 0x75, 0x73, 0x74, 0x65, 0x72, 0x62, 0x06, 0x70, 0x72, 0x6f,
+	0x74, 0x6f, 0x33,
 }
 
 var (
@@ -162,18 +307,22 @@ func file_cluster_proto_rawDescGZIP() []byte {
 	return file_cluster_proto_rawDescData
 }
 
-var file_cluster_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_cluster_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_cluster_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
 var file_cluster_proto_goTypes = []any{
-	(*LogEntity)(nil),   // 0: clusterpb.LogEntity
-	(*LogProposal)(nil), // 1: clusterpb.LogProposal
+	(LogValidationStrategy)(0), // 0: clusterpb.LogValidationStrategy
+	(*LogEntity)(nil),          // 1: clusterpb.LogEntity
+	(*LogProposal)(nil),        // 2: clusterpb.LogProposal
+	(*LogType)(nil),            // 3: clusterpb.LogType
 }
 var file_cluster_proto_depIdxs = []int32{
-	0, // 0: clusterpb.LogProposal.logEntities:type_name -> clusterpb.LogEntity
-	1, // [1:1] is the sub-list for method output_type
-	1, // [1:1] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	1, // 0: clusterpb.LogProposal.logEntities:type_name -> clusterpb.LogEntity
+	0, // 1: clusterpb.LogType.Validate:type_name -> clusterpb.LogValidationStrategy
+	2, // [2:2] is the sub-list for method output_type
+	2, // [2:2] is the sub-list for method input_type
+	2, // [2:2] is the sub-list for extension type_name
+	2, // [2:2] is the sub-list for extension extendee
+	0, // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_cluster_proto_init() }
@@ -206,19 +355,32 @@ func file_cluster_proto_init() {
 				return nil
 			}
 		}
+		file_cluster_proto_msgTypes[2].Exporter = func(v any, i int) any {
+			switch v := v.(*LogType); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: file_cluster_proto_rawDesc,
-			NumEnums:      0,
-			NumMessages:   2,
+			NumEnums:      1,
+			NumMessages:   3,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
 		GoTypes:           file_cluster_proto_goTypes,
 		DependencyIndexes: file_cluster_proto_depIdxs,
+		EnumInfos:         file_cluster_proto_enumTypes,
 		MessageInfos:      file_cluster_proto_msgTypes,
 	}.Build()
 	File_cluster_proto = out.File

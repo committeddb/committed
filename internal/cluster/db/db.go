@@ -3,11 +3,9 @@ package db
 //go:generate go run github.com/maxbrunsfeld/counterfeiter/v6 -generate
 
 import (
-	"fmt"
 	"io"
 
 	"github.com/philborlin/committed/internal/cluster"
-	"github.com/philborlin/committed/internal/cluster/db/wal"
 	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/raft/v3/raftpb"
 )
@@ -20,6 +18,7 @@ type DB struct {
 	proposeC    chan<- []byte
 	confChangeC chan<- raftpb.ConfChange
 	closer      io.Closer
+	storage     Storage
 }
 
 func New(id uint64, peers Peers, s Storage) *DB {
@@ -34,16 +33,7 @@ func New(id uint64, peers Peers, s Storage) *DB {
 	}
 
 	commitC, errorC, closer := NewRaft(id, rpeers, s, proposeC, confChangeC)
-	return &DB{CommitC: commitC, ErrorC: errorC, proposeC: proposeC, confChangeC: confChangeC, closer: closer}
-}
-
-func NewWithDefaultStorage(id uint64, peers Peers) (*DB, error) {
-	s, err := wal.Open("./data")
-	if err != nil {
-		return nil, fmt.Errorf("cannot open storage: %w", err)
-	}
-
-	return New(id, peers, s), nil
+	return &DB{CommitC: commitC, ErrorC: errorC, proposeC: proposeC, confChangeC: confChangeC, closer: closer, storage: s}
 }
 
 func (db *DB) Propose(p *cluster.Proposal) error {
@@ -55,6 +45,22 @@ func (db *DB) Propose(p *cluster.Proposal) error {
 	db.proposeC <- bs
 
 	return nil
+}
+
+func (db *DB) ProposeType(t *cluster.Type) error {
+	typeEntity, err := cluster.NewUpsertTypeEntity(t)
+	if err != nil {
+		return err
+	}
+
+	p := &cluster.Proposal{}
+	p.Entities = append(p.Entities, typeEntity)
+
+	return db.Propose(p)
+}
+
+func (db *DB) Type(id string) (*cluster.Type, error) {
+	return db.storage.Type(id)
 }
 
 func (db *DB) Close() error {
