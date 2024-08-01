@@ -227,12 +227,16 @@ func (w *WalStorage) Save(st pb.HardState, ents []pb.Entry, snap pb.Snapshot) er
 
 			for _, entity := range p.Entities {
 				if cluster.IsType(entity.ID) {
-					t := &cluster.Type{}
-					err := t.Unmarshal(entity.Data)
-					if err != nil {
-						continue
+					if string(entity.Data) == string(cluster.Delete) {
+						w.deleteType(entity.Key)
+					} else {
+						t := &cluster.Type{}
+						err := t.Unmarshal(entity.Data)
+						if err != nil {
+							continue
+						}
+						w.saveType(t)
 					}
-					w.saveType(t)
 				}
 			}
 		}
@@ -252,6 +256,16 @@ func (w *WalStorage) saveType(t *cluster.Type) error {
 			return err
 		}
 		return b.Put([]byte(t.ID), bs)
+	})
+}
+
+func (w *WalStorage) deleteType(id []byte) error {
+	return w.typeStorage.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(typeBucket)
+		if b == nil {
+			return ErrBucketMissing
+		}
+		return b.Delete(id)
 	})
 }
 

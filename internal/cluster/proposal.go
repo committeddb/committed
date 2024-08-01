@@ -4,7 +4,7 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-var delete []byte = []byte("7ec589c2-3318-4a3c-839b-a9af9c9443be")
+var Delete []byte = []byte("7ec589c2-3318-4a3c-839b-a9af9c9443be")
 
 type Entity struct {
 	*Type
@@ -21,7 +21,7 @@ func NewUpsertEntity(t *Type, key []byte, data []byte) *Entity {
 }
 
 func NewDeleteEntity(t *Type, key []byte) *Entity {
-	return &Entity{t, key, delete}
+	return &Entity{t, key, Delete}
 }
 
 func (p *Proposal) Validate() error {
