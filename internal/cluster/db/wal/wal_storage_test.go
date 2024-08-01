@@ -558,7 +558,7 @@ func TestTypeDelete(t *testing.T) {
 			}
 
 			for i, tipe := range tt.types {
-				e := cluster.NewDeleteTypeEntity(tipe)
+				e := cluster.NewDeleteTypeEntity(tipe.ID)
 				saveEntity(t, e, s, term, index+uint64(i))
 
 				_, err := s.Type(tipe.ID)

@@ -38,8 +38,8 @@ func NewUpsertTypeEntity(t *Type) (*Entity, error) {
 	return NewUpsertEntity(typeType, []byte(t.ID), bs), nil
 }
 
-func NewDeleteTypeEntity(t *Type) *Entity {
-	return NewDeleteEntity(typeType, []byte(t.ID))
+func NewDeleteTypeEntity(id string) *Entity {
+	return NewDeleteEntity(typeType, []byte(id))
 }
 
 func (t *Type) Marshal() ([]byte, error) {

@@ -59,6 +59,15 @@ func (db *DB) ProposeType(t *cluster.Type) error {
 	return db.Propose(p)
 }
 
+func (db *DB) ProposeDeleteType(id string) error {
+	deleteTypeEntity := cluster.NewDeleteTypeEntity(id)
+
+	p := &cluster.Proposal{}
+	p.Entities = append(p.Entities, deleteTypeEntity)
+
+	return db.Propose(p)
+}
+
 func (db *DB) Type(id string) (*cluster.Type, error) {
 	return db.storage.Type(id)
 }
