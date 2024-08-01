@@ -100,6 +100,7 @@ require (
 	github.com/spf13/pflag v1.0.5 // indirect
 	github.com/tidwall/wal v1.1.7
 	github.com/xiang90/probing v0.0.0-20190116061207-43a291ad63a2 // indirect
+	go.etcd.io/bbolt v1.3.10
 	go.etcd.io/etcd/server/v3 v3.5.14
 	go.uber.org/zap v1.27.0
 	golang.org/x/net v0.25.0 // indirect

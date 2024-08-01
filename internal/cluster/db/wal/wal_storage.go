@@ -7,15 +7,20 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/tidwall/wal"
+	bolt "go.etcd.io/bbolt"
 	"go.etcd.io/etcd/raft/v3"
 	pb "go.etcd.io/etcd/raft/v3/raftpb"
 )
 
 var ErrOutOfBounds = errors.New("requested index is greater than last index")
 var ErrTypeMissing = errors.New("type not found")
+var ErrBucketMissing = errors.New("key value bucket missing")
+
+var typeBucket = []byte("types")
 
 type StateType int
 
@@ -30,14 +35,14 @@ type State struct {
 }
 
 type WalStorage struct {
-	EntryLog   *wal.Log
-	StateLog   *wal.Log
-	snapshot   pb.Snapshot
-	hardState  pb.HardState
-	firstIndex uint64
-	lastIndex  uint64
-	stateIndex uint64
-	types      map[string]*cluster.Type
+	EntryLog    *wal.Log
+	StateLog    *wal.Log
+	typeStorage *bolt.DB
+	snapshot    pb.Snapshot
+	hardState   pb.HardState
+	firstIndex  uint64
+	lastIndex   uint64
+	stateIndex  uint64
 }
 
 // Returns a *WalStorage, whether this storage existed already, or an error
@@ -45,6 +50,7 @@ type WalStorage struct {
 func Open(dir string) (*WalStorage, error) {
 	entryLogDir := filepath.Join(dir, "entry-log")
 	stateLogDir := filepath.Join(dir, "state-log")
+	typeStorageDir := filepath.Join(dir, "type-storage")
 
 	err := os.MkdirAll(entryLogDir, os.ModePerm)
 	if err != nil {
@@ -52,6 +58,11 @@ func Open(dir string) (*WalStorage, error) {
 	}
 
 	err = os.MkdirAll(stateLogDir, os.ModePerm)
+	if err != nil {
+		return nil, err
+	}
+
+	err = os.MkdirAll(typeStorageDir, os.ModePerm)
 	if err != nil {
 		return nil, err
 	}
@@ -65,8 +76,20 @@ func Open(dir string) (*WalStorage, error) {
 		return nil, err
 	}
 
-	types := make(map[string]*cluster.Type)
-	ws := &WalStorage{EntryLog: entryLog, StateLog: stateLog, types: types}
+	typeStorage, err := bolt.Open(filepath.Join(typeStorageDir, "types.db"), 0600, &bolt.Options{Timeout: 1 * time.Second})
+	if err != nil {
+		return nil, err
+	}
+
+	typeStorage.Update(func(tx *bolt.Tx) error {
+		_, err := tx.CreateBucketIfNotExists(typeBucket)
+		if err != nil {
+			return fmt.Errorf("create bucket: %s", err)
+		}
+		return nil
+	})
+
+	ws := &WalStorage{EntryLog: entryLog, StateLog: stateLog, typeStorage: typeStorage}
 
 	fi, err := entryLog.FirstIndex()
 	if err != nil {
@@ -114,12 +137,17 @@ func Open(dir string) (*WalStorage, error) {
 func (s *WalStorage) Close() error {
 	err1 := s.EntryLog.Close()
 	err2 := s.StateLog.Close()
+	err3 := s.typeStorage.Close()
 
 	if err1 != nil {
 		return err1
 	}
 
-	return err2
+	if err2 != nil {
+		return err2
+	}
+
+	return err3
 }
 
 func (s *WalStorage) getLastStates(li uint64) (*pb.HardState, *pb.Snapshot, error) {
@@ -204,13 +232,27 @@ func (w *WalStorage) Save(st pb.HardState, ents []pb.Entry, snap pb.Snapshot) er
 					if err != nil {
 						continue
 					}
-					w.types[t.ID] = t
+					w.saveType(t)
 				}
 			}
 		}
 	}
 
 	return w.appendState(st, snap)
+}
+
+func (w *WalStorage) saveType(t *cluster.Type) error {
+	return w.typeStorage.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(typeBucket)
+		if b == nil {
+			return ErrBucketMissing
+		}
+		bs, err := t.Marshal()
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(t.ID), bs)
+	})
 }
 
 func (s *WalStorage) appendEntries(ents []pb.Entry) error {
@@ -269,7 +311,6 @@ func (s *WalStorage) appendEntries(ents []pb.Entry) error {
 		}
 
 		i := e.Index - s.firstIndex + 1
-		fmt.Printf("appending index %d to position %d\n", e.Index, i)
 		err = s.EntryLog.Write(i, data)
 		if err != nil {
 			return fmt.Errorf("index %d to position %d: %w", e.Index, i, err)
@@ -323,7 +364,6 @@ func (s *WalStorage) InitialState() (pb.HardState, pb.ConfState, error) {
 func (s *WalStorage) Entries(lo, hi, maxSize uint64) ([]pb.Entry, error) {
 	var totalSize uint64
 
-	fmt.Printf("lo: %d, hi: %d, firstIndex: %d\n", lo, hi, s.firstIndex)
 	if lo <= s.firstIndex {
 		return nil, raft.ErrCompacted
 	}
@@ -382,8 +422,6 @@ func (s *WalStorage) state(li uint64) (*State, error) {
 // FirstIndex is retained for matching purposes even though the
 // rest of that entry may not be available.
 func (s *WalStorage) Term(i uint64) (uint64, error) {
-	fmt.Printf("index: %d, fi: %d, li: %d\n", i, s.firstIndex, s.lastIndex)
-
 	if s.firstIndex == 0 && s.lastIndex == 0 {
 		return uint64(0), nil
 	}
@@ -437,10 +475,17 @@ func (s *WalStorage) Compact(compactIndex uint64) error {
 }
 
 func (s *WalStorage) Type(id string) (*cluster.Type, error) {
-	t, ok := s.types[id]
-	if !ok {
-		return nil, ErrTypeMissing
-	}
+	t := &cluster.Type{}
 
-	return t, nil
+	return t, s.typeStorage.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(typeBucket)
+		if b == nil {
+			return ErrBucketMissing
+		}
+		bs := b.Get([]byte(id))
+		if bs == nil {
+			return ErrTypeMissing
+		}
+		return t.Unmarshal(bs)
+	})
 }

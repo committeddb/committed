@@ -3,7 +3,6 @@ package wal_test
 import (
 	"bytes"
 	"encoding/gob"
-	"fmt"
 	"math"
 	"os"
 	"testing"
@@ -86,10 +85,7 @@ func (s *StorageWrapper) ents(t *testing.T) []pb.Entry {
 	}
 
 	var es []pb.Entry
-	fmt.Printf("fi: %d, li: %d \n", fi, li)
-
 	for i := fi; i <= li; i++ {
-		fmt.Printf("  read: %d\n", i)
 		data, err := s.EntryLog.Read(i)
 		if err != nil {
 			t.Error(err)
@@ -123,10 +119,7 @@ func (s *StorageWrapper) states(t *testing.T) []wal.State {
 	}
 
 	var es []wal.State
-	fmt.Printf("fi: %d, li: %d \n", fi, li)
-
 	for i := fi; i <= li; i++ {
-		fmt.Printf("  read: %d\n", i)
 		data, err := s.StateLog.Read(i)
 		if err != nil {
 			t.Error(err)
@@ -148,12 +141,30 @@ func (s *StorageWrapper) states(t *testing.T) []wal.State {
 
 func NewStorage(t *testing.T, ents []pb.Entry) *StorageWrapper {
 	dir, err := os.MkdirTemp("", "wal-storage-test-")
-	fmt.Printf("Creating temp dir: %s\n", dir)
 	if err != nil {
 		t.Fatal(err)
 		return nil
 	}
 
+	s := OpenStorage(t, dir)
+	if ents != nil {
+		s.Save(defaultHardState, ents, defaultSnap)
+	}
+
+	return s
+}
+
+func (s *StorageWrapper) CloseAndReopenStorage(t *testing.T) *StorageWrapper {
+	err := s.Close()
+	if err != nil {
+		t.Fatal(err)
+		return nil
+	}
+
+	return OpenStorage(t, s.path)
+}
+
+func OpenStorage(t *testing.T, dir string) *StorageWrapper {
 	wal, err := wal.Open(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -161,9 +172,6 @@ func NewStorage(t *testing.T, ents []pb.Entry) *StorageWrapper {
 	}
 
 	s := &StorageWrapper{wal, dir}
-	if ents != nil {
-		s.Save(defaultHardState, ents, defaultSnap)
-	}
 
 	return s
 }
@@ -525,13 +533,20 @@ func TestType(t *testing.T) {
 				require.Equal(t, nil, err)
 				require.Equal(t, expected, got)
 			}
+
+			s = s.CloseAndReopenStorage(t)
+			defer s.Cleanup()
+
+			for _, expected := range tt.types {
+				got, err := s.Type(expected.ID)
+				require.Equal(t, nil, err)
+				require.Equal(t, expected, got)
+			}
 		})
 	}
 }
 
-// TODO The next test
-// func TestTypeAfterRestart(t *testing.T) {
-// }
+// TODO Test Type Delete
 
 func TestTypeError(t *testing.T) {
 	s := NewStorage(t, index(3).terms(3, 4, 5))

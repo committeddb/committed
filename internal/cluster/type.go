@@ -30,16 +30,7 @@ func IsType(id string) bool {
 }
 
 func NewUpsertTypeEntity(t *Type) (*Entity, error) {
-	lt := &LogType{
-		ID:         t.ID,
-		Name:       t.Name,
-		Version:    int32(t.Version),
-		SchemaType: t.SchemaType,
-		Schema:     t.Schema,
-		Validate:   LogValidationStrategy(t.Validate),
-	}
-
-	bs, err := proto.Marshal(lt)
+	bs, err := t.Marshal()
 	if err != nil {
 		return nil, err
 	}
@@ -49,6 +40,19 @@ func NewUpsertTypeEntity(t *Type) (*Entity, error) {
 
 func NewDeleteTypeEntity(t *Type) *Entity {
 	return NewDeleteEntity(typeType, []byte(t.ID))
+}
+
+func (t *Type) Marshal() ([]byte, error) {
+	lt := &LogType{
+		ID:         t.ID,
+		Name:       t.Name,
+		Version:    int32(t.Version),
+		SchemaType: t.SchemaType,
+		Schema:     t.Schema,
+		Validate:   LogValidationStrategy(t.Validate),
+	}
+
+	return proto.Marshal(lt)
 }
 
 func (t *Type) Unmarshal(bs []byte) error {
