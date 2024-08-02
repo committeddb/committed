@@ -227,7 +227,7 @@ func (w *WalStorage) Save(st pb.HardState, ents []pb.Entry, snap pb.Snapshot) er
 
 			for _, entity := range p.Entities {
 				if cluster.IsType(entity.ID) {
-					if string(entity.Data) == string(cluster.Delete) {
+					if entity.IsDelete() {
 						w.deleteType(entity.Key)
 					} else {
 						t := &cluster.Type{}
