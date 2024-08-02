@@ -586,8 +586,7 @@ func insertTypes(t *testing.T, s db.Storage, ts []*cluster.Type, term, index uin
 	return index + uint64(len(ts))
 }
 
-func saveEntity(t *testing.T, e *cluster.Entity, s db.Storage, term, index uint64) {
-	p := &cluster.Proposal{Entities: []*cluster.Entity{e}}
+func saveProposal(t *testing.T, p *cluster.Proposal, s db.Storage, term, index uint64) {
 	bs, err := p.Marshal()
 	require.Equal(t, nil, err)
 
@@ -597,7 +596,10 @@ func saveEntity(t *testing.T, e *cluster.Entity, s db.Storage, term, index uint6
 	require.Equal(t, nil, err)
 }
 
-// TODO Test Type Delete
+func saveEntity(t *testing.T, e *cluster.Entity, s db.Storage, term, index uint64) {
+	p := &cluster.Proposal{Entities: []*cluster.Entity{e}}
+	saveProposal(t, p, s, term, index)
+}
 
 func TestTypeError(t *testing.T) {
 	s := NewStorage(t, index(3).terms(3, 4, 5))

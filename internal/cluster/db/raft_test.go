@@ -278,3 +278,7 @@ func (ms *MemoryStorage) Save(st raftpb.HardState, ents []raftpb.Entry, snap raf
 func (ms *MemoryStorage) Type(id string) (*cluster.Type, error) {
 	return nil, nil
 }
+
+func (ms *MemoryStorage) Reader(id string) db.ProposalReader {
+	return nil
+}

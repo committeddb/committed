@@ -36,7 +36,7 @@ type State struct {
 
 type WalStorage struct {
 	EntryLog    *wal.Log
-	StateLog    *wal.Log
+	StateLog    *wal.Log // Should we get rid of this and store the latest state in the bbolt db?
 	typeStorage *bolt.DB
 	snapshot    pb.Snapshot
 	hardState   pb.HardState
