@@ -6,10 +6,6 @@ import (
 	"go.etcd.io/etcd/raft/v3/raftpb"
 )
 
-type ProposalReader interface {
-	Read() (*cluster.Proposal, error)
-}
-
 //counterfeiter:generate . Storage
 type Storage interface {
 	raft.Storage

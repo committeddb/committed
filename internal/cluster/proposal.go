@@ -6,18 +6,14 @@ import (
 
 var delete []byte = []byte("7ec589c2-3318-4a3c-839b-a9af9c9443be")
 
+type Proposal struct {
+	Entities []*Entity
+}
+
 type Entity struct {
 	*Type
 	Key  []byte
 	Data []byte
-}
-
-func (e *Entity) IsDelete() bool {
-	return string(e.Data) == string(delete)
-}
-
-type Proposal struct {
-	Entities []*Entity
 }
 
 func NewUpsertEntity(t *Type, key []byte, data []byte) *Entity {
@@ -26,6 +22,10 @@ func NewUpsertEntity(t *Type, key []byte, data []byte) *Entity {
 
 func NewDeleteEntity(t *Type, key []byte) *Entity {
 	return &Entity{t, key, delete}
+}
+
+func (e *Entity) IsDelete() bool {
+	return string(e.Data) == string(delete)
 }
 
 func (p *Proposal) Validate() error {
