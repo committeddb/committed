@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"io"
 	"sync"
 
 	"github.com/philborlin/committed/internal/cluster"
@@ -19,7 +20,13 @@ func (r *Reader) Read() (*cluster.Proposal, error) {
 	defer r.Unlock()
 
 	for {
-		bs, err := r.s.EntryLog.Read(r.lastReadIndex + 1)
+		nextReadIndex := r.lastReadIndex + 1
+
+		if nextReadIndex > r.s.lastIndex {
+			return nil, io.EOF
+		}
+
+		bs, err := r.s.EntryLog.Read(nextReadIndex)
 		if err != nil {
 			return nil, err
 		}
@@ -30,7 +37,7 @@ func (r *Reader) Read() (*cluster.Proposal, error) {
 			return nil, err
 		}
 
-		r.lastReadIndex++
+		r.lastReadIndex = nextReadIndex
 
 		if ent.Type == pb.EntryNormal {
 			p := &cluster.Proposal{}

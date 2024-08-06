@@ -2,6 +2,7 @@ package wal_test
 
 import (
 	"fmt"
+	"io"
 	"testing"
 
 	"github.com/philborlin/committed/internal/cluster"
@@ -65,4 +66,21 @@ func TestReader(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestEOF(t *testing.T) {
+	s := NewStorage(t, nil)
+	defer s.Cleanup()
+
+	ps := createProposals([][]string{{"foo"}})
+	saveProposal(t, ps[0], s, 1, 1)
+
+	r := s.Reader("foo")
+
+	got, err := r.Read()
+	require.Equal(t, nil, err)
+	require.Equal(t, ps[0], got)
+
+	_, err = r.Read()
+	require.Equal(t, io.EOF, err)
 }
