@@ -4,7 +4,6 @@ import (
 	"sync"
 
 	"github.com/philborlin/committed/internal/cluster"
-	"github.com/philborlin/committed/internal/cluster/db"
 	pb "go.etcd.io/etcd/raft/v3/raftpb"
 )
 
@@ -45,6 +44,6 @@ func (r *WalReader) Read() (*cluster.Proposal, error) {
 }
 
 // TODO Look up the lastReadIndex by id
-func (s *WalStorage) Reader(id string) db.ProposalReader {
+func (s *WalStorage) Reader(id string) cluster.ProposalReader {
 	return &WalReader{lastReadIndex: 0, s: s}
 }
