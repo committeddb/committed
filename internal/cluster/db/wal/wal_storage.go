@@ -34,7 +34,7 @@ type State struct {
 	Data []byte
 }
 
-type WalStorage struct {
+type Storage struct {
 	EntryLog    *wal.Log
 	StateLog    *wal.Log // Should we get rid of this and store the latest state in the bbolt db?
 	typeStorage *bolt.DB
@@ -47,7 +47,7 @@ type WalStorage struct {
 
 // Returns a *WalStorage, whether this storage existed already, or an error
 // func Open() (*WalStorage, bool, error) {
-func Open(dir string) (*WalStorage, error) {
+func Open(dir string) (*Storage, error) {
 	entryLogDir := filepath.Join(dir, "entry-log")
 	stateLogDir := filepath.Join(dir, "state-log")
 	typeStorageDir := filepath.Join(dir, "type-storage")
@@ -89,7 +89,7 @@ func Open(dir string) (*WalStorage, error) {
 		return nil
 	})
 
-	ws := &WalStorage{EntryLog: entryLog, StateLog: stateLog, typeStorage: typeStorage}
+	ws := &Storage{EntryLog: entryLog, StateLog: stateLog, typeStorage: typeStorage}
 
 	fi, err := entryLog.FirstIndex()
 	if err != nil {
@@ -134,7 +134,7 @@ func Open(dir string) (*WalStorage, error) {
 	return ws, nil
 }
 
-func (s *WalStorage) Close() error {
+func (s *Storage) Close() error {
 	err1 := s.EntryLog.Close()
 	err2 := s.StateLog.Close()
 	err3 := s.typeStorage.Close()
@@ -150,7 +150,7 @@ func (s *WalStorage) Close() error {
 	return err3
 }
 
-func (s *WalStorage) getLastStates(li uint64) (*pb.HardState, *pb.Snapshot, error) {
+func (s *Storage) getLastStates(li uint64) (*pb.HardState, *pb.Snapshot, error) {
 	st := &pb.HardState{}
 	snap := &pb.Snapshot{
 		Data: nil,
@@ -205,14 +205,14 @@ func (s *WalStorage) getLastStates(li uint64) (*pb.HardState, *pb.Snapshot, erro
 	return st, snap, nil
 }
 
-func (s *WalStorage) ConfState(c *pb.ConfState) {
+func (s *Storage) ConfState(c *pb.ConfState) {
 	s.snapshot.Metadata.ConfState = *c
 }
 
-func (w *WalStorage) Save(st pb.HardState, ents []pb.Entry, snap pb.Snapshot) error {
-	w.hardState = st
-	w.snapshot = snap
-	err := w.appendEntries(ents)
+func (s *Storage) Save(st pb.HardState, ents []pb.Entry, snap pb.Snapshot) error {
+	s.hardState = st
+	s.snapshot = snap
+	err := s.appendEntries(ents)
 	if err != nil {
 		return err
 	}
@@ -228,25 +228,25 @@ func (w *WalStorage) Save(st pb.HardState, ents []pb.Entry, snap pb.Snapshot) er
 			for _, entity := range p.Entities {
 				if cluster.IsType(entity.ID) {
 					if entity.IsDelete() {
-						w.deleteType(entity.Key)
+						s.deleteType(entity.Key)
 					} else {
 						t := &cluster.Type{}
 						err := t.Unmarshal(entity.Data)
 						if err != nil {
 							continue
 						}
-						w.saveType(t)
+						s.saveType(t)
 					}
 				}
 			}
 		}
 	}
 
-	return w.appendState(st, snap)
+	return s.appendState(st, snap)
 }
 
-func (w *WalStorage) saveType(t *cluster.Type) error {
-	return w.typeStorage.Update(func(tx *bolt.Tx) error {
+func (s *Storage) saveType(t *cluster.Type) error {
+	return s.typeStorage.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(typeBucket)
 		if b == nil {
 			return ErrBucketMissing
@@ -259,8 +259,8 @@ func (w *WalStorage) saveType(t *cluster.Type) error {
 	})
 }
 
-func (w *WalStorage) deleteType(id []byte) error {
-	return w.typeStorage.Update(func(tx *bolt.Tx) error {
+func (s *Storage) deleteType(id []byte) error {
+	return s.typeStorage.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(typeBucket)
 		if b == nil {
 			return ErrBucketMissing
@@ -269,7 +269,7 @@ func (w *WalStorage) deleteType(id []byte) error {
 	})
 }
 
-func (s *WalStorage) appendEntries(ents []pb.Entry) error {
+func (s *Storage) appendEntries(ents []pb.Entry) error {
 	if len(ents) == 0 {
 		return nil
 	}
@@ -336,7 +336,7 @@ func (s *WalStorage) appendEntries(ents []pb.Entry) error {
 	return nil
 }
 
-func (s *WalStorage) appendState(st pb.HardState, snap pb.Snapshot) error {
+func (s *Storage) appendState(st pb.HardState, snap pb.Snapshot) error {
 	var ss []State
 	stData, err := st.Marshal()
 	if err != nil {
@@ -368,14 +368,14 @@ func (s *WalStorage) appendState(st pb.HardState, snap pb.Snapshot) error {
 }
 
 // InitialState returns the saved HardState and ConfState information.
-func (s *WalStorage) InitialState() (pb.HardState, pb.ConfState, error) {
+func (s *Storage) InitialState() (pb.HardState, pb.ConfState, error) {
 	return s.hardState, s.snapshot.Metadata.ConfState, nil
 }
 
 // Entries returns a slice of log entries in the range [lo,hi).
 // MaxSize limits the total size of the log entries returned, but
 // Entries returns at least one entry if any.
-func (s *WalStorage) Entries(lo, hi, maxSize uint64) ([]pb.Entry, error) {
+func (s *Storage) Entries(lo, hi, maxSize uint64) ([]pb.Entry, error) {
 	var totalSize uint64
 
 	if lo <= s.firstIndex {
@@ -401,7 +401,7 @@ func (s *WalStorage) Entries(lo, hi, maxSize uint64) ([]pb.Entry, error) {
 }
 
 // Returns the entry, the size of the entry (in bytes) before being unmarshalled, and an error
-func (s *WalStorage) entry(i uint64) (*pb.Entry, uint64, error) {
+func (s *Storage) entry(i uint64) (*pb.Entry, uint64, error) {
 	e := &pb.Entry{}
 	data, err := s.EntryLog.Read(i)
 	if err != nil {
@@ -416,7 +416,7 @@ func (s *WalStorage) entry(i uint64) (*pb.Entry, uint64, error) {
 	return e, uint64(len(data)), nil
 }
 
-func (s *WalStorage) state(li uint64) (*State, error) {
+func (s *Storage) state(li uint64) (*State, error) {
 	e := &State{}
 	data, err := s.StateLog.Read(li)
 	if err != nil {
@@ -435,7 +435,7 @@ func (s *WalStorage) state(li uint64) (*State, error) {
 // [FirstIndex()-1, LastIndex()]. The term of the entry before
 // FirstIndex is retained for matching purposes even though the
 // rest of that entry may not be available.
-func (s *WalStorage) Term(i uint64) (uint64, error) {
+func (s *Storage) Term(i uint64) (uint64, error) {
 	if s.firstIndex == 0 && s.lastIndex == 0 {
 		return uint64(0), nil
 	}
@@ -457,19 +457,19 @@ func (s *WalStorage) Term(i uint64) (uint64, error) {
 	return e.Term, nil
 }
 
-func (s *WalStorage) LastIndex() (uint64, error) {
+func (s *Storage) LastIndex() (uint64, error) {
 	return s.lastIndex, nil
 }
 
-func (s *WalStorage) FirstIndex() (uint64, error) {
+func (s *Storage) FirstIndex() (uint64, error) {
 	return s.firstIndex + uint64(1), nil
 }
 
-func (s *WalStorage) Snapshot() (pb.Snapshot, error) {
+func (s *Storage) Snapshot() (pb.Snapshot, error) {
 	return s.snapshot, nil
 }
 
-func (s *WalStorage) Compact(compactIndex uint64) error {
+func (s *Storage) Compact(compactIndex uint64) error {
 	if compactIndex <= s.firstIndex {
 		return raft.ErrCompacted
 	}
@@ -488,7 +488,7 @@ func (s *WalStorage) Compact(compactIndex uint64) error {
 	return nil
 }
 
-func (s *WalStorage) Type(id string) (*cluster.Type, error) {
+func (s *Storage) Type(id string) (*cluster.Type, error) {
 	t := &cluster.Type{}
 
 	return t, s.typeStorage.View(func(tx *bolt.Tx) error {

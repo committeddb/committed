@@ -7,14 +7,14 @@ import (
 	pb "go.etcd.io/etcd/raft/v3/raftpb"
 )
 
-type WalReader struct {
+type Reader struct {
 	sync.Mutex
 	lastReadIndex uint64
-	s             *WalStorage
+	s             *Storage
 }
 
 // How to deal with tombstones?
-func (r *WalReader) Read() (*cluster.Proposal, error) {
+func (r *Reader) Read() (*cluster.Proposal, error) {
 	r.Lock()
 	defer r.Unlock()
 
@@ -44,6 +44,6 @@ func (r *WalReader) Read() (*cluster.Proposal, error) {
 }
 
 // TODO Look up the lastReadIndex by id
-func (s *WalStorage) Reader(id string) cluster.ProposalReader {
-	return &WalReader{lastReadIndex: 0, s: s}
+func (s *Storage) Reader(id string) cluster.ProposalReader {
+	return &Reader{lastReadIndex: 0, s: s}
 }

@@ -49,7 +49,7 @@ func (i index) terms(terms ...uint64) []pb.Entry {
 }
 
 type StorageWrapper struct {
-	*wal.WalStorage
+	*wal.Storage
 	path string
 }
 
