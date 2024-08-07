@@ -154,6 +154,13 @@ func TestSync(t *testing.T) {
 			if diff != "" {
 				t.Fatalf(diff)
 			}
+
+			for i, p := range ps {
+				diff := cmp.Diff(p, sync.proposals[i])
+				if diff != "" {
+					t.Fatalf(diff)
+				}
+			}
 		})
 	}
 }
