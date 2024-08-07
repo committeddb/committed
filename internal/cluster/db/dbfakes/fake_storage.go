@@ -73,16 +73,16 @@ type FakeStorage struct {
 		result1 uint64
 		result2 error
 	}
-	ReaderStub        func(string) cluster.ProposalReader
+	ReaderStub        func(string) db.ProposalReader
 	readerMutex       sync.RWMutex
 	readerArgsForCall []struct {
 		arg1 string
 	}
 	readerReturns struct {
-		result1 cluster.ProposalReader
+		result1 db.ProposalReader
 	}
 	readerReturnsOnCall map[int]struct {
-		result1 cluster.ProposalReader
+		result1 db.ProposalReader
 	}
 	SaveStub        func(raftpb.HardState, []raftpb.Entry, raftpb.Snapshot) error
 	saveMutex       sync.RWMutex
@@ -429,7 +429,7 @@ func (fake *FakeStorage) LastIndexReturnsOnCall(i int, result1 uint64, result2 e
 	}{result1, result2}
 }
 
-func (fake *FakeStorage) Reader(arg1 string) cluster.ProposalReader {
+func (fake *FakeStorage) Reader(arg1 string) db.ProposalReader {
 	fake.readerMutex.Lock()
 	ret, specificReturn := fake.readerReturnsOnCall[len(fake.readerArgsForCall)]
 	fake.readerArgsForCall = append(fake.readerArgsForCall, struct {
@@ -454,7 +454,7 @@ func (fake *FakeStorage) ReaderCallCount() int {
 	return len(fake.readerArgsForCall)
 }
 
-func (fake *FakeStorage) ReaderCalls(stub func(string) cluster.ProposalReader) {
+func (fake *FakeStorage) ReaderCalls(stub func(string) db.ProposalReader) {
 	fake.readerMutex.Lock()
 	defer fake.readerMutex.Unlock()
 	fake.ReaderStub = stub
@@ -467,26 +467,26 @@ func (fake *FakeStorage) ReaderArgsForCall(i int) string {
 	return argsForCall.arg1
 }
 
-func (fake *FakeStorage) ReaderReturns(result1 cluster.ProposalReader) {
+func (fake *FakeStorage) ReaderReturns(result1 db.ProposalReader) {
 	fake.readerMutex.Lock()
 	defer fake.readerMutex.Unlock()
 	fake.ReaderStub = nil
 	fake.readerReturns = struct {
-		result1 cluster.ProposalReader
+		result1 db.ProposalReader
 	}{result1}
 }
 
-func (fake *FakeStorage) ReaderReturnsOnCall(i int, result1 cluster.ProposalReader) {
+func (fake *FakeStorage) ReaderReturnsOnCall(i int, result1 db.ProposalReader) {
 	fake.readerMutex.Lock()
 	defer fake.readerMutex.Unlock()
 	fake.ReaderStub = nil
 	if fake.readerReturnsOnCall == nil {
 		fake.readerReturnsOnCall = make(map[int]struct {
-			result1 cluster.ProposalReader
+			result1 db.ProposalReader
 		})
 	}
 	fake.readerReturnsOnCall[i] = struct {
-		result1 cluster.ProposalReader
+		result1 db.ProposalReader
 	}{result1}
 }
 

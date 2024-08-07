@@ -3,6 +3,7 @@ package db
 //go:generate go run github.com/maxbrunsfeld/counterfeiter/v6 -generate
 
 import (
+	"context"
 	"io"
 
 	"github.com/philborlin/committed/internal/cluster"
@@ -75,4 +76,29 @@ func (db *DB) Type(id string) (*cluster.Type, error) {
 func (db *DB) Close() error {
 	close(db.proposeC)
 	return db.closer.Close()
+}
+
+// The caller should run this on a separate go routine - or do we want to do this so close() can cancel all contexts?
+func (db *DB) Sync(ctx context.Context, id string, s cluster.Syncable) error {
+	r := db.storage.Reader(id)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+		}
+
+		p, err := r.Read()
+		if err == io.EOF {
+			// TODO Figure out what to do - maybe do an exponential backoff to a certain point - maybe nothing?
+		} else if err != nil {
+			return err
+		}
+
+		err = s.Sync(ctx, p)
+		if err != nil {
+			return err
+		}
+	}
 }

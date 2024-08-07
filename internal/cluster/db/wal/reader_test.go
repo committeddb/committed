@@ -84,3 +84,5 @@ func TestEOF(t *testing.T) {
 	_, err = r.Read()
 	require.Equal(t, io.EOF, err)
 }
+
+// TODO Test that we skip malformed Proposals (or pb.Entry structs that aren't proposals)

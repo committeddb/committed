@@ -279,6 +279,6 @@ func (ms *MemoryStorage) Type(id string) (*cluster.Type, error) {
 	return nil, nil
 }
 
-func (ms *MemoryStorage) Reader(id string) cluster.ProposalReader {
+func (ms *MemoryStorage) Reader(id string) db.ProposalReader {
 	return nil
 }

@@ -1,7 +1,9 @@
 package db_test
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -116,6 +118,46 @@ func TestType(t *testing.T) {
 	}
 }
 
+func TestSync(t *testing.T) {
+	tests := map[string]struct {
+		inputs [][]string
+	}{
+		"simple":  {inputs: [][]string{{"foo"}}},
+		"two":     {inputs: [][]string{{"foo", "bar"}}},
+		"two-one": {inputs: [][]string{{"foo", "bar"}, {"baz"}}},
+	}
+
+	id := "foo"
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			s := &dbfakes.FakeStorage{}
+			db := createDBWithStorage(s)
+			defer db.Close()
+
+			size := len(tc.inputs)
+
+			s.FirstIndexReturns(1, nil)
+			s.LastIndexReturns(uint64(size), nil)
+
+			ctx, cancel := context.WithCancel(context.Background())
+
+			ps := createProposals(tc.inputs)
+			sync := NewSyncable(size, cancel)
+			r := &TestReader{proposals: ps}
+			s.ReaderReturns(r)
+
+			go db.Sync(ctx, id, sync)
+			<-sync.done
+
+			diff := cmp.Diff(size, sync.count)
+			if diff != "" {
+				t.Fatalf(diff)
+			}
+		})
+	}
+}
+
 // TODO Test deletes - may have to test with a syncable because a delete doesn't have context except when read
 
 func createType(name string) *cluster.Type {
@@ -189,4 +231,56 @@ func (db *DB) ents() ([]*cluster.Proposal, error) {
 	}
 
 	return ps, nil
+}
+
+type MemorySyncable struct {
+	proposals   []*cluster.Proposal
+	cancel      func()
+	count       int
+	done        chan any
+	doneAtCount int
+}
+
+func NewSyncable(doneAtCount int, cancel func()) *MemorySyncable {
+	return &MemorySyncable{doneAtCount: doneAtCount, cancel: cancel, done: make(chan any)}
+}
+
+func (ms *MemorySyncable) Init(ctx context.Context) error {
+	return nil
+}
+
+func (ms *MemorySyncable) Sync(ctx context.Context, p *cluster.Proposal) error {
+	fmt.Printf("syncing: %v\n", p)
+
+	ms.count++
+	ms.proposals = append(ms.proposals, p)
+	if ms.doneAtCount == ms.count {
+		ms.cancel()
+		ms.done <- ""
+	}
+
+	return nil
+}
+
+func (ms *MemorySyncable) Close() error {
+	return nil
+}
+
+type TestReader struct {
+	nextIndex int
+	proposals []*cluster.Proposal
+}
+
+func (tr *TestReader) Read() (*cluster.Proposal, error) {
+	if tr.nextIndex >= len(tr.proposals) {
+		return nil, io.EOF
+	}
+
+	p := tr.proposals[tr.nextIndex]
+	tr.nextIndex++
+	if p == nil {
+		return nil, io.EOF
+	}
+
+	return p, nil
 }
