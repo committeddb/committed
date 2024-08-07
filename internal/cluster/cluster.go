@@ -4,6 +4,7 @@ import "context"
 
 //go:generate go run github.com/maxbrunsfeld/counterfeiter/v6 -generate
 //go:generate protoc --go_out=paths=source_relative:. ./cluster.proto
+//go:generate protoc --go_out=paths=source_relative:. ./clusterpb/cluster.proto
 
 type Cluster interface {
 	Propose(p *Proposal)

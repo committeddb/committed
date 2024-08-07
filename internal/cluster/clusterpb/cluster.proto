@@ -1,7 +1,7 @@
 syntax = "proto3";
 package clusterpb;
 
-option go_package = "github.com/philborlin/committed/internal/cluster";
+option go_package = "github.com/philborlin/committed/internal/cluster/clusterpb";
 
 message LogEntity {
     string typeID = 1;

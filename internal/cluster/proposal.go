@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"github.com/philborlin/committed/internal/cluster/clusterpb"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -40,18 +41,18 @@ func (p *Proposal) Validate() error {
 }
 
 func (p *Proposal) Marshal() ([]byte, error) {
-	var es []*LogEntity
+	var es []*clusterpb.LogEntity
 	for _, e := range p.Entities {
-		es = append(es, &LogEntity{TypeID: e.Type.ID, Key: e.Key, Data: e.Data})
+		es = append(es, &clusterpb.LogEntity{TypeID: e.Type.ID, Key: e.Key, Data: e.Data})
 	}
 
-	lp := &LogProposal{LogEntities: es}
+	lp := &clusterpb.LogProposal{LogEntities: es}
 
 	return proto.Marshal(lp)
 }
 
 func (p *Proposal) Unmarshal(bs []byte) error {
-	lp := &LogProposal{}
+	lp := &clusterpb.LogProposal{}
 	err := proto.Unmarshal(bs, lp)
 	if err != nil {
 		return err
