@@ -13,7 +13,7 @@ type TypeRequest struct {
 }
 
 func (h *HTTP) AddType(w httpgo.ResponseWriter, r *httpgo.Request) {
-	var tr TypeRequest
+	tr := &TypeRequest{}
 	err := unmarshalBody(r, tr)
 	if err != nil {
 		badRequest(w, err)

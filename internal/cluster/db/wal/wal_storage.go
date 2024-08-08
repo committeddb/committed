@@ -227,6 +227,7 @@ func (s *Storage) Save(st pb.HardState, ents []pb.Entry, snap pb.Snapshot) error
 
 			for _, entity := range p.Entities {
 				if cluster.IsType(entity.ID) {
+					fmt.Printf("[wal] saving type...\n")
 					if entity.IsDelete() {
 						s.deleteType(entity.Key)
 					} else {
@@ -236,6 +237,7 @@ func (s *Storage) Save(st pb.HardState, ents []pb.Entry, snap pb.Snapshot) error
 							continue
 						}
 						s.saveType(t)
+						fmt.Printf("[wal] ... type saved\n")
 					}
 				}
 			}

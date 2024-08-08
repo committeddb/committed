@@ -17,15 +17,15 @@ type EntityRequest struct {
 }
 
 func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
-	var tr ProposalRequest
-	err := unmarshalBody(r, tr)
+	pr := &ProposalRequest{}
+	err := unmarshalBody(r, pr)
 	if err != nil {
 		badRequest(w, err)
 		return
 	}
 
 	var es []*cluster.Entity
-	for _, e := range tr.Entities {
+	for _, e := range pr.Entities {
 		t, err := h.c.Type(e.TypeID)
 		if err != nil {
 			internalServerError(w, err)

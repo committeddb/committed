@@ -4,6 +4,7 @@ package db
 
 import (
 	"context"
+	"fmt"
 	"io"
 
 	"github.com/philborlin/committed/internal/cluster"
@@ -37,13 +38,26 @@ func New(id uint64, peers Peers, s Storage) *DB {
 	return &DB{CommitC: commitC, ErrorC: errorC, proposeC: proposeC, confChangeC: confChangeC, closer: closer, storage: s}
 }
 
+func (db *DB) EatCommitC() {
+	go func() {
+		for {
+			<-db.CommitC
+		}
+	}()
+}
+
 func (db *DB) Propose(p *cluster.Proposal) error {
 	bs, err := p.Marshal()
 	if err != nil {
 		return err
 	}
 
+	// TODO Should we wrap this in a log level?
+	fmt.Printf("Proposing %v", p)
+
 	db.proposeC <- bs
+
+	fmt.Println("...Proposal made")
 
 	return nil
 }

@@ -97,7 +97,9 @@ func (n *node) serveChannels() {
 					n.proposeC = nil
 				} else {
 					// blocks until accepted by raft state machine
+					fmt.Printf("[raft] proposal being sent to state machine...\n")
 					n.node.Propose(context.TODO(), []byte(prop))
+					fmt.Printf("[raft] ...proposal accepted by state machine\n")
 				}
 
 			case cc, ok := <-n.proposeConfC:
@@ -119,6 +121,7 @@ func (n *node) serveChannels() {
 		case <-ticker.C:
 			n.node.Tick()
 		case rd := <-n.node.Ready():
+			fmt.Printf("[raft] ready and about to save to storage\n")
 			n.storage.Save(rd.HardState, rd.Entries, rd.Snapshot)
 			n.transport.Send(rd.Messages)
 			if !raft.IsEmptySnap(rd.Snapshot) {

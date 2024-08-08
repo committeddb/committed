@@ -7,7 +7,7 @@ import "context"
 //go:generate protoc --go_out=paths=source_relative:. ./clusterpb/cluster.proto
 
 type Cluster interface {
-	Propose(p *Proposal)
+	Propose(p *Proposal) error
 	ProposeType(t *Type) error
 	ProposeDeleteType(id string) error
 	Type(id string) (*Type, error)

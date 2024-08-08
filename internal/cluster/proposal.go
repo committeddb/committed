@@ -1,6 +1,9 @@
 package cluster
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/philborlin/committed/internal/cluster/clusterpb"
 	"google.golang.org/protobuf/proto"
 )
@@ -38,6 +41,20 @@ func (p *Proposal) Validate() error {
 	}
 
 	return nil
+}
+
+func (p *Proposal) String() string {
+	var sb strings.Builder
+
+	sb.WriteString("Proposal:\n")
+	for i, e := range p.Entities {
+		sb.WriteString(fmt.Sprintf("  [%d](%s) %v", i, e.Type.Name, string(e.Key)))
+		if i < len(p.Entities)-1 {
+			sb.WriteString("\n")
+		}
+	}
+
+	return sb.String()
 }
 
 func (p *Proposal) Marshal() ([]byte, error) {

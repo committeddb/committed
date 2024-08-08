@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	httpgo "net/http"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/philborlin/committed/internal/cluster"
@@ -26,8 +25,8 @@ func New(c cluster.Cluster) *HTTP {
 	return h
 }
 
-func (h *HTTP) ListenAndServe(addr string) {
-	httpgo.ListenAndServe(addr, h.r)
+func (h *HTTP) ListenAndServe(addr string) error {
+	return http.ListenAndServe(addr, h.r)
 }
 
 func badRequest(w http.ResponseWriter, err error) {

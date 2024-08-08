@@ -1,6 +1,8 @@
 package cluster
 
 import (
+	"fmt"
+
 	"github.com/philborlin/committed/internal/cluster/clusterpb"
 	"google.golang.org/protobuf/proto"
 )
@@ -18,6 +20,10 @@ type Type struct {
 	SchemaType string // something like Thrift, Protobuf, JSON Schema, etc.
 	Schema     []byte // The contents of the schema
 	Validate   ValidationStrategy
+}
+
+func (t *Type) String() string {
+	return fmt.Sprintf(" (%s) %s - v%d", t.ID, t.Name, t.Version)
 }
 
 var typeType = &Type{

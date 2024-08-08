@@ -7,6 +7,7 @@ import (
 
 	"github.com/philborlin/committed/internal/cluster/db"
 	"github.com/philborlin/committed/internal/cluster/db/wal"
+	"github.com/philborlin/committed/internal/cluster/http"
 	"github.com/spf13/cobra"
 )
 
@@ -24,6 +25,7 @@ to quickly create a Cobra application.`,
 
 		url := flag.String("url", "http://127.0.0.1:9022", "url with port")
 		id := flag.Uint64("id", 1, "node ID")
+		addr := flag.String("addr", ":8080", "node ID")
 
 		s, err := wal.Open("./data")
 		if err != nil {
@@ -34,6 +36,18 @@ to quickly create a Cobra application.`,
 		peers[*id] = *url
 
 		db := db.New(*id, peers, s)
+		fmt.Printf("Raft Running...\n")
+		h := http.New(db)
+		fmt.Printf("API Listening on %s...\n", *addr)
+
+		db.EatCommitC()
+
+		go func() {
+			if err := h.ListenAndServe(*addr); err != nil {
+				log.Fatal(err)
+			}
+		}()
+
 		if err, ok := <-db.ErrorC; ok {
 			log.Fatalf("raft error: %v", err)
 		}
