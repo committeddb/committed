@@ -4,7 +4,6 @@ package db
 
 import (
 	"context"
-	"fmt"
 	"io"
 
 	"github.com/philborlin/committed/internal/cluster"
@@ -21,6 +20,8 @@ type DB struct {
 	confChangeC chan<- raftpb.ConfChange
 	closer      io.Closer
 	storage     Storage
+	ctx         context.Context
+	cancelSyncs context.CancelFunc
 }
 
 func New(id uint64, peers Peers, s Storage) *DB {
@@ -34,8 +35,19 @@ func New(id uint64, peers Peers, s Storage) *DB {
 		i++
 	}
 
+	ctx, cancelSyncs := context.WithCancel(context.Background())
+
 	commitC, errorC, closer := NewRaft(id, rpeers, s, proposeC, confChangeC)
-	return &DB{CommitC: commitC, ErrorC: errorC, proposeC: proposeC, confChangeC: confChangeC, closer: closer, storage: s}
+	return &DB{
+		CommitC:     commitC,
+		ErrorC:      errorC,
+		proposeC:    proposeC,
+		confChangeC: confChangeC,
+		closer:      closer,
+		storage:     s,
+		ctx:         ctx,
+		cancelSyncs: cancelSyncs,
+	}
 }
 
 func (db *DB) EatCommitC() {
@@ -53,11 +65,11 @@ func (db *DB) Propose(p *cluster.Proposal) error {
 	}
 
 	// TODO Should we wrap this in a log level?
-	fmt.Printf("Proposing %v", p)
+	// fmt.Printf("Proposing %v", p)
 
 	db.proposeC <- bs
 
-	fmt.Println("...Proposal made")
+	// fmt.Println("...Proposal made")
 
 	return nil
 }
@@ -89,30 +101,38 @@ func (db *DB) Type(id string) (*cluster.Type, error) {
 
 func (db *DB) Close() error {
 	close(db.proposeC)
+	db.cancelSyncs()
 	return db.closer.Close()
 }
 
 // The caller should run this on a separate go routine - or do we want to do this so close() can cancel all contexts?
 func (db *DB) Sync(ctx context.Context, id string, s cluster.Syncable) error {
-	r := db.storage.Reader(id)
+	go func() {
+		r := db.storage.Reader(id)
 
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		default:
-		}
+		for {
+			select {
+			case <-db.ctx.Done():
+				return
+			default:
+			}
 
-		p, err := r.Read()
-		if err == io.EOF {
-			// TODO Figure out what to do - maybe do an exponential backoff to a certain point - maybe nothing?
-		} else if err != nil {
-			return err
-		}
+			p, err := r.Read()
+			if err == io.EOF {
+				// TODO Figure out what to do - maybe do an exponential backoff to a certain point - maybe nothing?
+				continue
+			} else if err != nil {
+				// TODO Handle error
+				return
+			}
 
-		err = s.Sync(ctx, p)
-		if err != nil {
-			return err
+			err = s.Sync(db.ctx, p)
+			if err != nil {
+				// TODO Handle error
+				return
+			}
 		}
-	}
+	}()
+
+	return nil
 }

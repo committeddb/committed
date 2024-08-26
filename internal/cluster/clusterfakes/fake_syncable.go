@@ -19,17 +19,6 @@ type FakeSyncable struct {
 	closeReturnsOnCall map[int]struct {
 		result1 error
 	}
-	InitStub        func(context.Context) error
-	initMutex       sync.RWMutex
-	initArgsForCall []struct {
-		arg1 context.Context
-	}
-	initReturns struct {
-		result1 error
-	}
-	initReturnsOnCall map[int]struct {
-		result1 error
-	}
 	SyncStub        func(context.Context, *cluster.Proposal) error
 	syncMutex       sync.RWMutex
 	syncArgsForCall []struct {
@@ -95,67 +84,6 @@ func (fake *FakeSyncable) CloseReturnsOnCall(i int, result1 error) {
 		})
 	}
 	fake.closeReturnsOnCall[i] = struct {
-		result1 error
-	}{result1}
-}
-
-func (fake *FakeSyncable) Init(arg1 context.Context) error {
-	fake.initMutex.Lock()
-	ret, specificReturn := fake.initReturnsOnCall[len(fake.initArgsForCall)]
-	fake.initArgsForCall = append(fake.initArgsForCall, struct {
-		arg1 context.Context
-	}{arg1})
-	stub := fake.InitStub
-	fakeReturns := fake.initReturns
-	fake.recordInvocation("Init", []interface{}{arg1})
-	fake.initMutex.Unlock()
-	if stub != nil {
-		return stub(arg1)
-	}
-	if specificReturn {
-		return ret.result1
-	}
-	return fakeReturns.result1
-}
-
-func (fake *FakeSyncable) InitCallCount() int {
-	fake.initMutex.RLock()
-	defer fake.initMutex.RUnlock()
-	return len(fake.initArgsForCall)
-}
-
-func (fake *FakeSyncable) InitCalls(stub func(context.Context) error) {
-	fake.initMutex.Lock()
-	defer fake.initMutex.Unlock()
-	fake.InitStub = stub
-}
-
-func (fake *FakeSyncable) InitArgsForCall(i int) context.Context {
-	fake.initMutex.RLock()
-	defer fake.initMutex.RUnlock()
-	argsForCall := fake.initArgsForCall[i]
-	return argsForCall.arg1
-}
-
-func (fake *FakeSyncable) InitReturns(result1 error) {
-	fake.initMutex.Lock()
-	defer fake.initMutex.Unlock()
-	fake.InitStub = nil
-	fake.initReturns = struct {
-		result1 error
-	}{result1}
-}
-
-func (fake *FakeSyncable) InitReturnsOnCall(i int, result1 error) {
-	fake.initMutex.Lock()
-	defer fake.initMutex.Unlock()
-	fake.InitStub = nil
-	if fake.initReturnsOnCall == nil {
-		fake.initReturnsOnCall = make(map[int]struct {
-			result1 error
-		})
-	}
-	fake.initReturnsOnCall[i] = struct {
 		result1 error
 	}{result1}
 }
@@ -227,8 +155,6 @@ func (fake *FakeSyncable) Invocations() map[string][][]interface{} {
 	defer fake.invocationsMutex.RUnlock()
 	fake.closeMutex.RLock()
 	defer fake.closeMutex.RUnlock()
-	fake.initMutex.RLock()
-	defer fake.initMutex.RUnlock()
 	fake.syncMutex.RLock()
 	defer fake.syncMutex.RUnlock()
 	copiedInvocations := map[string][][]interface{}{}

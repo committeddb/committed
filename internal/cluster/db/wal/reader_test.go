@@ -69,20 +69,33 @@ func TestReader(t *testing.T) {
 }
 
 func TestEOF(t *testing.T) {
-	s := NewStorage(t, nil)
-	defer s.Cleanup()
+	tests := map[string]struct {
+		inputs [][]string
+	}{
+		"empty":  {inputs: [][]string{}},
+		"simple": {inputs: [][]string{{"foo"}}},
+	}
 
-	ps := createProposals([][]string{{"foo"}})
-	saveProposal(t, ps[0], s, 1, 1)
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			s := NewStorage(t, nil)
+			defer s.Cleanup()
 
-	r := s.Reader("foo")
+			r := s.Reader("foo")
 
-	got, err := r.Read()
-	require.Equal(t, nil, err)
-	require.Equal(t, ps[0], got)
+			ps := createProposals(tt.inputs)
+			for i, p := range ps {
+				saveProposal(t, p, s, 1, 1+uint64(i))
 
-	_, err = r.Read()
-	require.Equal(t, io.EOF, err)
+				got, err := r.Read()
+				require.Equal(t, nil, err)
+				require.Equal(t, p, got)
+			}
+
+			_, err := r.Read()
+			require.Equal(t, io.EOF, err)
+		})
+	}
 }
 
 // TODO Test that we skip malformed Proposals (or pb.Entry structs that aren't proposals)

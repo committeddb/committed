@@ -7,7 +7,7 @@ import (
 )
 
 type ProposalRequest struct {
-	Entities []*EntityRequest
+	Entities []*EntityRequest `json:"entities"`
 }
 
 type EntityRequest struct {

@@ -21,6 +21,7 @@ func New(c cluster.Cluster) *HTTP {
 
 	r.Post("/type", h.AddType)
 	r.Post("/proposal", h.AddProposal)
+	r.Post("/syncable", h.AddSyncable)
 
 	return h
 }
