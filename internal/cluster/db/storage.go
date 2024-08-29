@@ -13,4 +13,5 @@ type Storage interface {
 	Save(st raftpb.HardState, ents []raftpb.Entry, snap raftpb.Snapshot) error
 	Type(id string) (*cluster.Type, error)
 	Reader(id string) ProposalReader
+	Database(id string) (cluster.Database, error)
 }

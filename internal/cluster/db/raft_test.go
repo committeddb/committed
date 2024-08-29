@@ -282,3 +282,7 @@ func (ms *MemoryStorage) Type(id string) (*cluster.Type, error) {
 func (ms *MemoryStorage) Reader(id string) db.ProposalReader {
 	return nil
 }
+
+func (ms *MemoryStorage) Database(id string) (cluster.Database, error) {
+	return nil, nil
+}

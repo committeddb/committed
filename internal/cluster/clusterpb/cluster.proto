@@ -25,3 +25,10 @@ message LogType {
     bytes Schema = 5;
     LogValidationStrategy Validate = 6;
 }
+
+message LogConfiguration {
+    string ID = 1;
+    string Name = 2;
+    string MimeType = 3;
+    bytes Data = 4;
+}
