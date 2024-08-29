@@ -16,7 +16,7 @@ type Syncable interface {
 //
 //counterfeiter:generate . SyncableParser
 type SyncableParser interface {
-	Parse(*viper.Viper, map[string]Database) (Syncable, error)
+	Parse(*viper.Viper, DatabaseStorage) (Syncable, error)
 }
 
 var syncableType = &Type{

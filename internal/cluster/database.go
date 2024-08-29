@@ -9,6 +9,10 @@ type Database interface {
 	Close() error
 }
 
+type DatabaseStorage interface {
+	Database(id string) (Database, error)
+}
+
 // DatabaseParser will parse a viper file into a Database
 //
 //counterfeiter:generate . DatabaseParser

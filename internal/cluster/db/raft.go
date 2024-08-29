@@ -23,7 +23,6 @@ type node struct {
 	node    raft.Node
 	storage Storage
 
-	// transport      *rafthttp.Transport
 	transport      Transport
 	transportStopC chan struct{} // signals http transport to shutdown
 	transportDoneC chan struct{} // signals http transport shutdown complete

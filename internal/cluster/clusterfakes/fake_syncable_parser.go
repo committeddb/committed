@@ -9,11 +9,11 @@ import (
 )
 
 type FakeSyncableParser struct {
-	ParseStub        func(*viper.Viper, map[string]cluster.Database) (cluster.Syncable, error)
+	ParseStub        func(*viper.Viper, cluster.DatabaseStorage) (cluster.Syncable, error)
 	parseMutex       sync.RWMutex
 	parseArgsForCall []struct {
 		arg1 *viper.Viper
-		arg2 map[string]cluster.Database
+		arg2 cluster.DatabaseStorage
 	}
 	parseReturns struct {
 		result1 cluster.Syncable
@@ -27,12 +27,12 @@ type FakeSyncableParser struct {
 	invocationsMutex sync.RWMutex
 }
 
-func (fake *FakeSyncableParser) Parse(arg1 *viper.Viper, arg2 map[string]cluster.Database) (cluster.Syncable, error) {
+func (fake *FakeSyncableParser) Parse(arg1 *viper.Viper, arg2 cluster.DatabaseStorage) (cluster.Syncable, error) {
 	fake.parseMutex.Lock()
 	ret, specificReturn := fake.parseReturnsOnCall[len(fake.parseArgsForCall)]
 	fake.parseArgsForCall = append(fake.parseArgsForCall, struct {
 		arg1 *viper.Viper
-		arg2 map[string]cluster.Database
+		arg2 cluster.DatabaseStorage
 	}{arg1, arg2})
 	stub := fake.ParseStub
 	fakeReturns := fake.parseReturns
@@ -53,13 +53,13 @@ func (fake *FakeSyncableParser) ParseCallCount() int {
 	return len(fake.parseArgsForCall)
 }
 
-func (fake *FakeSyncableParser) ParseCalls(stub func(*viper.Viper, map[string]cluster.Database) (cluster.Syncable, error)) {
+func (fake *FakeSyncableParser) ParseCalls(stub func(*viper.Viper, cluster.DatabaseStorage) (cluster.Syncable, error)) {
 	fake.parseMutex.Lock()
 	defer fake.parseMutex.Unlock()
 	fake.ParseStub = stub
 }
 
-func (fake *FakeSyncableParser) ParseArgsForCall(i int) (*viper.Viper, map[string]cluster.Database) {
+func (fake *FakeSyncableParser) ParseArgsForCall(i int) (*viper.Viper, cluster.DatabaseStorage) {
 	fake.parseMutex.RLock()
 	defer fake.parseMutex.RUnlock()
 	argsForCall := fake.parseArgsForCall[i]

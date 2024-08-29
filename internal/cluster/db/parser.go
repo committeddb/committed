@@ -22,10 +22,7 @@ func (db *DB) AddDatabaseParser(name string, p cluster.DatabaseParser) {
 }
 
 func (db *DB) ProposeSyncable(c *cluster.Configuration) error {
-	// TODO Make this real
-	dbs := make(map[string]cluster.Database)
-
-	_, _, err := parseSyncable(c.MimeType, bytes.NewReader(c.Data), dbs)
+	_, _, err := parseSyncable(c.MimeType, bytes.NewReader(c.Data), db.storage)
 	if err != nil {
 		return err
 	}
@@ -56,7 +53,7 @@ func (db *DB) ProposeDatabase(c *cluster.Configuration) error {
 	return nil
 }
 
-func parseSyncable(mimeType string, reader io.Reader, dbs map[string]cluster.Database) (string, cluster.Syncable, error) {
+func parseSyncable(mimeType string, reader io.Reader, s cluster.DatabaseStorage) (string, cluster.Syncable, error) {
 	v, err := parseBytes(mimeType, reader)
 	if err != nil {
 		return "", nil, err
@@ -70,7 +67,7 @@ func parseSyncable(mimeType string, reader io.Reader, dbs map[string]cluster.Dat
 		return "", nil, fmt.Errorf("cannot parse syncable of type: %s", tipe)
 	}
 
-	syncable, err := parser.Parse(v, dbs)
+	syncable, err := parser.Parse(v, s)
 	if err != nil {
 		return "", nil, err
 	}
