@@ -17,6 +17,7 @@ func TestDatabase(t *testing.T) {
 	tests := []struct {
 		cfgs []*cluster.Configuration
 	}{
+		{[]*cluster.Configuration{}},
 		{[]*cluster.Configuration{cfg1}},
 		{[]*cluster.Configuration{cfg1, cfg2}},
 	}
