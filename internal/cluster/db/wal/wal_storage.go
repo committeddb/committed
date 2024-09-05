@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/philborlin/committed/internal/cluster"
+	"github.com/philborlin/committed/internal/cluster/db"
 	"github.com/tidwall/wal"
 	bolt "go.etcd.io/bbolt"
 	"go.etcd.io/etcd/raft/v3"
@@ -23,6 +24,8 @@ var ErrBucketMissing = errors.New("key value bucket missing")
 
 var typeBucket = []byte("types")
 var databaseBucket = []byte("databases")
+var syncableBucket = []byte("syncables")
+var buckets = [][]byte{typeBucket, databaseBucket, syncableBucket}
 
 type StateType int
 
@@ -46,12 +49,12 @@ type Storage struct {
 	lastIndex   uint64
 	stateIndex  uint64
 	databases   map[string]cluster.Database
-	parser      Parser
+	parser      db.Parser
 }
 
 // Returns a *WalStorage, whether this storage existed already, or an error
 // func Open() (*WalStorage, bool, error) {
-func Open(dir string, p Parser) (*Storage, error) {
+func Open(dir string, p db.Parser) (*Storage, error) {
 	entryLogDir := filepath.Join(dir, "entry-log")
 	stateLogDir := filepath.Join(dir, "state-log")
 	typeStorageDir := filepath.Join(dir, "type-storage")
@@ -86,7 +89,7 @@ func Open(dir string, p Parser) (*Storage, error) {
 	}
 
 	typeStorage.Update(func(tx *bolt.Tx) error {
-		for _, bucket := range [][]byte{typeBucket, databaseBucket} {
+		for _, bucket := range buckets {
 			_, err := tx.CreateBucketIfNotExists(bucket)
 			if err != nil {
 				return fmt.Errorf("create bucket: %s", err)
@@ -259,6 +262,10 @@ func (s *Storage) Save(st pb.HardState, ents []pb.Entry, snap pb.Snapshot) error
 						return err
 					}
 				case cluster.IsSyncable(entity.ID):
+					err := s.handleSyncable(entity)
+					if err != nil {
+						return err
+					}
 				}
 			}
 		}

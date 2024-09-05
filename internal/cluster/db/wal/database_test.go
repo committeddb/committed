@@ -6,6 +6,7 @@ import (
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/clusterfakes"
 	"github.com/philborlin/committed/internal/cluster/db"
+	parser "github.com/philborlin/committed/internal/cluster/db/parser"
 	"github.com/philborlin/committed/internal/cluster/db/wal"
 	"github.com/stretchr/testify/require"
 )
@@ -24,7 +25,7 @@ func TestDatabase(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run("", func(t *testing.T) {
-			var p wal.Parser = db.NewParser()
+			var p db.Parser = parser.New()
 			s := NewStorageWithParser(t, index(3).terms(3, 4, 5), p)
 			defer s.Cleanup()
 

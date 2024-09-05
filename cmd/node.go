@@ -6,6 +6,7 @@ import (
 	"log"
 
 	"github.com/philborlin/committed/internal/cluster/db"
+	parser "github.com/philborlin/committed/internal/cluster/db/parser"
 	"github.com/philborlin/committed/internal/cluster/db/wal"
 	"github.com/philborlin/committed/internal/cluster/http"
 	"github.com/spf13/cobra"
@@ -27,7 +28,8 @@ to quickly create a Cobra application.`,
 		id := flag.Uint64("id", 1, "node ID")
 		addr := flag.String("addr", ":8080", "node ID")
 
-		s, err := wal.Open("./data")
+		p := parser.New()
+		s, err := wal.Open("./data", p)
 		if err != nil {
 			log.Fatalf("cannot open storage: %v", err)
 		}
@@ -35,7 +37,7 @@ to quickly create a Cobra application.`,
 		peers := make(db.Peers)
 		peers[*id] = *url
 
-		db := db.New(*id, peers, s)
+		db := db.New(*id, peers, s, p)
 		fmt.Printf("Raft Running...\n")
 		h := http.New(db)
 		fmt.Printf("API Listening on %s...\n", *addr)

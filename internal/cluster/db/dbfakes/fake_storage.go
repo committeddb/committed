@@ -122,6 +122,18 @@ type FakeStorage struct {
 		result1 raftpb.Snapshot
 		result2 error
 	}
+	SyncablesStub        func() ([]*cluster.Configuration, error)
+	syncablesMutex       sync.RWMutex
+	syncablesArgsForCall []struct {
+	}
+	syncablesReturns struct {
+		result1 []*cluster.Configuration
+		result2 error
+	}
+	syncablesReturnsOnCall map[int]struct {
+		result1 []*cluster.Configuration
+		result2 error
+	}
 	TermStub        func(uint64) (uint64, error)
 	termMutex       sync.RWMutex
 	termArgsForCall []struct {
@@ -691,6 +703,62 @@ func (fake *FakeStorage) SnapshotReturnsOnCall(i int, result1 raftpb.Snapshot, r
 	}{result1, result2}
 }
 
+func (fake *FakeStorage) Syncables() ([]*cluster.Configuration, error) {
+	fake.syncablesMutex.Lock()
+	ret, specificReturn := fake.syncablesReturnsOnCall[len(fake.syncablesArgsForCall)]
+	fake.syncablesArgsForCall = append(fake.syncablesArgsForCall, struct {
+	}{})
+	stub := fake.SyncablesStub
+	fakeReturns := fake.syncablesReturns
+	fake.recordInvocation("Syncables", []interface{}{})
+	fake.syncablesMutex.Unlock()
+	if stub != nil {
+		return stub()
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeStorage) SyncablesCallCount() int {
+	fake.syncablesMutex.RLock()
+	defer fake.syncablesMutex.RUnlock()
+	return len(fake.syncablesArgsForCall)
+}
+
+func (fake *FakeStorage) SyncablesCalls(stub func() ([]*cluster.Configuration, error)) {
+	fake.syncablesMutex.Lock()
+	defer fake.syncablesMutex.Unlock()
+	fake.SyncablesStub = stub
+}
+
+func (fake *FakeStorage) SyncablesReturns(result1 []*cluster.Configuration, result2 error) {
+	fake.syncablesMutex.Lock()
+	defer fake.syncablesMutex.Unlock()
+	fake.SyncablesStub = nil
+	fake.syncablesReturns = struct {
+		result1 []*cluster.Configuration
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeStorage) SyncablesReturnsOnCall(i int, result1 []*cluster.Configuration, result2 error) {
+	fake.syncablesMutex.Lock()
+	defer fake.syncablesMutex.Unlock()
+	fake.SyncablesStub = nil
+	if fake.syncablesReturnsOnCall == nil {
+		fake.syncablesReturnsOnCall = make(map[int]struct {
+			result1 []*cluster.Configuration
+			result2 error
+		})
+	}
+	fake.syncablesReturnsOnCall[i] = struct {
+		result1 []*cluster.Configuration
+		result2 error
+	}{result1, result2}
+}
+
 func (fake *FakeStorage) Term(arg1 uint64) (uint64, error) {
 	fake.termMutex.Lock()
 	ret, specificReturn := fake.termReturnsOnCall[len(fake.termArgsForCall)]
@@ -840,6 +908,8 @@ func (fake *FakeStorage) Invocations() map[string][][]interface{} {
 	defer fake.saveMutex.RUnlock()
 	fake.snapshotMutex.RLock()
 	defer fake.snapshotMutex.RUnlock()
+	fake.syncablesMutex.RLock()
+	defer fake.syncablesMutex.RUnlock()
 	fake.termMutex.RLock()
 	defer fake.termMutex.RUnlock()
 	fake.typeMutex.RLock()

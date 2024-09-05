@@ -10,6 +10,7 @@ import (
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/db"
 	"github.com/philborlin/committed/internal/cluster/db/dbfakes"
+	parser "github.com/philborlin/committed/internal/cluster/db/parser"
 	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/raft/v3/raftpb"
 )
@@ -200,8 +201,9 @@ func createDBWithStorage(s db.Storage) *DB {
 	url := fmt.Sprintf("http://127.0.0.1:%d", 12379)
 	peers := make(db.Peers)
 	peers[id] = url
+	parser := parser.New()
 
-	db := db.New(id, peers, s)
+	db := db.New(id, peers, s, parser)
 	return &DB{db, s, peers, id}
 }
 

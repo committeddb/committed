@@ -22,10 +22,10 @@ type DB struct {
 	storage     Storage
 	ctx         context.Context
 	cancelSyncs context.CancelFunc
-	parser      *Parser
+	parser      Parser
 }
 
-func New(id uint64, peers Peers, s Storage) *DB {
+func New(id uint64, peers Peers, s Storage, p Parser) *DB {
 	proposeC := make(chan []byte)
 	confChangeC := make(chan raftpb.ConfChange)
 
@@ -48,7 +48,7 @@ func New(id uint64, peers Peers, s Storage) *DB {
 		storage:     s,
 		ctx:         ctx,
 		cancelSyncs: cancelSyncs,
-		parser:      NewParser(),
+		parser:      p,
 	}
 }
 

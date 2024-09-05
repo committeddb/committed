@@ -65,7 +65,7 @@ func (i index) terms(terms ...uint64) []pb.Entry {
 type StorageWrapper struct {
 	*wal.Storage
 	path   string
-	parser wal.Parser
+	parser db.Parser
 }
 
 func (s *StorageWrapper) CloseAndReopen() (*StorageWrapper, error) {
@@ -159,7 +159,7 @@ func NewStorage(t *testing.T, ents []pb.Entry) *StorageWrapper {
 	return NewStorageWithParser(t, ents, nil)
 }
 
-func NewStorageWithParser(t *testing.T, ents []pb.Entry, p wal.Parser) *StorageWrapper {
+func NewStorageWithParser(t *testing.T, ents []pb.Entry, p db.Parser) *StorageWrapper {
 	dir, err := os.MkdirTemp("", "wal-storage-test-")
 	if err != nil {
 		t.Fatal(err)
@@ -184,7 +184,7 @@ func (s *StorageWrapper) CloseAndReopenStorage(t *testing.T) *StorageWrapper {
 	return OpenStorage(t, s.path, s.parser)
 }
 
-func OpenStorage(t *testing.T, dir string, p wal.Parser) *StorageWrapper {
+func OpenStorage(t *testing.T, dir string, p db.Parser) *StorageWrapper {
 	wal, err := wal.Open(dir, p)
 	if err != nil {
 		t.Fatal(err)

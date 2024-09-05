@@ -14,4 +14,5 @@ type Storage interface {
 	Type(id string) (*cluster.Type, error)
 	Reader(id string) ProposalReader
 	Database(id string) (cluster.Database, error)
+	Syncables() ([]*cluster.Configuration, error)
 }
