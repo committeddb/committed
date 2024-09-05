@@ -5,6 +5,7 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// TODO Do we need name? It should be in the data and parseable
 type Configuration struct {
 	ID       string
 	Name     string

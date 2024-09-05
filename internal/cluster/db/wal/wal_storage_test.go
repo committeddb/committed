@@ -3,6 +3,7 @@ package wal_test
 import (
 	"bytes"
 	"encoding/gob"
+	"encoding/json"
 	"math"
 	"os"
 	"testing"
@@ -32,6 +33,19 @@ var defaultSnap pb.Snapshot = pb.Snapshot{
 	},
 }
 
+type SyncableConfig struct {
+	Details *Details `json:"syncable"`
+}
+
+type DatabaseConfig struct {
+	Details *Details `json:"database"`
+}
+
+type Details struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
 // index is a helper type for generating slices of pb.Entry. The value of index
 // is the first entry index in the generated slices.
 type index uint64
@@ -50,7 +64,8 @@ func (i index) terms(terms ...uint64) []pb.Entry {
 
 type StorageWrapper struct {
 	*wal.Storage
-	path string
+	path   string
+	parser wal.Parser
 }
 
 func (s *StorageWrapper) CloseAndReopen() (*StorageWrapper, error) {
@@ -59,12 +74,12 @@ func (s *StorageWrapper) CloseAndReopen() (*StorageWrapper, error) {
 		return nil, err
 	}
 
-	wal, err := wal.Open(s.path)
+	wal, err := wal.Open(s.path, s.parser)
 	if err != nil {
 		return nil, err
 	}
 
-	return &StorageWrapper{wal, s.path}, nil
+	return &StorageWrapper{wal, s.path, s.parser}, nil
 }
 
 func (s *StorageWrapper) Cleanup() error {
@@ -141,13 +156,17 @@ func (s *StorageWrapper) states(t *testing.T) []wal.State {
 }
 
 func NewStorage(t *testing.T, ents []pb.Entry) *StorageWrapper {
+	return NewStorageWithParser(t, ents, nil)
+}
+
+func NewStorageWithParser(t *testing.T, ents []pb.Entry, p wal.Parser) *StorageWrapper {
 	dir, err := os.MkdirTemp("", "wal-storage-test-")
 	if err != nil {
 		t.Fatal(err)
 		return nil
 	}
 
-	s := OpenStorage(t, dir)
+	s := OpenStorage(t, dir, p)
 	if ents != nil {
 		s.Save(defaultHardState, ents, defaultSnap)
 	}
@@ -162,17 +181,17 @@ func (s *StorageWrapper) CloseAndReopenStorage(t *testing.T) *StorageWrapper {
 		return nil
 	}
 
-	return OpenStorage(t, s.path)
+	return OpenStorage(t, s.path, s.parser)
 }
 
-func OpenStorage(t *testing.T, dir string) *StorageWrapper {
-	wal, err := wal.Open(dir)
+func OpenStorage(t *testing.T, dir string, p wal.Parser) *StorageWrapper {
+	wal, err := wal.Open(dir, p)
 	if err != nil {
 		t.Fatal(err)
 		return nil
 	}
 
-	s := &StorageWrapper{wal, dir}
+	s := &StorageWrapper{wal, dir, p}
 
 	return s
 }
@@ -500,90 +519,9 @@ func TestStartupWithExistingLogs(t *testing.T) {
 	}
 }
 
-func TestType(t *testing.T) {
-	tests := []struct {
-		types []*cluster.Type
-	}{
-		{[]*cluster.Type{{ID: "foo", Name: "foo"}}},
-		{[]*cluster.Type{{ID: "foo", Name: "foo"}, {ID: "bar", Name: "bar"}}},
-	}
-
-	for _, tt := range tests {
-		t.Run("", func(t *testing.T) {
-			s := NewStorage(t, index(3).terms(3, 4, 5))
-			defer s.Cleanup()
-
-			currentIndex := uint64(6)
-			currentTerm := uint64(6)
-			insertTypes(t, s, tt.types, currentIndex, currentTerm)
-
-			for _, expected := range tt.types {
-				got, err := s.Type(expected.ID)
-				require.Equal(t, nil, err)
-				require.Equal(t, expected, got)
-			}
-
-			s = s.CloseAndReopenStorage(t)
-			defer s.Cleanup()
-
-			for _, expected := range tt.types {
-				got, err := s.Type(expected.ID)
-				require.Equal(t, nil, err)
-				require.Equal(t, expected, got)
-			}
-		})
-	}
-}
-
-func TestTypeDelete(t *testing.T) {
-	tests := []struct {
-		types []*cluster.Type
-	}{
-		{[]*cluster.Type{{ID: "foo", Name: "foo"}}},
-		{[]*cluster.Type{{ID: "foo", Name: "foo"}, {ID: "bar", Name: "bar"}}},
-	}
-
-	for _, tt := range tests {
-		t.Run("", func(t *testing.T) {
-			s := NewStorage(t, index(3).terms(3, 4, 5))
-			defer s.Cleanup()
-
-			term := uint64(6)
-			index := insertTypes(t, s, tt.types, term, uint64(6))
-
-			for _, expected := range tt.types {
-				got, err := s.Type(expected.ID)
-				require.Equal(t, nil, err)
-				require.Equal(t, expected, got)
-			}
-
-			for i, tipe := range tt.types {
-				e := cluster.NewDeleteTypeEntity(tipe.ID)
-				saveEntity(t, e, s, term, index+uint64(i))
-
-				_, err := s.Type(tipe.ID)
-				require.Equal(t, wal.ErrTypeMissing, err)
-
-				// Make sure other types are still available
-				for j := i + 1; j < len(tt.types); j++ {
-					got, err := s.Type(tt.types[j].ID)
-					require.Equal(t, nil, err)
-					require.Equal(t, tt.types[j], got)
-				}
-			}
-		})
-	}
-}
-
-func insertTypes(t *testing.T, s db.Storage, ts []*cluster.Type, term, index uint64) uint64 {
-	for i, tipe := range ts {
-		e, err := cluster.NewUpsertTypeEntity(tipe)
-		require.Equal(t, nil, err)
-
-		saveEntity(t, e, s, term, index+uint64(i))
-	}
-
-	return index + uint64(len(ts))
+func saveEntity(t *testing.T, e *cluster.Entity, s db.Storage, term, index uint64) {
+	p := &cluster.Proposal{Entities: []*cluster.Entity{e}}
+	saveProposal(t, p, s, term, index)
 }
 
 func saveProposal(t *testing.T, p *cluster.Proposal, s db.Storage, term, index uint64) {
@@ -596,15 +534,12 @@ func saveProposal(t *testing.T, p *cluster.Proposal, s db.Storage, term, index u
 	require.Equal(t, nil, err)
 }
 
-func saveEntity(t *testing.T, e *cluster.Entity, s db.Storage, term, index uint64) {
-	p := &cluster.Proposal{Entities: []*cluster.Entity{e}}
-	saveProposal(t, p, s, term, index)
+func createDatabaseConfiguration(name string) *cluster.Configuration {
+	d := &DatabaseConfig{Details: &Details{Name: name, Type: name}}
+	return createConfiguration(name, d)
 }
 
-func TestTypeError(t *testing.T) {
-	s := NewStorage(t, index(3).terms(3, 4, 5))
-	defer s.Cleanup()
-
-	_, err := s.Type("none")
-	require.Equal(t, wal.ErrTypeMissing, err)
+func createConfiguration(name string, v any) *cluster.Configuration {
+	bs, _ := json.Marshal(v)
+	return &cluster.Configuration{ID: name, Name: name, MimeType: "application/json", Data: bs}
 }

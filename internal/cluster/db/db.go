@@ -22,6 +22,7 @@ type DB struct {
 	storage     Storage
 	ctx         context.Context
 	cancelSyncs context.CancelFunc
+	parser      *Parser
 }
 
 func New(id uint64, peers Peers, s Storage) *DB {
@@ -47,6 +48,7 @@ func New(id uint64, peers Peers, s Storage) *DB {
 		storage:     s,
 		ctx:         ctx,
 		cancelSyncs: cancelSyncs,
+		parser:      NewParser(),
 	}
 }
 

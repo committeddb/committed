@@ -9,20 +9,36 @@ import (
 	"github.com/spf13/viper"
 )
 
-var syncableParsers = map[string]cluster.SyncableParser{}
+type Parser struct {
+	databaseParsers map[string]cluster.DatabaseParser
+	syncableParsers map[string]cluster.SyncableParser
+}
 
-var databaseParsers = map[string]cluster.DatabaseParser{}
+func NewParser() *Parser {
+	return &Parser{
+		databaseParsers: make(map[string]cluster.DatabaseParser),
+		syncableParsers: make(map[string]cluster.SyncableParser),
+	}
+}
+
+func (p *Parser) AddSyncableParser(name string, sp cluster.SyncableParser) {
+	p.syncableParsers[name] = sp
+}
+
+func (p *Parser) AddDatabaseParser(name string, dp cluster.DatabaseParser) {
+	p.databaseParsers[name] = dp
+}
 
 func (db *DB) AddSyncableParser(name string, p cluster.SyncableParser) {
-	syncableParsers[name] = p
+	db.parser.syncableParsers[name] = p
 }
 
 func (db *DB) AddDatabaseParser(name string, p cluster.DatabaseParser) {
-	databaseParsers[name] = p
+	db.parser.databaseParsers[name] = p
 }
 
 func (db *DB) ProposeSyncable(c *cluster.Configuration) error {
-	_, _, err := parseSyncable(c.MimeType, bytes.NewReader(c.Data), db.storage)
+	_, _, err := db.ParseSyncable(c.MimeType, c.Data, db.storage)
 	if err != nil {
 		return err
 	}
@@ -38,7 +54,7 @@ func (db *DB) ProposeSyncable(c *cluster.Configuration) error {
 	return nil
 }
 func (db *DB) ProposeDatabase(c *cluster.Configuration) error {
-	_, _, err := parseDatabase(c.MimeType, bytes.NewReader(c.Data))
+	_, _, err := db.ParseDatabase(c.MimeType, c.Data)
 	if err != nil {
 		return err
 	}
@@ -53,15 +69,19 @@ func (db *DB) ProposeDatabase(c *cluster.Configuration) error {
 	return nil
 }
 
-func parseSyncable(mimeType string, reader io.Reader, s cluster.DatabaseStorage) (string, cluster.Syncable, error) {
-	v, err := parseBytes(mimeType, reader)
+func (db *DB) ParseSyncable(mimeType string, data []byte, s cluster.DatabaseStorage) (string, cluster.Syncable, error) {
+	return db.parser.ParseSyncable(mimeType, data, s)
+}
+
+func (p *Parser) ParseSyncable(mimeType string, data []byte, s cluster.DatabaseStorage) (string, cluster.Syncable, error) {
+	v, err := parseBytes(mimeType, bytes.NewReader(data))
 	if err != nil {
 		return "", nil, err
 	}
 
 	name := v.GetString("syncable.name")
 	tipe := v.GetString("syncable.type")
-	parser, ok := syncableParsers[tipe]
+	parser, ok := p.syncableParsers[tipe]
 
 	if !ok {
 		return "", nil, fmt.Errorf("cannot parse syncable of type: %s", tipe)
@@ -74,15 +94,19 @@ func parseSyncable(mimeType string, reader io.Reader, s cluster.DatabaseStorage)
 	return name, syncable, nil
 }
 
-func parseDatabase(mimeType string, reader io.Reader) (string, cluster.Database, error) {
-	v, err := parseBytes(mimeType, reader)
+func (db *DB) ParseDatabase(mimeType string, data []byte) (string, cluster.Database, error) {
+	return db.parser.ParseDatabase(mimeType, data)
+}
+
+func (p *Parser) ParseDatabase(mimeType string, data []byte) (string, cluster.Database, error) {
+	v, err := parseBytes(mimeType, bytes.NewReader(data))
 	if err != nil {
 		return "", nil, err
 	}
 
 	name := v.GetString("database.name")
 	dbType := v.GetString("database.type")
-	parser, ok := databaseParsers[dbType]
+	parser, ok := p.databaseParsers[dbType]
 
 	if !ok {
 		return "", nil, fmt.Errorf("cannot parse database of type: %s", dbType)

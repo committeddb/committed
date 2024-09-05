@@ -18,9 +18,11 @@ import (
 
 var ErrOutOfBounds = errors.New("requested index is greater than last index")
 var ErrTypeMissing = errors.New("type not found")
+var ErrDatabaseMissing = errors.New("database not found")
 var ErrBucketMissing = errors.New("key value bucket missing")
 
 var typeBucket = []byte("types")
+var databaseBucket = []byte("databases")
 
 type StateType int
 
@@ -43,11 +45,13 @@ type Storage struct {
 	firstIndex  uint64
 	lastIndex   uint64
 	stateIndex  uint64
+	databases   map[string]cluster.Database
+	parser      Parser
 }
 
 // Returns a *WalStorage, whether this storage existed already, or an error
 // func Open() (*WalStorage, bool, error) {
-func Open(dir string) (*Storage, error) {
+func Open(dir string, p Parser) (*Storage, error) {
 	entryLogDir := filepath.Join(dir, "entry-log")
 	stateLogDir := filepath.Join(dir, "state-log")
 	typeStorageDir := filepath.Join(dir, "type-storage")
@@ -82,14 +86,18 @@ func Open(dir string) (*Storage, error) {
 	}
 
 	typeStorage.Update(func(tx *bolt.Tx) error {
-		_, err := tx.CreateBucketIfNotExists(typeBucket)
-		if err != nil {
-			return fmt.Errorf("create bucket: %s", err)
+		for _, bucket := range [][]byte{typeBucket, databaseBucket} {
+			_, err := tx.CreateBucketIfNotExists(bucket)
+			if err != nil {
+				return fmt.Errorf("create bucket: %s", err)
+			}
 		}
+
 		return nil
 	})
 
-	ws := &Storage{EntryLog: entryLog, StateLog: stateLog, typeStorage: typeStorage}
+	dbs := make(map[string]cluster.Database)
+	ws := &Storage{EntryLog: entryLog, StateLog: stateLog, typeStorage: typeStorage, databases: dbs, parser: p}
 
 	fi, err := entryLog.FirstIndex()
 	if err != nil {
@@ -131,23 +139,36 @@ func Open(dir string) (*Storage, error) {
 	ws.hardState = *st
 	ws.snapshot = *snap
 
+	err = ws.loadDatabases()
+	if err != nil {
+		return nil, err
+	}
+
 	return ws, nil
 }
 
 func (s *Storage) Close() error {
-	err1 := s.EntryLog.Close()
-	err2 := s.StateLog.Close()
-	err3 := s.typeStorage.Close()
+	var finalErr error
 
-	if err1 != nil {
-		return err1
+	finalErr = s.EntryLog.Close()
+
+	err := s.StateLog.Close()
+	if err != nil && finalErr == nil {
+		finalErr = err
+	}
+	err = s.typeStorage.Close()
+	if err != nil && finalErr == nil {
+		finalErr = err
 	}
 
-	if err2 != nil {
-		return err2
+	for _, db := range s.databases {
+		err = db.Close()
+		if err != nil && finalErr == nil {
+			finalErr = err
+		}
 	}
 
-	return err3
+	return finalErr
 }
 
 func (s *Storage) getLastStates(li uint64) (*pb.HardState, *pb.Snapshot, error) {
@@ -226,49 +247,24 @@ func (s *Storage) Save(st pb.HardState, ents []pb.Entry, snap pb.Snapshot) error
 			}
 
 			for _, entity := range p.Entities {
-				if cluster.IsType(entity.ID) {
-					// fmt.Printf("[wal] saving type...\n")
-					if entity.IsDelete() {
-						s.deleteType(entity.Key)
-					} else {
-						t := &cluster.Type{}
-						err := t.Unmarshal(entity.Data)
-						if err != nil {
-							continue
-						}
-						s.saveType(t)
-						// fmt.Printf("[wal] ... type saved\n")
+				switch {
+				case cluster.IsType(entity.ID):
+					err := s.handleType(entity)
+					if err != nil {
+						return err
 					}
+				case cluster.IsDatabase(entity.ID):
+					err := s.handleDatabase(entity)
+					if err != nil {
+						return err
+					}
+				case cluster.IsSyncable(entity.ID):
 				}
 			}
 		}
 	}
 
 	return s.appendState(st, snap)
-}
-
-func (s *Storage) saveType(t *cluster.Type) error {
-	return s.typeStorage.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(typeBucket)
-		if b == nil {
-			return ErrBucketMissing
-		}
-		bs, err := t.Marshal()
-		if err != nil {
-			return err
-		}
-		return b.Put([]byte(t.ID), bs)
-	})
-}
-
-func (s *Storage) deleteType(id []byte) error {
-	return s.typeStorage.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(typeBucket)
-		if b == nil {
-			return ErrBucketMissing
-		}
-		return b.Delete(id)
-	})
 }
 
 func (s *Storage) appendEntries(ents []pb.Entry) error {
@@ -488,24 +484,4 @@ func (s *Storage) Compact(compactIndex uint64) error {
 	s.firstIndex = compactIndex
 
 	return nil
-}
-
-func (s *Storage) Type(id string) (*cluster.Type, error) {
-	t := &cluster.Type{}
-
-	return t, s.typeStorage.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket(typeBucket)
-		if b == nil {
-			return ErrBucketMissing
-		}
-		bs := b.Get([]byte(id))
-		if bs == nil {
-			return ErrTypeMissing
-		}
-		return t.Unmarshal(bs)
-	})
-}
-
-func (s *Storage) Database(id string) (cluster.Database, error) {
-	return nil, nil
 }
