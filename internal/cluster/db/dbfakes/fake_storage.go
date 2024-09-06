@@ -86,10 +86,10 @@ type FakeStorage struct {
 		result1 uint64
 		result2 error
 	}
-	ReaderStub        func(string) db.ProposalReader
+	ReaderStub        func(uint64) db.ProposalReader
 	readerMutex       sync.RWMutex
 	readerArgsForCall []struct {
-		arg1 string
+		arg1 uint64
 	}
 	readerReturns struct {
 		result1 db.ProposalReader
@@ -518,11 +518,11 @@ func (fake *FakeStorage) LastIndexReturnsOnCall(i int, result1 uint64, result2 e
 	}{result1, result2}
 }
 
-func (fake *FakeStorage) Reader(arg1 string) db.ProposalReader {
+func (fake *FakeStorage) Reader(arg1 uint64) db.ProposalReader {
 	fake.readerMutex.Lock()
 	ret, specificReturn := fake.readerReturnsOnCall[len(fake.readerArgsForCall)]
 	fake.readerArgsForCall = append(fake.readerArgsForCall, struct {
-		arg1 string
+		arg1 uint64
 	}{arg1})
 	stub := fake.ReaderStub
 	fakeReturns := fake.readerReturns
@@ -543,13 +543,13 @@ func (fake *FakeStorage) ReaderCallCount() int {
 	return len(fake.readerArgsForCall)
 }
 
-func (fake *FakeStorage) ReaderCalls(stub func(string) db.ProposalReader) {
+func (fake *FakeStorage) ReaderCalls(stub func(uint64) db.ProposalReader) {
 	fake.readerMutex.Lock()
 	defer fake.readerMutex.Unlock()
 	fake.ReaderStub = stub
 }
 
-func (fake *FakeStorage) ReaderArgsForCall(i int) string {
+func (fake *FakeStorage) ReaderArgsForCall(i int) uint64 {
 	fake.readerMutex.RLock()
 	defer fake.readerMutex.RUnlock()
 	argsForCall := fake.readerArgsForCall[i]

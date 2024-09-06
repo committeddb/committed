@@ -11,47 +11,45 @@ import (
 
 type Reader struct {
 	sync.Mutex
-	lastReadIndex uint64
-	s             *Storage
+	index uint64
+	s     *Storage
 }
 
-// How to deal with tombstones?
-func (r *Reader) Read() (*cluster.Proposal, error) {
+func (r *Reader) Read() (uint64, *cluster.Proposal, error) {
 	r.Lock()
 	defer r.Unlock()
 
 	for {
-		nextReadIndex := r.lastReadIndex + 1
+		readIndex := r.index + 1
 
-		if nextReadIndex > r.s.lastIndex {
-			return nil, io.EOF
+		if readIndex > r.s.lastIndex {
+			return 0, nil, io.EOF
 		}
 
-		bs, err := r.s.EntryLog.Read(nextReadIndex)
+		bs, err := r.s.EntryLog.Read(readIndex)
 		if err != nil {
-			return nil, err
+			return 0, nil, err
 		}
 
 		ent := &pb.Entry{}
 		err = ent.Unmarshal(bs)
 		if err != nil {
-			return nil, err
+			return 0, nil, err
 		}
 
-		r.lastReadIndex = nextReadIndex
+		r.index = readIndex
 
 		if ent.Type == pb.EntryNormal {
 			p := &cluster.Proposal{}
 			p.Unmarshal(ent.Data)
 
 			if len(p.Entities) > 0 {
-				return p, nil
+				return readIndex, p, nil
 			}
 		}
 	}
 }
 
-// TODO Look up the lastReadIndex by id
-func (s *Storage) Reader(id string) db.ProposalReader {
-	return &Reader{lastReadIndex: 0, s: s}
+func (s *Storage) Reader(index uint64) db.ProposalReader {
+	return &Reader{index: index, s: s}
 }

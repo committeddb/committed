@@ -280,16 +280,16 @@ type TestReader struct {
 	proposals []*cluster.Proposal
 }
 
-func (tr *TestReader) Read() (*cluster.Proposal, error) {
+func (tr *TestReader) Read() (uint64, *cluster.Proposal, error) {
 	if tr.nextIndex >= len(tr.proposals) {
-		return nil, io.EOF
+		return 0, nil, io.EOF
 	}
 
 	p := tr.proposals[tr.nextIndex]
 	tr.nextIndex++
 	if p == nil {
-		return nil, io.EOF
+		return 0, nil, io.EOF
 	}
 
-	return p, nil
+	return uint64(tr.nextIndex - 1), p, nil
 }

@@ -24,9 +24,9 @@ to quickly create a Cobra application.`,
 			log.Fatalf("cannot open storage: %v", err)
 		}
 
-		r := s.Reader("default")
+		r := s.Reader(0)
 		for {
-			p, err := r.Read()
+			_, p, err := r.Read()
 			if err == io.EOF {
 				break
 			} else if err != nil {

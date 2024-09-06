@@ -110,7 +110,8 @@ func (db *DB) Close() error {
 // The caller should run this on a separate go routine - or do we want to do this so close() can cancel all contexts?
 func (db *DB) Sync(ctx context.Context, id string, s cluster.Syncable) error {
 	go func() {
-		r := db.storage.Reader(id)
+		// TODO Get the index for the reader id from storage
+		r := db.storage.Reader(0)
 
 		for {
 			select {
@@ -119,7 +120,7 @@ func (db *DB) Sync(ctx context.Context, id string, s cluster.Syncable) error {
 			default:
 			}
 
-			p, err := r.Read()
+			_, p, err := r.Read()
 			if err == io.EOF {
 				// TODO Figure out what to do - maybe do an exponential backoff to a certain point - maybe nothing?
 				continue
@@ -133,6 +134,9 @@ func (db *DB) Sync(ctx context.Context, id string, s cluster.Syncable) error {
 				// TODO Handle error
 				return
 			}
+
+			// TODO Add a proposal to store what index we just read
+			// We need to use raft when updating ids so boltdbs on all nodes have access to the ids
 		}
 	}()
 

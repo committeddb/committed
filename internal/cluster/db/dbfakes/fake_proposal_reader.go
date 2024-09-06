@@ -9,23 +9,25 @@ import (
 )
 
 type FakeProposalReader struct {
-	ReadStub        func() (*cluster.Proposal, error)
+	ReadStub        func() (uint64, *cluster.Proposal, error)
 	readMutex       sync.RWMutex
 	readArgsForCall []struct {
 	}
 	readReturns struct {
-		result1 *cluster.Proposal
-		result2 error
+		result1 uint64
+		result2 *cluster.Proposal
+		result3 error
 	}
 	readReturnsOnCall map[int]struct {
-		result1 *cluster.Proposal
-		result2 error
+		result1 uint64
+		result2 *cluster.Proposal
+		result3 error
 	}
 	invocations      map[string][][]interface{}
 	invocationsMutex sync.RWMutex
 }
 
-func (fake *FakeProposalReader) Read() (*cluster.Proposal, error) {
+func (fake *FakeProposalReader) Read() (uint64, *cluster.Proposal, error) {
 	fake.readMutex.Lock()
 	ret, specificReturn := fake.readReturnsOnCall[len(fake.readArgsForCall)]
 	fake.readArgsForCall = append(fake.readArgsForCall, struct {
@@ -38,9 +40,9 @@ func (fake *FakeProposalReader) Read() (*cluster.Proposal, error) {
 		return stub()
 	}
 	if specificReturn {
-		return ret.result1, ret.result2
+		return ret.result1, ret.result2, ret.result3
 	}
-	return fakeReturns.result1, fakeReturns.result2
+	return fakeReturns.result1, fakeReturns.result2, fakeReturns.result3
 }
 
 func (fake *FakeProposalReader) ReadCallCount() int {
@@ -49,36 +51,39 @@ func (fake *FakeProposalReader) ReadCallCount() int {
 	return len(fake.readArgsForCall)
 }
 
-func (fake *FakeProposalReader) ReadCalls(stub func() (*cluster.Proposal, error)) {
+func (fake *FakeProposalReader) ReadCalls(stub func() (uint64, *cluster.Proposal, error)) {
 	fake.readMutex.Lock()
 	defer fake.readMutex.Unlock()
 	fake.ReadStub = stub
 }
 
-func (fake *FakeProposalReader) ReadReturns(result1 *cluster.Proposal, result2 error) {
+func (fake *FakeProposalReader) ReadReturns(result1 uint64, result2 *cluster.Proposal, result3 error) {
 	fake.readMutex.Lock()
 	defer fake.readMutex.Unlock()
 	fake.ReadStub = nil
 	fake.readReturns = struct {
-		result1 *cluster.Proposal
-		result2 error
-	}{result1, result2}
+		result1 uint64
+		result2 *cluster.Proposal
+		result3 error
+	}{result1, result2, result3}
 }
 
-func (fake *FakeProposalReader) ReadReturnsOnCall(i int, result1 *cluster.Proposal, result2 error) {
+func (fake *FakeProposalReader) ReadReturnsOnCall(i int, result1 uint64, result2 *cluster.Proposal, result3 error) {
 	fake.readMutex.Lock()
 	defer fake.readMutex.Unlock()
 	fake.ReadStub = nil
 	if fake.readReturnsOnCall == nil {
 		fake.readReturnsOnCall = make(map[int]struct {
-			result1 *cluster.Proposal
-			result2 error
+			result1 uint64
+			result2 *cluster.Proposal
+			result3 error
 		})
 	}
 	fake.readReturnsOnCall[i] = struct {
-		result1 *cluster.Proposal
-		result2 error
-	}{result1, result2}
+		result1 uint64
+		result2 *cluster.Proposal
+		result3 error
+	}{result1, result2, result3}
 }
 
 func (fake *FakeProposalReader) Invocations() map[string][][]interface{} {
