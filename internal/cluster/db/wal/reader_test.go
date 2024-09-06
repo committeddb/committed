@@ -11,6 +11,7 @@ import (
 )
 
 // TODO Test that we skip malformed Proposals (or pb.Entry structs that aren't proposals)
+// TODO Test that we skip system Proposals (types, configurations, read indexes, etc.)
 
 func TestReader(t *testing.T) {
 	tests := map[string]struct {
