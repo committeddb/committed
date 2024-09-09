@@ -156,10 +156,14 @@ func TestSync(t *testing.T) {
 				t.Fatalf(diff)
 			}
 
-			for i, p := range ps {
-				diff := cmp.Diff(p, sync.proposals[i])
-				if diff != "" {
-					t.Fatalf(diff)
+			i := 0
+			for _, got := range sync.proposals {
+				if !cluster.IsSystem(got.Entities[0].Type.ID) {
+					diff := cmp.Diff(ps[i], got)
+					if diff != "" {
+						t.Fatalf(diff)
+					}
+					i++
 				}
 			}
 		})

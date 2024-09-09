@@ -83,3 +83,16 @@ func (p *Proposal) Unmarshal(bs []byte) error {
 
 	return nil
 }
+
+func IsSystem(id string) bool {
+	switch id {
+	case syncableType.ID:
+		return true
+	case databaseType.ID:
+		return true
+	case typeType.ID:
+		return true
+	}
+
+	return false
+}
