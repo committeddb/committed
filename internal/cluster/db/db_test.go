@@ -3,6 +3,7 @@ package db_test
 import (
 	"context"
 	"fmt"
+	"github.com/stretchr/testify/require"
 	"io"
 	"testing"
 
@@ -166,6 +167,11 @@ func TestSync(t *testing.T) {
 					i++
 				}
 			}
+
+			_, ents, _ := s.SaveArgsForCall(1)
+			ps = db.entsToProposals(ents)
+			require.Equal(t, 1, len(ps))
+			require.True(t, cluster.IsSyncableIndex(ps[0].Entities[0].Type.ID))
 		})
 	}
 }
@@ -234,6 +240,12 @@ func (db *DB) ents() ([]*cluster.Proposal, error) {
 		return nil, err
 	}
 
+	ps := db.entsToProposals(ents)
+
+	return ps, nil
+}
+
+func (db *DB) entsToProposals(ents []raftpb.Entry) []*cluster.Proposal {
 	var ps []*cluster.Proposal
 	for _, e := range ents {
 		if e.Type == raftpb.EntryNormal && e.Data != nil {
@@ -243,7 +255,7 @@ func (db *DB) ents() ([]*cluster.Proposal, error) {
 		}
 	}
 
-	return ps, nil
+	return ps
 }
 
 type MemorySyncable struct {
