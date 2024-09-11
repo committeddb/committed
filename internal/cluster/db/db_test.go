@@ -3,9 +3,11 @@ package db_test
 import (
 	"context"
 	"fmt"
-	"github.com/stretchr/testify/require"
 	"io"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/philborlin/committed/internal/cluster"
@@ -145,20 +147,35 @@ func TestSync(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 
 			ps := createProposals(tc.inputs)
-			sync := NewSyncable(size, cancel)
+			syncable := NewSyncable(size, cancel)
 			r := &TestReader{proposals: ps}
 			s.ReaderReturns(r)
 
-			go db.Sync(ctx, id, sync)
-			<-sync.done
+			db.Sync(ctx, id, syncable)
+			<-syncable.done
 
-			diff := cmp.Diff(size, sync.count)
+			callCountDone := make(chan any)
+			go func() {
+				for {
+					if s.SaveCallCount() == len(tc.inputs) {
+						callCountDone <- ""
+					}
+				}
+			}()
+
+			select {
+			case <-callCountDone:
+			case <-time.After(3 * time.Second):
+				t.Fatal("timeout waiting for SaveCallCount to = ", len(tc.inputs))
+			}
+
+			diff := cmp.Diff(size, syncable.count)
 			if diff != "" {
 				t.Fatalf(diff)
 			}
 
 			i := 0
-			for _, got := range sync.proposals {
+			for _, got := range syncable.proposals {
 				if !cluster.IsSystem(got.Entities[0].Type.ID) {
 					diff := cmp.Diff(ps[i], got)
 					if diff != "" {
@@ -166,6 +183,13 @@ func TestSync(t *testing.T) {
 					}
 					i++
 				}
+			}
+
+			// Sync is done before proposals so proposals never get called. Need to sync in a way that lets proposals get done
+			for i := 0; i > s.SaveCallCount(); i++ {
+				_, ents, _ := s.SaveArgsForCall(i)
+				ps = db.entsToProposals(ents)
+				fmt.Printf("[%d]: %t", i, cluster.IsSyncableIndex(ps[0].Entities[0].Type.ID))
 			}
 
 			_, ents, _ := s.SaveArgsForCall(1)
