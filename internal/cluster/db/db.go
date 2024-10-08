@@ -110,12 +110,11 @@ func (db *DB) Close() error {
 // The caller should run this on a separate go routine - or do we want to do this so close() can cancel all contexts?
 func (db *DB) Sync(ctx context.Context, id string, s cluster.Syncable) error {
 	go func() {
-		// TODO Get the index for the reader id from storage
-		r := db.storage.Reader(0)
+		r := db.storage.Reader(id)
 
 		for {
 			select {
-			case <-db.ctx.Done():
+			case <-ctx.Done():
 				return
 			default:
 			}

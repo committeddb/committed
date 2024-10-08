@@ -3,18 +3,15 @@ package db_test
 import (
 	"context"
 	"fmt"
-	"io"
+	"reflect"
 	"testing"
-	"time"
-
-	"github.com/stretchr/testify/require"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/db"
 	"github.com/philborlin/committed/internal/cluster/db/dbfakes"
 	parser "github.com/philborlin/committed/internal/cluster/db/parser"
-	"go.etcd.io/etcd/raft/v3"
+	"github.com/stretchr/testify/require"
 	"go.etcd.io/etcd/raft/v3/raftpb"
 )
 
@@ -50,7 +47,7 @@ func TestDBPropose(t *testing.T) {
 			for i, p := range ps {
 				diff := cmp.Diff(p, ents[i])
 				if diff != "" {
-					t.Fatalf(diff)
+					t.Fatal(diff)
 				}
 			}
 		})
@@ -95,7 +92,7 @@ func TestProposeType(t *testing.T) {
 
 				diff := cmp.Diff(tc.types[i], tipe)
 				if diff != "" {
-					t.Fatalf(diff)
+					t.Fatal(diff)
 				}
 			}
 		})
@@ -118,7 +115,7 @@ func TestType(t *testing.T) {
 
 	diff := cmp.Diff(expected, got)
 	if diff != "" {
-		t.Fatalf(diff)
+		t.Fatal(diff)
 	}
 }
 
@@ -135,82 +132,155 @@ func TestSync(t *testing.T) {
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			s := &dbfakes.FakeStorage{}
+			s := NewMemoryStorage()
 			db := createDBWithStorage(s)
 			defer db.Close()
 
 			size := len(tc.inputs)
 
-			s.FirstIndexReturns(1, nil)
-			s.LastIndexReturns(uint64(size), nil)
-
 			ctx, cancel := context.WithCancel(context.Background())
 
 			ps := createProposals(tc.inputs)
+			for _, p := range ps {
+				require.Equal(t, nil, db.Propose(p))
+				<-db.CommitC
+			}
+
 			syncable := NewSyncable(size, cancel)
-			r := &TestReader{proposals: ps}
-			s.ReaderReturns(r)
+			_ = db.Sync(ctx, id, syncable)
+			for i := 0; i < len(tc.inputs); i++ {
+				<-db.CommitC
+			}
+			require.Equal(t, size, syncable.count)
 
-			db.Sync(ctx, id, syncable)
-			<-syncable.done
+			ps, err := db.ents()
+			require.Nil(t, err)
+			require.Equal(t, len(tc.inputs)*2, len(ps))
 
-			callCountDone := make(chan any)
-			go func() {
-				for {
-					if s.SaveCallCount() == len(tc.inputs) {
-						callCountDone <- ""
-					}
+			for i, p := range ps {
+				got := cluster.IsSyncableIndex(p.Entities[0].Type.ID)
+				expected := i >= len(tc.inputs)
+				require.Equal(t, expected, got)
+			}
+		})
+	}
+}
+
+func TestResumeSync(t *testing.T) {
+	tests := map[string]struct {
+		inputs [][]string
+	}{
+		"simple":  {inputs: [][]string{{"foo"}}},
+		"two":     {inputs: [][]string{{"foo", "bar"}}},
+		"two-one": {inputs: [][]string{{"foo", "bar"}, {"baz"}}},
+	}
+
+	id := "foo"
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			storage := NewMemoryStorage()
+			db := createDBWithStorage(storage)
+			defer db.Close()
+
+			size := len(tc.inputs)
+
+			ps := createProposalsAndProposeThem(t, db, tc.inputs)
+			ctx, cancel := context.WithCancel(context.Background())
+			syncable := NewSyncable(size, cancel)
+
+			_ = db.Sync(ctx, id, syncable)
+			for i := 0; i < len(tc.inputs); i++ {
+				<-db.CommitC
+			}
+
+			inputs2 := modifyInputs(tc.inputs)
+
+			ps2 := createProposalsAndProposeThem(t, db, inputs2)
+			ctx, cancel = context.WithCancel(context.Background())
+			syncable = NewSyncable(size, cancel)
+
+			storage.indexes[id] = getLastIndex(storage, ps)
+
+			_ = db.Sync(ctx, id, syncable)
+			for i := 0; i < len(inputs2); i++ {
+				<-db.CommitC
+			}
+
+			require.Equal(t, size, syncable.count)
+
+			for i, p := range storage.Proposals() {
+				fmt.Printf("Testing [%v] - %v", i, p)
+				if i < size {
+					require.False(t, cluster.IsSystem(p.Entities[0].Type.ID))
+					require.Equal(t, ps[i%size], p)
+				} else if i >= size*2 && i < size*3 {
+					require.False(t, cluster.IsSystem(p.Entities[0].Type.ID))
+					require.Equal(t, ps2[i%size], p)
+				} else {
+					require.True(t, cluster.IsSystem(p.Entities[0].Type.ID))
 				}
-			}()
-
-			select {
-			case <-callCountDone:
-			case <-time.After(3 * time.Second):
-				t.Fatal("timeout waiting for SaveCallCount to = ", len(tc.inputs))
 			}
 
-			diff := cmp.Diff(size, syncable.count)
-			if diff != "" {
-				t.Fatalf(diff)
+			for i, got := range syncable.proposals {
+				require.False(t, cluster.IsSystem(got.Entities[0].Type.ID))
+				require.Equal(t, ps2[i], got)
 			}
-
-			i := 0
-			for _, got := range syncable.proposals {
-				if !cluster.IsSystem(got.Entities[0].Type.ID) {
-					diff := cmp.Diff(ps[i], got)
-					if diff != "" {
-						t.Fatalf(diff)
-					}
-					i++
-				}
-			}
-
-			// Sync is done before proposals so proposals never get called. Need to sync in a way that lets proposals get done
-			for i := 0; i > s.SaveCallCount(); i++ {
-				_, ents, _ := s.SaveArgsForCall(i)
-				ps = db.entsToProposals(ents)
-				fmt.Printf("[%d]: %t", i, cluster.IsSyncableIndex(ps[0].Entities[0].Type.ID))
-			}
-
-			_, ents, _ := s.SaveArgsForCall(1)
-			ps = db.entsToProposals(ents)
-			require.Equal(t, 1, len(ps))
-			require.True(t, cluster.IsSyncableIndex(ps[0].Entities[0].Type.ID))
 		})
 	}
 }
 
 // TODO Test deletes - may have to test with a syncable because a delete doesn't have context except when read
 
+func getLastIndex(s db.Storage, ps []*cluster.Proposal) uint64 {
+	var i uint64
+	var got *cluster.Proposal
+	r := s.Reader("storage")
+
+	for _, expected := range ps {
+		for {
+			i, got, _ = r.Read()
+			if reflect.DeepEqual(expected, got) {
+				break
+			}
+		}
+	}
+
+	return i
+}
+
+func modifyInputs(is [][]string) [][]string {
+	var newInput [][]string
+	for _, outer := range is {
+		var newOuter []string
+		for _, inner := range outer {
+			newOuter = append(newOuter, inner+"'")
+		}
+		newInput = append(newInput, newOuter)
+	}
+
+	return newInput
+}
+
 func createType(name string) *cluster.Type {
 	return &cluster.Type{ID: name, Name: name}
+}
+
+func createProposalsAndProposeThem(t *testing.T, db *DB, inputs [][]string) []*cluster.Proposal {
+	ps := createProposals(inputs)
+	for _, p := range ps {
+		require.Equal(t, nil, db.Propose(p))
+		<-db.CommitC
+	}
+
+	return ps
 }
 
 func createProposals(input [][]string) []*cluster.Proposal {
 	var ps []*cluster.Proposal
 
 	for fi, entities := range input {
-		fmt.Printf("Entities: %v", entities)
+		fmt.Printf("Entities: %v\n", entities)
 		proposal := &cluster.Proposal{}
 		for si, entity := range entities {
 			logEntity := &cluster.Entity{
@@ -227,7 +297,7 @@ func createProposals(input [][]string) []*cluster.Proposal {
 }
 
 func createDB() *DB {
-	return createDBWithStorage(&MemoryStorage{raft.NewMemoryStorage()})
+	return createDBWithStorage(NewMemoryStorage())
 }
 
 func createDBWithStorage(s db.Storage) *DB {
@@ -283,15 +353,16 @@ func (db *DB) entsToProposals(ents []raftpb.Entry) []*cluster.Proposal {
 }
 
 type MemorySyncable struct {
-	proposals   []*cluster.Proposal
-	cancel      func()
-	count       int
-	done        chan any
+	proposals []*cluster.Proposal
+	cancel    func()
+	count     int
+	// done        chan any
 	doneAtCount int
 }
 
 func NewSyncable(doneAtCount int, cancel func()) *MemorySyncable {
-	return &MemorySyncable{doneAtCount: doneAtCount, cancel: cancel, done: make(chan any)}
+	return &MemorySyncable{doneAtCount: doneAtCount, cancel: cancel}
+	// return &MemorySyncable{doneAtCount: doneAtCount, cancel: cancel, done: make(chan any)}
 }
 
 func (ms *MemorySyncable) Init(ctx context.Context) error {
@@ -305,7 +376,7 @@ func (ms *MemorySyncable) Sync(ctx context.Context, p *cluster.Proposal) error {
 	ms.proposals = append(ms.proposals, p)
 	if ms.doneAtCount == ms.count {
 		ms.cancel()
-		ms.done <- ""
+		// ms.done <- ""
 	}
 
 	return nil
@@ -313,23 +384,4 @@ func (ms *MemorySyncable) Sync(ctx context.Context, p *cluster.Proposal) error {
 
 func (ms *MemorySyncable) Close() error {
 	return nil
-}
-
-type TestReader struct {
-	nextIndex int
-	proposals []*cluster.Proposal
-}
-
-func (tr *TestReader) Read() (uint64, *cluster.Proposal, error) {
-	if tr.nextIndex >= len(tr.proposals) {
-		return 0, nil, io.EOF
-	}
-
-	p := tr.proposals[tr.nextIndex]
-	tr.nextIndex++
-	if p == nil {
-		return 0, nil, io.EOF
-	}
-
-	return uint64(tr.nextIndex - 1), p, nil
 }

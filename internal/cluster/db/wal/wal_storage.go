@@ -25,7 +25,8 @@ var ErrBucketMissing = errors.New("key value bucket missing")
 var typeBucket = []byte("types")
 var databaseBucket = []byte("databases")
 var syncableBucket = []byte("syncables")
-var buckets = [][]byte{typeBucket, databaseBucket, syncableBucket}
+var syncableIndexBucket = []byte("syncableIndexes")
+var buckets = [][]byte{typeBucket, databaseBucket, syncableBucket, syncableIndexBucket}
 
 type StateType int
 
@@ -263,6 +264,11 @@ func (s *Storage) Save(st pb.HardState, ents []pb.Entry, snap pb.Snapshot) error
 					}
 				case cluster.IsSyncable(entity.ID):
 					err := s.handleSyncable(entity)
+					if err != nil {
+						return err
+					}
+				case cluster.IsSyncableIndex(entity.ID):
+					err := s.handleSyncableIndex(entity)
 					if err != nil {
 						return err
 					}

@@ -34,5 +34,6 @@ message LogConfiguration {
 }
 
 message LogSyncableIndex {
-    uint64 Index = 1;
+    string ID = 1;
+    uint64 Index = 2;
 }

@@ -47,11 +47,12 @@ var syncableIndexType = &Type{
 }
 
 type SyncableIndex struct {
+	ID    string
 	Index uint64
 }
 
 func (i *SyncableIndex) Marshal() ([]byte, error) {
-	li := &clusterpb.LogSyncableIndex{Index: i.Index}
+	li := &clusterpb.LogSyncableIndex{ID: i.ID, Index: i.Index}
 	return proto.Marshal(li)
 }
 
@@ -62,6 +63,7 @@ func (i *SyncableIndex) Unmarshal(bs []byte) error {
 		return err
 	}
 
+	i.ID = li.ID
 	i.Index = li.Index
 
 	return nil

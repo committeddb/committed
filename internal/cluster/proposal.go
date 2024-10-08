@@ -92,6 +92,8 @@ func IsSystem(id string) bool {
 		return true
 	case typeType.ID:
 		return true
+	case syncableIndexType.ID:
+		return true
 	}
 
 	return false

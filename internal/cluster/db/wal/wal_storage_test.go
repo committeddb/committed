@@ -519,9 +519,10 @@ func TestStartupWithExistingLogs(t *testing.T) {
 	}
 }
 
-func saveEntity(t *testing.T, e *cluster.Entity, s db.Storage, term, index uint64) {
+func saveEntity(t *testing.T, e *cluster.Entity, s db.Storage, term, index uint64) *cluster.Proposal {
 	p := &cluster.Proposal{Entities: []*cluster.Entity{e}}
 	saveProposal(t, p, s, term, index)
+	return p
 }
 
 func saveProposal(t *testing.T, p *cluster.Proposal, s db.Storage, term, index uint64) {
