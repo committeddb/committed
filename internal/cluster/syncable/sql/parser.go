@@ -1,0 +1,51 @@
+package sql
+
+import (
+	"io"
+
+	"github.com/spf13/viper"
+)
+
+func Parse(configType string, r io.Reader) *SQLConfig {
+	v := *viper.New()
+	v.SetConfigType(configType)
+	v.ReadConfig(r)
+
+	topic := v.GetString("sql.topic")
+	sqlDB := v.GetString("sql.db")
+	table := v.GetString("sql.table")
+	primaryKey := v.GetString("sql.primaryKey")
+
+	var mappings []SQLMapping
+	for _, item := range v.Get("sql.mappings").([]interface{}) {
+		m := item.(map[string]interface{})
+		mapping := SQLMapping{
+			JsonPath: m["jsonPath"].(string),
+			Column:   m["column"].(string),
+			SQLType:  m["type"].(string),
+		}
+		mappings = append(mappings, mapping)
+	}
+
+	var indexes []Index
+	for _, item := range v.Get("sql.indexes").([]interface{}) {
+		m := item.(map[string]interface{})
+		i := Index{
+			IndexName:   m["name"].(string),
+			ColumnNames: m["index"].(string),
+		}
+		indexes = append(indexes, i)
+	}
+
+	config := &SQLConfig{
+		SQLDB:      sqlDB,
+		Topic:      topic,
+		Table:      table,
+		Mappings:   mappings,
+		Indexes:    indexes,
+		PrimaryKey: primaryKey,
+	}
+	// return newSyncable(config, databases)
+
+	return config
+}
