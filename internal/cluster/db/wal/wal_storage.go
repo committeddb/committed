@@ -89,7 +89,7 @@ func Open(dir string, p db.Parser) (*Storage, error) {
 		return nil, err
 	}
 
-	typeStorage.Update(func(tx *bolt.Tx) error {
+	err = typeStorage.Update(func(tx *bolt.Tx) error {
 		for _, bucket := range buckets {
 			_, err := tx.CreateBucketIfNotExists(bucket)
 			if err != nil {
@@ -99,6 +99,9 @@ func Open(dir string, p db.Parser) (*Storage, error) {
 
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
 
 	dbs := make(map[string]cluster.Database)
 	ws := &Storage{EntryLog: entryLog, StateLog: stateLog, typeStorage: typeStorage, databases: dbs, parser: p}

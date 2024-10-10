@@ -344,7 +344,7 @@ func (db *DB) entsToProposals(ents []raftpb.Entry) []*cluster.Proposal {
 	for _, e := range ents {
 		if e.Type == raftpb.EntryNormal && e.Data != nil {
 			p := &cluster.Proposal{}
-			p.Unmarshal(e.Data)
+			_ = p.Unmarshal(e.Data)
 			ps = append(ps, p)
 		}
 	}

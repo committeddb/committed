@@ -82,9 +82,9 @@ func (s *StorageWrapper) CloseAndReopen() (*StorageWrapper, error) {
 	return &StorageWrapper{wal, s.path, s.parser}, nil
 }
 
-func (s *StorageWrapper) Cleanup() error {
+func (s *StorageWrapper) Cleanup() {
 	_ = s.Close()
-	return os.RemoveAll(s.path)
+	_ = os.RemoveAll(s.path)
 }
 
 func (s *StorageWrapper) ents(t *testing.T) []pb.Entry {
@@ -168,7 +168,7 @@ func NewStorageWithParser(t *testing.T, ents []pb.Entry, p db.Parser) *StorageWr
 
 	s := OpenStorage(t, dir, p)
 	if ents != nil {
-		s.Save(defaultHardState, ents, defaultSnap)
+		_ = s.Save(defaultHardState, ents, defaultSnap)
 	}
 
 	return s
@@ -482,7 +482,8 @@ func TestStateStorage(t *testing.T) {
 		t.Run("", func(t *testing.T) {
 			s := NewStorage(t, nil)
 			defer s.Cleanup()
-			s.Save(tt.st, nil, tt.snap)
+			err := s.Save(tt.st, nil, tt.snap)
+			require.Equal(t, nil, err)
 
 			stb, err := tt.st.Marshal()
 			require.Equal(t, nil, err)

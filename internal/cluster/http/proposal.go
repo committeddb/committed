@@ -42,5 +42,8 @@ func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
 		Entities: es,
 	}
 
-	h.c.Propose(p)
+	err = h.c.Propose(p)
+	if err != nil {
+		internalServerError(w, err)
+	}
 }

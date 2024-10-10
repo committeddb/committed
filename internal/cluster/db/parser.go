@@ -29,9 +29,7 @@ func (db *DB) ProposeSyncable(c *cluster.Configuration) error {
 	}
 
 	p := &cluster.Proposal{Entities: []*cluster.Entity{e}}
-	db.Propose(p)
-
-	return nil
+	return db.Propose(p)
 }
 func (db *DB) ProposeDatabase(c *cluster.Configuration) error {
 	_, _, err := db.parser.ParseDatabase(c.MimeType, c.Data)
@@ -44,9 +42,7 @@ func (db *DB) ProposeDatabase(c *cluster.Configuration) error {
 		return err
 	}
 	p := &cluster.Proposal{Entities: []*cluster.Entity{e}}
-	db.Propose(p)
-
-	return nil
+	return db.Propose(p)
 }
 
 func (db *DB) ParseSyncable(mimeType string, data []byte, s cluster.DatabaseStorage) (string, cluster.Syncable, error) {

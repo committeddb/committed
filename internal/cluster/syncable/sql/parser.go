@@ -9,7 +9,8 @@ import (
 func Parse(configType string, r io.Reader) *Config {
 	v := *viper.New()
 	v.SetConfigType(configType)
-	v.ReadConfig(r)
+	// TODO What should we do?
+	_ = v.ReadConfig(r)
 
 	topic := v.GetString("sql.topic")
 	sqlDB := v.GetString("sql.db")
