@@ -36,7 +36,7 @@ func NewDB(dialect Dialect, db *sql.DB) *DB {
 // 	return nil
 // }
 
-func (d *DB) CreateInsert(config *SQLConfig) (*SQLInsert, error) {
+func (d *DB) CreateInsert(config *Config) (*Insert, error) {
 	sqlString := d.dialect.CreateSQL(config.Table, config.Mappings)
 
 	stmt, err := d.DB.Prepare(sqlString)
@@ -49,7 +49,7 @@ func (d *DB) CreateInsert(config *SQLConfig) (*SQLInsert, error) {
 		jsonPaths = append(jsonPaths, mapping.JsonPath)
 	}
 
-	return &SQLInsert{stmt, jsonPaths}, nil
+	return &Insert{stmt, jsonPaths}, nil
 }
 
 // func (d *DB) CreateSQL(table string, sqlMappings []SQLMapping) string {

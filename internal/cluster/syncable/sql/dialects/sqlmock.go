@@ -10,12 +10,12 @@ import (
 type SQLMockDialect struct{}
 
 // CreateDDL implements Dialect
-func (d *SQLMockDialect) CreateDDL(c *sql.SQLConfig) string {
+func (d *SQLMockDialect) CreateDDL(c *sql.Config) string {
 	return createDDL(c)
 }
 
 // CreateSQL implements Dialect
-func (d *SQLMockDialect) CreateSQL(table string, sqlMappings []sql.SQLMapping) string {
+func (d *SQLMockDialect) CreateSQL(table string, sqlMappings []sql.Mapping) string {
 	var sql strings.Builder
 
 	fmt.Fprintf(&sql, "INSERT INTO %s(", table)

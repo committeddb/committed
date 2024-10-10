@@ -12,7 +12,7 @@ import (
 func TestParse(t *testing.T) {
 	tests := []struct {
 		configFileName string
-		config         *sql.SQLConfig
+		config         *sql.Config
 	}{
 		{"./simple.toml", simpleConfig()},
 	}
@@ -28,12 +28,12 @@ func TestParse(t *testing.T) {
 	}
 }
 
-func simpleConfig() *sql.SQLConfig {
-	m1 := sql.SQLMapping{JsonPath: "$.key", Column: "pk", SQLType: "TEXT"}
-	m2 := sql.SQLMapping{JsonPath: "$.one", Column: "one", SQLType: "TEXT"}
-	m := []sql.SQLMapping{m1, m2}
+func simpleConfig() *sql.Config {
+	m1 := sql.Mapping{JsonPath: "$.key", Column: "pk", SQLType: "TEXT"}
+	m2 := sql.Mapping{JsonPath: "$.one", Column: "one", SQLType: "TEXT"}
+	m := []sql.Mapping{m1, m2}
 
 	i1 := sql.Index{IndexName: "firstIndex", ColumnNames: "one"}
 	i := []sql.Index{i1}
-	return &sql.SQLConfig{SQLDB: "testdb", Topic: "test1", Table: "foo", Mappings: m, Indexes: i, PrimaryKey: "pk"}
+	return &sql.Config{SQLDB: "testdb", Topic: "test1", Table: "foo", Mappings: m, Indexes: i, PrimaryKey: "pk"}
 }

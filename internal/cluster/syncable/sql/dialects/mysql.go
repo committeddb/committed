@@ -12,12 +12,12 @@ import (
 type MySQLDialect struct{}
 
 // CreateDDL implements Dialect
-func (d *MySQLDialect) CreateDDL(c *sql.SQLConfig) string {
+func (d *MySQLDialect) CreateDDL(c *sql.Config) string {
 	return createDDL(c)
 }
 
 // CreateSQL implements Dialect
-func (d *MySQLDialect) CreateSQL(table string, sqlMappings []sql.SQLMapping) string {
+func (d *MySQLDialect) CreateSQL(table string, sqlMappings []sql.Mapping) string {
 	var sql strings.Builder
 
 	fmt.Fprintf(&sql, "INSERT INTO %s(", table)

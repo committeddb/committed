@@ -13,14 +13,14 @@ import (
 type RamSQLDialect struct{}
 
 // CreateDDL implements Dialect
-func (d *RamSQLDialect) CreateDDL(c *sql.SQLConfig) string {
+func (d *RamSQLDialect) CreateDDL(c *sql.Config) string {
 	c.Indexes = nil
 
 	return createDDL(c)
 }
 
 // CreateSQL implements Dialect
-func (d *RamSQLDialect) CreateSQL(table string, sqlMappings []sql.SQLMapping) string {
+func (d *RamSQLDialect) CreateSQL(table string, sqlMappings []sql.Mapping) string {
 	var sql strings.Builder
 
 	fmt.Fprintf(&sql, "INSERT INTO %s(", table)

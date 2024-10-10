@@ -12,12 +12,12 @@ import (
 
 type Syncable struct {
 	d       *DB
-	config  *SQLConfig
+	config  *Config
 	dialect Dialect
-	insert  *SQLInsert
+	insert  *Insert
 }
 
-func New(d *DB, dialect Dialect, config *SQLConfig) *Syncable {
+func New(d *DB, dialect Dialect, config *Config) *Syncable {
 	return &Syncable{d: d, config: config, dialect: dialect}
 }
 
@@ -34,7 +34,7 @@ func (c *Syncable) Init() error {
 		jsonPaths = append(jsonPaths, mapping.JsonPath)
 	}
 
-	c.insert = &SQLInsert{stmt, jsonPaths}
+	c.insert = &Insert{stmt, jsonPaths}
 
 	return nil
 }

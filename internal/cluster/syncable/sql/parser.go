@@ -6,7 +6,7 @@ import (
 	"github.com/spf13/viper"
 )
 
-func Parse(configType string, r io.Reader) *SQLConfig {
+func Parse(configType string, r io.Reader) *Config {
 	v := *viper.New()
 	v.SetConfigType(configType)
 	v.ReadConfig(r)
@@ -16,10 +16,10 @@ func Parse(configType string, r io.Reader) *SQLConfig {
 	table := v.GetString("sql.table")
 	primaryKey := v.GetString("sql.primaryKey")
 
-	var mappings []SQLMapping
+	var mappings []Mapping
 	for _, item := range v.Get("sql.mappings").([]interface{}) {
 		m := item.(map[string]interface{})
-		mapping := SQLMapping{
+		mapping := Mapping{
 			JsonPath: m["jsonPath"].(string),
 			Column:   m["column"].(string),
 			SQLType:  m["type"].(string),
@@ -37,7 +37,7 @@ func Parse(configType string, r io.Reader) *SQLConfig {
 		indexes = append(indexes, i)
 	}
 
-	config := &SQLConfig{
+	config := &Config{
 		SQLDB:      sqlDB,
 		Topic:      topic,
 		Table:      table,

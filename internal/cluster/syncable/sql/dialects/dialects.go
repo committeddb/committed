@@ -7,7 +7,7 @@ import (
 	"github.com/philborlin/committed/internal/cluster/syncable/sql"
 )
 
-func createDDL(config *sql.SQLConfig) string {
+func createDDL(config *sql.Config) string {
 	var ddl strings.Builder
 	ddl.WriteString(fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (", config.Table))
 	for i, column := range config.Mappings {
