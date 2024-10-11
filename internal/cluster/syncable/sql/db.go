@@ -14,8 +14,13 @@ type DB struct {
 	// Insert *SQLInsert
 }
 
-func NewDB(dialect Dialect, db *sql.DB) *DB {
-	return &DB{dialect: dialect, DB: db}
+func NewDB(dialect Dialect, connectionString string) (*DB, error) {
+	db, err := dialect.Open(connectionString)
+	if err != nil {
+		return nil, err
+	}
+
+	return &DB{dialect: dialect, DB: db}, nil
 }
 
 // NewDB creates a new SQLDB
@@ -52,11 +57,6 @@ func (d *DB) CreateInsert(config *Config) (*Insert, error) {
 	return &Insert{stmt, jsonPaths}, nil
 }
 
-// func (d *DB) CreateSQL(table string, sqlMappings []SQLMapping) string {
-// 	return d.dialect.CreateSQL(table, sqlMappings)
-// }
-
-// Close implements Database
 func (d *DB) Close() error {
 	return d.DB.Close()
 }

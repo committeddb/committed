@@ -1,19 +1,37 @@
 package sql
 
 import (
-	"io"
+	"fmt"
+	"reflect"
 
+	"github.com/philborlin/committed/internal/cluster"
 	"github.com/spf13/viper"
 )
 
-func Parse(configType string, r io.Reader) *Config {
-	v := *viper.New()
-	v.SetConfigType(configType)
-	// TODO What should we do?
-	_ = v.ReadConfig(r)
+type SyncableParser struct{}
+
+func (p *SyncableParser) Parse(v *viper.Viper, storage cluster.DatabaseStorage) (cluster.Syncable, error) {
+	config, err := p.ParseConfig(v, storage)
+	if err != nil {
+		return nil, err
+	}
+
+	db, ok := config.Database.(*DB)
+	if !ok {
+		return nil, fmt.Errorf("expected sql.DB but was %s", reflect.TypeOf(config.Database))
+	}
+
+	return New(db, config), nil
+}
+
+func (p *SyncableParser) ParseConfig(v *viper.Viper, storage cluster.DatabaseStorage) (*Config, error) {
+	sqlDB := v.GetString("sql.db")
+	db, err := storage.Database(sqlDB)
+	if err != nil {
+		return nil, err
+	}
 
 	topic := v.GetString("sql.topic")
-	sqlDB := v.GetString("sql.db")
 	table := v.GetString("sql.table")
 	primaryKey := v.GetString("sql.primaryKey")
 
@@ -39,14 +57,13 @@ func Parse(configType string, r io.Reader) *Config {
 	}
 
 	config := &Config{
-		SQLDB:      sqlDB,
+		Database:   db,
 		Topic:      topic,
 		Table:      table,
 		Mappings:   mappings,
 		Indexes:    indexes,
 		PrimaryKey: primaryKey,
 	}
-	// return newSyncable(config, databases)
 
-	return config
+	return config, nil
 }

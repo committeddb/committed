@@ -4,7 +4,7 @@ name="foo"
 dbType="sql"
 
 [sql]
-topic = "test1"
+topic = "simple"
 db = "testdb"
 table = "foo"
 primaryKey = "pk"

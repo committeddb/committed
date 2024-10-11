@@ -17,6 +17,7 @@ import (
 )
 
 var simpleType = &cluster.Type{ID: "simple", Name: "simple"}
+var notSimpleType = &cluster.Type{ID: "notSimple", Name: "notSimple"}
 
 func TestSync(t *testing.T) {
 	simpleOne := simpleEntity("key1", "one")
@@ -28,28 +29,35 @@ func TestSync(t *testing.T) {
 		data           [][]*Entity
 		configFileName string
 	}{
-		{"one-simple", [][]*Entity{{simpleOne}}, "./simple.toml"},
-		{"two-simple", [][]*Entity{{simpleOne, simpleTwo}}, "./simple.toml"},
-		{"two-one-simple", [][]*Entity{{simpleOne, simpleTwo}, {simpleThree}}, "./simple.toml"},
+		{"one-simple", [][]*Entity{{simpleOne}}, "./simple_syncable.toml"},
+		{"two-simple", [][]*Entity{{simpleOne, simpleTwo}}, "./simple_syncable.toml"},
+		{"two-one-simple", [][]*Entity{{simpleOne, simpleTwo}, {simpleThree}}, "./simple_syncable.toml"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sqlMockDB, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+			dialect, mock, err := dialects.NewSQLMockDialect()
 			require.Nil(t, err)
 
 			bs, err := os.ReadFile(tt.configFileName)
 			require.Nil(t, err)
-			config := sql.Parse("toml", bytes.NewReader(bs))
+			v := readConfig(t, "toml", bytes.NewReader(bs))
 
-			dialect := &dialects.SQLMockDialect{}
-			db := sql.NewDB(dialect, sqlMockDB)
+			p := &sql.SyncableParser{}
+
+			db, err := sql.NewDB(dialect, "")
+			require.Nil(t, err)
 			defer db.Close()
+
+			dbs := make(map[string]cluster.Database)
+			dbs["testdb"] = db
+			config, err := p.ParseConfig(v, &TestDatabaseStorage{dbs: dbs})
+			require.Nil(t, err)
 
 			insertSQL := dialect.CreateSQL(config.Table, config.Mappings)
 			expectedPrepare := mock.ExpectPrepare(insertSQL)
 
-			syncable := sql.New(db, dialect, config)
+			syncable := sql.New(db, config)
 			err = syncable.Init()
 			require.Nil(t, err)
 
@@ -66,6 +74,59 @@ func TestSync(t *testing.T) {
 					expectedPrepare.ExpectExec().WithArgs(dvs...).WillReturnResult(result)
 				}
 				mock.ExpectCommit()
+				err := syncable.Sync(ctx, p)
+				require.Nil(t, err)
+			}
+
+			require.Nil(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestDontSyncOtherTypes(t *testing.T) {
+	simpleOne := simpleEntity("key1", "one")
+	notSimpleOne := notSimpleEntity("key1", "one")
+
+	tests := []struct {
+		name           string
+		data           [][]*Entity
+		configFileName string
+	}{
+		{"one-simple", [][]*Entity{{notSimpleOne}}, "./simple_syncable.toml"},
+		{"two-simple", [][]*Entity{{simpleOne, notSimpleOne}}, "./simple_syncable.toml"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dialect, mock, err := dialects.NewSQLMockDialect()
+			require.Nil(t, err)
+
+			bs, err := os.ReadFile(tt.configFileName)
+			require.Nil(t, err)
+			v := readConfig(t, "toml", bytes.NewReader(bs))
+
+			p := &sql.SyncableParser{}
+
+			db, err := sql.NewDB(dialect, "")
+			require.Nil(t, err)
+			defer db.Close()
+
+			dbs := make(map[string]cluster.Database)
+			dbs["testdb"] = db
+			config, err := p.ParseConfig(v, &TestDatabaseStorage{dbs: dbs})
+			require.Nil(t, err)
+
+			insertSQL := dialect.CreateSQL(config.Table, config.Mappings)
+			mock.ExpectPrepare(insertSQL)
+
+			syncable := sql.New(db, config)
+			err = syncable.Init()
+			require.Nil(t, err)
+
+			ctx := context.Background()
+
+			for _, p := range createProposals(t, tt.data) {
+				mock.ExpectBegin()
 				err := syncable.Sync(ctx, p)
 				require.Nil(t, err)
 			}
@@ -117,6 +178,10 @@ type Entity struct {
 
 func simpleEntity(key string, one string) *Entity {
 	return &Entity{Type: simpleType, Key: key, Data: &Simple{Key: key, One: one}, Args: []any{key, one}}
+}
+
+func notSimpleEntity(key string, one string) *Entity {
+	return &Entity{Type: notSimpleType, Key: key, Data: &Simple{Key: key, One: one}, Args: []any{key, one}}
 }
 
 type Simple struct {

@@ -2,11 +2,14 @@ package sql
 
 import (
 	gosql "database/sql"
+
+	"github.com/philborlin/committed/internal/cluster"
 )
 
 type Dialect interface {
 	CreateDDL(config *Config) string
 	CreateSQL(table string, sqlMappings []Mapping) string
+	Open(connectionString string) (*gosql.DB, error)
 }
 
 type Index struct {
@@ -22,7 +25,7 @@ type Mapping struct {
 }
 
 type Config struct {
-	SQLDB      string
+	Database   cluster.Database
 	Topic      string
 	Table      string
 	Mappings   []Mapping

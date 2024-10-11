@@ -2,6 +2,7 @@ package sql
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -11,20 +12,20 @@ import (
 )
 
 type Syncable struct {
-	d       *DB
+	db      *sql.DB
 	config  *Config
 	dialect Dialect
 	insert  *Insert
 }
 
-func New(d *DB, dialect Dialect, config *Config) *Syncable {
-	return &Syncable{d: d, config: config, dialect: dialect}
+func New(d *DB, config *Config) *Syncable {
+	return &Syncable{db: d.DB, config: config, dialect: d.dialect}
 }
 
 func (c *Syncable) Init() error {
 	sqlString := c.dialect.CreateSQL(c.config.Table, c.config.Mappings)
 
-	stmt, err := c.d.DB.Prepare(sqlString)
+	stmt, err := c.db.Prepare(sqlString)
 	if err != nil {
 		log.Fatalf("Error Preparing sql [%s]: %v", sqlString, err)
 	}
@@ -40,9 +41,15 @@ func (c *Syncable) Init() error {
 }
 
 func (c *Syncable) Sync(ctx context.Context, p *cluster.Proposal) error {
-	tx, err := c.d.DB.Begin()
+	tx, err := c.db.Begin()
 	if err != nil {
 		return err
+	}
+
+	for _, e := range p.Entities {
+		if c.config.Topic != e.Type.ID {
+			return nil
+		}
 	}
 
 	for _, e := range p.Entities {
