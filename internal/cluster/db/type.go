@@ -30,7 +30,6 @@ func ParseType(mimeType string, data []byte, s cluster.DatabaseStorage) (string,
 	}
 
 	id := fmt.Sprintf("%v", ulid.Make())
-	fmt.Printf("ulid: %s", id)
 	name := v.GetString("type.name")
 	version := 0
 	if v.IsSet("type.version") {

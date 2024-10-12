@@ -69,16 +69,14 @@ func createConfiguration(w http.ResponseWriter, r *http.Request) (*cluster.Confi
 		return nil, err
 	}
 
-	idArray := ulid.Make()
-	id := idArray[:]
-
+	id := fmt.Sprintf("%v", ulid.Make())
 	configuration := &cluster.Configuration{
 		ID:       string(id),
 		MimeType: mimeType,
 		Data:     body,
 	}
 
-	w.Write(id)
+	w.Write([]byte(id))
 
 	return configuration, nil
 }
