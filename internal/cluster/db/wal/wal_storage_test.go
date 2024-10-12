@@ -541,7 +541,7 @@ func createDatabaseConfiguration(name string) *cluster.Configuration {
 	return createConfiguration(name, d)
 }
 
-func createConfiguration(name string, v any) *cluster.Configuration {
+func createConfiguration(id string, v any) *cluster.Configuration {
 	bs, _ := json.Marshal(v)
-	return &cluster.Configuration{ID: name, Name: name, MimeType: "application/json", Data: bs}
+	return &cluster.Configuration{ID: id, MimeType: "application/json", Data: bs}
 }

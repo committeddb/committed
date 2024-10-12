@@ -76,17 +76,17 @@ func (db *DB) Propose(p *cluster.Proposal) error {
 	return nil
 }
 
-func (db *DB) ProposeType(t *cluster.Type) error {
-	typeEntity, err := cluster.NewUpsertTypeEntity(t)
-	if err != nil {
-		return err
-	}
+// func (db *DB) ProposeType(t *cluster.Type) error {
+// 	typeEntity, err := cluster.NewUpsertTypeEntity(t)
+// 	if err != nil {
+// 		return err
+// 	}
 
-	p := &cluster.Proposal{}
-	p.Entities = append(p.Entities, typeEntity)
+// 	p := &cluster.Proposal{}
+// 	p.Entities = append(p.Entities, typeEntity)
 
-	return db.Propose(p)
-}
+// 	return db.Propose(p)
+// }
 
 func (db *DB) ProposeDeleteType(id string) error {
 	deleteTypeEntity := cluster.NewDeleteTypeEntity(id)

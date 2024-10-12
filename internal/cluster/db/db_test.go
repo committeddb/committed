@@ -56,10 +56,10 @@ func TestDBPropose(t *testing.T) {
 
 func TestProposeType(t *testing.T) {
 	tests := map[string]struct {
-		types []*cluster.Type
+		types []*Type
 	}{
-		"simple": {types: []*cluster.Type{createType("foo")}},
-		"two":    {types: []*cluster.Type{createType("foo"), createType("bar")}},
+		"simple": {types: []*Type{createType("foo")}},
+		"two":    {types: []*Type{createType("foo"), createType("bar")}},
 	}
 
 	for name, tc := range tests {
@@ -68,17 +68,13 @@ func TestProposeType(t *testing.T) {
 			defer db.Close()
 
 			for _, tipe := range tc.types {
-				err := db.ProposeType(tipe)
-				if err != nil {
-					t.Fatal(err)
-				}
+				err := db.ProposeType(tipe.config)
+				require.Nil(t, err)
 				<-db.CommitC
 			}
 
 			ents, err := db.ents()
-			if err != nil {
-				t.Fatal(err)
-			}
+			require.Nil(t, err)
 
 			offset := len(ents) - len(tc.types)
 			for i := range ents {
@@ -86,14 +82,11 @@ func TestProposeType(t *testing.T) {
 
 				e := ents[offset+i]
 				err := tipe.Unmarshal(e.Entities[0].Data)
-				if err != nil {
-					t.Fatal(err)
-				}
+				require.Nil(t, err)
 
-				diff := cmp.Diff(tc.types[i], tipe)
-				if diff != "" {
-					t.Fatal(diff)
-				}
+				// The ID is a generated ID that we can't predict ahead of time. Just copy over and trust...
+				tc.types[i].tipe.ID = tipe.ID
+				require.Equal(t, tc.types[i].tipe, tipe)
 			}
 		})
 	}
@@ -105,18 +98,15 @@ func TestType(t *testing.T) {
 	defer db.Close()
 
 	expected := createType("foo")
-	s.TypeReturns(expected, nil)
+	s.TypeReturns(expected.tipe, nil)
 	s.FirstIndexReturns(1, nil)
 
-	got, err := db.Type(expected.ID)
+	got, err := db.Type(expected.tipe.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	diff := cmp.Diff(expected, got)
-	if diff != "" {
-		t.Fatal(diff)
-	}
+	require.Equal(t, expected.tipe, got)
 }
 
 func TestSync(t *testing.T) {
@@ -262,8 +252,23 @@ func modifyInputs(is [][]string) [][]string {
 	return newInput
 }
 
-func createType(name string) *cluster.Type {
-	return &cluster.Type{ID: name, Name: name}
+type Type struct {
+	tipe   *cluster.Type
+	config *cluster.Configuration
+}
+
+func createType(name string) *Type {
+	toml := fmt.Sprintf("[type]\nname = \"%s\"", name)
+	fmt.Println(toml)
+
+	return &Type{
+		tipe: &cluster.Type{ID: name, Name: name},
+		config: &cluster.Configuration{
+			ID:       name,
+			MimeType: "text/toml",
+			Data:     []byte(toml),
+		},
+	}
 }
 
 func createProposalsAndProposeThem(t *testing.T, db *DB, inputs [][]string) []*cluster.Proposal {

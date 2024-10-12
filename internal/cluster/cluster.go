@@ -10,7 +10,7 @@ import (
 // TODO There should be a single Propose(p *Proposal) error and then utility functions for preparing different types of proposals
 type Cluster interface {
 	Propose(p *Proposal) error
-	ProposeType(t *Type) error
+	ProposeType(c *Configuration) error
 	ProposeDeleteType(id string) error
 	ProposeSyncable(c *Configuration) error
 	ProposeDatabase(c *Configuration) error

@@ -49,7 +49,7 @@ func simpleConfig(db cluster.Database) *sql.Config {
 
 	i1 := sql.Index{IndexName: "firstIndex", ColumnNames: "one"}
 	i := []sql.Index{i1}
-	return &sql.Config{Database: db, Topic: "test1", Table: "foo", Mappings: m, Indexes: i, PrimaryKey: "pk"}
+	return &sql.Config{Database: db, Topic: "simple", Table: "foo", Mappings: m, Indexes: i, PrimaryKey: "pk"}
 }
 
 func readConfig(t *testing.T, configType string, r io.Reader) *viper.Viper {
