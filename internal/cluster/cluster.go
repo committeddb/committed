@@ -8,6 +8,8 @@ import (
 //go:generate protoc --go_out=paths=source_relative:. ./clusterpb/cluster.proto
 
 // TODO There should be a single Propose(p *Proposal) error and then utility functions for preparing different types of proposals
+//
+//counterfeiter:generate . Cluster
 type Cluster interface {
 	Propose(p *Proposal) error
 	ProposeType(c *Configuration) error

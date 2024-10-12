@@ -34,12 +34,12 @@ func (h *HTTP) ListenAndServe(addr string) error {
 
 func badRequest(w http.ResponseWriter, err error) {
 	w.WriteHeader(http.StatusBadRequest)
-	fmt.Printf("%v", err)
+	fmt.Printf("%v\n", err)
 }
 
 func internalServerError(w http.ResponseWriter, err error) {
 	w.WriteHeader(http.StatusInternalServerError)
-	fmt.Printf("%v", err)
+	fmt.Printf("%v\n", err)
 }
 
 func unmarshalBody(r *http.Request, v any) error {
@@ -65,7 +65,6 @@ func createConfiguration(w http.ResponseWriter, r *http.Request) (*cluster.Confi
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		internalServerError(w, err)
 		return nil, err
 	}
 
