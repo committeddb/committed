@@ -32,7 +32,7 @@ type DB struct {
 	id      uint64
 }
 
-func (db *DB) ents() ([]*cluster.Proposal, error) {
+func (db *DB) Ents() ([]*cluster.Proposal, error) {
 	fi, err := db.storage.FirstIndex()
 	if err != nil {
 		return nil, err
