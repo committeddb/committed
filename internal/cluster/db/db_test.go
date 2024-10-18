@@ -312,7 +312,7 @@ func createDBWithStorage(s db.Storage) *DB {
 	peers[id] = url
 	parser := parser.New()
 
-	db := db.New(id, peers, s, parser)
+	db := db.New(id, peers, s, parser, nil)
 	return &DB{db, s, peers, id}
 }
 

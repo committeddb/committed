@@ -9,15 +9,15 @@ import (
 	"github.com/philborlin/committed/internal/cluster/syncable/sql"
 )
 
-type MySQLDialect struct{}
+type PostgreSQLDialect struct{}
 
 // CreateDDL implements Dialect
-func (d *MySQLDialect) CreateDDL(c *sql.Config) string {
+func (d *PostgreSQLDialect) CreateDDL(c *sql.Config) string {
 	return createDDL(c)
 }
 
 // CreateSQL implements Dialect
-func (d *MySQLDialect) CreateSQL(table string, sqlMappings []sql.Mapping) string {
+func (d *PostgreSQLDialect) CreateSQL(table string, sqlMappings []sql.Mapping) string {
 	var sql strings.Builder
 
 	fmt.Fprintf(&sql, "INSERT INTO %s(", table)
@@ -31,17 +31,17 @@ func (d *MySQLDialect) CreateSQL(table string, sqlMappings []sql.Mapping) string
 	fmt.Fprint(&sql, ") VALUES (")
 	for i := range sqlMappings {
 		if i == 0 {
-			fmt.Fprint(&sql, "?")
+			fmt.Fprintf(&sql, "$%d", i+1)
 		} else {
-			fmt.Fprint(&sql, ",?")
+			fmt.Fprintf(&sql, ",$%d", i+1)
 		}
 	}
 	fmt.Fprint(&sql, ") ON DUPLICATE KEY UPDATE ")
 	for i, item := range sqlMappings {
 		if i == 0 {
-			fmt.Fprintf(&sql, "%s=?", item.Column)
+			fmt.Fprintf(&sql, "%s=$%d", item.Column, i+1)
 		} else {
-			fmt.Fprintf(&sql, ",%s=?", item.Column)
+			fmt.Fprintf(&sql, ",%s=$%d", item.Column, i+1)
 		}
 	}
 

@@ -11,7 +11,7 @@ type DBParser struct {
 	Dialects map[string]Dialect
 }
 
-func (d *DBParser) Parse(v *viper.Viper) (cluster.Database, error) {
+func (d *DBParser) Parse(v *viper.Viper, name string) (cluster.Database, error) {
 	dialectName := v.GetString("sql.dialect")
 	connectionString := v.GetString("sql.connectionString")
 
@@ -20,7 +20,7 @@ func (d *DBParser) Parse(v *viper.Viper) (cluster.Database, error) {
 		return nil, fmt.Errorf("%s not found", dialectName)
 	}
 
-	db, err := dialect.Open(connectionString)
+	db, err := NewDB(dialect, connectionString)
 	if err != nil {
 		return nil, err
 	}

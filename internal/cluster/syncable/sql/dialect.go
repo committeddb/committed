@@ -34,6 +34,7 @@ type Config struct {
 }
 
 type Insert struct {
+	SQL      string
 	Stmt     *gosql.Stmt
 	JsonPath []string
 }

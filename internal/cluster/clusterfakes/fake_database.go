@@ -18,6 +18,16 @@ type FakeDatabase struct {
 	closeReturnsOnCall map[int]struct {
 		result1 error
 	}
+	GetTypeStub        func() string
+	getTypeMutex       sync.RWMutex
+	getTypeArgsForCall []struct {
+	}
+	getTypeReturns struct {
+		result1 string
+	}
+	getTypeReturnsOnCall map[int]struct {
+		result1 string
+	}
 	invocations      map[string][][]interface{}
 	invocationsMutex sync.RWMutex
 }
@@ -75,11 +85,66 @@ func (fake *FakeDatabase) CloseReturnsOnCall(i int, result1 error) {
 	}{result1}
 }
 
+func (fake *FakeDatabase) GetType() string {
+	fake.getTypeMutex.Lock()
+	ret, specificReturn := fake.getTypeReturnsOnCall[len(fake.getTypeArgsForCall)]
+	fake.getTypeArgsForCall = append(fake.getTypeArgsForCall, struct {
+	}{})
+	stub := fake.GetTypeStub
+	fakeReturns := fake.getTypeReturns
+	fake.recordInvocation("GetType", []interface{}{})
+	fake.getTypeMutex.Unlock()
+	if stub != nil {
+		return stub()
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeDatabase) GetTypeCallCount() int {
+	fake.getTypeMutex.RLock()
+	defer fake.getTypeMutex.RUnlock()
+	return len(fake.getTypeArgsForCall)
+}
+
+func (fake *FakeDatabase) GetTypeCalls(stub func() string) {
+	fake.getTypeMutex.Lock()
+	defer fake.getTypeMutex.Unlock()
+	fake.GetTypeStub = stub
+}
+
+func (fake *FakeDatabase) GetTypeReturns(result1 string) {
+	fake.getTypeMutex.Lock()
+	defer fake.getTypeMutex.Unlock()
+	fake.GetTypeStub = nil
+	fake.getTypeReturns = struct {
+		result1 string
+	}{result1}
+}
+
+func (fake *FakeDatabase) GetTypeReturnsOnCall(i int, result1 string) {
+	fake.getTypeMutex.Lock()
+	defer fake.getTypeMutex.Unlock()
+	fake.GetTypeStub = nil
+	if fake.getTypeReturnsOnCall == nil {
+		fake.getTypeReturnsOnCall = make(map[int]struct {
+			result1 string
+		})
+	}
+	fake.getTypeReturnsOnCall[i] = struct {
+		result1 string
+	}{result1}
+}
+
 func (fake *FakeDatabase) Invocations() map[string][][]interface{} {
 	fake.invocationsMutex.RLock()
 	defer fake.invocationsMutex.RUnlock()
 	fake.closeMutex.RLock()
 	defer fake.closeMutex.RUnlock()
+	fake.getTypeMutex.RLock()
+	defer fake.getTypeMutex.RUnlock()
 	copiedInvocations := map[string][][]interface{}{}
 	for key, value := range fake.invocations {
 		copiedInvocations[key] = value

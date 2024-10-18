@@ -74,7 +74,7 @@ func (s *StorageWrapper) CloseAndReopen() (*StorageWrapper, error) {
 		return nil, err
 	}
 
-	wal, err := wal.Open(s.path, s.parser)
+	wal, err := wal.Open(s.path, s.parser, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -166,7 +166,7 @@ func NewStorageWithParser(t *testing.T, ents []pb.Entry, p db.Parser) *StorageWr
 		return nil
 	}
 
-	s := OpenStorage(t, dir, p)
+	s := OpenStorage(t, dir, p, nil)
 	if ents != nil {
 		_ = s.Save(defaultHardState, ents, defaultSnap)
 	}
@@ -181,11 +181,11 @@ func (s *StorageWrapper) CloseAndReopenStorage(t *testing.T) *StorageWrapper {
 		return nil
 	}
 
-	return OpenStorage(t, s.path, s.parser)
+	return OpenStorage(t, s.path, s.parser, nil)
 }
 
-func OpenStorage(t *testing.T, dir string, p db.Parser) *StorageWrapper {
-	wal, err := wal.Open(dir, p)
+func OpenStorage(t *testing.T, dir string, p db.Parser, sync chan *db.SyncableWithID) *StorageWrapper {
+	wal, err := wal.Open(dir, p, sync)
 	if err != nil {
 		t.Fatal(err)
 		return nil

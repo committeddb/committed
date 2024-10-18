@@ -23,6 +23,12 @@ func New(d *DB, config *Config) *Syncable {
 }
 
 func (c *Syncable) Init() error {
+	ddlString := c.dialect.CreateDDL(c.config)
+	_, err := c.db.Exec(ddlString)
+	if err != nil {
+		return fmt.Errorf("ddl [%s]: %w", ddlString, err)
+	}
+
 	sqlString := c.dialect.CreateSQL(c.config.Table, c.config.Mappings)
 
 	stmt, err := c.db.Prepare(sqlString)
@@ -35,7 +41,7 @@ func (c *Syncable) Init() error {
 		jsonPaths = append(jsonPaths, mapping.JsonPath)
 	}
 
-	c.insert = &Insert{stmt, jsonPaths}
+	c.insert = &Insert{sqlString, stmt, jsonPaths}
 
 	return nil
 }
@@ -68,9 +74,13 @@ func (c *Syncable) Sync(ctx context.Context, p *cluster.Proposal) error {
 			values = append(values, res)
 		}
 
-		_, err = tx.Stmt(c.insert.Stmt).Exec(values...)
+		// We need one set for the insert and one for the on duplicate key update.
+		// TODO Do all dbs need this? Should this be a dialect setting?
+		allValues := append(values, values...)
+
+		_, err = tx.Stmt(c.insert.Stmt).Exec(allValues...)
 		if err != nil {
-			return err
+			return fmt.Errorf("[sql.Sync] tx.Stmt [%s]: %w", c.insert.SQL, err)
 		}
 	}
 
@@ -87,5 +97,5 @@ func (c *Syncable) Sync(ctx context.Context, p *cluster.Proposal) error {
 }
 
 func (c *Syncable) Close() error {
-	return nil
+	return c.insert.Stmt.Close()
 }

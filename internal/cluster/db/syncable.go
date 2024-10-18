@@ -2,6 +2,11 @@ package db
 
 import "github.com/philborlin/committed/internal/cluster"
 
+type SyncableWithID struct {
+	ID       string
+	Syncable cluster.Syncable
+}
+
 func (db *DB) AddSyncableParser(name string, p cluster.SyncableParser) {
 	db.parser.AddSyncableParser(name, p)
 }

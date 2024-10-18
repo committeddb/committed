@@ -51,11 +51,12 @@ type Storage struct {
 	stateIndex  uint64
 	databases   map[string]cluster.Database
 	parser      db.Parser
+	sync        chan<- *db.SyncableWithID
 }
 
 // Returns a *WalStorage, whether this storage existed already, or an error
 // func Open() (*WalStorage, bool, error) {
-func Open(dir string, p db.Parser) (*Storage, error) {
+func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID) (*Storage, error) {
 	entryLogDir := filepath.Join(dir, "entry-log")
 	stateLogDir := filepath.Join(dir, "state-log")
 	typeStorageDir := filepath.Join(dir, "type-storage")
@@ -104,7 +105,14 @@ func Open(dir string, p db.Parser) (*Storage, error) {
 	}
 
 	dbs := make(map[string]cluster.Database)
-	ws := &Storage{EntryLog: entryLog, StateLog: stateLog, typeStorage: typeStorage, databases: dbs, parser: p}
+	ws := &Storage{
+		EntryLog:    entryLog,
+		StateLog:    stateLog,
+		typeStorage: typeStorage,
+		databases:   dbs,
+		parser:      p,
+		sync:        sync,
+	}
 
 	fi, err := entryLog.FirstIndex()
 	if err != nil {
@@ -242,7 +250,7 @@ func (s *Storage) Save(st pb.HardState, ents []pb.Entry, snap pb.Snapshot) error
 	s.snapshot = snap
 	err := s.appendEntries(ents)
 	if err != nil {
-		return err
+		return fmt.Errorf("[wal.storage] appendEntries: %w", err)
 	}
 
 	for _, ent := range ents {
@@ -258,29 +266,34 @@ func (s *Storage) Save(st pb.HardState, ents []pb.Entry, snap pb.Snapshot) error
 				case cluster.IsType(entity.ID):
 					err := s.handleType(entity)
 					if err != nil {
-						return err
+						return fmt.Errorf("[wal.storage] handleType: %w", err)
 					}
 				case cluster.IsDatabase(entity.ID):
 					err := s.handleDatabase(entity)
 					if err != nil {
-						return err
+						return fmt.Errorf("[wal.storage] handleDatabase: %w", err)
 					}
 				case cluster.IsSyncable(entity.ID):
 					err := s.handleSyncable(entity)
 					if err != nil {
-						return err
+						return fmt.Errorf("[wal.storage] handleSyncable: %w", err)
 					}
 				case cluster.IsSyncableIndex(entity.ID):
 					err := s.handleSyncableIndex(entity)
 					if err != nil {
-						return err
+						return fmt.Errorf("[wal.storage] handleSyncableIndex: %w", err)
 					}
 				}
 			}
 		}
 	}
 
-	return s.appendState(st, snap)
+	err = s.appendState(st, snap)
+	if err != nil {
+		return fmt.Errorf("[wal.storage] appendState: %w", err)
+	}
+
+	return nil
 }
 
 func (s *Storage) appendEntries(ents []pb.Entry) error {

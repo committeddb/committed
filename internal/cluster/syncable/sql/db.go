@@ -5,13 +5,9 @@ import (
 	"fmt"
 )
 
-// DB represents an sql query database
 type DB struct {
 	dialect Dialect
-	// driver           string
-	// connectionString string
-	DB *sql.DB
-	// Insert *SQLInsert
+	DB      *sql.DB
 }
 
 func NewDB(dialect Dialect, connectionString string) (*DB, error) {
@@ -23,30 +19,18 @@ func NewDB(dialect Dialect, connectionString string) (*DB, error) {
 	return &DB{dialect: dialect, DB: db}, nil
 }
 
-// NewDB creates a new SQLDB
-// func NewDB(dialect Dialect, driver string, connectionString string) *DB {
-// 	return &DB{dialect: dialect, driver: driver, connectionString: connectionString}
-// }
-
-// func (d *DB) Init() error {
-// 	// TODO If the connection string is the same lets cache and return. Also let's check if it is active and allow
-// 	// successive calls to Init() to refresh closed db connections.
-// 	// Maybe, but what happens if the syncable closes and we try to clean up a shared database connection? Sounds bad...
-// 	db, err := sql.Open(d.driver, d.connectionString)
-// 	if err != nil {
-// 		return err
-// 	}
-// 	d.DB = db
-
-// 	return nil
-// }
-
 func (d *DB) CreateInsert(config *Config) (*Insert, error) {
+	ddlString := d.dialect.CreateDDL(config)
+	_, err := d.DB.Exec(ddlString)
+	if err != nil {
+		return nil, fmt.Errorf("ddl [%s]: %w", ddlString, err)
+	}
+
 	sqlString := d.dialect.CreateSQL(config.Table, config.Mappings)
 
 	stmt, err := d.DB.Prepare(sqlString)
 	if err != nil {
-		return nil, fmt.Errorf("error preparing sql [%s]: %w", sqlString, err)
+		return nil, fmt.Errorf("sql [%s]: %w", sqlString, err)
 	}
 
 	var jsonPaths []string
@@ -54,9 +38,13 @@ func (d *DB) CreateInsert(config *Config) (*Insert, error) {
 		jsonPaths = append(jsonPaths, mapping.JsonPath)
 	}
 
-	return &Insert{stmt, jsonPaths}, nil
+	return &Insert{sqlString, stmt, jsonPaths}, nil
 }
 
 func (d *DB) Close() error {
 	return d.DB.Close()
+}
+
+func (d *DB) GetType() string {
+	return "sql"
 }

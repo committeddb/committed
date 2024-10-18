@@ -21,7 +21,13 @@ func (p *SyncableParser) Parse(v *viper.Viper, storage cluster.DatabaseStorage) 
 		return nil, fmt.Errorf("expected sql.DB but was %s", reflect.TypeOf(config.Database))
 	}
 
-	return New(db, config), nil
+	syncable := New(db, config)
+	err = syncable.Init()
+	if err != nil {
+		return nil, fmt.Errorf("[sql.syncable-parser] init: %w", err)
+	}
+
+	return syncable, nil
 }
 
 func (p *SyncableParser) ParseConfig(v *viper.Viper, storage cluster.DatabaseStorage) (*Config, error) {

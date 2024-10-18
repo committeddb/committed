@@ -67,6 +67,10 @@ func (d *TestDatabase) Close() error {
 	return nil
 }
 
+func (d *TestDatabase) GetType() string {
+	return "test"
+}
+
 type TestDatabaseStorage struct {
 	dbs map[string]cluster.Database
 }

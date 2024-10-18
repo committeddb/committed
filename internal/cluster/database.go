@@ -7,6 +7,7 @@ import "github.com/spf13/viper"
 //counterfeiter:generate . Database
 type Database interface {
 	Close() error
+	GetType() string
 }
 
 type DatabaseStorage interface {
@@ -17,7 +18,7 @@ type DatabaseStorage interface {
 //
 //counterfeiter:generate . DatabaseParser
 type DatabaseParser interface {
-	Parse(*viper.Viper) (Database, error)
+	Parse(v *viper.Viper, name string) (Database, error)
 }
 
 var databaseType = &Type{

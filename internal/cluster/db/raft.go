@@ -129,6 +129,7 @@ func (n *node) serveChannels() {
 			// fmt.Printf("[raft] ready and about to save to storage\n")
 			err := n.storage.Save(rd.HardState, rd.Entries, rd.Snapshot)
 			if err != nil {
+				fmt.Printf("[raft] storage save: %v\n", err)
 				n.raftErrorC <- err
 			}
 			n.transport.Send(rd.Messages)

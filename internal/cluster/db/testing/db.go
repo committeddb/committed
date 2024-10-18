@@ -11,17 +11,16 @@ import (
 )
 
 func CreateDB() *DB {
-	return CreateDBWithStorage(NewMemoryStorage())
+	return CreateDBWithStorage(NewMemoryStorage(), parser.New(), nil)
 }
 
-func CreateDBWithStorage(s db.Storage) *DB {
+func CreateDBWithStorage(s db.Storage, parser *parser.Parser, sync <-chan *db.SyncableWithID) *DB {
 	id := uint64(1)
 	url := fmt.Sprintf("http://127.0.0.1:%d", 12379)
 	peers := make(db.Peers)
 	peers[id] = url
-	parser := parser.New()
 
-	db := db.New(id, peers, s, parser)
+	db := db.New(id, peers, s, parser, sync)
 	return &DB{db, s, peers, id}
 }
 

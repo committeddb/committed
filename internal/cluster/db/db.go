@@ -4,6 +4,7 @@ package db
 
 import (
 	"context"
+	"fmt"
 	"io"
 
 	"github.com/philborlin/committed/internal/cluster"
@@ -25,7 +26,7 @@ type DB struct {
 	parser      Parser
 }
 
-func New(id uint64, peers Peers, s Storage, p Parser) *DB {
+func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithID) *DB {
 	proposeC := make(chan []byte)
 	confChangeC := make(chan raftpb.ConfChange)
 
@@ -39,7 +40,8 @@ func New(id uint64, peers Peers, s Storage, p Parser) *DB {
 	ctx, cancelSyncs := context.WithCancel(context.Background())
 
 	commitC, errorC, closer := NewRaft(id, rpeers, s, proposeC, confChangeC)
-	return &DB{
+
+	db := &DB{
 		CommitC:     commitC,
 		ErrorC:      errorC,
 		proposeC:    proposeC,
@@ -49,6 +51,17 @@ func New(id uint64, peers Peers, s Storage, p Parser) *DB {
 		ctx:         ctx,
 		cancelSyncs: cancelSyncs,
 		parser:      p,
+	}
+
+	go db.sync(sync)
+
+	return db
+}
+
+func (db *DB) sync(sync <-chan *SyncableWithID) {
+	for sync != nil {
+		syncable := <-sync
+		db.Sync(context.Background(), syncable.ID, syncable.Syncable)
 	}
 }
 
@@ -131,10 +144,11 @@ func (db *DB) Sync(ctx context.Context, id string, s cluster.Syncable) error {
 			err = s.Sync(db.ctx, p)
 			if err != nil {
 				// TODO Handle error
+				fmt.Printf("[db.DB] sync: %v\n", err)
 				return
 			}
 
-			err = db.proposeSyncableIndex(&cluster.SyncableIndex{Index: i})
+			err = db.proposeSyncableIndex(&cluster.SyncableIndex{ID: id, Index: i})
 			if err != nil {
 				// TODO Handle error
 				return

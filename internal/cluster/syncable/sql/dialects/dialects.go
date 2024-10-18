@@ -24,7 +24,5 @@ func createDDL(config *sql.Config) string {
 	}
 	ddl.WriteString(");")
 
-	fmt.Println(ddl.String())
-
 	return ddl.String()
 }

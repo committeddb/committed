@@ -1,6 +1,8 @@
 package wal
 
 import (
+	"fmt"
+
 	"github.com/philborlin/committed/internal/cluster"
 	bolt "go.etcd.io/bbolt"
 )
@@ -14,6 +16,7 @@ func (s *Storage) handleSyncableIndex(e *cluster.Entity) error {
 		if err != nil {
 			return err
 		}
+		fmt.Printf("[wal.syncable-index] index: %#v\n", t)
 		return s.saveSyncableIndex(t)
 	}
 }
@@ -26,12 +29,12 @@ func (s *Storage) saveSyncableIndex(t *cluster.SyncableIndex) error {
 		}
 		bs, err := t.Marshal()
 		if err != nil {
-			return err
+			return fmt.Errorf("[wal.syncable-index] marshal: %w", err)
 		}
 
 		err = b.Put([]byte(t.ID), bs)
 		if err != nil {
-			return err
+			return fmt.Errorf("[wal.syncable-index] put: %w", err)
 		}
 
 		return nil

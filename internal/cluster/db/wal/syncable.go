@@ -1,7 +1,10 @@
 package wal
 
 import (
+	"fmt"
+
 	"github.com/philborlin/committed/internal/cluster"
+	"github.com/philborlin/committed/internal/cluster/db"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -28,17 +31,21 @@ func (s *Storage) saveSyncable(t *cluster.Configuration) error {
 		}
 		bs, err := t.Marshal()
 		if err != nil {
-			return err
+			return fmt.Errorf("[wal.syncable] marshal: %w", err)
 		}
 
-		_, _, err = s.parser.ParseSyncable(t.MimeType, t.Data, s)
+		_, syncable, err := s.parser.ParseSyncable(t.MimeType, t.Data, s)
 		if err != nil {
-			return err
+			return fmt.Errorf("[wal.syncable] parseSyncable: %w", err)
 		}
 
 		err = b.Put([]byte(t.ID), bs)
 		if err != nil {
-			return err
+			return fmt.Errorf("[wal.syncable] put: %w", err)
+		}
+
+		if s.sync != nil {
+			s.sync <- &db.SyncableWithID{ID: t.ID, Syncable: syncable}
 		}
 
 		return nil
