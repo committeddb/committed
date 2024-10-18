@@ -139,8 +139,6 @@ func view(t *testing.T, s db.Storage, databaseID string, p *Proposal, connection
 	if err != nil {
 		require.Nil(t, err)
 	}
-
-	require.True(t, false)
 }
 
 func addDatabase(t *testing.T, h *http.HTTP, dialect string) string {

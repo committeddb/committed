@@ -374,7 +374,7 @@ func (ms *MemorySyncable) Init(ctx context.Context) error {
 	return nil
 }
 
-func (ms *MemorySyncable) Sync(ctx context.Context, p *cluster.Proposal) error {
+func (ms *MemorySyncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.ShouldSnapshot, error) {
 	fmt.Printf("syncing: %v\n", p)
 
 	ms.count++
@@ -384,7 +384,9 @@ func (ms *MemorySyncable) Sync(ctx context.Context, p *cluster.Proposal) error {
 		// ms.done <- ""
 	}
 
-	return nil
+	var shouldSnapshot = cluster.ShouldSnapshot(len(p.Entities) == 1 && cluster.IsSystem(p.Entities[0].Type.ID))
+
+	return shouldSnapshot, nil
 }
 
 func (ms *MemorySyncable) Close() error {

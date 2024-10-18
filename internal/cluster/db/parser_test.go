@@ -47,6 +47,9 @@ func TestDatabase(t *testing.T) {
 
 			p1 := &clusterfakes.FakeDatabaseParser{}
 			p2 := &clusterfakes.FakeDatabaseParser{}
+			d1 := &clusterfakes.FakeDatabase{}
+			p1.ParseReturns(d1, nil)
+			p2.ParseReturns(d1, nil)
 			db.AddDatabaseParser("foo", p1)
 			db.AddDatabaseParser("bar", p2)
 

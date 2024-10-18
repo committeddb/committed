@@ -141,17 +141,19 @@ func (db *DB) Sync(ctx context.Context, id string, s cluster.Syncable) error {
 				return
 			}
 
-			err = s.Sync(db.ctx, p)
+			shouldSnapshot, err := s.Sync(db.ctx, p)
 			if err != nil {
 				// TODO Handle error
 				fmt.Printf("[db.DB] sync: %v\n", err)
 				return
 			}
 
-			err = db.proposeSyncableIndex(&cluster.SyncableIndex{ID: id, Index: i})
-			if err != nil {
-				// TODO Handle error
-				return
+			if shouldSnapshot {
+				err = db.proposeSyncableIndex(&cluster.SyncableIndex{ID: id, Index: i})
+				if err != nil {
+					// TODO Handle error
+					return
+				}
 			}
 		}
 	}()

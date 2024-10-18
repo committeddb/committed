@@ -54,6 +54,8 @@ func TestSync(t *testing.T) {
 			config, err := p.ParseConfig(v, &TestDatabaseStorage{dbs: dbs})
 			require.Nil(t, err)
 
+			ddlSQL := dialect.CreateDDL(config)
+			mock.ExpectExec(ddlSQL).WillReturnResult(driver.ResultNoRows)
 			insertSQL := dialect.CreateSQL(config.Table, config.Mappings)
 			expectedPrepare := mock.ExpectPrepare(insertSQL)
 
@@ -71,11 +73,13 @@ func TestSync(t *testing.T) {
 					total++
 					dvs := getDriverValues(e.Args)
 					result := sqlmock.NewResult(total, 1)
-					expectedPrepare.ExpectExec().WithArgs(dvs...).WillReturnResult(result)
+					allDVS := append(dvs, dvs...)
+					expectedPrepare.ExpectExec().WithArgs(allDVS...).WillReturnResult(result)
 				}
 				mock.ExpectCommit()
-				err := syncable.Sync(ctx, p)
+				shouldSnapshot, err := syncable.Sync(ctx, p)
 				require.Nil(t, err)
+				require.Equal(t, cluster.ShouldSnapshot(true), shouldSnapshot)
 			}
 
 			require.Nil(t, mock.ExpectationsWereMet())
@@ -116,6 +120,8 @@ func TestDontSyncOtherTypes(t *testing.T) {
 			config, err := p.ParseConfig(v, &TestDatabaseStorage{dbs: dbs})
 			require.Nil(t, err)
 
+			ddlSQL := dialect.CreateDDL(config)
+			mock.ExpectExec(ddlSQL).WillReturnResult(driver.ResultNoRows)
 			insertSQL := dialect.CreateSQL(config.Table, config.Mappings)
 			mock.ExpectPrepare(insertSQL)
 
@@ -127,8 +133,9 @@ func TestDontSyncOtherTypes(t *testing.T) {
 
 			for _, p := range createProposals(t, tt.data) {
 				mock.ExpectBegin()
-				err := syncable.Sync(ctx, p)
+				shouldSnapshot, err := syncable.Sync(ctx, p)
 				require.Nil(t, err)
+				require.Equal(t, cluster.ShouldSnapshot(false), shouldSnapshot)
 			}
 
 			require.Nil(t, mock.ExpectationsWereMet())

@@ -46,15 +46,15 @@ func (c *Syncable) Init() error {
 	return nil
 }
 
-func (c *Syncable) Sync(ctx context.Context, p *cluster.Proposal) error {
+func (c *Syncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.ShouldSnapshot, error) {
 	tx, err := c.db.Begin()
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	for _, e := range p.Entities {
 		if c.config.Topic != e.Type.ID {
-			return nil
+			return false, nil
 		}
 	}
 
@@ -62,14 +62,14 @@ func (c *Syncable) Sync(ctx context.Context, p *cluster.Proposal) error {
 		var jsonData any
 		err := json.Unmarshal(e.Data, &jsonData)
 		if err != nil {
-			return fmt.Errorf("%v: %w", string(e.Data), err)
+			return false, fmt.Errorf("%v: %w", string(e.Data), err)
 		}
 
 		var values []any
 		for _, path := range c.insert.JsonPath {
 			res, err := jsonpath.JsonPathLookup(jsonData, path)
 			if err != nil {
-				return fmt.Errorf("parsing [%v] in [%v]: %w", path, jsonData, err)
+				return false, fmt.Errorf("parsing [%v] in [%v]: %w", path, jsonData, err)
 			}
 			values = append(values, res)
 		}
@@ -80,7 +80,7 @@ func (c *Syncable) Sync(ctx context.Context, p *cluster.Proposal) error {
 
 		_, err = tx.Stmt(c.insert.Stmt).Exec(allValues...)
 		if err != nil {
-			return fmt.Errorf("[sql.Sync] tx.Stmt [%s]: %w", c.insert.SQL, err)
+			return false, fmt.Errorf("[sql.Sync] tx.Stmt [%s]: %w", c.insert.SQL, err)
 		}
 	}
 
@@ -88,12 +88,12 @@ func (c *Syncable) Sync(ctx context.Context, p *cluster.Proposal) error {
 	if err != nil {
 		rollbackErr := tx.Rollback()
 		if rollbackErr != nil {
-			return rollbackErr
+			return false, rollbackErr
 		}
-		return err
+		return false, err
 	}
 
-	return nil
+	return true, nil
 }
 
 func (c *Syncable) Close() error {

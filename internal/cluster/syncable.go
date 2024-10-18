@@ -8,9 +8,11 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+type ShouldSnapshot bool
+
 //counterfeiter:generate . Syncable
 type Syncable interface {
-	Sync(ctx context.Context, p *Proposal) error
+	Sync(ctx context.Context, p *Proposal) (ShouldSnapshot, error)
 	Close() error
 }
 
