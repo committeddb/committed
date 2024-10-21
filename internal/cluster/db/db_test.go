@@ -3,7 +3,7 @@ package db_test
 import (
 	"context"
 	"fmt"
-	"io"
+	"reflect"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -11,7 +11,7 @@ import (
 	"github.com/philborlin/committed/internal/cluster/db"
 	"github.com/philborlin/committed/internal/cluster/db/dbfakes"
 	parser "github.com/philborlin/committed/internal/cluster/db/parser"
-	"go.etcd.io/etcd/raft/v3"
+	"github.com/stretchr/testify/require"
 	"go.etcd.io/etcd/raft/v3/raftpb"
 )
 
@@ -47,7 +47,7 @@ func TestDBPropose(t *testing.T) {
 			for i, p := range ps {
 				diff := cmp.Diff(p, ents[i])
 				if diff != "" {
-					t.Fatalf(diff)
+					t.Fatal(diff)
 				}
 			}
 		})
@@ -56,10 +56,10 @@ func TestDBPropose(t *testing.T) {
 
 func TestProposeType(t *testing.T) {
 	tests := map[string]struct {
-		types []*cluster.Type
+		types []*Type
 	}{
-		"simple": {types: []*cluster.Type{createType("foo")}},
-		"two":    {types: []*cluster.Type{createType("foo"), createType("bar")}},
+		"simple": {types: []*Type{createType("foo")}},
+		"two":    {types: []*Type{createType("foo"), createType("bar")}},
 	}
 
 	for name, tc := range tests {
@@ -68,17 +68,13 @@ func TestProposeType(t *testing.T) {
 			defer db.Close()
 
 			for _, tipe := range tc.types {
-				err := db.ProposeType(tipe)
-				if err != nil {
-					t.Fatal(err)
-				}
+				err := db.ProposeType(tipe.config)
+				require.Nil(t, err)
 				<-db.CommitC
 			}
 
 			ents, err := db.ents()
-			if err != nil {
-				t.Fatal(err)
-			}
+			require.Nil(t, err)
 
 			offset := len(ents) - len(tc.types)
 			for i := range ents {
@@ -86,14 +82,11 @@ func TestProposeType(t *testing.T) {
 
 				e := ents[offset+i]
 				err := tipe.Unmarshal(e.Entities[0].Data)
-				if err != nil {
-					t.Fatal(err)
-				}
+				require.Nil(t, err)
 
-				diff := cmp.Diff(tc.types[i], tipe)
-				if diff != "" {
-					t.Fatalf(diff)
-				}
+				// The ID is a generated ID that we can't predict ahead of time. Just copy over and trust...
+				tc.types[i].tipe.ID = tipe.ID
+				require.Equal(t, tc.types[i].tipe, tipe)
 			}
 		})
 	}
@@ -105,18 +98,15 @@ func TestType(t *testing.T) {
 	defer db.Close()
 
 	expected := createType("foo")
-	s.TypeReturns(expected, nil)
+	s.TypeReturns(expected.tipe, nil)
 	s.FirstIndexReturns(1, nil)
 
-	got, err := db.Type(expected.ID)
+	got, err := db.Type(expected.tipe.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	diff := cmp.Diff(expected, got)
-	if diff != "" {
-		t.Fatalf(diff)
-	}
+	require.Equal(t, expected.tipe, got)
 }
 
 func TestSync(t *testing.T) {
@@ -132,39 +122,99 @@ func TestSync(t *testing.T) {
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			s := &dbfakes.FakeStorage{}
+			s := NewMemoryStorage()
 			db := createDBWithStorage(s)
 			defer db.Close()
 
 			size := len(tc.inputs)
 
-			s.FirstIndexReturns(1, nil)
-			s.LastIndexReturns(uint64(size), nil)
-
 			ctx, cancel := context.WithCancel(context.Background())
 
 			ps := createProposals(tc.inputs)
-			sync := NewSyncable(size, cancel)
-			r := &TestReader{proposals: ps}
-			s.ReaderReturns(r)
-
-			go db.Sync(ctx, id, sync)
-			<-sync.done
-
-			diff := cmp.Diff(size, sync.count)
-			if diff != "" {
-				t.Fatalf(diff)
+			for _, p := range ps {
+				require.Equal(t, nil, db.Propose(p))
+				<-db.CommitC
 			}
 
-			i := 0
-			for _, got := range sync.proposals {
-				if !cluster.IsSystem(got.Entities[0].Type.ID) {
-					diff := cmp.Diff(ps[i], got)
-					if diff != "" {
-						t.Fatalf(diff)
-					}
-					i++
+			syncable := NewSyncable(size, cancel)
+			_ = db.Sync(ctx, id, syncable)
+			for i := 0; i < len(tc.inputs); i++ {
+				<-db.CommitC
+			}
+			require.Equal(t, size, syncable.count)
+
+			ps, err := db.ents()
+			require.Nil(t, err)
+			require.Equal(t, len(tc.inputs)*2, len(ps))
+
+			for i, p := range ps {
+				got := cluster.IsSyncableIndex(p.Entities[0].Type.ID)
+				expected := i >= len(tc.inputs)
+				require.Equal(t, expected, got)
+			}
+		})
+	}
+}
+
+func TestResumeSync(t *testing.T) {
+	tests := map[string]struct {
+		inputs [][]string
+	}{
+		"simple":  {inputs: [][]string{{"foo"}}},
+		"two":     {inputs: [][]string{{"foo", "bar"}}},
+		"two-one": {inputs: [][]string{{"foo", "bar"}, {"baz"}}},
+	}
+
+	id := "foo"
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			storage := NewMemoryStorage()
+			db := createDBWithStorage(storage)
+			defer db.Close()
+
+			size := len(tc.inputs)
+
+			ps := createProposalsAndProposeThem(t, db, tc.inputs)
+			ctx, cancel := context.WithCancel(context.Background())
+			syncable := NewSyncable(size, cancel)
+
+			_ = db.Sync(ctx, id, syncable)
+			for i := 0; i < len(tc.inputs); i++ {
+				<-db.CommitC
+			}
+
+			inputs2 := modifyInputs(tc.inputs)
+
+			ps2 := createProposalsAndProposeThem(t, db, inputs2)
+			ctx, cancel = context.WithCancel(context.Background())
+			syncable = NewSyncable(size, cancel)
+
+			storage.indexes[id] = getLastIndex(storage, ps)
+
+			_ = db.Sync(ctx, id, syncable)
+			for i := 0; i < len(inputs2); i++ {
+				<-db.CommitC
+			}
+
+			require.Equal(t, size, syncable.count)
+
+			for i, p := range storage.Proposals() {
+				fmt.Printf("Testing [%v] - %v", i, p)
+				if i < size {
+					require.False(t, cluster.IsSystem(p.Entities[0].Type.ID))
+					require.Equal(t, ps[i%size], p)
+				} else if i >= size*2 && i < size*3 {
+					require.False(t, cluster.IsSystem(p.Entities[0].Type.ID))
+					require.Equal(t, ps2[i%size], p)
+				} else {
+					require.True(t, cluster.IsSystem(p.Entities[0].Type.ID))
 				}
+			}
+
+			for i, got := range syncable.proposals {
+				require.False(t, cluster.IsSystem(got.Entities[0].Type.ID))
+				require.Equal(t, ps2[i], got)
 			}
 		})
 	}
@@ -172,15 +222,70 @@ func TestSync(t *testing.T) {
 
 // TODO Test deletes - may have to test with a syncable because a delete doesn't have context except when read
 
-func createType(name string) *cluster.Type {
-	return &cluster.Type{ID: name, Name: name}
+func getLastIndex(s db.Storage, ps []*cluster.Proposal) uint64 {
+	var i uint64
+	var got *cluster.Proposal
+	r := s.Reader("storage")
+
+	for _, expected := range ps {
+		for {
+			i, got, _ = r.Read()
+			if reflect.DeepEqual(expected, got) {
+				break
+			}
+		}
+	}
+
+	return i
+}
+
+func modifyInputs(is [][]string) [][]string {
+	var newInput [][]string
+	for _, outer := range is {
+		var newOuter []string
+		for _, inner := range outer {
+			newOuter = append(newOuter, inner+"'")
+		}
+		newInput = append(newInput, newOuter)
+	}
+
+	return newInput
+}
+
+type Type struct {
+	tipe   *cluster.Type
+	config *cluster.Configuration
+}
+
+func createType(name string) *Type {
+	toml := fmt.Sprintf("[type]\nname = \"%s\"", name)
+	fmt.Println(toml)
+
+	return &Type{
+		tipe: &cluster.Type{ID: name, Name: name},
+		config: &cluster.Configuration{
+			ID:       name,
+			MimeType: "text/toml",
+			Data:     []byte(toml),
+		},
+	}
+}
+
+func createProposalsAndProposeThem(t *testing.T, db *DB, inputs [][]string) []*cluster.Proposal {
+	ps := createProposals(inputs)
+	for _, p := range ps {
+		require.Equal(t, nil, db.Propose(p))
+		<-db.CommitC
+	}
+
+	return ps
 }
 
 func createProposals(input [][]string) []*cluster.Proposal {
 	var ps []*cluster.Proposal
 
 	for fi, entities := range input {
-		fmt.Printf("Entities: %v", entities)
+		fmt.Printf("Entities: %v\n", entities)
 		proposal := &cluster.Proposal{}
 		for si, entity := range entities {
 			logEntity := &cluster.Entity{
@@ -197,7 +302,7 @@ func createProposals(input [][]string) []*cluster.Proposal {
 }
 
 func createDB() *DB {
-	return createDBWithStorage(&MemoryStorage{raft.NewMemoryStorage()})
+	return createDBWithStorage(NewMemoryStorage())
 }
 
 func createDBWithStorage(s db.Storage) *DB {
@@ -207,7 +312,7 @@ func createDBWithStorage(s db.Storage) *DB {
 	peers[id] = url
 	parser := parser.New()
 
-	db := db.New(id, peers, s, parser)
+	db := db.New(id, peers, s, parser, nil)
 	return &DB{db, s, peers, id}
 }
 
@@ -234,66 +339,56 @@ func (db *DB) ents() ([]*cluster.Proposal, error) {
 		return nil, err
 	}
 
-	var ps []*cluster.Proposal
-	for _, e := range ents {
-		if e.Type == raftpb.EntryNormal && e.Data != nil {
-			p := &cluster.Proposal{}
-			p.Unmarshal(e.Data)
-			ps = append(ps, p)
-		}
-	}
+	ps := db.entsToProposals(ents)
 
 	return ps, nil
 }
 
+func (db *DB) entsToProposals(ents []raftpb.Entry) []*cluster.Proposal {
+	var ps []*cluster.Proposal
+	for _, e := range ents {
+		if e.Type == raftpb.EntryNormal && e.Data != nil {
+			p := &cluster.Proposal{}
+			_ = p.Unmarshal(e.Data)
+			ps = append(ps, p)
+		}
+	}
+
+	return ps
+}
+
 type MemorySyncable struct {
-	proposals   []*cluster.Proposal
-	cancel      func()
-	count       int
-	done        chan any
+	proposals []*cluster.Proposal
+	cancel    func()
+	count     int
+	// done        chan any
 	doneAtCount int
 }
 
 func NewSyncable(doneAtCount int, cancel func()) *MemorySyncable {
-	return &MemorySyncable{doneAtCount: doneAtCount, cancel: cancel, done: make(chan any)}
+	return &MemorySyncable{doneAtCount: doneAtCount, cancel: cancel}
+	// return &MemorySyncable{doneAtCount: doneAtCount, cancel: cancel, done: make(chan any)}
 }
 
 func (ms *MemorySyncable) Init(ctx context.Context) error {
 	return nil
 }
 
-func (ms *MemorySyncable) Sync(ctx context.Context, p *cluster.Proposal) error {
+func (ms *MemorySyncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.ShouldSnapshot, error) {
 	fmt.Printf("syncing: %v\n", p)
 
 	ms.count++
 	ms.proposals = append(ms.proposals, p)
 	if ms.doneAtCount == ms.count {
 		ms.cancel()
-		ms.done <- ""
+		// ms.done <- ""
 	}
 
-	return nil
+	var shouldSnapshot = cluster.ShouldSnapshot(len(p.Entities) == 1 && cluster.IsSystem(p.Entities[0].Type.ID))
+
+	return shouldSnapshot, nil
 }
 
 func (ms *MemorySyncable) Close() error {
 	return nil
-}
-
-type TestReader struct {
-	nextIndex int
-	proposals []*cluster.Proposal
-}
-
-func (tr *TestReader) Read() (uint64, *cluster.Proposal, error) {
-	if tr.nextIndex >= len(tr.proposals) {
-		return 0, nil, io.EOF
-	}
-
-	p := tr.proposals[tr.nextIndex]
-	tr.nextIndex++
-	if p == nil {
-		return 0, nil, io.EOF
-	}
-
-	return uint64(tr.nextIndex - 1), p, nil
 }

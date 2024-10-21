@@ -1,6 +1,7 @@
 package http
 
 import (
+	"encoding/json"
 	httpgo "net/http"
 
 	"github.com/philborlin/committed/internal/cluster"
@@ -11,9 +12,9 @@ type ProposalRequest struct {
 }
 
 type EntityRequest struct {
-	TypeID string `json:"typeId"`
-	Key    string `json:"key"`
-	Data   string `json:"data"`
+	TypeID string          `json:"typeId"`
+	Key    string          `json:"key"`
+	Data   json.RawMessage `json:"data"`
 }
 
 func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
@@ -28,13 +29,13 @@ func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
 	for _, e := range pr.Entities {
 		t, err := h.c.Type(e.TypeID)
 		if err != nil {
-			internalServerError(w, err)
+			badRequest(w, err)
 			return
 		}
 		es = append(es, &cluster.Entity{
 			Type: t,
 			Key:  []byte(e.Key),
-			Data: []byte(e.Data),
+			Data: e.Data,
 		})
 	}
 
@@ -42,5 +43,8 @@ func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
 		Entities: es,
 	}
 
-	h.c.Propose(p)
+	err = h.c.Propose(p)
+	if err != nil {
+		internalServerError(w, err)
+	}
 }

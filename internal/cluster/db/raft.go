@@ -97,7 +97,10 @@ func (n *node) serveChannels() {
 				} else {
 					// blocks until accepted by raft state machine
 					// fmt.Printf("[raft] proposal being sent to state machine...\n")
-					n.node.Propose(context.TODO(), []byte(prop))
+					err := n.node.Propose(context.TODO(), []byte(prop))
+					if err != nil {
+						n.raftErrorC <- err
+					}
 					// fmt.Printf("[raft] ...proposal accepted by state machine\n")
 				}
 
@@ -107,7 +110,10 @@ func (n *node) serveChannels() {
 				} else {
 					confChangeCount++
 					cc.ID = confChangeCount
-					n.node.ProposeConfChange(context.Background(), cc)
+					err := n.node.ProposeConfChange(context.Background(), cc)
+					if err != nil {
+						n.raftErrorC <- err
+					}
 				}
 			}
 		}
@@ -121,7 +127,11 @@ func (n *node) serveChannels() {
 			n.node.Tick()
 		case rd := <-n.node.Ready():
 			// fmt.Printf("[raft] ready and about to save to storage\n")
-			n.storage.Save(rd.HardState, rd.Entries, rd.Snapshot)
+			err := n.storage.Save(rd.HardState, rd.Entries, rd.Snapshot)
+			if err != nil {
+				fmt.Printf("[raft] storage save: %v\n", err)
+				n.raftErrorC <- err
+			}
 			n.transport.Send(rd.Messages)
 			if !raft.IsEmptySnap(rd.Snapshot) {
 				n.processSnapshot(rd.Snapshot)
@@ -130,7 +140,10 @@ func (n *node) serveChannels() {
 				n.processCommittedEntry(entry)
 				if entry.Type == raftpb.EntryConfChange {
 					var cc raftpb.ConfChange
-					cc.Unmarshal(entry.Data)
+					err := cc.Unmarshal(entry.Data)
+					if err != nil {
+						n.raftErrorC <- err
+					}
 					n.node.ApplyConfChange(cc)
 					// Do we need to update the confState or will a snapshop be sent above?
 					// c := n.node.ApplyConfChange(cc)

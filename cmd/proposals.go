@@ -19,12 +19,12 @@ Cobra is a CLI library for Go that empowers applications.
 This application is a tool to generate the needed files
 to quickly create a Cobra application.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		s, err := wal.Open("./data", nil)
+		s, err := wal.Open("./data", nil, nil)
 		if err != nil {
 			log.Fatalf("cannot open storage: %v", err)
 		}
 
-		r := s.Reader(0)
+		r := s.Reader("")
 		for {
 			_, p, err := r.Read()
 			if err == io.EOF {
@@ -35,33 +35,6 @@ to quickly create a Cobra application.`,
 
 			fmt.Println(p)
 		}
-
-		// fi, err := s.FirstIndex()
-		// if err != nil {
-		// 	log.Fatalf("FirstIndex(): %v", err)
-		// }
-		// fmt.Printf("FirstIndex(): %v\n", fi)
-		// li, err := s.LastIndex()
-		// if err != nil {
-		// 	log.Fatalf("LastIndex: %v", err)
-		// }
-		// fmt.Printf("LastIndex(): %v\n", li)
-
-		// ents, err := s.Entries(fi, li+1, math.MaxInt)
-		// if err != nil {
-		// 	log.Fatalf("Entries: %v", err)
-		// }
-
-		// for _, ent := range ents {
-		// 	if ent.Type == raftpb.EntryNormal {
-		// 		p := &cluster.Proposal{}
-		// 		err := p.Unmarshal(ent.Data)
-		// 		if err != nil {
-		// 			fmt.Printf("proposal.Unmarshal(): %v\n", err)
-		// 		}
-		// 		fmt.Println(p)
-		// 	}
-		// }
 	},
 }
 

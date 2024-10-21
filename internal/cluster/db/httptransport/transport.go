@@ -47,7 +47,10 @@ func (t *HttpTransport) GetErrorC() chan error {
 }
 
 func (t *HttpTransport) Start(stopC <-chan struct{}) error {
-	t.transport.Start()
+	err := t.transport.Start()
+	if err != nil {
+		return err
+	}
 	rawURL := ""
 	for _, p := range t.peers {
 		if p.ID != t.id {

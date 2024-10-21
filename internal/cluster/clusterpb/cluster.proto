@@ -32,3 +32,8 @@ message LogConfiguration {
     string MimeType = 3;
     bytes Data = 4;
 }
+
+message LogSyncableIndex {
+    string ID = 1;
+    uint64 Index = 2;
+}

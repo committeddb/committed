@@ -4,6 +4,7 @@ package db
 
 import (
 	"context"
+	"fmt"
 	"io"
 
 	"github.com/philborlin/committed/internal/cluster"
@@ -25,7 +26,7 @@ type DB struct {
 	parser      Parser
 }
 
-func New(id uint64, peers Peers, s Storage, p Parser) *DB {
+func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithID) *DB {
 	proposeC := make(chan []byte)
 	confChangeC := make(chan raftpb.ConfChange)
 
@@ -39,7 +40,8 @@ func New(id uint64, peers Peers, s Storage, p Parser) *DB {
 	ctx, cancelSyncs := context.WithCancel(context.Background())
 
 	commitC, errorC, closer := NewRaft(id, rpeers, s, proposeC, confChangeC)
-	return &DB{
+
+	db := &DB{
 		CommitC:     commitC,
 		ErrorC:      errorC,
 		proposeC:    proposeC,
@@ -49,6 +51,17 @@ func New(id uint64, peers Peers, s Storage, p Parser) *DB {
 		ctx:         ctx,
 		cancelSyncs: cancelSyncs,
 		parser:      p,
+	}
+
+	go db.sync(sync)
+
+	return db
+}
+
+func (db *DB) sync(sync <-chan *SyncableWithID) {
+	for sync != nil {
+		syncable := <-sync
+		db.Sync(context.Background(), syncable.ID, syncable.Syncable)
 	}
 }
 
@@ -76,17 +89,17 @@ func (db *DB) Propose(p *cluster.Proposal) error {
 	return nil
 }
 
-func (db *DB) ProposeType(t *cluster.Type) error {
-	typeEntity, err := cluster.NewUpsertTypeEntity(t)
-	if err != nil {
-		return err
-	}
+// func (db *DB) ProposeType(t *cluster.Type) error {
+// 	typeEntity, err := cluster.NewUpsertTypeEntity(t)
+// 	if err != nil {
+// 		return err
+// 	}
 
-	p := &cluster.Proposal{}
-	p.Entities = append(p.Entities, typeEntity)
+// 	p := &cluster.Proposal{}
+// 	p.Entities = append(p.Entities, typeEntity)
 
-	return db.Propose(p)
-}
+// 	return db.Propose(p)
+// }
 
 func (db *DB) ProposeDeleteType(id string) error {
 	deleteTypeEntity := cluster.NewDeleteTypeEntity(id)
@@ -110,17 +123,16 @@ func (db *DB) Close() error {
 // The caller should run this on a separate go routine - or do we want to do this so close() can cancel all contexts?
 func (db *DB) Sync(ctx context.Context, id string, s cluster.Syncable) error {
 	go func() {
-		// TODO Get the index for the reader id from storage
-		r := db.storage.Reader(0)
+		r := db.storage.Reader(id)
 
 		for {
 			select {
-			case <-db.ctx.Done():
+			case <-ctx.Done():
 				return
 			default:
 			}
 
-			_, p, err := r.Read()
+			i, p, err := r.Read()
 			if err == io.EOF {
 				// TODO Figure out what to do - maybe do an exponential backoff to a certain point - maybe nothing?
 				continue
@@ -129,16 +141,36 @@ func (db *DB) Sync(ctx context.Context, id string, s cluster.Syncable) error {
 				return
 			}
 
-			err = s.Sync(db.ctx, p)
+			shouldSnapshot, err := s.Sync(db.ctx, p)
 			if err != nil {
 				// TODO Handle error
+				fmt.Printf("[db.DB] sync: %v\n", err)
 				return
 			}
 
-			// TODO Add a proposal to store what index we just read
-			// We need to use raft when updating ids so boltdbs on all nodes have access to the ids
+			if shouldSnapshot {
+				err = db.proposeSyncableIndex(&cluster.SyncableIndex{ID: id, Index: i})
+				if err != nil {
+					// TODO Handle error
+					return
+				}
+			}
 		}
 	}()
+
+	return nil
+}
+
+func (db *DB) proposeSyncableIndex(i *cluster.SyncableIndex) error {
+	entity, err := cluster.NewUpsertSyncableIndexEntity(i)
+	if err != nil {
+		return err
+	}
+
+	err = db.Propose(&cluster.Proposal{Entities: []*cluster.Entity{entity}})
+	if err != nil {
+		return err
+	}
 
 	return nil
 }

@@ -4,16 +4,15 @@ import (
 	httpgo "net/http"
 )
 
-func (h *HTTP) AddType(w httpgo.ResponseWriter, r *httpgo.Request) {
+func (h *HTTP) AddDatabase(w httpgo.ResponseWriter, r *httpgo.Request) {
 	c, err := createConfiguration(w, r)
 	if err != nil {
 		badRequest(w, err)
 		return
 	}
 
-	err = h.c.ProposeType(c)
+	err = h.c.ProposeDatabase(c)
 	if err != nil {
 		internalServerError(w, err)
-		return
 	}
 }

@@ -12,7 +12,7 @@ type Storage interface {
 	Close() error
 	Save(st raftpb.HardState, ents []raftpb.Entry, snap raftpb.Snapshot) error
 	Type(id string) (*cluster.Type, error)
-	Reader(index uint64) ProposalReader // The index to start reading from
+	Reader(id string) ProposalReader // Sets current index by id cache. If id is not know index is 0
 	Database(id string) (cluster.Database, error)
 	Syncables() ([]*cluster.Configuration, error)
 }

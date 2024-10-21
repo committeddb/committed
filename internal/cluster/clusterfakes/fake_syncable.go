@@ -19,17 +19,19 @@ type FakeSyncable struct {
 	closeReturnsOnCall map[int]struct {
 		result1 error
 	}
-	SyncStub        func(context.Context, *cluster.Proposal) error
+	SyncStub        func(context.Context, *cluster.Proposal) (cluster.ShouldSnapshot, error)
 	syncMutex       sync.RWMutex
 	syncArgsForCall []struct {
 		arg1 context.Context
 		arg2 *cluster.Proposal
 	}
 	syncReturns struct {
-		result1 error
+		result1 cluster.ShouldSnapshot
+		result2 error
 	}
 	syncReturnsOnCall map[int]struct {
-		result1 error
+		result1 cluster.ShouldSnapshot
+		result2 error
 	}
 	invocations      map[string][][]interface{}
 	invocationsMutex sync.RWMutex
@@ -88,7 +90,7 @@ func (fake *FakeSyncable) CloseReturnsOnCall(i int, result1 error) {
 	}{result1}
 }
 
-func (fake *FakeSyncable) Sync(arg1 context.Context, arg2 *cluster.Proposal) error {
+func (fake *FakeSyncable) Sync(arg1 context.Context, arg2 *cluster.Proposal) (cluster.ShouldSnapshot, error) {
 	fake.syncMutex.Lock()
 	ret, specificReturn := fake.syncReturnsOnCall[len(fake.syncArgsForCall)]
 	fake.syncArgsForCall = append(fake.syncArgsForCall, struct {
@@ -103,9 +105,9 @@ func (fake *FakeSyncable) Sync(arg1 context.Context, arg2 *cluster.Proposal) err
 		return stub(arg1, arg2)
 	}
 	if specificReturn {
-		return ret.result1
+		return ret.result1, ret.result2
 	}
-	return fakeReturns.result1
+	return fakeReturns.result1, fakeReturns.result2
 }
 
 func (fake *FakeSyncable) SyncCallCount() int {
@@ -114,7 +116,7 @@ func (fake *FakeSyncable) SyncCallCount() int {
 	return len(fake.syncArgsForCall)
 }
 
-func (fake *FakeSyncable) SyncCalls(stub func(context.Context, *cluster.Proposal) error) {
+func (fake *FakeSyncable) SyncCalls(stub func(context.Context, *cluster.Proposal) (cluster.ShouldSnapshot, error)) {
 	fake.syncMutex.Lock()
 	defer fake.syncMutex.Unlock()
 	fake.SyncStub = stub
@@ -127,27 +129,30 @@ func (fake *FakeSyncable) SyncArgsForCall(i int) (context.Context, *cluster.Prop
 	return argsForCall.arg1, argsForCall.arg2
 }
 
-func (fake *FakeSyncable) SyncReturns(result1 error) {
+func (fake *FakeSyncable) SyncReturns(result1 cluster.ShouldSnapshot, result2 error) {
 	fake.syncMutex.Lock()
 	defer fake.syncMutex.Unlock()
 	fake.SyncStub = nil
 	fake.syncReturns = struct {
-		result1 error
-	}{result1}
+		result1 cluster.ShouldSnapshot
+		result2 error
+	}{result1, result2}
 }
 
-func (fake *FakeSyncable) SyncReturnsOnCall(i int, result1 error) {
+func (fake *FakeSyncable) SyncReturnsOnCall(i int, result1 cluster.ShouldSnapshot, result2 error) {
 	fake.syncMutex.Lock()
 	defer fake.syncMutex.Unlock()
 	fake.SyncStub = nil
 	if fake.syncReturnsOnCall == nil {
 		fake.syncReturnsOnCall = make(map[int]struct {
-			result1 error
+			result1 cluster.ShouldSnapshot
+			result2 error
 		})
 	}
 	fake.syncReturnsOnCall[i] = struct {
-		result1 error
-	}{result1}
+		result1 cluster.ShouldSnapshot
+		result2 error
+	}{result1, result2}
 }
 
 func (fake *FakeSyncable) Invocations() map[string][][]interface{} {

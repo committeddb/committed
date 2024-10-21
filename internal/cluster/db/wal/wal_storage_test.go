@@ -74,7 +74,7 @@ func (s *StorageWrapper) CloseAndReopen() (*StorageWrapper, error) {
 		return nil, err
 	}
 
-	wal, err := wal.Open(s.path, s.parser)
+	wal, err := wal.Open(s.path, s.parser, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -82,9 +82,9 @@ func (s *StorageWrapper) CloseAndReopen() (*StorageWrapper, error) {
 	return &StorageWrapper{wal, s.path, s.parser}, nil
 }
 
-func (s *StorageWrapper) Cleanup() error {
+func (s *StorageWrapper) Cleanup() {
 	_ = s.Close()
-	return os.RemoveAll(s.path)
+	_ = os.RemoveAll(s.path)
 }
 
 func (s *StorageWrapper) ents(t *testing.T) []pb.Entry {
@@ -166,9 +166,9 @@ func NewStorageWithParser(t *testing.T, ents []pb.Entry, p db.Parser) *StorageWr
 		return nil
 	}
 
-	s := OpenStorage(t, dir, p)
+	s := OpenStorage(t, dir, p, nil)
 	if ents != nil {
-		s.Save(defaultHardState, ents, defaultSnap)
+		_ = s.Save(defaultHardState, ents, defaultSnap)
 	}
 
 	return s
@@ -181,11 +181,11 @@ func (s *StorageWrapper) CloseAndReopenStorage(t *testing.T) *StorageWrapper {
 		return nil
 	}
 
-	return OpenStorage(t, s.path, s.parser)
+	return OpenStorage(t, s.path, s.parser, nil)
 }
 
-func OpenStorage(t *testing.T, dir string, p db.Parser) *StorageWrapper {
-	wal, err := wal.Open(dir, p)
+func OpenStorage(t *testing.T, dir string, p db.Parser, sync chan *db.SyncableWithID) *StorageWrapper {
+	wal, err := wal.Open(dir, p, sync)
 	if err != nil {
 		t.Fatal(err)
 		return nil
@@ -482,7 +482,8 @@ func TestStateStorage(t *testing.T) {
 		t.Run("", func(t *testing.T) {
 			s := NewStorage(t, nil)
 			defer s.Cleanup()
-			s.Save(tt.st, nil, tt.snap)
+			err := s.Save(tt.st, nil, tt.snap)
+			require.Equal(t, nil, err)
 
 			stb, err := tt.st.Marshal()
 			require.Equal(t, nil, err)
@@ -519,9 +520,10 @@ func TestStartupWithExistingLogs(t *testing.T) {
 	}
 }
 
-func saveEntity(t *testing.T, e *cluster.Entity, s db.Storage, term, index uint64) {
+func saveEntity(t *testing.T, e *cluster.Entity, s db.Storage, term, index uint64) *cluster.Proposal {
 	p := &cluster.Proposal{Entities: []*cluster.Entity{e}}
 	saveProposal(t, p, s, term, index)
+	return p
 }
 
 func saveProposal(t *testing.T, p *cluster.Proposal, s db.Storage, term, index uint64) {
@@ -539,7 +541,7 @@ func createDatabaseConfiguration(name string) *cluster.Configuration {
 	return createConfiguration(name, d)
 }
 
-func createConfiguration(name string, v any) *cluster.Configuration {
+func createConfiguration(id string, v any) *cluster.Configuration {
 	bs, _ := json.Marshal(v)
-	return &cluster.Configuration{ID: name, Name: name, MimeType: "application/json", Data: bs}
+	return &cluster.Configuration{ID: id, MimeType: "application/json", Data: bs}
 }

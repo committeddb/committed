@@ -1,0 +1,24 @@
+[syncable]
+name="foo"
+# Determines what the rest of the config will look like
+dbType="sql"
+
+[sql]
+topic = "simple"
+db = "testdb"
+table = "foo"
+primaryKey = "pk"
+
+[[sql.indexes]]
+name = "firstIndex"
+index = "one"
+
+[[sql.mappings]]
+jsonPath = "$.key"
+column = "pk"
+type = "TEXT"
+
+[[sql.mappings]]
+jsonPath = "$.one"
+column = "one"
+type = "TEXT"

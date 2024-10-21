@@ -3,12 +3,16 @@ package cluster
 import (
 	"context"
 
+	"github.com/philborlin/committed/internal/cluster/clusterpb"
 	"github.com/spf13/viper"
+	"google.golang.org/protobuf/proto"
 )
+
+type ShouldSnapshot bool
 
 //counterfeiter:generate . Syncable
 type Syncable interface {
-	Sync(ctx context.Context, p *Proposal) error
+	Sync(ctx context.Context, p *Proposal) (ShouldSnapshot, error)
 	Close() error
 }
 
@@ -36,4 +40,47 @@ func NewUpsertSyncableEntity(c *Configuration) (*Entity, error) {
 	}
 
 	return NewUpsertEntity(syncableType, []byte(c.ID), bs), nil
+}
+
+var syncableIndexType = &Type{
+	ID:      "ab972bba-83fe-4dea-9c5d-877645e8d21e",
+	Name:    "InternalSyncableIndex",
+	Version: 1,
+}
+
+type SyncableIndex struct {
+	ID    string
+	Index uint64
+}
+
+func (i *SyncableIndex) Marshal() ([]byte, error) {
+	li := &clusterpb.LogSyncableIndex{ID: i.ID, Index: i.Index}
+	return proto.Marshal(li)
+}
+
+func (i *SyncableIndex) Unmarshal(bs []byte) error {
+	li := &clusterpb.LogSyncableIndex{}
+	err := proto.Unmarshal(bs, li)
+	if err != nil {
+		return err
+	}
+
+	i.ID = li.ID
+	i.Index = li.Index
+
+	return nil
+}
+
+func IsSyncableIndex(id string) bool {
+	return id == syncableIndexType.ID
+}
+
+func NewUpsertSyncableIndexEntity(i *SyncableIndex) (*Entity, error) {
+	bs, err := i.Marshal()
+	if err != nil {
+		return nil, err
+	}
+
+	// TODO Hardcoded
+	return NewUpsertEntity(syncableIndexType, []byte("foo"), bs), nil
 }

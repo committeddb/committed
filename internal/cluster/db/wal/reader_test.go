@@ -1,7 +1,6 @@
 package wal_test
 
 import (
-	"fmt"
 	"io"
 	"testing"
 
@@ -28,11 +27,52 @@ func TestReader(t *testing.T) {
 			defer s.Cleanup()
 
 			pc := NewProposalCreator(s)
-			ps := pc.saveProposal(t, tt.inputs)
+			ps := pc.createAndSaveProposals(t, tt.inputs)
 
-			r := s.Reader(0)
+			r := s.Reader("qux")
 
 			for _, expected := range ps {
+				_, got, err := r.Read()
+				require.Equal(t, nil, err)
+				require.Equal(t, expected, got)
+			}
+		})
+	}
+}
+
+func TestReaderSkipsSyncableIndexes(t *testing.T) {
+	tests := map[string]struct {
+		inputs [][]string
+	}{
+		"simple":  {inputs: [][]string{{"foo"}}},
+		"two-one": {inputs: [][]string{{"foo", "bar"}, {"baz"}}},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			id := "foo"
+			s := NewStorage(t, nil)
+			defer s.Cleanup()
+
+			pc := NewProposalCreator(s)
+
+			var ps []*cluster.Proposal
+			for _, input := range tt.inputs {
+				ps = append(ps, createProposal(input))
+				ps = append(ps, createSyncableIndexProposal(t, id))
+			}
+			pc.saveProposals(t, ps)
+
+			psAssert := []*cluster.Proposal{}
+			for _, p := range ps {
+				if !cluster.IsSyncableIndex(p.Entities[0].Type.ID) {
+					psAssert = append(psAssert, p)
+				}
+			}
+
+			r := s.Reader(id)
+
+			for _, expected := range psAssert {
 				_, got, err := r.Read()
 				require.Equal(t, nil, err)
 				require.Equal(t, expected, got)
@@ -54,7 +94,7 @@ func TestEOF(t *testing.T) {
 			s := NewStorage(t, nil)
 			defer s.Cleanup()
 
-			r := s.Reader(0)
+			r := s.Reader("qux")
 
 			ps := createProposals(tt.inputs)
 			for i, p := range ps {
@@ -85,13 +125,14 @@ func TestResumeReader(t *testing.T) {
 
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
+			id := "qux"
 			s := NewStorage(t, nil)
 			defer s.Cleanup()
 
 			pc := NewProposalCreator(s)
-			ps := pc.saveProposal(t, tt.firstRead)
+			ps := pc.createAndSaveProposals(t, tt.firstRead)
 
-			r := s.Reader(0)
+			r := s.Reader(id)
 
 			var index uint64
 			for _, expected := range ps {
@@ -101,8 +142,10 @@ func TestResumeReader(t *testing.T) {
 				require.Equal(t, expected, got)
 			}
 
-			ps = pc.saveProposal(t, tt.secondRead)
-			r = s.Reader(index)
+			pc.saveProposals(t, []*cluster.Proposal{createSyncableIndexProposalWithIndex(t, id, index)})
+
+			ps = pc.createAndSaveProposals(t, tt.secondRead)
+			r = s.Reader(id)
 
 			for _, expected := range ps {
 				_, got, err := r.Read()
@@ -123,8 +166,7 @@ func NewProposalCreator(s *StorageWrapper) *ProposalCreator {
 	return &ProposalCreator{currentIndex: uint64(6), currentTerm: uint64(6), s: s}
 }
 
-func (c *ProposalCreator) saveProposal(t *testing.T, inputs [][]string) []*cluster.Proposal {
-	ps := createProposals(inputs)
+func (c *ProposalCreator) saveProposals(t *testing.T, ps []*cluster.Proposal) []*cluster.Proposal {
 	for _, p := range ps {
 		c.currentIndex += 1
 		configEntry := &pb.Entry{
@@ -141,21 +183,40 @@ func (c *ProposalCreator) saveProposal(t *testing.T, inputs [][]string) []*clust
 	return ps
 }
 
+func (c *ProposalCreator) createAndSaveProposals(t *testing.T, inputs [][]string) []*cluster.Proposal {
+	ps := createProposals(inputs)
+	return c.saveProposals(t, ps)
+}
+
 func createProposals(input [][]string) []*cluster.Proposal {
 	var ps []*cluster.Proposal
 
-	for fi, entities := range input {
-		proposal := &cluster.Proposal{}
-		for si, entity := range entities {
-			logEntity := &cluster.Entity{
-				Type: &cluster.Type{ID: "string"},
-				Key:  []byte(fmt.Sprintf("%d-%d", fi, si)),
-				Data: []byte(entity),
-			}
-			proposal.Entities = append(proposal.Entities, logEntity)
-		}
-		ps = append(ps, proposal)
+	for _, entities := range input {
+		ps = append(ps, createProposal(entities))
 	}
 
 	return ps
+}
+
+func createProposal(input []string) *cluster.Proposal {
+	proposal := &cluster.Proposal{}
+	for _, entity := range input {
+		logEntity := &cluster.Entity{
+			Type: &cluster.Type{ID: "string"},
+			Key:  []byte(entity),
+			Data: []byte(entity),
+		}
+		proposal.Entities = append(proposal.Entities, logEntity)
+	}
+	return proposal
+}
+
+func createSyncableIndexProposal(t *testing.T, id string) *cluster.Proposal {
+	return createSyncableIndexProposalWithIndex(t, id, 0)
+}
+
+func createSyncableIndexProposalWithIndex(t *testing.T, id string, index uint64) *cluster.Proposal {
+	e, err := cluster.NewUpsertSyncableIndexEntity(&cluster.SyncableIndex{ID: id, Index: index})
+	require.Nil(t, err)
+	return &cluster.Proposal{Entities: []*cluster.Entity{e}}
 }

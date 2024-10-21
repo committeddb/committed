@@ -1,6 +1,8 @@
 package wal
 
 import (
+	"fmt"
+
 	"github.com/philborlin/committed/internal/cluster"
 	bolt "go.etcd.io/bbolt"
 )
@@ -28,17 +30,17 @@ func (s *Storage) saveDatabase(t *cluster.Configuration) error {
 		}
 		bs, err := t.Marshal()
 		if err != nil {
-			return err
+			return fmt.Errorf("[wal.database] marshal: %w", err)
 		}
 
 		_, db, err := s.parser.ParseDatabase(t.MimeType, t.Data)
 		if err != nil {
-			return err
+			return fmt.Errorf("[wal.database] parseDatabase: %w", err)
 		}
 
 		err = b.Put([]byte(t.ID), bs)
 		if err != nil {
-			return err
+			return fmt.Errorf("[wal.database] put: %w", err)
 		}
 
 		s.databases[t.ID] = db

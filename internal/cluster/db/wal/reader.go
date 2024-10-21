@@ -41,15 +41,26 @@ func (r *Reader) Read() (uint64, *cluster.Proposal, error) {
 
 		if ent.Type == pb.EntryNormal {
 			p := &cluster.Proposal{}
-			p.Unmarshal(ent.Data)
+			err := p.Unmarshal(ent.Data)
+			if err != nil {
+				return 0, nil, err
+			}
 
-			if len(p.Entities) > 0 {
+			if len(p.Entities) > 0 && !cluster.IsSyncableIndex(p.Entities[0].Type.ID) {
 				return readIndex, p, nil
 			}
 		}
 	}
 }
 
-func (s *Storage) Reader(index uint64) db.ProposalReader {
-	return &Reader{index: index, s: s}
+func (s *Storage) Reader(id string) db.ProposalReader {
+	i, err := s.getSyncableIndex(id)
+	if err != nil {
+		// TODO We should log this
+		i = 0
+	} else if id == "" {
+		i = 0
+	}
+
+	return &Reader{index: i, s: s}
 }
