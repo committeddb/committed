@@ -1,0 +1,9 @@
+syntax = "proto3";
+package dialectpb;
+
+option go_package = "github.com/philborlin/committed/internal/cluster/ingestable/dialect/dialectpb";
+
+message MySQLBinLogPosition {
+    string name = 1;
+	uint32 pos = 2;
+}

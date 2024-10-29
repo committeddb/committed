@@ -8,3 +8,4 @@ entry-log
 state-log
 .vscode
 .idea
+docker/db
