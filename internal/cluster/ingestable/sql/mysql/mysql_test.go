@@ -81,10 +81,10 @@ func TestMysqlDialect(t *testing.T) {
 	basicConfig := &sql.Config{
 		Type: simpleType,
 		Mappings: []sql.Mapping{{
-			JSONName:  "one",
+			JsonName:  "one",
 			SQLColumn: "one",
 		}, {
-			JSONName:  "pk",
+			JsonName:  "pk",
 			SQLColumn: "pk",
 		}},
 		PrimaryKey: "pk",

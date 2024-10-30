@@ -84,7 +84,7 @@ func (h *MySQLEventHandler) OnRow(e *canal.RowsEvent) error {
 		toJSON := make(map[string]any)
 		for _, mapping := range h.config.Mappings {
 			value := m[mapping.SQLColumn]
-			toJSON[mapping.JSONName] = value
+			toJSON[mapping.JsonName] = value
 		}
 
 		jsonString, err := json.Marshal(toJSON)

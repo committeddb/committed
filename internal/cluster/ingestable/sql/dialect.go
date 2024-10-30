@@ -20,6 +20,6 @@ type Config struct {
 }
 
 type Mapping struct {
-	JSONName  string
+	JsonName  string
 	SQLColumn string
 }

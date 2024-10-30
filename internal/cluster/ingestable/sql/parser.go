@@ -43,7 +43,7 @@ func (p *IngestableParser) ParseConfig(v *viper.Viper) (*Config, Dialect, error)
 	for _, item := range v.Get("sql.mappings").([]interface{}) {
 		m := item.(map[string]interface{})
 		mapping := Mapping{
-			JSONName:  m["jsonName"].(string),
+			JsonName:  m["jsonName"].(string),
 			SQLColumn: m["column"].(string),
 		}
 		mappings = append(mappings, mapping)

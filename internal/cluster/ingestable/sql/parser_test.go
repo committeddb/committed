@@ -52,8 +52,8 @@ func TestParse(t *testing.T) {
 }
 
 func simpleConfig() *sql.Config {
-	m1 := sql.Mapping{JSONName: "pk", SQLColumn: "pk"}
-	m2 := sql.Mapping{JSONName: "one", SQLColumn: "one"}
+	m1 := sql.Mapping{JsonName: "pk", SQLColumn: "pk"}
+	m2 := sql.Mapping{JsonName: "one", SQLColumn: "one"}
 	m := []sql.Mapping{m1, m2}
 
 	return &sql.Config{
