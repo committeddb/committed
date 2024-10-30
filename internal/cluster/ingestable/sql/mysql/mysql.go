@@ -19,20 +19,18 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-type MySQLDialect struct {
-	Config *sql.Config
-}
+type MySQLDialect struct{}
 
-func (m *MySQLDialect) Open(connectionString string, pos sql.Position) (<-chan *cluster.Proposal, <-chan sql.Position, io.Closer, error) {
-	c, tables, err := createCanal(connectionString)
+func (m *MySQLDialect) Open(config *sql.Config, pos cluster.Position) (<-chan *cluster.Proposal, <-chan cluster.Position, io.Closer, error) {
+	c, tables, err := createCanal(config.ConnectionString)
 	if err != nil {
 		fmt.Println(err)
 	}
 
 	proposalChan := make(chan *cluster.Proposal)
-	positionChan := make(chan sql.Position)
+	positionChan := make(chan cluster.Position)
 	handler := &MySQLEventHandler{
-		dialect:      m,
+		config:       config,
 		canal:        c,
 		proposalChan: proposalChan,
 		positionChan: positionChan,
@@ -58,10 +56,10 @@ func (m *MySQLDialect) Open(connectionString string, pos sql.Position) (<-chan *
 
 type MySQLEventHandler struct {
 	canal.DummyEventHandler
-	dialect      *MySQLDialect
+	config       *sql.Config
 	canal        *canal.Canal
 	proposalChan chan<- *cluster.Proposal
-	positionChan chan<- sql.Position
+	positionChan chan<- cluster.Position
 	tables       []string
 }
 
@@ -84,7 +82,7 @@ func (h *MySQLEventHandler) OnRow(e *canal.RowsEvent) error {
 		}
 
 		toJSON := make(map[string]any)
-		for _, mapping := range h.dialect.Config.Mappings {
+		for _, mapping := range h.config.Mappings {
 			value := m[mapping.SQLColumn]
 			toJSON[mapping.JSONName] = value
 		}
@@ -94,12 +92,12 @@ func (h *MySQLEventHandler) OnRow(e *canal.RowsEvent) error {
 			return err
 		}
 
-		primaryKey := h.dialect.Config.PrimaryKey
+		primaryKey := h.config.PrimaryKey
 		key := fmt.Sprintf("%v", m[primaryKey])
 
 		p := &cluster.Proposal{
 			Entities: []*cluster.Entity{{
-				Type: h.dialect.Config.Type,
+				Type: h.config.Type,
 				Key:  []byte(key),
 				Data: []byte(jsonString),
 			}},

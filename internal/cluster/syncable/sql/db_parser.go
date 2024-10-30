@@ -17,7 +17,7 @@ func (d *DBParser) Parse(v *viper.Viper, name string) (cluster.Database, error) 
 
 	dialect, ok := d.Dialects[dialectName]
 	if !ok {
-		return nil, fmt.Errorf("%s not found", dialectName)
+		return nil, fmt.Errorf("dialect %s not found", dialectName)
 	}
 
 	db, err := NewDB(dialect, connectionString)

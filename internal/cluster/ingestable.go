@@ -1,9 +1,9 @@
 package cluster
 
-import "context"
+type Position []byte
 
 //counterfeiter:generate . Ingestable
 type Ingestable interface {
-	Ingest(ctx context.Context) (ShouldSnapshot, *Proposal, error)
+	Ingest(pos Position) (<-chan *Proposal, <-chan Position, error)
 	Close() error
 }

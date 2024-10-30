@@ -1,0 +1,18 @@
+[ingestable]
+name="foo"
+# Determines what the rest of the config will look like
+dbType="sql"
+
+[sql]
+dialect="mysql"
+topic = "simple"
+connectionString="foo"
+primaryKey = "pk"
+
+[[sql.mappings]]
+jsonName = "pk"
+column = "pk"
+
+[[sql.mappings]]
+jsonName = "one"
+column = "one"

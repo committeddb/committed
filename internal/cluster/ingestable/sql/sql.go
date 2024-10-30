@@ -1,48 +1,31 @@
 package sql
 
 import (
-	"context"
-	"database/sql"
+	"io"
 
 	"github.com/philborlin/committed/internal/cluster"
 )
 
-type Read struct {
-}
+//go:generate go run github.com/maxbrunsfeld/counterfeiter/v6 -generate
 
 type Ingestable struct {
-	db      *sql.DB
 	config  *Config
 	dialect Dialect
-	insert  *Read
+	closer  io.Closer
 }
 
-func New(d *DB, config *Config) *Ingestable {
-	return &Ingestable{db: d.DB, config: config, dialect: d.dialect}
+func New(d Dialect, config *Config) *Ingestable {
+	return &Ingestable{config: config, dialect: d}
 }
 
-func (i *Ingestable) Ingest(ctx context.Context) (cluster.ShouldSnapshot, *cluster.Proposal, error) {
-	// cfg := replication.BinlogSyncerConfig{
-	// 	ServerID: 100,
-	// 	Flavor:   "mysql",
-	// 	Host:     "127.0.0.1",
-	// 	Port:     3306,
-	// 	User:     "root",
-	// 	Password: "",
-	// }
-	// syncer := replication.NewBinlogSyncer(cfg)
+func (i *Ingestable) Ingest(pos cluster.Position) (<-chan *cluster.Proposal, <-chan cluster.Position, error) {
+	proposalChan, positionChan, closer, err := i.dialect.Open(i.config, pos)
 
-	// syncer.
+	i.closer = closer
 
-	// streamer, _ := syncer.StartSync(mysql.Position{binlogFile, binlogPos})
-
-	return false, nil, nil
-}
-
-func (i *Ingestable) Init() error {
-	return nil
+	return proposalChan, positionChan, err
 }
 
 func (i *Ingestable) Close() error {
-	return nil
+	return i.closer.Close()
 }

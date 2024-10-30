@@ -118,9 +118,10 @@ func TestMysqlDialect(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dialect := &mysql.MySQLDialect{tt.config}
+			dialect := &mysql.MySQLDialect{}
 			con := fmt.Sprintf("mysql://%s:%s@127.0.0.1:%s/%s?tables=%s", username, password, port, dbName, tt.tables)
-			proposalChan, positionChan, closer, err := dialect.Open(con, nil)
+			tt.config.ConnectionString = con
+			proposalChan, positionChan, closer, err := dialect.Open(tt.config, nil)
 			require.Nil(t, err)
 			defer closer.Close()
 
@@ -129,7 +130,7 @@ func TestMysqlDialect(t *testing.T) {
 			expectedCount := 2
 
 			var proposals []*cluster.Proposal
-			var positions []*sql.Position
+			var positions []*cluster.Position
 		outer:
 			for {
 				select {
