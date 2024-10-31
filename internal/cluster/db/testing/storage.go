@@ -78,6 +78,10 @@ func (ms *MemoryStorage) Reader(id string) db.ProposalReader {
 	return &Reader{index: i, s: ms}
 }
 
+func (ms *MemoryStorage) Position(id string) cluster.Position {
+	return nil
+}
+
 func (ms *MemoryStorage) Database(id string) (cluster.Database, error) {
 	return nil, nil
 }

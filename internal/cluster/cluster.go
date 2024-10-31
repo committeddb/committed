@@ -19,6 +19,8 @@ type Cluster interface {
 	Type(id string) (*Type, error)
 	Close() error
 	// The caller should run this on a separate go routine - or do we want to do this so close() can cancel all contexts?
+	Ingest(ctx context.Context, id string, s Ingestable) error
+	// The caller should run this on a separate go routine - or do we want to do this so close() can cancel all contexts?
 	Sync(ctx context.Context, id string, s Syncable) error
 	AddSyncableParser(name string, p SyncableParser)
 	AddDatabaseParser(name string, p DatabaseParser)

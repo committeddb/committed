@@ -81,6 +81,5 @@ func NewUpsertSyncableIndexEntity(i *SyncableIndex) (*Entity, error) {
 		return nil, err
 	}
 
-	// TODO Hardcoded
-	return NewUpsertEntity(syncableIndexType, []byte("foo"), bs), nil
+	return NewUpsertEntity(syncableIndexType, []byte(i.ID), bs), nil
 }

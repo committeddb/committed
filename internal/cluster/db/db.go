@@ -120,7 +120,38 @@ func (db *DB) Close() error {
 	return db.closer.Close()
 }
 
-// The caller should run this on a separate go routine - or do we want to do this so close() can cancel all contexts?
+func (db *DB) Ingest(ctx context.Context, id string, i cluster.Ingestable) error {
+	go func() {
+		p := db.storage.Position(id)
+		proposalChan, positionChan, err := i.Ingest(p)
+		if err != nil {
+			fmt.Printf("[db.DB] ingest: %v\n", err)
+		}
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case proposal := <-proposalChan:
+				err = db.Propose(proposal)
+				if err != nil {
+					// TODO Handle error
+					fmt.Printf("[db.DB] propose: %v\n", err)
+				}
+			case position := <-positionChan:
+				err = db.proposeIngestablePosition(&cluster.IngestablePosition{ID: id, Position: position})
+				if err != nil {
+					// TODO Handle error
+					fmt.Printf("[db.DB] proposeIngestablePosition: %v\n", err)
+				}
+				// default:
+			}
+		}
+	}()
+
+	return nil
+}
+
 func (db *DB) Sync(ctx context.Context, id string, s cluster.Syncable) error {
 	go func() {
 		r := db.storage.Reader(id)
@@ -138,6 +169,7 @@ func (db *DB) Sync(ctx context.Context, id string, s cluster.Syncable) error {
 				continue
 			} else if err != nil {
 				// TODO Handle error
+				fmt.Printf("[db.DB] read: %v\n", err)
 				return
 			}
 
@@ -152,6 +184,7 @@ func (db *DB) Sync(ctx context.Context, id string, s cluster.Syncable) error {
 				err = db.proposeSyncableIndex(&cluster.SyncableIndex{ID: id, Index: i})
 				if err != nil {
 					// TODO Handle error
+					fmt.Printf("[db.DB] proposeSyncableIndex: %v\n", err)
 					return
 				}
 			}
@@ -163,6 +196,20 @@ func (db *DB) Sync(ctx context.Context, id string, s cluster.Syncable) error {
 
 func (db *DB) proposeSyncableIndex(i *cluster.SyncableIndex) error {
 	entity, err := cluster.NewUpsertSyncableIndexEntity(i)
+	if err != nil {
+		return err
+	}
+
+	err = db.Propose(&cluster.Proposal{Entities: []*cluster.Entity{entity}})
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (db *DB) proposeIngestablePosition(p *cluster.IngestablePosition) error {
+	entity, err := cluster.NewUpsertIngestablePositionEntity(p)
 	if err != nil {
 		return err
 	}

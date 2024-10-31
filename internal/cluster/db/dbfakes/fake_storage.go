@@ -86,6 +86,17 @@ type FakeStorage struct {
 		result1 uint64
 		result2 error
 	}
+	PositionStub        func(string) cluster.Position
+	positionMutex       sync.RWMutex
+	positionArgsForCall []struct {
+		arg1 string
+	}
+	positionReturns struct {
+		result1 cluster.Position
+	}
+	positionReturnsOnCall map[int]struct {
+		result1 cluster.Position
+	}
 	ReaderStub        func(string) db.ProposalReader
 	readerMutex       sync.RWMutex
 	readerArgsForCall []struct {
@@ -518,6 +529,67 @@ func (fake *FakeStorage) LastIndexReturnsOnCall(i int, result1 uint64, result2 e
 	}{result1, result2}
 }
 
+func (fake *FakeStorage) Position(arg1 string) cluster.Position {
+	fake.positionMutex.Lock()
+	ret, specificReturn := fake.positionReturnsOnCall[len(fake.positionArgsForCall)]
+	fake.positionArgsForCall = append(fake.positionArgsForCall, struct {
+		arg1 string
+	}{arg1})
+	stub := fake.PositionStub
+	fakeReturns := fake.positionReturns
+	fake.recordInvocation("Position", []interface{}{arg1})
+	fake.positionMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeStorage) PositionCallCount() int {
+	fake.positionMutex.RLock()
+	defer fake.positionMutex.RUnlock()
+	return len(fake.positionArgsForCall)
+}
+
+func (fake *FakeStorage) PositionCalls(stub func(string) cluster.Position) {
+	fake.positionMutex.Lock()
+	defer fake.positionMutex.Unlock()
+	fake.PositionStub = stub
+}
+
+func (fake *FakeStorage) PositionArgsForCall(i int) string {
+	fake.positionMutex.RLock()
+	defer fake.positionMutex.RUnlock()
+	argsForCall := fake.positionArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeStorage) PositionReturns(result1 cluster.Position) {
+	fake.positionMutex.Lock()
+	defer fake.positionMutex.Unlock()
+	fake.PositionStub = nil
+	fake.positionReturns = struct {
+		result1 cluster.Position
+	}{result1}
+}
+
+func (fake *FakeStorage) PositionReturnsOnCall(i int, result1 cluster.Position) {
+	fake.positionMutex.Lock()
+	defer fake.positionMutex.Unlock()
+	fake.PositionStub = nil
+	if fake.positionReturnsOnCall == nil {
+		fake.positionReturnsOnCall = make(map[int]struct {
+			result1 cluster.Position
+		})
+	}
+	fake.positionReturnsOnCall[i] = struct {
+		result1 cluster.Position
+	}{result1}
+}
+
 func (fake *FakeStorage) Reader(arg1 string) db.ProposalReader {
 	fake.readerMutex.Lock()
 	ret, specificReturn := fake.readerReturnsOnCall[len(fake.readerArgsForCall)]
@@ -902,6 +974,8 @@ func (fake *FakeStorage) Invocations() map[string][][]interface{} {
 	defer fake.initialStateMutex.RUnlock()
 	fake.lastIndexMutex.RLock()
 	defer fake.lastIndexMutex.RUnlock()
+	fake.positionMutex.RLock()
+	defer fake.positionMutex.RUnlock()
 	fake.readerMutex.RLock()
 	defer fake.readerMutex.RUnlock()
 	fake.saveMutex.RLock()

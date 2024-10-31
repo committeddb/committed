@@ -318,6 +318,10 @@ func (ms *MemoryStorage) Type(id string) (*cluster.Type, error) {
 	return nil, nil
 }
 
+func (ms *MemoryStorage) Position(id string) cluster.Position {
+	return nil
+}
+
 func (ms *MemoryStorage) Reader(id string) db.ProposalReader {
 	i, ok := ms.indexes[id]
 	if !ok {

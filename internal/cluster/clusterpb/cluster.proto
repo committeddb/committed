@@ -37,3 +37,8 @@ message LogSyncableIndex {
     string ID = 1;
     uint64 Index = 2;
 }
+
+message LogIngestablePosition {
+    string ID = 1;
+    bytes Position = 2;
+}
