@@ -14,6 +14,7 @@ type Cluster interface {
 	Propose(p *Proposal) error
 	ProposeType(c *Configuration) error
 	ProposeDeleteType(id string) error
+	ProposeIngestable(c *Configuration) error
 	ProposeSyncable(c *Configuration) error
 	ProposeDatabase(c *Configuration) error
 	Type(id string) (*Type, error)

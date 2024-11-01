@@ -1,7 +1,7 @@
 [ingestable]
 name="foo"
 # Determines what the rest of the config will look like
-dbType="sql"
+type="sql"
 
 [sql]
 dialect="mysql"

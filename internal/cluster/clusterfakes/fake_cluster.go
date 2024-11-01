@@ -77,6 +77,17 @@ type FakeCluster struct {
 	proposeDeleteTypeReturnsOnCall map[int]struct {
 		result1 error
 	}
+	ProposeIngestableStub        func(*cluster.Configuration) error
+	proposeIngestableMutex       sync.RWMutex
+	proposeIngestableArgsForCall []struct {
+		arg1 *cluster.Configuration
+	}
+	proposeIngestableReturns struct {
+		result1 error
+	}
+	proposeIngestableReturnsOnCall map[int]struct {
+		result1 error
+	}
 	ProposeSyncableStub        func(*cluster.Configuration) error
 	proposeSyncableMutex       sync.RWMutex
 	proposeSyncableArgsForCall []struct {
@@ -494,6 +505,67 @@ func (fake *FakeCluster) ProposeDeleteTypeReturnsOnCall(i int, result1 error) {
 	}{result1}
 }
 
+func (fake *FakeCluster) ProposeIngestable(arg1 *cluster.Configuration) error {
+	fake.proposeIngestableMutex.Lock()
+	ret, specificReturn := fake.proposeIngestableReturnsOnCall[len(fake.proposeIngestableArgsForCall)]
+	fake.proposeIngestableArgsForCall = append(fake.proposeIngestableArgsForCall, struct {
+		arg1 *cluster.Configuration
+	}{arg1})
+	stub := fake.ProposeIngestableStub
+	fakeReturns := fake.proposeIngestableReturns
+	fake.recordInvocation("ProposeIngestable", []interface{}{arg1})
+	fake.proposeIngestableMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeCluster) ProposeIngestableCallCount() int {
+	fake.proposeIngestableMutex.RLock()
+	defer fake.proposeIngestableMutex.RUnlock()
+	return len(fake.proposeIngestableArgsForCall)
+}
+
+func (fake *FakeCluster) ProposeIngestableCalls(stub func(*cluster.Configuration) error) {
+	fake.proposeIngestableMutex.Lock()
+	defer fake.proposeIngestableMutex.Unlock()
+	fake.ProposeIngestableStub = stub
+}
+
+func (fake *FakeCluster) ProposeIngestableArgsForCall(i int) *cluster.Configuration {
+	fake.proposeIngestableMutex.RLock()
+	defer fake.proposeIngestableMutex.RUnlock()
+	argsForCall := fake.proposeIngestableArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeCluster) ProposeIngestableReturns(result1 error) {
+	fake.proposeIngestableMutex.Lock()
+	defer fake.proposeIngestableMutex.Unlock()
+	fake.ProposeIngestableStub = nil
+	fake.proposeIngestableReturns = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *FakeCluster) ProposeIngestableReturnsOnCall(i int, result1 error) {
+	fake.proposeIngestableMutex.Lock()
+	defer fake.proposeIngestableMutex.Unlock()
+	fake.ProposeIngestableStub = nil
+	if fake.proposeIngestableReturnsOnCall == nil {
+		fake.proposeIngestableReturnsOnCall = make(map[int]struct {
+			result1 error
+		})
+	}
+	fake.proposeIngestableReturnsOnCall[i] = struct {
+		result1 error
+	}{result1}
+}
+
 func (fake *FakeCluster) ProposeSyncable(arg1 *cluster.Configuration) error {
 	fake.proposeSyncableMutex.Lock()
 	ret, specificReturn := fake.proposeSyncableReturnsOnCall[len(fake.proposeSyncableArgsForCall)]
@@ -760,6 +832,8 @@ func (fake *FakeCluster) Invocations() map[string][][]interface{} {
 	defer fake.proposeDatabaseMutex.RUnlock()
 	fake.proposeDeleteTypeMutex.RLock()
 	defer fake.proposeDeleteTypeMutex.RUnlock()
+	fake.proposeIngestableMutex.RLock()
+	defer fake.proposeIngestableMutex.RUnlock()
 	fake.proposeSyncableMutex.RLock()
 	defer fake.proposeSyncableMutex.RUnlock()
 	fake.proposeTypeMutex.RLock()

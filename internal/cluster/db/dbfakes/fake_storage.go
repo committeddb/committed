@@ -60,6 +60,18 @@ type FakeStorage struct {
 		result1 uint64
 		result2 error
 	}
+	IngestablesStub        func() ([]*cluster.Configuration, error)
+	ingestablesMutex       sync.RWMutex
+	ingestablesArgsForCall []struct {
+	}
+	ingestablesReturns struct {
+		result1 []*cluster.Configuration
+		result2 error
+	}
+	ingestablesReturnsOnCall map[int]struct {
+		result1 []*cluster.Configuration
+		result2 error
+	}
 	InitialStateStub        func() (raftpb.HardState, raftpb.ConfState, error)
 	initialStateMutex       sync.RWMutex
 	initialStateArgsForCall []struct {
@@ -410,6 +422,62 @@ func (fake *FakeStorage) FirstIndexReturnsOnCall(i int, result1 uint64, result2 
 	}
 	fake.firstIndexReturnsOnCall[i] = struct {
 		result1 uint64
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeStorage) Ingestables() ([]*cluster.Configuration, error) {
+	fake.ingestablesMutex.Lock()
+	ret, specificReturn := fake.ingestablesReturnsOnCall[len(fake.ingestablesArgsForCall)]
+	fake.ingestablesArgsForCall = append(fake.ingestablesArgsForCall, struct {
+	}{})
+	stub := fake.IngestablesStub
+	fakeReturns := fake.ingestablesReturns
+	fake.recordInvocation("Ingestables", []interface{}{})
+	fake.ingestablesMutex.Unlock()
+	if stub != nil {
+		return stub()
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeStorage) IngestablesCallCount() int {
+	fake.ingestablesMutex.RLock()
+	defer fake.ingestablesMutex.RUnlock()
+	return len(fake.ingestablesArgsForCall)
+}
+
+func (fake *FakeStorage) IngestablesCalls(stub func() ([]*cluster.Configuration, error)) {
+	fake.ingestablesMutex.Lock()
+	defer fake.ingestablesMutex.Unlock()
+	fake.IngestablesStub = stub
+}
+
+func (fake *FakeStorage) IngestablesReturns(result1 []*cluster.Configuration, result2 error) {
+	fake.ingestablesMutex.Lock()
+	defer fake.ingestablesMutex.Unlock()
+	fake.IngestablesStub = nil
+	fake.ingestablesReturns = struct {
+		result1 []*cluster.Configuration
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeStorage) IngestablesReturnsOnCall(i int, result1 []*cluster.Configuration, result2 error) {
+	fake.ingestablesMutex.Lock()
+	defer fake.ingestablesMutex.Unlock()
+	fake.IngestablesStub = nil
+	if fake.ingestablesReturnsOnCall == nil {
+		fake.ingestablesReturnsOnCall = make(map[int]struct {
+			result1 []*cluster.Configuration
+			result2 error
+		})
+	}
+	fake.ingestablesReturnsOnCall[i] = struct {
+		result1 []*cluster.Configuration
 		result2 error
 	}{result1, result2}
 }
@@ -970,6 +1038,8 @@ func (fake *FakeStorage) Invocations() map[string][][]interface{} {
 	defer fake.entriesMutex.RUnlock()
 	fake.firstIndexMutex.RLock()
 	defer fake.firstIndexMutex.RUnlock()
+	fake.ingestablesMutex.RLock()
+	defer fake.ingestablesMutex.RUnlock()
 	fake.initialStateMutex.RLock()
 	defer fake.initialStateMutex.RUnlock()
 	fake.lastIndexMutex.RLock()

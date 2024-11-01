@@ -28,9 +28,10 @@ to quickly create a Cobra application.`,
 		id := flag.Uint64("id", 1, "node ID")
 		addr := flag.String("addr", ":8080", "node ID")
 		var sync chan *db.SyncableWithID
+		var ingest chan *db.IngestableWithID
 
 		p := parser.New()
-		s, err := wal.Open("./data", p, sync)
+		s, err := wal.Open("./data", p, sync, ingest)
 		if err != nil {
 			log.Fatalf("cannot open storage: %v", err)
 		}
@@ -38,7 +39,7 @@ to quickly create a Cobra application.`,
 		peers := make(db.Peers)
 		peers[*id] = *url
 
-		db := db.New(*id, peers, s, p, sync)
+		db := db.New(*id, peers, s, p, sync, ingest)
 		fmt.Printf("Raft Running...\n")
 		h := http.New(db)
 		fmt.Printf("API Listening on %s...\n", *addr)

@@ -24,9 +24,12 @@ var ErrBucketMissing = errors.New("key value bucket missing")
 
 var typeBucket = []byte("types")
 var databaseBucket = []byte("databases")
+var ingestableBucket = []byte("ingestables")
+
+// TODO var ingestablePositionBucket = []byte("ingestablesPositions")
 var syncableBucket = []byte("syncables")
 var syncableIndexBucket = []byte("syncableIndexes")
-var buckets = [][]byte{typeBucket, databaseBucket, syncableBucket, syncableIndexBucket}
+var buckets = [][]byte{typeBucket, databaseBucket, ingestableBucket, syncableBucket, syncableIndexBucket}
 
 type StateType int
 
@@ -52,11 +55,12 @@ type Storage struct {
 	databases   map[string]cluster.Database
 	parser      db.Parser
 	sync        chan<- *db.SyncableWithID
+	ingest      chan<- *db.IngestableWithID
 }
 
 // Returns a *WalStorage, whether this storage existed already, or an error
 // func Open() (*WalStorage, bool, error) {
-func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID) (*Storage, error) {
+func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<- *db.IngestableWithID) (*Storage, error) {
 	entryLogDir := filepath.Join(dir, "entry-log")
 	stateLogDir := filepath.Join(dir, "state-log")
 	typeStorageDir := filepath.Join(dir, "type-storage")
@@ -112,6 +116,7 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID) (*Storage, er
 		databases:   dbs,
 		parser:      p,
 		sync:        sync,
+		ingest:      ingest,
 	}
 
 	fi, err := entryLog.FirstIndex()
@@ -272,6 +277,11 @@ func (s *Storage) Save(st pb.HardState, ents []pb.Entry, snap pb.Snapshot) error
 					err := s.handleDatabase(entity)
 					if err != nil {
 						return fmt.Errorf("[wal.storage] handleDatabase: %w", err)
+					}
+				case cluster.IsIngestable(entity.ID):
+					err := s.handleIngestable(entity)
+					if err != nil {
+						return fmt.Errorf("[wal.storage] handleIngestable: %w", err)
 					}
 				case cluster.IsSyncable(entity.ID):
 					err := s.handleSyncable(entity)

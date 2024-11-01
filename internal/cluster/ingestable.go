@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"github.com/philborlin/committed/internal/cluster/clusterpb"
+	"github.com/spf13/viper"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -11,6 +12,30 @@ type Position []byte
 type Ingestable interface {
 	Ingest(pos Position) (<-chan *Proposal, <-chan Position, error)
 	Close() error
+}
+
+//counterfeiter:generate . IngestableParser
+type IngestableParser interface {
+	Parse(*viper.Viper) (Ingestable, error)
+}
+
+var ingestableType = &Type{
+	ID:      "c5917145-c248-4d97-a863-8e26ca042b09",
+	Name:    "InternalIngestableParser",
+	Version: 1,
+}
+
+func IsIngestable(id string) bool {
+	return id == ingestableType.ID
+}
+
+func NewUpsertIngestableEntity(c *Configuration) (*Entity, error) {
+	bs, err := c.Marshal()
+	if err != nil {
+		return nil, err
+	}
+
+	return NewUpsertEntity(ingestableType, []byte(c.ID), bs), nil
 }
 
 var ingestablePositionType = &Type{

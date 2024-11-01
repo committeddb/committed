@@ -21,6 +21,7 @@ func New(c cluster.Cluster) *HTTP {
 	h := &HTTP{r: r, c: c}
 
 	r.Post("/database", h.AddDatabase)
+	r.Post("/ingestable", h.AddIngestable)
 	r.Post("/proposal", h.AddProposal)
 	r.Post("/syncable", h.AddSyncable)
 	r.Post("/type", h.AddType)

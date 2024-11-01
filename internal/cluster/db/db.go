@@ -26,7 +26,7 @@ type DB struct {
 	parser      Parser
 }
 
-func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithID) *DB {
+func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithID, ingest <-chan *IngestableWithID) *DB {
 	proposeC := make(chan []byte)
 	confChangeC := make(chan raftpb.ConfChange)
 
@@ -54,6 +54,7 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 	}
 
 	go db.sync(sync)
+	go db.ingest(ingest)
 
 	return db
 }
@@ -62,6 +63,13 @@ func (db *DB) sync(sync <-chan *SyncableWithID) {
 	for sync != nil {
 		syncable := <-sync
 		db.Sync(context.Background(), syncable.ID, syncable.Syncable)
+	}
+}
+
+func (db *DB) ingest(ingest <-chan *IngestableWithID) {
+	for ingest != nil {
+		ingestable := <-ingest
+		db.Ingest(context.Background(), ingestable.ID, ingestable.Ingestable)
 	}
 }
 

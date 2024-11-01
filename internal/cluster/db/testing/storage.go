@@ -86,6 +86,10 @@ func (ms *MemoryStorage) Database(id string) (cluster.Database, error) {
 	return nil, nil
 }
 
+func (ms *MemoryStorage) Ingestables() ([]*cluster.Configuration, error) {
+	return nil, nil
+}
+
 func (ms *MemoryStorage) Syncables() ([]*cluster.Configuration, error) {
 	return nil, nil
 }
