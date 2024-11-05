@@ -1,6 +1,7 @@
 package dialects
 
 import (
+	gosql "database/sql"
 	"fmt"
 	"strings"
 
@@ -46,4 +47,8 @@ func (d *MySQLDialect) CreateSQL(table string, sqlMappings []sql.Mapping) string
 	}
 
 	return sql.String()
+}
+
+func (d *MySQLDialect) Open(connectionString string) (*gosql.DB, error) {
+	return gosql.Open("mysql", connectionString)
 }

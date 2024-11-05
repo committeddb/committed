@@ -1,6 +1,8 @@
 package wal
 
 import (
+	"fmt"
+
 	"github.com/philborlin/committed/internal/cluster"
 	bolt "go.etcd.io/bbolt"
 )
@@ -61,5 +63,41 @@ func (s *Storage) Type(id string) (*cluster.Type, error) {
 }
 
 func (s *Storage) Types() ([]*cluster.Configuration, error) {
-	return nil, nil
+	var cfgs []*cluster.Configuration
+
+	err := s.typeStorage.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(typeBucket)
+		if b == nil {
+			return ErrBucketMissing
+		}
+
+		err := b.ForEach(func(k, v []byte) error {
+			tipe := &cluster.Type{}
+			err := tipe.Unmarshal(v)
+			if err != nil {
+				return err
+			}
+
+			cfg := &cluster.Configuration{
+				ID:       tipe.ID,
+				MimeType: "text/toml",
+				Data:     []byte(fmt.Sprintf("[type]\nname = \"%s\"", tipe.Name)),
+			}
+
+			cfgs = append(cfgs, cfg)
+
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	return cfgs, nil
 }

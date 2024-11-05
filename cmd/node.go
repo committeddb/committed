@@ -9,6 +9,10 @@ import (
 	parser "github.com/philborlin/committed/internal/cluster/db/parser"
 	"github.com/philborlin/committed/internal/cluster/db/wal"
 	"github.com/philborlin/committed/internal/cluster/http"
+	ingestablesql "github.com/philborlin/committed/internal/cluster/ingestable/sql"
+	ingestablemysql "github.com/philborlin/committed/internal/cluster/ingestable/sql/mysql"
+	syncsql "github.com/philborlin/committed/internal/cluster/syncable/sql"
+	syncmysql "github.com/philborlin/committed/internal/cluster/syncable/sql/dialects"
 	"github.com/spf13/cobra"
 )
 
@@ -44,6 +48,10 @@ to quickly create a Cobra application.`,
 		h := http.New(db)
 		fmt.Printf("API Listening on %s...\n", *addr)
 
+		db.AddDatabaseParser("sql", dbParser())
+		db.AddIngestableParser("sql", ingestableParser(db))
+		db.AddSyncableParser("sql", &syncsql.SyncableParser{})
+
 		db.EatCommitC()
 
 		go func() {
@@ -56,6 +64,19 @@ to quickly create a Cobra application.`,
 			log.Fatalf("raft error: %v", err)
 		}
 	},
+}
+
+func dbParser() *syncsql.DBParser {
+	ds := make(map[string]syncsql.Dialect)
+	p := &syncsql.DBParser{Dialects: ds}
+	ds["mysql"] = &syncmysql.MySQLDialect{}
+	return p
+}
+
+func ingestableParser(t ingestablesql.Typer) *ingestablesql.IngestableParser {
+	p := ingestablesql.NewIngestableParser(t)
+	p.Dialects["mysql"] = &ingestablemysql.MySQLDialect{}
+	return p
 }
 
 func init() {

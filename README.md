@@ -67,7 +67,7 @@ To Add a syncable POST to http://server:port/cluster/syncables with an HTTP body
 [syncable]
 name = "foo"
 # Determines what the rest of the config will look like
-dbType = "sql"
+type = "sql"
 
 [sql]
 topic = "test1"

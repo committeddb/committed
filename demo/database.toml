@@ -1,6 +1,6 @@
 [database]
 name="foo"
-dbType="sql"
+type="sql"
 
 [sql]
 dialect="mysql"

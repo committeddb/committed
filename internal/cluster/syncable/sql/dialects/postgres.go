@@ -1,10 +1,11 @@
 package dialects
 
 import (
+	gosql "database/sql"
 	"fmt"
 	"strings"
 
-	_ "github.com/go-sql-driver/mysql" // mysql driver
+	_ "github.com/jackc/pgx/v5" // postgres driver
 
 	"github.com/philborlin/committed/internal/cluster/syncable/sql"
 )
@@ -46,4 +47,8 @@ func (d *PostgreSQLDialect) CreateSQL(table string, sqlMappings []sql.Mapping) s
 	}
 
 	return sql.String()
+}
+
+func (d *PostgreSQLDialect) Open(connectionString string) (*gosql.DB, error) {
+	return gosql.Open("pgx", connectionString)
 }

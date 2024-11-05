@@ -1,6 +1,6 @@
 [syncable]
 name="one"
-dbType="sql"
+type="sql"
 
 [sql]
 topic = "simple"
