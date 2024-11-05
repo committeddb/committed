@@ -16,3 +16,13 @@ func (h *HTTP) AddSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
 		internalServerError(w, err)
 	}
 }
+
+func (h *HTTP) GetSyncables(w httpgo.ResponseWriter, r *httpgo.Request) {
+	cfgs, err := h.c.Syncables()
+	if err != nil {
+		badRequest(w, err)
+		return
+	}
+
+	writeConfigurations(w, cfgs)
+}

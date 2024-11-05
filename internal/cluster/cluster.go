@@ -25,4 +25,8 @@ type Cluster interface {
 	Sync(ctx context.Context, id string, s Syncable) error
 	AddSyncableParser(name string, p SyncableParser)
 	AddDatabaseParser(name string, p DatabaseParser)
+	Databases() ([]*Configuration, error)
+	Ingestables() ([]*Configuration, error)
+	Syncables() ([]*Configuration, error)
+	Types() ([]*Configuration, error)
 }

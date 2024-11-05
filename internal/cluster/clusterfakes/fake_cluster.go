@@ -31,6 +31,18 @@ type FakeCluster struct {
 	closeReturnsOnCall map[int]struct {
 		result1 error
 	}
+	DatabasesStub        func() ([]*cluster.Configuration, error)
+	databasesMutex       sync.RWMutex
+	databasesArgsForCall []struct {
+	}
+	databasesReturns struct {
+		result1 []*cluster.Configuration
+		result2 error
+	}
+	databasesReturnsOnCall map[int]struct {
+		result1 []*cluster.Configuration
+		result2 error
+	}
 	IngestStub        func(context.Context, string, cluster.Ingestable) error
 	ingestMutex       sync.RWMutex
 	ingestArgsForCall []struct {
@@ -43,6 +55,18 @@ type FakeCluster struct {
 	}
 	ingestReturnsOnCall map[int]struct {
 		result1 error
+	}
+	IngestablesStub        func() ([]*cluster.Configuration, error)
+	ingestablesMutex       sync.RWMutex
+	ingestablesArgsForCall []struct {
+	}
+	ingestablesReturns struct {
+		result1 []*cluster.Configuration
+		result2 error
+	}
+	ingestablesReturnsOnCall map[int]struct {
+		result1 []*cluster.Configuration
+		result2 error
 	}
 	ProposeStub        func(*cluster.Proposal) error
 	proposeMutex       sync.RWMutex
@@ -123,6 +147,18 @@ type FakeCluster struct {
 	syncReturnsOnCall map[int]struct {
 		result1 error
 	}
+	SyncablesStub        func() ([]*cluster.Configuration, error)
+	syncablesMutex       sync.RWMutex
+	syncablesArgsForCall []struct {
+	}
+	syncablesReturns struct {
+		result1 []*cluster.Configuration
+		result2 error
+	}
+	syncablesReturnsOnCall map[int]struct {
+		result1 []*cluster.Configuration
+		result2 error
+	}
 	TypeStub        func(string) (*cluster.Type, error)
 	typeMutex       sync.RWMutex
 	typeArgsForCall []struct {
@@ -134,6 +170,18 @@ type FakeCluster struct {
 	}
 	typeReturnsOnCall map[int]struct {
 		result1 *cluster.Type
+		result2 error
+	}
+	TypesStub        func() ([]*cluster.Configuration, error)
+	typesMutex       sync.RWMutex
+	typesArgsForCall []struct {
+	}
+	typesReturns struct {
+		result1 []*cluster.Configuration
+		result2 error
+	}
+	typesReturnsOnCall map[int]struct {
+		result1 []*cluster.Configuration
 		result2 error
 	}
 	invocations      map[string][][]interface{}
@@ -259,6 +307,62 @@ func (fake *FakeCluster) CloseReturnsOnCall(i int, result1 error) {
 	}{result1}
 }
 
+func (fake *FakeCluster) Databases() ([]*cluster.Configuration, error) {
+	fake.databasesMutex.Lock()
+	ret, specificReturn := fake.databasesReturnsOnCall[len(fake.databasesArgsForCall)]
+	fake.databasesArgsForCall = append(fake.databasesArgsForCall, struct {
+	}{})
+	stub := fake.DatabasesStub
+	fakeReturns := fake.databasesReturns
+	fake.recordInvocation("Databases", []interface{}{})
+	fake.databasesMutex.Unlock()
+	if stub != nil {
+		return stub()
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeCluster) DatabasesCallCount() int {
+	fake.databasesMutex.RLock()
+	defer fake.databasesMutex.RUnlock()
+	return len(fake.databasesArgsForCall)
+}
+
+func (fake *FakeCluster) DatabasesCalls(stub func() ([]*cluster.Configuration, error)) {
+	fake.databasesMutex.Lock()
+	defer fake.databasesMutex.Unlock()
+	fake.DatabasesStub = stub
+}
+
+func (fake *FakeCluster) DatabasesReturns(result1 []*cluster.Configuration, result2 error) {
+	fake.databasesMutex.Lock()
+	defer fake.databasesMutex.Unlock()
+	fake.DatabasesStub = nil
+	fake.databasesReturns = struct {
+		result1 []*cluster.Configuration
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) DatabasesReturnsOnCall(i int, result1 []*cluster.Configuration, result2 error) {
+	fake.databasesMutex.Lock()
+	defer fake.databasesMutex.Unlock()
+	fake.DatabasesStub = nil
+	if fake.databasesReturnsOnCall == nil {
+		fake.databasesReturnsOnCall = make(map[int]struct {
+			result1 []*cluster.Configuration
+			result2 error
+		})
+	}
+	fake.databasesReturnsOnCall[i] = struct {
+		result1 []*cluster.Configuration
+		result2 error
+	}{result1, result2}
+}
+
 func (fake *FakeCluster) Ingest(arg1 context.Context, arg2 string, arg3 cluster.Ingestable) error {
 	fake.ingestMutex.Lock()
 	ret, specificReturn := fake.ingestReturnsOnCall[len(fake.ingestArgsForCall)]
@@ -320,6 +424,62 @@ func (fake *FakeCluster) IngestReturnsOnCall(i int, result1 error) {
 	fake.ingestReturnsOnCall[i] = struct {
 		result1 error
 	}{result1}
+}
+
+func (fake *FakeCluster) Ingestables() ([]*cluster.Configuration, error) {
+	fake.ingestablesMutex.Lock()
+	ret, specificReturn := fake.ingestablesReturnsOnCall[len(fake.ingestablesArgsForCall)]
+	fake.ingestablesArgsForCall = append(fake.ingestablesArgsForCall, struct {
+	}{})
+	stub := fake.IngestablesStub
+	fakeReturns := fake.ingestablesReturns
+	fake.recordInvocation("Ingestables", []interface{}{})
+	fake.ingestablesMutex.Unlock()
+	if stub != nil {
+		return stub()
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeCluster) IngestablesCallCount() int {
+	fake.ingestablesMutex.RLock()
+	defer fake.ingestablesMutex.RUnlock()
+	return len(fake.ingestablesArgsForCall)
+}
+
+func (fake *FakeCluster) IngestablesCalls(stub func() ([]*cluster.Configuration, error)) {
+	fake.ingestablesMutex.Lock()
+	defer fake.ingestablesMutex.Unlock()
+	fake.IngestablesStub = stub
+}
+
+func (fake *FakeCluster) IngestablesReturns(result1 []*cluster.Configuration, result2 error) {
+	fake.ingestablesMutex.Lock()
+	defer fake.ingestablesMutex.Unlock()
+	fake.IngestablesStub = nil
+	fake.ingestablesReturns = struct {
+		result1 []*cluster.Configuration
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) IngestablesReturnsOnCall(i int, result1 []*cluster.Configuration, result2 error) {
+	fake.ingestablesMutex.Lock()
+	defer fake.ingestablesMutex.Unlock()
+	fake.IngestablesStub = nil
+	if fake.ingestablesReturnsOnCall == nil {
+		fake.ingestablesReturnsOnCall = make(map[int]struct {
+			result1 []*cluster.Configuration
+			result2 error
+		})
+	}
+	fake.ingestablesReturnsOnCall[i] = struct {
+		result1 []*cluster.Configuration
+		result2 error
+	}{result1, result2}
 }
 
 func (fake *FakeCluster) Propose(arg1 *cluster.Proposal) error {
@@ -751,6 +911,62 @@ func (fake *FakeCluster) SyncReturnsOnCall(i int, result1 error) {
 	}{result1}
 }
 
+func (fake *FakeCluster) Syncables() ([]*cluster.Configuration, error) {
+	fake.syncablesMutex.Lock()
+	ret, specificReturn := fake.syncablesReturnsOnCall[len(fake.syncablesArgsForCall)]
+	fake.syncablesArgsForCall = append(fake.syncablesArgsForCall, struct {
+	}{})
+	stub := fake.SyncablesStub
+	fakeReturns := fake.syncablesReturns
+	fake.recordInvocation("Syncables", []interface{}{})
+	fake.syncablesMutex.Unlock()
+	if stub != nil {
+		return stub()
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeCluster) SyncablesCallCount() int {
+	fake.syncablesMutex.RLock()
+	defer fake.syncablesMutex.RUnlock()
+	return len(fake.syncablesArgsForCall)
+}
+
+func (fake *FakeCluster) SyncablesCalls(stub func() ([]*cluster.Configuration, error)) {
+	fake.syncablesMutex.Lock()
+	defer fake.syncablesMutex.Unlock()
+	fake.SyncablesStub = stub
+}
+
+func (fake *FakeCluster) SyncablesReturns(result1 []*cluster.Configuration, result2 error) {
+	fake.syncablesMutex.Lock()
+	defer fake.syncablesMutex.Unlock()
+	fake.SyncablesStub = nil
+	fake.syncablesReturns = struct {
+		result1 []*cluster.Configuration
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) SyncablesReturnsOnCall(i int, result1 []*cluster.Configuration, result2 error) {
+	fake.syncablesMutex.Lock()
+	defer fake.syncablesMutex.Unlock()
+	fake.SyncablesStub = nil
+	if fake.syncablesReturnsOnCall == nil {
+		fake.syncablesReturnsOnCall = make(map[int]struct {
+			result1 []*cluster.Configuration
+			result2 error
+		})
+	}
+	fake.syncablesReturnsOnCall[i] = struct {
+		result1 []*cluster.Configuration
+		result2 error
+	}{result1, result2}
+}
+
 func (fake *FakeCluster) Type(arg1 string) (*cluster.Type, error) {
 	fake.typeMutex.Lock()
 	ret, specificReturn := fake.typeReturnsOnCall[len(fake.typeArgsForCall)]
@@ -815,6 +1031,62 @@ func (fake *FakeCluster) TypeReturnsOnCall(i int, result1 *cluster.Type, result2
 	}{result1, result2}
 }
 
+func (fake *FakeCluster) Types() ([]*cluster.Configuration, error) {
+	fake.typesMutex.Lock()
+	ret, specificReturn := fake.typesReturnsOnCall[len(fake.typesArgsForCall)]
+	fake.typesArgsForCall = append(fake.typesArgsForCall, struct {
+	}{})
+	stub := fake.TypesStub
+	fakeReturns := fake.typesReturns
+	fake.recordInvocation("Types", []interface{}{})
+	fake.typesMutex.Unlock()
+	if stub != nil {
+		return stub()
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeCluster) TypesCallCount() int {
+	fake.typesMutex.RLock()
+	defer fake.typesMutex.RUnlock()
+	return len(fake.typesArgsForCall)
+}
+
+func (fake *FakeCluster) TypesCalls(stub func() ([]*cluster.Configuration, error)) {
+	fake.typesMutex.Lock()
+	defer fake.typesMutex.Unlock()
+	fake.TypesStub = stub
+}
+
+func (fake *FakeCluster) TypesReturns(result1 []*cluster.Configuration, result2 error) {
+	fake.typesMutex.Lock()
+	defer fake.typesMutex.Unlock()
+	fake.TypesStub = nil
+	fake.typesReturns = struct {
+		result1 []*cluster.Configuration
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) TypesReturnsOnCall(i int, result1 []*cluster.Configuration, result2 error) {
+	fake.typesMutex.Lock()
+	defer fake.typesMutex.Unlock()
+	fake.TypesStub = nil
+	if fake.typesReturnsOnCall == nil {
+		fake.typesReturnsOnCall = make(map[int]struct {
+			result1 []*cluster.Configuration
+			result2 error
+		})
+	}
+	fake.typesReturnsOnCall[i] = struct {
+		result1 []*cluster.Configuration
+		result2 error
+	}{result1, result2}
+}
+
 func (fake *FakeCluster) Invocations() map[string][][]interface{} {
 	fake.invocationsMutex.RLock()
 	defer fake.invocationsMutex.RUnlock()
@@ -824,8 +1096,12 @@ func (fake *FakeCluster) Invocations() map[string][][]interface{} {
 	defer fake.addSyncableParserMutex.RUnlock()
 	fake.closeMutex.RLock()
 	defer fake.closeMutex.RUnlock()
+	fake.databasesMutex.RLock()
+	defer fake.databasesMutex.RUnlock()
 	fake.ingestMutex.RLock()
 	defer fake.ingestMutex.RUnlock()
+	fake.ingestablesMutex.RLock()
+	defer fake.ingestablesMutex.RUnlock()
 	fake.proposeMutex.RLock()
 	defer fake.proposeMutex.RUnlock()
 	fake.proposeDatabaseMutex.RLock()
@@ -840,8 +1116,12 @@ func (fake *FakeCluster) Invocations() map[string][][]interface{} {
 	defer fake.proposeTypeMutex.RUnlock()
 	fake.syncMutex.RLock()
 	defer fake.syncMutex.RUnlock()
+	fake.syncablesMutex.RLock()
+	defer fake.syncablesMutex.RUnlock()
 	fake.typeMutex.RLock()
 	defer fake.typeMutex.RUnlock()
+	fake.typesMutex.RLock()
+	defer fake.typesMutex.RUnlock()
 	copiedInvocations := map[string][][]interface{}{}
 	for key, value := range fake.invocations {
 		copiedInvocations[key] = value

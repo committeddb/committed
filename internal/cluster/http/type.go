@@ -17,3 +17,13 @@ func (h *HTTP) AddType(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 }
+
+func (h *HTTP) GetTypes(w httpgo.ResponseWriter, r *httpgo.Request) {
+	cfgs, err := h.c.Types()
+	if err != nil {
+		badRequest(w, err)
+		return
+	}
+
+	writeConfigurations(w, cfgs)
+}

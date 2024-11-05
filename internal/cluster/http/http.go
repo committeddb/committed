@@ -20,10 +20,18 @@ func New(c cluster.Cluster) *HTTP {
 	r := chi.NewRouter()
 	h := &HTTP{r: r, c: c}
 
+	r.Get("/database", h.GetDatabases)
 	r.Post("/database", h.AddDatabase)
+
+	r.Get("/ingestable", h.GetIngestables)
 	r.Post("/ingestable", h.AddIngestable)
+
 	r.Post("/proposal", h.AddProposal)
+
+	r.Get("/syncable", h.GetSyncables)
 	r.Post("/syncable", h.AddSyncable)
+
+	r.Get("/type", h.GetTypes)
 	r.Post("/type", h.AddType)
 
 	return h
@@ -79,4 +87,37 @@ func createConfiguration(w http.ResponseWriter, r *http.Request) (*cluster.Confi
 	w.Write([]byte(id))
 
 	return configuration, nil
+}
+
+type ConfigurationResponse struct {
+	ID string `json:"id"`
+}
+
+func writeConfigurations(w http.ResponseWriter, cfgs []*cluster.Configuration) {
+	var rs []*ConfigurationResponse
+
+	for _, cfg := range cfgs {
+		rs = append(rs, &ConfigurationResponse{ID: cfg.ID})
+	}
+
+	writeArrayBody(w, rs)
+}
+
+func writeArrayBody[T any](w http.ResponseWriter, body []T) {
+	if body == nil {
+		writeJson(w, []byte("[]"))
+		return
+	}
+
+	bs, err := json.Marshal(body)
+	if err != nil {
+		internalServerError(w, err)
+	}
+
+	writeJson(w, bs)
+}
+
+func writeJson(w http.ResponseWriter, bs []byte) {
+	w.Header().Add("Content-Type", "application/json")
+	w.Write(bs)
 }

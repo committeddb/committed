@@ -44,3 +44,7 @@ func ParseType(c *cluster.Configuration, s cluster.DatabaseStorage) (string, *cl
 
 	return name, t, nil
 }
+
+func (db *DB) Types() ([]*cluster.Configuration, error) {
+	return db.storage.Types()
+}

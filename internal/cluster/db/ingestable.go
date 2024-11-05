@@ -29,3 +29,7 @@ func (db *DB) ProposeIngestable(c *cluster.Configuration) error {
 func (db *DB) ParseIngestable(mimeType string, data []byte) (string, cluster.Ingestable, error) {
 	return db.parser.ParseIngestable(mimeType, data)
 }
+
+func (db *DB) Ingestables() ([]*cluster.Configuration, error) {
+	return db.storage.Ingestables()
+}

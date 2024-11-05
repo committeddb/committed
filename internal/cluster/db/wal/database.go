@@ -104,3 +104,37 @@ func (s *Storage) Database(id string) (cluster.Database, error) {
 
 	return db, nil
 }
+
+func (s *Storage) Databases() ([]*cluster.Configuration, error) {
+	var cfgs []*cluster.Configuration
+
+	err := s.typeStorage.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(databaseBucket)
+		if b == nil {
+			return ErrBucketMissing
+		}
+
+		err := b.ForEach(func(k, v []byte) error {
+			cfg := &cluster.Configuration{}
+			err := cfg.Unmarshal(v)
+			if err != nil {
+				return err
+			}
+
+			cfgs = append(cfgs, cfg)
+
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	return cfgs, nil
+}

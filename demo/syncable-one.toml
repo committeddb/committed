@@ -1,0 +1,23 @@
+[syncable]
+name="one"
+dbType="sql"
+
+[sql]
+topic = "simple"
+db = "foo"
+table = "one"
+primaryKey = "pk"
+
+[[sql.indexes]]
+name = "firstIndex"
+index = "title"
+
+[[sql.mappings]]
+jsonPath = "$.key"
+column = "pk"
+type = "TEXT"
+
+[[sql.mappings]]
+jsonPath = "$.one"
+column = "title"
+type = "TEXT"

@@ -59,3 +59,7 @@ func (s *Storage) Type(id string) (*cluster.Type, error) {
 		return t.Unmarshal(bs)
 	})
 }
+
+func (s *Storage) Types() ([]*cluster.Configuration, error) {
+	return nil, nil
+}

@@ -15,6 +15,8 @@ type Storage interface {
 	Reader(id string) ProposalReader     // Gets current index by id cache. If id is not known, index is 0
 	Position(id string) cluster.Position // Gets current index by id cache. If id is not known position is 0
 	Database(id string) (cluster.Database, error)
-	Syncables() ([]*cluster.Configuration, error)
+	Databases() ([]*cluster.Configuration, error)
 	Ingestables() ([]*cluster.Configuration, error)
+	Syncables() ([]*cluster.Configuration, error)
+	Types() ([]*cluster.Configuration, error)
 }

@@ -16,3 +16,13 @@ func (h *HTTP) AddDatabase(w httpgo.ResponseWriter, r *httpgo.Request) {
 		internalServerError(w, err)
 	}
 }
+
+func (h *HTTP) GetDatabases(w httpgo.ResponseWriter, r *httpgo.Request) {
+	cfgs, err := h.c.Databases()
+	if err != nil {
+		badRequest(w, err)
+		return
+	}
+
+	writeConfigurations(w, cfgs)
+}

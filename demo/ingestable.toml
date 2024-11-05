@@ -1,0 +1,21 @@
+[ingestable]
+name="foo"
+type="sql"
+
+[sql]
+dialect="mysql"
+topic = "simple"
+connectionString="admin:password@tcp(127.0.0.1:3306)/source?tables=simple"
+primaryKey = "id"
+
+[[sql.mappings]]
+jsonName = "id"
+column = "id"
+
+[[sql.mappings]]
+jsonName = "title"
+column = "title"
+
+[[sql.mappings]]
+jsonName = "body"
+column = "body"

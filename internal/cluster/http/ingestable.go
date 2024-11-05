@@ -16,3 +16,13 @@ func (h *HTTP) AddIngestable(w httpgo.ResponseWriter, r *httpgo.Request) {
 		internalServerError(w, err)
 	}
 }
+
+func (h *HTTP) GetIngestables(w httpgo.ResponseWriter, r *httpgo.Request) {
+	cfgs, err := h.c.Ingestables()
+	if err != nil {
+		badRequest(w, err)
+		return
+	}
+
+	writeConfigurations(w, cfgs)
+}

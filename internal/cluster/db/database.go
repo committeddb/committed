@@ -28,3 +28,7 @@ func (db *DB) ProposeDatabase(c *cluster.Configuration) error {
 func (db *DB) ParseDatabase(mimeType string, data []byte) (string, cluster.Database, error) {
 	return db.parser.ParseDatabase(mimeType, data)
 }
+
+func (db *DB) Databases() ([]*cluster.Configuration, error) {
+	return db.storage.Databases()
+}

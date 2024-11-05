@@ -1,0 +1,11 @@
+services:
+ db:
+   image: mysql:latest
+   container_name: committeddb-demo
+   ports:
+     - "3306:3306"
+   environment:
+     - MYSQL_ROOT_PASSWORD=password
+     - MYSQL_DATABASE=test
+   volumes:
+     - /Users/phil/repositories/committeddb/committed/demo/db:/var/lib/mysql 

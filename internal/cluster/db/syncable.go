@@ -29,3 +29,7 @@ func (db *DB) ProposeSyncable(c *cluster.Configuration) error {
 func (db *DB) ParseSyncable(mimeType string, data []byte, s cluster.DatabaseStorage) (string, cluster.Syncable, error) {
 	return db.parser.ParseSyncable(mimeType, data, s)
 }
+
+func (db *DB) Syncables() ([]*cluster.Configuration, error) {
+	return db.storage.Syncables()
+}
