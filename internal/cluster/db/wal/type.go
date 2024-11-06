@@ -8,7 +8,7 @@ import (
 )
 
 func (s *Storage) handleType(e *cluster.Entity) error {
-	// fmt.Printf("[wal] saving type...\n")
+	// fmt.Printf("[wal.type] saving type...\n")
 	if e.IsDelete() {
 		return s.deleteType(e.Key)
 	} else {
@@ -18,7 +18,7 @@ func (s *Storage) handleType(e *cluster.Entity) error {
 			return err
 		}
 		return s.saveType(t)
-		// fmt.Printf("[wal] ... type saved\n")
+		// fmt.Printf("[wal.type] ... type saved\n")
 	}
 }
 
@@ -56,7 +56,7 @@ func (s *Storage) Type(id string) (*cluster.Type, error) {
 		}
 		bs := b.Get([]byte(id))
 		if bs == nil {
-			return ErrTypeMissing
+			return fmt.Errorf("%w: %s", ErrTypeMissing, id)
 		}
 		return t.Unmarshal(bs)
 	})

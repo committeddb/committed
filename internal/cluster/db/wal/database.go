@@ -8,7 +8,7 @@ import (
 )
 
 func (s *Storage) handleDatabase(e *cluster.Entity) error {
-	// fmt.Printf("[wal] saving database...\n")
+	fmt.Printf("[wal.database] saving database...\n")
 	if e.IsDelete() {
 		return s.deleteDatabase(e.Key)
 	} else {
@@ -17,8 +17,8 @@ func (s *Storage) handleDatabase(e *cluster.Entity) error {
 		if err != nil {
 			return err
 		}
+		fmt.Printf("[wal.database] ... database saved\n")
 		return s.saveDatabase(t)
-		// fmt.Printf("[wal] ... database saved\n")
 	}
 }
 
@@ -33,11 +33,12 @@ func (s *Storage) saveDatabase(t *cluster.Configuration) error {
 			return fmt.Errorf("[wal.database] marshal: %w", err)
 		}
 
-		_, db, err := s.parser.ParseDatabase(t.MimeType, t.Data)
+		name, db, err := s.parser.ParseDatabase(t.MimeType, t.Data)
 		if err != nil {
 			return fmt.Errorf("[wal.database] parseDatabase: %w", err)
 		}
 
+		fmt.Printf("[wal.database] Saved database: %s\n", name)
 		err = b.Put([]byte(t.ID), bs)
 		if err != nil {
 			return fmt.Errorf("[wal.database] put: %w", err)

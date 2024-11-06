@@ -84,6 +84,7 @@ func (c *Syncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.Shoul
 		}
 	}
 
+	fmt.Printf("[sql syncable] Committing...\n")
 	err = tx.Commit()
 	if err != nil {
 		rollbackErr := tx.Rollback()
@@ -92,6 +93,7 @@ func (c *Syncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.Shoul
 		}
 		return false, err
 	}
+	fmt.Printf("[sql syncable] ...Committed\n")
 
 	return true, nil
 }

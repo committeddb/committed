@@ -10,14 +10,14 @@ primaryKey = "pk"
 
 [[sql.indexes]]
 name = "firstIndex"
-index = "title"
+index = "body"
 
 [[sql.mappings]]
 jsonPath = "$.key"
 column = "pk"
-type = "TEXT"
+type = "VARCHAR(256)"
 
 [[sql.mappings]]
 jsonPath = "$.one"
 column = "body"
-type = "TEXT"
+type = "VARCHAR(256)"

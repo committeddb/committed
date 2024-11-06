@@ -9,7 +9,7 @@ import (
 )
 
 func (s *Storage) handleSyncable(e *cluster.Entity) error {
-	// fmt.Printf("[wal] saving database...\n")
+	// fmt.Printf("[wal.syncable] saving database...\n")
 	if e.IsDelete() {
 		return s.deleteSyncable(e.Key)
 	} else {
@@ -19,7 +19,7 @@ func (s *Storage) handleSyncable(e *cluster.Entity) error {
 			return err
 		}
 		return s.saveSyncable(t)
-		// fmt.Printf("[wal] ... database saved\n")
+		// fmt.Printf("[wal.syncable] ... database saved\n")
 	}
 }
 
@@ -44,6 +44,7 @@ func (s *Storage) saveSyncable(t *cluster.Configuration) error {
 			return fmt.Errorf("[wal.syncable] put: %w", err)
 		}
 
+		fmt.Printf("[wal.syncable] Sending to channel %v\n", s.sync)
 		if s.sync != nil {
 			s.sync <- &db.SyncableWithID{ID: t.ID, Syncable: syncable}
 		}

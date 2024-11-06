@@ -15,9 +15,9 @@ index = "title"
 [[sql.mappings]]
 jsonPath = "$.key"
 column = "pk"
-type = "TEXT"
+type = "VARCHAR(256)"
 
 [[sql.mappings]]
 jsonPath = "$.one"
 column = "title"
-type = "TEXT"
+type = "VARCHAR(256)"

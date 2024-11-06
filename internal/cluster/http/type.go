@@ -5,7 +5,7 @@ import (
 )
 
 func (h *HTTP) AddType(w httpgo.ResponseWriter, r *httpgo.Request) {
-	c, err := createConfiguration(w, r)
+	c, err := createConfiguration(r)
 	if err != nil {
 		badRequest(w, err)
 		return
@@ -16,6 +16,8 @@ func (h *HTTP) AddType(w httpgo.ResponseWriter, r *httpgo.Request) {
 		internalServerError(w, err)
 		return
 	}
+
+	w.Write([]byte(c.ID))
 }
 
 func (h *HTTP) GetTypes(w httpgo.ResponseWriter, r *httpgo.Request) {

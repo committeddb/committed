@@ -43,12 +43,12 @@ func (h *HTTP) ListenAndServe(addr string) error {
 
 func badRequest(w http.ResponseWriter, err error) {
 	w.WriteHeader(http.StatusBadRequest)
-	fmt.Printf("%v\n", err)
+	fmt.Printf("[http] %v\n", err)
 }
 
 func internalServerError(w http.ResponseWriter, err error) {
 	w.WriteHeader(http.StatusInternalServerError)
-	fmt.Printf("%v\n", err)
+	fmt.Printf("[http] %v\n", err)
 }
 
 func unmarshalBody(r *http.Request, v any) error {
@@ -65,7 +65,7 @@ func unmarshalBody(r *http.Request, v any) error {
 	return nil
 }
 
-func createConfiguration(w http.ResponseWriter, r *http.Request) (*cluster.Configuration, error) {
+func createConfiguration(r *http.Request) (*cluster.Configuration, error) {
 	mimeType := "text/toml"
 	header, ok := r.Header["Content-Type"]
 	if ok && len(header) == 1 {
@@ -83,8 +83,6 @@ func createConfiguration(w http.ResponseWriter, r *http.Request) (*cluster.Confi
 		MimeType: mimeType,
 		Data:     body,
 	}
-
-	w.Write([]byte(id))
 
 	return configuration, nil
 }

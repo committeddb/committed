@@ -24,7 +24,7 @@ type MySQLDialect struct{}
 func (m *MySQLDialect) Open(config *sql.Config, pos cluster.Position) (<-chan *cluster.Proposal, <-chan cluster.Position, io.Closer, error) {
 	c, tables, err := createCanal(config.ConnectionString)
 	if err != nil {
-		fmt.Println(err)
+		return nil, nil, nil, err
 	}
 
 	proposalChan := make(chan *cluster.Proposal)

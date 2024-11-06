@@ -9,7 +9,7 @@ import (
 )
 
 func (s *Storage) handleIngestable(e *cluster.Entity) error {
-	// fmt.Printf("[wal] saving ingestable...\n")
+	// fmt.Printf("[wal.ingestable] saving ingestable...\n")
 	if e.IsDelete() {
 		return s.deleteIngestable(e.Key)
 	} else {
@@ -19,7 +19,7 @@ func (s *Storage) handleIngestable(e *cluster.Entity) error {
 			return err
 		}
 		return s.saveIngestable(t)
-		// fmt.Printf("[wal] ... ingestable saved\n")
+		// fmt.Printf("[wal.ingestable] ... ingestable saved\n")
 	}
 }
 

@@ -5,7 +5,7 @@ import (
 )
 
 func (h *HTTP) AddIngestable(w httpgo.ResponseWriter, r *httpgo.Request) {
-	c, err := createConfiguration(w, r)
+	c, err := createConfiguration(r)
 	if err != nil {
 		badRequest(w, err)
 		return
@@ -14,7 +14,10 @@ func (h *HTTP) AddIngestable(w httpgo.ResponseWriter, r *httpgo.Request) {
 	err = h.c.ProposeIngestable(c)
 	if err != nil {
 		internalServerError(w, err)
+		return
 	}
+
+	w.Write([]byte(c.ID))
 }
 
 func (h *HTTP) GetIngestables(w httpgo.ResponseWriter, r *httpgo.Request) {

@@ -77,6 +77,7 @@ func (db *DB) EatCommitC() {
 	go func() {
 		for {
 			<-db.CommitC
+			fmt.Printf("[db.DB] Ate a commit\n")
 		}
 	}()
 }
@@ -88,11 +89,11 @@ func (db *DB) Propose(p *cluster.Proposal) error {
 	}
 
 	// TODO Should we wrap this in a log level?
-	// fmt.Printf("Proposing %v", p)
+	fmt.Printf("[db.DB] Proposing %v", p)
 
 	db.proposeC <- bs
 
-	// fmt.Println("...Proposal made")
+	fmt.Println("[db.DB] ...Proposal made")
 
 	return nil
 }
@@ -162,6 +163,8 @@ func (db *DB) Ingest(ctx context.Context, id string, i cluster.Ingestable) error
 
 func (db *DB) Sync(ctx context.Context, id string, s cluster.Syncable) error {
 	go func() {
+		fmt.Printf("[db] Syncing %v\n", id)
+
 		r := db.storage.Reader(id)
 
 		for {

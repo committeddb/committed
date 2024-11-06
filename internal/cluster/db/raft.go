@@ -65,14 +65,14 @@ func (n *node) startRaft(id uint64, ps []raft.Peer) {
 	hs, _, err := n.storage.InitialState()
 	if err != nil {
 		// Send to the error channel
-		fmt.Println(err)
+		fmt.Printf("[raft] %v\n", err)
 	}
 
 	if hs.Term > 0 {
-		fmt.Printf("Restarting Node %d\n", id)
+		fmt.Printf("[raft] Restarting Node %d\n", id)
 		n.node = raft.RestartNode(c)
 	} else {
-		fmt.Printf("Starting Node %d\n", id)
+		fmt.Printf("[raft] Starting Node %d\n", id)
 		n.node = raft.StartNode(c, ps)
 	}
 
@@ -95,15 +95,14 @@ func (n *node) serveChannels() {
 				if !ok {
 					n.proposeC = nil
 				} else {
+					fmt.Printf("[raft] proposal being sent to state machine...\n")
 					// blocks until accepted by raft state machine
-					// fmt.Printf("[raft] proposal being sent to state machine...\n")
 					err := n.node.Propose(context.TODO(), []byte(prop))
 					if err != nil {
 						n.raftErrorC <- err
 					}
-					// fmt.Printf("[raft] ...proposal accepted by state machine\n")
+					fmt.Printf("[raft] ...proposal accepted by state machine\n")
 				}
-
 			case cc, ok := <-n.proposeConfC:
 				if !ok {
 					n.proposeConfC = nil
