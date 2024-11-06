@@ -2,6 +2,7 @@ package http
 
 import (
 	"encoding/json"
+	"fmt"
 	httpgo "net/http"
 
 	"github.com/philborlin/committed/internal/cluster"
@@ -42,6 +43,8 @@ func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
 	p := &cluster.Proposal{
 		Entities: es,
 	}
+
+	fmt.Printf("Proposal contained %d entries\n", len(es))
 
 	err = h.c.Propose(p)
 	if err != nil {

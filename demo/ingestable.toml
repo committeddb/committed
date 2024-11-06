@@ -5,7 +5,7 @@ type="sql"
 [sql]
 dialect="mysql"
 topic = "simple"
-connectionString="admin:password@tcp(127.0.0.1:3306)/source?tables=simple"
+connectionString="mysql://root:password@127.0.0.1:3306/source?tables=simple"
 primaryKey = "id"
 
 [[sql.mappings]]

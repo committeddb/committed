@@ -267,7 +267,7 @@ func (s *Storage) Save(st pb.HardState, ents []pb.Entry, snap pb.Snapshot) error
 			}
 
 			for _, entity := range p.Entities {
-				fmt.Printf("Saving entity %v\n", entity)
+				fmt.Printf("[wal.storage] Saving entity %v\n", entity)
 				switch {
 				case cluster.IsType(entity.ID):
 					err := s.handleType(entity)

@@ -1,3 +1,13 @@
 {
-    "key":"%s","one":"%s"
+    "entities": [
+        {
+            "typeId": "simple",
+            "key": "one-1",
+            "data": {
+                "id": "one-1",
+                "title": "title-1",
+                "body": "body-1"
+            }
+        }
+    ]
 }

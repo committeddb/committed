@@ -13,11 +13,11 @@ name = "firstIndex"
 index = "title"
 
 [[sql.mappings]]
-jsonPath = "$.key"
+jsonPath = "$.id"
 column = "pk"
 type = "VARCHAR(256)"
 
 [[sql.mappings]]
-jsonPath = "$.one"
+jsonPath = "$.title"
 column = "title"
 type = "VARCHAR(256)"
