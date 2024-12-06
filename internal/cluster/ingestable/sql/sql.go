@@ -1,7 +1,7 @@
 package sql
 
 import (
-	"io"
+	"context"
 
 	"github.com/philborlin/committed/internal/cluster"
 )
@@ -11,21 +11,16 @@ import (
 type Ingestable struct {
 	config  *Config
 	dialect Dialect
-	closer  io.Closer
 }
 
 func New(d Dialect, config *Config) *Ingestable {
 	return &Ingestable{config: config, dialect: d}
 }
 
-func (i *Ingestable) Ingest(pos cluster.Position) (<-chan *cluster.Proposal, <-chan cluster.Position, error) {
-	proposalChan, positionChan, closer, err := i.dialect.Open(i.config, pos)
-
-	i.closer = closer
-
-	return proposalChan, positionChan, err
+func (i *Ingestable) Ingest(ctx context.Context, pos cluster.Position, pr chan<- *cluster.Proposal, po chan<- cluster.Position) error {
+	return i.dialect.Ingest(ctx, i.config, pos, pr, po)
 }
 
 func (i *Ingestable) Close() error {
-	return i.closer.Close()
+	return nil
 }

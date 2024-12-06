@@ -2,6 +2,7 @@
 package clusterfakes
 
 import (
+	"context"
 	"sync"
 
 	"github.com/philborlin/committed/internal/cluster"
@@ -18,20 +19,19 @@ type FakeIngestable struct {
 	closeReturnsOnCall map[int]struct {
 		result1 error
 	}
-	IngestStub        func(cluster.Position) (<-chan *cluster.Proposal, <-chan cluster.Position, error)
+	IngestStub        func(context.Context, cluster.Position, chan<- *cluster.Proposal, chan<- cluster.Position) error
 	ingestMutex       sync.RWMutex
 	ingestArgsForCall []struct {
-		arg1 cluster.Position
+		arg1 context.Context
+		arg2 cluster.Position
+		arg3 chan<- *cluster.Proposal
+		arg4 chan<- cluster.Position
 	}
 	ingestReturns struct {
-		result1 <-chan *cluster.Proposal
-		result2 <-chan cluster.Position
-		result3 error
+		result1 error
 	}
 	ingestReturnsOnCall map[int]struct {
-		result1 <-chan *cluster.Proposal
-		result2 <-chan cluster.Position
-		result3 error
+		result1 error
 	}
 	invocations      map[string][][]interface{}
 	invocationsMutex sync.RWMutex
@@ -90,23 +90,26 @@ func (fake *FakeIngestable) CloseReturnsOnCall(i int, result1 error) {
 	}{result1}
 }
 
-func (fake *FakeIngestable) Ingest(arg1 cluster.Position) (<-chan *cluster.Proposal, <-chan cluster.Position, error) {
+func (fake *FakeIngestable) Ingest(arg1 context.Context, arg2 cluster.Position, arg3 chan<- *cluster.Proposal, arg4 chan<- cluster.Position) error {
 	fake.ingestMutex.Lock()
 	ret, specificReturn := fake.ingestReturnsOnCall[len(fake.ingestArgsForCall)]
 	fake.ingestArgsForCall = append(fake.ingestArgsForCall, struct {
-		arg1 cluster.Position
-	}{arg1})
+		arg1 context.Context
+		arg2 cluster.Position
+		arg3 chan<- *cluster.Proposal
+		arg4 chan<- cluster.Position
+	}{arg1, arg2, arg3, arg4})
 	stub := fake.IngestStub
 	fakeReturns := fake.ingestReturns
-	fake.recordInvocation("Ingest", []interface{}{arg1})
+	fake.recordInvocation("Ingest", []interface{}{arg1, arg2, arg3, arg4})
 	fake.ingestMutex.Unlock()
 	if stub != nil {
-		return stub(arg1)
+		return stub(arg1, arg2, arg3, arg4)
 	}
 	if specificReturn {
-		return ret.result1, ret.result2, ret.result3
+		return ret.result1
 	}
-	return fakeReturns.result1, fakeReturns.result2, fakeReturns.result3
+	return fakeReturns.result1
 }
 
 func (fake *FakeIngestable) IngestCallCount() int {
@@ -115,46 +118,40 @@ func (fake *FakeIngestable) IngestCallCount() int {
 	return len(fake.ingestArgsForCall)
 }
 
-func (fake *FakeIngestable) IngestCalls(stub func(cluster.Position) (<-chan *cluster.Proposal, <-chan cluster.Position, error)) {
+func (fake *FakeIngestable) IngestCalls(stub func(context.Context, cluster.Position, chan<- *cluster.Proposal, chan<- cluster.Position) error) {
 	fake.ingestMutex.Lock()
 	defer fake.ingestMutex.Unlock()
 	fake.IngestStub = stub
 }
 
-func (fake *FakeIngestable) IngestArgsForCall(i int) cluster.Position {
+func (fake *FakeIngestable) IngestArgsForCall(i int) (context.Context, cluster.Position, chan<- *cluster.Proposal, chan<- cluster.Position) {
 	fake.ingestMutex.RLock()
 	defer fake.ingestMutex.RUnlock()
 	argsForCall := fake.ingestArgsForCall[i]
-	return argsForCall.arg1
+	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3, argsForCall.arg4
 }
 
-func (fake *FakeIngestable) IngestReturns(result1 <-chan *cluster.Proposal, result2 <-chan cluster.Position, result3 error) {
+func (fake *FakeIngestable) IngestReturns(result1 error) {
 	fake.ingestMutex.Lock()
 	defer fake.ingestMutex.Unlock()
 	fake.IngestStub = nil
 	fake.ingestReturns = struct {
-		result1 <-chan *cluster.Proposal
-		result2 <-chan cluster.Position
-		result3 error
-	}{result1, result2, result3}
+		result1 error
+	}{result1}
 }
 
-func (fake *FakeIngestable) IngestReturnsOnCall(i int, result1 <-chan *cluster.Proposal, result2 <-chan cluster.Position, result3 error) {
+func (fake *FakeIngestable) IngestReturnsOnCall(i int, result1 error) {
 	fake.ingestMutex.Lock()
 	defer fake.ingestMutex.Unlock()
 	fake.IngestStub = nil
 	if fake.ingestReturnsOnCall == nil {
 		fake.ingestReturnsOnCall = make(map[int]struct {
-			result1 <-chan *cluster.Proposal
-			result2 <-chan cluster.Position
-			result3 error
+			result1 error
 		})
 	}
 	fake.ingestReturnsOnCall[i] = struct {
-		result1 <-chan *cluster.Proposal
-		result2 <-chan cluster.Position
-		result3 error
-	}{result1, result2, result3}
+		result1 error
+	}{result1}
 }
 
 func (fake *FakeIngestable) Invocations() map[string][][]interface{} {

@@ -1,9 +1,9 @@
 package mysql
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/url"
 	"os"
 	"slices"
@@ -21,19 +21,17 @@ import (
 
 type MySQLDialect struct{}
 
-func (m *MySQLDialect) Open(config *sql.Config, pos cluster.Position) (<-chan *cluster.Proposal, <-chan cluster.Position, io.Closer, error) {
+func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos cluster.Position, pr chan<- *cluster.Proposal, po chan<- cluster.Position) error {
 	c, tables, err := createCanal(config.ConnectionString)
 	if err != nil {
-		return nil, nil, nil, err
+		return err
 	}
 
-	proposalChan := make(chan *cluster.Proposal)
-	positionChan := make(chan cluster.Position)
 	handler := &MySQLEventHandler{
 		config:       config,
 		canal:        c,
-		proposalChan: proposalChan,
-		positionChan: positionChan,
+		proposalChan: pr,
+		positionChan: po,
 		tables:       tables,
 	}
 
@@ -43,7 +41,7 @@ func (m *MySQLDialect) Open(config *sql.Config, pos cluster.Position) (<-chan *c
 		posProto := &dialectpb.MySQLBinLogPosition{}
 		err := proto.Unmarshal(pos, posProto)
 		if err != nil {
-			return nil, nil, nil, err
+			return err
 		}
 
 		go c.RunFrom(mysql.Position{Name: posProto.Name, Pos: posProto.Pos})
@@ -51,7 +49,13 @@ func (m *MySQLDialect) Open(config *sql.Config, pos cluster.Position) (<-chan *c
 		go c.Run()
 	}
 
-	return proposalChan, positionChan, handler, nil
+	<-ctx.Done()
+	c.Close()
+	return nil
+}
+
+func (m *MySQLDialect) Close() error {
+	return nil
 }
 
 type MySQLEventHandler struct {
@@ -61,11 +65,6 @@ type MySQLEventHandler struct {
 	proposalChan chan<- *cluster.Proposal
 	positionChan chan<- cluster.Position
 	tables       []string
-}
-
-func (h *MySQLEventHandler) Close() error {
-	h.canal.Close()
-	return nil
 }
 
 // TODO We will have to handle transactions at some point 1 transaction == 1 proposal

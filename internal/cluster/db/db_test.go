@@ -109,48 +109,6 @@ func TestType(t *testing.T) {
 	require.Equal(t, expected.tipe, got)
 }
 
-func TestIngest(t *testing.T) {
-	tests := map[string]struct {
-		inputs [][]string
-	}{
-		"simple":  {inputs: [][]string{{"foo"}}},
-		"two":     {inputs: [][]string{{"foo", "bar"}}},
-		"two-one": {inputs: [][]string{{"foo", "bar"}, {"baz"}}},
-	}
-
-	id := "foo"
-
-	for name, tc := range tests {
-		t.Run(name, func(t *testing.T) {
-			s := NewMemoryStorage()
-			db := createDBWithStorage(s)
-			defer db.Close()
-
-			ctx, cancel := context.WithCancel(context.Background())
-			ps := createProposals(tc.inputs)
-			positions := []cluster.Position{cluster.Position([]byte("foo"))}
-			ingestable := NewIngestable(ps, positions, cancel)
-			err := db.Ingest(ctx, id, ingestable)
-			require.Nil(t, err)
-			for i := 0; i < (len(ps) + len(positions)); i++ {
-				<-db.CommitC
-			}
-
-			size := len(ps) + len(positions)
-
-			ents, err := db.ents()
-			require.Nil(t, err)
-			require.Equal(t, len(ents), size)
-
-			for i, p := range ents {
-				got := cluster.IsIngestablePosition(p.Entities[0].Type.ID)
-				expected := i == size-1
-				require.Equal(t, expected, got)
-			}
-		})
-	}
-}
-
 func TestSync(t *testing.T) {
 	tests := map[string]struct {
 		inputs [][]string
@@ -377,9 +335,13 @@ func (db *DB) ents() ([]*cluster.Proposal, error) {
 		return nil, err
 	}
 
-	ents, err := db.storage.Entries(fi, li+1, 10000)
-	if err != nil {
-		return nil, err
+	var ents []raftpb.Entry
+	// Make sure storage is not empty
+	if li+1 > fi {
+		ents, err = db.storage.Entries(fi, li+1, 10000)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	ps := db.entsToProposals(ents)
@@ -398,43 +360,6 @@ func (db *DB) entsToProposals(ents []raftpb.Entry) []*cluster.Proposal {
 	}
 
 	return ps
-}
-
-type MemoryIngestable struct {
-	proposals    []*cluster.Proposal
-	positions    []cluster.Position
-	cancel       func()
-	proposalChan chan *cluster.Proposal
-	positionChan chan cluster.Position
-}
-
-func NewIngestable(proposals []*cluster.Proposal, positions []cluster.Position, cancel func()) *MemoryIngestable {
-	proposalChan := make(chan *cluster.Proposal)
-	positionChan := make(chan cluster.Position)
-	return &MemoryIngestable{
-		proposals:    proposals,
-		positions:    positions,
-		cancel:       cancel,
-		proposalChan: proposalChan,
-		positionChan: positionChan,
-	}
-}
-
-func (mi *MemoryIngestable) Ingest(pos cluster.Position) (<-chan *cluster.Proposal, <-chan cluster.Position, error) {
-	go func() {
-		for _, p := range mi.proposals {
-			mi.proposalChan <- p
-		}
-		for _, p := range mi.positions {
-			mi.positionChan <- p
-		}
-	}()
-
-	return mi.proposalChan, mi.positionChan, nil
-}
-
-func (mi *MemoryIngestable) Close() error {
-	return nil
 }
 
 type MemorySyncable struct {

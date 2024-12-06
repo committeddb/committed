@@ -1,6 +1,8 @@
 package ingestable
 
 import (
+	"context"
+
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/spf13/viper"
 )
@@ -21,17 +23,17 @@ type ProposalIngestable struct {
 	ps []*cluster.Proposal
 }
 
-func (i *ProposalIngestable) Ingest(pos cluster.Position) (<-chan *cluster.Proposal, <-chan cluster.Position, error) {
-	proposalChan := make(chan *cluster.Proposal)
-	positionChan := make(chan cluster.Position)
-
-	go func() {
-		for _, p := range i.ps {
-			proposalChan <- p
+func (i *ProposalIngestable) Ingest(ctx context.Context, pos cluster.Position, pr chan<- *cluster.Proposal, po chan<- cluster.Position) error {
+	for _, p := range i.ps {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+			pr <- p
 		}
-	}()
+	}
 
-	return proposalChan, positionChan, nil
+	return nil
 }
 
 func (i *ProposalIngestable) Close() error {

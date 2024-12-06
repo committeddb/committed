@@ -71,7 +71,7 @@ func TestTypeDelete(t *testing.T) {
 				saveEntity(t, e, s, term, index+uint64(i))
 
 				_, err := s.Type(tipe.ID)
-				require.Equal(t, wal.ErrTypeMissing, err)
+				require.ErrorIs(t, err, wal.ErrTypeMissing)
 
 				// Make sure other types are still available
 				for j := i + 1; j < len(tt.types); j++ {
@@ -89,7 +89,7 @@ func TestTypeError(t *testing.T) {
 	defer s.Cleanup()
 
 	_, err := s.Type("none")
-	require.Equal(t, wal.ErrTypeMissing, err)
+	require.ErrorIs(t, err, wal.ErrTypeMissing)
 }
 
 func insertTypes(t *testing.T, s db.Storage, ts []*cluster.Type, term, index uint64) uint64 {

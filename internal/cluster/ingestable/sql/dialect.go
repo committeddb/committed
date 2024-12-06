@@ -1,7 +1,7 @@
 package sql
 
 import (
-	"io"
+	"context"
 
 	"github.com/philborlin/committed/internal/cluster"
 )
@@ -9,7 +9,7 @@ import (
 //go:generate protoc --go_out=paths=source_relative:. ./dialectpb/dialect.proto
 
 type Dialect interface {
-	Open(config *Config, pos cluster.Position) (<-chan *cluster.Proposal, <-chan cluster.Position, io.Closer, error)
+	Ingest(ctx context.Context, config *Config, pos cluster.Position, pr chan<- *cluster.Proposal, po chan<- cluster.Position) error
 }
 
 type Config struct {

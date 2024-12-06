@@ -1,6 +1,7 @@
 package mysql_test
 
 import (
+	"context"
 	gosql "database/sql"
 	"fmt"
 	"log"
@@ -121,9 +122,18 @@ func TestMysqlDialect(t *testing.T) {
 			dialect := &mysql.MySQLDialect{}
 			con := fmt.Sprintf("mysql://%s:%s@127.0.0.1:%s/%s?tables=%s", username, password, port, dbName, tt.tables)
 			tt.config.ConnectionString = con
-			proposalChan, positionChan, closer, err := dialect.Open(tt.config, nil)
-			require.Nil(t, err)
-			defer closer.Close()
+
+			ctx, cancel := context.WithCancel(context.Background())
+
+			proposalChan := make(chan *cluster.Proposal)
+			positionChan := make(chan cluster.Position)
+
+			go func() {
+				err := dialect.Ingest(ctx, tt.config, nil, proposalChan, positionChan)
+				require.Nil(t, err)
+			}()
+
+			defer cancel()
 
 			tt.setupFn(t)
 

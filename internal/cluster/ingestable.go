@@ -1,6 +1,8 @@
 package cluster
 
 import (
+	"context"
+
 	"github.com/philborlin/committed/internal/cluster/clusterpb"
 	"github.com/spf13/viper"
 	"google.golang.org/protobuf/proto"
@@ -10,7 +12,13 @@ type Position []byte
 
 //counterfeiter:generate . Ingestable
 type Ingestable interface {
-	Ingest(pos Position) (<-chan *Proposal, <-chan Position, error)
+	// Start ingesting at position
+	// During ingestion:
+	// * write proposals to pr
+	// * write position changes to po. How often to update the position is up to the Ingestable
+	// * check the context for done after every proposal
+	// Ingest MUST support being called multiple times
+	Ingest(ctx context.Context, pos Position, pr chan<- *Proposal, po chan<- Position) error
 	Close() error
 }
 

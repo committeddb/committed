@@ -3,7 +3,6 @@ package db
 import (
 	"context"
 	"fmt"
-	"io"
 	"log"
 	"time"
 
@@ -13,12 +12,13 @@ import (
 	"go.uber.org/zap"
 )
 
-type node struct {
+type Raft struct {
 	proposeC     <-chan []byte            // proposed messages
 	proposeConfC <-chan raftpb.ConfChange // proposed cluster config changes
 	commitC      chan<- []byte            // when a message is committed it is sent here
 	raftErrorC   chan<- error             // errors from raft session
 	raftStopC    chan struct{}
+	leaderState  *LeaderState
 
 	node    raft.Node
 	storage Storage
@@ -30,16 +30,17 @@ type node struct {
 	logger *zap.Logger
 }
 
-func NewRaft(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, proposeConfC <-chan raftpb.ConfChange) (<-chan []byte, <-chan error, io.Closer) {
+func NewRaft(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, proposeConfC <-chan raftpb.ConfChange) (<-chan []byte, <-chan error, *Raft) {
 	commitC := make(chan []byte)
 	errorC := make(chan error)
 
-	n := &node{
+	n := &Raft{
 		proposeC:       proposeC,
 		proposeConfC:   proposeConfC,
 		commitC:        commitC,
 		raftErrorC:     errorC,
 		raftStopC:      make(chan struct{}),
+		leaderState:    NewLeaderState(false),
 		storage:        s,
 		transportStopC: make(chan struct{}),
 		transportDoneC: make(chan struct{}),
@@ -51,7 +52,7 @@ func NewRaft(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, propo
 	return commitC, errorC, n
 }
 
-func (n *node) startRaft(id uint64, ps []raft.Peer) {
+func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 	c := &raft.Config{
 		ID:                        id,
 		ElectionTick:              10,
@@ -76,13 +77,14 @@ func (n *node) startRaft(id uint64, ps []raft.Peer) {
 		n.node = raft.StartNode(c, ps)
 	}
 
-	n.transport = httptransport.New(id, ps, n.logger, n)
+	r := &httpTransportRaft{node: n.node}
+	n.transport = httptransport.New(id, ps, n.logger, r)
 
 	go n.serveRaft()
 	go n.serveChannels()
 }
 
-func (n *node) serveChannels() {
+func (n *Raft) serveChannels() {
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -126,6 +128,9 @@ func (n *node) serveChannels() {
 			n.node.Tick()
 		case rd := <-n.node.Ready():
 			// fmt.Printf("[raft] ready and about to save to storage\n")
+			n.leaderState.SetLeader(n.node.Status().RaftState == raft.StateLeader)
+			fmt.Printf("Leader state is: %s - %v\n", n.node.Status().RaftState, n.leaderState.IsLeader())
+
 			err := n.storage.Save(rd.HardState, rd.Entries, rd.Snapshot)
 			if err != nil {
 				fmt.Printf("[raft] storage save: %v\n", err)
@@ -160,14 +165,14 @@ func (n *node) serveChannels() {
 	}
 }
 
-func (n *node) writeError(err error) {
+func (n *Raft) writeError(err error) {
 	n.stopTransport()
 	n.raftErrorC <- err
 	close(n.raftErrorC)
 	n.node.Stop()
 }
 
-func (n *node) stopTransport() {
+func (n *Raft) stopTransport() {
 	if n.transport != nil {
 		n.transport.Stop()
 	}
@@ -175,12 +180,12 @@ func (n *node) stopTransport() {
 	<-n.transportDoneC
 }
 
-func (n *node) Close() error {
+func (n *Raft) Close() error {
 	n.stopTransport()
 	return nil
 }
 
-func (n *node) serveRaft() {
+func (n *Raft) serveRaft() {
 	err := n.transport.Start(n.transportStopC)
 	select {
 	case <-n.transportStopC:
@@ -190,22 +195,26 @@ func (n *node) serveRaft() {
 	close(n.transportDoneC)
 }
 
-func (n *node) processSnapshot(ms raftpb.Snapshot) {
+func (n *Raft) processSnapshot(ms raftpb.Snapshot) {
 	// Nothing to do yet
 }
 
-func (n *node) processCommittedEntry(e raftpb.Entry) {
+func (n *Raft) processCommittedEntry(e raftpb.Entry) {
 	if e.Type == raftpb.EntryNormal && e.Data != nil {
 		n.commitC <- e.Data
 	}
 }
 
+type httpTransportRaft struct {
+	node raft.Node
+}
+
 // The next four methods implement the Raft interface in the rafthttp package needed for rafthttp.Transport
-func (n *node) Process(ctx context.Context, m raftpb.Message) error {
+func (n *httpTransportRaft) Process(ctx context.Context, m raftpb.Message) error {
 	return n.node.Step(ctx, m)
 }
-func (n *node) IsIDRemoved(id uint64) bool  { return false }
-func (n *node) ReportUnreachable(id uint64) { n.node.ReportUnreachable(id) }
-func (n *node) ReportSnapshot(id uint64, status raft.SnapshotStatus) {
+func (n *httpTransportRaft) IsIDRemoved(id uint64) bool  { return false }
+func (n *httpTransportRaft) ReportUnreachable(id uint64) { n.node.ReportUnreachable(id) }
+func (n *httpTransportRaft) ReportSnapshot(id uint64, status raft.SnapshotStatus) {
 	n.node.ReportSnapshot(id, status)
 }

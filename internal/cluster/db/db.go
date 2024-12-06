@@ -19,11 +19,12 @@ type DB struct {
 	ErrorC      <-chan error
 	proposeC    chan<- []byte
 	confChangeC chan<- raftpb.ConfChange
-	closer      io.Closer
+	raft        *Raft
 	storage     Storage
 	ctx         context.Context
 	cancelSyncs context.CancelFunc
 	parser      Parser
+	leaderState *LeaderState
 }
 
 func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithID, ingest <-chan *IngestableWithID) *DB {
@@ -39,34 +40,35 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 
 	ctx, cancelSyncs := context.WithCancel(context.Background())
 
-	commitC, errorC, closer := NewRaft(id, rpeers, s, proposeC, confChangeC)
+	commitC, errorC, raft := NewRaft(id, rpeers, s, proposeC, confChangeC)
 
 	db := &DB{
 		CommitC:     commitC,
 		ErrorC:      errorC,
 		proposeC:    proposeC,
 		confChangeC: confChangeC,
-		closer:      closer,
+		raft:        raft,
 		storage:     s,
 		ctx:         ctx,
 		cancelSyncs: cancelSyncs,
 		parser:      p,
+		leaderState: raft.leaderState,
 	}
 
-	go db.sync(sync)
-	go db.ingest(ingest)
+	go db.listenForSyncables(sync)
+	go db.listenForIngestables(ingest)
 
 	return db
 }
 
-func (db *DB) sync(sync <-chan *SyncableWithID) {
+func (db *DB) listenForSyncables(sync <-chan *SyncableWithID) {
 	for sync != nil {
 		syncable := <-sync
 		db.Sync(context.Background(), syncable.ID, syncable.Syncable)
 	}
 }
 
-func (db *DB) ingest(ingest <-chan *IngestableWithID) {
+func (db *DB) listenForIngestables(ingest <-chan *IngestableWithID) {
 	for ingest != nil {
 		ingestable := <-ingest
 		db.Ingest(context.Background(), ingestable.ID, ingestable.Ingestable)
@@ -98,18 +100,6 @@ func (db *DB) Propose(p *cluster.Proposal) error {
 	return nil
 }
 
-// func (db *DB) ProposeType(t *cluster.Type) error {
-// 	typeEntity, err := cluster.NewUpsertTypeEntity(t)
-// 	if err != nil {
-// 		return err
-// 	}
-
-// 	p := &cluster.Proposal{}
-// 	p.Entities = append(p.Entities, typeEntity)
-
-// 	return db.Propose(p)
-// }
-
 func (db *DB) ProposeDeleteType(id string) error {
 	deleteTypeEntity := cluster.NewDeleteTypeEntity(id)
 
@@ -126,42 +116,12 @@ func (db *DB) Type(id string) (*cluster.Type, error) {
 func (db *DB) Close() error {
 	close(db.proposeC)
 	db.cancelSyncs()
-	return db.closer.Close()
-}
-
-func (db *DB) Ingest(ctx context.Context, id string, i cluster.Ingestable) error {
-	go func() {
-		p := db.storage.Position(id)
-		proposalChan, positionChan, err := i.Ingest(p)
-		if err != nil {
-			fmt.Printf("[db.DB] ingest: %v\n", err)
-		}
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case proposal := <-proposalChan:
-				err = db.Propose(proposal)
-				if err != nil {
-					// TODO Handle error
-					fmt.Printf("[db.DB] propose: %v\n", err)
-				}
-			case position := <-positionChan:
-				err = db.proposeIngestablePosition(&cluster.IngestablePosition{ID: id, Position: position})
-				if err != nil {
-					// TODO Handle error
-					fmt.Printf("[db.DB] proposeIngestablePosition: %v\n", err)
-				}
-				// default:
-			}
-		}
-	}()
-
-	return nil
+	return db.raft.Close()
 }
 
 func (db *DB) Sync(ctx context.Context, id string, s cluster.Syncable) error {
+	// TODO If transition to leader, start syncing, if transition off leader, stop syncing
+
 	go func() {
 		fmt.Printf("[db] Syncing %v\n", id)
 
