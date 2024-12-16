@@ -120,17 +120,17 @@ func checkCommits(t *testing.T, db *DB, size int, positions ...int) {
 	require.Nil(t, err)
 	require.Equal(t, size, len(ents))
 
-	positionIndex := 0
+	positionsFound := 0
 	for i, p := range ents {
 		expected := slices.Contains(positions, i)
 		got := cluster.IsIngestablePosition(p.Entities[0].Type.ID)
 		require.Equal(t, expected, got)
 		if got {
-			positionIndex++
+			positionsFound++
 		}
 	}
 
-	require.Equal(t, len(positions), positionIndex)
+	require.Equal(t, len(positions), positionsFound)
 }
 
 type MemoryIngestable struct {
