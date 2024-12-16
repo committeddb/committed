@@ -91,7 +91,7 @@ func (db *DB) Propose(p *cluster.Proposal) error {
 	}
 
 	// TODO Should we wrap this in a log level?
-	fmt.Printf("[db.DB] Proposing %v", p)
+	fmt.Printf("[db.DB] Proposing %v\n", p)
 
 	db.proposeC <- bs
 
@@ -114,8 +114,9 @@ func (db *DB) Type(id string) (*cluster.Type, error) {
 }
 
 func (db *DB) Close() error {
+	fmt.Printf("Closing db\n")
 	close(db.proposeC)
-	db.cancelSyncs()
+	db.cancelSyncs() // TODO This needs to cancel/close all workers
 	return db.raft.Close()
 }
 
@@ -191,4 +192,8 @@ func (db *DB) proposeIngestablePosition(p *cluster.IngestablePosition) error {
 	}
 
 	return nil
+}
+
+func (db *DB) ID() uint64 {
+	return db.raft.id
 }

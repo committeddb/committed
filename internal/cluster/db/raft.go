@@ -18,6 +18,7 @@ type Raft struct {
 	commitC      chan<- []byte            // when a message is committed it is sent here
 	raftErrorC   chan<- error             // errors from raft session
 	raftStopC    chan struct{}
+	id           uint64
 	leaderState  *LeaderState
 
 	node    raft.Node
@@ -35,6 +36,7 @@ func NewRaft(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, propo
 	errorC := make(chan error)
 
 	n := &Raft{
+		id:             id,
 		proposeC:       proposeC,
 		proposeConfC:   proposeConfC,
 		commitC:        commitC,
@@ -129,7 +131,6 @@ func (n *Raft) serveChannels() {
 		case rd := <-n.node.Ready():
 			// fmt.Printf("[raft] ready and about to save to storage\n")
 			n.leaderState.SetLeader(n.node.Status().RaftState == raft.StateLeader)
-			fmt.Printf("Leader state is: %s - %v\n", n.node.Status().RaftState, n.leaderState.IsLeader())
 
 			err := n.storage.Save(rd.HardState, rd.Entries, rd.Snapshot)
 			if err != nil {

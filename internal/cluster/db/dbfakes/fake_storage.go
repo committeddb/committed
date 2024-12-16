@@ -110,6 +110,17 @@ type FakeStorage struct {
 		result1 uint64
 		result2 error
 	}
+	NodeStub        func(string) uint64
+	nodeMutex       sync.RWMutex
+	nodeArgsForCall []struct {
+		arg1 string
+	}
+	nodeReturns struct {
+		result1 uint64
+	}
+	nodeReturnsOnCall map[int]struct {
+		result1 uint64
+	}
 	PositionStub        func(string) cluster.Position
 	positionMutex       sync.RWMutex
 	positionArgsForCall []struct {
@@ -677,6 +688,67 @@ func (fake *FakeStorage) LastIndexReturnsOnCall(i int, result1 uint64, result2 e
 	}{result1, result2}
 }
 
+func (fake *FakeStorage) Node(arg1 string) uint64 {
+	fake.nodeMutex.Lock()
+	ret, specificReturn := fake.nodeReturnsOnCall[len(fake.nodeArgsForCall)]
+	fake.nodeArgsForCall = append(fake.nodeArgsForCall, struct {
+		arg1 string
+	}{arg1})
+	stub := fake.NodeStub
+	fakeReturns := fake.nodeReturns
+	fake.recordInvocation("Node", []interface{}{arg1})
+	fake.nodeMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeStorage) NodeCallCount() int {
+	fake.nodeMutex.RLock()
+	defer fake.nodeMutex.RUnlock()
+	return len(fake.nodeArgsForCall)
+}
+
+func (fake *FakeStorage) NodeCalls(stub func(string) uint64) {
+	fake.nodeMutex.Lock()
+	defer fake.nodeMutex.Unlock()
+	fake.NodeStub = stub
+}
+
+func (fake *FakeStorage) NodeArgsForCall(i int) string {
+	fake.nodeMutex.RLock()
+	defer fake.nodeMutex.RUnlock()
+	argsForCall := fake.nodeArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeStorage) NodeReturns(result1 uint64) {
+	fake.nodeMutex.Lock()
+	defer fake.nodeMutex.Unlock()
+	fake.NodeStub = nil
+	fake.nodeReturns = struct {
+		result1 uint64
+	}{result1}
+}
+
+func (fake *FakeStorage) NodeReturnsOnCall(i int, result1 uint64) {
+	fake.nodeMutex.Lock()
+	defer fake.nodeMutex.Unlock()
+	fake.NodeStub = nil
+	if fake.nodeReturnsOnCall == nil {
+		fake.nodeReturnsOnCall = make(map[int]struct {
+			result1 uint64
+		})
+	}
+	fake.nodeReturnsOnCall[i] = struct {
+		result1 uint64
+	}{result1}
+}
+
 func (fake *FakeStorage) Position(arg1 string) cluster.Position {
 	fake.positionMutex.Lock()
 	ret, specificReturn := fake.positionReturnsOnCall[len(fake.positionArgsForCall)]
@@ -1182,6 +1254,8 @@ func (fake *FakeStorage) Invocations() map[string][][]interface{} {
 	defer fake.initialStateMutex.RUnlock()
 	fake.lastIndexMutex.RLock()
 	defer fake.lastIndexMutex.RUnlock()
+	fake.nodeMutex.RLock()
+	defer fake.nodeMutex.RUnlock()
 	fake.positionMutex.RLock()
 	defer fake.positionMutex.RUnlock()
 	fake.readerMutex.RLock()

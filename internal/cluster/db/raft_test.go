@@ -270,11 +270,12 @@ type MemoryStorage struct {
 	*raft.MemoryStorage
 	saveArgsForCall []*MemoryStorageSaveArgsForCall
 	indexes         map[string]uint64
+	node            uint64
 }
 
 func NewMemoryStorage() *MemoryStorage {
 	indexes := make(map[string]uint64)
-	return &MemoryStorage{raft.NewMemoryStorage(), nil, indexes}
+	return &MemoryStorage{raft.NewMemoryStorage(), nil, indexes, 0}
 }
 
 func (ms *MemoryStorage) Close() error {
@@ -329,6 +330,14 @@ func (ms *MemoryStorage) Reader(id string) db.ProposalReader {
 	}
 
 	return &Reader{index: i, s: ms}
+}
+
+func (ms *MemoryStorage) Node(id string) uint64 {
+	return ms.node
+}
+
+func (ms *MemoryStorage) SetNode(n uint64) {
+	ms.node = n
 }
 
 func (ms *MemoryStorage) Database(id string) (cluster.Database, error) {
