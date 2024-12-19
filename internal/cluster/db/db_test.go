@@ -109,118 +109,6 @@ func TestType(t *testing.T) {
 	require.Equal(t, expected.tipe, got)
 }
 
-func TestSync(t *testing.T) {
-	tests := map[string]struct {
-		inputs [][]string
-	}{
-		"simple":  {inputs: [][]string{{"foo"}}},
-		"two":     {inputs: [][]string{{"foo", "bar"}}},
-		"two-one": {inputs: [][]string{{"foo", "bar"}, {"baz"}}},
-	}
-
-	id := "foo"
-
-	for name, tc := range tests {
-		t.Run(name, func(t *testing.T) {
-			s := NewMemoryStorage()
-			db := createDBWithStorage(s)
-			defer db.Close()
-
-			size := len(tc.inputs)
-
-			ctx, cancel := context.WithCancel(context.Background())
-
-			ps := createProposals(tc.inputs)
-			for _, p := range ps {
-				require.Equal(t, nil, db.Propose(p))
-				<-db.CommitC
-			}
-
-			syncable := NewSyncable(size, cancel)
-			err := db.Sync(ctx, id, syncable)
-			require.Nil(t, err)
-			for i := 0; i < len(tc.inputs); i++ {
-				<-db.CommitC
-			}
-			require.Equal(t, size, syncable.count)
-
-			ps, err = db.ents()
-			require.Nil(t, err)
-			require.Equal(t, len(tc.inputs)*2, len(ps))
-
-			for i, p := range ps {
-				got := cluster.IsSyncableIndex(p.Entities[0].Type.ID)
-				expected := i >= len(tc.inputs)
-				require.Equal(t, expected, got)
-			}
-		})
-	}
-}
-
-func TestResumeSync(t *testing.T) {
-	tests := map[string]struct {
-		inputs [][]string
-	}{
-		"simple":  {inputs: [][]string{{"foo"}}},
-		"two":     {inputs: [][]string{{"foo", "bar"}}},
-		"two-one": {inputs: [][]string{{"foo", "bar"}, {"baz"}}},
-	}
-
-	id := "foo"
-
-	for name, tc := range tests {
-		t.Run(name, func(t *testing.T) {
-			storage := NewMemoryStorage()
-			db := createDBWithStorage(storage)
-			defer db.Close()
-
-			size := len(tc.inputs)
-
-			ps := createProposalsAndProposeThem(t, db, tc.inputs)
-			ctx, cancel := context.WithCancel(context.Background())
-			syncable := NewSyncable(size, cancel)
-
-			_ = db.Sync(ctx, id, syncable)
-			for i := 0; i < len(tc.inputs); i++ {
-				<-db.CommitC
-			}
-
-			inputs2 := modifyInputs(tc.inputs)
-
-			ps2 := createProposalsAndProposeThem(t, db, inputs2)
-			ctx, cancel = context.WithCancel(context.Background())
-			syncable = NewSyncable(size, cancel)
-
-			storage.indexes[id] = getLastIndex(storage, ps)
-
-			_ = db.Sync(ctx, id, syncable)
-			for i := 0; i < len(inputs2); i++ {
-				<-db.CommitC
-			}
-
-			require.Equal(t, size, syncable.count)
-
-			for i, p := range storage.Proposals() {
-				fmt.Printf("Testing [%v] - %v", i, p)
-				if i < size {
-					require.False(t, cluster.IsSystem(p.Entities[0].Type.ID))
-					require.Equal(t, ps[i%size], p)
-				} else if i >= size*2 && i < size*3 {
-					require.False(t, cluster.IsSystem(p.Entities[0].Type.ID))
-					require.Equal(t, ps2[i%size], p)
-				} else {
-					require.True(t, cluster.IsSystem(p.Entities[0].Type.ID))
-				}
-			}
-
-			for i, got := range syncable.proposals {
-				require.False(t, cluster.IsSystem(got.Entities[0].Type.ID))
-				require.Equal(t, ps2[i], got)
-			}
-		})
-	}
-}
-
 // TODO Test deletes - may have to test with a syncable because a delete doesn't have context except when read
 
 func getLastIndex(s db.Storage, ps []*cluster.Proposal) uint64 {
@@ -386,9 +274,14 @@ func (ms *MemorySyncable) Sync(ctx context.Context, p *cluster.Proposal) (cluste
 		ms.cancel()
 	}
 
-	var shouldSnapshot = cluster.ShouldSnapshot(len(p.Entities) == 1 && cluster.IsSystem(p.Entities[0].Type.ID))
+	shouldSnapshot := true
+	for _, e := range p.Entities {
+		if cluster.IsSystem(e.Type.ID) {
+			shouldSnapshot = false
+		}
+	}
 
-	return shouldSnapshot, nil
+	return cluster.ShouldSnapshot(shouldSnapshot), nil
 }
 
 func (ms *MemorySyncable) Close() error {

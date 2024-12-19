@@ -5,7 +5,6 @@ package db
 import (
 	"context"
 	"fmt"
-	"io"
 
 	"github.com/philborlin/committed/internal/cluster"
 	"go.etcd.io/etcd/raft/v3"
@@ -118,52 +117,6 @@ func (db *DB) Close() error {
 	close(db.proposeC)
 	db.cancelSyncs() // TODO This needs to cancel/close all workers
 	return db.raft.Close()
-}
-
-func (db *DB) Sync(ctx context.Context, id string, s cluster.Syncable) error {
-	// TODO If transition to leader, start syncing, if transition off leader, stop syncing
-
-	go func() {
-		fmt.Printf("[db] Syncing %v\n", id)
-
-		r := db.storage.Reader(id)
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-
-			i, p, err := r.Read()
-			if err == io.EOF {
-				// TODO Figure out what to do - maybe do an exponential backoff to a certain point - maybe nothing?
-				continue
-			} else if err != nil {
-				// TODO Handle error
-				fmt.Printf("[db.DB] read: %v\n", err)
-				return
-			}
-
-			shouldSnapshot, err := s.Sync(db.ctx, p)
-			if err != nil {
-				// TODO Handle error
-				fmt.Printf("[db.DB] sync: %v\n", err)
-				return
-			}
-
-			if shouldSnapshot {
-				err = db.proposeSyncableIndex(&cluster.SyncableIndex{ID: id, Index: i})
-				if err != nil {
-					// TODO Handle error
-					fmt.Printf("[db.DB] proposeSyncableIndex: %v\n", err)
-					return
-				}
-			}
-		}
-	}()
-
-	return nil
 }
 
 func (db *DB) proposeSyncableIndex(i *cluster.SyncableIndex) error {
