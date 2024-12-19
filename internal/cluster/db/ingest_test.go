@@ -2,6 +2,7 @@ package db_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"slices"
@@ -41,6 +42,57 @@ func TestIngest(t *testing.T) {
 
 			size := len(ps) + len(positions)
 			checkCommits(t, db, size, size-1)
+		})
+	}
+}
+
+func TestResumeIngest(t *testing.T) {
+	tests := map[string]struct {
+		inputs [][]string
+	}{
+		"simple":  {inputs: [][]string{{"foo"}}},
+		"two":     {inputs: [][]string{{"foo", "bar"}}},
+		"two-one": {inputs: [][]string{{"foo", "bar"}, {"baz"}}},
+	}
+
+	id := "foo"
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			storage := NewMemoryStorage()
+			db := createDBWithStorage(storage)
+			defer db.Close()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			ps := createProposals(tc.inputs)
+			positions := []cluster.Position{cluster.Position([]byte("foo"))}
+			ingestable := NewIngestable(ps, positions, cancel)
+			err := db.Ingest(ctx, id, ingestable)
+			require.Nil(t, err)
+			for i := 0; i < (len(ps) + len(positions)); i++ {
+				<-db.CommitC
+			}
+
+			size := len(ps) + len(positions)
+			checkCommits(t, db, size, size-1)
+
+			cancel()
+
+			storage.positions[id] = &MemoryPosition{ProIndex: len(tc.inputs), PosIndex: 1}
+
+			ctx, cancel = context.WithCancel(context.Background())
+			inputs2 := modifyInputs(tc.inputs)
+			ps2 := createProposals(inputs2)
+			positions2 := []cluster.Position{cluster.Position([]byte("bar"))}
+			ingestable2 := NewIngestable(append(ps, ps2...), append(positions, positions2...), cancel)
+			err = db.Ingest(ctx, id, ingestable2)
+			require.Nil(t, err)
+			for i := 0; i < (len(ps) + len(positions)); i++ {
+				<-db.CommitC
+			}
+
+			size2 := (len(ps) + len(positions)) * 2
+			checkCommits(t, db, size2, len(ps), size2-1)
 		})
 	}
 }
@@ -148,22 +200,24 @@ func NewIngestable(proposals []*cluster.Proposal, positions []cluster.Position, 
 }
 
 func (mi *MemoryIngestable) Ingest(ctx context.Context, pos cluster.Position, pr chan<- *cluster.Proposal, po chan<- cluster.Position) error {
-	proIndex := 0
-	posIndex := 0
+	position := &MemoryPosition{}
+	if pos != nil {
+		_ = json.Unmarshal(pos, position)
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil // TODO Should this be an io.EOF?
 		default:
-			if len(mi.proposals) > proIndex {
-				fmt.Printf("Proposal Index: %v\n", proIndex)
-				pr <- mi.proposals[proIndex]
-				proIndex++
-			} else if len(mi.positions) > posIndex {
-				fmt.Printf("Position Index: %v\n", posIndex)
-				po <- mi.positions[posIndex]
-				posIndex++
+			if len(mi.proposals) > position.ProIndex {
+				fmt.Printf("Proposal Index: %v\n", position.ProIndex)
+				pr <- mi.proposals[position.ProIndex]
+				position.ProIndex++
+			} else if len(mi.positions) > position.PosIndex {
+				fmt.Printf("Position Index: %v\n", position.PosIndex)
+				po <- mi.positions[position.PosIndex]
+				position.PosIndex++
 			}
 		}
 	}

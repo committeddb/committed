@@ -1,6 +1,7 @@
 package db_test
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -260,6 +261,11 @@ func (rs Rafts) Close() error {
 	return err
 }
 
+type MemoryPosition struct {
+	ProIndex int
+	PosIndex int
+}
+
 type MemoryStorageSaveArgsForCall struct {
 	st   raftpb.HardState
 	ents []raftpb.Entry
@@ -270,12 +276,14 @@ type MemoryStorage struct {
 	*raft.MemoryStorage
 	saveArgsForCall []*MemoryStorageSaveArgsForCall
 	indexes         map[string]uint64
+	positions       map[string]*MemoryPosition
 	node            uint64
 }
 
 func NewMemoryStorage() *MemoryStorage {
 	indexes := make(map[string]uint64)
-	return &MemoryStorage{raft.NewMemoryStorage(), nil, indexes, 0}
+	positions := make(map[string]*MemoryPosition)
+	return &MemoryStorage{raft.NewMemoryStorage(), nil, indexes, positions, 0}
 }
 
 func (ms *MemoryStorage) Close() error {
@@ -320,6 +328,15 @@ func (ms *MemoryStorage) Type(id string) (*cluster.Type, error) {
 }
 
 func (ms *MemoryStorage) Position(id string) cluster.Position {
+	pos := ms.positions[id]
+
+	if pos != nil {
+		bs, err := json.Marshal(pos)
+		if err == nil {
+			return bs
+		}
+	}
+
 	return nil
 }
 
