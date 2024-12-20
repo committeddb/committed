@@ -43,17 +43,7 @@ func TestSync(t *testing.T) {
 			for i := 0; i < len(tc.inputs); i++ {
 				<-db.CommitC
 			}
-			require.Equal(t, size, syncable.count)
-
-			ps, err = db.ents()
-			require.Nil(t, err)
-			require.Equal(t, len(tc.inputs)*2, len(ps))
-
-			for i, p := range ps {
-				got := cluster.IsSyncableIndex(p.Entities[0].Type.ID)
-				expected := i >= len(tc.inputs)
-				require.Equal(t, expected, got)
-			}
+			checkSyncs(t, db, syncable, ps)
 		})
 	}
 }
@@ -193,5 +183,26 @@ func TestSyncWithStateChanges(t *testing.T) {
 
 			fmt.Printf("Got here\n")
 		})
+	}
+}
+
+func checkSyncs(t *testing.T, db *DB, syncable *MemorySyncable, ps []*cluster.Proposal) {
+	size := len(ps)
+	require.Equal(t, size, syncable.count)
+
+	ents, err := db.ents()
+	require.Nil(t, err)
+	require.Equal(t, len(ps)*2, len(ents))
+
+	for i, p := range ents {
+		got := cluster.IsSyncableIndex(p.Entities[0].Type.ID)
+		expected := i >= len(ps)
+		require.Equal(t, expected, got)
+
+		if !got {
+			for ei, e := range ents[i].Entities {
+				require.Equal(t, e.Data, ents[i].Entities[ei].Data)
+			}
+		}
 	}
 }
