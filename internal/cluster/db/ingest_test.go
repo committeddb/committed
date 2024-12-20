@@ -41,7 +41,7 @@ func TestIngest(t *testing.T) {
 			}
 
 			size := len(ps) + len(positions)
-			checkCommits(t, db, size, size-1)
+			checkCommits(t, db, ps, size-1)
 		})
 	}
 }
@@ -74,7 +74,7 @@ func TestResumeIngest(t *testing.T) {
 			}
 
 			size := len(ps) + len(positions)
-			checkCommits(t, db, size, size-1)
+			checkCommits(t, db, ps, size-1)
 
 			cancel()
 
@@ -92,7 +92,7 @@ func TestResumeIngest(t *testing.T) {
 			}
 
 			size2 := (len(ps) + len(positions)) * 2
-			checkCommits(t, db, size2, len(ps), size2-1)
+			checkCommits(t, db, append(ps, ps2...), len(ps), size2-1)
 		})
 	}
 }
@@ -134,17 +134,17 @@ func TestIngestWithStateChanges(t *testing.T) {
 			size := len(ps) + len(positions)
 			positionIndex := size - 1
 
-			checkCommits(t, db, 0)
+			checkCommits(t, db, []*cluster.Proposal{})
 
 			// not-leader -> not-leader - keep not-ingesting
 			s.SetNode(math.MaxUint64)
 			time.Sleep(duration)
-			checkCommits(t, db, 0)
+			checkCommits(t, db, []*cluster.Proposal{})
 
 			// not-leader -> leader - start ingesting
 			s.SetNode(db.ID())
 			time.Sleep(duration)
-			checkCommits(t, db, size, positionIndex)
+			checkCommits(t, db, ps, positionIndex)
 
 			// leader -> leader - keep ingesting
 			s.SetNode(db.ID())
@@ -153,21 +153,23 @@ func TestIngestWithStateChanges(t *testing.T) {
 			ingestable.positions = append(ingestable.positions, cluster.Position([]byte("bar")))
 			size = size + 2
 			time.Sleep(duration)
-			checkCommits(t, db, size, positionIndex, size-1)
+			checkCommits(t, db, append(ps, ps2...), positionIndex, size-1)
 
 			// leader -> not-leader - stop ingesting
 			s.SetNode(math.MaxUint64)
 			time.Sleep(duration)
 			ps3 := createProposals([][]string{{"ps3"}})
 			ingestable.proposals = append(ingestable.proposals, ps3[0])
-			checkCommits(t, db, size, positionIndex, size-1)
+			checkCommits(t, db, append(ps, ps2...), positionIndex, size-1)
 
 			fmt.Printf("Got here\n")
 		})
 	}
 }
 
-func checkCommits(t *testing.T, db *DB, size int, positions ...int) {
+func checkCommits(t *testing.T, db *DB, ps []*cluster.Proposal, positions ...int) {
+	size := len(ps) + len(positions)
+
 	ents, err := db.ents()
 	require.Nil(t, err)
 	require.Equal(t, size, len(ents))
@@ -179,6 +181,10 @@ func checkCommits(t *testing.T, db *DB, size int, positions ...int) {
 		require.Equal(t, expected, got)
 		if got {
 			positionsFound++
+		} else {
+			for ei, e := range ents[i].Entities {
+				require.Equal(t, e.Data, ps[i-positionsFound].Entities[ei].Data)
+			}
 		}
 	}
 
