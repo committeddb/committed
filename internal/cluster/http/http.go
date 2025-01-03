@@ -7,8 +7,8 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/oklog/ulid/v2"
 	"github.com/philborlin/committed/internal/cluster"
+	"github.com/rs/cors"
 )
 
 type HTTP struct {
@@ -18,10 +18,16 @@ type HTTP struct {
 
 func New(c cluster.Cluster) *HTTP {
 	r := chi.NewRouter()
+
+	corsMiddleware := cors.New(cors.Options{
+		AllowedOrigins: []string{"http://localhost:5173", "http://localhost:4173"},
+	})
+
+	r.Use(corsMiddleware.Handler)
 	h := &HTTP{r: r, c: c}
 
 	r.Get("/database", h.GetDatabases)
-	r.Post("/database", h.AddDatabase)
+	r.Post("/database/{id}", h.AddDatabase)
 
 	r.Get("/ingestable", h.GetIngestables)
 	r.Post("/ingestable", h.AddIngestable)
@@ -66,6 +72,11 @@ func unmarshalBody(r *http.Request, v any) error {
 }
 
 func createConfiguration(r *http.Request) (*cluster.Configuration, error) {
+	id := r.PathValue("id")
+	if id == "" {
+		return nil, fmt.Errorf("id is empty")
+	}
+
 	mimeType := "text/toml"
 	header, ok := r.Header["Content-Type"]
 	if ok && len(header) == 1 {
@@ -77,7 +88,6 @@ func createConfiguration(r *http.Request) (*cluster.Configuration, error) {
 		return nil, err
 	}
 
-	id := fmt.Sprintf("%v", ulid.Make())
 	configuration := &cluster.Configuration{
 		ID:       string(id),
 		MimeType: mimeType,
@@ -88,14 +98,22 @@ func createConfiguration(r *http.Request) (*cluster.Configuration, error) {
 }
 
 type ConfigurationResponse struct {
-	ID string `json:"id"`
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	MimeType string `json:"mimeType"`
+	Data     string `json:"data"`
 }
 
 func writeConfigurations(w http.ResponseWriter, cfgs []*cluster.Configuration) {
 	var rs []*ConfigurationResponse
 
 	for _, cfg := range cfgs {
-		rs = append(rs, &ConfigurationResponse{ID: cfg.ID})
+		rs = append(rs, &ConfigurationResponse{
+			ID:       cfg.ID,
+			Name:     "", // TODO - get name configuration
+			MimeType: cfg.MimeType,
+			Data:     string(cfg.Data),
+		})
 	}
 
 	writeArrayBody(w, rs)

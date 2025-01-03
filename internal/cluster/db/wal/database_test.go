@@ -59,6 +59,21 @@ func TestDatabase(t *testing.T) {
 				require.Equal(t, nil, err)
 				require.Equal(t, dbs[expected.ID], got)
 			}
+
+			cfgs, err := s.Databases()
+			require.Equal(t, nil, err)
+			require.Equal(t, len(tt.cfgs), len(cfgs))
+			for _, expected := range tt.cfgs {
+				var got *cluster.Configuration
+				for _, cfg := range cfgs {
+					if expected.ID == cfg.ID {
+						got = cfg
+					}
+				}
+				require.NotNil(t, got)
+				require.Equal(t, expected.Data, got.Data)
+				require.Equal(t, expected.MimeType, got.MimeType)
+			}
 		})
 	}
 }
