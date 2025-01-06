@@ -1,5 +1,5 @@
 import React from 'react'
-import { DatabaseOutlined, ExportOutlined, HomeOutlined, ImportOutlined } from '@ant-design/icons'
+import { CompassOutlined, DatabaseOutlined, ExportOutlined, HomeOutlined, ImportOutlined } from '@ant-design/icons'
 import { Layout, Menu } from 'antd'
 import { useLocation, useNavigate } from '@tanstack/react-router'
 
@@ -26,7 +26,8 @@ const Sider: React.FC = () => {
     item('Home', '/', HomeOutlined),
     item('Databases', '/databases', DatabaseOutlined),
     item('Ingestables', '/ingestables', ImportOutlined),
-    item('Syncables', '/syncables', ExportOutlined)
+    item('Syncables', '/syncables', ExportOutlined),
+    item('Types', '/types', CompassOutlined)
   ]
 
   return (

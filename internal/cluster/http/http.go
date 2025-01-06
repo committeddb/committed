@@ -30,15 +30,15 @@ func New(c cluster.Cluster) *HTTP {
 	r.Post("/database/{id}", h.AddDatabase)
 
 	r.Get("/ingestable", h.GetIngestables)
-	r.Post("/ingestable", h.AddIngestable)
+	r.Post("/ingestable/{id}", h.AddIngestable)
 
 	r.Post("/proposal", h.AddProposal)
 
 	r.Get("/syncable", h.GetSyncables)
-	r.Post("/syncable", h.AddSyncable)
+	r.Post("/syncable/{id}", h.AddSyncable)
 
 	r.Get("/type", h.GetTypes)
-	r.Post("/type", h.AddType)
+	r.Post("/type/{id}", h.AddType)
 
 	return h
 }

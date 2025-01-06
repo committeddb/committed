@@ -1,7 +1,6 @@
 package http
 
 import (
-	"fmt"
 	httpgo "net/http"
 )
 
@@ -12,7 +11,6 @@ func (h *HTTP) AddDatabase(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 
-	fmt.Printf("[http] ProposeDatabase\n")
 	err = h.c.ProposeDatabase(c)
 	if err != nil {
 		internalServerError(w, err)
