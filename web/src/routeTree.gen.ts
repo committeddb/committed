@@ -14,35 +14,41 @@ import { createFileRoute } from '@tanstack/react-router'
 
 import { Route as rootRoute } from './routes/__root'
 import { Route as TypesImport } from './routes/types'
+import { Route as SyncablesImport } from './routes/syncables'
+import { Route as IngestablesImport } from './routes/ingestables'
 import { Route as DatabasesImport } from './routes/databases'
 
 // Create Virtual Routes
 
-const SyncablesLazyImport = createFileRoute('/syncables')()
-const IngestablesLazyImport = createFileRoute('/ingestables')()
 const IndexLazyImport = createFileRoute('/')()
 const TypesTypeIdLazyImport = createFileRoute('/types/$typeId')()
+const SyncablesSyncableIdLazyImport = createFileRoute(
+  '/syncables/$syncableId',
+)()
+const IngestablesIngestableIdLazyImport = createFileRoute(
+  '/ingestables/$ingestableId',
+)()
 const DatabasesDatabaseIdLazyImport = createFileRoute(
   '/databases/$databaseId',
 )()
 
 // Create/Update Routes
 
-const SyncablesLazyRoute = SyncablesLazyImport.update({
-  id: '/syncables',
-  path: '/syncables',
-  getParentRoute: () => rootRoute,
-} as any).lazy(() => import('./routes/syncables.lazy').then((d) => d.Route))
-
-const IngestablesLazyRoute = IngestablesLazyImport.update({
-  id: '/ingestables',
-  path: '/ingestables',
-  getParentRoute: () => rootRoute,
-} as any).lazy(() => import('./routes/ingestables.lazy').then((d) => d.Route))
-
 const TypesRoute = TypesImport.update({
   id: '/types',
   path: '/types',
+  getParentRoute: () => rootRoute,
+} as any)
+
+const SyncablesRoute = SyncablesImport.update({
+  id: '/syncables',
+  path: '/syncables',
+  getParentRoute: () => rootRoute,
+} as any)
+
+const IngestablesRoute = IngestablesImport.update({
+  id: '/ingestables',
+  path: '/ingestables',
   getParentRoute: () => rootRoute,
 } as any)
 
@@ -63,6 +69,23 @@ const TypesTypeIdLazyRoute = TypesTypeIdLazyImport.update({
   path: '/$typeId',
   getParentRoute: () => TypesRoute,
 } as any).lazy(() => import('./routes/types.$typeId.lazy').then((d) => d.Route))
+
+const SyncablesSyncableIdLazyRoute = SyncablesSyncableIdLazyImport.update({
+  id: '/$syncableId',
+  path: '/$syncableId',
+  getParentRoute: () => SyncablesRoute,
+} as any).lazy(() =>
+  import('./routes/syncables.$syncableId.lazy').then((d) => d.Route),
+)
+
+const IngestablesIngestableIdLazyRoute =
+  IngestablesIngestableIdLazyImport.update({
+    id: '/$ingestableId',
+    path: '/$ingestableId',
+    getParentRoute: () => IngestablesRoute,
+  } as any).lazy(() =>
+    import('./routes/ingestables.$ingestableId.lazy').then((d) => d.Route),
+  )
 
 const DatabasesDatabaseIdLazyRoute = DatabasesDatabaseIdLazyImport.update({
   id: '/$databaseId',
@@ -90,25 +113,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof DatabasesImport
       parentRoute: typeof rootRoute
     }
-    '/types': {
-      id: '/types'
-      path: '/types'
-      fullPath: '/types'
-      preLoaderRoute: typeof TypesImport
-      parentRoute: typeof rootRoute
-    }
     '/ingestables': {
       id: '/ingestables'
       path: '/ingestables'
       fullPath: '/ingestables'
-      preLoaderRoute: typeof IngestablesLazyImport
+      preLoaderRoute: typeof IngestablesImport
       parentRoute: typeof rootRoute
     }
     '/syncables': {
       id: '/syncables'
       path: '/syncables'
       fullPath: '/syncables'
-      preLoaderRoute: typeof SyncablesLazyImport
+      preLoaderRoute: typeof SyncablesImport
+      parentRoute: typeof rootRoute
+    }
+    '/types': {
+      id: '/types'
+      path: '/types'
+      fullPath: '/types'
+      preLoaderRoute: typeof TypesImport
       parentRoute: typeof rootRoute
     }
     '/databases/$databaseId': {
@@ -117,6 +140,20 @@ declare module '@tanstack/react-router' {
       fullPath: '/databases/$databaseId'
       preLoaderRoute: typeof DatabasesDatabaseIdLazyImport
       parentRoute: typeof DatabasesImport
+    }
+    '/ingestables/$ingestableId': {
+      id: '/ingestables/$ingestableId'
+      path: '/$ingestableId'
+      fullPath: '/ingestables/$ingestableId'
+      preLoaderRoute: typeof IngestablesIngestableIdLazyImport
+      parentRoute: typeof IngestablesImport
+    }
+    '/syncables/$syncableId': {
+      id: '/syncables/$syncableId'
+      path: '/$syncableId'
+      fullPath: '/syncables/$syncableId'
+      preLoaderRoute: typeof SyncablesSyncableIdLazyImport
+      parentRoute: typeof SyncablesImport
     }
     '/types/$typeId': {
       id: '/types/$typeId'
@@ -142,6 +179,30 @@ const DatabasesRouteWithChildren = DatabasesRoute._addFileChildren(
   DatabasesRouteChildren,
 )
 
+interface IngestablesRouteChildren {
+  IngestablesIngestableIdLazyRoute: typeof IngestablesIngestableIdLazyRoute
+}
+
+const IngestablesRouteChildren: IngestablesRouteChildren = {
+  IngestablesIngestableIdLazyRoute: IngestablesIngestableIdLazyRoute,
+}
+
+const IngestablesRouteWithChildren = IngestablesRoute._addFileChildren(
+  IngestablesRouteChildren,
+)
+
+interface SyncablesRouteChildren {
+  SyncablesSyncableIdLazyRoute: typeof SyncablesSyncableIdLazyRoute
+}
+
+const SyncablesRouteChildren: SyncablesRouteChildren = {
+  SyncablesSyncableIdLazyRoute: SyncablesSyncableIdLazyRoute,
+}
+
+const SyncablesRouteWithChildren = SyncablesRoute._addFileChildren(
+  SyncablesRouteChildren,
+)
+
 interface TypesRouteChildren {
   TypesTypeIdLazyRoute: typeof TypesTypeIdLazyRoute
 }
@@ -155,20 +216,24 @@ const TypesRouteWithChildren = TypesRoute._addFileChildren(TypesRouteChildren)
 export interface FileRoutesByFullPath {
   '/': typeof IndexLazyRoute
   '/databases': typeof DatabasesRouteWithChildren
+  '/ingestables': typeof IngestablesRouteWithChildren
+  '/syncables': typeof SyncablesRouteWithChildren
   '/types': typeof TypesRouteWithChildren
-  '/ingestables': typeof IngestablesLazyRoute
-  '/syncables': typeof SyncablesLazyRoute
   '/databases/$databaseId': typeof DatabasesDatabaseIdLazyRoute
+  '/ingestables/$ingestableId': typeof IngestablesIngestableIdLazyRoute
+  '/syncables/$syncableId': typeof SyncablesSyncableIdLazyRoute
   '/types/$typeId': typeof TypesTypeIdLazyRoute
 }
 
 export interface FileRoutesByTo {
   '/': typeof IndexLazyRoute
   '/databases': typeof DatabasesRouteWithChildren
+  '/ingestables': typeof IngestablesRouteWithChildren
+  '/syncables': typeof SyncablesRouteWithChildren
   '/types': typeof TypesRouteWithChildren
-  '/ingestables': typeof IngestablesLazyRoute
-  '/syncables': typeof SyncablesLazyRoute
   '/databases/$databaseId': typeof DatabasesDatabaseIdLazyRoute
+  '/ingestables/$ingestableId': typeof IngestablesIngestableIdLazyRoute
+  '/syncables/$syncableId': typeof SyncablesSyncableIdLazyRoute
   '/types/$typeId': typeof TypesTypeIdLazyRoute
 }
 
@@ -176,10 +241,12 @@ export interface FileRoutesById {
   __root__: typeof rootRoute
   '/': typeof IndexLazyRoute
   '/databases': typeof DatabasesRouteWithChildren
+  '/ingestables': typeof IngestablesRouteWithChildren
+  '/syncables': typeof SyncablesRouteWithChildren
   '/types': typeof TypesRouteWithChildren
-  '/ingestables': typeof IngestablesLazyRoute
-  '/syncables': typeof SyncablesLazyRoute
   '/databases/$databaseId': typeof DatabasesDatabaseIdLazyRoute
+  '/ingestables/$ingestableId': typeof IngestablesIngestableIdLazyRoute
+  '/syncables/$syncableId': typeof SyncablesSyncableIdLazyRoute
   '/types/$typeId': typeof TypesTypeIdLazyRoute
 }
 
@@ -188,28 +255,34 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/databases'
-    | '/types'
     | '/ingestables'
     | '/syncables'
+    | '/types'
     | '/databases/$databaseId'
+    | '/ingestables/$ingestableId'
+    | '/syncables/$syncableId'
     | '/types/$typeId'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
     | '/databases'
-    | '/types'
     | '/ingestables'
     | '/syncables'
+    | '/types'
     | '/databases/$databaseId'
+    | '/ingestables/$ingestableId'
+    | '/syncables/$syncableId'
     | '/types/$typeId'
   id:
     | '__root__'
     | '/'
     | '/databases'
-    | '/types'
     | '/ingestables'
     | '/syncables'
+    | '/types'
     | '/databases/$databaseId'
+    | '/ingestables/$ingestableId'
+    | '/syncables/$syncableId'
     | '/types/$typeId'
   fileRoutesById: FileRoutesById
 }
@@ -217,17 +290,17 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexLazyRoute: typeof IndexLazyRoute
   DatabasesRoute: typeof DatabasesRouteWithChildren
+  IngestablesRoute: typeof IngestablesRouteWithChildren
+  SyncablesRoute: typeof SyncablesRouteWithChildren
   TypesRoute: typeof TypesRouteWithChildren
-  IngestablesLazyRoute: typeof IngestablesLazyRoute
-  SyncablesLazyRoute: typeof SyncablesLazyRoute
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexLazyRoute: IndexLazyRoute,
   DatabasesRoute: DatabasesRouteWithChildren,
+  IngestablesRoute: IngestablesRouteWithChildren,
+  SyncablesRoute: SyncablesRouteWithChildren,
   TypesRoute: TypesRouteWithChildren,
-  IngestablesLazyRoute: IngestablesLazyRoute,
-  SyncablesLazyRoute: SyncablesLazyRoute,
 }
 
 export const routeTree = rootRoute
@@ -242,9 +315,9 @@ export const routeTree = rootRoute
       "children": [
         "/",
         "/databases",
-        "/types",
         "/ingestables",
-        "/syncables"
+        "/syncables",
+        "/types"
       ]
     },
     "/": {
@@ -256,21 +329,35 @@ export const routeTree = rootRoute
         "/databases/$databaseId"
       ]
     },
+    "/ingestables": {
+      "filePath": "ingestables.tsx",
+      "children": [
+        "/ingestables/$ingestableId"
+      ]
+    },
+    "/syncables": {
+      "filePath": "syncables.tsx",
+      "children": [
+        "/syncables/$syncableId"
+      ]
+    },
     "/types": {
       "filePath": "types.tsx",
       "children": [
         "/types/$typeId"
       ]
     },
-    "/ingestables": {
-      "filePath": "ingestables.lazy.tsx"
-    },
-    "/syncables": {
-      "filePath": "syncables.lazy.tsx"
-    },
     "/databases/$databaseId": {
       "filePath": "databases.$databaseId.lazy.tsx",
       "parent": "/databases"
+    },
+    "/ingestables/$ingestableId": {
+      "filePath": "ingestables.$ingestableId.lazy.tsx",
+      "parent": "/ingestables"
+    },
+    "/syncables/$syncableId": {
+      "filePath": "syncables.$syncableId.lazy.tsx",
+      "parent": "/syncables"
     },
     "/types/$typeId": {
       "filePath": "types.$typeId.lazy.tsx",

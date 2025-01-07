@@ -1,3 +1,5 @@
+import { getSyncablesQuery } from './queries'
+import Syncable from './Syncable'
 import Syncables from './Syncables'
 
-export { Syncables }
+export { getSyncablesQuery, Syncable, Syncables }
