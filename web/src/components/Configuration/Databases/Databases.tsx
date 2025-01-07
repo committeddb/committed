@@ -1,4 +1,4 @@
-import { Configurations } from '../ConfigurationEditor'
+import Configurations from '../Configurations'
 import { getDatabasesQuery } from './queries'
 
 const Databases: React.FC = () => {

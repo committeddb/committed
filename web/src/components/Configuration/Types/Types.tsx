@@ -1,4 +1,4 @@
-import { Configurations } from '../ConfigurationEditor'
+import Configurations from '../Configurations'
 import { getTypesQuery } from './queries'
 
 const Types: React.FC = () => {

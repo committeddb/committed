@@ -3,7 +3,7 @@ import { useParams } from '@tanstack/react-router'
 import { MutationFunction, OmitKeyof, useMutation, UseQueryOptions, useSuspenseQuery } from '@tanstack/react-query'
 import { Button, Flex, Select, Space } from 'antd'
 import { Configuration } from './configuration'
-import { ConfigurationEditor } from '.'
+import ConfigurationEditor from './ConfigurationEditor'
 
 type ConfigurationParams = {
   paramName: string
