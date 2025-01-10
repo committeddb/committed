@@ -1,22 +1,32 @@
-import { Dispatch, SetStateAction } from 'react';
-import { Controlled as CodeMirror } from 'react-codemirror2'
-import 'codemirror/lib/codemirror.css'
+import Editor from '@monaco-editor/react'
+import * as monaco from 'monaco-editor/esm/vs/editor/editor.api'
 
 type ConfigurationEditorProps = {
   value: string,
-  setValue: Dispatch<SetStateAction<string>>
+  setValue: (value: string) => void
 }
 
 const ConfigurationEditor: React.FC<ConfigurationEditorProps> = ({ value, setValue }) => {
-  return <CodeMirror
+  const editorDidMount = (editor: monaco.editor.IStandaloneCodeEditor, _monaco: typeof monaco) => {
+    editor.focus();
+  }
+
+  const onChange = (value: string | undefined, _e: monaco.editor.IModelContentChangedEvent) => {
+    if (value) setValue(value)
+  }
+
+  const options: monaco.editor.IStandaloneEditorConstructionOptions = {
+    selectOnLineNumbers: false,
+    colorDecorators: true,
+    readOnly: true
+  }
+
+  return <Editor
+    height='65vh'
     value={value}
-    options={{
-      lineNumbers: true,
-    }}
-    onBeforeChange={(_editor, _data, value) => {
-      console.log("About to change")
-      setValue(value)
-    }}
+    options={options}
+    onChange={onChange}
+    onMount={editorDidMount}
   />
 }
 

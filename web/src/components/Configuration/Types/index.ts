@@ -1,5 +1,5 @@
-import Type from './Type'
+import TypeDetail from './TypeDetail'
 import Types from './Types'
 import { getTypesQuery } from './queries'
 
-export { getTypesQuery, Type, Types }
+export { getTypesQuery, TypeDetail as Type, Types }

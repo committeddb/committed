@@ -10,14 +10,12 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@codemirror/state": "^6.5.0",
-    "@codemirror/view": "^6.36.1",
+    "@monaco-editor/react": "^4.6.0",
     "@paralleldrive/cuid2": "^2.2.2",
     "@std/toml": "npm:@jsr/std__toml@^1.0.2",
     "@tanstack/react-query": "^5.62.10",
     "antd": "^5.22.5",
     "react": "^18.3.1",
-    "react-codemirror2": "^8.0.0",
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
