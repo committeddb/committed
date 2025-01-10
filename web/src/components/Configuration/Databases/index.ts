@@ -1,5 +1,5 @@
-import Database from './Database'
+import DatabaseDetail from './DatabaseDetail'
 import Databases from './Databases'
 import { getDatabasesQuery } from './queries'
 
-export { Database, Databases, getDatabasesQuery }
+export { DatabaseDetail as Database, Databases, getDatabasesQuery }

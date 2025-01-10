@@ -2,14 +2,17 @@ import React from 'react'
 import { Form, Input } from 'antd'
 import { ConfigurationData } from '../configuration'
 import { parse, stringify } from "@std/toml";
-import { Type } from './type'
+import { emptyType, Type } from './type'
 
 type FieldType = {
   name?: string
 }
 
 const TypeForm: React.FC<ConfigurationData> = ({ data, setData }) => {
-  const type = parse(data) as Type
+  let type = emptyType()
+  if (data) {
+    type = parse(data) as Type
+  }
 
   const nameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     type.type.name = e.target?.value
