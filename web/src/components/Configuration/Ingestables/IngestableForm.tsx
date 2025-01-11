@@ -22,29 +22,6 @@ const TypeForm: React.FC<ConfigurationData> = ({ data, setData }) => {
     setData(stringify(ingestable))
   }
 
-  const toml = `[ingestable]
-name = ""
-type = "sql"
-
-[sql]
-dialect = "mysql"
-connectionString = ""
-primaryKey = ""
-topic = ""
-
-[[sql.mappings]]
-jsonName = "one"
-column = "one"
-
-[[sql.mappings]]
-jsonName = "two"
-column = "two"
-`
-
-  const t2 = parse(toml)
-  console.log(t2)
-  console.log(stringify(t2))
-
   const nameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     ingestable.ingestable.name = e.target?.value
     updateData()
@@ -76,7 +53,6 @@ column = "two"
   }
 
   const jsonNameChange = (index: number) => (e: React.ChangeEvent<HTMLInputElement>) => {
-    console.log(index)
     if (ingestable.sql.mappings) {
       ingestable.sql.mappings[index].jsonName = e.target?.value
       updateData()
@@ -84,7 +60,6 @@ column = "two"
   }
 
   const columnChange = (index: number) => (e: React.ChangeEvent<HTMLInputElement>) => {
-    console.log(index)
     if (ingestable.sql.mappings) {
       ingestable.sql.mappings[index].column = e.target?.value
       updateData()
