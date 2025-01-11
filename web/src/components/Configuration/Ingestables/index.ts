@@ -1,5 +1,5 @@
 import { getIngestablesQuery } from './queries'
-import Ingestable from './Ingestable'
+import IngestableDetail from './IngestableDetail'
 import Ingestables from './Ingestables'
 
-export { getIngestablesQuery, Ingestable, Ingestables }
+export { getIngestablesQuery, IngestableDetail as Ingestable, Ingestables }
