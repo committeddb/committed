@@ -1,5 +1,5 @@
 import React from 'react'
-import { Button, Card, Divider, Form, Input, Select } from 'antd'
+import { Button, Card, Divider, Empty, Form, Input, Select, Space } from 'antd'
 import { CloseOutlined } from '@ant-design/icons'
 import { ConfigurationData } from '../configuration'
 import { parse, stringify } from "@std/toml";
@@ -91,6 +91,13 @@ const TypeForm: React.FC<ConfigurationData> = ({ data, setData }) => {
     topic: ingestable.sql.topic
   }
 
+  const empty = <Empty
+    description="Please Create a Type first"
+    image={Empty.PRESENTED_IMAGE_SIMPLE}
+    style={{ margin: 8 }}
+    imageStyle={{ height: 32 }}
+  />
+
   return <Form name="basic" initialValues={values} style={{ overflow: 'auto' }}>
     <Form.Item<FieldType>
       label="Name"
@@ -129,7 +136,14 @@ const TypeForm: React.FC<ConfigurationData> = ({ data, setData }) => {
       <Input onChange={primaryKeyChange} />
     </Form.Item>
     <Form.Item<FieldType>
-      label="Type"
+      label="Topic"
+      name="topic"
+      rules={[{ required: true, message: 'SQL Dialect' }]}
+    >
+      <Select options={topicOptions} onChange={topicChange} notFoundContent={empty} />
+    </Form.Item>
+    <Form.Item<FieldType>
+      label="Topic"
       name="topic"
       rules={[{ required: true, message: 'SQL Dialect' }]}
     >
