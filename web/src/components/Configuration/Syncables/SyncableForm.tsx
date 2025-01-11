@@ -12,6 +12,8 @@ const TypeForm: React.FC<ConfigurationData> = ({ data, setData }) => {
   let syncable = emptySyncable()
   if (data) {
     syncable = parse(data) as Syncable
+  } else {
+    setData(stringify(syncable))
   }
 
   const nameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -19,7 +21,11 @@ const TypeForm: React.FC<ConfigurationData> = ({ data, setData }) => {
     setData(stringify(syncable))
   }
 
-  return <Form name="basic" initialValues={{ name: syncable?.syncable?.name }}>
+  const values = {
+    name: syncable.syncable.name,
+  }
+
+  return <Form name="basic" initialValues={values}>
     <Form.Item<FieldType>
       label="Name"
       name="name"
