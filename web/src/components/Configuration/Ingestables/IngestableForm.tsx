@@ -1,5 +1,5 @@
 import React from 'react'
-import { Button, Card, Divider, Empty, Form, Input, Select, Space } from 'antd'
+import { Button, Card, Divider, Empty, Form, Input, Select } from 'antd'
 import { CloseOutlined } from '@ant-design/icons'
 import { ConfigurationData } from '../configuration'
 import { parse, stringify } from "@std/toml";
