@@ -78,6 +78,12 @@ const TypeForm: React.FC<ConfigurationData> = ({ data, setData }) => {
       ingestable.sql.mappings = []
     }
     ingestable.sql.mappings.push({ jsonName: '', column: '' })
+    updateData()
+  }
+
+  const removeMapping = (index: number) => {
+    ingestable.sql.mappings?.splice(index, 1)
+    updateData()
   }
 
   const topicOptions: any = []
@@ -142,13 +148,6 @@ const TypeForm: React.FC<ConfigurationData> = ({ data, setData }) => {
     >
       <Select options={topicOptions} onChange={topicChange} notFoundContent={empty} />
     </Form.Item>
-    <Form.Item<FieldType>
-      label="Topic"
-      name="topic"
-      rules={[{ required: true, message: 'SQL Dialect' }]}
-    >
-      <Select options={topicOptions} onChange={topicChange} />
-    </Form.Item>
     <Form.List name="mappings">
       {(fields, { add, remove }) => (
         <div style={{ display: 'flex', rowGap: 16, flexDirection: 'column' }}>
@@ -158,11 +157,7 @@ const TypeForm: React.FC<ConfigurationData> = ({ data, setData }) => {
               title={`SQL Mapping ${field.name + 1}`}
               key={field.key}
               extra={
-                <CloseOutlined
-                  onClick={() => {
-                    remove(field.name);
-                  }}
-                />
+                <CloseOutlined onClick={() => { remove(field.name); removeMapping(field.name) }} />
               }
             >
               <Form.Item
