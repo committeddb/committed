@@ -22,7 +22,7 @@ func (s *Storage) handleSyncableIndex(e *cluster.Entity) error {
 }
 
 func (s *Storage) saveSyncableIndex(t *cluster.SyncableIndex) error {
-	return s.typeStorage.Update(func(tx *bolt.Tx) error {
+	return s.keyValueStorage.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(syncableIndexBucket)
 		if b == nil {
 			return ErrBucketMissing
@@ -42,7 +42,7 @@ func (s *Storage) saveSyncableIndex(t *cluster.SyncableIndex) error {
 }
 
 func (s *Storage) deleteSyncableIndex(id []byte) error {
-	return s.typeStorage.Update(func(tx *bolt.Tx) error {
+	return s.keyValueStorage.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(syncableIndexBucket)
 		if b == nil {
 			return ErrBucketMissing
@@ -58,7 +58,7 @@ func (s *Storage) deleteSyncableIndex(id []byte) error {
 
 func (s *Storage) getSyncableIndex(id string) (uint64, error) {
 	index := &cluster.SyncableIndex{}
-	err := s.typeStorage.View(func(tx *bolt.Tx) error {
+	err := s.keyValueStorage.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(syncableIndexBucket)
 		if b == nil {
 			return ErrBucketMissing

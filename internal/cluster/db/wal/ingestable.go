@@ -24,7 +24,7 @@ func (s *Storage) handleIngestable(e *cluster.Entity) error {
 }
 
 func (s *Storage) saveIngestable(t *cluster.Configuration) error {
-	return s.typeStorage.Update(func(tx *bolt.Tx) error {
+	return s.keyValueStorage.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(ingestableBucket)
 		if b == nil {
 			return ErrBucketMissing
@@ -53,7 +53,7 @@ func (s *Storage) saveIngestable(t *cluster.Configuration) error {
 }
 
 func (s *Storage) deleteIngestable(id []byte) error {
-	return s.typeStorage.Update(func(tx *bolt.Tx) error {
+	return s.keyValueStorage.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(ingestableBucket)
 		if b == nil {
 			return ErrBucketMissing
@@ -71,7 +71,7 @@ func (s *Storage) deleteIngestable(id []byte) error {
 func (s *Storage) Ingestables() ([]*cluster.Configuration, error) {
 	var cfgs []*cluster.Configuration
 
-	err := s.typeStorage.View(func(tx *bolt.Tx) error {
+	err := s.keyValueStorage.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(ingestableBucket)
 		if b == nil {
 			return ErrBucketMissing

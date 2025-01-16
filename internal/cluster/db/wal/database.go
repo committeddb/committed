@@ -23,7 +23,7 @@ func (s *Storage) handleDatabase(e *cluster.Entity) error {
 }
 
 func (s *Storage) saveDatabase(t *cluster.Configuration) error {
-	return s.typeStorage.Update(func(tx *bolt.Tx) error {
+	return s.keyValueStorage.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(databaseBucket)
 		if b == nil {
 			return ErrBucketMissing
@@ -51,7 +51,7 @@ func (s *Storage) saveDatabase(t *cluster.Configuration) error {
 }
 
 func (s *Storage) deleteDatabase(id []byte) error {
-	return s.typeStorage.Update(func(tx *bolt.Tx) error {
+	return s.keyValueStorage.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(databaseBucket)
 		if b == nil {
 			return ErrBucketMissing
@@ -67,7 +67,7 @@ func (s *Storage) deleteDatabase(id []byte) error {
 }
 
 func (s *Storage) loadDatabases() error {
-	return s.typeStorage.View(func(tx *bolt.Tx) error {
+	return s.keyValueStorage.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(databaseBucket)
 		if b == nil {
 			return ErrBucketMissing
@@ -109,7 +109,7 @@ func (s *Storage) Database(id string) (cluster.Database, error) {
 func (s *Storage) Databases() ([]*cluster.Configuration, error) {
 	var cfgs []*cluster.Configuration
 
-	err := s.typeStorage.View(func(tx *bolt.Tx) error {
+	err := s.keyValueStorage.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(databaseBucket)
 		if b == nil {
 			return ErrBucketMissing

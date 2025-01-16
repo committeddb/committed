@@ -24,7 +24,7 @@ func (s *Storage) handleSyncable(e *cluster.Entity) error {
 }
 
 func (s *Storage) saveSyncable(t *cluster.Configuration) error {
-	return s.typeStorage.Update(func(tx *bolt.Tx) error {
+	return s.keyValueStorage.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(syncableBucket)
 		if b == nil {
 			return ErrBucketMissing
@@ -54,7 +54,7 @@ func (s *Storage) saveSyncable(t *cluster.Configuration) error {
 }
 
 func (s *Storage) deleteSyncable(id []byte) error {
-	return s.typeStorage.Update(func(tx *bolt.Tx) error {
+	return s.keyValueStorage.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(syncableBucket)
 		if b == nil {
 			return ErrBucketMissing
@@ -71,7 +71,7 @@ func (s *Storage) deleteSyncable(id []byte) error {
 func (s *Storage) Syncables() ([]*cluster.Configuration, error) {
 	var cfgs []*cluster.Configuration
 
-	err := s.typeStorage.View(func(tx *bolt.Tx) error {
+	err := s.keyValueStorage.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(syncableBucket)
 		if b == nil {
 			return ErrBucketMissing

@@ -44,18 +44,18 @@ type State struct {
 }
 
 type Storage struct {
-	EntryLog    *wal.Log
-	StateLog    *wal.Log // Should we get rid of this and store the latest state in the bbolt db?
-	typeStorage *bolt.DB
-	snapshot    pb.Snapshot
-	hardState   pb.HardState
-	firstIndex  uint64
-	lastIndex   uint64
-	stateIndex  uint64
-	databases   map[string]cluster.Database
-	parser      db.Parser
-	sync        chan<- *db.SyncableWithID
-	ingest      chan<- *db.IngestableWithID
+	EntryLog        *wal.Log
+	StateLog        *wal.Log // Should we get rid of this and store the latest state in the bbolt db?
+	keyValueStorage *bolt.DB
+	snapshot        pb.Snapshot
+	hardState       pb.HardState
+	firstIndex      uint64
+	lastIndex       uint64
+	stateIndex      uint64
+	databases       map[string]cluster.Database
+	parser          db.Parser
+	sync            chan<- *db.SyncableWithID
+	ingest          chan<- *db.IngestableWithID
 }
 
 // Returns a *WalStorage, whether this storage existed already, or an error
@@ -63,7 +63,7 @@ type Storage struct {
 func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<- *db.IngestableWithID) (*Storage, error) {
 	entryLogDir := filepath.Join(dir, "entry-log")
 	stateLogDir := filepath.Join(dir, "state-log")
-	typeStorageDir := filepath.Join(dir, "type-storage")
+	keyValueStorageDir := filepath.Join(dir, "type-storage")
 
 	err := os.MkdirAll(entryLogDir, os.ModePerm)
 	if err != nil {
@@ -75,7 +75,7 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		return nil, err
 	}
 
-	err = os.MkdirAll(typeStorageDir, os.ModePerm)
+	err = os.MkdirAll(keyValueStorageDir, os.ModePerm)
 	if err != nil {
 		return nil, err
 	}
@@ -89,12 +89,12 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		return nil, err
 	}
 
-	typeStorage, err := bolt.Open(filepath.Join(typeStorageDir, "types.db"), 0600, &bolt.Options{Timeout: 1 * time.Second})
+	keyValueStorage, err := bolt.Open(filepath.Join(keyValueStorageDir, "types.db"), 0600, &bolt.Options{Timeout: 1 * time.Second})
 	if err != nil {
 		return nil, err
 	}
 
-	err = typeStorage.Update(func(tx *bolt.Tx) error {
+	err = keyValueStorage.Update(func(tx *bolt.Tx) error {
 		for _, bucket := range buckets {
 			_, err := tx.CreateBucketIfNotExists(bucket)
 			if err != nil {
@@ -110,13 +110,13 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 
 	dbs := make(map[string]cluster.Database)
 	ws := &Storage{
-		EntryLog:    entryLog,
-		StateLog:    stateLog,
-		typeStorage: typeStorage,
-		databases:   dbs,
-		parser:      p,
-		sync:        sync,
-		ingest:      ingest,
+		EntryLog:        entryLog,
+		StateLog:        stateLog,
+		keyValueStorage: keyValueStorage,
+		databases:       dbs,
+		parser:          p,
+		sync:            sync,
+		ingest:          ingest,
 	}
 
 	fi, err := entryLog.FirstIndex()
@@ -176,7 +176,7 @@ func (s *Storage) Close() error {
 	if err != nil && finalErr == nil {
 		finalErr = err
 	}
-	err = s.typeStorage.Close()
+	err = s.keyValueStorage.Close()
 	if err != nil && finalErr == nil {
 		finalErr = err
 	}
