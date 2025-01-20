@@ -105,6 +105,7 @@ require (
 	github.com/magiconair/properties v1.8.0 // indirect
 	github.com/matttproud/golang_protobuf_extensions v1.0.1 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
+	github.com/nakabonne/tstorage v0.3.6
 	github.com/ory/dockertest/v3 v3.11.0
 	github.com/pelletier/go-toml v1.2.0 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/nakabonne/tstorage"
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/db"
 	"github.com/tidwall/wal"
@@ -44,18 +45,19 @@ type State struct {
 }
 
 type Storage struct {
-	EntryLog        *wal.Log
-	StateLog        *wal.Log // Should we get rid of this and store the latest state in the bbolt db?
-	keyValueStorage *bolt.DB
-	snapshot        pb.Snapshot
-	hardState       pb.HardState
-	firstIndex      uint64
-	lastIndex       uint64
-	stateIndex      uint64
-	databases       map[string]cluster.Database
-	parser          db.Parser
-	sync            chan<- *db.SyncableWithID
-	ingest          chan<- *db.IngestableWithID
+	EntryLog          *wal.Log
+	StateLog          *wal.Log // Should we get rid of this and store the latest state in the bbolt db?
+	keyValueStorage   *bolt.DB
+	TimeSeriesStorage tstorage.Storage
+	snapshot          pb.Snapshot
+	hardState         pb.HardState
+	firstIndex        uint64
+	lastIndex         uint64
+	stateIndex        uint64
+	databases         map[string]cluster.Database
+	parser            db.Parser
+	sync              chan<- *db.SyncableWithID
+	ingest            chan<- *db.IngestableWithID
 }
 
 // Returns a *WalStorage, whether this storage existed already, or an error
@@ -64,6 +66,7 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	entryLogDir := filepath.Join(dir, "entry-log")
 	stateLogDir := filepath.Join(dir, "state-log")
 	keyValueStorageDir := filepath.Join(dir, "type-storage")
+	timeSeriesStorageDir := filepath.Join(dir, "time-series")
 
 	err := os.MkdirAll(entryLogDir, os.ModePerm)
 	if err != nil {
@@ -80,6 +83,11 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		return nil, err
 	}
 
+	err = os.MkdirAll(timeSeriesStorageDir, os.ModePerm)
+	if err != nil {
+		return nil, err
+	}
+
 	entryLog, err := wal.Open(entryLogDir, nil)
 	if err != nil {
 		return nil, err
@@ -90,6 +98,14 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	}
 
 	keyValueStorage, err := bolt.Open(filepath.Join(keyValueStorageDir, "types.db"), 0600, &bolt.Options{Timeout: 1 * time.Second})
+	if err != nil {
+		return nil, err
+	}
+
+	timeSeriesStorage, err := tstorage.NewStorage(
+		tstorage.WithDataPath("./data"),
+		tstorage.WithTimestampPrecision(tstorage.Milliseconds),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -110,13 +126,14 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 
 	dbs := make(map[string]cluster.Database)
 	ws := &Storage{
-		EntryLog:        entryLog,
-		StateLog:        stateLog,
-		keyValueStorage: keyValueStorage,
-		databases:       dbs,
-		parser:          p,
-		sync:            sync,
-		ingest:          ingest,
+		EntryLog:          entryLog,
+		StateLog:          stateLog,
+		keyValueStorage:   keyValueStorage,
+		TimeSeriesStorage: timeSeriesStorage,
+		databases:         dbs,
+		parser:            p,
+		sync:              sync,
+		ingest:            ingest,
 	}
 
 	fi, err := entryLog.FirstIndex()
@@ -177,6 +194,11 @@ func (s *Storage) Close() error {
 		finalErr = err
 	}
 	err = s.keyValueStorage.Close()
+	if err != nil && finalErr == nil {
+		finalErr = err
+	}
+
+	err = s.TimeSeriesStorage.Close()
 	if err != nil && finalErr == nil {
 		finalErr = err
 	}
@@ -293,6 +315,11 @@ func (s *Storage) Save(st pb.HardState, ents []pb.Entry, snap pb.Snapshot) error
 					err := s.handleSyncableIndex(entity)
 					if err != nil {
 						return fmt.Errorf("[wal.storage] handleSyncableIndex: %w", err)
+					}
+				default:
+					err := s.handleUserDefined(entity)
+					if err != nil {
+						return fmt.Errorf("[wal.storage] handleUserDefined: %w", err)
 					}
 				}
 			}
