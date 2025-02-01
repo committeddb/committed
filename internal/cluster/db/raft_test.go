@@ -8,6 +8,7 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/philborlin/committed/internal/cluster"
@@ -324,6 +325,10 @@ func (ms *MemoryStorage) SaveArgsForCall(i int) (raftpb.HardState, []raftpb.Entr
 }
 
 func (ms *MemoryStorage) Type(id string) (*cluster.Type, error) {
+	return nil, nil
+}
+
+func (ms *MemoryStorage) TimePoints(typeID string, start time.Time, end time.Time) ([]cluster.TimePoint, error) {
 	return nil, nil
 }
 

@@ -4,6 +4,7 @@ import (
 	"io"
 	"math"
 	"sync"
+	"time"
 
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/db"
@@ -67,6 +68,10 @@ func (ms *MemoryStorage) SaveArgsForCall(i int) (raftpb.HardState, []raftpb.Entr
 }
 
 func (ms *MemoryStorage) Type(id string) (*cluster.Type, error) {
+	return nil, nil
+}
+
+func (ms *MemoryStorage) TimePoints(typeID string, start time.Time, end time.Time) ([]cluster.TimePoint, error) {
 	return nil, nil
 }
 

@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"time"
 )
 
 //go:generate go run github.com/maxbrunsfeld/counterfeiter/v6 -generate
@@ -18,6 +19,7 @@ type Cluster interface {
 	ProposeSyncable(c *Configuration) error
 	ProposeDatabase(c *Configuration) error
 	Type(id string) (*Type, error)
+	TypeGraph(typeID string, start time.Time, end time.Time) ([]TimePoint, error)
 	Close() error
 	// The caller should run this on a separate go routine - or do we want to do this so close() can cancel all contexts?
 	Ingest(ctx context.Context, id string, s Ingestable) error

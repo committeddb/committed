@@ -1,6 +1,8 @@
 package db
 
 import (
+	"time"
+
 	"github.com/philborlin/committed/internal/cluster"
 	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/raft/v3/raftpb"
@@ -12,6 +14,7 @@ type Storage interface {
 	Close() error
 	Save(st raftpb.HardState, ents []raftpb.Entry, snap raftpb.Snapshot) error
 	Type(id string) (*cluster.Type, error)
+	TimePoints(typeID string, start time.Time, end time.Time) ([]cluster.TimePoint, error)
 	Reader(id string) ProposalReader     // Gets current index by id cache. If id is not known, index is 0
 	Position(id string) cluster.Position // Gets current index by id cache. If id is not known position is 0
 	Node(id string) uint64               // Gets the node id that a worker is assigned to run on

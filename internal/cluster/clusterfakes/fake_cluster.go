@@ -4,6 +4,7 @@ package clusterfakes
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/philborlin/committed/internal/cluster"
 )
@@ -170,6 +171,21 @@ type FakeCluster struct {
 	}
 	typeReturnsOnCall map[int]struct {
 		result1 *cluster.Type
+		result2 error
+	}
+	TypeGraphStub        func(string, time.Time, time.Time) ([]cluster.TimePoint, error)
+	typeGraphMutex       sync.RWMutex
+	typeGraphArgsForCall []struct {
+		arg1 string
+		arg2 time.Time
+		arg3 time.Time
+	}
+	typeGraphReturns struct {
+		result1 []cluster.TimePoint
+		result2 error
+	}
+	typeGraphReturnsOnCall map[int]struct {
+		result1 []cluster.TimePoint
 		result2 error
 	}
 	TypesStub        func() ([]*cluster.Configuration, error)
@@ -1031,6 +1047,72 @@ func (fake *FakeCluster) TypeReturnsOnCall(i int, result1 *cluster.Type, result2
 	}{result1, result2}
 }
 
+func (fake *FakeCluster) TypeGraph(arg1 string, arg2 time.Time, arg3 time.Time) ([]cluster.TimePoint, error) {
+	fake.typeGraphMutex.Lock()
+	ret, specificReturn := fake.typeGraphReturnsOnCall[len(fake.typeGraphArgsForCall)]
+	fake.typeGraphArgsForCall = append(fake.typeGraphArgsForCall, struct {
+		arg1 string
+		arg2 time.Time
+		arg3 time.Time
+	}{arg1, arg2, arg3})
+	stub := fake.TypeGraphStub
+	fakeReturns := fake.typeGraphReturns
+	fake.recordInvocation("TypeGraph", []interface{}{arg1, arg2, arg3})
+	fake.typeGraphMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2, arg3)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeCluster) TypeGraphCallCount() int {
+	fake.typeGraphMutex.RLock()
+	defer fake.typeGraphMutex.RUnlock()
+	return len(fake.typeGraphArgsForCall)
+}
+
+func (fake *FakeCluster) TypeGraphCalls(stub func(string, time.Time, time.Time) ([]cluster.TimePoint, error)) {
+	fake.typeGraphMutex.Lock()
+	defer fake.typeGraphMutex.Unlock()
+	fake.TypeGraphStub = stub
+}
+
+func (fake *FakeCluster) TypeGraphArgsForCall(i int) (string, time.Time, time.Time) {
+	fake.typeGraphMutex.RLock()
+	defer fake.typeGraphMutex.RUnlock()
+	argsForCall := fake.typeGraphArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3
+}
+
+func (fake *FakeCluster) TypeGraphReturns(result1 []cluster.TimePoint, result2 error) {
+	fake.typeGraphMutex.Lock()
+	defer fake.typeGraphMutex.Unlock()
+	fake.TypeGraphStub = nil
+	fake.typeGraphReturns = struct {
+		result1 []cluster.TimePoint
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) TypeGraphReturnsOnCall(i int, result1 []cluster.TimePoint, result2 error) {
+	fake.typeGraphMutex.Lock()
+	defer fake.typeGraphMutex.Unlock()
+	fake.TypeGraphStub = nil
+	if fake.typeGraphReturnsOnCall == nil {
+		fake.typeGraphReturnsOnCall = make(map[int]struct {
+			result1 []cluster.TimePoint
+			result2 error
+		})
+	}
+	fake.typeGraphReturnsOnCall[i] = struct {
+		result1 []cluster.TimePoint
+		result2 error
+	}{result1, result2}
+}
+
 func (fake *FakeCluster) Types() ([]*cluster.Configuration, error) {
 	fake.typesMutex.Lock()
 	ret, specificReturn := fake.typesReturnsOnCall[len(fake.typesArgsForCall)]
@@ -1120,6 +1202,8 @@ func (fake *FakeCluster) Invocations() map[string][][]interface{} {
 	defer fake.syncablesMutex.RUnlock()
 	fake.typeMutex.RLock()
 	defer fake.typeMutex.RUnlock()
+	fake.typeGraphMutex.RLock()
+	defer fake.typeGraphMutex.RUnlock()
 	fake.typesMutex.RLock()
 	defer fake.typesMutex.RUnlock()
 	copiedInvocations := map[string][][]interface{}{}

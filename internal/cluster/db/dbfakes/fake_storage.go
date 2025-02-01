@@ -3,6 +3,7 @@ package dbfakes
 
 import (
 	"sync"
+	"time"
 
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/db"
@@ -191,6 +192,21 @@ type FakeStorage struct {
 	}
 	termReturnsOnCall map[int]struct {
 		result1 uint64
+		result2 error
+	}
+	TimePointsStub        func(string, time.Time, time.Time) ([]cluster.TimePoint, error)
+	timePointsMutex       sync.RWMutex
+	timePointsArgsForCall []struct {
+		arg1 string
+		arg2 time.Time
+		arg3 time.Time
+	}
+	timePointsReturns struct {
+		result1 []cluster.TimePoint
+		result2 error
+	}
+	timePointsReturnsOnCall map[int]struct {
+		result1 []cluster.TimePoint
 		result2 error
 	}
 	TypeStub        func(string) (*cluster.Type, error)
@@ -1115,6 +1131,72 @@ func (fake *FakeStorage) TermReturnsOnCall(i int, result1 uint64, result2 error)
 	}{result1, result2}
 }
 
+func (fake *FakeStorage) TimePoints(arg1 string, arg2 time.Time, arg3 time.Time) ([]cluster.TimePoint, error) {
+	fake.timePointsMutex.Lock()
+	ret, specificReturn := fake.timePointsReturnsOnCall[len(fake.timePointsArgsForCall)]
+	fake.timePointsArgsForCall = append(fake.timePointsArgsForCall, struct {
+		arg1 string
+		arg2 time.Time
+		arg3 time.Time
+	}{arg1, arg2, arg3})
+	stub := fake.TimePointsStub
+	fakeReturns := fake.timePointsReturns
+	fake.recordInvocation("TimePoints", []interface{}{arg1, arg2, arg3})
+	fake.timePointsMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2, arg3)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeStorage) TimePointsCallCount() int {
+	fake.timePointsMutex.RLock()
+	defer fake.timePointsMutex.RUnlock()
+	return len(fake.timePointsArgsForCall)
+}
+
+func (fake *FakeStorage) TimePointsCalls(stub func(string, time.Time, time.Time) ([]cluster.TimePoint, error)) {
+	fake.timePointsMutex.Lock()
+	defer fake.timePointsMutex.Unlock()
+	fake.TimePointsStub = stub
+}
+
+func (fake *FakeStorage) TimePointsArgsForCall(i int) (string, time.Time, time.Time) {
+	fake.timePointsMutex.RLock()
+	defer fake.timePointsMutex.RUnlock()
+	argsForCall := fake.timePointsArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3
+}
+
+func (fake *FakeStorage) TimePointsReturns(result1 []cluster.TimePoint, result2 error) {
+	fake.timePointsMutex.Lock()
+	defer fake.timePointsMutex.Unlock()
+	fake.TimePointsStub = nil
+	fake.timePointsReturns = struct {
+		result1 []cluster.TimePoint
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeStorage) TimePointsReturnsOnCall(i int, result1 []cluster.TimePoint, result2 error) {
+	fake.timePointsMutex.Lock()
+	defer fake.timePointsMutex.Unlock()
+	fake.TimePointsStub = nil
+	if fake.timePointsReturnsOnCall == nil {
+		fake.timePointsReturnsOnCall = make(map[int]struct {
+			result1 []cluster.TimePoint
+			result2 error
+		})
+	}
+	fake.timePointsReturnsOnCall[i] = struct {
+		result1 []cluster.TimePoint
+		result2 error
+	}{result1, result2}
+}
+
 func (fake *FakeStorage) Type(arg1 string) (*cluster.Type, error) {
 	fake.typeMutex.Lock()
 	ret, specificReturn := fake.typeReturnsOnCall[len(fake.typeArgsForCall)]
@@ -1268,6 +1350,8 @@ func (fake *FakeStorage) Invocations() map[string][][]interface{} {
 	defer fake.syncablesMutex.RUnlock()
 	fake.termMutex.RLock()
 	defer fake.termMutex.RUnlock()
+	fake.timePointsMutex.RLock()
+	defer fake.timePointsMutex.RUnlock()
 	fake.typeMutex.RLock()
 	defer fake.typeMutex.RUnlock()
 	fake.typesMutex.RLock()

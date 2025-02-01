@@ -9,12 +9,6 @@ import (
 	"github.com/philborlin/committed/internal/cluster"
 )
 
-type TimePoint struct {
-	Start time.Time
-	End   time.Time
-	Value uint64
-}
-
 func (s *Storage) handleUserDefined(e *cluster.Entity) error {
 	return s.TimeSeriesStorage.InsertRows([]tstorage.Row{
 		{
@@ -25,16 +19,18 @@ func (s *Storage) handleUserDefined(e *cluster.Entity) error {
 	})
 }
 
-func (s *Storage) GetTimePoints(typeID string, start time.Time, end time.Time) ([]TimePoint, error) {
-	// end := time.Now()
-	// start := end.Add(-time.Duration(hours) * time.Hour)
+func (s *Storage) TimePoints(typeID string, start time.Time, end time.Time) ([]cluster.TimePoint, error) {
+	_, err := s.Type(typeID)
+	if err != nil {
+		return nil, err
+	}
 
 	points, err := s.TimeSeriesStorage.Select(typeID, []tstorage.Label{}, start.UnixMilli(), end.UnixMilli())
 	if err != nil && !errors.Is(err, tstorage.ErrNoDataPoints) {
 		return nil, err
 	}
 
-	timePoints, err := getTimePoints(start, end)
+	timePoints, err := timePoints(start, end)
 	if err != nil {
 		return nil, err
 	}
@@ -52,7 +48,7 @@ func (s *Storage) GetTimePoints(typeID string, start time.Time, end time.Time) (
 }
 
 // getTimePoints divides the time range into 100 non-overlapping intervals and returns them as a slice of TimePoint.
-func getTimePoints(startTime time.Time, endTime time.Time) ([]TimePoint, error) {
+func timePoints(startTime time.Time, endTime time.Time) ([]cluster.TimePoint, error) {
 	if endTime.Before(startTime) {
 		return nil, fmt.Errorf("endTime cannot be before startTime")
 	}
@@ -63,12 +59,12 @@ func getTimePoints(startTime time.Time, endTime time.Time) ([]TimePoint, error) 
 		return nil, err
 	}
 
-	result := make([]TimePoint, 100)
+	result := make([]cluster.TimePoint, 100)
 	currentStart := startTime
 
 	for i, interval := range intervals {
 		currentEnd := currentStart.Add(interval)
-		result[i] = TimePoint{
+		result[i] = cluster.TimePoint{
 			Start: currentStart,
 			End:   currentEnd,
 		}

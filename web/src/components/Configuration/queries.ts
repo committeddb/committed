@@ -14,15 +14,17 @@ export const createQuery = ({ queryKey, path }: createQueryParameters) => {
   return queryOptions({
     queryKey: [queryKey],
     queryFn: async (): Promise<Map<string, Configuration>> => {
-
       console.log(`fetching ${url(path)}`)
       const response = await fetch(url(path))
-      const types = await response.json()
 
-      const map = new Map();
-      types.forEach((type: Configuration) => {
-        map.set(type.id, type)
-      });
+      const map = new Map()
+      if (response.ok) {
+        const types = await response.json()
+
+        types.forEach((type: Configuration) => {
+          map.set(type.id, type)
+        })
+      }
 
       return map
     },

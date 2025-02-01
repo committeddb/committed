@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/philborlin/committed/internal/cluster/clusterpb"
 	"google.golang.org/protobuf/proto"
@@ -20,6 +21,12 @@ type Type struct {
 	SchemaType string // something like Thrift, Protobuf, JSON Schema, etc.
 	Schema     []byte // The contents of the schema
 	Validate   ValidationStrategy
+}
+
+type TimePoint struct {
+	Start time.Time
+	End   time.Time
+	Value uint64
 }
 
 func (t *Type) String() string {

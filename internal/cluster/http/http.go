@@ -38,6 +38,7 @@ func New(c cluster.Cluster) *HTTP {
 	r.Post("/syncable/{id}", h.AddSyncable)
 
 	r.Get("/type", h.GetTypes)
+	r.Get("/type/{id}", h.GetType)
 	r.Post("/type/{id}", h.AddType)
 
 	return h

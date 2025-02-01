@@ -47,7 +47,7 @@ func TestGetTimePoints(t *testing.T) {
 			err = timeSeriesStorage.InsertRows(rows)
 			assert.Nil(t, err)
 
-			timePoints, err := s.GetTimePoints(metric, startTime, endTime)
+			timePoints, err := s.TimePoints(metric, startTime, endTime)
 			assert.Nil(t, err)
 
 			for i, tp := range timePoints {

@@ -2,6 +2,7 @@ package db
 
 import (
 	"bytes"
+	"time"
 
 	"github.com/philborlin/committed/internal/cluster"
 )
@@ -47,4 +48,8 @@ func ParseType(c *cluster.Configuration, s cluster.DatabaseStorage) (string, *cl
 
 func (db *DB) Types() ([]*cluster.Configuration, error) {
 	return db.storage.Types()
+}
+
+func (db *DB) TypeGraph(typeID string, start time.Time, end time.Time) ([]cluster.TimePoint, error) {
+	return db.storage.TimePoints(typeID, start, end)
 }
