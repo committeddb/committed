@@ -119,7 +119,7 @@ func createDialect(t *testing.T, connectionString string) sql.Dialect {
 type Proposal struct {
 	key string
 	one string
-	p   *http.ProposalRequest
+	p   *http.AddProposalRequest
 }
 
 func (p *Proposal) toClusterProposal(t *testing.T, db *test.DB) *cluster.Proposal {
@@ -297,7 +297,7 @@ func addType(t *testing.T, h *http.HTTP, name string) string {
 	return string(id)
 }
 
-func propose(t *testing.T, h *http.HTTP, proposal *http.ProposalRequest) {
+func propose(t *testing.T, h *http.HTTP, proposal *http.AddProposalRequest) {
 	bs, err := json.Marshal(proposal)
 	require.Nil(t, err)
 	req := httptest.NewRequest("POST", "http://localhost/proposal", bytes.NewReader(bs))
@@ -313,8 +313,8 @@ func propose(t *testing.T, h *http.HTTP, proposal *http.ProposalRequest) {
 
 func createProposal(typeID string, key string, one string) *Proposal {
 	j := fmt.Sprintf("{\"key\":\"%s\",\"one\":\"%s\"}", key, one)
-	r := &http.ProposalRequest{
-		Entities: []*http.EntityRequest{{
+	r := &http.AddProposalRequest{
+		Entities: []*http.AddEntityRequest{{
 			TypeID: typeID,
 			Key:    key,
 			Data:   []byte(j),

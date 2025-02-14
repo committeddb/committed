@@ -18,6 +18,7 @@ type Cluster interface {
 	ProposeIngestable(c *Configuration) error
 	ProposeSyncable(c *Configuration) error
 	ProposeDatabase(c *Configuration) error
+	Proposals(n uint64, types ...string) ([]*Proposal, error)
 	Type(id string) (*Type, error)
 	TypeGraph(typeID string, start time.Time, end time.Time) ([]TimePoint, error)
 	Close() error

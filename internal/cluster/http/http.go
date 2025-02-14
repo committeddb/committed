@@ -32,6 +32,7 @@ func New(c cluster.Cluster) *HTTP {
 	r.Get("/ingestable", h.GetIngestables)
 	r.Post("/ingestable/{id}", h.AddIngestable)
 
+	r.Get("/proposal", h.GetProposals)
 	r.Post("/proposal", h.AddProposal)
 
 	r.Get("/syncable", h.GetSyncables)

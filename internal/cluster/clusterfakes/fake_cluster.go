@@ -69,6 +69,20 @@ type FakeCluster struct {
 		result1 []*cluster.Configuration
 		result2 error
 	}
+	ProposalsStub        func(uint64, ...string) ([]*cluster.Proposal, error)
+	proposalsMutex       sync.RWMutex
+	proposalsArgsForCall []struct {
+		arg1 uint64
+		arg2 []string
+	}
+	proposalsReturns struct {
+		result1 []*cluster.Proposal
+		result2 error
+	}
+	proposalsReturnsOnCall map[int]struct {
+		result1 []*cluster.Proposal
+		result2 error
+	}
 	ProposeStub        func(*cluster.Proposal) error
 	proposeMutex       sync.RWMutex
 	proposeArgsForCall []struct {
@@ -494,6 +508,71 @@ func (fake *FakeCluster) IngestablesReturnsOnCall(i int, result1 []*cluster.Conf
 	}
 	fake.ingestablesReturnsOnCall[i] = struct {
 		result1 []*cluster.Configuration
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) Proposals(arg1 uint64, arg2 ...string) ([]*cluster.Proposal, error) {
+	fake.proposalsMutex.Lock()
+	ret, specificReturn := fake.proposalsReturnsOnCall[len(fake.proposalsArgsForCall)]
+	fake.proposalsArgsForCall = append(fake.proposalsArgsForCall, struct {
+		arg1 uint64
+		arg2 []string
+	}{arg1, arg2})
+	stub := fake.ProposalsStub
+	fakeReturns := fake.proposalsReturns
+	fake.recordInvocation("Proposals", []interface{}{arg1, arg2})
+	fake.proposalsMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2...)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeCluster) ProposalsCallCount() int {
+	fake.proposalsMutex.RLock()
+	defer fake.proposalsMutex.RUnlock()
+	return len(fake.proposalsArgsForCall)
+}
+
+func (fake *FakeCluster) ProposalsCalls(stub func(uint64, ...string) ([]*cluster.Proposal, error)) {
+	fake.proposalsMutex.Lock()
+	defer fake.proposalsMutex.Unlock()
+	fake.ProposalsStub = stub
+}
+
+func (fake *FakeCluster) ProposalsArgsForCall(i int) (uint64, []string) {
+	fake.proposalsMutex.RLock()
+	defer fake.proposalsMutex.RUnlock()
+	argsForCall := fake.proposalsArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2
+}
+
+func (fake *FakeCluster) ProposalsReturns(result1 []*cluster.Proposal, result2 error) {
+	fake.proposalsMutex.Lock()
+	defer fake.proposalsMutex.Unlock()
+	fake.ProposalsStub = nil
+	fake.proposalsReturns = struct {
+		result1 []*cluster.Proposal
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) ProposalsReturnsOnCall(i int, result1 []*cluster.Proposal, result2 error) {
+	fake.proposalsMutex.Lock()
+	defer fake.proposalsMutex.Unlock()
+	fake.ProposalsStub = nil
+	if fake.proposalsReturnsOnCall == nil {
+		fake.proposalsReturnsOnCall = make(map[int]struct {
+			result1 []*cluster.Proposal
+			result2 error
+		})
+	}
+	fake.proposalsReturnsOnCall[i] = struct {
+		result1 []*cluster.Proposal
 		result2 error
 	}{result1, result2}
 }
@@ -1184,6 +1263,8 @@ func (fake *FakeCluster) Invocations() map[string][][]interface{} {
 	defer fake.ingestMutex.RUnlock()
 	fake.ingestablesMutex.RLock()
 	defer fake.ingestablesMutex.RUnlock()
+	fake.proposalsMutex.RLock()
+	defer fake.proposalsMutex.RUnlock()
 	fake.proposeMutex.RLock()
 	defer fake.proposeMutex.RUnlock()
 	fake.proposeDatabaseMutex.RLock()
