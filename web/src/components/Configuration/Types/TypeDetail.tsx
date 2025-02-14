@@ -67,19 +67,17 @@ const TypeDetail: React.FC = () => {
         },
       ],
     }
-    graphElement = <><Line options={options} data={data} /><Divider /></>
+    graphElement = <><Divider /><Line options={options} data={data} /></>
   }
 
-
-
   return <Space direction="vertical">
-    {graphElement}
     <ConfigurationDetail
       paramName={paramName}
       mutationFn={saveTypeFunction}
       query={getTypesQuery}
       form={TypeForm}
     />
+    {graphElement}
   </Space>
 }
 
