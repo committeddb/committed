@@ -14,7 +14,7 @@ type FieldType = {
   topic?: string
 }
 
-const TypeForm: React.FC<ConfigurationData> = ({ data, setData }) => {
+const IngestableForm: React.FC<ConfigurationData> = ({ data, setData }) => {
   let ingestable = emptyIngestable()
   if (data) {
     ingestable = parse(data) as Ingestable
@@ -185,4 +185,4 @@ const TypeForm: React.FC<ConfigurationData> = ({ data, setData }) => {
   </Form>
 }
 
-export default TypeForm
+export default IngestableForm

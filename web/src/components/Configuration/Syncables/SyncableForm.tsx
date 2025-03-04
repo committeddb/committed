@@ -14,7 +14,7 @@ type FieldType = {
   table?: string
 }
 
-const TypeForm: React.FC<ConfigurationData> = ({ data, setData }) => {
+const SycableForm: React.FC<ConfigurationData> = ({ data, setData }) => {
   let syncable = emptySyncable()
   if (data) {
     syncable = parse(data) as Syncable
@@ -268,4 +268,4 @@ const TypeForm: React.FC<ConfigurationData> = ({ data, setData }) => {
   </Form>
 }
 
-export default TypeForm
+export default SycableForm

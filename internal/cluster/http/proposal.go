@@ -54,6 +54,22 @@ func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
 	}
 }
 
+type GetProposalResponse struct {
+	Entities []*GetProposalEntityResponse `json:"entities"`
+}
+
+type GetProposalEntityResponse struct {
+	TypeID   string `json:"typeId"`
+	TypeName string `json:"typeName"`
+	Key      string `json:"key"`
+	Data     string `json:"data"`
+}
+
+type GetProposalTypeResponse struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
 func (h *HTTP) GetProposals(w httpgo.ResponseWriter, r *httpgo.Request) {
 	t := r.URL.Query().Get("type")
 
@@ -72,5 +88,20 @@ func (h *HTTP) GetProposals(w httpgo.ResponseWriter, r *httpgo.Request) {
 		internalServerError(w, err)
 	}
 
-	writeArrayBody(w, ps)
+	var body []GetProposalResponse
+	for _, p := range ps {
+		proposalResponse := &GetProposalResponse{}
+		for _, e := range p.Entities {
+			proposalEntityResponse := &GetProposalEntityResponse{
+				TypeID:   e.Type.ID,
+				TypeName: e.Type.Name,
+				Key:      string(e.Key),
+				Data:     string(e.Data),
+			}
+			proposalResponse.Entities = append(proposalResponse.Entities, proposalEntityResponse)
+		}
+		body = append(body, *proposalResponse)
+	}
+
+	writeArrayBody(w, body)
 }

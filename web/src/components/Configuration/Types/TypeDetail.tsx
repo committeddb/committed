@@ -16,6 +16,8 @@ import {
   TimeScale,
   Tooltip,
 } from 'chart.js';
+import { getProposalsQuery } from '../../Proposals/queries'
+import Proposals from '../../Proposals/Proposals'
 
 ChartJS.register(
   CategoryScale,
@@ -31,6 +33,7 @@ const TypeDetail: React.FC = () => {
   const param: any = useParams({ strict: false })
   const id = param[paramName]
   const { data: graph } = useSuspenseQuery(getTypeGraphQuery(id))
+  const { data: proposals } = useSuspenseQuery(getProposalsQuery(id))
 
   const options = {
     adapters: {
@@ -67,7 +70,13 @@ const TypeDetail: React.FC = () => {
         },
       ],
     }
-    graphElement = <><Divider /><Line options={options} data={data} /></>
+    graphElement = <>
+      <Divider />
+      <Space direction='vertical' size='large'>
+        <Line options={options} data={data} />
+        <Proposals proposals={proposals} />
+      </Space>
+    </>
   }
 
   return <Space direction="vertical">

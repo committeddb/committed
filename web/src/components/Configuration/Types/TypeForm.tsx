@@ -14,12 +14,19 @@ const TypeForm: React.FC<ConfigurationData> = ({ data, setData }) => {
     type = parse(data) as Type
   }
 
+  const name = type?.type?.name
+
+  const [form] = Form.useForm()
+  React.useEffect(() => {
+    form.setFieldsValue({ name: name })
+  }, [name])
+
   const nameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     type.type.name = e.target?.value
     setData(stringify(type))
   }
 
-  return <Form name="basic" initialValues={{ name: type?.type?.name }}>
+  return <Form name="basic" form={form}>
     <Form.Item<FieldType>
       label="Name"
       name="name"

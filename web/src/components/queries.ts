@@ -1,5 +1,5 @@
 import { queryOptions } from "@tanstack/react-query"
-import { Configuration } from "./configuration"
+import { Configuration } from "./Configuration/configuration"
 
 export const url = (fragment: string): string => {
   return (import.meta.env.VITE_API_URL ?? '') + fragment

@@ -1,4 +1,4 @@
-import { createQuery, createSaveFunction } from '../queries'
+import { createQuery, createSaveFunction } from '../../queries'
 
 const path = '/ingestable'
 

@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { useParams } from '@tanstack/react-router'
 import { MutationFunction, OmitKeyof, useMutation, UseQueryOptions, useSuspenseQuery } from '@tanstack/react-query'
 import { Button, Flex, Select, Space, Tabs } from 'antd'
@@ -28,6 +28,10 @@ const ConfigurationDetail: React.FC<ConfigurationParams> = ({ paramName, query, 
   }
 
   const [data, setData] = useState(originalData)
+
+  useEffect(() => {
+    setData(originalData)
+  }, [originalData])
 
   const save = () => {
     const configuration = { id: id ?? '', mimeType: 'text/toml', data: data }

@@ -11,7 +11,7 @@ type FieldType = {
   connectionString?: string
 }
 
-const TypeForm: React.FC<ConfigurationData> = ({ data, setData }) => {
+const DatabaseForm: React.FC<ConfigurationData> = ({ data, setData }) => {
   let database = emptyDatabase()
   if (data) {
     database = parse(data) as Database
@@ -79,4 +79,4 @@ const TypeForm: React.FC<ConfigurationData> = ({ data, setData }) => {
   </Form>
 }
 
-export default TypeForm
+export default DatabaseForm
