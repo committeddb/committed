@@ -11,6 +11,10 @@ test/ci:
 	go build
 	go test ./... -cover
 
+test-all:
+	go build
+	go test -tags "docker integration" -timeout 300s ./... -cover
+
 test/topic:
 	$(call test,"github.com/philborlin/committed/topic")
 

@@ -45,6 +45,10 @@ func New(c cluster.Cluster) *HTTP {
 	return h
 }
 
+func (h *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.r.ServeHTTP(w, r)
+}
+
 func (h *HTTP) ListenAndServe(addr string) error {
 	return http.ListenAndServe(addr, h.r)
 }

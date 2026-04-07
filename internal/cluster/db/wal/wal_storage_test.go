@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"math"
 	"os"
+	"sync"
 	"testing"
 
 	"github.com/philborlin/committed/internal/cluster"
@@ -68,13 +69,13 @@ func (i index) terms(terms ...uint64) []pb.Entry {
 
 type StorageWrapper struct {
 	*wal.Storage
-	path   string
-	parser db.Parser
+	path     string
+	parser   db.Parser
+	closeOnce *sync.Once
 }
 
 func (s *StorageWrapper) CloseAndReopen() (*StorageWrapper, error) {
-	err := s.Close()
-	if err != nil {
+	if err := s.closeIdempotent(); err != nil {
 		return nil, err
 	}
 
@@ -83,11 +84,23 @@ func (s *StorageWrapper) CloseAndReopen() (*StorageWrapper, error) {
 		return nil, err
 	}
 
-	return &StorageWrapper{wal, s.path, s.parser}, nil
+	return &StorageWrapper{wal, s.path, s.parser, &sync.Once{}}, nil
+}
+
+// closeIdempotent closes the underlying storage at most once. Tests routinely
+// hold multiple StorageWrapper handles to the same path (e.g. before and after
+// CloseAndReopen) and may end up calling Close on each via deferred cleanup;
+// the underlying tstorage panics on a double-close, so we guard with sync.Once.
+func (s *StorageWrapper) closeIdempotent() error {
+	var err error
+	s.closeOnce.Do(func() {
+		err = s.Close()
+	})
+	return err
 }
 
 func (s *StorageWrapper) Cleanup() {
-	_ = s.Close()
+	_ = s.closeIdempotent()
 	_ = os.RemoveAll(s.path)
 }
 
@@ -179,8 +192,7 @@ func NewStorageWithParser(t *testing.T, ents []pb.Entry, p db.Parser) *StorageWr
 }
 
 func (s *StorageWrapper) CloseAndReopenStorage(t *testing.T) *StorageWrapper {
-	err := s.Close()
-	if err != nil {
+	if err := s.closeIdempotent(); err != nil {
 		t.Fatal(err)
 		return nil
 	}
@@ -188,14 +200,14 @@ func (s *StorageWrapper) CloseAndReopenStorage(t *testing.T) *StorageWrapper {
 	return OpenStorage(t, s.path, s.parser, nil, nil)
 }
 
-func OpenStorage(t *testing.T, dir string, p db.Parser, sync chan *db.SyncableWithID, ingest chan *db.IngestableWithID) *StorageWrapper {
-	wal, err := wal.Open(dir, p, sync, ingest)
+func OpenStorage(t *testing.T, dir string, p db.Parser, syncCh chan *db.SyncableWithID, ingest chan *db.IngestableWithID) *StorageWrapper {
+	wal, err := wal.Open(dir, p, syncCh, ingest)
 	if err != nil {
 		t.Fatal(err)
 		return nil
 	}
 
-	s := &StorageWrapper{wal, dir, p}
+	s := &StorageWrapper{wal, dir, p, &sync.Once{}}
 
 	return s
 }

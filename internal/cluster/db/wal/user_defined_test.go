@@ -5,8 +5,9 @@ import (
 	"time"
 
 	"github.com/nakabonne/tstorage"
-	"github.com/philborlin/committed/internal/cluster/db/wal"
+	"github.com/philborlin/committed/internal/cluster"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type GetTimePointsTest struct {
@@ -30,12 +31,26 @@ func TestGetTimePoints(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			timeSeriesStorage, err := tstorage.NewStorage(
+			s := NewStorage(t, index(3).terms(3, 4, 5))
+			defer s.Cleanup()
+
+			// TimePoints validates the type exists via s.Type(typeID), so we
+			// must register both metrics as types before exercising it.
+			insertTypes(t, s, []*cluster.Type{
+				{ID: metric, Name: metric},
+				{ID: otherMetric, Name: otherMetric},
+			}, 6, 6)
+
+			// wal.Open initialises TimeSeriesStorage with a hardcoded relative
+			// data path ("./data") that persists across test runs. Swap in a
+			// fresh in-memory tstorage so subtests can't see each other's
+			// inserts.
+			freshTSS, err := tstorage.NewStorage(
 				tstorage.WithTimestampPrecision(tstorage.Milliseconds),
 			)
-			assert.Nil(t, err)
-
-			s := &wal.Storage{TimeSeriesStorage: timeSeriesStorage}
+			require.Nil(t, err)
+			_ = s.TimeSeriesStorage.Close()
+			s.TimeSeriesStorage = freshTSS
 
 			var rows []tstorage.Row
 			for _, t := range tt.times {
@@ -44,14 +59,14 @@ func TestGetTimePoints(t *testing.T) {
 			// Add a row into a different metric within the tested time frame just to make sure it doesn't get picked up
 			rows = append(rows, tstorage.Row{Metric: otherMetric, DataPoint: tstorage.DataPoint{Value: 1, Timestamp: startTime.Add(time.Second).UnixMilli()}})
 
-			err = timeSeriesStorage.InsertRows(rows)
-			assert.Nil(t, err)
+			err = s.TimeSeriesStorage.InsertRows(rows)
+			require.Nil(t, err)
 
 			timePoints, err := s.TimePoints(metric, startTime, endTime)
 			assert.Nil(t, err)
 
 			for i, tp := range timePoints {
-				assert.Equal(t, tp.Value, tt.expected[i])
+				assert.Equal(t, tt.expected[i], tp.Value)
 			}
 		})
 	}

@@ -1,3 +1,5 @@
+//go:build integration
+
 package http_test
 
 import (
@@ -180,6 +182,7 @@ func view(t *testing.T, s db.Storage, databaseID string, p *Proposal, connection
 
 func addDatabase(t *testing.T, h *http.HTTP, dialect string) string {
 	name := "bar"
+	id := "test-db-id"
 
 	body := fmt.Sprintf(`[database]
 type = "sql"
@@ -188,23 +191,24 @@ name = "%s"
 dialect="%s"
 connectionString="%s"`, name, dialect, name)
 
-	req := httptest.NewRequest("POST", "http://localhost/database", strings.NewReader(body))
+	req := httptest.NewRequest("POST", fmt.Sprintf("http://localhost/database/%s", id), strings.NewReader(body))
 	req.Header["Content-Type"] = []string{"text/toml"}
 
 	w := httptest.NewRecorder()
 
-	h.AddDatabase(w, req)
+	h.ServeHTTP(w, req)
 
 	resp := w.Result()
 	require.Equal(t, 200, resp.StatusCode)
-	id, err := io.ReadAll(resp.Body)
+	respID, err := io.ReadAll(resp.Body)
 	require.Nil(t, err)
 
-	return string(id)
+	return string(respID)
 }
 
 func addIngestable(t *testing.T, h *http.HTTP, dialect string) string {
 	name := "bar"
+	id := "test-ingestable-id"
 	body := fmt.Sprintf(`[ingestable]
 type = "proposal"
 name = "%s"
@@ -222,24 +226,25 @@ column = "pk"
 jsonName = "one"
 column = "one"`, name, dialect, name)
 
-	req := httptest.NewRequest("POST", "http://localhost/ingestable", strings.NewReader(body))
+	req := httptest.NewRequest("POST", fmt.Sprintf("http://localhost/ingestable/%s", id), strings.NewReader(body))
 	req.Header["Content-Type"] = []string{"text/toml"}
 
 	w := httptest.NewRecorder()
 
-	h.AddIngestable(w, req)
+	h.ServeHTTP(w, req)
 
 	resp := w.Result()
 	require.Equal(t, 200, resp.StatusCode)
-	id, err := io.ReadAll(resp.Body)
+	respID, err := io.ReadAll(resp.Body)
 	require.Nil(t, err)
 
-	return string(id)
+	return string(respID)
 }
 
 func addSyncable(t *testing.T, h *http.HTTP, topicId string, databaseID string) string {
 	name := "bar"
 	tableName := name + ".foo"
+	id := "test-syncable-id"
 
 	body := fmt.Sprintf(`[syncable]
 type = "sql"
@@ -264,48 +269,49 @@ jsonPath = "$.one"
 column = "one"
 type = "VARCHAR(128)"`, name, topicId, databaseID, tableName)
 
-	req := httptest.NewRequest("POST", "http://localhost/syncable", strings.NewReader(body))
+	req := httptest.NewRequest("POST", fmt.Sprintf("http://localhost/syncable/%s", id), strings.NewReader(body))
 	req.Header["Content-Type"] = []string{"text/toml"}
 
 	w := httptest.NewRecorder()
 
-	h.AddSyncable(w, req)
+	h.ServeHTTP(w, req)
 
 	resp := w.Result()
 	require.Equal(t, 200, resp.StatusCode)
-	id, err := io.ReadAll(resp.Body)
+	respID, err := io.ReadAll(resp.Body)
 	require.Nil(t, err)
 
-	return string(id)
+	return string(respID)
 }
 
 func addType(t *testing.T, h *http.HTTP, name string) string {
+	id := "test-type-id"
 	body := fmt.Sprintf("[type]\nname = \"%s\"", name)
 
-	req := httptest.NewRequest("POST", "http://localhost/type", strings.NewReader(body))
+	req := httptest.NewRequest("POST", fmt.Sprintf("http://localhost/type/%s", id), strings.NewReader(body))
 	req.Header["Content-Type"] = []string{"text/toml"}
 
 	w := httptest.NewRecorder()
 
-	h.AddType(w, req)
+	h.ServeHTTP(w, req)
 
 	resp := w.Result()
 	require.Equal(t, 200, resp.StatusCode)
-	id, err := io.ReadAll(resp.Body)
+	respID, err := io.ReadAll(resp.Body)
 	require.Nil(t, err)
 
-	return string(id)
+	return string(respID)
 }
 
 func propose(t *testing.T, h *http.HTTP, proposal *http.AddProposalRequest) {
 	bs, err := json.Marshal(proposal)
 	require.Nil(t, err)
 	req := httptest.NewRequest("POST", "http://localhost/proposal", bytes.NewReader(bs))
-	req.Header["Content-Type"] = []string{"text/toml"}
+	req.Header["Content-Type"] = []string{"application/json"}
 
 	w := httptest.NewRecorder()
 
-	h.AddProposal(w, req)
+	h.ServeHTTP(w, req)
 
 	resp := w.Result()
 	require.Equal(t, 200, resp.StatusCode)
