@@ -8,5 +8,6 @@ entry-log
 state-log
 .vscode
 .idea
+.claude/
 docker/db
 demo/db
