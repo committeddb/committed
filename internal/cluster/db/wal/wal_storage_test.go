@@ -79,12 +79,24 @@ func (s *StorageWrapper) CloseAndReopen() (*StorageWrapper, error) {
 		return nil, err
 	}
 
-	wal, err := wal.Open(s.path, s.parser, nil, nil)
+	wal, err := wal.Open(s.path, s.parser, nil, nil, testOpenOptions...)
 	if err != nil {
 		return nil, err
 	}
 
 	return &StorageWrapper{wal, s.path, s.parser, &sync.Once{}}, nil
+}
+
+// testOpenOptions are the wal.Open options applied by every test in this
+// package. They disable fsync on the bbolt key-value store and keep the
+// time-series store entirely in memory, which together cut wal.Open from
+// ~22ms to ~5ms — a substantial speedup over a package with 50+ tests.
+//
+// Tests that need to assert on disk durability or persistence behaviour
+// should call wal.Open directly without these options.
+var testOpenOptions = []wal.Option{
+	wal.WithoutFsync(),
+	wal.WithInMemoryTimeSeries(),
 }
 
 // closeIdempotent closes the underlying storage at most once. Tests routinely
@@ -201,7 +213,7 @@ func (s *StorageWrapper) CloseAndReopenStorage(t *testing.T) *StorageWrapper {
 }
 
 func OpenStorage(t *testing.T, dir string, p db.Parser, syncCh chan *db.SyncableWithID, ingest chan *db.IngestableWithID) *StorageWrapper {
-	wal, err := wal.Open(dir, p, syncCh, ingest)
+	wal, err := wal.Open(dir, p, syncCh, ingest, testOpenOptions...)
 	if err != nil {
 		t.Fatal(err)
 		return nil

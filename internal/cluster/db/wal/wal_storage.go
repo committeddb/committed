@@ -62,7 +62,12 @@ type Storage struct {
 
 // Returns a *WalStorage, whether this storage existed already, or an error
 // func Open() (*WalStorage, bool, error) {
-func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<- *db.IngestableWithID) (*Storage, error) {
+func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<- *db.IngestableWithID, opts ...Option) (*Storage, error) {
+	var cfg options
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
 	entryLogDir := filepath.Join(dir, "entry-log")
 	stateLogDir := filepath.Join(dir, "state-log")
 	keyValueStorageDir := filepath.Join(dir, "type-storage")
@@ -97,15 +102,19 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		return nil, err
 	}
 
-	keyValueStorage, err := bolt.Open(filepath.Join(keyValueStorageDir, "types.db"), 0600, &bolt.Options{Timeout: 1 * time.Second})
+	boltOpts := &bolt.Options{Timeout: 1 * time.Second, NoSync: cfg.fsyncDisabled}
+	keyValueStorage, err := bolt.Open(filepath.Join(keyValueStorageDir, "types.db"), 0600, boltOpts)
 	if err != nil {
 		return nil, err
 	}
 
-	timeSeriesStorage, err := tstorage.NewStorage(
-		tstorage.WithDataPath("./data"),
+	tssOpts := []tstorage.Option{
 		tstorage.WithTimestampPrecision(tstorage.Milliseconds),
-	)
+	}
+	if !cfg.inMemoryTimeSeries {
+		tssOpts = append(tssOpts, tstorage.WithDataPath("./data"))
+	}
+	timeSeriesStorage, err := tstorage.NewStorage(tssOpts...)
 	if err != nil {
 		return nil, err
 	}

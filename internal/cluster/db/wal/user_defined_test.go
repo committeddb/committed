@@ -41,17 +41,6 @@ func TestGetTimePoints(t *testing.T) {
 				{ID: otherMetric, Name: otherMetric},
 			}, 6, 6)
 
-			// wal.Open initialises TimeSeriesStorage with a hardcoded relative
-			// data path ("./data") that persists across test runs. Swap in a
-			// fresh in-memory tstorage so subtests can't see each other's
-			// inserts.
-			freshTSS, err := tstorage.NewStorage(
-				tstorage.WithTimestampPrecision(tstorage.Milliseconds),
-			)
-			require.Nil(t, err)
-			_ = s.TimeSeriesStorage.Close()
-			s.TimeSeriesStorage = freshTSS
-
 			var rows []tstorage.Row
 			for _, t := range tt.times {
 				rows = append(rows, tstorage.Row{Metric: metric, DataPoint: tstorage.DataPoint{Value: 1, Timestamp: t.UnixMilli()}})
@@ -59,7 +48,7 @@ func TestGetTimePoints(t *testing.T) {
 			// Add a row into a different metric within the tested time frame just to make sure it doesn't get picked up
 			rows = append(rows, tstorage.Row{Metric: otherMetric, DataPoint: tstorage.DataPoint{Value: 1, Timestamp: startTime.Add(time.Second).UnixMilli()}})
 
-			err = s.TimeSeriesStorage.InsertRows(rows)
+			err := s.TimeSeriesStorage.InsertRows(rows)
 			require.Nil(t, err)
 
 			timePoints, err := s.TimePoints(metric, startTime, endTime)
