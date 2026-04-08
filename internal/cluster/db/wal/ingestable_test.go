@@ -3,6 +3,7 @@ package wal_test
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/philborlin/committed/internal/cluster/db"
 	parser "github.com/philborlin/committed/internal/cluster/db/parser"
 	"github.com/philborlin/committed/internal/cluster/db/wal"
+	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
 	"go.etcd.io/etcd/raft/v3/raftpb"
 )
@@ -76,6 +78,88 @@ func TestEmptyIngestables(t *testing.T) {
 	require.Equal(t, 0, len(is))
 }
 
+// TestApplyCommitted_RestartReplay verifies that wal.Storage's persisted
+// appliedIndex correctly survives a close + reopen, and that already-applied
+// committed entries are skipped on the second pass.
+//
+// This is the load-bearing assertion behind PR1's idempotency story:
+// without persisted appliedIndex, restart would replay every committed
+// entry through ApplyCommitted, which would re-parse every ingestable and
+// re-spawn its worker — exactly the worker-registry-by-id.md bug.
+//
+// We verify by installing a parser on reopen whose Parse panics. If the
+// re-apply fails to short-circuit on the index check, the panic surfaces.
+func TestApplyCommitted_RestartReplay(t *testing.T) {
+	dir := t.TempDir()
+
+	// First incarnation: apply an ingestable through a working parser.
+	workingParser := parser.New()
+	fakeIngestable := &clusterfakes.FakeIngestable{}
+	fakeParser := &clusterfakes.FakeIngestableParser{}
+	fakeParser.ParseReturns(fakeIngestable, nil)
+	workingParser.AddIngestableParser("test-replay", fakeParser)
+
+	// No channels — this test focuses on apply + bucket state, not the
+	// channel-fanout side. saveIngestable's `if s.ingest != nil` guard
+	// keeps it quiet.
+	s, err := wal.Open(dir, workingParser, nil, nil, testOpenOptions...)
+	require.Nil(t, err)
+
+	cfg := &cluster.Configuration{
+		ID:       "ingest-replay",
+		MimeType: "application/json",
+		Data:     []byte(`{"ingestable": {"name": "ingest-replay", "type": "test-replay"}}`),
+	}
+	entity, err := cluster.NewUpsertIngestableEntity(cfg)
+	require.Nil(t, err)
+
+	p := &cluster.Proposal{Entities: []*cluster.Entity{entity}}
+	bs, err := p.Marshal()
+	require.Nil(t, err)
+	entry := raftpb.Entry{Term: 1, Index: 1, Type: raftpb.EntryNormal, Data: bs}
+
+	require.Nil(t, s.Save(defaultHardState, []raftpb.Entry{entry}, defaultSnap))
+	require.Nil(t, s.ApplyCommitted(entry))
+	require.Equal(t, uint64(1), s.AppliedIndex(), "appliedIndex bumped after first apply")
+	require.Equal(t, 1, fakeParser.ParseCallCount(), "parser invoked exactly once on first apply")
+
+	// Bucket should hold the configuration we just put.
+	cfgs, err := s.Ingestables()
+	require.Nil(t, err)
+	require.Equal(t, 1, len(cfgs))
+
+	require.Nil(t, s.Close())
+
+	// Second incarnation: install a parser that PANICS if Parse is called.
+	// If appliedIndex was not persisted (or the index-skip in ApplyCommitted
+	// was wrong), this is the line that catches it.
+	panicParser := parser.New()
+	panickingFake := &clusterfakes.FakeIngestableParser{}
+	panickingFake.ParseStub = func(*viper.Viper) (cluster.Ingestable, error) {
+		panic("parser must not be called on restart-replay of an already-applied entry")
+	}
+	panicParser.AddIngestableParser("test-replay", panickingFake)
+
+	s2, err := wal.Open(dir, panicParser, nil, nil, testOpenOptions...)
+	require.Nil(t, err)
+	defer s2.Close()
+
+	// appliedIndex must survive the close/reopen.
+	require.Equal(t, uint64(1), s2.AppliedIndex(), "appliedIndex restored from bbolt")
+
+	// Re-applying the same entry must be a no-op — neither parse nor put
+	// runs. If the index-skip is broken, the panicParser triggers.
+	require.Nil(t, s2.ApplyCommitted(entry))
+
+	// Bucket state from the first incarnation must still be visible
+	// (BoltDB persistence is independent of this test's appliedIndex story,
+	// but worth asserting so a regression in bucket persistence is caught).
+	cfgs2, err := s2.Ingestables()
+	require.Nil(t, err)
+	require.Equal(t, 1, len(cfgs2))
+	require.Equal(t, "ingest-replay", cfgs2[0].ID)
+}
+
 func insertIngestables(t *testing.T, s db.Storage, ts []*cluster.Configuration, term, index uint64) uint64 {
 	for i, tipe := range ts {
 		e, err := cluster.NewUpsertIngestableEntity(tipe)
@@ -115,10 +199,12 @@ func TestProposeIngestable_StartsIngestionWiring(t *testing.T) {
 	// Buffered so wal saveIngestable's send does not block on the consumer.
 	// db.listenForIngestables receives unbuffered, but a buffer of 1 keeps
 	// the test deterministic if the consumer goroutine is slow to schedule.
+	// (Named syncCh rather than sync to avoid shadowing the sync package,
+	// which the closeOnce wrapper below needs.)
 	ingest := make(chan *db.IngestableWithID, 1)
-	sync := make(chan *db.SyncableWithID, 1)
+	syncCh := make(chan *db.SyncableWithID, 1)
 
-	storage, err := wal.Open(t.TempDir(), p, sync, ingest, testOpenOptions...)
+	storage, err := wal.Open(t.TempDir(), p, syncCh, ingest, testOpenOptions...)
 	require.Nil(t, err)
 	defer storage.Close()
 
@@ -156,8 +242,19 @@ func TestProposeIngestable_StartsIngestionWiring(t *testing.T) {
 	// with any other package that constructs a db.DB.
 	id := uint64(1)
 	peers := db.Peers{id: ""}
-	d := db.New(id, peers, storage, p, sync, ingest, db.WithTickInterval(1*time.Millisecond))
-	defer d.Close()
+	d := db.New(id, peers, storage, p, syncCh, ingest, db.WithTickInterval(1*time.Millisecond))
+	// db.Close panics on second call (it close()s proposeC without
+	// sync.Once protection). The test needs to call Close mid-flow to
+	// quiesce the raft loop before reading wal.Storage's
+	// firstIndex/lastIndex (those fields are unsynchronized — pre-existing
+	// gap surfaced when this test was added). Wrap Close in a local
+	// sync.Once so the deferred safety-net cleanup is harmless if the
+	// happy path already closed.
+	var closeOnce sync.Once
+	closeDB := func() {
+		closeOnce.Do(func() { _ = d.Close() })
+	}
+	defer closeDB()
 	d.EatCommitC()
 
 	cfg := &cluster.Configuration{
@@ -170,22 +267,43 @@ func TestProposeIngestable_StartsIngestionWiring(t *testing.T) {
 
 	require.Nil(t, d.ProposeIngestable(cfg))
 
-	// Two committed entries should appear: the ingestable Configuration and
-	// the proposal that the ingestable produced via the wired channel.
+	// Wait for at least two committed entries to be applied: the
+	// ingestable Configuration and the proposal that the ingestable
+	// produced via the wired channel. AppliedIndex is backed by an
+	// atomic.Uint64 so it's safe to read concurrently with the raft
+	// goroutine that's writing it. (Polling FirstIndex/LastIndex/Entries
+	// directly would race against wal.Storage's plain-uint64 firstIndex/
+	// lastIndex fields, which appendEntries mutates from inside Save.)
 	require.Eventually(t, func() bool {
-		ents := readNormalProposals(storage)
-		return len(ents) == 2
+		return storage.AppliedIndex() >= 2
 	}, 2*time.Second, 5*time.Millisecond,
-		"expected Configuration + ingested Proposal in raft log")
+		"expected Configuration + ingested Proposal to be applied")
+
+	// Quiesce the raft loop before reading the entry log directly.
+	// readNormalProposals reads the unsynchronized firstIndex/lastIndex
+	// fields, which would otherwise race against the running raft
+	// goroutine. Closing the db waits for serveChannels to exit, after
+	// which those fields are safe to read.
+	closeDB()
 
 	ents := readNormalProposals(storage)
-	require.Equal(t, 2, len(ents))
+	require.GreaterOrEqual(t, len(ents), 2,
+		"expected at least Configuration + ingested Proposal in raft log")
 
-	// Second entry should be the proposal the fake ingestable emitted.
-	require.Equal(t, 1, len(ents[1].Entities))
-	got := ents[1].Entities[0]
+	// Find the proposal the fake ingestable emitted (key = "test-key").
+	// We can't always count on it being at index 1 because the raft loop
+	// may interleave system entries (e.g. an ingestable position bump)
+	// between the configuration and the user proposal.
+	var got *cluster.Entity
+	for _, p := range ents {
+		for _, e := range p.Entities {
+			if string(e.Key) == "test-key" {
+				got = e
+			}
+		}
+	}
+	require.NotNil(t, got, "ingested test-key proposal not found in raft log")
 	require.Equal(t, "test-type", got.Type.ID)
-	require.Equal(t, "test-key", string(got.Key))
 	require.Equal(t, []byte(`{"x":1}`), got.Data)
 
 	// And the parser was actually invoked by saveIngestable, proving the

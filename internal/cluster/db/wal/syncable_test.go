@@ -54,8 +54,18 @@ func TestSyncable(t *testing.T) {
 
 			currentIndex := uint64(6)
 			currentTerm := uint64(6)
-			insertDatabases(t, s, []*cluster.Configuration{cfgd1, cfgd2}, currentIndex, currentTerm)
-			insertSyncables(t, s, tt.cfgs, currentIndex+uint64(len(dbs)), currentTerm)
+			// insertDatabases / insertSyncables have signature (term, index).
+			// Pre-PR1 the call site swapped them and got away with it because
+			// Save always re-applied: the syncable entries collided with the
+			// database entries at indices 6,7 in the entry log, but the
+			// database bucket already held foo/bar from the prior apply, and
+			// the syncable bucket got populated by the syncable apply on the
+			// same Save call. After PR1, apply is idempotent on entry index,
+			// so a second apply at index 6/7 would skip — leaving the
+			// syncable bucket empty. Fix: pass term and index in the right
+			// slots, and start syncables AFTER the databases (index 8+).
+			insertDatabases(t, s, []*cluster.Configuration{cfgd1, cfgd2}, currentTerm, currentIndex)
+			insertSyncables(t, s, tt.cfgs, currentTerm, currentIndex+uint64(len(dbs)))
 
 			cfgs, err := s.Syncables()
 			require.Equal(t, nil, err)

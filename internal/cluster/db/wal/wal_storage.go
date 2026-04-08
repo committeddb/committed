@@ -2,11 +2,13 @@ package wal
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/gob"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	"github.com/nakabonne/tstorage"
@@ -30,7 +32,15 @@ var ingestableBucket = []byte("ingestables")
 // TODO var ingestablePositionBucket = []byte("ingestablesPositions")
 var syncableBucket = []byte("syncables")
 var syncableIndexBucket = []byte("syncableIndexes")
-var buckets = [][]byte{typeBucket, databaseBucket, ingestableBucket, syncableBucket, syncableIndexBucket}
+
+// appliedIndexBucket holds a single key ("idx") whose value is the
+// big-endian uint64 of the highest raft entry index that ApplyCommitted has
+// fully applied. Persisted so that on restart the Ready loop's replay of
+// already-applied committed entries is a no-op.
+var appliedIndexBucket = []byte("appliedIndex")
+var appliedIndexKey = []byte("idx")
+
+var buckets = [][]byte{typeBucket, databaseBucket, ingestableBucket, syncableBucket, syncableIndexBucket, appliedIndexBucket}
 
 type StateType int
 
@@ -58,6 +68,10 @@ type Storage struct {
 	parser            db.Parser
 	sync              chan<- *db.SyncableWithID
 	ingest            chan<- *db.IngestableWithID
+	// appliedIndex is the highest raft entry index that ApplyCommitted has
+	// fully applied. Bumped after each successful per-entry apply (and
+	// persisted to bbolt in the same step). Loaded from bbolt on Open.
+	appliedIndex atomic.Uint64
 }
 
 // Returns a *WalStorage, whether this storage existed already, or an error
@@ -190,6 +204,12 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		return nil, err
 	}
 
+	idx, err := ws.loadAppliedIndex()
+	if err != nil {
+		return nil, err
+	}
+	ws.appliedIndex.Store(idx)
+
 	return ws, nil
 }
 
@@ -281,66 +301,141 @@ func (s *Storage) ConfState(c *pb.ConfState) {
 	s.snapshot.Metadata.ConfState = *c
 }
 
+// Save persists raft state and entries durably. It does NOT apply entities
+// to BoltDB / time series — that happens in ApplyCommitted, which raft.go
+// calls separately on rd.CommittedEntries. Splitting these is important
+// because the raft Ready loop hands Save the *to-persist* slice (rd.Entries),
+// which on a multi-node follower may include uncommitted entries; applying
+// them to bucket state before commit would diverge the cluster.
 func (s *Storage) Save(st pb.HardState, ents []pb.Entry, snap pb.Snapshot) error {
 	s.hardState = st
 	s.snapshot = snap
-	err := s.appendEntries(ents)
-	if err != nil {
+
+	if err := s.appendEntries(ents); err != nil {
 		return fmt.Errorf("[wal.storage] appendEntries: %w", err)
 	}
 
-	for _, ent := range ents {
-		if ent.Type == pb.EntryNormal {
-			p := &cluster.Proposal{}
-			err := p.Unmarshal(ent.Data)
-			if err != nil {
-				continue
-			}
-
-			for _, entity := range p.Entities {
-				fmt.Printf("[wal.storage] Saving entity %v\n", entity)
-				switch {
-				case cluster.IsType(entity.ID):
-					err := s.handleType(entity)
-					if err != nil {
-						return fmt.Errorf("[wal.storage] handleType: %w", err)
-					}
-				case cluster.IsDatabase(entity.ID):
-					err := s.handleDatabase(entity)
-					if err != nil {
-						return fmt.Errorf("[wal.storage] handleDatabase: %w", err)
-					}
-				case cluster.IsIngestable(entity.ID):
-					err := s.handleIngestable(entity)
-					if err != nil {
-						return fmt.Errorf("[wal.storage] handleIngestable: %w", err)
-					}
-				case cluster.IsSyncable(entity.ID):
-					err := s.handleSyncable(entity)
-					if err != nil {
-						return fmt.Errorf("[wal.storage] handleSyncable: %w", err)
-					}
-				case cluster.IsSyncableIndex(entity.ID):
-					err := s.handleSyncableIndex(entity)
-					if err != nil {
-						return fmt.Errorf("[wal.storage] handleSyncableIndex: %w", err)
-					}
-				default:
-					err := s.handleUserDefined(entity)
-					if err != nil {
-						return fmt.Errorf("[wal.storage] handleUserDefined: %w", err)
-					}
-				}
-			}
-		}
-	}
-
-	err = s.appendState(st, snap)
-	if err != nil {
+	if err := s.appendState(st, snap); err != nil {
 		return fmt.Errorf("[wal.storage] appendState: %w", err)
 	}
 
 	return nil
+}
+
+// ApplyCommitted applies a single committed raft entry to application
+// state. It is called by the raft Ready loop on each entry from
+// rd.CommittedEntries, after Save has persisted the entry and before
+// node.Advance(). Apply must complete before Advance per etcd-raft contract.
+//
+// ApplyCommitted is idempotent on re-apply: entries with index <=
+// AppliedIndex are skipped. The applied index is bumped (and persisted to
+// bbolt) after each successful apply, so a restart that replays committed
+// entries through the Ready loop will skip the already-applied portion.
+//
+// Errors here are treated as fatal by raft.go; see the apply error policy
+// comment in raft.go's Ready loop.
+func (s *Storage) ApplyCommitted(entry pb.Entry) error {
+	if entry.Type != pb.EntryNormal || entry.Data == nil {
+		return nil
+	}
+
+	// Skip already-applied entries (replay-on-restart safety).
+	if entry.Index <= s.appliedIndex.Load() {
+		return nil
+	}
+
+	p := &cluster.Proposal{}
+	if err := p.Unmarshal(entry.Data); err != nil {
+		// Match the prior Save behavior for undecodable proposals: skip,
+		// but still bump appliedIndex so we don't loop on it forever.
+		s.appliedIndex.Store(entry.Index)
+		return s.saveAppliedIndex(entry.Index)
+	}
+
+	for _, entity := range p.Entities {
+		fmt.Printf("[wal.storage] Applying entity %v\n", entity)
+		if err := s.applyEntity(entity); err != nil {
+			return err
+		}
+	}
+
+	s.appliedIndex.Store(entry.Index)
+	return s.saveAppliedIndex(entry.Index)
+}
+
+func (s *Storage) applyEntity(entity *cluster.Entity) error {
+	switch {
+	case cluster.IsType(entity.ID):
+		if err := s.handleType(entity); err != nil {
+			return fmt.Errorf("[wal.storage] handleType: %w", err)
+		}
+	case cluster.IsDatabase(entity.ID):
+		if err := s.handleDatabase(entity); err != nil {
+			return fmt.Errorf("[wal.storage] handleDatabase: %w", err)
+		}
+	case cluster.IsIngestable(entity.ID):
+		if err := s.handleIngestable(entity); err != nil {
+			return fmt.Errorf("[wal.storage] handleIngestable: %w", err)
+		}
+	case cluster.IsSyncable(entity.ID):
+		if err := s.handleSyncable(entity); err != nil {
+			return fmt.Errorf("[wal.storage] handleSyncable: %w", err)
+		}
+	case cluster.IsSyncableIndex(entity.ID):
+		if err := s.handleSyncableIndex(entity); err != nil {
+			return fmt.Errorf("[wal.storage] handleSyncableIndex: %w", err)
+		}
+	default:
+		if err := s.handleUserDefined(entity); err != nil {
+			return fmt.Errorf("[wal.storage] handleUserDefined: %w", err)
+		}
+	}
+	return nil
+}
+
+// AppliedIndex returns the highest raft entry index that ApplyCommitted has
+// fully applied. Loaded from bbolt on Open and bumped after each successful
+// apply.
+func (s *Storage) AppliedIndex() uint64 {
+	return s.appliedIndex.Load()
+}
+
+// saveAppliedIndex persists the applied index to bbolt. Called from
+// ApplyCommitted after a per-entry apply succeeds. Each apply runs in its
+// own short bbolt transaction; this is acceptable because the per-entity
+// handlers are not atomic with each other today either.
+func (s *Storage) saveAppliedIndex(idx uint64) error {
+	return s.keyValueStorage.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(appliedIndexBucket)
+		if b == nil {
+			return ErrBucketMissing
+		}
+		var buf [8]byte
+		binary.BigEndian.PutUint64(buf[:], idx)
+		return b.Put(appliedIndexKey, buf[:])
+	})
+}
+
+// loadAppliedIndex reads the persisted applied index from bbolt, or returns
+// 0 if no apply has happened yet (fresh storage).
+func (s *Storage) loadAppliedIndex() (uint64, error) {
+	var idx uint64
+	err := s.keyValueStorage.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(appliedIndexBucket)
+		if b == nil {
+			return ErrBucketMissing
+		}
+		v := b.Get(appliedIndexKey)
+		if v == nil {
+			return nil
+		}
+		if len(v) != 8 {
+			return fmt.Errorf("appliedIndex: expected 8 bytes, got %d", len(v))
+		}
+		idx = binary.BigEndian.Uint64(v)
+		return nil
+	})
+	return idx, err
 }
 
 func (s *Storage) appendEntries(ents []pb.Entry) error {

@@ -23,8 +23,16 @@ func (s *Storage) handleIngestable(e *cluster.Entity) error {
 	}
 }
 
+// saveIngestable persists an ingestable Configuration to bbolt and then
+// notifies the consumer channel. See saveSyncable for the rationale on why
+// the channel send happens outside the bbolt Update closure.
+//
+// Idempotency on restart depends on the persisted appliedIndex (see
+// wal.Storage.ApplyCommitted). Without it, replay would re-spawn a worker
+// for the same ID — see .claude-scratch/tickets/worker-registry-by-id.md.
 func (s *Storage) saveIngestable(t *cluster.Configuration) error {
-	return s.keyValueStorage.Update(func(tx *bolt.Tx) error {
+	var ingestable cluster.Ingestable
+	err := s.keyValueStorage.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(ingestableBucket)
 		if b == nil {
 			return ErrBucketMissing
@@ -34,22 +42,27 @@ func (s *Storage) saveIngestable(t *cluster.Configuration) error {
 			return fmt.Errorf("[wal.ingestable] marshal: %w", err)
 		}
 
-		_, ingestable, err := s.parser.ParseIngestable(t.MimeType, t.Data)
+		_, parsed, err := s.parser.ParseIngestable(t.MimeType, t.Data)
 		if err != nil {
 			return fmt.Errorf("[wal.ingestable] parseIngestable: %w", err)
 		}
+		ingestable = parsed
 
-		err = b.Put([]byte(t.ID), bs)
-		if err != nil {
+		if err := b.Put([]byte(t.ID), bs); err != nil {
 			return fmt.Errorf("[wal.ingestable] put: %w", err)
-		}
-
-		if s.ingest != nil {
-			s.ingest <- &db.IngestableWithID{ID: t.ID, Ingestable: ingestable}
 		}
 
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+
+	if s.ingest != nil {
+		s.ingest <- &db.IngestableWithID{ID: t.ID, Ingestable: ingestable}
+	}
+
+	return nil
 }
 
 func (s *Storage) deleteIngestable(id []byte) error {

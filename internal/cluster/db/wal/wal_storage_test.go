@@ -554,14 +554,30 @@ func saveEntity(t *testing.T, e *cluster.Entity, s db.Storage, term, index uint6
 	return p
 }
 
+// saveProposal persists an entity proposal AND applies it via
+// ApplyCommitted, so that downstream test assertions against bucket state
+// (s.Type, s.Database, etc.) see the entity. After PR1 split Save into
+// pure-persist and a separate ApplyCommitted, every test that expects
+// bucket state must call both. saveAndApply (below) is the helper for
+// tests that build their own pb.Entry.
 func saveProposal(t *testing.T, p *cluster.Proposal, s db.Storage, term, index uint64) {
 	bs, err := p.Marshal()
 	require.Equal(t, nil, err)
 
-	ent := pb.Entry{Term: term, Index: index, Data: bs}
+	ent := pb.Entry{Term: term, Index: index, Type: pb.EntryNormal, Data: bs}
 
-	err = s.Save(defaultHardState, []pb.Entry{ent}, defaultSnap)
-	require.Equal(t, nil, err)
+	saveAndApply(t, s, []pb.Entry{ent})
+}
+
+// saveAndApply runs Save then ApplyCommitted on each entry. Use for tests
+// that need bucket state to be queryable. Use s.Save directly when the
+// test only cares about entry-log persistence (e.g., reader_test.go and
+// the persistence-only tests in wal_storage_test.go).
+func saveAndApply(t *testing.T, s db.Storage, ents []pb.Entry) {
+	require.Nil(t, s.Save(defaultHardState, ents, defaultSnap))
+	for _, e := range ents {
+		require.Nil(t, s.ApplyCommitted(e))
+	}
 }
 
 func createDatabaseConfiguration(name string) *cluster.Configuration {

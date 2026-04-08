@@ -56,8 +56,7 @@ func TestSave_TypeEntity_Upsert(t *testing.T) {
 	entity := makeTypeEntity(t, "type-1", "MyType")
 	entry := makeEntry(t, 1, entity)
 
-	err := s.Save(defaultHardState, []pb.Entry{entry}, defaultSnap)
-	require.Nil(t, err)
+	saveAndApply(t, s, []pb.Entry{entry})
 
 	typ, err := s.Type("type-1")
 	require.Nil(t, err)
@@ -77,16 +76,14 @@ func TestSave_TypeEntity_Delete(t *testing.T) {
 
 	entity := makeTypeEntity(t, "type-del", "ToDelete")
 	entry := makeEntry(t, 1, entity)
-	err := s.Save(defaultHardState, []pb.Entry{entry}, defaultSnap)
-	require.Nil(t, err)
+	saveAndApply(t, s, []pb.Entry{entry})
 
-	_, err = s.Type("type-del")
+	_, err := s.Type("type-del")
 	require.Nil(t, err)
 
 	delEntity := cluster.NewDeleteTypeEntity("type-del")
 	delEntry := makeEntry(t, 2, delEntity)
-	err = s.Save(defaultHardState, []pb.Entry{delEntry}, defaultSnap)
-	require.Nil(t, err)
+	saveAndApply(t, s, []pb.Entry{delEntry})
 
 	_, err = s.Type("type-del")
 	require.NotNil(t, err)
@@ -101,8 +98,7 @@ func TestSave_MultipleTypeEntities(t *testing.T) {
 	e2 := makeTypeEntity(t, "t2", "Type2")
 	entry := makeEntry(t, 1, e1, e2)
 
-	err := s.Save(defaultHardState, []pb.Entry{entry}, defaultSnap)
-	require.Nil(t, err)
+	saveAndApply(t, s, []pb.Entry{entry})
 
 	cfgs, err := s.Types()
 	require.Nil(t, err)
@@ -117,17 +113,15 @@ func TestSave_SyncableIndexEntity(t *testing.T) {
 
 	userEntity := makeUserEntity()
 	userEntry := makeEntry(t, 1, userEntity)
-	err := s.Save(defaultHardState, []pb.Entry{userEntry}, defaultSnap)
-	require.Nil(t, err)
+	saveAndApply(t, s, []pb.Entry{userEntry})
 
 	siEntity := makeSyncableIndexEntity(t, "sync-1", 1)
 	siEntry := makeEntry(t, 2, siEntity)
-	err = s.Save(defaultHardState, []pb.Entry{siEntry}, defaultSnap)
-	require.Nil(t, err)
+	saveAndApply(t, s, []pb.Entry{siEntry})
 
 	// Reader with checkpoint at index 1 should skip the syncable index entry at 2
 	reader := s.Reader("sync-1")
-	_, _, err = reader.Read()
+	_, _, err := reader.Read()
 	require.Equal(t, io.EOF, err)
 }
 
@@ -140,8 +134,7 @@ func TestSave_UserDefinedEntity(t *testing.T) {
 	entity := makeUserEntity()
 	entry := makeEntry(t, 1, entity)
 
-	err := s.Save(defaultHardState, []pb.Entry{entry}, defaultSnap)
-	require.Nil(t, err)
+	saveAndApply(t, s, []pb.Entry{entry})
 
 	last, err := s.LastIndex()
 	require.Nil(t, err)
@@ -158,8 +151,7 @@ func TestSave_MixedEntities(t *testing.T) {
 	userEntity := makeUserEntity()
 	entry := makeEntry(t, 1, typeEntity, userEntity)
 
-	err := s.Save(defaultHardState, []pb.Entry{entry}, defaultSnap)
-	require.Nil(t, err)
+	saveAndApply(t, s, []pb.Entry{entry})
 
 	typ, err := s.Type("type-mix")
 	require.Nil(t, err)
@@ -183,8 +175,7 @@ func TestSave_ConfChangeEntry_SkipsEntityHandlers(t *testing.T) {
 		Data:  []byte("some conf change data"),
 	}
 
-	err := s.Save(defaultHardState, []pb.Entry{entry}, defaultSnap)
-	require.Nil(t, err)
+	saveAndApply(t, s, []pb.Entry{entry})
 
 	cfgs, err := s.Types()
 	require.Nil(t, err)
@@ -205,8 +196,7 @@ func TestSave_MultipleEntries(t *testing.T) {
 		makeEntry(t, 2, e2),
 	}
 
-	err := s.Save(defaultHardState, entries, defaultSnap)
-	require.Nil(t, err)
+	saveAndApply(t, s, entries)
 
 	cfgs, err := s.Types()
 	require.Nil(t, err)
@@ -239,8 +229,7 @@ func TestSave_DatabaseEntity(t *testing.T) {
 	require.Nil(t, err)
 
 	entry := makeEntry(t, 1, entity)
-	err = s.Save(defaultHardState, []pb.Entry{entry}, defaultSnap)
-	require.Nil(t, err)
+	saveAndApply(t, s, []pb.Entry{entry})
 
 	database, err := s.Database("db-1")
 	require.Nil(t, err)
@@ -275,8 +264,7 @@ func TestSave_SyncableEntity_SignalsChannel(t *testing.T) {
 	require.Nil(t, err)
 
 	entry := makeEntry(t, 1, entity)
-	err = s.Save(defaultHardState, []pb.Entry{entry}, defaultSnap)
-	require.Nil(t, err)
+	saveAndApply(t, s, []pb.Entry{entry})
 
 	received := <-syncCh
 	require.Equal(t, "sync-1", received.ID)
@@ -306,8 +294,7 @@ func TestSave_IngestableEntity_SignalsChannel(t *testing.T) {
 	require.Nil(t, err)
 
 	entry := makeEntry(t, 1, entity)
-	err = s.Save(defaultHardState, []pb.Entry{entry}, defaultSnap)
-	require.Nil(t, err)
+	saveAndApply(t, s, []pb.Entry{entry})
 
 	received := <-ingestCh
 	require.Equal(t, "ingest-1", received.ID)

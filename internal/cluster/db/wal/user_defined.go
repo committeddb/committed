@@ -9,6 +9,18 @@ import (
 	"github.com/philborlin/committed/internal/cluster"
 )
 
+// handleUserDefined records a time-series point for a user-defined entity.
+//
+// TODO: time.Now() makes apply non-deterministic in entry content. Two
+// consequences once the cluster is multi-node: followers and the leader
+// will compute different timestamps for the same entry, and a snapshot
+// install followed by replay would write a *new* timestamp. Today we are
+// single node and persist appliedIndex (see wal.Storage.ApplyCommitted) to
+// skip replay, so this is masked. The right fix is to add a Timestamp
+// field to the LogEntity protobuf so the proposer records the wall-clock
+// time once and every node reads the same value. Deferred from PR1 to keep
+// scope down — see .claude-scratch/tickets/save-does-double-duty.md (PR1
+// "Out of scope") for the reasoning.
 func (s *Storage) handleUserDefined(e *cluster.Entity) error {
 	return s.TimeSeriesStorage.InsertRows([]tstorage.Row{
 		{

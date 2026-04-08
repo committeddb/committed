@@ -331,6 +331,18 @@ func (ms *MemoryStorage) Save(st raftpb.HardState, ents []raftpb.Entry, snap raf
 	return err
 }
 
+// ApplyCommitted is a no-op for the test MemoryStorage. The raft_test
+// MemoryStorage is purposely a thin wrapper around etcd's raft.MemoryStorage
+// for testing the raft layer in isolation; there are no buckets to apply
+// to. AppliedIndex always returns 0 for the same reason.
+func (ms *MemoryStorage) ApplyCommitted(entry raftpb.Entry) error {
+	return nil
+}
+
+func (ms *MemoryStorage) AppliedIndex() uint64 {
+	return 0
+}
+
 // maybeAppendArgsForCallLocked must be called with stateMu held.
 func (ms *MemoryStorage) maybeAppendArgsForCallLocked(st raftpb.HardState, ents []raftpb.Entry, snap raftpb.Snapshot) {
 	normalEntry := false

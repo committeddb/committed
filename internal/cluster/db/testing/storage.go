@@ -45,6 +45,20 @@ func (ms *MemoryStorage) Save(st raftpb.HardState, ents []raftpb.Entry, snap raf
 	return ms.SetHardState(st)
 }
 
+// ApplyCommitted is a no-op for MemoryStorage. The in-memory test storage
+// has no buckets and no downstream channels to feed, so there is nothing to
+// apply. Tests that exercise the apply path use wal.Storage instead.
+func (ms *MemoryStorage) ApplyCommitted(entry raftpb.Entry) error {
+	return nil
+}
+
+// AppliedIndex always returns 0 for MemoryStorage. There is no apply step,
+// so there is no progress to report. Tests that depend on apply progress
+// use wal.Storage.
+func (ms *MemoryStorage) AppliedIndex() uint64 {
+	return 0
+}
+
 func (ms *MemoryStorage) maybeAppendArgsForCall(st raftpb.HardState, ents []raftpb.Entry, snap raftpb.Snapshot) {
 	normalEntry := false
 	for _, ent := range ents {

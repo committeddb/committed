@@ -23,8 +23,24 @@ func (s *Storage) handleSyncable(e *cluster.Entity) error {
 	}
 }
 
+// saveSyncable persists a syncable Configuration to bbolt and then notifies
+// the consumer channel. The channel send happens AFTER the bbolt Update
+// returns successfully — it must not happen inside the closure, because:
+//
+//  1. The unbuffered channel send would block while holding the bbolt
+//     writer lock, blocking all other writes against any bucket.
+//  2. If the tx commit failed *after* the send, the consumer would have
+//     been notified about state that doesn't exist on disk.
+//  3. The consumer (db.listenForSyncables) calls db.Sync, which can re-enter
+//     the proposal path; that would deadlock under the writer lock.
+//
+// Idempotency on restart depends on the persisted appliedIndex (see
+// wal.Storage.ApplyCommitted). Without it, replay would re-spawn a worker
+// for the same ID — which is a separate bug tracked in
+// .claude-scratch/tickets/worker-registry-by-id.md.
 func (s *Storage) saveSyncable(t *cluster.Configuration) error {
-	return s.keyValueStorage.Update(func(tx *bolt.Tx) error {
+	var syncable cluster.Syncable
+	err := s.keyValueStorage.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(syncableBucket)
 		if b == nil {
 			return ErrBucketMissing
@@ -34,23 +50,28 @@ func (s *Storage) saveSyncable(t *cluster.Configuration) error {
 			return fmt.Errorf("[wal.syncable] marshal: %w", err)
 		}
 
-		_, syncable, err := s.parser.ParseSyncable(t.MimeType, t.Data, s)
+		_, parsed, err := s.parser.ParseSyncable(t.MimeType, t.Data, s)
 		if err != nil {
 			return fmt.Errorf("[wal.syncable] parseSyncable: %w", err)
 		}
+		syncable = parsed
 
-		err = b.Put([]byte(t.ID), bs)
-		if err != nil {
+		if err := b.Put([]byte(t.ID), bs); err != nil {
 			return fmt.Errorf("[wal.syncable] put: %w", err)
-		}
-
-		fmt.Printf("[wal.syncable] Sending to channel %v\n", s.sync)
-		if s.sync != nil {
-			s.sync <- &db.SyncableWithID{ID: t.ID, Syncable: syncable}
 		}
 
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+
+	if s.sync != nil {
+		fmt.Printf("[wal.syncable] Sending to channel %v\n", s.sync)
+		s.sync <- &db.SyncableWithID{ID: t.ID, Syncable: syncable}
+	}
+
+	return nil
 }
 
 func (s *Storage) deleteSyncable(id []byte) error {

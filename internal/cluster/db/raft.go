@@ -185,6 +185,12 @@ func (n *Raft) serveChannels() {
 			// fmt.Printf("[raft] ready and about to save to storage\n")
 			n.leaderState.SetLeader(n.node.Status().RaftState == raft.StateLeader)
 
+			// Save persists the new entries durably. It does NOT apply them
+			// to bucket state — that happens via ApplyCommitted below, only
+			// on rd.CommittedEntries. Calling Save with rd.Entries and apply
+			// with rd.CommittedEntries is required by the etcd raft contract;
+			// rd.Entries may include uncommitted entries on a follower, so
+			// applying them to application state would diverge the cluster.
 			err := n.storage.Save(rd.HardState, rd.Entries, rd.Snapshot)
 			if err != nil {
 				fmt.Printf("[raft] storage save: %v\n", err)
@@ -195,6 +201,16 @@ func (n *Raft) serveChannels() {
 				n.processSnapshot(rd.Snapshot)
 			}
 			for _, entry := range rd.CommittedEntries {
+				// Apply MUST complete before Advance() per the etcd raft
+				// contract. Apply errors are crash-fatal: continuing past a
+				// half-applied entry diverges the state machine, retrying
+				// risks masking programming bugs, and disk failures leave
+				// the node inconsistent in a way that's worse to keep
+				// running than to crash. (Same posture etcd's raftexample
+				// takes.)
+				if err := n.storage.ApplyCommitted(entry); err != nil {
+					n.logger.Fatal("apply committed entry", zap.Uint64("index", entry.Index), zap.Error(err))
+				}
 				n.processCommittedEntry(entry)
 				if entry.Type == raftpb.EntryConfChange {
 					var cc raftpb.ConfChange
@@ -272,7 +288,17 @@ func (n *Raft) serveRaft() {
 }
 
 func (n *Raft) processSnapshot(ms raftpb.Snapshot) {
-	// Nothing to do yet
+	// TODO: Snapshot install must:
+	//   1. Restore application state (BoltDB buckets, time series) from
+	//      snap.Data.
+	//   2. Bump Storage's appliedIndex to snap.Metadata.Index — otherwise
+	//      ApplyCommitted will re-process every committed entry from
+	//      firstIndex up to that point on the next Ready cycle.
+	// Today snapshots are a no-op (single-node, no follower bringup),
+	// so we get away with leaving this empty. ApplyCommitted's
+	// "skip if entry.Index <= appliedIndex" guard means once snapshot
+	// install lands, the only correctness-critical step here is to set
+	// appliedIndex to snap.Metadata.Index.
 }
 
 func (n *Raft) processCommittedEntry(e raftpb.Entry) {

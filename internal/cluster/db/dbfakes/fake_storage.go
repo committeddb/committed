@@ -11,6 +11,27 @@ import (
 )
 
 type FakeStorage struct {
+	AppliedIndexStub        func() uint64
+	appliedIndexMutex       sync.RWMutex
+	appliedIndexArgsForCall []struct {
+	}
+	appliedIndexReturns struct {
+		result1 uint64
+	}
+	appliedIndexReturnsOnCall map[int]struct {
+		result1 uint64
+	}
+	ApplyCommittedStub        func(raftpb.Entry) error
+	applyCommittedMutex       sync.RWMutex
+	applyCommittedArgsForCall []struct {
+		arg1 raftpb.Entry
+	}
+	applyCommittedReturns struct {
+		result1 error
+	}
+	applyCommittedReturnsOnCall map[int]struct {
+		result1 error
+	}
 	CloseStub        func() error
 	closeMutex       sync.RWMutex
 	closeArgsForCall []struct {
@@ -236,6 +257,120 @@ type FakeStorage struct {
 	}
 	invocations      map[string][][]interface{}
 	invocationsMutex sync.RWMutex
+}
+
+func (fake *FakeStorage) AppliedIndex() uint64 {
+	fake.appliedIndexMutex.Lock()
+	ret, specificReturn := fake.appliedIndexReturnsOnCall[len(fake.appliedIndexArgsForCall)]
+	fake.appliedIndexArgsForCall = append(fake.appliedIndexArgsForCall, struct {
+	}{})
+	stub := fake.AppliedIndexStub
+	fakeReturns := fake.appliedIndexReturns
+	fake.recordInvocation("AppliedIndex", []interface{}{})
+	fake.appliedIndexMutex.Unlock()
+	if stub != nil {
+		return stub()
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeStorage) AppliedIndexCallCount() int {
+	fake.appliedIndexMutex.RLock()
+	defer fake.appliedIndexMutex.RUnlock()
+	return len(fake.appliedIndexArgsForCall)
+}
+
+func (fake *FakeStorage) AppliedIndexCalls(stub func() uint64) {
+	fake.appliedIndexMutex.Lock()
+	defer fake.appliedIndexMutex.Unlock()
+	fake.AppliedIndexStub = stub
+}
+
+func (fake *FakeStorage) AppliedIndexReturns(result1 uint64) {
+	fake.appliedIndexMutex.Lock()
+	defer fake.appliedIndexMutex.Unlock()
+	fake.AppliedIndexStub = nil
+	fake.appliedIndexReturns = struct {
+		result1 uint64
+	}{result1}
+}
+
+func (fake *FakeStorage) AppliedIndexReturnsOnCall(i int, result1 uint64) {
+	fake.appliedIndexMutex.Lock()
+	defer fake.appliedIndexMutex.Unlock()
+	fake.AppliedIndexStub = nil
+	if fake.appliedIndexReturnsOnCall == nil {
+		fake.appliedIndexReturnsOnCall = make(map[int]struct {
+			result1 uint64
+		})
+	}
+	fake.appliedIndexReturnsOnCall[i] = struct {
+		result1 uint64
+	}{result1}
+}
+
+func (fake *FakeStorage) ApplyCommitted(arg1 raftpb.Entry) error {
+	fake.applyCommittedMutex.Lock()
+	ret, specificReturn := fake.applyCommittedReturnsOnCall[len(fake.applyCommittedArgsForCall)]
+	fake.applyCommittedArgsForCall = append(fake.applyCommittedArgsForCall, struct {
+		arg1 raftpb.Entry
+	}{arg1})
+	stub := fake.ApplyCommittedStub
+	fakeReturns := fake.applyCommittedReturns
+	fake.recordInvocation("ApplyCommitted", []interface{}{arg1})
+	fake.applyCommittedMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeStorage) ApplyCommittedCallCount() int {
+	fake.applyCommittedMutex.RLock()
+	defer fake.applyCommittedMutex.RUnlock()
+	return len(fake.applyCommittedArgsForCall)
+}
+
+func (fake *FakeStorage) ApplyCommittedCalls(stub func(raftpb.Entry) error) {
+	fake.applyCommittedMutex.Lock()
+	defer fake.applyCommittedMutex.Unlock()
+	fake.ApplyCommittedStub = stub
+}
+
+func (fake *FakeStorage) ApplyCommittedArgsForCall(i int) raftpb.Entry {
+	fake.applyCommittedMutex.RLock()
+	defer fake.applyCommittedMutex.RUnlock()
+	argsForCall := fake.applyCommittedArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeStorage) ApplyCommittedReturns(result1 error) {
+	fake.applyCommittedMutex.Lock()
+	defer fake.applyCommittedMutex.Unlock()
+	fake.ApplyCommittedStub = nil
+	fake.applyCommittedReturns = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *FakeStorage) ApplyCommittedReturnsOnCall(i int, result1 error) {
+	fake.applyCommittedMutex.Lock()
+	defer fake.applyCommittedMutex.Unlock()
+	fake.ApplyCommittedStub = nil
+	if fake.applyCommittedReturnsOnCall == nil {
+		fake.applyCommittedReturnsOnCall = make(map[int]struct {
+			result1 error
+		})
+	}
+	fake.applyCommittedReturnsOnCall[i] = struct {
+		result1 error
+	}{result1}
 }
 
 func (fake *FakeStorage) Close() error {
@@ -1320,6 +1455,10 @@ func (fake *FakeStorage) TypesReturnsOnCall(i int, result1 []*cluster.Configurat
 func (fake *FakeStorage) Invocations() map[string][][]interface{} {
 	fake.invocationsMutex.RLock()
 	defer fake.invocationsMutex.RUnlock()
+	fake.appliedIndexMutex.RLock()
+	defer fake.appliedIndexMutex.RUnlock()
+	fake.applyCommittedMutex.RLock()
+	defer fake.applyCommittedMutex.RUnlock()
 	fake.closeMutex.RLock()
 	defer fake.closeMutex.RUnlock()
 	fake.databaseMutex.RLock()
