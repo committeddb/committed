@@ -8,15 +8,40 @@ import (
 	"github.com/philborlin/committed/internal/cluster"
 )
 
-func (db *DB) Sync(ctx context.Context, id string, s cluster.Syncable) error {
-	// State Machine
-	// leader -> leader - keep syncing
-	// leader -> not-leader - stop syncing
-	// not-leader -> not-leader - keep not-syncing
-	// not-leader -> leader - start syncing
+// Sync registers a Syncable to run as a worker for the given ID. See
+// db.Ingest for the registry semantics — Sync is the syncable-side
+// counterpart and behaves identically: a duplicate call for the same
+// ID cancels and replaces the existing worker, the worker context is
+// derived from db.ctx (not the caller's ctx), and db.Close drains
+// every registered worker before tearing the raft layer down.
+func (db *DB) Sync(_ context.Context, id string, s cluster.Syncable) error {
+	db.workersMu.Lock()
+	// See db.Ingest for the rationale behind the loop. tl;dr: a naive
+	// check-cancel-wait-install races against concurrent replaces of
+	// the same id and orphans workers. The loop re-checks the slot
+	// after each wait, walking through any new entries that slipped in.
+	for {
+		existing, ok := db.syncWorkers[id]
+		if !ok {
+			break
+		}
+		existing.cancel()
+		db.workersMu.Unlock()
+		<-existing.done
+		db.workersMu.Lock()
+		if db.syncWorkers[id] == existing {
+			delete(db.syncWorkers, id)
+		}
+	}
+
+	workerCtx, cancel := context.WithCancel(db.ctx)
+	handle := &workerHandle{cancel: cancel, done: make(chan struct{})}
+	db.syncWorkers[id] = handle
+	db.workersMu.Unlock()
 
 	go func() {
-		_ = db.sync(ctx, id, s)
+		defer close(handle.done)
+		_ = db.sync(workerCtx, id, s)
 	}()
 
 	return nil
@@ -53,7 +78,15 @@ func (db *DB) sync(ctx context.Context, id string, s cluster.Syncable) error {
 					fmt.Printf("[db.DB] read: %v\n", err)
 				}
 
-				shouldSnapshot, err := s.Sync(db.ctx, p)
+				// Pass the worker's ctx (not db.ctx) so a replace or
+				// Close-driven cancellation propagates into the user's
+				// Sync implementation. Without this, a slow Sync keeps
+				// the worker alive past the registry replace, leaving
+				// the new worker waiting on the old one's done channel.
+				// Sync operations are expected to be idempotent (the
+				// SQL dialect uses upsert), so the replacement worker
+				// re-syncing the same proposal after a cancel is safe.
+				shouldSnapshot, err := s.Sync(ctx, p)
 				if err != nil {
 					// TODO Handle error
 					fmt.Printf("[db.DB] sync: %v\n", err)

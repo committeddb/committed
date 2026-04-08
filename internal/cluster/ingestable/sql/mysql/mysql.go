@@ -28,6 +28,7 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 	}
 
 	handler := &MySQLEventHandler{
+		ctx:          ctx,
 		config:       config,
 		canal:        c,
 		proposalChan: pr,
@@ -60,6 +61,11 @@ func (m *MySQLDialect) Close() error {
 
 type MySQLEventHandler struct {
 	canal.DummyEventHandler
+	// ctx is the Ingest caller's context. The OnRow / OnPosSynced
+	// callbacks use it to abort their channel sends if the worker is
+	// canceled mid-emit, otherwise the canal goroutine would leak
+	// blocked on a no-receiver channel.
+	ctx          context.Context
 	config       *sql.Config
 	canal        *canal.Canal
 	proposalChan chan<- *cluster.Proposal
@@ -114,7 +120,11 @@ func (h *MySQLEventHandler) OnRow(e *canal.RowsEvent) error {
 			}},
 		}
 
-		h.proposalChan <- p
+		select {
+		case h.proposalChan <- p:
+		case <-h.ctx.Done():
+			return h.ctx.Err()
+		}
 
 		fmt.Printf("[OnRow] [%v] Action: [%s] Rows:[%v]\n", e.Table, e.Action, e.Rows)
 	}
@@ -132,7 +142,11 @@ func (h *MySQLEventHandler) OnPosSynced(header *replication.EventHeader, pos mys
 			return err
 		}
 
-		h.positionChan <- bs
+		select {
+		case h.positionChan <- bs:
+		case <-h.ctx.Done():
+			return h.ctx.Err()
+		}
 		fmt.Printf("[OnPosSynced] Header: [%v] pos:[%v]\n", header, pos)
 	}
 

@@ -6,7 +6,7 @@ Committed is a distributed commit log database built on etcd Raft consensus. It 
 
 ## Tech Stack
 
-- **Backend**: Go 1.24 (Raft consensus, Chi HTTP router, Protobuf serialization, Zap logging)
+- **Backend**: Go 1.26.2 (Raft consensus, Chi HTTP router, Protobuf serialization, Zap logging)
 - **Frontend**: React 18 + TypeScript 5.6, Vite, Ant Design, TanStack Router (file-based) + Query, Chart.js
 - **Storage**: Write-ahead log (tidwall/wal), BoltDB, in-memory time series (tstorage)
 - **Databases**: MySQL (go-sql-driver), PostgreSQL (pgx)

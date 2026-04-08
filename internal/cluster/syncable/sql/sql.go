@@ -47,7 +47,11 @@ func (c *Syncable) Init() error {
 }
 
 func (c *Syncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.ShouldSnapshot, error) {
-	tx, err := c.db.Begin()
+	// BeginTx / ExecContext let cancellation actually interrupt the
+	// transaction. Without this, a canceled worker would have to wait
+	// for the current Sync to drain naturally before it could exit,
+	// which on a slow destination database can be many seconds.
+	tx, err := c.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
 	}
@@ -78,7 +82,7 @@ func (c *Syncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.Shoul
 		// TODO Do all dbs need this? Should this be a dialect setting?
 		allValues := append(values, values...)
 
-		_, err = tx.Stmt(c.insert.Stmt).Exec(allValues...)
+		_, err = tx.StmtContext(ctx, c.insert.Stmt).ExecContext(ctx, allValues...)
 		if err != nil {
 			return false, fmt.Errorf("[sql.Sync] tx.Stmt [%s]: %w", c.insert.SQL, err)
 		}

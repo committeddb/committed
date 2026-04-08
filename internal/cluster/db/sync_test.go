@@ -67,47 +67,97 @@ func TestResumeSync(t *testing.T) {
 
 			size := len(tc.inputs)
 
+			// First sync round: propose ps and let syncable1 consume them.
+			// MemorySyncable cancels the test's local ctx when count == size,
+			// which is the test's signal to advance — NOT a worker stop. After
+			// PR3 the worker context is db.ctx-derived so the caller's ctx is
+			// just an out-of-band wakeup channel for the test.
 			ps := createProposalsAndProposeThem(t, db, tc.inputs)
-			ctx, cancel := context.WithCancel(context.Background())
-			syncable := NewSyncable(size, cancel)
+			ctx1, cancel1 := context.WithCancel(context.Background())
+			syncable1 := NewSyncable(size, cancel1)
+			_ = db.Sync(ctx1, id, syncable1)
+			<-ctx1.Done()
 
-			_ = db.Sync(ctx, id, syncable)
-			// Sync goroutine cancels ctx once it has consumed `size`
-			// proposals; <-ctx.Done() replaces the old <-db.CommitC pump.
-			<-ctx.Done()
-
-			inputs2 := modifyInputs(tc.inputs)
-
-			ps2 := createProposalsAndProposeThem(t, db, inputs2)
-			ctx, cancel = context.WithCancel(context.Background())
-			syncable = NewSyncable(size, cancel)
-
+			// Second sync round: install syncable2 BEFORE proposing the new
+			// inputs. Because db.Sync now uses replace semantics, this call
+			// cancels the first worker, waits for it to drain, and starts a
+			// fresh worker that begins reading at storage.indexes[id]+1.
+			// We bump indexes[id] to lastIndex(ps) first so the replacement
+			// worker starts past the original ps proposals, exactly as the
+			// pre-PR3 version did via worker-context cancellation.
 			storage.indexes[id] = getLastIndex(storage, ps)
+			ctx2, cancel2 := context.WithCancel(context.Background())
+			syncable2 := NewSyncable(size, cancel2)
+			_ = db.Sync(ctx2, id, syncable2)
 
-			_ = db.Sync(ctx, id, syncable)
-			<-ctx.Done()
+			// Now propose the new inputs. The replacement worker is already
+			// running and will pick them up from the persisted index.
+			inputs2 := modifyInputs(tc.inputs)
+			ps2 := createProposalsAndProposeThem(t, db, inputs2)
+			<-ctx2.Done()
 
-			require.Equal(t, size, syncable.Count())
+			require.Equal(t, size, syncable2.Count())
 
-			for i, p := range storage.Proposals() {
-				fmt.Printf("Testing [%v] - %v", i, p)
-				if i < size {
-					require.False(t, cluster.IsSystem(p.Entities[0].Type.ID))
-					require.Equal(t, ps[i%size], p)
-				} else if i >= size*2 && i < size*3 {
-					require.False(t, cluster.IsSystem(p.Entities[0].Type.ID))
-					require.Equal(t, ps2[i%size], p)
-				} else {
-					require.True(t, cluster.IsSystem(p.Entities[0].Type.ID))
+			// Verify the wal contains exactly the proposals we proposed
+			// (ps + ps2) plus some number of system SyncableIndex entries.
+			// The exact wal layout depends on raft Ready timing for the
+			// fire-and-forget SyncableIndex bumps and is intentionally not
+			// asserted: what matters is that ps and ps2 are present as
+			// normal entries and that everything else is a system entry.
+			normal := 0
+			seenPs := 0
+			seenPs2 := 0
+			for _, p := range storage.Proposals() {
+				if cluster.IsSystem(p.Entities[0].Type.ID) {
+					continue
+				}
+				normal++
+				switch {
+				case containsProposal(ps, p):
+					seenPs++
+				case containsProposal(ps2, p):
+					seenPs2++
+				default:
+					t.Fatalf("unexpected non-system proposal in wal: %v", p)
 				}
 			}
+			require.Equal(t, len(ps), seenPs, "all ps proposals should appear in wal")
+			require.Equal(t, len(ps2), seenPs2, "all ps2 proposals should appear in wal")
+			require.Equal(t, len(ps)+len(ps2), normal, "no extra normal proposals")
 
-			for i, got := range syncable.Proposals() {
+			for i, got := range syncable2.Proposals() {
 				require.False(t, cluster.IsSystem(got.Entities[0].Type.ID))
 				require.Equal(t, ps2[i], got)
 			}
 		})
 	}
+}
+
+// containsProposal reports whether `target` is byte-equivalent to any
+// element of `ps`. Used by TestResumeSync to verify the wal contains
+// the expected proposals without depending on their exact wal positions.
+func containsProposal(ps []*cluster.Proposal, target *cluster.Proposal) bool {
+	for _, p := range ps {
+		if proposalEqual(p, target) {
+			return true
+		}
+	}
+	return false
+}
+
+func proposalEqual(a, b *cluster.Proposal) bool {
+	if len(a.Entities) != len(b.Entities) {
+		return false
+	}
+	for i := range a.Entities {
+		if string(a.Entities[i].Data) != string(b.Entities[i].Data) {
+			return false
+		}
+		if string(a.Entities[i].Key) != string(b.Entities[i].Key) {
+			return false
+		}
+	}
+	return true
 }
 
 func TestSyncWithStateChanges(t *testing.T) {

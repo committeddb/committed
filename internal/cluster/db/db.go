@@ -35,6 +35,29 @@ type DB struct {
 	waitersMu     sync.Mutex
 	waiters       map[uint64]chan error
 	nextRequestID atomic.Uint64
+
+	// workersMu guards syncWorkers / ingestWorkers. The two maps key
+	// running per-ID worker goroutines (one per syncable / ingestable
+	// ID), so that a second db.Sync / db.Ingest call for the same ID
+	// cancels and replaces the existing worker instead of spawning a
+	// duplicate that would race with the first over the same Reader,
+	// Position, and proposeC slot. db.Close cancels every entry and
+	// waits for the workers' done channels.
+	workersMu     sync.Mutex
+	syncWorkers   map[string]*workerHandle
+	ingestWorkers map[string]*workerHandle
+}
+
+// workerHandle is the registry entry for a per-ID Sync or Ingest
+// goroutine. cancel terminates the worker's context; done is closed
+// by the worker itself just before it returns. Replace and Close
+// both wait on done so they can guarantee the previous worker has
+// fully exited (released its Reader, finished any in-flight Propose,
+// returned from the user-supplied Sync/Ingest callback) before
+// proceeding.
+type workerHandle struct {
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithID, ingest <-chan *IngestableWithID, opts ...Option) *DB {
@@ -56,13 +79,15 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 	ctx, cancelSyncs := context.WithCancel(context.Background())
 
 	db := &DB{
-		proposeC:    proposeC,
-		confChangeC: confChangeC,
-		storage:     s,
-		ctx:         ctx,
-		cancelSyncs: cancelSyncs,
-		parser:      p,
-		waiters:     make(map[uint64]chan error),
+		proposeC:      proposeC,
+		confChangeC:   confChangeC,
+		storage:       s,
+		ctx:           ctx,
+		cancelSyncs:   cancelSyncs,
+		parser:        p,
+		waiters:       make(map[uint64]chan error),
+		syncWorkers:   make(map[string]*workerHandle),
+		ingestWorkers: make(map[string]*workerHandle),
 	}
 
 	// The applied notifier is wired into the raft Ready loop. After each
@@ -240,23 +265,56 @@ func (db *DB) Type(id string) (*cluster.Type, error) {
 }
 
 // Close tears down the DB. Order matters:
-//  1. Cancel db.ctx so any worker (or in-flight Propose) bails out via
-//     <-db.ctx.Done() before we tear raft down. Without this, a worker
-//     mid-Propose would be racing the raft shutdown and either hit a
-//     send-on-closed-channel panic or hang forever waiting for a reply
-//     that no one will ever send.
-//  2. Stop the raft layer, which signals closeC (telling serveChannels'
+//
+//  1. Cancel db.ctx via cancelSyncs FIRST. Every worker's context is
+//     derived from db.ctx (see db.Sync / db.Ingest), so this propagates
+//     into every worker, every inner Ingest goroutine, and every
+//     in-flight db.Propose / proposeFireAndForget select. Crucially,
+//     proposeFireAndForget's select only watches db.ctx (not the
+//     worker ctx), so if we drained workers BEFORE canceling db.ctx
+//     and any worker were stuck in a position/index bump while raft
+//     was wedged (quorum loss, slow Ready loop), the drain would hang
+//     forever. Cancel-first guarantees workers can always reach exit.
+//  2. Snapshot the worker registry under workersMu and wait on every
+//     handle's done channel. By now the workers are already racing
+//     toward exit (their contexts are canceled); the drain is just
+//     waiting for them to finish unwinding so we know the user-supplied
+//     Sync/Ingest callbacks have fully torn down before we touch raft.
+//     We still call h.cancel() in the snapshot loop — it's a no-op
+//     (the parent context already canceled the child), but explicit
+//     and self-documenting.
+//  3. Stop the raft layer, which signals closeC (telling serveChannels'
 //     proposeC reader to exit) and waits for serveChannels to actually
-//     stop. Notably we do NOT close db.proposeC ourselves: the raft
-//     reader is closeC-driven, and a worker that hasn't yet noticed
-//     db.ctx cancellation could otherwise panic on send.
+//     stop. We do NOT close db.proposeC ourselves: the raft reader is
+//     closeC-driven, and a worker that hasn't yet noticed db.ctx
+//     cancellation could otherwise panic on send.
 //
 // db.Close is idempotent: cancelSyncs is a CancelFunc (safe to call
-// multiple times) and raft.Close uses a sync.Once. This subsumes PR4's
-// "db.Close not idempotent" item, which is now folded in here.
+// multiple times), the registry drain is a no-op on the second call
+// (the maps are empty after the first), and raft.Close uses sync.Once.
 func (db *DB) Close() error {
 	fmt.Printf("Closing db\n")
+
 	db.cancelSyncs()
+
+	db.workersMu.Lock()
+	handles := make([]*workerHandle, 0, len(db.ingestWorkers)+len(db.syncWorkers))
+	for id, h := range db.ingestWorkers {
+		handles = append(handles, h)
+		h.cancel()
+		delete(db.ingestWorkers, id)
+	}
+	for id, h := range db.syncWorkers {
+		handles = append(handles, h)
+		h.cancel()
+		delete(db.syncWorkers, id)
+	}
+	db.workersMu.Unlock()
+
+	for _, h := range handles {
+		<-h.done
+	}
+
 	return db.raft.Close()
 }
 
