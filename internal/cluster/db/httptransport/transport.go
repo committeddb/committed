@@ -69,6 +69,21 @@ func (t *HttpTransport) Start(stopC <-chan struct{}) error {
 		}
 	}
 
+	// An empty local-peer URL means "do not bind a TCP listener". This is
+	// the right shape for single-node tests: there are no peers to accept
+	// connections from, so taking a port (and the cross-package collision
+	// risk that comes with it) buys us nothing. The transport can still
+	// send messages to AddPeer'd peers via t.transport.Send, but it cannot
+	// accept incoming ones — which is fine when there are no peers.
+	//
+	// We still block until stopC is closed so callers (Raft.serveRaft) can
+	// distinguish "asked to stop" from "the listener exploded" using their
+	// existing shutdown logic.
+	if rawURL == "" {
+		<-stopC
+		return nil
+	}
+
 	url, err := url.Parse(rawURL)
 	if err != nil {
 		log.Fatalf("raftexample: Failed parsing URL (%v)", err)

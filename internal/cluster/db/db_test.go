@@ -211,9 +211,11 @@ const testTickInterval = 1 * time.Millisecond
 
 func createDBWithStorage(s db.Storage) *DB {
 	id := uint64(1)
-	url := fmt.Sprintf("http://127.0.0.1:%d", 12379)
+	// Empty local-peer URL skips the rafthttp listener bind. Single-node
+	// tests have no peers to receive from, so taking a port (and the
+	// cross-package collision risk that comes with it) buys us nothing.
 	peers := make(db.Peers)
-	peers[id] = url
+	peers[id] = ""
 	parser := parser.New()
 
 	d := db.New(id, peers, s, parser, nil, nil, db.WithTickInterval(testTickInterval))

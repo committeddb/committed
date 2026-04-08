@@ -29,9 +29,26 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestEndToEnd verifies the full HTTP → raft → syncable → destination database
+// pipeline: data submitted via the HTTP /proposal endpoint must eventually
+// appear in a configured destination database after a syncable is wired up.
+//
+// Intermediate raft-log inspection that this test used to do has moved to
+// dedicated unit tests:
+//
+//   - HTTP propose round-trip (TypeID/Key/Data passing through the handler) is
+//     covered by handler_test.go:TestAddProposal_Success.
+//   - Raft proposal byte-equality is covered by db_test.go:TestDBPropose.
+//   - The "ProposeIngestable wires up the ingest goroutine and its proposals
+//     reach raft" wiring is covered by
+//     wal/ingestable_test.go:TestProposeIngestable_StartsIngestionWiring.
+//
+// The two waitFor() calls are workarounds for the Save-does-double-duty issue
+// (see .claude-scratch/tickets/save-does-double-duty.md): the HTTP handlers
+// for AddProposal and AddSyncable read from storage synchronously, which
+// races against the prior raft entry being applied to the storage buckets.
+// Once that ticket is resolved these waits become unnecessary.
 func TestEndToEnd(t *testing.T) {
-	sleepTime := 2 * time.Second
-
 	dir, err := os.MkdirTemp("", "CommitteddbE2ETest-*")
 	require.Nil(t, err)
 	defer os.RemoveAll(dir)
@@ -46,46 +63,38 @@ func TestEndToEnd(t *testing.T) {
 	h := http.New(db)
 
 	typeID := addType(t, h, "foo")
-	time.Sleep(sleepTime)
+	addParsers(t, db, dialect, typeID)
 
-	cp1 := addParsers(t, db, dialect, typeID)
+	// AddProposal's handler calls c.Type(typeID); wait until the AddType
+	// entry has been applied to the type bucket.
+	waitFor(t, "type to be queryable", func() bool {
+		_, err := db.Type(typeID)
+		return err == nil
+	})
 
 	p1 := createProposal(typeID, "key", "one")
 	propose(t, h, p1.p)
-	time.Sleep(sleepTime)
-	ps, err := db.Ents()
-	require.Nil(t, err)
-	require.Equal(t, 2, len(ps)) // AddType + ProposedProposal
-	require.Equal(t, 1, len(ps[1].Entities))
-	require.Equal(t, p1.p.Entities[0].TypeID, ps[1].Entities[0].Type.ID)
-	require.Equal(t, p1.p.Entities[0].Key, string(ps[1].Entities[0].Key))
-	require.Equal(t, []byte(p1.p.Entities[0].Data), ps[1].Entities[0].Data)
-
 	_ = addIngestable(t, h, "")
-	time.Sleep(sleepTime)
-
-	ps, err = db.Ents()
-	require.Nil(t, err)
-	require.Equal(t, 4, len(ps)) // AddType + ProposedProposal + Configuration + IngestedProposal
-	require.Equal(t, 1, len(ps[3].Entities))
-	require.Equal(t, cp1.Entities[0].Type.ID, ps[3].Entities[0].Type.ID)
-	require.Equal(t, cp1.Entities[0].Key, ps[3].Entities[0].Key)
-	require.Equal(t, cp1.Entities[0].Data, ps[3].Entities[0].Data)
-
 	databaseID := addDatabase(t, h, "go-mysql-server")
-	time.Sleep(sleepTime)
+
+	// AddSyncable's parser calls storage.Database(databaseID); wait until
+	// the database Configuration has been applied to the database bucket.
+	waitFor(t, "database to be queryable", func() bool {
+		_, err := storage.Database(databaseID)
+		return err == nil
+	})
 
 	addSyncable(t, h, typeID, databaseID)
-	time.Sleep(sleepTime)
 
 	view(t, storage, databaseID, p1, connectionString)
 
-	// Do a second proposal
-	// Shutdown and restart the cluster
-	// Add a third propoal
-	// Check all of the proposals are still saved
-	// Check the database to make sure the other proposals synced propoerly
-	// Ingest something else to make sure the ingestable restarts and keeps position
+	// TODO Restart/persistence coverage:
+	// - Do a second proposal
+	// - Shutdown and restart the cluster
+	// - Add a third proposal
+	// - Check all of the proposals are still saved
+	// - Check the database to make sure the other proposals synced properly
+	// - Ingest something else to make sure the ingestable restarts and keeps position
 }
 
 type dbs []sqle.Database
@@ -124,32 +133,26 @@ type Proposal struct {
 	p   *http.AddProposalRequest
 }
 
-func (p *Proposal) toClusterProposal(t *testing.T, db *test.DB) *cluster.Proposal {
-	proposal := &cluster.Proposal{}
-	for _, e := range p.p.Entities {
-		tipe, err := db.Type(e.TypeID)
-		require.Nil(t, err)
-		proposal.Entities = append(proposal.Entities, &cluster.Entity{
-			Type: tipe,
-			Key:  []byte(e.Key),
-			Data: e.Data,
-		})
-	}
-	return proposal
-}
-
-func addParsers(t *testing.T, db *test.DB, dialect sql.Dialect, typeID string) *cluster.Proposal {
+func addParsers(t *testing.T, db *test.DB, dialect sql.Dialect, typeID string) {
 	ds := make(map[string]sql.Dialect)
 	ds["go-mysql-server"] = dialect
 	sqlParser := &sql.DBParser{Dialects: ds}
 	db.AddDatabaseParser("sql", sqlParser)
 	db.AddSyncableParser("sql", &sql.SyncableParser{})
 
-	cp1 := createProposal(typeID, "key", "one").toClusterProposal(t, db)
-	ingestableProposals := []*cluster.Proposal{cp1}
-	db.AddIngestableParser("proposal", ingestable.NewProposalIngestableParser(ingestableProposals))
-
-	return cp1
+	// Build the seed proposal the ProposalIngestable will replay. We
+	// construct cluster.Type directly from typeID rather than calling
+	// db.Type(), which would race against wal storage applying the AddType
+	// entry to its bucket. The syncable only inspects Type.ID for topic
+	// matching, so a minimal Type is sufficient here.
+	seed := &cluster.Proposal{Entities: []*cluster.Entity{{
+		Type: &cluster.Type{ID: typeID},
+		Key:  []byte("key"),
+		Data: []byte(`{"key":"key","one":"one"}`),
+	}}}
+	db.AddIngestableParser("proposal", ingestable.NewProposalIngestableParser(
+		[]*cluster.Proposal{seed},
+	))
 }
 
 func view(t *testing.T, s db.Storage, databaseID string, p *Proposal, connectionString string) {
@@ -158,6 +161,17 @@ func view(t *testing.T, s db.Storage, databaseID string, p *Proposal, connection
 	db := database.(*sql.DB).DB
 	_, err = db.Exec("USE " + connectionString)
 	require.Nil(t, err)
+
+	// The syncable applies asynchronously after addSyncable returns, so poll
+	// until the row appears (or the deadline expires).
+	waitFor(t, "syncable to write row", func() bool {
+		var pk string
+		err := db.QueryRow(
+			"SELECT pk FROM "+connectionString+".foo WHERE pk = ?", p.key,
+		).Scan(&pk)
+		return err == nil
+	})
+
 	rows, err := db.Query("SELECT pk, one FROM "+connectionString+".foo WHERE pk = ?", p.key)
 	require.Nil(t, err)
 	defer rows.Close()
@@ -178,6 +192,23 @@ func view(t *testing.T, s db.Storage, databaseID string, p *Proposal, connection
 	if err != nil {
 		require.Nil(t, err)
 	}
+}
+
+// waitFor polls check at 5ms intervals for up to 500ms. With Raft's tick
+// interval already lowered to 1ms in tests (see testTickInterval in
+// db/testing/db.go), each propose→commit→apply cycle takes a few milliseconds,
+// so 500ms is roughly 15× the realistic worst case while still tight enough
+// to flag a real regression.
+func waitFor(t *testing.T, what string, check func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if check() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
 }
 
 func addDatabase(t *testing.T, h *http.HTTP, dialect string) string {

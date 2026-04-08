@@ -21,9 +21,13 @@ func CreateDB() *DB {
 
 func CreateDBWithStorage(s db.Storage, parser *parser.Parser, sync <-chan *db.SyncableWithID, ingest <-chan *db.IngestableWithID) *DB {
 	id := uint64(1)
-	url := fmt.Sprintf("http://127.0.0.1:%d", 12379)
+	// An empty local-peer URL tells httptransport.HttpTransport to skip
+	// binding a TCP listener, since single-node tests have no peers and
+	// there is nothing to receive. This avoids the historical port-12379
+	// collision when multiple test packages run in parallel under
+	// `go test ./...`.
 	peers := make(db.Peers)
-	peers[id] = url
+	peers[id] = ""
 
 	d := db.New(id, peers, s, parser, sync, ingest, db.WithTickInterval(testTickInterval))
 	return &DB{d, s, peers, id}

@@ -327,6 +327,7 @@ func TestAddProposal_Success(t *testing.T) {
 	require.Equal(t, 1, len(p.Entities))
 	require.Equal(t, "t1", p.Entities[0].Type.ID)
 	require.Equal(t, "k1", string(p.Entities[0].Key))
+	require.JSONEq(t, `{"foo": "bar"}`, string(p.Entities[0].Data))
 }
 
 func TestAddProposal_MultipleEntities(t *testing.T) {
