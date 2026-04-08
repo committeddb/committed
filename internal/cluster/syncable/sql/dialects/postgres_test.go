@@ -31,7 +31,9 @@ func TestPostgreSQLDialect_CreateDDL(t *testing.T) {
 	require.Contains(t, ddl, "id VARCHAR(128)")
 	require.Contains(t, ddl, "name TEXT")
 	require.Contains(t, ddl, "PRIMARY KEY (id)")
-	require.Contains(t, ddl, "INDEX idx_name (name)")
+	// PostgreSQL emits a separate CREATE INDEX statement, not an inline INDEX clause.
+	require.NotContains(t, ddl, "INDEX idx_name (name)")
+	require.Contains(t, ddl, "CREATE INDEX IF NOT EXISTS idx_name ON mytable (name);")
 	require.True(t, strings.HasSuffix(ddl, ");"))
 }
 
@@ -53,20 +55,24 @@ func TestPostgreSQLDialect_CreateDDL_NoIndexes(t *testing.T) {
 
 func TestPostgreSQLDialect_CreateSQL(t *testing.T) {
 	d := &dialects.PostgreSQLDialect{}
-	mappings := []sql.Mapping{
-		{Column: "id"},
-		{Column: "name"},
+	cfg := &sql.Config{
+		Table: "mytable",
+		Mappings: []sql.Mapping{
+			{Column: "id"},
+			{Column: "name"},
+		},
+		PrimaryKey: "id",
 	}
-	result := d.CreateSQL("mytable", mappings)
+	result := d.CreateSQL(cfg)
 
 	require.Contains(t, result, "INSERT INTO mytable(id,name)")
 	require.Contains(t, result, "VALUES ($1,$2)")
 
-	// BUG: PostgreSQL should use ON CONFLICT ... DO UPDATE SET, not ON DUPLICATE KEY UPDATE.
-	// This is MySQL syntax. Documenting the current (incorrect) behavior.
-	require.Contains(t, result, "ON DUPLICATE KEY UPDATE")
-	require.Contains(t, result, "id=$1")
-	require.Contains(t, result, "name=$2")
+	// PostgreSQL upsert uses ON CONFLICT ... DO UPDATE SET col = EXCLUDED.col.
+	require.Contains(t, result, "ON CONFLICT (id) DO UPDATE SET")
+	require.Contains(t, result, "id=EXCLUDED.id")
+	require.Contains(t, result, "name=EXCLUDED.name")
+	require.NotContains(t, result, "ON DUPLICATE KEY UPDATE")
 
 	// Verify it does NOT use MySQL ? placeholders
 	require.NotContains(t, result, "?")
@@ -74,33 +80,32 @@ func TestPostgreSQLDialect_CreateSQL(t *testing.T) {
 
 func TestPostgreSQLDialect_CreateSQL_SingleColumn(t *testing.T) {
 	d := &dialects.PostgreSQLDialect{}
-	mappings := []sql.Mapping{{Column: "pk"}}
-	result := d.CreateSQL("t", mappings)
+	cfg := &sql.Config{
+		Table:      "t",
+		Mappings:   []sql.Mapping{{Column: "pk"}},
+		PrimaryKey: "pk",
+	}
+	result := d.CreateSQL(cfg)
 
 	require.Contains(t, result, "INSERT INTO t(pk)")
 	require.Contains(t, result, "VALUES ($1)")
-	require.Contains(t, result, "pk=$1")
-}
-
-func TestDialect_CreateDDL_Identical(t *testing.T) {
-	pg := &dialects.PostgreSQLDialect{}
-	my := &dialects.MySQLDialect{}
-	cfg := testConfig()
-
-	// Both dialects use the shared createDDL function
-	require.Equal(t, my.CreateDDL(cfg), pg.CreateDDL(cfg))
+	require.Contains(t, result, "ON CONFLICT (pk) DO UPDATE SET pk=EXCLUDED.pk")
 }
 
 func TestDialect_PlaceholderDifference(t *testing.T) {
 	pg := &dialects.PostgreSQLDialect{}
 	my := &dialects.MySQLDialect{}
-	mappings := []sql.Mapping{
-		{Column: "a"},
-		{Column: "b"},
+	cfg := &sql.Config{
+		Table: "t",
+		Mappings: []sql.Mapping{
+			{Column: "a"},
+			{Column: "b"},
+		},
+		PrimaryKey: "a",
 	}
 
-	pgSQL := pg.CreateSQL("t", mappings)
-	mySQL := my.CreateSQL("t", mappings)
+	pgSQL := pg.CreateSQL(cfg)
+	mySQL := my.CreateSQL(cfg)
 
 	// PostgreSQL uses positional $N placeholders
 	require.Contains(t, pgSQL, "$1")

@@ -3,12 +3,17 @@ package testing
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/db"
 	"github.com/philborlin/committed/internal/cluster/db/parser"
 	"go.etcd.io/etcd/raft/v3/raftpb"
 )
+
+// testTickInterval makes single-node Raft elect itself in ~10ms instead of
+// the default ~1s, eliminating the per-test startup tax.
+const testTickInterval = 1 * time.Millisecond
 
 func CreateDB() *DB {
 	return CreateDBWithStorage(NewMemoryStorage(), parser.New(), nil, nil)
@@ -20,8 +25,8 @@ func CreateDBWithStorage(s db.Storage, parser *parser.Parser, sync <-chan *db.Sy
 	peers := make(db.Peers)
 	peers[id] = url
 
-	db := db.New(id, peers, s, parser, sync, ingest)
-	return &DB{db, s, peers, id}
+	d := db.New(id, peers, s, parser, sync, ingest, db.WithTickInterval(testTickInterval))
+	return &DB{d, s, peers, id}
 }
 
 type DB struct {

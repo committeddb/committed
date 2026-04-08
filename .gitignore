@@ -9,5 +9,6 @@ state-log
 .vscode
 .idea
 .claude/
+.claude-scratch/
 docker/db
 demo/db

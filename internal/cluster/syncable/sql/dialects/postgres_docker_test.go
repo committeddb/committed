@@ -203,11 +203,15 @@ func TestPostgreSQLIntegration_CreateSQL_Insert(t *testing.T) {
 		"CREATE TABLE %s (id VARCHAR(128) PRIMARY KEY, name TEXT)", table))
 	require.Nil(t, err)
 
-	mappings := []sql.Mapping{
-		{Column: "id"},
-		{Column: "name"},
+	cfg := &sql.Config{
+		Table: table,
+		Mappings: []sql.Mapping{
+			{Column: "id"},
+			{Column: "name"},
+		},
+		PrimaryKey: "id",
 	}
-	insertSQL := d.CreateSQL(table, mappings)
+	insertSQL := d.CreateSQL(cfg)
 
 	_, err = db.Exec(insertSQL, "key1", "value1")
 	require.Nil(t, err,
@@ -234,11 +238,15 @@ func TestPostgreSQLIntegration_CreateSQL_Upsert(t *testing.T) {
 		"CREATE TABLE %s (id VARCHAR(128) PRIMARY KEY, name TEXT)", table))
 	require.Nil(t, err)
 
-	mappings := []sql.Mapping{
-		{Column: "id"},
-		{Column: "name"},
+	cfg := &sql.Config{
+		Table: table,
+		Mappings: []sql.Mapping{
+			{Column: "id"},
+			{Column: "name"},
+		},
+		PrimaryKey: "id",
 	}
-	insertSQL := d.CreateSQL(table, mappings)
+	insertSQL := d.CreateSQL(cfg)
 
 	_, err = db.Exec(insertSQL, "key1", "first")
 	require.Nil(t, err, "first insert should succeed")
@@ -285,7 +293,7 @@ func TestPostgreSQLIntegration_FullSyncableFlow(t *testing.T) {
 	_, err = db.Exec(ddl)
 	require.Nil(t, err, "DDL must be valid PostgreSQL")
 
-	insertSQL := d.CreateSQL(cfg.Table, cfg.Mappings)
+	insertSQL := d.CreateSQL(cfg)
 	stmt, err := db.Prepare(insertSQL)
 	require.Nil(t, err, "INSERT must be valid PostgreSQL")
 	defer stmt.Close()

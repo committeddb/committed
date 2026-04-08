@@ -29,7 +29,7 @@ func (c *Syncable) Init() error {
 		return fmt.Errorf("ddl [%s]: %w", ddlString, err)
 	}
 
-	sqlString := c.dialect.CreateSQL(c.config.Table, c.config.Mappings)
+	sqlString := c.dialect.CreateSQL(c.config)
 
 	stmt, err := c.db.Prepare(sqlString)
 	if err != nil {

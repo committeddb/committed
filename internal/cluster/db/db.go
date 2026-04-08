@@ -26,7 +26,12 @@ type DB struct {
 	leaderState *LeaderState
 }
 
-func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithID, ingest <-chan *IngestableWithID) *DB {
+func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithID, ingest <-chan *IngestableWithID, opts ...Option) *DB {
+	cfg := defaultOptions()
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
 	proposeC := make(chan []byte)
 	confChangeC := make(chan raftpb.ConfChange)
 
@@ -39,7 +44,7 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 
 	ctx, cancelSyncs := context.WithCancel(context.Background())
 
-	commitC, errorC, raft := NewRaft(id, rpeers, s, proposeC, confChangeC)
+	commitC, errorC, raft := newRaftWithOptions(id, rpeers, s, proposeC, confChangeC, cfg)
 
 	db := &DB{
 		CommitC:     commitC,
@@ -76,8 +81,7 @@ func (db *DB) listenForIngestables(ingest <-chan *IngestableWithID) {
 
 func (db *DB) EatCommitC() {
 	go func() {
-		for {
-			<-db.CommitC
+		for range db.CommitC {
 			fmt.Printf("[db.DB] Ate a commit\n")
 		}
 	}()

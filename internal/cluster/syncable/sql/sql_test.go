@@ -56,7 +56,7 @@ func TestSync(t *testing.T) {
 
 			ddlSQL := dialect.CreateDDL(config)
 			mock.ExpectExec(ddlSQL).WillReturnResult(driver.ResultNoRows)
-			insertSQL := dialect.CreateSQL(config.Table, config.Mappings)
+			insertSQL := dialect.CreateSQL(config)
 			expectedPrepare := mock.ExpectPrepare(insertSQL)
 
 			syncable := sql.New(db, config)
@@ -122,7 +122,7 @@ func TestDontSyncOtherTypes(t *testing.T) {
 
 			ddlSQL := dialect.CreateDDL(config)
 			mock.ExpectExec(ddlSQL).WillReturnResult(driver.ResultNoRows)
-			insertSQL := dialect.CreateSQL(config.Table, config.Mappings)
+			insertSQL := dialect.CreateSQL(config)
 			mock.ExpectPrepare(insertSQL)
 
 			syncable := sql.New(db, config)

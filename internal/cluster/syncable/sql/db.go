@@ -26,7 +26,7 @@ func (d *DB) CreateInsert(config *Config) (*Insert, error) {
 		return nil, fmt.Errorf("ddl [%s]: %w", ddlString, err)
 	}
 
-	sqlString := d.dialect.CreateSQL(config.Table, config.Mappings)
+	sqlString := d.dialect.CreateSQL(config)
 
 	stmt, err := d.DB.Prepare(sqlString)
 	if err != nil {

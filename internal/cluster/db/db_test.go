@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/philborlin/committed/internal/cluster"
@@ -93,13 +95,20 @@ func TestProposeType(t *testing.T) {
 }
 
 func TestType(t *testing.T) {
+	expected := createType("foo")
+
+	// FakeStorage must return a sane FirstIndex BEFORE the DB is constructed:
+	// db.New synchronously starts a Raft node which calls FirstIndex during
+	// bootstrap. With the default zero return, etcd's raftLog computes
+	// committed = firstIndex - 1 = MaxUint64 and panics. (Previously this
+	// "worked" only because startRaft ran in a goroutine that hadn't been
+	// scheduled by the time the test finished.)
 	s := &dbfakes.FakeStorage{}
+	s.FirstIndexReturns(1, nil)
+	s.TypeReturns(expected.tipe, nil)
+
 	db := createDBWithStorage(s)
 	defer db.Close()
-
-	expected := createType("foo")
-	s.TypeReturns(expected.tipe, nil)
-	s.FirstIndexReturns(1, nil)
 
 	got, err := db.Type(expected.tipe.ID)
 	if err != nil {
@@ -194,6 +203,12 @@ func createDB() *DB {
 	return createDBWithStorage(NewMemoryStorage())
 }
 
+// testTickInterval is the Raft tick used by every test in this package.
+// Combined with the (still hard-coded) ElectionTick=10, it makes single-node
+// leader election complete in ~10ms instead of ~1s. Without this, every test
+// pays a one-second startup tax for the first proposal to be committed.
+const testTickInterval = 1 * time.Millisecond
+
 func createDBWithStorage(s db.Storage) *DB {
 	id := uint64(1)
 	url := fmt.Sprintf("http://127.0.0.1:%d", 12379)
@@ -201,8 +216,8 @@ func createDBWithStorage(s db.Storage) *DB {
 	peers[id] = url
 	parser := parser.New()
 
-	db := db.New(id, peers, s, parser, nil, nil)
-	return &DB{db, s, peers, id}
+	d := db.New(id, peers, s, parser, nil, nil, db.WithTickInterval(testTickInterval))
+	return &DB{d, s, peers, id}
 }
 
 type DB struct {
@@ -250,7 +265,13 @@ func (db *DB) entsToProposals(ents []raftpb.Entry) []*cluster.Proposal {
 	return ps
 }
 
+// MemorySyncable is a test syncable that records every proposal it sees.
+//
+// All state is guarded by mu because Sync() runs on the DB's internal sync
+// goroutine while tests inspect count/proposals from the test goroutine
+// (directly or via require.Eventually's polling goroutine).
 type MemorySyncable struct {
+	mu          sync.Mutex
 	proposals   []*cluster.Proposal
 	cancel      func()
 	count       int
@@ -261,6 +282,24 @@ func NewSyncable(doneAtCount int, cancel func()) *MemorySyncable {
 	return &MemorySyncable{doneAtCount: doneAtCount, cancel: cancel}
 }
 
+// Count returns the number of proposals Sync has been called with so far.
+// Safe to call concurrently with Sync.
+func (ms *MemorySyncable) Count() int {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	return ms.count
+}
+
+// Proposals returns a snapshot of all proposals Sync has received. Safe to
+// call concurrently with Sync.
+func (ms *MemorySyncable) Proposals() []*cluster.Proposal {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	out := make([]*cluster.Proposal, len(ms.proposals))
+	copy(out, ms.proposals)
+	return out
+}
+
 func (ms *MemorySyncable) Init(ctx context.Context) error {
 	return nil
 }
@@ -268,9 +307,13 @@ func (ms *MemorySyncable) Init(ctx context.Context) error {
 func (ms *MemorySyncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.ShouldSnapshot, error) {
 	fmt.Printf("syncing: %v\n", p)
 
+	ms.mu.Lock()
 	ms.count++
 	ms.proposals = append(ms.proposals, p)
-	if ms.doneAtCount == ms.count {
+	done := ms.doneAtCount == ms.count
+	ms.mu.Unlock()
+
+	if done {
 		ms.cancel()
 	}
 

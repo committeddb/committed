@@ -28,6 +28,12 @@ type HttpTransport struct {
 	transport *rafthttp.Transport
 }
 
+// New constructs an HttpTransport and fully initialises the underlying
+// rafthttp.Transport (calling its Start, which is non-blocking and just sets
+// up round-trippers, probers and the peer/remote maps). Initialising
+// synchronously here — rather than deferring it to (HttpTransport).Start —
+// guarantees that callers can safely call Stop() at any time after New
+// returns, even if the listener goroutine hasn't started serving yet.
 func New(id uint64, ps []raft.Peer, l *zap.Logger, r Raft) *HttpTransport {
 	t := &rafthttp.Transport{
 		Logger:      l,
@@ -39,6 +45,13 @@ func New(id uint64, ps []raft.Peer, l *zap.Logger, r Raft) *HttpTransport {
 		ErrorC:      make(chan error),
 	}
 
+	if err := t.Start(); err != nil {
+		// rafthttp.Transport.Start only fails if it can't construct round
+		// trippers, which only happens with a malformed TLS config (we don't
+		// pass one). Treat this as fatal — there is no recovery path.
+		log.Fatalf("rafthttp transport start: %v", err)
+	}
+
 	return &HttpTransport{id: id, peers: ps, transport: t}
 }
 
@@ -47,10 +60,6 @@ func (t *HttpTransport) GetErrorC() chan error {
 }
 
 func (t *HttpTransport) Start(stopC <-chan struct{}) error {
-	err := t.transport.Start()
-	if err != nil {
-		return err
-	}
 	rawURL := ""
 	for _, p := range t.peers {
 		if p.ID != t.id {

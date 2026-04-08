@@ -16,9 +16,9 @@ func (d *GoMySQLServerDialect) CreateDDL(c *sql.Config) string {
 	return createDDL(c)
 }
 
-func (d *GoMySQLServerDialect) CreateSQL(table string, sqlMappings []sql.Mapping) string {
+func (d *GoMySQLServerDialect) CreateSQL(config *sql.Config) string {
 	mySQL := &MySQLDialect{}
-	return mySQL.CreateSQL(table, sqlMappings)
+	return mySQL.CreateSQL(config)
 }
 
 func (d *GoMySQLServerDialect) Open(connectionString string) (*gosql.DB, error) {

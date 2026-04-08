@@ -177,7 +177,7 @@ func createRaft(id uint64, peers []raft.Peer, s db.Storage) *Raft {
 	proposeC := make(chan []byte)
 	confChangeC := make(chan raftpb.ConfChange)
 
-	commitC, errorC, closer := db.NewRaft(id, peers, s, proposeC, confChangeC)
+	commitC, errorC, closer := db.NewRaft(id, peers, s, proposeC, confChangeC, db.WithTickInterval(testTickInterval))
 
 	return &Raft{
 		storage:     s,
@@ -275,20 +275,47 @@ type MemoryStorageSaveArgsForCall struct {
 
 type MemoryStorage struct {
 	*raft.MemoryStorage
+	indexes   map[string]uint64
+	positions map[string]*MemoryPosition
+
+	// nodeMu guards node. Tests mutate node from the test goroutine while
+	// the DB's worker goroutines read it via Node() to determine leadership;
+	// without the mutex this is a data race that the race detector flags.
+	nodeMu sync.RWMutex
+	node   uint64
+
+	// stateMu guards both saveArgsForCall (which is appended to in Save) and
+	// reads of the underlying etcd hardState via InitialState. etcd's
+	// MemoryStorage.InitialState is NOT internally synchronised — it just
+	// returns ms.hardState directly — so any test that reads it concurrently
+	// with the raft worker calling Save would race. We override InitialState
+	// to take this mutex and Save acquires it around the SetHardState call.
+	stateMu         sync.RWMutex
 	saveArgsForCall []*MemoryStorageSaveArgsForCall
-	indexes         map[string]uint64
-	positions       map[string]*MemoryPosition
-	node            uint64
 }
 
 func NewMemoryStorage() *MemoryStorage {
 	indexes := make(map[string]uint64)
 	positions := make(map[string]*MemoryPosition)
-	return &MemoryStorage{raft.NewMemoryStorage(), nil, indexes, positions, 0}
+	return &MemoryStorage{
+		MemoryStorage: raft.NewMemoryStorage(),
+		indexes:       indexes,
+		positions:     positions,
+	}
 }
 
 func (ms *MemoryStorage) Close() error {
 	return nil
+}
+
+// InitialState overrides the embedded etcd MemoryStorage's InitialState so
+// reads are serialised against Save's SetHardState. etcd's implementation
+// returns ms.hardState directly without taking its internal lock, which
+// races with concurrent SetHardState writes from the raft worker.
+func (ms *MemoryStorage) InitialState() (raftpb.HardState, raftpb.ConfState, error) {
+	ms.stateMu.RLock()
+	defer ms.stateMu.RUnlock()
+	return ms.MemoryStorage.InitialState()
 }
 
 func (ms *MemoryStorage) Save(st raftpb.HardState, ents []raftpb.Entry, snap raftpb.Snapshot) error {
@@ -297,12 +324,15 @@ func (ms *MemoryStorage) Save(st raftpb.HardState, ents []raftpb.Entry, snap raf
 		return err
 	}
 
-	ms.maybeAppendArgsForCall(st, ents, snap)
-
-	return ms.SetHardState(st)
+	ms.stateMu.Lock()
+	ms.maybeAppendArgsForCallLocked(st, ents, snap)
+	err = ms.MemoryStorage.SetHardState(st)
+	ms.stateMu.Unlock()
+	return err
 }
 
-func (ms *MemoryStorage) maybeAppendArgsForCall(st raftpb.HardState, ents []raftpb.Entry, snap raftpb.Snapshot) {
+// maybeAppendArgsForCallLocked must be called with stateMu held.
+func (ms *MemoryStorage) maybeAppendArgsForCallLocked(st raftpb.HardState, ents []raftpb.Entry, snap raftpb.Snapshot) {
 	normalEntry := false
 	for _, ent := range ents {
 		if ent.Type == raftpb.EntryNormal {
@@ -316,10 +346,14 @@ func (ms *MemoryStorage) maybeAppendArgsForCall(st raftpb.HardState, ents []raft
 }
 
 func (ms *MemoryStorage) SaveCallCount() int {
+	ms.stateMu.RLock()
+	defer ms.stateMu.RUnlock()
 	return len(ms.saveArgsForCall)
 }
 
 func (ms *MemoryStorage) SaveArgsForCall(i int) (raftpb.HardState, []raftpb.Entry, raftpb.Snapshot) {
+	ms.stateMu.RLock()
+	defer ms.stateMu.RUnlock()
 	a := ms.saveArgsForCall[i]
 	return a.st, a.ents, a.snap
 }
@@ -355,10 +389,14 @@ func (ms *MemoryStorage) Reader(id string) db.ProposalReader {
 }
 
 func (ms *MemoryStorage) Node(id string) uint64 {
+	ms.nodeMu.RLock()
+	defer ms.nodeMu.RUnlock()
 	return ms.node
 }
 
 func (ms *MemoryStorage) SetNode(n uint64) {
+	ms.nodeMu.Lock()
+	defer ms.nodeMu.Unlock()
 	ms.node = n
 }
 

@@ -3,6 +3,7 @@ package db_test
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,19 +15,35 @@ import (
 // shouldSnapshot controls whether successful syncs trigger a SyncableIndex proposal.
 // Setting shouldSnapshot=false avoids races during cleanup since no extra proposals
 // are emitted by the sync goroutine.
+//
+// All mutable state is guarded by mu because Sync runs on the DB's sync
+// goroutine while tests inspect count from the test goroutine.
 type ErrorSyncable struct {
 	syncErr        error
-	count          int
 	maxBeforeStop  int
 	cancel         func()
-	receivedProps  []*cluster.Proposal
 	shouldSnapshot cluster.ShouldSnapshot
+
+	mu            sync.Mutex
+	count         int
+	receivedProps []*cluster.Proposal
+}
+
+// Count returns the number of times Sync has been called.
+func (s *ErrorSyncable) Count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.count
 }
 
 func (s *ErrorSyncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.ShouldSnapshot, error) {
+	s.mu.Lock()
 	s.count++
 	s.receivedProps = append(s.receivedProps, p)
-	if s.count >= s.maxBeforeStop && s.cancel != nil {
+	count := s.count
+	s.mu.Unlock()
+
+	if count >= s.maxBeforeStop && s.cancel != nil {
 		s.cancel()
 	}
 	if s.syncErr != nil {
@@ -70,7 +87,7 @@ func TestSync_SyncError_Continues(t *testing.T) {
 	<-ctx.Done()
 
 	// Despite errors, sync should have processed all proposals
-	require.Equal(t, len(ps), syncable.count, "sync loop should continue after sync errors")
+	require.Equal(t, len(ps), syncable.Count(), "sync loop should continue after sync errors")
 }
 
 // TestSync_ContextCancel verifies that cancelling the context terminates the sync goroutine.
@@ -119,7 +136,7 @@ func TestSync_EOF_Continues(t *testing.T) {
 
 	// Brief moment to let sync loop spin on EOF
 	time.Sleep(50 * time.Millisecond)
-	require.Equal(t, 0, syncable.count)
+	require.Equal(t, 0, syncable.Count())
 
 	// Now add a proposal - sync should pick it up despite earlier EOFs
 	p := createProposals([][]string{{"after-eof"}})[0]
@@ -127,5 +144,5 @@ func TestSync_EOF_Continues(t *testing.T) {
 
 	// Wait for sync to process the proposal (which fires cancel)
 	<-ctx.Done()
-	require.Equal(t, 1, syncable.count, "sync should resume after EOF when new data arrives")
+	require.Equal(t, 1, syncable.Count(), "sync should resume after EOF when new data arrives")
 }

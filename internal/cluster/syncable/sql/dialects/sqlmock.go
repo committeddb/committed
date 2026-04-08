@@ -27,11 +27,11 @@ func (d *SQLMockDialect) CreateDDL(c *sql.Config) string {
 	return createDDL(c)
 }
 
-func (d *SQLMockDialect) CreateSQL(table string, sqlMappings []sql.Mapping) string {
+func (d *SQLMockDialect) CreateSQL(config *sql.Config) string {
 	var sql strings.Builder
 
-	fmt.Fprintf(&sql, "INSERT INTO %s(", table)
-	for i, item := range sqlMappings {
+	fmt.Fprintf(&sql, "INSERT INTO %s(", config.Table)
+	for i, item := range config.Mappings {
 		if i == 0 {
 			fmt.Fprintf(&sql, "%s", item.Column)
 		} else {
@@ -39,7 +39,7 @@ func (d *SQLMockDialect) CreateSQL(table string, sqlMappings []sql.Mapping) stri
 		}
 	}
 	fmt.Fprint(&sql, ") VALUES (")
-	for i := range sqlMappings {
+	for i := range config.Mappings {
 		if i == 0 {
 			fmt.Fprint(&sql, "?")
 		} else {

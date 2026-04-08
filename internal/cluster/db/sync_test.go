@@ -89,7 +89,7 @@ func TestResumeSync(t *testing.T) {
 				<-db.CommitC
 			}
 
-			require.Equal(t, size, syncable.count)
+			require.Equal(t, size, syncable.Count())
 
 			for i, p := range storage.Proposals() {
 				fmt.Printf("Testing [%v] - %v", i, p)
@@ -104,7 +104,7 @@ func TestResumeSync(t *testing.T) {
 				}
 			}
 
-			for i, got := range syncable.proposals {
+			for i, got := range syncable.Proposals() {
 				require.False(t, cluster.IsSystem(got.Entities[0].Type.ID))
 				require.Equal(t, ps2[i], got)
 			}
@@ -123,7 +123,19 @@ func TestSyncWithStateChanges(t *testing.T) {
 	}
 
 	id := "foo"
-	duration := 1 * time.Second
+	// quietWait is how long we wait when asserting "nothing should happen".
+	// We can't poll for absence, so we have to wait a fixed period. This
+	// also has to be long enough for the sync goroutine to actually notice
+	// a leader-state change before any new proposals are committed —
+	// otherwise an in-flight propose can sneak in and be synced before the
+	// goroutine transitions to not-leader. Under -race the sync state
+	// machine is slow enough that 100ms isn't reliable.
+	const quietWait = 500 * time.Millisecond
+	// activeWait is the upper bound for "expect N items to be synced". The
+	// actual wait is typically a few ms because we poll, but under -race
+	// the sync goroutine's busy-wait loop and the raft worker compete for
+	// CPU, so we keep this generous to avoid flakes.
+	const activeWait = 10 * time.Second
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -148,38 +160,35 @@ func TestSyncWithStateChanges(t *testing.T) {
 			syncable := NewSyncable(len(tc.input1)+len(tc.input2)+1, cancel)
 			err := db.Sync(ctx, id, syncable)
 			require.Nil(t, err)
-			require.Equal(t, 0, syncable.count)
+			require.Equal(t, 0, syncable.Count())
 
 			// not-leader -> not-leader - keep not-ingesting
 			s.SetNode(math.MaxUint64)
-			time.Sleep(duration)
-			require.Equal(t, 0, syncable.count)
+			time.Sleep(quietWait)
+			require.Equal(t, 0, syncable.Count())
 
 			// not-leader -> leader - start ingesting
 			s.SetNode(db.ID())
-			time.Sleep(duration)
-			require.Equal(t, size, syncable.count)
+			require.Eventually(t, func() bool { return syncable.Count() == size }, activeWait, 5*time.Millisecond)
 
 			// leader -> leader - keep ingesting
 			s.SetNode(db.ID())
-			time.Sleep(duration)
 			ps2 := createProposals(tc.input2)
 			for _, p := range ps2 {
 				require.Equal(t, nil, db.Propose(p))
 			}
 			newSize := size + len(tc.input2)
-			time.Sleep(duration)
-			require.Equal(t, newSize, syncable.count)
+			require.Eventually(t, func() bool { return syncable.Count() == newSize }, activeWait, 5*time.Millisecond)
 
 			// leader -> not-leader - stop ingesting
 			s.SetNode(math.MaxUint64)
-			time.Sleep(duration)
+			time.Sleep(quietWait)
 			ps3 := createProposals(tc.input2)
 			for _, p := range ps3 {
 				require.Equal(t, nil, db.Propose(p))
 			}
-			time.Sleep(duration)
-			require.Equal(t, newSize, syncable.count)
+			time.Sleep(quietWait)
+			require.Equal(t, newSize, syncable.Count())
 
 			fmt.Printf("Got here\n")
 		})
@@ -188,7 +197,7 @@ func TestSyncWithStateChanges(t *testing.T) {
 
 func checkSyncs(t *testing.T, db *DB, syncable *MemorySyncable, ps []*cluster.Proposal) {
 	size := len(ps)
-	require.Equal(t, size, syncable.count)
+	require.Equal(t, size, syncable.Count())
 
 	ents, err := db.ents()
 	require.Nil(t, err)

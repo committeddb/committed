@@ -8,7 +8,7 @@ import (
 
 type Dialect interface {
 	CreateDDL(config *Config) string
-	CreateSQL(table string, sqlMappings []Mapping) string
+	CreateSQL(config *Config) string
 	Open(connectionString string) (*gosql.DB, error)
 }
 

@@ -82,11 +82,15 @@ func TestProposals(t *testing.T) {
 				require.Nil(t, err)
 			}
 
-			time.Sleep(1 * time.Second)
+			// Proposals are processed asynchronously through Raft. Poll
+			// db.Proposals until the expected number arrive (or fail after 2s).
+			var ps []*cluster.Proposal
+			require.Eventually(t, func() bool {
+				var err error
+				ps, err = db.Proposals(tc.amount, tc.typeIDsToSearchFor...)
+				return err == nil && len(ps) == len(tc.expect)
+			}, 2*time.Second, 5*time.Millisecond)
 
-			ps, err := db.Proposals(tc.amount, tc.typeIDsToSearchFor...)
-			require.Nil(t, err)
-			require.Equal(t, len(tc.expect), len(ps))
 			for i := range tc.expect {
 				require.Equal(t, string(tc.expect[i].Entities[0].Key), string(ps[i].Entities[0].Key))
 			}

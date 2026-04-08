@@ -18,11 +18,11 @@ func (d *MySQLDialect) CreateDDL(c *sql.Config) string {
 }
 
 // CreateSQL implements Dialect
-func (d *MySQLDialect) CreateSQL(table string, sqlMappings []sql.Mapping) string {
+func (d *MySQLDialect) CreateSQL(config *sql.Config) string {
 	var sql strings.Builder
 
-	fmt.Fprintf(&sql, "INSERT INTO %s(", table)
-	for i, item := range sqlMappings {
+	fmt.Fprintf(&sql, "INSERT INTO %s(", config.Table)
+	for i, item := range config.Mappings {
 		if i == 0 {
 			fmt.Fprintf(&sql, "%s", item.Column)
 		} else {
@@ -30,7 +30,7 @@ func (d *MySQLDialect) CreateSQL(table string, sqlMappings []sql.Mapping) string
 		}
 	}
 	fmt.Fprint(&sql, ") VALUES (")
-	for i := range sqlMappings {
+	for i := range config.Mappings {
 		if i == 0 {
 			fmt.Fprint(&sql, "?")
 		} else {
@@ -38,7 +38,7 @@ func (d *MySQLDialect) CreateSQL(table string, sqlMappings []sql.Mapping) string
 		}
 	}
 	fmt.Fprint(&sql, ") ON DUPLICATE KEY UPDATE ")
-	for i, item := range sqlMappings {
+	for i, item := range config.Mappings {
 		if i == 0 {
 			fmt.Fprintf(&sql, "%s=?", item.Column)
 		} else {

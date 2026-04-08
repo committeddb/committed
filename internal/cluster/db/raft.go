@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/philborlin/committed/internal/cluster/db/httptransport"
@@ -15,11 +16,16 @@ import (
 type Raft struct {
 	proposeC     <-chan []byte            // proposed messages
 	proposeConfC <-chan raftpb.ConfChange // proposed cluster config changes
-	commitC      chan<- []byte            // when a message is committed it is sent here
-	raftErrorC   chan<- error             // errors from raft session
+	// commitC is the bidirectional channel that committed proposal data is
+	// sent to. Stored as a bidirectional chan (rather than chan<-) so Close
+	// can close it after serveChannels has stopped, letting consumers like
+	// EatCommitC exit cleanly instead of leaking forever.
+	commitC    chan []byte
+	raftErrorC chan<- error
 	raftStopC    chan struct{}
 	id           uint64
 	leaderState  *LeaderState
+	tickInterval time.Duration
 
 	node    raft.Node
 	storage Storage
@@ -28,28 +34,59 @@ type Raft struct {
 	transportStopC chan struct{} // signals http transport to shutdown
 	transportDoneC chan struct{} // signals http transport shutdown complete
 
+	// closeC is closed by Close() to tell serveChannels (both its inner
+	// proposeC reader and its outer Ready loop) to exit. Without this,
+	// serveChannels only exits when proposeC is closed externally — which
+	// means Close() alone could leave serveChannels running and racing
+	// against any new Raft constructed on the same Storage.
+	closeC chan struct{}
+	// serveChannelsDoneC is closed by serveChannels on exit. Close() waits
+	// on it to guarantee serveChannels (and therefore Storage.Save) is no
+	// longer running before returning.
+	serveChannelsDoneC chan struct{}
+	// closeOnce guards close(closeC) so Close() is idempotent and safe to
+	// call from multiple paths.
+	closeOnce sync.Once
+
 	logger *zap.Logger
 }
 
-func NewRaft(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, proposeConfC <-chan raftpb.ConfChange) (<-chan []byte, <-chan error, *Raft) {
+func NewRaft(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, proposeConfC <-chan raftpb.ConfChange, opts ...Option) (<-chan []byte, <-chan error, *Raft) {
+	cfg := defaultOptions()
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	return newRaftWithOptions(id, ps, s, proposeC, proposeConfC, cfg)
+}
+
+func newRaftWithOptions(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, proposeConfC <-chan raftpb.ConfChange, cfg options) (<-chan []byte, <-chan error, *Raft) {
 	commitC := make(chan []byte)
 	errorC := make(chan error)
 
 	n := &Raft{
-		id:             id,
-		proposeC:       proposeC,
-		proposeConfC:   proposeConfC,
-		commitC:        commitC,
-		raftErrorC:     errorC,
-		raftStopC:      make(chan struct{}),
-		leaderState:    NewLeaderState(false),
-		storage:        s,
-		transportStopC: make(chan struct{}),
-		transportDoneC: make(chan struct{}),
+		id:                 id,
+		proposeC:           proposeC,
+		proposeConfC:       proposeConfC,
+		commitC:            commitC,
+		raftErrorC:         errorC,
+		raftStopC:          make(chan struct{}),
+		leaderState:        NewLeaderState(false),
+		tickInterval:       cfg.tickInterval,
+		storage:            s,
+		transportStopC:     make(chan struct{}),
+		transportDoneC:     make(chan struct{}),
+		closeC:             make(chan struct{}),
+		serveChannelsDoneC: make(chan struct{}),
 
 		logger: zap.NewExample(),
 	}
-	go n.startRaft(id, ps)
+	// startRaft itself doesn't block — it sets up the raft.Node and transport
+	// then spawns serveRaft/serveChannels as their own goroutines. Calling it
+	// synchronously here guarantees that n.transport and n.node are non-nil
+	// and the worker goroutines have been launched by the time NewRaft
+	// returns, so a fast caller-side Close() can't race with goroutine
+	// startup.
+	n.startRaft(id, ps)
 
 	return commitC, errorC, n
 }
@@ -87,8 +124,18 @@ func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 }
 
 func (n *Raft) serveChannels() {
-	ticker := time.NewTicker(100 * time.Millisecond)
+	defer close(n.serveChannelsDoneC)
+
+	ticker := time.NewTicker(n.tickInterval)
 	defer ticker.Stop()
+
+	// raftStopOnce protects close(n.raftStopC) since both the inner proposeC
+	// reader (when its channels close) and Close() (via closeC propagation)
+	// can drive shutdown.
+	var raftStopOnce sync.Once
+	closeRaftStop := func() {
+		raftStopOnce.Do(func() { close(n.raftStopC) })
+	}
 
 	go func() {
 		confChangeCount := uint64(0)
@@ -118,10 +165,16 @@ func (n *Raft) serveChannels() {
 						n.raftErrorC <- err
 					}
 				}
+			case <-n.closeC:
+				// Close() asked us to stop, even though proposeC is still
+				// open. Drop our reference and let raftStopC be closed below.
+				n.proposeC = nil
+				n.proposeConfC = nil
 			}
 		}
-		// client closed channel; shutdown raft if not already
-		close(n.raftStopC)
+		// client closed channel (or Close() asked us to stop); shutdown raft
+		// if not already
+		closeRaftStop()
 	}()
 
 	for {
@@ -162,6 +215,9 @@ func (n *Raft) serveChannels() {
 			return
 		case <-n.raftStopC:
 			return
+		case <-n.closeC:
+			closeRaftStop()
+			return
 		}
 	}
 }
@@ -181,8 +237,27 @@ func (n *Raft) stopTransport() {
 	<-n.transportDoneC
 }
 
+// Close fully tears down the Raft instance: it signals serveChannels and its
+// inner proposeC reader to exit, waits for serveChannels to actually stop
+// (which guarantees Storage.Save is no longer running), stops the transport,
+// stops the underlying etcd raft.Node, and closes commitC so any consumer
+// exits cleanly. It is safe to call Close more than once.
+//
+// Stopping n.node and closing commitC are critical to prevent goroutine
+// leaks: without them, every Raft we create leaks the etcd raft.Node's
+// internal `(*node).run` goroutine and any consumer of commitC (e.g. tests
+// using DB.EatCommitC). Across many test iterations the leaked goroutines
+// consume enough CPU that subsequent tests time out.
 func (n *Raft) Close() error {
-	n.stopTransport()
+	n.closeOnce.Do(func() {
+		close(n.closeC)
+		<-n.serveChannelsDoneC
+		n.stopTransport()
+		if n.node != nil {
+			n.node.Stop()
+		}
+		close(n.commitC)
+	})
 	return nil
 }
 

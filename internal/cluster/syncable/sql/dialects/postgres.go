@@ -12,17 +12,44 @@ import (
 
 type PostgreSQLDialect struct{}
 
-// CreateDDL implements Dialect
+// CreateDDL implements Dialect.
+//
+// PostgreSQL does not accept inline INDEX clauses inside CREATE TABLE, so we
+// build CREATE TABLE without indexes and then append a separate
+// CREATE INDEX IF NOT EXISTS for each declared index.
 func (d *PostgreSQLDialect) CreateDDL(c *sql.Config) string {
-	return createDDL(c)
+	var ddl strings.Builder
+	fmt.Fprintf(&ddl, "CREATE TABLE IF NOT EXISTS %s (", c.Table)
+	for i, column := range c.Mappings {
+		fmt.Fprintf(&ddl, "%s %s", column.Column, column.SQLType)
+		if i < len(c.Mappings)-1 {
+			ddl.WriteString(",")
+		}
+	}
+	if c.PrimaryKey != "" {
+		fmt.Fprintf(&ddl, ",PRIMARY KEY (%s)", c.PrimaryKey)
+	}
+	ddl.WriteString(");")
+
+	for _, index := range c.Indexes {
+		fmt.Fprintf(&ddl, "CREATE INDEX IF NOT EXISTS %s ON %s (%s);",
+			index.IndexName, c.Table, index.ColumnNames)
+	}
+
+	return ddl.String()
 }
 
-// CreateSQL implements Dialect
-func (d *PostgreSQLDialect) CreateSQL(table string, sqlMappings []sql.Mapping) string {
+// CreateSQL implements Dialect.
+//
+// PostgreSQL upserts use ON CONFLICT (<pk>) DO UPDATE SET col = EXCLUDED.col,
+// not the MySQL ON DUPLICATE KEY UPDATE syntax. EXCLUDED references the row
+// that was proposed for insertion, so no extra placeholders are needed for
+// the update clause.
+func (d *PostgreSQLDialect) CreateSQL(config *sql.Config) string {
 	var sql strings.Builder
 
-	fmt.Fprintf(&sql, "INSERT INTO %s(", table)
-	for i, item := range sqlMappings {
+	fmt.Fprintf(&sql, "INSERT INTO %s(", config.Table)
+	for i, item := range config.Mappings {
 		if i == 0 {
 			fmt.Fprintf(&sql, "%s", item.Column)
 		} else {
@@ -30,19 +57,23 @@ func (d *PostgreSQLDialect) CreateSQL(table string, sqlMappings []sql.Mapping) s
 		}
 	}
 	fmt.Fprint(&sql, ") VALUES (")
-	for i := range sqlMappings {
+	for i := range config.Mappings {
 		if i == 0 {
 			fmt.Fprintf(&sql, "$%d", i+1)
 		} else {
 			fmt.Fprintf(&sql, ",$%d", i+1)
 		}
 	}
-	fmt.Fprint(&sql, ") ON DUPLICATE KEY UPDATE ")
-	for i, item := range sqlMappings {
-		if i == 0 {
-			fmt.Fprintf(&sql, "%s=$%d", item.Column, i+1)
-		} else {
-			fmt.Fprintf(&sql, ",%s=$%d", item.Column, i+1)
+	fmt.Fprint(&sql, ")")
+
+	if config.PrimaryKey != "" {
+		fmt.Fprintf(&sql, " ON CONFLICT (%s) DO UPDATE SET ", config.PrimaryKey)
+		for i, item := range config.Mappings {
+			if i == 0 {
+				fmt.Fprintf(&sql, "%s=EXCLUDED.%s", item.Column, item.Column)
+			} else {
+				fmt.Fprintf(&sql, ",%s=EXCLUDED.%s", item.Column, item.Column)
+			}
 		}
 	}
 
