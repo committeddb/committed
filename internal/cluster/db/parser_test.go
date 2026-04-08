@@ -58,9 +58,8 @@ func TestDatabase(t *testing.T) {
 			db.AddDatabaseParser("bar", p2)
 
 			for _, cfg := range tt.configurations {
-				err := db.ProposeDatabase(cfg)
+				err := db.ProposeDatabase(testCtx(t), cfg)
 				require.Equal(t, nil, err)
-				<-db.CommitC
 			}
 
 			ps, err := db.ents()
@@ -95,9 +94,8 @@ func TestIngestable(t *testing.T) {
 			db.AddIngestableParser("bar", p2)
 
 			for _, cfg := range tt.configurations {
-				err := db.ProposeIngestable(cfg)
+				err := db.ProposeIngestable(testCtx(t), cfg)
 				require.Equal(t, nil, err)
-				<-db.CommitC
 			}
 
 			ps, err := db.ents()
@@ -129,9 +127,8 @@ func TestSyncable(t *testing.T) {
 			db.AddSyncableParser("bar", p2)
 
 			for _, cfg := range tt.configurations {
-				err := db.ProposeSyncable(cfg)
+				err := db.ProposeSyncable(testCtx(t), cfg)
 				require.Equal(t, nil, err)
-				<-db.CommitC
 			}
 
 			ps, err := db.ents()

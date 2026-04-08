@@ -11,7 +11,7 @@ func (h *HTTP) AddSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 
-	err = h.c.ProposeSyncable(c)
+	err = h.c.ProposeSyncable(r.Context(), c)
 	if err != nil {
 		internalServerError(w, err)
 		return

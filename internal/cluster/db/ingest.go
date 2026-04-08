@@ -34,7 +34,9 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) error
 			return nil
 		case proposal := <-proposalChan:
 			if db.isNode(id) {
-				err := db.Propose(proposal)
+				// Ingest worker proposes user data; we use the worker
+				// context (ctx) so cancel-on-stop interrupts the wait.
+				err := db.Propose(ctx, proposal)
 				if err != nil {
 					// TODO Handle error
 					fmt.Printf("[db.DB] propose: %v\n", err)
@@ -42,7 +44,7 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) error
 			}
 		case position := <-positionChan:
 			if db.isNode(id) {
-				err := db.proposeIngestablePosition(&cluster.IngestablePosition{ID: id, Position: position})
+				err := db.proposeIngestablePosition(ctx, &cluster.IngestablePosition{ID: id, Position: position})
 				if err != nil {
 					// TODO Handle error
 					fmt.Printf("[db.DB] proposeIngestablePosition: %v\n", err)

@@ -13,7 +13,7 @@ func (h *HTTP) AddType(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 
-	err = h.c.ProposeType(c)
+	err = h.c.ProposeType(r.Context(), c)
 	if err != nil {
 		internalServerError(w, err)
 		return

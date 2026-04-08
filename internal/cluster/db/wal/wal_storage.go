@@ -61,9 +61,15 @@ type Storage struct {
 	TimeSeriesStorage tstorage.Storage
 	snapshot          pb.Snapshot
 	hardState         pb.HardState
-	firstIndex        uint64
-	lastIndex         uint64
-	stateIndex        uint64
+	// firstIndex and lastIndex are mutated only from the raft serveChannels
+	// goroutine (via appendEntries and Compact) but read from many other
+	// goroutines: sync workers (Reader.Read), ingest workers, HTTP handlers
+	// (db.ents()), and tests. Atomics make those reads race-free without
+	// having to thread a mutex through every caller. The single-writer
+	// invariant means no compare-and-swap is needed.
+	firstIndex atomic.Uint64
+	lastIndex  atomic.Uint64
+	stateIndex uint64
 	databases         map[string]cluster.Database
 	parser            db.Parser
 	sync              chan<- *db.SyncableWithID
@@ -169,21 +175,21 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		if err != nil {
 			return nil, err
 		}
-		ws.firstIndex = fe.Index
+		ws.firstIndex.Store(fe.Index)
 	}
 
 	li, err := entryLog.LastIndex()
 	if err != nil {
 		return nil, err
 	}
-	ws.lastIndex = li
+	ws.lastIndex.Store(li)
 
 	if li > 0 {
 		le, _, err := ws.entry(li)
 		if err != nil {
 			return nil, err
 		}
-		ws.lastIndex = le.Index
+		ws.lastIndex.Store(le.Index)
 	}
 
 	li, err = stateLog.LastIndex()
@@ -443,7 +449,13 @@ func (s *Storage) appendEntries(ents []pb.Entry) error {
 		return nil
 	}
 
-	first := s.firstIndex + 1
+	// Snapshot the current bounds. appendEntries is only ever invoked from
+	// the raft serveChannels goroutine (the sole writer), so observing them
+	// once at the top is sufficient — no other writer can race us.
+	firstIndex := s.firstIndex.Load()
+	lastIndex := s.lastIndex.Load()
+
+	first := firstIndex + 1
 	last := ents[0].Index + uint64(len(ents)) - 1
 
 	// shortcut if there is no new entry.
@@ -455,12 +467,12 @@ func (s *Storage) appendEntries(ents []pb.Entry) error {
 		ents = ents[first-ents[0].Index:]
 	}
 
-	offset := ents[0].Index - s.firstIndex
-	l := s.lastIndex - s.firstIndex + 1
+	offset := ents[0].Index - firstIndex
+	l := lastIndex - firstIndex + 1
 
 	// Don't error when this is the first write
-	if s.firstIndex > 0 && l < offset {
-		return fmt.Errorf("missing log entry [last: %d, append at: %d]", s.lastIndex, s.firstIndex)
+	if firstIndex > 0 && l < offset {
+		return fmt.Errorf("missing log entry [last: %d, append at: %d]", lastIndex, firstIndex)
 	}
 
 	// We have received previous log entries a second time and/or have log entries newer than the ones being received
@@ -483,8 +495,9 @@ func (s *Storage) appendEntries(ents []pb.Entry) error {
 	// 	return fmt.Errorf("missing log entry [last: %d, append at: %d]", s.lastIndex, s.firstIndex)
 	// }
 
-	if s.firstIndex == 0 && s.lastIndex == 0 && ents != nil {
-		s.firstIndex = ents[0].Index
+	if firstIndex == 0 && lastIndex == 0 && ents != nil {
+		firstIndex = ents[0].Index
+		s.firstIndex.Store(firstIndex)
 	}
 
 	for _, e := range ents {
@@ -493,14 +506,14 @@ func (s *Storage) appendEntries(ents []pb.Entry) error {
 			return err
 		}
 
-		i := e.Index - s.firstIndex + 1
+		i := e.Index - firstIndex + 1
 		err = s.EntryLog.Write(i, data)
 		if err != nil {
 			return fmt.Errorf("index %d to position %d: %w", e.Index, i, err)
 		}
 	}
 
-	s.lastIndex = ents[len(ents)-1].Index
+	s.lastIndex.Store(ents[len(ents)-1].Index)
 
 	return nil
 }
@@ -547,12 +560,13 @@ func (s *Storage) InitialState() (pb.HardState, pb.ConfState, error) {
 func (s *Storage) Entries(lo, hi, maxSize uint64) ([]pb.Entry, error) {
 	var totalSize uint64
 
-	if lo <= s.firstIndex {
+	firstIndex := s.firstIndex.Load()
+	if lo <= firstIndex {
 		return nil, raft.ErrCompacted
 	}
 
 	var es []pb.Entry
-	logIndex := lo - s.firstIndex
+	logIndex := lo - firstIndex
 	for x := lo; x < hi; x++ {
 		logIndex++
 		e, size, err := s.entry(logIndex)
@@ -605,19 +619,22 @@ func (s *Storage) state(li uint64) (*State, error) {
 // FirstIndex is retained for matching purposes even though the
 // rest of that entry may not be available.
 func (s *Storage) Term(i uint64) (uint64, error) {
-	if s.firstIndex == 0 && s.lastIndex == 0 {
+	firstIndex := s.firstIndex.Load()
+	lastIndex := s.lastIndex.Load()
+
+	if firstIndex == 0 && lastIndex == 0 {
 		return uint64(0), nil
 	}
 
-	if i < s.firstIndex {
+	if i < firstIndex {
 		return 0, raft.ErrCompacted
 	}
 
-	if i > s.lastIndex {
+	if i > lastIndex {
 		return 0, raft.ErrUnavailable
 	}
 
-	logIndex := i - s.firstIndex + 1
+	logIndex := i - firstIndex + 1
 	e, _, err := s.entry(logIndex)
 	if err != nil {
 		return 0, fmt.Errorf("wal index %d: %w", logIndex, err)
@@ -627,11 +644,11 @@ func (s *Storage) Term(i uint64) (uint64, error) {
 }
 
 func (s *Storage) LastIndex() (uint64, error) {
-	return s.lastIndex, nil
+	return s.lastIndex.Load(), nil
 }
 
 func (s *Storage) FirstIndex() (uint64, error) {
-	return s.firstIndex + uint64(1), nil
+	return s.firstIndex.Load() + uint64(1), nil
 }
 
 func (s *Storage) Snapshot() (pb.Snapshot, error) {
@@ -639,20 +656,23 @@ func (s *Storage) Snapshot() (pb.Snapshot, error) {
 }
 
 func (s *Storage) Compact(compactIndex uint64) error {
-	if compactIndex <= s.firstIndex {
+	firstIndex := s.firstIndex.Load()
+	lastIndex := s.lastIndex.Load()
+
+	if compactIndex <= firstIndex {
 		return raft.ErrCompacted
 	}
-	if compactIndex > s.lastIndex {
+	if compactIndex > lastIndex {
 		return ErrOutOfBounds
 	}
 
-	i := compactIndex - s.firstIndex + 1
+	i := compactIndex - firstIndex + 1
 	err := s.EntryLog.TruncateFront(i)
 	if err != nil {
 		return err
 	}
 
-	s.firstIndex = compactIndex
+	s.firstIndex.Store(compactIndex)
 
 	return nil
 }

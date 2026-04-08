@@ -17,6 +17,17 @@ import (
 	"go.etcd.io/etcd/raft/v3/raftpb"
 )
 
+// testCtx returns a context with a generous deadline. PR2's blocking
+// Propose needs *some* deadline so a hung test fails fast instead of
+// hanging indefinitely. 5s is comfortably above any sane single-node
+// commit + apply latency.
+func testCtx(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(cancel)
+	return ctx
+}
+
 func TestDBPropose(t *testing.T) {
 	tests := map[string]struct {
 		inputs [][]string
@@ -34,11 +45,12 @@ func TestDBPropose(t *testing.T) {
 			ps := createProposals(tc.inputs)
 
 			for _, p := range ps {
-				err := db.Propose(p)
+				err := db.Propose(testCtx(t), p)
 				if err != nil {
 					t.Fatal(err)
 				}
-				<-db.CommitC
+				// No more <-db.CommitC: blocking Propose returns after
+				// apply, so the entry is already in storage by here.
 			}
 
 			ents, err := db.ents()
@@ -70,9 +82,8 @@ func TestProposeType(t *testing.T) {
 			defer db.Close()
 
 			for _, tipe := range tc.types {
-				err := db.ProposeType(tipe.config)
+				err := db.ProposeType(testCtx(t), tipe.config)
 				require.Nil(t, err)
-				<-db.CommitC
 			}
 
 			ents, err := db.ents()
@@ -172,8 +183,7 @@ func createType(name string) *Type {
 func createProposalsAndProposeThem(t *testing.T, db *DB, inputs [][]string) []*cluster.Proposal {
 	ps := createProposals(inputs)
 	for _, p := range ps {
-		require.Equal(t, nil, db.Propose(p))
-		<-db.CommitC
+		require.Equal(t, nil, db.Propose(testCtx(t), p))
 	}
 
 	return ps

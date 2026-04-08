@@ -11,7 +11,7 @@ func (h *HTTP) AddIngestable(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 
-	err = h.c.ProposeIngestable(c)
+	err = h.c.ProposeIngestable(r.Context(), c)
 	if err != nil {
 		internalServerError(w, err)
 		return

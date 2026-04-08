@@ -22,7 +22,7 @@ func (r *Reader) Read() (uint64, *cluster.Proposal, error) {
 	for {
 		readIndex := r.index + 1
 
-		if readIndex > r.s.lastIndex {
+		if readIndex > r.s.lastIndex.Load() {
 			return 0, nil, io.EOF
 		}
 

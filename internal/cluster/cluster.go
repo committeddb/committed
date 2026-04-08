@@ -12,12 +12,12 @@ import (
 //
 //counterfeiter:generate . Cluster
 type Cluster interface {
-	Propose(p *Proposal) error
-	ProposeType(c *Configuration) error
-	ProposeDeleteType(id string) error
-	ProposeIngestable(c *Configuration) error
-	ProposeSyncable(c *Configuration) error
-	ProposeDatabase(c *Configuration) error
+	Propose(ctx context.Context, p *Proposal) error
+	ProposeType(ctx context.Context, c *Configuration) error
+	ProposeDeleteType(ctx context.Context, id string) error
+	ProposeIngestable(ctx context.Context, c *Configuration) error
+	ProposeSyncable(ctx context.Context, c *Configuration) error
+	ProposeDatabase(ctx context.Context, c *Configuration) error
 	Proposals(n uint64, types ...string) ([]*Proposal, error)
 	Type(id string) (*Type, error)
 	TypeGraph(typeID string, start time.Time, end time.Time) ([]TimePoint, error)

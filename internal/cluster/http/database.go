@@ -11,7 +11,7 @@ func (h *HTTP) AddDatabase(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 
-	err = h.c.ProposeDatabase(c)
+	err = h.c.ProposeDatabase(r.Context(), c)
 	if err != nil {
 		internalServerError(w, err)
 		return

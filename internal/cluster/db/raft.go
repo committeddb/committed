@@ -30,6 +30,13 @@ type Raft struct {
 	node    raft.Node
 	storage Storage
 
+	// applyNotifier is invoked after each successful Storage.ApplyCommitted
+	// call with the raw entry data. db.New supplies db.notifyApplied here
+	// so blocking db.Propose can release waiters once their proposal has
+	// been applied. nil disables the callback (used by raft_test which
+	// constructs Raft directly without a db.DB).
+	applyNotifier func(data []byte)
+
 	transport      Transport
 	transportStopC chan struct{} // signals http transport to shutdown
 	transportDoneC chan struct{} // signals http transport shutdown complete
@@ -56,10 +63,10 @@ func NewRaft(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, propo
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	return newRaftWithOptions(id, ps, s, proposeC, proposeConfC, cfg)
+	return newRaftWithOptions(id, ps, s, proposeC, proposeConfC, nil, cfg)
 }
 
-func newRaftWithOptions(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, proposeConfC <-chan raftpb.ConfChange, cfg options) (<-chan []byte, <-chan error, *Raft) {
+func newRaftWithOptions(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, proposeConfC <-chan raftpb.ConfChange, applyNotifier func(data []byte), cfg options) (<-chan []byte, <-chan error, *Raft) {
 	commitC := make(chan []byte)
 	errorC := make(chan error)
 
@@ -73,6 +80,7 @@ func newRaftWithOptions(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []
 		leaderState:        NewLeaderState(false),
 		tickInterval:       cfg.tickInterval,
 		storage:            s,
+		applyNotifier:      applyNotifier,
 		transportStopC:     make(chan struct{}),
 		transportDoneC:     make(chan struct{}),
 		closeC:             make(chan struct{}),
@@ -210,6 +218,15 @@ func (n *Raft) serveChannels() {
 				// takes.)
 				if err := n.storage.ApplyCommitted(entry); err != nil {
 					n.logger.Fatal("apply committed entry", zap.Uint64("index", entry.Index), zap.Error(err))
+				}
+				// Fire the apply notifier after the storage apply has
+				// succeeded but before processCommittedEntry's send to
+				// commitC, so blocking db.Propose unblocks promptly. The
+				// notifier is no-op if nil (raft_test path) or if the
+				// proposal's RequestID is 0 (system-internal proposers
+				// or pre-PR2 entries).
+				if n.applyNotifier != nil && entry.Type == raftpb.EntryNormal && entry.Data != nil {
+					n.applyNotifier(entry.Data)
 				}
 				n.processCommittedEntry(entry)
 				if entry.Type == raftpb.EntryConfChange {

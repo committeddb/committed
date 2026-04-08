@@ -33,28 +33,32 @@ func TestAddConfiguration_Success(t *testing.T) {
 			name: "database",
 			path: "/database/db-1",
 			verifyFn: func(fake *clusterfakes.FakeCluster) (int, *cluster.Configuration) {
-				return fake.ProposeDatabaseCallCount(), fake.ProposeDatabaseArgsForCall(0)
+				_, cfg := fake.ProposeDatabaseArgsForCall(0)
+				return fake.ProposeDatabaseCallCount(), cfg
 			},
 		},
 		{
 			name: "syncable",
 			path: "/syncable/sync-1",
 			verifyFn: func(fake *clusterfakes.FakeCluster) (int, *cluster.Configuration) {
-				return fake.ProposeSyncableCallCount(), fake.ProposeSyncableArgsForCall(0)
+				_, cfg := fake.ProposeSyncableArgsForCall(0)
+				return fake.ProposeSyncableCallCount(), cfg
 			},
 		},
 		{
 			name: "ingestable",
 			path: "/ingestable/ingest-1",
 			verifyFn: func(fake *clusterfakes.FakeCluster) (int, *cluster.Configuration) {
-				return fake.ProposeIngestableCallCount(), fake.ProposeIngestableArgsForCall(0)
+				_, cfg := fake.ProposeIngestableArgsForCall(0)
+				return fake.ProposeIngestableCallCount(), cfg
 			},
 		},
 		{
 			name: "type",
 			path: "/type/type-1",
 			verifyFn: func(fake *clusterfakes.FakeCluster) (int, *cluster.Configuration) {
-				return fake.ProposeTypeCallCount(), fake.ProposeTypeArgsForCall(0)
+				_, cfg := fake.ProposeTypeArgsForCall(0)
+				return fake.ProposeTypeCallCount(), cfg
 			},
 		},
 	}
@@ -158,7 +162,7 @@ func TestAddConfiguration_ContentTypeHandling(t *testing.T) {
 		h.ServeHTTP(w, req)
 
 		require.Equal(t, 200, w.Result().StatusCode)
-		cfg := fake.ProposeDatabaseArgsForCall(0)
+		_, cfg := fake.ProposeDatabaseArgsForCall(0)
 		require.Equal(t, "text/toml", cfg.MimeType)
 	})
 
@@ -172,7 +176,7 @@ func TestAddConfiguration_ContentTypeHandling(t *testing.T) {
 		h.ServeHTTP(w, req)
 
 		require.Equal(t, 200, w.Result().StatusCode)
-		cfg := fake.ProposeDatabaseArgsForCall(0)
+		_, cfg := fake.ProposeDatabaseArgsForCall(0)
 		require.Equal(t, "application/json", cfg.MimeType)
 	})
 }
@@ -323,7 +327,7 @@ func TestAddProposal_Success(t *testing.T) {
 	require.Equal(t, "t1", fake.TypeArgsForCall(0))
 	require.Equal(t, 1, fake.ProposeCallCount())
 
-	p := fake.ProposeArgsForCall(0)
+	_, p := fake.ProposeArgsForCall(0)
 	require.Equal(t, 1, len(p.Entities))
 	require.Equal(t, "t1", p.Entities[0].Type.ID)
 	require.Equal(t, "k1", string(p.Entities[0].Key))
@@ -348,7 +352,8 @@ func TestAddProposal_MultipleEntities(t *testing.T) {
 	require.Equal(t, 200, w.Result().StatusCode)
 	require.Equal(t, 2, fake.TypeCallCount())
 	require.Equal(t, 1, fake.ProposeCallCount())
-	require.Equal(t, 2, len(fake.ProposeArgsForCall(0).Entities))
+	_, p := fake.ProposeArgsForCall(0)
+	require.Equal(t, 2, len(p.Entities))
 }
 
 func TestAddProposal_BadJSON(t *testing.T) {

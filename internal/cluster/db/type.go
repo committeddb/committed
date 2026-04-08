@@ -2,12 +2,13 @@ package db
 
 import (
 	"bytes"
+	"context"
 	"time"
 
 	"github.com/philborlin/committed/internal/cluster"
 )
 
-func (db *DB) ProposeType(c *cluster.Configuration) error {
+func (db *DB) ProposeType(ctx context.Context, c *cluster.Configuration) error {
 	_, t, err := ParseType(c, db.storage)
 	if err != nil {
 		return err
@@ -19,7 +20,7 @@ func (db *DB) ProposeType(c *cluster.Configuration) error {
 	}
 
 	p := &cluster.Proposal{Entities: []*cluster.Entity{e}}
-	return db.Propose(p)
+	return db.Propose(ctx, p)
 }
 
 func ParseType(c *cluster.Configuration, s cluster.DatabaseStorage) (string, *cluster.Type, error) {

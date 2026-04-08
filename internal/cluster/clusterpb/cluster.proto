@@ -11,6 +11,13 @@ message LogEntity {
 
 message LogProposal {
     repeated LogEntity logEntities = 1;
+    // requestID lets db.Propose's caller wait for *its* proposal to be
+    // applied. db.DB holds a request-ID-keyed waiter map; the apply path
+    // signals the waiter after the entry's bucket writes succeed. A
+    // requestID of 0 means "no waiter" — used by system-internal proposers
+    // (ingest worker, sync worker) that don't need read-after-write
+    // semantics. Backward-compatible: old log entries unmarshal as 0.
+    uint64 requestID = 2;
 }
 
 enum LogValidationStrategy {

@@ -60,7 +60,7 @@ func (db *DB) sync(ctx context.Context, id string, s cluster.Syncable) error {
 				}
 
 				if shouldSnapshot {
-					err = db.proposeSyncableIndex(&cluster.SyncableIndex{ID: id, Index: i})
+					err = db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: i})
 					if err != nil {
 						// TODO Handle error
 						fmt.Printf("[db.DB] proposeSyncableIndex: %v\n", err)

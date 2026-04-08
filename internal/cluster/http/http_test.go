@@ -43,11 +43,10 @@ import (
 //     reach raft" wiring is covered by
 //     wal/ingestable_test.go:TestProposeIngestable_StartsIngestionWiring.
 //
-// The two waitFor() calls are workarounds for the Save-does-double-duty issue
-// (see .claude-scratch/tickets/save-does-double-duty.md): the HTTP handlers
-// for AddProposal and AddSyncable read from storage synchronously, which
-// races against the prior raft entry being applied to the storage buckets.
-// Once that ticket is resolved these waits become unnecessary.
+// Read-after-write between AddType/AddDatabase and the next handler is
+// guaranteed by db.Propose's synchronous-apply contract (PR2): when the
+// AddType/AddDatabase HTTP call returns, the corresponding bucket entry has
+// already been applied, so the next handler can read it without polling.
 func TestEndToEnd(t *testing.T) {
 	dir, err := os.MkdirTemp("", "CommitteddbE2ETest-*")
 	require.Nil(t, err)
@@ -65,28 +64,27 @@ func TestEndToEnd(t *testing.T) {
 	typeID := addType(t, h, "foo")
 	addParsers(t, db, dialect, typeID)
 
-	// AddProposal's handler calls c.Type(typeID); wait until the AddType
-	// entry has been applied to the type bucket.
-	waitFor(t, "type to be queryable", func() bool {
-		_, err := db.Type(typeID)
-		return err == nil
-	})
-
 	p1 := createProposal(typeID, "key", "one")
 	propose(t, h, p1.p)
 	_ = addIngestable(t, h, "")
 	databaseID := addDatabase(t, h, "go-mysql-server")
 
-	// AddSyncable's parser calls storage.Database(databaseID); wait until
-	// the database Configuration has been applied to the database bucket.
-	waitFor(t, "database to be queryable", func() bool {
-		_, err := storage.Database(databaseID)
-		return err == nil
-	})
+	syncableID := addSyncable(t, h, typeID, databaseID)
 
-	addSyncable(t, h, typeID, databaseID)
+	// Wait for the sync worker to finish syncing every normal proposal in
+	// the wal before tearing the db down. We can't simply close the db and
+	// read — closing too early loses the row. We can't poll the destination
+	// database either, because go-mysql-server's in-memory backing store is
+	// not safe under concurrent connections (the race detector trips on its
+	// internal map). Polling the wal-side syncable index is fine because
+	// it's bbolt-backed and goroutine-safe.
+	waitForSyncCaughtUp(t, storage, syncableID)
 
-	view(t, storage, databaseID, p1, connectionString)
+	// Tear the db down so the sync goroutine stops touching go-mysql-server
+	// before view's SELECT runs. wal storage stays open for view's reads.
+	require.Nil(t, db.Close())
+
+	view(t, storage, syncableID, databaseID, p1, connectionString)
 
 	// TODO Restart/persistence coverage:
 	// - Do a second proposal
@@ -155,22 +153,41 @@ func addParsers(t *testing.T, db *test.DB, dialect sql.Dialect, typeID string) {
 	))
 }
 
-func view(t *testing.T, s db.Storage, databaseID string, p *Proposal, connectionString string) {
+// waitForSyncCaughtUp blocks until the sync worker is no longer making
+// forward progress on the named syncable. We can't compare against
+// wal.LastIndex because every successful sync writes a SyncableIndex entry,
+// which itself bumps lastIndex — the syncable index would chase a moving
+// target it can never reach. Instead we sample the persisted syncable
+// index, sleep one poll interval, sample again, and accept the snapshot
+// once two consecutive samples agree (and at least one normal proposal
+// has been processed). This is a "stable for one tick" check, which is
+// good enough because the test only proposes one normal entry.
+func waitForSyncCaughtUp(t *testing.T, s *wal.Storage, syncableID string) {
+	t.Helper()
+	const interval = 10 * time.Millisecond
+	deadline := time.Now().Add(2 * time.Second)
+	var prev uint64
+	have := false
+	for time.Now().Before(deadline) {
+		idx, err := s.GetSyncableIndex(syncableID)
+		if err == nil && idx > 0 {
+			if have && idx == prev {
+				return
+			}
+			prev = idx
+			have = true
+		}
+		time.Sleep(interval)
+	}
+	t.Fatalf("timed out waiting for sync to catch up on %q", syncableID)
+}
+
+func view(t *testing.T, s *wal.Storage, syncableID string, databaseID string, p *Proposal, connectionString string) {
 	database, err := s.Database(databaseID)
 	require.Nil(t, err)
 	db := database.(*sql.DB).DB
 	_, err = db.Exec("USE " + connectionString)
 	require.Nil(t, err)
-
-	// The syncable applies asynchronously after addSyncable returns, so poll
-	// until the row appears (or the deadline expires).
-	waitFor(t, "syncable to write row", func() bool {
-		var pk string
-		err := db.QueryRow(
-			"SELECT pk FROM "+connectionString+".foo WHERE pk = ?", p.key,
-		).Scan(&pk)
-		return err == nil
-	})
 
 	rows, err := db.Query("SELECT pk, one FROM "+connectionString+".foo WHERE pk = ?", p.key)
 	require.Nil(t, err)
@@ -365,7 +382,7 @@ func createProposal(typeID string, key string, one string) *Proposal {
 	}
 }
 
-func createDB(t *testing.T, p *parser.Parser, dir string, sync chan *db.SyncableWithID, ingest chan *db.IngestableWithID) (db.Storage, *test.DB) {
+func createDB(t *testing.T, p *parser.Parser, dir string, sync chan *db.SyncableWithID, ingest chan *db.IngestableWithID) (*wal.Storage, *test.DB) {
 	storage, err := wal.Open(dir, p, sync, ingest)
 	require.Nil(t, err)
 

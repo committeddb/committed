@@ -83,10 +83,11 @@ type FakeCluster struct {
 		result1 []*cluster.Proposal
 		result2 error
 	}
-	ProposeStub        func(*cluster.Proposal) error
+	ProposeStub        func(context.Context, *cluster.Proposal) error
 	proposeMutex       sync.RWMutex
 	proposeArgsForCall []struct {
-		arg1 *cluster.Proposal
+		arg1 context.Context
+		arg2 *cluster.Proposal
 	}
 	proposeReturns struct {
 		result1 error
@@ -94,10 +95,11 @@ type FakeCluster struct {
 	proposeReturnsOnCall map[int]struct {
 		result1 error
 	}
-	ProposeDatabaseStub        func(*cluster.Configuration) error
+	ProposeDatabaseStub        func(context.Context, *cluster.Configuration) error
 	proposeDatabaseMutex       sync.RWMutex
 	proposeDatabaseArgsForCall []struct {
-		arg1 *cluster.Configuration
+		arg1 context.Context
+		arg2 *cluster.Configuration
 	}
 	proposeDatabaseReturns struct {
 		result1 error
@@ -105,10 +107,11 @@ type FakeCluster struct {
 	proposeDatabaseReturnsOnCall map[int]struct {
 		result1 error
 	}
-	ProposeDeleteTypeStub        func(string) error
+	ProposeDeleteTypeStub        func(context.Context, string) error
 	proposeDeleteTypeMutex       sync.RWMutex
 	proposeDeleteTypeArgsForCall []struct {
-		arg1 string
+		arg1 context.Context
+		arg2 string
 	}
 	proposeDeleteTypeReturns struct {
 		result1 error
@@ -116,10 +119,11 @@ type FakeCluster struct {
 	proposeDeleteTypeReturnsOnCall map[int]struct {
 		result1 error
 	}
-	ProposeIngestableStub        func(*cluster.Configuration) error
+	ProposeIngestableStub        func(context.Context, *cluster.Configuration) error
 	proposeIngestableMutex       sync.RWMutex
 	proposeIngestableArgsForCall []struct {
-		arg1 *cluster.Configuration
+		arg1 context.Context
+		arg2 *cluster.Configuration
 	}
 	proposeIngestableReturns struct {
 		result1 error
@@ -127,10 +131,11 @@ type FakeCluster struct {
 	proposeIngestableReturnsOnCall map[int]struct {
 		result1 error
 	}
-	ProposeSyncableStub        func(*cluster.Configuration) error
+	ProposeSyncableStub        func(context.Context, *cluster.Configuration) error
 	proposeSyncableMutex       sync.RWMutex
 	proposeSyncableArgsForCall []struct {
-		arg1 *cluster.Configuration
+		arg1 context.Context
+		arg2 *cluster.Configuration
 	}
 	proposeSyncableReturns struct {
 		result1 error
@@ -138,10 +143,11 @@ type FakeCluster struct {
 	proposeSyncableReturnsOnCall map[int]struct {
 		result1 error
 	}
-	ProposeTypeStub        func(*cluster.Configuration) error
+	ProposeTypeStub        func(context.Context, *cluster.Configuration) error
 	proposeTypeMutex       sync.RWMutex
 	proposeTypeArgsForCall []struct {
-		arg1 *cluster.Configuration
+		arg1 context.Context
+		arg2 *cluster.Configuration
 	}
 	proposeTypeReturns struct {
 		result1 error
@@ -577,18 +583,19 @@ func (fake *FakeCluster) ProposalsReturnsOnCall(i int, result1 []*cluster.Propos
 	}{result1, result2}
 }
 
-func (fake *FakeCluster) Propose(arg1 *cluster.Proposal) error {
+func (fake *FakeCluster) Propose(arg1 context.Context, arg2 *cluster.Proposal) error {
 	fake.proposeMutex.Lock()
 	ret, specificReturn := fake.proposeReturnsOnCall[len(fake.proposeArgsForCall)]
 	fake.proposeArgsForCall = append(fake.proposeArgsForCall, struct {
-		arg1 *cluster.Proposal
-	}{arg1})
+		arg1 context.Context
+		arg2 *cluster.Proposal
+	}{arg1, arg2})
 	stub := fake.ProposeStub
 	fakeReturns := fake.proposeReturns
-	fake.recordInvocation("Propose", []interface{}{arg1})
+	fake.recordInvocation("Propose", []interface{}{arg1, arg2})
 	fake.proposeMutex.Unlock()
 	if stub != nil {
-		return stub(arg1)
+		return stub(arg1, arg2)
 	}
 	if specificReturn {
 		return ret.result1
@@ -602,17 +609,17 @@ func (fake *FakeCluster) ProposeCallCount() int {
 	return len(fake.proposeArgsForCall)
 }
 
-func (fake *FakeCluster) ProposeCalls(stub func(*cluster.Proposal) error) {
+func (fake *FakeCluster) ProposeCalls(stub func(context.Context, *cluster.Proposal) error) {
 	fake.proposeMutex.Lock()
 	defer fake.proposeMutex.Unlock()
 	fake.ProposeStub = stub
 }
 
-func (fake *FakeCluster) ProposeArgsForCall(i int) *cluster.Proposal {
+func (fake *FakeCluster) ProposeArgsForCall(i int) (context.Context, *cluster.Proposal) {
 	fake.proposeMutex.RLock()
 	defer fake.proposeMutex.RUnlock()
 	argsForCall := fake.proposeArgsForCall[i]
-	return argsForCall.arg1
+	return argsForCall.arg1, argsForCall.arg2
 }
 
 func (fake *FakeCluster) ProposeReturns(result1 error) {
@@ -638,18 +645,19 @@ func (fake *FakeCluster) ProposeReturnsOnCall(i int, result1 error) {
 	}{result1}
 }
 
-func (fake *FakeCluster) ProposeDatabase(arg1 *cluster.Configuration) error {
+func (fake *FakeCluster) ProposeDatabase(arg1 context.Context, arg2 *cluster.Configuration) error {
 	fake.proposeDatabaseMutex.Lock()
 	ret, specificReturn := fake.proposeDatabaseReturnsOnCall[len(fake.proposeDatabaseArgsForCall)]
 	fake.proposeDatabaseArgsForCall = append(fake.proposeDatabaseArgsForCall, struct {
-		arg1 *cluster.Configuration
-	}{arg1})
+		arg1 context.Context
+		arg2 *cluster.Configuration
+	}{arg1, arg2})
 	stub := fake.ProposeDatabaseStub
 	fakeReturns := fake.proposeDatabaseReturns
-	fake.recordInvocation("ProposeDatabase", []interface{}{arg1})
+	fake.recordInvocation("ProposeDatabase", []interface{}{arg1, arg2})
 	fake.proposeDatabaseMutex.Unlock()
 	if stub != nil {
-		return stub(arg1)
+		return stub(arg1, arg2)
 	}
 	if specificReturn {
 		return ret.result1
@@ -663,17 +671,17 @@ func (fake *FakeCluster) ProposeDatabaseCallCount() int {
 	return len(fake.proposeDatabaseArgsForCall)
 }
 
-func (fake *FakeCluster) ProposeDatabaseCalls(stub func(*cluster.Configuration) error) {
+func (fake *FakeCluster) ProposeDatabaseCalls(stub func(context.Context, *cluster.Configuration) error) {
 	fake.proposeDatabaseMutex.Lock()
 	defer fake.proposeDatabaseMutex.Unlock()
 	fake.ProposeDatabaseStub = stub
 }
 
-func (fake *FakeCluster) ProposeDatabaseArgsForCall(i int) *cluster.Configuration {
+func (fake *FakeCluster) ProposeDatabaseArgsForCall(i int) (context.Context, *cluster.Configuration) {
 	fake.proposeDatabaseMutex.RLock()
 	defer fake.proposeDatabaseMutex.RUnlock()
 	argsForCall := fake.proposeDatabaseArgsForCall[i]
-	return argsForCall.arg1
+	return argsForCall.arg1, argsForCall.arg2
 }
 
 func (fake *FakeCluster) ProposeDatabaseReturns(result1 error) {
@@ -699,18 +707,19 @@ func (fake *FakeCluster) ProposeDatabaseReturnsOnCall(i int, result1 error) {
 	}{result1}
 }
 
-func (fake *FakeCluster) ProposeDeleteType(arg1 string) error {
+func (fake *FakeCluster) ProposeDeleteType(arg1 context.Context, arg2 string) error {
 	fake.proposeDeleteTypeMutex.Lock()
 	ret, specificReturn := fake.proposeDeleteTypeReturnsOnCall[len(fake.proposeDeleteTypeArgsForCall)]
 	fake.proposeDeleteTypeArgsForCall = append(fake.proposeDeleteTypeArgsForCall, struct {
-		arg1 string
-	}{arg1})
+		arg1 context.Context
+		arg2 string
+	}{arg1, arg2})
 	stub := fake.ProposeDeleteTypeStub
 	fakeReturns := fake.proposeDeleteTypeReturns
-	fake.recordInvocation("ProposeDeleteType", []interface{}{arg1})
+	fake.recordInvocation("ProposeDeleteType", []interface{}{arg1, arg2})
 	fake.proposeDeleteTypeMutex.Unlock()
 	if stub != nil {
-		return stub(arg1)
+		return stub(arg1, arg2)
 	}
 	if specificReturn {
 		return ret.result1
@@ -724,17 +733,17 @@ func (fake *FakeCluster) ProposeDeleteTypeCallCount() int {
 	return len(fake.proposeDeleteTypeArgsForCall)
 }
 
-func (fake *FakeCluster) ProposeDeleteTypeCalls(stub func(string) error) {
+func (fake *FakeCluster) ProposeDeleteTypeCalls(stub func(context.Context, string) error) {
 	fake.proposeDeleteTypeMutex.Lock()
 	defer fake.proposeDeleteTypeMutex.Unlock()
 	fake.ProposeDeleteTypeStub = stub
 }
 
-func (fake *FakeCluster) ProposeDeleteTypeArgsForCall(i int) string {
+func (fake *FakeCluster) ProposeDeleteTypeArgsForCall(i int) (context.Context, string) {
 	fake.proposeDeleteTypeMutex.RLock()
 	defer fake.proposeDeleteTypeMutex.RUnlock()
 	argsForCall := fake.proposeDeleteTypeArgsForCall[i]
-	return argsForCall.arg1
+	return argsForCall.arg1, argsForCall.arg2
 }
 
 func (fake *FakeCluster) ProposeDeleteTypeReturns(result1 error) {
@@ -760,18 +769,19 @@ func (fake *FakeCluster) ProposeDeleteTypeReturnsOnCall(i int, result1 error) {
 	}{result1}
 }
 
-func (fake *FakeCluster) ProposeIngestable(arg1 *cluster.Configuration) error {
+func (fake *FakeCluster) ProposeIngestable(arg1 context.Context, arg2 *cluster.Configuration) error {
 	fake.proposeIngestableMutex.Lock()
 	ret, specificReturn := fake.proposeIngestableReturnsOnCall[len(fake.proposeIngestableArgsForCall)]
 	fake.proposeIngestableArgsForCall = append(fake.proposeIngestableArgsForCall, struct {
-		arg1 *cluster.Configuration
-	}{arg1})
+		arg1 context.Context
+		arg2 *cluster.Configuration
+	}{arg1, arg2})
 	stub := fake.ProposeIngestableStub
 	fakeReturns := fake.proposeIngestableReturns
-	fake.recordInvocation("ProposeIngestable", []interface{}{arg1})
+	fake.recordInvocation("ProposeIngestable", []interface{}{arg1, arg2})
 	fake.proposeIngestableMutex.Unlock()
 	if stub != nil {
-		return stub(arg1)
+		return stub(arg1, arg2)
 	}
 	if specificReturn {
 		return ret.result1
@@ -785,17 +795,17 @@ func (fake *FakeCluster) ProposeIngestableCallCount() int {
 	return len(fake.proposeIngestableArgsForCall)
 }
 
-func (fake *FakeCluster) ProposeIngestableCalls(stub func(*cluster.Configuration) error) {
+func (fake *FakeCluster) ProposeIngestableCalls(stub func(context.Context, *cluster.Configuration) error) {
 	fake.proposeIngestableMutex.Lock()
 	defer fake.proposeIngestableMutex.Unlock()
 	fake.ProposeIngestableStub = stub
 }
 
-func (fake *FakeCluster) ProposeIngestableArgsForCall(i int) *cluster.Configuration {
+func (fake *FakeCluster) ProposeIngestableArgsForCall(i int) (context.Context, *cluster.Configuration) {
 	fake.proposeIngestableMutex.RLock()
 	defer fake.proposeIngestableMutex.RUnlock()
 	argsForCall := fake.proposeIngestableArgsForCall[i]
-	return argsForCall.arg1
+	return argsForCall.arg1, argsForCall.arg2
 }
 
 func (fake *FakeCluster) ProposeIngestableReturns(result1 error) {
@@ -821,18 +831,19 @@ func (fake *FakeCluster) ProposeIngestableReturnsOnCall(i int, result1 error) {
 	}{result1}
 }
 
-func (fake *FakeCluster) ProposeSyncable(arg1 *cluster.Configuration) error {
+func (fake *FakeCluster) ProposeSyncable(arg1 context.Context, arg2 *cluster.Configuration) error {
 	fake.proposeSyncableMutex.Lock()
 	ret, specificReturn := fake.proposeSyncableReturnsOnCall[len(fake.proposeSyncableArgsForCall)]
 	fake.proposeSyncableArgsForCall = append(fake.proposeSyncableArgsForCall, struct {
-		arg1 *cluster.Configuration
-	}{arg1})
+		arg1 context.Context
+		arg2 *cluster.Configuration
+	}{arg1, arg2})
 	stub := fake.ProposeSyncableStub
 	fakeReturns := fake.proposeSyncableReturns
-	fake.recordInvocation("ProposeSyncable", []interface{}{arg1})
+	fake.recordInvocation("ProposeSyncable", []interface{}{arg1, arg2})
 	fake.proposeSyncableMutex.Unlock()
 	if stub != nil {
-		return stub(arg1)
+		return stub(arg1, arg2)
 	}
 	if specificReturn {
 		return ret.result1
@@ -846,17 +857,17 @@ func (fake *FakeCluster) ProposeSyncableCallCount() int {
 	return len(fake.proposeSyncableArgsForCall)
 }
 
-func (fake *FakeCluster) ProposeSyncableCalls(stub func(*cluster.Configuration) error) {
+func (fake *FakeCluster) ProposeSyncableCalls(stub func(context.Context, *cluster.Configuration) error) {
 	fake.proposeSyncableMutex.Lock()
 	defer fake.proposeSyncableMutex.Unlock()
 	fake.ProposeSyncableStub = stub
 }
 
-func (fake *FakeCluster) ProposeSyncableArgsForCall(i int) *cluster.Configuration {
+func (fake *FakeCluster) ProposeSyncableArgsForCall(i int) (context.Context, *cluster.Configuration) {
 	fake.proposeSyncableMutex.RLock()
 	defer fake.proposeSyncableMutex.RUnlock()
 	argsForCall := fake.proposeSyncableArgsForCall[i]
-	return argsForCall.arg1
+	return argsForCall.arg1, argsForCall.arg2
 }
 
 func (fake *FakeCluster) ProposeSyncableReturns(result1 error) {
@@ -882,18 +893,19 @@ func (fake *FakeCluster) ProposeSyncableReturnsOnCall(i int, result1 error) {
 	}{result1}
 }
 
-func (fake *FakeCluster) ProposeType(arg1 *cluster.Configuration) error {
+func (fake *FakeCluster) ProposeType(arg1 context.Context, arg2 *cluster.Configuration) error {
 	fake.proposeTypeMutex.Lock()
 	ret, specificReturn := fake.proposeTypeReturnsOnCall[len(fake.proposeTypeArgsForCall)]
 	fake.proposeTypeArgsForCall = append(fake.proposeTypeArgsForCall, struct {
-		arg1 *cluster.Configuration
-	}{arg1})
+		arg1 context.Context
+		arg2 *cluster.Configuration
+	}{arg1, arg2})
 	stub := fake.ProposeTypeStub
 	fakeReturns := fake.proposeTypeReturns
-	fake.recordInvocation("ProposeType", []interface{}{arg1})
+	fake.recordInvocation("ProposeType", []interface{}{arg1, arg2})
 	fake.proposeTypeMutex.Unlock()
 	if stub != nil {
-		return stub(arg1)
+		return stub(arg1, arg2)
 	}
 	if specificReturn {
 		return ret.result1
@@ -907,17 +919,17 @@ func (fake *FakeCluster) ProposeTypeCallCount() int {
 	return len(fake.proposeTypeArgsForCall)
 }
 
-func (fake *FakeCluster) ProposeTypeCalls(stub func(*cluster.Configuration) error) {
+func (fake *FakeCluster) ProposeTypeCalls(stub func(context.Context, *cluster.Configuration) error) {
 	fake.proposeTypeMutex.Lock()
 	defer fake.proposeTypeMutex.Unlock()
 	fake.ProposeTypeStub = stub
 }
 
-func (fake *FakeCluster) ProposeTypeArgsForCall(i int) *cluster.Configuration {
+func (fake *FakeCluster) ProposeTypeArgsForCall(i int) (context.Context, *cluster.Configuration) {
 	fake.proposeTypeMutex.RLock()
 	defer fake.proposeTypeMutex.RUnlock()
 	argsForCall := fake.proposeTypeArgsForCall[i]
-	return argsForCall.arg1
+	return argsForCall.arg1, argsForCall.arg2
 }
 
 func (fake *FakeCluster) ProposeTypeReturns(result1 error) {

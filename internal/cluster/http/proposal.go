@@ -47,7 +47,7 @@ func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
 
 	fmt.Printf("Proposal contained %d entries\n", len(es))
 
-	err = h.c.Propose(p)
+	err = h.c.Propose(r.Context(), p)
 	if err != nil {
 		internalServerError(w, err)
 		return

@@ -2,7 +2,6 @@ package db_test
 
 import (
 	"testing"
-	"time"
 
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/stretchr/testify/require"
@@ -69,27 +68,26 @@ func TestProposals(t *testing.T) {
 			db := createDB()
 			defer db.Close()
 
-			db.EatCommitC()
+			// db.New now calls EatCommitC automatically, so the explicit
+			// call here is redundant after PR2.
 
+			ctx := testCtx(t)
 			for _, id := range tc.typeIDsToCreate {
 				tipe := createType(id)
-				err := db.ProposeType(tipe.config)
+				err := db.ProposeType(ctx, tipe.config)
 				require.Nil(t, err)
 			}
 
 			for _, p := range tc.add {
-				err := db.Propose(p)
+				err := db.Propose(ctx, p)
 				require.Nil(t, err)
 			}
 
-			// Proposals are processed asynchronously through Raft. Poll
-			// db.Proposals until the expected number arrive (or fail after 2s).
-			var ps []*cluster.Proposal
-			require.Eventually(t, func() bool {
-				var err error
-				ps, err = db.Proposals(tc.amount, tc.typeIDsToSearchFor...)
-				return err == nil && len(ps) == len(tc.expect)
-			}, 2*time.Second, 5*time.Millisecond)
+			// Blocking Propose returns after apply, so the proposals are
+			// already in storage by here. No polling needed.
+			ps, err := db.Proposals(tc.amount, tc.typeIDsToSearchFor...)
+			require.Nil(t, err)
+			require.Equal(t, len(tc.expect), len(ps))
 
 			for i := range tc.expect {
 				require.Equal(t, string(tc.expect[i].Entities[0].Key), string(ps[i].Entities[0].Key))

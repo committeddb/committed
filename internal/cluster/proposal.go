@@ -12,6 +12,14 @@ var delete []byte = []byte("7ec589c2-3318-4a3c-839b-a9af9c9443be")
 
 type Proposal struct {
 	Entities []*Entity
+	// RequestID lets db.Propose's caller wait for *its* proposal to be
+	// applied. db.DB sets this in db.Propose to a unique value before
+	// marshaling, registers a waiter under the same ID, and the apply path
+	// signals the waiter after the entity bucket writes succeed. A
+	// RequestID of 0 means "no waiter" — used by system-internal proposers
+	// (ingest worker, sync worker) that don't need read-after-write
+	// semantics. Backward-compatible: old log entries unmarshal as 0.
+	RequestID uint64
 }
 
 type Entity struct {
@@ -63,7 +71,7 @@ func (p *Proposal) Marshal() ([]byte, error) {
 		es = append(es, &clusterpb.LogEntity{TypeID: e.Type.ID, Key: e.Key, Data: e.Data})
 	}
 
-	lp := &clusterpb.LogProposal{LogEntities: es}
+	lp := &clusterpb.LogProposal{LogEntities: es, RequestID: p.RequestID}
 
 	return proto.Marshal(lp)
 }
@@ -75,6 +83,7 @@ func (p *Proposal) Unmarshal(bs []byte) error {
 		return err
 	}
 
+	p.RequestID = lp.RequestID
 	for _, e := range lp.LogEntities {
 		// TODO Get the type from a map of types
 		t := &Type{ID: e.TypeID}

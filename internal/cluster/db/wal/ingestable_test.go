@@ -3,7 +3,6 @@ package wal_test
 import (
 	"context"
 	"fmt"
-	"sync"
 	"testing"
 	"time"
 
@@ -243,18 +242,7 @@ func TestProposeIngestable_StartsIngestionWiring(t *testing.T) {
 	id := uint64(1)
 	peers := db.Peers{id: ""}
 	d := db.New(id, peers, storage, p, syncCh, ingest, db.WithTickInterval(1*time.Millisecond))
-	// db.Close panics on second call (it close()s proposeC without
-	// sync.Once protection). The test needs to call Close mid-flow to
-	// quiesce the raft loop before reading wal.Storage's
-	// firstIndex/lastIndex (those fields are unsynchronized — pre-existing
-	// gap surfaced when this test was added). Wrap Close in a local
-	// sync.Once so the deferred safety-net cleanup is harmless if the
-	// happy path already closed.
-	var closeOnce sync.Once
-	closeDB := func() {
-		closeOnce.Do(func() { _ = d.Close() })
-	}
-	defer closeDB()
+	defer d.Close()
 	d.EatCommitC()
 
 	cfg := &cluster.Configuration{
@@ -265,26 +253,22 @@ func TestProposeIngestable_StartsIngestionWiring(t *testing.T) {
 		}`),
 	}
 
-	require.Nil(t, d.ProposeIngestable(cfg))
+	require.Nil(t, d.ProposeIngestable(context.Background(), cfg))
 
-	// Wait for at least two committed entries to be applied: the
-	// ingestable Configuration and the proposal that the ingestable
-	// produced via the wired channel. AppliedIndex is backed by an
-	// atomic.Uint64 so it's safe to read concurrently with the raft
-	// goroutine that's writing it. (Polling FirstIndex/LastIndex/Entries
-	// directly would race against wal.Storage's plain-uint64 firstIndex/
-	// lastIndex fields, which appendEntries mutates from inside Save.)
+	// d.ProposeIngestable is blocking after PR2: when it returns, the
+	// configuration entry is already applied and storage.AppliedIndex
+	// reflects whatever raft index it landed at (this depends on
+	// pre-existing entries from leader election, conf-change bootstrap,
+	// etc., so we can't hard-code the expected value). We then wait for
+	// AppliedIndex to grow further, which signals that the ingest worker
+	// has emitted its test-key proposal AND that proposal has been
+	// applied. AppliedIndex is backed by atomic.Uint64 so it's safe to
+	// read concurrently with the raft goroutine that writes it.
+	configAppliedIndex := storage.AppliedIndex()
 	require.Eventually(t, func() bool {
-		return storage.AppliedIndex() >= 2
+		return storage.AppliedIndex() > configAppliedIndex
 	}, 2*time.Second, 5*time.Millisecond,
-		"expected Configuration + ingested Proposal to be applied")
-
-	// Quiesce the raft loop before reading the entry log directly.
-	// readNormalProposals reads the unsynchronized firstIndex/lastIndex
-	// fields, which would otherwise race against the running raft
-	// goroutine. Closing the db waits for serveChannels to exit, after
-	// which those fields are safe to read.
-	closeDB()
+		"expected ingested Proposal to be applied after Configuration")
 
 	ents := readNormalProposals(storage)
 	require.GreaterOrEqual(t, len(ents), 2,

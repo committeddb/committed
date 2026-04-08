@@ -66,9 +66,9 @@ func TestSync_SyncError_Continues(t *testing.T) {
 
 	// Propose 3 proposals
 	ps := createProposals([][]string{{"a"}, {"b"}, {"c"}})
+	proposeCtx := testCtx(t)
 	for _, p := range ps {
-		require.Nil(t, db.Propose(p))
-		<-db.CommitC
+		require.Nil(t, db.Propose(proposeCtx, p))
 	}
 
 	// Syncable that always returns an error but counts calls
@@ -122,8 +122,7 @@ func TestSync_EOF_Continues(t *testing.T) {
 	db := createDBWithStorage(s)
 	defer db.Close()
 
-	// Drain commits asynchronously so propose calls never block.
-	db.EatCommitC()
+	// db.New now calls EatCommitC automatically.
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -140,7 +139,7 @@ func TestSync_EOF_Continues(t *testing.T) {
 
 	// Now add a proposal - sync should pick it up despite earlier EOFs
 	p := createProposals([][]string{{"after-eof"}})[0]
-	require.Nil(t, db.Propose(p))
+	require.Nil(t, db.Propose(testCtx(t), p))
 
 	// Wait for sync to process the proposal (which fires cancel)
 	<-ctx.Done()

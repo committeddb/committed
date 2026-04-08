@@ -1,6 +1,10 @@
 package db
 
-import "github.com/philborlin/committed/internal/cluster"
+import (
+	"context"
+
+	"github.com/philborlin/committed/internal/cluster"
+)
 
 type IngestableWithID struct {
 	ID         string
@@ -11,7 +15,7 @@ func (db *DB) AddIngestableParser(name string, p cluster.IngestableParser) {
 	db.parser.AddIngestableParser(name, p)
 }
 
-func (db *DB) ProposeIngestable(c *cluster.Configuration) error {
+func (db *DB) ProposeIngestable(ctx context.Context, c *cluster.Configuration) error {
 	_, _, err := db.ParseIngestable(c.MimeType, c.Data)
 	if err != nil {
 		return err
@@ -23,7 +27,7 @@ func (db *DB) ProposeIngestable(c *cluster.Configuration) error {
 	}
 
 	p := &cluster.Proposal{Entities: []*cluster.Entity{e}}
-	return db.Propose(p)
+	return db.Propose(ctx, p)
 }
 
 func (db *DB) ParseIngestable(mimeType string, data []byte) (string, cluster.Ingestable, error) {

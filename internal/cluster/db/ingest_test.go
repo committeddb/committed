@@ -32,16 +32,25 @@ func TestIngest(t *testing.T) {
 			defer db.Close()
 
 			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 			ps := createProposals(tc.inputs)
 			positions := []cluster.Position{cluster.Position([]byte("foo"))}
 			ingestable := NewIngestable(ps, positions, cancel)
 			err := db.Ingest(ctx, id, ingestable)
 			require.Nil(t, err)
-			for i := 0; i < (len(ps) + len(positions)); i++ {
-				<-db.CommitC
-			}
 
+			// db.New now drains CommitC automatically (PR2), so the
+			// previous "<-db.CommitC N times" sync no longer works. Poll
+			// the entry log via db.ents() — etcd's raft.MemoryStorage
+			// (which db_test.MemoryStorage embeds) is mutex-guarded, so
+			// reading from the test goroutine while the raft loop writes
+			// is safe.
 			size := len(ps) + len(positions)
+			require.Eventually(t, func() bool {
+				ents, err := db.ents()
+				return err == nil && len(ents) >= size
+			}, 5*time.Second, 5*time.Millisecond)
+
 			checkCommits(t, db, ps, size-1)
 		})
 	}
@@ -70,11 +79,13 @@ func TestResumeIngest(t *testing.T) {
 			ingestable := NewIngestable(ps, positions, cancel)
 			err := db.Ingest(ctx, id, ingestable)
 			require.Nil(t, err)
-			for i := 0; i < (len(ps) + len(positions)); i++ {
-				<-db.CommitC
-			}
 
 			size := len(ps) + len(positions)
+			require.Eventually(t, func() bool {
+				ents, err := db.ents()
+				return err == nil && len(ents) >= size
+			}, 5*time.Second, 5*time.Millisecond)
+
 			checkCommits(t, db, ps, size-1)
 
 			cancel()
@@ -82,17 +93,20 @@ func TestResumeIngest(t *testing.T) {
 			storage.positions[id] = &MemoryPosition{ProIndex: len(tc.inputs), PosIndex: 1}
 
 			ctx, cancel = context.WithCancel(context.Background())
+			defer cancel()
 			inputs2 := modifyInputs(tc.inputs)
 			ps2 := createProposals(inputs2)
 			positions2 := []cluster.Position{cluster.Position([]byte("bar"))}
 			ingestable2 := NewIngestable(append(ps, ps2...), append(positions, positions2...), cancel)
 			err = db.Ingest(ctx, id, ingestable2)
 			require.Nil(t, err)
-			for i := 0; i < (len(ps) + len(positions)); i++ {
-				<-db.CommitC
-			}
 
 			size2 := (len(ps) + len(positions)) * 2
+			require.Eventually(t, func() bool {
+				ents, err := db.ents()
+				return err == nil && len(ents) >= size2
+			}, 5*time.Second, 5*time.Millisecond)
+
 			checkCommits(t, db, append(ps, ps2...), len(ps), size2-1)
 		})
 	}
@@ -133,7 +147,7 @@ func TestIngestWithStateChanges(t *testing.T) {
 			db := createDBWithStorage(s)
 			defer db.Close()
 
-			db.EatCommitC()
+			// db.New now calls EatCommitC automatically.
 
 			// Start as not leader
 			s.SetNode(math.MaxUint64)

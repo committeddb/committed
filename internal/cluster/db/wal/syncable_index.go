@@ -56,6 +56,15 @@ func (s *Storage) deleteSyncableIndex(id []byte) error {
 	})
 }
 
+// GetSyncableIndex returns the highest raft entry index that the named
+// syncable's worker has finished syncing. Tests use this as a barrier:
+// once it has advanced past the persisted lastIndex, the sync worker is
+// caught up and follow-up reads against the destination database don't
+// race with in-flight INSERTs.
+func (s *Storage) GetSyncableIndex(id string) (uint64, error) {
+	return s.getSyncableIndex(id)
+}
+
 func (s *Storage) getSyncableIndex(id string) (uint64, error) {
 	index := &cluster.SyncableIndex{}
 	err := s.keyValueStorage.View(func(tx *bolt.Tx) error {

@@ -33,16 +33,16 @@ func TestSync(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			ps := createProposals(tc.inputs)
 			for _, p := range ps {
-				require.Equal(t, nil, db.Propose(p))
-				<-db.CommitC
+				require.Equal(t, nil, db.Propose(testCtx(t), p))
 			}
 
 			syncable := NewSyncable(size, cancel)
 			err := db.Sync(ctx, id, syncable)
 			require.Nil(t, err)
-			for i := 0; i < len(tc.inputs); i++ {
-				<-db.CommitC
-			}
+			// The sync goroutine cancels ctx once it has consumed `size`
+			// proposals; wait on that instead of <-db.CommitC, which is
+			// now drained by the auto-EatCommitC in db.New.
+			<-ctx.Done()
 			checkSyncs(t, db, syncable, ps)
 		})
 	}
@@ -72,9 +72,9 @@ func TestResumeSync(t *testing.T) {
 			syncable := NewSyncable(size, cancel)
 
 			_ = db.Sync(ctx, id, syncable)
-			for i := 0; i < len(tc.inputs); i++ {
-				<-db.CommitC
-			}
+			// Sync goroutine cancels ctx once it has consumed `size`
+			// proposals; <-ctx.Done() replaces the old <-db.CommitC pump.
+			<-ctx.Done()
 
 			inputs2 := modifyInputs(tc.inputs)
 
@@ -85,9 +85,7 @@ func TestResumeSync(t *testing.T) {
 			storage.indexes[id] = getLastIndex(storage, ps)
 
 			_ = db.Sync(ctx, id, syncable)
-			for i := 0; i < len(inputs2); i++ {
-				<-db.CommitC
-			}
+			<-ctx.Done()
 
 			require.Equal(t, size, syncable.Count())
 
@@ -145,16 +143,17 @@ func TestSyncWithStateChanges(t *testing.T) {
 
 			size := len(tc.input1)
 
-			db.EatCommitC()
+			// db.New now calls EatCommitC automatically.
 
 			// Start as not leader
 			s.SetNode(math.MaxUint64)
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+			proposeCtx := testCtx(t)
 			ps := createProposals(tc.input1)
 			for _, p := range ps {
-				require.Equal(t, nil, db.Propose(p))
+				require.Equal(t, nil, db.Propose(proposeCtx, p))
 			}
 
 			syncable := NewSyncable(len(tc.input1)+len(tc.input2)+1, cancel)
@@ -175,7 +174,7 @@ func TestSyncWithStateChanges(t *testing.T) {
 			s.SetNode(db.ID())
 			ps2 := createProposals(tc.input2)
 			for _, p := range ps2 {
-				require.Equal(t, nil, db.Propose(p))
+				require.Equal(t, nil, db.Propose(proposeCtx, p))
 			}
 			newSize := size + len(tc.input2)
 			require.Eventually(t, func() bool { return syncable.Count() == newSize }, activeWait, 5*time.Millisecond)
@@ -185,7 +184,7 @@ func TestSyncWithStateChanges(t *testing.T) {
 			time.Sleep(quietWait)
 			ps3 := createProposals(tc.input2)
 			for _, p := range ps3 {
-				require.Equal(t, nil, db.Propose(p))
+				require.Equal(t, nil, db.Propose(proposeCtx, p))
 			}
 			time.Sleep(quietWait)
 			require.Equal(t, newSize, syncable.Count())
@@ -199,9 +198,20 @@ func checkSyncs(t *testing.T, db *DB, syncable *MemorySyncable, ps []*cluster.Pr
 	size := len(ps)
 	require.Equal(t, size, syncable.Count())
 
-	ents, err := db.ents()
+	// The sync worker fires proposeSyncableIndex after each successful
+	// s.Sync, but it's fire-and-forget — by the time the syncable's
+	// internal cancel() unblocks the test, the SyncableIndex propose may
+	// not yet have been committed and applied. Poll until both halves
+	// (original proposals + syncable indexes) are visible.
+	expected := len(ps) * 2
+	var ents []*cluster.Proposal
+	var err error
+	require.Eventually(t, func() bool {
+		ents, err = db.ents()
+		return err == nil && len(ents) == expected
+	}, 5*time.Second, 5*time.Millisecond)
 	require.Nil(t, err)
-	require.Equal(t, len(ps)*2, len(ents))
+	require.Equal(t, expected, len(ents))
 
 	for i, p := range ents {
 		got := cluster.IsSyncableIndex(p.Entities[0].Type.ID)
