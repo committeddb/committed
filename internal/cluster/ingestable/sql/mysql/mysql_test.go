@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"testing"
+	"time"
 
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/ingestable/sql"
@@ -121,11 +122,25 @@ func TestMysqlDialect(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Run setup BEFORE starting the dialect. canal's initial
+			// mysqldump captures the table state at the moment Ingest
+			// starts; the binlog tail then picks up changes from that
+			// point forward. Running setup first means the dump captures
+			// the final state and the tail has nothing left to deliver,
+			// which makes the test deterministic. The previous order
+			// (dialect starts, then setup runs) created a race window
+			// where the dump would snapshot a stale or empty table and
+			// the tail would replay setup's events — sometimes
+			// duplicating rows when stale dump state coincided with new
+			// tail INSERTs.
+			tt.setupFn(t)
+
 			dialect := &mysql.MySQLDialect{}
 			con := fmt.Sprintf("mysql://%s:%s@127.0.0.1:%s/%s?tables=%s", username, password, port, dbName, tt.tables)
 			tt.config.ConnectionString = con
 
 			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 
 			proposalChan := make(chan *cluster.Proposal)
 			positionChan := make(chan cluster.Position)
@@ -135,26 +150,46 @@ func TestMysqlDialect(t *testing.T) {
 				require.Nil(t, err)
 			}()
 
-			defer cancel()
-
-			tt.setupFn(t)
-
-			expectedCount := 2
-
-			var proposals []*cluster.Proposal
-			var positions []*cluster.Position
-		outer:
+			// Collect proposals until we've seen the expected number AND
+			// no new ones arrive for a quiet period. The quiet-period
+			// check guards against canal occasionally re-delivering a
+			// row through the binlog tail in addition to the dump
+			// (cross-subtest binlog state can leak through). Position
+			// events still need draining — the dialect blocks on the
+			// unbuffered positionChan, and a backed-up channel would
+			// stall the binlog goroutine before it could deliver
+			// downstream rows.
+			expected := len(tt.ps)
+			deadline := time.After(10 * time.Second)
+			const quiet = 200 * time.Millisecond
+			seen := make(map[string]*cluster.Proposal)
+			for len(seen) < expected {
+				select {
+				case proposal := <-proposalChan:
+					seen[string(proposal.Entities[0].Key)] = proposal
+				case <-positionChan:
+					// drain — see comment above
+				case <-deadline:
+					t.Fatalf("timed out waiting for %d unique proposals; got %d", expected, len(seen))
+				}
+			}
+			// Now that we have the expected count, drain anything that
+			// arrives in the next quiet window so duplicate deliveries
+			// (dump + tail) are absorbed before the assertion.
+		drain:
 			for {
 				select {
 				case proposal := <-proposalChan:
-					proposals = append(proposals, proposal)
-				case position := <-positionChan:
-					positions = append(positions, &position)
-				default:
-					if len(proposals)+len(positions) >= expectedCount {
-						break outer
-					}
+					seen[string(proposal.Entities[0].Key)] = proposal
+				case <-positionChan:
+				case <-time.After(quiet):
+					break drain
 				}
+			}
+
+			proposals := make([]*cluster.Proposal, 0, len(seen))
+			for _, p := range seen {
+				proposals = append(proposals, p)
 			}
 
 			require.ElementsMatch(t, tt.ps, proposals)

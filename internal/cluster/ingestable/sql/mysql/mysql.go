@@ -77,7 +77,19 @@ func (h *MySQLEventHandler) OnRow(e *canal.RowsEvent) error {
 		m := make(map[string]any)
 		row := e.Rows[len(e.Rows)-1]
 		for i, c := range e.Table.Columns {
-			m[strings.ToLower(c.Name)] = row[i]
+			val := row[i]
+			// The MySQL binlog stream delivers TEXT/BLOB columns as []byte
+			// while VARCHAR columns come through as string; the initial
+			// mysqldump path that canal runs at startup delivers everything
+			// as string. Coerce []byte to string here so the JSON we marshal
+			// downstream is identical regardless of which path produced the
+			// row. (json.Marshal of a []byte field base64-encodes it, which
+			// would otherwise turn "one" into "b25l".) Binary BLOB columns
+			// are not a concern for any current caller of this dialect.
+			if b, ok := val.([]byte); ok {
+				val = string(b)
+			}
+			m[strings.ToLower(c.Name)] = val
 		}
 
 		toJSON := make(map[string]any)
