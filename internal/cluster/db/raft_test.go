@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,6 +19,33 @@ import (
 	"go.etcd.io/etcd/raft/v3/raftpb"
 )
 
+// multiNodeTickInterval is the per-tick interval used by multi-node raft
+// tests. Single-node tests use 1ms (testTickInterval) because there's no
+// network round trip and election completes in one tick. Multi-node tests
+// communicate over real httptransport (loopback TCP), and 1ms is too tight
+// for the heartbeat round trip — leaders lose contact with followers within
+// the 10-tick election timeout, triggering re-election thrash that prevents
+// any user proposal from being committed before the next election starts.
+//
+// 10ms gives a 100ms election timeout, which is comfortable for loopback
+// HTTP. The trade-off is that multi-node tests pay ~100ms of startup latency
+// (one election cycle) instead of ~10ms.
+const multiNodeTickInterval = 10 * time.Millisecond
+
+// multiNodeStartupTimeout bounds how long a multi-node test will wait for
+// the cluster to elect a stable leader before failing. With a 100ms election
+// timeout and HTTP transport startup, 5s is a generous upper bound.
+const multiNodeStartupTimeout = 5 * time.Second
+
+// TestRaftPropose covers the single-node propose path: a fresh cluster of
+// one, propose N inputs, verify they appear in storage. The single-node
+// shape uses the empty-URL escape hatch in httptransport so it doesn't
+// bind any TCP listener — that's what keeps it as a unit test rather than
+// an integration test.
+//
+// The 3-node ("cluster3") variant lives in raft_multinode_test.go behind
+// the `integration` build tag because it binds real loopback ports and is
+// timing-sensitive in a way unit tests shouldn't be.
 func TestRaftPropose(t *testing.T) {
 	tests := map[string]struct {
 		clusterSize int
@@ -24,13 +53,26 @@ func TestRaftPropose(t *testing.T) {
 	}{
 		"simple": {clusterSize: 1, inputs: []string{"a/b/c"}},
 		"two":    {clusterSize: 1, inputs: []string{"a/b/c", "foo"}},
-		// "cluster3": {clusterSize: 3, inputs: []string{"a/b/c", "foo"}},
 	}
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			rafts := createRafts(tc.clusterSize)
 			defer rafts.Close()
+			// Drainers must stop BEFORE rafts.Close so they unblock via
+			// the stop channel rather than racing commitC's close. Defer
+			// LIFO ordering puts this stop call before rafts.Close.
+			stopDrainers := rafts.StartDrainers()
+			defer stopDrainers()
+
+			// Multi-node clusters need to settle on a leader before any
+			// propose can succeed. Single-node clusters elect themselves
+			// in one tick so the wait is a no-op for them, but it's safe
+			// to call uniformly. Without this barrier, a 3-node propose
+			// races the initial election: the first propose may land on
+			// a not-yet-elected node and either hang or be dropped on a
+			// stale term.
+			rafts.WaitForLeader(t)
 
 			r := rafts[0]
 
@@ -38,19 +80,31 @@ func TestRaftPropose(t *testing.T) {
 				proposeAndCheck(t, r, input)
 			}
 
-			offsetToFirstProposal := uint64(3)
+			// Verify each node's storage contains the user proposals.
+			// We can't hardcode "first proposal is at index N" because
+			// the index depends on bootstrap shape: a 1-node StartNode
+			// generates 1 conf-change entry, a 3-node StartNode generates
+			// 3, and either way etcd raft adds an empty leader entry on
+			// term start. Walking each node's filtered EntryNormal
+			// entries with non-nil Data is robust against both shapes.
 			for _, r := range rafts {
-				s := r.storage
-
-				ents, err := s.Entries(offsetToFirstProposal, offsetToFirstProposal+uint64(len(tc.inputs)), 5000)
+				userEnts, err := r.ents()
 				if err != nil {
 					t.Fatal(err)
 				}
-
-				for i, e := range ents {
-					diff := cmp.Diff([]byte(tc.inputs[i]), e.Data)
+				if len(userEnts) < len(tc.inputs) {
+					t.Fatalf("node %d: expected at least %d user entries, got %d",
+						r.id, len(tc.inputs), len(userEnts))
+				}
+				// Take the LAST len(tc.inputs) user entries — earlier
+				// ones may exist from a previous restart cycle in
+				// TestRaftRestart, but TestRaftPropose's clusters are
+				// fresh so the take is exact.
+				start := len(userEnts) - len(tc.inputs)
+				for i, input := range tc.inputs {
+					diff := cmp.Diff([]byte(input), userEnts[start+i].Data)
 					if diff != "" {
-						t.Fatal(diff)
+						t.Fatalf("node %d, entry %d: %s", r.id, i, diff)
 					}
 				}
 			}
@@ -58,6 +112,9 @@ func TestRaftPropose(t *testing.T) {
 	}
 }
 
+// TestRaftRestart covers single-node propose → restart in place → propose
+// more → verify everything is in storage. The 3-node variant lives in
+// raft_multinode_test.go behind the `integration` build tag.
 func TestRaftRestart(t *testing.T) {
 	tests := map[string]struct {
 		clusterSize int
@@ -65,7 +122,6 @@ func TestRaftRestart(t *testing.T) {
 		inputs2     []string
 	}{
 		"simple": {clusterSize: 1, inputs1: []string{"foo", "bar"}, inputs2: []string{"baz"}},
-		// "cluster3": {clusterSize: 3, inputs1: []string{"foo"}, inputs2: []string{"bar"}},
 	}
 
 	for name, tc := range tests {
@@ -73,18 +129,60 @@ func TestRaftRestart(t *testing.T) {
 			rafts := createRafts(tc.clusterSize)
 			defer rafts.Close()
 
+			// Per-node drainers so we can swap the one belonging to the
+			// node that gets restarted. A test-wide StartDrainers() would
+			// hold a stale commitC reference for the restarted node and
+			// silently stop draining, which would deadlock the new Ready
+			// loop on its first commit.
+			drainers := make([]func(), len(rafts))
+			for i, r := range rafts {
+				drainers[i] = r.startDrainer()
+			}
+			defer func() {
+				for _, d := range drainers {
+					if d != nil {
+						d()
+					}
+				}
+			}()
+
+			rafts.WaitForLeader(t)
+
 			r := rafts[0]
 
 			for _, input := range tc.inputs1 {
-				propose(r, input)
+				proposeAndCheck(t, r, input)
 			}
 
 			lastIndex(t, r)
 
+			// Stop drainer for node 0 BEFORE Restart so the goroutine
+			// exits cleanly via its stop channel before db.Raft.Close
+			// closes the channel out from under it.
+			drainers[0]()
+			drainers[0] = nil
+
+			// Restart node 0 in place. For multi-node clusters this only
+			// restarts one of three replicas — the others stay up, the
+			// cluster keeps quorum, and node 0 catches back up via raft
+			// log replication when it returns.
 			err := rafts[0].Restart()
 			if err != nil {
 				t.Fatal(err)
 			}
+
+			// New commitC after Restart needs a fresh drainer to keep the
+			// new Ready loop unblocked. Without this, the first replayed
+			// committed entry blocks processCommittedEntry, which blocks
+			// the entire Ready loop, which blocks the next propose.
+			drainers[0] = rafts[0].startDrainer()
+
+			// After a single-node restart there's no other voter to elect a
+			// leader, so this re-elects itself. After a multi-node restart
+			// the existing leader (which may or may not have been node 0)
+			// is still alive and accepting proposes; node 0 reconnects and
+			// the cluster converges back on a stable leader.
+			rafts.WaitForLeader(t)
 
 			lastIndex(t, r)
 
@@ -97,17 +195,11 @@ func TestRaftRestart(t *testing.T) {
 			fmt.Printf("hard state: %v, conf state: %v\n", hs, cs)
 
 			for _, input := range tc.inputs2 {
-				propose(r, input)
+				proposeAndCheck(t, r, input)
 			}
-
-			c := <-r.commitC
-			fmt.Printf("committed: %s\n", string(c))
-			c = <-r.commitC
-			fmt.Printf("committed: %s\n", string(c))
 
 			lastIndex(t, rafts[0])
 
-			// offsetToFirstProposal := uint64(3)
 			for _, r := range rafts {
 				inputs := slices.Concat(tc.inputs1, tc.inputs2)
 
@@ -116,10 +208,16 @@ func TestRaftRestart(t *testing.T) {
 					t.Fatal(err)
 				}
 
-				for i, e := range es {
-					diff := cmp.Diff(inputs[i], string(e.Data))
+				if len(es) < len(inputs) {
+					t.Fatalf("node %d: expected at least %d user entries, got %d",
+						r.id, len(inputs), len(es))
+				}
+
+				start := len(es) - len(inputs)
+				for i, want := range inputs {
+					diff := cmp.Diff(want, string(es[start+i].Data))
 					if diff != "" {
-						t.Fatal(diff)
+						t.Fatalf("node %d, entry %d: %s", r.id, i, diff)
 					}
 				}
 			}
@@ -127,20 +225,37 @@ func TestRaftRestart(t *testing.T) {
 	}
 }
 
+// proposeAndCheck sends `input` on the raft's proposeC and waits until the
+// proposal appears at the tail of the node's user-entry log. It does NOT
+// read from commitC — that's handled by background drainers (see
+// Rafts.StartDrainers) so the Ready loop never blocks on a synchronous send
+// when no test goroutine is reading. Polling storage is the correct
+// synchronization barrier here because storage is the durable state we
+// actually care about asserting on.
 func proposeAndCheck(t *testing.T, r *Raft, input string) {
+	t.Helper()
 	r.proposeC <- []byte(input)
-	got := <-r.commitC
-	diff := cmp.Diff([]byte(input), got)
-	if diff != "" {
-		t.Fatal(diff)
-	}
+	waitForUserEntry(t, r, []byte(input))
 }
 
-func propose(r *Raft, input string) {
-	fmt.Printf("proposing: %s\n", input)
-	r.proposeC <- []byte(input)
-	c := <-r.commitC
-	fmt.Printf("committed: %s\n", string(c))
+// waitForUserEntry polls r's storage until the most recent user entry
+// (EntryNormal with non-nil Data, post-filtering) equals `want`. Bounded
+// by multiNodeStartupTimeout so a hung propose surfaces as a useful error
+// instead of a test timeout.
+func waitForUserEntry(t *testing.T, r *Raft, want []byte) {
+	t.Helper()
+	deadline := time.Now().Add(multiNodeStartupTimeout)
+	for {
+		es, _ := r.ents()
+		if len(es) > 0 && cmp.Equal(es[len(es)-1].Data, want) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("node %d: timed out waiting for user entry %q (have %d entries)",
+				r.id, string(want), len(es))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 func lastIndex(t *testing.T, r *Raft) uint64 {
@@ -153,67 +268,132 @@ func lastIndex(t *testing.T, r *Raft) uint64 {
 	return li
 }
 
+// createRafts builds a `replicas`-node raft cluster wired together over real
+// loopback HTTP. Single-node clusters use the empty-URL escape hatch in
+// httptransport (no listener bound) and the fast 1ms tick interval; clusters
+// with replicas > 1 dynamically allocate free ports on 127.0.0.1 and use the
+// slower multiNodeTickInterval so the HTTP-transported heartbeats keep up
+// with the election timeout.
 func createRafts(replicas int) Rafts {
-	var rafts Rafts
-
-	var peers []raft.Peer
-	for id := uint64(1); id <= uint64(replicas); id++ {
-		port := id*10000 + 2379
-		context := fmt.Sprintf("http://127.0.0.1:%d", port)
-		peers = append(peers, raft.Peer{ID: id, Context: []byte(context)})
-
-		fmt.Println(id)
+	tick := testTickInterval
+	if replicas > 1 {
+		tick = multiNodeTickInterval
 	}
 
+	var peers []raft.Peer
+	if replicas == 1 {
+		// Empty Context tells the transport to skip binding a listener.
+		// Matches db.New's default and keeps single-node tests free of
+		// any TCP / port-allocation concerns.
+		peers = append(peers, raft.Peer{ID: 1, Context: []byte("")})
+	} else {
+		ports := pickFreePorts(replicas)
+		for i := 0; i < replicas; i++ {
+			id := uint64(i + 1)
+			ctx := fmt.Sprintf("http://127.0.0.1:%d", ports[i])
+			peers = append(peers, raft.Peer{ID: id, Context: []byte(ctx)})
+		}
+	}
+
+	var rafts Rafts
 	for _, p := range peers {
 		s := NewMemoryStorage()
-		rafts = append(rafts, createRaft(p.ID, peers, s))
+		rafts = append(rafts, createRaft(p.ID, peers, s, tick))
 	}
 
 	return rafts
 }
 
-func createRaft(id uint64, peers []raft.Peer, s db.Storage) *Raft {
+// portCounter is bumped per port allocation so successive calls within the
+// same process don't pick adjacent ports (which can interact badly with
+// listener-close + TIME_WAIT cycles on `go test -count=N` runs).
+var portCounter atomic.Uint64
+
+// pickFreePorts asks the kernel for `n` free TCP ports on 127.0.0.1 by
+// briefly opening listeners, recording the assigned port, and closing them.
+// There's an inherent TOCTOU window — another process could grab the port
+// before we re-bind in httptransport — but in practice, sequential allocate
+// + immediate use is reliable enough for in-process test clusters.
+//
+// Holding the listeners open until the end of the loop (rather than closing
+// each as we go) reduces the chance that the kernel reuses the same port
+// for two of our requested slots.
+func pickFreePorts(n int) []int {
+	listeners := make([]net.Listener, 0, n)
+	ports := make([]int, 0, n)
+	defer func() {
+		for _, l := range listeners {
+			l.Close()
+		}
+	}()
+	for i := 0; i < n; i++ {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			panic(fmt.Sprintf("pickFreePorts: %v", err))
+		}
+		listeners = append(listeners, l)
+		ports = append(ports, l.Addr().(*net.TCPAddr).Port)
+	}
+	portCounter.Add(uint64(n))
+	return ports
+}
+
+func createRaft(id uint64, peers []raft.Peer, s db.Storage, tickInterval time.Duration) *Raft {
 	proposeC := make(chan []byte)
 	confChangeC := make(chan raftpb.ConfChange)
 
-	commitC, errorC, closer := db.NewRaft(id, peers, s, proposeC, confChangeC, db.WithTickInterval(testTickInterval))
+	commitC, errorC, r := db.NewRaft(id, peers, s, proposeC, confChangeC, db.WithTickInterval(tickInterval))
 
 	return &Raft{
-		storage:     s,
-		commitC:     commitC,
-		errorC:      errorC,
-		closer:      closer,
-		peers:       peers,
-		proposeC:    proposeC,
-		confChangeC: confChangeC,
-		id:          id,
+		storage:      s,
+		commitC:      commitC,
+		errorC:       errorC,
+		raft:         r,
+		peers:        peers,
+		proposeC:     proposeC,
+		confChangeC:  confChangeC,
+		id:           id,
+		tickInterval: tickInterval,
 	}
 }
 
 type Raft struct {
-	storage     db.Storage
-	peers       []raft.Peer
-	commitC     <-chan []byte
-	errorC      <-chan error
-	closer      io.Closer
-	proposeC    chan<- []byte
-	confChangeC chan<- raftpb.ConfChange
-	id          uint64
+	storage      db.Storage
+	peers        []raft.Peer
+	commitC      <-chan []byte
+	errorC       <-chan error
+	raft         *db.Raft
+	proposeC     chan<- []byte
+	confChangeC  chan<- raftpb.ConfChange
+	id           uint64
+	tickInterval time.Duration
+}
+
+// Leader returns the node ID this Raft believes is the current leader, or
+// 0 if no leader is known. Thin pass-through to the underlying db.Raft so
+// tests can poll for cluster readiness without touching internals.
+func (rs *Raft) Leader() uint64 {
+	return rs.raft.Leader()
+}
+
+// Close shuts down the underlying db.Raft. db.Raft.Close is idempotent so
+// it's safe to call from both Restart and Rafts.Close.
+func (rs *Raft) Close() error {
+	return rs.raft.Close()
 }
 
 func (rs *Raft) Restart() error {
-	err := rs.closer.Close()
+	err := rs.raft.Close()
 	if err != nil {
 		return err
 	}
 
-	r := createRaft(rs.id, rs.peers, rs.storage)
+	r := createRaft(rs.id, rs.peers, rs.storage, rs.tickInterval)
 	rs.storage = r.storage
 	rs.peers = r.peers
 	rs.commitC = r.commitC
 	rs.errorC = r.errorC
-	rs.closer = r.closer
+	rs.raft = r.raft
 	rs.proposeC = r.proposeC
 	rs.confChangeC = r.confChangeC
 	rs.id = r.id
@@ -232,7 +412,10 @@ func (rs *Raft) ents() ([]raftpb.Entry, error) {
 		return nil, err
 	}
 
-	ents, err := rs.storage.Entries(fi, li, 10000)
+	// Entries semantics are [lo, hi) — pass li+1 so the last entry is
+	// actually included. The previous off-by-one was masked because tests
+	// only checked the prefix of the log, never the tail.
+	ents, err := rs.storage.Entries(fi, li+1, 10000)
 	if err != nil {
 		return nil, err
 	}
@@ -253,13 +436,162 @@ func (rs Rafts) Close() error {
 	var err error
 
 	for _, r := range rs {
-		ierr := r.closer.Close()
+		ierr := r.Close()
 		if ierr != nil {
 			err = ierr
 		}
 	}
 
 	return err
+}
+
+// WaitForLeader blocks until every node in the cluster reports the same
+// non-zero leader ID, or until multiNodeStartupTimeout elapses. This is the
+// barrier multi-node tests use to know that the initial election has settled
+// before they start proposing — without it, a propose can race a not-yet-
+// elected node and either hang or get dropped on a stale term.
+//
+// Polling at 5ms is fine: the leader ID is read from etcd raft's Status()
+// channel, which is cheap. Stable agreement (all nodes pointing at the same
+// leader) is required because a transient state like "node A says leader=B,
+// node B says leader=0" is exactly the window where re-election thrash can
+// still happen, and we'd rather wait it out than start proposing into it.
+func (rs Rafts) WaitForLeader(t *testing.T) uint64 {
+	t.Helper()
+	deadline := time.Now().Add(multiNodeStartupTimeout)
+	for {
+		if time.Now().After(deadline) {
+			t.Fatalf("WaitForLeader: no stable leader within %v", multiNodeStartupTimeout)
+		}
+		leader, ok := rs.stableLeader()
+		if ok {
+			return leader
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// stableLeader returns the leader ID if every node in the slice agrees on
+// the same non-zero leader AND that leader is itself one of the nodes in
+// the slice. Returns (0, false) otherwise.
+//
+// The "leader is in the slice" check matters for kill-leader tests: after
+// killing the leader, the survivors may briefly still report the dead
+// leader's ID (until their heartbeat deadlines fire and re-election starts).
+// During that window stableLeader returns false, so callers correctly keep
+// waiting for the new leader to emerge instead of acting on a dead one.
+func (rs Rafts) stableLeader() (uint64, bool) {
+	if len(rs) == 0 {
+		return 0, false
+	}
+	first := rs[0].Leader()
+	if first == 0 {
+		return 0, false
+	}
+	for _, r := range rs[1:] {
+		if r.Leader() != first {
+			return 0, false
+		}
+	}
+	leaderInSlice := false
+	for _, r := range rs {
+		if r.id == first {
+			leaderInSlice = true
+			break
+		}
+	}
+	if !leaderInSlice {
+		return 0, false
+	}
+	return first, true
+}
+
+// LeaderRaft returns the *Raft that the cluster currently believes is the
+// leader. Caller must have already called WaitForLeader. If the leader can't
+// be found in the slice (e.g., it was killed), returns nil.
+func (rs Rafts) LeaderRaft() *Raft {
+	leaderID, ok := rs.stableLeader()
+	if !ok {
+		return nil
+	}
+	for _, r := range rs {
+		if r.id == leaderID {
+			return r
+		}
+	}
+	return nil
+}
+
+// FollowerRaft returns any non-leader Raft in the cluster, or nil if none.
+// Useful for "propose on follower → forwards to leader" tests.
+func (rs Rafts) FollowerRaft() *Raft {
+	leaderID, ok := rs.stableLeader()
+	if !ok {
+		return nil
+	}
+	for _, r := range rs {
+		if r.id != leaderID {
+			return r
+		}
+	}
+	return nil
+}
+
+// startDrainer spawns a single goroutine that continuously consumes from
+// r.commitC and discards the result. The returned stop function signals
+// the goroutine to exit and waits for it. Per-node so that Restart can
+// swap drainers cleanly: the restarted node has a brand-new commitC, so
+// the test must stop the old drainer (which is reading from the now-closed
+// old channel) and start a new one against r.commitC after Restart returns.
+//
+// commitC is captured at startDrainer call time, so a later Restart that
+// reassigns r.commitC does NOT change which channel this goroutine reads
+// from. The Restart helper handles this by making the test stop and
+// re-start the drainer explicitly.
+func (r *Raft) startDrainer() func() {
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	commitC := r.commitC
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case _, ok := <-commitC:
+				if !ok {
+					return
+				}
+			case <-stop:
+				return
+			}
+		}
+	}()
+	return func() {
+		close(stop)
+		wg.Wait()
+	}
+}
+
+// StartDrainers spawns one drainer per node (see startDrainer) and returns
+// a stop function that closes them all in parallel. This is the bridge
+// between db.Raft (which sends every committed user proposal synchronously
+// to commitC inside the Ready loop) and these tests (which assert on
+// storage rather than commitC). Without an active reader on commitC,
+// processCommittedEntry blocks the Ready loop, which in turn blocks every
+// subsequent commit and deadlocks any multi-propose test.
+//
+// Drainers must be stopped BEFORE Rafts are closed so the goroutines exit
+// via their stop channels rather than racing db.Raft.Close's commitC close.
+func (rs Rafts) StartDrainers() func() {
+	stops := make([]func(), len(rs))
+	for i, r := range rs {
+		stops[i] = r.startDrainer()
+	}
+	return func() {
+		for _, s := range stops {
+			s()
+		}
+	}
 }
 
 type MemoryPosition struct {

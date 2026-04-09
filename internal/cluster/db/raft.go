@@ -304,6 +304,20 @@ func (n *Raft) serveRaft() {
 	close(n.transportDoneC)
 }
 
+// Leader returns the raft node ID that this Raft believes is the current
+// leader, or 0 if no leader is known. Reads through to etcd raft's Status()
+// snapshot, which is concurrency-safe (served via raft.node's status channel).
+//
+// Used by multi-node tests as the cheapest available "is the cluster ready"
+// signal: poll until every node reports the same non-zero leader ID, then
+// proceed with proposes. Production code shouldn't need this.
+func (n *Raft) Leader() uint64 {
+	if n.node == nil {
+		return 0
+	}
+	return n.node.Status().Lead
+}
+
 func (n *Raft) processSnapshot(ms raftpb.Snapshot) {
 	// TODO: Snapshot install must:
 	//   1. Restore application state (BoltDB buckets, time series) from
