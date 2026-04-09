@@ -10,23 +10,32 @@ import (
 )
 
 // handleUserDefined records a time-series point for a user-defined entity.
+// The timestamp comes from e.Timestamp, which the propose path stamps
+// once when the proposal is built. Reading it here (instead of calling
+// time.Now() at apply) makes apply content-deterministic across nodes:
+// every replica writes the same value into the time-series store, and
+// post-snapshot replay reproduces the original timestamp instead of
+// computing a new one.
 //
-// TODO: time.Now() makes apply non-deterministic in entry content. Two
-// consequences once the cluster is multi-node: followers and the leader
-// will compute different timestamps for the same entry, and a snapshot
-// install followed by replay would write a *new* timestamp. Today we are
-// single node and persist appliedIndex (see wal.Storage.ApplyCommitted) to
-// skip replay, so this is masked. The right fix is to add a Timestamp
-// field to the LogEntity protobuf so the proposer records the wall-clock
-// time once and every node reads the same value. Deferred from PR1 to keep
-// scope down — see .claude-scratch/tickets/save-does-double-duty.md (PR1
-// "Out of scope") for the reasoning.
+// Pre-PR4 entries (and any propose path that forgets to stamp) arrive
+// with Timestamp == 0. We fall back to time.Now() in that case to
+// preserve the old behavior for those entries. This fallback is
+// non-deterministic, but it only affects entries written before this
+// fix landed AND wal.Storage.ApplyCommitted skips re-apply via the
+// persisted appliedIndex, so an old entry only goes through
+// handleUserDefined once (on its original apply, when the old code
+// was still using time.Now() anyway). New propose paths all stamp at
+// propose time and never hit the fallback.
 func (s *Storage) handleUserDefined(e *cluster.Entity) error {
+	ts := e.Timestamp
+	if ts == 0 {
+		ts = time.Now().UnixMilli()
+	}
 	return s.TimeSeriesStorage.InsertRows([]tstorage.Row{
 		{
 			Metric:    e.Type.ID,
 			Labels:    []tstorage.Label{},
-			DataPoint: tstorage.DataPoint{Timestamp: time.Now().UnixMilli(), Value: 1},
+			DataPoint: tstorage.DataPoint{Timestamp: ts, Value: 1},
 		},
 	})
 }

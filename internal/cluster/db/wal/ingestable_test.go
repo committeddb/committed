@@ -198,8 +198,6 @@ func TestProposeIngestable_StartsIngestionWiring(t *testing.T) {
 	// Buffered so wal saveIngestable's send does not block on the consumer.
 	// db.listenForIngestables receives unbuffered, but a buffer of 1 keeps
 	// the test deterministic if the consumer goroutine is slow to schedule.
-	// (Named syncCh rather than sync to avoid shadowing the sync package,
-	// which the closeOnce wrapper below needs.)
 	ingest := make(chan *db.IngestableWithID, 1)
 	syncCh := make(chan *db.SyncableWithID, 1)
 

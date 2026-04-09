@@ -5,6 +5,7 @@ import (
 	"fmt"
 	httpgo "net/http"
 	"strconv"
+	"time"
 
 	"github.com/philborlin/committed/internal/cluster"
 )
@@ -27,6 +28,12 @@ func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 
+	// Capture wall-clock once for the whole proposal so every entity in
+	// it ends up with the same timestamp. This is what makes apply
+	// content-deterministic on multi-node clusters: the proposer fixes
+	// the time and every node reads it back from the marshaled entry.
+	ts := time.Now().UnixMilli()
+
 	var es []*cluster.Entity
 	for _, e := range pr.Entities {
 		t, err := h.c.Type(e.TypeID)
@@ -35,9 +42,10 @@ func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
 			return
 		}
 		es = append(es, &cluster.Entity{
-			Type: t,
-			Key:  []byte(e.Key),
-			Data: e.Data,
+			Type:      t,
+			Key:       []byte(e.Key),
+			Data:      e.Data,
+			Timestamp: ts,
 		})
 	}
 

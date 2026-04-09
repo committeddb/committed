@@ -26,14 +26,21 @@ type Entity struct {
 	*Type
 	Key  []byte
 	Data []byte
+	// Timestamp is the wall-clock time (unix milliseconds) at which the
+	// proposer recorded this entity. Set once by the propose path so the
+	// apply path can write a content-deterministic time-series row on
+	// every node. Zero means "unset" and triggers a wall-clock fallback
+	// at apply time (only relevant for pre-PR4 entries — every new
+	// propose path sets this). See clusterpb.LogEntity.Timestamp.
+	Timestamp int64
 }
 
 func NewUpsertEntity(t *Type, key []byte, data []byte) *Entity {
-	return &Entity{t, key, data}
+	return &Entity{Type: t, Key: key, Data: data}
 }
 
 func NewDeleteEntity(t *Type, key []byte) *Entity {
-	return &Entity{t, key, delete}
+	return &Entity{Type: t, Key: key, Data: delete}
 }
 
 func (e *Entity) IsDelete() bool {
@@ -68,7 +75,12 @@ func (p *Proposal) String() string {
 func (p *Proposal) Marshal() ([]byte, error) {
 	var es []*clusterpb.LogEntity
 	for _, e := range p.Entities {
-		es = append(es, &clusterpb.LogEntity{TypeID: e.Type.ID, Key: e.Key, Data: e.Data})
+		es = append(es, &clusterpb.LogEntity{
+			TypeID:    e.Type.ID,
+			Key:       e.Key,
+			Data:      e.Data,
+			Timestamp: e.Timestamp,
+		})
 	}
 
 	lp := &clusterpb.LogProposal{LogEntities: es, RequestID: p.RequestID}
@@ -87,7 +99,12 @@ func (p *Proposal) Unmarshal(bs []byte) error {
 	for _, e := range lp.LogEntities {
 		// TODO Get the type from a map of types
 		t := &Type{ID: e.TypeID}
-		p.Entities = append(p.Entities, &Entity{Type: t, Key: e.Key, Data: e.Data})
+		p.Entities = append(p.Entities, &Entity{
+			Type:      t,
+			Key:       e.Key,
+			Data:      e.Data,
+			Timestamp: e.Timestamp,
+		})
 	}
 
 	return nil

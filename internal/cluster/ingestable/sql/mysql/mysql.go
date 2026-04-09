@@ -8,6 +8,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/go-mysql-org/go-mysql/canal"
 	"github.com/go-mysql-org/go-mysql/mysql"
@@ -144,11 +145,17 @@ func (h *MySQLEventHandler) OnRow(e *canal.RowsEvent) error {
 		primaryKey := h.config.PrimaryKey
 		key := fmt.Sprintf("%v", m[primaryKey])
 
+		// Stamp the propose-time wall-clock so apply on every node
+		// records the same time-series timestamp. Without this, the
+		// time-series store sees a different value per node and a
+		// post-snapshot replay would write a fresh "now" instead of
+		// the original. See cluster.Entity.Timestamp.
 		p := &cluster.Proposal{
 			Entities: []*cluster.Entity{{
-				Type: h.config.Type,
-				Key:  []byte(key),
-				Data: []byte(jsonString),
+				Type:      h.config.Type,
+				Key:       []byte(key),
+				Data:      []byte(jsonString),
+				Timestamp: time.Now().UnixMilli(),
 			}},
 		}
 

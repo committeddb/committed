@@ -7,6 +7,15 @@ message LogEntity {
     string typeID = 1;
 	bytes Key = 2;
 	bytes Data = 3;
+	// Timestamp is the wall-clock time (unix milliseconds) at which the
+	// proposer recorded this entity. It is set once at propose time so
+	// that apply on every node is content-deterministic — followers and
+	// leaders write the same timestamp into the time-series store, and
+	// post-snapshot replay reproduces the original timestamp instead of
+	// recomputing time.Now() at apply. Zero is "unset" and triggers a
+	// fallback at apply time (see wal.handleUserDefined). Backward
+	// compatible: pre-PR4 entries unmarshal as 0.
+	int64 Timestamp = 4;
 }
 
 message LogProposal {

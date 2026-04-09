@@ -105,6 +105,93 @@ func boundaries(startTime time.Time) GetTimePointsTest {
 	return GetTimePointsTest{"boundaries", times, expected}
 }
 
+// TestHandleUserDefined_TimestampDeterministic verifies that
+// handleUserDefined honors Entity.Timestamp set by the propose path
+// instead of recomputing time.Now() at apply. This is what makes the
+// time-series store content-deterministic across nodes (and across
+// post-snapshot replays): every replica writes the same timestamp.
+//
+// The test stamps an entity with a fixed Timestamp far enough in the
+// past that wall-clock interference is impossible, applies it through
+// the full Save→ApplyCommitted path (so handleUserDefined is what
+// inserts the row), and queries TimePoints over a window that
+// includes only the stamped time. The expected bucket count must be
+// 1 — if handleUserDefined fell back to time.Now() the row would
+// land outside the window and the bucket would be 0.
+func TestHandleUserDefined_TimestampDeterministic(t *testing.T) {
+	s := NewStorage(t, index(3).terms(3, 4, 5))
+	defer s.Cleanup()
+
+	const metric = "user-metric"
+	insertTypes(t, s, []*cluster.Type{{ID: metric, Name: metric}}, 6, 6)
+
+	// Pick a fixed reference time well in the past so wall-clock can't
+	// accidentally hit it. UTC for stability across machines.
+	stamped := time.Date(2024, 6, 1, 12, 0, 0, 0, time.UTC)
+
+	entity := &cluster.Entity{
+		Type:      &cluster.Type{ID: metric},
+		Key:       []byte("k"),
+		Data:      []byte("v"),
+		Timestamp: stamped.UnixMilli(),
+	}
+	saveEntity(t, entity, s, 7, 7)
+
+	// Query a 100-second window centered on the stamped time so we can
+	// see exactly which bucket the row lands in. timePoints() returns
+	// 100 buckets across the range, so the row should land in bucket 50.
+	windowStart := stamped.Add(-50 * time.Second)
+	windowEnd := stamped.Add(50 * time.Second)
+	points, err := s.TimePoints(metric, windowStart, windowEnd)
+	require.Nil(t, err)
+	require.Len(t, points, 100)
+
+	// The single inserted row must be in exactly one bucket within the
+	// window. If handleUserDefined had used time.Now(), no bucket
+	// inside our 2024 window would contain the row.
+	var total uint64
+	for _, p := range points {
+		total += p.Value
+	}
+	require.Equal(t, uint64(1), total,
+		"expected exactly 1 stored time-series row inside the stamped-time window; "+
+			"if handleUserDefined fell back to time.Now() the row would land outside the window")
+}
+
+// TestHandleUserDefined_TimestampZeroFallback verifies the
+// pre-PR4-compat fallback: an entity with Timestamp == 0 still gets
+// recorded (using time.Now() at apply). This protects entries
+// committed before the propose path was updated to stamp.
+func TestHandleUserDefined_TimestampZeroFallback(t *testing.T) {
+	s := NewStorage(t, index(3).terms(3, 4, 5))
+	defer s.Cleanup()
+
+	const metric = "legacy-metric"
+	insertTypes(t, s, []*cluster.Type{{ID: metric, Name: metric}}, 6, 6)
+
+	before := time.Now()
+	entity := &cluster.Entity{
+		Type: &cluster.Type{ID: metric},
+		Key:  []byte("k"),
+		Data: []byte("v"),
+		// Timestamp deliberately unset (== 0) to exercise the fallback.
+	}
+	saveEntity(t, entity, s, 7, 7)
+	after := time.Now()
+
+	// Query a generous window around now; the row should land inside.
+	windowStart := before.Add(-time.Minute)
+	windowEnd := after.Add(time.Minute)
+	points, err := s.TimePoints(metric, windowStart, windowEnd)
+	require.Nil(t, err)
+
+	var total uint64
+	for _, p := range points {
+		total += p.Value
+	}
+	require.Equal(t, uint64(1), total, "fallback should record exactly one row near time.Now()")
+}
+
 func ignoreOutOfBounds(startTime time.Time) GetTimePointsTest {
 	times := []time.Time{
 		startTime.Add(-time.Millisecond * 100),

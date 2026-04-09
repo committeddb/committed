@@ -192,6 +192,19 @@ func TestMysqlDialect(t *testing.T) {
 				proposals = append(proposals, p)
 			}
 
+			// Each entity must have a non-zero propose-time Timestamp
+			// (set in mysql.go's OnRow handler since PR4). The exact
+			// value depends on wall-clock at run time, so we assert
+			// non-zero and then clear it before the ElementsMatch
+			// check so the comparison doesn't depend on timing.
+			for _, p := range proposals {
+				for _, e := range p.Entities {
+					require.NotZero(t, e.Timestamp,
+						"OnRow must stamp the entity with propose-time wall-clock for content-deterministic apply")
+					e.Timestamp = 0
+				}
+			}
+
 			require.ElementsMatch(t, tt.ps, proposals)
 		})
 	}
