@@ -2,6 +2,8 @@
 
 ![Build Status](https://app.codeship.com/projects/28313820-8549-0137-dc4f-2289976f1a49/status?branch=master)
 
+A single-binary, Raft-backed CDC pipeline with the log as its own source of truth.
+
 Committed is a distributed commit log designed to store data long term in a log structure. Instead of the typical implementation where you are given simple read and write primitives and have to build, use adddons, or 3rd party software to aid in your read activites, Committed's two primitives are write and sync. The sync primitive is designed to move your data somewhere else. The purpose of this is to make it easy to transform or multiplex streams of data in a value added manner, or to move data into a system that has efficient querying (like a traditional SQL or NoSQL database). Committed even works with ephemeral data storage because it provides an efficient way to recreate the ephemeral storage if it fails (think Redis).
 
 Another way to think of Committed is as a serious system for creating distributed Command Query Responsibility Segregation (CQRS) systems. In this case Committed would work as the Command database and provide powerful semantics for replicating transformed data into Query systems.
@@ -9,6 +11,12 @@ Another way to think of Committed is as a serious system for creating distribute
 A final way to think of Committed is as a functional database with powerful data stream transformation capabilities.
 
 Committed is specifically NOT a databse designed for querying.
+
+## What makes it distinctive
+
+- **vs. Kafka**: a single replicated log instead of partitioned topics, with built-in *output-side* projection (syncables) rather than consumer offsets. Configs live in the log, not ZooKeeper/KRaft.
+- **vs. etcd**: same Raft substrate, but append-only log semantics instead of KV — and a worker model for ingest/sync that etcd doesn't have.
+- **vs. an RDBMS / Debezium pipeline**: Committed collapses "replicated log + CDC source + sink connectors" into one process. You don't need Kafka + Debezium + Kafka Connect + a separate consensus layer; the same binary holds the log, the source, and the sink.
 
 ## Version 0.2
 This is a beta version of Committed. You can spin up a cluster. See the included Procfile for an example of how to run the server, run the Procfile directly using goreman or something similar that can execute Procfiles, or checkout our
