@@ -108,6 +108,13 @@ func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 		MaxSizePerMsg:             1024 * 1024,
 		MaxInflightMsgs:           256,
 		MaxUncommittedEntriesSize: 1 << 30,
+		// PreVote runs an "am I electable" round before incrementing term,
+		// so a partitioned-then-rejoining node cannot disrupt the cluster
+		// by force-stepping-down a healthy leader with an inflated term.
+		// Recommended by Ongaro's thesis §9.6 and used by every production
+		// etcd-raft deployment. See docs/event-log-architecture.md
+		// § "PreVote and election timeout".
+		PreVote: true,
 	}
 
 	hs, _, err := n.storage.InitialState()

@@ -16,6 +16,7 @@ package db_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 )
@@ -263,5 +264,104 @@ func TestRaftPropose_LeaderKillReelectsAndAccepts(t *testing.T) {
 	proposeAndCheck(t, remaining[0], "after-kill")
 	for _, r := range remaining {
 		waitForUserEntry(t, r, []byte("after-kill"))
+	}
+}
+
+// TestPreVote_PartitionedFollowerDoesNotDisruptLeader is the regression
+// test for the PreVote configuration in db.Raft. It exercises the exact
+// scenario from Ongaro's thesis §9.6: a follower is partitioned from the
+// cluster, sits long enough that its election timer fires repeatedly,
+// then rejoins. With PreVote enabled, the follower's election attempts
+// never increment its term (the PreVote round can't get a quorum from
+// the empty peer set), so on rejoin its term still matches the leader's
+// and the leader is NOT forced to step down. With PreVote disabled, the
+// follower's term would have climbed during the partition and on rejoin
+// would force the healthy leader to step down via a higher-term reply.
+//
+// "Partition" is simulated at the transport layer via the test-only
+// PartitionPeerForTest helper. Both directions are removed: the follower
+// can no longer reach its peers, and its peers can no longer reach it.
+// One-sided partition (only removing peers from one side) wouldn't work
+// — the receiving side ignores the partition and the test wouldn't
+// exercise the Pre/Vote increment-term path at all.
+func TestPreVote_PartitionedFollowerDoesNotDisruptLeader(t *testing.T) {
+	rafts := createRafts(3)
+	defer rafts.Close()
+	stopDrainers := rafts.StartDrainers()
+	defer stopDrainers()
+
+	originalLeader := rafts.WaitForLeader(t)
+
+	// Pick any follower to partition. The cluster is small enough that
+	// the choice doesn't matter; we just need a non-leader.
+	follower := rafts.FollowerRaft()
+	if follower == nil {
+		t.Fatal("FollowerRaft returned nil after WaitForLeader")
+	}
+
+	// Partition the follower from the cluster at the transport layer.
+	// Both directions: drop the follower from every other node's peer
+	// set, and drop every other node from the follower's peer set.
+	for _, r := range rafts {
+		if r.id == follower.id {
+			for _, peer := range follower.peers {
+				if peer.ID != follower.id {
+					follower.raft.PartitionPeerForTest(peer.ID)
+				}
+			}
+		} else {
+			r.raft.PartitionPeerForTest(follower.id)
+		}
+	}
+
+	// Sit in the partition long enough for many election cycles to
+	// elapse. Election timeout is 10 ticks × multiNodeTickInterval
+	// (10ms) = 100ms, so 1s allows for ~10 cycles. With PreVote enabled
+	// the follower's term should NOT advance during this window;
+	// without PreVote it would advance ~10 times.
+	time.Sleep(1 * time.Second)
+
+	// Heal the partition by re-adding peers on both sides.
+	for _, r := range rafts {
+		if r.id == follower.id {
+			for _, peer := range follower.peers {
+				if peer.ID != follower.id {
+					if err := follower.raft.UnpartitionPeerForTest(peer); err != nil {
+						t.Fatalf("unpartition follower→%d: %v", peer.ID, err)
+					}
+				}
+			}
+		} else {
+			for _, peer := range r.peers {
+				if peer.ID == follower.id {
+					if err := r.raft.UnpartitionPeerForTest(peer); err != nil {
+						t.Fatalf("unpartition %d→follower: %v", r.id, err)
+					}
+				}
+			}
+		}
+	}
+
+	// Allow time for any in-flight RPCs from the rejoining follower to
+	// land at the leader. This is the window where, without PreVote, a
+	// stale-but-high-term RequestVote would force the leader down.
+	time.Sleep(500 * time.Millisecond)
+
+	// Cluster should still report the original leader. With PreVote off
+	// this assertion would fail because the rejoining follower would
+	// have a higher term than the leader.
+	finalLeader := rafts.WaitForLeader(t)
+	if finalLeader != originalLeader {
+		t.Fatalf("leader changed across partition+heal: was %d, now %d (PreVote should prevent this)",
+			originalLeader, finalLeader)
+	}
+
+	// Sanity check: cluster is still functional after the partition is
+	// healed. Propose one entry and verify every node applies it,
+	// including the formerly-partitioned follower (which catches up via
+	// normal raft log replication once heartbeats resume).
+	proposeAndCheck(t, rafts[0], "after-heal")
+	for _, r := range rafts {
+		waitForUserEntry(t, r, []byte("after-heal"))
 	}
 }

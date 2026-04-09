@@ -4,9 +4,21 @@ import "time"
 
 // defaultTickInterval is the cadence at which Raft.Tick() is called when no
 // override is supplied. It interacts with the (currently hard-coded)
-// ElectionTick=10 and HeartbeatTick=1 settings: with a 100ms tick, leader
-// election takes ~1s and heartbeats fire every 100ms.
-const defaultTickInterval = 100 * time.Millisecond
+// ElectionTick=10 and HeartbeatTick=1 settings: with a 30ms tick, leader
+// election fires after ~300ms and heartbeats fire every 30ms. The 300ms
+// election timeout is the upper end of Raft paper §5.2's recommended
+// 150-300ms range and is conservative enough to absorb routine GC pauses
+// and modest network jitter on real-world deployments.
+//
+// Operators who run on a low-latency LAN and want faster failover can
+// drop this to 15ms via WithTickInterval (yields a 150ms election
+// timeout — the lower end of the paper's range). Going below 15ms is
+// strongly discouraged in production: GC pauses or transient packet
+// loss will trigger spurious elections.
+//
+// Tests override this with their own (much faster) values via
+// WithTickInterval — see testTickInterval and multiNodeTickInterval.
+const defaultTickInterval = 30 * time.Millisecond
 
 // Option configures behaviour of New. Options exist primarily to let tests
 // shorten timing-sensitive constants; production callers should pass none.
