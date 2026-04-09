@@ -4,8 +4,26 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/philborlin/committed/internal/cluster"
+)
+
+// ingestBackoff{Min,Max} bound the interval at which db.ingest's
+// state-machine wakes to check for leader transitions when no
+// proposal or position is in flight. The worker reacts to its
+// channels immediately (the select still has the channel cases), so
+// active workloads pay no latency; the backoff only governs how
+// often an idle worker polls db.isNode for a leadership change.
+//
+// Without this, the loop's `default` branch ran on every iteration
+// and burned ~one CPU core per worker between proposals — atomic
+// load + branch + loop, ~10M iter/sec. Same trade-off as
+// syncBackoff: idle workers cap at Max polling latency for leader
+// transitions, active workers stay at Min.
+const (
+	ingestBackoffMin = 1 * time.Millisecond
+	ingestBackoffMax = 500 * time.Millisecond
 )
 
 // Ingest registers an Ingestable to run as a worker for the given ID.
@@ -101,6 +119,8 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) error
 		ingressWG.Wait()
 	}()
 
+	backoff := ingestBackoffMin
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -115,6 +135,7 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) error
 					fmt.Printf("[db.DB] propose: %v\n", err)
 				}
 			}
+			backoff = ingestBackoffMin
 		case position := <-positionChan:
 			if db.isNode(id) {
 				err := db.proposeIngestablePosition(ctx, &cluster.IngestablePosition{ID: id, Position: position})
@@ -123,7 +144,13 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) error
 					fmt.Printf("[db.DB] proposeIngestablePosition: %v\n", err)
 				}
 			}
-		default:
+			backoff = ingestBackoffMin
+		case <-time.After(backoff):
+			// Periodic wakeup to check for leader transitions. Replaces
+			// the previous default-branch spin which polled db.isNode
+			// at ~10M iter/sec between proposals. The state-machine
+			// logic is unchanged; only the cadence is.
+			progressed := false
 			if isNode && !db.isNode(id) {
 				fmt.Println("Stopping ingestion...")
 				// leader -> not-leader - stop ingesting
@@ -131,6 +158,7 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) error
 				ingressCancel()
 				ingressWG.Wait()
 				ingressCancel = nil
+				progressed = true
 			} else if !isNode && db.isNode(id) {
 				fmt.Println("Starting to ingest...")
 				// not-leader -> leader - start ingesting
@@ -154,6 +182,15 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) error
 						fmt.Printf("[db.DB] ingest: %v\n", err)
 					}
 				})
+				progressed = true
+			}
+			if progressed {
+				backoff = ingestBackoffMin
+			} else {
+				backoff *= 2
+				if backoff > ingestBackoffMax {
+					backoff = ingestBackoffMax
+				}
 			}
 		}
 	}

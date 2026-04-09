@@ -4,8 +4,29 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/philborlin/committed/internal/cluster"
+)
+
+// syncBackoff{Min,Max} bound the polling interval for db.sync's idle
+// loop. The worker has no event source to block on (the wal reader
+// returns io.EOF when caught up rather than blocking on new entries),
+// so without a backoff the loop spins on a sync.Mutex + atomic.Load
+// at ~one CPU core per worker. The backoff doubles starting at Min on
+// every consecutive idle iteration and caps at Max; any progress
+// (state change, successful read, successful sync) resets it to Min.
+//
+// Trade-off: a freshly-committed entry takes up to syncBackoffMax to
+// be picked up by an already-idle worker, but actively-syncing
+// workers stay at syncBackoffMin and pay no measurable latency.
+// 500ms is fine for the current "syncs trail the log by some bounded
+// amount" semantics; if a future caller needs sub-millisecond sync
+// latency, the right answer is option 3 from the audit (notification
+// channel from ApplyCommitted), not lowering this constant.
+const (
+	syncBackoffMin = 1 * time.Millisecond
+	syncBackoffMax = 500 * time.Millisecond
 )
 
 // Sync registers a Syncable to run as a worker for the given ID. See
@@ -55,35 +76,47 @@ func (db *DB) Sync(_ context.Context, id string, s cluster.Syncable) error {
 
 func (db *DB) sync(ctx context.Context, id string, s cluster.Syncable) error {
 	isNode := false
-
 	var r ProposalReader
+	backoff := syncBackoffMin
 
 	for {
+		// Cheap non-blocking ctx check at the top so a cancellation
+		// observed mid-iteration short-circuits the next round.
 		select {
 		case <-ctx.Done():
 			return nil
 		default:
-			if isNode && !db.isNode(id) {
-				fmt.Println("Stopping Sync...")
-				// leader -> not-leader - stop syncing
-				r = nil
-				isNode = false
-			} else if !isNode && db.isNode(id) {
-				fmt.Printf("[db] Syncing %v\n", id)
-				// not-leader -> leader - start syncing
-				r = db.storage.Reader(id)
-				isNode = true
-			} else if isNode && db.isNode(id) {
-				// leader -> leader - keep syncing
-				i, p, err := r.Read()
-				if err == io.EOF {
-					// TODO Figure out what to do - maybe do an exponential backoff to a certain point - maybe nothing?
-					continue
-				} else if err != nil {
-					// TODO Handle error
-					fmt.Printf("[db.DB] read: %v\n", err)
-				}
+		}
 
+		// Run one iteration of the state machine and decide whether
+		// the iteration made progress. Progress is defined as: state
+		// transition (gain/lose leadership) OR a successful read+sync
+		// of a proposal. Progress resets the backoff. Idle iterations
+		// (no leader, or leader-but-EOF) double the backoff.
+		progressed := false
+		switch {
+		case isNode && !db.isNode(id):
+			fmt.Println("Stopping Sync...")
+			r = nil
+			isNode = false
+			progressed = true
+		case !isNode && db.isNode(id):
+			fmt.Printf("[db] Syncing %v\n", id)
+			r = db.storage.Reader(id)
+			isNode = true
+			progressed = true
+		case isNode && db.isNode(id):
+			i, p, err := r.Read()
+			switch {
+			case err == io.EOF:
+				// caught up; idle, will sleep below
+			case err != nil:
+				// TODO Handle error properly. For now log and idle —
+				// treating a Read error as "no progress" lets the
+				// backoff slow the retry loop instead of hammering a
+				// broken reader.
+				fmt.Printf("[db.DB] read: %v\n", err)
+			default:
 				// Pass the worker's ctx (not db.ctx) so a replace or
 				// Close-driven cancellation propagates into the user's
 				// Sync implementation. Without this, a slow Sync keeps
@@ -97,7 +130,6 @@ func (db *DB) sync(ctx context.Context, id string, s cluster.Syncable) error {
 					// TODO Handle error
 					fmt.Printf("[db.DB] sync: %v\n", err)
 				}
-
 				if shouldSnapshot {
 					err = db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: i})
 					if err != nil {
@@ -105,7 +137,28 @@ func (db *DB) sync(ctx context.Context, id string, s cluster.Syncable) error {
 						fmt.Printf("[db.DB] proposeSyncableIndex: %v\n", err)
 					}
 				}
+				progressed = true
 			}
+		// case !isNode && !db.isNode(id): no work, no state change.
+		// fall through to backoff sleep.
+		}
+
+		if progressed {
+			backoff = syncBackoffMin
+			continue
+		}
+
+		// Idle iteration. Sleep with backoff, but stay interruptible
+		// by ctx cancellation so registry replace and Close get prompt
+		// shutdowns.
+		select {
+		case <-time.After(backoff):
+		case <-ctx.Done():
+			return nil
+		}
+		backoff *= 2
+		if backoff > syncBackoffMax {
+			backoff = syncBackoffMax
 		}
 	}
 }
