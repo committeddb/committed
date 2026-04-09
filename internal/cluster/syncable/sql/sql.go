@@ -89,6 +89,16 @@ func (c *Syncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.Shoul
 	}
 
 	fmt.Printf("[sql syncable] Committing...\n")
+	// CAVEAT: tx.Commit() does NOT take a context — database/sql does
+	// not expose CommitContext. Everything before this point in Sync
+	// (BeginTx, StmtContext, ExecContext) is interruptible by ctx, but
+	// the commit itself can hang on the network and there is no
+	// portable way to abort it. If the destination database is
+	// unreachable, a worker that is being canceled by Close or by a
+	// registry replace will block here until the underlying conn's
+	// driver-level read deadline fires (if any) or until the conn is
+	// closed externally. This is a known database/sql limitation, not
+	// something we can fix without per-driver hacks.
 	err = tx.Commit()
 	if err != nil {
 		rollbackErr := tx.Rollback()

@@ -25,6 +25,10 @@ import (
 // (which cancels via cancelSyncs / the per-handle cancel).
 func (db *DB) Ingest(_ context.Context, id string, i cluster.Ingestable) error {
 	db.workersMu.Lock()
+	if db.closed {
+		db.workersMu.Unlock()
+		return ErrClosed
+	}
 	// Loop until the slot is empty before installing. The naive
 	// "if existing { cancel; wait; install }" shape races when two
 	// callers replace the same id concurrently: both observe the
@@ -39,6 +43,10 @@ func (db *DB) Ingest(_ context.Context, id string, i cluster.Ingestable) error {
 	// converges in normal use (one extra cycle per pre-empting caller)
 	// and the lock is dropped only during the wait, so the exiting
 	// worker is never blocked by us.
+	//
+	// Re-check db.closed after each wait too: a concurrent db.Close
+	// may have flipped the flag while we were dropped. Without the
+	// re-check, we'd install a worker that escapes the Close drain.
 	for {
 		existing, ok := db.ingestWorkers[id]
 		if !ok {
@@ -48,6 +56,10 @@ func (db *DB) Ingest(_ context.Context, id string, i cluster.Ingestable) error {
 		db.workersMu.Unlock()
 		<-existing.done
 		db.workersMu.Lock()
+		if db.closed {
+			db.workersMu.Unlock()
+			return ErrClosed
+		}
 		if db.ingestWorkers[id] == existing {
 			delete(db.ingestWorkers, id)
 		}

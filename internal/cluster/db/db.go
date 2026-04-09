@@ -4,6 +4,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -12,6 +13,11 @@ import (
 	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/raft/v3/raftpb"
 )
+
+// ErrClosed is returned by db.Sync, db.Ingest, and db.Propose when the
+// DB has been (or is being) closed. Callers can use errors.Is(err,
+// db.ErrClosed) to distinguish a normal shutdown from other failures.
+var ErrClosed = errors.New("db: closed")
 
 type Peers map[uint64]string
 
@@ -36,16 +42,26 @@ type DB struct {
 	waiters       map[uint64]chan error
 	nextRequestID atomic.Uint64
 
-	// workersMu guards syncWorkers / ingestWorkers. The two maps key
-	// running per-ID worker goroutines (one per syncable / ingestable
-	// ID), so that a second db.Sync / db.Ingest call for the same ID
-	// cancels and replaces the existing worker instead of spawning a
-	// duplicate that would race with the first over the same Reader,
-	// Position, and proposeC slot. db.Close cancels every entry and
-	// waits for the workers' done channels.
+	// workersMu guards syncWorkers / ingestWorkers / closed. The two
+	// maps key running per-ID worker goroutines (one per syncable /
+	// ingestable ID), so that a second db.Sync / db.Ingest call for
+	// the same ID cancels and replaces the existing worker instead of
+	// spawning a duplicate that would race with the first over the
+	// same Reader, Position, and proposeC slot. db.Close cancels every
+	// entry and waits for the workers' done channels.
+	//
+	// closed is set to true by db.Close after it has drained the
+	// registry. db.Sync / db.Ingest check it under workersMu and
+	// reject installs with ErrClosed when set, so a late caller (e.g.,
+	// listenForSyncables waking up after the drain has run) can't
+	// spawn an unobserved worker that escapes the drain. Without this
+	// flag, the spawn-vs-Close race produced a brief leak window
+	// where a goroutine could outlive Close by however long it took
+	// to observe db.ctx.Done() on its own.
 	workersMu     sync.Mutex
 	syncWorkers   map[string]*workerHandle
 	ingestWorkers map[string]*workerHandle
+	closed        bool
 }
 
 // workerHandle is the registry entry for a per-ID Sync or Ingest
@@ -152,17 +168,48 @@ func (db *DB) notifyApplied(data []byte) {
 	}
 }
 
+// listenForSyncables forwards syncable registrations from the input
+// channel to db.Sync. It exits cleanly when db.ctx is canceled (db.Close)
+// or when the input channel is closed. The previous "for sync != nil"
+// shape was a pre-PR3 typo: a non-nil channel reference never becomes
+// nil, so the loop ran forever and the goroutine leaked across Close.
+// PR3's tighter shutdown semantics surfaced the leak as a race against
+// db.Sync's closed-flag check, so we fix the listener to terminate
+// properly here.
+//
+// nil input channels are handled explicitly so test setups that pass
+// nil don't waste a goroutine waiting on db.ctx.
 func (db *DB) listenForSyncables(sync <-chan *SyncableWithID) {
-	for sync != nil {
-		syncable := <-sync
-		db.Sync(context.Background(), syncable.ID, syncable.Syncable)
+	if sync == nil {
+		return
+	}
+	for {
+		select {
+		case syncable, ok := <-sync:
+			if !ok {
+				return
+			}
+			db.Sync(context.Background(), syncable.ID, syncable.Syncable)
+		case <-db.ctx.Done():
+			return
+		}
 	}
 }
 
 func (db *DB) listenForIngestables(ingest <-chan *IngestableWithID) {
-	for ingest != nil {
-		ingestable := <-ingest
-		db.Ingest(context.Background(), ingestable.ID, ingestable.Ingestable)
+	if ingest == nil {
+		return
+	}
+	for {
+		select {
+		case ingestable, ok := <-ingest:
+			if !ok {
+				return
+			}
+			db.Ingest(context.Background(), ingestable.ID, ingestable.Ingestable)
+		case <-db.ctx.Done():
+			return
+		}
 	}
 }
 
@@ -298,6 +345,7 @@ func (db *DB) Close() error {
 	db.cancelSyncs()
 
 	db.workersMu.Lock()
+	db.closed = true
 	handles := make([]*workerHandle, 0, len(db.ingestWorkers)+len(db.syncWorkers))
 	for id, h := range db.ingestWorkers {
 		handles = append(handles, h)
@@ -322,14 +370,17 @@ func (db *DB) Close() error {
 // after a successful Sync. Called from the sync worker, which doesn't
 // need to wait for apply — fire-and-forget keeps the worker loop tight.
 //
-// We deliberately use db.ctx (lifecycle) instead of the worker's per-Sync
-// context here. The worker's ctx is often cancelled mid-tick by tests
-// (and by future PR3 worker-replacement), but the index bump is the
-// LAST thing the worker does for that proposal — losing it would mean
-// re-syncing the same proposal on restart. db.ctx ensures the bump only
-// fails when the whole DB is shutting down, in which case losing it is
-// fine because the new DB instance will re-sync from the persisted
-// index that DID land.
+// We use db.ctx (lifecycle) here even though a worker ctx is in scope.
+// Post-PR3 the worker ctx is canceled by registry replace and by Close.
+// On a replace, the worker is being torn down because a new syncable
+// instance is taking over the same id; we still want this index bump
+// to land so the replacement starts from the correct position. The
+// Sync upsert is idempotent, so re-syncing the same proposal on the
+// replacement worker is safe but wasteful — landing the bump avoids
+// the waste. On Close, db.ctx is canceled too, so the proposeC send
+// short-circuits and we lose the bump anyway; that's fine because
+// recovery on the next process start will re-sync from whatever
+// SyncableIndex DID land.
 func (db *DB) proposeSyncableIndex(_ context.Context, i *cluster.SyncableIndex) error {
 	entity, err := cluster.NewUpsertSyncableIndexEntity(i)
 	if err != nil {
@@ -338,10 +389,17 @@ func (db *DB) proposeSyncableIndex(_ context.Context, i *cluster.SyncableIndex) 
 	return db.proposeFireAndForget(db.ctx, &cluster.Proposal{Entities: []*cluster.Entity{entity}})
 }
 
-// proposeIngestablePosition bumps the persisted Position for an ingestable
-// after the upstream source advances. Called from the ingest worker, which
-// doesn't need to wait for apply — fire-and-forget keeps the worker loop
-// tight. Uses db.ctx for the same reason as proposeSyncableIndex above.
+// proposeIngestablePosition bumps the persisted Position for an
+// ingestable after the upstream source advances. Called from the
+// ingest worker, which doesn't need to wait for apply —
+// fire-and-forget keeps the worker loop tight.
+//
+// Uses db.ctx for the same reason as proposeSyncableIndex: a registry
+// replace shouldn't drop the position bump (the upstream source
+// emitted it; losing it means the replacement re-reads from the
+// previous position and re-emits the same rows), and on Close the
+// bump is naturally lost via db.ctx cancellation. Recovery rebuilds
+// from whatever position DID land.
 func (db *DB) proposeIngestablePosition(_ context.Context, p *cluster.IngestablePosition) error {
 	entity, err := cluster.NewUpsertIngestablePositionEntity(p)
 	if err != nil {

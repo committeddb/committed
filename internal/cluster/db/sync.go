@@ -16,10 +16,12 @@ import (
 // every registered worker before tearing the raft layer down.
 func (db *DB) Sync(_ context.Context, id string, s cluster.Syncable) error {
 	db.workersMu.Lock()
-	// See db.Ingest for the rationale behind the loop. tl;dr: a naive
-	// check-cancel-wait-install races against concurrent replaces of
-	// the same id and orphans workers. The loop re-checks the slot
-	// after each wait, walking through any new entries that slipped in.
+	if db.closed {
+		db.workersMu.Unlock()
+		return ErrClosed
+	}
+	// See db.Ingest for the rationale behind the loop and the
+	// re-check of db.closed after each wait.
 	for {
 		existing, ok := db.syncWorkers[id]
 		if !ok {
@@ -29,6 +31,10 @@ func (db *DB) Sync(_ context.Context, id string, s cluster.Syncable) error {
 		db.workersMu.Unlock()
 		<-existing.done
 		db.workersMu.Lock()
+		if db.closed {
+			db.workersMu.Unlock()
+			return ErrClosed
+		}
 		if db.syncWorkers[id] == existing {
 			delete(db.syncWorkers, id)
 		}

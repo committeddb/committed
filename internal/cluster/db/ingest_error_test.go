@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/philborlin/committed/internal/cluster"
+	"github.com/philborlin/committed/internal/cluster/db"
 	"github.com/stretchr/testify/require"
 )
 
@@ -34,6 +35,34 @@ func (i *SignalingIngestable) Ingest(ctx context.Context, pos cluster.Position, 
 
 func (i *SignalingIngestable) Close() error {
 	return nil
+}
+
+// TestIngest_AfterCloseRejects verifies the ErrClosed gate added in
+// the audit follow-up. Pre-fix, a db.Ingest call that arrived after
+// db.Close had drained the registry would still install a worker —
+// the new worker context (derived from db.ctx) was already canceled,
+// so the goroutine exited promptly, but it ran briefly past Close
+// returning. The leak window was bounded but real, and listenForX
+// goroutines were the most likely caller because they wake up
+// asynchronously on inbound channel sends.
+//
+// The closed flag (set under workersMu after the drain) makes both
+// db.Ingest and db.Sync reject installs with ErrClosed once Close
+// has run. This test verifies both paths.
+func TestRegistry_AfterCloseRejects(t *testing.T) {
+	d := createDBWithStorage(NewMemoryStorage())
+
+	require.Nil(t, d.Close())
+
+	// Both calls must observe the closed flag and return ErrClosed.
+	// Use a pristine SignalingIngestable / blockingSyncable so the
+	// failure mode isn't ambiguous: if the call did install a worker,
+	// the ingestable's Ingest would eventually be invoked.
+	ingErr := d.Ingest(context.Background(), "after-close-ing", NewSignalingIngestable())
+	require.ErrorIs(t, ingErr, db.ErrClosed)
+
+	syncErr := d.Sync(context.Background(), "after-close-sync", newBlockingSyncable())
+	require.ErrorIs(t, syncErr, db.ErrClosed)
 }
 
 // TestIngest_CloseTerminatesWorker verifies that db.Close cancels the

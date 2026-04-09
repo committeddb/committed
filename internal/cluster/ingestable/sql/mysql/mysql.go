@@ -50,6 +50,28 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 		go c.Run()
 	}
 
+	// Block until the worker cancels us, then ask canal to stop.
+	//
+	// IMPORTANT: c.Close() initiates shutdown but does NOT wait for
+	// the goroutine started by `go c.Run()` above. (Reading the canal
+	// source at v1.9.1: Close cancels canal's internal context and
+	// closes the syncer/connection synchronously, then returns. There
+	// is no WaitGroup join.) So when this function returns, the canal
+	// goroutine may still be racing toward exit.
+	//
+	// We rely on two things to make that safe:
+	//  1. Closing the syncer/connection causes the canal goroutine's
+	//     binlog read to fail, so it exits promptly on its own.
+	//  2. Our OnRow / OnPosSynced callbacks select on ctx.Done (which
+	//     is already done by the time we get here) so if the canal
+	//     goroutine fires a callback after Close, the callback bails
+	//     out instead of blocking on a no-receiver channel send.
+	//
+	// The worker that called us (db.ingest) will return shortly after
+	// we do, and its WaitGroup wait covers the inner Ingest goroutine
+	// (this function) but not the canal goroutine. The canal goroutine
+	// briefly outlives both, then exits when the read fails — leak
+	// window is bounded by the binlog driver's read timeout.
 	<-ctx.Done()
 	c.Close()
 	return nil
@@ -65,6 +87,16 @@ type MySQLEventHandler struct {
 	// callbacks use it to abort their channel sends if the worker is
 	// canceled mid-emit, otherwise the canal goroutine would leak
 	// blocked on a no-receiver channel.
+	//
+	// Storing context.Context on a struct is an anti-pattern that
+	// vet flags by default — Go's guidance is to pass ctx as the
+	// first function argument so it's never long-lived state. We
+	// accept the deviation here because the canal.EventHandler
+	// interface (defined upstream in go-mysql-org/go-mysql) does not
+	// take ctx in OnRow / OnPosSynced and we have no other way to
+	// thread cancellation into those callbacks. The handler's lifetime
+	// is exactly one Ingest call, so the stored ctx isn't long-lived
+	// across calls and the usual "stale ctx" hazard doesn't apply.
 	ctx          context.Context
 	config       *sql.Config
 	canal        *canal.Canal
