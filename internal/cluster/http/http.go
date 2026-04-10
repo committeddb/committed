@@ -2,7 +2,7 @@ package http
 
 import (
 	"encoding/json"
-	"fmt"
+	"errors"
 	"io"
 	"net/http"
 
@@ -56,16 +56,6 @@ func (h *HTTP) ListenAndServe(addr string) error {
 	return http.ListenAndServe(addr, h.r)
 }
 
-func badRequest(w http.ResponseWriter, err error) {
-	w.WriteHeader(http.StatusBadRequest)
-	fmt.Printf("[http] %v\n", err)
-}
-
-func internalServerError(w http.ResponseWriter, err error) {
-	w.WriteHeader(http.StatusInternalServerError)
-	fmt.Printf("[http] %v\n", err)
-}
-
 func unmarshalBody(r *http.Request, v any) error {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -83,7 +73,7 @@ func unmarshalBody(r *http.Request, v any) error {
 func createConfiguration(r *http.Request) (*cluster.Configuration, error) {
 	id := r.PathValue("id")
 	if id == "" {
-		return nil, fmt.Errorf("id is empty")
+		return nil, errors.New("id is empty")
 	}
 
 	mimeType := "text/toml"
@@ -136,7 +126,8 @@ func writeArrayBody[T any](w http.ResponseWriter, body []T) {
 
 	bs, err := json.Marshal(body)
 	if err != nil {
-		internalServerError(w, err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "failed to marshal response")
+		return
 	}
 
 	writeJson(w, bs)

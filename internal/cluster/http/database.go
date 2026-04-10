@@ -7,13 +7,13 @@ import (
 func (h *HTTP) AddDatabase(w httpgo.ResponseWriter, r *httpgo.Request) {
 	c, err := createConfiguration(r)
 	if err != nil {
-		badRequest(w, err)
+		writeError(w, httpgo.StatusBadRequest, "invalid_config", "invalid database configuration")
 		return
 	}
 
 	err = h.c.ProposeDatabase(r.Context(), c)
 	if err != nil {
-		internalServerError(w, err)
+		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to propose database")
 		return
 	}
 
@@ -23,7 +23,7 @@ func (h *HTTP) AddDatabase(w httpgo.ResponseWriter, r *httpgo.Request) {
 func (h *HTTP) GetDatabases(w httpgo.ResponseWriter, r *httpgo.Request) {
 	cfgs, err := h.c.Databases()
 	if err != nil {
-		badRequest(w, err)
+		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to retrieve databases")
 		return
 	}
 

@@ -7,13 +7,13 @@ import (
 func (h *HTTP) AddIngestable(w httpgo.ResponseWriter, r *httpgo.Request) {
 	c, err := createConfiguration(r)
 	if err != nil {
-		badRequest(w, err)
+		writeError(w, httpgo.StatusBadRequest, "invalid_config", "invalid ingestable configuration")
 		return
 	}
 
 	err = h.c.ProposeIngestable(r.Context(), c)
 	if err != nil {
-		internalServerError(w, err)
+		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to propose ingestable")
 		return
 	}
 
@@ -23,7 +23,7 @@ func (h *HTTP) AddIngestable(w httpgo.ResponseWriter, r *httpgo.Request) {
 func (h *HTTP) GetIngestables(w httpgo.ResponseWriter, r *httpgo.Request) {
 	cfgs, err := h.c.Ingestables()
 	if err != nil {
-		badRequest(w, err)
+		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to retrieve ingestables")
 		return
 	}
 

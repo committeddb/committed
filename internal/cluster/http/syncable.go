@@ -7,13 +7,13 @@ import (
 func (h *HTTP) AddSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
 	c, err := createConfiguration(r)
 	if err != nil {
-		badRequest(w, err)
+		writeError(w, httpgo.StatusBadRequest, "invalid_config", "invalid syncable configuration")
 		return
 	}
 
 	err = h.c.ProposeSyncable(r.Context(), c)
 	if err != nil {
-		internalServerError(w, err)
+		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to propose syncable")
 		return
 	}
 
@@ -23,7 +23,7 @@ func (h *HTTP) AddSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
 func (h *HTTP) GetSyncables(w httpgo.ResponseWriter, r *httpgo.Request) {
 	cfgs, err := h.c.Syncables()
 	if err != nil {
-		badRequest(w, err)
+		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to retrieve syncables")
 		return
 	}
 

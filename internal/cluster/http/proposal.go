@@ -24,7 +24,7 @@ func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
 	pr := &AddProposalRequest{}
 	err := unmarshalBody(r, pr)
 	if err != nil {
-		badRequest(w, err)
+		writeError(w, httpgo.StatusBadRequest, "invalid_json", "request body is not valid JSON")
 		return
 	}
 
@@ -38,7 +38,7 @@ func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
 	for _, e := range pr.Entities {
 		t, err := h.c.Type(e.TypeID)
 		if err != nil {
-			badRequest(w, err)
+			writeErrorf(w, httpgo.StatusBadRequest, "type_not_found", "type %q not found", e.TypeID)
 			return
 		}
 		es = append(es, &cluster.Entity{
@@ -57,7 +57,7 @@ func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
 
 	err = h.c.Propose(r.Context(), p)
 	if err != nil {
-		internalServerError(w, err)
+		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to propose")
 		return
 	}
 }
@@ -86,14 +86,16 @@ func (h *HTTP) GetProposals(w httpgo.ResponseWriter, r *httpgo.Request) {
 	if qn != "" {
 		n, err := strconv.Atoi(qn)
 		if err != nil {
-			badRequest(w, err)
+			writeErrorf(w, httpgo.StatusBadRequest, "invalid_parameter", "number parameter %q is not a valid integer", qn)
+			return
 		}
 		amount = n
 	}
 
 	ps, err := h.c.Proposals(uint64(amount), t)
 	if err != nil {
-		internalServerError(w, err)
+		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to retrieve proposals")
+		return
 	}
 
 	var body []GetProposalResponse

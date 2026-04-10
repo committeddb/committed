@@ -1,7 +1,6 @@
 package http
 
 import (
-	"fmt"
 	httpgo "net/http"
 	"time"
 )
@@ -9,13 +8,13 @@ import (
 func (h *HTTP) AddType(w httpgo.ResponseWriter, r *httpgo.Request) {
 	c, err := createConfiguration(r)
 	if err != nil {
-		badRequest(w, err)
+		writeError(w, httpgo.StatusBadRequest, "invalid_config", "invalid type configuration")
 		return
 	}
 
 	err = h.c.ProposeType(r.Context(), c)
 	if err != nil {
-		internalServerError(w, err)
+		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to propose type")
 		return
 	}
 
@@ -25,7 +24,7 @@ func (h *HTTP) AddType(w httpgo.ResponseWriter, r *httpgo.Request) {
 func (h *HTTP) GetTypes(w httpgo.ResponseWriter, r *httpgo.Request) {
 	cfgs, err := h.c.Types()
 	if err != nil {
-		internalServerError(w, err)
+		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to retrieve types")
 		return
 	}
 
@@ -48,22 +47,21 @@ func (h *HTTP) GetType(w httpgo.ResponseWriter, r *httpgo.Request) {
 	tr := &GetTypeGraphRequest{}
 	start, err := time.Parse("2006-01-02T15:04:05Z0700", r.URL.Query().Get("start"))
 	if err != nil {
-		badRequest(w, err)
+		writeError(w, httpgo.StatusBadRequest, "invalid_parameter", "start parameter is not a valid timestamp")
 		return
 	}
 	tr.Start = start
 
 	end, err := time.Parse("2006-01-02T15:04:05Z0700", r.URL.Query().Get("end"))
 	if err != nil {
-		badRequest(w, err)
+		writeError(w, httpgo.StatusBadRequest, "invalid_parameter", "end parameter is not a valid timestamp")
 		return
 	}
 	tr.End = end
 
 	ps, err := h.c.TypeGraph(id, tr.Start, tr.End)
 	if err != nil {
-		fmt.Printf("TypeGraph %v - %v", id, err)
-		internalServerError(w, err)
+		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to retrieve type graph")
 		return
 	}
 

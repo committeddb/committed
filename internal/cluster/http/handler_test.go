@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	httpgo "net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -135,7 +136,9 @@ func TestAddConfiguration_ClusterError(t *testing.T) {
 
 			h.ServeHTTP(w, req)
 
-			require.Equal(t, 500, w.Result().StatusCode)
+			resp := w.Result()
+			require.Equal(t, 500, resp.StatusCode)
+			requireErrorResponse(t, resp, "internal_error")
 		})
 	}
 }
@@ -263,34 +266,29 @@ func TestGetConfigurations_Empty(t *testing.T) {
 
 func TestGetConfigurations_Error(t *testing.T) {
 	tests := []struct {
-		name           string
-		path           string
-		setupFn        func(fake *clusterfakes.FakeCluster)
-		expectedStatus int
+		name    string
+		path    string
+		setupFn func(fake *clusterfakes.FakeCluster)
 	}{
 		{
-			name:           "database returns 400",
-			path:           "/database",
-			setupFn:        func(fake *clusterfakes.FakeCluster) { fake.DatabasesReturns(nil, fmt.Errorf("fail")) },
-			expectedStatus: 400,
+			name:    "database",
+			path:    "/database",
+			setupFn: func(fake *clusterfakes.FakeCluster) { fake.DatabasesReturns(nil, fmt.Errorf("fail")) },
 		},
 		{
-			name:           "syncable returns 400",
-			path:           "/syncable",
-			setupFn:        func(fake *clusterfakes.FakeCluster) { fake.SyncablesReturns(nil, fmt.Errorf("fail")) },
-			expectedStatus: 400,
+			name:    "syncable",
+			path:    "/syncable",
+			setupFn: func(fake *clusterfakes.FakeCluster) { fake.SyncablesReturns(nil, fmt.Errorf("fail")) },
 		},
 		{
-			name:           "ingestable returns 400",
-			path:           "/ingestable",
-			setupFn:        func(fake *clusterfakes.FakeCluster) { fake.IngestablesReturns(nil, fmt.Errorf("fail")) },
-			expectedStatus: 400,
+			name:    "ingestable",
+			path:    "/ingestable",
+			setupFn: func(fake *clusterfakes.FakeCluster) { fake.IngestablesReturns(nil, fmt.Errorf("fail")) },
 		},
 		{
-			name:           "types returns 500",
-			path:           "/type",
-			setupFn:        func(fake *clusterfakes.FakeCluster) { fake.TypesReturns(nil, fmt.Errorf("fail")) },
-			expectedStatus: 500,
+			name:    "type",
+			path:    "/type",
+			setupFn: func(fake *clusterfakes.FakeCluster) { fake.TypesReturns(nil, fmt.Errorf("fail")) },
 		},
 	}
 
@@ -304,7 +302,9 @@ func TestGetConfigurations_Error(t *testing.T) {
 
 			h.ServeHTTP(w, req)
 
-			require.Equal(t, tc.expectedStatus, w.Result().StatusCode)
+			resp := w.Result()
+			require.Equal(t, 500, resp.StatusCode)
+			requireErrorResponse(t, resp, "internal_error")
 		})
 	}
 }
@@ -364,7 +364,9 @@ func TestAddProposal_BadJSON(t *testing.T) {
 
 	h.ServeHTTP(w, req)
 
-	require.Equal(t, 400, w.Result().StatusCode)
+	resp := w.Result()
+	require.Equal(t, 400, resp.StatusCode)
+	requireErrorResponse(t, resp, "invalid_json")
 }
 
 func TestAddProposal_TypeNotFound(t *testing.T) {
@@ -377,8 +379,10 @@ func TestAddProposal_TypeNotFound(t *testing.T) {
 
 	h.ServeHTTP(w, req)
 
-	require.Equal(t, 400, w.Result().StatusCode)
+	resp := w.Result()
+	require.Equal(t, 400, resp.StatusCode)
 	require.Equal(t, 0, fake.ProposeCallCount())
+	requireErrorResponse(t, resp, "type_not_found")
 }
 
 func TestAddProposal_ProposeError(t *testing.T) {
@@ -392,7 +396,9 @@ func TestAddProposal_ProposeError(t *testing.T) {
 
 	h.ServeHTTP(w, req)
 
-	require.Equal(t, 500, w.Result().StatusCode)
+	resp := w.Result()
+	require.Equal(t, 500, resp.StatusCode)
+	requireErrorResponse(t, resp, "internal_error")
 }
 
 // --- GetProposals ---
@@ -470,10 +476,10 @@ func TestGetProposals_InvalidNumber(t *testing.T) {
 
 	h.ServeHTTP(w, req)
 
-	// BUG: GetProposals calls badRequest but does not return early.
-	// The status is 400 but Proposals() is still called with the default amount.
-	require.Equal(t, 400, w.Result().StatusCode)
-	require.Equal(t, 1, fake.ProposalsCallCount(), "BUG: Proposals called despite bad input (missing return after badRequest)")
+	resp := w.Result()
+	require.Equal(t, 400, resp.StatusCode)
+	require.Equal(t, 0, fake.ProposalsCallCount(), "Proposals should not be called with invalid number")
+	requireErrorResponse(t, resp, "invalid_parameter")
 }
 
 func TestGetProposals_ClusterError(t *testing.T) {
@@ -485,9 +491,9 @@ func TestGetProposals_ClusterError(t *testing.T) {
 
 	h.ServeHTTP(w, req)
 
-	// BUG: GetProposals calls internalServerError but does not return early.
-	// The response has status 500 but then writes a body with [].
-	require.Equal(t, 500, w.Result().StatusCode)
+	resp := w.Result()
+	require.Equal(t, 500, resp.StatusCode)
+	requireErrorResponse(t, resp, "internal_error")
 }
 
 // --- GetType (graph) ---
@@ -538,7 +544,9 @@ func TestGetType_MissingStartParam(t *testing.T) {
 
 	h.ServeHTTP(w, req)
 
-	require.Equal(t, 400, w.Result().StatusCode)
+	resp := w.Result()
+	require.Equal(t, 400, resp.StatusCode)
+	requireErrorResponse(t, resp, "invalid_parameter")
 }
 
 func TestGetType_BadEndFormat(t *testing.T) {
@@ -549,7 +557,9 @@ func TestGetType_BadEndFormat(t *testing.T) {
 
 	h.ServeHTTP(w, req)
 
-	require.Equal(t, 400, w.Result().StatusCode)
+	resp := w.Result()
+	require.Equal(t, 400, resp.StatusCode)
+	requireErrorResponse(t, resp, "invalid_parameter")
 }
 
 func TestGetType_ClusterError(t *testing.T) {
@@ -561,7 +571,9 @@ func TestGetType_ClusterError(t *testing.T) {
 
 	h.ServeHTTP(w, req)
 
-	require.Equal(t, 500, w.Result().StatusCode)
+	resp := w.Result()
+	require.Equal(t, 500, resp.StatusCode)
+	requireErrorResponse(t, resp, "internal_error")
 }
 
 func TestGetType_EmptyResult(t *testing.T) {
@@ -579,4 +591,50 @@ func TestGetType_EmptyResult(t *testing.T) {
 	body, err := io.ReadAll(resp.Body)
 	require.Nil(t, err)
 	require.Equal(t, "[]", string(body))
+}
+
+// --- Error response helpers & shape test ---
+
+// requireErrorResponse reads the response body, unmarshals it as an
+// ErrorResponse, and asserts the code field matches expectedCode.
+func requireErrorResponse(t *testing.T, resp *httpgo.Response, expectedCode string) {
+	t.Helper()
+	body, err := io.ReadAll(resp.Body)
+	require.Nil(t, err)
+	require.Equal(t, "application/json", resp.Header.Get("Content-Type"))
+
+	var errResp http.ErrorResponse
+	err = json.Unmarshal(body, &errResp)
+	require.Nil(t, err, "response body is not valid ErrorResponse JSON: %s", string(body))
+	require.Equal(t, expectedCode, errResp.Code)
+	require.NotEmpty(t, errResp.Message)
+}
+
+func TestErrorResponse_JSONShape(t *testing.T) {
+	h, fake := setupTest()
+	fake.TypeReturns(nil, fmt.Errorf("not found"))
+
+	body := `{"entities": [{"typeId": "missing", "key": "k1", "data": {}}]}`
+	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+
+	resp := w.Result()
+	require.Equal(t, 400, resp.StatusCode)
+	require.Equal(t, "application/json", resp.Header.Get("Content-Type"))
+
+	respBody, err := io.ReadAll(resp.Body)
+	require.Nil(t, err)
+
+	// Verify the JSON shape has exactly the expected fields
+	var raw map[string]any
+	err = json.Unmarshal(respBody, &raw)
+	require.Nil(t, err)
+
+	require.Contains(t, raw, "code")
+	require.Contains(t, raw, "message")
+	require.Equal(t, "type_not_found", raw["code"])
+	require.IsType(t, "", raw["message"])
+	require.NotEmpty(t, raw["message"])
 }
