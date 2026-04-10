@@ -2,14 +2,40 @@ package cluster
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
 	"github.com/philborlin/committed/internal/cluster/clusterpb"
 	"github.com/spf13/viper"
 	"google.golang.org/protobuf/proto"
 )
 
+// ErrPermanent wraps a Sync error that retrying will not fix (e.g.,
+// constraint violations, malformed data). db.sync logs and skips
+// proposals returning a permanent error instead of retrying.
+var ErrPermanent = errors.New("syncable: permanent error")
+
+// Permanent marks err as non-retryable by wrapping it with ErrPermanent.
+// Use this in Syncable implementations to signal that the proposal should
+// be skipped rather than retried.
+func Permanent(err error) error {
+	return fmt.Errorf("%w: %w", ErrPermanent, err)
+}
+
 type ShouldSnapshot bool
 
+// Syncable consumes proposals from the commit log and applies them to
+// an external system (e.g., a SQL database, webhook, file).
+//
+// Contract:
+//   - Sync MUST be idempotent. The same proposal may be delivered more
+//     than once due to leader transition, worker replace, or process
+//     restart. Implementations should use upsert or equivalent semantics.
+//   - Sync errors are retried with exponential backoff. Wrap with
+//     cluster.Permanent(err) to skip the proposal instead of retrying.
+//   - Sync receives a context tied to the worker lifecycle; respect
+//     ctx.Done() for cooperative shutdown.
+//
 //counterfeiter:generate . Syncable
 type Syncable interface {
 	Sync(ctx context.Context, p *Proposal) (ShouldSnapshot, error)

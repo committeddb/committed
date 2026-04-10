@@ -10,6 +10,10 @@ type Dialect interface {
 	CreateDDL(config *Config) string
 	CreateSQL(config *Config) string
 	Open(connectionString string) (*gosql.DB, error)
+	// IsPermanent returns true if the given SQL error is non-retryable
+	// (e.g., constraint violations, data-type mismatches). The sync loop
+	// skips proposals that produce permanent errors instead of retrying.
+	IsPermanent(err error) bool
 }
 
 type Index struct {

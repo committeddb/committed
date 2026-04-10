@@ -56,38 +56,80 @@ func (s *ErrorSyncable) Close() error {
 	return nil
 }
 
-// TestSync_SyncError_Continues verifies that when Syncable.Sync returns an error,
-// the sync loop continues processing the next proposal instead of crashing.
-// This documents the current TODO behavior at sync.go:58.
-func TestSync_SyncError_Continues(t *testing.T) {
+// TestSync_TransientError_Retries verifies that when Syncable.Sync returns a
+// transient (non-permanent) error, the sync loop retries the same proposal
+// with backoff instead of advancing past it.
+func TestSync_TransientError_Retries(t *testing.T) {
 	s := NewMemoryStorage()
 	db := createDBWithStorage(s)
 	defer db.Close()
 
-	// Propose 3 proposals
-	ps := createProposals([][]string{{"a"}, {"b"}, {"c"}})
+	// Propose 1 proposal
+	ps := createProposals([][]string{{"a"}})
 	proposeCtx := testCtx(t)
-	for _, p := range ps {
-		require.Nil(t, db.Propose(proposeCtx, p))
-	}
+	require.Nil(t, db.Propose(proposeCtx, ps[0]))
 
-	// Syncable that always returns an error but counts calls
+	// Syncable that always returns a transient error
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	syncable := &ErrorSyncable{
-		syncErr:       fmt.Errorf("simulated sync failure"),
-		maxBeforeStop: len(ps),
+		syncErr:       fmt.Errorf("simulated transient failure"),
+		maxBeforeStop: 3,
 		cancel:        cancel,
 	}
 
 	err := db.Sync(ctx, "sync-1", syncable)
 	require.Nil(t, err)
 
-	// Wait until cancel fires (when count reaches maxBeforeStop)
 	<-ctx.Done()
 
-	// Despite errors, sync should have processed all proposals
-	require.Equal(t, len(ps), syncable.Count(), "sync loop should continue after sync errors")
+	// All 3 calls should have been on the same proposal (retries)
+	require.Equal(t, 3, syncable.Count(), "sync loop should retry transient errors")
+	syncable.mu.Lock()
+	for i, p := range syncable.receivedProps {
+		require.Equal(t, string(ps[0].Entities[0].Data), string(p.Entities[0].Data),
+			"call %d should receive the same proposal", i)
+	}
+	syncable.mu.Unlock()
+}
+
+// TestSync_PermanentError_Skips verifies that when Syncable.Sync returns a
+// permanent error, the sync loop skips past the bad proposal and continues
+// processing the next one.
+func TestSync_PermanentError_Skips(t *testing.T) {
+	s := NewMemoryStorage()
+	db := createDBWithStorage(s)
+	defer db.Close()
+
+	// Propose 2 proposals
+	ps := createProposals([][]string{{"bad"}, {"good"}})
+	proposeCtx := testCtx(t)
+	for _, p := range ps {
+		require.Nil(t, db.Propose(proposeCtx, p))
+	}
+
+	// Syncable that returns permanent error on first call, succeeds on second
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	syncable := &ScriptedSyncable{
+		responses: []syncResponse{
+			{err: cluster.Permanent(fmt.Errorf("bad data"))},
+			{snapshot: false, err: nil},
+		},
+		cancel: cancel,
+	}
+
+	err := db.Sync(ctx, "sync-1", syncable)
+	require.Nil(t, err)
+
+	<-ctx.Done()
+
+	// Both proposals should have been seen: first skipped, second processed
+	syncable.mu.Lock()
+	require.Equal(t, 2, len(syncable.receivedProps))
+	require.Equal(t, "bad", string(syncable.receivedProps[0].Entities[0].Data))
+	require.Equal(t, "good", string(syncable.receivedProps[1].Entities[0].Data))
+	syncable.mu.Unlock()
 }
 
 // TestSync_RegistryReplace verifies that calling db.Sync twice for the
@@ -368,4 +410,46 @@ func TestSync_EOF_Continues(t *testing.T) {
 	// Wait for sync to process the proposal (which fires cancel)
 	<-ctx.Done()
 	require.Equal(t, 1, syncable.Count(), "sync should resume after EOF when new data arrives")
+}
+
+// syncResponse is a single scripted response for ScriptedSyncable.
+type syncResponse struct {
+	snapshot cluster.ShouldSnapshot
+	err      error
+}
+
+// ScriptedSyncable returns pre-scripted responses for each Sync call.
+// After all scripted responses are exhausted, it cancels the context.
+type ScriptedSyncable struct {
+	responses []syncResponse
+	cancel    func()
+
+	mu            sync.Mutex
+	count         int
+	receivedProps []*cluster.Proposal
+}
+
+func (s *ScriptedSyncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.ShouldSnapshot, error) {
+	s.mu.Lock()
+	idx := s.count
+	s.count++
+	s.receivedProps = append(s.receivedProps, p)
+	s.mu.Unlock()
+
+	if idx >= len(s.responses) {
+		if s.cancel != nil {
+			s.cancel()
+		}
+		return false, nil
+	}
+
+	resp := s.responses[idx]
+	if idx == len(s.responses)-1 && s.cancel != nil {
+		s.cancel()
+	}
+	return resp.snapshot, resp.err
+}
+
+func (s *ScriptedSyncable) Close() error {
+	return nil
 }

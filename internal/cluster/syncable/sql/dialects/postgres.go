@@ -2,9 +2,11 @@ package dialects
 
 import (
 	gosql "database/sql"
+	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib" // registers "pgx" with database/sql
 
 	"github.com/philborlin/committed/internal/cluster/syncable/sql"
@@ -82,4 +84,18 @@ func (d *PostgreSQLDialect) CreateSQL(config *sql.Config) string {
 
 func (d *PostgreSQLDialect) Open(connectionString string) (*gosql.DB, error) {
 	return gosql.Open("pgx", connectionString)
+}
+
+// IsPermanent classifies PostgreSQL errors as permanent (non-retryable)
+// when they belong to class 22 (data exception) or class 23 (integrity
+// constraint violation).
+func (d *PostgreSQLDialect) IsPermanent(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		code := pgErr.Code
+		if strings.HasPrefix(code, "22") || strings.HasPrefix(code, "23") {
+			return true
+		}
+	}
+	return false
 }

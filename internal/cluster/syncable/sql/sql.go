@@ -66,14 +66,14 @@ func (c *Syncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.Shoul
 		var jsonData any
 		err := json.Unmarshal(e.Data, &jsonData)
 		if err != nil {
-			return false, fmt.Errorf("%v: %w", string(e.Data), err)
+			return false, cluster.Permanent(fmt.Errorf("unmarshal entity data: %w", err))
 		}
 
 		var values []any
 		for _, path := range c.insert.JsonPath {
 			res, err := jsonpath.JsonPathLookup(jsonData, path)
 			if err != nil {
-				return false, fmt.Errorf("parsing [%v] in [%v]: %w", path, jsonData, err)
+				return false, cluster.Permanent(fmt.Errorf("jsonpath [%v]: %w", path, err))
 			}
 			values = append(values, res)
 		}
@@ -84,7 +84,11 @@ func (c *Syncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.Shoul
 
 		_, err = tx.StmtContext(ctx, c.insert.Stmt).ExecContext(ctx, allValues...)
 		if err != nil {
-			return false, fmt.Errorf("[sql.Sync] tx.Stmt [%s]: %w", c.insert.SQL, err)
+			wrapped := fmt.Errorf("[sql.Sync] exec [%s]: %w", c.insert.SQL, err)
+			if c.dialect.IsPermanent(err) {
+				return false, cluster.Permanent(wrapped)
+			}
+			return false, wrapped
 		}
 	}
 
@@ -115,3 +119,4 @@ func (c *Syncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.Shoul
 func (c *Syncable) Close() error {
 	return c.insert.Stmt.Close()
 }
+

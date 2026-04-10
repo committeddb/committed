@@ -54,3 +54,7 @@ func (d *SQLMockDialect) CreateSQL(config *sql.Config) string {
 func (d *SQLMockDialect) Open(connectionString string) (*gosql.DB, error) {
 	return d.db, nil
 }
+
+func (d *SQLMockDialect) IsPermanent(err error) bool {
+	return false
+}

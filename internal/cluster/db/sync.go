@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"io"
 	"time"
 
@@ -79,6 +80,13 @@ func (db *DB) sync(ctx context.Context, id string, s cluster.Syncable) error {
 	var r ProposalReader
 	backoff := syncBackoffMin
 
+	// retryIndex and retryProposal hold a proposal that failed with a
+	// transient error. On the next iteration the worker retries the same
+	// proposal instead of reading a new one from the log. Cleared on
+	// success, permanent error, or leadership transition.
+	var retryIndex uint64
+	var retryProposal *cluster.Proposal
+
 	for {
 		// Cheap non-blocking ctx check at the top so a cancellation
 		// observed mid-iteration short-circuits the next round.
@@ -99,23 +107,30 @@ func (db *DB) sync(ctx context.Context, id string, s cluster.Syncable) error {
 			db.logger.Info("stopping sync", zap.String("id", id))
 			r = nil
 			isNode = false
+			retryProposal = nil
 			progressed = true
 		case !isNode && db.isNode(id):
 			db.logger.Info("starting sync", zap.String("id", id))
 			r = db.storage.Reader(id)
 			isNode = true
+			retryProposal = nil
 			progressed = true
 		case isNode && db.isNode(id):
-			i, p, err := r.Read()
+			var i uint64
+			var p *cluster.Proposal
+			var readErr error
+
+			if retryProposal != nil {
+				i, p = retryIndex, retryProposal
+			} else {
+				i, p, readErr = r.Read()
+			}
+
 			switch {
-			case err == io.EOF:
+			case readErr == io.EOF:
 				// caught up; idle, will sleep below
-			case err != nil:
-				// TODO Handle error properly. For now log and idle —
-				// treating a Read error as "no progress" lets the
-				// backoff slow the retry loop instead of hammering a
-				// broken reader.
-				db.logger.Warn("sync read error", zap.String("id", id), zap.Error(err))
+			case readErr != nil:
+				db.logger.Warn("sync read error", zap.String("id", id), zap.Error(readErr))
 			default:
 				// Pass the worker's ctx (not db.ctx) so a replace or
 				// Close-driven cancellation propagates into the user's
@@ -125,12 +140,26 @@ func (db *DB) sync(ctx context.Context, id string, s cluster.Syncable) error {
 				// Sync operations are expected to be idempotent (the
 				// SQL dialect uses upsert), so the replacement worker
 				// re-syncing the same proposal after a cancel is safe.
-				shouldSnapshot, err := s.Sync(ctx, p)
-				if err != nil {
-					db.logger.Warn("sync error", zap.String("id", id), zap.Error(err))
+				shouldSnapshot, syncErr := s.Sync(ctx, p)
+				if syncErr != nil {
+					if errors.Is(syncErr, cluster.ErrPermanent) {
+						db.logger.Error("permanent sync error, skipping proposal",
+							zap.String("id", id), zap.Uint64("index", i), zap.Error(syncErr))
+						retryProposal = nil
+					} else {
+						db.logger.Warn("transient sync error, will retry",
+							zap.String("id", id), zap.Uint64("index", i), zap.Error(syncErr))
+						retryIndex = i
+						retryProposal = p
+						// Don't set progressed — the backoff will
+						// slow the retry loop.
+						break
+					}
+				} else {
+					retryProposal = nil
 				}
 				if shouldSnapshot {
-					err = db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: i})
+					err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: i})
 					if err != nil {
 						db.logger.Warn("proposeSyncableIndex error", zap.String("id", id), zap.Error(err))
 					}

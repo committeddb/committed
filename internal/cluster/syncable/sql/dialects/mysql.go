@@ -2,10 +2,11 @@ package dialects
 
 import (
 	gosql "database/sql"
+	"errors"
 	"fmt"
 	"strings"
 
-	_ "github.com/go-sql-driver/mysql" // mysql driver
+	"github.com/go-sql-driver/mysql"
 
 	"github.com/philborlin/committed/internal/cluster/syncable/sql"
 )
@@ -51,4 +52,23 @@ func (d *MySQLDialect) CreateSQL(config *sql.Config) string {
 
 func (d *MySQLDialect) Open(connectionString string) (*gosql.DB, error) {
 	return gosql.Open("mysql", connectionString)
+}
+
+// IsPermanent classifies MySQL errors as permanent (non-retryable) when
+// they indicate constraint violations or data-type mismatches.
+func (d *MySQLDialect) IsPermanent(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) {
+		switch mysqlErr.Number {
+		case 1048, // Column cannot be null
+			1054, // Unknown column
+			1062, // Duplicate entry (when not using upsert)
+			1136, // Column count doesn't match
+			1264, // Out of range value
+			1265, // Data truncated
+			1366: // Incorrect value for column
+			return true
+		}
+	}
+	return false
 }
