@@ -44,11 +44,13 @@ func (db *DB) Sync(_ context.Context, id string, s cluster.Syncable) error {
 	}
 	// See db.Ingest for the rationale behind the loop and the
 	// re-check of db.closed after each wait.
+	replaced := false
 	for {
 		existing, ok := db.syncWorkers[id]
 		if !ok {
 			break
 		}
+		replaced = true
 		existing.cancel()
 		db.workersMu.Unlock()
 		<-existing.done
@@ -62,13 +64,26 @@ func (db *DB) Sync(_ context.Context, id string, s cluster.Syncable) error {
 		}
 	}
 
+	if replaced && db.metrics != nil {
+		db.metrics.WorkerReplaced("sync", id)
+	}
+
 	workerCtx, cancel := context.WithCancel(db.ctx)
 	handle := &workerHandle{cancel: cancel, done: make(chan struct{})}
 	db.syncWorkers[id] = handle
 	db.workersMu.Unlock()
 
+	if db.metrics != nil {
+		db.metrics.SetWorkerRunning("sync", id, true)
+	}
+
 	go func() {
-		defer close(handle.done)
+		defer func() {
+			if db.metrics != nil {
+				db.metrics.SetWorkerRunning("sync", id, false)
+			}
+			close(handle.done)
+		}()
 		_ = db.sync(workerCtx, id, s)
 	}()
 
@@ -140,7 +155,11 @@ func (db *DB) sync(ctx context.Context, id string, s cluster.Syncable) error {
 				// Sync operations are expected to be idempotent (the
 				// SQL dialect uses upsert), so the replacement worker
 				// re-syncing the same proposal after a cancel is safe.
+				syncStart := time.Now()
 				shouldSnapshot, syncErr := s.Sync(ctx, p)
+				if db.metrics != nil {
+					db.metrics.SyncCompleted(id, time.Since(syncStart))
+				}
 				if syncErr != nil {
 					if errors.Is(syncErr, cluster.ErrPermanent) {
 						db.logger.Error("permanent sync error, skipping proposal",

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/philborlin/committed/internal/cluster/db/httptransport"
+	"github.com/philborlin/committed/internal/cluster/metrics"
 	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/raft/v3/raftpb"
 	"go.uber.org/zap"
@@ -54,7 +55,8 @@ type Raft struct {
 	// call from multiple paths.
 	closeOnce sync.Once
 
-	logger *zap.Logger
+	logger  *zap.Logger
+	metrics *metrics.Metrics
 }
 
 func NewRaft(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, proposeConfC <-chan raftpb.ConfChange, opts ...Option) (<-chan []byte, <-chan error, *Raft) {
@@ -85,7 +87,8 @@ func newRaftWithOptions(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []
 		closeC:             make(chan struct{}),
 		serveChannelsDoneC: make(chan struct{}),
 
-		logger: logger,
+		logger:  logger,
+		metrics: cfg.metrics,
 	}
 	// startRaft itself doesn't block — it sets up the raft.Node and transport
 	// then spawns serveRaft/serveChannels as their own goroutines. Calling it
@@ -195,7 +198,12 @@ func (n *Raft) serveChannels() {
 		case <-ticker.C:
 			n.node.Tick()
 		case rd := <-n.node.Ready():
-			n.leaderState.SetLeader(n.node.Status().RaftState == raft.StateLeader)
+			isLeader := n.node.Status().RaftState == raft.StateLeader
+			n.leaderState.SetLeader(isLeader)
+
+			if n.metrics != nil {
+				n.metrics.SetLeader(isLeader)
+			}
 
 			// Save persists the new entries durably. It does NOT apply them
 			// to bucket state — that happens via ApplyCommitted below, only
@@ -220,8 +228,12 @@ func (n *Raft) serveChannels() {
 				// the node inconsistent in a way that's worse to keep
 				// running than to crash. (Same posture etcd's raftexample
 				// takes.)
+				applyStart := time.Now()
 				if err := n.storage.ApplyCommitted(entry); err != nil {
 					n.logger.Fatal("apply committed entry", zap.Uint64("index", entry.Index), zap.Error(err))
+				}
+				if n.metrics != nil {
+					n.metrics.EntryApplied(entry.Index, time.Since(applyStart))
 				}
 				// Fire the apply notifier after the storage apply has
 				// succeeded but before processCommittedEntry's send to
@@ -245,6 +257,13 @@ func (n *Raft) serveChannels() {
 					// n.storage.ConfState(c)
 				}
 			}
+
+			if n.metrics != nil {
+				fi, _ := n.storage.FirstIndex()
+				li, _ := n.storage.LastIndex()
+				n.metrics.SetIndexRange(fi, li)
+			}
+
 			n.node.Advance()
 		// case err := <-n.transport.ErrorC:
 		case err := <-n.transport.GetErrorC():

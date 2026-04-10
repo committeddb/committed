@@ -126,11 +126,13 @@ func (db *DB) Ingest(_ context.Context, id string, i cluster.Ingestable) error {
 	// Re-check db.closed after each wait too: a concurrent db.Close
 	// may have flipped the flag while we were dropped. Without the
 	// re-check, we'd install a worker that escapes the Close drain.
+	replaced := false
 	for {
 		existing, ok := db.ingestWorkers[id]
 		if !ok {
 			break
 		}
+		replaced = true
 		existing.cancel()
 		db.workersMu.Unlock()
 		<-existing.done
@@ -144,13 +146,26 @@ func (db *DB) Ingest(_ context.Context, id string, i cluster.Ingestable) error {
 		}
 	}
 
+	if replaced && db.metrics != nil {
+		db.metrics.WorkerReplaced("ingest", id)
+	}
+
 	workerCtx, cancel := context.WithCancel(db.ctx)
 	handle := &workerHandle{cancel: cancel, done: make(chan struct{})}
 	db.ingestWorkers[id] = handle
 	db.workersMu.Unlock()
 
+	if db.metrics != nil {
+		db.metrics.SetWorkerRunning("ingest", id, true)
+	}
+
 	go func() {
-		defer close(handle.done)
+		defer func() {
+			if db.metrics != nil {
+				db.metrics.SetWorkerRunning("ingest", id, false)
+			}
+			close(handle.done)
+		}()
 		_ = db.ingest(workerCtx, id, i)
 	}()
 

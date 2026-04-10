@@ -1,14 +1,20 @@
 package cmd
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
+	"os"
+
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 
 	"github.com/philborlin/committed/internal/cluster/db"
 	parser "github.com/philborlin/committed/internal/cluster/db/parser"
 	"github.com/philborlin/committed/internal/cluster/db/wal"
 	"github.com/philborlin/committed/internal/cluster/http"
+	"github.com/philborlin/committed/internal/cluster/metrics"
 	ingestablesql "github.com/philborlin/committed/internal/cluster/ingestable/sql"
 	ingestablemysql "github.com/philborlin/committed/internal/cluster/ingestable/sql/mysql"
 	syncsql "github.com/philborlin/committed/internal/cluster/syncable/sql"
@@ -43,7 +49,27 @@ to quickly create a Cobra application.`,
 		peers := make(db.Peers)
 		peers[*id] = *url
 
-		db := db.New(*id, peers, s, p, sync, ingest)
+		var dbOpts []db.Option
+
+		// When OTEL_EXPORTER_OTLP_ENDPOINT is set (e.g., "localhost:4317"),
+		// metrics are pushed to an OTel Collector via gRPC. The collector
+		// handles routing to backends (Prometheus, Datadog, etc.). When
+		// unset, no metrics are collected and there is zero overhead.
+		if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "" {
+			ctx := context.Background()
+			exporter, err := otlpmetricgrpc.New(ctx)
+			if err != nil {
+				log.Fatalf("otel exporter: %v", err)
+			}
+			provider := sdkmetric.NewMeterProvider(
+				sdkmetric.WithReader(sdkmetric.NewPeriodicReader(exporter)),
+			)
+			defer provider.Shutdown(context.Background())
+			m := metrics.New(provider.Meter("committed"))
+			dbOpts = append(dbOpts, db.WithMetrics(m))
+		}
+
+		db := db.New(*id, peers, s, p, sync, ingest, dbOpts...)
 		fmt.Printf("Raft Running...\n")
 		h := http.New(db)
 		fmt.Printf("API Listening on %s...\n", *addr)

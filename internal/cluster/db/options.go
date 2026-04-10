@@ -3,6 +3,7 @@ package db
 import (
 	"time"
 
+	"github.com/philborlin/committed/internal/cluster/metrics"
 	"go.uber.org/zap"
 )
 
@@ -31,6 +32,7 @@ type Option func(*options)
 type options struct {
 	tickInterval time.Duration
 	logger       *zap.Logger
+	metrics      *metrics.Metrics
 }
 
 func defaultOptions() options {
@@ -52,4 +54,11 @@ func WithTickInterval(d time.Duration) Option {
 // Defaults to zap.NewNop() so tests run silently.
 func WithLogger(l *zap.Logger) Option {
 	return func(o *options) { o.logger = l }
+}
+
+// WithMetrics wires Prometheus metrics into DB and its internal Raft
+// instance. Defaults to nil (no metrics collected). Pass a *Metrics
+// created via metrics.New(registry) to enable instrumentation.
+func WithMetrics(m *metrics.Metrics) Option {
+	return func(o *options) { o.metrics = m }
 }

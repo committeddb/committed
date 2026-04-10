@@ -8,7 +8,10 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"time"
+
 	"github.com/philborlin/committed/internal/cluster"
+	"github.com/philborlin/committed/internal/cluster/metrics"
 	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/raft/v3/raftpb"
 	"go.uber.org/zap"
@@ -63,7 +66,8 @@ type DB struct {
 	ingestWorkers map[string]*workerHandle
 	closed        bool
 
-	logger *zap.Logger
+	logger  *zap.Logger
+	metrics *metrics.Metrics
 }
 
 // workerHandle is the registry entry for a per-ID Sync or Ingest
@@ -107,6 +111,7 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		syncWorkers:   make(map[string]*workerHandle),
 		ingestWorkers: make(map[string]*workerHandle),
 		logger:        cfg.logger,
+		metrics:       cfg.metrics,
 	}
 
 	// The applied notifier is wired into the raft Ready loop. After each
@@ -238,6 +243,7 @@ func (db *DB) EatCommitC() {
 // position bumps, syncable index bumps) should call proposeFireAndForget
 // instead so they don't tie up a request ID + waiter slot.
 func (db *DB) Propose(ctx context.Context, p *cluster.Proposal) error {
+	start := time.Now()
 	p.RequestID = db.nextRequestID.Add(1)
 
 	ack := make(chan error, 1)
@@ -256,6 +262,11 @@ func (db *DB) Propose(ctx context.Context, p *cluster.Proposal) error {
 		return err
 	}
 
+	kind := proposalKind(p)
+	if db.metrics != nil {
+		db.metrics.ProposalSubmitted(kind)
+	}
+
 	db.logger.Debug("proposing", zap.Uint64("requestID", p.RequestID), zap.Int("entities", len(p.Entities)))
 
 	// db.ctx in the select handles the "db is shutting down" case so a
@@ -271,6 +282,9 @@ func (db *DB) Propose(ctx context.Context, p *cluster.Proposal) error {
 
 	select {
 	case err := <-ack:
+		if db.metrics != nil {
+			db.metrics.ProposalApplied(time.Since(start))
+		}
 		db.logger.Debug("proposal applied", zap.Uint64("requestID", p.RequestID))
 		return err
 	case <-ctx.Done():
@@ -278,6 +292,15 @@ func (db *DB) Propose(ctx context.Context, p *cluster.Proposal) error {
 	case <-db.ctx.Done():
 		return db.ctx.Err()
 	}
+}
+
+// proposalKind classifies a proposal as "user" or "config" based on
+// whether its entities contain system types.
+func proposalKind(p *cluster.Proposal) string {
+	if len(p.Entities) > 0 && p.Entities[0].Type != nil && cluster.IsSystem(p.Entities[0].Type.ID) {
+		return "config"
+	}
+	return "user"
 }
 
 // proposeFireAndForget marshals and enqueues a proposal without waiting
@@ -388,6 +411,9 @@ func (db *DB) proposeSyncableIndex(_ context.Context, i *cluster.SyncableIndex) 
 	if err != nil {
 		return err
 	}
+	if db.metrics != nil {
+		db.metrics.ProposalSubmitted("index")
+	}
 	return db.proposeFireAndForget(db.ctx, &cluster.Proposal{Entities: []*cluster.Entity{entity}})
 }
 
@@ -406,6 +432,9 @@ func (db *DB) proposeIngestablePosition(_ context.Context, p *cluster.Ingestable
 	entity, err := cluster.NewUpsertIngestablePositionEntity(p)
 	if err != nil {
 		return err
+	}
+	if db.metrics != nil {
+		db.metrics.ProposalSubmitted("position")
 	}
 	return db.proposeFireAndForget(db.ctx, &cluster.Proposal{Entities: []*cluster.Entity{entity}})
 }
