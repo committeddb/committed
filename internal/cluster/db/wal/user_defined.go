@@ -10,32 +10,26 @@ import (
 )
 
 // handleUserDefined records a time-series point for a user-defined entity.
-// The timestamp comes from e.Timestamp, which the propose path stamps
+// The timestamp comes from e.Timestamp, which every propose path stamps
 // once when the proposal is built. Reading it here (instead of calling
-// time.Now() at apply) makes apply content-deterministic across nodes:
-// every replica writes the same value into the time-series store, and
-// post-snapshot replay reproduces the original timestamp instead of
+// time.Now() at apply) is what makes apply content-deterministic across
+// nodes: every replica writes the same value into the time-series store,
+// and post-snapshot replay reproduces the original timestamp instead of
 // computing a new one.
 //
-// Pre-PR4 entries (and any propose path that forgets to stamp) arrive
-// with Timestamp == 0. We fall back to time.Now() in that case to
-// preserve the old behavior for those entries. This fallback is
-// non-deterministic, but it only affects entries written before this
-// fix landed AND wal.Storage.ApplyCommitted skips re-apply via the
-// persisted appliedIndex, so an old entry only goes through
-// handleUserDefined once (on its original apply, when the old code
-// was still using time.Now() anyway). New propose paths all stamp at
-// propose time and never hit the fallback.
+// There is no time.Now() fallback. Apply must be deterministic given the
+// same raft entry — see docs/event-log-architecture.md
+// § "Determinism requirement". A propose path that forgets to stamp will
+// land its row at unix epoch (0) on every node, which is deterministic
+// but visible enough in time-series queries that the bug is easy to spot.
+// Pre-PR4 entries that exist on disk with Timestamp == 0 are skipped on
+// restart by the persisted appliedIndex, so this never re-applies them.
 func (s *Storage) handleUserDefined(e *cluster.Entity) error {
-	ts := e.Timestamp
-	if ts == 0 {
-		ts = time.Now().UnixMilli()
-	}
 	return s.TimeSeriesStorage.InsertRows([]tstorage.Row{
 		{
 			Metric:    e.Type.ID,
 			Labels:    []tstorage.Label{},
-			DataPoint: tstorage.DataPoint{Timestamp: ts, Value: 1},
+			DataPoint: tstorage.DataPoint{Timestamp: e.Timestamp, Value: 1},
 		},
 	})
 }

@@ -475,19 +475,56 @@ nice-to-have, because:
 
 ### Known sources of non-determinism
 
-A separate ticket (`determinism-audit.md`) tracks the audit. Known issues:
+The apply-path audit lives at `.claude-scratch/tickets/determinism-audit.md`
+and is **complete** as of the determinism-audit landing. Findings:
 
-- `time.Now()` in `internal/cluster/db/wal/user_defined.go` — known bug.
-  Fix: add a wall-clock field to the proposal payload at propose time, so
-  the same value is used by every node when applying.
+- **`time.Now()` in `wal/user_defined.go`** — fixed. Every propose path
+  (HTTP `AddProposal`, the MySQL ingest `OnRow` handler) now stamps the
+  proposal's `Entity.Timestamp` (unix milliseconds) once at propose time,
+  and `handleUserDefined` reads that field directly with no fallback. The
+  field is part of the `LogEntity` proto so it survives serialization. A
+  proto path that forgets to stamp will land its row at unix epoch on
+  every node — deterministic, and visible enough in time-series queries
+  that the bug surfaces immediately.
+- **Map iteration, random IDs, UUIDs, node-id fields, float math,
+  goroutine ordering, OS-dependent calls** — none found in the apply
+  path. `applyEntity` runs single-threaded inside the raft Ready loop,
+  every per-handler bbolt write is a marshaled protobuf with scalar/bytes
+  fields only, and channel notifies in `saveSyncable`/`saveIngestable`
+  happen *after* the bucket write so they don't race the state.
 
-The audit will look for: map iteration order, random ID/UUID/nonce
-generation during apply, node-id-dependent fields, float operations with
-platform-dependent rounding, and anything else that could differ across
-nodes.
+A regression test, `wal.TestApplyDeterminism`
+(`internal/cluster/db/wal/determinism_test.go`), constructs three fresh
+`wal.Storage` instances on disjoint temp dirs, applies the same varied
+burst of raft entries (multiple types, a database, syncable, ingestable,
+syncable-index, stamped + unstamped user entities, mixed proposals, a
+delete) to each, and compares three things across all three nodes:
 
-A multi-node integration test will hash each node's permanent event log
-+ bbolt content after a propose burst and assert the hashes match.
+1. **The raft entry log** — walked end-to-end via `EntryLog.Read`.
+   Today this is mostly a check on raft's own replication contract
+   ("every node sees the same committed entries in the same order"),
+   but it's the stand-in for the future permanent-event-log directory
+   hash. A `Save` bug that dropped or reordered entries on one node
+   would diverge here even when the other checks looked fine.
+2. **bbolt bucket contents** — every bucket walked in sorted name order
+   with each bucket's keys walked lexicographically, snapshotted into a
+   slice of `"bucket/hex(key)=hex(value)"` lines and compared via
+   testify's `require.Equal` (per-line diff on failure). The snapshot
+   helper lives in `wal/export_test.go` so it's only compiled into the
+   test binary; production code does not carry a snapshot API.
+3. **Raw `tstorage.Select()` points** for the user metric — ensures the
+   time-series store also stays content-deterministic across nodes,
+   which is the assertion that catches a re-introduced wall-clock read
+   in `handleUserDefined` (the bucket walker deliberately excludes the
+   time-series store because tstorage's on-disk format is not
+   byte-stable today, so the raw-points comparison is what guards that
+   handler).
+
+The test is a unit test (no build tag) so it runs under both `make test`
+and `make test-all`. It bypasses real raft because raft's only contract
+is "every node sees the same committed entries in the same order" and
+the test simulates exactly that — bypassing eliminates election timing
+and HTTP transport flakiness without weakening the actual invariant.
 
 ---
 

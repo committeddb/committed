@@ -158,39 +158,10 @@ func TestHandleUserDefined_TimestampDeterministic(t *testing.T) {
 			"if handleUserDefined fell back to time.Now() the row would land outside the window")
 }
 
-// TestHandleUserDefined_TimestampZeroFallback verifies the
-// pre-PR4-compat fallback: an entity with Timestamp == 0 still gets
-// recorded (using time.Now() at apply). This protects entries
-// committed before the propose path was updated to stamp.
-func TestHandleUserDefined_TimestampZeroFallback(t *testing.T) {
-	s := NewStorage(t, index(3).terms(3, 4, 5))
-	defer s.Cleanup()
-
-	const metric = "legacy-metric"
-	insertTypes(t, s, []*cluster.Type{{ID: metric, Name: metric}}, 6, 6)
-
-	before := time.Now()
-	entity := &cluster.Entity{
-		Type: &cluster.Type{ID: metric},
-		Key:  []byte("k"),
-		Data: []byte("v"),
-		// Timestamp deliberately unset (== 0) to exercise the fallback.
-	}
-	saveEntity(t, entity, s, 7, 7)
-	after := time.Now()
-
-	// Query a generous window around now; the row should land inside.
-	windowStart := before.Add(-time.Minute)
-	windowEnd := after.Add(time.Minute)
-	points, err := s.TimePoints(metric, windowStart, windowEnd)
-	require.Nil(t, err)
-
-	var total uint64
-	for _, p := range points {
-		total += p.Value
-	}
-	require.Equal(t, uint64(1), total, "fallback should record exactly one row near time.Now()")
-}
+// Removed: TestHandleUserDefined_TimestampZeroFallback. It existed to
+// characterize the (now-removed) time.Now() fallback in handleUserDefined.
+// Cross-node determinism is now covered by TestApplyDeterminism in
+// determinism_test.go, which is the load-bearing assertion.
 
 func ignoreOutOfBounds(startTime time.Time) GetTimePointsTest {
 	times := []time.Time{
