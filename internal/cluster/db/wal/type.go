@@ -8,7 +8,6 @@ import (
 )
 
 func (s *Storage) handleType(e *cluster.Entity) error {
-	// fmt.Printf("[wal.type] saving type...\n")
 	if e.IsDelete() {
 		return s.deleteType(e.Key)
 	} else {
@@ -18,7 +17,6 @@ func (s *Storage) handleType(e *cluster.Entity) error {
 			return err
 		}
 		return s.saveType(t)
-		// fmt.Printf("[wal.type] ... type saved\n")
 	}
 }
 

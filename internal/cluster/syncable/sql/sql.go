@@ -5,10 +5,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
 
 	"github.com/oliveagle/jsonpath"
 	"github.com/philborlin/committed/internal/cluster"
+	"go.uber.org/zap"
 )
 
 type Syncable struct {
@@ -33,7 +33,7 @@ func (c *Syncable) Init() error {
 
 	stmt, err := c.db.Prepare(sqlString)
 	if err != nil {
-		log.Fatalf("Error Preparing sql [%s]: %v", sqlString, err)
+		return fmt.Errorf("prepare sql [%s]: %w", sqlString, err)
 	}
 
 	var jsonPaths []string
@@ -88,7 +88,7 @@ func (c *Syncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.Shoul
 		}
 	}
 
-	fmt.Printf("[sql syncable] Committing...\n")
+	zap.L().Debug("sql syncable committing")
 	// CAVEAT: tx.Commit() does NOT take a context — database/sql does
 	// not expose CommitContext. Everything before this point in Sync
 	// (BeginTx, StmtContext, ExecContext) is interruptible by ctx, but
@@ -107,7 +107,7 @@ func (c *Syncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.Shoul
 		}
 		return false, err
 	}
-	fmt.Printf("[sql syncable] ...Committed\n")
+	zap.L().Debug("sql syncable committed")
 
 	return true, nil
 }

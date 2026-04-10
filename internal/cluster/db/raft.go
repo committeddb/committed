@@ -2,7 +2,6 @@ package db
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -63,10 +62,10 @@ func NewRaft(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, propo
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	return newRaftWithOptions(id, ps, s, proposeC, proposeConfC, nil, cfg)
+	return newRaftWithOptions(id, ps, s, proposeC, proposeConfC, nil, cfg.logger, cfg)
 }
 
-func newRaftWithOptions(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, proposeConfC <-chan raftpb.ConfChange, applyNotifier func(data []byte), cfg options) (<-chan []byte, <-chan error, *Raft) {
+func newRaftWithOptions(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, proposeConfC <-chan raftpb.ConfChange, applyNotifier func(data []byte), logger *zap.Logger, cfg options) (<-chan []byte, <-chan error, *Raft) {
 	commitC := make(chan []byte)
 	errorC := make(chan error)
 
@@ -86,7 +85,7 @@ func newRaftWithOptions(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []
 		closeC:             make(chan struct{}),
 		serveChannelsDoneC: make(chan struct{}),
 
-		logger: zap.NewExample(),
+		logger: logger,
 	}
 	// startRaft itself doesn't block — it sets up the raft.Node and transport
 	// then spawns serveRaft/serveChannels as their own goroutines. Calling it
@@ -119,15 +118,14 @@ func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 
 	hs, _, err := n.storage.InitialState()
 	if err != nil {
-		// Send to the error channel
-		fmt.Printf("[raft] %v\n", err)
+		n.logger.Error("initial state", zap.Error(err))
 	}
 
 	if hs.Term > 0 {
-		fmt.Printf("[raft] Restarting Node %d\n", id)
+		n.logger.Info("restarting node", zap.Uint64("id", id))
 		n.node = raft.RestartNode(c)
 	} else {
-		fmt.Printf("[raft] Starting Node %d\n", id)
+		n.logger.Info("starting node", zap.Uint64("id", id))
 		n.node = raft.StartNode(c, ps)
 	}
 
@@ -161,13 +159,13 @@ func (n *Raft) serveChannels() {
 				if !ok {
 					n.proposeC = nil
 				} else {
-					fmt.Printf("[raft] proposal being sent to state machine...\n")
+					n.logger.Debug("proposal being sent to state machine")
 					// blocks until accepted by raft state machine
 					err := n.node.Propose(context.TODO(), []byte(prop))
 					if err != nil {
 						n.raftErrorC <- err
 					}
-					fmt.Printf("[raft] ...proposal accepted by state machine\n")
+					n.logger.Debug("proposal accepted by state machine")
 				}
 			case cc, ok := <-n.proposeConfC:
 				if !ok {
@@ -197,7 +195,6 @@ func (n *Raft) serveChannels() {
 		case <-ticker.C:
 			n.node.Tick()
 		case rd := <-n.node.Ready():
-			// fmt.Printf("[raft] ready and about to save to storage\n")
 			n.leaderState.SetLeader(n.node.Status().RaftState == raft.StateLeader)
 
 			// Save persists the new entries durably. It does NOT apply them
@@ -208,7 +205,7 @@ func (n *Raft) serveChannels() {
 			// applying them to application state would diverge the cluster.
 			err := n.storage.Save(rd.HardState, rd.Entries, rd.Snapshot)
 			if err != nil {
-				fmt.Printf("[raft] storage save: %v\n", err)
+				n.logger.Error("storage save", zap.Error(err))
 				n.raftErrorC <- err
 			}
 			n.transport.Send(rd.Messages)

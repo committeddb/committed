@@ -2,11 +2,11 @@ package db
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"time"
 
 	"github.com/philborlin/committed/internal/cluster"
+	"go.uber.org/zap"
 )
 
 // syncBackoff{Min,Max} bound the polling interval for db.sync's idle
@@ -96,12 +96,12 @@ func (db *DB) sync(ctx context.Context, id string, s cluster.Syncable) error {
 		progressed := false
 		switch {
 		case isNode && !db.isNode(id):
-			fmt.Println("Stopping Sync...")
+			db.logger.Info("stopping sync", zap.String("id", id))
 			r = nil
 			isNode = false
 			progressed = true
 		case !isNode && db.isNode(id):
-			fmt.Printf("[db] Syncing %v\n", id)
+			db.logger.Info("starting sync", zap.String("id", id))
 			r = db.storage.Reader(id)
 			isNode = true
 			progressed = true
@@ -115,7 +115,7 @@ func (db *DB) sync(ctx context.Context, id string, s cluster.Syncable) error {
 				// treating a Read error as "no progress" lets the
 				// backoff slow the retry loop instead of hammering a
 				// broken reader.
-				fmt.Printf("[db.DB] read: %v\n", err)
+				db.logger.Warn("sync read error", zap.String("id", id), zap.Error(err))
 			default:
 				// Pass the worker's ctx (not db.ctx) so a replace or
 				// Close-driven cancellation propagates into the user's
@@ -127,14 +127,12 @@ func (db *DB) sync(ctx context.Context, id string, s cluster.Syncable) error {
 				// re-syncing the same proposal after a cancel is safe.
 				shouldSnapshot, err := s.Sync(ctx, p)
 				if err != nil {
-					// TODO Handle error
-					fmt.Printf("[db.DB] sync: %v\n", err)
+					db.logger.Warn("sync error", zap.String("id", id), zap.Error(err))
 				}
 				if shouldSnapshot {
 					err = db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: i})
 					if err != nil {
-						// TODO Handle error
-						fmt.Printf("[db.DB] proposeSyncableIndex: %v\n", err)
+						db.logger.Warn("proposeSyncableIndex error", zap.String("id", id), zap.Error(err))
 					}
 				}
 				progressed = true

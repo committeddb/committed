@@ -35,6 +35,7 @@ func writeError(w httpgo.ResponseWriter, status int, code string, message string
 	w.Write(bs)
 
 	zap.L().Warn("http error",
+		zap.String("request_id", w.Header().Get("X-Request-ID")),
 		zap.Int("status", status),
 		zap.String("code", code),
 		zap.String("message", message),

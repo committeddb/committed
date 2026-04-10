@@ -24,6 +24,7 @@ func New(c cluster.Cluster) *HTTP {
 	})
 
 	r.Use(corsMiddleware.Handler)
+	r.Use(RequestID)
 	h := &HTTP{r: r, c: c}
 
 	r.Get("/health", h.Health)

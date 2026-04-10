@@ -18,6 +18,7 @@ import (
 	bolt "go.etcd.io/bbolt"
 	"go.etcd.io/etcd/raft/v3"
 	pb "go.etcd.io/etcd/raft/v3/raftpb"
+	"go.uber.org/zap"
 )
 
 var ErrOutOfBounds = errors.New("requested index is greater than last index")
@@ -78,6 +79,8 @@ type Storage struct {
 	// fully applied. Bumped after each successful per-entry apply (and
 	// persisted to bbolt in the same step). Loaded from bbolt on Open.
 	appliedIndex atomic.Uint64
+
+	logger *zap.Logger
 }
 
 // Returns a *WalStorage, whether this storage existed already, or an error
@@ -153,6 +156,11 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		return nil, err
 	}
 
+	logger := cfg.logger
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+
 	dbs := make(map[string]cluster.Database)
 	ws := &Storage{
 		EntryLog:          entryLog,
@@ -163,6 +171,7 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		parser:            p,
 		sync:              sync,
 		ingest:            ingest,
+		logger:            logger,
 	}
 
 	fi, err := entryLog.FirstIndex()
@@ -359,7 +368,7 @@ func (s *Storage) ApplyCommitted(entry pb.Entry) error {
 	}
 
 	for _, entity := range p.Entities {
-		fmt.Printf("[wal.storage] Applying entity %v\n", entity)
+		s.logger.Debug("applying entity", zap.String("typeID", entity.Type.ID), zap.String("key", string(entity.Key)))
 		if err := s.applyEntity(entity); err != nil {
 			return err
 		}

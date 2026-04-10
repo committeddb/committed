@@ -5,10 +5,11 @@ import (
 
 	"github.com/philborlin/committed/internal/cluster"
 	bolt "go.etcd.io/bbolt"
+	"go.uber.org/zap"
 )
 
 func (s *Storage) handleDatabase(e *cluster.Entity) error {
-	fmt.Printf("[wal.database] saving database...\n")
+	s.logger.Debug("saving database", zap.String("key", string(e.Key)))
 	if e.IsDelete() {
 		return s.deleteDatabase(e.Key)
 	} else {
@@ -17,7 +18,6 @@ func (s *Storage) handleDatabase(e *cluster.Entity) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("[wal.database] ... database saved\n")
 		return s.saveDatabase(t)
 	}
 }
@@ -38,7 +38,7 @@ func (s *Storage) saveDatabase(t *cluster.Configuration) error {
 			return fmt.Errorf("[wal.database] parseDatabase: %w", err)
 		}
 
-		fmt.Printf("[wal.database] Saved database: %s\n", name)
+		s.logger.Debug("database saved", zap.String("id", t.ID), zap.String("name", name))
 		err = b.Put([]byte(t.ID), bs)
 		if err != nil {
 			return fmt.Errorf("[wal.database] put: %w", err)

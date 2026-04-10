@@ -46,8 +46,6 @@ func (d *MySQLDialect) CreateSQL(config *sql.Config) string {
 		}
 	}
 
-	fmt.Printf("[mysql.dialect] %s\n", sql.String())
-
 	return sql.String()
 }
 

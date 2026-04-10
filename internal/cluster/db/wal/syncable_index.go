@@ -16,7 +16,6 @@ func (s *Storage) handleSyncableIndex(e *cluster.Entity) error {
 		if err != nil {
 			return err
 		}
-		// fmt.Printf("[wal.syncable-index] index: %#v\n", t)
 		return s.saveSyncableIndex(t)
 	}
 }

@@ -1,6 +1,10 @@
 package db
 
-import "time"
+import (
+	"time"
+
+	"go.uber.org/zap"
+)
 
 // defaultTickInterval is the cadence at which Raft.Tick() is called when no
 // override is supplied. It interacts with the (currently hard-coded)
@@ -26,11 +30,13 @@ type Option func(*options)
 
 type options struct {
 	tickInterval time.Duration
+	logger       *zap.Logger
 }
 
 func defaultOptions() options {
 	return options{
 		tickInterval: defaultTickInterval,
+		logger:       zap.NewNop(),
 	}
 }
 
@@ -40,4 +46,10 @@ func defaultOptions() options {
 // is unacceptable. Production callers should leave this at the default.
 func WithTickInterval(d time.Duration) Option {
 	return func(o *options) { o.tickInterval = d }
+}
+
+// WithLogger overrides the logger used by DB and its internal Raft instance.
+// Defaults to zap.NewNop() so tests run silently.
+func WithLogger(l *zap.Logger) Option {
+	return func(o *options) { o.logger = l }
 }

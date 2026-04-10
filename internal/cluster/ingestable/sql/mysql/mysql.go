@@ -17,6 +17,7 @@ import (
 	"github.com/philborlin/committed/internal/cluster/ingestable/sql"
 	"github.com/philborlin/committed/internal/cluster/ingestable/sql/dialectpb"
 	"github.com/siddontang/go-log/log"
+	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -165,7 +166,7 @@ func (h *MySQLEventHandler) OnRow(e *canal.RowsEvent) error {
 			return h.ctx.Err()
 		}
 
-		fmt.Printf("[OnRow] [%v] Action: [%s] Rows:[%v]\n", e.Table, e.Action, e.Rows)
+		zap.L().Debug("OnRow", zap.String("table", e.Table.Name), zap.String("action", e.Action))
 	}
 
 	return nil
@@ -173,7 +174,7 @@ func (h *MySQLEventHandler) OnRow(e *canal.RowsEvent) error {
 
 func (h *MySQLEventHandler) OnPosSynced(header *replication.EventHeader, pos mysql.Position, set mysql.GTIDSet, force bool) error {
 	// An XID event is generated for a COMMIT of a transaction that modifies one or more tables of an XA-capable storage engine.
-	fmt.Printf("header: %v\n", header)
+	zap.L().Debug("OnPosSynced header", zap.Any("eventType", header))
 	if header != nil && header.EventType == replication.XID_EVENT {
 		pos := &dialectpb.MySQLBinLogPosition{Name: pos.Name, Pos: pos.Pos}
 		bs, err := proto.Marshal(pos)
@@ -186,7 +187,7 @@ func (h *MySQLEventHandler) OnPosSynced(header *replication.EventHeader, pos mys
 		case <-h.ctx.Done():
 			return h.ctx.Err()
 		}
-		fmt.Printf("[OnPosSynced] Header: [%v] pos:[%v]\n", header, pos)
+		zap.L().Debug("OnPosSynced", zap.String("pos", pos.Name), zap.Uint32("offset", pos.Pos))
 	}
 
 	return nil

@@ -6,10 +6,10 @@ import (
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/db"
 	bolt "go.etcd.io/bbolt"
+	"go.uber.org/zap"
 )
 
 func (s *Storage) handleSyncable(e *cluster.Entity) error {
-	// fmt.Printf("[wal.syncable] saving database...\n")
 	if e.IsDelete() {
 		return s.deleteSyncable(e.Key)
 	} else {
@@ -19,7 +19,6 @@ func (s *Storage) handleSyncable(e *cluster.Entity) error {
 			return err
 		}
 		return s.saveSyncable(t)
-		// fmt.Printf("[wal.syncable] ... database saved\n")
 	}
 }
 
@@ -67,7 +66,7 @@ func (s *Storage) saveSyncable(t *cluster.Configuration) error {
 	}
 
 	if s.sync != nil {
-		fmt.Printf("[wal.syncable] Sending to channel %v\n", s.sync)
+		s.logger.Debug("sending syncable to channel", zap.String("id", t.ID))
 		s.sync <- &db.SyncableWithID{ID: t.ID, Syncable: syncable}
 	}
 

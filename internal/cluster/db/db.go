@@ -5,13 +5,13 @@ package db
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"sync/atomic"
 
 	"github.com/philborlin/committed/internal/cluster"
 	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/raft/v3/raftpb"
+	"go.uber.org/zap"
 )
 
 // ErrClosed is returned by db.Sync, db.Ingest, and db.Propose when the
@@ -62,6 +62,8 @@ type DB struct {
 	syncWorkers   map[string]*workerHandle
 	ingestWorkers map[string]*workerHandle
 	closed        bool
+
+	logger *zap.Logger
 }
 
 // workerHandle is the registry entry for a per-ID Sync or Ingest
@@ -104,6 +106,7 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		waiters:       make(map[uint64]chan error),
 		syncWorkers:   make(map[string]*workerHandle),
 		ingestWorkers: make(map[string]*workerHandle),
+		logger:        cfg.logger,
 	}
 
 	// The applied notifier is wired into the raft Ready loop. After each
@@ -112,7 +115,7 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 	// p.RequestID, and signal it. This shape works uniformly for
 	// wal.Storage (real apply) and testing.MemoryStorage (no-op apply) —
 	// both go through the same raft.go iteration over rd.CommittedEntries.
-	commitC, errorC, raft := newRaftWithOptions(id, rpeers, s, proposeC, confChangeC, db.notifyApplied, cfg)
+	commitC, errorC, raft := newRaftWithOptions(id, rpeers, s, proposeC, confChangeC, db.notifyApplied, cfg.logger, cfg)
 
 	db.CommitC = commitC
 	db.ErrorC = errorC
@@ -147,7 +150,7 @@ func (db *DB) notifyApplied(data []byte) {
 		// Don't crash on undecodable data — Propose's caller will time
 		// out via ctx if its waiter is never signaled. Logging is
 		// enough; the apply path itself already logged or skipped.
-		fmt.Printf("[db.DB] notifyApplied unmarshal: %v\n", err)
+		db.logger.Warn("notifyApplied unmarshal failed", zap.Error(err))
 		return
 	}
 	if p.RequestID == 0 {
@@ -216,7 +219,7 @@ func (db *DB) listenForIngestables(ingest <-chan *IngestableWithID) {
 func (db *DB) EatCommitC() {
 	go func() {
 		for range db.CommitC {
-			fmt.Printf("[db.DB] Ate a commit\n")
+			db.logger.Debug("ate a commit")
 		}
 	}()
 }
@@ -253,8 +256,7 @@ func (db *DB) Propose(ctx context.Context, p *cluster.Proposal) error {
 		return err
 	}
 
-	// TODO Should we wrap this in a log level?
-	fmt.Printf("[db.DB] Proposing %v\n", p)
+	db.logger.Debug("proposing", zap.Uint64("requestID", p.RequestID), zap.Int("entities", len(p.Entities)))
 
 	// db.ctx in the select handles the "db is shutting down" case so a
 	// worker (e.g., the ingest goroutine) doesn't race against
@@ -269,7 +271,7 @@ func (db *DB) Propose(ctx context.Context, p *cluster.Proposal) error {
 
 	select {
 	case err := <-ack:
-		fmt.Println("[db.DB] ...Proposal applied")
+		db.logger.Debug("proposal applied", zap.Uint64("requestID", p.RequestID))
 		return err
 	case <-ctx.Done():
 		return ctx.Err()
@@ -340,7 +342,7 @@ func (db *DB) Type(id string) (*cluster.Type, error) {
 // multiple times), the registry drain is a no-op on the second call
 // (the maps are empty after the first), and raft.Close uses sync.Once.
 func (db *DB) Close() error {
-	fmt.Printf("Closing db\n")
+	db.logger.Info("closing db")
 
 	db.cancelSyncs()
 

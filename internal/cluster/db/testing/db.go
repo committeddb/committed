@@ -2,7 +2,6 @@ package testing
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/philborlin/committed/internal/cluster"
@@ -92,7 +91,6 @@ func (ms *MemorySyncable) Init(ctx context.Context) error {
 }
 
 func (ms *MemorySyncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.ShouldSnapshot, error) {
-	fmt.Printf("syncing: %v\n", p)
 
 	ms.count++
 	ms.proposals = append(ms.proposals, p)

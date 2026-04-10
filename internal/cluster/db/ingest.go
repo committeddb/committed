@@ -2,11 +2,11 @@ package db
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"time"
 
 	"github.com/philborlin/committed/internal/cluster"
+	"go.uber.org/zap"
 )
 
 // ingestBackoff{Min,Max} bound the interval at which db.ingest's
@@ -69,8 +69,7 @@ func (l *ingressLifecycle) start(parent context.Context, i cluster.Ingestable, p
 	l.wg.Go(func() {
 		err := i.Ingest(ictx, pos, l.proposalChan, l.positionChan)
 		if err != nil {
-			// TODO Handle error
-			fmt.Printf("[db.DB] ingest: %v\n", err)
+			zap.L().Warn("ingest error", zap.Error(err))
 		}
 	})
 }
@@ -188,8 +187,7 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) error
 				// context (ctx) so cancel-on-stop interrupts the wait.
 				err := db.Propose(ctx, proposal)
 				if err != nil {
-					// TODO Handle error
-					fmt.Printf("[db.DB] propose: %v\n", err)
+					db.logger.Warn("ingest propose error", zap.String("id", id), zap.Error(err))
 				}
 			}
 			backoff = ingestBackoffMin
@@ -197,8 +195,7 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) error
 			if db.isNode(id) {
 				err := db.proposeIngestablePosition(ctx, &cluster.IngestablePosition{ID: id, Position: position})
 				if err != nil {
-					// TODO Handle error
-					fmt.Printf("[db.DB] proposeIngestablePosition: %v\n", err)
+					db.logger.Warn("proposeIngestablePosition error", zap.String("id", id), zap.Error(err))
 				}
 			}
 			backoff = ingestBackoffMin
@@ -209,13 +206,13 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) error
 			// logic is unchanged; only the cadence is.
 			progressed := false
 			if isNode && !db.isNode(id) {
-				fmt.Println("Stopping ingestion...")
+				db.logger.Info("stopping ingestion", zap.String("id", id))
 				// leader -> not-leader - stop ingesting
 				isNode = false
 				ingress.stop()
 				progressed = true
 			} else if !isNode && db.isNode(id) {
-				fmt.Println("Starting to ingest...")
+				db.logger.Info("starting ingestion", zap.String("id", id))
 				// not-leader -> leader - start ingesting
 				isNode = true
 				// Parent the inner Ingest's context on the worker ctx
