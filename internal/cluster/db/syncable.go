@@ -18,7 +18,7 @@ func (db *DB) AddSyncableParser(name string, p cluster.SyncableParser) {
 func (db *DB) ProposeSyncable(ctx context.Context, c *cluster.Configuration) error {
 	_, _, err := db.ParseSyncable(c.MimeType, c.Data, db.storage)
 	if err != nil {
-		return err
+		return &cluster.ConfigError{Err: err}
 	}
 
 	e, err := cluster.NewUpsertSyncableEntity(c)

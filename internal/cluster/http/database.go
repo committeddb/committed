@@ -1,7 +1,10 @@
 package http
 
 import (
+	"errors"
 	httpgo "net/http"
+
+	"github.com/philborlin/committed/internal/cluster"
 )
 
 func (h *HTTP) AddDatabase(w httpgo.ResponseWriter, r *httpgo.Request) {
@@ -13,7 +16,12 @@ func (h *HTTP) AddDatabase(w httpgo.ResponseWriter, r *httpgo.Request) {
 
 	err = h.c.ProposeDatabase(r.Context(), c)
 	if err != nil {
-		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to propose database")
+		var configErr *cluster.ConfigError
+		if errors.As(err, &configErr) {
+			writeError(w, httpgo.StatusBadRequest, "invalid_database_config", "invalid database configuration")
+		} else {
+			writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to propose database")
+		}
 		return
 	}
 

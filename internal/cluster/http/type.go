@@ -1,8 +1,11 @@
 package http
 
 import (
+	"errors"
 	httpgo "net/http"
 	"time"
+
+	"github.com/philborlin/committed/internal/cluster"
 )
 
 func (h *HTTP) AddType(w httpgo.ResponseWriter, r *httpgo.Request) {
@@ -14,7 +17,12 @@ func (h *HTTP) AddType(w httpgo.ResponseWriter, r *httpgo.Request) {
 
 	err = h.c.ProposeType(r.Context(), c)
 	if err != nil {
-		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to propose type")
+		var configErr *cluster.ConfigError
+		if errors.As(err, &configErr) {
+			writeError(w, httpgo.StatusBadRequest, "invalid_type_config", "invalid type configuration")
+		} else {
+			writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to propose type")
+		}
 		return
 	}
 

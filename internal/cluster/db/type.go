@@ -11,7 +11,7 @@ import (
 func (db *DB) ProposeType(ctx context.Context, c *cluster.Configuration) error {
 	_, t, err := ParseType(c, db.storage)
 	if err != nil {
-		return err
+		return &cluster.ConfigError{Err: err}
 	}
 
 	e, err := cluster.NewUpsertTypeEntity(t)

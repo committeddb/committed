@@ -13,7 +13,7 @@ func (db *DB) AddDatabaseParser(name string, p cluster.DatabaseParser) {
 func (db *DB) ProposeDatabase(ctx context.Context, c *cluster.Configuration) error {
 	_, database, err := db.parser.ParseDatabase(c.MimeType, c.Data)
 	if err != nil {
-		return err
+		return &cluster.ConfigError{Err: err}
 	}
 
 	err = database.Close()

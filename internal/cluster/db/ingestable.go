@@ -18,7 +18,7 @@ func (db *DB) AddIngestableParser(name string, p cluster.IngestableParser) {
 func (db *DB) ProposeIngestable(ctx context.Context, c *cluster.Configuration) error {
 	_, _, err := db.ParseIngestable(c.MimeType, c.Data)
 	if err != nil {
-		return err
+		return &cluster.ConfigError{Err: err}
 	}
 
 	e, err := cluster.NewUpsertIngestableEntity(c)

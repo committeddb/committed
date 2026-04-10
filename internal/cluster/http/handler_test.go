@@ -143,6 +143,58 @@ func TestAddConfiguration_ClusterError(t *testing.T) {
 	}
 }
 
+func TestAddConfiguration_ConfigError(t *testing.T) {
+	configErr := &cluster.ConfigError{Err: fmt.Errorf("bad toml")}
+
+	tests := []struct {
+		name         string
+		path         string
+		setupFn      func(fake *clusterfakes.FakeCluster)
+		expectedCode string
+	}{
+		{
+			name:         "database",
+			path:         "/database/db-1",
+			setupFn:      func(fake *clusterfakes.FakeCluster) { fake.ProposeDatabaseReturns(configErr) },
+			expectedCode: "invalid_database_config",
+		},
+		{
+			name:         "syncable",
+			path:         "/syncable/sync-1",
+			setupFn:      func(fake *clusterfakes.FakeCluster) { fake.ProposeSyncableReturns(configErr) },
+			expectedCode: "invalid_syncable_config",
+		},
+		{
+			name:         "ingestable",
+			path:         "/ingestable/ingest-1",
+			setupFn:      func(fake *clusterfakes.FakeCluster) { fake.ProposeIngestableReturns(configErr) },
+			expectedCode: "invalid_ingestable_config",
+		},
+		{
+			name:         "type",
+			path:         "/type/type-1",
+			setupFn:      func(fake *clusterfakes.FakeCluster) { fake.ProposeTypeReturns(configErr) },
+			expectedCode: "invalid_type_config",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h, fake := setupTest()
+			tc.setupFn(fake)
+
+			req := httptest.NewRequest("POST", "http://localhost"+tc.path, strings.NewReader("body"))
+			w := httptest.NewRecorder()
+
+			h.ServeHTTP(w, req)
+
+			resp := w.Result()
+			require.Equal(t, 400, resp.StatusCode)
+			requireErrorResponse(t, resp, tc.expectedCode)
+		})
+	}
+}
+
 func TestAddConfiguration_EmptyBody(t *testing.T) {
 	h, _ := setupTest()
 
