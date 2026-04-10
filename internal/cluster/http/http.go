@@ -26,6 +26,9 @@ func New(c cluster.Cluster) *HTTP {
 	r.Use(corsMiddleware.Handler)
 	h := &HTTP{r: r, c: c}
 
+	r.Get("/health", h.Health)
+	r.Get("/ready", h.Ready)
+
 	r.Get("/database", h.GetDatabases)
 	r.Post("/database/{id}", h.AddDatabase)
 

@@ -23,11 +23,21 @@ type MemoryStorage struct {
 	saveArgsForCall []*MemoryStorageSaveArgsForCall
 	indexes         map[string]uint64
 	node            uint64
+
+	// appliedMu guards appliedIndex. ApplyCommitted is invoked from the
+	// raft Ready loop goroutine while AppliedIndex can be read from any
+	// goroutine (e.g., the /ready HTTP probe), so the bare uint64 needs
+	// a lock to satisfy the race detector.
+	appliedMu    sync.Mutex
+	appliedIndex uint64
 }
 
 func NewMemoryStorage() *MemoryStorage {
 	indexes := make(map[string]uint64)
-	return &MemoryStorage{raft.NewMemoryStorage(), nil, indexes, 0}
+	return &MemoryStorage{
+		MemoryStorage: raft.NewMemoryStorage(),
+		indexes:       indexes,
+	}
 }
 
 func (ms *MemoryStorage) Close() error {
@@ -45,18 +55,31 @@ func (ms *MemoryStorage) Save(st raftpb.HardState, ents []raftpb.Entry, snap raf
 	return ms.SetHardState(st)
 }
 
-// ApplyCommitted is a no-op for MemoryStorage. The in-memory test storage
-// has no buckets and no downstream channels to feed, so there is nothing to
-// apply. Tests that exercise the apply path use wal.Storage instead.
+// ApplyCommitted records the entry's index as the highest applied index
+// and otherwise does nothing. The in-memory test storage has no buckets
+// and no downstream channels to feed, so there is no real apply work —
+// but recording the index is enough for tests that need a non-zero
+// AppliedIndex (notably the /ready HTTP probe test, which gates on
+// AppliedIndex > 0). Tests that exercise the real apply path still use
+// wal.Storage.
 func (ms *MemoryStorage) ApplyCommitted(entry raftpb.Entry) error {
+	ms.appliedMu.Lock()
+	defer ms.appliedMu.Unlock()
+	if entry.Index > ms.appliedIndex {
+		ms.appliedIndex = entry.Index
+	}
 	return nil
 }
 
-// AppliedIndex always returns 0 for MemoryStorage. There is no apply step,
-// so there is no progress to report. Tests that depend on apply progress
-// use wal.Storage.
+// AppliedIndex returns the highest entry index that ApplyCommitted has
+// observed. For MemoryStorage there is no real apply step, so this
+// reflects "raft told us this entry was committed" rather than "we
+// successfully wrote it to a bucket" — but for liveness/readiness
+// purposes that's the same signal.
 func (ms *MemoryStorage) AppliedIndex() uint64 {
-	return 0
+	ms.appliedMu.Lock()
+	defer ms.appliedMu.Unlock()
+	return ms.appliedIndex
 }
 
 func (ms *MemoryStorage) maybeAppendArgsForCall(st raftpb.HardState, ents []raftpb.Entry, snap raftpb.Snapshot) {

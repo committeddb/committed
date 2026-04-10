@@ -22,6 +22,16 @@ type FakeCluster struct {
 		arg1 string
 		arg2 cluster.SyncableParser
 	}
+	AppliedIndexStub        func() uint64
+	appliedIndexMutex       sync.RWMutex
+	appliedIndexArgsForCall []struct {
+	}
+	appliedIndexReturns struct {
+		result1 uint64
+	}
+	appliedIndexReturnsOnCall map[int]struct {
+		result1 uint64
+	}
 	CloseStub        func() error
 	closeMutex       sync.RWMutex
 	closeArgsForCall []struct {
@@ -68,6 +78,16 @@ type FakeCluster struct {
 	ingestablesReturnsOnCall map[int]struct {
 		result1 []*cluster.Configuration
 		result2 error
+	}
+	LeaderStub        func() uint64
+	leaderMutex       sync.RWMutex
+	leaderArgsForCall []struct {
+	}
+	leaderReturns struct {
+		result1 uint64
+	}
+	leaderReturnsOnCall map[int]struct {
+		result1 uint64
 	}
 	ProposalsStub        func(uint64, ...string) ([]*cluster.Proposal, error)
 	proposalsMutex       sync.RWMutex
@@ -288,6 +308,59 @@ func (fake *FakeCluster) AddSyncableParserArgsForCall(i int) (string, cluster.Sy
 	defer fake.addSyncableParserMutex.RUnlock()
 	argsForCall := fake.addSyncableParserArgsForCall[i]
 	return argsForCall.arg1, argsForCall.arg2
+}
+
+func (fake *FakeCluster) AppliedIndex() uint64 {
+	fake.appliedIndexMutex.Lock()
+	ret, specificReturn := fake.appliedIndexReturnsOnCall[len(fake.appliedIndexArgsForCall)]
+	fake.appliedIndexArgsForCall = append(fake.appliedIndexArgsForCall, struct {
+	}{})
+	stub := fake.AppliedIndexStub
+	fakeReturns := fake.appliedIndexReturns
+	fake.recordInvocation("AppliedIndex", []interface{}{})
+	fake.appliedIndexMutex.Unlock()
+	if stub != nil {
+		return stub()
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeCluster) AppliedIndexCallCount() int {
+	fake.appliedIndexMutex.RLock()
+	defer fake.appliedIndexMutex.RUnlock()
+	return len(fake.appliedIndexArgsForCall)
+}
+
+func (fake *FakeCluster) AppliedIndexCalls(stub func() uint64) {
+	fake.appliedIndexMutex.Lock()
+	defer fake.appliedIndexMutex.Unlock()
+	fake.AppliedIndexStub = stub
+}
+
+func (fake *FakeCluster) AppliedIndexReturns(result1 uint64) {
+	fake.appliedIndexMutex.Lock()
+	defer fake.appliedIndexMutex.Unlock()
+	fake.AppliedIndexStub = nil
+	fake.appliedIndexReturns = struct {
+		result1 uint64
+	}{result1}
+}
+
+func (fake *FakeCluster) AppliedIndexReturnsOnCall(i int, result1 uint64) {
+	fake.appliedIndexMutex.Lock()
+	defer fake.appliedIndexMutex.Unlock()
+	fake.AppliedIndexStub = nil
+	if fake.appliedIndexReturnsOnCall == nil {
+		fake.appliedIndexReturnsOnCall = make(map[int]struct {
+			result1 uint64
+		})
+	}
+	fake.appliedIndexReturnsOnCall[i] = struct {
+		result1 uint64
+	}{result1}
 }
 
 func (fake *FakeCluster) Close() error {
@@ -516,6 +589,59 @@ func (fake *FakeCluster) IngestablesReturnsOnCall(i int, result1 []*cluster.Conf
 		result1 []*cluster.Configuration
 		result2 error
 	}{result1, result2}
+}
+
+func (fake *FakeCluster) Leader() uint64 {
+	fake.leaderMutex.Lock()
+	ret, specificReturn := fake.leaderReturnsOnCall[len(fake.leaderArgsForCall)]
+	fake.leaderArgsForCall = append(fake.leaderArgsForCall, struct {
+	}{})
+	stub := fake.LeaderStub
+	fakeReturns := fake.leaderReturns
+	fake.recordInvocation("Leader", []interface{}{})
+	fake.leaderMutex.Unlock()
+	if stub != nil {
+		return stub()
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeCluster) LeaderCallCount() int {
+	fake.leaderMutex.RLock()
+	defer fake.leaderMutex.RUnlock()
+	return len(fake.leaderArgsForCall)
+}
+
+func (fake *FakeCluster) LeaderCalls(stub func() uint64) {
+	fake.leaderMutex.Lock()
+	defer fake.leaderMutex.Unlock()
+	fake.LeaderStub = stub
+}
+
+func (fake *FakeCluster) LeaderReturns(result1 uint64) {
+	fake.leaderMutex.Lock()
+	defer fake.leaderMutex.Unlock()
+	fake.LeaderStub = nil
+	fake.leaderReturns = struct {
+		result1 uint64
+	}{result1}
+}
+
+func (fake *FakeCluster) LeaderReturnsOnCall(i int, result1 uint64) {
+	fake.leaderMutex.Lock()
+	defer fake.leaderMutex.Unlock()
+	fake.LeaderStub = nil
+	if fake.leaderReturnsOnCall == nil {
+		fake.leaderReturnsOnCall = make(map[int]struct {
+			result1 uint64
+		})
+	}
+	fake.leaderReturnsOnCall[i] = struct {
+		result1 uint64
+	}{result1}
 }
 
 func (fake *FakeCluster) Proposals(arg1 uint64, arg2 ...string) ([]*cluster.Proposal, error) {
@@ -1267,6 +1393,8 @@ func (fake *FakeCluster) Invocations() map[string][][]interface{} {
 	defer fake.addDatabaseParserMutex.RUnlock()
 	fake.addSyncableParserMutex.RLock()
 	defer fake.addSyncableParserMutex.RUnlock()
+	fake.appliedIndexMutex.RLock()
+	defer fake.appliedIndexMutex.RUnlock()
 	fake.closeMutex.RLock()
 	defer fake.closeMutex.RUnlock()
 	fake.databasesMutex.RLock()
@@ -1275,6 +1403,8 @@ func (fake *FakeCluster) Invocations() map[string][][]interface{} {
 	defer fake.ingestMutex.RUnlock()
 	fake.ingestablesMutex.RLock()
 	defer fake.ingestablesMutex.RUnlock()
+	fake.leaderMutex.RLock()
+	defer fake.leaderMutex.RUnlock()
 	fake.proposalsMutex.RLock()
 	defer fake.proposalsMutex.RUnlock()
 	fake.proposeMutex.RLock()

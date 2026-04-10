@@ -32,4 +32,12 @@ type Cluster interface {
 	Ingestables() ([]*Configuration, error)
 	Syncables() ([]*Configuration, error)
 	Types() ([]*Configuration, error)
+	// Leader returns the raft node ID this cluster believes is the current
+	// leader, or 0 if no leader is known. Used by the /ready HTTP probe to
+	// gate readiness on raft having elected a leader.
+	Leader() uint64
+	// AppliedIndex returns the highest log index that has been fully
+	// applied to local application state. Used by the /ready HTTP probe to
+	// gate readiness on this node having caught up.
+	AppliedIndex() uint64
 }

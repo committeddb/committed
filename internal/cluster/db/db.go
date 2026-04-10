@@ -411,3 +411,18 @@ func (db *DB) proposeIngestablePosition(_ context.Context, p *cluster.Ingestable
 func (db *DB) ID() uint64 {
 	return db.raft.id
 }
+
+// Leader returns the raft node ID this DB believes is the current leader,
+// or 0 if no leader is known. Pass-through to Raft.Leader, which reads
+// through to etcd raft's Status() snapshot. Used by the /ready HTTP probe.
+func (db *DB) Leader() uint64 {
+	return db.raft.Leader()
+}
+
+// AppliedIndex returns the highest log index that has been fully applied
+// to local application state. Pass-through to Storage.AppliedIndex. Used
+// by the /ready HTTP probe to gate readiness on this node having caught
+// up; a freshly-started node reports 0 until at least one entry applies.
+func (db *DB) AppliedIndex() uint64 {
+	return db.storage.AppliedIndex()
+}
