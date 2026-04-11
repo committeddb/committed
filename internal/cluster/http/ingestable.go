@@ -18,7 +18,7 @@ func (h *HTTP) AddIngestable(w httpgo.ResponseWriter, r *httpgo.Request) {
 	if err != nil {
 		var configErr *cluster.ConfigError
 		if errors.As(err, &configErr) {
-			writeError(w, httpgo.StatusBadRequest, "invalid_ingestable_config", "invalid ingestable configuration")
+			writeError(w, httpgo.StatusBadRequest, "invalid_ingestable_config", configErr.Error())
 		} else {
 			writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to propose ingestable")
 		}

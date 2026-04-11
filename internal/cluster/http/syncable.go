@@ -18,7 +18,7 @@ func (h *HTTP) AddSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
 	if err != nil {
 		var configErr *cluster.ConfigError
 		if errors.As(err, &configErr) {
-			writeError(w, httpgo.StatusBadRequest, "invalid_syncable_config", "invalid syncable configuration")
+			writeError(w, httpgo.StatusBadRequest, "invalid_syncable_config", configErr.Error())
 		} else {
 			writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to propose syncable")
 		}

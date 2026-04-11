@@ -190,7 +190,8 @@ func TestAddConfiguration_ConfigError(t *testing.T) {
 
 			resp := w.Result()
 			require.Equal(t, 400, resp.StatusCode)
-			requireErrorResponse(t, resp, tc.expectedCode)
+			errResp := requireErrorResponse(t, resp, tc.expectedCode)
+			require.Contains(t, errResp.Message, "bad toml", "response should include the underlying parse error")
 		})
 	}
 }
@@ -649,7 +650,7 @@ func TestGetType_EmptyResult(t *testing.T) {
 
 // requireErrorResponse reads the response body, unmarshals it as an
 // ErrorResponse, and asserts the code field matches expectedCode.
-func requireErrorResponse(t *testing.T, resp *httpgo.Response, expectedCode string) {
+func requireErrorResponse(t *testing.T, resp *httpgo.Response, expectedCode string) http.ErrorResponse {
 	t.Helper()
 	body, err := io.ReadAll(resp.Body)
 	require.Nil(t, err)
@@ -660,6 +661,7 @@ func requireErrorResponse(t *testing.T, resp *httpgo.Response, expectedCode stri
 	require.Nil(t, err, "response body is not valid ErrorResponse JSON: %s", string(body))
 	require.Equal(t, expectedCode, errResp.Code)
 	require.NotEmpty(t, errResp.Message)
+	return errResp
 }
 
 func TestErrorResponse_JSONShape(t *testing.T) {

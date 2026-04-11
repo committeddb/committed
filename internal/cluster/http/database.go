@@ -18,7 +18,7 @@ func (h *HTTP) AddDatabase(w httpgo.ResponseWriter, r *httpgo.Request) {
 	if err != nil {
 		var configErr *cluster.ConfigError
 		if errors.As(err, &configErr) {
-			writeError(w, httpgo.StatusBadRequest, "invalid_database_config", "invalid database configuration")
+			writeError(w, httpgo.StatusBadRequest, "invalid_database_config", configErr.Error())
 		} else {
 			writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to propose database")
 		}
