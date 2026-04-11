@@ -19,7 +19,8 @@ type TypeResolver interface {
 type ValidationStrategy int
 
 const (
-	NoValidation = 0
+	NoValidation   ValidationStrategy = 0
+	ValidateSchema ValidationStrategy = 1
 )
 
 type Type struct {

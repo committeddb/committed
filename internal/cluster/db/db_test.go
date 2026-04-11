@@ -180,6 +180,86 @@ func createType(name string) *Type {
 	}
 }
 
+func TestParseType(t *testing.T) {
+	t.Run("without schema", func(t *testing.T) {
+		cfg := &cluster.Configuration{
+			ID:       "t1",
+			MimeType: "text/toml",
+			Data:     []byte("[type]\nname = \"Person\""),
+		}
+
+		name, typ, err := db.ParseType(cfg, nil)
+		require.Nil(t, err)
+		require.Equal(t, "Person", name)
+		require.Equal(t, "t1", typ.ID)
+		require.Empty(t, typ.SchemaType)
+		require.Empty(t, typ.Schema)
+		require.Equal(t, cluster.NoValidation, typ.Validate)
+	})
+
+	t.Run("with JSONSchema", func(t *testing.T) {
+		schema := `{"type":"object","required":["name"]}`
+		toml := fmt.Sprintf("[type]\nname = \"Person\"\nschemaType = \"JSONSchema\"\nvalidate = 1\nschema = '%s'", schema)
+
+		cfg := &cluster.Configuration{
+			ID:       "t2",
+			MimeType: "text/toml",
+			Data:     []byte(toml),
+		}
+
+		name, typ, err := db.ParseType(cfg, nil)
+		require.Nil(t, err)
+		require.Equal(t, "Person", name)
+		require.Equal(t, "JSONSchema", typ.SchemaType)
+		require.Equal(t, schema, string(typ.Schema))
+		require.Equal(t, cluster.ValidateSchema, typ.Validate)
+	})
+
+	t.Run("validate enabled but no schemaType", func(t *testing.T) {
+		toml := "[type]\nname = \"Bad\"\nvalidate = 1\nschema = '{\"type\":\"object\"}'"
+
+		cfg := &cluster.Configuration{
+			ID:       "t3",
+			MimeType: "text/toml",
+			Data:     []byte(toml),
+		}
+
+		_, _, err := db.ParseType(cfg, nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "schemaType is not set")
+	})
+
+	t.Run("validate enabled but no schema", func(t *testing.T) {
+		toml := "[type]\nname = \"Bad\"\nschemaType = \"JSONSchema\"\nvalidate = 1"
+
+		cfg := &cluster.Configuration{
+			ID:       "t4",
+			MimeType: "text/toml",
+			Data:     []byte(toml),
+		}
+
+		_, _, err := db.ParseType(cfg, nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "schema is empty")
+	})
+
+	t.Run("schema present but validation disabled", func(t *testing.T) {
+		schema := `{"type":"object"}`
+		toml := fmt.Sprintf("[type]\nname = \"Loose\"\nschemaType = \"JSONSchema\"\nschema = '%s'", schema)
+
+		cfg := &cluster.Configuration{
+			ID:       "t5",
+			MimeType: "text/toml",
+			Data:     []byte(toml),
+		}
+
+		_, typ, err := db.ParseType(cfg, nil)
+		require.Nil(t, err)
+		require.Equal(t, "JSONSchema", typ.SchemaType)
+		require.Equal(t, cluster.NoValidation, typ.Validate)
+	})
+}
+
 func createProposalsAndProposeThem(t *testing.T, db *DB, inputs [][]string) []*cluster.Proposal {
 	ps := createProposals(inputs)
 	for _, p := range ps {

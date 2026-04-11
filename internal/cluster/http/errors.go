@@ -47,3 +47,30 @@ func writeError(w httpgo.ResponseWriter, status int, code string, message string
 func writeErrorf(w httpgo.ResponseWriter, status int, code string, format string, args ...any) {
 	writeError(w, status, code, fmt.Sprintf(format, args...))
 }
+
+// writeErrorWithDetails writes a structured JSON error response that
+// includes a details field for additional context (e.g. validation errors).
+func writeErrorWithDetails(w httpgo.ResponseWriter, status int, code string, message string, details any) {
+	resp := ErrorResponse{
+		Code:    code,
+		Message: message,
+		Details: details,
+	}
+
+	bs, err := json.Marshal(resp)
+	if err != nil {
+		w.WriteHeader(httpgo.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	w.Write(bs)
+
+	zap.L().Warn("http error",
+		zap.String("request_id", w.Header().Get("X-Request-ID")),
+		zap.Int("status", status),
+		zap.String("code", code),
+		zap.String("message", message),
+	)
+}

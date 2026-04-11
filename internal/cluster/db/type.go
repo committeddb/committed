@@ -3,6 +3,7 @@ package db
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/philborlin/committed/internal/cluster"
@@ -35,13 +36,37 @@ func ParseType(c *cluster.Configuration, s cluster.DatabaseStorage) (string, *cl
 		version = v.GetInt("type.version")
 	}
 
+	var schemaType string
+	if v.IsSet("type.schemaType") {
+		schemaType = v.GetString("type.schemaType")
+	}
+
+	var schema []byte
+	if v.IsSet("type.schema") {
+		schema = []byte(v.GetString("type.schema"))
+	}
+
+	var validate cluster.ValidationStrategy
+	if v.IsSet("type.validate") {
+		validate = cluster.ValidationStrategy(v.GetInt("type.validate"))
+	}
+
+	if validate == cluster.ValidateSchema {
+		if schemaType == "" {
+			return "", nil, fmt.Errorf("validate is enabled but schemaType is not set")
+		}
+		if len(schema) == 0 {
+			return "", nil, fmt.Errorf("validate is enabled but schema is empty")
+		}
+	}
+
 	t := &cluster.Type{
 		ID:         c.ID,
 		Name:       name,
 		Version:    version,
-		SchemaType: "",
-		Schema:     []byte{},
-		Validate:   0,
+		SchemaType: schemaType,
+		Schema:     schema,
+		Validate:   validate,
 	}
 
 	return name, t, nil

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"sync"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/philborlin/committed/internal/cluster"
@@ -12,8 +13,9 @@ import (
 )
 
 type HTTP struct {
-	r *chi.Mux
-	c cluster.Cluster
+	r       *chi.Mux
+	c       cluster.Cluster
+	schemas sync.Map // type ID → *jsonschema.Schema
 }
 
 func New(c cluster.Cluster) *HTTP {

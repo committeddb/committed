@@ -454,6 +454,252 @@ func TestAddProposal_ProposeError(t *testing.T) {
 	requireErrorResponse(t, resp, "internal_error")
 }
 
+// --- AddProposal schema validation ---
+
+func TestAddProposal_SchemaValidation_Valid(t *testing.T) {
+	h, fake := setupTest()
+
+	schema := []byte(`{
+		"type": "object",
+		"properties": {
+			"name": {"type": "string"},
+			"age":  {"type": "integer"}
+		},
+		"required": ["name"]
+	}`)
+
+	fake.TypeReturns(&cluster.Type{
+		ID:         "t1",
+		Name:       "Person",
+		SchemaType: "JSONSchema",
+		Schema:     schema,
+		Validate:   cluster.ValidateSchema,
+	}, nil)
+
+	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"name": "Alice", "age": 30}}]}`
+	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+
+	require.Equal(t, 200, w.Result().StatusCode)
+	require.Equal(t, 1, fake.ProposeCallCount())
+}
+
+func TestAddProposal_SchemaValidation_Invalid(t *testing.T) {
+	h, fake := setupTest()
+
+	schema := []byte(`{
+		"type": "object",
+		"properties": {
+			"name": {"type": "string"},
+			"age":  {"type": "integer"}
+		},
+		"required": ["name"]
+	}`)
+
+	fake.TypeReturns(&cluster.Type{
+		ID:         "t1",
+		Name:       "Person",
+		SchemaType: "JSONSchema",
+		Schema:     schema,
+		Validate:   cluster.ValidateSchema,
+	}, nil)
+
+	// Missing required "name" field
+	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"age": 30}}]}`
+	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+
+	resp := w.Result()
+	require.Equal(t, 400, resp.StatusCode)
+	require.Equal(t, 0, fake.ProposeCallCount())
+	errResp := requireErrorResponse(t, resp, "schema_validation_failed")
+	require.NotNil(t, errResp.Details)
+}
+
+func TestAddProposal_SchemaValidation_WrongType(t *testing.T) {
+	h, fake := setupTest()
+
+	schema := []byte(`{
+		"type": "object",
+		"properties": {
+			"age": {"type": "integer"}
+		}
+	}`)
+
+	fake.TypeReturns(&cluster.Type{
+		ID:         "t1",
+		Name:       "Person",
+		SchemaType: "JSONSchema",
+		Schema:     schema,
+		Validate:   cluster.ValidateSchema,
+	}, nil)
+
+	// "age" should be integer, not string
+	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"age": "not a number"}}]}`
+	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+
+	resp := w.Result()
+	require.Equal(t, 400, resp.StatusCode)
+	require.Equal(t, 0, fake.ProposeCallCount())
+	requireErrorResponse(t, resp, "schema_validation_failed")
+}
+
+func TestAddProposal_SchemaValidation_NoValidation(t *testing.T) {
+	h, fake := setupTest()
+
+	// Type has a schema but Validate == NoValidation — should skip validation
+	schema := []byte(`{"type": "object", "required": ["name"]}`)
+	fake.TypeReturns(&cluster.Type{
+		ID:         "t1",
+		Name:       "Loose",
+		SchemaType: "JSONSchema",
+		Schema:     schema,
+		Validate:   cluster.NoValidation,
+	}, nil)
+
+	// Missing required "name" — should still pass because validation is off
+	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"other": 1}}]}`
+	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+
+	require.Equal(t, 200, w.Result().StatusCode)
+	require.Equal(t, 1, fake.ProposeCallCount())
+}
+
+func TestAddProposal_SchemaValidation_NonJSONSchemaType(t *testing.T) {
+	h, fake := setupTest()
+
+	// SchemaType is not "JSONSchema" — validation should be skipped even with ValidateSchema
+	fake.TypeReturns(&cluster.Type{
+		ID:         "t1",
+		Name:       "Proto",
+		SchemaType: "Protobuf",
+		Schema:     []byte("not json schema"),
+		Validate:   cluster.ValidateSchema,
+	}, nil)
+
+	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"anything": true}}]}`
+	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+
+	require.Equal(t, 200, w.Result().StatusCode)
+	require.Equal(t, 1, fake.ProposeCallCount())
+}
+
+func TestAddProposal_SchemaValidation_EmptySchema(t *testing.T) {
+	h, fake := setupTest()
+
+	// ValidateSchema + JSONSchema but no actual schema content — should 500
+	fake.TypeReturns(&cluster.Type{
+		ID:         "t1",
+		Name:       "Bad",
+		SchemaType: "JSONSchema",
+		Schema:     nil,
+		Validate:   cluster.ValidateSchema,
+	}, nil)
+
+	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"a": 1}}]}`
+	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+
+	resp := w.Result()
+	require.Equal(t, 500, resp.StatusCode)
+	require.Equal(t, 0, fake.ProposeCallCount())
+	requireErrorResponse(t, resp, "internal_error")
+}
+
+func TestAddProposal_SchemaValidation_InvalidSchemaJSON(t *testing.T) {
+	h, fake := setupTest()
+
+	// ValidateSchema + JSONSchema but schema is not valid JSON
+	fake.TypeReturns(&cluster.Type{
+		ID:         "t1",
+		Name:       "Bad",
+		SchemaType: "JSONSchema",
+		Schema:     []byte("not valid json {{{"),
+		Validate:   cluster.ValidateSchema,
+	}, nil)
+
+	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"a": 1}}]}`
+	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+
+	resp := w.Result()
+	require.Equal(t, 500, resp.StatusCode)
+	require.Equal(t, 0, fake.ProposeCallCount())
+	requireErrorResponse(t, resp, "internal_error")
+}
+
+func TestAddProposal_SchemaValidation_EmptySchemaType(t *testing.T) {
+	h, fake := setupTest()
+
+	// ValidateSchema but SchemaType is empty — validation should be skipped
+	fake.TypeReturns(&cluster.Type{
+		ID:       "t1",
+		Name:     "Legacy",
+		Schema:   []byte(`{"type":"object"}`),
+		Validate: cluster.ValidateSchema,
+	}, nil)
+
+	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"a": 1}}]}`
+	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+
+	require.Equal(t, 200, w.Result().StatusCode)
+	require.Equal(t, 1, fake.ProposeCallCount())
+}
+
+func TestAddProposal_SchemaValidation_CacheInvalidatesOnSchemaChange(t *testing.T) {
+	h, fake := setupTest()
+
+	// First schema: requires "name"
+	schema1 := []byte(`{"type":"object","required":["name"],"properties":{"name":{"type":"string"}}}`)
+	fake.TypeReturnsOnCall(0, &cluster.Type{
+		ID: "t1", Name: "Person", SchemaType: "JSONSchema",
+		Schema: schema1, Validate: cluster.ValidateSchema,
+	}, nil)
+
+	// Proposal with "name" — should pass against schema1
+	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"name": "Alice"}}]}`
+	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	require.Equal(t, 200, w.Result().StatusCode)
+
+	// Update schema: now requires "email" instead of "name"
+	schema2 := []byte(`{"type":"object","required":["email"],"properties":{"email":{"type":"string"}}}`)
+	fake.TypeReturnsOnCall(1, &cluster.Type{
+		ID: "t1", Name: "Person", SchemaType: "JSONSchema",
+		Schema: schema2, Validate: cluster.ValidateSchema,
+	}, nil)
+
+	// Same proposal with "name" but no "email" — must fail against schema2
+	// If cache is stale this would incorrectly pass
+	body = `{"entities": [{"typeId": "t1", "key": "k2", "data": {"name": "Bob"}}]}`
+	req = httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	require.Equal(t, 400, w.Result().StatusCode)
+	requireErrorResponse(t, w.Result(), "schema_validation_failed")
+}
+
 // --- GetProposals ---
 
 func TestGetProposals_Success(t *testing.T) {

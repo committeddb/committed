@@ -47,17 +47,6 @@ func (e *Entity) IsDelete() bool {
 	return string(e.Data) == string(delete)
 }
 
-func (p *Proposal) Validate() error {
-	for _, e := range p.Entities {
-		if e.Validate == NoValidation {
-			continue
-		}
-		// Find Validator for Schema Type
-	}
-
-	return nil
-}
-
 func (p *Proposal) String() string {
 	var sb strings.Builder
 

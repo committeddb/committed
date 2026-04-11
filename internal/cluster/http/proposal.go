@@ -1,12 +1,15 @@
 package http
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	httpgo "net/http"
 	"strconv"
 	"time"
 
 	"github.com/philborlin/committed/internal/cluster"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 type AddProposalRequest struct {
@@ -40,6 +43,27 @@ func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
 			writeErrorf(w, httpgo.StatusBadRequest, "type_not_found", "type %q not found", e.TypeID)
 			return
 		}
+
+		if t.Validate == cluster.ValidateSchema && t.SchemaType == "JSONSchema" {
+			sch, err := h.compiledSchema(t)
+			if err != nil {
+				writeErrorf(w, httpgo.StatusInternalServerError, "internal_error",
+					"failed to compile schema for type %q: %s", t.ID, err)
+				return
+			}
+			v, err := jsonschema.UnmarshalJSON(bytes.NewReader(e.Data))
+			if err != nil {
+				writeErrorf(w, httpgo.StatusBadRequest, "schema_validation_failed",
+					"entity data for type %q is not valid JSON", t.ID)
+				return
+			}
+			if err := sch.Validate(v); err != nil {
+				writeErrorWithDetails(w, httpgo.StatusBadRequest, "schema_validation_failed",
+					fmt.Sprintf("entity data does not match schema for type %q", t.ID), err.Error())
+				return
+			}
+		}
+
 		es = append(es, &cluster.Entity{
 			Type:      t,
 			Key:       []byte(e.Key),
@@ -111,4 +135,44 @@ func (h *HTTP) GetProposals(w httpgo.ResponseWriter, r *httpgo.Request) {
 	}
 
 	writeArrayBody(w, body)
+}
+
+// cachedSchema holds a compiled JSONSchema alongside the raw schema
+// bytes it was compiled from. On cache hit we compare the raw bytes to
+// detect type updates and recompile when the schema has changed.
+type cachedSchema struct {
+	raw      []byte
+	compiled *jsonschema.Schema
+}
+
+// compiledSchema returns a compiled JSONSchema for the given type,
+// caching the result so repeated proposals against the same type
+// don't recompile. If the type's schema has changed since the last
+// compilation the cache entry is replaced.
+func (h *HTTP) compiledSchema(t *cluster.Type) (*jsonschema.Schema, error) {
+	if cached, ok := h.schemas.Load(t.ID); ok {
+		cs := cached.(*cachedSchema)
+		if bytes.Equal(cs.raw, t.Schema) {
+			return cs.compiled, nil
+		}
+	}
+
+	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(t.Schema))
+	if err != nil {
+		return nil, fmt.Errorf("unmarshal schema: %w", err)
+	}
+
+	url := "urn:committed:type:" + t.ID
+	c := jsonschema.NewCompiler()
+	if err := c.AddResource(url, doc); err != nil {
+		return nil, fmt.Errorf("add resource: %w", err)
+	}
+
+	sch, err := c.Compile(url)
+	if err != nil {
+		return nil, fmt.Errorf("compile: %w", err)
+	}
+
+	h.schemas.Store(t.ID, &cachedSchema{raw: append([]byte{}, t.Schema...), compiled: sch})
+	return sch, nil
 }
