@@ -19,14 +19,19 @@ import (
 	"github.com/ory/dockertest/v3"
 )
 
-var port = "3306"
+var (
+	port     = "3306"
+	pool     *dockertest.Pool
+	resource *dockertest.Resource
+)
 
 const dbName = "dbName"
 const username = "root"
 const password = "secret"
 
 func TestMain(m *testing.M) {
-	pool, err := dockertest.NewPool("")
+	var err error
+	pool, err = dockertest.NewPool("")
 	if err != nil {
 		log.Fatalf("Could not construct pool: %s", err)
 	}
@@ -36,7 +41,7 @@ func TestMain(m *testing.M) {
 		log.Fatalf("Could not connect to Docker: %s", err)
 	}
 
-	resource, err := pool.Run("mysql", "9", []string{fmt.Sprintf("MYSQL_ROOT_PASSWORD=%s", password)})
+	resource, err = pool.Run("mysql", "9", []string{fmt.Sprintf("MYSQL_ROOT_PASSWORD=%s", password)})
 	if err != nil {
 		log.Fatalf("Could not start resource: %s", err)
 	}
@@ -64,7 +69,7 @@ func TestMain(m *testing.M) {
 		log.Fatalf("Could not connect to database: %s", err)
 	}
 
-	if err := resource.Expire(30); err != nil { // Tell docker to hard kill the container in 30 seconds
+	if err := resource.Expire(60); err != nil { // Tell docker to hard kill the container in 60 seconds
 		log.Fatalf("Could not expire resource: %s", err)
 	}
 
@@ -243,4 +248,103 @@ func createDB(t *testing.T) *gosql.DB {
 	require.Nil(t, err)
 
 	return db
+}
+
+// TestMysqlReconnect verifies that the ingestable reconnects after
+// MySQL goes away mid-stream and resumes delivering proposals once
+// MySQL comes back.
+func TestMysqlReconnect(t *testing.T) {
+	table := "reconnect_table"
+
+	// --- initial setup: create table + insert row before Ingest starts ---
+	db := createDB(t)
+	_, err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS `%s`", table))
+	require.Nil(t, err)
+	_, err = db.Exec(fmt.Sprintf("CREATE TABLE `%s` (pk VARCHAR(32) NOT NULL, val TEXT, PRIMARY KEY (pk));", table))
+	require.Nil(t, err)
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, val) VALUES ('before', 'initial');", table))
+	require.Nil(t, err)
+	db.Close()
+
+	simpleType := &cluster.Type{ID: "reconnect", Name: "reconnect"}
+	config := &sql.Config{
+		Type: simpleType,
+		Mappings: []sql.Mapping{
+			{JsonName: "pk", SQLColumn: "pk"},
+			{JsonName: "val", SQLColumn: "val"},
+		},
+		PrimaryKey:       "pk",
+		ConnectionString: fmt.Sprintf("mysql://%s:%s@127.0.0.1:%s/%s?tables=%s", username, password, port, dbName, table),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	proposalChan := make(chan *cluster.Proposal, 10)
+	positionChan := make(chan cluster.Position, 10)
+
+	dialect := &mysql.MySQLDialect{}
+	ingestErr := make(chan error, 1)
+	go func() {
+		ingestErr <- dialect.Ingest(ctx, config, nil, proposalChan, positionChan)
+	}()
+
+	// --- collect the initial "before" proposal ---
+	deadline := time.After(15 * time.Second)
+	seen := make(map[string]bool)
+	for !seen["before"] {
+		select {
+		case p := <-proposalChan:
+			seen[string(p.Entities[0].Key)] = true
+		case <-positionChan:
+		case <-deadline:
+			t.Fatal("timed out waiting for initial proposal")
+		}
+	}
+
+	// --- stop MySQL (simulate outage) ---
+	t.Log("stopping MySQL container")
+	err = pool.Client.StopContainer(resource.Container.ID, 3)
+	require.Nil(t, err)
+
+	// --- restart MySQL ---
+	t.Log("restarting MySQL container")
+	err = pool.Client.StartContainer(resource.Container.ID, nil)
+	require.Nil(t, err)
+
+	// Wait for MySQL to accept connections again.
+	require.NoError(t, pool.Retry(func() error {
+		db, err := gosql.Open("mysql", fmt.Sprintf("%s:%s@(localhost:%s)/%s", username, password, port, dbName))
+		if err != nil {
+			return err
+		}
+		defer db.Close()
+		return db.Ping()
+	}))
+
+	// --- insert a new row after MySQL is back ---
+	db = createDB(t)
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, val) VALUES ('after', 'reconnected');", table))
+	require.Nil(t, err)
+	db.Close()
+
+	// --- verify the ingestable reconnected and delivered the new row ---
+	deadline = time.After(30 * time.Second)
+	for !seen["after"] {
+		select {
+		case p := <-proposalChan:
+			seen[string(p.Entities[0].Key)] = true
+		case <-positionChan:
+		case <-deadline:
+			t.Fatal("timed out waiting for post-reconnect proposal")
+		}
+	}
+
+	cancel()
+	select {
+	case err := <-ingestErr:
+		require.Nil(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Ingest did not exit after cancel")
+	}
 }

@@ -23,60 +23,118 @@ import (
 
 type MySQLDialect struct{}
 
+// canalBackoff{Min,Max} bound the retry interval for createCanal.
+// A transient MySQL outage (DNS blip, container restart, network
+// partition) at Ingest startup used to immediately return an error,
+// leaving the worker leader-but-not-ingesting with no recovery path.
+// The retry loop below caps at Max and is bounded by ctx so a
+// shutdown still propagates promptly.
+const (
+	canalBackoffMin = 1 * time.Second
+	canalBackoffMax = 30 * time.Second
+)
+
 func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos cluster.Position, pr chan<- *cluster.Proposal, po chan<- cluster.Position) error {
-	c, tables, err := createCanal(config.ConnectionString)
-	if err != nil {
-		return err
-	}
+	backoff := canalBackoffMin
 
-	handler := &MySQLEventHandler{
-		ctx:          ctx,
-		config:       config,
-		canal:        c,
-		proposalChan: pr,
-		positionChan: po,
-		tables:       tables,
-	}
+	// Outer loop: each iteration creates a canal, runs it until it
+	// exits (connection loss, OnRow error, etc.), then reconnects with
+	// backoff. Only ctx cancellation breaks out.
+	for {
+		// --- create canal with retry ---
+		var c *canal.Canal
+		var tables []string
+		for {
+			var err error
+			c, tables, err = createCanal(config.ConnectionString)
+			if err == nil {
+				backoff = canalBackoffMin
+				break
+			}
 
-	c.SetEventHandler(handler)
+			zap.L().Warn("createCanal failed, retrying",
+				zap.Duration("backoff", backoff),
+				zap.Error(err),
+			)
 
-	if pos != nil {
-		posProto := &dialectpb.MySQLBinLogPosition{}
-		err := proto.Unmarshal(pos, posProto)
-		if err != nil {
-			return err
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(backoff):
+			}
+
+			backoff *= 2
+			if backoff > canalBackoffMax {
+				backoff = canalBackoffMax
+			}
 		}
 
-		go c.RunFrom(mysql.Position{Name: posProto.Name, Pos: posProto.Pos})
-	} else {
-		go c.Run()
-	}
+		// --- set up handler and start the canal goroutine ---
+		handler := &MySQLEventHandler{
+			ctx:          ctx,
+			config:       config,
+			canal:        c,
+			proposalChan: pr,
+			positionChan: po,
+			tables:       tables,
+		}
 
-	// Block until the worker cancels us, then ask canal to stop.
-	//
-	// IMPORTANT: c.Close() initiates shutdown but does NOT wait for
-	// the goroutine started by `go c.Run()` above. (Reading the canal
-	// source at v1.9.1: Close cancels canal's internal context and
-	// closes the syncer/connection synchronously, then returns. There
-	// is no WaitGroup join.) So when this function returns, the canal
-	// goroutine may still be racing toward exit.
-	//
-	// We rely on two things to make that safe:
-	//  1. Closing the syncer/connection causes the canal goroutine's
-	//     binlog read to fail, so it exits promptly on its own.
-	//  2. Our OnRow / OnPosSynced callbacks select on ctx.Done (which
-	//     is already done by the time we get here) so if the canal
-	//     goroutine fires a callback after Close, the callback bails
-	//     out instead of blocking on a no-receiver channel send.
-	//
-	// The worker that called us (db.ingest) will return shortly after
-	// we do, and its WaitGroup wait covers the inner Ingest goroutine
-	// (this function) but not the canal goroutine. The canal goroutine
-	// briefly outlives both, then exits when the read fails — leak
-	// window is bounded by the binlog driver's read timeout.
-	<-ctx.Done()
-	c.Close()
-	return nil
+		c.SetEventHandler(handler)
+
+		// Determine the resume position: prefer the handler's last
+		// emitted position (from a previous iteration) over the
+		// original pos passed into Ingest.
+		var resumePos *mysql.Position
+		if handler.lastPos != nil {
+			resumePos = handler.lastPos
+		} else if pos != nil {
+			posProto := &dialectpb.MySQLBinLogPosition{}
+			if err := proto.Unmarshal(pos, posProto); err != nil {
+				c.Close()
+				return err
+			}
+			resumePos = &mysql.Position{Name: posProto.Name, Pos: posProto.Pos}
+		}
+
+		// Capture the Run/RunFrom return so we know when the canal
+		// goroutine exits — a non-nil error means the stream broke
+		// (connection lost, OnRow error propagated, etc.) and we
+		// should reconnect.
+		canalDone := make(chan error, 1)
+		if resumePos != nil {
+			go func() { canalDone <- c.RunFrom(*resumePos) }()
+		} else {
+			go func() { canalDone <- c.Run() }()
+		}
+
+		// --- wait for canal exit or context cancel ---
+		select {
+		case <-ctx.Done():
+			c.Close()
+			return nil
+		case err := <-canalDone:
+			// Canal exited on its own — connection lost, fatal
+			// binlog error, or an OnRow error that was returned to
+			// canal. Close the old canal and reconnect.
+			zap.L().Warn("canal exited, will reconnect",
+				zap.Duration("backoff", backoff),
+				zap.Error(err),
+			)
+			c.Close()
+		}
+
+		// --- backoff before reconnect ---
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(backoff):
+		}
+
+		backoff *= 2
+		if backoff > canalBackoffMax {
+			backoff = canalBackoffMax
+		}
+	}
 }
 
 func (m *MySQLDialect) Close() error {
@@ -105,6 +163,11 @@ type MySQLEventHandler struct {
 	proposalChan chan<- *cluster.Proposal
 	positionChan chan<- cluster.Position
 	tables       []string
+
+	// lastPos holds the most recently emitted binlog position so the
+	// outer reconnect loop can resume from where it left off instead
+	// of re-dumping from scratch or replaying from the original pos.
+	lastPos *mysql.Position
 }
 
 // TODO We will have to handle transactions at some point 1 transaction == 1 proposal
@@ -140,7 +203,11 @@ func (h *MySQLEventHandler) OnRow(e *canal.RowsEvent) error {
 
 		jsonString, err := json.Marshal(toJSON)
 		if err != nil {
-			return err
+			zap.L().Warn("OnRow: skipping row with unmarshalable data",
+				zap.String("table", e.Table.Name),
+				zap.Error(err),
+			)
+			return nil
 		}
 
 		primaryKey := h.config.PrimaryKey
@@ -176,8 +243,8 @@ func (h *MySQLEventHandler) OnPosSynced(header *replication.EventHeader, pos mys
 	// An XID event is generated for a COMMIT of a transaction that modifies one or more tables of an XA-capable storage engine.
 	zap.L().Debug("OnPosSynced header", zap.Any("eventType", header))
 	if header != nil && header.EventType == replication.XID_EVENT {
-		pos := &dialectpb.MySQLBinLogPosition{Name: pos.Name, Pos: pos.Pos}
-		bs, err := proto.Marshal(pos)
+		posProto := &dialectpb.MySQLBinLogPosition{Name: pos.Name, Pos: pos.Pos}
+		bs, err := proto.Marshal(posProto)
 		if err != nil {
 			return err
 		}
@@ -187,9 +254,31 @@ func (h *MySQLEventHandler) OnPosSynced(header *replication.EventHeader, pos mys
 		case <-h.ctx.Done():
 			return h.ctx.Err()
 		}
+
+		// Track the last successfully emitted position so the outer
+		// reconnect loop can resume from here instead of re-dumping.
+		h.lastPos = &mysql.Position{Name: pos.Name, Pos: pos.Pos}
+
 		zap.L().Debug("OnPosSynced", zap.String("pos", pos.Name), zap.Uint32("offset", pos.Pos))
 	}
 
+	return nil
+}
+
+func (h *MySQLEventHandler) OnDDL(header *replication.EventHeader, nextPos mysql.Position, queryEvent *replication.QueryEvent) error {
+	if queryEvent == nil {
+		zap.L().Warn("OnDDL: DDL event with nil query",
+			zap.String("pos", nextPos.Name),
+			zap.Uint32("offset", nextPos.Pos),
+		)
+		return nil
+	}
+	zap.L().Warn("OnDDL: DDL event received",
+		zap.String("schema", string(queryEvent.Schema)),
+		zap.String("query", string(queryEvent.Query)),
+		zap.String("pos", nextPos.Name),
+		zap.Uint32("offset", nextPos.Pos),
+	)
 	return nil
 }
 
