@@ -162,7 +162,9 @@ func (ms *MemoryStorage) Proposals() []*cluster.Proposal {
 	for _, e := range ents {
 		if e.Type == raftpb.EntryNormal {
 			p := &cluster.Proposal{}
-			_ = p.Unmarshal(e.Data)
+			if err := p.Unmarshal(e.Data, ms); err != nil {
+				continue
+			}
 
 			if len(p.Entities) > 0 {
 				ps = append(ps, p)
@@ -207,7 +209,9 @@ func (r *Reader) Read() (uint64, *cluster.Proposal, error) {
 
 		if ent.Type == raftpb.EntryNormal {
 			p := &cluster.Proposal{}
-			_ = p.Unmarshal(ent.Data)
+			if err := p.Unmarshal(ent.Data, r.s); err != nil {
+				return 0, nil, err
+			}
 
 			if len(p.Entities) > 0 && !cluster.IsSyncableIndex(p.Entities[0].Type.ID) {
 				return readIndex, p, nil

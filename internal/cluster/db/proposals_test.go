@@ -4,7 +4,9 @@ import (
 	"testing"
 
 	"github.com/philborlin/committed/internal/cluster"
+	"github.com/philborlin/committed/internal/cluster/db/dbfakes"
 	"github.com/stretchr/testify/require"
+	"go.etcd.io/etcd/raft/v3/raftpb"
 )
 
 func TestProposals(t *testing.T) {
@@ -104,6 +106,22 @@ func createProposal(key string, typeID string) *cluster.Proposal {
 	}}
 
 	return p
+}
+
+func TestProposals_UnmarshalError(t *testing.T) {
+	s := &dbfakes.FakeStorage{}
+	s.FirstIndexReturns(1, nil)
+	s.LastIndexReturns(2, nil)
+	s.EntriesReturns([]raftpb.Entry{
+		{Type: raftpb.EntryNormal, Data: []byte("not valid protobuf")},
+	}, nil)
+
+	db := createDBWithStorage(s)
+	defer db.Close()
+
+	ps, err := db.Proposals(1)
+	require.Error(t, err)
+	require.Nil(t, ps)
 }
 
 func createTypeProposal(typeID string) *cluster.Proposal {

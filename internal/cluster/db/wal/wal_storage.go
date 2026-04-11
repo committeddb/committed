@@ -360,7 +360,7 @@ func (s *Storage) ApplyCommitted(entry pb.Entry) error {
 	}
 
 	p := &cluster.Proposal{}
-	if err := p.Unmarshal(entry.Data); err != nil {
+	if err := p.Unmarshal(entry.Data, s); err != nil {
 		// Match the prior Save behavior for undecodable proposals: skip,
 		// but still bump appliedIndex so we don't loop on it forever.
 		s.appliedIndex.Store(entry.Index)

@@ -8,6 +8,14 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// TypeResolver looks up a full Type by ID. Implementations include
+// wal.Storage (BoltDB-backed) and db.Storage (the interface). Passing
+// a TypeResolver to Proposal.Unmarshal hydrates each Entity.Type with
+// the complete schema metadata instead of leaving a stub with only ID.
+type TypeResolver interface {
+	Type(id string) (*Type, error)
+}
+
 type ValidationStrategy int
 
 const (

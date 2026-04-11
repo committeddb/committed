@@ -41,7 +41,7 @@ func (r *Reader) Read() (uint64, *cluster.Proposal, error) {
 
 		if ent.Type == pb.EntryNormal {
 			p := &cluster.Proposal{}
-			err := p.Unmarshal(ent.Data)
+			err := p.Unmarshal(ent.Data, r.s)
 			if err != nil {
 				return 0, nil, err
 			}

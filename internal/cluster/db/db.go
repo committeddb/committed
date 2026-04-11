@@ -151,7 +151,7 @@ func (db *DB) notifyApplied(data []byte) {
 		return
 	}
 	p := &cluster.Proposal{}
-	if err := p.Unmarshal(data); err != nil {
+	if err := p.Unmarshal(data, db.storage); err != nil {
 		// Don't crash on undecodable data — Propose's caller will time
 		// out via ctx if its waiter is never signaled. Logging is
 		// enough; the apply path itself already logged or skipped.

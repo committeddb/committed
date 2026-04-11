@@ -88,7 +88,7 @@ func (p *Proposal) Marshal() ([]byte, error) {
 	return proto.Marshal(lp)
 }
 
-func (p *Proposal) Unmarshal(bs []byte) error {
+func (p *Proposal) Unmarshal(bs []byte, r TypeResolver) error {
 	lp := &clusterpb.LogProposal{}
 	err := proto.Unmarshal(bs, lp)
 	if err != nil {
@@ -97,8 +97,7 @@ func (p *Proposal) Unmarshal(bs []byte) error {
 
 	p.RequestID = lp.RequestID
 	for _, e := range lp.LogEntities {
-		// TODO Get the type from a map of types
-		t := &Type{ID: e.TypeID}
+		t := resolveType(e.TypeID, r)
 		p.Entities = append(p.Entities, &Entity{
 			Type:      t,
 			Key:       e.Key,
@@ -108,6 +107,17 @@ func (p *Proposal) Unmarshal(bs []byte) error {
 	}
 
 	return nil
+}
+
+// resolveType returns the full Type from the resolver, falling back to
+// an ID-only stub when r is nil or the lookup fails.
+func resolveType(id string, r TypeResolver) *Type {
+	if r != nil {
+		if t, err := r.Type(id); err == nil && t != nil {
+			return t
+		}
+	}
+	return &Type{ID: id}
 }
 
 func IsSystem(id string) bool {

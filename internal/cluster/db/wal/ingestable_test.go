@@ -312,7 +312,7 @@ func readNormalProposals(s *wal.Storage) []*cluster.Proposal {
 			continue
 		}
 		p := &cluster.Proposal{}
-		if err := p.Unmarshal(e.Data); err != nil {
+		if err := p.Unmarshal(e.Data, nil); err != nil {
 			fmt.Printf("unmarshal proposal: %v\n", err)
 			continue
 		}

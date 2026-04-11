@@ -59,20 +59,23 @@ func (db *DB) readProposals(last uint64, number uint64) ([]*cluster.Proposal, er
 		return nil, err
 	}
 
-	return entsToProposals(es), nil
+	return entsToProposals(es, db.storage)
 }
 
-func entsToProposals(ents []raftpb.Entry) []*cluster.Proposal {
+
+func entsToProposals(ents []raftpb.Entry, r cluster.TypeResolver) ([]*cluster.Proposal, error) {
 	var ps []*cluster.Proposal
 	for _, e := range ents {
 		if e.Type == raftpb.EntryNormal && e.Data != nil {
 			p := &cluster.Proposal{}
-			_ = p.Unmarshal(e.Data)
+			if err := p.Unmarshal(e.Data, r); err != nil {
+				return nil, err
+			}
 			ps = append(ps, p)
 		}
 	}
 
-	return ps
+	return ps, nil
 }
 
 func addCandidatesToProposals(candidates []*cluster.Proposal, ps []*cluster.Proposal, max uint64, typeIDs ...string) []*cluster.Proposal {

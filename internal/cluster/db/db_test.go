@@ -269,7 +269,9 @@ func (db *DB) entsToProposals(ents []raftpb.Entry) []*cluster.Proposal {
 	for _, e := range ents {
 		if e.Type == raftpb.EntryNormal && e.Data != nil {
 			p := &cluster.Proposal{}
-			_ = p.Unmarshal(e.Data)
+			if err := p.Unmarshal(e.Data, db.storage); err != nil {
+				continue
+			}
 			ps = append(ps, p)
 		}
 	}
