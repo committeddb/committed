@@ -17,6 +17,7 @@ import (
 	"github.com/philborlin/committed/internal/cluster/metrics"
 	ingestablesql "github.com/philborlin/committed/internal/cluster/ingestable/sql"
 	ingestablemysql "github.com/philborlin/committed/internal/cluster/ingestable/sql/mysql"
+	synchttp "github.com/philborlin/committed/internal/cluster/syncable/http"
 	syncsql "github.com/philborlin/committed/internal/cluster/syncable/sql"
 	syncmysql "github.com/philborlin/committed/internal/cluster/syncable/sql/dialects"
 	"github.com/spf13/cobra"
@@ -83,6 +84,7 @@ to quickly create a Cobra application.`,
 		db.AddDatabaseParser("sql", dbParser())
 		db.AddIngestableParser("sql", ingestableParser(db))
 		db.AddSyncableParser("sql", &syncsql.SyncableParser{})
+		db.AddSyncableParser("http", &synchttp.SyncableParser{})
 
 		db.EatCommitC()
 

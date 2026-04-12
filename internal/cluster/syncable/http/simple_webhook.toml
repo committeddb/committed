@@ -1,0 +1,17 @@
+[syncable]
+name = "webhook-test"
+type = "http"
+
+[http]
+topic = "test-topic"
+url = "http://localhost:8080/webhook"
+method = "POST"
+timeout_ms = 3000
+
+[[http.headers]]
+name = "Authorization"
+value = "Bearer test-token"
+
+[[http.headers]]
+name = "X-Custom"
+value = "custom-value"
