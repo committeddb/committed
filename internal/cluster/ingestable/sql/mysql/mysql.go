@@ -32,6 +32,13 @@ type MySQLDialect struct{}
 const (
 	canalBackoffMin = 1 * time.Second
 	canalBackoffMax = 30 * time.Second
+
+	// maxPendingEntities is the soft limit on buffered entities per
+	// transaction. If a single MySQL transaction modifies more than
+	// this many rows, the handler emits a partial proposal to avoid
+	// unbounded memory growth. This breaks atomicity for oversized
+	// transactions — an acceptable trade-off versus OOM-ing the process.
+	maxPendingEntities = 10000
 )
 
 func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos cluster.Position, pr chan<- *cluster.Proposal, po chan<- cluster.Position) error {
@@ -168,101 +175,128 @@ type MySQLEventHandler struct {
 	// outer reconnect loop can resume from where it left off instead
 	// of re-dumping from scratch or replaying from the original pos.
 	lastPos *mysql.Position
+
+	// pending accumulates entities from OnRow calls until the
+	// transaction commits (OnXID). This ensures one MySQL transaction
+	// maps to one cluster.Proposal, giving consumers atomic delivery
+	// and enabling exactly-once semantics via post-commit position
+	// checkpointing.
+	pending []*cluster.Entity
 }
 
-// TODO We will have to handle transactions at some point 1 transaction == 1 proposal
 func (h *MySQLEventHandler) OnRow(e *canal.RowsEvent) error {
-	if slices.Contains(h.tables, strings.ToLower(e.Table.Name)) {
-		// switch e.Header.EventType {
-		// case:
-		// }
-
-		m := make(map[string]any)
-		row := e.Rows[len(e.Rows)-1]
-		for i, c := range e.Table.Columns {
-			val := row[i]
-			// The MySQL binlog stream delivers TEXT/BLOB columns as []byte
-			// while VARCHAR columns come through as string; the initial
-			// mysqldump path that canal runs at startup delivers everything
-			// as string. Coerce []byte to string here so the JSON we marshal
-			// downstream is identical regardless of which path produced the
-			// row. (json.Marshal of a []byte field base64-encodes it, which
-			// would otherwise turn "one" into "b25l".) Binary BLOB columns
-			// are not a concern for any current caller of this dialect.
-			if b, ok := val.([]byte); ok {
-				val = string(b)
-			}
-			m[strings.ToLower(c.Name)] = val
-		}
-
-		toJSON := make(map[string]any)
-		for _, mapping := range h.config.Mappings {
-			value := m[mapping.SQLColumn]
-			toJSON[mapping.JsonName] = value
-		}
-
-		jsonString, err := json.Marshal(toJSON)
-		if err != nil {
-			zap.L().Warn("OnRow: skipping row with unmarshalable data",
-				zap.String("table", e.Table.Name),
-				zap.Error(err),
-			)
-			return nil
-		}
-
-		primaryKey := h.config.PrimaryKey
-		key := fmt.Sprintf("%v", m[primaryKey])
-
-		// Stamp the propose-time wall-clock so apply on every node
-		// records the same time-series timestamp. Without this, the
-		// time-series store sees a different value per node and a
-		// post-snapshot replay would write a fresh "now" instead of
-		// the original. See cluster.Entity.Timestamp.
-		p := &cluster.Proposal{
-			Entities: []*cluster.Entity{{
-				Type:      h.config.Type,
-				Key:       []byte(key),
-				Data:      []byte(jsonString),
-				Timestamp: time.Now().UnixMilli(),
-			}},
-		}
-
-		select {
-		case h.proposalChan <- p:
-		case <-h.ctx.Done():
-			return h.ctx.Err()
-		}
-
-		zap.L().Debug("OnRow", zap.String("table", e.Table.Name), zap.String("action", e.Action))
+	if !slices.Contains(h.tables, strings.ToLower(e.Table.Name)) {
+		return nil
 	}
 
+	m := make(map[string]any)
+	row := e.Rows[len(e.Rows)-1]
+	for i, c := range e.Table.Columns {
+		val := row[i]
+		// The MySQL binlog stream delivers TEXT/BLOB columns as []byte
+		// while VARCHAR columns come through as string; the initial
+		// mysqldump path that canal runs at startup delivers everything
+		// as string. Coerce []byte to string here so the JSON we marshal
+		// downstream is identical regardless of which path produced the
+		// row. (json.Marshal of a []byte field base64-encodes it, which
+		// would otherwise turn "one" into "b25l".) Binary BLOB columns
+		// are not a concern for any current caller of this dialect.
+		if b, ok := val.([]byte); ok {
+			val = string(b)
+		}
+		m[strings.ToLower(c.Name)] = val
+	}
+
+	toJSON := make(map[string]any)
+	for _, mapping := range h.config.Mappings {
+		value := m[mapping.SQLColumn]
+		toJSON[mapping.JsonName] = value
+	}
+
+	jsonString, err := json.Marshal(toJSON)
+	if err != nil {
+		zap.L().Warn("OnRow: skipping row with unmarshalable data",
+			zap.String("table", e.Table.Name),
+			zap.Error(err),
+		)
+		return nil
+	}
+
+	primaryKey := h.config.PrimaryKey
+	key := fmt.Sprintf("%v", m[primaryKey])
+
+	// Buffer the entity until the transaction commits (OnXID). Stamp
+	// the propose-time wall-clock so apply on every node records the
+	// same time-series timestamp. See cluster.Entity.Timestamp.
+	h.pending = append(h.pending, &cluster.Entity{
+		Type:      h.config.Type,
+		Key:       []byte(key),
+		Data:      []byte(jsonString),
+		Timestamp: time.Now().UnixMilli(),
+	})
+
+	// Soft limit: emit a partial batch to prevent OOM on very large
+	// transactions. This breaks atomicity for oversized transactions
+	// but is the right trade-off versus unbounded memory growth.
+	if len(h.pending) >= maxPendingEntities {
+		if err := h.flushPending(); err != nil {
+			return err
+		}
+	}
+
+	zap.L().Debug("OnRow", zap.String("table", e.Table.Name), zap.String("action", e.Action))
+	return nil
+}
+
+// flushPending emits all buffered entities as a single proposal and
+// resets the buffer. No-op when the buffer is empty.
+func (h *MySQLEventHandler) flushPending() error {
+	if len(h.pending) == 0 {
+		return nil
+	}
+	p := &cluster.Proposal{Entities: h.pending}
+	select {
+	case h.proposalChan <- p:
+	case <-h.ctx.Done():
+		return h.ctx.Err()
+	}
+	h.pending = nil
+	return nil
+}
+
+// OnXID is called when a MySQL transaction commits. It flushes all
+// buffered entities as a single proposal and checkpoints the post-commit
+// binlog position. This ensures one MySQL transaction maps to one
+// cluster.Proposal and that the checkpoint position is always past a
+// fully committed transaction — no duplicates or gaps on restart.
+func (h *MySQLEventHandler) OnXID(header *replication.EventHeader, pos mysql.Position) error {
+	if err := h.flushPending(); err != nil {
+		return err
+	}
+
+	posProto := &dialectpb.MySQLBinLogPosition{Name: pos.Name, Pos: pos.Pos}
+	bs, err := proto.Marshal(posProto)
+	if err != nil {
+		return err
+	}
+
+	select {
+	case h.positionChan <- bs:
+	case <-h.ctx.Done():
+		return h.ctx.Err()
+	}
+
+	h.lastPos = &mysql.Position{Name: pos.Name, Pos: pos.Pos}
+
+	zap.L().Debug("OnXID", zap.String("pos", pos.Name), zap.Uint32("offset", pos.Pos))
 	return nil
 }
 
 func (h *MySQLEventHandler) OnPosSynced(header *replication.EventHeader, pos mysql.Position, set mysql.GTIDSet, force bool) error {
-	// An XID event is generated for a COMMIT of a transaction that modifies one or more tables of an XA-capable storage engine.
-	zap.L().Debug("OnPosSynced header", zap.Any("eventType", header))
-	if header != nil && header.EventType == replication.XID_EVENT {
-		posProto := &dialectpb.MySQLBinLogPosition{Name: pos.Name, Pos: pos.Pos}
-		bs, err := proto.Marshal(posProto)
-		if err != nil {
-			return err
-		}
-
-		select {
-		case h.positionChan <- bs:
-		case <-h.ctx.Done():
-			return h.ctx.Err()
-		}
-
-		// Track the last successfully emitted position so the outer
-		// reconnect loop can resume from here instead of re-dumping.
-		h.lastPos = &mysql.Position{Name: pos.Name, Pos: pos.Pos}
-
-		zap.L().Debug("OnPosSynced", zap.String("pos", pos.Name), zap.Uint32("offset", pos.Pos))
-	}
-
-	return nil
+	// Flush any entities accumulated during the dump phase. During
+	// binlog replication OnXID already flushed before this is called,
+	// so pending will be empty here.
+	return h.flushPending()
 }
 
 func (h *MySQLEventHandler) OnDDL(header *replication.EventHeader, nextPos mysql.Position, queryEvent *replication.QueryEvent) error {

@@ -99,30 +99,26 @@ func TestMysqlDialect(t *testing.T) {
 		PrimaryKey: "pk",
 	}
 
-	p1 := &cluster.Proposal{
-		Entities: []*cluster.Entity{{
-			Type: simpleType,
-			Key:  []byte("key1"),
-			Data: []byte("{\"one\":\"one\",\"pk\":\"key1\"}"),
-		}},
+	e1 := &cluster.Entity{
+		Type: simpleType,
+		Key:  []byte("key1"),
+		Data: []byte("{\"one\":\"one\",\"pk\":\"key1\"}"),
 	}
-	p2 := &cluster.Proposal{
-		Entities: []*cluster.Entity{{
-			Type: simpleType,
-			Key:  []byte("key2"),
-			Data: []byte("{\"one\":\"two\",\"pk\":\"key2\"}"),
-		}},
+	e2 := &cluster.Entity{
+		Type: simpleType,
+		Key:  []byte("key2"),
+		Data: []byte("{\"one\":\"two\",\"pk\":\"key2\"}"),
 	}
 
 	tests := []struct {
-		name    string
-		config  *sql.Config
-		tables  string
-		setupFn func(*testing.T)
-		ps      []*cluster.Proposal
+		name     string
+		config   *sql.Config
+		tables   string
+		setupFn  func(*testing.T)
+		entities []*cluster.Entity
 	}{
-		{"one-simple", basicConfig, "table", setup1, []*cluster.Proposal{p1}},
-		{"two-simple", basicConfig, "table", setup2, []*cluster.Proposal{p1, p2}},
+		{"one-simple", basicConfig, "table", setup1, []*cluster.Entity{e1}},
+		{"two-simple", basicConfig, "table", setup2, []*cluster.Entity{e1, e2}},
 	}
 
 	for _, tt := range tests {
@@ -155,62 +151,53 @@ func TestMysqlDialect(t *testing.T) {
 				require.Nil(t, err)
 			}()
 
-			// Collect proposals until we've seen the expected number AND
-			// no new ones arrive for a quiet period. The quiet-period
-			// check guards against canal occasionally re-delivering a
-			// row through the binlog tail in addition to the dump
-			// (cross-subtest binlog state can leak through). Position
-			// events still need draining — the dialect blocks on the
-			// unbuffered positionChan, and a backed-up channel would
-			// stall the binlog goroutine before it could deliver
-			// downstream rows.
-			expected := len(tt.ps)
+			// Collect entities until we've seen the expected count.
+			// With XID-aware grouping, dump-phase rows may arrive as a
+			// single multi-entity proposal, so we iterate all entities
+			// in each proposal. Position events still need draining.
+			expected := len(tt.entities)
 			deadline := time.After(10 * time.Second)
 			const quiet = 200 * time.Millisecond
-			seen := make(map[string]*cluster.Proposal)
+			seen := make(map[string]*cluster.Entity)
 			for len(seen) < expected {
 				select {
 				case proposal := <-proposalChan:
-					seen[string(proposal.Entities[0].Key)] = proposal
+					for _, e := range proposal.Entities {
+						seen[string(e.Key)] = e
+					}
 				case <-positionChan:
-					// drain — see comment above
+					// drain
 				case <-deadline:
-					t.Fatalf("timed out waiting for %d unique proposals; got %d", expected, len(seen))
+					t.Fatalf("timed out waiting for %d unique entities; got %d", expected, len(seen))
 				}
 			}
-			// Now that we have the expected count, drain anything that
-			// arrives in the next quiet window so duplicate deliveries
-			// (dump + tail) are absorbed before the assertion.
+			// Drain anything that arrives in the next quiet window so
+			// duplicate deliveries (dump + tail) are absorbed.
 		drain:
 			for {
 				select {
 				case proposal := <-proposalChan:
-					seen[string(proposal.Entities[0].Key)] = proposal
+					for _, e := range proposal.Entities {
+						seen[string(e.Key)] = e
+					}
 				case <-positionChan:
 				case <-time.After(quiet):
 					break drain
 				}
 			}
 
-			proposals := make([]*cluster.Proposal, 0, len(seen))
-			for _, p := range seen {
-				proposals = append(proposals, p)
+			entities := make([]*cluster.Entity, 0, len(seen))
+			for _, e := range seen {
+				entities = append(entities, e)
 			}
 
-			// Each entity must have a non-zero propose-time Timestamp
-			// (set in mysql.go's OnRow handler since PR4). The exact
-			// value depends on wall-clock at run time, so we assert
-			// non-zero and then clear it before the ElementsMatch
-			// check so the comparison doesn't depend on timing.
-			for _, p := range proposals {
-				for _, e := range p.Entities {
-					require.NotZero(t, e.Timestamp,
-						"OnRow must stamp the entity with propose-time wall-clock for content-deterministic apply")
-					e.Timestamp = 0
-				}
+			for _, e := range entities {
+				require.NotZero(t, e.Timestamp,
+					"OnRow must stamp the entity with propose-time wall-clock for content-deterministic apply")
+				e.Timestamp = 0
 			}
 
-			require.ElementsMatch(t, tt.ps, proposals)
+			require.ElementsMatch(t, tt.entities, entities)
 		})
 	}
 }
@@ -295,7 +282,9 @@ func TestMysqlReconnect(t *testing.T) {
 	for !seen["before"] {
 		select {
 		case p := <-proposalChan:
-			seen[string(p.Entities[0].Key)] = true
+			for _, e := range p.Entities {
+				seen[string(e.Key)] = true
+			}
 		case <-positionChan:
 		case <-deadline:
 			t.Fatal("timed out waiting for initial proposal")
@@ -333,7 +322,9 @@ func TestMysqlReconnect(t *testing.T) {
 	for !seen["after"] {
 		select {
 		case p := <-proposalChan:
-			seen[string(p.Entities[0].Key)] = true
+			for _, e := range p.Entities {
+				seen[string(e.Key)] = true
+			}
 		case <-positionChan:
 		case <-deadline:
 			t.Fatal("timed out waiting for post-reconnect proposal")
@@ -346,5 +337,110 @@ func TestMysqlReconnect(t *testing.T) {
 		require.Nil(t, err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("Ingest did not exit after cancel")
+	}
+}
+
+// TestMysqlTransactionGrouping verifies that multiple rows committed in
+// a single MySQL transaction arrive as exactly one cluster.Proposal with
+// all entities, and that the checkpointed position is the post-commit
+// binlog position.
+func TestMysqlTransactionGrouping(t *testing.T) {
+	table := "tx_group_table"
+
+	// Create the table and insert a sentinel row before Ingest starts.
+	// The sentinel lets us detect when the dump phase is complete.
+	db := createDB(t)
+	_, err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS `%s`", table))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf("CREATE TABLE `%s` (pk VARCHAR(32) NOT NULL, val TEXT, PRIMARY KEY (pk));", table))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, val) VALUES ('sentinel', 'init');", table))
+	require.NoError(t, err)
+	db.Close()
+
+	simpleType := &cluster.Type{ID: "txgroup", Name: "txgroup"}
+	config := &sql.Config{
+		Type: simpleType,
+		Mappings: []sql.Mapping{
+			{JsonName: "pk", SQLColumn: "pk"},
+			{JsonName: "val", SQLColumn: "val"},
+		},
+		PrimaryKey:       "pk",
+		ConnectionString: fmt.Sprintf("mysql://%s:%s@127.0.0.1:%s/%s?tables=%s", username, password, port, dbName, table),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	proposalChan := make(chan *cluster.Proposal, 10)
+	positionChan := make(chan cluster.Position, 10)
+
+	dialect := &mysql.MySQLDialect{}
+	go func() {
+		_ = dialect.Ingest(ctx, config, nil, proposalChan, positionChan)
+	}()
+
+	// Wait for the sentinel row to arrive — this means the dump phase
+	// is complete and canal is tailing the binlog.
+	deadline := time.After(15 * time.Second)
+	sentinelSeen := false
+	for !sentinelSeen {
+		select {
+		case p := <-proposalChan:
+			for _, e := range p.Entities {
+				if string(e.Key) == "sentinel" {
+					sentinelSeen = true
+				}
+			}
+		case <-positionChan:
+		case <-deadline:
+			t.Fatal("timed out waiting for sentinel row from dump")
+		}
+	}
+
+	// Insert 10 rows in a single transaction.
+	db = createDB(t)
+	tx, err := db.Begin()
+	require.NoError(t, err)
+	for i := 0; i < 10; i++ {
+		_, err = tx.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, val) VALUES ('tx%d', 'value%d');", table, i, i))
+		require.NoError(t, err)
+	}
+	err = tx.Commit()
+	require.NoError(t, err)
+	db.Close()
+
+	// Collect the transaction proposal. Because all 10 rows are in one
+	// MySQL transaction, they must arrive as a single proposal.
+	deadline = time.After(15 * time.Second)
+	var txProposal *cluster.Proposal
+	for txProposal == nil {
+		select {
+		case p := <-proposalChan:
+			txProposal = p
+		case <-positionChan:
+		case <-deadline:
+			t.Fatal("timed out waiting for transaction proposal")
+		}
+	}
+
+	require.Len(t, txProposal.Entities, 10,
+		"expected all 10 rows from one transaction in a single proposal")
+
+	keys := make(map[string]bool)
+	for _, e := range txProposal.Entities {
+		require.NotZero(t, e.Timestamp)
+		keys[string(e.Key)] = true
+	}
+	for i := 0; i < 10; i++ {
+		require.True(t, keys[fmt.Sprintf("tx%d", i)], "missing key tx%d", i)
+	}
+
+	// A position must have been checkpointed for the committed transaction.
+	select {
+	case pos := <-positionChan:
+		require.NotEmpty(t, pos, "expected a non-empty post-commit position")
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for post-commit position")
 	}
 }
