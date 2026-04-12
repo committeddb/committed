@@ -62,35 +62,21 @@ func TestReady_Unit(t *testing.T) {
 			leader:         0,
 			applied:        0,
 			expectedStatus: 503,
-			expectedBody: http.ReadyResponse{
-				Status:       "not ready",
-				Reason:       "no raft leader",
-				Leader:       0,
-				AppliedIndex: 0,
-			},
+			expectedBody:   http.ReadyResponse{Status: "not ready"},
 		},
 		{
 			name:           "leader elected but nothing applied",
 			leader:         1,
 			applied:        0,
 			expectedStatus: 503,
-			expectedBody: http.ReadyResponse{
-				Status:       "not ready",
-				Reason:       "applied index is 0",
-				Leader:       1,
-				AppliedIndex: 0,
-			},
+			expectedBody:   http.ReadyResponse{Status: "not ready"},
 		},
 		{
 			name:           "leader elected and applied advanced",
 			leader:         1,
 			applied:        7,
 			expectedStatus: 200,
-			expectedBody: http.ReadyResponse{
-				Status:       "ok",
-				Leader:       1,
-				AppliedIndex: 7,
-			},
+			expectedBody:   http.ReadyResponse{Status: "ok"},
 		},
 	}
 
@@ -154,9 +140,6 @@ func TestReady_RealRaft(t *testing.T) {
 		last = doReady(t, h)
 		if last.status == 200 {
 			require.Equal(t, "ok", last.body.Status)
-			require.NotZero(t, last.body.Leader, "expected non-zero leader once ready")
-			require.Equal(t, uint64(1), last.body.Leader, "single-node cluster should report self as leader")
-			require.NotZero(t, last.body.AppliedIndex, "expected non-zero applied index once ready")
 			return
 		}
 		time.Sleep(5 * time.Millisecond)

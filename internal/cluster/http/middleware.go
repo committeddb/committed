@@ -3,8 +3,10 @@ package http
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	httpgo "net/http"
+	"strings"
 
 	"go.uber.org/zap"
 )
@@ -43,4 +45,30 @@ func generateRequestID() string {
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// bearerAuth returns middleware that rejects requests whose
+// Authorization header does not carry the expected bearer token.
+// Comparison uses crypto/subtle to prevent timing side-channels.
+func (h *HTTP) bearerAuth(next httpgo.Handler) httpgo.Handler {
+	return httpgo.HandlerFunc(func(w httpgo.ResponseWriter, r *httpgo.Request) {
+		header := r.Header.Get("Authorization")
+		if header == "" {
+			writeError(w, httpgo.StatusUnauthorized, "unauthorized", "missing Authorization header")
+			return
+		}
+
+		token, ok := strings.CutPrefix(header, "Bearer ")
+		if !ok {
+			writeError(w, httpgo.StatusUnauthorized, "unauthorized", "Authorization header must use Bearer scheme")
+			return
+		}
+
+		if subtle.ConstantTimeCompare([]byte(token), []byte(h.bearerToken)) != 1 {
+			writeError(w, httpgo.StatusUnauthorized, "unauthorized", "invalid bearer token")
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }

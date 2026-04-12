@@ -10,15 +10,22 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/rs/cors"
+	"go.uber.org/zap"
 )
 
 type HTTP struct {
-	r       *chi.Mux
-	c       cluster.Cluster
-	schemas sync.Map // type ID → *jsonschema.Schema
+	r           *chi.Mux
+	c           cluster.Cluster
+	schemas     sync.Map // type ID → *jsonschema.Schema
+	bearerToken string   // empty = no auth (dev mode)
 }
 
-func New(c cluster.Cluster) *HTTP {
+func New(c cluster.Cluster, opts ...Option) *HTTP {
+	var o options
+	for _, fn := range opts {
+		fn(&o)
+	}
+
 	r := chi.NewRouter()
 
 	corsMiddleware := cors.New(cors.Options{
@@ -27,26 +34,40 @@ func New(c cluster.Cluster) *HTTP {
 
 	r.Use(corsMiddleware.Handler)
 	r.Use(RequestID)
-	h := &HTTP{r: r, c: c}
+	h := &HTTP{r: r, c: c, bearerToken: o.bearerToken}
 
+	if o.bearerToken != "" {
+		zap.L().Info("API bearer-token authentication enabled")
+	} else {
+		zap.L().Warn("API authentication disabled (no COMMITTED_API_TOKEN set)")
+	}
+
+	// /health and /ready are exempt from authentication — orchestrators
+	// use them as liveness/readiness probes without credentials.
 	r.Get("/health", h.Health)
 	r.Get("/ready", h.Ready)
 
-	r.Get("/database", h.GetDatabases)
-	r.Post("/database/{id}", h.AddDatabase)
+	r.Group(func(r chi.Router) {
+		if h.bearerToken != "" {
+			r.Use(h.bearerAuth)
+		}
 
-	r.Get("/ingestable", h.GetIngestables)
-	r.Post("/ingestable/{id}", h.AddIngestable)
+		r.Get("/database", h.GetDatabases)
+		r.Post("/database/{id}", h.AddDatabase)
 
-	r.Get("/proposal", h.GetProposals)
-	r.Post("/proposal", h.AddProposal)
+		r.Get("/ingestable", h.GetIngestables)
+		r.Post("/ingestable/{id}", h.AddIngestable)
 
-	r.Get("/syncable", h.GetSyncables)
-	r.Post("/syncable/{id}", h.AddSyncable)
+		r.Get("/proposal", h.GetProposals)
+		r.Post("/proposal", h.AddProposal)
 
-	r.Get("/type", h.GetTypes)
-	r.Get("/type/{id}", h.GetType)
-	r.Post("/type/{id}", h.AddType)
+		r.Get("/syncable", h.GetSyncables)
+		r.Post("/syncable/{id}", h.AddSyncable)
+
+		r.Get("/type", h.GetTypes)
+		r.Get("/type/{id}", h.GetType)
+		r.Post("/type/{id}", h.AddType)
+	})
 
 	return h
 }

@@ -71,7 +71,13 @@ to quickly create a Cobra application.`,
 
 		db := db.New(*id, peers, s, p, sync, ingest, dbOpts...)
 		fmt.Printf("Raft Running...\n")
-		h := http.New(db)
+
+		var httpOpts []http.Option
+		if token := os.Getenv("COMMITTED_API_TOKEN"); token != "" {
+			httpOpts = append(httpOpts, http.WithBearerToken(token))
+		}
+
+		h := http.New(db, httpOpts...)
 		fmt.Printf("API Listening on %s...\n", *addr)
 
 		db.AddDatabaseParser("sql", dbParser())

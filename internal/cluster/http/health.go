@@ -15,16 +15,13 @@ type HealthResponse struct {
 	Status string `json:"status"`
 }
 
-// ReadyResponse is the body returned by /ready. On success Status is
-// "ok". On failure Status is "not ready", Reason names which check
-// failed (so an oncall reading the log line knows whether it's an
-// election issue or an apply lag issue), and the numeric fields expose
-// the values that drove the decision so dashboards can graph them.
+// ReadyResponse is the body returned by /ready. Only the Status field
+// is exposed — the endpoint is unauthenticated (orchestrators need it
+// without credentials), so it deliberately omits cluster internals
+// like leader ID and applied index. Operators who need those details
+// can check the structured logs.
 type ReadyResponse struct {
-	Status       string `json:"status"`
-	Reason       string `json:"reason,omitempty"`
-	Leader       uint64 `json:"leader"`
-	AppliedIndex uint64 `json:"appliedIndex"`
+	Status string `json:"status"`
 }
 
 // Health is a pure liveness probe. It always returns 200 with a small
@@ -49,27 +46,17 @@ func (h *HTTP) Ready(w httpgo.ResponseWriter, r *httpgo.Request) {
 	leader := h.c.Leader()
 	applied := h.c.AppliedIndex()
 
-	resp := ReadyResponse{
-		Leader:       leader,
-		AppliedIndex: applied,
-	}
-
 	if leader == 0 {
-		resp.Status = "not ready"
-		resp.Reason = "no raft leader"
-		writeJSONStatus(w, httpgo.StatusServiceUnavailable, resp)
+		writeJSONStatus(w, httpgo.StatusServiceUnavailable, ReadyResponse{Status: "not ready"})
 		return
 	}
 
 	if applied == 0 {
-		resp.Status = "not ready"
-		resp.Reason = "applied index is 0"
-		writeJSONStatus(w, httpgo.StatusServiceUnavailable, resp)
+		writeJSONStatus(w, httpgo.StatusServiceUnavailable, ReadyResponse{Status: "not ready"})
 		return
 	}
 
-	resp.Status = "ok"
-	writeJSONStatus(w, httpgo.StatusOK, resp)
+	writeJSONStatus(w, httpgo.StatusOK, ReadyResponse{Status: "ok"})
 }
 
 // writeJSONStatus marshals body and writes it with the given status
