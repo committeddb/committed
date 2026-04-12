@@ -30,6 +30,16 @@ const (
 	syncBackoffMax = 500 * time.Millisecond
 )
 
+// syncBatch{MaxSize,MaxAge} control how db.sync batches proposals when
+// the Syncable implements BatchSyncable. Proposals are buffered until
+// either MaxSize proposals accumulate or MaxAge elapses since the first
+// proposal in the batch, whichever comes first. A partial batch is also
+// flushed immediately when the reader returns EOF (caught up).
+const (
+	syncBatchMaxSize = 100
+	syncBatchMaxAge  = 50 * time.Millisecond
+)
+
 // Sync registers a Syncable to run as a worker for the given ID. See
 // db.Ingest for the registry semantics — Sync is the syncable-side
 // counterpart and behaves identically: a duplicate call for the same
@@ -91,6 +101,14 @@ func (db *DB) Sync(_ context.Context, id string, s cluster.Syncable) error {
 }
 
 func (db *DB) sync(ctx context.Context, id string, s cluster.Syncable) error {
+	bs, isBatch := s.(cluster.BatchSyncable)
+	if isBatch {
+		return db.syncBatch(ctx, id, s, bs)
+	}
+	return db.syncSingle(ctx, id, s)
+}
+
+func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) error {
 	isNode := false
 	var r ProposalReader
 	backoff := syncBackoffMin
@@ -207,4 +225,187 @@ func (db *DB) sync(ctx context.Context, id string, s cluster.Syncable) error {
 			backoff = syncBackoffMax
 		}
 	}
+}
+
+// batchEntry pairs a proposal with its WAL index so the batch flush
+// can advance SyncableIndex to the last index in the batch.
+type batchEntry struct {
+	index    uint64
+	proposal *cluster.Proposal
+}
+
+func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs cluster.BatchSyncable) error {
+	isNode := false
+	var r ProposalReader
+	backoff := syncBackoffMin
+
+	var batch []batchEntry
+	var batchStart time.Time
+	// retryBatch is set when a flush fails with a transient error. The
+	// next iteration retries the flush instead of reading more proposals.
+	retryBatch := false
+
+	flush := func() bool {
+		if len(batch) == 0 {
+			return true
+		}
+
+		ps := make([]*cluster.Proposal, len(batch))
+		for i, e := range batch {
+			ps[i] = e.proposal
+		}
+
+		syncStart := time.Now()
+		shouldSnapshot, syncErr := bs.SyncBatch(ctx, ps)
+		if db.metrics != nil {
+			db.metrics.SyncCompleted(id, time.Since(syncStart))
+		}
+
+		if syncErr != nil {
+			if errors.Is(syncErr, cluster.ErrPermanent) {
+				// A permanent error from the batch means at least one
+				// proposal is bad. Fall back to per-proposal Sync on
+				// this batch to isolate the offending proposal(s).
+				db.logger.Warn("permanent batch error, falling back to per-proposal sync",
+					zap.String("id", id), zap.Int("batch_size", len(batch)), zap.Error(syncErr))
+				ok := db.syncBatchFallback(ctx, id, s, batch)
+				if ok {
+					batch = batch[:0]
+					retryBatch = false
+				}
+				return ok
+			}
+			// Transient error — don't clear the batch so it will be
+			// retried on the next iteration.
+			db.logger.Warn("transient batch sync error, will retry",
+				zap.String("id", id), zap.Int("batch_size", len(batch)), zap.Error(syncErr))
+			retryBatch = true
+			return false
+		}
+
+		lastIndex := batch[len(batch)-1].index
+		if shouldSnapshot {
+			err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: lastIndex})
+			if err != nil {
+				db.logger.Warn("proposeSyncableIndex error", zap.String("id", id), zap.Error(err))
+			}
+		}
+
+		batch = batch[:0]
+		retryBatch = false
+		return true
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+		}
+
+		progressed := false
+		switch {
+		case isNode && !db.isNode(id):
+			db.logger.Info("stopping sync", zap.String("id", id))
+			r = nil
+			isNode = false
+			batch = batch[:0]
+			retryBatch = false
+			progressed = true
+		case !isNode && db.isNode(id):
+			db.logger.Info("starting sync", zap.String("id", id))
+			r = db.storage.Reader(id)
+			isNode = true
+			batch = batch[:0]
+			retryBatch = false
+			progressed = true
+		case isNode && db.isNode(id):
+			// If a previous flush failed with a transient error, retry
+			// the flush before reading more proposals.
+			if retryBatch {
+				if flush() {
+					progressed = true
+				}
+				break
+			}
+
+			i, p, readErr := r.Read()
+			switch {
+			case readErr == io.EOF:
+				// Caught up. Flush any partial batch immediately.
+				if len(batch) > 0 {
+					if flush() {
+						progressed = true
+					}
+				}
+			case readErr != nil:
+				db.logger.Warn("sync read error", zap.String("id", id), zap.Error(readErr))
+			default:
+				if len(batch) == 0 {
+					batchStart = time.Now()
+				}
+				batch = append(batch, batchEntry{index: i, proposal: p})
+
+				// Flush if batch is full or has aged past the deadline.
+				if len(batch) >= syncBatchMaxSize || time.Since(batchStart) >= syncBatchMaxAge {
+					if flush() {
+						progressed = true
+					}
+				} else {
+					// More room in the batch — immediately try to read
+					// more without sleeping.
+					progressed = true
+				}
+			}
+		}
+
+		if progressed {
+			backoff = syncBackoffMin
+			continue
+		}
+
+		select {
+		case <-time.After(backoff):
+		case <-ctx.Done():
+			return nil
+		}
+		backoff *= 2
+		if backoff > syncBackoffMax {
+			backoff = syncBackoffMax
+		}
+	}
+}
+
+// syncBatchFallback processes a failed batch one proposal at a time
+// using the per-proposal Sync method. Permanent errors skip the
+// offending proposal; transient errors stop the fallback and leave the
+// remaining proposals in the batch for the caller to retry.
+func (db *DB) syncBatchFallback(ctx context.Context, id string, s cluster.Syncable, entries []batchEntry) bool {
+	for _, e := range entries {
+		syncStart := time.Now()
+		shouldSnapshot, syncErr := s.Sync(ctx, e.proposal)
+		if db.metrics != nil {
+			db.metrics.SyncCompleted(id, time.Since(syncStart))
+		}
+		if syncErr != nil {
+			if errors.Is(syncErr, cluster.ErrPermanent) {
+				db.logger.Error("permanent sync error, skipping proposal",
+					zap.String("id", id), zap.Uint64("index", e.index), zap.Error(syncErr))
+				continue
+			}
+			// Transient error in fallback — stop here. The caller
+			// should not retry this batch (the successful prefix
+			// was already committed via Sync's idempotent upsert).
+			db.logger.Warn("transient sync error in fallback, stopping",
+				zap.String("id", id), zap.Uint64("index", e.index), zap.Error(syncErr))
+			return false
+		}
+		if shouldSnapshot {
+			err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: e.index})
+			if err != nil {
+				db.logger.Warn("proposeSyncableIndex error", zap.String("id", id), zap.Error(err))
+			}
+		}
+	}
+	return true
 }

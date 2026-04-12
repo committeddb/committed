@@ -116,6 +116,63 @@ func (c *Syncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.Shoul
 	return true, nil
 }
 
+func (c *Syncable) SyncBatch(ctx context.Context, ps []*cluster.Proposal) (bool, error) {
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+
+	for _, p := range ps {
+		for _, e := range p.Entities {
+			if c.config.Topic != e.Type.ID {
+				continue
+			}
+
+			var jsonData any
+			err := json.Unmarshal(e.Data, &jsonData)
+			if err != nil {
+				_ = tx.Rollback()
+				return false, cluster.Permanent(fmt.Errorf("unmarshal entity data: %w", err))
+			}
+
+			var values []any
+			for _, path := range c.insert.JsonPath {
+				res, err := jsonpath.JsonPathLookup(jsonData, path)
+				if err != nil {
+					_ = tx.Rollback()
+					return false, cluster.Permanent(fmt.Errorf("jsonpath [%v]: %w", path, err))
+				}
+				values = append(values, res)
+			}
+
+			allValues := append(values, values...)
+
+			_, err = tx.StmtContext(ctx, c.insert.Stmt).ExecContext(ctx, allValues...)
+			if err != nil {
+				_ = tx.Rollback()
+				wrapped := fmt.Errorf("[sql.SyncBatch] exec [%s]: %w", c.insert.SQL, err)
+				if c.dialect.IsPermanent(err) {
+					return false, cluster.Permanent(wrapped)
+				}
+				return false, wrapped
+			}
+		}
+	}
+
+	zap.L().Debug("sql syncable batch committing", zap.Int("batch_size", len(ps)))
+	err = tx.Commit()
+	if err != nil {
+		rollbackErr := tx.Rollback()
+		if rollbackErr != nil {
+			return false, rollbackErr
+		}
+		return false, err
+	}
+	zap.L().Debug("sql syncable batch committed", zap.Int("batch_size", len(ps)))
+
+	return true, nil
+}
+
 func (c *Syncable) Close() error {
 	return c.insert.Stmt.Close()
 }

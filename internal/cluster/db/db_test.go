@@ -424,3 +424,48 @@ func (ms *MemorySyncable) Sync(ctx context.Context, p *cluster.Proposal) (cluste
 func (ms *MemorySyncable) Close() error {
 	return nil
 }
+
+// MemoryBatchSyncable extends MemorySyncable with BatchSyncable support.
+// db.sync will detect the SyncBatch method and use the batching path.
+type MemoryBatchSyncable struct {
+	MemorySyncable
+	batchMu     sync.Mutex
+	batchSizes  []int
+}
+
+func NewBatchSyncable(doneAtCount int, cancel func()) *MemoryBatchSyncable {
+	return &MemoryBatchSyncable{
+		MemorySyncable: MemorySyncable{doneAtCount: doneAtCount, cancel: cancel},
+	}
+}
+
+func (ms *MemoryBatchSyncable) SyncBatch(ctx context.Context, ps []*cluster.Proposal) (bool, error) {
+	fmt.Printf("batch syncing: %d proposals\n", len(ps))
+
+	ms.mu.Lock()
+	ms.batchMu.Lock()
+	ms.batchSizes = append(ms.batchSizes, len(ps))
+	ms.batchMu.Unlock()
+	for _, p := range ps {
+		ms.count++
+		ms.proposals = append(ms.proposals, p)
+	}
+	done := ms.count >= ms.doneAtCount
+	ms.mu.Unlock()
+
+	if done {
+		ms.cancel()
+	}
+
+	return true, nil
+}
+
+// BatchSizes returns a snapshot of the sizes of each batch that was
+// flushed via SyncBatch.
+func (ms *MemoryBatchSyncable) BatchSizes() []int {
+	ms.batchMu.Lock()
+	defer ms.batchMu.Unlock()
+	out := make([]int, len(ms.batchSizes))
+	copy(out, ms.batchSizes)
+	return out
+}

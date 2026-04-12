@@ -42,6 +42,26 @@ type Syncable interface {
 	Close() error
 }
 
+// BatchSyncable is an optional extension of Syncable for implementations
+// that benefit from processing multiple proposals in a single transaction
+// (e.g., SQL databases). db.sync checks for this interface at startup and
+// uses SyncBatch when available, falling back to per-proposal Sync
+// otherwise.
+//
+// SyncBatch receives a slice of proposals and returns the count of
+// proposals that should be snapshotted (counted from the start of the
+// slice). On success, the caller advances SyncableIndex to the last
+// proposal in the batch.
+//
+// Error semantics match Syncable.Sync: wrap with cluster.Permanent(err)
+// to skip proposals. When a batch returns a permanent error, the caller
+// falls back to per-proposal Sync on that batch to isolate the bad
+// proposal.
+type BatchSyncable interface {
+	Syncable
+	SyncBatch(ctx context.Context, ps []*Proposal) (shouldSnapshot bool, err error)
+}
+
 // Parser will parse a viper file into a Syncable
 //
 //counterfeiter:generate . SyncableParser
