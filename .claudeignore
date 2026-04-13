@@ -1,0 +1,10 @@
+# Generated counterfeiter fakes — regenerate with `go generate ./...`
+internal/cluster/clusterfakes/
+internal/cluster/db/dbfakes/
+internal/cluster/ingestable/sql/sqlfakes/
+
+# Generated protobuf
+internal/cluster/clusterpb/*.pb.go
+
+# Generated TanStack route tree
+web/src/routeTree.gen.ts
