@@ -17,6 +17,7 @@ import (
 	"github.com/philborlin/committed/internal/cluster/metrics"
 	ingestablesql "github.com/philborlin/committed/internal/cluster/ingestable/sql"
 	ingestablemysql "github.com/philborlin/committed/internal/cluster/ingestable/sql/mysql"
+	ingestablepostgres "github.com/philborlin/committed/internal/cluster/ingestable/sql/postgres"
 	synchttp "github.com/philborlin/committed/internal/cluster/syncable/http"
 	syncsql "github.com/philborlin/committed/internal/cluster/syncable/sql"
 	syncmysql "github.com/philborlin/committed/internal/cluster/syncable/sql/dialects"
@@ -110,6 +111,7 @@ func dbParser() *syncsql.DBParser {
 func ingestableParser(t ingestablesql.Typer) *ingestablesql.IngestableParser {
 	p := ingestablesql.NewIngestableParser(t)
 	p.Dialects["mysql"] = &ingestablemysql.MySQLDialect{}
+	p.Dialects["postgres"] = &ingestablepostgres.PostgreSQLDialect{}
 	return p
 }
 

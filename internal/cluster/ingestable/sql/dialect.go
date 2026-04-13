@@ -17,6 +17,8 @@ type Config struct {
 	Type             *cluster.Type
 	Mappings         []Mapping
 	PrimaryKey       string
+	Tables           []string
+	Options          map[string]string
 }
 
 type Mapping struct {

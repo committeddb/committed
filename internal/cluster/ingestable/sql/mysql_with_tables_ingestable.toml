@@ -1,0 +1,18 @@
+[ingestable]
+name="foo"
+type="sql"
+
+[sql]
+dialect="mysql"
+topic = "simple"
+connectionString="mysql://user:pass@host:3306/db"
+primaryKey = "pk"
+tables = ["orders", "customers"]
+
+[[sql.mappings]]
+jsonName = "pk"
+column = "pk"
+
+[[sql.mappings]]
+jsonName = "one"
+column = "one"

@@ -49,6 +49,9 @@ func (p *IngestableParser) ParseConfig(v *viper.Viper) (*Config, Dialect, error)
 		mappings = append(mappings, mapping)
 	}
 
+	tables := v.GetStringSlice("sql.tables")
+	options := v.GetStringMapString("sql." + dialectName)
+
 	dialect, ok := p.Dialects[dialectName]
 	if !ok {
 		return nil, nil, fmt.Errorf("dialect %s not found", dialectName)
@@ -64,6 +67,8 @@ func (p *IngestableParser) ParseConfig(v *viper.Viper) (*Config, Dialect, error)
 		Type:             tipe,
 		Mappings:         mappings,
 		PrimaryKey:       primaryKey,
+		Tables:           tables,
+		Options:          options,
 	}
 
 	return config, dialect, nil

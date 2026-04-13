@@ -53,7 +53,7 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 		var tables []string
 		for {
 			var err error
-			c, tables, err = createCanal(config.ConnectionString)
+			c, tables, err = createCanal(config)
 			if err == nil {
 				backoff = canalBackoffMin
 				break
@@ -320,8 +320,8 @@ func (h *MySQLEventHandler) String() string {
 	return "MyEventHandler"
 }
 
-func createCanal(connectionString string) (*canal.Canal, []string, error) {
-	u, err := url.Parse(connectionString)
+func createCanal(config *sql.Config) (*canal.Canal, []string, error) {
+	u, err := url.Parse(config.ConnectionString)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -330,7 +330,8 @@ func createCanal(connectionString string) (*canal.Canal, []string, error) {
 	username := u.User.Username()
 	password, passwordExists := u.User.Password()
 	database := strings.TrimPrefix(u.Path, "/")
-	tables := strings.Split(u.Query().Get("tables"), ",")
+
+	tables := config.Tables
 
 	cfg := canal.NewDefaultConfig()
 	cfg.Addr = addr

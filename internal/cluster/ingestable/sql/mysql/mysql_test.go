@@ -137,8 +137,8 @@ func TestMysqlDialect(t *testing.T) {
 			tt.setupFn(t)
 
 			dialect := &mysql.MySQLDialect{}
-			con := fmt.Sprintf("mysql://%s:%s@127.0.0.1:%s/%s?tables=%s", username, password, port, dbName, tt.tables)
-			tt.config.ConnectionString = con
+			tt.config.ConnectionString = fmt.Sprintf("mysql://%s:%s@127.0.0.1:%s/%s", username, password, port, dbName)
+			tt.config.Tables = []string{tt.tables}
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -261,7 +261,8 @@ func TestMysqlReconnect(t *testing.T) {
 			{JsonName: "val", SQLColumn: "val"},
 		},
 		PrimaryKey:       "pk",
-		ConnectionString: fmt.Sprintf("mysql://%s:%s@127.0.0.1:%s/%s?tables=%s", username, password, port, dbName, table),
+		ConnectionString: fmt.Sprintf("mysql://%s:%s@127.0.0.1:%s/%s", username, password, port, dbName),
+		Tables:           []string{table},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -366,7 +367,8 @@ func TestMysqlTransactionGrouping(t *testing.T) {
 			{JsonName: "val", SQLColumn: "val"},
 		},
 		PrimaryKey:       "pk",
-		ConnectionString: fmt.Sprintf("mysql://%s:%s@127.0.0.1:%s/%s?tables=%s", username, password, port, dbName, table),
+		ConnectionString: fmt.Sprintf("mysql://%s:%s@127.0.0.1:%s/%s", username, password, port, dbName),
+		Tables:           []string{table},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

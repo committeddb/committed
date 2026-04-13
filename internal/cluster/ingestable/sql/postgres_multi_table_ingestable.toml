@@ -1,0 +1,22 @@
+[ingestable]
+name="foo"
+type="sql"
+
+[sql]
+dialect="postgres"
+topic = "simple"
+connectionString="postgres://user:pass@localhost:5432/db?sslmode=disable"
+primaryKey = "pk"
+tables = ["public.orders", "public.customers", "public.items"]
+
+[sql.postgres]
+slot_name = "multi_slot"
+publication = "multi_pub"
+
+[[sql.mappings]]
+jsonName = "pk"
+column = "pk"
+
+[[sql.mappings]]
+jsonName = "one"
+column = "one"
