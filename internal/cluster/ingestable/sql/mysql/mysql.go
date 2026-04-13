@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"context"
+	gosql "database/sql"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/go-mysql-org/go-mysql/canal"
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
@@ -44,10 +46,68 @@ const (
 func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos cluster.Position, pr chan<- *cluster.Proposal, po chan<- cluster.Position) error {
 	backoff := canalBackoffMin
 
-	// Outer loop: each iteration creates a canal, runs it until it
-	// exits (connection loss, OnRow error, etc.), then reconnects with
+	// Parse the initial resume position, if any.
+	var lastPos *mysql.Position
+	if pos != nil {
+		posProto := &dialectpb.MySQLBinLogPosition{}
+		if err := proto.Unmarshal(pos, posProto); err != nil {
+			return err
+		}
+		lastPos = &mysql.Position{Name: posProto.Name, Pos: posProto.Pos}
+	}
+
+	// Outer loop: each iteration either snapshots (first run) or
+	// creates a canal, runs it until it exits, then reconnects with
 	// backoff. Only ctx cancellation breaks out.
 	for {
+		// --- snapshot on first run ---
+		// When there is no saved position, perform a pure-SQL initial
+		// snapshot to capture existing data and determine the binlog
+		// position to stream from. This replaces canal's built-in
+		// mysqldump phase, eliminating the external binary dependency.
+		if lastPos == nil {
+			snapshotPos, err := snapshot(ctx, config, pr)
+			if err != nil {
+				if ctx.Err() != nil {
+					return nil
+				}
+				zap.L().Warn("snapshot failed, retrying",
+					zap.Duration("backoff", backoff),
+					zap.Error(err),
+				)
+				select {
+				case <-ctx.Done():
+					return nil
+				case <-time.After(backoff):
+				}
+				backoff *= 2
+				if backoff > canalBackoffMax {
+					backoff = canalBackoffMax
+				}
+				continue
+			}
+			lastPos = snapshotPos
+			backoff = canalBackoffMin
+			zap.L().Info("snapshot complete",
+				zap.String("binlog_file", lastPos.Name),
+				zap.Uint32("binlog_pos", lastPos.Pos),
+			)
+
+			// Checkpoint the snapshot position so a restart after
+			// the snapshot but before the first binlog commit does
+			// not redo the entire snapshot.
+			posProto := &dialectpb.MySQLBinLogPosition{Name: lastPos.Name, Pos: lastPos.Pos}
+			bs, err := proto.Marshal(posProto)
+			if err != nil {
+				return err
+			}
+			select {
+			case po <- bs:
+			case <-ctx.Done():
+				return nil
+			}
+		}
+
 		// --- create canal with retry ---
 		var c *canal.Canal
 		var tables []string
@@ -88,31 +148,11 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 
 		c.SetEventHandler(handler)
 
-		// Determine the resume position: prefer the handler's last
-		// emitted position (from a previous iteration) over the
-		// original pos passed into Ingest.
-		var resumePos *mysql.Position
-		if handler.lastPos != nil {
-			resumePos = handler.lastPos
-		} else if pos != nil {
-			posProto := &dialectpb.MySQLBinLogPosition{}
-			if err := proto.Unmarshal(pos, posProto); err != nil {
-				c.Close()
-				return err
-			}
-			resumePos = &mysql.Position{Name: posProto.Name, Pos: posProto.Pos}
-		}
-
-		// Capture the Run/RunFrom return so we know when the canal
-		// goroutine exits — a non-nil error means the stream broke
-		// (connection lost, OnRow error propagated, etc.) and we
-		// should reconnect.
+		// Always start from a known position — the snapshot or a
+		// previously checkpointed position. canal's built-in
+		// mysqldump is never used.
 		canalDone := make(chan error, 1)
-		if resumePos != nil {
-			go func() { canalDone <- c.RunFrom(*resumePos) }()
-		} else {
-			go func() { canalDone <- c.Run() }()
-		}
+		go func() { canalDone <- c.RunFrom(*lastPos) }()
 
 		// --- wait for canal exit or context cancel ---
 		select {
@@ -121,8 +161,13 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			return nil
 		case err := <-canalDone:
 			// Canal exited on its own — connection lost, fatal
-			// binlog error, or an OnRow error that was returned to
-			// canal. Close the old canal and reconnect.
+			// binlog error, or an OnRow error. Capture the last
+			// emitted position before closing so the next iteration
+			// resumes correctly.
+			if handler.lastPos != nil {
+				lastPos = handler.lastPos
+			}
+
 			zap.L().Warn("canal exited, will reconnect",
 				zap.Duration("backoff", backoff),
 				zap.Error(err),
@@ -194,12 +239,10 @@ func (h *MySQLEventHandler) OnRow(e *canal.RowsEvent) error {
 	for i, c := range e.Table.Columns {
 		val := row[i]
 		// The MySQL binlog stream delivers TEXT/BLOB columns as []byte
-		// while VARCHAR columns come through as string; the initial
-		// mysqldump path that canal runs at startup delivers everything
-		// as string. Coerce []byte to string here so the JSON we marshal
-		// downstream is identical regardless of which path produced the
-		// row. (json.Marshal of a []byte field base64-encodes it, which
-		// would otherwise turn "one" into "b25l".) Binary BLOB columns
+		// while VARCHAR columns come through as string. Coerce []byte
+		// to string here so json.Marshal produces text rather than
+		// base64 (json.Marshal of a []byte field base64-encodes it,
+		// which would turn "one" into "b25l"). Binary BLOB columns
 		// are not a concern for any current caller of this dialect.
 		if b, ok := val.([]byte); ok {
 			val = string(b)
@@ -293,9 +336,9 @@ func (h *MySQLEventHandler) OnXID(header *replication.EventHeader, pos mysql.Pos
 }
 
 func (h *MySQLEventHandler) OnPosSynced(header *replication.EventHeader, pos mysql.Position, set mysql.GTIDSet, force bool) error {
-	// Flush any entities accumulated during the dump phase. During
-	// binlog replication OnXID already flushed before this is called,
-	// so pending will be empty here.
+	// During binlog replication OnXID already flushed pending entities
+	// before this callback is invoked, so pending will normally be
+	// empty. Flush as a safety measure.
 	return h.flushPending()
 }
 
@@ -326,21 +369,19 @@ func createCanal(config *sql.Config) (*canal.Canal, []string, error) {
 		return nil, nil, err
 	}
 
-	addr := u.Host
 	username := u.User.Username()
 	password, passwordExists := u.User.Password()
-	database := strings.TrimPrefix(u.Path, "/")
 
 	tables := config.Tables
 
 	cfg := canal.NewDefaultConfig()
-	cfg.Addr = addr
+	cfg.Addr = u.Host
 	cfg.User = username
 	if passwordExists {
 		cfg.Password = password
 	}
-	cfg.Dump.TableDB = database
-	cfg.Dump.Tables = tables
+	// Dump config is intentionally omitted — the pure-SQL snapshot
+	// replaces canal's built-in mysqldump phase.
 	streamHandler, err := log.NewStreamHandler(os.Stdout)
 	if err != nil {
 		return nil, nil, err
@@ -352,4 +393,242 @@ func createCanal(config *sql.Config) (*canal.Canal, []string, error) {
 	canal, err := canal.NewCanal(cfg)
 
 	return canal, tables, err
+}
+
+// snapshot performs a pure-SQL initial dump of all watched tables. It
+// replaces the external mysqldump binary that canal uses internally.
+//
+// The approach mirrors what mysqldump --single-transaction --master-data
+// does, without shelling out:
+//
+//  1. FLUSH TABLES WITH READ LOCK — briefly blocks all writes.
+//  2. SHOW BINARY LOG STATUS — captures the binlog position.
+//  3. START TRANSACTION WITH CONSISTENT SNAPSHOT — establishes the
+//     InnoDB read-view at the same point as the binlog position.
+//  4. UNLOCK TABLES — releases the global lock.
+//  5. SELECT * FROM each table — reads consistent snapshot data.
+//  6. COMMIT.
+//
+// The returned position is where the binlog streamer should start to
+// avoid gaps or duplicates between the snapshot and streaming phases.
+func snapshot(
+	ctx context.Context,
+	config *sql.Config,
+	pr chan<- *cluster.Proposal,
+) (*mysql.Position, error) {
+	db, err := gosql.Open("mysql", buildDSN(config.ConnectionString))
+	if err != nil {
+		return nil, fmt.Errorf("snapshot: open: %w", err)
+	}
+	defer db.Close()
+
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot: conn: %w", err)
+	}
+	defer conn.Close()
+
+	// Ensure REPEATABLE READ so WITH CONSISTENT SNAPSHOT provides
+	// point-in-time consistency (MySQL defaults to REPEATABLE READ,
+	// but an explicit SET guards against changed server defaults).
+	if _, err := conn.ExecContext(ctx, "SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ"); err != nil {
+		return nil, fmt.Errorf("snapshot: set isolation: %w", err)
+	}
+
+	// Acquire a global read lock so the binlog position and InnoDB
+	// snapshot are consistent. The lock is held only until the
+	// snapshot transaction is established (microseconds).
+	if _, err := conn.ExecContext(ctx, "FLUSH TABLES WITH READ LOCK"); err != nil {
+		return nil, fmt.Errorf("snapshot: FLUSH TABLES WITH READ LOCK: %w", err)
+	}
+
+	pos, err := binlogStatus(ctx, conn)
+	if err != nil {
+		conn.ExecContext(ctx, "UNLOCK TABLES")
+		return nil, fmt.Errorf("snapshot: binlog status: %w", err)
+	}
+
+	// Start a consistent snapshot. The global lock is still held, so
+	// the snapshot's read-view corresponds exactly to the captured
+	// binlog position.
+	if _, err := conn.ExecContext(ctx, "START TRANSACTION WITH CONSISTENT SNAPSHOT"); err != nil {
+		conn.ExecContext(ctx, "UNLOCK TABLES")
+		return nil, fmt.Errorf("snapshot: START TRANSACTION: %w", err)
+	}
+
+	// Release the lock — the snapshot is established and other
+	// sessions can write again.
+	if _, err := conn.ExecContext(ctx, "UNLOCK TABLES"); err != nil {
+		return nil, fmt.Errorf("snapshot: UNLOCK TABLES: %w", err)
+	}
+
+	for _, table := range config.Tables {
+		if err := snapshotTable(ctx, conn, config, table, pr); err != nil {
+			return nil, fmt.Errorf("snapshot: table %s: %w", table, err)
+		}
+	}
+
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return nil, fmt.Errorf("snapshot: COMMIT: %w", err)
+	}
+
+	return &pos, nil
+}
+
+// binlogStatus returns the current binlog filename and byte offset. It
+// tries SHOW BINARY LOG STATUS (MySQL 8.4+) first, falling back to
+// SHOW MASTER STATUS for older versions.
+func binlogStatus(ctx context.Context, conn *gosql.Conn) (mysql.Position, error) {
+	for _, query := range []string{"SHOW BINARY LOG STATUS", "SHOW MASTER STATUS"} {
+		rows, err := conn.QueryContext(ctx, query)
+		if err != nil {
+			continue
+		}
+
+		cols, err := rows.Columns()
+		if err != nil {
+			rows.Close()
+			continue
+		}
+
+		if !rows.Next() {
+			rows.Close()
+			continue
+		}
+
+		// Scan the first two columns (File, Position) into typed
+		// destinations; discard the rest. database/sql handles the
+		// int64→uint32 conversion for Position automatically.
+		var file string
+		var pos uint32
+		dest := make([]any, len(cols))
+		dest[0] = &file
+		dest[1] = &pos
+		for i := 2; i < len(cols); i++ {
+			dest[i] = new(any)
+		}
+
+		if err := rows.Scan(dest...); err != nil {
+			rows.Close()
+			continue
+		}
+		rows.Close()
+
+		return mysql.Position{Name: file, Pos: pos}, nil
+	}
+
+	return mysql.Position{}, fmt.Errorf("binlogStatus: could not determine binlog position")
+}
+
+// snapshotTable reads all rows from a table and emits them as proposals.
+// Column mapping and primary-key extraction mirror the binlog streaming
+// path (OnRow) so consumers see identical entity shapes.
+func snapshotTable(
+	ctx context.Context,
+	conn *gosql.Conn,
+	config *sql.Config,
+	table string,
+	pr chan<- *cluster.Proposal,
+) error {
+	rows, err := conn.QueryContext(ctx, fmt.Sprintf("SELECT * FROM `%s`", table))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	columns, err := rows.Columns()
+	if err != nil {
+		return err
+	}
+
+	var pending []*cluster.Entity
+
+	for rows.Next() {
+		vals := make([]any, len(columns))
+		ptrs := make([]any, len(columns))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return err
+		}
+
+		m := make(map[string]any)
+		for i, colName := range columns {
+			v := vals[i]
+			if v == nil {
+				m[strings.ToLower(colName)] = nil
+			} else if b, ok := v.([]byte); ok {
+				m[strings.ToLower(colName)] = string(b)
+			} else {
+				m[strings.ToLower(colName)] = fmt.Sprintf("%v", v)
+			}
+		}
+
+		toJSON := make(map[string]any)
+		for _, mapping := range config.Mappings {
+			toJSON[mapping.JsonName] = m[mapping.SQLColumn]
+		}
+
+		jsonBytes, err := json.Marshal(toJSON)
+		if err != nil {
+			zap.L().Warn("snapshotTable: skipping row",
+				zap.String("table", table),
+				zap.Error(err),
+			)
+			continue
+		}
+
+		key := fmt.Sprintf("%v", m[config.PrimaryKey])
+
+		pending = append(pending, &cluster.Entity{
+			Type:      config.Type,
+			Key:       []byte(key),
+			Data:      jsonBytes,
+			Timestamp: time.Now().UnixMilli(),
+		})
+
+		if len(pending) >= maxPendingEntities {
+			if err := flushPending(ctx, &pending, pr); err != nil {
+				return err
+			}
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	return flushPending(ctx, &pending, pr)
+}
+
+// buildDSN converts a mysql:// URL to a go-sql-driver/mysql DSN string.
+func buildDSN(connectionString string) string {
+	u, err := url.Parse(connectionString)
+	if err != nil {
+		return connectionString
+	}
+
+	username := u.User.Username()
+	password, _ := u.User.Password()
+	database := strings.TrimPrefix(u.Path, "/")
+
+	return fmt.Sprintf("%s:%s@tcp(%s)/%s", username, password, u.Host, database)
+}
+
+// flushPending emits all buffered entities as a single proposal and
+// resets the buffer. No-op when the buffer is empty. Used by the
+// snapshot path; the binlog path uses MySQLEventHandler.flushPending.
+func flushPending(ctx context.Context, pending *[]*cluster.Entity, pr chan<- *cluster.Proposal) error {
+	if len(*pending) == 0 {
+		return nil
+	}
+	p := &cluster.Proposal{Entities: *pending}
+	select {
+	case pr <- p:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	*pending = nil
+	return nil
 }

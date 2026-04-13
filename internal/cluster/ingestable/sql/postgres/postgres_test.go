@@ -7,23 +7,21 @@ import (
 	gosql "database/sql"
 	"fmt"
 	"log"
+	"os"
 	"testing"
 	"time"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/testcontainers/testcontainers-go"
+	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/ingestable/sql"
 	"github.com/philborlin/committed/internal/cluster/ingestable/sql/postgres"
 	"github.com/stretchr/testify/require"
-
-	_ "github.com/jackc/pgx/v5/stdlib"
-	"github.com/ory/dockertest/v3"
 )
 
-var (
-	port     string
-	pool     *dockertest.Pool
-	resource *dockertest.Resource
-)
+var connString string
 
 const (
 	dbName   = "testdb"
@@ -32,66 +30,59 @@ const (
 )
 
 func TestMain(m *testing.M) {
-	var err error
-	pool, err = dockertest.NewPool("")
+	ctx := context.Background()
+
+	container, err := tcpostgres.Run(ctx,
+		"postgres:16",
+		tcpostgres.WithDatabase(dbName),
+		tcpostgres.WithUsername(username),
+		tcpostgres.WithPassword(password),
+		tcpostgres.BasicWaitStrategies(),
+		testcontainers.CustomizeRequest(testcontainers.GenericContainerRequest{
+			ContainerRequest: testcontainers.ContainerRequest{
+				Cmd: []string{
+					"-c", "wal_level=logical",
+					"-c", "max_replication_slots=10",
+					"-c", "max_wal_senders=10",
+				},
+			},
+		}),
+	)
 	if err != nil {
-		log.Fatalf("Could not construct pool: %s", err)
+		log.Fatalf("Could not start Postgres container: %v", err)
 	}
 
-	err = pool.Client.Ping()
+	connString, err = container.ConnectionString(ctx, "sslmode=disable")
 	if err != nil {
-		log.Fatalf("Could not connect to Docker: %s", err)
+		log.Fatalf("Could not get connection string: %v", err)
 	}
 
-	resource, err = pool.RunWithOptions(&dockertest.RunOptions{
-		Repository: "postgres",
-		Tag:        "16",
-		Env: []string{
-			fmt.Sprintf("POSTGRES_PASSWORD=%s", password),
-			fmt.Sprintf("POSTGRES_DB=%s", dbName),
-		},
-		Cmd: []string{
-			"postgres",
-			"-c", "wal_level=logical",
-			"-c", "max_replication_slots=10",
-			"-c", "max_wal_senders=10",
-		},
-	})
-	if err != nil {
-		log.Fatalf("Could not start resource: %s", err)
-	}
+	code := m.Run()
 
-	port = resource.GetPort("5432/tcp")
-
-	if err := pool.Retry(func() error {
-		db, err := gosql.Open("pgx", fmt.Sprintf("postgres://%s:%s@localhost:%s/%s?sslmode=disable", username, password, port, dbName))
-		if err != nil {
-			return err
-		}
-		defer db.Close()
-		return db.Ping()
-	}); err != nil {
-		log.Fatalf("Could not connect to database: %s", err)
-	}
-
-	if err := resource.Expire(300); err != nil {
-		log.Fatalf("Could not expire resource: %s", err)
-	}
-
-	defer func() {
-		if err := pool.Purge(resource); err != nil {
-			log.Fatalf("Could not purge resource: %s", err)
-		}
-	}()
-
-	m.Run()
+	// Ryuk (the testcontainers reaper) handles cleanup automatically.
+	os.Exit(code)
 }
 
-func baseConnString() string {
-	return fmt.Sprintf(
-		"postgres://%s:%s@localhost:%s/%s?sslmode=disable",
-		username, password, port, dbName,
-	)
+func createDB(t *testing.T) *gosql.DB {
+	db, err := gosql.Open("pgx", connString)
+	require.NoError(t, err)
+	require.NoError(t, db.Ping())
+	return db
+}
+
+// waitForSlot polls pg_replication_slots until the named slot is active,
+// replacing fragile time.Sleep calls.
+func waitForSlot(t *testing.T, slotName string) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		db := createDB(t)
+		defer db.Close()
+		var active bool
+		err := db.QueryRow(
+			"SELECT active FROM pg_replication_slots WHERE slot_name = $1", slotName,
+		).Scan(&active)
+		return err == nil && active
+	}, 10*time.Second, 100*time.Millisecond)
 }
 
 func TestPostgresDialect(t *testing.T) {
@@ -148,7 +139,7 @@ func TestPostgresDialect(t *testing.T) {
 			pubName := fmt.Sprintf("pub_%s", tt.name)
 
 			dialect := &postgres.PostgreSQLDialect{}
-			tt.config.ConnectionString = baseConnString()
+			tt.config.ConnectionString = connString
 			tt.config.Tables = []string{tt.table}
 			tt.config.Options = map[string]string{
 				"slot_name":   slotName,
@@ -228,28 +219,6 @@ func insertTwo(t *testing.T, table string) {
 	require.NoError(t, err)
 }
 
-func createDB(t *testing.T) *gosql.DB {
-	db, err := gosql.Open("pgx", fmt.Sprintf("postgres://%s:%s@localhost:%s/%s?sslmode=disable", username, password, port, dbName))
-	require.NoError(t, err)
-	require.NoError(t, db.Ping())
-	return db
-}
-
-// waitForSlot polls pg_replication_slots until the named slot is active,
-// replacing fragile time.Sleep calls.
-func waitForSlot(t *testing.T, slotName string) {
-	t.Helper()
-	require.Eventually(t, func() bool {
-		db := createDB(t)
-		defer db.Close()
-		var active bool
-		err := db.QueryRow(
-			"SELECT active FROM pg_replication_slots WHERE slot_name = $1", slotName,
-		).Scan(&active)
-		return err == nil && active
-	}, 10*time.Second, 100*time.Millisecond)
-}
-
 // TestPostgresPositionResume verifies that checkpointed LSN positions are
 // correctly restored on restart: a new Ingest call with a previously
 // checkpointed position only receives changes committed after that LSN.
@@ -271,7 +240,7 @@ func TestPostgresPositionResume(t *testing.T) {
 			{JsonName: "val", SQLColumn: "val"},
 		},
 		PrimaryKey:       "pk",
-		ConnectionString: baseConnString(),
+		ConnectionString: connString,
 		Tables:           []string{table},
 		Options: map[string]string{
 			"slot_name":   "slot_resume",
@@ -385,7 +354,7 @@ func TestPostgresTransactionGrouping(t *testing.T) {
 			{JsonName: "val", SQLColumn: "val"},
 		},
 		PrimaryKey:       "pk",
-		ConnectionString: baseConnString(),
+		ConnectionString: connString,
 		Tables:           []string{table},
 		Options: map[string]string{
 			"slot_name":   "slot_txgroup",
@@ -502,7 +471,7 @@ func TestPostgresSnapshotOnNewSlot(t *testing.T) {
 			{JsonName: "val", SQLColumn: "val"},
 		},
 		PrimaryKey:       "pk",
-		ConnectionString: baseConnString(),
+		ConnectionString: connString,
 		Tables:           []string{table},
 		Options: map[string]string{
 			"slot_name":   "slot_snap",

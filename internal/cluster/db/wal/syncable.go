@@ -22,9 +22,10 @@ func (s *Storage) handleSyncable(e *cluster.Entity) error {
 	}
 }
 
-// saveSyncable persists a syncable Configuration to bbolt and then notifies
-// the consumer channel. The channel send happens AFTER the bbolt Update
-// returns successfully — it must not happen inside the closure, because:
+// saveSyncable persists a syncable Configuration as a new version in bbolt
+// and then notifies the consumer channel. The channel send happens AFTER the
+// bbolt Update returns successfully — it must not happen inside the closure,
+// because:
 //
 //  1. The unbuffered channel send would block while holding the bbolt
 //     writer lock, blocking all other writes against any bucket.
@@ -32,11 +33,6 @@ func (s *Storage) handleSyncable(e *cluster.Entity) error {
 //     been notified about state that doesn't exist on disk.
 //  3. The consumer (db.listenForSyncables) calls db.Sync, which can re-enter
 //     the proposal path; that would deadlock under the writer lock.
-//
-// Idempotency on restart depends on the persisted appliedIndex (see
-// wal.Storage.ApplyCommitted). Without it, replay would re-spawn a worker
-// for the same ID — which is a separate bug tracked in
-// .claude-scratch/tickets/worker-registry-by-id.md.
 func (s *Storage) saveSyncable(t *cluster.Configuration) error {
 	var syncable cluster.Syncable
 	err := s.keyValueStorage.Update(func(tx *bolt.Tx) error {
@@ -55,8 +51,8 @@ func (s *Storage) saveSyncable(t *cluster.Configuration) error {
 		}
 		syncable = parsed
 
-		if err := b.Put([]byte(t.ID), bs); err != nil {
-			return fmt.Errorf("[wal.syncable] put: %w", err)
+		if _, err := putVersioned(b, []byte(t.ID), bs); err != nil {
+			return fmt.Errorf("[wal.syncable] putVersioned: %w", err)
 		}
 
 		return nil
@@ -79,12 +75,7 @@ func (s *Storage) deleteSyncable(id []byte) error {
 		if b == nil {
 			return ErrBucketMissing
 		}
-		err := b.Delete(id)
-		if err != nil {
-			return err
-		}
-
-		return nil
+		return deleteVersioned(b, id)
 	})
 }
 
@@ -97,22 +88,14 @@ func (s *Storage) Syncables() ([]*cluster.Configuration, error) {
 			return ErrBucketMissing
 		}
 
-		err := b.ForEach(func(k, v []byte) error {
+		return forEachCurrent(b, func(id, data []byte) error {
 			cfg := &cluster.Configuration{}
-			err := cfg.Unmarshal(v)
-			if err != nil {
+			if err := cfg.Unmarshal(data); err != nil {
 				return err
 			}
-
 			cfgs = append(cfgs, cfg)
-
 			return nil
 		})
-		if err != nil {
-			return err
-		}
-
-		return nil
 	})
 
 	if err != nil {
@@ -120,4 +103,37 @@ func (s *Storage) Syncables() ([]*cluster.Configuration, error) {
 	}
 
 	return cfgs, nil
+}
+
+func (s *Storage) SyncableVersions(id string) ([]cluster.VersionInfo, error) {
+	var versions []cluster.VersionInfo
+	err := s.keyValueStorage.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(syncableBucket)
+		if b == nil {
+			return ErrBucketMissing
+		}
+		var err error
+		versions, err = listVersions(b, []byte(id))
+		return err
+	})
+	return versions, err
+}
+
+func (s *Storage) SyncableVersion(id string, version uint64) (*cluster.Configuration, error) {
+	cfg := &cluster.Configuration{}
+	err := s.keyValueStorage.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(syncableBucket)
+		if b == nil {
+			return ErrBucketMissing
+		}
+		data, err := getVersion(b, []byte(id), version)
+		if err != nil {
+			return err
+		}
+		return cfg.Unmarshal(data)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return cfg, nil
 }

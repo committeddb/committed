@@ -153,6 +153,38 @@ func (ms *MemoryStorage) Types() ([]*cluster.Configuration, error) {
 	return nil, nil
 }
 
+func (ms *MemoryStorage) DatabaseVersions(id string) ([]cluster.VersionInfo, error) {
+	return nil, nil
+}
+
+func (ms *MemoryStorage) DatabaseVersion(id string, version uint64) (*cluster.Configuration, error) {
+	return nil, nil
+}
+
+func (ms *MemoryStorage) IngestableVersions(id string) ([]cluster.VersionInfo, error) {
+	return nil, nil
+}
+
+func (ms *MemoryStorage) IngestableVersion(id string, version uint64) (*cluster.Configuration, error) {
+	return nil, nil
+}
+
+func (ms *MemoryStorage) SyncableVersions(id string) ([]cluster.VersionInfo, error) {
+	return nil, nil
+}
+
+func (ms *MemoryStorage) SyncableVersion(id string, version uint64) (*cluster.Configuration, error) {
+	return nil, nil
+}
+
+func (ms *MemoryStorage) TypeVersions(id string) ([]cluster.VersionInfo, error) {
+	return nil, nil
+}
+
+func (ms *MemoryStorage) TypeVersion(id string, version uint64) (*cluster.Configuration, error) {
+	return nil, nil
+}
+
 func (ms *MemoryStorage) Proposals() []*cluster.Proposal {
 	fi, _ := ms.FirstIndex()
 	li, _ := ms.LastIndex()

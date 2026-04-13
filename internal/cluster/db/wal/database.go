@@ -39,9 +39,8 @@ func (s *Storage) saveDatabase(t *cluster.Configuration) error {
 		}
 
 		s.logger.Debug("database saved", zap.String("id", t.ID), zap.String("name", name))
-		err = b.Put([]byte(t.ID), bs)
-		if err != nil {
-			return fmt.Errorf("[wal.database] put: %w", err)
+		if _, err := putVersioned(b, []byte(t.ID), bs); err != nil {
+			return fmt.Errorf("[wal.database] putVersioned: %w", err)
 		}
 
 		s.databases[t.ID] = db
@@ -56,8 +55,7 @@ func (s *Storage) deleteDatabase(id []byte) error {
 		if b == nil {
 			return ErrBucketMissing
 		}
-		err := b.Delete(id)
-		if err != nil {
+		if err := deleteVersioned(b, id); err != nil {
 			return err
 		}
 
@@ -73,10 +71,9 @@ func (s *Storage) loadDatabases() error {
 			return ErrBucketMissing
 		}
 
-		err := b.ForEach(func(k, v []byte) error {
+		return forEachCurrent(b, func(id, data []byte) error {
 			cfg := &cluster.Configuration{}
-			err := cfg.Unmarshal(v)
-			if err != nil {
+			if err := cfg.Unmarshal(data); err != nil {
 				return err
 			}
 
@@ -86,14 +83,8 @@ func (s *Storage) loadDatabases() error {
 			}
 
 			s.databases[cfg.ID] = db
-
 			return nil
 		})
-		if err != nil {
-			return err
-		}
-
-		return nil
 	})
 }
 
@@ -115,22 +106,14 @@ func (s *Storage) Databases() ([]*cluster.Configuration, error) {
 			return ErrBucketMissing
 		}
 
-		err := b.ForEach(func(k, v []byte) error {
+		return forEachCurrent(b, func(id, data []byte) error {
 			cfg := &cluster.Configuration{}
-			err := cfg.Unmarshal(v)
-			if err != nil {
+			if err := cfg.Unmarshal(data); err != nil {
 				return err
 			}
-
 			cfgs = append(cfgs, cfg)
-
 			return nil
 		})
-		if err != nil {
-			return err
-		}
-
-		return nil
 	})
 
 	if err != nil {
@@ -138,4 +121,37 @@ func (s *Storage) Databases() ([]*cluster.Configuration, error) {
 	}
 
 	return cfgs, nil
+}
+
+func (s *Storage) DatabaseVersions(id string) ([]cluster.VersionInfo, error) {
+	var versions []cluster.VersionInfo
+	err := s.keyValueStorage.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(databaseBucket)
+		if b == nil {
+			return ErrBucketMissing
+		}
+		var err error
+		versions, err = listVersions(b, []byte(id))
+		return err
+	})
+	return versions, err
+}
+
+func (s *Storage) DatabaseVersion(id string, version uint64) (*cluster.Configuration, error) {
+	cfg := &cluster.Configuration{}
+	err := s.keyValueStorage.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(databaseBucket)
+		if b == nil {
+			return ErrBucketMissing
+		}
+		data, err := getVersion(b, []byte(id), version)
+		if err != nil {
+			return err
+		}
+		return cfg.Unmarshal(data)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return cfg, nil
 }

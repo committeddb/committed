@@ -36,3 +36,11 @@ func (db *DB) ParseDatabase(mimeType string, data []byte) (string, cluster.Datab
 func (db *DB) Databases() ([]*cluster.Configuration, error) {
 	return db.storage.Databases()
 }
+
+func (db *DB) DatabaseVersions(id string) ([]cluster.VersionInfo, error) {
+	return db.storage.DatabaseVersions(id)
+}
+
+func (db *DB) DatabaseVersion(id string, version uint64) (*cluster.Configuration, error) {
+	return db.storage.DatabaseVersion(id, version)
+}

@@ -15,6 +15,15 @@ func (db *DB) ProposeType(ctx context.Context, c *cluster.Configuration) error {
 		return &cluster.ConfigError{Err: err}
 	}
 
+	// Enforce immutability: a type+version pair is immutable once defined.
+	// To evolve a type, increment the version field.
+	existing, err := db.storage.Type(c.ID)
+	if err == nil && existing != nil && existing.Version == t.Version {
+		return &cluster.ConfigError{
+			Err: fmt.Errorf("type %q version %d already exists and is immutable; increment the version to evolve", c.ID, t.Version),
+		}
+	}
+
 	e, err := cluster.NewUpsertTypeEntity(t)
 	if err != nil {
 		return err
@@ -74,6 +83,14 @@ func ParseType(c *cluster.Configuration, s cluster.DatabaseStorage) (string, *cl
 
 func (db *DB) Types() ([]*cluster.Configuration, error) {
 	return db.storage.Types()
+}
+
+func (db *DB) TypeVersions(id string) ([]cluster.VersionInfo, error) {
+	return db.storage.TypeVersions(id)
+}
+
+func (db *DB) TypeVersion(id string, version uint64) (*cluster.Configuration, error) {
+	return db.storage.TypeVersion(id, version)
 }
 
 func (db *DB) TypeGraph(typeID string, start time.Time, end time.Time) ([]cluster.TimePoint, error) {

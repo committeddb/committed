@@ -54,19 +54,30 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 
 		r.Get("/database", h.GetDatabases)
 		r.Post("/database/{id}", h.AddDatabase)
+		r.Get("/database/{id}/versions", h.GetDatabaseVersions)
+		r.Get("/database/{id}/versions/{version}", h.GetDatabaseVersion)
+		r.Post("/database/{id}/rollback", h.RollbackDatabase)
 
 		r.Get("/ingestable", h.GetIngestables)
 		r.Post("/ingestable/{id}", h.AddIngestable)
+		r.Get("/ingestable/{id}/versions", h.GetIngestableVersions)
+		r.Get("/ingestable/{id}/versions/{version}", h.GetIngestableVersion)
+		r.Post("/ingestable/{id}/rollback", h.RollbackIngestable)
 
 		r.Get("/proposal", h.GetProposals)
 		r.Post("/proposal", h.AddProposal)
 
 		r.Get("/syncable", h.GetSyncables)
 		r.Post("/syncable/{id}", h.AddSyncable)
+		r.Get("/syncable/{id}/versions", h.GetSyncableVersions)
+		r.Get("/syncable/{id}/versions/{version}", h.GetSyncableVersion)
+		r.Post("/syncable/{id}/rollback", h.RollbackSyncable)
 
 		r.Get("/type", h.GetTypes)
 		r.Get("/type/{id}", h.GetType)
 		r.Post("/type/{id}", h.AddType)
+		r.Get("/type/{id}/versions", h.GetTypeVersions)
+		r.Get("/type/{id}/versions/{version}", h.GetTypeVersion)
 	})
 
 	return h

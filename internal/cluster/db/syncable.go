@@ -37,3 +37,11 @@ func (db *DB) ParseSyncable(mimeType string, data []byte, s cluster.DatabaseStor
 func (db *DB) Syncables() ([]*cluster.Configuration, error) {
 	return db.storage.Syncables()
 }
+
+func (db *DB) SyncableVersions(id string) ([]cluster.VersionInfo, error) {
+	return db.storage.SyncableVersions(id)
+}
+
+func (db *DB) SyncableVersion(id string, version uint64) (*cluster.Configuration, error) {
+	return db.storage.SyncableVersion(id, version)
+}

@@ -7,79 +7,65 @@ import (
 	gosql "database/sql"
 	"fmt"
 	"log"
+	"os"
 	"testing"
 	"time"
+
+	"github.com/docker/docker/client"
+	_ "github.com/go-sql-driver/mysql"
+	tcmysql "github.com/testcontainers/testcontainers-go/modules/mysql"
 
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/ingestable/sql"
 	"github.com/philborlin/committed/internal/cluster/ingestable/sql/mysql"
 	"github.com/stretchr/testify/require"
-
-	_ "github.com/go-sql-driver/mysql"
-	"github.com/ory/dockertest/v3"
 )
 
 var (
-	port     = "3306"
-	pool     *dockertest.Pool
-	resource *dockertest.Resource
+	mysqlContainer *tcmysql.MySQLContainer
+	dsn            string // go-sql-driver DSN (user:pass@tcp(host:port)/db)
+	ingestURL      string // mysql:// URL for ingestable config
 )
 
-const dbName = "dbName"
-const username = "root"
-const password = "secret"
+const (
+	dbName   = "dbName"
+	username = "root"
+	password = "secret"
+)
 
 func TestMain(m *testing.M) {
+	ctx := context.Background()
+
 	var err error
-	pool, err = dockertest.NewPool("")
+	mysqlContainer, err = tcmysql.Run(ctx,
+		"mysql:9",
+		tcmysql.WithDatabase(dbName),
+		tcmysql.WithUsername(username),
+		tcmysql.WithPassword(password),
+	)
 	if err != nil {
-		log.Fatalf("Could not construct pool: %s", err)
+		log.Fatalf("Could not start MySQL container: %v", err)
 	}
 
-	err = pool.Client.Ping()
+	dsn, err = mysqlContainer.ConnectionString(ctx)
 	if err != nil {
-		log.Fatalf("Could not connect to Docker: %s", err)
+		log.Fatalf("Could not get DSN: %v", err)
 	}
 
-	resource, err = pool.Run("mysql", "9", []string{fmt.Sprintf("MYSQL_ROOT_PASSWORD=%s", password)})
+	host, err := mysqlContainer.Host(ctx)
 	if err != nil {
-		log.Fatalf("Could not start resource: %s", err)
+		log.Fatalf("Could not get host: %v", err)
 	}
-
-	port = resource.GetPort("3306/tcp")
-
-	if err := pool.Retry(func() error {
-		var err error
-		db, err := gosql.Open("mysql", fmt.Sprintf("%s:%s@(localhost:%s)/", username, password, port))
-		if err != nil {
-			return err
-		}
-		err = db.Ping()
-		if err != nil {
-			return err
-		}
-
-		_, err = db.Exec("CREATE DATABASE " + dbName)
-		if err != nil {
-			return err
-		}
-
-		return nil
-	}); err != nil {
-		log.Fatalf("Could not connect to database: %s", err)
+	port, err := mysqlContainer.MappedPort(ctx, "3306/tcp")
+	if err != nil {
+		log.Fatalf("Could not get port: %v", err)
 	}
+	ingestURL = fmt.Sprintf("mysql://%s:%s@%s:%s/%s", username, password, host, port.Port(), dbName)
 
-	if err := resource.Expire(60); err != nil { // Tell docker to hard kill the container in 60 seconds
-		log.Fatalf("Could not expire resource: %s", err)
-	}
+	code := m.Run()
 
-	defer func() {
-		if err := pool.Purge(resource); err != nil {
-			log.Fatalf("Could not purge resource: %s", err)
-		}
-	}()
-
-	m.Run()
+	// Ryuk (the testcontainers reaper) handles cleanup automatically.
+	os.Exit(code)
 }
 
 func TestMysqlDialect(t *testing.T) {
@@ -123,21 +109,16 @@ func TestMysqlDialect(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Run setup BEFORE starting the dialect. canal's initial
-			// mysqldump captures the table state at the moment Ingest
+			// Run setup BEFORE starting the dialect. The pure-SQL
+			// snapshot captures the table state at the moment Ingest
 			// starts; the binlog tail then picks up changes from that
-			// point forward. Running setup first means the dump captures
-			// the final state and the tail has nothing left to deliver,
-			// which makes the test deterministic. The previous order
-			// (dialect starts, then setup runs) created a race window
-			// where the dump would snapshot a stale or empty table and
-			// the tail would replay setup's events — sometimes
-			// duplicating rows when stale dump state coincided with new
-			// tail INSERTs.
+			// point forward. Running setup first means the snapshot
+			// captures the final state and the tail has nothing left to
+			// deliver, which makes the test deterministic.
 			tt.setupFn(t)
 
 			dialect := &mysql.MySQLDialect{}
-			tt.config.ConnectionString = fmt.Sprintf("mysql://%s:%s@127.0.0.1:%s/%s", username, password, port, dbName)
+			tt.config.ConnectionString = ingestURL
 			tt.config.Tables = []string{tt.tables}
 
 			ctx, cancel := context.WithCancel(context.Background())
@@ -152,8 +133,8 @@ func TestMysqlDialect(t *testing.T) {
 			}()
 
 			// Collect entities until we've seen the expected count.
-			// With XID-aware grouping, dump-phase rows may arrive as a
-			// single multi-entity proposal, so we iterate all entities
+			// With XID-aware grouping, snapshot-phase rows may arrive
+			// as a single multi-entity proposal, so we iterate all entities
 			// in each proposal. Position events still need draining.
 			expected := len(tt.entities)
 			deadline := time.After(10 * time.Second)
@@ -172,7 +153,7 @@ func TestMysqlDialect(t *testing.T) {
 				}
 			}
 			// Drain anything that arrives in the next quiet window so
-			// duplicate deliveries (dump + tail) are absorbed.
+			// any duplicate deliveries are absorbed.
 		drain:
 			for {
 				select {
@@ -229,7 +210,7 @@ func setup2(t *testing.T) {
 }
 
 func createDB(t *testing.T) *gosql.DB {
-	db, err := gosql.Open("mysql", fmt.Sprintf("%s:%s@(localhost:%s)/%s", username, password, port, dbName))
+	db, err := gosql.Open("mysql", dsn)
 	require.Nil(t, err)
 	err = db.Ping()
 	require.Nil(t, err)
@@ -261,7 +242,7 @@ func TestMysqlReconnect(t *testing.T) {
 			{JsonName: "val", SQLColumn: "val"},
 		},
 		PrimaryKey:       "pk",
-		ConnectionString: fmt.Sprintf("mysql://%s:%s@127.0.0.1:%s/%s", username, password, port, dbName),
+		ConnectionString: ingestURL,
 		Tables:           []string{table},
 	}
 
@@ -292,25 +273,27 @@ func TestMysqlReconnect(t *testing.T) {
 		}
 	}
 
-	// --- stop MySQL (simulate outage) ---
-	t.Log("stopping MySQL container")
-	err = pool.Client.StopContainer(resource.Container.ID, 3)
+	// --- pause MySQL (simulate network outage) ---
+	// Use Docker pause/unpause instead of stop/start because
+	// OrbStack reassigns host port mappings on container restart.
+	// Pause freezes all processes and network without destroying
+	// the port mapping, so the canal can reconnect on the same port.
+	t.Log("pausing MySQL container")
+	cli, err := client.NewClientWithOpts(client.FromEnv)
+	require.Nil(t, err)
+	defer cli.Close()
+
+	containerID := mysqlContainer.GetContainerID()
+	err = cli.ContainerPause(ctx, containerID)
 	require.Nil(t, err)
 
-	// --- restart MySQL ---
-	t.Log("restarting MySQL container")
-	err = pool.Client.StartContainer(resource.Container.ID, nil)
-	require.Nil(t, err)
+	// Give the canal time to detect the frozen connection.
+	time.Sleep(3 * time.Second)
 
-	// Wait for MySQL to accept connections again.
-	require.NoError(t, pool.Retry(func() error {
-		db, err := gosql.Open("mysql", fmt.Sprintf("%s:%s@(localhost:%s)/%s", username, password, port, dbName))
-		if err != nil {
-			return err
-		}
-		defer db.Close()
-		return db.Ping()
-	}))
+	// --- unpause MySQL ---
+	t.Log("unpausing MySQL container")
+	err = cli.ContainerUnpause(ctx, containerID)
+	require.Nil(t, err)
 
 	// --- insert a new row after MySQL is back ---
 	db = createDB(t)
@@ -349,7 +332,7 @@ func TestMysqlTransactionGrouping(t *testing.T) {
 	table := "tx_group_table"
 
 	// Create the table and insert a sentinel row before Ingest starts.
-	// The sentinel lets us detect when the dump phase is complete.
+	// The sentinel lets us detect when the snapshot phase is complete.
 	db := createDB(t)
 	_, err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS `%s`", table))
 	require.NoError(t, err)
@@ -367,7 +350,7 @@ func TestMysqlTransactionGrouping(t *testing.T) {
 			{JsonName: "val", SQLColumn: "val"},
 		},
 		PrimaryKey:       "pk",
-		ConnectionString: fmt.Sprintf("mysql://%s:%s@127.0.0.1:%s/%s", username, password, port, dbName),
+		ConnectionString: ingestURL,
 		Tables:           []string{table},
 	}
 
@@ -382,8 +365,8 @@ func TestMysqlTransactionGrouping(t *testing.T) {
 		_ = dialect.Ingest(ctx, config, nil, proposalChan, positionChan)
 	}()
 
-	// Wait for the sentinel row to arrive — this means the dump phase
-	// is complete and canal is tailing the binlog.
+	// Wait for the sentinel row to arrive — this means the snapshot
+	// phase is complete and canal is tailing the binlog.
 	deadline := time.After(15 * time.Second)
 	sentinelSeen := false
 	for !sentinelSeen {
@@ -396,7 +379,7 @@ func TestMysqlTransactionGrouping(t *testing.T) {
 			}
 		case <-positionChan:
 		case <-deadline:
-			t.Fatal("timed out waiting for sentinel row from dump")
+			t.Fatal("timed out waiting for sentinel row from snapshot")
 		}
 	}
 
@@ -444,5 +427,237 @@ func TestMysqlTransactionGrouping(t *testing.T) {
 		require.NotEmpty(t, pos, "expected a non-empty post-commit position")
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for post-commit position")
+	}
+}
+
+// TestMysqlPositionResume verifies that checkpointed binlog positions are
+// correctly restored on restart: a new Ingest call with a previously
+// checkpointed position only receives changes committed after that position.
+func TestMysqlPositionResume(t *testing.T) {
+	table := "resume_table"
+
+	db := createDB(t)
+	_, err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS `%s`", table))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf("CREATE TABLE `%s` (pk VARCHAR(32) NOT NULL, val TEXT, PRIMARY KEY (pk));", table))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, val) VALUES ('before', 'initial');", table))
+	require.NoError(t, err)
+	db.Close()
+
+	simpleType := &cluster.Type{ID: "resume", Name: "resume"}
+	config := &sql.Config{
+		Type: simpleType,
+		Mappings: []sql.Mapping{
+			{JsonName: "pk", SQLColumn: "pk"},
+			{JsonName: "val", SQLColumn: "val"},
+		},
+		PrimaryKey:       "pk",
+		ConnectionString: ingestURL,
+		Tables:           []string{table},
+	}
+
+	// --- Phase 1: start dialect, collect "before" proposal and position ---
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	proposalChan1 := make(chan *cluster.Proposal, 10)
+	positionChan1 := make(chan cluster.Position, 10)
+
+	dialect1 := &mysql.MySQLDialect{}
+	go func() {
+		_ = dialect1.Ingest(ctx1, config, nil, proposalChan1, positionChan1)
+	}()
+
+	deadline := time.After(15 * time.Second)
+	seen := make(map[string]bool)
+	var lastPos cluster.Position
+	for !seen["before"] || lastPos == nil {
+		select {
+		case p := <-proposalChan1:
+			for _, e := range p.Entities {
+				seen[string(e.Key)] = true
+			}
+		case pos := <-positionChan1:
+			lastPos = pos
+		case <-deadline:
+			t.Fatal("timed out waiting for initial proposal and position")
+		}
+	}
+
+	// Insert another row while phase 1 is running so the binlog advances
+	// past "before". Then collect the position after "during" commits.
+	db = createDB(t)
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, val) VALUES ('during', 'phase1');", table))
+	require.NoError(t, err)
+	db.Close()
+
+	// Collect until we've seen "during" AND received a position
+	// checkpoint emitted after it. OnXID sends the proposal first and
+	// then the position, so requiring a post-"during" position guarantees
+	// lastPos is past the "during" commit.
+	deadline = time.After(15 * time.Second)
+	seenDuring := false
+	posAfterDuring := false
+	for !seenDuring || !posAfterDuring {
+		select {
+		case p := <-proposalChan1:
+			for _, e := range p.Entities {
+				seen[string(e.Key)] = true
+				if string(e.Key) == "during" {
+					seenDuring = true
+				}
+			}
+		case pos := <-positionChan1:
+			lastPos = pos
+			if seenDuring {
+				posAfterDuring = true
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for 'during' proposal and position")
+		}
+	}
+
+	// Stop the first dialect.
+	cancel1()
+	require.NotEmpty(t, lastPos, "should have a checkpointed position")
+
+	// --- Phase 2: start new dialect from checkpointed position ---
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+
+	proposalChan2 := make(chan *cluster.Proposal, 10)
+	positionChan2 := make(chan cluster.Position, 10)
+
+	// Insert a new row before starting phase 2 — this is committed
+	// AFTER lastPos, so the dialect should pick it up via binlog.
+	db = createDB(t)
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, val) VALUES ('after', 'resumed');", table))
+	require.NoError(t, err)
+	db.Close()
+
+	dialect2 := &mysql.MySQLDialect{}
+	ingestErr := make(chan error, 1)
+	go func() {
+		ingestErr <- dialect2.Ingest(ctx2, config, lastPos, proposalChan2, positionChan2)
+	}()
+
+	// Collect: "after" should appear. "before" and "during" should NOT
+	// re-appear since they were committed before the checkpointed position.
+	deadline = time.After(15 * time.Second)
+	seen2 := make(map[string]bool)
+	for !seen2["after"] {
+		select {
+		case p := <-proposalChan2:
+			for _, e := range p.Entities {
+				seen2[string(e.Key)] = true
+			}
+		case <-positionChan2:
+		case <-deadline:
+			t.Fatal("timed out waiting for post-resume proposal")
+		}
+	}
+
+	require.False(t, seen2["before"],
+		"'before' should not re-appear when resuming from checkpointed position")
+	require.False(t, seen2["during"],
+		"'during' should not re-appear when resuming from checkpointed position")
+
+	cancel2()
+	select {
+	case err := <-ingestErr:
+		require.Nil(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Ingest did not exit after cancel")
+	}
+}
+
+// TestMysqlSnapshotOnFreshStart verifies that pre-existing rows are
+// delivered as proposals via the pure-SQL snapshot on a fresh start
+// (no saved position), and that binlog streaming picks up new changes
+// seamlessly afterward.
+func TestMysqlSnapshotOnFreshStart(t *testing.T) {
+	table := "snap_table"
+
+	db := createDB(t)
+	_, err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS `%s`", table))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf("CREATE TABLE `%s` (pk VARCHAR(32) NOT NULL, val TEXT, PRIMARY KEY (pk));", table))
+	require.NoError(t, err)
+
+	// Insert rows BEFORE starting the dialect — these must arrive via snapshot.
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, val) VALUES ('pre1', 'existing1');", table))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, val) VALUES ('pre2', 'existing2');", table))
+	require.NoError(t, err)
+	db.Close()
+
+	simpleType := &cluster.Type{ID: "snap", Name: "snap"}
+	config := &sql.Config{
+		Type: simpleType,
+		Mappings: []sql.Mapping{
+			{JsonName: "pk", SQLColumn: "pk"},
+			{JsonName: "val", SQLColumn: "val"},
+		},
+		PrimaryKey:       "pk",
+		ConnectionString: ingestURL,
+		Tables:           []string{table},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	proposalChan := make(chan *cluster.Proposal, 10)
+	positionChan := make(chan cluster.Position, 10)
+
+	dialect := &mysql.MySQLDialect{}
+	ingestErr := make(chan error, 1)
+	go func() {
+		ingestErr <- dialect.Ingest(ctx, config, nil, proposalChan, positionChan)
+	}()
+
+	// Collect snapshot entities — the 2 pre-existing rows.
+	deadline := time.After(15 * time.Second)
+	seen := make(map[string]*cluster.Entity)
+	for len(seen) < 2 {
+		select {
+		case p := <-proposalChan:
+			for _, e := range p.Entities {
+				seen[string(e.Key)] = e
+			}
+		case <-positionChan:
+		case <-deadline:
+			t.Fatalf("timed out waiting for snapshot entities; got %d", len(seen))
+		}
+	}
+
+	require.Contains(t, seen, "pre1")
+	require.Contains(t, seen, "pre2")
+
+	// Insert a new row to verify binlog streaming works after the snapshot.
+	db = createDB(t)
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, val) VALUES ('post1', 'streamed');", table))
+	require.NoError(t, err)
+	db.Close()
+
+	deadline = time.After(15 * time.Second)
+	for seen["post1"] == nil {
+		select {
+		case p := <-proposalChan:
+			for _, e := range p.Entities {
+				seen[string(e.Key)] = e
+			}
+		case <-positionChan:
+		case <-deadline:
+			t.Fatal("timed out waiting for streamed entity after snapshot")
+		}
+	}
+
+	require.NotNil(t, seen["post1"])
+
+	cancel()
+	select {
+	case err := <-ingestErr:
+		require.Nil(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Ingest did not exit after cancel")
 	}
 }

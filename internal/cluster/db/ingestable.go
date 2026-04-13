@@ -37,3 +37,11 @@ func (db *DB) ParseIngestable(mimeType string, data []byte) (string, cluster.Ing
 func (db *DB) Ingestables() ([]*cluster.Configuration, error) {
 	return db.storage.Ingestables()
 }
+
+func (db *DB) IngestableVersions(id string) ([]cluster.VersionInfo, error) {
+	return db.storage.IngestableVersions(id)
+}
+
+func (db *DB) IngestableVersion(id string, version uint64) (*cluster.Configuration, error) {
+	return db.storage.IngestableVersion(id, version)
+}

@@ -42,6 +42,33 @@ type FakeCluster struct {
 	closeReturnsOnCall map[int]struct {
 		result1 error
 	}
+	DatabaseVersionStub        func(string, uint64) (*cluster.Configuration, error)
+	databaseVersionMutex       sync.RWMutex
+	databaseVersionArgsForCall []struct {
+		arg1 string
+		arg2 uint64
+	}
+	databaseVersionReturns struct {
+		result1 *cluster.Configuration
+		result2 error
+	}
+	databaseVersionReturnsOnCall map[int]struct {
+		result1 *cluster.Configuration
+		result2 error
+	}
+	DatabaseVersionsStub        func(string) ([]cluster.VersionInfo, error)
+	databaseVersionsMutex       sync.RWMutex
+	databaseVersionsArgsForCall []struct {
+		arg1 string
+	}
+	databaseVersionsReturns struct {
+		result1 []cluster.VersionInfo
+		result2 error
+	}
+	databaseVersionsReturnsOnCall map[int]struct {
+		result1 []cluster.VersionInfo
+		result2 error
+	}
 	DatabasesStub        func() ([]*cluster.Configuration, error)
 	databasesMutex       sync.RWMutex
 	databasesArgsForCall []struct {
@@ -66,6 +93,33 @@ type FakeCluster struct {
 	}
 	ingestReturnsOnCall map[int]struct {
 		result1 error
+	}
+	IngestableVersionStub        func(string, uint64) (*cluster.Configuration, error)
+	ingestableVersionMutex       sync.RWMutex
+	ingestableVersionArgsForCall []struct {
+		arg1 string
+		arg2 uint64
+	}
+	ingestableVersionReturns struct {
+		result1 *cluster.Configuration
+		result2 error
+	}
+	ingestableVersionReturnsOnCall map[int]struct {
+		result1 *cluster.Configuration
+		result2 error
+	}
+	IngestableVersionsStub        func(string) ([]cluster.VersionInfo, error)
+	ingestableVersionsMutex       sync.RWMutex
+	ingestableVersionsArgsForCall []struct {
+		arg1 string
+	}
+	ingestableVersionsReturns struct {
+		result1 []cluster.VersionInfo
+		result2 error
+	}
+	ingestableVersionsReturnsOnCall map[int]struct {
+		result1 []cluster.VersionInfo
+		result2 error
 	}
 	IngestablesStub        func() ([]*cluster.Configuration, error)
 	ingestablesMutex       sync.RWMutex
@@ -188,6 +242,33 @@ type FakeCluster struct {
 	syncReturnsOnCall map[int]struct {
 		result1 error
 	}
+	SyncableVersionStub        func(string, uint64) (*cluster.Configuration, error)
+	syncableVersionMutex       sync.RWMutex
+	syncableVersionArgsForCall []struct {
+		arg1 string
+		arg2 uint64
+	}
+	syncableVersionReturns struct {
+		result1 *cluster.Configuration
+		result2 error
+	}
+	syncableVersionReturnsOnCall map[int]struct {
+		result1 *cluster.Configuration
+		result2 error
+	}
+	SyncableVersionsStub        func(string) ([]cluster.VersionInfo, error)
+	syncableVersionsMutex       sync.RWMutex
+	syncableVersionsArgsForCall []struct {
+		arg1 string
+	}
+	syncableVersionsReturns struct {
+		result1 []cluster.VersionInfo
+		result2 error
+	}
+	syncableVersionsReturnsOnCall map[int]struct {
+		result1 []cluster.VersionInfo
+		result2 error
+	}
 	SyncablesStub        func() ([]*cluster.Configuration, error)
 	syncablesMutex       sync.RWMutex
 	syncablesArgsForCall []struct {
@@ -226,6 +307,33 @@ type FakeCluster struct {
 	}
 	typeGraphReturnsOnCall map[int]struct {
 		result1 []cluster.TimePoint
+		result2 error
+	}
+	TypeVersionStub        func(string, uint64) (*cluster.Configuration, error)
+	typeVersionMutex       sync.RWMutex
+	typeVersionArgsForCall []struct {
+		arg1 string
+		arg2 uint64
+	}
+	typeVersionReturns struct {
+		result1 *cluster.Configuration
+		result2 error
+	}
+	typeVersionReturnsOnCall map[int]struct {
+		result1 *cluster.Configuration
+		result2 error
+	}
+	TypeVersionsStub        func(string) ([]cluster.VersionInfo, error)
+	typeVersionsMutex       sync.RWMutex
+	typeVersionsArgsForCall []struct {
+		arg1 string
+	}
+	typeVersionsReturns struct {
+		result1 []cluster.VersionInfo
+		result2 error
+	}
+	typeVersionsReturnsOnCall map[int]struct {
+		result1 []cluster.VersionInfo
 		result2 error
 	}
 	TypesStub        func() ([]*cluster.Configuration, error)
@@ -416,6 +524,135 @@ func (fake *FakeCluster) CloseReturnsOnCall(i int, result1 error) {
 	}{result1}
 }
 
+func (fake *FakeCluster) DatabaseVersion(arg1 string, arg2 uint64) (*cluster.Configuration, error) {
+	fake.databaseVersionMutex.Lock()
+	ret, specificReturn := fake.databaseVersionReturnsOnCall[len(fake.databaseVersionArgsForCall)]
+	fake.databaseVersionArgsForCall = append(fake.databaseVersionArgsForCall, struct {
+		arg1 string
+		arg2 uint64
+	}{arg1, arg2})
+	stub := fake.DatabaseVersionStub
+	fakeReturns := fake.databaseVersionReturns
+	fake.recordInvocation("DatabaseVersion", []interface{}{arg1, arg2})
+	fake.databaseVersionMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeCluster) DatabaseVersionCallCount() int {
+	fake.databaseVersionMutex.RLock()
+	defer fake.databaseVersionMutex.RUnlock()
+	return len(fake.databaseVersionArgsForCall)
+}
+
+func (fake *FakeCluster) DatabaseVersionCalls(stub func(string, uint64) (*cluster.Configuration, error)) {
+	fake.databaseVersionMutex.Lock()
+	defer fake.databaseVersionMutex.Unlock()
+	fake.DatabaseVersionStub = stub
+}
+
+func (fake *FakeCluster) DatabaseVersionArgsForCall(i int) (string, uint64) {
+	fake.databaseVersionMutex.RLock()
+	defer fake.databaseVersionMutex.RUnlock()
+	argsForCall := fake.databaseVersionArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2
+}
+
+func (fake *FakeCluster) DatabaseVersionReturns(result1 *cluster.Configuration, result2 error) {
+	fake.databaseVersionMutex.Lock()
+	defer fake.databaseVersionMutex.Unlock()
+	fake.DatabaseVersionStub = nil
+	fake.databaseVersionReturns = struct {
+		result1 *cluster.Configuration
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) DatabaseVersionReturnsOnCall(i int, result1 *cluster.Configuration, result2 error) {
+	fake.databaseVersionMutex.Lock()
+	defer fake.databaseVersionMutex.Unlock()
+	fake.DatabaseVersionStub = nil
+	if fake.databaseVersionReturnsOnCall == nil {
+		fake.databaseVersionReturnsOnCall = make(map[int]struct {
+			result1 *cluster.Configuration
+			result2 error
+		})
+	}
+	fake.databaseVersionReturnsOnCall[i] = struct {
+		result1 *cluster.Configuration
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) DatabaseVersions(arg1 string) ([]cluster.VersionInfo, error) {
+	fake.databaseVersionsMutex.Lock()
+	ret, specificReturn := fake.databaseVersionsReturnsOnCall[len(fake.databaseVersionsArgsForCall)]
+	fake.databaseVersionsArgsForCall = append(fake.databaseVersionsArgsForCall, struct {
+		arg1 string
+	}{arg1})
+	stub := fake.DatabaseVersionsStub
+	fakeReturns := fake.databaseVersionsReturns
+	fake.recordInvocation("DatabaseVersions", []interface{}{arg1})
+	fake.databaseVersionsMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeCluster) DatabaseVersionsCallCount() int {
+	fake.databaseVersionsMutex.RLock()
+	defer fake.databaseVersionsMutex.RUnlock()
+	return len(fake.databaseVersionsArgsForCall)
+}
+
+func (fake *FakeCluster) DatabaseVersionsCalls(stub func(string) ([]cluster.VersionInfo, error)) {
+	fake.databaseVersionsMutex.Lock()
+	defer fake.databaseVersionsMutex.Unlock()
+	fake.DatabaseVersionsStub = stub
+}
+
+func (fake *FakeCluster) DatabaseVersionsArgsForCall(i int) string {
+	fake.databaseVersionsMutex.RLock()
+	defer fake.databaseVersionsMutex.RUnlock()
+	argsForCall := fake.databaseVersionsArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeCluster) DatabaseVersionsReturns(result1 []cluster.VersionInfo, result2 error) {
+	fake.databaseVersionsMutex.Lock()
+	defer fake.databaseVersionsMutex.Unlock()
+	fake.DatabaseVersionsStub = nil
+	fake.databaseVersionsReturns = struct {
+		result1 []cluster.VersionInfo
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) DatabaseVersionsReturnsOnCall(i int, result1 []cluster.VersionInfo, result2 error) {
+	fake.databaseVersionsMutex.Lock()
+	defer fake.databaseVersionsMutex.Unlock()
+	fake.DatabaseVersionsStub = nil
+	if fake.databaseVersionsReturnsOnCall == nil {
+		fake.databaseVersionsReturnsOnCall = make(map[int]struct {
+			result1 []cluster.VersionInfo
+			result2 error
+		})
+	}
+	fake.databaseVersionsReturnsOnCall[i] = struct {
+		result1 []cluster.VersionInfo
+		result2 error
+	}{result1, result2}
+}
+
 func (fake *FakeCluster) Databases() ([]*cluster.Configuration, error) {
 	fake.databasesMutex.Lock()
 	ret, specificReturn := fake.databasesReturnsOnCall[len(fake.databasesArgsForCall)]
@@ -533,6 +770,135 @@ func (fake *FakeCluster) IngestReturnsOnCall(i int, result1 error) {
 	fake.ingestReturnsOnCall[i] = struct {
 		result1 error
 	}{result1}
+}
+
+func (fake *FakeCluster) IngestableVersion(arg1 string, arg2 uint64) (*cluster.Configuration, error) {
+	fake.ingestableVersionMutex.Lock()
+	ret, specificReturn := fake.ingestableVersionReturnsOnCall[len(fake.ingestableVersionArgsForCall)]
+	fake.ingestableVersionArgsForCall = append(fake.ingestableVersionArgsForCall, struct {
+		arg1 string
+		arg2 uint64
+	}{arg1, arg2})
+	stub := fake.IngestableVersionStub
+	fakeReturns := fake.ingestableVersionReturns
+	fake.recordInvocation("IngestableVersion", []interface{}{arg1, arg2})
+	fake.ingestableVersionMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeCluster) IngestableVersionCallCount() int {
+	fake.ingestableVersionMutex.RLock()
+	defer fake.ingestableVersionMutex.RUnlock()
+	return len(fake.ingestableVersionArgsForCall)
+}
+
+func (fake *FakeCluster) IngestableVersionCalls(stub func(string, uint64) (*cluster.Configuration, error)) {
+	fake.ingestableVersionMutex.Lock()
+	defer fake.ingestableVersionMutex.Unlock()
+	fake.IngestableVersionStub = stub
+}
+
+func (fake *FakeCluster) IngestableVersionArgsForCall(i int) (string, uint64) {
+	fake.ingestableVersionMutex.RLock()
+	defer fake.ingestableVersionMutex.RUnlock()
+	argsForCall := fake.ingestableVersionArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2
+}
+
+func (fake *FakeCluster) IngestableVersionReturns(result1 *cluster.Configuration, result2 error) {
+	fake.ingestableVersionMutex.Lock()
+	defer fake.ingestableVersionMutex.Unlock()
+	fake.IngestableVersionStub = nil
+	fake.ingestableVersionReturns = struct {
+		result1 *cluster.Configuration
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) IngestableVersionReturnsOnCall(i int, result1 *cluster.Configuration, result2 error) {
+	fake.ingestableVersionMutex.Lock()
+	defer fake.ingestableVersionMutex.Unlock()
+	fake.IngestableVersionStub = nil
+	if fake.ingestableVersionReturnsOnCall == nil {
+		fake.ingestableVersionReturnsOnCall = make(map[int]struct {
+			result1 *cluster.Configuration
+			result2 error
+		})
+	}
+	fake.ingestableVersionReturnsOnCall[i] = struct {
+		result1 *cluster.Configuration
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) IngestableVersions(arg1 string) ([]cluster.VersionInfo, error) {
+	fake.ingestableVersionsMutex.Lock()
+	ret, specificReturn := fake.ingestableVersionsReturnsOnCall[len(fake.ingestableVersionsArgsForCall)]
+	fake.ingestableVersionsArgsForCall = append(fake.ingestableVersionsArgsForCall, struct {
+		arg1 string
+	}{arg1})
+	stub := fake.IngestableVersionsStub
+	fakeReturns := fake.ingestableVersionsReturns
+	fake.recordInvocation("IngestableVersions", []interface{}{arg1})
+	fake.ingestableVersionsMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeCluster) IngestableVersionsCallCount() int {
+	fake.ingestableVersionsMutex.RLock()
+	defer fake.ingestableVersionsMutex.RUnlock()
+	return len(fake.ingestableVersionsArgsForCall)
+}
+
+func (fake *FakeCluster) IngestableVersionsCalls(stub func(string) ([]cluster.VersionInfo, error)) {
+	fake.ingestableVersionsMutex.Lock()
+	defer fake.ingestableVersionsMutex.Unlock()
+	fake.IngestableVersionsStub = stub
+}
+
+func (fake *FakeCluster) IngestableVersionsArgsForCall(i int) string {
+	fake.ingestableVersionsMutex.RLock()
+	defer fake.ingestableVersionsMutex.RUnlock()
+	argsForCall := fake.ingestableVersionsArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeCluster) IngestableVersionsReturns(result1 []cluster.VersionInfo, result2 error) {
+	fake.ingestableVersionsMutex.Lock()
+	defer fake.ingestableVersionsMutex.Unlock()
+	fake.IngestableVersionsStub = nil
+	fake.ingestableVersionsReturns = struct {
+		result1 []cluster.VersionInfo
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) IngestableVersionsReturnsOnCall(i int, result1 []cluster.VersionInfo, result2 error) {
+	fake.ingestableVersionsMutex.Lock()
+	defer fake.ingestableVersionsMutex.Unlock()
+	fake.IngestableVersionsStub = nil
+	if fake.ingestableVersionsReturnsOnCall == nil {
+		fake.ingestableVersionsReturnsOnCall = make(map[int]struct {
+			result1 []cluster.VersionInfo
+			result2 error
+		})
+	}
+	fake.ingestableVersionsReturnsOnCall[i] = struct {
+		result1 []cluster.VersionInfo
+		result2 error
+	}{result1, result2}
 }
 
 func (fake *FakeCluster) Ingestables() ([]*cluster.Configuration, error) {
@@ -1144,6 +1510,135 @@ func (fake *FakeCluster) SyncReturnsOnCall(i int, result1 error) {
 	}{result1}
 }
 
+func (fake *FakeCluster) SyncableVersion(arg1 string, arg2 uint64) (*cluster.Configuration, error) {
+	fake.syncableVersionMutex.Lock()
+	ret, specificReturn := fake.syncableVersionReturnsOnCall[len(fake.syncableVersionArgsForCall)]
+	fake.syncableVersionArgsForCall = append(fake.syncableVersionArgsForCall, struct {
+		arg1 string
+		arg2 uint64
+	}{arg1, arg2})
+	stub := fake.SyncableVersionStub
+	fakeReturns := fake.syncableVersionReturns
+	fake.recordInvocation("SyncableVersion", []interface{}{arg1, arg2})
+	fake.syncableVersionMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeCluster) SyncableVersionCallCount() int {
+	fake.syncableVersionMutex.RLock()
+	defer fake.syncableVersionMutex.RUnlock()
+	return len(fake.syncableVersionArgsForCall)
+}
+
+func (fake *FakeCluster) SyncableVersionCalls(stub func(string, uint64) (*cluster.Configuration, error)) {
+	fake.syncableVersionMutex.Lock()
+	defer fake.syncableVersionMutex.Unlock()
+	fake.SyncableVersionStub = stub
+}
+
+func (fake *FakeCluster) SyncableVersionArgsForCall(i int) (string, uint64) {
+	fake.syncableVersionMutex.RLock()
+	defer fake.syncableVersionMutex.RUnlock()
+	argsForCall := fake.syncableVersionArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2
+}
+
+func (fake *FakeCluster) SyncableVersionReturns(result1 *cluster.Configuration, result2 error) {
+	fake.syncableVersionMutex.Lock()
+	defer fake.syncableVersionMutex.Unlock()
+	fake.SyncableVersionStub = nil
+	fake.syncableVersionReturns = struct {
+		result1 *cluster.Configuration
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) SyncableVersionReturnsOnCall(i int, result1 *cluster.Configuration, result2 error) {
+	fake.syncableVersionMutex.Lock()
+	defer fake.syncableVersionMutex.Unlock()
+	fake.SyncableVersionStub = nil
+	if fake.syncableVersionReturnsOnCall == nil {
+		fake.syncableVersionReturnsOnCall = make(map[int]struct {
+			result1 *cluster.Configuration
+			result2 error
+		})
+	}
+	fake.syncableVersionReturnsOnCall[i] = struct {
+		result1 *cluster.Configuration
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) SyncableVersions(arg1 string) ([]cluster.VersionInfo, error) {
+	fake.syncableVersionsMutex.Lock()
+	ret, specificReturn := fake.syncableVersionsReturnsOnCall[len(fake.syncableVersionsArgsForCall)]
+	fake.syncableVersionsArgsForCall = append(fake.syncableVersionsArgsForCall, struct {
+		arg1 string
+	}{arg1})
+	stub := fake.SyncableVersionsStub
+	fakeReturns := fake.syncableVersionsReturns
+	fake.recordInvocation("SyncableVersions", []interface{}{arg1})
+	fake.syncableVersionsMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeCluster) SyncableVersionsCallCount() int {
+	fake.syncableVersionsMutex.RLock()
+	defer fake.syncableVersionsMutex.RUnlock()
+	return len(fake.syncableVersionsArgsForCall)
+}
+
+func (fake *FakeCluster) SyncableVersionsCalls(stub func(string) ([]cluster.VersionInfo, error)) {
+	fake.syncableVersionsMutex.Lock()
+	defer fake.syncableVersionsMutex.Unlock()
+	fake.SyncableVersionsStub = stub
+}
+
+func (fake *FakeCluster) SyncableVersionsArgsForCall(i int) string {
+	fake.syncableVersionsMutex.RLock()
+	defer fake.syncableVersionsMutex.RUnlock()
+	argsForCall := fake.syncableVersionsArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeCluster) SyncableVersionsReturns(result1 []cluster.VersionInfo, result2 error) {
+	fake.syncableVersionsMutex.Lock()
+	defer fake.syncableVersionsMutex.Unlock()
+	fake.SyncableVersionsStub = nil
+	fake.syncableVersionsReturns = struct {
+		result1 []cluster.VersionInfo
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) SyncableVersionsReturnsOnCall(i int, result1 []cluster.VersionInfo, result2 error) {
+	fake.syncableVersionsMutex.Lock()
+	defer fake.syncableVersionsMutex.Unlock()
+	fake.SyncableVersionsStub = nil
+	if fake.syncableVersionsReturnsOnCall == nil {
+		fake.syncableVersionsReturnsOnCall = make(map[int]struct {
+			result1 []cluster.VersionInfo
+			result2 error
+		})
+	}
+	fake.syncableVersionsReturnsOnCall[i] = struct {
+		result1 []cluster.VersionInfo
+		result2 error
+	}{result1, result2}
+}
+
 func (fake *FakeCluster) Syncables() ([]*cluster.Configuration, error) {
 	fake.syncablesMutex.Lock()
 	ret, specificReturn := fake.syncablesReturnsOnCall[len(fake.syncablesArgsForCall)]
@@ -1330,6 +1825,135 @@ func (fake *FakeCluster) TypeGraphReturnsOnCall(i int, result1 []cluster.TimePoi
 	}{result1, result2}
 }
 
+func (fake *FakeCluster) TypeVersion(arg1 string, arg2 uint64) (*cluster.Configuration, error) {
+	fake.typeVersionMutex.Lock()
+	ret, specificReturn := fake.typeVersionReturnsOnCall[len(fake.typeVersionArgsForCall)]
+	fake.typeVersionArgsForCall = append(fake.typeVersionArgsForCall, struct {
+		arg1 string
+		arg2 uint64
+	}{arg1, arg2})
+	stub := fake.TypeVersionStub
+	fakeReturns := fake.typeVersionReturns
+	fake.recordInvocation("TypeVersion", []interface{}{arg1, arg2})
+	fake.typeVersionMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeCluster) TypeVersionCallCount() int {
+	fake.typeVersionMutex.RLock()
+	defer fake.typeVersionMutex.RUnlock()
+	return len(fake.typeVersionArgsForCall)
+}
+
+func (fake *FakeCluster) TypeVersionCalls(stub func(string, uint64) (*cluster.Configuration, error)) {
+	fake.typeVersionMutex.Lock()
+	defer fake.typeVersionMutex.Unlock()
+	fake.TypeVersionStub = stub
+}
+
+func (fake *FakeCluster) TypeVersionArgsForCall(i int) (string, uint64) {
+	fake.typeVersionMutex.RLock()
+	defer fake.typeVersionMutex.RUnlock()
+	argsForCall := fake.typeVersionArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2
+}
+
+func (fake *FakeCluster) TypeVersionReturns(result1 *cluster.Configuration, result2 error) {
+	fake.typeVersionMutex.Lock()
+	defer fake.typeVersionMutex.Unlock()
+	fake.TypeVersionStub = nil
+	fake.typeVersionReturns = struct {
+		result1 *cluster.Configuration
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) TypeVersionReturnsOnCall(i int, result1 *cluster.Configuration, result2 error) {
+	fake.typeVersionMutex.Lock()
+	defer fake.typeVersionMutex.Unlock()
+	fake.TypeVersionStub = nil
+	if fake.typeVersionReturnsOnCall == nil {
+		fake.typeVersionReturnsOnCall = make(map[int]struct {
+			result1 *cluster.Configuration
+			result2 error
+		})
+	}
+	fake.typeVersionReturnsOnCall[i] = struct {
+		result1 *cluster.Configuration
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) TypeVersions(arg1 string) ([]cluster.VersionInfo, error) {
+	fake.typeVersionsMutex.Lock()
+	ret, specificReturn := fake.typeVersionsReturnsOnCall[len(fake.typeVersionsArgsForCall)]
+	fake.typeVersionsArgsForCall = append(fake.typeVersionsArgsForCall, struct {
+		arg1 string
+	}{arg1})
+	stub := fake.TypeVersionsStub
+	fakeReturns := fake.typeVersionsReturns
+	fake.recordInvocation("TypeVersions", []interface{}{arg1})
+	fake.typeVersionsMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeCluster) TypeVersionsCallCount() int {
+	fake.typeVersionsMutex.RLock()
+	defer fake.typeVersionsMutex.RUnlock()
+	return len(fake.typeVersionsArgsForCall)
+}
+
+func (fake *FakeCluster) TypeVersionsCalls(stub func(string) ([]cluster.VersionInfo, error)) {
+	fake.typeVersionsMutex.Lock()
+	defer fake.typeVersionsMutex.Unlock()
+	fake.TypeVersionsStub = stub
+}
+
+func (fake *FakeCluster) TypeVersionsArgsForCall(i int) string {
+	fake.typeVersionsMutex.RLock()
+	defer fake.typeVersionsMutex.RUnlock()
+	argsForCall := fake.typeVersionsArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeCluster) TypeVersionsReturns(result1 []cluster.VersionInfo, result2 error) {
+	fake.typeVersionsMutex.Lock()
+	defer fake.typeVersionsMutex.Unlock()
+	fake.TypeVersionsStub = nil
+	fake.typeVersionsReturns = struct {
+		result1 []cluster.VersionInfo
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) TypeVersionsReturnsOnCall(i int, result1 []cluster.VersionInfo, result2 error) {
+	fake.typeVersionsMutex.Lock()
+	defer fake.typeVersionsMutex.Unlock()
+	fake.TypeVersionsStub = nil
+	if fake.typeVersionsReturnsOnCall == nil {
+		fake.typeVersionsReturnsOnCall = make(map[int]struct {
+			result1 []cluster.VersionInfo
+			result2 error
+		})
+	}
+	fake.typeVersionsReturnsOnCall[i] = struct {
+		result1 []cluster.VersionInfo
+		result2 error
+	}{result1, result2}
+}
+
 func (fake *FakeCluster) Types() ([]*cluster.Configuration, error) {
 	fake.typesMutex.Lock()
 	ret, specificReturn := fake.typesReturnsOnCall[len(fake.typesArgsForCall)]
@@ -1397,10 +2021,18 @@ func (fake *FakeCluster) Invocations() map[string][][]interface{} {
 	defer fake.appliedIndexMutex.RUnlock()
 	fake.closeMutex.RLock()
 	defer fake.closeMutex.RUnlock()
+	fake.databaseVersionMutex.RLock()
+	defer fake.databaseVersionMutex.RUnlock()
+	fake.databaseVersionsMutex.RLock()
+	defer fake.databaseVersionsMutex.RUnlock()
 	fake.databasesMutex.RLock()
 	defer fake.databasesMutex.RUnlock()
 	fake.ingestMutex.RLock()
 	defer fake.ingestMutex.RUnlock()
+	fake.ingestableVersionMutex.RLock()
+	defer fake.ingestableVersionMutex.RUnlock()
+	fake.ingestableVersionsMutex.RLock()
+	defer fake.ingestableVersionsMutex.RUnlock()
 	fake.ingestablesMutex.RLock()
 	defer fake.ingestablesMutex.RUnlock()
 	fake.leaderMutex.RLock()
@@ -1421,12 +2053,20 @@ func (fake *FakeCluster) Invocations() map[string][][]interface{} {
 	defer fake.proposeTypeMutex.RUnlock()
 	fake.syncMutex.RLock()
 	defer fake.syncMutex.RUnlock()
+	fake.syncableVersionMutex.RLock()
+	defer fake.syncableVersionMutex.RUnlock()
+	fake.syncableVersionsMutex.RLock()
+	defer fake.syncableVersionsMutex.RUnlock()
 	fake.syncablesMutex.RLock()
 	defer fake.syncablesMutex.RUnlock()
 	fake.typeMutex.RLock()
 	defer fake.typeMutex.RUnlock()
 	fake.typeGraphMutex.RLock()
 	defer fake.typeGraphMutex.RUnlock()
+	fake.typeVersionMutex.RLock()
+	defer fake.typeVersionMutex.RUnlock()
+	fake.typeVersionsMutex.RLock()
+	defer fake.typeVersionsMutex.RUnlock()
 	fake.typesMutex.RLock()
 	defer fake.typesMutex.RUnlock()
 	copiedInvocations := map[string][][]interface{}{}

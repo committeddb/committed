@@ -21,13 +21,9 @@ func (s *Storage) handleIngestable(e *cluster.Entity) error {
 	}
 }
 
-// saveIngestable persists an ingestable Configuration to bbolt and then
-// notifies the consumer channel. See saveSyncable for the rationale on why
-// the channel send happens outside the bbolt Update closure.
-//
-// Idempotency on restart depends on the persisted appliedIndex (see
-// wal.Storage.ApplyCommitted). Without it, replay would re-spawn a worker
-// for the same ID — see .claude-scratch/tickets/worker-registry-by-id.md.
+// saveIngestable persists an ingestable Configuration as a new version in
+// bbolt and then notifies the consumer channel. See saveSyncable for the
+// rationale on why the channel send happens outside the bbolt Update closure.
 func (s *Storage) saveIngestable(t *cluster.Configuration) error {
 	var ingestable cluster.Ingestable
 	err := s.keyValueStorage.Update(func(tx *bolt.Tx) error {
@@ -46,8 +42,8 @@ func (s *Storage) saveIngestable(t *cluster.Configuration) error {
 		}
 		ingestable = parsed
 
-		if err := b.Put([]byte(t.ID), bs); err != nil {
-			return fmt.Errorf("[wal.ingestable] put: %w", err)
+		if _, err := putVersioned(b, []byte(t.ID), bs); err != nil {
+			return fmt.Errorf("[wal.ingestable] putVersioned: %w", err)
 		}
 
 		return nil
@@ -69,8 +65,7 @@ func (s *Storage) deleteIngestable(id []byte) error {
 		if b == nil {
 			return ErrBucketMissing
 		}
-		err := b.Delete(id)
-		if err != nil {
+		if err := deleteVersioned(b, id); err != nil {
 			return err
 		}
 
@@ -88,22 +83,14 @@ func (s *Storage) Ingestables() ([]*cluster.Configuration, error) {
 			return ErrBucketMissing
 		}
 
-		err := b.ForEach(func(k, v []byte) error {
+		return forEachCurrent(b, func(id, data []byte) error {
 			cfg := &cluster.Configuration{}
-			err := cfg.Unmarshal(v)
-			if err != nil {
+			if err := cfg.Unmarshal(data); err != nil {
 				return err
 			}
-
 			cfgs = append(cfgs, cfg)
-
 			return nil
 		})
-		if err != nil {
-			return err
-		}
-
-		return nil
 	})
 
 	if err != nil {
@@ -111,4 +98,37 @@ func (s *Storage) Ingestables() ([]*cluster.Configuration, error) {
 	}
 
 	return cfgs, nil
+}
+
+func (s *Storage) IngestableVersions(id string) ([]cluster.VersionInfo, error) {
+	var versions []cluster.VersionInfo
+	err := s.keyValueStorage.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(ingestableBucket)
+		if b == nil {
+			return ErrBucketMissing
+		}
+		var err error
+		versions, err = listVersions(b, []byte(id))
+		return err
+	})
+	return versions, err
+}
+
+func (s *Storage) IngestableVersion(id string, version uint64) (*cluster.Configuration, error) {
+	cfg := &cluster.Configuration{}
+	err := s.keyValueStorage.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(ingestableBucket)
+		if b == nil {
+			return ErrBucketMissing
+		}
+		data, err := getVersion(b, []byte(id), version)
+		if err != nil {
+			return err
+		}
+		return cfg.Unmarshal(data)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return cfg, nil
 }

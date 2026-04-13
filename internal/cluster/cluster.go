@@ -32,6 +32,14 @@ type Cluster interface {
 	Ingestables() ([]*Configuration, error)
 	Syncables() ([]*Configuration, error)
 	Types() ([]*Configuration, error)
+	DatabaseVersions(id string) ([]VersionInfo, error)
+	DatabaseVersion(id string, version uint64) (*Configuration, error)
+	IngestableVersions(id string) ([]VersionInfo, error)
+	IngestableVersion(id string, version uint64) (*Configuration, error)
+	SyncableVersions(id string) ([]VersionInfo, error)
+	SyncableVersion(id string, version uint64) (*Configuration, error)
+	TypeVersions(id string) ([]VersionInfo, error)
+	TypeVersion(id string, version uint64) (*Configuration, error)
 	// Leader returns the raft node ID this cluster believes is the current
 	// leader, or 0 if no leader is known. Used by the /ready HTTP probe to
 	// gate readiness on raft having elected a leader.

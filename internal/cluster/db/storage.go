@@ -39,4 +39,12 @@ type Storage interface {
 	Ingestables() ([]*cluster.Configuration, error)
 	Syncables() ([]*cluster.Configuration, error)
 	Types() ([]*cluster.Configuration, error)
+	DatabaseVersions(id string) ([]cluster.VersionInfo, error)
+	DatabaseVersion(id string, version uint64) (*cluster.Configuration, error)
+	IngestableVersions(id string) ([]cluster.VersionInfo, error)
+	IngestableVersion(id string, version uint64) (*cluster.Configuration, error)
+	SyncableVersions(id string) ([]cluster.VersionInfo, error)
+	SyncableVersion(id string, version uint64) (*cluster.Configuration, error)
+	TypeVersions(id string) ([]cluster.VersionInfo, error)
+	TypeVersion(id string, version uint64) (*cluster.Configuration, error)
 }
