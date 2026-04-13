@@ -30,6 +30,9 @@ test/bridge:
 test/e2e:
 	go test -v -p=1 "github.com/philborlin/committed/e2e"
 
+lint/openapi:
+	npx --yes @redocly/cli@latest lint api/openapi.yaml
+
 crosscompile:
 	@GOOS=darwin GOARCH=amd64 go build -o committed-darwin-amd64
 	@file committed-darwin-amd64

@@ -1,0 +1,873 @@
+openapi: 3.2.0
+info:
+  title: Committed API
+  version: 0.1.0
+  description: |
+    HTTP API for Committed — a distributed commit log database.
+
+    Committed exposes two primitives over HTTP:
+
+    - **write**: append proposals to topics (POST /proposal)
+    - **configure**: manage databases, ingestables, syncables, and types
+
+    The API is not a query interface. Reads are limited to proposal history
+    and configuration retrieval. For querying committed data, use a syncable
+    to replicate to an external database.
+
+    ## Authentication
+
+    When the server is started with `COMMITTED_API_TOKEN`, all endpoints
+    except `/health`, `/ready`, `/openapi.yaml`, and `/docs` require a
+    bearer token in the `Authorization` header. In development mode (no
+    token configured) no authentication is enforced.
+
+    ## Content types
+
+    Configuration bodies accept either `text/toml` (default) or
+    `application/json`. The server stores and returns the original bytes
+    unchanged; it is the client's responsibility to send a well-formed
+    document matching the declared content type.
+
+    ## Consistency
+
+    All `POST` proposals go through Raft consensus and return only after
+    the proposal has been committed. `GET` operations reflect the state
+    applied on the node serving the request, which may lag the leader by
+    a small number of applied entries.
+servers:
+  - url: /
+    description: Served from the same origin as this spec
+security:
+  - bearerAuth: []
+tags:
+  - name: health
+    description: Liveness and readiness probes
+  - name: meta
+    description: Spec and documentation endpoints
+  - name: database
+    description: Database connection configurations
+  - name: ingestable
+    description: Configurations for ingesting data from external sources
+  - name: syncable
+    description: Configurations for syncing data to external systems
+  - name: type
+    description: Schema and type definitions
+  - name: proposal
+    description: Append and read proposals from the commit log
+paths:
+  /health:
+    get:
+      tags: [health]
+      summary: Liveness probe
+      description: |
+        Always returns 200 if the HTTP server is accepting requests.
+        Intentionally does not check raft or apply state — a follower
+        that has lost quorum is still alive and restarting it will not
+        help.
+      operationId: getHealth
+      security: []
+      responses:
+        '200':
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /ready:
+    get:
+      tags: [health]
+      summary: Readiness probe
+      description: |
+        Returns 200 once raft has elected a leader AND the node has
+        applied at least one entry. Returns 503 otherwise. Orchestrators
+        should keep traffic away until this endpoint reports ready.
+      operationId: getReady
+      security: []
+      responses:
+        '200':
+          description: Node is ready to serve traffic
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+        '503':
+          description: Node is not ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+  /openapi.yaml:
+    get:
+      tags: [meta]
+      summary: OpenAPI specification
+      description: Returns this OpenAPI document as YAML.
+      operationId: getOpenAPISpec
+      security: []
+      responses:
+        '200':
+          description: The OpenAPI spec
+          content:
+            application/yaml:
+              schema:
+                type: string
+  /docs:
+    get:
+      tags: [meta]
+      summary: Swagger UI
+      description: Browsable HTML documentation for the API.
+      operationId: getDocs
+      security: []
+      responses:
+        '200':
+          description: Swagger UI HTML page
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /database:
+    get:
+      tags: [database]
+      summary: List all databases
+      operationId: getDatabases
+      responses:
+        '200':
+          description: All database configurations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ConfigurationResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /database/{id}:
+    post:
+      tags: [database]
+      summary: Create or update a database configuration
+      operationId: addDatabase
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      requestBody:
+        required: true
+        description: Database configuration as TOML or JSON.
+        content:
+          text/toml:
+            schema:
+              type: string
+          application/json:
+            schema:
+              type: string
+      responses:
+        '200':
+          $ref: '#/components/responses/ResourceIdPlainText'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /database/{id}/versions:
+    get:
+      tags: [database]
+      summary: List database configuration versions
+      operationId: getDatabaseVersions
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      responses:
+        '200':
+          description: Version history (newest first)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/VersionInfo'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /database/{id}/versions/{version}:
+    get:
+      tags: [database]
+      summary: Get a specific database configuration version
+      operationId: getDatabaseVersion
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+        - $ref: '#/components/parameters/VersionNumber'
+      responses:
+        '200':
+          description: |
+            The configuration at the requested version. Returned as a
+            single-element array for consistency with the list endpoint.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ConfigurationResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /database/{id}/rollback:
+    post:
+      tags: [database]
+      summary: Roll a database back to a previous version
+      description: |
+        Reads the configuration at version `to` and re-proposes it as a
+        new current version. The old versions remain in the history.
+      operationId: rollbackDatabase
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+        - $ref: '#/components/parameters/RollbackTo'
+      responses:
+        '200':
+          $ref: '#/components/responses/ResourceIdPlainText'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /ingestable:
+    get:
+      tags: [ingestable]
+      summary: List all ingestables
+      operationId: getIngestables
+      responses:
+        '200':
+          description: All ingestable configurations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ConfigurationResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /ingestable/{id}:
+    post:
+      tags: [ingestable]
+      summary: Create or update an ingestable configuration
+      operationId: addIngestable
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      requestBody:
+        required: true
+        description: Ingestable configuration as TOML or JSON.
+        content:
+          text/toml:
+            schema:
+              type: string
+          application/json:
+            schema:
+              type: string
+      responses:
+        '200':
+          $ref: '#/components/responses/ResourceIdPlainText'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /ingestable/{id}/versions:
+    get:
+      tags: [ingestable]
+      summary: List ingestable configuration versions
+      operationId: getIngestableVersions
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      responses:
+        '200':
+          description: Version history (newest first)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/VersionInfo'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /ingestable/{id}/versions/{version}:
+    get:
+      tags: [ingestable]
+      summary: Get a specific ingestable configuration version
+      operationId: getIngestableVersion
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+        - $ref: '#/components/parameters/VersionNumber'
+      responses:
+        '200':
+          description: |
+            The configuration at the requested version, returned as a
+            single-element array for consistency with the list endpoint.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ConfigurationResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /ingestable/{id}/rollback:
+    post:
+      tags: [ingestable]
+      summary: Roll an ingestable back to a previous version
+      operationId: rollbackIngestable
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+        - $ref: '#/components/parameters/RollbackTo'
+      responses:
+        '200':
+          $ref: '#/components/responses/ResourceIdPlainText'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /syncable:
+    get:
+      tags: [syncable]
+      summary: List all syncables
+      operationId: getSyncables
+      responses:
+        '200':
+          description: All syncable configurations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ConfigurationResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /syncable/{id}:
+    post:
+      tags: [syncable]
+      summary: Create or update a syncable configuration
+      operationId: addSyncable
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      requestBody:
+        required: true
+        description: Syncable configuration as TOML or JSON.
+        content:
+          text/toml:
+            schema:
+              type: string
+          application/json:
+            schema:
+              type: string
+      responses:
+        '200':
+          $ref: '#/components/responses/ResourceIdPlainText'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /syncable/{id}/versions:
+    get:
+      tags: [syncable]
+      summary: List syncable configuration versions
+      operationId: getSyncableVersions
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      responses:
+        '200':
+          description: Version history (newest first)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/VersionInfo'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /syncable/{id}/versions/{version}:
+    get:
+      tags: [syncable]
+      summary: Get a specific syncable configuration version
+      operationId: getSyncableVersion
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+        - $ref: '#/components/parameters/VersionNumber'
+      responses:
+        '200':
+          description: |
+            The configuration at the requested version, returned as a
+            single-element array for consistency with the list endpoint.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ConfigurationResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /syncable/{id}/rollback:
+    post:
+      tags: [syncable]
+      summary: Roll a syncable back to a previous version
+      operationId: rollbackSyncable
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+        - $ref: '#/components/parameters/RollbackTo'
+      responses:
+        '200':
+          $ref: '#/components/responses/ResourceIdPlainText'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /type:
+    get:
+      tags: [type]
+      summary: List all types
+      operationId: getTypes
+      responses:
+        '200':
+          description: All type configurations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ConfigurationResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /type/{id}:
+    get:
+      tags: [type]
+      summary: Get a type activity graph
+      description: |
+        Returns a time series of proposal counts for the given type over
+        the `[start, end]` window. This is the endpoint that powers the
+        type activity charts in the web UI.
+
+        Note: this endpoint does *not* return the type configuration
+        itself. Use `GET /type/{id}/versions/{version}` or the list
+        endpoint `GET /type` for configuration data.
+      operationId: getTypeGraph
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+        - name: start
+          in: query
+          required: true
+          description: Start of the time window (ISO 8601 date-time without subseconds, e.g. `2024-01-01T00:00:00Z`).
+          schema:
+            type: string
+            format: date-time
+        - name: end
+          in: query
+          required: true
+          description: End of the time window (ISO 8601 date-time without subseconds).
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Time series of proposal counts
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GetTypeGraphPoint'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [type]
+      summary: Create or update a type configuration
+      operationId: addType
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      requestBody:
+        required: true
+        description: Type configuration as TOML or JSON.
+        content:
+          text/toml:
+            schema:
+              type: string
+          application/json:
+            schema:
+              type: string
+      responses:
+        '200':
+          $ref: '#/components/responses/ResourceIdPlainText'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /type/{id}/versions:
+    get:
+      tags: [type]
+      summary: List type configuration versions
+      operationId: getTypeVersions
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      responses:
+        '200':
+          description: Version history (newest first)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/VersionInfo'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /type/{id}/versions/{version}:
+    get:
+      tags: [type]
+      summary: Get a specific type configuration version
+      operationId: getTypeVersion
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+        - $ref: '#/components/parameters/VersionNumber'
+      responses:
+        '200':
+          description: |
+            The type configuration at the requested version, returned as
+            a single-element array for consistency with the list endpoint.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ConfigurationResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /proposal:
+    get:
+      tags: [proposal]
+      summary: Read recent proposals
+      description: |
+        Returns the most recent proposals, newest first. If `type` is
+        provided, only proposals containing at least one entity of that
+        type are returned. `number` bounds the count; default is 10.
+      operationId: getProposals
+      parameters:
+        - name: type
+          in: query
+          required: false
+          description: Filter to proposals containing entities of this type ID.
+          schema:
+            type: string
+        - name: number
+          in: query
+          required: false
+          description: Maximum number of proposals to return.
+          schema:
+            type: integer
+            minimum: 1
+            default: 10
+      responses:
+        '200':
+          description: Proposals, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GetProposalResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [proposal]
+      summary: Append a proposal
+      description: |
+        Appends a new proposal containing one or more entities. All
+        entities in a single proposal share a single wall-clock timestamp
+        assigned by the server at submission time, so apply is
+        content-deterministic across the cluster.
+
+        If any referenced type has schema validation enabled and the
+        entity data does not match, the whole proposal is rejected with
+        400 `schema_validation_failed`.
+
+        Returns 200 with an empty body on success.
+      operationId: addProposal
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddProposalRequest'
+      responses:
+        '200':
+          description: Proposal accepted and committed
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Static bearer token configured via `COMMITTED_API_TOKEN`. If the
+        server was started without a token, authentication is disabled
+        and any `Authorization` header is ignored.
+
+  parameters:
+    ResourceId:
+      name: id
+      in: path
+      required: true
+      description: Resource identifier.
+      schema:
+        type: string
+        minLength: 1
+    VersionNumber:
+      name: version
+      in: path
+      required: true
+      description: Configuration version number (1-indexed, monotonic).
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    RollbackTo:
+      name: to
+      in: query
+      required: true
+      description: Version to roll back to.
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+
+  responses:
+    ResourceIdPlainText:
+      description: Resource ID as plain text
+      content:
+        text/plain:
+          schema:
+            type: string
+    Unauthorized:
+      description: Missing or invalid bearer token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    BadRequest:
+      description: Malformed request or invalid configuration
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: Resource or version not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    InternalError:
+      description: Server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          const: ok
+
+    ReadyResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, "not ready"]
+
+    ConfigurationResponse:
+      type: object
+      required: [id, name, mimeType, data]
+      description: |
+        A versioned configuration document. `data` contains the raw bytes
+        of the configuration as originally submitted, in the format
+        indicated by `mimeType` (typically `text/toml` or
+        `application/json`). `name` is currently always empty; it is
+        reserved for a future human-readable label.
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+          description: Human-readable label. Currently always empty; reserved.
+        mimeType:
+          type: string
+          examples: ["text/toml", "application/json"]
+        data:
+          type: string
+          description: Raw configuration bytes.
+
+    VersionInfo:
+      type: object
+      required: [version, current]
+      properties:
+        version:
+          type: integer
+          format: int64
+          minimum: 1
+        current:
+          type: boolean
+          description: True if this is the current version.
+
+    GetTypeGraphPoint:
+      type: object
+      required: [x, y]
+      description: One bucket of a type activity time series.
+      properties:
+        x:
+          type: string
+          format: date-time
+          description: Bucket end timestamp.
+        y:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Proposal count in the bucket.
+
+    AddProposalRequest:
+      type: object
+      required: [entities]
+      properties:
+        entities:
+          type: array
+          items:
+            $ref: '#/components/schemas/AddEntityRequest'
+
+    AddEntityRequest:
+      type: object
+      required: [typeId, key, data]
+      properties:
+        typeId:
+          type: string
+          description: Type ID this entity belongs to.
+        key:
+          type: string
+          description: Entity key (unique within a type).
+        data:
+          description: |
+            Entity data as an arbitrary JSON value. If the target type has
+            schema validation enabled the data must match the schema.
+
+    GetProposalResponse:
+      type: object
+      required: [entities]
+      properties:
+        entities:
+          type: array
+          items:
+            $ref: '#/components/schemas/GetProposalEntityResponse'
+
+    GetProposalEntityResponse:
+      type: object
+      required: [typeId, typeName, key, data]
+      properties:
+        typeId:
+          type: string
+        typeName:
+          type: string
+        key:
+          type: string
+        data:
+          type: string
+          description: Entity data as a string (the bytes originally submitted).
+
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      description: Uniform shape for all non-2xx responses.
+      properties:
+        code:
+          type: string
+          description: Stable machine-readable error code.
+          examples: ["unauthorized", "invalid_config", "not_found", "internal_error"]
+        message:
+          type: string
+          description: Human-readable, safe-to-display message.
+        details:
+          description: Optional structured details (e.g. per-field validation errors).
