@@ -33,6 +33,14 @@ type options struct {
 	tickInterval time.Duration
 	logger       *zap.Logger
 	metrics      *metrics.Metrics
+	// transportWrapper, if non-nil, is applied to the Transport that
+	// startRaft constructs via httptransport.New, and the returned value
+	// is used in place of the original. Test-only hook set via
+	// WithTransportWrapperForTest (export_test.go) so the adversarial
+	// suite can inject fault-injection wrappers around the real transport
+	// without forking a parallel constructor path. Production callers
+	// leave this nil and get the plain HttpTransport.
+	transportWrapper func(Transport) Transport
 }
 
 func defaultOptions() options {

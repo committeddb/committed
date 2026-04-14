@@ -275,6 +275,38 @@ func lastIndex(t *testing.T, r *Raft) uint64 {
 // slower multiNodeTickInterval so the HTTP-transported heartbeats keep up
 // with the election timeout.
 func createRafts(replicas int) Rafts {
+	rafts, _ := buildRafts(replicas, nil)
+	return rafts
+}
+
+// createFaultyRafts builds a `replicas`-node cluster like createRafts, but
+// additionally constructs a FaultyCluster and wraps every node's transport
+// with a FaultyTransport registered in it. Returns both so the caller can
+// call cluster.Partition / cluster.Heal directly.
+//
+// The peer set is determined inside this function (via pickFreePorts), so
+// the FaultyCluster must be constructed here too — callers can't build one
+// ahead of time because they don't know the URLs yet.
+func createFaultyRafts(replicas int) (Rafts, *FaultyCluster) {
+	return buildRafts(replicas, newFaultyCluster)
+}
+
+// newFaultyCluster is a factory used by buildRafts when the caller asks for
+// a faulty cluster. Kept as a function pointer rather than a boolean so the
+// buildRafts signature stays narrow — if a future helper wants a different
+// cluster-wrapper shape (e.g., a latency-only wrapper), it plugs in the
+// same way.
+func newFaultyCluster(peers []raft.Peer) *FaultyCluster {
+	return NewFaultyCluster(peers)
+}
+
+// buildRafts is the internal constructor shared by createRafts and
+// createFaultyRafts. When clusterFactory is nil, it behaves exactly like
+// the legacy createRafts — no FaultyCluster is attached, no transport
+// wrapping happens, and the returned cluster pointer is nil. When non-nil,
+// it builds a FaultyCluster from the peer set and threads Wrap(id) into
+// each node via WithTransportWrapperForTest.
+func buildRafts(replicas int, clusterFactory func([]raft.Peer) *FaultyCluster) (Rafts, *FaultyCluster) {
 	tick := testTickInterval
 	if replicas > 1 {
 		tick = multiNodeTickInterval
@@ -295,13 +327,18 @@ func createRafts(replicas int) Rafts {
 		}
 	}
 
+	var cluster *FaultyCluster
+	if clusterFactory != nil {
+		cluster = clusterFactory(peers)
+	}
+
 	var rafts Rafts
 	for _, p := range peers {
 		s := NewMemoryStorage()
-		rafts = append(rafts, createRaft(p.ID, peers, s, tick))
+		rafts = append(rafts, createRaft(p.ID, peers, s, tick, cluster))
 	}
 
-	return rafts
+	return rafts, cluster
 }
 
 // portCounter is bumped per port allocation so successive calls within the
@@ -338,26 +375,56 @@ func pickFreePorts(n int) []int {
 	return ports
 }
 
-func createRaft(id uint64, peers []raft.Peer, s db.Storage, tickInterval time.Duration) *Raft {
+// createRaft builds a single *Raft. When cluster is non-nil, the raft is
+// constructed with WithTransportWrapperForTest(cluster.Wrap(id)) so the
+// node's transport becomes a FaultyTransport registered with the cluster.
+// When cluster is nil, the raft uses the plain HttpTransport (same as the
+// pre-adversarial-suite behaviour).
+//
+// The cluster reference is retained on the returned *Raft so Restart can
+// re-wrap after swapping the underlying db.Raft — without the reference,
+// a restarted node would come back up with a plain transport and
+// cluster.Partition would silently stop affecting it.
+func createRaft(id uint64, peers []raft.Peer, s db.Storage, tickInterval time.Duration, cluster *FaultyCluster) *Raft {
 	proposeC := make(chan []byte)
 	confChangeC := make(chan raftpb.ConfChange)
 
-	commitC, errorC, r := db.NewRaft(id, peers, s, proposeC, confChangeC, db.WithTickInterval(tickInterval))
+	opts := []db.Option{db.WithTickInterval(tickInterval)}
+	if cluster != nil {
+		opts = append(opts, db.WithTransportWrapperForTest(cluster.Wrap(id)))
+	}
+
+	commitC, errorC, r := db.NewRaft(id, peers, s, proposeC, confChangeC, opts...)
 
 	return &Raft{
-		storage:      s,
-		commitC:      commitC,
-		errorC:       errorC,
-		raft:         r,
-		peers:        peers,
-		proposeC:     proposeC,
-		confChangeC:  confChangeC,
-		id:           id,
-		tickInterval: tickInterval,
+		storage:       s,
+		commitC:       commitC,
+		errorC:        errorC,
+		raft:          r,
+		peers:         peers,
+		proposeC:      proposeC,
+		confChangeC:   confChangeC,
+		id:            id,
+		tickInterval:  tickInterval,
+		faultyCluster: cluster,
 	}
 }
 
 type Raft struct {
+	// mu guards the swap-on-Restart fields (storage, commitC, errorC,
+	// raft, proposeC, confChangeC, peers). Restart() rebuilds the
+	// underlying db.Raft and reassigns these fields, which races with
+	// concurrent readers — notably the adversarial suite's flap
+	// scenario where a background proposer goroutine calls ents() and
+	// proposeC send while the main goroutine kills + restarts the
+	// leader. A RWMutex keeps readers cheap (RLock in ents, Leader,
+	// etc.) while serialising the one Restart writer.
+	//
+	// faultyCluster, id, and tickInterval don't change across Restart
+	// so they don't need the lock, but including them keeps the struct
+	// cohesive — an explicit accessor for each is an unnecessary
+	// indirection.
+	mu           sync.RWMutex
 	storage      db.Storage
 	peers        []raft.Peer
 	commitC      <-chan []byte
@@ -367,28 +434,64 @@ type Raft struct {
 	confChangeC  chan<- raftpb.ConfChange
 	id           uint64
 	tickInterval time.Duration
+	// faultyCluster is nil unless this Raft was built via createFaultyRafts.
+	// Kept here so Restart() can pass the cluster back through to
+	// createRaft, re-wrapping the new db.Raft's transport with a fresh
+	// FaultyTransport registered in the same cluster. Without this,
+	// Restart would come back up with a plain transport and any
+	// subsequent cluster.Partition would silently skip this node.
+	faultyCluster *FaultyCluster
 }
 
 // Leader returns the node ID this Raft believes is the current leader, or
 // 0 if no leader is known. Thin pass-through to the underlying db.Raft so
 // tests can poll for cluster readiness without touching internals.
 func (rs *Raft) Leader() uint64 {
-	return rs.raft.Leader()
+	rs.mu.RLock()
+	r := rs.raft
+	rs.mu.RUnlock()
+	return r.Leader()
 }
 
 // Close shuts down the underlying db.Raft. db.Raft.Close is idempotent so
 // it's safe to call from both Restart and Rafts.Close.
 func (rs *Raft) Close() error {
-	return rs.raft.Close()
+	rs.mu.RLock()
+	r := rs.raft
+	rs.mu.RUnlock()
+	return r.Close()
 }
 
 func (rs *Raft) Restart() error {
-	err := rs.raft.Close()
-	if err != nil {
+	// Close the current underlying db.Raft before we build a replacement.
+	// We hold only the RLock to read `rs.raft` — Close itself is
+	// idempotent and thread-safe, and grabbing the write lock here would
+	// deadlock against any in-flight ents() / proposeC readers that
+	// also need the RLock.
+	rs.mu.RLock()
+	old := rs.raft
+	storage := rs.storage
+	peers := rs.peers
+	id := rs.id
+	tick := rs.tickInterval
+	fc := rs.faultyCluster
+	rs.mu.RUnlock()
+
+	if err := old.Close(); err != nil {
 		return err
 	}
 
-	r := createRaft(rs.id, rs.peers, rs.storage, rs.tickInterval)
+	// Pass the original FaultyCluster back in so the restarted node comes
+	// back up with a fresh FaultyTransport registered against the same
+	// cluster. FaultyCluster.Wrap overwrites the old (id → transport)
+	// entry, so post-restart partitions target the new transport and no
+	// stale pointer leaks from the pre-close transport.
+	r := createRaft(id, peers, storage, tick, fc)
+
+	// Swap the new fields in under the write lock. Concurrent readers
+	// (ents, Leader, Close) see either the old complete state or the
+	// new complete state, never a torn mixture.
+	rs.mu.Lock()
 	rs.storage = r.storage
 	rs.peers = r.peers
 	rs.commitC = r.commitC
@@ -397,17 +500,28 @@ func (rs *Raft) Restart() error {
 	rs.proposeC = r.proposeC
 	rs.confChangeC = r.confChangeC
 	rs.id = r.id
+	rs.faultyCluster = r.faultyCluster
+	rs.mu.Unlock()
 
 	return nil
 }
 
 func (rs *Raft) ents() ([]raftpb.Entry, error) {
-	fi, err := rs.storage.FirstIndex()
+	// Snapshot the storage pointer under the RLock so a concurrent
+	// Restart (which swaps rs.storage) doesn't interleave the field
+	// reassignment with our reads. The actual Storage implementation
+	// has its own internal synchronisation for FirstIndex/LastIndex/
+	// Entries.
+	rs.mu.RLock()
+	s := rs.storage
+	rs.mu.RUnlock()
+
+	fi, err := s.FirstIndex()
 	if err != nil {
 		return nil, err
 	}
 
-	li, err := rs.storage.LastIndex()
+	li, err := s.LastIndex()
 	if err != nil {
 		return nil, err
 	}
@@ -415,7 +529,7 @@ func (rs *Raft) ents() ([]raftpb.Entry, error) {
 	// Entries semantics are [lo, hi) — pass li+1 so the last entry is
 	// actually included. The previous off-by-one was masked because tests
 	// only checked the prefix of the log, never the tail.
-	ents, err := rs.storage.Entries(fi, li+1, 10000)
+	ents, err := s.Entries(fi, li+1, 10000)
 	if err != nil {
 		return nil, err
 	}
@@ -428,6 +542,20 @@ func (rs *Raft) ents() ([]raftpb.Entry, error) {
 	}
 
 	return es, nil
+}
+
+// proposeChan returns the current proposeC under the RLock. The flap
+// scenario uses this so a concurrent Restart's channel swap doesn't race
+// with the proposer's `ch <- payload` send; the proposer reads the channel
+// pointer via proposeChan and then sends on that snapshot.
+//
+// Tests that don't restart rafts mid-test can still use rs.proposeC
+// directly — the field race only manifests when Restart runs concurrently
+// with another goroutine reading the field.
+func (rs *Raft) proposeChan() chan<- []byte {
+	rs.mu.RLock()
+	defer rs.mu.RUnlock()
+	return rs.proposeC
 }
 
 type Rafts []*Raft

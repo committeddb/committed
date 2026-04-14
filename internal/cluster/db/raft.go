@@ -41,6 +41,13 @@ type Raft struct {
 	transportStopC chan struct{} // signals http transport to shutdown
 	transportDoneC chan struct{} // signals http transport shutdown complete
 
+	// transportWrapper is captured from the options in newRaftWithOptions
+	// so startRaft can apply it after constructing the HttpTransport. nil
+	// in all production paths; set by the adversarial test suite via
+	// WithTransportWrapperForTest to inject a fault-injection layer
+	// around the real transport.
+	transportWrapper func(Transport) Transport
+
 	// closeC is closed by Close() to tell serveChannels (both its inner
 	// proposeC reader and its outer Ready loop) to exit. Without this,
 	// serveChannels only exits when proposeC is closed externally — which
@@ -84,6 +91,7 @@ func newRaftWithOptions(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []
 		applyNotifier:      applyNotifier,
 		transportStopC:     make(chan struct{}),
 		transportDoneC:     make(chan struct{}),
+		transportWrapper:   cfg.transportWrapper,
 		closeC:             make(chan struct{}),
 		serveChannelsDoneC: make(chan struct{}),
 
@@ -133,7 +141,15 @@ func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 	}
 
 	r := &httpTransportRaft{node: n.node}
-	n.transport = httptransport.New(id, ps, n.logger, r)
+	var t Transport = httptransport.New(id, ps, n.logger, r)
+	if n.transportWrapper != nil {
+		// Wrap once, before serveRaft starts driving the transport. The
+		// wrapper returns a Transport that conforms to the same interface,
+		// so downstream Start/Send/AddPeer/RemovePeer calls flow through
+		// it transparently. Only the adversarial test suite sets this.
+		t = n.transportWrapper(t)
+	}
+	n.transport = t
 
 	go n.serveRaft()
 	go n.serveChannels()

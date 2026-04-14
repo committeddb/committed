@@ -26,3 +26,47 @@ func (n *Raft) PartitionPeerForTest(id uint64) {
 func (n *Raft) UnpartitionPeerForTest(p raft.Peer) error {
 	return n.transport.AddPeer(p)
 }
+
+// CommitIndexForTest returns this Raft's current commit index as reported
+// by etcd raft's Status snapshot. Used by adversarial tests to assert that
+// a minority-side leader does not advance commit while partitioned (safety
+// invariant: no quorum → no new commits).
+func (n *Raft) CommitIndexForTest() uint64 {
+	if n.node == nil {
+		return 0
+	}
+	return n.node.Status().HardState.Commit
+}
+
+// WithTransportWrapperForTest installs a wrapper around the Transport that
+// db.Raft's startRaft constructs. The wrapper receives the plain
+// HttpTransport and returns a Transport that's used in its place. Applied
+// exactly once per Raft, before serveRaft starts driving the transport, so
+// Send/AddPeer/RemovePeer/Start/Stop all flow through the wrapper for the
+// lifetime of the Raft.
+//
+// Only used by the adversarial suite (see faulty_transport_test.go). The
+// field on options is unexported, so this test-only Option is the single
+// entry point.
+func WithTransportWrapperForTest(w func(Transport) Transport) Option {
+	return func(o *options) { o.transportWrapper = w }
+}
+
+// IngestWorkerIDsForTest returns a snapshot of the ingest worker registry
+// keys — one entry per actively-running ingest worker. Used by the
+// adversarial suite's concurrent-config-change scenario to assert that
+// concurrent ProposeIngestable calls don't leave orphaned workers or
+// duplicate entries in the registry.
+//
+// Takes the registry mutex to avoid racing the registry's insertion /
+// deletion paths; returns a copy so the caller can sort / inspect
+// without holding the lock.
+func (db *DB) IngestWorkerIDsForTest() []string {
+	db.workersMu.Lock()
+	defer db.workersMu.Unlock()
+	ids := make([]string, 0, len(db.ingestWorkers))
+	for id := range db.ingestWorkers {
+		ids = append(ids, id)
+	}
+	return ids
+}
