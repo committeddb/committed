@@ -18,7 +18,8 @@ import (
 // runs migration) and verifies the versioned layout is correct.
 func TestMigration_FlatToVersioned(t *testing.T) {
 	dir := t.TempDir()
-	kvDir := filepath.Join(dir, "type-storage")
+	// Post-layout-migration, the bbolt file lives under metadata/.
+	kvDir := filepath.Join(dir, "metadata")
 
 	// We need to create the directory structure that wal.Open expects.
 	// Instead of doing that manually, we'll open a storage, close it,
@@ -39,7 +40,7 @@ func TestMigration_FlatToVersioned(t *testing.T) {
 
 	// Now write flat entries directly to bbolt (old layout)
 	boltOpts := &bolt.Options{Timeout: 1 * time.Second}
-	db, err := bolt.Open(filepath.Join(kvDir, "types.db"), 0600, boltOpts)
+	db, err := bolt.Open(filepath.Join(kvDir, "bbolt.db"), 0600, boltOpts)
 	require.Nil(t, err)
 
 	cfg1 := &cluster.Configuration{ID: "ingest-1", MimeType: "application/json", Data: []byte(`{"ingestable":{"name":"i1","type":"foo"}}`)}
@@ -176,7 +177,7 @@ func TestMigration_EmptyBuckets(t *testing.T) {
 // layout (the old format) is correctly migrated and readable as a Type.
 func TestMigration_TypePreservesContent(t *testing.T) {
 	dir := t.TempDir()
-	kvDir := filepath.Join(dir, "type-storage")
+	kvDir := filepath.Join(dir, "metadata")
 
 	p := parser.New()
 	s, err := wal.Open(dir, p, nil, nil, testOpenOptions...)
@@ -185,7 +186,7 @@ func TestMigration_TypePreservesContent(t *testing.T) {
 
 	// Write a Type directly in flat layout
 	boltOpts := &bolt.Options{Timeout: 1 * time.Second}
-	db, err := bolt.Open(filepath.Join(kvDir, "types.db"), 0600, boltOpts)
+	db, err := bolt.Open(filepath.Join(kvDir, "bbolt.db"), 0600, boltOpts)
 	require.Nil(t, err)
 
 	origType := &cluster.Type{ID: "events", Name: "Events", Version: 1}

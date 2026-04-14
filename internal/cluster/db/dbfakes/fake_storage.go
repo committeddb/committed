@@ -42,6 +42,31 @@ type FakeStorage struct {
 	closeReturnsOnCall map[int]struct {
 		result1 error
 	}
+	CompactStub        func(uint64) error
+	compactMutex       sync.RWMutex
+	compactArgsForCall []struct {
+		arg1 uint64
+	}
+	compactReturns struct {
+		result1 error
+	}
+	compactReturnsOnCall map[int]struct {
+		result1 error
+	}
+	CreateSnapshotStub        func(uint64, *raftpb.ConfState) (raftpb.Snapshot, error)
+	createSnapshotMutex       sync.RWMutex
+	createSnapshotArgsForCall []struct {
+		arg1 uint64
+		arg2 *raftpb.ConfState
+	}
+	createSnapshotReturns struct {
+		result1 raftpb.Snapshot
+		result2 error
+	}
+	createSnapshotReturnsOnCall map[int]struct {
+		result1 raftpb.Snapshot
+		result2 error
+	}
 	DatabaseStub        func(string) (cluster.Database, error)
 	databaseMutex       sync.RWMutex
 	databaseArgsForCall []struct {
@@ -108,6 +133,16 @@ type FakeStorage struct {
 	entriesReturnsOnCall map[int]struct {
 		result1 []raftpb.Entry
 		result2 error
+	}
+	EventIndexStub        func() uint64
+	eventIndexMutex       sync.RWMutex
+	eventIndexArgsForCall []struct {
+	}
+	eventIndexReturns struct {
+		result1 uint64
+	}
+	eventIndexReturnsOnCall map[int]struct {
+		result1 uint64
 	}
 	FirstIndexStub        func() (uint64, error)
 	firstIndexMutex       sync.RWMutex
@@ -218,6 +253,17 @@ type FakeStorage struct {
 	}
 	readerReturnsOnCall map[int]struct {
 		result1 db.ProposalReader
+	}
+	RestoreSnapshotStub        func(raftpb.Snapshot) error
+	restoreSnapshotMutex       sync.RWMutex
+	restoreSnapshotArgsForCall []struct {
+		arg1 raftpb.Snapshot
+	}
+	restoreSnapshotReturns struct {
+		result1 error
+	}
+	restoreSnapshotReturnsOnCall map[int]struct {
+		result1 error
 	}
 	SaveStub        func(raftpb.HardState, []raftpb.Entry, raftpb.Snapshot) error
 	saveMutex       sync.RWMutex
@@ -534,6 +580,132 @@ func (fake *FakeStorage) CloseReturnsOnCall(i int, result1 error) {
 	}{result1}
 }
 
+func (fake *FakeStorage) Compact(arg1 uint64) error {
+	fake.compactMutex.Lock()
+	ret, specificReturn := fake.compactReturnsOnCall[len(fake.compactArgsForCall)]
+	fake.compactArgsForCall = append(fake.compactArgsForCall, struct {
+		arg1 uint64
+	}{arg1})
+	stub := fake.CompactStub
+	fakeReturns := fake.compactReturns
+	fake.recordInvocation("Compact", []interface{}{arg1})
+	fake.compactMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeStorage) CompactCallCount() int {
+	fake.compactMutex.RLock()
+	defer fake.compactMutex.RUnlock()
+	return len(fake.compactArgsForCall)
+}
+
+func (fake *FakeStorage) CompactCalls(stub func(uint64) error) {
+	fake.compactMutex.Lock()
+	defer fake.compactMutex.Unlock()
+	fake.CompactStub = stub
+}
+
+func (fake *FakeStorage) CompactArgsForCall(i int) uint64 {
+	fake.compactMutex.RLock()
+	defer fake.compactMutex.RUnlock()
+	argsForCall := fake.compactArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeStorage) CompactReturns(result1 error) {
+	fake.compactMutex.Lock()
+	defer fake.compactMutex.Unlock()
+	fake.CompactStub = nil
+	fake.compactReturns = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *FakeStorage) CompactReturnsOnCall(i int, result1 error) {
+	fake.compactMutex.Lock()
+	defer fake.compactMutex.Unlock()
+	fake.CompactStub = nil
+	if fake.compactReturnsOnCall == nil {
+		fake.compactReturnsOnCall = make(map[int]struct {
+			result1 error
+		})
+	}
+	fake.compactReturnsOnCall[i] = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *FakeStorage) CreateSnapshot(arg1 uint64, arg2 *raftpb.ConfState) (raftpb.Snapshot, error) {
+	fake.createSnapshotMutex.Lock()
+	ret, specificReturn := fake.createSnapshotReturnsOnCall[len(fake.createSnapshotArgsForCall)]
+	fake.createSnapshotArgsForCall = append(fake.createSnapshotArgsForCall, struct {
+		arg1 uint64
+		arg2 *raftpb.ConfState
+	}{arg1, arg2})
+	stub := fake.CreateSnapshotStub
+	fakeReturns := fake.createSnapshotReturns
+	fake.recordInvocation("CreateSnapshot", []interface{}{arg1, arg2})
+	fake.createSnapshotMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeStorage) CreateSnapshotCallCount() int {
+	fake.createSnapshotMutex.RLock()
+	defer fake.createSnapshotMutex.RUnlock()
+	return len(fake.createSnapshotArgsForCall)
+}
+
+func (fake *FakeStorage) CreateSnapshotCalls(stub func(uint64, *raftpb.ConfState) (raftpb.Snapshot, error)) {
+	fake.createSnapshotMutex.Lock()
+	defer fake.createSnapshotMutex.Unlock()
+	fake.CreateSnapshotStub = stub
+}
+
+func (fake *FakeStorage) CreateSnapshotArgsForCall(i int) (uint64, *raftpb.ConfState) {
+	fake.createSnapshotMutex.RLock()
+	defer fake.createSnapshotMutex.RUnlock()
+	argsForCall := fake.createSnapshotArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2
+}
+
+func (fake *FakeStorage) CreateSnapshotReturns(result1 raftpb.Snapshot, result2 error) {
+	fake.createSnapshotMutex.Lock()
+	defer fake.createSnapshotMutex.Unlock()
+	fake.CreateSnapshotStub = nil
+	fake.createSnapshotReturns = struct {
+		result1 raftpb.Snapshot
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeStorage) CreateSnapshotReturnsOnCall(i int, result1 raftpb.Snapshot, result2 error) {
+	fake.createSnapshotMutex.Lock()
+	defer fake.createSnapshotMutex.Unlock()
+	fake.CreateSnapshotStub = nil
+	if fake.createSnapshotReturnsOnCall == nil {
+		fake.createSnapshotReturnsOnCall = make(map[int]struct {
+			result1 raftpb.Snapshot
+			result2 error
+		})
+	}
+	fake.createSnapshotReturnsOnCall[i] = struct {
+		result1 raftpb.Snapshot
+		result2 error
+	}{result1, result2}
+}
+
 func (fake *FakeStorage) Database(arg1 string) (cluster.Database, error) {
 	fake.databaseMutex.Lock()
 	ret, specificReturn := fake.databaseReturnsOnCall[len(fake.databaseArgsForCall)]
@@ -847,6 +1019,59 @@ func (fake *FakeStorage) EntriesReturnsOnCall(i int, result1 []raftpb.Entry, res
 		result1 []raftpb.Entry
 		result2 error
 	}{result1, result2}
+}
+
+func (fake *FakeStorage) EventIndex() uint64 {
+	fake.eventIndexMutex.Lock()
+	ret, specificReturn := fake.eventIndexReturnsOnCall[len(fake.eventIndexArgsForCall)]
+	fake.eventIndexArgsForCall = append(fake.eventIndexArgsForCall, struct {
+	}{})
+	stub := fake.EventIndexStub
+	fakeReturns := fake.eventIndexReturns
+	fake.recordInvocation("EventIndex", []interface{}{})
+	fake.eventIndexMutex.Unlock()
+	if stub != nil {
+		return stub()
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeStorage) EventIndexCallCount() int {
+	fake.eventIndexMutex.RLock()
+	defer fake.eventIndexMutex.RUnlock()
+	return len(fake.eventIndexArgsForCall)
+}
+
+func (fake *FakeStorage) EventIndexCalls(stub func() uint64) {
+	fake.eventIndexMutex.Lock()
+	defer fake.eventIndexMutex.Unlock()
+	fake.EventIndexStub = stub
+}
+
+func (fake *FakeStorage) EventIndexReturns(result1 uint64) {
+	fake.eventIndexMutex.Lock()
+	defer fake.eventIndexMutex.Unlock()
+	fake.EventIndexStub = nil
+	fake.eventIndexReturns = struct {
+		result1 uint64
+	}{result1}
+}
+
+func (fake *FakeStorage) EventIndexReturnsOnCall(i int, result1 uint64) {
+	fake.eventIndexMutex.Lock()
+	defer fake.eventIndexMutex.Unlock()
+	fake.EventIndexStub = nil
+	if fake.eventIndexReturnsOnCall == nil {
+		fake.eventIndexReturnsOnCall = make(map[int]struct {
+			result1 uint64
+		})
+	}
+	fake.eventIndexReturnsOnCall[i] = struct {
+		result1 uint64
+	}{result1}
 }
 
 func (fake *FakeStorage) FirstIndex() (uint64, error) {
@@ -1385,6 +1610,67 @@ func (fake *FakeStorage) ReaderReturnsOnCall(i int, result1 db.ProposalReader) {
 	}
 	fake.readerReturnsOnCall[i] = struct {
 		result1 db.ProposalReader
+	}{result1}
+}
+
+func (fake *FakeStorage) RestoreSnapshot(arg1 raftpb.Snapshot) error {
+	fake.restoreSnapshotMutex.Lock()
+	ret, specificReturn := fake.restoreSnapshotReturnsOnCall[len(fake.restoreSnapshotArgsForCall)]
+	fake.restoreSnapshotArgsForCall = append(fake.restoreSnapshotArgsForCall, struct {
+		arg1 raftpb.Snapshot
+	}{arg1})
+	stub := fake.RestoreSnapshotStub
+	fakeReturns := fake.restoreSnapshotReturns
+	fake.recordInvocation("RestoreSnapshot", []interface{}{arg1})
+	fake.restoreSnapshotMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeStorage) RestoreSnapshotCallCount() int {
+	fake.restoreSnapshotMutex.RLock()
+	defer fake.restoreSnapshotMutex.RUnlock()
+	return len(fake.restoreSnapshotArgsForCall)
+}
+
+func (fake *FakeStorage) RestoreSnapshotCalls(stub func(raftpb.Snapshot) error) {
+	fake.restoreSnapshotMutex.Lock()
+	defer fake.restoreSnapshotMutex.Unlock()
+	fake.RestoreSnapshotStub = stub
+}
+
+func (fake *FakeStorage) RestoreSnapshotArgsForCall(i int) raftpb.Snapshot {
+	fake.restoreSnapshotMutex.RLock()
+	defer fake.restoreSnapshotMutex.RUnlock()
+	argsForCall := fake.restoreSnapshotArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeStorage) RestoreSnapshotReturns(result1 error) {
+	fake.restoreSnapshotMutex.Lock()
+	defer fake.restoreSnapshotMutex.Unlock()
+	fake.RestoreSnapshotStub = nil
+	fake.restoreSnapshotReturns = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *FakeStorage) RestoreSnapshotReturnsOnCall(i int, result1 error) {
+	fake.restoreSnapshotMutex.Lock()
+	defer fake.restoreSnapshotMutex.Unlock()
+	fake.RestoreSnapshotStub = nil
+	if fake.restoreSnapshotReturnsOnCall == nil {
+		fake.restoreSnapshotReturnsOnCall = make(map[int]struct {
+			result1 error
+		})
+	}
+	fake.restoreSnapshotReturnsOnCall[i] = struct {
+		result1 error
 	}{result1}
 }
 
@@ -2085,6 +2371,10 @@ func (fake *FakeStorage) Invocations() map[string][][]interface{} {
 	defer fake.applyCommittedMutex.RUnlock()
 	fake.closeMutex.RLock()
 	defer fake.closeMutex.RUnlock()
+	fake.compactMutex.RLock()
+	defer fake.compactMutex.RUnlock()
+	fake.createSnapshotMutex.RLock()
+	defer fake.createSnapshotMutex.RUnlock()
 	fake.databaseMutex.RLock()
 	defer fake.databaseMutex.RUnlock()
 	fake.databaseVersionMutex.RLock()
@@ -2095,6 +2385,8 @@ func (fake *FakeStorage) Invocations() map[string][][]interface{} {
 	defer fake.databasesMutex.RUnlock()
 	fake.entriesMutex.RLock()
 	defer fake.entriesMutex.RUnlock()
+	fake.eventIndexMutex.RLock()
+	defer fake.eventIndexMutex.RUnlock()
 	fake.firstIndexMutex.RLock()
 	defer fake.firstIndexMutex.RUnlock()
 	fake.ingestableVersionMutex.RLock()
@@ -2113,6 +2405,8 @@ func (fake *FakeStorage) Invocations() map[string][][]interface{} {
 	defer fake.positionMutex.RUnlock()
 	fake.readerMutex.RLock()
 	defer fake.readerMutex.RUnlock()
+	fake.restoreSnapshotMutex.RLock()
+	defer fake.restoreSnapshotMutex.RUnlock()
 	fake.saveMutex.RLock()
 	defer fake.saveMutex.RUnlock()
 	fake.snapshotMutex.RLock()

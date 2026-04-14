@@ -20,12 +20,22 @@ type Raft struct {
 	// sent to. Stored as a bidirectional chan (rather than chan<-) so Close
 	// can close it after serveChannels has stopped, letting consumers like
 	// EatCommitC exit cleanly instead of leaking forever.
-	commitC    chan []byte
-	raftErrorC chan<- error
+	commitC      chan []byte
+	raftErrorC   chan<- error
 	raftStopC    chan struct{}
 	id           uint64
 	leaderState  *LeaderState
 	tickInterval time.Duration
+	// compactEveryN mirrors options.compactEveryN. 0 disables automatic
+	// compaction. When positive, maybeCompact is invoked once per
+	// committed-entry threshold and trims the raft log to a point that
+	// never exceeds this node's permanent event log highwatermark.
+	compactEveryN uint64
+	// lastCompactedIndex is the raft index the log was most recently
+	// compacted to on this node, used so maybeCompact doesn't redo a
+	// compaction and doesn't attempt to compact before a previous one
+	// completes. Mutated only from the serveChannels goroutine.
+	lastCompactedIndex uint64
 
 	node    raft.Node
 	storage Storage
@@ -87,6 +97,7 @@ func newRaftWithOptions(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []
 		raftStopC:          make(chan struct{}),
 		leaderState:        NewLeaderState(false),
 		tickInterval:       cfg.tickInterval,
+		compactEveryN:      cfg.compactEveryN,
 		storage:            s,
 		applyNotifier:      applyNotifier,
 		transportStopC:     make(chan struct{}),
@@ -319,6 +330,24 @@ func (n *Raft) serveChannels() {
 				n.metrics.SetIndexRange(fi, li)
 			}
 
+			// Storage invariant: P_local == R_local. See
+			// docs/event-log-architecture.md § "The storage invariant".
+			// On violation the cluster has compacted past this node's
+			// recoverable window (almost always via an InstallSnapshot
+			// that advanced the raft side without backfilling the event
+			// log) and this node cannot safely keep serving reads or
+			// voting — it must exit and be rebuilt. v1 is fail-fast per
+			// the doc; v2 will enter a streaming catch-up mode in
+			// place of the Fatal.
+			n.checkStorageInvariant()
+
+			// If configured, trim the raft log up to a safe point so we
+			// don't retain consensus transport indefinitely. The
+			// permanent event log keeps the events forever; the raft
+			// log only exists to move entries between peers and to
+			// satisfy the `appliedIndex` replay window.
+			n.maybeCompact()
+
 			n.node.Advance()
 		// case err := <-n.transport.ErrorC:
 		case err := <-n.transport.GetErrorC():
@@ -396,18 +425,125 @@ func (n *Raft) Leader() uint64 {
 	return n.node.Status().Lead
 }
 
-func (n *Raft) processSnapshot(ms raftpb.Snapshot) {
-	// TODO: Snapshot install must:
-	//   1. Restore application state (BoltDB buckets, time series) from
-	//      snap.Data.
-	//   2. Bump Storage's appliedIndex to snap.Metadata.Index — otherwise
-	//      ApplyCommitted will re-process every committed entry from
-	//      firstIndex up to that point on the next Ready cycle.
-	// Today snapshots are a no-op (single-node, no follower bringup),
-	// so we get away with leaving this empty. ApplyCommitted's
-	// "skip if entry.Index <= appliedIndex" guard means once snapshot
-	// install lands, the only correctness-critical step here is to set
-	// appliedIndex to snap.Metadata.Index.
+// checkStorageInvariant enforces P_local == R_local after every Ready
+// iteration. See docs/event-log-architecture.md § "The storage
+// invariant" for the full rationale. Briefly:
+//
+//   - P_local is storage.EventIndex() — the highest raft index this
+//     node has durably written to its permanent event log.
+//   - R_local is storage.AppliedIndex() — the highest raft index this
+//     node has acknowledged as applied to raft.
+//
+// Under normal operation ApplyCommitted writes the event and bumps
+// appliedIndex atomically per entry, so the two stay equal. The only
+// way they diverge is an InstallSnapshot that advanced appliedIndex
+// past the permanent event log highwatermark — i.e., the cluster's
+// raft log has been compacted past a gap this node can't fill. v1
+// handles this by fatal-exiting with a pointer to the rebuild
+// runbook; see docs/operations/rebuild.md.
+func (n *Raft) checkStorageInvariant() {
+	p := n.storage.EventIndex()
+	r := n.storage.AppliedIndex()
+	if p == r {
+		return
+	}
+	n.logger.Fatal(
+		"storage invariant violation: permanent event log is behind raft applied index. "+
+			"The cluster has compacted past this node's recovery point. "+
+			"Run the rebuild procedure at docs/operations/rebuild.md.",
+		zap.Uint64("eventIndex", p),
+		zap.Uint64("appliedIndex", r),
+		zap.Uint64("gap", r-p),
+	)
+}
+
+// maybeCompact trims the raft log up to a safe point when the count of
+// committed entries since the last compaction crosses compactEveryN.
+// Safety constraints from docs/event-log-architecture.md §
+// "Compaction policy":
+//
+//   - Compact point must be ≤ this node's permanent event log
+//     highwatermark (EventIndex), so we never forget a raft entry whose
+//     corresponding event isn't already durable here.
+//   - Compact point must be ≤ AppliedIndex, the normal raft contract.
+//   - We leave a small buffer below appliedIndex so a follower that
+//     briefly lagged can still catch up via AppendEntries instead of a
+//     more expensive snapshot install.
+//
+// The quorum-graduated constraint named in the doc isn't implemented
+// for v1 — etcd raft doesn't expose peer-wise applied indices
+// uniformly across versions, and a leader-only compact-point check
+// has the same safety envelope for single-leader writes. Followers
+// that fall behind still receive an InstallSnapshot if the leader's
+// log has moved past them; that's the intended shape.
+func (n *Raft) maybeCompact() {
+	if n.compactEveryN == 0 {
+		return
+	}
+	applied := n.storage.AppliedIndex()
+	if applied == 0 {
+		return
+	}
+	if applied-n.lastCompactedIndex < n.compactEveryN {
+		return
+	}
+
+	// Hold back from the very tip of applied so brief-lag followers can
+	// still use AppendEntries. The buffer is the compact threshold
+	// itself, which keeps the raft log around long enough for at least
+	// one "round" of follower catchup after each compaction.
+	const safetyBuffer = uint64(8)
+	if applied <= safetyBuffer {
+		return
+	}
+	compactTo := applied - safetyBuffer
+
+	// Never compact past the permanent event log — if we do, a
+	// follower could receive an InstallSnapshot advancing raft's
+	// state past its event log and trip the storage invariant.
+	if eventIdx := n.storage.EventIndex(); compactTo > eventIdx {
+		compactTo = eventIdx
+	}
+	if compactTo <= n.lastCompactedIndex {
+		return
+	}
+
+	// Take a metadata snapshot first so raft has something to ship to
+	// followers that fall behind the new first index.
+	if _, err := n.storage.CreateSnapshot(compactTo, nil); err != nil {
+		n.logger.Warn("create snapshot for compaction", zap.Uint64("compactTo", compactTo), zap.Error(err))
+		return
+	}
+	if err := n.storage.Compact(compactTo); err != nil {
+		n.logger.Warn("compact raft log", zap.Uint64("compactTo", compactTo), zap.Error(err))
+		return
+	}
+	n.lastCompactedIndex = compactTo
+	n.logger.Debug("raft log compacted", zap.Uint64("compactTo", compactTo))
+}
+
+// processSnapshot installs a snapshot delivered by the raft Ready
+// loop — i.e. a leader has told us via InstallSnapshot that we need
+// to catch up on metadata state that the leader's raft log no longer
+// carries. The restore only touches bbolt (metadata); the permanent
+// event log is NOT in the snapshot because events are too large to
+// ship through raft.
+//
+// A successful restore leaves appliedIndex at snap.Metadata.Index. If
+// this node's permanent event log is behind that index, the Ready
+// loop's checkStorageInvariant fatal-exits at the end of the current
+// iteration — by design. See docs/event-log-architecture.md §
+// "Severe lag — v1 manual rebuild". A RestoreSnapshot error here is
+// also fatal; a half-applied snapshot leaves the node in a hybrid
+// state that is worse than crashing and letting an operator rebuild.
+func (n *Raft) processSnapshot(snap raftpb.Snapshot) {
+	if err := n.storage.RestoreSnapshot(snap); err != nil {
+		n.logger.Fatal("restore snapshot failed",
+			zap.Uint64("snapIndex", snap.Metadata.Index),
+			zap.Uint64("snapTerm", snap.Metadata.Term),
+			zap.Error(err),
+		)
+	}
 }
 
 func (n *Raft) processCommittedEntry(e raftpb.Entry) {

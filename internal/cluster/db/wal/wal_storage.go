@@ -56,7 +56,13 @@ type State struct {
 }
 
 type Storage struct {
-	EntryLog          *wal.Log
+	EntryLog *wal.Log
+	// EventLog is the permanent event log — the "forever" tier described
+	// in docs/event-log-architecture.md. ApplyCommitted mirrors every
+	// committed raft entry into it, keyed by raft index. Unlike EntryLog,
+	// EventLog is never compacted: it is the canonical store that
+	// syncables read from, and the one a rebuild rsync covers.
+	EventLog          *wal.Log
 	StateLog          *wal.Log // Should we get rid of this and store the latest state in the bbolt db?
 	keyValueStorage   *bolt.DB
 	TimeSeriesStorage tstorage.Storage
@@ -71,14 +77,34 @@ type Storage struct {
 	firstIndex atomic.Uint64
 	lastIndex  atomic.Uint64
 	stateIndex uint64
-	databases         map[string]cluster.Database
-	parser            db.Parser
-	sync              chan<- *db.SyncableWithID
-	ingest            chan<- *db.IngestableWithID
+	databases  map[string]cluster.Database
+	parser     db.Parser
+	sync       chan<- *db.SyncableWithID
+	ingest     chan<- *db.IngestableWithID
 	// appliedIndex is the highest raft entry index that ApplyCommitted has
 	// fully applied. Bumped after each successful per-entry apply (and
 	// persisted to bbolt in the same step). Loaded from bbolt on Open.
+	//
+	// This is "R_local" in the storage invariant P_local == R_local.
 	appliedIndex atomic.Uint64
+	// eventIndex is the highest raft index written to EventLog. Bumped
+	// before appliedIndex in ApplyCommitted so that a crash between the
+	// EventLog write and the bbolt appliedIndex persist doesn't lose
+	// events: on restart, appliedIndex is <= eventIndex, replay re-runs
+	// ApplyCommitted for the gap, and the crash-window guard skips the
+	// duplicate EventLog write.
+	//
+	// This is "P_local" in the storage invariant P_local == R_local.
+	eventIndex atomic.Uint64
+	// firstEventIndex is the raft index of the first entry in EventLog
+	// (the entry at wal sequence 1). 0 means the event log is empty.
+	// Used by Reader to translate raft index ↔ wal seq: since Phase 1
+	// mirrors every committed raft entry, seq = raftIndex -
+	// firstEventIndex + 1 for any raftIndex in [firstEventIndex,
+	// eventIndex]. Mutated only from the raft serveChannels goroutine
+	// (on first write and on any future compaction of EventLog) so the
+	// atomic is for race-free reads, not for CAS.
+	firstEventIndex atomic.Uint64
 
 	logger *zap.Logger
 }
@@ -91,29 +117,16 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		opt(&cfg)
 	}
 
-	entryLogDir := filepath.Join(dir, "entry-log")
-	stateLogDir := filepath.Join(dir, "state-log")
-	keyValueStorageDir := filepath.Join(dir, "type-storage")
+	entryLogDir := filepath.Join(dir, "raft", "log")
+	stateLogDir := filepath.Join(dir, "raft", "state")
+	eventLogDir := filepath.Join(dir, "events")
+	keyValueStorageDir := filepath.Join(dir, "metadata")
 	timeSeriesStorageDir := filepath.Join(dir, "time-series")
 
-	err := os.MkdirAll(entryLogDir, os.ModePerm)
-	if err != nil {
-		return nil, err
-	}
-
-	err = os.MkdirAll(stateLogDir, os.ModePerm)
-	if err != nil {
-		return nil, err
-	}
-
-	err = os.MkdirAll(keyValueStorageDir, os.ModePerm)
-	if err != nil {
-		return nil, err
-	}
-
-	err = os.MkdirAll(timeSeriesStorageDir, os.ModePerm)
-	if err != nil {
-		return nil, err
+	for _, d := range []string{entryLogDir, stateLogDir, eventLogDir, keyValueStorageDir, timeSeriesStorageDir} {
+		if err := os.MkdirAll(d, os.ModePerm); err != nil {
+			return nil, err
+		}
 	}
 
 	entryLog, err := wal.Open(entryLogDir, nil)
@@ -124,9 +137,13 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	if err != nil {
 		return nil, err
 	}
+	eventLog, err := wal.Open(eventLogDir, nil)
+	if err != nil {
+		return nil, err
+	}
 
 	boltOpts := &bolt.Options{Timeout: 1 * time.Second, NoSync: cfg.fsyncDisabled}
-	keyValueStorage, err := bolt.Open(filepath.Join(keyValueStorageDir, "types.db"), 0600, boltOpts)
+	keyValueStorage, err := bolt.Open(filepath.Join(keyValueStorageDir, "bbolt.db"), 0600, boltOpts)
 	if err != nil {
 		return nil, err
 	}
@@ -173,6 +190,7 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	dbs := make(map[string]cluster.Database)
 	ws := &Storage{
 		EntryLog:          entryLog,
+		EventLog:          eventLog,
 		StateLog:          stateLog,
 		keyValueStorage:   keyValueStorage,
 		TimeSeriesStorage: timeSeriesStorage,
@@ -234,6 +252,43 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	}
 	ws.appliedIndex.Store(idx)
 
+	// eventIndex (P_local) is the raft index of the last entry durably
+	// written to EventLog. EventLog's own sequence numbers are
+	// monotonic-from-1 and don't match raft index, so we recover the
+	// raft index by unmarshaling the last stored entry. Empty EventLog
+	// (fresh install or pre-Phase-1 migration) leaves eventIndex at 0.
+	evLast, err := eventLog.LastIndex()
+	if err != nil {
+		return nil, err
+	}
+	if evLast > 0 {
+		data, err := eventLog.Read(evLast)
+		if err != nil {
+			return nil, fmt.Errorf("event log read last entry: %w", err)
+		}
+		last := &pb.Entry{}
+		if err := last.Unmarshal(data); err != nil {
+			return nil, fmt.Errorf("event log unmarshal last entry: %w", err)
+		}
+		ws.eventIndex.Store(last.Index)
+
+		// Read the first entry to initialize firstEventIndex so
+		// Reader.Read can map raft index ↔ wal seq.
+		evFirst, err := eventLog.FirstIndex()
+		if err != nil {
+			return nil, err
+		}
+		firstData, err := eventLog.Read(evFirst)
+		if err != nil {
+			return nil, fmt.Errorf("event log read first entry: %w", err)
+		}
+		first := &pb.Entry{}
+		if err := first.Unmarshal(firstData); err != nil {
+			return nil, fmt.Errorf("event log unmarshal first entry: %w", err)
+		}
+		ws.firstEventIndex.Store(first.Index)
+	}
+
 	return ws, nil
 }
 
@@ -242,7 +297,12 @@ func (s *Storage) Close() error {
 
 	finalErr = s.EntryLog.Close()
 
-	err := s.StateLog.Close()
+	err := s.EventLog.Close()
+	if err != nil && finalErr == nil {
+		finalErr = err
+	}
+
+	err = s.StateLog.Close()
 	if err != nil && finalErr == nil {
 		finalErr = err
 	}
@@ -356,30 +416,71 @@ func (s *Storage) Save(st pb.HardState, ents []pb.Entry, snap pb.Snapshot) error
 // bbolt) after each successful apply, so a restart that replays committed
 // entries through the Ready loop will skip the already-applied portion.
 //
+// It also mirrors the raw entry into the permanent EventLog — every
+// committed entry, regardless of EntryType or entity kind, so EventLog's
+// sequence number stays 1:1 with raft index. Readers filter at read time.
+// This is what keeps the storage invariant P_local == R_local true under
+// normal operation: both advance together per entry.
+//
 // Errors here are treated as fatal by raft.go; see the apply error policy
 // comment in raft.go's Ready loop.
 func (s *Storage) ApplyCommitted(entry pb.Entry) error {
-	if entry.Type != pb.EntryNormal || entry.Data == nil {
-		return nil
-	}
-
-	// Skip already-applied entries (replay-on-restart safety).
+	// Skip already-applied entries (replay-on-restart safety). A bare
+	// EntryNormal with nil data (e.g. the leader's post-election no-op
+	// entry from raft) still counts as applied — we bump appliedIndex so
+	// the Ready loop's invariant check stays P_local == R_local.
 	if entry.Index <= s.appliedIndex.Load() {
 		return nil
 	}
 
-	p := &cluster.Proposal{}
-	if err := p.Unmarshal(entry.Data, s); err != nil {
-		// Match the prior Save behavior for undecodable proposals: skip,
-		// but still bump appliedIndex so we don't loop on it forever.
-		s.appliedIndex.Store(entry.Index)
-		return s.saveAppliedIndex(entry.Index)
+	// Mirror the raw raft entry into the permanent event log. tidwall/wal
+	// requires sequentially-increasing sequence numbers starting at 1, so
+	// the wal seq is its own counter — not the raft index — and the raft
+	// index is recovered by unmarshaling the stored pb.Entry. The guard
+	// against entry.Index <= eventIndex covers the crash window where
+	// EventLog.Write succeeded but saveAppliedIndex didn't persist:
+	// without it, the replay would try to append the same entry again
+	// and diverge seq vs. raft index on disk.
+	if entry.Index > s.eventIndex.Load() {
+		entryBytes, err := entry.Marshal()
+		if err != nil {
+			return fmt.Errorf("[wal.storage] marshal entry for event log: %w", err)
+		}
+		nextSeq, err := s.EventLog.LastIndex()
+		if err != nil {
+			return fmt.Errorf("[wal.storage] event log last index: %w", err)
+		}
+		nextSeq++
+		if err := s.EventLog.Write(nextSeq, entryBytes); err != nil {
+			return fmt.Errorf("[wal.storage] event log write seq %d (raft index %d): %w", nextSeq, entry.Index, err)
+		}
+		// First-ever write: stamp firstEventIndex so Reader can map
+		// raft index → wal seq without an extra scan.
+		if nextSeq == 1 {
+			s.firstEventIndex.Store(entry.Index)
+		}
+		s.eventIndex.Store(entry.Index)
 	}
 
-	for _, entity := range p.Entities {
-		s.logger.Debug("applying entity", zap.String("typeID", entity.Type.ID), zap.String("key", string(entity.Key)))
-		if err := s.applyEntity(entity); err != nil {
-			return err
+	// For EntryNormal with data, apply entities to bucket state and the
+	// time-series store. Other entry types (conf changes, no-op entries)
+	// still count as "applied" for invariant purposes — we just have
+	// nothing to do at the entity level.
+	if entry.Type == pb.EntryNormal && entry.Data != nil {
+		p := &cluster.Proposal{}
+		if err := p.Unmarshal(entry.Data, s); err != nil {
+			// Match the prior Save behavior for undecodable proposals:
+			// skip the entity apply, but still bump appliedIndex so we
+			// don't loop on it forever.
+			s.appliedIndex.Store(entry.Index)
+			return s.saveAppliedIndex(entry.Index)
+		}
+
+		for _, entity := range p.Entities {
+			s.logger.Debug("applying entity", zap.String("typeID", entity.Type.ID), zap.String("key", string(entity.Key)))
+			if err := s.applyEntity(entity); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -419,9 +520,18 @@ func (s *Storage) applyEntity(entity *cluster.Entity) error {
 
 // AppliedIndex returns the highest raft entry index that ApplyCommitted has
 // fully applied. Loaded from bbolt on Open and bumped after each successful
-// apply.
+// apply. This is "R_local" in the storage invariant P_local == R_local.
 func (s *Storage) AppliedIndex() uint64 {
 	return s.appliedIndex.Load()
+}
+
+// EventIndex returns the highest raft entry index that has been durably
+// written to the permanent event log on this node. This is "P_local" in
+// the storage invariant P_local == R_local, which the Ready loop checks
+// after every iteration (see raft.go's checkStorageInvariant). On a fresh
+// or brand-new node EventLog starts empty and EventIndex is 0.
+func (s *Storage) EventIndex() uint64 {
+	return s.eventIndex.Load()
 }
 
 // saveAppliedIndex persists the applied index to bbolt. Called from

@@ -21,8 +21,10 @@ func TestReader_ConcurrentReads(t *testing.T) {
 	for i := 0; i < numEntries; i++ {
 		entries[i] = makeEntry(t, uint64(i+1), makeUserEntity())
 	}
-	err := s.Save(defaultHardState, entries, defaultSnap)
-	require.Nil(t, err)
+	// Reader reads from the permanent event log (Phase 2), which is
+	// populated only by ApplyCommitted. Save alone no longer makes
+	// entries visible to the reader.
+	saveAndApply(t, s, entries)
 
 	reader := s.Reader("nonexistent-sync")
 

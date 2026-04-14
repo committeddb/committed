@@ -82,6 +82,32 @@ func (ms *MemoryStorage) AppliedIndex() uint64 {
 	return ms.appliedIndex
 }
 
+// EventIndex mirrors AppliedIndex for MemoryStorage. Real storage
+// maintains a separate permanent event log index so the Ready loop can
+// detect divergence after a snapshot install, but MemoryStorage has no
+// event log to diverge from — so returning AppliedIndex keeps the
+// invariant P_local == R_local trivially true and lets tests that use
+// MemoryStorage run the same invariant check as production code.
+func (ms *MemoryStorage) EventIndex() uint64 {
+	return ms.AppliedIndex()
+}
+
+// CreateSnapshot delegates to the embedded raft.MemoryStorage, which
+// already supports snapshot creation for in-memory tests. Passing nil
+// Data is fine here — MemoryStorage has no bucket state to capture;
+// tests that need a real snapshot payload use wal.Storage.
+func (ms *MemoryStorage) CreateSnapshot(index uint64, confState *raftpb.ConfState) (raftpb.Snapshot, error) {
+	return ms.MemoryStorage.CreateSnapshot(index, confState, nil)
+}
+
+// RestoreSnapshot is a no-op for MemoryStorage. The embedded
+// raft.MemoryStorage handles raft-log-level snapshot state internally
+// when Save is called with a non-empty rd.Snapshot; there is no
+// application-level state for this in-memory stub to restore.
+func (ms *MemoryStorage) RestoreSnapshot(snap raftpb.Snapshot) error {
+	return nil
+}
+
 func (ms *MemoryStorage) maybeAppendArgsForCall(st raftpb.HardState, ents []raftpb.Entry, snap raftpb.Snapshot) {
 	normalEntry := false
 	for _, ent := range ents {

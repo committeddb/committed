@@ -831,6 +831,29 @@ func (ms *MemoryStorage) AppliedIndex() uint64 {
 	return 0
 }
 
+// EventIndex returns 0 to match AppliedIndex, keeping the Ready loop's
+// invariant check (P_local == R_local) trivially satisfied for the
+// raft-only in-memory storage used by these tests.
+func (ms *MemoryStorage) EventIndex() uint64 {
+	return 0
+}
+
+// CreateSnapshot delegates to the embedded raft.MemoryStorage. The
+// two-arg signature on db.Storage differs from raft's three-arg
+// internal API (which carries an arbitrary Data payload); this stub
+// threads through nil because MemoryStorage tests don't exercise the
+// payload path.
+func (ms *MemoryStorage) CreateSnapshot(index uint64, confState *raftpb.ConfState) (raftpb.Snapshot, error) {
+	return ms.MemoryStorage.CreateSnapshot(index, confState, nil)
+}
+
+// RestoreSnapshot is a no-op. The raft_test MemoryStorage exists to
+// exercise the raft layer in isolation; there is no application state
+// to restore.
+func (ms *MemoryStorage) RestoreSnapshot(snap raftpb.Snapshot) error {
+	return nil
+}
+
 // maybeAppendArgsForCallLocked must be called with stateMu held.
 func (ms *MemoryStorage) maybeAppendArgsForCallLocked(st raftpb.HardState, ents []raftpb.Entry, snap raftpb.Snapshot) {
 	normalEntry := false

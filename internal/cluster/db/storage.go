@@ -27,8 +27,35 @@ type Storage interface {
 	ApplyCommitted(entry raftpb.Entry) error
 	// AppliedIndex returns the highest log index that has been fully
 	// applied to application state. Survives restart so the Ready loop's
-	// replay of already-applied committed entries is a no-op.
+	// replay of already-applied committed entries is a no-op. This is
+	// "R_local" in the storage invariant checked after every Ready
+	// iteration.
 	AppliedIndex() uint64
+	// EventIndex returns the highest raft index that has been durably
+	// written to the permanent event log on this node. This is "P_local"
+	// in the storage invariant P_local == R_local; violation means the
+	// cluster has advanced past this node's recoverable window and is
+	// the trigger for the fatal-exit rebuild path described in
+	// docs/event-log-architecture.md.
+	EventIndex() uint64
+	// CreateSnapshot captures the current metadata-bucket state as a
+	// pb.Snapshot keyed at the given raft index. The raft serve loop
+	// calls this periodically so raft has a snapshot to ship to
+	// followers whose raft log has been compacted past.
+	CreateSnapshot(index uint64, confState *raftpb.ConfState) (raftpb.Snapshot, error)
+	// RestoreSnapshot installs the metadata state carried by snap onto
+	// this node, replacing current bbolt contents. Called from the
+	// raft Ready loop when raft delivers a non-empty rd.Snapshot. The
+	// permanent event log is NOT in the snapshot; a node whose event
+	// log is behind the snapshot's metadata index is expected to
+	// fatal-exit at the Ready loop's subsequent invariant check.
+	RestoreSnapshot(snap raftpb.Snapshot) error
+	// Compact drops raft log entries up to and including compactIndex.
+	// Called from the raft serve loop's compaction trigger after a
+	// CreateSnapshot has captured the metadata at the compact point.
+	// Implementations must leave EventLog untouched — it is the
+	// permanent record and independent of raft log retention.
+	Compact(compactIndex uint64) error
 	Type(id string) (*cluster.Type, error)
 	TimePoints(typeID string, start time.Time, end time.Time) ([]cluster.TimePoint, error)
 	Reader(id string) ProposalReader     // Gets current index by id cache. If id is not known, index is 0

@@ -112,3 +112,36 @@ syncable that allows you to transform data from one topic and write the transfor
 ## Sandbox
 
 There is an online sandbox that allows you to play with a shared server without having to download or install the database yourself. You can find more information at [http://www.committeddb.com/sandbox](http://www.committeddb.com/sandbox)
+
+## Operations
+
+### Storage layout
+
+A Committed node's data directory looks like this:
+
+```
+<datadir>/
+├── raft/
+│   ├── log/         # raft consensus log; bounded (10GB / 1hr)
+│   └── state/       # HardState + ConfState
+├── events/          # permanent event log; infinite retention
+├── metadata/
+│   └── bbolt.db     # types, databases, syncables, applied index
+└── time-series/     # derived view regenerable from events/
+```
+
+The permanent event log under `events/` is the canonical record of
+every write; syncables read from it, and it is never compacted.
+`raft/log/` is consensus transport only and is compacted aggressively.
+See [`docs/event-log-architecture.md`](docs/event-log-architecture.md)
+for the rationale.
+
+### Rebuilding a node
+
+If a node logs a `storage invariant violation` fatal message, it has
+fallen too far behind the cluster to recover via normal raft
+replication. The runbook for this case —
+[`docs/operations/rebuild.md`](docs/operations/rebuild.md) — covers
+both existing-node rebuild and adding a new node. The short version
+is: stop the node, rsync its data directory from a healthy peer,
+restart. Apply determinism keeps subsequent rebuilds O(diff).

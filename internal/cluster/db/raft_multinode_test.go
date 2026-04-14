@@ -63,6 +63,17 @@ func TestRaftPropose_Cluster3(t *testing.T) {
 			}
 		}
 	}
+
+	// Phase-1 storage invariant: P_local == R_local on every node. The
+	// Ready loop also checks this (fatal-exiting on violation) but the
+	// test makes it explicit so a regression of either value surfaces
+	// as a test failure rather than a cluster-wide fatal log line.
+	for _, r := range rafts {
+		p, rl := r.storage.EventIndex(), r.storage.AppliedIndex()
+		if p != rl {
+			t.Fatalf("node %d: storage invariant violation: EventIndex=%d AppliedIndex=%d", r.id, p, rl)
+		}
+	}
 }
 
 // TestRaftRestart_Cluster3 is the multi-node sibling of TestRaftRestart's

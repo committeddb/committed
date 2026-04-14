@@ -33,6 +33,13 @@ type options struct {
 	tickInterval time.Duration
 	logger       *zap.Logger
 	metrics      *metrics.Metrics
+	// compactEveryN, when > 0, triggers CreateSnapshot + Compact on the
+	// raft log every N committed entries. Default 0 (never compact
+	// automatically) keeps existing tests and short-lived deployments
+	// simple; real deployments should set this to a value sized for
+	// their memory and disk budgets. See
+	// docs/event-log-architecture.md § "Compaction policy".
+	compactEveryN uint64
 	// transportWrapper, if non-nil, is applied to the Transport that
 	// startRaft constructs via httptransport.New, and the returned value
 	// is used in place of the original. Test-only hook set via
@@ -69,4 +76,14 @@ func WithLogger(l *zap.Logger) Option {
 // created via metrics.New(registry) to enable instrumentation.
 func WithMetrics(m *metrics.Metrics) Option {
 	return func(o *options) { o.metrics = m }
+}
+
+// WithCompactEveryN configures the raft log to be compacted every N
+// committed entries. The compact point is always capped at the local
+// permanent event log highwatermark (the safety check in
+// maybeCompact), so enabling this cannot lose events. N == 0 disables
+// automatic compaction, which is the default for tests and
+// single-node deployments that don't need the behaviour.
+func WithCompactEveryN(n uint64) Option {
+	return func(o *options) { o.compactEveryN = n }
 }
