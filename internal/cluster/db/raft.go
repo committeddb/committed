@@ -125,6 +125,24 @@ func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 		// etcd-raft deployment. See docs/event-log-architecture.md
 		// § "PreVote and election timeout".
 		PreVote: true,
+		// CheckQuorum is PreVote's required companion for the DIRECTIONAL
+		// partition case. etcd raft's PreVote grant logic allows peers to
+		// grant a pre-vote at m.Term > r.Term even when they're hearing
+		// from a leader — UNLESS CheckQuorum is on, in which case the
+		// leader-lease check (electionElapsed < electionTimeout) short-
+		// circuits the grant. Without CheckQuorum, scenario (b) of the
+		// adversarial suite reveals the gap: the leader can't reach one
+		// follower, that follower campaigns at a higher term, the other
+		// followers grant the pre-vote (still at the old leader's term,
+		// with the old leader reachable), and the old leader steps down.
+		// With CheckQuorum, the other followers reject the pre-vote because
+		// they've heard from the leader within the election window.
+		//
+		// CheckQuorum also lets a leader proactively step down if it loses
+		// quorum (bounded by electionTimeout), which is the right posture
+		// for a production database: a partitioned-away leader shouldn't
+		// keep accepting reads indefinitely.
+		CheckQuorum: true,
 	}
 
 	hs, _, err := n.storage.InitialState()
@@ -227,10 +245,31 @@ func (n *Raft) serveChannels() {
 			// with rd.CommittedEntries is required by the etcd raft contract;
 			// rd.Entries may include uncommitted entries on a follower, so
 			// applying them to application state would diverge the cluster.
+			//
+			// Save errors are unrecoverable. Raft's invariants require that
+			// every entry returned from Ready be durably persisted before
+			// Advance is called: continuing past a failed Save and still
+			// calling Advance lets raft forget its unstable buffer while
+			// Storage lacks the corresponding entries, which panics the
+			// internal raft loop ("committed > lastIndex") the moment any
+			// new commit notification arrives. Treating Save failure as
+			// "this node is done" is the safe posture: stop the Ready loop
+			// (no more Send, ApplyCommitted, Advance), let peers notice the
+			// silence and re-elect around this node, and let Close tear
+			// down the transport and raft.Node.
+			//
+			// The send to raftErrorC is non-blocking so an unread error
+			// channel (raft_test's direct-constructed Raft) doesn't deadlock
+			// the return path. Production callers (db.DB) drain ErrorC so
+			// the send always lands immediately.
 			err := n.storage.Save(rd.HardState, rd.Entries, rd.Snapshot)
 			if err != nil {
 				n.logger.Error("storage save", zap.Error(err))
-				n.raftErrorC <- err
+				select {
+				case n.raftErrorC <- err:
+				default:
+				}
+				return
 			}
 			n.transport.Send(rd.Messages)
 			if !raft.IsEmptySnap(rd.Snapshot) {

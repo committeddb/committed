@@ -896,3 +896,404 @@ func createTestIngestableConfig(id string) *cluster.Configuration {
 	}
 }
 
+// -----------------------------------------------------------------------------
+// Scenario (b): asymmetric (one-way) partition
+//
+// Invariants protected:
+//
+//   - PreVote correctness under a DIRECTIONAL partition. Symmetric
+//     partition (scenario a) can't express this because both sides lose
+//     contact — no side has the "I can hear you but you can't hear me"
+//     shape that produces stale-term disruption in pre-PreVote raft.
+//     Here, leader → follower is dropped while follower → leader still
+//     works: the follower's heartbeat arrival stops (so its election
+//     timer fires), but the follower can still send PreVote messages to
+//     everyone else.
+//
+//   - Leader liveness when one follower stops hearing heartbeats.
+//     Without PreVote, the isolated-in-one-direction follower would
+//     repeatedly bump its term via campaign messages, and the leader
+//     (which eventually hears the higher term via follower → leader
+//     traffic) would step down even though it still has quorum with the
+//     OTHER follower. With PreVote, the follower asks for votes before
+//     incrementing term; the non-isolated followers reject the PreVote
+//     (they just heard from the current leader), and the leader stays.
+//
+//   - Post-heal convergence. Dropping the DirectionalDrop and then
+//     proposing one more entry must succeed on all three nodes, proving
+//     the previously-isolated follower catches back up via routine
+//     AppendEntries replication.
+// -----------------------------------------------------------------------------
+func TestAdversarial_AsymmetricPartition(t *testing.T) {
+	// Seeded RNG unused in this scenario today — same reservation pattern
+	// as scenarios (a), (c), (g). Uniform across the suite for triage.
+	_ = rand.New(rand.NewSource(2))
+
+	rafts, cluster := createFaultyRafts(3)
+
+	// Defer ordering: drainer-stop defers FIRST so it runs LAST (after
+	// rafts.Close), matching the pattern in scenario (a).
+	stopDrainers := rafts.StartDrainers()
+	defer stopDrainers()
+	defer rafts.Close()
+
+	leaderID := rafts.WaitForLeader(t)
+	leader := rafts.LeaderRaft()
+	if leader == nil {
+		t.Fatalf("LeaderRaft returned nil after WaitForLeader")
+	}
+
+	// Pick any follower to be the isolated-in-one-direction side. Any
+	// non-leader id works — the scenario's invariants don't depend on
+	// which follower is chosen.
+	var isolatedID uint64
+	for _, r := range rafts {
+		if r.id != leaderID {
+			isolatedID = r.id
+			break
+		}
+	}
+	if isolatedID == 0 {
+		t.Fatalf("could not find a follower id distinct from leader %d", leaderID)
+	}
+
+	// Establish a baseline so the post-heal catch-up assertion has something
+	// to check against.
+	proposeAndCheck(t, leader, "pre-asym")
+	for _, r := range rafts {
+		waitForUserEntry(t, r, []byte("pre-asym"))
+	}
+
+	// One-way drop: leader can no longer reach the isolated follower.
+	// The reverse direction (isolated → leader) still works, so the
+	// isolated follower's PreVotes can still reach the leader and be
+	// rejected — that's the whole point of the test.
+	cluster.DirectionalDrop(leaderID, isolatedID, true)
+
+	// Sit for 1s — long enough that the isolated follower's 100ms
+	// election timer would fire ~10 times if PreVote weren't masking it.
+	// Each election attempt issues a PreVote, and each PreVote that
+	// DIDN'T get masked would result in the leader stepping down on a
+	// higher term. 10 attempts is a generous margin above the ~1-2
+	// attempts that a flaky PreVote implementation would need to trigger
+	// the bug.
+	const isolationWindow = 1 * time.Second
+	deadline := time.Now().Add(isolationWindow)
+	for time.Now().Before(deadline) {
+		// The leader must not step down. Any change in leader id
+		// during the isolation window is an invariant violation.
+		if got := rafts[0].Leader(); got != leaderID {
+			// rafts[0] may BE the isolated follower — in that case
+			// it's expected to lose track of the leader because
+			// heartbeats are dropped. Check leader id from the OTHER
+			// non-isolated follower instead.
+			if rafts[0].id == isolatedID {
+				// Use a non-isolated node's view.
+				for _, r := range rafts {
+					if r.id == leaderID || r.id == isolatedID {
+						continue
+					}
+					if r.Leader() != leaderID {
+						t.Fatalf("non-isolated follower %d lost leader: expected %d, got %d — "+
+							"leader stepped down under directional partition; PreVote did not mask isolated-follower election attempts",
+							r.id, leaderID, r.Leader())
+					}
+				}
+			} else {
+				t.Fatalf("non-isolated node %d: leader changed from %d to %d during directional partition — "+
+					"PreVote did not mask isolated-follower election attempts",
+					rafts[0].id, leaderID, got)
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Heal: the leader can reach the isolated follower again.
+	cluster.DirectionalDrop(leaderID, isolatedID, false)
+
+	// Post-heal sanity: the cluster is still functional. The original
+	// leader is still leader (no step-down during isolation), the
+	// isolated follower catches up via AppendEntries, a new propose
+	// commits on all three.
+	rafts.WaitForLeader(t)
+	if got := rafts.LeaderRaft(); got == nil || got.id != leaderID {
+		gotID := uint64(0)
+		if got != nil {
+			gotID = got.id
+		}
+		t.Fatalf("post-heal leader changed: expected %d, got %d — "+
+			"leader stepped down at some point (possibly during heal) despite PreVote",
+			leaderID, gotID)
+	}
+	proposeAndCheck(t, leader, "post-asym")
+	for _, r := range rafts {
+		waitForUserEntry(t, r, []byte("post-asym"))
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Scenario (d): slow follower
+//
+// Invariants protected:
+//
+//   - Heartbeat / election-timeout tolerance of a slow replica. With 500ms
+//     one-way latency from leader to follower3, the follower experiences
+//     delayed heartbeats but NOT missing ones — its first heartbeat arrives
+//     500ms late, then subsequent heartbeats arrive at the normal 10ms
+//     cadence (just shifted in time). PreVote ensures that any election
+//     timer fires from the delayed startup window don't disrupt the leader.
+//
+//   - Catch-up-path correctness under latency. All 1000 proposes must
+//     eventually apply on follower3 — the entries arrive in one or more
+//     AppendEntries batches, each 500ms late, and the storage state must
+//     converge regardless of the per-message delay.
+//
+//   - Exactly-once apply under latency. Delayed delivery must not cause
+//     any entry to be applied twice (e.g., via a retransmit whose earlier
+//     copy was not fully processed). The per-node "every acked entry
+//     appears exactly once" check is the same invariant scenario (c)
+//     protects under leader flapping.
+// -----------------------------------------------------------------------------
+func TestAdversarial_SlowFollower(t *testing.T) {
+	_ = rand.New(rand.NewSource(4))
+
+	rafts, cluster := createFaultyRafts(3)
+
+	stopDrainers := rafts.StartDrainers()
+	defer stopDrainers()
+	defer rafts.Close()
+
+	leaderID := rafts.WaitForLeader(t)
+	leader := rafts.LeaderRaft()
+	if leader == nil {
+		t.Fatalf("LeaderRaft returned nil after WaitForLeader")
+	}
+
+	// Pick a single follower to slow down. We choose the first non-leader
+	// node; which one it is doesn't matter to the invariants being tested
+	// (the leader keeps quorum via itself + the other follower).
+	var slowID uint64
+	for _, r := range rafts {
+		if r.id != leaderID {
+			slowID = r.id
+			break
+		}
+	}
+	if slowID == 0 {
+		t.Fatalf("could not find a follower id distinct from leader %d", leaderID)
+	}
+
+	// 500ms latency per the ticket. Applied BEFORE proposes start so every
+	// AppendEntries carrying user data suffers the delay. The reverse
+	// direction (follower → leader) is unaffected, so replies come back
+	// immediately and the leader's view of the follower's matchIndex
+	// advances as the follower catches up.
+	const slowLatency = 500 * time.Millisecond
+	cluster.AddLatency(leaderID, slowID, slowLatency)
+
+	// 1000 entries back-to-back per the ticket. We fire them at the
+	// leader's proposeC without per-propose commit confirmation: the
+	// ticket's explicit invariant is "all 1000 entries eventually apply
+	// on all 3 nodes", not "each propose commits within a bounded time".
+	// Using a bounded sender with a fallback timeout guards against the
+	// proposeC send itself hanging (which would indicate serveChannels
+	// is wedged — a real failure mode).
+	const numEntries = 1000
+	ch := leader.proposeChan()
+	for i := 0; i < numEntries; i++ {
+		payload := []byte(fmt.Sprintf("slow-%d", i))
+		select {
+		case ch <- payload:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("propose %d: proposeC send blocked for 5s — "+
+				"leader's serveChannels appears wedged under slow-follower load",
+				i)
+		}
+	}
+
+	// Liveness check: the leader did not step down mid-run. A step-down
+	// would indicate the slow follower somehow disrupted the election
+	// despite PreVote (or the other follower lost contact with the leader,
+	// which would be a different and equally damning bug).
+	if got := rafts.LeaderRaft(); got == nil || got.id != leaderID {
+		gotID := uint64(0)
+		if got != nil {
+			gotID = got.id
+		}
+		t.Fatalf("leader changed during slow-follower run: expected %d, got %d — "+
+			"slow follower should not cause re-election",
+			leaderID, gotID)
+	}
+
+	// Catch-up check: every proposed entry appears exactly once on every
+	// node, including the slow one. Poll per-node because the slow
+	// follower's last batch of AppendEntries is at least 500ms behind
+	// the leader's commit point.
+	expected := make([]string, numEntries)
+	for i := 0; i < numEntries; i++ {
+		expected[i] = fmt.Sprintf("slow-%d", i)
+	}
+	catchUpDeadline := 30 * time.Second
+	for _, r := range rafts {
+		nodeDeadline := time.Now().Add(catchUpDeadline)
+		for {
+			es, err := r.ents()
+			if err != nil {
+				t.Fatal(err)
+			}
+			have := map[string]int{}
+			for _, e := range es {
+				have[string(e.Data)]++
+			}
+			missing := 0
+			for _, want := range expected {
+				if have[want] == 0 {
+					missing++
+				}
+			}
+			if missing == 0 {
+				for _, want := range expected {
+					if have[want] != 1 {
+						t.Fatalf("node %d: payload %q appears %d times, expected exactly once — "+
+							"exactly-once apply violated under slow-follower latency",
+							r.id, want, have[want])
+					}
+				}
+				break
+			}
+			if time.Now().After(nodeDeadline) {
+				t.Fatalf("node %d: %d of %d entries still missing after %v — "+
+					"slow follower did not catch up via AppendEntries",
+					r.id, missing, numEntries, catchUpDeadline)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Scenario (f): disk full (ENOSPC)
+//
+// Invariants protected:
+//
+//   - Graceful degradation on single-node storage failure. When one node's
+//     Save path starts returning ENOSPC, the raft.go Ready loop returns
+//     from serveChannels rather than continuing past the failed Save —
+//     that preserves the raft invariant that every Ready entry must be
+//     durably persisted before Advance is called. The node becomes raft-
+//     silent (no more Send or Advance), which matches the ticket's
+//     "fatals / steps down cleanly" acceptance criteria.
+//
+//   - No data loss on the surviving pair. Any propose that returns
+//     successfully (commit observed on the proposing node) must appear on
+//     BOTH surviving nodes, not just one. The failed node is allowed to
+//     have missing data — that's what ENOSPC models.
+//
+//   - Liveness of the surviving pair. Even after node 1 freezes, nodes 2
+//     and 3 must elect a leader (if not already) and continue committing
+//     proposes. Two out of three is quorum, so this is a pure failover
+//     liveness check.
+// -----------------------------------------------------------------------------
+func TestAdversarial_DiskFull(t *testing.T) {
+	_ = rand.New(rand.NewSource(6))
+
+	// Threshold 50 per the ticket. Bootstrap consumes ~4 entries (one
+	// conf-change per peer + empty leader entry on term start), so the
+	// first ~46 user entries land normally on node 1 before Save starts
+	// failing. The cluster-level assertion only requires that SOME
+	// proposals commit before ENOSPC and that ALL acked proposals post-
+	// ENOSPC land on the surviving pair — the exact split is irrelevant.
+	const threshold = 50
+
+	// faultyStore holds the FaultyStorage pointer for node 1 so the test
+	// can assert it actually tripped (a test where Save never failed
+	// would be a false pass).
+	var faultyStore *FaultyStorage
+	rafts, _ := createFaultyRaftsWithStorageWrapper(3, func(id uint64, s db.Storage) db.Storage {
+		if id != 1 {
+			return s
+		}
+		faultyStore = NewFaultyStorage(s, threshold)
+		return faultyStore
+	})
+
+	stopDrainers := rafts.StartDrainers()
+	defer stopDrainers()
+	defer rafts.Close()
+
+	rafts.WaitForLeader(t)
+
+	// Propose via node 2 (never the faulty node 1). If node 2 is a
+	// follower its propose is forwarded to whoever is leader; if node 1
+	// is the leader AND its Ready loop has frozen on the ENOSPC error
+	// send, the propose will time out until nodes 2 and 3 re-elect among
+	// themselves.
+	const numEntries = 100
+	const proposeDeadline = 5 * time.Second
+	target := rafts[1]
+
+	// Track which entries successfully committed on the target node.
+	// Those are the "acked" proposals whose presence on nodes 2 and 3
+	// is the load-bearing invariant.
+	var acked []string
+	for i := 0; i < numEntries; i++ {
+		payload := fmt.Sprintf("disk-%d", i)
+		if tryProposeAndVerify(target, []byte(payload), proposeDeadline, nil) {
+			acked = append(acked, payload)
+		}
+		// Unacked proposes are not required to have landed (the
+		// failing node may have been leader mid-flight). We don't
+		// fail the test on them; the surviving pair's
+		// no-data-loss invariant only applies to the acked set.
+	}
+
+	if len(acked) < threshold/2 {
+		t.Fatalf("only %d of %d proposals acked on the surviving pair — "+
+			"surviving pair did not maintain liveness under single-node ENOSPC",
+			len(acked), numEntries)
+	}
+
+	// The FaultyStorage must actually have tripped. If threshold was set
+	// so high that Save never failed, this test didn't exercise its
+	// invariants and a silent false-pass would be worse than a noisy
+	// failure.
+	if !faultyStore.Tripped() {
+		t.Fatalf("FaultyStorage on node 1 never tripped — test did not exercise ENOSPC path "+
+			"(threshold=%d may be too high for the entry volume)",
+			threshold)
+	}
+
+	// Every acked proposal is present on BOTH surviving nodes. Poll for
+	// convergence because the last few proposes may still be in flight to
+	// the non-leader follower when the loop exits.
+	survivors := []*Raft{rafts[1], rafts[2]}
+	for _, r := range survivors {
+		nodeDeadline := time.Now().Add(15 * time.Second)
+		for {
+			es, err := r.ents()
+			if err != nil {
+				t.Fatal(err)
+			}
+			have := map[string]bool{}
+			for _, e := range es {
+				have[string(e.Data)] = true
+			}
+			missing := 0
+			for _, want := range acked {
+				if !have[want] {
+					missing++
+				}
+			}
+			if missing == 0 {
+				break
+			}
+			if time.Now().After(nodeDeadline) {
+				t.Fatalf("surviving node %d: %d of %d acked proposals missing — "+
+					"data loss on the surviving pair under single-node ENOSPC",
+					r.id, missing, len(acked))
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+}
+

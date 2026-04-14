@@ -16,7 +16,8 @@ test-all:
 	go test -tags "docker integration" -timeout 300s ./... -cover
 
 # Runs the adversarial raft suite (phase 1: partition, leader flap,
-# concurrent config changes). Tagged `adversarial` so it's excluded from
+# concurrent config changes; phase 2: asymmetric partition, slow
+# follower, disk full). Tagged `adversarial` so it's excluded from
 # both `make test` and `make test-all`; those don't need to pay the
 # per-test election-timeout cost, and the adversarial scenarios are
 # specifically designed to stress-test failure modes rather than happy

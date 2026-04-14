@@ -562,6 +562,29 @@ even though the rejoiner has no chance of winning. PreVote runs an "am I
 electable" round before bumping term. Recommended by Diego Ongaro's
 thesis (§9.6).
 
+### CheckQuorum
+
+Enabled alongside PreVote via `Config.CheckQuorum = true`. CheckQuorum is
+required for PreVote to fully protect against disruption under a
+**directional** (one-way) partition: etcd raft's PreVote grant logic
+allows peers to grant a pre-vote at `m.Term > r.Term` even when they're
+hearing from a healthy leader — unless CheckQuorum is on, in which case
+the leader-lease check (`electionElapsed < electionTimeout`) short-
+circuits the grant.
+
+Without CheckQuorum, the adversarial suite's asymmetric-partition
+scenario reveals the gap: a follower that can't receive heartbeats from
+the leader (but can still send) will campaign at a higher term, and
+other followers — still receiving heartbeats from the current leader —
+will grant the pre-vote anyway, forcing a spurious step-down. With
+CheckQuorum, those peers correctly reject the pre-vote because their
+leader lease hasn't expired.
+
+CheckQuorum also lets a leader proactively step down if it loses quorum
+(bounded by electionTimeout), which is the right posture for a
+production database: a partitioned-away leader shouldn't keep accepting
+reads indefinitely.
+
 ### Production election timeout
 
 Production should default to `tickInterval = 30ms` with `ElectionTick =
@@ -692,6 +715,7 @@ can build on it.
 | Election timeout (production)     | 30ms tick / 300ms election                      | Upper end of Raft paper's recommendation; tests stay fast                              |
 | Election timeout (operator knob)  | 15ms tick / 150ms election                      | Optional optimization for low-latency LANs                                             |
 | PreVote                           | Enabled                                         | Eliminates rejoin-disruption failure mode (Ongaro thesis §9.6)                         |
+| CheckQuorum                       | Enabled                                         | Required companion to PreVote for directional-partition protection; leader steps down on lost quorum |
 | Joining-mode flag                 | None                                            | Node determines its state from on-disk data, not from operator input                   |
 | Per-write fsync on permanent log  | Yes                                             | Matches raft semantics; safe against power loss                                        |
 | Cross-type ordering               | Single raft group                               | Central differentiator from per-topic systems; sharding is v3+                         |

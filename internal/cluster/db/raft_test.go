@@ -275,7 +275,7 @@ func lastIndex(t *testing.T, r *Raft) uint64 {
 // slower multiNodeTickInterval so the HTTP-transported heartbeats keep up
 // with the election timeout.
 func createRafts(replicas int) Rafts {
-	rafts, _ := buildRafts(replicas, nil)
+	rafts, _ := buildRafts(replicas, nil, nil)
 	return rafts
 }
 
@@ -288,7 +288,20 @@ func createRafts(replicas int) Rafts {
 // the FaultyCluster must be constructed here too — callers can't build one
 // ahead of time because they don't know the URLs yet.
 func createFaultyRafts(replicas int) (Rafts, *FaultyCluster) {
-	return buildRafts(replicas, newFaultyCluster)
+	return buildRafts(replicas, newFaultyCluster, nil)
+}
+
+// createFaultyRaftsWithStorageWrapper is like createFaultyRafts but lets the
+// caller wrap each node's storage at construction time. The wrapper
+// receives the default MemoryStorage and returns a db.Storage that will be
+// used in its place. A nil wrapper, or a wrapper that returns its input
+// unchanged, is equivalent to createFaultyRafts.
+//
+// Used by scenario (f) to swap node 1's storage for a FaultyStorage that
+// trips ENOSPC after a threshold. The wrapper is called per node so the
+// caller can decide which nodes to wrap and which to leave alone.
+func createFaultyRaftsWithStorageWrapper(replicas int, wrapStorage func(id uint64, s db.Storage) db.Storage) (Rafts, *FaultyCluster) {
+	return buildRafts(replicas, newFaultyCluster, wrapStorage)
 }
 
 // newFaultyCluster is a factory used by buildRafts when the caller asks for
@@ -306,7 +319,11 @@ func newFaultyCluster(peers []raft.Peer) *FaultyCluster {
 // wrapping happens, and the returned cluster pointer is nil. When non-nil,
 // it builds a FaultyCluster from the peer set and threads Wrap(id) into
 // each node via WithTransportWrapperForTest.
-func buildRafts(replicas int, clusterFactory func([]raft.Peer) *FaultyCluster) (Rafts, *FaultyCluster) {
+//
+// wrapStorage, when non-nil, receives each freshly-constructed
+// MemoryStorage and may return a wrapper (e.g., a FaultyStorage) to use in
+// its place. nil leaves storage as the plain MemoryStorage.
+func buildRafts(replicas int, clusterFactory func([]raft.Peer) *FaultyCluster, wrapStorage func(id uint64, s db.Storage) db.Storage) (Rafts, *FaultyCluster) {
 	tick := testTickInterval
 	if replicas > 1 {
 		tick = multiNodeTickInterval
@@ -334,7 +351,10 @@ func buildRafts(replicas int, clusterFactory func([]raft.Peer) *FaultyCluster) (
 
 	var rafts Rafts
 	for _, p := range peers {
-		s := NewMemoryStorage()
+		var s db.Storage = NewMemoryStorage()
+		if wrapStorage != nil {
+			s = wrapStorage(p.ID, s)
+		}
 		rafts = append(rafts, createRaft(p.ID, peers, s, tick, cluster))
 	}
 
@@ -529,7 +549,15 @@ func (rs *Raft) ents() ([]raftpb.Entry, error) {
 	// Entries semantics are [lo, hi) — pass li+1 so the last entry is
 	// actually included. The previous off-by-one was masked because tests
 	// only checked the prefix of the log, never the tail.
-	ents, err := s.Entries(fi, li+1, 10000)
+	//
+	// MaxUint64 on maxSize so we never truncate the returned slice. The
+	// old 10000-byte cap silently dropped entries on high-volume tests
+	// (e.g., scenario (d) with 1000 proposes): each entry is ~10 bytes
+	// of user data but ~100 bytes total including raft framing, so the
+	// log overflows the cap around ~100 entries and the test sees fewer
+	// entries than actually exist — which reads as "entries missing"
+	// when they're really just not being returned here.
+	ents, err := s.Entries(fi, li+1, math.MaxUint64)
 	if err != nil {
 		return nil, err
 	}
