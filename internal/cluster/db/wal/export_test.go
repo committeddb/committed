@@ -19,7 +19,7 @@ import (
 // compiled into the test binary.
 func (s *Storage) BucketSnapshot() ([]string, error) {
 	var lines []string
-	err := s.keyValueStorage.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		return tx.ForEach(func(name []byte, b *bolt.Bucket) error {
 			return walkBucket(string(name), b, &lines)
 		})
@@ -28,6 +28,20 @@ func (s *Storage) BucketSnapshot() ([]string, error) {
 		return nil, err
 	}
 	return lines, nil
+}
+
+// EventLogLastSeq exposes the event log's wal sequence for test
+// assertions. External callers should use EventIndex() (raft index) —
+// this accessor is only here because a couple of Phase 1 tests assert
+// on the wal-seq count to prove the log is being appended to.
+func (s *Storage) EventLogLastSeq() (uint64, error) {
+	return s.lastEventSeq()
+}
+
+// ReadEventAt exposes event-log entries by wal seq for test assertions.
+// Production callers go through Reader.
+func (s *Storage) ReadEventAt(seq uint64) ([]byte, error) {
+	return s.readEventAt(seq)
 }
 
 func walkBucket(prefix string, b *bolt.Bucket, lines *[]string) error {

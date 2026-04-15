@@ -243,6 +243,18 @@ type FakeStorage struct {
 	positionReturnsOnCall map[int]struct {
 		result1 cluster.Position
 	}
+	RaftLogApproxSizeStub        func() (uint64, error)
+	raftLogApproxSizeMutex       sync.RWMutex
+	raftLogApproxSizeArgsForCall []struct {
+	}
+	raftLogApproxSizeReturns struct {
+		result1 uint64
+		result2 error
+	}
+	raftLogApproxSizeReturnsOnCall map[int]struct {
+		result1 uint64
+		result2 error
+	}
 	ReaderStub        func(string) db.ProposalReader
 	readerMutex       sync.RWMutex
 	readerArgsForCall []struct {
@@ -1552,6 +1564,62 @@ func (fake *FakeStorage) PositionReturnsOnCall(i int, result1 cluster.Position) 
 	}{result1}
 }
 
+func (fake *FakeStorage) RaftLogApproxSize() (uint64, error) {
+	fake.raftLogApproxSizeMutex.Lock()
+	ret, specificReturn := fake.raftLogApproxSizeReturnsOnCall[len(fake.raftLogApproxSizeArgsForCall)]
+	fake.raftLogApproxSizeArgsForCall = append(fake.raftLogApproxSizeArgsForCall, struct {
+	}{})
+	stub := fake.RaftLogApproxSizeStub
+	fakeReturns := fake.raftLogApproxSizeReturns
+	fake.recordInvocation("RaftLogApproxSize", []interface{}{})
+	fake.raftLogApproxSizeMutex.Unlock()
+	if stub != nil {
+		return stub()
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeStorage) RaftLogApproxSizeCallCount() int {
+	fake.raftLogApproxSizeMutex.RLock()
+	defer fake.raftLogApproxSizeMutex.RUnlock()
+	return len(fake.raftLogApproxSizeArgsForCall)
+}
+
+func (fake *FakeStorage) RaftLogApproxSizeCalls(stub func() (uint64, error)) {
+	fake.raftLogApproxSizeMutex.Lock()
+	defer fake.raftLogApproxSizeMutex.Unlock()
+	fake.RaftLogApproxSizeStub = stub
+}
+
+func (fake *FakeStorage) RaftLogApproxSizeReturns(result1 uint64, result2 error) {
+	fake.raftLogApproxSizeMutex.Lock()
+	defer fake.raftLogApproxSizeMutex.Unlock()
+	fake.RaftLogApproxSizeStub = nil
+	fake.raftLogApproxSizeReturns = struct {
+		result1 uint64
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeStorage) RaftLogApproxSizeReturnsOnCall(i int, result1 uint64, result2 error) {
+	fake.raftLogApproxSizeMutex.Lock()
+	defer fake.raftLogApproxSizeMutex.Unlock()
+	fake.RaftLogApproxSizeStub = nil
+	if fake.raftLogApproxSizeReturnsOnCall == nil {
+		fake.raftLogApproxSizeReturnsOnCall = make(map[int]struct {
+			result1 uint64
+			result2 error
+		})
+	}
+	fake.raftLogApproxSizeReturnsOnCall[i] = struct {
+		result1 uint64
+		result2 error
+	}{result1, result2}
+}
+
 func (fake *FakeStorage) Reader(arg1 string) db.ProposalReader {
 	fake.readerMutex.Lock()
 	ret, specificReturn := fake.readerReturnsOnCall[len(fake.readerArgsForCall)]
@@ -2403,6 +2471,8 @@ func (fake *FakeStorage) Invocations() map[string][][]interface{} {
 	defer fake.nodeMutex.RUnlock()
 	fake.positionMutex.RLock()
 	defer fake.positionMutex.RUnlock()
+	fake.raftLogApproxSizeMutex.RLock()
+	defer fake.raftLogApproxSizeMutex.RUnlock()
 	fake.readerMutex.RLock()
 	defer fake.readerMutex.RUnlock()
 	fake.restoreSnapshotMutex.RLock()

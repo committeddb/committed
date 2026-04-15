@@ -26,7 +26,7 @@ func (s *Storage) handleIngestable(e *cluster.Entity) error {
 // rationale on why the channel send happens outside the bbolt Update closure.
 func (s *Storage) saveIngestable(t *cluster.Configuration) error {
 	var ingestable cluster.Ingestable
-	err := s.keyValueStorage.Update(func(tx *bolt.Tx) error {
+	err := s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(ingestableBucket)
 		if b == nil {
 			return ErrBucketMissing
@@ -60,7 +60,7 @@ func (s *Storage) saveIngestable(t *cluster.Configuration) error {
 }
 
 func (s *Storage) deleteIngestable(id []byte) error {
-	return s.keyValueStorage.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(ingestableBucket)
 		if b == nil {
 			return ErrBucketMissing
@@ -77,7 +77,7 @@ func (s *Storage) deleteIngestable(id []byte) error {
 func (s *Storage) Ingestables() ([]*cluster.Configuration, error) {
 	var cfgs []*cluster.Configuration
 
-	err := s.keyValueStorage.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		b := tx.Bucket(ingestableBucket)
 		if b == nil {
 			return ErrBucketMissing
@@ -102,7 +102,7 @@ func (s *Storage) Ingestables() ([]*cluster.Configuration, error) {
 
 func (s *Storage) IngestableVersions(id string) ([]cluster.VersionInfo, error) {
 	var versions []cluster.VersionInfo
-	err := s.keyValueStorage.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		b := tx.Bucket(ingestableBucket)
 		if b == nil {
 			return ErrBucketMissing
@@ -116,7 +116,7 @@ func (s *Storage) IngestableVersions(id string) ([]cluster.VersionInfo, error) {
 
 func (s *Storage) IngestableVersion(id string, version uint64) (*cluster.Configuration, error) {
 	cfg := &cluster.Configuration{}
-	err := s.keyValueStorage.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		b := tx.Bucket(ingestableBucket)
 		if b == nil {
 			return ErrBucketMissing

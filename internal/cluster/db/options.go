@@ -33,13 +33,17 @@ type options struct {
 	tickInterval time.Duration
 	logger       *zap.Logger
 	metrics      *metrics.Metrics
-	// compactEveryN, when > 0, triggers CreateSnapshot + Compact on the
-	// raft log every N committed entries. Default 0 (never compact
-	// automatically) keeps existing tests and short-lived deployments
-	// simple; real deployments should set this to a value sized for
-	// their memory and disk budgets. See
-	// docs/event-log-architecture.md § "Compaction policy".
-	compactEveryN uint64
+	// compactMaxSize is the on-disk raft log size in bytes that, once
+	// exceeded, triggers a CreateSnapshot + Compact at the end of the
+	// current Ready iteration. 0 disables the size limb of the
+	// compaction policy. See docs/event-log-architecture.md §
+	// "Compaction policy".
+	compactMaxSize uint64
+	// compactMaxAge is the wall-clock time-since-last-compaction that,
+	// once exceeded, triggers compaction regardless of raft log size.
+	// Works in OR with compactMaxSize: whichever fires first drives
+	// the trigger. 0 disables the age limb.
+	compactMaxAge time.Duration
 	// transportWrapper, if non-nil, is applied to the Transport that
 	// startRaft constructs via httptransport.New, and the returned value
 	// is used in place of the original. Test-only hook set via
@@ -50,10 +54,21 @@ type options struct {
 	transportWrapper func(Transport) Transport
 }
 
+// DefaultCompactMaxSize is the production default: compact the raft
+// log when it grows past 10 GiB. See docs/event-log-architecture.md §
+// "Compaction policy".
+const DefaultCompactMaxSize uint64 = 10 * 1024 * 1024 * 1024
+
+// DefaultCompactMaxAge is the production default: compact the raft
+// log every hour even if it hasn't reached DefaultCompactMaxSize.
+const DefaultCompactMaxAge = time.Hour
+
 func defaultOptions() options {
 	return options{
-		tickInterval: defaultTickInterval,
-		logger:       zap.NewNop(),
+		tickInterval:   defaultTickInterval,
+		logger:         zap.NewNop(),
+		compactMaxSize: DefaultCompactMaxSize,
+		compactMaxAge:  DefaultCompactMaxAge,
 	}
 }
 
@@ -78,12 +93,18 @@ func WithMetrics(m *metrics.Metrics) Option {
 	return func(o *options) { o.metrics = m }
 }
 
-// WithCompactEveryN configures the raft log to be compacted every N
-// committed entries. The compact point is always capped at the local
-// permanent event log highwatermark (the safety check in
-// maybeCompact), so enabling this cannot lose events. N == 0 disables
-// automatic compaction, which is the default for tests and
-// single-node deployments that don't need the behaviour.
-func WithCompactEveryN(n uint64) Option {
-	return func(o *options) { o.compactEveryN = n }
+// WithCompactMaxSize overrides the raft log size (bytes) that
+// triggers a compaction. 0 disables the size limb of the compaction
+// policy; the age limb may still fire. Tests set tight values
+// (e.g. 4096 bytes) to exercise the trigger deterministically.
+func WithCompactMaxSize(bytes uint64) Option {
+	return func(o *options) { o.compactMaxSize = bytes }
+}
+
+// WithCompactMaxAge overrides the maximum wall-clock time between
+// compactions. 0 disables the age limb of the compaction policy; the
+// size limb may still fire. Tests set tight values (e.g. 10ms) to
+// exercise the trigger without ramping raft log size.
+func WithCompactMaxAge(d time.Duration) Option {
+	return func(o *options) { o.compactMaxAge = d }
 }

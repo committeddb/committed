@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -56,15 +57,33 @@ type State struct {
 }
 
 type Storage struct {
-	EntryLog *wal.Log
-	// EventLog is the permanent event log — the "forever" tier described
+	// raftLogDir is the on-disk directory tidwall/wal writes entry-log
+	// segments into. Kept around so RaftLogApproxSize can stat the
+	// segment files without poking through tidwall's internals.
+	raftLogDir string
+	EntryLog   *wal.Log
+	// eventLog is the permanent event log — the "forever" tier described
 	// in docs/event-log-architecture.md. ApplyCommitted mirrors every
 	// committed raft entry into it, keyed by raft index. Unlike EntryLog,
-	// EventLog is never compacted: it is the canonical store that
+	// eventLog is never compacted: it is the canonical store that
 	// syncables read from, and the one a rebuild rsync covers.
-	EventLog          *wal.Log
+	//
+	// Unexported so the raft-index ↔ wal-seq mapping (maintained by
+	// appendEvent + the in-memory eventIndex / firstEventIndex atomics)
+	// can't be bypassed by an outside caller writing directly. Access
+	// goes through appendEvent / readEventAt / EventIndex /
+	// firstEventSeq / lastEventSeq.
+	eventLog          *wal.Log
 	StateLog          *wal.Log // Should we get rid of this and store the latest state in the bbolt db?
 	keyValueStorage   *bolt.DB
+	// kvMu guards swaps of keyValueStorage (RestoreSnapshot replaces the
+	// bbolt handle wholesale: close → rename file → reopen → reassign).
+	// Every bbolt transaction routes through view / update, which take
+	// kvMu.RLock; RestoreSnapshot takes kvMu.Lock so it waits for
+	// in-flight reads to drain before closing the handle and blocks new
+	// reads until the reopen finishes. Without this an HTTP query that
+	// happened to run mid-restore would hit a closed-file error.
+	kvMu              sync.RWMutex
 	TimeSeriesStorage tstorage.Storage
 	snapshot          pb.Snapshot
 	hardState         pb.HardState
@@ -189,8 +208,9 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 
 	dbs := make(map[string]cluster.Database)
 	ws := &Storage{
+		raftLogDir:        entryLogDir,
 		EntryLog:          entryLog,
-		EventLog:          eventLog,
+		eventLog:          eventLog,
 		StateLog:          stateLog,
 		keyValueStorage:   keyValueStorage,
 		TimeSeriesStorage: timeSeriesStorage,
@@ -297,7 +317,7 @@ func (s *Storage) Close() error {
 
 	finalErr = s.EntryLog.Close()
 
-	err := s.EventLog.Close()
+	err := s.eventLog.Close()
 	if err != nil && finalErr == nil {
 		finalErr = err
 	}
@@ -433,33 +453,15 @@ func (s *Storage) ApplyCommitted(entry pb.Entry) error {
 		return nil
 	}
 
-	// Mirror the raw raft entry into the permanent event log. tidwall/wal
-	// requires sequentially-increasing sequence numbers starting at 1, so
-	// the wal seq is its own counter — not the raft index — and the raft
-	// index is recovered by unmarshaling the stored pb.Entry. The guard
+	// Mirror the raw raft entry into the permanent event log. The guard
 	// against entry.Index <= eventIndex covers the crash window where
-	// EventLog.Write succeeded but saveAppliedIndex didn't persist:
-	// without it, the replay would try to append the same entry again
-	// and diverge seq vs. raft index on disk.
+	// appendEvent succeeded but saveAppliedIndex didn't persist:
+	// without it, replay would try to append the same entry again and
+	// diverge seq vs. raft index on disk.
 	if entry.Index > s.eventIndex.Load() {
-		entryBytes, err := entry.Marshal()
-		if err != nil {
-			return fmt.Errorf("[wal.storage] marshal entry for event log: %w", err)
+		if err := s.appendEvent(entry); err != nil {
+			return fmt.Errorf("[wal.storage] %w", err)
 		}
-		nextSeq, err := s.EventLog.LastIndex()
-		if err != nil {
-			return fmt.Errorf("[wal.storage] event log last index: %w", err)
-		}
-		nextSeq++
-		if err := s.EventLog.Write(nextSeq, entryBytes); err != nil {
-			return fmt.Errorf("[wal.storage] event log write seq %d (raft index %d): %w", nextSeq, entry.Index, err)
-		}
-		// First-ever write: stamp firstEventIndex so Reader can map
-		// raft index → wal seq without an extra scan.
-		if nextSeq == 1 {
-			s.firstEventIndex.Store(entry.Index)
-		}
-		s.eventIndex.Store(entry.Index)
 	}
 
 	// For EntryNormal with data, apply entities to bucket state and the
@@ -529,9 +531,105 @@ func (s *Storage) AppliedIndex() uint64 {
 // written to the permanent event log on this node. This is "P_local" in
 // the storage invariant P_local == R_local, which the Ready loop checks
 // after every iteration (see raft.go's checkStorageInvariant). On a fresh
-// or brand-new node EventLog starts empty and EventIndex is 0.
+// or brand-new node eventLog starts empty and EventIndex is 0.
 func (s *Storage) EventIndex() uint64 {
 	return s.eventIndex.Load()
+}
+
+// RaftLogApproxSize returns the approximate on-disk size (bytes) of the
+// raft log by summing tidwall/wal's segment file sizes under
+// raft/log/. Called by the compaction trigger in raft.go to decide
+// whether the "size > threshold" limb of the 10GB/1hr policy has been
+// crossed. Approximate because tidwall/wal cycles segments, so a
+// segment that's still being written may be sized below its final
+// on-disk length by a few kB — close enough for a trigger decision.
+// Errors walking the directory are returned as (0, err); callers
+// treat that as "no trigger" rather than panicking.
+func (s *Storage) RaftLogApproxSize() (uint64, error) {
+	entries, err := os.ReadDir(s.raftLogDir)
+	if err != nil {
+		return 0, err
+	}
+	var total uint64
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			// File vanished between ReadDir and Info (e.g. a
+			// concurrent cycle); skip, don't fail the whole sum.
+			continue
+		}
+		total += uint64(info.Size())
+	}
+	return total, nil
+}
+
+// firstEventSeq returns the wal sequence of the first entry in the
+// permanent event log, or 0 when the log is empty. Package-internal.
+func (s *Storage) firstEventSeq() (uint64, error) {
+	return s.eventLog.FirstIndex()
+}
+
+// lastEventSeq returns the wal sequence of the last entry in the
+// permanent event log, or 0 when the log is empty. Package-internal.
+func (s *Storage) lastEventSeq() (uint64, error) {
+	return s.eventLog.LastIndex()
+}
+
+// readEventAt reads the raw pb.Entry bytes at the given wal sequence
+// from the permanent event log. Package-internal; callers outside the
+// storage tier should go through the Reader abstraction, which handles
+// raft index ↔ wal seq translation and filters metadata entries.
+func (s *Storage) readEventAt(seq uint64) ([]byte, error) {
+	return s.eventLog.Read(seq)
+}
+
+// appendEvent writes a committed raft entry's raw bytes to the
+// permanent event log, stamping firstEventIndex on the very first
+// write and bumping eventIndex on success. Called only from
+// ApplyCommitted, which already guards against writes at or below
+// eventIndex (crash-window idempotence). Kept on Storage (not inlined
+// into ApplyCommitted) so there's exactly one site that advances
+// P_local.
+func (s *Storage) appendEvent(entry pb.Entry) error {
+	entryBytes, err := entry.Marshal()
+	if err != nil {
+		return fmt.Errorf("marshal entry for event log: %w", err)
+	}
+	nextSeq, err := s.eventLog.LastIndex()
+	if err != nil {
+		return fmt.Errorf("event log last index: %w", err)
+	}
+	nextSeq++
+	if err := s.eventLog.Write(nextSeq, entryBytes); err != nil {
+		return fmt.Errorf("event log write seq %d (raft index %d): %w", nextSeq, entry.Index, err)
+	}
+	if nextSeq == 1 {
+		s.firstEventIndex.Store(entry.Index)
+	}
+	s.eventIndex.Store(entry.Index)
+	return nil
+}
+
+// view runs fn in a bbolt read-only transaction while holding kvMu for
+// read. Guards against RestoreSnapshot swapping the bbolt handle out
+// from under an in-flight query.
+func (s *Storage) view(fn func(tx *bolt.Tx) error) error {
+	s.kvMu.RLock()
+	defer s.kvMu.RUnlock()
+	return s.keyValueStorage.View(fn)
+}
+
+// update runs fn in a bbolt read-write transaction while holding kvMu
+// for read. Same concurrency shape as view: many concurrent update
+// calls proceed in parallel (bbolt itself serializes writers) and
+// RestoreSnapshot waits for them all to drain.
+func (s *Storage) update(fn func(tx *bolt.Tx) error) error {
+	s.kvMu.RLock()
+	defer s.kvMu.RUnlock()
+	return s.keyValueStorage.Update(fn)
 }
 
 // saveAppliedIndex persists the applied index to bbolt. Called from
@@ -539,7 +637,7 @@ func (s *Storage) EventIndex() uint64 {
 // own short bbolt transaction; this is acceptable because the per-entity
 // handlers are not atomic with each other today either.
 func (s *Storage) saveAppliedIndex(idx uint64) error {
-	return s.keyValueStorage.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(appliedIndexBucket)
 		if b == nil {
 			return ErrBucketMissing
@@ -554,7 +652,7 @@ func (s *Storage) saveAppliedIndex(idx uint64) error {
 // 0 if no apply has happened yet (fresh storage).
 func (s *Storage) loadAppliedIndex() (uint64, error) {
 	var idx uint64
-	err := s.keyValueStorage.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		b := tx.Bucket(appliedIndexBucket)
 		if b == nil {
 			return ErrBucketMissing

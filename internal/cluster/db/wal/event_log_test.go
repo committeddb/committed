@@ -38,7 +38,7 @@ func TestEventLog_AppliedEntriesMirrored(t *testing.T) {
 	}
 
 	// The event log should now contain exactly three entries.
-	li, err := s.EventLog.LastIndex()
+	li, err := s.EventLogLastSeq()
 	require.Nil(t, err)
 	require.Equal(t, uint64(3), li)
 }
@@ -65,13 +65,13 @@ func TestEventLog_SurvivesRestart(t *testing.T) {
 	require.Equal(t, uint64(3), s.EventIndex(), "EventIndex restored from event log")
 	require.Equal(t, uint64(3), s.AppliedIndex(), "AppliedIndex restored from bbolt")
 
-	li, err := s.EventLog.LastIndex()
+	li, err := s.EventLogLastSeq()
 	require.Nil(t, err)
 	require.Equal(t, uint64(3), li, "event log entries persist")
 
 	// Verify the stored entries round-trip back to their raft indexes.
 	for seq := uint64(1); seq <= li; seq++ {
-		data, err := s.EventLog.Read(seq)
+		data, err := s.ReadEventAt(seq)
 		require.Nil(t, err)
 		e := &pb.Entry{}
 		require.Nil(t, e.Unmarshal(data))
@@ -178,7 +178,7 @@ func TestEventLog_ReplaySkipsAlreadyApplied(t *testing.T) {
 	require.Equal(t, uint64(1), s.EventIndex())
 	require.Equal(t, uint64(1), s.AppliedIndex())
 
-	li, err := s.EventLog.LastIndex()
+	li, err := s.EventLogLastSeq()
 	require.Nil(t, err)
 	require.Equal(t, uint64(1), li, "event log not double-written on replay")
 }

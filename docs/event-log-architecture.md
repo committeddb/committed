@@ -599,6 +599,14 @@ default changes.
 
 ## Rebuild procedure
 
+The operator-facing runbook lives at
+[`docs/operations/rebuild.md`](operations/rebuild.md) — that is the
+canonical reference for anyone actually rebuilding a node, and it
+covers the failure modes ("when to rebuild" / "when not to rebuild"),
+the procedure, and post-restart verification. The summary below is
+design-level only; treat the runbook as source of truth when the two
+drift.
+
 ### Manual rebuild of an existing follower
 
 Triggered when a node fatal-exits with the storage-invariant error.

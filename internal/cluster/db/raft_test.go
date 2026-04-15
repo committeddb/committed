@@ -854,6 +854,13 @@ func (ms *MemoryStorage) RestoreSnapshot(snap raftpb.Snapshot) error {
 	return nil
 }
 
+// RaftLogApproxSize returns 0 — raft_test's MemoryStorage has no
+// on-disk footprint, and the compaction trigger against this double
+// is driven by options other than size when it's driven at all.
+func (ms *MemoryStorage) RaftLogApproxSize() (uint64, error) {
+	return 0, nil
+}
+
 // maybeAppendArgsForCallLocked must be called with stateMu held.
 func (ms *MemoryStorage) maybeAppendArgsForCallLocked(st raftpb.HardState, ents []raftpb.Entry, snap raftpb.Snapshot) {
 	normalEntry := false

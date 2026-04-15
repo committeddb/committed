@@ -22,7 +22,7 @@ func (s *Storage) handleType(e *cluster.Entity) error {
 }
 
 func (s *Storage) saveType(t *cluster.Type) error {
-	return s.keyValueStorage.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(typeBucket)
 		if b == nil {
 			return ErrBucketMissing
@@ -54,7 +54,7 @@ func (s *Storage) saveType(t *cluster.Type) error {
 }
 
 func (s *Storage) deleteType(id []byte) error {
-	return s.keyValueStorage.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(typeBucket)
 		if b == nil {
 			return ErrBucketMissing
@@ -66,7 +66,7 @@ func (s *Storage) deleteType(id []byte) error {
 func (s *Storage) Type(id string) (*cluster.Type, error) {
 	t := &cluster.Type{}
 
-	return t, s.keyValueStorage.View(func(tx *bolt.Tx) error {
+	return t, s.view(func(tx *bolt.Tx) error {
 		b := tx.Bucket(typeBucket)
 		if b == nil {
 			return ErrBucketMissing
@@ -82,7 +82,7 @@ func (s *Storage) Type(id string) (*cluster.Type, error) {
 func (s *Storage) Types() ([]*cluster.Configuration, error) {
 	var cfgs []*cluster.Configuration
 
-	err := s.keyValueStorage.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		b := tx.Bucket(typeBucket)
 		if b == nil {
 			return ErrBucketMissing
@@ -114,7 +114,7 @@ func (s *Storage) Types() ([]*cluster.Configuration, error) {
 
 func (s *Storage) TypeVersions(id string) ([]cluster.VersionInfo, error) {
 	var versions []cluster.VersionInfo
-	err := s.keyValueStorage.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		b := tx.Bucket(typeBucket)
 		if b == nil {
 			return ErrBucketMissing
@@ -128,7 +128,7 @@ func (s *Storage) TypeVersions(id string) ([]cluster.VersionInfo, error) {
 
 func (s *Storage) TypeVersion(id string, version uint64) (*cluster.Configuration, error) {
 	cfg := &cluster.Configuration{}
-	err := s.keyValueStorage.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		b := tx.Bucket(typeBucket)
 		if b == nil {
 			return ErrBucketMissing

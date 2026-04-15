@@ -56,6 +56,12 @@ type Storage interface {
 	// Implementations must leave EventLog untouched — it is the
 	// permanent record and independent of raft log retention.
 	Compact(compactIndex uint64) error
+	// RaftLogApproxSize reports the approximate on-disk footprint of
+	// the raft log in bytes, used by the compaction trigger to decide
+	// whether the size limb of the "10GB or 1hr" policy has been
+	// crossed. Implementations are allowed to return rough estimates
+	// — the trigger treats this as a signal, not an assertion.
+	RaftLogApproxSize() (uint64, error)
 	Type(id string) (*cluster.Type, error)
 	TimePoints(typeID string, start time.Time, end time.Time) ([]cluster.TimePoint, error)
 	Reader(id string) ProposalReader     // Gets current index by id cache. If id is not known, index is 0

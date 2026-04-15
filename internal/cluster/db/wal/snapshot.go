@@ -2,6 +2,7 @@ package wal
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -31,7 +32,7 @@ func (s *Storage) CreateSnapshot(index uint64, confState *pb.ConfState) (pb.Snap
 	}
 
 	var buf bytes.Buffer
-	err := s.keyValueStorage.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		_, werr := tx.WriteTo(&buf)
 		return werr
 	})
@@ -74,14 +75,20 @@ func (s *Storage) CreateSnapshot(index uint64, confState *pb.ConfState) (pb.Snap
 // raft.processSnapshot when raft delivers a non-empty rd.Snapshot in
 // the Ready loop.
 //
-// The operation is not atomic: we close the current bolt handle,
-// overwrite bbolt.db on disk, and reopen. A crash between close and
-// reopen leaves the node unable to start — an operator must rerun the
-// rebuild procedure in that case. The Ready loop's invariant check
-// catches the much more common failure, which is a snapshot that
-// advances raft's applied index past this node's permanent event log:
-// that condition is caught before any bbolt content is touched and
-// fatal-exits with the rebuild message.
+// Concurrency: RestoreSnapshot takes kvMu for write, so it blocks any
+// concurrent view / update callers until the close-swap-reopen dance
+// finishes and the new bbolt handle is installed. In-flight queries
+// started before RestoreSnapshot was called complete before the close
+// happens (RLock → Lock serialization), so no read ever sees a closed
+// handle.
+//
+// The file swap itself is not atomic across close / rename / reopen:
+// a crash anywhere in that window leaves the node unable to start, and
+// an operator must rerun the rebuild procedure. The Ready loop's
+// invariant check catches the much more common failure, which is a
+// snapshot that advances raft's applied index past this node's
+// permanent event log: that condition is caught before any bbolt
+// content is touched and fatal-exits with the rebuild message.
 func (s *Storage) RestoreSnapshot(snap pb.Snapshot) error {
 	if len(snap.Data) == 0 {
 		return fmt.Errorf("restore snapshot: empty data")
@@ -99,6 +106,12 @@ func (s *Storage) RestoreSnapshot(snap pb.Snapshot) error {
 			snap.Metadata.Index, s.eventIndex.Load(),
 		)
 	}
+
+	// Serialize against every concurrent bbolt reader/writer. Held for
+	// the full swap so nothing outside this function observes a closed
+	// or torn bbolt handle.
+	s.kvMu.Lock()
+	defer s.kvMu.Unlock()
 
 	// Close the current bolt handle so we can overwrite its file.
 	boltPath := s.keyValueStorage.Path()
@@ -128,21 +141,52 @@ func (s *Storage) RestoreSnapshot(snap pb.Snapshot) error {
 	}
 	s.keyValueStorage = db
 
-	// Refresh cached metadata: the snapshot replaced bbolt content,
-	// which includes the appliedIndex bucket. Load it so subsequent
-	// ApplyCommitted calls treat already-snapshotted entries as
-	// already applied, and re-load databases since their configs
-	// may have changed.
-	idx, err := s.loadAppliedIndex()
-	if err != nil {
+	// Post-swap reloads. We can't use the s.view / s.update helpers
+	// here because we still hold kvMu.Lock and they take kvMu.RLock —
+	// that would deadlock. Read directly against the local db handle;
+	// the lock ensures nothing else is touching it.
+	var idx uint64
+	if err := db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(appliedIndexBucket)
+		if b == nil {
+			return ErrBucketMissing
+		}
+		v := b.Get(appliedIndexKey)
+		if v == nil {
+			return nil
+		}
+		if len(v) != 8 {
+			return fmt.Errorf("appliedIndex: expected 8 bytes, got %d", len(v))
+		}
+		idx = binary.BigEndian.Uint64(v)
+		return nil
+	}); err != nil {
 		return fmt.Errorf("reload appliedIndex: %w", err)
 	}
 	s.appliedIndex.Store(idx)
 
 	// Drop any in-memory database handles and rebuild from the
-	// restored bucket. loadDatabases populates s.databases afresh.
+	// restored bucket. Walks the `databases` bucket directly since the
+	// loadDatabases helper routes through s.view.
 	s.databases = make(map[string]cluster.Database)
-	if err := s.loadDatabases(); err != nil {
+	if err := db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(databaseBucket)
+		if b == nil {
+			return ErrBucketMissing
+		}
+		return forEachCurrent(b, func(id, data []byte) error {
+			cfg := &cluster.Configuration{}
+			if err := cfg.Unmarshal(data); err != nil {
+				return err
+			}
+			_, parsed, err := s.parser.ParseDatabase(cfg.MimeType, cfg.Data)
+			if err != nil {
+				return err
+			}
+			s.databases[cfg.ID] = parsed
+			return nil
+		})
+	}); err != nil {
 		return fmt.Errorf("reload databases: %w", err)
 	}
 

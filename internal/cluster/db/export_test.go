@@ -1,6 +1,11 @@
 package db
 
-import "go.etcd.io/etcd/raft/v3"
+import (
+	"time"
+
+	"go.etcd.io/etcd/raft/v3"
+	"go.uber.org/zap"
+)
 
 // PartitionPeerForTest drops the named peer from this Raft's transport so
 // outbound messages to it become no-ops. Combined with calling the same
@@ -50,6 +55,42 @@ func (n *Raft) CommitIndexForTest() uint64 {
 // entry point.
 func WithTransportWrapperForTest(w func(Transport) Transport) Option {
 	return func(o *options) { o.transportWrapper = w }
+}
+
+// NewRaftForCompactionTest constructs a bare Raft sufficient to drive
+// maybeCompact from a test goroutine. It skips startRaft (no etcd
+// raft.Node, no transport, no serve loops) — the tests that use it
+// only exercise the compaction decision logic, which reads
+// storage.AppliedIndex / EventIndex / RaftLogApproxSize and calls
+// storage.CreateSnapshot / Compact. Production callers must continue
+// to use NewRaft.
+func NewRaftForCompactionTest(s Storage, maxSize uint64, maxAge time.Duration, logger *zap.Logger) *Raft {
+	return &Raft{
+		storage:         s,
+		compactMaxSize:  maxSize,
+		compactMaxAge:   maxAge,
+		lastCompactTime: time.Now(),
+		logger:          logger,
+	}
+}
+
+// MaybeCompactForTest exposes maybeCompact so unit tests can drive the
+// decision logic without wiring up a full Ready loop.
+func (n *Raft) MaybeCompactForTest() {
+	n.maybeCompact()
+}
+
+// LastCompactedIndexForTest lets tests observe the bookkeeping
+// maybeCompact maintains after a successful compaction.
+func (n *Raft) LastCompactedIndexForTest() uint64 {
+	return n.lastCompactedIndex
+}
+
+// SetLastCompactTimeForTest back-dates the internal timestamp so the
+// age limb of the compaction policy fires without sleeping. A raw
+// time setter is the simplest way to drive that path deterministically.
+func (n *Raft) SetLastCompactTimeForTest(t time.Time) {
+	n.lastCompactTime = t
 }
 
 // IngestWorkerIDsForTest returns a snapshot of the ingest worker registry

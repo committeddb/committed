@@ -35,7 +35,7 @@ func (s *Storage) handleSyncable(e *cluster.Entity) error {
 //     the proposal path; that would deadlock under the writer lock.
 func (s *Storage) saveSyncable(t *cluster.Configuration) error {
 	var syncable cluster.Syncable
-	err := s.keyValueStorage.Update(func(tx *bolt.Tx) error {
+	err := s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(syncableBucket)
 		if b == nil {
 			return ErrBucketMissing
@@ -70,7 +70,7 @@ func (s *Storage) saveSyncable(t *cluster.Configuration) error {
 }
 
 func (s *Storage) deleteSyncable(id []byte) error {
-	return s.keyValueStorage.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(syncableBucket)
 		if b == nil {
 			return ErrBucketMissing
@@ -82,7 +82,7 @@ func (s *Storage) deleteSyncable(id []byte) error {
 func (s *Storage) Syncables() ([]*cluster.Configuration, error) {
 	var cfgs []*cluster.Configuration
 
-	err := s.keyValueStorage.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		b := tx.Bucket(syncableBucket)
 		if b == nil {
 			return ErrBucketMissing
@@ -107,7 +107,7 @@ func (s *Storage) Syncables() ([]*cluster.Configuration, error) {
 
 func (s *Storage) SyncableVersions(id string) ([]cluster.VersionInfo, error) {
 	var versions []cluster.VersionInfo
-	err := s.keyValueStorage.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		b := tx.Bucket(syncableBucket)
 		if b == nil {
 			return ErrBucketMissing
@@ -121,7 +121,7 @@ func (s *Storage) SyncableVersions(id string) ([]cluster.VersionInfo, error) {
 
 func (s *Storage) SyncableVersion(id string, version uint64) (*cluster.Configuration, error) {
 	cfg := &cluster.Configuration{}
-	err := s.keyValueStorage.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		b := tx.Bucket(syncableBucket)
 		if b == nil {
 			return ErrBucketMissing

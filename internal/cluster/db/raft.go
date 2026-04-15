@@ -26,16 +26,23 @@ type Raft struct {
 	id           uint64
 	leaderState  *LeaderState
 	tickInterval time.Duration
-	// compactEveryN mirrors options.compactEveryN. 0 disables automatic
-	// compaction. When positive, maybeCompact is invoked once per
-	// committed-entry threshold and trims the raft log to a point that
-	// never exceeds this node's permanent event log highwatermark.
-	compactEveryN uint64
+	// compactMaxSize and compactMaxAge implement the "10GB or 1hr"
+	// policy described in docs/event-log-architecture.md §
+	// "Compaction policy". maybeCompact fires when either threshold is
+	// crossed; 0 disables that limb. Both zero disables automatic
+	// compaction entirely.
+	compactMaxSize uint64
+	compactMaxAge  time.Duration
 	// lastCompactedIndex is the raft index the log was most recently
-	// compacted to on this node, used so maybeCompact doesn't redo a
-	// compaction and doesn't attempt to compact before a previous one
-	// completes. Mutated only from the serveChannels goroutine.
+	// compacted to on this node. Used so maybeCompact doesn't attempt
+	// to re-compact to the same point.
 	lastCompactedIndex uint64
+	// lastCompactTime is the wall-clock moment of the most recent
+	// compaction (or startRaft time if no compaction has happened).
+	// The age limb of the policy fires when (time.Now() -
+	// lastCompactTime) exceeds compactMaxAge. Mutated only from the
+	// serveChannels goroutine.
+	lastCompactTime time.Time
 
 	node    raft.Node
 	storage Storage
@@ -97,7 +104,9 @@ func newRaftWithOptions(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []
 		raftStopC:          make(chan struct{}),
 		leaderState:        NewLeaderState(false),
 		tickInterval:       cfg.tickInterval,
-		compactEveryN:      cfg.compactEveryN,
+		compactMaxSize:     cfg.compactMaxSize,
+		compactMaxAge:      cfg.compactMaxAge,
+		lastCompactTime:    time.Now(),
 		storage:            s,
 		applyNotifier:      applyNotifier,
 		transportStopC:     make(chan struct{}),
@@ -457,18 +466,18 @@ func (n *Raft) checkStorageInvariant() {
 	)
 }
 
-// maybeCompact trims the raft log up to a safe point when the count of
-// committed entries since the last compaction crosses compactEveryN.
-// Safety constraints from docs/event-log-architecture.md §
-// "Compaction policy":
+// maybeCompact trims the raft log up to a safe point when either
+// compactMaxSize or compactMaxAge is exceeded — the "10GB or 1hr"
+// policy described in docs/event-log-architecture.md § "Compaction
+// policy". Safety constraints from the same doc:
 //
 //   - Compact point must be ≤ this node's permanent event log
-//     highwatermark (EventIndex), so we never forget a raft entry whose
-//     corresponding event isn't already durable here.
+//     highwatermark (EventIndex), so we never forget a raft entry
+//     whose corresponding event isn't already durable here.
 //   - Compact point must be ≤ AppliedIndex, the normal raft contract.
 //   - We leave a small buffer below appliedIndex so a follower that
-//     briefly lagged can still catch up via AppendEntries instead of a
-//     more expensive snapshot install.
+//     briefly lagged can still catch up via AppendEntries instead of
+//     a more expensive snapshot install.
 //
 // The quorum-graduated constraint named in the doc isn't implemented
 // for v1 — etcd raft doesn't expose peer-wise applied indices
@@ -477,21 +486,39 @@ func (n *Raft) checkStorageInvariant() {
 // that fall behind still receive an InstallSnapshot if the leader's
 // log has moved past them; that's the intended shape.
 func (n *Raft) maybeCompact() {
-	if n.compactEveryN == 0 {
+	if n.compactMaxSize == 0 && n.compactMaxAge == 0 {
 		return
 	}
+
+	triggered := false
+	var reason string
+	if n.compactMaxSize > 0 {
+		size, err := n.storage.RaftLogApproxSize()
+		if err == nil && size >= n.compactMaxSize {
+			triggered = true
+			reason = "size"
+		}
+	}
+	if !triggered && n.compactMaxAge > 0 {
+		if time.Since(n.lastCompactTime) >= n.compactMaxAge {
+			triggered = true
+			reason = "age"
+		}
+	}
+	if !triggered {
+		return
+	}
+
 	applied := n.storage.AppliedIndex()
 	if applied == 0 {
 		return
 	}
-	if applied-n.lastCompactedIndex < n.compactEveryN {
-		return
-	}
 
 	// Hold back from the very tip of applied so brief-lag followers can
-	// still use AppendEntries. The buffer is the compact threshold
-	// itself, which keeps the raft log around long enough for at least
-	// one "round" of follower catchup after each compaction.
+	// still use AppendEntries instead of the costlier InstallSnapshot
+	// path. Eight entries is arbitrary — small enough that compaction
+	// still buys real disk savings, large enough that a short network
+	// blip doesn't force a snapshot install.
 	const safetyBuffer = uint64(8)
 	if applied <= safetyBuffer {
 		return
@@ -519,7 +546,8 @@ func (n *Raft) maybeCompact() {
 		return
 	}
 	n.lastCompactedIndex = compactTo
-	n.logger.Debug("raft log compacted", zap.Uint64("compactTo", compactTo))
+	n.lastCompactTime = time.Now()
+	n.logger.Debug("raft log compacted", zap.Uint64("compactTo", compactTo), zap.String("reason", reason))
 }
 
 // processSnapshot installs a snapshot delivered by the raft Ready

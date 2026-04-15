@@ -49,7 +49,7 @@ func (r *Reader) Read() (uint64, *cluster.Proposal, error) {
 	}
 
 	for {
-		walLast, err := r.s.EventLog.LastIndex()
+		walLast, err := r.s.lastEventSeq()
 		if err != nil {
 			return 0, nil, err
 		}
@@ -57,7 +57,7 @@ func (r *Reader) Read() (uint64, *cluster.Proposal, error) {
 			return 0, nil, io.EOF
 		}
 
-		bs, err := r.s.EventLog.Read(r.walSeq)
+		bs, err := r.s.readEventAt(r.walSeq)
 		if err != nil {
 			return 0, nil, fmt.Errorf("event log read seq %d: %w", r.walSeq, err)
 		}
@@ -97,11 +97,11 @@ func (r *Reader) Read() (uint64, *cluster.Proposal, error) {
 // eventIndex.Load()), so the raft-index column of the event log is
 // sorted.
 func (r *Reader) resolveStartSeq() (uint64, error) {
-	first, err := r.s.EventLog.FirstIndex()
+	first, err := r.s.firstEventSeq()
 	if err != nil {
 		return 0, err
 	}
-	last, err := r.s.EventLog.LastIndex()
+	last, err := r.s.lastEventSeq()
 	if err != nil {
 		return 0, err
 	}
@@ -118,7 +118,7 @@ func (r *Reader) resolveStartSeq() (uint64, error) {
 	lo, hi := first, last+1
 	for lo < hi {
 		mid := lo + (hi-lo)/2
-		bs, err := r.s.EventLog.Read(mid)
+		bs, err := r.s.readEventAt(mid)
 		if err != nil {
 			return 0, fmt.Errorf("event log read seq %d during resolve: %w", mid, err)
 		}

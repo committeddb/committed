@@ -108,6 +108,13 @@ func (ms *MemoryStorage) RestoreSnapshot(snap raftpb.Snapshot) error {
 	return nil
 }
 
+// RaftLogApproxSize reports 0 for MemoryStorage — there is no on-disk
+// raft log to measure, and the compaction trigger against an
+// in-memory test double is always driven by options other than size.
+func (ms *MemoryStorage) RaftLogApproxSize() (uint64, error) {
+	return 0, nil
+}
+
 func (ms *MemoryStorage) maybeAppendArgsForCall(st raftpb.HardState, ents []raftpb.Entry, snap raftpb.Snapshot) {
 	normalEntry := false
 	for _, ent := range ents {
