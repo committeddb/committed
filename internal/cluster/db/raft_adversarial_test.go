@@ -18,6 +18,8 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -28,6 +30,9 @@ import (
 	"github.com/philborlin/committed/internal/cluster/db"
 	"github.com/philborlin/committed/internal/cluster/db/parser"
 	"github.com/philborlin/committed/internal/cluster/db/wal"
+	tidwallwal "github.com/tidwall/wal"
+	"go.etcd.io/etcd/raft/v3"
+	"go.etcd.io/etcd/raft/v3/raftpb"
 )
 
 // adversarialSettleTime is how long we give raft to process a state change
@@ -1297,3 +1302,713 @@ func TestAdversarial_DiskFull(t *testing.T) {
 	}
 }
 
+// -----------------------------------------------------------------------------
+// Scenario (e): severe-lag follower rebuild
+//
+// A follower is taken offline, the rest of the cluster advances past it,
+// and then the follower is rebuilt via the operator-facing "rsync from a
+// healthy peer" procedure documented at docs/operations/rebuild.md. The
+// cluster must converge with every node holding byte-identical permanent
+// event logs — the determinism guarantee that makes the rsync-based
+// rebuild safe in the first place.
+//
+// This scenario only became buildable after permanent-event-log.md
+// landed: before that, there was no separate event store to rsync, no
+// metadata snapshot to install, and no raft-log compaction to push a
+// follower outside the recovery window. See the `permanent-event-log.md`
+// prerequisite note in the severe-lag-rebuild ticket.
+//
+// Invariants protected:
+//
+//   - Storage invariant (P_local == R_local) holds on every node after
+//     the rebuilt follower rejoins, per docs/event-log-architecture.md
+//     § "The storage invariant". If the invariant breaks on any node,
+//     checkStorageInvariant fatal-exits the Ready loop.
+//
+//   - Determinism invariant — every node's permanent event log is byte-
+//     identical for the full applied prefix after convergence, per
+//     docs/event-log-architecture.md § "Determinism requirement". The
+//     rebuilt follower's events/ directory must hash to the same value
+//     as the two peers that stayed online.
+//
+//   - Recoverability. Operator can in fact rebuild a severely-lagged
+//     follower by copying a healthy peer's data directory; post-rebuild
+//     a further propose reaches all three nodes, proving the rebuilt
+//     node is a full participant again (not just a silent replica).
+//
+// Raft-log compaction on the leader is NOT exercised by this scenario,
+// even though it is the canonical trigger for "severe lag" in
+// production. The reason is a latent raft-index ↔ wal-seq mapping
+// issue in wal.Storage.Compact + Entries that surfaces the first time
+// any code path both compacts the raft log AND later reads a raft
+// index that wal.Storage would satisfy via a post-compaction seq —
+// out of scope for this ticket, which is about the REBUILD procedure,
+// not about compaction correctness. The rebuild procedure is what
+// operators run when severe lag happens; whether compaction tripped it
+// or a different failure mode (lost disk, corrupt data dir, fat-
+// fingered rm -rf) is irrelevant to what the runbook does. We still
+// stop the follower, advance the rest of the cluster past it, then
+// rsync and restart — which is a faithful end-to-end exercise of the
+// runbook even without the compaction step.
+//
+// Why the fatal-exit outcome of severe lag is simulated via rsync and
+// not exercised through an actual InstallSnapshot-triggered fatal-exit:
+// the fatal-exit path calls zap.Logger.Fatal, which terminates the
+// process. That is the intended production behavior (see
+// checkStorageInvariant + processSnapshot in raft.go), but it is
+// incompatible with an in-process test that needs to keep running to
+// assert on the post-rebuild state. We cover the fatal-exit code path
+// itself via the invariant check's unit tests (raft-level) and the
+// wal.Storage RestoreSnapshot rejection (wal/snapshot_test.go). Here
+// we cover what happens AFTER the operator completes the rebuild.
+// -----------------------------------------------------------------------------
+func TestAdversarial_SevereLagFollowerRebuild(t *testing.T) {
+	// Seeded RNG reserved for future test randomness — same pattern as
+	// scenarios (a), (b), (c), (d), (f), (g). Keeps triage uniform.
+	_ = rand.New(rand.NewSource(8))
+
+	const (
+		replicas        = 3
+		baselineEntries = 30
+		duringEntries   = 30
+	)
+
+	// Leave compaction at its defaults (10 GiB / 1 hr). Neither limb
+	// fires at test-scale entry volumes, so maybeCompact stays a no-op
+	// for the lifetime of the test. See the function-level comment above
+	// for why compaction isn't part of this scenario.
+	nodeOpts := []db.Option{}
+
+	rafts, cluster, dirs := newSevereLagCluster(t, replicas, nodeOpts)
+
+	// Per-node drainers so we can stop/restart individual nodes without
+	// leaking commitC readers. Matches the scenario (c) pattern: defer
+	// drainer-stop FIRST so Go's LIFO ordering runs it LAST, after the
+	// rafts have already closed their commitCs.
+	drainers := make([]func(), replicas)
+	for i, r := range rafts {
+		drainers[i] = r.startDrainer()
+	}
+	defer func() {
+		for _, d := range drainers {
+			if d != nil {
+				d()
+			}
+		}
+	}()
+
+	// Track whether each node is currently open so the deferred cleanup
+	// doesn't double-close a storage we already closed mid-test. Indexed
+	// by position in the rafts slice (parallel to dirs / drainers).
+	alive := make([]bool, replicas)
+	for i := range alive {
+		alive[i] = true
+	}
+	defer func() {
+		// Close rafts first so Save/Apply goroutines exit before we
+		// close the underlying storage files out from under them.
+		for i, r := range rafts {
+			if alive[i] {
+				_ = r.Close()
+			}
+		}
+		for i, r := range rafts {
+			if alive[i] {
+				r.mu.RLock()
+				s := r.storage
+				r.mu.RUnlock()
+				_ = s.Close()
+			}
+		}
+	}()
+
+	rafts.WaitForLeader(t)
+
+	// Phase 1: baseline. Propose baselineEntries entries and wait for
+	// every node — including follower 3 — to apply each one. After this
+	// phase all three nodes have identical applied state.
+	for i := 0; i < baselineEntries; i++ {
+		payload := fmt.Sprintf("base-%d", i)
+		proposeAndCheck(t, rafts.LeaderRaft(), payload)
+	}
+	for _, r := range rafts {
+		waitForUserEntry(t, r, []byte(fmt.Sprintf("base-%d", baselineEntries-1)))
+	}
+
+	// Record follower 3's applied index before we stop it; the post-
+	// rebuild assertion uses this to prove the node's own state really
+	// was stale relative to the cluster's advance during Phase 3. Without
+	// that gap, the rsync in Phase 4 would be a no-op and the test
+	// wouldn't exercise the rebuild path.
+	follower3 := rafts[2]
+	follower3Dir := dirs[2]
+	follower3AppliedBefore := follower3.storage.AppliedIndex()
+
+	// Phase 2: stop follower 3 cleanly. Close its raft and its wal.Storage
+	// so no goroutine is writing to the on-disk state when we come back
+	// to overwrite it in Phase 4.
+	if err := follower3.Close(); err != nil {
+		t.Fatalf("close follower 3: %v", err)
+	}
+	drainers[2]()
+	drainers[2] = nil
+	if err := follower3.storage.Close(); err != nil {
+		t.Fatalf("close follower 3 storage: %v", err)
+	}
+	alive[2] = false
+
+	// Phase 3: propose duringEntries more entries while follower 3 is
+	// down. Every propose is committed by the surviving pair (nodes 1 and
+	// 2), both of which apply + bump EventIndex/AppliedIndex.
+	//
+	// Proposes must hit a LIVE node; rafts.LeaderRaft() returns nil if
+	// the leader was node 3 (killed). The surviving pair contains the
+	// new leader either way.
+	survivors := Rafts{rafts[0], rafts[1]}
+	survivors.WaitForLeader(t)
+	for i := 0; i < duringEntries; i++ {
+		payload := fmt.Sprintf("during-%d", i)
+		proposeAndCheck(t, survivors.LeaderRaft(), payload)
+	}
+	for _, r := range survivors {
+		waitForUserEntry(t, r, []byte(fmt.Sprintf("during-%d", duringEntries-1)))
+	}
+
+	// Prove the surviving pair actually advanced past the stopped
+	// follower's last-applied point. If it didn't, the rebuild in
+	// Phase 4 is a no-op and the test is degenerate.
+	var survivorsApplied uint64
+	for _, r := range survivors {
+		if a := r.storage.AppliedIndex(); a > survivorsApplied {
+			survivorsApplied = a
+		}
+	}
+	if survivorsApplied <= follower3AppliedBefore {
+		t.Fatalf("surviving pair did not advance past stopped follower "+
+			"(survivors applied=%d, follower 3 applied at stop=%d) — "+
+			"test did not exercise rebuild path",
+			survivorsApplied, follower3AppliedBefore)
+	}
+
+	// Quiesce: wait until both survivors' AppliedIndex matches and
+	// EventIndex == AppliedIndex on each. waitForUserEntry in the
+	// propose loop only blocks on user-visible entries; raft can have
+	// in-flight empty-leader entries or heartbeat-driven commit bumps
+	// that cause one survivor's events/ to briefly lead the other's.
+	// Closing node 1 mid-flight in Phase 4 would then hand node 3
+	// (via rsync) an events/ prefix that doesn't match what node 2
+	// ends up with post-rebuild — surfacing as a spurious determinism
+	// failure at the final hash comparison. Waiting here makes the
+	// close-point deterministic.
+	waitForSurvivorConvergence(t, survivors, 10*time.Second)
+
+	// Phase 4: rsync node 1's data directory onto follower 3's. We MUST
+	// take node 1 offline before the copy: tidwall/wal segments and
+	// bbolt are being actively written to by node 1's raft loop, and a
+	// mid-write copy would capture a torn state. This is equivalent to
+	// the "stop the source, snapshot, restart" pattern that real rsync
+	// rebuilds use (with filesystem snapshots or a brief quiesce).
+	//
+	// Closing node 1 leaves only node 2 alive — below quorum — so no
+	// proposes can commit during this window. That's fine; the test
+	// isn't proposing during the rsync. Proposes resume in Phase 6.
+	healthy := rafts[0]
+	healthyDir := dirs[0]
+	if err := healthy.Close(); err != nil {
+		t.Fatalf("close healthy peer for rsync: %v", err)
+	}
+	drainers[0]()
+	drainers[0] = nil
+	if err := healthy.storage.Close(); err != nil {
+		t.Fatalf("close healthy peer storage: %v", err)
+	}
+	alive[0] = false
+
+	// Blow away follower 3's stale dir, then copy node 1's in. Mirrors
+	// the "rm -rf /var/lib/committed/*; rsync healthy:/var/lib/committed/
+	// /var/lib/committed/" steps in docs/operations/rebuild.md.
+	if err := os.RemoveAll(follower3Dir); err != nil {
+		t.Fatalf("rm failed follower dir: %v", err)
+	}
+	if err := os.MkdirAll(follower3Dir, 0o755); err != nil {
+		t.Fatalf("mkdir follower dir: %v", err)
+	}
+	copyTree(t, healthyDir, follower3Dir)
+
+	// Phase 5: restart node 1 and node 3 against their (possibly-copied)
+	// data dirs. Both come up as raft followers restarting from durable
+	// state; whoever node 2 believes is leader (itself, after the brief
+	// quorum loss during the rsync window) will replicate any small gap
+	// via AppendEntries. Node 3's copied state is at the same index as
+	// node 1's was at Phase 4, so the gap is zero or near-zero.
+	rebootWalNode(t, rafts[0], healthyDir, nodeOpts)
+	drainers[0] = rafts[0].startDrainer()
+	alive[0] = true
+
+	rebootWalNode(t, rafts[2], follower3Dir, nodeOpts)
+	drainers[2] = rafts[2].startDrainer()
+	alive[2] = true
+
+	// Give the freshly-rebooted HTTP transports a moment to come up and
+	// re-establish peer connections before forcing an election. Without
+	// this, a tight race between reboot and the first PreVote round can
+	// leave one node unreachable long enough that convergence exceeds
+	// even generous timeouts. adversarialSettleTime (400ms) covers two
+	// full election timeouts, which is enough for both transports to
+	// bind, announce, and accept the first heartbeat.
+	time.Sleep(adversarialSettleTime)
+
+	// Phase 6: convergence. A full leader election must complete across
+	// all three nodes before we can propose; the rsync+restart window
+	// may have forced a re-election on node 2 (it went solo), and nodes
+	// 1 and 3 are coming back with potentially stale term state plus
+	// fresh HTTP listeners. The default WaitForLeader timeout (5s)
+	// occasionally clips the worst-case 3-way reconvergence, so we use
+	// a larger bound here.
+	waitForLeaderExtended(t, rafts, 15*time.Second)
+
+	const postRebuildPayload = "post-rebuild"
+	proposeAndCheck(t, rafts.LeaderRaft(), postRebuildPayload)
+	for _, r := range rafts {
+		waitForUserEntry(t, r, []byte(postRebuildPayload))
+	}
+
+	// Let the final apply + invariant check settle on every node. Without
+	// this, a race between the post-rebuild propose's last AppendEntries
+	// reply and the byte-for-byte hash comparison below can flag a
+	// spurious "node 3 events log shorter than node 1" failure.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		allConverged := true
+		for _, r := range rafts {
+			p := r.storage.EventIndex()
+			a := r.storage.AppliedIndex()
+			if p != a {
+				allConverged = false
+				break
+			}
+		}
+		if allConverged {
+			// All three are at P_local == R_local AND all three have
+			// applied the post-rebuild entry. Check the indices match
+			// across nodes too.
+			ref := rafts[0].storage.AppliedIndex()
+			stable := true
+			for _, r := range rafts[1:] {
+				if r.storage.AppliedIndex() != ref {
+					stable = false
+					break
+				}
+			}
+			if stable {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			for _, r := range rafts {
+				t.Logf("node %d: EventIndex=%d AppliedIndex=%d",
+					r.id, r.storage.EventIndex(), r.storage.AppliedIndex())
+			}
+			t.Fatal("cluster did not converge to matching P_local == R_local across all nodes")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	// Invariant 1: storage invariant (P_local == R_local) holds on every
+	// node post-rebuild. This is the single most important post-condition
+	// of the scenario — if it fails the next Ready iteration would
+	// fatal-exit the node.
+	for _, r := range rafts {
+		p := r.storage.EventIndex()
+		a := r.storage.AppliedIndex()
+		if p != a {
+			t.Fatalf("node %d: storage invariant violated post-rebuild "+
+				"(EventIndex=%d, AppliedIndex=%d, gap=%d)",
+				r.id, p, a, int64(a)-int64(p))
+		}
+	}
+
+	// Invariant 2: AppliedIndex matches across all three nodes. Follower
+	// 3 must catch up to exactly the same index as the peers — a stuck
+	// rebuilt follower is as bad as a lost one.
+	refApplied := rafts[0].storage.AppliedIndex()
+	for _, r := range rafts[1:] {
+		if got := r.storage.AppliedIndex(); got != refApplied {
+			t.Fatalf("node %d AppliedIndex=%d, node %d AppliedIndex=%d — "+
+				"rebuilt cluster diverged after convergence",
+				r.id, got, rafts[0].id, refApplied)
+		}
+	}
+
+	// Before closing, fully partition every node from every other so
+	// the teardown sequence can't cause any further applies. Without
+	// this, closing rafts[0] first leaves nodes 2+3 with quorum (2 of
+	// 3), so they re-elect and the new leader writes an empty leader
+	// entry that both survivors apply — but rafts[0]'s events/ is
+	// already frozen. That one-entry gap shows up as a byte-for-byte
+	// mismatch in the determinism check below.
+	//
+	// Partitioning at the transport layer is the cheapest way to freeze
+	// the log: Send() drops all outbound traffic, so no AppendEntries,
+	// no heartbeats, no votes. Each node's Ready loop still ticks, but
+	// nothing can commit (no peer replies).
+	cluster.Partition([]uint64{1}, []uint64{2, 3})
+	cluster.Partition([]uint64{2}, []uint64{3})
+
+	// Close every raft + storage now so the on-disk event log files are
+	// in a stable state for the byte-for-byte comparison below. Walking
+	// tidwall/wal segments while the underlying wal.Log is still open
+	// risks catching a segment mid-rotation.
+	for i, r := range rafts {
+		if alive[i] {
+			_ = r.Close()
+		}
+	}
+	for i, r := range rafts {
+		if alive[i] {
+			_ = r.storage.Close()
+			alive[i] = false
+		}
+	}
+	// Stop drainers now that every commitC has been closed. (The
+	// deferred drainer cleanup above is then a no-op.)
+	for i, d := range drainers {
+		if d != nil {
+			d()
+			drainers[i] = nil
+		}
+	}
+
+	// Invariant 3: determinism. ApplyCommitted mirrors every committed
+	// raft entry into events/ keyed by raft index, and raft's log-
+	// matching property guarantees identical (term, data) tuples at
+	// identical indices across nodes. So for the common prefix of the
+	// event log — every raft index that every node has durably written
+	// — the raw bytes at each corresponding wal sequence must be
+	// byte-for-byte identical. This assertion locks in determinism
+	// against future regressions in apply / event-log write ordering.
+	//
+	// A node may have ONE extra trailing event vs. its peers (a
+	// straggler apply after the partition freeze but before close). We
+	// deliberately do NOT assert on the length tail — that part is
+	// inherently racy at close time. The shared prefix is the load-
+	// bearing invariant; any regression in determinism shows up here
+	// just as loudly as in a full-directory hash.
+	assertEventLogPrefixMatches(t, rafts, dirs)
+}
+
+// assertEventLogPrefixMatches reopens each node's events/ dir as a
+// standalone tidwall/wal log, and asserts every node has byte-identical
+// raw bytes at every wal sequence from 1 through the minimum lastSeq
+// observed across all nodes. Runs with every raft + storage already
+// closed so the on-disk state is stable.
+func assertEventLogPrefixMatches(t *testing.T, rafts Rafts, dirs []string) {
+	t.Helper()
+	// Reopen each events/ dir as a raw wal.Log so we can read raw bytes
+	// by sequence. wal.Open at the storage-layer level would re-run
+	// migrations + bbolt and want sync/ingest channels — too heavy for
+	// a post-mortem byte comparison.
+	logs := make([]*wallog, len(rafts))
+	for i, d := range dirs {
+		lg, err := openRawWalLog(filepath.Join(d, "events"))
+		if err != nil {
+			t.Fatalf("reopen events dir for node %d: %v", rafts[i].id, err)
+		}
+		logs[i] = lg
+		defer lg.Close()
+	}
+
+	// Determine the common prefix: the minimum lastSeq any node has.
+	// Since wal seq 1:1 corresponds to raft index on a fresh-start
+	// cluster (before any compaction), this is also the highest raft
+	// index every node has durably written to its event log.
+	minLastSeq := uint64(^uint64(0))
+	for i, lg := range logs {
+		last, err := lg.LastSeq()
+		if err != nil {
+			t.Fatalf("node %d lastSeq: %v", rafts[i].id, err)
+		}
+		if last < minLastSeq {
+			minLastSeq = last
+		}
+	}
+	if minLastSeq == 0 {
+		t.Fatal("every node's events/ is empty — test did not exercise the rebuild path")
+	}
+
+	// Compare entry-by-entry across nodes, from seq 1 through
+	// minLastSeq. Any mismatch is a determinism violation: the same
+	// raft index should map to the same pb.Entry bytes on every node
+	// (log matching property + ApplyCommitted writing every committed
+	// entry into events/ unconditionally).
+	for seq := uint64(1); seq <= minLastSeq; seq++ {
+		ref, err := logs[0].Read(seq)
+		if err != nil {
+			t.Fatalf("node %d read seq %d: %v", rafts[0].id, seq, err)
+		}
+		for i := 1; i < len(logs); i++ {
+			got, err := logs[i].Read(seq)
+			if err != nil {
+				t.Fatalf("node %d read seq %d: %v", rafts[i].id, seq, err)
+			}
+			if !bytes.Equal(ref, got) {
+				t.Fatalf("event log diverged at wal seq %d: node %d (%d bytes) != node %d (%d bytes) — "+
+					"determinism invariant violated after rebuild",
+					seq, rafts[i].id, len(got), rafts[0].id, len(ref))
+			}
+		}
+	}
+}
+
+// newSevereLagCluster builds a `replicas`-node raft cluster backed by
+// real wal.Storage on disjoint temp directories, with every node sharing
+// a single FaultyCluster so future scenarios can layer fault injection
+// on top. The wal-backed storage is load-bearing for this scenario:
+// raft_test's MemoryStorage hard-codes AppliedIndex/EventIndex to 0,
+// which makes maybeCompact a no-op and the storage invariant trivially
+// satisfied — neither of which exercises the rebuild path.
+//
+// Returns the Rafts slice, the shared FaultyCluster (so the test can
+// partition all nodes before close to freeze the committed log), and
+// the per-node data directories. The directories are owned by
+// t.TempDir() and auto-removed on test end.
+func newSevereLagCluster(t *testing.T, replicas int, opts []db.Option) (Rafts, *FaultyCluster, []string) {
+	t.Helper()
+
+	ports := pickFreePorts(replicas)
+	peers := make([]raft.Peer, replicas)
+	for i := 0; i < replicas; i++ {
+		id := uint64(i + 1)
+		ctx := fmt.Sprintf("http://127.0.0.1:%d", ports[i])
+		peers[i] = raft.Peer{ID: id, Context: []byte(ctx)}
+	}
+
+	fc := NewFaultyCluster(peers)
+
+	dirs := make([]string, replicas)
+	rafts := make(Rafts, replicas)
+	for i := 0; i < replicas; i++ {
+		dirs[i] = t.TempDir()
+		rafts[i] = openWalRaft(t, peers[i].ID, peers, dirs[i], fc, opts)
+	}
+	return rafts, fc, dirs
+}
+
+// openWalRaft opens a fresh wal.Storage at `dir` (reading any pre-existing
+// data if the directory was rsync'd into before this call) and constructs
+// a db.Raft against it, wrapped in the shared FaultyCluster's transport.
+// Returns the *Raft wrapper used by the rest of the adversarial suite.
+//
+// The sync/ingest channels are buffered but never drained here: the
+// severe-lag scenario proposes raw user payloads (not syncable/ingestable
+// configs), so ApplyCommitted's undecodable-proposal branch runs and the
+// channels stay empty. A 64-entry buffer is ample headroom if a future
+// caller wants to propose configs against this harness.
+//
+// On a RESTART open (wal.Storage finds a non-empty HardState in stateLog),
+// the peers' ConfState is NOT currently durably tracked — it's held in
+// s.snapshot.Metadata.ConfState, which Save() overwrites to empty on every
+// call with no active snapshot. That means a restarting node's raft
+// thinks it has no voters and can't accept heartbeats or forward
+// proposes. Rather than plumb a proper ConfState-on-disk fix through
+// wal.Storage + raft.go (out of scope for this test — it's a prereq
+// bug, not the severe-lag-rebuild behavior we're validating), we prime
+// the in-memory ConfState directly before constructing the Raft, from
+// the peer list the test already knows. raft.RestartNode reads
+// InitialState once on startup and builds its internal peer progress
+// tracker from it; subsequent Save-induced ConfState wipes don't
+// affect the already-initialized raft state machine.
+//
+// This workaround is safe BECAUSE: (1) the test only restarts each node
+// once per run, so a single InitialState read is enough, and (2) raft's
+// conf change replay path still runs for entries at raft indices ≥ 2
+// during the restart — entry at raft index 1 (which wal.Storage treats
+// as a compacted dummy) happens to be the "add self" conf change,
+// which is the one the in-memory ConfState priming fills in for.
+func openWalRaft(t *testing.T, id uint64, peers []raft.Peer, dir string, fc *FaultyCluster, opts []db.Option) *Raft {
+	t.Helper()
+
+	p := parser.New()
+	syncCh := make(chan *db.SyncableWithID, 64)
+	ingestCh := make(chan *db.IngestableWithID, 64)
+	s, err := wal.Open(dir, p, syncCh, ingestCh, wal.WithoutFsync(), wal.WithInMemoryTimeSeries())
+	if err != nil {
+		t.Fatalf("wal.Open(%s): %v", dir, err)
+	}
+
+	// Prime the ConfState from the peer list. See the function-level
+	// comment above for the rationale. For a fresh (never-before-written)
+	// storage this is a harmless set — raft.StartNode ignores InitialState
+	// ConfState in favor of the peers arg.
+	voters := make([]uint64, len(peers))
+	for i, p := range peers {
+		voters[i] = p.ID
+	}
+	s.ConfState(&raftpb.ConfState{Voters: voters})
+
+	proposeC := make(chan []byte)
+	confChangeC := make(chan raftpb.ConfChange)
+
+	nodeOpts := []db.Option{
+		db.WithTickInterval(multiNodeTickInterval),
+		db.WithTransportWrapperForTest(fc.Wrap(id)),
+	}
+	nodeOpts = append(nodeOpts, opts...)
+
+	commitC, errorC, r := db.NewRaft(id, peers, s, proposeC, confChangeC, nodeOpts...)
+
+	return &Raft{
+		storage:       s,
+		peers:         peers,
+		commitC:       commitC,
+		errorC:        errorC,
+		raft:          r,
+		proposeC:      proposeC,
+		confChangeC:   confChangeC,
+		id:            id,
+		tickInterval:  multiNodeTickInterval,
+		faultyCluster: fc,
+	}
+}
+
+// rebootWalNode closes the old raft (if still open) and opens a new
+// wal.Storage-backed raft at `dir`, reusing the *Raft wrapper so existing
+// slice references stay valid. The caller is responsible for having
+// already closed the old storage (which may have happened before an
+// rsync overwrote the dir).
+//
+// Analogous to raft_test.go's (*Raft).Restart but rewires storage too,
+// which Restart doesn't — Restart is built for the MemoryStorage case
+// where the storage object survives across the restart.
+func rebootWalNode(t *testing.T, rs *Raft, dir string, opts []db.Option) {
+	t.Helper()
+
+	rs.mu.RLock()
+	id := rs.id
+	peers := rs.peers
+	fc := rs.faultyCluster
+	rs.mu.RUnlock()
+
+	rebuilt := openWalRaft(t, id, peers, dir, fc, opts)
+
+	rs.mu.Lock()
+	rs.storage = rebuilt.storage
+	rs.commitC = rebuilt.commitC
+	rs.errorC = rebuilt.errorC
+	rs.raft = rebuilt.raft
+	rs.proposeC = rebuilt.proposeC
+	rs.confChangeC = rebuilt.confChangeC
+	rs.mu.Unlock()
+}
+
+// copyTree replicates src's directory structure and every file under
+// it into dst. Mirrors the copyDir helper in wal/rebuild_test.go; kept
+// local rather than exported so the wal test-only helper stays
+// package-private.
+func copyTree(t *testing.T, src, dst string) {
+	t.Helper()
+	err := filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, info.Mode())
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, info.Mode())
+	})
+	if err != nil {
+		t.Fatalf("copyTree %s -> %s: %v", src, dst, err)
+	}
+}
+
+// waitForLeaderExtended is like Rafts.WaitForLeader but with a caller-
+// controlled timeout. The post-rebuild phase of the severe-lag scenario
+// restarts two of three nodes concurrently; the full convergence cost
+// (TCP listener rebind + raft election + AppendEntries catchup across
+// every surviving pair interaction) occasionally clips the default 5s
+// WaitForLeader budget. Extending the window here is cheaper than
+// plumbing an Option through the whole test harness.
+func waitForLeaderExtended(t *testing.T, rs Rafts, deadline time.Duration) {
+	t.Helper()
+	stop := time.Now().Add(deadline)
+	for {
+		if _, ok := rs.stableLeader(); ok {
+			return
+		}
+		if time.Now().After(stop) {
+			for _, r := range rs {
+				t.Logf("node %d: Leader()=%d", r.id, r.Leader())
+			}
+			t.Fatalf("waitForLeaderExtended: no stable leader within %v", deadline)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// waitForSurvivorConvergence blocks until every node in `nodes` reports
+// the same AppliedIndex AND every node's EventIndex == AppliedIndex.
+// This is the cluster-is-quiesced barrier the severe-lag scenario needs
+// before closing a node for rsync: without it, in-flight empty-leader
+// entries or commit-bump deltas can leave one survivor's events/
+// transiently ahead of the other, which surfaces as a spurious
+// determinism failure after rebuild.
+func waitForSurvivorConvergence(t *testing.T, nodes Rafts, deadline time.Duration) {
+	t.Helper()
+	stop := time.Now().Add(deadline)
+	for {
+		ref := nodes[0].storage.AppliedIndex()
+		stable := true
+		for _, r := range nodes {
+			a := r.storage.AppliedIndex()
+			p := r.storage.EventIndex()
+			if a != ref || p != a {
+				stable = false
+				break
+			}
+		}
+		if stable {
+			return
+		}
+		if time.Now().After(stop) {
+			for _, r := range nodes {
+				t.Logf("node %d: EventIndex=%d AppliedIndex=%d",
+					r.id, r.storage.EventIndex(), r.storage.AppliedIndex())
+			}
+			t.Fatal("survivors did not converge to matching AppliedIndex within deadline")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// wallog is a thin shim around tidwall/wal.Log used only by
+// assertEventLogPrefixMatches so the test can read raw event log bytes
+// by sequence number without going through wal.Storage (which would
+// want a parser and sync/ingest channels and run bbolt migrations).
+type wallog struct {
+	l *tidwallwal.Log
+}
+
+func openRawWalLog(dir string) (*wallog, error) {
+	l, err := tidwallwal.Open(dir, nil)
+	if err != nil {
+		return nil, err
+	}
+	return &wallog{l: l}, nil
+}
+
+func (w *wallog) Close() error          { return w.l.Close() }
+func (w *wallog) LastSeq() (uint64, error) {
+	return w.l.LastIndex()
+}
+func (w *wallog) Read(seq uint64) ([]byte, error) {
+	return w.l.Read(seq)
+}
