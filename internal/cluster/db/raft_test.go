@@ -847,6 +847,12 @@ func (ms *MemoryStorage) CreateSnapshot(index uint64, confState *raftpb.ConfStat
 	return ms.MemoryStorage.CreateSnapshot(index, confState, nil)
 }
 
+// ConfState is a no-op on the in-memory test storage. The in-memory
+// path doesn't need a persistent ConfState because tests that care
+// about restart semantics use wal.Storage; the raft-only MemoryStorage
+// is constructed fresh per test and never replays from disk.
+func (ms *MemoryStorage) ConfState(c *raftpb.ConfState) {}
+
 // RestoreSnapshot is a no-op. The raft_test MemoryStorage exists to
 // exercise the raft layer in isolation; there is no application state
 // to restore.

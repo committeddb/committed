@@ -43,6 +43,16 @@ type Storage interface {
 	// calls this periodically so raft has a snapshot to ship to
 	// followers whose raft log has been compacted past.
 	CreateSnapshot(index uint64, confState *raftpb.ConfState) (raftpb.Snapshot, error)
+	// ConfState updates the conf state associated with the storage's
+	// in-memory snapshot metadata. Called by the raft Ready loop after
+	// each EntryConfChange apply, with the new ConfState returned by
+	// raft.Node.ApplyConfChange. The update is persisted on the next
+	// Save call (which writes the current snapshot metadata to the
+	// state log), so InitialState returns the correct voter set on
+	// restart. Without this, a restarted node reads an empty ConfState,
+	// has no voter progress tracker entries, and cannot accept
+	// heartbeats or forward proposals.
+	ConfState(c *raftpb.ConfState)
 	// RestoreSnapshot installs the metadata state carried by snap onto
 	// this node, replacing current bbolt contents. Called from the
 	// raft Ready loop when raft delivers a non-empty rd.Snapshot. The

@@ -83,7 +83,7 @@ func (n *Raft) MaybeCompactForTest() {
 // LastCompactedIndexForTest lets tests observe the bookkeeping
 // maybeCompact maintains after a successful compaction.
 func (n *Raft) LastCompactedIndexForTest() uint64 {
-	return n.lastCompactedIndex
+	return n.lastCompactedIndex.Load()
 }
 
 // SetLastCompactTimeForTest back-dates the internal timestamp so the

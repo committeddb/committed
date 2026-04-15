@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/philborlin/committed/internal/cluster/db/httptransport"
@@ -35,8 +36,11 @@ type Raft struct {
 	compactMaxAge  time.Duration
 	// lastCompactedIndex is the raft index the log was most recently
 	// compacted to on this node. Used so maybeCompact doesn't attempt
-	// to re-compact to the same point.
-	lastCompactedIndex uint64
+	// to re-compact to the same point. Atomic so tests (notably the
+	// severe-lag adversarial scenario) can read it from a non-serve-
+	// channels goroutine to assert compaction progress without racing
+	// the writer.
+	lastCompactedIndex atomic.Uint64
 	// lastCompactTime is the wall-clock moment of the most recent
 	// compaction (or startRaft time if no compaction has happened).
 	// The age limb of the policy fires when (time.Now() -
@@ -326,10 +330,20 @@ func (n *Raft) serveChannels() {
 					if err != nil {
 						n.raftErrorC <- err
 					}
-					n.node.ApplyConfChange(cc)
-					// Do we need to update the confState or will a snapshop be sent above?
-					// c := n.node.ApplyConfChange(cc)
-					// n.storage.ConfState(c)
+					// Capture the new ConfState from ApplyConfChange and
+					// mirror it into storage. Without this, the storage's
+					// snapshot metadata ConfState stays empty across the
+					// life of the cluster, and the next raft.RestartNode
+					// reads InitialState with no voters — the restarting
+					// node then can't accept heartbeats, forward proposes,
+					// or participate in elections. See the doc on
+					// Storage.ConfState and the Save-doesn't-overwrite-
+					// empty-snap contract in wal.Storage for why this
+					// single line is sufficient: the next Save iteration
+					// persists s.snapshot (with the updated ConfState) to
+					// the state log, and wal.Open reloads it.
+					cs := n.node.ApplyConfChange(cc)
+					n.storage.ConfState(cs)
 				}
 			}
 
@@ -531,7 +545,7 @@ func (n *Raft) maybeCompact() {
 	if eventIdx := n.storage.EventIndex(); compactTo > eventIdx {
 		compactTo = eventIdx
 	}
-	if compactTo <= n.lastCompactedIndex {
+	if compactTo <= n.lastCompactedIndex.Load() {
 		return
 	}
 
@@ -545,7 +559,7 @@ func (n *Raft) maybeCompact() {
 		n.logger.Warn("compact raft log", zap.Uint64("compactTo", compactTo), zap.Error(err))
 		return
 	}
-	n.lastCompactedIndex = compactTo
+	n.lastCompactedIndex.Store(compactTo)
 	n.lastCompactTime = time.Now()
 	n.logger.Debug("raft log compacted", zap.Uint64("compactTo", compactTo), zap.String("reason", reason))
 }

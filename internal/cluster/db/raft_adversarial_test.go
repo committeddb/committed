@@ -20,6 +20,8 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -33,6 +35,8 @@ import (
 	tidwallwal "github.com/tidwall/wal"
 	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/raft/v3/raftpb"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // adversarialSettleTime is how long we give raft to process a state change
@@ -1336,31 +1340,23 @@ func TestAdversarial_DiskFull(t *testing.T) {
 //     a further propose reaches all three nodes, proving the rebuilt
 //     node is a full participant again (not just a silent replica).
 //
-// Raft-log compaction on the leader is NOT exercised by this scenario,
-// even though it is the canonical trigger for "severe lag" in
-// production. The reason is a latent raft-index ↔ wal-seq mapping
-// issue in wal.Storage.Compact + Entries that surfaces the first time
-// any code path both compacts the raft log AND later reads a raft
-// index that wal.Storage would satisfy via a post-compaction seq —
-// out of scope for this ticket, which is about the REBUILD procedure,
-// not about compaction correctness. The rebuild procedure is what
-// operators run when severe lag happens; whether compaction tripped it
-// or a different failure mode (lost disk, corrupt data dir, fat-
-// fingered rm -rf) is irrelevant to what the runbook does. We still
-// stop the follower, advance the rest of the cluster past it, then
-// rsync and restart — which is a faithful end-to-end exercise of the
-// runbook even without the compaction step.
+//   - Raft-log compaction on the leader actually fires past the stopped
+//     follower's last-applied index, the canonical production trigger
+//     for severe lag. Without this, the test is vulnerable to plain
+//     AppendEntries catch-up resolving the gap without needing a
+//     rebuild — which wouldn't exercise the scenario the ticket cares
+//     about.
 //
-// Why the fatal-exit outcome of severe lag is simulated via rsync and
-// not exercised through an actual InstallSnapshot-triggered fatal-exit:
-// the fatal-exit path calls zap.Logger.Fatal, which terminates the
-// process. That is the intended production behavior (see
-// checkStorageInvariant + processSnapshot in raft.go), but it is
-// incompatible with an in-process test that needs to keep running to
-// assert on the post-rebuild state. We cover the fatal-exit code path
-// itself via the invariant check's unit tests (raft-level) and the
-// wal.Storage RestoreSnapshot rejection (wal/snapshot_test.go). Here
-// we cover what happens AFTER the operator completes the rebuild.
+// The fatal-exit path IS exercised in-process. Each node's logger is
+// wired with zap.WithFatalHook so logger.Fatal (called by
+// processSnapshot when wal.Storage.RestoreSnapshot rejects a too-far-
+// ahead snapshot) routes through a test hook that records the event
+// and calls runtime.Goexit instead of os.Exit. The test observes the
+// fatal via a channel, then proceeds with the rsync rebuild — so
+// both halves of the v1 severe-lag flow are under test in a single
+// scenario, mirroring the production sequence: follower receives
+// InstallSnapshot → P_local invariant violated → fatal exit →
+// operator runs rebuild → cluster converges.
 // -----------------------------------------------------------------------------
 func TestAdversarial_SevereLagFollowerRebuild(t *testing.T) {
 	// Seeded RNG reserved for future test randomness — same pattern as
@@ -1373,13 +1369,18 @@ func TestAdversarial_SevereLagFollowerRebuild(t *testing.T) {
 		duringEntries   = 30
 	)
 
-	// Leave compaction at its defaults (10 GiB / 1 hr). Neither limb
-	// fires at test-scale entry volumes, so maybeCompact stays a no-op
-	// for the lifetime of the test. See the function-level comment above
-	// for why compaction isn't part of this scenario.
-	nodeOpts := []db.Option{}
+	// Aggressive compaction so maybeCompact fires on the surviving pair
+	// during Phase 3 and advances past follower 3's stale applied index.
+	// 512 bytes is well below what a 30-entry burst produces with even
+	// tiny payloads, so the size limb is reached within a few Saves —
+	// fast enough that every iteration reliably pushes compaction
+	// past the stopped follower's position.
+	nodeOpts := []db.Option{
+		db.WithCompactMaxSize(512),
+		db.WithCompactMaxAge(0),
+	}
 
-	rafts, cluster, dirs := newSevereLagCluster(t, replicas, nodeOpts)
+	rafts, cluster, dirs, fatalC := newSevereLagCluster(t, replicas, nodeOpts)
 
 	// Per-node drainers so we can stop/restart individual nodes without
 	// leaking commitC readers. Matches the scenario (c) pattern: defer
@@ -1490,6 +1491,32 @@ func TestAdversarial_SevereLagFollowerRebuild(t *testing.T) {
 			survivorsApplied, follower3AppliedBefore)
 	}
 
+	// Prove that raft-log compaction actually fired on the surviving
+	// pair past follower 3's stale position. Without this, follower 3
+	// could in principle catch up via plain AppendEntries on restart
+	// without needing an rsync rebuild — which would make the rebuild
+	// exercise in Phase 4+ vacuously "succeed". The canonical severe-
+	// lag trigger in production IS compaction; requiring it here keeps
+	// the test honest.
+	var leaderCompacted uint64
+	for _, r := range survivors {
+		if c := r.raft.LastCompactedIndexForTest(); c > leaderCompacted {
+			leaderCompacted = c
+		}
+	}
+	if leaderCompacted == 0 {
+		t.Fatalf("no compaction observed on surviving pair — compactMaxSize=%d " +
+			"was not reached during the %d-entry burst (consider smaller limit " +
+			"or more proposes)", 512, duringEntries)
+	}
+	if leaderCompacted <= follower3AppliedBefore {
+		t.Fatalf("compaction on surviving pair reached index %d but stopped "+
+			"follower was already at %d — compaction did not advance past "+
+			"follower 3's stale applied index; AppendEntries could still "+
+			"resolve the gap without rebuild",
+			leaderCompacted, follower3AppliedBefore)
+	}
+
 	// Quiesce: wait until both survivors' AppliedIndex matches and
 	// EventIndex == AppliedIndex on each. waitForUserEntry in the
 	// propose loop only blocks on user-visible entries; raft can have
@@ -1502,7 +1529,67 @@ func TestAdversarial_SevereLagFollowerRebuild(t *testing.T) {
 	// close-point deterministic.
 	waitForSurvivorConvergence(t, survivors, 10*time.Second)
 
-	// Phase 4: rsync node 1's data directory onto follower 3's. We MUST
+	// Phase 4: restart follower 3 WITHOUT rsync to trigger the
+	// production severe-lag fatal path. Follower 3's stored state is
+	// at raft index ~follower3AppliedBefore; the leader's firstIndex
+	// is now past the compacted boundary from Phase 3. When follower 3
+	// rejoins, the leader's progress tracker sees it's behind
+	// firstIndex and sends InstallSnapshot at an index > follower 3's
+	// EventIndex. wal.Storage.RestoreSnapshot rejects with
+	//   "restore snapshot: snap.Metadata.Index=X exceeds EventIndex=Y; run rebuild procedure"
+	// processSnapshot in raft.go converts that to logger.Fatal, which
+	// under the test's fatal hook posts to fatalC and calls
+	// runtime.Goexit (terminating serveChannels, not the test process).
+	//
+	// Without the fatal hook, this step would os.Exit and take the
+	// test binary with it — which is why the previous version of this
+	// test skipped the fatal-exit path and jumped straight to rsync.
+	rebootWalNode(t, rafts[2], follower3Dir, nodeOpts, fatalC)
+	drainers[2] = rafts[2].startDrainer()
+	alive[2] = true
+
+	// Wait for the fatal event. The snapshot+reject round is fast —
+	// a couple of election intervals for the leader to detect follower
+	// 3's position, ship the snapshot, have it rejected, and fatal.
+	// 10 s is generous headroom for loaded test machines.
+	select {
+	case ev := <-fatalC:
+		if ev.nodeID != 3 {
+			t.Fatalf("fatal came from node %d, expected 3 (stopped-then-restarted follower): %q",
+				ev.nodeID, ev.message)
+		}
+		msg := strings.ToLower(ev.message)
+		// processSnapshot's fatal is "restore snapshot failed";
+		// checkStorageInvariant's is "storage invariant violation".
+		// Either one is a valid signal that the severe-lag v1
+		// fail-fast behaviour kicked in — that's the invariant this
+		// phase protects.
+		if !strings.Contains(msg, "snapshot") && !strings.Contains(msg, "invariant") {
+			t.Fatalf("fatal on node 3 did not match severe-lag path: %q", ev.message)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("follower 3 did not fatal-exit within 10s after restart without rsync — " +
+			"expected processSnapshot → restore-snapshot-failed fatal from the leader's " +
+			"InstallSnapshot round")
+	}
+
+	// Close the fatal'd node cleanly. serveChannels has already
+	// Goexit'd (its deferred close of serveChannelsDoneC fired), so
+	// raft.Close's wait on serveChannelsDoneC returns immediately.
+	// stopTransport and node.Stop still run to tear down the HTTP
+	// listener and etcd raft's internal goroutine; without that, the
+	// test would leak goroutines across -count=20 iterations.
+	if err := rafts[2].Close(); err != nil {
+		t.Fatalf("close fatal'd follower 3: %v", err)
+	}
+	drainers[2]()
+	drainers[2] = nil
+	if err := rafts[2].storage.Close(); err != nil {
+		t.Fatalf("close fatal'd follower 3 storage: %v", err)
+	}
+	alive[2] = false
+
+	// Phase 5: rsync node 1's data directory onto follower 3's. We MUST
 	// take node 1 offline before the copy: tidwall/wal segments and
 	// bbolt are being actively written to by node 1's raft loop, and a
 	// mid-write copy would capture a torn state. This is equivalent to
@@ -1511,7 +1598,7 @@ func TestAdversarial_SevereLagFollowerRebuild(t *testing.T) {
 	//
 	// Closing node 1 leaves only node 2 alive — below quorum — so no
 	// proposes can commit during this window. That's fine; the test
-	// isn't proposing during the rsync. Proposes resume in Phase 6.
+	// isn't proposing during the rsync. Proposes resume in Phase 7.
 	healthy := rafts[0]
 	healthyDir := dirs[0]
 	if err := healthy.Close(); err != nil {
@@ -1535,17 +1622,17 @@ func TestAdversarial_SevereLagFollowerRebuild(t *testing.T) {
 	}
 	copyTree(t, healthyDir, follower3Dir)
 
-	// Phase 5: restart node 1 and node 3 against their (possibly-copied)
+	// Phase 6: restart node 1 and node 3 against their (possibly-copied)
 	// data dirs. Both come up as raft followers restarting from durable
 	// state; whoever node 2 believes is leader (itself, after the brief
 	// quorum loss during the rsync window) will replicate any small gap
 	// via AppendEntries. Node 3's copied state is at the same index as
-	// node 1's was at Phase 4, so the gap is zero or near-zero.
-	rebootWalNode(t, rafts[0], healthyDir, nodeOpts)
+	// node 1's was at Phase 5, so the gap is zero or near-zero.
+	rebootWalNode(t, rafts[0], healthyDir, nodeOpts, fatalC)
 	drainers[0] = rafts[0].startDrainer()
 	alive[0] = true
 
-	rebootWalNode(t, rafts[2], follower3Dir, nodeOpts)
+	rebootWalNode(t, rafts[2], follower3Dir, nodeOpts, fatalC)
 	drainers[2] = rafts[2].startDrainer()
 	alive[2] = true
 
@@ -1558,7 +1645,7 @@ func TestAdversarial_SevereLagFollowerRebuild(t *testing.T) {
 	// bind, announce, and accept the first heartbeat.
 	time.Sleep(adversarialSettleTime)
 
-	// Phase 6: convergence. A full leader election must complete across
+	// Phase 7: convergence. A full leader election must complete across
 	// all three nodes before we can propose; the rsync+restart window
 	// may have forced a re-election on node 2 (it went solo), and nodes
 	// 1 and 3 are coming back with potentially stale term state plus
@@ -1769,10 +1856,15 @@ func assertEventLogPrefixMatches(t *testing.T, rafts Rafts, dirs []string) {
 // satisfied — neither of which exercises the rebuild path.
 //
 // Returns the Rafts slice, the shared FaultyCluster (so the test can
-// partition all nodes before close to freeze the committed log), and
-// the per-node data directories. The directories are owned by
-// t.TempDir() and auto-removed on test end.
-func newSevereLagCluster(t *testing.T, replicas int, opts []db.Option) (Rafts, *FaultyCluster, []string) {
+// partition all nodes before close to freeze the committed log), the
+// per-node data directories (owned by t.TempDir() and auto-removed on
+// test end), and a fatalCapture channel. Every node's logger is wired
+// with zap.WithFatalHook so any logger.Fatal call — checkStorageInvariant
+// in raft.go, processSnapshot's restore-failed fatal, etc — routes
+// through the hook: the event is delivered on fatalC and runtime.Goexit
+// terminates only the calling goroutine (typically serveChannels),
+// leaving the test process alive to run the rebuild phase.
+func newSevereLagCluster(t *testing.T, replicas int, opts []db.Option) (Rafts, *FaultyCluster, []string, chan fatalEvent) {
 	t.Helper()
 
 	ports := pickFreePorts(replicas)
@@ -1784,14 +1876,15 @@ func newSevereLagCluster(t *testing.T, replicas int, opts []db.Option) (Rafts, *
 	}
 
 	fc := NewFaultyCluster(peers)
+	fatalC := make(chan fatalEvent, replicas*4)
 
 	dirs := make([]string, replicas)
 	rafts := make(Rafts, replicas)
 	for i := 0; i < replicas; i++ {
 		dirs[i] = t.TempDir()
-		rafts[i] = openWalRaft(t, peers[i].ID, peers, dirs[i], fc, opts)
+		rafts[i] = openWalRaft(t, peers[i].ID, peers, dirs[i], fc, opts, fatalC)
 	}
-	return rafts, fc, dirs
+	return rafts, fc, dirs, fatalC
 }
 
 // openWalRaft opens a fresh wal.Storage at `dir` (reading any pre-existing
@@ -1804,28 +1897,7 @@ func newSevereLagCluster(t *testing.T, replicas int, opts []db.Option) (Rafts, *
 // configs), so ApplyCommitted's undecodable-proposal branch runs and the
 // channels stay empty. A 64-entry buffer is ample headroom if a future
 // caller wants to propose configs against this harness.
-//
-// On a RESTART open (wal.Storage finds a non-empty HardState in stateLog),
-// the peers' ConfState is NOT currently durably tracked — it's held in
-// s.snapshot.Metadata.ConfState, which Save() overwrites to empty on every
-// call with no active snapshot. That means a restarting node's raft
-// thinks it has no voters and can't accept heartbeats or forward
-// proposes. Rather than plumb a proper ConfState-on-disk fix through
-// wal.Storage + raft.go (out of scope for this test — it's a prereq
-// bug, not the severe-lag-rebuild behavior we're validating), we prime
-// the in-memory ConfState directly before constructing the Raft, from
-// the peer list the test already knows. raft.RestartNode reads
-// InitialState once on startup and builds its internal peer progress
-// tracker from it; subsequent Save-induced ConfState wipes don't
-// affect the already-initialized raft state machine.
-//
-// This workaround is safe BECAUSE: (1) the test only restarts each node
-// once per run, so a single InitialState read is enough, and (2) raft's
-// conf change replay path still runs for entries at raft indices ≥ 2
-// during the restart — entry at raft index 1 (which wal.Storage treats
-// as a compacted dummy) happens to be the "add self" conf change,
-// which is the one the in-memory ConfState priming fills in for.
-func openWalRaft(t *testing.T, id uint64, peers []raft.Peer, dir string, fc *FaultyCluster, opts []db.Option) *Raft {
+func openWalRaft(t *testing.T, id uint64, peers []raft.Peer, dir string, fc *FaultyCluster, opts []db.Option, fatalC chan<- fatalEvent) *Raft {
 	t.Helper()
 
 	p := parser.New()
@@ -1836,15 +1908,11 @@ func openWalRaft(t *testing.T, id uint64, peers []raft.Peer, dir string, fc *Fau
 		t.Fatalf("wal.Open(%s): %v", dir, err)
 	}
 
-	// Prime the ConfState from the peer list. See the function-level
-	// comment above for the rationale. For a fresh (never-before-written)
-	// storage this is a harmless set — raft.StartNode ignores InitialState
-	// ConfState in favor of the peers arg.
-	voters := make([]uint64, len(peers))
-	for i, p := range peers {
-		voters[i] = p.ID
-	}
-	s.ConfState(&raftpb.ConfState{Voters: voters})
+	// Per-node logger with a fatal hook that posts to fatalC and calls
+	// runtime.Goexit instead of the default os.Exit. Lets the test
+	// observe the severe-lag fatal path (processSnapshot /
+	// checkStorageInvariant) without terminating the test process.
+	logger := newFatalCapturingLogger(id, fatalC)
 
 	proposeC := make(chan []byte)
 	confChangeC := make(chan raftpb.ConfChange)
@@ -1852,6 +1920,7 @@ func openWalRaft(t *testing.T, id uint64, peers []raft.Peer, dir string, fc *Fau
 	nodeOpts := []db.Option{
 		db.WithTickInterval(multiNodeTickInterval),
 		db.WithTransportWrapperForTest(fc.Wrap(id)),
+		db.WithLogger(logger),
 	}
 	nodeOpts = append(nodeOpts, opts...)
 
@@ -1880,7 +1949,7 @@ func openWalRaft(t *testing.T, id uint64, peers []raft.Peer, dir string, fc *Fau
 // Analogous to raft_test.go's (*Raft).Restart but rewires storage too,
 // which Restart doesn't — Restart is built for the MemoryStorage case
 // where the storage object survives across the restart.
-func rebootWalNode(t *testing.T, rs *Raft, dir string, opts []db.Option) {
+func rebootWalNode(t *testing.T, rs *Raft, dir string, opts []db.Option, fatalC chan<- fatalEvent) {
 	t.Helper()
 
 	rs.mu.RLock()
@@ -1889,7 +1958,7 @@ func rebootWalNode(t *testing.T, rs *Raft, dir string, opts []db.Option) {
 	fc := rs.faultyCluster
 	rs.mu.RUnlock()
 
-	rebuilt := openWalRaft(t, id, peers, dir, fc, opts)
+	rebuilt := openWalRaft(t, id, peers, dir, fc, opts, fatalC)
 
 	rs.mu.Lock()
 	rs.storage = rebuilt.storage
@@ -1987,6 +2056,43 @@ func waitForSurvivorConvergence(t *testing.T, nodes Rafts, deadline time.Duratio
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// fatalEvent records a single zap.Fatal call captured via the
+// test-only fatal hook. The test waits on a channel of fatalEvents
+// to confirm that the severe-lag fatal-exit path was actually
+// reached — without the hook the logger.Fatal call would os.Exit
+// and take the whole test binary with it.
+type fatalEvent struct {
+	nodeID  uint64
+	message string
+}
+
+// fatalHook implements zapcore.CheckWriteHook. It posts a fatalEvent
+// to its channel (non-blocking; the channel is buffered) and then
+// calls runtime.Goexit to terminate the calling goroutine. Only the
+// goroutine that invoked Fatal exits — the rest of the test process,
+// including Close()-time cleanup for the dying node, keeps running.
+type fatalHook struct {
+	nodeID uint64
+	c      chan<- fatalEvent
+}
+
+func (h *fatalHook) OnWrite(ce *zapcore.CheckedEntry, _ []zapcore.Field) {
+	select {
+	case h.c <- fatalEvent{nodeID: h.nodeID, message: ce.Message}:
+	default:
+	}
+	runtime.Goexit()
+}
+
+// newFatalCapturingLogger returns a zap.Logger whose Fatal calls route
+// through fatalHook instead of os.Exit. The underlying core is a
+// NopCore so log output never surfaces in test runs; only the fatal
+// hook is observable. The node ID is baked into the hook so the test
+// can assert WHICH node fatal-exited.
+func newFatalCapturingLogger(nodeID uint64, c chan<- fatalEvent) *zap.Logger {
+	return zap.New(zapcore.NewNopCore(), zap.WithFatalHook(&fatalHook{nodeID: nodeID, c: c}))
 }
 
 // wallog is a thin shim around tidwall/wal.Log used only by

@@ -53,6 +53,11 @@ type FakeStorage struct {
 	compactReturnsOnCall map[int]struct {
 		result1 error
 	}
+	ConfStateStub        func(*raftpb.ConfState)
+	confStateMutex       sync.RWMutex
+	confStateArgsForCall []struct {
+		arg1 *raftpb.ConfState
+	}
 	CreateSnapshotStub        func(uint64, *raftpb.ConfState) (raftpb.Snapshot, error)
 	createSnapshotMutex       sync.RWMutex
 	createSnapshotArgsForCall []struct {
@@ -651,6 +656,38 @@ func (fake *FakeStorage) CompactReturnsOnCall(i int, result1 error) {
 	fake.compactReturnsOnCall[i] = struct {
 		result1 error
 	}{result1}
+}
+
+func (fake *FakeStorage) ConfState(arg1 *raftpb.ConfState) {
+	fake.confStateMutex.Lock()
+	fake.confStateArgsForCall = append(fake.confStateArgsForCall, struct {
+		arg1 *raftpb.ConfState
+	}{arg1})
+	stub := fake.ConfStateStub
+	fake.recordInvocation("ConfState", []interface{}{arg1})
+	fake.confStateMutex.Unlock()
+	if stub != nil {
+		fake.ConfStateStub(arg1)
+	}
+}
+
+func (fake *FakeStorage) ConfStateCallCount() int {
+	fake.confStateMutex.RLock()
+	defer fake.confStateMutex.RUnlock()
+	return len(fake.confStateArgsForCall)
+}
+
+func (fake *FakeStorage) ConfStateCalls(stub func(*raftpb.ConfState)) {
+	fake.confStateMutex.Lock()
+	defer fake.confStateMutex.Unlock()
+	fake.ConfStateStub = stub
+}
+
+func (fake *FakeStorage) ConfStateArgsForCall(i int) *raftpb.ConfState {
+	fake.confStateMutex.RLock()
+	defer fake.confStateMutex.RUnlock()
+	argsForCall := fake.confStateArgsForCall[i]
+	return argsForCall.arg1
 }
 
 func (fake *FakeStorage) CreateSnapshot(arg1 uint64, arg2 *raftpb.ConfState) (raftpb.Snapshot, error) {
@@ -2441,6 +2478,8 @@ func (fake *FakeStorage) Invocations() map[string][][]interface{} {
 	defer fake.closeMutex.RUnlock()
 	fake.compactMutex.RLock()
 	defer fake.compactMutex.RUnlock()
+	fake.confStateMutex.RLock()
+	defer fake.confStateMutex.RUnlock()
 	fake.createSnapshotMutex.RLock()
 	defer fake.createSnapshotMutex.RUnlock()
 	fake.databaseMutex.RLock()

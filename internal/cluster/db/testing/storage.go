@@ -96,6 +96,13 @@ func (ms *MemoryStorage) EventIndex() uint64 {
 // already supports snapshot creation for in-memory tests. Passing nil
 // Data is fine here — MemoryStorage has no bucket state to capture;
 // tests that need a real snapshot payload use wal.Storage.
+// ConfState is a no-op on the in-process test storage: tests that
+// use this MemoryStorage never restart across process boundaries, so
+// InitialState is only ever called once on a fresh struct. The method
+// exists to satisfy the db.Storage interface contract added when
+// restart-correct ConfState persistence was plumbed through wal.Storage.
+func (ms *MemoryStorage) ConfState(c *raftpb.ConfState) {}
+
 func (ms *MemoryStorage) CreateSnapshot(index uint64, confState *raftpb.ConfState) (raftpb.Snapshot, error) {
 	return ms.MemoryStorage.CreateSnapshot(index, confState, nil)
 }

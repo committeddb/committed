@@ -93,8 +93,32 @@ type Storage struct {
 	// (db.ents()), and tests. Atomics make those reads race-free without
 	// having to thread a mutex through every caller. The single-writer
 	// invariant means no compare-and-swap is needed.
+	//
+	// firstIndex semantics: the raft index that maps to wal sequence 1
+	// under the invariant seq = raftIndex - firstIndex + 1. Set once on
+	// the first Save and NEVER updated after that, so the seq mapping
+	// stays stable across compactions. tidwall/wal preserves absolute
+	// sequence numbers across TruncateFront, so the formula continues to
+	// work against the surviving portion of the wal even after the low
+	// end has been truncated. (Compact moves the COMPACTION BOUNDARY,
+	// tracked in compactedUpTo below; it does not re-base the seq
+	// mapping.)
 	firstIndex atomic.Uint64
 	lastIndex  atomic.Uint64
+	// compactedUpTo is the highest raft index that has been compacted
+	// away on this node's raft log (conceptually the "dummy" entry at
+	// the current wal first-seq — readable via Term for the match
+	// check, not via Entries). Zero means no compaction has happened
+	// on this storage. Mutated only from the raft serveChannels
+	// goroutine (via Compact) so single-writer atomic semantics apply.
+	//
+	// Why separate from firstIndex: before this split, firstIndex was
+	// overloaded to mean BOTH the seq-mapping offset AND the compaction
+	// boundary. Compact updated it to the compact index, which broke
+	// the seq mapping for future reads and writes (see the function-
+	// level comment on firstIndex). Splitting them lets each carry a
+	// single, invariant responsibility.
+	compactedUpTo atomic.Uint64
 	stateIndex uint64
 	databases  map[string]cluster.Database
 	parser     db.Parser
@@ -227,11 +251,24 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	}
 
 	if fi > 0 {
+		// Recover firstIndex (stable seq-mapping offset) and
+		// compactedUpTo (current compaction boundary) from the wal
+		// state: the entry at wal seq `fi` is by construction the one
+		// whose raft index equals the current compaction boundary
+		// (seq 1 pre-compaction, or the new first-seq after a Compact
+		// moved it forward). Inverting the seq-mapping formula
+		// seq = raftIndex - firstIndex + 1 gives
+		// firstIndex = raftIndex - seq + 1, which is valid whether
+		// seq 1 still physically exists or not — tidwall/wal preserves
+		// absolute seq numbers across TruncateFront, so a post-compact
+		// read of seq `fi` returns the same bytes it would have
+		// returned pre-compact.
 		fe, _, err := ws.entry(fi)
 		if err != nil {
 			return nil, err
 		}
-		ws.firstIndex.Store(fe.Index)
+		ws.firstIndex.Store(fe.Index - fi + 1)
+		ws.compactedUpTo.Store(fe.Index)
 	}
 
 	li, err := entryLog.LastIndex()
@@ -401,6 +438,16 @@ func (s *Storage) getLastStates(li uint64) (*pb.HardState, *pb.Snapshot, error) 
 	return st, snap, nil
 }
 
+// ConfState records the ConfState most recently produced by
+// raft.Node.ApplyConfChange into the storage's in-memory snapshot
+// metadata. The next Save call persists the snapshot (with this
+// ConfState) to the state log via appendState, so InitialState returns
+// the correct voter set on restart.
+//
+// Called by the raft Ready loop from raft.go after each EntryConfChange
+// apply. This is the write half of the "conf state must survive across
+// restart" invariant; the read half is wal.Open reloading the last
+// snapshot out of stateLog.
 func (s *Storage) ConfState(c *pb.ConfState) {
 	s.snapshot.Metadata.ConfState = *c
 }
@@ -411,15 +458,28 @@ func (s *Storage) ConfState(c *pb.ConfState) {
 // because the raft Ready loop hands Save the *to-persist* slice (rd.Entries),
 // which on a multi-node follower may include uncommitted entries; applying
 // them to bucket state before commit would diverge the cluster.
+//
+// Empty-snapshot handling: raft's Ready loop hands Save an empty snap
+// on every iteration except when a new InstallSnapshot is being
+// processed. Overwriting s.snapshot with the empty value each time
+// would destroy the ConfState that the conf-change apply path wrote via
+// (*Storage).ConfState, which breaks raft.RestartNode's voter-set
+// recovery. We only adopt the Ready-supplied snap when it's non-empty
+// (i.e. a real InstallSnapshot). In all other cases s.snapshot keeps
+// whatever ConfState the conf-change path set — and the subsequent
+// appendState call persists that snapshot (metadata, including
+// ConfState) to the state log.
 func (s *Storage) Save(st pb.HardState, ents []pb.Entry, snap pb.Snapshot) error {
 	s.hardState = st
-	s.snapshot = snap
+	if !raft.IsEmptySnap(snap) {
+		s.snapshot = snap
+	}
 
 	if err := s.appendEntries(ents); err != nil {
 		return fmt.Errorf("[wal.storage] appendEntries: %w", err)
 	}
 
-	if err := s.appendState(st, snap); err != nil {
+	if err := s.appendState(st, s.snapshot); err != nil {
 		return fmt.Errorf("[wal.storage] appendState: %w", err)
 	}
 
@@ -681,7 +741,11 @@ func (s *Storage) appendEntries(ents []pb.Entry) error {
 	firstIndex := s.firstIndex.Load()
 	lastIndex := s.lastIndex.Load()
 
-	first := firstIndex + 1
+	// `first` is the lowest raft index the wal can accept an append at
+	// — one past the current compacted-dummy (boundary()). Entries at
+	// or below that are already compacted away and must be skipped, not
+	// rewritten.
+	first := s.boundary() + 1
 	last := ents[0].Index + uint64(len(ents)) - 1
 
 	// shortcut if there is no new entry.
@@ -783,11 +847,19 @@ func (s *Storage) InitialState() (pb.HardState, pb.ConfState, error) {
 // Entries returns a slice of log entries in the range [lo,hi).
 // MaxSize limits the total size of the log entries returned, but
 // Entries returns at least one entry if any.
+//
+// Boundary check uses boundary(), which returns the higher of
+// firstIndex (the seq-mapping offset) and compactedUpTo (the
+// current compaction boundary). On a fresh storage both equal the
+// first written raft index, which correctly treats that entry as
+// the compacted-dummy per existing wal.Storage semantics. On a
+// post-compact storage, compactedUpTo dominates and the boundary
+// moves with each Compact without disturbing the seq mapping.
 func (s *Storage) Entries(lo, hi, maxSize uint64) ([]pb.Entry, error) {
 	var totalSize uint64
 
 	firstIndex := s.firstIndex.Load()
-	if lo <= firstIndex {
+	if lo <= s.boundary() {
 		return nil, raft.ErrCompacted
 	}
 
@@ -807,6 +879,24 @@ func (s *Storage) Entries(lo, hi, maxSize uint64) ([]pb.Entry, error) {
 	}
 
 	return es, nil
+}
+
+// boundary returns the higher of firstIndex (seq-mapping offset) and
+// compactedUpTo (current compaction boundary). Used by Entries, Term,
+// FirstIndex, and Compact to locate the "dummy" entry's raft index —
+// the index below which data is unavailable (ErrCompacted).
+//
+// Split rationale (from firstIndex's doc): firstIndex is stable for
+// seq mapping, compactedUpTo moves with each Compact. max() collapses
+// them to a single boundary for callers that only care about the
+// compaction view.
+func (s *Storage) boundary() uint64 {
+	fi := s.firstIndex.Load()
+	cu := s.compactedUpTo.Load()
+	if cu > fi {
+		return cu
+	}
+	return fi
 }
 
 // Returns the entry, the size of the entry (in bytes) before being unmarshalled, and an error
@@ -852,7 +942,7 @@ func (s *Storage) Term(i uint64) (uint64, error) {
 		return uint64(0), nil
 	}
 
-	if i < firstIndex {
+	if i < s.boundary() {
 		return 0, raft.ErrCompacted
 	}
 
@@ -873,32 +963,66 @@ func (s *Storage) LastIndex() (uint64, error) {
 	return s.lastIndex.Load(), nil
 }
 
+// FirstIndex returns the first raft index that Entries can return.
+// The entry at index boundary() is retained for Term() match checks
+// (the compacted-dummy semantic etcd raft expects) but is not
+// returnable via Entries — so the first readable index is
+// boundary()+1.
 func (s *Storage) FirstIndex() (uint64, error) {
-	return s.firstIndex.Load() + uint64(1), nil
+	return s.boundary() + 1, nil
 }
 
 func (s *Storage) Snapshot() (pb.Snapshot, error) {
 	return s.snapshot, nil
 }
 
+// Compact drops raft log entries up to and including compactIndex.
+// Only the raft-log tier is trimmed; eventLog is never compacted.
+//
+// Sequence mapping: compactIndex maps to wal seq
+// `compactIndex - firstIndex + 1`. tidwall/wal's TruncateFront removes
+// every seq strictly less than the argument and leaves the surviving
+// seqs at their absolute positions (no renumbering). firstIndex
+// therefore STAYS at its original offset — moving it would break the
+// seq-mapping formula for all future reads and writes (the entry at
+// raft index R is at wal seq R - firstIndex + 1; once firstIndex has
+// been advanced past 1, any subsequent read of R computes a wrong seq).
+//
+// compactedUpTo records the new compaction boundary so FirstIndex(),
+// Entries(), and Term() know where the current compacted-dummy sits.
+//
+// Store order: compactedUpTo is advanced BEFORE TruncateFront fires.
+// Reads from etcd raft's internal node goroutine (storage.Term during
+// leader AppendEntries construction, e.g. maybeSendAppend) race
+// against the serveChannels Compact call; if we truncated the wal
+// first, a racing Term read of an about-to-be-compacted index would
+// pass the boundary check against the stale compactedUpTo value,
+// fall through to EntryLog.Read on a seq that no longer exists, and
+// panic with "wal index N: not found". Advancing compactedUpTo first
+// makes such reads return ErrCompacted — raft treats that as a
+// signal to send an InstallSnapshot instead, which is safe even if
+// the wal still briefly holds the old seq. If TruncateFront fails
+// after compactedUpTo has been advanced, we're in an "over-reported
+// compaction" state where the wal retains data whose indices
+// we'll no longer return via Entries — benign: the data becomes
+// unreachable but isn't corrupted.
 func (s *Storage) Compact(compactIndex uint64) error {
 	firstIndex := s.firstIndex.Load()
 	lastIndex := s.lastIndex.Load()
 
-	if compactIndex <= firstIndex {
+	if compactIndex <= s.boundary() {
 		return raft.ErrCompacted
 	}
 	if compactIndex > lastIndex {
 		return ErrOutOfBounds
 	}
 
+	s.compactedUpTo.Store(compactIndex)
+
 	i := compactIndex - firstIndex + 1
-	err := s.EntryLog.TruncateFront(i)
-	if err != nil {
+	if err := s.EntryLog.TruncateFront(i); err != nil {
 		return err
 	}
-
-	s.firstIndex.Store(compactIndex)
 
 	return nil
 }
