@@ -229,6 +229,19 @@ type FakeCluster struct {
 	proposeTypeReturnsOnCall map[int]struct {
 		result1 error
 	}
+	ResolveTypeStub        func(cluster.TypeRef) (*cluster.Type, error)
+	resolveTypeMutex       sync.RWMutex
+	resolveTypeArgsForCall []struct {
+		arg1 cluster.TypeRef
+	}
+	resolveTypeReturns struct {
+		result1 *cluster.Type
+		result2 error
+	}
+	resolveTypeReturnsOnCall map[int]struct {
+		result1 *cluster.Type
+		result2 error
+	}
 	SyncStub        func(context.Context, string, cluster.Syncable) error
 	syncMutex       sync.RWMutex
 	syncArgsForCall []struct {
@@ -279,19 +292,6 @@ type FakeCluster struct {
 	}
 	syncablesReturnsOnCall map[int]struct {
 		result1 []*cluster.Configuration
-		result2 error
-	}
-	TypeStub        func(string) (*cluster.Type, error)
-	typeMutex       sync.RWMutex
-	typeArgsForCall []struct {
-		arg1 string
-	}
-	typeReturns struct {
-		result1 *cluster.Type
-		result2 error
-	}
-	typeReturnsOnCall map[int]struct {
-		result1 *cluster.Type
 		result2 error
 	}
 	TypeGraphStub        func(string, time.Time, time.Time) ([]cluster.TimePoint, error)
@@ -1447,6 +1447,70 @@ func (fake *FakeCluster) ProposeTypeReturnsOnCall(i int, result1 error) {
 	}{result1}
 }
 
+func (fake *FakeCluster) ResolveType(arg1 cluster.TypeRef) (*cluster.Type, error) {
+	fake.resolveTypeMutex.Lock()
+	ret, specificReturn := fake.resolveTypeReturnsOnCall[len(fake.resolveTypeArgsForCall)]
+	fake.resolveTypeArgsForCall = append(fake.resolveTypeArgsForCall, struct {
+		arg1 cluster.TypeRef
+	}{arg1})
+	stub := fake.ResolveTypeStub
+	fakeReturns := fake.resolveTypeReturns
+	fake.recordInvocation("ResolveType", []interface{}{arg1})
+	fake.resolveTypeMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeCluster) ResolveTypeCallCount() int {
+	fake.resolveTypeMutex.RLock()
+	defer fake.resolveTypeMutex.RUnlock()
+	return len(fake.resolveTypeArgsForCall)
+}
+
+func (fake *FakeCluster) ResolveTypeCalls(stub func(cluster.TypeRef) (*cluster.Type, error)) {
+	fake.resolveTypeMutex.Lock()
+	defer fake.resolveTypeMutex.Unlock()
+	fake.ResolveTypeStub = stub
+}
+
+func (fake *FakeCluster) ResolveTypeArgsForCall(i int) cluster.TypeRef {
+	fake.resolveTypeMutex.RLock()
+	defer fake.resolveTypeMutex.RUnlock()
+	argsForCall := fake.resolveTypeArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeCluster) ResolveTypeReturns(result1 *cluster.Type, result2 error) {
+	fake.resolveTypeMutex.Lock()
+	defer fake.resolveTypeMutex.Unlock()
+	fake.ResolveTypeStub = nil
+	fake.resolveTypeReturns = struct {
+		result1 *cluster.Type
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) ResolveTypeReturnsOnCall(i int, result1 *cluster.Type, result2 error) {
+	fake.resolveTypeMutex.Lock()
+	defer fake.resolveTypeMutex.Unlock()
+	fake.ResolveTypeStub = nil
+	if fake.resolveTypeReturnsOnCall == nil {
+		fake.resolveTypeReturnsOnCall = make(map[int]struct {
+			result1 *cluster.Type
+			result2 error
+		})
+	}
+	fake.resolveTypeReturnsOnCall[i] = struct {
+		result1 *cluster.Type
+		result2 error
+	}{result1, result2}
+}
+
 func (fake *FakeCluster) Sync(arg1 context.Context, arg2 string, arg3 cluster.Syncable) error {
 	fake.syncMutex.Lock()
 	ret, specificReturn := fake.syncReturnsOnCall[len(fake.syncArgsForCall)]
@@ -1691,70 +1755,6 @@ func (fake *FakeCluster) SyncablesReturnsOnCall(i int, result1 []*cluster.Config
 	}
 	fake.syncablesReturnsOnCall[i] = struct {
 		result1 []*cluster.Configuration
-		result2 error
-	}{result1, result2}
-}
-
-func (fake *FakeCluster) Type(arg1 string) (*cluster.Type, error) {
-	fake.typeMutex.Lock()
-	ret, specificReturn := fake.typeReturnsOnCall[len(fake.typeArgsForCall)]
-	fake.typeArgsForCall = append(fake.typeArgsForCall, struct {
-		arg1 string
-	}{arg1})
-	stub := fake.TypeStub
-	fakeReturns := fake.typeReturns
-	fake.recordInvocation("Type", []interface{}{arg1})
-	fake.typeMutex.Unlock()
-	if stub != nil {
-		return stub(arg1)
-	}
-	if specificReturn {
-		return ret.result1, ret.result2
-	}
-	return fakeReturns.result1, fakeReturns.result2
-}
-
-func (fake *FakeCluster) TypeCallCount() int {
-	fake.typeMutex.RLock()
-	defer fake.typeMutex.RUnlock()
-	return len(fake.typeArgsForCall)
-}
-
-func (fake *FakeCluster) TypeCalls(stub func(string) (*cluster.Type, error)) {
-	fake.typeMutex.Lock()
-	defer fake.typeMutex.Unlock()
-	fake.TypeStub = stub
-}
-
-func (fake *FakeCluster) TypeArgsForCall(i int) string {
-	fake.typeMutex.RLock()
-	defer fake.typeMutex.RUnlock()
-	argsForCall := fake.typeArgsForCall[i]
-	return argsForCall.arg1
-}
-
-func (fake *FakeCluster) TypeReturns(result1 *cluster.Type, result2 error) {
-	fake.typeMutex.Lock()
-	defer fake.typeMutex.Unlock()
-	fake.TypeStub = nil
-	fake.typeReturns = struct {
-		result1 *cluster.Type
-		result2 error
-	}{result1, result2}
-}
-
-func (fake *FakeCluster) TypeReturnsOnCall(i int, result1 *cluster.Type, result2 error) {
-	fake.typeMutex.Lock()
-	defer fake.typeMutex.Unlock()
-	fake.TypeStub = nil
-	if fake.typeReturnsOnCall == nil {
-		fake.typeReturnsOnCall = make(map[int]struct {
-			result1 *cluster.Type
-			result2 error
-		})
-	}
-	fake.typeReturnsOnCall[i] = struct {
-		result1 *cluster.Type
 		result2 error
 	}{result1, result2}
 }
@@ -2051,6 +2051,8 @@ func (fake *FakeCluster) Invocations() map[string][][]interface{} {
 	defer fake.proposeSyncableMutex.RUnlock()
 	fake.proposeTypeMutex.RLock()
 	defer fake.proposeTypeMutex.RUnlock()
+	fake.resolveTypeMutex.RLock()
+	defer fake.resolveTypeMutex.RUnlock()
 	fake.syncMutex.RLock()
 	defer fake.syncMutex.RUnlock()
 	fake.syncableVersionMutex.RLock()
@@ -2059,8 +2061,6 @@ func (fake *FakeCluster) Invocations() map[string][][]interface{} {
 	defer fake.syncableVersionsMutex.RUnlock()
 	fake.syncablesMutex.RLock()
 	defer fake.syncablesMutex.RUnlock()
-	fake.typeMutex.RLock()
-	defer fake.typeMutex.RUnlock()
 	fake.typeGraphMutex.RLock()
 	defer fake.typeGraphMutex.RUnlock()
 	fake.typeVersionMutex.RLock()

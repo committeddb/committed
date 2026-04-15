@@ -68,7 +68,7 @@ func TestParse(t *testing.T) {
 			v := readConfig(t, "toml", bytes.NewReader(bs))
 
 			tiper := &sqlfakes.FakeTyper{}
-			tiper.TypeReturns(simpleType, nil)
+			tiper.ResolveTypeReturns(simpleType, nil)
 			p := sql.NewIngestableParser(tiper)
 
 			p.Dialects["mysql"] = &mysql.MySQLDialect{}
@@ -102,7 +102,7 @@ column = "pk"
 	v := readConfig(t, "toml", bytes.NewReader([]byte(toml)))
 
 	tiper := &sqlfakes.FakeTyper{}
-	tiper.TypeReturns(simpleType, nil)
+	tiper.ResolveTypeReturns(simpleType, nil)
 	p := sql.NewIngestableParser(tiper)
 
 	_, _, err := p.ParseConfig(v)

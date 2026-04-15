@@ -9,7 +9,7 @@ import (
 
 //counterfeiter:generate . Typer
 type Typer interface {
-	Type(id string) (*cluster.Type, error)
+	ResolveType(ref cluster.TypeRef) (*cluster.Type, error)
 }
 
 type IngestableParser struct {
@@ -57,7 +57,7 @@ func (p *IngestableParser) ParseConfig(v *viper.Viper) (*Config, Dialect, error)
 		return nil, nil, fmt.Errorf("dialect %s not found", dialectName)
 	}
 
-	tipe, err := p.typer.Type(topic)
+	tipe, err := p.typer.ResolveType(cluster.LatestTypeRef(topic))
 	if err != nil {
 		return nil, nil, err
 	}

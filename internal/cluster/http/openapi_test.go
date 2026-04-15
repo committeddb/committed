@@ -320,7 +320,7 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 			contentType: "application/json",
 			body:        `{"entities":[{"typeId":"t-1","key":"k","data":{"hello":"world"}}]}`,
 			setup: func(fake *clusterfakes.FakeCluster) {
-				fake.TypeReturns(sampleType(), nil)
+				fake.ResolveTypeReturns(sampleType(), nil)
 			},
 		},
 	}

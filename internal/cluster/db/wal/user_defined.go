@@ -35,7 +35,7 @@ func (s *Storage) handleUserDefined(e *cluster.Entity) error {
 }
 
 func (s *Storage) TimePoints(typeID string, start time.Time, end time.Time) ([]cluster.TimePoint, error) {
-	_, err := s.Type(typeID)
+	_, err := s.ResolveType(cluster.LatestTypeRef(typeID))
 	if err != nil {
 		return nil, err
 	}

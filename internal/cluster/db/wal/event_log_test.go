@@ -86,6 +86,8 @@ func TestEventLog_SurvivesRestart(t *testing.T) {
 func TestEventLog_ReaderBootstrapFromIndex1(t *testing.T) {
 	s := NewStorage(t, nil)
 	defer s.Cleanup()
+	// Type at index 1; data proposals at 2, 3, 4.
+	s.RegisterType(t, "type-x", 1, 1)
 
 	want := [][]byte{[]byte("a"), []byte("b"), []byte("c")}
 	for i, data := range want {
@@ -94,17 +96,23 @@ func TestEventLog_ReaderBootstrapFromIndex1(t *testing.T) {
 			Key:  []byte{byte(i)},
 			Data: data,
 		}}}
-		saveProposal(t, p, s, 1, uint64(i+1))
+		saveProposal(t, p, s, 1, uint64(i+2))
 	}
 
 	r := s.Reader("brand-new-syncable")
+	// The reader also surfaces the type-registration entry — drain it
+	// first so the assertions below focus on the user-data entries.
+	_, typeEntry, err := r.Read()
+	require.Nil(t, err)
+	require.Equal(t, "type-x", string(typeEntry.Entities[0].Key))
+
 	for i, w := range want {
 		_, got, err := r.Read()
 		require.Nil(t, err, "read %d", i)
 		require.Equal(t, 1, len(got.Entities))
 		require.Equal(t, w, got.Entities[0].Data)
 	}
-	_, _, err := r.Read()
+	_, _, err = r.Read()
 	require.Equal(t, io.EOF, err, "EOF after draining")
 }
 
@@ -116,35 +124,40 @@ func TestEventLog_ReaderBootstrapFromIndex1(t *testing.T) {
 func TestEventLog_ReaderResumesFromPosition(t *testing.T) {
 	s := NewStorage(t, nil)
 	defer s.Cleanup()
+	// Register type-x at index 1; user-data proposals follow at
+	// indices 3, 5, 7 (with conf-change filler at 2, 4, 6). The
+	// appendEntries path in Save requires contiguous indices, so the
+	// gaps between raft indices must be filled by actual entries.
+	s.RegisterType(t, "type-x", 1, 1)
 
-	// Apply at raft indices 5, 7, 9 (gaps between).
-	for i, idx := range []uint64{5, 7, 9} {
+	// Apply at raft indices 3, 5, 7 (gaps between).
+	for i, idx := range []uint64{3, 5, 7} {
 		p := &cluster.Proposal{Entities: []*cluster.Entity{{
 			Type: &cluster.Type{ID: "type-x"},
 			Key:  []byte{byte(i)},
 			Data: []byte{byte(i)},
 		}}}
-		// Save a no-op EntryConfChange at idx-1 (or idx-2) to mimic
-		// how raft interleaves conf changes with user entries, but
-		// don't Apply it — so only the EntryNormal lands in EventLog.
+		// Save a no-op EntryConfChange at idx-1 to mimic how raft
+		// interleaves conf changes with user entries, but don't Apply
+		// it — so only the EntryNormal lands in EventLog.
 		cc := pb.Entry{Term: 1, Index: idx - 1, Type: pb.EntryConfChange}
 		require.Nil(t, s.Save(defaultHardState, []pb.Entry{cc}, defaultSnap))
 		saveProposal(t, p, s, 1, idx)
 	}
 
-	// Persist a syncable position of raft index 5 (already processed).
+	// Persist a syncable position of raft index 3 (already processed).
 	id := "partly-done"
-	posEntity, err := cluster.NewUpsertSyncableIndexEntity(&cluster.SyncableIndex{ID: id, Index: 5})
+	posEntity, err := cluster.NewUpsertSyncableIndexEntity(&cluster.SyncableIndex{ID: id, Index: 3})
 	require.Nil(t, err)
-	saveEntity(t, posEntity, s, 1, 10)
+	saveEntity(t, posEntity, s, 1, 8)
 
 	// Reopen so the reader picks up the persisted position.
 	s = s.CloseAndReopenStorage(t)
 	defer s.Cleanup()
 
 	r := s.Reader(id)
-	// Should skip the entry at raft index 5 and return 7, then 9.
-	for _, want := range []uint64{7, 9} {
+	// Should skip the entry at raft index 3 and return 5, then 7.
+	for _, want := range []uint64{5, 7} {
 		idx, _, err := r.Read()
 		require.Nil(t, err)
 		require.Equal(t, want, idx)

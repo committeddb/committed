@@ -243,6 +243,16 @@ func TestProposeIngestable_StartsIngestionWiring(t *testing.T) {
 	defer d.Close()
 	d.EatCommitC()
 
+	// Register the type referenced by the fake ingestable's emitted
+	// proposal via the real propose path. Without this, ApplyCommitted
+	// can't resolve "test-type" when the ingested proposal comes in.
+	typeCfg := &cluster.Configuration{
+		ID:       "test-type",
+		MimeType: "text/toml",
+		Data:     []byte("[type]\nname = \"test-type\""),
+	}
+	require.Nil(t, d.ProposeType(context.Background(), typeCfg))
+
 	cfg := &cluster.Configuration{
 		ID:       "ingestable-1",
 		MimeType: "application/json",
@@ -312,7 +322,7 @@ func readNormalProposals(s *wal.Storage) []*cluster.Proposal {
 			continue
 		}
 		p := &cluster.Proposal{}
-		if err := p.Unmarshal(e.Data, nil); err != nil {
+		if err := p.Unmarshal(e.Data, s); err != nil {
 			fmt.Printf("unmarshal proposal: %v\n", err)
 			continue
 		}

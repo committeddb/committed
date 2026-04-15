@@ -438,7 +438,7 @@ func TestTypeImmutability_SameVersionRejected(t *testing.T) {
 
 	// The mutation should have been silently skipped — the original
 	// definition should still be in place.
-	got, err := s.Type("events")
+	got, err := s.ResolveType(cluster.LatestTypeRef("events"))
 	require.Nil(t, err)
 	require.Equal(t, "Events", got.Name)
 
@@ -470,7 +470,7 @@ func TestTypeImmutability_NewVersionAllowed(t *testing.T) {
 	saveEntity(t, t2, s, 6, 7)
 
 	// Current type should be v2
-	got, err := s.Type("events")
+	got, err := s.ResolveType(cluster.LatestTypeRef("events"))
 	require.Nil(t, err)
 	require.Equal(t, "EventsV2", got.Name)
 	require.Equal(t, 2, got.Version)
@@ -510,7 +510,7 @@ func TestTypeImmutability_AfterDelete(t *testing.T) {
 	require.Nil(t, err)
 	saveEntity(t, t2, s, 6, 8)
 
-	got, err := s.Type("events")
+	got, err := s.ResolveType(cluster.LatestTypeRef("events"))
 	require.Nil(t, err)
 	require.Equal(t, "EventsRedefined", got.Name)
 }

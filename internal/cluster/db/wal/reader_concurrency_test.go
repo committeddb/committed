@@ -15,11 +15,14 @@ import (
 func TestReader_ConcurrentReads(t *testing.T) {
 	s := NewStorage(t, nil)
 	defer s.Cleanup()
+	// Register the type referenced by makeUserEntity at index 1; user
+	// entity entries follow starting at index 2.
+	s.RegisterType(t, "user-type-123", 1, 1)
 
 	const numEntries = 5
 	entries := make([]pb.Entry, numEntries)
 	for i := 0; i < numEntries; i++ {
-		entries[i] = makeEntry(t, uint64(i+1), makeUserEntity())
+		entries[i] = makeEntry(t, uint64(i+2), makeUserEntity())
 	}
 	// Reader reads from the permanent event log (Phase 2), which is
 	// populated only by ApplyCommitted. Save alone no longer makes

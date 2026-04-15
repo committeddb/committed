@@ -65,7 +65,10 @@ func (p *Proposal) Marshal() ([]byte, error) {
 	var es []*clusterpb.LogEntity
 	for _, e := range p.Entities {
 		es = append(es, &clusterpb.LogEntity{
-			TypeID:    e.Type.ID,
+			Type: &clusterpb.TypeRef{
+				ID:      e.Type.ID,
+				Version: uint32(e.Type.Version),
+			},
 			Key:       e.Key,
 			Data:      e.Data,
 			Timestamp: e.Timestamp,
@@ -77,16 +80,29 @@ func (p *Proposal) Marshal() ([]byte, error) {
 	return proto.Marshal(lp)
 }
 
+// Unmarshal decodes a marshaled Proposal and hydrates each entity's Type
+// via the resolver. The resolver is required: every production call site
+// has one, and a nil resolver indicates a programming bug. Type lookup
+// failures are returned — they indicate log/state inconsistency (the
+// type entry should always precede entity entries in the log) and must
+// not be silently hidden behind stub Types.
 func (p *Proposal) Unmarshal(bs []byte, r TypeResolver) error {
+	if r == nil {
+		return fmt.Errorf("Proposal.Unmarshal: TypeResolver is required")
+	}
+
 	lp := &clusterpb.LogProposal{}
-	err := proto.Unmarshal(bs, lp)
-	if err != nil {
+	if err := proto.Unmarshal(bs, lp); err != nil {
 		return err
 	}
 
 	p.RequestID = lp.RequestID
 	for _, e := range lp.LogEntities {
-		t := resolveType(e.TypeID, r)
+		ref := TypeRef{ID: e.Type.GetID(), Version: int(e.Type.GetVersion())}
+		t, err := resolveType(ref, r)
+		if err != nil {
+			return err
+		}
 		p.Entities = append(p.Entities, &Entity{
 			Type:      t,
 			Key:       e.Key,
@@ -98,28 +114,45 @@ func (p *Proposal) Unmarshal(bs []byte, r TypeResolver) error {
 	return nil
 }
 
-// resolveType returns the full Type from the resolver, falling back to
-// an ID-only stub when r is nil or the lookup fails.
-func resolveType(id string, r TypeResolver) *Type {
-	if r != nil {
-		if t, err := r.Type(id); err == nil && t != nil {
-			return t
-		}
+// resolveType returns the Type at the referenced version via the
+// resolver, with one short-circuit: built-in meta-types (the ones that
+// wrap Type/Database/Syncable/SyncableIndex/Ingestable config entries)
+// are hardcoded package vars not stored anywhere, so we return them
+// directly without calling the resolver. Lookup failures on
+// user-defined types propagate: a type referenced by a log entry that
+// storage doesn't know about is a consistency violation.
+func resolveType(ref TypeRef, r TypeResolver) (*Type, error) {
+	if t := systemType(ref.ID); t != nil {
+		return t, nil
 	}
-	return &Type{ID: id}
+	return r.ResolveType(ref)
+}
+
+// systemType returns the package-var Type for built-in meta-type IDs,
+// or nil for anything else. IsSystem delegates to this so the two never
+// drift. Ingestable is included here so the apply path can resolve its
+// Type; IsSystem keeps its original four-element scope (Proposals
+// excludes system config but includes ingestable data by design).
+func systemType(id string) *Type {
+	switch id {
+	case typeType.ID:
+		return typeType
+	case databaseType.ID:
+		return databaseType
+	case syncableType.ID:
+		return syncableType
+	case syncableIndexType.ID:
+		return syncableIndexType
+	case ingestableType.ID:
+		return ingestableType
+	}
+	return nil
 }
 
 func IsSystem(id string) bool {
 	switch id {
-	case syncableType.ID:
-		return true
-	case databaseType.ID:
-		return true
-	case typeType.ID:
-		return true
-	case syncableIndexType.ID:
+	case syncableType.ID, databaseType.ID, typeType.ID, syncableIndexType.ID:
 		return true
 	}
-
 	return false
 }

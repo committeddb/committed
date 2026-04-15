@@ -213,15 +213,25 @@ func (s *StorageWrapper) CloseAndReopenStorage(t *testing.T) *StorageWrapper {
 }
 
 func OpenStorage(t *testing.T, dir string, p db.Parser, syncCh chan *db.SyncableWithID, ingest chan *db.IngestableWithID) *StorageWrapper {
-	wal, err := wal.Open(dir, p, syncCh, ingest, testOpenOptions...)
+	ws, err := wal.Open(dir, p, syncCh, ingest, testOpenOptions...)
 	if err != nil {
 		t.Fatal(err)
 		return nil
 	}
 
-	s := &StorageWrapper{wal, dir, p, &sync.Once{}}
+	return &StorageWrapper{ws, dir, p, &sync.Once{}}
+}
 
-	return s
+// RegisterType proposes a Type upsert at the given raft index using the
+// real Save + ApplyCommitted path — the same path production runs. Use
+// when a test references a type by ID in a subsequent proposal: the
+// type must exist in storage before the proposal applies, or Unmarshal
+// can't resolve it. Consumes the given raft index; callers account for
+// this in any later indices they pass.
+func (s *StorageWrapper) RegisterType(t *testing.T, id string, term, index uint64) {
+	e, err := cluster.NewUpsertTypeEntity(&cluster.Type{ID: id, Name: id, Version: 1})
+	require.Nil(t, err)
+	saveEntity(t, e, s, term, index)
 }
 
 func TestNewStorage(t *testing.T) {

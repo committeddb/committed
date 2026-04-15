@@ -105,7 +105,7 @@ func TestProposeType(t *testing.T) {
 	}
 }
 
-func TestType(t *testing.T) {
+func TestResolveType(t *testing.T) {
 	expected := createType("foo")
 
 	// FakeStorage must return a sane FirstIndex BEFORE the DB is constructed:
@@ -116,12 +116,12 @@ func TestType(t *testing.T) {
 	// scheduled by the time the test finished.)
 	s := &dbfakes.FakeStorage{}
 	s.FirstIndexReturns(1, nil)
-	s.TypeReturns(expected.tipe, nil)
+	s.ResolveTypeReturns(expected.tipe, nil)
 
 	db := createDBWithStorage(s)
 	defer db.Close()
 
-	got, err := db.Type(expected.tipe.ID)
+	got, err := db.ResolveType(cluster.LatestTypeRef(expected.tipe.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +171,9 @@ func createType(name string) *Type {
 	fmt.Println(toml)
 
 	return &Type{
-		tipe: &cluster.Type{ID: name, Name: name},
+		// Version is system-assigned by ProposeType (1 on first PUT).
+		// Tests that load the type back out of the log will see Version 1.
+		tipe: &cluster.Type{ID: name, Name: name, Version: 1},
 		config: &cluster.Configuration{
 			ID:       name,
 			MimeType: "text/toml",
@@ -257,6 +259,23 @@ func TestParseType(t *testing.T) {
 		require.Nil(t, err)
 		require.Equal(t, "JSONSchema", typ.SchemaType)
 		require.Equal(t, cluster.NoValidation, typ.Validate)
+	})
+
+	t.Run("with Protobuf", func(t *testing.T) {
+		proto := "syntax = \\\"proto3\\\"; message Person { string name = 1; }"
+		toml := fmt.Sprintf("[type]\nname = \"Person\"\nschemaType = \"Protobuf\"\nvalidate = 1\nschema = \"%s\"", proto)
+
+		cfg := &cluster.Configuration{
+			ID:       "t6",
+			MimeType: "text/toml",
+			Data:     []byte(toml),
+		}
+
+		_, typ, err := db.ParseType(cfg, nil)
+		require.Nil(t, err)
+		require.Equal(t, "Protobuf", typ.SchemaType)
+		require.Equal(t, cluster.ValidateSchema, typ.Validate)
+		require.Contains(t, string(typ.Schema), "message Person")
 	})
 }
 

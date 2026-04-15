@@ -41,7 +41,7 @@ func TestSnapshot_RoundTrip(t *testing.T) {
 
 	// The restored storage should have the Type visible via the normal
 	// query API.
-	got, err := dst.Type("events")
+	got, err := dst.ResolveType(cluster.LatestTypeRef("events"))
 	require.Nil(t, err)
 	require.Equal(t, "events", got.ID)
 	require.Equal(t, "Events", got.Name)

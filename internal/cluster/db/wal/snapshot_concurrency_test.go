@@ -57,7 +57,7 @@ func TestRestoreSnapshot_ConcurrentReadersDoNotCrash(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for !stop.Load() {
-				if _, err := dst.Type("events"); err != nil {
+				if _, err := dst.ResolveType(cluster.LatestTypeRef("events")); err != nil {
 					readErrs <- err
 					return
 				}
@@ -89,7 +89,7 @@ func TestRestoreSnapshot_ConcurrentReadersDoNotCrash(t *testing.T) {
 	}
 
 	// Sanity: the type is still queryable through the normal API.
-	got, err := dst.Type("events")
+	got, err := dst.ResolveType(cluster.LatestTypeRef("events"))
 	require.Nil(t, err)
 	require.Equal(t, "events", got.ID)
 }

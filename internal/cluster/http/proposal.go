@@ -1,16 +1,25 @@
 package http
 
 import (
-	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	httpgo "net/http"
 	"strconv"
 	"time"
 
 	"github.com/philborlin/committed/internal/cluster"
-	"github.com/santhosh-tekuri/jsonschema/v6"
 )
+
+// schemaCacheKey identifies a compiled schema artifact by type ID +
+// version. Keying by version (instead of comparing schema bytes on every
+// request) is correct because Type.Version is system-assigned and bumps
+// whenever the schema changes — equal versions imply equal schemas. See
+// ticket type-schema-versioning Phase 1 known-risk #1.
+type schemaCacheKey struct {
+	id      string
+	version int
+}
 
 type AddProposalRequest struct {
 	Entities []*AddEntityRequest `json:"entities"`
@@ -38,28 +47,28 @@ func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
 
 	var es []*cluster.Entity
 	for _, e := range pr.Entities {
-		t, err := h.c.Type(e.TypeID)
+		t, err := h.c.ResolveType(cluster.LatestTypeRef(e.TypeID))
 		if err != nil {
 			writeErrorf(w, httpgo.StatusBadRequest, "type_not_found", "type %q not found", e.TypeID)
 			return
 		}
 
-		if t.Validate == cluster.ValidateSchema && t.SchemaType == "JSONSchema" {
-			sch, err := h.compiledSchema(t)
-			if err != nil {
+		v, err := h.compiledValidator(t)
+		if err != nil {
+			writeErrorf(w, httpgo.StatusInternalServerError, "internal_error",
+				"failed to compile schema for type %q: %s", t.ID, err)
+			return
+		}
+		if v != nil {
+			if err := v.validate(e.Data); err != nil {
+				var vErr *schemaValidationError
+				if errors.As(err, &vErr) {
+					writeErrorWithDetails(w, httpgo.StatusBadRequest, "schema_validation_failed",
+						fmt.Sprintf("entity data does not match schema for type %q", t.ID), vErr.Error())
+					return
+				}
 				writeErrorf(w, httpgo.StatusInternalServerError, "internal_error",
-					"failed to compile schema for type %q: %s", t.ID, err)
-				return
-			}
-			v, err := jsonschema.UnmarshalJSON(bytes.NewReader(e.Data))
-			if err != nil {
-				writeErrorf(w, httpgo.StatusBadRequest, "schema_validation_failed",
-					"entity data for type %q is not valid JSON", t.ID)
-				return
-			}
-			if err := sch.Validate(v); err != nil {
-				writeErrorWithDetails(w, httpgo.StatusBadRequest, "schema_validation_failed",
-					fmt.Sprintf("entity data does not match schema for type %q", t.ID), err.Error())
+					"validation error for type %q: %s", t.ID, err)
 				return
 			}
 		}
@@ -137,42 +146,27 @@ func (h *HTTP) GetProposals(w httpgo.ResponseWriter, r *httpgo.Request) {
 	writeArrayBody(w, body)
 }
 
-// cachedSchema holds a compiled JSONSchema alongside the raw schema
-// bytes it was compiled from. On cache hit we compare the raw bytes to
-// detect type updates and recompile when the schema has changed.
-type cachedSchema struct {
-	raw      []byte
-	compiled *jsonschema.Schema
-}
-
-// compiledSchema returns a compiled JSONSchema for the given type,
-// caching the result so repeated proposals against the same type
-// don't recompile. If the type's schema has changed since the last
-// compilation the cache entry is replaced.
-func (h *HTTP) compiledSchema(t *cluster.Type) (*jsonschema.Schema, error) {
-	if cached, ok := h.schemas.Load(t.ID); ok {
-		cs := cached.(*cachedSchema)
-		if bytes.Equal(cs.raw, t.Schema) {
-			return cs.compiled, nil
-		}
+// compiledValidator returns a cached entityValidator for the given type
+// or compiles one on miss. Returns (nil, nil) if the type doesn't call
+// for validation (Validate != ValidateSchema, or an unrecognized
+// SchemaType). The cache is keyed by (typeID, Version): Type.Version is
+// system-assigned and monotonically bumps on any schema change, so a
+// cache hit on (id, version) is guaranteed to reference the same schema
+// bytes — no per-request byte comparison needed.
+func (h *HTTP) compiledValidator(t *cluster.Type) (entityValidator, error) {
+	key := schemaCacheKey{id: t.ID, version: t.Version}
+	if cached, ok := h.schemas.Load(key); ok {
+		return cached.(entityValidator), nil
 	}
 
-	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(t.Schema))
+	v, err := compileValidator(t)
 	if err != nil {
-		return nil, fmt.Errorf("unmarshal schema: %w", err)
+		return nil, err
+	}
+	if v == nil {
+		return nil, nil
 	}
 
-	url := "urn:committed:type:" + t.ID
-	c := jsonschema.NewCompiler()
-	if err := c.AddResource(url, doc); err != nil {
-		return nil, fmt.Errorf("add resource: %w", err)
-	}
-
-	sch, err := c.Compile(url)
-	if err != nil {
-		return nil, fmt.Errorf("compile: %w", err)
-	}
-
-	h.schemas.Store(t.ID, &cachedSchema{raw: append([]byte{}, t.Schema...), compiled: sch})
-	return sch, nil
+	h.schemas.Store(key, v)
+	return v, nil
 }

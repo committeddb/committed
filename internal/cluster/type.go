@@ -8,12 +8,36 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// TypeResolver looks up a full Type by ID. Implementations include
-// wal.Storage (BoltDB-backed) and db.Storage (the interface). Passing
-// a TypeResolver to Proposal.Unmarshal hydrates each Entity.Type with
-// the complete schema metadata instead of leaving a stub with only ID.
+// TypeRef identifies a Type by the compound (ID, Version) key. A zero
+// Version means "latest" — resolvers return whatever is current for the
+// given ID. This sentinel never appears in caller code: construct
+// TypeRefs via LatestTypeRef or TypeRefAt so the intent is visible at
+// the call site.
+type TypeRef struct {
+	ID      string
+	Version int
+}
+
+// LatestTypeRef constructs a TypeRef that resolvers interpret as "give
+// me whatever version is current for this ID."
+func LatestTypeRef(id string) TypeRef { return TypeRef{ID: id} }
+
+// TypeRefAt constructs a TypeRef pinned to a specific historical
+// version. Used on the apply/replay path to pair an entity with the
+// schema that was in force when it was proposed.
+func TypeRefAt(id string, version int) TypeRef {
+	return TypeRef{ID: id, Version: version}
+}
+
+// TypeResolver looks up a full Type by (ID, Version). Implementations
+// include wal.Storage (BoltDB-backed) and db.Storage (the interface).
+// Passing a TypeResolver to Proposal.Unmarshal hydrates each
+// Entity.Type with the complete schema metadata instead of leaving a
+// stub with only ID. Lookup failures are errors, not a soft-fail: a
+// type referenced by a log entry that storage doesn't know about is a
+// consistency violation.
 type TypeResolver interface {
-	Type(id string) (*Type, error)
+	ResolveType(ref TypeRef) (*Type, error)
 }
 
 type ValidationStrategy int

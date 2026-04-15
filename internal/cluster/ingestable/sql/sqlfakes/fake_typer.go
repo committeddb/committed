@@ -9,16 +9,16 @@ import (
 )
 
 type FakeTyper struct {
-	TypeStub        func(string) (*cluster.Type, error)
-	typeMutex       sync.RWMutex
-	typeArgsForCall []struct {
-		arg1 string
+	ResolveTypeStub        func(cluster.TypeRef) (*cluster.Type, error)
+	resolveTypeMutex       sync.RWMutex
+	resolveTypeArgsForCall []struct {
+		arg1 cluster.TypeRef
 	}
-	typeReturns struct {
+	resolveTypeReturns struct {
 		result1 *cluster.Type
 		result2 error
 	}
-	typeReturnsOnCall map[int]struct {
+	resolveTypeReturnsOnCall map[int]struct {
 		result1 *cluster.Type
 		result2 error
 	}
@@ -26,16 +26,16 @@ type FakeTyper struct {
 	invocationsMutex sync.RWMutex
 }
 
-func (fake *FakeTyper) Type(arg1 string) (*cluster.Type, error) {
-	fake.typeMutex.Lock()
-	ret, specificReturn := fake.typeReturnsOnCall[len(fake.typeArgsForCall)]
-	fake.typeArgsForCall = append(fake.typeArgsForCall, struct {
-		arg1 string
+func (fake *FakeTyper) ResolveType(arg1 cluster.TypeRef) (*cluster.Type, error) {
+	fake.resolveTypeMutex.Lock()
+	ret, specificReturn := fake.resolveTypeReturnsOnCall[len(fake.resolveTypeArgsForCall)]
+	fake.resolveTypeArgsForCall = append(fake.resolveTypeArgsForCall, struct {
+		arg1 cluster.TypeRef
 	}{arg1})
-	stub := fake.TypeStub
-	fakeReturns := fake.typeReturns
-	fake.recordInvocation("Type", []interface{}{arg1})
-	fake.typeMutex.Unlock()
+	stub := fake.ResolveTypeStub
+	fakeReturns := fake.resolveTypeReturns
+	fake.recordInvocation("ResolveType", []interface{}{arg1})
+	fake.resolveTypeMutex.Unlock()
 	if stub != nil {
 		return stub(arg1)
 	}
@@ -45,46 +45,46 @@ func (fake *FakeTyper) Type(arg1 string) (*cluster.Type, error) {
 	return fakeReturns.result1, fakeReturns.result2
 }
 
-func (fake *FakeTyper) TypeCallCount() int {
-	fake.typeMutex.RLock()
-	defer fake.typeMutex.RUnlock()
-	return len(fake.typeArgsForCall)
+func (fake *FakeTyper) ResolveTypeCallCount() int {
+	fake.resolveTypeMutex.RLock()
+	defer fake.resolveTypeMutex.RUnlock()
+	return len(fake.resolveTypeArgsForCall)
 }
 
-func (fake *FakeTyper) TypeCalls(stub func(string) (*cluster.Type, error)) {
-	fake.typeMutex.Lock()
-	defer fake.typeMutex.Unlock()
-	fake.TypeStub = stub
+func (fake *FakeTyper) ResolveTypeCalls(stub func(cluster.TypeRef) (*cluster.Type, error)) {
+	fake.resolveTypeMutex.Lock()
+	defer fake.resolveTypeMutex.Unlock()
+	fake.ResolveTypeStub = stub
 }
 
-func (fake *FakeTyper) TypeArgsForCall(i int) string {
-	fake.typeMutex.RLock()
-	defer fake.typeMutex.RUnlock()
-	argsForCall := fake.typeArgsForCall[i]
+func (fake *FakeTyper) ResolveTypeArgsForCall(i int) cluster.TypeRef {
+	fake.resolveTypeMutex.RLock()
+	defer fake.resolveTypeMutex.RUnlock()
+	argsForCall := fake.resolveTypeArgsForCall[i]
 	return argsForCall.arg1
 }
 
-func (fake *FakeTyper) TypeReturns(result1 *cluster.Type, result2 error) {
-	fake.typeMutex.Lock()
-	defer fake.typeMutex.Unlock()
-	fake.TypeStub = nil
-	fake.typeReturns = struct {
+func (fake *FakeTyper) ResolveTypeReturns(result1 *cluster.Type, result2 error) {
+	fake.resolveTypeMutex.Lock()
+	defer fake.resolveTypeMutex.Unlock()
+	fake.ResolveTypeStub = nil
+	fake.resolveTypeReturns = struct {
 		result1 *cluster.Type
 		result2 error
 	}{result1, result2}
 }
 
-func (fake *FakeTyper) TypeReturnsOnCall(i int, result1 *cluster.Type, result2 error) {
-	fake.typeMutex.Lock()
-	defer fake.typeMutex.Unlock()
-	fake.TypeStub = nil
-	if fake.typeReturnsOnCall == nil {
-		fake.typeReturnsOnCall = make(map[int]struct {
+func (fake *FakeTyper) ResolveTypeReturnsOnCall(i int, result1 *cluster.Type, result2 error) {
+	fake.resolveTypeMutex.Lock()
+	defer fake.resolveTypeMutex.Unlock()
+	fake.ResolveTypeStub = nil
+	if fake.resolveTypeReturnsOnCall == nil {
+		fake.resolveTypeReturnsOnCall = make(map[int]struct {
 			result1 *cluster.Type
 			result2 error
 		})
 	}
-	fake.typeReturnsOnCall[i] = struct {
+	fake.resolveTypeReturnsOnCall[i] = struct {
 		result1 *cluster.Type
 		result2 error
 	}{result1, result2}
@@ -93,8 +93,8 @@ func (fake *FakeTyper) TypeReturnsOnCall(i int, result1 *cluster.Type, result2 e
 func (fake *FakeTyper) Invocations() map[string][][]interface{} {
 	fake.invocationsMutex.RLock()
 	defer fake.invocationsMutex.RUnlock()
-	fake.typeMutex.RLock()
-	defer fake.typeMutex.RUnlock()
+	fake.resolveTypeMutex.RLock()
+	defer fake.resolveTypeMutex.RUnlock()
 	copiedInvocations := map[string][][]interface{}{}
 	for key, value := range fake.invocations {
 		copiedInvocations[key] = value

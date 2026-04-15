@@ -206,7 +206,7 @@ func TestMigration_TypePreservesContent(t *testing.T) {
 	defer s2.Close()
 
 	// Type() should work via versioned lookup
-	tp, err := s2.Type("events")
+	tp, err := s2.ResolveType(cluster.LatestTypeRef("events"))
 	require.Nil(t, err)
 	require.Equal(t, "events", tp.ID)
 	require.Equal(t, "Events", tp.Name)

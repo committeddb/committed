@@ -16,7 +16,7 @@ import (
 type HTTP struct {
 	r           *chi.Mux
 	c           cluster.Cluster
-	schemas     sync.Map // type ID → *jsonschema.Schema
+	schemas     sync.Map // schemaCacheKey → *jsonschema.Schema
 	bearerToken string   // empty = no auth (dev mode)
 }
 

@@ -19,7 +19,13 @@ type Cluster interface {
 	ProposeSyncable(ctx context.Context, c *Configuration) error
 	ProposeDatabase(ctx context.Context, c *Configuration) error
 	Proposals(n uint64, types ...string) ([]*Proposal, error)
-	Type(id string) (*Type, error)
+	// ResolveType returns the Type identified by ref. A TypeRef with
+	// Version 0 (constructed via LatestTypeRef) resolves to whatever is
+	// current; a TypeRef pinned to a specific version (TypeRefAt)
+	// resolves to that historical definition. This is the single entry
+	// point for type lookups — callers use the constructors to make
+	// their intent explicit at the call site.
+	ResolveType(ref TypeRef) (*Type, error)
 	TypeGraph(typeID string, start time.Time, end time.Time) ([]TimePoint, error)
 	Close() error
 	// The caller should run this on a separate go routine - or do we want to do this so close() can cancel all contexts?

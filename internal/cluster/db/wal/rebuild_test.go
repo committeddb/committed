@@ -93,7 +93,7 @@ func TestRebuild_EndToEnd(t *testing.T) {
 
 	// Queries through the normal API should return the migrated
 	// metadata.
-	got, err := recovered.Type("events")
+	got, err := recovered.ResolveType(cluster.LatestTypeRef("events"))
 	require.Nil(t, err)
 	require.Equal(t, "events", got.ID)
 	require.Equal(t, "Events", got.Name)

@@ -144,8 +144,15 @@ func (ms *MemoryStorage) SaveArgsForCall(i int) (raftpb.HardState, []raftpb.Entr
 	return a.st, a.ents, a.snap
 }
 
-func (ms *MemoryStorage) Type(id string) (*cluster.Type, error) {
-	return nil, nil
+// ResolveType returns a bare Type with just the identity fields
+// populated from the ref. The in-memory test storage doesn't track
+// type definitions, so "unknown type" is ambiguous — returning a stub
+// keeps tests that propose-and-read-back user data working without
+// each test having to first register a real type. Production storage
+// fails a lookup loudly; tests that care about that path should use
+// wal.Storage.
+func (ms *MemoryStorage) ResolveType(ref cluster.TypeRef) (*cluster.Type, error) {
+	return &cluster.Type{ID: ref.ID, Version: ref.Version}, nil
 }
 
 func (ms *MemoryStorage) TimePoints(typeID string, start time.Time, end time.Time) ([]cluster.TimePoint, error) {

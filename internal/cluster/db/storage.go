@@ -72,7 +72,12 @@ type Storage interface {
 	// crossed. Implementations are allowed to return rough estimates
 	// — the trigger treats this as a signal, not an assertion.
 	RaftLogApproxSize() (uint64, error)
-	Type(id string) (*cluster.Type, error)
+	// ResolveType returns the Type identified by ref. See
+	// cluster.Cluster.ResolveType for the version-0-means-latest
+	// semantic. Returns ErrTypeMissing if the ID has never existed;
+	// ErrVersionNotFound if the ID exists but the pinned version
+	// doesn't.
+	ResolveType(ref cluster.TypeRef) (*cluster.Type, error)
 	TimePoints(typeID string, start time.Time, end time.Time) ([]cluster.TimePoint, error)
 	Reader(id string) ProposalReader     // Gets current index by id cache. If id is not known, index is 0
 	Position(id string) cluster.Position // Gets current index by id cache. If id is not known position is 0

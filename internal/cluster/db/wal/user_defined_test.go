@@ -34,7 +34,7 @@ func TestGetTimePoints(t *testing.T) {
 			s := NewStorage(t, index(3).terms(3, 4, 5))
 			defer s.Cleanup()
 
-			// TimePoints validates the type exists via s.Type(typeID), so we
+			// TimePoints validates the type exists via s.ResolveType(cluster.LatestTypeRef(typeID)), so we
 			// must register both metrics as types before exercising it.
 			insertTypes(t, s, []*cluster.Type{
 				{ID: metric, Name: metric},

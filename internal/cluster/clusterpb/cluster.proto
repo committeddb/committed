@@ -3,8 +3,19 @@ package clusterpb;
 
 option go_package = "github.com/philborlin/committed/internal/cluster/clusterpb";
 
+// TypeRef identifies a Type by the compound (ID, Version) key. It is
+// the pointer a LogEntity carries so future readers can resolve the
+// entity's Type at the exact version that was current at propose time.
+// A Version of 0 means "unset" — the resolver treats that as "resolve
+// as latest," which matches the pre-versioning behavior for log entries
+// written before TypeRef existed.
+message TypeRef {
+    string ID = 1;
+    uint32 Version = 2;
+}
+
 message LogEntity {
-    string typeID = 1;
+    TypeRef type = 1;
 	bytes Key = 2;
 	bytes Data = 3;
 	// Timestamp is the wall-clock time (unix milliseconds) at which the

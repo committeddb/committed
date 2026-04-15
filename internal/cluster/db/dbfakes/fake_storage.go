@@ -271,6 +271,19 @@ type FakeStorage struct {
 	readerReturnsOnCall map[int]struct {
 		result1 db.ProposalReader
 	}
+	ResolveTypeStub        func(cluster.TypeRef) (*cluster.Type, error)
+	resolveTypeMutex       sync.RWMutex
+	resolveTypeArgsForCall []struct {
+		arg1 cluster.TypeRef
+	}
+	resolveTypeReturns struct {
+		result1 *cluster.Type
+		result2 error
+	}
+	resolveTypeReturnsOnCall map[int]struct {
+		result1 *cluster.Type
+		result2 error
+	}
 	RestoreSnapshotStub        func(raftpb.Snapshot) error
 	restoreSnapshotMutex       sync.RWMutex
 	restoreSnapshotArgsForCall []struct {
@@ -372,19 +385,6 @@ type FakeStorage struct {
 	}
 	timePointsReturnsOnCall map[int]struct {
 		result1 []cluster.TimePoint
-		result2 error
-	}
-	TypeStub        func(string) (*cluster.Type, error)
-	typeMutex       sync.RWMutex
-	typeArgsForCall []struct {
-		arg1 string
-	}
-	typeReturns struct {
-		result1 *cluster.Type
-		result2 error
-	}
-	typeReturnsOnCall map[int]struct {
-		result1 *cluster.Type
 		result2 error
 	}
 	TypeVersionStub        func(string, uint64) (*cluster.Configuration, error)
@@ -1718,6 +1718,70 @@ func (fake *FakeStorage) ReaderReturnsOnCall(i int, result1 db.ProposalReader) {
 	}{result1}
 }
 
+func (fake *FakeStorage) ResolveType(arg1 cluster.TypeRef) (*cluster.Type, error) {
+	fake.resolveTypeMutex.Lock()
+	ret, specificReturn := fake.resolveTypeReturnsOnCall[len(fake.resolveTypeArgsForCall)]
+	fake.resolveTypeArgsForCall = append(fake.resolveTypeArgsForCall, struct {
+		arg1 cluster.TypeRef
+	}{arg1})
+	stub := fake.ResolveTypeStub
+	fakeReturns := fake.resolveTypeReturns
+	fake.recordInvocation("ResolveType", []interface{}{arg1})
+	fake.resolveTypeMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeStorage) ResolveTypeCallCount() int {
+	fake.resolveTypeMutex.RLock()
+	defer fake.resolveTypeMutex.RUnlock()
+	return len(fake.resolveTypeArgsForCall)
+}
+
+func (fake *FakeStorage) ResolveTypeCalls(stub func(cluster.TypeRef) (*cluster.Type, error)) {
+	fake.resolveTypeMutex.Lock()
+	defer fake.resolveTypeMutex.Unlock()
+	fake.ResolveTypeStub = stub
+}
+
+func (fake *FakeStorage) ResolveTypeArgsForCall(i int) cluster.TypeRef {
+	fake.resolveTypeMutex.RLock()
+	defer fake.resolveTypeMutex.RUnlock()
+	argsForCall := fake.resolveTypeArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeStorage) ResolveTypeReturns(result1 *cluster.Type, result2 error) {
+	fake.resolveTypeMutex.Lock()
+	defer fake.resolveTypeMutex.Unlock()
+	fake.ResolveTypeStub = nil
+	fake.resolveTypeReturns = struct {
+		result1 *cluster.Type
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeStorage) ResolveTypeReturnsOnCall(i int, result1 *cluster.Type, result2 error) {
+	fake.resolveTypeMutex.Lock()
+	defer fake.resolveTypeMutex.Unlock()
+	fake.ResolveTypeStub = nil
+	if fake.resolveTypeReturnsOnCall == nil {
+		fake.resolveTypeReturnsOnCall = make(map[int]struct {
+			result1 *cluster.Type
+			result2 error
+		})
+	}
+	fake.resolveTypeReturnsOnCall[i] = struct {
+		result1 *cluster.Type
+		result2 error
+	}{result1, result2}
+}
+
 func (fake *FakeStorage) RestoreSnapshot(arg1 raftpb.Snapshot) error {
 	fake.restoreSnapshotMutex.Lock()
 	ret, specificReturn := fake.restoreSnapshotReturnsOnCall[len(fake.restoreSnapshotArgsForCall)]
@@ -2218,70 +2282,6 @@ func (fake *FakeStorage) TimePointsReturnsOnCall(i int, result1 []cluster.TimePo
 	}{result1, result2}
 }
 
-func (fake *FakeStorage) Type(arg1 string) (*cluster.Type, error) {
-	fake.typeMutex.Lock()
-	ret, specificReturn := fake.typeReturnsOnCall[len(fake.typeArgsForCall)]
-	fake.typeArgsForCall = append(fake.typeArgsForCall, struct {
-		arg1 string
-	}{arg1})
-	stub := fake.TypeStub
-	fakeReturns := fake.typeReturns
-	fake.recordInvocation("Type", []interface{}{arg1})
-	fake.typeMutex.Unlock()
-	if stub != nil {
-		return stub(arg1)
-	}
-	if specificReturn {
-		return ret.result1, ret.result2
-	}
-	return fakeReturns.result1, fakeReturns.result2
-}
-
-func (fake *FakeStorage) TypeCallCount() int {
-	fake.typeMutex.RLock()
-	defer fake.typeMutex.RUnlock()
-	return len(fake.typeArgsForCall)
-}
-
-func (fake *FakeStorage) TypeCalls(stub func(string) (*cluster.Type, error)) {
-	fake.typeMutex.Lock()
-	defer fake.typeMutex.Unlock()
-	fake.TypeStub = stub
-}
-
-func (fake *FakeStorage) TypeArgsForCall(i int) string {
-	fake.typeMutex.RLock()
-	defer fake.typeMutex.RUnlock()
-	argsForCall := fake.typeArgsForCall[i]
-	return argsForCall.arg1
-}
-
-func (fake *FakeStorage) TypeReturns(result1 *cluster.Type, result2 error) {
-	fake.typeMutex.Lock()
-	defer fake.typeMutex.Unlock()
-	fake.TypeStub = nil
-	fake.typeReturns = struct {
-		result1 *cluster.Type
-		result2 error
-	}{result1, result2}
-}
-
-func (fake *FakeStorage) TypeReturnsOnCall(i int, result1 *cluster.Type, result2 error) {
-	fake.typeMutex.Lock()
-	defer fake.typeMutex.Unlock()
-	fake.TypeStub = nil
-	if fake.typeReturnsOnCall == nil {
-		fake.typeReturnsOnCall = make(map[int]struct {
-			result1 *cluster.Type
-			result2 error
-		})
-	}
-	fake.typeReturnsOnCall[i] = struct {
-		result1 *cluster.Type
-		result2 error
-	}{result1, result2}
-}
-
 func (fake *FakeStorage) TypeVersion(arg1 string, arg2 uint64) (*cluster.Configuration, error) {
 	fake.typeVersionMutex.Lock()
 	ret, specificReturn := fake.typeVersionReturnsOnCall[len(fake.typeVersionArgsForCall)]
@@ -2514,6 +2514,8 @@ func (fake *FakeStorage) Invocations() map[string][][]interface{} {
 	defer fake.raftLogApproxSizeMutex.RUnlock()
 	fake.readerMutex.RLock()
 	defer fake.readerMutex.RUnlock()
+	fake.resolveTypeMutex.RLock()
+	defer fake.resolveTypeMutex.RUnlock()
 	fake.restoreSnapshotMutex.RLock()
 	defer fake.restoreSnapshotMutex.RUnlock()
 	fake.saveMutex.RLock()
@@ -2530,8 +2532,6 @@ func (fake *FakeStorage) Invocations() map[string][][]interface{} {
 	defer fake.termMutex.RUnlock()
 	fake.timePointsMutex.RLock()
 	defer fake.timePointsMutex.RUnlock()
-	fake.typeMutex.RLock()
-	defer fake.typeMutex.RUnlock()
 	fake.typeVersionMutex.RLock()
 	defer fake.typeVersionMutex.RUnlock()
 	fake.typeVersionsMutex.RLock()

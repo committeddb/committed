@@ -15,13 +15,23 @@ func (db *DB) ProposeType(ctx context.Context, c *cluster.Configuration) error {
 		return &cluster.ConfigError{Err: err}
 	}
 
-	// Enforce immutability: a type+version pair is immutable once defined.
-	// To evolve a type, increment the version field.
-	existing, err := db.storage.Type(c.ID)
-	if err == nil && existing != nil && existing.Version == t.Version {
-		return &cluster.ConfigError{
-			Err: fmt.Errorf("type %q version %d already exists and is immutable; increment the version to evolve", c.ID, t.Version),
-		}
+	// Type.Version is system-assigned, not user-supplied. The caller may
+	// include a version in the TOML for documentation but we ignore it
+	// here: PUTs that change the schema get an auto-incremented version,
+	// PUTs with a byte-identical schema short-circuit as a no-op so a
+	// rerun of the same configuration doesn't churn the log. See ticket
+	// type-schema-versioning Phase 1 item 1.
+	existing, err := db.storage.ResolveType(cluster.LatestTypeRef(c.ID))
+	if err == nil && existing != nil && bytes.Equal(existing.Schema, t.Schema) &&
+		existing.SchemaType == t.SchemaType && existing.Validate == t.Validate &&
+		existing.Name == t.Name {
+		return nil
+	}
+
+	if existing != nil && err == nil {
+		t.Version = existing.Version + 1
+	} else {
+		t.Version = 1
 	}
 
 	e, err := cluster.NewUpsertTypeEntity(t)
@@ -83,6 +93,10 @@ func ParseType(c *cluster.Configuration, s cluster.DatabaseStorage) (string, *cl
 
 func (db *DB) Types() ([]*cluster.Configuration, error) {
 	return db.storage.Types()
+}
+
+func (db *DB) ResolveType(ref cluster.TypeRef) (*cluster.Type, error) {
+	return db.storage.ResolveType(ref)
 }
 
 func (db *DB) TypeVersions(id string) ([]cluster.VersionInfo, error) {

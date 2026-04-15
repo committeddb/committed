@@ -26,10 +26,15 @@ func TestReader(t *testing.T) {
 			s := NewStorage(t, nil)
 			defer s.Cleanup()
 
-			pc := NewProposalCreator(s)
+			pc := newProposalCreatorForString(t, s)
 			ps := pc.createAndSaveProposals(t, tt.inputs)
 
 			r := s.Reader("qux")
+			// Drain the "string" type-registration entry the reader
+			// surfaces before user-data proposals.
+			if _, _, err := r.Read(); err != nil {
+				t.Fatalf("drain type entry: %v", err)
+			}
 
 			for _, expected := range ps {
 				_, got, err := r.Read()
@@ -54,7 +59,7 @@ func TestReaderSkipsSyncableIndexes(t *testing.T) {
 			s := NewStorage(t, nil)
 			defer s.Cleanup()
 
-			pc := NewProposalCreator(s)
+			pc := newProposalCreatorForString(t, s)
 
 			var ps []*cluster.Proposal
 			for _, input := range tt.inputs {
@@ -71,6 +76,11 @@ func TestReaderSkipsSyncableIndexes(t *testing.T) {
 			}
 
 			r := s.Reader(id)
+			// Drain the "string" type-registration entry the reader
+			// surfaces before user-data proposals.
+			if _, _, err := r.Read(); err != nil {
+				t.Fatalf("drain type entry: %v", err)
+			}
 
 			for _, expected := range psAssert {
 				_, got, err := r.Read()
@@ -93,12 +103,22 @@ func TestEOF(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			s := NewStorage(t, nil)
 			defer s.Cleanup()
+			// Register the "string" type at index 1; entity proposals
+			// follow starting at index 2.
+			s.RegisterType(t, "string", 1, 1)
 
 			r := s.Reader("qux")
+			// The reader surfaces the type-registration entry first
+			// (Reader only filters SyncableIndex entries, not Type
+			// upserts). Drain it so the user-data assertions below are
+			// positional.
+			if _, _, err := r.Read(); err != nil {
+				t.Fatalf("drain type entry: %v", err)
+			}
 
 			ps := createProposals(tt.inputs)
 			for i, p := range ps {
-				saveProposal(t, p, s, 1, 1+uint64(i))
+				saveProposal(t, p, s, 1, 2+uint64(i))
 
 				_, got, err := r.Read()
 				require.Equal(t, nil, err)
@@ -129,12 +149,22 @@ func TestResumeReader(t *testing.T) {
 			s := NewStorage(t, nil)
 			defer s.Cleanup()
 
-			pc := NewProposalCreator(s)
+			pc := newProposalCreatorForString(t, s)
 			ps := pc.createAndSaveProposals(t, tt.firstRead)
 
 			r := s.Reader(id)
-
+			// Drain the "string" type-registration entry the reader
+			// surfaces before user-data proposals. Track its index so
+			// `index` reflects the last user-proposal index at the end
+			// of the loop (the persisted syncable position after this
+			// first read pass).
 			var index uint64
+			if i, _, err := r.Read(); err != nil {
+				t.Fatalf("drain type entry: %v", err)
+			} else {
+				index = i
+			}
+
 			for _, expected := range ps {
 				i, got, err := r.Read()
 				index = i
@@ -164,6 +194,19 @@ type ProposalCreator struct {
 
 func NewProposalCreator(s *StorageWrapper) *ProposalCreator {
 	return &ProposalCreator{currentIndex: uint64(6), currentTerm: uint64(6), s: s}
+}
+
+// newProposalCreatorForString registers the "string" type used by
+// createProposal via the real apply path (consuming one raft index),
+// then returns a ProposalCreator ready to append entity proposals after
+// it. Tests using createProposal/createProposals must go through this
+// constructor so that ApplyCommitted can resolve the type when the
+// entity proposals are applied.
+func newProposalCreatorForString(t *testing.T, s *StorageWrapper) *ProposalCreator {
+	pc := NewProposalCreator(s)
+	pc.currentIndex++
+	s.RegisterType(t, "string", pc.currentTerm, pc.currentIndex)
+	return pc
 }
 
 func (c *ProposalCreator) saveProposals(t *testing.T, ps []*cluster.Proposal) []*cluster.Proposal {
@@ -202,7 +245,10 @@ func createProposal(input []string) *cluster.Proposal {
 	proposal := &cluster.Proposal{}
 	for _, entity := range input {
 		logEntity := &cluster.Entity{
-			Type: &cluster.Type{ID: "string"},
+			// Must match what StorageWrapper.RegisterType writes, so
+			// that proposals produced by this helper compare equal to
+			// proposals read back after apply-path hydration.
+			Type: &cluster.Type{ID: "string", Name: "string", Version: 1},
 			Key:  []byte(entity),
 			Data: []byte(entity),
 		}

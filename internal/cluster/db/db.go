@@ -332,9 +332,6 @@ func (db *DB) ProposeDeleteType(ctx context.Context, id string) error {
 	return db.Propose(ctx, p)
 }
 
-func (db *DB) Type(id string) (*cluster.Type, error) {
-	return db.storage.Type(id)
-}
 
 // Close tears down the DB. Order matters:
 //

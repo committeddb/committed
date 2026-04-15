@@ -28,12 +28,13 @@ func (s *Storage) saveType(t *cluster.Type) error {
 			return ErrBucketMissing
 		}
 
-		// Enforce immutability: if a type with this ID already exists and
-		// its Version field matches, skip silently. The preflight check in
-		// ProposeType rejects this at the API boundary with a clear error;
-		// this apply-side guard is a safety net for proposals that bypass
-		// the preflight (e.g. raw Raft proposals). We skip rather than
-		// error because apply errors are fatal to the Raft state machine.
+		// Enforce immutability: a (typeID, Version) pair is written once.
+		// ProposeType auto-bumps Version when the schema changes and
+		// short-circuits when it doesn't, so under normal operation the
+		// stored version and the proposed version never collide here. This
+		// guard catches Raft replay (the same proposal applied twice) and
+		// raw Raft proposals that bypassed ProposeType. We skip rather
+		// than error because apply errors are fatal to the state machine.
 		existing, err := getVersioned(b, []byte(t.ID))
 		if err == nil {
 			var prev cluster.Type
@@ -63,9 +64,18 @@ func (s *Storage) deleteType(id []byte) error {
 	})
 }
 
-func (s *Storage) Type(id string) (*cluster.Type, error) {
-	t := &cluster.Type{}
+// ResolveType dispatches to the latest or specific-version lookup based
+// on ref.Version. Zero (constructed via cluster.LatestTypeRef) means
+// "whatever is current"; non-zero means the exact historical version.
+func (s *Storage) ResolveType(ref cluster.TypeRef) (*cluster.Type, error) {
+	if ref.Version > 0 {
+		return s.typeAtVersion(ref.ID, uint64(ref.Version))
+	}
+	return s.latestType(ref.ID)
+}
 
+func (s *Storage) latestType(id string) (*cluster.Type, error) {
+	t := &cluster.Type{}
 	return t, s.view(func(tx *bolt.Tx) error {
 		b := tx.Bucket(typeBucket)
 		if b == nil {
@@ -77,6 +87,25 @@ func (s *Storage) Type(id string) (*cluster.Type, error) {
 		}
 		return t.Unmarshal(bs)
 	})
+}
+
+func (s *Storage) typeAtVersion(id string, version uint64) (*cluster.Type, error) {
+	t := &cluster.Type{}
+	err := s.view(func(tx *bolt.Tx) error {
+		b := tx.Bucket(typeBucket)
+		if b == nil {
+			return ErrBucketMissing
+		}
+		bs, err := getVersion(b, []byte(id), version)
+		if err != nil {
+			return err
+		}
+		return t.Unmarshal(bs)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return t, nil
 }
 
 func (s *Storage) Types() ([]*cluster.Configuration, error) {

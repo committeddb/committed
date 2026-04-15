@@ -367,7 +367,7 @@ func TestGetConfigurations_Error(t *testing.T) {
 func TestAddProposal_Success(t *testing.T) {
 	h, fake := setupTest()
 
-	fake.TypeReturns(&cluster.Type{ID: "t1", Name: "TestType"}, nil)
+	fake.ResolveTypeReturns(&cluster.Type{ID: "t1", Name: "TestType"}, nil)
 
 	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"foo": "bar"}}]}`
 	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
@@ -376,8 +376,8 @@ func TestAddProposal_Success(t *testing.T) {
 	h.ServeHTTP(w, req)
 
 	require.Equal(t, 200, w.Result().StatusCode)
-	require.Equal(t, 1, fake.TypeCallCount())
-	require.Equal(t, "t1", fake.TypeArgsForCall(0))
+	require.Equal(t, 1, fake.ResolveTypeCallCount())
+	require.Equal(t, cluster.LatestTypeRef("t1"), fake.ResolveTypeArgsForCall(0))
 	require.Equal(t, 1, fake.ProposeCallCount())
 
 	_, p := fake.ProposeArgsForCall(0)
@@ -390,8 +390,8 @@ func TestAddProposal_Success(t *testing.T) {
 func TestAddProposal_MultipleEntities(t *testing.T) {
 	h, fake := setupTest()
 
-	fake.TypeReturnsOnCall(0, &cluster.Type{ID: "t1", Name: "Type1"}, nil)
-	fake.TypeReturnsOnCall(1, &cluster.Type{ID: "t2", Name: "Type2"}, nil)
+	fake.ResolveTypeReturnsOnCall(0, &cluster.Type{ID: "t1", Name: "Type1"}, nil)
+	fake.ResolveTypeReturnsOnCall(1, &cluster.Type{ID: "t2", Name: "Type2"}, nil)
 
 	body := `{"entities": [
 		{"typeId": "t1", "key": "k1", "data": {"a": 1}},
@@ -403,7 +403,7 @@ func TestAddProposal_MultipleEntities(t *testing.T) {
 	h.ServeHTTP(w, req)
 
 	require.Equal(t, 200, w.Result().StatusCode)
-	require.Equal(t, 2, fake.TypeCallCount())
+	require.Equal(t, 2, fake.ResolveTypeCallCount())
 	require.Equal(t, 1, fake.ProposeCallCount())
 	_, p := fake.ProposeArgsForCall(0)
 	require.Equal(t, 2, len(p.Entities))
@@ -424,7 +424,7 @@ func TestAddProposal_BadJSON(t *testing.T) {
 
 func TestAddProposal_TypeNotFound(t *testing.T) {
 	h, fake := setupTest()
-	fake.TypeReturns(nil, fmt.Errorf("type not found"))
+	fake.ResolveTypeReturns(nil, fmt.Errorf("type not found"))
 
 	body := `{"entities": [{"typeId": "missing", "key": "k1", "data": {}}]}`
 	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
@@ -440,7 +440,7 @@ func TestAddProposal_TypeNotFound(t *testing.T) {
 
 func TestAddProposal_ProposeError(t *testing.T) {
 	h, fake := setupTest()
-	fake.TypeReturns(&cluster.Type{ID: "t1", Name: "T"}, nil)
+	fake.ResolveTypeReturns(&cluster.Type{ID: "t1", Name: "T"}, nil)
 	fake.ProposeReturns(fmt.Errorf("raft failed"))
 
 	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {}}]}`
@@ -468,7 +468,7 @@ func TestAddProposal_SchemaValidation_Valid(t *testing.T) {
 		"required": ["name"]
 	}`)
 
-	fake.TypeReturns(&cluster.Type{
+	fake.ResolveTypeReturns(&cluster.Type{
 		ID:         "t1",
 		Name:       "Person",
 		SchemaType: "JSONSchema",
@@ -498,7 +498,7 @@ func TestAddProposal_SchemaValidation_Invalid(t *testing.T) {
 		"required": ["name"]
 	}`)
 
-	fake.TypeReturns(&cluster.Type{
+	fake.ResolveTypeReturns(&cluster.Type{
 		ID:         "t1",
 		Name:       "Person",
 		SchemaType: "JSONSchema",
@@ -530,7 +530,7 @@ func TestAddProposal_SchemaValidation_WrongType(t *testing.T) {
 		}
 	}`)
 
-	fake.TypeReturns(&cluster.Type{
+	fake.ResolveTypeReturns(&cluster.Type{
 		ID:         "t1",
 		Name:       "Person",
 		SchemaType: "JSONSchema",
@@ -556,7 +556,7 @@ func TestAddProposal_SchemaValidation_NoValidation(t *testing.T) {
 
 	// Type has a schema but Validate == NoValidation — should skip validation
 	schema := []byte(`{"type": "object", "required": ["name"]}`)
-	fake.TypeReturns(&cluster.Type{
+	fake.ResolveTypeReturns(&cluster.Type{
 		ID:         "t1",
 		Name:       "Loose",
 		SchemaType: "JSONSchema",
@@ -575,15 +575,203 @@ func TestAddProposal_SchemaValidation_NoValidation(t *testing.T) {
 	require.Equal(t, 1, fake.ProposeCallCount())
 }
 
-func TestAddProposal_SchemaValidation_NonJSONSchemaType(t *testing.T) {
+// --- Protobuf validation ---
+
+// protoSourcePerson is a minimal .proto source used by the Protobuf
+// validation tests. The message name (`Person`) matches the Type.Name,
+// which is what compileProtobufValidator uses to pick the root message
+// when a .proto file declares multiple messages.
+const protoSourcePerson = `syntax = "proto3";
+message Person {
+    string name = 1;
+    int32 age = 2;
+}
+`
+
+func TestAddProposal_ProtobufValidation_Valid(t *testing.T) {
 	h, fake := setupTest()
 
-	// SchemaType is not "JSONSchema" — validation should be skipped even with ValidateSchema
-	fake.TypeReturns(&cluster.Type{
+	fake.ResolveTypeReturns(&cluster.Type{
 		ID:         "t1",
-		Name:       "Proto",
+		Name:       "Person",
 		SchemaType: "Protobuf",
-		Schema:     []byte("not json schema"),
+		Schema:     []byte(protoSourcePerson),
+		Validate:   cluster.ValidateSchema,
+	}, nil)
+
+	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"name": "Alice", "age": 30}}]}`
+	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	require.Equal(t, 200, w.Result().StatusCode)
+	require.Equal(t, 1, fake.ProposeCallCount())
+}
+
+func TestAddProposal_ProtobufValidation_WrongFieldType(t *testing.T) {
+	h, fake := setupTest()
+
+	fake.ResolveTypeReturns(&cluster.Type{
+		ID:         "t1",
+		Name:       "Person",
+		SchemaType: "Protobuf",
+		Schema:     []byte(protoSourcePerson),
+		Validate:   cluster.ValidateSchema,
+	}, nil)
+
+	// age is declared int32; a string is a protojson type mismatch.
+	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"name": "Alice", "age": "thirty"}}]}`
+	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	resp := w.Result()
+	require.Equal(t, 400, resp.StatusCode)
+	require.Equal(t, 0, fake.ProposeCallCount())
+	requireErrorResponse(t, resp, "schema_validation_failed")
+}
+
+func TestAddProposal_ProtobufValidation_UnknownField(t *testing.T) {
+	h, fake := setupTest()
+
+	fake.ResolveTypeReturns(&cluster.Type{
+		ID:         "t1",
+		Name:       "Person",
+		SchemaType: "Protobuf",
+		Schema:     []byte(protoSourcePerson),
+		Validate:   cluster.ValidateSchema,
+	}, nil)
+
+	// `email` is not declared on Person. protojson.Unmarshal rejects
+	// unknown fields by default (DiscardUnknown: false).
+	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"name": "Alice", "email": "a@x.com"}}]}`
+	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	resp := w.Result()
+	require.Equal(t, 400, resp.StatusCode)
+	require.Equal(t, 0, fake.ProposeCallCount())
+	requireErrorResponse(t, resp, "schema_validation_failed")
+}
+
+func TestAddProposal_ProtobufValidation_BadProtoSource(t *testing.T) {
+	h, fake := setupTest()
+
+	// Schema is not valid .proto syntax. Compilation should fail, which
+	// surfaces as a 500 (internal_error) at proposal time.
+	fake.ResolveTypeReturns(&cluster.Type{
+		ID:         "t1",
+		Name:       "Person",
+		SchemaType: "Protobuf",
+		Schema:     []byte("this is not proto source {{{"),
+		Validate:   cluster.ValidateSchema,
+	}, nil)
+
+	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"name": "Alice"}}]}`
+	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	resp := w.Result()
+	require.Equal(t, 500, resp.StatusCode)
+	require.Equal(t, 0, fake.ProposeCallCount())
+	requireErrorResponse(t, resp, "internal_error")
+}
+
+func TestAddProposal_ProtobufValidation_MissingMessageName(t *testing.T) {
+	h, fake := setupTest()
+
+	// .proto compiles fine but declares no `message Person`. The
+	// validator surfaces this as a compile failure -> 500.
+	fake.ResolveTypeReturns(&cluster.Type{
+		ID:         "t1",
+		Name:       "Person",
+		SchemaType: "Protobuf",
+		Schema:     []byte(`syntax = "proto3"; message Other { string x = 1; }`),
+		Validate:   cluster.ValidateSchema,
+	}, nil)
+
+	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"name": "Alice"}}]}`
+	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	resp := w.Result()
+	require.Equal(t, 500, resp.StatusCode)
+	require.Equal(t, 0, fake.ProposeCallCount())
+	requireErrorResponse(t, resp, "internal_error")
+}
+
+// The same (typeID, version) compiles once and is served from cache.
+// This asserts that a second proposal against the same type doesn't
+// trigger a fresh compile — verified indirectly by re-using a type
+// (which returns the cached validator). A direct assertion on the
+// compile-count isn't practical without plumbing a counter through the
+// compiler, so this test just confirms functional correctness on the
+// second call.
+// A .proto with a `package` statement qualifies the message name. The
+// validator should still find it by the short name in Type.Name.
+func TestAddProposal_ProtobufValidation_WithPackage(t *testing.T) {
+	h, fake := setupTest()
+
+	src := `syntax = "proto3";
+package app.v1;
+message Person {
+    string name = 1;
+}
+`
+	fake.ResolveTypeReturns(&cluster.Type{
+		ID:         "t1",
+		Name:       "Person",
+		SchemaType: "Protobuf",
+		Schema:     []byte(src),
+		Validate:   cluster.ValidateSchema,
+	}, nil)
+
+	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"name": "Alice"}}]}`
+	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	require.Equal(t, 200, w.Result().StatusCode)
+}
+
+func TestAddProposal_ProtobufValidation_SameVersionCached(t *testing.T) {
+	h, fake := setupTest()
+
+	fake.ResolveTypeReturns(&cluster.Type{
+		ID:         "t1",
+		Name:       "Person",
+		Version:    3,
+		SchemaType: "Protobuf",
+		Schema:     []byte(protoSourcePerson),
+		Validate:   cluster.ValidateSchema,
+	}, nil)
+
+	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"name": "Alice"}}]}`
+	for i := 0; i < 3; i++ {
+		req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		require.Equal(t, 200, w.Result().StatusCode, "iteration %d", i)
+	}
+	require.Equal(t, 3, fake.ProposeCallCount())
+}
+
+func TestAddProposal_SchemaValidation_UnknownSchemaType(t *testing.T) {
+	h, fake := setupTest()
+
+	// An unrecognized SchemaType currently fails-open (the type is
+	// proposed without validation) per proposal-validation.md's "do not
+	// fail-closed for unknown schema types" guidance. JSONSchema and
+	// Protobuf have real validators; Thrift is the unimplemented one
+	// that exercises this branch.
+	fake.ResolveTypeReturns(&cluster.Type{
+		ID:         "t1",
+		Name:       "Thing",
+		SchemaType: "Thrift",
+		Schema:     []byte("not a real schema"),
 		Validate:   cluster.ValidateSchema,
 	}, nil)
 
@@ -601,7 +789,7 @@ func TestAddProposal_SchemaValidation_EmptySchema(t *testing.T) {
 	h, fake := setupTest()
 
 	// ValidateSchema + JSONSchema but no actual schema content — should 500
-	fake.TypeReturns(&cluster.Type{
+	fake.ResolveTypeReturns(&cluster.Type{
 		ID:         "t1",
 		Name:       "Bad",
 		SchemaType: "JSONSchema",
@@ -625,7 +813,7 @@ func TestAddProposal_SchemaValidation_InvalidSchemaJSON(t *testing.T) {
 	h, fake := setupTest()
 
 	// ValidateSchema + JSONSchema but schema is not valid JSON
-	fake.TypeReturns(&cluster.Type{
+	fake.ResolveTypeReturns(&cluster.Type{
 		ID:         "t1",
 		Name:       "Bad",
 		SchemaType: "JSONSchema",
@@ -649,7 +837,7 @@ func TestAddProposal_SchemaValidation_EmptySchemaType(t *testing.T) {
 	h, fake := setupTest()
 
 	// ValidateSchema but SchemaType is empty — validation should be skipped
-	fake.TypeReturns(&cluster.Type{
+	fake.ResolveTypeReturns(&cluster.Type{
 		ID:       "t1",
 		Name:     "Legacy",
 		Schema:   []byte(`{"type":"object"}`),
@@ -666,13 +854,34 @@ func TestAddProposal_SchemaValidation_EmptySchemaType(t *testing.T) {
 	require.Equal(t, 1, fake.ProposeCallCount())
 }
 
-func TestAddProposal_SchemaValidation_CacheInvalidatesOnSchemaChange(t *testing.T) {
+// AddProposal attaches the resolved Type (including its Version) to
+// every entity. Marshal reads Version off the Type for the wire stamp,
+// so covering the attached Type here transitively covers the wire
+// behavior too.
+func TestAddProposal_AttachesResolvedType(t *testing.T) {
+	h, fake := setupTest()
+	fake.ResolveTypeReturns(&cluster.Type{ID: "t1", Name: "Person", Version: 7}, nil)
+
+	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"a": 1}}]}`
+	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	require.Equal(t, 200, w.Result().StatusCode)
+	require.Equal(t, 1, fake.ProposeCallCount())
+
+	_, p := fake.ProposeArgsForCall(0)
+	require.Len(t, p.Entities, 1)
+	require.Equal(t, 7, p.Entities[0].Type.Version, "entity must carry the resolved Type.Version")
+}
+
+func TestAddProposal_SchemaValidation_CacheInvalidatesOnVersionBump(t *testing.T) {
 	h, fake := setupTest()
 
-	// First schema: requires "name"
+	// First schema: requires "name". Version 1 (the system bumps Version
+	// on every schema change).
 	schema1 := []byte(`{"type":"object","required":["name"],"properties":{"name":{"type":"string"}}}`)
-	fake.TypeReturnsOnCall(0, &cluster.Type{
-		ID: "t1", Name: "Person", SchemaType: "JSONSchema",
+	fake.ResolveTypeReturnsOnCall(0, &cluster.Type{
+		ID: "t1", Name: "Person", Version: 1, SchemaType: "JSONSchema",
 		Schema: schema1, Validate: cluster.ValidateSchema,
 	}, nil)
 
@@ -683,15 +892,16 @@ func TestAddProposal_SchemaValidation_CacheInvalidatesOnSchemaChange(t *testing.
 	h.ServeHTTP(w, req)
 	require.Equal(t, 200, w.Result().StatusCode)
 
-	// Update schema: now requires "email" instead of "name"
+	// Schema evolves: now requires "email" instead of "name". A real
+	// ProposeType would bump Version to 2 — the fake mirrors that so the
+	// cache key (typeID, version) misses and the new schema is compiled.
 	schema2 := []byte(`{"type":"object","required":["email"],"properties":{"email":{"type":"string"}}}`)
-	fake.TypeReturnsOnCall(1, &cluster.Type{
-		ID: "t1", Name: "Person", SchemaType: "JSONSchema",
+	fake.ResolveTypeReturnsOnCall(1, &cluster.Type{
+		ID: "t1", Name: "Person", Version: 2, SchemaType: "JSONSchema",
 		Schema: schema2, Validate: cluster.ValidateSchema,
 	}, nil)
 
-	// Same proposal with "name" but no "email" — must fail against schema2
-	// If cache is stale this would incorrectly pass
+	// Same proposal with "name" but no "email" — must fail against schema2.
 	body = `{"entities": [{"typeId": "t1", "key": "k2", "data": {"name": "Bob"}}]}`
 	req = httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
 	w = httptest.NewRecorder()
@@ -912,7 +1122,7 @@ func requireErrorResponse(t *testing.T, resp *httpgo.Response, expectedCode stri
 
 func TestErrorResponse_JSONShape(t *testing.T) {
 	h, fake := setupTest()
-	fake.TypeReturns(nil, fmt.Errorf("not found"))
+	fake.ResolveTypeReturns(nil, fmt.Errorf("not found"))
 
 	body := `{"entities": [{"typeId": "missing", "key": "k1", "data": {}}]}`
 	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
