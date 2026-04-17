@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 
+	"go.etcd.io/etcd/client/pkg/v3/transport"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 
@@ -52,6 +53,17 @@ to quickly create a Cobra application.`,
 		peers[*id] = *url
 
 		var dbOpts []db.Option
+
+		// mTLS for peer transport is configured via three env vars that
+		// must be set together: COMMITTED_TLS_CA_FILE,
+		// COMMITTED_TLS_CERT_FILE, COMMITTED_TLS_KEY_FILE. All three set
+		// enables mTLS; none set keeps plaintext peer transport. Any
+		// other combination is a hard startup error — silently running
+		// partial-TLS ("I thought we had TLS") is the failure mode this
+		// check exists to prevent.
+		if tlsInfo := loadPeerTLSInfo(); tlsInfo != nil {
+			dbOpts = append(dbOpts, db.WithTLSInfo(tlsInfo))
+		}
 
 		// When OTEL_EXPORTER_OTLP_ENDPOINT is set (e.g., "localhost:4317"),
 		// metrics are pushed to an OTel Collector via gRPC. The collector
@@ -99,6 +111,46 @@ to quickly create a Cobra application.`,
 			log.Fatalf("raft error: %v", err)
 		}
 	},
+}
+
+// loadPeerTLSInfo reads the three COMMITTED_TLS_* env vars and returns
+// the corresponding transport.TLSInfo. Returns nil when none of them are
+// set (plaintext — today's default). Fatal-exits if some are set but not
+// all three, since a half-configured TLS setup is almost always an
+// operator mistake and silent fallback to plaintext is worse than a loud
+// startup failure.
+func loadPeerTLSInfo() *transport.TLSInfo {
+	ca := os.Getenv("COMMITTED_TLS_CA_FILE")
+	cert := os.Getenv("COMMITTED_TLS_CERT_FILE")
+	key := os.Getenv("COMMITTED_TLS_KEY_FILE")
+
+	set := 0
+	if ca != "" {
+		set++
+	}
+	if cert != "" {
+		set++
+	}
+	if key != "" {
+		set++
+	}
+	if set == 0 {
+		return nil
+	}
+	if set != 3 {
+		log.Fatalf("peer mTLS: all of COMMITTED_TLS_CA_FILE, COMMITTED_TLS_CERT_FILE, COMMITTED_TLS_KEY_FILE must be set together (got CA=%q CERT=%q KEY=%q)", ca, cert, key)
+	}
+	return &transport.TLSInfo{
+		TrustedCAFile: ca,
+		CertFile:      cert,
+		KeyFile:       key,
+		// TrustedCAFile alone makes ServerConfig() require and verify
+		// client certs, but ClientCertAuth=true makes it explicit — so
+		// the server-side ClientAuth policy survives even if someone
+		// later swaps in a ServerConfig override that doesn't read
+		// TrustedCAFile for that decision.
+		ClientCertAuth: true,
+	}
 }
 
 func dbParser() *syncsql.DBParser {

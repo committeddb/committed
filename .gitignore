@@ -12,3 +12,5 @@ state-log
 .claude-scratch/
 docker/db
 demo/db
+
+wal.test

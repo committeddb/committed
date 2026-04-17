@@ -25,7 +25,7 @@ func TestNew_CreatesTransport(t *testing.T) {
 	peers := []raft.Peer{
 		{ID: 1, Context: []byte("http://127.0.0.1:12379")},
 	}
-	tr := New(1, peers, zap.NewExample(), &fakeRaft{})
+	tr := New(1, peers, zap.NewExample(), &fakeRaft{}, nil)
 	require.NotNil(t, tr)
 	require.NotNil(t, tr.GetErrorC())
 }
@@ -36,7 +36,7 @@ func TestAddPeer_InvalidURL(t *testing.T) {
 	peers := []raft.Peer{
 		{ID: 1, Context: []byte("http://127.0.0.1:12379")},
 	}
-	tr := New(1, peers, zap.NewExample(), &fakeRaft{})
+	tr := New(1, peers, zap.NewExample(), &fakeRaft{}, nil)
 
 	err := tr.AddPeer(raft.Peer{ID: 2, Context: []byte("://bad-url")})
 	require.NotNil(t, err)

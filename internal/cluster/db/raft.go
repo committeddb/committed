@@ -9,6 +9,7 @@ import (
 
 	"github.com/philborlin/committed/internal/cluster/db/httptransport"
 	"github.com/philborlin/committed/internal/cluster/metrics"
+	tlstransport "go.etcd.io/etcd/client/pkg/v3/transport"
 	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/raft/v3/raftpb"
 	"go.uber.org/zap"
@@ -68,6 +69,9 @@ type Raft struct {
 	// WithTransportWrapperForTest to inject a fault-injection layer
 	// around the real transport.
 	transportWrapper func(Transport) Transport
+	// tlsInfo is captured from the options so startRaft can pass it to
+	// httptransport.New. nil means plaintext peer transport (default).
+	tlsInfo *tlstransport.TLSInfo
 
 	// closeC is closed by Close() to tell serveChannels (both its inner
 	// proposeC reader and its outer Ready loop) to exit. Without this,
@@ -116,6 +120,7 @@ func newRaftWithOptions(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []
 		transportStopC:     make(chan struct{}),
 		transportDoneC:     make(chan struct{}),
 		transportWrapper:   cfg.transportWrapper,
+		tlsInfo:            cfg.tlsInfo,
 		closeC:             make(chan struct{}),
 		serveChannelsDoneC: make(chan struct{}),
 
@@ -183,7 +188,7 @@ func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 	}
 
 	r := &httpTransportRaft{node: n.node}
-	var t Transport = httptransport.New(id, ps, n.logger, r)
+	var t Transport = httptransport.New(id, ps, n.logger, r, n.tlsInfo)
 	if n.transportWrapper != nil {
 		// Wrap once, before serveRaft starts driving the transport. The
 		// wrapper returns a Transport that conforms to the same interface,

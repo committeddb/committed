@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/philborlin/committed/internal/cluster/metrics"
+	"go.etcd.io/etcd/client/pkg/v3/transport"
 	"go.uber.org/zap"
 )
 
@@ -52,6 +53,11 @@ type options struct {
 	// without forking a parallel constructor path. Production callers
 	// leave this nil and get the plain HttpTransport.
 	transportWrapper func(Transport) Transport
+	// tlsInfo, when non-nil, enables mTLS on the raft peer transport.
+	// Populated from WithTLSInfo by cmd/node.go when the
+	// COMMITTED_TLS_CA_FILE / CERT_FILE / KEY_FILE env vars are all set.
+	// nil (the default) leaves the peer transport as plaintext HTTP.
+	tlsInfo *transport.TLSInfo
 }
 
 // DefaultCompactMaxSize is the production default: compact the raft
@@ -107,4 +113,16 @@ func WithCompactMaxSize(bytes uint64) Option {
 // exercise the trigger without ramping raft log size.
 func WithCompactMaxAge(d time.Duration) Option {
 	return func(o *options) { o.compactMaxAge = d }
+}
+
+// WithTLSInfo enables mTLS on the raft peer transport. Pass a
+// transport.TLSInfo populated with CertFile, KeyFile, and TrustedCAFile
+// to require CA-signed client certs on inbound peer connections and to
+// present this node's cert on outbound ones. Peer URLs must use the
+// `https://` scheme for TLS dialing; mixed schemes across peers are a
+// configuration error and will manifest as handshake failures at
+// connection time. Default (no call) leaves the transport as plaintext
+// HTTP — the historical behavior.
+func WithTLSInfo(info *transport.TLSInfo) Option {
+	return func(o *options) { o.tlsInfo = info }
 }
