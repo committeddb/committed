@@ -3,11 +3,12 @@ package wal_test
 import (
 	"testing"
 
+	pb "go.etcd.io/etcd/raft/v3/raftpb"
+
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/clusterfakes"
 	"github.com/philborlin/committed/internal/cluster/db"
 	"github.com/philborlin/committed/internal/cluster/db/parser"
-	pb "go.etcd.io/etcd/raft/v3/raftpb"
 
 	"github.com/stretchr/testify/require"
 )
@@ -303,4 +304,3 @@ func mustMakeProposal(t *testing.T, idx uint64, entities ...*cluster.Entity) pb.
 	require.NoError(t, err)
 	return pb.Entry{Term: 1, Index: idx, Type: pb.EntryNormal, Data: bs}
 }
-

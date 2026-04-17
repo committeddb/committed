@@ -3,8 +3,9 @@ package db_test
 import (
 	"testing"
 
-	"github.com/philborlin/committed/internal/cluster/db"
 	"github.com/stretchr/testify/require"
+
+	"github.com/philborlin/committed/internal/cluster/db"
 )
 
 func TestLeaderState(t *testing.T) {

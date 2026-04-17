@@ -17,6 +17,8 @@ import (
 	"github.com/dolthub/go-mysql-server/driver"
 	"github.com/dolthub/go-mysql-server/memory"
 	sqle "github.com/dolthub/go-mysql-server/sql"
+	"github.com/stretchr/testify/require"
+
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/db"
 	"github.com/philborlin/committed/internal/cluster/db/parser"
@@ -26,7 +28,6 @@ import (
 	"github.com/philborlin/committed/internal/cluster/ingestable"
 	"github.com/philborlin/committed/internal/cluster/syncable/sql"
 	"github.com/philborlin/committed/internal/cluster/syncable/sql/dialects"
-	"github.com/stretchr/testify/require"
 )
 
 // TestEndToEnd verifies the full HTTP → raft → syncable → destination database
@@ -104,10 +105,9 @@ func (d dbs) Resolve(name string, options *driver.Options) (string, sqle.Databas
 }
 
 func createDialect(t *testing.T, connectionString string) sql.Dialect {
-	var memdbs dbs
 	memdb := memory.NewDatabase(connectionString)
 	memdb.EnablePrimaryKeyIndexes()
-	memdbs = append(memdbs, memdb)
+	memdbs := dbs{memdb}
 
 	drv := driver.New(memdbs, nil)
 	dialect := &dialects.GoMySQLServerDialect{Driver: drv}
@@ -209,23 +209,6 @@ func view(t *testing.T, s *wal.Storage, syncableID string, databaseID string, p 
 	if err != nil {
 		require.Nil(t, err)
 	}
-}
-
-// waitFor polls check at 5ms intervals for up to 500ms. With Raft's tick
-// interval already lowered to 1ms in tests (see testTickInterval in
-// db/testing/db.go), each propose→commit→apply cycle takes a few milliseconds,
-// so 500ms is roughly 15× the realistic worst case while still tight enough
-// to flag a real regression.
-func waitFor(t *testing.T, what string, check func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		if check() {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for %s", what)
 }
 
 func addDatabase(t *testing.T, h *http.HTTP, dialect string) string {

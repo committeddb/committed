@@ -15,6 +15,7 @@ import (
 	"fmt"
 
 	"github.com/itchyny/gojq"
+
 	"github.com/philborlin/committed/internal/cluster"
 )
 

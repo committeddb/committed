@@ -4,10 +4,11 @@ import (
 	"context"
 	"time"
 
+	"go.etcd.io/etcd/raft/v3/raftpb"
+
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/db"
 	"github.com/philborlin/committed/internal/cluster/db/parser"
-	"go.etcd.io/etcd/raft/v3/raftpb"
 )
 
 // testTickInterval makes single-node Raft elect itself in ~10ms instead of
@@ -91,7 +92,6 @@ func (ms *MemorySyncable) Init(ctx context.Context) error {
 }
 
 func (ms *MemorySyncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.ShouldSnapshot, error) {
-
 	ms.count++
 	ms.proposals = append(ms.proposals, p)
 	if ms.doneAtCount == ms.count {

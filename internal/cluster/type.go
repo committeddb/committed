@@ -4,8 +4,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/philborlin/committed/internal/cluster/clusterpb"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/philborlin/committed/internal/cluster/clusterpb"
 )
 
 // TypeRef identifies a Type by the compound (ID, Version) key. A zero

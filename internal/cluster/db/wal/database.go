@@ -3,9 +3,10 @@ package wal
 import (
 	"fmt"
 
-	"github.com/philborlin/committed/internal/cluster"
 	bolt "go.etcd.io/bbolt"
 	"go.uber.org/zap"
+
+	"github.com/philborlin/committed/internal/cluster"
 )
 
 func (s *Storage) handleDatabase(e *cluster.Entity) error {
@@ -115,7 +116,6 @@ func (s *Storage) Databases() ([]*cluster.Configuration, error) {
 			return nil
 		})
 	})
-
 	if err != nil {
 		return nil, err
 	}

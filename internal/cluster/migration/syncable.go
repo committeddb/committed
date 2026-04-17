@@ -65,19 +65,19 @@ func (b *batchSyncable) SyncBatch(ctx context.Context, ps []*cluster.Proposal) (
 func migrateProposal(r Resolver, p *cluster.Proposal) (*cluster.Proposal, error) {
 	out := &cluster.Proposal{RequestID: p.RequestID, Entities: make([]*cluster.Entity, 0, len(p.Entities))}
 	for _, e := range p.Entities {
-		if cluster.IsSystem(e.Type.ID) {
+		if cluster.IsSystem(e.ID) {
 			out.Entities = append(out.Entities, e)
 			continue
 		}
-		latest, err := r.ResolveType(cluster.LatestTypeRef(e.Type.ID))
+		latest, err := r.ResolveType(cluster.LatestTypeRef(e.ID))
 		if err != nil {
-			return nil, fmt.Errorf("resolve latest type %s: %w", e.Type.ID, err)
+			return nil, fmt.Errorf("resolve latest type %s: %w", e.ID, err)
 		}
-		if latest.Version <= e.Type.Version {
+		if latest.Version <= e.Version {
 			out.Entities = append(out.Entities, e)
 			continue
 		}
-		data, err := Chain(r, e.Type.ID, e.Type.Version, latest.Version, e.Data)
+		data, err := Chain(r, e.ID, e.Version, latest.Version, e.Data)
 		if err != nil {
 			return nil, err
 		}

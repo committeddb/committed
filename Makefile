@@ -25,6 +25,11 @@ test-all:
 test/adversarial:
 	go test -tags adversarial -race -count=20 -timeout 900s ./internal/cluster/db/...
 
+lint:
+	golangci-lint run
+
+check: lint test
+
 lint/openapi:
 	npx --yes @redocly/cli@latest lint api/openapi.yaml
 

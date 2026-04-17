@@ -4,10 +4,11 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/clusterfakes"
 	"github.com/philborlin/committed/internal/cluster/db/parser"
-	"github.com/stretchr/testify/require"
 )
 
 // --- ParseDatabase ---

@@ -3,8 +3,9 @@ package sql
 import (
 	"fmt"
 
-	"github.com/philborlin/committed/internal/cluster"
 	"github.com/spf13/viper"
+
+	"github.com/philborlin/committed/internal/cluster"
 )
 
 type DBParser struct {

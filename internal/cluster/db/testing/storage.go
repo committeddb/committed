@@ -7,10 +7,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/philborlin/committed/internal/cluster"
-	"github.com/philborlin/committed/internal/cluster/db"
 	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/raft/v3/raftpb"
+
+	"github.com/philborlin/committed/internal/cluster"
+	"github.com/philborlin/committed/internal/cluster/db"
 )
 
 type MemoryStorageSaveArgsForCall struct {

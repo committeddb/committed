@@ -27,16 +27,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/philborlin/committed/internal/cluster"
-	"github.com/philborlin/committed/internal/cluster/clusterfakes"
-	"github.com/philborlin/committed/internal/cluster/db"
-	"github.com/philborlin/committed/internal/cluster/db/parser"
-	"github.com/philborlin/committed/internal/cluster/db/wal"
 	tidwallwal "github.com/tidwall/wal"
 	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/raft/v3/raftpb"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+
+	"github.com/philborlin/committed/internal/cluster"
+	"github.com/philborlin/committed/internal/cluster/clusterfakes"
+	"github.com/philborlin/committed/internal/cluster/db"
+	"github.com/philborlin/committed/internal/cluster/db/parser"
+	"github.com/philborlin/committed/internal/cluster/db/wal"
 )
 
 // adversarialSettleTime is how long we give raft to process a state change
@@ -298,7 +299,6 @@ func TestAdversarial_SymmetricPartition(t *testing.T) {
 		}
 	}
 }
-
 
 // raftsByIDs returns the subset of rafts whose ids are in the given list,
 // preserving rafts' original order. Used by the partition scenario to
@@ -676,6 +676,7 @@ func tryProposeAndVerify(r *Raft, payload []byte, deadline time.Duration, stopC 
 //     (regression test for the PR3 concurrent-replace fix at the
 //     multi-node level — no orphaned workers from a concurrent-register
 //     race).
+//
 // -----------------------------------------------------------------------------
 func TestAdversarial_ConcurrentConfigChanges(t *testing.T) {
 	_ = rand.New(rand.NewSource(7))
@@ -932,6 +933,7 @@ func createTestIngestableConfig(id string) *cluster.Configuration {
 //     proposing one more entry must succeed on all three nodes, proving
 //     the previously-isolated follower catches back up via routine
 //     AppendEntries replication.
+//
 // -----------------------------------------------------------------------------
 func TestAdversarial_AsymmetricPartition(t *testing.T) {
 	// Seeded RNG unused in this scenario today — same reservation pattern
@@ -1062,6 +1064,7 @@ func TestAdversarial_AsymmetricPartition(t *testing.T) {
 //     copy was not fully processed). The per-node "every acked entry
 //     appears exactly once" check is the same invariant scenario (c)
 //     protects under leader flapping.
+//
 // -----------------------------------------------------------------------------
 func TestAdversarial_SlowFollower(t *testing.T) {
 	_ = rand.New(rand.NewSource(4))
@@ -1202,6 +1205,7 @@ func TestAdversarial_SlowFollower(t *testing.T) {
 //     and 3 must elect a leader (if not already) and continue committing
 //     proposes. Two out of three is quorum, so this is a pure failover
 //     liveness check.
+//
 // -----------------------------------------------------------------------------
 func TestAdversarial_DiskFull(t *testing.T) {
 	_ = rand.New(rand.NewSource(6))
@@ -1505,8 +1509,8 @@ func TestAdversarial_SevereLagFollowerRebuild(t *testing.T) {
 		}
 	}
 	if leaderCompacted == 0 {
-		t.Fatalf("no compaction observed on surviving pair — compactMaxSize=%d " +
-			"was not reached during the %d-entry burst (consider smaller limit " +
+		t.Fatalf("no compaction observed on surviving pair — compactMaxSize=%d "+
+			"was not reached during the %d-entry burst (consider smaller limit "+
 			"or more proposes)", 512, duringEntries)
 	}
 	if leaderCompacted <= follower3AppliedBefore {
@@ -1917,11 +1921,12 @@ func openWalRaft(t *testing.T, id uint64, peers []raft.Peer, dir string, fc *Fau
 	proposeC := make(chan []byte)
 	confChangeC := make(chan raftpb.ConfChange)
 
-	nodeOpts := []db.Option{
+	nodeOpts := make([]db.Option, 0, 3+len(opts))
+	nodeOpts = append(nodeOpts,
 		db.WithTickInterval(multiNodeTickInterval),
 		db.WithTransportWrapperForTest(fc.Wrap(id)),
 		db.WithLogger(logger),
-	}
+	)
 	nodeOpts = append(nodeOpts, opts...)
 
 	commitC, errorC, r := db.NewRaft(id, peers, s, proposeC, confChangeC, nodeOpts...)
@@ -2111,10 +2116,11 @@ func openRawWalLog(dir string) (*wallog, error) {
 	return &wallog{l: l}, nil
 }
 
-func (w *wallog) Close() error          { return w.l.Close() }
+func (w *wallog) Close() error { return w.l.Close() }
 func (w *wallog) LastSeq() (uint64, error) {
 	return w.l.LastIndex()
 }
+
 func (w *wallog) Read(seq uint64) ([]byte, error) {
 	return w.l.Read(seq)
 }

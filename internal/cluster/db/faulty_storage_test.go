@@ -4,8 +4,9 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/philborlin/committed/internal/cluster/db"
 	"go.etcd.io/etcd/raft/v3/raftpb"
+
+	"github.com/philborlin/committed/internal/cluster/db"
 )
 
 // FaultyStorage wraps a db.Storage and returns syscall.ENOSPC from Save

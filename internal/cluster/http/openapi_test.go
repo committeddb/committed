@@ -13,11 +13,12 @@ import (
 	"github.com/pb33f/libopenapi"
 	validator "github.com/pb33f/libopenapi-validator"
 	valerrors "github.com/pb33f/libopenapi-validator/errors"
+	"github.com/stretchr/testify/require"
+
 	openapiapi "github.com/philborlin/committed/api"
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/clusterfakes"
 	httppkg "github.com/philborlin/committed/internal/cluster/http"
-	"github.com/stretchr/testify/require"
 )
 
 // newValidator parses the embedded spec and constructs a validator. Test

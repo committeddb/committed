@@ -3,8 +3,9 @@ package db
 import (
 	"io"
 
-	"github.com/philborlin/committed/internal/cluster"
 	"github.com/spf13/viper"
+
+	"github.com/philborlin/committed/internal/cluster"
 )
 
 type Parser interface {
@@ -22,7 +23,7 @@ func parseBytes(mimeType string, reader io.Reader) (*viper.Viper, error) {
 		style = "json"
 	}
 
-	var v = viper.New()
+	v := viper.New()
 
 	v.SetConfigType(style)
 	err := v.ReadConfig(reader)

@@ -5,8 +5,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/philborlin/committed/internal/cluster"
 	"github.com/spf13/viper"
+
+	"github.com/philborlin/committed/internal/cluster"
 )
 
 // SyncableParser parses TOML configuration into an HTTP webhook Syncable.

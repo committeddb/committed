@@ -4,9 +4,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/philborlin/committed/internal/cluster/syncable/sql"
 	"github.com/philborlin/committed/internal/cluster/syncable/sql/dialects"
-	"github.com/stretchr/testify/require"
 )
 
 func testConfig() *sql.Config {

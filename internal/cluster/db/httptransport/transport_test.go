@@ -14,9 +14,9 @@ import (
 // without spinning up an actual cluster.
 type fakeRaft struct{}
 
-func (f *fakeRaft) Process(ctx context.Context, m raftpb.Message) error { return nil }
-func (f *fakeRaft) IsIDRemoved(id uint64) bool                          { return false }
-func (f *fakeRaft) ReportUnreachable(id uint64)                         {}
+func (f *fakeRaft) Process(ctx context.Context, m raftpb.Message) error  { return nil }
+func (f *fakeRaft) IsIDRemoved(id uint64) bool                           { return false }
+func (f *fakeRaft) ReportUnreachable(id uint64)                          {}
 func (f *fakeRaft) ReportSnapshot(id uint64, status raft.SnapshotStatus) {}
 
 // TestNew_CreatesTransport verifies that the constructor returns a non-nil

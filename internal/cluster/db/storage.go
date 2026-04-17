@@ -3,9 +3,10 @@ package db
 import (
 	"time"
 
-	"github.com/philborlin/committed/internal/cluster"
 	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/raft/v3/raftpb"
+
+	"github.com/philborlin/committed/internal/cluster"
 )
 
 //counterfeiter:generate . Storage

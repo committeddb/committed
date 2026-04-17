@@ -73,5 +73,5 @@ func writeJSONStatus(w httpgo.ResponseWriter, status int, body any) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	w.Write(bs)
+	_, _ = w.Write(bs)
 }

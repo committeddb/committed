@@ -16,11 +16,12 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
+
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/ingestable/sql"
 	"github.com/philborlin/committed/internal/cluster/ingestable/sql/dialectpb"
-	"go.uber.org/zap"
-	"google.golang.org/protobuf/proto"
 )
 
 // PostgreSQLDialect implements sql.Dialect for Postgres logical replication
@@ -205,7 +206,7 @@ func (d *PostgreSQLDialect) stream(
 	if err != nil {
 		return err
 	}
-	defer conn.Close(ctx)
+	defer func() { _ = conn.Close(ctx) }()
 
 	if err := ensurePublication(ctx, conn, pgCfg); err != nil {
 		return err
@@ -503,7 +504,7 @@ func (d *PostgreSQLDialect) snapshot(
 	if err != nil {
 		return fmt.Errorf("snapshot: open connection: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	batchSize := parseBatchSize(config.Options)
 
@@ -629,7 +630,7 @@ func readBatch(
 	if err != nil {
 		return nil, "", 0, fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	quotedTable := quoteTable(table)
 	quotedPK := quoteIdent(pkCol)
@@ -653,7 +654,7 @@ func readBatch(
 	if err != nil {
 		return nil, "", 0, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	columns, err := rows.Columns()
 	if err != nil {

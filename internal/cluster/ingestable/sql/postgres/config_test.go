@@ -5,9 +5,10 @@ import (
 	"testing"
 
 	"github.com/jackc/pglogrepl"
+	"github.com/stretchr/testify/require"
+
 	"github.com/philborlin/committed/internal/cluster/ingestable/sql"
 	"github.com/philborlin/committed/internal/cluster/ingestable/sql/dialectpb"
-	"github.com/stretchr/testify/require"
 )
 
 func TestBuildPgConfig(t *testing.T) {

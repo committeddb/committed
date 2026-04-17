@@ -3,10 +3,11 @@ package wal_test
 import (
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/db"
 	"github.com/philborlin/committed/internal/cluster/db/wal"
-	"github.com/stretchr/testify/require"
 )
 
 func TestType(t *testing.T) {

@@ -10,11 +10,12 @@ import (
 	"strings"
 
 	"github.com/bufbuild/protocompile"
-	"github.com/philborlin/committed/internal/cluster"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
+
+	"github.com/philborlin/committed/internal/cluster"
 )
 
 // entityValidator validates an entity's raw JSON data against a type
@@ -114,7 +115,7 @@ type protobufValidator struct {
 // declared in the same file and referenced by that root.
 func compileProtobufValidator(t *cluster.Type) (entityValidator, error) {
 	if t.Name == "" {
-		return nil, errors.New("Protobuf type requires a non-empty Name that matches the top-level message name")
+		return nil, errors.New("protobuf type requires a non-empty Name that matches the top-level message name")
 	}
 
 	// Wrap the in-memory resolver with WithStandardImports so the user's
@@ -150,7 +151,7 @@ func compileProtobufValidator(t *cluster.Type) (entityValidator, error) {
 		md = findMessageByShortName(msgs, t.Name)
 	}
 	if md == nil {
-		return nil, fmt.Errorf("Protobuf schema has no message named %q (declare `message %s { ... }` in the .proto)", t.Name, t.Name)
+		return nil, fmt.Errorf("protobuf schema has no message named %q (declare `message %s { ... }` in the .proto)", t.Name, t.Name)
 	}
 
 	return &protobufValidator{md: md}, nil

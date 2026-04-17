@@ -10,7 +10,7 @@ import (
 // unauthenticated so clients can discover the API without credentials.
 func (h *HTTP) OpenAPISpec(w httpgo.ResponseWriter, r *httpgo.Request) {
 	w.Header().Set("Content-Type", "application/yaml")
-	w.Write(api.OpenAPISpec)
+	_, _ = w.Write(api.OpenAPISpec)
 }
 
 // SwaggerUI serves a small HTML page that loads Swagger UI from a CDN
@@ -18,5 +18,5 @@ func (h *HTTP) OpenAPISpec(w httpgo.ResponseWriter, r *httpgo.Request) {
 // reason as the spec itself.
 func (h *HTTP) SwaggerUI(w httpgo.ResponseWriter, r *httpgo.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write(api.SwaggerUIHTML)
+	_, _ = w.Write(api.SwaggerUIHTML)
 }

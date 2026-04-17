@@ -16,11 +16,12 @@ import (
 	tcmysql "github.com/testcontainers/testcontainers-go/modules/mysql"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/ingestable/sql"
 	"github.com/philborlin/committed/internal/cluster/ingestable/sql/dialectpb"
 	"github.com/philborlin/committed/internal/cluster/ingestable/sql/mysql"
-	"github.com/stretchr/testify/require"
 )
 
 var (
@@ -832,10 +833,7 @@ waitProgress:
 	// Collect until we've seen all rows "006".."009" (4 rows).
 	seen := make(map[string]bool)
 	deadline = time.After(15 * time.Second)
-	for {
-		if seen["006"] && seen["007"] && seen["008"] && seen["009"] {
-			break
-		}
+	for !seen["006"] || !seen["007"] || !seen["008"] || !seen["009"] {
 		select {
 		case p := <-proposalChan2:
 			for _, e := range p.Entities {

@@ -8,9 +8,10 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/philborlin/committed/internal/cluster"
 	bolt "go.etcd.io/bbolt"
 	pb "go.etcd.io/etcd/raft/v3/raftpb"
+
+	"github.com/philborlin/committed/internal/cluster"
 )
 
 // CreateSnapshot captures the current metadata state (bbolt content) as
@@ -51,11 +52,9 @@ func (s *Storage) CreateSnapshot(index uint64, confState *pb.ConfState) (pb.Snap
 		term = 0
 	}
 
-	cs := pb.ConfState{}
+	cs := s.snapshot.Metadata.ConfState
 	if confState != nil {
 		cs = *confState
-	} else {
-		cs = s.snapshot.Metadata.ConfState
 	}
 
 	snap := pb.Snapshot{

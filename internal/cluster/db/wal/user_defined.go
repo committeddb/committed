@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/nakabonne/tstorage"
+
 	"github.com/philborlin/committed/internal/cluster"
 )
 

@@ -9,12 +9,13 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/stretchr/testify/require"
+	"go.etcd.io/etcd/raft/v3/raftpb"
+
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/db"
 	"github.com/philborlin/committed/internal/cluster/db/dbfakes"
 	parser "github.com/philborlin/committed/internal/cluster/db/parser"
-	"github.com/stretchr/testify/require"
-	"go.etcd.io/etcd/raft/v3/raftpb"
 )
 
 // testCtx returns a context with a generous deadline. PR2's blocking
@@ -142,9 +143,9 @@ func getLastIndex(s db.Storage, ps []*cluster.Proposal) uint64 {
 }
 
 func modifyInputs(is [][]string) [][]string {
-	var newInput [][]string
+	newInput := make([][]string, 0, len(is))
 	for _, outer := range is {
-		var newOuter []string
+		newOuter := make([]string, 0, len(outer))
 		for _, inner := range outer {
 			newOuter = append(newOuter, inner+"'")
 		}
@@ -282,7 +283,7 @@ func createProposalsAndProposeThem(t *testing.T, db *DB, inputs [][]string) []*c
 }
 
 func createProposals(input [][]string) []*cluster.Proposal {
-	var ps []*cluster.Proposal
+	ps := make([]*cluster.Proposal, 0, len(input))
 
 	for fi, entities := range input {
 		fmt.Printf("Entities: %v\n", entities)
@@ -423,7 +424,7 @@ func (ms *MemorySyncable) Sync(ctx context.Context, p *cluster.Proposal) (cluste
 
 	shouldSnapshot := true
 	for _, e := range p.Entities {
-		if cluster.IsSystem(e.Type.ID) {
+		if cluster.IsSystem(e.ID) {
 			shouldSnapshot = false
 		}
 	}
@@ -439,8 +440,8 @@ func (ms *MemorySyncable) Close() error {
 // db.sync will detect the SyncBatch method and use the batching path.
 type MemoryBatchSyncable struct {
 	MemorySyncable
-	batchMu     sync.Mutex
-	batchSizes  []int
+	batchMu    sync.Mutex
+	batchSizes []int
 }
 
 func NewBatchSyncable(doneAtCount int, cancel func()) *MemoryBatchSyncable {

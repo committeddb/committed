@@ -3,8 +3,9 @@ package ingestable
 import (
 	"context"
 
-	"github.com/philborlin/committed/internal/cluster"
 	"github.com/spf13/viper"
+
+	"github.com/philborlin/committed/internal/cluster"
 )
 
 type ProposalIngestableParser struct {

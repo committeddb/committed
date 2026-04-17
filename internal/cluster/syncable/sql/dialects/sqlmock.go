@@ -7,6 +7,7 @@ import (
 	gosql "database/sql"
 
 	"github.com/DATA-DOG/go-sqlmock"
+
 	"github.com/philborlin/committed/internal/cluster/syncable/sql"
 )
 

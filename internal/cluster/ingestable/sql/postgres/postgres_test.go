@@ -15,10 +15,11 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/ingestable/sql"
 	"github.com/philborlin/committed/internal/cluster/ingestable/sql/postgres"
-	"github.com/stretchr/testify/require"
 )
 
 // rowCount for chunking tests; sized to comfortably exceed batch_size=10.

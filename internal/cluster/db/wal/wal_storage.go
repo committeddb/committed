@@ -13,34 +13,43 @@ import (
 	"time"
 
 	"github.com/nakabonne/tstorage"
-	"github.com/philborlin/committed/internal/cluster"
-	"github.com/philborlin/committed/internal/cluster/db"
 	"github.com/tidwall/wal"
 	bolt "go.etcd.io/bbolt"
 	"go.etcd.io/etcd/raft/v3"
 	pb "go.etcd.io/etcd/raft/v3/raftpb"
 	"go.uber.org/zap"
+
+	"github.com/philborlin/committed/internal/cluster"
+	"github.com/philborlin/committed/internal/cluster/db"
 )
 
-var ErrOutOfBounds = errors.New("requested index is greater than last index")
-var ErrTypeMissing = errors.New("type not found")
-var ErrDatabaseMissing = errors.New("database not found")
-var ErrBucketMissing = errors.New("key value bucket missing")
+var (
+	ErrOutOfBounds     = errors.New("requested index is greater than last index")
+	ErrTypeMissing     = errors.New("type not found")
+	ErrDatabaseMissing = errors.New("database not found")
+	ErrBucketMissing   = errors.New("key value bucket missing")
+)
 
-var typeBucket = []byte("types")
-var databaseBucket = []byte("databases")
-var ingestableBucket = []byte("ingestables")
+var (
+	typeBucket       = []byte("types")
+	databaseBucket   = []byte("databases")
+	ingestableBucket = []byte("ingestables")
+)
 
 // TODO var ingestablePositionBucket = []byte("ingestablesPositions")
-var syncableBucket = []byte("syncables")
-var syncableIndexBucket = []byte("syncableIndexes")
+var (
+	syncableBucket      = []byte("syncables")
+	syncableIndexBucket = []byte("syncableIndexes")
+)
 
 // appliedIndexBucket holds a single key ("idx") whose value is the
 // big-endian uint64 of the highest raft entry index that ApplyCommitted has
 // fully applied. Persisted so that on restart the Ready loop's replay of
 // already-applied committed entries is a no-op.
-var appliedIndexBucket = []byte("appliedIndex")
-var appliedIndexKey = []byte("idx")
+var (
+	appliedIndexBucket = []byte("appliedIndex")
+	appliedIndexKey    = []byte("idx")
+)
 
 var buckets = [][]byte{typeBucket, databaseBucket, ingestableBucket, syncableBucket, syncableIndexBucket, appliedIndexBucket}
 
@@ -73,9 +82,9 @@ type Storage struct {
 	// can't be bypassed by an outside caller writing directly. Access
 	// goes through appendEvent / readEventAt / EventIndex /
 	// firstEventSeq / lastEventSeq.
-	eventLog          *wal.Log
-	StateLog          *wal.Log // Should we get rid of this and store the latest state in the bbolt db?
-	keyValueStorage   *bolt.DB
+	eventLog        *wal.Log
+	StateLog        *wal.Log // Should we get rid of this and store the latest state in the bbolt db?
+	keyValueStorage *bolt.DB
 	// kvMu guards swaps of keyValueStorage (RestoreSnapshot replaces the
 	// bbolt handle wholesale: close → rename file → reopen → reassign).
 	// Every bbolt transaction routes through view / update, which take
@@ -119,11 +128,11 @@ type Storage struct {
 	// level comment on firstIndex). Splitting them lets each carry a
 	// single, invariant responsibility.
 	compactedUpTo atomic.Uint64
-	stateIndex uint64
-	databases  map[string]cluster.Database
-	parser     db.Parser
-	sync       chan<- *db.SyncableWithID
-	ingest     chan<- *db.IngestableWithID
+	stateIndex    uint64
+	databases     map[string]cluster.Database
+	parser        db.Parser
+	sync          chan<- *db.SyncableWithID
+	ingest        chan<- *db.IngestableWithID
 	// appliedIndex is the highest raft entry index that ApplyCommitted has
 	// fully applied. Bumped after each successful per-entry apply (and
 	// persisted to bbolt in the same step). Loaded from bbolt on Open.
@@ -186,7 +195,7 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	}
 
 	boltOpts := &bolt.Options{Timeout: 1 * time.Second, NoSync: cfg.fsyncDisabled}
-	keyValueStorage, err := bolt.Open(filepath.Join(keyValueStorageDir, "bbolt.db"), 0600, boltOpts)
+	keyValueStorage, err := bolt.Open(filepath.Join(keyValueStorageDir, "bbolt.db"), 0o600, boltOpts)
 	if err != nil {
 		return nil, err
 	}

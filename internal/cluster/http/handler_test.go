@@ -10,10 +10,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/clusterfakes"
 	"github.com/philborlin/committed/internal/cluster/http"
-	"github.com/stretchr/testify/require"
 )
 
 func setupTest() (*http.HTTP, *clusterfakes.FakeCluster) {

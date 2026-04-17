@@ -9,18 +9,18 @@ import (
 
 func createDDL(config *sql.Config) string {
 	var ddl strings.Builder
-	ddl.WriteString(fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (", config.Table))
+	fmt.Fprintf(&ddl, "CREATE TABLE IF NOT EXISTS %s (", config.Table)
 	for i, column := range config.Mappings {
-		ddl.WriteString(fmt.Sprintf("%s %s", column.Column, column.SQLType))
+		fmt.Fprintf(&ddl, "%s %s", column.Column, column.SQLType)
 		if i < len(config.Mappings)-1 {
 			ddl.WriteString(",")
 		}
 	}
 	if config.PrimaryKey != "" {
-		ddl.WriteString(fmt.Sprintf(",PRIMARY KEY (%s)", config.PrimaryKey))
+		fmt.Fprintf(&ddl, ",PRIMARY KEY (%s)", config.PrimaryKey)
 	}
 	for _, index := range config.Indexes {
-		ddl.WriteString(fmt.Sprintf(",INDEX %s (%s)", index.IndexName, index.ColumnNames))
+		fmt.Fprintf(&ddl, ",INDEX %s (%s)", index.IndexName, index.ColumnNames)
 	}
 	ddl.WriteString(");")
 

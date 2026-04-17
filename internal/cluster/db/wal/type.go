@@ -4,9 +4,10 @@ import (
 	"bytes"
 	"fmt"
 
-	"github.com/philborlin/committed/internal/cluster"
 	bolt "go.etcd.io/bbolt"
 	"go.uber.org/zap"
+
+	"github.com/philborlin/committed/internal/cluster"
 )
 
 func (s *Storage) handleType(e *cluster.Entity) error {
@@ -165,7 +166,6 @@ func (s *Storage) Types() ([]*cluster.Configuration, error) {
 			return nil
 		})
 	})
-
 	if err != nil {
 		return nil, err
 	}

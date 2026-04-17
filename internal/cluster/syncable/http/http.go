@@ -10,8 +10,9 @@ import (
 	nethttp "net/http"
 	"time"
 
-	"github.com/philborlin/committed/internal/cluster"
 	"go.uber.org/zap"
+
+	"github.com/philborlin/committed/internal/cluster"
 )
 
 type payload struct {
@@ -45,7 +46,7 @@ func New(config *Config) *Syncable {
 
 func (s *Syncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.ShouldSnapshot, error) {
 	for _, e := range p.Entities {
-		if s.config.Topic != e.Type.ID {
+		if s.config.Topic != e.ID {
 			return false, nil
 		}
 	}
@@ -65,9 +66,9 @@ func (s *Syncable) sendEntity(ctx context.Context, e *cluster.Entity) error {
 	body := payload{
 		Key: encodedKey,
 		Type: payloadType{
-			ID:      e.Type.ID,
-			Name:    e.Type.Name,
-			Version: e.Type.Version,
+			ID:      e.ID,
+			Name:    e.Name,
+			Version: e.Version,
 		},
 		Data:      json.RawMessage(e.Data),
 		Timestamp: e.Timestamp,
@@ -95,7 +96,7 @@ func (s *Syncable) sendEntity(ctx context.Context, e *cluster.Entity) error {
 	if err != nil {
 		return fmt.Errorf("[http.Sync] request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, resp.Body)
 
 	return ClassifyStatus(resp.StatusCode)

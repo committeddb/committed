@@ -3,9 +3,10 @@ package db
 import (
 	"time"
 
-	"github.com/philborlin/committed/internal/cluster/metrics"
 	"go.etcd.io/etcd/client/pkg/v3/transport"
 	"go.uber.org/zap"
+
+	"github.com/philborlin/committed/internal/cluster/metrics"
 )
 
 // defaultTickInterval is the cadence at which Raft.Tick() is called when no

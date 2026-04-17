@@ -3,10 +3,11 @@ package db_test
 import (
 	"testing"
 
-	"github.com/philborlin/committed/internal/cluster"
-	"github.com/philborlin/committed/internal/cluster/db/dbfakes"
 	"github.com/stretchr/testify/require"
 	"go.etcd.io/etcd/raft/v3/raftpb"
+
+	"github.com/philborlin/committed/internal/cluster"
+	"github.com/philborlin/committed/internal/cluster/db/dbfakes"
 )
 
 func TestProposals(t *testing.T) {

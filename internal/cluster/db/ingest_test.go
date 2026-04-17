@@ -10,8 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/philborlin/committed/internal/cluster"
 	"github.com/stretchr/testify/require"
+
+	"github.com/philborlin/committed/internal/cluster"
 )
 
 func TestIngest(t *testing.T) {
@@ -75,7 +76,8 @@ func TestResumeIngest(t *testing.T) {
 
 			ctx, cancel := context.WithCancel(context.Background())
 			ps := createProposals(tc.inputs)
-			positions := []cluster.Position{cluster.Position([]byte("foo"))}
+			positions := make([]cluster.Position, 0, 2)
+			positions = append(positions, cluster.Position([]byte("foo")))
 			ingestable := NewIngestable(ps, positions, cancel)
 			err := db.Ingest(ctx, id, ingestable)
 			require.Nil(t, err)
@@ -206,7 +208,7 @@ func checkCommits(t *testing.T, db *DB, ps []*cluster.Proposal, positions ...int
 	positionsFound := 0
 	for i, p := range ents {
 		expected := slices.Contains(positions, i)
-		got := cluster.IsIngestablePosition(p.Entities[0].Type.ID)
+		got := cluster.IsIngestablePosition(p.Entities[0].ID)
 		require.Equal(t, expected, got)
 		if got {
 			positionsFound++

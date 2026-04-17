@@ -7,10 +7,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/philborlin/committed/internal/cluster/clusterfakes"
 	test "github.com/philborlin/committed/internal/cluster/db/testing"
 	"github.com/philborlin/committed/internal/cluster/http"
-	"github.com/stretchr/testify/require"
 )
 
 // TestHealth verifies the /health endpoint always returns 200 with a
@@ -166,4 +167,3 @@ func doReady(t *testing.T, h *http.HTTP) readyResult {
 	require.Nil(t, json.Unmarshal(bs, &body))
 	return readyResult{status: resp.StatusCode, body: body}
 }
-

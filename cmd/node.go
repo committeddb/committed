@@ -11,18 +11,19 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 
+	"github.com/spf13/cobra"
+
 	"github.com/philborlin/committed/internal/cluster/db"
 	parser "github.com/philborlin/committed/internal/cluster/db/parser"
 	"github.com/philborlin/committed/internal/cluster/db/wal"
 	"github.com/philborlin/committed/internal/cluster/http"
-	"github.com/philborlin/committed/internal/cluster/metrics"
 	ingestablesql "github.com/philborlin/committed/internal/cluster/ingestable/sql"
 	ingestablemysql "github.com/philborlin/committed/internal/cluster/ingestable/sql/mysql"
 	ingestablepostgres "github.com/philborlin/committed/internal/cluster/ingestable/sql/postgres"
+	"github.com/philborlin/committed/internal/cluster/metrics"
 	synchttp "github.com/philborlin/committed/internal/cluster/syncable/http"
 	syncsql "github.com/philborlin/committed/internal/cluster/syncable/sql"
 	syncmysql "github.com/philborlin/committed/internal/cluster/syncable/sql/dialects"
-	"github.com/spf13/cobra"
 )
 
 var nodeCmd = &cobra.Command{
@@ -78,7 +79,7 @@ to quickly create a Cobra application.`,
 			provider := sdkmetric.NewMeterProvider(
 				sdkmetric.WithReader(sdkmetric.NewPeriodicReader(exporter)),
 			)
-			defer provider.Shutdown(context.Background())
+			defer func() { _ = provider.Shutdown(context.Background()) }()
 			m := metrics.New(provider.Meter("committed"))
 			dbOpts = append(dbOpts, db.WithMetrics(m))
 		}

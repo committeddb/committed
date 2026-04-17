@@ -7,10 +7,11 @@ import (
 	"os"
 	"testing"
 
-	"github.com/philborlin/committed/internal/cluster"
-	"github.com/philborlin/committed/internal/cluster/syncable/sql"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
+
+	"github.com/philborlin/committed/internal/cluster"
+	"github.com/philborlin/committed/internal/cluster/syncable/sql"
 )
 
 var testDB = &TestDatabase{}

@@ -13,16 +13,17 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
 	"github.com/go-mysql-org/go-mysql/canal"
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
-	"github.com/philborlin/committed/internal/cluster"
-	"github.com/philborlin/committed/internal/cluster/ingestable/sql"
-	"github.com/philborlin/committed/internal/cluster/ingestable/sql/dialectpb"
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/siddontang/go-log/log"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/philborlin/committed/internal/cluster"
+	"github.com/philborlin/committed/internal/cluster/ingestable/sql"
+	"github.com/philborlin/committed/internal/cluster/ingestable/sql/dialectpb"
 )
 
 type MySQLDialect struct{}
@@ -448,7 +449,7 @@ func snapshot(
 	if err != nil {
 		return nil, fmt.Errorf("snapshot: open: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Determine the binlog position to resume from. On a fresh start
 	// we capture it now under a brief global lock; on resume we keep
@@ -512,7 +513,7 @@ func captureBinlogPosition(ctx context.Context, db *gosql.DB) (mysql.Position, e
 	if err != nil {
 		return mysql.Position{}, fmt.Errorf("snapshot: conn: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	if _, err := conn.ExecContext(ctx, "FLUSH TABLES WITH READ LOCK"); err != nil {
 		return mysql.Position{}, fmt.Errorf("snapshot: FLUSH TABLES WITH READ LOCK: %w", err)
@@ -580,12 +581,12 @@ func binlogStatus(ctx context.Context, conn *gosql.Conn) (mysql.Position, error)
 
 		cols, err := rows.Columns()
 		if err != nil {
-			rows.Close()
+			_ = rows.Close()
 			continue
 		}
 
 		if !rows.Next() {
-			rows.Close()
+			_ = rows.Close()
 			continue
 		}
 
@@ -602,10 +603,10 @@ func binlogStatus(ctx context.Context, conn *gosql.Conn) (mysql.Position, error)
 		}
 
 		if err := rows.Scan(dest...); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			continue
 		}
-		rows.Close()
+		_ = rows.Close()
 
 		return mysql.Position{Name: file, Pos: pos}, nil
 	}
@@ -708,7 +709,7 @@ func readBatch(
 	if err != nil {
 		return nil, "", 0, fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	var query string
 	var args []any
@@ -729,7 +730,7 @@ func readBatch(
 	if err != nil {
 		return nil, "", 0, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	columns, err := rows.Columns()
 	if err != nil {
@@ -809,4 +810,3 @@ func buildDSN(connectionString string) string {
 
 	return fmt.Sprintf("%s:%s@tcp(%s)/%s", username, password, u.Host, database)
 }
-

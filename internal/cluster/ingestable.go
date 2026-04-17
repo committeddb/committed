@@ -3,9 +3,10 @@ package cluster
 import (
 	"context"
 
-	"github.com/philborlin/committed/internal/cluster/clusterpb"
 	"github.com/spf13/viper"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/philborlin/committed/internal/cluster/clusterpb"
 )
 
 type Position []byte

@@ -7,14 +7,14 @@ import (
 	"errors"
 	"sync"
 	"sync/atomic"
-
 	"time"
 
-	"github.com/philborlin/committed/internal/cluster"
-	"github.com/philborlin/committed/internal/cluster/metrics"
 	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/raft/v3/raftpb"
 	"go.uber.org/zap"
+
+	"github.com/philborlin/committed/internal/cluster"
+	"github.com/philborlin/committed/internal/cluster/metrics"
 )
 
 // ErrClosed is returned by db.Sync, db.Ingest, and db.Propose when the
@@ -200,6 +200,7 @@ func (db *DB) listenForSyncables(sync <-chan *SyncableWithID) {
 			if !ok {
 				return
 			}
+			//nolint:errcheck // TODO(ci-golangci-lint Phase 2): decide fail-fast vs log-and-continue semantics for startup Sync registration.
 			db.Sync(context.Background(), syncable.ID, syncable.Syncable)
 		case <-db.ctx.Done():
 			return
@@ -217,6 +218,7 @@ func (db *DB) listenForIngestables(ingest <-chan *IngestableWithID) {
 			if !ok {
 				return
 			}
+			//nolint:errcheck // TODO(ci-golangci-lint Phase 2): decide fail-fast vs log-and-continue semantics for startup Ingest registration.
 			db.Ingest(context.Background(), ingestable.ID, ingestable.Ingestable)
 		case <-db.ctx.Done():
 			return
@@ -334,7 +336,6 @@ func (db *DB) ProposeDeleteType(ctx context.Context, id string) error {
 
 	return db.Propose(ctx, p)
 }
-
 
 // Close tears down the DB. Order matters:
 //

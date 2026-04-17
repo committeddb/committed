@@ -1,8 +1,9 @@
 package cluster
 
 import (
-	"github.com/philborlin/committed/internal/cluster/clusterpb"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/philborlin/committed/internal/cluster/clusterpb"
 )
 
 type Configuration struct {

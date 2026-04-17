@@ -5,10 +5,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/philborlin/committed/internal/cluster/metrics"
 	"github.com/stretchr/testify/require"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
+	"github.com/philborlin/committed/internal/cluster/metrics"
 )
 
 func setupTest(t *testing.T) (*metrics.Metrics, *sdkmetric.ManualReader) {

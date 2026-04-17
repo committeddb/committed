@@ -5,9 +5,10 @@ import (
 	"time"
 
 	"github.com/nakabonne/tstorage"
-	"github.com/philborlin/committed/internal/cluster"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/philborlin/committed/internal/cluster"
 )
 
 type GetTimePointsTest struct {

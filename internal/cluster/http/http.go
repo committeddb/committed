@@ -8,9 +8,10 @@ import (
 	"sync"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/philborlin/committed/internal/cluster"
 	"github.com/rs/cors"
 	"go.uber.org/zap"
+
+	"github.com/philborlin/committed/internal/cluster"
 )
 
 type HTTP struct {
@@ -143,7 +144,7 @@ type ConfigurationResponse struct {
 }
 
 func writeConfigurations(w http.ResponseWriter, cfgs []*cluster.Configuration) {
-	var rs []*ConfigurationResponse
+	rs := make([]*ConfigurationResponse, 0, len(cfgs))
 
 	for _, cfg := range cfgs {
 		rs = append(rs, &ConfigurationResponse{
@@ -174,5 +175,5 @@ func writeArrayBody[T any](w http.ResponseWriter, body []T) {
 
 func writeJson(w http.ResponseWriter, bs []byte) {
 	w.Header().Add("Content-Type", "application/json")
-	w.Write(bs)
+	_, _ = w.Write(bs)
 }

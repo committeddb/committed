@@ -11,13 +11,16 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/philborlin/committed/internal/cluster"
 	synchttp "github.com/philborlin/committed/internal/cluster/syncable/http"
-	"github.com/stretchr/testify/require"
 )
 
-var testType = &cluster.Type{ID: "test-topic", Name: "test", Version: 1}
-var otherType = &cluster.Type{ID: "other-topic", Name: "other", Version: 1}
+var (
+	testType  = &cluster.Type{ID: "test-topic", Name: "test", Version: 1}
+	otherType = &cluster.Type{ID: "other-topic", Name: "other", Version: 1}
+)
 
 func newConfig(url string) *synchttp.Config {
 	return &synchttp.Config{

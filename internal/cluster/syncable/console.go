@@ -3,8 +3,9 @@ package syncable
 import (
 	"context"
 
-	"github.com/philborlin/committed/internal/cluster"
 	"go.uber.org/zap"
+
+	"github.com/philborlin/committed/internal/cluster"
 )
 
 type Console struct{}

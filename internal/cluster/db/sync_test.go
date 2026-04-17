@@ -7,8 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/philborlin/committed/internal/cluster"
 	"github.com/stretchr/testify/require"
+
+	"github.com/philborlin/committed/internal/cluster"
 )
 
 func TestSync(t *testing.T) {

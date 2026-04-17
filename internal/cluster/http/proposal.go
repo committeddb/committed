@@ -133,8 +133,8 @@ func (h *HTTP) GetProposals(w httpgo.ResponseWriter, r *httpgo.Request) {
 		proposalResponse := &GetProposalResponse{}
 		for _, e := range p.Entities {
 			proposalEntityResponse := &GetProposalEntityResponse{
-				TypeID:   e.Type.ID,
-				TypeName: e.Type.Name,
+				TypeID:   e.ID,
+				TypeName: e.Name,
 				Key:      string(e.Key),
 				Data:     string(e.Data),
 			}

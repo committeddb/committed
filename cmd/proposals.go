@@ -5,8 +5,9 @@ import (
 	"io"
 	"log"
 
-	"github.com/philborlin/committed/internal/cluster/db/wal"
 	"github.com/spf13/cobra"
+
+	"github.com/philborlin/committed/internal/cluster/db/wal"
 )
 
 var controlplaneCmd = &cobra.Command{

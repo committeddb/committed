@@ -4,8 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/philborlin/committed/internal/cluster/clusterpb"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/philborlin/committed/internal/cluster/clusterpb"
 )
 
 var delete []byte = []byte("7ec589c2-3318-4a3c-839b-a9af9c9443be")
@@ -52,7 +53,7 @@ func (p *Proposal) String() string {
 
 	sb.WriteString("Proposal:\n")
 	for i, e := range p.Entities {
-		sb.WriteString(fmt.Sprintf("  [%d](%s) %v", i, e.Type.Name, string(e.Key)))
+		fmt.Fprintf(&sb, "  [%d](%s) %v", i, e.Name, string(e.Key))
 		if i < len(p.Entities)-1 {
 			sb.WriteString("\n")
 		}
@@ -62,12 +63,12 @@ func (p *Proposal) String() string {
 }
 
 func (p *Proposal) Marshal() ([]byte, error) {
-	var es []*clusterpb.LogEntity
+	es := make([]*clusterpb.LogEntity, 0, len(p.Entities))
 	for _, e := range p.Entities {
 		es = append(es, &clusterpb.LogEntity{
 			Type: &clusterpb.TypeRef{
-				ID:      e.Type.ID,
-				Version: uint32(e.Type.Version),
+				ID:      e.ID,
+				Version: uint32(e.Version),
 			},
 			Key:       e.Key,
 			Data:      e.Data,

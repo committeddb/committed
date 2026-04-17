@@ -5,9 +5,10 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/philborlin/committed/internal/cluster/clusterpb"
 	"github.com/spf13/viper"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/philborlin/committed/internal/cluster/clusterpb"
 )
 
 // ErrPermanent wraps a Sync error that retrying will not fix (e.g.,

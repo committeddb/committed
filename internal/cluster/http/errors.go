@@ -32,7 +32,7 @@ func writeError(w httpgo.ResponseWriter, status int, code string, message string
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	w.Write(bs)
+	_, _ = w.Write(bs)
 
 	zap.L().Warn("http error",
 		zap.String("request_id", w.Header().Get("X-Request-ID")),
@@ -65,7 +65,7 @@ func writeErrorWithDetails(w httpgo.ResponseWriter, status int, code string, mes
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	w.Write(bs)
+	_, _ = w.Write(bs)
 
 	zap.L().Warn("http error",
 		zap.String("request_id", w.Header().Get("X-Request-ID")),

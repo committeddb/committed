@@ -30,13 +30,13 @@ var demoSeederCmd = &cobra.Command{
 		if err != nil {
 			panic(err)
 		}
-		db.Close()
+		_ = db.Close()
 
 		db, err = sql.Open("mysql", "root:password@tcp(127.0.0.1:3306)/source")
 		if err != nil {
 			panic(err)
 		}
-		defer db.Close()
+		defer func() { _ = db.Close() }()
 
 		goose.SetBaseFS(embedMigrations)
 
@@ -48,8 +48,8 @@ var demoSeederCmd = &cobra.Command{
 			panic(err)
 		}
 
-		db.Exec(`INSERT INTO simple (title,body) VALUES ('title-one', 'body-one');`)
-		db.Exec(`INSERT INTO simple (title,body) VALUES ('title-two', 'body-two');`)
+		_, _ = db.Exec(`INSERT INTO simple (title,body) VALUES ('title-one', 'body-one');`)
+		_, _ = db.Exec(`INSERT INTO simple (title,body) VALUES ('title-two', 'body-two');`)
 	},
 }
 

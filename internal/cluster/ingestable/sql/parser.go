@@ -3,8 +3,9 @@ package sql
 import (
 	"fmt"
 
-	"github.com/philborlin/committed/internal/cluster"
 	"github.com/spf13/viper"
+
+	"github.com/philborlin/committed/internal/cluster"
 )
 
 //counterfeiter:generate . Typer
@@ -39,8 +40,9 @@ func (p *IngestableParser) ParseConfig(v *viper.Viper) (*Config, Dialect, error)
 	connectionString := v.GetString("sql.connectionString")
 	primaryKey := v.GetString("sql.primaryKey")
 
-	var mappings []Mapping
-	for _, item := range v.Get("sql.mappings").([]interface{}) {
+	rawMappings := v.Get("sql.mappings").([]interface{})
+	mappings := make([]Mapping, 0, len(rawMappings))
+	for _, item := range rawMappings {
 		m := item.(map[string]interface{})
 		mapping := Mapping{
 			JsonName:  m["jsonName"].(string),

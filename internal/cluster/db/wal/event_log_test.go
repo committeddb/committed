@@ -4,8 +4,9 @@ import (
 	"io"
 	"testing"
 
-	"github.com/philborlin/committed/internal/cluster"
 	"github.com/stretchr/testify/require"
+
+	"github.com/philborlin/committed/internal/cluster"
 
 	pb "go.etcd.io/etcd/raft/v3/raftpb"
 )

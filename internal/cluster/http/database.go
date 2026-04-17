@@ -25,7 +25,7 @@ func (h *HTTP) AddDatabase(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 
-	w.Write([]byte(c.ID))
+	_, _ = w.Write([]byte(c.ID))
 }
 
 func (h *HTTP) GetDatabases(w httpgo.ResponseWriter, r *httpgo.Request) {

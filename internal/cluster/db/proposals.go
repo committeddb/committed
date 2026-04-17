@@ -4,8 +4,9 @@ import (
 	"io"
 	"math"
 
-	"github.com/philborlin/committed/internal/cluster"
 	"go.etcd.io/etcd/raft/v3/raftpb"
+
+	"github.com/philborlin/committed/internal/cluster"
 )
 
 func (db *DB) Proposals(n uint64, typeIDs ...string) ([]*cluster.Proposal, error) {
@@ -61,7 +62,6 @@ func (db *DB) readProposals(last uint64, number uint64) ([]*cluster.Proposal, er
 
 	return entsToProposals(es, db.storage)
 }
-
 
 func entsToProposals(ents []raftpb.Entry, r cluster.TypeResolver) ([]*cluster.Proposal, error) {
 	var ps []*cluster.Proposal

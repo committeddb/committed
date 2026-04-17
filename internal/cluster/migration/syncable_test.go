@@ -7,9 +7,10 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/migration"
-	"github.com/stretchr/testify/require"
 )
 
 // recordingSyncable saves every Proposal it receives.

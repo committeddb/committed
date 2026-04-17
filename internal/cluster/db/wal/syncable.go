@@ -3,11 +3,12 @@ package wal
 import (
 	"fmt"
 
+	bolt "go.etcd.io/bbolt"
+	"go.uber.org/zap"
+
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/db"
 	"github.com/philborlin/committed/internal/cluster/migration"
-	bolt "go.etcd.io/bbolt"
-	"go.uber.org/zap"
 )
 
 func (s *Storage) handleSyncable(e *cluster.Entity) error {
@@ -106,7 +107,6 @@ func (s *Storage) Syncables() ([]*cluster.Configuration, error) {
 			return nil
 		})
 	})
-
 	if err != nil {
 		return nil, err
 	}

@@ -5,9 +5,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/philborlin/committed/internal/cluster/db"
 	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/raft/v3/raftpb"
+
+	"github.com/philborlin/committed/internal/cluster/db"
 )
 
 // FaultyTransport wraps a per-node db.Transport and implements db.Transport.

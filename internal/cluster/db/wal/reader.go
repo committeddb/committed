@@ -5,9 +5,10 @@ import (
 	"io"
 	"sync"
 
+	pb "go.etcd.io/etcd/raft/v3/raftpb"
+
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/db"
-	pb "go.etcd.io/etcd/raft/v3/raftpb"
 )
 
 // Reader streams committed proposals out of the permanent event log.

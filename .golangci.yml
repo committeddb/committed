@@ -1,0 +1,64 @@
+# Conservative starter set. Noisy linters (funlen, gocyclo, gocognit,
+# varnamelen, wsl) are intentionally off until the team opts in. gosec
+# is disabled here; its findings are tracked for a follow-up pass.
+version: "2"
+
+run:
+  timeout: 5m
+  build-tags:
+    - adversarial
+    - docker
+    - integration
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - misspell
+    - bodyclose
+    - prealloc
+
+  settings:
+    staticcheck:
+      # Start from golangci-lint's default set (which omits the
+      # opinionated ST* "stylecheck" family), then drop QF1008 —
+      # a stylistic embedded-field refactor, not a correctness
+      # issue, that fights with explicit `e.Type.X` paths that
+      # are clearer in tests and required when a nil-check comes
+      # first.
+      checks:
+        - all
+        - -ST1000
+        - -ST1003
+        - -ST1016
+        - -ST1020
+        - -ST1021
+        - -ST1022
+        - -QF1008
+
+  exclusions:
+    generated: lax
+    paths:
+      - ".*\\.pb\\.go$"
+      - "internal/cluster/clusterfakes/"
+      - "internal/cluster/db/dbfakes/"
+      - "internal/cluster/ingestable/sql/sqlfakes/"
+      - "demo/"
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+          - bodyclose
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/philborlin/committed

@@ -5,12 +5,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+	bolt "go.etcd.io/bbolt"
+
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/clusterfakes"
 	"github.com/philborlin/committed/internal/cluster/db/parser"
 	"github.com/philborlin/committed/internal/cluster/db/wal"
-	"github.com/stretchr/testify/require"
-	bolt "go.etcd.io/bbolt"
 )
 
 // TestMigration_FlatToVersioned writes flat key/value entries directly to
@@ -40,7 +41,7 @@ func TestMigration_FlatToVersioned(t *testing.T) {
 
 	// Now write flat entries directly to bbolt (old layout)
 	boltOpts := &bolt.Options{Timeout: 1 * time.Second}
-	db, err := bolt.Open(filepath.Join(kvDir, "bbolt.db"), 0600, boltOpts)
+	db, err := bolt.Open(filepath.Join(kvDir, "bbolt.db"), 0o600, boltOpts)
 	require.Nil(t, err)
 
 	cfg1 := &cluster.Configuration{ID: "ingest-1", MimeType: "application/json", Data: []byte(`{"ingestable":{"name":"i1","type":"foo"}}`)}
@@ -186,7 +187,7 @@ func TestMigration_TypePreservesContent(t *testing.T) {
 
 	// Write a Type directly in flat layout
 	boltOpts := &bolt.Options{Timeout: 1 * time.Second}
-	db, err := bolt.Open(filepath.Join(kvDir, "bbolt.db"), 0600, boltOpts)
+	db, err := bolt.Open(filepath.Join(kvDir, "bbolt.db"), 0o600, boltOpts)
 	require.Nil(t, err)
 
 	origType := &cluster.Type{ID: "events", Name: "Events", Version: 1}

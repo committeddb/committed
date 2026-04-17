@@ -4,9 +4,10 @@ import (
 	"io"
 	"testing"
 
-	"github.com/philborlin/committed/internal/cluster"
 	"github.com/stretchr/testify/require"
 	pb "go.etcd.io/etcd/raft/v3/raftpb"
+
+	"github.com/philborlin/committed/internal/cluster"
 )
 
 // TODO Test that we skip malformed Proposals (or pb.Entry structs that aren't proposals)
@@ -61,7 +62,7 @@ func TestReaderSkipsSyncableIndexes(t *testing.T) {
 
 			pc := newProposalCreatorForString(t, s)
 
-			var ps []*cluster.Proposal
+			ps := make([]*cluster.Proposal, 0, 2*len(tt.inputs))
 			for _, input := range tt.inputs {
 				ps = append(ps, createProposal(input))
 				ps = append(ps, createSyncableIndexProposal(t, id))
@@ -232,7 +233,7 @@ func (c *ProposalCreator) createAndSaveProposals(t *testing.T, inputs [][]string
 }
 
 func createProposals(input [][]string) []*cluster.Proposal {
-	var ps []*cluster.Proposal
+	ps := make([]*cluster.Proposal, 0, len(input))
 
 	for _, entities := range input {
 		ps = append(ps, createProposal(entities))

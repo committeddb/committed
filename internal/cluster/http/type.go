@@ -26,7 +26,7 @@ func (h *HTTP) AddType(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 
-	w.Write([]byte(c.ID))
+	_, _ = w.Write([]byte(c.ID))
 }
 
 func (h *HTTP) GetTypes(w httpgo.ResponseWriter, r *httpgo.Request) {

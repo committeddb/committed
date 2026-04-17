@@ -13,10 +13,11 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/philborlin/committed/internal/cluster"
-	"github.com/philborlin/committed/internal/cluster/db"
 	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/raft/v3/raftpb"
+
+	"github.com/philborlin/committed/internal/cluster"
+	"github.com/philborlin/committed/internal/cluster/db"
 )
 
 // multiNodeTickInterval is the per-tick interval used by multi-node raft
@@ -349,7 +350,7 @@ func buildRafts(replicas int, clusterFactory func([]raft.Peer) *FaultyCluster, w
 		cluster = clusterFactory(peers)
 	}
 
-	var rafts Rafts
+	rafts := make(Rafts, 0, len(peers))
 	for _, p := range peers {
 		var s db.Storage = NewMemoryStorage()
 		if wrapStorage != nil {
@@ -814,7 +815,7 @@ func (ms *MemoryStorage) Save(st raftpb.HardState, ents []raftpb.Entry, snap raf
 
 	ms.stateMu.Lock()
 	ms.maybeAppendArgsForCallLocked(st, ents, snap)
-	err = ms.MemoryStorage.SetHardState(st)
+	err = ms.SetHardState(st)
 	ms.stateMu.Unlock()
 	return err
 }

@@ -54,7 +54,7 @@ func (h *HTTP) RollbackIngestable(w httpgo.ResponseWriter, r *httpgo.Request) {
 		}
 		return
 	}
-	w.Write([]byte(cfg.ID))
+	_, _ = w.Write([]byte(cfg.ID))
 }
 
 // --- Syncable ---
@@ -103,7 +103,7 @@ func (h *HTTP) RollbackSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
 		}
 		return
 	}
-	w.Write([]byte(cfg.ID))
+	_, _ = w.Write([]byte(cfg.ID))
 }
 
 // --- Database ---
@@ -152,7 +152,7 @@ func (h *HTTP) RollbackDatabase(w httpgo.ResponseWriter, r *httpgo.Request) {
 		}
 		return
 	}
-	w.Write([]byte(cfg.ID))
+	_, _ = w.Write([]byte(cfg.ID))
 }
 
 // --- Type ---

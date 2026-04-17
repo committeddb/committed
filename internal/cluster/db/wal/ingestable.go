@@ -3,9 +3,10 @@ package wal
 import (
 	"fmt"
 
+	bolt "go.etcd.io/bbolt"
+
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/db"
-	bolt "go.etcd.io/bbolt"
 )
 
 func (s *Storage) handleIngestable(e *cluster.Entity) error {
@@ -92,7 +93,6 @@ func (s *Storage) Ingestables() ([]*cluster.Configuration, error) {
 			return nil
 		})
 	})
-
 	if err != nil {
 		return nil, err
 	}

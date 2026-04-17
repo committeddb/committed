@@ -7,9 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/db"
-	"github.com/stretchr/testify/require"
 )
 
 // SignalingIngestable runs forever (until ctx cancellation), signaling

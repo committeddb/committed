@@ -8,16 +8,19 @@ import (
 	"os"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/syncable/sql"
 	"github.com/philborlin/committed/internal/cluster/syncable/sql/dialects"
-	"github.com/stretchr/testify/require"
 
 	"github.com/DATA-DOG/go-sqlmock"
 )
 
-var simpleType = &cluster.Type{ID: "simple", Name: "simple"}
-var notSimpleType = &cluster.Type{ID: "notSimple", Name: "notSimple"}
+var (
+	simpleType    = &cluster.Type{ID: "simple", Name: "simple"}
+	notSimpleType = &cluster.Type{ID: "notSimple", Name: "notSimple"}
+)
 
 func TestSync(t *testing.T) {
 	simpleOne := simpleEntity("key1", "one")
@@ -144,7 +147,7 @@ func TestDontSyncOtherTypes(t *testing.T) {
 }
 
 func getDriverValues(vs []any) []driver.Value {
-	var ds []driver.Value
+	ds := make([]driver.Value, 0, len(vs))
 
 	for _, d := range vs {
 		ds = append(ds, d)
@@ -154,7 +157,7 @@ func getDriverValues(vs []any) []driver.Value {
 }
 
 func createProposals(t *testing.T, data [][]*Entity) []*cluster.Proposal {
-	var ps []*cluster.Proposal
+	ps := make([]*cluster.Proposal, 0, len(data))
 	for _, dataToProposal := range data {
 		p := &cluster.Proposal{}
 

@@ -8,10 +8,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/db"
 	"github.com/philborlin/committed/internal/cluster/migration"
-	"github.com/stretchr/testify/require"
 )
 
 // proposeTypeWithMigration is a variant of proposeTypeTOML that also
@@ -46,7 +47,7 @@ func (c *captureSyncable) Sync(ctx context.Context, p *cluster.Proposal) (cluste
 	// delivers everything on the log.
 	allSystem := true
 	for _, e := range p.Entities {
-		if !cluster.IsSystem(e.Type.ID) {
+		if !cluster.IsSystem(e.ID) {
 			allSystem = false
 			break
 		}

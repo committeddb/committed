@@ -5,12 +5,13 @@ import (
 	"io"
 	"testing"
 
+	"github.com/spf13/viper"
+	pb "go.etcd.io/etcd/raft/v3/raftpb"
+
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/clusterfakes"
 	"github.com/philborlin/committed/internal/cluster/db"
 	"github.com/philborlin/committed/internal/cluster/db/parser"
-	"github.com/spf13/viper"
-	pb "go.etcd.io/etcd/raft/v3/raftpb"
 
 	"github.com/stretchr/testify/require"
 )
@@ -317,10 +318,14 @@ func TestSave_IngestableEntity_SignalsChannel(t *testing.T) {
 }
 
 // Ensure the fakes satisfy the interfaces at compile time
-var _ cluster.DatabaseParser = (*clusterfakes.FakeDatabaseParser)(nil)
-var _ cluster.SyncableParser = (*clusterfakes.FakeSyncableParser)(nil)
-var _ cluster.IngestableParser = (*clusterfakes.FakeIngestableParser)(nil)
+var (
+	_ cluster.DatabaseParser   = (*clusterfakes.FakeDatabaseParser)(nil)
+	_ cluster.SyncableParser   = (*clusterfakes.FakeSyncableParser)(nil)
+	_ cluster.IngestableParser = (*clusterfakes.FakeIngestableParser)(nil)
+)
 
 // Suppress unused import warnings
-var _ *viper.Viper
-var _ context.Context
+var (
+	_ *viper.Viper
+	_ context.Context
+)

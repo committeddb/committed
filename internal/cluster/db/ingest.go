@@ -5,8 +5,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/philborlin/committed/internal/cluster"
 	"go.uber.org/zap"
+
+	"github.com/philborlin/committed/internal/cluster"
 )
 
 // ingestBackoff{Min,Max} bound the interval at which db.ingest's

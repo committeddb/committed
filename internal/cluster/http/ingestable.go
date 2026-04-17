@@ -25,7 +25,7 @@ func (h *HTTP) AddIngestable(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 
-	w.Write([]byte(c.ID))
+	_, _ = w.Write([]byte(c.ID))
 }
 
 func (h *HTTP) GetIngestables(w httpgo.ResponseWriter, r *httpgo.Request) {

@@ -25,7 +25,7 @@ func (h *HTTP) AddSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 
-	w.Write([]byte(c.ID))
+	_, _ = w.Write([]byte(c.ID))
 }
 
 func (h *HTTP) GetSyncables(w httpgo.ResponseWriter, r *httpgo.Request) {

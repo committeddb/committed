@@ -7,13 +7,14 @@ import (
 	"os"
 	"testing"
 
+	"github.com/spf13/viper"
+	"github.com/stretchr/testify/require"
+
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/ingestable/sql"
 	"github.com/philborlin/committed/internal/cluster/ingestable/sql/mysql"
 	"github.com/philborlin/committed/internal/cluster/ingestable/sql/postgres"
 	"github.com/philborlin/committed/internal/cluster/ingestable/sql/sqlfakes"
-	"github.com/spf13/viper"
-	"github.com/stretchr/testify/require"
 )
 
 var simpleType = &cluster.Type{

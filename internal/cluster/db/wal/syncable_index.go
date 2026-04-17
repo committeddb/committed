@@ -3,8 +3,9 @@ package wal
 import (
 	"fmt"
 
-	"github.com/philborlin/committed/internal/cluster"
 	bolt "go.etcd.io/bbolt"
+
+	"github.com/philborlin/committed/internal/cluster"
 )
 
 func (s *Storage) handleSyncableIndex(e *cluster.Entity) error {
@@ -81,7 +82,6 @@ func (s *Storage) getSyncableIndex(id string) (uint64, error) {
 
 		return nil
 	})
-
 	if err != nil {
 		return 0, err
 	}

@@ -141,12 +141,15 @@ func (t *HttpTransport) AddPeer(peer raft.Peer) error {
 
 	return nil
 }
+
 func (t *HttpTransport) RemovePeer(id uint64) {
 	t.transport.RemovePeer(types.ID(id))
 }
+
 func (t *HttpTransport) Send(msgs []raftpb.Message) {
 	t.transport.Send(msgs)
 }
+
 func (t *HttpTransport) Stop() {
 	t.transport.Stop()
 }

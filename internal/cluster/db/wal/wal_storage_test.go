@@ -9,30 +9,33 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/db"
 	"github.com/philborlin/committed/internal/cluster/db/wal"
-	"github.com/stretchr/testify/require"
 
 	"go.etcd.io/etcd/raft/v3"
 	pb "go.etcd.io/etcd/raft/v3/raftpb"
 )
 
-var defaultHardState pb.HardState = pb.HardState{}
-var defaultSnap pb.Snapshot = pb.Snapshot{
-	Data: nil,
-	Metadata: pb.SnapshotMetadata{
-		ConfState: pb.ConfState{
-			Voters:         []uint64{},
-			Learners:       []uint64{},
-			VotersOutgoing: []uint64{},
-			LearnersNext:   []uint64{},
-			AutoLeave:      false,
+var (
+	defaultHardState pb.HardState = pb.HardState{}
+	defaultSnap      pb.Snapshot  = pb.Snapshot{
+		Data: nil,
+		Metadata: pb.SnapshotMetadata{
+			ConfState: pb.ConfState{
+				Voters:         []uint64{},
+				Learners:       []uint64{},
+				VotersOutgoing: []uint64{},
+				LearnersNext:   []uint64{},
+				AutoLeave:      false,
+			},
+			Index: 0,
+			Term:  0,
 		},
-		Index: 0,
-		Term:  0,
-	},
-}
+	}
+)
 
 type SyncableConfig struct {
 	Details *Details `json:"syncable"`
@@ -69,8 +72,8 @@ func (i index) terms(terms ...uint64) []pb.Entry {
 
 type StorageWrapper struct {
 	*wal.Storage
-	path     string
-	parser   db.Parser
+	path      string
+	parser    db.Parser
 	closeOnce *sync.Once
 }
 

@@ -7,8 +7,9 @@ import (
 	"fmt"
 
 	"github.com/oliveagle/jsonpath"
-	"github.com/philborlin/committed/internal/cluster"
 	"go.uber.org/zap"
+
+	"github.com/philborlin/committed/internal/cluster"
 )
 
 type Syncable struct {
@@ -176,4 +177,3 @@ func (c *Syncable) SyncBatch(ctx context.Context, ps []*cluster.Proposal) (bool,
 func (c *Syncable) Close() error {
 	return c.insert.Stmt.Close()
 }
-

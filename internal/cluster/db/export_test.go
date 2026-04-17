@@ -40,7 +40,7 @@ func (n *Raft) CommitIndexForTest() uint64 {
 	if n.node == nil {
 		return 0
 	}
-	return n.node.Status().HardState.Commit
+	return n.node.Status().Commit
 }
 
 // WithTransportWrapperForTest installs a wrapper around the Transport that

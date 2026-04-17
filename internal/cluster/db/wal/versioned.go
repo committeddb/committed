@@ -5,12 +5,15 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/philborlin/committed/internal/cluster"
 	bolt "go.etcd.io/bbolt"
+
+	"github.com/philborlin/committed/internal/cluster"
 )
 
-var versionsBucket = []byte("versions")
-var currentKey = []byte("current")
+var (
+	versionsBucket = []byte("versions")
+	currentKey     = []byte("current")
+)
 
 // versionKey encodes a version number as big-endian uint64 for bbolt key ordering.
 func versionKey(version uint64) []byte {

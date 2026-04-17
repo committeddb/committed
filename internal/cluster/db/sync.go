@@ -6,8 +6,9 @@ import (
 	"io"
 	"time"
 
-	"github.com/philborlin/committed/internal/cluster"
 	"go.uber.org/zap"
+
+	"github.com/philborlin/committed/internal/cluster"
 )
 
 // syncBackoff{Min,Max} bound the polling interval for db.sync's idle
@@ -209,8 +210,8 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 				}
 				progressed = true
 			}
-		// case !isNode && !db.isNode(id): no work, no state change.
-		// fall through to backoff sleep.
+			// case !isNode && !db.isNode(id): no work, no state change.
+			// fall through to backoff sleep.
 		}
 
 		if progressed {
