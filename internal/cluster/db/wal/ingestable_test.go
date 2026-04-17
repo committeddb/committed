@@ -323,8 +323,7 @@ func readNormalProposals(s *wal.Storage) []*cluster.Proposal {
 		}
 		p := &cluster.Proposal{}
 		if err := p.Unmarshal(e.Data, s); err != nil {
-			fmt.Printf("unmarshal proposal: %v\n", err)
-			continue
+			panic(fmt.Sprintf("readNormalProposals: unmarshal entry at index %d: %v", e.Index, err))
 		}
 		if len(p.Entities) == 0 {
 			continue

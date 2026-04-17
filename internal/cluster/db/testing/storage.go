@@ -1,6 +1,7 @@
 package testing
 
 import (
+	"fmt"
 	"io"
 	"math"
 	"sync"
@@ -232,6 +233,11 @@ func (ms *MemoryStorage) TypeVersion(id string, version uint64) (*cluster.Config
 	return nil, nil
 }
 
+// Proposals is a test helper that decodes every normal raft entry in
+// storage into a Proposal. Unmarshal failures panic — this helper is
+// only used by tests against known-good data, and silently skipping
+// would hide real test bugs (the same failure mode
+// apply-unmarshal-error-handling removed from the production path).
 func (ms *MemoryStorage) Proposals() []*cluster.Proposal {
 	fi, _ := ms.FirstIndex()
 	li, _ := ms.LastIndex()
@@ -242,7 +248,7 @@ func (ms *MemoryStorage) Proposals() []*cluster.Proposal {
 		if e.Type == raftpb.EntryNormal {
 			p := &cluster.Proposal{}
 			if err := p.Unmarshal(e.Data, ms); err != nil {
-				continue
+				panic(fmt.Sprintf("MemoryStorage.Proposals: unmarshal entry at index %d: %v", e.Index, err))
 			}
 
 			if len(p.Entities) > 0 {

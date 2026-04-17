@@ -23,9 +23,15 @@ func TestEventLog_AppliedEntriesMirrored(t *testing.T) {
 	require.Equal(t, uint64(0), s.EventIndex())
 	require.Equal(t, uint64(0), s.AppliedIndex())
 
+	// Register the type referenced by the data proposals (index 1) —
+	// apply now fatal-exits on unresolved types.
+	s.RegisterType(t, "type-x", 1, 1)
+	require.Equal(t, uint64(1), s.EventIndex(), "EventIndex after type registration")
+	require.Equal(t, uint64(1), s.AppliedIndex(), "AppliedIndex after type registration")
+
 	// Apply three user-defined entity proposals at ascending raft indexes.
 	// Each apply should advance both EventIndex and AppliedIndex by 1.
-	for _, idx := range []uint64{1, 2, 3} {
+	for _, idx := range []uint64{2, 3, 4} {
 		p := &cluster.Proposal{Entities: []*cluster.Entity{{
 			Type: &cluster.Type{ID: "type-x"},
 			Key:  []byte("k"),
@@ -37,10 +43,11 @@ func TestEventLog_AppliedEntriesMirrored(t *testing.T) {
 		require.Equal(t, idx, s.AppliedIndex(), "AppliedIndex after apply")
 	}
 
-	// The event log should now contain exactly three entries.
+	// The event log should now contain the type registration plus the
+	// three user-data entries.
 	li, err := s.EventLogLastSeq()
 	require.Nil(t, err)
-	require.Equal(t, uint64(3), li)
+	require.Equal(t, uint64(4), li)
 }
 
 // TestEventLog_SurvivesRestart verifies the event log's contents and
@@ -50,7 +57,10 @@ func TestEventLog_SurvivesRestart(t *testing.T) {
 	s := NewStorage(t, nil)
 	defer s.Cleanup()
 
-	for _, idx := range []uint64{1, 2, 3} {
+	// Register the type referenced by the data proposals at index 1;
+	// user-data entries at 2, 3, 4.
+	s.RegisterType(t, "type-x", 1, 1)
+	for _, idx := range []uint64{2, 3, 4} {
 		p := &cluster.Proposal{Entities: []*cluster.Entity{{
 			Type: &cluster.Type{ID: "type-x"},
 			Key:  []byte("k"),
@@ -62,12 +72,12 @@ func TestEventLog_SurvivesRestart(t *testing.T) {
 	s, err := s.CloseAndReopen()
 	require.Nil(t, err)
 
-	require.Equal(t, uint64(3), s.EventIndex(), "EventIndex restored from event log")
-	require.Equal(t, uint64(3), s.AppliedIndex(), "AppliedIndex restored from bbolt")
+	require.Equal(t, uint64(4), s.EventIndex(), "EventIndex restored from event log")
+	require.Equal(t, uint64(4), s.AppliedIndex(), "AppliedIndex restored from bbolt")
 
 	li, err := s.EventLogLastSeq()
 	require.Nil(t, err)
-	require.Equal(t, uint64(3), li, "event log entries persist")
+	require.Equal(t, uint64(4), li, "event log entries persist")
 
 	// Verify the stored entries round-trip back to their raft indexes.
 	for seq := uint64(1); seq <= li; seq++ {
@@ -174,6 +184,10 @@ func TestEventLog_ReplaySkipsAlreadyApplied(t *testing.T) {
 	s := NewStorage(t, nil)
 	defer s.Cleanup()
 
+	// Register the type referenced by the data proposal at index 1; the
+	// data entry lands at index 2.
+	s.RegisterType(t, "type-x", 1, 1)
+
 	p := &cluster.Proposal{Entities: []*cluster.Entity{{
 		Type: &cluster.Type{ID: "type-x"},
 		Key:  []byte("k"),
@@ -182,16 +196,16 @@ func TestEventLog_ReplaySkipsAlreadyApplied(t *testing.T) {
 	bs, err := p.Marshal()
 	require.Nil(t, err)
 
-	ent := pb.Entry{Term: 1, Index: 1, Type: pb.EntryNormal, Data: bs}
+	ent := pb.Entry{Term: 1, Index: 2, Type: pb.EntryNormal, Data: bs}
 	require.Nil(t, s.Save(defaultHardState, []pb.Entry{ent}, defaultSnap))
 	require.Nil(t, s.ApplyCommitted(ent))
 	// Second apply of the same entry is a no-op (replay-on-restart safety).
 	require.Nil(t, s.ApplyCommitted(ent))
 
-	require.Equal(t, uint64(1), s.EventIndex())
-	require.Equal(t, uint64(1), s.AppliedIndex())
+	require.Equal(t, uint64(2), s.EventIndex())
+	require.Equal(t, uint64(2), s.AppliedIndex())
 
 	li, err := s.EventLogLastSeq()
 	require.Nil(t, err)
-	require.Equal(t, uint64(1), li, "event log not double-written on replay")
+	require.Equal(t, uint64(2), li, "event log not double-written on replay")
 }

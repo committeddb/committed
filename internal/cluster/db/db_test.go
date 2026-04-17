@@ -351,24 +351,22 @@ func (db *DB) ents() ([]*cluster.Proposal, error) {
 		}
 	}
 
-	ps := db.entsToProposals(ents)
-
-	return ps, nil
+	return db.entsToProposals(ents)
 }
 
-func (db *DB) entsToProposals(ents []raftpb.Entry) []*cluster.Proposal {
+func (db *DB) entsToProposals(ents []raftpb.Entry) ([]*cluster.Proposal, error) {
 	var ps []*cluster.Proposal
 	for _, e := range ents {
 		if e.Type == raftpb.EntryNormal && e.Data != nil {
 			p := &cluster.Proposal{}
 			if err := p.Unmarshal(e.Data, db.storage); err != nil {
-				continue
+				return nil, err
 			}
 			ps = append(ps, p)
 		}
 	}
 
-	return ps
+	return ps, nil
 }
 
 // MemorySyncable is a test syncable that records every proposal it sees.

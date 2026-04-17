@@ -152,9 +152,12 @@ func (db *DB) notifyApplied(data []byte) {
 	}
 	p := &cluster.Proposal{}
 	if err := p.Unmarshal(data, db.storage); err != nil {
-		// Don't crash on undecodable data — Propose's caller will time
-		// out via ctx if its waiter is never signaled. Logging is
-		// enough; the apply path itself already logged or skipped.
+		// Defense-in-depth: ApplyCommitted also unmarshals the entry
+		// and fatal-exits on failure, so reaching here with an
+		// unmarshal error means the apply path succeeded on one
+		// decode and this one failed — pathological, not expected.
+		// Log and skip; Propose's caller will time out via ctx if
+		// its waiter is never signaled.
 		db.logger.Warn("notifyApplied unmarshal failed", zap.Error(err))
 		return
 	}

@@ -24,6 +24,11 @@ func TestRaftLogApproxSize_GrowsAndShrinks(t *testing.T) {
 	initial, err := s.RaftLogApproxSize()
 	require.Nil(t, err)
 
+	// Register the type referenced by the data proposals — apply now
+	// fatal-exits on unresolved types, so the type entry must precede
+	// any entity that references it.
+	s.RegisterType(t, "type-x", 1, 1)
+
 	// Apply 10 proposals with chunky payloads. Writes go through Save
 	// (which writes to the raft log tier) and ApplyCommitted (which
 	// writes to the event log tier — unrelated to the size we're
@@ -36,7 +41,7 @@ func TestRaftLogApproxSize_GrowsAndShrinks(t *testing.T) {
 			Key:  []byte{byte(i)},
 			Data: append([]byte(nil), payload...),
 		}}}
-		saveProposal(t, p, s, 1, uint64(i+1))
+		saveProposal(t, p, s, 1, uint64(i+2))
 	}
 
 	afterWrites, err := s.RaftLogApproxSize()
@@ -45,7 +50,7 @@ func TestRaftLogApproxSize_GrowsAndShrinks(t *testing.T) {
 
 	// Compact near the tip. Compact truncates tidwall/wal's segment
 	// files, so the on-disk footprint should drop.
-	require.Nil(t, s.Compact(9))
+	require.Nil(t, s.Compact(10))
 	afterCompact, err := s.RaftLogApproxSize()
 	require.Nil(t, err)
 	require.Less(t, afterCompact, afterWrites, "raft log should shrink after Compact")

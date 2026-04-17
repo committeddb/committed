@@ -528,14 +528,21 @@ func (s *Storage) ApplyCommitted(entry pb.Entry) error {
 	// time-series store. Other entry types (conf changes, no-op entries)
 	// still count as "applied" for invariant purposes — we just have
 	// nothing to do at the entity level.
+	//
+	// Unmarshal failures here are returned as errors (not swallowed):
+	// the raft ready loop's apply-error policy fatal-exits the node,
+	// which is the correct behavior. Swallowing would let appliedIndex
+	// advance past an entry that wasn't applied, diverging replicas
+	// (node A applies, node B skips) and silently dropping entities
+	// from any future snapshot taken at that index.
 	if entry.Type == pb.EntryNormal && entry.Data != nil {
 		p := &cluster.Proposal{}
 		if err := p.Unmarshal(entry.Data, s); err != nil {
-			// Match the prior Save behavior for undecodable proposals:
-			// skip the entity apply, but still bump appliedIndex so we
-			// don't loop on it forever.
-			s.appliedIndex.Store(entry.Index)
-			return s.saveAppliedIndex(entry.Index)
+			s.logger.Error("unmarshal committed proposal",
+				zap.Uint64("index", entry.Index),
+				zap.Stringer("entryType", entry.Type),
+				zap.Error(err))
+			return fmt.Errorf("[wal.storage] unmarshal proposal at index %d: %w", entry.Index, err)
 		}
 
 		for _, entity := range p.Entities {
