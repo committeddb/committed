@@ -36,3 +36,12 @@ func (d *GoMySQLServerDialect) Open(connectionString string) (*gosql.DB, error) 
 
 	return db, nil
 }
+
+// IsPermanent always returns false. GoMySQLServerDialect is in-process
+// test infrastructure (dolthub/go-mysql-server), so errors surface as
+// vitess SQLErrors rather than go-sql-driver MySQLErrors — classifying
+// them would require a parallel error table that test code does not
+// exercise. Treating everything as retryable matches SQLMockDialect.
+func (d *GoMySQLServerDialect) IsPermanent(err error) bool {
+	return false
+}

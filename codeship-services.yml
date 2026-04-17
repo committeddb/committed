@@ -1,5 +1,0 @@
-app:
-  cached: true
-  build:
-    images: rancidfishbreath/committed
-    dockerfile_path: Dockerfile

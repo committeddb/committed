@@ -1,9 +1,3 @@
-define test
-	go test -covermode=atomic -coverprofile=.coverage.tmp -v -p=1 $(1)
-	go tool cover -html=.coverage.tmp
-	rm .coverage.tmp
-endef
-
 test:
 	go test -short ./... -cover
 
@@ -30,21 +24,6 @@ test-all:
 # evidence to trust a scenario.
 test/adversarial:
 	go test -tags adversarial -race -count=20 -timeout 900s ./internal/cluster/db/...
-
-test/topic:
-	$(call test,"github.com/philborlin/committed/topic")
-
-test/cluster:
-	$(call test,"github.com/philborlin/committed/cluster")
-
-test/sync:
-	$(call test,"github.com/philborlin/committed/syncable")
-
-test/bridge:
-	$(call test,"github.com/philborlin/committed/bridge")
-
-test/e2e:
-	go test -v -p=1 "github.com/philborlin/committed/e2e"
 
 lint/openapi:
 	npx --yes @redocly/cli@latest lint api/openapi.yaml
