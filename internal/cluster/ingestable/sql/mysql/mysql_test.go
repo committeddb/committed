@@ -14,9 +14,11 @@ import (
 	"github.com/docker/docker/client"
 	_ "github.com/go-sql-driver/mysql"
 	tcmysql "github.com/testcontainers/testcontainers-go/modules/mysql"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/ingestable/sql"
+	"github.com/philborlin/committed/internal/cluster/ingestable/sql/dialectpb"
 	"github.com/philborlin/committed/internal/cluster/ingestable/sql/mysql"
 	"github.com/stretchr/testify/require"
 )
@@ -659,5 +661,217 @@ func TestMysqlSnapshotOnFreshStart(t *testing.T) {
 		require.Nil(t, err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("Ingest did not exit after cancel")
+	}
+}
+
+// TestMysqlSnapshotChunking verifies that a snapshot of a table with
+// more rows than the configured batch_size delivers all rows across
+// multiple proposals. With keyset pagination and tx-per-batch, a 25-row
+// table at batch_size=10 should yield ≥3 proposals.
+func TestMysqlSnapshotChunking(t *testing.T) {
+	table := "chunk_table"
+
+	db := createDB(t)
+	_, err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS `%s`", table))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf("CREATE TABLE `%s` (pk VARCHAR(32) NOT NULL, val TEXT, PRIMARY KEY (pk));", table))
+	require.NoError(t, err)
+
+	const rowCount = 25
+	for i := 0; i < rowCount; i++ {
+		_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, val) VALUES ('%03d', 'v%d');", table, i, i))
+		require.NoError(t, err)
+	}
+	db.Close()
+
+	simpleType := &cluster.Type{ID: "chunk", Name: "chunk"}
+	config := &sql.Config{
+		Type: simpleType,
+		Mappings: []sql.Mapping{
+			{JsonName: "pk", SQLColumn: "pk"},
+			{JsonName: "val", SQLColumn: "val"},
+		},
+		PrimaryKey:       "pk",
+		ConnectionString: ingestURL,
+		Tables:           []string{table},
+		Options:          map[string]string{"batch_size": "10"},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	proposalChan := make(chan *cluster.Proposal, 20)
+	positionChan := make(chan cluster.Position, 20)
+
+	dialect := &mysql.MySQLDialect{}
+	ingestErr := make(chan error, 1)
+	go func() {
+		ingestErr <- dialect.Ingest(ctx, config, nil, proposalChan, positionChan)
+	}()
+
+	deadline := time.After(15 * time.Second)
+	seen := make(map[string]bool)
+	snapshotProposals := 0
+	for len(seen) < rowCount {
+		select {
+		case p := <-proposalChan:
+			snapshotProposals++
+			// With batch_size=10 and 25 rows, each proposal except
+			// possibly the last must contain exactly 10 entities.
+			require.LessOrEqual(t, len(p.Entities), 10,
+				"each snapshot proposal must not exceed batch_size")
+			for _, e := range p.Entities {
+				seen[string(e.Key)] = true
+			}
+		case <-positionChan:
+		case <-deadline:
+			t.Fatalf("timed out waiting for %d rows; got %d", rowCount, len(seen))
+		}
+	}
+
+	require.GreaterOrEqual(t, snapshotProposals, 3,
+		"25 rows at batch_size=10 should produce ≥3 proposals")
+
+	for i := 0; i < rowCount; i++ {
+		require.True(t, seen[fmt.Sprintf("%03d", i)], "missing row %03d", i)
+	}
+}
+
+// TestMysqlSnapshotResume verifies that an interrupted snapshot resumes
+// from the checkpointed per-table pk instead of re-reading already-
+// flushed rows. A synthetic resume position with snapshot_progress is
+// fed to Ingest; only rows past the checkpoint should be delivered.
+func TestMysqlSnapshotResume(t *testing.T) {
+	table := "snap_resume_table"
+
+	db := createDB(t)
+	_, err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS `%s`", table))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf("CREATE TABLE `%s` (pk VARCHAR(32) NOT NULL, val TEXT, PRIMARY KEY (pk));", table))
+	require.NoError(t, err)
+
+	const rowCount = 10
+	for i := 0; i < rowCount; i++ {
+		_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, val) VALUES ('%03d', 'v%d');", table, i, i))
+		require.NoError(t, err)
+	}
+	db.Close()
+
+	// --- Phase 1: capture the pre-snapshot binlog position. ---
+	config := &sql.Config{
+		Type: &cluster.Type{ID: "sr", Name: "sr"},
+		Mappings: []sql.Mapping{
+			{JsonName: "pk", SQLColumn: "pk"},
+			{JsonName: "val", SQLColumn: "val"},
+		},
+		PrimaryKey:       "pk",
+		ConnectionString: ingestURL,
+		Tables:           []string{table},
+		Options:          map[string]string{"batch_size": "3"},
+	}
+
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	proposalChan1 := make(chan *cluster.Proposal, 20)
+	positionChan1 := make(chan cluster.Position, 20)
+
+	dialect1 := &mysql.MySQLDialect{}
+	go func() {
+		_ = dialect1.Ingest(ctx1, config, nil, proposalChan1, positionChan1)
+	}()
+
+	// Collect the first position with snapshot_progress so we know the
+	// pre-snapshot binlog position. Keep draining until a checkpoint
+	// names a non-zero progress.
+	var firstProgressPos cluster.Position
+	deadline := time.After(15 * time.Second)
+waitProgress:
+	for {
+		select {
+		case <-proposalChan1:
+		case pos := <-positionChan1:
+			posProto := &dialectpb.MySQLBinLogPosition{}
+			require.NoError(t, proto.Unmarshal(pos, posProto))
+			if posProto.SnapshotProgress != nil && len(posProto.SnapshotProgress.LastPkByTable) > 0 {
+				firstProgressPos = pos
+				break waitProgress
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for snapshot progress checkpoint")
+		}
+	}
+	cancel1()
+
+	// --- Phase 2: craft a resume position that says "005 already flushed". ---
+	// Start from the captured binlog position so the resume path is
+	// honored (lastPos != nil) and the progress field advances to 005.
+	origProto := &dialectpb.MySQLBinLogPosition{}
+	require.NoError(t, proto.Unmarshal(firstProgressPos, origProto))
+
+	resumeProto := &dialectpb.MySQLBinLogPosition{
+		Name: origProto.Name,
+		Pos:  origProto.Pos,
+		SnapshotProgress: &dialectpb.SnapshotProgress{
+			LastPkByTable: map[string]string{table: "005"},
+		},
+	}
+	resumeBytes, err := proto.Marshal(resumeProto)
+	require.NoError(t, err)
+
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+
+	proposalChan2 := make(chan *cluster.Proposal, 20)
+	positionChan2 := make(chan cluster.Position, 20)
+
+	dialect2 := &mysql.MySQLDialect{}
+	go func() {
+		_ = dialect2.Ingest(ctx2, config, resumeBytes, proposalChan2, positionChan2)
+	}()
+
+	// Rows with pk ≤ "005" must not appear in phase 2 snapshot output.
+	// Collect until we've seen all rows "006".."009" (4 rows).
+	seen := make(map[string]bool)
+	deadline = time.After(15 * time.Second)
+	for {
+		if seen["006"] && seen["007"] && seen["008"] && seen["009"] {
+			break
+		}
+		select {
+		case p := <-proposalChan2:
+			for _, e := range p.Entities {
+				seen[string(e.Key)] = true
+			}
+		case <-positionChan2:
+		case <-deadline:
+			t.Fatalf("timed out waiting for post-resume rows; got %v", seen)
+		}
+	}
+
+	// Confirm the already-flushed rows did not re-appear in snapshot batches.
+	// They will eventually arrive via the binlog tail (if any binlog events
+	// existed for them), but that's a separate phase; the snapshot itself
+	// must skip pk ≤ "005".
+	// Drain a quiet window to catch any immediate snapshot duplicates.
+	quiet := time.After(500 * time.Millisecond)
+drain:
+	for {
+		select {
+		case p := <-proposalChan2:
+			for _, e := range p.Entities {
+				// Permit binlog-replay duplicates only; but with no
+				// activity during the test there should be none.
+				key := string(e.Key)
+				if _, already := seen[key]; !already {
+					seen[key] = true
+				}
+			}
+		case <-positionChan2:
+		case <-quiet:
+			break drain
+		}
+	}
+	for i := 0; i <= 5; i++ {
+		require.Falsef(t, seen[fmt.Sprintf("%03d", i)],
+			"row %03d must not re-appear after snapshot resume", i)
 	}
 }

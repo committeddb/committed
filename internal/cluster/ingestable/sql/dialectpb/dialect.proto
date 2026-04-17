@@ -5,5 +5,29 @@ option go_package = "github.com/philborlin/committed/internal/cluster/ingestable
 
 message MySQLBinLogPosition {
     string name = 1;
-	uint32 pos = 2;
+    uint32 pos = 2;
+    // snapshot_progress is populated only while the initial snapshot is
+    // still running. It tracks per-table progress so a restart can
+    // resume mid-snapshot instead of re-reading already-flushed rows.
+    // Cleared once the snapshot completes.
+    SnapshotProgress snapshot_progress = 3;
+}
+
+// PostgresPosition pairs the replication LSN with optional snapshot
+// progress. New checkpoints always use this proto-encoded format,
+// prefixed with a 0xFF magic byte so the 8-byte legacy raw-LSN format
+// is still readable. See postgres.go encode/decodePosition.
+message PostgresPosition {
+    uint64 lsn = 1;
+    SnapshotProgress snapshot_progress = 2;
+}
+
+// SnapshotProgress tracks where a chunked (keyset-paginated) snapshot
+// has gotten to. A table is either:
+//   - absent from both fields: not yet started
+//   - present in last_pk_by_table: partially complete (resume WHERE pk > last_pk)
+//   - present in completed_tables: done, skip entirely on resume
+message SnapshotProgress {
+    map<string, string> last_pk_by_table = 1;
+    repeated string completed_tables = 2;
 }

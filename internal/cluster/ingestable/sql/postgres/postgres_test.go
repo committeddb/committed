@@ -21,6 +21,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// rowCount for chunking tests; sized to comfortably exceed batch_size=10.
+const chunkTestRowCount = 25
+
 var connString string
 
 const (
@@ -539,5 +542,79 @@ func TestPostgresSnapshotOnNewSlot(t *testing.T) {
 		require.Nil(t, err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("Ingest did not exit after cancel")
+	}
+}
+
+// TestPostgresSnapshotChunking verifies keyset-paginated snapshots
+// deliver all rows across multiple proposals when batch_size is smaller
+// than the row count.
+func TestPostgresSnapshotChunking(t *testing.T) {
+	table := "pg_chunk_table"
+
+	db := createDB(t)
+	_, err := db.Exec(fmt.Sprintf(`DROP TABLE IF EXISTS %s`, table))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf(`CREATE TABLE %s (pk VARCHAR(32) NOT NULL PRIMARY KEY, val TEXT)`, table))
+	require.NoError(t, err)
+
+	for i := 0; i < chunkTestRowCount; i++ {
+		_, err = db.Exec(
+			fmt.Sprintf(`INSERT INTO %s (pk, val) VALUES ('%03d', 'v%d')`, table, i, i),
+		)
+		require.NoError(t, err)
+	}
+	db.Close()
+
+	config := &sql.Config{
+		Type: &cluster.Type{ID: "chunk", Name: "chunk"},
+		Mappings: []sql.Mapping{
+			{JsonName: "pk", SQLColumn: "pk"},
+			{JsonName: "val", SQLColumn: "val"},
+		},
+		PrimaryKey:       "pk",
+		ConnectionString: connString,
+		Tables:           []string{table},
+		Options: map[string]string{
+			"slot_name":   "slot_chunk",
+			"publication": "pub_chunk",
+			"batch_size":  "10",
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	proposalChan := make(chan *cluster.Proposal, 20)
+	positionChan := make(chan cluster.Position, 20)
+
+	dialect := &postgres.PostgreSQLDialect{}
+	ingestErr := make(chan error, 1)
+	go func() {
+		ingestErr <- dialect.Ingest(ctx, config, nil, proposalChan, positionChan)
+	}()
+
+	deadline := time.After(20 * time.Second)
+	seen := make(map[string]bool)
+	snapshotProposals := 0
+	for len(seen) < chunkTestRowCount {
+		select {
+		case p := <-proposalChan:
+			snapshotProposals++
+			require.LessOrEqual(t, len(p.Entities), 10,
+				"each snapshot proposal must not exceed batch_size")
+			for _, e := range p.Entities {
+				seen[string(e.Key)] = true
+			}
+		case <-positionChan:
+		case <-deadline:
+			t.Fatalf("timed out waiting for %d rows; got %d", chunkTestRowCount, len(seen))
+		}
+	}
+
+	require.GreaterOrEqual(t, snapshotProposals, 3,
+		"25 rows at batch_size=10 should produce ≥3 proposals")
+
+	for i := 0; i < chunkTestRowCount; i++ {
+		require.Truef(t, seen[fmt.Sprintf("%03d", i)], "missing row %03d", i)
 	}
 }
