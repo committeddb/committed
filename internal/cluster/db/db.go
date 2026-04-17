@@ -200,8 +200,14 @@ func (db *DB) listenForSyncables(sync <-chan *SyncableWithID) {
 			if !ok {
 				return
 			}
-			//nolint:errcheck // TODO(ci-golangci-lint Phase 2): decide fail-fast vs log-and-continue semantics for startup Sync registration.
-			db.Sync(context.Background(), syncable.ID, syncable.Syncable)
+			if err := db.Sync(context.Background(), syncable.ID, syncable.Syncable); err != nil {
+				// Sync only returns ErrClosed, which means db.Close
+				// fired between our channel receive and the registry
+				// check. Exit the listener (same as <-db.ctx.Done).
+				db.logger.Debug("listenForSyncables exiting",
+					zap.String("id", syncable.ID), zap.Error(err))
+				return
+			}
 		case <-db.ctx.Done():
 			return
 		}
@@ -218,8 +224,14 @@ func (db *DB) listenForIngestables(ingest <-chan *IngestableWithID) {
 			if !ok {
 				return
 			}
-			//nolint:errcheck // TODO(ci-golangci-lint Phase 2): decide fail-fast vs log-and-continue semantics for startup Ingest registration.
-			db.Ingest(context.Background(), ingestable.ID, ingestable.Ingestable)
+			if err := db.Ingest(context.Background(), ingestable.ID, ingestable.Ingestable); err != nil {
+				// Ingest only returns ErrClosed, which means db.Close
+				// fired between our channel receive and the registry
+				// check. Exit the listener (same as <-db.ctx.Done).
+				db.logger.Debug("listenForIngestables exiting",
+					zap.String("id", ingestable.ID), zap.Error(err))
+				return
+			}
 		case <-db.ctx.Done():
 			return
 		}
