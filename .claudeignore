@@ -5,6 +5,3 @@ internal/cluster/ingestable/sql/sqlfakes/
 
 # Generated protobuf
 internal/cluster/clusterpb/*.pb.go
-
-# Generated TanStack route tree
-web/src/routeTree.gen.ts
