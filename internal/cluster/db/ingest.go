@@ -151,7 +151,11 @@ func (db *DB) Ingest(_ context.Context, id string, i cluster.Ingestable) error {
 		db.metrics.WorkerReplaced("ingest", id)
 	}
 
-	workerCtx, cancel := context.WithCancel(db.ctx)
+	// cancel ownership passes to the workerHandle. It is invoked by
+	// db.Close (see db.go:~390) and by the replace path above when a
+	// duplicate Ingest call supersedes this worker, so the cancel is
+	// not leaked. gosec can't see through the handle indirection.
+	workerCtx, cancel := context.WithCancel(db.ctx) //nolint:gosec // G118: cancel owned by workerHandle
 	handle := &workerHandle{cancel: cancel, done: make(chan struct{})}
 	db.ingestWorkers[id] = handle
 	db.workersMu.Unlock()

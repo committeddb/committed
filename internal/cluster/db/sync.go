@@ -85,7 +85,11 @@ func (db *DB) Sync(_ context.Context, id string, s cluster.Syncable) error {
 		db.metrics.WorkerReplaced("sync", id)
 	}
 
-	workerCtx, cancel := context.WithCancel(db.ctx)
+	// cancel ownership passes to the workerHandle. It is invoked by
+	// db.Close (see db.go:~390) and by the replace path above when a
+	// duplicate Sync call supersedes this worker, so the cancel is
+	// not leaked. gosec can't see through the handle indirection.
+	workerCtx, cancel := context.WithCancel(db.ctx) //nolint:gosec // G118: cancel owned by workerHandle
 	handle := &workerHandle{cancel: cancel, done: make(chan struct{})}
 	db.syncWorkers[id] = handle
 	db.workersMu.Unlock()

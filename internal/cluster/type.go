@@ -105,12 +105,16 @@ func NewDeleteTypeEntity(id string) *Entity {
 
 func (t *Type) Marshal() ([]byte, error) {
 	lt := &clusterpb.LogType{
-		ID:         t.ID,
-		Name:       t.Name,
-		Version:    int32(t.Version),
+		ID:   t.ID,
+		Name: t.Name,
+		// Version and Validate are bounded by the domain: Version is
+		// monotonically assigned starting at 1 (will never exceed
+		// int32), and Validate has only two defined values
+		// (NoValidation=0, ValidateSchema=1).
+		Version:    int32(t.Version), //nolint:gosec // G115: bounded by domain
 		SchemaType: t.SchemaType,
 		Schema:     t.Schema,
-		Validate:   clusterpb.LogValidationStrategy(t.Validate),
+		Validate:   clusterpb.LogValidationStrategy(t.Validate), //nolint:gosec // G115: bounded by domain
 		Migration:  t.Migration,
 	}
 

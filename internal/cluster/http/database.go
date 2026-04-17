@@ -25,7 +25,11 @@ func (h *HTTP) AddDatabase(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 
-	_, _ = w.Write([]byte(c.ID))
+	// text/plain defeats browser content-sniffing; the response is a
+	// plain ID echoed back to the same client that POSTed the config,
+	// so there's no cross-user XSS surface even with a hostile ID.
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write([]byte(c.ID)) //nolint:gosec // G705
 }
 
 func (h *HTTP) GetDatabases(w httpgo.ResponseWriter, r *httpgo.Request) {

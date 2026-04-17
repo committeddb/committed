@@ -139,7 +139,10 @@ func loadPeerTLSInfo() *transport.TLSInfo {
 		return nil
 	}
 	if set != 3 {
-		log.Fatalf("peer mTLS: all of COMMITTED_TLS_CA_FILE, COMMITTED_TLS_CERT_FILE, COMMITTED_TLS_KEY_FILE must be set together (got CA=%q CERT=%q KEY=%q)", ca, cert, key)
+		// G706 false positive: the "user-controlled" values are env
+		// vars from the process operator, who already has full control
+		// over the process. Log-injection is not a coherent threat here.
+		log.Fatalf("peer mTLS: all of COMMITTED_TLS_CA_FILE, COMMITTED_TLS_CERT_FILE, COMMITTED_TLS_KEY_FILE must be set together (got CA=%q CERT=%q KEY=%q)", ca, cert, key) //nolint:gosec // G706
 	}
 	return &transport.TLSInfo{
 		TrustedCAFile: ca,

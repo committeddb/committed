@@ -175,8 +175,11 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	keyValueStorageDir := filepath.Join(dir, "metadata")
 	timeSeriesStorageDir := filepath.Join(dir, "time-series")
 
+	// 0700: WAL directories hold raft state and committed log entries;
+	// only the owning process needs access. os.ModePerm (0777) is too
+	// permissive for data storage.
 	for _, d := range []string{entryLogDir, stateLogDir, eventLogDir, keyValueStorageDir, timeSeriesStorageDir} {
-		if err := os.MkdirAll(d, os.ModePerm); err != nil {
+		if err := os.MkdirAll(d, 0o700); err != nil {
 			return nil, err
 		}
 	}
@@ -637,7 +640,14 @@ func (s *Storage) RaftLogApproxSize() (uint64, error) {
 			// concurrent cycle); skip, don't fail the whole sum.
 			continue
 		}
-		total += uint64(info.Size())
+		sz := info.Size()
+		if sz < 0 {
+			// os.FileInfo.Size() is non-negative for regular files;
+			// guard against exotic filesystems returning -1 for
+			// unknown sizes rather than wrap into a giant uint64.
+			continue
+		}
+		total += uint64(sz)
 	}
 	return total, nil
 }

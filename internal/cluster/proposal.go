@@ -67,8 +67,12 @@ func (p *Proposal) Marshal() ([]byte, error) {
 	for _, e := range p.Entities {
 		es = append(es, &clusterpb.LogEntity{
 			Type: &clusterpb.TypeRef{
-				ID:      e.ID,
-				Version: uint32(e.Version),
+				ID: e.ID,
+				// Type.Version is monotonically assigned by ProposeType
+				// starting at 1. Fitting into uint32 is guaranteed by
+				// the domain (no realistic system reaches 2^32 schema
+				// versions).
+				Version: uint32(e.Version), //nolint:gosec // G115: bounded by domain
 			},
 			Key:       e.Key,
 			Data:      e.Data,

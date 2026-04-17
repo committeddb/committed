@@ -1,6 +1,5 @@
 # Conservative starter set. Noisy linters (funlen, gocyclo, gocognit,
-# varnamelen, wsl) are intentionally off until the team opts in. gosec
-# is disabled here; its findings are tracked for a follow-up pass.
+# varnamelen, wsl) are intentionally off until the team opts in.
 version: "2"
 
 run:
@@ -21,8 +20,14 @@ linters:
     - misspell
     - bodyclose
     - prealloc
+    - gosec
 
   settings:
+    gosec:
+      excludes:
+        # G104 (unhandled errors) overlaps with errcheck; avoid double
+        # reports.
+        - G104
     staticcheck:
       # Start from golangci-lint's default set (which omits the
       # opinionated ST* "stylecheck" family), then drop QF1008 —
@@ -53,6 +58,7 @@ linters:
         linters:
           - errcheck
           - bodyclose
+          - gosec
 
 formatters:
   enable:

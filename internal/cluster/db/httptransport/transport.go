@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"time"
 
 	"go.etcd.io/etcd/client/pkg/v3/transport"
 	"go.etcd.io/etcd/client/pkg/v3/types"
@@ -129,7 +130,14 @@ func (t *HttpTransport) Start(stopC <-chan struct{}) error {
 		ln = tls.NewListener(ln, tlsCfg)
 	}
 
-	return (&http.Server{Handler: t.transport.Handler()}).Serve(ln)
+	// ReadHeaderTimeout prevents Slowloris on the Raft transport.
+	// Other timeouts are intentionally left default: Raft streams are
+	// long-lived and bounding ReadTimeout/WriteTimeout here would tear
+	// down healthy peer connections.
+	return (&http.Server{
+		Handler:           t.transport.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}).Serve(ln)
 }
 
 func (t *HttpTransport) AddPeer(peer raft.Peer) error {

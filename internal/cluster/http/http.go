@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rs/cors"
@@ -93,7 +94,20 @@ func (h *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *HTTP) ListenAndServe(addr string) error {
-	return http.ListenAndServe(addr, h.r)
+	// Timeouts bound how long a slow or malicious client can hold a
+	// connection. ReadHeaderTimeout prevents Slowloris. ReadTimeout and
+	// WriteTimeout cover full request/response, sized for the largest
+	// reasonable config payload (schemas, TOML bundles). IdleTimeout
+	// caps keepalive so dead peers don't pin file descriptors.
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           h.r,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+	return srv.ListenAndServe()
 }
 
 func unmarshalBody(r *http.Request, v any) error {
