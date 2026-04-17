@@ -6,6 +6,7 @@ import (
 
 	"github.com/philborlin/committed/internal/cluster/db"
 	parser "github.com/philborlin/committed/internal/cluster/db/parser"
+	"github.com/philborlin/committed/internal/cluster/db/wal"
 	"github.com/philborlin/committed/internal/cluster/metrics"
 	"github.com/stretchr/testify/require"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -82,19 +83,23 @@ func TestProposeType_IncrementsConfigCounter(t *testing.T) {
 	t.Cleanup(func() { provider.Shutdown(context.Background()) })
 
 	m := metrics.New(provider.Meter("test"))
-	s := NewMemoryStorage()
+	dir := t.TempDir()
+	p := parser.New()
+	s, err := wal.Open(dir, p, nil, nil, wal.WithoutFsync(), wal.WithInMemoryTimeSeries())
+	require.NoError(t, err)
+
 	id := uint64(1)
 	peers := make(db.Peers)
 	peers[id] = ""
 
-	d := db.New(id, peers, s, parser.New(), nil, nil,
+	d := db.New(id, peers, s, p, nil, nil,
 		db.WithTickInterval(testTickInterval),
 		db.WithMetrics(m),
 	)
 	defer d.Close()
 
 	tp := createType("test-type")
-	err := d.ProposeType(testCtx(t), tp.config)
+	err = d.ProposeType(testCtx(t), tp.config)
 	require.NoError(t, err)
 
 	var rm metricdata.ResourceMetrics

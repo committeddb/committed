@@ -54,6 +54,19 @@ type Type struct {
 	SchemaType string // something like Thrift, Protobuf, JSON Schema, etc.
 	Schema     []byte // The contents of the schema
 	Validate   ValidationStrategy
+	// Migration is the transform program that upgrades data written
+	// against Version-1 of this type into the shape this Version
+	// expects. Interpreted as a jq program against each entity's JSON
+	// payload. Empty means the schema change is additive enough that
+	// data doesn't need rewriting. Only applied when a syncable opts
+	// into "always-current" mode.
+	Migration []byte
+	// MigrationExplicit is transient (not persisted). Set by ParseType
+	// when the operator provided a [migration] section (either
+	// transform or none=true). Used by ProposeType to enforce the
+	// requirement that every version after v1 declares its migration
+	// intent explicitly.
+	MigrationExplicit bool
 }
 
 type TimePoint struct {
@@ -97,6 +110,7 @@ func (t *Type) Marshal() ([]byte, error) {
 		SchemaType: t.SchemaType,
 		Schema:     t.Schema,
 		Validate:   clusterpb.LogValidationStrategy(t.Validate),
+		Migration:  t.Migration,
 	}
 
 	return proto.Marshal(lt)
@@ -115,6 +129,7 @@ func (t *Type) Unmarshal(bs []byte) error {
 	t.Schema = lt.Schema
 	t.SchemaType = lt.SchemaType
 	t.Validate = ValidationStrategy(lt.Validate)
+	t.Migration = lt.Migration
 
 	return nil
 }

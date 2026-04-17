@@ -52,6 +52,15 @@ message LogType {
     string SchemaType = 4;
     bytes Schema = 5;
     LogValidationStrategy Validate = 6;
+    // Migration is the transform program that upgrades data written
+    // against version-1 of this type into the shape this version
+    // expects. Interpreted as a jq program against the entity's JSON
+    // payload. Empty when this is the first version (Version 1) or when
+    // the schema bump is additive enough that no transform is needed.
+    // Applied only when a syncable is configured in "always-current"
+    // mode; "as-stored" syncables see the raw entity data and handle
+    // versioning themselves.
+    bytes Migration = 7;
 }
 
 message LogConfiguration {

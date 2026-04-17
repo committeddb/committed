@@ -67,27 +67,23 @@ func TestProposals(t *testing.T) {
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			db := createDB()
-			defer db.Close()
-
-			// db.New now calls EatCommitC automatically, so the explicit
-			// call here is redundant after PR2.
+			// ProposeType depends on real storage state (version numbering,
+			// migration checks), so use wal-backed storage.
+			d, _ := newWalDB(t)
 
 			ctx := testCtx(t)
 			for _, id := range tc.typeIDsToCreate {
 				tipe := createType(id)
-				err := db.ProposeType(ctx, tipe.config)
+				err := d.ProposeType(ctx, tipe.config)
 				require.Nil(t, err)
 			}
 
 			for _, p := range tc.add {
-				err := db.Propose(ctx, p)
+				err := d.Propose(ctx, p)
 				require.Nil(t, err)
 			}
 
-			// Blocking Propose returns after apply, so the proposals are
-			// already in storage by here. No polling needed.
-			ps, err := db.Proposals(tc.amount, tc.typeIDsToSearchFor...)
+			ps, err := d.Proposals(tc.amount, tc.typeIDsToSearchFor...)
 			require.Nil(t, err)
 			require.Equal(t, len(tc.expect), len(ps))
 

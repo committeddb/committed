@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"bytes"
 	"fmt"
 
 	"github.com/philborlin/committed/internal/cluster"
@@ -28,19 +29,26 @@ func (s *Storage) saveType(t *cluster.Type) error {
 			return ErrBucketMissing
 		}
 
-		// Enforce immutability: a (typeID, Version) pair is written once.
-		// ProposeType auto-bumps Version when the schema changes and
-		// short-circuits when it doesn't, so under normal operation the
-		// stored version and the proposed version never collide here. This
-		// guard catches Raft replay (the same proposal applied twice) and
-		// raw Raft proposals that bypassed ProposeType. We skip rather
-		// than error because apply errors are fatal to the state machine.
 		existing, err := getVersioned(b, []byte(t.ID))
 		if err == nil {
 			var prev cluster.Type
 			if err := prev.Unmarshal(existing); err == nil && prev.Version == t.Version {
-				s.logger.Warn("ignoring type mutation: type+version is immutable",
-					zap.String("id", t.ID), zap.Int("version", t.Version))
+				// Same (typeID, version). Schema is immutable but the
+				// migration field is mutable — operators may need to
+				// retroactively fix a forgotten or buggy migration.
+				// If the migration is the only difference, overwrite
+				// the current version entry in place. If everything
+				// is byte-identical (Raft replay), skip silently.
+				if bytes.Equal(prev.Schema, t.Schema) &&
+					prev.SchemaType == t.SchemaType &&
+					prev.Validate == t.Validate &&
+					prev.Name == t.Name &&
+					!bytes.Equal(prev.Migration, t.Migration) {
+					s.logger.Info("updating migration for existing type version",
+						zap.String("id", t.ID), zap.Int("version", t.Version))
+					return overwriteCurrentVersion(b, []byte(t.ID), t)
+				}
+				// Byte-identical replay: skip.
 				return nil
 			}
 		}
@@ -52,6 +60,30 @@ func (s *Storage) saveType(t *cluster.Type) error {
 		_, err = putVersioned(b, []byte(t.ID), bs)
 		return err
 	})
+}
+
+// overwriteCurrentVersion replaces the data for the current version of
+// a type in place. Used when the Migration field on an existing version
+// changes — the schema (the identity-bearing part) stays immutable, but
+// the migration (a forward-looking transform hint) is mutable.
+func overwriteCurrentVersion(resourceBucket *bolt.Bucket, id []byte, t *cluster.Type) error {
+	idBucket := resourceBucket.Bucket(id)
+	if idBucket == nil {
+		return cluster.ErrResourceNotFound
+	}
+	currentVer := idBucket.Get(currentKey)
+	if currentVer == nil {
+		return cluster.ErrResourceNotFound
+	}
+	verBucket := idBucket.Bucket(versionsBucket)
+	if verBucket == nil {
+		return cluster.ErrResourceNotFound
+	}
+	bs, err := t.Marshal()
+	if err != nil {
+		return err
+	}
+	return verBucket.Put(currentVer, bs)
 }
 
 func (s *Storage) deleteType(id []byte) error {

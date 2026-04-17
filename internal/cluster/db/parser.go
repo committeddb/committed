@@ -13,7 +13,7 @@ type Parser interface {
 	AddDatabaseParser(name string, p cluster.DatabaseParser)
 	ParseDatabase(mimeType string, data []byte) (string, cluster.Database, error)
 	ParseIngestable(mimeType string, data []byte) (string, cluster.Ingestable, error)
-	ParseSyncable(mimeType string, data []byte, s cluster.DatabaseStorage) (string, cluster.Syncable, error)
+	ParseSyncable(mimeType string, data []byte, s cluster.DatabaseStorage) (string, cluster.Syncable, cluster.SyncableMode, error)
 }
 
 func parseBytes(mimeType string, reader io.Reader) (*viper.Viper, error) {

@@ -16,7 +16,7 @@ func (db *DB) AddSyncableParser(name string, p cluster.SyncableParser) {
 }
 
 func (db *DB) ProposeSyncable(ctx context.Context, c *cluster.Configuration) error {
-	_, _, err := db.ParseSyncable(c.MimeType, c.Data, db.storage)
+	_, _, _, err := db.ParseSyncable(c.MimeType, c.Data, db.storage)
 	if err != nil {
 		return &cluster.ConfigError{Err: err}
 	}
@@ -30,7 +30,7 @@ func (db *DB) ProposeSyncable(ctx context.Context, c *cluster.Configuration) err
 	return db.Propose(ctx, p)
 }
 
-func (db *DB) ParseSyncable(mimeType string, data []byte, s cluster.DatabaseStorage) (string, cluster.Syncable, error) {
+func (db *DB) ParseSyncable(mimeType string, data []byte, s cluster.DatabaseStorage) (string, cluster.Syncable, cluster.SyncableMode, error) {
 	return db.parser.ParseSyncable(mimeType, data, s)
 }
 

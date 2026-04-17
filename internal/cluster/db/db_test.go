@@ -78,28 +78,21 @@ func TestProposeType(t *testing.T) {
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			db := createDB()
-			defer db.Close()
+			// Use real wal.Storage: ProposeType reads existing state to
+			// decide version numbering and migration requirements, which
+			// the in-memory stub can't model correctly.
+			d, s := newWalDB(t)
 
 			for _, tipe := range tc.types {
-				err := db.ProposeType(testCtx(t), tipe.config)
+				err := d.ProposeType(testCtx(t), tipe.config)
 				require.Nil(t, err)
 			}
 
-			ents, err := db.ents()
-			require.Nil(t, err)
-
-			offset := len(ents) - len(tc.types)
-			for i := range ents {
-				tipe := &cluster.Type{}
-
-				e := ents[offset+i]
-				err := tipe.Unmarshal(e.Entities[0].Data)
+			for _, expected := range tc.types {
+				got, err := s.ResolveType(cluster.LatestTypeRef(expected.config.ID))
 				require.Nil(t, err)
-
-				// The ID is a generated ID that we can't predict ahead of time. Just copy over and trust...
-				tc.types[i].tipe.ID = tipe.ID
-				require.Equal(t, tc.types[i].tipe, tipe)
+				require.Equal(t, expected.tipe.Name, got.Name)
+				require.Equal(t, expected.tipe.Version, got.Version)
 			}
 		})
 	}

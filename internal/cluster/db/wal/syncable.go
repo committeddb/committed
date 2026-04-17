@@ -5,6 +5,7 @@ import (
 
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/db"
+	"github.com/philborlin/committed/internal/cluster/migration"
 	bolt "go.etcd.io/bbolt"
 	"go.uber.org/zap"
 )
@@ -45,9 +46,17 @@ func (s *Storage) saveSyncable(t *cluster.Configuration) error {
 			return fmt.Errorf("[wal.syncable] marshal: %w", err)
 		}
 
-		_, parsed, err := s.parser.ParseSyncable(t.MimeType, t.Data, s)
+		_, parsed, parsedMode, err := s.parser.ParseSyncable(t.MimeType, t.Data, s)
 		if err != nil {
 			return fmt.Errorf("[wal.syncable] parseSyncable: %w", err)
+		}
+		// ModeAlwaysCurrent decorates the user syncable with a
+		// migration wrapper so the worker loop stays oblivious to
+		// version-upgrade concerns. ModeAsStored hands the syncable
+		// through untouched. The wrapper lives in the migration
+		// package next to the chain it uses.
+		if parsedMode == cluster.ModeAlwaysCurrent {
+			parsed = migration.Wrap(parsed, s)
 		}
 		syncable = parsed
 

@@ -11,10 +11,10 @@ func (p *Parser) AddSyncableParser(name string, sp cluster.SyncableParser) {
 	p.syncableParsers[name] = sp
 }
 
-func (p *Parser) ParseSyncable(mimeType string, data []byte, s cluster.DatabaseStorage) (string, cluster.Syncable, error) {
+func (p *Parser) ParseSyncable(mimeType string, data []byte, s cluster.DatabaseStorage) (string, cluster.Syncable, cluster.SyncableMode, error) {
 	v, err := parseBytes(mimeType, bytes.NewReader(data))
 	if err != nil {
-		return "", nil, err
+		return "", nil, 0, err
 	}
 
 	name := v.GetString("syncable.name")
@@ -22,12 +22,17 @@ func (p *Parser) ParseSyncable(mimeType string, data []byte, s cluster.DatabaseS
 	parser, ok := p.syncableParsers[tipe]
 
 	if !ok {
-		return "", nil, fmt.Errorf("cannot parse syncable of type: %s", tipe)
+		return "", nil, 0, fmt.Errorf("cannot parse syncable of type: %s", tipe)
+	}
+
+	mode, err := cluster.ParseSyncableMode(v.GetString("syncable.mode"))
+	if err != nil {
+		return "", nil, 0, err
 	}
 
 	syncable, err := parser.Parse(v, s)
 	if err != nil {
-		return "", nil, err
+		return "", nil, 0, err
 	}
-	return name, syncable, nil
+	return name, syncable, mode, nil
 }

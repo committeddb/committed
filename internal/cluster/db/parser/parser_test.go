@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/clusterfakes"
 	"github.com/philborlin/committed/internal/cluster/db/parser"
 	"github.com/stretchr/testify/require"
@@ -155,10 +156,11 @@ func TestParseSyncable_Success(t *testing.T) {
 type = "sql"
 name = "my-sync"`)
 
-	name, syncable, err := p.ParseSyncable("text/toml", data, nil)
+	name, syncable, mode, err := p.ParseSyncable("text/toml", data, nil)
 	require.Nil(t, err)
 	require.Equal(t, "my-sync", name)
 	require.Equal(t, fakeSyncable, syncable)
+	require.Equal(t, cluster.ModeAsStored, mode)
 	require.Equal(t, 1, fakeParser.ParseCallCount())
 }
 
@@ -169,9 +171,45 @@ func TestParseSyncable_UnknownType(t *testing.T) {
 type = "unknown"
 name = "my-sync"`)
 
-	_, _, err := p.ParseSyncable("text/toml", data, nil)
+	_, _, _, err := p.ParseSyncable("text/toml", data, nil)
 	require.NotNil(t, err)
 	require.Contains(t, err.Error(), "cannot parse syncable of type: unknown")
+}
+
+func TestParseSyncable_AlwaysCurrentMode(t *testing.T) {
+	p := parser.New()
+
+	fakeSyncable := &clusterfakes.FakeSyncable{}
+	fakeParser := &clusterfakes.FakeSyncableParser{}
+	fakeParser.ParseReturns(fakeSyncable, nil)
+	p.AddSyncableParser("sql", fakeParser)
+
+	data := []byte(`[syncable]
+type = "sql"
+name = "my-sync"
+mode = "always-current"`)
+
+	_, _, mode, err := p.ParseSyncable("text/toml", data, nil)
+	require.Nil(t, err)
+	require.Equal(t, cluster.ModeAlwaysCurrent, mode)
+}
+
+func TestParseSyncable_UnknownMode(t *testing.T) {
+	p := parser.New()
+
+	fakeSyncable := &clusterfakes.FakeSyncable{}
+	fakeParser := &clusterfakes.FakeSyncableParser{}
+	fakeParser.ParseReturns(fakeSyncable, nil)
+	p.AddSyncableParser("sql", fakeParser)
+
+	data := []byte(`[syncable]
+type = "sql"
+name = "my-sync"
+mode = "something-weird"`)
+
+	_, _, _, err := p.ParseSyncable("text/toml", data, nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unknown syncable mode")
 }
 
 // --- Multiple parsers ---

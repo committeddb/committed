@@ -42,6 +42,40 @@ type Syncable interface {
 	Close() error
 }
 
+// SyncableMode controls whether a syncable sees entities at the
+// version they were proposed under (AsStored) or transparently
+// upgraded to the current type version (AlwaysCurrent). Mode is a
+// per-syncable configuration declared in the syncable's TOML under
+// `syncable.mode`; the default is AsStored, which matches the
+// pre-migration-runner behaviour.
+type SyncableMode int
+
+const (
+	// ModeAsStored delivers entities with their data untouched. The
+	// syncable sees the exact bytes that were written under whatever
+	// Type version was current at propose time. Version migrations are
+	// the syncable's responsibility.
+	ModeAsStored SyncableMode = 0
+	// ModeAlwaysCurrent runs each entity's data through the migration
+	// chain (Type.Migration programs from stamped-version+1 up to
+	// current) before the syncable sees it. The syncable only has to
+	// handle the shape the current type version defines.
+	ModeAlwaysCurrent SyncableMode = 1
+)
+
+// ParseSyncableMode maps the TOML string form to a SyncableMode.
+// Unknown strings return an error so typos surface at config-parse
+// time rather than silently defaulting.
+func ParseSyncableMode(s string) (SyncableMode, error) {
+	switch s {
+	case "", "as-stored":
+		return ModeAsStored, nil
+	case "always-current":
+		return ModeAlwaysCurrent, nil
+	}
+	return 0, fmt.Errorf("unknown syncable mode %q (expected \"as-stored\" or \"always-current\")", s)
+}
+
 // BatchSyncable is an optional extension of Syncable for implementations
 // that benefit from processing multiple proposals in a single transaction
 // (e.g., SQL databases). db.sync checks for this interface at startup and

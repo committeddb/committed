@@ -34,16 +34,20 @@ func newWalDB(t *testing.T) (*db.DB, *wal.Storage) {
 	return d, s
 }
 
-func proposeTypeTOML(t *testing.T, d *db.DB, id, name, schema string) {
+// proposeTypeTOML creates or bumps a type. For the first version of a
+// type (no existing version in storage), no migration section is needed.
+// For schema bumps, pass migrationSection as e.g.
+// "\n\n[migration]\nnone = true" or "\n\n[migration]\ntransform = '.'".
+func proposeTypeTOML(t *testing.T, d *db.DB, id, name, schema, migrationSection string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	var data string
 	if schema == "" {
-		data = fmt.Sprintf("[type]\nname = \"%s\"", name)
+		data = fmt.Sprintf("[type]\nname = \"%s\"%s", name, migrationSection)
 	} else {
-		data = fmt.Sprintf("[type]\nname = \"%s\"\nschemaType = \"JSONSchema\"\nschema = '%s'", name, schema)
+		data = fmt.Sprintf("[type]\nname = \"%s\"\nschemaType = \"JSONSchema\"\nschema = '%s'%s", name, schema, migrationSection)
 	}
 	cfg := &cluster.Configuration{ID: id, MimeType: "text/toml", Data: []byte(data)}
 	require.NoError(t, d.ProposeType(ctx, cfg))
@@ -56,8 +60,8 @@ func TestProposeType_ByteIdenticalIsNoOp(t *testing.T) {
 	d, s := newWalDB(t)
 
 	schema := `{"type":"object"}`
-	proposeTypeTOML(t, d, "person", "Person", schema)
-	proposeTypeTOML(t, d, "person", "Person", schema) // no-op
+	proposeTypeTOML(t, d, "person", "Person", schema, "")
+	proposeTypeTOML(t, d, "person", "Person", schema, "") // no-op
 
 	got, err := s.ResolveType(cluster.LatestTypeRef("person"))
 	require.NoError(t, err)
@@ -73,12 +77,12 @@ func TestProposeType_ByteIdenticalIsNoOp(t *testing.T) {
 func TestProposeType_BumpsVersionOnSchemaChange(t *testing.T) {
 	d, s := newWalDB(t)
 
-	proposeTypeTOML(t, d, "person", "Person", `{"type":"object","required":["name"]}`)
+	proposeTypeTOML(t, d, "person", "Person", `{"type":"object","required":["name"]}`, "")
 	v1, err := s.ResolveType(cluster.LatestTypeRef("person"))
 	require.NoError(t, err)
 	require.Equal(t, 1, v1.Version)
 
-	proposeTypeTOML(t, d, "person", "Person", `{"type":"object","required":["email"]}`)
+	proposeTypeTOML(t, d, "person", "Person", `{"type":"object","required":["email"]}`, "\n\n[migration]\nnone = true")
 	v2, err := s.ResolveType(cluster.LatestTypeRef("person"))
 	require.NoError(t, err)
 	require.Equal(t, 2, v2.Version)
@@ -107,7 +111,7 @@ func TestCrossVersionReplay_ProposalKeepsItsStampedSchema(t *testing.T) {
 	d, s := newWalDB(t)
 
 	// Type v1 — relaxed schema.
-	proposeTypeTOML(t, d, "person", "Person", `{"type":"object"}`)
+	proposeTypeTOML(t, d, "person", "Person", `{"type":"object"}`, "")
 
 	// Stamp an entity at v1. We construct the proposal directly (the
 	// HTTP layer does this from the current Type, but here we mirror it
@@ -125,7 +129,7 @@ func TestCrossVersionReplay_ProposalKeepsItsStampedSchema(t *testing.T) {
 	require.NoError(t, d.Propose(testCtx(t), p))
 
 	// Type evolves to v2 — strict schema.
-	proposeTypeTOML(t, d, "person", "Person", `{"type":"object","required":["email"]}`)
+	proposeTypeTOML(t, d, "person", "Person", `{"type":"object","required":["email"]}`, "\n\n[migration]\nnone = true")
 	cur2, err := s.ResolveType(cluster.LatestTypeRef("person"))
 	require.NoError(t, err)
 	require.Equal(t, 2, cur2.Version)
@@ -139,6 +143,73 @@ func TestCrossVersionReplay_ProposalKeepsItsStampedSchema(t *testing.T) {
 	require.Equal(t, 1, ps[0].Entities[0].Type.Version,
 		"entity must be hydrated with the schema in force at propose time, not the latest")
 	require.Equal(t, `{"type":"object"}`, string(ps[0].Entities[0].Type.Schema))
+}
+
+// Schema bump without a [migration] section is rejected.
+func TestProposeType_RejectsSchemaBumpWithoutMigration(t *testing.T) {
+	d, _ := newWalDB(t)
+
+	proposeTypeTOML(t, d, "person", "Person", `{"type":"object"}`, "")
+
+	cfg := &cluster.Configuration{
+		ID:       "person",
+		MimeType: "text/toml",
+		Data:     []byte("[type]\nname = \"Person\"\nschemaType = \"JSONSchema\"\nschema = '{\"type\":\"object\",\"required\":[\"email\"]}'"),
+	}
+	err := d.ProposeType(testCtx(t), cfg)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "[migration] section is required")
+}
+
+// migration.none = true allows a schema bump without a transform.
+func TestProposeType_AcceptsNoneExplicitMigration(t *testing.T) {
+	d, s := newWalDB(t)
+
+	proposeTypeTOML(t, d, "person", "Person", `{"type":"object"}`, "")
+	proposeTypeTOML(t, d, "person", "Person", `{"type":"object","required":["email"]}`, "\n\n[migration]\nnone = true")
+
+	got, err := s.ResolveType(cluster.LatestTypeRef("person"))
+	require.NoError(t, err)
+	require.Equal(t, 2, got.Version)
+	require.Empty(t, got.Migration, "none=true means empty migration, not a transform")
+}
+
+// Re-PUTting the same version with a different migration updates the
+// migration in place without bumping version.
+func TestProposeType_MutableMigration(t *testing.T) {
+	d, s := newWalDB(t)
+
+	proposeTypeTOML(t, d, "person", "Person", `{"type":"object"}`, "")
+	proposeTypeTOML(t, d, "person", "Person", `{"type":"object","required":["email"]}`, "\n\n[migration]\ntransform = '.'")
+
+	v2, err := s.ResolveType(cluster.LatestTypeRef("person"))
+	require.NoError(t, err)
+	require.Equal(t, 2, v2.Version)
+	require.Equal(t, ".", string(v2.Migration))
+
+	// Fix the migration in place — same schema, different transform.
+	proposeTypeTOML(t, d, "person", "Person", `{"type":"object","required":["email"]}`, "\n\n[migration]\ntransform = '. + {email: \"x\"}'")
+
+	fixed, err := s.ResolveType(cluster.LatestTypeRef("person"))
+	require.NoError(t, err)
+	require.Equal(t, 2, fixed.Version, "version must NOT bump on migration-only change")
+	require.Equal(t, `. + {email: "x"}`, string(fixed.Migration))
+}
+
+// Bad jq syntax is rejected at ProposeType time.
+func TestProposeType_RejectsBadJQ(t *testing.T) {
+	d, _ := newWalDB(t)
+
+	proposeTypeTOML(t, d, "person", "Person", `{"type":"object"}`, "")
+
+	cfg := &cluster.Configuration{
+		ID:       "person",
+		MimeType: "text/toml",
+		Data:     []byte("[type]\nname = \"Person\"\nschemaType = \"JSONSchema\"\nschema = '{\"type\":\"object\",\"required\":[\"email\"]}'\n\n[migration]\ntransform = 'this is not jq'"),
+	}
+	err := d.ProposeType(testCtx(t), cfg)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not valid jq")
 }
 
 // User-supplied Type.Version in the TOML is ignored — the system

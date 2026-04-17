@@ -46,6 +46,12 @@ const (
 // ID cancels and replaces the existing worker, the worker context is
 // derived from db.ctx (not the caller's ctx), and db.Close drains
 // every registered worker before tearing the raft layer down.
+//
+// The Syncable passed here is taken as-is. Registration-time
+// decorators (the always-current mode wrapper in
+// internal/cluster/migration) are applied by the wal layer before the
+// syncable reaches this method — db.sync doesn't know or care which
+// mode a syncable is running under.
 func (db *DB) Sync(_ context.Context, id string, s cluster.Syncable) error {
 	db.workersMu.Lock()
 	if db.closed {
