@@ -33,8 +33,17 @@ type Option func(*options)
 
 type options struct {
 	tickInterval time.Duration
-	logger       *zap.Logger
-	metrics      *metrics.Metrics
+	// leaderChangeGrace is how long db.DB's leader-change watcher waits
+	// after observing a raft leader transition before signaling at-risk
+	// waiters with ErrProposalUnknown. The grace period gives the
+	// normal apply path a chance to win when the new leader inherits
+	// and commits the entry fast — small enough to beat the caller's
+	// ctx deadline, large enough that a smooth hand-off doesn't produce
+	// spurious ErrProposalUnknowns. 0 means "derive from tickInterval
+	// at New time" — see defaultLeaderChangeGracePeriod and db.New.
+	leaderChangeGrace time.Duration
+	logger            *zap.Logger
+	metrics           *metrics.Metrics
 	// compactMaxSize is the on-disk raft log size in bytes that, once
 	// exceeded, triggers a CreateSnapshot + Compact at the end of the
 	// current Ready iteration. 0 disables the size limb of the
@@ -59,6 +68,32 @@ type options struct {
 	// COMMITTED_TLS_CA_FILE / CERT_FILE / KEY_FILE env vars are all set.
 	// nil (the default) leaves the peer transport as plaintext HTTP.
 	tlsInfo *transport.TLSInfo
+
+	// ingestSupervisor{InitialBackoff,MaxBackoff,MaxAttempts,HealthyWindow}
+	// govern the auto-restart behavior when an ingest worker parks in the
+	// ErrProposalUnknown freeze branch. The supervisor waits backoff (starting
+	// at InitialBackoff, doubling on each successive freeze, capped at
+	// MaxBackoff) before re-registering the ingestable via db.Ingest. After
+	// MaxAttempts consecutive freezes within HealthyWindow the supervisor
+	// gives up and emits IngestSupervisorGiveup; any freeze-free run longer
+	// than HealthyWindow resets the counter so a fresh flap starts clean.
+	// Zero values mean "use package defaults" (see default* constants in
+	// db.go).
+	ingestSupervisorInitialBackoff time.Duration
+	ingestSupervisorMaxBackoff     time.Duration
+	ingestSupervisorMaxAttempts    int
+	ingestSupervisorHealthyWindow  time.Duration
+
+	// ingestFreezeDrainTimeout bounds how long the ingest worker
+	// waits for its in-flight position-bump acks to resolve before
+	// returning ingestExitFreeze. A longer budget makes the
+	// supervisor's subsequent storage.Position read more accurate
+	// (fewer unresolved bumps means fewer rows re-read on replay);
+	// a shorter budget caps the MTTR for the supervisor's restart.
+	// 0 resolves to 2 * leaderChangeGrace at New time — the rough
+	// window within which the leader-change watcher will either
+	// apply-ack or ErrProposalUnknown-signal any in-flight waiter.
+	ingestFreezeDrainTimeout time.Duration
 }
 
 // DefaultCompactMaxSize is the production default: compact the raft
@@ -85,6 +120,18 @@ func defaultOptions() options {
 // is unacceptable. Production callers should leave this at the default.
 func WithTickInterval(d time.Duration) Option {
 	return func(o *options) { o.tickInterval = d }
+}
+
+// WithLeaderChangeGracePeriod overrides how long db.DB's leader-change
+// watcher waits before signaling in-flight Propose waiters with
+// ErrProposalUnknown after an observed leader transition. The default
+// is 3× tickInterval, which gives the new leader a handful of ticks to
+// inherit and commit the entry for callers where the apply path still
+// wins. Tests set tight values (e.g. 10ms) to exercise the fail-fast
+// path deterministically; production callers can leave it at the
+// default.
+func WithLeaderChangeGracePeriod(d time.Duration) Option {
+	return func(o *options) { o.leaderChangeGrace = d }
 }
 
 // WithLogger overrides the logger used by DB and its internal Raft instance.
@@ -114,6 +161,44 @@ func WithCompactMaxSize(bytes uint64) Option {
 // exercise the trigger without ramping raft log size.
 func WithCompactMaxAge(d time.Duration) Option {
 	return func(o *options) { o.compactMaxAge = d }
+}
+
+// WithIngestSupervisorInitialBackoff overrides the first-freeze wait
+// duration. Defaults to 100ms. Tests override to sub-millisecond values
+// to drive the restart path deterministically.
+func WithIngestSupervisorInitialBackoff(d time.Duration) Option {
+	return func(o *options) { o.ingestSupervisorInitialBackoff = d }
+}
+
+// WithIngestSupervisorMaxBackoff caps the exponential backoff applied
+// between consecutive freeze-restart cycles. Defaults to 30s. Tests
+// tighten this (e.g. 10ms) to keep the giveup-path scenario fast.
+func WithIngestSupervisorMaxBackoff(d time.Duration) Option {
+	return func(o *options) { o.ingestSupervisorMaxBackoff = d }
+}
+
+// WithIngestSupervisorMaxAttempts sets how many consecutive freezes the
+// supervisor will restart through before giving up. Defaults to 20.
+// Tests drop this (e.g. 3) so the giveup path completes within a test
+// deadline.
+func WithIngestSupervisorMaxAttempts(n int) Option {
+	return func(o *options) { o.ingestSupervisorMaxAttempts = n }
+}
+
+// WithIngestSupervisorHealthyWindow controls how long an ingestable has
+// to run freeze-free before the supervisor considers the previous flap
+// sequence "resolved" and resets the consecutive-freeze counter.
+// Defaults to 60s.
+func WithIngestSupervisorHealthyWindow(d time.Duration) Option {
+	return func(o *options) { o.ingestSupervisorHealthyWindow = d }
+}
+
+// WithIngestFreezeDrainTimeout caps how long the ingest worker waits
+// on its in-flight position-bump acks before returning from the
+// freeze branch. Tests tighten this to exercise the timeout path.
+// Zero leaves the default (2 * leaderChangeGrace) in place.
+func WithIngestFreezeDrainTimeout(d time.Duration) Option {
+	return func(o *options) { o.ingestFreezeDrainTimeout = d }
 }
 
 // WithTLSInfo enables mTLS on the raft peer transport. Pass a

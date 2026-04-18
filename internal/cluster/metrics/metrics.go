@@ -22,6 +22,14 @@ type Metrics struct {
 	syncDuration    metric.Float64Histogram
 	workerRunning   metric.Float64Gauge
 	workerReplaces  metric.Int64Counter
+
+	leaderTransitionsObserved metric.Int64Counter
+	proposeFailFastUnknown    metric.Int64Counter
+
+	ingestFrozen              metric.Float64Gauge
+	ingestRestarts            metric.Int64Counter
+	ingestSupervisorGiveups   metric.Int64Counter
+	ingestFreezeDrainTimeouts metric.Int64Counter
 }
 
 // New creates a Metrics instance from an OTel Meter. The caller
@@ -62,6 +70,24 @@ func New(meter metric.Meter) *Metrics {
 
 	m.workerReplaces, _ = meter.Int64Counter("committed.worker.replaces",
 		metric.WithDescription("Number of times a worker was replaced via the registry."))
+
+	m.leaderTransitionsObserved, _ = meter.Int64Counter("committed.leader.transitions.observed",
+		metric.WithDescription("Raft leader-ID transitions observed by this node's leader-change watcher."))
+
+	m.proposeFailFastUnknown, _ = meter.Int64Counter("committed.propose.fail_fast.unknown",
+		metric.WithDescription("In-flight Propose waiters signaled with ErrProposalUnknown by the leader-change watcher."))
+
+	m.ingestFrozen, _ = meter.Float64Gauge("committed.ingest.frozen",
+		metric.WithDescription("1 if an ingest worker is parked in the ErrProposalUnknown freeze branch awaiting supervisor restart, 0 otherwise."))
+
+	m.ingestRestarts, _ = meter.Int64Counter("committed.ingest.restart_total",
+		metric.WithDescription("Supervisor-triggered ingest worker re-registrations after a freeze."))
+
+	m.ingestSupervisorGiveups, _ = meter.Int64Counter("committed.ingest.supervisor_giveup_total",
+		metric.WithDescription("Ingest supervisor give-ups after hitting the consecutive-freeze cap for an id."))
+
+	m.ingestFreezeDrainTimeouts, _ = meter.Int64Counter("committed.ingest.freeze_drain_timeout_total",
+		metric.WithDescription("Ingest freeze-path drain hit its timeout with at least one unresolved in-flight bump; supervisor may read a stale position."))
 
 	return m
 }
@@ -125,4 +151,59 @@ func (m *Metrics) WorkerReplaced(kind, id string) {
 			attribute.String("kind", kind),
 			attribute.String("id", id),
 		))
+}
+
+// LeaderTransitionObserved increments the counter recording how often
+// this node's leader-change watcher has observed a raft leader-ID
+// transition. Serves as a healthy-baseline denominator alongside
+// ProposeFailFastUnknown.
+func (m *Metrics) LeaderTransitionObserved() {
+	m.leaderTransitionsObserved.Add(context.Background(), 1)
+}
+
+// ProposeFailFastUnknown increments the counter recording how often an
+// in-flight Propose waiter has been signaled with ErrProposalUnknown
+// because its stamped leader changed and the grace period expired
+// without apply.
+func (m *Metrics) ProposeFailFastUnknown() {
+	m.proposeFailFastUnknown.Add(context.Background(), 1)
+}
+
+// IngestFrozen sets the frozen gauge for an ingestable id. frozen=true
+// is emitted by the worker when it enters the ErrProposalUnknown freeze
+// branch; frozen=false is emitted by the supervisor after it
+// successfully re-registers the ingestable.
+func (m *Metrics) IngestFrozen(id string, frozen bool) {
+	v := 0.0
+	if frozen {
+		v = 1.0
+	}
+	m.ingestFrozen.Record(context.Background(), v,
+		metric.WithAttributes(attribute.String("id", id)))
+}
+
+// IngestRestart increments the supervisor restart counter for an
+// ingestable id. Fires once per successful supervisor-driven
+// re-registration.
+func (m *Metrics) IngestRestart(id string) {
+	m.ingestRestarts.Add(context.Background(), 1,
+		metric.WithAttributes(attribute.String("id", id)))
+}
+
+// IngestSupervisorGiveup increments the supervisor give-up counter for
+// an ingestable id. Fires once when the supervisor stops restarting
+// after the consecutive-freeze cap.
+func (m *Metrics) IngestSupervisorGiveup(id string) {
+	m.ingestSupervisorGiveups.Add(context.Background(), 1,
+		metric.WithAttributes(attribute.String("id", id)))
+}
+
+// IngestFreezeDrainTimeout increments the freeze-drain timeout counter
+// for an ingestable id. Fires when the worker's pre-freeze drain hit
+// its deadline with at least one in-flight bump unresolved — the
+// supervisor's subsequent storage.Position read may then be stale,
+// causing duplicate-row replay on the restart.
+func (m *Metrics) IngestFreezeDrainTimeout(id string) {
+	m.ingestFreezeDrainTimeouts.Add(context.Background(), 1,
+		metric.WithAttributes(attribute.String("id", id)))
 }

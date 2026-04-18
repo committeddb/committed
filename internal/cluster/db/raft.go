@@ -262,8 +262,15 @@ func (n *Raft) serveChannels() {
 		case <-ticker.C:
 			n.node.Tick()
 		case rd := <-n.node.Ready():
-			isLeader := n.node.Status().RaftState == raft.StateLeader
+			status := n.node.Status()
+			isLeader := status.RaftState == raft.StateLeader
 			n.leaderState.SetLeader(isLeader)
+			// Update the observed leader ID on every Ready. SetLeaderID
+			// no-ops when the value is unchanged; when it changes it
+			// dispatches to any subscribers (db.DB's leader-change
+			// watcher uses this to fail-fast in-flight Propose waiters
+			// stamped under the old leader).
+			n.leaderState.SetLeaderID(status.Lead)
 
 			if n.metrics != nil {
 				n.metrics.SetLeader(isLeader)
