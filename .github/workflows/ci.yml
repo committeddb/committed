@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      # Pin golangci-lint to match the version used locally during the
+      # ci-golangci-lint ticket triage. Bump deliberately so dev and CI
+      # flag the same things.
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: v2.11.4
+
+  test:
+    name: test (race)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      - run: make test/ci
+
+  # Adversarial raft suite runs -count=20 under -race with a 15-minute
+  # per-run timeout, so it can take ~10-15 minutes. Limit to main pushes
+  # and manual dispatch to keep PR feedback fast; rely on lint + test
+  # for the PR gate.
+  test-adversarial:
+    name: test (adversarial)
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      - run: make test/adversarial

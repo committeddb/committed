@@ -3,7 +3,7 @@ test:
 
 test/ci:
 	go build
-	go test ./... -cover
+	go test -race ./... -cover
 
 test-all:
 	go build
