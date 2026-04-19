@@ -94,8 +94,16 @@ type Storage struct {
 	// happened to run mid-restore would hit a closed-file error.
 	kvMu              sync.RWMutex
 	TimeSeriesStorage tstorage.Storage
-	snapshot          pb.Snapshot
-	hardState         pb.HardState
+	// snapMu guards snapshot and hardState. Both are written from the
+	// raft serveChannels goroutine (Save, ConfState, CreateSnapshot,
+	// RestoreSnapshot) and read from the etcd raft node.run goroutine
+	// (Snapshot, called via raftLog.snapshot → maybeSendAppend whenever
+	// the leader needs to ship a snapshot to a lagging follower).
+	// Without serialization, the race detector flags the cross-
+	// goroutine read/write of s.snapshot during severe-lag scenarios.
+	snapMu    sync.RWMutex
+	snapshot  pb.Snapshot
+	hardState pb.HardState
 	// firstIndex and lastIndex are mutated only from the raft serveChannels
 	// goroutine (via appendEntries and Compact) but read from many other
 	// goroutines: sync workers (Reader.Read), ingest workers, HTTP handlers
@@ -461,6 +469,8 @@ func (s *Storage) getLastStates(li uint64) (*pb.HardState, *pb.Snapshot, error) 
 // restart" invariant; the read half is wal.Open reloading the last
 // snapshot out of stateLog.
 func (s *Storage) ConfState(c *pb.ConfState) {
+	s.snapMu.Lock()
+	defer s.snapMu.Unlock()
 	s.snapshot.Metadata.ConfState = *c
 }
 
@@ -482,16 +492,19 @@ func (s *Storage) ConfState(c *pb.ConfState) {
 // appendState call persists that snapshot (metadata, including
 // ConfState) to the state log.
 func (s *Storage) Save(st pb.HardState, ents []pb.Entry, snap pb.Snapshot) error {
+	s.snapMu.Lock()
 	s.hardState = st
 	if !raft.IsEmptySnap(snap) {
 		s.snapshot = snap
 	}
+	snapCopy := s.snapshot
+	s.snapMu.Unlock()
 
 	if err := s.appendEntries(ents); err != nil {
 		return fmt.Errorf("[wal.storage] appendEntries: %w", err)
 	}
 
-	if err := s.appendState(st, s.snapshot); err != nil {
+	if err := s.appendState(st, snapCopy); err != nil {
 		return fmt.Errorf("[wal.storage] appendState: %w", err)
 	}
 
@@ -867,6 +880,8 @@ func (s *Storage) appendState(st pb.HardState, snap pb.Snapshot) error {
 
 // InitialState returns the saved HardState and ConfState information.
 func (s *Storage) InitialState() (pb.HardState, pb.ConfState, error) {
+	s.snapMu.RLock()
+	defer s.snapMu.RUnlock()
 	return s.hardState, s.snapshot.Metadata.ConfState, nil
 }
 
@@ -999,6 +1014,8 @@ func (s *Storage) FirstIndex() (uint64, error) {
 }
 
 func (s *Storage) Snapshot() (pb.Snapshot, error) {
+	s.snapMu.RLock()
+	defer s.snapMu.RUnlock()
 	return s.snapshot, nil
 }
 

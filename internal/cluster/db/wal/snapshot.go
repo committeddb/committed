@@ -52,6 +52,9 @@ func (s *Storage) CreateSnapshot(index uint64, confState *pb.ConfState) (pb.Snap
 		term = 0
 	}
 
+	s.snapMu.Lock()
+	defer s.snapMu.Unlock()
+
 	cs := s.snapshot.Metadata.ConfState
 	if confState != nil {
 		cs = *confState
@@ -191,7 +194,9 @@ func (s *Storage) RestoreSnapshot(snap pb.Snapshot) error {
 
 	// Record the snapshot so Storage.Snapshot() returns it and so
 	// InitialState reflects the restored confState.
+	s.snapMu.Lock()
 	s.snapshot = snap
+	s.snapMu.Unlock()
 
 	return nil
 }
