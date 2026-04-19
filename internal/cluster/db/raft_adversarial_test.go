@@ -1429,15 +1429,31 @@ func TestAdversarial_SevereLagFollowerRebuild(t *testing.T) {
 
 	rafts.WaitForLeader(t)
 
+	// Proposal sequence counter. severeLagProposal encodes each proposal
+	// as a valid clusterpb.LogProposal with this sequence as its
+	// RequestID — unique per-proposal bytes so waitForUserEntry
+	// distinguishes "the i-th propose landed" from "any propose has
+	// landed". Every other adversarial scenario uses MemoryStorage,
+	// whose ApplyCommitted ignores entry.Data; this scenario uses
+	// wal.Storage, which decodes every committed entry and fatal-exits
+	// the Ready loop on a decode failure (commit 8af21d9). Raw
+	// []byte("base-0") payloads — what the test used to send — are not
+	// valid protobuf and therefore trip that fatal on the first user
+	// entry. See .claude-scratch/tickets/adversarial-severe-lag-phase1-
+	// flake.md for the full diagnosis.
+	var seq uint64
+
 	// Phase 1: baseline. Propose baselineEntries entries and wait for
 	// every node — including follower 3 — to apply each one. After this
 	// phase all three nodes have identical applied state.
+	baselinePayloads := make([][]byte, baselineEntries)
 	for i := 0; i < baselineEntries; i++ {
-		payload := fmt.Sprintf("base-%d", i)
-		proposeAndCheck(t, rafts.LeaderRaft(), payload)
+		seq++
+		baselinePayloads[i] = severeLagProposal(t, seq)
+		proposeAndCheckBytes(t, rafts.LeaderRaft(), baselinePayloads[i])
 	}
 	for _, r := range rafts {
-		waitForUserEntry(t, r, []byte(fmt.Sprintf("base-%d", baselineEntries-1)))
+		waitForUserEntry(t, r, baselinePayloads[baselineEntries-1])
 	}
 
 	// Record follower 3's applied index before we stop it; the post-
@@ -1471,12 +1487,14 @@ func TestAdversarial_SevereLagFollowerRebuild(t *testing.T) {
 	// new leader either way.
 	survivors := Rafts{rafts[0], rafts[1]}
 	survivors.WaitForLeader(t)
+	duringPayloads := make([][]byte, duringEntries)
 	for i := 0; i < duringEntries; i++ {
-		payload := fmt.Sprintf("during-%d", i)
-		proposeAndCheck(t, survivors.LeaderRaft(), payload)
+		seq++
+		duringPayloads[i] = severeLagProposal(t, seq)
+		proposeAndCheckBytes(t, survivors.LeaderRaft(), duringPayloads[i])
 	}
 	for _, r := range survivors {
-		waitForUserEntry(t, r, []byte(fmt.Sprintf("during-%d", duringEntries-1)))
+		waitForUserEntry(t, r, duringPayloads[duringEntries-1])
 	}
 
 	// Prove the surviving pair actually advanced past the stopped
@@ -1658,10 +1676,11 @@ func TestAdversarial_SevereLagFollowerRebuild(t *testing.T) {
 	// a larger bound here.
 	waitForLeaderExtended(t, rafts, 15*time.Second)
 
-	const postRebuildPayload = "post-rebuild"
-	proposeAndCheck(t, rafts.LeaderRaft(), postRebuildPayload)
+	seq++
+	postRebuildPayload := severeLagProposal(t, seq)
+	proposeAndCheckBytes(t, rafts.LeaderRaft(), postRebuildPayload)
 	for _, r := range rafts {
-		waitForUserEntry(t, r, []byte(postRebuildPayload))
+		waitForUserEntry(t, r, postRebuildPayload)
 	}
 
 	// Let the final apply + invariant check settle on every node. Without
@@ -1849,6 +1868,80 @@ func assertEventLogPrefixMatches(t *testing.T, rafts Rafts, dirs []string) {
 			}
 		}
 	}
+}
+
+// severeLagProposal encodes a cluster.Proposal carrying the given
+// sequence number and returns the wire bytes. Used by the severe-lag
+// scenario in place of raw string payloads: wal.Storage's
+// ApplyCommitted decodes every committed entry as a clusterpb.LogProposal
+// and fatal-exits the Ready loop on a decode failure (the behavior
+// commit 8af21d9 installed), so the bytes on proposeC must be valid
+// protobuf. Other adversarial scenarios don't need this — they use
+// MemoryStorage, whose ApplyCommitted ignores entry.Data entirely.
+//
+// The proposal wraps a single NewUpsertTypeEntity whose Type.ID is
+// derived from seq (unique per proposal) and whose Schema carries
+// `severeLagProposalPadBytes` of padding. Two things ride on that
+// structure:
+//
+//  1. Bytes per raft-log entry end up in the 300–400-byte range (as
+//     opposed to ~2 bytes for a bare LogProposal{RequestID: seq}),
+//     which is what makes the survivors' raft log cross the 512-byte
+//     compactMaxSize multiple times during Phase 3. Without that,
+//     maybeCompact fires once early in the run and never again, and
+//     the test's "compaction advanced past the stopped follower"
+//     invariant fails.
+//  2. typeType resolves via cluster.systemType without any prior
+//     registration, so every replica — including follower 3 on its
+//     fresh-rsync'd state — can decode the proposal on apply. Unique
+//     typeIDs per seq keep saveType from collapsing distinct
+//     proposals into a "byte-identical replay" no-op.
+//
+// RequestID is set on the outer Proposal so every encoded payload's
+// bytes are unique, which is what waitForUserEntry keys off when it
+// compares es[len(es)-1].Data to the exact bytes just proposed.
+func severeLagProposal(t *testing.T, seq uint64) []byte {
+	t.Helper()
+	typeID := fmt.Sprintf("severe-lag-type-%d", seq)
+	padding := make([]byte, severeLagProposalPadBytes)
+	e, err := cluster.NewUpsertTypeEntity(&cluster.Type{
+		ID:     typeID,
+		Name:   typeID,
+		Schema: padding,
+	})
+	if err != nil {
+		t.Fatalf("build severe-lag type entity seq=%d: %v", seq, err)
+	}
+	p := &cluster.Proposal{
+		RequestID: seq,
+		Entities:  []*cluster.Entity{e},
+	}
+	bs, err := p.Marshal()
+	if err != nil {
+		t.Fatalf("marshal severe-lag proposal seq=%d: %v", seq, err)
+	}
+	return bs
+}
+
+// severeLagProposalPadBytes is the Schema padding baked into each
+// severeLagProposal payload. 256 bytes × ~30 entries pushes the
+// surviving pair's raft log well past compactMaxSize (512 bytes) with
+// headroom, so maybeCompact fires several times during Phase 3 and
+// lastCompactedIndex advances past the stopped follower's applied
+// index as the test expects. Smaller values risk a one-shot compaction
+// at the start of Phase 1 and nothing thereafter (tidwall/wal segment
+// headers dominate when payloads are tiny).
+const severeLagProposalPadBytes = 256
+
+// proposeAndCheckBytes is the []byte-payload counterpart to
+// proposeAndCheck. The severe-lag scenario proposes already-encoded
+// LogProposal bytes (see severeLagProposal) and asserts the same bytes
+// round-trip to storage, so it can't go through the string-keyed
+// helper without a double-encode.
+func proposeAndCheckBytes(t *testing.T, r *Raft, payload []byte) {
+	t.Helper()
+	r.proposeC <- payload
+	waitForUserEntry(t, r, payload)
 }
 
 // newSevereLagCluster builds a `replicas`-node raft cluster backed by
