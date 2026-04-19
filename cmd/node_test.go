@@ -1,9 +1,17 @@
 package cmd
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
@@ -142,4 +150,178 @@ func TestShutdownTimeout(t *testing.T) {
 
 	_ = os.Setenv("COMMITTED_SHUTDOWN_TIMEOUT", "0s")
 	require.Equal(t, defaultShutdownTimeout, shutdownTimeout())
+}
+
+// TestLoadAPITLSConfig covers the env-var parsing for the client-facing
+// HTTP TLS config. The startup-fatal path in nodeCmd.Run wraps this
+// helper, so covering the helper covers the fatal rule by extension.
+func TestLoadAPITLSConfig(t *testing.T) {
+	// Snapshot + restore the three env vars; tests in the same process
+	// must not leak state.
+	vars := []string{
+		"COMMITTED_HTTP_TLS_CERT_FILE",
+		"COMMITTED_HTTP_TLS_KEY_FILE",
+		"COMMITTED_HTTP_TLS_CLIENT_CA_FILE",
+	}
+	saved := map[string]string{}
+	hadVar := map[string]bool{}
+	for _, v := range vars {
+		val, ok := os.LookupEnv(v)
+		saved[v] = val
+		hadVar[v] = ok
+	}
+	t.Cleanup(func() {
+		for _, v := range vars {
+			if hadVar[v] {
+				_ = os.Setenv(v, saved[v])
+			} else {
+				_ = os.Unsetenv(v)
+			}
+		}
+	})
+
+	clearEnv := func() {
+		for _, v := range vars {
+			_ = os.Unsetenv(v)
+		}
+	}
+
+	pki := newAPITLSTestPKI(t)
+	certFile, keyFile := pki.issueServerCert(t)
+
+	t.Run("unset returns nil config and no error", func(t *testing.T) {
+		clearEnv()
+		cfg, err := loadAPITLSConfig()
+		require.NoError(t, err)
+		require.Nil(t, cfg)
+	})
+
+	t.Run("cert without key is a hard error", func(t *testing.T) {
+		clearEnv()
+		_ = os.Setenv("COMMITTED_HTTP_TLS_CERT_FILE", certFile)
+		cfg, err := loadAPITLSConfig()
+		require.Error(t, err)
+		require.Nil(t, cfg)
+	})
+
+	t.Run("key without cert is a hard error", func(t *testing.T) {
+		clearEnv()
+		_ = os.Setenv("COMMITTED_HTTP_TLS_KEY_FILE", keyFile)
+		cfg, err := loadAPITLSConfig()
+		require.Error(t, err)
+		require.Nil(t, cfg)
+	})
+
+	t.Run("client CA alone is a hard error", func(t *testing.T) {
+		clearEnv()
+		_ = os.Setenv("COMMITTED_HTTP_TLS_CLIENT_CA_FILE", pki.caFile)
+		cfg, err := loadAPITLSConfig()
+		require.Error(t, err)
+		require.Nil(t, cfg)
+	})
+
+	t.Run("cert + key enables TLS without client auth", func(t *testing.T) {
+		clearEnv()
+		_ = os.Setenv("COMMITTED_HTTP_TLS_CERT_FILE", certFile)
+		_ = os.Setenv("COMMITTED_HTTP_TLS_KEY_FILE", keyFile)
+		cfg, err := loadAPITLSConfig()
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+		require.Len(t, cfg.Certificates, 1)
+		require.Equal(t, uint16(tls.VersionTLS12), cfg.MinVersion)
+		require.Equal(t, tls.NoClientCert, cfg.ClientAuth)
+		require.Nil(t, cfg.ClientCAs)
+	})
+
+	t.Run("cert + key + client CA enables mTLS", func(t *testing.T) {
+		clearEnv()
+		_ = os.Setenv("COMMITTED_HTTP_TLS_CERT_FILE", certFile)
+		_ = os.Setenv("COMMITTED_HTTP_TLS_KEY_FILE", keyFile)
+		_ = os.Setenv("COMMITTED_HTTP_TLS_CLIENT_CA_FILE", pki.caFile)
+		cfg, err := loadAPITLSConfig()
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+		require.Equal(t, tls.RequireAndVerifyClientCert, cfg.ClientAuth)
+		require.NotNil(t, cfg.ClientCAs)
+	})
+
+	t.Run("bad cert path surfaces the load error", func(t *testing.T) {
+		clearEnv()
+		_ = os.Setenv("COMMITTED_HTTP_TLS_CERT_FILE", filepath.Join(t.TempDir(), "missing.pem"))
+		_ = os.Setenv("COMMITTED_HTTP_TLS_KEY_FILE", keyFile)
+		cfg, err := loadAPITLSConfig()
+		require.Error(t, err)
+		require.Nil(t, cfg)
+	})
+
+	t.Run("empty client CA file is a hard error", func(t *testing.T) {
+		clearEnv()
+		empty := filepath.Join(t.TempDir(), "empty.pem")
+		require.NoError(t, os.WriteFile(empty, []byte("not a cert"), 0o600))
+		_ = os.Setenv("COMMITTED_HTTP_TLS_CERT_FILE", certFile)
+		_ = os.Setenv("COMMITTED_HTTP_TLS_KEY_FILE", keyFile)
+		_ = os.Setenv("COMMITTED_HTTP_TLS_CLIENT_CA_FILE", empty)
+		cfg, err := loadAPITLSConfig()
+		require.Error(t, err)
+		require.Nil(t, cfg)
+	})
+}
+
+// apiTLSTestPKI is a throwaway CA for loadAPITLSConfig tests. We can't
+// reuse the one in internal/cluster/http/tls_test.go (different
+// package, test-only) so we inline a small copy here.
+type apiTLSTestPKI struct {
+	caFile string
+	caCert *x509.Certificate
+	caKey  *rsa.PrivateKey
+	dir    string
+}
+
+func newAPITLSTestPKI(t *testing.T) *apiTLSTestPKI {
+	t.Helper()
+	dir := t.TempDir()
+
+	caKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	caTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "committed-cmd-test-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
+	require.NoError(t, err)
+	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER})
+	caFile := filepath.Join(dir, "ca.pem")
+	require.NoError(t, os.WriteFile(caFile, caPEM, 0o600))
+	caCert, err := x509.ParseCertificate(caDER)
+	require.NoError(t, err)
+
+	return &apiTLSTestPKI{caFile: caFile, caCert: caCert, caKey: caKey, dir: dir}
+}
+
+func (p *apiTLSTestPKI) issueServerCert(t *testing.T) (certFile, keyFile string) {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject:      pkix.Name{CommonName: "server"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
+		DNSNames:     []string{"localhost"},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, p.caCert, &key.PublicKey, p.caKey)
+	require.NoError(t, err)
+	certFile = filepath.Join(p.dir, "server.pem")
+	keyFile = filepath.Join(p.dir, "server.key")
+	require.NoError(t, os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600))
+	require.NoError(t, os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}), 0o600))
+	return certFile, keyFile
 }

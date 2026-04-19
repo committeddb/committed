@@ -4,19 +4,22 @@ This runbook is for operators. It describes the two independent
 authentication layers Committed ships today, how to turn each one on,
 and how to keep the credentials healthy over time.
 
-The two layers protect different traffic and are configured
+The layers protect different traffic and are configured
 independently:
 
 - **HTTP API bearer token** — guards the client-facing REST API on
   port 8080 (by default). Humans and scripts talking to Committed use
   this.
+- **HTTP API TLS** — encrypts the client-facing REST API on the wire.
+  Optional client-cert enforcement (mTLS) is available on top.
 - **Peer mTLS** — guards the raft peer-to-peer transport between nodes
   in the same cluster. Nodes talking to each other use this.
 
-You can run either, both, or neither. Neither is acceptable for a
+You can mix these layers independently. Neither is acceptable for a
 single-developer laptop; anything exposed beyond a trusted network
-should have at least the bearer token, and production deployments
-should have both.
+should have at least the bearer token **over TLS** (plaintext bearer
+tokens travel in the clear), and production deployments should have
+all three.
 
 There is no authorization layer yet. "Authenticated = full access" is
 the current model. A per-resource RBAC layer is filed as a follow-up
@@ -102,6 +105,81 @@ If you need to rotate without downtime, run clients with both tokens
 in rotation and flip them through a reverse proxy until migration
 completes — Committed's single-token design doesn't support
 simultaneous valid tokens natively.
+
+## HTTP API TLS
+
+### Why TLS for the client API
+
+The REST API carries every configuration payload, every proposal
+body, and — once the bearer token is enabled — the token itself on
+every request. Without TLS all of this travels in the clear. Any host
+on the path can read credentials and data, and any host with a
+convenient MITM position can forge or modify requests. Bearer tokens
+on plaintext HTTP are not a production security boundary.
+
+### Enabling
+
+Set the cert + key env vars on each node:
+
+```
+COMMITTED_HTTP_TLS_CERT_FILE=/etc/committed/api.pem
+COMMITTED_HTTP_TLS_KEY_FILE=/etc/committed/api.key
+```
+
+Both must be set together. Setting one without the other is a hard
+startup error — same rationale as peer mTLS below: silent fallback
+to plaintext when operators think they have TLS is the failure mode
+this check exists to prevent.
+
+Neither set keeps today's plaintext behaviour with a startup warning
+log. Acceptable for local dev; anything else should have TLS on.
+
+The TLS 1.2 floor is enforced by the server — older TLS 1.0/1.1
+clients are rejected at handshake time.
+
+### Optional client-cert auth (mTLS)
+
+To require a client certificate in addition to (or instead of) a
+bearer token, set a third env var:
+
+```
+COMMITTED_HTTP_TLS_CLIENT_CA_FILE=/etc/committed/client-ca.pem
+```
+
+With that set, the server requires every client to present a cert
+signed by the CA in the named file. A stolen bearer token is useless
+without a client cert that chains to this CA — strictly more secure
+than bearer alone, at the cost of issuing and distributing client
+certs.
+
+This is orthogonal to the peer-mTLS CA; use the same CA if you want
+one PKI, or a separate CA for API clients if you want them scoped
+independently.
+
+### Generating a cert
+
+Any PKI works. For the cheapest self-contained setup, reuse the
+openssl recipe from the peer-mTLS section below — generate a CA,
+then issue a server cert whose SAN covers the hostname operators and
+scripts will dial (e.g. `api.example.com`, or `127.0.0.1` for a
+laptop).
+
+Permissions:
+
+```
+chown committed:committed api.pem api.key
+chmod 0644 api.pem
+chmod 0600 api.key
+```
+
+### What's not in scope
+
+- **Hot-reload of API certs**: rotating the cert requires a restart,
+  same as peer mTLS.
+- **ACME / Let's Encrypt integration**: out of scope; run a TLS
+  terminator (nginx, Caddy, a cloud LB) in front if you want this.
+- **Plaintext-to-HTTPS redirect on the same process**: also out of
+  scope. If you need both ports, terminate TLS in front.
 
 ## Peer mTLS
 
@@ -266,17 +344,18 @@ unauthorized clients.
 
 ## Choosing what to run
 
-- **Laptop / local dev**: neither. `goreman start` with no auth config
+- **Laptop / local dev**: nothing. `goreman start` with no auth config
   is the expected development shape.
-- **Shared dev / staging on a trusted LAN**: bearer token at minimum,
-  peer mTLS if the cluster spans machines.
+- **Shared dev / staging on a trusted LAN**: bearer token + API TLS at
+  minimum; peer mTLS if the cluster spans machines.
 - **Production, multi-tenant networks, anything internet-reachable**:
-  both.
+  all three — bearer token, API TLS (client-cert mTLS if you can
+  issue them), and peer mTLS.
 
-The two layers are independent by design. Turning one on doesn't force
-the other. The bearer token guards the API you hand to humans; mTLS
-guards the traffic between peers. They fail loudly in opposite
-directions — a missing bearer token returns a structured `401`; a
-failed TLS handshake rejects the connection entirely and logs on the
-server side — so operational debugging rarely needs to distinguish
-them.
+The layers are independent by design. Turning one on doesn't force
+the others. The bearer token and API TLS guard the API you hand to
+humans; peer mTLS guards the traffic between nodes. They fail loudly
+in different directions — a missing bearer token returns a
+structured `401`; a failed TLS handshake rejects the connection
+entirely and logs on the server side — so operational debugging
+rarely needs to distinguish them.

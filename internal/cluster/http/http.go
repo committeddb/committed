@@ -1,6 +1,7 @@
 package http
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"io"
@@ -146,6 +147,17 @@ func WithIdleTimeout(d time.Duration) ServerOption {
 		if d > 0 {
 			s.IdleTimeout = d
 		}
+	}
+}
+
+// WithTLSConfig attaches a tls.Config to the server. The caller drives
+// ListenAndServeTLS when TLSConfig != nil; nil keeps the plaintext
+// default. cmd/node.go builds the config from COMMITTED_HTTP_TLS_* env
+// vars so the http package stays free of filesystem I/O and credential
+// handling.
+func WithTLSConfig(cfg *tls.Config) ServerOption {
+	return func(s *http.Server) {
+		s.TLSConfig = cfg
 	}
 }
 
