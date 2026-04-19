@@ -2,10 +2,15 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
+	nethttp "net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"go.etcd.io/etcd/client/pkg/v3/transport"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
@@ -27,6 +32,12 @@ import (
 	syncmysql "github.com/philborlin/committed/internal/cluster/syncable/sql/dialects"
 	"github.com/philborlin/committed/internal/version"
 )
+
+// defaultShutdownTimeout bounds how long graceful shutdown waits for the
+// HTTP server to drain. Kubernetes pod terminationGracePeriodSeconds
+// defaults to 30s; staying inside that envelope keeps the graceful path
+// reachable in a normal rolling restart.
+const defaultShutdownTimeout = 30 * time.Second
 
 var nodeCmd = &cobra.Command{
 	Use:   "node",
@@ -94,7 +105,7 @@ to quickly create a Cobra application.`,
 			dbOpts = append(dbOpts, db.WithMetrics(m))
 		}
 
-		db := db.New(*id, peers, s, p, sync, ingest, dbOpts...)
+		d := db.New(*id, peers, s, p, sync, ingest, dbOpts...)
 		fmt.Printf("Raft Running...\n")
 
 		var httpOpts []http.Option
@@ -102,26 +113,123 @@ to quickly create a Cobra application.`,
 			httpOpts = append(httpOpts, http.WithBearerToken(token))
 		}
 
-		h := http.New(db, httpOpts...)
+		h := http.New(d, httpOpts...)
 		fmt.Printf("API Listening on %s...\n", *addr)
 
-		db.AddDatabaseParser("sql", dbParser())
-		db.AddIngestableParser("sql", ingestableParser(db))
-		db.AddSyncableParser("sql", &syncsql.SyncableParser{})
-		db.AddSyncableParser("http", &synchttp.SyncableParser{})
+		d.AddDatabaseParser("sql", dbParser())
+		d.AddIngestableParser("sql", ingestableParser(d))
+		d.AddSyncableParser("sql", &syncsql.SyncableParser{})
+		d.AddSyncableParser("http", &synchttp.SyncableParser{})
 
-		db.EatCommitC()
+		d.EatCommitC()
 
-		go func() {
-			if err := h.ListenAndServe(*addr); err != nil {
-				log.Fatal(err)
-			}
-		}()
-
-		if err, ok := <-db.ErrorC; ok {
-			log.Fatalf("raft error: %v", err)
+		exitCode := runNode(d, h.NewServer(*addr))
+		if exitCode != 0 {
+			os.Exit(exitCode)
 		}
 	},
+}
+
+// runNode owns the signal-handling + graceful-shutdown lifecycle. It
+// starts the HTTP server in a goroutine and blocks until one of:
+//
+//   - SIGINT/SIGTERM — graceful path: httpServer.Shutdown, then
+//     d.Close(), exit 0. If Shutdown exceeds COMMITTED_SHUTDOWN_TIMEOUT,
+//     httpServer.Close() is called for a hard drop and we still call
+//     d.Close() so raft + WAL + worker goroutines exit cleanly. Exit 1
+//     in that case so an orchestrator can tell the graceful path
+//     missed its deadline.
+//   - The HTTP server exits on its own (listener bind failure, etc.).
+//     Treated like a fatal error — we still try to close the db.
+//   - A raft error on d.ErrorC. Close the HTTP server, close the db,
+//     and exit 1.
+//
+// Returns the process exit code. Factored out of the cobra Run closure
+// so tests can drive the same shutdown logic in-process.
+func runNode(d *db.DB, httpServer *nethttp.Server) int {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	httpErrC := make(chan error, 1)
+	go func() {
+		err := httpServer.ListenAndServe()
+		if err != nil && !errors.Is(err, nethttp.ErrServerClosed) {
+			httpErrC <- err
+		}
+		close(httpErrC)
+	}()
+
+	select {
+	case <-ctx.Done():
+		zap.L().Info("shutdown.signal_received")
+		return gracefulShutdown(d, httpServer)
+	case err, ok := <-httpErrC:
+		if ok && err != nil {
+			zap.L().Error("http server exited unexpectedly", zap.Error(err))
+		}
+		_ = d.Close()
+		return 1
+	case err, ok := <-d.ErrorC:
+		if ok && err != nil {
+			zap.L().Error("raft error", zap.Error(err))
+		}
+		_ = httpServer.Close()
+		_ = d.Close()
+		return 1
+	}
+}
+
+// gracefulShutdown runs the signal-triggered drain: bounded
+// httpServer.Shutdown, then db.Close. On Shutdown timeout we fall
+// through to Close() (hard drop) but still call db.Close so the WAL
+// fsync + worker drain happen — otherwise we'd be trading a slow drain
+// for a dirty process exit, which is exactly what this ticket is trying
+// to prevent.
+func gracefulShutdown(d *db.DB, httpServer *nethttp.Server) int {
+	timeout := shutdownTimeout()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	exitCode := 0
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		zap.L().Warn("shutdown.http_timeout",
+			zap.Duration("timeout", timeout),
+			zap.Error(err))
+		_ = httpServer.Close()
+		exitCode = 1
+	} else {
+		zap.L().Info("shutdown.http_closed")
+	}
+
+	if err := d.Close(); err != nil {
+		zap.L().Warn("shutdown.db_close_error", zap.Error(err))
+		exitCode = 1
+	} else {
+		zap.L().Info("shutdown.db_closed")
+	}
+
+	zap.L().Info("shutdown.done", zap.Int("exitCode", exitCode))
+	return exitCode
+}
+
+// shutdownTimeout returns the configured graceful-shutdown deadline.
+// Reads COMMITTED_SHUTDOWN_TIMEOUT (Go duration syntax, e.g. "45s").
+// An unset or unparseable value falls back to defaultShutdownTimeout
+// with a warning — a misconfigured env var should not silently disable
+// the graceful path.
+func shutdownTimeout() time.Duration {
+	raw := os.Getenv("COMMITTED_SHUTDOWN_TIMEOUT")
+	if raw == "" {
+		return defaultShutdownTimeout
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		zap.L().Warn("COMMITTED_SHUTDOWN_TIMEOUT invalid, using default",
+			zap.String("value", raw),
+			zap.Duration("default", defaultShutdownTimeout))
+		return defaultShutdownTimeout
+	}
+	return d
 }
 
 // loadPeerTLSInfo reads the three COMMITTED_TLS_* env vars and returns

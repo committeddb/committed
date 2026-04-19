@@ -95,13 +95,18 @@ func (h *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.r.ServeHTTP(w, r)
 }
 
-func (h *HTTP) ListenAndServe(addr string) error {
-	// Timeouts bound how long a slow or malicious client can hold a
-	// connection. ReadHeaderTimeout prevents Slowloris. ReadTimeout and
-	// WriteTimeout cover full request/response, sized for the largest
-	// reasonable config payload (schemas, TOML bundles). IdleTimeout
-	// caps keepalive so dead peers don't pin file descriptors.
-	srv := &http.Server{
+// NewServer builds a configured *http.Server. Callers that want graceful
+// shutdown (cmd/node.go) drive ListenAndServe + Shutdown themselves; the
+// ListenAndServe convenience below is kept for tests and tooling that
+// just want to block until error.
+//
+// Timeouts bound how long a slow or malicious client can hold a
+// connection. ReadHeaderTimeout prevents Slowloris. ReadTimeout and
+// WriteTimeout cover full request/response, sized for the largest
+// reasonable config payload (schemas, TOML bundles). IdleTimeout caps
+// keepalive so dead peers don't pin file descriptors.
+func (h *HTTP) NewServer(addr string) *http.Server {
+	return &http.Server{
 		Addr:              addr,
 		Handler:           h.r,
 		ReadHeaderTimeout: 10 * time.Second,
@@ -109,7 +114,10 @@ func (h *HTTP) ListenAndServe(addr string) error {
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
-	return srv.ListenAndServe()
+}
+
+func (h *HTTP) ListenAndServe(addr string) error {
+	return h.NewServer(addr).ListenAndServe()
 }
 
 func unmarshalBody(r *http.Request, v any) error {
