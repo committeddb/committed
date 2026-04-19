@@ -826,9 +826,12 @@ func (db *DB) superviseRestartIngest(id string, i cluster.Ingestable, frozen *wo
 
 	// Jitter is drawn from [0, backoff/2]. Keeps concurrent freezes
 	// across multiple ids from all trying to restart in lockstep.
+	// math/rand/v2 is deliberate — this is scheduling jitter, not a
+	// security primitive, and crypto/rand would add failure modes
+	// (syscall error handling) for no benefit.
 	jitter := time.Duration(0)
 	if backoff/2 > 0 {
-		jitter = time.Duration(rand.Int64N(int64(backoff / 2)))
+		jitter = time.Duration(rand.Int64N(int64(backoff / 2))) //nolint:gosec // G404: non-security-sensitive jitter
 	}
 	select {
 	case <-time.After(backoff + jitter):

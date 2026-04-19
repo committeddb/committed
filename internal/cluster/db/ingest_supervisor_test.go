@@ -287,4 +287,3 @@ func findSupervisorCounterForID(rm metricdata.ResourceMetrics, name, id string) 
 	}
 	return 0
 }
-

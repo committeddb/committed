@@ -145,10 +145,11 @@ func newIngestFailFastDBWith(t *testing.T, extra ...db.Option) (*db.DB, *slowApp
 	inner.SetNode(id)
 	s := newSlowApplyStorage(inner)
 
-	opts := []db.Option{
+	opts := make([]db.Option, 0, 2+len(extra))
+	opts = append(opts,
 		db.WithTickInterval(testTickInterval),
-		db.WithLeaderChangeGracePeriod(50 * time.Millisecond),
-	}
+		db.WithLeaderChangeGracePeriod(50*time.Millisecond),
+	)
 	opts = append(opts, extra...)
 
 	d := db.New(id, peers, s, p, nil, nil, opts...)
@@ -219,9 +220,9 @@ type freezeRecordingIngestable struct {
 	proposal *cluster.Proposal
 	position cluster.Position
 
-	posMu        sync.Mutex
-	posSent      int
-	ingestCalls  int
+	posMu       sync.Mutex
+	posSent     int
+	ingestCalls int
 }
 
 func newFreezeRecordingIngestable(p *cluster.Proposal, pos cluster.Position) *freezeRecordingIngestable {
