@@ -44,12 +44,14 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 		zap.L().Warn("API authentication disabled (no COMMITTED_API_TOKEN set)")
 	}
 
-	// /health, /ready, /openapi.yaml, and /docs are exempt from
-	// authentication — orchestrators need the first two without
-	// credentials, and the spec + Swagger UI need to be discoverable
-	// by new clients before they have a token.
+	// /health, /ready, /version, /openapi.yaml, and /docs are exempt
+	// from authentication — orchestrators need the first two without
+	// credentials, /version is useful during rolling upgrades before
+	// an operator has a token handy, and the spec + Swagger UI need
+	// to be discoverable by new clients before they have a token.
 	r.Get("/health", h.Health)
 	r.Get("/ready", h.Ready)
+	r.Get("/version", h.Version)
 	r.Get("/openapi.yaml", h.OpenAPISpec)
 	r.Get("/docs", h.SwaggerUI)
 

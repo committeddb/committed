@@ -10,6 +10,7 @@ import (
 	"go.etcd.io/etcd/client/pkg/v3/transport"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.uber.org/zap"
 
 	"github.com/spf13/cobra"
 
@@ -24,6 +25,7 @@ import (
 	synchttp "github.com/philborlin/committed/internal/cluster/syncable/http"
 	syncsql "github.com/philborlin/committed/internal/cluster/syncable/sql"
 	syncmysql "github.com/philborlin/committed/internal/cluster/syncable/sql/dialects"
+	"github.com/philborlin/committed/internal/version"
 )
 
 var nodeCmd = &cobra.Command{
@@ -37,6 +39,14 @@ This application is a tool to generate the needed files
 to quickly create a Cobra application.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		fmt.Println("node called")
+
+		v := version.Get()
+		zap.L().Info("committed starting",
+			zap.String("version", v.Version),
+			zap.String("commit", v.Commit),
+			zap.String("buildDate", v.BuildDate),
+			zap.String("goVersion", v.GoVersion),
+		)
 
 		url := flag.String("url", "http://127.0.0.1:9022", "url with port")
 		id := flag.Uint64("id", 1, "node ID")

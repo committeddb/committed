@@ -1,12 +1,30 @@
+# Version metadata stamped into internal/version at link time. VERSION
+# prefers `git describe` so tagged releases get a real version string
+# and untagged commits fall back to a sha. `--dirty` surfaces
+# uncommitted working-tree changes so "is this binary reproducible
+# from a clean checkout?" is answerable from the binary itself.
+# Override any of these from the command line, e.g.
+# `make build VERSION=1.2.3`.
+VERSION ?= $(shell git describe --tags --dirty --always 2>/dev/null || echo dev)
+COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+LDFLAGS := -s -w \
+  -X github.com/philborlin/committed/internal/version.Version=$(VERSION) \
+  -X github.com/philborlin/committed/internal/version.Commit=$(COMMIT) \
+  -X github.com/philborlin/committed/internal/version.BuildDate=$(DATE)
+
+build:
+	go build -ldflags="$(LDFLAGS)"
+
 test:
 	go test -short ./... -cover
 
 test/ci:
-	go build
+	go build -ldflags="$(LDFLAGS)"
 	go test -race ./... -cover
 
 test-all:
-	go build
+	go build -ldflags="$(LDFLAGS)"
 	go test -tags "docker integration" -timeout 300s ./... -cover
 
 # Runs the adversarial raft suite (phase 1: partition, leader flap,
@@ -34,9 +52,9 @@ lint/openapi:
 	npx --yes @redocly/cli@latest lint api/openapi.yaml
 
 crosscompile:
-	@GOOS=darwin GOARCH=amd64 go build -o committed-darwin-amd64
+	@GOOS=darwin GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o committed-darwin-amd64
 	@file committed-darwin-amd64
-	@GOOS=linux GOARCH=amd64 go build -o committed-linux-amd64
+	@GOOS=linux GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o committed-linux-amd64
 	@file committed-linux-amd64
-	@GOOS=windows GOARCH=amd64 go build -o committed-windows-amd64.exe
+	@GOOS=windows GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o committed-windows-amd64.exe
 	@file committed-windows-amd64.exe
