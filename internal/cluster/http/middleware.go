@@ -47,6 +47,28 @@ func generateRequestID() string {
 	return hex.EncodeToString(b)
 }
 
+// securityHeaders sets defense-in-depth headers on every response.
+// HSTS is only emitted on TLS requests — sending it over plaintext
+// would be a no-op at best and confusing at worst, and Chrome ignores
+// it anyway when the scheme is http. The CSP here is the strict API
+// default (default-src 'none'); handlers that need a looser policy
+// (notably /docs) call w.Header().Set("Content-Security-Policy", ...)
+// to override before writing the body.
+func securityHeaders(next httpgo.Handler) httpgo.Handler {
+	return httpgo.HandlerFunc(func(w httpgo.ResponseWriter, r *httpgo.Request) {
+		h := w.Header()
+		if r.TLS != nil {
+			h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		h.Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
+		next.ServeHTTP(w, r)
+	})
+}
+
 // bearerAuth returns middleware that rejects requests whose
 // Authorization header does not carry the expected bearer token.
 // Comparison uses crypto/subtle to prevent timing side-channels.

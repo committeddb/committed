@@ -47,6 +47,7 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 	})
 
 	r.Use(corsMiddleware.Handler)
+	r.Use(securityHeaders)
 	r.Use(RequestID)
 
 	h := &HTTP{r: r, c: c, bearerToken: o.bearerToken}
