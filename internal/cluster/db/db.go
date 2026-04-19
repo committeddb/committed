@@ -5,6 +5,7 @@ package db
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/rand/v2"
 	"sync"
 	"sync/atomic"
@@ -130,6 +131,8 @@ type DB struct {
 	// from options; 0 means "derived from leaderChangeGrace".
 	ingestFreezeDrainTimeout time.Duration
 
+	maxProposalBytes uint64
+
 	logger  *zap.Logger
 	metrics *metrics.Metrics
 }
@@ -203,6 +206,9 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 	if cfg.ingestFreezeDrainTimeout == 0 {
 		cfg.ingestFreezeDrainTimeout = 2 * cfg.leaderChangeGrace
 	}
+	if cfg.maxProposalBytes == 0 {
+		cfg.maxProposalBytes = DefaultMaxProposalBytes
+	}
 
 	proposeC := make(chan []byte)
 	confChangeC := make(chan raftpb.ConfChange)
@@ -233,6 +239,7 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		ingestSupervisorMaxAttempts:    cfg.ingestSupervisorMaxAttempts,
 		ingestSupervisorHealthyWindow:  cfg.ingestSupervisorHealthyWindow,
 		ingestFreezeDrainTimeout:       cfg.ingestFreezeDrainTimeout,
+		maxProposalBytes:               cfg.maxProposalBytes,
 		logger:                         cfg.logger,
 		metrics:                        cfg.metrics,
 	}
@@ -580,6 +587,13 @@ func (db *DB) proposeAsync(ctx context.Context, p *cluster.Proposal) (uint64, <-
 	if err != nil {
 		db.unregisterWaiter(p.RequestID)
 		return 0, nil, err
+	}
+
+	// Post-Marshal so the check runs against the exact bytes raft
+	// replicates, and so every proposal source converges on one cap.
+	if db.maxProposalBytes > 0 && uint64(len(bs)) > db.maxProposalBytes {
+		db.unregisterWaiter(p.RequestID)
+		return 0, nil, fmt.Errorf("%w: %d bytes > %d limit", cluster.ErrProposalTooLarge, len(bs), db.maxProposalBytes)
 	}
 
 	kind := proposalKind(p)

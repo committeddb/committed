@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -8,6 +9,10 @@ import (
 
 	"github.com/philborlin/committed/internal/cluster/clusterpb"
 )
+
+// ErrProposalTooLarge is returned when a marshaled proposal exceeds
+// the configured size limit.
+var ErrProposalTooLarge = errors.New("proposal exceeds configured size limit")
 
 var delete []byte = []byte("7ec589c2-3318-4a3c-839b-a9af9c9443be")
 

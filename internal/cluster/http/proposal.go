@@ -87,6 +87,10 @@ func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
 
 	err = h.c.Propose(r.Context(), p)
 	if err != nil {
+		if errors.Is(err, cluster.ErrProposalTooLarge) {
+			writeError(w, httpgo.StatusRequestEntityTooLarge, "proposal_too_large", "proposal exceeds the configured size limit")
+			return
+		}
 		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to propose")
 		return
 	}

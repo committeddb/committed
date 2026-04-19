@@ -9,6 +9,7 @@ import (
 	nethttp "net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -87,6 +88,10 @@ to quickly create a Cobra application.`,
 			dbOpts = append(dbOpts, db.WithTLSInfo(tlsInfo))
 		}
 
+		if n, ok := parseInt64Env("COMMITTED_MAX_PROPOSAL_BYTES"); ok {
+			dbOpts = append(dbOpts, db.WithMaxProposalBytes(uint64(n)))
+		}
+
 		// When OTEL_EXPORTER_OTLP_ENDPOINT is set (e.g., "localhost:4317"),
 		// metrics are pushed to an OTel Collector via gRPC. The collector
 		// handles routing to backends (Prometheus, Datadog, etc.). When
@@ -123,7 +128,21 @@ to quickly create a Cobra application.`,
 
 		d.EatCommitC()
 
-		exitCode := runNode(d, h.NewServer(*addr))
+		var serverOpts []http.ServerOption
+		if d, ok := parseDurationEnv("COMMITTED_HTTP_READ_HEADER_TIMEOUT"); ok {
+			serverOpts = append(serverOpts, http.WithReadHeaderTimeout(d))
+		}
+		if d, ok := parseDurationEnv("COMMITTED_HTTP_READ_TIMEOUT"); ok {
+			serverOpts = append(serverOpts, http.WithReadTimeout(d))
+		}
+		if d, ok := parseDurationEnv("COMMITTED_HTTP_WRITE_TIMEOUT"); ok {
+			serverOpts = append(serverOpts, http.WithWriteTimeout(d))
+		}
+		if d, ok := parseDurationEnv("COMMITTED_HTTP_IDLE_TIMEOUT"); ok {
+			serverOpts = append(serverOpts, http.WithIdleTimeout(d))
+		}
+
+		exitCode := runNode(d, h.NewServer(*addr, serverOpts...))
 		if exitCode != 0 {
 			os.Exit(exitCode)
 		}
@@ -210,6 +229,37 @@ func gracefulShutdown(d *db.DB, httpServer *nethttp.Server) int {
 
 	zap.L().Info("shutdown.done", zap.Int("exitCode", exitCode))
 	return exitCode
+}
+
+// parseInt64Env reads an int64-valued env var. Returns (0, false)
+// when the var is unset or unparseable, with a logged warning for
+// the unparseable case — a typo in an HTTP-limit env var should be
+// visible, not silently reverted to the default.
+func parseInt64Env(name string) (int64, bool) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return 0, false
+	}
+	v, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || v <= 0 {
+		zap.L().Warn(name+" invalid, using default", zap.String("value", raw))
+		return 0, false
+	}
+	return v, true
+}
+
+// parseDurationEnv reads a Go-duration-formatted env var (e.g. "15s").
+func parseDurationEnv(name string) (time.Duration, bool) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return 0, false
+	}
+	v, err := time.ParseDuration(raw)
+	if err != nil || v <= 0 {
+		zap.L().Warn(name+" invalid, using default", zap.String("value", raw))
+		return 0, false
+	}
+	return v, true
 }
 
 // shutdownTimeout returns the configured graceful-shutdown deadline.

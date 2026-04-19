@@ -94,6 +94,8 @@ type options struct {
 	// window within which the leader-change watcher will either
 	// apply-ack or ErrProposalUnknown-signal any in-flight waiter.
 	ingestFreezeDrainTimeout time.Duration
+
+	maxProposalBytes uint64
 }
 
 // DefaultCompactMaxSize is the production default: compact the raft
@@ -105,12 +107,15 @@ const DefaultCompactMaxSize uint64 = 10 * 1024 * 1024 * 1024
 // log every hour even if it hasn't reached DefaultCompactMaxSize.
 const DefaultCompactMaxAge = time.Hour
 
+const DefaultMaxProposalBytes uint64 = 16 * 1024 * 1024
+
 func defaultOptions() options {
 	return options{
-		tickInterval:   defaultTickInterval,
-		logger:         zap.NewNop(),
-		compactMaxSize: DefaultCompactMaxSize,
-		compactMaxAge:  DefaultCompactMaxAge,
+		tickInterval:     defaultTickInterval,
+		logger:           zap.NewNop(),
+		compactMaxSize:   DefaultCompactMaxSize,
+		compactMaxAge:    DefaultCompactMaxAge,
+		maxProposalBytes: DefaultMaxProposalBytes,
 	}
 }
 
@@ -199,6 +204,12 @@ func WithIngestSupervisorHealthyWindow(d time.Duration) Option {
 // Zero leaves the default (2 * leaderChangeGrace) in place.
 func WithIngestFreezeDrainTimeout(d time.Duration) Option {
 	return func(o *options) { o.ingestFreezeDrainTimeout = d }
+}
+
+// WithMaxProposalBytes overrides the marshaled-proposal size cap.
+// 0 resolves to DefaultMaxProposalBytes.
+func WithMaxProposalBytes(bytes uint64) Option {
+	return func(o *options) { o.maxProposalBytes = bytes }
 }
 
 // WithTLSInfo enables mTLS on the raft peer transport. Pass a

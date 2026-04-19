@@ -2,10 +2,13 @@ package http
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	httpgo "net/http"
 
 	"go.uber.org/zap"
+
+	"github.com/philborlin/committed/internal/cluster"
 )
 
 // ErrorResponse is the JSON body returned for every non-2xx response.
@@ -46,6 +49,21 @@ func writeError(w httpgo.ResponseWriter, status int, code string, message string
 // the message with fmt.Sprintf.
 func writeErrorf(w httpgo.ResponseWriter, status int, code string, format string, args ...any) {
 	writeError(w, status, code, fmt.Sprintf(format, args...))
+}
+
+// writeProposeError maps a ProposeX error to the response shape
+// shared by every config handler: ConfigError → 400,
+// ErrProposalTooLarge → 413, else 500.
+func writeProposeError(w httpgo.ResponseWriter, err error, resource, action string) {
+	var configErr *cluster.ConfigError
+	switch {
+	case errors.As(err, &configErr):
+		writeError(w, httpgo.StatusBadRequest, "invalid_"+resource+"_config", configErr.Error())
+	case errors.Is(err, cluster.ErrProposalTooLarge):
+		writeError(w, httpgo.StatusRequestEntityTooLarge, "proposal_too_large", resource+" configuration exceeds the configured proposal size limit")
+	default:
+		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to "+action)
+	}
 }
 
 // writeErrorWithDetails writes a structured JSON error response that

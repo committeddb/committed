@@ -46,12 +46,7 @@ func (h *HTTP) RollbackIngestable(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 	if err := h.c.ProposeIngestable(r.Context(), cfg); err != nil {
-		var configErr *cluster.ConfigError
-		if errors.As(err, &configErr) {
-			writeError(w, httpgo.StatusBadRequest, "invalid_ingestable_config", configErr.Error())
-		} else {
-			writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to propose ingestable rollback")
-		}
+		writeProposeError(w, err, "ingestable", "propose ingestable rollback")
 		return
 	}
 	// See database.go AddDatabase for the G705 rationale.
@@ -97,12 +92,7 @@ func (h *HTTP) RollbackSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 	if err := h.c.ProposeSyncable(r.Context(), cfg); err != nil {
-		var configErr *cluster.ConfigError
-		if errors.As(err, &configErr) {
-			writeError(w, httpgo.StatusBadRequest, "invalid_syncable_config", configErr.Error())
-		} else {
-			writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to propose syncable rollback")
-		}
+		writeProposeError(w, err, "syncable", "propose syncable rollback")
 		return
 	}
 	// See database.go AddDatabase for the G705 rationale.
@@ -148,12 +138,7 @@ func (h *HTTP) RollbackDatabase(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 	if err := h.c.ProposeDatabase(r.Context(), cfg); err != nil {
-		var configErr *cluster.ConfigError
-		if errors.As(err, &configErr) {
-			writeError(w, httpgo.StatusBadRequest, "invalid_database_config", configErr.Error())
-		} else {
-			writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to propose database rollback")
-		}
+		writeProposeError(w, err, "database", "propose database rollback")
 		return
 	}
 	// See database.go AddDatabase for the G705 rationale.

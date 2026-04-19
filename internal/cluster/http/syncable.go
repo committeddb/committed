@@ -1,10 +1,7 @@
 package http
 
 import (
-	"errors"
 	httpgo "net/http"
-
-	"github.com/philborlin/committed/internal/cluster"
 )
 
 func (h *HTTP) AddSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
@@ -14,14 +11,8 @@ func (h *HTTP) AddSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 
-	err = h.c.ProposeSyncable(r.Context(), c)
-	if err != nil {
-		var configErr *cluster.ConfigError
-		if errors.As(err, &configErr) {
-			writeError(w, httpgo.StatusBadRequest, "invalid_syncable_config", configErr.Error())
-		} else {
-			writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to propose syncable")
-		}
+	if err := h.c.ProposeSyncable(r.Context(), c); err != nil {
+		writeProposeError(w, err, "syncable", "propose syncable")
 		return
 	}
 

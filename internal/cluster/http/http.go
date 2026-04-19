@@ -15,6 +15,17 @@ import (
 	"github.com/philborlin/committed/internal/cluster"
 )
 
+// Package defaults. Callers that want something different pass the
+// matching ServerOption to NewServer. Values chosen to be generous
+// enough that day-one operators don't trip over them while still
+// bounding pathological clients.
+const (
+	defaultReadHeaderTimeout = 10 * time.Second
+	defaultReadTimeout       = 30 * time.Second
+	defaultWriteTimeout      = 30 * time.Second
+	defaultIdleTimeout       = 120 * time.Second
+)
+
 type HTTP struct {
 	r           *chi.Mux
 	c           cluster.Cluster
@@ -36,6 +47,7 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 
 	r.Use(corsMiddleware.Handler)
 	r.Use(RequestID)
+
 	h := &HTTP{r: r, c: c, bearerToken: o.bearerToken}
 
 	if o.bearerToken != "" {
@@ -95,6 +107,48 @@ func (h *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.r.ServeHTTP(w, r)
 }
 
+// ServerOption mutates the *http.Server built by NewServer. Used by
+// cmd/node.go to translate env-var overrides into server timeouts
+// without giving that package knowledge of the server's field layout.
+type ServerOption func(*http.Server)
+
+// WithReadHeaderTimeout overrides the default ReadHeaderTimeout.
+// Zero or negative is ignored (keep the default).
+func WithReadHeaderTimeout(d time.Duration) ServerOption {
+	return func(s *http.Server) {
+		if d > 0 {
+			s.ReadHeaderTimeout = d
+		}
+	}
+}
+
+// WithReadTimeout overrides the default ReadTimeout.
+func WithReadTimeout(d time.Duration) ServerOption {
+	return func(s *http.Server) {
+		if d > 0 {
+			s.ReadTimeout = d
+		}
+	}
+}
+
+// WithWriteTimeout overrides the default WriteTimeout.
+func WithWriteTimeout(d time.Duration) ServerOption {
+	return func(s *http.Server) {
+		if d > 0 {
+			s.WriteTimeout = d
+		}
+	}
+}
+
+// WithIdleTimeout overrides the default IdleTimeout.
+func WithIdleTimeout(d time.Duration) ServerOption {
+	return func(s *http.Server) {
+		if d > 0 {
+			s.IdleTimeout = d
+		}
+	}
+}
+
 // NewServer builds a configured *http.Server. Callers that want graceful
 // shutdown (cmd/node.go) drive ListenAndServe + Shutdown themselves; the
 // ListenAndServe convenience below is kept for tests and tooling that
@@ -105,21 +159,29 @@ func (h *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // WriteTimeout cover full request/response, sized for the largest
 // reasonable config payload (schemas, TOML bundles). IdleTimeout caps
 // keepalive so dead peers don't pin file descriptors.
-func (h *HTTP) NewServer(addr string) *http.Server {
-	return &http.Server{
+func (h *HTTP) NewServer(addr string, opts ...ServerOption) *http.Server {
+	s := &http.Server{
 		Addr:              addr,
 		Handler:           h.r,
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       120 * time.Second,
+		ReadHeaderTimeout: defaultReadHeaderTimeout,
+		ReadTimeout:       defaultReadTimeout,
+		WriteTimeout:      defaultWriteTimeout,
+		IdleTimeout:       defaultIdleTimeout,
 	}
+	for _, fn := range opts {
+		fn(s)
+	}
+	return s
 }
 
 func (h *HTTP) ListenAndServe(addr string) error {
 	return h.NewServer(addr).ListenAndServe()
 }
 
+// unmarshalBody reads r.Body and JSON-decodes into v. Oversize
+// bodies are not rejected here — the proposal-size limit lives at
+// the raft choke point (db.proposeAsync) so every proposal source
+// is checked uniformly. See cluster.ErrProposalTooLarge.
 func unmarshalBody(r *http.Request, v any) error {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
