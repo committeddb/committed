@@ -155,6 +155,13 @@ func systemType(id string) *Type {
 		return syncableIndexType
 	case ingestableType.ID:
 		return ingestableType
+	case ingestablePositionType.ID:
+		// IngestablePosition entities are emitted by ingestable workers
+		// as position checkpoints. Without this branch, the apply path
+		// fatal-crashes the first time an ingestable sends a position
+		// checkpoint through Raft, because the resolver looks for the
+		// position type in the user-types bucket where it isn't stored.
+		return ingestablePositionType
 	}
 	return nil
 }

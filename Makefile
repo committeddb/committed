@@ -43,6 +43,19 @@ test-all:
 test/adversarial:
 	go test -tags adversarial -race -count=20 -timeout 900s ./internal/cluster/db/...
 
+# End-to-end CDC pressure-test harness. Drives a real Postgres
+# (testcontainers) and a real committed binary spawned as a child
+# process, then asserts the exact proposal stream produced from a
+# scripted mutation sequence against an in-script oracle. See
+# e2e/cdc/ and .claude/plans/wobbly-watching-lightning.md.
+#
+# -p=1 because each test boots its own Postgres container — parallel
+# container startup chokes Docker on most laptops. -timeout 600s
+# because the first test pays a one-off `go build .` of the committed
+# binary plus container pull on a fresh machine.
+test/cdc:
+	go test -tags docker -p=1 -timeout 600s ./e2e/cdc/...
+
 lint:
 	golangci-lint run
 

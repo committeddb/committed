@@ -604,6 +604,15 @@ func (s *Storage) applyEntity(entity *cluster.Entity) error {
 		if err := s.handleSyncableIndex(entity); err != nil {
 			return fmt.Errorf("[wal.storage] handleSyncableIndex: %w", err)
 		}
+	case cluster.IsIngestablePosition(entity.ID):
+		// IngestablePosition entities are emitted by ingest workers as
+		// resume-position checkpoints. Position(id) currently always
+		// returns nil (storage-side position persistence is not yet
+		// implemented), so this is a no-op apply. Without the explicit
+		// case the entity falls into handleUserDefined, which writes
+		// to the time-series store using e.Timestamp — and position
+		// entities don't carry one, so the apply crashes with
+		// "can't insert rows into disk partition".
 	default:
 		if err := s.handleUserDefined(entity); err != nil {
 			return fmt.Errorf("[wal.storage] handleUserDefined: %w", err)

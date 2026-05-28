@@ -79,6 +79,13 @@ to quickly create a Cobra application.`,
 
 		var dbOpts []db.Option
 
+		// Wire the global zap logger into db so internal supervisor /
+		// raft / leader-transition logs are visible. Without this, the
+		// DB defaults to zap.NewNop and operators have no visibility
+		// into ingest worker startup, propose failures, or leader
+		// flaps. main.go initializes the global, this propagates it.
+		dbOpts = append(dbOpts, db.WithLogger(zap.L()))
+
 		// mTLS for peer transport is configured via three env vars that
 		// must be set together: COMMITTED_TLS_CA_FILE,
 		// COMMITTED_TLS_CERT_FILE, COMMITTED_TLS_KEY_FILE. All three set
