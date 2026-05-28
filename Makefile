@@ -73,10 +73,18 @@ check: lint test
 lint/openapi:
 	npx --yes @redocly/cli@latest lint api/openapi.yaml
 
+# Release artifacts: arm64 + amd64 for each of darwin/linux/windows.
+# arm64 matters on both ends now — Apple Silicon dev machines and the
+# Graviton (i8g) production target — so we ship native binaries for both
+# architectures rather than relying on Rosetta/emulation.
+PLATFORMS := darwin/arm64 darwin/amd64 linux/arm64 linux/amd64 windows/arm64 windows/amd64
+
 crosscompile:
-	@GOOS=darwin GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o committed-darwin-amd64
-	@file committed-darwin-amd64
-	@GOOS=linux GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o committed-linux-amd64
-	@file committed-linux-amd64
-	@GOOS=windows GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o committed-windows-amd64.exe
-	@file committed-windows-amd64.exe
+	@for p in $(PLATFORMS); do \
+	  os=$${p%/*}; arch=$${p#*/}; ext=; \
+	  [ "$$os" = windows ] && ext=.exe; \
+	  out=committed-$$os-$$arch$$ext; \
+	  echo "building $$out"; \
+	  GOOS=$$os GOARCH=$$arch go build -ldflags="$(LDFLAGS)" -o $$out || exit 1; \
+	  file $$out; \
+	done
