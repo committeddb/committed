@@ -18,100 +18,127 @@ Committed is specifically NOT a databse designed for querying.
 - **vs. etcd**: same Raft substrate, but append-only log semantics instead of KV — and a worker model for ingest/sync that etcd doesn't have.
 - **vs. an RDBMS / Debezium pipeline**: Committed collapses "replicated log + CDC source + sink connectors" into one process. You don't need Kafka + Debezium + Kafka Connect + a separate consensus layer; the same binary holds the log, the source, and the sink.
 
-## Version 0.2
-This is a beta version of Committed. You can spin up a cluster. See the included Procfile for an example of how to run the server, run the Procfile directly using goreman or something similar that can execute Procfiles, or checkout our
-[sandbox](http://www.committeddb.com/sandbox).
+## Version 0.3
 
-Once the server is running you should see 3 leader elections (if you change the number of nodes you should see every node come to consensus). When the server is working your terminal should look something like this:
+A beta release with a functioning 3-node Raft cluster, REST API, optional
+bearer-token auth and TLS, optional OpenTelemetry metrics, and a working
+end-to-end CDC pipeline (Postgres logical replication ingestable → Raft
+log → SQL syncable).
 
-```
-08:13:19 committed1 | raft2018/04/30 08:13:19 INFO: raft.node: 1 elected leader 1 at term 2  
-08:13:19 committed2 | raft2018/04/30 08:13:19 INFO: raft.node: 2 elected leader 1 at term 2  
-08:13:19 committed3 | raft2018/04/30 08:13:19 INFO: raft.node: 3 elected leader 1 at term 2  
-```
+### Concepts
 
-The term number doesn't matter and who got elected leader doesn't matter either.
+- **Type** — schema/metadata for a topic's payload. Identified by ID;
+  supports explicit-migration versioning.
+- **Proposal** — the atomic unit written to the Raft log. Carries one
+  or more entities, each tagged with a Type ID.
+- **Database** — connection config for an external SQL system (MySQL or
+  PostgreSQL).
+- **Ingestable** — pulls data into the log from an external source.
+  Today: PostgreSQL via logical replication (pgoutput), MySQL via
+  binlog.
+- **Syncable** — projects log entries out to an external system.
+  Today: SQL (MySQL/PostgreSQL) and HTTP.
 
-Once started committed will create two folders per node. The first node will be called raft-node# and raft-node#-snap. These folders contain all of your data. To clear the data in the server you can simply delete the folders.
+### Running
 
-The beta has four things you can do:
+Build the binary:
 
-* Add a topic
-* Append to a topic
-* Add a database
-* Add a SQL syncable
-
-To Add a topic POST to http://server:port/cluster/topics with an HTTP body that looks like:  
-```
-[topic]
-name = "test1"
-```
-
-To Append to a topic POST to http://server:port/cluster/posts with an HTTP body that looks like:  
-```
-{  
-	"Topic" : "test1",  
-	"Proposal" : {
-		Key: "baz", One: "qux"
-	}
-}
+```sh
+make build
 ```
 
-To add a database POST to http://server:port/cluster/databases with an HTTP body that looks like:
-```
-[database]
-name = "testdb"
-type = "sql"
+Single node — defaults to ID=1, HTTP at `:8080`, data dir `./data`:
 
-[sql]
-dialect = "mysql"
-connectionString = "myConnectionString"
+```sh
+./committed node
 ```
 
-The Database is a TOML configuration file. Currently the only type supported is sql and the only dialect supported is mysql.
+Three-node cluster via [goreman](https://github.com/mattn/goreman) and
+the included `Procfile`:
 
-To Add a syncable POST to http://server:port/cluster/syncables with an HTTP body that looks like:  
-```
-[syncable]
-name = "foo"
-# Determines what the rest of the config will look like
-type = "sql"
-
-[sql]
-topic = "test1"
-db = "testdb"
-table = "foo"
-primaryKey = "pk"
-
-[[sql.indexes]]
-name = "firstIndex"
-index = "one"
-
-[[sql.mappings]]
-jsonPath = "$.Key"
-column = "pk"
-type = "TEXT"
-
-[[sql.mappings]]
-jsonPath = "$.One"
-column = "one"
-type = "TEXT"
+```sh
+goreman start
 ```
 
-The Syncable is a TOML configuration file.
+You'll see leader-election logs on each node. The current leader serves
+HTTP writes; followers forward proposals over Raft.
 
-The workflow would look like: Add a topic, Append some proposals, Add a database, Add a syncable, look at your SQL database and see the proposals get applied to the DB, Add some more proposals and then read the database and do something useful.
+### API tour
 
-## Road Map
+Routes are served by Chi from `internal/cluster/http/`. The full
+OpenAPI spec is available at `/openapi.yaml` with a Swagger UI at
+`/docs`. The endpoints below all sit under that router; bearer-token
+auth is applied when `COMMITTED_API_TOKEN` is set (see
+[`docs/operations/authentication.md`](docs/operations/authentication.md)).
 
-Next up is version 0.3.
+Canonical example configs live in [`demo/`](demo/) — copy from there
+for working values.
 
-Although there are no promises about what will be in the next release, we are currently working on a topic
-syncable that allows you to transform data from one topic and write the transformed data to a new topic
+Define a type:
 
-## Sandbox
+```sh
+curl -X POST -H 'Content-Type: text/toml' \
+  --data-binary @demo/type.toml \
+  http://localhost:8080/type/simple
+```
 
-There is an online sandbox that allows you to play with a shared server without having to download or install the database yourself. You can find more information at [http://www.committeddb.com/sandbox](http://www.committeddb.com/sandbox)
+Configure a database to write into (sink):
+
+```sh
+curl -X POST -H 'Content-Type: text/toml' \
+  --data-binary @demo/database.toml \
+  http://localhost:8080/database/foo
+```
+
+Configure a syncable that projects a type out to that database:
+
+```sh
+curl -X POST -H 'Content-Type: text/toml' \
+  --data-binary @demo/syncable-one.toml \
+  http://localhost:8080/syncable/one
+```
+
+Configure an ingestable that pulls from an external source into the
+log (MySQL example; see `internal/cluster/ingestable/sql/postgres_ingestable.toml`
+for a Postgres logical-replication config):
+
+```sh
+curl -X POST -H 'Content-Type: text/toml' \
+  --data-binary @demo/ingestable.toml \
+  http://localhost:8080/ingestable/foo
+```
+
+Append a proposal directly (without going through an ingestable):
+
+```sh
+curl -X POST -H 'Content-Type: application/json' \
+  --data-binary @demo/proposal.json \
+  http://localhost:8080/proposal
+```
+
+Read recent proposals for a type:
+
+```sh
+curl 'http://localhost:8080/proposal?type=simple&number=100'
+```
+
+Every config kind has versioned history and rollback under
+`GET /{kind}/{id}/versions[/{version}]` and `POST /{kind}/{id}/rollback`.
+Health endpoints `/health`, `/ready`, `/version` are exempt from auth.
+
+### Testing
+
+| Target | Scope |
+|---|---|
+| `make test` | Fast unit tests (`-short`) |
+| `make test/ci` | Full unit suite with `-race` and coverage |
+| `make test/integration` | `-tags integration` (HTTP server, MySQL/Postgres dialects) |
+| `make test/cdc` | End-to-end CDC pressure-test harness (`e2e/cdc/`) |
+| `make test/adversarial` | Multi-node raft adversarial suite, `-race -count=20` |
+| `make test-all` | Everything (docker + integration tags) |
+
+All five are wired into CI on every push and PR except `test/adversarial`,
+which runs on pushes to `main` only because of its multi-minute runtime.
 
 ## Operations
 
@@ -136,12 +163,9 @@ every write; syncables read from it, and it is never compacted.
 See [`docs/event-log-architecture.md`](docs/event-log-architecture.md)
 for the rationale.
 
-### Rebuilding a node
+### Runbooks
 
-If a node logs a `storage invariant violation` fatal message, it has
-fallen too far behind the cluster to recover via normal raft
-replication. The runbook for this case —
-[`docs/operations/rebuild.md`](docs/operations/rebuild.md) — covers
-both existing-node rebuild and adding a new node. The short version
-is: stop the node, rsync its data directory from a healthy peer,
-restart. Apply determinism keeps subsequent rebuilds O(diff).
+- [`docs/operations/authentication.md`](docs/operations/authentication.md) — bearer token + mTLS setup
+- [`docs/operations/shutdown.md`](docs/operations/shutdown.md) — `SIGTERM` handling and the graceful-shutdown deadline
+- [`docs/operations/http-limits.md`](docs/operations/http-limits.md) — proposal-size cap and HTTP server timeouts
+- [`docs/operations/rebuild.md`](docs/operations/rebuild.md) — rebuilding a node after a `storage invariant violation` fatal. Short version: stop the node, rsync its data directory from a healthy peer, restart. Apply determinism keeps subsequent rebuilds O(diff).
