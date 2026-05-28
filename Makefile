@@ -73,11 +73,16 @@ check: lint test
 lint/openapi:
 	npx --yes @redocly/cli@latest lint api/openapi.yaml
 
-# Release artifacts: arm64 + amd64 for each of darwin/linux/windows.
-# arm64 matters on both ends now — Apple Silicon dev machines and the
-# Graviton (i8g) production target — so we ship native binaries for both
-# architectures rather than relying on Rosetta/emulation.
-PLATFORMS := darwin/arm64 darwin/amd64 linux/arm64 linux/amd64 windows/arm64 windows/amd64
+# Release artifacts: arm64 + amd64 for darwin/linux, amd64-only for
+# windows. arm64 matters on both ends now — Apple Silicon dev machines
+# and the Graviton (i8g) production target — so we ship native binaries
+# for both architectures rather than relying on Rosetta/emulation.
+#
+# windows/arm64 is intentionally omitted: the tstorage dependency's
+# mmap_windows.go only defines maxMapSize for amd64, so it doesn't
+# compile for windows/arm64. Windows-on-ARM runs the amd64 binary under
+# its built-in x64 emulation, so that audience is still covered.
+PLATFORMS := darwin/arm64 darwin/amd64 linux/arm64 linux/amd64 windows/amd64
 
 crosscompile:
 	@for p in $(PLATFORMS); do \
