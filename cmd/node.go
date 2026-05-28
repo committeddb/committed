@@ -5,13 +5,13 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
-	"flag"
 	"fmt"
 	"log"
 	nethttp "net/http"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -44,16 +44,26 @@ const defaultShutdownTimeout = 30 * time.Second
 
 var nodeCmd = &cobra.Command{
 	Use:   "node",
-	Short: "A brief description of your command",
-	Long: `A longer description that spans multiple lines and likely contains examples
-and usage of using your command. For example:
+	Short: "Run a committed node",
+	Long: `Run a committed node.
 
-Cobra is a CLI library for Go that empowers applications.
-This application is a tool to generate the needed files
-to quickly create a Cobra application.`,
+Configuration is supplied through environment variables so the same
+image can be templated per-node by an orchestrator:
+
+  COMMITTED_NODE_ID    raft node ID (default 1; must be unique and
+                       present in COMMITTED_PEERS)
+  COMMITTED_API_ADDR   HTTP API listen address (default ":8080")
+  COMMITTED_DATA_DIR   data directory for WAL/state (default "./data")
+  COMMITTED_PEER_URL   this node's advertised raft peer URL
+                       (default "http://127.0.0.1:9022"); used when
+                       COMMITTED_PEERS is unset
+  COMMITTED_PEERS      full static cluster membership as id=url pairs,
+                       e.g. "1=http://n1:9022,2=http://n2:9022". The
+                       same value is given to every node and must
+                       include this node's own COMMITTED_NODE_ID.
+                       Consumed only on first boot; thereafter
+                       membership is restored from the WAL.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("node called")
-
 		v := version.Get()
 		zap.L().Info("committed starting",
 			zap.String("version", v.Version),
@@ -62,20 +72,27 @@ to quickly create a Cobra application.`,
 			zap.String("goVersion", v.GoVersion),
 		)
 
-		url := flag.String("url", "http://127.0.0.1:9022", "url with port")
-		id := flag.Uint64("id", 1, "node ID")
-		addr := flag.String("addr", ":8080", "node ID")
+		// Node identity and addressing come from the environment so the
+		// same image can be templated per-node by an orchestrator (Docker,
+		// Nomad, k8s). The historical stdlib `flag` calls here were dead —
+		// flag.Parse() was never invoked, so they always returned defaults.
+		id := nodeID()
+		addr := getenvDefault("COMMITTED_API_ADDR", ":8080")
+		dataDir := getenvDefault("COMMITTED_DATA_DIR", "./data")
+
+		// Resolve peer membership before opening storage so a malformed
+		// COMMITTED_PEERS fails fast without first creating an empty data
+		// directory.
+		peers := loadPeers(id)
+
 		sync := make(chan *db.SyncableWithID)
 		ingest := make(chan *db.IngestableWithID)
 
 		p := parser.New()
-		s, err := wal.Open("./data", p, sync, ingest)
+		s, err := wal.Open(dataDir, p, sync, ingest)
 		if err != nil {
 			log.Fatalf("cannot open storage: %v", err)
 		}
-
-		peers := make(db.Peers)
-		peers[*id] = *url
 
 		var dbOpts []db.Option
 
@@ -119,7 +136,7 @@ to quickly create a Cobra application.`,
 			dbOpts = append(dbOpts, db.WithMetrics(m))
 		}
 
-		d := db.New(*id, peers, s, p, sync, ingest, dbOpts...)
+		d := db.New(id, peers, s, p, sync, ingest, dbOpts...)
 		fmt.Printf("Raft Running...\n")
 
 		var httpOpts []http.Option
@@ -128,7 +145,7 @@ to quickly create a Cobra application.`,
 		}
 
 		h := http.New(d, httpOpts...)
-		fmt.Printf("API Listening on %s...\n", *addr)
+		fmt.Printf("API Listening on %s...\n", addr)
 
 		d.AddDatabaseParser("sql", dbParser())
 		d.AddIngestableParser("sql", ingestableParser(d))
@@ -165,7 +182,7 @@ to quickly create a Cobra application.`,
 			zap.L().Warn("API TLS disabled (no COMMITTED_HTTP_TLS_CERT_FILE/KEY_FILE set) — do not expose the API to untrusted networks in this state")
 		}
 
-		exitCode := runNode(d, h.NewServer(*addr, serverOpts...))
+		exitCode := runNode(d, h.NewServer(addr, serverOpts...))
 		if exitCode != 0 {
 			os.Exit(exitCode)
 		}
@@ -260,6 +277,111 @@ func gracefulShutdown(d *db.DB, httpServer *nethttp.Server) int {
 
 	zap.L().Info("shutdown.done", zap.Int("exitCode", exitCode))
 	return exitCode
+}
+
+// getenvDefault returns the value of env var name, or def when it is
+// unset or empty.
+func getenvDefault(name, def string) string {
+	if v := os.Getenv(name); v != "" {
+		return v
+	}
+	return def
+}
+
+// nodeID reads COMMITTED_NODE_ID and fatal-exits on a bad value. The
+// parsing lives in parseNodeID so it can be unit-tested without the
+// process-exiting wrapper.
+func nodeID() uint64 {
+	id, err := parseNodeID(os.Getenv("COMMITTED_NODE_ID"))
+	if err != nil {
+		// G706 false positive: the value is an operator-supplied env var.
+		log.Fatalf("%v", err) //nolint:gosec // G706
+	}
+	return id
+}
+
+// parseNodeID interprets the COMMITTED_NODE_ID env value: empty defaults
+// to 1, otherwise it must be a positive uint64. A zero or unparseable
+// value is an error rather than a silent fallback — collapsing a
+// mistyped identity onto ID 1 would let two nodes claim the same raft ID
+// and corrupt the group, which is far worse than refusing to start.
+func parseNodeID(raw string) (uint64, error) {
+	if raw == "" {
+		return 1, nil
+	}
+	id, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil || id == 0 {
+		return 0, fmt.Errorf("COMMITTED_NODE_ID must be a positive integer (got %q)", raw)
+	}
+	return id, nil
+}
+
+// loadPeers builds the static raft peer set used for first-boot
+// bootstrap and fatal-exits on a malformed COMMITTED_PEERS. Parsing
+// lives in parsePeers so it can be unit-tested without the wrapper.
+func loadPeers(id uint64) db.Peers {
+	peers, err := parsePeers(id, os.Getenv("COMMITTED_PEERS"), getenvDefault("COMMITTED_PEER_URL", "http://127.0.0.1:9022"))
+	if err != nil {
+		// G706 false positive: the value is an operator-supplied env var.
+		log.Fatalf("%v", err) //nolint:gosec // G706
+	}
+	return peers
+}
+
+// parsePeers builds the static raft peer set for first-boot bootstrap
+// (raft.StartNode).
+//
+// raw is the COMMITTED_PEERS env value: when non-empty it is the full
+// cluster membership as a comma-separated list of id=url pairs, e.g.
+//
+//	COMMITTED_PEERS="1=http://n1:9022,2=http://n2:9022,3=http://n3:9022"
+//
+// Every node receives the same COMMITTED_PEERS and the set must include
+// this node's own id. Membership is consumed only on first boot; on
+// restart it is restored from the WAL (raft.RestartNode), so editing
+// COMMITTED_PEERS after a node has state has no effect — use the
+// conf-change API for live membership changes.
+//
+// When raw is empty the node bootstraps a single-node cluster
+// advertising selfURL (COMMITTED_PEER_URL) for itself — the historical
+// laptop-dev default.
+//
+// Malformed input is an error rather than best-effort: a bad peer set
+// yields split-brain or a node that can never reach quorum, both worse
+// than a loud refusal to start.
+func parsePeers(id uint64, raw, selfURL string) (db.Peers, error) {
+	if raw == "" {
+		return db.Peers{id: selfURL}, nil
+	}
+
+	peers := make(db.Peers)
+	for entry := range strings.SplitSeq(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		k, v, ok := strings.Cut(entry, "=")
+		k = strings.TrimSpace(k)
+		v = strings.TrimSpace(v)
+		if !ok || k == "" || v == "" {
+			return nil, fmt.Errorf("COMMITTED_PEERS entry %q is not in id=url form", entry)
+		}
+		pid, err := strconv.ParseUint(k, 10, 64)
+		if err != nil || pid == 0 {
+			return nil, fmt.Errorf("COMMITTED_PEERS entry %q has an invalid peer id", entry)
+		}
+		if _, dup := peers[pid]; dup {
+			return nil, fmt.Errorf("COMMITTED_PEERS has a duplicate peer id %d", pid)
+		}
+		peers[pid] = v
+	}
+	if len(peers) == 0 {
+		return nil, fmt.Errorf("COMMITTED_PEERS is set but contains no valid peers")
+	}
+	if _, ok := peers[id]; !ok {
+		return nil, fmt.Errorf("COMMITTED_PEERS must include this node's own COMMITTED_NODE_ID (%d)", id)
+	}
+	return peers, nil
 }
 
 // parseInt64Env reads an int64-valued env var. Returns (0, false)

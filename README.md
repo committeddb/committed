@@ -63,6 +63,30 @@ goreman start
 You'll see leader-election logs on each node. The current leader serves
 HTTP writes; followers forward proposals over Raft.
 
+#### Configuration
+
+A node is configured entirely through environment variables, so the
+same image can be templated per-node by an orchestrator:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `COMMITTED_NODE_ID` | `1` | Raft node ID. Must be unique and appear in `COMMITTED_PEERS`. |
+| `COMMITTED_API_ADDR` | `:8080` | HTTP API listen address. |
+| `COMMITTED_DATA_DIR` | `./data` | Directory for the WAL, raft state, metadata, and time-series data. |
+| `COMMITTED_PEER_URL` | `http://127.0.0.1:9022` | This node's advertised raft peer URL. Used when `COMMITTED_PEERS` is unset. |
+| `COMMITTED_PEERS` | _(unset)_ | Full static cluster membership as `id=url` pairs, e.g. `1=http://n1:9022,2=http://n2:9022,3=http://n3:9022`. Give the same value to every node; it must include this node's `COMMITTED_NODE_ID`. |
+
+`COMMITTED_PEERS` is consumed only on a node's **first** boot
+(`raft.StartNode`). After that, membership is restored from the WAL on
+restart, so editing `COMMITTED_PEERS` has no effect — use the
+conf-change API for live membership changes. When `COMMITTED_PEERS` is
+unset the node bootstraps a single-node cluster advertising
+`COMMITTED_PEER_URL`.
+
+Additional operational variables (peer/API mTLS, proposal-size and HTTP
+timeout limits, graceful-shutdown deadline, OTel export) are documented
+under [`docs/operations/`](docs/operations/).
+
 ### API tour
 
 Routes are served by Chi from `internal/cluster/http/`. The full
