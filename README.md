@@ -18,12 +18,28 @@ Committed is specifically NOT a databse designed for querying.
 - **vs. etcd**: same Raft substrate, but append-only log semantics instead of KV — and a worker model for ingest/sync that etcd doesn't have.
 - **vs. an RDBMS / Debezium pipeline**: Committed collapses "replicated log + CDC source + sink connectors" into one process. You don't need Kafka + Debezium + Kafka Connect + a separate consensus layer; the same binary holds the log, the source, and the sink.
 
-## Version 0.3
+## Version 0.4
 
-A beta release with a functioning 3-node Raft cluster, REST API, optional
-bearer-token auth and TLS, optional OpenTelemetry metrics, and a working
-end-to-end CDC pipeline (Postgres logical replication ingestable → Raft
-log → SQL syncable).
+A beta release focused on productionizing the backend. It keeps 0.3's
+functioning 3-node Raft cluster, REST API, optional bearer-token auth and
+TLS, optional OpenTelemetry metrics, and end-to-end CDC pipeline (Postgres
+logical replication / MySQL binlog ingestable → Raft log → SQL/HTTP
+syncable), and adds:
+
+- **Env-var configuration and static multi-node bootstrap** — node
+  identity, addressing, data directory, and cluster membership are all set
+  via `COMMITTED_*` environment variables (see
+  [Configuration](#configuration)), so the same image can be templated
+  per-node by an orchestrator.
+- **Graceful shutdown** — bounded HTTP drain and clean WAL/raft close on
+  `SIGTERM`/`SIGINT`.
+- **Configurable server limits** — HTTP read/write/idle timeouts and a
+  Raft proposal-size cap.
+- **More resilient ingest** — an ingest-worker supervisor with
+  backoff/restart, durable ingestable position (ingest resumes where it
+  left off after a restart or leader change), and per-commit standby acks.
+- **Prebuilt multi-arch binaries** — darwin and linux on both arm64 and
+  amd64, plus windows/amd64, attached to each release.
 
 ### Concepts
 
@@ -41,7 +57,9 @@ log → SQL syncable).
 
 ### Running
 
-Build the binary:
+Download a prebuilt binary for your platform from the
+[releases page](https://github.com/philborlin/committed/releases), or
+build from source:
 
 ```sh
 make build
