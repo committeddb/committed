@@ -59,7 +59,7 @@ func postConfig(t *testing.T, path, body string) {
 	req.Header.Set("Content-Type", "text/toml")
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err, "POST %s", path)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	b, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 300 {
 		t.Fatalf("POST %s: %d %s\n----- request body -----\n%s", path, resp.StatusCode, string(b), body)

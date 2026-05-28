@@ -124,4 +124,3 @@ func TestSecurityHeaders_OpenAPISpecKeepsStrictCSP(t *testing.T) {
 	require.Equal(t, "default-src 'none'; frame-ancestors 'none'",
 		resp.Header.Get("Content-Security-Policy"))
 }
-

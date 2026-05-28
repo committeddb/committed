@@ -23,14 +23,14 @@ import (
 // Harness owns the per-test fixture lifecycle. One Harness per test;
 // t.Cleanup tears everything down so the next test starts fresh.
 type Harness struct {
-	pg         *tcpostgres.PostgresContainer
-	pgConnStr  string
-	pgConn     *pgx.Conn
-	committed  *committedProcess
-	topics     []string
-	slotNames  map[string]string // topic → slot name
-	ctx        context.Context
-	cancel     context.CancelFunc
+	pg        *tcpostgres.PostgresContainer
+	pgConnStr string
+	pgConn    *pgx.Conn
+	committed *committedProcess
+	topics    []string
+	slotNames map[string]string // topic → slot name
+	ctx       context.Context
+	cancel    context.CancelFunc
 	// baseline is the per-topic proposal count captured AFTER dataset
 	// load and ingestable startup. Capture() trims away everything up
 	// to this count so each test only sees its mutation script output.

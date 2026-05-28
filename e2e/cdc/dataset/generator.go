@@ -69,11 +69,11 @@ type PartRow struct {
 }
 
 type PartSuppRow struct {
-	PartKey     int
-	SuppKey     int
-	AvailQty    int
-	SupplyCost  string
-	Comment     string
+	PartKey    int
+	SuppKey    int
+	AvailQty   int
+	SupplyCost string
+	Comment    string
 }
 
 type OrdersRow struct {
@@ -89,22 +89,22 @@ type OrdersRow struct {
 }
 
 type LineItemRow struct {
-	OrderKey       int
-	PartKey        int
-	SuppKey        int
-	LineNumber     int
-	Quantity       string
-	ExtendedPrice  string
-	Discount       string
-	Tax            string
-	ReturnFlag     string
-	LineStatus     string
-	ShipDate       time.Time
-	CommitDate     time.Time
-	ReceiptDate    time.Time
-	ShipInstruct   string
-	ShipMode       string
-	Comment        string
+	OrderKey      int
+	PartKey       int
+	SuppKey       int
+	LineNumber    int
+	Quantity      string
+	ExtendedPrice string
+	Discount      string
+	Tax           string
+	ReturnFlag    string
+	LineStatus    string
+	ShipDate      time.Time
+	CommitDate    time.Time
+	ReceiptDate   time.Time
+	ShipInstruct  string
+	ShipMode      string
+	Comment       string
 }
 
 // Sizes controls per-table rowcounts. Defaults are tiny — picked so the
@@ -141,7 +141,11 @@ var DefaultSizes = Sizes{
 // byte-identical Dataset across runs and across machines (math/rand/v2
 // PCG is platform-independent).
 func Generate(seed uint64, sizes Sizes) Dataset {
-	r := rand.New(rand.NewPCG(seed, seed^0x9E3779B97F4A7C15))
+	// G404: seeded PCG is deliberate here — the harness's correctness
+	// guarantee is "same seed → byte-identical dataset," which is
+	// exactly what a deterministic PRNG provides and exactly what
+	// crypto/rand would defeat.
+	r := rand.New(rand.NewPCG(seed, seed^0x9E3779B97F4A7C15)) //nolint:gosec
 	ds := Dataset{}
 
 	for i := 0; i < sizes.Regions; i++ {
