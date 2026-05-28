@@ -27,6 +27,16 @@ const (
 	defaultIdleTimeout       = 120 * time.Second
 )
 
+// Default CORS request methods and headers, applied when WithCORS is
+// given origins but no explicit methods/headers. These cover every verb
+// the API actually uses plus the headers a browser client sends on a
+// configured request (Content-Type for JSON/TOML bodies, Authorization
+// for the bearer token, X-Request-ID for trace correlation).
+var (
+	defaultCORSMethods = []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}
+	defaultCORSHeaders = []string{"Content-Type", "Authorization", "X-Request-ID"}
+)
+
 type HTTP struct {
 	r           *chi.Mux
 	c           cluster.Cluster
@@ -42,11 +52,28 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 
 	r := chi.NewRouter()
 
-	corsMiddleware := cors.New(cors.Options{
-		AllowedOrigins: []string{"http://localhost:5173", "http://localhost:4173"},
-	})
+	// CORS is off unless an operator supplies an allowlist via
+	// WithCORS (COMMITTED_HTTP_CORS_ORIGINS). With no allowlist we mount
+	// no CORS middleware at all, so no Access-Control-* headers are
+	// emitted and the browser's same-origin policy decides — the right
+	// default for a server binary with no in-tree browser client.
+	if len(o.corsOrigins) > 0 {
+		methods := o.corsMethods
+		if len(methods) == 0 {
+			methods = defaultCORSMethods
+		}
+		headers := o.corsHeaders
+		if len(headers) == 0 {
+			headers = defaultCORSHeaders
+		}
+		corsMiddleware := cors.New(cors.Options{
+			AllowedOrigins: o.corsOrigins,
+			AllowedMethods: methods,
+			AllowedHeaders: headers,
+		})
+		r.Use(corsMiddleware.Handler)
+	}
 
-	r.Use(corsMiddleware.Handler)
 	r.Use(securityHeaders)
 	r.Use(RequestID)
 

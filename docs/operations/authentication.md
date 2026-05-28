@@ -181,6 +181,59 @@ chmod 0600 api.key
 - **Plaintext-to-HTTPS redirect on the same process**: also out of
   scope. If you need both ports, terminate TLS in front.
 
+## CORS
+
+### Why it's off by default
+
+CORS only matters when a browser-based client hosted at one origin
+calls the API at another. Committed ships no in-tree browser frontend,
+so the API emits **no** `Access-Control-*` headers unless you opt in.
+With CORS off, the browser's same-origin policy applies unchanged:
+server-to-server clients, `curl`, and same-origin pages are unaffected;
+only cross-origin browser requests are blocked (by the browser, not the
+server).
+
+### Enabling
+
+Set an explicit allowlist of browser origins:
+
+```
+COMMITTED_HTTP_CORS_ORIGINS=https://app.example.com,https://admin.example.com
+```
+
+Each entry must be a full `scheme://host` origin. A malformed entry
+(e.g. a bare hostname with no scheme) is a hard startup error rather
+than a silent skip — a typo'd origin should fail loudly at boot, not
+reject every preflight at runtime.
+
+Origins not on the list get no allow header and are blocked by the
+browser. The allowed request methods and headers default to:
+
+- Methods: `GET, POST, PUT, DELETE, OPTIONS`
+- Headers: `Content-Type, Authorization, X-Request-ID`
+
+Override either with `COMMITTED_HTTP_CORS_METHODS` /
+`COMMITTED_HTTP_CORS_HEADERS` (comma-separated). Both only take effect
+when CORS is enabled.
+
+### Wildcard origin
+
+```
+COMMITTED_HTTP_CORS_ORIGINS=*
+```
+
+The literal `*` allows any origin. Use only for internal setups where
+any origin reaching the node is already trusted. Note the browser will
+**reject** `*` combined with credentialed requests (cookies / TLS
+client certs) — if your clients send credentials, list explicit
+origins instead.
+
+### What's not in scope
+
+- **Per-route CORS**: all routes share one policy.
+- **Dynamic reload**: changing the allowlist requires a restart, same
+  as the other HTTP settings.
+
 ## Peer mTLS
 
 ### Why mTLS for peers

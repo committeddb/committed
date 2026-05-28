@@ -152,6 +152,64 @@ func TestShutdownTimeout(t *testing.T) {
 	require.Equal(t, defaultShutdownTimeout, shutdownTimeout())
 }
 
+// TestLoadCORSOrigins covers the env-var parsing for the CORS allowlist.
+// The startup-fatal path in nodeCmd.Run wraps this helper, so covering
+// the helper covers the fatal rule by extension.
+func TestLoadCORSOrigins(t *testing.T) {
+	orig, hadOrig := os.LookupEnv("COMMITTED_HTTP_CORS_ORIGINS")
+	t.Cleanup(func() {
+		if hadOrig {
+			_ = os.Setenv("COMMITTED_HTTP_CORS_ORIGINS", orig)
+		} else {
+			_ = os.Unsetenv("COMMITTED_HTTP_CORS_ORIGINS")
+		}
+	})
+
+	t.Run("unset returns nil and no error", func(t *testing.T) {
+		_ = os.Unsetenv("COMMITTED_HTTP_CORS_ORIGINS")
+		got, err := loadCORSOrigins()
+		require.NoError(t, err)
+		require.Nil(t, got)
+	})
+
+	t.Run("single origin", func(t *testing.T) {
+		_ = os.Setenv("COMMITTED_HTTP_CORS_ORIGINS", "https://app.example.com")
+		got, err := loadCORSOrigins()
+		require.NoError(t, err)
+		require.Equal(t, []string{"https://app.example.com"}, got)
+	})
+
+	t.Run("multiple origins trimmed", func(t *testing.T) {
+		_ = os.Setenv("COMMITTED_HTTP_CORS_ORIGINS",
+			" https://app.example.com , https://admin.example.com ")
+		got, err := loadCORSOrigins()
+		require.NoError(t, err)
+		require.Equal(t,
+			[]string{"https://app.example.com", "https://admin.example.com"}, got)
+	})
+
+	t.Run("wildcard allowed", func(t *testing.T) {
+		_ = os.Setenv("COMMITTED_HTTP_CORS_ORIGINS", "*")
+		got, err := loadCORSOrigins()
+		require.NoError(t, err)
+		require.Equal(t, []string{"*"}, got)
+	})
+
+	t.Run("malformed origin is a hard error", func(t *testing.T) {
+		_ = os.Setenv("COMMITTED_HTTP_CORS_ORIGINS", "app.example.com")
+		got, err := loadCORSOrigins()
+		require.Error(t, err)
+		require.Nil(t, got)
+	})
+
+	t.Run("only commas is a hard error", func(t *testing.T) {
+		_ = os.Setenv("COMMITTED_HTTP_CORS_ORIGINS", " , , ")
+		got, err := loadCORSOrigins()
+		require.Error(t, err)
+		require.Nil(t, got)
+	})
+}
+
 // TestLoadAPITLSConfig covers the env-var parsing for the client-facing
 // HTTP TLS config. The startup-fatal path in nodeCmd.Run wraps this
 // helper, so covering the helper covers the fatal rule by extension.

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	nethttp "net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -62,7 +63,24 @@ image can be templated per-node by an orchestrator:
                        same value is given to every node and must
                        include this node's own COMMITTED_NODE_ID.
                        Consumed only on first boot; thereafter
-                       membership is restored from the WAL.`,
+                       membership is restored from the WAL.
+
+  COMMITTED_HTTP_CORS_ORIGINS
+                       comma-separated browser-origin allowlist, e.g.
+                       "https://app.example.com,https://admin.example.com",
+                       or the literal "*" to allow any origin. Unset
+                       (default) disables CORS entirely — no
+                       Access-Control-* headers are emitted. Each entry
+                       must be scheme://host or "*"; a malformed entry is
+                       a hard startup error.
+  COMMITTED_HTTP_CORS_METHODS
+                       comma-separated allowed request methods (default
+                       "GET,POST,PUT,DELETE,OPTIONS"). Only applies when
+                       CORS is enabled.
+  COMMITTED_HTTP_CORS_HEADERS
+                       comma-separated allowed request headers (default
+                       "Content-Type,Authorization,X-Request-ID"). Only
+                       applies when CORS is enabled.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		v := version.Get()
 		zap.L().Info("committed starting",
@@ -142,6 +160,20 @@ image can be templated per-node by an orchestrator:
 		var httpOpts []http.Option
 		if token := os.Getenv("COMMITTED_API_TOKEN"); token != "" {
 			httpOpts = append(httpOpts, http.WithBearerToken(token))
+		}
+
+		corsOrigins, err := loadCORSOrigins()
+		if err != nil {
+			// G706 false positive: the value is an operator-supplied env var.
+			log.Fatalf("CORS: %v", err) //nolint:gosec // G706
+		}
+		if len(corsOrigins) > 0 {
+			httpOpts = append(httpOpts, http.WithCORS(
+				corsOrigins,
+				parseListEnv("COMMITTED_HTTP_CORS_METHODS"),
+				parseListEnv("COMMITTED_HTTP_CORS_HEADERS"),
+			))
+			zap.L().Info("API CORS enabled", zap.Strings("origins", corsOrigins))
 		}
 
 		h := http.New(d, httpOpts...)
@@ -399,6 +431,61 @@ func parseInt64Env(name string) (int64, bool) {
 		return 0, false
 	}
 	return v, true
+}
+
+// loadCORSOrigins parses the comma-separated COMMITTED_HTTP_CORS_ORIGINS
+// allowlist. Unset or empty returns (nil, nil) — CORS stays off and the
+// http package emits no Access-Control-* headers. Each entry must be the
+// literal "*" (allow any origin) or an absolute scheme://host origin;
+// anything else is a hard error so a typo'd origin fails fast at startup
+// rather than silently rejecting every browser preflight at runtime.
+//
+// Returning (origins, err) instead of calling log.Fatalf lets node_test.go
+// exercise the parsing and error cases directly, matching loadAPITLSConfig.
+func loadCORSOrigins() ([]string, error) {
+	raw := os.Getenv("COMMITTED_HTTP_CORS_ORIGINS")
+	if raw == "" {
+		return nil, nil
+	}
+
+	var origins []string
+	for entry := range strings.SplitSeq(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if entry == "*" {
+			origins = append(origins, entry)
+			continue
+		}
+		u, err := url.Parse(entry)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			return nil, fmt.Errorf("COMMITTED_HTTP_CORS_ORIGINS entry %q is not a valid origin (want scheme://host, e.g. https://app.example.com, or \"*\")", entry)
+		}
+		origins = append(origins, entry)
+	}
+	if len(origins) == 0 {
+		return nil, fmt.Errorf("COMMITTED_HTTP_CORS_ORIGINS is set but contains no valid origins")
+	}
+	return origins, nil
+}
+
+// parseListEnv reads a comma-separated env var into a trimmed, non-empty
+// string slice. Unset or empty returns nil so the caller falls back to
+// its own defaults.
+func parseListEnv(name string) []string {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for entry := range strings.SplitSeq(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry != "" {
+			out = append(out, entry)
+		}
+	}
+	return out
 }
 
 // parseDurationEnv reads a Go-duration-formatted env var (e.g. "15s").
