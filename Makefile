@@ -27,6 +27,15 @@ test-all:
 	go build -ldflags="$(LDFLAGS)"
 	go test -tags "docker integration" -timeout 300s ./... -cover
 
+# Integration tests gated by the `integration` build tag (the docker
+# tag is handled by `test/cdc` because that suite spawns its own
+# Postgres containers per test and must run -p=1; mixing the two in
+# one `go test` invocation makes parallel container startup choke
+# Docker on most CI runners). -race because the integration tests
+# exercise the full goroutine fan-out across HTTP / ingest / sync.
+test/integration:
+	go test -race -tags integration -timeout 300s ./... -cover
+
 # Runs the adversarial raft suite (phase 1: partition, leader flap,
 # concurrent config changes; phase 2: asymmetric partition, slow
 # follower, disk full). Tagged `adversarial` so it's excluded from

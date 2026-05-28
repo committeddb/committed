@@ -14,11 +14,13 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/ingestable/sql"
+	"github.com/philborlin/committed/internal/cluster/ingestable/sql/dialectpb"
 	"github.com/philborlin/committed/internal/cluster/ingestable/sql/postgres"
 )
 
@@ -74,18 +76,46 @@ func createDB(t *testing.T) *gosql.DB {
 	return db
 }
 
-// waitForSlot polls pg_replication_slots until the named slot is active,
-// replacing fragile time.Sleep calls.
+// isCommitPosition reports whether a position published by the
+// dialect's `po` channel is a per-commit checkpoint (Lsn>0) rather
+// than a snapshot-progress checkpoint (Lsn=0, with SnapshotProgress
+// set). encodePosition / decodePosition in postgres.go own the wire
+// format: magic byte 0xff followed by a proto-encoded
+// dialectpb.PostgresPosition.
+func isCommitPosition(t *testing.T, pos cluster.Position) bool {
+	t.Helper()
+	if len(pos) < 2 || pos[0] != 0xff {
+		return false
+	}
+	pp := &dialectpb.PostgresPosition{}
+	if err := proto.Unmarshal(pos[1:], pp); err != nil {
+		return false
+	}
+	return pp.Lsn > 0
+}
+
+// waitForSlot polls pg_stat_replication until the named slot is in
+// state='streaming' — i.e. the dialect has finished its snapshot phase
+// and is actively consuming WAL. Gating on pg_replication_slots.active
+// is NOT enough: active flips true when the dialect's replication
+// connection opens (before snapshot), so a subsequent INSERT can race
+// the dialect's snapshot REPEATABLE READ window, get captured BOTH by
+// the snapshot AND re-streamed by pgoutput → two proposals from one
+// INSERT, which broke TestPostgresTransactionGrouping flakily ~25% of
+// the time.
 func waitForSlot(t *testing.T, slotName string) {
 	t.Helper()
 	require.Eventually(t, func() bool {
 		db := createDB(t)
 		defer db.Close()
-		var active bool
-		err := db.QueryRow(
-			"SELECT active FROM pg_replication_slots WHERE slot_name = $1", slotName,
-		).Scan(&active)
-		return err == nil && active
+		var state string
+		err := db.QueryRow(`
+			SELECT s.state
+			FROM pg_stat_replication s
+			JOIN pg_replication_slots r ON r.active_pid = s.pid
+			WHERE r.slot_name = $1`, slotName,
+		).Scan(&state)
+		return err == nil && state == "streaming"
 	}, 10*time.Second, 100*time.Millisecond)
 }
 
@@ -269,7 +299,14 @@ func TestPostgresPositionResume(t *testing.T) {
 	require.NoError(t, err)
 	db.Close()
 
-	// Collect the "before" proposal and its position.
+	// Collect the "before" proposal AND a post-commit position.
+	// The dialect emits TWO kinds of position checkpoints to po:
+	//   - snapshot-progress (Lsn=0, SnapshotProgress set)
+	//   - per-commit (Lsn>0, SnapshotProgress nil)
+	// Resuming from a snapshot-progress checkpoint races re-streaming
+	// from the slot's restart_lsn (the entire failure mode this test
+	// is supposed to guard against). Filter explicitly: a usable
+	// resume position is one whose decoded Lsn > 0.
 	deadline := time.After(15 * time.Second)
 	seen := make(map[string]bool)
 	var lastPos cluster.Position
@@ -280,9 +317,11 @@ func TestPostgresPositionResume(t *testing.T) {
 				seen[string(e.Key)] = true
 			}
 		case pos := <-positionChan1:
-			lastPos = pos
+			if isCommitPosition(t, pos) {
+				lastPos = pos
+			}
 		case <-deadline:
-			t.Fatal("timed out waiting for initial proposal and position")
+			t.Fatal("timed out waiting for initial proposal and commit position")
 		}
 	}
 

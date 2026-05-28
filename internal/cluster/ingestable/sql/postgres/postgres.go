@@ -248,6 +248,22 @@ func (d *PostgreSQLDialect) stream(
 	clientXLogPos := *lastLSN
 	nextStandby := time.Now().Add(standbyTimeout)
 
+	// resumeFloor is the LSN we asked StartReplication to resume from.
+	// pgoutput is allowed to re-stream messages from the slot's
+	// restart_lsn (which moves with acks, not with our explicit start
+	// LSN), so the server can hand us transactions whose COMMIT LSN
+	// has already been processed. Track resumeFloor here and drop any
+	// transaction whose BEGIN reports a final LSN <= resumeFloor.
+	//
+	// skippingTxn becomes true on BEGIN when finalLSN <= resumeFloor
+	// and resets on the matching COMMIT. While true, Insert/Update/
+	// Delete messages for the txn are dropped, the txn's COMMIT does
+	// NOT emit a proposal or position checkpoint, and pending is left
+	// untouched (it was empty at BEGIN by invariant, since the
+	// preceding non-skipped COMMIT flushed).
+	resumeFloor := *lastLSN
+	skippingTxn := false
+
 	for {
 		rawMsg, err := conn.ReceiveMessage(ctx)
 		if err != nil {
@@ -295,8 +311,15 @@ func (d *PostgreSQLDialect) stream(
 
 			case *pglogrepl.BeginMessage:
 				// Transaction start — pending should already be empty.
+				// Compare against resumeFloor to decide whether this
+				// txn was already processed in a previous session and
+				// should be silently dropped (see resumeFloor doc above).
+				skippingTxn = resumeFloor > 0 && m.FinalLSN <= resumeFloor
 
 			case *pglogrepl.InsertMessage:
+				if skippingTxn {
+					break
+				}
 				if e := tupleToEntity(m.Tuple, m.RelationID, relations, config, pgCfg); e != nil {
 					pending = append(pending, e)
 				}
@@ -307,6 +330,9 @@ func (d *PostgreSQLDialect) stream(
 				}
 
 			case *pglogrepl.UpdateMessage:
+				if skippingTxn {
+					break
+				}
 				if e := tupleToEntity(m.NewTuple, m.RelationID, relations, config, pgCfg); e != nil {
 					pending = append(pending, e)
 				}
@@ -317,6 +343,9 @@ func (d *PostgreSQLDialect) stream(
 				}
 
 			case *pglogrepl.DeleteMessage:
+				if skippingTxn {
+					break
+				}
 				// With REPLICA IDENTITY DEFAULT only the primary key
 				// columns are available in the old tuple. Non-key
 				// columns will be null in the resulting JSON.
@@ -330,6 +359,15 @@ func (d *PostgreSQLDialect) stream(
 				}
 
 			case *pglogrepl.CommitMessage:
+				if skippingTxn {
+					skippingTxn = false
+					// pending is empty by invariant (we dropped every
+					// row in the txn). No proposal to flush, no
+					// position checkpoint to emit — the supervisor
+					// already has a position past this LSN, which is
+					// why we're skipping.
+					break
+				}
 				if err := flushPending(ctx, &pending, pr); err != nil {
 					return err
 				}
@@ -352,16 +390,29 @@ func (d *PostgreSQLDialect) stream(
 				clientXLogPos = endLSN
 				*lastLSN = endLSN
 
-				// Acknowledge the commit position to Postgres.
-				if time.Now().After(nextStandby) {
-					err = pglogrepl.SendStandbyStatusUpdate(ctx, conn, pglogrepl.StandbyStatusUpdate{
-						WALWritePosition: clientXLogPos,
-					})
-					if err != nil {
-						return err
-					}
-					nextStandby = time.Now().Add(standbyTimeout)
+				// Acknowledge the commit position to Postgres on every
+				// commit (not just every standbyTimeout). The throttle
+				// here was the root cause of TestPostgresPositionResume:
+				// after one commit, the supervisor / test had a position
+				// checkpoint to resume from, but the server's
+				// confirmed_flush_lsn hadn't moved, so a resume from that
+				// checkpoint LSN re-streamed already-processed messages
+				// from the slot's older restart_lsn. Per-commit acking
+				// keeps the server's view of our progress in sync with
+				// the position we publish on the position channel.
+				//
+				// Cost is one TCP message per Postgres COMMIT, which is
+				// negligible — commits are inherently rate-limited by
+				// the upstream workload, not by us. The throttle still
+				// applies to keepalive-driven acks below where there
+				// is no new commit to report.
+				err = pglogrepl.SendStandbyStatusUpdate(ctx, conn, pglogrepl.StandbyStatusUpdate{
+					WALWritePosition: clientXLogPos,
+				})
+				if err != nil {
+					return err
 				}
+				nextStandby = time.Now().Add(standbyTimeout)
 
 			case *pglogrepl.TruncateMessage:
 				zap.L().Warn("TruncateMessage received, ignoring")
