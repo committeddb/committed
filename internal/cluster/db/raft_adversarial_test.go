@@ -16,6 +16,7 @@ package db_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
@@ -710,7 +711,13 @@ func TestAdversarial_ConcurrentConfigChanges(t *testing.T) {
 	//   - ~2/3 on a follower (forwarded via raft to the leader)
 	//
 	// Whoever the leader happens to be, at least a third of the
-	// proposes exercise the forwarding path.
+	// proposes exercise the forwarding path. ErrProposalUnknown is the
+	// documented retry-me signal from the leader-change watcher and
+	// ProposeIngestable is idempotent by config ID (saveIngestable's
+	// putVersioned tolerates same-ID re-applies), so we retry instead
+	// of failing on it — otherwise this test flakes ~2% under -count=20
+	// when a transient re-election lands between WaitForLeader and the
+	// concurrent propose burst.
 	var wg sync.WaitGroup
 	errs := make([]error, ingestables)
 	for i := 0; i < ingestables; i++ {
@@ -721,7 +728,12 @@ func TestAdversarial_ConcurrentConfigChanges(t *testing.T) {
 			cfg := createTestIngestableConfig(fmt.Sprintf("adv-%d", i))
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			errs[i] = h.dbs[i%replicas].ProposeIngestable(ctx, cfg)
+			for attempt := 0; attempt < 5; attempt++ {
+				errs[i] = h.dbs[i%replicas].ProposeIngestable(ctx, cfg)
+				if !errors.Is(errs[i], db.ErrProposalUnknown) {
+					return
+				}
+			}
 		}()
 	}
 	wg.Wait()
