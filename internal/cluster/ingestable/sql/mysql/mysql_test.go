@@ -121,18 +121,27 @@ func TestMysqlDialect(t *testing.T) {
 			tt.setupFn(t)
 
 			dialect := &mysql.MySQLDialect{}
-			tt.config.ConnectionString = ingestURL
-			tt.config.Tables = []string{tt.tables}
+
+			// Copy basicConfig per iteration. The previous iteration's
+			// Ingest goroutine may still be unwinding after t.Run's
+			// defer cancel(); without an isolated config, writing the
+			// new iteration's ConnectionString / Tables races the old
+			// goroutine's read inside createCanal (race detector flagged
+			// this on the CI runner). Shallow copy is enough — only
+			// ConnectionString and Tables are mutated below, the
+			// other fields are read-only.
+			cfg := *tt.config
+			cfg.ConnectionString = ingestURL
+			cfg.Tables = []string{tt.tables}
 
 			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
 
 			proposalChan := make(chan *cluster.Proposal)
 			positionChan := make(chan cluster.Position)
 
+			ingestErr := make(chan error, 1)
 			go func() {
-				err := dialect.Ingest(ctx, tt.config, nil, proposalChan, positionChan)
-				require.Nil(t, err)
+				ingestErr <- dialect.Ingest(ctx, &cfg, nil, proposalChan, positionChan)
 			}()
 
 			// Collect entities until we've seen the expected count.
@@ -182,6 +191,17 @@ func TestMysqlDialect(t *testing.T) {
 			}
 
 			require.ElementsMatch(t, tt.entities, entities)
+
+			// Cancel and wait for the Ingest goroutine to fully exit
+			// before t.Run returns. Without this the next iteration can
+			// race the goroutine on tt.config / the shared MySQL slot.
+			cancel()
+			select {
+			case err := <-ingestErr:
+				require.Nil(t, err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("Ingest did not exit after cancel")
+			}
 		})
 	}
 }
@@ -278,25 +298,36 @@ func TestMysqlReconnect(t *testing.T) {
 
 	// --- pause MySQL (simulate network outage) ---
 	// Use Docker pause/unpause instead of stop/start because
-	// OrbStack reassigns host port mappings on container restart.
-	// Pause freezes all processes and network without destroying
-	// the port mapping, so the canal can reconnect on the same port.
+	// OrbStack (and other Docker-compatible runtimes) reassign host
+	// port mappings on container restart. Pause freezes all processes
+	// and network without destroying the port mapping, so the canal
+	// can reconnect on the same port.
 	t.Log("pausing MySQL container")
-	cli, err := client.NewClientWithOpts(client.FromEnv)
+	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	require.Nil(t, err)
 	defer cli.Close()
 
 	containerID := mysqlContainer.GetContainerID()
-	err = cli.ContainerPause(ctx, containerID)
-	require.Nil(t, err)
+	require.NotEmpty(t, containerID, "testcontainers handed back an empty container ID")
+
+	// Use a fresh context for Docker control calls, independent of the
+	// dialect's context. If `ctx` happened to be cancelled (e.g. by a
+	// failure in a different goroutine), the pause/unpause calls would
+	// fail with a context error instead of doing the work we need for
+	// the rest of the test.
+	dockerCtx, dockerCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer dockerCancel()
+
+	err = cli.ContainerPause(dockerCtx, containerID)
+	require.Nil(t, err, "ContainerPause(%q)", containerID)
 
 	// Give the canal time to detect the frozen connection.
 	time.Sleep(3 * time.Second)
 
 	// --- unpause MySQL ---
 	t.Log("unpausing MySQL container")
-	err = cli.ContainerUnpause(ctx, containerID)
-	require.Nil(t, err)
+	err = cli.ContainerUnpause(dockerCtx, containerID)
+	require.Nil(t, err, "ContainerUnpause(%q)", containerID)
 
 	// --- insert a new row after MySQL is back ---
 	db = createDB(t)
