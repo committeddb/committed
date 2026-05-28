@@ -1,4 +1,7 @@
 committed*
+# Built binary matches `committed*` above; un-ignore Go sources so files
+# like e2e/cdc/harness/committed.go don't silently disappear from commits.
+!*.go
 vendor
 raft-*
 debug
