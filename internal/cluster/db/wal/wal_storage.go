@@ -31,12 +31,12 @@ var (
 )
 
 var (
-	typeBucket       = []byte("types")
-	databaseBucket   = []byte("databases")
-	ingestableBucket = []byte("ingestables")
+	typeBucket               = []byte("types")
+	databaseBucket           = []byte("databases")
+	ingestableBucket         = []byte("ingestables")
+	ingestablePositionBucket = []byte("ingestablePositions")
 )
 
-// TODO var ingestablePositionBucket = []byte("ingestablesPositions")
 var (
 	syncableBucket      = []byte("syncables")
 	syncableIndexBucket = []byte("syncableIndexes")
@@ -51,7 +51,7 @@ var (
 	appliedIndexKey    = []byte("idx")
 )
 
-var buckets = [][]byte{typeBucket, databaseBucket, ingestableBucket, syncableBucket, syncableIndexBucket, appliedIndexBucket}
+var buckets = [][]byte{typeBucket, databaseBucket, ingestableBucket, ingestablePositionBucket, syncableBucket, syncableIndexBucket, appliedIndexBucket}
 
 type StateType int
 
@@ -322,6 +322,21 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	if err != nil {
 		return nil, err
 	}
+
+	// Re-spawn ingestable workers for configs applied in a previous
+	// run. ApplyCommitted's idempotency guard (entry.Index <=
+	// appliedIndex) means re-replay of the WAL on restart does NOT
+	// re-call handleIngestable, so without this restore step the
+	// supervisor never gets notified about ingestables that were
+	// registered before the restart. Combined with the position
+	// persistence in ingestable_position.go, this is what makes
+	// restart-resume work end-to-end.
+	//
+	// Send asynchronously so Open does not block on the channel: db.New
+	// is the caller, and it only starts listenForIngestables AFTER
+	// Open returns. The send goroutine will block briefly on the
+	// unbuffered channel until then.
+	go ws.restoreIngestableWorkers()
 
 	idx, err := ws.loadAppliedIndex()
 	if err != nil {
@@ -605,14 +620,9 @@ func (s *Storage) applyEntity(entity *cluster.Entity) error {
 			return fmt.Errorf("[wal.storage] handleSyncableIndex: %w", err)
 		}
 	case cluster.IsIngestablePosition(entity.ID):
-		// IngestablePosition entities are emitted by ingest workers as
-		// resume-position checkpoints. Position(id) currently always
-		// returns nil (storage-side position persistence is not yet
-		// implemented), so this is a no-op apply. Without the explicit
-		// case the entity falls into handleUserDefined, which writes
-		// to the time-series store using e.Timestamp — and position
-		// entities don't carry one, so the apply crashes with
-		// "can't insert rows into disk partition".
+		if err := s.saveIngestablePosition(entity); err != nil {
+			return fmt.Errorf("[wal.storage] saveIngestablePosition: %w", err)
+		}
 	default:
 		if err := s.handleUserDefined(entity); err != nil {
 			return fmt.Errorf("[wal.storage] handleUserDefined: %w", err)

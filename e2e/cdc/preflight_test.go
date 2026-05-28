@@ -72,35 +72,38 @@ func TestPreflightReplicaIdentity(t *testing.T) {
 	}
 }
 
-// TestRestartResume verifies committed survives a Postgres restart
-// without losing or duplicating CDC events.
+// TestRestartResume verifies that committed resumes ingestion from
+// the persisted IngestablePosition after a restart — no re-snapshot,
+// no replayed events, no gaps.
 //
-// SKIPPED FOR NOW: testcontainers-go's Stop+Start cycle assigns a new
-// host port to the Postgres container, but committed's ingestable
-// config has the original connection string baked in (it was POSTed
-// at New() time). After restart, committed's reconnect loop bangs on
-// the old port forever. To make this test real we need either:
-//   (a) a fixed host-port mapping for the Postgres container (loses
-//       parallel-test isolation but is fine since we run -p=1), or
-//   (b) restarting Postgres inside the container with docker exec so
-//       the port doesn't change, or
-//   (c) re-POSTing the ingestable with the new connection string.
-// All three are post-PR improvements.
+// Restarts committed (not Postgres) because that's the scenario
+// position persistence actually serves: a committed process exits
+// (k8s rolling restart, crash, deploy) and the next process picks up
+// where the previous one left off. Postgres stays up so the slot's
+// LSN cursor is preserved on the server side; the test asserts that
+// committed's side also remembers, via the position bucket added in
+// internal/cluster/db/wal/ingestable_position.go.
 func TestRestartResume(t *testing.T) {
-	t.Skip("testcontainers Postgres restart reassigns host port; see comment for resolution paths")
-
 	h := harness.New(t, harness.Options{Tables: []string{"region"}})
 
+	// Phase 1: insert two rows, capture, verify.
 	pre := mutation.NewScript()
-	pre.Insert("region", regionRow(1, "BEFORE", "phase1"))
+	pre.Insert("region", regionRow(1, "BEFORE_A", "phase1-a"))
+	pre.Insert("region", regionRow(2, "BEFORE_B", "phase1-b"))
 	require.NoError(t, pre.Run(context.Background(), h.Conn()), "phase 1 run")
 	oracle.Assert(t, pre.Expected(), h.Capture(t, pre.ExpectedCounts()))
 
-	ctx := context.Background()
-	require.NoError(t, h.RestartPostgres(ctx), "restart postgres")
+	// Restart committed against the same data dir. Position persistence
+	// means the resumed ingestable starts from where phase 1 left off
+	// instead of re-snapshotting region (which would re-emit rows 1
+	// and 2 and break the oracle below).
+	h.RestartCommitted(t)
 
+	// Phase 2: insert two more rows. The oracle expects exactly 2 new
+	// proposals on region — proving phase-1 rows were NOT replayed.
 	post := mutation.NewScript()
-	post.Insert("region", regionRow(2, "AFTER", "phase2"))
-	require.NoError(t, post.Run(ctx, h.Conn()), "phase 2 run")
+	post.Insert("region", regionRow(3, "AFTER_A", "phase2-a"))
+	post.Insert("region", regionRow(4, "AFTER_B", "phase2-b"))
+	require.NoError(t, post.Run(context.Background(), h.Conn()), "phase 2 run")
 	oracle.Assert(t, post.Expected(), h.Capture(t, post.ExpectedCounts()))
 }

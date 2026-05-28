@@ -258,6 +258,32 @@ func (h *Harness) SlotName(table string) string {
 	return h.slotNames[table]
 }
 
+// RestartCommitted stops the committed child process and starts a
+// fresh one against the same data dir. Postgres is untouched, so the
+// replication slot keeps its position. After restart, committed
+// replays its WAL, re-loads ingestable configs, and reads back the
+// persisted IngestablePosition via Storage.Position so the ingestable
+// resumes from the last acked LSN rather than re-snapshotting.
+//
+// This is the test path for the resume-from-checkpoint feature added
+// in this PR — it exercises Storage.Position end-to-end without
+// needing a Postgres restart (which testcontainers can't do cleanly
+// because Stop+Start reassigns the host port).
+func (h *Harness) RestartCommitted(t *testing.T) {
+	t.Helper()
+	dataDir := h.committed.dataDir
+	h.committed.Stop()
+	h.committed = startCommittedAt(t, dataDir)
+
+	// Wait for each ingestable's slot to be in streaming state again.
+	// On restart, committed re-applies the ingestable config, the
+	// supervisor spawns the dialect, and the dialect reconnects to
+	// the existing slot from the persisted position.
+	for _, table := range h.topics {
+		h.waitForIngestableReady(t, h.slotNames[table])
+	}
+}
+
 // RestartPostgres stops and restarts the Postgres container, then
 // reconnects the harness's pgx connection. Committed's ingestable
 // reconnects on its own (see postgres.go:135 "postgres replication

@@ -37,15 +37,11 @@ func postIngestable(t *testing.T, table, pgConnStr, slotName, pubName string) {
 	fmt.Fprintf(&b, "topic = %q\n", table)
 	fmt.Fprintf(&b, "connectionString = %q\n", pgConnStr)
 	fmt.Fprintf(&b, "primaryKey = %q\n", dataset.PrimaryKey(table))
-	// Unqualified table name. The postgres ingestable's
-	// ensurePublication (postgres.go:389) double-quotes the whole
-	// string as a single identifier, so "public.region" becomes the
-	// identifier "public.region" with a literal dot, not schema.table.
-	// Unqualified names resolve to the current schema (public for the
-	// postgres superuser) and sidestep the issue. The dialect's
-	// tupleToEntity matching is namespace-tolerant — both qualified
-	// and unqualified work on the lookup side (postgres.go:428).
-	fmt.Fprintf(&b, "tables = [%q]\n\n", table)
+	// Schema-qualified table name — the natural form, matching the
+	// TOML examples in the repo. ensurePublication uses quoteTable
+	// (postgres.go:389) so "public.region" correctly becomes the
+	// schema.table reference "public"."region".
+	fmt.Fprintf(&b, "tables = [\"public.%s\"]\n\n", table)
 	fmt.Fprintf(&b, "[sql.postgres]\nslot_name = %q\npublication = %q\n\n", slotName, pubName)
 	for _, col := range dataset.Columns(table) {
 		fmt.Fprintf(&b, "[[sql.mappings]]\njsonName = %q\ncolumn = %q\n\n", col, col)

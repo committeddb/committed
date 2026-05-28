@@ -386,10 +386,17 @@ func quoteIdent(s string) string {
 
 // ensurePublication creates the publication if it does not already exist.
 // The connection must be in replication=database mode which allows SQL.
+//
+// Table names are quoted via quoteTable (not quoteIdent) so that
+// schema-qualified entries like "public.orders" become "public"."orders"
+// — a schema-qualified reference — instead of a single literal
+// identifier "public.orders" with a dot in the name. The TOML examples
+// in this repo (postgres_ingestable.toml, postgres_multi_table_ingestable.toml)
+// all use schema-qualified names; quoteIdent here used to break them.
 func ensurePublication(ctx context.Context, conn *pgconn.PgConn, pgCfg *pgConfig) error {
 	quoted := make([]string, len(pgCfg.tables))
 	for i, t := range pgCfg.tables {
-		quoted[i] = quoteIdent(t)
+		quoted[i] = quoteTable(t)
 	}
 	tableList := strings.Join(quoted, ", ")
 	query := fmt.Sprintf("CREATE PUBLICATION %s FOR TABLE %s", quoteIdent(pgCfg.publication), tableList)

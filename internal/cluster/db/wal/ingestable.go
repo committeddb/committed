@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	bolt "go.etcd.io/bbolt"
+	"go.uber.org/zap"
 
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/db"
@@ -73,6 +74,34 @@ func (s *Storage) deleteIngestable(id []byte) error {
 		s.databases[string(id)] = nil
 		return nil
 	})
+}
+
+// restoreIngestableWorkers walks the ingestable bucket and re-sends
+// each registered ingestable to the supervisor's ingest channel so a
+// restarted node spawns workers for them. See the call site comment in
+// Open for the apply-path/restart-replay ordering this fixes.
+//
+// Errors here are warnings, not fatals: a corrupted single config
+// shouldn't stop the rest from running. The dialect will surface a
+// real connection or schema error in its own retry loop later.
+func (s *Storage) restoreIngestableWorkers() {
+	if s.ingest == nil {
+		return
+	}
+	cfgs, err := s.Ingestables()
+	if err != nil {
+		s.logger.Warn("restoreIngestableWorkers: list ingestables", zap.Error(err))
+		return
+	}
+	for _, cfg := range cfgs {
+		_, ingestable, err := s.parser.ParseIngestable(cfg.MimeType, cfg.Data)
+		if err != nil {
+			s.logger.Warn("restoreIngestableWorkers: parse",
+				zap.String("id", cfg.ID), zap.Error(err))
+			continue
+		}
+		s.ingest <- &db.IngestableWithID{ID: cfg.ID, Ingestable: ingestable}
+	}
 }
 
 func (s *Storage) Ingestables() ([]*cluster.Configuration, error) {
