@@ -318,6 +318,14 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	ws.hardState = *st
 	ws.snapshot = *snap
 
+	// Fail fast if any persisted config templates a secret env var this
+	// node is missing, before opening database connections or spawning
+	// workers below. See validateConfigSecrets for why missing secrets
+	// are fatal while other parse errors are left to the paths below.
+	if err = ws.validateConfigSecrets(); err != nil {
+		return nil, err
+	}
+
 	err = ws.loadDatabases()
 	if err != nil {
 		return nil, err

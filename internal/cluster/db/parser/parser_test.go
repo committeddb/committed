@@ -1,6 +1,7 @@
 package parser_test
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 
@@ -8,6 +9,7 @@ import (
 
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/clusterfakes"
+	"github.com/philborlin/committed/internal/cluster/config"
 	"github.com/philborlin/committed/internal/cluster/db/parser"
 )
 
@@ -211,6 +213,91 @@ mode = "something-weird"`)
 	_, _, _, err := p.ParseSyncable("text/toml", data, nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "unknown syncable mode")
+}
+
+// --- Secret interpolation ---
+
+// TestParse_InterpolatesEnv asserts a ${VAR} reference in a config is
+// expanded against the environment before the sub-parser sees the value,
+// so secrets live in the env rather than in the proposed/stored config.
+func TestParse_InterpolatesEnv(t *testing.T) {
+	t.Setenv("TEST_DB_PASSWORD", "s3cr3t")
+
+	p := parser.New()
+	fakeParser := &clusterfakes.FakeDatabaseParser{}
+	fakeParser.ParseReturns(&clusterfakes.FakeDatabase{}, nil)
+	p.AddDatabaseParser("sql", fakeParser)
+
+	data := []byte(`[database]
+type = "sql"
+name = "mydb"
+[sql]
+dialect = "mysql"
+connectionString = "user:${TEST_DB_PASSWORD}@tcp(localhost:3306)/db"`)
+
+	_, _, err := p.ParseDatabase("text/toml", data)
+	require.NoError(t, err)
+
+	v, _ := fakeParser.ParseArgsForCall(0)
+	require.Equal(t, "user:s3cr3t@tcp(localhost:3306)/db", v.GetString("sql.connectionString"))
+	// Non-secret fields round-trip unchanged through interpolation.
+	require.Equal(t, "mysql", v.GetString("sql.dialect"))
+}
+
+// TestParse_MissingEnvVarErrors asserts an unset reference fails the
+// parse with a typed MissingVarError instead of silently sending an
+// empty credential.
+func TestParse_MissingEnvVarErrors(t *testing.T) {
+	p := parser.New()
+	fakeParser := &clusterfakes.FakeDatabaseParser{}
+	fakeParser.ParseReturns(&clusterfakes.FakeDatabase{}, nil)
+	p.AddDatabaseParser("sql", fakeParser)
+
+	data := []byte(`[database]
+type = "sql"
+name = "mydb"
+[sql]
+dialect = "mysql"
+connectionString = "user:${DEFINITELY_UNSET_VAR}@tcp"`)
+
+	_, _, err := p.ParseDatabase("text/toml", data)
+	require.Error(t, err)
+	var missing *config.MissingVarError
+	require.True(t, errors.As(err, &missing))
+	require.Equal(t, "DEFINITELY_UNSET_VAR", missing.Name)
+	// The sub-parser must never run when interpolation fails.
+	require.Equal(t, 0, fakeParser.ParseCallCount())
+}
+
+// TestValidate covers the side-effect-free startup check: missing
+// reference → MissingVarError, all-resolved → nil, no sub-parser needed.
+func TestValidate(t *testing.T) {
+	p := parser.New() // no sub-parsers registered: Validate must not need them
+
+	tmpl := []byte(`[ingestable]
+type = "sql"
+name = "ing"
+[sql]
+connectionString = "user:${TEST_VALIDATE_PW}@tcp"`)
+
+	t.Run("missing var errors", func(t *testing.T) {
+		err := p.Validate("text/toml", tmpl)
+		require.Error(t, err)
+		var missing *config.MissingVarError
+		require.True(t, errors.As(err, &missing))
+	})
+
+	t.Run("resolved var passes", func(t *testing.T) {
+		t.Setenv("TEST_VALIDATE_PW", "ok")
+		require.NoError(t, p.Validate("text/toml", tmpl))
+	})
+
+	t.Run("malformed toml is a non-missing error", func(t *testing.T) {
+		err := p.Validate("text/toml", []byte(`not valid toml {{{`))
+		require.Error(t, err)
+		var missing *config.MissingVarError
+		require.False(t, errors.As(err, &missing))
+	})
 }
 
 // --- Multiple parsers ---
