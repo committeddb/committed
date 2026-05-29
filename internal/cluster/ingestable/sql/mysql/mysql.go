@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"maps"
 	"net/url"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -17,7 +16,6 @@ import (
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/siddontang/go-log/log"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 
@@ -399,13 +397,12 @@ func createCanal(config *sql.Config) (*canal.Canal, []string, error) {
 	}
 	// Dump config is intentionally omitted — the pure-SQL snapshot
 	// replaces canal's built-in mysqldump phase.
-	streamHandler, err := log.NewStreamHandler(os.Stdout)
-	if err != nil {
-		return nil, nil, err
-	}
-	logger := log.NewDefault(streamHandler)
-	logger.SetLevel(log.LevelError)
-	cfg.Logger = logger
+	//
+	// Route canal's own logging through zap (see canalLogger) so MySQL
+	// CDC logs share the structured stream instead of going straight to
+	// stdout. The previous siddontang LevelError behavior is preserved
+	// by canalLogger's level policy.
+	cfg.Logger = newCanalLogger(zap.L())
 
 	canal, err := canal.NewCanal(cfg)
 

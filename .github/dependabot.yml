@@ -1,0 +1,22 @@
+# Dependabot keeps Go module dependencies current so the stale-deps
+# situation this config was added for (viper/go-log/jsonpath pinned to
+# 2018–2019) doesn't recur. The repo is Go-only, so gomod is the only
+# ecosystem watched.
+version: 2
+updates:
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    # Batch minor + patch bumps into a single PR to cut review noise.
+    # Major bumps are intentionally left out of the group so each lands
+    # in its own PR for manual review — majors can carry breaking API
+    # changes (exactly what bit the viper upgrade).
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+    commit-message:
+      prefix: "deps"

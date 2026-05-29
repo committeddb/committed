@@ -40,15 +40,9 @@ func (p *IngestableParser) ParseConfig(v *viper.Viper) (*Config, Dialect, error)
 	connectionString := v.GetString("sql.connectionString")
 	primaryKey := v.GetString("sql.primaryKey")
 
-	rawMappings := v.Get("sql.mappings").([]interface{})
-	mappings := make([]Mapping, 0, len(rawMappings))
-	for _, item := range rawMappings {
-		m := item.(map[string]interface{})
-		mapping := Mapping{
-			JsonName:  m["jsonName"].(string),
-			SQLColumn: m["column"].(string),
-		}
-		mappings = append(mappings, mapping)
+	var mappings []Mapping
+	if err := v.UnmarshalKey("sql.mappings", &mappings); err != nil {
+		return nil, nil, fmt.Errorf("parse sql.mappings: %w", err)
 	}
 
 	tables := v.GetStringSlice("sql.tables")

@@ -16,15 +16,21 @@ type Dialect interface {
 	IsPermanent(err error) bool
 }
 
+// The mapstructure tags drive viper.UnmarshalKey when parsing the
+// [[sql.indexes]] / [[sql.mappings]] array-of-tables. They're required
+// where the Go field name differs from the TOML key (IndexName→name,
+// ColumnNames→index, SQLType→type) and make the camelCase keys
+// (jsonPath) explicit so parsing no longer depends on viper's key-case
+// handling, which changed between viper versions.
 type Index struct {
-	IndexName   string
-	ColumnNames string // comma separated list of columns - why isn't this a slice?
+	IndexName   string `mapstructure:"name"`
+	ColumnNames string `mapstructure:"index"` // comma separated list of columns - why isn't this a slice?
 }
 
 type Mapping struct {
-	JsonPath string
-	Column   string
-	SQLType  string
+	JsonPath string `mapstructure:"jsonPath"`
+	Column   string `mapstructure:"column"`
+	SQLType  string `mapstructure:"type"`
 	// TODO Add a concept of an optional mapping that doesn't error if it is missing
 }
 

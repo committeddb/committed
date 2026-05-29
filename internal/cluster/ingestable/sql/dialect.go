@@ -21,7 +21,12 @@ type Config struct {
 	Options          map[string]string
 }
 
+// The mapstructure tags drive viper.UnmarshalKey when parsing the
+// [[sql.mappings]] array-of-tables. Required because the Go field names
+// differ from the TOML keys (JsonName→jsonName, SQLColumn→column), and
+// they keep parsing independent of viper's key-case handling, which
+// changed between viper versions.
 type Mapping struct {
-	JsonName  string
-	SQLColumn string
+	JsonName  string `mapstructure:"jsonName"`
+	SQLColumn string `mapstructure:"column"`
 }

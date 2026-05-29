@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/oliveagle/jsonpath"
+	"github.com/PaesslerAG/jsonpath"
 	"go.uber.org/zap"
 
 	"github.com/philborlin/committed/internal/cluster"
@@ -72,7 +72,7 @@ func (c *Syncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.Shoul
 
 		var values []any
 		for _, path := range c.insert.JsonPath {
-			res, err := jsonpath.JsonPathLookup(jsonData, path)
+			res, err := jsonpath.Get(path, jsonData)
 			if err != nil {
 				return false, cluster.Permanent(fmt.Errorf("jsonpath [%v]: %w", path, err))
 			}
@@ -138,7 +138,7 @@ func (c *Syncable) SyncBatch(ctx context.Context, ps []*cluster.Proposal) (bool,
 
 			var values []any
 			for _, path := range c.insert.JsonPath {
-				res, err := jsonpath.JsonPathLookup(jsonData, path)
+				res, err := jsonpath.Get(path, jsonData)
 				if err != nil {
 					_ = tx.Rollback()
 					return false, cluster.Permanent(fmt.Errorf("jsonpath [%v]: %w", path, err))

@@ -43,24 +43,13 @@ func (p *SyncableParser) ParseConfig(v *viper.Viper, storage cluster.DatabaseSto
 	primaryKey := v.GetString("sql.primaryKey")
 
 	var mappings []Mapping
-	for _, item := range v.Get("sql.mappings").([]interface{}) {
-		m := item.(map[string]interface{})
-		mapping := Mapping{
-			JsonPath: m["jsonPath"].(string),
-			Column:   m["column"].(string),
-			SQLType:  m["type"].(string),
-		}
-		mappings = append(mappings, mapping)
+	if err := v.UnmarshalKey("sql.mappings", &mappings); err != nil {
+		return nil, fmt.Errorf("[sql.syncable-parser] parse sql.mappings: %w", err)
 	}
 
 	var indexes []Index
-	for _, item := range v.Get("sql.indexes").([]interface{}) {
-		m := item.(map[string]interface{})
-		i := Index{
-			IndexName:   m["name"].(string),
-			ColumnNames: m["index"].(string),
-		}
-		indexes = append(indexes, i)
+	if err := v.UnmarshalKey("sql.indexes", &indexes); err != nil {
+		return nil, fmt.Errorf("[sql.syncable-parser] parse sql.indexes: %w", err)
 	}
 
 	config := &Config{
