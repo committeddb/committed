@@ -16,6 +16,19 @@ LDFLAGS := -s -w \
 build:
 	go build -ldflags="$(LDFLAGS)"
 
+# Build the runtime container image, stamping the same version metadata
+# the binary targets use so `docker run $(IMAGE) --version` matches a
+# native `make build`. Override the tag with IMAGE, e.g.
+# `make docker/build IMAGE=committed:1.2.3`.
+IMAGE ?= committed:latest
+
+docker/build:
+	docker build \
+	  --build-arg VERSION=$(VERSION) \
+	  --build-arg COMMIT=$(COMMIT) \
+	  --build-arg BUILD_DATE=$(DATE) \
+	  -t $(IMAGE) .
+
 test:
 	go test -short ./... -cover
 

@@ -1,5 +1,30 @@
-version: "3"
+# Single-node committed for local development. Build + run with:
+#
+#   VERSION=$(git describe --tags --dirty --always) \
+#   COMMIT=$(git rev-parse --short HEAD) \
+#   BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+#   docker compose up --build
+#
+# The version/commit/date env vars are optional — unset, the build
+# stamps the "dev"/"unknown" defaults. (For a stamped image without
+# compose, use `make docker/build`.)
 services:
   committed:
     container_name: committed
-    build: .
+    build:
+      context: .
+      args:
+        VERSION: ${VERSION:-dev}
+        COMMIT: ${COMMIT:-unknown}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
+    ports:
+      - "8080:8080" # HTTP API
+      - "9022:9022" # raft peer transport
+    environment:
+      - COMMITTED_NODE_ID=1
+      - COMMITTED_API_ADDR=:8080
+    # No volume is mounted, so WAL/state live in the container's writable
+    # layer and are lost when the container is removed — fine for a dev
+    # smoke test, not for anything you want to keep. To persist, mount a
+    # volume the nonroot user (uid 65532) can write and point
+    # COMMITTED_DATA_DIR at it.

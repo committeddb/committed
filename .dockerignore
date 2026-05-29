@@ -1,0 +1,36 @@
+# Keep the build context small and reproducible. The build needs the Go
+# sources, go.mod/go.sum, and the embedded assets (api/openapi.yaml,
+# api/swagger-ui.html, cmd/demo/migrations/*.sql) — nothing else.
+
+# VCS and tooling metadata.
+.git
+.gitignore
+.github
+.golangci.yml
+
+# Agent / editor local state.
+.claude
+.claude-scratch
+.vscode
+.idea
+
+# Docker scaffolding (no need to send it into its own build context).
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# Local runtime / data dirs and the dev mysql volume.
+data
+example-data
+demo/db
+docker/db
+
+# Pre-built binaries: the repo-root build output (committed) and the
+# cross-compiled release artifacts (committed-<os>-<arch>[.exe]).
+/committed
+/committed-*
+*.exe
+
+# Docs the binary build doesn't need (none are go:embed'd).
+*.md
+LICENSE
