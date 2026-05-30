@@ -84,17 +84,6 @@ type options struct {
 	ingestSupervisorMaxAttempts    int
 	ingestSupervisorHealthyWindow  time.Duration
 
-	// ingestFreezeDrainTimeout bounds how long the ingest worker
-	// waits for its in-flight position-bump acks to resolve before
-	// returning ingestExitFreeze. A longer budget makes the
-	// supervisor's subsequent storage.Position read more accurate
-	// (fewer unresolved bumps means fewer rows re-read on replay);
-	// a shorter budget caps the MTTR for the supervisor's restart.
-	// 0 resolves to 2 * leaderChangeGrace at New time — the rough
-	// window within which the leader-change watcher will either
-	// apply-ack or ErrProposalUnknown-signal any in-flight waiter.
-	ingestFreezeDrainTimeout time.Duration
-
 	maxProposalBytes uint64
 }
 
@@ -196,14 +185,6 @@ func WithIngestSupervisorMaxAttempts(n int) Option {
 // Defaults to 60s.
 func WithIngestSupervisorHealthyWindow(d time.Duration) Option {
 	return func(o *options) { o.ingestSupervisorHealthyWindow = d }
-}
-
-// WithIngestFreezeDrainTimeout caps how long the ingest worker waits
-// on its in-flight position-bump acks before returning from the
-// freeze branch. Tests tighten this to exercise the timeout path.
-// Zero leaves the default (2 * leaderChangeGrace) in place.
-func WithIngestFreezeDrainTimeout(d time.Duration) Option {
-	return func(o *options) { o.ingestFreezeDrainTimeout = d }
 }
 
 // WithMaxProposalBytes overrides the marshaled-proposal size cap.

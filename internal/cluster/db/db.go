@@ -126,11 +126,6 @@ type DB struct {
 	ingestSupervisorMaxAttempts    int
 	ingestSupervisorHealthyWindow  time.Duration
 
-	// ingestFreezeDrainTimeout caps how long the ingest worker's
-	// freeze path waits on its in-flight bump acks. Resolved in New
-	// from options; 0 means "derived from leaderChangeGrace".
-	ingestFreezeDrainTimeout time.Duration
-
 	maxProposalBytes uint64
 
 	logger  *zap.Logger
@@ -203,9 +198,6 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 	if cfg.ingestSupervisorHealthyWindow == 0 {
 		cfg.ingestSupervisorHealthyWindow = defaultIngestSupervisorHealthyWindow
 	}
-	if cfg.ingestFreezeDrainTimeout == 0 {
-		cfg.ingestFreezeDrainTimeout = 2 * cfg.leaderChangeGrace
-	}
 	if cfg.maxProposalBytes == 0 {
 		cfg.maxProposalBytes = DefaultMaxProposalBytes
 	}
@@ -238,7 +230,6 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		ingestSupervisorMaxBackoff:     cfg.ingestSupervisorMaxBackoff,
 		ingestSupervisorMaxAttempts:    cfg.ingestSupervisorMaxAttempts,
 		ingestSupervisorHealthyWindow:  cfg.ingestSupervisorHealthyWindow,
-		ingestFreezeDrainTimeout:       cfg.ingestFreezeDrainTimeout,
 		maxProposalBytes:               cfg.maxProposalBytes,
 		logger:                         cfg.logger,
 		metrics:                        cfg.metrics,
@@ -555,12 +546,12 @@ func (db *DB) Propose(ctx context.Context, p *cluster.Proposal) error {
 // send completes, or Marshal fails), proposeAsync unregisters the
 // waiter itself and returns a zero RequestID + nil ack + error.
 //
-// Callers that want a simple block-until-applied (sync's index bump,
-// most config and user proposals) use the Propose wrapper. Callers
-// that want pipelined submissions with later outcome tracking
-// (ingest's position bump, which must drain before the worker freezes
-// so the supervisor's subsequent storage.Position read reflects
-// reality) use proposeAsync directly.
+// proposeAsync is the shared primitive beneath db.Propose; every
+// caller (user/config proposals, sync's index bump, ingest's position
+// bump) goes through the blocking Propose wrapper, so none use the raw
+// ack form directly today. It stays factored out because Propose's
+// select-on-ack logic is cleaner expressed against it, and because a
+// future pipelined caller would build on it again.
 func (db *DB) proposeAsync(ctx context.Context, p *cluster.Proposal) (uint64, <-chan error, error) {
 	p.RequestID = db.nextRequestID.Add(1)
 
@@ -668,11 +659,11 @@ func (db *DB) ProposeDeleteType(ctx context.Context, id string) error {
 //     derived from db.ctx (see db.Sync / db.Ingest), so this propagates
 //     into every worker, every inner Ingest goroutine, and every
 //     in-flight db.Propose / proposeAsync select. Both the ingest
-//     position-bump path (proposeAsync) and sync's index-bump path
-//     (the blocking Propose) watch db.ctx on the send and in the wait,
-//     so if we drained workers BEFORE canceling db.ctx and any worker
-//     were stuck in a bump while raft was wedged (quorum loss, slow
-//     Ready loop), the drain would hang forever. Cancel-first
+//     position-bump path and sync's index-bump path now go through the
+//     blocking Propose, which watches db.ctx on the send and in the
+//     wait, so if we drained workers BEFORE canceling db.ctx and any
+//     worker were stuck in a bump while raft was wedged (quorum loss,
+//     slow Ready loop), the drain would hang forever. Cancel-first
 //     guarantees workers can always reach exit.
 //  2. Snapshot the worker registry under workersMu and wait on every
 //     handle's done channel. By now the workers are already racing
@@ -756,27 +747,44 @@ func (db *DB) proposeSyncableIndex(ctx context.Context, i *cluster.SyncableIndex
 	return err
 }
 
-// proposeIngestablePositionAsync bumps the persisted Position for
-// an ingestable after the upstream source advances. Unlike sync's
-// bump, the ingest worker MUST be able to observe the bump's
-// outcome: if a flap truncates the bump before it applies,
-// storage.Position stays stale, and the supervisor's restart would
-// replay rows that were already committed under the old leader —
-// producing duplicate raft log entries.
+// proposeIngestablePosition bumps the persisted Position for an
+// ingestable after the upstream source advances, and BLOCKS until that
+// bump is durably applied (the ingestablePositions bucket written via
+// the apply path) or until ctx is canceled / a leader change orphans
+// the proposal. The cost is one Raft round-trip per checkpoint; in
+// exchange, the resume position is durable.
 //
-// The worker registers the returned ack in its in-flight bump set
-// and drains every outstanding entry on freeze (either applied or
-// ErrProposalUnknown is fine; both leave storage.Position
-// consistent with what the supervisor's post-freeze read will
-// see). Passing db.ctx here (instead of a worker ctx) keeps the
-// bump submittable even during a registry replace — same rationale
-// as the old proposeIngestablePosition.
-func (db *DB) proposeIngestablePositionAsync(_ context.Context, p *cluster.IngestablePosition) (uint64, <-chan error, error) {
+// This used to be fire-and-forget (proposeIngestablePositionAsync on
+// db.ctx) with a worker-local in-flight-bump set drained on freeze —
+// machinery that existed only because the bump was async. Blocking the
+// bump makes the worker process one checkpoint at a time: there is never
+// more than one bump in flight, so the supervisor's post-freeze
+// storage.Position read is always definitive without a drain, and a hard
+// crash re-emits at most the proposals since the last durable checkpoint
+// instead of an unbounded storm.
+//
+// ctx is the INGEST WORKER's context, not db.ctx. On a registry replace
+// or Close the worker ctx is canceled; Propose then returns ctx.Err and
+// the position is not advanced. The ingestable's next resume reads the
+// un-advanced (persisted) position from storage and re-emits — safe
+// because those proposals either didn't commit, or committed but their
+// bump didn't (the very race this guards). On ErrProposalUnknown the
+// worker freezes, exactly like an unknown user proposal.
+//
+// On a successful (durable) bump the round-trip latency is recorded to
+// committed_ingest_position_bump_duration_seconds.
+func (db *DB) proposeIngestablePosition(ctx context.Context, p *cluster.IngestablePosition) error {
 	entity, err := cluster.NewUpsertIngestablePositionEntity(p)
 	if err != nil {
-		return 0, nil, err
+		return err
 	}
-	return db.proposeAsync(db.ctx, &cluster.Proposal{Entities: []*cluster.Entity{entity}})
+
+	start := time.Now()
+	err = db.Propose(ctx, &cluster.Proposal{Entities: []*cluster.Entity{entity}})
+	if err == nil && db.metrics != nil {
+		db.metrics.IngestPositionBumpCompleted(time.Since(start))
+	}
+	return err
 }
 
 // superviseRestartIngest re-registers an ingestable whose worker

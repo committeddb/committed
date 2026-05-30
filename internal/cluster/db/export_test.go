@@ -1,7 +1,6 @@
 package db
 
 import (
-	"context"
 	"time"
 
 	"go.etcd.io/etcd/raft/v3"
@@ -170,19 +169,6 @@ func (db *DB) WaitersForTest() []uint64 {
 		ids = append(ids, id)
 	}
 	return ids
-}
-
-// DrainInflightBumpsForTest exposes inflightBumps.drain so tests can
-// exercise the applied / lost / timeout paths without standing up
-// a full ingest worker. Callers construct the ack map by registering
-// real waiters via RegisterWaiterForTest, optionally signaling them
-// via SignalWaiterForTest, and passing the returned ack channels
-// here. After drain returns, every waiter in the map is unregistered
-// (leak-prevention cleanup), matching the behavior of the worker's
-// real freeze-exit path.
-func (db *DB) DrainInflightBumpsForTest(acks map[uint64]<-chan error, timeout time.Duration, id string) {
-	b := &inflightBumps{acks: acks}
-	b.drain(context.TODO(), db, timeout, db.logger, id)
 }
 
 // WaitForAnyWaiterForTest polls db.waiters until any waiter is

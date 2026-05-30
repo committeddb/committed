@@ -2,6 +2,7 @@ package db_test
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -327,4 +328,49 @@ func (ms *MemoryStorage) HasIngestablePositionEntity(_ string) bool {
 		}
 	}
 	return false
+}
+
+// TestIngest_FreezeNoWaiterLeak verifies the end-to-end cleanup
+// invariant through the worker's actual freeze path: after inducing a
+// freeze (and a subsequent supervisor restart, effectively disabled via
+// a very long backoff), no waiter entries remain in db.waiters. This
+// catches regressions where Propose's own defer skips cleanup on the
+// ErrProposalUnknown return path.
+//
+// (Relocated here from the deleted ingest_freeze_drain_test.go when the
+// async-bump drain machinery was retired in favor of blocking position
+// bumps. There is no drain to exercise anymore — the freeze path just
+// returns — but the no-leak invariant is still worth guarding.)
+func TestIngest_FreezeNoWaiterLeak(t *testing.T) {
+	d, s := newIngestFailFastDB(t)
+
+	require.Eventually(t,
+		func() bool { return d.ObservedLeaderForTest() == 1 },
+		2*time.Second, 2*time.Millisecond,
+	)
+
+	proposal := &cluster.Proposal{Entities: []*cluster.Entity{{
+		Type: &cluster.Type{ID: "string"}, Key: []byte("k"), Data: []byte("v"),
+	}}}
+	ing := newFreezeRecordingIngestable(proposal, cluster.Position([]byte("pos")))
+
+	require.NoError(t, d.Ingest(context.Background(), "leak-id", ing))
+	rid := d.WaitForAnyWaiterForTest(2 * time.Second)
+	require.NotZero(t, rid)
+
+	d.SignalWaiterForTest(rid, db.ErrProposalUnknown)
+
+	// Give the worker a moment to run through the freeze branch and
+	// return ingestExitFreeze. The supervisor backoff is 1h per
+	// newIngestFailFastDB, so it won't restart during teardown.
+	require.Eventually(t, func() bool {
+		return !slices.Contains(d.WaitersForTest(), rid)
+	}, 2*time.Second, 10*time.Millisecond,
+		"Propose's defer never unregistered the frozen waiter")
+
+	s.Unblock()
+	require.NoError(t, d.Close())
+
+	require.Empty(t, d.WaitersForTest(),
+		"waiters map must be empty after Close")
 }

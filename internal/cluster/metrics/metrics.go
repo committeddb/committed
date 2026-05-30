@@ -27,10 +27,10 @@ type Metrics struct {
 	leaderTransitionsObserved metric.Int64Counter
 	proposeFailFastUnknown    metric.Int64Counter
 
-	ingestFrozen              metric.Float64Gauge
-	ingestRestarts            metric.Int64Counter
-	ingestSupervisorGiveups   metric.Int64Counter
-	ingestFreezeDrainTimeouts metric.Int64Counter
+	ingestFrozen               metric.Float64Gauge
+	ingestRestarts             metric.Int64Counter
+	ingestSupervisorGiveups    metric.Int64Counter
+	ingestPositionBumpDuration metric.Float64Histogram
 }
 
 // New creates a Metrics instance from an OTel Meter. The caller
@@ -91,8 +91,9 @@ func New(meter metric.Meter) *Metrics {
 	m.ingestSupervisorGiveups, _ = meter.Int64Counter("committed.ingest.supervisor_giveup_total",
 		metric.WithDescription("Ingest supervisor give-ups after hitting the consecutive-freeze cap for an id."))
 
-	m.ingestFreezeDrainTimeouts, _ = meter.Int64Counter("committed.ingest.freeze_drain_timeout_total",
-		metric.WithDescription("Ingest freeze-path drain hit its timeout with at least one unresolved in-flight bump; supervisor may read a stale position."))
+	m.ingestPositionBumpDuration, _ = meter.Float64Histogram("committed.ingest.position.bump.duration",
+		metric.WithDescription("Time from submitting an ingestable Position bump after a batch of ingested proposals until it is durably applied."),
+		metric.WithUnit("s"))
 
 	return m
 }
@@ -213,12 +214,12 @@ func (m *Metrics) IngestSupervisorGiveup(id string) {
 		metric.WithAttributes(attribute.String("id", id)))
 }
 
-// IngestFreezeDrainTimeout increments the freeze-drain timeout counter
-// for an ingestable id. Fires when the worker's pre-freeze drain hit
-// its deadline with at least one in-flight bump unresolved — the
-// supervisor's subsequent storage.Position read may then be stale,
-// causing duplicate-row replay on the restart.
-func (m *Metrics) IngestFreezeDrainTimeout(id string) {
-	m.ingestFreezeDrainTimeouts.Add(context.Background(), 1,
-		metric.WithAttributes(attribute.String("id", id)))
+// IngestPositionBumpCompleted records the round-trip cost of the
+// now-blocking ingestable Position bump that follows a batch of ingested
+// proposals — the extra Raft round-trip this node pays in exchange for a
+// durable resume position (bounding duplicate log entries to the
+// proposals since the last durable checkpoint instead of an unbounded
+// storm on a hard crash). Recorded only on a successful (durable) bump.
+func (m *Metrics) IngestPositionBumpCompleted(d time.Duration) {
+	m.ingestPositionBumpDuration.Record(context.Background(), d.Seconds())
 }
