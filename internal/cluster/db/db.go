@@ -545,23 +545,22 @@ func (db *DB) Propose(ctx context.Context, p *cluster.Proposal) error {
 // RequestID, registers a waiter stamped under the current leader,
 // marshals, and sends on proposeC. On successful submit it returns
 // (requestID, ack, nil); callers MUST either read the ack (once) AND
-// call unregisterWaiter(rid), OR delegate both to a wrapper like
-// Propose / proposeAndDiscardAck. The ack channel is buffered
-// cap=1, so notifyApplied and the leader-change watcher can each
-// send without blocking; the first signal wins, subsequent signals
-// fall through the default branch in their respective send sites.
+// call unregisterWaiter(rid), OR delegate both to the Propose wrapper.
+// The ack channel is buffered cap=1, so notifyApplied and the
+// leader-change watcher can each send without blocking; the first
+// signal wins, subsequent signals fall through the default branch in
+// their respective send sites.
 //
 // On submit failure (ctx or db.ctx canceled before the proposeC
 // send completes, or Marshal fails), proposeAsync unregisters the
 // waiter itself and returns a zero RequestID + nil ack + error.
 //
-// Callers that want simple fire-and-forget semantics (sync's index
-// bump, which relies on downstream idempotency and doesn't care
-// about outcome) use proposeAndDiscardAck. Callers that want
-// pipelined submissions with later outcome tracking (ingest's
-// position bump, which must drain before the worker freezes so the
-// supervisor's subsequent storage.Position read reflects reality)
-// use proposeAsync directly.
+// Callers that want a simple block-until-applied (sync's index bump,
+// most config and user proposals) use the Propose wrapper. Callers
+// that want pipelined submissions with later outcome tracking
+// (ingest's position bump, which must drain before the worker freezes
+// so the supervisor's subsequent storage.Position read reflects
+// reality) use proposeAsync directly.
 func (db *DB) proposeAsync(ctx context.Context, p *cluster.Proposal) (uint64, <-chan error, error) {
 	p.RequestID = db.nextRequestID.Add(1)
 
@@ -618,41 +617,11 @@ func (db *DB) proposeAsync(ctx context.Context, p *cluster.Proposal) (uint64, <-
 	}
 }
 
-// proposeAndDiscardAck submits a proposal and abandons the ack: a
-// small cleanup goroutine drains the ack (or observes db shutdown
-// via db.ctx) and then unregisters the waiter so the waiters map
-// doesn't leak.
-//
-// Used by sync's index-bump path, which relies on downstream sink-
-// level idempotency (SQL UPSERT) for correctness under flap and so
-// doesn't need to observe whether the bump applied or was signaled
-// ErrProposalUnknown. (Non-idempotent syncables — e.g. HTTP webhook —
-// have a separate latent issue tracked in
-// .claude-scratch/tickets/sync-fail-fast-bump-tracking.md.)
-//
-// Callers that DO care about outcome (ingest position bumps) use
-// proposeAsync directly and track the ack in their own in-flight
-// set for later drain.
-func (db *DB) proposeAndDiscardAck(ctx context.Context, p *cluster.Proposal) error {
-	rid, ack, err := db.proposeAsync(ctx, p)
-	if err != nil {
-		return err
-	}
-	go func() {
-		select {
-		case <-ack:
-		case <-db.ctx.Done():
-		}
-		db.unregisterWaiter(rid)
-	}()
-	return nil
-}
-
 // unregisterWaiter removes the waiter registered under rid. Safe to
 // call for a rid that is no longer registered (idempotent: the
 // delete is a no-op). Used by Propose's defer, by proposeAsync's
-// submit-failure cleanup, by proposeAndDiscardAck's drain goroutine,
-// and by the ingest worker's in-flight bump drain.
+// submit-failure cleanup, and by the ingest worker's in-flight bump
+// drain.
 func (db *DB) unregisterWaiter(rid uint64) {
 	db.waitersMu.Lock()
 	delete(db.waiters, rid)
@@ -700,11 +669,11 @@ func (db *DB) ProposeDeleteType(ctx context.Context, id string) error {
 //     into every worker, every inner Ingest goroutine, and every
 //     in-flight db.Propose / proposeAsync select. Both the ingest
 //     position-bump path (proposeAsync) and sync's index-bump path
-//     (proposeAndDiscardAck, which also flows through proposeAsync)
-//     watch db.ctx on the send, so if we drained workers BEFORE
-//     canceling db.ctx and any worker were stuck in a bump while raft
-//     was wedged (quorum loss, slow Ready loop), the drain would hang
-//     forever. Cancel-first guarantees workers can always reach exit.
+//     (the blocking Propose) watch db.ctx on the send and in the wait,
+//     so if we drained workers BEFORE canceling db.ctx and any worker
+//     were stuck in a bump while raft was wedged (quorum loss, slow
+//     Ready loop), the drain would hang forever. Cancel-first
+//     guarantees workers can always reach exit.
 //  2. Snapshot the worker registry under workersMu and wait on every
 //     handle's done channel. By now the workers are already racing
 //     toward exit (their contexts are canceled); the drain is just
@@ -750,26 +719,41 @@ func (db *DB) Close() error {
 }
 
 // proposeSyncableIndex bumps the persisted SyncableIndex for a
-// syncable after a successful Sync. Called from the sync worker,
-// which doesn't observe bump outcomes directly — the unified
-// primitive registers a waiter under the hood and a cleanup
-// goroutine unregisters it on apply, ErrProposalUnknown, or db
-// shutdown, whichever comes first.
+// syncable after a successful Sync, and BLOCKS until that bump is
+// durably applied (the appliedIndex/SyncableIndex bucket fsynced via
+// the apply path) or until ctx is canceled / a leader change orphans
+// the proposal. The cost is one Raft round-trip per bump; in exchange,
+// recovery is deterministic.
 //
-// Uses db.ctx (lifecycle) rather than a worker ctx because a
-// registry replace shouldn't drop the bump: the replacement sync
-// worker should start from the advanced index, not re-sync rows
-// already pushed downstream. The Sync operation is required to be
-// idempotent at the sink level (SQL UPSERT), so a lost bump just
-// means extra downstream work, not incorrect state. (Non-idempotent
-// syncables have a separate latent issue — see
+// This used to be fire-and-forget (proposeAndDiscardAck on db.ctx),
+// which let an arbitrary number of bumps sit un-applied: a crash
+// between the Sync returning and the bumps applying made the restarted
+// worker re-deliver every proposal since the last *persisted* index — a
+// duplicate storm. Blocking caps recovery at one duplicate: the worker
+// never advances past a proposal whose bump hasn't durably landed.
+//
+// ctx is the SYNC WORKER's context, not db.ctx. On a registry replace
+// or Close the worker ctx is canceled; Propose then returns ctx.Err and
+// the worker does NOT advance its index. The replacement worker re-syncs
+// from the un-advanced (persisted) index. Sync is required to be
+// idempotent at the sink level (SQL UPSERT), so re-syncing is safe.
+// (Non-idempotent syncables have a separate latent issue — see
 // .claude-scratch/tickets/sync-fail-fast-bump-tracking.md.)
-func (db *DB) proposeSyncableIndex(_ context.Context, i *cluster.SyncableIndex) error {
+//
+// On a successful (durable) bump the round-trip latency is recorded to
+// committed_sync_bump_duration_seconds so the extra cost is observable.
+func (db *DB) proposeSyncableIndex(ctx context.Context, i *cluster.SyncableIndex) error {
 	entity, err := cluster.NewUpsertSyncableIndexEntity(i)
 	if err != nil {
 		return err
 	}
-	return db.proposeAndDiscardAck(db.ctx, &cluster.Proposal{Entities: []*cluster.Entity{entity}})
+
+	start := time.Now()
+	err = db.Propose(ctx, &cluster.Proposal{Entities: []*cluster.Entity{entity}})
+	if err == nil && db.metrics != nil {
+		db.metrics.SyncBumpCompleted(time.Since(start))
+	}
+	return err
 }
 
 // proposeIngestablePositionAsync bumps the persisted Position for

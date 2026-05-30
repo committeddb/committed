@@ -207,9 +207,21 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 					retryProposal = nil
 				}
 				if shouldSnapshot {
-					err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: i})
-					if err != nil {
-						db.logger.Warn("proposeSyncableIndex error", zap.String("id", id), zap.Error(err))
+					if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: i}); err != nil {
+						// The bump did not durably apply — ctx canceled by a
+						// replace/Close, or ErrProposalUnknown after a leader
+						// change. Do NOT advance past this proposal: re-sync
+						// and re-bump it on the next iteration so the persisted
+						// index never trails the reader by more than the one
+						// in-flight proposal. A crash here costs at most one
+						// duplicate on recovery instead of a storm. Sync is
+						// idempotent (contract), so the re-sync is safe; on ctx
+						// cancellation the loop-top check exits before retrying.
+						db.logger.Warn("proposeSyncableIndex error, will retry",
+							zap.String("id", id), zap.Uint64("index", i), zap.Error(err))
+						retryIndex = i
+						retryProposal = p
+						break
 					}
 				}
 				progressed = true
@@ -296,9 +308,17 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 
 		lastIndex := batch[len(batch)-1].index
 		if shouldSnapshot {
-			err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: lastIndex})
-			if err != nil {
-				db.logger.Warn("proposeSyncableIndex error", zap.String("id", id), zap.Error(err))
+			if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: lastIndex}); err != nil {
+				// The bump did not durably apply (ctx canceled, or
+				// ErrProposalUnknown after a leader change). Keep the batch
+				// and retry the SyncBatch + bump on the next iteration rather
+				// than advancing past an unconfirmed index. SyncBatch is
+				// idempotent (contract), so re-running it is safe, and not
+				// advancing keeps recovery to at most one duplicate batch.
+				db.logger.Warn("proposeSyncableIndex error, will retry batch",
+					zap.String("id", id), zap.Error(err))
+				retryBatch = true
+				return false
 			}
 		}
 
@@ -412,9 +432,15 @@ func (db *DB) syncBatchFallback(ctx context.Context, id string, s cluster.Syncab
 			return false
 		}
 		if shouldSnapshot {
-			err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: e.index})
-			if err != nil {
-				db.logger.Warn("proposeSyncableIndex error", zap.String("id", id), zap.Error(err))
+			if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: e.index}); err != nil {
+				// The bump did not durably apply. Stop the fallback and
+				// leave the remaining batch for the caller to retry rather
+				// than advancing past an unconfirmed index. The successful
+				// prefix was already pushed downstream via the idempotent
+				// Sync, so re-processing on retry is safe.
+				db.logger.Warn("proposeSyncableIndex error in fallback, stopping",
+					zap.String("id", id), zap.Uint64("index", e.index), zap.Error(err))
+				return false
 			}
 		}
 	}

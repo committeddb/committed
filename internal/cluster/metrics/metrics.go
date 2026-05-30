@@ -12,16 +12,17 @@ import (
 // A nil *Metrics is safe to use — callers check for nil before calling
 // methods, so no instrumentation overhead when metrics are disabled.
 type Metrics struct {
-	proposals       metric.Int64Counter
-	proposeDuration metric.Float64Histogram
-	applyIndex      metric.Float64Gauge
-	firstIndex      metric.Float64Gauge
-	lastIndex       metric.Float64Gauge
-	leader          metric.Float64Gauge
-	applyDuration   metric.Float64Histogram
-	syncDuration    metric.Float64Histogram
-	workerRunning   metric.Float64Gauge
-	workerReplaces  metric.Int64Counter
+	proposals        metric.Int64Counter
+	proposeDuration  metric.Float64Histogram
+	applyIndex       metric.Float64Gauge
+	firstIndex       metric.Float64Gauge
+	lastIndex        metric.Float64Gauge
+	leader           metric.Float64Gauge
+	applyDuration    metric.Float64Histogram
+	syncDuration     metric.Float64Histogram
+	syncBumpDuration metric.Float64Histogram
+	workerRunning    metric.Float64Gauge
+	workerReplaces   metric.Int64Counter
 
 	leaderTransitionsObserved metric.Int64Counter
 	proposeFailFastUnknown    metric.Int64Counter
@@ -63,6 +64,10 @@ func New(meter metric.Meter) *Metrics {
 
 	m.syncDuration, _ = meter.Float64Histogram("committed.sync.duration",
 		metric.WithDescription("Time spent inside a Syncable.Sync call."),
+		metric.WithUnit("s"))
+
+	m.syncBumpDuration, _ = meter.Float64Histogram("committed.sync.bump.duration",
+		metric.WithDescription("Time from submitting a SyncableIndex bump after a successful Sync until it is durably applied."),
 		metric.WithUnit("s"))
 
 	m.workerRunning, _ = meter.Float64Gauge("committed.worker.running",
@@ -129,6 +134,16 @@ func (m *Metrics) SetIndexRange(first, last uint64) {
 func (m *Metrics) SyncCompleted(id string, d time.Duration) {
 	m.syncDuration.Record(context.Background(), d.Seconds(),
 		metric.WithAttributes(attribute.String("syncable_id", id)))
+}
+
+// SyncBumpCompleted records the round-trip cost of the now-blocking
+// SyncableIndex bump that follows a successful Sync — the extra Raft
+// round-trip this node pays in exchange for deterministic recovery
+// (at most one duplicate on crash instead of a duplicate storm).
+// Recorded only on a successful (durable) bump so the histogram
+// reflects real round-trip latency, not error-path timing.
+func (m *Metrics) SyncBumpCompleted(d time.Duration) {
+	m.syncBumpDuration.Record(context.Background(), d.Seconds())
 }
 
 // SetWorkerRunning sets the worker running gauge to 1 or 0.
