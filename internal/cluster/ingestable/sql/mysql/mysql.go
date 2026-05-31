@@ -159,6 +159,12 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			proposalChan: pr,
 			positionChan: po,
 			tables:       tables,
+			// Seed the live coordinate from the resume position so a
+			// mid-transaction flush before the first commit still stamps
+			// a sane SourceSeq. lastPos is non-nil here (resume or
+			// snapshot-derived).
+			curFile: lastPos.Name,
+			curPos:  lastPos.Pos,
 		}
 
 		c.SetEventHandler(handler)
@@ -236,6 +242,15 @@ type MySQLEventHandler struct {
 	// of re-dumping from scratch or replaying from the original pos.
 	lastPos *mysql.Position
 
+	// curFile / curPos track the live binlog coordinate as events
+	// stream, so every flushed proposal can be stamped with a
+	// strictly-monotonic, resume-deterministic SourceSeq for
+	// effectively-once dedup. curFile follows binlog rotation
+	// (OnRotate) and commits (OnXID); curPos follows each row's
+	// end-of-event offset (OnRow) and the commit offset (OnXID).
+	curFile string
+	curPos  uint32
+
 	// pending accumulates entities from OnRow calls until the
 	// transaction commits (OnXID). This ensures one MySQL transaction
 	// maps to one cluster.Proposal, giving consumers atomic delivery
@@ -293,6 +308,13 @@ func (h *MySQLEventHandler) OnRow(e *canal.RowsEvent) error {
 		Timestamp: time.Now().UnixMilli(),
 	})
 
+	// Track the live binlog offset so a mid-transaction flush below
+	// stamps a monotonic SourceSeq. e.Header.LogPos is the offset at the
+	// end of this row event.
+	if e.Header != nil {
+		h.curPos = e.Header.LogPos
+	}
+
 	// Soft limit: emit a partial batch to prevent OOM on very large
 	// transactions. This breaks atomicity for oversized transactions
 	// but is the right trade-off versus unbounded memory growth.
@@ -312,7 +334,7 @@ func (h *MySQLEventHandler) flushPending() error {
 	if len(h.pending) == 0 {
 		return nil
 	}
-	p := &cluster.Proposal{Entities: h.pending}
+	p := &cluster.Proposal{Entities: h.pending, SourceSeq: encodeSourceSeq(h.curFile, h.curPos)}
 	select {
 	case h.proposalChan <- p:
 	case <-h.ctx.Done():
@@ -328,6 +350,12 @@ func (h *MySQLEventHandler) flushPending() error {
 // cluster.Proposal and that the checkpoint position is always past a
 // fully committed transaction — no duplicates or gaps on restart.
 func (h *MySQLEventHandler) OnXID(header *replication.EventHeader, pos mysql.Position) error {
+	// Stamp the commit coordinate before flushing so the transaction's
+	// proposal carries the post-commit (file, offset) as its SourceSeq —
+	// strictly greater than any mid-transaction flush in the same txn and
+	// than the previous txn's commit.
+	h.curFile = pos.Name
+	h.curPos = pos.Pos
 	if err := h.flushPending(); err != nil {
 		return err
 	}
@@ -374,8 +402,39 @@ func (h *MySQLEventHandler) OnDDL(header *replication.EventHeader, nextPos mysql
 	return nil
 }
 
+// OnRotate follows binlog file rotation so curFile stays correct for a
+// mid-transaction flush that straddles a rotation (rare — rotations
+// usually align with transaction boundaries). rotateEvent.NextLogName is
+// the file the stream rotates into.
+func (h *MySQLEventHandler) OnRotate(header *replication.EventHeader, rotateEvent *replication.RotateEvent) error {
+	if rotateEvent != nil && len(rotateEvent.NextLogName) > 0 {
+		h.curFile = string(rotateEvent.NextLogName)
+	}
+	return nil
+}
+
 func (h *MySQLEventHandler) String() string {
 	return "MyEventHandler"
+}
+
+// encodeSourceSeq maps a binlog coordinate (file, offset) to a
+// strictly-monotonic uint64 used as a proposal's SourceSeq for
+// effectively-once dedup. The file's numeric suffix occupies the high 32
+// bits and the offset the low 32 bits, so ordering matches binlog order:
+// a later file always outranks an earlier one regardless of offset, and
+// within a file the offset orders. Returns 0 (which disables dedup for
+// the proposal — never a false positive) when the file name has no
+// parseable numeric suffix, e.g. an unexpected naming scheme.
+func encodeSourceSeq(name string, pos uint32) uint64 {
+	dot := strings.LastIndexByte(name, '.')
+	if dot < 0 || dot == len(name)-1 {
+		return 0
+	}
+	fileNum, err := strconv.ParseUint(name[dot+1:], 10, 32)
+	if err != nil {
+		return 0
+	}
+	return fileNum<<32 | uint64(pos)
 }
 
 func createCanal(config *sql.Config) (*canal.Canal, []string, error) {

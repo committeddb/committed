@@ -26,6 +26,18 @@ type Proposal struct {
 	// (ingest worker, sync worker) that don't need read-after-write
 	// semantics. Backward-compatible: old log entries unmarshal as 0.
 	RequestID uint64
+
+	// IngestableID and SourceSeq tag a proposal emitted by an ingest
+	// worker. SourceSeq is the dialect's per-ingestable monotonic source
+	// position (Postgres LSN, MySQL binlog file+offset) set on the
+	// proposal by the Ingestable; IngestableID is stamped by the ingest
+	// worker (which knows the registry id) before propose. They drive
+	// effectively-once ingest: the apply path advances a per-ingestable
+	// highwater to max(highwater, SourceSeq), and the leader's worker
+	// skips re-emitted proposals (SourceSeq <= highwater) before they
+	// enter raft. Zero/"" means "not an ingest proposal" — never deduped.
+	IngestableID string
+	SourceSeq    uint64
 }
 
 type Entity struct {
@@ -85,7 +97,12 @@ func (p *Proposal) Marshal() ([]byte, error) {
 		})
 	}
 
-	lp := &clusterpb.LogProposal{LogEntities: es, RequestID: p.RequestID}
+	lp := &clusterpb.LogProposal{
+		LogEntities:  es,
+		RequestID:    p.RequestID,
+		IngestableID: p.IngestableID,
+		SourceSeq:    p.SourceSeq,
+	}
 
 	return proto.Marshal(lp)
 }
@@ -107,6 +124,8 @@ func (p *Proposal) Unmarshal(bs []byte, r TypeResolver) error {
 	}
 
 	p.RequestID = lp.RequestID
+	p.IngestableID = lp.IngestableID
+	p.SourceSeq = lp.SourceSeq
 	for _, e := range lp.LogEntities {
 		ref := TypeRef{ID: e.Type.GetID(), Version: int(e.Type.GetVersion())}
 		t, err := resolveType(ref, r)

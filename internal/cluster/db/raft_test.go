@@ -932,6 +932,13 @@ func (ms *MemoryStorage) Reader(id string) db.ProposalReader {
 	return &Reader{index: i, s: ms}
 }
 
+// IngestSourceSeqHighwater stubs the effectively-once dedup highwater.
+// This in-memory double doesn't run the entity apply path that would
+// advance it, so it reports 0; dedup tests use the real wal.Storage.
+func (ms *MemoryStorage) IngestSourceSeqHighwater(id string) uint64 {
+	return 0
+}
+
 func (ms *MemoryStorage) Node(id string) uint64 {
 	ms.nodeMu.RLock()
 	defer ms.nodeMu.RUnlock()

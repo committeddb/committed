@@ -82,7 +82,14 @@ type Storage interface {
 	TimePoints(typeID string, start time.Time, end time.Time) ([]cluster.TimePoint, error)
 	Reader(id string) ProposalReader     // Gets current index by id cache. If id is not known, index is 0
 	Position(id string) cluster.Position // Gets current index by id cache. If id is not known position is 0
-	Node(id string) uint64               // Gets the node id that a worker is assigned to run on
+	// IngestSourceSeqHighwater returns the highest source sequence
+	// (cluster.Proposal.SourceSeq) applied for the given ingestable id,
+	// or 0 if none. Advanced deterministically in ApplyCommitted from
+	// committed state; the ingest worker reads it before propose to skip
+	// re-emitted proposals (effectively-once ingest). 0 for an unknown id
+	// means "never ingested — dedup nothing".
+	IngestSourceSeqHighwater(id string) uint64
+	Node(id string) uint64 // Gets the node id that a worker is assigned to run on
 	Database(id string) (cluster.Database, error)
 	Databases() ([]*cluster.Configuration, error)
 	Ingestables() ([]*cluster.Configuration, error)

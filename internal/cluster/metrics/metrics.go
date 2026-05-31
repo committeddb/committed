@@ -31,6 +31,7 @@ type Metrics struct {
 	ingestRestarts             metric.Int64Counter
 	ingestSupervisorGiveups    metric.Int64Counter
 	ingestPositionBumpDuration metric.Float64Histogram
+	ingestDedupSkipped         metric.Int64Counter
 }
 
 // New creates a Metrics instance from an OTel Meter. The caller
@@ -94,6 +95,9 @@ func New(meter metric.Meter) *Metrics {
 	m.ingestPositionBumpDuration, _ = meter.Float64Histogram("committed.ingest.position.bump.duration",
 		metric.WithDescription("Time from submitting an ingestable Position bump after a batch of ingested proposals until it is durably applied."),
 		metric.WithUnit("s"))
+
+	m.ingestDedupSkipped, _ = meter.Int64Counter("committed.ingest.dedup_skipped_total",
+		metric.WithDescription("Re-emitted ingest proposals skipped before raft because their source sequence was at or below the durable highwater (effectively-once dedup)."))
 
 	return m
 }
@@ -222,4 +226,12 @@ func (m *Metrics) IngestSupervisorGiveup(id string) {
 // storm on a hard crash). Recorded only on a successful (durable) bump.
 func (m *Metrics) IngestPositionBumpCompleted(d time.Duration) {
 	m.ingestPositionBumpDuration.Record(context.Background(), d.Seconds())
+}
+
+// IngestDedupSkipped counts an ingest proposal dropped before raft
+// because its source sequence was at or below the durable highwater — a
+// re-emit after a crash/flap that effectively-once dedup elided.
+func (m *Metrics) IngestDedupSkipped(id string) {
+	m.ingestDedupSkipped.Add(context.Background(), 1,
+		metric.WithAttributes(attribute.String("id", id)))
 }

@@ -245,6 +245,30 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 			return ingestExitShutdown
 		case proposal := <-ingress.proposalChan:
 			if db.isNode(id) {
+				// Stamp the ingestable id so the apply path advances this
+				// ingestable's source-seq highwater when the proposal
+				// applies.
+				proposal.IngestableID = id
+
+				// Effectively-once dedup. After a crash/flap the dialect
+				// resumes from a checkpoint that may trail the last
+				// committed proposal and re-emits proposals already in the
+				// log. We drop those here — BEFORE raft — by comparing the
+				// dialect's monotonic SourceSeq against the durable
+				// highwater. Dropping pre-raft keeps the duplicate out of
+				// the committed event log entirely, so syncables never see
+				// it. SourceSeq==0 (snapshot rows / non-CDC / legacy) is
+				// never deduped.
+				if proposal.SourceSeq > 0 && proposal.SourceSeq <= db.storage.IngestSourceSeqHighwater(id) {
+					db.logger.Debug("ingest dedup skip",
+						zap.String("id", id), zap.Uint64("sourceSeq", proposal.SourceSeq))
+					if db.metrics != nil {
+						db.metrics.IngestDedupSkipped(id)
+					}
+					backoff = ingestBackoffMin
+					continue
+				}
+
 				// Ingest worker proposes user data; we use the worker
 				// context (ctx) so cancel-on-stop interrupts the wait.
 				err := db.Propose(ctx, proposal)

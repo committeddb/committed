@@ -201,15 +201,27 @@ func TestPostgresDialect(t *testing.T) {
 			expected := len(tt.entities)
 			deadline := time.After(15 * time.Second)
 			seen := make(map[string]*cluster.Entity)
+			var seqs []uint64
 			for len(seen) < expected {
 				select {
 				case proposal := <-proposalChan:
+					seqs = append(seqs, proposal.SourceSeq)
 					for _, e := range proposal.Entities {
 						seen[string(e.Key)] = e
 					}
 				case <-positionChan:
 				case <-deadline:
 					t.Fatalf("timed out waiting for %d unique entities; got %d", expected, len(seen))
+				}
+			}
+
+			// Streaming-phase proposals must each carry a non-zero,
+			// strictly-increasing SourceSeq (the commit/message LSN) — the
+			// effectively-once dedup key the ingest worker relies on.
+			for i, sq := range seqs {
+				require.NotZero(t, sq, "CDC proposal %d must carry a non-zero SourceSeq (LSN)", i)
+				if i > 0 {
+					require.Greater(t, sq, seqs[i-1], "SourceSeq must strictly increase per proposal")
 				}
 			}
 

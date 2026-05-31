@@ -174,6 +174,14 @@ func (ms *MemoryStorage) Position(id string) cluster.Position {
 	return nil
 }
 
+// IngestSourceSeqHighwater is a stub: this in-memory test double has no
+// apply path to advance a highwater (ApplyCommitted only records the
+// applied index), so it always reports 0 ("dedup nothing"). Tests that
+// exercise effectively-once ingest dedup use the real wal.Storage.
+func (ms *MemoryStorage) IngestSourceSeqHighwater(id string) uint64 {
+	return 0
+}
+
 func (ms *MemoryStorage) Database(id string) (cluster.Database, error) {
 	return nil, nil
 }

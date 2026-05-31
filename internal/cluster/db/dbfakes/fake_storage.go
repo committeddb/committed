@@ -161,6 +161,17 @@ type FakeStorage struct {
 		result1 uint64
 		result2 error
 	}
+	IngestSourceSeqHighwaterStub        func(string) uint64
+	ingestSourceSeqHighwaterMutex       sync.RWMutex
+	ingestSourceSeqHighwaterArgsForCall []struct {
+		arg1 string
+	}
+	ingestSourceSeqHighwaterReturns struct {
+		result1 uint64
+	}
+	ingestSourceSeqHighwaterReturnsOnCall map[int]struct {
+		result1 uint64
+	}
 	IngestableVersionStub        func(string, uint64) (*cluster.Configuration, error)
 	ingestableVersionMutex       sync.RWMutex
 	ingestableVersionArgsForCall []struct {
@@ -1177,6 +1188,67 @@ func (fake *FakeStorage) FirstIndexReturnsOnCall(i int, result1 uint64, result2 
 		result1 uint64
 		result2 error
 	}{result1, result2}
+}
+
+func (fake *FakeStorage) IngestSourceSeqHighwater(arg1 string) uint64 {
+	fake.ingestSourceSeqHighwaterMutex.Lock()
+	ret, specificReturn := fake.ingestSourceSeqHighwaterReturnsOnCall[len(fake.ingestSourceSeqHighwaterArgsForCall)]
+	fake.ingestSourceSeqHighwaterArgsForCall = append(fake.ingestSourceSeqHighwaterArgsForCall, struct {
+		arg1 string
+	}{arg1})
+	stub := fake.IngestSourceSeqHighwaterStub
+	fakeReturns := fake.ingestSourceSeqHighwaterReturns
+	fake.recordInvocation("IngestSourceSeqHighwater", []interface{}{arg1})
+	fake.ingestSourceSeqHighwaterMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeStorage) IngestSourceSeqHighwaterCallCount() int {
+	fake.ingestSourceSeqHighwaterMutex.RLock()
+	defer fake.ingestSourceSeqHighwaterMutex.RUnlock()
+	return len(fake.ingestSourceSeqHighwaterArgsForCall)
+}
+
+func (fake *FakeStorage) IngestSourceSeqHighwaterCalls(stub func(string) uint64) {
+	fake.ingestSourceSeqHighwaterMutex.Lock()
+	defer fake.ingestSourceSeqHighwaterMutex.Unlock()
+	fake.IngestSourceSeqHighwaterStub = stub
+}
+
+func (fake *FakeStorage) IngestSourceSeqHighwaterArgsForCall(i int) string {
+	fake.ingestSourceSeqHighwaterMutex.RLock()
+	defer fake.ingestSourceSeqHighwaterMutex.RUnlock()
+	argsForCall := fake.ingestSourceSeqHighwaterArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeStorage) IngestSourceSeqHighwaterReturns(result1 uint64) {
+	fake.ingestSourceSeqHighwaterMutex.Lock()
+	defer fake.ingestSourceSeqHighwaterMutex.Unlock()
+	fake.IngestSourceSeqHighwaterStub = nil
+	fake.ingestSourceSeqHighwaterReturns = struct {
+		result1 uint64
+	}{result1}
+}
+
+func (fake *FakeStorage) IngestSourceSeqHighwaterReturnsOnCall(i int, result1 uint64) {
+	fake.ingestSourceSeqHighwaterMutex.Lock()
+	defer fake.ingestSourceSeqHighwaterMutex.Unlock()
+	fake.IngestSourceSeqHighwaterStub = nil
+	if fake.ingestSourceSeqHighwaterReturnsOnCall == nil {
+		fake.ingestSourceSeqHighwaterReturnsOnCall = make(map[int]struct {
+			result1 uint64
+		})
+	}
+	fake.ingestSourceSeqHighwaterReturnsOnCall[i] = struct {
+		result1 uint64
+	}{result1}
 }
 
 func (fake *FakeStorage) IngestableVersion(arg1 string, arg2 uint64) (*cluster.Configuration, error) {
@@ -2496,6 +2568,8 @@ func (fake *FakeStorage) Invocations() map[string][][]interface{} {
 	defer fake.eventIndexMutex.RUnlock()
 	fake.firstIndexMutex.RLock()
 	defer fake.firstIndexMutex.RUnlock()
+	fake.ingestSourceSeqHighwaterMutex.RLock()
+	defer fake.ingestSourceSeqHighwaterMutex.RUnlock()
 	fake.ingestableVersionMutex.RLock()
 	defer fake.ingestableVersionMutex.RUnlock()
 	fake.ingestableVersionsMutex.RLock()

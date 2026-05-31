@@ -305,6 +305,12 @@ func (d *PostgreSQLDialect) stream(
 				return err
 			}
 
+			// curLSN is this message's WAL start — a strictly-increasing,
+			// resume-deterministic position stamped onto any proposal
+			// flushed while handling this message (the proposal's
+			// SourceSeq for effectively-once dedup).
+			curLSN := xld.WALStart
+
 			switch m := logicalMsg.(type) {
 			case *pglogrepl.RelationMessage:
 				relations[m.RelationID] = m
@@ -324,7 +330,7 @@ func (d *PostgreSQLDialect) stream(
 					pending = append(pending, e)
 				}
 				if len(pending) >= maxPendingEntities {
-					if err := flushPending(ctx, &pending, pr); err != nil {
+					if err := flushPending(ctx, &pending, pr, curLSN); err != nil {
 						return err
 					}
 				}
@@ -337,7 +343,7 @@ func (d *PostgreSQLDialect) stream(
 					pending = append(pending, e)
 				}
 				if len(pending) >= maxPendingEntities {
-					if err := flushPending(ctx, &pending, pr); err != nil {
+					if err := flushPending(ctx, &pending, pr, curLSN); err != nil {
 						return err
 					}
 				}
@@ -353,7 +359,7 @@ func (d *PostgreSQLDialect) stream(
 					pending = append(pending, e)
 				}
 				if len(pending) >= maxPendingEntities {
-					if err := flushPending(ctx, &pending, pr); err != nil {
+					if err := flushPending(ctx, &pending, pr, curLSN); err != nil {
 						return err
 					}
 				}
@@ -368,7 +374,7 @@ func (d *PostgreSQLDialect) stream(
 					// why we're skipping.
 					break
 				}
-				if err := flushPending(ctx, &pending, pr); err != nil {
+				if err := flushPending(ctx, &pending, pr, curLSN); err != nil {
 					return err
 				}
 
@@ -823,12 +829,18 @@ func quoteTable(table string) string {
 }
 
 // flushPending emits all buffered entities as a single proposal and
-// resets the buffer. No-op when the buffer is empty.
-func flushPending(ctx context.Context, pending *[]*cluster.Entity, pr chan<- *cluster.Proposal) error {
+// resets the buffer. No-op when the buffer is empty. lsn is the WAL
+// position of the message that triggered the flush; it becomes the
+// proposal's SourceSeq, a strictly-monotonic per-proposal key the
+// ingest worker uses to dedup re-emitted proposals after a crash/flap
+// (effectively-once). Monotonic because clientXLogPos only advances, and
+// deterministic because a resume re-reads the same messages in the same
+// order, producing the same flush LSNs.
+func flushPending(ctx context.Context, pending *[]*cluster.Entity, pr chan<- *cluster.Proposal, lsn pglogrepl.LSN) error {
 	if len(*pending) == 0 {
 		return nil
 	}
-	p := &cluster.Proposal{Entities: *pending}
+	p := &cluster.Proposal{Entities: *pending, SourceSeq: uint64(lsn)}
 	select {
 	case pr <- p:
 	case <-ctx.Done():

@@ -67,12 +67,13 @@ func (s *Storage) deleteIngestable(id []byte) error {
 		if b == nil {
 			return ErrBucketMissing
 		}
-		if err := deleteVersioned(b, id); err != nil {
-			return err
-		}
-
-		s.databases[string(id)] = nil
-		return nil
+		// NB: unlike deleteDatabase there is no in-memory map to clear —
+		// ingestables aren't cached on the Storage (they're handed to the
+		// supervisor via the ingest channel). The previous
+		// `s.databases[id] = nil` here was a copy-paste leftover from
+		// deleteDatabase that could nil out a live database connection if
+		// an ingestable and database happened to share an id.
+		return deleteVersioned(b, id)
 	})
 }
 

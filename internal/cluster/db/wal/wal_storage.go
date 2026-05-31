@@ -35,6 +35,10 @@ var (
 	databaseBucket           = []byte("databases")
 	ingestableBucket         = []byte("ingestables")
 	ingestablePositionBucket = []byte("ingestablePositions")
+	// ingestSourceSeqBucket maps an ingestable id to the big-endian
+	// uint64 highwater of the highest applied source sequence. Drives
+	// effectively-once ingest dedup — see ingest_source_seq.go.
+	ingestSourceSeqBucket = []byte("ingestSourceSeq")
 )
 
 var (
@@ -51,7 +55,7 @@ var (
 	appliedIndexKey    = []byte("idx")
 )
 
-var buckets = [][]byte{typeBucket, databaseBucket, ingestableBucket, ingestablePositionBucket, syncableBucket, syncableIndexBucket, appliedIndexBucket}
+var buckets = [][]byte{typeBucket, databaseBucket, ingestableBucket, ingestablePositionBucket, ingestSourceSeqBucket, syncableBucket, syncableIndexBucket, appliedIndexBucket}
 
 type StateType int
 
@@ -598,6 +602,15 @@ func (s *Storage) ApplyCommitted(entry pb.Entry) error {
 			if err := s.applyEntity(entity); err != nil {
 				return err
 			}
+		}
+
+		// Advance the per-ingestable source-seq highwater for ingest
+		// proposals. Deterministic across replicas (derived only from the
+		// committed proposal) and done before saveAppliedIndex so a
+		// replayed entry re-applies the idempotent max. Non-ingest
+		// proposals carry "" / 0 and no-op here.
+		if err := s.advanceIngestSourceSeq(p.IngestableID, p.SourceSeq); err != nil {
+			return fmt.Errorf("[wal.storage] advanceIngestSourceSeq: %w", err)
 		}
 	}
 

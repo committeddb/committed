@@ -38,6 +38,17 @@ message LogProposal {
     // (ingest worker, sync worker) that don't need read-after-write
     // semantics. Backward-compatible: old log entries unmarshal as 0.
     uint64 requestID = 2;
+    // ingestableID + sourceSeq tag a proposal emitted by an ingest worker
+    // for a given source event. sourceSeq is a per-ingestable monotonic
+    // position (Postgres LSN, MySQL binlog file+offset) the dialect stamps
+    // on every emitted proposal. The apply path advances a per-ingestable
+    // highwater to max(highwater, sourceSeq), and the leader's worker
+    // skips re-emitted proposals (sourceSeq <= highwater) BEFORE they
+    // enter raft — giving effectively-once ingest. Empty ID / zero seq
+    // means "not an ingest proposal" and is never deduped. Backward
+    // compatible: pre-feature entries unmarshal as "" / 0.
+    string ingestableID = 3;
+    uint64 sourceSeq = 4;
 }
 
 enum LogValidationStrategy {
