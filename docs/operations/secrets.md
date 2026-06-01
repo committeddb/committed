@@ -7,10 +7,10 @@ and syncables through the normal API.
 
 ## The problem
 
-Database connection strings and other credentials used to live verbatim
-in the TOML/JSON you submit, and that text is replicated through Raft and
-persisted in bbolt on every node. Anyone with read access to the bbolt
-file, a proposal dump, or an API response could read the secret.
+A database connection string carries a credential. Committed replicates
+and persists *config* — the text you submit is written through Raft into
+bbolt on every node — and anything left verbatim in that text is readable
+by anyone with the bbolt file, a proposal dump, or an API response.
 
 Committed has to store *config*; it does not have to store *secrets*.
 
@@ -35,7 +35,7 @@ Secret, a Vault agent's `EnvironmentFile`, a systemd unit's
 
 | Syntax    | Meaning                                                        |
 | --------- | ------------------------------------------------------------- |
-| `${NAME}` | Expands to env var `NAME`. **Unset → hard error** (see below). |
+| `${NAME}` | Expands to env var `NAME`. **Unset → rejected at submit (HTTP 400); degrades the config at startup/apply** (see Failure mode). |
 | `$$`      | A literal `$` (escape). Use in a password like `p$$w0rd`.      |
 | `$`       | Any other `$` is preserved verbatim. Bare `$VAR` is **not** expanded — `${...}` is required. |
 
@@ -61,9 +61,11 @@ config is parsed. The stored config keeps the literal
 ## Operational rule: provision the env var on every node first
 
 > **Set the secret on _every_ node — via a rolling restart — _before_ you
-> propose a config that references it. A node that is missing a
-> referenced `${VAR}` will crash or refuse to start; it does not skip the
-> config and keep running.**
+> propose a config that references it.** A node missing a referenced
+> `${VAR}` stays up and in quorum, but it cannot build that config: the
+> config is persisted cluster-wide and sits **degraded** on that node (the
+> database / ingestable / syncable it configures is not active there)
+> until you provide the variable and restart the node.
 
 This is the single most important thing to understand about this
 feature. Interpolation happens locally on each node, so a config that
@@ -76,43 +78,71 @@ have `FOO` in their environment. The correct order of operations is:
    the env var and restart; you do **not** propose a new config.
 2. Only then submit (or re-submit) the config that references it.
 
-If you propose first, every node still missing the variable will fail as
-described below.
+If you propose first, every node missing the variable persists the config
+but marks it **degraded** — see Failure mode below. The node keeps
+serving; the config just isn't active there until you fix its environment
+and restart it.
 
 ## Failure mode: missing variable
 
-A `${VAR}` whose variable is not set is a **hard error** — never a
-silent empty credential, and never a silently-skipped config. There are
-three points where it can surface, and all three are fatal by design:
+A `${VAR}` whose variable is not set never becomes a silent empty
+credential. What happens depends on where it is caught:
 
 - **At submit time**, on the node that receives the API call (it
   interpolates against its own environment before proposing): the request
   is rejected with **HTTP 400** naming the missing variable. Nothing is
-  proposed.
+  proposed — the node you submit to fails fast, before anything is
+  replicated.
 
-- **At startup**, every persisted config is re-validated against the
+- **At startup**, every persisted config is re-checked against the
   current environment before the node begins serving. A node missing a
-  variable that a stored config references **fails to start**:
+  variable a stored config references **starts anyway, with that config
+  degraded** — it logs a loud error and skips building the config's live
+  object, but it joins the cluster and keeps serving everything else:
 
   ```
-  cannot open storage: database config "orders": environment variable "MYSQL_PASSWORD" referenced in config is not set
+  ERROR  config persisted but a required ${VAR} secret is unset on this node
+         (degraded); the node stays in quorum, fix the environment and
+         restart to build it   {"kind": "database", "id": "orders",
+         "error": "environment variable \"MYSQL_PASSWORD\" ... is not set"}
   ```
 
 - **At apply time**, if a config is proposed (and committed) while a
-  *running* node is missing the variable, that node **crashes** when it
-  applies the entry (a fatal apply error). This is not optional or
-  configurable: applying committed entries must be deterministic across
-  the cluster, so a node that cannot apply an entry every other node
-  applied must stop rather than silently diverge. The crash is the
-  cluster telling you the env-first ordering above was not followed on
-  that node — fix its environment and restart it.
+  *running* node is missing the variable, that node **persists the config
+  and marks it degraded** — it does **not** crash. The config bytes are
+  identical on every node (they are replicated); only the local build of
+  the connection/worker is deferred on the node that can't resolve the
+  secret.
 
-All three are deliberate. A node that booted or kept running with an
-unresolved secret would otherwise fail much later with a confusing
-authentication error against the external database; failing loudly and
-early turns it into an obvious operator fix. (Only the missing-secret
-case is treated this strictly. An otherwise malformed stored config is
-handled by the existing, more lenient load paths.)
+### Why a missing secret degrades the config
+
+Interpolation reads the local environment, so a missing `${VAR}` is a
+*node-local* condition: the config itself is valid and replicated
+identically on every node. A node-local gap must not take a node out of
+quorum — if it did, a secret rolled to some nodes but not all could drop
+the whole follower set at once, and for a freshly-committed config that is
+quorum loss. So persisting the config (deterministic, identical on every
+node) always succeeds; only the local construction — the part that reads
+the environment — is deferred. The config is persisted everywhere and is
+degraded only on the nodes that can't resolve the secret.
+
+This covers any node-local build failure, missing secret or otherwise.
+Genuine corruption — config bytes that don't even decode — is a separate
+case that does stop the node; that's disk corruption, not a missing
+secret.
+
+### Observing and recovering a degraded config
+
+- **Metric:** `committed_config_build_errors` is a per-node gauge: the
+  number of configs persisted on that node but not buildable there.
+  Non-zero means "a degraded config on this node," **not** "a down node."
+  Alert on it.
+- **Logs:** each degraded config emits the `ERROR` above, naming the kind,
+  id, and the unset variable.
+- **Recover:** provide the variable in the node's environment and
+  **restart** the node (environment is read at process start; there is no
+  hot reload). On restart the config builds and the gauge returns to zero.
+  You do **not** re-submit the config.
 
 ## Kubernetes
 

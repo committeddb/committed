@@ -32,6 +32,8 @@ type Metrics struct {
 	ingestSupervisorGiveups    metric.Int64Counter
 	ingestPositionBumpDuration metric.Float64Histogram
 	ingestDedupSkipped         metric.Int64Counter
+
+	configBuildErrors metric.Float64Gauge
 }
 
 // New creates a Metrics instance from an OTel Meter. The caller
@@ -98,6 +100,9 @@ func New(meter metric.Meter) *Metrics {
 
 	m.ingestDedupSkipped, _ = meter.Int64Counter("committed.ingest.dedup_skipped_total",
 		metric.WithDescription("Re-emitted ingest proposals skipped before raft because their source sequence was at or below the durable highwater (effectively-once dedup)."))
+
+	m.configBuildErrors, _ = meter.Float64Gauge("committed.config.build_errors",
+		metric.WithDescription("Configs (database/ingestable/syncable) persisted on this node but not buildable locally — usually a missing ${VAR} secret. Non-zero means a degraded config, not a down node."))
 
 	return m
 }
@@ -234,4 +239,12 @@ func (m *Metrics) IngestPositionBumpCompleted(d time.Duration) {
 func (m *Metrics) IngestDedupSkipped(id string) {
 	m.ingestDedupSkipped.Add(context.Background(), 1,
 		metric.WithAttributes(attribute.String("id", id)))
+}
+
+// SetConfigBuildErrors records how many configs are currently degraded on
+// this node (persisted but not buildable locally — usually a missing
+// ${VAR} secret). Emitted from the raft Ready loop. A non-zero value is
+// an operator signal to fix the environment; the node is still serving.
+func (m *Metrics) SetConfigBuildErrors(n int) {
+	m.configBuildErrors.Record(context.Background(), float64(n))
 }

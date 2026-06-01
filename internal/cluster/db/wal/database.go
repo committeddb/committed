@@ -34,16 +34,32 @@ func (s *Storage) saveDatabase(t *cluster.Configuration) error {
 			return fmt.Errorf("[wal.database] marshal: %w", err)
 		}
 
-		name, db, err := s.parser.ParseDatabase(t.MimeType, t.Data)
-		if err != nil {
-			return fmt.Errorf("[wal.database] parseDatabase: %w", err)
-		}
-
-		s.logger.Debug("database saved", zap.String("id", t.ID), zap.String("name", name))
+		// Deterministic state-machine write FIRST: persist the raw config
+		// bytes. This depends only on Marshal (not on the node-local parse
+		// below), so every replica converges on the same config bucket
+		// state regardless of whether THIS node can build the live
+		// connection.
 		if _, err := putVersioned(b, []byte(t.ID), bs); err != nil {
 			return fmt.Errorf("[wal.database] putVersioned: %w", err)
 		}
 
+		// Node-local construction: build the live Database. ParseDatabase
+		// interpolates ${VAR} secrets against this node's environment, so
+		// it can fail for node-local reasons a follower's environment
+		// differs in. Degrade — record + log, leave the database uncached
+		// — instead of returning an error, which the apply path treats as
+		// fatal and would crash the node (and, for a freshly-rolled secret
+		// the proposing node has but others don't, every follower at once).
+		name, db, err := s.parser.ParseDatabase(t.MimeType, t.Data)
+		if err != nil {
+			s.recordConfigError("database", t.ID, err)
+			s.logger.Error("database config persisted but could not be built on this node (degraded); fix the environment and the config will build on next restart",
+				zap.String("id", t.ID), zap.Error(err))
+			return nil
+		}
+		s.clearConfigError("database", t.ID)
+
+		s.logger.Debug("database saved", zap.String("id", t.ID), zap.String("name", name))
 		s.databases[t.ID] = db
 
 		return nil
@@ -75,14 +91,23 @@ func (s *Storage) loadDatabases() error {
 		return forEachCurrent(b, func(id, data []byte) error {
 			cfg := &cluster.Configuration{}
 			if err := cfg.Unmarshal(data); err != nil {
-				return err
+				return err // genuine corruption — stays fatal
 			}
 
 			_, db, err := s.parser.ParseDatabase(cfg.MimeType, cfg.Data)
 			if err != nil {
-				return err
+				// Node-local build failure (e.g. missing ${VAR} secret).
+				// Degrade: skip caching the connection and keep going,
+				// rather than failing startup. Dependent syncables/
+				// ingestables will surface connection errors; the operator
+				// fixes the env and a restart builds it.
+				s.recordConfigError("database", cfg.ID, err)
+				s.logger.Error("database config could not be built on this node at startup (degraded)",
+					zap.String("id", cfg.ID), zap.Error(err))
+				return nil
 			}
 
+			s.clearConfigError("database", cfg.ID)
 			s.databases[cfg.ID] = db
 			return nil
 		})

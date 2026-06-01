@@ -37,6 +37,7 @@ func (s *Storage) handleSyncable(e *cluster.Entity) error {
 //     the proposal path; that would deadlock under the writer lock.
 func (s *Storage) saveSyncable(t *cluster.Configuration) error {
 	var syncable cluster.Syncable
+	var built bool
 	err := s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(syncableBucket)
 		if b == nil {
@@ -47,10 +48,24 @@ func (s *Storage) saveSyncable(t *cluster.Configuration) error {
 			return fmt.Errorf("[wal.syncable] marshal: %w", err)
 		}
 
+		// Deterministic state-machine write FIRST: persist the raw config
+		// bytes so every replica converges, then attempt the node-local
+		// build (which can fail on a missing ${VAR} secret).
+		if _, err := putVersioned(b, []byte(t.ID), bs); err != nil {
+			return fmt.Errorf("[wal.syncable] putVersioned: %w", err)
+		}
+
 		_, parsed, parsedMode, err := s.parser.ParseSyncable(t.MimeType, t.Data, s)
 		if err != nil {
-			return fmt.Errorf("[wal.syncable] parseSyncable: %w", err)
+			// Degrade rather than fail the apply (which would crash the
+			// node). The config is persisted; no worker is started until
+			// the build succeeds.
+			s.recordConfigError("syncable", t.ID, err)
+			s.logger.Error("syncable config persisted but could not be built on this node (degraded); fix the environment and the config will build on next restart",
+				zap.String("id", t.ID), zap.Error(err))
+			return nil
 		}
+		s.clearConfigError("syncable", t.ID)
 		// ModeAlwaysCurrent decorates the user syncable with a
 		// migration wrapper so the worker loop stays oblivious to
 		// version-upgrade concerns. ModeAsStored hands the syncable
@@ -60,10 +75,7 @@ func (s *Storage) saveSyncable(t *cluster.Configuration) error {
 			parsed = migration.Wrap(parsed, s)
 		}
 		syncable = parsed
-
-		if _, err := putVersioned(b, []byte(t.ID), bs); err != nil {
-			return fmt.Errorf("[wal.syncable] putVersioned: %w", err)
-		}
+		built = true
 
 		return nil
 	})
@@ -71,7 +83,7 @@ func (s *Storage) saveSyncable(t *cluster.Configuration) error {
 		return err
 	}
 
-	if s.sync != nil {
+	if built && s.sync != nil {
 		s.logger.Debug("sending syncable to channel", zap.String("id", t.ID))
 		s.sync <- &db.SyncableWithID{ID: t.ID, Syncable: syncable}
 	}

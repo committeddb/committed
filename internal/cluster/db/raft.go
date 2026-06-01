@@ -16,6 +16,15 @@ import (
 	"github.com/philborlin/committed/internal/cluster/metrics"
 )
 
+// configBuildErrorReporter is an optional Storage extension that reports
+// how many persisted configs could not be built on this node (a missing
+// ${VAR} secret degrades the config rather than crashing the node). The
+// Ready loop type-asserts it to emit the committed_config_build_errors
+// gauge; wal.Storage implements it, the in-memory test double does not.
+type configBuildErrorReporter interface {
+	ConfigBuildErrorCount() int
+}
+
 type Raft struct {
 	proposeC     <-chan []byte            // proposed messages
 	proposeConfC <-chan raftpb.ConfChange // proposed cluster config changes
@@ -364,6 +373,13 @@ func (n *Raft) serveChannels() {
 				fi, _ := n.storage.FirstIndex()
 				li, _ := n.storage.LastIndex()
 				n.metrics.SetIndexRange(fi, li)
+				// Surface degraded configs (persisted but not buildable on
+				// this node — usually a missing ${VAR} secret). Optional
+				// interface so only real storage reports it; the in-memory
+				// test double doesn't implement it.
+				if r, ok := n.storage.(configBuildErrorReporter); ok {
+					n.metrics.SetConfigBuildErrors(r.ConfigBuildErrorCount())
+				}
 			}
 
 			// Storage invariant: P_local == R_local. See

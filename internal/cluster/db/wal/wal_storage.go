@@ -145,6 +145,17 @@ type Storage struct {
 	parser        db.Parser
 	sync          chan<- *db.SyncableWithID
 	ingest        chan<- *db.IngestableWithID
+
+	// configErrMu guards configErrors. configErrors records, per
+	// "kind/id" (e.g. "database/orders"), the most recent failure to
+	// BUILD a config's live object on THIS node — a node-local condition
+	// (a missing ${VAR} secret, a parse error) that must not fail the
+	// deterministic apply. The raw config bytes are always persisted;
+	// only the local construction is deferred. A successful build clears
+	// the entry. db.DB reads the count via ConfigBuildErrorCount to emit
+	// a gauge. See secrets.go / saveDatabase for the rationale.
+	configErrMu  sync.Mutex
+	configErrors map[string]error
 	// appliedIndex is the highest raft entry index that ApplyCommitted has
 	// fully applied. Bumped after each successful per-entry apply (and
 	// persisted to bbolt in the same step). Loaded from bbolt on Open.
@@ -267,6 +278,7 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		sync:              sync,
 		ingest:            ingest,
 		logger:            logger,
+		configErrors:      make(map[string]error),
 	}
 
 	fi, err := entryLog.FirstIndex()

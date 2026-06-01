@@ -28,6 +28,7 @@ func (s *Storage) handleIngestable(e *cluster.Entity) error {
 // rationale on why the channel send happens outside the bbolt Update closure.
 func (s *Storage) saveIngestable(t *cluster.Configuration) error {
 	var ingestable cluster.Ingestable
+	var built bool
 	err := s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(ingestableBucket)
 		if b == nil {
@@ -38,15 +39,26 @@ func (s *Storage) saveIngestable(t *cluster.Configuration) error {
 			return fmt.Errorf("[wal.ingestable] marshal: %w", err)
 		}
 
-		_, parsed, err := s.parser.ParseIngestable(t.MimeType, t.Data)
-		if err != nil {
-			return fmt.Errorf("[wal.ingestable] parseIngestable: %w", err)
-		}
-		ingestable = parsed
-
+		// Deterministic state-machine write FIRST: persist the raw config
+		// bytes so every replica converges, then attempt the node-local
+		// build (which can fail on a missing ${VAR} secret).
 		if _, err := putVersioned(b, []byte(t.ID), bs); err != nil {
 			return fmt.Errorf("[wal.ingestable] putVersioned: %w", err)
 		}
+
+		_, parsed, err := s.parser.ParseIngestable(t.MimeType, t.Data)
+		if err != nil {
+			// Degrade rather than fail the apply (which would crash the
+			// node). The config is persisted; no worker is started until
+			// the build succeeds.
+			s.recordConfigError("ingestable", t.ID, err)
+			s.logger.Error("ingestable config persisted but could not be built on this node (degraded); fix the environment and the config will build on next restart",
+				zap.String("id", t.ID), zap.Error(err))
+			return nil
+		}
+		s.clearConfigError("ingestable", t.ID)
+		ingestable = parsed
+		built = true
 
 		return nil
 	})
@@ -54,7 +66,7 @@ func (s *Storage) saveIngestable(t *cluster.Configuration) error {
 		return err
 	}
 
-	if s.ingest != nil {
+	if built && s.ingest != nil {
 		s.ingest <- &db.IngestableWithID{ID: t.ID, Ingestable: ingestable}
 	}
 
@@ -97,10 +109,15 @@ func (s *Storage) restoreIngestableWorkers() {
 	for _, cfg := range cfgs {
 		_, ingestable, err := s.parser.ParseIngestable(cfg.MimeType, cfg.Data)
 		if err != nil {
-			s.logger.Warn("restoreIngestableWorkers: parse",
+			// Degraded: record so the build-errors gauge reflects the
+			// build path too (validateConfigSecrets uses the cheaper
+			// Validate; a config can pass that but fail the full parse).
+			s.recordConfigError("ingestable", cfg.ID, err)
+			s.logger.Warn("restoreIngestableWorkers: parse (degraded)",
 				zap.String("id", cfg.ID), zap.Error(err))
 			continue
 		}
+		s.clearConfigError("ingestable", cfg.ID)
 		s.ingest <- &db.IngestableWithID{ID: cfg.ID, Ingestable: ingestable}
 	}
 }
