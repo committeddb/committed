@@ -181,13 +181,19 @@ func systemType(id string) *Type {
 		// checkpoint through Raft, because the resolver looks for the
 		// position type in the user-types bucket where it isn't stored.
 		return ingestablePositionType
+	case syncableDeadLetterType.ID:
+		// SyncableDeadLetter entities are emitted by the sync worker when
+		// Sync returns a permanent error. Same rationale as the position
+		// branch: the apply path must resolve the type without consulting
+		// the user-types bucket, where this internal type is never stored.
+		return syncableDeadLetterType
 	}
 	return nil
 }
 
 func IsSystem(id string) bool {
 	switch id {
-	case syncableType.ID, databaseType.ID, typeType.ID, syncableIndexType.ID:
+	case syncableType.ID, databaseType.ID, typeType.ID, syncableIndexType.ID, syncableDeadLetterType.ID:
 		return true
 	}
 	return false

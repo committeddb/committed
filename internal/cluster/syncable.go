@@ -164,3 +164,70 @@ func NewUpsertSyncableIndexEntity(i *SyncableIndex) (*Entity, error) {
 
 	return NewUpsertEntity(syncableIndexType, []byte(i.ID), bs), nil
 }
+
+var syncableDeadLetterType = &Type{
+	ID:      "5f3b6c8e-1d2a-4e7b-9c0f-2a8d6b4e1f93",
+	Name:    "InternalSyncableDeadLetter",
+	Version: 1,
+}
+
+// SyncableDeadLetter records that a syncable permanently skipped (dead-
+// lettered) the proposal at raft Index. It is proposed by the leader's
+// sync worker when Sync returns cluster.ErrPermanent and applied
+// deterministically on every node, so the dead-letter record is durable
+// and queryable cluster-wide rather than stranded on whichever node
+// happened to be leader at failure time.
+//
+// TimestampUnixNano, Kind, and Message are stamped once by the proposer
+// so apply writes identical bytes on every replica. Message is truncated
+// by the proposer (see db.maxDeadLetterMessageBytes) to bound log growth.
+type SyncableDeadLetter struct {
+	ID                string
+	Index             uint64
+	TimestampUnixNano int64
+	Kind              string
+	Message           string
+}
+
+func (d *SyncableDeadLetter) Marshal() ([]byte, error) {
+	ld := &clusterpb.LogSyncableDeadLetter{
+		ID:                d.ID,
+		Index:             d.Index,
+		TimestampUnixNano: d.TimestampUnixNano,
+		Kind:              d.Kind,
+		Message:           d.Message,
+	}
+	return proto.Marshal(ld)
+}
+
+func (d *SyncableDeadLetter) Unmarshal(bs []byte) error {
+	ld := &clusterpb.LogSyncableDeadLetter{}
+	if err := proto.Unmarshal(bs, ld); err != nil {
+		return err
+	}
+
+	d.ID = ld.ID
+	d.Index = ld.Index
+	d.TimestampUnixNano = ld.TimestampUnixNano
+	d.Kind = ld.Kind
+	d.Message = ld.Message
+
+	return nil
+}
+
+func IsSyncableDeadLetter(id string) bool {
+	return id == syncableDeadLetterType.ID
+}
+
+// NewUpsertSyncableDeadLetterEntity wraps a SyncableDeadLetter as an
+// upsert entity keyed by the syncable id. The apply handler derives the
+// per-failure bbolt key (id + raft index) from the unmarshaled record,
+// so the entity Key only needs to carry the syncable id.
+func NewUpsertSyncableDeadLetterEntity(d *SyncableDeadLetter) (*Entity, error) {
+	bs, err := d.Marshal()
+	if err != nil {
+		return nil, err
+	}
+
+	return NewUpsertEntity(syncableDeadLetterType, []byte(d.ID), bs), nil
+}

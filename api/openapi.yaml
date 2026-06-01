@@ -447,6 +447,54 @@ paths:
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
+  /syncable/{id}/errors:
+    get:
+      tags: [syncable]
+      summary: List proposals a syncable permanently skipped (dead letters)
+      description: |
+        Returns the dead-letter records for a syncable — proposals it
+        permanently failed and skipped — in ascending raft-index order.
+        The records are replicated state, so any node answers identically.
+
+        Page forward by passing the `index` of the last record you saw as
+        the next `since`.
+      operationId: getSyncableErrors
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+        - name: since
+          in: query
+          required: false
+          description: |
+            Exclusive raft-index cursor: only records with index strictly
+            greater than this are returned. Default 0 (from the beginning).
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+        - name: limit
+          in: query
+          required: false
+          description: |
+            Maximum number of records to return. Defaults to 100; the
+            server caps the maximum.
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        '200':
+          description: Dead-letter records (ascending raft-index order; empty if none)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SyncableDeadLetterResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
   /syncable/{id}/rollback:
     post:
       tags: [syncable]
@@ -794,6 +842,30 @@ components:
         current:
           type: boolean
           description: True if this is the current version.
+
+    SyncableDeadLetterResponse:
+      type: object
+      required: [index, timestamp, kind, message]
+      description: One proposal a syncable permanently skipped.
+      properties:
+        index:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            Raft index of the dropped proposal. The proposal itself stays
+            in the log; this is the pointer back to it. Pass it as `since`
+            to page forward.
+        timestamp:
+          type: string
+          format: date-time
+          description: When the leader recorded the failure (RFC 3339, UTC).
+        kind:
+          type: string
+          description: Failure classification (e.g. `permanent`).
+        message:
+          type: string
+          description: Truncated error string from the failing Sync.
 
     GetTypeGraphPoint:
       type: object

@@ -80,11 +80,15 @@ func (r *Reader) Read() (uint64, *cluster.Proposal, error) {
 			return 0, nil, err
 		}
 
-		// Metadata proposals (syncable-index updates) are internal
-		// bookkeeping and shouldn't reach syncable projection code;
-		// skip them and keep scanning. Matches the prior Reader shape.
-		if len(p.Entities) > 0 && !cluster.IsSyncableIndex(p.Entities[0].Type.ID) {
-			return ent.Index, p, nil
+		// Metadata proposals (syncable-index bumps, dead-letter records)
+		// are internal bookkeeping with no topic and shouldn't reach
+		// syncable projection code — a syncable would otherwise re-Sync
+		// its own dead letters. Skip them and keep scanning.
+		if len(p.Entities) > 0 {
+			tid := p.Entities[0].Type.ID
+			if !cluster.IsSyncableIndex(tid) && !cluster.IsSyncableDeadLetter(tid) {
+				return ent.Index, p, nil
+			}
 		}
 	}
 }

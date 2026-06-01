@@ -255,6 +255,21 @@ type FakeCluster struct {
 	syncReturnsOnCall map[int]struct {
 		result1 error
 	}
+	SyncableDeadLettersStub        func(string, uint64, int) ([]cluster.SyncableDeadLetter, error)
+	syncableDeadLettersMutex       sync.RWMutex
+	syncableDeadLettersArgsForCall []struct {
+		arg1 string
+		arg2 uint64
+		arg3 int
+	}
+	syncableDeadLettersReturns struct {
+		result1 []cluster.SyncableDeadLetter
+		result2 error
+	}
+	syncableDeadLettersReturnsOnCall map[int]struct {
+		result1 []cluster.SyncableDeadLetter
+		result2 error
+	}
 	SyncableVersionStub        func(string, uint64) (*cluster.Configuration, error)
 	syncableVersionMutex       sync.RWMutex
 	syncableVersionArgsForCall []struct {
@@ -1574,6 +1589,72 @@ func (fake *FakeCluster) SyncReturnsOnCall(i int, result1 error) {
 	}{result1}
 }
 
+func (fake *FakeCluster) SyncableDeadLetters(arg1 string, arg2 uint64, arg3 int) ([]cluster.SyncableDeadLetter, error) {
+	fake.syncableDeadLettersMutex.Lock()
+	ret, specificReturn := fake.syncableDeadLettersReturnsOnCall[len(fake.syncableDeadLettersArgsForCall)]
+	fake.syncableDeadLettersArgsForCall = append(fake.syncableDeadLettersArgsForCall, struct {
+		arg1 string
+		arg2 uint64
+		arg3 int
+	}{arg1, arg2, arg3})
+	stub := fake.SyncableDeadLettersStub
+	fakeReturns := fake.syncableDeadLettersReturns
+	fake.recordInvocation("SyncableDeadLetters", []interface{}{arg1, arg2, arg3})
+	fake.syncableDeadLettersMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2, arg3)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeCluster) SyncableDeadLettersCallCount() int {
+	fake.syncableDeadLettersMutex.RLock()
+	defer fake.syncableDeadLettersMutex.RUnlock()
+	return len(fake.syncableDeadLettersArgsForCall)
+}
+
+func (fake *FakeCluster) SyncableDeadLettersCalls(stub func(string, uint64, int) ([]cluster.SyncableDeadLetter, error)) {
+	fake.syncableDeadLettersMutex.Lock()
+	defer fake.syncableDeadLettersMutex.Unlock()
+	fake.SyncableDeadLettersStub = stub
+}
+
+func (fake *FakeCluster) SyncableDeadLettersArgsForCall(i int) (string, uint64, int) {
+	fake.syncableDeadLettersMutex.RLock()
+	defer fake.syncableDeadLettersMutex.RUnlock()
+	argsForCall := fake.syncableDeadLettersArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3
+}
+
+func (fake *FakeCluster) SyncableDeadLettersReturns(result1 []cluster.SyncableDeadLetter, result2 error) {
+	fake.syncableDeadLettersMutex.Lock()
+	defer fake.syncableDeadLettersMutex.Unlock()
+	fake.SyncableDeadLettersStub = nil
+	fake.syncableDeadLettersReturns = struct {
+		result1 []cluster.SyncableDeadLetter
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) SyncableDeadLettersReturnsOnCall(i int, result1 []cluster.SyncableDeadLetter, result2 error) {
+	fake.syncableDeadLettersMutex.Lock()
+	defer fake.syncableDeadLettersMutex.Unlock()
+	fake.SyncableDeadLettersStub = nil
+	if fake.syncableDeadLettersReturnsOnCall == nil {
+		fake.syncableDeadLettersReturnsOnCall = make(map[int]struct {
+			result1 []cluster.SyncableDeadLetter
+			result2 error
+		})
+	}
+	fake.syncableDeadLettersReturnsOnCall[i] = struct {
+		result1 []cluster.SyncableDeadLetter
+		result2 error
+	}{result1, result2}
+}
+
 func (fake *FakeCluster) SyncableVersion(arg1 string, arg2 uint64) (*cluster.Configuration, error) {
 	fake.syncableVersionMutex.Lock()
 	ret, specificReturn := fake.syncableVersionReturnsOnCall[len(fake.syncableVersionArgsForCall)]
@@ -2055,6 +2136,8 @@ func (fake *FakeCluster) Invocations() map[string][][]interface{} {
 	defer fake.resolveTypeMutex.RUnlock()
 	fake.syncMutex.RLock()
 	defer fake.syncMutex.RUnlock()
+	fake.syncableDeadLettersMutex.RLock()
+	defer fake.syncableDeadLettersMutex.RUnlock()
 	fake.syncableVersionMutex.RLock()
 	defer fake.syncableVersionMutex.RUnlock()
 	fake.syncableVersionsMutex.RLock()

@@ -44,6 +44,12 @@ var (
 var (
 	syncableBucket      = []byte("syncables")
 	syncableIndexBucket = []byte("syncableIndexes")
+	// syncableDeadLetterBucket holds one nested sub-bucket per syncable
+	// id; each sub-bucket maps a big-endian raft index to a marshaled
+	// cluster.SyncableDeadLetter. Written deterministically from the
+	// apply path (handleSyncableDeadLetter) so the records replicate to
+	// every node and ride along in snapshots. See dead_letter.go.
+	syncableDeadLetterBucket = []byte("syncableDeadLetters")
 )
 
 // appliedIndexBucket holds a single key ("idx") whose value is the
@@ -55,7 +61,7 @@ var (
 	appliedIndexKey    = []byte("idx")
 )
 
-var buckets = [][]byte{typeBucket, databaseBucket, ingestableBucket, ingestablePositionBucket, ingestSourceSeqBucket, syncableBucket, syncableIndexBucket, appliedIndexBucket}
+var buckets = [][]byte{typeBucket, databaseBucket, ingestableBucket, ingestablePositionBucket, ingestSourceSeqBucket, syncableBucket, syncableIndexBucket, syncableDeadLetterBucket, appliedIndexBucket}
 
 type StateType int
 
@@ -651,6 +657,10 @@ func (s *Storage) applyEntity(entity *cluster.Entity) error {
 	case cluster.IsSyncableIndex(entity.ID):
 		if err := s.handleSyncableIndex(entity); err != nil {
 			return fmt.Errorf("[wal.storage] handleSyncableIndex: %w", err)
+		}
+	case cluster.IsSyncableDeadLetter(entity.ID):
+		if err := s.handleSyncableDeadLetter(entity); err != nil {
+			return fmt.Errorf("[wal.storage] handleSyncableDeadLetter: %w", err)
 		}
 	case cluster.IsIngestablePosition(entity.ID):
 		if err := s.saveIngestablePosition(entity); err != nil {

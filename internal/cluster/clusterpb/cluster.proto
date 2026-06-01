@@ -90,3 +90,21 @@ message LogIngestablePosition {
     string ID = 1;
     bytes Position = 2;
 }
+
+message LogSyncableDeadLetter {
+    // ID is the syncable that permanently failed a proposal.
+    string ID = 1;
+    // index is the raft index of the failed proposal in the permanent
+    // event log — the pointer back to the dropped data (the proposal
+    // itself stays in the log; we only record that it was skipped).
+    uint64 index = 2;
+    // timestampUnixNano is the wall-clock time the leader recorded the
+    // failure. Stamped once at propose time so apply is content-
+    // deterministic on every replica (every node stores the same bytes).
+    int64 timestampUnixNano = 3;
+    // kind classifies the failure: "permanent" today. A
+    // "transient-exceeded" kind arrives with the bounded-retry feature.
+    string kind = 4;
+    // message is the (truncated) error string from the failing Sync.
+    string message = 5;
+}

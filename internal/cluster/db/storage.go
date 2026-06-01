@@ -101,6 +101,12 @@ type Storage interface {
 	IngestableVersion(id string, version uint64) (*cluster.Configuration, error)
 	SyncableVersions(id string) ([]cluster.VersionInfo, error)
 	SyncableVersion(id string, version uint64) (*cluster.Configuration, error)
+	// SyncableDeadLetters returns the proposals a syncable permanently
+	// skipped, in ascending raft-index order. `since` is an exclusive
+	// raft-index cursor and `limit` bounds the page. Records are written
+	// from the apply path, so they are consistent on every replica and
+	// queryable from any node. An unknown id returns an empty slice.
+	SyncableDeadLetters(id string, since uint64, limit int) ([]cluster.SyncableDeadLetter, error)
 	TypeVersions(id string) ([]cluster.VersionInfo, error)
 	TypeVersion(id string, version uint64) (*cluster.Configuration, error)
 }

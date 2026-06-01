@@ -119,6 +119,38 @@ func (db *DB) sync(ctx context.Context, id string, s cluster.Syncable) error {
 	return db.syncSingle(ctx, id, s)
 }
 
+// recordSyncPermanentError emits the permanent-error metric and durably
+// dead-letters the skipped proposal so an operator can later query (and,
+// once replay lands, re-drive) it. Best-effort on the dead-letter write:
+// a permanent error skips the proposal regardless, so a failed record
+// propose (ctx canceled by replace/Close, or a leader change) is logged,
+// not fatal. ctx is the sync worker's context.
+func (db *DB) recordSyncPermanentError(ctx context.Context, id string, index uint64, syncErr error) {
+	if db.metrics != nil {
+		db.metrics.SyncError(id, "permanent")
+	}
+	dl := &cluster.SyncableDeadLetter{
+		ID:                id,
+		Index:             index,
+		TimestampUnixNano: time.Now().UnixNano(),
+		Kind:              "permanent",
+		Message:           truncateDeadLetterMessage(syncErr.Error()),
+	}
+	if err := db.proposeSyncableDeadLetter(ctx, dl); err != nil {
+		db.logger.Warn("dead-letter record not persisted (best-effort; proposal still skipped)",
+			zap.String("id", id), zap.Uint64("index", index), zap.Error(err))
+	}
+}
+
+// recordSyncTransientError emits the transient-error metric. Each
+// occurrence counts, so a worker stuck retrying a transient failure
+// shows a rising counter and a fresh last-error timestamp.
+func (db *DB) recordSyncTransientError(id string) {
+	if db.metrics != nil {
+		db.metrics.SyncError(id, "transient")
+	}
+}
+
 func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) error {
 	isNode := false
 	var r ProposalReader
@@ -193,10 +225,12 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 					if errors.Is(syncErr, cluster.ErrPermanent) {
 						db.logger.Error("permanent sync error, skipping proposal",
 							zap.String("id", id), zap.Uint64("index", i), zap.Error(syncErr))
+						db.recordSyncPermanentError(ctx, id, i, syncErr)
 						retryProposal = nil
 					} else {
 						db.logger.Warn("transient sync error, will retry",
 							zap.String("id", id), zap.Uint64("index", i), zap.Error(syncErr))
+						db.recordSyncTransientError(id)
 						retryIndex = i
 						retryProposal = p
 						// Don't set progressed — the backoff will
@@ -302,6 +336,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 			// retried on the next iteration.
 			db.logger.Warn("transient batch sync error, will retry",
 				zap.String("id", id), zap.Int("batch_size", len(batch)), zap.Error(syncErr))
+			db.recordSyncTransientError(id)
 			retryBatch = true
 			return false
 		}
@@ -422,6 +457,7 @@ func (db *DB) syncBatchFallback(ctx context.Context, id string, s cluster.Syncab
 			if errors.Is(syncErr, cluster.ErrPermanent) {
 				db.logger.Error("permanent sync error, skipping proposal",
 					zap.String("id", id), zap.Uint64("index", e.index), zap.Error(syncErr))
+				db.recordSyncPermanentError(ctx, id, e.index, syncErr)
 				continue
 			}
 			// Transient error in fallback — stop here. The caller
@@ -429,6 +465,7 @@ func (db *DB) syncBatchFallback(ctx context.Context, id string, s cluster.Syncab
 			// was already committed via Sync's idempotent upsert).
 			db.logger.Warn("transient sync error in fallback, stopping",
 				zap.String("id", id), zap.Uint64("index", e.index), zap.Error(syncErr))
+			db.recordSyncTransientError(id)
 			return false
 		}
 		if shouldSnapshot {

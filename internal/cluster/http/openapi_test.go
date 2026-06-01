@@ -246,6 +246,16 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 			},
 		},
 		{
+			name:   "GET /syncable/{id}/errors",
+			method: httpgo.MethodGet,
+			path:   "/syncable/sync-1/errors?since=5&limit=10",
+			setup: func(fake *clusterfakes.FakeCluster) {
+				fake.SyncableDeadLettersReturns([]cluster.SyncableDeadLetter{
+					{ID: "sync-1", Index: 7, TimestampUnixNano: 1_700_000_000_000_000_000, Kind: "permanent", Message: "constraint violation"},
+				}, nil)
+			},
+		},
+		{
 			name:   "POST /syncable/{id}/rollback",
 			method: httpgo.MethodPost,
 			path:   "/syncable/sync-1/rollback?to=1",
@@ -468,6 +478,7 @@ func TestOpenAPIContract_SpecCoversAllRoutes(t *testing.T) {
 		"/syncable/{id}",
 		"/syncable/{id}/versions",
 		"/syncable/{id}/versions/{version}",
+		"/syncable/{id}/errors",
 		"/syncable/{id}/rollback",
 		"/type",
 		"/type/{id}",

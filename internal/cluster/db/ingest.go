@@ -274,6 +274,12 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 				err := db.Propose(ctx, proposal)
 				if err != nil {
 					db.logger.Warn("ingest propose error", zap.String("id", id), zap.Error(err))
+					// Count real failures only — a ctx cancellation here is
+					// the worker shutting down (replace/Close), not an
+					// ingest error.
+					if db.metrics != nil && ctx.Err() == nil {
+						db.metrics.IngestError(id, "propose")
+					}
 					if errors.Is(err, ErrProposalUnknown) {
 						// Freeze: we don't know if this proposal
 						// committed. Because position bumps are now
@@ -312,6 +318,9 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 				err := db.proposeIngestablePosition(ctx, &cluster.IngestablePosition{ID: id, Position: position})
 				if err != nil {
 					db.logger.Warn("proposeIngestablePosition error", zap.String("id", id), zap.Error(err))
+					if db.metrics != nil && ctx.Err() == nil {
+						db.metrics.IngestError(id, "position")
+					}
 					if errors.Is(err, ErrProposalUnknown) {
 						if db.metrics != nil {
 							db.metrics.IngestFrozen(id, true)

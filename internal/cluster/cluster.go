@@ -44,6 +44,11 @@ type Cluster interface {
 	IngestableVersion(id string, version uint64) (*Configuration, error)
 	SyncableVersions(id string) ([]VersionInfo, error)
 	SyncableVersion(id string, version uint64) (*Configuration, error)
+	// SyncableDeadLetters returns the proposals a syncable permanently
+	// skipped (dead-lettered), in ascending raft-index order. `since` is
+	// an exclusive raft-index cursor for paging; `limit` bounds the page.
+	// Backed by replicated state, so any node returns the same answer.
+	SyncableDeadLetters(id string, since uint64, limit int) ([]SyncableDeadLetter, error)
 	TypeVersions(id string) ([]VersionInfo, error)
 	TypeVersion(id string, version uint64) (*Configuration, error)
 	// Leader returns the raft node ID this cluster believes is the current

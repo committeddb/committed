@@ -747,6 +747,54 @@ func (db *DB) proposeSyncableIndex(ctx context.Context, i *cluster.SyncableIndex
 	return err
 }
 
+// maxDeadLetterMessageBytes bounds the error string stored in a
+// dead-letter record. The record is replicated through Raft and lives in
+// the permanent event log, so an unbounded driver error message (some
+// SQL drivers echo the whole offending statement) would bloat every
+// replica's log. 1 KiB keeps the diagnostic useful while capping growth.
+const maxDeadLetterMessageBytes = 1024
+
+// proposeSyncableDeadLetter records that a syncable permanently skipped
+// the proposal at index i. It proposes a SyncableDeadLetter entity and
+// BLOCKS until it durably applies, so the record is replicated to every
+// node and queryable from any of them — not stranded on whichever node
+// was leader at failure time.
+//
+// Unlike proposeSyncableIndex, a failure here does NOT change control
+// flow: a permanent error skips the proposal regardless, and the dead
+// letter is best-effort observability layered on top (the metric counter
+// and the structured ERROR log already fired). A ctx cancellation
+// (replace/Close) or ErrProposalUnknown (leader change) just means this
+// one record didn't land; the caller logs and moves on rather than
+// freezing the worker. ctx is the sync worker's context.
+func (db *DB) proposeSyncableDeadLetter(ctx context.Context, d *cluster.SyncableDeadLetter) error {
+	entity, err := cluster.NewUpsertSyncableDeadLetterEntity(d)
+	if err != nil {
+		return err
+	}
+	return db.Propose(ctx, &cluster.Proposal{Entities: []*cluster.Entity{entity}})
+}
+
+// truncateDeadLetterMessage clamps s to maxDeadLetterMessageBytes,
+// appending an ellipsis marker when it had to cut. Operates on bytes
+// (not runes) for a hard size bound; a multi-byte rune split at the
+// boundary is acceptable for a diagnostic string.
+func truncateDeadLetterMessage(s string) string {
+	if len(s) <= maxDeadLetterMessageBytes {
+		return s
+	}
+	return s[:maxDeadLetterMessageBytes] + "…(truncated)"
+}
+
+// SyncableDeadLetters returns the proposals a syncable permanently
+// skipped, in ascending raft-index order. `since` is an exclusive
+// raft-index cursor; `limit` bounds the page. Delegates to storage,
+// where the records were written from the (replicated) apply path, so
+// the answer is consistent on every node.
+func (db *DB) SyncableDeadLetters(id string, since uint64, limit int) ([]cluster.SyncableDeadLetter, error) {
+	return db.storage.SyncableDeadLetters(id, since, limit)
+}
+
 // proposeIngestablePosition bumps the persisted Position for an
 // ingestable after the upstream source advances, and BLOCKS until that
 // bump is durably applied (the ingestablePositions bucket written via

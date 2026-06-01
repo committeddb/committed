@@ -120,6 +120,7 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 		r.Post("/syncable/{id}", h.AddSyncable)
 		r.Get("/syncable/{id}/versions", h.GetSyncableVersions)
 		r.Get("/syncable/{id}/versions/{version}", h.GetSyncableVersion)
+		r.Get("/syncable/{id}/errors", h.GetSyncableErrors)
 		r.Post("/syncable/{id}/rollback", h.RollbackSyncable)
 
 		r.Get("/type", h.GetTypes)

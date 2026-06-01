@@ -995,6 +995,10 @@ func (ms *MemoryStorage) SyncableVersion(id string, version uint64) (*cluster.Co
 	return nil, nil
 }
 
+func (ms *MemoryStorage) SyncableDeadLetters(id string, since uint64, limit int) ([]cluster.SyncableDeadLetter, error) {
+	return nil, nil
+}
+
 func (ms *MemoryStorage) TypeVersions(id string) ([]cluster.VersionInfo, error) {
 	return nil, nil
 }
@@ -1063,8 +1067,11 @@ func (r *Reader) Read() (uint64, *cluster.Proposal, error) {
 				return 0, nil, err
 			}
 
-			if len(p.Entities) > 0 && !cluster.IsSyncableIndex(p.Entities[0].Type.ID) {
-				return readIndex, p, nil
+			if len(p.Entities) > 0 {
+				tid := p.Entities[0].Type.ID
+				if !cluster.IsSyncableIndex(tid) && !cluster.IsSyncableDeadLetter(tid) {
+					return readIndex, p, nil
+				}
 			}
 		}
 	}

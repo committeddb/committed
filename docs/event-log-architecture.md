@@ -597,6 +597,74 @@ default changes.
 
 ---
 
+## Commit ambiguity on leadership change (`ErrProposalUnknown`)
+
+When a node calls `db.Propose`, it registers a waiter stamped with the
+leader it currently believes in (`proposeAsync` in
+`internal/cluster/db/db.go`). A background watcher
+(`watchLeaderTransitions`) notices when that leader changes and, after a
+short grace period (`WithLeaderChangeGracePeriod`, default 3× tick —
+during which apply may still land) signals any still-unresolved waiter
+with **`ErrProposalUnknown`**: literally "proposal status unknown after
+leader change." The proposal *might* have committed (and will apply) or
+*might* have been dropped by the transition. The proposer cannot tell.
+
+Every in-flight propose has to decide what to do with that ambiguity. The
+governing principle is:
+
+> **The reaction to commit ambiguity is proportional to what is lost if
+> you guess wrong.**
+
+Guessing wrong about a data-carrying proposal corrupts the log
+(duplication or loss); guessing wrong about a diagnostic costs at most a
+missing diagnostic line. So the write paths react differently — by what is
+at stake, not by which subsystem they live in:
+
+| In-flight proposal | What's at stake on a wrong guess | Reaction | Recovery mechanism |
+|--------------------|----------------------------------|----------|--------------------|
+| Ingest data (a row from the source) | duplicate in the log, or silent data loss | **Freeze** the worker | Supervisor restarts the ingestable from the last *durable* position; the dialect replays from there; effectively-once dedup (`SourceSeq` highwater) drops any re-emit that already committed |
+| Ingest position checkpoint | resume point diverges → loss or re-emit storm | **Freeze** the worker | The unacknowledged position is discarded; restart re-reads `storage.Position`, still the last durable checkpoint |
+| Sync index bump (`proposeSyncableIndex`) | durable resume point advances past unconfirmed work → missed re-sync | **Don't advance**; keep the proposal and re-sync it next iteration | Bounded to at most one duplicate; safe because `Sync` is contractually idempotent (SQL UPSERT) |
+| Sync dead-letter record (`proposeSyncableDeadLetter`) | a row missing from `GET /syncable/{id}/errors` | **Log and continue** | Best-effort; the error counter and ERROR log already fired, and the skip stands regardless. Often self-healed on a later replay, but losing it costs nothing |
+
+The reactions form a ladder of severity, deepest cost first:
+
+- **Freeze** (ingest data + position). Continuing past an ambiguous
+  *data* proposal is the dangerous option — it risks unrecoverable loss or
+  duplication — so the worker stops entirely and rewinds to a known-good
+  point. Freezing halts that ingestable, a real availability cost, but it
+  is the lesser evil when the alternative is corrupting the event log, and
+  it is only safe because the rewind + replay + dedup machinery absorbs the
+  overlap on restart. See the `ingestExitFreeze` branch in
+  `internal/cluster/db/ingest.go` and `ingest-effectively-once.md`.
+
+- **Don't-advance-and-retry** (sync index bump). The bump *is* the durable
+  resume point, so advancing it past work whose commit is unconfirmed would
+  silently skip re-syncing that work on recovery. The worker refuses to
+  advance and re-syncs the same proposal next iteration. This caps recovery
+  at one duplicate rather than freezing, because `Sync` is idempotent and a
+  single re-delivery is harmless. See `proposeSyncableIndex` in
+  `internal/cluster/db/db.go` and `sync-position-durable.md`.
+
+- **Log-and-continue** (sync dead letter). The dead-letter record is
+  observability *about* a decision — the permanent skip — that has already
+  been made and is independent of whether the record persists. Nothing is
+  at stake in a wrong guess: the counter and ERROR log already captured the
+  event, the proposal is skipped regardless, and because a permanent skip
+  does not advance the durable `SyncableIndex`, a later replay frequently
+  re-derives and re-records the dead letter idempotently. Freezing here
+  would be actively wrong — it would halt the whole syncable over a
+  diagnostic for an *expected* condition (bad data), defeating the entire
+  point of skip-and-dead-letter, which is to keep good data flowing past
+  bad rows. See `proposeSyncableDeadLetter` in `internal/cluster/db/db.go`
+  and `sync-error-observability.md`.
+
+The same ambiguity, three reactions — and the deciding question is always
+"if I'm wrong about whether this committed, what breaks, and can I
+recover?"
+
+---
+
 ## Rebuild procedure
 
 The operator-facing runbook lives at
@@ -727,6 +795,7 @@ can build on it.
 | Joining-mode flag                 | None                                            | Node determines its state from on-disk data, not from operator input                   |
 | Per-write fsync on permanent log  | Yes                                             | Matches raft semantics; safe against power loss                                        |
 | Cross-type ordering               | Single raft group                               | Central differentiator from per-topic systems; sharding is v3+                         |
+| In-flight proposal on leader change | Reaction scaled to stakes: freeze (ingest data/position) / don't-advance + re-sync (sync index bump) / log + continue (dead letter) | Data proposes can't risk loss or duplication; a diagnostic can — `ErrProposalUnknown` is handled by what's lost on a wrong guess |
 
 ---
 

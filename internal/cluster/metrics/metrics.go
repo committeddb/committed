@@ -24,6 +24,11 @@ type Metrics struct {
 	workerRunning    metric.Float64Gauge
 	workerReplaces   metric.Int64Counter
 
+	syncErrors          metric.Int64Counter
+	syncLastErrorTime   metric.Float64Gauge
+	ingestErrors        metric.Int64Counter
+	ingestLastErrorTime metric.Float64Gauge
+
 	leaderTransitionsObserved metric.Int64Counter
 	proposeFailFastUnknown    metric.Int64Counter
 
@@ -78,6 +83,20 @@ func New(meter metric.Meter) *Metrics {
 
 	m.workerReplaces, _ = meter.Int64Counter("committed.worker.replaces",
 		metric.WithDescription("Number of times a worker was replaced via the registry."))
+
+	m.syncErrors, _ = meter.Int64Counter("committed.sync.errors",
+		metric.WithDescription("Sync errors by syncable_id and kind (permanent|transient). A permanent error dead-letters and skips the proposal; transient errors retry."))
+
+	m.syncLastErrorTime, _ = meter.Float64Gauge("committed.sync.last_error.timestamp",
+		metric.WithDescription("Unix time (seconds) of the most recent sync error for a syncable_id. Pair with sync_errors_total to spot a worker stuck in a retry loop."),
+		metric.WithUnit("s"))
+
+	m.ingestErrors, _ = meter.Int64Counter("committed.ingest.errors",
+		metric.WithDescription("Ingest errors by ingestable_id and kind (propose|position). A failure to commit an ingested proposal or its position checkpoint."))
+
+	m.ingestLastErrorTime, _ = meter.Float64Gauge("committed.ingest.last_error.timestamp",
+		metric.WithDescription("Unix time (seconds) of the most recent ingest error for an ingestable_id."),
+		metric.WithUnit("s"))
 
 	m.leaderTransitionsObserved, _ = meter.Int64Counter("committed.leader.transitions.observed",
 		metric.WithDescription("Raft leader-ID transitions observed by this node's leader-change watcher."))
@@ -154,6 +173,36 @@ func (m *Metrics) SyncCompleted(id string, d time.Duration) {
 // reflects real round-trip latency, not error-path timing.
 func (m *Metrics) SyncBumpCompleted(d time.Duration) {
 	m.syncBumpDuration.Record(context.Background(), d.Seconds())
+}
+
+// SyncError counts one sync error for a syncable and stamps the
+// last-error timestamp gauge. kind is "permanent" (the proposal was
+// dead-lettered and skipped) or "transient" (the worker will retry).
+// Node-local observability — emitted from the sync worker, which runs on
+// one node at a time; alert on the counter, dashboard the timestamp.
+func (m *Metrics) SyncError(id, kind string) {
+	m.syncErrors.Add(context.Background(), 1,
+		metric.WithAttributes(
+			attribute.String("syncable_id", id),
+			attribute.String("kind", kind),
+		))
+	m.syncLastErrorTime.Record(context.Background(), float64(time.Now().Unix()),
+		metric.WithAttributes(attribute.String("syncable_id", id)))
+}
+
+// IngestError counts one ingest error for an ingestable and stamps the
+// last-error timestamp gauge. kind is "propose" (a failure to commit an
+// ingested proposal) or "position" (a failure to commit a position
+// checkpoint). Context-cancellation on shutdown is not counted — the
+// caller guards on ctx.
+func (m *Metrics) IngestError(id, kind string) {
+	m.ingestErrors.Add(context.Background(), 1,
+		metric.WithAttributes(
+			attribute.String("ingestable_id", id),
+			attribute.String("kind", kind),
+		))
+	m.ingestLastErrorTime.Record(context.Background(), float64(time.Now().Unix()),
+		metric.WithAttributes(attribute.String("ingestable_id", id)))
 }
 
 // SetWorkerRunning sets the worker running gauge to 1 or 0.
