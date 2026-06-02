@@ -121,6 +121,10 @@ type Storage interface {
 	// what makes the manual dead-letter flow node-agnostic.
 	SyncableStuck(id string) (cluster.SyncableStuck, bool, error)
 	SyncableSkipRequest(id string) (cluster.SyncableSkipRequest, bool, error)
+	// ProposalAt returns the committed proposal at a raft index, read from
+	// the permanent event log by binary search. Used by replay to re-drive a
+	// single dead-lettered proposal without disturbing any reader cursor.
+	ProposalAt(index uint64) (*cluster.Proposal, error)
 	TypeVersions(id string) ([]cluster.VersionInfo, error)
 	TypeVersion(id string, version uint64) (*cluster.Configuration, error)
 }

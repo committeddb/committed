@@ -2,6 +2,7 @@ package http_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http/httptest"
 	"testing"
@@ -190,4 +191,64 @@ func TestGetSyncableStatus_NotStuck(t *testing.T) {
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	require.JSONEq(t, `{"stuck":false}`, string(body))
+}
+
+// TestReplaySyncableDeadLetterHandler_Success maps a nil error to 200 and
+// threads id + index through to the cluster.
+func TestReplaySyncableDeadLetterHandler_Success(t *testing.T) {
+	h, fake := setupTest()
+	fake.ReplaySyncableDeadLetterReturns(nil)
+
+	req := httptest.NewRequest("POST", "http://localhost/syncable/sync-1/replay/7", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	require.Equal(t, 200, w.Result().StatusCode)
+	require.Equal(t, 1, fake.ReplaySyncableDeadLetterCallCount())
+	_, gotID, gotIndex := fake.ReplaySyncableDeadLetterArgsForCall(0)
+	require.Equal(t, "sync-1", gotID)
+	require.Equal(t, uint64(7), gotIndex)
+}
+
+// TestReplaySyncableDeadLetterHandler_NotDeadLettered maps ErrNotDeadLettered
+// to 404.
+func TestReplaySyncableDeadLetterHandler_NotDeadLettered(t *testing.T) {
+	h, fake := setupTest()
+	fake.ReplaySyncableDeadLetterReturns(cluster.ErrNotDeadLettered)
+
+	req := httptest.NewRequest("POST", "http://localhost/syncable/sync-1/replay/7", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	require.Equal(t, 404, w.Result().StatusCode)
+}
+
+// TestReplaySyncableDeadLetterHandler_SyncFailed maps a wrapped
+// ErrReplaySyncFailed to 502 with the cause in details.
+func TestReplaySyncableDeadLetterHandler_SyncFailed(t *testing.T) {
+	h, fake := setupTest()
+	fake.ReplaySyncableDeadLetterReturns(fmt.Errorf("%w: ERROR: value too long", cluster.ErrReplaySyncFailed))
+
+	req := httptest.NewRequest("POST", "http://localhost/syncable/sync-1/replay/7", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	resp := w.Result()
+	require.Equal(t, 502, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Contains(t, string(body), "value too long", "the failure cause should be surfaced in details")
+}
+
+// TestReplaySyncableDeadLetterHandler_BadIndex rejects a non-numeric index
+// with 400 before consulting the cluster.
+func TestReplaySyncableDeadLetterHandler_BadIndex(t *testing.T) {
+	h, fake := setupTest()
+
+	req := httptest.NewRequest("POST", "http://localhost/syncable/sync-1/replay/notanumber", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	require.Equal(t, 400, w.Result().StatusCode)
+	require.Zero(t, fake.ReplaySyncableDeadLetterCallCount())
 }

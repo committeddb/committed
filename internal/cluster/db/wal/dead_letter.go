@@ -27,11 +27,37 @@ const maxDeadLetterPageLimit = 1000
 // overwrites the same key with a fresh timestamp rather than duplicating
 // the row.
 func (s *Storage) handleSyncableDeadLetter(e *cluster.Entity) error {
+	if e.IsDelete() {
+		id, index, ok := cluster.DecodeSyncableDeadLetterKey(e.Key)
+		if !ok {
+			return fmt.Errorf("[wal.dead-letter] malformed delete key (%d bytes)", len(e.Key))
+		}
+		return s.deleteSyncableDeadLetter(id, index)
+	}
 	d := &cluster.SyncableDeadLetter{}
 	if err := d.Unmarshal(e.Data); err != nil {
 		return err
 	}
 	return s.saveSyncableDeadLetter(d)
+}
+
+// deleteSyncableDeadLetter removes the record at a specific raft index from a
+// syncable's nested bucket (used by replay after a successful re-sync). A
+// missing id or key is a no-op.
+func (s *Storage) deleteSyncableDeadLetter(id string, index uint64) error {
+	return s.update(func(tx *bolt.Tx) error {
+		top := tx.Bucket(syncableDeadLetterBucket)
+		if top == nil {
+			return ErrBucketMissing
+		}
+		sub := top.Bucket([]byte(id))
+		if sub == nil {
+			return nil
+		}
+		var key [8]byte
+		binary.BigEndian.PutUint64(key[:], index)
+		return sub.Delete(key[:])
+	})
 }
 
 func (s *Storage) saveSyncableDeadLetter(d *cluster.SyncableDeadLetter) error {

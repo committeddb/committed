@@ -194,3 +194,48 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 	}
 	writeJson(w, bs)
 }
+
+// ReplaySyncableDeadLetter re-drives a dead-lettered proposal
+// (POST /syncable/{id}/replay/{index}): it re-runs the syncable's Sync for the
+// proposal at `index` and, on success, clears the dead-letter record. Use it
+// after fixing the downstream that caused the original skip. Node-agnostic.
+func (h *HTTP) ReplaySyncableDeadLetter(w httpgo.ResponseWriter, r *httpgo.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, httpgo.StatusBadRequest, "invalid_parameter", "id is empty")
+		return
+	}
+	index, err := strconv.ParseUint(r.PathValue("index"), 10, 64)
+	if err != nil {
+		writeErrorf(w, httpgo.StatusBadRequest, "invalid_parameter",
+			"index %q is not a valid raft index", r.PathValue("index"))
+		return
+	}
+
+	err = h.c.ReplaySyncableDeadLetter(r.Context(), id, index)
+	switch {
+	case err == nil:
+		w.WriteHeader(httpgo.StatusOK)
+	case errors.Is(err, cluster.ErrNotDeadLettered):
+		writeError(w, httpgo.StatusNotFound, "not_dead_lettered",
+			"raft index is not a dead letter for this syncable")
+	case errors.Is(err, cluster.ErrReplaySyncFailed):
+		// The downstream rejected the proposal again; the dead letter is left
+		// in place. Surface the cause so the operator can see what failed.
+		writeErrorWithDetails(w, httpgo.StatusBadGateway, "replay_failed",
+			"the syncable rejected the proposal again; dead letter left in place", capError(err))
+	default:
+		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to replay the dead-lettered proposal")
+	}
+}
+
+// capError bounds an error string before it goes into a response detail so a
+// chatty driver error can't bloat the body.
+func capError(err error) string {
+	const max = 512
+	s := err.Error()
+	if len(s) > max {
+		return s[:max] + "…"
+	}
+	return s
+}

@@ -569,6 +569,55 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalError'
+  /syncable/{id}/replay/{index}:
+    post:
+      tags: [syncable]
+      summary: Re-drive a dead-lettered proposal
+      description: |
+        Re-runs the syncable's `Sync` for the dead-lettered proposal at raft
+        `index` and, on success, clears the dead-letter record. Use it after
+        you've fixed the downstream that caused the original skip (a
+        `permanent` failure that's now resolved, or a `manual` skip you want
+        to undo). Sync is idempotent, so replaying a proposal that already
+        applied is harmless.
+
+        Node-agnostic: config, the proposal, and the dead-letter store are
+        all replicated, so any node can serve it.
+      operationId: replaySyncableDeadLetter
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+        - name: index
+          in: path
+          required: true
+          description: Raft index of the dead-lettered proposal to re-drive.
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+      responses:
+        '200':
+          description: Re-synced successfully; the dead-letter record was cleared.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: The raft index is not a dead letter for this syncable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '502':
+          description: |
+            The re-sync failed again (the downstream still rejected the
+            proposal); the dead-letter record is left in place. The `details`
+            field carries the failure cause.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
   /syncable/{id}/rollback:
     post:
       tags: [syncable]

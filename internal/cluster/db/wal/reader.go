@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -142,6 +143,63 @@ func (r *Reader) resolveStartSeq() (uint64, error) {
 		return 0, nil
 	}
 	return lo, nil
+}
+
+// ErrProposalNotFound is returned by ProposalAt when no committed proposal
+// exists at the requested raft index (it was never committed, has been
+// scrubbed, or the entry there carries no proposal data).
+var ErrProposalNotFound = errors.New("wal: no proposal at raft index")
+
+// ProposalAt returns the committed proposal at raft index, read straight from
+// the permanent event log. It binary-searches the log by raft index (the
+// event log is strictly monotonic in raft index, so seq order == index
+// order), so it is O(log n) and does not disturb any syncable's read cursor.
+// Used by replay to re-drive a single dead-lettered proposal. Returns
+// ErrProposalNotFound if the index isn't present or carries no proposal.
+func (s *Storage) ProposalAt(index uint64) (*cluster.Proposal, error) {
+	first, err := s.firstEventSeq()
+	if err != nil {
+		return nil, err
+	}
+	last, err := s.lastEventSeq()
+	if err != nil {
+		return nil, err
+	}
+	if first == 0 || last == 0 || last < first {
+		return nil, ErrProposalNotFound
+	}
+
+	lo, hi := first, last
+	for lo <= hi {
+		mid := lo + (hi-lo)/2
+		bs, err := s.readEventAt(mid)
+		if err != nil {
+			return nil, fmt.Errorf("event log read seq %d: %w", mid, err)
+		}
+		ent := &pb.Entry{}
+		if err := ent.Unmarshal(bs); err != nil {
+			return nil, err
+		}
+		switch {
+		case ent.Index == index:
+			if ent.Type != pb.EntryNormal || ent.Data == nil {
+				return nil, ErrProposalNotFound
+			}
+			p := &cluster.Proposal{}
+			if err := p.Unmarshal(ent.Data, s); err != nil {
+				return nil, err
+			}
+			return p, nil
+		case ent.Index < index:
+			lo = mid + 1
+		default:
+			if mid == first {
+				return nil, ErrProposalNotFound
+			}
+			hi = mid - 1
+		}
+	}
+	return nil, ErrProposalNotFound
 }
 
 func (s *Storage) Reader(id string) db.ProposalReader {

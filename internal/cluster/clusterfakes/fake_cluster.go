@@ -243,6 +243,19 @@ type FakeCluster struct {
 	proposeTypeReturnsOnCall map[int]struct {
 		result1 error
 	}
+	ReplaySyncableDeadLetterStub        func(context.Context, string, uint64) error
+	replaySyncableDeadLetterMutex       sync.RWMutex
+	replaySyncableDeadLetterArgsForCall []struct {
+		arg1 context.Context
+		arg2 string
+		arg3 uint64
+	}
+	replaySyncableDeadLetterReturns struct {
+		result1 error
+	}
+	replaySyncableDeadLetterReturnsOnCall map[int]struct {
+		result1 error
+	}
 	ResolveTypeStub        func(cluster.TypeRef) (*cluster.Type, error)
 	resolveTypeMutex       sync.RWMutex
 	resolveTypeArgsForCall []struct {
@@ -1556,6 +1569,69 @@ func (fake *FakeCluster) ProposeTypeReturnsOnCall(i int, result1 error) {
 	}{result1}
 }
 
+func (fake *FakeCluster) ReplaySyncableDeadLetter(arg1 context.Context, arg2 string, arg3 uint64) error {
+	fake.replaySyncableDeadLetterMutex.Lock()
+	ret, specificReturn := fake.replaySyncableDeadLetterReturnsOnCall[len(fake.replaySyncableDeadLetterArgsForCall)]
+	fake.replaySyncableDeadLetterArgsForCall = append(fake.replaySyncableDeadLetterArgsForCall, struct {
+		arg1 context.Context
+		arg2 string
+		arg3 uint64
+	}{arg1, arg2, arg3})
+	stub := fake.ReplaySyncableDeadLetterStub
+	fakeReturns := fake.replaySyncableDeadLetterReturns
+	fake.recordInvocation("ReplaySyncableDeadLetter", []interface{}{arg1, arg2, arg3})
+	fake.replaySyncableDeadLetterMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2, arg3)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeCluster) ReplaySyncableDeadLetterCallCount() int {
+	fake.replaySyncableDeadLetterMutex.RLock()
+	defer fake.replaySyncableDeadLetterMutex.RUnlock()
+	return len(fake.replaySyncableDeadLetterArgsForCall)
+}
+
+func (fake *FakeCluster) ReplaySyncableDeadLetterCalls(stub func(context.Context, string, uint64) error) {
+	fake.replaySyncableDeadLetterMutex.Lock()
+	defer fake.replaySyncableDeadLetterMutex.Unlock()
+	fake.ReplaySyncableDeadLetterStub = stub
+}
+
+func (fake *FakeCluster) ReplaySyncableDeadLetterArgsForCall(i int) (context.Context, string, uint64) {
+	fake.replaySyncableDeadLetterMutex.RLock()
+	defer fake.replaySyncableDeadLetterMutex.RUnlock()
+	argsForCall := fake.replaySyncableDeadLetterArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3
+}
+
+func (fake *FakeCluster) ReplaySyncableDeadLetterReturns(result1 error) {
+	fake.replaySyncableDeadLetterMutex.Lock()
+	defer fake.replaySyncableDeadLetterMutex.Unlock()
+	fake.ReplaySyncableDeadLetterStub = nil
+	fake.replaySyncableDeadLetterReturns = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *FakeCluster) ReplaySyncableDeadLetterReturnsOnCall(i int, result1 error) {
+	fake.replaySyncableDeadLetterMutex.Lock()
+	defer fake.replaySyncableDeadLetterMutex.Unlock()
+	fake.ReplaySyncableDeadLetterStub = nil
+	if fake.replaySyncableDeadLetterReturnsOnCall == nil {
+		fake.replaySyncableDeadLetterReturnsOnCall = make(map[int]struct {
+			result1 error
+		})
+	}
+	fake.replaySyncableDeadLetterReturnsOnCall[i] = struct {
+		result1 error
+	}{result1}
+}
+
 func (fake *FakeCluster) ResolveType(arg1 cluster.TypeRef) (*cluster.Type, error) {
 	fake.resolveTypeMutex.Lock()
 	ret, specificReturn := fake.resolveTypeReturnsOnCall[len(fake.resolveTypeArgsForCall)]
@@ -2295,6 +2371,8 @@ func (fake *FakeCluster) Invocations() map[string][][]interface{} {
 	defer fake.proposeSyncableMutex.RUnlock()
 	fake.proposeTypeMutex.RLock()
 	defer fake.proposeTypeMutex.RUnlock()
+	fake.replaySyncableDeadLetterMutex.RLock()
+	defer fake.replaySyncableDeadLetterMutex.RUnlock()
 	fake.resolveTypeMutex.RLock()
 	defer fake.resolveTypeMutex.RUnlock()
 	fake.syncMutex.RLock()

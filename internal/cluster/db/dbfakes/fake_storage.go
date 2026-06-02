@@ -273,6 +273,19 @@ type FakeStorage struct {
 	positionReturnsOnCall map[int]struct {
 		result1 cluster.Position
 	}
+	ProposalAtStub        func(uint64) (*cluster.Proposal, error)
+	proposalAtMutex       sync.RWMutex
+	proposalAtArgsForCall []struct {
+		arg1 uint64
+	}
+	proposalAtReturns struct {
+		result1 *cluster.Proposal
+		result2 error
+	}
+	proposalAtReturnsOnCall map[int]struct {
+		result1 *cluster.Proposal
+		result2 error
+	}
 	RaftLogApproxSizeStub        func() (uint64, error)
 	raftLogApproxSizeMutex       sync.RWMutex
 	raftLogApproxSizeArgsForCall []struct {
@@ -1797,6 +1810,70 @@ func (fake *FakeStorage) PositionReturnsOnCall(i int, result1 cluster.Position) 
 	}{result1}
 }
 
+func (fake *FakeStorage) ProposalAt(arg1 uint64) (*cluster.Proposal, error) {
+	fake.proposalAtMutex.Lock()
+	ret, specificReturn := fake.proposalAtReturnsOnCall[len(fake.proposalAtArgsForCall)]
+	fake.proposalAtArgsForCall = append(fake.proposalAtArgsForCall, struct {
+		arg1 uint64
+	}{arg1})
+	stub := fake.ProposalAtStub
+	fakeReturns := fake.proposalAtReturns
+	fake.recordInvocation("ProposalAt", []interface{}{arg1})
+	fake.proposalAtMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeStorage) ProposalAtCallCount() int {
+	fake.proposalAtMutex.RLock()
+	defer fake.proposalAtMutex.RUnlock()
+	return len(fake.proposalAtArgsForCall)
+}
+
+func (fake *FakeStorage) ProposalAtCalls(stub func(uint64) (*cluster.Proposal, error)) {
+	fake.proposalAtMutex.Lock()
+	defer fake.proposalAtMutex.Unlock()
+	fake.ProposalAtStub = stub
+}
+
+func (fake *FakeStorage) ProposalAtArgsForCall(i int) uint64 {
+	fake.proposalAtMutex.RLock()
+	defer fake.proposalAtMutex.RUnlock()
+	argsForCall := fake.proposalAtArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeStorage) ProposalAtReturns(result1 *cluster.Proposal, result2 error) {
+	fake.proposalAtMutex.Lock()
+	defer fake.proposalAtMutex.Unlock()
+	fake.ProposalAtStub = nil
+	fake.proposalAtReturns = struct {
+		result1 *cluster.Proposal
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeStorage) ProposalAtReturnsOnCall(i int, result1 *cluster.Proposal, result2 error) {
+	fake.proposalAtMutex.Lock()
+	defer fake.proposalAtMutex.Unlock()
+	fake.ProposalAtStub = nil
+	if fake.proposalAtReturnsOnCall == nil {
+		fake.proposalAtReturnsOnCall = make(map[int]struct {
+			result1 *cluster.Proposal
+			result2 error
+		})
+	}
+	fake.proposalAtReturnsOnCall[i] = struct {
+		result1 *cluster.Proposal
+		result2 error
+	}{result1, result2}
+}
+
 func (fake *FakeStorage) RaftLogApproxSize() (uint64, error) {
 	fake.raftLogApproxSizeMutex.Lock()
 	ret, specificReturn := fake.raftLogApproxSizeReturnsOnCall[len(fake.raftLogApproxSizeArgsForCall)]
@@ -2910,6 +2987,8 @@ func (fake *FakeStorage) Invocations() map[string][][]interface{} {
 	defer fake.nodeMutex.RUnlock()
 	fake.positionMutex.RLock()
 	defer fake.positionMutex.RUnlock()
+	fake.proposalAtMutex.RLock()
+	defer fake.proposalAtMutex.RUnlock()
 	fake.raftLogApproxSizeMutex.RLock()
 	defer fake.raftLogApproxSizeMutex.RUnlock()
 	fake.readerMutex.RLock()

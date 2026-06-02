@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 
@@ -29,6 +30,17 @@ func Permanent(err error) error {
 // than the one running the worker (the "currently blocked" state is
 // node-local). The HTTP layer maps this to 409 Conflict.
 var ErrSyncNotStuck = errors.New("cluster: syncable is not currently blocked on this node")
+
+// ErrNotDeadLettered is returned by Cluster.ReplaySyncableDeadLetter when the
+// requested raft index is not a dead letter for the syncable (it was never
+// dead-lettered, or it has already been replayed and cleared). The HTTP layer
+// maps this to 404.
+var ErrNotDeadLettered = errors.New("cluster: index is not a dead letter for this syncable")
+
+// ErrReplaySyncFailed wraps the error a replay's re-Sync returned: the
+// syncable's downstream still rejected the proposal, so the dead letter is
+// left in place. The HTTP layer maps this to 502 and surfaces the cause.
+var ErrReplaySyncFailed = errors.New("cluster: replay re-sync failed")
 
 type ShouldSnapshot bool
 
@@ -241,6 +253,29 @@ func NewUpsertSyncableDeadLetterEntity(d *SyncableDeadLetter) (*Entity, error) {
 	}
 
 	return NewUpsertEntity(syncableDeadLetterType, []byte(d.ID), bs), nil
+}
+
+// NewDeleteSyncableDeadLetterEntity clears the dead-letter record at a
+// specific raft index (used by replay after a successful re-sync). The upsert
+// path keys the entity by syncable id and reads the index from the record
+// body, but a delete carries the delete sentinel in the body, so the index
+// rides in the Key instead: id bytes followed by the 8-byte big-endian index.
+// DecodeSyncableDeadLetterKey reverses it on the apply side.
+func NewDeleteSyncableDeadLetterEntity(id string, index uint64) *Entity {
+	key := make([]byte, len(id)+8)
+	copy(key, id)
+	binary.BigEndian.PutUint64(key[len(id):], index)
+	return NewDeleteEntity(syncableDeadLetterType, key)
+}
+
+// DecodeSyncableDeadLetterKey reverses NewDeleteSyncableDeadLetterEntity's
+// composite Key into (id, index). ok is false if the key is too short to
+// carry an 8-byte index.
+func DecodeSyncableDeadLetterKey(key []byte) (id string, index uint64, ok bool) {
+	if len(key) < 8 {
+		return "", 0, false
+	}
+	return string(key[:len(key)-8]), binary.BigEndian.Uint64(key[len(key)-8:]), true
 }
 
 var syncableStuckType = &Type{

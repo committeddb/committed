@@ -106,15 +106,50 @@ proposal on re-read, so a stuck syncable you've cleared does not re-wedge
 when its node restarts. Page forward through a long list with
 `?since=<last index>&limit=<n>`.
 
+## Re-driving a dead letter (replay)
+
+Once you've fixed the destination — the column exists now, the outage is
+over — re-drive a dead-lettered proposal and clear its record:
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  http://node:8080/syncable/orders/replay/4123
+# 200                — re-synced; the dead-letter record was cleared
+# 404                — raft index 4123 isn't a dead letter for this syncable
+# 502 {... details}  — the syncable rejected it again; record left in place,
+#                      the failure cause is in the error's details field
+```
+
+Replay re-runs the syncable's `Sync` once for that proposal against a fresh
+build of its current config, and on success removes the dead letter. It is
+node-agnostic (config, the proposal, and the dead-letter store are all
+replicated) and safe to retry — `Sync` is idempotent, so replaying a
+proposal that already applied is a no-op at the sink. A `502` means the
+downstream *still* won't take it: read the `details`, fix the cause, and
+replay again.
+
+> **Replay applies the proposal out of order — mind superseding writes.**
+> The worker skipped the dead letter and kept going, so by now the
+> downstream reflects *every later proposal* but not this one. Replaying it
+> re-applies it **last**, after those later proposals. For a key only this
+> proposal touched, that's exactly right. But if a **newer** proposal for the
+> **same key** has already applied — say this one was `insert K=old` and a
+> later `update K=new` already landed — replaying the old one re-upserts
+> `K=old` *on top of* `K=new` and reverts it.
+>
+> Two rules keep you safe:
+>
+> - **Replay in index order.** If several dead letters touch the same key,
+>   replay the lowest index first so the newest lands last.
+> - **Check for newer writes.** Before replaying an old dead letter, make
+>   sure nothing newer has written the same key since — otherwise you'll
+>   clobber it. (When in doubt, the safe replays are the most recent dead
+>   letters, or ones for keys nothing else has touched.)
+
 ## What is *not* (yet) done
 
-- **Replay.** Once you've fixed the destination, there is currently no
-  supported way to re-drive a dead-lettered proposal — the record is a
-  pointer for an operator and a future `POST /syncable/{id}/replay/{index}`,
-  not an automatic retry. Until replay ships, a skipped proposal is
-  *recorded but not re-applied*: the dead letter's `index` and `message`
-  tell you which proposal was dropped and why, but re-landing that data
-  downstream is a manual step on your side for now.
+- **Bulk replay.** Replay is one index at a time; there is no "retry
+  everything since X" yet. Page through `GET .../errors` and replay each.
 - **Auto-classification.** Improving how syncables classify errors (so more
   genuinely-permanent failures dead-letter automatically and fewer need this
   loop) is ongoing.

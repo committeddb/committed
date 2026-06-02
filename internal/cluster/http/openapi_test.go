@@ -281,6 +281,14 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 				}, true, nil)
 			},
 		},
+		{
+			name:   "POST /syncable/{id}/replay/{index}",
+			method: httpgo.MethodPost,
+			path:   "/syncable/sync-1/replay/7",
+			setup: func(fake *clusterfakes.FakeCluster) {
+				fake.ReplaySyncableDeadLetterReturns(nil)
+			},
+		},
 
 		// --- type ---
 		{
@@ -499,6 +507,7 @@ func TestOpenAPIContract_SpecCoversAllRoutes(t *testing.T) {
 		"/syncable/{id}/errors",
 		"/syncable/{id}/deadletter/",
 		"/syncable/{id}/status",
+		"/syncable/{id}/replay/{index}",
 		"/syncable/{id}/rollback",
 		"/type",
 		"/type/{id}",

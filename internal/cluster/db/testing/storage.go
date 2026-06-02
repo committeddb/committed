@@ -260,6 +260,12 @@ func (ms *MemoryStorage) SyncableSkipRequest(id string) (cluster.SyncableSkipReq
 	return cluster.SyncableSkipRequest{}, false, nil
 }
 
+// ProposalAt is a stub: MemoryStorage has no permanent event log. Tests that
+// exercise replay (which reads the proposal back by index) use wal.Storage.
+func (ms *MemoryStorage) ProposalAt(index uint64) (*cluster.Proposal, error) {
+	return nil, nil
+}
+
 func (ms *MemoryStorage) TypeVersions(id string) ([]cluster.VersionInfo, error) {
 	return nil, nil
 }

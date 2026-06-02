@@ -63,6 +63,13 @@ type Cluster interface {
 	// by replicated state, so any node answers identically — powers
 	// GET /syncable/{id}/status.
 	SyncableStuck(id string) (SyncableStuck, bool, error)
+	// ReplaySyncableDeadLetter re-drives a dead-lettered proposal: it
+	// re-runs the syncable's Sync for the proposal at index and, on success,
+	// clears the dead-letter record. Node-agnostic. Returns ErrNotDeadLettered
+	// if index isn't a dead letter for the syncable, or an error wrapping
+	// ErrReplaySyncFailed if the re-sync failed again (the record is left in
+	// place). See those errors.
+	ReplaySyncableDeadLetter(ctx context.Context, id string, index uint64) error
 	TypeVersions(id string) ([]VersionInfo, error)
 	TypeVersion(id string, version uint64) (*Configuration, error)
 	// Leader returns the raft node ID this cluster believes is the current
