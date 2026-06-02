@@ -50,6 +50,12 @@ var (
 	// apply path (handleSyncableDeadLetter) so the records replicate to
 	// every node and ride along in snapshots. See dead_letter.go.
 	syncableDeadLetterBucket = []byte("syncableDeadLetters")
+	// syncableStuckBucket and syncableSkipRequestBucket each hold one entry
+	// per syncable id (last-writer-wins): the worker's current "blocked on
+	// index N" status and the operator's pending skip request. Replicated
+	// metadata for the node-agnostic manual dead-letter flow; see stuck.go.
+	syncableStuckBucket       = []byte("syncableStuck")
+	syncableSkipRequestBucket = []byte("syncableSkipRequests")
 )
 
 // appliedIndexBucket holds a single key ("idx") whose value is the
@@ -61,7 +67,7 @@ var (
 	appliedIndexKey    = []byte("idx")
 )
 
-var buckets = [][]byte{typeBucket, databaseBucket, ingestableBucket, ingestablePositionBucket, ingestSourceSeqBucket, syncableBucket, syncableIndexBucket, syncableDeadLetterBucket, appliedIndexBucket}
+var buckets = [][]byte{typeBucket, databaseBucket, ingestableBucket, ingestablePositionBucket, ingestSourceSeqBucket, syncableBucket, syncableIndexBucket, syncableDeadLetterBucket, syncableStuckBucket, syncableSkipRequestBucket, appliedIndexBucket}
 
 type StateType int
 
@@ -661,6 +667,14 @@ func (s *Storage) applyEntity(entity *cluster.Entity) error {
 	case cluster.IsSyncableDeadLetter(entity.ID):
 		if err := s.handleSyncableDeadLetter(entity); err != nil {
 			return fmt.Errorf("[wal.storage] handleSyncableDeadLetter: %w", err)
+		}
+	case cluster.IsSyncableStuck(entity.ID):
+		if err := s.handleSyncableStuck(entity); err != nil {
+			return fmt.Errorf("[wal.storage] handleSyncableStuck: %w", err)
+		}
+	case cluster.IsSyncableSkipRequest(entity.ID):
+		if err := s.handleSyncableSkipRequest(entity); err != nil {
+			return fmt.Errorf("[wal.storage] handleSyncableSkipRequest: %w", err)
 		}
 	case cluster.IsIngestablePosition(entity.ID):
 		if err := s.saveIngestablePosition(entity); err != nil {

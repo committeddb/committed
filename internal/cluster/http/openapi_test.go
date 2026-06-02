@@ -263,6 +263,24 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 				fake.SyncableVersionReturns(sampleConfig("sync-1"), nil)
 			},
 		},
+		{
+			name:   "POST /syncable/{id}/deadletter/",
+			method: httpgo.MethodPost,
+			path:   "/syncable/sync-1/deadletter/",
+			setup: func(fake *clusterfakes.FakeCluster) {
+				fake.DeadLetterStuckSyncableReturns(7, nil)
+			},
+		},
+		{
+			name:   "GET /syncable/{id}/status",
+			method: httpgo.MethodGet,
+			path:   "/syncable/sync-1/status",
+			setup: func(fake *clusterfakes.FakeCluster) {
+				fake.SyncableStuckReturns(cluster.SyncableStuck{
+					ID: "sync-1", Index: 7, SinceUnixNano: 1_700_000_000_000_000_000, Message: "boom",
+				}, true, nil)
+			},
+		},
 
 		// --- type ---
 		{
@@ -479,6 +497,8 @@ func TestOpenAPIContract_SpecCoversAllRoutes(t *testing.T) {
 		"/syncable/{id}/versions",
 		"/syncable/{id}/versions/{version}",
 		"/syncable/{id}/errors",
+		"/syncable/{id}/deadletter/",
+		"/syncable/{id}/status",
 		"/syncable/{id}/rollback",
 		"/type",
 		"/type/{id}",

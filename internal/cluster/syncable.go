@@ -23,6 +23,13 @@ func Permanent(err error) error {
 	return fmt.Errorf("%w: %w", ErrPermanent, err)
 }
 
+// ErrSyncNotStuck is returned by Cluster.DeadLetterStuckSyncable when the
+// syncable is not currently blocked retrying a transient error on this node
+// — it is healthy, its id is unknown, or the request reached a node other
+// than the one running the worker (the "currently blocked" state is
+// node-local). The HTTP layer maps this to 409 Conflict.
+var ErrSyncNotStuck = errors.New("cluster: syncable is not currently blocked on this node")
+
 type ShouldSnapshot bool
 
 // Syncable consumes proposals from the commit log and applies them to
@@ -171,12 +178,13 @@ var syncableDeadLetterType = &Type{
 	Version: 1,
 }
 
-// SyncableDeadLetter records that a syncable permanently skipped (dead-
-// lettered) the proposal at raft Index. It is proposed by the leader's
-// sync worker when Sync returns cluster.ErrPermanent and applied
-// deterministically on every node, so the dead-letter record is durable
-// and queryable cluster-wide rather than stranded on whichever node
-// happened to be leader at failure time.
+// SyncableDeadLetter records that a syncable gave up on and skipped (dead-
+// lettered) the proposal at raft Index. It is proposed by the sync worker —
+// either automatically when Sync returns cluster.ErrPermanent, or on an
+// operator's DeadLetterStuckSyncable request for a worker wedged on a
+// transient error — and applied deterministically on every node, so the
+// record is durable and queryable cluster-wide rather than stranded on
+// whichever node happened to be leader at failure time.
 //
 // TimestampUnixNano, Kind, and Message are stamped once by the proposer
 // so apply writes identical bytes on every replica. Message is truncated
@@ -185,8 +193,11 @@ type SyncableDeadLetter struct {
 	ID                string
 	Index             uint64
 	TimestampUnixNano int64
-	Kind              string
-	Message           string
+	// Kind is why the proposal was skipped: "permanent" (Sync returned
+	// cluster.ErrPermanent) or "manual" (an operator dead-lettered a
+	// syncable wedged on a transient error).
+	Kind    string
+	Message string
 }
 
 func (d *SyncableDeadLetter) Marshal() ([]byte, error) {
@@ -230,4 +241,115 @@ func NewUpsertSyncableDeadLetterEntity(d *SyncableDeadLetter) (*Entity, error) {
 	}
 
 	return NewUpsertEntity(syncableDeadLetterType, []byte(d.ID), bs), nil
+}
+
+var syncableStuckType = &Type{
+	ID:      "8a1c4d2e-7b3f-4a6c-9e8d-1f5b2c7a9d04",
+	Name:    "InternalSyncableStuck",
+	Version: 1,
+}
+
+// SyncableStuck records that a syncable's worker is currently blocked
+// retrying a transient error on the proposal at Index (for a batch syncable,
+// the head of the wedged batch). The worker proposes it through Raft after a
+// debounce window so every node can report the stall (GET status) and so an
+// operator's skip request can be served from any node, not just the one
+// running the worker. Upsert/delete keyed by the syncable id — one current
+// value per syncable; the worker deletes it on progress.
+type SyncableStuck struct {
+	ID            string
+	Index         uint64
+	SinceUnixNano int64
+	Message       string
+}
+
+func (s *SyncableStuck) Marshal() ([]byte, error) {
+	ls := &clusterpb.LogSyncableStuck{
+		ID:            s.ID,
+		Index:         s.Index,
+		SinceUnixNano: s.SinceUnixNano,
+		Message:       s.Message,
+	}
+	return proto.Marshal(ls)
+}
+
+func (s *SyncableStuck) Unmarshal(bs []byte) error {
+	ls := &clusterpb.LogSyncableStuck{}
+	if err := proto.Unmarshal(bs, ls); err != nil {
+		return err
+	}
+	s.ID = ls.ID
+	s.Index = ls.Index
+	s.SinceUnixNano = ls.SinceUnixNano
+	s.Message = ls.Message
+	return nil
+}
+
+func IsSyncableStuck(id string) bool {
+	return id == syncableStuckType.ID
+}
+
+// NewUpsertSyncableStuckEntity wraps a SyncableStuck as an upsert entity
+// keyed by the syncable id.
+func NewUpsertSyncableStuckEntity(s *SyncableStuck) (*Entity, error) {
+	bs, err := s.Marshal()
+	if err != nil {
+		return nil, err
+	}
+	return NewUpsertEntity(syncableStuckType, []byte(s.ID), bs), nil
+}
+
+// NewDeleteSyncableStuckEntity clears the stuck record for a syncable.
+func NewDeleteSyncableStuckEntity(id string) *Entity {
+	return NewDeleteEntity(syncableStuckType, []byte(id))
+}
+
+var syncableSkipRequestType = &Type{
+	ID:      "3d9e6b1a-5c2f-4d7b-8a0e-6f4c1b8d3e25",
+	Name:    "InternalSyncableSkipRequest",
+	Version: 1,
+}
+
+// SyncableSkipRequest is the operator's request (proposed by the dead-letter
+// endpoint from any node) for a syncable's worker to skip what it is blocked
+// on. Index is copied from the matching SyncableStuck so the worker can only
+// skip the exact proposal the operator saw. Upsert/delete keyed by syncable
+// id; the worker deletes it once honored or drops it as stale.
+type SyncableSkipRequest struct {
+	ID    string
+	Index uint64
+}
+
+func (r *SyncableSkipRequest) Marshal() ([]byte, error) {
+	lr := &clusterpb.LogSyncableSkipRequest{ID: r.ID, Index: r.Index}
+	return proto.Marshal(lr)
+}
+
+func (r *SyncableSkipRequest) Unmarshal(bs []byte) error {
+	lr := &clusterpb.LogSyncableSkipRequest{}
+	if err := proto.Unmarshal(bs, lr); err != nil {
+		return err
+	}
+	r.ID = lr.ID
+	r.Index = lr.Index
+	return nil
+}
+
+func IsSyncableSkipRequest(id string) bool {
+	return id == syncableSkipRequestType.ID
+}
+
+// NewUpsertSyncableSkipRequestEntity wraps a SyncableSkipRequest as an upsert
+// entity keyed by the syncable id.
+func NewUpsertSyncableSkipRequestEntity(r *SyncableSkipRequest) (*Entity, error) {
+	bs, err := r.Marshal()
+	if err != nil {
+		return nil, err
+	}
+	return NewUpsertEntity(syncableSkipRequestType, []byte(r.ID), bs), nil
+}
+
+// NewDeleteSyncableSkipRequestEntity clears the skip request for a syncable.
+func NewDeleteSyncableSkipRequestEntity(id string) *Entity {
+	return NewDeleteEntity(syncableSkipRequestType, []byte(id))
 }

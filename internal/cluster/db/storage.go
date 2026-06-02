@@ -107,6 +107,20 @@ type Storage interface {
 	// from the apply path, so they are consistent on every replica and
 	// queryable from any node. An unknown id returns an empty slice.
 	SyncableDeadLetters(id string, since uint64, limit int) ([]cluster.SyncableDeadLetter, error)
+	// HasSyncableDeadLetter reports whether the proposal at raft index in
+	// syncable id has been dead-lettered (permanently skipped or manually
+	// skipped by an operator). The sync worker consults it before
+	// processing a proposal so a skip survives restart: a proposal already
+	// given up on is excluded rather than re-attempted. Backed by the same
+	// replicated store as SyncableDeadLetters.
+	HasSyncableDeadLetter(id string, index uint64) (bool, error)
+	// SyncableStuck returns the syncable's current "blocked on index N"
+	// record (ok=false if not blocked), and SyncableSkipRequest the pending
+	// operator skip request (ok=false if none). Both are replicated metadata
+	// written from the apply path, so any node answers identically — that's
+	// what makes the manual dead-letter flow node-agnostic.
+	SyncableStuck(id string) (cluster.SyncableStuck, bool, error)
+	SyncableSkipRequest(id string) (cluster.SyncableSkipRequest, bool, error)
 	TypeVersions(id string) ([]cluster.VersionInfo, error)
 	TypeVersion(id string, version uint64) (*cluster.Configuration, error)
 }

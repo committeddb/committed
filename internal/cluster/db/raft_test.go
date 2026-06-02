@@ -999,6 +999,18 @@ func (ms *MemoryStorage) SyncableDeadLetters(id string, since uint64, limit int)
 	return nil, nil
 }
 
+func (ms *MemoryStorage) HasSyncableDeadLetter(id string, index uint64) (bool, error) {
+	return false, nil
+}
+
+func (ms *MemoryStorage) SyncableStuck(id string) (cluster.SyncableStuck, bool, error) {
+	return cluster.SyncableStuck{}, false, nil
+}
+
+func (ms *MemoryStorage) SyncableSkipRequest(id string) (cluster.SyncableSkipRequest, bool, error) {
+	return cluster.SyncableSkipRequest{}, false, nil
+}
+
 func (ms *MemoryStorage) TypeVersions(id string) ([]cluster.VersionInfo, error) {
 	return nil, nil
 }
@@ -1069,7 +1081,8 @@ func (r *Reader) Read() (uint64, *cluster.Proposal, error) {
 
 			if len(p.Entities) > 0 {
 				tid := p.Entities[0].Type.ID
-				if !cluster.IsSyncableIndex(tid) && !cluster.IsSyncableDeadLetter(tid) {
+				if !cluster.IsSyncableIndex(tid) && !cluster.IsSyncableDeadLetter(tid) &&
+					!cluster.IsSyncableStuck(tid) && !cluster.IsSyncableSkipRequest(tid) {
 					return readIndex, p, nil
 				}
 			}

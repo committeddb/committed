@@ -108,3 +108,86 @@ func TestGetSyncableErrors_InternalError(t *testing.T) {
 
 	require.Equal(t, 500, w.Result().StatusCode)
 }
+
+// TestDeadLetterStuckSyncableHandler_Accepted asserts the handler returns 202
+// with the targeted index and threads the id through to the cluster.
+func TestDeadLetterStuckSyncableHandler_Accepted(t *testing.T) {
+	h, fake := setupTest()
+	fake.DeadLetterStuckSyncableReturns(42, nil)
+
+	req := httptest.NewRequest("POST", "http://localhost/syncable/sync-1/deadletter/", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	resp := w.Result()
+	require.Equal(t, 202, resp.StatusCode)
+	require.Equal(t, "application/json", resp.Header.Get("Content-Type"))
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	var got struct {
+		Index uint64 `json:"index"`
+	}
+	require.NoError(t, json.Unmarshal(body, &got))
+	require.Equal(t, uint64(42), got.Index)
+
+	require.Equal(t, 1, fake.DeadLetterStuckSyncableCallCount())
+	_, gotID := fake.DeadLetterStuckSyncableArgsForCall(0)
+	require.Equal(t, "sync-1", gotID)
+}
+
+// TestDeadLetterStuckSyncableHandler_NotStuck maps ErrSyncNotStuck to 409.
+func TestDeadLetterStuckSyncableHandler_NotStuck(t *testing.T) {
+	h, fake := setupTest()
+	fake.DeadLetterStuckSyncableReturns(0, cluster.ErrSyncNotStuck)
+
+	req := httptest.NewRequest("POST", "http://localhost/syncable/sync-1/deadletter/", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	require.Equal(t, 409, w.Result().StatusCode)
+}
+
+// TestGetSyncableStatus_Stuck renders a blocked syncable's status.
+func TestGetSyncableStatus_Stuck(t *testing.T) {
+	h, fake := setupTest()
+	fake.SyncableStuckReturns(cluster.SyncableStuck{
+		ID: "sync-1", Index: 9, SinceUnixNano: 1_700_000_000_000_000_000, Message: "downstream rejected the row",
+	}, true, nil)
+
+	req := httptest.NewRequest("GET", "http://localhost/syncable/sync-1/status", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	resp := w.Result()
+	require.Equal(t, 200, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	var got struct {
+		Stuck   bool   `json:"stuck"`
+		Index   uint64 `json:"index"`
+		Since   string `json:"since"`
+		Message string `json:"message"`
+	}
+	require.NoError(t, json.Unmarshal(body, &got))
+	require.True(t, got.Stuck)
+	require.Equal(t, uint64(9), got.Index)
+	require.Equal(t, "2023-11-14T22:13:20Z", got.Since)
+	require.Equal(t, "downstream rejected the row", got.Message)
+}
+
+// TestGetSyncableStatus_NotStuck reports a healthy syncable as not stuck.
+func TestGetSyncableStatus_NotStuck(t *testing.T) {
+	h, fake := setupTest()
+	fake.SyncableStuckReturns(cluster.SyncableStuck{}, false, nil)
+
+	req := httptest.NewRequest("GET", "http://localhost/syncable/sync-1/status", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	resp := w.Result()
+	require.Equal(t, 200, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"stuck":false}`, string(body))
+}

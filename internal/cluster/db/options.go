@@ -85,7 +85,19 @@ type options struct {
 	ingestSupervisorHealthyWindow  time.Duration
 
 	maxProposalBytes uint64
+
+	// syncStuckThreshold is how long a sync worker must be continuously
+	// blocked retrying a transient error before it publishes a replicated
+	// SyncableStuck record (so the stall is visible cluster-wide and an
+	// operator can skip it). 0 means "use defaultSyncStuckThreshold". Tests
+	// shorten it via WithSyncStuckThreshold; production leaves the default.
+	syncStuckThreshold time.Duration
 }
+
+// defaultSyncStuckThreshold debounces the "stuck" signal: a syncable must be
+// wedged this long before it flags, so normal fast-recovering transients
+// never surface as stuck. Tunable later if operators want it shorter.
+const defaultSyncStuckThreshold = 30 * time.Second
 
 // DefaultCompactMaxSize is the production default: compact the raft
 // log when it grows past 10 GiB. See docs/event-log-architecture.md §
@@ -100,12 +112,20 @@ const DefaultMaxProposalBytes uint64 = 16 * 1024 * 1024
 
 func defaultOptions() options {
 	return options{
-		tickInterval:     defaultTickInterval,
-		logger:           zap.NewNop(),
-		compactMaxSize:   DefaultCompactMaxSize,
-		compactMaxAge:    DefaultCompactMaxAge,
-		maxProposalBytes: DefaultMaxProposalBytes,
+		tickInterval:       defaultTickInterval,
+		logger:             zap.NewNop(),
+		compactMaxSize:     DefaultCompactMaxSize,
+		compactMaxAge:      DefaultCompactMaxAge,
+		maxProposalBytes:   DefaultMaxProposalBytes,
+		syncStuckThreshold: defaultSyncStuckThreshold,
 	}
+}
+
+// WithSyncStuckThreshold overrides how long a sync worker must be blocked
+// before it flags itself stuck. Tests set it small (tens of ms) so they
+// don't wait the 30s production debounce.
+func WithSyncStuckThreshold(d time.Duration) Option {
+	return func(o *options) { o.syncStuckThreshold = d }
 }
 
 // WithTickInterval overrides how often Raft.Tick() is called. Smaller

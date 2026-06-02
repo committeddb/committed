@@ -59,6 +59,33 @@ func (s *Storage) saveSyncableDeadLetter(d *cluster.SyncableDeadLetter) error {
 	})
 }
 
+// HasSyncableDeadLetter reports whether a dead-letter record exists for the
+// proposal at raft index in syncable id. The sync worker consults it before
+// (re-)processing a proposal so a skip — permanent or operator "manual" —
+// survives restart: a proposal already given up on is excluded rather than
+// re-attempted. An unknown syncable id returns false.
+func (s *Storage) HasSyncableDeadLetter(id string, index uint64) (bool, error) {
+	found := false
+	err := s.view(func(tx *bolt.Tx) error {
+		top := tx.Bucket(syncableDeadLetterBucket)
+		if top == nil {
+			return ErrBucketMissing
+		}
+		sub := top.Bucket([]byte(id))
+		if sub == nil {
+			return nil
+		}
+		var key [8]byte
+		binary.BigEndian.PutUint64(key[:], index)
+		found = sub.Get(key[:]) != nil
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return found, nil
+}
+
 // SyncableDeadLetters returns the dead-letter records for a syncable in
 // ascending raft-index order. `since` is an EXCLUSIVE cursor: only
 // records with raft index strictly greater than `since` are returned, so

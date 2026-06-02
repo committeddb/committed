@@ -26,6 +26,7 @@ type Metrics struct {
 
 	syncErrors          metric.Int64Counter
 	syncLastErrorTime   metric.Float64Gauge
+	syncStuck           metric.Float64Gauge
 	ingestErrors        metric.Int64Counter
 	ingestLastErrorTime metric.Float64Gauge
 
@@ -90,6 +91,9 @@ func New(meter metric.Meter) *Metrics {
 	m.syncLastErrorTime, _ = meter.Float64Gauge("committed.sync.last_error.timestamp",
 		metric.WithDescription("Unix time (seconds) of the most recent sync error for a syncable_id. Pair with sync_errors_total to spot a worker stuck in a retry loop."),
 		metric.WithUnit("s"))
+
+	m.syncStuck, _ = meter.Float64Gauge("committed.sync.stuck",
+		metric.WithDescription("1 if a syncable's worker has been blocked retrying a transient error past the stuck threshold (an operator can skip it via POST /syncable/{id}/deadletter/), 0 otherwise. Alert on this."))
 
 	m.ingestErrors, _ = meter.Int64Counter("committed.ingest.errors",
 		metric.WithDescription("Ingest errors by ingestable_id and kind (propose|position). A failure to commit an ingested proposal or its position checkpoint."))
@@ -254,6 +258,18 @@ func (m *Metrics) IngestFrozen(id string, frozen bool) {
 	}
 	m.ingestFrozen.Record(context.Background(), v,
 		metric.WithAttributes(attribute.String("id", id)))
+}
+
+// SetSyncStuck sets the stuck gauge for a syncable id (1 = blocked past the
+// stuck threshold, 0 = not). Driven by the worker's stuck tracker when it
+// publishes / clears the replicated SyncableStuck record.
+func (m *Metrics) SetSyncStuck(id string, stuck bool) {
+	v := 0.0
+	if stuck {
+		v = 1.0
+	}
+	m.syncStuck.Record(context.Background(), v,
+		metric.WithAttributes(attribute.String("syncable_id", id)))
 }
 
 // IngestRestart increments the supervisor restart counter for an

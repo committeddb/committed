@@ -92,7 +92,7 @@ message LogIngestablePosition {
 }
 
 message LogSyncableDeadLetter {
-    // ID is the syncable that permanently failed a proposal.
+    // ID is the syncable that gave up on and skipped a proposal.
     string ID = 1;
     // index is the raft index of the failed proposal in the permanent
     // event log — the pointer back to the dropped data (the proposal
@@ -102,9 +102,43 @@ message LogSyncableDeadLetter {
     // failure. Stamped once at propose time so apply is content-
     // deterministic on every replica (every node stores the same bytes).
     int64 timestampUnixNano = 3;
-    // kind classifies the failure: "permanent" today. A
-    // "transient-exceeded" kind arrives with the bounded-retry feature.
+    // kind classifies the skip: "permanent" (Sync returned a non-retryable
+    // error) or "manual" (an operator skipped a syncable wedged on a
+    // transient error via DeadLetterStuckSyncable).
     string kind = 4;
     // message is the (truncated) error string from the failing Sync.
     string message = 5;
+}
+
+// LogSyncableStuck is published by a syncable's worker when it has been
+// blocked retrying a transient error for longer than a debounce window. It
+// is replicated like every other metadata entry so any node can report
+// "syncable X is blocked on index N" (GET /syncable/{id}/status) and so an
+// operator's dead-letter request can be served from any node. It is
+// upsert/delete keyed by syncable id (one current value per syncable);
+// deleted when the worker makes progress.
+message LogSyncableStuck {
+    // ID is the blocked syncable.
+    string ID = 1;
+    // index is the raft index of the proposal (or, for a batch syncable, the
+    // head of the batch) the worker is currently blocked on.
+    uint64 index = 2;
+    // sinceUnixNano is when the worker first wedged on this proposal.
+    int64 sinceUnixNano = 3;
+    // message is the (truncated) last transient error.
+    string message = 4;
+}
+
+// LogSyncableSkipRequest is proposed by the dead-letter endpoint (from any
+// node) to ask the syncable's worker to skip what it is currently blocked
+// on. It carries the index from the matching LogSyncableStuck so the worker
+// can only ever skip the exact proposal the operator saw — never a different
+// one the worker may have moved on to. Upsert/delete keyed by syncable id;
+// the worker deletes it once honored (or drops it as stale).
+message LogSyncableSkipRequest {
+    // ID is the syncable to unstick.
+    string ID = 1;
+    // index is the blocked index the operator requested be skipped; the
+    // worker honors the request only while its current stuck index matches.
+    uint64 index = 2;
 }

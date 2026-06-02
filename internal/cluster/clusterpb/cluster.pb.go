@@ -567,7 +567,7 @@ type LogSyncableDeadLetter struct {
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	// ID is the syncable that permanently failed a proposal.
+	// ID is the syncable that gave up on and skipped a proposal.
 	ID string `protobuf:"bytes,1,opt,name=ID,proto3" json:"ID,omitempty"`
 	// index is the raft index of the failed proposal in the permanent
 	// event log — the pointer back to the dropped data (the proposal
@@ -577,8 +577,9 @@ type LogSyncableDeadLetter struct {
 	// failure. Stamped once at propose time so apply is content-
 	// deterministic on every replica (every node stores the same bytes).
 	TimestampUnixNano int64 `protobuf:"varint,3,opt,name=timestampUnixNano,proto3" json:"timestampUnixNano,omitempty"`
-	// kind classifies the failure: "permanent" today. A
-	// "transient-exceeded" kind arrives with the bounded-retry feature.
+	// kind classifies the skip: "permanent" (Sync returned a non-retryable
+	// error) or "manual" (an operator skipped a syncable wedged on a
+	// transient error via DeadLetterStuckSyncable).
 	Kind string `protobuf:"bytes,4,opt,name=kind,proto3" json:"kind,omitempty"`
 	// message is the (truncated) error string from the failing Sync.
 	Message string `protobuf:"bytes,5,opt,name=message,proto3" json:"message,omitempty"`
@@ -649,6 +650,149 @@ func (x *LogSyncableDeadLetter) GetMessage() string {
 	return ""
 }
 
+// LogSyncableStuck is published by a syncable's worker when it has been
+// blocked retrying a transient error for longer than a debounce window. It
+// is replicated like every other metadata entry so any node can report
+// "syncable X is blocked on index N" (GET /syncable/{id}/status) and so an
+// operator's dead-letter request can be served from any node. It is
+// upsert/delete keyed by syncable id (one current value per syncable);
+// deleted when the worker makes progress.
+type LogSyncableStuck struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	// ID is the blocked syncable.
+	ID string `protobuf:"bytes,1,opt,name=ID,proto3" json:"ID,omitempty"`
+	// index is the raft index of the proposal (or, for a batch syncable, the
+	// head of the batch) the worker is currently blocked on.
+	Index uint64 `protobuf:"varint,2,opt,name=index,proto3" json:"index,omitempty"`
+	// sinceUnixNano is when the worker first wedged on this proposal.
+	SinceUnixNano int64 `protobuf:"varint,3,opt,name=sinceUnixNano,proto3" json:"sinceUnixNano,omitempty"`
+	// message is the (truncated) last transient error.
+	Message string `protobuf:"bytes,4,opt,name=message,proto3" json:"message,omitempty"`
+}
+
+func (x *LogSyncableStuck) Reset() {
+	*x = LogSyncableStuck{}
+	mi := &file_clusterpb_cluster_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LogSyncableStuck) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LogSyncableStuck) ProtoMessage() {}
+
+func (x *LogSyncableStuck) ProtoReflect() protoreflect.Message {
+	mi := &file_clusterpb_cluster_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LogSyncableStuck.ProtoReflect.Descriptor instead.
+func (*LogSyncableStuck) Descriptor() ([]byte, []int) {
+	return file_clusterpb_cluster_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *LogSyncableStuck) GetID() string {
+	if x != nil {
+		return x.ID
+	}
+	return ""
+}
+
+func (x *LogSyncableStuck) GetIndex() uint64 {
+	if x != nil {
+		return x.Index
+	}
+	return 0
+}
+
+func (x *LogSyncableStuck) GetSinceUnixNano() int64 {
+	if x != nil {
+		return x.SinceUnixNano
+	}
+	return 0
+}
+
+func (x *LogSyncableStuck) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+// LogSyncableSkipRequest is proposed by the dead-letter endpoint (from any
+// node) to ask the syncable's worker to skip what it is currently blocked
+// on. It carries the index from the matching LogSyncableStuck so the worker
+// can only ever skip the exact proposal the operator saw — never a different
+// one the worker may have moved on to. Upsert/delete keyed by syncable id;
+// the worker deletes it once honored (or drops it as stale).
+type LogSyncableSkipRequest struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	// ID is the syncable to unstick.
+	ID string `protobuf:"bytes,1,opt,name=ID,proto3" json:"ID,omitempty"`
+	// index is the blocked index the operator requested be skipped; the
+	// worker honors the request only while its current stuck index matches.
+	Index uint64 `protobuf:"varint,2,opt,name=index,proto3" json:"index,omitempty"`
+}
+
+func (x *LogSyncableSkipRequest) Reset() {
+	*x = LogSyncableSkipRequest{}
+	mi := &file_clusterpb_cluster_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LogSyncableSkipRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LogSyncableSkipRequest) ProtoMessage() {}
+
+func (x *LogSyncableSkipRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_clusterpb_cluster_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LogSyncableSkipRequest.ProtoReflect.Descriptor instead.
+func (*LogSyncableSkipRequest) Descriptor() ([]byte, []int) {
+	return file_clusterpb_cluster_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *LogSyncableSkipRequest) GetID() string {
+	if x != nil {
+		return x.ID
+	}
+	return ""
+}
+
+func (x *LogSyncableSkipRequest) GetIndex() uint64 {
+	if x != nil {
+		return x.Index
+	}
+	return 0
+}
+
 var File_clusterpb_cluster_proto protoreflect.FileDescriptor
 
 var file_clusterpb_cluster_proto_rawDesc = []byte{
@@ -713,15 +857,27 @@ var file_clusterpb_cluster_proto_rawDesc = []byte{
 	0x73, 0x74, 0x61, 0x6d, 0x70, 0x55, 0x6e, 0x69, 0x78, 0x4e, 0x61, 0x6e, 0x6f, 0x12, 0x12, 0x0a,
 	0x04, 0x6b, 0x69, 0x6e, 0x64, 0x18, 0x04, 0x20, 0x01, 0x28, 0x09, 0x52, 0x04, 0x6b, 0x69, 0x6e,
 	0x64, 0x12, 0x18, 0x0a, 0x07, 0x6d, 0x65, 0x73, 0x73, 0x61, 0x67, 0x65, 0x18, 0x05, 0x20, 0x01,
-	0x28, 0x09, 0x52, 0x07, 0x6d, 0x65, 0x73, 0x73, 0x61, 0x67, 0x65, 0x2a, 0x3d, 0x0a, 0x15, 0x4c,
-	0x6f, 0x67, 0x56, 0x61, 0x6c, 0x69, 0x64, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x53, 0x74, 0x72, 0x61,
-	0x74, 0x65, 0x67, 0x79, 0x12, 0x10, 0x0a, 0x0c, 0x4e, 0x6f, 0x56, 0x61, 0x6c, 0x69, 0x64, 0x61,
-	0x74, 0x69, 0x6f, 0x6e, 0x10, 0x00, 0x12, 0x12, 0x0a, 0x0e, 0x56, 0x61, 0x6c, 0x69, 0x64, 0x61,
-	0x74, 0x65, 0x53, 0x63, 0x68, 0x65, 0x6d, 0x61, 0x10, 0x01, 0x42, 0x3c, 0x5a, 0x3a, 0x67, 0x69,
-	0x74, 0x68, 0x75, 0x62, 0x2e, 0x63, 0x6f, 0x6d, 0x2f, 0x70, 0x68, 0x69, 0x6c, 0x62, 0x6f, 0x72,
-	0x6c, 0x69, 0x6e, 0x2f, 0x63, 0x6f, 0x6d, 0x6d, 0x69, 0x74, 0x74, 0x65, 0x64, 0x2f, 0x69, 0x6e,
-	0x74, 0x65, 0x72, 0x6e, 0x61, 0x6c, 0x2f, 0x63, 0x6c, 0x75, 0x73, 0x74, 0x65, 0x72, 0x2f, 0x63,
-	0x6c, 0x75, 0x73, 0x74, 0x65, 0x72, 0x70, 0x62, 0x62, 0x06, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x33,
+	0x28, 0x09, 0x52, 0x07, 0x6d, 0x65, 0x73, 0x73, 0x61, 0x67, 0x65, 0x22, 0x78, 0x0a, 0x10, 0x4c,
+	0x6f, 0x67, 0x53, 0x79, 0x6e, 0x63, 0x61, 0x62, 0x6c, 0x65, 0x53, 0x74, 0x75, 0x63, 0x6b, 0x12,
+	0x0e, 0x0a, 0x02, 0x49, 0x44, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x02, 0x49, 0x44, 0x12,
+	0x14, 0x0a, 0x05, 0x69, 0x6e, 0x64, 0x65, 0x78, 0x18, 0x02, 0x20, 0x01, 0x28, 0x04, 0x52, 0x05,
+	0x69, 0x6e, 0x64, 0x65, 0x78, 0x12, 0x24, 0x0a, 0x0d, 0x73, 0x69, 0x6e, 0x63, 0x65, 0x55, 0x6e,
+	0x69, 0x78, 0x4e, 0x61, 0x6e, 0x6f, 0x18, 0x03, 0x20, 0x01, 0x28, 0x03, 0x52, 0x0d, 0x73, 0x69,
+	0x6e, 0x63, 0x65, 0x55, 0x6e, 0x69, 0x78, 0x4e, 0x61, 0x6e, 0x6f, 0x12, 0x18, 0x0a, 0x07, 0x6d,
+	0x65, 0x73, 0x73, 0x61, 0x67, 0x65, 0x18, 0x04, 0x20, 0x01, 0x28, 0x09, 0x52, 0x07, 0x6d, 0x65,
+	0x73, 0x73, 0x61, 0x67, 0x65, 0x22, 0x3e, 0x0a, 0x16, 0x4c, 0x6f, 0x67, 0x53, 0x79, 0x6e, 0x63,
+	0x61, 0x62, 0x6c, 0x65, 0x53, 0x6b, 0x69, 0x70, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x12,
+	0x0e, 0x0a, 0x02, 0x49, 0x44, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x02, 0x49, 0x44, 0x12,
+	0x14, 0x0a, 0x05, 0x69, 0x6e, 0x64, 0x65, 0x78, 0x18, 0x02, 0x20, 0x01, 0x28, 0x04, 0x52, 0x05,
+	0x69, 0x6e, 0x64, 0x65, 0x78, 0x2a, 0x3d, 0x0a, 0x15, 0x4c, 0x6f, 0x67, 0x56, 0x61, 0x6c, 0x69,
+	0x64, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x53, 0x74, 0x72, 0x61, 0x74, 0x65, 0x67, 0x79, 0x12, 0x10,
+	0x0a, 0x0c, 0x4e, 0x6f, 0x56, 0x61, 0x6c, 0x69, 0x64, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x10, 0x00,
+	0x12, 0x12, 0x0a, 0x0e, 0x56, 0x61, 0x6c, 0x69, 0x64, 0x61, 0x74, 0x65, 0x53, 0x63, 0x68, 0x65,
+	0x6d, 0x61, 0x10, 0x01, 0x42, 0x3c, 0x5a, 0x3a, 0x67, 0x69, 0x74, 0x68, 0x75, 0x62, 0x2e, 0x63,
+	0x6f, 0x6d, 0x2f, 0x70, 0x68, 0x69, 0x6c, 0x62, 0x6f, 0x72, 0x6c, 0x69, 0x6e, 0x2f, 0x63, 0x6f,
+	0x6d, 0x6d, 0x69, 0x74, 0x74, 0x65, 0x64, 0x2f, 0x69, 0x6e, 0x74, 0x65, 0x72, 0x6e, 0x61, 0x6c,
+	0x2f, 0x63, 0x6c, 0x75, 0x73, 0x74, 0x65, 0x72, 0x2f, 0x63, 0x6c, 0x75, 0x73, 0x74, 0x65, 0x72,
+	0x70, 0x62, 0x62, 0x06, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x33,
 }
 
 var (
@@ -737,17 +893,19 @@ func file_clusterpb_cluster_proto_rawDescGZIP() []byte {
 }
 
 var file_clusterpb_cluster_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_clusterpb_cluster_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_clusterpb_cluster_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_clusterpb_cluster_proto_goTypes = []any{
-	(LogValidationStrategy)(0),    // 0: clusterpb.LogValidationStrategy
-	(*TypeRef)(nil),               // 1: clusterpb.TypeRef
-	(*LogEntity)(nil),             // 2: clusterpb.LogEntity
-	(*LogProposal)(nil),           // 3: clusterpb.LogProposal
-	(*LogType)(nil),               // 4: clusterpb.LogType
-	(*LogConfiguration)(nil),      // 5: clusterpb.LogConfiguration
-	(*LogSyncableIndex)(nil),      // 6: clusterpb.LogSyncableIndex
-	(*LogIngestablePosition)(nil), // 7: clusterpb.LogIngestablePosition
-	(*LogSyncableDeadLetter)(nil), // 8: clusterpb.LogSyncableDeadLetter
+	(LogValidationStrategy)(0),     // 0: clusterpb.LogValidationStrategy
+	(*TypeRef)(nil),                // 1: clusterpb.TypeRef
+	(*LogEntity)(nil),              // 2: clusterpb.LogEntity
+	(*LogProposal)(nil),            // 3: clusterpb.LogProposal
+	(*LogType)(nil),                // 4: clusterpb.LogType
+	(*LogConfiguration)(nil),       // 5: clusterpb.LogConfiguration
+	(*LogSyncableIndex)(nil),       // 6: clusterpb.LogSyncableIndex
+	(*LogIngestablePosition)(nil),  // 7: clusterpb.LogIngestablePosition
+	(*LogSyncableDeadLetter)(nil),  // 8: clusterpb.LogSyncableDeadLetter
+	(*LogSyncableStuck)(nil),       // 9: clusterpb.LogSyncableStuck
+	(*LogSyncableSkipRequest)(nil), // 10: clusterpb.LogSyncableSkipRequest
 }
 var file_clusterpb_cluster_proto_depIdxs = []int32{
 	1, // 0: clusterpb.LogEntity.type:type_name -> clusterpb.TypeRef
@@ -771,7 +929,7 @@ func file_clusterpb_cluster_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: file_clusterpb_cluster_proto_rawDesc,
 			NumEnums:      1,
-			NumMessages:   8,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

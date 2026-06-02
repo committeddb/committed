@@ -44,11 +44,25 @@ type Cluster interface {
 	IngestableVersion(id string, version uint64) (*Configuration, error)
 	SyncableVersions(id string) ([]VersionInfo, error)
 	SyncableVersion(id string, version uint64) (*Configuration, error)
-	// SyncableDeadLetters returns the proposals a syncable permanently
+	// SyncableDeadLetters returns the proposals a syncable gave up on and
 	// skipped (dead-lettered), in ascending raft-index order. `since` is
 	// an exclusive raft-index cursor for paging; `limit` bounds the page.
 	// Backed by replicated state, so any node returns the same answer.
 	SyncableDeadLetters(id string, since uint64, limit int) ([]SyncableDeadLetter, error)
+	// DeadLetterStuckSyncable skips the proposal a syncable is currently
+	// blocked retrying (a transient error retries forever, so the worker
+	// stalls visibly rather than losing data until an operator intervenes).
+	// It reads the replicated SyncableStuck record to find the blocked index
+	// and proposes a skip request through Raft; the worker records a "manual"
+	// dead letter and advances. Works from any node (the stuck state is
+	// replicated). Returns the targeted raft index, or ErrSyncNotStuck if the
+	// syncable isn't currently blocked. See ErrSyncNotStuck.
+	DeadLetterStuckSyncable(ctx context.Context, id string) (uint64, error)
+	// SyncableStuck reports whether a syncable's worker is currently blocked
+	// and, if so, on which raft index (with when and the last error). Backed
+	// by replicated state, so any node answers identically — powers
+	// GET /syncable/{id}/status.
+	SyncableStuck(id string) (SyncableStuck, bool, error)
 	TypeVersions(id string) ([]VersionInfo, error)
 	TypeVersion(id string, version uint64) (*Configuration, error)
 	// Leader returns the raft node ID this cluster believes is the current

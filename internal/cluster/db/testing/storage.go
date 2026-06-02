@@ -242,6 +242,24 @@ func (ms *MemoryStorage) SyncableDeadLetters(id string, since uint64, limit int)
 	return nil, nil
 }
 
+// HasSyncableDeadLetter is a stub: MemoryStorage's ApplyCommitted is a
+// no-op, so no dead-letter records are ever stored. Tests that exercise the
+// real dead-letter store (including restart re-skip) use wal.Storage.
+func (ms *MemoryStorage) HasSyncableDeadLetter(id string, index uint64) (bool, error) {
+	return false, nil
+}
+
+// SyncableStuck / SyncableSkipRequest are stubs: MemoryStorage's
+// ApplyCommitted is a no-op, so the replicated stuck/skip records never land.
+// Tests of the node-agnostic manual dead-letter flow use wal.Storage.
+func (ms *MemoryStorage) SyncableStuck(id string) (cluster.SyncableStuck, bool, error) {
+	return cluster.SyncableStuck{}, false, nil
+}
+
+func (ms *MemoryStorage) SyncableSkipRequest(id string) (cluster.SyncableSkipRequest, bool, error) {
+	return cluster.SyncableSkipRequest{}, false, nil
+}
+
 func (ms *MemoryStorage) TypeVersions(id string) ([]cluster.VersionInfo, error) {
 	return nil, nil
 }
@@ -317,7 +335,8 @@ func (r *Reader) Read() (uint64, *cluster.Proposal, error) {
 
 			if len(p.Entities) > 0 {
 				tid := p.Entities[0].Type.ID
-				if !cluster.IsSyncableIndex(tid) && !cluster.IsSyncableDeadLetter(tid) {
+				if !cluster.IsSyncableIndex(tid) && !cluster.IsSyncableDeadLetter(tid) &&
+					!cluster.IsSyncableStuck(tid) && !cluster.IsSyncableSkipRequest(tid) {
 					return readIndex, p, nil
 				}
 			}

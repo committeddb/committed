@@ -450,11 +450,14 @@ paths:
   /syncable/{id}/errors:
     get:
       tags: [syncable]
-      summary: List proposals a syncable permanently skipped (dead letters)
+      summary: List proposals a syncable skipped (dead letters)
       description: |
-        Returns the dead-letter records for a syncable — proposals it
-        permanently failed and skipped — in ascending raft-index order.
-        The records are replicated state, so any node answers identically.
+        Returns the dead-letter records for a syncable — proposals it gave
+        up on and skipped — in ascending raft-index order. The `kind` field
+        says why: `permanent` (the sync failed with a non-retryable error)
+        or `manual` (an operator skipped a syncable wedged on a transient
+        error via the deadletter endpoint). The records are replicated
+        state, so any node answers identically.
 
         Page forward by passing the `index` of the last record you saw as
         the next `since`.
@@ -491,6 +494,77 @@ paths:
                   $ref: '#/components/schemas/SyncableDeadLetterResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /syncable/{id}/deadletter/:
+    post:
+      tags: [syncable]
+      summary: Skip the proposal a syncable is currently blocked on
+      description: |
+        Dead-letters the proposal the syncable is currently blocked
+        retrying and lets its worker advance past it. A transient (non-
+        permanent) sync error retries forever by design, so a syncable
+        wedged on a proposal the downstream will never accept stalls
+        visibly (its `errors` total stops advancing) rather than losing
+        data. This is the operator's lever to give up on that one
+        proposal: it records a `manual` dead letter (queryable via
+        `GET /syncable/{id}/errors`) and the worker moves on.
+
+        Use it when the downstream is healthy but one proposal won't
+        apply — not during an outage, where the syncable is correctly
+        waiting and you should let it.
+
+        Works from any node: the stuck state is replicated, so any node
+        finds the blocked index and proposes the skip through Raft. A
+        syncable that isn't currently blocked returns 409. Discover stuck
+        syncables via `GET /syncable/{id}/status` or the
+        `committed_sync_stuck` metric.
+      operationId: deadLetterStuckSyncable
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      responses:
+        '202':
+          description: |
+            Accepted. The worker will dead-letter the named proposal on its
+            next retry; poll `GET /syncable/{id}/errors` to confirm.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncableDeadLetterStuckResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: The syncable is not currently blocked (healthy or unknown).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /syncable/{id}/status:
+    get:
+      tags: [syncable]
+      summary: Report whether a syncable's worker is blocked
+      description: |
+        Reports whether the syncable's worker is currently blocked retrying
+        a transient error (a wedged syncable stalls visibly rather than
+        losing data). Backed by replicated state, so any node answers
+        identically — this is how you discover a wedged syncable behind a
+        load balancer, and the `index` to expect when you POST
+        `.../deadletter/`. The `committed_sync_stuck` gauge carries the same
+        signal for Prometheus alarms.
+      operationId: getSyncableStatus
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      responses:
+        '200':
+          description: The syncable's current worker status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncableStatusResponse'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '500':
@@ -846,7 +920,7 @@ components:
     SyncableDeadLetterResponse:
       type: object
       required: [index, timestamp, kind, message]
-      description: One proposal a syncable permanently skipped.
+      description: One proposal a syncable gave up on and skipped.
       properties:
         index:
           type: integer
@@ -859,13 +933,55 @@ components:
         timestamp:
           type: string
           format: date-time
-          description: When the leader recorded the failure (RFC 3339, UTC).
+          description: When the leader recorded the skip (RFC 3339, UTC).
         kind:
           type: string
-          description: Failure classification (e.g. `permanent`).
+          enum: [permanent, manual]
+          description: |
+            Why the proposal was skipped: `permanent` (non-retryable Sync
+            error) or `manual` (an operator skipped a syncable wedged on a
+            transient error).
         message:
           type: string
           description: Truncated error string from the failing Sync.
+
+    SyncableDeadLetterStuckResponse:
+      type: object
+      required: [index]
+      description: The proposal a manual dead-letter request targeted.
+      properties:
+        index:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            Raft index of the proposal the syncable was blocked on and that
+            the worker will dead-letter. Query `GET /syncable/{id}/errors`
+            to confirm the `manual` record once it lands.
+
+    SyncableStatusResponse:
+      type: object
+      required: [stuck]
+      description: A syncable worker's current operational status.
+      properties:
+        stuck:
+          type: boolean
+          description: |
+            True if the worker has been blocked retrying a transient error
+            past the stuck threshold. The remaining fields are present only
+            when true.
+        index:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Raft index the worker is blocked on (pass to .../deadletter/).
+        since:
+          type: string
+          format: date-time
+          description: When the worker first wedged on this proposal (RFC 3339, UTC).
+        message:
+          type: string
+          description: Truncated last transient error.
 
     GetTypeGraphPoint:
       type: object

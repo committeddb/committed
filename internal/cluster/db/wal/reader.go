@@ -86,7 +86,8 @@ func (r *Reader) Read() (uint64, *cluster.Proposal, error) {
 		// its own dead letters. Skip them and keep scanning.
 		if len(p.Entities) > 0 {
 			tid := p.Entities[0].Type.ID
-			if !cluster.IsSyncableIndex(tid) && !cluster.IsSyncableDeadLetter(tid) {
+			if !cluster.IsSyncableIndex(tid) && !cluster.IsSyncableDeadLetter(tid) &&
+				!cluster.IsSyncableStuck(tid) && !cluster.IsSyncableSkipRequest(tid) {
 				return ent.Index, p, nil
 			}
 		}

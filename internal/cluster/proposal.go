@@ -187,13 +187,20 @@ func systemType(id string) *Type {
 		// branch: the apply path must resolve the type without consulting
 		// the user-types bucket, where this internal type is never stored.
 		return syncableDeadLetterType
+	case syncableStuckType.ID:
+		// SyncableStuck / SyncableSkipRequest are the replicated stuck-state
+		// the manual dead-letter flow uses; same apply-path rationale.
+		return syncableStuckType
+	case syncableSkipRequestType.ID:
+		return syncableSkipRequestType
 	}
 	return nil
 }
 
 func IsSystem(id string) bool {
 	switch id {
-	case syncableType.ID, databaseType.ID, typeType.ID, syncableIndexType.ID, syncableDeadLetterType.ID:
+	case syncableType.ID, databaseType.ID, typeType.ID, syncableIndexType.ID,
+		syncableDeadLetterType.ID, syncableStuckType.ID, syncableSkipRequestType.ID:
 		return true
 	}
 	return false

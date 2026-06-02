@@ -1,9 +1,13 @@
 package http
 
 import (
+	"encoding/json"
+	"errors"
 	httpgo "net/http"
 	"strconv"
 	"time"
+
+	"github.com/philborlin/committed/internal/cluster"
 )
 
 // defaultSyncableErrorsLimit is the page size GetSyncableErrors uses when
@@ -98,4 +102,95 @@ func (h *HTTP) GetSyncableErrors(w httpgo.ResponseWriter, r *httpgo.Request) {
 	}
 
 	writeArrayBody(w, body)
+}
+
+// SyncableDeadLetterStuckResponse reports which proposal a manual dead-letter
+// request targeted — the raft index the syncable was blocked on.
+type SyncableDeadLetterStuckResponse struct {
+	Index uint64 `json:"index"`
+}
+
+// DeadLetterStuckSyncable skips the proposal a syncable is currently blocked
+// retrying (POST /syncable/{id}/deadletter/). A transient sync error retries
+// forever by design, so a syncable wedged on a proposal the downstream will
+// never accept stalls visibly rather than losing data; this is the operator's
+// lever to dead-letter that one proposal (kind "manual") and let the worker
+// advance.
+//
+// Node-agnostic: the stuck state is replicated, so any node can find the
+// blocked index and propose the skip through Raft. A syncable that isn't
+// currently blocked gets 409. The worker honors the request on its next
+// retry; poll GET /syncable/{id}/errors to confirm the manual dead letter.
+func (h *HTTP) DeadLetterStuckSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, httpgo.StatusBadRequest, "invalid_parameter", "id is empty")
+		return
+	}
+
+	index, err := h.c.DeadLetterStuckSyncable(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, cluster.ErrSyncNotStuck) {
+			writeError(w, httpgo.StatusConflict, "not_stuck",
+				"syncable is not currently blocked; it may be healthy or unknown")
+			return
+		}
+		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to dead-letter the stuck proposal")
+		return
+	}
+
+	// 202: the worker honors the request on its next retry, so the
+	// dead-letter record lands shortly after this returns. The body names
+	// the targeted index; poll GET /syncable/{id}/errors to confirm.
+	bs, err := json.Marshal(SyncableDeadLetterStuckResponse{Index: index})
+	if err != nil {
+		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to marshal response")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(httpgo.StatusAccepted)
+	_, _ = w.Write(bs)
+}
+
+// SyncableStatusResponse is the lean operational status of a syncable's
+// worker — currently just whether it is blocked, and if so on what.
+type SyncableStatusResponse struct {
+	Stuck bool `json:"stuck"`
+	// Index, Since, and Message are present only when stuck.
+	Index   uint64 `json:"index,omitempty"`
+	Since   string `json:"since,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
+// GetSyncableStatus reports whether a syncable's worker is currently blocked
+// retrying a transient error (GET /syncable/{id}/status). Backed by
+// replicated state, so any node answers identically — this is how an operator
+// (or a dashboard) discovers a wedged syncable behind a load balancer, and
+// the index to expect when they POST .../deadletter/.
+func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, httpgo.StatusBadRequest, "invalid_parameter", "id is empty")
+		return
+	}
+
+	stuck, ok, err := h.c.SyncableStuck(id)
+	if err != nil {
+		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to retrieve syncable status")
+		return
+	}
+
+	resp := SyncableStatusResponse{Stuck: ok}
+	if ok {
+		resp.Index = stuck.Index
+		resp.Since = time.Unix(0, stuck.SinceUnixNano).UTC().Format(time.RFC3339Nano)
+		resp.Message = stuck.Message
+	}
+
+	bs, err := json.Marshal(resp)
+	if err != nil {
+		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to marshal response")
+		return
+	}
+	writeJson(w, bs)
 }

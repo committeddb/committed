@@ -126,6 +126,13 @@ type DB struct {
 	ingestSupervisorMaxAttempts    int
 	ingestSupervisorHealthyWindow  time.Duration
 
+	// syncStuckThreshold is how long a worker must be continuously blocked
+	// retrying a transient error before it publishes a replicated
+	// SyncableStuck record (and lights the stuck gauge). Debounced so normal
+	// fast-recovering transients never flag; only a genuine wedge surfaces.
+	// Default 30s; tests override via WithSyncStuckThreshold.
+	syncStuckThreshold time.Duration
+
 	maxProposalBytes uint64
 
 	logger  *zap.Logger
@@ -225,6 +232,7 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		leaderChangeGrace:              cfg.leaderChangeGrace,
 		syncWorkers:                    make(map[string]*workerHandle),
 		ingestWorkers:                  make(map[string]*workerHandle),
+		syncStuckThreshold:             cfg.syncStuckThreshold,
 		ingestSupervisorStates:         make(map[string]*ingestSupervisorState),
 		ingestSupervisorInitialBackoff: cfg.ingestSupervisorInitialBackoff,
 		ingestSupervisorMaxBackoff:     cfg.ingestSupervisorMaxBackoff,

@@ -119,27 +119,40 @@ func (db *DB) sync(ctx context.Context, id string, s cluster.Syncable) error {
 	return db.syncSingle(ctx, id, s)
 }
 
-// recordSyncPermanentError emits the permanent-error metric and durably
+// recordSyncDeadLetter emits the error metric for `kind` and durably
 // dead-letters the skipped proposal so an operator can later query (and,
 // once replay lands, re-drive) it. Best-effort on the dead-letter write:
-// a permanent error skips the proposal regardless, so a failed record
-// propose (ctx canceled by replace/Close, or a leader change) is logged,
-// not fatal. ctx is the sync worker's context.
-func (db *DB) recordSyncPermanentError(ctx context.Context, id string, index uint64, syncErr error) {
+// the proposal is skipped regardless, so a failed record propose (ctx
+// canceled by replace/Close, or a leader change) is logged, not fatal.
+// `kind` is "permanent" (Sync returned ErrPermanent) or "manual" (an
+// operator skipped a syncable wedged on a transient error). ctx is the
+// sync worker's context.
+func (db *DB) recordSyncDeadLetter(ctx context.Context, id string, index uint64, kind string, syncErr error) {
 	if db.metrics != nil {
-		db.metrics.SyncError(id, "permanent")
+		db.metrics.SyncError(id, kind)
+	}
+	msg := "operator dead-letter"
+	if syncErr != nil {
+		msg = syncErr.Error()
 	}
 	dl := &cluster.SyncableDeadLetter{
 		ID:                id,
 		Index:             index,
 		TimestampUnixNano: time.Now().UnixNano(),
-		Kind:              "permanent",
-		Message:           truncateDeadLetterMessage(syncErr.Error()),
+		Kind:              kind,
+		Message:           truncateDeadLetterMessage(msg),
 	}
 	if err := db.proposeSyncableDeadLetter(ctx, dl); err != nil {
 		db.logger.Warn("dead-letter record not persisted (best-effort; proposal still skipped)",
-			zap.String("id", id), zap.Uint64("index", index), zap.Error(err))
+			zap.String("id", id), zap.Uint64("index", index), zap.String("kind", kind), zap.Error(err))
 	}
+}
+
+// recordSyncPermanentError dead-letters a proposal that Sync rejected with a
+// permanent error. Thin wrapper over recordSyncDeadLetter for the
+// "permanent" kind.
+func (db *DB) recordSyncPermanentError(ctx context.Context, id string, index uint64, syncErr error) {
+	db.recordSyncDeadLetter(ctx, id, index, "permanent", syncErr)
 }
 
 // recordSyncTransientError emits the transient-error metric. Each
@@ -151,6 +164,94 @@ func (db *DB) recordSyncTransientError(id string) {
 	}
 }
 
+// stuckTracker manages a worker's replicated "blocked on index N" status —
+// the node-agnostic half of the manual dead-letter flow. It debounces the
+// flag (publishing only after the worker has been wedged for
+// db.syncStuckThreshold), publishes/clears the SyncableStuck record through
+// Raft so every node can see the stall, drives the stuck gauge, and reads the
+// operator's SyncableSkipRequest. One per worker goroutine; all of its Raft
+// proposes are best-effort (a failure just defers visibility to the next
+// retry, never the worker's control flow).
+type stuckTracker struct {
+	db        *DB
+	id        string
+	since     time.Time // when the worker first wedged on `index`; zero = not stuck
+	index     uint64
+	published bool
+}
+
+// wedged is called on every transient failure of the proposal at `index`. It
+// (re)starts the debounce when the wedged proposal changes and publishes the
+// replicated stuck record once the worker has been blocked past the threshold.
+func (t *stuckTracker) wedged(ctx context.Context, index uint64, lastErr error) {
+	if t.since.IsZero() || t.index != index {
+		t.since = time.Now()
+		t.index = index
+		t.published = false
+	}
+	if t.published || time.Since(t.since) < t.db.syncStuckThreshold {
+		return
+	}
+	msg := ""
+	if lastErr != nil {
+		msg = truncateDeadLetterMessage(lastErr.Error())
+	}
+	s := &cluster.SyncableStuck{ID: t.id, Index: index, SinceUnixNano: t.since.UnixNano(), Message: msg}
+	if err := t.db.proposeSyncableStuck(ctx, s); err != nil {
+		t.db.logger.Warn("publish stuck status failed (will retry)",
+			zap.String("id", t.id), zap.Uint64("index", index), zap.Error(err))
+		return
+	}
+	t.published = true
+	if t.db.metrics != nil {
+		t.db.metrics.SetSyncStuck(t.id, true)
+	}
+}
+
+// skipRequested reports whether an operator has asked the worker to skip the
+// proposal at `index` (matching the stuck record it published). A request for
+// a different index is stale (the worker moved on) and is dropped. Returns
+// false until a stuck record has been published, since a request can only
+// target a published index.
+func (t *stuckTracker) skipRequested(ctx context.Context, index uint64) bool {
+	if !t.published {
+		return false
+	}
+	req, ok, err := t.db.storage.SyncableSkipRequest(t.id)
+	if err != nil || !ok {
+		return false
+	}
+	if req.Index != index {
+		_ = t.db.proposeDeleteSyncableSkipRequest(ctx, t.id)
+		return false
+	}
+	return true
+}
+
+// cleared is called when the worker makes progress, unsticks, or stops. It
+// clears the published stuck record (no-op if nothing was published) and
+// resets the debounce.
+func (t *stuckTracker) cleared(ctx context.Context) {
+	if t.published {
+		if err := t.db.proposeDeleteSyncableStuck(ctx, t.id); err != nil {
+			t.db.logger.Warn("clear stuck status failed", zap.String("id", t.id), zap.Error(err))
+		}
+		if t.db.metrics != nil {
+			t.db.metrics.SetSyncStuck(t.id, false)
+		}
+	}
+	t.since = time.Time{}
+	t.index = 0
+	t.published = false
+}
+
+// honored is called after the worker skips a proposal in response to a skip
+// request: it clears the request as well as the stuck record.
+func (t *stuckTracker) honored(ctx context.Context) {
+	_ = t.db.proposeDeleteSyncableSkipRequest(ctx, t.id)
+	t.cleared(ctx)
+}
+
 func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) error {
 	isNode := false
 	var r ProposalReader
@@ -158,10 +259,16 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 
 	// retryIndex and retryProposal hold a proposal that failed with a
 	// transient error. On the next iteration the worker retries the same
-	// proposal instead of reading a new one from the log. Cleared on
-	// success, permanent error, or leadership transition.
+	// proposal instead of reading a new one from the log — transient
+	// errors retry forever, so the worker stalls (visibly) rather than
+	// losing data. retryErr is the most recent transient error, recorded
+	// as the dead-letter message if an operator skips the wedged proposal.
+	// All three are cleared on success, permanent error, manual skip, or
+	// leadership transition.
 	var retryIndex uint64
 	var retryProposal *cluster.Proposal
+	var retryErr error
+	tracker := &stuckTracker{db: db, id: id}
 
 	for {
 		// Cheap non-blocking ctx check at the top so a cancellation
@@ -184,12 +291,14 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 			r = nil
 			isNode = false
 			retryProposal = nil
+			tracker.cleared(ctx)
 			progressed = true
 		case !isNode && db.isNode(id):
 			db.logger.Info("starting sync", zap.String("id", id))
 			r = db.storage.Reader(id)
 			isNode = true
 			retryProposal = nil
+			tracker.cleared(ctx)
 			progressed = true
 		case isNode && db.isNode(id):
 			var i uint64
@@ -198,6 +307,20 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 
 			if retryProposal != nil {
 				i, p = retryIndex, retryProposal
+				// The worker is blocked retrying this proposal. If an
+				// operator asked to dead-letter what it's stuck on, honor
+				// it now: record the skip (kind "manual", carrying the last
+				// transient error) and advance past it instead of syncing.
+				if tracker.skipRequested(ctx, i) {
+					db.logger.Warn("operator dead-letter: skipping wedged proposal",
+						zap.String("id", id), zap.Uint64("index", i), zap.Error(retryErr))
+					db.recordSyncDeadLetter(ctx, id, i, "manual", retryErr)
+					retryProposal = nil
+					retryErr = nil
+					tracker.honored(ctx)
+					progressed = true
+					break
+				}
 			} else {
 				i, p, readErr = r.Read()
 			}
@@ -208,6 +331,24 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 			case readErr != nil:
 				db.logger.Warn("sync read error", zap.String("id", id), zap.Error(readErr))
 			default:
+				// A proposal already dead-lettered (a permanent skip, or an
+				// operator's manual skip) stays skipped across restarts:
+				// exclude it without re-syncing. This is what makes a manual
+				// skip durable — unlike a permanent error, the syncable won't
+				// re-declare a transient failure skippable on the re-read
+				// after restart, so the durable record is the source of truth.
+				if dl, derr := db.storage.HasSyncableDeadLetter(id, i); derr != nil {
+					db.logger.Warn("dead-letter lookup failed; proceeding to sync",
+						zap.String("id", id), zap.Uint64("index", i), zap.Error(derr))
+				} else if dl {
+					db.logger.Info("skipping already dead-lettered proposal",
+						zap.String("id", id), zap.Uint64("index", i))
+					retryProposal = nil
+					retryErr = nil
+					tracker.cleared(ctx)
+					progressed = true
+					break
+				}
 				// Pass the worker's ctx (not db.ctx) so a replace or
 				// Close-driven cancellation propagates into the user's
 				// Sync implementation. Without this, a slow Sync keeps
@@ -227,18 +368,26 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 							zap.String("id", id), zap.Uint64("index", i), zap.Error(syncErr))
 						db.recordSyncPermanentError(ctx, id, i, syncErr)
 						retryProposal = nil
+						retryErr = nil
+						tracker.cleared(ctx)
 					} else {
 						db.logger.Warn("transient sync error, will retry",
 							zap.String("id", id), zap.Uint64("index", i), zap.Error(syncErr))
 						db.recordSyncTransientError(id)
 						retryIndex = i
 						retryProposal = p
-						// Don't set progressed — the backoff will
-						// slow the retry loop.
+						retryErr = syncErr
+						// Publish (after the debounce) the index the worker is
+						// blocked on so any node can report it and an operator
+						// can skip it. Don't set progressed — the backoff slows
+						// the retry loop.
+						tracker.wedged(ctx, i, syncErr)
 						break
 					}
 				} else {
 					retryProposal = nil
+					retryErr = nil
+					tracker.cleared(ctx)
 				}
 				if shouldSnapshot {
 					if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: i}); err != nil {
@@ -301,6 +450,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 	// retryBatch is set when a flush fails with a transient error. The
 	// next iteration retries the flush instead of reading more proposals.
 	retryBatch := false
+	tracker := &stuckTracker{db: db, id: id}
 
 	flush := func() bool {
 		if len(batch) == 0 {
@@ -325,10 +475,11 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 				// this batch to isolate the offending proposal(s).
 				db.logger.Warn("permanent batch error, falling back to per-proposal sync",
 					zap.String("id", id), zap.Int("batch_size", len(batch)), zap.Error(syncErr))
-				ok := db.syncBatchFallback(ctx, id, s, batch)
+				ok := db.syncBatchFallback(ctx, id, s, batch, "")
 				if ok {
 					batch = batch[:0]
 					retryBatch = false
+					tracker.cleared(ctx)
 				}
 				return ok
 			}
@@ -338,6 +489,12 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 				zap.String("id", id), zap.Int("batch_size", len(batch)), zap.Error(syncErr))
 			db.recordSyncTransientError(id)
 			retryBatch = true
+			// Publish (after the debounce) the head of the blocked batch so
+			// an operator can dead-letter what the syncable is stuck on. A
+			// batch fails atomically, so the head is the cursor; honoring the
+			// request isolates the batch per-proposal (see the retryBatch
+			// branch).
+			tracker.wedged(ctx, batch[0].index, syncErr)
 			return false
 		}
 
@@ -359,6 +516,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 
 		batch = batch[:0]
 		retryBatch = false
+		tracker.cleared(ctx)
 		return true
 	}
 
@@ -377,6 +535,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 			isNode = false
 			batch = batch[:0]
 			retryBatch = false
+			tracker.cleared(ctx)
 			progressed = true
 		case !isNode && db.isNode(id):
 			db.logger.Info("starting sync", zap.String("id", id))
@@ -384,11 +543,27 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 			isNode = true
 			batch = batch[:0]
 			retryBatch = false
+			tracker.cleared(ctx)
 			progressed = true
 		case isNode && db.isNode(id):
 			// If a previous flush failed with a transient error, retry
 			// the flush before reading more proposals.
 			if retryBatch {
+				// Honor an operator's request to dead-letter what the batch
+				// is stuck on: isolate it per-proposal, dead-lettering (kind
+				// "manual") only the proposals that still fail and advancing
+				// the rest. One operator action clears one wedged batch.
+				if len(batch) > 0 && tracker.skipRequested(ctx, batch[0].index) {
+					db.logger.Warn("operator dead-letter: isolating wedged batch",
+						zap.String("id", id), zap.Int("batch_size", len(batch)), zap.Uint64("head_index", batch[0].index))
+					if db.syncBatchFallback(ctx, id, s, batch, "manual") {
+						batch = batch[:0]
+						retryBatch = false
+						tracker.honored(ctx)
+						progressed = true
+					}
+					break
+				}
 				if flush() {
 					progressed = true
 				}
@@ -407,6 +582,20 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 			case readErr != nil:
 				db.logger.Warn("sync read error", zap.String("id", id), zap.Error(readErr))
 			default:
+				// Exclude a proposal already dead-lettered (a permanent skip
+				// or an operator's manual skip) from the batch, so the skip
+				// survives restart and a manually-isolated poison proposal
+				// stays out of future batches — a batch fails atomically, so a
+				// re-included poison would re-wedge the whole batch.
+				if dl, derr := db.storage.HasSyncableDeadLetter(id, i); derr != nil {
+					db.logger.Warn("dead-letter lookup failed; including proposal in batch",
+						zap.String("id", id), zap.Uint64("index", i), zap.Error(derr))
+				} else if dl {
+					db.logger.Info("skipping already dead-lettered proposal",
+						zap.String("id", id), zap.Uint64("index", i))
+					progressed = true
+					break
+				}
 				if len(batch) == 0 {
 					batchStart = time.Now()
 				}
@@ -442,11 +631,19 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 	}
 }
 
-// syncBatchFallback processes a failed batch one proposal at a time
-// using the per-proposal Sync method. Permanent errors skip the
-// offending proposal; transient errors stop the fallback and leave the
-// remaining proposals in the batch for the caller to retry.
-func (db *DB) syncBatchFallback(ctx context.Context, id string, s cluster.Syncable, entries []batchEntry) bool {
+// syncBatchFallback processes a failed batch one proposal at a time using
+// the per-proposal Sync method. Permanent errors always skip (dead-letter)
+// the offending proposal. The transient-error reaction depends on
+// transientSkipKind:
+//
+//   - "" (permanent-isolation fallback): stop the fallback and leave the
+//     remaining proposals for the caller to retry — a transient blip while
+//     isolating a permanent error shouldn't drop data.
+//   - non-empty (operator manual dead-letter): the operator chose to give up
+//     on what the syncable is stuck on, so dead-letter the still-failing
+//     proposal with that kind ("manual") and continue, isolating the bad
+//     proposal(s) while letting the healthy ones in the batch through.
+func (db *DB) syncBatchFallback(ctx context.Context, id string, s cluster.Syncable, entries []batchEntry, transientSkipKind string) bool {
 	for _, e := range entries {
 		syncStart := time.Now()
 		shouldSnapshot, syncErr := s.Sync(ctx, e.proposal)
@@ -458,6 +655,14 @@ func (db *DB) syncBatchFallback(ctx context.Context, id string, s cluster.Syncab
 				db.logger.Error("permanent sync error, skipping proposal",
 					zap.String("id", id), zap.Uint64("index", e.index), zap.Error(syncErr))
 				db.recordSyncPermanentError(ctx, id, e.index, syncErr)
+				continue
+			}
+			if transientSkipKind != "" {
+				// Operator-requested isolation: skip the still-failing
+				// proposal rather than re-blocking on it.
+				db.logger.Warn("operator dead-letter: skipping proposal that still fails in isolation",
+					zap.String("id", id), zap.Uint64("index", e.index), zap.Error(syncErr))
+				db.recordSyncDeadLetter(ctx, id, e.index, transientSkipKind, syncErr)
 				continue
 			}
 			// Transient error in fallback — stop here. The caller
