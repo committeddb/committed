@@ -2,6 +2,7 @@ package wal_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/philborlin/committed/internal/cluster/clusterfakes"
 	"github.com/philborlin/committed/internal/cluster/db"
 	parser "github.com/philborlin/committed/internal/cluster/db/parser"
+	"github.com/philborlin/committed/internal/cluster/db/wal"
 )
 
 func TestSyncable(t *testing.T) {
@@ -81,6 +83,68 @@ func TestSyncable(t *testing.T) {
 			require.Equal(t, len(tt.cfgs), len(cfgs))
 			require.ElementsMatch(t, tt.cfgs, cfgs)
 		})
+	}
+}
+
+// TestRestoreSyncableWorkers is the syncable twin of
+// TestRestoreIngestableWorkers. It pins the restart-resume contract:
+//
+//  1. Open does NOT auto-restore workers — doing so would race the caller's
+//     parser registration and, on a loaded machine, silently drop every
+//     syncable ("cannot parse syncable of type: ..." → degraded → skipped),
+//     so a restarted node would never resume syncing.
+//  2. The explicit RestoreSyncableWorkers, called once parsers are wired,
+//     re-sends each persisted syncable to the sync channel.
+func TestRestoreSyncableWorkers(t *testing.T) {
+	dir := t.TempDir()
+	p := parser.New()
+	sp := &clusterfakes.FakeSyncableParser{}
+	sp.ParseReturns(&clusterfakes.FakeSyncable{}, nil)
+	p.AddSyncableParser("test", sp)
+
+	openOpts := []wal.Option{wal.WithoutFsync(), wal.WithInMemoryTimeSeries()}
+
+	// First incarnation: persist a syncable. Buffered so the apply-path send
+	// (saveSyncable) doesn't block; drain it so it can't be mistaken for a
+	// restore send later.
+	syncCh := make(chan *db.SyncableWithID, 4)
+	s, err := wal.Open(dir, p, syncCh, nil, openOpts...)
+	require.Nil(t, err)
+	cfg := &cluster.Configuration{
+		ID:       "sync-1",
+		MimeType: "application/json",
+		Data:     []byte(`{"syncable": {"name": "sync-1", "type": "test"}}`),
+	}
+	ent, err := cluster.NewUpsertSyncableEntity(cfg)
+	require.Nil(t, err)
+	saveEntity(t, ent, s, 1, 1)
+	select {
+	case got := <-syncCh:
+		require.Equal(t, "sync-1", got.ID, "apply path should send the freshly-applied syncable")
+	case <-time.After(2 * time.Second):
+		t.Fatal("apply path did not send the syncable")
+	}
+	require.Nil(t, s.Close())
+
+	// Reopen. Open must NOT auto-restore — restoration is now the caller's
+	// explicit, post-parser-registration responsibility.
+	syncCh2 := make(chan *db.SyncableWithID, 4)
+	s2, err := wal.Open(dir, p, syncCh2, nil, openOpts...)
+	require.Nil(t, err)
+	defer s2.Close()
+	select {
+	case got := <-syncCh2:
+		t.Fatalf("Open must not auto-restore workers; got unexpected send for %q", got.ID)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// The explicit restore re-sends the persisted syncable.
+	s2.RestoreSyncableWorkers()
+	select {
+	case got := <-syncCh2:
+		require.Equal(t, "sync-1", got.ID)
+	case <-time.After(2 * time.Second):
+		t.Fatal("RestoreSyncableWorkers did not re-send the persisted syncable")
 	}
 }
 

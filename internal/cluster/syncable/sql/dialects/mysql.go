@@ -72,3 +72,10 @@ func (d *MySQLDialect) IsPermanent(err error) bool {
 	}
 	return false
 }
+
+// BindArgs doubles the values: CreateSQL emits ? placeholders for both the
+// INSERT VALUES list and the ON DUPLICATE KEY UPDATE clause, so each column
+// value is bound twice.
+func (d *MySQLDialect) BindArgs(values []any) []any {
+	return append(values, values...)
+}

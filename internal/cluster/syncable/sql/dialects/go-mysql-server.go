@@ -46,3 +46,9 @@ func (d *GoMySQLServerDialect) Open(connectionString string) (*gosql.DB, error) 
 func (d *GoMySQLServerDialect) IsPermanent(err error) bool {
 	return false
 }
+
+// BindArgs mirrors MySQLDialect: CreateSQL delegates to it, so the same
+// value doubling applies.
+func (d *GoMySQLServerDialect) BindArgs(values []any) []any {
+	return (&MySQLDialect{}).BindArgs(values)
+}

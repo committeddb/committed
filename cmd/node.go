@@ -33,7 +33,7 @@ import (
 	"github.com/philborlin/committed/internal/cluster/metrics"
 	synchttp "github.com/philborlin/committed/internal/cluster/syncable/http"
 	syncsql "github.com/philborlin/committed/internal/cluster/syncable/sql"
-	syncmysql "github.com/philborlin/committed/internal/cluster/syncable/sql/dialects"
+	syncdialects "github.com/philborlin/committed/internal/cluster/syncable/sql/dialects"
 	"github.com/philborlin/committed/internal/version"
 )
 
@@ -107,6 +107,15 @@ image can be templated per-node by an orchestrator:
 		ingest := make(chan *db.IngestableWithID)
 
 		p := parser.New()
+		// The database sub-parser MUST be registered before wal.Open: Open
+		// calls loadDatabases, which rebuilds every persisted database handle
+		// via Parser.ParseDatabase. Register it afterward (as the ingestable /
+		// syncable parsers are, because they need *d) and a restarted node
+		// silently fails to rebuild its databases — which then breaks
+		// RestoreSyncableWorkers, since a syncable resolves its sink through
+		// storage.Database. dbParser() has no dependency on *d, so it can and
+		// must be wired here. See wal.TestDatabaseRestore_ParserOrdering.
+		p.AddDatabaseParser("sql", dbParser())
 		// Pass the real logger so storage-layer warnings are visible in
 		// production. Without this the Storage defaults to a Nop logger, which
 		// is why a degraded ingestable restore (and other wal warnings) used
@@ -183,18 +192,22 @@ image can be templated per-node by an orchestrator:
 		h := http.New(d, httpOpts...)
 		fmt.Printf("API Listening on %s...\n", addr)
 
-		d.AddDatabaseParser("sql", dbParser())
+		// NB: the database parser is registered earlier, before wal.Open (see
+		// above). These three need *d (the ingestable parser) or are simply
+		// fine to register here alongside it.
 		d.AddIngestableParser("sql", ingestableParser(d))
 		d.AddSyncableParser("sql", &syncsql.SyncableParser{})
 		d.AddSyncableParser("http", &synchttp.SyncableParser{})
 
-		// Restore ingestable workers for configs applied in a previous run.
-		// This MUST run after the sub-parsers above are registered and after
-		// db.New started draining the ingest channel — see the ordering
-		// contract on RestoreIngestableWorkers. Spawning it from inside
-		// wal.Open (as before) raced this registration and silently dropped
-		// the workers on restart under load.
+		// Restore ingestable and syncable workers for configs applied in a
+		// previous run. These MUST run after the sub-parsers above are
+		// registered and after db.New started draining the ingest/sync
+		// channels — see the ordering contract on RestoreIngestableWorkers /
+		// RestoreSyncableWorkers. Spawning them from inside wal.Open (as the
+		// ingestable side once did) raced this registration and silently
+		// dropped the workers on restart under load.
 		go s.RestoreIngestableWorkers()
+		go s.RestoreSyncableWorkers()
 
 		d.EatCommitC()
 
@@ -638,7 +651,12 @@ func loadAPITLSConfig() (*tls.Config, error) {
 func dbParser() *syncsql.DBParser {
 	ds := make(map[string]syncsql.Dialect)
 	p := &syncsql.DBParser{Dialects: ds}
-	ds["mysql"] = &syncmysql.MySQLDialect{}
+	// Both dialects live in the same syncable/sql/dialects package. The
+	// ingestable side wires postgres too (see ingestableParser); a syncable
+	// sink config with dialect = "postgres" failed with "dialect postgres
+	// not found" until this was added.
+	ds["mysql"] = &syncdialects.MySQLDialect{}
+	ds["postgres"] = &syncdialects.PostgreSQLDialect{}
 	return p
 }
 

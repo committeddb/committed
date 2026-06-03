@@ -87,6 +87,62 @@ func TestDatabaseError(t *testing.T) {
 	require.Equal(t, wal.ErrDatabaseMissing, err)
 }
 
+// TestDatabaseRestore_ParserOrdering pins the ordering contract that
+// cmd/node.go must follow: loadDatabases runs INSIDE wal.Open, so the
+// database sub-parser must be registered on the Parser BEFORE Open. Register
+// it afterward and a restarted node silently fails to rebuild its database
+// handles — which in turn breaks RestoreSyncableWorkers, because a syncable's
+// ParseSyncable resolves its sink via storage.Database.
+//
+// TestDatabase doesn't catch this: it reuses one Parser object across its
+// close/reopen, so the parser is already populated when it reopens. A real
+// restart builds a fresh parser.New(), so this test mirrors that — opening
+// each incarnation with its own parser.
+func TestDatabaseRestore_ParserOrdering(t *testing.T) {
+	dir := t.TempDir()
+	openOpts := []wal.Option{wal.WithoutFsync(), wal.WithInMemoryTimeSeries()}
+	cfg := createDatabaseConfiguration("sink") // id "sink", dialect/type "sink"
+
+	// Incarnation 1: parser registered, Open, apply the database config.
+	p1 := parser.New()
+	fp1 := &clusterfakes.FakeDatabaseParser{}
+	fp1.ParseReturns(&clusterfakes.FakeDatabase{}, nil)
+	p1.AddDatabaseParser("sink", fp1)
+	s1, err := wal.Open(dir, p1, nil, nil, openOpts...)
+	require.NoError(t, err)
+	insertDatabases(t, s1, []*cluster.Configuration{cfg}, 1, 1)
+	_, err = s1.Database("sink")
+	require.NoError(t, err, "database resolvable after the apply path builds it")
+	require.NoError(t, s1.Close())
+
+	// Incarnation 2a — the footgun: register the parser AFTER Open. Open's
+	// loadDatabases already ran against an empty parser, so the database is
+	// NOT rebuilt; the later registration is too late.
+	pLate := parser.New()
+	sLate, err := wal.Open(dir, pLate, nil, nil, openOpts...)
+	require.NoError(t, err)
+	fpLate := &clusterfakes.FakeDatabaseParser{}
+	fpLate.ParseReturns(&clusterfakes.FakeDatabase{}, nil)
+	pLate.AddDatabaseParser("sink", fpLate)
+	_, err = sLate.Database("sink")
+	require.ErrorIs(t, err, wal.ErrDatabaseMissing,
+		"registering the db parser AFTER Open must miss the database on restart")
+	require.NoError(t, sLate.Close())
+
+	// Incarnation 2b — the contract: register the parser BEFORE Open and the
+	// database is rebuilt on restart.
+	pEarly := parser.New()
+	fpEarly := &clusterfakes.FakeDatabaseParser{}
+	fpEarly.ParseReturns(&clusterfakes.FakeDatabase{}, nil)
+	pEarly.AddDatabaseParser("sink", fpEarly)
+	sEarly, err := wal.Open(dir, pEarly, nil, nil, openOpts...)
+	require.NoError(t, err)
+	defer sEarly.Close()
+	_, err = sEarly.Database("sink")
+	require.NoError(t, err,
+		"registering the db parser BEFORE Open rebuilds the database on restart")
+}
+
 func insertDatabases(t *testing.T, s db.Storage, ts []*cluster.Configuration, term, index uint64) uint64 {
 	for i, tipe := range ts {
 		e, err := cluster.NewUpsertDatabaseEntity(tipe)

@@ -117,3 +117,33 @@ func TestDialect_PlaceholderDifference(t *testing.T) {
 	require.Contains(t, mySQL, "?")
 	require.NotContains(t, mySQL, "$")
 }
+
+// TestDialect_BindArgs_MatchesPlaceholders is the invariant that keeps the
+// Syncable's dialect-agnostic Sync correct: the number of args a dialect binds
+// per row MUST equal the number of placeholders its CreateSQL emits. Postgres
+// (EXCLUDED) binds N; MySQL (ON DUPLICATE KEY UPDATE) binds 2N. Sync passes
+// exactly dialect.BindArgs(values) to ExecContext, so a mismatch here is a
+// runtime "expected N args, got M" against a real database — which is the bug
+// the postgres syncable shipped with before BindArgs existed.
+func TestDialect_BindArgs_MatchesPlaceholders(t *testing.T) {
+	cfg := &sql.Config{
+		Table:      "t",
+		Mappings:   []sql.Mapping{{Column: "a"}, {Column: "b"}, {Column: "c"}},
+		PrimaryKey: "a",
+	}
+	values := []any{"1", "2", "3"}
+
+	t.Run("postgres", func(t *testing.T) {
+		d := &dialects.PostgreSQLDialect{}
+		placeholders := strings.Count(d.CreateSQL(cfg), "$")
+		require.Len(t, d.BindArgs(values), placeholders,
+			"postgres BindArgs count must equal its $N placeholder count")
+	})
+
+	t.Run("mysql", func(t *testing.T) {
+		d := &dialects.MySQLDialect{}
+		placeholders := strings.Count(d.CreateSQL(cfg), "?")
+		require.Len(t, d.BindArgs(values), placeholders,
+			"mysql BindArgs count must equal its ? placeholder count")
+	})
+}

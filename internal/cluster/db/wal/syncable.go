@@ -101,6 +101,65 @@ func (s *Storage) deleteSyncable(id []byte) error {
 	})
 }
 
+// RestoreSyncableWorkers walks the syncable bucket and re-sends each persisted
+// syncable to the supervisor's sync channel so a restarted node spawns workers
+// for them. It is the syncable twin of RestoreIngestableWorkers.
+//
+// Why this is needed: on a clean restart, ApplyCommitted's idempotency guard
+// (entry.Index <= appliedIndex) means handleSyncable is NOT re-called, so the
+// only thing that ever sends on s.sync (saveSyncable, on the apply path) does
+// not fire. Without an explicit restore, a previously-configured syncable's
+// worker never respawns and it silently stops syncing until the config is
+// re-applied.
+//
+// ORDERING CONTRACT (identical to RestoreIngestableWorkers): the caller MUST
+// have registered the syncable sub-parsers (Parser.AddSyncableParser "sql" /
+// "http") AND started the channel consumer (db.New's listenForSyncables drains
+// s.sync) before calling this. Open deliberately does NOT auto-spawn it: when
+// the ingestable side did, the goroutine raced the caller's parser
+// registration and, on a loaded machine, usually lost — every syncable then
+// failed ParseSyncable with "cannot parse syncable of type: sql", was logged
+// as a (silent, under the default Nop logger) degraded parse, and skipped, so
+// the restarted node never resumed syncing. Run it once setup is complete
+// instead (cmd/node spawns `go s.RestoreSyncableWorkers()` after the parsers
+// are wired). It also races the apply path: a config re-applied on restart
+// (handleSyncable) re-sends the same syncable, but db.Sync's replace-by-id
+// collapses the duplicate to a single worker, so last-writer-wins.
+//
+// Errors here are warnings, not fatals: a corrupted single config shouldn't
+// stop the rest from running. The dialect will surface a real connection or
+// schema error in its own retry loop later.
+func (s *Storage) RestoreSyncableWorkers() {
+	if s.sync == nil {
+		return
+	}
+	cfgs, err := s.Syncables()
+	if err != nil {
+		s.logger.Warn("restoreSyncableWorkers: list syncables", zap.Error(err))
+		return
+	}
+	for _, cfg := range cfgs {
+		_, syncable, mode, err := s.parser.ParseSyncable(cfg.MimeType, cfg.Data, s)
+		if err != nil {
+			// Degraded: record so the build-errors gauge reflects the
+			// build path too (validateConfigSecrets uses the cheaper
+			// Validate; a config can pass that but fail the full parse).
+			s.recordConfigError("syncable", cfg.ID, err)
+			s.logger.Warn("restoreSyncableWorkers: parse (degraded)",
+				zap.String("id", cfg.ID), zap.Error(err))
+			continue
+		}
+		s.clearConfigError("syncable", cfg.ID)
+		// Mirror saveSyncable: ModeAlwaysCurrent decorates the syncable
+		// with the migration wrapper so the worker loop stays oblivious
+		// to version-upgrade concerns.
+		if mode == cluster.ModeAlwaysCurrent {
+			syncable = migration.Wrap(syncable, s)
+		}
+		s.sync <- &db.SyncableWithID{ID: cfg.ID, Syncable: syncable}
+	}
+}
+
 func (s *Storage) Syncables() ([]*cluster.Configuration, error) {
 	var cfgs []*cluster.Configuration
 

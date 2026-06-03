@@ -37,11 +37,17 @@ type Harness struct {
 	baseline map[string]int
 }
 
-// Options configures a Harness. Currently just the table set — tests
-// that don't touch all 8 TPC-H tables can opt in to a subset to keep
-// per-test setup time down (each table = one ingestable = one slot).
+// Options configures a Harness. Tests that don't touch all 8 TPC-H tables
+// can opt in to a subset to keep per-test setup time down (each table = one
+// ingestable = one slot).
 type Options struct {
 	Tables []string // defaults to dataset.Tables (all 8)
+	// Syncable, when set, also wires the OUTPUT side: a sink database
+	// (the harness's own Postgres) plus one syncable per table that
+	// projects topic <table> into a <table>_sink table. Used to exercise
+	// the syncable path end-to-end (e.g. restart-resume). Off by default
+	// so the ingestable-only tests pay nothing for it.
+	Syncable bool
 }
 
 // New brings up Postgres + committed + ingestables and returns a ready
@@ -55,8 +61,11 @@ func New(t *testing.T, opts ...Options) *Harness {
 	t.Helper()
 
 	o := Options{Tables: dataset.Tables}
-	if len(opts) > 0 && len(opts[0].Tables) > 0 {
-		o.Tables = opts[0].Tables
+	if len(opts) > 0 {
+		if len(opts[0].Tables) > 0 {
+			o.Tables = opts[0].Tables
+		}
+		o.Syncable = opts[0].Syncable
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -98,6 +107,18 @@ func New(t *testing.T, opts ...Options) *Harness {
 	// 6. Wait for every slot to be active.
 	for _, table := range o.Tables {
 		h.waitForIngestableReady(t, h.slotNames[table])
+	}
+
+	// 6b. OUTPUT side (opt-in): a sink database plus one syncable per table
+	// that projects topic <table> into <table>_sink. Posted after the
+	// ingestables so the topic the syncable reads already has a producer.
+	// The syncable's Init runs CREATE TABLE IF NOT EXISTS on apply, so the
+	// sink tables exist (empty) once these POSTs return.
+	if o.Syncable {
+		postSinkDatabase(t, h.pgConnStr)
+		for _, table := range o.Tables {
+			postSyncable(t, table)
+		}
 	}
 
 	// 7. Establish baseline. At this point no CDC events have flowed

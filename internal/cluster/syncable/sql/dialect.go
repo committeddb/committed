@@ -14,6 +14,14 @@ type Dialect interface {
 	// (e.g., constraint violations, data-type mismatches). The sync loop
 	// skips proposals that produce permanent errors instead of retrying.
 	IsPermanent(err error) bool
+	// BindArgs arranges one row's mapped column values into the positional
+	// arguments that this dialect's CreateSQL placeholders expect. MySQL's
+	// `INSERT ... ON DUPLICATE KEY UPDATE col = ?` repeats every column, so
+	// it needs the values twice; PostgreSQL's `ON CONFLICT ... DO UPDATE SET
+	// col = EXCLUDED.col` references the proposed row and needs them once.
+	// The Syncable is otherwise dialect-agnostic, so it delegates this
+	// arrangement here rather than hardcoding the MySQL doubling.
+	BindArgs(values []any) []any
 }
 
 // The mapstructure tags drive viper.UnmarshalKey when parsing the

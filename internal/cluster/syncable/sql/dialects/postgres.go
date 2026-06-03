@@ -99,3 +99,10 @@ func (d *PostgreSQLDialect) IsPermanent(err error) bool {
 	}
 	return false
 }
+
+// BindArgs binds the values once: CreateSQL's ON CONFLICT ... DO UPDATE SET
+// col = EXCLUDED.col references the proposed row, so no extra placeholders
+// (and no value doubling) are needed beyond the INSERT VALUES list.
+func (d *PostgreSQLDialect) BindArgs(values []any) []any {
+	return values
+}

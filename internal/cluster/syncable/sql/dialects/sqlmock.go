@@ -59,3 +59,10 @@ func (d *SQLMockDialect) Open(connectionString string) (*gosql.DB, error) {
 func (d *SQLMockDialect) IsPermanent(err error) bool {
 	return false
 }
+
+// BindArgs doubles the values to mirror MySQL, which is the dialect the
+// mock stands in for in sql_test.go (the mock does not validate arg vs
+// placeholder counts, so the doubling is what the tests assert against).
+func (d *SQLMockDialect) BindArgs(values []any) []any {
+	return append(values, values...)
+}

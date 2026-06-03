@@ -79,9 +79,10 @@ func (c *Syncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.Shoul
 			values = append(values, res)
 		}
 
-		// We need one set for the insert and one for the on duplicate key update.
-		// TODO Do all dbs need this? Should this be a dialect setting?
-		allValues := append(values, values...)
+		// The dialect decides how values map to placeholders: MySQL repeats
+		// them (INSERT ? + ON DUPLICATE KEY UPDATE ?), PostgreSQL binds them
+		// once (ON CONFLICT ... EXCLUDED).
+		allValues := c.dialect.BindArgs(values)
 
 		_, err = tx.StmtContext(ctx, c.insert.Stmt).ExecContext(ctx, allValues...)
 		if err != nil {
@@ -146,7 +147,7 @@ func (c *Syncable) SyncBatch(ctx context.Context, ps []*cluster.Proposal) (bool,
 				values = append(values, res)
 			}
 
-			allValues := append(values, values...)
+			allValues := c.dialect.BindArgs(values)
 
 			_, err = tx.StmtContext(ctx, c.insert.Stmt).ExecContext(ctx, allValues...)
 			if err != nil {
