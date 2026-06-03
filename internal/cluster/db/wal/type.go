@@ -158,6 +158,7 @@ func (s *Storage) Types() ([]*cluster.Configuration, error) {
 
 			cfg := &cluster.Configuration{
 				ID:       tipe.ID,
+				Name:     tipe.Name,
 				MimeType: "text/toml",
 				Data:     []byte(fmt.Sprintf("[type]\nname = \"%s\"", tipe.Name)),
 			}
@@ -205,6 +206,7 @@ func (s *Storage) TypeVersion(id string, version uint64) (*cluster.Configuration
 			return err
 		}
 		cfg.ID = tipe.ID
+		cfg.Name = tipe.Name
 		cfg.MimeType = "text/toml"
 		cfg.Data = []byte(fmt.Sprintf("[type]\nname = \"%s\"", tipe.Name))
 		return nil

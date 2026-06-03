@@ -242,8 +242,8 @@ func TestAddConfiguration_ContentTypeHandling(t *testing.T) {
 
 func TestGetConfigurations_Success(t *testing.T) {
 	cfgs := []*cluster.Configuration{
-		{ID: "id-1", MimeType: "text/toml", Data: []byte("data1")},
-		{ID: "id-2", MimeType: "application/json", Data: []byte("data2")},
+		{ID: "id-1", Name: "name-1", MimeType: "text/toml", Data: []byte("data1")},
+		{ID: "id-2", Name: "name-2", MimeType: "application/json", Data: []byte("data2")},
 	}
 
 	tests := []struct {
@@ -295,8 +295,10 @@ func TestGetConfigurations_Success(t *testing.T) {
 			require.Nil(t, err)
 			require.Equal(t, 2, len(result))
 			require.Equal(t, "id-1", result[0].ID)
+			require.Equal(t, "name-1", result[0].Name)
 			require.Equal(t, "data1", result[0].Data)
 			require.Equal(t, "id-2", result[1].ID)
+			require.Equal(t, "name-2", result[1].Name)
 		})
 	}
 }

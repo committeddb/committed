@@ -71,7 +71,7 @@ func writeConfigurations(w http.ResponseWriter, cfgs []*cluster.Configuration) {
 	for _, cfg := range cfgs {
 		rs = append(rs, &ConfigurationResponse{
 			ID:       cfg.ID,
-			Name:     "", // TODO - get name configuration
+			Name:     cfg.Name,
 			MimeType: cfg.MimeType,
 			Data:     string(cfg.Data),
 		})

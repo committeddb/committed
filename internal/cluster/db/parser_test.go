@@ -70,6 +70,31 @@ func TestDatabase(t *testing.T) {
 	}
 }
 
+// TestProposeDatabase_PersistsName verifies the full name path: ProposeDatabase
+// parses the config, extracts database.name, records it on the Configuration,
+// and that name survives marshaling into the stored entity. createDatabaseConfiguration
+// sets database.name == database.type == "foo".
+func TestProposeDatabase_PersistsName(t *testing.T) {
+	db := createDB()
+	defer db.Close()
+
+	p := &clusterfakes.FakeDatabaseParser{}
+	p.ParseReturns(&clusterfakes.FakeDatabase{}, nil)
+	db.AddDatabaseParser("foo", p)
+
+	cfg := createDatabaseConfiguration("foo")
+	require.Equal(t, nil, db.ProposeDatabase(testCtx(t), cfg))
+
+	ps, err := db.ents()
+	require.Equal(t, nil, err)
+	require.Equal(t, 1, len(ps))
+	require.Equal(t, 1, len(ps[0].Entities))
+
+	var got cluster.Configuration
+	require.Equal(t, nil, got.Unmarshal(ps[0].Entities[0].Data))
+	require.Equal(t, "foo", got.Name)
+}
+
 func TestIngestable(t *testing.T) {
 	cfg1 := createIngestableConfiguration("foo")
 	cfg2 := createIngestableConfiguration("bar")

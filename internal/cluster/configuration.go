@@ -8,12 +8,13 @@ import (
 
 type Configuration struct {
 	ID       string
+	Name     string
 	MimeType string
 	Data     []byte
 }
 
 func (c *Configuration) Marshal() ([]byte, error) {
-	lc := &clusterpb.LogConfiguration{ID: c.ID, MimeType: c.MimeType, Data: c.Data}
+	lc := &clusterpb.LogConfiguration{ID: c.ID, Name: c.Name, MimeType: c.MimeType, Data: c.Data}
 	return proto.Marshal(lc)
 }
 
@@ -25,6 +26,7 @@ func (c *Configuration) Unmarshal(bs []byte) error {
 	}
 
 	c.ID = lc.ID
+	c.Name = lc.Name
 	c.MimeType = lc.MimeType
 	c.Data = lc.Data
 
