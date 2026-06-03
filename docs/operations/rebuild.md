@@ -41,6 +41,21 @@ Rebuild is the right response when any of these hold:
   loss, partial restore) and `committed` refuses to start. The rebuild
   procedure replaces the data directory with a known-good copy.
 
+  Each WAL entry (raft log, permanent event log, and state log) carries a
+  CRC32C checksum, verified on read. A detected mismatch fails the read
+  with:
+
+  ```
+  wal: entry checksum mismatch (data corruption); see docs/operations/rebuild.md
+  ```
+
+  and increments the `committed_wal_corrupt_entries_total` metric (labelled
+  by `log`). Hit during the startup recovery reads, this aborts `Open` and
+  the node fatal-exits — the data directory is no longer trustworthy, so
+  rebuild it from a healthy peer. Logs written before checksums existed are
+  read transparently (trust-on-first-read) and are not flagged; new appends
+  are always checksummed, so coverage grows as the log compacts.
+
 Rebuild is NOT the right response when:
 
 - The node briefly fell behind because of a network blip, restart, or

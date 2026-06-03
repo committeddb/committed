@@ -21,6 +21,7 @@ import (
 
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/db"
+	"github.com/philborlin/committed/internal/cluster/metrics"
 )
 
 var (
@@ -247,6 +248,11 @@ type Storage struct {
 	firstEventIndex atomic.Uint64
 
 	logger *zap.Logger
+	// metrics drives the committed.wal.corrupt_entries counter, bumped by
+	// recordCorrupt when a per-entry checksum verification fails on read.
+	// Nil when metrics are disabled (no OTel endpoint); every use is
+	// nil-guarded, so there is zero overhead in that case.
+	metrics *metrics.Metrics
 }
 
 // Returns a *WalStorage, whether this storage existed already, or an error
@@ -285,6 +291,9 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		return nil, err
 	}
 
+	// bbolt is excluded from the per-entry WAL checksums below: it is a
+	// B+tree with built-in page-level checksums (meta-page CRC64 + per-page
+	// validation), so torn or bitflipped pages are already detected on read.
 	boltOpts := &bolt.Options{Timeout: 1 * time.Second, NoSync: cfg.fsyncDisabled}
 	keyValueStorage, err := bolt.Open(filepath.Join(keyValueStorageDir, "bbolt.db"), 0o600, boltOpts)
 	if err != nil {
@@ -343,6 +352,7 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		ingest:            ingest,
 		logger:            logger,
 		configErrors:      make(map[string]error),
+		metrics:           cfg.metrics,
 	}
 
 	fi, err := entryLog.FirstIndex()
@@ -439,7 +449,10 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		return nil, err
 	}
 	if evLast > 0 {
-		data, err := eventLog.Read(evLast)
+		// Reads go through ws.readEventAt so the checksum verify happens at
+		// the single chokepoint; a corrupt boundary entry fails Open here
+		// (node fatal-exits with the ErrCorruptEntry message → rebuild.md).
+		data, err := ws.readEventAt(evLast)
 		if err != nil {
 			return nil, fmt.Errorf("event log read last entry: %w", err)
 		}
@@ -455,7 +468,7 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		if err != nil {
 			return nil, err
 		}
-		firstData, err := eventLog.Read(evFirst)
+		firstData, err := ws.readEventAt(evFirst)
 		if err != nil {
 			return nil, fmt.Errorf("event log read first entry: %w", err)
 		}
@@ -793,12 +806,38 @@ func (s *Storage) lastEventSeq() (uint64, error) {
 	return s.eventLog.LastIndex()
 }
 
-// readEventAt reads the raw pb.Entry bytes at the given wal sequence
-// from the permanent event log. Package-internal; callers outside the
-// storage tier should go through the Reader abstraction, which handles
-// raft index ↔ wal seq translation and filters metadata entries.
+// readEventAt reads the pb.Entry bytes at the given wal sequence from the
+// permanent event log, verifying the per-entry checksum (see checksum.go).
+// Package-internal; callers outside the storage tier should go through the
+// Reader abstraction, which handles raft index ↔ wal seq translation and
+// filters metadata entries.
 func (s *Storage) readEventAt(seq uint64) ([]byte, error) {
-	return s.eventLog.Read(seq)
+	raw, err := s.eventLog.Read(seq)
+	if err != nil {
+		return nil, err
+	}
+	return s.unframe(raw, "event_log")
+}
+
+// unframe verifies and strips the checksum frame from a raw log read,
+// recording a corruption-counter sample (attributed to logName) before
+// returning ErrCorruptEntry on a CRC mismatch. The metrics handle is
+// nil-safe. Legacy un-checksummed entries pass through unchanged.
+func (s *Storage) unframe(raw []byte, logName string) ([]byte, error) {
+	payload, err := unframe(raw)
+	if err != nil {
+		s.recordCorrupt(logName)
+		return nil, err
+	}
+	return payload, nil
+}
+
+// recordCorrupt bumps the corruption counter for logName when metrics are
+// enabled. A nil *Metrics (metrics disabled) is a no-op.
+func (s *Storage) recordCorrupt(logName string) {
+	if s.metrics != nil {
+		s.metrics.WalCorruptEntry(logName)
+	}
 }
 
 // appendEvent writes a committed raft entry's raw bytes to the
@@ -818,7 +857,7 @@ func (s *Storage) appendEvent(entry pb.Entry) error {
 		return fmt.Errorf("event log last index: %w", err)
 	}
 	nextSeq++
-	if err := s.eventLog.Write(nextSeq, entryBytes); err != nil {
+	if err := s.eventLog.Write(nextSeq, frame(entryBytes)); err != nil {
 		return fmt.Errorf("event log write seq %d (raft index %d): %w", nextSeq, entry.Index, err)
 	}
 	if nextSeq == 1 {
@@ -952,7 +991,7 @@ func (s *Storage) appendEntries(ents []pb.Entry) error {
 		}
 
 		i := e.Index - firstIndex + 1
-		err = s.EntryLog.Write(i, data)
+		err = s.EntryLog.Write(i, frame(data))
 		if err != nil {
 			return fmt.Errorf("index %d to position %d: %w", e.Index, i, err)
 		}
@@ -985,7 +1024,7 @@ func (s *Storage) appendState(st pb.HardState, snap pb.Snapshot) error {
 		}
 
 		s.stateIndex++
-		err = s.StateLog.Write(s.stateIndex, buf.Bytes())
+		err = s.StateLog.Write(s.stateIndex, frame(buf.Bytes()))
 		if err != nil {
 			return fmt.Errorf("position %d: %w", s.stateIndex, err)
 		}
@@ -1059,7 +1098,12 @@ func (s *Storage) boundary() uint64 {
 // Returns the entry, the size of the entry (in bytes) before being unmarshalled, and an error
 func (s *Storage) entry(i uint64) (*pb.Entry, uint64, error) {
 	e := &pb.Entry{}
-	data, err := s.EntryLog.Read(i)
+	raw, err := s.EntryLog.Read(i)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	data, err := s.unframe(raw, "entry_log")
 	if err != nil {
 		return nil, 0, err
 	}
@@ -1069,12 +1113,19 @@ func (s *Storage) entry(i uint64) (*pb.Entry, uint64, error) {
 		return nil, 0, err
 	}
 
+	// Size is the unframed payload length — what raft's maxSize budget
+	// accounts for — not the on-disk framed length.
 	return e, uint64(len(data)), nil
 }
 
 func (s *Storage) state(li uint64) (*State, error) {
 	e := &State{}
-	data, err := s.StateLog.Read(li)
+	raw, err := s.StateLog.Read(li)
+	if err != nil {
+		return nil, err
+	}
+
+	data, err := s.unframe(raw, "state_log")
 	if err != nil {
 		return nil, err
 	}

@@ -134,7 +134,13 @@ func (s *StorageWrapper) ents(t *testing.T) []pb.Entry {
 
 	var es []pb.Entry
 	for i := fi; i <= li; i++ {
-		data, err := s.EntryLog.Read(i)
+		raw, err := s.EntryLog.Read(i)
+		if err != nil {
+			t.Error(err)
+			return nil
+		}
+
+		data, err := wal.Unframe(raw)
 		if err != nil {
 			t.Error(err)
 			return nil
@@ -168,7 +174,13 @@ func (s *StorageWrapper) states(t *testing.T) []wal.State {
 
 	var es []wal.State
 	for i := fi; i <= li; i++ {
-		data, err := s.StateLog.Read(i)
+		raw, err := s.StateLog.Read(i)
+		if err != nil {
+			t.Error(err)
+			return nil
+		}
+
+		data, err := wal.Unframe(raw)
 		if err != nil {
 			t.Error(err)
 			return nil

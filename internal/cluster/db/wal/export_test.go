@@ -44,6 +44,16 @@ func (s *Storage) ReadEventAt(seq uint64) ([]byte, error) {
 	return s.readEventAt(seq)
 }
 
+// Unframe strips and verifies the per-entry checksum frame from a raw log
+// read, so tests that inspect on-disk bytes directly (e.g. via EntryLog /
+// StateLog) can decode the payload. Production reads go through
+// entry()/state()/readEventAt, which unframe and verify on the live path.
+// Returns ErrCorruptEntry on a CRC mismatch; legacy un-checksummed bytes
+// pass through unchanged.
+func Unframe(raw []byte) ([]byte, error) {
+	return unframe(raw)
+}
+
 func walkBucket(prefix string, b *bolt.Bucket, lines *[]string) error {
 	return b.ForEach(func(k, v []byte) error {
 		if v == nil {

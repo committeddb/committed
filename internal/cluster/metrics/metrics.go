@@ -41,6 +41,8 @@ type Metrics struct {
 
 	configBuildErrors metric.Float64Gauge
 	timeSeriesLag     metric.Float64Gauge
+
+	walCorruptEntries metric.Int64Counter
 }
 
 // New creates a Metrics instance from an OTel Meter. The caller
@@ -131,6 +133,9 @@ func New(meter metric.Meter) *Metrics {
 	m.timeSeriesLag, _ = meter.Float64Gauge("committed.tstorage.lag",
 		metric.WithDescription("Seconds between now and the newest point in the derived time-series view (now - latest_tstorage_timestamp). Near zero on a healthy node; a growing value means the view has stopped tracking the committed log. Emitted only once the view holds at least one point."),
 		metric.WithUnit("s"))
+
+	m.walCorruptEntries, _ = meter.Int64Counter("committed.wal.corrupt_entries",
+		metric.WithDescription("WAL entries that failed CRC32C checksum verification on read, by log (entry_log|event_log|state_log). Any non-zero value means on-disk corruption was detected (bit rot, torn write, filesystem damage); the node will fatal-exit. Alert on this and rebuild from a healthy peer per docs/operations/rebuild.md."))
 
 	return m
 }
@@ -325,4 +330,13 @@ func (m *Metrics) SetConfigBuildErrors(n int) {
 // means it has drifted (worth alerting on for nodes that serve the type graph).
 func (m *Metrics) SetTimeSeriesLag(seconds float64) {
 	m.timeSeriesLag.Record(context.Background(), seconds)
+}
+
+// WalCorruptEntry counts one WAL entry that failed checksum verification on
+// read, attributed to which log it came from ("entry_log", "event_log", or
+// "state_log"). Emitted from the storage read path the moment corruption is
+// detected, before the error propagates to the fatal-exit.
+func (m *Metrics) WalCorruptEntry(log string) {
+	m.walCorruptEntries.Add(context.Background(), 1,
+		metric.WithAttributes(attribute.String("log", log)))
 }

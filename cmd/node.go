@@ -116,16 +116,45 @@ image can be templated per-node by an orchestrator:
 		// storage.Database. dbParser() has no dependency on *d, so it can and
 		// must be wired here. See wal.TestDatabaseRestore_ParserOrdering.
 		p.AddDatabaseParser("sql", dbParser())
+
+		// Build metrics before wal.Open so the storage layer can emit the
+		// committed.wal.corrupt_entries counter, including for corruption
+		// detected during the Open recovery reads. When
+		// OTEL_EXPORTER_OTLP_ENDPOINT is set (e.g., "localhost:4317"), metrics
+		// are pushed to an OTel Collector via gRPC; the collector routes to
+		// backends (Prometheus, Datadog, etc.). When unset, m stays nil and
+		// every metrics call is a nil-safe no-op (zero overhead).
+		var m *metrics.Metrics
+		if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "" {
+			ctx := context.Background()
+			exporter, err := otlpmetricgrpc.New(ctx)
+			if err != nil {
+				log.Fatalf("otel exporter: %v", err)
+			}
+			provider := sdkmetric.NewMeterProvider(
+				sdkmetric.WithReader(sdkmetric.NewPeriodicReader(exporter)),
+			)
+			defer func() { _ = provider.Shutdown(context.Background()) }()
+			m = metrics.New(provider.Meter("committed"))
+		}
+
 		// Pass the real logger so storage-layer warnings are visible in
 		// production. Without this the Storage defaults to a Nop logger, which
 		// is why a degraded ingestable restore (and other wal warnings) used
 		// to fail completely silently.
-		s, err := wal.Open(dataDir, p, sync, ingest, wal.WithLogger(zap.L()))
+		walOpts := []wal.Option{wal.WithLogger(zap.L())}
+		if m != nil {
+			walOpts = append(walOpts, wal.WithMetrics(m))
+		}
+		s, err := wal.Open(dataDir, p, sync, ingest, walOpts...)
 		if err != nil {
 			log.Fatalf("cannot open storage: %v", err)
 		}
 
 		var dbOpts []db.Option
+		if m != nil {
+			dbOpts = append(dbOpts, db.WithMetrics(m))
+		}
 
 		// Wire the global zap logger into db so internal supervisor /
 		// raft / leader-transition logs are visible. Without this, the
@@ -147,24 +176,6 @@ image can be templated per-node by an orchestrator:
 
 		if n, ok := parseInt64Env("COMMITTED_MAX_PROPOSAL_BYTES"); ok {
 			dbOpts = append(dbOpts, db.WithMaxProposalBytes(uint64(n)))
-		}
-
-		// When OTEL_EXPORTER_OTLP_ENDPOINT is set (e.g., "localhost:4317"),
-		// metrics are pushed to an OTel Collector via gRPC. The collector
-		// handles routing to backends (Prometheus, Datadog, etc.). When
-		// unset, no metrics are collected and there is zero overhead.
-		if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "" {
-			ctx := context.Background()
-			exporter, err := otlpmetricgrpc.New(ctx)
-			if err != nil {
-				log.Fatalf("otel exporter: %v", err)
-			}
-			provider := sdkmetric.NewMeterProvider(
-				sdkmetric.WithReader(sdkmetric.NewPeriodicReader(exporter)),
-			)
-			defer func() { _ = provider.Shutdown(context.Background()) }()
-			m := metrics.New(provider.Meter("committed"))
-			dbOpts = append(dbOpts, db.WithMetrics(m))
 		}
 
 		d := db.New(id, peers, s, p, sync, ingest, dbOpts...)
