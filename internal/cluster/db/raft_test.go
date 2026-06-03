@@ -18,6 +18,7 @@ import (
 
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/db"
+	dbtesting "github.com/philborlin/committed/internal/cluster/db/testing"
 )
 
 // multiNodeTickInterval is the per-tick interval used by multi-node raft
@@ -764,6 +765,7 @@ type MemoryStorageSaveArgsForCall struct {
 
 type MemoryStorage struct {
 	*raft.MemoryStorage
+	dbtesting.StorageStubs
 	indexes   map[string]uint64
 	positions map[string]*MemoryPosition
 
@@ -971,58 +973,6 @@ func (ms *MemoryStorage) Types() ([]*cluster.Configuration, error) {
 	return nil, nil
 }
 
-func (ms *MemoryStorage) DatabaseVersions(id string) ([]cluster.VersionInfo, error) {
-	return nil, nil
-}
-
-func (ms *MemoryStorage) DatabaseVersion(id string, version uint64) (*cluster.Configuration, error) {
-	return nil, nil
-}
-
-func (ms *MemoryStorage) IngestableVersions(id string) ([]cluster.VersionInfo, error) {
-	return nil, nil
-}
-
-func (ms *MemoryStorage) IngestableVersion(id string, version uint64) (*cluster.Configuration, error) {
-	return nil, nil
-}
-
-func (ms *MemoryStorage) SyncableVersions(id string) ([]cluster.VersionInfo, error) {
-	return nil, nil
-}
-
-func (ms *MemoryStorage) SyncableVersion(id string, version uint64) (*cluster.Configuration, error) {
-	return nil, nil
-}
-
-func (ms *MemoryStorage) SyncableDeadLetters(id string, since uint64, limit int) ([]cluster.SyncableDeadLetter, error) {
-	return nil, nil
-}
-
-func (ms *MemoryStorage) HasSyncableDeadLetter(id string, index uint64) (bool, error) {
-	return false, nil
-}
-
-func (ms *MemoryStorage) SyncableStuck(id string) (cluster.SyncableStuck, bool, error) {
-	return cluster.SyncableStuck{}, false, nil
-}
-
-func (ms *MemoryStorage) SyncableSkipRequest(id string) (cluster.SyncableSkipRequest, bool, error) {
-	return cluster.SyncableSkipRequest{}, false, nil
-}
-
-func (ms *MemoryStorage) ProposalAt(index uint64) (*cluster.Proposal, error) {
-	return nil, nil
-}
-
-func (ms *MemoryStorage) TypeVersions(id string) ([]cluster.VersionInfo, error) {
-	return nil, nil
-}
-
-func (ms *MemoryStorage) TypeVersion(id string, version uint64) (*cluster.Configuration, error) {
-	return nil, nil
-}
-
 func (ms *MemoryStorage) Proposals() []*cluster.Proposal {
 	fi, _ := ms.FirstIndex()
 	li, _ := ms.LastIndex()
@@ -1084,9 +1034,7 @@ func (r *Reader) Read() (uint64, *cluster.Proposal, error) {
 			}
 
 			if len(p.Entities) > 0 {
-				tid := p.Entities[0].Type.ID
-				if !cluster.IsSyncableIndex(tid) && !cluster.IsSyncableDeadLetter(tid) &&
-					!cluster.IsSyncableStuck(tid) && !cluster.IsSyncableSkipRequest(tid) {
+				if !cluster.IsSyncableMetadata(p.Entities[0].Type.ID) {
 					return readIndex, p, nil
 				}
 			}

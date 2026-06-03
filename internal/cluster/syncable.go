@@ -388,3 +388,17 @@ func NewUpsertSyncableSkipRequestEntity(r *SyncableSkipRequest) (*Entity, error)
 func NewDeleteSyncableSkipRequestEntity(id string) *Entity {
 	return NewDeleteEntity(syncableSkipRequestType, []byte(id))
 }
+
+// IsSyncableMetadata reports whether a type ID identifies a syncable's own
+// internal coordination state — its progress index, dead-letter records, and
+// stuck / skip-request status. These ride in the permanent event log like any
+// other entity, but they must NOT be projected back into a syncable (a
+// syncable re-Syncing its own dead letters would loop), so every event-log
+// reader filters them out at read time. Centralised here so the set lives in
+// one place instead of being re-listed in each reader.
+func IsSyncableMetadata(typeID string) bool {
+	return IsSyncableIndex(typeID) ||
+		IsSyncableDeadLetter(typeID) ||
+		IsSyncableStuck(typeID) ||
+		IsSyncableSkipRequest(typeID)
+}

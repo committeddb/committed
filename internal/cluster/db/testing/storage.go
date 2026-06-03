@@ -22,6 +22,7 @@ type MemoryStorageSaveArgsForCall struct {
 
 type MemoryStorage struct {
 	*raft.MemoryStorage
+	StorageStubs
 	saveArgsForCall []*MemoryStorageSaveArgsForCall
 	indexes         map[string]uint64
 	node            uint64
@@ -210,70 +211,6 @@ func (ms *MemoryStorage) Types() ([]*cluster.Configuration, error) {
 	return nil, nil
 }
 
-func (ms *MemoryStorage) DatabaseVersions(id string) ([]cluster.VersionInfo, error) {
-	return nil, nil
-}
-
-func (ms *MemoryStorage) DatabaseVersion(id string, version uint64) (*cluster.Configuration, error) {
-	return nil, nil
-}
-
-func (ms *MemoryStorage) IngestableVersions(id string) ([]cluster.VersionInfo, error) {
-	return nil, nil
-}
-
-func (ms *MemoryStorage) IngestableVersion(id string, version uint64) (*cluster.Configuration, error) {
-	return nil, nil
-}
-
-func (ms *MemoryStorage) SyncableVersions(id string) ([]cluster.VersionInfo, error) {
-	return nil, nil
-}
-
-func (ms *MemoryStorage) SyncableVersion(id string, version uint64) (*cluster.Configuration, error) {
-	return nil, nil
-}
-
-// SyncableDeadLetters is a stub: MemoryStorage's ApplyCommitted is a
-// no-op (no buckets), so dead-letter proposals committed in a test never
-// land anywhere queryable. Tests that exercise the real dead-letter
-// store use wal.Storage.
-func (ms *MemoryStorage) SyncableDeadLetters(id string, since uint64, limit int) ([]cluster.SyncableDeadLetter, error) {
-	return nil, nil
-}
-
-// HasSyncableDeadLetter is a stub: MemoryStorage's ApplyCommitted is a
-// no-op, so no dead-letter records are ever stored. Tests that exercise the
-// real dead-letter store (including restart re-skip) use wal.Storage.
-func (ms *MemoryStorage) HasSyncableDeadLetter(id string, index uint64) (bool, error) {
-	return false, nil
-}
-
-// SyncableStuck / SyncableSkipRequest are stubs: MemoryStorage's
-// ApplyCommitted is a no-op, so the replicated stuck/skip records never land.
-// Tests of the node-agnostic manual dead-letter flow use wal.Storage.
-func (ms *MemoryStorage) SyncableStuck(id string) (cluster.SyncableStuck, bool, error) {
-	return cluster.SyncableStuck{}, false, nil
-}
-
-func (ms *MemoryStorage) SyncableSkipRequest(id string) (cluster.SyncableSkipRequest, bool, error) {
-	return cluster.SyncableSkipRequest{}, false, nil
-}
-
-// ProposalAt is a stub: MemoryStorage has no permanent event log. Tests that
-// exercise replay (which reads the proposal back by index) use wal.Storage.
-func (ms *MemoryStorage) ProposalAt(index uint64) (*cluster.Proposal, error) {
-	return nil, nil
-}
-
-func (ms *MemoryStorage) TypeVersions(id string) ([]cluster.VersionInfo, error) {
-	return nil, nil
-}
-
-func (ms *MemoryStorage) TypeVersion(id string, version uint64) (*cluster.Configuration, error) {
-	return nil, nil
-}
-
 // Proposals is a test helper that decodes every normal raft entry in
 // storage into a Proposal. Unmarshal failures panic — this helper is
 // only used by tests against known-good data, and silently skipping
@@ -300,6 +237,46 @@ func (ms *MemoryStorage) Proposals() []*cluster.Proposal {
 
 	return ps
 }
+
+// StorageStubs supplies default no-op implementations of the db.Storage
+// methods that the in-memory test doubles don't model — version history, the
+// dead-letter store, the replicated stuck/skip state, and proposal-by-index.
+// Both MemoryStorage doubles (this package's and the one in raft_test.go)
+// embed it, so a new Storage method that only needs a trivial stub is added
+// here once instead of in every double. A double that DOES want real behavior
+// for one of these just defines its own method, which shadows the embedded
+// stub. Tests that need the real behavior use wal.Storage.
+type StorageStubs struct{}
+
+func (StorageStubs) DatabaseVersions(id string) ([]cluster.VersionInfo, error) { return nil, nil }
+func (StorageStubs) DatabaseVersion(id string, version uint64) (*cluster.Configuration, error) {
+	return nil, nil
+}
+func (StorageStubs) IngestableVersions(id string) ([]cluster.VersionInfo, error) { return nil, nil }
+func (StorageStubs) IngestableVersion(id string, version uint64) (*cluster.Configuration, error) {
+	return nil, nil
+}
+func (StorageStubs) SyncableVersions(id string) ([]cluster.VersionInfo, error) { return nil, nil }
+func (StorageStubs) SyncableVersion(id string, version uint64) (*cluster.Configuration, error) {
+	return nil, nil
+}
+func (StorageStubs) TypeVersions(id string) ([]cluster.VersionInfo, error) { return nil, nil }
+func (StorageStubs) TypeVersion(id string, version uint64) (*cluster.Configuration, error) {
+	return nil, nil
+}
+
+func (StorageStubs) SyncableDeadLetters(id string, since uint64, limit int) ([]cluster.SyncableDeadLetter, error) {
+	return nil, nil
+}
+func (StorageStubs) HasSyncableDeadLetter(id string, index uint64) (bool, error) { return false, nil }
+func (StorageStubs) SyncableStuck(id string) (cluster.SyncableStuck, bool, error) {
+	return cluster.SyncableStuck{}, false, nil
+}
+
+func (StorageStubs) SyncableSkipRequest(id string) (cluster.SyncableSkipRequest, bool, error) {
+	return cluster.SyncableSkipRequest{}, false, nil
+}
+func (StorageStubs) ProposalAt(index uint64) (*cluster.Proposal, error) { return nil, nil }
 
 // TODO Pull this reader out and make it concrete instead of an interface
 type Reader struct {
@@ -340,9 +317,7 @@ func (r *Reader) Read() (uint64, *cluster.Proposal, error) {
 			}
 
 			if len(p.Entities) > 0 {
-				tid := p.Entities[0].Type.ID
-				if !cluster.IsSyncableIndex(tid) && !cluster.IsSyncableDeadLetter(tid) &&
-					!cluster.IsSyncableStuck(tid) && !cluster.IsSyncableSkipRequest(tid) {
+				if !cluster.IsSyncableMetadata(p.Entities[0].Type.ID) {
 					return readIndex, p, nil
 				}
 			}
