@@ -35,8 +35,7 @@ dialect = "mysql"`)
 	require.Equal(t, fakeDB, db)
 	require.Equal(t, 1, fakeParser.ParseCallCount())
 
-	v, parsedName := fakeParser.ParseArgsForCall(0)
-	require.Equal(t, "mydb", parsedName)
+	v := fakeParser.ParseArgsForCall(0)
 	require.Equal(t, "mysql", v.GetString("sql.dialect"))
 }
 
@@ -55,7 +54,7 @@ func TestParseDatabase_JSON_Success(t *testing.T) {
 	require.Equal(t, "jsondb", name)
 	require.Equal(t, fakeDB, db)
 
-	v, _ := fakeParser.ParseArgsForCall(0)
+	v := fakeParser.ParseArgsForCall(0)
 	require.Equal(t, "postgres", v.GetString("sql.dialect"))
 }
 
@@ -238,7 +237,7 @@ connectionString = "user:${TEST_DB_PASSWORD}@tcp(localhost:3306)/db"`)
 	_, _, err := p.ParseDatabase("text/toml", data)
 	require.NoError(t, err)
 
-	v, _ := fakeParser.ParseArgsForCall(0)
+	v := fakeParser.ParseArgsForCall(0)
 	require.Equal(t, "user:s3cr3t@tcp(localhost:3306)/db", v.GetString("sql.connectionString"))
 	// Non-secret fields round-trip unchanged through interpolation.
 	require.Equal(t, "mysql", v.GetString("sql.dialect"))

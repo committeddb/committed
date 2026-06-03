@@ -25,7 +25,7 @@ func (p *Parser) ParseDatabase(mimeType string, data []byte) (string, cluster.Da
 		return "", nil, fmt.Errorf("cannot parse database of type: %s", dbType)
 	}
 
-	database, err := parser.Parse(v, name)
+	database, err := parser.Parse(v)
 	if err != nil {
 		return "", nil, err
 	}

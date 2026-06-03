@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
 
 	"github.com/philborlin/committed/internal/cluster"
@@ -26,12 +25,6 @@ type IngestableConfig struct {
 type Details struct {
 	Name string `json:"name"`
 	Type string `json:"type"`
-}
-
-type TestDatabaseParser struct{}
-
-func (p *TestDatabaseParser) Parse(*viper.Viper) (cluster.Database, error) {
-	return &clusterfakes.FakeDatabase{}, nil
 }
 
 func TestDatabase(t *testing.T) {

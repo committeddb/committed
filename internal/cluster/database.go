@@ -18,7 +18,7 @@ type DatabaseStorage interface {
 //
 //counterfeiter:generate . DatabaseParser
 type DatabaseParser interface {
-	Parse(v *viper.Viper, name string) (Database, error)
+	Parse(v *viper.Viper) (Database, error)
 }
 
 var databaseType = registerSystemType(&Type{
