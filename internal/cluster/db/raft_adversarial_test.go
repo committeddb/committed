@@ -90,14 +90,6 @@ func TestAdversarial_SymmetricPartition(t *testing.T) {
 
 	rafts, cluster := createFaultyRafts(5)
 
-	// Drainer-then-Close defer ordering: Go runs defers LIFO, so we
-	// register drainer-stop FIRST (runs LAST) and rafts.Close SECOND
-	// (runs FIRST). rafts.Close closes each commitC, which makes the
-	// drainers exit via the `!ok` path; stopping drainers before Close
-	// would leave serveChannels blocked on a commitC send with no reader
-	// and deadlock Close waiting on serveChannelsDoneC.
-	stopDrainers := rafts.StartDrainers()
-	defer stopDrainers()
 	defer rafts.Close()
 
 	rafts.WaitForLeader(t)
@@ -338,32 +330,6 @@ func TestAdversarial_LeaderFlapping(t *testing.T) {
 
 	rafts := createRafts(3)
 
-	// Per-node drainers — we swap them across Restart, same pattern as
-	// TestRaftRestart. A test-wide StartDrainers holds a stale commitC
-	// for the restarted node and silently stops draining, which
-	// deadlocks the new Ready loop on its first commit.
-	//
-	// Defer order matters: rafts.Close must run BEFORE the drainer stop
-	// so that db.Raft.Close's commitC-close naturally drains any
-	// in-flight processCommittedEntry send. Stopping drainers first
-	// would leave serveChannels blocked on commitC with no reader, and
-	// Close would deadlock waiting on serveChannelsDoneC. Register the
-	// drainer-stop defer FIRST so Go's LIFO defer order runs it LAST.
-	drainers := make([]func(), len(rafts))
-	for i, r := range rafts {
-		drainers[i] = r.startDrainer()
-	}
-	defer func() {
-		// Runs last. By this point rafts.Close has already closed each
-		// commitC, so each drainer has already exited via !ok. Calling
-		// the stop functions here is a no-op but keeps the cleanup
-		// shape uniform with TestRaftRestart / the flap loop.
-		for _, d := range drainers {
-			if d != nil {
-				d()
-			}
-		}
-	}()
 	defer rafts.Close()
 
 	rafts.WaitForLeader(t)
@@ -472,43 +438,10 @@ func TestAdversarial_LeaderFlapping(t *testing.T) {
 			t.Fatalf("flap iteration %d: no stable leader after WaitForLeader", i)
 		}
 
-		// Find the leader's index in the rafts slice — we need this to
-		// swap its drainer across the restart cycle.
-		leaderIdx := -1
-		for idx, r := range rafts {
-			if r.id == leader.id {
-				leaderIdx = idx
-				break
-			}
-		}
-		if leaderIdx < 0 {
-			t.Fatalf("flap iteration %d: leader id %d not in rafts slice", i, leader.id)
-		}
-
-		// DO NOT stop the drainer before Close — if we do, and
-		// serveChannels is mid-Ready with a pending processCommittedEntry
-		// send on commitC, the send blocks with no reader and Close
-		// deadlocks waiting on serveChannelsDoneC. Under the flap test's
-		// continuous-propose workload there's almost always a commit in
-		// flight when Close is called. Instead, leave the drainer running
-		// throughout Close; db.Raft.Close closes commitC after
-		// serveChannels exits, which signals the drainer to return via
-		// the `!ok` path of its select. We mark the drainers[] slot as
-		// already-exited (nil) so the deferred cleanup doesn't double-
-		// stop a goroutine that's already gone.
-		oldDrainerStop := drainers[leaderIdx]
-		drainers[leaderIdx] = nil
-
 		markDead(leader.id)
 		if err := leader.Close(); err != nil {
 			t.Fatalf("flap iteration %d: close leader %d: %v", i, leader.id, err)
 		}
-		// Close commitC happens inside leader.Close; the drainer goroutine
-		// has already returned by here (it exited via !ok). Calling the
-		// old stop function now is a no-op but also safe — close(stop)
-		// on an unclosed channel with no listener does nothing, and
-		// wg.Wait returns immediately because Done already fired.
-		oldDrainerStop()
 
 		// Wait for the survivors to re-elect. Using a subset slice
 		// with only the survivors (not the full rafts) so stableLeader's
@@ -528,7 +461,6 @@ func TestAdversarial_LeaderFlapping(t *testing.T) {
 		if err := leader.Restart(); err != nil {
 			t.Fatalf("flap iteration %d: restart node %d: %v", i, leader.id, err)
 		}
-		drainers[leaderIdx] = leader.startDrainer()
 		markAlive(leader)
 
 		// Wait for all 3 to re-agree on a leader before the next
@@ -954,10 +886,6 @@ func TestAdversarial_AsymmetricPartition(t *testing.T) {
 
 	rafts, cluster := createFaultyRafts(3)
 
-	// Defer ordering: drainer-stop defers FIRST so it runs LAST (after
-	// rafts.Close), matching the pattern in scenario (a).
-	stopDrainers := rafts.StartDrainers()
-	defer stopDrainers()
 	defer rafts.Close()
 
 	leaderID := rafts.WaitForLeader(t)
@@ -1083,8 +1011,6 @@ func TestAdversarial_SlowFollower(t *testing.T) {
 
 	rafts, cluster := createFaultyRafts(3)
 
-	stopDrainers := rafts.StartDrainers()
-	defer stopDrainers()
 	defer rafts.Close()
 
 	leaderID := rafts.WaitForLeader(t)
@@ -1242,8 +1168,6 @@ func TestAdversarial_DiskFull(t *testing.T) {
 		return faultyStore
 	})
 
-	stopDrainers := rafts.StartDrainers()
-	defer stopDrainers()
 	defer rafts.Close()
 
 	rafts.WaitForLeader(t)
@@ -1398,25 +1322,9 @@ func TestAdversarial_SevereLagFollowerRebuild(t *testing.T) {
 
 	rafts, cluster, dirs, fatalC := newSevereLagCluster(t, replicas, nodeOpts)
 
-	// Per-node drainers so we can stop/restart individual nodes without
-	// leaking commitC readers. Matches the scenario (c) pattern: defer
-	// drainer-stop FIRST so Go's LIFO ordering runs it LAST, after the
-	// rafts have already closed their commitCs.
-	drainers := make([]func(), replicas)
-	for i, r := range rafts {
-		drainers[i] = r.startDrainer()
-	}
-	defer func() {
-		for _, d := range drainers {
-			if d != nil {
-				d()
-			}
-		}
-	}()
-
 	// Track whether each node is currently open so the deferred cleanup
 	// doesn't double-close a storage we already closed mid-test. Indexed
-	// by position in the rafts slice (parallel to dirs / drainers).
+	// by position in the rafts slice (parallel to dirs).
 	alive := make([]bool, replicas)
 	for i := range alive {
 		alive[i] = true
@@ -1483,8 +1391,6 @@ func TestAdversarial_SevereLagFollowerRebuild(t *testing.T) {
 	if err := follower3.Close(); err != nil {
 		t.Fatalf("close follower 3: %v", err)
 	}
-	drainers[2]()
-	drainers[2] = nil
 	if err := follower3.storage.Close(); err != nil {
 		t.Fatalf("close follower 3 storage: %v", err)
 	}
@@ -1579,7 +1485,6 @@ func TestAdversarial_SevereLagFollowerRebuild(t *testing.T) {
 	// test binary with it — which is why the previous version of this
 	// test skipped the fatal-exit path and jumped straight to rsync.
 	rebootWalNode(t, rafts[2], follower3Dir, nodeOpts, fatalC)
-	drainers[2] = rafts[2].startDrainer()
 	alive[2] = true
 
 	// Wait for the fatal event. The snapshot+reject round is fast —
@@ -1616,8 +1521,6 @@ func TestAdversarial_SevereLagFollowerRebuild(t *testing.T) {
 	if err := rafts[2].Close(); err != nil {
 		t.Fatalf("close fatal'd follower 3: %v", err)
 	}
-	drainers[2]()
-	drainers[2] = nil
 	if err := rafts[2].storage.Close(); err != nil {
 		t.Fatalf("close fatal'd follower 3 storage: %v", err)
 	}
@@ -1638,8 +1541,6 @@ func TestAdversarial_SevereLagFollowerRebuild(t *testing.T) {
 	if err := healthy.Close(); err != nil {
 		t.Fatalf("close healthy peer for rsync: %v", err)
 	}
-	drainers[0]()
-	drainers[0] = nil
 	if err := healthy.storage.Close(); err != nil {
 		t.Fatalf("close healthy peer storage: %v", err)
 	}
@@ -1663,11 +1564,9 @@ func TestAdversarial_SevereLagFollowerRebuild(t *testing.T) {
 	// via AppendEntries. Node 3's copied state is at the same index as
 	// node 1's was at Phase 5, so the gap is zero or near-zero.
 	rebootWalNode(t, rafts[0], healthyDir, nodeOpts, fatalC)
-	drainers[0] = rafts[0].startDrainer()
 	alive[0] = true
 
 	rebootWalNode(t, rafts[2], follower3Dir, nodeOpts, fatalC)
-	drainers[2] = rafts[2].startDrainer()
 	alive[2] = true
 
 	// Give the freshly-rebooted HTTP transports a moment to come up and
@@ -1792,15 +1691,6 @@ func TestAdversarial_SevereLagFollowerRebuild(t *testing.T) {
 			alive[i] = false
 		}
 	}
-	// Stop drainers now that every commitC has been closed. (The
-	// deferred drainer cleanup above is then a no-op.)
-	for i, d := range drainers {
-		if d != nil {
-			d()
-			drainers[i] = nil
-		}
-	}
-
 	// Invariant 3: determinism. ApplyCommitted mirrors every committed
 	// raft entry into events/ keyed by raft index, and raft's log-
 	// matching property guarantees identical (term, data) tuples at
@@ -2034,12 +1924,11 @@ func openWalRaft(t *testing.T, id uint64, peers []raft.Peer, dir string, fc *Fau
 	)
 	nodeOpts = append(nodeOpts, opts...)
 
-	commitC, errorC, r := db.NewRaft(id, peers, s, proposeC, confChangeC, nodeOpts...)
+	errorC, r := db.NewRaft(id, peers, s, proposeC, confChangeC, nodeOpts...)
 
 	return &Raft{
 		storage:       s,
 		peers:         peers,
-		commitC:       commitC,
 		errorC:        errorC,
 		raft:          r,
 		proposeC:      proposeC,
@@ -2072,7 +1961,6 @@ func rebootWalNode(t *testing.T, rs *Raft, dir string, opts []db.Option, fatalC 
 
 	rs.mu.Lock()
 	rs.storage = rebuilt.storage
-	rs.commitC = rebuilt.commitC
 	rs.errorC = rebuilt.errorC
 	rs.raft = rebuilt.raft
 	rs.proposeC = rebuilt.proposeC

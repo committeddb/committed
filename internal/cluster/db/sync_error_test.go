@@ -389,8 +389,6 @@ func TestSync_EOF_Continues(t *testing.T) {
 	db := createDBWithStorage(s)
 	defer db.Close()
 
-	// db.New now calls EatCommitC automatically.
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 

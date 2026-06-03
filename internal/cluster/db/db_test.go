@@ -50,8 +50,8 @@ func TestDBPropose(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				// No more <-db.CommitC: blocking Propose returns after
-				// apply, so the entry is already in storage by here.
+				// Blocking Propose returns after apply, so the entry is
+				// already in storage by here.
 			}
 
 			ents, err := db.ents()

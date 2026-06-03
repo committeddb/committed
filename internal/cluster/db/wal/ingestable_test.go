@@ -242,7 +242,6 @@ func TestProposeIngestable_StartsIngestionWiring(t *testing.T) {
 	peers := db.Peers{id: ""}
 	d := db.New(id, peers, storage, p, syncCh, ingest, db.WithTickInterval(1*time.Millisecond))
 	defer d.Close()
-	d.EatCommitC()
 
 	// Register the type referenced by the fake ingestable's emitted
 	// proposal via the real propose path. Without this, ApplyCommitted

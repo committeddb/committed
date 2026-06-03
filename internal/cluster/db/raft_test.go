@@ -61,11 +61,6 @@ func TestRaftPropose(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			rafts := createRafts(tc.clusterSize)
 			defer rafts.Close()
-			// Drainers must stop BEFORE rafts.Close so they unblock via
-			// the stop channel rather than racing commitC's close. Defer
-			// LIFO ordering puts this stop call before rafts.Close.
-			stopDrainers := rafts.StartDrainers()
-			defer stopDrainers()
 
 			// Multi-node clusters need to settle on a leader before any
 			// propose can succeed. Single-node clusters elect themselves
@@ -131,23 +126,6 @@ func TestRaftRestart(t *testing.T) {
 			rafts := createRafts(tc.clusterSize)
 			defer rafts.Close()
 
-			// Per-node drainers so we can swap the one belonging to the
-			// node that gets restarted. A test-wide StartDrainers() would
-			// hold a stale commitC reference for the restarted node and
-			// silently stop draining, which would deadlock the new Ready
-			// loop on its first commit.
-			drainers := make([]func(), len(rafts))
-			for i, r := range rafts {
-				drainers[i] = r.startDrainer()
-			}
-			defer func() {
-				for _, d := range drainers {
-					if d != nil {
-						d()
-					}
-				}
-			}()
-
 			rafts.WaitForLeader(t)
 
 			r := rafts[0]
@@ -158,12 +136,6 @@ func TestRaftRestart(t *testing.T) {
 
 			lastIndex(t, r)
 
-			// Stop drainer for node 0 BEFORE Restart so the goroutine
-			// exits cleanly via its stop channel before db.Raft.Close
-			// closes the channel out from under it.
-			drainers[0]()
-			drainers[0] = nil
-
 			// Restart node 0 in place. For multi-node clusters this only
 			// restarts one of three replicas — the others stay up, the
 			// cluster keeps quorum, and node 0 catches back up via raft
@@ -172,12 +144,6 @@ func TestRaftRestart(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-
-			// New commitC after Restart needs a fresh drainer to keep the
-			// new Ready loop unblocked. Without this, the first replayed
-			// committed entry blocks processCommittedEntry, which blocks
-			// the entire Ready loop, which blocks the next propose.
-			drainers[0] = rafts[0].startDrainer()
 
 			// After a single-node restart there's no other voter to elect a
 			// leader, so this re-elects itself. After a multi-node restart
@@ -228,12 +194,9 @@ func TestRaftRestart(t *testing.T) {
 }
 
 // proposeAndCheck sends `input` on the raft's proposeC and waits until the
-// proposal appears at the tail of the node's user-entry log. It does NOT
-// read from commitC — that's handled by background drainers (see
-// Rafts.StartDrainers) so the Ready loop never blocks on a synchronous send
-// when no test goroutine is reading. Polling storage is the correct
-// synchronization barrier here because storage is the durable state we
-// actually care about asserting on.
+// proposal appears at the tail of the node's user-entry log. Polling storage
+// is the correct synchronization barrier here because storage is the durable
+// state we actually care about asserting on.
 func proposeAndCheck(t *testing.T, r *Raft, input string) {
 	t.Helper()
 	r.proposeC <- []byte(input)
@@ -416,11 +379,10 @@ func createRaft(id uint64, peers []raft.Peer, s db.Storage, tickInterval time.Du
 		opts = append(opts, db.WithTransportWrapperForTest(cluster.Wrap(id)))
 	}
 
-	commitC, errorC, r := db.NewRaft(id, peers, s, proposeC, confChangeC, opts...)
+	errorC, r := db.NewRaft(id, peers, s, proposeC, confChangeC, opts...)
 
 	return &Raft{
 		storage:       s,
-		commitC:       commitC,
 		errorC:        errorC,
 		raft:          r,
 		peers:         peers,
@@ -433,8 +395,8 @@ func createRaft(id uint64, peers []raft.Peer, s db.Storage, tickInterval time.Du
 }
 
 type Raft struct {
-	// mu guards the swap-on-Restart fields (storage, commitC, errorC,
-	// raft, proposeC, confChangeC, peers). Restart() rebuilds the
+	// mu guards the swap-on-Restart fields (storage, errorC, raft,
+	// proposeC, confChangeC, peers). Restart() rebuilds the
 	// underlying db.Raft and reassigns these fields, which races with
 	// concurrent readers — notably the adversarial suite's flap
 	// scenario where a background proposer goroutine calls ents() and
@@ -449,7 +411,6 @@ type Raft struct {
 	mu           sync.RWMutex
 	storage      db.Storage
 	peers        []raft.Peer
-	commitC      <-chan []byte
 	errorC       <-chan error
 	raft         *db.Raft
 	proposeC     chan<- []byte
@@ -516,7 +477,6 @@ func (rs *Raft) Restart() error {
 	rs.mu.Lock()
 	rs.storage = r.storage
 	rs.peers = r.peers
-	rs.commitC = r.commitC
 	rs.errorC = r.errorC
 	rs.raft = r.raft
 	rs.proposeC = r.proposeC
@@ -693,63 +653,6 @@ func (rs Rafts) FollowerRaft() *Raft {
 		}
 	}
 	return nil
-}
-
-// startDrainer spawns a single goroutine that continuously consumes from
-// r.commitC and discards the result. The returned stop function signals
-// the goroutine to exit and waits for it. Per-node so that Restart can
-// swap drainers cleanly: the restarted node has a brand-new commitC, so
-// the test must stop the old drainer (which is reading from the now-closed
-// old channel) and start a new one against r.commitC after Restart returns.
-//
-// commitC is captured at startDrainer call time, so a later Restart that
-// reassigns r.commitC does NOT change which channel this goroutine reads
-// from. The Restart helper handles this by making the test stop and
-// re-start the drainer explicitly.
-func (r *Raft) startDrainer() func() {
-	stop := make(chan struct{})
-	var wg sync.WaitGroup
-	wg.Add(1)
-	commitC := r.commitC
-	go func() {
-		defer wg.Done()
-		for {
-			select {
-			case _, ok := <-commitC:
-				if !ok {
-					return
-				}
-			case <-stop:
-				return
-			}
-		}
-	}()
-	return func() {
-		close(stop)
-		wg.Wait()
-	}
-}
-
-// StartDrainers spawns one drainer per node (see startDrainer) and returns
-// a stop function that closes them all in parallel. This is the bridge
-// between db.Raft (which sends every committed user proposal synchronously
-// to commitC inside the Ready loop) and these tests (which assert on
-// storage rather than commitC). Without an active reader on commitC,
-// processCommittedEntry blocks the Ready loop, which in turn blocks every
-// subsequent commit and deadlocks any multi-propose test.
-//
-// Drainers must be stopped BEFORE Rafts are closed so the goroutines exit
-// via their stop channels rather than racing db.Raft.Close's commitC close.
-func (rs Rafts) StartDrainers() func() {
-	stops := make([]func(), len(rs))
-	for i, r := range rs {
-		stops[i] = r.startDrainer()
-	}
-	return func() {
-		for _, s := range stops {
-			s()
-		}
-	}
 }
 
 type MemoryPosition struct {

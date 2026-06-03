@@ -43,7 +43,6 @@ var ErrProposalUnknown = errors.New("db: proposal status unknown after leader ch
 type Peers map[uint64]string
 
 type DB struct {
-	CommitC     <-chan []byte
 	ErrorC      <-chan error
 	proposeC    chan<- []byte
 	confChangeC chan<- raftpb.ConfChange
@@ -220,20 +219,11 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 	// p.RequestID, and signal it. This shape works uniformly for
 	// wal.Storage (real apply) and testing.MemoryStorage (no-op apply) —
 	// both go through the same raft.go iteration over rd.CommittedEntries.
-	commitC, errorC, raft := newRaftWithOptions(id, rpeers, s, proposeC, confChangeC, db.notifyApplied, cfg.logger, cfg)
+	errorC, raft := newRaftWithOptions(id, rpeers, s, proposeC, confChangeC, db.notifyApplied, cfg.logger, cfg)
 
-	db.CommitC = commitC
 	db.ErrorC = errorC
 	db.raft = raft
 	db.leaderState = raft.leaderState
-
-	// EatCommitC was previously the caller's responsibility — forgetting
-	// to call it deadlocks the raft Ready loop on the unbuffered commitC
-	// send. Now that the only legitimate use of CommitC was as a test
-	// synchronization barrier (rendered redundant by blocking Propose),
-	// it's safe to unconditionally drain. Tests that previously read
-	// <-db.CommitC for sync now use blocking Propose instead.
-	db.EatCommitC()
 
 	// The watcher subscribes to leader-ID transitions from LeaderState
 	// BEFORE the first Ready iteration could land — subscribe() just
@@ -306,14 +296,6 @@ func (db *DB) listenForIngestables(ingest <-chan *IngestableWithID) {
 			return
 		}
 	}
-}
-
-func (db *DB) EatCommitC() {
-	go func() {
-		for range db.CommitC {
-			db.logger.Debug("ate a commit")
-		}
-	}()
 }
 
 // Propose submits a proposal to raft and blocks until it has been applied

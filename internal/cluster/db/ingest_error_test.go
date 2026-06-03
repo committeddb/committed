@@ -295,8 +295,6 @@ func TestIngest_LeaderChangeStopsIngestGoroutine(t *testing.T) {
 	db := createDBWithStorage(s)
 	defer db.Close()
 
-	// db.New now calls EatCommitC automatically.
-
 	// Start as leader (default node ID matches db ID)
 	s.SetNode(db.ID())
 

@@ -40,12 +40,10 @@ func TestIngest(t *testing.T) {
 			err := db.Ingest(ctx, id, ingestable)
 			require.Nil(t, err)
 
-			// db.New now drains CommitC automatically (PR2), so the
-			// previous "<-db.CommitC N times" sync no longer works. Poll
-			// the entry log via db.ents() — etcd's raft.MemoryStorage
-			// (which db_test.MemoryStorage embeds) is mutex-guarded, so
-			// reading from the test goroutine while the raft loop writes
-			// is safe.
+			// Poll the entry log via db.ents() to wait for the ingested
+			// proposals to land — etcd's raft.MemoryStorage (which
+			// db_test.MemoryStorage embeds) is mutex-guarded, so reading
+			// from the test goroutine while the raft loop writes is safe.
 			size := len(ps) + len(positions)
 			require.Eventually(t, func() bool {
 				ents, err := db.ents()
@@ -148,8 +146,6 @@ func TestIngestWithStateChanges(t *testing.T) {
 			s := NewMemoryStorage()
 			db := createDBWithStorage(s)
 			defer db.Close()
-
-			// db.New now calls EatCommitC automatically.
 
 			// Start as not leader
 			s.SetNode(math.MaxUint64)

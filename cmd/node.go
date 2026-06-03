@@ -209,8 +209,6 @@ image can be templated per-node by an orchestrator:
 		go s.RestoreIngestableWorkers()
 		go s.RestoreSyncableWorkers()
 
-		d.EatCommitC()
-
 		var serverOpts []http.ServerOption
 		if d, ok := parseDurationEnv("COMMITTED_HTTP_READ_HEADER_TIMEOUT"); ok {
 			serverOpts = append(serverOpts, http.WithReadHeaderTimeout(d))

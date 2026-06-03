@@ -34,7 +34,6 @@ func newTestDB(t *testing.T) *db.DB {
 	peers := make(db.Peers)
 	peers[1] = "" // empty URL skips peer-transport listener
 	d := db.New(1, peers, s, p, nil, nil, db.WithTickInterval(1*time.Millisecond))
-	d.EatCommitC()
 	return d
 }
 

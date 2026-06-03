@@ -370,7 +370,6 @@ func createDB(t *testing.T, p *parser.Parser, dir string, sync chan *db.Syncable
 	require.Nil(t, err)
 
 	db := test.CreateDBWithStorage(storage, p, sync, ingest)
-	db.EatCommitC()
 
 	return storage, db
 }

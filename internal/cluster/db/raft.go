@@ -37,11 +37,6 @@ type timeSeriesLagReporter interface {
 type Raft struct {
 	proposeC     <-chan []byte            // proposed messages
 	proposeConfC <-chan raftpb.ConfChange // proposed cluster config changes
-	// commitC is the bidirectional channel that committed proposal data is
-	// sent to. Stored as a bidirectional chan (rather than chan<-) so Close
-	// can close it after serveChannels has stopped, letting consumers like
-	// EatCommitC exit cleanly instead of leaking forever.
-	commitC      chan []byte
 	raftErrorC   chan<- error
 	raftStopC    chan struct{}
 	id           uint64
@@ -110,7 +105,7 @@ type Raft struct {
 	metrics *metrics.Metrics
 }
 
-func NewRaft(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, proposeConfC <-chan raftpb.ConfChange, opts ...Option) (<-chan []byte, <-chan error, *Raft) {
+func NewRaft(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, proposeConfC <-chan raftpb.ConfChange, opts ...Option) (<-chan error, *Raft) {
 	cfg := defaultOptions()
 	for _, opt := range opts {
 		opt(&cfg)
@@ -118,15 +113,13 @@ func NewRaft(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, propo
 	return newRaftWithOptions(id, ps, s, proposeC, proposeConfC, nil, cfg.logger, cfg)
 }
 
-func newRaftWithOptions(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, proposeConfC <-chan raftpb.ConfChange, applyNotifier func(data []byte), logger *zap.Logger, cfg options) (<-chan []byte, <-chan error, *Raft) {
-	commitC := make(chan []byte)
+func newRaftWithOptions(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, proposeConfC <-chan raftpb.ConfChange, applyNotifier func(data []byte), logger *zap.Logger, cfg options) (<-chan error, *Raft) {
 	errorC := make(chan error)
 
 	n := &Raft{
 		id:                 id,
 		proposeC:           proposeC,
 		proposeConfC:       proposeConfC,
-		commitC:            commitC,
 		raftErrorC:         errorC,
 		raftStopC:          make(chan struct{}),
 		leaderState:        NewLeaderState(false),
@@ -154,7 +147,7 @@ func newRaftWithOptions(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []
 	// startup.
 	n.startRaft(id, ps)
 
-	return commitC, errorC, n
+	return errorC, n
 }
 
 func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
@@ -345,16 +338,14 @@ func (n *Raft) serveChannels() {
 				if n.metrics != nil {
 					n.metrics.EntryApplied(entry.Index, time.Since(applyStart))
 				}
-				// Fire the apply notifier after the storage apply has
-				// succeeded but before processCommittedEntry's send to
-				// commitC, so blocking db.Propose unblocks promptly. The
+				// Fire the apply notifier once the storage apply has
+				// succeeded, so blocking db.Propose unblocks promptly. The
 				// notifier is no-op if nil (raft_test path) or if the
 				// proposal's RequestID is 0 (system-internal proposers
 				// or pre-PR2 entries).
 				if n.applyNotifier != nil && entry.Type == raftpb.EntryNormal && entry.Data != nil {
 					n.applyNotifier(entry.Data)
 				}
-				n.processCommittedEntry(entry)
 				if entry.Type == raftpb.EntryConfChange {
 					var cc raftpb.ConfChange
 					err := cc.Unmarshal(entry.Data)
@@ -451,14 +442,13 @@ func (n *Raft) stopTransport() {
 // Close fully tears down the Raft instance: it signals serveChannels and its
 // inner proposeC reader to exit, waits for serveChannels to actually stop
 // (which guarantees Storage.Save is no longer running), stops the transport,
-// stops the underlying etcd raft.Node, and closes commitC so any consumer
-// exits cleanly. It is safe to call Close more than once.
+// and stops the underlying etcd raft.Node. It is safe to call Close more than
+// once.
 //
-// Stopping n.node and closing commitC are critical to prevent goroutine
-// leaks: without them, every Raft we create leaks the etcd raft.Node's
-// internal `(*node).run` goroutine and any consumer of commitC (e.g. tests
-// using DB.EatCommitC). Across many test iterations the leaked goroutines
-// consume enough CPU that subsequent tests time out.
+// Stopping n.node is critical to prevent goroutine leaks: without it, every
+// Raft we create leaks the etcd raft.Node's internal `(*node).run` goroutine.
+// Across many test iterations the leaked goroutines consume enough CPU that
+// subsequent tests time out.
 func (n *Raft) Close() error {
 	n.closeOnce.Do(func() {
 		close(n.closeC)
@@ -467,7 +457,6 @@ func (n *Raft) Close() error {
 		if n.node != nil {
 			n.node.Stop()
 		}
-		close(n.commitC)
 	})
 	return nil
 }
@@ -633,12 +622,6 @@ func (n *Raft) processSnapshot(snap raftpb.Snapshot) {
 			zap.Uint64("snapTerm", snap.Metadata.Term),
 			zap.Error(err),
 		)
-	}
-}
-
-func (n *Raft) processCommittedEntry(e raftpb.Entry) {
-	if e.Type == raftpb.EntryNormal && e.Data != nil {
-		n.commitC <- e.Data
 	}
 }
 

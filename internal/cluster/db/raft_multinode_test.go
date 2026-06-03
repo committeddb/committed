@@ -7,8 +7,8 @@
 // election-timeout latency, which is fine for an integration sweep but
 // not for `make test`.
 //
-// Helpers (createRafts, Rafts.WaitForLeader, Rafts.StartDrainers,
-// proposeAndCheck, waitForUserEntry, etc.) live in raft_test.go without
+// Helpers (createRafts, Rafts.WaitForLeader, proposeAndCheck,
+// waitForUserEntry, etc.) live in raft_test.go without
 // a build tag so they're available to both single-node tests and to this
 // file when the integration tag is set.
 
@@ -34,8 +34,6 @@ func TestRaftPropose_Cluster3(t *testing.T) {
 
 	rafts := createRafts(3)
 	defer rafts.Close()
-	stopDrainers := rafts.StartDrainers()
-	defer stopDrainers()
 
 	rafts.WaitForLeader(t)
 
@@ -87,41 +85,15 @@ func TestRaftRestart_Cluster3(t *testing.T) {
 	rafts := createRafts(3)
 	defer rafts.Close()
 
-	// Per-node drainers so we can swap the one belonging to the node that
-	// gets restarted. A test-wide StartDrainers would hold a stale commitC
-	// reference for the restarted node and silently stop draining.
-	drainers := make([]func(), len(rafts))
-	for i, r := range rafts {
-		drainers[i] = r.startDrainer()
-	}
-	defer func() {
-		for _, d := range drainers {
-			if d != nil {
-				d()
-			}
-		}
-	}()
-
 	rafts.WaitForLeader(t)
 
 	for _, input := range inputs1 {
 		proposeAndCheck(t, rafts[0], input)
 	}
 
-	// Stop drainer for node 0 BEFORE Restart so the goroutine exits via
-	// its stop channel before db.Raft.Close closes commitC out from under
-	// it.
-	drainers[0]()
-	drainers[0] = nil
-
 	if err := rafts[0].Restart(); err != nil {
 		t.Fatalf("restart node 0: %v", err)
 	}
-
-	// Fresh drainer for the new commitC. Without this the new Ready loop
-	// blocks on the first replayed committed entry and the next propose
-	// hangs.
-	drainers[0] = rafts[0].startDrainer()
 
 	rafts.WaitForLeader(t)
 
@@ -166,9 +138,6 @@ func TestRaftPropose_FromFollower(t *testing.T) {
 	rafts := createRafts(3)
 	defer rafts.Close()
 
-	stopDrainers := rafts.StartDrainers()
-	defer stopDrainers()
-
 	rafts.WaitForLeader(t)
 
 	follower := rafts.FollowerRaft()
@@ -207,18 +176,6 @@ func TestRaftPropose_LeaderKillReelectsAndAccepts(t *testing.T) {
 	rafts := createRafts(3)
 	defer rafts.Close()
 
-	drainers := make([]func(), len(rafts))
-	for i, r := range rafts {
-		drainers[i] = r.startDrainer()
-	}
-	defer func() {
-		for _, d := range drainers {
-			if d != nil {
-				d()
-			}
-		}
-	}()
-
 	rafts.WaitForLeader(t)
 
 	// Establish a baseline by proposing one entry while the original
@@ -239,11 +196,6 @@ func TestRaftPropose_LeaderKillReelectsAndAccepts(t *testing.T) {
 		t.Fatalf("could not find leader id %d in rafts slice", leaderID)
 	}
 
-	// Stop the leader's drainer first so the goroutine exits via its
-	// stop channel before db.Raft.Close closes commitC. Order matters
-	// here for the same reason as in TestRaftRestart_Cluster3.
-	drainers[killIdx]()
-	drainers[killIdx] = nil
 	if err := rafts[killIdx].Close(); err != nil {
 		t.Fatalf("close leader: %v", err)
 	}
@@ -298,8 +250,6 @@ func TestRaftPropose_LeaderKillReelectsAndAccepts(t *testing.T) {
 func TestPreVote_PartitionedFollowerDoesNotDisruptLeader(t *testing.T) {
 	rafts := createRafts(3)
 	defer rafts.Close()
-	stopDrainers := rafts.StartDrainers()
-	defer stopDrainers()
 
 	originalLeader := rafts.WaitForLeader(t)
 

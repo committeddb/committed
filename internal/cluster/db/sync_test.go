@@ -41,8 +41,7 @@ func TestSync(t *testing.T) {
 			err := db.Sync(ctx, id, syncable)
 			require.Nil(t, err)
 			// The sync goroutine cancels ctx once it has consumed `size`
-			// proposals; wait on that instead of <-db.CommitC, which is
-			// now drained by the auto-EatCommitC in db.New.
+			// proposals; wait on that.
 			<-ctx.Done()
 			checkSyncs(t, db, syncable, ps)
 		})
@@ -193,8 +192,6 @@ func TestSyncWithStateChanges(t *testing.T) {
 			defer db.Close()
 
 			size := len(tc.input1)
-
-			// db.New now calls EatCommitC automatically.
 
 			// Start as not leader
 			s.SetNode(math.MaxUint64)
