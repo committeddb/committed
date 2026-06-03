@@ -107,7 +107,11 @@ image can be templated per-node by an orchestrator:
 		ingest := make(chan *db.IngestableWithID)
 
 		p := parser.New()
-		s, err := wal.Open(dataDir, p, sync, ingest)
+		// Pass the real logger so storage-layer warnings are visible in
+		// production. Without this the Storage defaults to a Nop logger, which
+		// is why a degraded ingestable restore (and other wal warnings) used
+		// to fail completely silently.
+		s, err := wal.Open(dataDir, p, sync, ingest, wal.WithLogger(zap.L()))
 		if err != nil {
 			log.Fatalf("cannot open storage: %v", err)
 		}
@@ -183,6 +187,14 @@ image can be templated per-node by an orchestrator:
 		d.AddIngestableParser("sql", ingestableParser(d))
 		d.AddSyncableParser("sql", &syncsql.SyncableParser{})
 		d.AddSyncableParser("http", &synchttp.SyncableParser{})
+
+		// Restore ingestable workers for configs applied in a previous run.
+		// This MUST run after the sub-parsers above are registered and after
+		// db.New started draining the ingest channel — see the ordering
+		// contract on RestoreIngestableWorkers. Spawning it from inside
+		// wal.Open (as before) raced this registration and silently dropped
+		// the workers on restart under load.
+		go s.RestoreIngestableWorkers()
 
 		d.EatCommitC()
 

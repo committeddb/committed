@@ -333,3 +333,65 @@ func readNormalProposals(s *wal.Storage) []*cluster.Proposal {
 	}
 	return ps
 }
+
+// TestRestoreIngestableWorkers verifies the restart-resume contract that
+// replaced wal.Open's old auto-spawn of restoreIngestableWorkers:
+//
+//  1. Open does NOT auto-restore workers — doing so raced the caller's parser
+//     registration and, on a loaded machine, silently dropped every ingestable
+//     ("cannot parse ingestable of type: sql" → degraded → skipped), so a
+//     restarted node never resumed ingestion (the TestRestartResume flake).
+//  2. The explicit RestoreIngestableWorkers, called once parsers are wired,
+//     re-sends each persisted ingestable to the ingest channel.
+func TestRestoreIngestableWorkers(t *testing.T) {
+	dir := t.TempDir()
+	p := parser.New()
+	fp := &clusterfakes.FakeIngestableParser{}
+	fp.ParseReturns(&clusterfakes.FakeIngestable{}, nil)
+	p.AddIngestableParser("test", fp)
+
+	openOpts := []wal.Option{wal.WithoutFsync(), wal.WithInMemoryTimeSeries()}
+
+	// First incarnation: persist an ingestable. Buffered so the apply-path
+	// send (saveIngestable) doesn't block; drain it so it can't be mistaken
+	// for a restore send later.
+	ingestCh := make(chan *db.IngestableWithID, 4)
+	s, err := wal.Open(dir, p, nil, ingestCh, openOpts...)
+	require.Nil(t, err)
+	cfg := &cluster.Configuration{
+		ID:       "ing-1",
+		MimeType: "application/json",
+		Data:     []byte(`{"ingestable": {"name": "ing-1", "type": "test"}}`),
+	}
+	ent, err := cluster.NewUpsertIngestableEntity(cfg)
+	require.Nil(t, err)
+	saveEntity(t, ent, s, 1, 1)
+	select {
+	case got := <-ingestCh:
+		require.Equal(t, "ing-1", got.ID, "apply path should send the freshly-applied ingestable")
+	case <-time.After(2 * time.Second):
+		t.Fatal("apply path did not send the ingestable")
+	}
+	require.Nil(t, s.Close())
+
+	// Reopen. Open must NOT auto-restore — restoration is now the caller's
+	// explicit, post-parser-registration responsibility.
+	ingestCh2 := make(chan *db.IngestableWithID, 4)
+	s2, err := wal.Open(dir, p, nil, ingestCh2, openOpts...)
+	require.Nil(t, err)
+	defer s2.Close()
+	select {
+	case got := <-ingestCh2:
+		t.Fatalf("Open must not auto-restore workers; got unexpected send for %q", got.ID)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// The explicit restore re-sends the persisted ingestable.
+	s2.RestoreIngestableWorkers()
+	select {
+	case got := <-ingestCh2:
+		require.Equal(t, "ing-1", got.ID)
+	case <-time.After(2 * time.Second):
+		t.Fatal("RestoreIngestableWorkers did not re-send the persisted ingestable")
+	}
+}

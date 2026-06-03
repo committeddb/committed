@@ -411,20 +411,17 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		return nil, err
 	}
 
-	// Re-spawn ingestable workers for configs applied in a previous
-	// run. ApplyCommitted's idempotency guard (entry.Index <=
-	// appliedIndex) means re-replay of the WAL on restart does NOT
-	// re-call handleIngestable, so without this restore step the
-	// supervisor never gets notified about ingestables that were
-	// registered before the restart. Combined with the position
-	// persistence in ingestable_position.go, this is what makes
-	// restart-resume work end-to-end.
-	//
-	// Send asynchronously so Open does not block on the channel: db.New
-	// is the caller, and it only starts listenForIngestables AFTER
-	// Open returns. The send goroutine will block briefly on the
-	// unbuffered channel until then.
-	go ws.restoreIngestableWorkers()
+	// NOTE: ingestable workers for configs applied in a previous run are
+	// restored by the caller via RestoreIngestableWorkers AFTER it has wired
+	// up the ingestable sub-parsers and started the channel consumer — NOT
+	// here. Open used to `go ws.restoreIngestableWorkers()` directly, but that
+	// goroutine raced the caller's parser registration (and the parser map
+	// write), silently skipping every ingestable on a loaded machine. See the
+	// ordering contract on RestoreIngestableWorkers. (ApplyCommitted's
+	// idempotency guard means re-replay on restart does NOT re-call
+	// handleIngestable, so this explicit restore step is what makes
+	// restart-resume work end-to-end, together with the position persistence
+	// in ingestable_position.go.)
 
 	idx, err := ws.loadAppliedIndex()
 	if err != nil {

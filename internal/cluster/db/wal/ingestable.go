@@ -89,15 +89,27 @@ func (s *Storage) deleteIngestable(id []byte) error {
 	})
 }
 
-// restoreIngestableWorkers walks the ingestable bucket and re-sends
-// each registered ingestable to the supervisor's ingest channel so a
-// restarted node spawns workers for them. See the call site comment in
-// Open for the apply-path/restart-replay ordering this fixes.
+// RestoreIngestableWorkers walks the ingestable bucket and re-sends each
+// persisted ingestable to the supervisor's ingest channel so a restarted node
+// spawns workers for them.
 //
-// Errors here are warnings, not fatals: a corrupted single config
-// shouldn't stop the rest from running. The dialect will surface a
-// real connection or schema error in its own retry loop later.
-func (s *Storage) restoreIngestableWorkers() {
+// ORDERING CONTRACT: the caller MUST have registered the ingestable
+// sub-parsers (Parser.AddIngestableParser) AND started the channel consumer
+// (db.New's listenForIngestables drains s.ingest) before calling this. Open
+// deliberately does NOT auto-spawn it: when it did, the goroutine raced the
+// caller's parser registration, and on a loaded machine usually lost — every
+// ingestable then failed ParseIngestable with "cannot parse ingestable of
+// type: sql", was logged as a (silent, with the default Nop logger) degraded
+// parse, and skipped, so the restarted node never resumed ingestion. Run it
+// once setup is complete instead (cmd/node spawns `go s.RestoreIngestableWorkers()`
+// after the parsers are wired). It also races the apply path: a config
+// re-applied on restart (handleIngestable) re-sends the same ingestable, but
+// db.Ingest's replace-by-id makes the duplicate a no-op, so last-writer-wins.
+//
+// Errors here are warnings, not fatals: a corrupted single config shouldn't
+// stop the rest from running. The dialect will surface a real connection or
+// schema error in its own retry loop later.
+func (s *Storage) RestoreIngestableWorkers() {
 	if s.ingest == nil {
 		return
 	}
