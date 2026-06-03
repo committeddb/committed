@@ -11,6 +11,14 @@ import (
 	"github.com/philborlin/committed/internal/cluster"
 )
 
+// This file holds the sync worker core: registration (Sync), the
+// single-vs-batch dispatch (sync), the two worker state machines
+// (syncSingle, syncBatch + syncBatchFallback), and the success-path index
+// bump (proposeSyncableIndex). The two cohesive subsystems the worker leans
+// on live alongside it: the replicated stuck/skip debounce in
+// stuck_tracker.go, and the dead-letter recording/query helpers in
+// sync_dead_letter.go.
+
 // syncBackoff{Min,Max} bound the polling interval for db.sync's idle
 // loop. The worker has no event source to block on (the wal reader
 // returns io.EOF when caught up rather than blocking on new entries),
@@ -117,139 +125,6 @@ func (db *DB) sync(ctx context.Context, id string, s cluster.Syncable) error {
 		return db.syncBatch(ctx, id, s, bs)
 	}
 	return db.syncSingle(ctx, id, s)
-}
-
-// recordSyncDeadLetter emits the error metric for `kind` and durably
-// dead-letters the skipped proposal so an operator can later query (and,
-// once replay lands, re-drive) it. Best-effort on the dead-letter write:
-// the proposal is skipped regardless, so a failed record propose (ctx
-// canceled by replace/Close, or a leader change) is logged, not fatal.
-// `kind` is "permanent" (Sync returned ErrPermanent) or "manual" (an
-// operator skipped a syncable wedged on a transient error). ctx is the
-// sync worker's context.
-func (db *DB) recordSyncDeadLetter(ctx context.Context, id string, index uint64, kind string, syncErr error) {
-	if db.metrics != nil {
-		db.metrics.SyncError(id, kind)
-	}
-	msg := "operator dead-letter"
-	if syncErr != nil {
-		msg = syncErr.Error()
-	}
-	dl := &cluster.SyncableDeadLetter{
-		ID:                id,
-		Index:             index,
-		TimestampUnixNano: time.Now().UnixNano(),
-		Kind:              kind,
-		Message:           truncateDeadLetterMessage(msg),
-	}
-	if err := db.proposeSyncableDeadLetter(ctx, dl); err != nil {
-		db.logger.Warn("dead-letter record not persisted (best-effort; proposal still skipped)",
-			zap.String("id", id), zap.Uint64("index", index), zap.String("kind", kind), zap.Error(err))
-	}
-}
-
-// recordSyncPermanentError dead-letters a proposal that Sync rejected with a
-// permanent error. Thin wrapper over recordSyncDeadLetter for the
-// "permanent" kind.
-func (db *DB) recordSyncPermanentError(ctx context.Context, id string, index uint64, syncErr error) {
-	db.recordSyncDeadLetter(ctx, id, index, "permanent", syncErr)
-}
-
-// recordSyncTransientError emits the transient-error metric. Each
-// occurrence counts, so a worker stuck retrying a transient failure
-// shows a rising counter and a fresh last-error timestamp.
-func (db *DB) recordSyncTransientError(id string) {
-	if db.metrics != nil {
-		db.metrics.SyncError(id, "transient")
-	}
-}
-
-// stuckTracker manages a worker's replicated "blocked on index N" status —
-// the node-agnostic half of the manual dead-letter flow. It debounces the
-// flag (publishing only after the worker has been wedged for
-// db.syncStuckThreshold), publishes/clears the SyncableStuck record through
-// Raft so every node can see the stall, drives the stuck gauge, and reads the
-// operator's SyncableSkipRequest. One per worker goroutine; all of its Raft
-// proposes are best-effort (a failure just defers visibility to the next
-// retry, never the worker's control flow).
-type stuckTracker struct {
-	db        *DB
-	id        string
-	since     time.Time // when the worker first wedged on `index`; zero = not stuck
-	index     uint64
-	published bool
-}
-
-// wedged is called on every transient failure of the proposal at `index`. It
-// (re)starts the debounce when the wedged proposal changes and publishes the
-// replicated stuck record once the worker has been blocked past the threshold.
-func (t *stuckTracker) wedged(ctx context.Context, index uint64, lastErr error) {
-	if t.since.IsZero() || t.index != index {
-		t.since = time.Now()
-		t.index = index
-		t.published = false
-	}
-	if t.published || time.Since(t.since) < t.db.syncStuckThreshold {
-		return
-	}
-	msg := ""
-	if lastErr != nil {
-		msg = truncateDeadLetterMessage(lastErr.Error())
-	}
-	s := &cluster.SyncableStuck{ID: t.id, Index: index, SinceUnixNano: t.since.UnixNano(), Message: msg}
-	if err := t.db.proposeSyncableStuck(ctx, s); err != nil {
-		t.db.logger.Warn("publish stuck status failed (will retry)",
-			zap.String("id", t.id), zap.Uint64("index", index), zap.Error(err))
-		return
-	}
-	t.published = true
-	if t.db.metrics != nil {
-		t.db.metrics.SetSyncStuck(t.id, true)
-	}
-}
-
-// skipRequested reports whether an operator has asked the worker to skip the
-// proposal at `index` (matching the stuck record it published). A request for
-// a different index is stale (the worker moved on) and is dropped. Returns
-// false until a stuck record has been published, since a request can only
-// target a published index.
-func (t *stuckTracker) skipRequested(ctx context.Context, index uint64) bool {
-	if !t.published {
-		return false
-	}
-	req, ok, err := t.db.storage.SyncableSkipRequest(t.id)
-	if err != nil || !ok {
-		return false
-	}
-	if req.Index != index {
-		_ = t.db.proposeDeleteSyncableSkipRequest(ctx, t.id)
-		return false
-	}
-	return true
-}
-
-// cleared is called when the worker makes progress, unsticks, or stops. It
-// clears the published stuck record (no-op if nothing was published) and
-// resets the debounce.
-func (t *stuckTracker) cleared(ctx context.Context) {
-	if t.published {
-		if err := t.db.proposeDeleteSyncableStuck(ctx, t.id); err != nil {
-			t.db.logger.Warn("clear stuck status failed", zap.String("id", t.id), zap.Error(err))
-		}
-		if t.db.metrics != nil {
-			t.db.metrics.SetSyncStuck(t.id, false)
-		}
-	}
-	t.since = time.Time{}
-	t.index = 0
-	t.published = false
-}
-
-// honored is called after the worker skips a proposal in response to a skip
-// request: it clears the request as well as the stuck record.
-func (t *stuckTracker) honored(ctx context.Context) {
-	_ = t.db.proposeDeleteSyncableSkipRequest(ctx, t.id)
-	t.cleared(ctx)
 }
 
 func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) error {
@@ -725,52 +600,4 @@ func (db *DB) proposeSyncableIndex(ctx context.Context, i *cluster.SyncableIndex
 		db.metrics.SyncBumpCompleted(time.Since(start))
 	}
 	return err
-}
-
-// maxDeadLetterMessageBytes bounds the error string stored in a
-// dead-letter record. The record is replicated through Raft and lives in
-// the permanent event log, so an unbounded driver error message (some
-// SQL drivers echo the whole offending statement) would bloat every
-// replica's log. 1 KiB keeps the diagnostic useful while capping growth.
-const maxDeadLetterMessageBytes = 1024
-
-// proposeSyncableDeadLetter records that a syncable permanently skipped
-// the proposal at index i. It proposes a SyncableDeadLetter entity and
-// BLOCKS until it durably applies, so the record is replicated to every
-// node and queryable from any of them — not stranded on whichever node
-// was leader at failure time.
-//
-// Unlike proposeSyncableIndex, a failure here does NOT change control
-// flow: a permanent error skips the proposal regardless, and the dead
-// letter is best-effort observability layered on top (the metric counter
-// and the structured ERROR log already fired). A ctx cancellation
-// (replace/Close) or ErrProposalUnknown (leader change) just means this
-// one record didn't land; the caller logs and moves on rather than
-// freezing the worker. ctx is the sync worker's context.
-func (db *DB) proposeSyncableDeadLetter(ctx context.Context, d *cluster.SyncableDeadLetter) error {
-	entity, err := cluster.NewUpsertSyncableDeadLetterEntity(d)
-	if err != nil {
-		return err
-	}
-	return db.Propose(ctx, &cluster.Proposal{Entities: []*cluster.Entity{entity}})
-}
-
-// truncateDeadLetterMessage clamps s to maxDeadLetterMessageBytes,
-// appending an ellipsis marker when it had to cut. Operates on bytes
-// (not runes) for a hard size bound; a multi-byte rune split at the
-// boundary is acceptable for a diagnostic string.
-func truncateDeadLetterMessage(s string) string {
-	if len(s) <= maxDeadLetterMessageBytes {
-		return s
-	}
-	return s[:maxDeadLetterMessageBytes] + "…(truncated)"
-}
-
-// SyncableDeadLetters returns the proposals a syncable permanently
-// skipped, in ascending raft-index order. `since` is an exclusive
-// raft-index cursor; `limit` bounds the page. Delegates to storage,
-// where the records were written from the (replicated) apply path, so
-// the answer is consistent on every node.
-func (db *DB) SyncableDeadLetters(id string, since uint64, limit int) ([]cluster.SyncableDeadLetter, error) {
-	return db.storage.SyncableDeadLetters(id, since, limit)
 }
