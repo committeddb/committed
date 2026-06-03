@@ -688,3 +688,89 @@ func (db *DB) syncBatchFallback(ctx context.Context, id string, s cluster.Syncab
 	}
 	return true
 }
+
+// proposeSyncableIndex bumps the persisted SyncableIndex for a
+// syncable after a successful Sync, and BLOCKS until that bump is
+// durably applied (the appliedIndex/SyncableIndex bucket fsynced via
+// the apply path) or until ctx is canceled / a leader change orphans
+// the proposal. The cost is one Raft round-trip per bump; in exchange,
+// recovery is deterministic.
+//
+// This used to be fire-and-forget (proposeAndDiscardAck on db.ctx),
+// which let an arbitrary number of bumps sit un-applied: a crash
+// between the Sync returning and the bumps applying made the restarted
+// worker re-deliver every proposal since the last *persisted* index — a
+// duplicate storm. Blocking caps recovery at one duplicate: the worker
+// never advances past a proposal whose bump hasn't durably landed.
+//
+// ctx is the SYNC WORKER's context, not db.ctx. On a registry replace
+// or Close the worker ctx is canceled; Propose then returns ctx.Err and
+// the worker does NOT advance its index. The replacement worker re-syncs
+// from the un-advanced (persisted) index. Sync is required to be
+// idempotent at the sink level (SQL UPSERT), so re-syncing is safe.
+// (Non-idempotent syncables have a separate latent issue — see
+// .claude-scratch/tickets/sync-fail-fast-bump-tracking.md.)
+//
+// On a successful (durable) bump the round-trip latency is recorded to
+// committed_sync_bump_duration_seconds so the extra cost is observable.
+func (db *DB) proposeSyncableIndex(ctx context.Context, i *cluster.SyncableIndex) error {
+	entity, err := cluster.NewUpsertSyncableIndexEntity(i)
+	if err != nil {
+		return err
+	}
+
+	start := time.Now()
+	err = db.Propose(ctx, &cluster.Proposal{Entities: []*cluster.Entity{entity}})
+	if err == nil && db.metrics != nil {
+		db.metrics.SyncBumpCompleted(time.Since(start))
+	}
+	return err
+}
+
+// maxDeadLetterMessageBytes bounds the error string stored in a
+// dead-letter record. The record is replicated through Raft and lives in
+// the permanent event log, so an unbounded driver error message (some
+// SQL drivers echo the whole offending statement) would bloat every
+// replica's log. 1 KiB keeps the diagnostic useful while capping growth.
+const maxDeadLetterMessageBytes = 1024
+
+// proposeSyncableDeadLetter records that a syncable permanently skipped
+// the proposal at index i. It proposes a SyncableDeadLetter entity and
+// BLOCKS until it durably applies, so the record is replicated to every
+// node and queryable from any of them — not stranded on whichever node
+// was leader at failure time.
+//
+// Unlike proposeSyncableIndex, a failure here does NOT change control
+// flow: a permanent error skips the proposal regardless, and the dead
+// letter is best-effort observability layered on top (the metric counter
+// and the structured ERROR log already fired). A ctx cancellation
+// (replace/Close) or ErrProposalUnknown (leader change) just means this
+// one record didn't land; the caller logs and moves on rather than
+// freezing the worker. ctx is the sync worker's context.
+func (db *DB) proposeSyncableDeadLetter(ctx context.Context, d *cluster.SyncableDeadLetter) error {
+	entity, err := cluster.NewUpsertSyncableDeadLetterEntity(d)
+	if err != nil {
+		return err
+	}
+	return db.Propose(ctx, &cluster.Proposal{Entities: []*cluster.Entity{entity}})
+}
+
+// truncateDeadLetterMessage clamps s to maxDeadLetterMessageBytes,
+// appending an ellipsis marker when it had to cut. Operates on bytes
+// (not runes) for a hard size bound; a multi-byte rune split at the
+// boundary is acceptable for a diagnostic string.
+func truncateDeadLetterMessage(s string) string {
+	if len(s) <= maxDeadLetterMessageBytes {
+		return s
+	}
+	return s[:maxDeadLetterMessageBytes] + "…(truncated)"
+}
+
+// SyncableDeadLetters returns the proposals a syncable permanently
+// skipped, in ascending raft-index order. `since` is an exclusive
+// raft-index cursor; `limit` bounds the page. Delegates to storage,
+// where the records were written from the (replicated) apply path, so
+// the answer is consistent on every node.
+func (db *DB) SyncableDeadLetters(id string, since uint64, limit int) ([]cluster.SyncableDeadLetter, error) {
+	return db.storage.SyncableDeadLetters(id, since, limit)
+}
