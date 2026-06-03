@@ -829,7 +829,25 @@ see what was deliberately deferred vs. accidentally forgotten.
   tests. Part of `determinism-audit.md`.
 - **Right-to-be-forgotten implementation**: model is described above; the
   actual code is a future ticket.
-- **Time-series storage in this picture**: today the time series store
-  is populated as a side-effect of `handleUserDefined`. After the
-  permanent event log lands, the time series can be regenerated from
-  the permanent log on demand. v1 still rsyncs it for speed.
+- **Time-series storage in this picture**: the time-series store is a
+  pure **derived view**, populated as a side-effect of `handleUserDefined`
+  (one point per user-defined entity: type id + timestamp, both already in
+  the permanent event log). It is therefore fully regenerable from the
+  permanent log, and that is now its durability model (see
+  `wal/time_series_recovery.go`):
+  - On disk it lives under `<data-dir>/time-series/` (per node), not a
+    process-relative path.
+  - tstorage never fsyncs and keeps its newest partition in memory, so a
+    crash loses the in-memory head — and the on-disk partitions it *does*
+    keep are flushed mid-run, so the survivors are **not** a clean
+    index-prefix. We therefore trust the on-disk view only after a clean
+    shutdown, proven by the `tsAppliedIndex` watermark (written on `Close`
+    after the flush) equalling `appliedIndex`.
+  - On an unclean restart (`tsAppliedIndex < appliedIndex`) `Open`
+    **discards** the on-disk view and **rebuilds** it from the event log
+    over the retention window (~336h) — bounded, not full history, and
+    correct (starting empty, so no double-counting the mid-run-flushed
+    copy). Clean restarts cost nothing.
+  - `committed_tstorage_lag` (seconds = now − newest point) surfaces drift.
+  - v1 still rsyncs `time-series/` for speed; the discarded/rebuilt case
+    above is the fallback when an rsync'd copy can't be trusted.

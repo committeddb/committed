@@ -67,6 +67,17 @@ var (
 	appliedIndexKey    = []byte("idx")
 )
 
+// tsAppliedIndexBucket holds a single key ("idx") whose value is the
+// big-endian uint64 watermark of the derived time-series view: the highest
+// raft index whose user-defined points are durably flushed into tstorage.
+// It is written ONLY on a clean Close (after the tstorage flush), so on the
+// next Open a value < appliedIndex proves an unclean shutdown and triggers a
+// rebuild of the view from the event log. See time_series_recovery.go.
+var (
+	tsAppliedIndexBucket = []byte("tsAppliedIndex")
+	tsAppliedIndexKey    = []byte("idx")
+)
+
 // internalEntity binds a built-in entity type to the bucket it lives in and
 // the handler that applies it. applyEntity dispatches by scanning this table
 // (predicates are mutually exclusive, so first match wins), and the bucket set
@@ -92,14 +103,15 @@ var internalEntities = []internalEntity{
 }
 
 // buckets is every bbolt bucket Open must create: one per internal entity type
-// (derived from internalEntities) plus the two that aren't entity-driven — the
-// ingest source-seq highwater and the applied-index marker.
+// (derived from internalEntities) plus the ones that aren't entity-driven — the
+// ingest source-seq highwater, the applied-index marker, and the time-series
+// watermark.
 var buckets = func() [][]byte {
-	bs := make([][]byte, 0, len(internalEntities)+2)
+	bs := make([][]byte, 0, len(internalEntities)+3)
 	for _, ie := range internalEntities {
 		bs = append(bs, ie.bucket)
 	}
-	return append(bs, ingestSourceSeqBucket, appliedIndexBucket)
+	return append(bs, ingestSourceSeqBucket, appliedIndexBucket, tsAppliedIndexBucket)
 }()
 
 type StateType int
@@ -143,6 +155,14 @@ type Storage struct {
 	// happened to run mid-restore would hit a closed-file error.
 	kvMu              sync.RWMutex
 	TimeSeriesStorage tstorage.Storage
+	// tsLatestUnixNano is the largest user-defined entity timestamp (unix
+	// milliseconds, despite the name) handleUserDefined has written into
+	// TimeSeriesStorage — both on the live apply path and during a rebuild.
+	// Drives the committed_tstorage_lag_seconds gauge (now - latest), a
+	// health signal for whether the derived view has fallen behind. Written
+	// only from the single apply / rebuild goroutine; atomic for race-free
+	// sampling from the metrics path. 0 means no user-defined data yet.
+	tsLatestUnixNano atomic.Int64
 	// snapMu guards snapshot and hardState. Both are written from the
 	// raft serveChannels goroutine (Save, ConfState, CreateSnapshot,
 	// RestoreSnapshot) and read from the etcd raft node.run goroutine
@@ -271,13 +291,12 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		return nil, err
 	}
 
-	tssOpts := []tstorage.Option{
-		tstorage.WithTimestampPrecision(tstorage.Milliseconds),
-	}
-	if !cfg.inMemoryTimeSeries {
-		tssOpts = append(tssOpts, tstorage.WithDataPath("./data"))
-	}
-	timeSeriesStorage, err := tstorage.NewStorage(tssOpts...)
+	// On disk, tstorage lives under this node's data dir (timeSeriesStorageDir),
+	// NOT a process-relative "./data" — otherwise co-located nodes (e.g. the
+	// goreman dev cluster) would all clobber one shared directory. See
+	// time_series_recovery.go for openTimeSeries and the rebuild-on-restart
+	// path that reconciles this derived view with the committed log.
+	timeSeriesStorage, err := openTimeSeries(timeSeriesStorageDir, cfg.inMemoryTimeSeries)
 	if err != nil {
 		return nil, err
 	}
@@ -450,6 +469,15 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		ws.firstEventIndex.Store(first.Index)
 	}
 
+	// Reconcile the derived time-series view with the committed log. On a
+	// clean restart this is a no-op; after an unclean shutdown it discards
+	// the (untrustworthy) on-disk view and rebuilds it from the event log.
+	// Done here, after appliedIndex and the event-log seq mapping are
+	// loaded, because the rebuild walks the event log up to appliedIndex.
+	if err := ws.recoverTimeSeries(timeSeriesStorageDir, cfg.inMemoryTimeSeries); err != nil {
+		return nil, err
+	}
+
 	return ws, nil
 }
 
@@ -467,12 +495,25 @@ func (s *Storage) Close() error {
 	if err != nil && finalErr == nil {
 		finalErr = err
 	}
-	err = s.keyValueStorage.Close()
-	if err != nil && finalErr == nil {
-		finalErr = err
+
+	// Flush the derived time-series view to disk BEFORE closing bbolt, then
+	// stamp the watermark while bbolt is still open. Ordering is load-bearing:
+	// the watermark must record appliedIndex only after a successful tstorage
+	// flush (so the next Open can trust the on-disk view as a complete prefix),
+	// and the bbolt write that records it has to happen before keyValueStorage
+	// closes. If the flush fails we deliberately skip the watermark, leaving it
+	// stale so the next Open rebuilds rather than trusting a partial flush.
+	tsErr := s.TimeSeriesStorage.Close()
+	if tsErr != nil && finalErr == nil {
+		finalErr = tsErr
+	}
+	if tsErr == nil {
+		if err = s.saveTSAppliedIndex(s.appliedIndex.Load()); err != nil && finalErr == nil {
+			finalErr = err
+		}
 	}
 
-	err = s.TimeSeriesStorage.Close()
+	err = s.keyValueStorage.Close()
 	if err != nil && finalErr == nil {
 		finalErr = err
 	}

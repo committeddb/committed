@@ -40,6 +40,7 @@ type Metrics struct {
 	ingestDedupSkipped         metric.Int64Counter
 
 	configBuildErrors metric.Float64Gauge
+	timeSeriesLag     metric.Float64Gauge
 }
 
 // New creates a Metrics instance from an OTel Meter. The caller
@@ -126,6 +127,10 @@ func New(meter metric.Meter) *Metrics {
 
 	m.configBuildErrors, _ = meter.Float64Gauge("committed.config.build_errors",
 		metric.WithDescription("Configs (database/ingestable/syncable) persisted on this node but not buildable locally — usually a missing ${VAR} secret. Non-zero means a degraded config, not a down node."))
+
+	m.timeSeriesLag, _ = meter.Float64Gauge("committed.tstorage.lag",
+		metric.WithDescription("Seconds between now and the newest point in the derived time-series view (now - latest_tstorage_timestamp). Near zero on a healthy node; a growing value means the view has stopped tracking the committed log. Emitted only once the view holds at least one point."),
+		metric.WithUnit("s"))
 
 	return m
 }
@@ -312,4 +317,12 @@ func (m *Metrics) IngestDedupSkipped(id string) {
 // an operator signal to fix the environment; the node is still serving.
 func (m *Metrics) SetConfigBuildErrors(n int) {
 	m.configBuildErrors.Record(context.Background(), float64(n))
+}
+
+// SetTimeSeriesLag records the staleness of the derived time-series view in
+// seconds (now - newest point). Emitted from the raft Ready loop. A steady
+// near-zero value means the view is keeping up with applies; a climbing value
+// means it has drifted (worth alerting on for nodes that serve the type graph).
+func (m *Metrics) SetTimeSeriesLag(seconds float64) {
+	m.timeSeriesLag.Record(context.Background(), seconds)
 }

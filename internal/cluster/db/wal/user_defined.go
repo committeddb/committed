@@ -26,13 +26,22 @@ import (
 // Pre-PR4 entries that exist on disk with Timestamp == 0 are skipped on
 // restart by the persisted appliedIndex, so this never re-applies them.
 func (s *Storage) handleUserDefined(e *cluster.Entity) error {
-	return s.TimeSeriesStorage.InsertRows([]tstorage.Row{
+	if err := s.TimeSeriesStorage.InsertRows([]tstorage.Row{
 		{
 			Metric:    e.Type.ID,
 			Labels:    []tstorage.Label{},
 			DataPoint: tstorage.DataPoint{Timestamp: e.Timestamp, Value: 1},
 		},
-	})
+	}); err != nil {
+		return err
+	}
+	// Advance the lag-gauge cursor to the newest point written. Called only
+	// from the single apply / rebuild goroutine, so a plain compare-and-store
+	// (no CAS loop) is safe; the atomic is for race-free metric sampling.
+	if e.Timestamp > s.tsLatestUnixNano.Load() {
+		s.tsLatestUnixNano.Store(e.Timestamp)
+	}
+	return nil
 }
 
 func (s *Storage) TimePoints(typeID string, start time.Time, end time.Time) ([]cluster.TimePoint, error) {
