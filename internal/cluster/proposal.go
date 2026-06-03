@@ -157,51 +157,56 @@ func resolveType(ref TypeRef, r TypeResolver) (*Type, error) {
 	return r.ResolveType(ref)
 }
 
-// systemType returns the package-var Type for built-in meta-type IDs,
-// or nil for anything else. IsSystem delegates to this so the two never
-// drift. Ingestable is included here so the apply path can resolve its
-// Type; IsSystem keeps its original four-element scope (Proposals
-// excludes system config but includes ingestable data by design).
-func systemType(id string) *Type {
-	switch id {
-	case typeType.ID:
-		return typeType
-	case databaseType.ID:
-		return databaseType
-	case syncableType.ID:
-		return syncableType
-	case syncableIndexType.ID:
-		return syncableIndexType
-	case ingestableType.ID:
-		return ingestableType
-	case ingestablePositionType.ID:
-		// IngestablePosition entities are emitted by ingestable workers
-		// as position checkpoints. Without this branch, the apply path
-		// fatal-crashes the first time an ingestable sends a position
-		// checkpoint through Raft, because the resolver looks for the
-		// position type in the user-types bucket where it isn't stored.
-		return ingestablePositionType
-	case syncableDeadLetterType.ID:
-		// SyncableDeadLetter entities are emitted by the sync worker when
-		// Sync returns a permanent error. Same rationale as the position
-		// branch: the apply path must resolve the type without consulting
-		// the user-types bucket, where this internal type is never stored.
-		return syncableDeadLetterType
-	case syncableStuckType.ID:
-		// SyncableStuck / SyncableSkipRequest are the replicated stuck-state
-		// the manual dead-letter flow uses; same apply-path rationale.
-		return syncableStuckType
-	case syncableSkipRequestType.ID:
-		return syncableSkipRequestType
+// systemType, IsSystem, and IsSyncableMetadata are all derived from
+// systemTypes — the registry of built-in (non-user) entity types. Each
+// built-in type registers itself once, at its definition, via
+// registerSystemType, so nothing here is edited to add a type. That is what
+// keeps "resolvable on the apply path" (systemType) and "hidden from the
+// default Proposals() listing" (IsSystem) from drifting out of sync.
+type sysType struct {
+	typ          *Type
+	hideFromList bool // excluded from the default Proposals() listing (IsSystem)
+	syncableMeta bool // a syncable's own coordination state, filtered from projection (IsSyncableMetadata)
+}
+
+var systemTypes = map[string]sysType{}
+
+type sysTypeOpt func(*sysType)
+
+// hiddenFromProposals marks a built-in type as excluded from the default
+// Proposals() listing — config and syncable coordination state, but not
+// ingestable data, which is surfaced by design.
+func hiddenFromProposals(s *sysType) { s.hideFromList = true }
+
+// syncableMetadata marks a built-in type as a syncable's own coordination
+// state (its index, dead letters, stuck/skip status), filtered from syncable
+// projection so a syncable never re-Syncs its own bookkeeping.
+func syncableMetadata(s *sysType) { s.syncableMeta = true }
+
+// registerSystemType records a built-in type's identity and classification
+// and returns it, so a type's var definition doubles as its registration:
+//
+//	var fooType = registerSystemType(&Type{...}, hiddenFromProposals)
+//
+// Called from package-var initialisers, which Go runs (after systemTypes is
+// initialised, by dependency order) before any proposal is applied.
+func registerSystemType(t *Type, opts ...sysTypeOpt) *Type {
+	info := sysType{typ: t}
+	for _, o := range opts {
+		o(&info)
 	}
-	return nil
+	systemTypes[t.ID] = info
+	return t
+}
+
+// systemType returns the package-var Type for a built-in meta-type ID, or nil
+// for a user-defined type. Built-in types are hardcoded vars stored in no
+// bucket, so the apply path resolves them here without a resolver lookup —
+// without which it would fatal-crash the first time such an entity commits.
+func systemType(id string) *Type {
+	return systemTypes[id].typ
 }
 
 func IsSystem(id string) bool {
-	switch id {
-	case syncableType.ID, databaseType.ID, typeType.ID, syncableIndexType.ID,
-		syncableDeadLetterType.ID, syncableStuckType.ID, syncableSkipRequestType.ID:
-		return true
-	}
-	return false
+	return systemTypes[id].hideFromList
 }

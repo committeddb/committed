@@ -123,11 +123,11 @@ type SyncableParser interface {
 	Parse(*viper.Viper, DatabaseStorage) (Syncable, error)
 }
 
-var syncableType = &Type{
+var syncableType = registerSystemType(&Type{
 	ID:      "0cd18065-a0e2-4c19-a4d6-f824f1898cb5",
 	Name:    "InternalSyncableParser",
 	Version: 1,
-}
+}, hiddenFromProposals)
 
 func IsSyncable(id string) bool {
 	return id == syncableType.ID
@@ -142,11 +142,11 @@ func NewUpsertSyncableEntity(c *Configuration) (*Entity, error) {
 	return NewUpsertEntity(syncableType, []byte(c.ID), bs), nil
 }
 
-var syncableIndexType = &Type{
+var syncableIndexType = registerSystemType(&Type{
 	ID:      "ab972bba-83fe-4dea-9c5d-877645e8d21e",
 	Name:    "InternalSyncableIndex",
 	Version: 1,
-}
+}, hiddenFromProposals, syncableMetadata)
 
 type SyncableIndex struct {
 	ID    string
@@ -184,11 +184,11 @@ func NewUpsertSyncableIndexEntity(i *SyncableIndex) (*Entity, error) {
 	return NewUpsertEntity(syncableIndexType, []byte(i.ID), bs), nil
 }
 
-var syncableDeadLetterType = &Type{
+var syncableDeadLetterType = registerSystemType(&Type{
 	ID:      "5f3b6c8e-1d2a-4e7b-9c0f-2a8d6b4e1f93",
 	Name:    "InternalSyncableDeadLetter",
 	Version: 1,
-}
+}, hiddenFromProposals, syncableMetadata)
 
 // SyncableDeadLetter records that a syncable gave up on and skipped (dead-
 // lettered) the proposal at raft Index. It is proposed by the sync worker —
@@ -278,11 +278,11 @@ func DecodeSyncableDeadLetterKey(key []byte) (id string, index uint64, ok bool) 
 	return string(key[:len(key)-8]), binary.BigEndian.Uint64(key[len(key)-8:]), true
 }
 
-var syncableStuckType = &Type{
+var syncableStuckType = registerSystemType(&Type{
 	ID:      "8a1c4d2e-7b3f-4a6c-9e8d-1f5b2c7a9d04",
 	Name:    "InternalSyncableStuck",
 	Version: 1,
-}
+}, hiddenFromProposals, syncableMetadata)
 
 // SyncableStuck records that a syncable's worker is currently blocked
 // retrying a transient error on the proposal at Index (for a batch syncable,
@@ -339,11 +339,11 @@ func NewDeleteSyncableStuckEntity(id string) *Entity {
 	return NewDeleteEntity(syncableStuckType, []byte(id))
 }
 
-var syncableSkipRequestType = &Type{
+var syncableSkipRequestType = registerSystemType(&Type{
 	ID:      "3d9e6b1a-5c2f-4d7b-8a0e-6f4c1b8d3e25",
 	Name:    "InternalSyncableSkipRequest",
 	Version: 1,
-}
+}, hiddenFromProposals, syncableMetadata)
 
 // SyncableSkipRequest is the operator's request (proposed by the dead-letter
 // endpoint from any node) for a syncable's worker to skip what it is blocked
@@ -394,11 +394,8 @@ func NewDeleteSyncableSkipRequestEntity(id string) *Entity {
 // stuck / skip-request status. These ride in the permanent event log like any
 // other entity, but they must NOT be projected back into a syncable (a
 // syncable re-Syncing its own dead letters would loop), so every event-log
-// reader filters them out at read time. Centralised here so the set lives in
-// one place instead of being re-listed in each reader.
+// reader filters them out at read time. Derived from the type registry (the
+// syncableMetadata flag), so a new such type is classified at its definition.
 func IsSyncableMetadata(typeID string) bool {
-	return IsSyncableIndex(typeID) ||
-		IsSyncableDeadLetter(typeID) ||
-		IsSyncableStuck(typeID) ||
-		IsSyncableSkipRequest(typeID)
+	return systemTypes[typeID].syncableMeta
 }

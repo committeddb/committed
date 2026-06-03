@@ -67,7 +67,40 @@ var (
 	appliedIndexKey    = []byte("idx")
 )
 
-var buckets = [][]byte{typeBucket, databaseBucket, ingestableBucket, ingestablePositionBucket, ingestSourceSeqBucket, syncableBucket, syncableIndexBucket, syncableDeadLetterBucket, syncableStuckBucket, syncableSkipRequestBucket, appliedIndexBucket}
+// internalEntity binds a built-in entity type to the bucket it lives in and
+// the handler that applies it. applyEntity dispatches by scanning this table
+// (predicates are mutually exclusive, so first match wins), and the bucket set
+// is derived from it — so adding a built-in entity is one row here plus its
+// handler, not parallel edits to a dispatch switch AND a bucket list.
+type internalEntity struct {
+	is      func(string) bool
+	name    string // for apply-error wrapping; matches the handler's name
+	bucket  []byte
+	handler func(*Storage, *cluster.Entity) error
+}
+
+var internalEntities = []internalEntity{
+	{cluster.IsType, "handleType", typeBucket, (*Storage).handleType},
+	{cluster.IsDatabase, "handleDatabase", databaseBucket, (*Storage).handleDatabase},
+	{cluster.IsIngestable, "handleIngestable", ingestableBucket, (*Storage).handleIngestable},
+	{cluster.IsSyncable, "handleSyncable", syncableBucket, (*Storage).handleSyncable},
+	{cluster.IsSyncableIndex, "handleSyncableIndex", syncableIndexBucket, (*Storage).handleSyncableIndex},
+	{cluster.IsSyncableDeadLetter, "handleSyncableDeadLetter", syncableDeadLetterBucket, (*Storage).handleSyncableDeadLetter},
+	{cluster.IsSyncableStuck, "handleSyncableStuck", syncableStuckBucket, (*Storage).handleSyncableStuck},
+	{cluster.IsSyncableSkipRequest, "handleSyncableSkipRequest", syncableSkipRequestBucket, (*Storage).handleSyncableSkipRequest},
+	{cluster.IsIngestablePosition, "saveIngestablePosition", ingestablePositionBucket, (*Storage).saveIngestablePosition},
+}
+
+// buckets is every bbolt bucket Open must create: one per internal entity type
+// (derived from internalEntities) plus the two that aren't entity-driven — the
+// ingest source-seq highwater and the applied-index marker.
+var buckets = func() [][]byte {
+	bs := make([][]byte, 0, len(internalEntities)+2)
+	for _, ie := range internalEntities {
+		bs = append(bs, ie.bucket)
+	}
+	return append(bs, ingestSourceSeqBucket, appliedIndexBucket)
+}()
 
 type StateType int
 
@@ -643,47 +676,16 @@ func (s *Storage) ApplyCommitted(entry pb.Entry) error {
 }
 
 func (s *Storage) applyEntity(entity *cluster.Entity) error {
-	switch {
-	case cluster.IsType(entity.ID):
-		if err := s.handleType(entity); err != nil {
-			return fmt.Errorf("[wal.storage] handleType: %w", err)
+	for _, ie := range internalEntities {
+		if ie.is(entity.ID) {
+			if err := ie.handler(s, entity); err != nil {
+				return fmt.Errorf("[wal.storage] %s: %w", ie.name, err)
+			}
+			return nil
 		}
-	case cluster.IsDatabase(entity.ID):
-		if err := s.handleDatabase(entity); err != nil {
-			return fmt.Errorf("[wal.storage] handleDatabase: %w", err)
-		}
-	case cluster.IsIngestable(entity.ID):
-		if err := s.handleIngestable(entity); err != nil {
-			return fmt.Errorf("[wal.storage] handleIngestable: %w", err)
-		}
-	case cluster.IsSyncable(entity.ID):
-		if err := s.handleSyncable(entity); err != nil {
-			return fmt.Errorf("[wal.storage] handleSyncable: %w", err)
-		}
-	case cluster.IsSyncableIndex(entity.ID):
-		if err := s.handleSyncableIndex(entity); err != nil {
-			return fmt.Errorf("[wal.storage] handleSyncableIndex: %w", err)
-		}
-	case cluster.IsSyncableDeadLetter(entity.ID):
-		if err := s.handleSyncableDeadLetter(entity); err != nil {
-			return fmt.Errorf("[wal.storage] handleSyncableDeadLetter: %w", err)
-		}
-	case cluster.IsSyncableStuck(entity.ID):
-		if err := s.handleSyncableStuck(entity); err != nil {
-			return fmt.Errorf("[wal.storage] handleSyncableStuck: %w", err)
-		}
-	case cluster.IsSyncableSkipRequest(entity.ID):
-		if err := s.handleSyncableSkipRequest(entity); err != nil {
-			return fmt.Errorf("[wal.storage] handleSyncableSkipRequest: %w", err)
-		}
-	case cluster.IsIngestablePosition(entity.ID):
-		if err := s.saveIngestablePosition(entity); err != nil {
-			return fmt.Errorf("[wal.storage] saveIngestablePosition: %w", err)
-		}
-	default:
-		if err := s.handleUserDefined(entity); err != nil {
-			return fmt.Errorf("[wal.storage] handleUserDefined: %w", err)
-		}
+	}
+	if err := s.handleUserDefined(entity); err != nil {
+		return fmt.Errorf("[wal.storage] handleUserDefined: %w", err)
 	}
 	return nil
 }

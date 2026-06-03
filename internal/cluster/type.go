@@ -80,11 +80,11 @@ func (t *Type) String() string {
 	return fmt.Sprintf(" (%s) %s - v%d", t.ID, t.Name, t.Version)
 }
 
-var typeType = &Type{
+var typeType = registerSystemType(&Type{
 	ID:      "268e1ac4-7d17-4798-afae-3f1f9aa6fc65",
 	Name:    "InternalType",
 	Version: 1,
-}
+}, hiddenFromProposals)
 
 func IsType(id string) bool {
 	return id == typeType.ID

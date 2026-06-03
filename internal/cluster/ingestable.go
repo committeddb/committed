@@ -28,11 +28,11 @@ type IngestableParser interface {
 	Parse(*viper.Viper) (Ingestable, error)
 }
 
-var ingestableType = &Type{
+var ingestableType = registerSystemType(&Type{
 	ID:      "c5917145-c248-4d97-a863-8e26ca042b09",
 	Name:    "InternalIngestableParser",
 	Version: 1,
-}
+})
 
 func IsIngestable(id string) bool {
 	return id == ingestableType.ID
@@ -47,11 +47,11 @@ func NewUpsertIngestableEntity(c *Configuration) (*Entity, error) {
 	return NewUpsertEntity(ingestableType, []byte(c.ID), bs), nil
 }
 
-var ingestablePositionType = &Type{
+var ingestablePositionType = registerSystemType(&Type{
 	ID:      "8ea60a68-e22a-41cd-b09d-31352b0356f1",
 	Name:    "InternalIngestablePosition",
 	Version: 1,
-}
+})
 
 type IngestablePosition struct {
 	ID       string
