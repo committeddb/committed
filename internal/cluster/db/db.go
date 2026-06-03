@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -40,20 +39,6 @@ var ErrClosed = errors.New("db: closed")
 // normal apply path win for quick-transition cases where the new
 // leader inherits and commits the entry within a handful of ticks.
 var ErrProposalUnknown = errors.New("db: proposal status unknown after leader change")
-
-// ingestSupervisor* constants govern the auto-restart behavior applied
-// when an ingest worker parks in the ErrProposalUnknown freeze branch.
-// Options (WithIngestSupervisor*) let callers override; zero values in
-// options resolve to these defaults. See the ingest-worker-supervisor
-// ticket for the motivation — in short, a cluster that flaps under
-// load would otherwise leave one or more ingestables offline after
-// each flap until an operator intervened.
-const (
-	defaultIngestSupervisorInitialBackoff = 100 * time.Millisecond
-	defaultIngestSupervisorMaxBackoff     = 30 * time.Second
-	defaultIngestSupervisorMaxAttempts    = 20
-	defaultIngestSupervisorHealthyWindow  = 60 * time.Second
-)
 
 type Peers map[uint64]string
 
@@ -137,20 +122,6 @@ type DB struct {
 
 	logger  *zap.Logger
 	metrics *metrics.Metrics
-}
-
-// ingestSupervisorState tracks consecutive freeze-restart cycles for a
-// single ingestable id. A freeze observed within
-// ingestSupervisorHealthyWindow of the previous one counts as
-// consecutive and grows the backoff; a longer gap means the restarted
-// worker ran healthy long enough to reset the counter. giveup is set
-// once the supervisor has declared the id unrecoverable so subsequent
-// freezes (e.g., if an operator replaces the config later) don't
-// silently carry forward old state forever.
-type ingestSupervisorState struct {
-	lastFreezeAt       time.Time
-	consecutiveFreezes int
-	backoff            time.Duration
 }
 
 // workerHandle is the registry entry for a per-ID Sync or Ingest
@@ -841,129 +812,6 @@ func (db *DB) proposeIngestablePosition(ctx context.Context, p *cluster.Ingestab
 		db.metrics.IngestPositionBumpCompleted(time.Since(start))
 	}
 	return err
-}
-
-// superviseRestartIngest re-registers an ingestable whose worker
-// parked in the ErrProposalUnknown freeze branch. It runs as a
-// detached goroutine spawned from the freeze-exit branch of the
-// worker-launch goroutine in spawnIngestWorkerLocked.
-//
-// Behavior:
-//
-//   - Records the freeze in the per-id state map; resets the
-//     consecutive counter if the gap since the last freeze exceeds
-//     ingestSupervisorHealthyWindow (the worker ran cleanly long enough
-//     that this flap is "new", not a continuation).
-//   - Gives up + emits IngestSupervisorGiveup once the consecutive
-//     count exceeds ingestSupervisorMaxAttempts. The worker stays
-//     parked; operator intervention is required.
-//   - Otherwise waits a jittered backoff (exponential, capped at
-//     ingestSupervisorMaxBackoff) before re-registering.
-//   - Preflight AND install under a single workersMu hold so a
-//     concurrent user replace can't slip in between (see the race
-//     analysis in spawnIngestWorkerLocked's doc comment): if the
-//     frozen handle is no longer the registered one when we acquire
-//     the lock, we bail; otherwise we delete it and install the
-//     supervisor's replacement without releasing the lock. A user
-//     replace that arrives after the unlock still wins the final
-//     state via db.Ingest's own replacement loop.
-//   - On successful install, clears the frozen gauge and bumps the
-//     IngestRestart counter.
-func (db *DB) superviseRestartIngest(id string, i cluster.Ingestable, frozen *workerHandle) {
-	backoff, consecutive, giveup := db.recordFreezeAndNextBackoff(id)
-	if giveup {
-		db.logger.Error("ingest supervisor giving up after repeated freezes",
-			zap.String("id", id),
-			zap.Int("consecutive_freezes", consecutive))
-		if db.metrics != nil {
-			db.metrics.IngestSupervisorGiveup(id)
-		}
-		return
-	}
-
-	db.logger.Info("ingest supervisor scheduled restart",
-		zap.String("id", id),
-		zap.Int("consecutive_freezes", consecutive),
-		zap.Duration("backoff", backoff))
-
-	// Jitter is drawn from [0, backoff/2]. Keeps concurrent freezes
-	// across multiple ids from all trying to restart in lockstep.
-	// math/rand/v2 is deliberate — this is scheduling jitter, not a
-	// security primitive, and crypto/rand would add failure modes
-	// (syscall error handling) for no benefit.
-	jitter := time.Duration(0)
-	if backoff/2 > 0 {
-		jitter = time.Duration(rand.Int64N(int64(backoff / 2))) //nolint:gosec // G404: non-security-sensitive jitter
-	}
-	select {
-	case <-time.After(backoff + jitter):
-	case <-db.ctx.Done():
-		return
-	}
-
-	db.workersMu.Lock()
-	if db.closed {
-		db.workersMu.Unlock()
-		return
-	}
-	if db.ingestWorkers[id] != frozen {
-		// A user-initiated replace already installed a fresh handle
-		// while we were waiting. Nothing for us to do.
-		db.workersMu.Unlock()
-		db.logger.Debug("ingest supervisor skipping restart; handle replaced",
-			zap.String("id", id))
-		return
-	}
-	// Drop the frozen entry directly. Its goroutine exited already
-	// (we're downstream of that exit) and its handle.done is closed,
-	// so no drain step is needed — unlike db.Ingest's public replace
-	// loop, which must assume the existing worker is still running.
-	delete(db.ingestWorkers, id)
-	db.spawnIngestWorkerLocked(id, i)
-	db.workersMu.Unlock()
-
-	if db.metrics != nil {
-		db.metrics.SetWorkerRunning("ingest", id, true)
-		db.metrics.IngestFrozen(id, false)
-		db.metrics.IngestRestart(id)
-	}
-}
-
-// recordFreezeAndNextBackoff bumps the consecutive-freeze counter for
-// id and returns the backoff to apply before the next restart. If the
-// gap since the previous freeze exceeds ingestSupervisorHealthyWindow
-// the counter is reset first — the worker ran cleanly long enough that
-// this flap is a fresh episode, not a continuation. Returns giveup =
-// true when the (post-increment) counter exceeds
-// ingestSupervisorMaxAttempts; callers surface the giveup metric and
-// skip the restart.
-func (db *DB) recordFreezeAndNextBackoff(id string) (backoff time.Duration, consecutive int, giveup bool) {
-	db.ingestSupervisorMu.Lock()
-	defer db.ingestSupervisorMu.Unlock()
-
-	st, ok := db.ingestSupervisorStates[id]
-	if !ok {
-		st = &ingestSupervisorState{backoff: db.ingestSupervisorInitialBackoff}
-		db.ingestSupervisorStates[id] = st
-	}
-	now := time.Now()
-	if !st.lastFreezeAt.IsZero() && now.Sub(st.lastFreezeAt) > db.ingestSupervisorHealthyWindow {
-		st.consecutiveFreezes = 0
-		st.backoff = db.ingestSupervisorInitialBackoff
-	}
-	st.consecutiveFreezes++
-	st.lastFreezeAt = now
-
-	if st.consecutiveFreezes > db.ingestSupervisorMaxAttempts {
-		return 0, st.consecutiveFreezes, true
-	}
-
-	backoff = st.backoff
-	st.backoff *= 2
-	if st.backoff > db.ingestSupervisorMaxBackoff {
-		st.backoff = db.ingestSupervisorMaxBackoff
-	}
-	return backoff, st.consecutiveFreezes, false
 }
 
 func (db *DB) ID() uint64 {
