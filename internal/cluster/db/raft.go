@@ -411,7 +411,6 @@ func (n *Raft) serveChannels() {
 			n.maybeCompact()
 
 			n.node.Advance()
-		// case err := <-n.transport.ErrorC:
 		case err := <-n.transport.GetErrorC():
 			n.writeError(err)
 			return

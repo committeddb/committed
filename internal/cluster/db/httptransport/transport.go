@@ -105,13 +105,13 @@ func (t *HttpTransport) Start(stopC <-chan struct{}) error {
 
 	url, err := url.Parse(rawURL)
 	if err != nil {
-		log.Fatalf("raftexample: Failed parsing URL (%v)", err)
+		log.Fatalf("committed: Failed parsing URL (%v)", err)
 	}
 
 	var ln net.Listener
 	ln, err = newStoppableListener(url.Host, stopC)
 	if err != nil {
-		log.Fatalf("raftexample: Failed to listen rafthttp (%v)", err)
+		log.Fatalf("committed: Failed to listen rafthttp (%v)", err)
 	}
 
 	// When tlsInfo is set we terminate TLS here, in front of the
