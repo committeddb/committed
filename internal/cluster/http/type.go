@@ -5,32 +5,9 @@ import (
 	"time"
 )
 
-func (h *HTTP) AddType(w httpgo.ResponseWriter, r *httpgo.Request) {
-	c, err := createConfiguration(r)
-	if err != nil {
-		writeError(w, httpgo.StatusBadRequest, "invalid_config", "invalid type configuration")
-		return
-	}
-
-	if err := h.c.ProposeType(r.Context(), c); err != nil {
-		writeProposeError(w, err, "type", "propose type")
-		return
-	}
-
-	// See database.go AddDatabase for the G705 rationale.
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = w.Write([]byte(c.ID)) //nolint:gosec // G705
-}
-
-func (h *HTTP) GetTypes(w httpgo.ResponseWriter, r *httpgo.Request) {
-	cfgs, err := h.c.Types()
-	if err != nil {
-		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to retrieve types")
-		return
-	}
-
-	writeConfigurations(w, cfgs)
-}
+// AddType (POST /type/{id}) and GetTypes (GET /type) are served by the
+// generic config handlers in config_handlers.go. GetType below is bespoke:
+// GET /type/{id} returns a time-series graph, not a configuration.
 
 type GetTypeGraphRequest struct {
 	Start time.Time `json:"start"`

@@ -1,30 +1,14 @@
 package http
 
 import (
-	"crypto/tls"
-	"encoding/json"
-	"errors"
-	"io"
 	"net/http"
 	"sync"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rs/cors"
 	"go.uber.org/zap"
 
 	"github.com/philborlin/committed/internal/cluster"
-)
-
-// Package defaults. Callers that want something different pass the
-// matching ServerOption to NewServer. Values chosen to be generous
-// enough that day-one operators don't trip over them while still
-// bounding pathological clients.
-const (
-	defaultReadHeaderTimeout = 10 * time.Second
-	defaultReadTimeout       = 30 * time.Second
-	defaultWriteTimeout      = 30 * time.Second
-	defaultIdleTimeout       = 120 * time.Second
 )
 
 // Default CORS request methods and headers, applied when WithCORS is
@@ -101,36 +85,41 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 			r.Use(h.bearerAuth)
 		}
 
-		r.Get("/database", h.GetDatabases)
-		r.Post("/database/{id}", h.AddDatabase)
-		r.Get("/database/{id}/versions", h.GetDatabaseVersions)
-		r.Get("/database/{id}/versions/{version}", h.GetDatabaseVersion)
-		r.Post("/database/{id}/rollback", h.RollbackDatabase)
+		// The four config resources share a generic handler set
+		// (see config_handlers.go); the route table stays explicit so
+		// per-resource deviations — type has no rollback and a bespoke
+		// GET /type/{id}, syncable adds errors/status/deadletter/replay —
+		// remain visible rather than hidden inside a registrar.
+		r.Get("/database", h.listConfig("database", h.c.Databases))
+		r.Post("/database/{id}", h.addConfig("database", h.c.ProposeDatabase))
+		r.Get("/database/{id}/versions", h.getVersions("database", h.c.DatabaseVersions))
+		r.Get("/database/{id}/versions/{version}", h.getVersion("database", h.c.DatabaseVersion))
+		r.Post("/database/{id}/rollback", h.rollback("database", h.c.DatabaseVersion, h.c.ProposeDatabase))
 
-		r.Get("/ingestable", h.GetIngestables)
-		r.Post("/ingestable/{id}", h.AddIngestable)
-		r.Get("/ingestable/{id}/versions", h.GetIngestableVersions)
-		r.Get("/ingestable/{id}/versions/{version}", h.GetIngestableVersion)
-		r.Post("/ingestable/{id}/rollback", h.RollbackIngestable)
+		r.Get("/ingestable", h.listConfig("ingestable", h.c.Ingestables))
+		r.Post("/ingestable/{id}", h.addConfig("ingestable", h.c.ProposeIngestable))
+		r.Get("/ingestable/{id}/versions", h.getVersions("ingestable", h.c.IngestableVersions))
+		r.Get("/ingestable/{id}/versions/{version}", h.getVersion("ingestable", h.c.IngestableVersion))
+		r.Post("/ingestable/{id}/rollback", h.rollback("ingestable", h.c.IngestableVersion, h.c.ProposeIngestable))
 
 		r.Get("/proposal", h.GetProposals)
 		r.Post("/proposal", h.AddProposal)
 
-		r.Get("/syncable", h.GetSyncables)
-		r.Post("/syncable/{id}", h.AddSyncable)
-		r.Get("/syncable/{id}/versions", h.GetSyncableVersions)
-		r.Get("/syncable/{id}/versions/{version}", h.GetSyncableVersion)
+		r.Get("/syncable", h.listConfig("syncable", h.c.Syncables))
+		r.Post("/syncable/{id}", h.addConfig("syncable", h.c.ProposeSyncable))
+		r.Get("/syncable/{id}/versions", h.getVersions("syncable", h.c.SyncableVersions))
+		r.Get("/syncable/{id}/versions/{version}", h.getVersion("syncable", h.c.SyncableVersion))
 		r.Get("/syncable/{id}/errors", h.GetSyncableErrors)
 		r.Get("/syncable/{id}/status", h.GetSyncableStatus)
 		r.Post("/syncable/{id}/deadletter/", h.DeadLetterStuckSyncable)
 		r.Post("/syncable/{id}/replay/{index}", h.ReplaySyncableDeadLetter)
-		r.Post("/syncable/{id}/rollback", h.RollbackSyncable)
+		r.Post("/syncable/{id}/rollback", h.rollback("syncable", h.c.SyncableVersion, h.c.ProposeSyncable))
 
-		r.Get("/type", h.GetTypes)
+		r.Get("/type", h.listConfig("type", h.c.Types))
 		r.Get("/type/{id}", h.GetType)
-		r.Post("/type/{id}", h.AddType)
-		r.Get("/type/{id}/versions", h.GetTypeVersions)
-		r.Get("/type/{id}/versions/{version}", h.GetTypeVersion)
+		r.Post("/type/{id}", h.addConfig("type", h.c.ProposeType))
+		r.Get("/type/{id}/versions", h.getVersions("type", h.c.TypeVersions))
+		r.Get("/type/{id}/versions/{version}", h.getVersion("type", h.c.TypeVersion))
 	})
 
 	return h
@@ -138,172 +127,4 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 
 func (h *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.r.ServeHTTP(w, r)
-}
-
-// ServerOption mutates the *http.Server built by NewServer. Used by
-// cmd/node.go to translate env-var overrides into server timeouts
-// without giving that package knowledge of the server's field layout.
-type ServerOption func(*http.Server)
-
-// WithReadHeaderTimeout overrides the default ReadHeaderTimeout.
-// Zero or negative is ignored (keep the default).
-func WithReadHeaderTimeout(d time.Duration) ServerOption {
-	return func(s *http.Server) {
-		if d > 0 {
-			s.ReadHeaderTimeout = d
-		}
-	}
-}
-
-// WithReadTimeout overrides the default ReadTimeout.
-func WithReadTimeout(d time.Duration) ServerOption {
-	return func(s *http.Server) {
-		if d > 0 {
-			s.ReadTimeout = d
-		}
-	}
-}
-
-// WithWriteTimeout overrides the default WriteTimeout.
-func WithWriteTimeout(d time.Duration) ServerOption {
-	return func(s *http.Server) {
-		if d > 0 {
-			s.WriteTimeout = d
-		}
-	}
-}
-
-// WithIdleTimeout overrides the default IdleTimeout.
-func WithIdleTimeout(d time.Duration) ServerOption {
-	return func(s *http.Server) {
-		if d > 0 {
-			s.IdleTimeout = d
-		}
-	}
-}
-
-// WithTLSConfig attaches a tls.Config to the server. The caller drives
-// ListenAndServeTLS when TLSConfig != nil; nil keeps the plaintext
-// default. cmd/node.go builds the config from COMMITTED_HTTP_TLS_* env
-// vars so the http package stays free of filesystem I/O and credential
-// handling.
-func WithTLSConfig(cfg *tls.Config) ServerOption {
-	return func(s *http.Server) {
-		s.TLSConfig = cfg
-	}
-}
-
-// NewServer builds a configured *http.Server. Callers that want graceful
-// shutdown (cmd/node.go) drive ListenAndServe + Shutdown themselves; the
-// ListenAndServe convenience below is kept for tests and tooling that
-// just want to block until error.
-//
-// Timeouts bound how long a slow or malicious client can hold a
-// connection. ReadHeaderTimeout prevents Slowloris. ReadTimeout and
-// WriteTimeout cover full request/response, sized for the largest
-// reasonable config payload (schemas, TOML bundles). IdleTimeout caps
-// keepalive so dead peers don't pin file descriptors.
-func (h *HTTP) NewServer(addr string, opts ...ServerOption) *http.Server {
-	s := &http.Server{
-		Addr:              addr,
-		Handler:           h.r,
-		ReadHeaderTimeout: defaultReadHeaderTimeout,
-		ReadTimeout:       defaultReadTimeout,
-		WriteTimeout:      defaultWriteTimeout,
-		IdleTimeout:       defaultIdleTimeout,
-	}
-	for _, fn := range opts {
-		fn(s)
-	}
-	return s
-}
-
-func (h *HTTP) ListenAndServe(addr string) error {
-	return h.NewServer(addr).ListenAndServe()
-}
-
-// unmarshalBody reads r.Body and JSON-decodes into v. Oversize
-// bodies are not rejected here — the proposal-size limit lives at
-// the raft choke point (db.proposeAsync) so every proposal source
-// is checked uniformly. See cluster.ErrProposalTooLarge.
-func unmarshalBody(r *http.Request, v any) error {
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		return err
-	}
-
-	err = json.Unmarshal(body, &v)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func createConfiguration(r *http.Request) (*cluster.Configuration, error) {
-	id := r.PathValue("id")
-	if id == "" {
-		return nil, errors.New("id is empty")
-	}
-
-	mimeType := "text/toml"
-	header, ok := r.Header["Content-Type"]
-	if ok && len(header) == 1 {
-		mimeType = header[0]
-	}
-
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	configuration := &cluster.Configuration{
-		ID:       string(id),
-		MimeType: mimeType,
-		Data:     body,
-	}
-
-	return configuration, nil
-}
-
-type ConfigurationResponse struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	MimeType string `json:"mimeType"`
-	Data     string `json:"data"`
-}
-
-func writeConfigurations(w http.ResponseWriter, cfgs []*cluster.Configuration) {
-	rs := make([]*ConfigurationResponse, 0, len(cfgs))
-
-	for _, cfg := range cfgs {
-		rs = append(rs, &ConfigurationResponse{
-			ID:       cfg.ID,
-			Name:     "", // TODO - get name configuration
-			MimeType: cfg.MimeType,
-			Data:     string(cfg.Data),
-		})
-	}
-
-	writeArrayBody(w, rs)
-}
-
-func writeArrayBody[T any](w http.ResponseWriter, body []T) {
-	if body == nil {
-		writeJson(w, []byte("[]"))
-		return
-	}
-
-	bs, err := json.Marshal(body)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "failed to marshal response")
-		return
-	}
-
-	writeJson(w, bs)
-}
-
-func writeJson(w http.ResponseWriter, bs []byte) {
-	w.Header().Add("Content-Type", "application/json")
-	_, _ = w.Write(bs)
 }
