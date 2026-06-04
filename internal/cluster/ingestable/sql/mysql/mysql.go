@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-mysql-org/go-mysql/canal"
@@ -237,6 +238,18 @@ type MySQLEventHandler struct {
 	positionChan chan<- cluster.Position
 	tables       []string
 
+	// mu guards the mutable streaming state below (lastPos, curFile,
+	// curPos, pending). canal.Close invokes OnPosSynced on the goroutine
+	// that calls Close (our Ingest goroutine on the ctx-cancel path),
+	// which can run concurrently with canal's own event-processing
+	// goroutine still inside OnXID/OnRow → both reach flushPending and
+	// race on pending. The lock is uncontended on the normal streaming
+	// path — every callback runs on the single canal goroutine. Critical
+	// sections are short (mutate fields / snapshot the buffer); the
+	// blocking proposal send in flushPending happens with the lock
+	// released, so the lock is never held across a channel send.
+	mu sync.Mutex
+
 	// lastPos holds the most recently emitted binlog position so the
 	// outer reconnect loop can resume from where it left off instead
 	// of re-dumping from scratch or replaying from the original pos.
@@ -298,15 +311,18 @@ func (h *MySQLEventHandler) OnRow(e *canal.RowsEvent) error {
 	primaryKey := h.config.PrimaryKey
 	key := fmt.Sprintf("%v", m[primaryKey])
 
-	// Buffer the entity until the transaction commits (OnXID). Stamp
-	// the propose-time wall-clock so apply on every node records the
-	// same time-series timestamp. See cluster.Entity.Timestamp.
-	h.pending = append(h.pending, &cluster.Entity{
+	entity := &cluster.Entity{
 		Type:      h.config.Type,
 		Key:       []byte(key),
 		Data:      []byte(jsonString),
 		Timestamp: time.Now().UnixMilli(),
-	})
+	}
+
+	h.mu.Lock()
+	// Buffer the entity until the transaction commits (OnXID). Stamp
+	// the propose-time wall-clock so apply on every node records the
+	// same time-series timestamp. See cluster.Entity.Timestamp.
+	h.pending = append(h.pending, entity)
 
 	// Track the live binlog offset so a mid-transaction flush below
 	// stamps a monotonic SourceSeq. e.Header.LogPos is the offset at the
@@ -318,7 +334,10 @@ func (h *MySQLEventHandler) OnRow(e *canal.RowsEvent) error {
 	// Soft limit: emit a partial batch to prevent OOM on very large
 	// transactions. This breaks atomicity for oversized transactions
 	// but is the right trade-off versus unbounded memory growth.
-	if len(h.pending) >= maxPendingEntities {
+	overLimit := len(h.pending) >= maxPendingEntities
+	h.mu.Unlock()
+
+	if overLimit {
 		if err := h.flushPending(); err != nil {
 			return err
 		}
@@ -329,19 +348,27 @@ func (h *MySQLEventHandler) OnRow(e *canal.RowsEvent) error {
 }
 
 // flushPending emits all buffered entities as a single proposal and
-// resets the buffer. No-op when the buffer is empty.
+// resets the buffer. No-op when the buffer is empty. It snapshots and
+// clears the buffer under h.mu, then performs the (possibly blocking)
+// channel send with the lock released — so the Close-time OnPosSynced
+// never waits on the lock behind an in-flight send, and the normal
+// event-loop callbacks never hold the lock across a blocking send.
 func (h *MySQLEventHandler) flushPending() error {
+	h.mu.Lock()
 	if len(h.pending) == 0 {
+		h.mu.Unlock()
 		return nil
 	}
 	p := &cluster.Proposal{Entities: h.pending, SourceSeq: encodeSourceSeq(h.curFile, h.curPos)}
+	h.pending = nil
+	h.mu.Unlock()
+
 	select {
 	case h.proposalChan <- p:
+		return nil
 	case <-h.ctx.Done():
 		return h.ctx.Err()
 	}
-	h.pending = nil
-	return nil
 }
 
 // OnXID is called when a MySQL transaction commits. It flushes all
@@ -354,8 +381,10 @@ func (h *MySQLEventHandler) OnXID(header *replication.EventHeader, pos mysql.Pos
 	// proposal carries the post-commit (file, offset) as its SourceSeq —
 	// strictly greater than any mid-transaction flush in the same txn and
 	// than the previous txn's commit.
+	h.mu.Lock()
 	h.curFile = pos.Name
 	h.curPos = pos.Pos
+	h.mu.Unlock()
 	if err := h.flushPending(); err != nil {
 		return err
 	}
@@ -372,7 +401,9 @@ func (h *MySQLEventHandler) OnXID(header *replication.EventHeader, pos mysql.Pos
 		return h.ctx.Err()
 	}
 
+	h.mu.Lock()
 	h.lastPos = &mysql.Position{Name: pos.Name, Pos: pos.Pos}
+	h.mu.Unlock()
 
 	zap.L().Debug("OnXID", zap.String("pos", pos.Name), zap.Uint32("offset", pos.Pos))
 	return nil
@@ -381,7 +412,9 @@ func (h *MySQLEventHandler) OnXID(header *replication.EventHeader, pos mysql.Pos
 func (h *MySQLEventHandler) OnPosSynced(header *replication.EventHeader, pos mysql.Position, set mysql.GTIDSet, force bool) error {
 	// During binlog replication OnXID already flushed pending entities
 	// before this callback is invoked, so pending will normally be
-	// empty. Flush as a safety measure.
+	// empty. Flush as a safety measure. canal.Close also calls this from
+	// a different goroutine than the event loop; flushPending takes h.mu
+	// internally, which is what makes that concurrent call safe.
 	return h.flushPending()
 }
 
@@ -408,7 +441,9 @@ func (h *MySQLEventHandler) OnDDL(header *replication.EventHeader, nextPos mysql
 // the file the stream rotates into.
 func (h *MySQLEventHandler) OnRotate(header *replication.EventHeader, rotateEvent *replication.RotateEvent) error {
 	if rotateEvent != nil && len(rotateEvent.NextLogName) > 0 {
+		h.mu.Lock()
 		h.curFile = string(rotateEvent.NextLogName)
+		h.mu.Unlock()
 	}
 	return nil
 }
