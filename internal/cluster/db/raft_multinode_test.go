@@ -146,7 +146,7 @@ func TestRaftPropose_FromFollower(t *testing.T) {
 	}
 
 	// Sanity check: the follower really is a follower (not the leader).
-	leader := rafts.LeaderRaft()
+	leader := rafts.waitForLeaderRaft(t)
 	if follower.id == leader.id {
 		t.Fatalf("FollowerRaft returned the leader (id=%d)", follower.id)
 	}
@@ -184,7 +184,7 @@ func TestRaftPropose_LeaderKillReelectsAndAccepts(t *testing.T) {
 	proposeAndCheck(t, rafts[0], "before-kill")
 
 	// Identify and kill the leader.
-	leaderID := rafts.LeaderRaft().id
+	leaderID := rafts.waitForLeaderRaft(t).id
 	killIdx := -1
 	for i, r := range rafts {
 		if r.id == leaderID {

@@ -430,13 +430,9 @@ func TestAdversarial_LeaderFlapping(t *testing.T) {
 	const flapIterations = 3
 	const interFlapRest = 600 * time.Millisecond
 	for i := 0; i < flapIterations; i++ {
-		// Identify current leader. If re-election is still in flight,
-		// WaitForLeader blocks until it settles.
-		rafts.WaitForLeader(t)
-		leader := rafts.LeaderRaft()
-		if leader == nil {
-			t.Fatalf("flap iteration %d: no stable leader after WaitForLeader", i)
-		}
+		// Identify current leader, waiting out any in-flight re-election or
+		// PreVote churn so we act on a stable, non-nil leader.
+		leader := rafts.waitForLeaderRaft(t)
 
 		markDead(leader.id)
 		if err := leader.Close(); err != nil {
@@ -888,11 +884,8 @@ func TestAdversarial_AsymmetricPartition(t *testing.T) {
 
 	defer rafts.Close()
 
-	leaderID := rafts.WaitForLeader(t)
-	leader := rafts.LeaderRaft()
-	if leader == nil {
-		t.Fatalf("LeaderRaft returned nil after WaitForLeader")
-	}
+	leader := rafts.waitForLeaderRaft(t)
+	leaderID := leader.id
 
 	// Pick any follower to be the isolated-in-one-direction side. Any
 	// non-leader id works — the scenario's invariants don't depend on
@@ -1013,11 +1006,8 @@ func TestAdversarial_SlowFollower(t *testing.T) {
 
 	defer rafts.Close()
 
-	leaderID := rafts.WaitForLeader(t)
-	leader := rafts.LeaderRaft()
-	if leader == nil {
-		t.Fatalf("LeaderRaft returned nil after WaitForLeader")
-	}
+	leader := rafts.waitForLeaderRaft(t)
+	leaderID := leader.id
 
 	// Pick a single follower to slow down. We choose the first non-leader
 	// node; which one it is doesn't matter to the invariants being tested
@@ -1370,7 +1360,7 @@ func TestAdversarial_SevereLagFollowerRebuild(t *testing.T) {
 	for i := 0; i < baselineEntries; i++ {
 		seq++
 		baselinePayloads[i] = severeLagProposal(t, seq)
-		proposeAndCheckBytes(t, rafts.LeaderRaft(), baselinePayloads[i])
+		proposeAndCheckBytes(t, rafts.waitForLeaderRaft(t), baselinePayloads[i])
 	}
 	for _, r := range rafts {
 		waitForUserEntry(t, r, baselinePayloads[baselineEntries-1])
@@ -1409,7 +1399,7 @@ func TestAdversarial_SevereLagFollowerRebuild(t *testing.T) {
 	for i := 0; i < duringEntries; i++ {
 		seq++
 		duringPayloads[i] = severeLagProposal(t, seq)
-		proposeAndCheckBytes(t, survivors.LeaderRaft(), duringPayloads[i])
+		proposeAndCheckBytes(t, survivors.waitForLeaderRaft(t), duringPayloads[i])
 	}
 	for _, r := range survivors {
 		waitForUserEntry(t, r, duringPayloads[duringEntries-1])
@@ -1589,7 +1579,7 @@ func TestAdversarial_SevereLagFollowerRebuild(t *testing.T) {
 
 	seq++
 	postRebuildPayload := severeLagProposal(t, seq)
-	proposeAndCheckBytes(t, rafts.LeaderRaft(), postRebuildPayload)
+	proposeAndCheckBytes(t, rafts.waitForLeaderRaft(t), postRebuildPayload)
 	for _, r := range rafts {
 		waitForUserEntry(t, r, postRebuildPayload)
 	}

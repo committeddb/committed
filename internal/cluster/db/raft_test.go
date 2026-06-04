@@ -655,6 +655,47 @@ func (rs Rafts) FollowerRaft() *Raft {
 	return nil
 }
 
+// waitForLeaderRaft blocks until rs reports a stable leader that is a member of
+// rs, and returns it (never nil). "Stable" here is deliberately stronger than
+// WaitForLeader's single snapshot: the same in-slice leader must be observed
+// across leaderStableSamples consecutive polls. PreVote/CheckQuorum churn can
+// make a follower briefly pre-campaign — reporting a different leader (or none)
+// for a few milliseconds — without leadership actually changing; during that
+// window stableLeader() returns false and the bare LeaderRaft() returns nil.
+// Callers that need a live leader to act on (propose to it, read its id) would
+// nil-deref on that transient. Sampling across consecutive polls steps over the
+// wobble instead of latching onto it. Bounded by multiNodeStartupTimeout, after
+// which it fails the test rather than spinning forever.
+//
+// Use this in place of rs.LeaderRaft() wherever the result is assumed non-nil.
+// Genuine point-in-time assertions ("the leader did NOT step down") must keep
+// using LeaderRaft() directly — they want to observe the wobble, not skip it.
+func (rs Rafts) waitForLeaderRaft(t *testing.T) *Raft {
+	t.Helper()
+	const leaderStableSamples = 3
+	deadline := time.Now().Add(multiNodeStartupTimeout)
+	for {
+		var first *Raft
+		stable := true
+		for s := 0; s < leaderStableSamples; s++ {
+			r := rs.LeaderRaft()
+			if r == nil || (first != nil && r.id != first.id) {
+				stable = false
+				break
+			}
+			first = r
+			time.Sleep(2 * time.Millisecond)
+		}
+		if stable && first != nil {
+			return first
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("waitForLeaderRaft: no stable in-slice leader within %v", multiNodeStartupTimeout)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 type MemoryPosition struct {
 	ProIndex int
 	PosIndex int
