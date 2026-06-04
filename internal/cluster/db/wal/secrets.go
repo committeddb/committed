@@ -3,6 +3,8 @@ package wal
 import (
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 
 	"go.uber.org/zap"
 
@@ -97,4 +99,34 @@ func (s *Storage) ConfigBuildErrorCount() int {
 	s.configErrMu.Lock()
 	defer s.configErrMu.Unlock()
 	return len(s.configErrors)
+}
+
+// ConfigBuildErrors returns a snapshot of the configs currently degraded
+// on this node (persisted but not buildable here — usually a missing
+// ${VAR} secret), sorted by kind then id so the response is stable. Where
+// ConfigBuildErrorCount gives the gauge its "how many", this gives GET
+// /node/status its "which, and why".
+//
+// The error string is taken verbatim from the recorded build error, which
+// names the failing ${VAR} but never an interpolated value — interpolation
+// failed, so no secret value exists to leak.
+func (s *Storage) ConfigBuildErrors() []cluster.ConfigBuildError {
+	s.configErrMu.Lock()
+	defer s.configErrMu.Unlock()
+
+	out := make([]cluster.ConfigBuildError, 0, len(s.configErrors))
+	for key, err := range s.configErrors {
+		// Keys are "kind/id" (recordConfigError); kind is one of
+		// database/ingestable/syncable and never contains a slash, so the
+		// first separator splits them unambiguously.
+		kind, id, _ := strings.Cut(key, "/")
+		out = append(out, cluster.ConfigBuildError{Kind: kind, ID: id, Error: err.Error()})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Kind != out[j].Kind {
+			return out[i].Kind < out[j].Kind
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out
 }

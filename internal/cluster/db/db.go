@@ -573,3 +573,16 @@ func (db *DB) Leader() uint64 {
 func (db *DB) AppliedIndex() uint64 {
 	return db.storage.AppliedIndex()
 }
+
+// ConfigBuildErrors returns the configs this node persisted but could not
+// build into live objects (degraded — a node-local condition, usually a
+// missing ${VAR} secret). Served by GET /node/status. Optional-interface
+// assert on storage — the same fork the committed_config_build_errors
+// gauge uses: real wal.Storage implements configBuildErrorReporter; the
+// in-memory test double does not and reports none.
+func (db *DB) ConfigBuildErrors() []cluster.ConfigBuildError {
+	if r, ok := db.storage.(configBuildErrorReporter); ok {
+		return r.ConfigBuildErrors()
+	}
+	return nil
+}

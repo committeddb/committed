@@ -170,6 +170,12 @@ Every config kind has versioned history and rollback under
 Operational endpoints `/health`, `/ready`, `/version` stay unprefixed and
 are exempt from auth.
 
+`GET /v1/node/status` returns per-node diagnostics for the node that
+answers — notably the configs it persisted but could not build locally
+(degraded, usually a missing `${VAR}` secret on that node), each with the
+failing variable named. It is the queryable, authenticated counterpart of
+the `committed_config_build_errors` gauge.
+
 ### Testing
 
 | Target | Scope |

@@ -65,6 +65,8 @@ tags:
     description: Schema and type definitions
   - name: proposal
     description: Append and read proposals from the commit log
+  - name: node
+    description: Per-node diagnostics for the node that serves the request
 paths:
   /health:
     get:
@@ -856,6 +858,42 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /v1/node/status:
+    get:
+      tags: [node]
+      summary: Per-node diagnostics for the node that served the request
+      description: |
+        Returns diagnostics that are local and ephemeral to the node that
+        answers — not part of the replicated config content — starting with
+        the configs this node persisted but could not build into live
+        objects (degraded, usually a missing `${VAR}` secret on this node).
+
+        This is the queryable, authenticated counterpart of the
+        `committed_config_build_errors` gauge: the gauge says how many
+        configs are degraded so it can alert per node, while this says which
+        ones and why. Each `error` names the failing `${VAR}` and never an
+        interpolated value (interpolation failed, so no secret value exists
+        to leak).
+
+        `node` is load-bearing even though the path scopes to "this node":
+        behind a load balancer you need to know which node answered. The
+        path is the scope; the body is the identity. `leader` and
+        `appliedIndex` mirror the raft details the unauthenticated `/ready`
+        probe deliberately omits. A healthy node returns an empty
+        `degradedConfigs` array.
+      operationId: getNodeStatus
+      responses:
+        '200':
+          description: This node's diagnostics.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeStatusResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -942,6 +980,63 @@ components:
         status:
           type: string
           enum: [ok, "not ready"]
+
+    NodeStatusResponse:
+      type: object
+      required: [node, leader, appliedIndex, degradedConfigs]
+      description: |
+        Per-node diagnostics for the node that served the request. The
+        fields are node-local and ephemeral (not replicated), so two nodes
+        can legitimately return different bodies for the same cluster state.
+      properties:
+        node:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            Raft node ID of the node that answered. Load-bearing behind a
+            load balancer — it tells you which node these diagnostics
+            describe.
+        leader:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Node ID this node believes is the raft leader, or 0 if none is known.
+        appliedIndex:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Highest raft log index this node has fully applied.
+        degradedConfigs:
+          type: array
+          description: |
+            Configs this node persisted but could not build into a live
+            object (usually a missing `${VAR}` secret on this node). Empty
+            on a healthy node.
+          items:
+            $ref: '#/components/schemas/DegradedConfig'
+
+    DegradedConfig:
+      type: object
+      required: [kind, id, error]
+      description: |
+        One config this node persisted but could not build locally. The
+        raw config bytes are valid and replicated cluster-wide; only this
+        node's live-object construction failed (a node-local condition).
+      properties:
+        kind:
+          type: string
+          enum: [database, ingestable, syncable]
+          description: Config kind.
+        id:
+          type: string
+          description: Config ID.
+        error:
+          type: string
+          description: |
+            Why the build failed. Names the failing `${VAR}` when a secret
+            is unset; never contains an interpolated secret value
+            (interpolation failed, so no value exists).
 
     ConfigurationResponse:
       type: object

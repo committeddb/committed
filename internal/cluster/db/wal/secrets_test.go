@@ -93,6 +93,48 @@ func TestConfigApply_MissingSecretDegradesNotFatal(t *testing.T) {
 	require.Equal(t, 1, s.ConfigBuildErrorCount())
 }
 
+// TestConfigBuildErrors_ListsDegradedWithVarName asserts the
+// ConfigBuildErrors snapshot (which powers GET /node/status) returns the
+// degraded config split into kind/id and carries an error that NAMES the
+// missing ${VAR} but never an interpolated secret value — interpolation
+// failed, so no value exists to leak.
+func TestConfigBuildErrors_ListsDegradedWithVarName(t *testing.T) {
+	var p db.Parser = parser.New()
+	fake := &clusterfakes.FakeDatabaseParser{}
+	fake.ParseReturns(&clusterfakes.FakeDatabase{}, nil)
+	p.AddDatabaseParser("sql", fake)
+
+	s := NewStorageWithParser(t, index(3).terms(3, 4, 5), p)
+	defer s.Cleanup()
+
+	const secretValue = "s3cr3t-do-not-leak"
+	t.Setenv("COMMITTED_LEAK_CHECK_SECRET", secretValue)
+	cfg := &cluster.Configuration{
+		ID:       "mydb",
+		MimeType: "application/json",
+		Data:     []byte(`{"database":{"type":"sql","name":"mydb"},"sql":{"connectionString":"user:${COMMITTED_LEAK_CHECK_SECRET}@tcp"}}`),
+	}
+	e, err := cluster.NewUpsertDatabaseEntity(cfg)
+	require.NoError(t, err)
+	saveEntity(t, e, s, 6, 6)
+
+	// The save above interpolated successfully (the var is set), so nothing
+	// is degraded yet. Unset the var and re-validate to degrade it.
+	require.NoError(t, os.Unsetenv("COMMITTED_LEAK_CHECK_SECRET"))
+	s2, err := s.CloseAndReopen()
+	require.NoError(t, err)
+	defer s2.Cleanup()
+
+	got := s2.ConfigBuildErrors()
+	require.Len(t, got, 1)
+	require.Equal(t, "database", got[0].Kind)
+	require.Equal(t, "mydb", got[0].ID)
+	require.Contains(t, got[0].Error, "COMMITTED_LEAK_CHECK_SECRET",
+		"the error must name the missing variable so an operator can fix it")
+	require.NotContains(t, got[0].Error, secretValue,
+		"the error must never carry an interpolated secret value")
+}
+
 // TestValidateConfigSecrets_PassesWhenVarSet asserts the same node
 // reopens cleanly — with no degraded configs — while the templated env
 // var remains set.

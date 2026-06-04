@@ -42,6 +42,16 @@ type FakeCluster struct {
 	closeReturnsOnCall map[int]struct {
 		result1 error
 	}
+	ConfigBuildErrorsStub        func() []cluster.ConfigBuildError
+	configBuildErrorsMutex       sync.RWMutex
+	configBuildErrorsArgsForCall []struct {
+	}
+	configBuildErrorsReturns struct {
+		result1 []cluster.ConfigBuildError
+	}
+	configBuildErrorsReturnsOnCall map[int]struct {
+		result1 []cluster.ConfigBuildError
+	}
 	DatabaseVersionStub        func(string, uint64) (*cluster.Configuration, error)
 	databaseVersionMutex       sync.RWMutex
 	databaseVersionArgsForCall []struct {
@@ -94,6 +104,16 @@ type FakeCluster struct {
 	deadLetterStuckSyncableReturnsOnCall map[int]struct {
 		result1 uint64
 		result2 error
+	}
+	IDStub        func() uint64
+	iDMutex       sync.RWMutex
+	iDArgsForCall []struct {
+	}
+	iDReturns struct {
+		result1 uint64
+	}
+	iDReturnsOnCall map[int]struct {
+		result1 uint64
 	}
 	IngestStub        func(context.Context, string, cluster.Ingestable) error
 	ingestMutex       sync.RWMutex
@@ -581,6 +601,59 @@ func (fake *FakeCluster) CloseReturnsOnCall(i int, result1 error) {
 	}{result1}
 }
 
+func (fake *FakeCluster) ConfigBuildErrors() []cluster.ConfigBuildError {
+	fake.configBuildErrorsMutex.Lock()
+	ret, specificReturn := fake.configBuildErrorsReturnsOnCall[len(fake.configBuildErrorsArgsForCall)]
+	fake.configBuildErrorsArgsForCall = append(fake.configBuildErrorsArgsForCall, struct {
+	}{})
+	stub := fake.ConfigBuildErrorsStub
+	fakeReturns := fake.configBuildErrorsReturns
+	fake.recordInvocation("ConfigBuildErrors", []interface{}{})
+	fake.configBuildErrorsMutex.Unlock()
+	if stub != nil {
+		return stub()
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeCluster) ConfigBuildErrorsCallCount() int {
+	fake.configBuildErrorsMutex.RLock()
+	defer fake.configBuildErrorsMutex.RUnlock()
+	return len(fake.configBuildErrorsArgsForCall)
+}
+
+func (fake *FakeCluster) ConfigBuildErrorsCalls(stub func() []cluster.ConfigBuildError) {
+	fake.configBuildErrorsMutex.Lock()
+	defer fake.configBuildErrorsMutex.Unlock()
+	fake.ConfigBuildErrorsStub = stub
+}
+
+func (fake *FakeCluster) ConfigBuildErrorsReturns(result1 []cluster.ConfigBuildError) {
+	fake.configBuildErrorsMutex.Lock()
+	defer fake.configBuildErrorsMutex.Unlock()
+	fake.ConfigBuildErrorsStub = nil
+	fake.configBuildErrorsReturns = struct {
+		result1 []cluster.ConfigBuildError
+	}{result1}
+}
+
+func (fake *FakeCluster) ConfigBuildErrorsReturnsOnCall(i int, result1 []cluster.ConfigBuildError) {
+	fake.configBuildErrorsMutex.Lock()
+	defer fake.configBuildErrorsMutex.Unlock()
+	fake.ConfigBuildErrorsStub = nil
+	if fake.configBuildErrorsReturnsOnCall == nil {
+		fake.configBuildErrorsReturnsOnCall = make(map[int]struct {
+			result1 []cluster.ConfigBuildError
+		})
+	}
+	fake.configBuildErrorsReturnsOnCall[i] = struct {
+		result1 []cluster.ConfigBuildError
+	}{result1}
+}
+
 func (fake *FakeCluster) DatabaseVersion(arg1 string, arg2 uint64) (*cluster.Configuration, error) {
 	fake.databaseVersionMutex.Lock()
 	ret, specificReturn := fake.databaseVersionReturnsOnCall[len(fake.databaseVersionArgsForCall)]
@@ -829,6 +902,59 @@ func (fake *FakeCluster) DeadLetterStuckSyncableReturnsOnCall(i int, result1 uin
 		result1 uint64
 		result2 error
 	}{result1, result2}
+}
+
+func (fake *FakeCluster) ID() uint64 {
+	fake.iDMutex.Lock()
+	ret, specificReturn := fake.iDReturnsOnCall[len(fake.iDArgsForCall)]
+	fake.iDArgsForCall = append(fake.iDArgsForCall, struct {
+	}{})
+	stub := fake.IDStub
+	fakeReturns := fake.iDReturns
+	fake.recordInvocation("ID", []interface{}{})
+	fake.iDMutex.Unlock()
+	if stub != nil {
+		return stub()
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeCluster) IDCallCount() int {
+	fake.iDMutex.RLock()
+	defer fake.iDMutex.RUnlock()
+	return len(fake.iDArgsForCall)
+}
+
+func (fake *FakeCluster) IDCalls(stub func() uint64) {
+	fake.iDMutex.Lock()
+	defer fake.iDMutex.Unlock()
+	fake.IDStub = stub
+}
+
+func (fake *FakeCluster) IDReturns(result1 uint64) {
+	fake.iDMutex.Lock()
+	defer fake.iDMutex.Unlock()
+	fake.IDStub = nil
+	fake.iDReturns = struct {
+		result1 uint64
+	}{result1}
+}
+
+func (fake *FakeCluster) IDReturnsOnCall(i int, result1 uint64) {
+	fake.iDMutex.Lock()
+	defer fake.iDMutex.Unlock()
+	fake.IDStub = nil
+	if fake.iDReturnsOnCall == nil {
+		fake.iDReturnsOnCall = make(map[int]struct {
+			result1 uint64
+		})
+	}
+	fake.iDReturnsOnCall[i] = struct {
+		result1 uint64
+	}{result1}
 }
 
 func (fake *FakeCluster) Ingest(arg1 context.Context, arg2 string, arg3 cluster.Ingestable) error {
@@ -2339,6 +2465,8 @@ func (fake *FakeCluster) Invocations() map[string][][]interface{} {
 	defer fake.appliedIndexMutex.RUnlock()
 	fake.closeMutex.RLock()
 	defer fake.closeMutex.RUnlock()
+	fake.configBuildErrorsMutex.RLock()
+	defer fake.configBuildErrorsMutex.RUnlock()
 	fake.databaseVersionMutex.RLock()
 	defer fake.databaseVersionMutex.RUnlock()
 	fake.databaseVersionsMutex.RLock()
@@ -2347,6 +2475,8 @@ func (fake *FakeCluster) Invocations() map[string][][]interface{} {
 	defer fake.databasesMutex.RUnlock()
 	fake.deadLetterStuckSyncableMutex.RLock()
 	defer fake.deadLetterStuckSyncableMutex.RUnlock()
+	fake.iDMutex.RLock()
+	defer fake.iDMutex.RUnlock()
 	fake.ingestMutex.RLock()
 	defer fake.ingestMutex.RUnlock()
 	fake.ingestableVersionMutex.RLock()

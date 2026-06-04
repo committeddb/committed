@@ -12,17 +12,21 @@ import (
 	"go.etcd.io/etcd/raft/v3/raftpb"
 	"go.uber.org/zap"
 
+	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/db/httptransport"
 	"github.com/philborlin/committed/internal/cluster/metrics"
 )
 
 // configBuildErrorReporter is an optional Storage extension that reports
-// how many persisted configs could not be built on this node (a missing
-// ${VAR} secret degrades the config rather than crashing the node). The
-// Ready loop type-asserts it to emit the committed_config_build_errors
-// gauge; wal.Storage implements it, the in-memory test double does not.
+// the configs that could not be built on this node (a missing ${VAR}
+// secret degrades the config rather than crashing the node). The Ready
+// loop type-asserts it to emit the committed_config_build_errors gauge
+// from the count; db.DB type-asserts it to serve the full list on GET
+// /node/status. wal.Storage implements it, the in-memory test double does
+// not.
 type configBuildErrorReporter interface {
 	ConfigBuildErrorCount() int
+	ConfigBuildErrors() []cluster.ConfigBuildError
 }
 
 // timeSeriesLagReporter is an optional Storage extension that reports the

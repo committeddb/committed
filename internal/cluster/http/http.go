@@ -125,6 +125,12 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 			r.Post("/type/{id}", h.addConfig("type", h.c.ProposeType))
 			r.Get("/type/{id}/versions", h.getVersions("type", h.c.TypeVersions))
 			r.Get("/type/{id}/versions/{version}", h.getVersion("type", h.c.TypeVersion))
+
+			// Per-node diagnostics. /node/ (not /status) scopes this to the
+			// answering node — degraded-build state is node-local and
+			// ephemeral, unlike the replicated config content — and reserves
+			// /cluster/status for a future fan-out sibling.
+			r.Get("/node/status", h.NodeStatus)
 		})
 	})
 

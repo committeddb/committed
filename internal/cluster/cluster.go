@@ -72,6 +72,9 @@ type Cluster interface {
 	ReplaySyncableDeadLetter(ctx context.Context, id string, index uint64) error
 	TypeVersions(id string) ([]VersionInfo, error)
 	TypeVersion(id string, version uint64) (*Configuration, error)
+	// ID returns the raft node ID of this node. Used by GET /node/status
+	// to report which node answered (load-bearing behind a load balancer).
+	ID() uint64
 	// Leader returns the raft node ID this cluster believes is the current
 	// leader, or 0 if no leader is known. Used by the /ready HTTP probe to
 	// gate readiness on raft having elected a leader.
@@ -80,4 +83,12 @@ type Cluster interface {
 	// applied to local application state. Used by the /ready HTTP probe to
 	// gate readiness on this node having caught up.
 	AppliedIndex() uint64
+	// ConfigBuildErrors returns the configs this node persisted but could
+	// not build into live objects (degraded — a node-local condition,
+	// usually a missing ${VAR} secret). The raw config bytes are valid and
+	// replicated cluster-wide; only this node's local construction failed,
+	// so the answer is per-node and a healthy node returns none. Powers GET
+	// /node/status, the queryable counterpart of the
+	// committed_config_build_errors gauge.
+	ConfigBuildErrors() []ConfigBuildError
 }

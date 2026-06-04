@@ -360,6 +360,21 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 				fake.ResolveTypeReturns(sampleType(), nil)
 			},
 		},
+
+		// --- node ---
+		{
+			name:   "GET /node/status",
+			method: httpgo.MethodGet,
+			path:   "/v1/node/status",
+			setup: func(fake *clusterfakes.FakeCluster) {
+				fake.IDReturns(2)
+				fake.LeaderReturns(1)
+				fake.AppliedIndexReturns(42)
+				fake.ConfigBuildErrorsReturns([]cluster.ConfigBuildError{
+					{Kind: "database", ID: "orders-warehouse", Error: "missing environment variable ${WAREHOUSE_PW}"},
+				})
+			},
+		},
 	}
 
 	for _, tc := range cases {
@@ -514,6 +529,7 @@ func TestOpenAPIContract_SpecCoversAllRoutes(t *testing.T) {
 		"/v1/type/{id}/versions",
 		"/v1/type/{id}/versions/{version}",
 		"/v1/proposal",
+		"/v1/node/status",
 	}
 
 	model, errs := doc.BuildV3Model()
