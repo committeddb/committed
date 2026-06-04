@@ -7,7 +7,7 @@ import (
 
 	"github.com/philborlin/committed/internal/cluster"
 
-	pb "go.etcd.io/etcd/raft/v3/raftpb"
+	pb "go.etcd.io/raft/v3/raftpb"
 )
 
 // TestApplyCommitted_UnmarshalError_FailsAndPreservesAppliedIndex is the

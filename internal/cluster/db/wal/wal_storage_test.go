@@ -15,8 +15,8 @@ import (
 	"github.com/philborlin/committed/internal/cluster/db"
 	"github.com/philborlin/committed/internal/cluster/db/wal"
 
-	"go.etcd.io/etcd/raft/v3"
-	pb "go.etcd.io/etcd/raft/v3/raftpb"
+	"go.etcd.io/raft/v3"
+	pb "go.etcd.io/raft/v3/raftpb"
 )
 
 var (

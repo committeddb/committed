@@ -29,8 +29,8 @@ import (
 	"time"
 
 	tidwallwal "github.com/tidwall/wal"
-	"go.etcd.io/etcd/raft/v3"
-	"go.etcd.io/etcd/raft/v3/raftpb"
+	"go.etcd.io/raft/v3"
+	"go.etcd.io/raft/v3/raftpb"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 

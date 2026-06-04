@@ -3,7 +3,7 @@ package db
 import (
 	"time"
 
-	"go.etcd.io/etcd/raft/v3"
+	"go.etcd.io/raft/v3"
 	"go.uber.org/zap"
 )
 

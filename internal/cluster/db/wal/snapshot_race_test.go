@@ -10,7 +10,7 @@ import (
 
 	"github.com/philborlin/committed/internal/cluster"
 
-	pb "go.etcd.io/etcd/raft/v3/raftpb"
+	pb "go.etcd.io/raft/v3/raftpb"
 )
 
 // TestSnapshot_ConcurrentCreateAndRead races CreateSnapshot (the

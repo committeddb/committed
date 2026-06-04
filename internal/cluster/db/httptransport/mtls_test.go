@@ -10,7 +10,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"go.etcd.io/etcd/client/pkg/v3/transport"
-	"go.etcd.io/etcd/raft/v3"
+	"go.etcd.io/raft/v3"
 	"go.uber.org/zap"
 )
 

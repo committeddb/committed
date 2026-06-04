@@ -8,8 +8,8 @@ import (
 	"time"
 
 	tlstransport "go.etcd.io/etcd/client/pkg/v3/transport"
-	"go.etcd.io/etcd/raft/v3"
-	"go.etcd.io/etcd/raft/v3/raftpb"
+	"go.etcd.io/raft/v3"
+	"go.etcd.io/raft/v3/raftpb"
 	"go.uber.org/zap"
 
 	"github.com/philborlin/committed/internal/cluster"

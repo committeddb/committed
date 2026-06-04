@@ -15,8 +15,8 @@ import (
 	"github.com/nakabonne/tstorage"
 	"github.com/tidwall/wal"
 	bolt "go.etcd.io/bbolt"
-	"go.etcd.io/etcd/raft/v3"
-	pb "go.etcd.io/etcd/raft/v3/raftpb"
+	"go.etcd.io/raft/v3"
+	pb "go.etcd.io/raft/v3/raftpb"
 	"go.uber.org/zap"
 
 	"github.com/philborlin/committed/internal/cluster"

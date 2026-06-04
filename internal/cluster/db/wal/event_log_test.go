@@ -8,7 +8,7 @@ import (
 
 	"github.com/philborlin/committed/internal/cluster"
 
-	pb "go.etcd.io/etcd/raft/v3/raftpb"
+	pb "go.etcd.io/raft/v3/raftpb"
 )
 
 // TestEventLog_AppliedEntriesMirrored verifies that ApplyCommitted mirrors

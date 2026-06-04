@@ -7,8 +7,8 @@ import (
 
 	"github.com/philborlin/committed/internal/cluster"
 
-	"go.etcd.io/etcd/raft/v3"
-	pb "go.etcd.io/etcd/raft/v3/raftpb"
+	"go.etcd.io/raft/v3"
+	pb "go.etcd.io/raft/v3/raftpb"
 )
 
 // TestRaftLogApproxSize_GrowsAndShrinks verifies the storage-level
