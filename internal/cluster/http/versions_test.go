@@ -28,22 +28,22 @@ func TestGetVersions_Success(t *testing.T) {
 	}{
 		{
 			name:    "database",
-			path:    "/database/db-1/versions",
+			path:    "/v1/database/db-1/versions",
 			setupFn: func(fake *clusterfakes.FakeCluster) { fake.DatabaseVersionsReturns(versions, nil) },
 		},
 		{
 			name:    "ingestable",
-			path:    "/ingestable/ingest-1/versions",
+			path:    "/v1/ingestable/ingest-1/versions",
 			setupFn: func(fake *clusterfakes.FakeCluster) { fake.IngestableVersionsReturns(versions, nil) },
 		},
 		{
 			name:    "syncable",
-			path:    "/syncable/sync-1/versions",
+			path:    "/v1/syncable/sync-1/versions",
 			setupFn: func(fake *clusterfakes.FakeCluster) { fake.SyncableVersionsReturns(versions, nil) },
 		},
 		{
 			name:    "type",
-			path:    "/type/type-1/versions",
+			path:    "/v1/type/type-1/versions",
 			setupFn: func(fake *clusterfakes.FakeCluster) { fake.TypeVersionsReturns(versions, nil) },
 		},
 	}
@@ -86,25 +86,25 @@ func TestGetVersions_ResourceNotFound(t *testing.T) {
 	}{
 		{
 			name:         "database",
-			path:         "/database/missing/versions",
+			path:         "/v1/database/missing/versions",
 			setupFn:      func(fake *clusterfakes.FakeCluster) { fake.DatabaseVersionsReturns(nil, cluster.ErrResourceNotFound) },
 			expectedCode: "database_not_found",
 		},
 		{
 			name:         "ingestable",
-			path:         "/ingestable/missing/versions",
+			path:         "/v1/ingestable/missing/versions",
 			setupFn:      func(fake *clusterfakes.FakeCluster) { fake.IngestableVersionsReturns(nil, cluster.ErrResourceNotFound) },
 			expectedCode: "ingestable_not_found",
 		},
 		{
 			name:         "syncable",
-			path:         "/syncable/missing/versions",
+			path:         "/v1/syncable/missing/versions",
 			setupFn:      func(fake *clusterfakes.FakeCluster) { fake.SyncableVersionsReturns(nil, cluster.ErrResourceNotFound) },
 			expectedCode: "syncable_not_found",
 		},
 		{
 			name:         "type",
-			path:         "/type/missing/versions",
+			path:         "/v1/type/missing/versions",
 			setupFn:      func(fake *clusterfakes.FakeCluster) { fake.TypeVersionsReturns(nil, cluster.ErrResourceNotFound) },
 			expectedCode: "type_not_found",
 		},
@@ -131,7 +131,7 @@ func TestGetVersions_InternalError(t *testing.T) {
 	h, fake := setupTest()
 	fake.DatabaseVersionsReturns(nil, fmt.Errorf("disk failure"))
 
-	req := httptest.NewRequest("GET", "http://localhost/database/db-1/versions", nil)
+	req := httptest.NewRequest("GET", "http://localhost/v1/database/db-1/versions", nil)
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
@@ -153,22 +153,22 @@ func TestGetVersion_Success(t *testing.T) {
 	}{
 		{
 			name:    "database",
-			path:    "/database/res-1/versions/1",
+			path:    "/v1/database/res-1/versions/1",
 			setupFn: func(fake *clusterfakes.FakeCluster) { fake.DatabaseVersionReturns(cfg, nil) },
 		},
 		{
 			name:    "ingestable",
-			path:    "/ingestable/res-1/versions/1",
+			path:    "/v1/ingestable/res-1/versions/1",
 			setupFn: func(fake *clusterfakes.FakeCluster) { fake.IngestableVersionReturns(cfg, nil) },
 		},
 		{
 			name:    "syncable",
-			path:    "/syncable/res-1/versions/1",
+			path:    "/v1/syncable/res-1/versions/1",
 			setupFn: func(fake *clusterfakes.FakeCluster) { fake.SyncableVersionReturns(cfg, nil) },
 		},
 		{
 			name:    "type",
-			path:    "/type/res-1/versions/1",
+			path:    "/v1/type/res-1/versions/1",
 			setupFn: func(fake *clusterfakes.FakeCluster) { fake.TypeVersionReturns(cfg, nil) },
 		},
 	}
@@ -203,7 +203,7 @@ func TestGetVersion_VersionNotFound(t *testing.T) {
 	h, fake := setupTest()
 	fake.IngestableVersionReturns(nil, cluster.ErrVersionNotFound)
 
-	req := httptest.NewRequest("GET", "http://localhost/ingestable/ingest-1/versions/99", nil)
+	req := httptest.NewRequest("GET", "http://localhost/v1/ingestable/ingest-1/versions/99", nil)
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
@@ -218,9 +218,9 @@ func TestGetVersion_InvalidVersionParam(t *testing.T) {
 		name string
 		path string
 	}{
-		{name: "non-numeric", path: "/ingestable/ingest-1/versions/abc"},
-		{name: "zero", path: "/ingestable/ingest-1/versions/0"},
-		{name: "negative", path: "/ingestable/ingest-1/versions/-1"},
+		{name: "non-numeric", path: "/v1/ingestable/ingest-1/versions/abc"},
+		{name: "zero", path: "/v1/ingestable/ingest-1/versions/0"},
+		{name: "negative", path: "/v1/ingestable/ingest-1/versions/-1"},
 	}
 
 	for _, tc := range tests {
@@ -252,7 +252,7 @@ func TestRollback_Success(t *testing.T) {
 	}{
 		{
 			name: "database",
-			path: "/database/res-1/rollback?to=1",
+			path: "/v1/database/res-1/rollback?to=1",
 			setupFn: func(fake *clusterfakes.FakeCluster) {
 				fake.DatabaseVersionReturns(cfg, nil)
 			},
@@ -264,7 +264,7 @@ func TestRollback_Success(t *testing.T) {
 		},
 		{
 			name: "ingestable",
-			path: "/ingestable/res-1/rollback?to=1",
+			path: "/v1/ingestable/res-1/rollback?to=1",
 			setupFn: func(fake *clusterfakes.FakeCluster) {
 				fake.IngestableVersionReturns(cfg, nil)
 			},
@@ -276,7 +276,7 @@ func TestRollback_Success(t *testing.T) {
 		},
 		{
 			name: "syncable",
-			path: "/syncable/res-1/rollback?to=1",
+			path: "/v1/syncable/res-1/rollback?to=1",
 			setupFn: func(fake *clusterfakes.FakeCluster) {
 				fake.SyncableVersionReturns(cfg, nil)
 			},
@@ -314,7 +314,7 @@ func TestRollback_VersionNotFound(t *testing.T) {
 	h, fake := setupTest()
 	fake.IngestableVersionReturns(nil, cluster.ErrVersionNotFound)
 
-	req := httptest.NewRequest("POST", "http://localhost/ingestable/ingest-1/rollback?to=99", nil)
+	req := httptest.NewRequest("POST", "http://localhost/v1/ingestable/ingest-1/rollback?to=99", nil)
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
@@ -331,7 +331,7 @@ func TestRollback_ProposeError(t *testing.T) {
 	fake.SyncableVersionReturns(cfg, nil)
 	fake.ProposeSyncableReturns(fmt.Errorf("raft unavailable"))
 
-	req := httptest.NewRequest("POST", "http://localhost/syncable/sync-1/rollback?to=1", nil)
+	req := httptest.NewRequest("POST", "http://localhost/v1/syncable/sync-1/rollback?to=1", nil)
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
@@ -349,7 +349,7 @@ func TestRollback_ProposeConfigError(t *testing.T) {
 	fake.DatabaseVersionReturns(cfg, nil)
 	fake.ProposeDatabaseReturns(configErr)
 
-	req := httptest.NewRequest("POST", "http://localhost/database/db-1/rollback?to=1", nil)
+	req := httptest.NewRequest("POST", "http://localhost/v1/database/db-1/rollback?to=1", nil)
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
@@ -362,7 +362,7 @@ func TestRollback_ProposeConfigError(t *testing.T) {
 func TestRollback_MissingToParam(t *testing.T) {
 	h, _ := setupTest()
 
-	req := httptest.NewRequest("POST", "http://localhost/ingestable/ingest-1/rollback", nil)
+	req := httptest.NewRequest("POST", "http://localhost/v1/ingestable/ingest-1/rollback", nil)
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
@@ -377,8 +377,8 @@ func TestRollback_InvalidToParam(t *testing.T) {
 		name string
 		path string
 	}{
-		{name: "non-numeric", path: "/database/db-1/rollback?to=abc"},
-		{name: "zero", path: "/database/db-1/rollback?to=0"},
+		{name: "non-numeric", path: "/v1/database/db-1/rollback?to=abc"},
+		{name: "zero", path: "/v1/database/db-1/rollback?to=0"},
 	}
 
 	for _, tc := range tests {
@@ -402,7 +402,7 @@ func TestRollback_InvalidToParam(t *testing.T) {
 func TestTypeRollback_NoRoute(t *testing.T) {
 	h, _ := setupTest()
 
-	req := httptest.NewRequest("POST", "http://localhost/type/type-1/rollback?to=1", nil)
+	req := httptest.NewRequest("POST", "http://localhost/v1/type/type-1/rollback?to=1", nil)
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)

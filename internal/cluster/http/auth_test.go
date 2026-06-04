@@ -24,49 +24,49 @@ func TestBearerAuth(t *testing.T) {
 			name:           "no token configured, no header",
 			token:          "",
 			authHeader:     "",
-			path:           "/database",
+			path:           "/v1/database",
 			expectedStatus: 200,
 		},
 		{
 			name:           "no token configured, header sent anyway",
 			token:          "",
 			authHeader:     "Bearer xyz",
-			path:           "/database",
+			path:           "/v1/database",
 			expectedStatus: 200,
 		},
 		{
 			name:           "token configured, no header",
 			token:          "secret",
 			authHeader:     "",
-			path:           "/database",
+			path:           "/v1/database",
 			expectedStatus: 401,
 		},
 		{
 			name:           "token configured, wrong token",
 			token:          "secret",
 			authHeader:     "Bearer wrong",
-			path:           "/database",
+			path:           "/v1/database",
 			expectedStatus: 401,
 		},
 		{
 			name:           "token configured, correct token",
 			token:          "secret",
 			authHeader:     "Bearer secret",
-			path:           "/database",
+			path:           "/v1/database",
 			expectedStatus: 200,
 		},
 		{
 			name:           "token configured, malformed scheme",
 			token:          "secret",
 			authHeader:     "Basic secret",
-			path:           "/database",
+			path:           "/v1/database",
 			expectedStatus: 401,
 		},
 		{
 			name:           "token configured, Bearer with no space",
 			token:          "secret",
 			authHeader:     "Bearersecret",
-			path:           "/database",
+			path:           "/v1/database",
 			expectedStatus: 401,
 		},
 		{
@@ -118,7 +118,7 @@ func TestBearerAuth_ErrorBody(t *testing.T) {
 	fake := &clusterfakes.FakeCluster{}
 	h := http.New(fake, http.WithBearerToken("secret"))
 
-	req := httptest.NewRequest("GET", "http://localhost/database", nil)
+	req := httptest.NewRequest("GET", "http://localhost/v1/database", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 

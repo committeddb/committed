@@ -98,7 +98,7 @@ KillSignal=SIGTERM
 - **In-flight proposal drain.** HTTP requests are drained (they finish
   or are dropped by the deadline), but proposals already sent to raft
   are not individually awaited — `db.Close` cancels the contexts that
-  are waiting on apply, so any blocked `POST /proposal` returns an
+  are waiting on apply, so any blocked `POST /v1/proposal` returns an
   error to the caller instead of hanging until the deadline.
 - **SIGHUP reload.** There is no dynamic config reload; a config
   change today still requires a full restart.

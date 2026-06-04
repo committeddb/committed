@@ -22,7 +22,7 @@ func TestGetSyncableErrors_Success(t *testing.T) {
 		{ID: "sync-1", Index: 12, TimestampUnixNano: 1_700_000_001_000_000_000, Kind: "permanent", Message: "bad row"},
 	}, nil)
 
-	req := httptest.NewRequest("GET", "http://localhost/syncable/sync-1/errors?since=5&limit=10", nil)
+	req := httptest.NewRequest("GET", "http://localhost/v1/syncable/sync-1/errors?since=5&limit=10", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -60,7 +60,7 @@ func TestGetSyncableErrors_Defaults(t *testing.T) {
 	h, fake := setupTest()
 	fake.SyncableDeadLettersReturns(nil, nil)
 
-	req := httptest.NewRequest("GET", "http://localhost/syncable/sync-1/errors", nil)
+	req := httptest.NewRequest("GET", "http://localhost/v1/syncable/sync-1/errors", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -81,10 +81,10 @@ func TestGetSyncableErrors_Defaults(t *testing.T) {
 // rejected with 400 before the cluster is consulted.
 func TestGetSyncableErrors_BadParams(t *testing.T) {
 	for _, path := range []string{
-		"/syncable/sync-1/errors?since=notanumber",
-		"/syncable/sync-1/errors?limit=0",
-		"/syncable/sync-1/errors?limit=-3",
-		"/syncable/sync-1/errors?limit=abc",
+		"/v1/syncable/sync-1/errors?since=notanumber",
+		"/v1/syncable/sync-1/errors?limit=0",
+		"/v1/syncable/sync-1/errors?limit=-3",
+		"/v1/syncable/sync-1/errors?limit=abc",
 	} {
 		t.Run(path, func(t *testing.T) {
 			h, fake := setupTest()
@@ -103,7 +103,7 @@ func TestGetSyncableErrors_InternalError(t *testing.T) {
 	h, fake := setupTest()
 	fake.SyncableDeadLettersReturns(nil, io.ErrUnexpectedEOF)
 
-	req := httptest.NewRequest("GET", "http://localhost/syncable/sync-1/errors", nil)
+	req := httptest.NewRequest("GET", "http://localhost/v1/syncable/sync-1/errors", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -116,7 +116,7 @@ func TestDeadLetterStuckSyncableHandler_Accepted(t *testing.T) {
 	h, fake := setupTest()
 	fake.DeadLetterStuckSyncableReturns(42, nil)
 
-	req := httptest.NewRequest("POST", "http://localhost/syncable/sync-1/deadletter/", nil)
+	req := httptest.NewRequest("POST", "http://localhost/v1/syncable/sync-1/deadletter/", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -142,7 +142,7 @@ func TestDeadLetterStuckSyncableHandler_NotStuck(t *testing.T) {
 	h, fake := setupTest()
 	fake.DeadLetterStuckSyncableReturns(0, cluster.ErrSyncNotStuck)
 
-	req := httptest.NewRequest("POST", "http://localhost/syncable/sync-1/deadletter/", nil)
+	req := httptest.NewRequest("POST", "http://localhost/v1/syncable/sync-1/deadletter/", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -156,7 +156,7 @@ func TestGetSyncableStatus_Stuck(t *testing.T) {
 		ID: "sync-1", Index: 9, SinceUnixNano: 1_700_000_000_000_000_000, Message: "downstream rejected the row",
 	}, true, nil)
 
-	req := httptest.NewRequest("GET", "http://localhost/syncable/sync-1/status", nil)
+	req := httptest.NewRequest("GET", "http://localhost/v1/syncable/sync-1/status", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -182,7 +182,7 @@ func TestGetSyncableStatus_NotStuck(t *testing.T) {
 	h, fake := setupTest()
 	fake.SyncableStuckReturns(cluster.SyncableStuck{}, false, nil)
 
-	req := httptest.NewRequest("GET", "http://localhost/syncable/sync-1/status", nil)
+	req := httptest.NewRequest("GET", "http://localhost/v1/syncable/sync-1/status", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -199,7 +199,7 @@ func TestReplaySyncableDeadLetterHandler_Success(t *testing.T) {
 	h, fake := setupTest()
 	fake.ReplaySyncableDeadLetterReturns(nil)
 
-	req := httptest.NewRequest("POST", "http://localhost/syncable/sync-1/replay/7", nil)
+	req := httptest.NewRequest("POST", "http://localhost/v1/syncable/sync-1/replay/7", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -216,7 +216,7 @@ func TestReplaySyncableDeadLetterHandler_NotDeadLettered(t *testing.T) {
 	h, fake := setupTest()
 	fake.ReplaySyncableDeadLetterReturns(cluster.ErrNotDeadLettered)
 
-	req := httptest.NewRequest("POST", "http://localhost/syncable/sync-1/replay/7", nil)
+	req := httptest.NewRequest("POST", "http://localhost/v1/syncable/sync-1/replay/7", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -229,7 +229,7 @@ func TestReplaySyncableDeadLetterHandler_SyncFailed(t *testing.T) {
 	h, fake := setupTest()
 	fake.ReplaySyncableDeadLetterReturns(fmt.Errorf("%w: ERROR: value too long", cluster.ErrReplaySyncFailed))
 
-	req := httptest.NewRequest("POST", "http://localhost/syncable/sync-1/replay/7", nil)
+	req := httptest.NewRequest("POST", "http://localhost/v1/syncable/sync-1/replay/7", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -245,7 +245,7 @@ func TestReplaySyncableDeadLetterHandler_SyncFailed(t *testing.T) {
 func TestReplaySyncableDeadLetterHandler_BadIndex(t *testing.T) {
 	h, fake := setupTest()
 
-	req := httptest.NewRequest("POST", "http://localhost/syncable/sync-1/replay/notanumber", nil)
+	req := httptest.NewRequest("POST", "http://localhost/v1/syncable/sync-1/replay/notanumber", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 

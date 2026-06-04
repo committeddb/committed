@@ -109,7 +109,8 @@ under [`docs/operations/`](docs/operations/).
 
 Routes are served by Chi from `internal/cluster/http/`. The full
 OpenAPI spec is available at `/openapi.yaml` with a Swagger UI at
-`/docs`. The endpoints below all sit under that router; bearer-token
+`/docs`. Every API endpoint lives under a `/v1` prefix (see
+[`docs/api-compatibility.md`](docs/api-compatibility.md)); bearer-token
 auth is applied when `COMMITTED_API_TOKEN` is set (see
 [`docs/operations/authentication.md`](docs/operations/authentication.md)).
 
@@ -121,7 +122,7 @@ Define a type:
 ```sh
 curl -X POST -H 'Content-Type: text/toml' \
   --data-binary @demo/type.toml \
-  http://localhost:8080/type/simple
+  http://localhost:8080/v1/type/simple
 ```
 
 Configure a database to write into (sink):
@@ -129,7 +130,7 @@ Configure a database to write into (sink):
 ```sh
 curl -X POST -H 'Content-Type: text/toml' \
   --data-binary @demo/database.toml \
-  http://localhost:8080/database/foo
+  http://localhost:8080/v1/database/foo
 ```
 
 Configure a syncable that projects a type out to that database:
@@ -137,7 +138,7 @@ Configure a syncable that projects a type out to that database:
 ```sh
 curl -X POST -H 'Content-Type: text/toml' \
   --data-binary @demo/syncable-one.toml \
-  http://localhost:8080/syncable/one
+  http://localhost:8080/v1/syncable/one
 ```
 
 Configure an ingestable that pulls from an external source into the
@@ -147,7 +148,7 @@ for a Postgres logical-replication config):
 ```sh
 curl -X POST -H 'Content-Type: text/toml' \
   --data-binary @demo/ingestable.toml \
-  http://localhost:8080/ingestable/foo
+  http://localhost:8080/v1/ingestable/foo
 ```
 
 Append a proposal directly (without going through an ingestable):
@@ -155,18 +156,19 @@ Append a proposal directly (without going through an ingestable):
 ```sh
 curl -X POST -H 'Content-Type: application/json' \
   --data-binary @demo/proposal.json \
-  http://localhost:8080/proposal
+  http://localhost:8080/v1/proposal
 ```
 
 Read recent proposals for a type:
 
 ```sh
-curl 'http://localhost:8080/proposal?type=simple&number=100'
+curl 'http://localhost:8080/v1/proposal?type=simple&number=100'
 ```
 
 Every config kind has versioned history and rollback under
-`GET /{kind}/{id}/versions[/{version}]` and `POST /{kind}/{id}/rollback`.
-Health endpoints `/health`, `/ready`, `/version` are exempt from auth.
+`GET /v1/{kind}/{id}/versions[/{version}]` and `POST /v1/{kind}/{id}/rollback`.
+Operational endpoints `/health`, `/ready`, `/version` stay unprefixed and
+are exempt from auth.
 
 ### Testing
 
@@ -212,4 +214,4 @@ for the rationale.
 - [`docs/operations/shutdown.md`](docs/operations/shutdown.md) — `SIGTERM` handling and the graceful-shutdown deadline
 - [`docs/operations/http-limits.md`](docs/operations/http-limits.md) — proposal-size cap and HTTP server timeouts
 - [`docs/operations/rebuild.md`](docs/operations/rebuild.md) — rebuilding a node after a `storage invariant violation` fatal. Short version: stop the node, rsync its data directory from a healthy peer, restart. Apply determinism keeps subsequent rebuilds O(diff).
-- [`docs/operations/stuck-syncables.md`](docs/operations/stuck-syncables.md) — spotting a syncable wedged on a transient error (the `committed_sync_stuck` gauge, `GET /syncable/{id}/status`), skipping the bad proposal (`POST /syncable/{id}/deadletter/`), and re-driving it after a fix (`POST /syncable/{id}/replay/{index}`), plus dead letters and `GET /syncable/{id}/errors`.
+- [`docs/operations/stuck-syncables.md`](docs/operations/stuck-syncables.md) — spotting a syncable wedged on a transient error (the `committed_sync_stuck` gauge, `GET /v1/syncable/{id}/status`), skipping the bad proposal (`POST /v1/syncable/{id}/deadletter/`), and re-driving it after a fix (`POST /v1/syncable/{id}/replay/{index}`), plus dead letters and `GET /v1/syncable/{id}/errors`.

@@ -64,14 +64,18 @@ token anywhere you can recover it from.
 
 ### Routes covered
 
-The middleware is wired on every HTTP route except:
+The middleware is wired on every HTTP route except the operational
+endpoints, which are always anonymous:
 
-- `/health` — liveness probe, always anonymous
-- `/ready` — readiness probe, always anonymous
+- `/health` — liveness probe
+- `/ready` — readiness probe
+- `/version` — build information
+- `/openapi.yaml` — the OpenAPI spec
+- `/docs` — Swagger UI
 
-Every other route (including `/metrics` if present, every `/database`,
-`/proposal`, `/syncable`, `/ingestable`, `/type`, `/openapi.json`
-endpoint) requires the bearer token. Responses without it return
+Every other route — the entire `/v1` API surface (`/v1/database`,
+`/v1/proposal`, `/v1/syncable`, `/v1/ingestable`, `/v1/type`, and their
+sub-resources) — requires the bearer token. Responses without it return
 `401 Unauthorized` with a structured error body.
 
 ### Distributing the token

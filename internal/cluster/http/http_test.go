@@ -222,7 +222,7 @@ name = "%s"
 dialect="%s"
 connectionString="%s"`, name, dialect, name)
 
-	req := httptest.NewRequest("POST", fmt.Sprintf("http://localhost/database/%s", id), strings.NewReader(body))
+	req := httptest.NewRequest("POST", fmt.Sprintf("http://localhost/v1/database/%s", id), strings.NewReader(body))
 	req.Header["Content-Type"] = []string{"text/toml"}
 
 	w := httptest.NewRecorder()
@@ -257,7 +257,7 @@ column = "pk"
 jsonName = "one"
 column = "one"`, name, dialect, name)
 
-	req := httptest.NewRequest("POST", fmt.Sprintf("http://localhost/ingestable/%s", id), strings.NewReader(body))
+	req := httptest.NewRequest("POST", fmt.Sprintf("http://localhost/v1/ingestable/%s", id), strings.NewReader(body))
 	req.Header["Content-Type"] = []string{"text/toml"}
 
 	w := httptest.NewRecorder()
@@ -300,7 +300,7 @@ jsonPath = "$.one"
 column = "one"
 type = "VARCHAR(128)"`, name, topicId, databaseID, tableName)
 
-	req := httptest.NewRequest("POST", fmt.Sprintf("http://localhost/syncable/%s", id), strings.NewReader(body))
+	req := httptest.NewRequest("POST", fmt.Sprintf("http://localhost/v1/syncable/%s", id), strings.NewReader(body))
 	req.Header["Content-Type"] = []string{"text/toml"}
 
 	w := httptest.NewRecorder()
@@ -319,7 +319,7 @@ func addType(t *testing.T, h *http.HTTP, name string) string {
 	id := "test-type-id"
 	body := fmt.Sprintf("[type]\nname = \"%s\"", name)
 
-	req := httptest.NewRequest("POST", fmt.Sprintf("http://localhost/type/%s", id), strings.NewReader(body))
+	req := httptest.NewRequest("POST", fmt.Sprintf("http://localhost/v1/type/%s", id), strings.NewReader(body))
 	req.Header["Content-Type"] = []string{"text/toml"}
 
 	w := httptest.NewRecorder()
@@ -337,7 +337,7 @@ func addType(t *testing.T, h *http.HTTP, name string) string {
 func propose(t *testing.T, h *http.HTTP, proposal *http.AddProposalRequest) {
 	bs, err := json.Marshal(proposal)
 	require.Nil(t, err)
-	req := httptest.NewRequest("POST", "http://localhost/proposal", bytes.NewReader(bs))
+	req := httptest.NewRequest("POST", "http://localhost/v1/proposal", bytes.NewReader(bs))
 	req.Header["Content-Type"] = []string{"application/json"}
 
 	w := httptest.NewRecorder()

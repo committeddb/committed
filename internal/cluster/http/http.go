@@ -85,41 +85,47 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 			r.Use(h.bearerAuth)
 		}
 
-		// The four config resources share a generic handler set
-		// (see config_handlers.go); the route table stays explicit so
+		// Every API endpoint lives under /v1 so a future breaking change
+		// can bump the prefix instead of breaking existing clients. See
+		// docs/api-compatibility.md for the versioning contract.
+		//
+		// The four config resources share a generic handler set (see
+		// config_handlers.go); the route table stays explicit so
 		// per-resource deviations — type has no rollback and a bespoke
 		// GET /type/{id}, syncable adds errors/status/deadletter/replay —
 		// remain visible rather than hidden inside a registrar.
-		r.Get("/database", h.listConfig("database", h.c.Databases))
-		r.Post("/database/{id}", h.addConfig("database", h.c.ProposeDatabase))
-		r.Get("/database/{id}/versions", h.getVersions("database", h.c.DatabaseVersions))
-		r.Get("/database/{id}/versions/{version}", h.getVersion("database", h.c.DatabaseVersion))
-		r.Post("/database/{id}/rollback", h.rollback("database", h.c.DatabaseVersion, h.c.ProposeDatabase))
+		r.Route("/v1", func(r chi.Router) {
+			r.Get("/database", h.listConfig("database", h.c.Databases))
+			r.Post("/database/{id}", h.addConfig("database", h.c.ProposeDatabase))
+			r.Get("/database/{id}/versions", h.getVersions("database", h.c.DatabaseVersions))
+			r.Get("/database/{id}/versions/{version}", h.getVersion("database", h.c.DatabaseVersion))
+			r.Post("/database/{id}/rollback", h.rollback("database", h.c.DatabaseVersion, h.c.ProposeDatabase))
 
-		r.Get("/ingestable", h.listConfig("ingestable", h.c.Ingestables))
-		r.Post("/ingestable/{id}", h.addConfig("ingestable", h.c.ProposeIngestable))
-		r.Get("/ingestable/{id}/versions", h.getVersions("ingestable", h.c.IngestableVersions))
-		r.Get("/ingestable/{id}/versions/{version}", h.getVersion("ingestable", h.c.IngestableVersion))
-		r.Post("/ingestable/{id}/rollback", h.rollback("ingestable", h.c.IngestableVersion, h.c.ProposeIngestable))
+			r.Get("/ingestable", h.listConfig("ingestable", h.c.Ingestables))
+			r.Post("/ingestable/{id}", h.addConfig("ingestable", h.c.ProposeIngestable))
+			r.Get("/ingestable/{id}/versions", h.getVersions("ingestable", h.c.IngestableVersions))
+			r.Get("/ingestable/{id}/versions/{version}", h.getVersion("ingestable", h.c.IngestableVersion))
+			r.Post("/ingestable/{id}/rollback", h.rollback("ingestable", h.c.IngestableVersion, h.c.ProposeIngestable))
 
-		r.Get("/proposal", h.GetProposals)
-		r.Post("/proposal", h.AddProposal)
+			r.Get("/proposal", h.GetProposals)
+			r.Post("/proposal", h.AddProposal)
 
-		r.Get("/syncable", h.listConfig("syncable", h.c.Syncables))
-		r.Post("/syncable/{id}", h.addConfig("syncable", h.c.ProposeSyncable))
-		r.Get("/syncable/{id}/versions", h.getVersions("syncable", h.c.SyncableVersions))
-		r.Get("/syncable/{id}/versions/{version}", h.getVersion("syncable", h.c.SyncableVersion))
-		r.Get("/syncable/{id}/errors", h.GetSyncableErrors)
-		r.Get("/syncable/{id}/status", h.GetSyncableStatus)
-		r.Post("/syncable/{id}/deadletter/", h.DeadLetterStuckSyncable)
-		r.Post("/syncable/{id}/replay/{index}", h.ReplaySyncableDeadLetter)
-		r.Post("/syncable/{id}/rollback", h.rollback("syncable", h.c.SyncableVersion, h.c.ProposeSyncable))
+			r.Get("/syncable", h.listConfig("syncable", h.c.Syncables))
+			r.Post("/syncable/{id}", h.addConfig("syncable", h.c.ProposeSyncable))
+			r.Get("/syncable/{id}/versions", h.getVersions("syncable", h.c.SyncableVersions))
+			r.Get("/syncable/{id}/versions/{version}", h.getVersion("syncable", h.c.SyncableVersion))
+			r.Get("/syncable/{id}/errors", h.GetSyncableErrors)
+			r.Get("/syncable/{id}/status", h.GetSyncableStatus)
+			r.Post("/syncable/{id}/deadletter/", h.DeadLetterStuckSyncable)
+			r.Post("/syncable/{id}/replay/{index}", h.ReplaySyncableDeadLetter)
+			r.Post("/syncable/{id}/rollback", h.rollback("syncable", h.c.SyncableVersion, h.c.ProposeSyncable))
 
-		r.Get("/type", h.listConfig("type", h.c.Types))
-		r.Get("/type/{id}", h.GetType)
-		r.Post("/type/{id}", h.addConfig("type", h.c.ProposeType))
-		r.Get("/type/{id}/versions", h.getVersions("type", h.c.TypeVersions))
-		r.Get("/type/{id}/versions/{version}", h.getVersion("type", h.c.TypeVersion))
+			r.Get("/type", h.listConfig("type", h.c.Types))
+			r.Get("/type/{id}", h.GetType)
+			r.Post("/type/{id}", h.addConfig("type", h.c.ProposeType))
+			r.Get("/type/{id}/versions", h.getVersions("type", h.c.TypeVersions))
+			r.Get("/type/{id}/versions/{version}", h.getVersion("type", h.c.TypeVersion))
+		})
 	})
 
 	return h

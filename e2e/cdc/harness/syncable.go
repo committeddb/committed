@@ -32,7 +32,7 @@ func postSinkDatabase(t *testing.T, connStr string) {
 	fmt.Fprintf(&b, "[database]\nname = %q\ntype = \"sql\"\n\n", sinkDatabaseID)
 	fmt.Fprintf(&b, "[sql]\ndialect = \"postgres\"\n")
 	fmt.Fprintf(&b, "connectionString = %q\n", connStr)
-	postConfig(t, "/database/"+sinkDatabaseID, b.String())
+	postConfig(t, "/v1/database/"+sinkDatabaseID, b.String())
 }
 
 // postSyncable registers a syncable that projects one topic into its
@@ -52,7 +52,7 @@ func postSyncable(t *testing.T, table string) {
 		fmt.Fprintf(&b, "[[sql.mappings]]\njsonPath = \"$.%s\"\ncolumn = %q\ntype = \"TEXT\"\n\n",
 			col, col)
 	}
-	postConfig(t, "/syncable/"+table, b.String())
+	postConfig(t, "/v1/syncable/"+table, b.String())
 }
 
 // SinkValue returns the value of column `col` for the row whose primary key

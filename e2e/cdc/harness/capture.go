@@ -46,13 +46,13 @@ type CapturedProposal struct {
 func fetchProposals(t *testing.T, topic string) []CapturedProposal {
 	t.Helper()
 	const window = 10000
-	u := committedURL("/proposal") + "?" + url.Values{
+	u := committedURL("/v1/proposal") + "?" + url.Values{
 		"type":   {topic},
 		"number": {fmt.Sprintf("%d", window)},
 	}.Encode()
 
 	resp, err := http.Get(u) //nolint:gosec // G107: u is built from a fixed in-process URL plus a hardcoded topic; not from untrusted input
-	require.NoError(t, err, "GET /proposal")
+	require.NoError(t, err, "GET /v1/proposal")
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)

@@ -135,7 +135,7 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 		{
 			name:   "GET /database",
 			method: httpgo.MethodGet,
-			path:   "/database",
+			path:   "/v1/database",
 			setup: func(fake *clusterfakes.FakeCluster) {
 				fake.DatabasesReturns([]*cluster.Configuration{sampleConfig("db-1")}, nil)
 			},
@@ -143,14 +143,14 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 		{
 			name:        "POST /database/{id}",
 			method:      httpgo.MethodPost,
-			path:        "/database/db-1",
+			path:        "/v1/database/db-1",
 			body:        "[config]\nvalue = \"x\"",
 			contentType: "text/toml",
 		},
 		{
 			name:   "GET /database/{id}/versions",
 			method: httpgo.MethodGet,
-			path:   "/database/db-1/versions",
+			path:   "/v1/database/db-1/versions",
 			setup: func(fake *clusterfakes.FakeCluster) {
 				fake.DatabaseVersionsReturns(sampleVersions(), nil)
 			},
@@ -158,7 +158,7 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 		{
 			name:   "GET /database/{id}/versions/{version}",
 			method: httpgo.MethodGet,
-			path:   "/database/db-1/versions/1",
+			path:   "/v1/database/db-1/versions/1",
 			setup: func(fake *clusterfakes.FakeCluster) {
 				fake.DatabaseVersionReturns(sampleConfig("db-1"), nil)
 			},
@@ -166,7 +166,7 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 		{
 			name:   "POST /database/{id}/rollback",
 			method: httpgo.MethodPost,
-			path:   "/database/db-1/rollback?to=1",
+			path:   "/v1/database/db-1/rollback?to=1",
 			setup: func(fake *clusterfakes.FakeCluster) {
 				fake.DatabaseVersionReturns(sampleConfig("db-1"), nil)
 			},
@@ -176,7 +176,7 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 		{
 			name:   "GET /ingestable",
 			method: httpgo.MethodGet,
-			path:   "/ingestable",
+			path:   "/v1/ingestable",
 			setup: func(fake *clusterfakes.FakeCluster) {
 				fake.IngestablesReturns([]*cluster.Configuration{sampleConfig("ing-1")}, nil)
 			},
@@ -184,14 +184,14 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 		{
 			name:        "POST /ingestable/{id}",
 			method:      httpgo.MethodPost,
-			path:        "/ingestable/ing-1",
+			path:        "/v1/ingestable/ing-1",
 			body:        "[config]\nvalue = \"x\"",
 			contentType: "text/toml",
 		},
 		{
 			name:   "GET /ingestable/{id}/versions",
 			method: httpgo.MethodGet,
-			path:   "/ingestable/ing-1/versions",
+			path:   "/v1/ingestable/ing-1/versions",
 			setup: func(fake *clusterfakes.FakeCluster) {
 				fake.IngestableVersionsReturns(sampleVersions(), nil)
 			},
@@ -199,7 +199,7 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 		{
 			name:   "GET /ingestable/{id}/versions/{version}",
 			method: httpgo.MethodGet,
-			path:   "/ingestable/ing-1/versions/1",
+			path:   "/v1/ingestable/ing-1/versions/1",
 			setup: func(fake *clusterfakes.FakeCluster) {
 				fake.IngestableVersionReturns(sampleConfig("ing-1"), nil)
 			},
@@ -207,7 +207,7 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 		{
 			name:   "POST /ingestable/{id}/rollback",
 			method: httpgo.MethodPost,
-			path:   "/ingestable/ing-1/rollback?to=1",
+			path:   "/v1/ingestable/ing-1/rollback?to=1",
 			setup: func(fake *clusterfakes.FakeCluster) {
 				fake.IngestableVersionReturns(sampleConfig("ing-1"), nil)
 			},
@@ -217,7 +217,7 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 		{
 			name:   "GET /syncable",
 			method: httpgo.MethodGet,
-			path:   "/syncable",
+			path:   "/v1/syncable",
 			setup: func(fake *clusterfakes.FakeCluster) {
 				fake.SyncablesReturns([]*cluster.Configuration{sampleConfig("sync-1")}, nil)
 			},
@@ -225,14 +225,14 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 		{
 			name:        "POST /syncable/{id}",
 			method:      httpgo.MethodPost,
-			path:        "/syncable/sync-1",
+			path:        "/v1/syncable/sync-1",
 			body:        "[config]\nvalue = \"x\"",
 			contentType: "text/toml",
 		},
 		{
 			name:   "GET /syncable/{id}/versions",
 			method: httpgo.MethodGet,
-			path:   "/syncable/sync-1/versions",
+			path:   "/v1/syncable/sync-1/versions",
 			setup: func(fake *clusterfakes.FakeCluster) {
 				fake.SyncableVersionsReturns(sampleVersions(), nil)
 			},
@@ -240,7 +240,7 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 		{
 			name:   "GET /syncable/{id}/versions/{version}",
 			method: httpgo.MethodGet,
-			path:   "/syncable/sync-1/versions/1",
+			path:   "/v1/syncable/sync-1/versions/1",
 			setup: func(fake *clusterfakes.FakeCluster) {
 				fake.SyncableVersionReturns(sampleConfig("sync-1"), nil)
 			},
@@ -248,7 +248,7 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 		{
 			name:   "GET /syncable/{id}/errors",
 			method: httpgo.MethodGet,
-			path:   "/syncable/sync-1/errors?since=5&limit=10",
+			path:   "/v1/syncable/sync-1/errors?since=5&limit=10",
 			setup: func(fake *clusterfakes.FakeCluster) {
 				fake.SyncableDeadLettersReturns([]cluster.SyncableDeadLetter{
 					{ID: "sync-1", Index: 7, TimestampUnixNano: 1_700_000_000_000_000_000, Kind: "permanent", Message: "constraint violation"},
@@ -258,7 +258,7 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 		{
 			name:   "POST /syncable/{id}/rollback",
 			method: httpgo.MethodPost,
-			path:   "/syncable/sync-1/rollback?to=1",
+			path:   "/v1/syncable/sync-1/rollback?to=1",
 			setup: func(fake *clusterfakes.FakeCluster) {
 				fake.SyncableVersionReturns(sampleConfig("sync-1"), nil)
 			},
@@ -266,7 +266,7 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 		{
 			name:   "POST /syncable/{id}/deadletter/",
 			method: httpgo.MethodPost,
-			path:   "/syncable/sync-1/deadletter/",
+			path:   "/v1/syncable/sync-1/deadletter/",
 			setup: func(fake *clusterfakes.FakeCluster) {
 				fake.DeadLetterStuckSyncableReturns(7, nil)
 			},
@@ -274,7 +274,7 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 		{
 			name:   "GET /syncable/{id}/status",
 			method: httpgo.MethodGet,
-			path:   "/syncable/sync-1/status",
+			path:   "/v1/syncable/sync-1/status",
 			setup: func(fake *clusterfakes.FakeCluster) {
 				fake.SyncableStuckReturns(cluster.SyncableStuck{
 					ID: "sync-1", Index: 7, SinceUnixNano: 1_700_000_000_000_000_000, Message: "boom",
@@ -284,7 +284,7 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 		{
 			name:   "POST /syncable/{id}/replay/{index}",
 			method: httpgo.MethodPost,
-			path:   "/syncable/sync-1/replay/7",
+			path:   "/v1/syncable/sync-1/replay/7",
 			setup: func(fake *clusterfakes.FakeCluster) {
 				fake.ReplaySyncableDeadLetterReturns(nil)
 			},
@@ -294,7 +294,7 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 		{
 			name:   "GET /type",
 			method: httpgo.MethodGet,
-			path:   "/type",
+			path:   "/v1/type",
 			setup: func(fake *clusterfakes.FakeCluster) {
 				fake.TypesReturns([]*cluster.Configuration{sampleConfig("t-1")}, nil)
 			},
@@ -304,7 +304,7 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 			method: httpgo.MethodGet,
 			// The handler parses start/end with a format that rejects
 			// fractional seconds, so keep the example at whole seconds.
-			path: "/type/t-1?start=2024-01-01T00:00:00Z&end=2024-01-02T00:00:00Z",
+			path: "/v1/type/t-1?start=2024-01-01T00:00:00Z&end=2024-01-02T00:00:00Z",
 			setup: func(fake *clusterfakes.FakeCluster) {
 				fake.TypeGraphReturns([]cluster.TimePoint{
 					{End: time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC), Value: 3},
@@ -314,14 +314,14 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 		{
 			name:        "POST /type/{id}",
 			method:      httpgo.MethodPost,
-			path:        "/type/t-1",
+			path:        "/v1/type/t-1",
 			body:        "[config]\nvalue = \"x\"",
 			contentType: "text/toml",
 		},
 		{
 			name:   "GET /type/{id}/versions",
 			method: httpgo.MethodGet,
-			path:   "/type/t-1/versions",
+			path:   "/v1/type/t-1/versions",
 			setup: func(fake *clusterfakes.FakeCluster) {
 				fake.TypeVersionsReturns(sampleVersions(), nil)
 			},
@@ -329,7 +329,7 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 		{
 			name:   "GET /type/{id}/versions/{version}",
 			method: httpgo.MethodGet,
-			path:   "/type/t-1/versions/1",
+			path:   "/v1/type/t-1/versions/1",
 			setup: func(fake *clusterfakes.FakeCluster) {
 				fake.TypeVersionReturns(sampleConfig("t-1"), nil)
 			},
@@ -339,7 +339,7 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 		{
 			name:   "GET /proposal",
 			method: httpgo.MethodGet,
-			path:   "/proposal",
+			path:   "/v1/proposal",
 			setup: func(fake *clusterfakes.FakeCluster) {
 				fake.ProposalsReturns([]*cluster.Proposal{
 					{Entities: []*cluster.Entity{{
@@ -353,7 +353,7 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 		{
 			name:        "POST /proposal",
 			method:      httpgo.MethodPost,
-			path:        "/proposal",
+			path:        "/v1/proposal",
 			contentType: "application/json",
 			body:        `{"entities":[{"typeId":"t-1","key":"k","data":{"hello":"world"}}]}`,
 			setup: func(fake *clusterfakes.FakeCluster) {
@@ -409,20 +409,20 @@ func TestOpenAPIContract_ErrorResponses(t *testing.T) {
 		{
 			name:       "POST /proposal with invalid JSON → 400",
 			method:     httpgo.MethodPost,
-			path:       "/proposal",
+			path:       "/v1/proposal",
 			body:       "not-json",
 			wantStatus: 400,
 		},
 		{
 			name:       "GET /database/{id}/versions/{version} with bad version → 400",
 			method:     httpgo.MethodGet,
-			path:       "/database/db-1/versions/abc",
+			path:       "/v1/database/db-1/versions/abc",
 			wantStatus: 400,
 		},
 		{
 			name:   "GET /database/{id}/versions with resource missing → 404",
 			method: httpgo.MethodGet,
-			path:   "/database/missing/versions",
+			path:   "/v1/database/missing/versions",
 			setup: func(f *clusterfakes.FakeCluster) {
 				f.DatabaseVersionsReturns(nil, cluster.ErrResourceNotFound)
 			},
@@ -465,7 +465,7 @@ func TestOpenAPIContract_UnauthorizedShape(t *testing.T) {
 	fake := &clusterfakes.FakeCluster{}
 	h := httppkg.New(fake, httppkg.WithBearerToken("secret"))
 
-	req := httptest.NewRequest(httpgo.MethodGet, "http://localhost/database", nil)
+	req := httptest.NewRequest(httpgo.MethodGet, "http://localhost/v1/database", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 
@@ -490,30 +490,30 @@ func TestOpenAPIContract_SpecCoversAllRoutes(t *testing.T) {
 		"/ready",
 		"/openapi.yaml",
 		"/docs",
-		"/database",
-		"/database/{id}",
-		"/database/{id}/versions",
-		"/database/{id}/versions/{version}",
-		"/database/{id}/rollback",
-		"/ingestable",
-		"/ingestable/{id}",
-		"/ingestable/{id}/versions",
-		"/ingestable/{id}/versions/{version}",
-		"/ingestable/{id}/rollback",
-		"/syncable",
-		"/syncable/{id}",
-		"/syncable/{id}/versions",
-		"/syncable/{id}/versions/{version}",
-		"/syncable/{id}/errors",
-		"/syncable/{id}/deadletter/",
-		"/syncable/{id}/status",
-		"/syncable/{id}/replay/{index}",
-		"/syncable/{id}/rollback",
-		"/type",
-		"/type/{id}",
-		"/type/{id}/versions",
-		"/type/{id}/versions/{version}",
-		"/proposal",
+		"/v1/database",
+		"/v1/database/{id}",
+		"/v1/database/{id}/versions",
+		"/v1/database/{id}/versions/{version}",
+		"/v1/database/{id}/rollback",
+		"/v1/ingestable",
+		"/v1/ingestable/{id}",
+		"/v1/ingestable/{id}/versions",
+		"/v1/ingestable/{id}/versions/{version}",
+		"/v1/ingestable/{id}/rollback",
+		"/v1/syncable",
+		"/v1/syncable/{id}",
+		"/v1/syncable/{id}/versions",
+		"/v1/syncable/{id}/versions/{version}",
+		"/v1/syncable/{id}/errors",
+		"/v1/syncable/{id}/deadletter/",
+		"/v1/syncable/{id}/status",
+		"/v1/syncable/{id}/replay/{index}",
+		"/v1/syncable/{id}/rollback",
+		"/v1/type",
+		"/v1/type/{id}",
+		"/v1/type/{id}/versions",
+		"/v1/type/{id}/versions/{version}",
+		"/v1/proposal",
 	}
 
 	model, errs := doc.BuildV3Model()

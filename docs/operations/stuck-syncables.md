@@ -36,11 +36,11 @@ the one running the worker, and it survives a leader change.
   (~30 seconds), `0` otherwise. Prometheus scrapes each node directly, so an
   alert like `max by (syncable_id) (committed_sync_stuck) == 1 for 5m`
   fires regardless of which node holds the worker.
-- **Status endpoint.** `GET /syncable/{id}/status` reports it on demand:
+- **Status endpoint.** `GET /v1/syncable/{id}/status` reports it on demand:
 
   ```bash
   curl -H "Authorization: Bearer $TOKEN" \
-    http://node:8080/syncable/orders/status
+    http://node:8080/v1/syncable/orders/status
   # {"stuck":true,"index":4123,"since":"2026-06-02T14:00:00Z",
   #  "message":"ERROR: value too long for type character varying(20)"}
   ```
@@ -61,7 +61,7 @@ is healthy, but *this* row won't go in — skip it:
 
 ```bash
 curl -X POST -H "Authorization: Bearer $TOKEN" \
-  http://node:8080/syncable/orders/deadletter/
+  http://node:8080/v1/syncable/orders/deadletter/
 # 202 {"index":4123}   — the worker will skip raft index 4123 and advance
 # 409                  — the syncable isn't currently blocked
 ```
@@ -91,7 +91,7 @@ landed:
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" \
-  http://node:8080/syncable/orders/errors
+  http://node:8080/v1/syncable/orders/errors
 # [{"index":4123,"timestamp":"2026-06-02T14:05:00Z","kind":"manual",
 #   "message":"ERROR: value too long for type character varying(20)"}]
 ```
@@ -113,7 +113,7 @@ over — re-drive a dead-lettered proposal and clear its record:
 
 ```bash
 curl -X POST -H "Authorization: Bearer $TOKEN" \
-  http://node:8080/syncable/orders/replay/4123
+  http://node:8080/v1/syncable/orders/replay/4123
 # 200                — re-synced; the dead-letter record was cleared
 # 404                — raft index 4123 isn't a dead letter for this syncable
 # 502 {... details}  — the syncable rejected it again; record left in place,

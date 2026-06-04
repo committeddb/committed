@@ -625,7 +625,7 @@ at stake, not by which subsystem they live in:
 | Ingest data (a row from the source) | duplicate in the log, or silent data loss | **Freeze** the worker | Supervisor restarts the ingestable from the last *durable* position; the dialect replays from there; effectively-once dedup (`SourceSeq` highwater) drops any re-emit that already committed |
 | Ingest position checkpoint | resume point diverges → loss or re-emit storm | **Freeze** the worker | The unacknowledged position is discarded; restart re-reads `storage.Position`, still the last durable checkpoint |
 | Sync index bump (`proposeSyncableIndex`) | durable resume point advances past unconfirmed work → missed re-sync | **Don't advance**; keep the proposal and re-sync it next iteration | Bounded to at most one duplicate; safe because `Sync` is contractually idempotent (SQL UPSERT) |
-| Sync dead-letter record (`proposeSyncableDeadLetter`) | a row missing from `GET /syncable/{id}/errors` | **Log and continue** | Best-effort; the error counter and ERROR log already fired, and the skip stands regardless. Often self-healed on a later replay, but losing it costs nothing |
+| Sync dead-letter record (`proposeSyncableDeadLetter`) | a row missing from `GET /v1/syncable/{id}/errors` | **Log and continue** | Best-effort; the error counter and ERROR log already fired, and the skip stands regardless. Often self-healed on a later replay, but losing it costs nothing |
 
 The reactions form a ladder of severity, deepest cost first:
 

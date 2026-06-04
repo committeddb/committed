@@ -40,7 +40,7 @@ func TestPropose_ReturnsTooLarge_MapsTo413(t *testing.T) {
 		{
 			name:   "proposal",
 			method: "POST",
-			path:   "/proposal",
+			path:   "/v1/proposal",
 			ct:     "application/json",
 			body:   `{"entities":[{"typeId":"t","key":"k","data":{}}]}`,
 			setupFn: func(fake *clusterfakes.FakeCluster) {
@@ -55,7 +55,7 @@ func TestPropose_ReturnsTooLarge_MapsTo413(t *testing.T) {
 		{
 			name:   "database",
 			method: "POST",
-			path:   "/database/db-1",
+			path:   "/v1/database/db-1",
 			ct:     "text/toml",
 			body:   "[config]\nname = \"x\"",
 			setupFn: func(fake *clusterfakes.FakeCluster) {
@@ -65,7 +65,7 @@ func TestPropose_ReturnsTooLarge_MapsTo413(t *testing.T) {
 		{
 			name:   "syncable",
 			method: "POST",
-			path:   "/syncable/s-1",
+			path:   "/v1/syncable/s-1",
 			ct:     "text/toml",
 			body:   "[config]\nname = \"x\"",
 			setupFn: func(fake *clusterfakes.FakeCluster) {
@@ -75,7 +75,7 @@ func TestPropose_ReturnsTooLarge_MapsTo413(t *testing.T) {
 		{
 			name:   "ingestable",
 			method: "POST",
-			path:   "/ingestable/i-1",
+			path:   "/v1/ingestable/i-1",
 			ct:     "text/toml",
 			body:   "[config]\nname = \"x\"",
 			setupFn: func(fake *clusterfakes.FakeCluster) {
@@ -85,7 +85,7 @@ func TestPropose_ReturnsTooLarge_MapsTo413(t *testing.T) {
 		{
 			name:   "type",
 			method: "POST",
-			path:   "/type/t-1",
+			path:   "/v1/type/t-1",
 			ct:     "text/toml",
 			body:   "[config]\nname = \"x\"",
 			setupFn: func(fake *clusterfakes.FakeCluster) {

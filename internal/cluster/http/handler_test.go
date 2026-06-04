@@ -33,7 +33,7 @@ func TestAddConfiguration_Success(t *testing.T) {
 	}{
 		{
 			name: "database",
-			path: "/database/db-1",
+			path: "/v1/database/db-1",
 			verifyFn: func(fake *clusterfakes.FakeCluster) (int, *cluster.Configuration) {
 				_, cfg := fake.ProposeDatabaseArgsForCall(0)
 				return fake.ProposeDatabaseCallCount(), cfg
@@ -41,7 +41,7 @@ func TestAddConfiguration_Success(t *testing.T) {
 		},
 		{
 			name: "syncable",
-			path: "/syncable/sync-1",
+			path: "/v1/syncable/sync-1",
 			verifyFn: func(fake *clusterfakes.FakeCluster) (int, *cluster.Configuration) {
 				_, cfg := fake.ProposeSyncableArgsForCall(0)
 				return fake.ProposeSyncableCallCount(), cfg
@@ -49,7 +49,7 @@ func TestAddConfiguration_Success(t *testing.T) {
 		},
 		{
 			name: "ingestable",
-			path: "/ingestable/ingest-1",
+			path: "/v1/ingestable/ingest-1",
 			verifyFn: func(fake *clusterfakes.FakeCluster) (int, *cluster.Configuration) {
 				_, cfg := fake.ProposeIngestableArgsForCall(0)
 				return fake.ProposeIngestableCallCount(), cfg
@@ -57,7 +57,7 @@ func TestAddConfiguration_Success(t *testing.T) {
 		},
 		{
 			name: "type",
-			path: "/type/type-1",
+			path: "/v1/type/type-1",
 			verifyFn: func(fake *clusterfakes.FakeCluster) (int, *cluster.Configuration) {
 				_, cfg := fake.ProposeTypeArgsForCall(0)
 				return fake.ProposeTypeCallCount(), cfg
@@ -107,22 +107,22 @@ func TestAddConfiguration_ClusterError(t *testing.T) {
 	}{
 		{
 			name:    "database",
-			path:    "/database/db-1",
+			path:    "/v1/database/db-1",
 			setupFn: func(fake *clusterfakes.FakeCluster) { fake.ProposeDatabaseReturns(fmt.Errorf("fail")) },
 		},
 		{
 			name:    "syncable",
-			path:    "/syncable/sync-1",
+			path:    "/v1/syncable/sync-1",
 			setupFn: func(fake *clusterfakes.FakeCluster) { fake.ProposeSyncableReturns(fmt.Errorf("fail")) },
 		},
 		{
 			name:    "ingestable",
-			path:    "/ingestable/ingest-1",
+			path:    "/v1/ingestable/ingest-1",
 			setupFn: func(fake *clusterfakes.FakeCluster) { fake.ProposeIngestableReturns(fmt.Errorf("fail")) },
 		},
 		{
 			name:    "type",
-			path:    "/type/type-1",
+			path:    "/v1/type/type-1",
 			setupFn: func(fake *clusterfakes.FakeCluster) { fake.ProposeTypeReturns(fmt.Errorf("fail")) },
 		},
 	}
@@ -155,25 +155,25 @@ func TestAddConfiguration_ConfigError(t *testing.T) {
 	}{
 		{
 			name:         "database",
-			path:         "/database/db-1",
+			path:         "/v1/database/db-1",
 			setupFn:      func(fake *clusterfakes.FakeCluster) { fake.ProposeDatabaseReturns(configErr) },
 			expectedCode: "invalid_database_config",
 		},
 		{
 			name:         "syncable",
-			path:         "/syncable/sync-1",
+			path:         "/v1/syncable/sync-1",
 			setupFn:      func(fake *clusterfakes.FakeCluster) { fake.ProposeSyncableReturns(configErr) },
 			expectedCode: "invalid_syncable_config",
 		},
 		{
 			name:         "ingestable",
-			path:         "/ingestable/ingest-1",
+			path:         "/v1/ingestable/ingest-1",
 			setupFn:      func(fake *clusterfakes.FakeCluster) { fake.ProposeIngestableReturns(configErr) },
 			expectedCode: "invalid_ingestable_config",
 		},
 		{
 			name:         "type",
-			path:         "/type/type-1",
+			path:         "/v1/type/type-1",
 			setupFn:      func(fake *clusterfakes.FakeCluster) { fake.ProposeTypeReturns(configErr) },
 			expectedCode: "invalid_type_config",
 		},
@@ -200,7 +200,7 @@ func TestAddConfiguration_ConfigError(t *testing.T) {
 func TestAddConfiguration_EmptyBody(t *testing.T) {
 	h, _ := setupTest()
 
-	req := httptest.NewRequest("POST", "http://localhost/database/db-1", strings.NewReader(""))
+	req := httptest.NewRequest("POST", "http://localhost/v1/database/db-1", strings.NewReader(""))
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
@@ -212,7 +212,7 @@ func TestAddConfiguration_ContentTypeHandling(t *testing.T) {
 	t.Run("default mime type is text/toml", func(t *testing.T) {
 		h, fake := setupTest()
 
-		req := httptest.NewRequest("POST", "http://localhost/database/db-1", strings.NewReader("data"))
+		req := httptest.NewRequest("POST", "http://localhost/v1/database/db-1", strings.NewReader("data"))
 		// No Content-Type header set
 		w := httptest.NewRecorder()
 
@@ -226,7 +226,7 @@ func TestAddConfiguration_ContentTypeHandling(t *testing.T) {
 	t.Run("explicit application/json", func(t *testing.T) {
 		h, fake := setupTest()
 
-		req := httptest.NewRequest("POST", "http://localhost/database/db-1", strings.NewReader("{}"))
+		req := httptest.NewRequest("POST", "http://localhost/v1/database/db-1", strings.NewReader("{}"))
 		req.Header["Content-Type"] = []string{"application/json"}
 		w := httptest.NewRecorder()
 
@@ -253,22 +253,22 @@ func TestGetConfigurations_Success(t *testing.T) {
 	}{
 		{
 			name:    "database",
-			path:    "/database",
+			path:    "/v1/database",
 			setupFn: func(fake *clusterfakes.FakeCluster) { fake.DatabasesReturns(cfgs, nil) },
 		},
 		{
 			name:    "syncable",
-			path:    "/syncable",
+			path:    "/v1/syncable",
 			setupFn: func(fake *clusterfakes.FakeCluster) { fake.SyncablesReturns(cfgs, nil) },
 		},
 		{
 			name:    "ingestable",
-			path:    "/ingestable",
+			path:    "/v1/ingestable",
 			setupFn: func(fake *clusterfakes.FakeCluster) { fake.IngestablesReturns(cfgs, nil) },
 		},
 		{
 			name:    "type",
-			path:    "/type",
+			path:    "/v1/type",
 			setupFn: func(fake *clusterfakes.FakeCluster) { fake.TypesReturns(cfgs, nil) },
 		},
 	}
@@ -307,7 +307,7 @@ func TestGetConfigurations_Empty(t *testing.T) {
 	h, fake := setupTest()
 	fake.DatabasesReturns(nil, nil)
 
-	req := httptest.NewRequest("GET", "http://localhost/database", nil)
+	req := httptest.NewRequest("GET", "http://localhost/v1/database", nil)
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
@@ -328,22 +328,22 @@ func TestGetConfigurations_Error(t *testing.T) {
 	}{
 		{
 			name:    "database",
-			path:    "/database",
+			path:    "/v1/database",
 			setupFn: func(fake *clusterfakes.FakeCluster) { fake.DatabasesReturns(nil, fmt.Errorf("fail")) },
 		},
 		{
 			name:    "syncable",
-			path:    "/syncable",
+			path:    "/v1/syncable",
 			setupFn: func(fake *clusterfakes.FakeCluster) { fake.SyncablesReturns(nil, fmt.Errorf("fail")) },
 		},
 		{
 			name:    "ingestable",
-			path:    "/ingestable",
+			path:    "/v1/ingestable",
 			setupFn: func(fake *clusterfakes.FakeCluster) { fake.IngestablesReturns(nil, fmt.Errorf("fail")) },
 		},
 		{
 			name:    "type",
-			path:    "/type",
+			path:    "/v1/type",
 			setupFn: func(fake *clusterfakes.FakeCluster) { fake.TypesReturns(nil, fmt.Errorf("fail")) },
 		},
 	}
@@ -373,7 +373,7 @@ func TestAddProposal_Success(t *testing.T) {
 	fake.ResolveTypeReturns(&cluster.Type{ID: "t1", Name: "TestType"}, nil)
 
 	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"foo": "bar"}}]}`
-	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	req := httptest.NewRequest("POST", "http://localhost/v1/proposal", strings.NewReader(body))
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
@@ -400,7 +400,7 @@ func TestAddProposal_MultipleEntities(t *testing.T) {
 		{"typeId": "t1", "key": "k1", "data": {"a": 1}},
 		{"typeId": "t2", "key": "k2", "data": {"b": 2}}
 	]}`
-	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	req := httptest.NewRequest("POST", "http://localhost/v1/proposal", strings.NewReader(body))
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
@@ -415,7 +415,7 @@ func TestAddProposal_MultipleEntities(t *testing.T) {
 func TestAddProposal_BadJSON(t *testing.T) {
 	h, _ := setupTest()
 
-	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader("not json"))
+	req := httptest.NewRequest("POST", "http://localhost/v1/proposal", strings.NewReader("not json"))
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
@@ -430,7 +430,7 @@ func TestAddProposal_TypeNotFound(t *testing.T) {
 	fake.ResolveTypeReturns(nil, fmt.Errorf("type not found"))
 
 	body := `{"entities": [{"typeId": "missing", "key": "k1", "data": {}}]}`
-	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	req := httptest.NewRequest("POST", "http://localhost/v1/proposal", strings.NewReader(body))
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
@@ -447,7 +447,7 @@ func TestAddProposal_ProposeError(t *testing.T) {
 	fake.ProposeReturns(fmt.Errorf("raft failed"))
 
 	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {}}]}`
-	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	req := httptest.NewRequest("POST", "http://localhost/v1/proposal", strings.NewReader(body))
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
@@ -480,7 +480,7 @@ func TestAddProposal_SchemaValidation_Valid(t *testing.T) {
 	}, nil)
 
 	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"name": "Alice", "age": 30}}]}`
-	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	req := httptest.NewRequest("POST", "http://localhost/v1/proposal", strings.NewReader(body))
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
@@ -511,7 +511,7 @@ func TestAddProposal_SchemaValidation_Invalid(t *testing.T) {
 
 	// Missing required "name" field
 	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"age": 30}}]}`
-	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	req := httptest.NewRequest("POST", "http://localhost/v1/proposal", strings.NewReader(body))
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
@@ -543,7 +543,7 @@ func TestAddProposal_SchemaValidation_WrongType(t *testing.T) {
 
 	// "age" should be integer, not string
 	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"age": "not a number"}}]}`
-	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	req := httptest.NewRequest("POST", "http://localhost/v1/proposal", strings.NewReader(body))
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
@@ -569,7 +569,7 @@ func TestAddProposal_SchemaValidation_NoValidation(t *testing.T) {
 
 	// Missing required "name" — should still pass because validation is off
 	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"other": 1}}]}`
-	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	req := httptest.NewRequest("POST", "http://localhost/v1/proposal", strings.NewReader(body))
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
@@ -603,7 +603,7 @@ func TestAddProposal_ProtobufValidation_Valid(t *testing.T) {
 	}, nil)
 
 	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"name": "Alice", "age": 30}}]}`
-	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	req := httptest.NewRequest("POST", "http://localhost/v1/proposal", strings.NewReader(body))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -624,7 +624,7 @@ func TestAddProposal_ProtobufValidation_WrongFieldType(t *testing.T) {
 
 	// age is declared int32; a string is a protojson type mismatch.
 	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"name": "Alice", "age": "thirty"}}]}`
-	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	req := httptest.NewRequest("POST", "http://localhost/v1/proposal", strings.NewReader(body))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -648,7 +648,7 @@ func TestAddProposal_ProtobufValidation_UnknownField(t *testing.T) {
 	// `email` is not declared on Person. protojson.Unmarshal rejects
 	// unknown fields by default (DiscardUnknown: false).
 	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"name": "Alice", "email": "a@x.com"}}]}`
-	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	req := httptest.NewRequest("POST", "http://localhost/v1/proposal", strings.NewReader(body))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -672,7 +672,7 @@ func TestAddProposal_ProtobufValidation_BadProtoSource(t *testing.T) {
 	}, nil)
 
 	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"name": "Alice"}}]}`
-	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	req := httptest.NewRequest("POST", "http://localhost/v1/proposal", strings.NewReader(body))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -696,7 +696,7 @@ func TestAddProposal_ProtobufValidation_MissingMessageName(t *testing.T) {
 	}, nil)
 
 	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"name": "Alice"}}]}`
-	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	req := httptest.NewRequest("POST", "http://localhost/v1/proposal", strings.NewReader(body))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -733,7 +733,7 @@ message Person {
 	}, nil)
 
 	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"name": "Alice"}}]}`
-	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	req := httptest.NewRequest("POST", "http://localhost/v1/proposal", strings.NewReader(body))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -754,7 +754,7 @@ func TestAddProposal_ProtobufValidation_SameVersionCached(t *testing.T) {
 
 	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"name": "Alice"}}]}`
 	for i := 0; i < 3; i++ {
-		req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+		req := httptest.NewRequest("POST", "http://localhost/v1/proposal", strings.NewReader(body))
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
 		require.Equal(t, 200, w.Result().StatusCode, "iteration %d", i)
@@ -779,7 +779,7 @@ func TestAddProposal_SchemaValidation_UnknownSchemaType(t *testing.T) {
 	}, nil)
 
 	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"anything": true}}]}`
-	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	req := httptest.NewRequest("POST", "http://localhost/v1/proposal", strings.NewReader(body))
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
@@ -801,7 +801,7 @@ func TestAddProposal_SchemaValidation_EmptySchema(t *testing.T) {
 	}, nil)
 
 	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"a": 1}}]}`
-	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	req := httptest.NewRequest("POST", "http://localhost/v1/proposal", strings.NewReader(body))
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
@@ -825,7 +825,7 @@ func TestAddProposal_SchemaValidation_InvalidSchemaJSON(t *testing.T) {
 	}, nil)
 
 	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"a": 1}}]}`
-	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	req := httptest.NewRequest("POST", "http://localhost/v1/proposal", strings.NewReader(body))
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
@@ -848,7 +848,7 @@ func TestAddProposal_SchemaValidation_EmptySchemaType(t *testing.T) {
 	}, nil)
 
 	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"a": 1}}]}`
-	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	req := httptest.NewRequest("POST", "http://localhost/v1/proposal", strings.NewReader(body))
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
@@ -866,7 +866,7 @@ func TestAddProposal_AttachesResolvedType(t *testing.T) {
 	fake.ResolveTypeReturns(&cluster.Type{ID: "t1", Name: "Person", Version: 7}, nil)
 
 	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"a": 1}}]}`
-	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	req := httptest.NewRequest("POST", "http://localhost/v1/proposal", strings.NewReader(body))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 	require.Equal(t, 200, w.Result().StatusCode)
@@ -890,7 +890,7 @@ func TestAddProposal_SchemaValidation_CacheInvalidatesOnVersionBump(t *testing.T
 
 	// Proposal with "name" — should pass against schema1
 	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"name": "Alice"}}]}`
-	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	req := httptest.NewRequest("POST", "http://localhost/v1/proposal", strings.NewReader(body))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 	require.Equal(t, 200, w.Result().StatusCode)
@@ -906,7 +906,7 @@ func TestAddProposal_SchemaValidation_CacheInvalidatesOnVersionBump(t *testing.T
 
 	// Same proposal with "name" but no "email" — must fail against schema2.
 	body = `{"entities": [{"typeId": "t1", "key": "k2", "data": {"name": "Bob"}}]}`
-	req = httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	req = httptest.NewRequest("POST", "http://localhost/v1/proposal", strings.NewReader(body))
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 	require.Equal(t, 400, w.Result().StatusCode)
@@ -925,7 +925,7 @@ func TestGetProposals_Success(t *testing.T) {
 	}
 	fake.ProposalsReturns(proposals, nil)
 
-	req := httptest.NewRequest("GET", "http://localhost/proposal?type=Type1&number=5", nil)
+	req := httptest.NewRequest("GET", "http://localhost/v1/proposal?type=Type1&number=5", nil)
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
@@ -955,7 +955,7 @@ func TestGetProposals_DefaultNumber(t *testing.T) {
 	h, fake := setupTest()
 	fake.ProposalsReturns(nil, nil)
 
-	req := httptest.NewRequest("GET", "http://localhost/proposal", nil)
+	req := httptest.NewRequest("GET", "http://localhost/v1/proposal", nil)
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
@@ -969,7 +969,7 @@ func TestGetProposals_WithTypeFilter(t *testing.T) {
 	h, fake := setupTest()
 	fake.ProposalsReturns(nil, nil)
 
-	req := httptest.NewRequest("GET", "http://localhost/proposal?type=MyType", nil)
+	req := httptest.NewRequest("GET", "http://localhost/v1/proposal?type=MyType", nil)
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
@@ -983,7 +983,7 @@ func TestGetProposals_InvalidNumber(t *testing.T) {
 	h, fake := setupTest()
 	fake.ProposalsReturns(nil, nil)
 
-	req := httptest.NewRequest("GET", "http://localhost/proposal?number=abc", nil)
+	req := httptest.NewRequest("GET", "http://localhost/v1/proposal?number=abc", nil)
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
@@ -998,7 +998,7 @@ func TestGetProposals_ClusterError(t *testing.T) {
 	h, fake := setupTest()
 	fake.ProposalsReturns(nil, fmt.Errorf("storage error"))
 
-	req := httptest.NewRequest("GET", "http://localhost/proposal", nil)
+	req := httptest.NewRequest("GET", "http://localhost/v1/proposal", nil)
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
@@ -1021,7 +1021,7 @@ func TestGetType_Success(t *testing.T) {
 	fake.TypeGraphReturns(points, nil)
 
 	req := httptest.NewRequest("GET", fmt.Sprintf(
-		"http://localhost/type/mytype?start=%s&end=%s",
+		"http://localhost/v1/type/mytype?start=%s&end=%s",
 		start.Format("2006-01-02T15:04:05Z0700"),
 		end.Format("2006-01-02T15:04:05Z0700"),
 	), nil)
@@ -1051,7 +1051,7 @@ func TestGetType_Success(t *testing.T) {
 func TestGetType_MissingStartParam(t *testing.T) {
 	h, _ := setupTest()
 
-	req := httptest.NewRequest("GET", "http://localhost/type/mytype?end=2024-01-02T00:00:00Z", nil)
+	req := httptest.NewRequest("GET", "http://localhost/v1/type/mytype?end=2024-01-02T00:00:00Z", nil)
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
@@ -1064,7 +1064,7 @@ func TestGetType_MissingStartParam(t *testing.T) {
 func TestGetType_BadEndFormat(t *testing.T) {
 	h, _ := setupTest()
 
-	req := httptest.NewRequest("GET", "http://localhost/type/mytype?start=2024-01-01T00:00:00Z&end=not-a-date", nil)
+	req := httptest.NewRequest("GET", "http://localhost/v1/type/mytype?start=2024-01-01T00:00:00Z&end=not-a-date", nil)
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
@@ -1078,7 +1078,7 @@ func TestGetType_ClusterError(t *testing.T) {
 	h, fake := setupTest()
 	fake.TypeGraphReturns(nil, fmt.Errorf("graph error"))
 
-	req := httptest.NewRequest("GET", "http://localhost/type/mytype?start=2024-01-01T00:00:00Z&end=2024-01-02T00:00:00Z", nil)
+	req := httptest.NewRequest("GET", "http://localhost/v1/type/mytype?start=2024-01-01T00:00:00Z&end=2024-01-02T00:00:00Z", nil)
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
@@ -1092,7 +1092,7 @@ func TestGetType_EmptyResult(t *testing.T) {
 	h, fake := setupTest()
 	fake.TypeGraphReturns(nil, nil)
 
-	req := httptest.NewRequest("GET", "http://localhost/type/mytype?start=2024-01-01T00:00:00Z&end=2024-01-02T00:00:00Z", nil)
+	req := httptest.NewRequest("GET", "http://localhost/v1/type/mytype?start=2024-01-01T00:00:00Z&end=2024-01-02T00:00:00Z", nil)
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
@@ -1128,7 +1128,7 @@ func TestErrorResponse_JSONShape(t *testing.T) {
 	fake.ResolveTypeReturns(nil, fmt.Errorf("not found"))
 
 	body := `{"entities": [{"typeId": "missing", "key": "k1", "data": {}}]}`
-	req := httptest.NewRequest("POST", "http://localhost/proposal", strings.NewReader(body))
+	req := httptest.NewRequest("POST", "http://localhost/v1/proposal", strings.NewReader(body))
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)

@@ -22,7 +22,7 @@ import (
 func postType(t *testing.T, id string) {
 	t.Helper()
 	body := fmt.Sprintf("[type]\nname = %q\n", id)
-	postConfig(t, "/type/"+id, body)
+	postConfig(t, "/v1/type/"+id, body)
 }
 
 // postIngestable registers one Postgres ingestable per TPC-H table.
@@ -46,7 +46,7 @@ func postIngestable(t *testing.T, table, pgConnStr, slotName, pubName string) {
 	for _, col := range dataset.Columns(table) {
 		fmt.Fprintf(&b, "[[sql.mappings]]\njsonName = %q\ncolumn = %q\n\n", col, col)
 	}
-	postConfig(t, "/ingestable/"+table, b.String())
+	postConfig(t, "/v1/ingestable/"+table, b.String())
 }
 
 // postConfig POSTs a TOML configuration body to the given path. Fails

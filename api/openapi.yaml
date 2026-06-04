@@ -1,25 +1,36 @@
 openapi: 3.1.0
 info:
   title: Committed API
-  version: 0.1.0
+  version: 0.2.0
   description: |
     HTTP API for Committed — a distributed commit log database.
 
     Committed exposes two primitives over HTTP:
 
-    - **write**: append proposals to topics (POST /proposal)
+    - **write**: append proposals to topics (POST /v1/proposal)
     - **configure**: manage databases, ingestables, syncables, and types
 
     The API is not a query interface. Reads are limited to proposal history
     and configuration retrieval. For querying committed data, use a syncable
     to replicate to an external database.
 
+    ## Versioning
+
+    Every API endpoint is served under a `/v1` URL prefix. Additive
+    changes (new endpoints, new optional fields) are made in place within
+    a major version; a breaking change bumps the prefix to `/v2` and the
+    old prefix is supported for at least one further release. Operational
+    endpoints (`/health`, `/ready`, `/version`, `/openapi.yaml`, `/docs`)
+    are infrastructure, not API surface, and stay unprefixed. See
+    `docs/api-compatibility.md` for the full contract.
+
     ## Authentication
 
-    When the server is started with `COMMITTED_API_TOKEN`, all endpoints
-    except `/health`, `/ready`, `/openapi.yaml`, and `/docs` require a
-    bearer token in the `Authorization` header. In development mode (no
-    token configured) no authentication is enforced.
+    When the server is started with `COMMITTED_API_TOKEN`, all API
+    endpoints require a bearer token in the `Authorization` header. The
+    operational endpoints `/health`, `/ready`, `/version`, `/openapi.yaml`,
+    and `/docs` are exempt. In development mode (no token configured) no
+    authentication is enforced.
 
     ## Content types
 
@@ -125,7 +136,7 @@ paths:
               schema:
                 type: string
 
-  /database:
+  /v1/database:
     get:
       tags: [database]
       summary: List all databases
@@ -143,7 +154,7 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalError'
-  /database/{id}:
+  /v1/database/{id}:
     post:
       tags: [database]
       summary: Create or update a database configuration
@@ -169,7 +180,7 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalError'
-  /database/{id}/versions:
+  /v1/database/{id}/versions:
     get:
       tags: [database]
       summary: List database configuration versions
@@ -191,7 +202,7 @@ paths:
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
-  /database/{id}/versions/{version}:
+  /v1/database/{id}/versions/{version}:
     get:
       tags: [database]
       summary: Get a specific database configuration version
@@ -218,7 +229,7 @@ paths:
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
-  /database/{id}/rollback:
+  /v1/database/{id}/rollback:
     post:
       tags: [database]
       summary: Roll a database back to a previous version
@@ -241,7 +252,7 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /ingestable:
+  /v1/ingestable:
     get:
       tags: [ingestable]
       summary: List all ingestables
@@ -259,7 +270,7 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalError'
-  /ingestable/{id}:
+  /v1/ingestable/{id}:
     post:
       tags: [ingestable]
       summary: Create or update an ingestable configuration
@@ -285,7 +296,7 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalError'
-  /ingestable/{id}/versions:
+  /v1/ingestable/{id}/versions:
     get:
       tags: [ingestable]
       summary: List ingestable configuration versions
@@ -307,7 +318,7 @@ paths:
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
-  /ingestable/{id}/versions/{version}:
+  /v1/ingestable/{id}/versions/{version}:
     get:
       tags: [ingestable]
       summary: Get a specific ingestable configuration version
@@ -334,7 +345,7 @@ paths:
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
-  /ingestable/{id}/rollback:
+  /v1/ingestable/{id}/rollback:
     post:
       tags: [ingestable]
       summary: Roll an ingestable back to a previous version
@@ -354,7 +365,7 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /syncable:
+  /v1/syncable:
     get:
       tags: [syncable]
       summary: List all syncables
@@ -372,7 +383,7 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalError'
-  /syncable/{id}:
+  /v1/syncable/{id}:
     post:
       tags: [syncable]
       summary: Create or update a syncable configuration
@@ -398,7 +409,7 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalError'
-  /syncable/{id}/versions:
+  /v1/syncable/{id}/versions:
     get:
       tags: [syncable]
       summary: List syncable configuration versions
@@ -420,7 +431,7 @@ paths:
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
-  /syncable/{id}/versions/{version}:
+  /v1/syncable/{id}/versions/{version}:
     get:
       tags: [syncable]
       summary: Get a specific syncable configuration version
@@ -447,7 +458,7 @@ paths:
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
-  /syncable/{id}/errors:
+  /v1/syncable/{id}/errors:
     get:
       tags: [syncable]
       summary: List proposals a syncable skipped (dead letters)
@@ -498,7 +509,7 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalError'
-  /syncable/{id}/deadletter/:
+  /v1/syncable/{id}/deadletter/:
     post:
       tags: [syncable]
       summary: Skip the proposal a syncable is currently blocked on
@@ -510,7 +521,7 @@ paths:
         visibly (its `errors` total stops advancing) rather than losing
         data. This is the operator's lever to give up on that one
         proposal: it records a `manual` dead letter (queryable via
-        `GET /syncable/{id}/errors`) and the worker moves on.
+        `GET /v1/syncable/{id}/errors`) and the worker moves on.
 
         Use it when the downstream is healthy but one proposal won't
         apply — not during an outage, where the syncable is correctly
@@ -519,7 +530,7 @@ paths:
         Works from any node: the stuck state is replicated, so any node
         finds the blocked index and proposes the skip through Raft. A
         syncable that isn't currently blocked returns 409. Discover stuck
-        syncables via `GET /syncable/{id}/status` or the
+        syncables via `GET /v1/syncable/{id}/status` or the
         `committed_sync_stuck` metric.
       operationId: deadLetterStuckSyncable
       parameters:
@@ -528,7 +539,7 @@ paths:
         '202':
           description: |
             Accepted. The worker will dead-letter the named proposal on its
-            next retry; poll `GET /syncable/{id}/errors` to confirm.
+            next retry; poll `GET /v1/syncable/{id}/errors` to confirm.
           content:
             application/json:
               schema:
@@ -543,7 +554,7 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '500':
           $ref: '#/components/responses/InternalError'
-  /syncable/{id}/status:
+  /v1/syncable/{id}/status:
     get:
       tags: [syncable]
       summary: Report whether a syncable's worker is blocked
@@ -569,7 +580,7 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalError'
-  /syncable/{id}/replay/{index}:
+  /v1/syncable/{id}/replay/{index}:
     post:
       tags: [syncable]
       summary: Re-drive a dead-lettered proposal
@@ -618,7 +629,7 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '500':
           $ref: '#/components/responses/InternalError'
-  /syncable/{id}/rollback:
+  /v1/syncable/{id}/rollback:
     post:
       tags: [syncable]
       summary: Roll a syncable back to a previous version
@@ -638,7 +649,7 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /type:
+  /v1/type:
     get:
       tags: [type]
       summary: List all types
@@ -656,7 +667,7 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalError'
-  /type/{id}:
+  /v1/type/{id}:
     get:
       tags: [type]
       summary: Get a type activity graph
@@ -666,8 +677,8 @@ paths:
         type activity charts in the web UI.
 
         Note: this endpoint does *not* return the type configuration
-        itself. Use `GET /type/{id}/versions/{version}` or the list
-        endpoint `GET /type` for configuration data.
+        itself. Use `GET /v1/type/{id}/versions/{version}` or the list
+        endpoint `GET /v1/type` for configuration data.
       operationId: getTypeGraph
       parameters:
         - $ref: '#/components/parameters/ResourceId'
@@ -725,7 +736,7 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalError'
-  /type/{id}/versions:
+  /v1/type/{id}/versions:
     get:
       tags: [type]
       summary: List type configuration versions
@@ -747,7 +758,7 @@ paths:
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
-  /type/{id}/versions/{version}:
+  /v1/type/{id}/versions/{version}:
     get:
       tags: [type]
       summary: Get a specific type configuration version
@@ -775,7 +786,7 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /proposal:
+  /v1/proposal:
     get:
       tags: [proposal]
       summary: Read recent proposals
@@ -1005,7 +1016,7 @@ components:
           minimum: 0
           description: |
             Raft index of the proposal the syncable was blocked on and that
-            the worker will dead-letter. Query `GET /syncable/{id}/errors`
+            the worker will dead-letter. Query `GET /v1/syncable/{id}/errors`
             to confirm the `manual` record once it lands.
 
     SyncableStatusResponse:

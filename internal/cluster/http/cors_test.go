@@ -58,7 +58,7 @@ func TestCORS_Wildcard(t *testing.T) {
 // methods/headers list overrides those defaults.
 func TestCORS_Preflight(t *testing.T) {
 	preflight := func(h *http.HTTP, reqMethod string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest("OPTIONS", "http://localhost/proposal", nil)
+		req := httptest.NewRequest("OPTIONS", "http://localhost/v1/proposal", nil)
 		req.Header.Set("Origin", "https://app.example.com")
 		req.Header.Set("Access-Control-Request-Method", reqMethod)
 		w := httptest.NewRecorder()
