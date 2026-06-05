@@ -27,6 +27,7 @@ type Harness struct {
 	pgConnStr string
 	pgConn    *pgx.Conn
 	committed *committedProcess
+	collector *collector
 	topics    []string
 	slotNames map[string]string // topic → slot name
 	ctx       context.Context
@@ -91,6 +92,12 @@ func New(t *testing.T, opts ...Options) *Harness {
 	// 3. committed.
 	h.committed = startCommitted(t)
 
+	// 3b. The collector: an HTTP endpoint the per-topic webhook syncables
+	// (registered below) POST every committed Actual to. This is how the
+	// harness observes the log — through a syncable, the way a real consumer
+	// does — since the log is write-only over HTTP (no GET /proposal).
+	h.collector = newCollector()
+
 	// 4. One Type per table.
 	for _, table := range o.Tables {
 		postType(t, table)
@@ -107,6 +114,14 @@ func New(t *testing.T, opts ...Options) *Harness {
 	// 6. Wait for every slot to be active.
 	for _, table := range o.Tables {
 		h.waitForIngestableReady(t, h.slotNames[table])
+	}
+
+	// 6a. One webhook syncable per topic, POSTing every committed Actual to
+	// the collector. A new syncable reads its topic from the start, so the
+	// collector accumulates the full stream; the baseline below trims away
+	// everything up to the dataset-load point.
+	for _, table := range o.Tables {
+		postCollectSyncable(t, table, h.collector.urlFor(table))
 	}
 
 	// 6b. OUTPUT side (opt-in): a sink database plus one syncable per table
@@ -206,12 +221,12 @@ func (h *Harness) Topics() []string {
 func (h *Harness) Capture(t *testing.T, expected map[string]int) map[string][]CapturedProposal {
 	t.Helper()
 	if expected != nil {
-		h.waitForCounts(t, expected, 30*time.Second)
+		h.waitForCounts(t, expected, captureTimeout(expected))
 	}
 
 	out := make(map[string][]CapturedProposal, len(h.topics))
 	for _, topic := range h.topics {
-		all := fetchProposals(t, topic)
+		all := h.collector.proposals(topic)
 		out[topic] = all[h.baseline[topic]:]
 		h.baseline[topic] = len(all)
 	}
@@ -224,8 +239,24 @@ func (h *Harness) Capture(t *testing.T, expected map[string]int) map[string][]Ca
 func (h *Harness) Rebaseline(t *testing.T) {
 	t.Helper()
 	for _, topic := range h.topics {
-		h.baseline[topic] = len(fetchProposals(t, topic))
+		h.baseline[topic] = len(h.collector.proposals(topic))
 	}
+}
+
+// captureTimeout scales the capture wait with the number of proposals
+// expected. Unlike the old direct GET /proposal read (which saw the committed
+// log instantly), the harness now observes through the real delivery path:
+// every proposal costs a webhook POST plus an fsync-bound SyncableIndex bump,
+// and on a single node those fsyncs serialize with the ingestable's own
+// writes. High-volume captures (e.g. hot-key churn) therefore need headroom
+// proportional to the work; small captures reach their count in well under
+// the floor and never feel it.
+func captureTimeout(expected map[string]int) time.Duration {
+	total := 0
+	for _, n := range expected {
+		total += n
+	}
+	return 30*time.Second + time.Duration(total)*250*time.Millisecond
 }
 
 // waitForCounts polls each topic until the proposal count reaches
@@ -236,7 +267,7 @@ func (h *Harness) waitForCounts(t *testing.T, expected map[string]int, timeout t
 	for topic, n := range expected {
 		target := h.baseline[topic] + n
 		for {
-			got := len(fetchProposals(t, topic))
+			got := len(h.collector.proposals(topic))
 			if got >= target {
 				break
 			}
@@ -257,6 +288,9 @@ func (h *Harness) Close() {
 	}
 	if h.committed != nil {
 		h.committed.Stop()
+	}
+	if h.collector != nil {
+		h.collector.close()
 	}
 	if h.pg != nil {
 		_ = h.pg.Terminate(context.Background())
