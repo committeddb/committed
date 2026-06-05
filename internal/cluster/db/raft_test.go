@@ -865,7 +865,7 @@ func (ms *MemoryStorage) Position(id string) cluster.Position {
 	return nil
 }
 
-func (ms *MemoryStorage) Reader(id string) db.ProposalReader {
+func (ms *MemoryStorage) Reader(id string) db.ActualReader {
 	i, ok := ms.indexes[id]
 	if !ok {
 		i = 0
@@ -942,7 +942,7 @@ type Reader struct {
 	s     db.Storage
 }
 
-func (r *Reader) Read() (uint64, *cluster.Proposal, error) {
+func (r *Reader) Read() (*cluster.Actual, error) {
 	r.Lock()
 	defer r.Unlock()
 
@@ -951,16 +951,16 @@ func (r *Reader) Read() (uint64, *cluster.Proposal, error) {
 
 		li, err := r.s.LastIndex()
 		if err != nil {
-			return 0, nil, err
+			return nil, err
 		}
 
 		if readIndex > li {
-			return 0, nil, io.EOF
+			return nil, io.EOF
 		}
 
 		ents, err := r.s.Entries(readIndex, readIndex+1, math.MaxUint)
 		if err != nil {
-			return 0, nil, err
+			return nil, err
 		}
 
 		ent := ents[0]
@@ -970,12 +970,12 @@ func (r *Reader) Read() (uint64, *cluster.Proposal, error) {
 		if ent.Type == raftpb.EntryNormal {
 			p := &cluster.Proposal{}
 			if err := p.Unmarshal(ent.Data, r.s); err != nil {
-				return 0, nil, err
+				return nil, err
 			}
 
 			if len(p.Entities) > 0 {
 				if !cluster.IsSyncableMetadata(p.Entities[0].Type.ID) {
-					return readIndex, p, nil
+					return &cluster.Actual{Index: readIndex, Entities: p.Entities}, nil
 				}
 			}
 		}

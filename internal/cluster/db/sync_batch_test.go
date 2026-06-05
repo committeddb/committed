@@ -45,7 +45,7 @@ func TestSyncBatch_Basic(t *testing.T) {
 			<-ctx.Done()
 
 			require.Equal(t, size, syncable.Count())
-			got := syncable.Proposals()
+			got := syncable.Actuals()
 			for i, p := range ps {
 				require.Equal(t, string(p.Entities[0].Data), string(got[i].Entities[0].Data))
 			}
@@ -103,12 +103,12 @@ func TestSyncBatch_IndexAdvancesToLastInBatch(t *testing.T) {
 	var normalIndices []uint64
 	r := s.Reader("raw")
 	for {
-		idx, p, err := r.Read()
+		a, err := r.Read()
 		if err != nil {
 			break
 		}
-		if len(p.Entities) > 0 && !cluster.IsSystem(p.Entities[0].Type.ID) {
-			normalIndices = append(normalIndices, idx)
+		if len(a.Entities) > 0 && !cluster.IsSystem(a.Entities[0].Type.ID) {
+			normalIndices = append(normalIndices, a.Index)
 		}
 	}
 	require.Equal(t, len(inputs), len(normalIndices))
@@ -147,7 +147,7 @@ func TestSyncBatch_PermanentErrorFallback(t *testing.T) {
 		// SyncBatch always returns a permanent error to trigger fallback
 		batchErr: cluster.Permanent(fmt.Errorf("batch has bad data")),
 		// Per-proposal Sync: permanent on "bad", success on everything else
-		perProposalErr: func(p *cluster.Proposal) error {
+		perProposalErr: func(p *cluster.Actual) error {
 			if string(p.Entities[0].Data) == "bad" {
 				return cluster.Permanent(fmt.Errorf("bad proposal"))
 			}
@@ -231,24 +231,24 @@ func TestSyncBatch_TransientErrorRetries(t *testing.T) {
 // proposal behavior. Used to test the permanent-error fallback path.
 type errorBatchSyncable struct {
 	batchErr       error
-	perProposalErr func(*cluster.Proposal) error
+	perProposalErr func(*cluster.Actual) error
 	doneAtCount    int
 	cancel         func()
 
 	mu             sync.Mutex
 	batchCallCount int
 	syncCallCount  int
-	syncedProps    []*cluster.Proposal
+	syncedProps    []*cluster.Actual
 }
 
-func (s *errorBatchSyncable) SyncBatch(ctx context.Context, ps []*cluster.Proposal) (bool, error) {
+func (s *errorBatchSyncable) SyncBatch(ctx context.Context, ps []*cluster.Actual) (bool, error) {
 	s.mu.Lock()
 	s.batchCallCount++
 	s.mu.Unlock()
 	return false, s.batchErr
 }
 
-func (s *errorBatchSyncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.ShouldSnapshot, error) {
+func (s *errorBatchSyncable) Sync(ctx context.Context, p *cluster.Actual) (cluster.ShouldSnapshot, error) {
 	s.mu.Lock()
 	s.syncCallCount++
 	s.syncedProps = append(s.syncedProps, p)
@@ -281,7 +281,7 @@ type transientBatchSyncable struct {
 	batchCallCount int
 }
 
-func (s *transientBatchSyncable) SyncBatch(ctx context.Context, ps []*cluster.Proposal) (bool, error) {
+func (s *transientBatchSyncable) SyncBatch(ctx context.Context, ps []*cluster.Actual) (bool, error) {
 	s.mu.Lock()
 	s.batchCallCount++
 	count := s.batchCallCount
@@ -295,7 +295,7 @@ func (s *transientBatchSyncable) SyncBatch(ctx context.Context, ps []*cluster.Pr
 	return false, nil
 }
 
-func (s *transientBatchSyncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.ShouldSnapshot, error) {
+func (s *transientBatchSyncable) Sync(ctx context.Context, p *cluster.Actual) (cluster.ShouldSnapshot, error) {
 	return false, nil
 }
 

@@ -31,8 +31,8 @@ func newConfig(url string) *synchttp.Config {
 	}
 }
 
-func newProposal(entities ...*cluster.Entity) *cluster.Proposal {
-	return &cluster.Proposal{Entities: entities}
+func newActual(entities ...*cluster.Entity) *cluster.Actual {
+	return &cluster.Actual{Entities: entities}
 }
 
 func newEntity(t *cluster.Type, key string, data any) *cluster.Entity {
@@ -72,9 +72,9 @@ func TestSync_SingleEntity_Success(t *testing.T) {
 	defer s.Close()
 
 	entity := newEntity(testType, "key1", map[string]string{"id": "1", "name": "test"})
-	p := newProposal(entity)
+	a := newActual(entity)
 
-	snapshot, err := s.Sync(context.Background(), p)
+	snapshot, err := s.Sync(context.Background(), a)
 	require.NoError(t, err)
 	require.Equal(t, cluster.ShouldSnapshot(true), snapshot)
 
@@ -101,9 +101,9 @@ func TestSync_MultipleEntities_Success(t *testing.T) {
 
 	e1 := newEntity(testType, "key1", map[string]string{"id": "1"})
 	e2 := newEntity(testType, "key2", map[string]string{"id": "2"})
-	p := newProposal(e1, e2)
+	a := newActual(e1, e2)
 
-	snapshot, err := s.Sync(context.Background(), p)
+	snapshot, err := s.Sync(context.Background(), a)
 	require.NoError(t, err)
 	require.Equal(t, cluster.ShouldSnapshot(true), snapshot)
 	require.Equal(t, int32(2), count.Load())
@@ -122,9 +122,9 @@ func TestSync_TopicMismatch(t *testing.T) {
 	defer s.Close()
 
 	entity := newEntity(otherType, "key1", map[string]string{"id": "1"})
-	p := newProposal(entity)
+	a := newActual(entity)
 
-	snapshot, err := s.Sync(context.Background(), p)
+	snapshot, err := s.Sync(context.Background(), a)
 	require.NoError(t, err)
 	require.Equal(t, cluster.ShouldSnapshot(false), snapshot)
 	require.Equal(t, int32(0), count.Load())
@@ -145,9 +145,9 @@ func TestSync_PermanentError_4xx(t *testing.T) {
 			defer s.Close()
 
 			entity := newEntity(testType, "key1", map[string]string{"id": "1"})
-			p := newProposal(entity)
+			a := newActual(entity)
 
-			_, err := s.Sync(context.Background(), p)
+			_, err := s.Sync(context.Background(), a)
 			require.Error(t, err)
 			require.True(t, errors.Is(err, cluster.ErrPermanent), "status %d should be permanent", code)
 		})
@@ -169,9 +169,9 @@ func TestSync_TransientError_5xx(t *testing.T) {
 			defer s.Close()
 
 			entity := newEntity(testType, "key1", map[string]string{"id": "1"})
-			p := newProposal(entity)
+			a := newActual(entity)
 
-			_, err := s.Sync(context.Background(), p)
+			_, err := s.Sync(context.Background(), a)
 			require.Error(t, err)
 			require.False(t, errors.Is(err, cluster.ErrPermanent), "status %d should be transient", code)
 		})
@@ -188,9 +188,9 @@ func TestSync_TransientError_429(t *testing.T) {
 	defer s.Close()
 
 	entity := newEntity(testType, "key1", map[string]string{"id": "1"})
-	p := newProposal(entity)
+	a := newActual(entity)
 
-	_, err := s.Sync(context.Background(), p)
+	_, err := s.Sync(context.Background(), a)
 	require.Error(t, err)
 	require.False(t, errors.Is(err, cluster.ErrPermanent))
 }
@@ -205,9 +205,9 @@ func TestSync_TransientError_408(t *testing.T) {
 	defer s.Close()
 
 	entity := newEntity(testType, "key1", map[string]string{"id": "1"})
-	p := newProposal(entity)
+	a := newActual(entity)
 
-	_, err := s.Sync(context.Background(), p)
+	_, err := s.Sync(context.Background(), a)
 	require.Error(t, err)
 	require.False(t, errors.Is(err, cluster.ErrPermanent))
 }
@@ -227,9 +227,9 @@ func TestSync_PUT_Method(t *testing.T) {
 	defer s.Close()
 
 	entity := newEntity(testType, "key1", map[string]string{"id": "1"})
-	p := newProposal(entity)
+	a := newActual(entity)
 
-	_, err := s.Sync(context.Background(), p)
+	_, err := s.Sync(context.Background(), a)
 	require.NoError(t, err)
 	require.Equal(t, "PUT", method)
 }
@@ -252,9 +252,9 @@ func TestSync_CustomHeaders(t *testing.T) {
 	defer s.Close()
 
 	entity := newEntity(testType, "key1", map[string]string{"id": "1"})
-	p := newProposal(entity)
+	a := newActual(entity)
 
-	_, err := s.Sync(context.Background(), p)
+	_, err := s.Sync(context.Background(), a)
 	require.NoError(t, err)
 	require.Equal(t, "Bearer my-token", headers.Get("Authorization"))
 	require.Equal(t, "custom-value", headers.Get("X-Custom"))
@@ -273,9 +273,9 @@ func TestSync_ContextCancellation(t *testing.T) {
 	cancel()
 
 	entity := newEntity(testType, "key1", map[string]string{"id": "1"})
-	p := newProposal(entity)
+	a := newActual(entity)
 
-	_, err := s.Sync(ctx, p)
+	_, err := s.Sync(ctx, a)
 	require.Error(t, err)
 }
 

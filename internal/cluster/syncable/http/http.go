@@ -43,14 +43,14 @@ func New(config *Config) *Syncable {
 	}
 }
 
-func (s *Syncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.ShouldSnapshot, error) {
-	for _, e := range p.Entities {
+func (s *Syncable) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldSnapshot, error) {
+	for _, e := range a.Entities {
 		if s.config.Topic != e.ID {
 			return false, nil
 		}
 	}
 
-	for _, e := range p.Entities {
+	for _, e := range a.Entities {
 		if err := s.sendEntity(ctx, e); err != nil {
 			return false, err
 		}

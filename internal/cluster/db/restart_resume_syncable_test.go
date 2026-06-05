@@ -45,7 +45,7 @@ func (r *resumeRecorder) has(payload string) bool {
 
 type resumeSyncable struct{ r *resumeRecorder }
 
-func (s *resumeSyncable) Sync(_ context.Context, p *cluster.Proposal) (cluster.ShouldSnapshot, error) {
+func (s *resumeSyncable) Sync(_ context.Context, p *cluster.Actual) (cluster.ShouldSnapshot, error) {
 	if allSystem(p) {
 		return cluster.ShouldSnapshot(false), nil
 	}

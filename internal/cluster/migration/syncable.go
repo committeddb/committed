@@ -30,12 +30,12 @@ type single struct {
 	resolver Resolver
 }
 
-func (s *single) Sync(ctx context.Context, p *cluster.Proposal) (cluster.ShouldSnapshot, error) {
-	migrated, err := migrateProposal(s.resolver, p)
+func (s *single) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldSnapshot, error) {
+	entities, err := migrateEntities(s.resolver, a.Entities)
 	if err != nil {
 		return false, cluster.Permanent(err)
 	}
-	return s.inner.Sync(ctx, migrated)
+	return s.inner.Sync(ctx, &cluster.Actual{Index: a.Index, Entities: entities})
 }
 
 func (s *single) Close() error { return s.inner.Close() }
@@ -45,28 +45,28 @@ type batchSyncable struct {
 	batch cluster.BatchSyncable
 }
 
-func (b *batchSyncable) SyncBatch(ctx context.Context, ps []*cluster.Proposal) (bool, error) {
-	migrated := make([]*cluster.Proposal, len(ps))
-	for i, p := range ps {
-		m, err := migrateProposal(b.resolver, p)
+func (b *batchSyncable) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool, error) {
+	migrated := make([]*cluster.Actual, len(as))
+	for i, a := range as {
+		entities, err := migrateEntities(b.resolver, a.Entities)
 		if err != nil {
 			return false, cluster.Permanent(err)
 		}
-		migrated[i] = m
+		migrated[i] = &cluster.Actual{Index: a.Index, Entities: entities}
 	}
 	return b.batch.SyncBatch(ctx, migrated)
 }
 
-// migrateProposal rebuilds a Proposal with every user-data entity's
-// Data run through the migration chain up to the current latest type
-// version. System entities (config entries) pass through untouched.
-// The input Proposal is not modified — retry paths see consistent
-// input across attempts.
-func migrateProposal(r Resolver, p *cluster.Proposal) (*cluster.Proposal, error) {
-	out := &cluster.Proposal{RequestID: p.RequestID, Entities: make([]*cluster.Entity, 0, len(p.Entities))}
-	for _, e := range p.Entities {
+// migrateEntities returns a copy of es with every user-data entity's Data
+// run through the migration chain up to the current latest type version.
+// System entities (config entries) pass through untouched. The input
+// entities are not modified — retry paths see consistent input across
+// attempts.
+func migrateEntities(r Resolver, es []*cluster.Entity) ([]*cluster.Entity, error) {
+	out := make([]*cluster.Entity, 0, len(es))
+	for _, e := range es {
 		if cluster.IsSystem(e.ID) {
-			out.Entities = append(out.Entities, e)
+			out = append(out, e)
 			continue
 		}
 		latest, err := r.ResolveType(cluster.LatestTypeRef(e.ID))
@@ -74,7 +74,7 @@ func migrateProposal(r Resolver, p *cluster.Proposal) (*cluster.Proposal, error)
 			return nil, fmt.Errorf("resolve latest type %s: %w", e.ID, err)
 		}
 		if latest.Version <= e.Version {
-			out.Entities = append(out.Entities, e)
+			out = append(out, e)
 			continue
 		}
 		data, err := Chain(r, e.ID, e.Version, latest.Version, e.Data)
@@ -84,7 +84,7 @@ func migrateProposal(r Resolver, p *cluster.Proposal) (*cluster.Proposal, error)
 		copy := *e
 		copy.Type = latest
 		copy.Data = data
-		out.Entities = append(out.Entities, &copy)
+		out = append(out, &copy)
 	}
 	return out, nil
 }

@@ -19,11 +19,11 @@ type FakeSyncable struct {
 	closeReturnsOnCall map[int]struct {
 		result1 error
 	}
-	SyncStub        func(context.Context, *cluster.Proposal) (cluster.ShouldSnapshot, error)
+	SyncStub        func(context.Context, *cluster.Actual) (cluster.ShouldSnapshot, error)
 	syncMutex       sync.RWMutex
 	syncArgsForCall []struct {
 		arg1 context.Context
-		arg2 *cluster.Proposal
+		arg2 *cluster.Actual
 	}
 	syncReturns struct {
 		result1 cluster.ShouldSnapshot
@@ -90,12 +90,12 @@ func (fake *FakeSyncable) CloseReturnsOnCall(i int, result1 error) {
 	}{result1}
 }
 
-func (fake *FakeSyncable) Sync(arg1 context.Context, arg2 *cluster.Proposal) (cluster.ShouldSnapshot, error) {
+func (fake *FakeSyncable) Sync(arg1 context.Context, arg2 *cluster.Actual) (cluster.ShouldSnapshot, error) {
 	fake.syncMutex.Lock()
 	ret, specificReturn := fake.syncReturnsOnCall[len(fake.syncArgsForCall)]
 	fake.syncArgsForCall = append(fake.syncArgsForCall, struct {
 		arg1 context.Context
-		arg2 *cluster.Proposal
+		arg2 *cluster.Actual
 	}{arg1, arg2})
 	stub := fake.SyncStub
 	fakeReturns := fake.syncReturns
@@ -116,13 +116,13 @@ func (fake *FakeSyncable) SyncCallCount() int {
 	return len(fake.syncArgsForCall)
 }
 
-func (fake *FakeSyncable) SyncCalls(stub func(context.Context, *cluster.Proposal) (cluster.ShouldSnapshot, error)) {
+func (fake *FakeSyncable) SyncCalls(stub func(context.Context, *cluster.Actual) (cluster.ShouldSnapshot, error)) {
 	fake.syncMutex.Lock()
 	defer fake.syncMutex.Unlock()
 	fake.SyncStub = stub
 }
 
-func (fake *FakeSyncable) SyncArgsForCall(i int) (context.Context, *cluster.Proposal) {
+func (fake *FakeSyncable) SyncArgsForCall(i int) (context.Context, *cluster.Actual) {
 	fake.syncMutex.RLock()
 	defer fake.syncMutex.RUnlock()
 	argsForCall := fake.syncArgsForCall[i]

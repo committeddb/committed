@@ -37,14 +37,14 @@ type Reader struct {
 	s              *Storage
 }
 
-func (r *Reader) Read() (uint64, *cluster.Proposal, error) {
+func (r *Reader) Read() (*cluster.Actual, error) {
 	r.Lock()
 	defer r.Unlock()
 
 	if !r.walSeqResolved {
 		seq, err := r.resolveStartSeq()
 		if err != nil {
-			return 0, nil, err
+			return nil, err
 		}
 		r.walSeq = seq
 		r.walSeqResolved = true
@@ -53,20 +53,20 @@ func (r *Reader) Read() (uint64, *cluster.Proposal, error) {
 	for {
 		walLast, err := r.s.lastEventSeq()
 		if err != nil {
-			return 0, nil, err
+			return nil, err
 		}
 		if r.walSeq == 0 || r.walSeq > walLast {
-			return 0, nil, io.EOF
+			return nil, io.EOF
 		}
 
 		bs, err := r.s.readEventAt(r.walSeq)
 		if err != nil {
-			return 0, nil, fmt.Errorf("event log read seq %d: %w", r.walSeq, err)
+			return nil, fmt.Errorf("event log read seq %d: %w", r.walSeq, err)
 		}
 
 		ent := &pb.Entry{}
 		if err := ent.Unmarshal(bs); err != nil {
-			return 0, nil, err
+			return nil, err
 		}
 
 		r.raftIndex = ent.Index
@@ -78,7 +78,7 @@ func (r *Reader) Read() (uint64, *cluster.Proposal, error) {
 
 		p := &cluster.Proposal{}
 		if err := p.Unmarshal(ent.Data, r.s); err != nil {
-			return 0, nil, err
+			return nil, err
 		}
 
 		// Metadata proposals (syncable-index bumps, dead-letter records)
@@ -87,7 +87,7 @@ func (r *Reader) Read() (uint64, *cluster.Proposal, error) {
 		// its own dead letters. Skip them and keep scanning.
 		if len(p.Entities) > 0 {
 			if !cluster.IsSyncableMetadata(p.Entities[0].Type.ID) {
-				return ent.Index, p, nil
+				return &cluster.Actual{Index: ent.Index, Entities: p.Entities}, nil
 			}
 		}
 	}
@@ -143,18 +143,18 @@ func (r *Reader) resolveStartSeq() (uint64, error) {
 	return lo, nil
 }
 
-// ErrProposalNotFound is returned by ProposalAt when no committed proposal
-// exists at the requested raft index (it was never committed, has been
-// scrubbed, or the entry there carries no proposal data).
-var ErrProposalNotFound = errors.New("wal: no proposal at raft index")
+// ErrActualNotFound is returned by ActualAt when no committed Actual exists
+// at the requested raft index (it was never committed, has been scrubbed, or
+// the entry there carries no proposal data).
+var ErrActualNotFound = errors.New("wal: no committed entry at raft index")
 
-// ProposalAt returns the committed proposal at raft index, read straight from
-// the permanent event log. It binary-searches the log by raft index (the
-// event log is strictly monotonic in raft index, so seq order == index
-// order), so it is O(log n) and does not disturb any syncable's read cursor.
-// Used by replay to re-drive a single dead-lettered proposal. Returns
-// ErrProposalNotFound if the index isn't present or carries no proposal.
-func (s *Storage) ProposalAt(index uint64) (*cluster.Proposal, error) {
+// ActualAt returns the committed Actual at raft index, read straight from the
+// permanent event log. It binary-searches the log by raft index (the event
+// log is strictly monotonic in raft index, so seq order == index order), so
+// it is O(log n) and does not disturb any syncable's read cursor. Used by
+// replay to re-drive a single dead-lettered Actual. Returns ErrActualNotFound
+// if the index isn't present or carries no proposal.
+func (s *Storage) ActualAt(index uint64) (*cluster.Actual, error) {
 	first, err := s.firstEventSeq()
 	if err != nil {
 		return nil, err
@@ -164,7 +164,7 @@ func (s *Storage) ProposalAt(index uint64) (*cluster.Proposal, error) {
 		return nil, err
 	}
 	if first == 0 || last == 0 || last < first {
-		return nil, ErrProposalNotFound
+		return nil, ErrActualNotFound
 	}
 
 	lo, hi := first, last
@@ -181,26 +181,26 @@ func (s *Storage) ProposalAt(index uint64) (*cluster.Proposal, error) {
 		switch {
 		case ent.Index == index:
 			if ent.Type != pb.EntryNormal || ent.Data == nil {
-				return nil, ErrProposalNotFound
+				return nil, ErrActualNotFound
 			}
 			p := &cluster.Proposal{}
 			if err := p.Unmarshal(ent.Data, s); err != nil {
 				return nil, err
 			}
-			return p, nil
+			return &cluster.Actual{Index: ent.Index, Entities: p.Entities}, nil
 		case ent.Index < index:
 			lo = mid + 1
 		default:
 			if mid == first {
-				return nil, ErrProposalNotFound
+				return nil, ErrActualNotFound
 			}
 			hi = mid - 1
 		}
 	}
-	return nil, ErrProposalNotFound
+	return nil, ErrActualNotFound
 }
 
-func (s *Storage) Reader(id string) db.ProposalReader {
+func (s *Storage) Reader(id string) db.ActualReader {
 	i, err := s.getSyncableIndex(id)
 	if err != nil {
 		// TODO We should log this

@@ -31,9 +31,9 @@ func (db *DB) ReplaySyncableDeadLetter(ctx context.Context, id string, index uin
 		return cluster.ErrNotDeadLettered
 	}
 
-	p, err := db.storage.ProposalAt(index)
+	a, err := db.storage.ActualAt(index)
 	if err != nil {
-		return fmt.Errorf("read proposal at index %d: %w", index, err)
+		return fmt.Errorf("read committed entry at index %d: %w", index, err)
 	}
 
 	syncable, err := db.buildSyncable(id)
@@ -42,7 +42,7 @@ func (db *DB) ReplaySyncableDeadLetter(ctx context.Context, id string, index uin
 	}
 	defer func() { _ = syncable.Close() }()
 
-	if _, syncErr := syncable.Sync(ctx, p); syncErr != nil {
+	if _, syncErr := syncable.Sync(ctx, a); syncErr != nil {
 		return fmt.Errorf("%w: %v", cluster.ErrReplaySyncFailed, syncErr)
 	}
 

@@ -29,7 +29,7 @@ type permanentSyncable struct {
 	userCount int
 }
 
-func (s *permanentSyncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.ShouldSnapshot, error) {
+func (s *permanentSyncable) Sync(ctx context.Context, p *cluster.Actual) (cluster.ShouldSnapshot, error) {
 	if allSystem(p) {
 		return cluster.ShouldSnapshot(false), nil
 	}

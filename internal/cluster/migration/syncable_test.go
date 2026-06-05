@@ -15,10 +15,10 @@ import (
 
 // recordingSyncable saves every Proposal it receives.
 type recordingSyncable struct {
-	received []*cluster.Proposal
+	received []*cluster.Actual
 }
 
-func (r *recordingSyncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.ShouldSnapshot, error) {
+func (r *recordingSyncable) Sync(ctx context.Context, p *cluster.Actual) (cluster.ShouldSnapshot, error) {
 	r.received = append(r.received, p)
 	return cluster.ShouldSnapshot(true), nil
 }
@@ -29,10 +29,10 @@ func (r *recordingSyncable) Close() error { return nil }
 // BatchSyncable, to verify the wrapper preserves the batch optimization.
 type recordingBatchSyncable struct {
 	recordingSyncable
-	batches [][]*cluster.Proposal
+	batches [][]*cluster.Actual
 }
 
-func (r *recordingBatchSyncable) SyncBatch(ctx context.Context, ps []*cluster.Proposal) (bool, error) {
+func (r *recordingBatchSyncable) SyncBatch(ctx context.Context, ps []*cluster.Actual) (bool, error) {
 	r.batches = append(r.batches, ps)
 	return true, nil
 }
@@ -47,7 +47,7 @@ func TestWrap_MigratesEntityBeforeSync(t *testing.T) {
 	inner := &recordingSyncable{}
 	wrapped := migration.Wrap(inner, r)
 
-	p := &cluster.Proposal{Entities: []*cluster.Entity{{
+	p := &cluster.Actual{Entities: []*cluster.Entity{{
 		Type: &cluster.Type{ID: "person", Version: 1},
 		Key:  []byte("k"),
 		Data: []byte(`{"name":"alice"}`),
@@ -73,7 +73,7 @@ func TestWrap_SkipsWhenAtLatest(t *testing.T) {
 	wrapped := migration.Wrap(inner, r)
 
 	original := []byte(`{"name":"alice"}`)
-	p := &cluster.Proposal{Entities: []*cluster.Entity{{
+	p := &cluster.Actual{Entities: []*cluster.Entity{{
 		Type: &cluster.Type{ID: "person", Version: 1},
 		Key:  []byte("k"),
 		Data: original,
@@ -98,7 +98,7 @@ func TestWrap_PassesSystemEntitiesThrough(t *testing.T) {
 	e, err := cluster.NewUpsertTypeEntity(&cluster.Type{ID: "some-id", Name: "Name", Version: 1})
 	require.NoError(t, err)
 
-	p := &cluster.Proposal{Entities: []*cluster.Entity{e}}
+	p := &cluster.Actual{Entities: []*cluster.Entity{e}}
 	_, err = wrapped.Sync(context.Background(), p)
 	require.NoError(t, err, "system entities should bypass migration, no resolver lookup")
 	require.Len(t, inner.received, 1)
@@ -113,7 +113,7 @@ func TestWrap_MigrationFailureIsPermanent(t *testing.T) {
 	inner := &recordingSyncable{}
 	wrapped := migration.Wrap(inner, r)
 
-	p := &cluster.Proposal{Entities: []*cluster.Entity{{
+	p := &cluster.Actual{Entities: []*cluster.Entity{{
 		Type: &cluster.Type{ID: "person", Version: 1},
 		Key:  []byte("k"),
 		Data: []byte(`{"name":"alice"}`),
@@ -136,7 +136,7 @@ func TestWrap_PreservesBatchInterface(t *testing.T) {
 	require.True(t, isBatch, "Wrap of a BatchSyncable must satisfy cluster.BatchSyncable")
 
 	bs := wrapped.(cluster.BatchSyncable)
-	ps := []*cluster.Proposal{
+	ps := []*cluster.Actual{
 		{Entities: []*cluster.Entity{{
 			Type: &cluster.Type{ID: "person", Version: 1},
 			Key:  []byte("k1"),

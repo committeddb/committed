@@ -77,7 +77,7 @@ type Storage interface {
 	// ErrVersionNotFound if the ID exists but the pinned version
 	// doesn't.
 	ResolveType(ref cluster.TypeRef) (*cluster.Type, error)
-	Reader(id string) ProposalReader     // Gets current index by id cache. If id is not known, index is 0
+	Reader(id string) ActualReader       // Gets current index by id cache. If id is not known, index is 0
 	Position(id string) cluster.Position // Gets current index by id cache. If id is not known position is 0
 	// IngestSourceSeqHighwater returns the highest source sequence
 	// (cluster.Proposal.SourceSeq) applied for the given ingestable id,
@@ -118,10 +118,10 @@ type Storage interface {
 	// what makes the manual dead-letter flow node-agnostic.
 	SyncableStuck(id string) (cluster.SyncableStuck, bool, error)
 	SyncableSkipRequest(id string) (cluster.SyncableSkipRequest, bool, error)
-	// ProposalAt returns the committed proposal at a raft index, read from
-	// the permanent event log by binary search. Used by replay to re-drive a
-	// single dead-lettered proposal without disturbing any reader cursor.
-	ProposalAt(index uint64) (*cluster.Proposal, error)
+	// ActualAt returns the committed Actual at a raft index, read from the
+	// permanent event log by binary search. Used by replay to re-drive a
+	// single dead-lettered Actual without disturbing any reader cursor.
+	ActualAt(index uint64) (*cluster.Actual, error)
 	TypeVersions(id string) ([]cluster.VersionInfo, error)
 	TypeVersion(id string, version uint64) (*cluster.Configuration, error)
 }

@@ -28,7 +28,7 @@ type transientSyncable struct {
 	stuckHits int
 }
 
-func (s *transientSyncable) Sync(_ context.Context, p *cluster.Proposal) (cluster.ShouldSnapshot, error) {
+func (s *transientSyncable) Sync(_ context.Context, p *cluster.Actual) (cluster.ShouldSnapshot, error) {
 	if allSystem(p) {
 		return cluster.ShouldSnapshot(false), nil
 	}
@@ -175,7 +175,7 @@ type batchTransientSyncable struct {
 	solo    []string
 }
 
-func (s *batchTransientSyncable) SyncBatch(_ context.Context, ps []*cluster.Proposal) (bool, error) {
+func (s *batchTransientSyncable) SyncBatch(_ context.Context, ps []*cluster.Actual) (bool, error) {
 	s.mu.Lock()
 	s.batches++
 	s.mu.Unlock()
@@ -190,7 +190,7 @@ func (s *batchTransientSyncable) SyncBatch(_ context.Context, ps []*cluster.Prop
 	return true, nil
 }
 
-func (s *batchTransientSyncable) Sync(_ context.Context, p *cluster.Proposal) (cluster.ShouldSnapshot, error) {
+func (s *batchTransientSyncable) Sync(_ context.Context, p *cluster.Actual) (cluster.ShouldSnapshot, error) {
 	if allSystem(p) {
 		return cluster.ShouldSnapshot(false), nil
 	}

@@ -156,10 +156,10 @@ func getDriverValues(vs []any) []driver.Value {
 	return ds
 }
 
-func createProposals(t *testing.T, data [][]*Entity) []*cluster.Proposal {
-	ps := make([]*cluster.Proposal, 0, len(data))
+func createProposals(t *testing.T, data [][]*Entity) []*cluster.Actual {
+	ps := make([]*cluster.Actual, 0, len(data))
 	for _, dataToProposal := range data {
-		p := &cluster.Proposal{}
+		p := &cluster.Actual{}
 
 		for _, dataToEntity := range dataToProposal {
 			bs, err := json.Marshal(dataToEntity.Data)

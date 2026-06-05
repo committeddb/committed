@@ -44,8 +44,8 @@ func seedUserProposals(t *testing.T, d *db.DB, s *wal.Storage, typeID string, pa
 // proposals to syncables alongside user data; tests that care only about
 // user data skip them — and crucially do NOT bump the index for them, so
 // the persisted index tracks user proposals exactly.
-func allSystem(p *cluster.Proposal) bool {
-	for _, e := range p.Entities {
+func allSystem(a *cluster.Actual) bool {
+	for _, e := range a.Entities {
 		if !cluster.IsSystem(e.ID) {
 			return false
 		}
@@ -70,7 +70,7 @@ type probeSyncable struct {
 	cancel func()
 }
 
-func (p *probeSyncable) Sync(ctx context.Context, prop *cluster.Proposal) (cluster.ShouldSnapshot, error) {
+func (p *probeSyncable) Sync(ctx context.Context, prop *cluster.Actual) (cluster.ShouldSnapshot, error) {
 	if allSystem(prop) {
 		return cluster.ShouldSnapshot(false), nil
 	}
@@ -162,7 +162,7 @@ type recordingSyncable struct {
 	cancel      func()
 }
 
-func (s *recordingSyncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.ShouldSnapshot, error) {
+func (s *recordingSyncable) Sync(ctx context.Context, p *cluster.Actual) (cluster.ShouldSnapshot, error) {
 	if allSystem(p) {
 		return cluster.ShouldSnapshot(false), nil
 	}

@@ -27,14 +27,14 @@ to quickly create a Cobra application.`,
 
 		r := s.Reader("")
 		for {
-			_, p, err := r.Read()
+			a, err := r.Read()
 			if err == io.EOF {
 				break
 			} else if err != nil {
 				log.Fatalf("reader error: %v", err)
 			}
 
-			fmt.Println(p)
+			fmt.Println(a)
 		}
 	},
 }

@@ -3,7 +3,6 @@ package dbfakes
 
 import (
 	"sync"
-	"time"
 
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/db"
@@ -11,6 +10,19 @@ import (
 )
 
 type FakeStorage struct {
+	ActualAtStub        func(uint64) (*cluster.Actual, error)
+	actualAtMutex       sync.RWMutex
+	actualAtArgsForCall []struct {
+		arg1 uint64
+	}
+	actualAtReturns struct {
+		result1 *cluster.Actual
+		result2 error
+	}
+	actualAtReturnsOnCall map[int]struct {
+		result1 *cluster.Actual
+		result2 error
+	}
 	AppliedIndexStub        func() uint64
 	appliedIndexMutex       sync.RWMutex
 	appliedIndexArgsForCall []struct {
@@ -273,19 +285,6 @@ type FakeStorage struct {
 	positionReturnsOnCall map[int]struct {
 		result1 cluster.Position
 	}
-	ProposalAtStub        func(uint64) (*cluster.Proposal, error)
-	proposalAtMutex       sync.RWMutex
-	proposalAtArgsForCall []struct {
-		arg1 uint64
-	}
-	proposalAtReturns struct {
-		result1 *cluster.Proposal
-		result2 error
-	}
-	proposalAtReturnsOnCall map[int]struct {
-		result1 *cluster.Proposal
-		result2 error
-	}
 	RaftLogApproxSizeStub        func() (uint64, error)
 	raftLogApproxSizeMutex       sync.RWMutex
 	raftLogApproxSizeArgsForCall []struct {
@@ -298,16 +297,16 @@ type FakeStorage struct {
 		result1 uint64
 		result2 error
 	}
-	ReaderStub        func(string) db.ProposalReader
+	ReaderStub        func(string) db.ActualReader
 	readerMutex       sync.RWMutex
 	readerArgsForCall []struct {
 		arg1 string
 	}
 	readerReturns struct {
-		result1 db.ProposalReader
+		result1 db.ActualReader
 	}
 	readerReturnsOnCall map[int]struct {
-		result1 db.ProposalReader
+		result1 db.ActualReader
 	}
 	ResolveTypeStub        func(cluster.TypeRef) (*cluster.Type, error)
 	resolveTypeMutex       sync.RWMutex
@@ -455,21 +454,6 @@ type FakeStorage struct {
 		result1 uint64
 		result2 error
 	}
-	TimePointsStub        func(string, time.Time, time.Time) ([]cluster.TimePoint, error)
-	timePointsMutex       sync.RWMutex
-	timePointsArgsForCall []struct {
-		arg1 string
-		arg2 time.Time
-		arg3 time.Time
-	}
-	timePointsReturns struct {
-		result1 []cluster.TimePoint
-		result2 error
-	}
-	timePointsReturnsOnCall map[int]struct {
-		result1 []cluster.TimePoint
-		result2 error
-	}
 	TypeVersionStub        func(string, uint64) (*cluster.Configuration, error)
 	typeVersionMutex       sync.RWMutex
 	typeVersionArgsForCall []struct {
@@ -511,6 +495,70 @@ type FakeStorage struct {
 	}
 	invocations      map[string][][]interface{}
 	invocationsMutex sync.RWMutex
+}
+
+func (fake *FakeStorage) ActualAt(arg1 uint64) (*cluster.Actual, error) {
+	fake.actualAtMutex.Lock()
+	ret, specificReturn := fake.actualAtReturnsOnCall[len(fake.actualAtArgsForCall)]
+	fake.actualAtArgsForCall = append(fake.actualAtArgsForCall, struct {
+		arg1 uint64
+	}{arg1})
+	stub := fake.ActualAtStub
+	fakeReturns := fake.actualAtReturns
+	fake.recordInvocation("ActualAt", []interface{}{arg1})
+	fake.actualAtMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeStorage) ActualAtCallCount() int {
+	fake.actualAtMutex.RLock()
+	defer fake.actualAtMutex.RUnlock()
+	return len(fake.actualAtArgsForCall)
+}
+
+func (fake *FakeStorage) ActualAtCalls(stub func(uint64) (*cluster.Actual, error)) {
+	fake.actualAtMutex.Lock()
+	defer fake.actualAtMutex.Unlock()
+	fake.ActualAtStub = stub
+}
+
+func (fake *FakeStorage) ActualAtArgsForCall(i int) uint64 {
+	fake.actualAtMutex.RLock()
+	defer fake.actualAtMutex.RUnlock()
+	argsForCall := fake.actualAtArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeStorage) ActualAtReturns(result1 *cluster.Actual, result2 error) {
+	fake.actualAtMutex.Lock()
+	defer fake.actualAtMutex.Unlock()
+	fake.ActualAtStub = nil
+	fake.actualAtReturns = struct {
+		result1 *cluster.Actual
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeStorage) ActualAtReturnsOnCall(i int, result1 *cluster.Actual, result2 error) {
+	fake.actualAtMutex.Lock()
+	defer fake.actualAtMutex.Unlock()
+	fake.ActualAtStub = nil
+	if fake.actualAtReturnsOnCall == nil {
+		fake.actualAtReturnsOnCall = make(map[int]struct {
+			result1 *cluster.Actual
+			result2 error
+		})
+	}
+	fake.actualAtReturnsOnCall[i] = struct {
+		result1 *cluster.Actual
+		result2 error
+	}{result1, result2}
 }
 
 func (fake *FakeStorage) AppliedIndex() uint64 {
@@ -1810,70 +1858,6 @@ func (fake *FakeStorage) PositionReturnsOnCall(i int, result1 cluster.Position) 
 	}{result1}
 }
 
-func (fake *FakeStorage) ProposalAt(arg1 uint64) (*cluster.Proposal, error) {
-	fake.proposalAtMutex.Lock()
-	ret, specificReturn := fake.proposalAtReturnsOnCall[len(fake.proposalAtArgsForCall)]
-	fake.proposalAtArgsForCall = append(fake.proposalAtArgsForCall, struct {
-		arg1 uint64
-	}{arg1})
-	stub := fake.ProposalAtStub
-	fakeReturns := fake.proposalAtReturns
-	fake.recordInvocation("ProposalAt", []interface{}{arg1})
-	fake.proposalAtMutex.Unlock()
-	if stub != nil {
-		return stub(arg1)
-	}
-	if specificReturn {
-		return ret.result1, ret.result2
-	}
-	return fakeReturns.result1, fakeReturns.result2
-}
-
-func (fake *FakeStorage) ProposalAtCallCount() int {
-	fake.proposalAtMutex.RLock()
-	defer fake.proposalAtMutex.RUnlock()
-	return len(fake.proposalAtArgsForCall)
-}
-
-func (fake *FakeStorage) ProposalAtCalls(stub func(uint64) (*cluster.Proposal, error)) {
-	fake.proposalAtMutex.Lock()
-	defer fake.proposalAtMutex.Unlock()
-	fake.ProposalAtStub = stub
-}
-
-func (fake *FakeStorage) ProposalAtArgsForCall(i int) uint64 {
-	fake.proposalAtMutex.RLock()
-	defer fake.proposalAtMutex.RUnlock()
-	argsForCall := fake.proposalAtArgsForCall[i]
-	return argsForCall.arg1
-}
-
-func (fake *FakeStorage) ProposalAtReturns(result1 *cluster.Proposal, result2 error) {
-	fake.proposalAtMutex.Lock()
-	defer fake.proposalAtMutex.Unlock()
-	fake.ProposalAtStub = nil
-	fake.proposalAtReturns = struct {
-		result1 *cluster.Proposal
-		result2 error
-	}{result1, result2}
-}
-
-func (fake *FakeStorage) ProposalAtReturnsOnCall(i int, result1 *cluster.Proposal, result2 error) {
-	fake.proposalAtMutex.Lock()
-	defer fake.proposalAtMutex.Unlock()
-	fake.ProposalAtStub = nil
-	if fake.proposalAtReturnsOnCall == nil {
-		fake.proposalAtReturnsOnCall = make(map[int]struct {
-			result1 *cluster.Proposal
-			result2 error
-		})
-	}
-	fake.proposalAtReturnsOnCall[i] = struct {
-		result1 *cluster.Proposal
-		result2 error
-	}{result1, result2}
-}
-
 func (fake *FakeStorage) RaftLogApproxSize() (uint64, error) {
 	fake.raftLogApproxSizeMutex.Lock()
 	ret, specificReturn := fake.raftLogApproxSizeReturnsOnCall[len(fake.raftLogApproxSizeArgsForCall)]
@@ -1930,7 +1914,7 @@ func (fake *FakeStorage) RaftLogApproxSizeReturnsOnCall(i int, result1 uint64, r
 	}{result1, result2}
 }
 
-func (fake *FakeStorage) Reader(arg1 string) db.ProposalReader {
+func (fake *FakeStorage) Reader(arg1 string) db.ActualReader {
 	fake.readerMutex.Lock()
 	ret, specificReturn := fake.readerReturnsOnCall[len(fake.readerArgsForCall)]
 	fake.readerArgsForCall = append(fake.readerArgsForCall, struct {
@@ -1955,7 +1939,7 @@ func (fake *FakeStorage) ReaderCallCount() int {
 	return len(fake.readerArgsForCall)
 }
 
-func (fake *FakeStorage) ReaderCalls(stub func(string) db.ProposalReader) {
+func (fake *FakeStorage) ReaderCalls(stub func(string) db.ActualReader) {
 	fake.readerMutex.Lock()
 	defer fake.readerMutex.Unlock()
 	fake.ReaderStub = stub
@@ -1968,26 +1952,26 @@ func (fake *FakeStorage) ReaderArgsForCall(i int) string {
 	return argsForCall.arg1
 }
 
-func (fake *FakeStorage) ReaderReturns(result1 db.ProposalReader) {
+func (fake *FakeStorage) ReaderReturns(result1 db.ActualReader) {
 	fake.readerMutex.Lock()
 	defer fake.readerMutex.Unlock()
 	fake.ReaderStub = nil
 	fake.readerReturns = struct {
-		result1 db.ProposalReader
+		result1 db.ActualReader
 	}{result1}
 }
 
-func (fake *FakeStorage) ReaderReturnsOnCall(i int, result1 db.ProposalReader) {
+func (fake *FakeStorage) ReaderReturnsOnCall(i int, result1 db.ActualReader) {
 	fake.readerMutex.Lock()
 	defer fake.readerMutex.Unlock()
 	fake.ReaderStub = nil
 	if fake.readerReturnsOnCall == nil {
 		fake.readerReturnsOnCall = make(map[int]struct {
-			result1 db.ProposalReader
+			result1 db.ActualReader
 		})
 	}
 	fake.readerReturnsOnCall[i] = struct {
-		result1 db.ProposalReader
+		result1 db.ActualReader
 	}{result1}
 }
 
@@ -2689,72 +2673,6 @@ func (fake *FakeStorage) TermReturnsOnCall(i int, result1 uint64, result2 error)
 	}{result1, result2}
 }
 
-func (fake *FakeStorage) TimePoints(arg1 string, arg2 time.Time, arg3 time.Time) ([]cluster.TimePoint, error) {
-	fake.timePointsMutex.Lock()
-	ret, specificReturn := fake.timePointsReturnsOnCall[len(fake.timePointsArgsForCall)]
-	fake.timePointsArgsForCall = append(fake.timePointsArgsForCall, struct {
-		arg1 string
-		arg2 time.Time
-		arg3 time.Time
-	}{arg1, arg2, arg3})
-	stub := fake.TimePointsStub
-	fakeReturns := fake.timePointsReturns
-	fake.recordInvocation("TimePoints", []interface{}{arg1, arg2, arg3})
-	fake.timePointsMutex.Unlock()
-	if stub != nil {
-		return stub(arg1, arg2, arg3)
-	}
-	if specificReturn {
-		return ret.result1, ret.result2
-	}
-	return fakeReturns.result1, fakeReturns.result2
-}
-
-func (fake *FakeStorage) TimePointsCallCount() int {
-	fake.timePointsMutex.RLock()
-	defer fake.timePointsMutex.RUnlock()
-	return len(fake.timePointsArgsForCall)
-}
-
-func (fake *FakeStorage) TimePointsCalls(stub func(string, time.Time, time.Time) ([]cluster.TimePoint, error)) {
-	fake.timePointsMutex.Lock()
-	defer fake.timePointsMutex.Unlock()
-	fake.TimePointsStub = stub
-}
-
-func (fake *FakeStorage) TimePointsArgsForCall(i int) (string, time.Time, time.Time) {
-	fake.timePointsMutex.RLock()
-	defer fake.timePointsMutex.RUnlock()
-	argsForCall := fake.timePointsArgsForCall[i]
-	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3
-}
-
-func (fake *FakeStorage) TimePointsReturns(result1 []cluster.TimePoint, result2 error) {
-	fake.timePointsMutex.Lock()
-	defer fake.timePointsMutex.Unlock()
-	fake.TimePointsStub = nil
-	fake.timePointsReturns = struct {
-		result1 []cluster.TimePoint
-		result2 error
-	}{result1, result2}
-}
-
-func (fake *FakeStorage) TimePointsReturnsOnCall(i int, result1 []cluster.TimePoint, result2 error) {
-	fake.timePointsMutex.Lock()
-	defer fake.timePointsMutex.Unlock()
-	fake.TimePointsStub = nil
-	if fake.timePointsReturnsOnCall == nil {
-		fake.timePointsReturnsOnCall = make(map[int]struct {
-			result1 []cluster.TimePoint
-			result2 error
-		})
-	}
-	fake.timePointsReturnsOnCall[i] = struct {
-		result1 []cluster.TimePoint
-		result2 error
-	}{result1, result2}
-}
-
 func (fake *FakeStorage) TypeVersion(arg1 string, arg2 uint64) (*cluster.Configuration, error) {
 	fake.typeVersionMutex.Lock()
 	ret, specificReturn := fake.typeVersionReturnsOnCall[len(fake.typeVersionArgsForCall)]
@@ -2943,6 +2861,8 @@ func (fake *FakeStorage) TypesReturnsOnCall(i int, result1 []*cluster.Configurat
 func (fake *FakeStorage) Invocations() map[string][][]interface{} {
 	fake.invocationsMutex.RLock()
 	defer fake.invocationsMutex.RUnlock()
+	fake.actualAtMutex.RLock()
+	defer fake.actualAtMutex.RUnlock()
 	fake.appliedIndexMutex.RLock()
 	defer fake.appliedIndexMutex.RUnlock()
 	fake.applyCommittedMutex.RLock()
@@ -2987,8 +2907,6 @@ func (fake *FakeStorage) Invocations() map[string][][]interface{} {
 	defer fake.nodeMutex.RUnlock()
 	fake.positionMutex.RLock()
 	defer fake.positionMutex.RUnlock()
-	fake.proposalAtMutex.RLock()
-	defer fake.proposalAtMutex.RUnlock()
 	fake.raftLogApproxSizeMutex.RLock()
 	defer fake.raftLogApproxSizeMutex.RUnlock()
 	fake.readerMutex.RLock()
@@ -3015,8 +2933,6 @@ func (fake *FakeStorage) Invocations() map[string][][]interface{} {
 	defer fake.syncablesMutex.RUnlock()
 	fake.termMutex.RLock()
 	defer fake.termMutex.RUnlock()
-	fake.timePointsMutex.RLock()
-	defer fake.timePointsMutex.RUnlock()
 	fake.typeVersionMutex.RLock()
 	defer fake.typeVersionMutex.RUnlock()
 	fake.typeVersionsMutex.RLock()

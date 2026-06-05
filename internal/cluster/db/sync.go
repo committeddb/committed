@@ -129,19 +129,17 @@ func (db *DB) sync(ctx context.Context, id string, s cluster.Syncable) error {
 
 func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) error {
 	isNode := false
-	var r ProposalReader
+	var r ActualReader
 	backoff := syncBackoffMin
 
-	// retryIndex and retryProposal hold a proposal that failed with a
-	// transient error. On the next iteration the worker retries the same
-	// proposal instead of reading a new one from the log — transient
-	// errors retry forever, so the worker stalls (visibly) rather than
-	// losing data. retryErr is the most recent transient error, recorded
-	// as the dead-letter message if an operator skips the wedged proposal.
-	// All three are cleared on success, permanent error, manual skip, or
-	// leadership transition.
-	var retryIndex uint64
-	var retryProposal *cluster.Proposal
+	// retryActual holds an Actual that failed with a transient error. On
+	// the next iteration the worker retries the same Actual instead of
+	// reading a new one from the log — transient errors retry forever, so
+	// the worker stalls (visibly) rather than losing data. retryErr is the
+	// most recent transient error, recorded as the dead-letter message if
+	// an operator skips the wedged Actual. Both are cleared on success,
+	// permanent error, manual skip, or leadership transition.
+	var retryActual *cluster.Actual
 	var retryErr error
 	tracker := &stuckTracker{db: db, id: id}
 
@@ -165,24 +163,25 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 			db.logger.Info("stopping sync", zap.String("id", id))
 			r = nil
 			isNode = false
-			retryProposal = nil
+			retryActual = nil
 			tracker.cleared(ctx)
 			progressed = true
 		case !isNode && db.isNode(id):
 			db.logger.Info("starting sync", zap.String("id", id))
 			r = db.storage.Reader(id)
 			isNode = true
-			retryProposal = nil
+			retryActual = nil
 			tracker.cleared(ctx)
 			progressed = true
 		case isNode && db.isNode(id):
 			var i uint64
-			var p *cluster.Proposal
+			var a *cluster.Actual
 			var readErr error
 
-			if retryProposal != nil {
-				i, p = retryIndex, retryProposal
-				// The worker is blocked retrying this proposal. If an
+			if retryActual != nil {
+				a = retryActual
+				i = a.Index
+				// The worker is blocked retrying this Actual. If an
 				// operator asked to dead-letter what it's stuck on, honor
 				// it now: record the skip (kind "manual", carrying the last
 				// transient error) and advance past it instead of syncing.
@@ -190,14 +189,17 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 					db.logger.Warn("operator dead-letter: skipping wedged proposal",
 						zap.String("id", id), zap.Uint64("index", i), zap.Error(retryErr))
 					db.recordSyncDeadLetter(ctx, id, i, "manual", retryErr)
-					retryProposal = nil
+					retryActual = nil
 					retryErr = nil
 					tracker.honored(ctx)
 					progressed = true
 					break
 				}
 			} else {
-				i, p, readErr = r.Read()
+				a, readErr = r.Read()
+				if readErr == nil {
+					i = a.Index
+				}
 			}
 
 			switch {
@@ -218,7 +220,7 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 				} else if dl {
 					db.logger.Info("skipping already dead-lettered proposal",
 						zap.String("id", id), zap.Uint64("index", i))
-					retryProposal = nil
+					retryActual = nil
 					retryErr = nil
 					tracker.cleared(ctx)
 					progressed = true
@@ -233,7 +235,7 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 				// SQL dialect uses upsert), so the replacement worker
 				// re-syncing the same proposal after a cancel is safe.
 				syncStart := time.Now()
-				shouldSnapshot, syncErr := s.Sync(ctx, p)
+				shouldSnapshot, syncErr := s.Sync(ctx, a)
 				if db.metrics != nil {
 					db.metrics.SyncCompleted(id, time.Since(syncStart))
 				}
@@ -242,15 +244,14 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 						db.logger.Error("permanent sync error, skipping proposal",
 							zap.String("id", id), zap.Uint64("index", i), zap.Error(syncErr))
 						db.recordSyncPermanentError(ctx, id, i, syncErr)
-						retryProposal = nil
+						retryActual = nil
 						retryErr = nil
 						tracker.cleared(ctx)
 					} else {
 						db.logger.Warn("transient sync error, will retry",
 							zap.String("id", id), zap.Uint64("index", i), zap.Error(syncErr))
 						db.recordSyncTransientError(id)
-						retryIndex = i
-						retryProposal = p
+						retryActual = a
 						retryErr = syncErr
 						// Publish (after the debounce) the index the worker is
 						// blocked on so any node can report it and an operator
@@ -260,7 +261,7 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 						break
 					}
 				} else {
-					retryProposal = nil
+					retryActual = nil
 					retryErr = nil
 					tracker.cleared(ctx)
 				}
@@ -277,8 +278,7 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 						// cancellation the loop-top check exits before retrying.
 						db.logger.Warn("proposeSyncableIndex error, will retry",
 							zap.String("id", id), zap.Uint64("index", i), zap.Error(err))
-						retryIndex = i
-						retryProposal = p
+						retryActual = a
 						break
 					}
 				}
@@ -308,19 +308,14 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 	}
 }
 
-// batchEntry pairs a proposal with its WAL index so the batch flush
-// can advance SyncableIndex to the last index in the batch.
-type batchEntry struct {
-	index    uint64
-	proposal *cluster.Proposal
-}
-
 func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs cluster.BatchSyncable) error {
 	isNode := false
-	var r ProposalReader
+	var r ActualReader
 	backoff := syncBackoffMin
 
-	var batch []batchEntry
+	// batch accumulates Actuals until a flush; each Actual carries its own
+	// Index, so the flush can advance SyncableIndex to the last in the batch.
+	var batch []*cluster.Actual
 	var batchStart time.Time
 	// retryBatch is set when a flush fails with a transient error. The
 	// next iteration retries the flush instead of reading more proposals.
@@ -332,13 +327,8 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 			return true
 		}
 
-		ps := make([]*cluster.Proposal, len(batch))
-		for i, e := range batch {
-			ps[i] = e.proposal
-		}
-
 		syncStart := time.Now()
-		shouldSnapshot, syncErr := bs.SyncBatch(ctx, ps)
+		shouldSnapshot, syncErr := bs.SyncBatch(ctx, batch)
 		if db.metrics != nil {
 			db.metrics.SyncCompleted(id, time.Since(syncStart))
 		}
@@ -369,11 +359,11 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 			// batch fails atomically, so the head is the cursor; honoring the
 			// request isolates the batch per-proposal (see the retryBatch
 			// branch).
-			tracker.wedged(ctx, batch[0].index, syncErr)
+			tracker.wedged(ctx, batch[0].Index, syncErr)
 			return false
 		}
 
-		lastIndex := batch[len(batch)-1].index
+		lastIndex := batch[len(batch)-1].Index
 		if shouldSnapshot {
 			if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: lastIndex}); err != nil {
 				// The bump did not durably apply (ctx canceled, or
@@ -428,9 +418,9 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 				// is stuck on: isolate it per-proposal, dead-lettering (kind
 				// "manual") only the proposals that still fail and advancing
 				// the rest. One operator action clears one wedged batch.
-				if len(batch) > 0 && tracker.skipRequested(ctx, batch[0].index) {
+				if len(batch) > 0 && tracker.skipRequested(ctx, batch[0].Index) {
 					db.logger.Warn("operator dead-letter: isolating wedged batch",
-						zap.String("id", id), zap.Int("batch_size", len(batch)), zap.Uint64("head_index", batch[0].index))
+						zap.String("id", id), zap.Int("batch_size", len(batch)), zap.Uint64("head_index", batch[0].Index))
 					if db.syncBatchFallback(ctx, id, s, batch, "manual") {
 						batch = batch[:0]
 						retryBatch = false
@@ -445,7 +435,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 				break
 			}
 
-			i, p, readErr := r.Read()
+			a, readErr := r.Read()
 			switch {
 			case readErr == io.EOF:
 				// Caught up. Flush any partial batch immediately.
@@ -457,6 +447,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 			case readErr != nil:
 				db.logger.Warn("sync read error", zap.String("id", id), zap.Error(readErr))
 			default:
+				i := a.Index
 				// Exclude a proposal already dead-lettered (a permanent skip
 				// or an operator's manual skip) from the batch, so the skip
 				// survives restart and a manually-isolated poison proposal
@@ -474,7 +465,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 				if len(batch) == 0 {
 					batchStart = time.Now()
 				}
-				batch = append(batch, batchEntry{index: i, proposal: p})
+				batch = append(batch, a)
 
 				// Flush if batch is full or has aged past the deadline.
 				if len(batch) >= syncBatchMaxSize || time.Since(batchStart) >= syncBatchMaxAge {
@@ -518,45 +509,45 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 //     on what the syncable is stuck on, so dead-letter the still-failing
 //     proposal with that kind ("manual") and continue, isolating the bad
 //     proposal(s) while letting the healthy ones in the batch through.
-func (db *DB) syncBatchFallback(ctx context.Context, id string, s cluster.Syncable, entries []batchEntry, transientSkipKind string) bool {
+func (db *DB) syncBatchFallback(ctx context.Context, id string, s cluster.Syncable, entries []*cluster.Actual, transientSkipKind string) bool {
 	for _, e := range entries {
 		syncStart := time.Now()
-		shouldSnapshot, syncErr := s.Sync(ctx, e.proposal)
+		shouldSnapshot, syncErr := s.Sync(ctx, e)
 		if db.metrics != nil {
 			db.metrics.SyncCompleted(id, time.Since(syncStart))
 		}
 		if syncErr != nil {
 			if errors.Is(syncErr, cluster.ErrPermanent) {
 				db.logger.Error("permanent sync error, skipping proposal",
-					zap.String("id", id), zap.Uint64("index", e.index), zap.Error(syncErr))
-				db.recordSyncPermanentError(ctx, id, e.index, syncErr)
+					zap.String("id", id), zap.Uint64("index", e.Index), zap.Error(syncErr))
+				db.recordSyncPermanentError(ctx, id, e.Index, syncErr)
 				continue
 			}
 			if transientSkipKind != "" {
 				// Operator-requested isolation: skip the still-failing
 				// proposal rather than re-blocking on it.
 				db.logger.Warn("operator dead-letter: skipping proposal that still fails in isolation",
-					zap.String("id", id), zap.Uint64("index", e.index), zap.Error(syncErr))
-				db.recordSyncDeadLetter(ctx, id, e.index, transientSkipKind, syncErr)
+					zap.String("id", id), zap.Uint64("index", e.Index), zap.Error(syncErr))
+				db.recordSyncDeadLetter(ctx, id, e.Index, transientSkipKind, syncErr)
 				continue
 			}
 			// Transient error in fallback — stop here. The caller
 			// should not retry this batch (the successful prefix
 			// was already committed via Sync's idempotent upsert).
 			db.logger.Warn("transient sync error in fallback, stopping",
-				zap.String("id", id), zap.Uint64("index", e.index), zap.Error(syncErr))
+				zap.String("id", id), zap.Uint64("index", e.Index), zap.Error(syncErr))
 			db.recordSyncTransientError(id)
 			return false
 		}
 		if shouldSnapshot {
-			if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: e.index}); err != nil {
+			if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: e.Index}); err != nil {
 				// The bump did not durably apply. Stop the fallback and
 				// leave the remaining batch for the caller to retry rather
 				// than advancing past an unconfirmed index. The successful
 				// prefix was already pushed downstream via the idempotent
 				// Sync, so re-processing on retry is safe.
 				db.logger.Warn("proposeSyncableIndex error in fallback, stopping",
-					zap.String("id", id), zap.Uint64("index", e.index), zap.Error(err))
+					zap.String("id", id), zap.Uint64("index", e.Index), zap.Error(err))
 				return false
 			}
 		}

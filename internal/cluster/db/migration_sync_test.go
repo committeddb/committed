@@ -36,12 +36,12 @@ func proposeTypeWithMigration(t *testing.T, d *db.DB, id, name, schema, jq strin
 // one goroutine.
 type captureSyncable struct {
 	mu        sync.Mutex
-	received  []*cluster.Proposal
+	received  []*cluster.Actual
 	doneAfter int
 	cancel    func()
 }
 
-func (c *captureSyncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.ShouldSnapshot, error) {
+func (c *captureSyncable) Sync(ctx context.Context, p *cluster.Actual) (cluster.ShouldSnapshot, error) {
 	// Ignore proposals that only contain system config entries (types,
 	// syncables, etc.). Tests care about user data; the sync worker
 	// delivers everything on the log.
@@ -68,10 +68,10 @@ func (c *captureSyncable) Sync(ctx context.Context, p *cluster.Proposal) (cluste
 
 func (c *captureSyncable) Close() error { return nil }
 
-func (c *captureSyncable) proposals() []*cluster.Proposal {
+func (c *captureSyncable) proposals() []*cluster.Actual {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	out := make([]*cluster.Proposal, len(c.received))
+	out := make([]*cluster.Actual, len(c.received))
 	copy(out, c.received)
 	return out
 }

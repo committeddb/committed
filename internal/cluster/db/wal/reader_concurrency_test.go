@@ -37,9 +37,9 @@ func TestReader_ConcurrentReads(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			idx, _, err := reader.Read()
+			a, err := reader.Read()
 			if err == nil {
-				results <- idx
+				results <- a.Index
 			}
 		}()
 	}

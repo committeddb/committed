@@ -44,21 +44,24 @@ var ErrReplaySyncFailed = errors.New("cluster: replay re-sync failed")
 
 type ShouldSnapshot bool
 
-// Syncable consumes proposals from the commit log and applies them to
-// an external system (e.g., a SQL database, webhook, file).
+// Syncable consumes committed Actuals from the log and applies them to
+// an external system (e.g., a SQL database, webhook, file). It is handed
+// Actuals (committed facts with an Index), in Index order — never Proposals.
 //
 // Contract:
-//   - Sync MUST be idempotent. The same proposal may be delivered more
+//   - Sync MUST be idempotent. The same Actual may be delivered more
 //     than once due to leader transition, worker replace, or process
 //     restart. Implementations should use upsert or equivalent semantics.
+//   - An Actual's entities are one atomic unit (one committed transaction);
+//     apply them together (e.g. in one destination transaction).
 //   - Sync errors are retried with exponential backoff. Wrap with
-//     cluster.Permanent(err) to skip the proposal instead of retrying.
+//     cluster.Permanent(err) to skip the Actual instead of retrying.
 //   - Sync receives a context tied to the worker lifecycle; respect
 //     ctx.Done() for cooperative shutdown.
 //
 //counterfeiter:generate . Syncable
 type Syncable interface {
-	Sync(ctx context.Context, p *Proposal) (ShouldSnapshot, error)
+	Sync(ctx context.Context, a *Actual) (ShouldSnapshot, error)
 	Close() error
 }
 
@@ -97,23 +100,20 @@ func ParseSyncableMode(s string) (SyncableMode, error) {
 }
 
 // BatchSyncable is an optional extension of Syncable for implementations
-// that benefit from processing multiple proposals in a single transaction
+// that benefit from processing multiple Actuals in a single transaction
 // (e.g., SQL databases). db.sync checks for this interface at startup and
-// uses SyncBatch when available, falling back to per-proposal Sync
-// otherwise.
+// uses SyncBatch when available, falling back to per-Actual Sync otherwise.
 //
-// SyncBatch receives a slice of proposals and returns the count of
-// proposals that should be snapshotted (counted from the start of the
-// slice). On success, the caller advances SyncableIndex to the last
-// proposal in the batch.
+// SyncBatch receives a slice of Actuals (each itself an atomic unit) and
+// returns whether the batch should be snapshotted. On success, the caller
+// advances SyncableIndex to the last Actual in the batch.
 //
 // Error semantics match Syncable.Sync: wrap with cluster.Permanent(err)
-// to skip proposals. When a batch returns a permanent error, the caller
-// falls back to per-proposal Sync on that batch to isolate the bad
-// proposal.
+// to skip Actuals. When a batch returns a permanent error, the caller
+// falls back to per-Actual Sync on that batch to isolate the bad one.
 type BatchSyncable interface {
 	Syncable
-	SyncBatch(ctx context.Context, ps []*Proposal) (shouldSnapshot bool, err error)
+	SyncBatch(ctx context.Context, as []*Actual) (shouldSnapshot bool, err error)
 }
 
 // Parser will parse a viper file into a Syncable

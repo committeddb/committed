@@ -8,26 +8,24 @@ import (
 	"github.com/philborlin/committed/internal/cluster/db"
 )
 
-type FakeProposalReader struct {
-	ReadStub        func() (uint64, *cluster.Proposal, error)
+type FakeActualReader struct {
+	ReadStub        func() (*cluster.Actual, error)
 	readMutex       sync.RWMutex
 	readArgsForCall []struct {
 	}
 	readReturns struct {
-		result1 uint64
-		result2 *cluster.Proposal
-		result3 error
+		result1 *cluster.Actual
+		result2 error
 	}
 	readReturnsOnCall map[int]struct {
-		result1 uint64
-		result2 *cluster.Proposal
-		result3 error
+		result1 *cluster.Actual
+		result2 error
 	}
 	invocations      map[string][][]interface{}
 	invocationsMutex sync.RWMutex
 }
 
-func (fake *FakeProposalReader) Read() (uint64, *cluster.Proposal, error) {
+func (fake *FakeActualReader) Read() (*cluster.Actual, error) {
 	fake.readMutex.Lock()
 	ret, specificReturn := fake.readReturnsOnCall[len(fake.readArgsForCall)]
 	fake.readArgsForCall = append(fake.readArgsForCall, struct {
@@ -40,53 +38,50 @@ func (fake *FakeProposalReader) Read() (uint64, *cluster.Proposal, error) {
 		return stub()
 	}
 	if specificReturn {
-		return ret.result1, ret.result2, ret.result3
+		return ret.result1, ret.result2
 	}
-	return fakeReturns.result1, fakeReturns.result2, fakeReturns.result3
+	return fakeReturns.result1, fakeReturns.result2
 }
 
-func (fake *FakeProposalReader) ReadCallCount() int {
+func (fake *FakeActualReader) ReadCallCount() int {
 	fake.readMutex.RLock()
 	defer fake.readMutex.RUnlock()
 	return len(fake.readArgsForCall)
 }
 
-func (fake *FakeProposalReader) ReadCalls(stub func() (uint64, *cluster.Proposal, error)) {
+func (fake *FakeActualReader) ReadCalls(stub func() (*cluster.Actual, error)) {
 	fake.readMutex.Lock()
 	defer fake.readMutex.Unlock()
 	fake.ReadStub = stub
 }
 
-func (fake *FakeProposalReader) ReadReturns(result1 uint64, result2 *cluster.Proposal, result3 error) {
+func (fake *FakeActualReader) ReadReturns(result1 *cluster.Actual, result2 error) {
 	fake.readMutex.Lock()
 	defer fake.readMutex.Unlock()
 	fake.ReadStub = nil
 	fake.readReturns = struct {
-		result1 uint64
-		result2 *cluster.Proposal
-		result3 error
-	}{result1, result2, result3}
+		result1 *cluster.Actual
+		result2 error
+	}{result1, result2}
 }
 
-func (fake *FakeProposalReader) ReadReturnsOnCall(i int, result1 uint64, result2 *cluster.Proposal, result3 error) {
+func (fake *FakeActualReader) ReadReturnsOnCall(i int, result1 *cluster.Actual, result2 error) {
 	fake.readMutex.Lock()
 	defer fake.readMutex.Unlock()
 	fake.ReadStub = nil
 	if fake.readReturnsOnCall == nil {
 		fake.readReturnsOnCall = make(map[int]struct {
-			result1 uint64
-			result2 *cluster.Proposal
-			result3 error
+			result1 *cluster.Actual
+			result2 error
 		})
 	}
 	fake.readReturnsOnCall[i] = struct {
-		result1 uint64
-		result2 *cluster.Proposal
-		result3 error
-	}{result1, result2, result3}
+		result1 *cluster.Actual
+		result2 error
+	}{result1, result2}
 }
 
-func (fake *FakeProposalReader) Invocations() map[string][][]interface{} {
+func (fake *FakeActualReader) Invocations() map[string][][]interface{} {
 	fake.invocationsMutex.RLock()
 	defer fake.invocationsMutex.RUnlock()
 	fake.readMutex.RLock()
@@ -98,7 +93,7 @@ func (fake *FakeProposalReader) Invocations() map[string][][]interface{} {
 	return copiedInvocations
 }
 
-func (fake *FakeProposalReader) recordInvocation(key string, args []interface{}) {
+func (fake *FakeActualReader) recordInvocation(key string, args []interface{}) {
 	fake.invocationsMutex.Lock()
 	defer fake.invocationsMutex.Unlock()
 	if fake.invocations == nil {
@@ -110,4 +105,4 @@ func (fake *FakeProposalReader) recordInvocation(key string, args []interface{})
 	fake.invocations[key] = append(fake.invocations[key], args)
 }
 
-var _ db.ProposalReader = new(FakeProposalReader)
+var _ db.ActualReader = new(FakeActualReader)

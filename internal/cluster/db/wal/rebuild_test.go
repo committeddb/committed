@@ -104,7 +104,7 @@ func TestRebuild_EndToEnd(t *testing.T) {
 	r := recovered.Reader("fresh-syncable")
 	var count int
 	for {
-		_, _, err := r.Read()
+		_, err := r.Read()
 		if err == io.EOF {
 			break
 		}

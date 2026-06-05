@@ -130,7 +130,7 @@ func TestSave_SyncableIndexEntity(t *testing.T) {
 
 	// Reader with checkpoint at index 2 should skip the syncable index entry at 3
 	reader := s.Reader("sync-1")
-	_, _, err := reader.Read()
+	_, err := reader.Read()
 	require.Equal(t, io.EOF, err)
 }
 

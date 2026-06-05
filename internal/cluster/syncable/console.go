@@ -10,8 +10,8 @@ import (
 
 type Console struct{}
 
-func (c *Console) Sync(ctx context.Context, p *cluster.Proposal) error {
-	zap.L().Info("console syncable", zap.Int("entities", len(p.Entities)))
+func (c *Console) Sync(ctx context.Context, a *cluster.Actual) error {
+	zap.L().Info("console syncable", zap.Int("entities", len(a.Entities)))
 	return nil
 }
 

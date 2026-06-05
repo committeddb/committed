@@ -113,17 +113,17 @@ func TestEventLog_ReaderBootstrapFromIndex1(t *testing.T) {
 	r := s.Reader("brand-new-syncable")
 	// The reader also surfaces the type-registration entry — drain it
 	// first so the assertions below focus on the user-data entries.
-	_, typeEntry, err := r.Read()
+	typeEntry, err := r.Read()
 	require.Nil(t, err)
 	require.Equal(t, "type-x", string(typeEntry.Entities[0].Key))
 
 	for i, w := range want {
-		_, got, err := r.Read()
+		got, err := r.Read()
 		require.Nil(t, err, "read %d", i)
 		require.Equal(t, 1, len(got.Entities))
 		require.Equal(t, w, got.Entities[0].Data)
 	}
-	_, _, err = r.Read()
+	_, err = r.Read()
 	require.Equal(t, io.EOF, err, "EOF after draining")
 }
 
@@ -169,11 +169,11 @@ func TestEventLog_ReaderResumesFromPosition(t *testing.T) {
 	r := s.Reader(id)
 	// Should skip the entry at raft index 3 and return 5, then 7.
 	for _, want := range []uint64{5, 7} {
-		idx, _, err := r.Read()
+		a, err := r.Read()
 		require.Nil(t, err)
-		require.Equal(t, want, idx)
+		require.Equal(t, want, a.Index)
 	}
-	_, _, err = r.Read()
+	_, err = r.Read()
 	require.Equal(t, io.EOF, err)
 }
 

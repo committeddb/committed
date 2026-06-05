@@ -27,7 +27,7 @@ type ErrorSyncable struct {
 
 	mu            sync.Mutex
 	count         int
-	receivedProps []*cluster.Proposal
+	receivedProps []*cluster.Actual
 }
 
 // Count returns the number of times Sync has been called.
@@ -37,7 +37,7 @@ func (s *ErrorSyncable) Count() int {
 	return s.count
 }
 
-func (s *ErrorSyncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.ShouldSnapshot, error) {
+func (s *ErrorSyncable) Sync(ctx context.Context, p *cluster.Actual) (cluster.ShouldSnapshot, error) {
 	s.mu.Lock()
 	s.count++
 	s.receivedProps = append(s.receivedProps, p)
@@ -346,7 +346,7 @@ func newBlockingSyncable() *blockingSyncable {
 	}
 }
 
-func (s *blockingSyncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.ShouldSnapshot, error) {
+func (s *blockingSyncable) Sync(ctx context.Context, p *cluster.Actual) (cluster.ShouldSnapshot, error) {
 	s.enteredOnce.Do(func() { close(s.entered) })
 	<-ctx.Done()
 	s.exitedOnce.Do(func() { close(s.exited) })
@@ -425,10 +425,10 @@ type ScriptedSyncable struct {
 
 	mu            sync.Mutex
 	count         int
-	receivedProps []*cluster.Proposal
+	receivedProps []*cluster.Actual
 }
 
-func (s *ScriptedSyncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.ShouldSnapshot, error) {
+func (s *ScriptedSyncable) Sync(ctx context.Context, p *cluster.Actual) (cluster.ShouldSnapshot, error) {
 	s.mu.Lock()
 	idx := s.count
 	s.count++

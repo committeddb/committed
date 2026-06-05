@@ -33,14 +33,14 @@ func TestReader(t *testing.T) {
 			r := s.Reader("qux")
 			// Drain the "string" type-registration entry the reader
 			// surfaces before user-data proposals.
-			if _, _, err := r.Read(); err != nil {
+			if _, err := r.Read(); err != nil {
 				t.Fatalf("drain type entry: %v", err)
 			}
 
 			for _, expected := range ps {
-				_, got, err := r.Read()
+				got, err := r.Read()
 				require.Equal(t, nil, err)
-				require.Equal(t, expected, got)
+				require.Equal(t, expected.Entities, got.Entities)
 			}
 		})
 	}
@@ -79,14 +79,14 @@ func TestReaderSkipsSyncableIndexes(t *testing.T) {
 			r := s.Reader(id)
 			// Drain the "string" type-registration entry the reader
 			// surfaces before user-data proposals.
-			if _, _, err := r.Read(); err != nil {
+			if _, err := r.Read(); err != nil {
 				t.Fatalf("drain type entry: %v", err)
 			}
 
 			for _, expected := range psAssert {
-				_, got, err := r.Read()
+				got, err := r.Read()
 				require.Equal(t, nil, err)
-				require.Equal(t, expected, got)
+				require.Equal(t, expected.Entities, got.Entities)
 			}
 		})
 	}
@@ -113,7 +113,7 @@ func TestEOF(t *testing.T) {
 			// (Reader only filters SyncableIndex entries, not Type
 			// upserts). Drain it so the user-data assertions below are
 			// positional.
-			if _, _, err := r.Read(); err != nil {
+			if _, err := r.Read(); err != nil {
 				t.Fatalf("drain type entry: %v", err)
 			}
 
@@ -121,12 +121,12 @@ func TestEOF(t *testing.T) {
 			for i, p := range ps {
 				saveProposal(t, p, s, 1, 2+uint64(i))
 
-				_, got, err := r.Read()
+				got, err := r.Read()
 				require.Equal(t, nil, err)
-				require.Equal(t, p, got)
+				require.Equal(t, p.Entities, got.Entities)
 			}
 
-			_, _, err := r.Read()
+			_, err := r.Read()
 			require.Equal(t, io.EOF, err)
 		})
 	}
@@ -160,17 +160,17 @@ func TestResumeReader(t *testing.T) {
 			// of the loop (the persisted syncable position after this
 			// first read pass).
 			var index uint64
-			if i, _, err := r.Read(); err != nil {
+			if a, err := r.Read(); err != nil {
 				t.Fatalf("drain type entry: %v", err)
 			} else {
-				index = i
+				index = a.Index
 			}
 
 			for _, expected := range ps {
-				i, got, err := r.Read()
-				index = i
+				got, err := r.Read()
+				index = got.Index
 				require.Equal(t, nil, err)
-				require.Equal(t, expected, got)
+				require.Equal(t, expected.Entities, got.Entities)
 			}
 
 			pc.saveProposals(t, []*cluster.Proposal{createSyncableIndexProposalWithIndex(t, id, index)})
@@ -179,9 +179,9 @@ func TestResumeReader(t *testing.T) {
 			r = s.Reader(id)
 
 			for _, expected := range ps {
-				_, got, err := r.Read()
+				got, err := r.Read()
 				require.Equal(t, nil, err)
-				require.Equal(t, expected, got)
+				require.Equal(t, expected.Entities, got.Entities)
 			}
 		})
 	}

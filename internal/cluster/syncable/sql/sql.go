@@ -47,7 +47,7 @@ func (c *Syncable) Init() error {
 	return nil
 }
 
-func (c *Syncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.ShouldSnapshot, error) {
+func (c *Syncable) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldSnapshot, error) {
 	// BeginTx / ExecContext let cancellation actually interrupt the
 	// transaction. Without this, a canceled worker would have to wait
 	// for the current Sync to drain naturally before it could exit,
@@ -57,13 +57,13 @@ func (c *Syncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.Shoul
 		return false, err
 	}
 
-	for _, e := range p.Entities {
+	for _, e := range a.Entities {
 		if c.config.Topic != e.Type.ID {
 			return false, nil
 		}
 	}
 
-	for _, e := range p.Entities {
+	for _, e := range a.Entities {
 		var jsonData any
 		err := json.Unmarshal(e.Data, &jsonData)
 		if err != nil {
@@ -118,14 +118,14 @@ func (c *Syncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.Shoul
 	return true, nil
 }
 
-func (c *Syncable) SyncBatch(ctx context.Context, ps []*cluster.Proposal) (bool, error) {
+func (c *Syncable) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool, error) {
 	tx, err := c.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
 	}
 
-	for _, p := range ps {
-		for _, e := range p.Entities {
+	for _, a := range as {
+		for _, e := range a.Entities {
 			if c.config.Topic != e.Type.ID {
 				continue
 			}
@@ -161,7 +161,7 @@ func (c *Syncable) SyncBatch(ctx context.Context, ps []*cluster.Proposal) (bool,
 		}
 	}
 
-	zap.L().Debug("sql syncable batch committing", zap.Int("batch_size", len(ps)))
+	zap.L().Debug("sql syncable batch committing", zap.Int("batch_size", len(as)))
 	err = tx.Commit()
 	if err != nil {
 		rollbackErr := tx.Rollback()
@@ -170,7 +170,7 @@ func (c *Syncable) SyncBatch(ctx context.Context, ps []*cluster.Proposal) (bool,
 		}
 		return false, err
 	}
-	zap.L().Debug("sql syncable batch committed", zap.Int("batch_size", len(ps)))
+	zap.L().Debug("sql syncable batch committed", zap.Int("batch_size", len(as)))
 
 	return true, nil
 }

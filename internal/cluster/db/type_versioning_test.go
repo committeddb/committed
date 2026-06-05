@@ -141,9 +141,9 @@ func TestCrossVersionReplay_ProposalKeepsItsStampedSchema(t *testing.T) {
 	// type, not "person"). The kept proposal must come back hydrated with
 	// v1's schema — the version it was stamped with — not the latest v2.
 	r := s.Reader("")
-	var ps []*cluster.Proposal
+	var ps []*cluster.Actual
 	for {
-		_, p, err := r.Read()
+		p, err := r.Read()
 		if err == io.EOF {
 			break
 		}

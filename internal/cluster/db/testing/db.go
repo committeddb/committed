@@ -75,7 +75,7 @@ func (db *DB) entsToProposals(ents []raftpb.Entry) ([]*cluster.Proposal, error) 
 }
 
 type MemorySyncable struct {
-	proposals []*cluster.Proposal
+	proposals []*cluster.Actual
 	cancel    func()
 	count     int
 	// done        chan any
@@ -91,7 +91,7 @@ func (ms *MemorySyncable) Init(ctx context.Context) error {
 	return nil
 }
 
-func (ms *MemorySyncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.ShouldSnapshot, error) {
+func (ms *MemorySyncable) Sync(ctx context.Context, p *cluster.Actual) (cluster.ShouldSnapshot, error) {
 	ms.count++
 	ms.proposals = append(ms.proposals, p)
 	if ms.doneAtCount == ms.count {

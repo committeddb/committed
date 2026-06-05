@@ -127,13 +127,17 @@ func TestResolveType(t *testing.T) {
 
 func getLastIndex(s db.Storage, ps []*cluster.Proposal) uint64 {
 	var i uint64
-	var got *cluster.Proposal
+	var got *cluster.Actual
 	r := s.Reader("storage")
 
 	for _, expected := range ps {
 		for {
-			i, got, _ = r.Read()
-			if reflect.DeepEqual(expected, got) {
+			got, _ = r.Read()
+			if got == nil {
+				continue
+			}
+			i = got.Index
+			if reflect.DeepEqual(expected.Entities, got.Entities) {
 				break
 			}
 		}
@@ -377,7 +381,7 @@ func (db *DB) entsToProposals(ents []raftpb.Entry) ([]*cluster.Proposal, error) 
 // (directly or via require.Eventually's polling goroutine).
 type MemorySyncable struct {
 	mu          sync.Mutex
-	proposals   []*cluster.Proposal
+	proposals   []*cluster.Actual
 	cancel      func()
 	count       int
 	doneAtCount int
@@ -395,12 +399,12 @@ func (ms *MemorySyncable) Count() int {
 	return ms.count
 }
 
-// Proposals returns a snapshot of all proposals Sync has received. Safe to
+// Actuals returns a snapshot of all Actuals Sync has received. Safe to
 // call concurrently with Sync.
-func (ms *MemorySyncable) Proposals() []*cluster.Proposal {
+func (ms *MemorySyncable) Actuals() []*cluster.Actual {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
-	out := make([]*cluster.Proposal, len(ms.proposals))
+	out := make([]*cluster.Actual, len(ms.proposals))
 	copy(out, ms.proposals)
 	return out
 }
@@ -409,7 +413,7 @@ func (ms *MemorySyncable) Init(ctx context.Context) error {
 	return nil
 }
 
-func (ms *MemorySyncable) Sync(ctx context.Context, p *cluster.Proposal) (cluster.ShouldSnapshot, error) {
+func (ms *MemorySyncable) Sync(ctx context.Context, p *cluster.Actual) (cluster.ShouldSnapshot, error) {
 	fmt.Printf("syncing: %v\n", p)
 
 	ms.mu.Lock()
@@ -450,7 +454,7 @@ func NewBatchSyncable(doneAtCount int, cancel func()) *MemoryBatchSyncable {
 	}
 }
 
-func (ms *MemoryBatchSyncable) SyncBatch(ctx context.Context, ps []*cluster.Proposal) (bool, error) {
+func (ms *MemoryBatchSyncable) SyncBatch(ctx context.Context, ps []*cluster.Actual) (bool, error) {
 	fmt.Printf("batch syncing: %d proposals\n", len(ps))
 
 	ms.mu.Lock()
