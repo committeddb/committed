@@ -1,8 +1,6 @@
 package db
 
 import (
-	"time"
-
 	"go.etcd.io/raft/v3"
 	"go.etcd.io/raft/v3/raftpb"
 
@@ -79,7 +77,6 @@ type Storage interface {
 	// ErrVersionNotFound if the ID exists but the pinned version
 	// doesn't.
 	ResolveType(ref cluster.TypeRef) (*cluster.Type, error)
-	TimePoints(typeID string, start time.Time, end time.Time) ([]cluster.TimePoint, error)
 	Reader(id string) ProposalReader     // Gets current index by id cache. If id is not known, index is 0
 	Position(id string) cluster.Position // Gets current index by id cache. If id is not known position is 0
 	// IngestSourceSeqHighwater returns the highest source sequence

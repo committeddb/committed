@@ -91,10 +91,9 @@ func TestAlwaysCurrentSyncable_MigratesOldProposal(t *testing.T) {
 
 	// Propose an entity at v1.
 	pOld := &cluster.Proposal{Entities: []*cluster.Entity{{
-		Type:      v1,
-		Key:       []byte("alice"),
-		Data:      []byte(`{"name":"alice"}`),
-		Timestamp: time.Now().UnixMilli(),
+		Type: v1,
+		Key:  []byte("alice"),
+		Data: []byte(`{"name":"alice"}`),
 	}}}
 	require.NoError(t, d.Propose(testCtx(t), pOld))
 
@@ -139,10 +138,9 @@ func TestAsStoredSyncable_DeliversRawBytes(t *testing.T) {
 	require.NoError(t, err)
 
 	pOld := &cluster.Proposal{Entities: []*cluster.Entity{{
-		Type:      v1,
-		Key:       []byte("alice"),
-		Data:      []byte(`{"name":"alice"}`),
-		Timestamp: time.Now().UnixMilli(),
+		Type: v1,
+		Key:  []byte("alice"),
+		Data: []byte(`{"name":"alice"}`),
 	}}}
 	require.NoError(t, d.Propose(testCtx(t), pOld))
 

@@ -230,12 +230,6 @@ func TestPostgresDialect(t *testing.T) {
 				entities = append(entities, e)
 			}
 
-			for _, e := range entities {
-				require.NotZero(t, e.Timestamp,
-					"entity must have propose-time wall-clock for content-deterministic apply")
-				e.Timestamp = 0
-			}
-
 			require.ElementsMatch(t, tt.entities, entities)
 
 			cancel()
@@ -482,7 +476,6 @@ func TestPostgresTransactionGrouping(t *testing.T) {
 
 	keys := make(map[string]bool)
 	for _, e := range txProposal.Entities {
-		require.NotZero(t, e.Timestamp)
 		keys[string(e.Key)] = true
 	}
 	for i := 0; i < 10; i++ {

@@ -8,7 +8,6 @@ import (
 	"sort"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/pb33f/libopenapi"
 	validator "github.com/pb33f/libopenapi-validator"
@@ -300,18 +299,6 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 			},
 		},
 		{
-			name:   "GET /type/{id} (graph)",
-			method: httpgo.MethodGet,
-			// The handler parses start/end with a format that rejects
-			// fractional seconds, so keep the example at whole seconds.
-			path: "/v1/type/t-1?start=2024-01-01T00:00:00Z&end=2024-01-02T00:00:00Z",
-			setup: func(fake *clusterfakes.FakeCluster) {
-				fake.TypeGraphReturns([]cluster.TimePoint{
-					{End: time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC), Value: 3},
-				}, nil)
-			},
-		},
-		{
 			name:        "POST /type/{id}",
 			method:      httpgo.MethodPost,
 			path:        "/v1/type/t-1",
@@ -335,21 +322,7 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 			},
 		},
 
-		// --- proposal ---
-		{
-			name:   "GET /proposal",
-			method: httpgo.MethodGet,
-			path:   "/v1/proposal",
-			setup: func(fake *clusterfakes.FakeCluster) {
-				fake.ProposalsReturns([]*cluster.Proposal{
-					{Entities: []*cluster.Entity{{
-						Type: sampleType(),
-						Key:  []byte("k"),
-						Data: []byte(`{"hello":"world"}`),
-					}}},
-				}, nil)
-			},
-		},
+		// --- proposal --- (write-only: no GET, the log is not a query interface)
 		{
 			name:        "POST /proposal",
 			method:      httpgo.MethodPost,

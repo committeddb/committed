@@ -312,16 +312,13 @@ func (h *MySQLEventHandler) OnRow(e *canal.RowsEvent) error {
 	key := fmt.Sprintf("%v", m[primaryKey])
 
 	entity := &cluster.Entity{
-		Type:      h.config.Type,
-		Key:       []byte(key),
-		Data:      []byte(jsonString),
-		Timestamp: time.Now().UnixMilli(),
+		Type: h.config.Type,
+		Key:  []byte(key),
+		Data: []byte(jsonString),
 	}
 
 	h.mu.Lock()
-	// Buffer the entity until the transaction commits (OnXID). Stamp
-	// the propose-time wall-clock so apply on every node records the
-	// same time-series timestamp. See cluster.Entity.Timestamp.
+	// Buffer the entity until the transaction commits (OnXID).
 	h.pending = append(h.pending, entity)
 
 	// Track the live binlog offset so a mid-transaction flush below
@@ -871,10 +868,9 @@ func readBatch(
 		batchLastPK = key
 
 		entities = append(entities, &cluster.Entity{
-			Type:      config.Type,
-			Key:       []byte(key),
-			Data:      jsonBytes,
-			Timestamp: time.Now().UnixMilli(),
+			Type: config.Type,
+			Key:  []byte(key),
+			Data: jsonBytes,
 		})
 	}
 

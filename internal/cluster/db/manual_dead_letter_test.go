@@ -69,7 +69,7 @@ func newWalDBStuck(t *testing.T) (*db.DB, *wal.Storage) {
 	t.Helper()
 	dir := t.TempDir()
 	p := parser.New()
-	s, err := wal.Open(dir, p, nil, nil, wal.WithoutFsync(), wal.WithInMemoryTimeSeries())
+	s, err := wal.Open(dir, p, nil, nil, wal.WithoutFsync())
 	require.NoError(t, err)
 	d := db.New(uint64(1), db.Peers{1: ""}, s, p, nil, nil,
 		db.WithTickInterval(testTickInterval), db.WithSyncStuckThreshold(50*time.Millisecond))
@@ -261,7 +261,7 @@ func TestDeadLetterStuckSyncable_SurvivesRestart(t *testing.T) {
 	p := parser.New()
 
 	// Run 1: wedge on the (last) proposal, then operator-skip it.
-	s1, err := wal.Open(dir, p, nil, nil, wal.WithoutFsync(), wal.WithInMemoryTimeSeries())
+	s1, err := wal.Open(dir, p, nil, nil, wal.WithoutFsync())
 	require.NoError(t, err)
 	d1 := db.New(uint64(1), db.Peers{1: ""}, s1, p, nil, nil,
 		db.WithTickInterval(testTickInterval), db.WithSyncStuckThreshold(50*time.Millisecond))
@@ -295,7 +295,7 @@ func TestDeadLetterStuckSyncable_SurvivesRestart(t *testing.T) {
 
 	// Run 2: reopen the same data dir. The worker must NOT re-wedge — the
 	// durable dead-letter record excludes the poison proposal before Sync.
-	s2, err := wal.Open(dir, p, nil, nil, wal.WithoutFsync(), wal.WithInMemoryTimeSeries())
+	s2, err := wal.Open(dir, p, nil, nil, wal.WithoutFsync())
 	require.NoError(t, err)
 	d2 := db.New(uint64(1), db.Peers{1: ""}, s2, p, nil, nil,
 		db.WithTickInterval(testTickInterval), db.WithSyncStuckThreshold(50*time.Millisecond))

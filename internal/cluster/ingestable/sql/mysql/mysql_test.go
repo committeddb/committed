@@ -184,12 +184,6 @@ func TestMysqlDialect(t *testing.T) {
 				entities = append(entities, e)
 			}
 
-			for _, e := range entities {
-				require.NotZero(t, e.Timestamp,
-					"OnRow must stamp the entity with propose-time wall-clock for content-deterministic apply")
-				e.Timestamp = 0
-			}
-
 			require.ElementsMatch(t, tt.entities, entities)
 
 			// Cancel and wait for the Ingest goroutine to fully exit
@@ -448,7 +442,6 @@ func TestMysqlTransactionGrouping(t *testing.T) {
 
 	keys := make(map[string]bool)
 	for _, e := range txProposal.Entities {
-		require.NotZero(t, e.Timestamp)
 		keys[string(e.Key)] = true
 	}
 	for i := 0; i < 10; i++ {

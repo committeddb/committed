@@ -4,7 +4,6 @@ package clusterfakes
 import (
 	"context"
 	"sync"
-	"time"
 
 	"github.com/philborlin/committed/internal/cluster"
 )
@@ -176,20 +175,6 @@ type FakeCluster struct {
 	}
 	leaderReturnsOnCall map[int]struct {
 		result1 uint64
-	}
-	ProposalsStub        func(uint64, ...string) ([]*cluster.Proposal, error)
-	proposalsMutex       sync.RWMutex
-	proposalsArgsForCall []struct {
-		arg1 uint64
-		arg2 []string
-	}
-	proposalsReturns struct {
-		result1 []*cluster.Proposal
-		result2 error
-	}
-	proposalsReturnsOnCall map[int]struct {
-		result1 []*cluster.Proposal
-		result2 error
 	}
 	ProposeStub        func(context.Context, *cluster.Proposal) error
 	proposeMutex       sync.RWMutex
@@ -369,21 +354,6 @@ type FakeCluster struct {
 	}
 	syncablesReturnsOnCall map[int]struct {
 		result1 []*cluster.Configuration
-		result2 error
-	}
-	TypeGraphStub        func(string, time.Time, time.Time) ([]cluster.TimePoint, error)
-	typeGraphMutex       sync.RWMutex
-	typeGraphArgsForCall []struct {
-		arg1 string
-		arg2 time.Time
-		arg3 time.Time
-	}
-	typeGraphReturns struct {
-		result1 []cluster.TimePoint
-		result2 error
-	}
-	typeGraphReturnsOnCall map[int]struct {
-		result1 []cluster.TimePoint
 		result2 error
 	}
 	TypeVersionStub        func(string, uint64) (*cluster.Configuration, error)
@@ -1256,71 +1226,6 @@ func (fake *FakeCluster) LeaderReturnsOnCall(i int, result1 uint64) {
 	fake.leaderReturnsOnCall[i] = struct {
 		result1 uint64
 	}{result1}
-}
-
-func (fake *FakeCluster) Proposals(arg1 uint64, arg2 ...string) ([]*cluster.Proposal, error) {
-	fake.proposalsMutex.Lock()
-	ret, specificReturn := fake.proposalsReturnsOnCall[len(fake.proposalsArgsForCall)]
-	fake.proposalsArgsForCall = append(fake.proposalsArgsForCall, struct {
-		arg1 uint64
-		arg2 []string
-	}{arg1, arg2})
-	stub := fake.ProposalsStub
-	fakeReturns := fake.proposalsReturns
-	fake.recordInvocation("Proposals", []interface{}{arg1, arg2})
-	fake.proposalsMutex.Unlock()
-	if stub != nil {
-		return stub(arg1, arg2...)
-	}
-	if specificReturn {
-		return ret.result1, ret.result2
-	}
-	return fakeReturns.result1, fakeReturns.result2
-}
-
-func (fake *FakeCluster) ProposalsCallCount() int {
-	fake.proposalsMutex.RLock()
-	defer fake.proposalsMutex.RUnlock()
-	return len(fake.proposalsArgsForCall)
-}
-
-func (fake *FakeCluster) ProposalsCalls(stub func(uint64, ...string) ([]*cluster.Proposal, error)) {
-	fake.proposalsMutex.Lock()
-	defer fake.proposalsMutex.Unlock()
-	fake.ProposalsStub = stub
-}
-
-func (fake *FakeCluster) ProposalsArgsForCall(i int) (uint64, []string) {
-	fake.proposalsMutex.RLock()
-	defer fake.proposalsMutex.RUnlock()
-	argsForCall := fake.proposalsArgsForCall[i]
-	return argsForCall.arg1, argsForCall.arg2
-}
-
-func (fake *FakeCluster) ProposalsReturns(result1 []*cluster.Proposal, result2 error) {
-	fake.proposalsMutex.Lock()
-	defer fake.proposalsMutex.Unlock()
-	fake.ProposalsStub = nil
-	fake.proposalsReturns = struct {
-		result1 []*cluster.Proposal
-		result2 error
-	}{result1, result2}
-}
-
-func (fake *FakeCluster) ProposalsReturnsOnCall(i int, result1 []*cluster.Proposal, result2 error) {
-	fake.proposalsMutex.Lock()
-	defer fake.proposalsMutex.Unlock()
-	fake.ProposalsStub = nil
-	if fake.proposalsReturnsOnCall == nil {
-		fake.proposalsReturnsOnCall = make(map[int]struct {
-			result1 []*cluster.Proposal
-			result2 error
-		})
-	}
-	fake.proposalsReturnsOnCall[i] = struct {
-		result1 []*cluster.Proposal
-		result2 error
-	}{result1, result2}
 }
 
 func (fake *FakeCluster) Propose(arg1 context.Context, arg2 *cluster.Proposal) error {
@@ -2203,72 +2108,6 @@ func (fake *FakeCluster) SyncablesReturnsOnCall(i int, result1 []*cluster.Config
 	}{result1, result2}
 }
 
-func (fake *FakeCluster) TypeGraph(arg1 string, arg2 time.Time, arg3 time.Time) ([]cluster.TimePoint, error) {
-	fake.typeGraphMutex.Lock()
-	ret, specificReturn := fake.typeGraphReturnsOnCall[len(fake.typeGraphArgsForCall)]
-	fake.typeGraphArgsForCall = append(fake.typeGraphArgsForCall, struct {
-		arg1 string
-		arg2 time.Time
-		arg3 time.Time
-	}{arg1, arg2, arg3})
-	stub := fake.TypeGraphStub
-	fakeReturns := fake.typeGraphReturns
-	fake.recordInvocation("TypeGraph", []interface{}{arg1, arg2, arg3})
-	fake.typeGraphMutex.Unlock()
-	if stub != nil {
-		return stub(arg1, arg2, arg3)
-	}
-	if specificReturn {
-		return ret.result1, ret.result2
-	}
-	return fakeReturns.result1, fakeReturns.result2
-}
-
-func (fake *FakeCluster) TypeGraphCallCount() int {
-	fake.typeGraphMutex.RLock()
-	defer fake.typeGraphMutex.RUnlock()
-	return len(fake.typeGraphArgsForCall)
-}
-
-func (fake *FakeCluster) TypeGraphCalls(stub func(string, time.Time, time.Time) ([]cluster.TimePoint, error)) {
-	fake.typeGraphMutex.Lock()
-	defer fake.typeGraphMutex.Unlock()
-	fake.TypeGraphStub = stub
-}
-
-func (fake *FakeCluster) TypeGraphArgsForCall(i int) (string, time.Time, time.Time) {
-	fake.typeGraphMutex.RLock()
-	defer fake.typeGraphMutex.RUnlock()
-	argsForCall := fake.typeGraphArgsForCall[i]
-	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3
-}
-
-func (fake *FakeCluster) TypeGraphReturns(result1 []cluster.TimePoint, result2 error) {
-	fake.typeGraphMutex.Lock()
-	defer fake.typeGraphMutex.Unlock()
-	fake.TypeGraphStub = nil
-	fake.typeGraphReturns = struct {
-		result1 []cluster.TimePoint
-		result2 error
-	}{result1, result2}
-}
-
-func (fake *FakeCluster) TypeGraphReturnsOnCall(i int, result1 []cluster.TimePoint, result2 error) {
-	fake.typeGraphMutex.Lock()
-	defer fake.typeGraphMutex.Unlock()
-	fake.TypeGraphStub = nil
-	if fake.typeGraphReturnsOnCall == nil {
-		fake.typeGraphReturnsOnCall = make(map[int]struct {
-			result1 []cluster.TimePoint
-			result2 error
-		})
-	}
-	fake.typeGraphReturnsOnCall[i] = struct {
-		result1 []cluster.TimePoint
-		result2 error
-	}{result1, result2}
-}
-
 func (fake *FakeCluster) TypeVersion(arg1 string, arg2 uint64) (*cluster.Configuration, error) {
 	fake.typeVersionMutex.Lock()
 	ret, specificReturn := fake.typeVersionReturnsOnCall[len(fake.typeVersionArgsForCall)]
@@ -2487,8 +2326,6 @@ func (fake *FakeCluster) Invocations() map[string][][]interface{} {
 	defer fake.ingestablesMutex.RUnlock()
 	fake.leaderMutex.RLock()
 	defer fake.leaderMutex.RUnlock()
-	fake.proposalsMutex.RLock()
-	defer fake.proposalsMutex.RUnlock()
 	fake.proposeMutex.RLock()
 	defer fake.proposeMutex.RUnlock()
 	fake.proposeDatabaseMutex.RLock()
@@ -2517,8 +2354,6 @@ func (fake *FakeCluster) Invocations() map[string][][]interface{} {
 	defer fake.syncableVersionsMutex.RUnlock()
 	fake.syncablesMutex.RLock()
 	defer fake.syncablesMutex.RUnlock()
-	fake.typeGraphMutex.RLock()
-	defer fake.typeGraphMutex.RUnlock()
 	fake.typeVersionMutex.RLock()
 	defer fake.typeVersionMutex.RUnlock()
 	fake.typeVersionsMutex.RLock()

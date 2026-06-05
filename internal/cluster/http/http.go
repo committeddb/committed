@@ -107,7 +107,10 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 			r.Get("/ingestable/{id}/versions/{version}", h.getVersion("ingestable", h.c.IngestableVersion))
 			r.Post("/ingestable/{id}/rollback", h.rollback("ingestable", h.c.IngestableVersion, h.c.ProposeIngestable))
 
-			r.Get("/proposal", h.GetProposals)
+			// /proposal is write-only by design: Committed is a commit log,
+			// not a query interface. Reads happen on the synced query side
+			// (hook up a syncable), not over HTTP. See the API overview in
+			// api/openapi.yaml.
 			r.Post("/proposal", h.AddProposal)
 
 			r.Get("/syncable", h.listConfig("syncable", h.c.Syncables))
@@ -121,7 +124,6 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 			r.Post("/syncable/{id}/rollback", h.rollback("syncable", h.c.SyncableVersion, h.c.ProposeSyncable))
 
 			r.Get("/type", h.listConfig("type", h.c.Types))
-			r.Get("/type/{id}", h.GetType)
 			r.Post("/type/{id}", h.addConfig("type", h.c.ProposeType))
 			r.Get("/type/{id}/versions", h.getVersions("type", h.c.TypeVersions))
 			r.Get("/type/{id}/versions/{version}", h.getVersion("type", h.c.TypeVersion))

@@ -85,7 +85,7 @@ func TestRestartResumeSyncable(t *testing.T) {
 	p1 := parser.New()
 	p1.AddSyncableParser("test", &resumeParser{r: rec})
 	sync1 := make(chan *db.SyncableWithID)
-	s1, err := wal.Open(dir, p1, sync1, nil, wal.WithoutFsync(), wal.WithInMemoryTimeSeries())
+	s1, err := wal.Open(dir, p1, sync1, nil, wal.WithoutFsync())
 	require.NoError(t, err)
 	d1 := db.New(uint64(1), db.Peers{1: ""}, s1, p1, sync1, nil, db.WithTickInterval(testTickInterval))
 
@@ -113,7 +113,7 @@ func TestRestartResumeSyncable(t *testing.T) {
 	p2 := parser.New()
 	p2.AddSyncableParser("test", &resumeParser{r: rec})
 	sync2 := make(chan *db.SyncableWithID)
-	s2, err := wal.Open(dir, p2, sync2, nil, wal.WithoutFsync(), wal.WithInMemoryTimeSeries())
+	s2, err := wal.Open(dir, p2, sync2, nil, wal.WithoutFsync())
 	require.NoError(t, err)
 	d2 := db.New(uint64(1), db.Peers{1: ""}, s2, p2, sync2, nil, db.WithTickInterval(testTickInterval))
 	t.Cleanup(func() { _ = d2.Close() })

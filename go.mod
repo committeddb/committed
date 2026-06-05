@@ -157,7 +157,6 @@ require (
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/jackc/pgx/v5 v5.9.1
 	github.com/magiconair/properties v1.8.10 // indirect
-	github.com/nakabonne/tstorage v0.3.6
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/pressly/goose/v3 v3.22.1
 	github.com/prometheus/client_model v0.6.1 // indirect

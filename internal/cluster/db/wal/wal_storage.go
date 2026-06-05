@@ -12,7 +12,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/nakabonne/tstorage"
 	"github.com/tidwall/wal"
 	bolt "go.etcd.io/bbolt"
 	"go.etcd.io/raft/v3"
@@ -68,17 +67,6 @@ var (
 	appliedIndexKey    = []byte("idx")
 )
 
-// tsAppliedIndexBucket holds a single key ("idx") whose value is the
-// big-endian uint64 watermark of the derived time-series view: the highest
-// raft index whose user-defined points are durably flushed into tstorage.
-// It is written ONLY on a clean Close (after the tstorage flush), so on the
-// next Open a value < appliedIndex proves an unclean shutdown and triggers a
-// rebuild of the view from the event log. See time_series_recovery.go.
-var (
-	tsAppliedIndexBucket = []byte("tsAppliedIndex")
-	tsAppliedIndexKey    = []byte("idx")
-)
-
 // internalEntity binds a built-in entity type to the bucket it lives in and
 // the handler that applies it. applyEntity dispatches by scanning this table
 // (predicates are mutually exclusive, so first match wins), and the bucket set
@@ -105,14 +93,13 @@ var internalEntities = []internalEntity{
 
 // buckets is every bbolt bucket Open must create: one per internal entity type
 // (derived from internalEntities) plus the ones that aren't entity-driven — the
-// ingest source-seq highwater, the applied-index marker, and the time-series
-// watermark.
+// ingest source-seq highwater and the applied-index marker.
 var buckets = func() [][]byte {
-	bs := make([][]byte, 0, len(internalEntities)+3)
+	bs := make([][]byte, 0, len(internalEntities)+2)
 	for _, ie := range internalEntities {
 		bs = append(bs, ie.bucket)
 	}
-	return append(bs, ingestSourceSeqBucket, appliedIndexBucket, tsAppliedIndexBucket)
+	return append(bs, ingestSourceSeqBucket, appliedIndexBucket)
 }()
 
 type StateType int
@@ -154,16 +141,7 @@ type Storage struct {
 	// in-flight reads to drain before closing the handle and blocks new
 	// reads until the reopen finishes. Without this an HTTP query that
 	// happened to run mid-restore would hit a closed-file error.
-	kvMu              sync.RWMutex
-	TimeSeriesStorage tstorage.Storage
-	// tsLatestUnixNano is the largest user-defined entity timestamp (unix
-	// milliseconds, despite the name) handleUserDefined has written into
-	// TimeSeriesStorage — both on the live apply path and during a rebuild.
-	// Drives the committed_tstorage_lag_seconds gauge (now - latest), a
-	// health signal for whether the derived view has fallen behind. Written
-	// only from the single apply / rebuild goroutine; atomic for race-free
-	// sampling from the metrics path. 0 means no user-defined data yet.
-	tsLatestUnixNano atomic.Int64
+	kvMu sync.RWMutex
 	// snapMu guards snapshot and hardState. Both are written from the
 	// raft serveChannels goroutine (Save, ConfState, CreateSnapshot,
 	// RestoreSnapshot) and read from the etcd raft node.run goroutine
@@ -267,12 +245,11 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	stateLogDir := filepath.Join(dir, "raft", "state")
 	eventLogDir := filepath.Join(dir, "events")
 	keyValueStorageDir := filepath.Join(dir, "metadata")
-	timeSeriesStorageDir := filepath.Join(dir, "time-series")
 
 	// 0700: WAL directories hold raft state and committed log entries;
 	// only the owning process needs access. os.ModePerm (0777) is too
 	// permissive for data storage.
-	for _, d := range []string{entryLogDir, stateLogDir, eventLogDir, keyValueStorageDir, timeSeriesStorageDir} {
+	for _, d := range []string{entryLogDir, stateLogDir, eventLogDir, keyValueStorageDir} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return nil, err
 		}
@@ -296,16 +273,6 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	// validation), so torn or bitflipped pages are already detected on read.
 	boltOpts := &bolt.Options{Timeout: 1 * time.Second, NoSync: cfg.fsyncDisabled}
 	keyValueStorage, err := bolt.Open(filepath.Join(keyValueStorageDir, "bbolt.db"), 0o600, boltOpts)
-	if err != nil {
-		return nil, err
-	}
-
-	// On disk, tstorage lives under this node's data dir (timeSeriesStorageDir),
-	// NOT a process-relative "./data" — otherwise co-located nodes (e.g. the
-	// goreman dev cluster) would all clobber one shared directory. See
-	// time_series_recovery.go for openTimeSeries and the rebuild-on-restart
-	// path that reconciles this derived view with the committed log.
-	timeSeriesStorage, err := openTimeSeries(timeSeriesStorageDir, cfg.inMemoryTimeSeries)
 	if err != nil {
 		return nil, err
 	}
@@ -340,19 +307,18 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 
 	dbs := make(map[string]cluster.Database)
 	ws := &Storage{
-		raftLogDir:        entryLogDir,
-		EntryLog:          entryLog,
-		eventLog:          eventLog,
-		StateLog:          stateLog,
-		keyValueStorage:   keyValueStorage,
-		TimeSeriesStorage: timeSeriesStorage,
-		databases:         dbs,
-		parser:            p,
-		sync:              sync,
-		ingest:            ingest,
-		logger:            logger,
-		configErrors:      make(map[string]error),
-		metrics:           cfg.metrics,
+		raftLogDir:      entryLogDir,
+		EntryLog:        entryLog,
+		eventLog:        eventLog,
+		StateLog:        stateLog,
+		keyValueStorage: keyValueStorage,
+		databases:       dbs,
+		parser:          p,
+		sync:            sync,
+		ingest:          ingest,
+		logger:          logger,
+		configErrors:    make(map[string]error),
+		metrics:         cfg.metrics,
 	}
 
 	fi, err := entryLog.FirstIndex()
@@ -479,15 +445,6 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		ws.firstEventIndex.Store(first.Index)
 	}
 
-	// Reconcile the derived time-series view with the committed log. On a
-	// clean restart this is a no-op; after an unclean shutdown it discards
-	// the (untrustworthy) on-disk view and rebuilds it from the event log.
-	// Done here, after appliedIndex and the event-log seq mapping are
-	// loaded, because the rebuild walks the event log up to appliedIndex.
-	if err := ws.recoverTimeSeries(timeSeriesStorageDir, cfg.inMemoryTimeSeries); err != nil {
-		return nil, err
-	}
-
 	return ws, nil
 }
 
@@ -504,23 +461,6 @@ func (s *Storage) Close() error {
 	err = s.StateLog.Close()
 	if err != nil && finalErr == nil {
 		finalErr = err
-	}
-
-	// Flush the derived time-series view to disk BEFORE closing bbolt, then
-	// stamp the watermark while bbolt is still open. Ordering is load-bearing:
-	// the watermark must record appliedIndex only after a successful tstorage
-	// flush (so the next Open can trust the on-disk view as a complete prefix),
-	// and the bbolt write that records it has to happen before keyValueStorage
-	// closes. If the flush fails we deliberately skip the watermark, leaving it
-	// stale so the next Open rebuilds rather than trusting a partial flush.
-	tsErr := s.TimeSeriesStorage.Close()
-	if tsErr != nil && finalErr == nil {
-		finalErr = tsErr
-	}
-	if tsErr == nil {
-		if err = s.saveTSAppliedIndex(s.appliedIndex.Load()); err != nil && finalErr == nil {
-			finalErr = err
-		}
 	}
 
 	err = s.keyValueStorage.Close()
@@ -735,9 +675,9 @@ func (s *Storage) applyEntity(entity *cluster.Entity) error {
 			return nil
 		}
 	}
-	if err := s.handleUserDefined(entity); err != nil {
-		return fmt.Errorf("[wal.storage] handleUserDefined: %w", err)
-	}
+	// User-defined (topic) entities have no apply-time side effect: their
+	// durable record is the permanent event log, written in ApplyCommitted
+	// before this entity-level dispatch runs.
 	return nil
 }
 

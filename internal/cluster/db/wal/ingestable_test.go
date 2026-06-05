@@ -349,7 +349,7 @@ func TestRestoreIngestableWorkers(t *testing.T) {
 	fp.ParseReturns(&clusterfakes.FakeIngestable{}, nil)
 	p.AddIngestableParser("test", fp)
 
-	openOpts := []wal.Option{wal.WithoutFsync(), wal.WithInMemoryTimeSeries()}
+	openOpts := []wal.Option{wal.WithoutFsync()}
 
 	// First incarnation: persist an ingestable. Buffered so the apply-path
 	// send (saveIngestable) doesn't block; drain it so it can't be mistaken

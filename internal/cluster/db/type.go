@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/philborlin/committed/internal/cluster"
 	"github.com/philborlin/committed/internal/cluster/migration"
@@ -150,8 +149,4 @@ func (db *DB) TypeVersions(id string) ([]cluster.VersionInfo, error) {
 
 func (db *DB) TypeVersion(id string, version uint64) (*cluster.Configuration, error) {
 	return db.storage.TypeVersion(id, version)
-}
-
-func (db *DB) TypeGraph(typeID string, start time.Time, end time.Time) ([]cluster.TimePoint, error) {
-	return db.storage.TimePoints(typeID, start, end)
 }

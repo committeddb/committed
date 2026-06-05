@@ -148,13 +148,12 @@ backing store changes.
 │   ├── log/         # raft consensus log; bounded ~10GB; tidwall/wal
 │   └── state/       # HardState + ConfState (currently state-log/)
 ├── events/          # permanent event log; infinite retention; terabytes
-├── metadata/
-│   └── bbolt.db     # types, databases, ingestables, syncables, syncableIndex, appliedIndex
-└── time-series/     # derived view; rsync'd for speed but regenerable from events
+└── metadata/
+    └── bbolt.db     # types, databases, ingestables, syncables, syncableIndex, appliedIndex
 ```
 
 `events/` at the top level makes the rebuild story trivial to explain and
-script: "rsync `events/`, `raft/`, `metadata/`, `time-series/` from a
+script: "rsync `events/`, `raft/`, `metadata/` from a
 peer." Different I/O profiles per tier mean operators can put `raft/` on a
 smaller fast device if they want; not v1 work but the layout supports it.
 
@@ -290,7 +289,7 @@ try to send `InstallSnapshot`. Our handling:
    ```
 
 5. An operator runs the rebuild script: copy `events/` + `metadata/` +
-   `raft/` + `time-series/` from a healthy peer, restart the node.
+   `raft/` from a healthy peer, restart the node.
 
 After restart, the storage invariant (`P_local == R_local`) holds, the
 node joins normally, and raft fills the small gap that accrued during
@@ -478,14 +477,14 @@ nice-to-have, because:
 The apply-path audit lives at `.claude-scratch/tickets/determinism-audit.md`
 and is **complete** as of the determinism-audit landing. Findings:
 
-- **`time.Now()` in `wal/user_defined.go`** — fixed. Every propose path
-  (HTTP `AddProposal`, the MySQL ingest `OnRow` handler) now stamps the
-  proposal's `Entity.Timestamp` (unix milliseconds) once at propose time,
-  and `handleUserDefined` reads that field directly with no fallback. The
-  field is part of the `LogEntity` proto so it survives serialization. A
-  proto path that forgets to stamp will land its row at unix epoch on
-  every node — deterministic, and visible enough in time-series queries
-  that the bug surfaces immediately.
+- **`time.Now()` in `wal/user_defined.go`** — moot. The original finding
+  was a wall-clock read in the user-defined apply handler that fed the
+  derived time-series store. That store (and the handler) have since been
+  removed entirely; user-defined (topic) entities now apply as a no-op,
+  their durable record being the permanent event log. The per-entity
+  `Timestamp` field that the handler consumed was removed too — a
+  server-stamped clock has no place in a consensus log, where the raft
+  index is the only ordering authority. No wall-clock is read at apply.
 - **Map iteration, random IDs, UUIDs, node-id fields, float math,
   goroutine ordering, OS-dependent calls** — none found in the apply
   path. `applyEntity` runs single-threaded inside the raft Ready loop,
@@ -498,7 +497,7 @@ A regression test, `wal.TestApplyDeterminism`
 `wal.Storage` instances on disjoint temp dirs, applies the same varied
 burst of raft entries (multiple types, a database, syncable, ingestable,
 syncable-index, stamped + unstamped user entities, mixed proposals, a
-delete) to each, and compares three things across all three nodes:
+delete) to each, and compares two things across all three nodes:
 
 1. **The raft entry log** — walked end-to-end via `EntryLog.Read`.
    Today this is mostly a check on raft's own replication contract
@@ -512,13 +511,6 @@ delete) to each, and compares three things across all three nodes:
    testify's `require.Equal` (per-line diff on failure). The snapshot
    helper lives in `wal/export_test.go` so it's only compiled into the
    test binary; production code does not carry a snapshot API.
-3. **Raw `tstorage.Select()` points** for the user metric — ensures the
-   time-series store also stays content-deterministic across nodes,
-   which is the assertion that catches a re-introduced wall-clock read
-   in `handleUserDefined` (the bucket walker deliberately excludes the
-   time-series store because tstorage's on-disk format is not
-   byte-stable today, so the raw-points comparison is what guards that
-   handler).
 
 The test is a unit test (no build tag) so it runs under both `make test`
 and `make test-all`. It bypasses real raft because raft's only contract
@@ -829,25 +821,3 @@ see what was deliberately deferred vs. accidentally forgotten.
   tests. Part of `determinism-audit.md`.
 - **Right-to-be-forgotten implementation**: model is described above; the
   actual code is a future ticket.
-- **Time-series storage in this picture**: the time-series store is a
-  pure **derived view**, populated as a side-effect of `handleUserDefined`
-  (one point per user-defined entity: type id + timestamp, both already in
-  the permanent event log). It is therefore fully regenerable from the
-  permanent log, and that is now its durability model (see
-  `wal/time_series_recovery.go`):
-  - On disk it lives under `<data-dir>/time-series/` (per node), not a
-    process-relative path.
-  - tstorage never fsyncs and keeps its newest partition in memory, so a
-    crash loses the in-memory head — and the on-disk partitions it *does*
-    keep are flushed mid-run, so the survivors are **not** a clean
-    index-prefix. We therefore trust the on-disk view only after a clean
-    shutdown, proven by the `tsAppliedIndex` watermark (written on `Close`
-    after the flush) equalling `appliedIndex`.
-  - On an unclean restart (`tsAppliedIndex < appliedIndex`) `Open`
-    **discards** the on-disk view and **rebuilds** it from the event log
-    over the retention window (~336h) — bounded, not full history, and
-    correct (starting empty, so no double-counting the mid-run-flushed
-    copy). Clean restarts cost nothing.
-  - `committed_tstorage_lag` (seconds = now − newest point) surfaces drift.
-  - v1 still rsyncs `time-series/` for speed; the discarded/rebuilt case
-    above is the fallback when an rsync'd copy can't be trusted.

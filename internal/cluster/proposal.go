@@ -44,13 +44,6 @@ type Entity struct {
 	*Type
 	Key  []byte
 	Data []byte
-	// Timestamp is the wall-clock time (unix milliseconds) at which the
-	// proposer recorded this entity. Set once by the propose path so the
-	// apply path can write a content-deterministic time-series row on
-	// every node. Zero means "unset" and triggers a wall-clock fallback
-	// at apply time (only relevant for pre-PR4 entries — every new
-	// propose path sets this). See clusterpb.LogEntity.Timestamp.
-	Timestamp int64
 }
 
 func NewUpsertEntity(t *Type, key []byte, data []byte) *Entity {
@@ -91,9 +84,8 @@ func (p *Proposal) Marshal() ([]byte, error) {
 				// versions).
 				Version: uint32(e.Version), //nolint:gosec // G115: bounded by domain
 			},
-			Key:       e.Key,
-			Data:      e.Data,
-			Timestamp: e.Timestamp,
+			Key:  e.Key,
+			Data: e.Data,
 		})
 	}
 
@@ -133,10 +125,9 @@ func (p *Proposal) Unmarshal(bs []byte, r TypeResolver) error {
 			return err
 		}
 		p.Entities = append(p.Entities, &Entity{
-			Type:      t,
-			Key:       e.Key,
-			Data:      e.Data,
-			Timestamp: e.Timestamp,
+			Type: t,
+			Key:  e.Key,
+			Data: e.Data,
 		})
 	}
 

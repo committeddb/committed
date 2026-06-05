@@ -38,18 +38,16 @@ func newProposal(entities ...*cluster.Entity) *cluster.Proposal {
 func newEntity(t *cluster.Type, key string, data any) *cluster.Entity {
 	bs, _ := json.Marshal(data)
 	return &cluster.Entity{
-		Type:      t,
-		Key:       []byte(key),
-		Data:      bs,
-		Timestamp: 1000,
+		Type: t,
+		Key:  []byte(key),
+		Data: bs,
 	}
 }
 
 type webhookBody struct {
-	Key       string          `json:"key"`
-	Type      webhookType     `json:"type"`
-	Data      json.RawMessage `json:"data"`
-	Timestamp int64           `json:"timestamp"`
+	Key  string          `json:"key"`
+	Type webhookType     `json:"type"`
+	Data json.RawMessage `json:"data"`
 }
 
 type webhookType struct {
@@ -84,7 +82,6 @@ func TestSync_SingleEntity_Success(t *testing.T) {
 	require.Equal(t, "test-topic", received.Type.ID)
 	require.Equal(t, "test", received.Type.Name)
 	require.Equal(t, 1, received.Type.Version)
-	require.Equal(t, int64(1000), received.Timestamp)
 
 	require.Equal(t, "application/json", headers.Get("Content-Type"))
 	require.Equal(t, base64.StdEncoding.EncodeToString([]byte("key1")), headers.Get("Idempotency-Key"))

@@ -86,7 +86,7 @@ func TestProposeType_IncrementsConfigCounter(t *testing.T) {
 	m := metrics.New(provider.Meter("test"))
 	dir := t.TempDir()
 	p := parser.New()
-	s, err := wal.Open(dir, p, nil, nil, wal.WithoutFsync(), wal.WithInMemoryTimeSeries())
+	s, err := wal.Open(dir, p, nil, nil, wal.WithoutFsync())
 	require.NoError(t, err)
 
 	id := uint64(1)

@@ -1892,7 +1892,7 @@ func openWalRaft(t *testing.T, id uint64, peers []raft.Peer, dir string, fc *Fau
 	p := parser.New()
 	syncCh := make(chan *db.SyncableWithID, 64)
 	ingestCh := make(chan *db.IngestableWithID, 64)
-	s, err := wal.Open(dir, p, syncCh, ingestCh, wal.WithoutFsync(), wal.WithInMemoryTimeSeries())
+	s, err := wal.Open(dir, p, syncCh, ingestCh, wal.WithoutFsync())
 	if err != nil {
 		t.Fatalf("wal.Open(%s): %v", dir, err)
 	}

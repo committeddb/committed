@@ -18,15 +18,13 @@ message LogEntity {
     TypeRef type = 1;
 	bytes Key = 2;
 	bytes Data = 3;
-	// Timestamp is the wall-clock time (unix milliseconds) at which the
-	// proposer recorded this entity. It is set once at propose time so
-	// that apply on every node is content-deterministic — followers and
-	// leaders write the same timestamp into the time-series store, and
-	// post-snapshot replay reproduces the original timestamp instead of
-	// recomputing time.Now() at apply. Zero is "unset" and triggers a
-	// fallback at apply time (see wal.handleUserDefined). Backward
-	// compatible: pre-PR4 entries unmarshal as 0.
-	int64 Timestamp = 4;
+	// Field 4 was Timestamp (server-stamped wall-clock at propose time). A
+	// clock value in a consensus log is an anti-pattern — the raft index is
+	// the ordering authority and the timestamp was just one node's possibly-
+	// skewed clock — so it was removed. Reserved so the number is never
+	// reused with an incompatible meaning against any on-disk data.
+	reserved 4;
+	reserved "Timestamp";
 }
 
 message LogProposal {

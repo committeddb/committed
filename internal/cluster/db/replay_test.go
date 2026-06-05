@@ -68,7 +68,7 @@ func newWalDBWithSync(t *testing.T) (*db.DB, *wal.Storage) {
 	dir := t.TempDir()
 	p := parser.New()
 	sync := make(chan *db.SyncableWithID)
-	s, err := wal.Open(dir, p, sync, nil, wal.WithoutFsync(), wal.WithInMemoryTimeSeries())
+	s, err := wal.Open(dir, p, sync, nil, wal.WithoutFsync())
 	require.NoError(t, err)
 	d := db.New(uint64(1), db.Peers{1: ""}, s, p, sync, nil, db.WithTickInterval(testTickInterval))
 	t.Cleanup(func() { _ = d.Close() })

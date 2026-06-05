@@ -100,7 +100,7 @@ func TestDatabaseError(t *testing.T) {
 // each incarnation with its own parser.
 func TestDatabaseRestore_ParserOrdering(t *testing.T) {
 	dir := t.TempDir()
-	openOpts := []wal.Option{wal.WithoutFsync(), wal.WithInMemoryTimeSeries()}
+	openOpts := []wal.Option{wal.WithoutFsync()}
 	cfg := createDatabaseConfiguration("sink") // id "sink", dialect/type "sink"
 
 	// Incarnation 1: parser registered, Open, apply the database config.

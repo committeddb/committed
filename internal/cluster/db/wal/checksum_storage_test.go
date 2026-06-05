@@ -41,14 +41,14 @@ func TestStorage_CorruptEntryDetectedOnReopen(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = os.RemoveAll(dir) }()
 
-	s, err := wal.Open(dir, nil, nil, nil, wal.WithInMemoryTimeSeries())
+	s, err := wal.Open(dir, nil, nil, nil)
 	require.NoError(t, err)
 	require.NoError(t, s.Save(defaultHardState, index(1).terms(1, 1, 1), defaultSnap))
 	require.NoError(t, s.Close())
 
 	flipLastByte(t, filepath.Join(dir, "raft", "log"))
 
-	_, err = wal.Open(dir, nil, nil, nil, wal.WithInMemoryTimeSeries())
+	_, err = wal.Open(dir, nil, nil, nil)
 	require.ErrorIs(t, err, wal.ErrCorruptEntry)
 }
 

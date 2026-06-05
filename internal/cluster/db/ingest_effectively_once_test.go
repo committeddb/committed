@@ -99,7 +99,7 @@ func newWalDBWithMetrics(t *testing.T) (*db.DB, *wal.Storage, *sdkmetric.ManualR
 
 	dir := t.TempDir()
 	p := parser.New()
-	s, err := wal.Open(dir, p, nil, nil, wal.WithoutFsync(), wal.WithInMemoryTimeSeries())
+	s, err := wal.Open(dir, p, nil, nil, wal.WithoutFsync())
 	require.NoError(t, err)
 
 	id := uint64(1)

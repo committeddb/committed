@@ -90,7 +90,7 @@ same image can be templated per-node by an orchestrator:
 | --- | --- | --- |
 | `COMMITTED_NODE_ID` | `1` | Raft node ID. Must be unique and appear in `COMMITTED_PEERS`. |
 | `COMMITTED_API_ADDR` | `:8080` | HTTP API listen address. |
-| `COMMITTED_DATA_DIR` | `./data` | Directory for the WAL, raft state, metadata, and time-series data. |
+| `COMMITTED_DATA_DIR` | `./data` | Directory for the WAL, raft state, and metadata. |
 | `COMMITTED_PEER_URL` | `http://127.0.0.1:9022` | This node's advertised raft peer URL. Used when `COMMITTED_PEERS` is unset. |
 | `COMMITTED_PEERS` | _(unset)_ | Full static cluster membership as `id=url` pairs, e.g. `1=http://n1:9022,2=http://n2:9022,3=http://n3:9022`. Give the same value to every node; it must include this node's `COMMITTED_NODE_ID`. |
 
@@ -159,11 +159,10 @@ curl -X POST -H 'Content-Type: application/json' \
   http://localhost:8080/v1/proposal
 ```
 
-Read recent proposals for a type:
-
-```sh
-curl 'http://localhost:8080/v1/proposal?type=simple&number=100'
-```
+`/v1/proposal` is write-only — there is no endpoint to read the log back
+over HTTP. That's by design: Committed is a commit log, not a query
+interface. To read committed data, replicate it to a queryable store with a
+syncable and query there.
 
 Every config kind has versioned history and rollback under
 `GET /v1/{kind}/{id}/versions[/{version}]` and `POST /v1/{kind}/{id}/rollback`.
@@ -202,9 +201,8 @@ A Committed node's data directory looks like this:
 │   ├── log/         # raft consensus log; bounded (10GB / 1hr)
 │   └── state/       # HardState + ConfState
 ├── events/          # permanent event log; infinite retention
-├── metadata/
-│   └── bbolt.db     # types, databases, syncables, applied index
-└── time-series/     # derived view regenerable from events/
+└── metadata/
+    └── bbolt.db     # types, databases, syncables, applied index
 ```
 
 The permanent event log under `events/` is the canonical record of

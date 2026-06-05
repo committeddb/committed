@@ -852,10 +852,6 @@ func (ms *MemoryStorage) ResolveType(ref cluster.TypeRef) (*cluster.Type, error)
 	return &cluster.Type{ID: ref.ID, Version: ref.Version}, nil
 }
 
-func (ms *MemoryStorage) TimePoints(typeID string, start time.Time, end time.Time) ([]cluster.TimePoint, error) {
-	return nil, nil
-}
-
 func (ms *MemoryStorage) Position(id string) cluster.Position {
 	pos := ms.positions[id]
 

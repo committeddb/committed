@@ -7,7 +7,7 @@ Committed is a distributed commit log database built on etcd Raft consensus. It 
 ## Tech Stack
 
 - **Backend**: Go 1.26.2 (Raft consensus, Chi HTTP router, Protobuf serialization, Zap logging)
-- **Storage**: Write-ahead log (tidwall/wal), BoltDB, in-memory time series (tstorage)
+- **Storage**: Write-ahead log (tidwall/wal), BoltDB
 - **Databases**: MySQL (go-sql-driver), PostgreSQL (pgx)
 
 ## Project Structure
@@ -68,10 +68,10 @@ Databases, syncables, and ingestables use TOML configuration. See README.md for 
 All served via Chi router in `internal/cluster/http/`:
 
 - `GET/POST /database/{id}` - Database configurations
-- `GET/POST /proposal` - Proposals (log entries)
+- `POST /proposal` - Append proposals (write-only; the log is not queried over HTTP — sync it out and query there)
 - `GET/POST /syncable/{id}` - Syncable configurations
 - `GET/POST /ingestable/{id}` - Ingestable configurations
-- `GET/POST /type/{id}` - Type definitions
+- `POST /type/{id}` - Type configurations (read back via `GET /type` and the version endpoints)
 
 ## Code Generation
 

@@ -29,15 +29,6 @@ type configBuildErrorReporter interface {
 	ConfigBuildErrors() []cluster.ConfigBuildError
 }
 
-// timeSeriesLagReporter is an optional Storage extension that reports the
-// newest timestamp (unix milliseconds) in the derived time-series view, or 0
-// if it holds no points yet. The Ready loop type-asserts it to emit the
-// committed_tstorage_lag gauge (now - latest); wal.Storage implements it, the
-// in-memory test double does not.
-type timeSeriesLagReporter interface {
-	TimeSeriesLatestUnixNano() int64
-}
-
 type Raft struct {
 	proposeC     <-chan []byte            // proposed messages
 	proposeConfC <-chan raftpb.ConfChange // proposed cluster config changes
@@ -383,16 +374,6 @@ func (n *Raft) serveChannels() {
 				// test double doesn't implement it.
 				if r, ok := n.storage.(configBuildErrorReporter); ok {
 					n.metrics.SetConfigBuildErrors(r.ConfigBuildErrorCount())
-				}
-				// Surface how stale the derived time-series view is. Skip
-				// while it holds no points (latest == 0): there is no
-				// meaningful "lag" yet, and emitting now-0 would read as a
-				// huge bogus lag.
-				if r, ok := n.storage.(timeSeriesLagReporter); ok {
-					if latest := r.TimeSeriesLatestUnixNano(); latest > 0 {
-						lag := time.Since(time.UnixMilli(latest)).Seconds()
-						n.metrics.SetTimeSeriesLag(lag)
-					}
 				}
 			}
 

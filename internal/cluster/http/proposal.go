@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	httpgo "net/http"
-	"strconv"
-	"time"
 
 	"github.com/philborlin/committed/internal/cluster"
 )
@@ -39,12 +37,6 @@ func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 
-	// Capture wall-clock once for the whole proposal so every entity in
-	// it ends up with the same timestamp. This is what makes apply
-	// content-deterministic on multi-node clusters: the proposer fixes
-	// the time and every node reads it back from the marshaled entry.
-	ts := time.Now().UnixMilli()
-
 	var es []*cluster.Entity
 	for _, e := range pr.Entities {
 		t, err := h.c.ResolveType(cluster.LatestTypeRef(e.TypeID))
@@ -74,10 +66,9 @@ func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
 		}
 
 		es = append(es, &cluster.Entity{
-			Type:      t,
-			Key:       []byte(e.Key),
-			Data:      e.Data,
-			Timestamp: ts,
+			Type: t,
+			Key:  []byte(e.Key),
+			Data: e.Data,
 		})
 	}
 
@@ -94,60 +85,6 @@ func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
 		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to propose")
 		return
 	}
-}
-
-type GetProposalResponse struct {
-	Entities []*GetProposalEntityResponse `json:"entities"`
-}
-
-type GetProposalEntityResponse struct {
-	TypeID   string `json:"typeId"`
-	TypeName string `json:"typeName"`
-	Key      string `json:"key"`
-	Data     string `json:"data"`
-}
-
-type GetProposalTypeResponse struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-}
-
-func (h *HTTP) GetProposals(w httpgo.ResponseWriter, r *httpgo.Request) {
-	t := r.URL.Query().Get("type")
-
-	amount := 10
-	qn := r.URL.Query().Get("number")
-	if qn != "" {
-		n, err := strconv.Atoi(qn)
-		if err != nil {
-			writeErrorf(w, httpgo.StatusBadRequest, "invalid_parameter", "number parameter %q is not a valid integer", qn)
-			return
-		}
-		amount = n
-	}
-
-	ps, err := h.c.Proposals(uint64(amount), t)
-	if err != nil {
-		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to retrieve proposals")
-		return
-	}
-
-	var body []GetProposalResponse
-	for _, p := range ps {
-		proposalResponse := &GetProposalResponse{}
-		for _, e := range p.Entities {
-			proposalEntityResponse := &GetProposalEntityResponse{
-				TypeID:   e.ID,
-				TypeName: e.Name,
-				Key:      string(e.Key),
-				Data:     string(e.Data),
-			}
-			proposalResponse.Entities = append(proposalResponse.Entities, proposalEntityResponse)
-		}
-		body = append(body, *proposalResponse)
-	}
-
-	writeArrayBody(w, body)
 }
 
 // compiledValidator returns a cached entityValidator for the given type

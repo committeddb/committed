@@ -102,7 +102,7 @@ func TestRestoreSyncableWorkers(t *testing.T) {
 	sp.ParseReturns(&clusterfakes.FakeSyncable{}, nil)
 	p.AddSyncableParser("test", sp)
 
-	openOpts := []wal.Option{wal.WithoutFsync(), wal.WithInMemoryTimeSeries()}
+	openOpts := []wal.Option{wal.WithoutFsync()}
 
 	// First incarnation: persist a syncable. Buffered so the apply-path send
 	// (saveSyncable) doesn't block; drain it so it can't be mistaken for a

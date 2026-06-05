@@ -16,10 +16,9 @@ import (
 )
 
 type payload struct {
-	Key       string          `json:"key"`
-	Type      payloadType     `json:"type"`
-	Data      json.RawMessage `json:"data"`
-	Timestamp int64           `json:"timestamp"`
+	Key  string          `json:"key"`
+	Type payloadType     `json:"type"`
+	Data json.RawMessage `json:"data"`
 }
 
 type payloadType struct {
@@ -70,8 +69,7 @@ func (s *Syncable) sendEntity(ctx context.Context, e *cluster.Entity) error {
 			Name:    e.Name,
 			Version: e.Version,
 		},
-		Data:      json.RawMessage(e.Data),
-		Timestamp: e.Timestamp,
+		Data: json.RawMessage(e.Data),
 	}
 
 	bs, err := json.Marshal(body)

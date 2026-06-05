@@ -3,6 +3,7 @@ package db_test
 import (
 	"context"
 	"fmt"
+	"io"
 	"testing"
 	"time"
 
@@ -23,7 +24,7 @@ func newWalDB(t *testing.T) (*db.DB, *wal.Storage) {
 	t.Helper()
 	dir := t.TempDir()
 	p := parser.New()
-	s, err := wal.Open(dir, p, nil, nil, wal.WithoutFsync(), wal.WithInMemoryTimeSeries())
+	s, err := wal.Open(dir, p, nil, nil, wal.WithoutFsync())
 	require.NoError(t, err)
 
 	id := uint64(1)
@@ -122,10 +123,9 @@ func TestCrossVersionReplay_ProposalKeepsItsStampedSchema(t *testing.T) {
 	require.Equal(t, 1, cur.Version)
 
 	p := &cluster.Proposal{Entities: []*cluster.Entity{{
-		Type:      cur,
-		Key:       []byte("k1"),
-		Data:      []byte(`{"name":"alice"}`),
-		Timestamp: time.Now().UnixMilli(),
+		Type: cur,
+		Key:  []byte("k1"),
+		Data: []byte(`{"name":"alice"}`),
 	}}}
 	require.NoError(t, d.Propose(testCtx(t), p))
 
@@ -135,11 +135,23 @@ func TestCrossVersionReplay_ProposalKeepsItsStampedSchema(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 2, cur2.Version)
 
-	// Read all proposals back. The user-data proposal must come back
-	// hydrated with v1's schema (the version it was stamped with), not
-	// the latest v2 schema.
-	ps, err := d.Proposals(100, "person")
-	require.NoError(t, err)
+	// Read the user proposal back off the permanent event log, keeping only
+	// the "person" entity proposals (the Reader also surfaces the v1 and v2
+	// type-registration proposals, whose entity type is the internal type
+	// type, not "person"). The kept proposal must come back hydrated with
+	// v1's schema — the version it was stamped with — not the latest v2.
+	r := s.Reader("")
+	var ps []*cluster.Proposal
+	for {
+		_, p, err := r.Read()
+		if err == io.EOF {
+			break
+		}
+		require.NoError(t, err)
+		if p.Entities[0].Type.ID == "person" {
+			ps = append(ps, p)
+		}
+	}
 	require.Len(t, ps, 1)
 	require.Equal(t, 1, ps[0].Entities[0].Type.Version,
 		"entity must be hydrated with the schema in force at propose time, not the latest")

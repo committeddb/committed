@@ -537,10 +537,9 @@ func tupleToEntity(
 	key := fmt.Sprintf("%v", m[config.PrimaryKey])
 
 	return &cluster.Entity{
-		Type:      config.Type,
-		Key:       []byte(key),
-		Data:      jsonBytes,
-		Timestamp: time.Now().UnixMilli(),
+		Type: config.Type,
+		Key:  []byte(key),
+		Data: jsonBytes,
 	}
 }
 
@@ -768,10 +767,9 @@ func readBatch(
 		batchLastPK = key
 
 		entities = append(entities, &cluster.Entity{
-			Type:      config.Type,
-			Key:       []byte(key),
-			Data:      jsonBytes,
-			Timestamp: time.Now().UnixMilli(),
+			Type: config.Type,
+			Key:  []byte(key),
+			Data: jsonBytes,
 		})
 	}
 

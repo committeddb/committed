@@ -99,13 +99,12 @@ func (s *StorageWrapper) CloseAndReopen() (*StorageWrapper, error) {
 // should call wal.Open directly without these options.
 var testOpenOptions = []wal.Option{
 	wal.WithoutFsync(),
-	wal.WithInMemoryTimeSeries(),
 }
 
 // closeIdempotent closes the underlying storage at most once. Tests routinely
 // hold multiple StorageWrapper handles to the same path (e.g. before and after
 // CloseAndReopen) and may end up calling Close on each via deferred cleanup;
-// the underlying tstorage panics on a double-close, so we guard with sync.Once.
+// sync.Once makes the redundant closes harmless no-ops.
 func (s *StorageWrapper) closeIdempotent() error {
 	var err error
 	s.closeOnce.Do(func() {

@@ -35,8 +35,10 @@ import (
 //   - A database with a parsed configuration (covers handleDatabase)
 //   - A syncable (covers handleSyncable + the channel notify path)
 //   - An ingestable (covers handleIngestable + the channel notify path)
-//   - User-defined entities, both stamped and unstamped (covers
-//     handleUserDefined and the no-fallback contract)
+//   - User-defined (topic) entities, both stamped and unstamped. Their
+//     apply is a no-op now (durability is the permanent event log), but
+//     they must still flow through the dispatch without touching any
+//     bucket or diverging across nodes.
 //   - Mixed proposals carrying multiple entities at once
 //   - A delete (covers the delete branch in handleType)
 //
@@ -45,14 +47,6 @@ import (
 // order, formatting each entry as a "bucket/hex=hex" line. testify's
 // require.Equal on the resulting slices produces a per-line diff on
 // failure, which is much more useful than a hash mismatch.
-//
-// Time-series storage is NOT in BucketSnapshot because tstorage's
-// on-disk format is not byte-stable today (out-of-scope per the
-// ticket). User-defined entities still flow through handleUserDefined
-// and write to the time-series store; we cover that path with a
-// separate cross-node assertion against the raw tstorage points,
-// because the original known non-determinism (the time.Now() fallback)
-// lived in handleUserDefined and would otherwise go undetected.
 //
 // If anyone reintroduces a source of non-determinism in the apply path —
 // time.Now() at apply, map iteration order, random IDs, etc. — this test
@@ -121,7 +115,7 @@ func TestApplyDeterminism(t *testing.T) {
 	// "every node sees the same committed entries in the same order"),
 	// but it's still load-bearing for the test as a whole: a Save bug
 	// that drops or reorders entries on one node would diverge here
-	// even though the bbolt walk and the tstorage walk look fine.
+	// even though the bbolt walk looks fine.
 	entryLogs := make([][]pb.Entry, nodes)
 	for i, s := range storages {
 		entryLogs[i] = s.ents(t)
@@ -147,61 +141,6 @@ func TestApplyDeterminism(t *testing.T) {
 		require.Equalf(t, snapshots[0], snapshots[i],
 			"apply path is non-deterministic: node %d bbolt buckets differ from node 0", i)
 	}
-
-	// BucketSnapshot deliberately excludes the time-series store (its
-	// on-disk format is not byte-stable today). The time-series store IS
-	// where the original known non-determinism lived (handleUserDefined's
-	// old time.Now() fallback), so we make a separate cross-node
-	// assertion by pulling the raw points out of tstorage and comparing
-	// every timestamp. If anyone reintroduces a wall-clock read in
-	// handleUserDefined, this assertion will fail because the three
-	// node-applies' timestamps will differ — back-to-back applies still
-	// tick the millisecond.
-	const userMetric = "user-events"
-	// Cover everything from unix epoch through year 9999 (no point in
-	// being clever — this only matters as a query, not as storage).
-	const tsLo = int64(0)
-	const tsHi = int64(253402300799000) // 9999-12-31 in ms
-	var firstPoints []*timeseriesPoint
-	for i, s := range storages {
-		points := selectAllPoints(t, s, userMetric, tsLo, tsHi)
-		if i == 0 {
-			firstPoints = points
-			continue
-		}
-		require.Equalf(t, len(firstPoints), len(points),
-			"node %d time-series point count mismatch (got %d, want %d)",
-			i, len(points), len(firstPoints))
-		for j, p := range points {
-			require.Equalf(t, firstPoints[j].timestamp, p.timestamp,
-				"node %d time-series point %d timestamp mismatch — apply non-deterministic in handleUserDefined?",
-				i, j)
-			require.Equalf(t, firstPoints[j].value, p.value,
-				"node %d time-series point %d value mismatch", i, j)
-		}
-	}
-}
-
-type timeseriesPoint struct {
-	timestamp int64
-	value     float64
-}
-
-// selectAllPoints reads every point in [lo, hi] for the given metric and
-// returns them in tstorage's natural order. tstorage.Select returns
-// `ErrNoDataPoints` for an empty range, which we normalize to an empty
-// slice so callers can compare lengths uniformly.
-func selectAllPoints(t *testing.T, s *StorageWrapper, metric string, lo, hi int64) []*timeseriesPoint {
-	t.Helper()
-	raw, err := s.TimeSeriesStorage.Select(metric, nil, lo, hi)
-	if err != nil && err.Error() != "no data points found" {
-		t.Fatalf("tstorage.Select: %v", err)
-	}
-	out := make([]*timeseriesPoint, 0, len(raw))
-	for _, p := range raw {
-		out = append(out, &timeseriesPoint{timestamp: p.Timestamp, value: p.Value})
-	}
-	return out
 }
 
 // buildVariedBurst constructs a representative slice of raft entries
@@ -251,20 +190,19 @@ func buildVariedBurst(t *testing.T) []pb.Entry {
 	siEnt, err := cluster.NewUpsertSyncableIndexEntity(&cluster.SyncableIndex{ID: "sync-1", Index: 5})
 	require.NoError(t, err)
 
-	// User-defined entities. One stamped (the common case), one
-	// unstamped (Timestamp == 0) to lock in the no-fallback contract.
+	// Two user-defined (topic) entities. They apply as no-ops now, but must
+	// still flow through the dispatch identically on every node without
+	// touching any bucket.
 	userType := &cluster.Type{ID: "user-events"}
-	userStamped := &cluster.Entity{
-		Type:      userType,
-		Key:       []byte("alice"),
-		Data:      []byte(`{"action":"login"}`),
-		Timestamp: 1700000000000, // fixed wall-clock; deterministic
+	userA := &cluster.Entity{
+		Type: userType,
+		Key:  []byte("alice"),
+		Data: []byte(`{"action":"login"}`),
 	}
-	userUnstamped := &cluster.Entity{
+	userB := &cluster.Entity{
 		Type: userType,
 		Key:  []byte("bob"),
 		Data: []byte(`{"action":"logout"}`),
-		// Timestamp deliberately 0 — verifies the no-fallback path.
 	}
 
 	// A delete-type entity, exercising the delete branch of handleType.
@@ -280,11 +218,11 @@ func buildVariedBurst(t *testing.T) []pb.Entry {
 		makeEntry(t, idx+2, t3),
 		makeEntry(t, idx+3, dbEnt),
 		// Multi-entity proposal: type+user mixed
-		mustMakeProposal(t, idx+4, dbEnt, userStamped),
+		mustMakeProposal(t, idx+4, dbEnt, userA),
 		makeEntry(t, idx+5, syncEnt),
 		makeEntry(t, idx+6, ingestEnt),
-		makeEntry(t, idx+7, userStamped),
-		makeEntry(t, idx+8, userUnstamped),
+		makeEntry(t, idx+7, userA),
+		makeEntry(t, idx+8, userB),
 		makeEntry(t, idx+9, siEnt),
 		makeEntry(t, idx+10, delTmp),
 	}

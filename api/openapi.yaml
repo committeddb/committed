@@ -10,9 +10,10 @@ info:
     - **write**: append proposals to topics (POST /v1/proposal)
     - **configure**: manage databases, ingestables, syncables, and types
 
-    The API is not a query interface. Reads are limited to proposal history
-    and configuration retrieval. For querying committed data, use a syncable
-    to replicate to an external database.
+    The API is not a query interface, and `/v1/proposal` is write-only:
+    there is no endpoint to read the log back. Reads are limited to
+    configuration retrieval. For querying committed data, use a syncable to
+    replicate it to an external database and query there.
 
     ## Versioning
 
@@ -64,7 +65,7 @@ tags:
   - name: type
     description: Schema and type definitions
   - name: proposal
-    description: Append and read proposals from the commit log
+    description: Append proposals to the commit log (write-only)
   - name: node
     description: Per-node diagnostics for the node that serves the request
 paths:
@@ -670,49 +671,9 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
   /v1/type/{id}:
-    get:
-      tags: [type]
-      summary: Get a type activity graph
-      description: |
-        Returns a time series of proposal counts for the given type over
-        the `[start, end]` window. This is the endpoint that powers the
-        type activity charts in the web UI.
-
-        Note: this endpoint does *not* return the type configuration
-        itself. Use `GET /v1/type/{id}/versions/{version}` or the list
-        endpoint `GET /v1/type` for configuration data.
-      operationId: getTypeGraph
-      parameters:
-        - $ref: '#/components/parameters/ResourceId'
-        - name: start
-          in: query
-          required: true
-          description: Start of the time window (ISO 8601 date-time without subseconds, e.g. `2024-01-01T00:00:00Z`).
-          schema:
-            type: string
-            format: date-time
-        - name: end
-          in: query
-          required: true
-          description: End of the time window (ISO 8601 date-time without subseconds).
-          schema:
-            type: string
-            format: date-time
-      responses:
-        '200':
-          description: Time series of proposal counts
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/GetTypeGraphPoint'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '500':
-          $ref: '#/components/responses/InternalError'
+    # Write-only: a type's configuration is created/updated here and read
+    # back via the version endpoints below or the GET /v1/type list. There
+    # is no GET /v1/type/{id} — committed data is not queried over HTTP.
     post:
       tags: [type]
       summary: Create or update a type configuration
@@ -789,52 +750,17 @@ paths:
           $ref: '#/components/responses/InternalError'
 
   /v1/proposal:
-    get:
-      tags: [proposal]
-      summary: Read recent proposals
-      description: |
-        Returns the most recent proposals, newest first. If `type` is
-        provided, only proposals containing at least one entity of that
-        type are returned. `number` bounds the count; default is 10.
-      operationId: getProposals
-      parameters:
-        - name: type
-          in: query
-          required: false
-          description: Filter to proposals containing entities of this type ID.
-          schema:
-            type: string
-        - name: number
-          in: query
-          required: false
-          description: Maximum number of proposals to return.
-          schema:
-            type: integer
-            minimum: 1
-            default: 10
-      responses:
-        '200':
-          description: Proposals, newest first
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/GetProposalResponse'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '500':
-          $ref: '#/components/responses/InternalError'
+    # Write-only by design. Committed is a commit log, not a query
+    # interface: there is no GET. To read committed data, replicate it to a
+    # queryable store with a syncable and query there (see the API overview).
     post:
       tags: [proposal]
       summary: Append a proposal
       description: |
-        Appends a new proposal containing one or more entities. All
-        entities in a single proposal share a single wall-clock timestamp
-        assigned by the server at submission time, so apply is
-        content-deterministic across the cluster.
+        Appends a new proposal containing one or more entities. The
+        proposal's position in the log — its raft index, assigned by
+        consensus — is its only ordering authority; the server records no
+        wall-clock time for entities.
 
         If any referenced type has schema validation enabled and the
         entity data does not match, the whole proposal is rejected with
@@ -1138,21 +1064,6 @@ components:
           type: string
           description: Truncated last transient error.
 
-    GetTypeGraphPoint:
-      type: object
-      required: [x, y]
-      description: One bucket of a type activity time series.
-      properties:
-        x:
-          type: string
-          format: date-time
-          description: Bucket end timestamp.
-        y:
-          type: integer
-          format: int64
-          minimum: 0
-          description: Proposal count in the bucket.
-
     AddProposalRequest:
       type: object
       required: [entities]
@@ -1176,29 +1087,6 @@ components:
           description: |
             Entity data as an arbitrary JSON value. If the target type has
             schema validation enabled the data must match the schema.
-
-    GetProposalResponse:
-      type: object
-      required: [entities]
-      properties:
-        entities:
-          type: array
-          items:
-            $ref: '#/components/schemas/GetProposalEntityResponse'
-
-    GetProposalEntityResponse:
-      type: object
-      required: [typeId, typeName, key, data]
-      properties:
-        typeId:
-          type: string
-        typeName:
-          type: string
-        key:
-          type: string
-        data:
-          type: string
-          description: Entity data as a string (the bytes originally submitted).
 
     ErrorResponse:
       type: object
