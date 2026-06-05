@@ -45,6 +45,10 @@ func newEntity(t *cluster.Type, key string, data any) *cluster.Entity {
 }
 
 type webhookBody struct {
+	Entities []webhookEntity `json:"entities"`
+}
+
+type webhookEntity struct {
 	Key  string          `json:"key"`
 	Type webhookType     `json:"type"`
 	Data json.RawMessage `json:"data"`
@@ -73,25 +77,37 @@ func TestSync_SingleEntity_Success(t *testing.T) {
 
 	entity := newEntity(testType, "key1", map[string]string{"id": "1", "name": "test"})
 	a := newActual(entity)
+	a.Index = 42
 
 	snapshot, err := s.Sync(context.Background(), a)
 	require.NoError(t, err)
 	require.Equal(t, cluster.ShouldSnapshot(true), snapshot)
 
-	require.Equal(t, base64.StdEncoding.EncodeToString([]byte("key1")), received.Key)
-	require.Equal(t, "test-topic", received.Type.ID)
-	require.Equal(t, "test", received.Type.Name)
-	require.Equal(t, 1, received.Type.Version)
+	require.Len(t, received.Entities, 1)
+	require.Equal(t, base64.StdEncoding.EncodeToString([]byte("key1")), received.Entities[0].Key)
+	require.Equal(t, "test-topic", received.Entities[0].Type.ID)
+	require.Equal(t, "test", received.Entities[0].Type.Name)
+	require.Equal(t, 1, received.Entities[0].Type.Version)
 
 	require.Equal(t, "application/json", headers.Get("Content-Type"))
-	require.Equal(t, base64.StdEncoding.EncodeToString([]byte("key1")), headers.Get("Idempotency-Key"))
+	// Idempotency key is the Actual's raft index (transaction-level), not a
+	// per-entity key.
+	require.Equal(t, "42", headers.Get("Idempotency-Key"))
 }
 
-func TestSync_MultipleEntities_Success(t *testing.T) {
+// TestSync_MultipleEntities_OneAtomicRequest is the transaction-boundary
+// guarantee: a multi-entity Actual is delivered as exactly ONE request whose
+// body carries all the entities — not one request per entity. Shredding a
+// committed transaction into independent calls (the old behaviour) broke
+// atomicity downstream.
+func TestSync_MultipleEntities_OneAtomicRequest(t *testing.T) {
 	var count atomic.Int32
+	var received webhookBody
 
 	ts := httptest.NewServer(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
 		count.Add(1)
+		bs, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(bs, &received)
 		w.WriteHeader(200)
 	}))
 	defer ts.Close()
@@ -106,7 +122,11 @@ func TestSync_MultipleEntities_Success(t *testing.T) {
 	snapshot, err := s.Sync(context.Background(), a)
 	require.NoError(t, err)
 	require.Equal(t, cluster.ShouldSnapshot(true), snapshot)
-	require.Equal(t, int32(2), count.Load())
+
+	require.Equal(t, int32(1), count.Load(), "the whole Actual must be one request")
+	require.Len(t, received.Entities, 2, "both entities must ride in the single request")
+	require.Equal(t, base64.StdEncoding.EncodeToString([]byte("key1")), received.Entities[0].Key)
+	require.Equal(t, base64.StdEncoding.EncodeToString([]byte("key2")), received.Entities[1].Key)
 }
 
 func TestSync_TopicMismatch(t *testing.T) {
