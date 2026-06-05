@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"encoding/binary"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -68,6 +69,22 @@ type Raft struct {
 	// constructs Raft directly without a db.DB).
 	applyNotifier func(data []byte)
 
+	// appliedIndexNotifier is invoked once per Ready iteration that
+	// applied at least one committed entry (i.e. AppliedIndex advanced).
+	// db.New supplies db.notifyAppliedIndexAdvanced so a LinearizableRead
+	// blocked waiting for AppliedIndex to reach its ReadIndex wakes up
+	// promptly instead of polling. nil disables it (raft_test path).
+	appliedIndexNotifier func()
+
+	// readMu guards readWaiters. ReadIndex registers a waiter keyed by the
+	// request-context token it hands to node.ReadIndex; the Ready loop
+	// dispatches each rd.ReadStates entry back to the matching waiter by
+	// the same token. The token is a monotonic counter (nextReadReq) so
+	// concurrent ReadIndex calls never collide.
+	readMu      sync.Mutex
+	readWaiters map[string]chan uint64
+	nextReadReq atomic.Uint64
+
 	transport      Transport
 	transportStopC chan struct{} // signals http transport to shutdown
 	transportDoneC chan struct{} // signals http transport shutdown complete
@@ -105,31 +122,33 @@ func NewRaft(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, propo
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	return newRaftWithOptions(id, ps, s, proposeC, proposeConfC, nil, cfg.logger, cfg)
+	return newRaftWithOptions(id, ps, s, proposeC, proposeConfC, nil, nil, cfg.logger, cfg)
 }
 
-func newRaftWithOptions(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, proposeConfC <-chan raftpb.ConfChange, applyNotifier func(data []byte), logger *zap.Logger, cfg options) (<-chan error, *Raft) {
+func newRaftWithOptions(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, proposeConfC <-chan raftpb.ConfChange, applyNotifier func(data []byte), appliedIndexNotifier func(), logger *zap.Logger, cfg options) (<-chan error, *Raft) {
 	errorC := make(chan error)
 
 	n := &Raft{
-		id:                 id,
-		proposeC:           proposeC,
-		proposeConfC:       proposeConfC,
-		raftErrorC:         errorC,
-		raftStopC:          make(chan struct{}),
-		leaderState:        NewLeaderState(false),
-		tickInterval:       cfg.tickInterval,
-		compactMaxSize:     cfg.compactMaxSize,
-		compactMaxAge:      cfg.compactMaxAge,
-		lastCompactTime:    time.Now(),
-		storage:            s,
-		applyNotifier:      applyNotifier,
-		transportStopC:     make(chan struct{}),
-		transportDoneC:     make(chan struct{}),
-		transportWrapper:   cfg.transportWrapper,
-		tlsInfo:            cfg.tlsInfo,
-		closeC:             make(chan struct{}),
-		serveChannelsDoneC: make(chan struct{}),
+		id:                   id,
+		proposeC:             proposeC,
+		proposeConfC:         proposeConfC,
+		raftErrorC:           errorC,
+		raftStopC:            make(chan struct{}),
+		leaderState:          NewLeaderState(false),
+		tickInterval:         cfg.tickInterval,
+		compactMaxSize:       cfg.compactMaxSize,
+		compactMaxAge:        cfg.compactMaxAge,
+		lastCompactTime:      time.Now(),
+		storage:              s,
+		applyNotifier:        applyNotifier,
+		appliedIndexNotifier: appliedIndexNotifier,
+		readWaiters:          make(map[string]chan uint64),
+		transportStopC:       make(chan struct{}),
+		transportDoneC:       make(chan struct{}),
+		transportWrapper:     cfg.transportWrapper,
+		tlsInfo:              cfg.tlsInfo,
+		closeC:               make(chan struct{}),
+		serveChannelsDoneC:   make(chan struct{}),
 
 		logger:  logger,
 		metrics: cfg.metrics,
@@ -145,10 +164,16 @@ func newRaftWithOptions(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []
 	return errorC, n
 }
 
+// raftElectionTicks is the number of Tick()s without a heartbeat from the
+// leader before a follower starts an election (raft.Config.ElectionTick).
+// Named so the read-index retry cadence can express itself in the same unit
+// — "one election timeout" — rather than duplicating the literal.
+const raftElectionTicks = 10
+
 func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 	c := &raft.Config{
 		ID:                        id,
-		ElectionTick:              10,
+		ElectionTick:              raftElectionTicks,
 		HeartbeatTick:             1,
 		Storage:                   n.storage,
 		MaxSizePerMsg:             1024 * 1024,
@@ -282,6 +307,14 @@ func (n *Raft) serveChannels() {
 				n.metrics.SetLeader(isLeader)
 			}
 
+			// Hand each confirmed read state back to its waiting
+			// ReadIndex caller. A ReadState carries the request-context
+			// token we passed to node.ReadIndex plus the commit index at
+			// which the leader confirmed quorum; the caller then waits
+			// for AppliedIndex to reach that index before reading. This
+			// is independent of Save/apply, so dispatch it up front.
+			n.dispatchReadStates(rd.ReadStates)
+
 			// Save persists the new entries durably. It does NOT apply them
 			// to bucket state — that happens via ApplyCommitted below, only
 			// on rd.CommittedEntries. Calling Save with rd.Entries and apply
@@ -362,6 +395,14 @@ func (n *Raft) serveChannels() {
 					cs := n.node.ApplyConfChange(cc)
 					n.storage.ConfState(cs)
 				}
+			}
+
+			// AppliedIndex advanced this iteration (every committed entry
+			// bumps it, regardless of type), so wake any LinearizableRead
+			// blocked on AppliedIndex >= its ReadIndex. Fired once per
+			// Ready rather than per entry to keep the broadcast cheap.
+			if n.appliedIndexNotifier != nil && len(rd.CommittedEntries) > 0 {
+				n.appliedIndexNotifier()
 			}
 
 			if n.metrics != nil {
@@ -467,6 +508,101 @@ func (n *Raft) Leader() uint64 {
 		return 0
 	}
 	return n.node.Status().Lead
+}
+
+// ReadIndex performs the etcd-raft ReadIndex protocol and returns the raft
+// log index at which a linearizable read may be served. The leader confirms
+// it still holds quorum (a heartbeat round-trip, coalesced across concurrent
+// requests by etcd-raft) before replying; on a follower the request is
+// forwarded to the leader transparently. The returned index is the commit
+// index observed at confirmation time — the caller must wait for its local
+// AppliedIndex to reach it before reading (see db.LinearizableRead).
+//
+// ReadIndex blocks until the matching ReadState surfaces on a Ready, ctx is
+// canceled, or the Raft is closed. If no leader can be reached (e.g. this
+// node is partitioned into a minority), no ReadState ever comes back and the
+// call returns ctx.Err() once ctx fires — that is the mechanism by which a
+// partitioned node refuses to serve a stale linearizable read.
+//
+// The request-context token handed to node.ReadIndex is a per-call monotonic
+// counter, so concurrent ReadIndex calls each match only their own
+// ReadState. etcd-raft may still coalesce the underlying heartbeat round-trip
+// across them, so the per-read cost amortizes under load.
+func (n *Raft) ReadIndex(ctx context.Context) (uint64, error) {
+	rctx := make([]byte, 8)
+	binary.BigEndian.PutUint64(rctx, n.nextReadReq.Add(1))
+	key := string(rctx)
+
+	// Buffered cap 1 so dispatchReadStates never blocks the Ready loop:
+	// the single expected send always fits, and a late duplicate (raft
+	// can echo a ReadState more than once) falls through its default.
+	ack := make(chan uint64, 1)
+	n.readMu.Lock()
+	n.readWaiters[key] = ack
+	n.readMu.Unlock()
+	defer func() {
+		n.readMu.Lock()
+		delete(n.readWaiters, key)
+		n.readMu.Unlock()
+	}()
+
+	// etcd-raft DROPS a MsgReadIndex that arrives while this node sees no
+	// leader (startup before the first election, or the gap during a
+	// re-election) rather than queuing it — the request is silently lost
+	// and no ReadState ever comes back. So re-issue on a timer until the
+	// ReadState surfaces or ctx fires. The same token is reused across
+	// attempts, so a leader that answers more than once is harmless: the
+	// buffered ack keeps the first index and drops the rest. This mirrors
+	// etcd's own linearizableReadLoop retry.
+	retry := time.NewTimer(0) // fire immediately for the first attempt
+	defer retry.Stop()
+	for {
+		select {
+		case <-retry.C:
+			if err := n.node.ReadIndex(ctx, rctx); err != nil {
+				return 0, err
+			}
+			retry.Reset(n.readIndexRetryInterval())
+		case idx := <-ack:
+			return idx, nil
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-n.closeC:
+			return 0, ErrClosed
+		}
+	}
+}
+
+// readIndexRetryInterval is how long ReadIndex waits between re-issuing a
+// dropped read request. One election timeout (ElectionTick × tickInterval) is
+// the natural cadence: that's the timescale on which a missing leader
+// resolves, so retrying faster just spams the dropped-message path while
+// retrying slower needlessly stalls reads during a brief election. Floored so
+// a tiny test tick doesn't turn this into a hot loop.
+func (n *Raft) readIndexRetryInterval() time.Duration {
+	return max(raftElectionTicks*n.tickInterval, 5*time.Millisecond)
+}
+
+// dispatchReadStates routes each confirmed ReadState from a Ready back to the
+// ReadIndex caller that registered the matching request-context token. A
+// ReadState whose token has no waiter (the caller already returned via ctx,
+// or raft echoed a duplicate) is dropped. Called from the Ready loop only.
+func (n *Raft) dispatchReadStates(states []raft.ReadState) {
+	if len(states) == 0 {
+		return
+	}
+	n.readMu.Lock()
+	defer n.readMu.Unlock()
+	for _, rs := range states {
+		ack, ok := n.readWaiters[string(rs.RequestCtx)]
+		if !ok {
+			continue
+		}
+		select {
+		case ack <- rs.Index:
+		default:
+		}
+	}
 }
 
 // checkStorageInvariant enforces P_local == R_local after every Ready

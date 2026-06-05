@@ -2125,3 +2125,108 @@ func (w *wallog) LastSeq() (uint64, error) {
 func (w *wallog) Read(seq uint64) ([]byte, error) {
 	return w.l.Read(seq)
 }
+
+// -----------------------------------------------------------------------------
+// Scenario: linearizable read under partition
+//
+// Invariants protected:
+//
+//   - SAFETY: a follower partitioned out of the quorum CANNOT confirm a
+//     linearizable read. Its MsgReadIndex can never reach the leader, so no
+//     ReadState ever comes back and ReadIndex blocks to its deadline rather
+//     than letting the caller read stale local state. This is the multi-node
+//     proof the read-index ticket asks for: stale reads are prevented by
+//     default on the wrong side of a split.
+//   - AVAILABILITY (stale opt-out): that SAME isolated follower still answers
+//     a stale read — a direct read of local committed state — immediately,
+//     with no quorum check. That's the ?consistency=stale escape hatch.
+//   - LIVENESS (right side): the majority keeps a leader and that leader
+//     continues to confirm reads, so a partition costs read availability only
+//     on the minority side.
+// -----------------------------------------------------------------------------
+
+func TestAdversarial_ReadIndexPartitionedFollower(t *testing.T) {
+	rafts, cluster := createFaultyRafts(3)
+	defer rafts.Close()
+
+	rafts.WaitForLeader(t)
+
+	// A baseline write applied on every node, so the stale read below has a
+	// definite value to return.
+	proposeAndCheck(t, rafts[0], "baseline")
+	for _, r := range rafts {
+		waitForUserEntry(t, r, []byte("baseline"))
+	}
+
+	leader := rafts.waitForLeaderRaft(t)
+
+	// Pick one follower to isolate; everyone else (the leader included) stays
+	// in the majority. A 2/3 majority keeps quorum, so the leader does not
+	// step down and only the isolated follower loses the ability to confirm a
+	// read.
+	var follower *Raft
+	majorityIDs := make([]uint64, 0, 2)
+	for _, r := range rafts {
+		if r.id != leader.id && follower == nil {
+			follower = r
+			continue
+		}
+		majorityIDs = append(majorityIDs, r.id)
+	}
+	if follower == nil {
+		t.Fatal("expected at least one follower besides the leader")
+	}
+
+	// Before the partition the follower is still in the quorum, so it CAN
+	// confirm a read (forwarded to the leader and back). This anchors the
+	// post-partition failure as a consequence of the split, not a node that
+	// never could read.
+	preCtx, preCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	_, preErr := follower.ReadIndex(preCtx)
+	preCancel()
+	if preErr != nil {
+		t.Fatalf("follower should confirm a linearizable read before the partition: %v", preErr)
+	}
+
+	cluster.Partition([]uint64{follower.id}, majorityIDs)
+	defer cluster.Heal()
+	time.Sleep(adversarialSettleTime)
+
+	// LIVENESS: the majority still has a leader and that leader confirms reads.
+	majorityRafts := raftsByIDs(rafts, majorityIDs)
+	majorityRafts.WaitForLeader(t)
+	majLeader := majorityRafts.waitForLeaderRaft(t)
+	majCtx, majCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	idx, majErr := majLeader.ReadIndex(majCtx)
+	majCancel()
+	if majErr != nil {
+		t.Fatalf("majority leader still holds quorum and must confirm reads: %v", majErr)
+	}
+	if idx == 0 {
+		t.Fatal("majority leader's confirmed read index should be non-zero")
+	}
+
+	// SAFETY: the isolated follower cannot confirm a linearizable read — no
+	// path to the leader means no ReadState ever returns, so ReadIndex blocks
+	// to its deadline. The timeout is comfortably longer than a healthy
+	// confirmation (one heartbeat), so a deadline here means "couldn't
+	// confirm", not "slow".
+	roCtx, roCancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	_, roErr := follower.ReadIndex(roCtx)
+	roCancel()
+	if !errors.Is(roErr, context.DeadlineExceeded) {
+		t.Fatalf("a partitioned follower must NOT confirm a linearizable read; got err=%v", roErr)
+	}
+
+	// AVAILABILITY: a stale read of the same isolated follower still returns
+	// its last local entry immediately, with no quorum check — the
+	// ?consistency=stale path stays available on the minority side.
+	ents, entErr := follower.ents()
+	if entErr != nil {
+		t.Fatalf("stale read of partitioned follower failed: %v", entErr)
+	}
+	if len(ents) == 0 || !bytes.Equal(ents[len(ents)-1].Data, []byte("baseline")) {
+		t.Fatalf("stale read should still return the follower's last local entry %q; have %d entries",
+			"baseline", len(ents))
+	}
+}

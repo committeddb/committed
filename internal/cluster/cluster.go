@@ -80,6 +80,16 @@ type Cluster interface {
 	// applied to local application state. Used by the /ready HTTP probe to
 	// gate readiness on this node having caught up.
 	AppliedIndex() uint64
+	// LinearizableRead blocks until the raft leader has confirmed (via the
+	// ReadIndex quorum round-trip) the index at which a linearizable read
+	// may be served AND this node's applied state has caught up to it. It
+	// returns nil when both hold, or ctx.Err() if the leader can't be
+	// reached before ctx fires (e.g. this node is partitioned out of the
+	// quorum). HTTP read handlers call this before serving replicated
+	// state, so a default GET never returns data from a node that has
+	// silently fallen behind. Reads that explicitly opt out
+	// (?consistency=stale) skip it.
+	LinearizableRead(ctx context.Context) error
 	// ConfigBuildErrors returns the configs this node persisted but could
 	// not build into live objects (degraded — a node-local condition,
 	// usually a missing ${VAR} secret). The raw config bytes are valid and

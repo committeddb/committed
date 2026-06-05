@@ -69,6 +69,15 @@ type DB struct {
 	waiters       map[uint64]*waiter
 	nextRequestID atomic.Uint64
 
+	// appliedNotifyCh is a broadcast channel for "AppliedIndex advanced".
+	// LinearizableRead, after raft confirms a ReadIndex, blocks until the
+	// local AppliedIndex catches up to that index; it waits on this
+	// channel rather than polling. The raft Ready loop closes and replaces
+	// it (notifyAppliedIndexAdvanced) once per iteration that applied any
+	// committed entry, waking every waiter. Guarded by appliedMu.
+	appliedMu       sync.Mutex
+	appliedNotifyCh chan struct{}
+
 	// leaderChangeGrace is how long the leader-change watcher waits
 	// between observing a transition and signaling at-risk waiters.
 	// Populated from options (default 3× tickInterval; tests override
@@ -199,6 +208,7 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		cancelSyncs:                    cancelSyncs,
 		parser:                         p,
 		waiters:                        make(map[uint64]*waiter),
+		appliedNotifyCh:                make(chan struct{}),
 		leaderChangeGrace:              cfg.leaderChangeGrace,
 		syncWorkers:                    make(map[string]*workerHandle),
 		ingestWorkers:                  make(map[string]*workerHandle),
@@ -213,13 +223,16 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		metrics:                        cfg.metrics,
 	}
 
-	// The applied notifier is wired into the raft Ready loop. After each
-	// successful ApplyCommitted, raft.go calls db.notifyApplied with the
-	// raw entry data so we can unmarshal once, look up the waiter by
-	// p.RequestID, and signal it. This shape works uniformly for
-	// wal.Storage (real apply) and testing.MemoryStorage (no-op apply) —
-	// both go through the same raft.go iteration over rd.CommittedEntries.
-	errorC, raft := newRaftWithOptions(id, rpeers, s, proposeC, confChangeC, db.notifyApplied, cfg.logger, cfg)
+	// Two hooks are wired into the raft Ready loop. The per-entry applied
+	// notifier (db.notifyApplied) receives each committed entry's bytes so
+	// we can unmarshal once, look up the blocking-Propose waiter by
+	// RequestID, and signal it. The per-Ready applied-index notifier
+	// (db.notifyAppliedIndexAdvanced) fires once whenever AppliedIndex
+	// advanced, waking LinearizableRead callers blocked on apply catch-up.
+	// Both shapes work uniformly for wal.Storage (real apply) and the
+	// in-memory test double — both go through the same raft.go iteration
+	// over rd.CommittedEntries.
+	errorC, raft := newRaftWithOptions(id, rpeers, s, proposeC, confChangeC, db.notifyApplied, db.notifyAppliedIndexAdvanced, cfg.logger, cfg)
 
 	db.ErrorC = errorC
 	db.raft = raft

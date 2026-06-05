@@ -48,6 +48,9 @@ func (h *HTTP) addConfig(name string, propose func(context.Context, *cluster.Con
 // listConfig handles GET /{resource}: return every current configuration.
 func (h *HTTP) listConfig(name string, list func() ([]*cluster.Configuration, error)) httpgo.HandlerFunc {
 	return func(w httpgo.ResponseWriter, r *httpgo.Request) {
+		if !h.linearize(w, r) {
+			return
+		}
 		cfgs, err := list()
 		if err != nil {
 			writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to retrieve "+name+"s")
@@ -61,6 +64,9 @@ func (h *HTTP) listConfig(name string, list func() ([]*cluster.Configuration, er
 // getVersions handles GET /{resource}/{id}/versions: the version history.
 func (h *HTTP) getVersions(name string, versions func(string) ([]cluster.VersionInfo, error)) httpgo.HandlerFunc {
 	return func(w httpgo.ResponseWriter, r *httpgo.Request) {
+		if !h.linearize(w, r) {
+			return
+		}
 		id := r.PathValue("id")
 		vs, err := versions(id)
 		if err != nil {
@@ -77,6 +83,9 @@ func (h *HTTP) getVersion(name string, version func(string, uint64) (*cluster.Co
 		id := r.PathValue("id")
 		v, ok := parseVersion(w, r)
 		if !ok {
+			return
+		}
+		if !h.linearize(w, r) {
 			return
 		}
 		cfg, err := version(id, v)

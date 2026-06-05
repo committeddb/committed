@@ -1,13 +1,16 @@
 package http
 
+import "time"
+
 // Option configures behaviour of New.
 type Option func(*options)
 
 type options struct {
-	bearerToken string
-	corsOrigins []string
-	corsMethods []string
-	corsHeaders []string
+	bearerToken      string
+	corsOrigins      []string
+	corsMethods      []string
+	corsHeaders      []string
+	readIndexTimeout time.Duration
 }
 
 // WithBearerToken enables bearer-token authentication on every route
@@ -34,5 +37,18 @@ func WithCORS(origins, methods, headers []string) Option {
 		o.corsOrigins = origins
 		o.corsMethods = methods
 		o.corsHeaders = headers
+	}
+}
+
+// WithReadIndexTimeout bounds how long a default (linearizable) GET waits for
+// the raft ReadIndex quorum confirmation before returning 503. Keeps a
+// partitioned node from holding the connection open until the server
+// WriteTimeout. Zero or negative keeps the package default
+// (defaultReadIndexTimeout). cmd/node.go can wire this from an env var.
+func WithReadIndexTimeout(d time.Duration) Option {
+	return func(o *options) {
+		if d > 0 {
+			o.readIndexTimeout = d
+		}
 	}
 }

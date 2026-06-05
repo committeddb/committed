@@ -176,6 +176,17 @@ type FakeCluster struct {
 	leaderReturnsOnCall map[int]struct {
 		result1 uint64
 	}
+	LinearizableReadStub        func(context.Context) error
+	linearizableReadMutex       sync.RWMutex
+	linearizableReadArgsForCall []struct {
+		arg1 context.Context
+	}
+	linearizableReadReturns struct {
+		result1 error
+	}
+	linearizableReadReturnsOnCall map[int]struct {
+		result1 error
+	}
 	ProposeStub        func(context.Context, *cluster.Proposal) error
 	proposeMutex       sync.RWMutex
 	proposeArgsForCall []struct {
@@ -1225,6 +1236,67 @@ func (fake *FakeCluster) LeaderReturnsOnCall(i int, result1 uint64) {
 	}
 	fake.leaderReturnsOnCall[i] = struct {
 		result1 uint64
+	}{result1}
+}
+
+func (fake *FakeCluster) LinearizableRead(arg1 context.Context) error {
+	fake.linearizableReadMutex.Lock()
+	ret, specificReturn := fake.linearizableReadReturnsOnCall[len(fake.linearizableReadArgsForCall)]
+	fake.linearizableReadArgsForCall = append(fake.linearizableReadArgsForCall, struct {
+		arg1 context.Context
+	}{arg1})
+	stub := fake.LinearizableReadStub
+	fakeReturns := fake.linearizableReadReturns
+	fake.recordInvocation("LinearizableRead", []interface{}{arg1})
+	fake.linearizableReadMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeCluster) LinearizableReadCallCount() int {
+	fake.linearizableReadMutex.RLock()
+	defer fake.linearizableReadMutex.RUnlock()
+	return len(fake.linearizableReadArgsForCall)
+}
+
+func (fake *FakeCluster) LinearizableReadCalls(stub func(context.Context) error) {
+	fake.linearizableReadMutex.Lock()
+	defer fake.linearizableReadMutex.Unlock()
+	fake.LinearizableReadStub = stub
+}
+
+func (fake *FakeCluster) LinearizableReadArgsForCall(i int) context.Context {
+	fake.linearizableReadMutex.RLock()
+	defer fake.linearizableReadMutex.RUnlock()
+	argsForCall := fake.linearizableReadArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeCluster) LinearizableReadReturns(result1 error) {
+	fake.linearizableReadMutex.Lock()
+	defer fake.linearizableReadMutex.Unlock()
+	fake.LinearizableReadStub = nil
+	fake.linearizableReadReturns = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *FakeCluster) LinearizableReadReturnsOnCall(i int, result1 error) {
+	fake.linearizableReadMutex.Lock()
+	defer fake.linearizableReadMutex.Unlock()
+	fake.LinearizableReadStub = nil
+	if fake.linearizableReadReturnsOnCall == nil {
+		fake.linearizableReadReturnsOnCall = make(map[int]struct {
+			result1 error
+		})
+	}
+	fake.linearizableReadReturnsOnCall[i] = struct {
+		result1 error
 	}{result1}
 }
 
@@ -2326,6 +2398,8 @@ func (fake *FakeCluster) Invocations() map[string][][]interface{} {
 	defer fake.ingestablesMutex.RUnlock()
 	fake.leaderMutex.RLock()
 	defer fake.leaderMutex.RUnlock()
+	fake.linearizableReadMutex.RLock()
+	defer fake.linearizableReadMutex.RUnlock()
 	fake.proposeMutex.RLock()
 	defer fake.proposeMutex.RUnlock()
 	fake.proposeDatabaseMutex.RLock()

@@ -61,3 +61,20 @@ Raise `READ_TIMEOUT` / `WRITE_TIMEOUT` if you post very large configs
 over slow links and see truncated requests; lower them if you front
 Committed with a CDN that enforces its own tighter deadlines and you
 want the node to give up first.
+
+## Linearizable-read timeout
+
+Default `GET` reads run a raft ReadIndex round-trip to confirm the
+serving node still holds quorum before answering (see
+[consistency.md](../consistency.md)). This knob bounds how long that
+confirmation waits before the handler returns `503 not_linearizable` —
+so a partitioned node fails fast instead of holding the connection until
+`WRITE_TIMEOUT`.
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `COMMITTED_HTTP_READ_INDEX_TIMEOUT` | `5s` | Max wait for ReadIndex quorum confirmation on a default (linearizable) GET before returning 503. |
+
+Keep it comfortably below `WRITE_TIMEOUT`. Clients that don't need
+linearizability can bypass the round-trip entirely per request with
+`?consistency=stale`.

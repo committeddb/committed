@@ -33,6 +33,8 @@ type Metrics struct {
 	leaderTransitionsObserved metric.Int64Counter
 	proposeFailFastUnknown    metric.Int64Counter
 
+	readIndexDuration metric.Float64Histogram
+
 	ingestFrozen               metric.Float64Gauge
 	ingestRestarts             metric.Int64Counter
 	ingestSupervisorGiveups    metric.Int64Counter
@@ -109,6 +111,10 @@ func New(meter metric.Meter) *Metrics {
 
 	m.proposeFailFastUnknown, _ = meter.Int64Counter("committed.propose.fail_fast.unknown",
 		metric.WithDescription("In-flight Propose waiters signaled with ErrProposalUnknown by the leader-change watcher."))
+
+	m.readIndexDuration, _ = meter.Float64Histogram("committed.read_index.duration",
+		metric.WithDescription("Time for a linearizable read to complete: the ReadIndex quorum round-trip plus the wait for local AppliedIndex to catch up."),
+		metric.WithUnit("s"))
 
 	m.ingestFrozen, _ = meter.Float64Gauge("committed.ingest.frozen",
 		metric.WithDescription("1 if an ingest worker is parked in the ErrProposalUnknown freeze branch awaiting supervisor restart, 0 otherwise."))
@@ -250,6 +256,15 @@ func (m *Metrics) LeaderTransitionObserved() {
 // without apply.
 func (m *Metrics) ProposeFailFastUnknown() {
 	m.proposeFailFastUnknown.Add(context.Background(), 1)
+}
+
+// ReadIndexCompleted records the end-to-end latency of a successful
+// linearizable read — the ReadIndex quorum confirmation round-trip plus the
+// wait for local AppliedIndex to reach the confirmed index. Recorded only on
+// success, so the histogram reflects real round-trip cost rather than
+// timeout/partition error-path timing.
+func (m *Metrics) ReadIndexCompleted(d time.Duration) {
+	m.readIndexDuration.Record(context.Background(), d.Seconds())
 }
 
 // IngestFrozen sets the frozen gauge for an ingestable id. frozen=true

@@ -43,9 +43,16 @@ info:
     ## Consistency
 
     All `POST` proposals go through Raft consensus and return only after
-    the proposal has been committed. `GET` operations reflect the state
-    applied on the node serving the request, which may lag the leader by
-    a small number of applied entries.
+    the proposal has been committed.
+
+    `GET` reads are **linearizable by default**: the serving node confirms
+    it still holds Raft quorum (a ReadIndex heartbeat round-trip) and waits
+    for its local apply to catch up before answering, so a read reflects
+    every write that completed before it began — and a node partitioned
+    from the leader returns `503` rather than stale data. Pass
+    `?consistency=stale` on any GET to skip that confirmation and serve
+    local state immediately, accepting that a lagging node may answer with
+    out-of-date data. See `docs/consistency.md` for the full model.
 servers:
   - url: /
     description: Served from the same origin as this spec
@@ -144,6 +151,8 @@ paths:
       tags: [database]
       summary: List all databases
       operationId: getDatabases
+      parameters:
+        - $ref: '#/components/parameters/Consistency'
       responses:
         '200':
           description: All database configurations
@@ -157,6 +166,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/NotLinearizable'
   /v1/database/{id}:
     post:
       tags: [database]
@@ -189,6 +200,7 @@ paths:
       summary: List database configuration versions
       operationId: getDatabaseVersions
       parameters:
+        - $ref: '#/components/parameters/Consistency'
         - $ref: '#/components/parameters/ResourceId'
       responses:
         '200':
@@ -205,12 +217,15 @@ paths:
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/NotLinearizable'
   /v1/database/{id}/versions/{version}:
     get:
       tags: [database]
       summary: Get a specific database configuration version
       operationId: getDatabaseVersion
       parameters:
+        - $ref: '#/components/parameters/Consistency'
         - $ref: '#/components/parameters/ResourceId'
         - $ref: '#/components/parameters/VersionNumber'
       responses:
@@ -232,6 +247,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/NotLinearizable'
   /v1/database/{id}/rollback:
     post:
       tags: [database]
@@ -260,6 +277,8 @@ paths:
       tags: [ingestable]
       summary: List all ingestables
       operationId: getIngestables
+      parameters:
+        - $ref: '#/components/parameters/Consistency'
       responses:
         '200':
           description: All ingestable configurations
@@ -273,6 +292,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/NotLinearizable'
   /v1/ingestable/{id}:
     post:
       tags: [ingestable]
@@ -305,6 +326,7 @@ paths:
       summary: List ingestable configuration versions
       operationId: getIngestableVersions
       parameters:
+        - $ref: '#/components/parameters/Consistency'
         - $ref: '#/components/parameters/ResourceId'
       responses:
         '200':
@@ -321,12 +343,15 @@ paths:
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/NotLinearizable'
   /v1/ingestable/{id}/versions/{version}:
     get:
       tags: [ingestable]
       summary: Get a specific ingestable configuration version
       operationId: getIngestableVersion
       parameters:
+        - $ref: '#/components/parameters/Consistency'
         - $ref: '#/components/parameters/ResourceId'
         - $ref: '#/components/parameters/VersionNumber'
       responses:
@@ -348,6 +373,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/NotLinearizable'
   /v1/ingestable/{id}/rollback:
     post:
       tags: [ingestable]
@@ -373,6 +400,8 @@ paths:
       tags: [syncable]
       summary: List all syncables
       operationId: getSyncables
+      parameters:
+        - $ref: '#/components/parameters/Consistency'
       responses:
         '200':
           description: All syncable configurations
@@ -386,6 +415,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/NotLinearizable'
   /v1/syncable/{id}:
     post:
       tags: [syncable]
@@ -418,6 +449,7 @@ paths:
       summary: List syncable configuration versions
       operationId: getSyncableVersions
       parameters:
+        - $ref: '#/components/parameters/Consistency'
         - $ref: '#/components/parameters/ResourceId'
       responses:
         '200':
@@ -434,12 +466,15 @@ paths:
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/NotLinearizable'
   /v1/syncable/{id}/versions/{version}:
     get:
       tags: [syncable]
       summary: Get a specific syncable configuration version
       operationId: getSyncableVersion
       parameters:
+        - $ref: '#/components/parameters/Consistency'
         - $ref: '#/components/parameters/ResourceId'
         - $ref: '#/components/parameters/VersionNumber'
       responses:
@@ -461,6 +496,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/NotLinearizable'
   /v1/syncable/{id}/errors:
     get:
       tags: [syncable]
@@ -477,6 +514,7 @@ paths:
         the next `since`.
       operationId: getSyncableErrors
       parameters:
+        - $ref: '#/components/parameters/Consistency'
         - $ref: '#/components/parameters/ResourceId'
         - name: since
           in: query
@@ -512,6 +550,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/NotLinearizable'
   /v1/syncable/{id}/deadletter/:
     post:
       tags: [syncable]
@@ -571,6 +611,7 @@ paths:
         signal for Prometheus alarms.
       operationId: getSyncableStatus
       parameters:
+        - $ref: '#/components/parameters/Consistency'
         - $ref: '#/components/parameters/ResourceId'
       responses:
         '200':
@@ -583,6 +624,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/NotLinearizable'
   /v1/syncable/{id}/replay/{index}:
     post:
       tags: [syncable]
@@ -657,6 +700,8 @@ paths:
       tags: [type]
       summary: List all types
       operationId: getTypes
+      parameters:
+        - $ref: '#/components/parameters/Consistency'
       responses:
         '200':
           description: All type configurations
@@ -670,6 +715,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/NotLinearizable'
   /v1/type/{id}:
     # Write-only: a type's configuration is created/updated here and read
     # back via the version endpoints below or the GET /v1/type list. There
@@ -705,6 +752,7 @@ paths:
       summary: List type configuration versions
       operationId: getTypeVersions
       parameters:
+        - $ref: '#/components/parameters/Consistency'
         - $ref: '#/components/parameters/ResourceId'
       responses:
         '200':
@@ -721,12 +769,15 @@ paths:
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/NotLinearizable'
   /v1/type/{id}/versions/{version}:
     get:
       tags: [type]
       summary: Get a specific type configuration version
       operationId: getTypeVersion
       parameters:
+        - $ref: '#/components/parameters/Consistency'
         - $ref: '#/components/parameters/ResourceId'
         - $ref: '#/components/parameters/VersionNumber'
       responses:
@@ -748,6 +799,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/NotLinearizable'
 
   /v1/proposal:
     # Write-only by design. Committed is a commit log, not a query
@@ -857,6 +910,22 @@ components:
         type: integer
         format: int64
         minimum: 1
+    Consistency:
+      name: consistency
+      in: query
+      required: false
+      description: |
+        Read consistency. `linearizable` (the default) confirms the
+        serving node still holds raft quorum via a ReadIndex round-trip and
+        waits for local apply to catch up before answering, so the read
+        reflects every write that completed before it — at the cost of one
+        heartbeat round-trip. `stale` skips that confirmation and serves
+        local state immediately; a node partitioned from the leader may
+        then return out-of-date data. See docs/consistency.md.
+      schema:
+        type: string
+        enum: [linearizable, stale]
+        default: linearizable
 
   responses:
     ResourceIdPlainText:
@@ -885,6 +954,15 @@ components:
             $ref: '#/components/schemas/ErrorResponse'
     InternalError:
       description: Server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotLinearizable:
+      description: |
+        The node could not confirm a linearizable read (no raft quorum, or
+        this node is partitioned from the leader). Retry, or request
+        `?consistency=stale` to accept a possibly-stale read.
       content:
         application/json:
           schema:

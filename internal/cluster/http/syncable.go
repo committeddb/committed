@@ -63,6 +63,10 @@ func (h *HTTP) GetSyncableErrors(w httpgo.ResponseWriter, r *httpgo.Request) {
 		limit = n
 	}
 
+	if !h.linearize(w, r) {
+		return
+	}
+
 	dls, err := h.c.SyncableDeadLetters(id, since, limit)
 	if err != nil {
 		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to retrieve syncable errors")
@@ -149,6 +153,10 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 	id := r.PathValue("id")
 	if id == "" {
 		writeError(w, httpgo.StatusBadRequest, "invalid_parameter", "id is empty")
+		return
+	}
+
+	if !h.linearize(w, r) {
 		return
 	}
 

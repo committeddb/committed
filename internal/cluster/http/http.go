@@ -3,6 +3,7 @@ package http
 import (
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rs/cors"
@@ -22,10 +23,11 @@ var (
 )
 
 type HTTP struct {
-	r           *chi.Mux
-	c           cluster.Cluster
-	schemas     sync.Map // schemaCacheKey → *jsonschema.Schema
-	bearerToken string   // empty = no auth (dev mode)
+	r                *chi.Mux
+	c                cluster.Cluster
+	schemas          sync.Map // schemaCacheKey → *jsonschema.Schema
+	bearerToken      string   // empty = no auth (dev mode)
+	readIndexTimeout time.Duration
 }
 
 func New(c cluster.Cluster, opts ...Option) *HTTP {
@@ -61,7 +63,12 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 	r.Use(securityHeaders)
 	r.Use(RequestID)
 
-	h := &HTTP{r: r, c: c, bearerToken: o.bearerToken}
+	readIndexTimeout := o.readIndexTimeout
+	if readIndexTimeout <= 0 {
+		readIndexTimeout = defaultReadIndexTimeout
+	}
+
+	h := &HTTP{r: r, c: c, bearerToken: o.bearerToken, readIndexTimeout: readIndexTimeout}
 
 	if o.bearerToken != "" {
 		zap.L().Info("API bearer-token authentication enabled")
