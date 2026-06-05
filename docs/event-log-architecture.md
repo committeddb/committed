@@ -104,6 +104,23 @@ characteristics:
 Roughly: the raft log is the "now", the permanent event log is the
 "forever", and the metadata buckets are the "control plane."
 
+### Proposals and Actuals
+
+Consensus is a boundary, and the two sides have different names. A
+**Proposal** is a write *request* — one or more entities offered to the log
+together, with no place in the order yet. Once raft commits it, it is an
+**Actual** (`cluster.Actual`): the same entities, now a committed fact at a
+fixed `Index`. You *propose* Proposals; you *sync* Actuals.
+
+The distinction is load-bearing on the read side. A `Reader` yields
+`*cluster.Actual` in `Index` order, and a `Syncable` consumes Actuals — it
+never sees a Proposal. The `Index` is the Actual's identity and its place in
+the single total order (the only ordering authority in the system), so it is
+also what a syncable's cursor, dead-letter records, and the HTTP webhook's
+`Idempotency-Key` are keyed on. The write-side metadata a Proposal carries
+(RequestID, IngestableID, SourceSeq) is plumbing that stops at the boundary
+— an Actual carries only `Index` and the committed entities.
+
 ### Write paths
 
 There are two distinct write paths depending on the entity type. Today
@@ -135,10 +152,13 @@ never touch the raft log. Reads are addressed by raft index (the stable
 identifier — see "Indexing" below). The raft log retention window is
 irrelevant to syncables; they only care about the permanent event log.
 
-Today in `internal/cluster/db/wal/reader.go`, syncables read from the raft
-entry log via `Reader.Read()`. After this work lands, `Reader` reads from
-the permanent event log instead. The interface stays the same; the
-backing store changes.
+In `internal/cluster/db/wal/reader.go`, `Reader.Read()` returns the next
+`*cluster.Actual` from the permanent event log in raft-index order (skipping
+internal metadata entries like syncable-index bumps). It earlier scanned the
+raft entry log and returned a raw proposal plus a separate index; the backing
+store moved to the permanent log and the return type became the `Actual` that
+folds the index into the value, but it stays a simple "read the next
+committed entry" call.
 
 ### On-disk layout
 

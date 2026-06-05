@@ -45,14 +45,18 @@ syncable), and adds:
 
 - **Type** — schema/metadata for a topic's payload. Identified by ID;
   supports explicit-migration versioning.
-- **Proposal** — the atomic unit written to the Raft log. Carries one
-  or more entities, each tagged with a Type ID.
+- **Proposal** — a write *request*: one or more entities (each tagged with
+  a Type ID) offered to the log together. You propose a Proposal; consensus
+  decides its fate. It has no place in the order yet.
+- **Actual** — a committed fact: the Proposal that consensus ordered and
+  wrote to the log at a fixed Index. You propose Proposals, you *sync*
+  Actuals — a Syncable is handed Actuals (in Index order), never Proposals.
 - **Database** — connection config for an external SQL system (MySQL or
   PostgreSQL).
 - **Ingestable** — pulls data into the log from an external source.
   Today: PostgreSQL via logical replication (pgoutput), MySQL via
   binlog.
-- **Syncable** — projects log entries out to an external system.
+- **Syncable** — projects committed Actuals out to an external system.
   Today: SQL (MySQL/PostgreSQL) and HTTP.
 
 ### Running

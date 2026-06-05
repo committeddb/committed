@@ -4,8 +4,8 @@ Core domain package. All key interfaces are defined in `cluster.go`.
 
 ## Key interfaces (cluster.go)
 
-- **Cluster**: Main interface — propose writes, read proposals, manage configs, sync/ingest
-- **Syncable** (syncable.go): Syncs topic data to an external system
+- **Cluster**: Main interface — propose writes, manage configs, sync/ingest
+- **Syncable** (syncable.go): Consumes committed Actuals (`cluster.Actual`, in Index order) and applies them to an external system. A Syncable is handed Actuals, never Proposals — propose a `Proposal`, sync an `Actual`.
 - **Ingestable** (ingestable.go): Ingests data from an external source into topics
 - **Database** (database.go): External database connection config
 - **SyncableParser / IngestableParser / DatabaseParser** (configuration.go): Parse TOML configs into typed structs
@@ -23,4 +23,4 @@ Core domain package. All key interfaces are defined in `cluster.go`.
 ## Other files in this package
 
 - `config_error.go`: ConfigError type for configuration validation
-- `type.go`, `proposal.go`, `time_point.go`, `version_info.go`: Domain types
+- `type.go`, `proposal.go`, `actual.go`, `time_point.go`, `version_info.go`: Domain types (`proposal.go` = the write request; `actual.go` = the committed fact a Syncable consumes)
