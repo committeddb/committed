@@ -38,6 +38,7 @@ type collectBody struct {
 }
 
 type collectEntity struct {
+	Op   string          `json:"op"`  // "upsert" or "delete"
 	Key  string          `json:"key"` // base64-encoded entity key
 	Type collectType     `json:"type"`
 	Data json.RawMessage `json:"data"`
@@ -79,6 +80,7 @@ func (c *collector) handle(w http.ResponseWriter, r *http.Request) {
 		// CapturedEntity matches what the oracle expects (the raw key).
 		key, _ := base64.StdEncoding.DecodeString(e.Key)
 		cp.Entities = append(cp.Entities, CapturedEntity{
+			Op:       e.Op,
 			TypeID:   e.Type.ID,
 			TypeName: e.Type.Name,
 			Key:      string(key),

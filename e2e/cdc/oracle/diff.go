@@ -157,17 +157,30 @@ func tally[T any](items []T, keyFn func(T) string) map[string]int {
 	return out
 }
 
-// expectedKey returns the canonical "(key, normalized data)" string
-// for an Expected entity. Includes the key so two entities with the
-// same data but different PKs are still distinct.
+// deleteMarker is the canonical-form payload for a delete (tombstone)
+// entity. A delete carries no data, so two deletes for the same key are
+// equal and a delete never collides with an upsert of the same key.
+const deleteMarker = "<delete>"
+
+// expectedKey returns the canonical "(key, payload)" string for an Expected
+// entity. Includes the key so two entities with the same payload but
+// different PKs are still distinct. A delete's payload is deleteMarker — the
+// oracle matches deletes by key + delete-ness, not by old-row data.
 func expectedKey(e mutation.Expected) string {
+	if e.IsDelete {
+		return e.Key + "|" + deleteMarker
+	}
 	return e.Key + "|" + mutation.JSONNormalize(e.Data)
 }
 
-// capturedKey returns the canonical "(key, normalized data)" string
-// for a CapturedEntity. Normalizes the JSON so that map ordering
-// doesn't cause spurious mismatches.
+// capturedKey returns the canonical "(key, payload)" string for a
+// CapturedEntity. Normalizes the JSON so that map ordering doesn't cause
+// spurious mismatches; a delete (op == "delete") canonicalizes to
+// deleteMarker to match expectedKey.
 func capturedKey(e harness.CapturedEntity) string {
+	if e.Op == "delete" {
+		return e.Key + "|" + deleteMarker
+	}
 	return e.Key + "|" + normalizeJSON(e.Data)
 }
 
@@ -212,7 +225,11 @@ func unionTopics(a map[string][]mutation.ExpectedProposal, b map[string][]harnes
 func renderExpected(p mutation.ExpectedProposal) string {
 	parts := make([]string, len(p.Entities))
 	for i, e := range p.Entities {
-		parts[i] = fmt.Sprintf("{key=%q data=%s}", e.Key, mutation.JSONNormalize(e.Data))
+		if e.IsDelete {
+			parts[i] = fmt.Sprintf("{key=%q DELETE}", e.Key)
+		} else {
+			parts[i] = fmt.Sprintf("{key=%q data=%s}", e.Key, mutation.JSONNormalize(e.Data))
+		}
 	}
 	return "[" + strings.Join(parts, ", ") + "]"
 }
@@ -220,7 +237,11 @@ func renderExpected(p mutation.ExpectedProposal) string {
 func renderActual(p harness.CapturedProposal) string {
 	parts := make([]string, len(p.Entities))
 	for i, e := range p.Entities {
-		parts[i] = fmt.Sprintf("{key=%q data=%s}", e.Key, normalizeJSON(e.Data))
+		if e.Op == "delete" {
+			parts[i] = fmt.Sprintf("{key=%q DELETE}", e.Key)
+		} else {
+			parts[i] = fmt.Sprintf("{key=%q data=%s}", e.Key, normalizeJSON(e.Data))
+		}
 	}
 	return "[" + strings.Join(parts, ", ") + "]"
 }

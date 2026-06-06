@@ -9,6 +9,9 @@ import "testing"
 // shape to the oracle (rather than the internal cluster.Entity) because it
 // carries everything the differ needs and nothing it doesn't.
 type CapturedEntity struct {
+	// Op is "upsert" or "delete" — the webhook syncable's per-entity op.
+	// A delete carries no Data; the differ matches deletes by key + op.
+	Op       string `json:"op"`
 	TypeID   string `json:"typeId"`
 	TypeName string `json:"typeName"`
 	Key      string `json:"key"`

@@ -326,7 +326,7 @@ func (d *PostgreSQLDialect) stream(
 				if skippingTxn {
 					break
 				}
-				if e := tupleToEntity(m.Tuple, m.RelationID, relations, config, pgCfg); e != nil {
+				if e := tupleToEntity(m.Tuple, m.RelationID, relations, config, pgCfg, false); e != nil {
 					pending = append(pending, e)
 				}
 				if len(pending) >= maxPendingEntities {
@@ -339,7 +339,7 @@ func (d *PostgreSQLDialect) stream(
 				if skippingTxn {
 					break
 				}
-				if e := tupleToEntity(m.NewTuple, m.RelationID, relations, config, pgCfg); e != nil {
+				if e := tupleToEntity(m.NewTuple, m.RelationID, relations, config, pgCfg, false); e != nil {
 					pending = append(pending, e)
 				}
 				if len(pending) >= maxPendingEntities {
@@ -352,10 +352,14 @@ func (d *PostgreSQLDialect) stream(
 				if skippingTxn {
 					break
 				}
-				// With REPLICA IDENTITY DEFAULT only the primary key
-				// columns are available in the old tuple. Non-key
-				// columns will be null in the resulting JSON.
-				if e := tupleToEntity(m.OldTuple, m.RelationID, relations, config, pgCfg); e != nil {
+				// A source DELETE becomes a delete (tombstone) entity keyed
+				// by the row's primary key — not an upsert of the old row.
+				// Only the PK is needed from the old tuple (available under
+				// both REPLICA IDENTITY DEFAULT and FULL); the rest of the
+				// pre-image is not a payload to write downstream. The
+				// syncable removes the keyed record (cluster.Syncable
+				// honor-deletes contract).
+				if e := tupleToEntity(m.OldTuple, m.RelationID, relations, config, pgCfg, true); e != nil {
 					pending = append(pending, e)
 				}
 				if len(pending) >= maxPendingEntities {
@@ -470,13 +474,17 @@ func ensurePublication(ctx context.Context, conn *pgconn.PgConn, pgCfg *pgConfig
 
 // tupleToEntity converts a pgoutput tuple into a cluster.Entity using the
 // column mappings from the sql.Config. Returns nil if the tuple is nil or
-// the relation is not in the watched table list.
+// the relation is not in the watched table list. When isDelete is true the
+// result is a delete (tombstone) entity keyed by the row's primary key — the
+// tuple supplies only the key, not a payload (a source DELETE removes the
+// downstream record; see the cluster.Syncable honor-deletes contract).
 func tupleToEntity(
 	tuple *pglogrepl.TupleData,
 	relationID uint32,
 	relations map[uint32]*pglogrepl.RelationMessage,
 	config *sql.Config,
 	pgCfg *pgConfig,
+	isDelete bool,
 ) *cluster.Entity {
 	if tuple == nil {
 		return nil
@@ -519,6 +527,13 @@ func tupleToEntity(
 		}
 	}
 
+	key := fmt.Sprintf("%v", m[config.PrimaryKey])
+
+	// A delete carries no payload — emit a tombstone keyed by the PK.
+	if isDelete {
+		return cluster.NewDeleteEntity(config.Type, []byte(key))
+	}
+
 	// Apply column mappings.
 	toJSON := make(map[string]any)
 	for _, mapping := range config.Mappings {
@@ -533,8 +548,6 @@ func tupleToEntity(
 		)
 		return nil
 	}
-
-	key := fmt.Sprintf("%v", m[config.PrimaryKey])
 
 	return &cluster.Entity{
 		Type: config.Type,

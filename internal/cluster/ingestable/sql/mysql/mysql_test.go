@@ -457,6 +457,87 @@ func TestMysqlTransactionGrouping(t *testing.T) {
 	}
 }
 
+// TestMysqlStreamingDelete verifies a source DELETE on the binlog stream is
+// ingested as a delete (tombstone) entity keyed by the row's primary key — not
+// an upsert of the deleted row. This is the MySQL counterpart of the Postgres
+// ingestable's delete handling; without it a downstream syncable would never
+// remove the row (the right-to-be-forgotten zombie).
+func TestMysqlStreamingDelete(t *testing.T) {
+	table := "stream_delete_table"
+
+	db := createDB(t)
+	_, err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS `%s`", table))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf("CREATE TABLE `%s` (pk VARCHAR(32) NOT NULL, val TEXT, PRIMARY KEY (pk));", table))
+	require.NoError(t, err)
+	// Sentinel row inserted before Ingest so we can detect snapshot completion.
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, val) VALUES ('sentinel', 'init');", table))
+	require.NoError(t, err)
+	db.Close()
+
+	simpleType := &cluster.Type{ID: "streamdel", Name: "streamdel"}
+	config := &sql.Config{
+		Type: simpleType,
+		Mappings: []sql.Mapping{
+			{JsonName: "pk", SQLColumn: "pk"},
+			{JsonName: "val", SQLColumn: "val"},
+		},
+		PrimaryKey:       "pk",
+		ConnectionString: ingestURL,
+		Tables:           []string{table},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	proposalChan := make(chan *cluster.Proposal, 10)
+	positionChan := make(chan cluster.Position, 10)
+
+	dialect := &mysql.MySQLDialect{}
+	go func() { _ = dialect.Ingest(ctx, config, nil, proposalChan, positionChan) }()
+
+	// waitForEntity drains proposals (and positions) until an entity with the
+	// given key arrives, returning it. Insert and delete run as separate
+	// transactions, so they arrive as separate proposals consumed in order.
+	waitForEntity := func(key string) *cluster.Entity {
+		t.Helper()
+		deadline := time.After(15 * time.Second)
+		for {
+			select {
+			case p := <-proposalChan:
+				for _, e := range p.Entities {
+					if string(e.Key) == key {
+						return e
+					}
+				}
+			case <-positionChan:
+			case <-deadline:
+				t.Fatalf("timed out waiting for entity %q", key)
+			}
+		}
+	}
+
+	// Snapshot phase is done once the sentinel arrives — canal is now tailing.
+	_ = waitForEntity("sentinel")
+
+	// Stream an INSERT — must ingest as an upsert (not a delete).
+	db = createDB(t)
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, val) VALUES ('row1', 'v1');", table))
+	require.NoError(t, err)
+
+	ins := waitForEntity("row1")
+	require.False(t, ins.IsDelete(), "an INSERT must ingest as an upsert")
+	require.JSONEq(t, `{"pk":"row1","val":"v1"}`, string(ins.Data))
+
+	// Stream a DELETE of the same row — must ingest as a delete entity.
+	_, err = db.Exec(fmt.Sprintf("DELETE FROM `%s` WHERE pk = 'row1';", table))
+	require.NoError(t, err)
+	db.Close()
+
+	del := waitForEntity("row1")
+	require.True(t, del.IsDelete(), "a source DELETE must ingest as a delete entity")
+}
+
 // TestMysqlPositionResume verifies that checkpointed binlog positions are
 // correctly restored on restart: a new Ingest call with a previously
 // checkpointed position only receives changes committed after that position.

@@ -77,3 +77,52 @@ func TestRestartResumeSyncable(t *testing.T) {
 	require.Equal(t, 2, h.SinkCount(t, "region"),
 		"sink should hold exactly the phase-1 and phase-2 rows after restart")
 }
+
+// TestDeleteHonoredEndToEnd is the full right-to-be-forgotten chain through
+// CDC: a row is inserted then deleted on the Postgres SOURCE, and the test
+// asserts with TWO syncables that both halves landed:
+//
+//   - a webhook syncable (the harness collector) proves the ingestable emits a
+//     proper op="upsert" then op="delete" for the same key — a source DELETE is
+//     no longer ingested as an upsert of the old row;
+//   - a Postgres SQL syncable (the sink) proves the delete is honored all the
+//     way out: the row appears in region_sink after the insert, then is gone
+//     after the delete.
+//
+// This is the e2e regression guard for the zombie: before the fix, the source
+// DELETE rode through as an upsert and the projection kept the PII forever.
+func TestDeleteHonoredEndToEnd(t *testing.T) {
+	h := harness.New(t, harness.Options{Tables: []string{"region"}, Syncable: true})
+
+	row := regionRow(7, "EPHEMERAL", "to-be-forgotten")
+
+	// Phase 1: INSERT on the source. The webhook observes an upsert, and the
+	// row reaches the SQL sink.
+	ins := mutation.NewScript()
+	ins.Insert("region", row)
+	require.NoError(t, ins.Run(context.Background(), h.Conn()), "insert region 7")
+
+	add := h.Capture(t, map[string]int{"region": 1})["region"]
+	require.Len(t, add, 1)
+	require.Len(t, add[0].Entities, 1)
+	require.Equal(t, "upsert", add[0].Entities[0].Op, "an INSERT must ingest as an upsert")
+	require.Equal(t, "7", add[0].Entities[0].Key)
+
+	h.WaitForSinkValue(t, "region", "7", "r_name", "EPHEMERAL", 30*time.Second)
+
+	// Phase 2: DELETE the same row on the source. The webhook observes a delete
+	// (not an upsert of the old row), and the sink row is removed.
+	del := mutation.NewScript()
+	del.Delete("region", row)
+	require.NoError(t, del.Run(context.Background(), h.Conn()), "delete region 7")
+
+	gone := h.Capture(t, map[string]int{"region": 1})["region"]
+	require.Len(t, gone, 1)
+	require.Len(t, gone[0].Entities, 1)
+	require.Equal(t, "delete", gone[0].Entities[0].Op, "a source DELETE must ingest as a delete entity")
+	require.Equal(t, "7", gone[0].Entities[0].Key)
+	require.Empty(t, gone[0].Entities[0].Data, "a delete carries no payload")
+
+	h.WaitForSinkAbsent(t, "region", "7", 30*time.Second)
+	require.Equal(t, 0, h.SinkCount(t, "region"), "the sink row must be gone after the delete")
+}

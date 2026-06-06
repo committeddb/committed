@@ -172,17 +172,19 @@ func TestUpdateCaptureSingle(t *testing.T) {
 	oracle.Assert(t, s.Expected(), h.Capture(t, s.ExpectedCounts()))
 }
 
-// TestDeleteCapture verifies that a DELETE produces a proposal whose
-// Entity carries the pre-image of the deleted row (because the table
-// has REPLICA IDENTITY FULL). The oracle compares the expected
-// pre-image map against the captured Data JSON.
+// TestDeleteCapture verifies that a source DELETE produces a proposal whose
+// Entity is a delete (tombstone) keyed by the deleted row's primary key — not
+// an upsert of the row's pre-image. This is what lets a downstream syncable
+// remove the record (right-to-be-forgotten); the old behavior (ingesting a
+// delete as an upsert of the old row) left a zombie row in every projection.
+// The oracle matches the delete by key + delete-ness.
 func TestDeleteCapture(t *testing.T) {
 	h := harness.New(t, harness.Options{Tables: []string{"region"}})
 
 	preDelete := regionRow(42, "DELETED_ROW", "to-be-deleted")
 	s := mutation.NewScript()
 	s.Insert("region", preDelete)
-	s.Delete("region", preDelete) // pass the FULL pre-image — REPLICA IDENTITY FULL emits all columns
+	s.Delete("region", preDelete) // only the PK is load-bearing for a delete
 
 	if err := s.Run(context.Background(), h.Conn()); err != nil {
 		t.Fatalf("script run: %v", err)

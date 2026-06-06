@@ -311,10 +311,21 @@ func (h *MySQLEventHandler) OnRow(e *canal.RowsEvent) error {
 	primaryKey := h.config.PrimaryKey
 	key := fmt.Sprintf("%v", m[primaryKey])
 
-	entity := &cluster.Entity{
-		Type: h.config.Type,
-		Key:  []byte(key),
-		Data: []byte(jsonString),
+	// A source DELETE becomes a delete (tombstone) entity keyed by the row's
+	// primary key — not an upsert of the deleted row. canal delivers the
+	// deleted row under e.Rows so the key is available, but its column values
+	// are not a payload to write downstream: the syncable must remove the
+	// keyed record (cluster.Syncable honor-deletes contract). INSERT and
+	// UPDATE emit upserts of the post-image as before.
+	var entity *cluster.Entity
+	if e.Action == canal.DeleteAction {
+		entity = cluster.NewDeleteEntity(h.config.Type, []byte(key))
+	} else {
+		entity = &cluster.Entity{
+			Type: h.config.Type,
+			Key:  []byte(key),
+			Data: []byte(jsonString),
+		}
 	}
 
 	h.mu.Lock()

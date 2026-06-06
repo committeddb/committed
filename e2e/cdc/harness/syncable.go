@@ -96,6 +96,25 @@ func (h *Harness) WaitForSinkValue(t *testing.T, table, pk, col, want string, ti
 		SinkTable(table), dataset.PrimaryKey(table), pk, col, last, want)
 }
 
+// WaitForSinkAbsent polls until the sink row pk no longer exists, or fails
+// the test after timeout. This is how a test asserts a delete was honored all
+// the way out to the external database: the syncable translated a delete
+// Actual into a DELETE that removed the row. Callers should first confirm the
+// row was present (WaitForSinkValue) so that absence proves removal, not a
+// row that never arrived.
+func (h *Harness) WaitForSinkAbsent(t *testing.T, table, pk string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, ok := h.SinkValue(table, pk, dataset.PrimaryKey(table)); !ok {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("sink %s: row %s=%q still present after %s (delete was not honored)",
+		SinkTable(table), dataset.PrimaryKey(table), pk, timeout)
+}
+
 // SinkCount returns the number of rows in a topic's sink table, or 0 if the
 // table does not exist yet.
 func (h *Harness) SinkCount(t *testing.T, table string) int {

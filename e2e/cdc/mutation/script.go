@@ -60,11 +60,15 @@ type recordedOp struct {
 // Expected describes one entity the oracle expects to see in committed's
 // proposal stream. Topic is the table name (ingestable topic = table
 // name in our harness setup). Key is the stringified primary key. Data
-// is the JSON shape committed should produce (column → value).
+// is the JSON shape committed should produce (column → value). When
+// IsDelete is true the entity is a tombstone — Data is irrelevant (a
+// source DELETE becomes a delete entity keyed by PK, not an upsert of the
+// old row), and the oracle matches it by key + delete-ness.
 type Expected struct {
-	Topic string
-	Key   string
-	Data  map[string]any
+	Topic    string
+	Key      string
+	Data     map[string]any
+	IsDelete bool
 }
 
 // NewScript returns an empty Script.
@@ -146,17 +150,17 @@ func (t *Txn) Update(table string, row map[string]any) {
 	})
 }
 
-// Delete records a DELETE of the row identified by row[pkCol]. row
-// must be the FULL pre-delete state of the row (because under REPLICA
-// IDENTITY FULL pgoutput sends the full OLD tuple, which becomes the
-// expected Entity's Data). For REPLICA IDENTITY DEFAULT tables, pass
-// only the PK column.
+// Delete records a DELETE of the row identified by row[pkCol]. Only the
+// primary key in row is load-bearing: a source DELETE becomes a delete
+// (tombstone) entity keyed by the PK, not an upsert of the old row, so the
+// rest of the pre-image is ignored by the oracle. row may still carry the
+// full pre-image for readability at the call site.
 func (t *Txn) Delete(table string, row map[string]any) {
 	pkCol := dataset.PrimaryKey(table)
 	pkVal := row[pkCol]
 	t.rec.ops = append(t.rec.ops, &recordedOp{
 		kind: opDelete, table: table, pkCol: pkCol, pkVal: pkVal, row: row,
-		expected: expectedFromRow(table, pkVal, row),
+		expected: expectedDelete(table, pkVal),
 	})
 }
 
@@ -276,6 +280,17 @@ func expectedFromRow(table string, pkVal any, row map[string]any) *Expected {
 		Topic: table,
 		Key:   fmt.Sprintf("%v", pkVal),
 		Data:  row,
+	}
+}
+
+// expectedDelete builds the Expected for a DELETE op: a tombstone keyed by
+// the primary key with no payload. A source DELETE becomes a delete entity,
+// not an upsert of the old row, so the oracle matches it by key + delete-ness.
+func expectedDelete(table string, pkVal any) *Expected {
+	return &Expected{
+		Topic:    table,
+		Key:      fmt.Sprintf("%v", pkVal),
+		IsDelete: true,
 	}
 }
 
