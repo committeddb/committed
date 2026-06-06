@@ -7,7 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/philborlin/committed/internal/cluster/db/wal"
+	"github.com/committeddb/committed/internal/cluster/db/wal"
 )
 
 var controlplaneCmd = &cobra.Command{

@@ -8,8 +8,8 @@ import (
 
 	pb "go.etcd.io/raft/v3/raftpb"
 
-	"github.com/philborlin/committed/internal/cluster"
-	"github.com/philborlin/committed/internal/cluster/db"
+	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/db"
 )
 
 // Reader streams committed proposals out of the permanent event log.

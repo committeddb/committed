@@ -5,7 +5,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	"github.com/philborlin/committed/internal/cluster/clusterpb"
+	"github.com/committeddb/committed/internal/cluster/clusterpb"
 )
 
 // scrubType is the built-in entity type for a Scrub command — the committed

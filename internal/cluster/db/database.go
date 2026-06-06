@@ -3,7 +3,7 @@ package db
 import (
 	"context"
 
-	"github.com/philborlin/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 func (db *DB) AddDatabaseParser(name string, p cluster.DatabaseParser) {

@@ -6,7 +6,7 @@ import (
 
 	bolt "go.etcd.io/bbolt"
 
-	"github.com/philborlin/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 // maxDeadLetterPageLimit caps how many records a single

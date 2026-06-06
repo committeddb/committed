@@ -12,10 +12,10 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.etcd.io/raft/v3/raftpb"
 
-	"github.com/philborlin/committed/internal/cluster"
-	"github.com/philborlin/committed/internal/cluster/db"
-	"github.com/philborlin/committed/internal/cluster/db/dbfakes"
-	parser "github.com/philborlin/committed/internal/cluster/db/parser"
+	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/db"
+	"github.com/committeddb/committed/internal/cluster/db/dbfakes"
+	parser "github.com/committeddb/committed/internal/cluster/db/parser"
 )
 
 // testCtx returns a context with a generous deadline. PR2's blocking

@@ -12,7 +12,7 @@ import (
 	pb "go.etcd.io/raft/v3/raftpb"
 	"go.uber.org/zap"
 
-	"github.com/philborlin/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 // This file implements the RTBF scrubber: physical removal of already-delete-

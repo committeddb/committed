@@ -1,4 +1,4 @@
-module github.com/philborlin/committed
+module github.com/committeddb/committed
 
 go 1.26.2
 

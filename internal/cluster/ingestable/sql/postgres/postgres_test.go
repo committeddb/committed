@@ -18,10 +18,10 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/philborlin/committed/internal/cluster"
-	"github.com/philborlin/committed/internal/cluster/ingestable/sql"
-	"github.com/philborlin/committed/internal/cluster/ingestable/sql/dialectpb"
-	"github.com/philborlin/committed/internal/cluster/ingestable/sql/postgres"
+	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/ingestable/sql"
+	"github.com/committeddb/committed/internal/cluster/ingestable/sql/dialectpb"
+	"github.com/committeddb/committed/internal/cluster/ingestable/sql/postgres"
 )
 
 // rowCount for chunking tests; sized to comfortably exceed batch_size=10.

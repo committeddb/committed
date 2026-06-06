@@ -35,11 +35,11 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
-	"github.com/philborlin/committed/internal/cluster"
-	"github.com/philborlin/committed/internal/cluster/clusterfakes"
-	"github.com/philborlin/committed/internal/cluster/db"
-	"github.com/philborlin/committed/internal/cluster/db/parser"
-	"github.com/philborlin/committed/internal/cluster/db/wal"
+	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/clusterfakes"
+	"github.com/committeddb/committed/internal/cluster/db"
+	"github.com/committeddb/committed/internal/cluster/db/parser"
+	"github.com/committeddb/committed/internal/cluster/db/wal"
 )
 
 // adversarialSettleTime is how long we give raft to process a state change

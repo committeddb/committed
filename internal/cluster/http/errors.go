@@ -8,7 +8,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/philborlin/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 // ErrorResponse is the JSON body returned for every non-2xx response.

@@ -9,7 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib" // registers "pgx" with database/sql
 
-	"github.com/philborlin/committed/internal/cluster/syncable/sql"
+	"github.com/committeddb/committed/internal/cluster/syncable/sql"
 )
 
 type PostgreSQLDialect struct{}

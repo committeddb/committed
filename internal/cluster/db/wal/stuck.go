@@ -5,7 +5,7 @@ import (
 
 	bolt "go.etcd.io/bbolt"
 
-	"github.com/philborlin/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 // handleSyncableStuck applies a committed SyncableStuck entity: a delete

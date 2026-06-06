@@ -17,7 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 
-	"github.com/philborlin/committed/e2e/cdc/dataset"
+	"github.com/committeddb/committed/e2e/cdc/dataset"
 )
 
 // Harness owns the per-test fixture lifecycle. One Harness per test;

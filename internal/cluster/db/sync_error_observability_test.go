@@ -11,10 +11,10 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
-	"github.com/philborlin/committed/internal/cluster"
-	"github.com/philborlin/committed/internal/cluster/db"
-	parser "github.com/philborlin/committed/internal/cluster/db/parser"
-	"github.com/philborlin/committed/internal/cluster/metrics"
+	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/db"
+	parser "github.com/committeddb/committed/internal/cluster/db/parser"
+	"github.com/committeddb/committed/internal/cluster/metrics"
 )
 
 // permanentSyncable returns a permanent error on the first USER proposal

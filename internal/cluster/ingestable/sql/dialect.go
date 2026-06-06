@@ -3,7 +3,7 @@ package sql
 import (
 	"context"
 
-	"github.com/philborlin/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 //go:generate protoc --go_out=paths=source_relative:. ./dialectpb/dialect.proto

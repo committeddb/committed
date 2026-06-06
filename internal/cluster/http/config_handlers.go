@@ -4,7 +4,7 @@ import (
 	"context"
 	httpgo "net/http"
 
-	"github.com/philborlin/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 // The four versioned config resources — database, ingestable, syncable,

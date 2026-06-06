@@ -4,7 +4,13 @@
 # golang:1.26-alpine tracks the latest 1.26.x, satisfying the go.mod
 # toolchain floor. The builder is throwaway, so its size doesn't matter;
 # only the static binary it produces is copied into the runtime image.
-FROM golang:1.26-alpine AS builder
+#
+# --platform=$BUILDPLATFORM pins the builder to the machine doing the
+# build (not the target), so a multi-arch `buildx` build cross-compiles
+# with GOOS/GOARCH at native speed instead of running an emulated
+# (QEMU) builder per target arch. Safe here because the binary is pure
+# Go with CGO disabled.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
 
 WORKDIR /src
 
@@ -25,14 +31,19 @@ ARG VERSION=dev
 ARG COMMIT=unknown
 ARG BUILD_DATE=unknown
 
-# CGO_ENABLED=0 yields a fully static binary that runs on distroless
-# static (no libc). -trimpath strips local filesystem paths; -s -w drops
-# the symbol table and DWARF for a smaller artifact.
-RUN CGO_ENABLED=0 go build -trimpath \
+# TARGETOS/TARGETARCH are provided automatically by buildx from the
+# --platform value; defaulting unset they fall back to the builder's own
+# GOOS/GOARCH for a plain `docker build`. CGO_ENABLED=0 yields a fully
+# static binary that runs on distroless static (no libc). -trimpath
+# strips local filesystem paths; -s -w drops the symbol table and DWARF
+# for a smaller artifact.
+ARG TARGETOS
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
     -ldflags="-s -w \
-      -X github.com/philborlin/committed/internal/version.Version=${VERSION} \
-      -X github.com/philborlin/committed/internal/version.Commit=${COMMIT} \
-      -X github.com/philborlin/committed/internal/version.BuildDate=${BUILD_DATE}" \
+      -X github.com/committeddb/committed/internal/version.Version=${VERSION} \
+      -X github.com/committeddb/committed/internal/version.Commit=${COMMIT} \
+      -X github.com/committeddb/committed/internal/version.BuildDate=${BUILD_DATE}" \
     -o /out/committed .
 
 # ---- runtime stage ----
@@ -40,6 +51,24 @@ RUN CGO_ENABLED=0 go build -trimpath \
 # nonroot user (uid 65532) — no shell, package manager, or toolchain, so
 # the runtime attack surface is the binary itself.
 FROM gcr.io/distroless/static-debian12:nonroot
+
+# OCI image labels advertise provenance on the registry and in
+# `docker inspect`. version/revision/created mirror the same build args
+# the binary is stamped with, so the image metadata and
+# `committed --version` agree. ARGs are scoped per build stage, so the
+# three build-identity args are re-declared here to be visible to LABEL.
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_DATE=unknown
+LABEL org.opencontainers.image.title="committed" \
+      org.opencontainers.image.description="A single-binary, Raft-backed CDC pipeline with the log as its own source of truth." \
+      org.opencontainers.image.source="https://github.com/committeddb/committed" \
+      org.opencontainers.image.url="https://github.com/committeddb/committed" \
+      org.opencontainers.image.documentation="https://github.com/committeddb/committed/blob/main/README.md" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${COMMIT}" \
+      org.opencontainers.image.created="${BUILD_DATE}"
 
 COPY --from=builder /out/committed /usr/local/bin/committed
 

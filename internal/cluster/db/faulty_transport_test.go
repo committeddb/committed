@@ -8,7 +8,7 @@ import (
 	"go.etcd.io/raft/v3"
 	"go.etcd.io/raft/v3/raftpb"
 
-	"github.com/philborlin/committed/internal/cluster/db"
+	"github.com/committeddb/committed/internal/cluster/db"
 )
 
 // FaultyTransport wraps a per-node db.Transport and implements db.Transport.

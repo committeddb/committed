@@ -9,9 +9,9 @@ VERSION ?= $(shell git describe --tags --dirty --always 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -s -w \
-  -X github.com/philborlin/committed/internal/version.Version=$(VERSION) \
-  -X github.com/philborlin/committed/internal/version.Commit=$(COMMIT) \
-  -X github.com/philborlin/committed/internal/version.BuildDate=$(DATE)
+  -X github.com/committeddb/committed/internal/version.Version=$(VERSION) \
+  -X github.com/committeddb/committed/internal/version.Commit=$(COMMIT) \
+  -X github.com/committeddb/committed/internal/version.BuildDate=$(DATE)
 
 build:
 	go build -ldflags="$(LDFLAGS)"

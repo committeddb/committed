@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/require"
 	pb "go.etcd.io/raft/v3/raftpb"
 
-	"github.com/philborlin/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 // applyIngestSeq commits one ingest proposal at raft index idx tagged

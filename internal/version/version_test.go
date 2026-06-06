@@ -6,7 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/philborlin/committed/internal/version"
+	"github.com/committeddb/committed/internal/version"
 )
 
 // TestGet verifies Info reflects the current package-level variables

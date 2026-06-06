@@ -5,7 +5,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/philborlin/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 type FakeSyncable struct {

@@ -5,7 +5,7 @@ import (
 	httpgo "net/http"
 	"strconv"
 
-	"github.com/philborlin/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 // Helpers shared by the version/rollback config handlers in

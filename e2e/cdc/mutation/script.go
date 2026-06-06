@@ -16,7 +16,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/philborlin/committed/e2e/cdc/dataset"
+	"github.com/committeddb/committed/e2e/cdc/dataset"
 )
 
 // Script is a sequence of transactions to execute, plus their expected

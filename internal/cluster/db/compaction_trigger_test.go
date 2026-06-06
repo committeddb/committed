@@ -8,8 +8,8 @@ import (
 	"go.etcd.io/raft/v3/raftpb"
 	"go.uber.org/zap"
 
-	"github.com/philborlin/committed/internal/cluster/db"
-	"github.com/philborlin/committed/internal/cluster/db/dbfakes"
+	"github.com/committeddb/committed/internal/cluster/db"
+	"github.com/committeddb/committed/internal/cluster/db/dbfakes"
 )
 
 // TestMaybeCompact_SizeLimb drives the size limb of the "10GB or 1hr"

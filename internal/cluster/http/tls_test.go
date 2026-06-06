@@ -18,8 +18,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/philborlin/committed/internal/cluster/clusterfakes"
-	"github.com/philborlin/committed/internal/cluster/http"
+	"github.com/committeddb/committed/internal/cluster/clusterfakes"
+	"github.com/committeddb/committed/internal/cluster/http"
 )
 
 // These tests cover the http package's TLS wiring — the WithTLSConfig

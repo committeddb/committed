@@ -13,7 +13,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/philborlin/committed/e2e/cdc/dataset"
+	"github.com/committeddb/committed/e2e/cdc/dataset"
 )
 
 // postType creates a committed Type with the given ID (which doubles

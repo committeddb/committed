@@ -6,7 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/philborlin/committed/internal/version"
+	"github.com/committeddb/committed/internal/version"
 )
 
 var rootCmd = &cobra.Command{

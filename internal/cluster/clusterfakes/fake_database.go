@@ -4,7 +4,7 @@ package clusterfakes
 import (
 	"sync"
 
-	"github.com/philborlin/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 type FakeDatabase struct {

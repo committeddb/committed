@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/philborlin/committed/internal/cluster"
-	"github.com/philborlin/committed/internal/cluster/migration"
+	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/migration"
 )
 
 // ReplaySyncableDeadLetter re-drives a single dead-lettered proposal: it

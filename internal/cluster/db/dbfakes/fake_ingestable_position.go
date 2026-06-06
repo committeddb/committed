@@ -4,8 +4,8 @@ package dbfakes
 import (
 	"sync"
 
-	"github.com/philborlin/committed/internal/cluster"
-	"github.com/philborlin/committed/internal/cluster/db"
+	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/db"
 )
 
 type FakeIngestablePosition struct {

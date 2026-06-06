@@ -10,7 +10,7 @@ import (
 	"go.etcd.io/raft/v3"
 	"go.etcd.io/raft/v3/raftpb"
 
-	"github.com/philborlin/committed/internal/cluster/db"
+	"github.com/committeddb/committed/internal/cluster/db"
 )
 
 // createJoiningRaft builds a node that joins an existing cluster: it knows the

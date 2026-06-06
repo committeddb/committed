@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/philborlin/committed/e2e/cdc/dataset"
+	"github.com/committeddb/committed/e2e/cdc/dataset"
 )
 
 // SinkTable is the table a topic's syncable projects into. It must differ

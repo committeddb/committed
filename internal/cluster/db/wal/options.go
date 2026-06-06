@@ -3,7 +3,7 @@ package wal
 import (
 	"go.uber.org/zap"
 
-	"github.com/philborlin/committed/internal/cluster/metrics"
+	"github.com/committeddb/committed/internal/cluster/metrics"
 )
 
 // Option configures behaviour of Open. Options are intended primarily for

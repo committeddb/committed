@@ -4,8 +4,8 @@ package sqlfakes
 import (
 	"sync"
 
-	"github.com/philborlin/committed/internal/cluster"
-	"github.com/philborlin/committed/internal/cluster/ingestable/sql"
+	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/ingestable/sql"
 )
 
 type FakeTyper struct {

@@ -16,9 +16,9 @@ import (
 	"go.etcd.io/raft/v3"
 	"go.etcd.io/raft/v3/raftpb"
 
-	"github.com/philborlin/committed/internal/cluster"
-	"github.com/philborlin/committed/internal/cluster/db"
-	dbtesting "github.com/philborlin/committed/internal/cluster/db/testing"
+	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/db"
+	dbtesting "github.com/committeddb/committed/internal/cluster/db/testing"
 )
 
 // multiNodeTickInterval is the per-tick interval used by multi-node raft

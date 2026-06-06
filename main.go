@@ -9,7 +9,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/philborlin/committed/cmd"
+	"github.com/committeddb/committed/cmd"
 )
 
 func main() {

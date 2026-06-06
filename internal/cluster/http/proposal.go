@@ -6,7 +6,7 @@ import (
 	"fmt"
 	httpgo "net/http"
 
-	"github.com/philborlin/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 // schemaCacheKey identifies a compiled schema artifact by type ID +

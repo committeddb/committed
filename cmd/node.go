@@ -23,18 +23,18 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/philborlin/committed/internal/cluster/db"
-	parser "github.com/philborlin/committed/internal/cluster/db/parser"
-	"github.com/philborlin/committed/internal/cluster/db/wal"
-	"github.com/philborlin/committed/internal/cluster/http"
-	ingestablesql "github.com/philborlin/committed/internal/cluster/ingestable/sql"
-	ingestablemysql "github.com/philborlin/committed/internal/cluster/ingestable/sql/mysql"
-	ingestablepostgres "github.com/philborlin/committed/internal/cluster/ingestable/sql/postgres"
-	"github.com/philborlin/committed/internal/cluster/metrics"
-	synchttp "github.com/philborlin/committed/internal/cluster/syncable/http"
-	syncsql "github.com/philborlin/committed/internal/cluster/syncable/sql"
-	syncdialects "github.com/philborlin/committed/internal/cluster/syncable/sql/dialects"
-	"github.com/philborlin/committed/internal/version"
+	"github.com/committeddb/committed/internal/cluster/db"
+	parser "github.com/committeddb/committed/internal/cluster/db/parser"
+	"github.com/committeddb/committed/internal/cluster/db/wal"
+	"github.com/committeddb/committed/internal/cluster/http"
+	ingestablesql "github.com/committeddb/committed/internal/cluster/ingestable/sql"
+	ingestablemysql "github.com/committeddb/committed/internal/cluster/ingestable/sql/mysql"
+	ingestablepostgres "github.com/committeddb/committed/internal/cluster/ingestable/sql/postgres"
+	"github.com/committeddb/committed/internal/cluster/metrics"
+	synchttp "github.com/committeddb/committed/internal/cluster/syncable/http"
+	syncsql "github.com/committeddb/committed/internal/cluster/syncable/sql"
+	syncdialects "github.com/committeddb/committed/internal/cluster/syncable/sql/dialects"
+	"github.com/committeddb/committed/internal/version"
 )
 
 // defaultShutdownTimeout bounds how long graceful shutdown waits for the

@@ -8,9 +8,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/philborlin/committed/internal/cluster"
-	"github.com/philborlin/committed/internal/cluster/db/parser"
-	"github.com/philborlin/committed/internal/cluster/db/wal"
+	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/db/parser"
+	"github.com/committeddb/committed/internal/cluster/db/wal"
 )
 
 // TestRebuild_EndToEnd simulates the operator-facing rebuild

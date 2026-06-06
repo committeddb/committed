@@ -13,9 +13,9 @@ import (
 	"go.etcd.io/raft/v3/raftpb"
 	"go.uber.org/zap"
 
-	"github.com/philborlin/committed/internal/cluster"
-	"github.com/philborlin/committed/internal/cluster/db/httptransport"
-	"github.com/philborlin/committed/internal/cluster/metrics"
+	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/db/httptransport"
+	"github.com/committeddb/committed/internal/cluster/metrics"
 )
 
 // configBuildErrorReporter is an optional Storage extension that reports

@@ -3,7 +3,7 @@ package sql
 import (
 	gosql "database/sql"
 
-	"github.com/philborlin/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 type Dialect interface {

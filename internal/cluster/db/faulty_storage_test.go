@@ -6,7 +6,7 @@ import (
 
 	"go.etcd.io/raft/v3/raftpb"
 
-	"github.com/philborlin/committed/internal/cluster/db"
+	"github.com/committeddb/committed/internal/cluster/db"
 )
 
 // FaultyStorage wraps a db.Storage and returns syscall.ENOSPC from Save

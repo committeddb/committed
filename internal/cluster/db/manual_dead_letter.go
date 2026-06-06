@@ -3,7 +3,7 @@ package db
 import (
 	"context"
 
-	"github.com/philborlin/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 // DeadLetterStuckSyncable asks the worker for id to dead-letter the proposal

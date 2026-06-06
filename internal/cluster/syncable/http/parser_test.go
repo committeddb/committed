@@ -9,7 +9,7 @@ import (
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
 
-	synchttp "github.com/philborlin/committed/internal/cluster/syncable/http"
+	synchttp "github.com/committeddb/committed/internal/cluster/syncable/http"
 )
 
 func readConfig(t *testing.T, configType string, r io.Reader) *viper.Viper {

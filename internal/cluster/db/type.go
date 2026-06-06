@@ -5,8 +5,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/philborlin/committed/internal/cluster"
-	"github.com/philborlin/committed/internal/cluster/migration"
+	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/migration"
 )
 
 func (db *DB) ProposeType(ctx context.Context, c *cluster.Configuration) error {

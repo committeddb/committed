@@ -9,8 +9,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/philborlin/committed/e2e/cdc/harness"
-	"github.com/philborlin/committed/e2e/cdc/mutation"
+	"github.com/committeddb/committed/e2e/cdc/harness"
+	"github.com/committeddb/committed/e2e/cdc/mutation"
 )
 
 // TestSyncableProjectsToSink is the baseline that the restart test builds on:

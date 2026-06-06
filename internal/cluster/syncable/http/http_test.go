@@ -13,8 +13,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/philborlin/committed/internal/cluster"
-	synchttp "github.com/philborlin/committed/internal/cluster/syncable/http"
+	"github.com/committeddb/committed/internal/cluster"
+	synchttp "github.com/committeddb/committed/internal/cluster/syncable/http"
 )
 
 var (

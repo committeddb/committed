@@ -1,7 +1,7 @@
 syntax = "proto3";
 package clusterpb;
 
-option go_package = "github.com/philborlin/committed/internal/cluster/clusterpb";
+option go_package = "github.com/committeddb/committed/internal/cluster/clusterpb";
 
 // TypeRef identifies a Type by the compound (ID, Version) key. It is
 // the pointer a LogEntity carries so future readers can resolve the

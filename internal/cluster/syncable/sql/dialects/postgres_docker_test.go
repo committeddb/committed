@@ -15,8 +15,8 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 
-	"github.com/philborlin/committed/internal/cluster/syncable/sql"
-	"github.com/philborlin/committed/internal/cluster/syncable/sql/dialects"
+	"github.com/committeddb/committed/internal/cluster/syncable/sql"
+	"github.com/committeddb/committed/internal/cluster/syncable/sql/dialects"
 
 	"github.com/stretchr/testify/require"
 )

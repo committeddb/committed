@@ -8,7 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/philborlin/committed/internal/version"
+	"github.com/committeddb/committed/internal/version"
 )
 
 // TestVersionFlag verifies `committed --version` exits 0 and prints

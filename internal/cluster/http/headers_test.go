@@ -7,8 +7,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/philborlin/committed/internal/cluster/clusterfakes"
-	"github.com/philborlin/committed/internal/cluster/http"
+	"github.com/committeddb/committed/internal/cluster/clusterfakes"
+	"github.com/committeddb/committed/internal/cluster/http"
 )
 
 // TestSecurityHeaders_APIRoute asserts the defense-in-depth headers the

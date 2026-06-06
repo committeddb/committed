@@ -9,9 +9,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/philborlin/committed/internal/cluster/clusterfakes"
-	"github.com/philborlin/committed/internal/cluster/http"
-	"github.com/philborlin/committed/internal/version"
+	"github.com/committeddb/committed/internal/cluster/clusterfakes"
+	"github.com/committeddb/committed/internal/cluster/http"
+	"github.com/committeddb/committed/internal/version"
 )
 
 // TestVersion verifies /version returns 200 with the build Info. It

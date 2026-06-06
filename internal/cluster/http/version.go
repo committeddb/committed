@@ -3,7 +3,7 @@ package http
 import (
 	httpgo "net/http"
 
-	"github.com/philborlin/committed/internal/version"
+	"github.com/committeddb/committed/internal/version"
 )
 
 // Version returns the running binary's build metadata as JSON. It is

@@ -6,7 +6,7 @@ import (
 	httpgo "net/http"
 	"strconv"
 
-	"github.com/philborlin/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 // AddMemberRequest is the body of POST /v1/membership: add a voting node to

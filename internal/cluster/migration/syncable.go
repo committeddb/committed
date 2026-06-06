@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/philborlin/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 // Wrap returns a cluster.Syncable that transforms each proposal's

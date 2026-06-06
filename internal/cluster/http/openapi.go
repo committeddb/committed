@@ -3,7 +3,7 @@ package http
 import (
 	httpgo "net/http"
 
-	"github.com/philborlin/committed/api"
+	"github.com/committeddb/committed/api"
 )
 
 // OpenAPISpec serves the embedded OpenAPI specification as YAML. It is

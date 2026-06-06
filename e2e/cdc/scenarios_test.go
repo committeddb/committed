@@ -11,10 +11,10 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/philborlin/committed/e2e/cdc/dataset"
-	"github.com/philborlin/committed/e2e/cdc/harness"
-	"github.com/philborlin/committed/e2e/cdc/mutation"
-	"github.com/philborlin/committed/e2e/cdc/oracle"
+	"github.com/committeddb/committed/e2e/cdc/dataset"
+	"github.com/committeddb/committed/e2e/cdc/harness"
+	"github.com/committeddb/committed/e2e/cdc/mutation"
+	"github.com/committeddb/committed/e2e/cdc/oracle"
 )
 
 // regionRow is shorthand for a fully-populated region row map. Every

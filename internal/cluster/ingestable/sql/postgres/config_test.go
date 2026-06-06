@@ -7,8 +7,8 @@ import (
 	"github.com/jackc/pglogrepl"
 	"github.com/stretchr/testify/require"
 
-	"github.com/philborlin/committed/internal/cluster/ingestable/sql"
-	"github.com/philborlin/committed/internal/cluster/ingestable/sql/dialectpb"
+	"github.com/committeddb/committed/internal/cluster/ingestable/sql"
+	"github.com/committeddb/committed/internal/cluster/ingestable/sql/dialectpb"
 )
 
 func TestBuildPgConfig(t *testing.T) {

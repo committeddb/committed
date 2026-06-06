@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/philborlin/committed/internal/cluster/clusterpb"
+	"github.com/committeddb/committed/internal/cluster/clusterpb"
 )
 
 func TestScrubRoundTrip(t *testing.T) {

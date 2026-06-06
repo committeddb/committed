@@ -1,6 +1,6 @@
 package db
 
-import "github.com/philborlin/committed/internal/cluster"
+import "github.com/committeddb/committed/internal/cluster"
 
 // ActualReader streams committed Actuals out of the permanent event log in
 // raft-index order. Storage.Reader(id) constructs one; callers read until

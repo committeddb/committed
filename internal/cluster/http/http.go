@@ -9,7 +9,7 @@ import (
 	"github.com/rs/cors"
 	"go.uber.org/zap"
 
-	"github.com/philborlin/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 // Default CORS request methods and headers, applied when WithCORS is

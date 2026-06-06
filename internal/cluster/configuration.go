@@ -3,7 +3,7 @@ package cluster
 import (
 	"google.golang.org/protobuf/proto"
 
-	"github.com/philborlin/committed/internal/cluster/clusterpb"
+	"github.com/committeddb/committed/internal/cluster/clusterpb"
 )
 
 type Configuration struct {

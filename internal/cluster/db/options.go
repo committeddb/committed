@@ -6,7 +6,7 @@ import (
 	"go.etcd.io/etcd/client/pkg/v3/transport"
 	"go.uber.org/zap"
 
-	"github.com/philborlin/committed/internal/cluster/metrics"
+	"github.com/committeddb/committed/internal/cluster/metrics"
 )
 
 // defaultTickInterval is the cadence at which Raft.Tick() is called when no

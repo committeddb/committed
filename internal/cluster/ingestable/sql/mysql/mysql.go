@@ -20,9 +20,9 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/philborlin/committed/internal/cluster"
-	"github.com/philborlin/committed/internal/cluster/ingestable/sql"
-	"github.com/philborlin/committed/internal/cluster/ingestable/sql/dialectpb"
+	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/ingestable/sql"
+	"github.com/committeddb/committed/internal/cluster/ingestable/sql/dialectpb"
 )
 
 type MySQLDialect struct{}

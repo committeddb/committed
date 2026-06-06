@@ -9,9 +9,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/philborlin/committed/internal/cluster/clusterfakes"
-	test "github.com/philborlin/committed/internal/cluster/db/testing"
-	"github.com/philborlin/committed/internal/cluster/http"
+	"github.com/committeddb/committed/internal/cluster/clusterfakes"
+	test "github.com/committeddb/committed/internal/cluster/db/testing"
+	"github.com/committeddb/committed/internal/cluster/http"
 )
 
 // TestHealth verifies the /health endpoint always returns 200 with a

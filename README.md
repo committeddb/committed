@@ -1,6 +1,6 @@
 # Committed
 
-[![CI](https://github.com/philborlin/committed/actions/workflows/ci.yml/badge.svg)](https://github.com/philborlin/committed/actions/workflows/ci.yml)
+[![CI](https://github.com/committeddb/committed/actions/workflows/ci.yml/badge.svg)](https://github.com/committeddb/committed/actions/workflows/ci.yml)
 
 A single-binary, Raft-backed CDC pipeline with the log as its own source of truth.
 
@@ -18,28 +18,43 @@ Committed is specifically NOT a databse designed for querying.
 - **vs. etcd**: same Raft substrate, but append-only log semantics instead of KV — and a worker model for ingest/sync that etcd doesn't have.
 - **vs. an RDBMS / Debezium pipeline**: Committed collapses "replicated log + CDC source + sink connectors" into one process. You don't need Kafka + Debezium + Kafka Connect + a separate consensus layer; the same binary holds the log, the source, and the sink.
 
-## Version 0.4
+## Version 0.5
 
-A beta release focused on productionizing the backend. It keeps 0.3's
-functioning 3-node Raft cluster, REST API, optional bearer-token auth and
-TLS, optional OpenTelemetry metrics, and end-to-end CDC pipeline (Postgres
-logical replication / MySQL binlog ingestable → Raft log → SQL/HTTP
-syncable), and adds:
+A beta release that hardens the log's correctness guarantees and makes the
+sync/ingest pipeline operable under failure. It keeps 0.4's productionized
+backend — 3-node Raft cluster, `COMMITTED_*` env-var configuration and
+static multi-node bootstrap, optional bearer-token auth and TLS, graceful
+shutdown, configurable server limits, optional OpenTelemetry metrics, and
+the end-to-end CDC pipeline (Postgres logical replication / MySQL binlog
+ingestable → Raft log → SQL/HTTP syncable) — and adds:
 
-- **Env-var configuration and static multi-node bootstrap** — node
-  identity, addressing, data directory, and cluster membership are all set
-  via `COMMITTED_*` environment variables (see
-  [Configuration](#configuration)), so the same image can be templated
-  per-node by an orchestrator.
-- **Graceful shutdown** — bounded HTTP drain and clean WAL/raft close on
-  `SIGTERM`/`SIGINT`.
-- **Configurable server limits** — HTTP read/write/idle timeouts and a
-  Raft proposal-size cap.
-- **More resilient ingest** — an ingest-worker supervisor with
-  backoff/restart, durable ingestable position (ingest resumes where it
-  left off after a restart or leader change), and per-commit standby acks.
-- **Prebuilt multi-arch binaries** — darwin and linux on both arm64 and
-  amd64, plus windows/amd64, attached to each release.
+- **The Actual concept** — a committed Proposal is now a first-class
+  *Actual*: the fact consensus ordered at a fixed Index. Syncables consume
+  Actuals, never Proposals (see [Concepts](#concepts)). Inconsistent
+  read-side concepts ("proposal time", reading a proposal back) were
+  removed, so the log stays write-only over HTTP by design.
+- **Stronger consensus guarantees** — JointImplicit configuration changes
+  to prevent split brains during membership changes, linearizable reads of
+  snapshotted data, and WAL checksums to detect on-disk corruption (etcd
+  raft updated to the latest release).
+- **Effectively-once ingest** — durable ingestable positions plus
+  duplicate-storm-on-crash fixes, so ingest resumes where it left off
+  across restarts and leader changes behind a supervised ingest worker.
+- **Operable syncables** — a replay API
+  (`POST /v1/syncable/{id}/replay/{index}`), dead-letter handling with
+  metrics so durability failures are visible, bounded transient-retry
+  config, and syncables that correctly restart and resume on node restart.
+  Deletes now propagate through both ingestables and syncables.
+- **Diagnostics, versioned APIs & config secrets** — a
+  `GET /v1/node/status` endpoint reporting locally-degraded configs,
+  versioned (`/v1`) endpoints with per-config history and rollback,
+  `${VAR}` substitution to keep secrets out of Raft/bbolt, and configurable
+  CORS.
+- **Official container image** — a distroless, static, multi-arch
+  (`linux/amd64` + `linux/arm64`) image published to Docker Hub at
+  [`committeddb/committed`](https://hub.docker.com/r/committeddb/committed),
+  alongside the prebuilt binaries (darwin/linux on arm64 + amd64,
+  windows/amd64) attached to each release.
 
 ### Concepts
 
@@ -62,7 +77,7 @@ syncable), and adds:
 ### Running
 
 Download a prebuilt binary for your platform from the
-[releases page](https://github.com/philborlin/committed/releases), or
+[releases page](https://github.com/committeddb/committed/releases), or
 build from source:
 
 ```sh
@@ -74,6 +89,21 @@ Single node — defaults to ID=1, HTTP at `:8080`, data dir `./data`:
 ```sh
 ./committed node
 ```
+
+Or run the published container (distroless, static, runs as nonroot uid
+65532). It reads the same `COMMITTED_*` env vars and persists WAL/state
+under `/home/nonroot/data`:
+
+```sh
+docker run --rm -p 8080:8080 -p 9022:9022 \
+  -v committed-data:/home/nonroot/data \
+  committeddb/committed:0.5-beta
+```
+
+`docker run committeddb/committed:0.5-beta --version` prints the build
+identity; `:latest` tracks the most recent release. See
+[Configuration](#configuration) for the env vars and `docker-compose.yml`
+for a local single-node setup.
 
 Three-node cluster via [goreman](https://github.com/mattn/goreman) and
 the included `Procfile`:

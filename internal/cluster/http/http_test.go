@@ -19,15 +19,15 @@ import (
 	sqle "github.com/dolthub/go-mysql-server/sql"
 	"github.com/stretchr/testify/require"
 
-	"github.com/philborlin/committed/internal/cluster"
-	"github.com/philborlin/committed/internal/cluster/db"
-	"github.com/philborlin/committed/internal/cluster/db/parser"
-	test "github.com/philborlin/committed/internal/cluster/db/testing"
-	"github.com/philborlin/committed/internal/cluster/db/wal"
-	"github.com/philborlin/committed/internal/cluster/http"
-	"github.com/philborlin/committed/internal/cluster/ingestable"
-	"github.com/philborlin/committed/internal/cluster/syncable/sql"
-	"github.com/philborlin/committed/internal/cluster/syncable/sql/dialects"
+	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/db"
+	"github.com/committeddb/committed/internal/cluster/db/parser"
+	test "github.com/committeddb/committed/internal/cluster/db/testing"
+	"github.com/committeddb/committed/internal/cluster/db/wal"
+	"github.com/committeddb/committed/internal/cluster/http"
+	"github.com/committeddb/committed/internal/cluster/ingestable"
+	"github.com/committeddb/committed/internal/cluster/syncable/sql"
+	"github.com/committeddb/committed/internal/cluster/syncable/sql/dialects"
 )
 
 // TestEndToEnd verifies the full HTTP → raft → syncable → destination database

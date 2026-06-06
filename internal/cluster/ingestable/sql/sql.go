@@ -3,7 +3,7 @@ package sql
 import (
 	"context"
 
-	"github.com/philborlin/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 //go:generate go run github.com/maxbrunsfeld/counterfeiter/v6 -generate

@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/philborlin/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 // defaultSyncableErrorsLimit is the page size GetSyncableErrors uses when

@@ -18,10 +18,10 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/philborlin/committed/internal/cluster/db"
-	"github.com/philborlin/committed/internal/cluster/db/parser"
-	dbtest "github.com/philborlin/committed/internal/cluster/db/testing"
-	clusterhttp "github.com/philborlin/committed/internal/cluster/http"
+	"github.com/committeddb/committed/internal/cluster/db"
+	"github.com/committeddb/committed/internal/cluster/db/parser"
+	dbtest "github.com/committeddb/committed/internal/cluster/db/testing"
+	clusterhttp "github.com/committeddb/committed/internal/cluster/http"
 )
 
 // newTestDB builds a single-node db.DB backed by MemoryStorage. Mirrors

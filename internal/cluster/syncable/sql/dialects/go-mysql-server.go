@@ -6,7 +6,7 @@ import (
 
 	"github.com/dolthub/go-mysql-server/driver"
 
-	"github.com/philborlin/committed/internal/cluster/syncable/sql"
+	"github.com/committeddb/committed/internal/cluster/syncable/sql"
 )
 
 type GoMySQLServerDialect struct {

@@ -11,9 +11,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.etcd.io/raft/v3/raftpb"
 
-	"github.com/philborlin/committed/internal/cluster"
-	"github.com/philborlin/committed/internal/cluster/db"
-	parser "github.com/philborlin/committed/internal/cluster/db/parser"
+	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/db"
+	parser "github.com/committeddb/committed/internal/cluster/db/parser"
 )
 
 // TestIngest_FreezesOnErrProposalUnknown verifies that when db.Propose

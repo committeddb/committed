@@ -11,9 +11,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/philborlin/committed/internal/cluster"
-	"github.com/philborlin/committed/internal/cluster/syncable/sql"
-	"github.com/philborlin/committed/internal/cluster/syncable/sql/dialects"
+	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/syncable/sql"
+	"github.com/committeddb/committed/internal/cluster/syncable/sql/dialects"
 
 	"github.com/DATA-DOG/go-sqlmock"
 )

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/philborlin/committed/internal/cluster/syncable/sql"
+	"github.com/committeddb/committed/internal/cluster/syncable/sql"
 )
 
 // createDeleteSQL builds `DELETE FROM <table> WHERE <keyCol> = <placeholder>`.

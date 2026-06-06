@@ -8,7 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/philborlin/committed/internal/cluster/db/wal"
+	"github.com/committeddb/committed/internal/cluster/db/wal"
 )
 
 // segmentName matches tidwall/wal's segment files: a 20-digit, zero-padded

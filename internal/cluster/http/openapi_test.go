@@ -14,10 +14,10 @@ import (
 	valerrors "github.com/pb33f/libopenapi-validator/errors"
 	"github.com/stretchr/testify/require"
 
-	openapiapi "github.com/philborlin/committed/api"
-	"github.com/philborlin/committed/internal/cluster"
-	"github.com/philborlin/committed/internal/cluster/clusterfakes"
-	httppkg "github.com/philborlin/committed/internal/cluster/http"
+	openapiapi "github.com/committeddb/committed/api"
+	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/clusterfakes"
+	httppkg "github.com/committeddb/committed/internal/cluster/http"
 )
 
 // newValidator parses the embedded spec and constructs a validator. Test

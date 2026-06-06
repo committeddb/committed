@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 	pb "go.etcd.io/raft/v3/raftpb"
 
-	"github.com/philborlin/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 // TODO Test that we skip malformed Proposals (or pb.Entry structs that aren't proposals)

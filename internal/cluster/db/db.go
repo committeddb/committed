@@ -14,8 +14,8 @@ import (
 	"go.etcd.io/raft/v3/raftpb"
 	"go.uber.org/zap"
 
-	"github.com/philborlin/committed/internal/cluster"
-	"github.com/philborlin/committed/internal/cluster/metrics"
+	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/metrics"
 )
 
 // ErrClosed is returned by db.Sync, db.Ingest, and db.Propose when the

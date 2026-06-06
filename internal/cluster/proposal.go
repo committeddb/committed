@@ -7,7 +7,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	"github.com/philborlin/committed/internal/cluster/clusterpb"
+	"github.com/committeddb/committed/internal/cluster/clusterpb"
 )
 
 // ErrProposalTooLarge is returned when a marshaled proposal exceeds

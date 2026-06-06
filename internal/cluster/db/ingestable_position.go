@@ -1,6 +1,6 @@
 package db
 
-import "github.com/philborlin/committed/internal/cluster"
+import "github.com/committeddb/committed/internal/cluster"
 
 // []byte - index of the position
 //

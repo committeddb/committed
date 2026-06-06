@@ -11,7 +11,7 @@ import (
 	bolt "go.etcd.io/bbolt"
 	pb "go.etcd.io/raft/v3/raftpb"
 
-	"github.com/philborlin/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 // CreateSnapshot captures the current metadata state (bbolt content) as

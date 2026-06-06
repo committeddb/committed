@@ -16,7 +16,7 @@ import (
 
 	"github.com/itchyny/gojq"
 
-	"github.com/philborlin/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 // Resolver fetches type definitions by (ID, Version). The chain walker

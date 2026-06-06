@@ -6,7 +6,7 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/philborlin/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 // Request-body decoding and response-body writing helpers shared across
