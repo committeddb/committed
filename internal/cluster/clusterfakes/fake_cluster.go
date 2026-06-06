@@ -310,6 +310,17 @@ type FakeCluster struct {
 		result1 *cluster.Type
 		result2 error
 	}
+	ScrubStub        func(context.Context) error
+	scrubMutex       sync.RWMutex
+	scrubArgsForCall []struct {
+		arg1 context.Context
+	}
+	scrubReturns struct {
+		result1 error
+	}
+	scrubReturnsOnCall map[int]struct {
+		result1 error
+	}
 	SyncStub        func(context.Context, string, cluster.Syncable) error
 	syncMutex       sync.RWMutex
 	syncArgsForCall []struct {
@@ -1949,6 +1960,67 @@ func (fake *FakeCluster) ResolveTypeReturnsOnCall(i int, result1 *cluster.Type, 
 	}{result1, result2}
 }
 
+func (fake *FakeCluster) Scrub(arg1 context.Context) error {
+	fake.scrubMutex.Lock()
+	ret, specificReturn := fake.scrubReturnsOnCall[len(fake.scrubArgsForCall)]
+	fake.scrubArgsForCall = append(fake.scrubArgsForCall, struct {
+		arg1 context.Context
+	}{arg1})
+	stub := fake.ScrubStub
+	fakeReturns := fake.scrubReturns
+	fake.recordInvocation("Scrub", []interface{}{arg1})
+	fake.scrubMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeCluster) ScrubCallCount() int {
+	fake.scrubMutex.RLock()
+	defer fake.scrubMutex.RUnlock()
+	return len(fake.scrubArgsForCall)
+}
+
+func (fake *FakeCluster) ScrubCalls(stub func(context.Context) error) {
+	fake.scrubMutex.Lock()
+	defer fake.scrubMutex.Unlock()
+	fake.ScrubStub = stub
+}
+
+func (fake *FakeCluster) ScrubArgsForCall(i int) context.Context {
+	fake.scrubMutex.RLock()
+	defer fake.scrubMutex.RUnlock()
+	argsForCall := fake.scrubArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeCluster) ScrubReturns(result1 error) {
+	fake.scrubMutex.Lock()
+	defer fake.scrubMutex.Unlock()
+	fake.ScrubStub = nil
+	fake.scrubReturns = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *FakeCluster) ScrubReturnsOnCall(i int, result1 error) {
+	fake.scrubMutex.Lock()
+	defer fake.scrubMutex.Unlock()
+	fake.ScrubStub = nil
+	if fake.scrubReturnsOnCall == nil {
+		fake.scrubReturnsOnCall = make(map[int]struct {
+			result1 error
+		})
+	}
+	fake.scrubReturnsOnCall[i] = struct {
+		result1 error
+	}{result1}
+}
+
 func (fake *FakeCluster) Sync(arg1 context.Context, arg2 string, arg3 cluster.Syncable) error {
 	fake.syncMutex.Lock()
 	ret, specificReturn := fake.syncReturnsOnCall[len(fake.syncArgsForCall)]
@@ -2570,6 +2642,8 @@ func (fake *FakeCluster) Invocations() map[string][][]interface{} {
 	defer fake.replaySyncableDeadLetterMutex.RUnlock()
 	fake.resolveTypeMutex.RLock()
 	defer fake.resolveTypeMutex.RUnlock()
+	fake.scrubMutex.RLock()
+	defer fake.scrubMutex.RUnlock()
 	fake.syncMutex.RLock()
 	defer fake.syncMutex.RUnlock()
 	fake.syncableDeadLettersMutex.RLock()

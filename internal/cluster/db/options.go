@@ -104,6 +104,16 @@ type options struct {
 	// operator can skip it). 0 means "use defaultSyncStuckThreshold". Tests
 	// shorten it via WithSyncStuckThreshold; production leaves the default.
 	syncStuckThreshold time.Duration
+
+	// scrubInterval is the cadence at which the leader proposes a Scrub
+	// command when there is unscrubbed RTBF backlog (delete proposals whose
+	// PII originals are still in the permanent event log). The interval
+	// amortizes the O(N) rewrite over batches of deletes and bounds the
+	// erasure SLA. 0 disables the automatic scheduler entirely (the manual
+	// POST /v1/scrub lever still works). See docs/event-log-architecture.md
+	// § "Right-to-be-forgotten / deletes". Tests shorten it via
+	// WithScrubInterval; production leaves the default.
+	scrubInterval time.Duration
 }
 
 // defaultSyncStuckThreshold debounces the "stuck" signal: a syncable must be
@@ -122,6 +132,13 @@ const DefaultCompactMaxAge = time.Hour
 
 const DefaultMaxProposalBytes uint64 = 16 * 1024 * 1024
 
+// DefaultScrubInterval is the production cadence at which the leader proposes a
+// Scrub when there is unscrubbed RTBF backlog. One hour mirrors the compaction
+// age limb and bounds how long deleted PII lingers in the permanent event log
+// before physical removal. Operators tune it via COMMITTED_SCRUB_INTERVAL; 0
+// disables the automatic scheduler.
+const DefaultScrubInterval = time.Hour
+
 func defaultOptions() options {
 	return options{
 		tickInterval:       defaultTickInterval,
@@ -130,6 +147,7 @@ func defaultOptions() options {
 		compactMaxAge:      DefaultCompactMaxAge,
 		maxProposalBytes:   DefaultMaxProposalBytes,
 		syncStuckThreshold: defaultSyncStuckThreshold,
+		scrubInterval:      DefaultScrubInterval,
 	}
 }
 
@@ -234,6 +252,15 @@ func WithIngestSupervisorHealthyWindow(d time.Duration) Option {
 // 0 resolves to DefaultMaxProposalBytes.
 func WithMaxProposalBytes(bytes uint64) Option {
 	return func(o *options) { o.maxProposalBytes = bytes }
+}
+
+// WithScrubInterval overrides the automatic-scrub cadence. 0 disables the
+// scheduler (the manual POST /v1/scrub lever still works). Tests set tight
+// values (tens of ms) to drive the scheduler deterministically; production
+// leaves the default (DefaultScrubInterval). cmd/node.go wires
+// COMMITTED_SCRUB_INTERVAL to this.
+func WithScrubInterval(d time.Duration) Option {
+	return func(o *options) { o.scrubInterval = d }
 }
 
 // WithTLSInfo enables mTLS on the raft peer transport. Pass a

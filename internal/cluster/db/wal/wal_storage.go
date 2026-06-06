@@ -39,6 +39,11 @@ var (
 	// uint64 highwater of the highest applied source sequence. Drives
 	// effectively-once ingest dedup — see ingest_source_seq.go.
 	ingestSourceSeqBucket = []byte("ingestSourceSeq")
+	// eventTombstoneBucket records, per user-defined (topic) (type, key), the
+	// raft indices at which it was delete-proposed. The RTBF scrubber consults
+	// it to physically remove a subject's PII from the permanent event log. See
+	// tombstone.go for the encoding and the determinism rationale.
+	eventTombstoneBucket = []byte("eventTombstones")
 )
 
 var (
@@ -67,6 +72,18 @@ var (
 	appliedIndexKey    = []byte("idx")
 )
 
+// pendingScrubBucket holds the scrubber's durable state: the highest requested
+// Scrub upper-bound ("bound") and the highest one this node has finished
+// rewriting to ("completed"). handleScrub bumps "bound"; the background worker
+// advances "completed" after a swap. Persisted so a pending scrub resumes after
+// restart even though the replayed Scrub entry is skipped by ApplyCommitted's
+// already-applied guard. See scrub.go.
+var (
+	pendingScrubBucket   = []byte("pendingScrub")
+	pendingScrubBoundKey = []byte("bound")
+	scrubCompletedKey    = []byte("completed")
+)
+
 // internalEntity binds a built-in entity type to the bucket it lives in and
 // the handler that applies it. applyEntity dispatches by scanning this table
 // (predicates are mutually exclusive, so first match wins), and the bucket set
@@ -89,17 +106,18 @@ var internalEntities = []internalEntity{
 	{cluster.IsSyncableStuck, "handleSyncableStuck", syncableStuckBucket, (*Storage).handleSyncableStuck},
 	{cluster.IsSyncableSkipRequest, "handleSyncableSkipRequest", syncableSkipRequestBucket, (*Storage).handleSyncableSkipRequest},
 	{cluster.IsIngestablePosition, "saveIngestablePosition", ingestablePositionBucket, (*Storage).saveIngestablePosition},
+	{cluster.IsScrub, "handleScrub", pendingScrubBucket, (*Storage).handleScrub},
 }
 
 // buckets is every bbolt bucket Open must create: one per internal entity type
 // (derived from internalEntities) plus the ones that aren't entity-driven — the
 // ingest source-seq highwater and the applied-index marker.
 var buckets = func() [][]byte {
-	bs := make([][]byte, 0, len(internalEntities)+2)
+	bs := make([][]byte, 0, len(internalEntities)+3)
 	for _, ie := range internalEntities {
 		bs = append(bs, ie.bucket)
 	}
-	return append(bs, ingestSourceSeqBucket, appliedIndexBucket)
+	return append(bs, ingestSourceSeqBucket, appliedIndexBucket, eventTombstoneBucket)
 }()
 
 type StateType int
@@ -131,9 +149,45 @@ type Storage struct {
 	// can't be bypassed by an outside caller writing directly. Access
 	// goes through appendEvent / readEventAt / EventIndex /
 	// firstEventSeq / lastEventSeq.
-	eventLog        *wal.Log
-	StateLog        *wal.Log // Should we get rid of this and store the latest state in the bbolt db?
-	keyValueStorage *bolt.DB
+	eventLog *wal.Log
+	// eventLogDir is the on-disk directory for eventLog (<datadir>/events).
+	// The scrubber rewrites the event log by building a sibling directory and
+	// renaming it over this one, so it needs the path (tidwall/wal doesn't
+	// expose it). Set once in Open and never changed.
+	eventLogDir string
+	// eventMu guards the s.eventLog handle pointer and the on-disk events/
+	// directory identity against the scrubber's swap (close → rename → reopen),
+	// exactly mirroring how kvMu guards the bbolt handle against RestoreSnapshot.
+	// Every event-log read/append takes eventMu.RLock (readEventAt,
+	// firstEventSeq, lastEventSeq, appendEvent); the scrub swap takes
+	// eventMu.Lock so it waits for in-flight readers/the appender to drain
+	// before closing the handle. tidwall/wal serializes concurrent read/write
+	// internally, so RLock holders don't need to exclude each other — only the
+	// swap is exclusive. Lock order is eventMu → kvMu (the swap clears bbolt
+	// scrub state outside the eventMu section, so the two never nest).
+	eventMu sync.RWMutex
+	// scrubSignal pokes the background scrubWorker that a Scrub command has
+	// recorded a new pending bound (buffered cap 1: a poke that arrives while
+	// one is queued is coalesced — the worker re-reads the latest bound from
+	// bbolt anyway). scrubStop is closed by Close to stop the worker;
+	// scrubDone is closed by the worker on exit so Close can wait for it.
+	scrubSignal   chan struct{}
+	scrubStop     chan struct{}
+	scrubDone     chan struct{}
+	scrubStopOnce sync.Once
+	// scrubGen increments on every completed scrub swap. A scrub re-densifies
+	// the wal sequence numbers, so a Reader's cached walSeq cursor becomes
+	// stale across a swap. Readers compare this against the generation they
+	// last resolved at and, on a change, re-derive walSeq from their (stable,
+	// never-renumbered) raft-index position. Bumped under eventMu.Lock by the
+	// scrub worker; read by Readers under eventMu.RLock.
+	scrubGen atomic.Uint64
+	// lastScrubbedBound mirrors the persisted "completed" scrub bound (the
+	// highest Scrub upper-bound this node has finished rewriting to). Loaded in
+	// Open, advanced by the worker; read by the automatic-scrub scheduler.
+	lastScrubbedBound atomic.Uint64
+	StateLog          *wal.Log // Should we get rid of this and store the latest state in the bbolt db?
+	keyValueStorage   *bolt.DB
 	// kvMu guards swaps of keyValueStorage (RestoreSnapshot replaces the
 	// bbolt handle wholesale: close → rename file → reopen → reassign).
 	// Every bbolt transaction routes through view / update, which take
@@ -215,14 +269,15 @@ type Storage struct {
 	//
 	// This is "P_local" in the storage invariant P_local == R_local.
 	eventIndex atomic.Uint64
-	// firstEventIndex is the raft index of the first entry in EventLog
-	// (the entry at wal sequence 1). 0 means the event log is empty.
-	// Used by Reader to translate raft index ↔ wal seq: since Phase 1
-	// mirrors every committed raft entry, seq = raftIndex -
-	// firstEventIndex + 1 for any raftIndex in [firstEventIndex,
-	// eventIndex]. Mutated only from the raft serveChannels goroutine
-	// (on first write and on any future compaction of EventLog) so the
-	// atomic is for race-free reads, not for CAS.
+	// firstEventIndex is the raft index of the first entry in EventLog. 0
+	// means the event log is empty. It is NOT used for an arithmetic seq
+	// mapping: the Reader binary-searches the (ascending) raft-index column
+	// (resolveStartSeq / ActualAt), which tolerates the gaps a scrub leaves
+	// behind. firstEventIndex is maintained for Open recovery and diagnostics
+	// — stamped on the first append, and recomputed from the first surviving
+	// entry after a scrub rewrite (which can raise it past 1). Mutated only
+	// from the serveChannels goroutine (first write) and the scrub worker
+	// (under eventMu.Lock), so the atomic is for race-free reads, not CAS.
 	firstEventIndex atomic.Uint64
 
 	logger *zap.Logger
@@ -245,6 +300,17 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	stateLogDir := filepath.Join(dir, "raft", "state")
 	eventLogDir := filepath.Join(dir, "events")
 	keyValueStorageDir := filepath.Join(dir, "metadata")
+
+	// Recover from a scrub that crashed mid-rewrite or mid-swap BEFORE the
+	// MkdirAll below — otherwise, if a swap had renamed events/ out of the way,
+	// MkdirAll would recreate an empty events/ and we'd open an empty event log
+	// (data loss / storage-invariant violation). recoverScrubDirs rolls an
+	// interrupted swap back to the pre-swap directory and removes temp/leftover
+	// dirs; the persisted pending bound re-drives the rewrite once the worker
+	// starts. See scrub.go.
+	if err := recoverScrubDirs(dir); err != nil {
+		return nil, fmt.Errorf("recover scrub dirs: %w", err)
+	}
 
 	// 0700: WAL directories hold raft state and committed log entries;
 	// only the owning process needs access. os.ModePerm (0777) is too
@@ -310,6 +376,7 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		raftLogDir:      entryLogDir,
 		EntryLog:        entryLog,
 		eventLog:        eventLog,
+		eventLogDir:     eventLogDir,
 		StateLog:        stateLog,
 		keyValueStorage: keyValueStorage,
 		databases:       dbs,
@@ -319,6 +386,9 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		logger:          logger,
 		configErrors:    make(map[string]error),
 		metrics:         cfg.metrics,
+		scrubSignal:     make(chan struct{}, 1),
+		scrubStop:       make(chan struct{}),
+		scrubDone:       make(chan struct{}),
 	}
 
 	fi, err := entryLog.FirstIndex()
@@ -445,11 +515,29 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		ws.firstEventIndex.Store(first.Index)
 	}
 
+	// Load the highest completed scrub bound so the worker skips redundant
+	// rewrites and the scheduler can see progress. Then start the background
+	// scrubber: it immediately resumes any pending scrub (a Scrub command that
+	// committed before a crash leaves a durable bound that outlives the
+	// replay-skipped entry) and thereafter runs on each signal.
+	completed, err := ws.loadScrubCompleted()
+	if err != nil {
+		return nil, err
+	}
+	ws.lastScrubbedBound.Store(completed)
+	go ws.scrubWorker()
+
 	return ws, nil
 }
 
 func (s *Storage) Close() error {
 	var finalErr error
+
+	// Stop the background scrubber before closing the event log it rewrites.
+	// scrubStop signals it; scrubDone confirms it has returned (so no swap is
+	// mid-flight when we close the handle below). Idempotent close of scrubStop
+	// is handled in stopScrubWorker.
+	s.stopScrubWorker()
 
 	finalErr = s.EntryLog.Close()
 
@@ -650,6 +738,18 @@ func (s *Storage) ApplyCommitted(entry pb.Entry) error {
 			if err := s.applyEntity(entity); err != nil {
 				return err
 			}
+
+			// Record an event-log tombstone for a user-defined delete so a
+			// future Scrub can physically remove this subject's PII from the
+			// permanent event log. Built-in config/coordination deletes are not
+			// PII and are never scrubbed. Deterministic: keyed on the committed
+			// entity and stamped with this entry's raft index, so every replica
+			// stores identical bytes.
+			if isUserDefinedType(entity.Type.ID) && entity.IsDelete() {
+				if err := s.recordEventTombstone(entity.Type.ID, entity.Key, entry.Index); err != nil {
+					return fmt.Errorf("[wal.storage] recordEventTombstone: %w", err)
+				}
+			}
 		}
 
 		// Advance the per-ingestable source-seq highwater for ingest
@@ -736,13 +836,30 @@ func (s *Storage) RaftLogApproxSize() (uint64, error) {
 
 // firstEventSeq returns the wal sequence of the first entry in the
 // permanent event log, or 0 when the log is empty. Package-internal.
+// Takes eventMu.RLock so it never observes the handle mid-swap.
 func (s *Storage) firstEventSeq() (uint64, error) {
+	s.eventMu.RLock()
+	defer s.eventMu.RUnlock()
+	return s.firstEventSeqLocked()
+}
+
+// firstEventSeqLocked is firstEventSeq without the lock; the caller must hold
+// eventMu (R or W). Used by the scrub swap, which already holds eventMu.Lock
+// and would deadlock re-acquiring RLock.
+func (s *Storage) firstEventSeqLocked() (uint64, error) {
 	return s.eventLog.FirstIndex()
 }
 
 // lastEventSeq returns the wal sequence of the last entry in the
 // permanent event log, or 0 when the log is empty. Package-internal.
 func (s *Storage) lastEventSeq() (uint64, error) {
+	s.eventMu.RLock()
+	defer s.eventMu.RUnlock()
+	return s.lastEventSeqLocked()
+}
+
+// lastEventSeqLocked is lastEventSeq without the lock; caller must hold eventMu.
+func (s *Storage) lastEventSeqLocked() (uint64, error) {
 	return s.eventLog.LastIndex()
 }
 
@@ -752,6 +869,13 @@ func (s *Storage) lastEventSeq() (uint64, error) {
 // Reader abstraction, which handles raft index ↔ wal seq translation and
 // filters metadata entries.
 func (s *Storage) readEventAt(seq uint64) ([]byte, error) {
+	s.eventMu.RLock()
+	defer s.eventMu.RUnlock()
+	return s.readEventAtLocked(seq)
+}
+
+// readEventAtLocked is readEventAt without the lock; caller must hold eventMu.
+func (s *Storage) readEventAtLocked(seq uint64) ([]byte, error) {
 	raw, err := s.eventLog.Read(seq)
 	if err != nil {
 		return nil, err
@@ -788,6 +912,13 @@ func (s *Storage) recordCorrupt(logName string) {
 // into ApplyCommitted) so there's exactly one site that advances
 // P_local.
 func (s *Storage) appendEvent(entry pb.Entry) error {
+	// RLock for the whole body so the seq it computes (LastIndex+1) and the
+	// Write that consumes it can't straddle a scrub swap that would replace the
+	// handle underneath them. Shared with concurrent readers; only the swap
+	// (eventMu.Lock) is excluded.
+	s.eventMu.RLock()
+	defer s.eventMu.RUnlock()
+
 	entryBytes, err := entry.Marshal()
 	if err != nil {
 		return fmt.Errorf("marshal entry for event log: %w", err)

@@ -126,6 +126,11 @@ type DB struct {
 	// Default 30s; tests override via WithSyncStuckThreshold.
 	syncStuckThreshold time.Duration
 
+	// scrubInterval is the automatic-scrub cadence (0 disables the scheduler).
+	// scrubScheduler ticks at this rate and, when leader with RTBF backlog,
+	// proposes a Scrub command. See scrubScheduler / maybeProposeScrub.
+	scrubInterval time.Duration
+
 	maxProposalBytes uint64
 
 	logger  *zap.Logger
@@ -213,6 +218,7 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		syncWorkers:                    make(map[string]*workerHandle),
 		ingestWorkers:                  make(map[string]*workerHandle),
 		syncStuckThreshold:             cfg.syncStuckThreshold,
+		scrubInterval:                  cfg.scrubInterval,
 		ingestSupervisorStates:         make(map[string]*ingestSupervisorState),
 		ingestSupervisorInitialBackoff: cfg.ingestSupervisorInitialBackoff,
 		ingestSupervisorMaxBackoff:     cfg.ingestSupervisorMaxBackoff,
@@ -248,6 +254,7 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 
 	go db.listenForSyncables(sync)
 	go db.listenForIngestables(ingest)
+	go db.scrubScheduler()
 
 	return db
 }
@@ -470,6 +477,70 @@ func (db *DB) ProposeDeleteType(ctx context.Context, id string) error {
 	p.Entities = append(p.Entities, deleteTypeEntity)
 
 	return db.Propose(ctx, p)
+}
+
+// Scrub proposes a Scrub command at the current applied index (the freeze line)
+// and returns once it has been applied — each node then runs the physical
+// rewrite in the background. See the cluster.Cluster.Scrub contract. The bound
+// is read at propose time but carried in the committed command, so every replica
+// rewrites against the same frozen prefix.
+func (db *DB) Scrub(ctx context.Context) error {
+	e, err := cluster.NewScrubEntity(db.storage.AppliedIndex())
+	if err != nil {
+		return err
+	}
+	return db.Propose(ctx, &cluster.Proposal{Entities: []*cluster.Entity{e}})
+}
+
+// scrubBacklogReporter is the optional Storage extension that reports whether
+// any delete-proposed (RTBF) entities remain unscrubbed in the permanent event
+// log. wal.Storage implements it; the in-memory test double does not, in which
+// case the scheduler simply never fires (the same optional-interface shape as
+// configBuildErrorReporter).
+type scrubBacklogReporter interface {
+	HasScrubBacklog() bool
+}
+
+// scrubScheduler drives automatic scrubbing: on each tick, if this node is the
+// leader and there is unscrubbed RTBF backlog, it proposes a Scrub command. The
+// work funnels through one committed command, so a leader-only check (rather
+// than every node racing to propose) is sufficient and keeps the rewrite
+// deterministic. Exits when db.ctx is canceled (db.Close). A zero interval
+// disables it.
+func (db *DB) scrubScheduler() {
+	if db.scrubInterval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(db.scrubInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-db.ctx.Done():
+			return
+		case <-ticker.C:
+			db.maybeProposeScrub()
+		}
+	}
+}
+
+// maybeProposeScrub proposes a Scrub when this node is the leader and storage
+// reports RTBF backlog. Best-effort: a transient propose failure (no quorum,
+// leader change) is logged and retried on the next tick.
+func (db *DB) maybeProposeScrub() {
+	if db.raft.Leader() != db.ID() {
+		return
+	}
+	reporter, ok := db.storage.(scrubBacklogReporter)
+	if !ok || !reporter.HasScrubBacklog() {
+		return
+	}
+	// Bound the propose so a wedged raft layer can't pin this goroutine past
+	// the next tick; the next tick retries anyway.
+	ctx, cancel := context.WithTimeout(db.ctx, db.scrubInterval)
+	defer cancel()
+	if err := db.Scrub(ctx); err != nil {
+		db.logger.Warn("automatic scrub failed; will retry", zap.Error(err))
+	}
 }
 
 // Close tears down the DB. Order matters:

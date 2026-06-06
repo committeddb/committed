@@ -183,6 +183,14 @@ image can be templated per-node by an orchestrator:
 			dbOpts = append(dbOpts, db.WithMaxProposalBytes(uint64(n)))
 		}
 
+		// COMMITTED_SCRUB_INTERVAL sets the automatic right-to-be-forgotten
+		// scrub cadence (Go duration, e.g. "30m"). 0 disables the scheduler;
+		// the manual POST /v1/scrub lever still works. Unset uses the default
+		// (db.DefaultScrubInterval).
+		if d, ok := parseDurationEnv("COMMITTED_SCRUB_INTERVAL"); ok {
+			dbOpts = append(dbOpts, db.WithScrubInterval(d))
+		}
+
 		// COMMITTED_JOIN marks this node as joining an existing cluster
 		// rather than bootstrapping a new one. A joining node comes up with
 		// no raft configuration and learns its membership from the leader

@@ -208,6 +208,11 @@ func buildVariedBurst(t *testing.T) []pb.Entry {
 	// A delete-type entity, exercising the delete branch of handleType.
 	delTmp := cluster.NewDeleteTypeEntity("tmp-type")
 
+	// A user-defined delete, exercising the event-log tombstone recording in
+	// ApplyCommitted. Must land identically (eventTombstones bucket) on every
+	// node — the BucketSnapshot comparison below covers that.
+	delUserA := cluster.NewDeleteEntity(userType, []byte("alice"))
+
 	// Compose proposals. Some single-entity, one multi-entity, in a
 	// shape that exercises the per-entity loop in ApplyCommitted.
 	idx := uint64(1)
@@ -225,6 +230,7 @@ func buildVariedBurst(t *testing.T) []pb.Entry {
 		makeEntry(t, idx+8, userB),
 		makeEntry(t, idx+9, siEnt),
 		makeEntry(t, idx+10, delTmp),
+		makeEntry(t, idx+11, delUserA),
 	}
 	for i := range entries {
 		entries[i].Term = term

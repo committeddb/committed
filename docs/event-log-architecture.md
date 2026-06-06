@@ -180,9 +180,13 @@ smaller fast device if they want; not v1 work but the layout supports it.
 ### Indexing
 
 **Syncable positions are tracked by raft index, never by file offset.**
-Raft index is monotonic, stable across right-to-be-forgotten deletes (the
-index sequence stays dense; deletes nullify content but never remove an
-index slot), and authoritative.
+Raft index is monotonic and authoritative, and a given entry's raft index
+never changes. A right-to-be-forgotten scrub physically *removes* entries,
+so the raft-index column becomes sparse (a removed index is absent) — but
+it stays ascending and an index is never renumbered, so a syncable's
+stored position remains valid and the binary-search Reader keeps working
+across the gaps. (The wal sequence numbers, which are an internal
+implementation detail, are re-densified on each rewrite.)
 
 The permanent event log's on-disk format will eventually be a `.log` file
 plus a sparse `.index` file mapping `raft_index → byte_offset`. The sparse
@@ -378,101 +382,142 @@ whole lifetime of the entity. The requester only needs to know what to
 forget (the entity), not the raft indices of every historical event
 involving it.
 
+**Mechanism: removal, not redaction.** An earlier version of this design
+specified *redaction* — zero a deleted entry's payload in place and keep
+its raft-index slot, so the index sequence stayed dense. That was
+superseded by **physical removal**: the deleted entries are dropped from
+the permanent event log entirely. Removal was chosen because it is the
+only option that actually *shrinks* the log, so the same mechanism also
+bounds the never-compacted tier's metadata growth (a future ticket reuses
+this scrubber to GC superseded bookkeeping) — which is why Committed stays
+single-raft instead of introducing a separate compactable metadata raft.
+The cost is that the raft-index column becomes **sparse (gapped)**: an
+index that was removed is simply absent. The wal sequence numbers are
+re-densified on rewrite and the raft index carries the gaps. The Reader
+binary-searches by raft index (`resolveStartSeq`, `ActualAt`) and so
+tolerates gaps natively, as long as the column stays ascending — which
+removal preserves.
+
+### Scope boundaries
+
+Two adjacent concerns are deliberately **not** part of the scrubber:
+
+- **Subject resolution** — turning "customer 12345" into the *set* of
+  `(type, key)` pairs that constitute their data — is domain-specific and
+  lives outside the log. The client (or future tooling) computes the set
+  and issues the deletes; the scrubber only ever consumes `(type, key)`
+  tombstones. A workable pre-1.0 path is: hook up a syncable, query the
+  projection for the relevant type/key pairs, and issue the deletes
+  programmatically.
+- **Downstream / logical-delete handling** — making a syncable translate a
+  delete Actual into a downstream `DELETE` — is its own ticket. The model
+  is described under Phase 1 below; honoring deletes is part of the
+  Syncable contract, but the SQL/HTTP syncables wiring it up ships
+  separately from the scrubber.
+
 ### Two-phase model
 
 When a delete request arrives (e.g., GDPR right-to-be-forgotten):
 
 **Phase 1: logical deletes flood the log.**
 "Delete entity" proposals are written through the normal raft path. Each
-delete carries `(type, key)` identifying what to forget. Existing
-syncables receive these delete events as normal events and remove the
-matching rows from their downstream projections — exactly the same way
-the metadata handlers already process `NewDeleteEntity` for types,
-databases, ingestables, etc. A syncable processing events in order sees
-the original entity events, then later sees its delete event, and emits
-the corresponding `DELETE FROM <table> WHERE key = '12345'` against its
-downstream database.
-
-For an entity with N historical update events, one delete proposal is
-enough. The syncable's projection is keyed by entity, so a single
-downstream `DELETE` removes everything; the historical events in the log
+delete carries `(type, key)` identifying what to forget. A syncable
+processing events in order sees the original entity events, then later
+sees its delete event, and emits the corresponding
+`DELETE FROM <table> WHERE key = '12345'` against its downstream
+database. For an entity with N historical update events, one delete
+proposal is enough: the projection is keyed by entity, so a single
+downstream `DELETE` removes everything. The historical events in the log
 itself are handled by phase 2.
 
-**Phase 2: physical sweep.**
-A background process walks the permanent event log and maintains a
-tombstone set of `(type, key)` pairs to delete. For each entry it
-encounters, if the entry's `(type, key)` is in the tombstone set, the
-entry's data field is zeroed out. The raft index slot stays in place so
-the index sequence remains dense — only the data bytes are removed.
+**Phase 2: physical scrub.**
+As deletes apply, each node records an **event-log tombstone** — the
+delete's raft index keyed by its `(type, key)` — in a replicated bbolt
+bucket (`eventTombstones`). Physical removal is then driven by a committed
+**`Scrub` command** carrying a single upper-bound raft index **B** (the
+"freeze line"). When the command applies, each node records a pending
+scrub and pokes a **background worker** (off the raft Ready loop — the
+O(N) rewrite must never stall consensus). The worker rewrites the event
+log: copy every entry, removing the entities whose `(type, key)` has a
+tombstone with a delete index `D` such that `entry.Index < D <= B`
+(i.e. the entity was written before a delete within the freeze line),
+keeping the delete-tombstones, and copying entries at raft index `> B`
+verbatim. It writes a fresh sibling directory and swaps it in under a
+short lock (`eventMu`, mirroring how `kvMu` guards the bbolt handle during
+`RestoreSnapshot`).
 
-After enough time has passed that all live syncables have processed the
-delete events themselves (they are in the log too, with their own raft
-indices), the sweep also removes the delete events. From that point on,
-a brand-new syncable bootstrapping from index 1 sees neither the
-originals nor the deletes, and the right-to-be-forgotten request has
-been fulfilled.
+Removal is **entity-granular**: a proposal that bundled several entities
+is re-marshaled to keep its untombstoned siblings; the whole record is
+dropped only when every entity in it is removed. (A referential constraint
+from a *retained* entity to a *scrubbed* one can break a new syncable's
+replay — inherent to time-traveled deletion, and the schema designer's
+responsibility.)
+
+The **delete-tombstone entries are retained** (they are instructions, not
+PII, and are tiny). Keeping them is required for correctness: a syncable
+that has read the originals but not yet the delete must still receive the
+delete to drop its row, and a fresh syncable replaying a scrubbed log sees
+only the delete → a `DELETE` of a row that was never inserted → harmless
+no-op.
+
+**Triggers.** A `Scrub` command is proposed two ways: automatically by the
+leader on a cadence (`COMMITTED_SCRUB_INTERVAL`, default 1h) whenever there
+is unscrubbed RTBF backlog, and manually via `POST /v1/scrub` for
+SLA-expedited erasure. Automatic scrubbing never *decides* to delete
+anything — it only ever physically completes deletions a delete proposal
+already requested.
 
 ### Bootstrap timing edge cases
 
-A new syncable that bootstraps from index 1 may catch the log mid-sweep.
-Three sub-cases, all of which converge on the right answer:
+A new syncable that bootstraps from index 1 may catch the log mid-scrub.
+The sub-cases all converge on the right answer:
 
-- **Bootstrap before the sweep starts**: sees originals, then sees
-  deletes, processes them in order. End state: rows inserted, then
-  deleted. Correct.
-- **Bootstrap during the sweep, before the originals are gone**: same
-  as above.
-- **Bootstrap after the originals are swept but before the deletes are
-  swept**: sees only delete events for keys it never saw originals for.
-  These translate to `DELETE FROM <table> WHERE key = X` against rows
-  that don't exist — a no-op in any sane downstream database. Drop on
-  the floor with no harm.
-- **Bootstrap after both are swept**: sees neither. The deleted entity
-  never existed from this syncable's perspective.
+- **Bootstrap before the scrub**: sees originals, then the delete,
+  processes them in order. End state: rows inserted, then deleted.
+  Correct.
+- **Bootstrap after the originals are removed (delete retained)**: sees
+  only the delete event for a key it never saw an original for. Translates
+  to `DELETE FROM <table> WHERE key = X` against a row that doesn't exist
+  — a no-op in any sane downstream database. Harmless.
 
-### Sweep cost
+### Determinism of the scrub
 
-Type+key lookup means the sweep is **O(N)** in the size of the
-permanent event log per cycle, because every entry has to be checked
-against the tombstone set. At terabyte scale this matters. Two
-mitigations make it manageable:
+The rewrite must produce byte-identical files on every node or the rsync
+rebuild story breaks. The survivor set is a pure function of three frozen,
+replicated inputs: the event-log bytes, the tombstone set **filtered to
+delete index `<= B`**, and `B` itself (carried in the committed command).
 
-- **Sweeps run rarely.** Maybe once a day, or when the tombstone set
-  reaches a threshold. Not every commit.
-- **Bloom-filter the tombstone set.** Bloom-negative entries skip the
-  precise comparison entirely; only the small fraction of bloom-positive
-  entries get checked against the sorted tombstone set.
+- **Frozen bound.** `B` is pinned inside the committed `Scrub` command, so
+  every node rewrites the same prefix. New commits during a background
+  rewrite all land at index `> B` and are always survivors, so concurrent
+  appends can't change the answer.
+- **Frozen selection.** A tombstone stores the delete's raft index, and
+  the predicate only considers indices `<= B`. All deletes `<= B` are
+  guaranteed applied before the `Scrub` command applies (in-order apply;
+  the command commits at an index `> B`), so the eligible set is identical
+  on every node regardless of *when* each node's worker runs. Re-marshaled
+  records use deterministic protobuf encoding.
 
-Even without those optimizations, walking 10TB on local NVMe is a few
-minutes. A background job at that cadence is fine.
+If a node crashes mid-rewrite or mid-swap, the next `Open` rolls an
+interrupted swap back to the pre-swap directory and re-runs from the
+persisted pending bound. The rewrite is idempotent, so re-running yields
+the identical result.
 
-### Determinism of the sweep
+### EventIndex / invariant impact
 
-The phase-2 sweep must produce byte-identical files on every node,
-otherwise the rsync rebuild story breaks. Two requirements:
+`EventIndex()` (P_local — the max raft index in the event log) **never
+regresses**, so the Ready loop's `P_local == R_local` invariant holds
+across a scrub. The tail (highest index) is always `> B` and never a
+removal candidate — at minimum the `Scrub` command's own mirrored entry
+sits above `B` — so the rewritten log's tail index equals the old one.
 
-- **Deterministic trigger**. Every node sweeps at the same logical
-  point. Drive it from a deterministic local condition, like "every
-  time `appliedIndex` crosses a multiple of N, sweep delete events
-  whose own raft index is older than M applied entries." Every node
-  hits the same trigger at the same logical time.
-- **Deterministic algorithm**. Walk the log in raft index order. Build
-  the tombstone set in raft index order (so every node has the same
-  set). Apply the same zero-out operation to the same matching entries.
-
-If a node crashes mid-sweep, restart re-runs the sweep from the same
-logical point. The sweep is idempotent (zeroing already-zeroed data is
-a no-op), so files end up the same regardless of how many times the
-sweep runs.
-
-### Indexing impact
-
-The raft index sequence stays dense throughout — sweeps zero data, they
-do not remove index slots. Syncable positions remain raft-index-based.
-A future segment-rewrite optimization could physically reclaim the
-zeroed bytes by writing a new segment file and remapping the sparse
-index, but that's an optimization for later, and the rewrite would
-itself need to be deterministic across nodes.
+The raft-index column becomes sparse but stays ascending; the wal
+sequence column is re-densified (no gaps). Syncable positions remain
+raft-index-based and the binary-search Reader is unaffected. The event log
+is therefore no longer a 1:1 mirror of the committed index space — it is a
+subset — so nothing may assume "every committed index is present in the
+event log" (`ActualAt` returns `ErrActualNotFound` for a scrubbed index,
+by design).
 
 ---
 
@@ -777,11 +822,17 @@ error message that links to it. Same ticket, phase 4.
 Streaming segment transfer RPC. Out of scope for the initial
 implementation. Will get its own ticket once the foundation is in place.
 
-### Phase 8 (deferred): Right-to-be-forgotten implementation
+### Phase 8: Right-to-be-forgotten implementation
 
-Two-phase deletes (logical proposals, then physical sweep). Will get its
-own ticket; the architecture above describes the model so future work
-can build on it.
+The physical scrubber — a committed `Scrub{B}` command driving a
+deterministic background segment-rewrite that removes already-delete-
+proposed entities — has landed (`event-log-scrubber-rtbf.md`). It uses
+**removal**, not the redaction sketch earlier drafts described; see
+§ "Right-to-be-forgotten / deletes". Two follow-ups remain their own
+tickets: (a) wiring user-data deletes through to downstream syncables
+(the Phase-1 logical-delete handling, mandatory in the Syncable contract),
+and (b) metadata-GC, which reuses the same scrub engine to bound
+never-compacted bookkeeping growth.
 
 ---
 
@@ -790,7 +841,7 @@ can build on it.
 | Decision                          | Choice                                          | Rationale                                                                              |
 |-----------------------------------|-------------------------------------------------|----------------------------------------------------------------------------------------|
 | Compaction trigger                | 10GB or 1hr, whichever first                    | Operator-friendly, bounds disk                                                         |
-| Indexing                          | Raft index                                      | Stable across right-to-be-forgotten sweeps; tidwall/wal positions are not              |
+| Indexing                          | Raft index                                      | Never renumbered (only made sparse) by a scrub; tidwall/wal positions are not stable   |
 | New syncables start at            | Index 1                                         | CQRS bootstrap is the use case; no concrete need for other start points                |
 | Compaction safety                 | Quorum-graduated AND local-graduated            | Survives any single-node loss                                                          |
 | Read consistency for syncables    | Historical only                                 | No linearizability needed; cheap to fan out later                                      |
@@ -798,7 +849,9 @@ can build on it.
 | Catch-up v1                       | Manual rsync after fatal-exit                   | Operator-friendly; no silent stale reads                                               |
 | Catch-up v2                       | Streaming segment files                         | Future work; per-entry streaming is too slow at TB scale                               |
 | Permanent log format v1           | tidwall/wal                                     | Reuse existing dependency; custom format later when measurements demand it             |
-| Tombstone model                   | Two-phase: delete events, then physical sweep   | Matches CQRS semantics and gives downstream syncables a chance to delete cleanly       |
+| RTBF mechanism                    | Physical removal (not redaction/crypto-shred)   | Only option that shrinks the log → serves metadata-GC too, keeping us single-raft      |
+| Scrub trigger                     | Committed `Scrub{B}` command; auto + manual     | One committed bound makes the background rewrite deterministic across replicas         |
+| Delete-tombstone retention        | Retained (never scrubbed)                       | In-flight/fresh syncables still need the delete; tiny and non-PII                      |
 | Delete addressing                 | `(type, key)`, not raft index                   | Matches existing `NewDeleteEntity` model; one delete covers all history for an entity  |
 | Election timeout (production)     | 30ms tick / 300ms election                      | Upper end of Raft paper's recommendation; tests stay fast                              |
 | Election timeout (operator knob)  | 15ms tick / 150ms election                      | Optional optimization for low-latency LANs                                             |

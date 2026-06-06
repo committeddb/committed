@@ -17,6 +17,16 @@ type Cluster interface {
 	ProposeIngestable(ctx context.Context, c *Configuration) error
 	ProposeSyncable(ctx context.Context, c *Configuration) error
 	ProposeDatabase(ctx context.Context, c *Configuration) error
+	// Scrub requests physical removal of already-delete-proposed (RTBF)
+	// entities from the permanent event log up to the current applied index.
+	// It proposes a Scrub command through Raft and returns once the command has
+	// been applied (the rewrite then runs in the background on every node).
+	// Idempotent and safe to call repeatedly: it only ever removes entities a
+	// delete proposal already requested be forgotten. The automatic scheduler
+	// calls this on a cadence; the manual lever (POST /v1/scrub) calls it on
+	// demand for SLA-expedited erasure. See docs/event-log-architecture.md
+	// § "Right-to-be-forgotten / deletes".
+	Scrub(ctx context.Context) error
 	// ResolveType returns the Type identified by ref. A TypeRef with
 	// Version 0 (constructed via LatestTypeRef) resolves to whatever is
 	// current; a TypeRef pinned to a specific version (TypeRefAt)

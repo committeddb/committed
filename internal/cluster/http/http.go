@@ -120,6 +120,12 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 			// api/openapi.yaml.
 			r.Post("/proposal", h.AddProposal)
 
+			// /scrub is the manual right-to-be-forgotten lever: physically
+			// remove already-delete-proposed entities from the permanent event
+			// log up to the current applied index. Authenticated like every
+			// other write; the automatic scheduler does the same on a cadence.
+			r.Post("/scrub", h.Scrub)
+
 			r.Get("/syncable", h.listConfig("syncable", h.c.Syncables))
 			r.Post("/syncable/{id}", h.addConfig("syncable", h.c.ProposeSyncable))
 			r.Get("/syncable/{id}/versions", h.getVersions("syncable", h.c.SyncableVersions))

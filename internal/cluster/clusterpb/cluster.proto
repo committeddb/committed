@@ -140,3 +140,17 @@ message LogSyncableSkipRequest {
     // worker honors the request only while its current stuck index matches.
     uint64 index = 2;
 }
+
+// LogScrub is the payload of a Scrub command — the committed instruction
+// that triggers physical removal of already-delete-proposed entities from
+// the permanent event log. It carries one value, the upper-bound raft
+// index B (the "freeze line"): only event-log entries at raft index <= B
+// are eligible for removal, and only entities whose (type,key) was
+// delete-proposed at a raft index <= B. Pinning B inside the committed
+// command makes every replica remove the identical set, so the rewritten
+// event logs stay byte-identical across nodes (the rsync-rebuild and
+// determinism-test contract). See docs/event-log-architecture.md
+// § "Right-to-be-forgotten / deletes".
+message LogScrub {
+    uint64 upperBound = 1;
+}
