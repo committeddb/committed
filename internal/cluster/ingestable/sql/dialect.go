@@ -8,6 +8,15 @@ import (
 
 //go:generate protoc --go_out=paths=source_relative:. ./dialectpb/dialect.proto
 
+// Dialect is the per-source implementation behind a SQL Ingestable (Postgres
+// logical replication, MySQL binlog). Ingest streams source changes as
+// Proposals.
+//
+// Like any Ingestable, a Dialect MUST translate a source DELETE into a delete
+// entity (cluster.NewDeleteEntity) keyed by the row's primary key — never an
+// upsert of the deleted row's pre-image. Emitting deletes is mandatory for a
+// well-behaved ingestable: only a delete entity makes the downstream Syncable
+// remove the record. See the cluster.Ingestable contract.
 type Dialect interface {
 	Ingest(ctx context.Context, config *Config, pos cluster.Position, pr chan<- *cluster.Proposal, po chan<- cluster.Position) error
 }

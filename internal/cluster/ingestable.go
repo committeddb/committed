@@ -11,14 +11,30 @@ import (
 
 type Position []byte
 
+// Ingestable pulls changes from an external source (e.g. a SQL database's
+// change-data-capture stream) and emits them as Proposals into the log. It is
+// the producing counterpart of Syncable: an Ingestable writes Proposals; a
+// Syncable consumes the resulting Actuals.
+//
+// Contract:
+//   - Ingest MUST emit deletes. When the source signals that a row was
+//     removed (a CDC DELETE), the Ingestable MUST emit a delete entity
+//     (NewDeleteEntity) keyed by that row's primary key — NOT an upsert of
+//     the row's pre-image. This is mandatory for the same reason honoring
+//     deletes is mandatory for a Syncable (see the Syncable contract): the
+//     entity flows source → log → Syncable, and only a delete entity makes
+//     the Syncable remove the downstream record. An Ingestable that forwards a
+//     source delete as an upsert of the old row leaves the deleted data live
+//     in every projection forever — a right-to-be-forgotten zombie. The
+//     delete's Key MUST equal the key an upsert of that same row uses, so the
+//     downstream delete targets the right record.
+//   - During ingestion, write Proposals to pr and position checkpoints to po;
+//     how often to checkpoint the position is up to the Ingestable.
+//   - Check ctx for done after every proposal and stop promptly when it fires.
+//   - Ingest MUST support being called multiple times (resume from pos).
+//
 //counterfeiter:generate . Ingestable
 type Ingestable interface {
-	// Start ingesting at position
-	// During ingestion:
-	// * write proposals to pr
-	// * write position changes to po. How often to update the position is up to the Ingestable
-	// * check the context for done after every proposal
-	// Ingest MUST support being called multiple times
 	Ingest(ctx context.Context, pos Position, pr chan<- *Proposal, po chan<- Position) error
 	Close() error
 }
