@@ -64,6 +64,11 @@ image can be templated per-node by an orchestrator:
                        include this node's own COMMITTED_NODE_ID.
                        Consumed only on first boot; thereafter
                        membership is restored from the WAL.
+  COMMITTED_JOIN       when truthy, this node joins an existing cluster
+                       instead of bootstrapping a new one: it starts with
+                       no raft configuration and learns its membership from
+                       the leader after a "committed member add" naming it
+                       commits. COMMITTED_PEERS still seeds the transport.
 
   COMMITTED_HTTP_CORS_ORIGINS
                        comma-separated browser-origin allowlist, e.g.
@@ -176,6 +181,20 @@ image can be templated per-node by an orchestrator:
 
 		if n, ok := parseInt64Env("COMMITTED_MAX_PROPOSAL_BYTES"); ok {
 			dbOpts = append(dbOpts, db.WithMaxProposalBytes(uint64(n)))
+		}
+
+		// COMMITTED_JOIN marks this node as joining an existing cluster
+		// rather than bootstrapping a new one. A joining node comes up with
+		// no raft configuration and learns its membership from the leader
+		// once an "member add" naming it commits — so COMMITTED_PEERS must
+		// still list the existing members (and itself, for the listener URL)
+		// to seed the transport, but it is NOT bootstrapped into a config.
+		// Without this flag a fresh node would StartNode the static peer set
+		// and split-brain against the cluster it meant to join. See
+		// docs/operations/membership.md.
+		if boolEnv("COMMITTED_JOIN") {
+			dbOpts = append(dbOpts, db.WithJoin())
+			zap.L().Info("joining existing cluster (COMMITTED_JOIN set); membership will be learned from the leader")
 		}
 
 		d := db.New(id, peers, s, p, sync, ingest, dbOpts...)
@@ -414,7 +433,11 @@ func loadPeers(id uint64) db.Peers {
 // this node's own id. Membership is consumed only on first boot; on
 // restart it is restored from the WAL (raft.RestartNode), so editing
 // COMMITTED_PEERS after a node has state has no effect — use the
-// conf-change API for live membership changes.
+// "committed member add/remove" commands (the /v1/membership API) for
+// live membership changes. A node joining an existing cluster sets
+// COMMITTED_JOIN=true so its COMMITTED_PEERS seeds the transport without
+// bootstrapping a competing configuration. See
+// docs/operations/membership.md.
 //
 // When raw is empty the node bootstraps a single-node cluster
 // advertising selfURL (COMMITTED_PEER_URL) for itself — the historical
@@ -528,6 +551,15 @@ func parseListEnv(name string) []string {
 		}
 	}
 	return out
+}
+
+// boolEnv reports whether env var name holds a truthy value, parsed by
+// strconv.ParseBool ("1", "t", "true", "TRUE", etc.). Unset, empty, or
+// unparseable all read as false — a flag-style env var is opt-in, so any
+// non-affirmative value leaves the default behavior in place.
+func boolEnv(name string) bool {
+	v, err := strconv.ParseBool(os.Getenv(name))
+	return err == nil && v
 }
 
 // parseDurationEnv reads a Go-duration-formatted env var (e.g. "15s").

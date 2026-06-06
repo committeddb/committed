@@ -31,8 +31,13 @@ type configBuildErrorReporter interface {
 }
 
 type Raft struct {
-	proposeC     <-chan []byte            // proposed messages
-	proposeConfC <-chan raftpb.ConfChange // proposed cluster config changes
+	proposeC     <-chan []byte              // proposed messages
+	proposeConfC <-chan raftpb.ConfChangeV2 // proposed cluster config changes
+	// join marks this node as joining an existing cluster: startRaft uses
+	// raft.RestartNode (empty state, learn membership from the leader)
+	// instead of raft.StartNode (bootstrap from the static peer set). See
+	// WithJoin and the join field on options.
+	join         bool
 	raftErrorC   chan<- error
 	raftStopC    chan struct{}
 	id           uint64
@@ -117,7 +122,7 @@ type Raft struct {
 	metrics *metrics.Metrics
 }
 
-func NewRaft(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, proposeConfC <-chan raftpb.ConfChange, opts ...Option) (<-chan error, *Raft) {
+func NewRaft(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, proposeConfC <-chan raftpb.ConfChangeV2, opts ...Option) (<-chan error, *Raft) {
 	cfg := defaultOptions()
 	for _, opt := range opts {
 		opt(&cfg)
@@ -125,7 +130,7 @@ func NewRaft(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, propo
 	return newRaftWithOptions(id, ps, s, proposeC, proposeConfC, nil, nil, cfg.logger, cfg)
 }
 
-func newRaftWithOptions(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, proposeConfC <-chan raftpb.ConfChange, applyNotifier func(data []byte), appliedIndexNotifier func(), logger *zap.Logger, cfg options) (<-chan error, *Raft) {
+func newRaftWithOptions(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, proposeConfC <-chan raftpb.ConfChangeV2, applyNotifier func(data []byte), appliedIndexNotifier func(), logger *zap.Logger, cfg options) (<-chan error, *Raft) {
 	errorC := make(chan error)
 
 	n := &Raft{
@@ -147,6 +152,7 @@ func newRaftWithOptions(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []
 		transportDoneC:       make(chan struct{}),
 		transportWrapper:     cfg.transportWrapper,
 		tlsInfo:              cfg.tlsInfo,
+		join:                 cfg.join,
 		closeC:               make(chan struct{}),
 		serveChannelsDoneC:   make(chan struct{}),
 
@@ -211,10 +217,21 @@ func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 		n.logger.Error("initial state", zap.Error(err))
 	}
 
-	if hs.Term > 0 {
+	switch {
+	case hs.Term > 0:
 		n.logger.Info("restarting node", zap.Uint64("id", id))
 		n.node = raft.RestartNode(c)
-	} else {
+	case n.join:
+		// Joining an existing cluster. RestartNode (not StartNode) reads the
+		// empty InitialState and brings the node up with no configuration —
+		// it learns its membership from the leader once the AddNode conf
+		// change naming it commits. StartNode(c, ps) would instead bootstrap
+		// a brand-new cluster from ps and split-brain against the one we mean
+		// to join. The transport below is still seeded from ps so this node
+		// can reach the existing members and bind its own listener.
+		n.logger.Info("joining cluster", zap.Uint64("id", id))
+		n.node = raft.RestartNode(c)
+	default:
 		n.logger.Info("starting node", zap.Uint64("id", id))
 		n.node = raft.StartNode(c, ps)
 	}
@@ -234,6 +251,66 @@ func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 	go n.serveChannels()
 }
 
+// applyConfChange applies a committed membership change (v1 or v2 wire form)
+// to the raft node, mirrors the resulting ConfState into storage so it
+// survives a restart (see Storage.ConfState — without it a restarted node
+// reads an empty voter set from InitialState and can't participate), and
+// updates the peer transport so this node starts or stops exchanging raft
+// messages with the affected peer.
+//
+// ccCtx is the change's Context. For an add it carries the new peer's
+// advertised URL (db.AddMember stashes it there); the transport needs the
+// URL to dial the peer, and raft's ConfState replicates only node IDs, never
+// addresses — so the URL must ride along on the conf change itself. The
+// JointImplicit auto-leave that raft proposes once a joint configuration
+// commits is a ConfChangeV2 with zero Changes, so it advances the ConfState
+// out of the joint state while doing nothing to the transport.
+//
+// The membership API submits one add or one remove at a time, so a v2 change
+// carries a single ConfChangeSingle and one shared Context. A hand-built
+// multi-add v2 would share that one Context across every add, which can't
+// express distinct URLs — not a concern for the paths we expose.
+func (n *Raft) applyConfChange(cc raftpb.ConfChangeI, ccCtx []byte) {
+	cs := n.node.ApplyConfChange(cc)
+	n.storage.ConfState(cs)
+
+	for _, ch := range cc.AsV2().Changes {
+		// A node needs no transport entry for itself: skip self so applying
+		// our own AddNode doesn't try to dial our own URL, and so a
+		// self-removal doesn't tear down a peer that was never added.
+		if ch.NodeID == n.id {
+			continue
+		}
+		switch ch.Type {
+		case raftpb.ConfChangeAddNode, raftpb.ConfChangeAddLearnerNode:
+			if len(ccCtx) == 0 {
+				// No URL to dial — happens for the bootstrap conf changes a
+				// node already knows from its static peer set, so the
+				// transport is already wired. Nothing to do.
+				continue
+			}
+			if err := n.transport.AddPeer(raft.Peer{ID: ch.NodeID, Context: ccCtx}); err != nil {
+				n.logger.Error("conf change: add peer to transport",
+					zap.Uint64("peer", ch.NodeID), zap.Error(err))
+			}
+		case raftpb.ConfChangeRemoveNode:
+			n.transport.RemovePeer(ch.NodeID)
+		}
+	}
+}
+
+// memberStatus reports the current raft voter configuration as observed by
+// this node: members is the union of the incoming and (during a joint
+// transition) outgoing voter sets, and joint is true while the configuration
+// is still in the joint state (an outgoing config is present). db.AddMember /
+// db.RemoveMember poll this to block until a membership change has fully
+// taken effect locally — i.e. the target node is present/absent AND the
+// joint transition has completed (joint == false).
+func (n *Raft) memberStatus() (members map[uint64]struct{}, joint bool) {
+	voters := n.node.Status().Config.Voters
+	return voters.IDs(), len(voters[1]) > 0
+}
+
 func (n *Raft) serveChannels() {
 	defer close(n.serveChannelsDoneC)
 
@@ -249,8 +326,6 @@ func (n *Raft) serveChannels() {
 	}
 
 	go func() {
-		confChangeCount := uint64(0)
-
 		for n.proposeC != nil && n.proposeConfC != nil {
 			select {
 			case prop, ok := <-n.proposeC:
@@ -269,8 +344,14 @@ func (n *Raft) serveChannels() {
 				if !ok {
 					n.proposeConfC = nil
 				} else {
-					confChangeCount++
-					cc.ID = confChangeCount
+					// cc already carries Transition=JointImplicit and a
+					// single add/remove change, built by db.AddMember /
+					// db.RemoveMember. ProposeConfChange forwards it to the
+					// leader (MsgProp) when this node is a follower, exactly
+					// like a normal Propose. ConfChangeV2 has no ID field —
+					// raft tracks the in-flight change by its entry index
+					// (pendingConfIndex), so unlike the old v1 path there is
+					// no application-assigned ID to set here.
 					err := n.node.ProposeConfChange(context.Background(), cc)
 					if err != nil {
 						n.raftErrorC <- err
@@ -374,26 +455,32 @@ func (n *Raft) serveChannels() {
 				if n.applyNotifier != nil && entry.Type == raftpb.EntryNormal && entry.Data != nil {
 					n.applyNotifier(entry.Data)
 				}
-				if entry.Type == raftpb.EntryConfChange {
-					var cc raftpb.ConfChange
-					err := cc.Unmarshal(entry.Data)
-					if err != nil {
+				switch entry.Type {
+				case raftpb.EntryConfChangeV2:
+					// The normal membership path. db.AddMember / db.RemoveMember
+					// propose ConfChangeV2 entries (joint consensus), and raft
+					// itself proposes a zero-change ConfChangeV2 to leave the
+					// joint configuration once it commits (JointImplicit
+					// auto-leave). Both flow through here.
+					var cc raftpb.ConfChangeV2
+					if err := cc.Unmarshal(entry.Data); err != nil {
 						n.raftErrorC <- err
+						break
 					}
-					// Capture the new ConfState from ApplyConfChange and
-					// mirror it into storage. Without this, the storage's
-					// snapshot metadata ConfState stays empty across the
-					// life of the cluster, and the next raft.RestartNode
-					// reads InitialState with no voters — the restarting
-					// node then can't accept heartbeats, forward proposes,
-					// or participate in elections. See the doc on
-					// Storage.ConfState and the Save-doesn't-overwrite-
-					// empty-snap contract in wal.Storage for why this
-					// single line is sufficient: the next Save iteration
-					// persists s.snapshot (with the updated ConfState) to
-					// the state log, and wal.Open reloads it.
-					cs := n.node.ApplyConfChange(cc)
-					n.storage.ConfState(cs)
+					n.applyConfChange(cc, cc.Context)
+				case raftpb.EntryConfChange:
+					// Backward compatibility: a v1 ConfChange can only appear
+					// in a log written by a pre-joint-consensus binary, since
+					// this node now proposes v2 exclusively. etcd raft still
+					// applies v1 (ConfChangeI.AsV2 promotes it), so replaying it
+					// keeps an upgraded node consistent with what the old leader
+					// committed. See docs/operations/membership.md.
+					var cc raftpb.ConfChange
+					if err := cc.Unmarshal(entry.Data); err != nil {
+						n.raftErrorC <- err
+						break
+					}
+					n.applyConfChange(cc, cc.Context)
 				}
 			}
 

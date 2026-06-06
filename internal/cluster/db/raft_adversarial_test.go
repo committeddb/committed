@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1922,7 +1923,7 @@ func openWalRaft(t *testing.T, id uint64, peers []raft.Peer, dir string, fc *Fau
 	logger := newFatalCapturingLogger(id, fatalC)
 
 	proposeC := make(chan []byte)
-	confChangeC := make(chan raftpb.ConfChange)
+	confChangeC := make(chan raftpb.ConfChangeV2)
 
 	nodeOpts := make([]db.Option, 0, 3+len(opts))
 	nodeOpts = append(nodeOpts,
@@ -2228,5 +2229,149 @@ func TestAdversarial_ReadIndexPartitionedFollower(t *testing.T) {
 	if len(ents) == 0 || !bytes.Equal(ents[len(ents)-1].Data, []byte("baseline")) {
 		t.Fatalf("stale read should still return the follower's last local entry %q; have %d entries",
 			"baseline", len(ents))
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Scenario: membership change under partition
+//
+// Invariants protected:
+//
+//   - Safety: a joint-consensus removal driven from the majority side never
+//     loses a committed entry and never lets the minority form a competing
+//     configuration. While the change is in flight the cluster is in the
+//     joint configuration C_old={1..5} ∪ C_new={1,2,3,5}; every commit needs
+//     a majority of BOTH, which only the majority partition {1,2,3} can
+//     muster, so the minority {4,5} cannot commit anything.
+//   - Liveness: the majority completes the change (enter-joint then the
+//     JointImplicit auto-leave) to the final non-joint C_new without the
+//     removed node, even though node 4 (the removal target) is unreachable
+//     in the minority partition the whole time.
+//   - Convergence: after heal, the surviving members {1,2,3,5} agree on an
+//     identical committed log prefix; node 5 (stranded in the minority during
+//     the change) catches up into the new configuration.
+//
+// This is the partition-during-transition case the ticket calls out: a member
+// change racing a partition must end with the member unambiguously in or out,
+// never split-brain.
+func TestAdversarial_MembershipChangeUnderPartition(t *testing.T) {
+	_ = rand.New(rand.NewSource(1))
+
+	rafts, cluster := createFaultyRafts(5)
+	defer rafts.Close()
+
+	rafts.WaitForLeader(t)
+
+	// Baseline: one entry committed on all five before anything goes wrong.
+	proposeAndCheck(t, rafts[0], "pre-change")
+	for _, r := range rafts {
+		waitForUserEntry(t, r, []byte("pre-change"))
+	}
+
+	// Split 3/2. The majority {1,2,3} keeps quorum; the minority {4,5} holds
+	// the removal target (node 4) and the to-be-stranded survivor (node 5).
+	majorityIDs := []uint64{1, 2, 3}
+	minorityIDs := []uint64{4, 5}
+	majorityRafts := raftsByIDs(rafts, majorityIDs)
+	minorityRafts := raftsByIDs(rafts, minorityIDs)
+
+	// Freeze the minority's commit indexes so we can prove they don't advance
+	// (no quorum-less commit) while the change is in flight.
+	minorityCommitBefore := map[uint64]uint64{}
+	for _, r := range minorityRafts {
+		minorityCommitBefore[r.id] = r.raft.CommitIndexForTest()
+	}
+
+	cluster.Partition(minorityIDs, majorityIDs)
+	time.Sleep(adversarialSettleTime)
+
+	// The majority re-elects among itself if the old leader was stranded.
+	majorityRafts.WaitForLeader(t)
+	leader := majorityRafts.LeaderRaft()
+
+	// Remove node 4 (in the minority) from the majority leader. The joint
+	// configuration is satisfiable by {1,2,3} alone, so this must complete to
+	// the final non-joint config {1,2,3,5} despite node 4 being unreachable.
+	leader.submitConfChange(removeNodeCC(4))
+	waitForMembership(t, leader, map[uint64]bool{1: true, 2: true, 3: true, 4: false})
+
+	// Liveness on the majority: a fresh entry commits across {1,2,3} under the
+	// new configuration.
+	proposeAndCheck(t, leader, "during-change")
+	for _, r := range majorityRafts {
+		waitForUserEntry(t, r, []byte("during-change"))
+	}
+
+	// Safety on the minority: no commit advanced — neither the membership
+	// change nor the during-change entry reached a minority quorum.
+	for _, r := range minorityRafts {
+		got := r.raft.CommitIndexForTest()
+		if got != minorityCommitBefore[r.id] {
+			t.Fatalf("minority node %d advanced commit during the membership change (before=%d now=%d) — "+
+				"split-brain: the minority committed without a joint-config quorum",
+				r.id, minorityCommitBefore[r.id], got)
+		}
+	}
+
+	cluster.Heal()
+
+	// The survivors of the new configuration are {1,2,3,5}. Node 4 was removed
+	// and the leader stopped talking to it, so it stays behind by design — it
+	// is excluded from the convergence and prefix checks.
+	survivors := raftsByIDs(rafts, []uint64{1, 2, 3, 5})
+
+	// Convergence: every survivor catches up to the highest majority commit,
+	// which includes the membership change and the during-change entry.
+	targetCommit := uint64(0)
+	for _, r := range majorityRafts {
+		if c := r.raft.CommitIndexForTest(); c > targetCommit {
+			targetCommit = c
+		}
+	}
+	convergeDeadline := time.Now().Add(10 * time.Second)
+	for _, r := range survivors {
+		for r.raft.CommitIndexForTest() < targetCommit {
+			if time.Now().After(convergeDeadline) {
+				t.Fatalf("survivor node %d: commit index %d never caught up to %d after heal — "+
+					"post-change replication did not converge",
+					r.id, r.raft.CommitIndexForTest(), targetCommit)
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+	}
+
+	// Node 5, stranded in the minority during the change, must now be in the
+	// final configuration and have the entries committed during the change.
+	waitForMembership(t, raftsByIDs(rafts, []uint64{5})[0],
+		map[uint64]bool{1: true, 2: true, 3: true, 4: false, 5: true})
+	waitForUserEntry(t, raftsByIDs(rafts, []uint64{5})[0], []byte("during-change"))
+
+	// Cross-node safety: the committed user-entry prefix is byte-identical
+	// across all survivors through the lowest commit index any of them holds.
+	minCommit := uint64(^uint64(0))
+	for _, r := range survivors {
+		if c := r.raft.CommitIndexForTest(); c < minCommit {
+			minCommit = c
+		}
+	}
+	var want []string
+	for i, r := range survivors {
+		es, err := r.ents()
+		if err != nil {
+			t.Fatalf("survivor node %d: ents: %v", r.id, err)
+		}
+		var got []string
+		for _, e := range es {
+			if e.Index <= minCommit {
+				got = append(got, string(e.Data))
+			}
+		}
+		if i == 0 {
+			want = got
+			continue
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("survivor node %d committed prefix diverged: got %v want %v", r.id, got, want)
+		}
 	}
 }

@@ -69,6 +69,19 @@ type Cluster interface {
 	ReplaySyncableDeadLetter(ctx context.Context, id string, index uint64) error
 	TypeVersions(id string) ([]VersionInfo, error)
 	TypeVersion(id string, version uint64) (*Configuration, error)
+	// AddMember adds a voting node (id, rawURL) to the raft cluster using a
+	// joint-consensus membership change and blocks until the change has
+	// taken effect or ctx fires. rawURL is the new node's advertised peer
+	// URL; the new node must be started in join mode. Partition-safe: joint
+	// consensus requires a majority of both the old and new configurations
+	// throughout the transition. Callable on any node. Powers POST
+	// /membership. See docs/operations/membership.md.
+	AddMember(ctx context.Context, id uint64, rawURL string) error
+	// RemoveMember removes node id from the raft cluster using a
+	// joint-consensus membership change and blocks until the change has
+	// taken effect or ctx fires. Partition-safe and callable on any node.
+	// Powers DELETE /membership/{id}.
+	RemoveMember(ctx context.Context, id uint64) error
 	// ID returns the raft node ID of this node. Used by GET /node/status
 	// to report which node answered (load-bearing behind a load balancer).
 	ID() uint64

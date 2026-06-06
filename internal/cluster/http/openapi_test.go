@@ -503,6 +503,8 @@ func TestOpenAPIContract_SpecCoversAllRoutes(t *testing.T) {
 		"/v1/type/{id}/versions/{version}",
 		"/v1/proposal",
 		"/v1/node/status",
+		"/v1/membership",
+		"/v1/membership/{id}",
 	}
 
 	model, errs := doc.BuildV3Model()

@@ -372,7 +372,7 @@ func pickFreePorts(n int) []int {
 // cluster.Partition would silently stop affecting it.
 func createRaft(id uint64, peers []raft.Peer, s db.Storage, tickInterval time.Duration, cluster *FaultyCluster) *Raft {
 	proposeC := make(chan []byte)
-	confChangeC := make(chan raftpb.ConfChange)
+	confChangeC := make(chan raftpb.ConfChangeV2)
 
 	opts := []db.Option{db.WithTickInterval(tickInterval)}
 	if cluster != nil {
@@ -414,7 +414,7 @@ type Raft struct {
 	errorC       <-chan error
 	raft         *db.Raft
 	proposeC     chan<- []byte
-	confChangeC  chan<- raftpb.ConfChange
+	confChangeC  chan<- raftpb.ConfChangeV2
 	id           uint64
 	tickInterval time.Duration
 	// faultyCluster is nil unless this Raft was built via createFaultyRafts.

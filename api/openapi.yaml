@@ -75,6 +75,8 @@ tags:
     description: Append proposals to the commit log (write-only)
   - name: node
     description: Per-node diagnostics for the node that serves the request
+  - name: membership
+    description: Live raft cluster membership (add/remove nodes)
 paths:
   /health:
     get:
@@ -873,6 +875,73 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /v1/membership:
+    post:
+      tags: [membership]
+      summary: Add a voting node to the cluster
+      description: |
+        Adds a voting node to the raft cluster via a joint-consensus
+        (ConfChangeV2) membership change. The change is partition-safe — it
+        transits the joint configuration C_old ∪ C_new, which requires a
+        majority of both the old and new configurations throughout, so it
+        can never lose a committed entry. May be sent to any node; a
+        follower forwards the proposal to the leader.
+
+        The node named here must already be running in join mode
+        (`COMMITTED_JOIN=true`) with a peer set that lets it reach the
+        existing members. The call blocks until the change has taken effect,
+        then returns 204. See docs/operations/membership.md.
+      operationId: addMember
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddMemberRequest'
+      responses:
+        '204':
+          description: Member added; the cluster has applied the new configuration.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/MembershipUnconfirmed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/membership/{id}:
+    delete:
+      tags: [membership]
+      summary: Remove a node from the cluster
+      description: |
+        Removes node `{id}` from the raft cluster via a joint-consensus
+        (ConfChangeV2) membership change, with the same partition-safety and
+        node-agnostic semantics as the add. The call blocks until the change
+        has taken effect, then returns 204. The removed node steps out of the
+        configuration and should be stopped afterward.
+      operationId: removeMember
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Raft node id of the member to remove.
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      responses:
+        '204':
+          description: Member removed; the cluster has applied the new configuration.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/MembershipUnconfirmed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -963,6 +1032,17 @@ components:
         The node could not confirm a linearizable read (no raft quorum, or
         this node is partitioned from the leader). Retry, or request
         `?consistency=stale` to accept a possibly-stale read.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    MembershipUnconfirmed:
+      description: |
+        The membership change was submitted to raft but could not be
+        confirmed to have taken effect before the request deadline —
+        typically this node cannot currently reach a quorum. The change may
+        still take effect once a quorum is reachable; re-query membership or
+        retry the request (it is idempotent).
       content:
         application/json:
           schema:
@@ -1141,6 +1221,23 @@ components:
         message:
           type: string
           description: Truncated last transient error.
+
+    AddMemberRequest:
+      type: object
+      required: [id, url]
+      properties:
+        id:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Raft node id of the member to add (unique, non-zero).
+        url:
+          type: string
+          description: |
+            Advertised raft peer URL of the new node — the address existing
+            members will dial. Raft replicates only node ids, not addresses,
+            so the url must be supplied here.
+          examples: ["http://n4:9022"]
 
     AddProposalRequest:
       type: object

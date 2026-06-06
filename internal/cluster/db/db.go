@@ -45,7 +45,7 @@ type Peers map[uint64]string
 type DB struct {
 	ErrorC      <-chan error
 	proposeC    chan<- []byte
-	confChangeC chan<- raftpb.ConfChange
+	confChangeC chan<- raftpb.ConfChangeV2
 	raft        *Raft
 	storage     Storage
 	ctx         context.Context
@@ -189,7 +189,7 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 	}
 
 	proposeC := make(chan []byte)
-	confChangeC := make(chan raftpb.ConfChange)
+	confChangeC := make(chan raftpb.ConfChangeV2)
 
 	rpeers := make([]raft.Peer, len(peers))
 	i := 0
@@ -577,6 +577,104 @@ func (db *DB) ID() uint64 {
 // through to etcd raft's Status() snapshot. Used by the /ready HTTP probe.
 func (db *DB) Leader() uint64 {
 	return db.raft.Leader()
+}
+
+// AddMember adds a voting node to the cluster via a joint-consensus
+// (ConfChangeV2) membership change and blocks until this node observes the
+// new member in the final configuration, ctx fires, or the DB shuts down.
+//
+// rawURL is the new node's advertised raft peer URL; it is carried in the
+// conf change Context so every existing node learns the address to dial it
+// (raft replicates only node ids, not addresses). The new node itself must
+// be started in join mode (WithJoin / COMMITTED_JOIN) with a peer set that
+// lets it reach the existing members. See docs/operations/membership.md.
+//
+// The change is safe under partition: joint consensus requires a majority of
+// both the old and new configurations to agree throughout the transition, so
+// no quorum shift can lose a committed entry. AddMember may be called against
+// any node (a follower forwards the proposal to the leader).
+func (db *DB) AddMember(ctx context.Context, id uint64, rawURL string) error {
+	if id == 0 {
+		return fmt.Errorf("%w: id must be non-zero", cluster.ErrInvalidMember)
+	}
+	if rawURL == "" {
+		return fmt.Errorf("%w: url must be non-empty", cluster.ErrInvalidMember)
+	}
+	cc := raftpb.ConfChangeV2{
+		Transition: raftpb.ConfChangeTransitionJointImplicit,
+		Changes:    []raftpb.ConfChangeSingle{{Type: raftpb.ConfChangeAddNode, NodeID: id}},
+		Context:    []byte(rawURL),
+	}
+	return db.proposeConfChange(ctx, cc, id, true)
+}
+
+// RemoveMember removes a node from the cluster via a joint-consensus
+// (ConfChangeV2) membership change and blocks until this node observes the
+// node gone from the final configuration, ctx fires, or the DB shuts down.
+// Like AddMember it is partition-safe and may be called against any node.
+// Removing the node serving the request is allowed; that node steps out of
+// the configuration once the change commits and should then be stopped.
+func (db *DB) RemoveMember(ctx context.Context, id uint64) error {
+	if id == 0 {
+		return fmt.Errorf("%w: id must be non-zero", cluster.ErrInvalidMember)
+	}
+	cc := raftpb.ConfChangeV2{
+		Transition: raftpb.ConfChangeTransitionJointImplicit,
+		Changes:    []raftpb.ConfChangeSingle{{Type: raftpb.ConfChangeRemoveNode, NodeID: id}},
+	}
+	return db.proposeConfChange(ctx, cc, id, false)
+}
+
+// proposeConfChange submits cc to the raft propose loop, then blocks (via
+// waitForMembership) until the membership change has fully taken effect on
+// this node. Submission itself can fail fast if ctx fires or the DB is
+// shutting down before the propose loop accepts the change.
+func (db *DB) proposeConfChange(ctx context.Context, cc raftpb.ConfChangeV2, id uint64, want bool) error {
+	select {
+	case db.confChangeC <- cc:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-db.ctx.Done():
+		return db.ctx.Err()
+	}
+	return db.waitForMembership(ctx, id, want)
+}
+
+// waitForMembership blocks until this node's applied raft configuration
+// reaches the target — id present (want=true) or absent (want=false) AND the
+// joint transition complete — ctx is canceled, or the DB is shutting down.
+// It waits on the same applied-index broadcast (appliedNotify) the Ready loop
+// fires after each apply, re-checking on every wake rather than polling: a
+// membership change advances the applied index when both the enter-joint and
+// the auto-leave entries apply, so each step wakes the waiter. Requiring
+// joint==false means a successful return reflects the final (non-joint)
+// configuration, not the transient joint state.
+func (db *DB) waitForMembership(ctx context.Context, id uint64, want bool) error {
+	settled := func() bool {
+		members, joint := db.raft.memberStatus()
+		_, present := members[id]
+		return !joint && present == want
+	}
+	for {
+		if settled() {
+			return nil
+		}
+		// Snapshot the current-generation channel before re-checking, so an
+		// apply that lands between the check and the select doesn't strand
+		// us — the channel we hold is already closed and the select returns
+		// at once. Same close-to-broadcast pattern as waitForApplied.
+		ch := db.appliedNotify()
+		if settled() {
+			return nil
+		}
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-db.ctx.Done():
+			return db.ctx.Err()
+		}
+	}
 }
 
 // AppliedIndex returns the highest log index that has been fully applied

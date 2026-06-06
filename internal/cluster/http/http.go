@@ -140,6 +140,14 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 			// ephemeral, unlike the replicated config content — and reserves
 			// /cluster/status for a future fan-out sibling.
 			r.Get("/node/status", h.NodeStatus)
+
+			// Live cluster membership. POST adds a voting node, DELETE
+			// removes one — both via joint-consensus (ConfChangeV2) raft
+			// reconfiguration. Authenticated like every other write. The
+			// node added via POST must first be started in join mode. See
+			// docs/operations/membership.md.
+			r.Post("/membership", h.AddMember)
+			r.Delete("/membership/{id}", h.RemoveMember)
 		})
 	})
 

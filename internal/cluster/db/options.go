@@ -69,6 +69,18 @@ type options struct {
 	// nil (the default) leaves the peer transport as plaintext HTTP.
 	tlsInfo *transport.TLSInfo
 
+	// join marks this node as joining an existing cluster rather than
+	// bootstrapping a new one. When true, startRaft calls raft.RestartNode
+	// with an empty initial state instead of raft.StartNode(c, peers): the
+	// node starts with no configuration and learns its membership from the
+	// leader once an AddNode conf change naming it commits. The peer set is
+	// still used to seed the transport (so the node can reach the existing
+	// members and bind its own listener), but it does NOT become a
+	// bootstrap configuration — bootstrapping from it would form a
+	// competing single-node cluster. Set via WithJoin from cmd/node.go when
+	// COMMITTED_JOIN is truthy. See docs/operations/membership.md.
+	join bool
+
 	// ingestSupervisor{InitialBackoff,MaxBackoff,MaxAttempts,HealthyWindow}
 	// govern the auto-restart behavior when an ingest worker parks in the
 	// ErrProposalUnknown freeze branch. The supervisor waits backoff (starting
@@ -134,6 +146,17 @@ func WithSyncStuckThreshold(d time.Duration) Option {
 // is unacceptable. Production callers should leave this at the default.
 func WithTickInterval(d time.Duration) Option {
 	return func(o *options) { o.tickInterval = d }
+}
+
+// WithJoin marks this node as joining an existing cluster. A joining node
+// bootstraps via raft.RestartNode with an empty state (learning its
+// membership from the leader after an AddNode conf change commits) rather
+// than raft.StartNode (which would form a competing cluster from the static
+// peer set). The peer set is still consumed to seed the transport so the
+// node can dial the existing members and bind its own listener. cmd/node.go
+// sets this from the COMMITTED_JOIN env var.
+func WithJoin() Option {
+	return func(o *options) { o.join = true }
 }
 
 // WithLeaderChangeGracePeriod overrides how long db.DB's leader-change

@@ -32,6 +32,18 @@ func (n *Raft) UnpartitionPeerForTest(p raft.Peer) error {
 	return n.transport.AddPeer(p)
 }
 
+// MembersForTest returns this Raft's current voter configuration as observed
+// locally: members is the union of the incoming and (mid joint transition)
+// outgoing voter sets, and joint reports whether the configuration is still
+// in the joint state. Joint-consensus membership tests poll this to watch a
+// change move through the joint configuration and settle into its final form.
+func (n *Raft) MembersForTest() (members map[uint64]struct{}, joint bool) {
+	if n.node == nil {
+		return nil, false
+	}
+	return n.memberStatus()
+}
+
 // CommitIndexForTest returns this Raft's current commit index as reported
 // by etcd raft's Status snapshot. Used by adversarial tests to assert that
 // a minority-side leader does not advance commit while partitioned (safety
