@@ -65,7 +65,12 @@ func (b *batchSyncable) SyncBatch(ctx context.Context, as []*cluster.Actual) (bo
 func migrateEntities(r Resolver, es []*cluster.Entity) ([]*cluster.Entity, error) {
 	out := make([]*cluster.Entity, 0, len(es))
 	for _, e := range es {
-		if cluster.IsSystem(e.ID) {
+		// System entities (config) and deletes pass through untouched: a
+		// delete carries the sentinel, not a payload, so running it through
+		// the migration chain would corrupt it into a permanent error and
+		// silently drop the erasure. The downstream syncable branches on
+		// IsDelete() to honor it.
+		if cluster.IsSystem(e.ID) || e.IsDelete() {
 			out = append(out, e)
 			continue
 		}

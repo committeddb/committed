@@ -7,6 +7,15 @@ import (
 	"github.com/philborlin/committed/internal/cluster/syncable/sql"
 )
 
+// createDeleteSQL builds `DELETE FROM <table> WHERE <keyCol> = <placeholder>`.
+// The placeholder is the only dialect-specific bit (? for MySQL, $1 for
+// PostgreSQL); the single bound argument is the entity Key. Shared by every
+// dialect so the delete shape stays identical across them.
+func createDeleteSQL(config *sql.Config, placeholder string) string {
+	return fmt.Sprintf("DELETE FROM %s WHERE %s = %s",
+		config.Table, config.DeleteKeyColumn(), placeholder)
+}
+
 func createDDL(config *sql.Config) string {
 	var ddl strings.Builder
 	fmt.Fprintf(&ddl, "CREATE TABLE IF NOT EXISTS %s (", config.Table)

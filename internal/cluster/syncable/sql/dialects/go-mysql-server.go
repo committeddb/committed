@@ -22,6 +22,10 @@ func (d *GoMySQLServerDialect) CreateSQL(config *sql.Config) string {
 	return mySQL.CreateSQL(config)
 }
 
+func (d *GoMySQLServerDialect) CreateDeleteSQL(config *sql.Config) string {
+	return (&MySQLDialect{}).CreateDeleteSQL(config)
+}
+
 func (d *GoMySQLServerDialect) Open(connectionString string) (*gosql.DB, error) {
 	conn, err := d.Driver.OpenConnector(connectionString)
 	if err != nil {

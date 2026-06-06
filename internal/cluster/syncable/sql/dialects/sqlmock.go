@@ -28,6 +28,12 @@ func (d *SQLMockDialect) CreateDDL(c *sql.Config) string {
 	return createDDL(c)
 }
 
+// CreateDeleteSQL implements Dialect, mirroring MySQL's ? placeholder (the
+// dialect the mock stands in for).
+func (d *SQLMockDialect) CreateDeleteSQL(c *sql.Config) string {
+	return createDeleteSQL(c, "?")
+}
+
 func (d *SQLMockDialect) CreateSQL(config *sql.Config) string {
 	var sql strings.Builder
 

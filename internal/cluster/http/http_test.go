@@ -96,6 +96,49 @@ func TestEndToEnd(t *testing.T) {
 	// - Ingest something else to make sure the ingestable restarts and keeps position
 }
 
+// TestEndToEnd_HonorsDelete verifies the downstream half of right-to-be-
+// forgotten end-to-end: an upsert proposed over HTTP syncs a row into the
+// destination database, then a `delete: true` proposal for the same key syncs a
+// DELETE that removes it. This is the regression guard for the zombie bug — a
+// delete Actual used to unmarshal the sentinel as invalid JSON, get
+// dead-lettered by the SQL syncable, and leave the row live forever.
+func TestEndToEnd_HonorsDelete(t *testing.T) {
+	dir, err := os.MkdirTemp("", "CommitteddbE2EDeleteTest-*")
+	require.Nil(t, err)
+	defer os.RemoveAll(dir)
+
+	connectionString := "bar"
+	dialect := createDialect(t, connectionString)
+
+	parser := parser.New()
+	sync := make(chan *db.SyncableWithID)
+	ingest := make(chan *db.IngestableWithID)
+	storage, db := createDB(t, parser, dir, sync, ingest)
+	h := http.New(db)
+
+	typeID := addType(t, h, "foo")
+	addParsers(t, db, dialect, typeID)
+
+	upsert := createProposal(typeID, "key", "one")
+	propose(t, h, upsert.p)
+	_ = addIngestable(t, h, "")
+	databaseID := addDatabase(t, h, "go-mysql-server")
+	syncableID := addSyncable(t, h, typeID, databaseID)
+
+	// The upsert must land downstream first.
+	waitForSyncCaughtUp(t, storage, syncableID)
+	view(t, storage, syncableID, databaseID, upsert, connectionString)
+
+	// Now erase it: a delete proposal for the same key must remove the row.
+	floor, err := storage.GetSyncableIndex(syncableID)
+	require.Nil(t, err)
+	propose(t, h, createDeleteProposal(typeID, "key"))
+	waitForSyncIndexAbove(t, storage, syncableID, floor)
+
+	require.Nil(t, db.Close())
+	viewDeleted(t, storage, databaseID, connectionString, "key")
+}
+
 type dbs []sqle.Database
 
 var _ driver.Provider = dbs{}
@@ -346,6 +389,55 @@ func propose(t *testing.T, h *http.HTTP, proposal *http.AddProposalRequest) {
 
 	resp := w.Result()
 	require.Equal(t, 200, resp.StatusCode)
+}
+
+// createDeleteProposal builds an HTTP delete (tombstone) request for
+// (typeID, key) — the intake half of right-to-be-forgotten. It carries no data.
+func createDeleteProposal(typeID string, key string) *http.AddProposalRequest {
+	return &http.AddProposalRequest{
+		Entities: []*http.AddEntityRequest{{
+			TypeID: typeID,
+			Key:    key,
+			Delete: true,
+		}},
+	}
+}
+
+// waitForSyncIndexAbove blocks until the syncable's persisted index advances
+// strictly past floor — i.e. the worker has processed (and committed) a
+// proposal newer than the one at floor. Used after proposing a delete to know
+// the DELETE has reached the destination before reading it back.
+func waitForSyncIndexAbove(t *testing.T, s *wal.Storage, syncableID string, floor uint64) {
+	t.Helper()
+	const interval = 10 * time.Millisecond
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		idx, err := s.GetSyncableIndex(syncableID)
+		if err == nil && idx > floor {
+			return
+		}
+		time.Sleep(interval)
+	}
+	t.Fatalf("timed out waiting for sync index above %d on %q", floor, syncableID)
+}
+
+// viewDeleted asserts the row keyed by key is gone from the destination table.
+func viewDeleted(t *testing.T, s *wal.Storage, databaseID string, connectionString string, key string) {
+	database, err := s.Database(databaseID)
+	require.Nil(t, err)
+	db := database.(*sql.DB).DB
+	_, err = db.Exec("USE " + connectionString)
+	require.Nil(t, err)
+
+	rows, err := db.Query("SELECT pk, one FROM "+connectionString+".foo WHERE pk = ?", key)
+	require.Nil(t, err)
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		count++
+	}
+	require.Nil(t, rows.Err())
+	require.Equal(t, 0, count, "row should be deleted after the delete proposal syncs")
 }
 
 func createProposal(typeID string, key string, one string) *Proposal {

@@ -41,6 +41,7 @@ func (p *SyncableParser) ParseConfig(v *viper.Viper, storage cluster.DatabaseSto
 	topic := v.GetString("sql.topic")
 	table := v.GetString("sql.table")
 	primaryKey := v.GetString("sql.primaryKey")
+	keyColumn := v.GetString("sql.keyColumn")
 
 	var mappings []Mapping
 	if err := v.UnmarshalKey("sql.mappings", &mappings); err != nil {
@@ -59,6 +60,7 @@ func (p *SyncableParser) ParseConfig(v *viper.Viper, storage cluster.DatabaseSto
 		Mappings:   mappings,
 		Indexes:    indexes,
 		PrimaryKey: primaryKey,
+		KeyColumn:  keyColumn,
 	}
 
 	return config, nil

@@ -104,6 +104,29 @@ func TestWrap_PassesSystemEntitiesThrough(t *testing.T) {
 	require.Len(t, inner.received, 1)
 }
 
+// TestWrap_PassesDeletesThrough verifies a delete entity bypasses migration: it
+// carries the delete sentinel, not a payload, so running it through the
+// migration chain would corrupt it into a permanent error and silently drop
+// the erasure. The wrapper must hand the delete to the inner syncable
+// untouched (here person@2 has a migration that would fail on the sentinel).
+func TestWrap_PassesDeletesThrough(t *testing.T) {
+	r := &stubResolver{types: map[string]*cluster.Type{
+		"person":   {ID: "person", Name: "Person", Version: 2, Migration: []byte(`. + {email: "x@y"}`)},
+		"person@2": {ID: "person", Name: "Person", Version: 2, Migration: []byte(`. + {email: "x@y"}`)},
+	}}
+
+	inner := &recordingSyncable{}
+	wrapped := migration.Wrap(inner, r)
+
+	del := cluster.NewDeleteEntity(&cluster.Type{ID: "person", Version: 1}, []byte("k"))
+	p := &cluster.Actual{Entities: []*cluster.Entity{del}}
+	_, err := wrapped.Sync(context.Background(), p)
+	require.NoError(t, err, "a delete must bypass migration")
+
+	require.Len(t, inner.received, 1)
+	require.True(t, inner.received[0].Entities[0].IsDelete(), "delete sentinel must be preserved")
+}
+
 func TestWrap_MigrationFailureIsPermanent(t *testing.T) {
 	r := &stubResolver{types: map[string]*cluster.Type{
 		"person":   {ID: "person", Version: 2},

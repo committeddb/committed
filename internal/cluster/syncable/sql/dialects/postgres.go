@@ -41,6 +41,12 @@ func (d *PostgreSQLDialect) CreateDDL(c *sql.Config) string {
 	return ddl.String()
 }
 
+// CreateDeleteSQL implements Dialect. PostgreSQL binds the WHERE value with a
+// $1 positional placeholder.
+func (d *PostgreSQLDialect) CreateDeleteSQL(c *sql.Config) string {
+	return createDeleteSQL(c, "$1")
+}
+
 // CreateSQL implements Dialect.
 //
 // PostgreSQL upserts use ON CONFLICT (<pk>) DO UPDATE SET col = EXCLUDED.col,

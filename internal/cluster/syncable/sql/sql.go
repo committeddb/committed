@@ -17,6 +17,12 @@ type Syncable struct {
 	config  *Config
 	dialect Dialect
 	insert  *Insert
+	// delete is the prepared DELETE-by-key statement honoring delete
+	// Actuals (right-to-be-forgotten). It is nil only when the config
+	// names neither keyColumn nor primaryKey, in which case a delete
+	// Actual is a permanent misconfiguration rather than a silent
+	// retention. See Config.DeleteKeyColumn.
+	delete *Delete
 }
 
 func New(d *DB, config *Config) *Syncable {
@@ -44,6 +50,19 @@ func (c *Syncable) Init() error {
 
 	c.insert = &Insert{sqlString, stmt, jsonPaths}
 
+	// Prepare the DELETE-by-key statement so delete Actuals can be honored
+	// without a JSON unmarshal (the delete sentinel is not a payload). Only
+	// possible when a key column is known; otherwise leave it nil and let
+	// applyEntity surface the misconfiguration if a delete ever arrives.
+	if c.config.DeleteKeyColumn() != "" {
+		deleteString := c.dialect.CreateDeleteSQL(c.config)
+		deleteStmt, err := c.db.Prepare(deleteString)
+		if err != nil {
+			return fmt.Errorf("prepare delete sql [%s]: %w", deleteString, err)
+		}
+		c.delete = &Delete{deleteString, deleteStmt}
+	}
+
 	return nil
 }
 
@@ -64,33 +83,8 @@ func (c *Syncable) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldS
 	}
 
 	for _, e := range a.Entities {
-		var jsonData any
-		err := json.Unmarshal(e.Data, &jsonData)
-		if err != nil {
-			return false, cluster.Permanent(fmt.Errorf("unmarshal entity data: %w", err))
-		}
-
-		var values []any
-		for _, path := range c.insert.JsonPath {
-			res, err := jsonpath.Get(path, jsonData)
-			if err != nil {
-				return false, cluster.Permanent(fmt.Errorf("jsonpath [%v]: %w", path, err))
-			}
-			values = append(values, res)
-		}
-
-		// The dialect decides how values map to placeholders: MySQL repeats
-		// them (INSERT ? + ON DUPLICATE KEY UPDATE ?), PostgreSQL binds them
-		// once (ON CONFLICT ... EXCLUDED).
-		allValues := c.dialect.BindArgs(values)
-
-		_, err = tx.StmtContext(ctx, c.insert.Stmt).ExecContext(ctx, allValues...)
-		if err != nil {
-			wrapped := fmt.Errorf("[sql.Sync] exec [%s]: %w", c.insert.SQL, err)
-			if c.dialect.IsPermanent(err) {
-				return false, cluster.Permanent(wrapped)
-			}
-			return false, wrapped
+		if err := c.applyEntity(ctx, tx, e); err != nil {
+			return false, err
 		}
 	}
 
@@ -130,33 +124,9 @@ func (c *Syncable) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool, e
 				continue
 			}
 
-			var jsonData any
-			err := json.Unmarshal(e.Data, &jsonData)
-			if err != nil {
+			if err := c.applyEntity(ctx, tx, e); err != nil {
 				_ = tx.Rollback()
-				return false, cluster.Permanent(fmt.Errorf("unmarshal entity data: %w", err))
-			}
-
-			var values []any
-			for _, path := range c.insert.JsonPath {
-				res, err := jsonpath.Get(path, jsonData)
-				if err != nil {
-					_ = tx.Rollback()
-					return false, cluster.Permanent(fmt.Errorf("jsonpath [%v]: %w", path, err))
-				}
-				values = append(values, res)
-			}
-
-			allValues := c.dialect.BindArgs(values)
-
-			_, err = tx.StmtContext(ctx, c.insert.Stmt).ExecContext(ctx, allValues...)
-			if err != nil {
-				_ = tx.Rollback()
-				wrapped := fmt.Errorf("[sql.SyncBatch] exec [%s]: %w", c.insert.SQL, err)
-				if c.dialect.IsPermanent(err) {
-					return false, cluster.Permanent(wrapped)
-				}
-				return false, wrapped
+				return false, err
 			}
 		}
 	}
@@ -175,6 +145,69 @@ func (c *Syncable) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool, e
 	return true, nil
 }
 
+// applyEntity applies one entity to an open transaction: a delete removes the
+// downstream row keyed by the entity's Key (right-to-be-forgotten); any other
+// entity upserts the jsonpath-mapped columns. The delete binds the entity Key
+// directly — the sentinel payload is never unmarshaled — and a DELETE of a row
+// that was never inserted is a natural no-op, which is what makes a fresh
+// syncable replaying an already-scrubbed log correct. Returns a
+// cluster.Permanent error for non-retryable failures so the worker skips
+// rather than retries. The caller owns the transaction (commit/rollback).
+func (c *Syncable) applyEntity(ctx context.Context, tx *sql.Tx, e *cluster.Entity) error {
+	if e.IsDelete() {
+		if c.delete == nil {
+			return cluster.Permanent(fmt.Errorf(
+				"[sql.apply] cannot honor delete for key %q: no keyColumn or primaryKey configured",
+				string(e.Key)))
+		}
+		_, err := tx.StmtContext(ctx, c.delete.Stmt).ExecContext(ctx, string(e.Key))
+		if err != nil {
+			wrapped := fmt.Errorf("[sql.apply] exec [%s]: %w", c.delete.SQL, err)
+			if c.dialect.IsPermanent(err) {
+				return cluster.Permanent(wrapped)
+			}
+			return wrapped
+		}
+		return nil
+	}
+
+	var jsonData any
+	if err := json.Unmarshal(e.Data, &jsonData); err != nil {
+		return cluster.Permanent(fmt.Errorf("unmarshal entity data: %w", err))
+	}
+
+	var values []any
+	for _, path := range c.insert.JsonPath {
+		res, err := jsonpath.Get(path, jsonData)
+		if err != nil {
+			return cluster.Permanent(fmt.Errorf("jsonpath [%v]: %w", path, err))
+		}
+		values = append(values, res)
+	}
+
+	// The dialect decides how values map to placeholders: MySQL repeats them
+	// (INSERT ? + ON DUPLICATE KEY UPDATE ?), PostgreSQL binds them once
+	// (ON CONFLICT ... EXCLUDED).
+	allValues := c.dialect.BindArgs(values)
+
+	if _, err := tx.StmtContext(ctx, c.insert.Stmt).ExecContext(ctx, allValues...); err != nil {
+		wrapped := fmt.Errorf("[sql.apply] exec [%s]: %w", c.insert.SQL, err)
+		if c.dialect.IsPermanent(err) {
+			return cluster.Permanent(wrapped)
+		}
+		return wrapped
+	}
+	return nil
+}
+
 func (c *Syncable) Close() error {
-	return c.insert.Stmt.Close()
+	// Close both prepared statements; report the first error but always
+	// attempt the delete close so it does not leak when insert close fails.
+	err := c.insert.Stmt.Close()
+	if c.delete != nil {
+		if derr := c.delete.Stmt.Close(); err == nil {
+			err = derr
+		}
+	}
+	return err
 }

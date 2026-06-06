@@ -1250,7 +1250,7 @@ components:
 
     AddEntityRequest:
       type: object
-      required: [typeId, key, data]
+      required: [typeId, key]
       properties:
         typeId:
           type: string
@@ -1262,6 +1262,21 @@ components:
           description: |
             Entity data as an arbitrary JSON value. If the target type has
             schema validation enabled the data must match the schema.
+            Required for an upsert (the default); ignored when `delete` is
+            true.
+        delete:
+          type: boolean
+          default: false
+          description: |
+            Issue a delete (tombstone) for `(typeId, key)` instead of an
+            upsert. A delete carries no payload: `data` is ignored and
+            schema validation is skipped. Downstream syncables translate the
+            delete into a removal of the record keyed by `key` (SQL: a
+            `DELETE` by the configured key column; HTTP webhook: an `op:
+            "delete"` payload). A delete for a record that does not exist is
+            a harmless no-op. This is the intake half of right-to-be-
+            forgotten erasure — pair it with `POST /v1/scrub` to also remove
+            the entries from the permanent event log.
 
     ErrorResponse:
       type: object

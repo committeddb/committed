@@ -52,6 +52,17 @@ type ShouldSnapshot bool
 //   - Sync MUST be idempotent. The same Actual may be delivered more
 //     than once due to leader transition, worker replace, or process
 //     restart. Implementations should use upsert or equivalent semantics.
+//   - Sync MUST honor deletes. When an entity reports IsDelete(), the
+//     syncable MUST remove the corresponding downstream record keyed by
+//     the entity's Key — it has no Data to apply (Data carries the delete
+//     sentinel, not a payload, so it must NOT be unmarshaled). This is the
+//     downstream half of right-to-be-forgotten erasure: the scrubber
+//     removes a subject's entries from the permanent log, and honoring the
+//     delete proposal is what removes the same subject from every
+//     projection. A delete for a record that does not exist MUST be a
+//     harmless no-op — that is what makes a fresh syncable replaying an
+//     already-scrubbed log correct (the bootstrap edge case: the original
+//     upsert may have been scrubbed away before this syncable ever saw it).
 //   - An Actual's entities are one atomic unit (one committed transaction);
 //     apply them together (e.g. in one destination transaction).
 //   - Sync errors are retried with exponential backoff. Wrap with

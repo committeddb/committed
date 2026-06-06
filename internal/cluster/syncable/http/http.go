@@ -25,10 +25,21 @@ type payload struct {
 }
 
 type entityPayload struct {
+	// Op is "upsert" or "delete". A delete carries no Data and the receiver
+	// MUST remove the record keyed by Key (a delete for a record that does
+	// not exist MUST be a harmless no-op) — this is the downstream half of
+	// right-to-be-forgotten erasure. Op is always present so receivers
+	// branch on it explicitly rather than inferring intent from missing Data.
+	Op   string          `json:"op"`
 	Key  string          `json:"key"`
 	Type payloadType     `json:"type"`
-	Data json.RawMessage `json:"data"`
+	Data json.RawMessage `json:"data,omitempty"`
 }
+
+const (
+	opUpsert = "upsert"
+	opDelete = "delete"
+)
 
 type payloadType struct {
 	ID      string `json:"id"`
@@ -67,14 +78,25 @@ func (s *Syncable) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldS
 
 	entities := make([]entityPayload, 0, len(a.Entities))
 	for _, e := range a.Entities {
+		// A delete carries the sentinel in Data, not a payload — emit op
+		// "delete" with no Data so the receiver removes the keyed record;
+		// otherwise emit op "upsert" with the entity's data.
+		op := opUpsert
+		var data json.RawMessage
+		if e.IsDelete() {
+			op = opDelete
+		} else {
+			data = json.RawMessage(e.Data)
+		}
 		entities = append(entities, entityPayload{
+			Op:  op,
 			Key: base64.StdEncoding.EncodeToString(e.Key),
 			Type: payloadType{
 				ID:      e.ID,
 				Name:    e.Name,
 				Version: e.Version,
 			},
-			Data: json.RawMessage(e.Data),
+			Data: data,
 		})
 	}
 

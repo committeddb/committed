@@ -49,6 +49,7 @@ type webhookBody struct {
 }
 
 type webhookEntity struct {
+	Op   string          `json:"op"`
 	Key  string          `json:"key"`
 	Type webhookType     `json:"type"`
 	Data json.RawMessage `json:"data"`
@@ -127,6 +128,62 @@ func TestSync_MultipleEntities_OneAtomicRequest(t *testing.T) {
 	require.Len(t, received.Entities, 2, "both entities must ride in the single request")
 	require.Equal(t, base64.StdEncoding.EncodeToString([]byte("key1")), received.Entities[0].Key)
 	require.Equal(t, base64.StdEncoding.EncodeToString([]byte("key2")), received.Entities[1].Key)
+}
+
+// TestSync_Delete_EmitsDeleteOp verifies a delete entity is delivered as an
+// op:"delete" webhook carrying no data — the downstream half of
+// right-to-be-forgotten. The receiver removes the record keyed by Key, and the
+// sentinel payload must never be forwarded.
+func TestSync_Delete_EmitsDeleteOp(t *testing.T) {
+	var received webhookBody
+	var rawBody []byte
+
+	ts := httptest.NewServer(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		rawBody, _ = io.ReadAll(r.Body)
+		_ = json.Unmarshal(rawBody, &received)
+		w.WriteHeader(200)
+	}))
+	defer ts.Close()
+
+	s := synchttp.New(newConfig(ts.URL))
+	defer s.Close()
+
+	a := newActual(cluster.NewDeleteEntity(testType, []byte("key1")))
+	a.Index = 7
+
+	snapshot, err := s.Sync(context.Background(), a)
+	require.NoError(t, err)
+	require.Equal(t, cluster.ShouldSnapshot(true), snapshot)
+
+	require.Len(t, received.Entities, 1)
+	require.Equal(t, "delete", received.Entities[0].Op)
+	require.Equal(t, base64.StdEncoding.EncodeToString([]byte("key1")), received.Entities[0].Key)
+	require.Equal(t, "test-topic", received.Entities[0].Type.ID)
+	require.Empty(t, received.Entities[0].Data)
+	// `data` must be omitted from the wire body entirely (omitempty).
+	require.NotContains(t, string(rawBody), `"data"`)
+}
+
+// TestSync_Upsert_EmitsUpsertOp pins the op for the upsert path so receivers
+// branch on it explicitly rather than inferring from a present/absent payload.
+func TestSync_Upsert_EmitsUpsertOp(t *testing.T) {
+	var received webhookBody
+
+	ts := httptest.NewServer(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		bs, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(bs, &received)
+		w.WriteHeader(200)
+	}))
+	defer ts.Close()
+
+	s := synchttp.New(newConfig(ts.URL))
+	defer s.Close()
+
+	_, err := s.Sync(context.Background(), newActual(newEntity(testType, "key1", map[string]string{"id": "1"})))
+	require.NoError(t, err)
+	require.Len(t, received.Entities, 1)
+	require.Equal(t, "upsert", received.Entities[0].Op)
+	require.JSONEq(t, `{"id":"1"}`, string(received.Entities[0].Data))
 }
 
 func TestSync_TopicMismatch(t *testing.T) {

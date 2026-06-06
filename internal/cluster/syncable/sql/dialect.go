@@ -9,6 +9,12 @@ import (
 type Dialect interface {
 	CreateDDL(config *Config) string
 	CreateSQL(config *Config) string
+	// CreateDeleteSQL returns the statement that removes one downstream row
+	// by its key column: `DELETE FROM <table> WHERE <keyCol> = <placeholder>`.
+	// The placeholder is dialect-specific (? for MySQL, $1 for PostgreSQL).
+	// The key column is Config.DeleteKeyColumn(); the single bound argument
+	// is the entity's Key, so deletes never unmarshal the (absent) payload.
+	CreateDeleteSQL(config *Config) string
 	Open(connectionString string) (*gosql.DB, error)
 	// IsPermanent returns true if the given SQL error is non-retryable
 	// (e.g., constraint violations, data-type mismatches). The sync loop
@@ -49,10 +55,36 @@ type Config struct {
 	Mappings   []Mapping
 	Indexes    []Index
 	PrimaryKey string
+	// KeyColumn names the column whose value equals the entity's Key, used
+	// to translate a delete Actual into `DELETE FROM <table> WHERE
+	// <KeyColumn> = ?`. When empty it falls back to PrimaryKey (the common
+	// case: the entity Key is the row's primary key), so a config that only
+	// sets primaryKey honors deletes for free. See DeleteKeyColumn.
+	KeyColumn string
+}
+
+// DeleteKeyColumn returns the column a delete binds the entity Key against:
+// KeyColumn if set, otherwise PrimaryKey. Empty means the syncable cannot
+// generate a delete (neither was configured) — Init leaves the delete
+// statement unprepared and Sync rejects deletes as a permanent
+// misconfiguration rather than silently dropping the erasure.
+func (c *Config) DeleteKeyColumn() string {
+	if c.KeyColumn != "" {
+		return c.KeyColumn
+	}
+	return c.PrimaryKey
 }
 
 type Insert struct {
 	SQL      string
 	Stmt     *gosql.Stmt
 	JsonPath []string
+}
+
+// Delete is the prepared `DELETE FROM <table> WHERE <keyCol> = ?` statement.
+// Its single placeholder binds the entity's Key, so honoring a delete needs
+// no JSON payload (the delete sentinel is never unmarshaled).
+type Delete struct {
+	SQL  string
+	Stmt *gosql.Stmt
 }

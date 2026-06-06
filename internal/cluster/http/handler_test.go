@@ -411,6 +411,85 @@ func TestAddProposal_MultipleEntities(t *testing.T) {
 	require.Equal(t, 2, len(p.Entities))
 }
 
+// TestAddProposal_Delete is the intake half of right-to-be-forgotten: a
+// `delete: true` entity builds a delete (tombstone) proposal rather than an
+// upsert, so a downstream syncable removes the keyed record.
+func TestAddProposal_Delete(t *testing.T) {
+	h, fake := setupTest()
+
+	fake.ResolveTypeReturns(&cluster.Type{ID: "t1", Name: "TestType"}, nil)
+
+	body := `{"entities": [{"typeId": "t1", "key": "k1", "delete": true}]}`
+	req := httptest.NewRequest("POST", "http://localhost/v1/proposal", strings.NewReader(body))
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+
+	require.Equal(t, 200, w.Result().StatusCode)
+	require.Equal(t, 1, fake.ProposeCallCount())
+
+	_, p := fake.ProposeArgsForCall(0)
+	require.Equal(t, 1, len(p.Entities))
+	require.Equal(t, "t1", p.Entities[0].Type.ID)
+	require.Equal(t, "k1", string(p.Entities[0].Key))
+	require.True(t, p.Entities[0].IsDelete())
+}
+
+// TestAddProposal_Delete_SkipsSchemaValidation: a delete carries no payload, so
+// even a type with schema validation enabled must accept a delete with no data.
+func TestAddProposal_Delete_SkipsSchemaValidation(t *testing.T) {
+	h, fake := setupTest()
+
+	schema := []byte(`{
+		"type": "object",
+		"properties": {"name": {"type": "string"}},
+		"required": ["name"]
+	}`)
+	fake.ResolveTypeReturns(&cluster.Type{
+		ID:         "t1",
+		Name:       "Person",
+		SchemaType: "JSONSchema",
+		Schema:     schema,
+		Validate:   cluster.ValidateSchema,
+	}, nil)
+
+	body := `{"entities": [{"typeId": "t1", "key": "k1", "delete": true}]}`
+	req := httptest.NewRequest("POST", "http://localhost/v1/proposal", strings.NewReader(body))
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+
+	require.Equal(t, 200, w.Result().StatusCode)
+	require.Equal(t, 1, fake.ProposeCallCount())
+	_, p := fake.ProposeArgsForCall(0)
+	require.True(t, p.Entities[0].IsDelete())
+}
+
+// TestAddProposal_MixedUpsertAndDelete: one proposal may carry both upserts and
+// deletes; each entity is built according to its own delete flag.
+func TestAddProposal_MixedUpsertAndDelete(t *testing.T) {
+	h, fake := setupTest()
+
+	fake.ResolveTypeReturnsOnCall(0, &cluster.Type{ID: "t1", Name: "Type1"}, nil)
+	fake.ResolveTypeReturnsOnCall(1, &cluster.Type{ID: "t1", Name: "Type1"}, nil)
+
+	body := `{"entities": [
+		{"typeId": "t1", "key": "k1", "data": {"a": 1}},
+		{"typeId": "t1", "key": "k2", "delete": true}
+	]}`
+	req := httptest.NewRequest("POST", "http://localhost/v1/proposal", strings.NewReader(body))
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+
+	require.Equal(t, 200, w.Result().StatusCode)
+	require.Equal(t, 1, fake.ProposeCallCount())
+	_, p := fake.ProposeArgsForCall(0)
+	require.Equal(t, 2, len(p.Entities))
+	require.False(t, p.Entities[0].IsDelete())
+	require.True(t, p.Entities[1].IsDelete())
+}
+
 func TestAddProposal_BadJSON(t *testing.T) {
 	h, _ := setupTest()
 

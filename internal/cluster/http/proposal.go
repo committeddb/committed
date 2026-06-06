@@ -27,6 +27,12 @@ type AddEntityRequest struct {
 	TypeID string          `json:"typeId"`
 	Key    string          `json:"key"`
 	Data   json.RawMessage `json:"data"`
+	// Delete issues a tombstone for (typeId, key) instead of an upsert.
+	// A delete carries no payload: Data is ignored, schema validation is
+	// skipped (there is nothing to validate), and the syncable removes the
+	// downstream record keyed by Key. This is the intake half of
+	// right-to-be-forgotten — see the cluster.Syncable contract.
+	Delete bool `json:"delete"`
 }
 
 func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
@@ -43,6 +49,13 @@ func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
 		if err != nil {
 			writeErrorf(w, httpgo.StatusBadRequest, "type_not_found", "type %q not found", e.TypeID)
 			return
+		}
+
+		// A delete has no payload, so there is nothing to validate against
+		// the schema; build the tombstone entity and move on.
+		if e.Delete {
+			es = append(es, cluster.NewDeleteEntity(t, []byte(e.Key)))
+			continue
 		}
 
 		v, err := h.compiledValidator(t)
