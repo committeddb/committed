@@ -155,7 +155,7 @@ require (
 	github.com/go-mysql-org/go-mysql v1.9.1
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
-	github.com/jackc/pgx/v5 v5.9.1
+	github.com/jackc/pgx/v5 v5.9.2
 	github.com/magiconair/properties v1.8.10 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/pressly/goose/v3 v3.22.1

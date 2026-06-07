@@ -80,3 +80,42 @@ jobs:
           go-version: "1.26.x"
           check-latest: true
       - run: make test/adversarial
+
+  # Scan the runtime image for known-vulnerable OS packages and Go
+  # modules. Trivy reads the GitHub Advisory DB + NVD — the same advisory
+  # sources Docker Hub's Scout uses — so this catches CVEs that
+  # govulncheck's Go-only vuln DB misses (e.g. pgx GHSA-j88v-2chj-qfwx /
+  # CVE-2026-41889, which reached Docker Hub before we caught it).
+  # Building the image first means we scan exactly what ships: the static
+  # Go binary on distroless, the same two layers Scout sees.
+  #
+  # Gate: fail on any *fixable* vulnerability, all severities. This
+  # mirrors Scout, which lists every fixable CVE regardless of rank —
+  # note the pgx CVE that motivated this job is only rated LOW (CVSS 2.3)
+  # by NVD/Trivy, so a HIGH/CRITICAL-only gate would have missed it.
+  # ignore-unfixed keeps un-actionable findings (no upstream patch yet)
+  # from blocking work, so every failure here is a dependency/base bump
+  # away from green. To make it less strict, trim `severity` (e.g. to
+  # CRITICAL,HIGH) or set exit-code "0" to report-only.
+  vuln-scan:
+    name: vulnerability scan (trivy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build runtime image
+        run: make docker/build IMAGE=committed:scan
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        env:
+          # Authenticated DB pulls from ghcr.io avoid anonymous
+          # rate-limit flakes; GITHUB_TOKEN is provided automatically.
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          image-ref: committed:scan
+          scanners: vuln
+          vuln-type: os,library
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
