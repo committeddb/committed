@@ -63,6 +63,7 @@ bootstrap a configuration.
 COMMITTED_NODE_ID=4
 COMMITTED_JOIN=true
 COMMITTED_PEER_URL=http://n4:9022
+COMMITTED_API_URL=http://n4:8080   # advertised API address (see "Observing membership")
 COMMITTED_PEERS=1=http://n1:9022,2=http://n2:9022,3=http://n3:9022,4=http://n4:9022
 COMMITTED_DATA_DIR=/var/lib/committed   # a fresh, empty data dir
 ```
@@ -100,6 +101,46 @@ request* is allowed — it finalizes the change and then leaves.
 > still requires both to be healthy to commit — plan capacity
 > accordingly.
 
+## Observing membership
+
+`GET /v1/membership` lists the cluster: each member's role and the
+leader-observed **matched index** (how far that member has replicated),
+alongside the snapshot's leader, term, commit, and applied indices.
+
+```json
+{
+  "node_id": 1, "leader_id": 1, "term": 5,
+  "commit_index": 1234, "applied_index": 1234, "is_leader": true,
+  "members": [
+    { "id": 1, "role": "voter", "match_index": 1234, "api_url": "http://n1:8080" },
+    { "id": 2, "role": "voter", "match_index": 1230, "api_url": "http://n2:8080" }
+  ]
+}
+```
+
+The per-member `match_index` is **leader-only** state in raft, so the read
+is always answered by the leader: a request that lands on a follower is
+transparently **proxied to the leader**. This is what lets a caller behind
+a load balancer (a single VIP, no per-node addressing) get a
+leader-truthful answer from *any* node.
+
+For the proxy to reach the leader, each node advertises its HTTP API base
+URL via **`COMMITTED_API_URL`** (e.g. `http://n1:8080`) — the API-plane
+sibling of `COMMITTED_PEER_URL`. Each node self-announces its own URL into
+the cluster on startup, so set it on **every** node (bootstrap and joined
+alike). It survives restarts and snapshots; you only ever set each node's
+own.
+
+If the leader has not announced an API URL (`COMMITTED_API_URL` unset), or
+no leader is currently known, a follower can't proxy and returns **503**
+with the believed leader id in the error details (`{"details":{"leader_id":
+N}}`) — target node `N` directly, or retry.
+
+> **Catch-up is the caller's call.** The server reports `match_index` and
+> `commit_index` but does not judge "caught up" — a caller compares them
+> with its own threshold. (This is the observability the learner-promotion
+> workflow builds on.)
+
 ## CLI reference
 
 ```
@@ -121,20 +162,25 @@ same way the `healthcheck` probe does).
 
 ## HTTP API
 
-The CLI is a thin wrapper over two authenticated endpoints under `/v1`:
+Membership lives under `/v1` (all authenticated):
 
 ```
+GET    /v1/membership            → membership + replication progress (see "Observing membership")
 POST   /v1/membership            {"id": 4, "url": "http://n4:9022"}
 DELETE /v1/membership/{id}
 ```
 
-Both return `204 No Content` on success. Error responses use the standard
-structured JSON body (`{"code", "message"}`):
+The `member add`/`remove` CLI commands are thin wrappers over `POST`/`DELETE`;
+the `GET` is consumed directly over HTTP (by an orchestrator's scheduler, or
+ad hoc with `curl`).
+
+`POST`/`DELETE` return `204 No Content` on success. Error responses use the
+standard structured JSON body (`{"code", "message"}`):
 
 | Status | When                                                                       |
 |--------|----------------------------------------------------------------------------|
 | `400`  | malformed request — zero/missing id, empty url on add, non-numeric id      |
-| `503`  | the change was submitted but not confirmed before the request deadline (this node likely cannot reach a quorum); it may still take effect once quorum returns |
+| `503`  | a write: submitted but not confirmed before the deadline (this node likely cannot reach a quorum); may still take effect once quorum returns. A `GET`: no known leader, or the leader's API address is unknown — retry or target the leader directly |
 | `500`  | unexpected internal error                                                  |
 
 ## Notes

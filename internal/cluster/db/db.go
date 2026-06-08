@@ -131,6 +131,14 @@ type DB struct {
 	// proposes a Scrub command. See scrubScheduler / maybeProposeScrub.
 	scrubInterval time.Duration
 
+	// advertisedAPIURL is this node's advertised HTTP API base URL, announced
+	// into the replicated memberAPIURLs map by announceAPIURL. Empty disables
+	// the announce. announceInterval is the poll cadence that goroutine uses
+	// while waiting for this node to become a member with a reachable leader
+	// (derived from tickInterval at New time). See raft-leader-read-proxy.md.
+	advertisedAPIURL string
+	announceInterval time.Duration
+
 	maxProposalBytes uint64
 
 	logger  *zap.Logger
@@ -219,6 +227,8 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		ingestWorkers:                  make(map[string]*workerHandle),
 		syncStuckThreshold:             cfg.syncStuckThreshold,
 		scrubInterval:                  cfg.scrubInterval,
+		advertisedAPIURL:               cfg.advertisedAPIURL,
+		announceInterval:               cfg.tickInterval,
 		ingestSupervisorStates:         make(map[string]*ingestSupervisorState),
 		ingestSupervisorInitialBackoff: cfg.ingestSupervisorInitialBackoff,
 		ingestSupervisorMaxBackoff:     cfg.ingestSupervisorMaxBackoff,
@@ -255,6 +265,7 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 	go db.listenForSyncables(sync)
 	go db.listenForIngestables(ingest)
 	go db.scrubScheduler()
+	go db.announceAPIURL()
 
 	return db
 }

@@ -92,6 +92,18 @@ type Cluster interface {
 	// taken effect or ctx fires. Partition-safe and callable on any node.
 	// Powers DELETE /membership/{id}.
 	RemoveMember(ctx context.Context, id uint64) error
+	// Membership returns a snapshot of the raft cluster configuration and
+	// replication progress as observed by this node — voters/learners and,
+	// when this node is the leader, each member's matched index. Powers
+	// GET /v1/membership, which the HTTP layer proxies to the leader so the
+	// per-member progress is populated regardless of which node a caller
+	// (behind a load balancer) reaches. See cluster.Membership.
+	Membership() Membership
+	// MemberAPIURL returns the advertised HTTP API base URL node id
+	// self-announced (and whether one is known). Backed by the replicated
+	// address map, so it answers on any node — the leader-read proxy uses it
+	// to resolve the leader's API address from a follower.
+	MemberAPIURL(id uint64) (string, bool)
 	// ID returns the raft node ID of this node. Used by GET /node/status
 	// to report which node answered (load-bearing behind a load balancer).
 	ID() uint64

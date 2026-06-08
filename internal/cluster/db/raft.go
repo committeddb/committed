@@ -295,6 +295,16 @@ func (n *Raft) applyConfChange(cc raftpb.ConfChangeI, ccCtx []byte) {
 			}
 		case raftpb.ConfChangeRemoveNode:
 			n.transport.RemovePeer(ch.NodeID)
+			// Drop the removed node's announced API URL so the
+			// memberAPIURLs map doesn't accumulate stale entries across
+			// the add/remove churn of rebalancing. Best-effort cleanup:
+			// a stale entry is harmless (the node is gone from the
+			// configuration, so it never surfaces in membership reads),
+			// so a delete failure is logged, not fatal.
+			if err := n.storage.DeleteMemberAPIURL(ch.NodeID); err != nil {
+				n.logger.Error("conf change: delete member api url",
+					zap.Uint64("peer", ch.NodeID), zap.Error(err))
+			}
 		}
 	}
 }
@@ -309,6 +319,47 @@ func (n *Raft) applyConfChange(cc raftpb.ConfChangeI, ccCtx []byte) {
 func (n *Raft) memberStatus() (members map[uint64]struct{}, joint bool) {
 	voters := n.node.Status().Config.Voters
 	return voters.IDs(), len(voters[1]) > 0
+}
+
+// memberView is one member's role and (leader-only) replication progress as
+// observed by this node, for the GET /v1/membership read.
+type memberView struct {
+	id       uint64
+	learner  bool
+	match    uint64
+	hasMatch bool
+}
+
+// membershipView returns a single consistent snapshot of this node's raft
+// status for the membership read: the leader id, current term, commit index,
+// whether this node is the leader, and one memberView per voter and learner.
+//
+// The per-member matched index is populated only when this node is the leader
+// — etcd raft keeps a follower-progress tracker only on the leader (Status().
+// Progress is empty elsewhere). The HTTP layer proxies GET /v1/membership to
+// the leader so the answer always carries progress; a follower-built snapshot
+// still reports roles correctly, just with hasMatch=false.
+func (n *Raft) membershipView() (leaderID, term, commit uint64, isLeader bool, members []memberView) {
+	if n.node == nil {
+		return 0, 0, 0, false, nil
+	}
+	st := n.node.Status()
+
+	add := func(id uint64, learner bool) {
+		mv := memberView{id: id, learner: learner}
+		if pr, ok := st.Progress[id]; ok {
+			mv.match = pr.Match
+			mv.hasMatch = true
+		}
+		members = append(members, mv)
+	}
+	for id := range st.Config.Voters.IDs() {
+		add(id, false)
+	}
+	for id := range st.Config.Learners {
+		add(id, true)
+	}
+	return st.Lead, st.Term, st.Commit, st.RaftState == raft.StateLeader, members
 }
 
 func (n *Raft) serveChannels() {

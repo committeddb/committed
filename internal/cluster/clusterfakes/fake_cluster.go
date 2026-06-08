@@ -200,6 +200,29 @@ type FakeCluster struct {
 	linearizableReadReturnsOnCall map[int]struct {
 		result1 error
 	}
+	MemberAPIURLStub        func(uint64) (string, bool)
+	memberAPIURLMutex       sync.RWMutex
+	memberAPIURLArgsForCall []struct {
+		arg1 uint64
+	}
+	memberAPIURLReturns struct {
+		result1 string
+		result2 bool
+	}
+	memberAPIURLReturnsOnCall map[int]struct {
+		result1 string
+		result2 bool
+	}
+	MembershipStub        func() cluster.Membership
+	membershipMutex       sync.RWMutex
+	membershipArgsForCall []struct {
+	}
+	membershipReturns struct {
+		result1 cluster.Membership
+	}
+	membershipReturnsOnCall map[int]struct {
+		result1 cluster.Membership
+	}
 	ProposeStub        func(context.Context, *cluster.Proposal) error
 	proposeMutex       sync.RWMutex
 	proposeArgsForCall []struct {
@@ -1396,6 +1419,123 @@ func (fake *FakeCluster) LinearizableReadReturnsOnCall(i int, result1 error) {
 	}
 	fake.linearizableReadReturnsOnCall[i] = struct {
 		result1 error
+	}{result1}
+}
+
+func (fake *FakeCluster) MemberAPIURL(arg1 uint64) (string, bool) {
+	fake.memberAPIURLMutex.Lock()
+	ret, specificReturn := fake.memberAPIURLReturnsOnCall[len(fake.memberAPIURLArgsForCall)]
+	fake.memberAPIURLArgsForCall = append(fake.memberAPIURLArgsForCall, struct {
+		arg1 uint64
+	}{arg1})
+	stub := fake.MemberAPIURLStub
+	fakeReturns := fake.memberAPIURLReturns
+	fake.recordInvocation("MemberAPIURL", []interface{}{arg1})
+	fake.memberAPIURLMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeCluster) MemberAPIURLCallCount() int {
+	fake.memberAPIURLMutex.RLock()
+	defer fake.memberAPIURLMutex.RUnlock()
+	return len(fake.memberAPIURLArgsForCall)
+}
+
+func (fake *FakeCluster) MemberAPIURLCalls(stub func(uint64) (string, bool)) {
+	fake.memberAPIURLMutex.Lock()
+	defer fake.memberAPIURLMutex.Unlock()
+	fake.MemberAPIURLStub = stub
+}
+
+func (fake *FakeCluster) MemberAPIURLArgsForCall(i int) uint64 {
+	fake.memberAPIURLMutex.RLock()
+	defer fake.memberAPIURLMutex.RUnlock()
+	argsForCall := fake.memberAPIURLArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeCluster) MemberAPIURLReturns(result1 string, result2 bool) {
+	fake.memberAPIURLMutex.Lock()
+	defer fake.memberAPIURLMutex.Unlock()
+	fake.MemberAPIURLStub = nil
+	fake.memberAPIURLReturns = struct {
+		result1 string
+		result2 bool
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) MemberAPIURLReturnsOnCall(i int, result1 string, result2 bool) {
+	fake.memberAPIURLMutex.Lock()
+	defer fake.memberAPIURLMutex.Unlock()
+	fake.MemberAPIURLStub = nil
+	if fake.memberAPIURLReturnsOnCall == nil {
+		fake.memberAPIURLReturnsOnCall = make(map[int]struct {
+			result1 string
+			result2 bool
+		})
+	}
+	fake.memberAPIURLReturnsOnCall[i] = struct {
+		result1 string
+		result2 bool
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) Membership() cluster.Membership {
+	fake.membershipMutex.Lock()
+	ret, specificReturn := fake.membershipReturnsOnCall[len(fake.membershipArgsForCall)]
+	fake.membershipArgsForCall = append(fake.membershipArgsForCall, struct {
+	}{})
+	stub := fake.MembershipStub
+	fakeReturns := fake.membershipReturns
+	fake.recordInvocation("Membership", []interface{}{})
+	fake.membershipMutex.Unlock()
+	if stub != nil {
+		return stub()
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeCluster) MembershipCallCount() int {
+	fake.membershipMutex.RLock()
+	defer fake.membershipMutex.RUnlock()
+	return len(fake.membershipArgsForCall)
+}
+
+func (fake *FakeCluster) MembershipCalls(stub func() cluster.Membership) {
+	fake.membershipMutex.Lock()
+	defer fake.membershipMutex.Unlock()
+	fake.MembershipStub = stub
+}
+
+func (fake *FakeCluster) MembershipReturns(result1 cluster.Membership) {
+	fake.membershipMutex.Lock()
+	defer fake.membershipMutex.Unlock()
+	fake.MembershipStub = nil
+	fake.membershipReturns = struct {
+		result1 cluster.Membership
+	}{result1}
+}
+
+func (fake *FakeCluster) MembershipReturnsOnCall(i int, result1 cluster.Membership) {
+	fake.membershipMutex.Lock()
+	defer fake.membershipMutex.Unlock()
+	fake.MembershipStub = nil
+	if fake.membershipReturnsOnCall == nil {
+		fake.membershipReturnsOnCall = make(map[int]struct {
+			result1 cluster.Membership
+		})
+	}
+	fake.membershipReturnsOnCall[i] = struct {
+		result1 cluster.Membership
 	}{result1}
 }
 
@@ -2624,6 +2764,10 @@ func (fake *FakeCluster) Invocations() map[string][][]interface{} {
 	defer fake.leaderMutex.RUnlock()
 	fake.linearizableReadMutex.RLock()
 	defer fake.linearizableReadMutex.RUnlock()
+	fake.memberAPIURLMutex.RLock()
+	defer fake.memberAPIURLMutex.RUnlock()
+	fake.membershipMutex.RLock()
+	defer fake.membershipMutex.RUnlock()
 	fake.proposeMutex.RLock()
 	defer fake.proposeMutex.RUnlock()
 	fake.proposeDatabaseMutex.RLock()

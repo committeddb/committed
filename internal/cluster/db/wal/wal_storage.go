@@ -44,6 +44,14 @@ var (
 	// it to physically remove a subject's PII from the permanent event log. See
 	// tombstone.go for the encoding and the determinism rationale.
 	eventTombstoneBucket = []byte("eventTombstones")
+	// memberAPIURLBucket maps a raft node id (8 big-endian bytes, the key
+	// cluster.NodeAPIURLKey produces) to a marshaled cluster.NodeAPIURL — the
+	// node's self-announced advertised HTTP API base URL. Written from the
+	// apply path (handleNodeAPIURL) so the mapping replicates to every node and
+	// rides along in snapshots; read by the leader-read proxy to resolve a
+	// peer's (in particular the leader's) API address. See member_api_url.go
+	// and raft-leader-read-proxy.md.
+	memberAPIURLBucket = []byte("memberAPIURLs")
 )
 
 var (
@@ -107,6 +115,7 @@ var internalEntities = []internalEntity{
 	{cluster.IsSyncableSkipRequest, "handleSyncableSkipRequest", syncableSkipRequestBucket, (*Storage).handleSyncableSkipRequest},
 	{cluster.IsIngestablePosition, "saveIngestablePosition", ingestablePositionBucket, (*Storage).saveIngestablePosition},
 	{cluster.IsScrub, "handleScrub", pendingScrubBucket, (*Storage).handleScrub},
+	{cluster.IsNodeAPIURL, "handleNodeAPIURL", memberAPIURLBucket, (*Storage).handleNodeAPIURL},
 }
 
 // buckets is every bbolt bucket Open must create: one per internal entity type

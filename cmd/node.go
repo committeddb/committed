@@ -54,6 +54,14 @@ image can be templated per-node by an orchestrator:
   COMMITTED_NODE_ID    raft node ID (default 1; must be unique and
                        present in COMMITTED_PEERS)
   COMMITTED_API_ADDR   HTTP API listen address (default ":8080")
+  COMMITTED_API_URL    this node's advertised HTTP API base URL, e.g.
+                       "http://n1:8080". Self-announced to the cluster so a
+                       follower can proxy a leader-only read
+                       (GET /v1/membership) to the leader — letting a caller
+                       behind a load balancer get a leader-truthful answer
+                       from any node. Unset disables the announce: such a
+                       read on a follower returns 503 + the leader id so the
+                       caller can target the leader directly.
   COMMITTED_DATA_DIR   data directory for WAL/state (default "./data")
   COMMITTED_PEER_URL   this node's advertised raft peer URL
                        (default "http://127.0.0.1:9022"); used when
@@ -205,6 +213,15 @@ image can be templated per-node by an orchestrator:
 			zap.L().Info("joining existing cluster (COMMITTED_JOIN set); membership will be learned from the leader")
 		}
 
+		// COMMITTED_API_URL is this node's advertised HTTP API base URL. When
+		// set, the node self-announces it so a follower can proxy a leader-only
+		// read (GET /v1/membership) to the leader. Unset leaves the node's API
+		// address unknown to the proxy (the documented degraded path).
+		if apiURL := os.Getenv("COMMITTED_API_URL"); apiURL != "" {
+			dbOpts = append(dbOpts, db.WithAdvertisedAPIURL(apiURL))
+			zap.L().Info("advertising API URL for leader-read proxying", zap.String("url", apiURL))
+		}
+
 		d := db.New(id, peers, s, p, sync, ingest, dbOpts...)
 		fmt.Printf("Raft Running...\n")
 
@@ -233,6 +250,22 @@ image can be templated per-node by an orchestrator:
 		// connection until the write timeout. See docs/consistency.md.
 		if d, ok := parseDurationEnv("COMMITTED_HTTP_READ_INDEX_TIMEOUT"); ok {
 			httpOpts = append(httpOpts, http.WithReadIndexTimeout(d))
+		}
+
+		// The leader-read proxy (GET /v1/membership on a follower) calls a
+		// peer's API. When that API serves TLS with a private CA or
+		// self-signed certs, the proxy client needs the trust anchor (and,
+		// under mTLS, a client cert); loadProxyClient builds it from the same
+		// COMMITTED_HTTP_TLS_* env vars. Nil → the http layer's default client
+		// (system-root TLS), which is correct for plaintext or publicly-signed
+		// peer APIs.
+		proxyClient, err := loadProxyClient()
+		if err != nil {
+			// G706 false positive: values come from operator-supplied env vars.
+			log.Fatalf("leader-read proxy client: %v", err) //nolint:gosec // G706
+		}
+		if proxyClient != nil {
+			httpOpts = append(httpOpts, http.WithProxyClient(proxyClient))
 		}
 
 		h := http.New(d, httpOpts...)
@@ -703,6 +736,70 @@ func loadAPITLSConfig() (*tls.Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// proxyClientTimeout bounds the follower→leader hop the leader-read proxy
+// makes for GET /v1/membership. A few seconds is plenty for a leader's local
+// membership read, and staying under the server WriteTimeout means a wedged
+// leader yields a clean 503 rather than holding the caller's connection.
+const proxyClientTimeout = 5 * time.Second
+
+// loadProxyClient builds the HTTP client the leader-read proxy uses for the
+// follower→leader hop. It returns (nil, nil) when no TLS customization is
+// needed — the http layer then uses its default client (system-root TLS,
+// bounded timeout), which is correct for plaintext peer APIs or ones whose
+// certs chain to a public CA.
+//
+// For a TLS cluster with a private CA or self-signed certs the operator sets:
+//   - COMMITTED_HTTP_TLS_CA_FILE — CA bundle to trust when dialing a peer's
+//     API as a client (typically the same CA that signs the server certs).
+//   - COMMITTED_HTTP_TLS_INSECURE_SKIP_VERIFY — skip verification entirely
+//     (self-signed without a shared CA; the same escape hatch as the
+//     `member --insecure` flag).
+//
+// Under mTLS (a peer API configured with COMMITTED_HTTP_TLS_CLIENT_CA_FILE)
+// the node also presents its own COMMITTED_HTTP_TLS_CERT_FILE/KEY_FILE as the
+// client cert so the forwarded request is accepted. Returning (cfg, err)
+// instead of log.Fatalf lets node_test.go exercise the error cases directly,
+// matching loadAPITLSConfig.
+func loadProxyClient() (*nethttp.Client, error) {
+	caFile := os.Getenv("COMMITTED_HTTP_TLS_CA_FILE")
+	insecure := boolEnv("COMMITTED_HTTP_TLS_INSECURE_SKIP_VERIFY")
+	if caFile == "" && !insecure {
+		return nil, nil
+	}
+
+	tlsCfg := &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: insecure, //nolint:gosec // G402: operator opt-in via COMMITTED_HTTP_TLS_INSECURE_SKIP_VERIFY
+	}
+	if caFile != "" {
+		// G304 false positive: the path comes from an operator-set env var.
+		pem, err := os.ReadFile(caFile) //nolint:gosec // G304
+		if err != nil {
+			return nil, fmt.Errorf("read proxy CA file: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("proxy CA file %q contains no PEM certificates", caFile)
+		}
+		tlsCfg.RootCAs = pool
+	}
+	// Present our own cert as a client cert for peers whose API requires mTLS.
+	cert := os.Getenv("COMMITTED_HTTP_TLS_CERT_FILE")
+	key := os.Getenv("COMMITTED_HTTP_TLS_KEY_FILE")
+	if cert != "" && key != "" {
+		pair, err := tls.LoadX509KeyPair(cert, key)
+		if err != nil {
+			return nil, fmt.Errorf("load proxy client cert/key: %w", err)
+		}
+		tlsCfg.Certificates = []tls.Certificate{pair}
+	}
+
+	return &nethttp.Client{
+		Timeout:   proxyClientTimeout,
+		Transport: &nethttp.Transport{TLSClientConfig: tlsCfg},
+	}, nil
 }
 
 func dbParser() *syncsql.DBParser {

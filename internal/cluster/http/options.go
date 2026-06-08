@@ -1,6 +1,9 @@
 package http
 
-import "time"
+import (
+	httpgo "net/http"
+	"time"
+)
 
 // Option configures behaviour of New.
 type Option func(*options)
@@ -11,6 +14,7 @@ type options struct {
 	corsMethods      []string
 	corsHeaders      []string
 	readIndexTimeout time.Duration
+	proxyClient      *httpgo.Client
 }
 
 // WithBearerToken enables bearer-token authentication on every route
@@ -49,6 +53,20 @@ func WithReadIndexTimeout(d time.Duration) Option {
 	return func(o *options) {
 		if d > 0 {
 			o.readIndexTimeout = d
+		}
+	}
+}
+
+// WithProxyClient overrides the HTTP client used to proxy leader-only reads
+// (GET /v1/membership) from a follower to the leader. The default client uses
+// system-root TLS with defaultProxyTimeout; cmd/node.go passes a client
+// configured to trust the cluster's CA (or to skip verification for
+// self-signed peer certs) when the API serves TLS. A nil client keeps the
+// default.
+func WithProxyClient(c *httpgo.Client) Option {
+	return func(o *options) {
+		if c != nil {
+			o.proxyClient = c
 		}
 	}
 }

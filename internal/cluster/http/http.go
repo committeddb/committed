@@ -28,6 +28,11 @@ type HTTP struct {
 	schemas          sync.Map // schemaCacheKey → *jsonschema.Schema
 	bearerToken      string   // empty = no auth (dev mode)
 	readIndexTimeout time.Duration
+	// proxyClient performs the follower→leader hop for leaderRead-wrapped
+	// routes (GET /v1/membership). Defaults to a timeout-bounded client with
+	// system-root TLS; cmd/node.go overrides it via WithProxyClient to trust
+	// the cluster's CA or skip verification for self-signed peer certs.
+	proxyClient *http.Client
 }
 
 func New(c cluster.Cluster, opts ...Option) *HTTP {
@@ -68,7 +73,12 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 		readIndexTimeout = defaultReadIndexTimeout
 	}
 
-	h := &HTTP{r: r, c: c, bearerToken: o.bearerToken, readIndexTimeout: readIndexTimeout}
+	proxyClient := o.proxyClient
+	if proxyClient == nil {
+		proxyClient = &http.Client{Timeout: defaultProxyTimeout}
+	}
+
+	h := &HTTP{r: r, c: c, bearerToken: o.bearerToken, readIndexTimeout: readIndexTimeout, proxyClient: proxyClient}
 
 	if o.bearerToken != "" {
 		zap.L().Info("API bearer-token authentication enabled")
@@ -147,11 +157,16 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 			// /cluster/status for a future fan-out sibling.
 			r.Get("/node/status", h.NodeStatus)
 
-			// Live cluster membership. POST adds a voting node, DELETE
-			// removes one — both via joint-consensus (ConfChangeV2) raft
-			// reconfiguration. Authenticated like every other write. The
-			// node added via POST must first be started in join mode. See
+			// Live cluster membership. GET lists members with their roles
+			// and (leader-observed) replication progress; POST adds a voting
+			// node, DELETE removes one — both via joint-consensus
+			// (ConfChangeV2) raft reconfiguration. Authenticated like every
+			// other write. GET is leaderRead-wrapped so a follower proxies to
+			// the leader, giving a load-balanced caller a leader-truthful
+			// answer (per-member match index is leader-only state). The node
+			// added via POST must first be started in join mode. See
 			// docs/operations/membership.md.
+			r.Get("/membership", h.leaderRead(h.GetMembership))
 			r.Post("/membership", h.AddMember)
 			r.Delete("/membership/{id}", h.RemoveMember)
 		})

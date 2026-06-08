@@ -124,4 +124,16 @@ type Storage interface {
 	ActualAt(index uint64) (*cluster.Actual, error)
 	TypeVersions(id string) ([]cluster.VersionInfo, error)
 	TypeVersion(id string, version uint64) (*cluster.Configuration, error)
+	// MemberAPIURL returns the advertised HTTP API base URL node id
+	// self-announced (and whether one is known); MemberAPIURLs returns the
+	// whole id → URL map. Both read the replicated memberAPIURLs bucket, so
+	// any node answers identically — that's what lets a follower resolve the
+	// leader's API address to proxy a leader-only read. An un-announced node
+	// (no COMMITTED_API_URL) is absent, not an error.
+	MemberAPIURL(id uint64) (string, bool)
+	MemberAPIURLs() map[uint64]string
+	// DeleteMemberAPIURL drops a removed node's announced URL. Called from the
+	// membership-remove apply path so entries don't accumulate across the
+	// add/remove churn of rebalancing. Idempotent.
+	DeleteMemberAPIURL(id uint64) error
 }

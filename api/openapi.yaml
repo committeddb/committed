@@ -876,6 +876,47 @@ paths:
           $ref: '#/components/responses/InternalError'
 
   /v1/membership:
+    get:
+      tags: [membership]
+      summary: List cluster members with roles and replication progress
+      description: |
+        Returns the raft cluster configuration — each member's role
+        (`voter` / `learner`) and, for catch-up decisions, the leader-observed
+        matched index — plus the answering snapshot's leader, term, commit, and
+        applied indices.
+
+        Per-member `match_index` is leader-only state in raft, so this read is
+        answered by the leader: a request that lands on a follower is
+        transparently proxied to the leader, giving a caller behind a load
+        balancer a leader-truthful answer from any node. If the leader has not
+        announced an API address (`COMMITTED_API_URL` unset) or no leader is
+        known, the follower returns 503 with the believed `leader_id` in the
+        error details so the caller can target the leader directly.
+
+        A caller decides a member is "caught up" by comparing its `match_index`
+        against `commit_index` with its own threshold; the server does not
+        judge readiness. See docs/operations/membership.md.
+      operationId: getMembership
+      responses:
+        '200':
+          description: The current membership and replication progress.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MembershipResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          description: |
+            No leader is known, or the leader's API address is unknown, so a
+            leader-truthful answer can't be produced here. The error details
+            carry `leader_id`. Retry, or target the leader directly.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
     post:
       tags: [membership]
       summary: Add a voting node to the cluster
@@ -1238,6 +1279,78 @@ components:
             members will dial. Raft replicates only node ids, not addresses,
             so the url must be supplied here.
           examples: ["http://n4:9022"]
+
+    MembershipResponse:
+      type: object
+      required: [node_id, leader_id, term, commit_index, applied_index, is_leader, members]
+      properties:
+        node_id:
+          type: integer
+          format: int64
+          description: Raft node id that produced this snapshot.
+        leader_id:
+          type: integer
+          format: int64
+          description: Raft leader this node believes in (0 if none known).
+        term:
+          type: integer
+          format: int64
+          description: Current raft term.
+        commit_index:
+          type: integer
+          format: int64
+          description: |
+            Highest committed raft index — the catch-up target a caller
+            compares a member's match_index against.
+        applied_index:
+          type: integer
+          format: int64
+          description: How far this node has applied committed entries.
+        is_leader:
+          type: boolean
+          description: Whether this node is the leader (and thus whether member match_index values are populated).
+        members:
+          type: array
+          items:
+            $ref: '#/components/schemas/Member'
+      example:
+        node_id: 1
+        leader_id: 1
+        term: 5
+        commit_index: 1234
+        applied_index: 1234
+        is_leader: true
+        members:
+          - { id: 1, role: voter, match_index: 1234, api_url: "http://n1:8080" }
+          - { id: 4, role: learner, match_index: 1200, api_url: "http://n4:8080" }
+
+    Member:
+      type: object
+      required: [id, role]
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: Raft node id.
+        role:
+          type: string
+          enum: [voter, learner]
+          description: |
+            voter — counts toward quorum; learner — replicates the log but does
+            not vote. (Learners are added by a later change; today every member
+            is a voter.)
+        match_index:
+          type: integer
+          format: int64
+          description: |
+            Highest log index the leader has confirmed this member replicated.
+            Present only on a leader-produced snapshot (the read is proxied to
+            the leader, so it is normally populated).
+        api_url:
+          type: string
+          description: |
+            Member's advertised HTTP API base URL, as self-announced. Omitted
+            when the member has not announced one (no COMMITTED_API_URL).
 
     AddProposalRequest:
       type: object

@@ -136,6 +136,17 @@ type FakeStorage struct {
 		result1 []*cluster.Configuration
 		result2 error
 	}
+	DeleteMemberAPIURLStub        func(uint64) error
+	deleteMemberAPIURLMutex       sync.RWMutex
+	deleteMemberAPIURLArgsForCall []struct {
+		arg1 uint64
+	}
+	deleteMemberAPIURLReturns struct {
+		result1 error
+	}
+	deleteMemberAPIURLReturnsOnCall map[int]struct {
+		result1 error
+	}
 	EntriesStub        func(uint64, uint64, uint64) ([]raftpb.Entry, error)
 	entriesMutex       sync.RWMutex
 	entriesArgsForCall []struct {
@@ -262,6 +273,29 @@ type FakeStorage struct {
 	lastIndexReturnsOnCall map[int]struct {
 		result1 uint64
 		result2 error
+	}
+	MemberAPIURLStub        func(uint64) (string, bool)
+	memberAPIURLMutex       sync.RWMutex
+	memberAPIURLArgsForCall []struct {
+		arg1 uint64
+	}
+	memberAPIURLReturns struct {
+		result1 string
+		result2 bool
+	}
+	memberAPIURLReturnsOnCall map[int]struct {
+		result1 string
+		result2 bool
+	}
+	MemberAPIURLsStub        func() map[uint64]string
+	memberAPIURLsMutex       sync.RWMutex
+	memberAPIURLsArgsForCall []struct {
+	}
+	memberAPIURLsReturns struct {
+		result1 map[uint64]string
+	}
+	memberAPIURLsReturnsOnCall map[int]struct {
+		result1 map[uint64]string
 	}
 	NodeStub        func(string) uint64
 	nodeMutex       sync.RWMutex
@@ -1135,6 +1169,67 @@ func (fake *FakeStorage) DatabasesReturnsOnCall(i int, result1 []*cluster.Config
 	}{result1, result2}
 }
 
+func (fake *FakeStorage) DeleteMemberAPIURL(arg1 uint64) error {
+	fake.deleteMemberAPIURLMutex.Lock()
+	ret, specificReturn := fake.deleteMemberAPIURLReturnsOnCall[len(fake.deleteMemberAPIURLArgsForCall)]
+	fake.deleteMemberAPIURLArgsForCall = append(fake.deleteMemberAPIURLArgsForCall, struct {
+		arg1 uint64
+	}{arg1})
+	stub := fake.DeleteMemberAPIURLStub
+	fakeReturns := fake.deleteMemberAPIURLReturns
+	fake.recordInvocation("DeleteMemberAPIURL", []interface{}{arg1})
+	fake.deleteMemberAPIURLMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeStorage) DeleteMemberAPIURLCallCount() int {
+	fake.deleteMemberAPIURLMutex.RLock()
+	defer fake.deleteMemberAPIURLMutex.RUnlock()
+	return len(fake.deleteMemberAPIURLArgsForCall)
+}
+
+func (fake *FakeStorage) DeleteMemberAPIURLCalls(stub func(uint64) error) {
+	fake.deleteMemberAPIURLMutex.Lock()
+	defer fake.deleteMemberAPIURLMutex.Unlock()
+	fake.DeleteMemberAPIURLStub = stub
+}
+
+func (fake *FakeStorage) DeleteMemberAPIURLArgsForCall(i int) uint64 {
+	fake.deleteMemberAPIURLMutex.RLock()
+	defer fake.deleteMemberAPIURLMutex.RUnlock()
+	argsForCall := fake.deleteMemberAPIURLArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeStorage) DeleteMemberAPIURLReturns(result1 error) {
+	fake.deleteMemberAPIURLMutex.Lock()
+	defer fake.deleteMemberAPIURLMutex.Unlock()
+	fake.DeleteMemberAPIURLStub = nil
+	fake.deleteMemberAPIURLReturns = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *FakeStorage) DeleteMemberAPIURLReturnsOnCall(i int, result1 error) {
+	fake.deleteMemberAPIURLMutex.Lock()
+	defer fake.deleteMemberAPIURLMutex.Unlock()
+	fake.DeleteMemberAPIURLStub = nil
+	if fake.deleteMemberAPIURLReturnsOnCall == nil {
+		fake.deleteMemberAPIURLReturnsOnCall = make(map[int]struct {
+			result1 error
+		})
+	}
+	fake.deleteMemberAPIURLReturnsOnCall[i] = struct {
+		result1 error
+	}{result1}
+}
+
 func (fake *FakeStorage) Entries(arg1 uint64, arg2 uint64, arg3 uint64) ([]raftpb.Entry, error) {
 	fake.entriesMutex.Lock()
 	ret, specificReturn := fake.entriesReturnsOnCall[len(fake.entriesArgsForCall)]
@@ -1734,6 +1829,123 @@ func (fake *FakeStorage) LastIndexReturnsOnCall(i int, result1 uint64, result2 e
 		result1 uint64
 		result2 error
 	}{result1, result2}
+}
+
+func (fake *FakeStorage) MemberAPIURL(arg1 uint64) (string, bool) {
+	fake.memberAPIURLMutex.Lock()
+	ret, specificReturn := fake.memberAPIURLReturnsOnCall[len(fake.memberAPIURLArgsForCall)]
+	fake.memberAPIURLArgsForCall = append(fake.memberAPIURLArgsForCall, struct {
+		arg1 uint64
+	}{arg1})
+	stub := fake.MemberAPIURLStub
+	fakeReturns := fake.memberAPIURLReturns
+	fake.recordInvocation("MemberAPIURL", []interface{}{arg1})
+	fake.memberAPIURLMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeStorage) MemberAPIURLCallCount() int {
+	fake.memberAPIURLMutex.RLock()
+	defer fake.memberAPIURLMutex.RUnlock()
+	return len(fake.memberAPIURLArgsForCall)
+}
+
+func (fake *FakeStorage) MemberAPIURLCalls(stub func(uint64) (string, bool)) {
+	fake.memberAPIURLMutex.Lock()
+	defer fake.memberAPIURLMutex.Unlock()
+	fake.MemberAPIURLStub = stub
+}
+
+func (fake *FakeStorage) MemberAPIURLArgsForCall(i int) uint64 {
+	fake.memberAPIURLMutex.RLock()
+	defer fake.memberAPIURLMutex.RUnlock()
+	argsForCall := fake.memberAPIURLArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeStorage) MemberAPIURLReturns(result1 string, result2 bool) {
+	fake.memberAPIURLMutex.Lock()
+	defer fake.memberAPIURLMutex.Unlock()
+	fake.MemberAPIURLStub = nil
+	fake.memberAPIURLReturns = struct {
+		result1 string
+		result2 bool
+	}{result1, result2}
+}
+
+func (fake *FakeStorage) MemberAPIURLReturnsOnCall(i int, result1 string, result2 bool) {
+	fake.memberAPIURLMutex.Lock()
+	defer fake.memberAPIURLMutex.Unlock()
+	fake.MemberAPIURLStub = nil
+	if fake.memberAPIURLReturnsOnCall == nil {
+		fake.memberAPIURLReturnsOnCall = make(map[int]struct {
+			result1 string
+			result2 bool
+		})
+	}
+	fake.memberAPIURLReturnsOnCall[i] = struct {
+		result1 string
+		result2 bool
+	}{result1, result2}
+}
+
+func (fake *FakeStorage) MemberAPIURLs() map[uint64]string {
+	fake.memberAPIURLsMutex.Lock()
+	ret, specificReturn := fake.memberAPIURLsReturnsOnCall[len(fake.memberAPIURLsArgsForCall)]
+	fake.memberAPIURLsArgsForCall = append(fake.memberAPIURLsArgsForCall, struct {
+	}{})
+	stub := fake.MemberAPIURLsStub
+	fakeReturns := fake.memberAPIURLsReturns
+	fake.recordInvocation("MemberAPIURLs", []interface{}{})
+	fake.memberAPIURLsMutex.Unlock()
+	if stub != nil {
+		return stub()
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeStorage) MemberAPIURLsCallCount() int {
+	fake.memberAPIURLsMutex.RLock()
+	defer fake.memberAPIURLsMutex.RUnlock()
+	return len(fake.memberAPIURLsArgsForCall)
+}
+
+func (fake *FakeStorage) MemberAPIURLsCalls(stub func() map[uint64]string) {
+	fake.memberAPIURLsMutex.Lock()
+	defer fake.memberAPIURLsMutex.Unlock()
+	fake.MemberAPIURLsStub = stub
+}
+
+func (fake *FakeStorage) MemberAPIURLsReturns(result1 map[uint64]string) {
+	fake.memberAPIURLsMutex.Lock()
+	defer fake.memberAPIURLsMutex.Unlock()
+	fake.MemberAPIURLsStub = nil
+	fake.memberAPIURLsReturns = struct {
+		result1 map[uint64]string
+	}{result1}
+}
+
+func (fake *FakeStorage) MemberAPIURLsReturnsOnCall(i int, result1 map[uint64]string) {
+	fake.memberAPIURLsMutex.Lock()
+	defer fake.memberAPIURLsMutex.Unlock()
+	fake.MemberAPIURLsStub = nil
+	if fake.memberAPIURLsReturnsOnCall == nil {
+		fake.memberAPIURLsReturnsOnCall = make(map[int]struct {
+			result1 map[uint64]string
+		})
+	}
+	fake.memberAPIURLsReturnsOnCall[i] = struct {
+		result1 map[uint64]string
+	}{result1}
 }
 
 func (fake *FakeStorage) Node(arg1 string) uint64 {
@@ -2883,6 +3095,8 @@ func (fake *FakeStorage) Invocations() map[string][][]interface{} {
 	defer fake.databaseVersionsMutex.RUnlock()
 	fake.databasesMutex.RLock()
 	defer fake.databasesMutex.RUnlock()
+	fake.deleteMemberAPIURLMutex.RLock()
+	defer fake.deleteMemberAPIURLMutex.RUnlock()
 	fake.entriesMutex.RLock()
 	defer fake.entriesMutex.RUnlock()
 	fake.eventIndexMutex.RLock()
@@ -2903,6 +3117,10 @@ func (fake *FakeStorage) Invocations() map[string][][]interface{} {
 	defer fake.initialStateMutex.RUnlock()
 	fake.lastIndexMutex.RLock()
 	defer fake.lastIndexMutex.RUnlock()
+	fake.memberAPIURLMutex.RLock()
+	defer fake.memberAPIURLMutex.RUnlock()
+	fake.memberAPIURLsMutex.RLock()
+	defer fake.memberAPIURLsMutex.RUnlock()
 	fake.nodeMutex.RLock()
 	defer fake.nodeMutex.RUnlock()
 	fake.positionMutex.RLock()

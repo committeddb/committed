@@ -116,5 +116,10 @@ func TestScrubAutomaticRemovesPII(t *testing.T) {
 		return !up && tomb
 	}, 5*time.Second, 10*time.Millisecond, "automatic scrub did not remove alice's PII")
 
-	require.False(t, s.HasScrubBacklog(), "backlog should clear once the scrub completes")
+	// The backlog clears when the worker finishes advancing its "completed"
+	// bound, which can land a beat after the PII rewrite is observable above —
+	// poll rather than assert immediately, or this races under -race load.
+	require.Eventually(t, func() bool {
+		return !s.HasScrubBacklog()
+	}, 5*time.Second, 10*time.Millisecond, "backlog should clear once the scrub completes")
 }

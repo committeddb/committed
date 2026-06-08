@@ -154,3 +154,15 @@ message LogSyncableSkipRequest {
 message LogScrub {
     uint64 upperBound = 1;
 }
+
+// LogNodeAPIURL is a node's self-announcement of its advertised HTTP API
+// base URL (COMMITTED_API_URL), replicated so every node can discover the
+// address to reach any other — in particular the leader, for proxying
+// leader-only reads (GET /v1/membership) from a follower. Raft replicates
+// only node ids and raft peer URLs, never API addresses, so each node
+// announces its own once it joins. Upsert keyed by node id; the apply path
+// stores it in the memberAPIURLs bucket. See raft-leader-read-proxy.md.
+message LogNodeAPIURL {
+    uint64 nodeID = 1;
+    string apiURL = 2;
+}

@@ -273,6 +273,10 @@ func (StorageStubs) SyncableSkipRequest(id string) (cluster.SyncableSkipRequest,
 }
 func (StorageStubs) ActualAt(index uint64) (*cluster.Actual, error) { return nil, nil }
 
+func (StorageStubs) MemberAPIURL(id uint64) (string, bool) { return "", false }
+func (StorageStubs) MemberAPIURLs() map[uint64]string      { return nil }
+func (StorageStubs) DeleteMemberAPIURL(id uint64) error    { return nil }
+
 // TODO Pull this reader out and make it concrete instead of an interface
 type Reader struct {
 	sync.Mutex

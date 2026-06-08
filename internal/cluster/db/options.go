@@ -114,6 +114,15 @@ type options struct {
 	// § "Right-to-be-forgotten / deletes". Tests shorten it via
 	// WithScrubInterval; production leaves the default.
 	scrubInterval time.Duration
+
+	// advertisedAPIURL is this node's advertised HTTP API base URL (e.g.
+	// http://n1:8080), self-announced into the replicated memberAPIURLs map
+	// on startup so other nodes can resolve this node's API address to proxy
+	// leader-only reads. Empty (the default) means "don't announce" — the
+	// node's address stays unknown to the proxy, the documented degraded
+	// path. cmd/node.go wires COMMITTED_API_URL to this. See
+	// raft-leader-read-proxy.md.
+	advertisedAPIURL string
 }
 
 // defaultSyncStuckThreshold debounces the "stuck" signal: a syncable must be
@@ -261,6 +270,18 @@ func WithMaxProposalBytes(bytes uint64) Option {
 // COMMITTED_SCRUB_INTERVAL to this.
 func WithScrubInterval(d time.Duration) Option {
 	return func(o *options) { o.scrubInterval = d }
+}
+
+// WithAdvertisedAPIURL sets this node's advertised HTTP API base URL (e.g.
+// http://n1:8080). On startup the node self-announces it into the replicated
+// memberAPIURLs map so other nodes — in particular a follower proxying a
+// leader-only read (GET /v1/membership) — can resolve this node's API
+// address. Empty (the default) disables the announce: the node's address
+// stays unknown to the proxy and a leader-only read on a follower degrades to
+// 503 + leader_id. cmd/node.go wires COMMITTED_API_URL to this. See
+// raft-leader-read-proxy.md.
+func WithAdvertisedAPIURL(url string) Option {
+	return func(o *options) { o.advertisedAPIURL = url }
 }
 
 // WithTLSInfo enables mTLS on the raft peer transport. Pass a

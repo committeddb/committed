@@ -2,12 +2,74 @@ package http
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	httpgo "net/http"
 	"strconv"
 
 	"github.com/committeddb/committed/internal/cluster"
 )
+
+// MembershipResponse is the body of GET /v1/membership: the raft cluster
+// configuration and replication progress, as produced by the leader (the
+// route is leaderRead-wrapped, so a follower proxies to the leader and the
+// per-member match_index is always populated). CommitIndex is the catch-up
+// target; a caller decides a member is "caught up" by comparing its
+// match_index against commit_index with its own threshold.
+type MembershipResponse struct {
+	NodeID       uint64           `json:"node_id"`
+	LeaderID     uint64           `json:"leader_id"`
+	Term         uint64           `json:"term"`
+	CommitIndex  uint64           `json:"commit_index"`
+	AppliedIndex uint64           `json:"applied_index"`
+	IsLeader     bool             `json:"is_leader"`
+	Members      []MemberResponse `json:"members"`
+}
+
+// MemberResponse is one node's entry in MembershipResponse. MatchIndex is
+// omitted when unknown (a follower-built snapshot, before the leader-proxy
+// hop); APIURL is omitted when the member has not announced one.
+type MemberResponse struct {
+	ID         uint64  `json:"id"`
+	Role       string  `json:"role"`
+	MatchIndex *uint64 `json:"match_index,omitempty"`
+	APIURL     string  `json:"api_url,omitempty"`
+}
+
+// GetMembership handles GET /v1/membership. It returns the cluster
+// configuration (voters/learners), each member's leader-observed matched
+// index, and this answer's leader/term/commit/applied context. The route is
+// wrapped in leaderRead so the answer is always leader-truthful even when a
+// caller (behind a load balancer) reaches a follower. See
+// docs/operations/membership.md and raft-leader-read-proxy.md.
+func (h *HTTP) GetMembership(w httpgo.ResponseWriter, r *httpgo.Request) {
+	m := h.c.Membership()
+
+	resp := MembershipResponse{
+		NodeID:       m.NodeID,
+		LeaderID:     m.LeaderID,
+		Term:         m.Term,
+		CommitIndex:  m.CommitIndex,
+		AppliedIndex: m.AppliedIndex,
+		IsLeader:     m.IsLeader,
+		Members:      make([]MemberResponse, 0, len(m.Members)),
+	}
+	for _, mem := range m.Members {
+		resp.Members = append(resp.Members, MemberResponse{
+			ID:         mem.ID,
+			Role:       mem.Role,
+			MatchIndex: mem.MatchIndex,
+			APIURL:     mem.APIURL,
+		})
+	}
+
+	bs, err := json.Marshal(resp)
+	if err != nil {
+		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to marshal membership")
+		return
+	}
+	writeJson(w, bs)
+}
 
 // AddMemberRequest is the body of POST /v1/membership: add a voting node to
 // the raft cluster.
