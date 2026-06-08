@@ -15,6 +15,19 @@ type FakeCluster struct {
 		arg1 string
 		arg2 cluster.DatabaseParser
 	}
+	AddLearnerStub        func(context.Context, uint64, string) error
+	addLearnerMutex       sync.RWMutex
+	addLearnerArgsForCall []struct {
+		arg1 context.Context
+		arg2 uint64
+		arg3 string
+	}
+	addLearnerReturns struct {
+		result1 error
+	}
+	addLearnerReturnsOnCall map[int]struct {
+		result1 error
+	}
 	AddMemberStub        func(context.Context, uint64, string) error
 	addMemberMutex       sync.RWMutex
 	addMemberArgsForCall []struct {
@@ -222,6 +235,18 @@ type FakeCluster struct {
 	}
 	membershipReturnsOnCall map[int]struct {
 		result1 cluster.Membership
+	}
+	PromoteMemberStub        func(context.Context, uint64) error
+	promoteMemberMutex       sync.RWMutex
+	promoteMemberArgsForCall []struct {
+		arg1 context.Context
+		arg2 uint64
+	}
+	promoteMemberReturns struct {
+		result1 error
+	}
+	promoteMemberReturnsOnCall map[int]struct {
+		result1 error
 	}
 	ProposeStub        func(context.Context, *cluster.Proposal) error
 	proposeMutex       sync.RWMutex
@@ -500,6 +525,69 @@ func (fake *FakeCluster) AddDatabaseParserArgsForCall(i int) (string, cluster.Da
 	defer fake.addDatabaseParserMutex.RUnlock()
 	argsForCall := fake.addDatabaseParserArgsForCall[i]
 	return argsForCall.arg1, argsForCall.arg2
+}
+
+func (fake *FakeCluster) AddLearner(arg1 context.Context, arg2 uint64, arg3 string) error {
+	fake.addLearnerMutex.Lock()
+	ret, specificReturn := fake.addLearnerReturnsOnCall[len(fake.addLearnerArgsForCall)]
+	fake.addLearnerArgsForCall = append(fake.addLearnerArgsForCall, struct {
+		arg1 context.Context
+		arg2 uint64
+		arg3 string
+	}{arg1, arg2, arg3})
+	stub := fake.AddLearnerStub
+	fakeReturns := fake.addLearnerReturns
+	fake.recordInvocation("AddLearner", []interface{}{arg1, arg2, arg3})
+	fake.addLearnerMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2, arg3)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeCluster) AddLearnerCallCount() int {
+	fake.addLearnerMutex.RLock()
+	defer fake.addLearnerMutex.RUnlock()
+	return len(fake.addLearnerArgsForCall)
+}
+
+func (fake *FakeCluster) AddLearnerCalls(stub func(context.Context, uint64, string) error) {
+	fake.addLearnerMutex.Lock()
+	defer fake.addLearnerMutex.Unlock()
+	fake.AddLearnerStub = stub
+}
+
+func (fake *FakeCluster) AddLearnerArgsForCall(i int) (context.Context, uint64, string) {
+	fake.addLearnerMutex.RLock()
+	defer fake.addLearnerMutex.RUnlock()
+	argsForCall := fake.addLearnerArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3
+}
+
+func (fake *FakeCluster) AddLearnerReturns(result1 error) {
+	fake.addLearnerMutex.Lock()
+	defer fake.addLearnerMutex.Unlock()
+	fake.AddLearnerStub = nil
+	fake.addLearnerReturns = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *FakeCluster) AddLearnerReturnsOnCall(i int, result1 error) {
+	fake.addLearnerMutex.Lock()
+	defer fake.addLearnerMutex.Unlock()
+	fake.AddLearnerStub = nil
+	if fake.addLearnerReturnsOnCall == nil {
+		fake.addLearnerReturnsOnCall = make(map[int]struct {
+			result1 error
+		})
+	}
+	fake.addLearnerReturnsOnCall[i] = struct {
+		result1 error
+	}{result1}
 }
 
 func (fake *FakeCluster) AddMember(arg1 context.Context, arg2 uint64, arg3 string) error {
@@ -1536,6 +1624,68 @@ func (fake *FakeCluster) MembershipReturnsOnCall(i int, result1 cluster.Membersh
 	}
 	fake.membershipReturnsOnCall[i] = struct {
 		result1 cluster.Membership
+	}{result1}
+}
+
+func (fake *FakeCluster) PromoteMember(arg1 context.Context, arg2 uint64) error {
+	fake.promoteMemberMutex.Lock()
+	ret, specificReturn := fake.promoteMemberReturnsOnCall[len(fake.promoteMemberArgsForCall)]
+	fake.promoteMemberArgsForCall = append(fake.promoteMemberArgsForCall, struct {
+		arg1 context.Context
+		arg2 uint64
+	}{arg1, arg2})
+	stub := fake.PromoteMemberStub
+	fakeReturns := fake.promoteMemberReturns
+	fake.recordInvocation("PromoteMember", []interface{}{arg1, arg2})
+	fake.promoteMemberMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeCluster) PromoteMemberCallCount() int {
+	fake.promoteMemberMutex.RLock()
+	defer fake.promoteMemberMutex.RUnlock()
+	return len(fake.promoteMemberArgsForCall)
+}
+
+func (fake *FakeCluster) PromoteMemberCalls(stub func(context.Context, uint64) error) {
+	fake.promoteMemberMutex.Lock()
+	defer fake.promoteMemberMutex.Unlock()
+	fake.PromoteMemberStub = stub
+}
+
+func (fake *FakeCluster) PromoteMemberArgsForCall(i int) (context.Context, uint64) {
+	fake.promoteMemberMutex.RLock()
+	defer fake.promoteMemberMutex.RUnlock()
+	argsForCall := fake.promoteMemberArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2
+}
+
+func (fake *FakeCluster) PromoteMemberReturns(result1 error) {
+	fake.promoteMemberMutex.Lock()
+	defer fake.promoteMemberMutex.Unlock()
+	fake.PromoteMemberStub = nil
+	fake.promoteMemberReturns = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *FakeCluster) PromoteMemberReturnsOnCall(i int, result1 error) {
+	fake.promoteMemberMutex.Lock()
+	defer fake.promoteMemberMutex.Unlock()
+	fake.PromoteMemberStub = nil
+	if fake.promoteMemberReturnsOnCall == nil {
+		fake.promoteMemberReturnsOnCall = make(map[int]struct {
+			result1 error
+		})
+	}
+	fake.promoteMemberReturnsOnCall[i] = struct {
+		result1 error
 	}{result1}
 }
 
@@ -2732,6 +2882,8 @@ func (fake *FakeCluster) Invocations() map[string][][]interface{} {
 	defer fake.invocationsMutex.RUnlock()
 	fake.addDatabaseParserMutex.RLock()
 	defer fake.addDatabaseParserMutex.RUnlock()
+	fake.addLearnerMutex.RLock()
+	defer fake.addLearnerMutex.RUnlock()
 	fake.addMemberMutex.RLock()
 	defer fake.addMemberMutex.RUnlock()
 	fake.addSyncableParserMutex.RLock()
@@ -2768,6 +2920,8 @@ func (fake *FakeCluster) Invocations() map[string][][]interface{} {
 	defer fake.memberAPIURLMutex.RUnlock()
 	fake.membershipMutex.RLock()
 	defer fake.membershipMutex.RUnlock()
+	fake.promoteMemberMutex.RLock()
+	defer fake.promoteMemberMutex.RUnlock()
 	fake.proposeMutex.RLock()
 	defer fake.proposeMutex.RUnlock()
 	fake.proposeDatabaseMutex.RLock()

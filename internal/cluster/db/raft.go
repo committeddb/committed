@@ -309,16 +309,21 @@ func (n *Raft) applyConfChange(cc raftpb.ConfChangeI, ccCtx []byte) {
 	}
 }
 
-// memberStatus reports the current raft voter configuration as observed by
-// this node: members is the union of the incoming and (during a joint
-// transition) outgoing voter sets, and joint is true while the configuration
-// is still in the joint state (an outgoing config is present). db.AddMember /
-// db.RemoveMember poll this to block until a membership change has fully
-// taken effect locally — i.e. the target node is present/absent AND the
-// joint transition has completed (joint == false).
-func (n *Raft) memberStatus() (members map[uint64]struct{}, joint bool) {
-	voters := n.node.Status().Config.Voters
-	return voters.IDs(), len(voters[1]) > 0
+// memberStatus reports the current raft configuration as observed by this
+// node: voters is the union of the incoming and (during a joint transition)
+// outgoing voter sets, learners is the learner set, and joint is true while
+// the configuration is still in the joint state (an outgoing config is
+// present). db.AddMember / AddLearner / RemoveMember / PromoteMember poll this
+// (via waitForMembership) to block until a change has fully taken effect
+// locally — i.e. the target node is in the expected set (voter / learner /
+// neither) AND the joint transition has completed (joint == false).
+//
+// Both maps are owned by the caller: Status() returns a Clone of the tracker
+// config, so Voters.IDs() and the Learners map are fresh per call. learners is
+// nil when there are none (a nil-map read is a safe miss).
+func (n *Raft) memberStatus() (voters, learners map[uint64]struct{}, joint bool) {
+	cfg := n.node.Status().Config
+	return cfg.Voters.IDs(), cfg.Learners, len(cfg.Voters[1]) > 0
 }
 
 // memberView is one member's role and (leader-only) replication progress as

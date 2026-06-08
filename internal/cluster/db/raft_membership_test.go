@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	"go.etcd.io/raft/v3"
 	"go.etcd.io/raft/v3/raftpb"
 
@@ -120,4 +121,81 @@ func TestMembership_AddNode(t *testing.T) {
 	waitForUserEntry(t, node4, []byte("before-add"))
 	proposeAndCheck(t, leader, "after-add")
 	waitForUserEntry(t, node4, []byte("after-add"))
+}
+
+// startClusterWithJoiner brings up a 3-node bootstrap cluster (ids 1-3) plus a
+// 4th node in join mode that is reachable but not yet a member. It returns the
+// full rafts slice (close it via defer), the leader, node 4, and node 4's
+// advertised peer URL — the shared setup for the learner add/promote tests.
+func startClusterWithJoiner(t *testing.T) (rafts Rafts, leader, node4 *Raft, node4URL string) {
+	t.Helper()
+	ports := pickFreePorts(4)
+	allPeers := make([]raft.Peer, 4)
+	for i := 0; i < 4; i++ {
+		allPeers[i] = raft.Peer{ID: uint64(i + 1), Context: []byte(fmt.Sprintf("http://127.0.0.1:%d", ports[i]))}
+	}
+	bootstrapPeers := allPeers[:3]
+
+	tick := multiNodeTickInterval
+	rafts = make(Rafts, 0, 4)
+	for _, p := range bootstrapPeers {
+		rafts = append(rafts, createRaft(p.ID, bootstrapPeers, NewMemoryStorage(), tick, nil))
+	}
+	rafts.WaitForLeader(t)
+	leader = rafts.LeaderRaft()
+
+	node4 = createJoiningRaft(4, allPeers, tick)
+	rafts = append(rafts, node4)
+	return rafts, leader, node4, string(allPeers[3].Context)
+}
+
+// TestMembership_AddLearner adds a 4th node as a learner and verifies it is in
+// the learner set (NOT the voter set, so it can't count toward quorum or be
+// elected) and that it still replicates the log from the leader.
+func TestMembership_AddLearner(t *testing.T) {
+	rafts, leader, node4, url := startClusterWithJoiner(t)
+	defer rafts.Close()
+
+	proposeAndCheck(t, leader, "before-learner")
+
+	leader.submitConfChange(addLearnerCC(4, url))
+	waitForLearner(t, leader, 4)
+
+	voters, learners, joint := leader.memberRoles()
+	require.False(t, joint)
+	require.ElementsMatch(t, []uint64{1, 2, 3}, memberKeys(voters),
+		"the learner must not be in the voter set — that is what keeps it out of quorum")
+	require.ElementsMatch(t, []uint64{4}, memberKeys(learners))
+
+	// The learner replicates the entry committed before it joined and a fresh
+	// one committed after.
+	waitForUserEntry(t, node4, []byte("before-learner"))
+	proposeAndCheck(t, leader, "after-learner")
+	waitForUserEntry(t, node4, []byte("after-learner"))
+}
+
+// TestMembership_PromoteLearner adds a learner, lets it catch up, then promotes
+// it — verifying it moves from the learner set to the voter set and the cluster
+// keeps committing with it as a full voter.
+func TestMembership_PromoteLearner(t *testing.T) {
+	rafts, leader, node4, url := startClusterWithJoiner(t)
+	defer rafts.Close()
+
+	proposeAndCheck(t, leader, "before-promote")
+
+	leader.submitConfChange(addLearnerCC(4, url))
+	waitForLearner(t, leader, 4)
+	waitForUserEntry(t, node4, []byte("before-promote")) // caught up
+
+	leader.submitConfChange(promoteCC(4))
+	waitForVoter(t, leader, 4) // 4 in the voter set, not merely the union
+
+	voters, learners, joint := leader.memberRoles()
+	require.False(t, joint)
+	require.ElementsMatch(t, []uint64{1, 2, 3, 4}, memberKeys(voters))
+	require.Empty(t, memberKeys(learners), "no learners remain after promotion")
+
+	// The cluster still commits with node 4 now a voter.
+	proposeAndCheck(t, leader, "after-promote")
+	waitForUserEntry(t, node4, []byte("after-promote"))
 }

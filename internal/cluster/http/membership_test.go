@@ -111,3 +111,83 @@ func TestRemoveMember_ZeroID(t *testing.T) {
 	require.Equal(t, 400, status)
 	require.Equal(t, 0, fake.RemoveMemberCallCount())
 }
+
+// TestAddMember_LearnerFlag routes an add with "learner": true to
+// Cluster.AddLearner (not AddMember) and returns 204.
+func TestAddMember_LearnerFlag(t *testing.T) {
+	fake := &clusterfakes.FakeCluster{}
+	h := http.New(fake)
+
+	status := doRequest(t, h, "POST", "http://localhost/v1/membership",
+		`{"id": 4, "url": "http://127.0.0.1:9024", "learner": true}`)
+
+	require.Equal(t, 204, status)
+	require.Equal(t, 1, fake.AddLearnerCallCount())
+	require.Equal(t, 0, fake.AddMemberCallCount())
+	_, id, url := fake.AddLearnerArgsForCall(0)
+	require.Equal(t, uint64(4), id)
+	require.Equal(t, "http://127.0.0.1:9024", url)
+}
+
+// TestAddMember_DefaultsToVoter verifies an add with no learner field calls
+// AddMember (backward compatible), not AddLearner.
+func TestAddMember_DefaultsToVoter(t *testing.T) {
+	fake := &clusterfakes.FakeCluster{}
+	h := http.New(fake)
+
+	status := doRequest(t, h, "POST", "http://localhost/v1/membership",
+		`{"id": 4, "url": "http://127.0.0.1:9024"}`)
+
+	require.Equal(t, 204, status)
+	require.Equal(t, 1, fake.AddMemberCallCount())
+	require.Equal(t, 0, fake.AddLearnerCallCount())
+}
+
+// TestPromoteMember_Success forwards the parsed id to Cluster.PromoteMember
+// and returns 204.
+func TestPromoteMember_Success(t *testing.T) {
+	fake := &clusterfakes.FakeCluster{}
+	h := http.New(fake)
+
+	status := doRequest(t, h, "POST", "http://localhost/v1/membership/4/promote", "")
+
+	require.Equal(t, 204, status)
+	require.Equal(t, 1, fake.PromoteMemberCallCount())
+	_, id := fake.PromoteMemberArgsForCall(0)
+	require.Equal(t, uint64(4), id)
+}
+
+// TestPromoteMember_NotLearner maps cluster.ErrNotLearner to 400.
+func TestPromoteMember_NotLearner(t *testing.T) {
+	fake := &clusterfakes.FakeCluster{}
+	fake.PromoteMemberReturns(cluster.ErrNotLearner)
+	h := http.New(fake)
+
+	status := doRequest(t, h, "POST", "http://localhost/v1/membership/7/promote", "")
+
+	require.Equal(t, 400, status)
+}
+
+// TestPromoteMember_BadID rejects a non-numeric id with 400 and never calls
+// the cluster.
+func TestPromoteMember_BadID(t *testing.T) {
+	fake := &clusterfakes.FakeCluster{}
+	h := http.New(fake)
+
+	status := doRequest(t, h, "POST", "http://localhost/v1/membership/abc/promote", "")
+
+	require.Equal(t, 400, status)
+	require.Equal(t, 0, fake.PromoteMemberCallCount())
+}
+
+// TestPromoteMember_Unconfirmed maps a context error to 503, the same shape as
+// add/remove.
+func TestPromoteMember_Unconfirmed(t *testing.T) {
+	fake := &clusterfakes.FakeCluster{}
+	fake.PromoteMemberReturns(context.DeadlineExceeded)
+	h := http.New(fake)
+
+	status := doRequest(t, h, "POST", "http://localhost/v1/membership/4/promote", "")
+
+	require.Equal(t, 503, status)
+}

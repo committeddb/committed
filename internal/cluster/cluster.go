@@ -92,6 +92,21 @@ type Cluster interface {
 	// taken effect or ctx fires. Partition-safe and callable on any node.
 	// Powers DELETE /membership/{id}.
 	RemoveMember(ctx context.Context, id uint64) error
+	// AddLearner adds a node (id, rawURL) as a non-voting learner using a
+	// joint-consensus membership change and blocks until the change has taken
+	// effect or ctx fires. A learner replicates the log but does not count
+	// toward quorum; promote it to a voter with PromoteMember once it has
+	// caught up. Same shape and partition-safety as AddMember. Powers
+	// POST /membership with "learner": true. See docs/operations/membership.md.
+	AddLearner(ctx context.Context, id uint64, rawURL string) error
+	// PromoteMember promotes an existing learner (id) to a voter using a
+	// joint-consensus membership change and blocks until the change has taken
+	// effect or ctx fires. It validates that id is a current learner
+	// (ErrNotLearner otherwise) but does NOT judge whether the learner has
+	// caught up — that is the caller's policy, decided from the progress
+	// GET /v1/membership reports. Partition-safe and callable on any node.
+	// Powers POST /membership/{id}/promote.
+	PromoteMember(ctx context.Context, id uint64) error
 	// Membership returns a snapshot of the raft cluster configuration and
 	// replication progress as observed by this node — voters/learners and,
 	// when this node is the leader, each member's matched index. Powers

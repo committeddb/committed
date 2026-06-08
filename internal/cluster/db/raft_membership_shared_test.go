@@ -37,6 +37,27 @@ func removeNodeCC(id uint64) raftpb.ConfChangeV2 {
 	}
 }
 
+// addLearnerCC is what db.AddLearner builds: a JointImplicit ConfChangeV2 with
+// a single ConfChangeAddLearnerNode carrying the new node's peer URL.
+func addLearnerCC(id uint64, url string) raftpb.ConfChangeV2 {
+	return raftpb.ConfChangeV2{
+		Transition: raftpb.ConfChangeTransitionJointImplicit,
+		Changes:    []raftpb.ConfChangeSingle{{Type: raftpb.ConfChangeAddLearnerNode, NodeID: id}},
+		Context:    []byte(url),
+	}
+}
+
+// promoteCC is what db.PromoteMember builds: a JointImplicit ConfChangeV2 with
+// a single ConfChangeAddNode for an existing learner id and no Context (the
+// peer transport entry already exists from the learner add). etcd/raft
+// relocates the id from the Learners set to the Voters set.
+func promoteCC(id uint64) raftpb.ConfChangeV2 {
+	return raftpb.ConfChangeV2{
+		Transition: raftpb.ConfChangeTransitionJointImplicit,
+		Changes:    []raftpb.ConfChangeSingle{{Type: raftpb.ConfChangeAddNode, NodeID: id}},
+	}
+}
+
 // submitConfChange sends cc on this node's conf-change channel, the same path
 // db.AddMember / db.RemoveMember feed.
 func (rs *Raft) submitConfChange(cc raftpb.ConfChangeV2) {
@@ -54,6 +75,56 @@ func (rs *Raft) members() (map[uint64]struct{}, bool) {
 	r := rs.raft
 	rs.mu.RUnlock()
 	return r.MembersForTest()
+}
+
+// memberRoles returns this node's observed voter set, learner set, and joint
+// flag separately — for learner tests that must distinguish the two.
+func (rs *Raft) memberRoles() (voters, learners map[uint64]struct{}, joint bool) {
+	rs.mu.RLock()
+	r := rs.raft
+	rs.mu.RUnlock()
+	return r.MemberRolesForTest()
+}
+
+// waitForLearner blocks until r observes id as a learner (and not a voter)
+// with the joint transition complete, or the deadline fires.
+func waitForLearner(t *testing.T, r *Raft, id uint64) {
+	t.Helper()
+	deadline := time.Now().Add(membershipSettleTimeout)
+	for {
+		voters, learners, joint := r.memberRoles()
+		_, isVoter := voters[id]
+		_, isLearner := learners[id]
+		if !joint && isLearner && !isVoter {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("node %d not observed as learner within %s (voters=%v learners=%v joint=%v)",
+				id, membershipSettleTimeout, memberKeys(voters), memberKeys(learners), joint)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// waitForVoter blocks until r observes id as a voter (in the voter set) with
+// the joint transition complete, or the deadline fires. Distinct from
+// waitForMembership, which matches against the voter∪learner union and so
+// can't tell a promoted voter from a still-pending learner.
+func waitForVoter(t *testing.T, r *Raft, id uint64) {
+	t.Helper()
+	deadline := time.Now().Add(membershipSettleTimeout)
+	for {
+		voters, _, joint := r.memberRoles()
+		if _, isVoter := voters[id]; !joint && isVoter {
+			return
+		}
+		if time.Now().After(deadline) {
+			voters, learners, joint := r.memberRoles()
+			t.Fatalf("node %d not observed as voter within %s (voters=%v learners=%v joint=%v)",
+				id, membershipSettleTimeout, memberKeys(voters), memberKeys(learners), joint)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 // waitForMembership blocks until r's observed configuration matches want

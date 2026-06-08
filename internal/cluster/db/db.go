@@ -687,7 +687,76 @@ func (db *DB) AddMember(ctx context.Context, id uint64, rawURL string) error {
 		Changes:    []raftpb.ConfChangeSingle{{Type: raftpb.ConfChangeAddNode, NodeID: id}},
 		Context:    []byte(rawURL),
 	}
-	return db.proposeConfChange(ctx, cc, id, true)
+	return db.proposeConfChange(ctx, cc, id, memberVoter)
+}
+
+// AddLearner adds a node as a non-voting learner via a joint-consensus
+// (ConfChangeV2) membership change and blocks until this node observes the
+// learner in the final configuration, ctx fires, or the DB shuts down.
+//
+// A learner receives the replicated log but does not count toward quorum: it
+// doesn't vote and its acks don't help commit. That makes it the safe way to
+// grow the cluster — a new node catches up as a learner with zero effect on
+// quorum math, then is promoted to a voter (PromoteMember) once it is caught
+// up, so the cluster never includes a not-yet-replicated node in its quorum.
+//
+// rawURL is the new node's advertised raft peer URL, carried in the conf
+// change Context exactly like AddMember; the new node must be started in join
+// mode and should set COMMITTED_API_URL so it self-announces its API address.
+// Partition-safe and callable on any node. See docs/operations/membership.md.
+func (db *DB) AddLearner(ctx context.Context, id uint64, rawURL string) error {
+	if id == 0 {
+		return fmt.Errorf("%w: id must be non-zero", cluster.ErrInvalidMember)
+	}
+	if rawURL == "" {
+		return fmt.Errorf("%w: url must be non-empty", cluster.ErrInvalidMember)
+	}
+	cc := raftpb.ConfChangeV2{
+		Transition: raftpb.ConfChangeTransitionJointImplicit,
+		Changes:    []raftpb.ConfChangeSingle{{Type: raftpb.ConfChangeAddLearnerNode, NodeID: id}},
+		Context:    []byte(rawURL),
+	}
+	return db.proposeConfChange(ctx, cc, id, memberLearner)
+}
+
+// PromoteMember promotes an existing learner to a voter via a joint-consensus
+// (ConfChangeV2) membership change (a ConfChangeAddNode for the learner's id,
+// which etcd/raft relocates from the Learners set to the Voters set) and
+// blocks until this node observes it as a voter, ctx fires, or the DB shuts
+// down. No Context is needed — the peer transport entry and the node's
+// announced API address already exist from the learner add.
+//
+// PromoteMember validates only that id is a current learner; it does NOT judge
+// whether the learner has caught up. That is deliberate: a "caught up"
+// threshold is the caller's policy (it observes each member's matched index
+// via GET /v1/membership and decides), the check would be racy regardless (the
+// matched index is a snapshot), and the server has no principled threshold to
+// pick. The caller minimizes the at-quorum window by polling before promoting.
+// See docs/operations/membership.md and the ticket's "Decisions".
+//
+// Promoting a non-learner is rejected with cluster.ErrNotLearner rather than
+// submitted: a ConfChangeAddNode for an unknown id would add a brand-new voter
+// with no transport entry (a phantom voter that can't be reached), and for an
+// existing voter it is a meaningless no-op. The check reads this node's applied
+// configuration, so against a briefly-stale follower it can false-negative; an
+// operator promotes ids it just added and observed via GET /v1/membership, and
+// can retry. Partition-safe and callable on any node.
+func (db *DB) PromoteMember(ctx context.Context, id uint64) error {
+	if id == 0 {
+		return fmt.Errorf("%w: id must be non-zero", cluster.ErrInvalidMember)
+	}
+	voters, learners, _ := db.raft.memberStatus()
+	if _, isLearner := learners[id]; !isLearner {
+		if _, isVoter := voters[id]; isVoter {
+			return fmt.Errorf("%w: node %d is already a voter", cluster.ErrNotLearner, id)
+		}
+		return fmt.Errorf("%w: node %d is not a known learner", cluster.ErrNotLearner, id)
+	}
+	cc := raftpb.ConfChangeV2{
+		Transition: raftpb.ConfChangeTransitionJointImplicit,
+		Changes:    []raftpb.ConfChangeSingle{{Type: raftpb.ConfChangeAddNode, NodeID: id}},
+	}
+	return db.proposeConfChange(ctx, cc, id, memberVoter)
 }
 
 // RemoveMember removes a node from the cluster via a joint-consensus
@@ -704,14 +773,25 @@ func (db *DB) RemoveMember(ctx context.Context, id uint64) error {
 		Transition: raftpb.ConfChangeTransitionJointImplicit,
 		Changes:    []raftpb.ConfChangeSingle{{Type: raftpb.ConfChangeRemoveNode, NodeID: id}},
 	}
-	return db.proposeConfChange(ctx, cc, id, false)
+	return db.proposeConfChange(ctx, cc, id, memberAbsent)
 }
+
+// membershipTarget is the post-change role waitForMembership blocks for:
+// gone from the configuration (remove), a voter (add / promote), or a learner
+// (add-learner).
+type membershipTarget int
+
+const (
+	memberAbsent  membershipTarget = iota // absent from both voters and learners
+	memberVoter                           // present as a voter
+	memberLearner                         // present as a learner
+)
 
 // proposeConfChange submits cc to the raft propose loop, then blocks (via
 // waitForMembership) until the membership change has fully taken effect on
 // this node. Submission itself can fail fast if ctx fires or the DB is
 // shutting down before the propose loop accepts the change.
-func (db *DB) proposeConfChange(ctx context.Context, cc raftpb.ConfChangeV2, id uint64, want bool) error {
+func (db *DB) proposeConfChange(ctx context.Context, cc raftpb.ConfChangeV2, id uint64, target membershipTarget) error {
 	select {
 	case db.confChangeC <- cc:
 	case <-ctx.Done():
@@ -719,11 +799,11 @@ func (db *DB) proposeConfChange(ctx context.Context, cc raftpb.ConfChangeV2, id 
 	case <-db.ctx.Done():
 		return db.ctx.Err()
 	}
-	return db.waitForMembership(ctx, id, want)
+	return db.waitForMembership(ctx, id, target)
 }
 
 // waitForMembership blocks until this node's applied raft configuration
-// reaches the target — id present (want=true) or absent (want=false) AND the
+// reaches target — id in the expected set (voter / learner / neither) AND the
 // joint transition complete — ctx is canceled, or the DB is shutting down.
 // It waits on the same applied-index broadcast (appliedNotify) the Ready loop
 // fires after each apply, re-checking on every wake rather than polling: a
@@ -731,11 +811,22 @@ func (db *DB) proposeConfChange(ctx context.Context, cc raftpb.ConfChangeV2, id 
 // the auto-leave entries apply, so each step wakes the waiter. Requiring
 // joint==false means a successful return reflects the final (non-joint)
 // configuration, not the transient joint state.
-func (db *DB) waitForMembership(ctx context.Context, id uint64, want bool) error {
+func (db *DB) waitForMembership(ctx context.Context, id uint64, target membershipTarget) error {
 	settled := func() bool {
-		members, joint := db.raft.memberStatus()
-		_, present := members[id]
-		return !joint && present == want
+		voters, learners, joint := db.raft.memberStatus()
+		if joint {
+			return false
+		}
+		_, isVoter := voters[id]
+		_, isLearner := learners[id]
+		switch target {
+		case memberVoter:
+			return isVoter
+		case memberLearner:
+			return isLearner
+		default: // memberAbsent
+			return !isVoter && !isLearner
+		}
 	}
 	for {
 		if settled() {

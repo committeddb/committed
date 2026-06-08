@@ -25,6 +25,7 @@ var (
 	memberTarget   string
 	memberID       uint64
 	memberURL      string
+	memberLearner  bool
 	memberToken    string
 	memberInsecure bool
 )
@@ -54,7 +55,7 @@ URL. See docs/operations/membership.md.`,
 
 var memberAddCmd = &cobra.Command{
 	Use:          "add",
-	Short:        "Add a voting node to the cluster",
+	Short:        "Add a node to the cluster (a voter, or a learner with --learner)",
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if memberID == 0 {
@@ -63,11 +64,23 @@ var memberAddCmd = &cobra.Command{
 		if memberURL == "" {
 			return fmt.Errorf("--url is required (the new node's advertised peer URL)")
 		}
-		body, err := json.Marshal(map[string]any{"id": memberID, "url": memberURL})
+		body, err := json.Marshal(map[string]any{"id": memberID, "url": memberURL, "learner": memberLearner})
 		if err != nil {
 			return err
 		}
 		return memberDo(nethttp.MethodPost, "/v1/membership", body)
+	},
+}
+
+var memberPromoteCmd = &cobra.Command{
+	Use:          "promote",
+	Short:        "Promote a learner to a voter",
+	SilenceUsage: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if memberID == 0 {
+			return fmt.Errorf("--id is required and must be a positive integer")
+		}
+		return memberDo(nethttp.MethodPost, fmt.Sprintf("/v1/membership/%d/promote", memberID), nil)
 	},
 }
 
@@ -189,10 +202,14 @@ func init() {
 
 	memberAddCmd.Flags().Uint64Var(&memberID, "id", 0, "raft node id of the member to add")
 	memberAddCmd.Flags().StringVar(&memberURL, "url", "", "advertised peer URL of the member to add (e.g. http://n4:9022)")
+	memberAddCmd.Flags().BoolVar(&memberLearner, "learner", false, "add as a non-voting learner instead of a voter (promote later with 'member promote')")
 
 	memberRemoveCmd.Flags().Uint64Var(&memberID, "id", 0, "raft node id of the member to remove")
 
+	memberPromoteCmd.Flags().Uint64Var(&memberID, "id", 0, "raft node id of the learner to promote to a voter")
+
 	memberCmd.AddCommand(memberAddCmd)
 	memberCmd.AddCommand(memberRemoveCmd)
+	memberCmd.AddCommand(memberPromoteCmd)
 	rootCmd.AddCommand(memberCmd)
 }

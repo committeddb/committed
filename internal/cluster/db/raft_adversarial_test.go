@@ -2375,3 +2375,106 @@ func TestAdversarial_MembershipChangeUnderPartition(t *testing.T) {
 		}
 	}
 }
+
+// peerURL returns the advertised URL of node id from r's static peer set.
+func peerURL(r *Raft, id uint64) string {
+	for _, p := range r.peers {
+		if p.ID == id {
+			return string(p.Context)
+		}
+	}
+	return ""
+}
+
+// TestAdversarial_LearnerPromoteUnderPartition exercises add-learner + promote
+// through the joint-consensus path while a partition strands the learner. It
+// asserts the learner-relevant safety properties: a learner never counts toward
+// quorum (the partitioned minority holding it can't commit), and promoting an
+// unreachable learner completes on the majority via joint consensus without
+// split-brain, converging the learner as a voter after heal.
+//
+// Setup turns node 5 into a learner by removing it then re-adding it as a
+// learner (the faulty harness bootstraps every node as a voter, so this is how
+// we get a learner into the partitionable set).
+func TestAdversarial_LearnerPromoteUnderPartition(t *testing.T) {
+	rafts, cluster := createFaultyRafts(5)
+	defer rafts.Close()
+	rafts.WaitForLeader(t)
+
+	// Baseline committed on all five.
+	proposeAndCheck(t, rafts.LeaderRaft(), "pre-change")
+	for _, r := range rafts {
+		waitForUserEntry(t, r, []byte("pre-change"))
+	}
+
+	node5URL := peerURL(rafts[0], 5)
+
+	// Healthy: make node 5 a learner. Config becomes voters {1,2,3,4} + L{5}.
+	// Observe the changes on node 1 (a guaranteed survivor) rather than on the
+	// submitting leader — the leader may itself be node 5, which steps down on
+	// its own removal and so never observes the final config. Likewise, once
+	// node 5 is removed, leader lookups must use the survivor voter set: the
+	// full `rafts` slice still contains the removed node 5, which no longer
+	// agrees on a leader, so rafts.LeaderRaft() would return nil.
+	survivor := raftsByIDs(rafts, []uint64{1})[0]
+	node5 := raftsByIDs(rafts, []uint64{5})[0]
+	voters4 := raftsByIDs(rafts, []uint64{1, 2, 3, 4})
+
+	rafts.WaitForLeader(t)
+	rafts.LeaderRaft().submitConfChange(removeNodeCC(5))
+	waitForMembership(t, survivor, map[uint64]bool{5: false})
+
+	voters4.WaitForLeader(t)
+	voters4.LeaderRaft().submitConfChange(addLearnerCC(5, node5URL))
+	waitForLearner(t, survivor, 5)
+	waitForUserEntry(t, node5, []byte("pre-change")) // learner caught up
+
+	// Strand the learner (5) and one voter (4) in the minority.
+	majorityIDs := []uint64{1, 2, 3}
+	minorityIDs := []uint64{4, 5}
+	majorityRafts := raftsByIDs(rafts, majorityIDs)
+	minorityRafts := raftsByIDs(rafts, minorityIDs)
+
+	cluster.Partition(minorityIDs, majorityIDs)
+	time.Sleep(adversarialSettleTime)
+	majorityRafts.WaitForLeader(t)
+	leader := majorityRafts.LeaderRaft()
+
+	// Capture the minority's commit indexes AFTER the partition has settled, so
+	// any in-flight pre-partition commits (from the learner catch-up above) have
+	// already landed. From here the partitioned minority — a lone voter (4) plus
+	// the learner (5), not a quorum — must not advance.
+	minorityCommitBefore := map[uint64]uint64{}
+	for _, r := range minorityRafts {
+		minorityCommitBefore[r.id] = r.raft.CommitIndexForTest()
+	}
+
+	// Promote the unreachable learner 5 from the majority. The joint config
+	// voters{1,2,3,4} ∪ voters{1,2,3,4,5} is satisfiable by {1,2,3} alone, so
+	// the change must complete despite node 5 being partitioned away.
+	leader.submitConfChange(promoteCC(5))
+	waitForVoter(t, leader, 5)
+
+	// Liveness on the majority under the new config.
+	proposeAndCheck(t, leader, "during-change")
+	for _, r := range majorityRafts {
+		waitForUserEntry(t, r, []byte("during-change"))
+	}
+
+	// Safety: the stranded minority never advanced commit — neither the promote
+	// nor the during-change entry reached a minority quorum (the lone voter 4
+	// plus learner 5 is not a quorum, proving the learner doesn't count).
+	for _, r := range minorityRafts {
+		if got := r.raft.CommitIndexForTest(); got != minorityCommitBefore[r.id] {
+			t.Fatalf("minority node %d advanced commit during the promote (before=%d now=%d) — split-brain",
+				r.id, minorityCommitBefore[r.id], got)
+		}
+	}
+
+	cluster.Heal()
+
+	// After heal, the promoted node 5 converges as a voter and has the entry
+	// committed while it was partitioned away.
+	waitForVoter(t, node5, 5)
+	waitForUserEntry(t, node5, []byte("during-change"))
+}

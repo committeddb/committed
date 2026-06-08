@@ -81,10 +81,14 @@ func (db *DB) announceAPIURL() {
 }
 
 // selfIsMember reports whether this node currently appears in its own applied
-// raft configuration (voter or, once that work lands, learner).
+// raft configuration, as either a voter or a learner.
 func (db *DB) selfIsMember() bool {
-	members, _ := db.raft.memberStatus()
-	_, ok := members[db.ID()]
+	voters, learners, _ := db.raft.memberStatus()
+	id := db.ID()
+	if _, ok := voters[id]; ok {
+		return true
+	}
+	_, ok := learners[id]
 	return ok
 }
 

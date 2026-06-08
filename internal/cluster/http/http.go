@@ -158,16 +158,18 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 			r.Get("/node/status", h.NodeStatus)
 
 			// Live cluster membership. GET lists members with their roles
-			// and (leader-observed) replication progress; POST adds a voting
-			// node, DELETE removes one — both via joint-consensus
-			// (ConfChangeV2) raft reconfiguration. Authenticated like every
-			// other write. GET is leaderRead-wrapped so a follower proxies to
-			// the leader, giving a load-balanced caller a leader-truthful
-			// answer (per-member match index is leader-only state). The node
-			// added via POST must first be started in join mode. See
-			// docs/operations/membership.md.
+			// and (leader-observed) replication progress; POST adds a voter
+			// (or a learner with "learner": true); POST .../promote promotes
+			// a learner to a voter; DELETE removes a node — all via
+			// joint-consensus (ConfChangeV2) raft reconfiguration.
+			// Authenticated like every other write. GET is leaderRead-wrapped
+			// so a follower proxies to the leader, giving a load-balanced
+			// caller a leader-truthful answer (per-member match index is
+			// leader-only state). The node added via POST must first be
+			// started in join mode. See docs/operations/membership.md.
 			r.Get("/membership", h.leaderRead(h.GetMembership))
 			r.Post("/membership", h.AddMember)
+			r.Post("/membership/{id}/promote", h.PromoteMember)
 			r.Delete("/membership/{id}", h.RemoveMember)
 		})
 	})

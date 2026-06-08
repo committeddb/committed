@@ -63,6 +63,34 @@ func TestMembership_ServedLocallyOnLeader(t *testing.T) {
 	require.Equal(t, "http://n2:8080", resp.Members[1].APIURL)
 }
 
+// TestMembership_ReportsLearnerRole verifies GET /v1/membership distinguishes
+// voters from learners in its response (each carrying its match index).
+func TestMembership_ReportsLearnerRole(t *testing.T) {
+	fake := &clusterfakes.FakeCluster{}
+	fake.IDReturns(1)
+	fake.LeaderReturns(1)
+	fake.MembershipReturns(cluster.Membership{
+		NodeID: 1, LeaderID: 1, IsLeader: true, CommitIndex: 100,
+		Members: []cluster.Member{
+			{ID: 1, Role: cluster.MemberRoleVoter, MatchIndex: u64p(100)},
+			{ID: 4, Role: cluster.MemberRoleLearner, MatchIndex: u64p(80)},
+		},
+	})
+	h := http.New(fake)
+
+	status, body := doMembershipRequest(t, h, nil)
+	require.Equal(t, httpgo.StatusOK, status)
+
+	var resp http.MembershipResponse
+	require.NoError(t, json.Unmarshal(body, &resp))
+	roles := map[uint64]string{}
+	for _, m := range resp.Members {
+		roles[m.ID] = m.Role
+	}
+	require.Equal(t, cluster.MemberRoleVoter, roles[1])
+	require.Equal(t, cluster.MemberRoleLearner, roles[4])
+}
+
 // TestMembership_ProxiedFromFollower: a follower forwards the request to the
 // leader's announced API URL and returns the leader's response verbatim,
 // carrying the loop-guard marker and forwarding the Authorization header.

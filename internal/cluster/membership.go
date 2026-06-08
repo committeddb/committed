@@ -9,6 +9,15 @@ import "errors"
 // commit the change, which surfaces as a context error.
 var ErrInvalidMember = errors.New("cluster: invalid member")
 
+// ErrNotLearner is returned by Cluster.PromoteMember when the target id is not
+// a current learner — it is already a voter, or it is unknown to the
+// configuration. The HTTP layer maps it to 400. It guards against promoting a
+// non-learner: a promote of an unknown id would add a phantom voter with no
+// transport entry, and a promote of an existing voter is a no-op. Distinct
+// from a runtime failure to commit the change, which surfaces as a context
+// error (→ 503).
+var ErrNotLearner = errors.New("cluster: not a learner")
+
 // Member roles reported by Membership. A node is a voter (counts toward
 // quorum) or a learner (replicates the log but does not vote). Learners are
 // not yet added by this build; the role is reported generally so the

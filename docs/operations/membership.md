@@ -85,6 +85,65 @@ learns node 4's address, the leader replicates the log (or a snapshot) to
 it, and node 4 becomes a voter. The command returns once the change has
 taken effect.
 
+## Growing safely with a learner
+
+Adding a node straight as a voter (above) has a subtle cost: the new node
+joins the quorum **immediately**, while it is still empty and catching up.
+A 3-node cluster (quorum 2) that adds a 4th voter now needs 3 of 4 to
+commit — but node 4 can't meaningfully acknowledge anything yet, so the
+cluster has gone from "tolerates one failure" to "one failure from losing
+quorum" until node 4 catches up.
+
+A **learner** avoids that window. A learner replicates the log but does
+not vote and its acks don't count toward commit, so adding one leaves
+quorum math untouched. The safe pattern is add-as-learner → wait for it to
+catch up → promote:
+
+### Step 1 — add the new node as a learner
+
+Start it in join mode exactly as above (don't forget `COMMITTED_API_URL`),
+then:
+
+```
+committed member add --id 4 --url http://n4:9022 --learner --target http://n1:8080
+```
+
+It begins replicating with zero effect on quorum.
+
+### Step 2 — wait until it has caught up
+
+Poll `GET /v1/membership` (see "Observing membership") and compare node
+4's `match_index` against `commit_index`. You own the threshold — "caught
+up" might mean exactly equal, or within a few thousand entries you're
+comfortable closing under load. The server does not decide this for you.
+
+```
+curl -s http://n1:8080/v1/membership | jq '.members[] | select(.id==4)'
+# { "id": 4, "role": "learner", "match_index": 11920, ... }   commit_index: 11931
+```
+
+### Step 3 — promote it to a voter
+
+Once you judge it close enough:
+
+```
+committed member promote --id 4 --target http://n1:8080
+```
+
+This relocates node 4 from the learner set to the voter set. Promotion does
+**not** re-check catch-up — it acts on your decision — so there is a brief
+window where the just-promoted node is in the quorum while only
+*approximately* caught up; polling in step 2 is what keeps that window
+small. Promoting a node that isn't a current learner (already a voter, or
+an unknown id) is rejected with 400.
+
+> **When to skip the learner.** A direct `member add` (voter) is fine for
+> a node you don't mind counting toward quorum while it catches up — e.g.
+> restoring to full size after a brief outage, or any time the transient
+> reduced fault-tolerance is acceptable. Prefer the learner flow for
+> large/slow catch-ups (a multi-TB replica, a cross-host move) where the
+> catch-up window is long.
+
 ## Removing a node
 
 ```
@@ -144,9 +203,13 @@ N}}`) — target node `N` directly, or retry.
 ## CLI reference
 
 ```
-committed member add    --id <n> --url <peer-url>   [flags]
-committed member remove --id <n>                    [flags]
+committed member add     --id <n> --url <peer-url> [--learner]   [flags]
+committed member promote --id <n>                                [flags]
+committed member remove  --id <n>                                [flags]
 ```
+
+`--learner` on `add` creates a non-voting learner; `member promote` turns a
+learner into a voter (see "Growing safely with a learner").
 
 Common flags:
 
@@ -165,21 +228,23 @@ same way the `healthcheck` probe does).
 Membership lives under `/v1` (all authenticated):
 
 ```
-GET    /v1/membership            → membership + replication progress (see "Observing membership")
-POST   /v1/membership            {"id": 4, "url": "http://n4:9022"}
+GET    /v1/membership                 → membership + replication progress (see "Observing membership")
+POST   /v1/membership                 {"id": 4, "url": "http://n4:9022", "learner": false}
+POST   /v1/membership/{id}/promote    (no body — promote a learner to a voter)
 DELETE /v1/membership/{id}
 ```
 
-The `member add`/`remove` CLI commands are thin wrappers over `POST`/`DELETE`;
-the `GET` is consumed directly over HTTP (by an orchestrator's scheduler, or
-ad hoc with `curl`).
+The `member add`/`promote`/`remove` CLI commands are thin wrappers over the
+writes; the `GET` is consumed directly over HTTP (by an orchestrator's
+scheduler, or ad hoc with `curl`). `"learner": true` on the add (default
+false) creates a learner instead of a voter.
 
-`POST`/`DELETE` return `204 No Content` on success. Error responses use the
+The writes return `204 No Content` on success. Error responses use the
 standard structured JSON body (`{"code", "message"}`):
 
 | Status | When                                                                       |
 |--------|----------------------------------------------------------------------------|
-| `400`  | malformed request — zero/missing id, empty url on add, non-numeric id      |
+| `400`  | malformed request — zero/missing id, empty url on add, non-numeric id; or `promote` of a non-learner / unknown id |
 | `503`  | a write: submitted but not confirmed before the deadline (this node likely cannot reach a quorum); may still take effect once quorum returns. A `GET`: no known leader, or the leader's API address is unknown — retry or target the leader directly |
 | `500`  | unexpected internal error                                                  |
 
@@ -192,5 +257,6 @@ standard structured JSON body (`{"code", "message"}`):
 - **Backward compatibility.** A node upgraded from a pre-joint-consensus
   build correctly replays any single-step (`ConfChange` v1) entries left
   in its log; the cluster proposes only v2 entries going forward.
-- **Learners.** Promoting learners to voters is not yet exposed. Adds
-  create voting members directly.
+- **Learners.** A learner survives restart as a learner (the role is part
+  of the replicated `ConfState`), not silently promoted. Promotion is a
+  separate, explicit step (see "Growing safely with a learner").

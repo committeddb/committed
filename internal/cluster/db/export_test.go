@@ -32,14 +32,30 @@ func (n *Raft) UnpartitionPeerForTest(p raft.Peer) error {
 	return n.transport.AddPeer(p)
 }
 
-// MembersForTest returns this Raft's current voter configuration as observed
-// locally: members is the union of the incoming and (mid joint transition)
-// outgoing voter sets, and joint reports whether the configuration is still
-// in the joint state. Joint-consensus membership tests poll this to watch a
-// change move through the joint configuration and settle into its final form.
+// MembersForTest returns this Raft's current membership as observed locally:
+// members is the union of voters (incoming + mid-joint outgoing) and learners,
+// and joint reports whether the configuration is still in the joint state.
+// Joint-consensus membership tests poll this to watch a change move through the
+// joint configuration and settle into its final form; the union keeps existing
+// voter-only assertions working unchanged. Use MemberRolesForTest when a test
+// needs to distinguish voters from learners.
 func (n *Raft) MembersForTest() (members map[uint64]struct{}, joint bool) {
 	if n.node == nil {
 		return nil, false
+	}
+	voters, learners, joint := n.memberStatus()
+	for id := range learners {
+		voters[id] = struct{}{}
+	}
+	return voters, joint
+}
+
+// MemberRolesForTest returns this Raft's voter set, learner set, and joint
+// flag separately, so learner tests can assert that a node is a learner (not a
+// voter) and that promotion moves it from one set to the other.
+func (n *Raft) MemberRolesForTest() (voters, learners map[uint64]struct{}, joint bool) {
+	if n.node == nil {
+		return nil, nil, false
 	}
 	return n.memberStatus()
 }

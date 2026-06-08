@@ -919,14 +919,17 @@ paths:
           $ref: '#/components/responses/InternalError'
     post:
       tags: [membership]
-      summary: Add a voting node to the cluster
+      summary: 'Add a node to the cluster (voter, or learner with "learner": true)'
       description: |
-        Adds a voting node to the raft cluster via a joint-consensus
-        (ConfChangeV2) membership change. The change is partition-safe — it
-        transits the joint configuration C_old ∪ C_new, which requires a
-        majority of both the old and new configurations throughout, so it
-        can never lose a committed entry. May be sent to any node; a
-        follower forwards the proposal to the leader.
+        Adds a node to the raft cluster via a joint-consensus (ConfChangeV2)
+        membership change — a voter by default, or a non-voting learner when
+        the body sets `"learner": true`. A learner replicates the log but does
+        not count toward quorum; promote it to a voter with
+        POST /v1/membership/{id}/promote once it has caught up. The change is
+        partition-safe — it transits the joint configuration C_old ∪ C_new,
+        which requires a majority of both the old and new configurations
+        throughout, so it can never lose a committed entry. May be sent to any
+        node; a follower forwards the proposal to the leader.
 
         The node named here must already be running in join mode
         (`COMMITTED_JOIN=true`) with a peer set that lets it reach the
@@ -974,6 +977,42 @@ paths:
       responses:
         '204':
           description: Member removed; the cluster has applied the new configuration.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/MembershipUnconfirmed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/membership/{id}/promote:
+    post:
+      tags: [membership]
+      summary: Promote a learner to a voter
+      description: |
+        Promotes the existing learner `{id}` to a voter via a joint-consensus
+        (ConfChangeV2) membership change. The call blocks until the change has
+        taken effect, then returns 204. Same partition-safety and node-agnostic
+        semantics as the other membership changes.
+
+        This endpoint does NOT judge whether the learner has caught up — the
+        caller decides "caught up" from the per-member replication progress in
+        GET /v1/membership and promotes when ready. Promoting a non-learner or
+        an unknown id returns 400.
+      operationId: promoteMember
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Raft node id of the learner to promote.
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      responses:
+        '204':
+          description: Learner promoted; the cluster has applied the new configuration.
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -1279,6 +1318,14 @@ components:
             members will dial. Raft replicates only node ids, not addresses,
             so the url must be supplied here.
           examples: ["http://n4:9022"]
+        learner:
+          type: boolean
+          default: false
+          description: |
+            Add the node as a non-voting learner (it replicates the log but
+            does not count toward quorum) instead of a voter. Promote it later
+            with POST /v1/membership/{id}/promote. Defaults to false (voter),
+            so existing callers are unchanged.
 
     MembershipResponse:
       type: object
