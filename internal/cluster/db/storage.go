@@ -118,6 +118,15 @@ type Storage interface {
 	// what makes the manual dead-letter flow node-agnostic.
 	SyncableStuck(id string) (cluster.SyncableStuck, bool, error)
 	SyncableSkipRequest(id string) (cluster.SyncableSkipRequest, bool, error)
+	// TypeMigrationDeadLetters returns the proposals whose entities failed
+	// the type's migration program at runtime, in ascending raft-index
+	// order — the type-keyed twin of SyncableDeadLetters with the same
+	// cursor/limit semantics. An unknown type id returns an empty slice.
+	TypeMigrationDeadLetters(typeID string, since uint64, limit int) ([]cluster.TypeMigrationDeadLetter, error)
+	// HasTypeMigrationDeadLetter reports whether a migration dead-letter
+	// record exists for the proposal at raft index in type id. Migration
+	// retry consults it so a retry targets only a recorded failure.
+	HasTypeMigrationDeadLetter(typeID string, index uint64) (bool, error)
 	// ActualAt returns the committed Actual at a raft index, read from the
 	// permanent event log by binary search. Used by replay to re-drive a
 	// single dead-lettered Actual without disturbing any reader cursor.

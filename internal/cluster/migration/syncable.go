@@ -3,8 +3,10 @@ package migration
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/metrics"
 )
 
 // Wrap returns a cluster.Syncable that transforms each proposal's
@@ -18,20 +20,24 @@ import (
 // about migration) sees a plain Syncable with the usual contract.
 // Migration failures are reported as cluster.Permanent errors so the
 // worker logs and skips the bad proposal rather than retrying.
-func Wrap(inner cluster.Syncable, r Resolver) cluster.Syncable {
+//
+// m drives the committed.type.migration.duration histogram (recorded per
+// migrated entity, on success). Nil when metrics are disabled.
+func Wrap(inner cluster.Syncable, r Resolver, m *metrics.Metrics) cluster.Syncable {
 	if bs, ok := inner.(cluster.BatchSyncable); ok {
-		return &batchSyncable{single: single{inner: inner, resolver: r}, batch: bs}
+		return &batchSyncable{single: single{inner: inner, resolver: r, metrics: m}, batch: bs}
 	}
-	return &single{inner: inner, resolver: r}
+	return &single{inner: inner, resolver: r, metrics: m}
 }
 
 type single struct {
 	inner    cluster.Syncable
 	resolver Resolver
+	metrics  *metrics.Metrics
 }
 
 func (s *single) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldSnapshot, error) {
-	entities, err := migrateEntities(s.resolver, a.Entities)
+	entities, err := migrateEntities(s.resolver, s.metrics, a.Entities)
 	if err != nil {
 		return false, cluster.Permanent(err)
 	}
@@ -48,7 +54,7 @@ type batchSyncable struct {
 func (b *batchSyncable) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool, error) {
 	migrated := make([]*cluster.Actual, len(as))
 	for i, a := range as {
-		entities, err := migrateEntities(b.resolver, a.Entities)
+		entities, err := migrateEntities(b.resolver, b.metrics, a.Entities)
 		if err != nil {
 			return false, cluster.Permanent(err)
 		}
@@ -62,7 +68,7 @@ func (b *batchSyncable) SyncBatch(ctx context.Context, as []*cluster.Actual) (bo
 // System entities (config entries) pass through untouched. The input
 // entities are not modified — retry paths see consistent input across
 // attempts.
-func migrateEntities(r Resolver, es []*cluster.Entity) ([]*cluster.Entity, error) {
+func migrateEntities(r Resolver, m *metrics.Metrics, es []*cluster.Entity) ([]*cluster.Entity, error) {
 	out := make([]*cluster.Entity, 0, len(es))
 	for _, e := range es {
 		// System entities (config) and deletes pass through untouched: a
@@ -82,9 +88,13 @@ func migrateEntities(r Resolver, es []*cluster.Entity) ([]*cluster.Entity, error
 			out = append(out, e)
 			continue
 		}
+		start := time.Now()
 		data, err := Chain(r, e.ID, e.Version, latest.Version, e.Data)
 		if err != nil {
 			return nil, err
+		}
+		if m != nil {
+			m.MigrationCompleted(e.ID, time.Since(start))
 		}
 		copy := *e
 		copy.Type = latest

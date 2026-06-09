@@ -76,7 +76,7 @@ func (db *DB) buildSyncable(id string) (cluster.Syncable, error) {
 		return nil, err
 	}
 	if mode == cluster.ModeAlwaysCurrent {
-		syncable = migration.Wrap(syncable, db.storage)
+		syncable = migration.Wrap(syncable, db.storage, db.metrics)
 	}
 	return syncable, nil
 }

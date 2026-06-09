@@ -365,6 +365,19 @@ type FakeCluster struct {
 	replaySyncableDeadLetterReturnsOnCall map[int]struct {
 		result1 error
 	}
+	ReplayTypeMigrationDeadLetterStub        func(context.Context, string, uint64) error
+	replayTypeMigrationDeadLetterMutex       sync.RWMutex
+	replayTypeMigrationDeadLetterArgsForCall []struct {
+		arg1 context.Context
+		arg2 string
+		arg3 uint64
+	}
+	replayTypeMigrationDeadLetterReturns struct {
+		result1 error
+	}
+	replayTypeMigrationDeadLetterReturnsOnCall map[int]struct {
+		result1 error
+	}
 	ReportDiskStub        func(uint64, string) (cluster.DiskVerdict, error)
 	reportDiskMutex       sync.RWMutex
 	reportDiskArgsForCall []struct {
@@ -483,6 +496,21 @@ type FakeCluster struct {
 	}
 	syncablesReturnsOnCall map[int]struct {
 		result1 []*cluster.Configuration
+		result2 error
+	}
+	TypeMigrationDeadLettersStub        func(string, uint64, int) ([]cluster.TypeMigrationDeadLetter, error)
+	typeMigrationDeadLettersMutex       sync.RWMutex
+	typeMigrationDeadLettersArgsForCall []struct {
+		arg1 string
+		arg2 uint64
+		arg3 int
+	}
+	typeMigrationDeadLettersReturns struct {
+		result1 []cluster.TypeMigrationDeadLetter
+		result2 error
+	}
+	typeMigrationDeadLettersReturnsOnCall map[int]struct {
+		result1 []cluster.TypeMigrationDeadLetter
 		result2 error
 	}
 	TypeVersionStub        func(string, uint64) (*cluster.Configuration, error)
@@ -2326,6 +2354,69 @@ func (fake *FakeCluster) ReplaySyncableDeadLetterReturnsOnCall(i int, result1 er
 	}{result1}
 }
 
+func (fake *FakeCluster) ReplayTypeMigrationDeadLetter(arg1 context.Context, arg2 string, arg3 uint64) error {
+	fake.replayTypeMigrationDeadLetterMutex.Lock()
+	ret, specificReturn := fake.replayTypeMigrationDeadLetterReturnsOnCall[len(fake.replayTypeMigrationDeadLetterArgsForCall)]
+	fake.replayTypeMigrationDeadLetterArgsForCall = append(fake.replayTypeMigrationDeadLetterArgsForCall, struct {
+		arg1 context.Context
+		arg2 string
+		arg3 uint64
+	}{arg1, arg2, arg3})
+	stub := fake.ReplayTypeMigrationDeadLetterStub
+	fakeReturns := fake.replayTypeMigrationDeadLetterReturns
+	fake.recordInvocation("ReplayTypeMigrationDeadLetter", []interface{}{arg1, arg2, arg3})
+	fake.replayTypeMigrationDeadLetterMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2, arg3)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeCluster) ReplayTypeMigrationDeadLetterCallCount() int {
+	fake.replayTypeMigrationDeadLetterMutex.RLock()
+	defer fake.replayTypeMigrationDeadLetterMutex.RUnlock()
+	return len(fake.replayTypeMigrationDeadLetterArgsForCall)
+}
+
+func (fake *FakeCluster) ReplayTypeMigrationDeadLetterCalls(stub func(context.Context, string, uint64) error) {
+	fake.replayTypeMigrationDeadLetterMutex.Lock()
+	defer fake.replayTypeMigrationDeadLetterMutex.Unlock()
+	fake.ReplayTypeMigrationDeadLetterStub = stub
+}
+
+func (fake *FakeCluster) ReplayTypeMigrationDeadLetterArgsForCall(i int) (context.Context, string, uint64) {
+	fake.replayTypeMigrationDeadLetterMutex.RLock()
+	defer fake.replayTypeMigrationDeadLetterMutex.RUnlock()
+	argsForCall := fake.replayTypeMigrationDeadLetterArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3
+}
+
+func (fake *FakeCluster) ReplayTypeMigrationDeadLetterReturns(result1 error) {
+	fake.replayTypeMigrationDeadLetterMutex.Lock()
+	defer fake.replayTypeMigrationDeadLetterMutex.Unlock()
+	fake.ReplayTypeMigrationDeadLetterStub = nil
+	fake.replayTypeMigrationDeadLetterReturns = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *FakeCluster) ReplayTypeMigrationDeadLetterReturnsOnCall(i int, result1 error) {
+	fake.replayTypeMigrationDeadLetterMutex.Lock()
+	defer fake.replayTypeMigrationDeadLetterMutex.Unlock()
+	fake.ReplayTypeMigrationDeadLetterStub = nil
+	if fake.replayTypeMigrationDeadLetterReturnsOnCall == nil {
+		fake.replayTypeMigrationDeadLetterReturnsOnCall = make(map[int]struct {
+			result1 error
+		})
+	}
+	fake.replayTypeMigrationDeadLetterReturnsOnCall[i] = struct {
+		result1 error
+	}{result1}
+}
+
 func (fake *FakeCluster) ReportDisk(arg1 uint64, arg2 string) (cluster.DiskVerdict, error) {
 	fake.reportDiskMutex.Lock()
 	ret, specificReturn := fake.reportDiskReturnsOnCall[len(fake.reportDiskArgsForCall)]
@@ -2897,6 +2988,72 @@ func (fake *FakeCluster) SyncablesReturnsOnCall(i int, result1 []*cluster.Config
 	}{result1, result2}
 }
 
+func (fake *FakeCluster) TypeMigrationDeadLetters(arg1 string, arg2 uint64, arg3 int) ([]cluster.TypeMigrationDeadLetter, error) {
+	fake.typeMigrationDeadLettersMutex.Lock()
+	ret, specificReturn := fake.typeMigrationDeadLettersReturnsOnCall[len(fake.typeMigrationDeadLettersArgsForCall)]
+	fake.typeMigrationDeadLettersArgsForCall = append(fake.typeMigrationDeadLettersArgsForCall, struct {
+		arg1 string
+		arg2 uint64
+		arg3 int
+	}{arg1, arg2, arg3})
+	stub := fake.TypeMigrationDeadLettersStub
+	fakeReturns := fake.typeMigrationDeadLettersReturns
+	fake.recordInvocation("TypeMigrationDeadLetters", []interface{}{arg1, arg2, arg3})
+	fake.typeMigrationDeadLettersMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2, arg3)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeCluster) TypeMigrationDeadLettersCallCount() int {
+	fake.typeMigrationDeadLettersMutex.RLock()
+	defer fake.typeMigrationDeadLettersMutex.RUnlock()
+	return len(fake.typeMigrationDeadLettersArgsForCall)
+}
+
+func (fake *FakeCluster) TypeMigrationDeadLettersCalls(stub func(string, uint64, int) ([]cluster.TypeMigrationDeadLetter, error)) {
+	fake.typeMigrationDeadLettersMutex.Lock()
+	defer fake.typeMigrationDeadLettersMutex.Unlock()
+	fake.TypeMigrationDeadLettersStub = stub
+}
+
+func (fake *FakeCluster) TypeMigrationDeadLettersArgsForCall(i int) (string, uint64, int) {
+	fake.typeMigrationDeadLettersMutex.RLock()
+	defer fake.typeMigrationDeadLettersMutex.RUnlock()
+	argsForCall := fake.typeMigrationDeadLettersArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3
+}
+
+func (fake *FakeCluster) TypeMigrationDeadLettersReturns(result1 []cluster.TypeMigrationDeadLetter, result2 error) {
+	fake.typeMigrationDeadLettersMutex.Lock()
+	defer fake.typeMigrationDeadLettersMutex.Unlock()
+	fake.TypeMigrationDeadLettersStub = nil
+	fake.typeMigrationDeadLettersReturns = struct {
+		result1 []cluster.TypeMigrationDeadLetter
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) TypeMigrationDeadLettersReturnsOnCall(i int, result1 []cluster.TypeMigrationDeadLetter, result2 error) {
+	fake.typeMigrationDeadLettersMutex.Lock()
+	defer fake.typeMigrationDeadLettersMutex.Unlock()
+	fake.TypeMigrationDeadLettersStub = nil
+	if fake.typeMigrationDeadLettersReturnsOnCall == nil {
+		fake.typeMigrationDeadLettersReturnsOnCall = make(map[int]struct {
+			result1 []cluster.TypeMigrationDeadLetter
+			result2 error
+		})
+	}
+	fake.typeMigrationDeadLettersReturnsOnCall[i] = struct {
+		result1 []cluster.TypeMigrationDeadLetter
+		result2 error
+	}{result1, result2}
+}
+
 func (fake *FakeCluster) TypeVersion(arg1 string, arg2 uint64) (*cluster.Configuration, error) {
 	fake.typeVersionMutex.Lock()
 	ret, specificReturn := fake.typeVersionReturnsOnCall[len(fake.typeVersionArgsForCall)]
@@ -3147,6 +3304,8 @@ func (fake *FakeCluster) Invocations() map[string][][]interface{} {
 	defer fake.removeMemberMutex.RUnlock()
 	fake.replaySyncableDeadLetterMutex.RLock()
 	defer fake.replaySyncableDeadLetterMutex.RUnlock()
+	fake.replayTypeMigrationDeadLetterMutex.RLock()
+	defer fake.replayTypeMigrationDeadLetterMutex.RUnlock()
 	fake.reportDiskMutex.RLock()
 	defer fake.reportDiskMutex.RUnlock()
 	fake.resolveTypeMutex.RLock()
@@ -3165,6 +3324,8 @@ func (fake *FakeCluster) Invocations() map[string][][]interface{} {
 	defer fake.syncableVersionsMutex.RUnlock()
 	fake.syncablesMutex.RLock()
 	defer fake.syncablesMutex.RUnlock()
+	fake.typeMigrationDeadLettersMutex.RLock()
+	defer fake.typeMigrationDeadLettersMutex.RUnlock()
 	fake.typeVersionMutex.RLock()
 	defer fake.typeVersionMutex.RUnlock()
 	fake.typeVersionsMutex.RLock()

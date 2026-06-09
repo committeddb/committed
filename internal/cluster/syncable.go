@@ -401,8 +401,9 @@ func NewDeleteSyncableSkipRequestEntity(id string) *Entity {
 }
 
 // IsSyncableMetadata reports whether a type ID identifies a syncable's own
-// internal coordination state — its progress index, dead-letter records, and
-// stuck / skip-request status. These ride in the permanent event log like any
+// internal coordination state — its progress index, dead-letter records
+// (including the type-keyed migration dead letters), and stuck /
+// skip-request status. These ride in the permanent event log like any
 // other entity, but they must NOT be projected back into a syncable (a
 // syncable re-Syncing its own dead letters would loop), so every event-log
 // reader filters them out at read time. Derived from the type registry (the

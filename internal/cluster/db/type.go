@@ -115,6 +115,22 @@ func ParseType(c *cluster.Configuration, s cluster.DatabaseStorage) (string, *cl
 		}
 	}
 
+	// Optional pre-flight: migration.validate_against carries a sample
+	// JSON payload in the previous version's shape to run the proposed
+	// transform against, so a program that parses but breaks on real data
+	// is caught at propose time instead of at first-sync. Validation-only:
+	// it never becomes part of the Type (though, like the rest of the
+	// TOML, it stays visible in the raw config version history).
+	if v.IsSet("migration.validate_against") {
+		if !hasMigrationTransform {
+			return "", nil, fmt.Errorf("migration.validate_against requires migration.transform (there is no program to validate)")
+		}
+		sample := []byte(v.GetString("migration.validate_against"))
+		if err := runMigrationSample(migration, sample); err != nil {
+			return "", nil, fmt.Errorf("migration.transform failed against the validate_against sample: %w", err)
+		}
+	}
+
 	t := &cluster.Type{
 		ID:                c.ID,
 		Name:              name,
@@ -133,6 +149,15 @@ func ParseType(c *cluster.Configuration, s cluster.DatabaseStorage) (string, *cl
 // fail at ProposeType, not at first-sync.
 func compileMigration(program []byte) error {
 	return migration.Compile(program)
+}
+
+// runMigrationSample runs a proposed transform against an operator-supplied
+// sample payload — the pre-flight half of migration validation. Like
+// compileMigration, it lives outside ParseType because the local `migration`
+// variable there shadows the package name.
+func runMigrationSample(program, sample []byte) error {
+	_, err := migration.Run(program, sample)
+	return err
 }
 
 func (db *DB) Types() ([]*cluster.Configuration, error) {

@@ -1,6 +1,7 @@
 package migration_test
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 
@@ -108,4 +109,40 @@ func TestCompile_ValidProgram(t *testing.T) {
 
 func TestCompile_InvalidProgram(t *testing.T) {
 	require.Error(t, migration.Compile([]byte(`this is not jq`)))
+}
+
+// TestChain_RuntimeErrorIsStructured asserts a program failing at runtime
+// surfaces as a *migration.Error naming the exact failing step — the
+// identity the sync worker uses to dead-letter the failure against the
+// type and count it in committed.type.migration.errors.
+func TestChain_RuntimeErrorIsStructured(t *testing.T) {
+	// v2 passes; v3's program errors at runtime on this payload.
+	r := &stubResolver{types: map[string]*cluster.Type{
+		"person@2": {ID: "person", Version: 2, Migration: []byte(`. + {email: "unknown@example.com"}`)},
+		"person@3": {ID: "person", Version: 3, Migration: []byte(`error("cannot derive contact for " + .name)`)},
+	}}
+
+	_, err := migration.Chain(r, "person", 1, 3, []byte(`{"name":"alice"}`))
+	require.Error(t, err)
+
+	merr, ok := errors.AsType[*migration.Error](err)
+	require.True(t, ok, "a runtime step failure must be a *migration.Error")
+	require.Equal(t, "person", merr.TypeID)
+	require.Equal(t, 2, merr.FromVersion, "the failing step starts at the version below the broken program")
+	require.Equal(t, 3, merr.ToVersion, "the v3 program is the one that errored")
+	require.Contains(t, merr.Error(), "v2->v3")
+	require.Contains(t, merr.Error(), "cannot derive contact for alice")
+}
+
+// TestRun_SingleProgram covers the exported single-program entry point the
+// ParseType pre-flight uses: a good sample transforms, a runtime failure
+// reports the cause.
+func TestRun_SingleProgram(t *testing.T) {
+	out, err := migration.Run([]byte(`. + {email: "x"}`), []byte(`{"name":"alice"}`))
+	require.NoError(t, err)
+	require.JSONEq(t, `{"name":"alice","email":"x"}`, string(out))
+
+	_, err = migration.Run([]byte(`error("boom")`), []byte(`{"name":"alice"}`))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "boom")
 }

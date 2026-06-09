@@ -2,11 +2,13 @@ package db
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"go.uber.org/zap"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/migration"
 )
 
 // This file holds the dead-letter side of the sync worker: classifying a
@@ -42,6 +44,15 @@ func (db *DB) recordSyncDeadLetter(ctx context.Context, id string, index uint64,
 	if err := db.proposeSyncableDeadLetter(ctx, dl); err != nil {
 		db.logger.Warn("dead-letter record not persisted (best-effort; proposal still skipped)",
 			zap.String("id", id), zap.Uint64("index", index), zap.String("kind", kind), zap.Error(err))
+	}
+
+	// A failure inside the type-migration chain is attributed to the type as
+	// well: the syncable record above says "syncable S skipped index N", the
+	// type-keyed twin says which type's migration program broke it, so an
+	// operator can enumerate (and retry) failures per type. See
+	// type_migration_dead_letter.go.
+	if merr, ok := errors.AsType[*migration.Error](syncErr); ok {
+		db.recordTypeMigrationDeadLetter(ctx, index, merr)
 	}
 }
 

@@ -79,6 +79,21 @@ type Cluster interface {
 	ReplaySyncableDeadLetter(ctx context.Context, id string, index uint64) error
 	TypeVersions(id string) ([]VersionInfo, error)
 	TypeVersion(id string, version uint64) (*Configuration, error)
+	// TypeMigrationDeadLetters returns the proposals whose entities failed
+	// the type's migration program at runtime, in ascending raft-index
+	// order — the type-keyed twin of SyncableDeadLetters with the same
+	// cursor/limit semantics. Backed by replicated state, so any node
+	// returns the same answer.
+	TypeMigrationDeadLetters(typeID string, since uint64, limit int) ([]TypeMigrationDeadLetter, error)
+	// ReplayTypeMigrationDeadLetter re-runs the (presumably fixed)
+	// migration chain for the dead-lettered proposal at index and, on
+	// success, clears the type-keyed record. It validates the fix against
+	// the exact payload that broke the old program; delivering the result
+	// downstream is still ReplaySyncableDeadLetter's job. Node-agnostic.
+	// Returns ErrNotDeadLettered if index isn't a migration dead letter
+	// for the type, or an error wrapping ErrReplayMigrationFailed if the
+	// chain still fails (the record is left in place).
+	ReplayTypeMigrationDeadLetter(ctx context.Context, typeID string, index uint64) error
 	// AddMember adds a voting node (id, rawURL) to the raft cluster using a
 	// joint-consensus membership change and blocks until the change has
 	// taken effect or ctx fires. rawURL is the new node's advertised peer

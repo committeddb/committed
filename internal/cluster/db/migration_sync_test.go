@@ -111,7 +111,7 @@ func TestAlwaysCurrentSyncable_MigratesOldProposal(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cap := &captureSyncable{doneAfter: 1, cancel: cancel}
-	wrapped := migration.Wrap(cap, s)
+	wrapped := migration.Wrap(cap, s, nil)
 	require.NoError(t, d.Sync(ctx, "always-current-sync", wrapped))
 	<-ctx.Done()
 

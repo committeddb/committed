@@ -732,6 +732,18 @@ paths:
     post:
       tags: [type]
       summary: Create or update a type configuration
+      description: |
+        Proposes a type configuration. A schema change requires an explicit
+        `[migration]` section: either `transform = "<jq>"` (a jq program
+        upgrading previous-version data to the new shape) or `none = true`.
+        The transform is compiled at propose time, so syntax errors fail
+        here — but a program can still break at runtime on real payloads.
+        To catch that early, optionally set
+        `validate_against = '<sample JSON>'` in the `[migration]` section:
+        the proposed transform is run against the sample (a document in the
+        previous version's shape) and the request fails with 400 if it
+        errors. `validate_against` is validation-only — it never becomes
+        part of the type definition.
       operationId: addType
       parameters:
         - $ref: '#/components/parameters/ResourceId'
@@ -811,6 +823,116 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/NotLinearizable'
+  /v1/type/{id}/migration-errors:
+    get:
+      tags: [type]
+      summary: List proposals that failed this type's migration at runtime
+      description: |
+        Returns the runtime migration failures recorded for a type —
+        proposals whose entities its jq migration program could not
+        transform — in ascending raft-index order. Each record names the
+        failing chain step (`fromVersion` -> `toVersion`: the `toVersion`
+        program is the one that errored). These are the type-keyed twins of
+        the syncable dead letters: the same skipped proposal also appears
+        in `GET /v1/syncable/{id}/errors` for the syncable that hit it.
+        The records are replicated state, so any node answers identically.
+
+        Page forward by passing the `index` of the last record you saw as
+        the next `since`.
+      operationId: getTypeMigrationErrors
+      parameters:
+        - $ref: '#/components/parameters/Consistency'
+        - $ref: '#/components/parameters/ResourceId'
+        - name: since
+          in: query
+          required: false
+          description: |
+            Exclusive raft-index cursor: only records with index strictly
+            greater than this are returned. Default 0 (from the beginning).
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+        - name: limit
+          in: query
+          required: false
+          description: |
+            Maximum number of records to return. Defaults to 100; the
+            server caps the maximum.
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        '200':
+          description: Migration failure records (ascending raft-index order; empty if none)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TypeMigrationErrorResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/NotLinearizable'
+  /v1/type/{id}/migration-retry/{index}:
+    post:
+      tags: [type]
+      summary: Re-run a failed migration after fixing the program
+      description: |
+        Re-runs the type's migration chain for the dead-lettered proposal
+        at raft `index` and, on success, clears the migration-error record.
+        Use it after fixing the program (re-`POST /v1/type/{id}` with a
+        corrected `transform` — schema unchanged means the current
+        version's migration is updated in place) to verify the fix against
+        the exact payload that broke the old one.
+
+        This validates the chain only — it does not deliver the result
+        downstream. The proposal is still dead-lettered for every syncable
+        that skipped it; replay those with
+        `POST /v1/syncable/{id}/replay/{index}`, which re-runs the same
+        (now-working) chain on the way through.
+
+        Node-agnostic: the type history, the proposal, and the records are
+        all replicated, so any node can serve it.
+      operationId: replayTypeMigrationDeadLetter
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+        - name: index
+          in: path
+          required: true
+          description: Raft index of the dead-lettered proposal to re-run.
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+      responses:
+        '200':
+          description: The migration chain succeeded; the error record was cleared.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: The raft index is not a migration dead letter for this type.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '502':
+          description: |
+            The migration chain still fails on this proposal; the record is
+            left in place. The `details` field carries the failure cause.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
 
   /v1/proposal:
     # Write-only by design. Committed is a commit log, not a query
@@ -1447,6 +1569,38 @@ components:
         message:
           type: string
           description: Truncated error string from the failing Sync.
+
+    TypeMigrationErrorResponse:
+      type: object
+      required: [index, fromVersion, toVersion, timestamp, message]
+      description: |
+        One runtime migration failure — a proposal whose entity the type's
+        migration program could not transform.
+      properties:
+        index:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            Raft index of the proposal whose entity failed to migrate. The
+            data itself stays in the log; this is the pointer back to it.
+            Pass it as `since` to page forward, or to
+            `.../migration-retry/{index}` after fixing the program.
+        fromVersion:
+          type: integer
+          description: |
+            Stamped version the failing chain step started from; the
+            `toVersion` program is the one that errored.
+        toVersion:
+          type: integer
+          description: Version whose migration program failed.
+        timestamp:
+          type: string
+          format: date-time
+          description: When the leader recorded the failure (RFC 3339, UTC).
+        message:
+          type: string
+          description: Truncated error string from the failing program.
 
     SyncableDeadLetterStuckResponse:
       type: object

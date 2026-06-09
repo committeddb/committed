@@ -146,6 +146,51 @@ replay again.
 >   clobber it. (When in doubt, the safe replays are the most recent dead
 >   letters, or ones for keys nothing else has touched.)
 
+## Migration failures (always-current syncables)
+
+A syncable in `always-current` mode runs each entity through its type's
+migration chain (the jq programs registered on type versions) before `Sync`
+sees it. The programs are compiled when the type version is proposed, so
+syntax errors never reach production — but a program that works on 99% of
+payloads can still fail at runtime on the edge case. That failure is a
+**permanent** error: the worker dead-letters the proposal for the syncable
+exactly as above, and additionally records it **against the type**, naming
+the failing chain step:
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  http://node:8080/v1/type/person/migration-errors
+# [{"index":4123,"fromVersion":1,"toVersion":2,
+#   "timestamp":"2026-06-09T14:05:00Z",
+#   "message":"jq runtime: cannot derive email for alice"}]
+```
+
+`toVersion` is the broken program. The same failure increments
+`committed_type_migration_errors_total{type_id,from_version,to_version}` —
+alert on that, not on log lines. (Successful chains feed
+`committed_type_migration_duration_seconds{type_id}`.)
+
+The recovery loop:
+
+1. **Fix the program.** Re-`POST /v1/type/{id}` with the corrected
+   `transform` and the schema unchanged — that updates the current
+   version's migration in place, no version bump.
+2. **Verify against the payload that broke it.**
+   `POST /v1/type/{id}/migration-retry/{index}` re-runs the chain on the
+   dead-lettered proposal: `200` clears the type-keyed record, `502` means
+   the chain still fails (cause in `details`), `404` means the index isn't
+   a migration dead letter for that type.
+3. **Deliver.** The retry validates the chain only — the proposal is still
+   dead-lettered for each syncable that skipped it. Replay those with
+   `POST /v1/syncable/{id}/replay/{index}` (see above), which re-runs the
+   now-fixed chain on the way to the destination. The out-of-order caveat
+   above applies here too.
+
+To catch the gremlin *before* it dead-letters anything, pre-flight the
+program when you propose it: add `validate_against = '<sample JSON>'` (a
+document in the previous version's shape) to the `[migration]` section and
+the propose fails with `400` if the transform errors on it.
+
 ## What is *not* (yet) done
 
 - **Bulk replay.** Replay is one index at a time; there is no "retry
@@ -153,3 +198,6 @@ replay again.
 - **Auto-classification.** Improving how syncables classify errors (so more
   genuinely-permanent failures dead-letter automatically and fewer need this
   loop) is ongoing.
+- **Bulk migration retry.** Like replay, `migration-retry` is one index at
+  a time. A fixed program usually clears a batch of identical failures —
+  page through `GET .../migration-errors` and retry each.

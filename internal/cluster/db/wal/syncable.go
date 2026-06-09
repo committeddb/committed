@@ -72,7 +72,7 @@ func (s *Storage) saveSyncable(t *cluster.Configuration) error {
 		// through untouched. The wrapper lives in the migration
 		// package next to the chain it uses.
 		if parsedMode == cluster.ModeAlwaysCurrent {
-			parsed = migration.Wrap(parsed, s)
+			parsed = migration.Wrap(parsed, s, s.metrics)
 		}
 		syncable = parsed
 		built = true
@@ -154,7 +154,7 @@ func (s *Storage) RestoreSyncableWorkers() {
 		// with the migration wrapper so the worker loop stays oblivious
 		// to version-upgrade concerns.
 		if mode == cluster.ModeAlwaysCurrent {
-			syncable = migration.Wrap(syncable, s)
+			syncable = migration.Wrap(syncable, s, s.metrics)
 		}
 		s.sync <- &db.SyncableWithID{ID: cfg.ID, Syncable: syncable}
 	}

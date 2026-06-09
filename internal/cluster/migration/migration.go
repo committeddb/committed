@@ -28,11 +28,33 @@ type Resolver interface {
 	ResolveType(ref cluster.TypeRef) (*cluster.Type, error)
 }
 
+// Error is a migration program failing at runtime on a concrete entity —
+// the failure compile-time validation can't catch. It identifies the
+// failing chain step so the layer that owns metrics and dead-lettering
+// (db's sync worker) can attribute the failure to a type and version pair
+// instead of just the syncable that happened to trip over it. Unwraps to
+// the underlying jq/JSON error.
+type Error struct {
+	TypeID string
+	// FromVersion -> ToVersion is the chain step that failed: the
+	// ToVersion program is the one that errored.
+	FromVersion int
+	ToVersion   int
+	Err         error
+}
+
+func (e *Error) Error() string {
+	return fmt.Sprintf("migration chain: type %s v%d->v%d: %v", e.TypeID, e.FromVersion, e.ToVersion, e.Err)
+}
+
+func (e *Error) Unwrap() error { return e.Err }
+
 // Chain walks the type history for typeID from stampedVersion up to
 // latestVersion and applies each registered Migration program to data
 // in order. Returns the transformed JSON bytes. Versions whose
 // Migration is empty are skipped (no-op step). If stampedVersion equals
-// or exceeds latestVersion, data is returned unchanged.
+// or exceeds latestVersion, data is returned unchanged. A program that
+// fails at runtime is reported as an *Error naming the failing step.
 func Chain(r Resolver, typeID string, stampedVersion, latestVersion int, data []byte) ([]byte, error) {
 	if stampedVersion >= latestVersion {
 		return data, nil
@@ -47,9 +69,9 @@ func Chain(r Resolver, typeID string, stampedVersion, latestVersion int, data []
 		if len(t.Migration) == 0 {
 			continue
 		}
-		next, err := apply(t.Migration, current)
+		next, err := Run(t.Migration, current)
 		if err != nil {
-			return nil, fmt.Errorf("migration chain: type %s v%d->v%d: %w", typeID, v-1, v, err)
+			return nil, &Error{TypeID: typeID, FromVersion: v - 1, ToVersion: v, Err: err}
 		}
 		current = next
 	}
@@ -64,11 +86,13 @@ func Compile(program []byte) error {
 	return err
 }
 
-// apply runs a single jq program against a JSON document and returns
+// Run executes a single jq program against a JSON document and returns
 // the first produced value as JSON bytes. Programs that produce zero or
 // multiple values are treated as errors — a migration must produce
-// exactly one transformed document per input document.
-func apply(program, data []byte) ([]byte, error) {
+// exactly one transformed document per input document. Chain calls it per
+// step; ParseType's pre-flight validation calls it directly to try a
+// proposed program against an operator-supplied sample payload.
+func Run(program, data []byte) ([]byte, error) {
 	q, err := gojq.Parse(string(program))
 	if err != nil {
 		return nil, fmt.Errorf("parse jq: %w", err)

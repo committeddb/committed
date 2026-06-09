@@ -10,10 +10,11 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 )
 
-// defaultSyncableErrorsLimit is the page size GetSyncableErrors uses when
-// the caller omits ?limit. Storage clamps the upper bound, so a caller
-// asking for more just gets a full page.
-const defaultSyncableErrorsLimit = 100
+// defaultErrorsPageLimit is the page size the dead-letter listing handlers
+// (GetSyncableErrors, GetTypeMigrationErrors) use when the caller omits
+// ?limit. Storage clamps the upper bound, so a caller asking for more just
+// gets a full page.
+const defaultErrorsPageLimit = 100
 
 // AddSyncable (POST /syncable/{id}) and GetSyncables (GET /syncable) are
 // served by the generic config handlers in config_handlers.go. The handlers
@@ -53,7 +54,7 @@ func (h *HTTP) GetSyncableErrors(w httpgo.ResponseWriter, r *httpgo.Request) {
 		since = n
 	}
 
-	limit := defaultSyncableErrorsLimit
+	limit := defaultErrorsPageLimit
 	if ql := r.URL.Query().Get("limit"); ql != "" {
 		n, err := strconv.Atoi(ql)
 		if err != nil || n <= 0 {

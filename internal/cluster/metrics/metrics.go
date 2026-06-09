@@ -41,6 +41,9 @@ type Metrics struct {
 	ingestPositionBumpDuration metric.Float64Histogram
 	ingestDedupSkipped         metric.Int64Counter
 
+	typeMigrationErrors   metric.Int64Counter
+	typeMigrationDuration metric.Float64Histogram
+
 	configBuildErrors metric.Float64Gauge
 
 	walCorruptEntries metric.Int64Counter
@@ -141,6 +144,13 @@ func New(meter metric.Meter) *Metrics {
 	m.ingestDedupSkipped, _ = meter.Int64Counter("committed.ingest.dedup_skipped_total",
 		metric.WithDescription("Re-emitted ingest proposals skipped before raft because their source sequence was at or below the durable highwater (effectively-once dedup)."))
 
+	m.typeMigrationErrors, _ = meter.Int64Counter("committed.type.migration.errors",
+		metric.WithDescription("Runtime type-migration failures by type_id and the failing chain step (from_version -> to_version). Each counted failure dead-letters the proposal for the syncable that hit it; query GET /type/{id}/migration-errors for the records."))
+
+	m.typeMigrationDuration, _ = meter.Float64Histogram("committed.type.migration.duration",
+		metric.WithDescription("Time to run an entity through its type-migration chain (all steps from the stamped version to current). Recorded only on success, so the histogram reflects real transform cost."),
+		metric.WithUnit("s"))
+
 	m.configBuildErrors, _ = meter.Float64Gauge("committed.config.build_errors",
 		metric.WithDescription("Configs (database/ingestable/syncable) persisted on this node but not buildable locally — usually a missing ${VAR} secret. Non-zero means a degraded config, not a down node."))
 
@@ -234,6 +244,27 @@ func (m *Metrics) SyncError(id, kind string) {
 		))
 	m.syncLastErrorTime.Record(context.Background(), float64(time.Now().Unix()),
 		metric.WithAttributes(attribute.String("syncable_id", id)))
+}
+
+// MigrationError counts one runtime type-migration failure for a type,
+// attributed to the failing chain step (the toVersion program is the one
+// that errored). Emitted from the sync worker's dead-letter path, so a
+// batch failure isolated down to one bad entity counts once.
+func (m *Metrics) MigrationError(typeID string, fromVersion, toVersion int) {
+	m.typeMigrationErrors.Add(context.Background(), 1,
+		metric.WithAttributes(
+			attribute.String("type_id", typeID),
+			attribute.Int("from_version", fromVersion),
+			attribute.Int("to_version", toVersion),
+		))
+}
+
+// MigrationCompleted records the time an entity spent in its type-migration
+// chain (every step from the stamped version up to current). Recorded only
+// on success — failures are counted by MigrationError instead.
+func (m *Metrics) MigrationCompleted(typeID string, d time.Duration) {
+	m.typeMigrationDuration.Record(context.Background(), d.Seconds(),
+		metric.WithAttributes(attribute.String("type_id", typeID)))
 }
 
 // IngestError counts one ingest error for an ingestable and stamps the

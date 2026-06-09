@@ -45,7 +45,7 @@ func TestWrap_MigratesEntityBeforeSync(t *testing.T) {
 	r.types["person"] = r.types["person@2"] // "latest" lookup
 
 	inner := &recordingSyncable{}
-	wrapped := migration.Wrap(inner, r)
+	wrapped := migration.Wrap(inner, r, nil)
 
 	p := &cluster.Actual{Entities: []*cluster.Entity{{
 		Type: &cluster.Type{ID: "person", Version: 1},
@@ -70,7 +70,7 @@ func TestWrap_SkipsWhenAtLatest(t *testing.T) {
 	}}
 
 	inner := &recordingSyncable{}
-	wrapped := migration.Wrap(inner, r)
+	wrapped := migration.Wrap(inner, r, nil)
 
 	original := []byte(`{"name":"alice"}`)
 	p := &cluster.Actual{Entities: []*cluster.Entity{{
@@ -91,7 +91,7 @@ func TestWrap_PassesSystemEntitiesThrough(t *testing.T) {
 	r := &stubResolver{types: map[string]*cluster.Type{}} // empty
 
 	inner := &recordingSyncable{}
-	wrapped := migration.Wrap(inner, r)
+	wrapped := migration.Wrap(inner, r, nil)
 
 	// Construct a system-type entity directly: typeType lives in the
 	// cluster package, so we reach it via NewUpsertTypeEntity.
@@ -116,7 +116,7 @@ func TestWrap_PassesDeletesThrough(t *testing.T) {
 	}}
 
 	inner := &recordingSyncable{}
-	wrapped := migration.Wrap(inner, r)
+	wrapped := migration.Wrap(inner, r, nil)
 
 	del := cluster.NewDeleteEntity(&cluster.Type{ID: "person", Version: 1}, []byte("k"))
 	p := &cluster.Actual{Entities: []*cluster.Entity{del}}
@@ -134,7 +134,7 @@ func TestWrap_MigrationFailureIsPermanent(t *testing.T) {
 	}}
 
 	inner := &recordingSyncable{}
-	wrapped := migration.Wrap(inner, r)
+	wrapped := migration.Wrap(inner, r, nil)
 
 	p := &cluster.Actual{Entities: []*cluster.Entity{{
 		Type: &cluster.Type{ID: "person", Version: 1},
@@ -153,7 +153,7 @@ func TestWrap_PreservesBatchInterface(t *testing.T) {
 	}}
 
 	inner := &recordingBatchSyncable{}
-	wrapped := migration.Wrap(inner, r)
+	wrapped := migration.Wrap(inner, r, nil)
 
 	_, isBatch := wrapped.(cluster.BatchSyncable)
 	require.True(t, isBatch, "Wrap of a BatchSyncable must satisfy cluster.BatchSyncable")

@@ -108,9 +108,10 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 		//
 		// The four config resources share a generic handler set (see
 		// config_handlers.go); the route table stays explicit so
-		// per-resource deviations — type has no rollback and a bespoke
-		// GET /type/{id}, syncable adds errors/status/deadletter/replay —
-		// remain visible rather than hidden inside a registrar.
+		// per-resource deviations — type has no rollback and adds
+		// migration-errors/migration-retry, syncable adds
+		// errors/status/deadletter/replay — remain visible rather than
+		// hidden inside a registrar.
 		r.Route("/v1", func(r chi.Router) {
 			r.Get("/database", h.listConfig("database", h.c.Databases))
 			r.Post("/database/{id}", h.addConfig("database", h.c.ProposeDatabase))
@@ -150,6 +151,8 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 			r.Post("/type/{id}", h.addConfig("type", h.c.ProposeType))
 			r.Get("/type/{id}/versions", h.getVersions("type", h.c.TypeVersions))
 			r.Get("/type/{id}/versions/{version}", h.getVersion("type", h.c.TypeVersion))
+			r.Get("/type/{id}/migration-errors", h.GetTypeMigrationErrors)
+			r.Post("/type/{id}/migration-retry/{index}", h.ReplayTypeMigrationDeadLetter)
 
 			// Per-node diagnostics. /node/ (not /status) scopes this to the
 			// answering node — degraded-build state is node-local and

@@ -69,6 +69,13 @@ var (
 	// metadata for the node-agnostic manual dead-letter flow; see stuck.go.
 	syncableStuckBucket       = []byte("syncableStuck")
 	syncableSkipRequestBucket = []byte("syncableSkipRequests")
+	// typeMigrationDeadLetterBucket is the type-keyed twin of
+	// syncableDeadLetterBucket: one nested sub-bucket per type id, mapping
+	// a big-endian raft index to a marshaled cluster.TypeMigrationDeadLetter
+	// (a runtime migration-program failure). Written deterministically from
+	// the apply path (handleTypeMigrationDeadLetter). See
+	// type_migration_dead_letter.go.
+	typeMigrationDeadLetterBucket = []byte("typeMigrationDeadLetters")
 )
 
 // appliedIndexBucket holds a single key ("idx") whose value is the
@@ -111,6 +118,7 @@ var internalEntities = []internalEntity{
 	{cluster.IsSyncable, "handleSyncable", syncableBucket, (*Storage).handleSyncable},
 	{cluster.IsSyncableIndex, "handleSyncableIndex", syncableIndexBucket, (*Storage).handleSyncableIndex},
 	{cluster.IsSyncableDeadLetter, "handleSyncableDeadLetter", syncableDeadLetterBucket, (*Storage).handleSyncableDeadLetter},
+	{cluster.IsTypeMigrationDeadLetter, "handleTypeMigrationDeadLetter", typeMigrationDeadLetterBucket, (*Storage).handleTypeMigrationDeadLetter},
 	{cluster.IsSyncableStuck, "handleSyncableStuck", syncableStuckBucket, (*Storage).handleSyncableStuck},
 	{cluster.IsSyncableSkipRequest, "handleSyncableSkipRequest", syncableSkipRequestBucket, (*Storage).handleSyncableSkipRequest},
 	{cluster.IsIngestablePosition, "saveIngestablePosition", ingestablePositionBucket, (*Storage).saveIngestablePosition},
