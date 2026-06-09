@@ -54,7 +54,7 @@ func (h *HTTP) NodeStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 
 	bs, err := json.Marshal(resp)
 	if err != nil {
-		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to marshal response")
+		writeInternalError(w, "failed to marshal response", err)
 		return
 	}
 	writeJson(w, bs)

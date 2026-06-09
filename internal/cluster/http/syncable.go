@@ -69,7 +69,7 @@ func (h *HTTP) GetSyncableErrors(w httpgo.ResponseWriter, r *httpgo.Request) {
 
 	dls, err := h.c.SyncableDeadLetters(id, since, limit)
 	if err != nil {
-		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to retrieve syncable errors")
+		writeInternalError(w, "failed to retrieve syncable errors", err)
 		return
 	}
 
@@ -117,7 +117,7 @@ func (h *HTTP) DeadLetterStuckSyncable(w httpgo.ResponseWriter, r *httpgo.Reques
 				"syncable is not currently blocked; it may be healthy or unknown")
 			return
 		}
-		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to dead-letter the stuck proposal")
+		writeInternalError(w, "failed to dead-letter the stuck proposal", err)
 		return
 	}
 
@@ -126,7 +126,7 @@ func (h *HTTP) DeadLetterStuckSyncable(w httpgo.ResponseWriter, r *httpgo.Reques
 	// the targeted index; poll GET /syncable/{id}/errors to confirm.
 	bs, err := json.Marshal(SyncableDeadLetterStuckResponse{Index: index})
 	if err != nil {
-		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to marshal response")
+		writeInternalError(w, "failed to marshal response", err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -162,7 +162,7 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 
 	stuck, ok, err := h.c.SyncableStuck(id)
 	if err != nil {
-		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to retrieve syncable status")
+		writeInternalError(w, "failed to retrieve syncable status", err)
 		return
 	}
 
@@ -175,7 +175,7 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 
 	bs, err := json.Marshal(resp)
 	if err != nil {
-		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to marshal response")
+		writeInternalError(w, "failed to marshal response", err)
 		return
 	}
 	writeJson(w, bs)
@@ -211,7 +211,7 @@ func (h *HTTP) ReplaySyncableDeadLetter(w httpgo.ResponseWriter, r *httpgo.Reque
 		writeErrorWithDetails(w, httpgo.StatusBadGateway, "replay_failed",
 			"the syncable rejected the proposal again; dead letter left in place", capError(err))
 	default:
-		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to replay the dead-lettered proposal")
+		writeInternalError(w, "failed to replay the dead-lettered proposal", err)
 	}
 }
 

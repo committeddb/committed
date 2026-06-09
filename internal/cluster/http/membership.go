@@ -65,7 +65,7 @@ func (h *HTTP) GetMembership(w httpgo.ResponseWriter, r *httpgo.Request) {
 
 	bs, err := json.Marshal(resp)
 	if err != nil {
-		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to marshal membership")
+		writeInternalError(w, "failed to marshal membership", err)
 		return
 	}
 	writeJson(w, bs)
@@ -184,6 +184,6 @@ func writeMembershipError(w httpgo.ResponseWriter, err error, action string) {
 		writeError(w, httpgo.StatusServiceUnavailable, "membership_unconfirmed",
 			"membership change submitted but not confirmed before the request deadline; it may still take effect once a quorum is reachable")
 	default:
-		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to "+action+" member")
+		writeInternalError(w, "failed to "+action+" member", err)
 	}
 }

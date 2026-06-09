@@ -88,7 +88,7 @@ func writeArrayBody[T any](w http.ResponseWriter, body []T) {
 
 	bs, err := json.Marshal(body)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "failed to marshal response")
+		writeInternalError(w, "failed to marshal response", err)
 		return
 	}
 

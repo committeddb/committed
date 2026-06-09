@@ -45,6 +45,38 @@ func writeError(w httpgo.ResponseWriter, status int, code string, message string
 	)
 }
 
+// writeInternalError writes a 500 with a sanitized, client-safe message
+// and logs the underlying cause server-side at Error. A 500 is the
+// server's fault and its cause is deliberately withheld from the client
+// (the message stays generic to avoid leaking internals), so the server
+// log is the only place the cause is captured — and it is precisely the
+// thing a fronting load balancer's access log cannot see. The LB records
+// that a request returned 500; only this records why. cause may be nil.
+func writeInternalError(w httpgo.ResponseWriter, message string, cause error) {
+	resp := ErrorResponse{Code: "internal_error", Message: message}
+
+	bs, err := json.Marshal(resp)
+	if err != nil {
+		w.WriteHeader(httpgo.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(httpgo.StatusInternalServerError)
+	_, _ = w.Write(bs)
+
+	fields := []zap.Field{
+		zap.String("request_id", w.Header().Get("X-Request-ID")),
+		zap.Int("status", httpgo.StatusInternalServerError),
+		zap.String("code", "internal_error"),
+		zap.String("message", message),
+	}
+	if cause != nil {
+		fields = append(fields, zap.Error(cause))
+	}
+	zap.L().Error("http internal error", fields...)
+}
+
 // writeErrorf is a convenience wrapper around writeError that formats
 // the message with fmt.Sprintf.
 func writeErrorf(w httpgo.ResponseWriter, status int, code string, format string, args ...any) {
@@ -62,7 +94,7 @@ func writeProposeError(w httpgo.ResponseWriter, err error, resource, action stri
 	case errors.Is(err, cluster.ErrProposalTooLarge):
 		writeError(w, httpgo.StatusRequestEntityTooLarge, "proposal_too_large", resource+" configuration exceeds the configured proposal size limit")
 	default:
-		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to "+action)
+		writeInternalError(w, "failed to "+action, err)
 	}
 }
 

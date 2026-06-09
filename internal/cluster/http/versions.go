@@ -43,6 +43,6 @@ func writeVersionError(w httpgo.ResponseWriter, err error, resource string) {
 	} else if errors.Is(err, cluster.ErrVersionNotFound) {
 		writeError(w, httpgo.StatusNotFound, "version_not_found", "version not found")
 	} else {
-		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to retrieve "+resource+" versions")
+		writeInternalError(w, "failed to retrieve "+resource+" versions", err)
 	}
 }

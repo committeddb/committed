@@ -20,7 +20,7 @@ func (h *HTTP) Scrub(w httpgo.ResponseWriter, r *httpgo.Request) {
 			writeError(w, httpgo.StatusServiceUnavailable, "scrub_unconfirmed",
 				"scrub submitted but not confirmed before the request deadline; it may still take effect once a quorum is reachable")
 		default:
-			writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to request scrub")
+			writeInternalError(w, "failed to request scrub", err)
 		}
 		return
 	}

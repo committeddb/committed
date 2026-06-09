@@ -53,7 +53,7 @@ func (h *HTTP) listConfig(name string, list func() ([]*cluster.Configuration, er
 		}
 		cfgs, err := list()
 		if err != nil {
-			writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to retrieve "+name+"s")
+			writeInternalError(w, "failed to retrieve "+name+"s", err)
 			return
 		}
 

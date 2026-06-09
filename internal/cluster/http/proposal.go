@@ -60,8 +60,7 @@ func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
 
 		v, err := h.compiledValidator(t)
 		if err != nil {
-			writeErrorf(w, httpgo.StatusInternalServerError, "internal_error",
-				"failed to compile schema for type %q: %s", t.ID, err)
+			writeInternalError(w, fmt.Sprintf("failed to compile schema for type %q", t.ID), err)
 			return
 		}
 		if v != nil {
@@ -72,8 +71,7 @@ func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
 						fmt.Sprintf("entity data does not match schema for type %q", t.ID), vErr.Error())
 					return
 				}
-				writeErrorf(w, httpgo.StatusInternalServerError, "internal_error",
-					"validation error for type %q: %s", t.ID, err)
+				writeInternalError(w, fmt.Sprintf("validation error for type %q", t.ID), err)
 				return
 			}
 		}
@@ -95,7 +93,7 @@ func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
 			writeError(w, httpgo.StatusRequestEntityTooLarge, "proposal_too_large", "proposal exceeds the configured size limit")
 			return
 		}
-		writeError(w, httpgo.StatusInternalServerError, "internal_error", "failed to propose")
+		writeInternalError(w, "failed to propose", err)
 		return
 	}
 }
