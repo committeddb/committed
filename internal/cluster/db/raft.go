@@ -63,6 +63,13 @@ type Raft struct {
 	// lastCompactTime) exceeds compactMaxAge. Mutated only from the
 	// serveChannels goroutine.
 	lastCompactTime time.Time
+	// compactionPressure is a hint set by db's disk-usage watcher when free
+	// space drops to critical/full: while set, maybeCompact triggers on every
+	// Ready iteration (subject to the same compact-point safety constraints)
+	// regardless of the size/age limbs, so the node tries to free raft-log
+	// disk sooner. Atomic because the watcher goroutine sets it while the
+	// serveChannels goroutine reads it in maybeCompact.
+	compactionPressure atomic.Bool
 
 	node    raft.Node
 	storage Storage
@@ -653,6 +660,14 @@ func (n *Raft) Leader() uint64 {
 	return n.node.Status().Lead
 }
 
+// setCompactionPressure records whether the node is under disk pressure. While
+// true, maybeCompact treats it as a trigger limb (compact every Ready
+// iteration, subject to the usual safety constraints) so the node frees
+// raft-log disk sooner. Called from db's disk-usage watcher goroutine.
+func (n *Raft) setCompactionPressure(on bool) {
+	n.compactionPressure.Store(on)
+}
+
 // ReadIndex performs the etcd-raft ReadIndex protocol and returns the raft
 // log index at which a linearizable read may be served. The leader confirms
 // it still holds quorum (a heartbeat round-trip, coalesced across concurrent
@@ -800,13 +815,23 @@ func (n *Raft) checkStorageInvariant() {
 // that fall behind still receive an InstallSnapshot if the leader's
 // log has moved past them; that's the intended shape.
 func (n *Raft) maybeCompact() {
-	if n.compactMaxSize == 0 && n.compactMaxAge == 0 {
+	// Disk pressure is an independent trigger limb: it fires even when both
+	// the size and age limbs are disabled, so a node under disk pressure
+	// still compacts whatever is safe to free space. The compact-point
+	// safety constraints below are unchanged, so this can never compact past
+	// applied/event-log highwater.
+	pressure := n.compactionPressure.Load()
+	if n.compactMaxSize == 0 && n.compactMaxAge == 0 && !pressure {
 		return
 	}
 
 	triggered := false
 	var reason string
-	if n.compactMaxSize > 0 {
+	if pressure {
+		triggered = true
+		reason = "disk-pressure"
+	}
+	if !triggered && n.compactMaxSize > 0 {
 		size, err := n.storage.RaftLogApproxSize()
 		if err == nil && size >= n.compactMaxSize {
 			triggered = true

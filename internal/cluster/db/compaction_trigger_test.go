@@ -93,6 +93,36 @@ func TestMaybeCompact_BelowSafetyBufferIsNoOp(t *testing.T) {
 	require.Equal(t, 0, fake.CompactCallCount(), "must not compact when appliedIndex ≤ safetyBuffer")
 }
 
+// TestMaybeCompact_DiskPressureLimb drives the disk-pressure hint: with both
+// the size and age limbs disabled and the log well under any size threshold,
+// compaction still fires when the watcher has flagged disk pressure — the
+// "try to free space first" nudge — at the same safety-buffered compact point.
+func TestMaybeCompact_DiskPressureLimb(t *testing.T) {
+	fake := newFakeStorageWithIndexes(100 /*applied*/, 100 /*eventIdx*/, 0 /*size*/)
+	r := db.NewRaftForCompactionTest(fake, 0 /*maxSize disabled*/, 0 /*maxAge disabled*/, zap.NewNop())
+
+	r.SetCompactionPressureForTest(true)
+	r.MaybeCompactForTest()
+
+	require.Equal(t, 1, fake.CreateSnapshotCallCount(), "disk pressure must trigger CreateSnapshot")
+	require.Equal(t, 1, fake.CompactCallCount(), "and Compact")
+	require.Equal(t, uint64(92), r.LastCompactedIndexForTest(), "compact point = applied(100) - safetyBuffer(8)")
+}
+
+// TestMaybeCompact_PressureClearedIsNoOp confirms the hint is a toggle: once
+// the watcher clears pressure (disk recovered) and the size/age limbs are
+// disabled, maybeCompact is a no-op again.
+func TestMaybeCompact_PressureClearedIsNoOp(t *testing.T) {
+	fake := newFakeStorageWithIndexes(100, 100, 1<<40)
+	r := db.NewRaftForCompactionTest(fake, 0, 0, zap.NewNop())
+
+	r.SetCompactionPressureForTest(true)
+	r.SetCompactionPressureForTest(false)
+	r.MaybeCompactForTest()
+
+	require.Equal(t, 0, fake.CompactCallCount(), "no pressure and no limbs must not compact")
+}
+
 // newFakeStorageWithIndexes wires a FakeStorage with the three
 // values maybeCompact reads: AppliedIndex, EventIndex, and
 // RaftLogApproxSize. Everything else the fake returns is the zero

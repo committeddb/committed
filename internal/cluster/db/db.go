@@ -141,6 +141,13 @@ type DB struct {
 
 	maxProposalBytes uint64
 
+	// diskState is the current disk-pressure level (a diskState value),
+	// published by the disk-usage watcher goroutine and read by the propose
+	// gate (checkDiskWritable). Stored as an int32 so it can be updated
+	// atomically without a lock on the hot propose path. Stays diskOK when
+	// no watcher is configured, so the gate is a no-op.
+	diskState atomic.Int32
+
 	logger  *zap.Logger
 	metrics *metrics.Metrics
 }
@@ -267,7 +274,35 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 	go db.scrubScheduler()
 	go db.announceAPIURL()
 
+	// Start the disk-usage watcher last, once db.raft is wired, so its
+	// onDiskState callback can drive the compaction-pressure hint. An empty
+	// Path leaves it disabled and diskState pinned at diskOK (gate is a
+	// no-op). Stopped by db.ctx cancellation in db.Close.
+	if cfg.diskWatcher.Path != "" {
+		w := newDiskWatcher(cfg.diskWatcher, db.onDiskState, cfg.logger, cfg.metrics)
+		go w.run(db.ctx)
+	}
+
 	return db
+}
+
+// onDiskState is the disk-usage watcher's callback, invoked on every change in
+// disk-pressure level. It publishes the new state for the propose gate to read
+// and nudges the raft compaction-pressure hint so the node frees raft-log disk
+// sooner while space is critical/full. Called only from the watcher goroutine.
+func (db *DB) onDiskState(s diskState) {
+	db.diskState.Store(int32(s))
+	if db.raft != nil {
+		db.raft.setCompactionPressure(s >= diskCritical)
+	}
+}
+
+// checkDiskWritable returns the typed error a proposal of the given kind
+// should be rejected with under the current disk-pressure state, or nil if it
+// may proceed. The hot path is a single atomic load + comparison; when no
+// watcher is configured the state is diskOK and this always returns nil.
+func (db *DB) checkDiskWritable(kind string) error {
+	return diskRejection(diskState(db.diskState.Load()), kind)
 }
 
 // listenForSyncables forwards syncable registrations from the input
@@ -390,6 +425,16 @@ func (db *DB) Propose(ctx context.Context, p *cluster.Proposal) error {
 // select-on-ack logic is cleaner expressed against it, and because a
 // future pipelined caller would build on it again.
 func (db *DB) proposeAsync(ctx context.Context, p *cluster.Proposal) (uint64, <-chan error, error) {
+	kind := proposalKind(p)
+
+	// Disk-pressure gate, checked before we assign a RequestID or register a
+	// waiter so a rejected proposal consumes nothing. At critical only
+	// user-data proposals are rejected; at full everything is. Returns the
+	// typed cluster.ErrInsufficientStorage the HTTP layer maps to 507.
+	if err := db.checkDiskWritable(kind); err != nil {
+		return 0, nil, err
+	}
+
 	p.RequestID = db.nextRequestID.Add(1)
 
 	// Stamp the waiter with the leader this node currently believes in.
@@ -423,7 +468,6 @@ func (db *DB) proposeAsync(ctx context.Context, p *cluster.Proposal) (uint64, <-
 		return 0, nil, fmt.Errorf("%w: %d bytes > %d limit", cluster.ErrProposalTooLarge, len(bs), db.maxProposalBytes)
 	}
 
-	kind := proposalKind(p)
 	if db.metrics != nil {
 		db.metrics.ProposalSubmitted(kind)
 	}

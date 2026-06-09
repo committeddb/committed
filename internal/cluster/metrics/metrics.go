@@ -44,6 +44,10 @@ type Metrics struct {
 	configBuildErrors metric.Float64Gauge
 
 	walCorruptEntries metric.Int64Counter
+
+	diskFreeBytes   metric.Float64Gauge
+	diskFreePercent metric.Float64Gauge
+	diskState       metric.Float64Gauge
 }
 
 // New creates a Metrics instance from an OTel Meter. The caller
@@ -137,6 +141,16 @@ func New(meter metric.Meter) *Metrics {
 
 	m.walCorruptEntries, _ = meter.Int64Counter("committed.wal.corrupt_entries",
 		metric.WithDescription("WAL entries that failed CRC32C checksum verification on read, by log (entry_log|event_log|state_log). Any non-zero value means on-disk corruption was detected (bit rot, torn write, filesystem damage); the node will fatal-exit. Alert on this and rebuild from a healthy peer per docs/operations/rebuild.md."))
+
+	m.diskFreeBytes, _ = meter.Float64Gauge("committed.disk.free_bytes",
+		metric.WithDescription("Free bytes on the filesystem backing the data directory, sampled by the disk-usage watcher."),
+		metric.WithUnit("By"))
+
+	m.diskFreePercent, _ = meter.Float64Gauge("committed.disk.free_percent",
+		metric.WithDescription("Free space on the data directory's filesystem as a percent of total, sampled by the disk-usage watcher."))
+
+	m.diskState, _ = meter.Float64Gauge("committed.disk.state",
+		metric.WithDescription("Disk-pressure level of the data directory as mutually-exclusive gauges (level=ok|warn|critical|full); exactly one is 1, the rest 0. At critical, user proposals are rejected with 507; at full, the node is read-only. Alert on critical/full."))
 
 	return m
 }
@@ -341,4 +355,28 @@ func (m *Metrics) SetConfigBuildErrors(n int) {
 func (m *Metrics) WalCorruptEntry(log string) {
 	m.walCorruptEntries.Add(context.Background(), 1,
 		metric.WithAttributes(attribute.String("log", log)))
+}
+
+// SetDiskFree records the most recent free-space sample for the data
+// directory's filesystem: absolute free bytes and free percent of total.
+// Emitted from the disk-usage watcher on every poll.
+func (m *Metrics) SetDiskFree(freeBytes uint64, freePercent float64) {
+	m.diskFreeBytes.Record(context.Background(), float64(freeBytes))
+	m.diskFreePercent.Record(context.Background(), freePercent)
+}
+
+// SetDiskState publishes the current disk-pressure level as a set of
+// mutually-exclusive gauges: the active level records 1, every other level
+// records 0, so a dashboard/alert can match committed_disk_state{level="full"}
+// without worrying about a stale 1 lingering on a level we've left. active is
+// one of "ok", "warn", "critical", "full".
+func (m *Metrics) SetDiskState(active string) {
+	for _, level := range [...]string{"ok", "warn", "critical", "full"} {
+		v := 0.0
+		if level == active {
+			v = 1.0
+		}
+		m.diskState.Record(context.Background(), v,
+			metric.WithAttributes(attribute.String("level", level)))
+	}
 }

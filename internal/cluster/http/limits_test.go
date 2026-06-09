@@ -118,3 +118,96 @@ func TestPropose_ReturnsTooLarge_MapsTo413(t *testing.T) {
 		})
 	}
 }
+
+// TestPropose_ReturnsInsufficientStorage_MapsTo507 covers the 507 translation
+// for cluster.ErrInsufficientStorage, returned by db.Propose when the disk
+// watcher has put the node into a write-rejecting state. As with the 413 path,
+// the check lives in db so every proposal source funnels through it; these
+// tests assert the uniform handler translation across /proposal and the config
+// POSTs.
+func TestPropose_ReturnsInsufficientStorage_MapsTo507(t *testing.T) {
+	tests := []struct {
+		name    string
+		method  string
+		path    string
+		ct      string
+		body    string
+		setupFn func(*clusterfakes.FakeCluster)
+	}{
+		{
+			name:   "proposal",
+			method: "POST",
+			path:   "/v1/proposal",
+			ct:     "application/json",
+			body:   `{"entities":[{"typeId":"t","key":"k","data":{}}]}`,
+			setupFn: func(fake *clusterfakes.FakeCluster) {
+				fake.ResolveTypeReturns(&cluster.Type{ID: "t", Version: 1}, nil)
+				fake.ProposeReturns(fmt.Errorf("wrap: %w", cluster.ErrInsufficientStorage))
+			},
+		},
+		{
+			name:   "database",
+			method: "POST",
+			path:   "/v1/database/db-1",
+			ct:     "text/toml",
+			body:   "[config]\nname = \"x\"",
+			setupFn: func(fake *clusterfakes.FakeCluster) {
+				fake.ProposeDatabaseReturns(fmt.Errorf("wrap: %w", cluster.ErrInsufficientStorage))
+			},
+		},
+		{
+			name:   "syncable",
+			method: "POST",
+			path:   "/v1/syncable/s-1",
+			ct:     "text/toml",
+			body:   "[config]\nname = \"x\"",
+			setupFn: func(fake *clusterfakes.FakeCluster) {
+				fake.ProposeSyncableReturns(fmt.Errorf("wrap: %w", cluster.ErrInsufficientStorage))
+			},
+		},
+		{
+			name:   "ingestable",
+			method: "POST",
+			path:   "/v1/ingestable/i-1",
+			ct:     "text/toml",
+			body:   "[config]\nname = \"x\"",
+			setupFn: func(fake *clusterfakes.FakeCluster) {
+				fake.ProposeIngestableReturns(fmt.Errorf("wrap: %w", cluster.ErrInsufficientStorage))
+			},
+		},
+		{
+			name:   "type",
+			method: "POST",
+			path:   "/v1/type/t-1",
+			ct:     "text/toml",
+			body:   "[config]\nname = \"x\"",
+			setupFn: func(fake *clusterfakes.FakeCluster) {
+				fake.ProposeTypeReturns(fmt.Errorf("wrap: %w", cluster.ErrInsufficientStorage))
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &clusterfakes.FakeCluster{}
+			tc.setupFn(fake)
+			h := http.New(fake)
+
+			req := httptest.NewRequest(tc.method, "http://localhost"+tc.path, strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", tc.ct)
+			w := httptest.NewRecorder()
+
+			h.ServeHTTP(w, req)
+
+			resp := w.Result()
+			require.Equal(t, httpgo.StatusInsufficientStorage, resp.StatusCode,
+				"expected 507 for %s", tc.name)
+
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			var errResp http.ErrorResponse
+			require.NoError(t, json.Unmarshal(body, &errResp))
+			require.Equal(t, "insufficient_storage", errResp.Code)
+		})
+	}
+}

@@ -93,6 +93,11 @@ func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
 			writeError(w, httpgo.StatusRequestEntityTooLarge, "proposal_too_large", "proposal exceeds the configured size limit")
 			return
 		}
+		if errors.Is(err, cluster.ErrInsufficientStorage) {
+			writeError(w, httpgo.StatusInsufficientStorage, "insufficient_storage",
+				"the node is low on disk space and is rejecting writes; retry once disk space recovers")
+			return
+		}
 		writeInternalError(w, "failed to propose", err)
 		return
 	}

@@ -271,7 +271,10 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 
 				// Ingest worker proposes user data; we use the worker
 				// context (ctx) so cancel-on-stop interrupts the wait.
-				err := db.Propose(ctx, proposal)
+				// proposeIngestData retries (not drops) on disk-pressure
+				// rejection so a full disk pauses ingestion cleanly without
+				// advancing the position past uncommitted data.
+				err := db.proposeIngestData(ctx, proposal)
 				if err != nil {
 					db.logger.Warn("ingest propose error", zap.String("id", id), zap.Error(err))
 					// Count real failures only — a ctx cancellation here is
@@ -360,6 +363,43 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 					backoff = ingestBackoffMax
 				}
 			}
+		}
+	}
+}
+
+// proposeIngestData proposes one ingest data entry, retrying with backoff while
+// the node rejects it for disk pressure (cluster.ErrInsufficientStorage). It
+// deliberately does NOT drop the proposal on pressure: holding it keeps the
+// inner Ingest backpressured on the unbuffered proposalChan (so upstream
+// reading pauses) and — crucially — guarantees the ingestable's position never
+// advances past an uncommitted proposal. The position checkpoint is a separate
+// channel event processed only after this returns; if we dropped the data and
+// returned, the following checkpoint would commit and silently skip the dropped
+// data. Retrying instead pauses ingestion cleanly and resumes the moment disk
+// recovers.
+//
+// Returns nil on durable apply, ctx.Err() when the worker ctx is canceled
+// (replace/Close), or any non-pressure Propose error (e.g. ErrProposalUnknown)
+// unchanged for the caller's existing handling.
+func (db *DB) proposeIngestData(ctx context.Context, p *cluster.Proposal) error {
+	backoff := ingestBackoffMin
+	for {
+		err := db.Propose(ctx, p)
+		if !errors.Is(err, cluster.ErrInsufficientStorage) {
+			return err
+		}
+		db.logger.Warn("ingest paused: insufficient disk space, will retry",
+			zap.String("id", p.IngestableID),
+			zap.Uint64("sourceSeq", p.SourceSeq),
+			zap.Duration("backoff", backoff))
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+		if backoff > ingestBackoffMax {
+			backoff = ingestBackoffMax
 		}
 	}
 }

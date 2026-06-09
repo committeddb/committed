@@ -1,10 +1,13 @@
 package db
 
 import (
+	"context"
 	"time"
 
 	"go.etcd.io/raft/v3"
 	"go.uber.org/zap"
+
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 // PartitionPeerForTest drops the named peer from this Raft's transport so
@@ -106,6 +109,46 @@ func NewRaftForCompactionTest(s Storage, maxSize uint64, maxAge time.Duration, l
 // decision logic without wiring up a full Ready loop.
 func (n *Raft) MaybeCompactForTest() {
 	n.maybeCompact()
+}
+
+// SetCompactionPressureForTest drives the disk-pressure compaction hint so a
+// test can assert maybeCompact fires on pressure alone (size/age limbs
+// disabled). Mirrors what db.onDiskState does in production.
+func (n *Raft) SetCompactionPressureForTest(on bool) {
+	n.setCompactionPressure(on)
+}
+
+// SetDiskStateForTest forces the DB's disk-pressure state, exactly as the
+// disk-usage watcher would on a sample, so propose-gate tests don't need a
+// real low-disk filesystem. level is "ok", "warn", "critical", or "full".
+// Drives onDiskState so the compaction-pressure hint is exercised too.
+func (db *DB) SetDiskStateForTest(level string) {
+	var s diskState
+	switch level {
+	case "warn":
+		s = diskWarn
+	case "critical":
+		s = diskCritical
+	case "full":
+		s = diskFull
+	default:
+		s = diskOK
+	}
+	db.onDiskState(s)
+}
+
+// ProposeIngestDataForTest exposes the ingest worker's disk-pressure-aware
+// propose helper so a test can assert it pauses (retries) under disk pressure
+// and resumes on recovery without standing up a full ingest worker + upstream.
+func (db *DB) ProposeIngestDataForTest(ctx context.Context, p *cluster.Proposal) error {
+	return db.proposeIngestData(ctx, p)
+}
+
+// ProposeSyncableIndexForTest exposes the sync worker's index-bump propose
+// (a "checkpoint"-kind proposal) so a test can assert checkpoints still commit
+// while the disk gate is at full.
+func (db *DB) ProposeSyncableIndexForTest(ctx context.Context, id string, index uint64) error {
+	return db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: index})
 }
 
 // LastCompactedIndexForTest lets tests observe the bookkeeping

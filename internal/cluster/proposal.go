@@ -14,6 +14,14 @@ import (
 // the configured size limit.
 var ErrProposalTooLarge = errors.New("proposal exceeds configured size limit")
 
+// ErrInsufficientStorage is returned from Propose when the node's disk-usage
+// watcher has put the data directory into a write-rejecting state: at
+// "critical" free space, user-data proposals are rejected (config changes and
+// internal housekeeping still flow); at "full", every proposal is rejected
+// (read-only mode) until disk space recovers. The HTTP layer maps it to 507
+// Insufficient Storage. See internal/cluster/db/disk_watcher.go.
+var ErrInsufficientStorage = errors.New("insufficient disk space to accept the proposal")
+
 var delete []byte = []byte("7ec589c2-3318-4a3c-839b-a9af9c9443be")
 
 type Proposal struct {

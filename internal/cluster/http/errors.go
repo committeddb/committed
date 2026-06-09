@@ -85,7 +85,7 @@ func writeErrorf(w httpgo.ResponseWriter, status int, code string, format string
 
 // writeProposeError maps a ProposeX error to the response shape
 // shared by every config handler: ConfigError → 400,
-// ErrProposalTooLarge → 413, else 500.
+// ErrProposalTooLarge → 413, ErrInsufficientStorage → 507, else 500.
 func writeProposeError(w httpgo.ResponseWriter, err error, resource, action string) {
 	var configErr *cluster.ConfigError
 	switch {
@@ -93,6 +93,9 @@ func writeProposeError(w httpgo.ResponseWriter, err error, resource, action stri
 		writeError(w, httpgo.StatusBadRequest, "invalid_"+resource+"_config", configErr.Error())
 	case errors.Is(err, cluster.ErrProposalTooLarge):
 		writeError(w, httpgo.StatusRequestEntityTooLarge, "proposal_too_large", resource+" configuration exceeds the configured proposal size limit")
+	case errors.Is(err, cluster.ErrInsufficientStorage):
+		writeError(w, httpgo.StatusInsufficientStorage, "insufficient_storage",
+			"the node is low on disk space and is rejecting writes; retry once disk space recovers")
 	default:
 		writeInternalError(w, "failed to "+action, err)
 	}

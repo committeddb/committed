@@ -123,6 +123,13 @@ type options struct {
 	// path. cmd/node.go wires COMMITTED_API_URL to this. See
 	// raft-leader-read-proxy.md.
 	advertisedAPIURL string
+
+	// diskWatcher configures the background disk-usage watcher (free-space
+	// gauges + a soft propose-rejection threshold). An empty Path (the
+	// zero value) disables it: the node never gates writes on disk space,
+	// the historical behavior. cmd/node.go wires the data dir and the
+	// COMMITTED_DISK_*_PERCENT env vars to this. See disk_watcher.go.
+	diskWatcher DiskWatcherConfig
 }
 
 // defaultSyncStuckThreshold debounces the "stuck" signal: a syncable must be
@@ -282,6 +289,15 @@ func WithScrubInterval(d time.Duration) Option {
 // raft-leader-read-proxy.md.
 func WithAdvertisedAPIURL(url string) Option {
 	return func(o *options) { o.advertisedAPIURL = url }
+}
+
+// WithDiskWatcher enables the background disk-usage watcher. cfg.Path is the
+// data directory to statfs; an empty Path leaves the watcher disabled (the
+// node never gates writes on disk space). Zero-valued threshold/interval
+// fields resolve to their Default* values. cmd/node.go builds the config from
+// the data dir and the COMMITTED_DISK_*_PERCENT env vars. See disk_watcher.go.
+func WithDiskWatcher(cfg DiskWatcherConfig) Option {
+	return func(o *options) { o.diskWatcher = cfg }
 }
 
 // WithTLSInfo enables mTLS on the raft peer transport. Pass a

@@ -78,6 +78,22 @@ image can be templated per-node by an orchestrator:
                        the leader after a "committed member add" naming it
                        commits. COMMITTED_PEERS still seeds the transport.
 
+  COMMITTED_DISK_WARN_PERCENT
+                       free-space percent at which the disk watcher logs a
+                       warning (default 20). Writes still flow.
+  COMMITTED_DISK_CRITICAL_PERCENT
+                       free-space percent at which user-data proposals are
+                       rejected with 507 (default 10). Config changes and
+                       internal sync/ingest housekeeping still flow, and
+                       compaction is nudged to free space sooner.
+  COMMITTED_DISK_FULL_PERCENT
+                       free-space percent at which config writes are also
+                       frozen (default 3); user data and config return 507
+                       while sync/ingest checkpoints and compaction continue.
+                       Writes re-enable automatically once free space recovers
+                       above the warn threshold. Thresholds must be descending
+                       (warn > critical > full).
+
   COMMITTED_HTTP_CORS_ORIGINS
                        comma-separated browser-origin allowlist, e.g.
                        "https://app.example.com,https://admin.example.com",
@@ -198,6 +214,19 @@ image can be templated per-node by an orchestrator:
 		if d, ok := parseDurationEnv("COMMITTED_SCRUB_INTERVAL"); ok {
 			dbOpts = append(dbOpts, db.WithScrubInterval(d))
 		}
+
+		// The disk-usage watcher polls the data dir's filesystem and, as free
+		// space falls, first warns, then rejects user writes (507), then goes
+		// read-only — so a filling disk degrades gracefully instead of the
+		// raft loop fatal-exiting on ENOSPC. Always enabled (Path is the data
+		// dir); the COMMITTED_DISK_*_PERCENT env vars override the descending
+		// warn/critical/full thresholds, unset uses db.DefaultDisk*Percent.
+		dbOpts = append(dbOpts, db.WithDiskWatcher(db.DiskWatcherConfig{
+			Path:            dataDir,
+			WarnPercent:     parsePercentEnv("COMMITTED_DISK_WARN_PERCENT"),
+			CriticalPercent: parsePercentEnv("COMMITTED_DISK_CRITICAL_PERCENT"),
+			FullPercent:     parsePercentEnv("COMMITTED_DISK_FULL_PERCENT"),
+		}))
 
 		// COMMITTED_JOIN marks this node as joining an existing cluster
 		// rather than bootstrapping a new one. A joining node comes up with
@@ -601,6 +630,23 @@ func parseListEnv(name string) []string {
 func boolEnv(name string) bool {
 	v, err := strconv.ParseBool(os.Getenv(name))
 	return err == nil && v
+}
+
+// parsePercentEnv reads a free-space percent threshold (0,100) for the disk
+// watcher. Unset, empty, or out-of-range returns 0, which DiskWatcherConfig
+// resolves to the matching db.DefaultDisk*Percent — so a typo'd value warns
+// and falls back rather than silently disabling a guardrail.
+func parsePercentEnv(name string) float64 {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return 0
+	}
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil || v <= 0 || v >= 100 {
+		zap.L().Warn(name+" invalid (want a percent between 0 and 100), using default", zap.String("value", raw))
+		return 0
+	}
+	return v
 }
 
 // parseDurationEnv reads a Go-duration-formatted env var (e.g. "15s").

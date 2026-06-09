@@ -52,6 +52,8 @@ func TestNew_CreatesAllInstruments(t *testing.T) {
 	m.SyncCompleted("test-sync", 5*time.Millisecond)
 	m.SetWorkerRunning("sync", "s1", true)
 	m.WorkerReplaced("sync", "s1")
+	m.SetDiskFree(1<<30, 42.5)
+	m.SetDiskState("warn")
 
 	rm := collect(t, reader)
 
@@ -66,6 +68,9 @@ func TestNew_CreatesAllInstruments(t *testing.T) {
 		"committed.sync.duration",
 		"committed.worker.running",
 		"committed.worker.replaces",
+		"committed.disk.free_bytes",
+		"committed.disk.free_percent",
+		"committed.disk.state",
 	}
 
 	for _, name := range expected {
@@ -129,4 +134,51 @@ func TestSetLeader(t *testing.T) {
 	require.True(t, ok)
 	require.Len(t, gauge.DataPoints, 1)
 	require.Equal(t, 1.0, gauge.DataPoints[0].Value)
+}
+
+func TestSetDiskFree(t *testing.T) {
+	m, reader := setupTest(t)
+
+	m.SetDiskFree(2048, 12.5)
+
+	rm := collect(t, reader)
+
+	bytesM := findMetric(rm, "committed.disk.free_bytes")
+	require.NotNil(t, bytesM)
+	bytesG, ok := bytesM.Data.(metricdata.Gauge[float64])
+	require.True(t, ok)
+	require.Len(t, bytesG.DataPoints, 1)
+	require.Equal(t, 2048.0, bytesG.DataPoints[0].Value)
+
+	pctM := findMetric(rm, "committed.disk.free_percent")
+	require.NotNil(t, pctM)
+	pctG, ok := pctM.Data.(metricdata.Gauge[float64])
+	require.True(t, ok)
+	require.Len(t, pctG.DataPoints, 1)
+	require.Equal(t, 12.5, pctG.DataPoints[0].Value)
+}
+
+// TestSetDiskState_MutuallyExclusive asserts the active level reads 1 and every
+// other level reads 0 — so a dashboard alerting on committed_disk_state{level=
+// "full"} never sees a stale 1 left on a level the node has since left.
+func TestSetDiskState_MutuallyExclusive(t *testing.T) {
+	m, reader := setupTest(t)
+
+	m.SetDiskState("critical")
+
+	rm := collect(t, reader)
+	metric := findMetric(rm, "committed.disk.state")
+	require.NotNil(t, metric)
+	gauge, ok := metric.Data.(metricdata.Gauge[float64])
+	require.True(t, ok)
+
+	got := make(map[string]float64)
+	for _, dp := range gauge.DataPoints {
+		for _, attr := range dp.Attributes.ToSlice() {
+			if string(attr.Key) == "level" {
+				got[attr.Value.AsString()] = dp.Value
+			}
+		}
+	}
+	require.Equal(t, map[string]float64{"ok": 0, "warn": 0, "critical": 1, "full": 0}, got)
 }
