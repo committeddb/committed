@@ -95,7 +95,7 @@ func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
 		}
 		if errors.Is(err, cluster.ErrInsufficientStorage) {
 			writeError(w, httpgo.StatusInsufficientStorage, "insufficient_storage",
-				"the node is low on disk space and is rejecting writes; retry once disk space recovers")
+				"the cluster (or this node) is low on disk space and is rejecting writes; see GET /v1/node/status disk.admission, retry once disk space recovers")
 			return
 		}
 		writeInternalError(w, "failed to propose", err)

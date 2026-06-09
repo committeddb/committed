@@ -148,6 +148,25 @@ type DB struct {
 	// no watcher is configured, so the gate is a no-op.
 	diskState atomic.Int32
 
+	// Cluster-aware admission (see disk_cluster.go). diskVerdict is the
+	// cached cluster write-admission verdict the propose gate enforces
+	// (atomic pointer: the gate reads it lock-free on the hot path; nil or
+	// stale falls back to the node-local diskState). diskReports is the
+	// leader-side map of member disk reports, guarded by diskReportsMu.
+	// diskNudgeC wakes the coordinator loop early on a local disk-state
+	// change. lastDiskTransfer rate-limits disk-pressure leadership
+	// transfers; it is touched only from coordinator cycles.
+	diskVerdict          atomic.Pointer[diskVerdictState]
+	diskReportsMu        sync.Mutex
+	diskReports          map[uint64]diskReport
+	diskNudgeC           chan struct{}
+	diskReportInterval   time.Duration
+	diskTransferCooldown time.Duration
+	lastDiskTransfer     time.Time
+	diskReportSend       diskReportSender
+	transferLeadershipFn func(transferee uint64)
+	pickTransferTargetFn func(now time.Time) uint64
+
 	logger  *zap.Logger
 	metrics *metrics.Metrics
 }
@@ -242,8 +261,22 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		ingestSupervisorMaxAttempts:    cfg.ingestSupervisorMaxAttempts,
 		ingestSupervisorHealthyWindow:  cfg.ingestSupervisorHealthyWindow,
 		maxProposalBytes:               cfg.maxProposalBytes,
+		diskReports:                    make(map[uint64]diskReport),
+		diskNudgeC:                     make(chan struct{}, 1),
+		diskReportInterval:             cfg.diskReportInterval,
+		diskTransferCooldown:           cfg.diskTransferCooldown,
+		diskReportSend:                 cfg.diskReportSender,
 		logger:                         cfg.logger,
 		metrics:                        cfg.metrics,
+	}
+	if db.diskReportInterval == 0 {
+		db.diskReportInterval = DefaultDiskReportInterval
+	}
+	if db.diskTransferCooldown == 0 {
+		db.diskTransferCooldown = defaultDiskTransferCooldown
+	}
+	if db.diskReportSend == nil {
+		db.diskReportSend = newHTTPDiskReportSender(cfg.diskReportClient, cfg.diskReportToken)
 	}
 
 	// Two hooks are wired into the raft Ready loop. The per-entry applied
@@ -283,26 +316,38 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		go w.run(db.ctx)
 	}
 
+	// Cluster-aware disk admission (disk_cluster.go). The coordinator runs
+	// even with no local watcher: this node's own state stays pinned at ok,
+	// but its propose gate still needs the leader's verdict so it won't
+	// forward writes into a cluster that can't safely take them. A negative
+	// interval (WithDiskReportInterval(<=0)) disables it.
+	db.transferLeadershipFn = db.raft.transferLeadership
+	db.pickTransferTargetFn = db.pickTransferTarget
+	if db.diskReportInterval > 0 {
+		go db.diskCoordinator()
+	}
+
 	return db
 }
 
 // onDiskState is the disk-usage watcher's callback, invoked on every change in
 // disk-pressure level. It publishes the new state for the propose gate to read
 // and nudges the raft compaction-pressure hint so the node frees raft-log disk
-// sooner while space is critical/full. Called only from the watcher goroutine.
+// sooner while space is critical/full. On the leader it then synchronously
+// recomputes the cluster admission verdict (so the gate never enforces a
+// verdict older than the state just published); on a follower it nudges the
+// disk coordinator to report the transition to the leader right away. Called
+// from the watcher goroutine (and tests via SetDiskStateForTest).
 func (db *DB) onDiskState(s diskState) {
 	db.diskState.Store(int32(s))
 	if db.raft != nil {
 		db.raft.setCompactionPressure(s >= diskCritical)
 	}
-}
-
-// checkDiskWritable returns the typed error a proposal of the given kind
-// should be rejected with under the current disk-pressure state, or nil if it
-// may proceed. The hot path is a single atomic load + comparison; when no
-// watcher is configured the state is diskOK and this always returns nil.
-func (db *DB) checkDiskWritable(kind string) error {
-	return diskRejection(diskState(db.diskState.Load()), kind)
+	if db.leaderState != nil && db.leaderState.IsLeader() {
+		db.recomputeDiskVerdict(time.Now())
+		return
+	}
+	db.nudgeDiskCoordinator()
 }
 
 // listenForSyncables forwards syncable registrations from the input

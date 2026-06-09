@@ -346,6 +346,20 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 				fake.ConfigBuildErrorsReturns([]cluster.ConfigBuildError{
 					{Kind: "database", ID: "orders-warehouse", Error: "missing environment variable ${WAREHOUSE_PW}"},
 				})
+				fake.DiskStateReturns("ok")
+				fake.DiskAdmissionReturns(cluster.DiskAdmissionStatus{
+					Admitted: true, State: "ok", Source: "cluster", LeaderID: 1,
+				})
+			},
+		},
+		{
+			name:        "POST /node/disk-report",
+			method:      httpgo.MethodPost,
+			path:        "/v1/node/disk-report",
+			contentType: "application/json",
+			body:        `{"node":2,"state":"warn"}`,
+			setup: func(fake *clusterfakes.FakeCluster) {
+				fake.ReportDiskReturns(cluster.DiskVerdict{State: "ok", Reason: "", LeaderID: 1}, nil)
 			},
 		},
 	}

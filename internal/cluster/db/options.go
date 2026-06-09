@@ -1,6 +1,7 @@
 package db
 
 import (
+	nethttp "net/http"
 	"time"
 
 	"go.etcd.io/etcd/client/pkg/v3/transport"
@@ -130,6 +131,29 @@ type options struct {
 	// the historical behavior. cmd/node.go wires the data dir and the
 	// COMMITTED_DISK_*_PERCENT env vars to this. See disk_watcher.go.
 	diskWatcher DiskWatcherConfig
+
+	// diskReportInterval is the cadence of the cluster-admission
+	// coordinator: how often a member reports its disk state to the leader
+	// and the leader recomputes the write-admission verdict. 0 means "use
+	// DefaultDiskReportInterval"; negative disables the coordinator
+	// entirely (the propose gate then runs on the node-local Phase 1
+	// decision alone). cmd/node.go wires COMMITTED_DISK_REPORT_INTERVAL.
+	// See disk_cluster.go.
+	diskReportInterval time.Duration
+	// diskReportClient / diskReportToken configure the HTTP sender that
+	// delivers disk reports to the leader's announced API URL: the client
+	// carries the TLS trust for self-signed peer APIs (same wiring as the
+	// leader-read proxy client) and the token is the cluster's API bearer
+	// token. nil/empty work for plaintext, unauthenticated dev clusters.
+	diskReportClient *nethttp.Client
+	diskReportToken  string
+	// diskReportSender, if non-nil, replaces the HTTP sender wholesale.
+	// Test-only hook (WithDiskReportSenderForTest) so multi-node admission
+	// scenarios can route reports between in-process DBs directly.
+	diskReportSender diskReportSender
+	// diskTransferCooldown rate-limits disk-pressure leadership transfers.
+	// 0 means "use defaultDiskTransferCooldown". Tests shorten it.
+	diskTransferCooldown time.Duration
 }
 
 // defaultSyncStuckThreshold debounces the "stuck" signal: a syncable must be
@@ -298,6 +322,36 @@ func WithAdvertisedAPIURL(url string) Option {
 // the data dir and the COMMITTED_DISK_*_PERCENT env vars. See disk_watcher.go.
 func WithDiskWatcher(cfg DiskWatcherConfig) Option {
 	return func(o *options) { o.diskWatcher = cfg }
+}
+
+// WithDiskReportInterval sets the cadence of the cluster-admission
+// coordinator: how often a member reports its disk state to the leader and
+// the leader recomputes the cluster write-admission verdict. d <= 0 disables
+// the coordinator entirely, leaving the propose gate on the node-local
+// (Phase 1) decision alone. Default DefaultDiskReportInterval. cmd/node.go
+// wires COMMITTED_DISK_REPORT_INTERVAL. See disk_cluster.go.
+func WithDiskReportInterval(d time.Duration) Option {
+	return func(o *options) {
+		if d <= 0 {
+			d = -1
+		}
+		o.diskReportInterval = d
+	}
+}
+
+// WithDiskReportHTTP configures the HTTP sender that delivers disk reports
+// to the leader's announced API URL. client carries the TLS trust for
+// self-signed peer APIs (cmd/node.go passes the same client it builds for
+// the leader-read proxy; nil gets a timeout-bounded system-root default) and
+// token is the cluster's API bearer token (reports hit the authenticated
+// POST /v1/node/disk-report endpoint, so every node must share the token —
+// already the deployment shape, since the leader-read proxy forwards client
+// tokens between nodes).
+func WithDiskReportHTTP(client *nethttp.Client, token string) Option {
+	return func(o *options) {
+		o.diskReportClient = client
+		o.diskReportToken = token
+	}
 }
 
 // WithTLSInfo enables mTLS on the raft peer transport. Pass a

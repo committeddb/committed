@@ -326,3 +326,41 @@ func TestPreVote_PartitionedFollowerDoesNotDisruptLeader(t *testing.T) {
 		waitForUserEntry(t, r, []byte("after-heal"))
 	}
 }
+
+// TestTransferLeadership_MovesLeaderToTarget verifies the raft-level
+// plumbing beneath the disk-pressure leadership transfer: on the leader,
+// transferLeadership catches the target up, sends MsgTimeoutNow, and the
+// target wins an immediate election that the whole cluster converges on.
+// The decision layer above it (when to fire, which voter to pick) is
+// covered by the disk_cluster unit tests; this pins the hand-off itself.
+func TestTransferLeadership_MovesLeaderToTarget(t *testing.T) {
+	rafts := createRafts(3)
+	defer rafts.Close()
+
+	rafts.WaitForLeader(t)
+	leader := rafts.waitForLeaderRaft(t)
+	follower := rafts.FollowerRaft()
+	if follower == nil {
+		t.Fatal("FollowerRaft returned nil after WaitForLeader; cluster has no follower")
+	}
+
+	leader.mu.RLock()
+	lr := leader.raft
+	leader.mu.RUnlock()
+	lr.TransferLeadershipForTest(follower.id)
+
+	// The transfer expires after an election timeout if it can't complete,
+	// so converging on the target (everywhere, stably) is the assertion.
+	deadline := time.Now().Add(multiNodeStartupTimeout)
+	for {
+		if id, ok := rafts.stableLeader(); ok && id == follower.id {
+			return
+		}
+		if time.Now().After(deadline) {
+			id, _ := rafts.stableLeader()
+			t.Fatalf("leadership did not transfer to node %d within %s (current leader %d)",
+				follower.id, multiNodeStartupTimeout, id)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}

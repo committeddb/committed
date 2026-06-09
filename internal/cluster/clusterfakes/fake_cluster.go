@@ -130,6 +130,26 @@ type FakeCluster struct {
 		result1 uint64
 		result2 error
 	}
+	DiskAdmissionStub        func() cluster.DiskAdmissionStatus
+	diskAdmissionMutex       sync.RWMutex
+	diskAdmissionArgsForCall []struct {
+	}
+	diskAdmissionReturns struct {
+		result1 cluster.DiskAdmissionStatus
+	}
+	diskAdmissionReturnsOnCall map[int]struct {
+		result1 cluster.DiskAdmissionStatus
+	}
+	DiskStateStub        func() string
+	diskStateMutex       sync.RWMutex
+	diskStateArgsForCall []struct {
+	}
+	diskStateReturns struct {
+		result1 string
+	}
+	diskStateReturnsOnCall map[int]struct {
+		result1 string
+	}
 	IDStub        func() uint64
 	iDMutex       sync.RWMutex
 	iDArgsForCall []struct {
@@ -344,6 +364,20 @@ type FakeCluster struct {
 	}
 	replaySyncableDeadLetterReturnsOnCall map[int]struct {
 		result1 error
+	}
+	ReportDiskStub        func(uint64, string) (cluster.DiskVerdict, error)
+	reportDiskMutex       sync.RWMutex
+	reportDiskArgsForCall []struct {
+		arg1 uint64
+		arg2 string
+	}
+	reportDiskReturns struct {
+		result1 cluster.DiskVerdict
+		result2 error
+	}
+	reportDiskReturnsOnCall map[int]struct {
+		result1 cluster.DiskVerdict
+		result2 error
 	}
 	ResolveTypeStub        func(cluster.TypeRef) (*cluster.Type, error)
 	resolveTypeMutex       sync.RWMutex
@@ -1093,6 +1127,112 @@ func (fake *FakeCluster) DeadLetterStuckSyncableReturnsOnCall(i int, result1 uin
 		result1 uint64
 		result2 error
 	}{result1, result2}
+}
+
+func (fake *FakeCluster) DiskAdmission() cluster.DiskAdmissionStatus {
+	fake.diskAdmissionMutex.Lock()
+	ret, specificReturn := fake.diskAdmissionReturnsOnCall[len(fake.diskAdmissionArgsForCall)]
+	fake.diskAdmissionArgsForCall = append(fake.diskAdmissionArgsForCall, struct {
+	}{})
+	stub := fake.DiskAdmissionStub
+	fakeReturns := fake.diskAdmissionReturns
+	fake.recordInvocation("DiskAdmission", []interface{}{})
+	fake.diskAdmissionMutex.Unlock()
+	if stub != nil {
+		return stub()
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeCluster) DiskAdmissionCallCount() int {
+	fake.diskAdmissionMutex.RLock()
+	defer fake.diskAdmissionMutex.RUnlock()
+	return len(fake.diskAdmissionArgsForCall)
+}
+
+func (fake *FakeCluster) DiskAdmissionCalls(stub func() cluster.DiskAdmissionStatus) {
+	fake.diskAdmissionMutex.Lock()
+	defer fake.diskAdmissionMutex.Unlock()
+	fake.DiskAdmissionStub = stub
+}
+
+func (fake *FakeCluster) DiskAdmissionReturns(result1 cluster.DiskAdmissionStatus) {
+	fake.diskAdmissionMutex.Lock()
+	defer fake.diskAdmissionMutex.Unlock()
+	fake.DiskAdmissionStub = nil
+	fake.diskAdmissionReturns = struct {
+		result1 cluster.DiskAdmissionStatus
+	}{result1}
+}
+
+func (fake *FakeCluster) DiskAdmissionReturnsOnCall(i int, result1 cluster.DiskAdmissionStatus) {
+	fake.diskAdmissionMutex.Lock()
+	defer fake.diskAdmissionMutex.Unlock()
+	fake.DiskAdmissionStub = nil
+	if fake.diskAdmissionReturnsOnCall == nil {
+		fake.diskAdmissionReturnsOnCall = make(map[int]struct {
+			result1 cluster.DiskAdmissionStatus
+		})
+	}
+	fake.diskAdmissionReturnsOnCall[i] = struct {
+		result1 cluster.DiskAdmissionStatus
+	}{result1}
+}
+
+func (fake *FakeCluster) DiskState() string {
+	fake.diskStateMutex.Lock()
+	ret, specificReturn := fake.diskStateReturnsOnCall[len(fake.diskStateArgsForCall)]
+	fake.diskStateArgsForCall = append(fake.diskStateArgsForCall, struct {
+	}{})
+	stub := fake.DiskStateStub
+	fakeReturns := fake.diskStateReturns
+	fake.recordInvocation("DiskState", []interface{}{})
+	fake.diskStateMutex.Unlock()
+	if stub != nil {
+		return stub()
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeCluster) DiskStateCallCount() int {
+	fake.diskStateMutex.RLock()
+	defer fake.diskStateMutex.RUnlock()
+	return len(fake.diskStateArgsForCall)
+}
+
+func (fake *FakeCluster) DiskStateCalls(stub func() string) {
+	fake.diskStateMutex.Lock()
+	defer fake.diskStateMutex.Unlock()
+	fake.DiskStateStub = stub
+}
+
+func (fake *FakeCluster) DiskStateReturns(result1 string) {
+	fake.diskStateMutex.Lock()
+	defer fake.diskStateMutex.Unlock()
+	fake.DiskStateStub = nil
+	fake.diskStateReturns = struct {
+		result1 string
+	}{result1}
+}
+
+func (fake *FakeCluster) DiskStateReturnsOnCall(i int, result1 string) {
+	fake.diskStateMutex.Lock()
+	defer fake.diskStateMutex.Unlock()
+	fake.DiskStateStub = nil
+	if fake.diskStateReturnsOnCall == nil {
+		fake.diskStateReturnsOnCall = make(map[int]struct {
+			result1 string
+		})
+	}
+	fake.diskStateReturnsOnCall[i] = struct {
+		result1 string
+	}{result1}
 }
 
 func (fake *FakeCluster) ID() uint64 {
@@ -2186,6 +2326,71 @@ func (fake *FakeCluster) ReplaySyncableDeadLetterReturnsOnCall(i int, result1 er
 	}{result1}
 }
 
+func (fake *FakeCluster) ReportDisk(arg1 uint64, arg2 string) (cluster.DiskVerdict, error) {
+	fake.reportDiskMutex.Lock()
+	ret, specificReturn := fake.reportDiskReturnsOnCall[len(fake.reportDiskArgsForCall)]
+	fake.reportDiskArgsForCall = append(fake.reportDiskArgsForCall, struct {
+		arg1 uint64
+		arg2 string
+	}{arg1, arg2})
+	stub := fake.ReportDiskStub
+	fakeReturns := fake.reportDiskReturns
+	fake.recordInvocation("ReportDisk", []interface{}{arg1, arg2})
+	fake.reportDiskMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeCluster) ReportDiskCallCount() int {
+	fake.reportDiskMutex.RLock()
+	defer fake.reportDiskMutex.RUnlock()
+	return len(fake.reportDiskArgsForCall)
+}
+
+func (fake *FakeCluster) ReportDiskCalls(stub func(uint64, string) (cluster.DiskVerdict, error)) {
+	fake.reportDiskMutex.Lock()
+	defer fake.reportDiskMutex.Unlock()
+	fake.ReportDiskStub = stub
+}
+
+func (fake *FakeCluster) ReportDiskArgsForCall(i int) (uint64, string) {
+	fake.reportDiskMutex.RLock()
+	defer fake.reportDiskMutex.RUnlock()
+	argsForCall := fake.reportDiskArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2
+}
+
+func (fake *FakeCluster) ReportDiskReturns(result1 cluster.DiskVerdict, result2 error) {
+	fake.reportDiskMutex.Lock()
+	defer fake.reportDiskMutex.Unlock()
+	fake.ReportDiskStub = nil
+	fake.reportDiskReturns = struct {
+		result1 cluster.DiskVerdict
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) ReportDiskReturnsOnCall(i int, result1 cluster.DiskVerdict, result2 error) {
+	fake.reportDiskMutex.Lock()
+	defer fake.reportDiskMutex.Unlock()
+	fake.ReportDiskStub = nil
+	if fake.reportDiskReturnsOnCall == nil {
+		fake.reportDiskReturnsOnCall = make(map[int]struct {
+			result1 cluster.DiskVerdict
+			result2 error
+		})
+	}
+	fake.reportDiskReturnsOnCall[i] = struct {
+		result1 cluster.DiskVerdict
+		result2 error
+	}{result1, result2}
+}
+
 func (fake *FakeCluster) ResolveType(arg1 cluster.TypeRef) (*cluster.Type, error) {
 	fake.resolveTypeMutex.Lock()
 	ret, specificReturn := fake.resolveTypeReturnsOnCall[len(fake.resolveTypeArgsForCall)]
@@ -2902,6 +3107,10 @@ func (fake *FakeCluster) Invocations() map[string][][]interface{} {
 	defer fake.databasesMutex.RUnlock()
 	fake.deadLetterStuckSyncableMutex.RLock()
 	defer fake.deadLetterStuckSyncableMutex.RUnlock()
+	fake.diskAdmissionMutex.RLock()
+	defer fake.diskAdmissionMutex.RUnlock()
+	fake.diskStateMutex.RLock()
+	defer fake.diskStateMutex.RUnlock()
 	fake.iDMutex.RLock()
 	defer fake.iDMutex.RUnlock()
 	fake.ingestMutex.RLock()
@@ -2938,6 +3147,8 @@ func (fake *FakeCluster) Invocations() map[string][][]interface{} {
 	defer fake.removeMemberMutex.RUnlock()
 	fake.replaySyncableDeadLetterMutex.RLock()
 	defer fake.replaySyncableDeadLetterMutex.RUnlock()
+	fake.reportDiskMutex.RLock()
+	defer fake.reportDiskMutex.RUnlock()
 	fake.resolveTypeMutex.RLock()
 	defer fake.resolveTypeMutex.RUnlock()
 	fake.scrubMutex.RLock()

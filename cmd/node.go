@@ -93,6 +93,16 @@ image can be templated per-node by an orchestrator:
                        Writes re-enable automatically once free space recovers
                        above the warn threshold. Thresholds must be descending
                        (warn > critical > full).
+  COMMITTED_DISK_REPORT_INTERVAL
+                       cadence (Go duration, default 10s) at which each member
+                       reports its disk state to the leader and the leader
+                       recomputes the cluster-wide write-admission verdict
+                       (admit iff the leader and a quorum of voters have disk
+                       headroom), which every node enforces at its propose
+                       gate. Requires COMMITTED_API_URL on every node and a
+                       cluster-uniform COMMITTED_API_TOKEN; without them the
+                       gate falls back to the node-local decision. "0"
+                       disables cluster-aware admission entirely.
 
   COMMITTED_HTTP_CORS_ORIGINS
                        comma-separated browser-origin allowlist, e.g.
@@ -251,12 +261,32 @@ image can be templated per-node by an orchestrator:
 			zap.L().Info("advertising API URL for leader-read proxying", zap.String("url", apiURL))
 		}
 
+		// Cluster-aware disk admission: each member reports its disk state
+		// to the leader over the HTTP API and enforces the verdict the
+		// response carries. The report sender reuses the leader-read proxy's
+		// TLS client (same peer-API trust) and the cluster's API bearer
+		// token (the report endpoint is authenticated like every write).
+		// Read here, before db.New, and reused for the HTTP options below.
+		apiToken := os.Getenv("COMMITTED_API_TOKEN")
+		proxyClient, err := loadProxyClient()
+		if err != nil {
+			// G706 false positive: values come from operator-supplied env vars.
+			log.Fatalf("leader-read proxy client: %v", err) //nolint:gosec // G706
+		}
+		dbOpts = append(dbOpts, db.WithDiskReportHTTP(proxyClient, apiToken))
+		if raw := os.Getenv("COMMITTED_DISK_REPORT_INTERVAL"); raw == "0" {
+			dbOpts = append(dbOpts, db.WithDiskReportInterval(-1))
+			zap.L().Info("cluster disk admission disabled (COMMITTED_DISK_REPORT_INTERVAL=0); the propose gate is node-local only")
+		} else if d, ok := parseDurationEnv("COMMITTED_DISK_REPORT_INTERVAL"); ok {
+			dbOpts = append(dbOpts, db.WithDiskReportInterval(d))
+		}
+
 		d := db.New(id, peers, s, p, sync, ingest, dbOpts...)
 		fmt.Printf("Raft Running...\n")
 
 		var httpOpts []http.Option
-		if token := os.Getenv("COMMITTED_API_TOKEN"); token != "" {
-			httpOpts = append(httpOpts, http.WithBearerToken(token))
+		if apiToken != "" {
+			httpOpts = append(httpOpts, http.WithBearerToken(apiToken))
 		}
 
 		corsOrigins, err := loadCORSOrigins()
@@ -284,15 +314,10 @@ image can be templated per-node by an orchestrator:
 		// The leader-read proxy (GET /v1/membership on a follower) calls a
 		// peer's API. When that API serves TLS with a private CA or
 		// self-signed certs, the proxy client needs the trust anchor (and,
-		// under mTLS, a client cert); loadProxyClient builds it from the same
-		// COMMITTED_HTTP_TLS_* env vars. Nil → the http layer's default client
-		// (system-root TLS), which is correct for plaintext or publicly-signed
-		// peer APIs.
-		proxyClient, err := loadProxyClient()
-		if err != nil {
-			// G706 false positive: values come from operator-supplied env vars.
-			log.Fatalf("leader-read proxy client: %v", err) //nolint:gosec // G706
-		}
+		// under mTLS, a client cert); loadProxyClient (called above, shared
+		// with the disk-report sender) builds it from the COMMITTED_HTTP_TLS_*
+		// env vars. Nil → the http layer's default client (system-root TLS),
+		// which is correct for plaintext or publicly-signed peer APIs.
 		if proxyClient != nil {
 			httpOpts = append(httpOpts, http.WithProxyClient(proxyClient))
 		}

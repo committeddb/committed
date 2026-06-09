@@ -19,6 +19,32 @@ type NodeStatusResponse struct {
 	Leader          uint64                   `json:"leader"`
 	AppliedIndex    uint64                   `json:"appliedIndex"`
 	DegradedConfigs []DegradedConfigResponse `json:"degradedConfigs"`
+	Disk            DiskStatusResponse       `json:"disk"`
+}
+
+// DiskStatusResponse reports this node's disk pressure and the
+// write-admission decision its propose gate is applying. state is the
+// node-local watcher level; admission is the cluster-aware verdict (or the
+// node-local fallback when no fresh verdict is held). This is the queryable
+// "writable" signal — deliberately separate from /ready, which feeds load
+// balancers and would also drain the reads a low-disk node can still serve.
+type DiskStatusResponse struct {
+	State     string                `json:"state"`
+	Admission DiskAdmissionResponse `json:"admission"`
+}
+
+// DiskAdmissionResponse is one node's current write-admission view. admitted
+// says whether user-data writes are accepted at this node right now; state
+// and reason are the disk level and cause driving that decision; source is
+// "cluster" when a fresh leader-computed verdict is in force or "local" when
+// the gate has fallen back to the node-local Phase 1 decision; leader is the
+// verdict's computing leader (omitted under "local").
+type DiskAdmissionResponse struct {
+	Admitted bool   `json:"admitted"`
+	State    string `json:"state"`
+	Reason   string `json:"reason,omitempty"`
+	Source   string `json:"source"`
+	Leader   uint64 `json:"leader,omitempty"`
 }
 
 // DegradedConfigResponse names one config this node persisted but could
@@ -45,11 +71,22 @@ func (h *HTTP) NodeStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 		degraded = append(degraded, DegradedConfigResponse{Kind: e.Kind, ID: e.ID, Error: e.Error})
 	}
 
+	admission := h.c.DiskAdmission()
 	resp := NodeStatusResponse{
 		Node:            h.c.ID(),
 		Leader:          h.c.Leader(),
 		AppliedIndex:    h.c.AppliedIndex(),
 		DegradedConfigs: degraded,
+		Disk: DiskStatusResponse{
+			State: h.c.DiskState(),
+			Admission: DiskAdmissionResponse{
+				Admitted: admission.Admitted,
+				State:    admission.State,
+				Reason:   admission.Reason,
+				Source:   admission.Source,
+				Leader:   admission.LeaderID,
+			},
+		},
 	}
 
 	bs, err := json.Marshal(resp)

@@ -182,3 +182,86 @@ func TestSetDiskState_MutuallyExclusive(t *testing.T) {
 	}
 	require.Equal(t, map[string]float64{"ok": 0, "warn": 0, "critical": 1, "full": 0}, got)
 }
+
+// TestSetDiskClusterState_MutuallyExclusive mirrors the node-local disk-state
+// gauge contract for the cluster-effective level the admission gate enforces.
+func TestSetDiskClusterState_MutuallyExclusive(t *testing.T) {
+	m, reader := setupTest(t)
+
+	m.SetDiskClusterState("full")
+
+	rm := collect(t, reader)
+	metric := findMetric(rm, "committed.disk.cluster_state")
+	require.NotNil(t, metric)
+	gauge, ok := metric.Data.(metricdata.Gauge[float64])
+	require.True(t, ok)
+
+	got := make(map[string]float64)
+	for _, dp := range gauge.DataPoints {
+		for _, attr := range dp.Attributes.ToSlice() {
+			if string(attr.Key) == "level" {
+				got[attr.Value.AsString()] = dp.Value
+			}
+		}
+	}
+	require.Equal(t, map[string]float64{"ok": 0, "warn": 0, "critical": 0, "full": 1}, got)
+}
+
+// TestSetWriteAdmission asserts both halves of the admission signal: the
+// plain 1/0 admitted gauge, and the mutually-exclusive reason gauges where
+// exactly the active cause reads 1.
+func TestSetWriteAdmission(t *testing.T) {
+	m, reader := setupTest(t)
+
+	m.SetWriteAdmission(false, "quorum_at_risk")
+
+	rm := collect(t, reader)
+
+	admitted := findMetric(rm, "committed.write.admitted")
+	require.NotNil(t, admitted)
+	ag, ok := admitted.Data.(metricdata.Gauge[float64])
+	require.True(t, ok)
+	require.Len(t, ag.DataPoints, 1)
+	require.Equal(t, 0.0, ag.DataPoints[0].Value)
+
+	reason := findMetric(rm, "committed.write.admission_reason")
+	require.NotNil(t, reason)
+	rg, ok := reason.Data.(metricdata.Gauge[float64])
+	require.True(t, ok)
+
+	got := make(map[string]float64)
+	for _, dp := range rg.DataPoints {
+		for _, attr := range dp.Attributes.ToSlice() {
+			if string(attr.Key) == "reason" {
+				got[attr.Value.AsString()] = dp.Value
+			}
+		}
+	}
+	require.Equal(t, map[string]float64{
+		"ok": 0, "leader_disk": 0, "quorum_at_risk": 1, "cluster_reject": 0, "local_fallback": 0,
+	}, got)
+
+	// Recovery flips both: admitted reads 1 and the reason moves to ok.
+	m.SetWriteAdmission(true, "ok")
+	rm = collect(t, reader)
+	admitted = findMetric(rm, "committed.write.admitted")
+	ag, ok = admitted.Data.(metricdata.Gauge[float64])
+	require.True(t, ok)
+	require.Equal(t, 1.0, ag.DataPoints[0].Value)
+}
+
+// TestDiskLeadershipTransfer counts disk-pressure transfers.
+func TestDiskLeadershipTransfer(t *testing.T) {
+	m, reader := setupTest(t)
+
+	m.DiskLeadershipTransfer()
+	m.DiskLeadershipTransfer()
+
+	rm := collect(t, reader)
+	metric := findMetric(rm, "committed.disk.leadership_transfers")
+	require.NotNil(t, metric)
+	sum, ok := metric.Data.(metricdata.Sum[int64])
+	require.True(t, ok)
+	require.Len(t, sum.DataPoints, 1)
+	require.Equal(t, int64(2), sum.DataPoints[0].Value)
+}

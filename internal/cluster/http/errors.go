@@ -95,7 +95,7 @@ func writeProposeError(w httpgo.ResponseWriter, err error, resource, action stri
 		writeError(w, httpgo.StatusRequestEntityTooLarge, "proposal_too_large", resource+" configuration exceeds the configured proposal size limit")
 	case errors.Is(err, cluster.ErrInsufficientStorage):
 		writeError(w, httpgo.StatusInsufficientStorage, "insufficient_storage",
-			"the node is low on disk space and is rejecting writes; retry once disk space recovers")
+			"the cluster (or this node) is low on disk space and is rejecting writes; see GET /v1/node/status disk.admission, retry once disk space recovers")
 	default:
 		writeInternalError(w, "failed to "+action, err)
 	}

@@ -148,4 +148,22 @@ type Cluster interface {
 	// /node/status, the queryable counterpart of the
 	// committed_config_build_errors gauge.
 	ConfigBuildErrors() []ConfigBuildError
+	// ReportDisk records member nodeID's node-local disk-pressure level
+	// ("ok", "warn", "critical", or "full") on this node and returns the
+	// cluster write-admission verdict computed from all the collected
+	// states. Only the leader aggregates reports; on any other node it
+	// returns ErrNotLeader and the reporter should re-resolve the leader.
+	// Powers POST /v1/node/disk-report — the push half of cluster-aware
+	// disk admission (the verdict in the response is the pull half).
+	ReportDisk(nodeID uint64, state string) (DiskVerdict, error)
+	// DiskAdmission returns this node's current view of write admission:
+	// the decision its propose gate is applying right now, whether sourced
+	// from a fresh leader-computed cluster verdict or from the node-local
+	// fallback. Powers GET /node/status.
+	DiskAdmission() DiskAdmissionStatus
+	// DiskState returns this node's own disk-pressure level ("ok", "warn",
+	// "critical", or "full") as last sampled by the local disk watcher.
+	// Node-local diagnostics for GET /node/status, distinct from the
+	// cluster-wide verdict DiskAdmission reports.
+	DiskState() string
 }

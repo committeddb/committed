@@ -292,3 +292,85 @@ func (db *DB) IngestWorkerIDsForTest() []string {
 	}
 	return ids
 }
+
+// SetLocalDiskStateForTest stores the node-local disk-pressure level WITHOUT
+// driving onDiskState — no compaction-pressure nudge, no verdict recompute,
+// no coordinator nudge. Cluster-admission tests use it to set up "local says
+// X but the cluster verdict says Y" divergence; use SetDiskStateForTest when
+// the test wants the full watcher-callback behavior.
+func (db *DB) SetLocalDiskStateForTest(level string) {
+	s, ok := parseDiskState(level)
+	if !ok {
+		panic("unknown disk state " + level)
+	}
+	db.diskState.Store(int32(s))
+}
+
+// SetClusterVerdictForTest injects a cached cluster write-admission verdict
+// as if the leader had returned it on a report round trip age ago. Lets
+// gate tests exercise verdict-dominates-local and staleness-fallback without
+// standing up a multi-node cluster.
+func (db *DB) SetClusterVerdictForTest(state, reason string, leaderID uint64, age time.Duration) {
+	s, ok := parseDiskState(state)
+	if !ok {
+		panic("unknown disk state " + state)
+	}
+	db.diskVerdict.Store(&diskVerdictState{
+		state:    s,
+		reason:   reason,
+		leaderID: leaderID,
+		at:       time.Now().Add(-age),
+	})
+}
+
+// RecordDiskReportForTest seeds the leader-side report map directly, as if
+// member nodeID had reported state age ago — so verdict and transfer-target
+// tests can model member states without HTTP round trips.
+func (db *DB) RecordDiskReportForTest(nodeID uint64, state string, age time.Duration) {
+	s, ok := parseDiskState(state)
+	if !ok {
+		panic("unknown disk state " + state)
+	}
+	db.diskReportsMu.Lock()
+	db.diskReports[nodeID] = diskReport{state: s, at: time.Now().Add(-age)}
+	db.diskReportsMu.Unlock()
+}
+
+// DiskCoordinateForTest runs one disk-coordinator cycle synchronously (the
+// same body the background loop runs on each tick), so tests can drive the
+// leader recompute / follower report-and-cache paths deterministically.
+func (db *DB) DiskCoordinateForTest() {
+	db.diskCoordinate(time.Now())
+}
+
+// SetDiskTransferHooksForTest overrides the transfer-trigger collaborators:
+// pick returns the candidate voter (0 = none) and transfer records the
+// transfer call. cooldown rate-limits successive transfers. Returns nothing;
+// drive the decision via MaybeTransferLeadershipForTest.
+func (db *DB) SetDiskTransferHooksForTest(pick func() uint64, transfer func(uint64), cooldown time.Duration) {
+	db.pickTransferTargetFn = func(time.Time) uint64 { return pick() }
+	db.transferLeadershipFn = transfer
+	db.diskTransferCooldown = cooldown
+}
+
+// MaybeTransferLeadershipForTest runs one disk-pressure transfer decision at
+// the given instant, against the current local disk state and the hooks set
+// via SetDiskTransferHooksForTest.
+func (db *DB) MaybeTransferLeadershipForTest(now time.Time) {
+	db.maybeTransferLeadership(now, db.diskVerdict.Load())
+}
+
+// TransferLeadershipForTest exposes the raft-level leadership hand-off so the
+// multinode harness can assert the plumbing under disk-pressure transfers:
+// etcd raft catches the target up, sends MsgTimeoutNow, and the target wins
+// an immediate election.
+func (n *Raft) TransferLeadershipForTest(transferee uint64) {
+	n.transferLeadership(transferee)
+}
+
+// HTTPDiskReportSenderForTest builds the production HTTP report sender (the
+// exact code the disk coordinator uses) so a test can post a report through
+// a real HTTP handler and assert the db↔http wire contract stays in sync.
+func HTTPDiskReportSenderForTest(token string) func(ctx context.Context, leaderURL string, nodeID uint64, state string) (cluster.DiskVerdict, error) {
+	return newHTTPDiskReportSender(nil, token)
+}

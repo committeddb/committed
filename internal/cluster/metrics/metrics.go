@@ -48,6 +48,11 @@ type Metrics struct {
 	diskFreeBytes   metric.Float64Gauge
 	diskFreePercent metric.Float64Gauge
 	diskState       metric.Float64Gauge
+
+	diskClusterState        metric.Float64Gauge
+	writeAdmitted           metric.Float64Gauge
+	writeAdmissionReason    metric.Float64Gauge
+	diskLeadershipTransfers metric.Int64Counter
 }
 
 // New creates a Metrics instance from an OTel Meter. The caller
@@ -151,6 +156,18 @@ func New(meter metric.Meter) *Metrics {
 
 	m.diskState, _ = meter.Float64Gauge("committed.disk.state",
 		metric.WithDescription("Disk-pressure level of the data directory as mutually-exclusive gauges (level=ok|warn|critical|full); exactly one is 1, the rest 0. At critical, user proposals are rejected with 507; at full, the node is read-only. Alert on critical/full."))
+
+	m.diskClusterState, _ = meter.Float64Gauge("committed.disk.cluster_state",
+		metric.WithDescription("Cluster-effective disk-pressure level this node's write-admission gate is enforcing, as mutually-exclusive gauges (level=ok|warn|critical|full). Computed by the leader from all voter disk states: critical/full here means writes are being rejected cluster-wide. Alert on critical/full."))
+
+	m.writeAdmitted, _ = meter.Float64Gauge("committed.write.admitted",
+		metric.WithDescription("Whether this node's gate currently admits user-data writes (1) or rejects them with 507 (0). Alert on 0; diagnose with committed.write.admission_reason and committed.disk.cluster_state."))
+
+	m.writeAdmissionReason, _ = meter.Float64Gauge("committed.write.admission_reason",
+		metric.WithDescription("Dominant cause behind committed.write.admitted, as mutually-exclusive gauges (reason=ok|leader_disk|quorum_at_risk|cluster_reject|local_fallback); exactly one is 1. quorum_at_risk is the cluster-outage early warning: a quorum of voters is low on disk — expand disk or replace nodes before quorum is lost."))
+
+	m.diskLeadershipTransfers, _ = meter.Int64Counter("committed.disk.leadership_transfers",
+		metric.WithDescription("Leadership transfers triggered because the leader's own disk reached critical/full while a healthy voter existed. Each transfer converts a cluster-wide write freeze into a single constrained follower."))
 
 	return m
 }
@@ -379,4 +396,54 @@ func (m *Metrics) SetDiskState(active string) {
 		m.diskState.Record(context.Background(), v,
 			metric.WithAttributes(attribute.String("level", level)))
 	}
+}
+
+// SetDiskClusterState publishes the cluster-effective disk-pressure level this
+// node's write-admission gate is enforcing, in the same mutually-exclusive
+// gauge shape as SetDiskState. Emitted on every admission update — the leader
+// recomputing the verdict, a follower receiving one, or either falling back
+// to the node-local decision.
+func (m *Metrics) SetDiskClusterState(active string) {
+	for _, level := range [...]string{"ok", "warn", "critical", "full"} {
+		v := 0.0
+		if level == active {
+			v = 1.0
+		}
+		m.diskClusterState.Record(context.Background(), v,
+			metric.WithAttributes(attribute.String("level", level)))
+	}
+}
+
+// SetWriteAdmission publishes whether this node's gate currently admits
+// user-data writes (committed.write.admitted, 1/0) and the dominant cause
+// (committed.write.admission_reason as mutually-exclusive per-reason gauges,
+// same shape as SetDiskState, so an alert can match a reason without a stale
+// 1 lingering after the cause changes). reason is one of the bounded codes
+// ok | leader_disk | quorum_at_risk | cluster_reject | local_fallback —
+// cluster_reject is a follower enforcing a leader-computed rejection (the
+// leader_disk/quorum_at_risk breakdown lives on the leader's own gauge);
+// local_fallback means no fresh cluster verdict was available and the
+// node-local Phase 1 decision is in force.
+func (m *Metrics) SetWriteAdmission(admitted bool, reason string) {
+	v := 0.0
+	if admitted {
+		v = 1.0
+	}
+	m.writeAdmitted.Record(context.Background(), v)
+
+	for _, code := range [...]string{"ok", "leader_disk", "quorum_at_risk", "cluster_reject", "local_fallback"} {
+		rv := 0.0
+		if code == reason {
+			rv = 1.0
+		}
+		m.writeAdmissionReason.Record(context.Background(), rv,
+			metric.WithAttributes(attribute.String("reason", code)))
+	}
+}
+
+// DiskLeadershipTransfer counts a disk-pressure leadership transfer: the
+// leader's own disk reached critical/full and it handed leadership to a
+// confirmed-healthy voter.
+func (m *Metrics) DiskLeadershipTransfer() {
+	m.diskLeadershipTransfers.Add(context.Background(), 1)
 }

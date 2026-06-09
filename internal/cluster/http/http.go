@@ -157,6 +157,14 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 			// /cluster/status for a future fan-out sibling.
 			r.Get("/node/status", h.NodeStatus)
 
+			// Node-to-node: members push their disk state to the leader
+			// here and take the cluster write-admission verdict home from
+			// the response — the transport for cluster-aware disk
+			// admission (see db/disk_cluster.go). Authenticated with the
+			// same bearer token as every other write, which is why the
+			// token must be cluster-uniform.
+			r.Post("/node/disk-report", h.DiskReport)
+
 			// Live cluster membership. GET lists members with their roles
 			// and (leader-observed) replication progress; POST adds a voter
 			// (or a learner with "learner": true); POST .../promote promotes

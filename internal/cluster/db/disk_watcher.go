@@ -262,12 +262,10 @@ func (w *diskWatcher) handleSample(err error) bool {
 //     crash" guarantee into a duplicate storm. The 3% full headroom is reserved
 //     precisely for these essential small writes plus compaction's snapshot.
 //
-// This gate is node-local: it fires on whichever node receives the proposal,
-// based on that node's disk. That correctly protects the all-nodes-full case
-// but is imperfect across nodes (a full follower rejects writes the cluster
-// could still serve; a healthy leader keeps accepting even when a quorum of
-// followers is full). Cluster-aware admission is Phase 2 — see
-// resource-limits-disk-cluster-aware.
+// The same policy applies at two scopes: the propose gate normally evaluates
+// it against the CLUSTER-effective state (the leader-computed admission
+// verdict — see disk_cluster.go) and falls back to this node's own state when
+// no fresh verdict is held. Either way, this one kind-aware policy decides.
 func diskRejection(state diskState, kind string) error {
 	switch state {
 	case diskFull:

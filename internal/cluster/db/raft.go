@@ -668,6 +668,21 @@ func (n *Raft) setCompactionPressure(on bool) {
 	n.compactionPressure.Store(on)
 }
 
+// transferLeadership asks etcd raft to hand leadership to transferee. Only
+// meaningful on the current leader: raft first lets the target catch up on
+// the log, then sends it MsgTimeoutNow to start an immediate election; the
+// attempt silently expires after an election timeout if the target can't
+// catch up or is unreachable. Fire-and-forget by design — the caller
+// (db.maybeTransferLeadership, moving leadership off a disk-constrained
+// node) observes the outcome through the normal leader-change machinery and
+// retries on a later cycle if leadership didn't move.
+func (n *Raft) transferLeadership(transferee uint64) {
+	if n.node == nil {
+		return
+	}
+	n.node.TransferLeadership(context.Background(), n.node.Status().Lead, transferee)
+}
+
 // ReadIndex performs the etcd-raft ReadIndex protocol and returns the raft
 // log index at which a linearizable read may be served. The leader confirms
 // it still holds quorum (a heartbeat round-trip, coalesced across concurrent

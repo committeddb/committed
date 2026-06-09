@@ -56,6 +56,14 @@ Rebuild is the right response when any of these hold:
   read transparently (trust-on-first-read) and are not flagged; new appends
   are always checksummed, so coverage grows as the log compacts.
 
+- A node ran out of disk and you can't expand the volume in place.
+  The cluster keeps admitting writes while a quorum of voters has disk
+  headroom (see [disk-limits.md](disk-limits.md)), which deliberately
+  sacrifices the constrained node — its copy of the replicated log
+  keeps growing until it exits. Rebuild it onto a bigger volume; don't
+  remove it from the membership (that shrinks quorum and *reduces*
+  fault tolerance).
+
 Rebuild is NOT the right response when:
 
 - The node briefly fell behind because of a network blip, restart, or

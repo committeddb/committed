@@ -885,6 +885,57 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /v1/node/disk-report:
+    post:
+      tags: [node]
+      summary: Report a member's disk state to the leader (node-to-node)
+      description: |
+        The transport for cluster-aware disk admission. Each member
+        periodically POSTs its node-local disk-pressure level to the
+        leader's announced API URL, and the response carries back the
+        cluster-wide write-admission verdict the leader computed from all
+        voter states — admit iff the leader and a quorum of voters have
+        disk headroom. The member caches the verdict and enforces it at its
+        own propose gate, so one round trip per member per interval keeps
+        both directions fresh.
+
+        Nodes call this on each other; operators normally never do (though
+        it is harmless to — a report only updates the sender's own entry).
+        Authenticated with the same bearer token as every other write,
+        which is why `COMMITTED_API_TOKEN` must be cluster-uniform. Only
+        the leader aggregates reports: any other node answers 503
+        `leader_unavailable` with the believed `leader_id`, and the
+        reporter re-resolves the leader on its next cycle. See
+        docs/operations/disk-limits.md.
+      operationId: reportDisk
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DiskReportRequest'
+      responses:
+        '200':
+          description: Report recorded; the current cluster write-admission verdict.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiskReportResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          description: |
+            This node is not the raft leader (reports are aggregated only
+            there). The error details carry the believed `leader_id`; the
+            reporter re-resolves the leader's announced API URL and retries
+            on its next cycle.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /v1/membership:
     get:
       tags: [membership]
@@ -1119,13 +1170,16 @@ components:
             $ref: '#/components/schemas/ErrorResponse'
     InsufficientStorage:
       description: |
-        The node is low on disk space and is rejecting writes. The disk-usage
-        watcher rejects user-data proposals once free space falls to its
-        critical threshold, and also freezes config writes once it falls to the
-        full threshold (sync/ingest checkpoints keep flowing). Writes re-enable
-        automatically when free space recovers. The error `code` is
-        `insufficient_storage`. Retry once disk space recovers. See
-        docs/operations/http-limits.md.
+        The cluster (or this node) is low on disk space and is rejecting
+        writes. Admission is decided cluster-wide — a write is admitted iff
+        the leader and a quorum of voters have disk headroom — and enforced
+        at whichever node receives it: user-data proposals are rejected once
+        the cluster-effective free space falls to the critical threshold,
+        config writes also freeze at the full threshold (sync/ingest
+        checkpoints keep flowing). Writes re-enable automatically when free
+        space recovers. The error `code` is `insufficient_storage`; diagnose
+        with GET /v1/node/status (`disk.admission`). See
+        docs/operations/disk-limits.md.
       content:
         application/json:
           schema:
@@ -1170,7 +1224,7 @@ components:
 
     NodeStatusResponse:
       type: object
-      required: [node, leader, appliedIndex, degradedConfigs]
+      required: [node, leader, appliedIndex, degradedConfigs, disk]
       description: |
         Per-node diagnostics for the node that served the request. The
         fields are node-local and ephemeral (not replicated), so two nodes
@@ -1202,6 +1256,113 @@ components:
             on a healthy node.
           items:
             $ref: '#/components/schemas/DegradedConfig'
+        disk:
+          $ref: '#/components/schemas/DiskStatus'
+
+    DiskStatus:
+      type: object
+      required: [state, admission]
+      description: |
+        This node's disk pressure and the write-admission decision its
+        propose gate is applying. This is the queryable "writable" signal —
+        deliberately separate from `/ready`, which feeds load balancers and
+        would also drain the reads a low-disk node can still serve.
+      properties:
+        state:
+          type: string
+          enum: [ok, warn, critical, full]
+          description: |
+            Node-local disk-pressure level of this node's data directory, as
+            last sampled by its disk-usage watcher.
+        admission:
+          $ref: '#/components/schemas/DiskAdmission'
+
+    DiskAdmission:
+      type: object
+      required: [admitted, state, source]
+      description: |
+        One node's current write-admission view: whether user-data writes
+        are accepted at this node right now, and why. With cluster-aware
+        admission active (`source: cluster`) this is the leader-computed
+        verdict — admit iff the leader and a quorum of voters have disk
+        headroom — enforced identically at every node; under `source: local`
+        the node has no fresh verdict (no leader known, leader has no
+        announced API URL, or reports are failing) and falls back to gating
+        on its own disk alone.
+      properties:
+        admitted:
+          type: boolean
+          description: Whether user-data proposals are accepted at this node right now.
+        state:
+          type: string
+          enum: [ok, warn, critical, full]
+          description: |
+            Disk-pressure level driving the decision — cluster-effective
+            under `source: cluster`, node-local under `source: local`.
+            `critical` rejects user data with 507; `full` also freezes
+            config; checkpoints always flow.
+        reason:
+          type: string
+          description: |
+            Operator-facing cause when degraded, e.g. `leader disk critical`
+            or `quorum at risk: 1 of 3 voters have disk headroom (need 2)`.
+            Omitted when healthy.
+        source:
+          type: string
+          enum: [cluster, local]
+          description: |
+            `cluster` when a fresh leader-computed verdict is in force,
+            `local` when the gate has fallen back to the node-local
+            decision.
+        leader:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            Raft ID of the leader that computed the verdict. Omitted under
+            `source: local`.
+
+    DiskReportRequest:
+      type: object
+      required: [node, state]
+      description: |
+        One member's node-local disk-pressure report, pushed to the leader
+        on the disk coordinator's cadence (`COMMITTED_DISK_REPORT_INTERVAL`).
+      properties:
+        node:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Raft node ID of the reporting member.
+        state:
+          type: string
+          enum: [ok, warn, critical, full]
+          description: The member's disk-pressure level, as sampled by its disk-usage watcher.
+
+    DiskReportResponse:
+      type: object
+      required: [state, reason, leader]
+      description: |
+        The cluster write-admission verdict, piggybacked on the report round
+        trip. The reporting member caches it and enforces it at its own
+        propose gate until the next round trip refreshes it.
+      properties:
+        state:
+          type: string
+          enum: [ok, warn, critical, full]
+          description: |
+            Cluster-effective disk-pressure level — the max of the leader's
+            own level and the level a quorum of voters can collectively stay
+            under. `critical` rejects user data cluster-wide; `full` also
+            freezes config; checkpoints always flow.
+        reason:
+          type: string
+          description: Operator-facing cause when degraded; empty when healthy.
+        leader:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Raft ID of the leader that computed the verdict.
 
     DegradedConfig:
       type: object
