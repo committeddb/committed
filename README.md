@@ -159,6 +159,54 @@ curl -X POST -H 'Content-Type: text/toml' \
   http://localhost:8080/v1/type/simple
 ```
 
+#### Entity kinds
+
+A type can declare what the entities written under it are, ordered here
+by how much interpretation a consumer needs to apply one:
+
+```toml
+[type]
+name          = "TenantEvents"
+entityKind    = "event"
+discriminator = "$.event_type"
+```
+
+- **`snapshot`** — full objects, "tenant X is now {…}". Apply =
+  overwrite (last-write-wins per key). Kafka compacted-topic semantics.
+- **`delta`** — state-relative patches, "set tier=prod / add 3".
+  **Rejected at type creation**: syncables deliver at-least-once, and a
+  redelivered non-idempotent patch corrupts. Model the changes as
+  events instead.
+- **`event`** — domain facts, "tenant.provisioned happened". Apply =
+  fold via domain rules; partial and implicative by design. An event
+  type may also declare a `discriminator` — the jsonpath of the field
+  that distinguishes its variants — for projection tooling to consume.
+- **`command`** — requests, "please provision X". Apply = execute side
+  effects; replay is dangerous, and the lifecycle (dedup, acks)
+  belongs to the consumer. Committed carries commands; it does not
+  execute them.
+- **`standalone`** — facts with no aggregate to converge on (audit,
+  telemetry). Apply = append; never folded.
+
+The snapshot-vs-event fork is the one that matters in practice. Choose
+**snapshot** when one writer owns the object and no read model needs
+history — the topic carries current state and is key-compactable by
+definition. Choose **event** when there are multiple writers, the
+entities are audit or intent, or you want many read models folded from
+the same history.
+
+The entity kind is advisory metadata, validated at config time.
+Declaring none (`unspecified`, the default for every type written
+before the field existed) changes nothing — no enforcement ever applies
+to it. A declared kind is immutable: a version bump must restate it,
+and changing it means a new type/topic. Today the validation matrix
+warns (log + `committed_entity_kind_misuse` metric) when a leaf-mapped
+`sql` syncable targets an `event`-kind topic — events are partial by
+design, so each variant either dead-letters on the jsonpaths it doesn't
+carry or clobbers columns it didn't mean to write. The whole-payload
+`"$"` mapping shape below is the right way to land an event topic in
+SQL and is exempt from the warning.
+
 Configure a database to write into (sink):
 
 ```sh

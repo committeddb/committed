@@ -35,19 +35,27 @@ func (s *Storage) saveType(t *cluster.Type) error {
 			var prev cluster.Type
 			if err := prev.Unmarshal(existing); err == nil && prev.Version == t.Version {
 				// Same (typeID, version). Schema is immutable but the
-				// migration field is mutable — operators may need to
-				// retroactively fix a forgotten or buggy migration.
-				// If the migration is the only difference, overwrite
-				// the current version entry in place. If everything
-				// is byte-identical (Raft replay), skip silently.
+				// migration, entity-kind (unspecified→declared adoption
+				// only; ProposeType rejects every other change), and
+				// discriminator fields are mutable in place — operators
+				// may need to retroactively fix a forgotten or buggy
+				// migration, or declare an entity kind on a
+				// grandfathered type. If only those fields differ,
+				// overwrite the current version entry in place. If
+				// everything is byte-identical (Raft replay), skip
+				// silently.
 				if bytes.Equal(prev.Schema, t.Schema) &&
 					prev.SchemaType == t.SchemaType &&
 					prev.Validate == t.Validate &&
-					prev.Name == t.Name &&
-					!bytes.Equal(prev.Migration, t.Migration) {
-					s.logger.Info("updating migration for existing type version",
-						zap.String("id", t.ID), zap.Int("version", t.Version))
-					return overwriteCurrentVersion(b, []byte(t.ID), t)
+					prev.Name == t.Name {
+					changed := !bytes.Equal(prev.Migration, t.Migration) ||
+						prev.EntityKind != t.EntityKind ||
+						prev.Discriminator != t.Discriminator
+					if changed {
+						s.logger.Info("updating mutable fields for existing type version",
+							zap.String("id", t.ID), zap.Int("version", t.Version))
+						return overwriteCurrentVersion(b, []byte(t.ID), t)
+					}
 				}
 				// Byte-identical replay: skip.
 				return nil
@@ -156,11 +164,22 @@ func (s *Storage) Types() ([]*cluster.Configuration, error) {
 				return err
 			}
 
+			// The synthesized TOML mirrors what the operator declared.
+			// entityKind/discriminator are only rendered when set so
+			// unspecified (grandfathered) types list exactly as before.
+			toml := fmt.Sprintf("[type]\nname = \"%s\"", tipe.Name)
+			if tipe.EntityKind != cluster.EntityKindUnspecified {
+				toml += fmt.Sprintf("\nentityKind = \"%s\"", tipe.EntityKind)
+			}
+			if tipe.Discriminator != "" {
+				toml += fmt.Sprintf("\ndiscriminator = \"%s\"", tipe.Discriminator)
+			}
+
 			cfg := &cluster.Configuration{
 				ID:       tipe.ID,
 				Name:     tipe.Name,
 				MimeType: "text/toml",
-				Data:     []byte(fmt.Sprintf("[type]\nname = \"%s\"", tipe.Name)),
+				Data:     []byte(toml),
 			}
 
 			cfgs = append(cfgs, cfg)

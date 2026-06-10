@@ -744,6 +744,25 @@ paths:
         previous version's shape) and the request fails with 400 if it
         errors. `validate_against` is validation-only — it never becomes
         part of the type definition.
+
+        A type may declare what the entities written under it are with
+        `entityKind = "snapshot" | "event" | "command" | "standalone"`
+        (see README § Entity kinds). Omitting `entityKind`
+        (unspecified, the default for every pre-existing type) changes
+        nothing — no enforcement ever applies to it.
+        `entityKind = "delta"` is rejected with 400: at-least-once sync
+        delivery corrupts non-idempotent patches — model the changes as
+        events instead. A declared entity kind is immutable: every
+        later version must restate it, and changing it (or omitting it
+        once declared) fails with 400 — a different kind means a new
+        type. An `event`-kind type may additionally declare
+        `discriminator = "$.event_type"`, the jsonpath of the field
+        that distinguishes its event variants, for projection tooling
+        to consume; `discriminator` on any other kind fails with 400.
+        Declaring an entity kind on a previously-unspecified type
+        (adoption) or changing the discriminator updates the current
+        version in place — no version bump, no `[migration]` section
+        needed.
       operationId: addType
       parameters:
         - $ref: '#/components/parameters/ResourceId'

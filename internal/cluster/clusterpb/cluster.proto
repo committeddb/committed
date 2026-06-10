@@ -54,6 +54,30 @@ enum LogValidationStrategy {
     ValidateSchema = 1;
 }
 
+// LogEntityKind declares what the entities written under a type are —
+// how much interpretation a consumer needs to apply one.
+// EntityKindUnspecified is the grandfathered default: every type
+// written before the field existed unmarshals as it, and it behaves
+// exactly like an untyped topic (no enforcement ever applies). The
+// entity kind is immutable once declared (ProposeType rejects changes
+// across version bumps), so the value at any version is the value
+// forever.
+enum LogEntityKind {
+    EntityKindUnspecified = 0;
+    // Full objects; apply = overwrite (LWW per key).
+    EntityKindSnapshot = 1;
+    // State-relative patches; hostile to at-least-once sync delivery,
+    // rejected at type creation. Reserved so the taxonomy is complete.
+    EntityKindDelta = 2;
+    // Domain facts; apply = fold via domain rules.
+    EntityKindEvent = 3;
+    // Requests; replay is dangerous, lifecycle belongs to the consumer.
+    EntityKindCommand = 4;
+    // Facts with no aggregate to converge on (audit, telemetry); apply =
+    // append, never folded.
+    EntityKindStandalone = 5;
+}
+
 message LogType {
     string ID = 1;
     string Name = 2;
@@ -70,6 +94,16 @@ message LogType {
     // mode; "as-stored" syncables see the raw entity data and handle
     // versioning themselves.
     bytes Migration = 7;
+    // EntityKind classifies what the entities written under this type
+    // are (see LogEntityKind). Additive: log entries embed only
+    // TypeRef, so this touches type metadata only — pre-existing types
+    // unmarshal as EntityKindUnspecified and behave exactly as before.
+    LogEntityKind EntityKind = 8;
+    // Discriminator is a jsonpath (e.g. "$.event_type") naming the
+    // field that distinguishes entity variants. Only meaningful for
+    // EntityKindEvent; recorded so projection-style syncables can
+    // default their match rules to it.
+    string Discriminator = 9;
 }
 
 message LogConfiguration {

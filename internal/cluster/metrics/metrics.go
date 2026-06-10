@@ -43,6 +43,7 @@ type Metrics struct {
 
 	typeMigrationErrors   metric.Int64Counter
 	typeMigrationDuration metric.Float64Histogram
+	entityKindMisuse      metric.Int64Counter
 
 	configBuildErrors metric.Float64Gauge
 
@@ -150,6 +151,9 @@ func New(meter metric.Meter) *Metrics {
 	m.typeMigrationDuration, _ = meter.Float64Histogram("committed.type.migration.duration",
 		metric.WithDescription("Time to run an entity through its type-migration chain (all steps from the stamped version to current). Recorded only on success, so the histogram reflects real transform cost."),
 		metric.WithUnit("s"))
+
+	m.entityKindMisuse, _ = meter.Int64Counter("committed.entity_kind.misuse",
+		metric.WithDescription("Syncable configs parsed against a topic whose declared entity kind they mismatch (e.g. a leaf-mapped sql syncable on an event-kind topic). Advisory: the config still runs, but the combination is a known bug class — see README § Entity kinds."))
 
 	m.configBuildErrors, _ = meter.Float64Gauge("committed.config.build_errors",
 		metric.WithDescription("Configs (database/ingestable/syncable) persisted on this node but not buildable locally — usually a missing ${VAR} secret. Non-zero means a degraded config, not a down node."))
@@ -265,6 +269,21 @@ func (m *Metrics) MigrationError(typeID string, fromVersion, toVersion int) {
 func (m *Metrics) MigrationCompleted(typeID string, d time.Duration) {
 	m.typeMigrationDuration.Record(context.Background(), d.Seconds(),
 		metric.WithAttributes(attribute.String("type_id", typeID)))
+}
+
+// EntityKindMisuse counts a syncable config parsed against a topic
+// whose declared entity kind it mismatches (the config-time misuse
+// matrix — e.g. a leaf-mapped sql syncable on an event-kind topic).
+// Advisory: emitted alongside the parse-time warning log, once per
+// parse, so it fires at propose time and again on every worker rebuild
+// until the config is fixed.
+func (m *Metrics) EntityKindMisuse(syncableType, topic, entityKind string) {
+	m.entityKindMisuse.Add(context.Background(), 1,
+		metric.WithAttributes(
+			attribute.String("syncable_type", syncableType),
+			attribute.String("topic", topic),
+			attribute.String("entity_kind", entityKind),
+		))
 }
 
 // IngestError counts one ingest error for an ingestable and stamps the
