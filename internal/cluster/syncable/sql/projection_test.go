@@ -207,6 +207,48 @@ func TestProjectionWhenConjunction(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+// A null when clause matches a present JSON null only: an absent
+// field is "no match" (the standing missing-path invariant), and a
+// non-null value is not null.
+func TestProjectionWhenNullMatchesPresentNullOnly(t *testing.T) {
+	config := tenantProjectionConfig()
+	config.Rules = []sql.ProjectionRule{{
+		When: []sql.WhenClause{
+			{Path: "$.event_type", Equals: "tenant.audited"},
+			{Path: "$.allocs", Null: true},
+		},
+		Set: []sql.ProjectionSet{{Column: "state", Value: "unallocated"}},
+	}}
+	projection, mock, rules, _ := newMockProjection(t, config, nil)
+
+	// allocs present and null: the clause holds.
+	mock.ExpectBegin()
+	args := []driver.Value{"t1", "unallocated"}
+	rules[0].ExpectExec().WithArgs(append(args, args...)...).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+	_, err := projection.Sync(context.Background(), eventActual(t, "t1", map[string]any{
+		"tenant_id": "t1", "event_type": "tenant.audited", "allocs": nil,
+	}))
+	require.NoError(t, err)
+
+	// allocs absent: missing path is "no match", never a null match.
+	mock.ExpectBegin()
+	mock.ExpectCommit()
+	_, err = projection.Sync(context.Background(), eventActual(t, "t1", map[string]any{
+		"tenant_id": "t1", "event_type": "tenant.audited",
+	}))
+	require.NoError(t, err)
+
+	// allocs non-null: no match.
+	mock.ExpectBegin()
+	mock.ExpectCommit()
+	_, err = projection.Sync(context.Background(), eventActual(t, "t1", map[string]any{
+		"tenant_id": "t1", "event_type": "tenant.audited", "allocs": map[string]any{"cpu": 4},
+	}))
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 // TOML integers (int64) must match JSON numbers (float64) in when
 // clauses.
 func TestProjectionWhenMatchesNumericLiterals(t *testing.T) {

@@ -22,11 +22,16 @@ type ProjectionColumn struct {
 	SQLType string `mapstructure:"type"`
 }
 
-// WhenClause is one match condition: the value at Path must equal
-// Equals for the clause to hold. A rule matches when every one of its
-// clauses holds (AND); express OR as another rule. A missing Path is
-// "no match", never an error — events of other shapes simply don't
-// match.
+// WhenClause is one match condition: exactly one of Equals (the value
+// at Path must equal it) or Null (the value at Path must be JSON null)
+// must be set. Null is a flag for the same reason as
+// ProjectionSet.Null: TOML has no null literal, so `equals = null`
+// cannot be written. A rule matches when every one of its clauses
+// holds (AND); express OR as another rule. A missing Path is "no
+// match", never an error — events of other shapes simply don't match —
+// and that invariant is why a Null clause matches only a *present*
+// null: {"allocs": null} matches, an absent field does not. There is
+// no negation ("is not null"); the when language is equality-only.
 //
 // The jsonpath deliberately lives in a value, not a TOML key: viper
 // lowercases map keys at read time, which would silently corrupt
@@ -34,6 +39,7 @@ type ProjectionColumn struct {
 type WhenClause struct {
 	Path   string `mapstructure:"path"`
 	Equals any    `mapstructure:"equals"`
+	Null   bool   `mapstructure:"null"`
 }
 
 // ProjectionSet is one column write of a matched rule. Exactly one of
@@ -161,10 +167,10 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 			if cl.Path == "" {
 				return fmt.Errorf("rule %d: when entry needs a path", i+1)
 			}
-			if cl.Equals == nil {
-				return fmt.Errorf("rule %d: when entry for %q needs equals", i+1, cl.Path)
+			if (cl.Equals != nil) == cl.Null {
+				return fmt.Errorf("rule %d: when entry for %q: exactly one of equals or null is required", i+1, cl.Path)
 			}
-			if !isScalar(cl.Equals) {
+			if cl.Equals != nil && !isScalar(cl.Equals) {
 				return fmt.Errorf("rule %d: when entry for %q: equals must be a scalar literal, got %T", i+1, cl.Path, cl.Equals)
 			}
 		}
@@ -456,12 +462,20 @@ func (p *Projection) Close() error {
 
 // matchWhen reports whether every clause holds against the unmarshaled
 // payload. A missing path is "no match", never an error: when is a
-// filter, and events of other shapes simply don't match.
+// filter, and events of other shapes simply don't match. That holds
+// for null clauses too — jsonpath distinguishes a present null (nil,
+// no error) from an absent field (error), and only the former matches.
 func matchWhen(clauses []WhenClause, jsonData any) bool {
 	for _, c := range clauses {
 		v, err := jsonpath.Get(c.Path, jsonData)
 		if err != nil {
 			return false
+		}
+		if c.Null {
+			if v != nil {
+				return false
+			}
+			continue
 		}
 		if !literalEquals(c.Equals, v) {
 			return false

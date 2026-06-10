@@ -342,7 +342,10 @@ Rule semantics:
 
 - **`when` is data, not an expression**: an array of
   `{ path, equals }` clauses, all of which must hold (AND); express OR
-  as another rule. A missing path is "no match", never an error. If
+  as another rule. `{ path, null = true }` matches a *present* JSON
+  null (the flag form again, since TOML cannot write `equals = null`);
+  there is no negation. A missing path is "no match", never an error —
+  including for `null` clauses, so an absent field never matches. If
   the topic's type declares a `discriminator`, a rule can use the
   shorthand `when = "tenant.created"` — sugar for equality on the
   discriminator path.
@@ -358,11 +361,13 @@ Rule semantics:
   Delivery is at-least-once and idempotent re-apply is the recovery
   mechanism, which is why there are no aggregations (`col = col + 1`
   would corrupt on redelivery).
-- **Errors fail fast**: config misuse (unknown column, not exactly one
-  of `from`/`value`/`null`, a rule setting the primary key, a rule without a
-  `when`) is rejected at config time; a *matched* rule whose `from`
-  path is missing — or a matched event with no value at `keyPath` —
-  dead-letters as a permanent error rather than wedging the worker.
+- **Errors fail fast**: config misuse (unknown column, a `set` entry
+  without exactly one of `from`/`value`/`null`, a `when` entry without
+  exactly one of `equals`/`null`, a rule setting the primary key, a
+  rule without a `when`) is rejected at config time; a *matched* rule
+  whose `from` path is missing — or a matched event with no value at
+  `keyPath` — dead-letters as a permanent error rather than wedging
+  the worker.
 - **Deletes are honored**: a delete Actual hard-deletes the projected
   row by entity key (right-to-be-forgotten), distinct from soft-delete
   rules like `state = "deprovisioning"` — both exist. Deleting an

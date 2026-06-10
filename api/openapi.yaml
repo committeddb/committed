@@ -434,7 +434,8 @@ paths:
         (rule-driven fold into one row per entity — current-state
         tables; see README § SQL projections), or `http` (webhook).
         For `sql-projection`, all rule misuse (a `set` entry without
-        exactly one of `from`/`value`/`null`, an unknown column, a rule
+        exactly one of `from`/`value`/`null`, a `when` entry without
+        exactly one of `equals`/`null`, an unknown column, a rule
         without a `when`, a rule setting the primary-key column) fails
         here with 400.
       operationId: addSyncable

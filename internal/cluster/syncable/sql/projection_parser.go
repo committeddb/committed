@@ -134,8 +134,21 @@ func normalizeWhen(raw any, storage cluster.DatabaseStorage, topic string) ([]Wh
 					clause.Path = s
 				case strings.EqualFold(k, "equals"):
 					clause.Equals = val
+				case strings.EqualFold(k, "null"):
+					b, ok := val.(bool)
+					if !ok {
+						return nil, fmt.Errorf("when null must be a boolean; got %T", val)
+					}
+					// An explicit false would silently mean nothing
+					// (and "is not null" does not exist — the when
+					// language is equality-only), so reject it rather
+					// than let a misread config parse.
+					if !b {
+						return nil, fmt.Errorf("when null = false is not a predicate (no negation); omit the clause or match a concrete value with equals")
+					}
+					clause.Null = true
 				default:
-					return nil, fmt.Errorf("when entry has unknown key %q (expected path and equals)", k)
+					return nil, fmt.Errorf("when entry has unknown key %q (expected path and one of equals or null)", k)
 				}
 			}
 			clauses = append(clauses, clause)

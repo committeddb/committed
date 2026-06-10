@@ -154,6 +154,35 @@ func TestParseProjectionConfigKeyPathOverride(t *testing.T) {
 	require.Equal(t, "$.meta.id", config.KeyPath)
 }
 
+// A null when clause ({ path, null = true }) parses to Null: true —
+// TOML has no null literal, so the flag form stands in, same as the
+// set side.
+func TestParseProjectionWhenNull(t *testing.T) {
+	toml := `
+[sql-projection]
+topic      = "t"
+db         = "testdb"
+table      = "rows"
+primaryKey = "id"
+
+[[sql-projection.columns]]
+name = "id"
+type = "TEXT"
+
+[[sql-projection.columns]]
+name = "state"
+type = "TEXT"
+
+[[sql-projection.rules]]
+when = [ { path = "$.allocs", null = true } ]
+set  = [ { column = "state", value = "unallocated" } ]
+`
+	v := readConfig(t, "toml", strings.NewReader(toml))
+	config, err := (&sql.ProjectionSyncableParser{}).ParseConfig(v, projectionStorage())
+	require.NoError(t, err)
+	require.Equal(t, []sql.WhenClause{{Path: "$.allocs", Null: true}}, config.Rules[0].When)
+}
+
 // Every rule/config misuse must fail at config time — nothing may wedge
 // the worker at sync time.
 func TestParseProjectionConfigRejectsMisuse(t *testing.T) {
@@ -228,9 +257,24 @@ type = "TEXT"
 			`unknown key "equal"`,
 		},
 		{
-			"when missing equals",
+			"when missing equals and null",
 			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\" } ]\nset = [ { column = \"v\", value = \"y\" } ]",
-			"needs equals",
+			"exactly one of equals or null",
+		},
+		{
+			"when with both equals and null",
+			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\", null = true } ]\nset = [ { column = \"v\", value = \"y\" } ]",
+			"exactly one of equals or null",
+		},
+		{
+			"when null false",
+			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", null = false } ]\nset = [ { column = \"v\", value = \"y\" } ]",
+			"null = false is not a predicate",
+		},
+		{
+			"when null not a boolean",
+			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", null = \"yes\" } ]\nset = [ { column = \"v\", value = \"y\" } ]",
+			"when null must be a boolean",
 		},
 		{
 			"non-scalar equals",
