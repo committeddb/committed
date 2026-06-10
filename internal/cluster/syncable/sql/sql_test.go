@@ -139,8 +139,10 @@ func TestDontSyncOtherTypes(t *testing.T) {
 
 			ctx := context.Background()
 
+			// No ExpectBegin: a foreign-topic Actual must cost no
+			// transaction at all (regression: an open tx here leaked a
+			// pooled connection until db.Close).
 			for _, p := range createProposals(t, tt.data) {
-				mock.ExpectBegin()
 				shouldSnapshot, err := syncable.Sync(ctx, p)
 				require.Nil(t, err)
 				require.Equal(t, cluster.ShouldSnapshot(false), shouldSnapshot)
@@ -354,10 +356,57 @@ func TestSyncDeleteWithoutKeyColumnIsPermanent(t *testing.T) {
 	require.Nil(t, syncable.Init())
 
 	mock.ExpectBegin()
+	mock.ExpectRollback()
 	_, err = syncable.Sync(context.Background(), &cluster.Actual{Entities: []*cluster.Entity{
 		cluster.NewDeleteEntity(simpleType, []byte("key1")),
 	}})
 	require.Error(t, err)
 	require.True(t, errors.Is(err, cluster.ErrPermanent))
 	require.Nil(t, mock.ExpectationsWereMet())
+}
+
+// TestSyncRollsBackOnApplyError is the tx-leak regression for the error path:
+// any applyEntity failure inside Sync must roll the transaction back, never
+// return with it open (an open tx pins its pooled connection until db.Close).
+func TestSyncRollsBackOnApplyError(t *testing.T) {
+	t.Run("permanent-unmarshal-error", func(t *testing.T) {
+		dialect, mock, err := dialects.NewSQLMockDialect()
+		require.Nil(t, err)
+		db, err := sql.NewDB(dialect, "")
+		require.Nil(t, err)
+		defer db.Close()
+
+		syncable, _, _ := newSimpleSyncable(t, mock, dialect, db)
+
+		mock.ExpectBegin()
+		mock.ExpectRollback()
+		ss, err := syncable.Sync(context.Background(), &cluster.Actual{Entities: []*cluster.Entity{
+			cluster.NewUpsertEntity(simpleType, []byte("key1"), []byte("{not json")),
+		}})
+		require.Error(t, err)
+		require.True(t, errors.Is(err, cluster.ErrPermanent))
+		require.Equal(t, cluster.ShouldSnapshot(false), ss)
+		require.Nil(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("exec-error", func(t *testing.T) {
+		dialect, mock, err := dialects.NewSQLMockDialect()
+		require.Nil(t, err)
+		db, err := sql.NewDB(dialect, "")
+		require.Nil(t, err)
+		defer db.Close()
+
+		syncable, insertPrepare, _ := newSimpleSyncable(t, mock, dialect, db)
+
+		mock.ExpectBegin()
+		insertPrepare.ExpectExec().WithArgs("key1", "one", "key1", "one").
+			WillReturnError(errors.New("destination unhappy"))
+		mock.ExpectRollback()
+		ss, err := syncable.Sync(context.Background(), &cluster.Actual{Entities: []*cluster.Entity{
+			cluster.NewUpsertEntity(simpleType, []byte("key1"), simpleJSON(t, "key1", "one")),
+		}})
+		require.Error(t, err)
+		require.Equal(t, cluster.ShouldSnapshot(false), ss)
+		require.Nil(t, mock.ExpectationsWereMet())
+	})
 }

@@ -74,6 +74,14 @@ func (c *Syncable) Init() error {
 }
 
 func (c *Syncable) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldSnapshot, error) {
+	// Topic check before BeginTx so a non-matching Actual costs no
+	// transaction.
+	for _, e := range a.Entities {
+		if c.config.Topic != e.Type.ID {
+			return false, nil
+		}
+	}
+
 	// BeginTx / ExecContext let cancellation actually interrupt the
 	// transaction. Without this, a canceled worker would have to wait
 	// for the current Sync to drain naturally before it could exit,
@@ -84,13 +92,8 @@ func (c *Syncable) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldS
 	}
 
 	for _, e := range a.Entities {
-		if c.config.Topic != e.Type.ID {
-			return false, nil
-		}
-	}
-
-	for _, e := range a.Entities {
 		if err := c.applyEntity(ctx, tx, e); err != nil {
+			_ = tx.Rollback()
 			return false, err
 		}
 	}
