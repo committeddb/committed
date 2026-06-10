@@ -41,6 +41,14 @@ func TestRaftPropose_Cluster3(t *testing.T) {
 		proposeAndCheck(t, rafts[0], input)
 	}
 
+	// proposeAndCheck only confirms the entry on the proposing node;
+	// commit means a quorum has it, and the remaining replica receives
+	// it asynchronously. Wait for the final input on every node before
+	// reading their storage, or a loaded runner fails the count check.
+	for _, r := range rafts {
+		waitForUserEntry(t, r, []byte(inputs[len(inputs)-1]))
+	}
+
 	// Walk each node's user-entry suffix and assert the inputs landed in
 	// order. Storage indices vary by bootstrap shape, so a "find by
 	// content" approach is more robust than hardcoding offsets.
@@ -99,6 +107,13 @@ func TestRaftRestart_Cluster3(t *testing.T) {
 
 	for _, input := range inputs2 {
 		proposeAndCheck(t, rafts[0], input)
+	}
+
+	// As in TestRaftPropose_Cluster3: confirm the last entry reached
+	// every node before reading per-node storage — replication to the
+	// non-quorum replica is asynchronous after commit.
+	for _, r := range rafts {
+		waitForUserEntry(t, r, []byte(inputs2[len(inputs2)-1]))
 	}
 
 	for _, r := range rafts {
