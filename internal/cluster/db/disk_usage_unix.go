@@ -18,6 +18,6 @@ func diskUsage(path string) (free, total uint64, err error) {
 	if err := syscall.Statfs(path, &st); err != nil {
 		return 0, 0, err
 	}
-	bsize := uint64(st.Bsize)
+	bsize := uint64(st.Bsize) //nolint:gosec // G115: block size is never negative; int64 on Linux for ABI reasons only
 	return st.Bavail * bsize, st.Blocks * bsize, nil
 }
