@@ -101,6 +101,28 @@ func positionLSN(pos cluster.Position) uint64 {
 	return pp.Lsn
 }
 
+// cleanReplication drops the named replication slot and publication if
+// they survive from an earlier run against the same server (-count>1,
+// or a crashed run). Leftovers don't fail loudly — they stream silence:
+// a publication references tables by OID, so a prior run's DROP TABLE
+// leaves the publication empty and the recreated table unpublished,
+// while a leftover slot suppresses the initial snapshot. The slot drop
+// retries because the previous run's walsender dies asynchronously
+// after ctx cancel and an active slot cannot be dropped.
+func cleanReplication(t *testing.T, slotName, pubName string) {
+	t.Helper()
+	db := createDB(t)
+	defer db.Close()
+	require.Eventually(t, func() bool {
+		_, err := db.Exec(
+			`SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1`,
+			slotName)
+		return err == nil
+	}, 10*time.Second, 100*time.Millisecond)
+	_, err := db.Exec(fmt.Sprintf(`DROP PUBLICATION IF EXISTS %s`, pubName))
+	require.NoError(t, err)
+}
+
 // waitForSlot polls pg_stat_replication until the named slot is in
 // state='streaming' — i.e. the dialect has finished its snapshot phase
 // and is actively consuming WAL. Gating on pg_replication_slots.active
@@ -178,6 +200,7 @@ func TestPostgresDialect(t *testing.T) {
 
 			slotName := fmt.Sprintf("slot_%s", tt.name)
 			pubName := fmt.Sprintf("pub_%s", tt.name)
+			cleanReplication(t, slotName, pubName)
 
 			dialect := &postgres.PostgreSQLDialect{}
 			tt.config.ConnectionString = connString
@@ -278,6 +301,8 @@ func TestPostgresPositionResume(t *testing.T) {
 	_, err = db.Exec(fmt.Sprintf(`CREATE TABLE %s (pk VARCHAR(32) NOT NULL PRIMARY KEY, val TEXT)`, table))
 	require.NoError(t, err)
 	db.Close()
+
+	cleanReplication(t, "slot_resume", "pub_resume")
 
 	simpleType := &cluster.Type{ID: "resume", Name: "resume"}
 	config := &sql.Config{
@@ -401,6 +426,8 @@ func TestPostgresTransactionGrouping(t *testing.T) {
 	_, err = db.Exec(fmt.Sprintf(`CREATE TABLE %s (pk VARCHAR(32) NOT NULL PRIMARY KEY, val TEXT)`, table))
 	require.NoError(t, err)
 	db.Close()
+
+	cleanReplication(t, "slot_txgroup", "pub_txgroup")
 
 	simpleType := &cluster.Type{ID: "txgroup", Name: "txgroup"}
 	config := &sql.Config{
@@ -528,6 +555,11 @@ func TestPostgresSnapshotOnNewSlot(t *testing.T) {
 	require.NoError(t, err)
 	db.Close()
 
+	// Repeatability matters doubly here: this test's whole premise is a
+	// NEW slot (snapshot on creation), so a leftover slot from a prior
+	// run wouldn't just stream silence — it would skip the snapshot.
+	cleanReplication(t, "slot_snap", "pub_snap")
+
 	simpleType := &cluster.Type{ID: "snap", Name: "snap"}
 	config := &sql.Config{
 		Type: simpleType,
@@ -626,6 +658,8 @@ func TestPostgresSnapshotChunking(t *testing.T) {
 		require.NoError(t, err)
 	}
 	db.Close()
+
+	cleanReplication(t, "slot_chunk", "pub_chunk")
 
 	config := &sql.Config{
 		Type: &cluster.Type{ID: "chunk", Name: "chunk"},
