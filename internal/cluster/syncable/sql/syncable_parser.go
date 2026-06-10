@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/spf13/viper"
 	"go.uber.org/zap"
 
 	"github.com/committeddb/committed/internal/cluster"
@@ -18,7 +17,7 @@ type SyncableParser struct {
 	Metrics *metrics.Metrics
 }
 
-func (p *SyncableParser) Parse(v *viper.Viper, storage cluster.DatabaseStorage) (cluster.Syncable, error) {
+func (p *SyncableParser) Parse(v *cluster.ParsedConfig, storage cluster.DatabaseStorage) (cluster.Syncable, error) {
 	config, err := p.ParseConfig(v, storage)
 	if err != nil {
 		return nil, err
@@ -38,7 +37,7 @@ func (p *SyncableParser) Parse(v *viper.Viper, storage cluster.DatabaseStorage) 
 	return syncable, nil
 }
 
-func (p *SyncableParser) ParseConfig(v *viper.Viper, storage cluster.DatabaseStorage) (*Config, error) {
+func (p *SyncableParser) ParseConfig(v *cluster.ParsedConfig, storage cluster.DatabaseStorage) (*Config, error) {
 	sqlDB := v.GetString("sql.db")
 	db, err := storage.Database(sqlDB)
 	if err != nil {

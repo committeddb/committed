@@ -5,15 +5,13 @@ import (
 	"os"
 	"strings"
 
-	"github.com/spf13/viper"
-
 	"github.com/committeddb/committed/internal/cluster"
 )
 
 // SyncableParser parses TOML configuration into an HTTP webhook Syncable.
 type SyncableParser struct{}
 
-func (p *SyncableParser) Parse(v *viper.Viper, _ cluster.DatabaseStorage) (cluster.Syncable, error) {
+func (p *SyncableParser) Parse(v *cluster.ParsedConfig, _ cluster.DatabaseStorage) (cluster.Syncable, error) {
 	config, err := p.ParseConfig(v)
 	if err != nil {
 		return nil, err
@@ -21,7 +19,7 @@ func (p *SyncableParser) Parse(v *viper.Viper, _ cluster.DatabaseStorage) (clust
 	return New(config), nil
 }
 
-func (p *SyncableParser) ParseConfig(v *viper.Viper) (*Config, error) {
+func (p *SyncableParser) ParseConfig(v *cluster.ParsedConfig) (*Config, error) {
 	topic := v.GetString("http.topic")
 	if topic == "" {
 		return nil, fmt.Errorf("[http.syncable-parser] http.topic is required")
@@ -46,24 +44,24 @@ func (p *SyncableParser) ParseConfig(v *viper.Viper) (*Config, error) {
 	}
 
 	var headers []Header
-	if raw := v.Get("http.headers"); raw != nil {
-		items, ok := raw.([]interface{})
-		if !ok {
-			return nil, fmt.Errorf("[http.syncable-parser] http.headers must be an array of tables")
+	if v.IsSet("http.headers") {
+		// Decoded via mapstructure so the name/value field keys match
+		// case-insensitively, while the values (real header names and
+		// tokens — user data) stay byte-exact.
+		var raw []struct {
+			Name  string `mapstructure:"name"`
+			Value string `mapstructure:"value"`
 		}
-		for _, item := range items {
-			m, ok := item.(map[string]interface{})
-			if !ok {
-				return nil, fmt.Errorf("[http.syncable-parser] invalid header entry")
-			}
-			name, _ := m["name"].(string)
-			value, _ := m["value"].(string)
-			if name == "" {
+		if err := v.UnmarshalKey("http.headers", &raw); err != nil {
+			return nil, fmt.Errorf("[http.syncable-parser] http.headers must be an array of tables: %w", err)
+		}
+		for _, h := range raw {
+			if h.Name == "" {
 				return nil, fmt.Errorf("[http.syncable-parser] header name is required")
 			}
 			headers = append(headers, Header{
-				Name:  name,
-				Value: os.ExpandEnv(value),
+				Name:  h.Name,
+				Value: os.ExpandEnv(h.Value),
 			})
 		}
 	}

@@ -3,8 +3,6 @@ package sql
 import (
 	"fmt"
 
-	"github.com/spf13/viper"
-
 	"github.com/committeddb/committed/internal/cluster"
 )
 
@@ -23,7 +21,7 @@ func NewIngestableParser(t Typer) *IngestableParser {
 	return &IngestableParser{Dialects: dialects, typer: t}
 }
 
-func (p *IngestableParser) Parse(v *viper.Viper) (cluster.Ingestable, error) {
+func (p *IngestableParser) Parse(v *cluster.ParsedConfig) (cluster.Ingestable, error) {
 	config, dialect, err := p.ParseConfig(v)
 	if err != nil {
 		return nil, err
@@ -34,7 +32,7 @@ func (p *IngestableParser) Parse(v *viper.Viper) (cluster.Ingestable, error) {
 	return ingestable, nil
 }
 
-func (p *IngestableParser) ParseConfig(v *viper.Viper) (*Config, Dialect, error) {
+func (p *IngestableParser) ParseConfig(v *cluster.ParsedConfig) (*Config, Dialect, error) {
 	dialectName := v.GetString("sql.dialect")
 	topic := v.GetString("sql.topic")
 	connectionString := v.GetString("sql.connectionString")

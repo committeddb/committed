@@ -1,7 +1,6 @@
 package parser
 
 import (
-	"bytes"
 	"fmt"
 
 	"github.com/committeddb/committed/internal/cluster"
@@ -12,7 +11,7 @@ func (p *Parser) AddSyncableParser(name string, sp cluster.SyncableParser) {
 }
 
 func (p *Parser) ParseSyncable(mimeType string, data []byte, s cluster.DatabaseStorage) (string, cluster.Syncable, cluster.SyncableMode, error) {
-	v, err := parseBytes(mimeType, bytes.NewReader(data))
+	v, err := parseBytes(mimeType, data)
 	if err != nil {
 		return "", nil, 0, err
 	}

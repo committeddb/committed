@@ -1,7 +1,5 @@
 package cluster
 
-import "github.com/spf13/viper"
-
 // Database represents a query database
 //
 //counterfeiter:generate . Database
@@ -14,11 +12,11 @@ type DatabaseStorage interface {
 	Database(id string) (Database, error)
 }
 
-// DatabaseParser will parse a viper file into a Database
+// DatabaseParser will parse a config document into a Database
 //
 //counterfeiter:generate . DatabaseParser
 type DatabaseParser interface {
-	Parse(v *viper.Viper) (Database, error)
+	Parse(c *ParsedConfig) (Database, error)
 }
 
 var databaseType = registerSystemType(&Type{

@@ -7,7 +7,6 @@ import (
 	"os"
 	"testing"
 
-	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
 
 	"github.com/committeddb/committed/internal/cluster"
@@ -192,10 +191,14 @@ func postgresDefaultsConfig() *sql.Config {
 	}
 }
 
-func readConfig(t *testing.T, configType string, r io.Reader) *viper.Viper {
-	v := viper.New()
-	v.SetConfigType(configType)
-	err := v.ReadConfig(r)
+func readConfig(t *testing.T, configType string, r io.Reader) *cluster.ParsedConfig {
+	bs, err := io.ReadAll(r)
+	require.Nil(t, err)
+	mimeType := "text/toml"
+	if configType == "json" {
+		mimeType = "application/json"
+	}
+	v, err := cluster.ParseConfigBytes(mimeType, bs)
 	require.Nil(t, err)
 
 	return v

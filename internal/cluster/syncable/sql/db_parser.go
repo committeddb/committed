@@ -3,8 +3,6 @@ package sql
 import (
 	"fmt"
 
-	"github.com/spf13/viper"
-
 	"github.com/committeddb/committed/internal/cluster"
 )
 
@@ -12,7 +10,7 @@ type DBParser struct {
 	Dialects map[string]Dialect
 }
 
-func (d *DBParser) Parse(v *viper.Viper) (cluster.Database, error) {
+func (d *DBParser) Parse(v *cluster.ParsedConfig) (cluster.Database, error) {
 	dialectName := v.GetString("sql.dialect")
 	connectionString := v.GetString("sql.connectionString")
 

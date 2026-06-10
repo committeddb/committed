@@ -5,7 +5,6 @@ import (
 	"io"
 	"testing"
 
-	"github.com/spf13/viper"
 	pb "go.etcd.io/raft/v3/raftpb"
 
 	"github.com/committeddb/committed/internal/cluster"
@@ -326,6 +325,5 @@ var (
 
 // Suppress unused import warnings
 var (
-	_ *viper.Viper
 	_ context.Context
 )

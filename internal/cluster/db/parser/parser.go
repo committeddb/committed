@@ -1,11 +1,6 @@
 package parser
 
 import (
-	"bytes"
-	"io"
-
-	"github.com/spf13/viper"
-
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/config"
 )
@@ -32,20 +27,12 @@ func New() *Parser {
 // references an env var this node is missing. A missing reference
 // surfaces as *config.MissingVarError (wrapped by parseBytes).
 func (p *Parser) Validate(mimeType string, data []byte) error {
-	_, err := parseBytes(mimeType, bytes.NewReader(data))
+	_, err := parseBytes(mimeType, data)
 	return err
 }
 
-func parseBytes(mimeType string, reader io.Reader) (*viper.Viper, error) {
-	style := "toml"
-	if mimeType == "application/json" {
-		style = "json"
-	}
-
-	v := viper.New()
-
-	v.SetConfigType(style)
-	err := v.ReadConfig(reader)
+func parseBytes(mimeType string, data []byte) (*cluster.ParsedConfig, error) {
+	v, err := cluster.ParseConfigBytes(mimeType, data)
 	if err != nil {
 		return nil, err
 	}
@@ -54,15 +41,11 @@ func parseBytes(mimeType string, reader io.Reader) (*viper.Viper, error) {
 	// This happens at the parse boundary, after the TOML/JSON is parsed
 	// but before the sub-parser sees any value, so the raw template
 	// bytes are what get proposed into Raft and stored in bbolt — only
-	// the live in-memory config carries the resolved secret. Setting
-	// each interpolated top-level subtree as a viper override leaves
-	// every downstream Get* reading the expanded value.
-	settings := v.AllSettings()
-	if err := config.Interpolate(settings); err != nil {
+	// the live in-memory config carries the resolved secret. The
+	// expansion mutates the decoded tree in place, so every downstream
+	// Get* reads the expanded value.
+	if err := config.Interpolate(v.Values()); err != nil {
 		return nil, err
-	}
-	for k, val := range settings {
-		v.Set(k, val)
 	}
 
 	return v, nil

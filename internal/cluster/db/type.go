@@ -97,7 +97,10 @@ func (db *DB) ProposeType(ctx context.Context, c *cluster.Configuration) error {
 }
 
 func ParseType(c *cluster.Configuration, s cluster.DatabaseStorage) (string, *cluster.Type, error) {
-	v, err := parseBytes(c.MimeType, bytes.NewReader(c.Data))
+	// Type configs decode without ${VAR} interpolation, deliberately:
+	// schemas and jq programs are not secrets, and a literal "${" in a
+	// schema document must not error on a missing env var.
+	v, err := cluster.ParseConfigBytes(c.MimeType, c.Data)
 	if err != nil {
 		return "", nil, err
 	}

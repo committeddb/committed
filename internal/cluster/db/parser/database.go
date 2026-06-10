@@ -1,7 +1,6 @@
 package parser
 
 import (
-	"bytes"
 	"fmt"
 
 	"github.com/committeddb/committed/internal/cluster"
@@ -12,7 +11,7 @@ func (p *Parser) AddDatabaseParser(name string, dp cluster.DatabaseParser) {
 }
 
 func (p *Parser) ParseDatabase(mimeType string, data []byte) (string, cluster.Database, error) {
-	v, err := parseBytes(mimeType, bytes.NewReader(data))
+	v, err := parseBytes(mimeType, data)
 	if err != nil {
 		return "", nil, err
 	}

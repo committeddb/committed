@@ -3,8 +3,8 @@ package sql
 import (
 	"fmt"
 	"reflect"
+	"strings"
 
-	"github.com/spf13/viper"
 	"go.uber.org/zap"
 
 	"github.com/committeddb/committed/internal/cluster"
@@ -19,7 +19,7 @@ type ProjectionSyncableParser struct {
 	Metrics *metrics.Metrics
 }
 
-func (p *ProjectionSyncableParser) Parse(v *viper.Viper, storage cluster.DatabaseStorage) (cluster.Syncable, error) {
+func (p *ProjectionSyncableParser) Parse(v *cluster.ParsedConfig, storage cluster.DatabaseStorage) (cluster.Syncable, error) {
 	config, err := p.ParseConfig(v, storage)
 	if err != nil {
 		return nil, err
@@ -46,7 +46,7 @@ type rawProjectionRule struct {
 	Set  []ProjectionSet `mapstructure:"set"`
 }
 
-func (p *ProjectionSyncableParser) ParseConfig(v *viper.Viper, storage cluster.DatabaseStorage) (*ProjectionConfig, error) {
+func (p *ProjectionSyncableParser) ParseConfig(v *cluster.ParsedConfig, storage cluster.DatabaseStorage) (*ProjectionConfig, error) {
 	sqlDB := v.GetString("sql-projection.db")
 	db, err := storage.Database(sqlDB)
 	if err != nil {
@@ -123,14 +123,16 @@ func normalizeWhen(raw any, storage cluster.DatabaseStorage, topic string) ([]Wh
 			}
 			var clause WhenClause
 			for k, val := range m {
-				switch k {
-				case "path":
+				// Field names match case-insensitively (decode
+				// tolerance); the path VALUE stays byte-exact.
+				switch {
+				case strings.EqualFold(k, "path"):
 					s, ok := val.(string)
 					if !ok {
 						return nil, fmt.Errorf("when path must be a string; got %T", val)
 					}
 					clause.Path = s
-				case "equals":
+				case strings.EqualFold(k, "equals"):
 					clause.Equals = val
 				default:
 					return nil, fmt.Errorf("when entry has unknown key %q (expected path and equals)", k)

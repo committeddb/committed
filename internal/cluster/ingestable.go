@@ -3,7 +3,6 @@ package cluster
 import (
 	"context"
 
-	"github.com/spf13/viper"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster/clusterpb"
@@ -41,7 +40,7 @@ type Ingestable interface {
 
 //counterfeiter:generate . IngestableParser
 type IngestableParser interface {
-	Parse(*viper.Viper) (Ingestable, error)
+	Parse(c *ParsedConfig) (Ingestable, error)
 }
 
 var ingestableType = registerSystemType(&Type{

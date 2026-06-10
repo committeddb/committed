@@ -312,9 +312,7 @@ Rule semantics:
   as another rule. A missing path is "no match", never an error. If
   the topic's type declares a `discriminator`, a rule can use the
   shorthand `when = "tenant.created"` — sugar for equality on the
-  discriminator path. (The path lives in a value, not a TOML key,
-  because the config parser lowercases map keys — `$.eventType` would
-  silently become `$.eventtype`.)
+  discriminator path.
 - **Each matched rule is one prepared upsert** restricted to its
   columns, executed in manifest order inside the Actual's transaction.
   When two matched rules set the same column, the last rule wins.

@@ -3,8 +3,6 @@ package ingestable
 import (
 	"context"
 
-	"github.com/spf13/viper"
-
 	"github.com/committeddb/committed/internal/cluster"
 )
 
@@ -16,7 +14,7 @@ func NewProposalIngestableParser(ps []*cluster.Proposal) cluster.IngestableParse
 	return &ProposalIngestableParser{ps: ps}
 }
 
-func (p *ProposalIngestableParser) Parse(*viper.Viper) (cluster.Ingestable, error) {
+func (p *ProposalIngestableParser) Parse(*cluster.ParsedConfig) (cluster.Ingestable, error) {
 	return &ProposalIngestable{ps: p.ps}, nil
 }
 

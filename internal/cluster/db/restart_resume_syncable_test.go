@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
 
 	"github.com/committeddb/committed/internal/cluster"
@@ -59,7 +58,7 @@ func (s *resumeSyncable) Close() error { return nil }
 
 type resumeParser struct{ r *resumeRecorder }
 
-func (p *resumeParser) Parse(_ *viper.Viper, _ cluster.DatabaseStorage) (cluster.Syncable, error) {
+func (p *resumeParser) Parse(_ *cluster.ParsedConfig, _ cluster.DatabaseStorage) (cluster.Syncable, error) {
 	return &resumeSyncable{r: p.r}, nil
 }
 

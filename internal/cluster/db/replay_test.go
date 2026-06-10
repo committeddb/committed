@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
 
 	"github.com/committeddb/committed/internal/cluster"
@@ -56,7 +55,7 @@ func (s *replaySyncable) Close() error { return nil }
 
 type replayParser struct{ b *replayBehavior }
 
-func (p *replayParser) Parse(_ *viper.Viper, _ cluster.DatabaseStorage) (cluster.Syncable, error) {
+func (p *replayParser) Parse(_ *cluster.ParsedConfig, _ cluster.DatabaseStorage) (cluster.Syncable, error) {
 	return &replaySyncable{b: p.b}, nil
 }
 

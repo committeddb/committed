@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
 	"go.etcd.io/raft/v3/raftpb"
 
@@ -135,7 +134,7 @@ func TestApplyCommitted_RestartReplay(t *testing.T) {
 	// was wrong), this is the line that catches it.
 	panicParser := parser.New()
 	panickingFake := &clusterfakes.FakeIngestableParser{}
-	panickingFake.ParseStub = func(*viper.Viper) (cluster.Ingestable, error) {
+	panickingFake.ParseStub = func(*cluster.ParsedConfig) (cluster.Ingestable, error) {
 		panic("parser must not be called on restart-replay of an already-applied entry")
 	}
 	panicParser.AddIngestableParser("test-replay", panickingFake)

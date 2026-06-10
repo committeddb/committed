@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/spf13/viper"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster/clusterpb"
@@ -127,11 +126,11 @@ type BatchSyncable interface {
 	SyncBatch(ctx context.Context, as []*Actual) (shouldSnapshot bool, err error)
 }
 
-// Parser will parse a viper file into a Syncable
+// SyncableParser parses a config document into a Syncable
 //
 //counterfeiter:generate . SyncableParser
 type SyncableParser interface {
-	Parse(*viper.Viper, DatabaseStorage) (Syncable, error)
+	Parse(c *ParsedConfig, s DatabaseStorage) (Syncable, error)
 }
 
 var syncableType = registerSystemType(&Type{

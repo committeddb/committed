@@ -5,14 +5,13 @@ import (
 	"sync"
 
 	"github.com/committeddb/committed/internal/cluster"
-	"github.com/spf13/viper"
 )
 
 type FakeIngestableParser struct {
-	ParseStub        func(*viper.Viper) (cluster.Ingestable, error)
+	ParseStub        func(*cluster.ParsedConfig) (cluster.Ingestable, error)
 	parseMutex       sync.RWMutex
 	parseArgsForCall []struct {
-		arg1 *viper.Viper
+		arg1 *cluster.ParsedConfig
 	}
 	parseReturns struct {
 		result1 cluster.Ingestable
@@ -26,11 +25,11 @@ type FakeIngestableParser struct {
 	invocationsMutex sync.RWMutex
 }
 
-func (fake *FakeIngestableParser) Parse(arg1 *viper.Viper) (cluster.Ingestable, error) {
+func (fake *FakeIngestableParser) Parse(arg1 *cluster.ParsedConfig) (cluster.Ingestable, error) {
 	fake.parseMutex.Lock()
 	ret, specificReturn := fake.parseReturnsOnCall[len(fake.parseArgsForCall)]
 	fake.parseArgsForCall = append(fake.parseArgsForCall, struct {
-		arg1 *viper.Viper
+		arg1 *cluster.ParsedConfig
 	}{arg1})
 	stub := fake.ParseStub
 	fakeReturns := fake.parseReturns
@@ -51,13 +50,13 @@ func (fake *FakeIngestableParser) ParseCallCount() int {
 	return len(fake.parseArgsForCall)
 }
 
-func (fake *FakeIngestableParser) ParseCalls(stub func(*viper.Viper) (cluster.Ingestable, error)) {
+func (fake *FakeIngestableParser) ParseCalls(stub func(*cluster.ParsedConfig) (cluster.Ingestable, error)) {
 	fake.parseMutex.Lock()
 	defer fake.parseMutex.Unlock()
 	fake.ParseStub = stub
 }
 
-func (fake *FakeIngestableParser) ParseArgsForCall(i int) *viper.Viper {
+func (fake *FakeIngestableParser) ParseArgsForCall(i int) *cluster.ParsedConfig {
 	fake.parseMutex.RLock()
 	defer fake.parseMutex.RUnlock()
 	argsForCall := fake.parseArgsForCall[i]

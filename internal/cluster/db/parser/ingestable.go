@@ -1,7 +1,6 @@
 package parser
 
 import (
-	"bytes"
 	"fmt"
 
 	"github.com/committeddb/committed/internal/cluster"
@@ -12,7 +11,7 @@ func (p *Parser) AddIngestableParser(name string, sp cluster.IngestableParser) {
 }
 
 func (p *Parser) ParseIngestable(mimeType string, data []byte) (string, cluster.Ingestable, error) {
-	v, err := parseBytes(mimeType, bytes.NewReader(data))
+	v, err := parseBytes(mimeType, data)
 	if err != nil {
 		return "", nil, err
 	}

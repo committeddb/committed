@@ -6,17 +6,21 @@ import (
 	"os"
 	"testing"
 
-	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
 
+	"github.com/committeddb/committed/internal/cluster"
 	synchttp "github.com/committeddb/committed/internal/cluster/syncable/http"
 )
 
-func readConfig(t *testing.T, configType string, r io.Reader) *viper.Viper {
+func readConfig(t *testing.T, configType string, r io.Reader) *cluster.ParsedConfig {
 	t.Helper()
-	v := viper.New()
-	v.SetConfigType(configType)
-	err := v.ReadConfig(r)
+	bs, err := io.ReadAll(r)
+	require.NoError(t, err)
+	mimeType := "text/toml"
+	if configType == "json" {
+		mimeType = "application/json"
+	}
+	v, err := cluster.ParseConfigBytes(mimeType, bs)
 	require.NoError(t, err)
 	return v
 }
