@@ -427,6 +427,16 @@ paths:
     post:
       tags: [syncable]
       summary: Create or update a syncable configuration
+      description: |
+        Proposes a syncable configuration. `syncable.type` selects the
+        implementation: `sql` (one row per event — history tables and
+        the whole-payload `"$"` event-log shape), `sql-projection`
+        (rule-driven fold into one row per entity — current-state
+        tables; see README § SQL projections), or `http` (webhook).
+        For `sql-projection`, all rule misuse (a `set` entry with both
+        or neither of `from`/`value`, an unknown column, a rule without
+        a `when`, a rule setting the primary-key column) fails here
+        with 400.
       operationId: addSyncable
       parameters:
         - $ref: '#/components/parameters/ResourceId'

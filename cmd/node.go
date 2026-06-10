@@ -330,6 +330,7 @@ image can be templated per-node by an orchestrator:
 		// fine to register here alongside it.
 		d.AddIngestableParser("sql", ingestableParser(d))
 		d.AddSyncableParser("sql", &syncsql.SyncableParser{Metrics: m})
+		d.AddSyncableParser("sql-projection", &syncsql.ProjectionSyncableParser{Metrics: m})
 		d.AddSyncableParser("http", &synchttp.SyncableParser{})
 
 		// Restore ingestable and syncable workers for configs applied in a

@@ -27,6 +27,7 @@ type Metrics struct {
 	syncErrors          metric.Int64Counter
 	syncLastErrorTime   metric.Float64Gauge
 	syncStuck           metric.Float64Gauge
+	syncRulesUnmatched  metric.Int64Counter
 	ingestErrors        metric.Int64Counter
 	ingestLastErrorTime metric.Float64Gauge
 
@@ -152,6 +153,9 @@ func New(meter metric.Meter) *Metrics {
 		metric.WithDescription("Time to run an entity through its type-migration chain (all steps from the stamped version to current). Recorded only on success, so the histogram reflects real transform cost."),
 		metric.WithUnit("s"))
 
+	m.syncRulesUnmatched, _ = meter.Int64Counter("committed.sync.rules_unmatched",
+		metric.WithDescription("Events a sql-projection syncable consumed from its topic that matched none of its rules. The event leaves no row behind; a steady tick is the signal that a new event variant shipped without a projection rule."))
+
 	m.entityKindMisuse, _ = meter.Int64Counter("committed.entity_kind.misuse",
 		metric.WithDescription("Syncable configs parsed against a topic whose declared entity kind they mismatch (e.g. a leaf-mapped sql syncable on an event-kind topic). Advisory: the config still runs, but the combination is a known bug class — see README § Entity kinds."))
 
@@ -269,6 +273,18 @@ func (m *Metrics) MigrationError(typeID string, fromVersion, toVersion int) {
 func (m *Metrics) MigrationCompleted(typeID string, d time.Duration) {
 	m.typeMigrationDuration.Record(context.Background(), d.Seconds(),
 		metric.WithAttributes(attribute.String("type_id", typeID)))
+}
+
+// SyncRulesUnmatched counts one event a sql-projection syncable saw on
+// its topic that matched none of its rules (the event leaves no row
+// behind). Attributed by the syncable's TOML name — the config ID
+// never reaches the syncable layer — plus the topic.
+func (m *Metrics) SyncRulesUnmatched(name, topic string) {
+	m.syncRulesUnmatched.Add(context.Background(), 1,
+		metric.WithAttributes(
+			attribute.String("syncable_name", name),
+			attribute.String("topic", topic),
+		))
 }
 
 // EntityKindMisuse counts a syncable config parsed against a topic

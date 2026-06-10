@@ -251,6 +251,96 @@ particular) normalize what they store — key order, duplicate keys, number
 formatting — so expect a semantically equal document back, not identical
 bytes.
 
+#### SQL projections
+
+The plain `sql` syncable lands a *history* table: one row per event.
+Applications usually query *current state*: one row per entity, which
+requires folding each entity's events in log order. A
+`type = "sql-projection"` syncable expresses that fold declaratively —
+in the one place that sees every event exactly in order — so the log
+stays the source of truth, the rules live in version-controlled TOML,
+reads are O(1), and the table is disposable: rebuild it by replaying
+from index 0. Use `sql` for event-log/history tables (and for
+`snapshot`-kind topics, which are total updates with nothing to fold);
+use `sql-projection` to maintain current-state tables from an
+`event`-kind topic. One topic typically feeds both.
+
+```toml
+[syncable]
+name = "tenants"
+type = "sql-projection"
+mode = "always-current"        # rules target the current type version
+
+[sql-projection]
+topic      = "controlplane-event"
+db         = "hosted-projection"
+table      = "tenants"
+primaryKey = "tenant_id"
+# keyPath  = "$.tenant_id"     # optional; defaults to $.<primaryKey>
+
+[[sql-projection.columns]]
+name = "tenant_id"
+type = "VARCHAR(256)"
+
+[[sql-projection.columns]]
+name = "tier"
+type = "VARCHAR(32)"
+
+[[sql-projection.columns]]
+name = "state"
+type = "VARCHAR(32)"
+
+[[sql-projection.rules]]
+when = [ { path = "$.event_type", equals = "tenant.created" } ]
+set  = [
+  { column = "tier",  from  = "$.tier" },
+  { column = "state", value = "pending" },
+]
+
+[[sql-projection.rules]]
+when = [
+  { path = "$.event_type", equals = "tenant.provisioned" },
+  { path = "$.tier",       equals = "prod" },
+]
+set  = [ { column = "state", value = "active" } ]
+```
+
+Rule semantics:
+
+- **`when` is data, not an expression**: an array of
+  `{ path, equals }` clauses, all of which must hold (AND); express OR
+  as another rule. A missing path is "no match", never an error. If
+  the topic's type declares a `discriminator`, a rule can use the
+  shorthand `when = "tenant.created"` — sugar for equality on the
+  discriminator path. (The path lives in a value, not a TOML key,
+  because the config parser lowercases map keys — `$.eventType` would
+  silently become `$.eventtype`.)
+- **Each matched rule is one prepared upsert** restricted to its
+  columns, executed in manifest order inside the Actual's transaction.
+  When two matched rules set the same column, the last rule wins.
+  Zero matching rules → zero SQL: no ghost rows, and the
+  `committed_sync_rules_unmatched` counter ticks — the signal that a
+  new event variant shipped without a rule.
+- **Writes are absolute** (`from` extracts from the payload, `value`
+  is a literal — exactly one per `set` entry). Delivery is
+  at-least-once and idempotent re-apply is the recovery mechanism,
+  which is why there are no aggregations (`col = col + 1` would
+  corrupt on redelivery).
+- **Errors fail fast**: config misuse (unknown column, both/neither of
+  `from`/`value`, a rule setting the primary key, a rule without a
+  `when`) is rejected at config time; a *matched* rule whose `from`
+  path is missing — or a matched event with no value at `keyPath` —
+  dead-letters as a permanent error rather than wedging the worker.
+- **Deletes are honored**: a delete Actual hard-deletes the projected
+  row by entity key (right-to-be-forgotten), distinct from soft-delete
+  rules like `state = "deprovisioning"` — both exist. Deleting an
+  absent row is a no-op, which is what makes a fresh replay of an
+  already-scrubbed log correct.
+- **Schema evolution = fresh-table replay, not ALTER.** DDL is
+  `CREATE TABLE IF NOT EXISTS` only. To add a column or rule: point a
+  new syncable at a new table and let it replay from index 0 — cheap,
+  because the log is permanent. Cut reads over when it converges.
+
 Configure an ingestable that pulls from an external source into the
 log (MySQL example; see `internal/cluster/ingestable/sql/postgres_ingestable.toml`
 for a Postgres logical-replication config):
