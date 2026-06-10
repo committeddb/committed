@@ -18,43 +18,60 @@ Committed is specifically NOT a databse designed for querying.
 - **vs. etcd**: same Raft substrate, but append-only log semantics instead of KV — and a worker model for ingest/sync that etcd doesn't have.
 - **vs. an RDBMS / Debezium pipeline**: Committed collapses "replicated log + CDC source + sink connectors" into one process. You don't need Kafka + Debezium + Kafka Connect + a separate consensus layer; the same binary holds the log, the source, and the sink.
 
-## Version 0.5
+## Version 0.6
 
-A beta release that hardens the log's correctness guarantees and makes the
-sync/ingest pipeline operable under failure. It keeps 0.4's productionized
-backend — 3-node Raft cluster, `COMMITTED_*` env-var configuration and
-static multi-node bootstrap, optional bearer-token auth and TLS, graceful
-shutdown, configurable server limits, optional OpenTelemetry metrics, and
-the end-to-end CDC pipeline (Postgres logical replication / MySQL binlog
-ingestable → Raft log → SQL/HTTP syncable) — and adds:
+A beta release that gives the log a data model — types now declare what
+their entities *are*, and syncables can fold event history into
+current-state tables — and makes the cluster elastic and self-protecting,
+with learner-based growth, leader-proxied membership reads, and
+disk-pressure admission control. It keeps 0.5's hardened core — the
+Proposal/Actual model, joint-consensus membership changes, linearizable
+reads, WAL checksums, effectively-once ingest, operable syncables
+(replay, dead letters, bounded retry), versioned `/v1` APIs with
+per-config history and rollback, `${VAR}` config secrets, and the
+official container image — and adds:
 
-- **The Actual concept** — a committed Proposal is now a first-class
-  *Actual*: the fact consensus ordered at a fixed Index. Syncables consume
-  Actuals, never Proposals (see [Concepts](#concepts)). Inconsistent
-  read-side concepts ("proposal time", reading a proposal back) were
-  removed, so the log stays write-only over HTTP by design.
-- **Stronger consensus guarantees** — JointImplicit configuration changes
-  to prevent split brains during membership changes, linearizable reads of
-  snapshotted data, and WAL checksums to detect on-disk corruption (etcd
-  raft updated to the latest release).
-- **Effectively-once ingest** — durable ingestable positions plus
-  duplicate-storm-on-crash fixes, so ingest resumes where it left off
-  across restarts and leader changes behind a supervised ingest worker.
-- **Operable syncables** — a replay API
-  (`POST /v1/syncable/{id}/replay/{index}`), dead-letter handling with
-  metrics so durability failures are visible, bounded transient-retry
-  config, and syncables that correctly restart and resume on node restart.
-  Deletes now propagate through both ingestables and syncables.
-- **Diagnostics, versioned APIs & config secrets** — a
-  `GET /v1/node/status` endpoint reporting locally-degraded configs,
-  versioned (`/v1`) endpoints with per-config history and rollback,
-  `${VAR}` substitution to keep secrets out of Raft/bbolt, and configurable
-  CORS.
-- **Official container image** — a distroless, static, multi-arch
-  (`linux/amd64` + `linux/arm64`) image published to Docker Hub at
-  [`committeddb/committed`](https://hub.docker.com/r/committeddb/committed),
-  alongside the prebuilt binaries (darwin/linux on arm64 + amd64,
-  windows/amd64) attached to each release.
+- **Entity kinds** — a type declares what the entities written under it
+  are (`snapshot`, `event`, `command`, `standalone`; `delta` is rejected
+  by design), plus an optional `discriminator` for event variants. Kinds
+  are validated at config time, and a misuse matrix warns (log +
+  `committed_entity_kind_misuse` metric) when a leaf-mapped `sql`
+  syncable targets an `event`-kind topic. See
+  [Entity kinds](#entity-kinds).
+- **SQL projections** — a `sql-projection` syncable folds an
+  `event`-kind topic into a current-state table with declarative TOML
+  rules (`when`/`set`), idempotent absolute writes, hard deletes for
+  right-to-be-forgotten, and fresh-table replay instead of ALTER. See
+  [SQL projections](#sql-projections).
+- **Whole-payload mappings** — `jsonPath = "$"` in a `sql` syncable maps
+  the entire payload into one JSON/text column: the conventional
+  event-log shape of scalar envelope columns plus a payload column.
+- **Cluster growth with learners** — add a node as a non-voting learner
+  (`member add --learner`), watch it catch up, then `member promote` it
+  to a voter — growing the cluster without touching quorum math. See
+  [`docs/operations/membership.md`](docs/operations/membership.md).
+- **Membership observability & leader proxy** — `GET /v1/membership`
+  reports each member's role and replication progress. Followers
+  transparently proxy the read to the leader, so any node — including
+  one behind a load-balancer VIP — answers leader-truthfully; nodes
+  self-announce their API address via `COMMITTED_API_URL`.
+- **Disk-pressure protection** — a per-node free-space watcher
+  (warn/critical/full thresholds, `507` rejections) plus cluster-aware
+  write admission: writes are admitted only while the leader and a
+  quorum of voters have disk headroom, and leadership transfers off a
+  constrained leader. See
+  [`docs/operations/disk-limits.md`](docs/operations/disk-limits.md).
+- **Graceful type-migration failure handling** — a migration program
+  that fails at runtime dead-letters against the type
+  (`GET /v1/type/{id}/migration-errors`), can be re-run after a fix
+  (`POST /v1/type/{id}/migration-retry/{index}`), and feeds
+  `committed_type_migration_errors_total`; `validate_against` pre-flights
+  a program against a sample document at propose time.
+- **HTTP & SQL hardening** — panic recovery on every handler, sanitized
+  `500` responses whose cause is logged server-side with the request id,
+  and SQL syncable transaction hygiene (validate before `BeginTx`,
+  rollback on every error path). Viper was replaced with go-toml/v2 +
+  mapstructure, with tolerance tests pinning config-parsing behavior.
 
 ### Concepts
 
@@ -97,10 +114,10 @@ under `/home/nonroot/data`:
 ```sh
 docker run --rm -p 8080:8080 -p 9022:9022 \
   -v committed-data:/home/nonroot/data \
-  committeddb/committed:0.5-beta
+  committeddb/committed:0.6-beta
 ```
 
-`docker run committeddb/committed:0.5-beta --version` prints the build
+`docker run committeddb/committed:0.6-beta --version` prints the build
 identity; `:latest` tracks the most recent release. See
 [Configuration](#configuration) for the env vars and `docker-compose.yml`
 for a local single-node setup.
@@ -127,13 +144,15 @@ same image can be templated per-node by an orchestrator:
 | `COMMITTED_DATA_DIR` | `./data` | Directory for the WAL, raft state, and metadata. |
 | `COMMITTED_PEER_URL` | `http://127.0.0.1:9022` | This node's advertised raft peer URL. Used when `COMMITTED_PEERS` is unset. |
 | `COMMITTED_PEERS` | _(unset)_ | Full static cluster membership as `id=url` pairs, e.g. `1=http://n1:9022,2=http://n2:9022,3=http://n3:9022`. Give the same value to every node; it must include this node's `COMMITTED_NODE_ID`. |
+| `COMMITTED_API_URL` | _(unset)_ | This node's advertised HTTP API base URL (e.g. `http://n1:8080`), self-announced into the cluster so followers can proxy leader-only reads. Set it on every node. |
 
 `COMMITTED_PEERS` is consumed only on a node's **first** boot
 (`raft.StartNode`). After that, membership is restored from the WAL on
 restart, so editing `COMMITTED_PEERS` has no effect — use the
-conf-change API for live membership changes. When `COMMITTED_PEERS` is
-unset the node bootstraps a single-node cluster advertising
-`COMMITTED_PEER_URL`.
+membership API for live changes (see
+[`docs/operations/membership.md`](docs/operations/membership.md)). When
+`COMMITTED_PEERS` is unset the node bootstraps a single-node cluster
+advertising `COMMITTED_PEER_URL`.
 
 Additional operational variables (peer/API mTLS, proposal-size and HTTP
 timeout limits, graceful-shutdown deadline, OTel export) are documented
@@ -373,6 +392,13 @@ answers — notably the configs it persisted but could not build locally
 failing variable named. It is the queryable, authenticated counterpart of
 the `committed_config_build_errors` gauge.
 
+`GET /v1/membership` lists the cluster — each member's role (voter or
+learner) and replication progress — and is transparently proxied to the
+leader when a follower answers. `POST /v1/membership`,
+`POST /v1/membership/{id}/promote`, and `DELETE /v1/membership/{id}`
+change membership live; see
+[`docs/operations/membership.md`](docs/operations/membership.md).
+
 ### Testing
 
 | Target | Scope |
@@ -415,6 +441,7 @@ for the rationale.
 - [`docs/operations/secrets.md`](docs/operations/secrets.md) — `${VAR}` interpolation to keep DB credentials and tokens out of Raft/bbolt (Kubernetes + systemd patterns)
 - [`docs/operations/shutdown.md`](docs/operations/shutdown.md) — `SIGTERM` handling and the graceful-shutdown deadline
 - [`docs/operations/http-limits.md`](docs/operations/http-limits.md) — proposal-size cap and HTTP server timeouts
+- [`docs/operations/membership.md`](docs/operations/membership.md) — adding/removing nodes with joint consensus, growing safely via learner add → catch-up → promote, and observing membership (`GET /v1/membership`, the leader-read proxy, `COMMITTED_API_URL`)
 - [`docs/operations/disk-limits.md`](docs/operations/disk-limits.md) — disk-pressure behavior: the per-node free-space watcher (warn/critical/full thresholds, 507 rejections) and cluster-aware write admission (admit iff the leader and a quorum of voters have disk headroom; leadership transfers off a constrained leader), with the alerting and incident playbook
 - [`docs/operations/rebuild.md`](docs/operations/rebuild.md) — rebuilding a node after a `storage invariant violation` fatal. Short version: stop the node, rsync its data directory from a healthy peer, restart. Apply determinism keeps subsequent rebuilds O(diff).
-- [`docs/operations/stuck-syncables.md`](docs/operations/stuck-syncables.md) — spotting a syncable wedged on a transient error (the `committed_sync_stuck` gauge, `GET /v1/syncable/{id}/status`), skipping the bad proposal (`POST /v1/syncable/{id}/deadletter/`), and re-driving it after a fix (`POST /v1/syncable/{id}/replay/{index}`), plus dead letters and `GET /v1/syncable/{id}/errors`.
+- [`docs/operations/stuck-syncables.md`](docs/operations/stuck-syncables.md) — spotting a syncable wedged on a transient error (the `committed_sync_stuck` gauge, `GET /v1/syncable/{id}/status`), skipping the bad proposal (`POST /v1/syncable/{id}/deadletter/`), and re-driving it after a fix (`POST /v1/syncable/{id}/replay/{index}`), plus dead letters (`GET /v1/syncable/{id}/errors`) and the type-migration recovery loop (`GET /v1/type/{id}/migration-errors`, `POST /v1/type/{id}/migration-retry/{index}`).
