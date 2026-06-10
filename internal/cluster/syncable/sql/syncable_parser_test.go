@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/spf13/viper"
@@ -41,6 +42,53 @@ func TestParse(t *testing.T) {
 			require.Equal(t, tt.config, config)
 		})
 	}
+}
+
+// wholePayloadTOML is the event-log manifest shape: a scalar envelope column
+// plus a "$" mapping landing the whole payload in one column of payloadType.
+func wholePayloadTOML(payloadType string) string {
+	return `
+[sql]
+topic      = "controlplane-event"
+db         = "testdb"
+table      = "tenant_events"
+primaryKey = "event_id"
+
+[[sql.mappings]]
+jsonPath = "$.event_id"
+column   = "event_id"
+type     = "VARCHAR(64)"
+
+[[sql.mappings]]
+jsonPath = "$"
+column   = "payload"
+type     = "` + payloadType + `"
+`
+}
+
+func TestParseWholePayloadMapping(t *testing.T) {
+	v := readConfig(t, "toml", strings.NewReader(wholePayloadTOML("JSONB")))
+
+	dbs := map[string]cluster.Database{"testdb": testDB}
+	config, err := (&sql.SyncableParser{}).ParseConfig(v, &TestDatabaseStorage{dbs: dbs})
+	require.Nil(t, err)
+	require.Equal(t, []sql.Mapping{
+		{JsonPath: "$.event_id", Column: "event_id", SQLType: "VARCHAR(64)"},
+		{JsonPath: "$", Column: "payload", SQLType: "JSONB"},
+	}, config.Mappings)
+}
+
+// TestParseRejectsWholePayloadIntoNonTextColumn: a "$" mapping into a column
+// that cannot hold the document must fail at parse time — before consensus,
+// before any DDL — with an error naming the column and the offending type.
+func TestParseRejectsWholePayloadIntoNonTextColumn(t *testing.T) {
+	v := readConfig(t, "toml", strings.NewReader(wholePayloadTOML("INT")))
+
+	dbs := map[string]cluster.Database{"testdb": testDB}
+	_, err := (&sql.SyncableParser{}).ParseConfig(v, &TestDatabaseStorage{dbs: dbs})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `"payload"`)
+	require.Contains(t, err.Error(), `"INT"`)
 }
 
 func simpleConfig(db cluster.Database) *sql.Config {

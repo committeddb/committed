@@ -175,6 +175,34 @@ curl -X POST -H 'Content-Type: text/toml' \
   http://localhost:8080/v1/syncable/one
 ```
 
+A `[[sql.mappings]]` block usually extracts one leaf value
+(`jsonPath = "$.title"`) into a column. Setting `jsonPath = "$"` instead
+maps the *whole* payload — the exact JSON document as submitted — into a
+single column. That is the conventional event-log shape: a couple of
+scalar envelope columns for indexing plus one payload column the read
+side unmarshals and folds into current state:
+
+```toml
+[[sql.mappings]]
+jsonPath = "$.event_id"
+column   = "event_id"
+type     = "VARCHAR(64)"
+
+[[sql.mappings]]
+jsonPath = "$"
+column   = "payload"
+type     = "JSONB"
+```
+
+A `"$"` mapping requires a JSON or text column type (`JSONB`, `JSON`,
+`TEXT`, `VARCHAR`, `CHAR`, `NVARCHAR`, `LONGTEXT`, `MEDIUMTEXT`, `CLOB`);
+anything else is rejected when the syncable config is submitted. `TEXT`
+and `VARCHAR` columns receive the payload byte-for-byte, preserving key
+order and number formatting exactly. Native JSON columns (`JSONB` in
+particular) normalize what they store — key order, duplicate keys, number
+formatting — so expect a semantically equal document back, not identical
+bytes.
+
 Configure an ingestable that pulls from an external source into the
 log (MySQL example; see `internal/cluster/ingestable/sql/postgres_ingestable.toml`
 for a Postgres logical-replication config):

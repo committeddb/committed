@@ -47,6 +47,9 @@ func (p *SyncableParser) ParseConfig(v *viper.Viper, storage cluster.DatabaseSto
 	if err := v.UnmarshalKey("sql.mappings", &mappings); err != nil {
 		return nil, fmt.Errorf("[sql.syncable-parser] parse sql.mappings: %w", err)
 	}
+	if err := validateMappings(mappings); err != nil {
+		return nil, fmt.Errorf("[sql.syncable-parser] %w", err)
+	}
 
 	var indexes []Index
 	if err := v.UnmarshalKey("sql.indexes", &indexes); err != nil {

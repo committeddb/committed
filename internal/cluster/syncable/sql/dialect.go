@@ -2,6 +2,8 @@ package sql
 
 import (
 	gosql "database/sql"
+	"fmt"
+	"strings"
 
 	"github.com/committeddb/committed/internal/cluster"
 )
@@ -46,6 +48,48 @@ type Mapping struct {
 	Column   string `mapstructure:"column"`
 	SQLType  string `mapstructure:"type"`
 	// TODO Add a concept of an optional mapping that doesn't error if it is missing
+}
+
+// wholePayloadPath is the jsonPath that maps the entire submitted document —
+// the raw payload bytes — into a single column, rather than extracting one
+// leaf value. It is the conventional event-log shape: a few scalar envelope
+// columns for indexing plus one payload column the read side folds.
+const wholePayloadPath = "$"
+
+// wholePayloadColumnTypes are the case-insensitive column-type prefixes a
+// whole-payload mapping may target. The raw document binds as a JSON string,
+// so the column must hold arbitrary text or native JSON ("JSON" also covers
+// JSONB). Anything else (INT, BOOLEAN, TIMESTAMP, …) would fail only at exec
+// time, with a driver bind error that Dialect.IsPermanent cannot classify —
+// leaving the sync worker retrying forever — so it is rejected at config
+// time instead.
+var wholePayloadColumnTypes = []string{
+	"JSON", "TEXT", "VARCHAR", "NVARCHAR", "CHAR", "LONGTEXT", "MEDIUMTEXT", "CLOB",
+}
+
+// validateMappings rejects mapping configurations that could otherwise fail
+// only at exec time. Sole rule today: a whole-payload ("$") mapping must
+// target a column type that can hold the raw JSON document.
+func validateMappings(mappings []Mapping) error {
+	for _, m := range mappings {
+		if m.JsonPath != wholePayloadPath {
+			continue
+		}
+		sqlType := strings.ToUpper(strings.TrimSpace(m.SQLType))
+		allowed := false
+		for _, prefix := range wholePayloadColumnTypes {
+			if strings.HasPrefix(sqlType, prefix) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return fmt.Errorf(
+				"whole-payload mapping for column %q: jsonPath %q binds the entire payload as JSON text and requires a JSON or text column type (JSONB, JSON, TEXT, VARCHAR, …); got %q",
+				m.Column, wholePayloadPath, m.SQLType)
+		}
+	}
+	return nil
 }
 
 type Config struct {

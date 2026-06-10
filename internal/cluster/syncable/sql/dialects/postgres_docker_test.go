@@ -4,6 +4,7 @@ package dialects_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 
+	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/syncable/sql"
 	"github.com/committeddb/committed/internal/cluster/syncable/sql/dialects"
 
@@ -317,4 +319,112 @@ func TestPostgreSQLIntegration_FullSyncableFlow(t *testing.T) {
 	err = db.QueryRow("SELECT value FROM "+table+" WHERE pk = $1", "a").Scan(&aValue)
 	require.Nil(t, err)
 	require.Equal(t, "3", aValue)
+}
+
+// --- Whole-payload ("$") mappings ---
+
+var eventType = &cluster.Type{ID: "controlplane-event"}
+
+// wholePayloadConfig is the event-log read-model shape the "$" mapping
+// exists for: a scalar envelope column for indexing plus the entire payload
+// document in one column of payloadType.
+func wholePayloadConfig(table, payloadType string) *sql.Config {
+	return &sql.Config{
+		Topic: eventType.ID,
+		Table: table,
+		Mappings: []sql.Mapping{
+			{JsonPath: "$.event_id", Column: "event_id", SQLType: "VARCHAR(64)"},
+			{JsonPath: "$", Column: "payload", SQLType: payloadType},
+		},
+		PrimaryKey: "event_id",
+	}
+}
+
+// decodeJSONSemantic parses with UseNumber so numbers compare by their exact
+// digits rather than as float64 — the comparison must not hide the precision
+// loss the raw-bytes binding exists to prevent.
+func decodeJSONSemantic(t *testing.T, s string) any {
+	t.Helper()
+	dec := json.NewDecoder(strings.NewReader(s))
+	dec.UseNumber()
+	var v any
+	require.Nil(t, dec.Decode(&v))
+	return v
+}
+
+func syncOne(t *testing.T, syncable *sql.Syncable, key, raw string) {
+	t.Helper()
+	ss, err := syncable.Sync(context.Background(), &cluster.Actual{Entities: []*cluster.Entity{
+		cluster.NewUpsertEntity(eventType, []byte(key), []byte(raw)),
+	}})
+	require.Nil(t, err)
+	require.Equal(t, cluster.ShouldSnapshot(true), ss)
+}
+
+// TestPostgreSQLIntegration_WholePayloadJSONB drives the full Syncable with a
+// mixed manifest — scalar envelope column plus "$" whole-payload JSONB column
+// — against real Postgres. JSONB normalizes key order, duplicate keys, and
+// number formatting, so the contract is semantic JSON equality, asserted with
+// UseNumber so the integer above 2^53 still has to survive digit-for-digit.
+func TestPostgreSQLIntegration_WholePayloadJSONB(t *testing.T) {
+	d := &dialects.PostgreSQLDialect{}
+	db, err := sql.NewDB(d, pgConnString)
+	require.Nil(t, err)
+	defer db.Close()
+
+	table := uniqueTable(t)
+	defer dropTable(t, table)
+
+	syncable := sql.New(db, wholePayloadConfig(table, "JSONB"))
+	require.Nil(t, syncable.Init())
+	defer syncable.Close()
+
+	raw := `{"event_id":"evt-1","zfirst":true,"big":9007199254740993,"nested":{"b":2,"a":1}}`
+	syncOne(t, syncable, "evt-1", raw)
+
+	var eventID, payload string
+	require.Nil(t, db.DB.QueryRow(
+		"SELECT event_id, payload::text FROM "+table+" WHERE event_id = $1", "evt-1",
+	).Scan(&eventID, &payload))
+	require.Equal(t, "evt-1", eventID)
+	require.Equal(t, decodeJSONSemantic(t, raw), decodeJSONSemantic(t, payload))
+
+	// A second Actual with the same event_id upserts: the payload column is
+	// replaced, not duplicated.
+	updated := `{"event_id":"evt-1","zfirst":false,"big":9007199254740995}`
+	syncOne(t, syncable, "evt-1", updated)
+
+	var count int
+	require.Nil(t, db.DB.QueryRow("SELECT COUNT(*) FROM "+table).Scan(&count))
+	require.Equal(t, 1, count)
+	require.Nil(t, db.DB.QueryRow(
+		"SELECT payload::text FROM "+table+" WHERE event_id = $1", "evt-1",
+	).Scan(&payload))
+	require.Equal(t, decodeJSONSemantic(t, updated), decodeJSONSemantic(t, payload))
+}
+
+// TestPostgreSQLIntegration_WholePayloadTextByteExact: a TEXT column keeps
+// the document byte-for-byte as submitted — key order, formatting, and the
+// integer above 2^53 all intact (a float64 round trip would yield …992).
+func TestPostgreSQLIntegration_WholePayloadTextByteExact(t *testing.T) {
+	d := &dialects.PostgreSQLDialect{}
+	db, err := sql.NewDB(d, pgConnString)
+	require.Nil(t, err)
+	defer db.Close()
+
+	table := uniqueTable(t)
+	defer dropTable(t, table)
+
+	syncable := sql.New(db, wholePayloadConfig(table, "TEXT"))
+	require.Nil(t, syncable.Init())
+	defer syncable.Close()
+
+	raw := `{"event_id":"evt-1","big":9007199254740993,"keys":"in submitted order"}`
+	syncOne(t, syncable, "evt-1", raw)
+
+	var payload string
+	require.Nil(t, db.DB.QueryRow(
+		"SELECT payload FROM "+table+" WHERE event_id = $1", "evt-1",
+	).Scan(&payload))
+	require.Equal(t, raw, payload)
 }

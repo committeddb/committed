@@ -30,6 +30,13 @@ func New(d *DB, config *Config) *Syncable {
 }
 
 func (c *Syncable) Init() error {
+	// Re-validate even though ParseConfig already did: directly constructed
+	// configs (tests, future callers) must hit the same wall before any DDL
+	// reaches the destination database.
+	if err := validateMappings(c.config.Mappings); err != nil {
+		return err
+	}
+
 	ddlString := c.dialect.CreateDDL(c.config)
 	_, err := c.db.Exec(ddlString)
 	if err != nil {
@@ -178,6 +185,14 @@ func (c *Syncable) applyEntity(ctx context.Context, tx *sql.Tx, e *cluster.Entit
 
 	var values []any
 	for _, path := range c.insert.JsonPath {
+		// A whole-payload mapping binds the raw submitted bytes (already
+		// validated as JSON by the unmarshal above). Re-marshaling jsonData
+		// instead would round-trip numbers through float64 — corrupting
+		// integers above 2^53 — and lose key order and duplicate keys.
+		if path == wholePayloadPath {
+			values = append(values, string(e.Data))
+			continue
+		}
 		res, err := jsonpath.Get(path, jsonData)
 		if err != nil {
 			return cluster.Permanent(fmt.Errorf("jsonpath [%v]: %w", path, err))
