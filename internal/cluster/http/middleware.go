@@ -5,7 +5,9 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
+	"encoding/json"
 	httpgo "net/http"
+	"runtime/debug"
 	"strings"
 
 	"go.uber.org/zap"
@@ -66,6 +68,78 @@ func securityHeaders(next httpgo.Handler) httpgo.Handler {
 		h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 		h.Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
 		next.ServeHTTP(w, r)
+	})
+}
+
+// panicResponseWriter tracks whether the response has been started so
+// the recovery net knows if a sanitized 500 can still be written. A
+// Write without WriteHeader commits an implicit 200, so both mark it.
+type panicResponseWriter struct {
+	httpgo.ResponseWriter
+	wrote bool
+}
+
+func (w *panicResponseWriter) WriteHeader(status int) {
+	w.wrote = true
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *panicResponseWriter) Write(b []byte) (int, error) {
+	w.wrote = true
+	return w.ResponseWriter.Write(b)
+}
+
+// Unwrap lets http.ResponseController reach the underlying writer's
+// optional interfaces (Flusher, Hijacker, deadlines) through the wrapper.
+func (w *panicResponseWriter) Unwrap() httpgo.ResponseWriter { return w.ResponseWriter }
+
+// recoverPanic is the recovery net for the whole API surface: a panic in
+// any downstream middleware or handler becomes one Error-level log line
+// (with the request ID and the stack — captured here and only here,
+// server-side) plus a sanitized 500, instead of net/http's default of a
+// dropped connection with an unstructured stderr trace. If the handler
+// already started writing before panicking the headers are committed, so
+// it only logs rather than corrupt the in-flight response.
+// http.ErrAbortHandler re-panics: it is net/http's sentinel for a
+// deliberate abort, not a failure to report.
+func recoverPanic(next httpgo.Handler) httpgo.Handler {
+	return httpgo.HandlerFunc(func(w httpgo.ResponseWriter, r *httpgo.Request) {
+		pw := &panicResponseWriter{ResponseWriter: w}
+		defer func() {
+			v := recover()
+			if v == nil {
+				return
+			}
+			if v == httpgo.ErrAbortHandler { //nolint:errorlint // sentinel panic value, compared as such (stdlib/chi convention)
+				panic(v)
+			}
+
+			zap.L().Error("http handler panic",
+				zap.String("request_id", GetRequestID(r.Context())),
+				zap.String("method", r.Method),
+				zap.String("path", r.URL.Path),
+				zap.Any("panic", v),
+				zap.ByteString("stack", debug.Stack()),
+			)
+
+			if pw.wrote {
+				return
+			}
+
+			// The ErrorResponse shape of writeInternalError, written
+			// directly: that helper logs its own Error line and the
+			// panic is already logged above with more context.
+			bs, err := json.Marshal(ErrorResponse{Code: "internal_error", Message: "internal server error"})
+			if err != nil {
+				pw.WriteHeader(httpgo.StatusInternalServerError)
+				return
+			}
+			pw.Header().Set("Content-Type", "application/json")
+			pw.WriteHeader(httpgo.StatusInternalServerError)
+			_, _ = pw.Write(bs)
+		}()
+
+		next.ServeHTTP(pw, r)
 	})
 }
 

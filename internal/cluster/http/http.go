@@ -67,6 +67,9 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 
 	r.Use(securityHeaders)
 	r.Use(RequestID)
+	// After RequestID so the panic log carries the request ID; before
+	// bearerAuth and every handler so the net covers the whole surface.
+	r.Use(recoverPanic)
 
 	readIndexTimeout := o.readIndexTimeout
 	if readIndexTimeout <= 0 {
