@@ -84,14 +84,21 @@ func createDB(t *testing.T) *gosql.DB {
 // dialectpb.PostgresPosition.
 func isCommitPosition(t *testing.T, pos cluster.Position) bool {
 	t.Helper()
+	return positionLSN(pos) > 0
+}
+
+// positionLSN returns the LSN of a per-commit checkpoint position as a
+// WAL byte offset (comparable to pg_current_wal_lsn() - '0/0'), or 0
+// for snapshot-progress checkpoints and undecodable positions.
+func positionLSN(pos cluster.Position) uint64 {
 	if len(pos) < 2 || pos[0] != 0xff {
-		return false
+		return 0
 	}
 	pp := &dialectpb.PostgresPosition{}
 	if err := proto.Unmarshal(pos[1:], pp); err != nil {
-		return false
+		return 0
 	}
-	return pp.Lsn > 0
+	return pp.Lsn
 }
 
 // waitForSlot polls pg_stat_replication until the named slot is in
@@ -446,8 +453,13 @@ func TestPostgresTransactionGrouping(t *testing.T) {
 		}
 	}
 
-	// Insert 10 rows in a single transaction.
+	// Insert 10 rows in a single transaction. Capture the WAL position
+	// first: the commit's checkpoint must decode to an LSN past it,
+	// which is what distinguishes the transaction's own checkpoint from
+	// the sentinel commit's.
 	db = createDB(t)
+	var preCommitLSN int64
+	require.NoError(t, db.QueryRow(`SELECT (pg_current_wal_lsn() - '0/0')::bigint`).Scan(&preCommitLSN))
 	tx, err := db.Begin()
 	require.NoError(t, err)
 	for i := 0; i < 10; i++ {
@@ -458,16 +470,29 @@ func TestPostgresTransactionGrouping(t *testing.T) {
 	require.NoError(t, err)
 	db.Close()
 
-	// All 10 rows must arrive as a single proposal.
+	// All 10 rows must arrive as a single proposal, and the commit must
+	// checkpoint a position past preCommitLSN. One loop waits for both:
+	// select picks randomly among ready channels, so the earlier shape —
+	// drain-and-discard positions while waiting for the proposal, then
+	// wait for the position afterward — could discard the commit's
+	// checkpoint (the last position the dialect ever emits here) in the
+	// drain and time out on a channel nothing would ever send to again.
 	deadline = time.After(15 * time.Second)
 	var txProposal *cluster.Proposal
-	for txProposal == nil {
+	postCommitSeen := false
+	for txProposal == nil || !postCommitSeen {
 		select {
 		case p := <-proposalChan:
 			txProposal = p
-		case <-positionChan:
+		case pos := <-positionChan:
+			if positionLSN(pos) > uint64(preCommitLSN) {
+				postCommitSeen = true
+			}
 		case <-deadline:
-			t.Fatal("timed out waiting for transaction proposal")
+			if txProposal == nil {
+				t.Fatal("timed out waiting for transaction proposal")
+			}
+			t.Fatal("timed out waiting for post-commit position")
 		}
 	}
 
@@ -480,14 +505,6 @@ func TestPostgresTransactionGrouping(t *testing.T) {
 	}
 	for i := 0; i < 10; i++ {
 		require.True(t, keys[fmt.Sprintf("tx%d", i)], "missing key tx%d", i)
-	}
-
-	// A position must have been checkpointed.
-	select {
-	case pos := <-positionChan:
-		require.NotEmpty(t, pos, "expected a non-empty post-commit position")
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for post-commit position")
 	}
 }
 
