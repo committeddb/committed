@@ -500,10 +500,11 @@ func createCanal(config *sql.Config) (*canal.Canal, []string, error) {
 	// Dump config is intentionally omitted — the pure-SQL snapshot
 	// replaces canal's built-in mysqldump phase.
 	//
-	// Route canal's own logging through zap (see canalLogger) so MySQL
-	// CDC logs share the structured stream instead of going straight to
-	// stdout. The previous siddontang LevelError behavior is preserved
-	// by canalLogger's level policy.
+	// Route canal's own logging through zap (see canalSlogHandler) so
+	// MySQL CDC logs share the structured stream instead of going
+	// straight to stdout via slog's default handler. The historical
+	// keep-canal-quiet behavior is preserved by the handler's level
+	// policy (Info demotes to Debug).
 	cfg.Logger = newCanalLogger(zap.L())
 
 	canal, err := canal.NewCanal(cfg)
