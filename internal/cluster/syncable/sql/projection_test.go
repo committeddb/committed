@@ -23,7 +23,7 @@ var tenantEventType = &cluster.Type{ID: "controlplane-event", Name: "Controlplan
 
 // tenantProjectionConfig is the hosted tenant-lifecycle shape from the
 // ticket: created sets tier+pending, provisioned sets active+allocs,
-// deprovisioned sets deprovisioning.
+// deprovisioned sets deprovisioning and clears allocs to SQL NULL.
 func tenantProjectionConfig() *sql.ProjectionConfig {
 	return &sql.ProjectionConfig{
 		Topic:      "controlplane-event",
@@ -54,6 +54,7 @@ func tenantProjectionConfig() *sql.ProjectionConfig {
 				When: []sql.WhenClause{{Path: "$.event_type", Equals: "tenant.deprovisioned"}},
 				Set: []sql.ProjectionSet{
 					{Column: "state", Value: "deprovisioning"},
+					{Column: "allocs", Null: true},
 				},
 			},
 		},
@@ -128,6 +129,24 @@ func TestProjectionSyncAppliesMatchingRule(t *testing.T) {
 	}))
 	require.NoError(t, err)
 	require.Equal(t, cluster.ShouldSnapshot(true), ss)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// A null set entry binds SQL NULL — the only way to clear a column,
+// since TOML has no null literal for value and a missing from path on
+// a matched rule is a permanent error, not NULL.
+func TestProjectionNullSetBindsSQLNull(t *testing.T) {
+	projection, mock, rules, _ := newMockProjection(t, tenantProjectionConfig(), nil)
+
+	mock.ExpectBegin()
+	args := []driver.Value{"t1", "deprovisioning", nil}
+	rules[2].ExpectExec().WithArgs(append(args, args...)...).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	_, err := projection.Sync(context.Background(), eventActual(t, "t1", map[string]any{
+		"tenant_id": "t1", "event_type": "tenant.deprovisioned",
+	}))
+	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -410,10 +429,24 @@ func TestProjectionLifecycleGoMySQLServer(t *testing.T) {
 			require.NoError(t, err)
 		}
 	}
-	replay()
+
+	// First pass runs event by event so the mid-lifecycle state is
+	// observable: provisioned lands the allocs document, then
+	// deprovisioned's null set entry clears it back to NULL — proving
+	// the final NULL is a clear, not a never-written column.
+	for _, a := range lifecycle[:3] {
+		_, err := projection.Sync(ctx, a)
+		require.NoError(t, err)
+	}
+	require.Equal(t, map[string]any{"cpu": float64(4)}, readTenants(t, db)["t1"].Allocs,
+		"allocs set by tenant.provisioned")
+	for _, a := range lifecycle[3:] {
+		_, err := projection.Sync(ctx, a)
+		require.NoError(t, err)
+	}
 
 	want := map[string]tenantRow{
-		"t1": {Tier: "dev", State: "deprovisioning", Allocs: map[string]any{"cpu": float64(4)}},
+		"t1": {Tier: "dev", State: "deprovisioning"},
 		"t2": {Tier: "prod", State: "pending"},
 	}
 	require.Equal(t, want, readTenants(t, db), "fold result after first pass")

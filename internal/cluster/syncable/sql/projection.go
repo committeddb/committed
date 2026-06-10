@@ -37,15 +37,19 @@ type WhenClause struct {
 }
 
 // ProjectionSet is one column write of a matched rule. Exactly one of
-// From (a jsonpath into the event payload) or Value (a literal) must
-// be set. Writes are absolute — never relative to the current row —
-// which is what makes redelivery converge: delivery is at-least-once
-// and idempotent re-apply is the recovery mechanism, so aggregations
-// (col = col + 1) are a correctness boundary, not a missing feature.
+// From (a jsonpath into the event payload), Value (a literal), or Null
+// (write SQL NULL) must be set. Null is a flag rather than a Value
+// literal because TOML has no null — `value = null` cannot be written,
+// so clearing a column gets its own form. Writes are absolute — never
+// relative to the current row — which is what makes redelivery
+// converge: delivery is at-least-once and idempotent re-apply is the
+// recovery mechanism, so aggregations (col = col + 1) are a
+// correctness boundary, not a missing feature.
 type ProjectionSet struct {
 	Column string `mapstructure:"column"`
 	From   string `mapstructure:"from"`
 	Value  any    `mapstructure:"value"`
+	Null   bool   `mapstructure:"null"`
 }
 
 // ProjectionRule fires when all of its When clauses hold, upserting
@@ -178,8 +182,14 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 			if s.Column == c.PrimaryKey {
 				return fmt.Errorf("rule %d may not set the primary-key column %q (the key binds from keyPath)", i+1, s.Column)
 			}
-			if (s.From != "") == (s.Value != nil) {
-				return fmt.Errorf("rule %d column %q: exactly one of from or value is required", i+1, s.Column)
+			forms := 0
+			for _, set := range []bool{s.From != "", s.Value != nil, s.Null} {
+				if set {
+					forms++
+				}
+			}
+			if forms != 1 {
+				return fmt.Errorf("rule %d column %q: exactly one of from, value, or null is required", i+1, s.Column)
 			}
 			if s.Value != nil && !isScalar(s.Value) {
 				return fmt.Errorf("rule %d column %q: value must be a scalar literal, got %T", i+1, s.Column, s.Value)
@@ -402,15 +412,18 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, e *cluster.E
 		values := make([]any, 0, len(r.rule.Set)+1)
 		values = append(values, key)
 		for _, s := range r.rule.Set {
-			if s.From != "" {
+			switch {
+			case s.From != "":
 				v, err := jsonpath.Get(s.From, jsonData)
 				if err != nil {
 					return cluster.Permanent(fmt.Errorf("[sql-projection.apply] jsonpath [%s]: %w", s.From, err))
 				}
 				values = append(values, bindable(v))
-				continue
+			case s.Null:
+				values = append(values, nil)
+			default:
+				values = append(values, s.Value)
 			}
-			values = append(values, s.Value)
 		}
 		args := p.dialect.BindArgs(values)
 		if _, err := tx.StmtContext(ctx, r.Stmt).ExecContext(ctx, args...); err != nil {

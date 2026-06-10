@@ -56,6 +56,13 @@ set  = [
   { column = "state",  value = "active" },
   { column = "allocs", from  = "$.allocs" },
 ]
+
+[[sql-projection.rules]]
+when = [ { path = "$.event_type", equals = "tenant.deprovisioned" } ]
+set  = [
+  { column = "state",  value = "deprovisioning" },
+  { column = "allocs", null  = true },
+]
 `
 
 func projectionStorage() *TestDatabaseStorage {
@@ -94,6 +101,13 @@ func TestParseProjectionConfig(t *testing.T) {
 			Set: []sql.ProjectionSet{
 				{Column: "state", Value: "active"},
 				{Column: "allocs", From: "$.allocs"},
+			},
+		},
+		{
+			When: []sql.WhenClause{{Path: "$.event_type", Equals: "tenant.deprovisioned"}},
+			Set: []sql.ProjectionSet{
+				{Column: "state", Value: "deprovisioning"},
+				{Column: "allocs", Null: true},
 			},
 		},
 	}, config.Rules)
@@ -166,12 +180,22 @@ type = "TEXT"
 		{
 			"both from and value",
 			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\" } ]\nset = [ { column = \"v\", from = \"$.v\", value = \"y\" } ]",
-			"exactly one of from or value",
+			"exactly one of from, value, or null",
 		},
 		{
-			"neither from nor value",
+			"neither from nor value nor null",
 			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\" } ]\nset = [ { column = \"v\" } ]",
-			"exactly one of from or value",
+			"exactly one of from, value, or null",
+		},
+		{
+			"both value and null",
+			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\" } ]\nset = [ { column = \"v\", value = \"y\", null = true } ]",
+			"exactly one of from, value, or null",
+		},
+		{
+			"both from and null",
+			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\" } ]\nset = [ { column = \"v\", from = \"$.v\", null = true } ]",
+			"exactly one of from, value, or null",
 		},
 		{
 			"unknown column",

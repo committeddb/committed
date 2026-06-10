@@ -309,6 +309,10 @@ type = "VARCHAR(32)"
 name = "state"
 type = "VARCHAR(32)"
 
+[[sql-projection.columns]]
+name = "allocs"
+type = "JSONB"
+
 [[sql-projection.rules]]
 when = [ { path = "$.event_type", equals = "tenant.created" } ]
 set  = [
@@ -321,7 +325,17 @@ when = [
   { path = "$.event_type", equals = "tenant.provisioned" },
   { path = "$.tier",       equals = "prod" },
 ]
-set  = [ { column = "state", value = "active" } ]
+set  = [
+  { column = "state",  value = "active" },
+  { column = "allocs", from  = "$.allocs" },
+]
+
+[[sql-projection.rules]]
+when = [ { path = "$.event_type", equals = "tenant.deprovisioned" } ]
+set  = [
+  { column = "state",  value = "deprovisioning" },
+  { column = "allocs", null  = true },
+]
 ```
 
 Rule semantics:
@@ -339,12 +353,13 @@ Rule semantics:
   `committed_sync_rules_unmatched` counter ticks — the signal that a
   new event variant shipped without a rule.
 - **Writes are absolute** (`from` extracts from the payload, `value`
-  is a literal — exactly one per `set` entry). Delivery is
-  at-least-once and idempotent re-apply is the recovery mechanism,
-  which is why there are no aggregations (`col = col + 1` would
-  corrupt on redelivery).
-- **Errors fail fast**: config misuse (unknown column, both/neither of
-  `from`/`value`, a rule setting the primary key, a rule without a
+  is a literal, `null = true` writes SQL NULL — exactly one per `set`
+  entry; the flag form exists because TOML has no null literal).
+  Delivery is at-least-once and idempotent re-apply is the recovery
+  mechanism, which is why there are no aggregations (`col = col + 1`
+  would corrupt on redelivery).
+- **Errors fail fast**: config misuse (unknown column, not exactly one
+  of `from`/`value`/`null`, a rule setting the primary key, a rule without a
   `when`) is rejected at config time; a *matched* rule whose `from`
   path is missing — or a matched event with no value at `keyPath` —
   dead-letters as a permanent error rather than wedging the worker.

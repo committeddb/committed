@@ -433,10 +433,10 @@ paths:
         the whole-payload `"$"` event-log shape), `sql-projection`
         (rule-driven fold into one row per entity — current-state
         tables; see README § SQL projections), or `http` (webhook).
-        For `sql-projection`, all rule misuse (a `set` entry with both
-        or neither of `from`/`value`, an unknown column, a rule without
-        a `when`, a rule setting the primary-key column) fails here
-        with 400.
+        For `sql-projection`, all rule misuse (a `set` entry without
+        exactly one of `from`/`value`/`null`, an unknown column, a rule
+        without a `when`, a rule setting the primary-key column) fails
+        here with 400.
       operationId: addSyncable
       parameters:
         - $ref: '#/components/parameters/ResourceId'
