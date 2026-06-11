@@ -29,6 +29,50 @@ docker/build:
 	  --build-arg BUILD_DATE=$(DATE) \
 	  -t $(IMAGE) .
 
+# Release push to Docker Hub. This target exists because the supply
+# chain attestations were forgotten on two releases in a row when the
+# push was done by hand: a plain `docker push` ships neither SLSA
+# provenance nor an SBOM, and nothing on Docker Hub fails loudly when
+# they're absent. The flags live here so the only command anyone needs
+# to remember is `make docker/release` from a checkout of the release
+# tag.
+#
+# --provenance=mode=max attaches full SLSA provenance (source repo,
+# build args, materials); --sbom=true attaches a Syft-generated SBOM.
+# Both ride along in the pushed image index as attestation manifests
+# (the unknown/unknown entries Hub displays). Multi-platform builds and
+# attestation manifests require a container-driver builder, not the
+# default docker driver — override BUILDX_BUILDER if yours is named
+# differently (`docker buildx create --driver docker-container`).
+#
+# Hub tags drop the leading v (git v0.6-beta → hub 0.6-beta), and
+# :latest is retagged to every release. The guard refuses to push when
+# VERSION isn't an exact clean tag — `git describe` appends -g<sha> on
+# untagged commits and -dirty on modified trees — so a release can't be
+# cut from main-after-tag by accident.
+REPO ?= committeddb/committed
+BUILDX_BUILDER ?= multiarch
+RELEASE_PLATFORMS ?= linux/amd64,linux/arm64
+HUB_TAG = $(patsubst v%,%,$(VERSION))
+
+docker/release:
+	@case "$(VERSION)" in \
+	  dev|*-dirty|*-g[0-9a-f]*) \
+	    echo "VERSION=$(VERSION) is not a clean release tag; check out the tag first"; \
+	    exit 1;; \
+	esac
+	docker buildx build \
+	  --builder $(BUILDX_BUILDER) \
+	  --platform $(RELEASE_PLATFORMS) \
+	  --provenance=mode=max \
+	  --sbom=true \
+	  --build-arg VERSION=$(VERSION) \
+	  --build-arg COMMIT=$(COMMIT) \
+	  --build-arg BUILD_DATE=$(DATE) \
+	  -t $(REPO):$(HUB_TAG) \
+	  -t $(REPO):latest \
+	  --push .
+
 test:
 	go test -short ./... -cover
 
