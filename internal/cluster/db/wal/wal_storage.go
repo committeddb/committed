@@ -203,8 +203,19 @@ type Storage struct {
 	// highest Scrub upper-bound this node has finished rewriting to). Loaded in
 	// Open, advanced by the worker; read by the automatic-scrub scheduler.
 	lastScrubbedBound atomic.Uint64
-	StateLog          *wal.Log // Should we get rid of this and store the latest state in the bbolt db?
-	keyValueStorage   *bolt.DB
+	// StateLog persists raft's HardState and snapshot. Records are written
+	// only when the state actually changes, and appendState truncates behind
+	// the newest Snapshot + HardState records, so the log holds a handful of
+	// records, not history (see appendState).
+	//
+	// Deliberately NOT in bbolt: bbolt holds replicated state and
+	// RestoreSnapshot swaps the whole file for the leader's copy, while the
+	// hard state is node-LOCAL — letting a snapshot install replace this
+	// node's term/vote could make it vote twice in one term. The snapshot
+	// record's Data is itself the serialized bbolt file, which would make
+	// storing it there circular besides.
+	StateLog        *wal.Log
+	keyValueStorage *bolt.DB
 	// kvMu guards swaps of keyValueStorage (RestoreSnapshot replaces the
 	// bbolt handle wholesale: close → rename file → reopen → reassign).
 	// Every bbolt transaction routes through view / update, which take
@@ -256,10 +267,36 @@ type Storage struct {
 	// single, invariant responsibility.
 	compactedUpTo atomic.Uint64
 	stateIndex    uint64
-	databases     map[string]cluster.Database
-	parser        db.Parser
-	sync          chan<- *db.SyncableWithID
-	ingest        chan<- *db.IngestableWithID
+	// snapDirty marks that s.snapshot changed — a CreateSnapshot, an adopted
+	// InstallSnapshot, or a ConfState update — since the last Snapshot record
+	// was appended to the state log. Save consumes it: the snapshot is
+	// persisted only when dirty, NOT on every Ready. Persisting it per Ready
+	// is the write-amplification bug that filled disks: each record carries
+	// the entire serialized bbolt database, and message-only Readys
+	// (heartbeats, pre-vote rounds) fire constantly. Guarded by snapMu like
+	// the snapshot it describes.
+	snapDirty bool
+	// lastSnapSeq / lastHardStateSeq are the state-log seqs of the newest
+	// Snapshot record and the newest non-empty HardState record. Recovery
+	// (getLastStates) only ever needs those two records, so appendState
+	// truncates the log to the older of the two after each write — the state
+	// log stays a handful of records instead of growing forever. Mutated only
+	// from the raft serveChannels goroutine (via Save) and Open, like
+	// stateIndex.
+	lastSnapSeq      uint64
+	lastHardStateSeq uint64
+	// hardStateBytesSinceSnap accumulates the bytes of HardState records
+	// written since lastSnapSeq. When they outgrow one snapshot record
+	// (lastSnapBytes, floored at stateLogReanchorFloor), appendState
+	// re-appends the snapshot at the tail so the truncation cut can advance
+	// past the aging snapshot record — bounding the log at ~2 snapshot
+	// copies even when compaction (the usual snapshot refresher) is disabled.
+	hardStateBytesSinceSnap int
+	lastSnapBytes           int
+	databases               map[string]cluster.Database
+	parser                  db.Parser
+	sync                    chan<- *db.SyncableWithID
+	ingest                  chan<- *db.IngestableWithID
 
 	// configErrMu guards configErrors. configErrors records, per
 	// "kind/id" (e.g. "database/orders"), the most recent failure to
@@ -461,6 +498,19 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	ws.hardState = *st
 	ws.snapshot = *snap
 
+	// Rewrite the recovered state as fresh records at the state-log tail,
+	// then truncate everything older (appendState does both). Recovery above
+	// only ever uses the newest Snapshot and the newest non-empty HardState
+	// record, so the rest of the log is dead weight — and on data dirs
+	// written by the pre-truncation code (which appended the full snapshot on
+	// every Ready) it can be tens of GB. One snapshot-sized write per boot
+	// buys the reclaim.
+	if ws.stateIndex > 0 {
+		if err := ws.appendState(ws.hardState, ws.snapshot, !raft.IsEmptyHardState(ws.hardState), true); err != nil {
+			return nil, fmt.Errorf("compact state log: %w", err)
+		}
+	}
+
 	// Fail fast if any persisted config templates a secret env var this
 	// node is missing, before opening database connections or spawning
 	// workers below. See validateConfigSecrets for why missing secrets
@@ -616,11 +666,21 @@ func (s *Storage) getLastStates(li uint64) (*pb.HardState, *pb.Snapshot, error) 
 			}
 
 			if e.Type == HardState && !stDone {
-				err = st.Unmarshal(e.Data)
-				if err != nil {
+				var hs pb.HardState
+				if err := hs.Unmarshal(e.Data); err != nil {
 					return nil, nil, err
 				}
-				stDone = true
+				// Skip empty records: raft hands Save an empty HardState on
+				// every Ready where it didn't change, and the code before
+				// the per-Ready write fix persisted those as-is — so on a
+				// legacy log the newest HardState record is usually empty
+				// and the real term/vote lives further back. Adopting the
+				// empty one would restart the node at Term 0 (taking the
+				// StartNode bootstrap path) and forget its vote.
+				if !raft.IsEmptyHardState(hs) {
+					*st = hs
+					stDone = true
+				}
 			} else if e.Type == Snapshot && !snapDone {
 				err = snap.Unmarshal(e.Data)
 				if err != nil {
@@ -640,9 +700,9 @@ func (s *Storage) getLastStates(li uint64) (*pb.HardState, *pb.Snapshot, error) 
 
 // ConfState records the ConfState most recently produced by
 // raft.Node.ApplyConfChange into the storage's in-memory snapshot
-// metadata. The next Save call persists the snapshot (with this
-// ConfState) to the state log via appendState, so InitialState returns
-// the correct voter set on restart.
+// metadata. Marking the snapshot dirty makes the next Save call persist
+// it (with this ConfState) to the state log via appendState, so
+// InitialState returns the correct voter set on restart.
 //
 // Called by the raft Ready loop from raft.go after each EntryConfChange
 // apply. This is the write half of the "conf state must survive across
@@ -652,6 +712,7 @@ func (s *Storage) ConfState(c *pb.ConfState) {
 	s.snapMu.Lock()
 	defer s.snapMu.Unlock()
 	s.snapshot.Metadata.ConfState = *c
+	s.snapDirty = true
 }
 
 // Save persists raft state and entries durably. It does NOT apply entities
@@ -661,30 +722,42 @@ func (s *Storage) ConfState(c *pb.ConfState) {
 // which on a multi-node follower may include uncommitted entries; applying
 // them to bucket state before commit would diverge the cluster.
 //
-// Empty-snapshot handling: raft's Ready loop hands Save an empty snap
-// on every iteration except when a new InstallSnapshot is being
-// processed. Overwriting s.snapshot with the empty value each time
-// would destroy the ConfState that the conf-change apply path wrote via
-// (*Storage).ConfState, which breaks raft.RestartNode's voter-set
-// recovery. We only adopt the Ready-supplied snap when it's non-empty
-// (i.e. a real InstallSnapshot). In all other cases s.snapshot keeps
-// whatever ConfState the conf-change path set — and the subsequent
-// appendState call persists that snapshot (metadata, including
-// ConfState) to the state log.
+// Empty-value handling: per the etcd raft contract, rd.HardState and
+// rd.Snapshot are EMPTY on every Ready where they didn't change — which is
+// most of them (message-only Readys for heartbeats and elections carry
+// neither). Neither empty value is adopted or persisted. Adopting an empty
+// snap would destroy the ConfState that the conf-change apply path wrote via
+// (*Storage).ConfState, which breaks raft.RestartNode's voter-set recovery;
+// adopting an empty HardState would zero the in-memory term/vote, and
+// persisting it would shadow the real record on recovery (see
+// getLastStates). The snapshot is persisted only when snapDirty says it
+// actually changed, so an unchanged-state Ready writes nothing at all —
+// persisting the full snapshot (the entire serialized bbolt database) on
+// every Ready is the write amplification that could fill a disk in hours
+// under a crash loop.
 func (s *Storage) Save(st pb.HardState, ents []pb.Entry, snap pb.Snapshot) error {
 	s.snapMu.Lock()
-	s.hardState = st
+	if !raft.IsEmptyHardState(st) {
+		s.hardState = st
+	}
 	if !raft.IsEmptySnap(snap) {
 		s.snapshot = snap
+		s.snapDirty = true
 	}
+	hardCopy := s.hardState
 	snapCopy := s.snapshot
+	snapDirty := s.snapDirty
+	// Consumed here rather than after the write: a failed appendState stops
+	// the node (see the Save error policy in raft.go's Ready loop), so
+	// clearing early can't lose a snapshot.
+	s.snapDirty = false
 	s.snapMu.Unlock()
 
 	if err := s.appendEntries(ents); err != nil {
 		return fmt.Errorf("[wal.storage] appendEntries: %w", err)
 	}
 
-	if err := s.appendState(st, snapCopy); err != nil {
+	if err := s.appendState(hardCopy, snapCopy, !raft.IsEmptyHardState(st), snapDirty); err != nil {
 		return fmt.Errorf("[wal.storage] appendState: %w", err)
 	}
 
@@ -1090,35 +1163,103 @@ func (s *Storage) appendEntries(ents []pb.Entry) error {
 	return nil
 }
 
-func (s *Storage) appendState(st pb.HardState, snap pb.Snapshot) error {
-	var ss []State
-	stData, err := st.Marshal()
-	if err != nil {
-		return err
-	}
-	ss = append(ss, State{Type: HardState, Data: stData})
+// stateLogReanchorFloor floors the re-anchor threshold in appendState so a
+// small snapshot doesn't get re-appended every few HardState records. A var,
+// not a const, only so tests can lower it to exercise re-anchoring without
+// writing 64KB of records.
+var stateLogReanchorFloor = 64 * 1024
 
-	snapData, err := snap.Marshal()
-	if err != nil {
-		return err
+// appendState persists raft state to the state log and truncates the log so
+// it stays bounded. cur and snap are the CURRENT in-memory hard state and
+// snapshot; hardChanged / snapChanged say whether this Ready actually changed
+// them. Each is written only on change — recovery (getLastStates) needs only
+// the newest Snapshot and the newest non-empty HardState record, and
+// everything older than the older of those two is truncated away after the
+// write. An unchanged-state call writes nothing.
+//
+// Two refinements keep the truncation cut moving:
+//
+//   - Writing the snapshot only on change lets HardState records pile up
+//     behind an aging Snapshot record (the cut can't pass it). Once they
+//     outgrow one snapshot copy, the snapshot is re-appended at the tail to
+//     advance the cut — at most one extra snapshot write per snapshot-size
+//     of hard-state churn, which matters when compaction (the usual
+//     hourly snapshot refresher) is disabled.
+//   - Symmetrically, a snapshot write re-appends the current hard state so
+//     an old HardState record doesn't pin the cut the same way.
+//
+// The Snapshot record is written before the HardState record, matching the
+// raft Ready contract's persist-the-snapshot-first ordering.
+func (s *Storage) appendState(cur pb.HardState, snap pb.Snapshot, hardChanged, snapChanged bool) error {
+	writeSnap := snapChanged
+	if !writeSnap && hardChanged && s.lastSnapSeq > 0 &&
+		s.hardStateBytesSinceSnap > max(s.lastSnapBytes, stateLogReanchorFloor) {
+		writeSnap = true
 	}
-	ss = append(ss, State{Type: Snapshot, Data: snapData})
+	writeHard := hardChanged || (writeSnap && !raft.IsEmptyHardState(cur))
 
-	for _, e := range ss {
-		var buf bytes.Buffer
-		enc := gob.NewEncoder(&buf)
-		if err := enc.Encode(e); err != nil {
+	if !writeSnap && !writeHard {
+		return nil
+	}
+
+	if writeSnap {
+		data, err := snap.Marshal()
+		if err != nil {
 			return err
 		}
-
-		s.stateIndex++
-		err = s.StateLog.Write(s.stateIndex, frame(buf.Bytes()))
+		n, err := s.writeStateRecord(Snapshot, data)
 		if err != nil {
-			return fmt.Errorf("position %d: %w", s.stateIndex, err)
+			return err
+		}
+		s.lastSnapSeq = s.stateIndex
+		s.lastSnapBytes = n
+		s.hardStateBytesSinceSnap = 0
+	}
+
+	if writeHard {
+		data, err := cur.Marshal()
+		if err != nil {
+			return err
+		}
+		n, err := s.writeStateRecord(HardState, data)
+		if err != nil {
+			return err
+		}
+		s.lastHardStateSeq = s.stateIndex
+		s.hardStateBytesSinceSnap += n
+	}
+
+	cut := s.lastSnapSeq
+	if s.lastHardStateSeq > 0 && (cut == 0 || s.lastHardStateSeq < cut) {
+		cut = s.lastHardStateSeq
+	}
+	if cut > 0 {
+		fi, err := s.StateLog.FirstIndex()
+		if err == nil && fi > 0 && fi < cut {
+			// Best-effort: a failed truncation costs disk, not correctness —
+			// the records we just wrote are durable either way.
+			if err := s.StateLog.TruncateFront(cut); err != nil {
+				s.logger.Warn("truncate state log", zap.Uint64("cut", cut), zap.Error(err))
+			}
 		}
 	}
 
 	return nil
+}
+
+func (s *Storage) writeStateRecord(typ StateType, data []byte) (int, error) {
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	if err := enc.Encode(State{Type: typ, Data: data}); err != nil {
+		return 0, err
+	}
+
+	framed := frame(buf.Bytes())
+	s.stateIndex++
+	if err := s.StateLog.Write(s.stateIndex, framed); err != nil {
+		return 0, fmt.Errorf("position %d: %w", s.stateIndex, err)
+	}
+	return len(framed), nil
 }
 
 // InitialState returns the saved HardState and ConfState information.

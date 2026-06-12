@@ -69,6 +69,9 @@ func (s *Storage) CreateSnapshot(index uint64, confState *pb.ConfState) (pb.Snap
 		},
 	}
 	s.snapshot = snap
+	// Dirty so the next Save persists the new snapshot to the state log —
+	// Save only writes the snapshot on change, never per Ready.
+	s.snapDirty = true
 	return snap, nil
 }
 

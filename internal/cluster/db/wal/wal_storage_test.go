@@ -505,16 +505,28 @@ func TestStorageAppend(t *testing.T) {
 // }
 
 func TestStateStorage(t *testing.T) {
-	tests := []struct {
-		st   pb.HardState
-		snap pb.Snapshot
-	}{
-		{st: defaultHardState, snap: defaultSnap},
-		{st: pb.HardState{
+	// Per the etcd raft contract, an empty HardState / snapshot means
+	// "unchanged" — Save must not persist either, so an unchanged-state
+	// Ready (a heartbeat, a pre-vote round) writes nothing at all.
+	t.Run("unchanged state writes no records", func(t *testing.T) {
+		s := NewStorage(t, nil)
+		defer s.Cleanup()
+		require.NoError(t, s.Save(defaultHardState, nil, defaultSnap))
+
+		li, err := s.StateLog.LastIndex()
+		require.NoError(t, err)
+		require.Zero(t, li)
+	})
+
+	// A changed state is persisted as a Snapshot record followed by a
+	// HardState record (snapshot first, per the raft persistence contract).
+	t.Run("changed state writes snapshot then hard state", func(t *testing.T) {
+		st := pb.HardState{
 			Term:   1,
 			Vote:   1,
 			Commit: 1,
-		}, snap: pb.Snapshot{
+		}
+		snap := pb.Snapshot{
 			Data: []byte("Foo"),
 			Metadata: pb.SnapshotMetadata{
 				ConfState: pb.ConfState{
@@ -527,29 +539,24 @@ func TestStateStorage(t *testing.T) {
 				Index: 1,
 				Term:  1,
 			},
-		}},
-	}
+		}
 
-	for _, tt := range tests {
-		t.Run("", func(t *testing.T) {
-			s := NewStorage(t, nil)
-			defer s.Cleanup()
-			err := s.Save(tt.st, nil, tt.snap)
-			require.Equal(t, nil, err)
+		s := NewStorage(t, nil)
+		defer s.Cleanup()
+		require.NoError(t, s.Save(st, nil, snap))
 
-			stb, err := tt.st.Marshal()
-			require.Equal(t, nil, err)
+		stb, err := st.Marshal()
+		require.NoError(t, err)
 
-			snapb, err := tt.snap.Marshal()
-			require.Equal(t, nil, err)
+		snapb, err := snap.Marshal()
+		require.NoError(t, err)
 
-			states := []wal.State{
-				{Type: wal.HardState, Data: stb},
-				{Type: wal.Snapshot, Data: snapb},
-			}
-			require.Equal(t, states, s.states(t))
-		})
-	}
+		states := []wal.State{
+			{Type: wal.Snapshot, Data: snapb},
+			{Type: wal.HardState, Data: stb},
+		}
+		require.Equal(t, states, s.states(t))
+	})
 }
 
 func TestStartupWithExistingLogs(t *testing.T) {

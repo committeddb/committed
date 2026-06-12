@@ -129,6 +129,23 @@ func TombstoneKey(typeID string, key []byte) string {
 	return string(tombstoneKey(typeID, key))
 }
 
+// Frame applies the per-entry checksum frame, so tests can forge
+// legacy-format state-log records directly on disk (the pre-truncation code
+// appended a HardState + full-snapshot record pair on every Ready; recovery
+// and Open-time reclaim of such logs need coverage).
+func Frame(payload []byte) []byte {
+	return frame(payload)
+}
+
+// SetStateLogReanchorFloorForTest lowers the snapshot re-anchor floor so
+// tests can exercise appendState's re-anchoring without writing 64KB of
+// HardState records. Returns a func that restores the production value.
+func SetStateLogReanchorFloorForTest(n int) func() {
+	old := stateLogReanchorFloor
+	stateLogReanchorFloor = n
+	return func() { stateLogReanchorFloor = old }
+}
+
 func walkBucket(prefix string, b *bolt.Bucket, lines *[]string) error {
 	return b.ForEach(func(k, v []byte) error {
 		if v == nil {
