@@ -18,6 +18,22 @@ Committed is specifically NOT a databse designed for querying.
 - **vs. etcd**: same Raft substrate, but append-only log semantics instead of KV — and a worker model for ingest/sync that etcd doesn't have.
 - **vs. an RDBMS / Debezium pipeline**: Committed collapses "replicated log + CDC source + sink connectors" into one process. You don't need Kafka + Debezium + Kafka Connect + a separate consensus layer; the same binary holds the log, the source, and the sink.
 
+## Version 0.6.1
+
+A critical bugfix release for 0.6 — every 0.6 deployment should upgrade.
+
+- **Unbounded disk growth fixed** — the raft state log grew continuously
+  during normal operation and was never truncated, enough to fill a 50 GB
+  disk in days. The first boot after upgrading reclaims the space
+  automatically, and term/vote durability across restarts is restored.
+- **Snapshot catch-up fixed** — a follower catching up via a leader
+  snapshot could silently stop replicating; snapshot installs now work
+  in place and complete themselves on the next boot if interrupted.
+- **Projection language null support** — `set` entries can write SQL
+  NULL via `null = true`, and `when` clauses match a present JSON `null`
+  (an absent field remains "no match"). See
+  [SQL projections](#sql-projections).
+
 ## Version 0.6
 
 A beta release that gives the log a data model — types now declare what
@@ -114,10 +130,10 @@ under `/home/nonroot/data`:
 ```sh
 docker run --rm -p 8080:8080 -p 9022:9022 \
   -v committed-data:/home/nonroot/data \
-  committeddb/committed:0.6-beta
+  committeddb/committed:0.6.1-beta
 ```
 
-`docker run committeddb/committed:0.6-beta --version` prints the build
+`docker run committeddb/committed:0.6.1-beta --version` prints the build
 identity; `:latest` tracks the most recent release. See
 [Configuration](#configuration) for the env vars and `docker-compose.yml`
 for a local single-node setup.
