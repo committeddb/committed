@@ -154,7 +154,14 @@ type Storage struct {
 	// segments into. Kept around so RaftLogApproxSize can stat the
 	// segment files without poking through tidwall's internals.
 	raftLogDir string
-	EntryLog   *wal.Log
+	// entryMu guards swaps of the EntryLog handle: resetEntryLogToSnapshot
+	// (an in-place snapshot install) replaces the whole log with a fresh one.
+	// entry() — the read chokepoint raft's node.run goroutine hits via
+	// Entries/Term — takes it for read; the swap takes it for write. Writers
+	// (appendEntries, Compact) run on the same serveChannels goroutine as the
+	// swap, so they cannot race it and stay lock-free.
+	entryMu  sync.RWMutex
+	EntryLog *wal.Log
 	// eventLog is the permanent event log — the "forever" tier described
 	// in docs/event-log-architecture.md. ApplyCommitted mirrors every
 	// committed raft entry into it, keyed by raft index. Unlike EntryLog,
@@ -366,6 +373,14 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		return nil, fmt.Errorf("recover scrub dirs: %w", err)
 	}
 
+	// An in-place snapshot install (resetEntryLogToSnapshot) renames the old
+	// entry log dir aside before recreating it; a crash can leave the renamed
+	// dir behind. Remove it before opening — it's discarded consensus
+	// transport, never data (the permanent event log is untouched by resets).
+	if err := os.RemoveAll(entryLogDiscardDir(entryLogDir)); err != nil {
+		return nil, fmt.Errorf("remove discarded entry log: %w", err)
+	}
+
 	// 0700: WAL directories hold raft state and committed log entries;
 	// only the owning process needs access. os.ModePerm (0777) is too
 	// permissive for data storage.
@@ -497,6 +512,15 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	}
 	ws.hardState = *st
 	ws.snapshot = *snap
+
+	// Complete an in-place snapshot install that crashed between persisting
+	// the snapshot record (saveWithSnapshot's appendState) and cutting the
+	// entry log over. The persisted snapshot is the durable intent: if the
+	// entry log doesn't reach the snapshot point, raft's RestartNode would
+	// panic on a hard-state commit past lastIndex, so the cut-over is re-run.
+	if err := ws.reconcileEntryLogWithSnapshot(); err != nil {
+		return nil, fmt.Errorf("reconcile entry log with snapshot: %w", err)
+	}
 
 	// Rewrite the recovered state as fresh records at the state-log tail,
 	// then truncate everything older (appendState does both). Recovery above
@@ -735,14 +759,19 @@ func (s *Storage) ConfState(c *pb.ConfState) {
 // persisting the full snapshot (the entire serialized bbolt database) on
 // every Ready is the write amplification that could fill a disk in hours
 // under a crash loop.
+//
+// A Ready carrying a non-empty snapshot (an InstallSnapshot) is a log
+// REPLACEMENT, not an append, and is handled by saveWithSnapshot: the
+// entries that accompany it follow the snapshot index, not this node's
+// existing entry log, so appending them here would break the seq mapping.
 func (s *Storage) Save(st pb.HardState, ents []pb.Entry, snap pb.Snapshot) error {
+	if !raft.IsEmptySnap(snap) {
+		return s.saveWithSnapshot(st, ents, snap)
+	}
+
 	s.snapMu.Lock()
 	if !raft.IsEmptyHardState(st) {
 		s.hardState = st
-	}
-	if !raft.IsEmptySnap(snap) {
-		s.snapshot = snap
-		s.snapDirty = true
 	}
 	hardCopy := s.hardState
 	snapCopy := s.snapshot
@@ -762,6 +791,137 @@ func (s *Storage) Save(st pb.HardState, ents []pb.Entry, snap pb.Snapshot) error
 	}
 
 	return nil
+}
+
+// saveWithSnapshot handles the Ready that carries an InstallSnapshot. raft
+// has already reset its in-memory log to the snapshot point; the entries in
+// ents (if any — the leader's follow-up MsgApp can coalesce into the same
+// Ready) start at snap index+1 and connect to NOTHING in this node's
+// existing entry log. Before this path existed, appendEntries hit its
+// contiguity guard on those entries and the node silently stopped
+// replicating — the in-place snapshot catch-up path was broken.
+//
+// Severe lag is rejected here WITHOUT persisting or mutating anything: if
+// the snapshot leaps past the permanent event log, this node must be
+// rebuilt (processSnapshot fatal-exits with the rebuild message right after
+// this returns). Persisting any of the Ready first would let a restart
+// without the rsync rebuild come up with raft state ahead of the event log
+// and silently leave a permanent gap in it; restarting with the
+// pre-snapshot state instead makes the leader re-send the snapshot and the
+// fatal re-fire until the operator runs the rebuild.
+//
+// On accept the order is: persist the snapshot+hard state (durable intent),
+// cut the entry log over to a dummy at the snapshot point, then append the
+// follow-up entries. A crash between the persist and the cut-over is
+// completed at the next Open by reconcileEntryLogWithSnapshot.
+func (s *Storage) saveWithSnapshot(st pb.HardState, ents []pb.Entry, snap pb.Snapshot) error {
+	if snap.Metadata.Index > s.eventIndex.Load() {
+		return nil
+	}
+
+	s.snapMu.Lock()
+	if !raft.IsEmptyHardState(st) {
+		s.hardState = st
+	}
+	s.snapshot = snap
+	// Consumed by the appendState call below, which always persists this
+	// (newer) snapshot.
+	s.snapDirty = false
+	hardCopy := s.hardState
+	s.snapMu.Unlock()
+
+	if err := s.appendState(hardCopy, snap, !raft.IsEmptyHardState(st), true); err != nil {
+		return fmt.Errorf("[wal.storage] appendState: %w", err)
+	}
+
+	if err := s.resetEntryLogToSnapshot(snap.Metadata.Index, snap.Metadata.Term); err != nil {
+		return fmt.Errorf("[wal.storage] reset entry log: %w", err)
+	}
+
+	if err := s.appendEntries(ents); err != nil {
+		return fmt.Errorf("[wal.storage] appendEntries: %w", err)
+	}
+
+	return nil
+}
+
+// entryLogDiscardDir is where resetEntryLogToSnapshot renames the
+// superseded entry log before recreating a fresh one. A crash can strand
+// it; Open removes it before opening the live dir.
+func entryLogDiscardDir(entryLogDir string) string {
+	return entryLogDir + ".discarded"
+}
+
+// resetEntryLogToSnapshot replaces the entry log with a single dummy entry
+// at the snapshot point — the durable analogue of etcd
+// MemoryStorage.ApplySnapshot's ents = [{Index, Term}]. The dummy sits at
+// the compaction boundary: unreadable through Entries, but it supplies
+// Term(index) for raft's log-matching probe, and the seq mapping is rebased
+// (firstIndex = index) so post-snapshot entries append contiguously after
+// it. Discarding the old entries loses nothing durable: the entry log is
+// consensus transport; the permanent event log is a separate store this
+// function never touches.
+//
+// Not crash-atomic — close/rename/recreate are separate steps. The
+// preceding appendState persisted the snapshot record, which Open treats as
+// the durable intent: reconcileEntryLogWithSnapshot re-runs this cut-over
+// if a crash lands anywhere inside it, and Open removes a stranded
+// .discarded dir. An error mid-way leaves the handle unusable and is
+// returned, which stops the node (the Save error posture); the next boot
+// heals.
+func (s *Storage) resetEntryLogToSnapshot(index, term uint64) error {
+	dummy := pb.Entry{Index: index, Term: term}
+	data, err := dummy.Marshal()
+	if err != nil {
+		return err
+	}
+
+	discard := entryLogDiscardDir(s.raftLogDir)
+	if err := os.RemoveAll(discard); err != nil {
+		return fmt.Errorf("clear stale discard dir: %w", err)
+	}
+
+	s.entryMu.Lock()
+	defer s.entryMu.Unlock()
+
+	if err := s.EntryLog.Close(); err != nil {
+		return fmt.Errorf("close entry log: %w", err)
+	}
+	if err := os.Rename(s.raftLogDir, discard); err != nil {
+		return fmt.Errorf("rename entry log dir: %w", err)
+	}
+	if err := os.MkdirAll(s.raftLogDir, 0o700); err != nil {
+		return err
+	}
+	fresh, err := wal.Open(s.raftLogDir, nil)
+	if err != nil {
+		return fmt.Errorf("reopen entry log: %w", err)
+	}
+	if err := fresh.Write(1, frame(data)); err != nil {
+		return fmt.Errorf("write snapshot dummy: %w", err)
+	}
+	s.EntryLog = fresh
+	// Best effort — Open clears a leftover before the next boot's open.
+	_ = os.RemoveAll(discard)
+
+	s.firstIndex.Store(index)
+	s.compactedUpTo.Store(index)
+	s.lastIndex.Store(index)
+	return nil
+}
+
+// reconcileEntryLogWithSnapshot completes an in-place snapshot install that
+// crashed between saveWithSnapshot's appendState (snapshot persisted) and
+// its resetEntryLogToSnapshot (entry log cut over). Called from Open after
+// both logs are recovered. A node whose entry log already reaches the
+// snapshot point — every normal node, since compaction keeps the log's tail
+// well past the last snapshot — is left alone.
+func (s *Storage) reconcileEntryLogWithSnapshot() error {
+	snapIdx := s.snapshot.Metadata.Index
+	if snapIdx == 0 || s.lastIndex.Load() >= snapIdx {
+		return nil
+	}
+	return s.resetEntryLogToSnapshot(snapIdx, s.snapshot.Metadata.Term)
 }
 
 // ApplyCommitted applies a single committed raft entry to application
@@ -1327,7 +1487,9 @@ func (s *Storage) boundary() uint64 {
 // Returns the entry, the size of the entry (in bytes) before being unmarshalled, and an error
 func (s *Storage) entry(i uint64) (*pb.Entry, uint64, error) {
 	e := &pb.Entry{}
+	s.entryMu.RLock()
 	raw, err := s.EntryLog.Read(i)
+	s.entryMu.RUnlock()
 	if err != nil {
 		return nil, 0, err
 	}

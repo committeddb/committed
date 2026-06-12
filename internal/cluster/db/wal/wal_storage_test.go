@@ -543,6 +543,13 @@ func TestStateStorage(t *testing.T) {
 
 		s := NewStorage(t, nil)
 		defer s.Cleanup()
+		// Bring the permanent event log up to the snapshot point first: a
+		// non-empty snapshot routes through saveWithSnapshot, which rejects
+		// (persists nothing for) a snapshot past EventIndex — the severe-lag
+		// rebuild path.
+		require.NoError(t, s.Save(defaultHardState, index(1).terms(1), defaultSnap))
+		require.NoError(t, s.ApplyCommitted(index(1).terms(1)[0]))
+
 		require.NoError(t, s.Save(st, nil, snap))
 
 		stb, err := st.Marshal()

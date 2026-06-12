@@ -88,6 +88,12 @@ func TestStateLog_UnchangedReadysPreserveTerm(t *testing.T) {
 func TestStateLog_TruncatesSupersededRecords(t *testing.T) {
 	s := NewStorage(t, nil)
 
+	// Installed snapshots are gated on the permanent event log having
+	// reached the snapshot point; apply through 21 first.
+	for _, e := range index(1).terms(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1) {
+		require.NoError(t, s.ApplyCommitted(e))
+	}
+
 	require.NoError(t, s.Save(pb.HardState{Term: 1, Vote: 1, Commit: 1}, nil, metaSnapshot(1, []byte("meta"))))
 	for i := uint64(2); i <= 20; i++ {
 		require.NoError(t, s.Save(pb.HardState{Term: 1, Vote: 1, Commit: i}, nil, defaultSnap))
@@ -132,6 +138,8 @@ func TestStateLog_ReanchorBoundsHardStateChurn(t *testing.T) {
 	s := NewStorage(t, nil)
 	defer s.Cleanup()
 
+	// Event log must reach the snapshot point for the install to be accepted.
+	require.NoError(t, s.ApplyCommitted(index(1).terms(1)[0]))
 	require.NoError(t, s.Save(pb.HardState{Term: 1, Vote: 1, Commit: 1}, nil, metaSnapshot(1, []byte("meta"))))
 	for i := uint64(2); i <= 100; i++ {
 		require.NoError(t, s.Save(pb.HardState{Term: 1, Vote: 1, Commit: i}, nil, defaultSnap))
