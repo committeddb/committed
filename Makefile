@@ -150,3 +150,46 @@ crosscompile:
 	  GOOS=$$os GOARCH=$$arch go build -ldflags="$(LDFLAGS)" -o $$out || exit 1; \
 	  file $$out; \
 	done
+
+# Cut a complete release from a clean checkout of the release tag: run
+# the lint + race gate, cross-compile every release binary, publish the
+# GitHub release (those binaries + notes), then push the multi-arch image
+# with attestations. One command in place of the multi-step runbook.
+#
+#   git checkout v0.6.1-beta
+#   make release NOTES=.claude-scratch/release-notes-v0.6.1-beta.md
+#
+# What it deliberately does NOT do: create or push the git tag. gh and
+# docker only stamp from the tag — they don't author it — so tagging
+# stays a separate, deliberate step (`git tag v0.6.1-beta && git push
+# origin v0.6.1-beta`). You must also be authenticated to GitHub
+# (`gh auth status`) and Docker Hub (`docker login`) first.
+#
+# The same guard docker/release uses gates the whole thing up front:
+# `git describe` appends -g<sha> off-tag and -dirty on a modified tree,
+# so a release can't be cut stamped main-after-tag or with local edits.
+# It fires before the long test + compile so you fail in a second, not
+# after ten minutes.
+#
+# RELEASE_BINS is derived from PLATFORMS so the gh upload list and
+# crosscompile's output names can never drift apart.
+NOTES ?=
+RELEASE_BINS := $(foreach p,$(PLATFORMS),committed-$(subst /,-,$(p))$(if $(filter windows/%,$(p)),.exe))
+
+release:
+	@case "$(VERSION)" in \
+	  dev|*-dirty|*-g[0-9a-f]*) \
+	    echo "VERSION=$(VERSION) is not a clean release tag; check out the tag first"; \
+	    exit 1;; \
+	esac
+	@test -n "$(NOTES)" || { echo "set NOTES=<path/to/release-notes.md>"; exit 1; }
+	@test -f "$(NOTES)" || { echo "NOTES file not found: $(NOTES)"; exit 1; }
+	$(MAKE) lint
+	$(MAKE) test/ci
+	$(MAKE) crosscompile
+	gh release create $(VERSION) $(RELEASE_BINS) \
+	  --title $(VERSION) \
+	  --notes-file $(NOTES)
+	$(MAKE) docker/release
+	docker buildx imagetools inspect $(REPO):$(HUB_TAG)
+	@echo "released $(VERSION): github + $(REPO):$(HUB_TAG) (+ :latest)"
