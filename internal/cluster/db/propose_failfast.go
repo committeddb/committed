@@ -176,3 +176,45 @@ func (db *DB) notifyApplied(data []byte) {
 	default:
 	}
 }
+
+// notifyLost is invoked from wal.Storage.appendEntries (via the lost-callback
+// db.New wires through newRaftWithOptions / SetLostNotifier) when a
+// higher-term leader's AppendEntries truncates uncommitted tail entries this
+// node physically held. It receives the non-zero RequestIDs those entries
+// carried and signals each matching blocking-Propose waiter with
+// ErrProposalLost — the definitive "this attempt is gone, safe to retry"
+// signal, stronger than the conservative ErrProposalUnknown the leader-change
+// watcher emits.
+//
+// Matching is by node-local RequestID, exactly as notifyApplied does: a
+// waiter is present only on the node where its Propose ran, so a match means
+// that node both submitted the proposal and physically held the truncated
+// entry. Like notifyApplied the send is non-blocking on the cap-1 ack
+// channel: if apply or the leader-change watcher already filled it, the
+// default branch drops our signal. ErrProposalLost racing ErrProposalUnknown
+// on the same waiter is fine — both tell the caller "retry"; the first to
+// land wins and Lost is simply the more precise of the two.
+func (db *DB) notifyLost(requestIDs []uint64) {
+	if len(requestIDs) == 0 {
+		return
+	}
+	db.waitersMu.Lock()
+	defer db.waitersMu.Unlock()
+	for _, rid := range requestIDs {
+		if rid == 0 {
+			continue
+		}
+		w, ok := db.waiters[rid]
+		if !ok {
+			continue
+		}
+		select {
+		case w.ack <- ErrProposalLost:
+			db.logger.Debug("propose lost (truncated)", zap.Uint64("requestID", rid))
+			if db.metrics != nil {
+				db.metrics.ProposeFailFastLost()
+			}
+		default:
+		}
+	}
+}

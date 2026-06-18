@@ -847,6 +847,244 @@ func createTestIngestableConfig(id string) *cluster.Configuration {
 	}
 }
 
+// newFaultyMultiDBHarness builds a replicas-node db.DB cluster whose peer
+// transports route through a shared FaultyCluster, so a test can Partition /
+// Heal the db-level cluster the same way the raw-Raft scenarios do (the plain
+// newMultiDBHarness uses unwrapped loopback HTTP and can't be partitioned).
+//
+// tick sets every node's raft tick (so a test can widen the election window),
+// and grace overrides the leader-change fail-fast grace period —
+// truncation-detection tests set it large so the conservative
+// ErrProposalUnknown can't preempt the definitive ErrProposalLost they assert.
+func newFaultyMultiDBHarness(t *testing.T, replicas int, tick, grace time.Duration) (*multiDBHarness, *FaultyCluster) {
+	t.Helper()
+
+	ports := pickFreePorts(replicas)
+	peers := db.Peers{}
+	raftPeers := make([]raft.Peer, replicas)
+	for i := 0; i < replicas; i++ {
+		id := uint64(i + 1)
+		url := fmt.Sprintf("http://127.0.0.1:%d", ports[i])
+		peers[id] = url
+		raftPeers[i] = raft.Peer{ID: id, Context: []byte(url)}
+	}
+
+	fc := NewFaultyCluster(raftPeers)
+
+	h := &multiDBHarness{t: t}
+	for i := 0; i < replicas; i++ {
+		id := uint64(i + 1)
+		dir := t.TempDir()
+		p := parser.New()
+		syncCh := make(chan *db.SyncableWithID, 32)
+		ingestCh := make(chan *db.IngestableWithID, 32)
+
+		storage, err := wal.Open(dir, p, syncCh, ingestCh)
+		if err != nil {
+			t.Fatalf("wal.Open for node %d: %v", id, err)
+		}
+
+		d := db.New(id, peers, storage, p, syncCh, ingestCh,
+			db.WithTickInterval(tick),
+			db.WithTransportWrapperForTest(fc.Wrap(id)),
+			db.WithLeaderChangeGracePeriod(grace),
+		)
+
+		h.nodes = append(h.nodes, &multiDBNode{
+			id:      id,
+			dir:     dir,
+			storage: storage,
+			db:      d,
+			parser:  p,
+			sync:    syncCh,
+			ingest:  ingestCh,
+		})
+		h.dbs = append(h.dbs, d)
+	}
+
+	return h, fc
+}
+
+// dbByID returns the harness DB with the given node id (nil if absent).
+func (h *multiDBHarness) dbByID(id uint64) *db.DB {
+	for _, d := range h.dbs {
+		if d.ID() == id {
+			return d
+		}
+	}
+	return nil
+}
+
+// nodeByID returns the harness node (and its wal.Storage) for the given id.
+func (h *multiDBHarness) nodeByID(id uint64) *multiDBNode {
+	for _, n := range h.nodes {
+		if n.id == id {
+			return n
+		}
+	}
+	return nil
+}
+
+// agreedLeaderAmong returns the leader id that every listed node currently
+// reports, or 0 if they disagree or any reports no leader. Used to confirm the
+// majority side of a partition has settled on a fresh leader.
+func (h *multiDBHarness) agreedLeaderAmong(ids []uint64) uint64 {
+	var first uint64
+	for _, id := range ids {
+		d := h.dbByID(id)
+		if d == nil {
+			return 0
+		}
+		l := d.Leader()
+		if l == 0 {
+			return 0
+		}
+		if first == 0 {
+			first = l
+		} else if l != first {
+			return 0
+		}
+	}
+	return first
+}
+
+// -----------------------------------------------------------------------------
+// Scenario: truncation-detection ErrProposalLost (propose-truncation-detection.md)
+//
+// Invariant protected: a proposer that was leader when its entry was appended,
+// and that physically observes the entry's truncation by a higher-term leader,
+// gets the DEFINITIVE db.ErrProposalLost — not the conservative
+// db.ErrProposalUnknown. This is the integration counterpart to the unit tests
+// in wal/truncation_lost_test.go (detection) and propose_fail_fast_test.go
+// (signalling); here a real raft log conflict drives the whole path end to end.
+//
+// Setup: with a deliberately huge fail-fast grace (so the leader-change watcher
+// can't preempt the result), partition the leader away from the other two and
+// propose on it. The entry enters the isolated leader's log but can't commit
+// without quorum. The majority elects a new leader at a higher term whose
+// post-election no-op occupies the same raft index as the orphaned entry; on
+// heal, the new leader's AppendEntries truncates the orphan, wal.Storage fires
+// its lost-callback, and the still-blocked Propose returns ErrProposalLost.
+// -----------------------------------------------------------------------------
+func TestAdversarial_ProposalLostOnTruncation(t *testing.T) {
+	_ = rand.New(rand.NewSource(11))
+
+	// 50ms tick → 500ms election window: wide enough that the orphaned entry
+	// reliably lands in the partitioned leader's log before CheckQuorum steps
+	// it down, while keeping the whole scenario to ~1-2s.
+	const tick = 50 * time.Millisecond
+	// Huge grace: the leader-change watcher must NOT fire ErrProposalUnknown
+	// before the truncation lands, so the only non-success outcome the blocked
+	// Propose can observe is ErrProposalLost (and success is impossible — the
+	// entry is truncated, never committed).
+	h, fc := newFaultyMultiDBHarness(t, 3, tick, time.Minute)
+	defer h.Close()
+
+	h.WaitForLeader(t)
+	leaderID := h.stableLeader()
+	if leaderID == 0 {
+		t.Fatal("no stable leader to start from")
+	}
+
+	majorityIDs := make([]uint64, 0, 2)
+	for _, d := range h.dbs {
+		if d.ID() != leaderID {
+			majorityIDs = append(majorityIDs, d.ID())
+		}
+	}
+	leader := h.dbByID(leaderID)
+	if leader == nil {
+		t.Fatalf("leader db %d not found in harness", leaderID)
+	}
+
+	// Wait for all three nodes to apply the same prefix (the election no-op),
+	// so the orphaned entry and the new leader's no-op land at the same index
+	// — the conflict that forces a truncation rather than a clean append.
+	waitUntil(t, 5*time.Second, "nodes never converged on a common applied prefix", func() bool {
+		base := h.nodes[0].storage.AppliedIndex()
+		if base == 0 {
+			return false
+		}
+		for _, n := range h.nodes[1:] {
+			if n.storage.AppliedIndex() != base {
+				return false
+			}
+		}
+		return true
+	})
+
+	leaderStorage := h.nodeByID(leaderID).storage
+	baseIndex := leaderStorage.AppliedIndex()
+
+	// Isolate the leader. It keeps believing it's leader until CheckQuorum
+	// steps it down (~election timeout), and never hears a higher term while
+	// partitioned, so its in-flight waiter stays stamped under it.
+	fc.Partition([]uint64{leaderID}, majorityIDs)
+
+	// Propose on the isolated leader. The entry appends to its log but can
+	// never commit (no quorum); the call blocks on its waiter until the
+	// post-heal truncation resolves it.
+	proposeErr := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		p := createProposals([][]string{{"orphaned"}})[0]
+		proposeErr <- leader.Propose(ctx, p)
+	}()
+
+	// Confirm the orphaned entry actually landed in the (still-leader) node's
+	// log before it stepped down. If this times out, the leadership window was
+	// too tight — the rest of the scenario would be meaningless.
+	waitUntil(t, 5*time.Second, "orphaned entry never appended to the partitioned leader's log", func() bool {
+		li, err := leaderStorage.LastIndex()
+		return err == nil && li > baseIndex
+	})
+
+	// Wait for the majority to elect a NEW leader at a higher term. Its
+	// post-election no-op occupies the orphaned entry's index, setting up the
+	// conflict.
+	waitUntil(t, 10*time.Second, "majority never elected a new leader while the old leader was partitioned", func() bool {
+		l := h.agreedLeaderAmong(majorityIDs)
+		return l != 0 && l != leaderID
+	})
+
+	// Let the new leader commit its no-op so its log has advanced past the
+	// conflict index before we heal.
+	time.Sleep(300 * time.Millisecond)
+
+	// Heal. The new leader's AppendEntries reconciles the old leader's log,
+	// truncating the orphaned entry and firing notifyLost for the still-blocked
+	// waiter's RequestID.
+	fc.Heal()
+
+	select {
+	case err := <-proposeErr:
+		if !errors.Is(err, db.ErrProposalLost) {
+			t.Fatalf("the node that was leader at proposal time must see the definitive "+
+				"ErrProposalLost once its entry is truncated, got: %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("Propose on the truncated leader never returned")
+	}
+}
+
+// waitUntil polls cond every 20ms until it returns true or the deadline
+// expires, failing the test with msg on timeout. A local stand-in for
+// require.Eventually so the adversarial file keeps its testify-free idiom.
+func waitUntil(t *testing.T, timeout time.Duration, msg string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if cond() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("waitUntil timed out after %v: %s", timeout, msg)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // -----------------------------------------------------------------------------
 // Scenario (b): asymmetric (one-way) partition
 //

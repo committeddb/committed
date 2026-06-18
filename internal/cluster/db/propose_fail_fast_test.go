@@ -235,6 +235,101 @@ func TestPropose_FailFast_MetricsIncrement(t *testing.T) {
 	require.Equal(t, int64(1), sumInt64(ffSum))
 }
 
+// TestPropose_Lost_SignalsWaiter is the truncation-detection unit
+// counterpart to TestPropose_FailFast_TransitionSignalsWaiter: a waiter is
+// registered, the truncation callback fires for its RequestID (as
+// wal.Storage.appendEntries does on a conflicting append), and the waiter
+// receives the definitive ErrProposalLost rather than the conservative
+// ErrProposalUnknown.
+func TestPropose_Lost_SignalsWaiter(t *testing.T) {
+	d := newFailFastDB(t)
+	waitForStableLeader(t, d)
+
+	const rid uint64 = 4001
+	ack := d.RegisterWaiterForTest(rid, 1)
+	t.Cleanup(func() { d.UnregisterWaiterForTest(rid) })
+
+	// Include a RequestID with no registered waiter to prove notifyLost
+	// tolerates (and skips) IDs it doesn't know — the home node of a
+	// truncated entry need not be the node that ran Propose.
+	d.NotifyLostForTest([]uint64{rid, 9999})
+
+	select {
+	case err := <-ack:
+		require.ErrorIs(t, err, db.ErrProposalLost)
+	case <-time.After(time.Second):
+		t.Fatal("waiter never received ErrProposalLost")
+	}
+}
+
+// TestPropose_Lost_FirstSignalWins covers the documented race: apply (or
+// the leader-change watcher) already filled the cap-1 ack channel before
+// the truncation callback runs. notifyLost's non-blocking send must hit the
+// default branch and leave the prior signal in place — both outcomes mean
+// "retry", and we must not block the serveChannels goroutine notifyLost runs
+// on.
+func TestPropose_Lost_FirstSignalWins(t *testing.T) {
+	d := newFailFastDB(t)
+	waitForStableLeader(t, d)
+
+	const rid uint64 = 4002
+	ack := d.RegisterWaiterForTest(rid, 1)
+	t.Cleanup(func() { d.UnregisterWaiterForTest(rid) })
+
+	// Apply wins first.
+	d.SignalWaiterForTest(rid, nil)
+	// Truncation callback arrives second; its send is dropped.
+	d.NotifyLostForTest([]uint64{rid})
+
+	select {
+	case err := <-ack:
+		require.NoError(t, err, "apply landed first; the dropped Lost signal must not overwrite it")
+	case <-time.After(time.Second):
+		t.Fatal("waiter never received any signal")
+	}
+	// Channel must now be empty — the second (Lost) signal was dropped, not
+	// queued behind the first.
+	select {
+	case extra := <-ack:
+		t.Fatalf("unexpected second signal queued on the cap-1 ack: %v", extra)
+	default:
+	}
+}
+
+// TestPropose_Lost_MetricIncrements verifies the committed.propose.fail_fast.lost
+// counter ticks up once per signaled waiter.
+func TestPropose_Lost_MetricIncrements(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+
+	m := metrics.New(provider.Meter("test"))
+	d := newFailFastDB(t, db.WithMetrics(m))
+	waitForStableLeader(t, d)
+
+	const rid uint64 = 4003
+	ack := d.RegisterWaiterForTest(rid, 1)
+	t.Cleanup(func() { d.UnregisterWaiterForTest(rid) })
+
+	d.NotifyLostForTest([]uint64{rid})
+
+	select {
+	case err := <-ack:
+		require.ErrorIs(t, err, db.ErrProposalLost)
+	case <-time.After(time.Second):
+		t.Fatal("waiter never received ErrProposalLost")
+	}
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+
+	lost := findMetric(rm, "committed.propose.fail_fast.lost")
+	require.NotNil(t, lost, "lost counter missing")
+	lostSum, ok := lost.Data.(metricdata.Sum[int64])
+	require.True(t, ok)
+	require.Equal(t, int64(1), sumInt64(lostSum))
+}
+
 func sumInt64(s metricdata.Sum[int64]) int64 {
 	var total int64
 	for _, dp := range s.DataPoints {

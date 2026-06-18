@@ -40,6 +40,24 @@ var ErrClosed = errors.New("db: closed")
 // leader inherits and commits the entry within a handful of ticks.
 var ErrProposalUnknown = errors.New("db: proposal status unknown after leader change")
 
+// ErrProposalLost is returned from db.Propose when the raft log entry
+// carrying this proposal was physically truncated by a higher-term
+// leader's AppendEntries before it committed. Unlike ErrProposalUnknown,
+// this is a definitive signal: this specific proposal attempt did NOT
+// commit and is gone from the log, so it is always safe to retry — no
+// application-level idempotency reasoning required.
+//
+// It is the stronger of the two fail-fast signals and only fires on a
+// node that physically held the truncated entry (the leader at proposal
+// time, or a follower the old leader replicated to before stepping
+// down). A waiter on a node that never held the entry sees the
+// conservative ErrProposalUnknown from the leader-change watcher instead;
+// truncation detection upgrades the signal where physical evidence
+// exists, it does not replace the leader-change path. The two can race on
+// the same waiter — both mean "retry", and Lost simply wins when it
+// arrives.
+var ErrProposalLost = errors.New("db: proposal truncated before commit")
+
 type Peers map[uint64]string
 
 type DB struct {
@@ -279,16 +297,19 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		db.diskReportSend = newHTTPDiskReportSender(cfg.diskReportClient, cfg.diskReportToken)
 	}
 
-	// Two hooks are wired into the raft Ready loop. The per-entry applied
+	// Three hooks are wired into the raft layer. The per-entry applied
 	// notifier (db.notifyApplied) receives each committed entry's bytes so
 	// we can unmarshal once, look up the blocking-Propose waiter by
 	// RequestID, and signal it. The per-Ready applied-index notifier
 	// (db.notifyAppliedIndexAdvanced) fires once whenever AppliedIndex
 	// advanced, waking LinearizableRead callers blocked on apply catch-up.
-	// Both shapes work uniformly for wal.Storage (real apply) and the
+	// The first two work uniformly for wal.Storage (real apply) and the
 	// in-memory test double — both go through the same raft.go iteration
-	// over rd.CommittedEntries.
-	errorC, raft := newRaftWithOptions(id, rpeers, s, proposeC, confChangeC, db.notifyApplied, db.notifyAppliedIndexAdvanced, cfg.logger, cfg)
+	// over rd.CommittedEntries. The third, db.notifyLost, is installed on
+	// the storage (not called from the Ready loop): wal.Storage fires it
+	// from appendEntries when a higher-term leader truncates uncommitted
+	// entries this node held, so their waiters get ErrProposalLost.
+	errorC, raft := newRaftWithOptions(id, rpeers, s, proposeC, confChangeC, db.notifyApplied, db.notifyAppliedIndexAdvanced, db.notifyLost, cfg.logger, cfg)
 
 	db.ErrorC = errorC
 	db.raft = raft

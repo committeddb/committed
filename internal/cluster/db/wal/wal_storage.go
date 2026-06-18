@@ -347,6 +347,16 @@ type Storage struct {
 	// Nil when metrics are disabled (no OTel endpoint); every use is
 	// nil-guarded, so there is zero overhead in that case.
 	metrics *metrics.Metrics
+	// lostCallback is invoked from appendEntries after a higher-term
+	// leader's AppendEntries truncates uncommitted tail entries this node
+	// held, with the non-zero RequestIDs those entries carried. db.New
+	// wires db.notifyLost here (via SetLostNotifier) so blocking
+	// db.Propose waiters get the definitive ErrProposalLost. nil disables
+	// detection. Single-writer: set once at Open (WithLostCallback) or by
+	// SetLostNotifier before the raft serveChannels goroutine — the sole
+	// appendEntries caller — starts, so reads in appendEntries need no
+	// lock. See SetLostNotifier.
+	lostCallback func([]uint64)
 }
 
 // Returns a *WalStorage, whether this storage existed already, or an error
@@ -455,6 +465,7 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		logger:          logger,
 		configErrors:    make(map[string]error),
 		metrics:         cfg.metrics,
+		lostCallback:    cfg.lostCallback,
 		scrubSignal:     make(chan struct{}, 1),
 		scrubStop:       make(chan struct{}),
 		scrubDone:       make(chan struct{}),
@@ -1245,6 +1256,54 @@ func (s *Storage) loadAppliedIndex() (uint64, error) {
 	return idx, err
 }
 
+// SetLostNotifier installs the truncation lost-callback. db.New calls it
+// (via the lostNotifierSetter optional interface) with db.notifyLost
+// because the callback can't be passed at Open time — the DB it closes
+// over doesn't exist yet. It MUST be called before the raft serveChannels
+// goroutine starts (db wires it inside newRaftWithOptions, before
+// startRaft), since appendEntries — the sole reader — runs only on that
+// goroutine; setting it after would race. See the lostCallback field doc
+// and WithLostCallback (the test-only construction-time equivalent).
+func (s *Storage) SetLostNotifier(fn func([]uint64)) {
+	s.lostCallback = fn
+}
+
+// collectTruncatedRequestIDs reads the entries about to be overwritten by a
+// conflicting append — wal seqs [firstSeq, lastSeq] inclusive — and returns
+// the set of non-zero cluster.Proposal RequestIDs they carry. These are the
+// proposals physically present on this node that a higher-term leader is
+// about to truncate before they committed; their waiters (if this node is
+// also where Propose ran) get the definitive ErrProposalLost.
+//
+// Best-effort by design: an entry that fails to read or decode is logged and
+// skipped — the truncation is already happening, so signalling the IDs we
+// could decode beats signalling none. Config-change and empty (post-election
+// no-op) entries carry no RequestID and contribute nothing.
+func (s *Storage) collectTruncatedRequestIDs(firstSeq, lastSeq uint64) []uint64 {
+	var ids []uint64
+	for seq := firstSeq; seq <= lastSeq; seq++ {
+		e, _, err := s.entry(seq)
+		if err != nil {
+			s.logger.Warn("truncation detection: read entry failed; skipping",
+				zap.Uint64("seq", seq), zap.Error(err))
+			continue
+		}
+		if e.Type != pb.EntryNormal || len(e.Data) == 0 {
+			continue
+		}
+		rid, err := cluster.RequestIDFromProposal(e.Data)
+		if err != nil {
+			s.logger.Warn("truncation detection: decode proposal failed; skipping",
+				zap.Uint64("seq", seq), zap.Uint64("index", e.Index), zap.Error(err))
+			continue
+		}
+		if rid != 0 {
+			ids = append(ids, rid)
+		}
+	}
+	return ids
+}
+
 func (s *Storage) appendEntries(ents []pb.Entry) error {
 	if len(ents) == 0 {
 		return nil
@@ -1284,9 +1343,31 @@ func (s *Storage) appendEntries(ents []pb.Entry) error {
 	// This can happen during leadership changes or because we wrote data that was later not accepted by consensus
 	// Trust the new data over the old data
 	if l > offset {
+		// Before overwriting the conflicting tail, capture the RequestIDs
+		// of any proposals it carries so the lost-callback can give their
+		// blocking-Propose waiters the definitive ErrProposalLost. The
+		// truncated entries occupy wal seqs offset+1..l (raft indexes
+		// ents[0].Index..lastIndex) — the very entries TruncateBack drops.
+		// Skipped unless a callback is registered (the only case that
+		// cares) and there is a prior log to truncate, so the happy path
+		// pays nothing.
+		var lostIDs []uint64
+		if s.lostCallback != nil && firstIndex > 0 {
+			lostIDs = s.collectTruncatedRequestIDs(offset+1, l)
+		}
+
 		err := s.EntryLog.TruncateBack(offset)
 		if err != nil {
 			return err
+		}
+
+		// Signal only after the truncation actually executed, so a waiter
+		// never sees ErrProposalLost for an entry that survived. The
+		// callback (db.notifyLost) only does map lookups and non-blocking
+		// channel sends, so calling it inline on the serveChannels
+		// goroutine — exactly as notifyApplied is — is safe.
+		if len(lostIDs) > 0 {
+			s.lostCallback(lostIDs)
 		}
 	}
 

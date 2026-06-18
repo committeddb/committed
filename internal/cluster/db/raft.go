@@ -134,10 +134,10 @@ func NewRaft(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, propo
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	return newRaftWithOptions(id, ps, s, proposeC, proposeConfC, nil, nil, cfg.logger, cfg)
+	return newRaftWithOptions(id, ps, s, proposeC, proposeConfC, nil, nil, nil, cfg.logger, cfg)
 }
 
-func newRaftWithOptions(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, proposeConfC <-chan raftpb.ConfChangeV2, applyNotifier func(data []byte), appliedIndexNotifier func(), logger *zap.Logger, cfg options) (<-chan error, *Raft) {
+func newRaftWithOptions(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, proposeConfC <-chan raftpb.ConfChangeV2, applyNotifier func(data []byte), appliedIndexNotifier func(), lostNotifier func([]uint64), logger *zap.Logger, cfg options) (<-chan error, *Raft) {
 	errorC := make(chan error)
 
 	n := &Raft{
@@ -166,6 +166,20 @@ func newRaftWithOptions(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []
 		logger:  logger,
 		metrics: cfg.metrics,
 	}
+	// Install the truncation lost-notifier on the storage BEFORE startRaft
+	// spawns serveChannels (the sole appendEntries caller, where the
+	// callback fires). Setting it here, on this goroutine, before the spawn
+	// gives the field a happens-before edge to every appendEntries read, so
+	// no lock is needed on the storage side. db.New supplies db.notifyLost;
+	// NewRaft (raft_test path) passes nil. The in-memory test double doesn't
+	// implement the setter, so truncation detection is simply a wal.Storage
+	// feature — the leader-change watcher still covers its waiters.
+	if lostNotifier != nil {
+		if setter, ok := s.(lostNotifierSetter); ok {
+			setter.SetLostNotifier(lostNotifier)
+		}
+	}
+
 	// startRaft itself doesn't block — it sets up the raft.Node and transport
 	// then spawns serveRaft/serveChannels as their own goroutines. Calling it
 	// synchronously here guarantees that n.transport and n.node are non-nil

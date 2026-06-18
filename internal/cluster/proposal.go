@@ -107,6 +107,23 @@ func (p *Proposal) Marshal() ([]byte, error) {
 	return proto.Marshal(lp)
 }
 
+// RequestIDFromProposal decodes only the RequestID from a marshaled
+// Proposal, without resolving entity types. Truncation detection in
+// db/wal uses it to identify the waiters behind uncommitted entries a
+// higher-term leader is about to overwrite: those entries may reference
+// types not yet applied on this node, so the type-resolving Unmarshal
+// path could spuriously fail on a perfectly decodable RequestID. A
+// config-change or other non-Proposal payload that happens to decode
+// (proto is lenient about unknown wire data) yields 0, which the caller
+// treats as "no waiter".
+func RequestIDFromProposal(bs []byte) (uint64, error) {
+	lp := &clusterpb.LogProposal{}
+	if err := proto.Unmarshal(bs, lp); err != nil {
+		return 0, err
+	}
+	return lp.RequestID, nil
+}
+
 // Unmarshal decodes a marshaled Proposal and hydrates each entity's Type
 // via the resolver. The resolver is required: every production call site
 // has one, and a nil resolver indicates a programming bug. Type lookup

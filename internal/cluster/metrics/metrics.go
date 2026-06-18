@@ -33,6 +33,7 @@ type Metrics struct {
 
 	leaderTransitionsObserved metric.Int64Counter
 	proposeFailFastUnknown    metric.Int64Counter
+	proposeFailFastLost       metric.Int64Counter
 
 	readIndexDuration metric.Float64Histogram
 
@@ -125,6 +126,9 @@ func New(meter metric.Meter) *Metrics {
 
 	m.proposeFailFastUnknown, _ = meter.Int64Counter("committed.propose.fail_fast.unknown",
 		metric.WithDescription("In-flight Propose waiters signaled with ErrProposalUnknown by the leader-change watcher."))
+
+	m.proposeFailFastLost, _ = meter.Int64Counter("committed.propose.fail_fast.lost",
+		metric.WithDescription("In-flight Propose waiters signaled with ErrProposalLost because a higher-term leader truncated their entry on this node before it committed (the definitive, safe-to-retry signal)."))
 
 	m.readIndexDuration, _ = meter.Float64Histogram("committed.read_index.duration",
 		metric.WithDescription("Time for a linearizable read to complete: the ReadIndex quorum round-trip plus the wait for local AppliedIndex to catch up."),
@@ -353,6 +357,15 @@ func (m *Metrics) LeaderTransitionObserved() {
 // without apply.
 func (m *Metrics) ProposeFailFastUnknown() {
 	m.proposeFailFastUnknown.Add(context.Background(), 1)
+}
+
+// ProposeFailFastLost increments the counter recording how often an
+// in-flight Propose waiter has been signaled with ErrProposalLost because
+// a higher-term leader truncated its raft entry on this node before it
+// committed — the definitive, always-safe-to-retry signal, distinct from
+// the conservative ErrProposalUnknown counted above.
+func (m *Metrics) ProposeFailFastLost() {
+	m.proposeFailFastLost.Add(context.Background(), 1)
 }
 
 // ReadIndexCompleted records the end-to-end latency of a successful

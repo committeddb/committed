@@ -146,3 +146,18 @@ type Storage interface {
 	// add/remove churn of rebalancing. Idempotent.
 	DeleteMemberAPIURL(id uint64) error
 }
+
+// lostNotifierSetter is the optional Storage extension that accepts the
+// truncation lost-callback. A Storage implementing it detects when a
+// higher-term leader truncates uncommitted entries it physically held and
+// invokes the callback with their RequestIDs; db.New installs db.notifyLost
+// so blocking-Propose waiters get the definitive ErrProposalLost. wal.Storage
+// implements it (see SetLostNotifier); the in-memory test double in raft_test
+// does not, in which case truncation detection is simply absent — the
+// leader-change watcher still covers those waiters with ErrProposalUnknown.
+// Kept off the Storage interface (an optional interface, like
+// scrubBacklogReporter) so the fake and the test double don't have to
+// implement it.
+type lostNotifierSetter interface {
+	SetLostNotifier(func([]uint64))
+}

@@ -228,6 +228,16 @@ func (db *DB) SignalWaiterForTest(requestID uint64, err error) {
 	}
 }
 
+// NotifyLostForTest invokes the truncation lost-callback handler
+// (db.notifyLost) directly with the given RequestIDs, exactly as
+// wal.Storage.appendEntries does after truncating uncommitted entries.
+// Lets the propose-truncation tests assert ErrProposalLost delivery
+// without standing up a multi-node cluster and forcing a real log
+// conflict.
+func (db *DB) NotifyLostForTest(requestIDs []uint64) {
+	db.notifyLost(requestIDs)
+}
+
 // WaitersForTest returns a snapshot of currently registered waiter
 // RequestIDs. Useful for verifying that freeze-drain / Propose defer
 // cleanup paths haven't leaked waiter map entries after whatever
