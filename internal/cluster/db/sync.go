@@ -231,9 +231,11 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 				// Sync implementation. Without this, a slow Sync keeps
 				// the worker alive past the registry replace, leaving
 				// the new worker waiting on the old one's done channel.
-				// Sync operations are expected to be idempotent (the
-				// SQL dialect uses upsert), so the replacement worker
-				// re-syncing the same proposal after a cancel is safe.
+				// Re-syncing the same proposal on the replacement worker
+				// after a cancel relies on the Syncable contract's
+				// replay-idempotency requirement (the SQL dialects satisfy
+				// it via upsert; non-idempotent sinks are the operator's
+				// responsibility — see cluster.Syncable).
 				syncStart := time.Now()
 				shouldSnapshot, syncErr := s.Sync(ctx, a)
 				if db.metrics != nil {
@@ -268,14 +270,16 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 				if shouldSnapshot {
 					if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: i}); err != nil {
 						// The bump did not durably apply — ctx canceled by a
-						// replace/Close, or ErrProposalUnknown after a leader
-						// change. Do NOT advance past this proposal: re-sync
-						// and re-bump it on the next iteration so the persisted
-						// index never trails the reader by more than the one
-						// in-flight proposal. A crash here costs at most one
-						// duplicate on recovery instead of a storm. Sync is
-						// idempotent (contract), so the re-sync is safe; on ctx
-						// cancellation the loop-top check exits before retrying.
+						// replace/Close, or ErrProposalUnknown/ErrProposalLost
+						// after a leader change orphaned the bump. Do NOT advance
+						// past this proposal: re-sync and re-bump it on the next
+						// iteration so the persisted index never trails the
+						// reader by more than the one in-flight proposal. A crash
+						// here costs at most one duplicate on recovery instead of
+						// a storm. The re-sync relies on the Syncable contract's
+						// replay-idempotency requirement (see cluster.Syncable);
+						// on ctx cancellation the loop-top check exits before
+						// retrying.
 						db.logger.Warn("proposeSyncableIndex error, will retry",
 							zap.String("id", id), zap.Uint64("index", i), zap.Error(err))
 						retryActual = a
@@ -367,11 +371,12 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 		if shouldSnapshot {
 			if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: lastIndex}); err != nil {
 				// The bump did not durably apply (ctx canceled, or
-				// ErrProposalUnknown after a leader change). Keep the batch
-				// and retry the SyncBatch + bump on the next iteration rather
-				// than advancing past an unconfirmed index. SyncBatch is
-				// idempotent (contract), so re-running it is safe, and not
-				// advancing keeps recovery to at most one duplicate batch.
+				// ErrProposalUnknown/ErrProposalLost after a leader change
+				// orphaned the bump). Keep the batch and retry the SyncBatch +
+				// bump on the next iteration rather than advancing past an
+				// unconfirmed index. Re-running the batch relies on the Syncable
+				// contract's replay-idempotency requirement (see cluster.Syncable);
+				// not advancing keeps recovery to at most one duplicate batch.
 				db.logger.Warn("proposeSyncableIndex error, will retry batch",
 					zap.String("id", id), zap.Error(err))
 				retryBatch = true
@@ -533,7 +538,8 @@ func (db *DB) syncBatchFallback(ctx context.Context, id string, s cluster.Syncab
 			}
 			// Transient error in fallback — stop here. The caller
 			// should not retry this batch (the successful prefix
-			// was already committed via Sync's idempotent upsert).
+			// was already pushed downstream; re-pushing it relies on
+			// the Syncable contract's replay-idempotency requirement).
 			db.logger.Warn("transient sync error in fallback, stopping",
 				zap.String("id", id), zap.Uint64("index", e.Index), zap.Error(syncErr))
 			db.recordSyncTransientError(id)
@@ -544,8 +550,9 @@ func (db *DB) syncBatchFallback(ctx context.Context, id string, s cluster.Syncab
 				// The bump did not durably apply. Stop the fallback and
 				// leave the remaining batch for the caller to retry rather
 				// than advancing past an unconfirmed index. The successful
-				// prefix was already pushed downstream via the idempotent
-				// Sync, so re-processing on retry is safe.
+				// prefix was already pushed downstream, so re-processing it
+				// on retry relies on the Syncable contract's replay-idempotency
+				// requirement (see cluster.Syncable).
 				db.logger.Warn("proposeSyncableIndex error in fallback, stopping",
 					zap.String("id", id), zap.Uint64("index", e.Index), zap.Error(err))
 				return false
@@ -571,11 +578,15 @@ func (db *DB) syncBatchFallback(ctx context.Context, id string, s cluster.Syncab
 //
 // ctx is the SYNC WORKER's context, not db.ctx. On a registry replace
 // or Close the worker ctx is canceled; Propose then returns ctx.Err and
-// the worker does NOT advance its index. The replacement worker re-syncs
-// from the un-advanced (persisted) index. Sync is required to be
-// idempotent at the sink level (SQL UPSERT), so re-syncing is safe.
-// (Non-idempotent syncables have a separate latent issue — see
-// .claude-scratch/tickets/sync-fail-fast-bump-tracking.md.)
+// the worker does NOT advance its index. A leader flap can likewise
+// orphan the bump's log entry — Propose returns ErrProposalUnknown /
+// ErrProposalLost — with the same "do not advance" outcome. Either way
+// the replacement worker re-syncs from the un-advanced (persisted) index.
+// Re-syncing the replayed range is safe ONLY because the Syncable contract
+// requires downstream idempotency under replay (see the cluster.Syncable
+// doc); a non-idempotent sink will double-emit, which is the operator's
+// responsibility today. The opt-in mechanism to bound that is tracked in
+// .claude-scratch/tickets/sync-two-phase-syncable.md.
 //
 // On a successful (durable) bump the round-trip latency is recorded to
 // committed_sync_bump_duration_seconds so the extra cost is observable.

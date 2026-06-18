@@ -48,9 +48,31 @@ type ShouldSnapshot bool
 // Actuals (committed facts with an Index), in Index order — never Proposals.
 //
 // Contract:
-//   - Sync MUST be idempotent. The same Actual may be delivered more
-//     than once due to leader transition, worker replace, or process
-//     restart. Implementations should use upsert or equivalent semantics.
+//
+//   - Sync MUST be idempotent — including under REPLAY of an already-synced
+//     range, not just one-at-a-time redelivery. The same Actual, and indeed
+//     a whole contiguous run of Actuals the syncable already processed, may
+//     be delivered again. Implementations should use upsert or equivalent
+//     semantics. This is a hard requirement, not best-effort: the framework
+//     does not deduplicate downstream for you.
+//
+//     Why a run, not just one: after each successful Sync the worker bumps a
+//     durable SyncableIndex (the resume cursor) through raft. If a leader
+//     flaps while that bump is in flight, the bump's log entry can be
+//     truncated by the new leader before it commits — db.Propose returns
+//     db.ErrProposalUnknown / db.ErrProposalLost and the worker, correctly,
+//     does NOT advance. The persisted cursor stays behind the work already
+//     done, so a worker replace or process restart re-reads from the stale
+//     cursor and re-delivers every Actual between it and where the syncable
+//     had actually reached. An UPSERT/dedup sink absorbs this harmlessly; a
+//     non-idempotent sink (HTTP webhook, event stream, message queue with no
+//     dedup key) emits DUPLICATE downstream events. The committed framework
+//     does not prevent that today — sinks that cannot be made idempotent are
+//     the operator's responsibility (wrap in an idempotency-key layer, a
+//     dedup table, or a HEAD-before-POST check). A future opt-in two-phase
+//     mechanism may bound the duplicate window; see
+//     .claude-scratch/tickets/sync-two-phase-syncable.md.
+//
 //   - Sync MUST honor deletes. When an entity reports IsDelete(), the
 //     syncable MUST remove the corresponding downstream record keyed by
 //     the entity's Key — it has no Data to apply (Data carries the delete
@@ -62,10 +84,13 @@ type ShouldSnapshot bool
 //     harmless no-op — that is what makes a fresh syncable replaying an
 //     already-scrubbed log correct (the bootstrap edge case: the original
 //     upsert may have been scrubbed away before this syncable ever saw it).
+//
 //   - An Actual's entities are one atomic unit (one committed transaction);
 //     apply them together (e.g. in one destination transaction).
+//
 //   - Sync errors are retried with exponential backoff. Wrap with
 //     cluster.Permanent(err) to skip the Actual instead of retrying.
+//
 //   - Sync receives a context tied to the worker lifecycle; respect
 //     ctx.Done() for cooperative shutdown.
 //

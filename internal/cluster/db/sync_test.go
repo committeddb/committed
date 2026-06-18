@@ -133,6 +133,66 @@ func TestResumeSync(t *testing.T) {
 	}
 }
 
+// TestSyncReplaysRangeWhenBumpLost documents the replay behavior the
+// cluster.Syncable contract now spells out (and that
+// sync-fail-fast-bump-tracking.md decided to leave as the framework's
+// behavior for non-two-phase syncables): when the post-Sync index bump does
+// NOT durably apply — a worker replace/Close cancels it, or a leader flap
+// orphans it and db.Propose returns ErrProposalUnknown/ErrProposalLost — the
+// worker correctly does not advance the persisted SyncableIndex. A
+// replacement worker then re-reads from the stale cursor and re-delivers the
+// WHOLE already-synced range. An idempotent sink absorbs that; a
+// non-idempotent one (HTTP webhook, event stream) double-emits.
+//
+// Modeling note: this mirrors TestResumeSync but inverts its key line.
+// TestResumeSync advances storage.indexes[id] by hand to model a SUCCESSFUL
+// bump (MemoryStorage's ApplyCommitted is a no-op, so a bump never moves the
+// cursor on its own). Leaving the cursor un-advanced is therefore the
+// faithful model of a LOST bump — the persisted state the worker is left in
+// after the bump's Propose fails to apply.
+func TestSyncReplaysRangeWhenBumpLost(t *testing.T) {
+	inputs := [][]string{{"foo", "bar"}, {"baz"}}
+	id := "foo"
+
+	storage := NewMemoryStorage()
+	db := createDBWithStorage(storage)
+	defer db.Close()
+
+	size := len(inputs)
+
+	// First worker syncs the full range.
+	ps := createProposalsAndProposeThem(t, db, inputs)
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	syncable1 := NewSyncable(size, cancel1)
+	_ = db.Sync(ctx1, id, syncable1)
+	<-ctx1.Done()
+	require.Equal(t, size, syncable1.Count(), "first worker should sync the whole range")
+
+	// LOST bump: the persisted cursor stays put (NOT advanced the way
+	// TestResumeSync does to model a successful bump). This is the state the
+	// worker is left in when proposeSyncableIndex's Propose returns
+	// ErrProposalUnknown/ErrProposalLost during a flap.
+	require.Equal(t, uint64(0), storage.indexes[id], "precondition: lost bump leaves the cursor un-advanced")
+
+	// Replacement worker starts from the stale cursor and MUST re-deliver the
+	// same range — the duplicate a non-idempotent sink would re-emit.
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	syncable2 := NewSyncable(size, cancel2)
+	_ = db.Sync(ctx2, id, syncable2)
+	<-ctx2.Done()
+
+	require.Equal(t, size, syncable2.Count(),
+		"replacement worker re-syncs the replayed range when the bump was lost")
+
+	// Both workers saw the SAME proposals: the range was delivered twice.
+	for i, p := range ps {
+		require.Equal(t, p.Entities, syncable1.Actuals()[i].Entities,
+			"first worker delivered proposal %d", i)
+		require.Equal(t, p.Entities, syncable2.Actuals()[i].Entities,
+			"replacement re-delivered the SAME proposal %d (the replay duplicate)", i)
+	}
+}
+
 // containsProposal reports whether `target` is byte-equivalent to any
 // element of `ps`. Used by TestResumeSync to verify the wal contains
 // the expected proposals without depending on their exact wal positions.
