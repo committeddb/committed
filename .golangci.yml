@@ -8,6 +8,8 @@ run:
     - adversarial
     - docker
     - integration
+    - upgrade
+    - backup
 
 linters:
   default: none

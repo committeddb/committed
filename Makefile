@@ -131,6 +131,14 @@ test/cdc:
 test/upgrade:
 	go test -tags upgrade -p=1 -timeout 300s ./e2e/upgrade/...
 
+# Backup/restore round-trip: builds the real binary, boots a node, writes
+# state, asserts backup refuses a live node, stops it, backs it up, restores
+# into a fresh dir, boots a node on it, and confirms the state survived (see
+# docs/operations/backup.md and e2e/backup/). Tagged `backup`; -p=1 because the
+# node binds a per-run port; -timeout 300s covers the one-off `go build .`.
+test/backup:
+	go test -tags backup -p=1 -timeout 300s ./e2e/backup/...
+
 lint:
 	golangci-lint run
 
