@@ -64,6 +64,22 @@ jobs:
           check-latest: true
       - run: make test/cdc
 
+  # Rolling-upgrade per-node test: builds the real binary and exercises the
+  # graceful-stop → restart-over-same-data-dir → /ready → /version cycle plus
+  # state survival (docs/operations/upgrade.md). No Docker, runs in seconds, so
+  # it gates every push/PR like the unit suites — it guards the binary-level
+  # shutdown/restart/readiness path the in-process tests can't reach.
+  test-upgrade:
+    name: test (upgrade)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      - run: make test/upgrade
+
   # Adversarial raft suite runs -count=20 under -race with a 15-minute
   # per-run timeout, so it can take ~10-15 minutes. Limit to main pushes
   # and manual dispatch to keep PR feedback fast; rely on lint + test

@@ -511,6 +511,7 @@ for the rationale.
 - [`docs/operations/authentication.md`](docs/operations/authentication.md) — bearer token + mTLS setup
 - [`docs/operations/secrets.md`](docs/operations/secrets.md) — `${VAR}` interpolation to keep DB credentials and tokens out of Raft/bbolt (Kubernetes + systemd patterns)
 - [`docs/operations/shutdown.md`](docs/operations/shutdown.md) — `SIGTERM` handling and the graceful-shutdown deadline
+- [`docs/operations/upgrade.md`](docs/operations/upgrade.md) — zero-downtime rolling upgrades: the node-by-node procedure (leader last), `/ready` + `/version` gating, and rollback; pairs with the on-disk forward/backward-compatibility contract in [`docs/api-compatibility.md`](docs/api-compatibility.md#on-disk-and-wire-compatibility)
 - [`docs/operations/http-limits.md`](docs/operations/http-limits.md) — proposal-size cap and HTTP server timeouts
 - [`docs/operations/membership.md`](docs/operations/membership.md) — adding/removing nodes with joint consensus, growing safely via learner add → catch-up → promote, and observing membership (`GET /v1/membership`, the leader-read proxy, `COMMITTED_API_URL`)
 - [`docs/operations/disk-limits.md`](docs/operations/disk-limits.md) — disk-pressure behavior: the per-node free-space watcher (warn/critical/full thresholds, 507 rejections) and cluster-aware write admission (admit iff the leader and a quorum of voters have disk headroom; leadership transfers off a constrained leader), with the alerting and incident playbook

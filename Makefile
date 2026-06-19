@@ -122,6 +122,15 @@ test/adversarial:
 test/cdc:
 	go test -tags docker -p=1 -timeout 600s ./e2e/cdc/...
 
+# Rolling-upgrade per-node test: builds the real committed binary, boots a
+# node, writes state, SIGTERMs it, and restarts over the same data dir,
+# asserting graceful shutdown + /ready + /version + state survival (see
+# docs/operations/upgrade.md and e2e/upgrade/). Tagged `upgrade` so it's
+# out of `make test`; -p=1 because the node binds a fixed-per-run port.
+# -timeout 300s covers the one-off `go build .` on a fresh machine.
+test/upgrade:
+	go test -tags upgrade -p=1 -timeout 300s ./e2e/upgrade/...
+
 lint:
 	golangci-lint run
 
