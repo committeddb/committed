@@ -148,6 +148,19 @@ func (s *Syncable) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldS
 //   - 408, 429: transient (retryable)
 //   - other 4xx: permanent (skip proposal)
 //   - 5xx: transient (retryable)
+//
+// The 4xx/5xx split is the deliberate boundary, and it upholds the
+// asymmetric-risk principle (bias toward transient): a 4xx says the receiver
+// rejected *this request* as malformed/unacceptable (400, 422, 404, 405) —
+// the proposal will never be accepted as-is, so it's permanent and gets
+// dead-lettered; 408 (timeout) and 429 (rate limited) are the two 4xx that are
+// about timing, not the payload, so they stay transient. A 5xx is a
+// server-side failure — including 501 Not Implemented and 503 Unavailable —
+// and is always transient: retrying is safe, and if the endpoint is
+// permanently wrong (e.g. never implements the method) the worker wedges
+// visibly for an operator instead of silently dead-lettering every proposal.
+// A transport error (no status at all) is handled by the caller and is also
+// transient.
 func ClassifyStatus(code int) error {
 	if code >= 200 && code < 300 {
 		return nil

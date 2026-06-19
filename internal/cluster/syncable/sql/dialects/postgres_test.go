@@ -1,9 +1,12 @@
 package dialects_test
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/require"
 
 	"github.com/committeddb/committed/internal/cluster/syncable/sql"
@@ -145,5 +148,74 @@ func TestDialect_BindArgs_MatchesPlaceholders(t *testing.T) {
 		placeholders := strings.Count(d.CreateSQL(cfg), "?")
 		require.Len(t, d.BindArgs(values), placeholders,
 			"mysql BindArgs count must equal its ? placeholder count")
+	})
+}
+
+// TestPostgreSQLDialect_IsPermanent pins the asymmetric-risk classification:
+// only data/schema SQLSTATE classes (22, 23, 42, 0A) are permanent, and the
+// infrastructure classes (08, 40, 53, 57, 58) plus the 42501 access carve-out
+// stay transient. The negative cases are the load-bearing half — a
+// wrongly-permanent error silently drops a proposal past the dead letter, so a
+// regression that promotes a connection/deadlock/lock error to permanent must
+// fail here.
+func TestPostgreSQLDialect_IsPermanent(t *testing.T) {
+	d := &dialects.PostgreSQLDialect{}
+
+	tests := []struct {
+		name      string
+		code      string
+		permanent bool
+	}{
+		// Data (class 22): bad value, will never apply.
+		{"numeric_value_out_of_range", "22003", true},
+		{"invalid_datetime_format", "22007", true},
+		{"invalid_text_representation", "22P02", true},
+		// Integrity constraint (class 23): not-null, unique, check, FK.
+		{"not_null_violation", "23502", true},
+		{"foreign_key_violation", "23503", true},
+		{"unique_violation", "23505", true},
+		{"check_violation", "23514", true},
+		// Syntax / access rule (class 42): schema mismatch, malformed SQL.
+		{"undefined_column", "42703", true},
+		{"undefined_table", "42P01", true},
+		{"datatype_mismatch", "42804", true},
+		{"syntax_error", "42601", true},
+		// Feature not supported (class 0A).
+		{"feature_not_supported", "0A000", true},
+
+		// Carve-out: insufficient_privilege is access/config, not data/schema.
+		{"insufficient_privilege_is_transient", "42501", false},
+
+		// Infrastructure classes stay transient — retry forever, wedge visibly.
+		{"connection_exception", "08000", false},
+		{"connection_failure", "08006", false},
+		{"serialization_failure", "40001", false},
+		{"deadlock_detected", "40P01", false},
+		{"insufficient_resources", "53000", false},
+		{"disk_full", "53100", false},
+		{"too_many_connections", "53300", false},
+		{"admin_shutdown", "57P01", false},
+		{"query_canceled", "57014", false},
+		{"io_error", "58030", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := &pgconn.PgError{Code: tt.code}
+			require.Equal(t, tt.permanent, d.IsPermanent(err),
+				"SQLSTATE %s", tt.code)
+		})
+	}
+
+	// A non-pg error (e.g. a transport/driver error with no SQLSTATE) is never
+	// permanent — there is no data/schema signal to act on, so it retries.
+	t.Run("non_pg_error_is_transient", func(t *testing.T) {
+		require.False(t, d.IsPermanent(errors.New("dial tcp: connection refused")))
+	})
+
+	// errors.As must reach through a wrapped PgError.
+	t.Run("wrapped_pg_error", func(t *testing.T) {
+		wrapped := fmt.Errorf("exec failed: %w", &pgconn.PgError{Code: "23505"})
+		require.True(t, d.IsPermanent(wrapped))
 	})
 }

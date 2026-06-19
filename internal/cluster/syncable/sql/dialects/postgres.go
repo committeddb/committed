@@ -92,16 +92,43 @@ func (d *PostgreSQLDialect) Open(connectionString string) (*gosql.DB, error) {
 	return gosql.Open("pgx", connectionString)
 }
 
-// IsPermanent classifies PostgreSQL errors as permanent (non-retryable)
-// when they belong to class 22 (data exception) or class 23 (integrity
-// constraint violation).
+// IsPermanent classifies a PostgreSQL error as permanent (non-retryable) by
+// its SQLSTATE class — only when it is unambiguously about the data or schema,
+// so the bad proposal will never apply no matter how many times we retry:
+//
+//   - 22 data exception (bad value, numeric out of range, invalid encoding, …)
+//   - 23 integrity constraint violation (not-null, unique, check, foreign key)
+//   - 42 syntax error or access rule violation (undefined table/column,
+//     datatype mismatch, malformed SQL)
+//   - 0A feature not supported
+//
+// Everything else stays transient and retries forever (a wedged worker is
+// visible and an operator can skip it; a wrongly-permanent error silently
+// drops data past the dead letter). In particular the infrastructure classes
+// stay transient: 08 connection, 40 transaction rollback / serialization
+// failure / deadlock, 53 insufficient resources, 57 operator intervention,
+// 58 system error. See the asymmetric-risk principle in the
+// sync-permanent-error-classification ticket.
+//
+// One carve-out inside class 42: 42501 insufficient_privilege is a missing
+// GRANT (access/config), not data or schema — fixable without touching the
+// proposal and failing every row identically — so it stays transient (wedge
+// visibly) rather than dead-lettering the whole stream.
 func (d *PostgreSQLDialect) IsPermanent(err error) bool {
 	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
-		code := pgErr.Code
-		if strings.HasPrefix(code, "22") || strings.HasPrefix(code, "23") {
-			return true
-		}
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	code := pgErr.Code
+	if code == "42501" { // insufficient_privilege — access, not data/schema
+		return false
+	}
+	if len(code) < 2 {
+		return false
+	}
+	switch code[:2] {
+	case "22", "23", "42", "0A":
+		return true
 	}
 	return false
 }
