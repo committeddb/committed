@@ -105,6 +105,11 @@ type Config struct {
 	// case: the entity Key is the row's primary key), so a config that only
 	// sets primaryKey honors deletes for free. See DeleteKeyColumn.
 	KeyColumn string
+	// Checkpoint is the per-syncable checkpoint cadence parsed from the
+	// common [syncable] section. Zero fields mean "use the default" (the
+	// worker resolves them to the batch limits). For a batch syncable Every
+	// is the batch size and MaxAge the batch-age flush.
+	Checkpoint cluster.CheckpointPolicy
 }
 
 // DeleteKeyColumn returns the column a delete binds the entity Key against:

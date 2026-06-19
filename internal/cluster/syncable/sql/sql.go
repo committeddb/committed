@@ -29,6 +29,14 @@ func New(d *DB, config *Config) *Syncable {
 	return &Syncable{db: d.DB, config: config, dialect: d.dialect}
 }
 
+// CheckpointPolicy implements cluster.CheckpointConfigurable so the sync
+// worker honors the cadence parsed from the [syncable] TOML. For this batch
+// syncable, Every is the batch size and MaxAge the batch-age flush; zero
+// fields fall back to the worker's batch defaults.
+func (c *Syncable) CheckpointPolicy() cluster.CheckpointPolicy {
+	return c.config.Checkpoint
+}
+
 func (c *Syncable) Init() error {
 	// Re-validate even though ParseConfig already did: directly constructed
 	// configs (tests, future callers) must hit the same wall before any DDL

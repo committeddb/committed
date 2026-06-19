@@ -63,6 +63,14 @@ func New(config *Config) *Syncable {
 	}
 }
 
+// CheckpointPolicy implements cluster.CheckpointConfigurable so the sync
+// worker honors the cadence parsed from the [syncable] TOML. A webhook is
+// non-idempotent, so the default Every=1 is the right choice unless the
+// operator explicitly accepts duplicate POSTs on crash.
+func (s *Syncable) CheckpointPolicy() cluster.CheckpointPolicy {
+	return s.config.Checkpoint
+}
+
 // Sync delivers one Actual as a single POST whose body carries all of the
 // Actual's entities. The Actual is the unit of atomicity, so one Actual is
 // one request — the receiver gets the whole committed transaction together,

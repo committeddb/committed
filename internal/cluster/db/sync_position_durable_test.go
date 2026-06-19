@@ -63,6 +63,14 @@ type probeSyncable struct {
 	s  *wal.Storage
 	id string
 
+	// policy is the checkpoint cadence the worker reads via
+	// CheckpointConfigurable. Zero (the default for the durability tests) =
+	// Every=1, today's per-sync checkpoint. The cadence tests set it.
+	policy cluster.CheckpointPolicy
+	// syncDelay, when set, makes each user Sync block for this long — used by
+	// the MaxAge cadence test to let the age bound elapse between syncs.
+	syncDelay time.Duration
+
 	mu              sync.Mutex
 	persistedAtSync []uint64
 	count           int
@@ -71,9 +79,15 @@ type probeSyncable struct {
 	cancel func()
 }
 
+func (p *probeSyncable) CheckpointPolicy() cluster.CheckpointPolicy { return p.policy }
+
 func (p *probeSyncable) Sync(ctx context.Context, prop *cluster.Actual) (cluster.ShouldSnapshot, error) {
 	if allSystem(prop) {
 		return cluster.ShouldSnapshot(false), nil
+	}
+
+	if p.syncDelay > 0 {
+		time.Sleep(p.syncDelay)
 	}
 
 	idx, err := p.s.GetSyncableIndex(p.id)

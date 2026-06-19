@@ -66,11 +66,17 @@ func (p *SyncableParser) ParseConfig(v *cluster.ParsedConfig) (*Config, error) {
 		}
 	}
 
+	policy, err := cluster.ParseCheckpointPolicy(v)
+	if err != nil {
+		return nil, fmt.Errorf("[http.syncable-parser] %w", err)
+	}
+
 	return &Config{
-		Topic:     topic,
-		URL:       url,
-		Method:    method,
-		TimeoutMs: timeoutMs,
-		Headers:   headers,
+		Topic:      topic,
+		URL:        url,
+		Method:     method,
+		TimeoutMs:  timeoutMs,
+		Headers:    headers,
+		Checkpoint: policy,
 	}, nil
 }

@@ -184,6 +184,38 @@ func TestWrap_PreservesBatchInterface(t *testing.T) {
 	}
 }
 
+// cadenceSyncable is a recordingSyncable that also carries a checkpoint
+// policy, to verify the wrapper forwards CheckpointConfigurable.
+type cadenceSyncable struct {
+	recordingSyncable
+	policy cluster.CheckpointPolicy
+}
+
+func (c *cadenceSyncable) CheckpointPolicy() cluster.CheckpointPolicy { return c.policy }
+
+// TestWrap_ForwardsCheckpointPolicy guards the layering trap: the worker only
+// sees the migration wrapper, so if the wrapper didn't forward
+// CheckpointConfigurable a ModeAlwaysCurrent syncable would silently lose its
+// configured cadence. A wrapped configurable syncable must expose the same
+// policy; a wrapped non-configurable one exposes the zero policy (which the
+// worker resolves to its default).
+func TestWrap_ForwardsCheckpointPolicy(t *testing.T) {
+	r := &stubResolver{types: map[string]*cluster.Type{}}
+
+	want := cluster.CheckpointPolicy{Every: 25, MaxAge: 500_000_000} // 500ms
+	wrapped := migration.Wrap(&cadenceSyncable{policy: want}, r, nil)
+	cc, ok := wrapped.(cluster.CheckpointConfigurable)
+	require.True(t, ok, "wrapper must implement CheckpointConfigurable")
+	require.Equal(t, want, cc.CheckpointPolicy(), "wrapper must forward the wrapped policy")
+
+	// A wrapped syncable that doesn't configure cadence yields the zero
+	// policy, not a panic.
+	plain := migration.Wrap(&recordingSyncable{}, r, nil)
+	pc, ok := plain.(cluster.CheckpointConfigurable)
+	require.True(t, ok)
+	require.Equal(t, cluster.CheckpointPolicy{}, pc.CheckpointPolicy())
+}
+
 // Ensure fmt stays imported for future debug use; tests above don't
 // reach it directly but the package keeps it around.
 var _ = fmt.Sprintf

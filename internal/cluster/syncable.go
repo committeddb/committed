@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -159,6 +160,72 @@ func ParseSyncableMode(s string) (SyncableMode, error) {
 type BatchSyncable interface {
 	Syncable
 	SyncBatch(ctx context.Context, as []*Actual) (shouldSnapshot bool, err error)
+}
+
+// CheckpointPolicy tunes how often a syncable worker persists its
+// SyncableIndex checkpoint — the trade-off between the per-checkpoint raft
+// round-trip and how many already-synced proposals a crash re-delivers.
+//
+//   - Every: persist the checkpoint once per Every successful syncs (the
+//     shouldSnapshot=true boundaries). 1 (the default) checkpoints every
+//     sync — today's behavior. A larger value THINS checkpoints: a crash
+//     re-delivers up to Every already-synced proposals, so only raise it for
+//     idempotent sinks; leave it at 1 for non-idempotent sinks like webhooks
+//     (every duplicate is externally visible — see
+//     sync-fail-fast-bump-tracking).
+//   - MaxAge: an upper bound on how long a validated-but-unpersisted
+//     checkpoint may sit before being flushed, independent of count. 0
+//     disables the age bound — the worker still flushes on reaching Every and
+//     whenever it catches up (reader EOF), so even an idle syncable never
+//     lags its checkpoint forever.
+//
+// Cadence can only THIN which valid boundaries get persisted; it never
+// persists a boundary the syncable didn't validate (shouldSnapshot=true means
+// "everything through this index is durably committed downstream"), so it can
+// never advance the index past un-synced data, and it cannot checkpoint finer
+// than the syncable's own transaction granularity. For a BatchSyncable, Every
+// doubles as the batch size and MaxAge as the batch-age flush.
+type CheckpointPolicy struct {
+	Every  int
+	MaxAge time.Duration
+}
+
+// CheckpointConfigurable is the optional Syncable extension that carries a
+// CheckpointPolicy. The worker type-asserts it (exactly like BatchSyncable);
+// a syncable that doesn't implement it runs at the default cadence. The
+// syncable parser stamps the policy from the [syncable] TOML onto the
+// syncable's config, and the ModeAlwaysCurrent migration wrapper forwards it.
+type CheckpointConfigurable interface {
+	CheckpointPolicy() CheckpointPolicy
+}
+
+// ParseCheckpointPolicy reads the optional checkpoint-cadence fields from the
+// common [syncable] TOML section — checkpointEvery (int >= 1) and
+// checkpointMaxAge (a duration string like "500ms" or "1s"). Unset fields
+// stay zero, which the worker resolves to the path-appropriate default
+// (checkpoint-every-sync for single syncables, the batch limits for batch
+// syncables). Returns an error on a malformed value so a typo surfaces at
+// config-parse time rather than silently running the wrong cadence.
+func ParseCheckpointPolicy(v *ParsedConfig) (CheckpointPolicy, error) {
+	var p CheckpointPolicy
+	if v.IsSet("syncable.checkpointEvery") {
+		every := v.GetInt("syncable.checkpointEvery")
+		if every < 1 {
+			return CheckpointPolicy{}, fmt.Errorf("syncable.checkpointEvery must be >= 1, got %d", every)
+		}
+		p.Every = every
+	}
+	if s := v.GetString("syncable.checkpointMaxAge"); s != "" {
+		d, err := time.ParseDuration(s)
+		if err != nil {
+			return CheckpointPolicy{}, fmt.Errorf("syncable.checkpointMaxAge %q: %w", s, err)
+		}
+		if d < 0 {
+			return CheckpointPolicy{}, fmt.Errorf("syncable.checkpointMaxAge must be >= 0, got %s", d)
+		}
+		p.MaxAge = d
+	}
+	return p, nil
 }
 
 // SyncableParser parses a config document into a Syncable

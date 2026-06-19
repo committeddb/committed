@@ -39,15 +39,28 @@ const (
 	syncBackoffMax = 500 * time.Millisecond
 )
 
-// syncBatch{MaxSize,MaxAge} control how db.sync batches proposals when
-// the Syncable implements BatchSyncable. Proposals are buffered until
-// either MaxSize proposals accumulate or MaxAge elapses since the first
-// proposal in the batch, whichever comes first. A partial batch is also
-// flushed immediately when the reader returns EOF (caught up).
+// syncBatch{MaxSize,MaxAge} are the DEFAULT batch limits when the Syncable
+// implements BatchSyncable: proposals buffer until either MaxSize accumulate
+// or MaxAge elapses since the first proposal in the batch, whichever comes
+// first (a partial batch is also flushed on reader EOF). A syncable's
+// CheckpointPolicy overrides these per-syncable (Every→size, MaxAge→age).
 const (
 	syncBatchMaxSize = 100
 	syncBatchMaxAge  = 50 * time.Millisecond
 )
+
+// checkpointPolicyOf returns the syncable's configured checkpoint cadence, or
+// the zero policy if it doesn't implement CheckpointConfigurable. The worker
+// fills path-appropriate defaults (see syncSingle / syncBatch) for any zero
+// field, so an unconfigured syncable runs exactly as before. The
+// ModeAlwaysCurrent migration wrapper forwards this, so a wrapped syncable
+// keeps its TOML cadence.
+func checkpointPolicyOf(s cluster.Syncable) cluster.CheckpointPolicy {
+	if cc, ok := s.(cluster.CheckpointConfigurable); ok {
+		return cc.CheckpointPolicy()
+	}
+	return cluster.CheckpointPolicy{}
+}
 
 // Sync registers a Syncable to run as a worker for the given ID. See
 // db.Ingest for the registry semantics — Sync is the syncable-side
@@ -132,6 +145,18 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 	var r ActualReader
 	backoff := syncBackoffMin
 
+	// Checkpoint cadence. every is how many successful syncs accumulate
+	// before a mid-stream bump (default 1 = checkpoint every sync, today's
+	// behavior); maxAge optionally bounds how long a pending checkpoint may
+	// sit (0 = no age bound — EOF and the count still flush, so an idle
+	// syncable never lags). See cluster.CheckpointPolicy.
+	policy := checkpointPolicyOf(s)
+	every := policy.Every
+	if every < 1 {
+		every = 1
+	}
+	maxAge := policy.MaxAge
+
 	// retryActual holds an Actual that failed with a transient error. On
 	// the next iteration the worker retries the same Actual instead of
 	// reading a new one from the log — transient errors retry forever, so
@@ -155,6 +180,15 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 	// batch path already advances to the consumed head and needs no analogue.
 	var lastSeen, lastBumped uint64
 
+	// pendingCount is the number of successful syncs (validated
+	// shouldSnapshot=true boundaries) accumulated since the last durable
+	// checkpoint; pendingSince is when the first of them happened. The
+	// mid-stream bump fires once pendingCount reaches `every` OR maxAge
+	// elapses — thinning checkpoints per the cadence (sync-checkpoint-cadence).
+	// Reset on a leadership transition and after each successful bump.
+	var pendingCount int
+	var pendingSince time.Time
+
 	for {
 		// Cheap non-blocking ctx check at the top so a cancellation
 		// observed mid-iteration short-circuits the next round.
@@ -177,6 +211,7 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 			isNode = false
 			retryActual = nil
 			lastSeen, lastBumped = 0, 0
+			pendingCount = 0
 			tracker.cleared(ctx)
 			progressed = true
 		case !isNode && db.isNode(id):
@@ -185,6 +220,7 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 			isNode = true
 			retryActual = nil
 			lastSeen, lastBumped = 0, 0
+			pendingCount = 0
 			tracker.cleared(ctx)
 			progressed = true
 		case isNode && db.isNode(id):
@@ -239,6 +275,11 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 				// EOF frequency, not entry count, so it does not reintroduce
 				// per-entry bumps and does not grow the log while idle (once
 				// lastBumped == lastSeen, subsequent EOFs are no-ops).
+				//
+				// This EOF flush is also the cadence's caught-up trigger: it
+				// persists any pending sub-`every` tail the count hasn't flushed
+				// yet, so a low-traffic syncable never lags its checkpoint
+				// forever (sync-checkpoint-cadence constraint 2).
 				if lastSeen > lastBumped {
 					if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: lastSeen}); err != nil {
 						// Bump orphaned (ctx canceled, or leader change). Leave
@@ -248,6 +289,7 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 							zap.String("id", id), zap.Uint64("index", lastSeen), zap.Error(err))
 					} else {
 						lastBumped = lastSeen
+						pendingCount = 0
 						progressed = true
 					}
 				}
@@ -314,31 +356,48 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 					retryErr = nil
 					tracker.cleared(ctx)
 				}
+				// Decided this entry (synced — matched or topic-skipped via
+				// shouldSnapshot=false — or permanently errored just above):
+				// it's part of the consumed head, even if no checkpoint is
+				// written here. The io.EOF handler closes any lastSeen−lastBumped
+				// gap when the worker catches up.
+				lastSeen = i
+
+				// Count validated checkpoint boundaries (shouldSnapshot=true)
+				// toward the cadence; the mid-stream bump THINS them. It fires
+				// once `every` have accumulated, or once maxAge has elapsed since
+				// the first pending one (maxAge==0 disables the age bound — the
+				// count and the EOF flush still bound staleness). Skips don't
+				// count, but an age-triggered flush still advances the checkpoint
+				// past them since it targets lastSeen, the consumed head. At the
+				// default every==1 this bumps on every matched sync, exactly as
+				// before.
 				if shouldSnapshot {
-					if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: i}); err != nil {
+					if pendingCount == 0 {
+						pendingSince = time.Now()
+					}
+					pendingCount++
+				}
+				if pendingCount > 0 && (pendingCount >= every || (maxAge > 0 && time.Since(pendingSince) >= maxAge)) {
+					if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: lastSeen}); err != nil {
 						// The bump did not durably apply — ctx canceled by a
 						// replace/Close, or ErrProposalUnknown/ErrProposalLost
-						// after a leader change orphaned the bump. Do NOT advance
-						// past this proposal: re-sync and re-bump it on the next
-						// iteration so the persisted index never trails the
-						// reader by more than the one in-flight proposal. A crash
-						// here costs at most one duplicate on recovery instead of
-						// a storm. The re-sync relies on the Syncable contract's
-						// replay-idempotency requirement (see cluster.Syncable);
-						// on ctx cancellation the loop-top check exits before
-						// retrying.
+						// after a leader change orphaned the bump. Do NOT advance:
+						// retry the same entry + bump on the next iteration (we
+						// don't read ahead, so the synced-but-unbumped set can't
+						// exceed the cadence). A crash here re-delivers at most
+						// `every` already-synced proposals. The re-sync relies on
+						// the Syncable contract's replay-idempotency requirement
+						// (see cluster.Syncable); on ctx cancellation the loop-top
+						// check exits before retrying.
 						db.logger.Warn("proposeSyncableIndex error, will retry",
-							zap.String("id", id), zap.Uint64("index", i), zap.Error(err))
+							zap.String("id", id), zap.Uint64("index", lastSeen), zap.Error(err))
 						retryActual = a
 						break
 					}
-					lastBumped = i // durably checkpointed this index
+					lastBumped = lastSeen // durably checkpointed through here
+					pendingCount = 0
 				}
-				// Decided this entry (synced — matched or topic-skipped via
-				// shouldSnapshot=false — or permanently errored just above):
-				// it's part of the consumed head, even if no bump was issued.
-				// The io.EOF handler closes any lastSeen−lastBumped gap.
-				lastSeen = i
 				progressed = true
 			}
 			// case !isNode && !db.isNode(id): no work, no state change.
@@ -369,6 +428,21 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 	isNode := false
 	var r ActualReader
 	backoff := syncBackoffMin
+
+	// Batch limits come from the syncable's CheckpointPolicy (Every→size,
+	// MaxAge→age), each falling back to the package default when unset. One
+	// bump per batch is already the cadence, so this is the whole of cadence
+	// for the batch path: a bigger batch checkpoints less often and
+	// re-delivers up to one batch on crash. See cluster.CheckpointPolicy.
+	policy := checkpointPolicyOf(s)
+	maxSize := policy.Every
+	if maxSize < 1 {
+		maxSize = syncBatchMaxSize
+	}
+	maxAge := policy.MaxAge
+	if maxAge <= 0 {
+		maxAge = syncBatchMaxAge
+	}
 
 	// batch accumulates Actuals until a flush; each Actual carries its own
 	// Index, so the flush can advance SyncableIndex to the last in the batch.
@@ -526,7 +600,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 				batch = append(batch, a)
 
 				// Flush if batch is full or has aged past the deadline.
-				if len(batch) >= syncBatchMaxSize || time.Since(batchStart) >= syncBatchMaxAge {
+				if len(batch) >= maxSize || time.Since(batchStart) >= maxAge {
 					if flush() {
 						progressed = true
 					}

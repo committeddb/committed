@@ -435,6 +435,41 @@ leader when a follower answers. `POST /v1/membership`,
 change membership live; see
 [`docs/operations/membership.md`](docs/operations/membership.md).
 
+### Syncable checkpoint cadence
+
+After each successful sync a syncable durably checkpoints its progress
+(`SyncableIndex`) through raft, so recovery is deterministic — but that is one
+raft round-trip per checkpoint. Two optional `[syncable]` fields tune how often
+it happens, trading that round-trip against how many already-synced proposals a
+crash re-delivers:
+
+```toml
+[syncable]
+name = "warehouse"
+type = "sql"
+checkpointEvery   = 500      # checkpoint once per 500 successful syncs (default 1)
+checkpointMaxAge  = "1s"     # ...or once 1s elapses since the first pending one
+```
+
+- **`checkpointEvery`** (default `1`) — persist the checkpoint once per this
+  many successful syncs. The worker always also flushes when it catches up
+  (reaches the end of the log), so a low-traffic syncable never lags its
+  checkpoint regardless of this value.
+- **`checkpointMaxAge`** (a duration like `"500ms"`; default: no age bound for
+  single syncables, 50ms for batch) — flush a pending checkpoint after this
+  long even if `checkpointEvery` hasn't been reached.
+
+**Duplicate bound:** a crash re-delivers **at most `checkpointEvery`**
+already-synced proposals. The default of `1` re-delivers at most one — keep it
+at `1` for **non-idempotent** sinks (an HTTP webhook, an event stream: every
+duplicate is externally visible). Raise it only for **idempotent** sinks (the
+`sql` / `sql-projection` dialects upsert, so a replay is a harmless no-op),
+where it trades that bounded duplicate exposure for substantially fewer raft
+round-trips on a fast destination. For a `BatchSyncable` (the SQL dialects)
+`checkpointEvery` is the batch size and `checkpointMaxAge` the batch-age flush.
+Making a larger cadence *safe* on a non-idempotent sink is separate work; see
+the cross-reference in `sync-fail-fast-bump-tracking`.
+
 ### Testing
 
 | Target | Scope |

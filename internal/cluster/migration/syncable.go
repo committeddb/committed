@@ -46,6 +46,20 @@ func (s *single) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldSna
 
 func (s *single) Close() error { return s.inner.Close() }
 
+// CheckpointPolicy forwards the wrapped syncable's checkpoint cadence so a
+// ModeAlwaysCurrent syncable keeps the cadence parsed from its TOML — the
+// worker only sees this wrapper, so without the forward the policy would be
+// lost and the syncable would silently run at the default cadence. A wrapped
+// syncable that doesn't configure cadence yields the zero policy, which the
+// worker resolves to its default. batchSyncable embeds single, so it inherits
+// this. See cluster.CheckpointConfigurable.
+func (s *single) CheckpointPolicy() cluster.CheckpointPolicy {
+	if cc, ok := s.inner.(cluster.CheckpointConfigurable); ok {
+		return cc.CheckpointPolicy()
+	}
+	return cluster.CheckpointPolicy{}
+}
+
 type batchSyncable struct {
 	single
 	batch cluster.BatchSyncable

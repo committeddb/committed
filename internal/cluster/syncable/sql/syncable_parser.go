@@ -64,6 +64,11 @@ func (p *SyncableParser) ParseConfig(v *cluster.ParsedConfig, storage cluster.Da
 		return nil, fmt.Errorf("[sql.syncable-parser] parse sql.indexes: %w", err)
 	}
 
+	policy, err := cluster.ParseCheckpointPolicy(v)
+	if err != nil {
+		return nil, fmt.Errorf("[sql.syncable-parser] %w", err)
+	}
+
 	config := &Config{
 		Database:   db,
 		Topic:      topic,
@@ -72,6 +77,7 @@ func (p *SyncableParser) ParseConfig(v *cluster.ParsedConfig, storage cluster.Da
 		Indexes:    indexes,
 		PrimaryKey: primaryKey,
 		KeyColumn:  keyColumn,
+		Checkpoint: policy,
 	}
 
 	return config, nil

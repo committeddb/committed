@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -63,6 +64,68 @@ url = "http://example.com/hook"
 	require.Equal(t, "POST", config.Method)
 	require.Equal(t, 5000, config.TimeoutMs)
 	require.Empty(t, config.Headers)
+	// No cadence configured → zero policy (the worker resolves it to the
+	// default Every=1 for this single-path syncable).
+	require.Equal(t, cluster.CheckpointPolicy{}, config.Checkpoint)
+}
+
+func TestParseConfig_Checkpoint(t *testing.T) {
+	toml := `
+[syncable]
+name = "cadenced"
+type = "http"
+checkpointEvery = 50
+checkpointMaxAge = "250ms"
+
+[http]
+topic = "t1"
+url = "http://example.com/hook"
+`
+	v := readConfig(t, "toml", bytes.NewBufferString(toml))
+	p := &synchttp.SyncableParser{}
+	config, err := p.ParseConfig(v)
+	require.NoError(t, err)
+	require.Equal(t, cluster.CheckpointPolicy{Every: 50, MaxAge: 250 * time.Millisecond}, config.Checkpoint)
+
+	// The constructed syncable exposes it via CheckpointConfigurable.
+	s := synchttp.New(config)
+	cc, ok := any(s).(cluster.CheckpointConfigurable)
+	require.True(t, ok, "http syncable must implement CheckpointConfigurable")
+	require.Equal(t, config.Checkpoint, cc.CheckpointPolicy())
+}
+
+func TestParseConfig_CheckpointRejectsBadEvery(t *testing.T) {
+	toml := `
+[syncable]
+name = "bad"
+type = "http"
+checkpointEvery = 0
+
+[http]
+topic = "t1"
+url = "http://example.com/hook"
+`
+	v := readConfig(t, "toml", bytes.NewBufferString(toml))
+	p := &synchttp.SyncableParser{}
+	_, err := p.ParseConfig(v)
+	require.Error(t, err, "checkpointEvery < 1 must be rejected at parse time")
+}
+
+func TestParseConfig_CheckpointRejectsBadMaxAge(t *testing.T) {
+	toml := `
+[syncable]
+name = "bad"
+type = "http"
+checkpointMaxAge = "not-a-duration"
+
+[http]
+topic = "t1"
+url = "http://example.com/hook"
+`
+	v := readConfig(t, "toml", bytes.NewBufferString(toml))
+	p := &synchttp.SyncableParser{}
+	_, err := p.ParseConfig(v)
+	require.Error(t, err, "a malformed checkpointMaxAge must be rejected at parse time")
 }
 
 func TestParseConfig_EnvExpansion(t *testing.T) {
