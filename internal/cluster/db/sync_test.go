@@ -108,7 +108,7 @@ func TestResumeSync(t *testing.T) {
 			seenPs := 0
 			seenPs2 := 0
 			for _, p := range storage.Proposals() {
-				if cluster.IsSystem(p.Entities[0].Type.ID) {
+				if cluster.IsInternal(p.Entities[0].Type.ID) {
 					continue
 				}
 				normal++
@@ -126,7 +126,7 @@ func TestResumeSync(t *testing.T) {
 			require.Equal(t, len(ps)+len(ps2), normal, "no extra normal proposals")
 
 			for i, got := range syncable2.Actuals() {
-				require.False(t, cluster.IsSystem(got.Entities[0].Type.ID))
+				require.False(t, cluster.IsInternal(got.Entities[0].Type.ID))
 				require.Equal(t, ps2[i].Entities, got.Entities)
 			}
 		})

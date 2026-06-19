@@ -143,6 +143,18 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 	var retryErr error
 	tracker := &stuckTracker{db: db, id: id}
 
+	// lastSeen is the highest index this worker has fully DECIDED on in the
+	// current leadership stint — synced, skipped because it wasn't this
+	// syncable's topic (shouldSnapshot=false), or dead-lettered. It is the
+	// consumed head. lastBumped is the highest index durably checkpointed
+	// (via a successful proposeSyncableIndex) in this stint. The gap between
+	// them is the trailing run of entries the worker read and cheaply skipped
+	// without bumping; the io.EOF handler closes it with one bump to lastSeen
+	// so a selective syncable's lag reads 0 at rest (consumed-head semantics —
+	// see syncable-progress-lag). Both reset on a leadership transition; the
+	// batch path already advances to the consumed head and needs no analogue.
+	var lastSeen, lastBumped uint64
+
 	for {
 		// Cheap non-blocking ctx check at the top so a cancellation
 		// observed mid-iteration short-circuits the next round.
@@ -164,6 +176,7 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 			r = nil
 			isNode = false
 			retryActual = nil
+			lastSeen, lastBumped = 0, 0
 			tracker.cleared(ctx)
 			progressed = true
 		case !isNode && db.isNode(id):
@@ -171,6 +184,7 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 			r = db.storage.Reader(id)
 			isNode = true
 			retryActual = nil
+			lastSeen, lastBumped = 0, 0
 			tracker.cleared(ctx)
 			progressed = true
 		case isNode && db.isNode(id):
@@ -191,6 +205,7 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 					db.recordSyncDeadLetter(ctx, id, i, "manual", retryErr)
 					retryActual = nil
 					retryErr = nil
+					lastSeen = i // decided (dead-lettered); part of the consumed head
 					tracker.honored(ctx)
 					progressed = true
 					break
@@ -204,7 +219,38 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 
 			switch {
 			case readErr == io.EOF:
-				// caught up; idle, will sleep below
+				// Caught up. If the consumed head (lastSeen) is past the last
+				// index durably checkpointed (lastBumped), advance the
+				// checkpoint to it with one bump. For a selective single
+				// syncable this closes the trailing run of other-topic /
+				// dead-lettered entries it read and cheaply skipped without
+				// bumping, so its lag reads 0 at rest instead of a phantom
+				// backlog (consumed-head semantics — see syncable-progress-lag).
+				//
+				// Safe: advancing to lastSeen never skips THIS syncable's
+				// un-synced data. Every entry ≤ lastSeen was synced
+				// (downstream-committed), was not this syncable's topic
+				// (nothing to sync), or was dead-lettered (durably recorded;
+				// the restart-time HasSyncableDeadLetter check re-excludes it
+				// regardless of where the checkpoint sits). The only entries it
+				// moves past are ones that were never this syncable's work.
+				//
+				// Cost: one bump per EOF only while a gap exists — bounded by
+				// EOF frequency, not entry count, so it does not reintroduce
+				// per-entry bumps and does not grow the log while idle (once
+				// lastBumped == lastSeen, subsequent EOFs are no-ops).
+				if lastSeen > lastBumped {
+					if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: lastSeen}); err != nil {
+						// Bump orphaned (ctx canceled, or leader change). Leave
+						// lastBumped behind; the next EOF retries. Don't set
+						// progressed — back off rather than spin on a wedged bump.
+						db.logger.Warn("EOF checkpoint bump error, will retry",
+							zap.String("id", id), zap.Uint64("index", lastSeen), zap.Error(err))
+					} else {
+						lastBumped = lastSeen
+						progressed = true
+					}
+				}
 			case readErr != nil:
 				db.logger.Warn("sync read error", zap.String("id", id), zap.Error(readErr))
 			default:
@@ -222,6 +268,7 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 						zap.String("id", id), zap.Uint64("index", i))
 					retryActual = nil
 					retryErr = nil
+					lastSeen = i // decided (already dead-lettered); part of the consumed head
 					tracker.cleared(ctx)
 					progressed = true
 					break
@@ -285,7 +332,13 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 						retryActual = a
 						break
 					}
+					lastBumped = i // durably checkpointed this index
 				}
+				// Decided this entry (synced — matched or topic-skipped via
+				// shouldSnapshot=false — or permanently errored just above):
+				// it's part of the consumed head, even if no bump was issued.
+				// The io.EOF handler closes any lastSeen−lastBumped gap.
+				lastSeen = i
 				progressed = true
 			}
 			// case !isNode && !db.isNode(id): no work, no state change.
@@ -602,4 +655,36 @@ func (db *DB) proposeSyncableIndex(ctx context.Context, i *cluster.SyncableIndex
 		db.metrics.SyncBumpCompleted(time.Since(start))
 	}
 	return err
+}
+
+// syncableProgressReporter is the optional Storage extension that exposes the
+// two numbers SyncableProgress needs: a syncable's persisted checkpoint
+// (GetSyncableIndex) and the global data-entry head (DataEventIndex).
+// wal.Storage implements it; the in-memory test doubles do not (progress is a
+// wal.Storage feature, exercised by wal-backed tests), so SyncableProgress
+// reports zeros on them rather than failing — same optional-interface shape as
+// scrubBacklogReporter.
+type syncableProgressReporter interface {
+	GetSyncableIndex(id string) (uint64, error)
+	DataEventIndex() uint64
+}
+
+// SyncableProgress returns the syncable's persisted checkpoint (the consumed
+// head it has synced / topic-skipped / dead-lettered through) and the local
+// data head (DataEventIndex). The HTTP status handler turns these into
+// lag = max(0, head − checkpoint) and caught_up. Both are O(1) local reads,
+// answerable on any node without a leader hop. A never-checkpointed syncable
+// reports checkpoint 0 (so lag == head). On a storage that doesn't track
+// progress (the in-memory test double) it reports (0, 0, nil); production
+// always uses wal.Storage. See cluster.Cluster.SyncableProgress.
+func (db *DB) SyncableProgress(id string) (checkpoint, head uint64, err error) {
+	r, ok := db.storage.(syncableProgressReporter)
+	if !ok {
+		return 0, 0, nil
+	}
+	checkpoint, err = r.GetSyncableIndex(id)
+	if err != nil {
+		return 0, 0, err
+	}
+	return checkpoint, r.DataEventIndex(), nil
 }

@@ -141,10 +141,6 @@ func (fake *FakeDatabase) GetTypeReturnsOnCall(i int, result1 string) {
 func (fake *FakeDatabase) Invocations() map[string][][]interface{} {
 	fake.invocationsMutex.RLock()
 	defer fake.invocationsMutex.RUnlock()
-	fake.closeMutex.RLock()
-	defer fake.closeMutex.RUnlock()
-	fake.getTypeMutex.RLock()
-	defer fake.getTypeMutex.RUnlock()
 	copiedInvocations := map[string][][]interface{}{}
 	for key, value := range fake.invocations {
 		copiedInvocations[key] = value

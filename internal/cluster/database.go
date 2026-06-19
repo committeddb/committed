@@ -23,7 +23,7 @@ var databaseType = registerSystemType(&Type{
 	ID:      "4698b77e-9a7c-41a2-aae4-984da0cd33c1",
 	Name:    "InternalDatabaseParser",
 	Version: 1,
-}, hiddenFromProposals)
+})
 
 func IsDatabase(id string) bool {
 	return id == databaseType.ID

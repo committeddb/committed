@@ -107,7 +107,7 @@ func TestSyncBatch_IndexAdvancesToLastInBatch(t *testing.T) {
 		if err != nil {
 			break
 		}
-		if len(a.Entities) > 0 && !cluster.IsSystem(a.Entities[0].Type.ID) {
+		if len(a.Entities) > 0 && !cluster.IsInternal(a.Entities[0].Type.ID) {
 			normalIndices = append(normalIndices, a.Index)
 		}
 	}

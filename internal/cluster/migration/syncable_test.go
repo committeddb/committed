@@ -86,7 +86,7 @@ func TestWrap_SkipsWhenAtLatest(t *testing.T) {
 }
 
 func TestWrap_PassesSystemEntitiesThrough(t *testing.T) {
-	// IsSystem returns true for typeType.ID, so a Type-upsert proposal
+	// IsInternal returns true for typeType.ID, so a Type-upsert proposal
 	// should not trigger a resolver lookup.
 	r := &stubResolver{types: map[string]*cluster.Type{}} // empty
 

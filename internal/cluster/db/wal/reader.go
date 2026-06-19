@@ -101,12 +101,17 @@ func (r *Reader) Read() (*cluster.Actual, error) {
 			return nil, err
 		}
 
-		// Metadata proposals (syncable-index bumps, dead-letter records)
-		// are internal bookkeeping with no topic and shouldn't reach
-		// syncable projection code — a syncable would otherwise re-Sync
-		// its own dead letters. Skip them and keep scanning.
+		// Internal proposals — committed's own config (type / database /
+		// syncable / ingestable) and coordination (syncable index +
+		// dead-letters + stuck/skip, ingestable position, scrub, etc.) —
+		// are not topic data and must NOT be projected into a syncable: a
+		// syncable would otherwise re-Sync its own dead letters, and
+		// committed's control plane would leak out of band into every
+		// downstream sink. Skip them so a syncable sees only user-defined
+		// topic data (ingested data included — it rides under user topic
+		// types). Keep scanning.
 		if len(p.Entities) > 0 {
-			if !cluster.IsSyncableMetadata(p.Entities[0].Type.ID) {
+			if !cluster.IsInternal(p.Entities[0].Type.ID) {
 				return &cluster.Actual{Index: ent.Index, Entities: p.Entities}, nil
 			}
 		}

@@ -21,7 +21,7 @@ var nodeAPIURLType = registerSystemType(&Type{
 	ID:      "65499eaa-5910-4798-8cc5-0c2d996658e3",
 	Name:    "InternalNodeAPIURL",
 	Version: 1,
-}, hiddenFromProposals)
+})
 
 func IsNodeAPIURL(id string) bool {
 	return id == nodeAPIURLType.ID

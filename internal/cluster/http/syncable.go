@@ -135,21 +135,40 @@ func (h *HTTP) DeadLetterStuckSyncable(w httpgo.ResponseWriter, r *httpgo.Reques
 	_, _ = w.Write(bs)
 }
 
-// SyncableStatusResponse is the lean operational status of a syncable's
-// worker — currently just whether it is blocked, and if so on what.
+// SyncableStatusResponse is the operational status of a syncable's worker:
+// whether it is blocked (and on what), plus its numeric progress (how far it
+// has synced vs. how far there is to sync).
 type SyncableStatusResponse struct {
 	Stuck bool `json:"stuck"`
 	// Index, Since, and Message are present only when stuck.
 	Index   uint64 `json:"index,omitempty"`
 	Since   string `json:"since,omitempty"`
 	Message string `json:"message,omitempty"`
+
+	// Progress fields are ALWAYS present (not only when stuck). Distinct
+	// from Index above, which is the stuck-only "index it's blocked on".
+	//
+	// CheckpointIndex is the persisted SyncableIndex — the consumed head the
+	// worker has synced, topic-skipped, or dead-lettered through.
+	// HeadIndex is DataEventIndex — the highest data (non-metadata) raft
+	// index on this node, the head the worker converges to at EOF. Lag is
+	// max(0, HeadIndex − CheckpointIndex) and CaughtUp is Lag == 0, which is
+	// true exactly when the worker has nothing left to process. See the
+	// consumed-head semantics in syncable-progress-lag.
+	CheckpointIndex uint64 `json:"checkpoint_index"`
+	HeadIndex       uint64 `json:"head_index"`
+	Lag             uint64 `json:"lag"`
+	CaughtUp        bool   `json:"caught_up"`
 }
 
-// GetSyncableStatus reports whether a syncable's worker is currently blocked
-// retrying a transient error (GET /syncable/{id}/status). Backed by
-// replicated state, so any node answers identically — this is how an operator
-// (or a dashboard) discovers a wedged syncable behind a load balancer, and
-// the index to expect when they POST .../deadletter/.
+// GetSyncableStatus reports a syncable worker's operational status
+// (GET /syncable/{id}/status): whether it is blocked retrying a transient
+// error, and its numeric progress — checkpoint_index / head_index / lag /
+// caught_up. Backed by replicated + local apply state read behind the same
+// linearize barrier, so any node answers identically and without a leader
+// hop — this is how an operator (or a dashboard) discovers a wedged syncable
+// behind a load balancer (and the index to expect when they POST
+// .../deadletter/), and answers "is it caught up?" (lag == 0).
 func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 	id := r.PathValue("id")
 	if id == "" {
@@ -167,12 +186,30 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 
+	checkpoint, head, err := h.c.SyncableProgress(id)
+	if err != nil {
+		writeInternalError(w, "failed to retrieve syncable progress", err)
+		return
+	}
+
 	resp := SyncableStatusResponse{Stuck: ok}
 	if ok {
 		resp.Index = stuck.Index
 		resp.Since = time.Unix(0, stuck.SinceUnixNano).UTC().Format(time.RFC3339Nano)
 		resp.Message = stuck.Message
 	}
+
+	// Both numbers are sourced behind the same linearize barrier above, so
+	// checkpoint (replicated apply state) and head (local apply state) are
+	// mutually consistent and head ≥ checkpoint on the default path. Clamp
+	// anyway as belt-and-suspenders, and for ?consistency=stale reads on a
+	// lagging follower where the two could momentarily cross.
+	resp.CheckpointIndex = checkpoint
+	resp.HeadIndex = head
+	if head > checkpoint {
+		resp.Lag = head - checkpoint
+	}
+	resp.CaughtUp = resp.Lag == 0
 
 	bs, err := json.Marshal(resp)
 	if err != nil {

@@ -1648,27 +1648,58 @@ components:
 
     SyncableStatusResponse:
       type: object
-      required: [stuck]
-      description: A syncable worker's current operational status.
+      required: [stuck, checkpoint_index, head_index, lag, caught_up]
+      description: A syncable worker's current operational status and progress.
       properties:
         stuck:
           type: boolean
           description: |
             True if the worker has been blocked retrying a transient error
-            past the stuck threshold. The remaining fields are present only
-            when true.
+            past the stuck threshold. The `index`, `since`, and `message`
+            fields are present only when true.
         index:
           type: integer
           format: int64
           minimum: 0
-          description: Raft index the worker is blocked on (pass to .../deadletter/).
+          description: Raft index the worker is blocked on (pass to .../deadletter/). Present only when stuck.
         since:
           type: string
           format: date-time
-          description: When the worker first wedged on this proposal (RFC 3339, UTC).
+          description: When the worker first wedged on this proposal (RFC 3339, UTC). Present only when stuck.
         message:
           type: string
-          description: Truncated last transient error.
+          description: Truncated last transient error. Present only when stuck.
+        checkpoint_index:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            Persisted SyncableIndex — the consumed head this worker has synced,
+            topic-skipped, or dead-lettered through. 0 if it has never
+            checkpointed. Always present.
+        head_index:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            Highest user-topic-data raft index applied on this node — the head
+            the worker converges to when caught up. Excludes committed's
+            internal entries (its configs and all coordination: index bumps,
+            dead-letters, ingest positions, etc.) the syncable reader skips, so
+            it is NOT the cluster commit index. Always present.
+        lag:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            max(0, head_index - checkpoint_index) — how many data entries this
+            syncable still has to process. 0 exactly when caught up. A
+            selective syncable may transiently report a small positive lag under
+            sustained cross-topic load (it reads and cheaply skips other topics
+            to advance its consumed head) and returns to 0 at rest. Always present.
+        caught_up:
+          type: boolean
+          description: True iff lag == 0 — the syncable has nothing left to process. Always present.
 
     AddMemberRequest:
       type: object

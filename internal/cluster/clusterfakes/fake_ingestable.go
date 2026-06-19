@@ -157,10 +157,6 @@ func (fake *FakeIngestable) IngestReturnsOnCall(i int, result1 error) {
 func (fake *FakeIngestable) Invocations() map[string][][]interface{} {
 	fake.invocationsMutex.RLock()
 	defer fake.invocationsMutex.RUnlock()
-	fake.closeMutex.RLock()
-	defer fake.closeMutex.RUnlock()
-	fake.ingestMutex.RLock()
-	defer fake.ingestMutex.RUnlock()
 	copiedInvocations := map[string][][]interface{}{}
 	for key, value := range fake.invocations {
 		copiedInvocations[key] = value

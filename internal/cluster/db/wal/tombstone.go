@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 
 	bolt "go.etcd.io/bbolt"
+
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 // Event-log tombstones drive the RTBF scrubber. When a user-defined (topic)
@@ -40,21 +42,14 @@ func tombstoneKey(typeID string, key []byte) []byte {
 	return out
 }
 
-// isUserDefinedType reports whether id is a user-defined (topic) type — i.e. not
-// one of the built-in entity types handled by internalEntities. Only
-// user-defined entities carry application PII that RTBF scrubs; built-in config
-// and coordination entities are never tombstoned. Derived from the same table
-// applyEntity dispatches on, so a new built-in type is classified correctly
-// without editing this predicate. (cluster.IsSystem is unsuitable here: the
-// ingestable config/position types are deliberately not hidden-from-proposals,
-// so IsSystem reports false for them.)
+// isUserDefinedType reports whether id is a user-defined (topic) type — i.e.
+// not a built-in committed type. Only user-defined entities carry application
+// PII that RTBF scrubs; built-in config and coordination entities are never
+// tombstoned. It is the negation of cluster.IsInternal — the single source of
+// truth for the user-vs-internal line (the systemTypes registry) — so it stays
+// correct as built-ins are added without editing this predicate.
 func isUserDefinedType(id string) bool {
-	for _, ie := range internalEntities {
-		if ie.is(id) {
-			return false
-		}
-	}
-	return true
+	return !cluster.IsInternal(id)
 }
 
 // recordEventTombstone appends deleteIndex to the (type, key)'s tombstone list.

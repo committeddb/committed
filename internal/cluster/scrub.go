@@ -19,7 +19,7 @@ var scrubType = registerSystemType(&Type{
 	ID:      "45a0b2d1-99e7-4cf2-958c-a7c7e797d3ab",
 	Name:    "InternalScrub",
 	Version: 1,
-}, hiddenFromProposals)
+})
 
 // scrubKey is the fixed entity key for a Scrub command. A Scrub is a command,
 // not a keyed resource — the apply path dispatches on the type id alone — so

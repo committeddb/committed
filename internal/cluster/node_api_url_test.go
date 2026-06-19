@@ -30,11 +30,11 @@ func TestNewNodeAPIURLEntity(t *testing.T) {
 	require.Equal(t, "http://n7:8080", got.APIURL)
 }
 
-// The node-api-url type is hidden from the default Proposals() listing like
-// every other system type, so an operator never sees the cluster's internal
-// address bookkeeping among their own data.
-func TestNodeAPIURL_IsSystemType(t *testing.T) {
-	require.True(t, IsSystem(nodeAPIURLType.ID))
+// The node-api-url type is a built-in committed type, so it is filtered out
+// of the syncable projection stream — an operator's syncable never sees the
+// cluster's internal address bookkeeping among their own topic data.
+func TestNodeAPIURL_IsInternalType(t *testing.T) {
+	require.True(t, IsInternal(nodeAPIURLType.ID))
 	require.False(t, IsNodeAPIURL("not-the-type"))
 	require.False(t, IsNodeAPIURL(""))
 }

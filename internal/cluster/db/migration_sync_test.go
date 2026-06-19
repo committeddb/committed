@@ -47,7 +47,7 @@ func (c *captureSyncable) Sync(ctx context.Context, p *cluster.Actual) (cluster.
 	// delivers everything on the log.
 	allSystem := true
 	for _, e := range p.Entities {
-		if !cluster.IsSystem(e.ID) {
+		if !cluster.IsInternal(e.ID) {
 			allSystem = false
 			break
 		}

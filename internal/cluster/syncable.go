@@ -88,6 +88,16 @@ type ShouldSnapshot bool
 //   - An Actual's entities are one atomic unit (one committed transaction);
 //     apply them together (e.g. in one destination transaction).
 //
+//   - A syncable sees ONLY user-defined topic data — including data an
+//     ingestable pulled in, which is written under user topic types.
+//     committed's own internal entries (its type/database/syncable/ingestable
+//     configs and all coordination records — progress indexes, dead-letters,
+//     stuck/skip status, ingestable positions, scrub commands) are filtered
+//     out before they reach Sync and never appear in the stream. A syncable
+//     therefore cannot (and must not try to) observe committed's control
+//     plane through the projection path; query the config read endpoints
+//     (GET /type, /database, /syncable, and their version history) for that.
+//
 //   - Sync errors are retried with exponential backoff. Wrap with
 //     cluster.Permanent(err) to skip the Actual instead of retrying.
 //
@@ -162,7 +172,7 @@ var syncableType = registerSystemType(&Type{
 	ID:      "0cd18065-a0e2-4c19-a4d6-f824f1898cb5",
 	Name:    "InternalSyncableParser",
 	Version: 1,
-}, hiddenFromProposals)
+})
 
 func IsSyncable(id string) bool {
 	return id == syncableType.ID
@@ -181,7 +191,7 @@ var syncableIndexType = registerSystemType(&Type{
 	ID:      "ab972bba-83fe-4dea-9c5d-877645e8d21e",
 	Name:    "InternalSyncableIndex",
 	Version: 1,
-}, hiddenFromProposals, syncableMetadata)
+})
 
 type SyncableIndex struct {
 	ID    string
@@ -223,7 +233,7 @@ var syncableDeadLetterType = registerSystemType(&Type{
 	ID:      "5f3b6c8e-1d2a-4e7b-9c0f-2a8d6b4e1f93",
 	Name:    "InternalSyncableDeadLetter",
 	Version: 1,
-}, hiddenFromProposals, syncableMetadata)
+})
 
 // SyncableDeadLetter records that a syncable gave up on and skipped (dead-
 // lettered) the proposal at raft Index. It is proposed by the sync worker —
@@ -317,7 +327,7 @@ var syncableStuckType = registerSystemType(&Type{
 	ID:      "8a1c4d2e-7b3f-4a6c-9e8d-1f5b2c7a9d04",
 	Name:    "InternalSyncableStuck",
 	Version: 1,
-}, hiddenFromProposals, syncableMetadata)
+})
 
 // SyncableStuck records that a syncable's worker is currently blocked
 // retrying a transient error on the proposal at Index (for a batch syncable,
@@ -378,7 +388,7 @@ var syncableSkipRequestType = registerSystemType(&Type{
 	ID:      "3d9e6b1a-5c2f-4d7b-8a0e-6f4c1b8d3e25",
 	Name:    "InternalSyncableSkipRequest",
 	Version: 1,
-}, hiddenFromProposals, syncableMetadata)
+})
 
 // SyncableSkipRequest is the operator's request (proposed by the dead-letter
 // endpoint from any node) for a syncable's worker to skip what it is blocked
@@ -422,16 +432,4 @@ func NewUpsertSyncableSkipRequestEntity(r *SyncableSkipRequest) (*Entity, error)
 // NewDeleteSyncableSkipRequestEntity clears the skip request for a syncable.
 func NewDeleteSyncableSkipRequestEntity(id string) *Entity {
 	return NewDeleteEntity(syncableSkipRequestType, []byte(id))
-}
-
-// IsSyncableMetadata reports whether a type ID identifies a syncable's own
-// internal coordination state — its progress index, dead-letter records
-// (including the type-keyed migration dead letters), and stuck /
-// skip-request status. These ride in the permanent event log like any
-// other entity, but they must NOT be projected back into a syncable (a
-// syncable re-Syncing its own dead letters would loop), so every event-log
-// reader filters them out at read time. Derived from the type registry (the
-// syncableMetadata flag), so a new such type is classified at its definition.
-func IsSyncableMetadata(typeID string) bool {
-	return systemTypes[typeID].syncableMeta
 }

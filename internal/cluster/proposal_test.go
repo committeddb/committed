@@ -195,3 +195,37 @@ func TestUnmarshalSurfacesResolverErrors(t *testing.T) {
 		t.Fatal("expected Unmarshal to fail when the resolver has no record of the type")
 	}
 }
+
+// TestIsInternal_HidesEveryBuiltInFromSyncables locks in the single predicate
+// that keeps committed's control plane out of the syncable projection stream.
+// It must cover EVERY built-in type — notably the ingestable config and
+// position, which an earlier "hidden from listing" flag (since removed) did
+// NOT cover, and which is why classification is membership in the systemTypes
+// registry rather than a per-type flag. A user-defined topic type must NOT be
+// internal.
+func TestIsInternal_HidesEveryBuiltInFromSyncables(t *testing.T) {
+	builtins := map[string]string{
+		"type config":          typeType.ID,
+		"database config":      databaseType.ID,
+		"syncable config":      syncableType.ID,
+		"ingestable config":    ingestableType.ID,
+		"ingestable position":  ingestablePositionType.ID,
+		"syncable index":       syncableIndexType.ID,
+		"syncable dead-letter": syncableDeadLetterType.ID,
+		"syncable stuck":       syncableStuckType.ID,
+		"syncable skip":        syncableSkipRequestType.ID,
+		"scrub":                scrubType.ID,
+		"node api url":         nodeAPIURLType.ID,
+		"migration dl":         typeMigrationDeadLetterType.ID,
+	}
+	for name, id := range builtins {
+		if !IsInternal(id) {
+			t.Errorf("%s (%s) must be internal so the syncable reader hides it", name, id)
+		}
+	}
+
+	// A user-defined topic type flows through to syncables.
+	if IsInternal("a-user-defined-topic-type") {
+		t.Error("user-defined topic types must not be classified internal")
+	}
+}

@@ -113,9 +113,10 @@ func TestScrub_GappedReader(t *testing.T) {
 		require.Nil(t, err)
 		idxs = append(idxs, a.Index)
 	}
-	// idx 2 (alice PII) is gone; 1 (type), 3 (bob), 4 (alice delete), 5 (carol)
+	// idx 2 (alice PII) is gone; idx 1 (the type registration) is internal and
+	// filtered from the syncable stream; 3 (bob), 4 (alice delete), 5 (carol)
 	// remain, in ascending order across the raftIndex gap.
-	require.Equal(t, []uint64{1, 3, 4, 5}, idxs)
+	require.Equal(t, []uint64{3, 4, 5}, idxs)
 }
 
 // TestScrub_SurvivesRestart verifies the rewritten log persists and that
@@ -206,8 +207,9 @@ func TestScrub_ReaderMidStreamNotDesynced(t *testing.T) {
 	saveEntity(t, userUpsert("u", "carol", `{"ok":2}`), s, 1, 5)
 
 	r := s.Reader("midstream")
-	// Read up to and including bob (raft index 3): type(1), alice(2), bob(3).
-	for _, want := range []uint64{1, 2, 3} {
+	// Read up to and including bob (raft index 3): the type registration (1)
+	// is internal and filtered, so the stream is alice(2), bob(3).
+	for _, want := range []uint64{2, 3} {
 		a, err := r.Read()
 		require.Nil(t, err)
 		require.Equal(t, want, a.Index)

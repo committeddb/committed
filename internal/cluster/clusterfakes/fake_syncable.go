@@ -158,10 +158,6 @@ func (fake *FakeSyncable) SyncReturnsOnCall(i int, result1 cluster.ShouldSnapsho
 func (fake *FakeSyncable) Invocations() map[string][][]interface{} {
 	fake.invocationsMutex.RLock()
 	defer fake.invocationsMutex.RUnlock()
-	fake.closeMutex.RLock()
-	defer fake.closeMutex.RUnlock()
-	fake.syncMutex.RLock()
-	defer fake.syncMutex.RUnlock()
 	copiedInvocations := map[string][][]interface{}{}
 	for key, value := range fake.invocations {
 		copiedInvocations[key] = value

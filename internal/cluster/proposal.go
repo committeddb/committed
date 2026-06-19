@@ -124,6 +124,25 @@ func RequestIDFromProposal(bs []byte) (uint64, error) {
 	return lp.RequestID, nil
 }
 
+// FirstEntityTypeID decodes a marshaled Proposal and returns the type ID of
+// its first entity, plus whether the proposal had one, WITHOUT resolving
+// types. Recovery/scan paths in db/wal use it to classify an entry — data
+// vs. syncable-metadata — when they only need the type ID and must not depend
+// on the entity's type being resolvable (a type may have been scrubbed, or
+// bbolt may sit at a different point on an rsync-restored node, either of
+// which would make the type-resolving Unmarshal fail on a perfectly readable
+// classification). Returns ("", false, nil) for a proposal with no entities.
+func FirstEntityTypeID(bs []byte) (string, bool, error) {
+	lp := &clusterpb.LogProposal{}
+	if err := proto.Unmarshal(bs, lp); err != nil {
+		return "", false, err
+	}
+	if len(lp.LogEntities) == 0 || lp.LogEntities[0].Type == nil {
+		return "", false, nil
+	}
+	return lp.LogEntities[0].Type.GetID(), true, nil
+}
+
 // Unmarshal decodes a marshaled Proposal and hydrates each entity's Type
 // via the resolver. The resolver is required: every production call site
 // has one, and a nil resolver indicates a programming bug. Type lookup
@@ -173,56 +192,53 @@ func resolveType(ref TypeRef, r TypeResolver) (*Type, error) {
 	return r.ResolveType(ref)
 }
 
-// systemType, IsSystem, and IsSyncableMetadata are all derived from
-// systemTypes — the registry of built-in (non-user) entity types. Each
-// built-in type registers itself once, at its definition, via
-// registerSystemType, so nothing here is edited to add a type. That is what
-// keeps "resolvable on the apply path" (systemType) and "hidden from the
-// default Proposals() listing" (IsSystem) from drifting out of sync.
-type sysType struct {
-	typ          *Type
-	hideFromList bool // excluded from the default Proposals() listing (IsSystem)
-	syncableMeta bool // a syncable's own coordination state, filtered from projection (IsSyncableMetadata)
-}
-
-var systemTypes = map[string]sysType{}
-
-type sysTypeOpt func(*sysType)
-
-// hiddenFromProposals marks a built-in type as excluded from the default
-// Proposals() listing — config and syncable coordination state, but not
-// ingestable data, which is surfaced by design.
-func hiddenFromProposals(s *sysType) { s.hideFromList = true }
-
-// syncableMetadata marks a built-in type as a syncable's own coordination
-// state (its index, dead letters, stuck/skip status), filtered from syncable
-// projection so a syncable never re-Syncs its own bookkeeping.
-func syncableMetadata(s *sysType) { s.syncableMeta = true }
-
-// registerSystemType records a built-in type's identity and classification
-// and returns it, so a type's var definition doubles as its registration:
+// systemTypes is the single registry of built-in (committed-internal) entity
+// types — every config (type, database, syncable, ingestable) and every
+// coordination record (syncable index / dead-letters / stuck / skip,
+// ingestable position, scrub, node-API-URL, migration dead-letters). Each
+// built-in registers itself once, at its definition, via registerSystemType,
+// so adding a built-in is one line at its definition and nothing here changes.
 //
-//	var fooType = registerSystemType(&Type{...}, hiddenFromProposals)
+// It is the one source of truth for the two questions the rest of the system
+// asks about a type: "is it resolvable on the apply path without a storage
+// lookup?" (systemType) and "is it committed-internal rather than user topic
+// data?" (IsInternal). Those used to be split across this registry plus
+// hide-from-listing / syncable-metadata flags and a parallel wal dispatch
+// table; they are now all derived from membership here.
+var systemTypes = map[string]*Type{}
+
+// registerSystemType records a built-in type and returns it, so a type's var
+// definition doubles as its registration:
+//
+//	var fooType = registerSystemType(&Type{...})
 //
 // Called from package-var initialisers, which Go runs (after systemTypes is
 // initialised, by dependency order) before any proposal is applied.
-func registerSystemType(t *Type, opts ...sysTypeOpt) *Type {
-	info := sysType{typ: t}
-	for _, o := range opts {
-		o(&info)
-	}
-	systemTypes[t.ID] = info
+func registerSystemType(t *Type) *Type {
+	systemTypes[t.ID] = t
 	return t
 }
 
-// systemType returns the package-var Type for a built-in meta-type ID, or nil
-// for a user-defined type. Built-in types are hardcoded vars stored in no
-// bucket, so the apply path resolves them here without a resolver lookup —
-// without which it would fatal-crash the first time such an entity commits.
+// systemType returns the package-var Type for a built-in type ID, or nil for a
+// user-defined type. Built-in types are hardcoded vars stored in no bucket, so
+// the apply path resolves them here without a resolver lookup — without which
+// it would fatal-crash the first time such an entity commits.
 func systemType(id string) *Type {
-	return systemTypes[id].typ
+	return systemTypes[id]
 }
 
-func IsSystem(id string) bool {
-	return systemTypes[id].hideFromList
+// IsInternal reports whether id identifies a built-in committed type — any
+// config (type, database, syncable, ingestable) or coordination record
+// (syncable index / dead-letters / stuck / skip, ingestable position, scrub,
+// node-API-URL, migration dead-letters) — as opposed to a user-defined topic
+// type. It is membership in systemTypes: the single line between committed's
+// control plane and user data.
+//
+// The per-syncable event-log reader skips IsInternal entries so a syncable
+// only ever sees user topic data — including ingested data, which is written
+// under user-defined topic types, not the internal ingestable type. This keeps
+// committed's control plane (its configs and coordination) out of the
+// data-projection stream, which is otherwise an out-of-band read path.
+func IsInternal(id string) bool {
+	return systemType(id) != nil
 }

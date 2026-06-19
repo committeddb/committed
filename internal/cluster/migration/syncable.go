@@ -76,7 +76,7 @@ func migrateEntities(r Resolver, m *metrics.Metrics, es []*cluster.Entity) ([]*c
 		// the migration chain would corrupt it into a permanent error and
 		// silently drop the erasure. The downstream syncable branches on
 		// IsDelete() to honor it.
-		if cluster.IsSystem(e.ID) || e.IsDelete() {
+		if cluster.IsInternal(e.ID) || e.IsDelete() {
 			out = append(out, e)
 			continue
 		}

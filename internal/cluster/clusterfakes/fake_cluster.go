@@ -444,6 +444,21 @@ type FakeCluster struct {
 		result1 []cluster.SyncableDeadLetter
 		result2 error
 	}
+	SyncableProgressStub        func(string) (uint64, uint64, error)
+	syncableProgressMutex       sync.RWMutex
+	syncableProgressArgsForCall []struct {
+		arg1 string
+	}
+	syncableProgressReturns struct {
+		result1 uint64
+		result2 uint64
+		result3 error
+	}
+	syncableProgressReturnsOnCall map[int]struct {
+		result1 uint64
+		result2 uint64
+		result3 error
+	}
 	SyncableStuckStub        func(string) (cluster.SyncableStuck, bool, error)
 	syncableStuckMutex       sync.RWMutex
 	syncableStuckArgsForCall []struct {
@@ -2736,6 +2751,73 @@ func (fake *FakeCluster) SyncableDeadLettersReturnsOnCall(i int, result1 []clust
 	}{result1, result2}
 }
 
+func (fake *FakeCluster) SyncableProgress(arg1 string) (uint64, uint64, error) {
+	fake.syncableProgressMutex.Lock()
+	ret, specificReturn := fake.syncableProgressReturnsOnCall[len(fake.syncableProgressArgsForCall)]
+	fake.syncableProgressArgsForCall = append(fake.syncableProgressArgsForCall, struct {
+		arg1 string
+	}{arg1})
+	stub := fake.SyncableProgressStub
+	fakeReturns := fake.syncableProgressReturns
+	fake.recordInvocation("SyncableProgress", []interface{}{arg1})
+	fake.syncableProgressMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2, ret.result3
+	}
+	return fakeReturns.result1, fakeReturns.result2, fakeReturns.result3
+}
+
+func (fake *FakeCluster) SyncableProgressCallCount() int {
+	fake.syncableProgressMutex.RLock()
+	defer fake.syncableProgressMutex.RUnlock()
+	return len(fake.syncableProgressArgsForCall)
+}
+
+func (fake *FakeCluster) SyncableProgressCalls(stub func(string) (uint64, uint64, error)) {
+	fake.syncableProgressMutex.Lock()
+	defer fake.syncableProgressMutex.Unlock()
+	fake.SyncableProgressStub = stub
+}
+
+func (fake *FakeCluster) SyncableProgressArgsForCall(i int) string {
+	fake.syncableProgressMutex.RLock()
+	defer fake.syncableProgressMutex.RUnlock()
+	argsForCall := fake.syncableProgressArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeCluster) SyncableProgressReturns(result1 uint64, result2 uint64, result3 error) {
+	fake.syncableProgressMutex.Lock()
+	defer fake.syncableProgressMutex.Unlock()
+	fake.SyncableProgressStub = nil
+	fake.syncableProgressReturns = struct {
+		result1 uint64
+		result2 uint64
+		result3 error
+	}{result1, result2, result3}
+}
+
+func (fake *FakeCluster) SyncableProgressReturnsOnCall(i int, result1 uint64, result2 uint64, result3 error) {
+	fake.syncableProgressMutex.Lock()
+	defer fake.syncableProgressMutex.Unlock()
+	fake.SyncableProgressStub = nil
+	if fake.syncableProgressReturnsOnCall == nil {
+		fake.syncableProgressReturnsOnCall = make(map[int]struct {
+			result1 uint64
+			result2 uint64
+			result3 error
+		})
+	}
+	fake.syncableProgressReturnsOnCall[i] = struct {
+		result1 uint64
+		result2 uint64
+		result3 error
+	}{result1, result2, result3}
+}
+
 func (fake *FakeCluster) SyncableStuck(arg1 string) (cluster.SyncableStuck, bool, error) {
 	fake.syncableStuckMutex.Lock()
 	ret, specificReturn := fake.syncableStuckReturnsOnCall[len(fake.syncableStuckArgsForCall)]
@@ -3242,96 +3324,6 @@ func (fake *FakeCluster) TypesReturnsOnCall(i int, result1 []*cluster.Configurat
 func (fake *FakeCluster) Invocations() map[string][][]interface{} {
 	fake.invocationsMutex.RLock()
 	defer fake.invocationsMutex.RUnlock()
-	fake.addDatabaseParserMutex.RLock()
-	defer fake.addDatabaseParserMutex.RUnlock()
-	fake.addLearnerMutex.RLock()
-	defer fake.addLearnerMutex.RUnlock()
-	fake.addMemberMutex.RLock()
-	defer fake.addMemberMutex.RUnlock()
-	fake.addSyncableParserMutex.RLock()
-	defer fake.addSyncableParserMutex.RUnlock()
-	fake.appliedIndexMutex.RLock()
-	defer fake.appliedIndexMutex.RUnlock()
-	fake.closeMutex.RLock()
-	defer fake.closeMutex.RUnlock()
-	fake.configBuildErrorsMutex.RLock()
-	defer fake.configBuildErrorsMutex.RUnlock()
-	fake.databaseVersionMutex.RLock()
-	defer fake.databaseVersionMutex.RUnlock()
-	fake.databaseVersionsMutex.RLock()
-	defer fake.databaseVersionsMutex.RUnlock()
-	fake.databasesMutex.RLock()
-	defer fake.databasesMutex.RUnlock()
-	fake.deadLetterStuckSyncableMutex.RLock()
-	defer fake.deadLetterStuckSyncableMutex.RUnlock()
-	fake.diskAdmissionMutex.RLock()
-	defer fake.diskAdmissionMutex.RUnlock()
-	fake.diskStateMutex.RLock()
-	defer fake.diskStateMutex.RUnlock()
-	fake.iDMutex.RLock()
-	defer fake.iDMutex.RUnlock()
-	fake.ingestMutex.RLock()
-	defer fake.ingestMutex.RUnlock()
-	fake.ingestableVersionMutex.RLock()
-	defer fake.ingestableVersionMutex.RUnlock()
-	fake.ingestableVersionsMutex.RLock()
-	defer fake.ingestableVersionsMutex.RUnlock()
-	fake.ingestablesMutex.RLock()
-	defer fake.ingestablesMutex.RUnlock()
-	fake.leaderMutex.RLock()
-	defer fake.leaderMutex.RUnlock()
-	fake.linearizableReadMutex.RLock()
-	defer fake.linearizableReadMutex.RUnlock()
-	fake.memberAPIURLMutex.RLock()
-	defer fake.memberAPIURLMutex.RUnlock()
-	fake.membershipMutex.RLock()
-	defer fake.membershipMutex.RUnlock()
-	fake.promoteMemberMutex.RLock()
-	defer fake.promoteMemberMutex.RUnlock()
-	fake.proposeMutex.RLock()
-	defer fake.proposeMutex.RUnlock()
-	fake.proposeDatabaseMutex.RLock()
-	defer fake.proposeDatabaseMutex.RUnlock()
-	fake.proposeDeleteTypeMutex.RLock()
-	defer fake.proposeDeleteTypeMutex.RUnlock()
-	fake.proposeIngestableMutex.RLock()
-	defer fake.proposeIngestableMutex.RUnlock()
-	fake.proposeSyncableMutex.RLock()
-	defer fake.proposeSyncableMutex.RUnlock()
-	fake.proposeTypeMutex.RLock()
-	defer fake.proposeTypeMutex.RUnlock()
-	fake.removeMemberMutex.RLock()
-	defer fake.removeMemberMutex.RUnlock()
-	fake.replaySyncableDeadLetterMutex.RLock()
-	defer fake.replaySyncableDeadLetterMutex.RUnlock()
-	fake.replayTypeMigrationDeadLetterMutex.RLock()
-	defer fake.replayTypeMigrationDeadLetterMutex.RUnlock()
-	fake.reportDiskMutex.RLock()
-	defer fake.reportDiskMutex.RUnlock()
-	fake.resolveTypeMutex.RLock()
-	defer fake.resolveTypeMutex.RUnlock()
-	fake.scrubMutex.RLock()
-	defer fake.scrubMutex.RUnlock()
-	fake.syncMutex.RLock()
-	defer fake.syncMutex.RUnlock()
-	fake.syncableDeadLettersMutex.RLock()
-	defer fake.syncableDeadLettersMutex.RUnlock()
-	fake.syncableStuckMutex.RLock()
-	defer fake.syncableStuckMutex.RUnlock()
-	fake.syncableVersionMutex.RLock()
-	defer fake.syncableVersionMutex.RUnlock()
-	fake.syncableVersionsMutex.RLock()
-	defer fake.syncableVersionsMutex.RUnlock()
-	fake.syncablesMutex.RLock()
-	defer fake.syncablesMutex.RUnlock()
-	fake.typeMigrationDeadLettersMutex.RLock()
-	defer fake.typeMigrationDeadLettersMutex.RUnlock()
-	fake.typeVersionMutex.RLock()
-	defer fake.typeVersionMutex.RUnlock()
-	fake.typeVersionsMutex.RLock()
-	defer fake.typeVersionsMutex.RUnlock()
-	fake.typesMutex.RLock()
-	defer fake.typesMutex.RUnlock()
 	copiedInvocations := map[string][][]interface{}{}
 	for key, value := range fake.invocations {
 		copiedInvocations[key] = value

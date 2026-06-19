@@ -278,6 +278,7 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 				fake.SyncableStuckReturns(cluster.SyncableStuck{
 					ID: "sync-1", Index: 7, SinceUnixNano: 1_700_000_000_000_000_000, Message: "boom",
 				}, true, nil)
+				fake.SyncableProgressReturns(1234, 1240, nil)
 			},
 		},
 		{

@@ -31,11 +31,9 @@ func TestReader(t *testing.T) {
 			ps := pc.createAndSaveProposals(t, tt.inputs)
 
 			r := s.Reader("qux")
-			// Drain the "string" type-registration entry the reader
-			// surfaces before user-data proposals.
-			if _, err := r.Read(); err != nil {
-				t.Fatalf("drain type entry: %v", err)
-			}
+			// The reader filters committed's internal entries (the "string"
+			// type registration included — see cluster.IsInternal), so it
+			// surfaces only the user-data proposals, in order.
 
 			for _, expected := range ps {
 				got, err := r.Read()
@@ -77,11 +75,10 @@ func TestReaderSkipsSyncableIndexes(t *testing.T) {
 			}
 
 			r := s.Reader(id)
-			// Drain the "string" type-registration entry the reader
-			// surfaces before user-data proposals.
-			if _, err := r.Read(); err != nil {
-				t.Fatalf("drain type entry: %v", err)
-			}
+			// The reader filters committed's internal entries — the "string"
+			// type registration AND the interleaved syncable-index bumps (see
+			// cluster.IsInternal) — so it surfaces only the user-data
+			// proposals (psAssert), in order.
 
 			for _, expected := range psAssert {
 				got, err := r.Read()
@@ -109,13 +106,9 @@ func TestEOF(t *testing.T) {
 			s.RegisterType(t, "string", 1, 1)
 
 			r := s.Reader("qux")
-			// The reader surfaces the type-registration entry first
-			// (Reader only filters SyncableIndex entries, not Type
-			// upserts). Drain it so the user-data assertions below are
-			// positional.
-			if _, err := r.Read(); err != nil {
-				t.Fatalf("drain type entry: %v", err)
-			}
+			// The reader filters committed's internal entries (the type
+			// registration at index 1 included — see cluster.IsInternal), so
+			// it surfaces only the user-data proposals below, in order.
 
 			ps := createProposals(tt.inputs)
 			for i, p := range ps {
@@ -154,22 +147,17 @@ func TestResumeReader(t *testing.T) {
 			ps := pc.createAndSaveProposals(t, tt.firstRead)
 
 			r := s.Reader(id)
-			// Drain the "string" type-registration entry the reader
-			// surfaces before user-data proposals. Track its index so
-			// `index` reflects the last user-proposal index at the end
-			// of the loop (the persisted syncable position after this
-			// first read pass).
+			// The reader filters committed's internal entries (the "string"
+			// type registration, conf-changes, syncable-index bumps — see
+			// cluster.IsInternal), so it surfaces only the user-data
+			// proposals. Track the last user-proposal index read; it becomes
+			// the persisted syncable position for the second read pass. Stays
+			// 0 when the first read is empty.
 			var index uint64
-			if a, err := r.Read(); err != nil {
-				t.Fatalf("drain type entry: %v", err)
-			} else {
-				index = a.Index
-			}
-
 			for _, expected := range ps {
 				got, err := r.Read()
-				index = got.Index
 				require.Equal(t, nil, err)
+				index = got.Index
 				require.Equal(t, expected.Entities, got.Entities)
 			}
 

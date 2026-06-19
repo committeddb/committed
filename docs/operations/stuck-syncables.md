@@ -42,10 +42,12 @@ the one running the worker, and it survives a leader change.
   curl -H "Authorization: Bearer $TOKEN" \
     http://node:8080/v1/syncable/orders/status
   # {"stuck":true,"index":4123,"since":"2026-06-02T14:00:00Z",
-  #  "message":"ERROR: value too long for type character varying(20)"}
+  #  "message":"ERROR: value too long for type character varying(20)",
+  #  "checkpoint_index":4122,"head_index":4200,"lag":78,"caught_up":false}
   ```
 
   `index` is the raft index it's wedged on; `message` is the last error.
+  The `index`/`since`/`message` fields are present only when `stuck` is true.
 - **Corroborating signals.** `committed_sync_errors_total{syncable_id,kind="transient"}`
   climbs with no progress, the syncable's persisted index stops advancing,
   and the worker logs `transient sync error, will retry` on each attempt.
@@ -53,6 +55,45 @@ the one running the worker, and it survives a leader change.
 The stuck threshold debounces the signal so a normal blip that recovers in a
 few seconds never flags. It is currently fixed at **30 seconds** (tunable in
 a future release).
+
+## Telling how far behind a syncable is (lag)
+
+The status endpoint also answers the everyday question — *is this syncable
+caught up, and if not, by how much?* — with four fields that are **always
+present**, stuck or not:
+
+- `checkpoint_index` — how far the syncable has processed (its persisted
+  resume cursor).
+- `head_index` — how far there is to process: the highest **user-topic-data**
+  entry on this node. It deliberately excludes committed's internal entries —
+  its configs and all coordination (index bumps, dead-letter records, ingest
+  positions, …), which never reach a syncable — so it is **not** the cluster
+  commit index.
+- `lag` — `max(0, head_index − checkpoint_index)`, i.e. how many data entries
+  are still to go. Render "synced through X of Y" as `checkpoint_index` of
+  `head_index`.
+- `caught_up` — `true` exactly when `lag == 0`.
+
+**The guarantee:** `lag == 0` ⇔ the syncable has nothing left to do, for both
+SQL and webhook-style syncables. Computing lag against the raw commit index
+would be wrong — it counts the syncable's own progress bumps and every other
+syncable's traffic, so a perfectly caught-up syncable would show a permanent
+non-zero "backlog". `head_index` counts only what a syncable actually consumes,
+which is what makes `0` mean `0`.
+
+The read is O(1) and answerable from **any node** without a leader hop, so it
+is safe to poll (e.g. every ~5s) for a dashboard "caught up / N behind"
+indicator. Pass `?consistency=stale` to skip the quorum round-trip on a
+follower if you can tolerate slightly stale numbers.
+
+**One caveat for selective syncables.** A syncable that consumes only some
+topics advances its checkpoint past entries on *other* topics that it reads
+and cheaply skips (this keeps its restart cost low — it never re-scans a
+firehose of other-topic entries). Under sustained cross-topic write load its
+`lag` can therefore transiently overstate its own backlog while it reads
+through (and skips) other topics to advance its consumed cursor. It returns to
+`0` at rest. The number answers "is it caught up?" correctly; it is not a
+per-topic backlog count.
 
 ## Unsticking it
 

@@ -340,6 +340,23 @@ type Storage struct {
 	// from the serveChannels goroutine (first write) and the scrub worker
 	// (under eventMu.Lock), so the atomic is for race-free reads, not CAS.
 	firstEventIndex atomic.Uint64
+	// dataEventIndex is the highest raft index of a user-topic-DATA entry
+	// applied on this node — the head the per-syncable reader converges to
+	// at EOF, since the reader skips committed's internal entries (config +
+	// all coordination: index bumps, dead-letters, stuck/skip, positions,
+	// scrub, …). It is the reference for per-syncable lag: lag = max(0,
+	// dataEventIndex − checkpoint), which is 0 exactly when a worker is
+	// genuinely caught up (see SyncableProgress / GET /syncable/{id}/status).
+	// Distinct from eventIndex, which counts ALL applied entries (internal
+	// included) and so would show a permanent phantom backlog for an idle
+	// syncable.
+	//
+	// Bumped in ApplyCommitted with the same IsInternal filter the reader
+	// uses, so the two agree by construction. Monotonic (entries apply in
+	// index order). Mutated only from the serveChannels goroutine
+	// (ApplyCommitted) and Open; the atomic is for race-free reads from the
+	// HTTP status path on other goroutines, not CAS.
+	dataEventIndex atomic.Uint64
 
 	logger *zap.Logger
 	// metrics drives the committed.wal.corrupt_entries counter, bumped by
@@ -615,6 +632,47 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 			return nil, fmt.Errorf("event log unmarshal first entry: %w", err)
 		}
 		ws.firstEventIndex.Store(first.Index)
+
+		// Derive dataEventIndex (the head for per-syncable lag) by scanning
+		// the event log backward from the tail to the first user-topic-data
+		// entry, mirroring the reader's IsInternal filter. ApplyCommitted
+		// skips already-applied entries on restart, so this Open-time
+		// derivation — not replay — is what sets the head for the existing
+		// log (and it is the only source on an rsync-restored node, which
+		// never replays apply). The trailing internal run (index bumps,
+		// dead-letters, config, positions) is normally tiny; cap the scan so
+		// a pathological tail can't make Open O(log). On the cap, or any
+		// read / decode failure, leave the head at 0: under-reporting it only
+		// makes lag look smaller, never negative, and the next applied data
+		// entry corrects it.
+		const dataHeadBackscanCap = 4096
+		for seq, scanned := evLast, 0; seq >= evFirst && scanned < dataHeadBackscanCap; seq, scanned = seq-1, scanned+1 {
+			raw, rerr := ws.readEventAt(seq)
+			if rerr != nil {
+				ws.logger.Warn("dataEventIndex backscan: read failed; leaving head at 0",
+					zap.Uint64("seq", seq), zap.Error(rerr))
+				break
+			}
+			e := &pb.Entry{}
+			if uerr := e.Unmarshal(raw); uerr != nil {
+				ws.logger.Warn("dataEventIndex backscan: entry unmarshal failed; leaving head at 0",
+					zap.Uint64("seq", seq), zap.Error(uerr))
+				break
+			}
+			if e.Type != pb.EntryNormal || len(e.Data) == 0 {
+				continue
+			}
+			typeID, ok, derr := cluster.FirstEntityTypeID(e.Data)
+			if derr != nil {
+				ws.logger.Warn("dataEventIndex backscan: proposal decode failed; leaving head at 0",
+					zap.Uint64("seq", seq), zap.Uint64("index", e.Index), zap.Error(derr))
+				break
+			}
+			if ok && !cluster.IsInternal(typeID) {
+				ws.dataEventIndex.Store(e.Index)
+				break
+			}
+		}
 	}
 
 	// Load the highest completed scrub bound so the worker skips redundant
@@ -994,6 +1052,17 @@ func (s *Storage) ApplyCommitted(entry pb.Entry) error {
 			return fmt.Errorf("[wal.storage] unmarshal proposal at index %d: %w", entry.Index, err)
 		}
 
+		// Advance the data-entry head iff this is user topic data — exactly
+		// the filter the per-syncable reader applies in reader.go, so
+		// dataEventIndex tracks the index the reader converges to at EOF.
+		// Internal entries (committed's config + coordination) are skipped
+		// here just as the reader skips them, so an idle syncable's lag
+		// reads 0 rather than a phantom backlog of trailing internal
+		// entries. Monotonic: entries apply in index order.
+		if len(p.Entities) > 0 && !cluster.IsInternal(p.Entities[0].Type.ID) {
+			s.dataEventIndex.Store(entry.Index)
+		}
+
 		for _, entity := range p.Entities {
 			s.logger.Debug("applying entity", zap.String("typeID", entity.Type.ID), zap.String("key", string(entity.Key)))
 			if err := s.applyEntity(entity); err != nil {
@@ -1056,6 +1125,18 @@ func (s *Storage) AppliedIndex() uint64 {
 // or brand-new node eventLog starts empty and EventIndex is 0.
 func (s *Storage) EventIndex() uint64 {
 	return s.eventIndex.Load()
+}
+
+// DataEventIndex returns the highest raft index of a DATA (non-metadata)
+// entry applied on this node — the head a per-syncable reader converges to
+// at EOF. It is the reference for per-syncable lag (lag = max(0,
+// DataEventIndex − checkpoint)); unlike EventIndex it excludes the
+// syncable-metadata entries the reader skips, so a caught-up syncable reads
+// lag 0 instead of a phantom backlog of trailing index bumps. O(1), local,
+// and replicated-deterministic (every node applied through index i computes
+// the same value). 0 on a node that has applied no data entries yet.
+func (s *Storage) DataEventIndex() uint64 {
+	return s.dataEventIndex.Load()
 }
 
 // RaftLogApproxSize returns the approximate on-disk size (bytes) of the

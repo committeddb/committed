@@ -111,10 +111,10 @@ func TestRebuild_EndToEnd(t *testing.T) {
 		require.Nil(t, err)
 		count++
 	}
-	// Reader filters only SyncableIndex proposals (see reader.go); a
-	// Type entity and a user event both flow through, so a fresh
-	// syncable sees 2.
-	require.Equal(t, 2, count, "rebuilt node should replay every non-internal entry through the Reader")
+	// The Reader filters committed's internal entries (the Type
+	// registration included — see cluster.IsInternal); only the user
+	// event flows through, so a fresh syncable sees 1.
+	require.Equal(t, 1, count, "rebuilt node should replay every user-data entry through the Reader")
 }
 
 // copyDir replicates the rsync from the healthy peer: walks src and

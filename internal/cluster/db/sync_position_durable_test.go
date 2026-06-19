@@ -40,13 +40,14 @@ func seedUserProposals(t *testing.T, d *db.DB, s *wal.Storage, typeID string, pa
 }
 
 // allSystem reports whether every entity in p is a system entity (type,
-// syncable, database, syncable-index). The sync worker delivers system
-// proposals to syncables alongside user data; tests that care only about
-// user data skip them — and crucially do NOT bump the index for them, so
-// the persisted index tracks user proposals exactly.
+// syncable, database, syncable-index). The per-syncable reader now filters
+// committed's internal entries out of the stream entirely (see
+// cluster.IsInternal), so a syncable no longer receives them and this guard
+// is belt-and-suspenders — it stays so a test syncable that somehow sees one
+// still won't bump the index for it.
 func allSystem(a *cluster.Actual) bool {
 	for _, e := range a.Entities {
-		if !cluster.IsSystem(e.ID) {
+		if !cluster.IsInternal(e.ID) {
 			return false
 		}
 	}

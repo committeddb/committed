@@ -21,7 +21,7 @@ func TestNewScrubEntity(t *testing.T) {
 	e, err := NewScrubEntity(99)
 	require.Nil(t, err)
 	require.True(t, IsScrub(e.Type.ID))
-	require.True(t, IsSystem(e.Type.ID), "scrub is hidden from the proposals listing")
+	require.True(t, IsInternal(e.Type.ID), "scrub is a built-in/internal type, hidden from syncables")
 	require.False(t, e.IsDelete())
 
 	s := &Scrub{}

@@ -70,6 +70,18 @@ type Cluster interface {
 	// by replicated state, so any node answers identically — powers
 	// GET /syncable/{id}/status.
 	SyncableStuck(id string) (SyncableStuck, bool, error)
+	// SyncableProgress returns the syncable's checkpoint (the persisted
+	// SyncableIndex — the consumed head it has synced, topic-skipped, or
+	// dead-lettered through) and head (the highest data-entry raft index
+	// applied on this node, i.e. DataEventIndex). The caller computes
+	// lag = max(0, head − checkpoint); lag == 0 exactly when the worker has
+	// nothing left to process. Both are O(1) local reads answerable on any
+	// node without a leader hop — head excludes the syncable-metadata
+	// entries (index bumps, dead-letters) the reader skips, so an idle
+	// syncable reads lag 0 rather than a phantom backlog. A never-checkpointed
+	// syncable reports checkpoint 0 (and lag == head). Powers the progress
+	// fields on GET /syncable/{id}/status.
+	SyncableProgress(id string) (checkpoint, head uint64, err error)
 	// ReplaySyncableDeadLetter re-drives a dead-lettered proposal: it
 	// re-runs the syncable's Sync for the proposal at index and, on success,
 	// clears the dead-letter record. Node-agnostic. Returns ErrNotDeadLettered

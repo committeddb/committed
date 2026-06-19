@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/http"
 )
 
 // TestGetSyncableErrors_Success asserts the handler renders dead-letter
@@ -177,10 +178,12 @@ func TestGetSyncableStatus_Stuck(t *testing.T) {
 	require.Equal(t, "downstream rejected the row", got.Message)
 }
 
-// TestGetSyncableStatus_NotStuck reports a healthy syncable as not stuck.
+// TestGetSyncableStatus_NotStuck reports a healthy syncable as not stuck. The
+// stuck-only fields are omitted, but the progress fields are always present.
 func TestGetSyncableStatus_NotStuck(t *testing.T) {
 	h, fake := setupTest()
 	fake.SyncableStuckReturns(cluster.SyncableStuck{}, false, nil)
+	fake.SyncableProgressReturns(0, 0, nil)
 
 	req := httptest.NewRequest("GET", "http://localhost/v1/syncable/sync-1/status", nil)
 	w := httptest.NewRecorder()
@@ -190,7 +193,81 @@ func TestGetSyncableStatus_NotStuck(t *testing.T) {
 	require.Equal(t, 200, resp.StatusCode)
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	require.JSONEq(t, `{"stuck":false}`, string(body))
+	require.JSONEq(t, `{"stuck":false,"checkpoint_index":0,"head_index":0,"lag":0,"caught_up":true}`, string(body))
+}
+
+// progressResponse decodes the full status response including the
+// always-present progress fields.
+type progressResponse struct {
+	Stuck           bool   `json:"stuck"`
+	CheckpointIndex uint64 `json:"checkpoint_index"`
+	HeadIndex       uint64 `json:"head_index"`
+	Lag             uint64 `json:"lag"`
+	CaughtUp        bool   `json:"caught_up"`
+}
+
+func getStatus(t *testing.T, h *http.HTTP) progressResponse {
+	t.Helper()
+	req := httptest.NewRequest("GET", "http://localhost/v1/syncable/sync-1/status", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	resp := w.Result()
+	require.Equal(t, 200, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	var got progressResponse
+	require.NoError(t, json.Unmarshal(body, &got))
+	return got
+}
+
+// TestGetSyncableStatus_Behind renders the "X of Y, N behind" case: a healthy
+// (not stuck) syncable whose checkpoint trails the data head reports a
+// positive lag and caught_up=false. The progress fields are present even
+// though the syncable is not stuck.
+func TestGetSyncableStatus_Behind(t *testing.T) {
+	h, fake := setupTest()
+	fake.SyncableStuckReturns(cluster.SyncableStuck{}, false, nil)
+	fake.SyncableProgressReturns(1234, 1240, nil)
+
+	got := getStatus(t, h)
+	require.False(t, got.Stuck)
+	require.Equal(t, uint64(1234), got.CheckpointIndex)
+	require.Equal(t, uint64(1240), got.HeadIndex)
+	require.Equal(t, uint64(6), got.Lag)
+	require.False(t, got.CaughtUp)
+}
+
+// TestGetSyncableStatus_CaughtUp reports lag 0 / caught_up true when the
+// checkpoint has reached the head.
+func TestGetSyncableStatus_CaughtUp(t *testing.T) {
+	h, fake := setupTest()
+	fake.SyncableProgressReturns(900, 900, nil)
+
+	got := getStatus(t, h)
+	require.Equal(t, uint64(0), got.Lag)
+	require.True(t, got.CaughtUp)
+}
+
+// TestGetSyncableStatus_LagClampedNonNegative guards the clamp: on a stale
+// follower the checkpoint (replicated) can momentarily exceed the local head,
+// which would underflow an unsigned subtraction. lag must clamp to 0.
+func TestGetSyncableStatus_LagClampedNonNegative(t *testing.T) {
+	h, fake := setupTest()
+	fake.SyncableProgressReturns(60, 50, nil) // checkpoint > head
+
+	got := getStatus(t, h)
+	require.Equal(t, uint64(0), got.Lag, "lag must clamp to 0, never underflow")
+	require.True(t, got.CaughtUp)
+}
+
+// TestGetSyncableStatus_NoLeaderHop confirms the progress read is answerable
+// locally: the handler must not consult leadership/membership to serve it.
+func TestGetSyncableStatus_NoLeaderHop(t *testing.T) {
+	h, fake := setupTest()
+	fake.SyncableProgressReturns(10, 20, nil)
+
+	_ = getStatus(t, h)
+	require.Zero(t, fake.MembershipCallCount(), "status read must not make a leader/membership hop")
 }
 
 // TestReplaySyncableDeadLetterHandler_Success maps a nil error to 200 and

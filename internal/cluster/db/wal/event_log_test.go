@@ -111,19 +111,16 @@ func TestEventLog_ReaderBootstrapFromIndex1(t *testing.T) {
 	}
 
 	r := s.Reader("brand-new-syncable")
-	// The reader also surfaces the type-registration entry — drain it
-	// first so the assertions below focus on the user-data entries.
-	typeEntry, err := r.Read()
-	require.Nil(t, err)
-	require.Equal(t, "type-x", string(typeEntry.Entities[0].Key))
-
+	// The reader filters committed's internal entries (the type
+	// registration at index 1 included — see cluster.IsInternal), so it
+	// surfaces only the user-data entries, in order.
 	for i, w := range want {
 		got, err := r.Read()
 		require.Nil(t, err, "read %d", i)
 		require.Equal(t, 1, len(got.Entities))
 		require.Equal(t, w, got.Entities[0].Data)
 	}
-	_, err = r.Read()
+	_, err := r.Read()
 	require.Equal(t, io.EOF, err, "EOF after draining")
 }
 

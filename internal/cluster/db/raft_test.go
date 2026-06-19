@@ -974,7 +974,7 @@ func (r *Reader) Read() (*cluster.Actual, error) {
 			}
 
 			if len(p.Entities) > 0 {
-				if !cluster.IsSyncableMetadata(p.Entities[0].Type.ID) {
+				if !cluster.IsInternal(p.Entities[0].Type.ID) {
 					return &cluster.Actual{Index: readIndex, Entities: p.Entities}, nil
 				}
 			}

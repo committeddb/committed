@@ -100,7 +100,7 @@ func (ms *MemorySyncable) Sync(ctx context.Context, p *cluster.Actual) (cluster.
 
 	shouldSnapshot := true
 	for _, e := range p.Entities {
-		if cluster.IsSystem(e.Type.ID) {
+		if cluster.IsInternal(e.Type.ID) {
 			shouldSnapshot = false
 		}
 	}
