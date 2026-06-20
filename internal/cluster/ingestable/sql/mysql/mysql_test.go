@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/moby/moby/client"
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/moby/moby/client"
 	tcmysql "github.com/testcontainers/testcontainers-go/modules/mysql"
 	"google.golang.org/protobuf/proto"
 
@@ -297,7 +297,7 @@ func TestMysqlReconnect(t *testing.T) {
 	// and network without destroying the port mapping, so the canal
 	// can reconnect on the same port.
 	t.Log("pausing MySQL container")
-	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	cli, err := client.New(client.FromEnv)
 	require.Nil(t, err)
 	defer cli.Close()
 
