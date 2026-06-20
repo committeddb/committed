@@ -149,3 +149,29 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
           format: table
+
+  # Full gosec static-analysis security scan, including the SSA/taint analyzers
+  # (G701-G707: SQL/command injection, path traversal, SSRF, XSS) that the
+  # blocking golangci-lint job deliberately omits. gosec runs in ~2s over the
+  # whole module EXCEPT internal/cluster/backup, whose tar-extraction taint
+  # analysis takes ~6 hours; the `make lint/gosec` target leaves that one
+  # package out of the list. timeout-minutes is the hang backstop. See the
+  # lint/gosec target in the Makefile and .golangci.gosec.yml.
+  gosec:
+    name: gosec (security)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      # Install the golangci-lint binary (pinned to match the lint job and local
+      # dev) so the batched script can invoke it per package.
+      - name: Install golangci-lint
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
+            | sh -s -- -b "$(go env GOPATH)/bin" v2.11.4
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - run: make lint/gosec

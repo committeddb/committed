@@ -72,12 +72,12 @@ func runRestore() error {
 		return err
 	}
 
-	fmt.Fprintf(os.Stdout, "restored %d files into %s (backup taken %s", len(m.Files), restoreData, m.CreatedAt)
+	_, _ = fmt.Fprintf(os.Stdout, "restored %d files into %s (backup taken %s", len(m.Files), restoreData, m.CreatedAt)
 	if m.NodeID != 0 {
-		fmt.Fprintf(os.Stdout, ", node %d", m.NodeID)
+		_, _ = fmt.Fprintf(os.Stdout, ", node %d", m.NodeID)
 	}
-	fmt.Fprintln(os.Stdout, ")")
-	fmt.Fprintln(os.Stdout, "start a node against this directory with the source node's COMMITTED_NODE_ID and COMMITTED_PEERS; see docs/operations/backup.md")
+	_, _ = fmt.Fprintln(os.Stdout, ")")
+	_, _ = fmt.Fprintln(os.Stdout, "start a node against this directory with the source node's COMMITTED_NODE_ID and COMMITTED_PEERS; see docs/operations/backup.md")
 	return nil
 }
 

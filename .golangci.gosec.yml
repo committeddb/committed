@@ -1,0 +1,49 @@
+# Full gosec security scan — the SSA/taint analyzers the blocking .golangci.yml
+# omits.
+#
+# gosec is fast even cold (~2s for this whole module). The catch is a single
+# pathological package: internal/cluster/backup's tar extraction + filepath.Walk
+# make the taint analyzers (G701-G707) run for ~6 HOURS, which is what wedged CI.
+# exclusions.paths only filters output, not analysis, so the `make lint/gosec`
+# target runs gosec over the package list with backup left OUT entirely. All
+# gosec lives here, off the blocking-lint critical path.
+#
+# Rule set: gosec's full default — every AST rule AND every SSA analyzer,
+# including G115 (integer overflow) and the taint set G701-G707 (SQL/command
+# injection, path traversal, SSRF, XSS, log/SMTP injection). Only G104 is
+# dropped (it overlaps errcheck).
+#
+# Build tags deliberately exclude docker/integration: those gate the
+# testcontainers-importing test files, and pulling the moby tree into a
+# per-package gosec scan adds minutes for zero security signal (it is test
+# scaffolding, and _test.go is excluded below anyway).
+version: "2"
+run:
+  build-tags:
+    - adversarial
+    - upgrade
+    - backup
+
+linters:
+  default: none
+  enable:
+    - gosec
+  settings:
+    gosec:
+      excludes:
+        # G104 (unhandled errors) overlaps errcheck, which the blocking lint
+        # already runs.
+        - G104
+
+  exclusions:
+    generated: lax
+    paths:
+      - ".*\\.pb\\.go$"
+      - "internal/cluster/clusterfakes/"
+      - "internal/cluster/db/dbfakes/"
+      - "internal/cluster/ingestable/sql/sqlfakes/"
+      - "demo/"
+    rules:
+      - path: _test\.go
+        linters:
+          - gosec

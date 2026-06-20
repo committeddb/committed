@@ -4,19 +4,16 @@ version: "2"
 
 run:
   timeout: 5m
-  # Build tags listed here are compiled AND fed to the whole-program linters
-  # (unused/staticcheck/gosec), which build reachability facts over the entire
-  # transitive import graph. `docker` and `integration` gate the testcontainers
-  # harness (e2e/cdc/**) and the SQL integration tests, which pull in the full
-  # testcontainers -> docker -> moby tree (hundreds of packages). Analyzing that
-  # third-party tree yields zero lint signal but makes a cold-cache run pass
-  # over it super-linearly — a 50m+ hang on CI every time a build-tags or go.mod
-  # change invalidates the cache. So they are deliberately EXCLUDED: those files
-  # are still compiled, vetted, and executed by the `test (integration)` and
-  # `test (cdc)` CI jobs, just not linted. Keep only lightweight, pure-Go tags
-  # here. Do not re-add docker/integration without re-introducing the hang.
+  # Build tags compiled when linting. docker/integration pull in the
+  # testcontainers -> docker -> moby tree, but that tree loads in well under a
+  # second and is NOT a lint bottleneck, so every tag is linted for full
+  # coverage. (The hour-long CI lint hang first seen here was gosec, not these
+  # tags — gosec now runs in its own `gosec (security)` CI job, package by
+  # package; see .golangci.gosec.yml.)
   build-tags:
     - adversarial
+    - docker
+    - integration
     - upgrade
     - backup
 
@@ -31,14 +28,15 @@ linters:
     - misspell
     - bodyclose
     - prealloc
-    - gosec
+    # NOTE: gosec is intentionally NOT in this blocking lint. It runs in the
+    # `gosec (security)` CI job instead (scripts/gosec.sh + .golangci.gosec.yml),
+    # which carries the heavier SSA/taint analyzers — including G115 and the
+    # taint set G701-G707. gosec is fast (~2s) EXCEPT on internal/cluster/backup,
+    # whose tar-extraction taint analysis takes ~6 hours; that one package is
+    # excluded there. Keeping gosec out of this job leaves the blocking lint fast
+    # and clear of that landmine. See .golangci.gosec.yml.
 
   settings:
-    gosec:
-      excludes:
-        # G104 (unhandled errors) overlaps with errcheck; avoid double
-        # reports.
-        - G104
     staticcheck:
       # Start from golangci-lint's default set (which omits the
       # opinionated ST* "stylecheck" family), then drop QF1008 —
@@ -69,7 +67,6 @@ linters:
         linters:
           - errcheck
           - bodyclose
-          - gosec
 
 formatters:
   enable:

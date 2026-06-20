@@ -147,6 +147,16 @@ check: lint test
 lint/openapi:
 	npx --yes @redocly/cli@latest lint api/openapi.yaml
 
+# Full gosec security scan (~2s) including the SSA/taint analyzers the blocking
+# lint omits. golangci-lint can only filter gosec's *output*, not skip its
+# analysis, so internal/cluster/backup — whose tar/filepath.Walk code makes the
+# taint analyzers run for ~6h — must be kept OUT of the package list by hand (its
+# path-traversal risk is guarded by backup.safeJoin + its `../escape` test). The
+# `gosec (security)` CI job wraps this with timeout-minutes as a hang backstop.
+# See .golangci.gosec.yml.
+lint/gosec:
+	golangci-lint run -c .golangci.gosec.yml $$(go list -tags 'adversarial upgrade backup' ./internal/... ./cmd/... | grep -v '/internal/cluster/backup$$' | sed "s|^$$(go list -m)/|./|")
+
 # Release artifacts: arm64 + amd64 for darwin/linux, amd64-only for
 # windows. arm64 matters on both ends now — Apple Silicon dev machines
 # and the Graviton (i8g) production target — so we ship native binaries

@@ -110,7 +110,7 @@ func runBackup() error {
 		return fmt.Errorf("publish backup to %q: %w", backupTo, err)
 	}
 
-	fmt.Fprintf(os.Stdout, "backed up %d files from %s to %s\n", len(m.Files), dataDir, backupTo)
+	_, _ = fmt.Fprintf(os.Stdout, "backed up %d files from %s to %s\n", len(m.Files), dataDir, backupTo)
 	return nil
 }
 
