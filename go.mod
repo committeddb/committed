@@ -11,14 +11,9 @@ require (
 	github.com/itchyny/gojq v0.12.19
 	github.com/jackc/pglogrepl v0.0.0-20260401131349-e37c41485510
 	github.com/maxbrunsfeld/counterfeiter/v6 v6.12.2
-<<<<<<< HEAD
 	github.com/moby/moby/client v0.4.1
-	github.com/pb33f/libopenapi v0.37.3
-	github.com/pb33f/libopenapi-validator v0.13.8
-=======
 	github.com/pb33f/libopenapi v0.38.1
 	github.com/pb33f/libopenapi-validator v0.13.10
->>>>>>> 18212a37bd99b37b282f2bafe79cb14662558654
 	github.com/pelletier/go-toml/v2 v2.3.1
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 	github.com/spf13/cobra v1.10.2
