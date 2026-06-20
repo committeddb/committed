@@ -458,10 +458,69 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: |
+            The re-POSTed config would change the materialized table schema of
+            an existing table. The table is created with CREATE TABLE IF NOT
+            EXISTS and never ALTERed, so this would silently no-op. Rebuild the
+            table in place instead. The `code` is
+            `schema_change_requires_rebuild` and `details` names the table and
+            the added/removed/changed columns, so a deploy pipeline can branch
+            to the rebuild verb without scraping the message.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '500':
           $ref: '#/components/responses/InternalError'
         '507':
           $ref: '#/components/responses/InsufficientStorage'
+    delete:
+      tags: [syncable]
+      summary: Delete a syncable
+      description: |
+        Removes a syncable: its configuration and its checkpoint index are
+        deleted atomically (one committed Actual), the worker is stopped, and —
+        unless `keepData=true` — the owner tears down the syncable's destination
+        on a best-effort basis (for a SQL syncable, dropping its table). The
+        logical deletion is the authoritative act and completes before this
+        returns; the teardown settles shortly after on the leader and, if it
+        fails, only orphans destination state (the delete still succeeds). After
+        deletion a later same-id POST starts fresh from index 0. Leader-pinned.
+      operationId: deleteSyncable
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+        - name: keepData
+          in: query
+          required: false
+          description: |
+            When true, the syncable's destination state is preserved (the
+            logical delete still proceeds). Use when another consumer reads a
+            SQL syncable's table, or the node has DML-only grants. Defaults to
+            false (tear the destination down).
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: Syncable deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  keepData:
+                    type: boolean
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/MembershipUnconfirmed'
+        '500':
+          $ref: '#/components/responses/InternalError'
   /v1/syncable/{id}/versions:
     get:
       tags: [syncable]
@@ -711,6 +770,37 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/syncable/{id}/rebuild:
+    post:
+      tags: [syncable]
+      summary: Rebuild a syncable's table in place from index 0
+      description: |
+        Re-materializes the syncable's destination table from the log, keeping
+        the same config (and schema). The checkpoint is reset, the table is
+        dropped and recreated empty, and the worker replays from index 0 — the
+        recovery primitive for a drifted or corrupted projection. Rows the
+        replay does not reproduce are gone. Schema changes are NOT done this way
+        (DELETE then re-POST with the new schema). Re-runnable and idempotent;
+        leader-pinned. Returns 202 once the reset + drop/recreate are done; the
+        replay that refills the table runs afterward (poll
+        `GET /v1/syncable/{id}/status` for `lag` → 0).
+      operationId: rebuildSyncable
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      responses:
+        '202':
+          description: Rebuild accepted; the table is recreated and the replay is underway.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/MembershipUnconfirmed'
         '500':
           $ref: '#/components/responses/InternalError'
 

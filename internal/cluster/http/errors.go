@@ -84,11 +84,19 @@ func writeErrorf(w httpgo.ResponseWriter, status int, code string, format string
 }
 
 // writeProposeError maps a ProposeX error to the response shape
-// shared by every config handler: ConfigError → 400,
-// ErrProposalTooLarge → 413, ErrInsufficientStorage → 507, else 500.
+// shared by every config handler: RebuildRequiredError → 409 (with
+// machine-readable code + details), ConfigError → 400, ErrProposalTooLarge →
+// 413, ErrInsufficientStorage → 507, else 500.
 func writeProposeError(w httpgo.ResponseWriter, err error, resource, action string) {
+	var rebuildErr cluster.RebuildRequiredError
 	var configErr *cluster.ConfigError
 	switch {
+	case errors.As(err, &rebuildErr):
+		// 409 Conflict: this config change can't be applied in place and needs
+		// a rebuild. Code + details are destination-defined (e.g. table +
+		// changed columns) so a deploy pipeline can branch programmatically;
+		// this layer stays agnostic to what they contain.
+		writeErrorWithDetails(w, httpgo.StatusConflict, rebuildErr.Code(), rebuildErr.Error(), rebuildErr.Details())
 	case errors.As(err, &configErr):
 		writeError(w, httpgo.StatusBadRequest, "invalid_"+resource+"_config", configErr.Error())
 	case errors.Is(err, cluster.ErrProposalTooLarge):

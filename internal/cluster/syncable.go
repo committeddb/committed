@@ -162,6 +162,56 @@ type BatchSyncable interface {
 	SyncBatch(ctx context.Context, as []*Actual) (shouldSnapshot bool, err error)
 }
 
+// Teardownable is the optional Syncable extension implemented by syncables that
+// own destructive teardown of their destination state (a SQL syncable drops its
+// table). The delete and rebuild paths type-assert it (exactly like
+// BatchSyncable) and, on the owner node only, call Teardown after the logical
+// (consensus) act succeeds.
+//
+// Teardown must be idempotent (safe to re-run, e.g. after a leadership flap)
+// and reconstructable from the persisted config alone, since the delete path
+// parses the pre-delete config to a teardown handle just before removing it.
+// It is a destructive side effect and therefore owner-gated and live-only —
+// never run on a replaying or non-owner node. Syncables that own no external
+// state do not implement it.
+type Teardownable interface {
+	Teardown() error
+}
+
+// ConfigChangeValidator is the optional Syncable extension that vets an
+// in-place config replacement. The propose path calls ValidateReplace on the
+// newly-parsed syncable, passing the syncable built from the currently-
+// persisted config; a non-nil result rejects the re-POST.
+//
+// It exists because some destinations can't absorb every config change in
+// place: a SQL projection's table is created with CREATE TABLE IF NOT EXISTS
+// and never ALTERed, so a re-POST that changes its columns would silently
+// no-op. Such a syncable returns a RebuildRequiredError to steer the operator
+// to the rebuild verb. A syncable whose destination can take any change in
+// place (e.g. an HTTP webhook) does not implement this interface. The validator
+// is destination-specific; the generic layers never see the destination shape.
+type ConfigChangeValidator interface {
+	// ValidateReplace reports whether replacing prior's config with this
+	// syncable's config is safe to apply in place, returning a
+	// RebuildRequiredError (or other error) if not, nil if it is.
+	ValidateReplace(prior Syncable) error
+}
+
+// RebuildRequiredError is returned by a ConfigChangeValidator when a config
+// change can't be applied in place and needs a rebuild instead. The HTTP layer
+// renders it as 409 with Code and Details — without knowing what kind of
+// syncable (or destination) produced it, so destination-specific shapes
+// (e.g. SQL table/column names) stay out of the generic layers.
+type RebuildRequiredError interface {
+	error
+	// Code is the stable machine-readable error code a deploy pipeline branches
+	// on (e.g. "schema_change_requires_rebuild").
+	Code() string
+	// Details is the structured, JSON-serializable payload describing the
+	// change (e.g. the table and changed columns).
+	Details() any
+}
+
 // CheckpointPolicy tunes how often a syncable worker persists its
 // SyncableIndex checkpoint — the trade-off between the per-checkpoint raft
 // round-trip and how many already-synced proposals a crash re-delivers.
@@ -294,6 +344,26 @@ func NewUpsertSyncableIndexEntity(i *SyncableIndex) (*Entity, error) {
 	}
 
 	return NewUpsertEntity(syncableIndexType, []byte(i.ID), bs), nil
+}
+
+// NewDeleteSyncableEntities builds the two tombstones that remove a syncable:
+// its configuration and its checkpoint index. They are returned together so a
+// single Proposal commits them as one Actual — config and checkpoint die
+// atomically, leaving no window in which a later same-named syncable could
+// resume from a stale checkpoint and come back un-backfilled. The keys mirror
+// the upsert constructors (the syncable ID).
+func NewDeleteSyncableEntities(id string) []*Entity {
+	return []*Entity{
+		NewDeleteEntity(syncableType, []byte(id)),
+		NewDeleteEntity(syncableIndexType, []byte(id)),
+	}
+}
+
+// NewDeleteSyncableIndexEntity builds the tombstone that resets a syncable's
+// checkpoint to 0 (the Reader falls back to index 0 when the index entity is
+// absent), without touching its config. It is the consensus half of a rebuild.
+func NewDeleteSyncableIndexEntity(id string) *Entity {
+	return NewDeleteEntity(syncableIndexType, []byte(id))
 }
 
 var syncableDeadLetterType = registerSystemType(&Type{

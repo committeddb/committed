@@ -121,7 +121,11 @@ type DB struct {
 	workersMu     sync.Mutex
 	syncWorkers   map[string]*workerHandle
 	ingestWorkers map[string]*workerHandle
-	closed        bool
+	// syncDeleteKeep records, per syncable ID, that an operator asked DELETE to
+	// keep the destination state (keepData). DeleteSyncable sets it before
+	// proposing; deleteSync reads-and-clears it on apply. Guarded by workersMu.
+	syncDeleteKeep map[string]bool
+	closed         bool
 
 	// ingestSupervisorMu guards ingestSupervisorStates. Deliberately
 	// separate from workersMu so the supervisor's bookkeeping doesn't
@@ -199,6 +203,11 @@ type DB struct {
 type workerHandle struct {
 	cancel context.CancelFunc
 	done   chan struct{}
+	// syncable is the parsed Syncable this worker runs, retained so the delete
+	// path can reuse it as a teardown handle (e.g. DROP TABLE for a SQL
+	// syncable) without re-parsing the config — which would re-run Init. It is
+	// nil for ingest workers (deleteSync only reads it for syncables).
+	syncable cluster.Syncable
 }
 
 // waiter is the per-request state used by blocking db.Propose. ack is
@@ -269,6 +278,7 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		leaderChangeGrace:              cfg.leaderChangeGrace,
 		syncWorkers:                    make(map[string]*workerHandle),
 		ingestWorkers:                  make(map[string]*workerHandle),
+		syncDeleteKeep:                 make(map[string]bool),
 		syncStuckThreshold:             cfg.syncStuckThreshold,
 		scrubInterval:                  cfg.scrubInterval,
 		advertisedAPIURL:               cfg.advertisedAPIURL,
@@ -391,6 +401,10 @@ func (db *DB) listenForSyncables(sync <-chan *SyncableWithID) {
 		case syncable, ok := <-sync:
 			if !ok {
 				return
+			}
+			if syncable.Delete {
+				db.deleteSync(syncable.ID)
+				continue
 			}
 			if err := db.Sync(context.Background(), syncable.ID, syncable.Syncable); err != nil {
 				// Sync only returns ErrClosed, which means db.Close

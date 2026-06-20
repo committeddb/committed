@@ -91,14 +91,34 @@ func (s *Storage) saveSyncable(t *cluster.Configuration) error {
 	return nil
 }
 
+// deleteSyncable removes a syncable's persisted config bytes and then notifies
+// the DB layer so it can cancel the worker and (on the owner) tear down the
+// destination table. The channel send happens AFTER the bbolt Update returns,
+// for the same three reasons saveSyncable documents (no send under the writer
+// lock, no notify before the commit is durable, no re-entrant deadlock).
+//
+// The DB layer does the teardown, not this wal layer (the wal layer must not
+// touch the destination DB), and it reuses the worker's already-built syncable
+// handle rather than re-parsing here — so the delete signal carries only the
+// ID.
 func (s *Storage) deleteSyncable(id []byte) error {
-	return s.update(func(tx *bolt.Tx) error {
+	err := s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(syncableBucket)
 		if b == nil {
 			return ErrBucketMissing
 		}
 		return deleteVersioned(b, id)
 	})
+	if err != nil {
+		return err
+	}
+
+	if s.sync != nil {
+		s.logger.Debug("sending syncable delete to channel", zap.String("id", string(id)))
+		s.sync <- &db.SyncableWithID{ID: string(id), Delete: true}
+	}
+
+	return nil
 }
 
 // RestoreSyncableWorkers walks the syncable bucket and re-sends each persisted

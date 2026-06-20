@@ -111,7 +111,7 @@ func (db *DB) Sync(_ context.Context, id string, s cluster.Syncable) error {
 	// duplicate Sync call supersedes this worker, so the cancel is
 	// not leaked. gosec can't see through the handle indirection.
 	workerCtx, cancel := context.WithCancel(db.ctx) //nolint:gosec // G118: cancel owned by workerHandle
-	handle := &workerHandle{cancel: cancel, done: make(chan struct{})}
+	handle := &workerHandle{cancel: cancel, done: make(chan struct{}), syncable: s}
 	db.syncWorkers[id] = handle
 	db.workersMu.Unlock()
 
@@ -130,6 +130,65 @@ func (db *DB) Sync(_ context.Context, id string, s cluster.Syncable) error {
 	}()
 
 	return nil
+}
+
+// deleteSync tears down a syncable that was removed from the log: it cancels
+// and drains the local worker, then — on the owner node only — tears down the
+// syncable's destination. It is the delete-side counterpart of Sync, driven by
+// the apply path (deleteSyncable → the sync channel → listenForSyncables).
+//
+// Two planes, as the rebuild/delete design requires:
+//   - Worker cancel is node-local and idempotent: every node that built the
+//     config has a worker, and every node runs this on apply, so each stops
+//     its own goroutine. A node with no worker (degraded build) is a no-op.
+//   - The destination teardown is the destructive side effect (a SQL syncable
+//     DROPs its table), so it is gated on db.isNode(id) and run live only —
+//     never reconstructed from replay. A catching-up/non-owner node has isNode
+//     false and skips it; the owner tears down exactly once.
+//
+// The teardown is best-effort: the logical deletion already succeeded via
+// consensus, so a failure only leaves orphaned destination state an operator
+// can remove — it must never fail or panic. keepData (set by DeleteSyncable
+// before the propose) skips the teardown entirely.
+//
+// Ownership note: by the time this runs the config is already deleted, so
+// db.storage.Node(id) is 0 and isNode resolves to "this node is the leader."
+// The leader tears down using its own already-built syncable handle, which is
+// also the node the DELETE request landed on (writes proxy to the leader), so
+// its keepData intent is the one that applies.
+func (db *DB) deleteSync(id string) {
+	db.workersMu.Lock()
+	handle, ok := db.syncWorkers[id]
+	keepData := db.syncDeleteKeep[id]
+	delete(db.syncDeleteKeep, id)
+	if ok {
+		handle.cancel()
+		db.workersMu.Unlock()
+		<-handle.done
+		db.workersMu.Lock()
+		if db.syncWorkers[id] == handle {
+			delete(db.syncWorkers, id)
+		}
+	}
+	db.workersMu.Unlock()
+
+	if !ok || handle.syncable == nil {
+		return // no worker built on this node — nothing to tear down
+	}
+	if keepData || !db.isNode(id) {
+		return // operator opted to keep the data, or this node isn't the owner
+	}
+
+	teardownable, ok := handle.syncable.(cluster.Teardownable)
+	if !ok {
+		return // syncable owns no external destination state
+	}
+	if err := teardownable.Teardown(); err != nil {
+		// Best-effort: the logical delete already committed. Log loudly and
+		// move on — the worst case is orphaned destination state.
+		db.logger.Error("syncable deleted but destination teardown failed (orphaned destination state; remove it manually)",
+			zap.String("id", id), zap.Error(err))
+	}
 }
 
 func (db *DB) sync(ctx context.Context, id string, s cluster.Syncable) error {

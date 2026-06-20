@@ -37,6 +37,34 @@ func (c *Syncable) CheckpointPolicy() cluster.CheckpointPolicy {
 	return c.config.Checkpoint
 }
 
+// ValidateReplace implements cluster.ConfigChangeValidator: it rejects a
+// re-POST whose materialized table schema differs from prior's, which
+// CREATE TABLE IF NOT EXISTS would silently ignore. Returns a
+// *SchemaChangeError (a cluster.RebuildRequiredError) or nil.
+func (c *Syncable) ValidateReplace(prior cluster.Syncable) error {
+	return validateSchemaReplace(prior, c.materializedSchema())
+}
+
+// materializedSchema is the table syncable's shape: its mappings (columns +
+// types), primary key, and indexes — exactly what CreateDDL runs.
+func (c *Syncable) materializedSchema() SyncableSchema {
+	return schemaOf(c.config)
+}
+
+// Teardown implements cluster.Teardownable: it drops the syncable's
+// destination table (DROP TABLE IF EXISTS), the destructive mirror of Init's
+// CREATE. It is idempotent and reconstructable from the persisted config alone
+// (only the table name + DB handle), which the delete/rebuild paths rely on.
+// It never touches prepared statements or the connection pool; call Close for
+// those.
+func (c *Syncable) Teardown() error {
+	dropString := c.dialect.DropDDL(c.config)
+	if _, err := c.db.Exec(dropString); err != nil {
+		return fmt.Errorf("teardown [%s]: %w", dropString, err)
+	}
+	return nil
+}
+
 func (c *Syncable) Init() error {
 	// Re-validate even though ParseConfig already did: directly constructed
 	// configs (tests, future callers) must hit the same wall before any DDL

@@ -41,6 +41,13 @@ func (d *PostgreSQLDialect) CreateDDL(c *sql.Config) string {
 	return ddl.String()
 }
 
+// DropDDL implements Dialect. DROP TABLE cascades to the table's own indexes,
+// so the separate CREATE INDEX statements CreateDDL emits need no separate
+// drop.
+func (d *PostgreSQLDialect) DropDDL(c *sql.Config) string {
+	return dropDDL(c)
+}
+
 // CreateDeleteSQL implements Dialect. PostgreSQL binds the WHERE value with a
 // $1 positional placeholder.
 func (d *PostgreSQLDialect) CreateDeleteSQL(c *sql.Config) string {

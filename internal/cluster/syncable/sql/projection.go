@@ -261,6 +261,35 @@ func NewProjection(d *DB, config *ProjectionConfig, m *metrics.Metrics, name str
 	return &Projection{db: d.DB, config: config, dialect: d.dialect, metrics: m, name: name}
 }
 
+// ValidateReplace implements cluster.ConfigChangeValidator: it rejects a
+// re-POST whose materialized table schema differs from prior's, which
+// CREATE TABLE IF NOT EXISTS would silently ignore. Returns a
+// *SchemaChangeError (a cluster.RebuildRequiredError) or nil.
+func (p *Projection) ValidateReplace(prior cluster.Syncable) error {
+	return validateSchemaReplace(prior, p.materializedSchema())
+}
+
+// materializedSchema is the projection's table shape: its declared columns +
+// primary key (projections create no indexes), exactly the ddlConfig CreateDDL
+// runs.
+func (p *Projection) materializedSchema() SyncableSchema {
+	return schemaOf(p.config.ddlConfig())
+}
+
+// Teardown implements cluster.Teardownable: it drops the projection's
+// destination table (DROP TABLE IF EXISTS), the destructive mirror of Init's
+// CREATE. It is idempotent — dropping an already-absent table is a no-op — and
+// reconstructable from the persisted config alone (it needs only the table
+// name + DB handle), which is what the delete/rebuild paths rely on. It never
+// touches prepared statements or the connection pool; call Close for those.
+func (p *Projection) Teardown() error {
+	dropString := p.dialect.DropDDL(p.config.ddlConfig())
+	if _, err := p.db.Exec(dropString); err != nil {
+		return fmt.Errorf("teardown [%s]: %w", dropString, err)
+	}
+	return nil
+}
+
 func (p *Projection) Init() error {
 	// Re-validate even though ParseConfig already did: directly
 	// constructed configs (tests, future callers) must hit the same

@@ -16,6 +16,15 @@ func createDeleteSQL(config *sql.Config, placeholder string) string {
 		config.Table, config.DeleteKeyColumn(), placeholder)
 }
 
+// dropDDL builds `DROP TABLE IF EXISTS <table>;` — the destructive mirror of
+// createDDL. DROP TABLE removes the table's indexes with it, so no separate
+// index-drop is needed. IF EXISTS makes it idempotent: tearing down a table
+// that is already gone (a re-run, or a node that never created it) is a no-op,
+// not an error. Shared by every dialect so teardown is identical across them.
+func dropDDL(config *sql.Config) string {
+	return fmt.Sprintf("DROP TABLE IF EXISTS %s;", config.Table)
+}
+
 func createDDL(config *sql.Config) string {
 	var ddl strings.Builder
 	fmt.Fprintf(&ddl, "CREATE TABLE IF NOT EXISTS %s (", config.Table)

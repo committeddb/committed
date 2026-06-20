@@ -135,6 +135,83 @@ func (h *HTTP) DeadLetterStuckSyncable(w httpgo.ResponseWriter, r *httpgo.Reques
 	_, _ = w.Write(bs)
 }
 
+// SyncableDeleteResponse confirms a syncable was deleted and whether the
+// operator asked to keep its destination state.
+type SyncableDeleteResponse struct {
+	ID       string `json:"id"`
+	KeepData bool   `json:"keepData"`
+}
+
+// DeleteSyncable (DELETE /syncable/{id}) removes a syncable: its config and
+// checkpoint are deleted atomically (consensus), the worker is stopped, and —
+// unless ?keepData=true — the owner tears down the syncable's destination
+// best-effort (for a SQL syncable, dropping its table). A later same-name POST
+// then starts fresh from index 0.
+//
+// The logical deletion is the authoritative act and completes before this
+// returns (Propose blocks until the Actual applies); the destination teardown
+// is a best-effort side effect that settles shortly after on the leader. The
+// route is leader-pinned so this runs where the teardown does.
+func (h *HTTP) DeleteSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, httpgo.StatusBadRequest, "invalid_parameter", "id is empty")
+		return
+	}
+
+	keepData := false
+	if raw := r.URL.Query().Get("keepData"); raw != "" {
+		v, err := strconv.ParseBool(raw)
+		if err != nil {
+			writeError(w, httpgo.StatusBadRequest, "invalid_parameter", "keepData must be a boolean")
+			return
+		}
+		keepData = v
+	}
+
+	if err := h.c.DeleteSyncable(r.Context(), id, keepData); err != nil {
+		writeProposeError(w, err, "syncable", "delete syncable")
+		return
+	}
+
+	bs, err := json.Marshal(SyncableDeleteResponse{ID: id, KeepData: keepData})
+	if err != nil {
+		writeInternalError(w, "failed to marshal response", err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(httpgo.StatusOK)
+	_, _ = w.Write(bs)
+}
+
+// RebuildSyncable (POST /syncable/{id}/rebuild) re-materializes a syncable's
+// destination in place from index 0, keeping the same config. The destination
+// (for a SQL syncable, its table) is torn down, recreated empty, and refilled
+// by replaying the log — the recovery primitive for a drifted/corrupted
+// projection. Schema changes are NOT done this way (use DELETE then POST).
+// Returns 404 if the syncable is unknown. Leader-pinned.
+func (h *HTTP) RebuildSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, httpgo.StatusBadRequest, "invalid_parameter", "id is empty")
+		return
+	}
+
+	if err := h.c.RebuildSyncable(r.Context(), id); err != nil {
+		if errors.Is(err, cluster.ErrResourceNotFound) {
+			writeError(w, httpgo.StatusNotFound, "not_found", "syncable not found")
+			return
+		}
+		writeProposeError(w, err, "syncable", "rebuild syncable")
+		return
+	}
+
+	// 202: the checkpoint reset and destination teardown/re-init are done, but
+	// the replay that refills the destination runs in the worker afterward.
+	// Poll GET /syncable/{id}/status (lag → 0) to see the rebuild complete.
+	w.WriteHeader(httpgo.StatusAccepted)
+}
+
 // SyncableStatusResponse is the operational status of a syncable's worker:
 // whether it is blocked (and on what), plus its numeric progress (how far it
 // has synced vs. how far there is to sync).

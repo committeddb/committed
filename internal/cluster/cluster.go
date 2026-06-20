@@ -16,6 +16,17 @@ type Cluster interface {
 	ProposeDeleteType(ctx context.Context, id string) error
 	ProposeIngestable(ctx context.Context, c *Configuration) error
 	ProposeSyncable(ctx context.Context, c *Configuration) error
+	// DeleteSyncable removes a syncable: its config and checkpoint are deleted
+	// atomically and, unless keepData is set, the owner tears down the
+	// syncable's destination state (best-effort — for a SQL syncable, dropping
+	// its table). A later same-name create then starts fresh from index 0.
+	DeleteSyncable(ctx context.Context, id string, keepData bool) error
+	// RebuildSyncable re-materializes a syncable's destination from index 0
+	// using the same config: it resets the checkpoint, tears the destination
+	// down and back up (clean slate), and replays. The recovery primitive for a
+	// drifted or corrupted projection. Returns ErrResourceNotFound if the
+	// syncable is unknown.
+	RebuildSyncable(ctx context.Context, id string) error
 	ProposeDatabase(ctx context.Context, c *Configuration) error
 	// Scrub requests physical removal of already-delete-proposed (RTBF)
 	// entities from the permanent event log up to the current applied index.

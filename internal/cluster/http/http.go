@@ -142,6 +142,12 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 
 			r.Get("/syncable", h.listConfig("syncable", h.c.Syncables))
 			r.Post("/syncable/{id}", h.addConfig("syncable", h.c.ProposeSyncable))
+			// DELETE is leader-pinned (leaderRead reverse-proxies a follower's
+			// request to the leader): the owner-gated destination teardown runs on
+			// the leader and honors the keepData flag recorded there, so the
+			// request that carries keepData must land on the same node that tears
+			// down.
+			r.Delete("/syncable/{id}", h.leaderRead(h.DeleteSyncable))
 			r.Get("/syncable/{id}/versions", h.getVersions("syncable", h.c.SyncableVersions))
 			r.Get("/syncable/{id}/versions/{version}", h.getVersion("syncable", h.c.SyncableVersion))
 			r.Get("/syncable/{id}/errors", h.GetSyncableErrors)
@@ -149,6 +155,9 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 			r.Post("/syncable/{id}/deadletter/", h.DeadLetterStuckSyncable)
 			r.Post("/syncable/{id}/replay/{index}", h.ReplaySyncableDeadLetter)
 			r.Post("/syncable/{id}/rollback", h.rollback("syncable", h.c.SyncableVersion, h.c.ProposeSyncable))
+			// Rebuild is leader-pinned for the same reason as DELETE: the
+			// owner-side destination teardown/re-init runs on the leader.
+			r.Post("/syncable/{id}/rebuild", h.leaderRead(h.RebuildSyncable))
 
 			r.Get("/type", h.listConfig("type", h.c.Types))
 			r.Post("/type/{id}", h.addConfig("type", h.c.ProposeType))

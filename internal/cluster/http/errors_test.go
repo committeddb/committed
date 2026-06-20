@@ -1,6 +1,7 @@
 package http_test
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	httpgo "net/http"
@@ -63,4 +64,51 @@ func TestClientError_NotLoggedAsInternalError(t *testing.T) {
 
 	require.Equal(t, httpgo.StatusUnauthorized, w.Code)
 	require.Empty(t, logs.FilterMessage("http internal error").All())
+}
+
+// rebuildRequired is a cluster.RebuildRequiredError test double — the generic
+// shape the HTTP layer renders, with no dependency on the sql package's
+// concrete SchemaChangeError.
+type rebuildRequired struct {
+	code    string
+	message string
+	details any
+}
+
+func (e *rebuildRequired) Error() string { return e.message }
+func (e *rebuildRequired) Code() string  { return e.code }
+func (e *rebuildRequired) Details() any  { return e.details }
+
+// A RebuildRequiredError from propose is rendered as 409 with the
+// machine-readable code + structured details, so a deploy pipeline can branch
+// to the rebuild verb without scraping the message. The HTTP layer is agnostic
+// to what the details contain.
+func TestProposeSyncable_RebuildRequired_Returns409WithStructuredDetails(t *testing.T) {
+	fake := &clusterfakes.FakeCluster{}
+	fake.ProposeSyncableReturns(&rebuildRequired{
+		code:    "schema_change_requires_rebuild",
+		message: "schema changed; rebuild the table",
+		details: map[string]any{"table": "tenants", "addedColumns": []string{"tier"}},
+	})
+	h := http.New(fake)
+
+	r := httptest.NewRequest(httpgo.MethodPost, "/v1/syncable/s-1", strings.NewReader("x = 1"))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	require.Equal(t, httpgo.StatusConflict, w.Code)
+
+	var body struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+		Details struct {
+			Table        string   `json:"table"`
+			AddedColumns []string `json:"addedColumns"`
+		} `json:"details"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	require.Equal(t, "schema_change_requires_rebuild", body.Code)
+	require.Contains(t, body.Message, "rebuild")
+	require.Equal(t, "tenants", body.Details.Table)
+	require.Equal(t, []string{"tier"}, body.Details.AddedColumns)
 }

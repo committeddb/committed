@@ -10,6 +10,11 @@ import (
 
 type Dialect interface {
 	CreateDDL(config *Config) string
+	// DropDDL returns the destructive mirror of CreateDDL:
+	// `DROP TABLE IF EXISTS <table>`. It backs the syncable Teardown used by
+	// delete/rebuild. IF EXISTS keeps it idempotent; DROP TABLE removes the
+	// table's indexes with it.
+	DropDDL(config *Config) string
 	CreateSQL(config *Config) string
 	// CreateDeleteSQL returns the statement that removes one downstream row
 	// by its key column: `DELETE FROM <table> WHERE <keyCol> = <placeholder>`.

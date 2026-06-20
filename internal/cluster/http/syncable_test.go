@@ -13,6 +13,90 @@ import (
 	"github.com/committeddb/committed/internal/cluster/http"
 )
 
+// TestDeleteSyncable threads the id and the keepData query param through to
+// the cluster and returns 200. The route is leader-pinned (leaderRead), so the
+// fake reports itself as the leader to serve locally.
+func TestDeleteSyncable(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		query    string
+		keepData bool
+	}{
+		{"default tears down", "", false},
+		{"keepData=true", "?keepData=true", true},
+		{"keepData=false", "?keepData=false", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, fake := setupTest()
+			fake.IDReturns(1)
+			fake.LeaderReturns(1)
+
+			req := httptest.NewRequest("DELETE", "http://localhost/v1/syncable/sync-1"+tc.query, nil)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+
+			require.Equal(t, 200, w.Code)
+			require.Equal(t, 1, fake.DeleteSyncableCallCount())
+			_, gotID, gotKeep := fake.DeleteSyncableArgsForCall(0)
+			require.Equal(t, "sync-1", gotID)
+			require.Equal(t, tc.keepData, gotKeep)
+
+			var body struct {
+				ID       string `json:"id"`
+				KeepData bool   `json:"keepData"`
+			}
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+			require.Equal(t, "sync-1", body.ID)
+			require.Equal(t, tc.keepData, body.KeepData)
+		})
+	}
+}
+
+// A non-boolean keepData is a 400 and never reaches the cluster.
+func TestDeleteSyncable_InvalidKeepData(t *testing.T) {
+	h, fake := setupTest()
+	fake.IDReturns(1)
+	fake.LeaderReturns(1)
+
+	req := httptest.NewRequest("DELETE", "http://localhost/v1/syncable/sync-1?keepData=maybe", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	require.Equal(t, 400, w.Code)
+	require.Equal(t, 0, fake.DeleteSyncableCallCount())
+}
+
+// TestRebuildSyncable returns 202 and threads the id to the cluster. The route
+// is leader-pinned, so the fake reports itself as the leader.
+func TestRebuildSyncable(t *testing.T) {
+	h, fake := setupTest()
+	fake.IDReturns(1)
+	fake.LeaderReturns(1)
+
+	req := httptest.NewRequest("POST", "http://localhost/v1/syncable/sync-1/rebuild", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	require.Equal(t, 202, w.Code)
+	require.Equal(t, 1, fake.RebuildSyncableCallCount())
+	_, gotID := fake.RebuildSyncableArgsForCall(0)
+	require.Equal(t, "sync-1", gotID)
+}
+
+// An unknown syncable rebuilds to 404.
+func TestRebuildSyncable_NotFound(t *testing.T) {
+	h, fake := setupTest()
+	fake.IDReturns(1)
+	fake.LeaderReturns(1)
+	fake.RebuildSyncableReturns(cluster.ErrResourceNotFound)
+
+	req := httptest.NewRequest("POST", "http://localhost/v1/syncable/nope/rebuild", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	require.Equal(t, 404, w.Code)
+}
+
 // TestGetSyncableErrors_Success asserts the handler renders dead-letter
 // records as JSON and threads the since/limit cursor params through to
 // the cluster.

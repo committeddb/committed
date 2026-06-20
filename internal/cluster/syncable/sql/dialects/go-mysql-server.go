@@ -17,6 +17,10 @@ func (d *GoMySQLServerDialect) CreateDDL(c *sql.Config) string {
 	return createDDL(c)
 }
 
+func (d *GoMySQLServerDialect) DropDDL(c *sql.Config) string {
+	return dropDDL(c)
+}
+
 func (d *GoMySQLServerDialect) CreateSQL(config *sql.Config) string {
 	mySQL := &MySQLDialect{}
 	return mySQL.CreateSQL(config)

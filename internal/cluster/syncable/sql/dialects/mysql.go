@@ -18,6 +18,11 @@ func (d *MySQLDialect) CreateDDL(c *sql.Config) string {
 	return createDDL(c)
 }
 
+// DropDDL implements Dialect.
+func (d *MySQLDialect) DropDDL(c *sql.Config) string {
+	return dropDDL(c)
+}
+
 // CreateDeleteSQL implements Dialect. MySQL binds the WHERE value with a ?
 // placeholder.
 func (d *MySQLDialect) CreateDeleteSQL(c *sql.Config) string {
