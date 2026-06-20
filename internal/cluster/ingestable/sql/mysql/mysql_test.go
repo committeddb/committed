@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/docker/client"
+	"github.com/moby/moby/client"
 	_ "github.com/go-sql-driver/mysql"
 	tcmysql "github.com/testcontainers/testcontainers-go/modules/mysql"
 	"google.golang.org/protobuf/proto"
@@ -312,7 +312,7 @@ func TestMysqlReconnect(t *testing.T) {
 	dockerCtx, dockerCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer dockerCancel()
 
-	err = cli.ContainerPause(dockerCtx, containerID)
+	_, err = cli.ContainerPause(dockerCtx, containerID, client.ContainerPauseOptions{})
 	require.Nil(t, err, "ContainerPause(%q)", containerID)
 
 	// Give the canal time to detect the frozen connection.
@@ -320,7 +320,7 @@ func TestMysqlReconnect(t *testing.T) {
 
 	// --- unpause MySQL ---
 	t.Log("unpausing MySQL container")
-	err = cli.ContainerUnpause(dockerCtx, containerID)
+	_, err = cli.ContainerUnpause(dockerCtx, containerID, client.ContainerUnpauseOptions{})
 	require.Nil(t, err, "ContainerUnpause(%q)", containerID)
 
 	// --- insert a new row after MySQL is back ---
