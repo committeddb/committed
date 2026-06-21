@@ -229,3 +229,25 @@ func TestIsInternal_HidesEveryBuiltInFromSyncables(t *testing.T) {
 		t.Error("user-defined topic types must not be classified internal")
 	}
 }
+
+// TestSystemTypesAreSnapshotKind locks in that every built-in (system) type
+// declares EntityKindSnapshot. System types are last-writer-wins per
+// (type, key), which is exactly what makes them safe for the event-log
+// scrubber's system-tombstone (metadata GC) path: that path compacts a type's
+// superseded entries only when its EntityKind is Snapshot (see
+// metadata-gc-scrubber). A system type left at the EntityKindUnspecified
+// default would silently never be GC'd, so this guards against that — a new
+// built-in must consciously declare its kind. If a future internal type is
+// genuinely NOT last-writer-wins (e.g. an append-only internal audit log),
+// exclude it here deliberately rather than letting it default.
+func TestSystemTypesAreSnapshotKind(t *testing.T) {
+	if len(systemTypes) == 0 {
+		t.Fatal("systemTypes registry is empty; the package init wiring is broken")
+	}
+	for id, tp := range systemTypes {
+		if tp.EntityKind != EntityKindSnapshot {
+			t.Errorf("system type %q (%s) has EntityKind %q; built-in types must declare EntityKindSnapshot so the metadata-GC scrubber can compact their superseded entries",
+				tp.Name, id, tp.EntityKind)
+		}
+	}
+}

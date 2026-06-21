@@ -44,9 +44,10 @@ type IngestableParser interface {
 }
 
 var ingestableType = registerSystemType(&Type{
-	ID:      "c5917145-c248-4d97-a863-8e26ca042b09",
-	Name:    "InternalIngestableParser",
-	Version: 1,
+	ID:         "c5917145-c248-4d97-a863-8e26ca042b09",
+	Name:       "InternalIngestableParser",
+	Version:    1,
+	EntityKind: EntityKindSnapshot,
 })
 
 func IsIngestable(id string) bool {
@@ -63,9 +64,10 @@ func NewUpsertIngestableEntity(c *Configuration) (*Entity, error) {
 }
 
 var ingestablePositionType = registerSystemType(&Type{
-	ID:      "8ea60a68-e22a-41cd-b09d-31352b0356f1",
-	Name:    "InternalIngestablePosition",
-	Version: 1,
+	ID:         "8ea60a68-e22a-41cd-b09d-31352b0356f1",
+	Name:       "InternalIngestablePosition",
+	Version:    1,
+	EntityKind: EntityKindSnapshot,
 })
 
 type IngestablePosition struct {

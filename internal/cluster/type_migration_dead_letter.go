@@ -16,9 +16,10 @@ import (
 var ErrReplayMigrationFailed = errors.New("cluster: migration retry failed")
 
 var typeMigrationDeadLetterType = registerSystemType(&Type{
-	ID:      "9e9a9e5f-22f6-4963-ae77-a4a87d807496",
-	Name:    "InternalTypeMigrationDeadLetter",
-	Version: 1,
+	ID:         "9e9a9e5f-22f6-4963-ae77-a4a87d807496",
+	Name:       "InternalTypeMigrationDeadLetter",
+	Version:    1,
+	EntityKind: EntityKindSnapshot,
 })
 
 // TypeMigrationDeadLetter records that a type-migration program (jq) failed

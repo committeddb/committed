@@ -164,9 +164,10 @@ func (t *Type) String() string {
 }
 
 var typeType = registerSystemType(&Type{
-	ID:      "268e1ac4-7d17-4798-afae-3f1f9aa6fc65",
-	Name:    "InternalType",
-	Version: 1,
+	ID:         "268e1ac4-7d17-4798-afae-3f1f9aa6fc65",
+	Name:       "InternalType",
+	Version:    1,
+	EntityKind: EntityKindSnapshot,
 })
 
 func IsType(id string) bool {

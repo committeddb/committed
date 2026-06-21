@@ -286,9 +286,10 @@ type SyncableParser interface {
 }
 
 var syncableType = registerSystemType(&Type{
-	ID:      "0cd18065-a0e2-4c19-a4d6-f824f1898cb5",
-	Name:    "InternalSyncableParser",
-	Version: 1,
+	ID:         "0cd18065-a0e2-4c19-a4d6-f824f1898cb5",
+	Name:       "InternalSyncableParser",
+	Version:    1,
+	EntityKind: EntityKindSnapshot,
 })
 
 func IsSyncable(id string) bool {
@@ -305,9 +306,10 @@ func NewUpsertSyncableEntity(c *Configuration) (*Entity, error) {
 }
 
 var syncableIndexType = registerSystemType(&Type{
-	ID:      "ab972bba-83fe-4dea-9c5d-877645e8d21e",
-	Name:    "InternalSyncableIndex",
-	Version: 1,
+	ID:         "ab972bba-83fe-4dea-9c5d-877645e8d21e",
+	Name:       "InternalSyncableIndex",
+	Version:    1,
+	EntityKind: EntityKindSnapshot,
 })
 
 type SyncableIndex struct {
@@ -367,9 +369,10 @@ func NewDeleteSyncableIndexEntity(id string) *Entity {
 }
 
 var syncableDeadLetterType = registerSystemType(&Type{
-	ID:      "5f3b6c8e-1d2a-4e7b-9c0f-2a8d6b4e1f93",
-	Name:    "InternalSyncableDeadLetter",
-	Version: 1,
+	ID:         "5f3b6c8e-1d2a-4e7b-9c0f-2a8d6b4e1f93",
+	Name:       "InternalSyncableDeadLetter",
+	Version:    1,
+	EntityKind: EntityKindSnapshot,
 })
 
 // SyncableDeadLetter records that a syncable gave up on and skipped (dead-
@@ -461,9 +464,10 @@ func DecodeSyncableDeadLetterKey(key []byte) (id string, index uint64, ok bool) 
 }
 
 var syncableStuckType = registerSystemType(&Type{
-	ID:      "8a1c4d2e-7b3f-4a6c-9e8d-1f5b2c7a9d04",
-	Name:    "InternalSyncableStuck",
-	Version: 1,
+	ID:         "8a1c4d2e-7b3f-4a6c-9e8d-1f5b2c7a9d04",
+	Name:       "InternalSyncableStuck",
+	Version:    1,
+	EntityKind: EntityKindSnapshot,
 })
 
 // SyncableStuck records that a syncable's worker is currently blocked
@@ -522,9 +526,10 @@ func NewDeleteSyncableStuckEntity(id string) *Entity {
 }
 
 var syncableSkipRequestType = registerSystemType(&Type{
-	ID:      "3d9e6b1a-5c2f-4d7b-8a0e-6f4c1b8d3e25",
-	Name:    "InternalSyncableSkipRequest",
-	Version: 1,
+	ID:         "3d9e6b1a-5c2f-4d7b-8a0e-6f4c1b8d3e25",
+	Name:       "InternalSyncableSkipRequest",
+	Version:    1,
+	EntityKind: EntityKindSnapshot,
 })
 
 // SyncableSkipRequest is the operator's request (proposed by the dead-letter

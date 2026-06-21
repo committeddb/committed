@@ -16,9 +16,10 @@ import (
 // carries no entities a syncable would consume; it is acted on only by the
 // storage tier's apply path (handleScrub).
 var scrubType = registerSystemType(&Type{
-	ID:      "45a0b2d1-99e7-4cf2-958c-a7c7e797d3ab",
-	Name:    "InternalScrub",
-	Version: 1,
+	ID:         "45a0b2d1-99e7-4cf2-958c-a7c7e797d3ab",
+	Name:       "InternalScrub",
+	Version:    1,
+	EntityKind: EntityKindSnapshot,
 })
 
 // scrubKey is the fixed entity key for a Scrub command. A Scrub is a command,
