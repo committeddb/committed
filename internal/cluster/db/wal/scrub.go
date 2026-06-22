@@ -135,10 +135,21 @@ func (s *Storage) runPendingScrub() error {
 // freeze line bound, and swaps the rewritten directory in. See the file header
 // for the determinism and invariant guarantees.
 func (s *Storage) runScrub(bound uint64) error {
-	// Survivor selection: max delete index <= bound per (type, key). Captured
-	// once; deletes recorded after this point have index > bound and are
+	// RTBF (user-tombstone) selection: max delete index <= bound per (type, key).
+	// Captured once; deletes recorded after this point have index > bound and are
 	// irrelevant, so the selection is frozen and identical across replicas.
 	sel, err := s.tombstoneSelections(bound)
+	if err != nil {
+		return err
+	}
+
+	// Metadata-GC (system-tombstone) selection: max raft index <= bound per
+	// system-tombstonable (type, key). The rewrite keeps only that latest entry
+	// per key and drops earlier ones. Derived from the log prefix <= bound, so —
+	// like sel — it is a pure function of (log bytes, bound), identical on every
+	// replica. The two selections range over disjoint type sets (user-defined vs
+	// internal-snapshot), so they never collide despite sharing tombstoneKey.
+	msel, err := s.metadataSupersessions(bound)
 	if err != nil {
 		return err
 	}
@@ -178,7 +189,7 @@ func (s *Storage) runScrub(bound uint64) error {
 			if rerr != nil {
 				return rerr
 			}
-			keep, payload, ferr := scrubFilterEntry(raw, sel)
+			keep, payload, ferr := scrubFilterEntry(raw, sel, msel)
 			if ferr != nil {
 				return ferr
 			}
@@ -269,14 +280,23 @@ func (s *Storage) runScrub(bound uint64) error {
 // scrubFilterEntry decides the fate of one event-log record (raw = unframed
 // pb.Entry bytes). It returns whether to keep the record and, if kept, the
 // payload to write (the original bytes verbatim, or a re-marshaled entry with
-// tombstoned entities removed). Entries without a proposal (conf changes, the
-// leader no-op) are kept verbatim. The remove predicate fires for an entity at
-// raft index I whose (type, key) has a delete at D with I < D <= bound — i.e.
-// the entity was written before a delete within the freeze line — which is also
-// false for any entry at index > bound, so the tail is always kept. (The bound
-// is baked into sel — each value is the max delete index <= bound — so it is not
-// a separate parameter here.)
-func scrubFilterEntry(raw []byte, sel map[string]uint64) (keep bool, payload []byte, err error) {
+// removable entities dropped). Entries without a proposal (conf changes, the
+// leader no-op) are kept verbatim. Two removal reasons compose, each false for
+// any entry at index > bound (both selections are capped at bound), so the tail
+// is always kept:
+//
+//   - RTBF (user tombstone): a NON-delete entity at raft index I whose
+//     (type, key) has a delete at D with I < D <= bound — the entity was written
+//     before a delete within the freeze line. Deletes are spared so the
+//     tombstone survives. (sel values are the max delete index <= bound.)
+//   - Metadata GC (system tombstone): a system-tombstonable (internal-snapshot)
+//     entity — upsert OR delete — at index I superseded by a later entry for the
+//     same (type, key) at M <= bound (I < M). Only the latest per key survives;
+//     a superseded internal delete is droppable too. (msel values are that M.)
+//
+// The two selections range over disjoint type sets, so an entity matches at most
+// one reason.
+func scrubFilterEntry(raw []byte, sel, msel map[string]uint64) (keep bool, payload []byte, err error) {
 	pe := &pb.Entry{}
 	if err := pe.Unmarshal(raw); err != nil {
 		return false, nil, err
@@ -285,9 +305,19 @@ func scrubFilterEntry(raw []byte, sel map[string]uint64) (keep bool, payload []b
 		return true, raw, nil
 	}
 	idx := pe.Index
-	remove := func(typeID string, key []byte) bool {
-		d := sel[string(tombstoneKey(typeID, key))]
-		return d != 0 && idx < d
+	remove := func(typeID string, key []byte, isDelete bool) bool {
+		tk := string(tombstoneKey(typeID, key))
+		// RTBF: spare deletes (the tombstone must survive).
+		if !isDelete {
+			if d := sel[tk]; d != 0 && idx < d {
+				return true
+			}
+		}
+		// Metadata GC: drop anything below the latest entry for this key.
+		if m := msel[tk]; m != 0 && idx < m {
+			return true
+		}
+		return false
 	}
 	newData, allRemoved, changed, err := cluster.FilterProposalEntities(pe.Data, remove)
 	if err != nil {
@@ -305,6 +335,66 @@ func scrubFilterEntry(raw []byte, sel map[string]uint64) (keep bool, payload []b
 		return false, nil, err
 	}
 	return true, nb, nil
+}
+
+// metadataSupersessions scans the event log prefix at raft index <= bound and
+// returns, per system-tombstonable (internal-snapshot) (type, key), the highest
+// raft index <= bound at which an entry for that key appears. scrubFilterEntry
+// drops any entry for such a key whose index is strictly below this max, so only
+// the latest committed metadata value per key survives a scrub — bounding the
+// growth of superseded SyncableIndex / position / dead-letter / stuck / skip
+// bookkeeping (see metadata-gc-scrubber).
+//
+// Deterministic: a pure function of the log prefix <= bound, identical on every
+// replica, like tombstoneSelections. Keyed by tombstoneKey(type, key) so it
+// shares that encoding; the key set is disjoint from the RTBF selection's
+// (internal-snapshot vs user-defined types). Runs unlocked in scrub phase A, the
+// same access pattern as the phase-A copy — entries appended concurrently are
+// all at index > bound and excluded.
+func (s *Storage) metadataSupersessions(bound uint64) (map[string]uint64, error) {
+	sel := make(map[string]uint64)
+	first, err := s.firstEventSeq()
+	if err != nil {
+		return nil, err
+	}
+	last, err := s.lastEventSeq()
+	if err != nil {
+		return nil, err
+	}
+	if first == 0 || last == 0 {
+		return sel, nil
+	}
+	for seq := first; seq <= last; seq++ {
+		raw, err := s.readEventAt(seq)
+		if err != nil {
+			return nil, err
+		}
+		pe := &pb.Entry{}
+		if err := pe.Unmarshal(raw); err != nil {
+			return nil, err
+		}
+		// Event-log seqs are append order = raft-index order, so once an entry is
+		// past the freeze line the rest are too — stop before reading the tail.
+		if pe.Index > bound {
+			break
+		}
+		if pe.Type != pb.EntryNormal || pe.Data == nil {
+			continue
+		}
+		idx := pe.Index
+		if err := cluster.ForEachProposalEntity(pe.Data, func(typeID string, key []byte, _ bool) error {
+			if !cluster.IsSystemTombstonable(typeID) {
+				return nil
+			}
+			if tk := string(tombstoneKey(typeID, key)); idx > sel[tk] {
+				sel[tk] = idx
+			}
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+	}
+	return sel, nil
 }
 
 // recomputeEventBoundsLocked refreshes firstEventIndex/eventIndex from the
@@ -397,18 +487,44 @@ func (s *Storage) markScrubComplete(bound uint64) error {
 	for {
 		cur := s.lastScrubbedBound.Load()
 		if bound <= cur || s.lastScrubbedBound.CompareAndSwap(cur, bound) {
-			return nil
+			break
 		}
 	}
+	// The rewrite that just completed removed every superseded metadata entry at
+	// index <= bound, so the metadata-GC backlog is cleared. Writes that arrived
+	// during the scrub (index > bound) aren't reflected; they re-accumulate and
+	// drive the next scrub. Exactness isn't required (see metadataBacklog).
+	s.metadataBacklog.Store(0)
+	return nil
 }
 
-// HasScrubBacklog reports whether any tombstone records a delete at an index
-// beyond the highest completed scrub bound — i.e. there is RTBF erasure the next
-// scrub would physically remove. The automatic scheduler (db.scrubScheduler)
-// consults it so a cadence tick with no new deletions skips the O(N) rewrite.
-// Scans the tombstone bucket; cheap relative to the scrub cadence and the set is
-// the RTBF working set, not the whole log.
+// metadataBacklogThreshold is how many system-tombstonable metadata writes must
+// accumulate since the last completed scrub before HasScrubBacklog reports
+// metadata work. Unlike RTBF erasure (legally urgent — any single unscrubbed
+// delete triggers a scrub), metadata GC only reclaims space, so it batches: an
+// O(N) full-log rewrite isn't worth triggering to drop a handful of superseded
+// entries. This bounds lingering superseded metadata to roughly this many writes
+// between scheduled scrubs. A heuristic, not a correctness boundary — the
+// rewrite's removal set is exact and deterministic regardless of when it fires.
+// A var (not const) only so a test can lower it (SetMetadataBacklogThresholdForTest).
+var metadataBacklogThreshold int64 = 128
+
+// HasScrubBacklog reports whether the next scrub has anything to physically
+// remove — either RTBF erasure (a delete-tombstone beyond the highest completed
+// bound) or enough accumulated superseded metadata to be worth an O(N) rewrite.
+// It is the single "is there scrubbable work?" signal the automatic scheduler
+// (db.scrubScheduler) consults, deliberately covering both jobs the one rewrite
+// pass does, so an idle cadence tick skips the rewrite. A metadata-heavy,
+// RTBF-free cluster triggers via the metadata term (see metadata-gc-scrubber).
 func (s *Storage) HasScrubBacklog() bool {
+	return s.hasRTBFBacklog() || s.metadataBacklog.Load() >= metadataBacklogThreshold
+}
+
+// hasRTBFBacklog reports whether any tombstone records a delete at an index
+// beyond the highest completed scrub bound — i.e. there is RTBF erasure the next
+// scrub would physically remove. Scans the tombstone bucket; cheap relative to
+// the scrub cadence and the set is the RTBF working set, not the whole log.
+func (s *Storage) hasRTBFBacklog() bool {
 	bound := s.lastScrubbedBound.Load()
 	found := false
 	err := s.view(func(tx *bolt.Tx) error {

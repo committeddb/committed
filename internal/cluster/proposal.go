@@ -242,3 +242,23 @@ func systemType(id string) *Type {
 func IsInternal(id string) bool {
 	return systemType(id) != nil
 }
+
+// IsSystemTombstonable reports whether the event-log scrubber's system-tombstone
+// (metadata GC) pass may compact this type's superseded entries — i.e. drop all
+// but the latest committed entry per key. That is sound only for last-writer-wins
+// (EntityKindSnapshot) types, where a later write fully implies the earlier one;
+// for an event/standalone/command stream each entry carries information no later
+// entry implies, so none are compactable (only an RTBF "user tombstone" removes
+// those, regardless of kind).
+//
+// This predicate currently covers committed-internal metadata only: it is true
+// for a built-in iff that built-in is EntityKindSnapshot. Every system type is
+// Snapshot today (see TestSystemTypesAreSnapshotKind), but the kind is checked
+// rather than assumed so a future non-LWW internal type (e.g. an append-only
+// audit log) is excluded automatically. The follow-up
+// (compact-user-snapshot-streams) relaxes the internal restriction to also cover
+// user-defined EntityKindSnapshot types, which requires a TypeResolver.
+func IsSystemTombstonable(id string) bool {
+	t := systemType(id)
+	return t != nil && t.EntityKind == EntityKindSnapshot
+}

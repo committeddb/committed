@@ -15,11 +15,16 @@ import (
 // the cause.
 var ErrReplayMigrationFailed = errors.New("cluster: migration retry failed")
 
+// Standalone, not Snapshot — the type-keyed twin of syncableDeadLetterType: an
+// append-style audit log with many distinct live records per type id and an
+// asymmetric event-log key (upsert by type id, clearing delete by id+index), so
+// keep-latest-per-key compaction does not apply. EntityKindStandalone excludes
+// it from the metadata-GC scrubber (see syncableDeadLetterType).
 var typeMigrationDeadLetterType = registerSystemType(&Type{
 	ID:         "9e9a9e5f-22f6-4963-ae77-a4a87d807496",
 	Name:       "InternalTypeMigrationDeadLetter",
 	Version:    1,
-	EntityKind: EntityKindSnapshot,
+	EntityKind: EntityKindStandalone,
 })
 
 // TypeMigrationDeadLetter records that a type-migration program (jq) failed

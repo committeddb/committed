@@ -51,9 +51,10 @@ func TestFilterProposalEntities(t *testing.T) {
 		return bs
 	}
 
-	// remove forgets exactly (a, k1).
-	remove := func(typeID string, key []byte) bool {
-		return typeID == "a" && string(key) == "k1"
+	// remove forgets exactly (a, k1) — the RTBF shape: never removes a delete
+	// (the tombstone must survive), so the predicate guards on !isDelete.
+	remove := func(typeID string, key []byte, isDelete bool) bool {
+		return !isDelete && typeID == "a" && string(key) == "k1"
 	}
 
 	t.Run("none removed keeps verbatim", func(t *testing.T) {
@@ -91,13 +92,47 @@ func TestFilterProposalEntities(t *testing.T) {
 		require.Equal(t, [][2]string{{"b", "k9"}, {"c", "k1"}}, decodeEntities(t, newBytes))
 	})
 
-	t.Run("delete entity is always retained", func(t *testing.T) {
-		// (a, k1) matches remove, but it's a delete — the tombstone must stay.
+	t.Run("delete retention is the caller's choice", func(t *testing.T) {
+		// The RTBF-shaped predicate spares deletes: (a, k1) matches the
+		// type/key but is a delete, so the tombstone stays.
 		raw := mustMarshal(NewDeleteEntity(ty("a"), []byte("k1")))
 		newBytes, allRemoved, changed, err := FilterProposalEntities(raw, remove)
 		require.Nil(t, err)
 		require.False(t, allRemoved)
 		require.False(t, changed)
 		require.Nil(t, newBytes)
+
+		// A metadata-GC-shaped predicate that does NOT spare deletes drops the
+		// same delete — the system-tombstone path can compact a superseded
+		// internal delete.
+		dropDeletes := func(typeID string, key []byte, isDelete bool) bool {
+			return typeID == "a" && string(key) == "k1"
+		}
+		newBytes, allRemoved, changed, err = FilterProposalEntities(raw, dropDeletes)
+		require.Nil(t, err)
+		require.True(t, allRemoved)
+		require.True(t, changed)
+		require.Nil(t, newBytes)
 	})
+}
+
+func TestForEachProposalEntity(t *testing.T) {
+	ty := func(id string) *Type { return &Type{ID: id, Version: 1} }
+	raw, err := (&Proposal{Entities: []*Entity{
+		NewUpsertEntity(ty("a"), []byte("k1"), []byte(`{}`)),
+		NewDeleteEntity(ty("b"), []byte("k2")),
+	}}).Marshal()
+	require.Nil(t, err)
+
+	type ref struct {
+		typeID   string
+		key      string
+		isDelete bool
+	}
+	var got []ref
+	require.Nil(t, ForEachProposalEntity(raw, func(typeID string, key []byte, isDelete bool) error {
+		got = append(got, ref{typeID, string(key), isDelete})
+		return nil
+	}))
+	require.Equal(t, []ref{{"a", "k1", false}, {"b", "k2", true}}, got)
 }

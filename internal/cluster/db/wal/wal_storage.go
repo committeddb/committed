@@ -210,6 +210,15 @@ type Storage struct {
 	// highest Scrub upper-bound this node has finished rewriting to). Loaded in
 	// Open, advanced by the worker; read by the automatic-scrub scheduler.
 	lastScrubbedBound atomic.Uint64
+	// metadataBacklog counts system-tombstonable (internal-snapshot) entities
+	// applied since the last completed scrub — a cheap, in-memory proxy for
+	// "superseded metadata is waiting to be GC'd." HasScrubBacklog consults it so
+	// a metadata-heavy, RTBF-free cluster still triggers the automatic scrubber
+	// (see metadata-gc-scrubber). Non-durable and leader-local by design: only
+	// the leader proposes, the rewrite's removal set is what must be
+	// deterministic, and a restart simply re-accumulates from the still-present
+	// log. Reset on scrub completion (markScrubComplete).
+	metadataBacklog atomic.Int64
 	// StateLog persists raft's HardState and snapshot. Records are written
 	// only when the state actually changes, and appendState truncates behind
 	// the newest Snapshot + HardState records, so the log holds a handful of
@@ -1079,6 +1088,15 @@ func (s *Storage) ApplyCommitted(entry pb.Entry) error {
 				if err := s.recordEventTombstone(entity.Type.ID, entity.Key, entry.Index); err != nil {
 					return fmt.Errorf("[wal.storage] recordEventTombstone: %w", err)
 				}
+			}
+
+			// Count an applied system-tombstonable (internal-snapshot) entity as
+			// metadata-GC backlog so the automatic scrubber fires on a
+			// metadata-heavy cluster even with no RTBF deletes. Each write
+			// supersedes the previous value of its key, so this over-counts
+			// distinct-key writes slightly; that is fine (see metadataBacklog).
+			if cluster.IsSystemTombstonable(entity.Type.ID) {
+				s.metadataBacklog.Add(1)
 			}
 		}
 

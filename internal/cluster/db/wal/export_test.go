@@ -129,6 +129,51 @@ func TombstoneKey(typeID string, key []byte) string {
 	return string(tombstoneKey(typeID, key))
 }
 
+// EventIndices returns the raft indices present in the event log, in seq order,
+// so scrub tests can assert exactly which entries survived without hydrating
+// entities through a resolver.
+func (s *Storage) EventIndices() ([]uint64, error) {
+	first, err := s.firstEventSeq()
+	if err != nil {
+		return nil, err
+	}
+	last, err := s.lastEventSeq()
+	if err != nil {
+		return nil, err
+	}
+	var out []uint64
+	if first == 0 || last == 0 {
+		return out, nil
+	}
+	for seq := first; seq <= last; seq++ {
+		raw, err := s.readEventAt(seq)
+		if err != nil {
+			return nil, err
+		}
+		e := &pb.Entry{}
+		if err := e.Unmarshal(raw); err != nil {
+			return nil, err
+		}
+		out = append(out, e.Index)
+	}
+	return out, nil
+}
+
+// MetadataSupersessions exposes the metadata-GC "max index <= bound per
+// system-tombstonable (type, key)" selection for test assertions.
+func (s *Storage) MetadataSupersessions(bound uint64) (map[string]uint64, error) {
+	return s.metadataSupersessions(bound)
+}
+
+// SetMetadataBacklogThresholdForTest lowers the metadata-backlog trigger so a
+// test can exercise HasScrubBacklog's metadata term without applying 128
+// fsync-bound entries. Returns a func that restores the production value.
+func SetMetadataBacklogThresholdForTest(n int64) func() {
+	old := metadataBacklogThreshold
+	metadataBacklogThreshold = n
+	return func() { metadataBacklogThreshold = old }
+}
+
 // Frame applies the per-entry checksum frame, so tests can forge
 // legacy-format state-log records directly on disk (the pre-truncation code
 // appended a HardState + full-snapshot record pair on every Ready; recovery

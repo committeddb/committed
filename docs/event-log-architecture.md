@@ -388,9 +388,10 @@ its raft-index slot, so the index sequence stayed dense. That was
 superseded by **physical removal**: the deleted entries are dropped from
 the permanent event log entirely. Removal was chosen because it is the
 only option that actually *shrinks* the log, so the same mechanism also
-bounds the never-compacted tier's metadata growth (a future ticket reuses
-this scrubber to GC superseded bookkeeping) — which is why Committed stays
-single-raft instead of introducing a separate compactable metadata raft.
+bounds the never-compacted tier's metadata growth (metadata GC reuses this
+scrubber to compact superseded bookkeeping — see *Metadata GC (system
+tombstones)* below) — which is why Committed stays single-raft instead of
+introducing a separate compactable metadata raft.
 The cost is that the raft-index column becomes **sparse (gapped)**: an
 index that was removed is simply absent. The wal sequence numbers are
 re-densified on rewrite and the raft index carries the gaps. The Reader
@@ -519,6 +520,67 @@ subset — so nothing may assume "every committed index is present in the
 event log" (`ActualAt` returns `ErrActualNotFound` for a scrubbed index,
 by design).
 
+### Metadata GC (system tombstones)
+
+The same scrubber serves a second job it was built to also support: bounding
+the never-compacted tier's growth from **superseded internal bookkeeping**. On a
+busy cluster the dominant source of event-log growth often isn't user data — it
+is the steady stream of last-writer-wins coordination records: `SyncableIndex`
+checkpoint bumps, ingestable positions, `SyncableStuck` / `SyncableSkipRequest`
+status, and config rewrites. Only the latest value of each ever matters, yet
+every superseded copy otherwise lives forever in the log.
+
+**User tombstone vs system tombstone.** Removal has two predicates that run in
+the *one* rewrite pass:
+
+- A **user tombstone** is the RTBF delete above — an explicit erasure of a
+  subject. It removes a subject's entries regardless of entity kind (events
+  included) and always *spares* the delete-tombstone itself.
+- A **system tombstone** is metadata GC — the scrubber compacting a
+  last-writer-wins key to its latest value. It removes superseded entries
+  (upserts *and* deletes) of an internal key, keeping only the newest `<= B`. So
+  it *can* drop a superseded internal delete, exactly where the RTBF predicate
+  spares one.
+
+The two range over **disjoint type sets** — user tombstones touch user-defined
+types, system tombstones touch committed-internal types — so combining them in
+one pass is conflict-free and any entity matches at most one predicate.
+
+**Keep-latest, never drop-all — the source-of-truth invariant.** Metadata GC
+keeps the *latest* committed entry per `(type, key)` and drops only entries a
+later surviving entry makes redundant. It never drops the latest value of
+anything. This preserves the invariant that the permanent event log is a
+complete source of truth from which bbolt — a derived materialized view — can be
+reconstructed by replay: the live value of every key stays in the log. Dropping
+all metadata `<= B` would reclaim only one extra entry per key while forfeiting
+that invariant permanently, a bad trade. The rule, stated as an invariant:
+*metadata GC may drop only an entry a later surviving entry makes redundant —
+never the latest value of anything.*
+
+**Gating: last-writer-wins only (`EntityKindSnapshot`).** Compacting a key to its
+latest is sound only when a later write fully *implies* the earlier one — i.e.
+snapshot (LWW) semantics. `cluster.IsSystemTombstonable(type)` is the gate:
+internal **and** `EntityKindSnapshot`. Every built-in declares its kind; the LWW
+ones (`SyncableIndex`, ingestable position, stuck, skip, the configs) are
+Snapshot and GC'd. The two dead-letter logs are `EntityKindStandalone` and
+**excluded** — they are an append-style audit record with many distinct live
+entries per id and an asymmetric event-log key (upsert keyed by id, clearing
+delete keyed by id+index), so keep-latest-per-key would drop live records and
+break replayability.
+
+**Determinism.** Like the RTBF selection, the survivor set is a pure function of
+the log prefix `<= B`: a pre-pass computes, per system-tombstonable `(type,
+key)`, the max raft index `<= B`, and an entry is dropped iff its index is below
+that max. Identical inputs on every replica yield byte-identical rewritten logs.
+`EventIndex` is preserved by the same tail-is-always-`> B` argument as RTBF.
+
+**Trigger.** `HasScrubBacklog` is generalized from "is there RTBF erasure?" to
+"is there *any* scrubbable work — RTBF erasure **or** enough accumulated
+superseded metadata?", so a metadata-heavy, RTBF-free cluster still triggers the
+automatic scrubber and the one rewrite pass does both jobs. Because metadata GC
+only reclaims space — unlike legally-urgent erasure — it batches behind a small
+threshold rather than firing on every superseded write.
+
 ---
 
 ## Determinism requirement
@@ -539,8 +601,7 @@ nice-to-have, because:
 
 ### Known sources of non-determinism
 
-The apply-path audit lives at `.claude-scratch/tickets/determinism-audit.md`
-and is **complete** as of the determinism-audit landing. Findings:
+The apply-path determinism audit is **complete**. Findings:
 
 - **`time.Now()` in `wal/user_defined.go`** — moot. The original finding
   was a wall-clock read in the user-defined apply handler that fed the
@@ -605,9 +666,7 @@ foundation needs to be in place first.
 
 ## PreVote and election timeout
 
-These are small Raft tunings that should land independently of the
-larger event-log work. They are tracked in
-`prevote-and-election-timeout.md`.
+These are small Raft tunings, independent of the larger event-log work.
 
 ### PreVote
 
@@ -693,7 +752,7 @@ The reactions form a ladder of severity, deepest cost first:
   is the lesser evil when the alternative is corrupting the event log, and
   it is only safe because the rewind + replay + dedup machinery absorbs the
   overlap on restart. See the `ingestExitFreeze` branch in
-  `internal/cluster/db/ingest.go` and `ingest-effectively-once.md`.
+  `internal/cluster/db/ingest.go`.
 
 - **Don't-advance-and-retry** (sync index bump). The bump *is* the durable
   resume point, so advancing it past work whose commit is unconfirmed would
@@ -701,7 +760,7 @@ The reactions form a ladder of severity, deepest cost first:
   advance and re-syncs the same proposal next iteration. This caps recovery
   at one duplicate rather than freezing, because `Sync` is idempotent and a
   single re-delivery is harmless. See `proposeSyncableIndex` in
-  `internal/cluster/db/db.go` and `sync-position-durable.md`.
+  `internal/cluster/db/db.go`.
 
 - **Log-and-continue** (sync dead letter). The dead-letter record is
   observability *about* a decision — the permanent skip — that has already
@@ -713,8 +772,7 @@ The reactions form a ladder of severity, deepest cost first:
   would be actively wrong — it would halt the whole syncable over a
   diagnostic for an *expected* condition (bad data), defeating the entire
   point of skip-and-dead-letter, which is to keep good data flowing past
-  bad rows. See `proposeSyncableDeadLetter` in `internal/cluster/db/db.go`
-  and `sync-error-observability.md`.
+  bad rows. See `proposeSyncableDeadLetter` in `internal/cluster/db/db.go`.
 
 The same ambiguity, three reactions — and the deciding question is always
 "if I'm wrong about whether this committed, what breaks, and can I
@@ -785,20 +843,17 @@ the previous. Each phase is its own ticket.
 ### Phase 1: PreVote + production election timeout (small, independent)
 
 Tunings only. No event-log changes. Can land first.
-Ticket: `prevote-and-election-timeout.md`.
 
 ### Phase 2: Determinism audit (precondition)
 
 Walk every code path reachable from `ApplyCommitted` and `applyEntity`.
 Fix every source of non-determinism. Add a CI hash-comparison check.
-Ticket: `determinism-audit.md`.
 
 ### Phase 3: Carve out the permanent event log
 
 Add a second `wal.Log` at `events/`. `ApplyCommitted` writes events to
 both stores during a transition period. Add the storage invariant check
 at the end of every Ready loop iteration (fatal-exit on violation).
-Ticket: `permanent-event-log.md`, phase 1.
 
 ### Phase 4: Migrate syncable reads to the permanent log
 
@@ -826,13 +881,11 @@ implementation. Will get its own ticket once the foundation is in place.
 
 The physical scrubber — a committed `Scrub{B}` command driving a
 deterministic background segment-rewrite that removes already-delete-
-proposed entities — has landed (`event-log-scrubber-rtbf.md`). It uses
+proposed entities — has landed. It uses
 **removal**, not the redaction sketch earlier drafts described; see
-§ "Right-to-be-forgotten / deletes". Two follow-ups remain their own
-tickets: (a) wiring user-data deletes through to downstream syncables
-(the Phase-1 logical-delete handling, mandatory in the Syncable contract),
-and (b) metadata-GC, which reuses the same scrub engine to bound
-never-compacted bookkeeping growth.
+§ "Right-to-be-forgotten / deletes". **Metadata GC** — reusing the same
+scrub engine to bound never-compacted bookkeeping growth — has since landed;
+see § "Metadata GC (system tombstones)".
 
 ---
 
@@ -853,6 +906,9 @@ never-compacted bookkeeping growth.
 | Scrub trigger                     | Committed `Scrub{B}` command; auto + manual     | One committed bound makes the background rewrite deterministic across replicas         |
 | Delete-tombstone retention        | Retained (never scrubbed)                       | In-flight/fresh syncables still need the delete; tiny and non-PII                      |
 | Delete addressing                 | `(type, key)`, not raft index                   | Matches existing `NewDeleteEntity` model; one delete covers all history for an entity  |
+| Metadata GC predicate             | Keep-latest per `(type, key)`; never drop-all   | Event log stays a replayable source of truth for the derived bbolt view                |
+| Metadata GC gate                  | Internal AND `EntityKindSnapshot`               | Keep-latest is sound only for LWW-per-key; dead-letters are Standalone (asymmetric key) → excluded |
+| Scrub backlog signal              | Generalized: RTBF OR superseded-metadata work   | A metadata-heavy, RTBF-free cluster must still trigger the automatic scrubber          |
 | Election timeout (production)     | 30ms tick / 300ms election                      | Upper end of Raft paper's recommendation; tests stay fast                              |
 | Election timeout (operator knob)  | 15ms tick / 150ms election                      | Optional optimization for low-latency LANs                                             |
 | PreVote                           | Enabled                                         | Eliminates rejoin-disruption failure mode (Ongaro thesis §9.6)                         |
@@ -891,6 +947,6 @@ see what was deliberately deferred vs. accidentally forgotten.
 - **Per-topic raft groups**: only if write throughput on a single raft
   group hits a wall. Would compromise cross-type ordering.
 - **Determinism CI check**: cross-node hash comparison after multi-node
-  tests. Part of `determinism-audit.md`.
+  tests.
 - **Right-to-be-forgotten implementation**: model is described above; the
   actual code is a future ticket.

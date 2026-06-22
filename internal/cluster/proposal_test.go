@@ -230,24 +230,36 @@ func TestIsInternal_HidesEveryBuiltInFromSyncables(t *testing.T) {
 	}
 }
 
-// TestSystemTypesAreSnapshotKind locks in that every built-in (system) type
-// declares EntityKindSnapshot. System types are last-writer-wins per
-// (type, key), which is exactly what makes them safe for the event-log
-// scrubber's system-tombstone (metadata GC) path: that path compacts a type's
-// superseded entries only when its EntityKind is Snapshot (see
-// metadata-gc-scrubber). A system type left at the EntityKindUnspecified
-// default would silently never be GC'd, so this guards against that — a new
-// built-in must consciously declare its kind. If a future internal type is
-// genuinely NOT last-writer-wins (e.g. an append-only internal audit log),
-// exclude it here deliberately rather than letting it default.
-func TestSystemTypesAreSnapshotKind(t *testing.T) {
+// TestSystemTypesDeclareKindAndTombstonability locks in two things about every
+// built-in (system) type that drive the event-log scrubber's system-tombstone
+// (metadata GC) path:
+//
+//   - It must declare a deliberate EntityKind, never the Unspecified default —
+//     otherwise a new built-in would silently never be classified.
+//   - IsSystemTombstonable must match the type's nature. The keep-latest-per-key
+//     compaction is sound only for last-writer-wins types whose event-log key
+//     uniquely identifies the record (EntityKindSnapshot). The two dead-letter
+//     logs are append-style audit records with many live entries per id and an
+//     asymmetric key (upsert by id, delete by id+index), so they are
+//     EntityKindStandalone and excluded — compacting them would drop live
+//     records and break event-log replayability.
+func TestSystemTypesDeclareKindAndTombstonability(t *testing.T) {
 	if len(systemTypes) == 0 {
 		t.Fatal("systemTypes registry is empty; the package init wiring is broken")
 	}
+	// The only built-ins the metadata-GC scrubber must NOT compact.
+	notTombstonable := map[string]bool{
+		syncableDeadLetterType.ID:      true,
+		typeMigrationDeadLetterType.ID: true,
+	}
 	for id, tp := range systemTypes {
-		if tp.EntityKind != EntityKindSnapshot {
-			t.Errorf("system type %q (%s) has EntityKind %q; built-in types must declare EntityKindSnapshot so the metadata-GC scrubber can compact their superseded entries",
-				tp.Name, id, tp.EntityKind)
+		if tp.EntityKind == EntityKindUnspecified {
+			t.Errorf("system type %q (%s) must declare a deliberate EntityKind, not the Unspecified default", tp.Name, id)
+		}
+		want := !notTombstonable[id]
+		if got := IsSystemTombstonable(id); got != want {
+			t.Errorf("system type %q (%s): IsSystemTombstonable = %v, want %v (kind %q)",
+				tp.Name, id, got, want, tp.EntityKind)
 		}
 	}
 }

@@ -368,11 +368,20 @@ func NewDeleteSyncableIndexEntity(id string) *Entity {
 	return NewDeleteEntity(syncableIndexType, []byte(id))
 }
 
+// Standalone, not Snapshot: dead letters are an append-style audit log, not a
+// last-writer-wins value. Many distinct live records exist per syncable id
+// (one per failed proposal index), and the event-log key is asymmetric — the
+// upsert keys by id while the clearing delete keys by id+index — so the
+// metadata-GC scrubber's keep-latest-per-key compaction does NOT apply (it would
+// drop live records). EntityKindStandalone makes IsSystemTombstonable false, so
+// the scrubber leaves them alone. Dead letters are rare in healthy operation, so
+// they are not a log-growth driver; a key-aware GC for them is a possible
+// follow-up (see metadata-gc-scrubber).
 var syncableDeadLetterType = registerSystemType(&Type{
 	ID:         "5f3b6c8e-1d2a-4e7b-9c0f-2a8d6b4e1f93",
 	Name:       "InternalSyncableDeadLetter",
 	Version:    1,
-	EntityKind: EntityKindSnapshot,
+	EntityKind: EntityKindStandalone,
 })
 
 // SyncableDeadLetter records that a syncable gave up on and skipped (dead-

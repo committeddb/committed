@@ -67,11 +67,16 @@ func NewScrubEntity(b uint64) (*Entity, error) {
 }
 
 // FilterProposalEntities removes from a marshaled proposal every entity for
-// which remove(typeID, key) reports true — EXCEPT delete entities, which are
-// always retained (the delete-tombstone must survive so an in-flight syncable
-// still receives the delete and a fresh syncable replaying a scrubbed log
-// no-ops it). It is the entity-granular core of the scrubber: a proposal that
-// bundled several entities keeps its untombstoned siblings.
+// which remove(typeID, key, isDelete) reports true. It is the entity-granular
+// core of the scrubber: a proposal that bundled several entities keeps the ones
+// the predicate spares.
+//
+// The caller owns all policy, including whether delete tombstones are retained.
+// The RTBF (user-tombstone) pass passes a predicate that never removes a delete
+// — the tombstone must survive so an in-flight syncable still receives the
+// delete and a fresh syncable replaying a scrubbed log no-ops it — while the
+// metadata-GC (system-tombstone) pass may remove a superseded internal delete.
+// isDelete lets the predicate distinguish the two without re-deriving it.
 //
 // Returns:
 //   - newBytes: the re-marshaled proposal when some (but not all) entities were
@@ -86,7 +91,7 @@ func NewScrubEntity(b uint64) (*Entity, error) {
 // every replica produces identical bytes for a changed record. Working at the
 // clusterpb level (not the resolver-hydrated cluster.Proposal) keeps the result
 // a pure function of (input bytes, predicate) with no resolver dependency.
-func FilterProposalEntities(raw []byte, remove func(typeID string, key []byte) bool) (newBytes []byte, allRemoved bool, changed bool, err error) {
+func FilterProposalEntities(raw []byte, remove func(typeID string, key []byte, isDelete bool) bool) (newBytes []byte, allRemoved bool, changed bool, err error) {
 	lp := &clusterpb.LogProposal{}
 	if err := proto.Unmarshal(raw, lp); err != nil {
 		return nil, false, false, err
@@ -97,9 +102,8 @@ func FilterProposalEntities(raw []byte, remove func(typeID string, key []byte) b
 
 	kept := make([]*clusterpb.LogEntity, 0, len(lp.LogEntities))
 	for _, le := range lp.LogEntities {
-		// A delete entity is the tombstone itself, never PII — always retain it.
 		isDelete := bytes.Equal(le.Data, delete)
-		if !isDelete && remove(le.Type.GetID(), le.Key) {
+		if remove(le.Type.GetID(), le.Key, isDelete) {
 			continue
 		}
 		kept = append(kept, le)
@@ -120,4 +124,24 @@ func FilterProposalEntities(raw []byte, remove func(typeID string, key []byte) b
 		}
 		return out, false, true, nil
 	}
+}
+
+// ForEachProposalEntity decodes a marshaled proposal and calls fn once per
+// entity with its (typeID, key, isDelete) — enough to drive scrub/GC selection
+// without hydrating the entity through a resolver. It stops and returns the
+// first error from fn or from decoding. The key slice aliases the decoded
+// proposal's memory; copy it if retained beyond the callback. Like
+// FilterProposalEntities it works at the clusterpb level, so the traversal is a
+// pure function of the input bytes.
+func ForEachProposalEntity(raw []byte, fn func(typeID string, key []byte, isDelete bool) error) error {
+	lp := &clusterpb.LogProposal{}
+	if err := proto.Unmarshal(raw, lp); err != nil {
+		return err
+	}
+	for _, le := range lp.LogEntities {
+		if err := fn(le.Type.GetID(), le.Key, bytes.Equal(le.Data, delete)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
