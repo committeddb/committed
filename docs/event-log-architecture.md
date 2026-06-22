@@ -522,13 +522,14 @@ by design).
 
 ### Metadata GC (system tombstones)
 
-The same scrubber serves a second job it was built to also support: bounding
-the never-compacted tier's growth from **superseded internal bookkeeping**. On a
-busy cluster the dominant source of event-log growth often isn't user data — it
-is the steady stream of last-writer-wins coordination records: `SyncableIndex`
-checkpoint bumps, ingestable positions, `SyncableStuck` / `SyncableSkipRequest`
-status, and config rewrites. Only the latest value of each ever matters, yet
-every superseded copy otherwise lives forever in the log.
+The same scrubber serves a second job it was built to also support: bounding the
+never-compacted tier's growth from **superseded last-writer-wins data**. On a
+busy cluster the dominant source of event-log growth is often the steady stream
+of LWW records — internal coordination (`SyncableIndex` checkpoint bumps,
+ingestable positions, `SyncableStuck` / `SyncableSkipRequest` status) and
+user-defined `EntityKindSnapshot` topics, where each write fully replaces the
+previous one for its key. Only the latest value of each ever matters, yet every
+superseded copy otherwise lives forever in the log.
 
 **User tombstone vs system tombstone.** Removal has two predicates that run in
 the *one* rewrite pass:
@@ -536,15 +537,18 @@ the *one* rewrite pass:
 - A **user tombstone** is the RTBF delete above — an explicit erasure of a
   subject. It removes a subject's entries regardless of entity kind (events
   included) and always *spares* the delete-tombstone itself.
-- A **system tombstone** is metadata GC — the scrubber compacting a
-  last-writer-wins key to its latest value. It removes superseded entries
-  (upserts *and* deletes) of an internal key, keeping only the newest `<= B`. So
-  it *can* drop a superseded internal delete, exactly where the RTBF predicate
-  spares one.
+- A **system tombstone** is metadata GC — the scrubber compacting an
+  `EntityKindSnapshot` key (internal bookkeeping or a user Snapshot topic) to its
+  latest value. It removes superseded entries (upserts *and* deletes), keeping
+  only the newest `<= B`. So it *can* drop a superseded delete, exactly where the
+  RTBF predicate spares one.
 
-The two range over **disjoint type sets** — user tombstones touch user-defined
-types, system tombstones touch committed-internal types — so combining them in
-one pass is conflict-free and any entity matches at most one predicate.
+Both predicates run in the *one* rewrite pass: an entry is dropped if **either**
+fires (a single OR), so they never double-remove. Where they can overlap — a user
+Snapshot key that also carries an RTBF delete — they agree, since both keep only
+the latest entry per key. RTBF additionally guarantees a delete-tombstone
+survives (it spares deletes); metadata GC only drops a delete that a *later*
+entry for the same key supersedes, so the latest delete is always kept.
 
 **Keep-latest, never drop-all — the source-of-truth invariant.** Metadata GC
 keeps the *latest* committed entry per `(type, key)` and drops only entries a
@@ -559,19 +563,36 @@ never the latest value of anything.*
 
 **Gating: last-writer-wins only (`EntityKindSnapshot`).** Compacting a key to its
 latest is sound only when a later write fully *implies* the earlier one — i.e.
-snapshot (LWW) semantics. `cluster.IsSystemTombstonable(type)` is the gate:
-internal **and** `EntityKindSnapshot`. Every built-in declares its kind; the LWW
-ones (`SyncableIndex`, ingestable position, stuck, skip, the configs) are
-Snapshot and GC'd. The two dead-letter logs are `EntityKindStandalone` and
-**excluded** — they are an append-style audit record with many distinct live
-entries per id and an asymmetric event-log key (upsert keyed by id, clearing
-delete keyed by id+index), so keep-latest-per-key would drop live records and
-break replayability.
+snapshot (LWW) semantics, where superseded copies are disposable. So the gate is
+exactly **`EntityKind == EntityKindSnapshot`**, for internal *and* user-defined
+types alike: an internal Snapshot built-in (`SyncableIndex`, ingestable position,
+stuck, skip) or a user Snapshot topic is compacted to its latest-per-key.
+Everything else is retained, by kind — and the non-Snapshot built-ins are
+deliberately classified, not special-cased:
+
+- The version-stored configs (`type` / `database` / `syncable` / `ingestable`)
+  are **`EntityKindRevision`** — full states in a retained, addressable version
+  series (the rollback endpoints). Compacting them would discard history the log
+  must keep to stay self-describing and replayable into bbolt's versioned stores.
+- The dead-letter logs are **`EntityKindStandalone`** — append-style audit
+  records with many live entries per id and an asymmetric event-log key (upsert
+  by id, clearing delete by id+index); keep-latest-per-key would drop live
+  records.
+
+**Resolving the kind deterministically.** An internal type's kind is a constant.
+A *user* type's kind lives in mutable, deletable state, so reading the live type
+bucket at scrub time would be non-deterministic — a type delete at index `> B`
+could race the async worker, and two nodes would disagree. Instead the kind is
+harvested from the type's registration entries **in the log prefix `<= B`**
+(latest registration wins, in index order) — a pure function of the prefix, like
+the rest of the selection. `typeType` being `EntityKindRevision` (retained)
+guarantees a type's registration is always present in the log before the data
+that references it, so the harvest always resolves.
 
 **Determinism.** Like the RTBF selection, the survivor set is a pure function of
-the log prefix `<= B`: a pre-pass computes, per system-tombstonable `(type,
-key)`, the max raft index `<= B`, and an entry is dropped iff its index is below
-that max. Identical inputs on every replica yield byte-identical rewritten logs.
+the log prefix `<= B`: a pre-pass computes, per Snapshot `(type, key)`, the max
+raft index `<= B`, and an entry is dropped iff its index is below that max.
+Identical inputs on every replica yield byte-identical rewritten logs.
 `EventIndex` is preserved by the same tail-is-always-`> B` argument as RTBF.
 
 **Trigger.** `HasScrubBacklog` is generalized from "is there RTBF erasure?" to
@@ -907,7 +928,7 @@ see § "Metadata GC (system tombstones)".
 | Delete-tombstone retention        | Retained (never scrubbed)                       | In-flight/fresh syncables still need the delete; tiny and non-PII                      |
 | Delete addressing                 | `(type, key)`, not raft index                   | Matches existing `NewDeleteEntity` model; one delete covers all history for an entity  |
 | Metadata GC predicate             | Keep-latest per `(type, key)`; never drop-all   | Event log stays a replayable source of truth for the derived bbolt view                |
-| Metadata GC gate                  | Internal AND `EntityKindSnapshot`               | Keep-latest is sound only for LWW-per-key; dead-letters are Standalone (asymmetric key) → excluded |
+| Metadata GC gate                  | `EntityKind == Snapshot` (internal + user)      | Keep-latest is sound only for LWW; configs are Revision (history retained), dead-letters Standalone → both excluded. User kinds harvested from the log prefix for determinism |
 | Scrub backlog signal              | Generalized: RTBF OR superseded-metadata work   | A metadata-heavy, RTBF-free cluster must still trigger the automatic scrubber          |
 | Election timeout (production)     | 30ms tick / 300ms election                      | Upper end of Raft paper's recommendation; tests stay fast                              |
 | Election timeout (operator knob)  | 15ms tick / 150ms election                      | Optional optimization for low-latency LANs                                             |

@@ -76,6 +76,11 @@ enum LogEntityKind {
     // Facts with no aggregate to converge on (audit, telemetry); apply =
     // append, never folded.
     EntityKindStandalone = 5;
+    // Full states in a retained, ordered series — like Snapshot, but every
+    // prior version is kept and individually addressable (roll back / read
+    // "as of"). The latest is current; the history is part of the data, so
+    // it is never compacted away.
+    EntityKindRevision = 6;
 }
 
 message LogType {

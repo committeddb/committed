@@ -79,6 +79,16 @@ const (
 	// EntityKindStandalone entities are facts with no aggregate to
 	// converge on (audit, telemetry); apply = append, never folded.
 	EntityKindStandalone EntityKind = 5
+	// EntityKindRevision entities are full states in a retained, ordered
+	// series — like EntityKindSnapshot (self-contained, no folding), but
+	// every prior version is kept and individually addressable (roll back,
+	// read "as of"). The latest is current; the history is part of the data.
+	// So unlike Snapshot — whose superseded copies are disposable and get
+	// compacted away — a Revision's predecessors are never compacted. This is
+	// the shape of committed's own versioned configs (type/database/syncable/
+	// ingestable, with their rollback endpoints) and of any user data kept as
+	// a revision history rather than just a current value.
+	EntityKindRevision EntityKind = 6
 )
 
 // ParseEntityKind maps the TOML string form to an EntityKind. The
@@ -99,8 +109,10 @@ func ParseEntityKind(s string) (EntityKind, error) {
 		return EntityKindCommand, nil
 	case "standalone":
 		return EntityKindStandalone, nil
+	case "revision":
+		return EntityKindRevision, nil
 	}
-	return 0, fmt.Errorf("unknown entity kind %q (expected \"snapshot\", \"delta\", \"event\", \"command\", or \"standalone\")", s)
+	return 0, fmt.Errorf("unknown entity kind %q (expected \"snapshot\", \"delta\", \"event\", \"command\", \"standalone\", or \"revision\")", s)
 }
 
 func (k EntityKind) String() string {
@@ -115,6 +127,8 @@ func (k EntityKind) String() string {
 		return "command"
 	case EntityKindStandalone:
 		return "standalone"
+	case EntityKindRevision:
+		return "revision"
 	default:
 		return "unspecified"
 	}
@@ -163,11 +177,19 @@ func (t *Type) String() string {
 	return fmt.Sprintf(" (%s) %s - v%d", t.ID, t.Name, t.Version)
 }
 
+// EntityKindRevision, not Snapshot: type configs are version-stored with
+// rollback (every version retained and addressable), so the metadata-GC
+// scrubber must NOT keep-latest-compact them. Retaining every registration in
+// the permanent event log also keeps the log self-describing — a data entity's
+// schema is always resolvable from the log itself, which is what lets the
+// user-data-kind harvest work and the log replay back into bbolt's versioned
+// type store. The other versioned configs (database/syncable/ingestable) are
+// Revision for the same reason.
 var typeType = registerSystemType(&Type{
 	ID:         "268e1ac4-7d17-4798-afae-3f1f9aa6fc65",
 	Name:       "InternalType",
 	Version:    1,
-	EntityKind: EntityKindSnapshot,
+	EntityKind: EntityKindRevision,
 })
 
 func IsType(id string) bool {
@@ -195,7 +217,7 @@ func (t *Type) Marshal() ([]byte, error) {
 		// Version is monotonically assigned starting at 1 (will never
 		// exceed int32), Validate has only two defined values
 		// (NoValidation=0, ValidateSchema=1), and EntityKind only the
-		// six EntityKind constants (ParseEntityKind rejects anything
+		// defined EntityKind constants (ParseEntityKind rejects anything
 		// else).
 		Version:       int32(t.Version), //nolint:gosec // G115: bounded by domain
 		SchemaType:    t.SchemaType,

@@ -338,21 +338,35 @@ func scrubFilterEntry(raw []byte, sel, msel map[string]uint64) (keep bool, paylo
 }
 
 // metadataSupersessions scans the event log prefix at raft index <= bound and
-// returns, per system-tombstonable (internal-snapshot) (type, key), the highest
-// raft index <= bound at which an entry for that key appears. scrubFilterEntry
-// drops any entry for such a key whose index is strictly below this max, so only
-// the latest committed metadata value per key survives a scrub — bounding the
-// growth of superseded SyncableIndex / position / dead-letter / stuck / skip
-// bookkeeping (see metadata-gc-scrubber).
+// returns, per Snapshot (type, key), the highest raft index <= bound at which an
+// entry for that key appears. scrubFilterEntry drops any entry for such a key
+// whose index is strictly below this max, so only the latest committed value per
+// key survives a scrub — bounding the growth of superseded internal bookkeeping
+// (SyncableIndex / position / stuck / skip) AND superseded user
+// EntityKindSnapshot streams (see metadata-gc-scrubber + compact-user-snapshot-
+// streams).
+//
+// Compactability = EntityKindSnapshot. Internal Snapshot built-ins are resolved
+// by IsSystemTombstonable. A user type's kind is harvested from its type
+// registrations as we scan (latest registration wins, in index order): this
+// keeps kind resolution a pure function of the log prefix <= bound — and so
+// determinism-safe — rather than reading the mutable, deletable live type
+// bucket at worker time. typeType is EntityKindRevision (retained, never
+// compacted), so every registration is present in the log before the data that
+// references it, and the harvest always resolves.
 //
 // Deterministic: a pure function of the log prefix <= bound, identical on every
 // replica, like tombstoneSelections. Keyed by tombstoneKey(type, key) so it
-// shares that encoding; the key set is disjoint from the RTBF selection's
-// (internal-snapshot vs user-defined types). Runs unlocked in scrub phase A, the
-// same access pattern as the phase-A copy — entries appended concurrently are
-// all at index > bound and excluded.
+// shares that encoding; disjoint from the RTBF selection (a user delete is
+// handled by RTBF, not here). Runs unlocked in scrub phase A, the same access
+// pattern as the phase-A copy — entries appended concurrently are all at index
+// > bound and excluded.
 func (s *Storage) metadataSupersessions(bound uint64) (map[string]uint64, error) {
 	sel := make(map[string]uint64)
+	// User-type kinds, harvested in index order from type registrations as we
+	// scan. typeType being Revision (retained) guarantees a type's registration
+	// precedes its data here.
+	userKind := make(map[string]cluster.EntityKind)
 	first, err := s.firstEventSeq()
 	if err != nil {
 		return nil, err
@@ -382,8 +396,21 @@ func (s *Storage) metadataSupersessions(bound uint64) (map[string]uint64, error)
 			continue
 		}
 		idx := pe.Index
-		if err := cluster.ForEachProposalEntity(pe.Data, func(typeID string, key []byte, _ bool) error {
-			if !cluster.IsSystemTombstonable(typeID) {
+		if err := cluster.ForEachProposalEntity(pe.Data, func(typeID string, key, data []byte, isDelete bool) error {
+			// Learn each user type's declared kind from its registration.
+			if cluster.IsType(typeID) && !isDelete {
+				t := &cluster.Type{}
+				if uerr := t.Unmarshal(data); uerr != nil {
+					return uerr
+				}
+				userKind[t.ID] = t.EntityKind
+				return nil
+			}
+			// Compactable iff Snapshot: an internal Snapshot built-in, or a user
+			// type harvested as Snapshot. Everything else — Revision configs,
+			// Standalone dead-letters, Event/Command/Unspecified streams — is
+			// retained.
+			if !cluster.IsSystemTombstonable(typeID) && userKind[typeID] != cluster.EntityKindSnapshot {
 				return nil
 			}
 			if tk := string(tombstoneKey(typeID, key)); idx > sel[tk] {

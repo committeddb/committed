@@ -1090,12 +1090,14 @@ func (s *Storage) ApplyCommitted(entry pb.Entry) error {
 				}
 			}
 
-			// Count an applied system-tombstonable (internal-snapshot) entity as
-			// metadata-GC backlog so the automatic scrubber fires on a
-			// metadata-heavy cluster even with no RTBF deletes. Each write
-			// supersedes the previous value of its key, so this over-counts
-			// distinct-key writes slightly; that is fine (see metadataBacklog).
-			if cluster.IsSystemTombstonable(entity.Type.ID) {
+			// Count an applied EntityKindSnapshot entity as metadata-GC backlog so
+			// the automatic scrubber fires on a Snapshot-heavy cluster even with no
+			// RTBF deletes — covering both internal bookkeeping and user Snapshot
+			// streams. (Revision configs and Standalone dead-letters are retained,
+			// not counted.) This is a leader-local trigger heuristic, so the live
+			// resolved kind is fine here; it over-counts distinct-key writes
+			// slightly, which is harmless (see metadataBacklog).
+			if entity.Type.EntityKind == cluster.EntityKindSnapshot {
 				s.metadataBacklog.Add(1)
 			}
 		}

@@ -19,16 +19,20 @@ func syncIndex(t *testing.T, id string, idx uint64) *cluster.Entity {
 	return e
 }
 
-// userSnapshotType builds a user-defined type declared EntityKindSnapshot.
-// Such a type is LWW too, but this ticket compacts internal metadata only — the
-// follow-up (compact-user-snapshot-streams) extends GC to it.
-func userSnapshotType(t *testing.T, id string) *cluster.Entity {
+// userType builds a user-defined type declaration with the given EntityKind.
+func userType(t *testing.T, id string, kind cluster.EntityKind) *cluster.Entity {
 	t.Helper()
 	e, err := cluster.NewUpsertTypeEntity(&cluster.Type{
-		ID: id, Name: id, Version: 1, EntityKind: cluster.EntityKindSnapshot,
+		ID: id, Name: id, Version: 1, EntityKind: kind,
 	})
 	require.Nil(t, err)
 	return e
+}
+
+// userSnapshotType is the EntityKindSnapshot convenience.
+func userSnapshotType(t *testing.T, id string) *cluster.Entity {
+	t.Helper()
+	return userType(t, id, cluster.EntityKindSnapshot)
 }
 
 // TestScrub_MetadataKeepsLatestDropsSuperseded is the core metadata-GC test:
@@ -116,28 +120,82 @@ func TestScrub_MetadataKeepsLatestWhenItIsADelete(t *testing.T) {
 	require.Equal(t, []byte("A"), del.Entities[0].Key)
 }
 
-// TestScrub_UserSnapshotNotSystemTombstoned locks in this ticket's scope: the
-// system-tombstone (metadata GC) pass compacts INTERNAL snapshot types only.
-// A user-defined EntityKindSnapshot stream is last-writer-wins too, but is NOT
-// compacted here — the follow-up (compact-user-snapshot-streams) extends GC to
-// it, at which point this expectation changes.
-func TestScrub_UserSnapshotNotSystemTombstoned(t *testing.T) {
+// TestScrub_UserSnapshotCompacted: a user-defined EntityKindSnapshot stream is
+// compacted to the latest value per key, exactly like internal Snapshot
+// bookkeeping (the kind is harvested from the type registration). The type
+// config itself (EntityKindRevision) is retained.
+func TestScrub_UserSnapshotCompacted(t *testing.T) {
 	s := NewStorage(t, nil)
 	defer s.Cleanup()
 
-	saveEntity(t, userSnapshotType(t, "u"), s, 1, 1) // user snapshot type
+	saveEntity(t, userSnapshotType(t, "u"), s, 1, 1) // Revision config — retained
 	saveEntity(t, userUpsert("u", "k", `{"v":1}`), s, 1, 2)
 	saveEntity(t, userUpsert("u", "k", `{"v":2}`), s, 1, 3)
-	saveEntity(t, userUpsert("u", "k", `{"v":3}`), s, 1, 4)
-	saveEntity(t, userUpsert("u", "other", `{"v":9}`), s, 1, 5)
+	saveEntity(t, userUpsert("u", "k", `{"v":3}`), s, 1, 4)     // latest "k" <= bound
+	saveEntity(t, userUpsert("u", "other", `{"v":9}`), s, 1, 5) // tail (index > bound)
 
 	require.Nil(t, s.RunScrubForTest(4))
 
-	// Nothing removed: "u" is user-defined, so not system-tombstonable, and
-	// there are no RTBF deletes.
+	// Superseded "k" snapshots (2, 3) removed; latest "k" (4) and the tail (5)
+	// survive; the type registration (1) is retained because typeType is Revision.
 	got, err := s.EventIndices()
 	require.Nil(t, err)
-	require.Equal(t, []uint64{1, 2, 3, 4, 5}, got)
+	require.Equal(t, []uint64{1, 4, 5}, got)
+}
+
+// TestScrub_UserNonSnapshotKindsRetained guards the kind gate: only Snapshot is
+// system-tombstoned. Event / Standalone / Unspecified user streams are retained
+// whole — every entry survives a scrub.
+func TestScrub_UserNonSnapshotKindsRetained(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		kind cluster.EntityKind
+	}{
+		{"event", cluster.EntityKindEvent},
+		{"standalone", cluster.EntityKindStandalone},
+		{"unspecified", cluster.EntityKindUnspecified},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewStorage(t, nil)
+			defer s.Cleanup()
+
+			saveEntity(t, userType(t, "u", tc.kind), s, 1, 1)
+			saveEntity(t, userUpsert("u", "k", `{"v":1}`), s, 1, 2)
+			saveEntity(t, userUpsert("u", "k", `{"v":2}`), s, 1, 3)
+			saveEntity(t, userUpsert("u", "k", `{"v":3}`), s, 1, 4)
+			saveEntity(t, userUpsert("u", "tail", `{"v":9}`), s, 1, 5)
+
+			require.Nil(t, s.RunScrubForTest(4))
+
+			got, err := s.EventIndices()
+			require.Nil(t, err)
+			require.Equal(t, []uint64{1, 2, 3, 4, 5}, got)
+		})
+	}
+}
+
+// TestScrub_VersionedConfigsRetained: the version-stored configs are
+// EntityKindRevision, so a scrub retains every version even though they share an
+// event-log key — proving they are not keep-latest-compacted like Snapshot.
+func TestScrub_VersionedConfigsRetained(t *testing.T) {
+	s := NewStorage(t, nil)
+	defer s.Cleanup()
+
+	v1, err := cluster.NewUpsertTypeEntity(&cluster.Type{ID: "u", Name: "u", Version: 1, EntityKind: cluster.EntityKindSnapshot})
+	require.Nil(t, err)
+	saveEntity(t, v1, s, 1, 1)
+	v2, err := cluster.NewUpsertTypeEntity(&cluster.Type{ID: "u", Name: "u", Version: 2, EntityKind: cluster.EntityKindSnapshot})
+	require.Nil(t, err)
+	saveEntity(t, v2, s, 1, 2)
+	saveEntity(t, syncIndex(t, "A", 1), s, 1, 3) // tail
+
+	require.Nil(t, s.RunScrubForTest(2))
+
+	// Both type-config versions (1, 2) survive despite sharing the event-log key
+	// "u" — typeType is Revision, so its version history is retained.
+	got, err := s.EventIndices()
+	require.Nil(t, err)
+	require.Equal(t, []uint64{1, 2, 3}, got)
 }
 
 // TestScrub_SyncableDeadLettersNotCompacted guards the asymmetric-key hazard:
@@ -201,6 +259,30 @@ func TestScrubBacklog_MetadataTriggersAndResets(t *testing.T) {
 	require.Equal(t, uint64(3), s.EventIndex(), "tail preserved")
 }
 
+// TestScrubBacklog_UserSnapshotTriggers verifies user EntityKindSnapshot churn
+// also drives the backlog signal, and that the Revision type config does NOT
+// count toward it.
+func TestScrubBacklog_UserSnapshotTriggers(t *testing.T) {
+	restore := wal.SetMetadataBacklogThresholdForTest(3)
+	defer restore()
+
+	s := NewStorage(t, nil)
+	defer s.Cleanup()
+
+	// The type registration is EntityKindRevision — not counted.
+	saveEntity(t, userSnapshotType(t, "u"), s, 1, 1)
+	require.False(t, s.HasScrubBacklog())
+
+	// User Snapshot writes count; below threshold, still no backlog.
+	saveEntity(t, userUpsert("u", "k", `{"v":1}`), s, 1, 2)
+	saveEntity(t, userUpsert("u", "k", `{"v":2}`), s, 1, 3)
+	require.False(t, s.HasScrubBacklog())
+
+	// Crossing the threshold triggers it.
+	saveEntity(t, userUpsert("u", "k", `{"v":3}`), s, 1, 4)
+	require.True(t, s.HasScrubBacklog())
+}
+
 // TestScrubDeterminism_Metadata applies identical metadata churn + a scrub to
 // three fresh nodes and requires byte-identical event logs and bbolt — the
 // rsync-rebuild / cross-node-hash contract, extended to metadata GC.
@@ -241,5 +323,49 @@ func TestScrubDeterminism_Metadata(t *testing.T) {
 		require.Equalf(t, firstIdx[0], firstIdx[i], "FirstEventIndex differs: node %d vs 0", i)
 	}
 	// Survivors: latest A <= bound (5), latest B <= bound (6), tail (7).
+	require.Equal(t, uint64(7), eventIdx[0], "tail (EventIndex) preserved")
+}
+
+// TestScrubDeterminism_UserSnapshot applies identical user-Snapshot churn + a
+// scrub to three fresh nodes and requires byte-identical event logs and bbolt —
+// the harvest-driven user-kind resolution must be deterministic across replicas.
+func TestScrubDeterminism_UserSnapshot(t *testing.T) {
+	const nodes = 3
+	snaps := make([][]string, nodes)
+	buckets := make([][]string, nodes)
+	eventIdx := make([]uint64, nodes)
+	firstIdx := make([]uint64, nodes)
+
+	for i := 0; i < nodes; i++ {
+		s := NewStorage(t, nil)
+		defer s.Cleanup()
+
+		saveEntity(t, userSnapshotType(t, "u"), s, 1, 1) // Revision config (retained)
+		saveEntity(t, userUpsert("u", "a", `{"v":1}`), s, 1, 2)
+		saveEntity(t, userUpsert("u", "b", `{"v":1}`), s, 1, 3)
+		saveEntity(t, userUpsert("u", "a", `{"v":2}`), s, 1, 4)
+		saveEntity(t, userUpsert("u", "a", `{"v":3}`), s, 1, 5) // latest "a" <= bound
+		saveEntity(t, userUpsert("u", "b", `{"v":2}`), s, 1, 6) // latest "b" <= bound
+		saveEntity(t, userUpsert("u", "a", `{"v":4}`), s, 1, 7) // tail
+
+		require.Nil(t, s.RunScrubForTest(6))
+
+		var err error
+		snaps[i], err = s.EventLogSnapshot()
+		require.Nil(t, err)
+		buckets[i], err = s.BucketSnapshot()
+		require.Nil(t, err)
+		eventIdx[i] = s.EventIndex()
+		firstIdx[i] = s.FirstEventIndex()
+	}
+
+	for i := 1; i < nodes; i++ {
+		require.Equalf(t, snaps[0], snaps[i], "event log differs: node %d vs 0", i)
+		require.Equalf(t, buckets[0], buckets[i], "bbolt differs: node %d vs 0", i)
+		require.Equalf(t, eventIdx[0], eventIdx[i], "EventIndex differs: node %d vs 0", i)
+		require.Equalf(t, firstIdx[0], firstIdx[i], "FirstEventIndex differs: node %d vs 0", i)
+	}
+	// Survivors: type config (1), latest "a" <= bound (5), latest "b" <= bound
+	// (6), tail (7).
 	require.Equal(t, uint64(7), eventIdx[0], "tail (EventIndex) preserved")
 }

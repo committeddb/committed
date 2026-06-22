@@ -178,10 +178,11 @@ func discriminatorFor(storage cluster.DatabaseStorage, topic string) (string, er
 }
 
 // warnKindMisuse applies the config-time entity-kind misuse matrix for
-// the projection shape: a projection on a snapshot-kind topic is dead
-// weight — snapshots are total updates with nothing to fold; the plain
-// sql syncable upserts them directly. Advisory only (warn + metric,
-// the config still runs), and unspecified-kind topics never warn.
+// the projection shape: a projection on a snapshot- or revision-kind topic
+// is dead weight — both are total updates with nothing to fold (a revision
+// is a snapshot whose history is retained); the plain sql syncable upserts
+// them directly. Advisory only (warn + metric, the config still runs), and
+// unspecified-kind topics never warn.
 func (p *ProjectionSyncableParser) warnKindMisuse(storage cluster.DatabaseStorage, topic string) {
 	resolver, ok := storage.(cluster.TypeResolver)
 	if !ok {
@@ -191,11 +192,11 @@ func (p *ProjectionSyncableParser) warnKindMisuse(storage cluster.DatabaseStorag
 	if err != nil || t == nil {
 		return
 	}
-	if t.EntityKind != cluster.EntityKindSnapshot {
+	if t.EntityKind != cluster.EntityKindSnapshot && t.EntityKind != cluster.EntityKindRevision {
 		return
 	}
 
-	zap.L().Warn("[sql-projection.parser] projection on a snapshot-kind topic: snapshots are total updates with nothing to fold — use the plain sql syncable instead, see README § Entity kinds",
+	zap.L().Warn("[sql-projection.parser] projection on a snapshot- or revision-kind topic: those are total updates with nothing to fold — use the plain sql syncable instead, see README § Entity kinds",
 		zap.String("topic", topic),
 		zap.String("entity_kind", t.EntityKind.String()),
 	)

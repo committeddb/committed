@@ -48,8 +48,9 @@ per-config history and rollback, `${VAR}` config secrets, and the
 official container image — and adds:
 
 - **Entity kinds** — a type declares what the entities written under it
-  are (`snapshot`, `event`, `command`, `standalone`; `delta` is rejected
-  by design), plus an optional `discriminator` for event variants. Kinds
+  are (`snapshot`, `event`, `command`, `standalone`, `revision`; `delta`
+  is rejected by design), plus an optional `discriminator` for event
+  variants. Kinds
   are validated at config time, and a misuse matrix warns (log +
   `committed_entity_kind_misuse` metric) when a leaf-mapped `sql`
   syncable targets an `event`-kind topic. See
@@ -222,6 +223,13 @@ discriminator = "$.event_type"
   execute them.
 - **`standalone`** — facts with no aggregate to converge on (audit,
   telemetry). Apply = append; never folded.
+- **`revision`** — full states in a retained, ordered series. Like
+  `snapshot` (self-contained, no folding) but every prior version is kept
+  and individually addressable — roll back, or read "as of" a version.
+  The latest is current; the history is part of the data. This is the
+  shape of committed's own versioned configs (type/database/syncable/
+  ingestable, with their rollback endpoints) and of any record you keep
+  as a revision history rather than just a current value.
 
 The snapshot-vs-event fork is the one that matters in practice. Choose
 **snapshot** when one writer owns the object and no read model needs

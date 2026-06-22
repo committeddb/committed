@@ -127,19 +127,21 @@ func FilterProposalEntities(raw []byte, remove func(typeID string, key []byte, i
 }
 
 // ForEachProposalEntity decodes a marshaled proposal and calls fn once per
-// entity with its (typeID, key, isDelete) — enough to drive scrub/GC selection
-// without hydrating the entity through a resolver. It stops and returns the
-// first error from fn or from decoding. The key slice aliases the decoded
-// proposal's memory; copy it if retained beyond the callback. Like
+// entity with its (typeID, key, data, isDelete) — enough to drive scrub/GC
+// selection without hydrating the entity through a resolver. data is the raw
+// entity payload (the delete sentinel when isDelete is true); the scrubber uses
+// it to read a type registration's declared kind. It stops and returns the
+// first error from fn or from decoding. The key and data slices alias the
+// decoded proposal's memory; copy them if retained beyond the callback. Like
 // FilterProposalEntities it works at the clusterpb level, so the traversal is a
 // pure function of the input bytes.
-func ForEachProposalEntity(raw []byte, fn func(typeID string, key []byte, isDelete bool) error) error {
+func ForEachProposalEntity(raw []byte, fn func(typeID string, key, data []byte, isDelete bool) error) error {
 	lp := &clusterpb.LogProposal{}
 	if err := proto.Unmarshal(raw, lp); err != nil {
 		return err
 	}
 	for _, le := range lp.LogEntities {
-		if err := fn(le.Type.GetID(), le.Key, bytes.Equal(le.Data, delete)); err != nil {
+		if err := fn(le.Type.GetID(), le.Key, le.Data, bytes.Equal(le.Data, delete)); err != nil {
 			return err
 		}
 	}

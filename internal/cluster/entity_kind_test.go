@@ -48,6 +48,7 @@ func TestParseEntityKind(t *testing.T) {
 		"event":      cluster.EntityKindEvent,
 		"command":    cluster.EntityKindCommand,
 		"standalone": cluster.EntityKindStandalone,
+		"revision":   cluster.EntityKindRevision,
 	} {
 		got, err := cluster.ParseEntityKind(s)
 		require.NoError(t, err)

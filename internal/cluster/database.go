@@ -19,11 +19,13 @@ type DatabaseParser interface {
 	Parse(c *ParsedConfig) (Database, error)
 }
 
+// EntityKindRevision (version-stored config with rollback, retained — see
+// typeType).
 var databaseType = registerSystemType(&Type{
 	ID:         "4698b77e-9a7c-41a2-aae4-984da0cd33c1",
 	Name:       "InternalDatabaseParser",
 	Version:    1,
-	EntityKind: EntityKindSnapshot,
+	EntityKind: EntityKindRevision,
 })
 
 func IsDatabase(id string) bool {

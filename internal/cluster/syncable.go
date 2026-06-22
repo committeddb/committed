@@ -285,11 +285,13 @@ type SyncableParser interface {
 	Parse(c *ParsedConfig, s DatabaseStorage) (Syncable, error)
 }
 
+// EntityKindRevision (version-stored config with rollback, retained — see
+// typeType).
 var syncableType = registerSystemType(&Type{
 	ID:         "0cd18065-a0e2-4c19-a4d6-f824f1898cb5",
 	Name:       "InternalSyncableParser",
 	Version:    1,
-	EntityKind: EntityKindSnapshot,
+	EntityKind: EntityKindRevision,
 })
 
 func IsSyncable(id string) bool {

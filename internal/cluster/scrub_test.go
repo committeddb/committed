@@ -127,12 +127,16 @@ func TestForEachProposalEntity(t *testing.T) {
 	type ref struct {
 		typeID   string
 		key      string
+		data     string
 		isDelete bool
 	}
 	var got []ref
-	require.Nil(t, ForEachProposalEntity(raw, func(typeID string, key []byte, isDelete bool) error {
-		got = append(got, ref{typeID, string(key), isDelete})
+	require.Nil(t, ForEachProposalEntity(raw, func(typeID string, key, data []byte, isDelete bool) error {
+		got = append(got, ref{typeID, string(key), string(data), isDelete})
 		return nil
 	}))
-	require.Equal(t, []ref{{"a", "k1", false}, {"b", "k2", true}}, got)
+	require.Equal(t, []ref{
+		{"a", "k1", `{}`, false},
+		{"b", "k2", string(delete), true},
+	}, got)
 }

@@ -404,7 +404,15 @@ func TestParseProjectionWarnsOnSnapshotKindTopic(t *testing.T) {
 	}
 	_, err := (&sql.ProjectionSyncableParser{}).ParseConfig(v, storage)
 	require.NoError(t, err)
-	require.Len(t, logs.FilterMessageSnippet("snapshot-kind topic").All(), 1)
+	require.Len(t, logs.FilterMessageSnippet("nothing to fold").All(), 1)
+
+	// Revision-kind is also total-update (a snapshot with retained history),
+	// so a projection on it is the same dead weight — it warns too.
+	logs.TakeAll()
+	storage.types["tenant-topic"].EntityKind = cluster.EntityKindRevision
+	_, err = (&sql.ProjectionSyncableParser{}).ParseConfig(v, storage)
+	require.NoError(t, err)
+	require.Len(t, logs.FilterMessageSnippet("nothing to fold").All(), 1)
 
 	// Event-kind is the projection's home turf: no warning.
 	logs.TakeAll()

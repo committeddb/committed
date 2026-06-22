@@ -847,7 +847,7 @@ paths:
         part of the type definition.
 
         A type may declare what the entities written under it are with
-        `entityKind = "snapshot" | "event" | "command" | "standalone"`
+        `entityKind = "snapshot" | "event" | "command" | "standalone" | "revision"`
         (see README § Entity kinds). Omitting `entityKind`
         (unspecified, the default for every pre-existing type) changes
         nothing — no enforcement ever applies to it.

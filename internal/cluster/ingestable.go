@@ -43,11 +43,13 @@ type IngestableParser interface {
 	Parse(c *ParsedConfig) (Ingestable, error)
 }
 
+// EntityKindRevision (version-stored config with rollback, retained — see
+// typeType).
 var ingestableType = registerSystemType(&Type{
 	ID:         "c5917145-c248-4d97-a863-8e26ca042b09",
 	Name:       "InternalIngestableParser",
 	Version:    1,
-	EntityKind: EntityKindSnapshot,
+	EntityKind: EntityKindRevision,
 })
 
 func IsIngestable(id string) bool {
