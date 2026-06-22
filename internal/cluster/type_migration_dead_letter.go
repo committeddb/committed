@@ -15,16 +15,15 @@ import (
 // the cause.
 var ErrReplayMigrationFailed = errors.New("cluster: migration retry failed")
 
-// Standalone, not Snapshot — the type-keyed twin of syncableDeadLetterType: an
-// append-style audit log with many distinct live records per type id and an
-// asymmetric event-log key (upsert by type id, clearing delete by id+index), so
-// keep-latest-per-key compaction does not apply. EntityKindStandalone excludes
-// it from the metadata-GC scrubber (see syncableDeadLetterType).
+// EntityKindSnapshot — the type-keyed twin of syncableDeadLetterType: keyed by
+// its full identity (type id + raft index — typeMigrationDeadLetterKey) in both
+// the upsert and the clearing delete, so the scrubber compacts it keep-latest-
+// per-key like any other Snapshot built-in (see syncableDeadLetterType).
 var typeMigrationDeadLetterType = registerSystemType(&Type{
 	ID:         "9e9a9e5f-22f6-4963-ae77-a4a87d807496",
 	Name:       "InternalTypeMigrationDeadLetter",
 	Version:    1,
-	EntityKind: EntityKindStandalone,
+	EntityKind: EntityKindSnapshot,
 })
 
 // TypeMigrationDeadLetter records that a type-migration program (jq) failed
@@ -84,30 +83,39 @@ func IsTypeMigrationDeadLetter(id string) bool {
 	return id == typeMigrationDeadLetterType.ID
 }
 
-// NewUpsertTypeMigrationDeadLetterEntity wraps a TypeMigrationDeadLetter as
-// an upsert entity keyed by the type id. The apply handler derives the
-// per-failure bbolt key (type id + raft index) from the unmarshaled record,
-// so the entity Key only needs to carry the type id.
+// typeMigrationDeadLetterKey encodes a migration dead letter's full identity —
+// type id followed by the 8-byte big-endian raft index — and is the event-log
+// entity Key for BOTH the upsert and the clearing delete, so each record is a
+// single symmetric, unique key (what lets the scrubber compact them keep-latest-
+// per-key). DecodeTypeMigrationDeadLetterKey reverses it.
+func typeMigrationDeadLetterKey(typeID string, index uint64) []byte {
+	key := make([]byte, len(typeID)+8)
+	copy(key, typeID)
+	binary.BigEndian.PutUint64(key[len(typeID):], index)
+	return key
+}
+
+// NewUpsertTypeMigrationDeadLetterEntity wraps a TypeMigrationDeadLetter as an
+// upsert entity keyed by its full identity (type id + raft index —
+// typeMigrationDeadLetterKey), matching the clearing delete's key. The apply
+// handler still derives the bbolt key from the unmarshaled record body, so
+// storage is unchanged.
 func NewUpsertTypeMigrationDeadLetterEntity(d *TypeMigrationDeadLetter) (*Entity, error) {
 	bs, err := d.Marshal()
 	if err != nil {
 		return nil, err
 	}
 
-	return NewUpsertEntity(typeMigrationDeadLetterType, []byte(d.TypeID), bs), nil
+	return NewUpsertEntity(typeMigrationDeadLetterType, typeMigrationDeadLetterKey(d.TypeID, d.Index), bs), nil
 }
 
-// NewDeleteTypeMigrationDeadLetterEntity clears the migration dead-letter
-// record at a specific raft index (used by migration retry after the fixed
-// program succeeds). As with the syncable twin, a delete carries the delete
-// sentinel in the body, so the index rides in the Key: type id bytes
-// followed by the 8-byte big-endian index.
+// NewDeleteTypeMigrationDeadLetterEntity clears the migration dead-letter record
+// at a specific raft index (used by migration retry after the fixed program
+// succeeds). It keys by the same id+index identity as the upsert (a delete
+// carries the delete sentinel in the body, so the index must ride in the Key);
 // DecodeTypeMigrationDeadLetterKey reverses it on the apply side.
 func NewDeleteTypeMigrationDeadLetterEntity(typeID string, index uint64) *Entity {
-	key := make([]byte, len(typeID)+8)
-	copy(key, typeID)
-	binary.BigEndian.PutUint64(key[len(typeID):], index)
-	return NewDeleteEntity(typeMigrationDeadLetterType, key)
+	return NewDeleteEntity(typeMigrationDeadLetterType, typeMigrationDeadLetterKey(typeID, index))
 }
 
 // DecodeTypeMigrationDeadLetterKey reverses

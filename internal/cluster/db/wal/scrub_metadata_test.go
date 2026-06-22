@@ -198,15 +198,11 @@ func TestScrub_VersionedConfigsRetained(t *testing.T) {
 	require.Equal(t, []uint64{1, 2, 3}, got)
 }
 
-// TestScrub_SyncableDeadLettersNotCompacted guards the asymmetric-key hazard:
-// dead letters are an append-style audit log (EntityKindStandalone), with many
-// distinct live records per syncable id all sharing the same event-log upsert
-// key (the id). A naive keep-latest-per-key compaction would wrongly drop all
-// but the newest; they must instead survive intact.
-func TestScrub_SyncableDeadLettersNotCompacted(t *testing.T) {
-	s := NewStorage(t, nil)
-	defer s.Cleanup()
-
+// TestScrub_SyncableDeadLettersCompact verifies the reshaped (id+index) key
+// makes dead letters compact correctly now they are EntityKindSnapshot: each
+// record is a distinct key, so distinct dead letters survive, while a re-propose
+// or a clear of the same (id, index) collapses to the latest entry.
+func TestScrub_SyncableDeadLettersCompact(t *testing.T) {
 	dl := func(id string, index uint64) *cluster.Entity {
 		e, err := cluster.NewUpsertSyncableDeadLetterEntity(&cluster.SyncableDeadLetter{
 			ID: id, Index: index, Kind: "permanent", Message: "boom",
@@ -214,24 +210,65 @@ func TestScrub_SyncableDeadLettersNotCompacted(t *testing.T) {
 		require.Nil(t, err)
 		return e
 	}
-	// Two distinct dead letters for syncable "X" (proposals 100 and 200), both
-	// keyed in the event log by the id "X".
-	saveEntity(t, dl("X", 100), s, 1, 1)
-	saveEntity(t, dl("X", 200), s, 1, 2)
-	saveEntity(t, syncIndex(t, "A", 1), s, 1, 3) // tail (index > bound)
 
-	require.Nil(t, s.RunScrubForTest(2))
+	t.Run("distinct dead letters survive", func(t *testing.T) {
+		s := NewStorage(t, nil)
+		defer s.Cleanup()
 
-	// Nothing dropped — the earlier dead letter (idx 1) is NOT superseded by the
-	// later one despite sharing the event-log key.
-	got, err := s.EventIndices()
-	require.Nil(t, err)
-	require.Equal(t, []uint64{1, 2, 3}, got)
+		saveEntity(t, dl("X", 100), s, 1, 1)         // key X+100
+		saveEntity(t, dl("X", 200), s, 1, 2)         // key X+200 — distinct
+		saveEntity(t, syncIndex(t, "A", 1), s, 1, 3) // tail
 
-	// Both remain queryable.
-	dls, err := s.SyncableDeadLetters("X", 0, 10)
-	require.Nil(t, err)
-	require.Len(t, dls, 2)
+		require.Nil(t, s.RunScrubForTest(2))
+
+		got, err := s.EventIndices()
+		require.Nil(t, err)
+		require.Equal(t, []uint64{1, 2, 3}, got) // both survive (distinct keys)
+
+		dls, err := s.SyncableDeadLetters("X", 0, 10)
+		require.Nil(t, err)
+		require.Len(t, dls, 2)
+	})
+
+	t.Run("re-propose collapses to latest", func(t *testing.T) {
+		s := NewStorage(t, nil)
+		defer s.Cleanup()
+
+		saveEntity(t, dl("X", 100), s, 1, 1)         // key X+100
+		saveEntity(t, dl("X", 100), s, 1, 2)         // re-propose, same key X+100
+		saveEntity(t, syncIndex(t, "A", 1), s, 1, 3) // tail
+
+		require.Nil(t, s.RunScrubForTest(2))
+
+		got, err := s.EventIndices()
+		require.Nil(t, err)
+		require.Equal(t, []uint64{2, 3}, got) // superseded upsert (1) dropped
+
+		dls, err := s.SyncableDeadLetters("X", 0, 10)
+		require.Nil(t, err)
+		require.Len(t, dls, 1) // one record (same identity, overwritten)
+	})
+
+	t.Run("clear keeps the delete tombstone", func(t *testing.T) {
+		s := NewStorage(t, nil)
+		defer s.Cleanup()
+
+		saveEntity(t, dl("X", 100), s, 1, 1)                                        // upsert key X+100
+		saveEntity(t, cluster.NewDeleteSyncableDeadLetterEntity("X", 100), s, 1, 2) // delete key X+100
+		saveEntity(t, syncIndex(t, "A", 1), s, 1, 3)                                // tail
+
+		require.Nil(t, s.RunScrubForTest(2))
+
+		got, err := s.EventIndices()
+		require.Nil(t, err)
+		require.Equal(t, []uint64{2, 3}, got) // upsert (1) dropped; delete (2) kept
+
+		// The cleared record is gone from bbolt; the surviving log entry is its
+		// faithful final state (the delete).
+		dls, err := s.SyncableDeadLetters("X", 0, 10)
+		require.Nil(t, err)
+		require.Len(t, dls, 0)
+	})
 }
 
 // TestScrubBacklog_MetadataTriggersAndResets verifies the generalized

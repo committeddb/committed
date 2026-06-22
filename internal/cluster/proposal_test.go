@@ -238,25 +238,23 @@ func TestIsInternal_HidesEveryBuiltInFromSyncables(t *testing.T) {
 //     otherwise a new built-in would silently never be classified.
 //   - IsSystemTombstonable must match the type's nature. Keep-latest-per-key
 //     compaction is sound only for EntityKindSnapshot — full states whose
-//     superseded copies are disposable. Two other built-in shapes are excluded:
-//     the version-stored configs (type/database/syncable/ingestable) are
-//     EntityKindRevision — every version is retained for rollback and to keep
-//     the log self-describing — and the dead-letter logs are EntityKindStandalone
-//     append-style audit records with an asymmetric key (upsert by id, delete by
-//     id+index). Compacting either would drop records the log must keep.
+//     superseded copies are disposable, keyed so the event-log key uniquely
+//     identifies the record. The only built-ins excluded are the version-stored
+//     configs (type/database/syncable/ingestable), which are EntityKindRevision —
+//     every version is retained for rollback and to keep the log self-describing.
+//     (The dead-letter logs are now Snapshot too: their upsert and delete keys
+//     were reshaped to the full id+index identity, so keep-latest is correct.)
 func TestSystemTypesDeclareKindAndTombstonability(t *testing.T) {
 	if len(systemTypes) == 0 {
 		t.Fatal("systemTypes registry is empty; the package init wiring is broken")
 	}
-	// The built-ins the metadata-GC scrubber must NOT compact: retained
-	// version-stored configs (Revision) and append-style audit logs (Standalone).
+	// The only built-ins the metadata-GC scrubber must NOT compact: the retained
+	// version-stored configs (EntityKindRevision).
 	notTombstonable := map[string]bool{
-		typeType.ID:                    true,
-		databaseType.ID:                true,
-		syncableType.ID:                true,
-		ingestableType.ID:              true,
-		syncableDeadLetterType.ID:      true,
-		typeMigrationDeadLetterType.ID: true,
+		typeType.ID:       true,
+		databaseType.ID:   true,
+		syncableType.ID:   true,
+		ingestableType.ID: true,
 	}
 	for id, tp := range systemTypes {
 		if tp.EntityKind == EntityKindUnspecified {

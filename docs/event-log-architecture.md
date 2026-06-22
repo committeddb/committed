@@ -567,17 +567,17 @@ snapshot (LWW) semantics, where superseded copies are disposable. So the gate is
 exactly **`EntityKind == EntityKindSnapshot`**, for internal *and* user-defined
 types alike: an internal Snapshot built-in (`SyncableIndex`, ingestable position,
 stuck, skip) or a user Snapshot topic is compacted to its latest-per-key.
-Everything else is retained, by kind — and the non-Snapshot built-ins are
-deliberately classified, not special-cased:
-
-- The version-stored configs (`type` / `database` / `syncable` / `ingestable`)
-  are **`EntityKindRevision`** — full states in a retained, addressable version
-  series (the rollback endpoints). Compacting them would discard history the log
-  must keep to stay self-describing and replayable into bbolt's versioned stores.
-- The dead-letter logs are **`EntityKindStandalone`** — append-style audit
-  records with many live entries per id and an asymmetric event-log key (upsert
-  by id, clearing delete by id+index); keep-latest-per-key would drop live
-  records.
+Everything else is retained, by kind — and the held-back built-ins are
+deliberately classified, not special-cased. The one built-in category held back
+is the version-stored configs (`type` / `database` / `syncable` / `ingestable`):
+they are **`EntityKindRevision`** — full states in a retained, addressable
+version series (the rollback endpoints) — so compacting them would discard
+history the log must keep to stay self-describing and replayable into bbolt's
+versioned stores. Every other built-in compacts, including the dead-letter logs:
+their upsert and clearing-delete entities are both keyed by the record's full
+`id + index` identity, so each is a distinct, symmetric key that keep-latest
+compacts correctly (distinct dead letters survive; a re-propose or clear of the
+same record collapses to its latest).
 
 **Resolving the kind deterministically.** An internal type's kind is a constant.
 A *user* type's kind lives in mutable, deletable state, so reading the live type
@@ -928,7 +928,7 @@ see § "Metadata GC (system tombstones)".
 | Delete-tombstone retention        | Retained (never scrubbed)                       | In-flight/fresh syncables still need the delete; tiny and non-PII                      |
 | Delete addressing                 | `(type, key)`, not raft index                   | Matches existing `NewDeleteEntity` model; one delete covers all history for an entity  |
 | Metadata GC predicate             | Keep-latest per `(type, key)`; never drop-all   | Event log stays a replayable source of truth for the derived bbolt view                |
-| Metadata GC gate                  | `EntityKind == Snapshot` (internal + user)      | Keep-latest is sound only for LWW; configs are Revision (history retained), dead-letters Standalone → both excluded. User kinds harvested from the log prefix for determinism |
+| Metadata GC gate                  | `EntityKind == Snapshot` (internal + user)      | Keep-latest is sound only for LWW with a record-unique key; version-stored configs are Revision (history retained) → excluded. Dead-letter keys reshaped to `id+index` so they compact too. User kinds harvested from the log prefix for determinism |
 | Scrub backlog signal              | Generalized: RTBF OR superseded-metadata work   | A metadata-heavy, RTBF-free cluster must still trigger the automatic scrubber          |
 | Election timeout (production)     | 30ms tick / 300ms election                      | Upper end of Raft paper's recommendation; tests stay fast                              |
 | Election timeout (operator knob)  | 15ms tick / 150ms election                      | Optional optimization for low-latency LANs                                             |

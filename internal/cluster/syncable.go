@@ -370,20 +370,18 @@ func NewDeleteSyncableIndexEntity(id string) *Entity {
 	return NewDeleteEntity(syncableIndexType, []byte(id))
 }
 
-// Standalone, not Snapshot: dead letters are an append-style audit log, not a
-// last-writer-wins value. Many distinct live records exist per syncable id
-// (one per failed proposal index), and the event-log key is asymmetric — the
-// upsert keys by id while the clearing delete keys by id+index — so the
-// metadata-GC scrubber's keep-latest-per-key compaction does NOT apply (it would
-// drop live records). EntityKindStandalone makes IsSystemTombstonable false, so
-// the scrubber leaves them alone. Dead letters are rare in healthy operation, so
-// they are not a log-growth driver; a key-aware GC for them is a possible
-// follow-up (see metadata-gc-scrubber).
+// EntityKindSnapshot: a dead letter is keyed by its full identity — syncable id
+// + failed-proposal raft index (syncableDeadLetterKey) — in BOTH the upsert and
+// the clearing delete, so each record is a distinct, symmetric event-log key.
+// That makes the metadata-GC scrubber's keep-latest-per-key compaction correct:
+// distinct dead letters never supersede each other, a re-propose keeps the
+// newest, and a cleared one keeps its delete tombstone as the final state. (The
+// bbolt record is still keyed id+index, derived from the body — unchanged.)
 var syncableDeadLetterType = registerSystemType(&Type{
 	ID:         "5f3b6c8e-1d2a-4e7b-9c0f-2a8d6b4e1f93",
 	Name:       "InternalSyncableDeadLetter",
 	Version:    1,
-	EntityKind: EntityKindStandalone,
+	EntityKind: EntityKindSnapshot,
 })
 
 // SyncableDeadLetter records that a syncable gave up on and skipped (dead-
@@ -438,30 +436,38 @@ func IsSyncableDeadLetter(id string) bool {
 	return id == syncableDeadLetterType.ID
 }
 
-// NewUpsertSyncableDeadLetterEntity wraps a SyncableDeadLetter as an
-// upsert entity keyed by the syncable id. The apply handler derives the
-// per-failure bbolt key (id + raft index) from the unmarshaled record,
-// so the entity Key only needs to carry the syncable id.
+// syncableDeadLetterKey encodes a dead letter's full identity — syncable id
+// followed by the 8-byte big-endian failed-proposal raft index — and is the
+// event-log entity Key for BOTH the upsert and the clearing delete, so each
+// record is a single symmetric, unique key (what lets the scrubber compact them
+// keep-latest-per-key). DecodeSyncableDeadLetterKey reverses it.
+func syncableDeadLetterKey(id string, index uint64) []byte {
+	key := make([]byte, len(id)+8)
+	copy(key, id)
+	binary.BigEndian.PutUint64(key[len(id):], index)
+	return key
+}
+
+// NewUpsertSyncableDeadLetterEntity wraps a SyncableDeadLetter as an upsert
+// entity keyed by its full identity (id + raft index — syncableDeadLetterKey),
+// matching the clearing delete's key. The apply handler still derives the bbolt
+// key from the unmarshaled record body, so storage is unchanged.
 func NewUpsertSyncableDeadLetterEntity(d *SyncableDeadLetter) (*Entity, error) {
 	bs, err := d.Marshal()
 	if err != nil {
 		return nil, err
 	}
 
-	return NewUpsertEntity(syncableDeadLetterType, []byte(d.ID), bs), nil
+	return NewUpsertEntity(syncableDeadLetterType, syncableDeadLetterKey(d.ID, d.Index), bs), nil
 }
 
-// NewDeleteSyncableDeadLetterEntity clears the dead-letter record at a
-// specific raft index (used by replay after a successful re-sync). The upsert
-// path keys the entity by syncable id and reads the index from the record
-// body, but a delete carries the delete sentinel in the body, so the index
-// rides in the Key instead: id bytes followed by the 8-byte big-endian index.
-// DecodeSyncableDeadLetterKey reverses it on the apply side.
+// NewDeleteSyncableDeadLetterEntity clears the dead-letter record at a specific
+// raft index (used by replay after a successful re-sync). It keys by the same
+// id+index identity as the upsert (a delete carries the delete sentinel in the
+// body, so the index must ride in the Key); DecodeSyncableDeadLetterKey reverses
+// it on the apply side.
 func NewDeleteSyncableDeadLetterEntity(id string, index uint64) *Entity {
-	key := make([]byte, len(id)+8)
-	copy(key, id)
-	binary.BigEndian.PutUint64(key[len(id):], index)
-	return NewDeleteEntity(syncableDeadLetterType, key)
+	return NewDeleteEntity(syncableDeadLetterType, syncableDeadLetterKey(id, index))
 }
 
 // DecodeSyncableDeadLetterKey reverses NewDeleteSyncableDeadLetterEntity's
