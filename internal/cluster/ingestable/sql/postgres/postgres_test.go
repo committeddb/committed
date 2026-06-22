@@ -162,7 +162,7 @@ func TestPostgresDialect(t *testing.T) {
 			JsonName:  "pk",
 			SQLColumn: "pk",
 		}},
-		PrimaryKey: "pk",
+		PrimaryKey: []string{"pk"},
 	}
 
 	e1 := &cluster.Entity{
@@ -311,7 +311,7 @@ func TestPostgresPositionResume(t *testing.T) {
 			{JsonName: "pk", SQLColumn: "pk"},
 			{JsonName: "val", SQLColumn: "val"},
 		},
-		PrimaryKey:       "pk",
+		PrimaryKey:       []string{"pk"},
 		ConnectionString: connString,
 		Tables:           []string{table},
 		Options: map[string]string{
@@ -436,7 +436,7 @@ func TestPostgresTransactionGrouping(t *testing.T) {
 			{JsonName: "pk", SQLColumn: "pk"},
 			{JsonName: "val", SQLColumn: "val"},
 		},
-		PrimaryKey:       "pk",
+		PrimaryKey:       []string{"pk"},
 		ConnectionString: connString,
 		Tables:           []string{table},
 		Options: map[string]string{
@@ -567,7 +567,7 @@ func TestPostgresSnapshotOnNewSlot(t *testing.T) {
 			{JsonName: "pk", SQLColumn: "pk"},
 			{JsonName: "val", SQLColumn: "val"},
 		},
-		PrimaryKey:       "pk",
+		PrimaryKey:       []string{"pk"},
 		ConnectionString: connString,
 		Tables:           []string{table},
 		Options: map[string]string{
@@ -667,7 +667,7 @@ func TestPostgresSnapshotChunking(t *testing.T) {
 			{JsonName: "pk", SQLColumn: "pk"},
 			{JsonName: "val", SQLColumn: "val"},
 		},
-		PrimaryKey:       "pk",
+		PrimaryKey:       []string{"pk"},
 		ConnectionString: connString,
 		Tables:           []string{table},
 		Options: map[string]string{
@@ -713,4 +713,82 @@ func TestPostgresSnapshotChunking(t *testing.T) {
 	for i := 0; i < chunkTestRowCount; i++ {
 		require.Truef(t, seen[fmt.Sprintf("%03d", i)], "missing row %03d", i)
 	}
+}
+
+// TestPostgresSnapshotCompositePrimaryKey is the regression for the silent
+// row-loss the IMDb slice surfaced: a table with a composite PK (e.g. principals
+// keyed by (tconst, ordering)) whose rows share a leading column. Keyed by one
+// column they collided and all but the last were dropped. With the composite key
+// every row gets a distinct entity key, and keyset pagination uses row-value
+// comparison so a batch boundary inside a shared tconst doesn't skip its
+// siblings — batch_size=2 forces exactly that boundary.
+func TestPostgresSnapshotCompositePrimaryKey(t *testing.T) {
+	table := "pg_composite_pk"
+
+	db := createDB(t)
+	_, err := db.Exec(fmt.Sprintf(`DROP TABLE IF EXISTS %s`, table))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf(
+		`CREATE TABLE %s (tconst VARCHAR(16) NOT NULL, ordering INT NOT NULL, nconst TEXT, PRIMARY KEY (tconst, ordering))`,
+		table))
+	require.NoError(t, err)
+
+	// Two movies; the first has three principals — the boundary case.
+	rows := [][2]any{
+		{"tt1", 1}, {"tt1", 2}, {"tt1", 3}, {"tt2", 1}, {"tt2", 2},
+	}
+	for i, r := range rows {
+		_, err = db.Exec(
+			fmt.Sprintf(`INSERT INTO %s (tconst, ordering, nconst) VALUES ('%s', %d, 'nm%d')`, table, r[0], r[1], i),
+		)
+		require.NoError(t, err)
+	}
+	db.Close()
+
+	cleanReplication(t, "slot_composite", "pub_composite")
+
+	config := &sql.Config{
+		Type: &cluster.Type{ID: "principal", Name: "principal"},
+		Mappings: []sql.Mapping{
+			{JsonName: "tconst", SQLColumn: "tconst"},
+			{JsonName: "ordering", SQLColumn: "ordering"},
+			{JsonName: "nconst", SQLColumn: "nconst"},
+		},
+		PrimaryKey:       []string{"tconst", "ordering"},
+		ConnectionString: connString,
+		Tables:           []string{table},
+		Options: map[string]string{
+			"slot_name":   "slot_composite",
+			"publication": "pub_composite",
+			"batch_size":  "2", // forces a batch boundary inside tt1's principals
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	proposalChan := make(chan *cluster.Proposal, 20)
+	positionChan := make(chan cluster.Position, 20)
+
+	dialect := &postgres.PostgreSQLDialect{}
+	go func() { _ = dialect.Ingest(ctx, config, nil, proposalChan, positionChan) }()
+
+	want := map[string]bool{
+		`["tt1","1"]`: true, `["tt1","2"]`: true, `["tt1","3"]`: true,
+		`["tt2","1"]`: true, `["tt2","2"]`: true,
+	}
+	seen := make(map[string]bool)
+	deadline := time.After(20 * time.Second)
+	for len(seen) < len(want) {
+		select {
+		case p := <-proposalChan:
+			for _, e := range p.Entities {
+				seen[string(e.Key)] = true
+			}
+		case <-positionChan:
+		case <-deadline:
+			t.Fatalf("timed out; want %d composite-keyed rows, got %d: %v", len(want), len(seen), seen)
+		}
+	}
+	require.Equal(t, want, seen, "every composite-PK row must land with a distinct key (no collision)")
 }

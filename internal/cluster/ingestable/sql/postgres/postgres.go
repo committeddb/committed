@@ -527,7 +527,7 @@ func tupleToEntity(
 		}
 	}
 
-	key := fmt.Sprintf("%v", m[config.PrimaryKey])
+	key := sql.CompositeKey(m, config.PrimaryKey)
 
 	// A delete carries no payload — emit a tombstone keyed by the PK.
 	if isDelete {
@@ -634,7 +634,7 @@ func (d *PostgreSQLDialect) snapshotTable(
 	pr chan<- *cluster.Proposal,
 	po chan<- cluster.Position,
 ) error {
-	pkCol := config.PrimaryKey
+	pkCols := config.PrimaryKey
 	lastPK, haveLastPK := progress.LastPkByTable[table]
 
 	batchNum := 0
@@ -645,7 +645,7 @@ func (d *PostgreSQLDialect) snapshotTable(
 		}
 		batchNum++
 
-		entities, batchLastPK, count, err := readBatch(ctx, db, config, table, pkCol, lastPK, haveLastPK, batchSize)
+		entities, batchLastPK, count, err := readBatch(ctx, db, config, table, pkCols, lastPK, haveLastPK, batchSize)
 		if err != nil {
 			return err
 		}
@@ -694,7 +694,7 @@ func readBatch(
 	db *gosql.DB,
 	config *sql.Config,
 	table string,
-	pkCol string,
+	pkCols []string,
 	lastPK string,
 	haveLastPK bool,
 	batchSize int,
@@ -709,20 +709,41 @@ func readBatch(
 	defer func() { _ = tx.Rollback() }()
 
 	quotedTable := quoteTable(table)
-	quotedPK := quoteIdent(pkCol)
+
+	// Keyset pagination ordered by the full PK. For a single column this is
+	// `c > $1`; for a composite it's the row-value comparison `(c1, c2) > ($1,
+	// $2)` — Postgres infers each placeholder's type from its column, so the
+	// cursor values bind fine as strings. The cursor itself is the prior batch's
+	// last entity key (CompositeKey), decoded back to per-column values here.
+	orderCols := make([]string, len(pkCols))
+	for i, c := range pkCols {
+		orderCols[i] = quoteIdent(c) + " ASC"
+	}
+	orderBy := strings.Join(orderCols, ", ")
 
 	var query string
 	var args []any
 	if haveLastPK {
+		cursor, derr := sql.DecodeCompositeCursor(lastPK, len(pkCols))
+		if derr != nil {
+			return nil, "", 0, derr
+		}
+		cols := make([]string, len(pkCols))
+		placeholders := make([]string, len(pkCols))
+		args = make([]any, len(pkCols))
+		for i, c := range pkCols {
+			cols[i] = quoteIdent(c)
+			placeholders[i] = fmt.Sprintf("$%d", i+1)
+			args[i] = cursor[i]
+		}
 		query = fmt.Sprintf(
-			"SELECT * FROM %s WHERE %s > $1 ORDER BY %s ASC LIMIT %d",
-			quotedTable, quotedPK, quotedPK, batchSize,
+			"SELECT * FROM %s WHERE (%s) > (%s) ORDER BY %s LIMIT %d",
+			quotedTable, strings.Join(cols, ", "), strings.Join(placeholders, ", "), orderBy, batchSize,
 		)
-		args = []any{lastPK}
 	} else {
 		query = fmt.Sprintf(
-			"SELECT * FROM %s ORDER BY %s ASC LIMIT %d",
-			quotedTable, quotedPK, batchSize,
+			"SELECT * FROM %s ORDER BY %s LIMIT %d",
+			quotedTable, orderBy, batchSize,
 		)
 	}
 
@@ -776,7 +797,7 @@ func readBatch(
 			continue
 		}
 
-		key := fmt.Sprintf("%v", m[config.PrimaryKey])
+		key := sql.CompositeKey(m, pkCols)
 		batchLastPK = key
 
 		entities = append(entities, &cluster.Entity{

@@ -36,7 +36,11 @@ func (p *IngestableParser) ParseConfig(v *cluster.ParsedConfig) (*Config, Dialec
 	dialectName := v.GetString("sql.dialect")
 	topic := v.GetString("sql.topic")
 	connectionString := v.GetString("sql.connectionString")
-	primaryKey := v.GetString("sql.primaryKey")
+	// primaryKey accepts a scalar (primaryKey = "pk") or a list
+	// (primaryKey = ["tconst", "ordering"]) for composite keys; GetStringSlice
+	// normalizes both. Column names have no spaces, so the scalar path's
+	// whitespace split is a no-op.
+	primaryKey := v.GetStringSlice("sql.primaryKey")
 
 	var mappings []Mapping
 	if err := v.UnmarshalKey("sql.mappings", &mappings); err != nil {

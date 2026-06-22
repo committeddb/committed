@@ -308,8 +308,7 @@ func (h *MySQLEventHandler) OnRow(e *canal.RowsEvent) error {
 		return nil
 	}
 
-	primaryKey := h.config.PrimaryKey
-	key := fmt.Sprintf("%v", m[primaryKey])
+	key := sql.CompositeKey(m, h.config.PrimaryKey)
 
 	// A source DELETE becomes a delete (tombstone) entity keyed by the row's
 	// primary key — not an upsert of the deleted row. canal delivers the
@@ -733,7 +732,7 @@ func snapshotTable(
 	pr chan<- *cluster.Proposal,
 	po chan<- cluster.Position,
 ) error {
-	pkCol := config.PrimaryKey
+	pkCols := config.PrimaryKey
 	// lastPK, haveLastPK distinguish "no rows yet flushed" from
 	// "last flushed pk was the empty string".
 	lastPK, haveLastPK := progress.LastPkByTable[table]
@@ -746,7 +745,7 @@ func snapshotTable(
 		}
 		batchNum++
 
-		rows, lastKey, count, err := readBatch(ctx, db, config, table, pkCol, lastPK, haveLastPK, batchSize)
+		rows, lastKey, count, err := readBatch(ctx, db, config, table, pkCols, lastPK, haveLastPK, batchSize)
 		if err != nil {
 			return err
 		}
@@ -797,7 +796,7 @@ func readBatch(
 	db *gosql.DB,
 	config *sql.Config,
 	table string,
-	pkCol string,
+	pkCols []string,
 	lastPK string,
 	haveLastPK bool,
 	batchSize int,
@@ -811,18 +810,40 @@ func readBatch(
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// Keyset pagination ordered by the full PK. A single column is `c > ?`; a
+	// composite is the row-value comparison `(c1, c2) > (?, ?)` — MySQL coerces
+	// the bound string cursor values to each column's type. The cursor is the
+	// prior batch's last entity key (CompositeKey), decoded to per-column
+	// values here.
+	orderCols := make([]string, len(pkCols))
+	for i, c := range pkCols {
+		orderCols[i] = fmt.Sprintf("`%s` ASC", c)
+	}
+	orderBy := strings.Join(orderCols, ", ")
+
 	var query string
 	var args []any
 	if haveLastPK {
+		cursor, derr := sql.DecodeCompositeCursor(lastPK, len(pkCols))
+		if derr != nil {
+			return nil, "", 0, derr
+		}
+		cols := make([]string, len(pkCols))
+		placeholders := make([]string, len(pkCols))
+		args = make([]any, len(pkCols))
+		for i, c := range pkCols {
+			cols[i] = fmt.Sprintf("`%s`", c)
+			placeholders[i] = "?"
+			args[i] = cursor[i]
+		}
 		query = fmt.Sprintf(
-			"SELECT * FROM `%s` WHERE `%s` > ? ORDER BY `%s` ASC LIMIT %d",
-			table, pkCol, pkCol, batchSize,
+			"SELECT * FROM `%s` WHERE (%s) > (%s) ORDER BY %s LIMIT %d",
+			table, strings.Join(cols, ", "), strings.Join(placeholders, ", "), orderBy, batchSize,
 		)
-		args = []any{lastPK}
 	} else {
 		query = fmt.Sprintf(
-			"SELECT * FROM `%s` ORDER BY `%s` ASC LIMIT %d",
-			table, pkCol, batchSize,
+			"SELECT * FROM `%s` ORDER BY %s LIMIT %d",
+			table, orderBy, batchSize,
 		)
 	}
 
@@ -876,7 +897,7 @@ func readBatch(
 			continue
 		}
 
-		key := fmt.Sprintf("%v", m[config.PrimaryKey])
+		key := sql.CompositeKey(m, config.PrimaryKey)
 		batchLastPK = key
 
 		entities = append(entities, &cluster.Entity{

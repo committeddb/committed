@@ -25,9 +25,13 @@ type Config struct {
 	ConnectionString string
 	Type             *cluster.Type
 	Mappings         []Mapping
-	PrimaryKey       string
-	Tables           []string
-	Options          map[string]string
+	// PrimaryKey is the source table's primary-key column(s). A single column
+	// keys each entity by its bare value; multiple columns (a composite PK, e.g.
+	// IMDb principals' (tconst, ordering)) key by all of them so rows sharing a
+	// leading column don't collide. See CompositeKey.
+	PrimaryKey []string
+	Tables     []string
+	Options    map[string]string
 }
 
 // The mapstructure tags drive viper.UnmarshalKey when parsing the

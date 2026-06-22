@@ -85,7 +85,7 @@ func TestMysqlDialect(t *testing.T) {
 			JsonName:  "pk",
 			SQLColumn: "pk",
 		}},
-		PrimaryKey: "pk",
+		PrimaryKey: []string{"pk"},
 	}
 
 	e1 := &cluster.Entity{
@@ -258,7 +258,7 @@ func TestMysqlReconnect(t *testing.T) {
 			{JsonName: "pk", SQLColumn: "pk"},
 			{JsonName: "val", SQLColumn: "val"},
 		},
-		PrimaryKey:       "pk",
+		PrimaryKey:       []string{"pk"},
 		ConnectionString: ingestURL,
 		Tables:           []string{table},
 	}
@@ -377,7 +377,7 @@ func TestMysqlTransactionGrouping(t *testing.T) {
 			{JsonName: "pk", SQLColumn: "pk"},
 			{JsonName: "val", SQLColumn: "val"},
 		},
-		PrimaryKey:       "pk",
+		PrimaryKey:       []string{"pk"},
 		ConnectionString: ingestURL,
 		Tables:           []string{table},
 	}
@@ -482,7 +482,7 @@ func TestMysqlStreamingDelete(t *testing.T) {
 			{JsonName: "pk", SQLColumn: "pk"},
 			{JsonName: "val", SQLColumn: "val"},
 		},
-		PrimaryKey:       "pk",
+		PrimaryKey:       []string{"pk"},
 		ConnectionString: ingestURL,
 		Tables:           []string{table},
 	}
@@ -560,7 +560,7 @@ func TestMysqlPositionResume(t *testing.T) {
 			{JsonName: "pk", SQLColumn: "pk"},
 			{JsonName: "val", SQLColumn: "val"},
 		},
-		PrimaryKey:       "pk",
+		PrimaryKey:       []string{"pk"},
 		ConnectionString: ingestURL,
 		Tables:           []string{table},
 	}
@@ -705,7 +705,7 @@ func TestMysqlSnapshotOnFreshStart(t *testing.T) {
 			{JsonName: "pk", SQLColumn: "pk"},
 			{JsonName: "val", SQLColumn: "val"},
 		},
-		PrimaryKey:       "pk",
+		PrimaryKey:       []string{"pk"},
 		ConnectionString: ingestURL,
 		Tables:           []string{table},
 	}
@@ -797,7 +797,7 @@ func TestMysqlSnapshotChunking(t *testing.T) {
 			{JsonName: "pk", SQLColumn: "pk"},
 			{JsonName: "val", SQLColumn: "val"},
 		},
-		PrimaryKey:       "pk",
+		PrimaryKey:       []string{"pk"},
 		ConnectionString: ingestURL,
 		Tables:           []string{table},
 		Options:          map[string]string{"batch_size": "10"},
@@ -870,7 +870,7 @@ func TestMysqlSnapshotResume(t *testing.T) {
 			{JsonName: "pk", SQLColumn: "pk"},
 			{JsonName: "val", SQLColumn: "val"},
 		},
-		PrimaryKey:       "pk",
+		PrimaryKey:       []string{"pk"},
 		ConnectionString: ingestURL,
 		Tables:           []string{table},
 		Options:          map[string]string{"batch_size": "3"},
@@ -977,4 +977,69 @@ drain:
 		require.Falsef(t, seen[fmt.Sprintf("%03d", i)],
 			"row %03d must not re-appear after snapshot resume", i)
 	}
+}
+
+// TestMysqlSnapshotCompositePrimaryKey is the MySQL parity of the composite-PK
+// regression: a table with a composite PK whose rows share a leading column.
+// Every row must land with a distinct key, and keyset pagination (row-value
+// comparison) must not skip a shared-key sibling across a batch boundary
+// (batch_size=2 forces that boundary inside tt1's rows).
+func TestMysqlSnapshotCompositePrimaryKey(t *testing.T) {
+	table := "composite_pk"
+
+	db := createDB(t)
+	_, err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS `%s`", table))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf(
+		"CREATE TABLE `%s` (tconst VARCHAR(16) NOT NULL, ordering INT NOT NULL, nconst TEXT, PRIMARY KEY (tconst, ordering));",
+		table))
+	require.NoError(t, err)
+
+	rows := [][2]any{{"tt1", 1}, {"tt1", 2}, {"tt1", 3}, {"tt2", 1}, {"tt2", 2}}
+	for i, r := range rows {
+		_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (tconst, ordering, nconst) VALUES ('%s', %d, 'nm%d');", table, r[0], r[1], i))
+		require.NoError(t, err)
+	}
+	db.Close()
+
+	config := &sql.Config{
+		Type: &cluster.Type{ID: "principal", Name: "principal"},
+		Mappings: []sql.Mapping{
+			{JsonName: "tconst", SQLColumn: "tconst"},
+			{JsonName: "ordering", SQLColumn: "ordering"},
+			{JsonName: "nconst", SQLColumn: "nconst"},
+		},
+		PrimaryKey:       []string{"tconst", "ordering"},
+		ConnectionString: ingestURL,
+		Tables:           []string{table},
+		Options:          map[string]string{"batch_size": "2"},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	proposalChan := make(chan *cluster.Proposal, 20)
+	positionChan := make(chan cluster.Position, 20)
+
+	dialect := &mysql.MySQLDialect{}
+	go func() { _ = dialect.Ingest(ctx, config, nil, proposalChan, positionChan) }()
+
+	want := map[string]bool{
+		`["tt1","1"]`: true, `["tt1","2"]`: true, `["tt1","3"]`: true,
+		`["tt2","1"]`: true, `["tt2","2"]`: true,
+	}
+	seen := make(map[string]bool)
+	deadline := time.After(15 * time.Second)
+	for len(seen) < len(want) {
+		select {
+		case p := <-proposalChan:
+			for _, e := range p.Entities {
+				seen[string(e.Key)] = true
+			}
+		case <-positionChan:
+		case <-deadline:
+			t.Fatalf("timed out; want %d composite-keyed rows, got %d: %v", len(want), len(seen), seen)
+		}
+	}
+	require.Equal(t, want, seen, "every composite-PK row must land with a distinct key (no collision)")
 }

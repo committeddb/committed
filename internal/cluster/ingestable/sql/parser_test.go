@@ -119,7 +119,7 @@ func simpleConfig() *sql.Config {
 		ConnectionString: "foo",
 		Type:             simpleType,
 		Mappings:         m,
-		PrimaryKey:       "pk",
+		PrimaryKey:       []string{"pk"},
 		Tables:           nil,
 		Options:          map[string]string{},
 	}
@@ -134,7 +134,7 @@ func mysqlWithTablesConfig() *sql.Config {
 		ConnectionString: "mysql://user:pass@host:3306/db",
 		Type:             simpleType,
 		Mappings:         m,
-		PrimaryKey:       "pk",
+		PrimaryKey:       []string{"pk"},
 		Tables:           []string{"orders", "customers"},
 		Options:          map[string]string{},
 	}
@@ -149,7 +149,7 @@ func postgresConfig() *sql.Config {
 		ConnectionString: "postgres://user:pass@localhost:5432/db?sslmode=disable",
 		Type:             simpleType,
 		Mappings:         m,
-		PrimaryKey:       "pk",
+		PrimaryKey:       []string{"pk"},
 		Tables:           []string{"public.orders"},
 		Options: map[string]string{
 			"slot_name":   "my_slot",
@@ -167,7 +167,7 @@ func postgresMultiTableConfig() *sql.Config {
 		ConnectionString: "postgres://user:pass@localhost:5432/db?sslmode=disable",
 		Type:             simpleType,
 		Mappings:         m,
-		PrimaryKey:       "pk",
+		PrimaryKey:       []string{"pk"},
 		Tables:           []string{"public.orders", "public.customers", "public.items"},
 		Options: map[string]string{
 			"slot_name":   "multi_slot",
@@ -185,7 +185,7 @@ func postgresDefaultsConfig() *sql.Config {
 		ConnectionString: "postgres://user:pass@localhost:5432/db?sslmode=disable",
 		Type:             simpleType,
 		Mappings:         m,
-		PrimaryKey:       "pk",
+		PrimaryKey:       []string{"pk"},
 		Tables:           []string{"public.orders"},
 		Options:          map[string]string{},
 	}

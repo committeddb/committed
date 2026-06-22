@@ -50,7 +50,7 @@ Publication = "my_pub"
 	require.Equal(t, &postgres.PostgreSQLDialect{}, dialect)
 
 	require.Equal(t, "postgres://user:pass@localhost:5432/db", config.ConnectionString)
-	require.Equal(t, "pk", config.PrimaryKey)
+	require.Equal(t, []string{"pk"}, config.PrimaryKey)
 	require.Equal(t, []string{"public.Orders", "public.customers"}, config.Tables,
 		"table names are user data — case preserved")
 	require.Equal(t, []sql.Mapping{{JsonName: "pk", SQLColumn: "pk"}}, config.Mappings)
