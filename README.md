@@ -387,11 +387,13 @@ Rule semantics:
   would corrupt on redelivery).
 - **Errors fail fast**: config misuse (unknown column, a `set` entry
   without exactly one of `from`/`value`/`null`, a `when` entry without
-  exactly one of `equals`/`null`, a rule setting the primary key, a
-  rule without a `when`) is rejected at config time; a *matched* rule
-  whose `from` path is missing — or a matched event with no value at
-  `keyPath` — dead-letters as a permanent error rather than wedging
-  the worker.
+  exactly one of `equals`/`null`, a rule setting the primary key) is
+  rejected at config time; a *matched* rule whose `from` path is
+  missing — or a matched event with no value at `keyPath` —
+  dead-letters as a permanent error rather than wedging the worker. A
+  rule with **no** `when` matches every event of its source (the topic
+  is the discriminator) — the natural shape for folding a `snapshot`
+  source that has one event variant.
 - **Deletes are honored**: a delete Actual hard-deletes the projected
   row by entity key (right-to-be-forgotten), distinct from soft-delete
   rules like `state = "deprovisioning"` — both exist. Deleting an
@@ -409,6 +411,45 @@ Rule semantics:
   corrupted projection *without* a schema change,
   `POST /v1/syncable/{id}/rebuild` does the drop + replay-from-0 in place
   under the same name. The log is permanent, so replay is cheap.
+
+**Folding several topics into one row (multi-source).** A projection can
+consume more than one topic and fold them into a single denormalized
+"BFF" row — e.g. a `movie_card` built from a normalized `title` topic and
+a `rating` topic, one row per `tconst`. Replace the single top-level
+`topic`/`rules` with a `[[sql-projection.source]]` block per topic. The
+**topic is the discriminator** (an event only ever runs its own source's
+rules), and because each rule sets only its own columns, two sources fold
+into one row without clobbering. Each source also declares what its delete
+does to the row via `onDelete`: `delete-row` (the *spine* — its delete
+drops the row), `clear` (a *contributor* — its delete NULLs only the
+columns it owns, the row survives), or `ignore`.
+
+```toml
+[sql-projection]
+db = "bff"; table = "movie_card"; primaryKey = "tconst"
+# … columns: tconst, primary_title, start_year, genres, average_rating, num_votes …
+
+[[sql-projection.source]]
+topic    = "title"          # this source's discriminator
+keyPath  = "$.tconst"       # correlate by the shared aggregate key
+onDelete = "delete-row"     # title is the spine: its delete drops the movie
+  [[sql-projection.source.rules]]
+  set = [ { column = "primary_title", from = "$.primary_title" },
+          { column = "start_year",    from = "$.start_year" },
+          { column = "genres",        from = "$.genres" } ]
+
+[[sql-projection.source]]
+topic    = "rating"
+onDelete = "clear"          # a contributor: its delete NULLs its columns, keeps the row
+  [[sql-projection.source.rules]]
+  set = [ { column = "average_rating", from = "$.average_rating" },
+          { column = "num_votes",      from = "$.num_votes" } ]
+```
+
+The single-topic form above is the one-source special case. Source topics
+are commonly `snapshot`-kind (ingested current-state tables), which fold
+cleanly here — the snapshot-topic misuse warning only fires for a
+single-source projection, where there is genuinely nothing to fold.
 
 Configure an ingestable that pulls from an external source into the
 log (MySQL example; see `internal/cluster/ingestable/sql/postgres_ingestable.toml`

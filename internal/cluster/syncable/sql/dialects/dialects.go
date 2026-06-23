@@ -16,6 +16,25 @@ func createDeleteSQL(config *sql.Config, placeholder string) string {
 		config.Table, config.DeleteKeyColumn(), placeholder)
 }
 
+// createClearSQL builds `UPDATE <table> SET <c1>=NULL,<c2>=NULL WHERE <keyCol>
+// = <placeholder>`. Like createDeleteSQL the placeholder is the only
+// dialect-specific bit and the single bound argument is the entity Key; the SET
+// columns are all literal NULLs (no placeholders). Shared so the clear shape
+// stays identical across dialects. An UPDATE, not an upsert, so clearing an
+// absent row is a no-op.
+func createClearSQL(config *sql.Config, columns []string, placeholder string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "UPDATE %s SET ", config.Table)
+	for i, c := range columns {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		fmt.Fprintf(&b, "%s=NULL", c)
+	}
+	fmt.Fprintf(&b, " WHERE %s = %s", config.DeleteKeyColumn(), placeholder)
+	return b.String()
+}
+
 // dropDDL builds `DROP TABLE IF EXISTS <table>;` — the destructive mirror of
 // createDDL. DROP TABLE removes the table's indexes with it, so no separate
 // index-drop is needed. IF EXISTS makes it idempotent: tearing down a table

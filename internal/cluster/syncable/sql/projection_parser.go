@@ -46,6 +46,16 @@ type rawProjectionRule struct {
 	Set  []ProjectionSet `mapstructure:"set"`
 }
 
+// rawProjectionSource is the TOML decode shape of one [[sql-projection.source]]
+// block: a topic (the discriminator), its correlation keyPath, its onDelete
+// behavior, and its nested rules.
+type rawProjectionSource struct {
+	Topic    string              `mapstructure:"topic"`
+	KeyPath  string              `mapstructure:"keyPath"`
+	OnDelete string              `mapstructure:"onDelete"`
+	Rules    []rawProjectionRule `mapstructure:"rules"`
+}
+
 func (p *ProjectionSyncableParser) ParseConfig(v *cluster.ParsedConfig, storage cluster.DatabaseStorage) (*ProjectionConfig, error) {
 	sqlDB := v.GetString("sql-projection.db")
 	db, err := storage.Database(sqlDB)
@@ -53,47 +63,94 @@ func (p *ProjectionSyncableParser) ParseConfig(v *cluster.ParsedConfig, storage 
 		return nil, err
 	}
 
-	topic := v.GetString("sql-projection.topic")
 	table := v.GetString("sql-projection.table")
 	primaryKey := v.GetString("sql-projection.primaryKey")
-	keyPath := v.GetString("sql-projection.keyPath")
 
 	var columns []ProjectionColumn
 	if err := v.UnmarshalKey("sql-projection.columns", &columns); err != nil {
 		return nil, fmt.Errorf("[sql-projection.parser] parse sql-projection.columns: %w", err)
 	}
 
-	var rawRules []rawProjectionRule
-	if err := v.UnmarshalKey("sql-projection.rules", &rawRules); err != nil {
-		return nil, fmt.Errorf("[sql-projection.parser] parse sql-projection.rules: %w", err)
-	}
-
-	rules := make([]ProjectionRule, 0, len(rawRules))
-	for i, raw := range rawRules {
-		when, err := normalizeWhen(raw.When, storage, topic)
-		if err != nil {
-			return nil, fmt.Errorf("[sql-projection.parser] rule %d: %w", i+1, err)
-		}
-		rules = append(rules, ProjectionRule{When: when, Set: raw.Set})
+	sources, err := parseProjectionSources(v, storage)
+	if err != nil {
+		return nil, fmt.Errorf("[sql-projection.parser] %w", err)
 	}
 
 	config := &ProjectionConfig{
 		Database:   db,
-		Topic:      topic,
 		Table:      table,
 		PrimaryKey: primaryKey,
-		KeyPath:    keyPath,
 		Columns:    columns,
-		Rules:      rules,
+		Sources:    sources,
 	}
 	config.applyDefaults()
 	if err := validateProjectionConfig(config); err != nil {
 		return nil, fmt.Errorf("[sql-projection.parser] %w", err)
 	}
 
-	p.warnKindMisuse(storage, topic)
+	// Warn entity-kind misuse only for a single-source projection: a
+	// multi-source fold legitimately consumes Snapshot/Revision source topics
+	// (folding several normalized topics into one denormalized row is the point).
+	if len(config.Sources) == 1 {
+		p.warnKindMisuse(storage, config.Sources[0].Topic)
+	}
 
 	return config, nil
+}
+
+// parseProjectionSources reads either the multi-source
+// `[[sql-projection.source]]` blocks or — for back-compat — the single-source
+// top-level `topic` / `keyPath` / `rules`. Exactly one shape is used: source
+// blocks win when present.
+func parseProjectionSources(v *cluster.ParsedConfig, storage cluster.DatabaseStorage) ([]ProjectionSource, error) {
+	var rawSources []rawProjectionSource
+	if err := v.UnmarshalKey("sql-projection.source", &rawSources); err != nil {
+		return nil, fmt.Errorf("parse sql-projection.source: %w", err)
+	}
+
+	if len(rawSources) > 0 {
+		sources := make([]ProjectionSource, 0, len(rawSources))
+		for si, rs := range rawSources {
+			rules, err := normalizeRules(rs.Rules, storage, rs.Topic)
+			if err != nil {
+				return nil, fmt.Errorf("source %d (topic %q): %w", si+1, rs.Topic, err)
+			}
+			sources = append(sources, ProjectionSource{
+				Topic:    rs.Topic,
+				KeyPath:  rs.KeyPath,
+				OnDelete: rs.OnDelete,
+				Rules:    rules,
+			})
+		}
+		return sources, nil
+	}
+
+	// Back-compat single-source: top-level topic/keyPath/rules.
+	topic := v.GetString("sql-projection.topic")
+	keyPath := v.GetString("sql-projection.keyPath")
+	var rawRules []rawProjectionRule
+	if err := v.UnmarshalKey("sql-projection.rules", &rawRules); err != nil {
+		return nil, fmt.Errorf("parse sql-projection.rules: %w", err)
+	}
+	rules, err := normalizeRules(rawRules, storage, topic)
+	if err != nil {
+		return nil, err
+	}
+	return []ProjectionSource{{Topic: topic, KeyPath: keyPath, Rules: rules}}, nil
+}
+
+// normalizeRules turns raw TOML rules into ProjectionRules, resolving each
+// rule's when against the given topic's discriminator (for the shorthand form).
+func normalizeRules(rawRules []rawProjectionRule, storage cluster.DatabaseStorage, topic string) ([]ProjectionRule, error) {
+	rules := make([]ProjectionRule, 0, len(rawRules))
+	for i, raw := range rawRules {
+		when, err := normalizeWhen(raw.When, storage, topic)
+		if err != nil {
+			return nil, fmt.Errorf("rule %d: %w", i+1, err)
+		}
+		rules = append(rules, ProjectionRule{When: when, Set: raw.Set})
+	}
+	return rules, nil
 }
 
 // normalizeWhen turns the raw TOML when into match clauses. Two forms:
@@ -107,7 +164,11 @@ func (p *ProjectionSyncableParser) ParseConfig(v *cluster.ParsedConfig, storage 
 func normalizeWhen(raw any, storage cluster.DatabaseStorage, topic string) ([]WhenClause, error) {
 	switch w := raw.(type) {
 	case nil:
-		return nil, fmt.Errorf("when is required (a rule must declare what it matches)")
+		// No when → the rule matches every event of its source. The topic is the
+		// discriminator (a source only ever sees its own topic's events), so a
+		// snapshot source with one event shape — the multi-source fold case —
+		// needs no in-payload predicate. matchWhen(nil) is vacuously true.
+		return nil, nil
 	case string:
 		discriminator, err := discriminatorFor(storage, topic)
 		if err != nil {

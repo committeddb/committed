@@ -67,30 +67,66 @@ type ProjectionRule struct {
 	Set  []ProjectionSet
 }
 
-// ProjectionConfig declares a stateful fold from one topic into one
-// current-state table: one row per entity, maintained by rules that
-// fire per event. See README § SQL projections.
+// onDelete behaviors for a projection source: delete-row drops the folded row
+// (the spine source); clear NULLs the columns this source owns but keeps the row
+// (a contributor); ignore drops the delete entirely.
+const (
+	onDeleteRow    = "delete-row"
+	onDeleteClear  = "clear"
+	onDeleteIgnore = "ignore"
+)
+
+// ProjectionSource is one input topic of a projection: the rules that fold its
+// events into the shared row, the keyPath that correlates them by the shared
+// aggregate key, and what its delete does to that row. The topic is the
+// discriminator — events of other topics never reach this source's rules.
+//
+// KeyPath is the jsonpath that locates the entity key in this source's event
+// payload; the key binds the primary-key column of every rule upsert. Defaults
+// to $.<primaryKey>. The projected key must equal the entity's log Key for
+// delete Actuals to remove/clear the right row.
+type ProjectionSource struct {
+	Topic    string
+	KeyPath  string
+	OnDelete string
+	Rules    []ProjectionRule
+}
+
+// ProjectionConfig declares a stateful fold from one or more source topics into
+// one current-state table: one row per aggregate key, maintained by per-source
+// rules that fire per event. A single-source config is the common case; multiple
+// sources fold several normalized topics into one denormalized row (the topic is
+// each event's discriminator). See README § SQL projections.
 type ProjectionConfig struct {
 	Database   cluster.Database
-	Topic      string
 	Table      string
 	PrimaryKey string
-	// KeyPath is the jsonpath that locates the entity key in each
-	// event payload; the key binds the primary-key column of every
-	// rule upsert. Defaults to $.<primaryKey>. The projected key must
-	// equal the entity's log Key for delete Actuals (RTBF) to remove
-	// the right row — the same contract the plain syncable's KeyColumn
-	// carries.
+	Columns    []ProjectionColumn
+	Sources    []ProjectionSource
+
+	// Single-source shorthand. The README single-topic form (and existing
+	// configs) set these top-level fields; applyDefaults folds them into one
+	// Source. A multi-source config sets Sources directly and leaves these empty.
+	Topic   string
 	KeyPath string
-	Columns []ProjectionColumn
 	Rules   []ProjectionRule
 }
 
-// applyDefaults fills derivable fields; called by both ParseConfig and
-// Init so directly constructed configs behave like parsed ones.
+// applyDefaults folds the single-source shorthand into Sources and fills each
+// source's derivable fields; called by both ParseConfig and Init so directly
+// constructed configs behave like parsed ones.
 func (c *ProjectionConfig) applyDefaults() {
-	if c.KeyPath == "" && c.PrimaryKey != "" {
-		c.KeyPath = "$." + c.PrimaryKey
+	if len(c.Sources) == 0 && (c.Topic != "" || len(c.Rules) > 0) {
+		c.Sources = []ProjectionSource{{Topic: c.Topic, KeyPath: c.KeyPath, Rules: c.Rules}}
+	}
+	for i := range c.Sources {
+		s := &c.Sources[i]
+		if s.OnDelete == "" {
+			s.OnDelete = onDeleteRow // back-compat: a delete drops the row
+		}
+		if s.KeyPath == "" && c.PrimaryKey != "" {
+			s.KeyPath = "$." + c.PrimaryKey
+		}
 	}
 }
 
@@ -128,9 +164,6 @@ func (c *ProjectionConfig) ruleConfig(r ProjectionRule) *Config {
 // directly constructed configs exactly like parsed ones. Rule indexes
 // in errors are 1-based to match the operator's view of the manifest.
 func validateProjectionConfig(c *ProjectionConfig) error {
-	if c.Topic == "" {
-		return fmt.Errorf("topic is required")
-	}
 	if c.Table == "" {
 		return fmt.Errorf("table is required")
 	}
@@ -156,54 +189,80 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 	if !declared[c.PrimaryKey] {
 		return fmt.Errorf("primaryKey %q is not a declared column", c.PrimaryKey)
 	}
-	if len(c.Rules) == 0 {
-		return fmt.Errorf("at least one rule is required")
+	if len(c.Sources) == 0 {
+		return fmt.Errorf("at least one source (a topic and its rules) is required")
 	}
-	for i, r := range c.Rules {
-		if len(r.When) == 0 {
-			return fmt.Errorf("rule %d: when is required (a rule must declare what it matches)", i+1)
+	topics := make(map[string]bool, len(c.Sources))
+	for si, src := range c.Sources {
+		// "src %q" prefixes scope rule errors to their source for a multi-source
+		// config; the original single-source error substrings are preserved
+		// inside (the parser tests match on substrings).
+		where := fmt.Sprintf("source %d (topic %q)", si+1, src.Topic)
+		if src.Topic == "" {
+			return fmt.Errorf("source %d: topic is required", si+1)
 		}
-		for _, cl := range r.When {
-			if cl.Path == "" {
-				return fmt.Errorf("rule %d: when entry needs a path", i+1)
-			}
-			if (cl.Equals != nil) == cl.Null {
-				return fmt.Errorf("rule %d: when entry for %q: exactly one of equals or null is required", i+1, cl.Path)
-			}
-			if cl.Equals != nil && !isScalar(cl.Equals) {
-				return fmt.Errorf("rule %d: when entry for %q: equals must be a scalar literal, got %T", i+1, cl.Path, cl.Equals)
-			}
+		if topics[src.Topic] {
+			return fmt.Errorf("%s: topic declared twice (one source per topic)", where)
 		}
-		if len(r.Set) == 0 {
-			return fmt.Errorf("rule %d: set is required", i+1)
+		topics[src.Topic] = true
+		switch src.OnDelete {
+		case onDeleteRow, onDeleteClear, onDeleteIgnore:
+		default:
+			return fmt.Errorf("%s: onDelete %q is invalid (want %q, %q, or %q)", where, src.OnDelete, onDeleteRow, onDeleteClear, onDeleteIgnore)
 		}
-		seen := make(map[string]bool, len(r.Set))
-		for _, s := range r.Set {
-			if s.Column == "" {
-				return fmt.Errorf("rule %d: set entry with empty column", i+1)
-			}
-			if !declared[s.Column] {
-				return fmt.Errorf("rule %d sets unknown column %q", i+1, s.Column)
-			}
-			if s.Column == c.PrimaryKey {
-				return fmt.Errorf("rule %d may not set the primary-key column %q (the key binds from keyPath)", i+1, s.Column)
-			}
-			forms := 0
-			for _, set := range []bool{s.From != "", s.Value != nil, s.Null} {
-				if set {
-					forms++
+		if len(src.Rules) == 0 {
+			return fmt.Errorf("%s: at least one rule is required", where)
+		}
+		ownsColumn := false
+		for i, r := range src.Rules {
+			// An empty When is allowed: the rule matches every event of its
+			// source (the topic discriminates). Present clauses are validated.
+			for _, cl := range r.When {
+				if cl.Path == "" {
+					return fmt.Errorf("%s rule %d: when entry needs a path", where, i+1)
+				}
+				if (cl.Equals != nil) == cl.Null {
+					return fmt.Errorf("%s rule %d: when entry for %q: exactly one of equals or null is required", where, i+1, cl.Path)
+				}
+				if cl.Equals != nil && !isScalar(cl.Equals) {
+					return fmt.Errorf("%s rule %d: when entry for %q: equals must be a scalar literal, got %T", where, i+1, cl.Path, cl.Equals)
 				}
 			}
-			if forms != 1 {
-				return fmt.Errorf("rule %d column %q: exactly one of from, value, or null is required", i+1, s.Column)
+			if len(r.Set) == 0 {
+				return fmt.Errorf("%s rule %d: set is required", where, i+1)
 			}
-			if s.Value != nil && !isScalar(s.Value) {
-				return fmt.Errorf("rule %d column %q: value must be a scalar literal, got %T", i+1, s.Column, s.Value)
+			seen := make(map[string]bool, len(r.Set))
+			for _, s := range r.Set {
+				if s.Column == "" {
+					return fmt.Errorf("%s rule %d: set entry with empty column", where, i+1)
+				}
+				if !declared[s.Column] {
+					return fmt.Errorf("%s rule %d sets unknown column %q", where, i+1, s.Column)
+				}
+				if s.Column == c.PrimaryKey {
+					return fmt.Errorf("%s rule %d may not set the primary-key column %q (the key binds from keyPath)", where, i+1, s.Column)
+				}
+				forms := 0
+				for _, set := range []bool{s.From != "", s.Value != nil, s.Null} {
+					if set {
+						forms++
+					}
+				}
+				if forms != 1 {
+					return fmt.Errorf("%s rule %d column %q: exactly one of from, value, or null is required", where, i+1, s.Column)
+				}
+				if s.Value != nil && !isScalar(s.Value) {
+					return fmt.Errorf("%s rule %d column %q: value must be a scalar literal, got %T", where, i+1, s.Column, s.Value)
+				}
+				if seen[s.Column] {
+					return fmt.Errorf("%s rule %d sets column %q twice (within a rule each column is set once; across rules the last matching rule wins)", where, i+1, s.Column)
+				}
+				seen[s.Column] = true
+				ownsColumn = true
 			}
-			if seen[s.Column] {
-				return fmt.Errorf("rule %d sets column %q twice (within a rule each column is set once; across rules the last matching rule wins)", i+1, s.Column)
-			}
-			seen[s.Column] = true
+		}
+		if src.OnDelete == onDeleteClear && !ownsColumn {
+			return fmt.Errorf("%s: onDelete = %q needs at least one column set by its rules to clear", where, onDeleteClear)
 		}
 	}
 	return nil
@@ -238,14 +297,29 @@ type Projection struct {
 	// layer).
 	name    string
 	metrics *metrics.Metrics
-	rules   []*projectionStmt
-	// delete is the prepared DELETE-by-key statement honoring delete
-	// Actuals (right-to-be-forgotten). Always prepared: primaryKey is
-	// mandatory for projections. Self-healing closure: if an entity's
-	// creating event was scrubbed before a fresh replay, surviving
-	// events build a partial row and the scrub's delete Actual removes
-	// it.
+	// sources is keyed by topic id: each holds that source's prepared rule
+	// upserts, keyPath, onDelete behavior, and (for onDelete=clear) a prepared
+	// column-clear UPDATE. The topic is the discriminator — an entity routes to
+	// its source's rules, so two sources fold into one row without clobbering.
+	sources map[string]*projectionSource
+	// delete is the shared prepared DELETE-by-key. It serves sources whose
+	// onDelete is "delete-row" (and so any RTBF delete on such a topic). Always
+	// prepared: primaryKey is mandatory. Self-healing closure: if an entity's
+	// creating event was scrubbed before a fresh replay, surviving events build a
+	// partial row and the scrub's delete Actual removes it.
 	delete *Delete
+}
+
+// projectionSource is the prepared, per-topic runtime of one ProjectionSource.
+type projectionSource struct {
+	topic    string
+	keyPath  string
+	onDelete string
+	rules    []*projectionStmt
+	// clear is the prepared "UPDATE … SET ownedCols = NULL WHERE pk = ?", set
+	// only when onDelete == "clear".
+	clear    *gosql.Stmt
+	clearSQL string
 }
 
 // projectionStmt pairs one rule with its prepared upsert.
@@ -253,6 +327,22 @@ type projectionStmt struct {
 	rule ProjectionRule
 	SQL  string
 	Stmt *gosql.Stmt
+}
+
+// ownedColumns returns the distinct columns this source's rules set, in
+// first-seen order — the columns onDelete = "clear" NULLs.
+func (s ProjectionSource) ownedColumns() []string {
+	seen := make(map[string]bool)
+	var cols []string
+	for _, r := range s.Rules {
+		for _, set := range r.Set {
+			if !seen[set.Column] {
+				seen[set.Column] = true
+				cols = append(cols, set.Column)
+			}
+		}
+	}
+	return cols
 }
 
 // NewProjection constructs a Projection. m may be nil (no metrics);
@@ -305,15 +395,32 @@ func (p *Projection) Init() error {
 		return fmt.Errorf("ddl [%s]: %w", ddlString, err)
 	}
 
-	for i, r := range p.config.Rules {
-		sqlString := p.dialect.CreateSQL(p.config.ruleConfig(r))
-		stmt, err := p.db.Prepare(sqlString)
-		if err != nil {
-			return fmt.Errorf("prepare rule %d sql [%s]: %w", i+1, sqlString, err)
+	// Prepare per-source rule upserts (and any clear) first, then the shared
+	// row-delete last — the same prepare order as the original single-source
+	// projection.
+	p.sources = make(map[string]*projectionSource, len(p.config.Sources))
+	for si, src := range p.config.Sources {
+		ps := &projectionSource{topic: src.Topic, keyPath: src.KeyPath, onDelete: src.OnDelete}
+		for i, r := range src.Rules {
+			sqlString := p.dialect.CreateSQL(p.config.ruleConfig(r))
+			stmt, err := p.db.Prepare(sqlString)
+			if err != nil {
+				return fmt.Errorf("prepare source %d (topic %q) rule %d sql [%s]: %w", si+1, src.Topic, i+1, sqlString, err)
+			}
+			ps.rules = append(ps.rules, &projectionStmt{rule: r, SQL: sqlString, Stmt: stmt})
 		}
-		p.rules = append(p.rules, &projectionStmt{rule: r, SQL: sqlString, Stmt: stmt})
+		if src.OnDelete == onDeleteClear {
+			ps.clearSQL = p.dialect.CreateClearSQL(ddlConfig, src.ownedColumns())
+			clearStmt, err := p.db.Prepare(ps.clearSQL)
+			if err != nil {
+				return fmt.Errorf("prepare source %d (topic %q) clear sql [%s]: %w", si+1, src.Topic, ps.clearSQL, err)
+			}
+			ps.clear = clearStmt
+		}
+		p.sources[src.Topic] = ps
 	}
 
+	// Shared row-delete (onDelete=delete-row, and any RTBF delete on such a topic).
 	deleteString := p.dialect.CreateDeleteSQL(ddlConfig)
 	deleteStmt, err := p.db.Prepare(deleteString)
 	if err != nil {
@@ -325,12 +432,17 @@ func (p *Projection) Init() error {
 }
 
 func (p *Projection) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldSnapshot, error) {
-	// Topic check before BeginTx so a non-matching Actual costs no
-	// transaction.
+	// Skip an Actual that carries no entity for one of our source topics before
+	// BeginTx, so a non-matching Actual costs no transaction.
+	relevant := false
 	for _, e := range a.Entities {
-		if p.config.Topic != e.Type.ID {
-			return false, nil
+		if _, ok := p.sources[e.Type.ID]; ok {
+			relevant = true
+			break
 		}
+	}
+	if !relevant {
+		return false, nil
 	}
 
 	tx, err := p.db.BeginTx(ctx, nil)
@@ -339,7 +451,11 @@ func (p *Projection) Sync(ctx context.Context, a *cluster.Actual) (cluster.Shoul
 	}
 
 	for _, e := range a.Entities {
-		if err := p.applyEntity(ctx, tx, e); err != nil {
+		src, ok := p.sources[e.Type.ID]
+		if !ok {
+			continue
+		}
+		if err := p.applyEntity(ctx, tx, src, e); err != nil {
 			_ = tx.Rollback()
 			return false, err
 		}
@@ -366,10 +482,11 @@ func (p *Projection) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool,
 
 	for _, a := range as {
 		for _, e := range a.Entities {
-			if p.config.Topic != e.Type.ID {
+			src, ok := p.sources[e.Type.ID]
+			if !ok {
 				continue
 			}
-			if err := p.applyEntity(ctx, tx, e); err != nil {
+			if err := p.applyEntity(ctx, tx, src, e); err != nil {
 				_ = tx.Rollback()
 				return false, err
 			}
@@ -387,29 +504,17 @@ func (p *Projection) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool,
 	return true, nil
 }
 
-// applyEntity applies one entity to an open transaction: a delete
-// removes the projected row keyed by the entity's Key
-// (right-to-be-forgotten; the sentinel payload is never unmarshaled);
-// any other entity is matched against the rules and every matching
-// rule's upsert executes in manifest order. Zero matching rules → zero
-// SQL (no ghost rows) plus an unmatched metric tick. Returns
-// cluster.Permanent for non-retryable failures so the worker skips
+// applyEntity applies one entity from source src to an open transaction. A
+// delete follows the source's onDelete (see applyDelete); the sentinel payload
+// is never unmarshaled. Any other entity is matched against that source's rules
+// and every matching rule's upsert executes in manifest order — each rule sets
+// only its own columns, so two sources fold into one row without clobbering.
+// Zero matching rules → zero SQL (no ghost rows) plus an unmatched metric tick.
+// Returns cluster.Permanent for non-retryable failures so the worker skips
 // rather than retries. The caller owns the transaction.
-func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, e *cluster.Entity) error {
+func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *projectionSource, e *cluster.Entity) error {
 	if e.IsDelete() {
-		if p.delete == nil {
-			return cluster.Permanent(fmt.Errorf(
-				"[sql-projection.apply] cannot honor delete for key %q: no delete statement prepared",
-				string(e.Key)))
-		}
-		if _, err := tx.StmtContext(ctx, p.delete.Stmt).ExecContext(ctx, string(e.Key)); err != nil {
-			wrapped := fmt.Errorf("[sql-projection.apply] exec [%s]: %w", p.delete.SQL, err)
-			if p.dialect.IsPermanent(err) {
-				return cluster.Permanent(wrapped)
-			}
-			return wrapped
-		}
-		return nil
+		return p.applyDelete(ctx, tx, src, e)
 	}
 
 	var jsonData any
@@ -418,7 +523,7 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, e *cluster.E
 	}
 
 	var matched []*projectionStmt
-	for _, r := range p.rules {
+	for _, r := range src.rules {
 		if matchWhen(r.rule.When, jsonData) {
 			matched = append(matched, r)
 		}
@@ -427,9 +532,9 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, e *cluster.E
 		// No ghost rows: zero matching rules → zero SQL. The tick is
 		// the signal that a new event variant shipped without a rule.
 		zap.L().Debug("[sql-projection] event matched no rules",
-			zap.String("syncable", p.name), zap.String("topic", p.config.Topic))
+			zap.String("syncable", p.name), zap.String("topic", src.topic))
 		if p.metrics != nil {
-			p.metrics.SyncRulesUnmatched(p.name, p.config.Topic)
+			p.metrics.SyncRulesUnmatched(p.name, src.topic)
 		}
 		return nil
 	}
@@ -438,9 +543,9 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, e *cluster.E
 	// unmatched foreign event missing the keyPath is a non-event, not
 	// a dead letter. A matched event without a key is a permanent
 	// misconfiguration.
-	key, err := jsonpath.Get(p.config.KeyPath, jsonData)
+	key, err := jsonpath.Get(src.keyPath, jsonData)
 	if err != nil {
-		return cluster.Permanent(fmt.Errorf("[sql-projection.apply] keyPath [%s]: %w", p.config.KeyPath, err))
+		return cluster.Permanent(fmt.Errorf("[sql-projection.apply] keyPath [%s]: %w", src.keyPath, err))
 	}
 
 	for _, r := range matched {
@@ -472,13 +577,50 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, e *cluster.E
 	return nil
 }
 
+// applyDelete honors a delete entity per its source's onDelete: ignore drops it;
+// clear NULLs the source's owned columns for the keyed row (the folded row
+// survives); delete-row removes the row entirely. The single bound argument is
+// the entity Key, so the sentinel payload is never unmarshaled.
+func (p *Projection) applyDelete(ctx context.Context, tx *gosql.Tx, src *projectionSource, e *cluster.Entity) error {
+	var stmt *gosql.Stmt
+	var sqlStr string
+	switch src.onDelete {
+	case onDeleteIgnore:
+		return nil
+	case onDeleteClear:
+		stmt, sqlStr = src.clear, src.clearSQL
+	default: // onDeleteRow
+		stmt, sqlStr = p.delete.Stmt, p.delete.SQL
+	}
+	if stmt == nil {
+		return cluster.Permanent(fmt.Errorf(
+			"[sql-projection.apply] cannot honor delete for key %q (topic %q): no statement prepared",
+			string(e.Key), src.topic))
+	}
+	if _, err := tx.StmtContext(ctx, stmt).ExecContext(ctx, string(e.Key)); err != nil {
+		wrapped := fmt.Errorf("[sql-projection.apply] exec [%s]: %w", sqlStr, err)
+		if p.dialect.IsPermanent(err) {
+			return cluster.Permanent(wrapped)
+		}
+		return wrapped
+	}
+	return nil
+}
+
 func (p *Projection) Close() error {
 	// Close every prepared statement; report the first error but
 	// always attempt the rest so nothing leaks when one close fails.
 	var err error
-	for _, r := range p.rules {
-		if cerr := r.Stmt.Close(); err == nil {
-			err = cerr
+	for _, src := range p.sources {
+		for _, r := range src.rules {
+			if cerr := r.Stmt.Close(); err == nil {
+				err = cerr
+			}
+		}
+		if src.clear != nil {
+			if cerr := src.clear.Close(); err == nil {
+				err = cerr
+			}
 		}
 	}
 	if p.delete != nil {

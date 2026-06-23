@@ -29,6 +29,11 @@ func (d *MySQLDialect) CreateDeleteSQL(c *sql.Config) string {
 	return createDeleteSQL(c, "?")
 }
 
+// CreateClearSQL implements Dialect; MySQL binds the WHERE value with ?.
+func (d *MySQLDialect) CreateClearSQL(c *sql.Config, columns []string) string {
+	return createClearSQL(c, columns, "?")
+}
+
 // CreateSQL implements Dialect
 func (d *MySQLDialect) CreateSQL(config *sql.Config) string {
 	var sql strings.Builder

@@ -75,10 +75,10 @@ func TestParseProjectionConfig(t *testing.T) {
 	config, err := (&sql.ProjectionSyncableParser{}).ParseConfig(v, projectionStorage())
 	require.NoError(t, err)
 
-	require.Equal(t, "controlplane-event", config.Topic)
+	require.Equal(t, "controlplane-event", config.Sources[0].Topic)
 	require.Equal(t, "tenants", config.Table)
 	require.Equal(t, "tenant_id", config.PrimaryKey)
-	require.Equal(t, "$.tenant_id", config.KeyPath, "keyPath defaults to $.<primaryKey>")
+	require.Equal(t, "$.tenant_id", config.Sources[0].KeyPath, "keyPath defaults to $.<primaryKey>")
 	require.Equal(t, []sql.ProjectionColumn{
 		{Name: "tenant_id", SQLType: "VARCHAR(256)"},
 		{Name: "tier", SQLType: "VARCHAR(32)"},
@@ -110,7 +110,7 @@ func TestParseProjectionConfig(t *testing.T) {
 				{Column: "allocs", Null: true},
 			},
 		},
-	}, config.Rules)
+	}, config.Sources[0].Rules)
 }
 
 // The jsonpath in a when clause is a TOML *value*, so case survives
@@ -139,8 +139,8 @@ set  = [ { column = "v", from = "$.camelCase" } ]
 	v := readConfig(t, "toml", strings.NewReader(toml))
 	config, err := (&sql.ProjectionSyncableParser{}).ParseConfig(v, projectionStorage())
 	require.NoError(t, err)
-	require.Equal(t, "$.eventType", config.Rules[0].When[0].Path)
-	require.Equal(t, "$.camelCase", config.Rules[0].Set[0].From)
+	require.Equal(t, "$.eventType", config.Sources[0].Rules[0].When[0].Path)
+	require.Equal(t, "$.camelCase", config.Sources[0].Rules[0].Set[0].From)
 }
 
 func TestParseProjectionConfigKeyPathOverride(t *testing.T) {
@@ -151,7 +151,7 @@ func TestParseProjectionConfigKeyPathOverride(t *testing.T) {
 
 	config, err := (&sql.ProjectionSyncableParser{}).ParseConfig(v, projectionStorage())
 	require.NoError(t, err)
-	require.Equal(t, "$.meta.id", config.KeyPath)
+	require.Equal(t, "$.meta.id", config.Sources[0].KeyPath)
 }
 
 // A null when clause ({ path, null = true }) parses to Null: true —
@@ -180,7 +180,7 @@ set  = [ { column = "state", value = "unallocated" } ]
 	v := readConfig(t, "toml", strings.NewReader(toml))
 	config, err := (&sql.ProjectionSyncableParser{}).ParseConfig(v, projectionStorage())
 	require.NoError(t, err)
-	require.Equal(t, []sql.WhenClause{{Path: "$.allocs", Null: true}}, config.Rules[0].When)
+	require.Equal(t, []sql.WhenClause{{Path: "$.allocs", Null: true}}, config.Sources[0].Rules[0].When)
 }
 
 // Every rule/config misuse must fail at config time — nothing may wedge
@@ -240,11 +240,6 @@ type = "TEXT"
 			"duplicate column in one rule",
 			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\" } ]\nset = [ { column = \"v\", value = \"a\" }, { column = \"v\", value = \"b\" } ]",
 			`sets column "v" twice`,
-		},
-		{
-			"missing when",
-			"[[sql-projection.rules]]\nset = [ { column = \"v\", value = \"y\" } ]",
-			"when is required",
 		},
 		{
 			"empty set",
@@ -362,7 +357,7 @@ set  = [ { column = "state", value = "pending" } ]
 	}
 	config, err := (&sql.ProjectionSyncableParser{}).ParseConfig(v, storage)
 	require.NoError(t, err)
-	require.Equal(t, []sql.WhenClause{{Path: "$.event_type", Equals: "tenant.created"}}, config.Rules[0].When)
+	require.Equal(t, []sql.WhenClause{{Path: "$.event_type", Equals: "tenant.created"}}, config.Sources[0].Rules[0].When)
 
 	// Without a discriminator on the type, the shorthand cannot resolve;
 	// the error names the explicit escape hatch.
@@ -420,4 +415,87 @@ func TestParseProjectionWarnsOnSnapshotKindTopic(t *testing.T) {
 	_, err = (&sql.ProjectionSyncableParser{}).ParseConfig(v, storage)
 	require.NoError(t, err)
 	require.Empty(t, logs.All())
+}
+
+// TestParseMultiSourceProjection covers the [[sql-projection.source]] decode:
+// two source blocks each with its own topic, onDelete, and (match-all) rules
+// fold into one table. This is the multisource read-model config shape.
+func TestParseMultiSourceProjection(t *testing.T) {
+	const toml = `
+[sql-projection]
+db = "testdb"
+table = "movie_card"
+primaryKey = "tconst"
+
+[[sql-projection.columns]]
+name = "tconst"
+type = "VARCHAR(16)"
+[[sql-projection.columns]]
+name = "primary_title"
+type = "VARCHAR(255)"
+[[sql-projection.columns]]
+name = "average_rating"
+type = "NUMERIC"
+
+[[sql-projection.source]]
+topic = "title"
+onDelete = "delete-row"
+[[sql-projection.source.rules]]
+set = [ { column = "primary_title", from = "$.primary_title" } ]
+
+[[sql-projection.source]]
+topic = "rating"
+onDelete = "clear"
+[[sql-projection.source.rules]]
+set = [ { column = "average_rating", from = "$.average_rating" } ]
+`
+	v := readConfig(t, "toml", strings.NewReader(toml))
+	config, err := (&sql.ProjectionSyncableParser{}).ParseConfig(v, projectionStorage())
+	require.NoError(t, err)
+
+	require.Len(t, config.Sources, 2)
+	require.Equal(t, "title", config.Sources[0].Topic)
+	require.Equal(t, "delete-row", config.Sources[0].OnDelete)
+	require.Equal(t, "$.tconst", config.Sources[0].KeyPath, "keyPath defaults to $.<primaryKey> per source")
+	require.Empty(t, config.Sources[0].Rules[0].When, "a rule with no when matches every event of its source")
+	require.Equal(t, []sql.ProjectionSet{{Column: "primary_title", From: "$.primary_title"}}, config.Sources[0].Rules[0].Set)
+	require.Equal(t, "rating", config.Sources[1].Topic)
+	require.Equal(t, "clear", config.Sources[1].OnDelete)
+}
+
+// TestParseMultiSourceProjectionErrors covers the multisource-specific
+// validation: an invalid onDelete and a topic declared by two sources.
+func TestParseMultiSourceProjectionErrors(t *testing.T) {
+	const head = `
+[sql-projection]
+db = "testdb"
+table = "t"
+primaryKey = "k"
+[[sql-projection.columns]]
+name = "k"
+type = "TEXT"
+[[sql-projection.columns]]
+name = "v"
+type = "TEXT"
+`
+	for _, tc := range []struct{ name, sources, wantErr string }{
+		{
+			"invalid onDelete",
+			"[[sql-projection.source]]\ntopic = \"a\"\nonDelete = \"nope\"\n[[sql-projection.source.rules]]\nset = [ { column = \"v\", from = \"$.v\" } ]\n",
+			`onDelete "nope" is invalid`,
+		},
+		{
+			"duplicate topic",
+			"[[sql-projection.source]]\ntopic = \"a\"\n[[sql-projection.source.rules]]\nset = [ { column = \"v\", from = \"$.v\" } ]\n" +
+				"[[sql-projection.source]]\ntopic = \"a\"\n[[sql-projection.source.rules]]\nset = [ { column = \"v\", from = \"$.v\" } ]\n",
+			"topic declared twice",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v := readConfig(t, "toml", strings.NewReader(head+tc.sources))
+			_, err := (&sql.ProjectionSyncableParser{}).ParseConfig(v, projectionStorage())
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tc.wantErr)
+		})
+	}
 }

@@ -103,7 +103,7 @@ Set  = [ { Column = "v", From = "$.camelCase" } ]
 	config, err := (&sql.ProjectionSyncableParser{}).ParseConfig(v, projectionStorage())
 	require.NoError(t, err)
 
-	require.Equal(t, "$.Meta.ID", config.KeyPath, "user data in values must keep case")
-	require.Equal(t, []sql.WhenClause{{Path: "$.eventType", Equals: "x"}}, config.Rules[0].When)
-	require.Equal(t, "$.camelCase", config.Rules[0].Set[0].From)
+	require.Equal(t, "$.Meta.ID", config.Sources[0].KeyPath, "user data in values must keep case")
+	require.Equal(t, []sql.WhenClause{{Path: "$.eventType", Equals: "x"}}, config.Sources[0].Rules[0].When)
+	require.Equal(t, "$.camelCase", config.Sources[0].Rules[0].Set[0].From)
 }

@@ -22,6 +22,14 @@ type Dialect interface {
 	// The key column is Config.DeleteKeyColumn(); the single bound argument
 	// is the entity's Key, so deletes never unmarshal the (absent) payload.
 	CreateDeleteSQL(config *Config) string
+	// CreateClearSQL returns the statement that NULLs a set of columns for one
+	// row by its key column: `UPDATE <table> SET <c1>=NULL,<c2>=NULL WHERE
+	// <keyCol> = <placeholder>`. It backs a multi-source projection's
+	// `onDelete = "clear"` — a contributor source's delete blanks the columns it
+	// owns without dropping the folded row. An UPDATE (not an upsert) so a clear
+	// against an absent row is a no-op, never a ghost row. Placeholder is
+	// dialect-specific; the single bound argument is the entity's Key.
+	CreateClearSQL(config *Config, columns []string) string
 	Open(connectionString string) (*gosql.DB, error)
 	// IsPermanent returns true if the given SQL error is non-retryable
 	// (e.g., constraint violations, data-type mismatches). The sync loop

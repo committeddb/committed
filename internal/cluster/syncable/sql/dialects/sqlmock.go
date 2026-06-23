@@ -38,6 +38,11 @@ func (d *SQLMockDialect) CreateDeleteSQL(c *sql.Config) string {
 	return createDeleteSQL(c, "?")
 }
 
+// CreateClearSQL implements Dialect, mirroring MySQL's ? placeholder.
+func (d *SQLMockDialect) CreateClearSQL(c *sql.Config, columns []string) string {
+	return createClearSQL(c, columns, "?")
+}
+
 func (d *SQLMockDialect) CreateSQL(config *sql.Config) string {
 	var sql strings.Builder
 

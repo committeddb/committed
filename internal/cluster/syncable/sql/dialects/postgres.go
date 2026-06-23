@@ -54,6 +54,11 @@ func (d *PostgreSQLDialect) CreateDeleteSQL(c *sql.Config) string {
 	return createDeleteSQL(c, "$1")
 }
 
+// CreateClearSQL implements Dialect; PostgreSQL binds the WHERE value with $1.
+func (d *PostgreSQLDialect) CreateClearSQL(c *sql.Config, columns []string) string {
+	return createClearSQL(c, columns, "$1")
+}
+
 // CreateSQL implements Dialect.
 //
 // PostgreSQL upserts use ON CONFLICT (<pk>) DO UPDATE SET col = EXCLUDED.col,
