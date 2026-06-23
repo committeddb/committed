@@ -30,6 +30,34 @@ type Dialect interface {
 	// against an absent row is a no-op, never a ghost row. Placeholder is
 	// dialect-specific; the single bound argument is the entity's Key.
 	CreateClearSQL(config *Config, columns []string) string
+	// CreateAggregateSidecarDDL returns the CREATE TABLE for an aggregate
+	// source's backing table — the normalized store whose rows materialize the
+	// parent's JSON-array column. Its columns are fixed (Sidecar* consts):
+	// child_key (PK, the aggregated entity's Key), parent_key (the correlation
+	// key), element_key (the sort/identity key, stored as text), and element
+	// (the per-child JSON object). The dialect picks its own JSON and key column
+	// types (JSONB vs JSON, TEXT vs VARCHAR). Dropped via DropDDL on the sidecar
+	// table name, so no separate drop method is needed.
+	CreateAggregateSidecarDDL(spec AggregateSpec) string
+	// CreateAggregateMaterializeSQL returns the upsert that (re)writes the
+	// parent row's array column from the sidecar: INSERT the parent row with
+	// column = agg(elements for this parent ORDER BY element_key) ON CONFLICT DO
+	// UPDATE. An upsert (not a plain UPDATE) so a child arriving before its
+	// spine still lands its collection on a fresh partial row, exactly as a
+	// scalar contributor's rule upsert does. Both placeholders bind the parent
+	// key (the dialect repeats it rather than relying on placeholder reuse, so
+	// the runtime binds the same two-arg shape for every dialect).
+	CreateAggregateMaterializeSQL(spec AggregateSpec) string
+	// CreateAggregateRebuildSQL returns the delete-path UPDATE that rewrites the
+	// parent's array column from the sidecar after a child was removed: an
+	// UPDATE (never an upsert) so removing the last child of an absent parent is
+	// a no-op, never a ghost row. Both placeholders bind the parent key.
+	CreateAggregateRebuildSQL(spec AggregateSpec) string
+	// CreateAggregateParentLookupSQL returns the SELECT that recovers a removed
+	// child's parent key from the sidecar by its child key. A delete Actual
+	// carries no payload, so the parent correlation is read back from the
+	// sidecar the upsert recorded; the single bound argument is the child Key.
+	CreateAggregateParentLookupSQL(spec AggregateSpec) string
 	Open(connectionString string) (*gosql.DB, error)
 	// IsPermanent returns true if the given SQL error is non-retryable
 	// (e.g., constraint violations, data-type mismatches). The sync loop
@@ -149,4 +177,30 @@ type Insert struct {
 type Delete struct {
 	SQL  string
 	Stmt *gosql.Stmt
+}
+
+// Sidecar* are the fixed column names of an aggregate source's backing table.
+// They are shared between projection.go (which builds the sidecar upsert and
+// delete through the generic CreateSQL / CreateDeleteSQL path) and the dialects
+// (which build the sidecar DDL and the materialize / rebuild / lookup SQL), so
+// the two never drift.
+const (
+	SidecarChildKey   = "child_key"
+	SidecarParentKey  = "parent_key"
+	SidecarElementKey = "element_key"
+	SidecarElement    = "element"
+)
+
+// AggregateSpec is the dialect-facing description of one aggregate source: the
+// parent table it folds into, that table's primary-key and array columns, the
+// sidecar table backing the column, and whether the array orders by its
+// element key numerically (1,2,…,10) rather than lexically (1,10,2). The
+// dialects use it to build the sidecar DDL and the materialize / rebuild /
+// lookup statements; it carries no per-row data.
+type AggregateSpec struct {
+	Table       string
+	PrimaryKey  string
+	Column      string
+	Sidecar     string
+	NumericSort bool
 }

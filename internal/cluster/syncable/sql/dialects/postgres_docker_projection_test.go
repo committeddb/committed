@@ -6,6 +6,7 @@ import (
 	"context"
 	gosql "database/sql"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -274,4 +275,174 @@ func TestPostgreSQLIntegration_MultiSourceProjection(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "The Shawshank Redemption", r.Title.String)
 	require.Equal(t, "9.3", r.Rating.String)
+}
+
+var principalType = &cluster.Type{ID: "principal", Name: "Principal"}
+
+// movieCardSplitConfig folds three sources into one movie_card row: title (the
+// spine) plus the principal topic split by category into two array columns —
+// actors into top_cast, directors into directors — ordered numerically by
+// ordering. This is the filtered-aggregate shape: two aggregate sources share
+// one topic.
+func movieCardSplitConfig(table string) *sql.ProjectionConfig {
+	castElement := []sql.ProjectionElementField{
+		{Field: "ordering", From: "$.ordering"},
+		{Field: "nconst", From: "$.nconst"},
+	}
+	return &sql.ProjectionConfig{
+		Table:      table,
+		PrimaryKey: "tconst",
+		Columns: []sql.ProjectionColumn{
+			{Name: "tconst", SQLType: "VARCHAR(16)"},
+			{Name: "primary_title", SQLType: "VARCHAR(255)"},
+			{Name: "top_cast", SQLType: "JSONB"},
+			{Name: "directors", SQLType: "JSONB"},
+		},
+		Sources: []sql.ProjectionSource{
+			{
+				Topic:    "title",
+				OnDelete: "delete-row",
+				Rules: []sql.ProjectionRule{{
+					Set: []sql.ProjectionSet{{Column: "primary_title", From: "$.primary_title"}},
+				}},
+			},
+			{
+				Topic: "principal",
+				When:  []sql.WhenClause{{Path: "$.category", Equals: "actor"}},
+				Aggregate: &sql.ProjectionAggregate{
+					Column:         "top_cast",
+					ElementKey:     "$.ordering",
+					ElementKeyType: "number",
+					Element:        castElement,
+				},
+			},
+			{
+				Topic: "principal",
+				When:  []sql.WhenClause{{Path: "$.category", Equals: "director"}},
+				Aggregate: &sql.ProjectionAggregate{
+					Column:         "directors",
+					ElementKey:     "$.ordering",
+					ElementKeyType: "number",
+					Element:        castElement,
+				},
+			},
+		},
+	}
+}
+
+// TestPostgreSQLIntegration_AggregateProjection is the projection-aggregate
+// success criterion on real Postgres: the principal topic splits by category
+// into two array columns; the arrays order numerically by elementKey (10 after
+// 3, not lexically before it); a re-delivered child replaces its element; a
+// child delete removes exactly its element from the right column (the split
+// self-selects) and leaves the row and the other column; and a teardown +
+// rebuild-from-0 reproduces the same arrays.
+func TestPostgreSQLIntegration_AggregateProjection(t *testing.T) {
+	// Short fixed name: the sidecar (<table>__top_cast) and its index
+	// (..._parent) append suffixes, and Postgres truncates identifiers at 63.
+	const table = "agg_movie_card"
+	dropTable(t, table)
+	defer dropTable(t, table)
+	defer dropTable(t, table+"__top_cast")
+	defer dropTable(t, table+"__directors")
+
+	db, err := sql.NewDB(&dialects.PostgreSQLDialect{}, pgConnString)
+	require.Nil(t, err)
+	defer db.Close()
+
+	projection := sql.NewProjection(db, movieCardSplitConfig(table), nil, "movie_card")
+	require.Nil(t, projection.Init())
+	ctx := context.Background()
+
+	principal := func(ordering int, nconst, category string) *cluster.Actual {
+		key := fmt.Sprintf("[\"tt1\",\"%d\"]", ordering)
+		return sourceEvent(t, principalType, key, map[string]any{
+			"tconst": "tt1", "ordering": ordering, "nconst": nconst, "category": category,
+		})
+	}
+	principalKey := func(ordering int) string { return fmt.Sprintf("[\"tt1\",\"%d\"]", ordering) }
+
+	// nconstsOf reads one array column and returns its elements' nconst values
+	// in stored order — the order is what proves numeric vs lexical sorting.
+	nconstsOf := func(col string) []string {
+		var raw gosql.NullString
+		err := db.DB.QueryRow("SELECT "+col+" FROM "+table+" WHERE tconst = $1", "tt1").Scan(&raw)
+		if err == gosql.ErrNoRows || !raw.Valid {
+			return nil
+		}
+		require.NoError(t, err)
+		var arr []map[string]any
+		require.NoError(t, json.Unmarshal([]byte(raw.String), &arr))
+		out := make([]string, len(arr))
+		for i, m := range arr {
+			out[i] = m["nconst"].(string)
+		}
+		return out
+	}
+	rowExists := func() bool {
+		var n int
+		require.NoError(t, db.DB.QueryRow("SELECT COUNT(*) FROM "+table+" WHERE tconst = $1", "tt1").Scan(&n))
+		return n == 1
+	}
+
+	// The folding sequence: spine, then actors and a director out of order, an
+	// actor with two-digit ordering (the numeric-sort probe), an actor replace,
+	// and two deletes (an actor and the director).
+	seq := []*cluster.Actual{
+		sourceEvent(t, titleType, "tt1", map[string]any{"tconst": "tt1", "primary_title": "Heat"}),
+		principal(1, "nm1", "actor"),
+		principal(3, "nm3", "actor"),
+		principal(2, "nmDir", "director"),
+		principal(10, "nm10", "actor"),
+	}
+	apply := func(as ...*cluster.Actual) {
+		for _, a := range as {
+			_, err := projection.Sync(ctx, a)
+			require.NoError(t, err)
+		}
+	}
+
+	apply(seq...)
+	// Numeric order: 1,3,10 — not lexical 1,10,3.
+	require.Equal(t, []string{"nm1", "nm3", "nm10"}, nconstsOf("top_cast"), "actors fold into top_cast, numeric order")
+	require.Equal(t, []string{"nmDir"}, nconstsOf("directors"), "the director folds into its own column")
+	require.Equal(t, "Heat", func() string {
+		var s string
+		require.NoError(t, db.DB.QueryRow("SELECT primary_title FROM "+table+" WHERE tconst=$1", "tt1").Scan(&s))
+		return s
+	}(), "the spine column coexists with both aggregates")
+
+	// Re-deliver ordering 1 with a new nconst: the element is replaced, not
+	// duplicated, and the array stays numerically ordered.
+	replace := principal(1, "nm1b", "actor")
+	apply(replace)
+	require.Equal(t, []string{"nm1b", "nm3", "nm10"}, nconstsOf("top_cast"))
+
+	// Delete an actor: removed from top_cast only. The delete routes to both
+	// aggregate sources, but the director source never folded it, so directors
+	// is untouched — the split self-selects.
+	delActor := sourceDelete(principalType, principalKey(3))
+	apply(delActor)
+	require.Equal(t, []string{"nm1b", "nm10"}, nconstsOf("top_cast"), "the deleted actor's element is gone")
+	require.Equal(t, []string{"nmDir"}, nconstsOf("directors"), "the other column is untouched")
+	require.True(t, rowExists(), "the movie row survives a child delete")
+
+	// Delete the director: directors empties to [], the row and top_cast stay.
+	delDirector := sourceDelete(principalType, principalKey(2))
+	apply(delDirector)
+	require.Equal(t, []string{"nm1b", "nm10"}, nconstsOf("top_cast"))
+	require.Empty(t, nconstsOf("directors"), "removing the last child leaves an empty array, row intact")
+	require.True(t, rowExists())
+
+	// Capture the converged state, then rebuild from 0 (teardown + re-init drops
+	// the table and sidecars and recreates them empty) and replay the whole
+	// sequence: the arrays must reproduce exactly.
+	wantCast := nconstsOf("top_cast")
+	full := append(append([]*cluster.Actual{}, seq...), replace, delActor, delDirector)
+
+	require.NoError(t, projection.Teardown())
+	require.NoError(t, projection.Init())
+	apply(full...)
+	require.Equal(t, wantCast, nconstsOf("top_cast"), "rebuild-from-0 reproduces top_cast")
+	require.Empty(t, nconstsOf("directors"), "rebuild-from-0 reproduces directors")
 }

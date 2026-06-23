@@ -59,6 +59,50 @@ func (d *PostgreSQLDialect) CreateClearSQL(c *sql.Config, columns []string) stri
 	return createClearSQL(c, columns, "$1")
 }
 
+// pgAggSubquery is the scalar subquery that re-aggregates one parent's children
+// from the sidecar into a JSON array: COALESCE(jsonb_agg(element ORDER BY
+// element_key), '[]') so an empty set yields [] not NULL. Ordering by
+// element_key::numeric (numeric sort) or element_key (lexical) makes the array
+// a pure function of the set, independent of arrival order. <ph> binds the
+// parent key.
+func pgAggSubquery(spec sql.AggregateSpec, ph string) string {
+	sort := sql.SidecarElementKey
+	if spec.NumericSort {
+		sort = sql.SidecarElementKey + "::numeric"
+	}
+	return fmt.Sprintf("(SELECT COALESCE(jsonb_agg(%s ORDER BY %s), '[]'::jsonb) FROM %s WHERE %s = %s)",
+		sql.SidecarElement, sort, spec.Sidecar, sql.SidecarParentKey, ph)
+}
+
+// CreateAggregateSidecarDDL implements Dialect; PostgreSQL stores the element
+// as JSONB and the keys as TEXT (unbounded, still indexable).
+func (d *PostgreSQLDialect) CreateAggregateSidecarDDL(spec sql.AggregateSpec) string {
+	return d.CreateDDL(aggregateSidecarConfig(spec, "JSONB", "TEXT"))
+}
+
+// CreateAggregateMaterializeSQL implements Dialect; both $1 (the inserted
+// parent key) and $2 (the subquery's parent_key filter) bind the same parent
+// key.
+func (d *PostgreSQLDialect) CreateAggregateMaterializeSQL(spec sql.AggregateSpec) string {
+	return fmt.Sprintf(
+		"INSERT INTO %s (%s,%s) VALUES ($1,%s) ON CONFLICT (%s) DO UPDATE SET %s=EXCLUDED.%s",
+		spec.Table, spec.PrimaryKey, spec.Column, pgAggSubquery(spec, "$2"),
+		spec.PrimaryKey, spec.Column, spec.Column)
+}
+
+// CreateAggregateRebuildSQL implements Dialect; $1 (the subquery filter) and $2
+// (the WHERE) both bind the parent key.
+func (d *PostgreSQLDialect) CreateAggregateRebuildSQL(spec sql.AggregateSpec) string {
+	return fmt.Sprintf("UPDATE %s SET %s=%s WHERE %s=$2",
+		spec.Table, spec.Column, pgAggSubquery(spec, "$1"), spec.PrimaryKey)
+}
+
+// CreateAggregateParentLookupSQL implements Dialect; PostgreSQL binds the child
+// key with $1.
+func (d *PostgreSQLDialect) CreateAggregateParentLookupSQL(spec sql.AggregateSpec) string {
+	return createAggregateParentLookupSQL(spec, "$1")
+}
+
 // CreateSQL implements Dialect.
 //
 // PostgreSQL upserts use ON CONFLICT (<pk>) DO UPDATE SET col = EXCLUDED.col,

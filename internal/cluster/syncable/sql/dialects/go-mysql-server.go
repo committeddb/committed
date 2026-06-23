@@ -34,6 +34,22 @@ func (d *GoMySQLServerDialect) CreateClearSQL(config *sql.Config, columns []stri
 	return (&MySQLDialect{}).CreateClearSQL(config, columns)
 }
 
+func (d *GoMySQLServerDialect) CreateAggregateSidecarDDL(spec sql.AggregateSpec) string {
+	return (&MySQLDialect{}).CreateAggregateSidecarDDL(spec)
+}
+
+func (d *GoMySQLServerDialect) CreateAggregateMaterializeSQL(spec sql.AggregateSpec) string {
+	return (&MySQLDialect{}).CreateAggregateMaterializeSQL(spec)
+}
+
+func (d *GoMySQLServerDialect) CreateAggregateRebuildSQL(spec sql.AggregateSpec) string {
+	return (&MySQLDialect{}).CreateAggregateRebuildSQL(spec)
+}
+
+func (d *GoMySQLServerDialect) CreateAggregateParentLookupSQL(spec sql.AggregateSpec) string {
+	return (&MySQLDialect{}).CreateAggregateParentLookupSQL(spec)
+}
+
 func (d *GoMySQLServerDialect) Open(connectionString string) (*gosql.DB, error) {
 	conn, err := d.Driver.OpenConnector(connectionString)
 	if err != nil {

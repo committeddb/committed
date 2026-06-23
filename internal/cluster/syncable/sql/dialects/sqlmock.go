@@ -43,6 +43,25 @@ func (d *SQLMockDialect) CreateClearSQL(c *sql.Config, columns []string) string 
 	return createClearSQL(c, columns, "?")
 }
 
+// The aggregate builders mirror MySQL (the dialect the mock stands in for); the
+// projection unit tests assert exec/prepare SQL through this same dialect, with
+// real-database behavior validated against PostgreSQL in the docker tests.
+func (d *SQLMockDialect) CreateAggregateSidecarDDL(spec sql.AggregateSpec) string {
+	return (&MySQLDialect{}).CreateAggregateSidecarDDL(spec)
+}
+
+func (d *SQLMockDialect) CreateAggregateMaterializeSQL(spec sql.AggregateSpec) string {
+	return (&MySQLDialect{}).CreateAggregateMaterializeSQL(spec)
+}
+
+func (d *SQLMockDialect) CreateAggregateRebuildSQL(spec sql.AggregateSpec) string {
+	return (&MySQLDialect{}).CreateAggregateRebuildSQL(spec)
+}
+
+func (d *SQLMockDialect) CreateAggregateParentLookupSQL(spec sql.AggregateSpec) string {
+	return (&MySQLDialect{}).CreateAggregateParentLookupSQL(spec)
+}
+
 func (d *SQLMockDialect) CreateSQL(config *sql.Config) string {
 	var sql strings.Builder
 

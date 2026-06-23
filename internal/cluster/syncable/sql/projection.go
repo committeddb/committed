@@ -67,29 +67,73 @@ type ProjectionRule struct {
 	Set  []ProjectionSet
 }
 
-// onDelete behaviors for a projection source: delete-row drops the folded row
-// (the spine source); clear NULLs the columns this source owns but keeps the row
-// (a contributor); ignore drops the delete entirely.
+// onDelete behaviors for a projection source. The first three are for rule
+// (scalar-fold) sources: delete-row drops the folded row (the spine source);
+// clear NULLs the columns this source owns but keeps the row (a contributor);
+// ignore drops the delete entirely. remove-from-aggregate is for an aggregate
+// (collection-fold) source: it removes the deleted child's element from the
+// parent's array column, leaving the row.
 const (
-	onDeleteRow    = "delete-row"
-	onDeleteClear  = "clear"
-	onDeleteIgnore = "ignore"
+	onDeleteRow                 = "delete-row"
+	onDeleteClear               = "clear"
+	onDeleteIgnore              = "ignore"
+	onDeleteRemoveFromAggregate = "remove-from-aggregate"
 )
 
-// ProjectionSource is one input topic of a projection: the rules that fold its
-// events into the shared row, the keyPath that correlates them by the shared
-// aggregate key, and what its delete does to that row. The topic is the
-// discriminator — events of other topics never reach this source's rules.
+// elementKeyType values for an aggregate's elementKey. The sidecar always
+// stores the key as text (so binding never mismatches a typed column); this
+// flag only chooses how the array orders: "number" sorts 1,2,…,10 (numeric
+// cast), "text" sorts lexically 1,10,2. Default is text.
+const (
+	elementKeyTypeText   = "text"
+	elementKeyTypeNumber = "number"
+)
+
+// ProjectionElementField is one field of an aggregate's stored per-child
+// object: Field is the output JSON key, From a jsonpath into the child payload.
+// It is an array-of-tables (not an inline map) for the same reason jsonpaths
+// live in values elsewhere — viper lowercases map keys, which would silently
+// corrupt a camelCase Field name.
+type ProjectionElementField struct {
+	Field string `mapstructure:"field"`
+	From  string `mapstructure:"from"`
+}
+
+// ProjectionAggregate folds a source's child entities into one JSON-array
+// column on the parent row. Column is the array column; Element is the per-child
+// object to store; ElementKey is a jsonpath to each child's identity within the
+// array (its sort key, and what makes a re-delivered child replace rather than
+// duplicate). ElementKeyType ("text" or "number") chooses lexical vs numeric
+// ordering. The array is materialized from a sidecar table (one row per child),
+// so it is a pure function of the child set and a delete — which carries only
+// the child Key — removes exactly that child's element.
+type ProjectionAggregate struct {
+	Column         string
+	Element        []ProjectionElementField
+	ElementKey     string
+	ElementKeyType string
+}
+
+// ProjectionSource is one input of a projection. The topic is the discriminator
+// — events of other topics never reach this source. A source folds its events
+// either as scalar columns (Rules) or as one collection column (Aggregate),
+// never both. When, if set, restricts which of the topic's events this source
+// consumes, so several sources can split one topic into different columns (e.g.
+// principals where category=actor into top_cast, category=director into
+// directors); an empty When consumes every event of the topic.
 //
-// KeyPath is the jsonpath that locates the entity key in this source's event
-// payload; the key binds the primary-key column of every rule upsert. Defaults
-// to $.<primaryKey>. The projected key must equal the entity's log Key for
-// delete Actuals to remove/clear the right row.
+// KeyPath is the jsonpath that locates the correlation key in this source's
+// event payload — for a rule source it binds the primary-key column of every
+// upsert; for an aggregate source it picks the parent row a child folds into.
+// Defaults to $.<primaryKey>. The projected key must equal the entity's log Key
+// for a rule source's delete Actuals to remove/clear the right row.
 type ProjectionSource struct {
-	Topic    string
-	KeyPath  string
-	OnDelete string
-	Rules    []ProjectionRule
+	Topic     string
+	KeyPath   string
+	OnDelete  string
+	When      []WhenClause
+	Rules     []ProjectionRule
+	Aggregate *ProjectionAggregate
 }
 
 // ProjectionConfig declares a stateful fold from one or more source topics into
@@ -122,10 +166,17 @@ func (c *ProjectionConfig) applyDefaults() {
 	for i := range c.Sources {
 		s := &c.Sources[i]
 		if s.OnDelete == "" {
-			s.OnDelete = onDeleteRow // back-compat: a delete drops the row
+			if s.Aggregate != nil {
+				s.OnDelete = onDeleteRemoveFromAggregate // a child delete leaves the row
+			} else {
+				s.OnDelete = onDeleteRow // back-compat: a delete drops the row
+			}
 		}
 		if s.KeyPath == "" && c.PrimaryKey != "" {
 			s.KeyPath = "$." + c.PrimaryKey
+		}
+		if s.Aggregate != nil && s.Aggregate.ElementKeyType == "" {
+			s.Aggregate.ElementKeyType = elementKeyTypeText
 		}
 	}
 }
@@ -192,41 +243,45 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 	if len(c.Sources) == 0 {
 		return fmt.Errorf("at least one source (a topic and its rules) is required")
 	}
-	topics := make(map[string]bool, len(c.Sources))
+	// owner records which source writes each column. A column is owned by one
+	// source (so two sources never clobber each other); the same source claiming
+	// a column across its rules is fine. This — not topic uniqueness — is the
+	// real guard, which is what lets several sources split one topic into
+	// different columns (filtered aggregates).
+	owner := make(map[string]int)
 	for si, src := range c.Sources {
-		// "src %q" prefixes scope rule errors to their source for a multi-source
-		// config; the original single-source error substrings are preserved
-		// inside (the parser tests match on substrings).
+		// "source N (topic X)" prefixes scope errors to their source for a
+		// multi-source config; the original single-source error substrings are
+		// preserved inside (the parser tests match on substrings).
 		where := fmt.Sprintf("source %d (topic %q)", si+1, src.Topic)
 		if src.Topic == "" {
 			return fmt.Errorf("source %d: topic is required", si+1)
 		}
-		if topics[src.Topic] {
-			return fmt.Errorf("%s: topic declared twice (one source per topic)", where)
+		hasRules := len(src.Rules) > 0
+		hasAgg := src.Aggregate != nil
+		if hasRules == hasAgg {
+			return fmt.Errorf("%s: a source needs either rules or an aggregate (not both, not neither)", where)
 		}
-		topics[src.Topic] = true
+		// Source-level when is an optional filter (empty consumes the whole
+		// topic); its clauses are validated like a rule's.
+		if err := validateWhenClauses(src.When, where); err != nil {
+			return err
+		}
+		if hasAgg {
+			if err := validateAggregate(c, src, where, declared, owner, si); err != nil {
+				return err
+			}
+			continue
+		}
 		switch src.OnDelete {
 		case onDeleteRow, onDeleteClear, onDeleteIgnore:
 		default:
 			return fmt.Errorf("%s: onDelete %q is invalid (want %q, %q, or %q)", where, src.OnDelete, onDeleteRow, onDeleteClear, onDeleteIgnore)
 		}
-		if len(src.Rules) == 0 {
-			return fmt.Errorf("%s: at least one rule is required", where)
-		}
 		ownsColumn := false
 		for i, r := range src.Rules {
-			// An empty When is allowed: the rule matches every event of its
-			// source (the topic discriminates). Present clauses are validated.
-			for _, cl := range r.When {
-				if cl.Path == "" {
-					return fmt.Errorf("%s rule %d: when entry needs a path", where, i+1)
-				}
-				if (cl.Equals != nil) == cl.Null {
-					return fmt.Errorf("%s rule %d: when entry for %q: exactly one of equals or null is required", where, i+1, cl.Path)
-				}
-				if cl.Equals != nil && !isScalar(cl.Equals) {
-					return fmt.Errorf("%s rule %d: when entry for %q: equals must be a scalar literal, got %T", where, i+1, cl.Path, cl.Equals)
-				}
+			if err := validateWhenClauses(r.When, fmt.Sprintf("%s rule %d", where, i+1)); err != nil {
+				return err
 			}
 			if len(r.Set) == 0 {
 				return fmt.Errorf("%s rule %d: set is required", where, i+1)
@@ -258,12 +313,94 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 					return fmt.Errorf("%s rule %d sets column %q twice (within a rule each column is set once; across rules the last matching rule wins)", where, i+1, s.Column)
 				}
 				seen[s.Column] = true
+				if err := claimColumn(owner, s.Column, si, where); err != nil {
+					return err
+				}
 				ownsColumn = true
 			}
 		}
 		if src.OnDelete == onDeleteClear && !ownsColumn {
 			return fmt.Errorf("%s: onDelete = %q needs at least one column set by its rules to clear", where, onDeleteClear)
 		}
+	}
+	return nil
+}
+
+// validateWhenClauses checks a set of match clauses (a rule's or a source's).
+// An empty set is allowed — it matches every event of the source's topic (the
+// topic is the discriminator). where prefixes each error to its location.
+func validateWhenClauses(clauses []WhenClause, where string) error {
+	for _, cl := range clauses {
+		if cl.Path == "" {
+			return fmt.Errorf("%s: when entry needs a path", where)
+		}
+		if (cl.Equals != nil) == cl.Null {
+			return fmt.Errorf("%s: when entry for %q: exactly one of equals or null is required", where, cl.Path)
+		}
+		if cl.Equals != nil && !isScalar(cl.Equals) {
+			return fmt.Errorf("%s: when entry for %q: equals must be a scalar literal, got %T", where, cl.Path, cl.Equals)
+		}
+	}
+	return nil
+}
+
+// claimColumn records that source si writes col, rejecting a second source that
+// writes the same column. The same source re-claiming a column (its rules set
+// it more than once, last-write-wins) is fine.
+func claimColumn(owner map[string]int, col string, si int, where string) error {
+	if prev, ok := owner[col]; ok && prev != si {
+		return fmt.Errorf("%s: column %q is already written by source %d (each column is owned by one source)", where, col, prev+1)
+	}
+	owner[col] = si
+	return nil
+}
+
+// validateAggregate checks one aggregate source: a valid delete behavior, a
+// declared non-primary-key column it solely owns, a non-empty elementKey and a
+// known elementKeyType, and at least one element field (each with a name and a
+// from jsonpath, names distinct).
+func validateAggregate(c *ProjectionConfig, src ProjectionSource, where string, declared map[string]bool, owner map[string]int, si int) error {
+	ag := src.Aggregate
+	switch src.OnDelete {
+	case onDeleteRemoveFromAggregate, onDeleteIgnore:
+	default:
+		return fmt.Errorf("%s: onDelete %q is invalid for an aggregate source (want %q or %q)", where, src.OnDelete, onDeleteRemoveFromAggregate, onDeleteIgnore)
+	}
+	if ag.Column == "" {
+		return fmt.Errorf("%s: aggregate column is required", where)
+	}
+	if !declared[ag.Column] {
+		return fmt.Errorf("%s: aggregate column %q is not a declared column", where, ag.Column)
+	}
+	if ag.Column == c.PrimaryKey {
+		return fmt.Errorf("%s: aggregate column %q may not be the primary-key column", where, ag.Column)
+	}
+	if err := claimColumn(owner, ag.Column, si, where); err != nil {
+		return err
+	}
+	if ag.ElementKey == "" {
+		return fmt.Errorf("%s: aggregate elementKey is required", where)
+	}
+	switch ag.ElementKeyType {
+	case elementKeyTypeText, elementKeyTypeNumber:
+	default:
+		return fmt.Errorf("%s: aggregate elementKeyType %q is invalid (want %q or %q)", where, ag.ElementKeyType, elementKeyTypeText, elementKeyTypeNumber)
+	}
+	if len(ag.Element) == 0 {
+		return fmt.Errorf("%s: aggregate element needs at least one field", where)
+	}
+	seen := make(map[string]bool, len(ag.Element))
+	for _, f := range ag.Element {
+		if f.Field == "" {
+			return fmt.Errorf("%s: aggregate element field with empty name", where)
+		}
+		if f.From == "" {
+			return fmt.Errorf("%s: aggregate element field %q needs a from jsonpath", where, f.Field)
+		}
+		if seen[f.Field] {
+			return fmt.Errorf("%s: aggregate element field %q declared twice", where, f.Field)
+		}
+		seen[f.Field] = true
 	}
 	return nil
 }
@@ -297,11 +434,12 @@ type Projection struct {
 	// layer).
 	name    string
 	metrics *metrics.Metrics
-	// sources is keyed by topic id: each holds that source's prepared rule
-	// upserts, keyPath, onDelete behavior, and (for onDelete=clear) a prepared
-	// column-clear UPDATE. The topic is the discriminator — an entity routes to
-	// its source's rules, so two sources fold into one row without clobbering.
-	sources map[string]*projectionSource
+	// sources is keyed by topic id to the sources that consume it. The topic is
+	// the discriminator; an entity routes to every source on its topic, and each
+	// source's When (and, for rule sources, per-rule when) decides whether it
+	// folds the event. Several sources may share a topic — that is how one topic
+	// splits into different columns (filtered aggregates).
+	sources map[string][]*projectionSource
 	// delete is the shared prepared DELETE-by-key. It serves sources whose
 	// onDelete is "delete-row" (and so any RTBF delete on such a topic). Always
 	// prepared: primaryKey is mandatory. Self-healing closure: if an entity's
@@ -310,16 +448,78 @@ type Projection struct {
 	delete *Delete
 }
 
-// projectionSource is the prepared, per-topic runtime of one ProjectionSource.
+// projectionSource is the prepared runtime of one ProjectionSource. Exactly one
+// of rules (a scalar-fold source) or agg (a collection-fold source) is set.
 type projectionSource struct {
 	topic    string
 	keyPath  string
 	onDelete string
-	rules    []*projectionStmt
+	// when is the source-level filter (empty = consume every event of the
+	// topic), evaluated on upsert before the rules/aggregate apply.
+	when  []WhenClause
+	rules []*projectionStmt
 	// clear is the prepared "UPDATE … SET ownedCols = NULL WHERE pk = ?", set
 	// only when onDelete == "clear".
 	clear    *gosql.Stmt
 	clearSQL string
+	// agg is the prepared aggregate runtime, set only for a collection-fold
+	// source (nil for a rule source).
+	agg *aggregateRuntime
+}
+
+// aggregateRuntime is the prepared runtime of one ProjectionAggregate: the
+// element shape plus the statements that maintain the sidecar and re-materialize
+// the parent's array column from it.
+type aggregateRuntime struct {
+	column     string
+	elementKey string
+	fields     []ProjectionElementField
+	sidecar    string
+
+	upsertSidecar    *gosql.Stmt
+	upsertSidecarSQL string
+	deleteSidecar    *gosql.Stmt
+	deleteSidecarSQL string
+	materialize      *gosql.Stmt
+	materializeSQL   string
+	rebuild          *gosql.Stmt
+	rebuildSQL       string
+	lookup           *gosql.Stmt
+	lookupSQL        string
+}
+
+// sidecarName is the backing table for an aggregate column: <table>__<column>.
+// One per aggregate source; teardown drops them alongside the projection table.
+func sidecarName(table, column string) string {
+	return table + "__" + column
+}
+
+// aggregateSpec builds the dialect-facing spec for one aggregate source.
+func (c *ProjectionConfig) aggregateSpec(ag *ProjectionAggregate) AggregateSpec {
+	return AggregateSpec{
+		Table:       c.Table,
+		PrimaryKey:  c.PrimaryKey,
+		Column:      ag.Column,
+		Sidecar:     sidecarName(c.Table, ag.Column),
+		NumericSort: ag.ElementKeyType == elementKeyTypeNumber,
+	}
+}
+
+// sidecarConfig synthesizes the plain Config whose CreateSQL / CreateDeleteSQL
+// give the sidecar's upsert and delete — both ordinary key-on-conflict shapes,
+// so they reuse the dialect's existing builders (and MySQL arg-doubling) rather
+// than adding sidecar-specific dialect surface.
+func sidecarConfig(sidecar string) *Config {
+	return &Config{
+		Table:      sidecar,
+		PrimaryKey: SidecarChildKey,
+		Mappings: []Mapping{
+			{Column: SidecarChildKey},
+			{Column: SidecarParentKey},
+			{Column: SidecarElementKey},
+			{Column: SidecarElement},
+		},
+	}
 }
 
 // projectionStmt pairs one rule with its prepared upsert.
@@ -373,6 +573,19 @@ func (p *Projection) materializedSchema() SyncableSchema {
 // name + DB handle), which is what the delete/rebuild paths rely on. It never
 // touches prepared statements or the connection pool; call Close for those.
 func (p *Projection) Teardown() error {
+	p.config.applyDefaults()
+	// Drop each aggregate source's sidecar, then the projection table. Order is
+	// not load-bearing (DROP IF EXISTS is independent), but dropping sidecars
+	// first keeps teardown's footprint a strict subset of Init's.
+	for _, src := range p.config.Sources {
+		if src.Aggregate == nil {
+			continue
+		}
+		drop := p.dialect.DropDDL(&Config{Table: sidecarName(p.config.Table, src.Aggregate.Column)})
+		if _, err := p.db.Exec(drop); err != nil {
+			return fmt.Errorf("teardown [%s]: %w", drop, err)
+		}
+	}
 	dropString := p.dialect.DropDDL(p.config.ddlConfig())
 	if _, err := p.db.Exec(dropString); err != nil {
 		return fmt.Errorf("teardown [%s]: %w", dropString, err)
@@ -395,12 +608,21 @@ func (p *Projection) Init() error {
 		return fmt.Errorf("ddl [%s]: %w", ddlString, err)
 	}
 
-	// Prepare per-source rule upserts (and any clear) first, then the shared
-	// row-delete last — the same prepare order as the original single-source
-	// projection.
-	p.sources = make(map[string]*projectionSource, len(p.config.Sources))
+	// Prepare per-source rule upserts (and any clear) or aggregate statements
+	// first, then the shared row-delete last — the same prepare order as the
+	// original single-source projection.
+	p.sources = make(map[string][]*projectionSource, len(p.config.Sources))
 	for si, src := range p.config.Sources {
-		ps := &projectionSource{topic: src.Topic, keyPath: src.KeyPath, onDelete: src.OnDelete}
+		ps := &projectionSource{topic: src.Topic, keyPath: src.KeyPath, onDelete: src.OnDelete, when: src.When}
+		if src.Aggregate != nil {
+			agg, err := p.initAggregate(si, src)
+			if err != nil {
+				return err
+			}
+			ps.agg = agg
+			p.sources[src.Topic] = append(p.sources[src.Topic], ps)
+			continue
+		}
 		for i, r := range src.Rules {
 			sqlString := p.dialect.CreateSQL(p.config.ruleConfig(r))
 			stmt, err := p.db.Prepare(sqlString)
@@ -417,7 +639,7 @@ func (p *Projection) Init() error {
 			}
 			ps.clear = clearStmt
 		}
-		p.sources[src.Topic] = ps
+		p.sources[src.Topic] = append(p.sources[src.Topic], ps)
 	}
 
 	// Shared row-delete (onDelete=delete-row, and any RTBF delete on such a topic).
@@ -429,6 +651,61 @@ func (p *Projection) Init() error {
 	p.delete = &Delete{deleteString, deleteStmt}
 
 	return nil
+}
+
+// initAggregate creates one aggregate source's sidecar table and prepares the
+// five statements that maintain it and re-materialize the parent column: the
+// sidecar upsert and delete (ordinary key shapes, reusing the dialect's
+// CreateSQL / CreateDeleteSQL), the parent-key lookup (read back a deleted
+// child's parent), and the materialize / rebuild (re-aggregate the parent's
+// array from the sidecar on upsert / delete).
+func (p *Projection) initAggregate(si int, src ProjectionSource) (*aggregateRuntime, error) {
+	ag := src.Aggregate
+	spec := p.config.aggregateSpec(ag)
+	where := fmt.Sprintf("source %d (topic %q) aggregate %q", si+1, src.Topic, ag.Column)
+
+	ddl := p.dialect.CreateAggregateSidecarDDL(spec)
+	if _, err := p.db.Exec(ddl); err != nil {
+		return nil, fmt.Errorf("%s sidecar ddl [%s]: %w", where, ddl, err)
+	}
+
+	rt := &aggregateRuntime{
+		column:     ag.Column,
+		elementKey: ag.ElementKey,
+		fields:     ag.Element,
+		sidecar:    spec.Sidecar,
+	}
+	scConfig := sidecarConfig(spec.Sidecar)
+	prepare := func(label, sqlString string) (*gosql.Stmt, error) {
+		stmt, err := p.db.Prepare(sqlString)
+		if err != nil {
+			return nil, fmt.Errorf("%s prepare %s [%s]: %w", where, label, sqlString, err)
+		}
+		return stmt, nil
+	}
+
+	var err error
+	rt.upsertSidecarSQL = p.dialect.CreateSQL(scConfig)
+	if rt.upsertSidecar, err = prepare("sidecar upsert", rt.upsertSidecarSQL); err != nil {
+		return nil, err
+	}
+	rt.deleteSidecarSQL = p.dialect.CreateDeleteSQL(scConfig)
+	if rt.deleteSidecar, err = prepare("sidecar delete", rt.deleteSidecarSQL); err != nil {
+		return nil, err
+	}
+	rt.lookupSQL = p.dialect.CreateAggregateParentLookupSQL(spec)
+	if rt.lookup, err = prepare("parent lookup", rt.lookupSQL); err != nil {
+		return nil, err
+	}
+	rt.materializeSQL = p.dialect.CreateAggregateMaterializeSQL(spec)
+	if rt.materialize, err = prepare("materialize", rt.materializeSQL); err != nil {
+		return nil, err
+	}
+	rt.rebuildSQL = p.dialect.CreateAggregateRebuildSQL(spec)
+	if rt.rebuild, err = prepare("rebuild", rt.rebuildSQL); err != nil {
+		return nil, err
+	}
+	return rt, nil
 }
 
 func (p *Projection) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldSnapshot, error) {
@@ -451,13 +728,11 @@ func (p *Projection) Sync(ctx context.Context, a *cluster.Actual) (cluster.Shoul
 	}
 
 	for _, e := range a.Entities {
-		src, ok := p.sources[e.Type.ID]
-		if !ok {
-			continue
-		}
-		if err := p.applyEntity(ctx, tx, src, e); err != nil {
-			_ = tx.Rollback()
-			return false, err
+		for _, src := range p.sources[e.Type.ID] {
+			if err := p.applyEntity(ctx, tx, src, e); err != nil {
+				_ = tx.Rollback()
+				return false, err
+			}
 		}
 	}
 
@@ -482,13 +757,11 @@ func (p *Projection) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool,
 
 	for _, a := range as {
 		for _, e := range a.Entities {
-			src, ok := p.sources[e.Type.ID]
-			if !ok {
-				continue
-			}
-			if err := p.applyEntity(ctx, tx, src, e); err != nil {
-				_ = tx.Rollback()
-				return false, err
+			for _, src := range p.sources[e.Type.ID] {
+				if err := p.applyEntity(ctx, tx, src, e); err != nil {
+					_ = tx.Rollback()
+					return false, err
+				}
 			}
 		}
 	}
@@ -514,12 +787,34 @@ func (p *Projection) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool,
 // rather than retries. The caller owns the transaction.
 func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *projectionSource, e *cluster.Entity) error {
 	if e.IsDelete() {
+		// A delete carries no payload, so the source-level when cannot be
+		// evaluated — route it to every source on the topic. An aggregate's
+		// remove is keyed by the child Key in its sidecar, so it self-selects:
+		// the one source that folded this child removes its element, the others
+		// are no-ops. (For a split by when, this is how the right column shrinks.)
+		if src.agg != nil {
+			if src.onDelete == onDeleteIgnore {
+				return nil
+			}
+			return p.removeFromAggregate(ctx, tx, src, e)
+		}
 		return p.applyDelete(ctx, tx, src, e)
 	}
 
 	var jsonData any
 	if err := json.Unmarshal(e.Data, &jsonData); err != nil {
 		return cluster.Permanent(fmt.Errorf("[sql-projection.apply] unmarshal entity data: %w", err))
+	}
+
+	// Source-level when prefilter: a source consumes only the events it matches,
+	// so several sources can split one topic into different columns. An empty
+	// when matches every event of the topic.
+	if !matchWhen(src.when, jsonData) {
+		return nil
+	}
+
+	if src.agg != nil {
+		return p.applyAggregate(ctx, tx, src, jsonData, e)
 	}
 
 	var matched []*projectionStmt
@@ -607,19 +902,128 @@ func (p *Projection) applyDelete(ctx context.Context, tx *gosql.Tx, src *project
 	return nil
 }
 
+// applyAggregate folds one child upsert into its parent's array column. It
+// records the child in the sidecar (keyed by the child's entity Key, so a
+// re-delivered child replaces rather than duplicates) and then re-materializes
+// the parent's column from the sidecar — an upsert, so a child arriving before
+// its spine lands the collection on a fresh partial row. The parent key binds
+// both materialize placeholders.
+func (p *Projection) applyAggregate(ctx context.Context, tx *gosql.Tx, src *projectionSource, jsonData any, e *cluster.Entity) error {
+	ag := src.agg
+
+	parentKey, err := jsonpath.Get(src.keyPath, jsonData)
+	if err != nil {
+		return cluster.Permanent(fmt.Errorf("[sql-projection.aggregate] keyPath [%s]: %w", src.keyPath, err))
+	}
+	elementKey, err := jsonpath.Get(ag.elementKey, jsonData)
+	if err != nil {
+		return cluster.Permanent(fmt.Errorf("[sql-projection.aggregate] elementKey [%s]: %w", ag.elementKey, err))
+	}
+	element := make(map[string]any, len(ag.fields))
+	for _, f := range ag.fields {
+		v, err := jsonpath.Get(f.From, jsonData)
+		if err != nil {
+			return cluster.Permanent(fmt.Errorf("[sql-projection.aggregate] element field %q from [%s]: %w", f.Field, f.From, err))
+		}
+		element[f.Field] = v
+	}
+	elementJSON, err := json.Marshal(element)
+	if err != nil {
+		return cluster.Permanent(fmt.Errorf("[sql-projection.aggregate] marshal element: %w", err))
+	}
+
+	// Sidecar columns are text/JSON; bind the keys as strings (elementKey is
+	// stored as text and ordered with an optional numeric cast) so a numeric
+	// jsonpath value never mismatches the column type.
+	pk := bindable(parentKey)
+	scValues := []any{string(e.Key), pk, keyString(elementKey), string(elementJSON)}
+	if err := p.aggExec(ctx, tx, ag.upsertSidecar, ag.upsertSidecarSQL, p.dialect.BindArgs(scValues)...); err != nil {
+		return err
+	}
+	// Both materialize placeholders bind the parent key (insert value + subquery
+	// filter); the dialect repeats the placeholder so the arg shape is uniform.
+	return p.aggExec(ctx, tx, ag.materialize, ag.materializeSQL, pk, pk)
+}
+
+// removeFromAggregate honors a child delete: recover the child's parent from the
+// sidecar (a no-op if this source never folded the child — which is how a split
+// self-selects), delete the sidecar row, and rebuild the parent's array from
+// what remains. The rebuild is an UPDATE, so emptying an absent parent is a
+// no-op, never a ghost row.
+func (p *Projection) removeFromAggregate(ctx context.Context, tx *gosql.Tx, src *projectionSource, e *cluster.Entity) error {
+	ag := src.agg
+	childKey := string(e.Key)
+
+	var parentKey string
+	row := tx.StmtContext(ctx, ag.lookup).QueryRowContext(ctx, childKey)
+	switch err := row.Scan(&parentKey); err {
+	case nil:
+	case gosql.ErrNoRows:
+		return nil // this source never folded the child — nothing to remove
+	default:
+		wrapped := fmt.Errorf("[sql-projection.aggregate] exec [%s]: %w", ag.lookupSQL, err)
+		if p.dialect.IsPermanent(err) {
+			return cluster.Permanent(wrapped)
+		}
+		return wrapped
+	}
+
+	if err := p.aggExec(ctx, tx, ag.deleteSidecar, ag.deleteSidecarSQL, childKey); err != nil {
+		return err
+	}
+	return p.aggExec(ctx, tx, ag.rebuild, ag.rebuildSQL, parentKey, parentKey)
+}
+
+// aggExec runs one prepared aggregate statement, classifying a permanent error
+// the same way the rule path does.
+func (p *Projection) aggExec(ctx context.Context, tx *gosql.Tx, stmt *gosql.Stmt, sqlStr string, args ...any) error {
+	if _, err := tx.StmtContext(ctx, stmt).ExecContext(ctx, args...); err != nil {
+		wrapped := fmt.Errorf("[sql-projection.aggregate] exec [%s]: %w", sqlStr, err)
+		if p.dialect.IsPermanent(err) {
+			return cluster.Permanent(wrapped)
+		}
+		return wrapped
+	}
+	return nil
+}
+
+// keyString renders a correlation/element key as the text the sidecar stores. A
+// string passes through; nil is empty; a JSON number (float64) prints without a
+// decimal point for integral values (ordering 1 → "1", not "1.000000").
+func keyString(v any) string {
+	switch s := v.(type) {
+	case string:
+		return s
+	case nil:
+		return ""
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+
 func (p *Projection) Close() error {
 	// Close every prepared statement; report the first error but
 	// always attempt the rest so nothing leaks when one close fails.
 	var err error
-	for _, src := range p.sources {
-		for _, r := range src.rules {
-			if cerr := r.Stmt.Close(); err == nil {
+	closeStmt := func(s *gosql.Stmt) {
+		if s != nil {
+			if cerr := s.Close(); err == nil {
 				err = cerr
 			}
 		}
-		if src.clear != nil {
-			if cerr := src.clear.Close(); err == nil {
-				err = cerr
+	}
+	for _, list := range p.sources {
+		for _, src := range list {
+			for _, r := range src.rules {
+				closeStmt(r.Stmt)
+			}
+			closeStmt(src.clear)
+			if src.agg != nil {
+				closeStmt(src.agg.upsertSidecar)
+				closeStmt(src.agg.deleteSidecar)
+				closeStmt(src.agg.lookup)
+				closeStmt(src.agg.materialize)
+				closeStmt(src.agg.rebuild)
 			}
 		}
 	}

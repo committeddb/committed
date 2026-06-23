@@ -44,6 +44,37 @@ func dropDDL(config *sql.Config) string {
 	return fmt.Sprintf("DROP TABLE IF EXISTS %s;", config.Table)
 }
 
+// aggregateSidecarConfig synthesizes the plain Config that createDDL /
+// CreateDDL turn into the aggregate sidecar's CREATE TABLE: child_key (PK),
+// parent_key, element_key — all the dialect's key type — and element, the
+// dialect's JSON type. A secondary index on parent_key keeps the per-parent
+// re-aggregation (the materialize / rebuild subquery) from scanning the whole
+// sidecar. Reusing the DDL builder this way keeps the sidecar shape identical
+// to every other table the dialect creates.
+func aggregateSidecarConfig(spec sql.AggregateSpec, jsonType, keyType string) *sql.Config {
+	return &sql.Config{
+		Table:      spec.Sidecar,
+		PrimaryKey: sql.SidecarChildKey,
+		Mappings: []sql.Mapping{
+			{Column: sql.SidecarChildKey, SQLType: keyType},
+			{Column: sql.SidecarParentKey, SQLType: keyType},
+			{Column: sql.SidecarElementKey, SQLType: keyType},
+			{Column: sql.SidecarElement, SQLType: jsonType},
+		},
+		Indexes: []sql.Index{{IndexName: spec.Sidecar + "_parent", ColumnNames: sql.SidecarParentKey}},
+	}
+}
+
+// createAggregateParentLookupSQL builds `SELECT parent_key FROM <sidecar> WHERE
+// child_key = <placeholder>`, the delete-path recovery of a removed child's
+// parent. The placeholder is the only dialect-specific bit; the single bound
+// argument is the child Key. Shared so the shape stays identical across
+// dialects.
+func createAggregateParentLookupSQL(spec sql.AggregateSpec, placeholder string) string {
+	return fmt.Sprintf("SELECT %s FROM %s WHERE %s = %s",
+		sql.SidecarParentKey, spec.Sidecar, sql.SidecarChildKey, placeholder)
+}
+
 func createDDL(config *sql.Config) string {
 	var ddl strings.Builder
 	fmt.Fprintf(&ddl, "CREATE TABLE IF NOT EXISTS %s (", config.Table)

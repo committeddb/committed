@@ -34,6 +34,52 @@ func (d *MySQLDialect) CreateClearSQL(c *sql.Config, columns []string) string {
 	return createClearSQL(c, columns, "?")
 }
 
+// mysqlAggSubquery re-aggregates one parent's children into a JSON array.
+// JSON_ARRAYAGG ignores ORDER BY, so the rows are ordered in a derived table
+// first — MySQL 8 honors that derived-table order for the aggregate in
+// practice, but it is not guaranteed by the spec, so MySQL aggregate ordering
+// is best-effort (PostgreSQL is the supported target for deterministic order;
+// see README § Aggregate columns). COALESCE(... , JSON_ARRAY()) makes an empty
+// set yield [] not NULL. <ph> binds the parent key.
+func mysqlAggSubquery(spec sql.AggregateSpec, ph string) string {
+	sort := sql.SidecarElementKey
+	if spec.NumericSort {
+		sort = fmt.Sprintf("CAST(%s AS DECIMAL)", sql.SidecarElementKey)
+	}
+	return fmt.Sprintf(
+		"(SELECT COALESCE(JSON_ARRAYAGG(%s), JSON_ARRAY()) FROM (SELECT %s,%s FROM %s WHERE %s = %s ORDER BY %s) AS ordered)",
+		sql.SidecarElement, sql.SidecarElement, sql.SidecarElementKey, spec.Sidecar, sql.SidecarParentKey, ph, sort)
+}
+
+// CreateAggregateSidecarDDL implements Dialect; MySQL stores the element as
+// JSON and the keys as VARCHAR(255) (a bounded type so child_key can be a
+// PRIMARY KEY).
+func (d *MySQLDialect) CreateAggregateSidecarDDL(spec sql.AggregateSpec) string {
+	return createDDL(aggregateSidecarConfig(spec, "JSON", "VARCHAR(255)"))
+}
+
+// CreateAggregateMaterializeSQL implements Dialect; both ? placeholders bind
+// the parent key (the inserted row's key and the subquery filter).
+func (d *MySQLDialect) CreateAggregateMaterializeSQL(spec sql.AggregateSpec) string {
+	return fmt.Sprintf(
+		"INSERT INTO %s (%s,%s) VALUES (?,%s) ON DUPLICATE KEY UPDATE %s=VALUES(%s)",
+		spec.Table, spec.PrimaryKey, spec.Column, mysqlAggSubquery(spec, "?"),
+		spec.Column, spec.Column)
+}
+
+// CreateAggregateRebuildSQL implements Dialect; both ? placeholders bind the
+// parent key (the subquery filter and the WHERE).
+func (d *MySQLDialect) CreateAggregateRebuildSQL(spec sql.AggregateSpec) string {
+	return fmt.Sprintf("UPDATE %s SET %s=%s WHERE %s=?",
+		spec.Table, spec.Column, mysqlAggSubquery(spec, "?"), spec.PrimaryKey)
+}
+
+// CreateAggregateParentLookupSQL implements Dialect; MySQL binds the child key
+// with ?.
+func (d *MySQLDialect) CreateAggregateParentLookupSQL(spec sql.AggregateSpec) string {
+	return createAggregateParentLookupSQL(spec, "?")
+}
+
 // CreateSQL implements Dialect
 func (d *MySQLDialect) CreateSQL(config *sql.Config) string {
 	var sql strings.Builder

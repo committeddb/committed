@@ -451,6 +451,60 @@ are commonly `snapshot`-kind (ingested current-state tables), which fold
 cleanly here — the snapshot-topic misuse warning only fires for a
 single-source projection, where there is genuinely nothing to fold.
 
+**Folding a collection into one column (aggregate).** Some BFF columns are
+*collections*: a movie's `top_cast[]` folds many `principal` rows into one
+JSON array on the movie row. A source declares an `aggregate` block instead
+of `rules`: `column` is the array column, `elementKey` a jsonpath to each
+child's identity within the array (its sort key, and what makes a
+re-delivered child replace rather than duplicate), and `element` an
+array-of-tables naming the per-child object's fields (an array, not an
+inline map, so field names survive byte-exact). `elementKeyType` picks
+`number` (sort 1,2,…,10) or `text` (lexical, the default). A child delete
+removes exactly its element via `onDelete = "remove-from-aggregate"`,
+leaving the row.
+
+Because several sources may share one topic, a source's optional `when`
+filters which of the topic's events it folds — so one topic splits into
+different columns. Here the `principal` topic feeds `top_cast` (actors) and
+`directors` (directors):
+
+```toml
+[[sql-projection.source]]
+topic   = "principal"
+keyPath = "$.tconst"                 # which movie row this child folds into
+when    = [ { path = "$.category", equals = "actor" } ]
+  [sql-projection.source.aggregate]
+  column         = "top_cast"
+  elementKey     = "$.ordering"      # billing order: identity + numeric sort
+  elementKeyType = "number"
+    [[sql-projection.source.aggregate.element]]
+    field = "nconst"
+    from  = "$.nconst"
+    [[sql-projection.source.aggregate.element]]
+    field = "ordering"
+    from  = "$.ordering"
+
+[[sql-projection.source]]
+topic   = "principal"
+keyPath = "$.tconst"
+when    = [ { path = "$.category", equals = "director" } ]
+  [sql-projection.source.aggregate]
+  column     = "directors"
+  elementKey = "$.ordering"
+    [[sql-projection.source.aggregate.element]]
+    field = "nconst"
+    from  = "$.nconst"
+```
+
+Each aggregate column is backed by a `<table>__<column>` sidecar table the
+projection creates and tears down with the projection — one normalized row
+per child, so the array column is a pure `jsonb_agg` of it (deterministic,
+rebuildable from index 0) and a delete — which carries only the child Key —
+finds and removes the right element without the payload. The `read` column
+stays a clean array. Deterministic ordering is a PostgreSQL guarantee;
+MySQL aggregate ordering is best-effort (`JSON_ARRAYAGG` ignores `ORDER
+BY`).
+
 Configure an ingestable that pulls from an external source into the
 log (MySQL example; see `internal/cluster/ingestable/sql/postgres_ingestable.toml`
 for a Postgres logical-replication config):

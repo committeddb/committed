@@ -289,7 +289,7 @@ type = "TEXT"
 		{
 			"no rules",
 			"",
-			"at least one rule is required",
+			"a source needs either rules or an aggregate",
 		},
 	}
 
@@ -464,7 +464,7 @@ set = [ { column = "average_rating", from = "$.average_rating" } ]
 }
 
 // TestParseMultiSourceProjectionErrors covers the multisource-specific
-// validation: an invalid onDelete and a topic declared by two sources.
+// validation: an invalid onDelete and two sources writing one column.
 func TestParseMultiSourceProjectionErrors(t *testing.T) {
 	const head = `
 [sql-projection]
@@ -485,14 +485,143 @@ type = "TEXT"
 			`onDelete "nope" is invalid`,
 		},
 		{
-			"duplicate topic",
+			"two sources write one column",
 			"[[sql-projection.source]]\ntopic = \"a\"\n[[sql-projection.source.rules]]\nset = [ { column = \"v\", from = \"$.v\" } ]\n" +
-				"[[sql-projection.source]]\ntopic = \"a\"\n[[sql-projection.source.rules]]\nset = [ { column = \"v\", from = \"$.v\" } ]\n",
-			"topic declared twice",
+				"[[sql-projection.source]]\ntopic = \"b\"\n[[sql-projection.source.rules]]\nset = [ { column = \"v\", from = \"$.v\" } ]\n",
+			`column "v" is already written by source 1`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			v := readConfig(t, "toml", strings.NewReader(head+tc.sources))
+			_, err := (&sql.ProjectionSyncableParser{}).ParseConfig(v, projectionStorage())
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tc.wantErr)
+		})
+	}
+}
+
+// TestParseAggregateProjection covers the [sql-projection.source.aggregate]
+// decode and the split: two sources share the principal topic, filtered by
+// when, folding into two different array columns. The element is an
+// array-of-tables so its field names survive viper byte-exact.
+func TestParseAggregateProjection(t *testing.T) {
+	const toml = `
+[sql-projection]
+db = "testdb"
+table = "movie_card"
+primaryKey = "tconst"
+
+[[sql-projection.columns]]
+name = "tconst"
+type = "VARCHAR(16)"
+[[sql-projection.columns]]
+name = "top_cast"
+type = "JSONB"
+[[sql-projection.columns]]
+name = "directors"
+type = "JSONB"
+
+[[sql-projection.source]]
+topic = "principal"
+keyPath = "$.tconst"
+when = [ { path = "$.category", equals = "actor" } ]
+[sql-projection.source.aggregate]
+column = "top_cast"
+elementKey = "$.ordering"
+elementKeyType = "number"
+[[sql-projection.source.aggregate.element]]
+field = "nconst"
+from = "$.nconst"
+[[sql-projection.source.aggregate.element]]
+field = "billingOrder"
+from = "$.ordering"
+
+[[sql-projection.source]]
+topic = "principal"
+keyPath = "$.tconst"
+when = [ { path = "$.category", equals = "director" } ]
+[sql-projection.source.aggregate]
+column = "directors"
+elementKey = "$.ordering"
+[[sql-projection.source.aggregate.element]]
+field = "nconst"
+from = "$.nconst"
+`
+	v := readConfig(t, "toml", strings.NewReader(toml))
+	config, err := (&sql.ProjectionSyncableParser{}).ParseConfig(v, projectionStorage())
+	require.NoError(t, err)
+
+	require.Len(t, config.Sources, 2)
+
+	cast := config.Sources[0]
+	require.Equal(t, "principal", cast.Topic)
+	require.Equal(t, []sql.WhenClause{{Path: "$.category", Equals: "actor"}}, cast.When)
+	require.Equal(t, "remove-from-aggregate", cast.OnDelete, "aggregate delete defaults to remove-from-aggregate")
+	require.Nil(t, cast.Rules)
+	require.NotNil(t, cast.Aggregate)
+	require.Equal(t, "top_cast", cast.Aggregate.Column)
+	require.Equal(t, "$.ordering", cast.Aggregate.ElementKey)
+	require.Equal(t, "number", cast.Aggregate.ElementKeyType)
+	require.Equal(t, []sql.ProjectionElementField{
+		{Field: "nconst", From: "$.nconst"},
+		{Field: "billingOrder", From: "$.ordering"}, // case survives viper
+	}, cast.Aggregate.Element)
+
+	dir := config.Sources[1]
+	require.Equal(t, "directors", dir.Aggregate.Column)
+	require.Equal(t, "text", dir.Aggregate.ElementKeyType, "elementKeyType defaults to text")
+}
+
+// TestParseAggregateProjectionErrors covers aggregate-specific validation.
+func TestParseAggregateProjectionErrors(t *testing.T) {
+	const head = `
+[sql-projection]
+db = "testdb"
+table = "movie_card"
+primaryKey = "tconst"
+[[sql-projection.columns]]
+name = "tconst"
+type = "VARCHAR(16)"
+[[sql-projection.columns]]
+name = "top_cast"
+type = "JSONB"
+`
+	const elem = "[[sql-projection.source.aggregate.element]]\nfield = \"nconst\"\nfrom = \"$.nconst\"\n"
+	for _, tc := range []struct{ name, source, wantErr string }{
+		{
+			"rules and aggregate together",
+			"[[sql-projection.source]]\ntopic = \"principal\"\n[[sql-projection.source.rules]]\nset = [ { column = \"top_cast\", from = \"$.x\" } ]\n" +
+				"[sql-projection.source.aggregate]\ncolumn = \"top_cast\"\nelementKey = \"$.ordering\"\n" + elem,
+			"either rules or an aggregate",
+		},
+		{
+			"unknown aggregate column",
+			"[[sql-projection.source]]\ntopic = \"principal\"\n[sql-projection.source.aggregate]\ncolumn = \"nope\"\nelementKey = \"$.ordering\"\n" + elem,
+			`aggregate column "nope" is not a declared column`,
+		},
+		{
+			"missing elementKey",
+			"[[sql-projection.source]]\ntopic = \"principal\"\n[sql-projection.source.aggregate]\ncolumn = \"top_cast\"\n" + elem,
+			"aggregate elementKey is required",
+		},
+		{
+			"invalid elementKeyType",
+			"[[sql-projection.source]]\ntopic = \"principal\"\n[sql-projection.source.aggregate]\ncolumn = \"top_cast\"\nelementKey = \"$.ordering\"\nelementKeyType = \"int\"\n" + elem,
+			`elementKeyType "int" is invalid`,
+		},
+		{
+			"empty element",
+			"[[sql-projection.source]]\ntopic = \"principal\"\n[sql-projection.source.aggregate]\ncolumn = \"top_cast\"\nelementKey = \"$.ordering\"\n",
+			"aggregate element needs at least one field",
+		},
+		{
+			"invalid onDelete for aggregate",
+			"[[sql-projection.source]]\ntopic = \"principal\"\nonDelete = \"clear\"\n[sql-projection.source.aggregate]\ncolumn = \"top_cast\"\nelementKey = \"$.ordering\"\n" + elem,
+			`onDelete "clear" is invalid for an aggregate source`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v := readConfig(t, "toml", strings.NewReader(head+tc.source))
 			_, err := (&sql.ProjectionSyncableParser{}).ParseConfig(v, projectionStorage())
 			require.Error(t, err)
 			require.Contains(t, err.Error(), tc.wantErr)

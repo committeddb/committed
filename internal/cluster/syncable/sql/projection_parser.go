@@ -48,12 +48,28 @@ type rawProjectionRule struct {
 
 // rawProjectionSource is the TOML decode shape of one [[sql-projection.source]]
 // block: a topic (the discriminator), its correlation keyPath, its onDelete
-// behavior, and its nested rules.
+// behavior, an optional source-level when filter, and either nested rules (a
+// scalar fold) or an aggregate (a collection fold). when decodes as any so it
+// resolves the same string-shorthand / explicit-clauses forms a rule's when
+// does.
 type rawProjectionSource struct {
-	Topic    string              `mapstructure:"topic"`
-	KeyPath  string              `mapstructure:"keyPath"`
-	OnDelete string              `mapstructure:"onDelete"`
-	Rules    []rawProjectionRule `mapstructure:"rules"`
+	Topic     string                  `mapstructure:"topic"`
+	KeyPath   string                  `mapstructure:"keyPath"`
+	OnDelete  string                  `mapstructure:"onDelete"`
+	When      any                     `mapstructure:"when"`
+	Rules     []rawProjectionRule     `mapstructure:"rules"`
+	Aggregate *rawProjectionAggregate `mapstructure:"aggregate"`
+}
+
+// rawProjectionAggregate is the TOML decode shape of a source's
+// [sql-projection.source.aggregate] block. Element is an array-of-tables (each
+// { field, from }) rather than an inline map so its output field names survive
+// viper's map-key lowercasing byte-exact.
+type rawProjectionAggregate struct {
+	Column         string                   `mapstructure:"column"`
+	ElementKey     string                   `mapstructure:"elementKey"`
+	ElementKeyType string                   `mapstructure:"elementKeyType"`
+	Element        []ProjectionElementField `mapstructure:"element"`
 }
 
 func (p *ProjectionSyncableParser) ParseConfig(v *cluster.ParsedConfig, storage cluster.DatabaseStorage) (*ProjectionConfig, error) {
@@ -111,16 +127,35 @@ func parseProjectionSources(v *cluster.ParsedConfig, storage cluster.DatabaseSto
 	if len(rawSources) > 0 {
 		sources := make([]ProjectionSource, 0, len(rawSources))
 		for si, rs := range rawSources {
-			rules, err := normalizeRules(rs.Rules, storage, rs.Topic)
+			when, err := normalizeWhen(rs.When, storage, rs.Topic)
 			if err != nil {
-				return nil, fmt.Errorf("source %d (topic %q): %w", si+1, rs.Topic, err)
+				return nil, fmt.Errorf("source %d (topic %q): when: %w", si+1, rs.Topic, err)
 			}
-			sources = append(sources, ProjectionSource{
+			src := ProjectionSource{
 				Topic:    rs.Topic,
 				KeyPath:  rs.KeyPath,
 				OnDelete: rs.OnDelete,
-				Rules:    rules,
-			})
+				When:     when,
+			}
+			// Populate rules and aggregate independently so a source that
+			// declares both is caught by validation (a source has one or the
+			// other), not silently resolved by parse order.
+			if len(rs.Rules) > 0 {
+				rules, err := normalizeRules(rs.Rules, storage, rs.Topic)
+				if err != nil {
+					return nil, fmt.Errorf("source %d (topic %q): %w", si+1, rs.Topic, err)
+				}
+				src.Rules = rules
+			}
+			if rs.Aggregate != nil {
+				src.Aggregate = &ProjectionAggregate{
+					Column:         rs.Aggregate.Column,
+					Element:        rs.Aggregate.Element,
+					ElementKey:     rs.Aggregate.ElementKey,
+					ElementKeyType: strings.ToLower(rs.Aggregate.ElementKeyType),
+				}
+			}
+			sources = append(sources, src)
 		}
 		return sources, nil
 	}
