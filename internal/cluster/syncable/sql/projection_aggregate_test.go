@@ -167,3 +167,143 @@ func TestProjectionAggregateDeleteUnknownChildIsNoOp(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
+
+var nameType = &cluster.Type{ID: "name", Name: "Name"}
+
+// enrichedConfig folds a names lookup (dimension) and a principal aggregate whose
+// cast element enriches name from that dimension by nconst.
+func enrichedConfig() *sql.ProjectionConfig {
+	return &sql.ProjectionConfig{
+		Table:      "movie_card",
+		PrimaryKey: "tconst",
+		Columns: []sql.ProjectionColumn{
+			{Name: "tconst", SQLType: "VARCHAR(16)"},
+			{Name: "top_cast", SQLType: "JSONB"},
+		},
+		Sources: []sql.ProjectionSource{
+			{
+				Topic:  "name",
+				Lookup: &sql.ProjectionLookup{Name: "names", Fields: []sql.ProjectionElementField{{Field: "primary_name", From: "$.primary_name"}}},
+			},
+			{
+				Topic: "principal",
+				Aggregate: &sql.ProjectionAggregate{
+					Column:         "top_cast",
+					ElementKey:     "$.ordering",
+					ElementKeyType: "text",
+					Element: []sql.ProjectionElementField{
+						{Field: "nconst", From: "$.nconst"},
+						{Field: "name", Lookup: "names", On: "nconst", Select: "primary_name"},
+					},
+				},
+			},
+		},
+	}
+}
+
+type enrichedPrepares struct {
+	dimUpsert *sqlmock.ExpectedPrepare
+	dimDelete *sqlmock.ExpectedPrepare
+	affected  *sqlmock.ExpectedPrepare
+	rebuild   *sqlmock.ExpectedPrepare
+}
+
+// newMockEnrichedProjection registers the Init expectations for enrichedConfig in
+// the exact order Init issues them (main DDL; the lookup's dimension DDL +
+// upsert/delete prepares; the aggregate's sidecar DDL + five prepares; the
+// fan-out affected-parents prepare; the shared row-delete prepare) and returns
+// the handles the fan-out tests attach to.
+func newMockEnrichedProjection(t *testing.T) (*sql.Projection, sqlmock.Sqlmock, enrichedPrepares) {
+	t.Helper()
+	dialect, mock, err := dialects.NewSQLMockDialect()
+	require.NoError(t, err)
+	db, err := sql.NewDB(dialect, "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	ddlConfig := &sql.Config{
+		Table:      "movie_card",
+		PrimaryKey: "tconst",
+		Mappings:   []sql.Mapping{{Column: "tconst", SQLType: "VARCHAR(16)"}, {Column: "top_cast", SQLType: "JSONB"}},
+	}
+	dimSpec := sql.LookupSpec{Dimension: "movie_card__lookup_names"}
+	dimConfig := &sql.Config{
+		Table:      "movie_card__lookup_names",
+		PrimaryKey: sql.LookupKey,
+		Mappings:   []sql.Mapping{{Column: sql.LookupKey}, {Column: sql.LookupFields}},
+	}
+	aggSpec := sql.AggregateSpec{
+		Table: "movie_card", PrimaryKey: "tconst", Column: "top_cast",
+		Sidecar: "movie_card__top_cast",
+		Enrichments: []sql.AggregateEnrichment{{
+			Dimension: "movie_card__lookup_names", OnField: "nconst",
+			Selects: []sql.AggregateEnrichmentField{{Output: "name", Source: "primary_name"}},
+		}},
+	}
+	scConfig := &sql.Config{
+		Table: "movie_card__top_cast", PrimaryKey: sql.SidecarChildKey,
+		Mappings: []sql.Mapping{{Column: sql.SidecarChildKey}, {Column: sql.SidecarParentKey}, {Column: sql.SidecarElementKey}, {Column: sql.SidecarElement}},
+	}
+
+	mock.ExpectExec(dialect.CreateDDL(ddlConfig)).WillReturnResult(driver.ResultNoRows)
+	// lookup source
+	mock.ExpectExec(dialect.CreateLookupDimensionDDL(dimSpec)).WillReturnResult(driver.ResultNoRows)
+	p := enrichedPrepares{dimUpsert: mock.ExpectPrepare(dialect.CreateSQL(dimConfig))}
+	p.dimDelete = mock.ExpectPrepare(dialect.CreateDeleteSQL(dimConfig))
+	// aggregate source
+	mock.ExpectExec(dialect.CreateAggregateSidecarDDL(aggSpec)).WillReturnResult(driver.ResultNoRows)
+	mock.ExpectPrepare(dialect.CreateSQL(scConfig))
+	mock.ExpectPrepare(dialect.CreateDeleteSQL(scConfig))
+	mock.ExpectPrepare(dialect.CreateAggregateParentLookupSQL(aggSpec))
+	mock.ExpectPrepare(dialect.CreateAggregateMaterializeSQL(aggSpec))
+	p.rebuild = mock.ExpectPrepare(dialect.CreateAggregateRebuildSQL(aggSpec))
+	// fan-out wiring + shared row-delete
+	p.affected = mock.ExpectPrepare(dialect.CreateAggregateAffectedParentsSQL(aggSpec, "nconst"))
+	mock.ExpectPrepare(dialect.CreateDeleteSQL(ddlConfig))
+
+	projection := sql.NewProjection(db, enrichedConfig(), nil, "movie_card")
+	require.NoError(t, projection.Init())
+	return projection, mock, p
+}
+
+// A dimension upsert stores the row, then fans out: it finds the parents whose
+// elements reference the changed key and rebuilds each.
+func TestProjectionLookupUpsertFansOut(t *testing.T) {
+	projection, mock, p := newMockEnrichedProjection(t)
+
+	dimArgs := []driver.Value{"nm1", `{"primary_name":"Al Pacino"}`}
+	dimArgs = append(dimArgs, dimArgs...) // mock dialect doubles like MySQL
+
+	mock.ExpectBegin()
+	p.dimUpsert.ExpectExec().WithArgs(dimArgs...).WillReturnResult(sqlmock.NewResult(0, 1))
+	p.affected.ExpectQuery().WithArgs("nm1").
+		WillReturnRows(sqlmock.NewRows([]string{"parent_key"}).AddRow("tt1").AddRow("tt2"))
+	p.rebuild.ExpectExec().WithArgs("tt1", "tt1").WillReturnResult(sqlmock.NewResult(0, 1))
+	p.rebuild.ExpectExec().WithArgs("tt2", "tt2").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	actual := &cluster.Actual{Entities: []*cluster.Entity{cluster.NewUpsertEntity(
+		nameType, []byte("nm1"), []byte(`{"nconst":"nm1","primary_name":"Al Pacino"}`),
+	)}}
+	_, err := projection.Sync(context.Background(), actual)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// A dimension delete drops the row, then fans out the same way (dependents
+// rebuild with the enriched field now null).
+func TestProjectionLookupDeleteFansOut(t *testing.T) {
+	projection, mock, p := newMockEnrichedProjection(t)
+
+	mock.ExpectBegin()
+	p.dimDelete.ExpectExec().WithArgs("nm1").WillReturnResult(sqlmock.NewResult(0, 1))
+	p.affected.ExpectQuery().WithArgs("nm1").
+		WillReturnRows(sqlmock.NewRows([]string{"parent_key"}).AddRow("tt1"))
+	p.rebuild.ExpectExec().WithArgs("tt1", "tt1").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	actual := &cluster.Actual{Entities: []*cluster.Entity{cluster.NewDeleteEntity(nameType, []byte("nm1"))}}
+	_, err := projection.Sync(context.Background(), actual)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}

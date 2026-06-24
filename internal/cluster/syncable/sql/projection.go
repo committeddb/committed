@@ -89,14 +89,33 @@ const (
 	elementKeyTypeNumber = "number"
 )
 
-// ProjectionElementField is one field of an aggregate's stored per-child
-// object: Field is the output JSON key, From a jsonpath into the child payload.
-// It is an array-of-tables (not an inline map) for the same reason jsonpaths
-// live in values elsewhere — viper lowercases map keys, which would silently
-// corrupt a camelCase Field name.
+// ProjectionElementField is one field of an aggregate's stored per-child object
+// or of a dimension's stored object. Field is the output JSON key. A field is
+// either *plain* — From, a jsonpath into the payload — or *enriched* — Lookup
+// (a lookup source's name), On (the element field holding the foreign key), and
+// Select (the dimension field to pull). Enriched fields are resolved by a join
+// at materialize, not stored. It is an array-of-tables (not an inline map) for
+// the same reason jsonpaths live in values elsewhere — viper lowercases map
+// keys, which would silently corrupt a camelCase Field name.
 type ProjectionElementField struct {
-	Field string `mapstructure:"field"`
-	From  string `mapstructure:"from"`
+	Field  string `mapstructure:"field"`
+	From   string `mapstructure:"from"`
+	Lookup string `mapstructure:"lookup"`
+	On     string `mapstructure:"on"`
+	Select string `mapstructure:"select"`
+}
+
+// enriched reports whether this field is resolved from a dimension (Lookup set)
+// rather than read straight from the payload (From set).
+func (f ProjectionElementField) enriched() bool { return f.Lookup != "" }
+
+// ProjectionLookup declares a dimension source: a topic whose entities populate
+// a keyed dimension table (Name → referenced by element enrichments), storing
+// Fields (each a plain field/from) keyed by the source's keyPath. It writes no
+// BFF column — it is read by aggregate elements that enrich from it.
+type ProjectionLookup struct {
+	Name   string
+	Fields []ProjectionElementField
 }
 
 // ProjectionAggregate folds a source's child entities into one JSON-array
@@ -116,11 +135,12 @@ type ProjectionAggregate struct {
 
 // ProjectionSource is one input of a projection. The topic is the discriminator
 // — events of other topics never reach this source. A source folds its events
-// either as scalar columns (Rules) or as one collection column (Aggregate),
-// never both. When, if set, restricts which of the topic's events this source
-// consumes, so several sources can split one topic into different columns (e.g.
-// principals where category=actor into top_cast, category=director into
-// directors); an empty When consumes every event of the topic.
+// exactly one of three ways: scalar columns (Rules), one collection column
+// (Aggregate), or a dimension table other sources enrich from (Lookup). When,
+// if set, restricts which of the topic's events this source consumes, so several
+// sources can split one topic into different columns (e.g. principals where
+// category=actor into top_cast, category=director into directors); an empty When
+// consumes every event of the topic.
 //
 // KeyPath is the jsonpath that locates the correlation key in this source's
 // event payload — for a rule source it binds the primary-key column of every
@@ -134,6 +154,7 @@ type ProjectionSource struct {
 	When      []WhenClause
 	Rules     []ProjectionRule
 	Aggregate *ProjectionAggregate
+	Lookup    *ProjectionLookup
 }
 
 // ProjectionConfig declares a stateful fold from one or more source topics into
@@ -165,15 +186,20 @@ func (c *ProjectionConfig) applyDefaults() {
 	}
 	for i := range c.Sources {
 		s := &c.Sources[i]
-		if s.OnDelete == "" {
-			if s.Aggregate != nil {
-				s.OnDelete = onDeleteRemoveFromAggregate // a child delete leaves the row
-			} else {
-				s.OnDelete = onDeleteRow // back-compat: a delete drops the row
+		// A lookup source writes a dimension table, not the BFF row, so the row
+		// onDelete behaviors and the $.<primaryKey> keyPath default don't apply —
+		// its keyPath is the dimension key and must be explicit.
+		if s.Lookup == nil {
+			if s.OnDelete == "" {
+				if s.Aggregate != nil {
+					s.OnDelete = onDeleteRemoveFromAggregate // a child delete leaves the row
+				} else {
+					s.OnDelete = onDeleteRow // back-compat: a delete drops the row
+				}
 			}
-		}
-		if s.KeyPath == "" && c.PrimaryKey != "" {
-			s.KeyPath = "$." + c.PrimaryKey
+			if s.KeyPath == "" && c.PrimaryKey != "" {
+				s.KeyPath = "$." + c.PrimaryKey
+			}
 		}
 		if s.Aggregate != nil && s.Aggregate.ElementKeyType == "" {
 			s.Aggregate.ElementKeyType = elementKeyTypeText
@@ -243,6 +269,22 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 	if len(c.Sources) == 0 {
 		return fmt.Errorf("at least one source (a topic and its rules) is required")
 	}
+	// lookups maps each declared lookup source's name to its source index, so an
+	// aggregate's enrichment can be checked to reference a real dimension. Built
+	// in a pre-pass because enrichments may reference a lookup declared later.
+	lookups := make(map[string]int)
+	for si, src := range c.Sources {
+		if src.Lookup == nil {
+			continue
+		}
+		if src.Lookup.Name == "" {
+			return fmt.Errorf("source %d (topic %q): lookup name is required", si+1, src.Topic)
+		}
+		if prev, ok := lookups[src.Lookup.Name]; ok {
+			return fmt.Errorf("source %d (topic %q): lookup %q already declared by source %d", si+1, src.Topic, src.Lookup.Name, prev+1)
+		}
+		lookups[src.Lookup.Name] = si
+	}
 	// owner records which source writes each column. A column is owned by one
 	// source (so two sources never clobber each other); the same source claiming
 	// a column across its rules is fine. This — not topic uniqueness — is the
@@ -257,18 +299,28 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 		if src.Topic == "" {
 			return fmt.Errorf("source %d: topic is required", si+1)
 		}
-		hasRules := len(src.Rules) > 0
-		hasAgg := src.Aggregate != nil
-		if hasRules == hasAgg {
-			return fmt.Errorf("%s: a source needs either rules or an aggregate (not both, not neither)", where)
+		kinds := 0
+		for _, has := range []bool{len(src.Rules) > 0, src.Aggregate != nil, src.Lookup != nil} {
+			if has {
+				kinds++
+			}
+		}
+		if kinds != 1 {
+			return fmt.Errorf("%s: a source needs exactly one of rules, an aggregate, or a lookup", where)
 		}
 		// Source-level when is an optional filter (empty consumes the whole
 		// topic); its clauses are validated like a rule's.
 		if err := validateWhenClauses(src.When, where); err != nil {
 			return err
 		}
-		if hasAgg {
-			if err := validateAggregate(c, src, where, declared, owner, si); err != nil {
+		if src.Lookup != nil {
+			if err := validateLookup(src, where); err != nil {
+				return err
+			}
+			continue
+		}
+		if src.Aggregate != nil {
+			if err := validateAggregate(c, src, where, declared, owner, si, lookups); err != nil {
 				return err
 			}
 			continue
@@ -359,7 +411,7 @@ func claimColumn(owner map[string]int, col string, si int, where string) error {
 // declared non-primary-key column it solely owns, a non-empty elementKey and a
 // known elementKeyType, and at least one element field (each with a name and a
 // from jsonpath, names distinct).
-func validateAggregate(c *ProjectionConfig, src ProjectionSource, where string, declared map[string]bool, owner map[string]int, si int) error {
+func validateAggregate(c *ProjectionConfig, src ProjectionSource, where string, declared map[string]bool, owner map[string]int, si int, lookups map[string]int) error {
 	ag := src.Aggregate
 	switch src.OnDelete {
 	case onDeleteRemoveFromAggregate, onDeleteIgnore:
@@ -389,16 +441,72 @@ func validateAggregate(c *ProjectionConfig, src ProjectionSource, where string, 
 	if len(ag.Element) == 0 {
 		return fmt.Errorf("%s: aggregate element needs at least one field", where)
 	}
+	// First pass: each field is plain (from) XOR enriched (lookup/on/select);
+	// collect the plain field names — an enriched field's `on` must name one
+	// (the foreign key is stored, the dimension value is joined at materialize).
+	plain := make(map[string]bool)
 	seen := make(map[string]bool, len(ag.Element))
 	for _, f := range ag.Element {
 		if f.Field == "" {
 			return fmt.Errorf("%s: aggregate element field with empty name", where)
 		}
-		if f.From == "" {
-			return fmt.Errorf("%s: aggregate element field %q needs a from jsonpath", where, f.Field)
-		}
 		if seen[f.Field] {
 			return fmt.Errorf("%s: aggregate element field %q declared twice", where, f.Field)
+		}
+		seen[f.Field] = true
+		if f.enriched() {
+			if f.From != "" {
+				return fmt.Errorf("%s: aggregate element field %q has both from and lookup (a field is one or the other)", where, f.Field)
+			}
+			if f.On == "" || f.Select == "" {
+				return fmt.Errorf("%s: aggregate element field %q: an enriched field needs on and select", where, f.Field)
+			}
+			if _, ok := lookups[f.Lookup]; !ok {
+				return fmt.Errorf("%s: aggregate element field %q references unknown lookup %q", where, f.Field, f.Lookup)
+			}
+		} else {
+			if f.From == "" {
+				return fmt.Errorf("%s: aggregate element field %q needs a from jsonpath (or lookup/on/select)", where, f.Field)
+			}
+			if f.On != "" || f.Select != "" {
+				return fmt.Errorf("%s: aggregate element field %q: on/select are only for enriched (lookup) fields", where, f.Field)
+			}
+			plain[f.Field] = true
+		}
+	}
+	if len(plain) == 0 {
+		return fmt.Errorf("%s: aggregate element needs at least one plain (from) field", where)
+	}
+	// Second pass: an enriched field's `on` must name a plain element field.
+	for _, f := range ag.Element {
+		if f.enriched() && !plain[f.On] {
+			return fmt.Errorf("%s: aggregate element field %q: on %q is not a plain element field", where, f.Field, f.On)
+		}
+	}
+	return nil
+}
+
+// validateLookup checks one lookup (dimension) source: at least one stored
+// field, each a plain field/from (a dimension field cannot itself enrich), names
+// distinct. The dimension key is the entity's own Key, so there is no keyPath.
+func validateLookup(src ProjectionSource, where string) error {
+	lk := src.Lookup
+	if len(lk.Fields) == 0 {
+		return fmt.Errorf("%s: lookup %q needs at least one field", where, lk.Name)
+	}
+	seen := make(map[string]bool, len(lk.Fields))
+	for _, f := range lk.Fields {
+		if f.Field == "" {
+			return fmt.Errorf("%s: lookup %q field with empty name", where, lk.Name)
+		}
+		if f.enriched() {
+			return fmt.Errorf("%s: lookup %q field %q may not itself enrich (no lookup/on/select)", where, lk.Name, f.Field)
+		}
+		if f.From == "" {
+			return fmt.Errorf("%s: lookup %q field %q needs a from jsonpath", where, lk.Name, f.Field)
+		}
+		if seen[f.Field] {
+			return fmt.Errorf("%s: lookup %q field %q declared twice", where, lk.Name, f.Field)
 		}
 		seen[f.Field] = true
 	}
@@ -449,7 +557,7 @@ type Projection struct {
 }
 
 // projectionSource is the prepared runtime of one ProjectionSource. Exactly one
-// of rules (a scalar-fold source) or agg (a collection-fold source) is set.
+// of rules (scalar fold), agg (collection fold), or lkp (dimension) is set.
 type projectionSource struct {
 	topic    string
 	keyPath  string
@@ -463,17 +571,21 @@ type projectionSource struct {
 	clear    *gosql.Stmt
 	clearSQL string
 	// agg is the prepared aggregate runtime, set only for a collection-fold
-	// source (nil for a rule source).
+	// source (nil otherwise).
 	agg *aggregateRuntime
+	// lkp is the prepared lookup (dimension) runtime, set only for a lookup
+	// source (nil otherwise).
+	lkp *lookupRuntime
 }
 
 // aggregateRuntime is the prepared runtime of one ProjectionAggregate: the
-// element shape plus the statements that maintain the sidecar and re-materialize
-// the parent's array column from it.
+// stored (plain) element fields plus the statements that maintain the sidecar
+// and re-materialize the parent's array column from it. Enriched fields are not
+// stored — they are joined in by the materialize/rebuild SQL.
 type aggregateRuntime struct {
 	column     string
 	elementKey string
-	fields     []ProjectionElementField
+	fields     []ProjectionElementField // plain fields only (stored in the sidecar)
 	sidecar    string
 
 	upsertSidecar    *gosql.Stmt
@@ -488,20 +600,91 @@ type aggregateRuntime struct {
 	lookupSQL        string
 }
 
+// lookupRuntime is the prepared runtime of one ProjectionLookup: the dimension
+// key/fields, the statements maintaining the dimension table, and the dependent
+// aggregates to re-materialize when a dimension row changes (the fan-out).
+type lookupRuntime struct {
+	name      string
+	fields    []ProjectionElementField
+	dimension string
+
+	upsertDim    *gosql.Stmt
+	upsertDimSQL string
+	deleteDim    *gosql.Stmt
+	deleteDimSQL string
+
+	dependents []*aggregateDependent
+}
+
+// aggregateDependent is one aggregate that enriches from a lookup: when a
+// dimension key changes, affected finds the parents whose elements reference it
+// (on onField) and rebuild re-materializes each (shared with the aggregate's own
+// rebuild).
+type aggregateDependent struct {
+	onField     string
+	affected    *gosql.Stmt
+	affectedSQL string
+	rebuild     *gosql.Stmt
+	rebuildSQL  string
+}
+
 // sidecarName is the backing table for an aggregate column: <table>__<column>.
 // One per aggregate source; teardown drops them alongside the projection table.
 func sidecarName(table, column string) string {
 	return table + "__" + column
 }
 
-// aggregateSpec builds the dialect-facing spec for one aggregate source.
+// dimensionName is the backing table for a lookup source: <table>__lookup_<name>.
+func dimensionName(table, lookup string) string {
+	return table + "__lookup_" + lookup
+}
+
+// aggregateSpec builds the dialect-facing spec for one aggregate source,
+// grouping its enriched element fields by (lookup, on) into one join apiece
+// (first-seen order, so the materialize SQL is stable).
 func (c *ProjectionConfig) aggregateSpec(ag *ProjectionAggregate) AggregateSpec {
-	return AggregateSpec{
+	spec := AggregateSpec{
 		Table:       c.Table,
 		PrimaryKey:  c.PrimaryKey,
 		Column:      ag.Column,
 		Sidecar:     sidecarName(c.Table, ag.Column),
 		NumericSort: ag.ElementKeyType == elementKeyTypeNumber,
+	}
+	type joinKey struct{ lookup, on string }
+	at := map[joinKey]int{}
+	for _, f := range ag.Element {
+		if !f.enriched() {
+			continue
+		}
+		k := joinKey{f.Lookup, f.On}
+		i, ok := at[k]
+		if !ok {
+			i = len(spec.Enrichments)
+			at[k] = i
+			spec.Enrichments = append(spec.Enrichments, AggregateEnrichment{
+				Dimension: dimensionName(c.Table, f.Lookup),
+				OnField:   f.On,
+			})
+		}
+		spec.Enrichments[i].Selects = append(spec.Enrichments[i].Selects,
+			AggregateEnrichmentField{Output: f.Field, Source: f.Select})
+	}
+	return spec
+}
+
+// lookupSpec builds the dialect-facing spec for one lookup source.
+func (c *ProjectionConfig) lookupSpec(lk *ProjectionLookup) LookupSpec {
+	return LookupSpec{Dimension: dimensionName(c.Table, lk.Name)}
+}
+
+// dimensionConfig synthesizes the plain Config whose CreateSQL / CreateDeleteSQL
+// give the dimension's upsert and delete — an ordinary key-on-conflict shape,
+// reusing the dialect's builders (and MySQL arg-doubling).
+func dimensionConfig(dimension string) *Config {
+	return &Config{
+		Table:      dimension,
+		PrimaryKey: LookupKey,
+		Mappings:   []Mapping{{Column: LookupKey}, {Column: LookupFields}},
 	}
 }
 
@@ -578,10 +761,16 @@ func (p *Projection) Teardown() error {
 	// not load-bearing (DROP IF EXISTS is independent), but dropping sidecars
 	// first keeps teardown's footprint a strict subset of Init's.
 	for _, src := range p.config.Sources {
-		if src.Aggregate == nil {
+		var housekeeping string
+		switch {
+		case src.Aggregate != nil:
+			housekeeping = sidecarName(p.config.Table, src.Aggregate.Column)
+		case src.Lookup != nil:
+			housekeeping = dimensionName(p.config.Table, src.Lookup.Name)
+		default:
 			continue
 		}
-		drop := p.dialect.DropDDL(&Config{Table: sidecarName(p.config.Table, src.Aggregate.Column)})
+		drop := p.dialect.DropDDL(&Config{Table: housekeeping})
 		if _, err := p.db.Exec(drop); err != nil {
 			return fmt.Errorf("teardown [%s]: %w", drop, err)
 		}
@@ -608,38 +797,81 @@ func (p *Projection) Init() error {
 		return fmt.Errorf("ddl [%s]: %w", ddlString, err)
 	}
 
-	// Prepare per-source rule upserts (and any clear) or aggregate statements
-	// first, then the shared row-delete last — the same prepare order as the
-	// original single-source projection.
+	// Prepare per-source statements. enrichRefs collects, per lookup name, the
+	// aggregates that enrich from it (their spec + on-field), so the second pass
+	// can wire each lookup's fan-out to its dependents' rebuilds.
 	p.sources = make(map[string][]*projectionSource, len(p.config.Sources))
+	var lookupSources []*projectionSource
+	enrichRefs := map[string][]enrichRef{}
 	for si, src := range p.config.Sources {
 		ps := &projectionSource{topic: src.Topic, keyPath: src.KeyPath, onDelete: src.OnDelete, when: src.When}
-		if src.Aggregate != nil {
-			agg, err := p.initAggregate(si, src)
+		switch {
+		case src.Aggregate != nil:
+			spec := p.config.aggregateSpec(src.Aggregate)
+			agg, err := p.initAggregate(si, src, spec)
 			if err != nil {
 				return err
 			}
 			ps.agg = agg
-			p.sources[src.Topic] = append(p.sources[src.Topic], ps)
-			continue
-		}
-		for i, r := range src.Rules {
-			sqlString := p.dialect.CreateSQL(p.config.ruleConfig(r))
-			stmt, err := p.db.Prepare(sqlString)
-			if err != nil {
-				return fmt.Errorf("prepare source %d (topic %q) rule %d sql [%s]: %w", si+1, src.Topic, i+1, sqlString, err)
+			// Register one ref per distinct (lookup, on) this aggregate enriches.
+			seen := map[[2]string]bool{}
+			for _, f := range src.Aggregate.Element {
+				if !f.enriched() {
+					continue
+				}
+				k := [2]string{f.Lookup, f.On}
+				if seen[k] {
+					continue
+				}
+				seen[k] = true
+				enrichRefs[f.Lookup] = append(enrichRefs[f.Lookup], enrichRef{agg: agg, spec: spec, onField: f.On})
 			}
-			ps.rules = append(ps.rules, &projectionStmt{rule: r, SQL: sqlString, Stmt: stmt})
-		}
-		if src.OnDelete == onDeleteClear {
-			ps.clearSQL = p.dialect.CreateClearSQL(ddlConfig, src.ownedColumns())
-			clearStmt, err := p.db.Prepare(ps.clearSQL)
+		case src.Lookup != nil:
+			lkp, err := p.initLookup(si, src)
 			if err != nil {
-				return fmt.Errorf("prepare source %d (topic %q) clear sql [%s]: %w", si+1, src.Topic, ps.clearSQL, err)
+				return err
 			}
-			ps.clear = clearStmt
+			ps.lkp = lkp
+			lookupSources = append(lookupSources, ps)
+		default:
+			for i, r := range src.Rules {
+				sqlString := p.dialect.CreateSQL(p.config.ruleConfig(r))
+				stmt, err := p.db.Prepare(sqlString)
+				if err != nil {
+					return fmt.Errorf("prepare source %d (topic %q) rule %d sql [%s]: %w", si+1, src.Topic, i+1, sqlString, err)
+				}
+				ps.rules = append(ps.rules, &projectionStmt{rule: r, SQL: sqlString, Stmt: stmt})
+			}
+			if src.OnDelete == onDeleteClear {
+				ps.clearSQL = p.dialect.CreateClearSQL(ddlConfig, src.ownedColumns())
+				clearStmt, err := p.db.Prepare(ps.clearSQL)
+				if err != nil {
+					return fmt.Errorf("prepare source %d (topic %q) clear sql [%s]: %w", si+1, src.Topic, ps.clearSQL, err)
+				}
+				ps.clear = clearStmt
+			}
 		}
 		p.sources[src.Topic] = append(p.sources[src.Topic], ps)
+	}
+
+	// Second pass: wire each lookup's fan-out. For every aggregate that enriches
+	// from this lookup, prepare the affected-parents query and point it at that
+	// aggregate's rebuild, so a dimension change re-materializes its dependents.
+	for _, ps := range lookupSources {
+		for _, ref := range enrichRefs[ps.lkp.name] {
+			affSQL := p.dialect.CreateAggregateAffectedParentsSQL(ref.spec, ref.onField)
+			affStmt, err := p.db.Prepare(affSQL)
+			if err != nil {
+				return fmt.Errorf("prepare lookup %q affected-parents sql [%s]: %w", ps.lkp.name, affSQL, err)
+			}
+			ps.lkp.dependents = append(ps.lkp.dependents, &aggregateDependent{
+				onField:     ref.onField,
+				affected:    affStmt,
+				affectedSQL: affSQL,
+				rebuild:     ref.agg.rebuild,
+				rebuildSQL:  ref.agg.rebuildSQL,
+			})
+		}
 	}
 
 	// Shared row-delete (onDelete=delete-row, and any RTBF delete on such a topic).
@@ -653,15 +885,66 @@ func (p *Projection) Init() error {
 	return nil
 }
 
+// enrichRef records, for the fan-out wiring, that aggregate agg (with the given
+// spec) enriches on element field onField from some lookup.
+type enrichRef struct {
+	agg     *aggregateRuntime
+	spec    AggregateSpec
+	onField string
+}
+
+// plainElementFields returns the element fields read straight from the payload
+// (the ones stored in the sidecar); enriched fields are joined in at materialize.
+func plainElementFields(fields []ProjectionElementField) []ProjectionElementField {
+	out := make([]ProjectionElementField, 0, len(fields))
+	for _, f := range fields {
+		if !f.enriched() {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// initLookup creates one lookup source's dimension table and prepares its upsert
+// and delete (ordinary key shapes reusing the dialect's CreateSQL /
+// CreateDeleteSQL). The fan-out wiring (dependents) is attached in Init's second
+// pass, once every aggregate is built.
+func (p *Projection) initLookup(si int, src ProjectionSource) (*lookupRuntime, error) {
+	lk := src.Lookup
+	spec := p.config.lookupSpec(lk)
+	where := fmt.Sprintf("source %d (topic %q) lookup %q", si+1, src.Topic, lk.Name)
+
+	ddl := p.dialect.CreateLookupDimensionDDL(spec)
+	if _, err := p.db.Exec(ddl); err != nil {
+		return nil, fmt.Errorf("%s dimension ddl [%s]: %w", where, ddl, err)
+	}
+
+	rt := &lookupRuntime{
+		name:      lk.Name,
+		fields:    lk.Fields,
+		dimension: spec.Dimension,
+	}
+	dimConfig := dimensionConfig(spec.Dimension)
+	var err error
+	rt.upsertDimSQL = p.dialect.CreateSQL(dimConfig)
+	if rt.upsertDim, err = p.db.Prepare(rt.upsertDimSQL); err != nil {
+		return nil, fmt.Errorf("%s prepare dimension upsert [%s]: %w", where, rt.upsertDimSQL, err)
+	}
+	rt.deleteDimSQL = p.dialect.CreateDeleteSQL(dimConfig)
+	if rt.deleteDim, err = p.db.Prepare(rt.deleteDimSQL); err != nil {
+		return nil, fmt.Errorf("%s prepare dimension delete [%s]: %w", where, rt.deleteDimSQL, err)
+	}
+	return rt, nil
+}
+
 // initAggregate creates one aggregate source's sidecar table and prepares the
 // five statements that maintain it and re-materialize the parent column: the
 // sidecar upsert and delete (ordinary key shapes, reusing the dialect's
 // CreateSQL / CreateDeleteSQL), the parent-key lookup (read back a deleted
 // child's parent), and the materialize / rebuild (re-aggregate the parent's
 // array from the sidecar on upsert / delete).
-func (p *Projection) initAggregate(si int, src ProjectionSource) (*aggregateRuntime, error) {
+func (p *Projection) initAggregate(si int, src ProjectionSource, spec AggregateSpec) (*aggregateRuntime, error) {
 	ag := src.Aggregate
-	spec := p.config.aggregateSpec(ag)
 	where := fmt.Sprintf("source %d (topic %q) aggregate %q", si+1, src.Topic, ag.Column)
 
 	ddl := p.dialect.CreateAggregateSidecarDDL(spec)
@@ -672,7 +955,7 @@ func (p *Projection) initAggregate(si int, src ProjectionSource) (*aggregateRunt
 	rt := &aggregateRuntime{
 		column:     ag.Column,
 		elementKey: ag.ElementKey,
-		fields:     ag.Element,
+		fields:     plainElementFields(ag.Element), // enriched fields are joined in, not stored
 		sidecar:    spec.Sidecar,
 	}
 	scConfig := sidecarConfig(spec.Sidecar)
@@ -792,6 +1075,9 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 		// remove is keyed by the child Key in its sidecar, so it self-selects:
 		// the one source that folded this child removes its element, the others
 		// are no-ops. (For a split by when, this is how the right column shrinks.)
+		if src.lkp != nil {
+			return p.removeFromDimension(ctx, tx, src, e)
+		}
 		if src.agg != nil {
 			if src.onDelete == onDeleteIgnore {
 				return nil
@@ -813,6 +1099,9 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 		return nil
 	}
 
+	if src.lkp != nil {
+		return p.applyLookup(ctx, tx, src, jsonData, e)
+	}
 	if src.agg != nil {
 		return p.applyAggregate(ctx, tx, src, jsonData, e)
 	}
@@ -987,6 +1276,88 @@ func (p *Projection) aggExec(ctx context.Context, tx *gosql.Tx, stmt *gosql.Stmt
 	return nil
 }
 
+// applyLookup folds one dimension-entity upsert: store its key → fields object
+// in the dimension table, then fan out — re-materialize every parent whose
+// folded children reference this key, so a value that arrives after the facts
+// that reference it fills in (and a changed value updates them).
+func (p *Projection) applyLookup(ctx context.Context, tx *gosql.Tx, src *projectionSource, jsonData any, e *cluster.Entity) error {
+	lk := src.lkp
+
+	fields := make(map[string]any, len(lk.fields))
+	for _, f := range lk.fields {
+		v, err := jsonpath.Get(f.From, jsonData)
+		if err != nil {
+			return cluster.Permanent(fmt.Errorf("[sql-projection.lookup] field %q from [%s]: %w", f.Field, f.From, err))
+		}
+		fields[f.Field] = v
+	}
+	fieldsJSON, err := json.Marshal(fields)
+	if err != nil {
+		return cluster.Permanent(fmt.Errorf("[sql-projection.lookup] marshal fields: %w", err))
+	}
+
+	// The dimension key is the entity's own Key — the value aggregate elements
+	// reference in `on`, and the only key a (payload-less) delete can use.
+	key := string(e.Key)
+	dimValues := []any{key, string(fieldsJSON)}
+	if err := p.aggExec(ctx, tx, lk.upsertDim, lk.upsertDimSQL, p.dialect.BindArgs(dimValues)...); err != nil {
+		return err
+	}
+	return p.fanOut(ctx, tx, lk, key)
+}
+
+// removeFromDimension honors a dimension-entity delete: drop the dimension row,
+// then fan out — the parents that referenced it re-materialize, their enriched
+// fields now null (the materialize LEFT JOIN finds no dimension row).
+func (p *Projection) removeFromDimension(ctx context.Context, tx *gosql.Tx, src *projectionSource, e *cluster.Entity) error {
+	lk := src.lkp
+	key := string(e.Key)
+	if err := p.aggExec(ctx, tx, lk.deleteDim, lk.deleteDimSQL, key); err != nil {
+		return err
+	}
+	return p.fanOut(ctx, tx, lk, key)
+}
+
+// fanOut re-materializes every parent whose folded children reference the
+// changed dimension key. For each dependent aggregate it collects the affected
+// parent keys (fully draining the query before any rebuild — a tx holds one
+// connection, so a rebuild cannot run while the cursor is open) and rebuilds
+// each. Synchronous in the dimension change's transaction; bounded by the
+// fan-out degree (see projection-fanout-deferred for the batched option).
+func (p *Projection) fanOut(ctx context.Context, tx *gosql.Tx, lk *lookupRuntime, dimKey string) error {
+	for _, dep := range lk.dependents {
+		rows, err := tx.StmtContext(ctx, dep.affected).QueryContext(ctx, dimKey)
+		if err != nil {
+			wrapped := fmt.Errorf("[sql-projection.lookup] exec [%s]: %w", dep.affectedSQL, err)
+			if p.dialect.IsPermanent(err) {
+				return cluster.Permanent(wrapped)
+			}
+			return wrapped
+		}
+		var parents []string
+		for rows.Next() {
+			var pk string
+			if err := rows.Scan(&pk); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("[sql-projection.lookup] scan affected parent: %w", err)
+			}
+			parents = append(parents, pk)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("[sql-projection.lookup] affected parents: %w", err)
+		}
+		_ = rows.Close()
+
+		for _, pk := range parents {
+			if err := p.aggExec(ctx, tx, dep.rebuild, dep.rebuildSQL, pk, pk); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // keyString renders a correlation/element key as the text the sidecar stores. A
 // string passes through; nil is empty; a JSON number (float64) prints without a
 // decimal point for integral values (ordering 1 → "1", not "1.000000").
@@ -1024,6 +1395,15 @@ func (p *Projection) Close() error {
 				closeStmt(src.agg.lookup)
 				closeStmt(src.agg.materialize)
 				closeStmt(src.agg.rebuild)
+			}
+			if src.lkp != nil {
+				closeStmt(src.lkp.upsertDim)
+				closeStmt(src.lkp.deleteDim)
+				// dependents' rebuild stmts belong to the aggregate runtimes (closed
+				// above); only the affected-parents queries are the lookup's own.
+				for _, dep := range src.lkp.dependents {
+					closeStmt(dep.affected)
+				}
 			}
 		}
 	}

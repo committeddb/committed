@@ -289,7 +289,7 @@ type = "TEXT"
 		{
 			"no rules",
 			"",
-			"a source needs either rules or an aggregate",
+			"a source needs exactly one of rules, an aggregate, or a lookup",
 		},
 	}
 
@@ -592,7 +592,7 @@ type = "JSONB"
 			"rules and aggregate together",
 			"[[sql-projection.source]]\ntopic = \"principal\"\n[[sql-projection.source.rules]]\nset = [ { column = \"top_cast\", from = \"$.x\" } ]\n" +
 				"[sql-projection.source.aggregate]\ncolumn = \"top_cast\"\nelementKey = \"$.ordering\"\n" + elem,
-			"either rules or an aggregate",
+			"exactly one of rules, an aggregate, or a lookup",
 		},
 		{
 			"unknown aggregate column",
@@ -618,6 +618,124 @@ type = "JSONB"
 			"invalid onDelete for aggregate",
 			"[[sql-projection.source]]\ntopic = \"principal\"\nonDelete = \"clear\"\n[sql-projection.source.aggregate]\ncolumn = \"top_cast\"\nelementKey = \"$.ordering\"\n" + elem,
 			`onDelete "clear" is invalid for an aggregate source`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v := readConfig(t, "toml", strings.NewReader(head+tc.source))
+			_, err := (&sql.ProjectionSyncableParser{}).ParseConfig(v, projectionStorage())
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tc.wantErr)
+		})
+	}
+}
+
+// TestParseLookupEnrichmentProjection covers the lookup (dimension) source and
+// an aggregate element enriched from it: the principal's nconst joins to the
+// names dimension, pulling primary_name into the cast element.
+func TestParseLookupEnrichmentProjection(t *testing.T) {
+	const toml = `
+[sql-projection]
+db = "testdb"
+table = "movie_card"
+primaryKey = "tconst"
+
+[[sql-projection.columns]]
+name = "tconst"
+type = "VARCHAR(16)"
+[[sql-projection.columns]]
+name = "top_cast"
+type = "JSONB"
+
+[[sql-projection.source]]
+topic = "name"
+[sql-projection.source.lookup]
+name = "names"
+[[sql-projection.source.lookup.field]]
+field = "primary_name"
+from = "$.primary_name"
+
+[[sql-projection.source]]
+topic = "principal"
+keyPath = "$.tconst"
+[sql-projection.source.aggregate]
+column = "top_cast"
+elementKey = "$.ordering"
+[[sql-projection.source.aggregate.element]]
+field = "nconst"
+from = "$.nconst"
+[[sql-projection.source.aggregate.element]]
+field = "name"
+lookup = "names"
+on = "nconst"
+select = "primary_name"
+`
+	v := readConfig(t, "toml", strings.NewReader(toml))
+	config, err := (&sql.ProjectionSyncableParser{}).ParseConfig(v, projectionStorage())
+	require.NoError(t, err)
+	require.Len(t, config.Sources, 2)
+
+	lk := config.Sources[0]
+	require.Equal(t, "name", lk.Topic)
+	require.NotNil(t, lk.Lookup)
+	require.Equal(t, "names", lk.Lookup.Name)
+	require.Equal(t, []sql.ProjectionElementField{{Field: "primary_name", From: "$.primary_name"}}, lk.Lookup.Fields)
+
+	require.Equal(t, []sql.ProjectionElementField{
+		{Field: "nconst", From: "$.nconst"},
+		{Field: "name", Lookup: "names", On: "nconst", Select: "primary_name"},
+	}, config.Sources[1].Aggregate.Element)
+}
+
+// TestParseLookupEnrichmentErrors covers lookup/enrichment validation.
+func TestParseLookupEnrichmentErrors(t *testing.T) {
+	const head = `
+[sql-projection]
+db = "testdb"
+table = "movie_card"
+primaryKey = "tconst"
+[[sql-projection.columns]]
+name = "tconst"
+type = "VARCHAR(16)"
+[[sql-projection.columns]]
+name = "top_cast"
+type = "JSONB"
+`
+	// A principal aggregate enriched from a (maybe-absent) lookup.
+	agg := func(enrich string) string {
+		return "[[sql-projection.source]]\ntopic = \"principal\"\nkeyPath = \"$.tconst\"\n" +
+			"[sql-projection.source.aggregate]\ncolumn = \"top_cast\"\nelementKey = \"$.ordering\"\n" +
+			"[[sql-projection.source.aggregate.element]]\nfield = \"nconst\"\nfrom = \"$.nconst\"\n" + enrich
+	}
+	lookupNames := "[[sql-projection.source]]\ntopic = \"name\"\n[sql-projection.source.lookup]\nname = \"names\"\n" +
+		"[[sql-projection.source.lookup.field]]\nfield = \"primary_name\"\nfrom = \"$.primary_name\"\n"
+	enriched := func(body string) string {
+		return "[[sql-projection.source.aggregate.element]]\nfield = \"name\"\n" + body
+	}
+	for _, tc := range []struct{ name, source, wantErr string }{
+		{
+			"unknown lookup",
+			agg(enriched("lookup = \"missing\"\non = \"nconst\"\nselect = \"primary_name\"\n")),
+			`references unknown lookup "missing"`,
+		},
+		{
+			"on not a plain field",
+			lookupNames + agg(enriched("lookup = \"names\"\non = \"name\"\nselect = \"primary_name\"\n")),
+			`on "name" is not a plain element field`,
+		},
+		{
+			"enriched missing select",
+			lookupNames + agg(enriched("lookup = \"names\"\non = \"nconst\"\n")),
+			"an enriched field needs on and select",
+		},
+		{
+			"from and lookup together",
+			lookupNames + agg(enriched("from = \"$.x\"\nlookup = \"names\"\non = \"nconst\"\nselect = \"primary_name\"\n")),
+			"has both from and lookup",
+		},
+		{
+			"lookup without field",
+			"[[sql-projection.source]]\ntopic = \"name\"\n[sql-projection.source.lookup]\nname = \"names\"\n" + agg(""),
+			`lookup "names" needs at least one field`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

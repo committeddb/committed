@@ -505,6 +505,53 @@ stays a clean array. Deterministic ordering is a PostgreSQL guarantee;
 MySQL aggregate ordering is best-effort (`JSON_ARRAYAGG` ignores `ORDER
 BY`).
 
+**Enriching folded data from another topic (lookup).** A folded element often
+carries a foreign key — `top_cast` holds each cast member's `nconst`, but the
+*interesting* single-table query wants the actor's name, which lives in a
+`name` topic keyed by `nconst`. A **lookup source** ingests that topic into a
+keyed dimension table, and an aggregate element resolves the key into it by a
+join — so the column carries the name and the query needs no join of its own.
+A lookup source declares a `lookup` block (its `name`, referenced by
+enrichments, and the `field`s it stores) instead of `rules`/`aggregate`; an
+element field then declares `lookup`/`on`/`select` instead of `from` (`on`
+names the plain element field holding the foreign key). Several enriched fields
+sharing a dimension coalesce into one join:
+
+```toml
+[[sql-projection.source]]
+topic = "name"                         # the dimension topic, keyed by nconst
+  [sql-projection.source.lookup]
+  name = "names"                       # referenced by element enrichments below
+    [[sql-projection.source.lookup.field]]
+    field = "primary_name"
+    from  = "$.primary_name"
+
+[[sql-projection.source]]
+topic   = "principal"
+keyPath = "$.tconst"
+  [sql-projection.source.aggregate]
+  column     = "top_cast"
+  elementKey = "$.ordering"
+    [[sql-projection.source.aggregate.element]]
+    field = "nconst"                   # the foreign key, stored
+    from  = "$.nconst"
+    [[sql-projection.source.aggregate.element]]
+    field  = "name"                    # resolved from the names dimension
+    lookup = "names"
+    on     = "nconst"                  # join the element's nconst …
+    select = "primary_name"            # … to the dimension's primary_name
+```
+
+The dimension is the source of truth (a `<table>__lookup_<name>` housekeeping
+table); the array column joins to it at materialize, so the resolved value is
+never copied and stays fresh. Cross-topic order is handled: a dimension row
+that arrives *after* the facts that reference it — or a later change to it —
+**fans out**, re-materializing every parent whose elements reference that key,
+so the names fill in (a delete nulls the field but keeps the element). Fan-out
+is synchronous; for hot, fast-changing dimensions a batched option is planned.
+One syncable fills one table — a dimension is its own internal housekeeping, so
+two syncables that need the same data each keep their own copy.
+
 Configure an ingestable that pulls from an external source into the
 log (MySQL example; see `internal/cluster/ingestable/sql/postgres_ingestable.toml`
 for a Postgres logical-replication config):

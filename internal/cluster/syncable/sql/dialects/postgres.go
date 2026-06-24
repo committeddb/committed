@@ -63,15 +63,36 @@ func (d *PostgreSQLDialect) CreateClearSQL(c *sql.Config, columns []string) stri
 // from the sidecar into a JSON array: COALESCE(jsonb_agg(element ORDER BY
 // element_key), '[]') so an empty set yields [] not NULL. Ordering by
 // element_key::numeric (numeric sort) or element_key (lexical) makes the array
-// a pure function of the set, independent of arrival order. <ph> binds the
-// parent key.
+// a pure function of the set, independent of arrival order. With enrichments
+// each element is LEFT JOINed to its dimension and merged with the resolved
+// fields (|| jsonb_build_object); a missing dimension row leaves nulls (LEFT
+// JOIN), never drops the element. <ph> binds the parent key.
 func pgAggSubquery(spec sql.AggregateSpec, ph string) string {
-	sort := sql.SidecarElementKey
-	if spec.NumericSort {
-		sort = sql.SidecarElementKey + "::numeric"
+	if len(spec.Enrichments) == 0 {
+		sort := sql.SidecarElementKey
+		if spec.NumericSort {
+			sort = sql.SidecarElementKey + "::numeric"
+		}
+		return fmt.Sprintf("(SELECT COALESCE(jsonb_agg(%s ORDER BY %s), '[]'::jsonb) FROM %s WHERE %s = %s)",
+			sql.SidecarElement, sort, spec.Sidecar, sql.SidecarParentKey, ph)
 	}
-	return fmt.Sprintf("(SELECT COALESCE(jsonb_agg(%s ORDER BY %s), '[]'::jsonb) FROM %s WHERE %s = %s)",
-		sql.SidecarElement, sort, spec.Sidecar, sql.SidecarParentKey, ph)
+
+	sort := "s." + sql.SidecarElementKey
+	if spec.NumericSort {
+		sort = "s." + sql.SidecarElementKey + "::numeric"
+	}
+	var joins, build strings.Builder
+	for i, e := range spec.Enrichments {
+		alias := fmt.Sprintf("d%d", i)
+		fmt.Fprintf(&joins, " LEFT JOIN %s %s ON s.%s->>'%s' = %s.%s",
+			e.Dimension, alias, sql.SidecarElement, e.OnField, alias, sql.LookupKey)
+		for _, f := range e.Selects {
+			fmt.Fprintf(&build, ",'%s',%s.%s->'%s'", f.Output, alias, sql.LookupFields, f.Source)
+		}
+	}
+	element := fmt.Sprintf("s.%s || jsonb_build_object(%s)", sql.SidecarElement, strings.TrimPrefix(build.String(), ","))
+	return fmt.Sprintf("(SELECT COALESCE(jsonb_agg(%s ORDER BY %s), '[]'::jsonb) FROM %s s%s WHERE s.%s = %s)",
+		element, sort, spec.Sidecar, joins.String(), sql.SidecarParentKey, ph)
 }
 
 // CreateAggregateSidecarDDL implements Dialect; PostgreSQL stores the element
@@ -101,6 +122,19 @@ func (d *PostgreSQLDialect) CreateAggregateRebuildSQL(spec sql.AggregateSpec) st
 // key with $1.
 func (d *PostgreSQLDialect) CreateAggregateParentLookupSQL(spec sql.AggregateSpec) string {
 	return createAggregateParentLookupSQL(spec, "$1")
+}
+
+// CreateLookupDimensionDDL implements Dialect; PostgreSQL stores the fields as
+// JSONB and the key as TEXT.
+func (d *PostgreSQLDialect) CreateLookupDimensionDDL(spec sql.LookupSpec) string {
+	return d.CreateDDL(lookupDimensionConfig(spec, "JSONB", "TEXT"))
+}
+
+// CreateAggregateAffectedParentsSQL implements Dialect; PostgreSQL extracts the
+// element field with `->>'field'` and binds the changed dimension key with $1.
+func (d *PostgreSQLDialect) CreateAggregateAffectedParentsSQL(spec sql.AggregateSpec, onField string) string {
+	extract := fmt.Sprintf("%s->>'%s'", sql.SidecarElement, onField)
+	return createAggregateAffectedParentsSQL(spec, extract, "$1")
 }
 
 // CreateSQL implements Dialect.

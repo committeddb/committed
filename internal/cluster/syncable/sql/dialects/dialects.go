@@ -75,6 +75,31 @@ func createAggregateParentLookupSQL(spec sql.AggregateSpec, placeholder string) 
 		sql.SidecarParentKey, spec.Sidecar, sql.SidecarChildKey, placeholder)
 }
 
+// createAggregateAffectedParentsSQL builds `SELECT DISTINCT parent_key FROM
+// <sidecar> WHERE <extract> = <placeholder>` — the fan-out query for a dimension
+// change. The text-extraction syntax differs (PostgreSQL `element->>'k'`, MySQL
+// `element->>'$.k'`), so the dialect passes the built expression; the single
+// bound argument is the changed dimension key.
+func createAggregateAffectedParentsSQL(spec sql.AggregateSpec, extract, placeholder string) string {
+	return fmt.Sprintf("SELECT DISTINCT %s FROM %s WHERE %s = %s",
+		sql.SidecarParentKey, spec.Sidecar, extract, placeholder)
+}
+
+// lookupDimensionConfig synthesizes the plain Config that createDDL / CreateDDL
+// turn into an enrichment dimension's CREATE TABLE: lookup_key (PK, the dialect
+// key type) and lookup_fields (the dialect JSON type). Reuses the DDL builder so
+// the dimension shape matches every other table the dialect creates.
+func lookupDimensionConfig(spec sql.LookupSpec, jsonType, keyType string) *sql.Config {
+	return &sql.Config{
+		Table:      spec.Dimension,
+		PrimaryKey: sql.LookupKey,
+		Mappings: []sql.Mapping{
+			{Column: sql.LookupKey, SQLType: keyType},
+			{Column: sql.LookupFields, SQLType: jsonType},
+		},
+	}
+}
+
 func createDDL(config *sql.Config) string {
 	var ddl strings.Builder
 	fmt.Fprintf(&ddl, "CREATE TABLE IF NOT EXISTS %s (", config.Table)

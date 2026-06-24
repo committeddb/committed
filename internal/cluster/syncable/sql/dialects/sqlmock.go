@@ -62,6 +62,14 @@ func (d *SQLMockDialect) CreateAggregateParentLookupSQL(spec sql.AggregateSpec) 
 	return (&MySQLDialect{}).CreateAggregateParentLookupSQL(spec)
 }
 
+func (d *SQLMockDialect) CreateLookupDimensionDDL(spec sql.LookupSpec) string {
+	return (&MySQLDialect{}).CreateLookupDimensionDDL(spec)
+}
+
+func (d *SQLMockDialect) CreateAggregateAffectedParentsSQL(spec sql.AggregateSpec, onField string) string {
+	return (&MySQLDialect{}).CreateAggregateAffectedParentsSQL(spec, onField)
+}
+
 func (d *SQLMockDialect) CreateSQL(config *sql.Config) string {
 	var sql strings.Builder
 

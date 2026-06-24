@@ -59,17 +59,27 @@ type rawProjectionSource struct {
 	When      any                     `mapstructure:"when"`
 	Rules     []rawProjectionRule     `mapstructure:"rules"`
 	Aggregate *rawProjectionAggregate `mapstructure:"aggregate"`
+	Lookup    *rawProjectionLookup    `mapstructure:"lookup"`
 }
 
 // rawProjectionAggregate is the TOML decode shape of a source's
 // [sql-projection.source.aggregate] block. Element is an array-of-tables (each
-// { field, from }) rather than an inline map so its output field names survive
-// viper's map-key lowercasing byte-exact.
+// a plain { field, from } or an enriched { field, lookup, on, select }) rather
+// than an inline map so its output field names survive viper's map-key
+// lowercasing byte-exact.
 type rawProjectionAggregate struct {
 	Column         string                   `mapstructure:"column"`
 	ElementKey     string                   `mapstructure:"elementKey"`
 	ElementKeyType string                   `mapstructure:"elementKeyType"`
 	Element        []ProjectionElementField `mapstructure:"element"`
+}
+
+// rawProjectionLookup is the TOML decode shape of a source's
+// [sql-projection.source.lookup] block: the dimension's id (referenced by
+// element enrichments) and its stored fields.
+type rawProjectionLookup struct {
+	Name   string                   `mapstructure:"name"`
+	Fields []ProjectionElementField `mapstructure:"field"`
 }
 
 func (p *ProjectionSyncableParser) ParseConfig(v *cluster.ParsedConfig, storage cluster.DatabaseStorage) (*ProjectionConfig, error) {
@@ -137,9 +147,9 @@ func parseProjectionSources(v *cluster.ParsedConfig, storage cluster.DatabaseSto
 				OnDelete: rs.OnDelete,
 				When:     when,
 			}
-			// Populate rules and aggregate independently so a source that
-			// declares both is caught by validation (a source has one or the
-			// other), not silently resolved by parse order.
+			// Populate rules, aggregate, and lookup independently so a source that
+			// declares more than one is caught by validation (a source has exactly
+			// one kind), not silently resolved by parse order.
 			if len(rs.Rules) > 0 {
 				rules, err := normalizeRules(rs.Rules, storage, rs.Topic)
 				if err != nil {
@@ -153,6 +163,12 @@ func parseProjectionSources(v *cluster.ParsedConfig, storage cluster.DatabaseSto
 					Element:        rs.Aggregate.Element,
 					ElementKey:     rs.Aggregate.ElementKey,
 					ElementKeyType: strings.ToLower(rs.Aggregate.ElementKeyType),
+				}
+			}
+			if rs.Lookup != nil {
+				src.Lookup = &ProjectionLookup{
+					Name:   rs.Lookup.Name,
+					Fields: rs.Lookup.Fields,
 				}
 			}
 			sources = append(sources, src)

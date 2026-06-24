@@ -58,6 +58,18 @@ type Dialect interface {
 	// carries no payload, so the parent correlation is read back from the
 	// sidecar the upsert recorded; the single bound argument is the child Key.
 	CreateAggregateParentLookupSQL(spec AggregateSpec) string
+	// CreateLookupDimensionDDL returns the CREATE TABLE for an enrichment
+	// dimension: lookup_key (PK, the foreign-key target) and lookup_fields (the
+	// stored JSON object of dimension columns). The dialect picks its own JSON
+	// and key types. Dropped via DropDDL on the dimension table name.
+	CreateLookupDimensionDDL(spec LookupSpec) string
+	// CreateAggregateAffectedParentsSQL returns the fan-out query: the DISTINCT
+	// parent keys whose folded children reference a given dimension key —
+	// `SELECT DISTINCT parent_key FROM <sidecar> WHERE element->>'<onField>' =
+	// <placeholder>`. When a dimension row changes, these are the parents whose
+	// array column must be re-materialized. The single bound argument is the
+	// changed dimension key.
+	CreateAggregateAffectedParentsSQL(spec AggregateSpec, onField string) string
 	Open(connectionString string) (*gosql.DB, error)
 	// IsPermanent returns true if the given SQL error is non-retryable
 	// (e.g., constraint violations, data-type mismatches). The sync loop
@@ -191,16 +203,50 @@ const (
 	SidecarElement    = "element"
 )
 
+// Lookup* are the fixed column names of an enrichment dimension table: the
+// foreign-key target and the stored JSON object of dimension fields.
+const (
+	LookupKey    = "lookup_key"
+	LookupFields = "lookup_fields"
+)
+
+// AggregateEnrichmentField is one field an aggregate element pulls from a
+// dimension: Output is the element key it lands under, Source the dimension
+// field it reads.
+type AggregateEnrichmentField struct {
+	Output string
+	Source string
+}
+
+// AggregateEnrichment is one dimension join an aggregate's materialize performs:
+// LEFT JOIN Dimension on the element's OnField equals the dimension key, pulling
+// each of Selects into the element. Several element fields sharing a dimension
+// and on-field coalesce into one AggregateEnrichment (one join, many selects).
+type AggregateEnrichment struct {
+	Dimension string
+	OnField   string
+	Selects   []AggregateEnrichmentField
+}
+
 // AggregateSpec is the dialect-facing description of one aggregate source: the
 // parent table it folds into, that table's primary-key and array columns, the
-// sidecar table backing the column, and whether the array orders by its
-// element key numerically (1,2,…,10) rather than lexically (1,10,2). The
-// dialects use it to build the sidecar DDL and the materialize / rebuild /
-// lookup statements; it carries no per-row data.
+// sidecar table backing the column, whether the array orders by its element key
+// numerically (1,2,…,10) rather than lexically (1,10,2), and any dimension
+// enrichments joined in at materialize. The dialects use it to build the
+// sidecar DDL and the materialize / rebuild / lookup / affected-parents
+// statements; it carries no per-row data.
 type AggregateSpec struct {
 	Table       string
 	PrimaryKey  string
 	Column      string
 	Sidecar     string
 	NumericSort bool
+	Enrichments []AggregateEnrichment
+}
+
+// LookupSpec is the dialect-facing description of one enrichment dimension: just
+// the table that backs it (its columns are fixed — see Lookup* and
+// CreateLookupDimensionDDL).
+type LookupSpec struct {
+	Dimension string
 }

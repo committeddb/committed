@@ -50,6 +50,14 @@ func (d *GoMySQLServerDialect) CreateAggregateParentLookupSQL(spec sql.Aggregate
 	return (&MySQLDialect{}).CreateAggregateParentLookupSQL(spec)
 }
 
+func (d *GoMySQLServerDialect) CreateLookupDimensionDDL(spec sql.LookupSpec) string {
+	return (&MySQLDialect{}).CreateLookupDimensionDDL(spec)
+}
+
+func (d *GoMySQLServerDialect) CreateAggregateAffectedParentsSQL(spec sql.AggregateSpec, onField string) string {
+	return (&MySQLDialect{}).CreateAggregateAffectedParentsSQL(spec, onField)
+}
+
 func (d *GoMySQLServerDialect) Open(connectionString string) (*gosql.DB, error) {
 	conn, err := d.Driver.OpenConnector(connectionString)
 	if err != nil {

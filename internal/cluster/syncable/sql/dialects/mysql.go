@@ -42,13 +42,33 @@ func (d *MySQLDialect) CreateClearSQL(c *sql.Config, columns []string) string {
 // see README § Aggregate columns). COALESCE(... , JSON_ARRAY()) makes an empty
 // set yield [] not NULL. <ph> binds the parent key.
 func mysqlAggSubquery(spec sql.AggregateSpec, ph string) string {
-	sort := sql.SidecarElementKey
-	if spec.NumericSort {
-		sort = fmt.Sprintf("CAST(%s AS DECIMAL)", sql.SidecarElementKey)
+	if len(spec.Enrichments) == 0 {
+		sort := sql.SidecarElementKey
+		if spec.NumericSort {
+			sort = fmt.Sprintf("CAST(%s AS DECIMAL)", sql.SidecarElementKey)
+		}
+		return fmt.Sprintf(
+			"(SELECT COALESCE(JSON_ARRAYAGG(%s), JSON_ARRAY()) FROM (SELECT %s,%s FROM %s WHERE %s = %s ORDER BY %s) AS ordered)",
+			sql.SidecarElement, sql.SidecarElement, sql.SidecarElementKey, spec.Sidecar, sql.SidecarParentKey, ph, sort)
 	}
+
+	sort := "s." + sql.SidecarElementKey
+	if spec.NumericSort {
+		sort = fmt.Sprintf("CAST(s.%s AS DECIMAL)", sql.SidecarElementKey)
+	}
+	var joins, build strings.Builder
+	for i, e := range spec.Enrichments {
+		alias := fmt.Sprintf("d%d", i)
+		fmt.Fprintf(&joins, " LEFT JOIN %s %s ON s.%s->>'$.%s' = %s.%s",
+			e.Dimension, alias, sql.SidecarElement, e.OnField, alias, sql.LookupKey)
+		for _, f := range e.Selects {
+			fmt.Fprintf(&build, ",'%s',JSON_EXTRACT(%s.%s,'$.%s')", f.Output, alias, sql.LookupFields, f.Source)
+		}
+	}
+	element := fmt.Sprintf("JSON_MERGE_PATCH(s.%s,JSON_OBJECT(%s))", sql.SidecarElement, strings.TrimPrefix(build.String(), ","))
 	return fmt.Sprintf(
-		"(SELECT COALESCE(JSON_ARRAYAGG(%s), JSON_ARRAY()) FROM (SELECT %s,%s FROM %s WHERE %s = %s ORDER BY %s) AS ordered)",
-		sql.SidecarElement, sql.SidecarElement, sql.SidecarElementKey, spec.Sidecar, sql.SidecarParentKey, ph, sort)
+		"(SELECT COALESCE(JSON_ARRAYAGG(%s), JSON_ARRAY()) FROM (SELECT %s AS %s,s.%s FROM %s s%s WHERE s.%s = %s ORDER BY %s) AS ordered)",
+		sql.SidecarElement, element, sql.SidecarElement, sql.SidecarElementKey, spec.Sidecar, joins.String(), sql.SidecarParentKey, ph, sort)
 }
 
 // CreateAggregateSidecarDDL implements Dialect; MySQL stores the element as
@@ -78,6 +98,20 @@ func (d *MySQLDialect) CreateAggregateRebuildSQL(spec sql.AggregateSpec) string 
 // with ?.
 func (d *MySQLDialect) CreateAggregateParentLookupSQL(spec sql.AggregateSpec) string {
 	return createAggregateParentLookupSQL(spec, "?")
+}
+
+// CreateLookupDimensionDDL implements Dialect; MySQL stores the fields as JSON
+// and the key as VARCHAR(255) (a bounded type so lookup_key can be a PRIMARY
+// KEY).
+func (d *MySQLDialect) CreateLookupDimensionDDL(spec sql.LookupSpec) string {
+	return createDDL(lookupDimensionConfig(spec, "JSON", "VARCHAR(255)"))
+}
+
+// CreateAggregateAffectedParentsSQL implements Dialect; MySQL extracts the
+// element field with `->>'$.field'` and binds the changed dimension key with ?.
+func (d *MySQLDialect) CreateAggregateAffectedParentsSQL(spec sql.AggregateSpec, onField string) string {
+	extract := fmt.Sprintf("%s->>'$.%s'", sql.SidecarElement, onField)
+	return createAggregateAffectedParentsSQL(spec, extract, "?")
 }
 
 // CreateSQL implements Dialect

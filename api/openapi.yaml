@@ -434,17 +434,19 @@ paths:
         (a fold into one row per entity — current-state tables,
         optionally folding several source topics into one denormalized
         row via `[[sql-projection.source]]` blocks with a per-source
-        `onDelete`; a source folds either scalar columns via `rules` or
-        one collection column via an `aggregate` block, and several
-        sources may share a topic, split by a per-source `when`; see
-        README § SQL projections), or `http` (webhook). For
-        `sql-projection`, config misuse (a `set` entry without exactly
-        one of `from`/`value`/`null`, a `when` entry without exactly one
-        of `equals`/`null`, an unknown column, a rule setting the
-        primary-key column, an invalid `onDelete`, two sources writing
-        the same column, an aggregate without a valid column/elementKey/
-        element) fails here with 400. A rule or source with no `when`
-        matches every event of its topic.
+        `onDelete`; a source folds scalar columns via `rules`, one
+        collection column via an `aggregate` block, or a dimension table
+        via a `lookup` block (whose fields aggregate elements resolve by
+        an `on`/`select` join — enrichment), and several sources may
+        share a topic, split by a per-source `when`; see README § SQL
+        projections), or `http` (webhook). For `sql-projection`, config
+        misuse (a `set` entry without exactly one of `from`/`value`/`null`,
+        a `when` entry without exactly one of `equals`/`null`, an unknown
+        column, a rule setting the primary-key column, an invalid
+        `onDelete`, two sources writing the same column, an aggregate
+        without a valid column/elementKey/element, an enrichment
+        referencing an unknown lookup) fails here with 400. A rule or
+        source with no `when` matches every event of its topic.
       operationId: addSyncable
       parameters:
         - $ref: '#/components/parameters/ResourceId'

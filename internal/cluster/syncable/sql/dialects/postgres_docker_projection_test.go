@@ -446,3 +446,142 @@ func TestPostgreSQLIntegration_AggregateProjection(t *testing.T) {
 	require.Equal(t, wantCast, nconstsOf("top_cast"), "rebuild-from-0 reproduces top_cast")
 	require.Empty(t, nconstsOf("directors"), "rebuild-from-0 reproduces directors")
 }
+
+var nameType = &cluster.Type{ID: "name", Name: "Name"}
+
+// movieCardEnrichedConfig folds the title spine and a principal aggregate whose
+// cast elements are enriched from a names dimension (nconst → primary_name), so
+// top_cast carries actor names, not codes.
+func movieCardEnrichedConfig(table string) *sql.ProjectionConfig {
+	return &sql.ProjectionConfig{
+		Table:      table,
+		PrimaryKey: "tconst",
+		Columns: []sql.ProjectionColumn{
+			{Name: "tconst", SQLType: "VARCHAR(16)"},
+			{Name: "primary_title", SQLType: "VARCHAR(255)"},
+			{Name: "top_cast", SQLType: "JSONB"},
+		},
+		Sources: []sql.ProjectionSource{
+			{
+				Topic:    "title",
+				OnDelete: "delete-row",
+				Rules: []sql.ProjectionRule{{
+					Set: []sql.ProjectionSet{{Column: "primary_title", From: "$.primary_title"}},
+				}},
+			},
+			{
+				Topic:  "name",
+				Lookup: &sql.ProjectionLookup{Name: "names", Fields: []sql.ProjectionElementField{{Field: "primary_name", From: "$.primary_name"}}},
+			},
+			{
+				Topic: "principal",
+				Aggregate: &sql.ProjectionAggregate{
+					Column:         "top_cast",
+					ElementKey:     "$.ordering",
+					ElementKeyType: "number",
+					Element: []sql.ProjectionElementField{
+						{Field: "nconst", From: "$.nconst"},
+						{Field: "ordering", From: "$.ordering"},
+						{Field: "name", Lookup: "names", On: "nconst", Select: "primary_name"},
+					},
+				},
+			},
+		},
+	}
+}
+
+// TestPostgreSQLIntegration_LookupEnrichment is the enrichment success criterion
+// on real Postgres: an aggregate element resolves a foreign key (nconst) to a
+// dimension field (primary_name) by join, so top_cast carries names; a dimension
+// row that arrives after the facts that reference it fills them in (fan-out); a
+// dimension change updates every referencing element; a dimension delete nulls
+// the enriched field but keeps the element; and rebuild-from-0 reproduces it.
+func TestPostgreSQLIntegration_LookupEnrichment(t *testing.T) {
+	const table = "enr_movie_card"
+	dropTable(t, table)
+	defer dropTable(t, table)
+	defer dropTable(t, table+"__top_cast")
+	defer dropTable(t, table+"__lookup_names")
+
+	db, err := sql.NewDB(&dialects.PostgreSQLDialect{}, pgConnString)
+	require.Nil(t, err)
+	defer db.Close()
+
+	projection := sql.NewProjection(db, movieCardEnrichedConfig(table), nil, "movie_card")
+	require.Nil(t, projection.Init())
+	ctx := context.Background()
+
+	principal := func(ordering int, nconst string) *cluster.Actual {
+		return sourceEvent(t, principalType, fmt.Sprintf("[\"tt1\",\"%d\"]", ordering),
+			map[string]any{"tconst": "tt1", "ordering": ordering, "nconst": nconst})
+	}
+	name := func(nconst, primaryName string) *cluster.Actual {
+		return sourceEvent(t, nameType, nconst, map[string]any{"nconst": nconst, "primary_name": primaryName})
+	}
+	apply := func(as ...*cluster.Actual) {
+		for _, a := range as {
+			_, err := projection.Sync(ctx, a)
+			require.NoError(t, err)
+		}
+	}
+
+	// names map nconst → resolved name in top_cast (nil = present element, null
+	// name; absent key = no such cast member).
+	names := func() map[string]any {
+		var raw gosql.NullString
+		err := db.DB.QueryRow("SELECT top_cast FROM "+table+" WHERE tconst = $1", "tt1").Scan(&raw)
+		if err == gosql.ErrNoRows || !raw.Valid {
+			return map[string]any{}
+		}
+		require.NoError(t, err)
+		var arr []map[string]any
+		require.NoError(t, json.Unmarshal([]byte(raw.String), &arr))
+		out := map[string]any{}
+		for _, m := range arr {
+			out[m["nconst"].(string)] = m["name"]
+		}
+		return out
+	}
+
+	// Dimensions before facts: the names resolve on the principals' first fold.
+	apply(
+		sourceEvent(t, titleType, "tt1", map[string]any{"tconst": "tt1", "primary_title": "Heat"}),
+		name("nm1", "Al Pacino"),
+		name("nm2", "Robert De Niro"),
+		principal(1, "nm1"),
+		principal(2, "nm2"),
+	)
+	require.Equal(t, map[string]any{"nm1": "Al Pacino", "nm2": "Robert De Niro"}, names(),
+		"the foreign key resolves to the dimension name")
+
+	// Late-arriving dimension: a principal whose name does not exist yet folds
+	// with a null name, then the name's arrival fans out and fills it in.
+	apply(principal(3, "nm3"))
+	require.Nil(t, names()["nm3"], "the cast member is present but its name is null until the dimension arrives")
+	apply(name("nm3", "Val Kilmer"))
+	require.Equal(t, "Val Kilmer", names()["nm3"], "the late dimension row fans out and fills the element in")
+
+	// Dimension update: changing a name updates every element that references it.
+	apply(name("nm1", "Alfredo James Pacino"))
+	require.Equal(t, "Alfredo James Pacino", names()["nm1"], "a dimension change re-materializes its dependents")
+
+	// Dimension delete: the enriched field nulls (LEFT JOIN), the element stays.
+	apply(sourceDelete(nameType, "nm2"))
+	got := names()
+	require.Contains(t, got, "nm2", "the cast member survives a dimension delete")
+	require.Nil(t, got["nm2"], "the enriched name nulls out")
+
+	// Rebuild from 0 reproduces the enriched, fanned-out state.
+	want := names()
+	full := []*cluster.Actual{
+		sourceEvent(t, titleType, "tt1", map[string]any{"tconst": "tt1", "primary_title": "Heat"}),
+		name("nm1", "Al Pacino"), name("nm2", "Robert De Niro"),
+		principal(1, "nm1"), principal(2, "nm2"),
+		principal(3, "nm3"), name("nm3", "Val Kilmer"),
+		name("nm1", "Alfredo James Pacino"), sourceDelete(nameType, "nm2"),
+	}
+	require.NoError(t, projection.Teardown())
+	require.NoError(t, projection.Init())
+	apply(full...)
+	require.Equal(t, want, names(), "rebuild-from-0 reproduces the enriched top_cast")
+}
