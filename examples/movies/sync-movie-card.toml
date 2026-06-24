@@ -1,9 +1,9 @@
 # The read model: one denormalized row per movie, folded from four topics.
-#   - title    -> the spine (descriptive columns; its delete drops the row)
-#   - rating   -> a contributor (its columns; its delete clears them, row stays)
-#   - name     -> a dimension (nconst -> primary_name), enriched into the arrays
-#   - principal-> split by category into top_cast (actors) and directors,
-#                 each element enriched with the person's name
+#   - movie  -> the spine (descriptive columns; its delete drops the row)
+#   - rating -> a contributor (its columns; its delete clears them, row stays)
+#   - person -> a dimension (person_id -> name), enriched into the arrays
+#   - credit -> split by role into top_cast (actors) and directors,
+#               each element enriched with the person's name
 # See README § SQL projections for the full mechanics.
 [syncable]
 name = "movie-card"
@@ -12,25 +12,25 @@ type = "sql-projection"
 [sql-projection]
 db = "bff"
 table = "movie_card"
-primaryKey = "tconst"
+primaryKey = "movie_id"
 
 [[sql-projection.columns]]
-name = "tconst"
+name = "movie_id"
 type = "VARCHAR(16)"
 [[sql-projection.columns]]
-name = "primary_title"
+name = "title"
 type = "VARCHAR(255)"
 [[sql-projection.columns]]
-name = "start_year"
+name = "year"
 type = "INT"
 [[sql-projection.columns]]
 name = "genres"
 type = "VARCHAR(255)"
 [[sql-projection.columns]]
-name = "average_rating"
+name = "score"
 type = "NUMERIC"
 [[sql-projection.columns]]
-name = "num_votes"
+name = "votes"
 type = "INT"
 [[sql-projection.columns]]
 name = "top_cast"
@@ -40,12 +40,12 @@ name = "directors"
 type = "JSONB"
 
 [[sql-projection.source]]
-topic = "title"
+topic = "movie"
 onDelete = "delete-row"
 [[sql-projection.source.rules]]
 set = [
-  { column = "primary_title", from = "$.primary_title" },
-  { column = "start_year", from = "$.start_year" },
+  { column = "title", from = "$.title" },
+  { column = "year", from = "$.year" },
   { column = "genres", from = "$.genres" },
 ]
 
@@ -54,51 +54,51 @@ topic = "rating"
 onDelete = "clear"
 [[sql-projection.source.rules]]
 set = [
-  { column = "average_rating", from = "$.average_rating" },
-  { column = "num_votes", from = "$.num_votes" },
+  { column = "score", from = "$.score" },
+  { column = "votes", from = "$.votes" },
 ]
 
 [[sql-projection.source]]
-topic = "name"
+topic = "person"
 [sql-projection.source.lookup]
-name = "names"
+name = "people"
 [[sql-projection.source.lookup.field]]
-field = "primary_name"
-from = "$.primary_name"
+field = "name"
+from = "$.name"
 
 [[sql-projection.source]]
-topic = "principal"
-keyPath = "$.tconst"
-when = [ { path = "$.category", equals = "actor" } ]
+topic = "credit"
+keyPath = "$.movie_id"
+when = [ { path = "$.role", equals = "actor" } ]
 [sql-projection.source.aggregate]
 column = "top_cast"
-elementKey = "$.ordering"
+elementKey = "$.billing"
 elementKeyType = "number"
 [[sql-projection.source.aggregate.element]]
-field = "ordering"
-from = "$.ordering"
+field = "billing"
+from = "$.billing"
 [[sql-projection.source.aggregate.element]]
-field = "nconst"
-from = "$.nconst"
+field = "person_id"
+from = "$.person_id"
 [[sql-projection.source.aggregate.element]]
 field = "name"
-lookup = "names"
-on = "nconst"
-select = "primary_name"
+lookup = "people"
+on = "person_id"
+select = "name"
 
 [[sql-projection.source]]
-topic = "principal"
-keyPath = "$.tconst"
-when = [ { path = "$.category", equals = "director" } ]
+topic = "credit"
+keyPath = "$.movie_id"
+when = [ { path = "$.role", equals = "director" } ]
 [sql-projection.source.aggregate]
 column = "directors"
-elementKey = "$.ordering"
+elementKey = "$.billing"
 elementKeyType = "number"
 [[sql-projection.source.aggregate.element]]
-field = "nconst"
-from = "$.nconst"
+field = "person_id"
+from = "$.person_id"
 [[sql-projection.source.aggregate.element]]
 field = "name"
-lookup = "names"
-on = "nconst"
-select = "primary_name"
+lookup = "people"
+on = "person_id"
+select = "name"

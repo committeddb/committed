@@ -5,8 +5,8 @@ type = "sql"
 [sql]
 dialect = "postgres"
 topic = "rating"
-connectionString = "postgres://test:test@db:5432/imdb?sslmode=disable"
-primaryKey = "tconst"
+connectionString = "postgres://test:test@db:5432/catalog?sslmode=disable"
+primaryKey = "movie_id"
 tables = ["ingress.rating"]
 
 [sql.postgres]
@@ -14,11 +14,11 @@ slot_name = "committed_rating_slot"
 publication = "committed_rating_pub"
 
 [[sql.mappings]]
-jsonName = "tconst"
-column = "tconst"
+jsonName = "movie_id"
+column = "movie_id"
 [[sql.mappings]]
-jsonName = "average_rating"
-column = "average_rating"
+jsonName = "score"
+column = "score"
 [[sql.mappings]]
-jsonName = "num_votes"
-column = "num_votes"
+jsonName = "votes"
+column = "votes"

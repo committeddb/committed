@@ -6,4 +6,4 @@ type = "sql"
 
 [sql]
 dialect = "postgres"
-connectionString = "postgres://test:test@db:5432/imdb?search_path=read&sslmode=disable"
+connectionString = "postgres://test:test@db:5432/catalog?search_path=read&sslmode=disable"

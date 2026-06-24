@@ -4,7 +4,7 @@
 
 A single-binary, Raft-backed distributed commit log that is its own source of truth — write events in, sync them out to systems built for querying.
 
-> **New here? Start with the [Quickstart](docs/quickstart.md)** — one `docker compose up` takes a normalized IMDb dataset to a single denormalized table you query with no joins (named cast and all).
+> **New here? Start with the [Quickstart](docs/quickstart.md)** — one `docker compose up` takes a normalized movie catalog to a single denormalized table you query with no joins (named cast and all).
 
 Committed is a distributed commit log designed to store data long term in a log structure. Instead of the typical implementation where you are given simple read and write primitives and have to build, use adddons, or 3rd party software to aid in your read activites, Committed's two primitives are write and sync. The sync primitive is designed to move your data somewhere else. The purpose of this is to make it easy to transform or multiplex streams of data in a value added manner, or to move data into a system that has efficient querying (like a traditional SQL or NoSQL database). Committed even works with ephemeral data storage because it provides an efficient way to recreate the ephemeral storage if it fails (think Redis).
 
@@ -186,7 +186,7 @@ OpenAPI spec is available at `/openapi.yaml` with a Swagger UI at
 auth is applied when `COMMITTED_API_TOKEN` is set (see
 [`docs/operations/authentication.md`](docs/operations/authentication.md)).
 
-Runnable example configs live in [`examples/imdb/`](examples/imdb/), wired
+Runnable example configs live in [`examples/movies/`](examples/movies/), wired
 together end to end in the [Quickstart](docs/quickstart.md). The snippets below
 reference them as standalone illustrations of each endpoint.
 
@@ -194,8 +194,8 @@ Define a type:
 
 ```sh
 curl -X POST -H 'Content-Type: text/toml' \
-  --data-binary @examples/imdb/type-title.toml \
-  http://localhost:8080/v1/type/title
+  --data-binary @examples/movies/type-movie.toml \
+  http://localhost:8080/v1/type/movie
 ```
 
 #### Entity kinds
@@ -257,7 +257,7 @@ Configure a database to write into (sink):
 
 ```sh
 curl -X POST -H 'Content-Type: text/toml' \
-  --data-binary @examples/imdb/db-bff.toml \
+  --data-binary @examples/movies/db-bff.toml \
   http://localhost:8080/v1/database/bff
 ```
 
@@ -267,24 +267,24 @@ into columns:
 
 ```sh
 curl -X POST -H 'Content-Type: text/toml' --data-binary @- \
-  http://localhost:8080/v1/syncable/titles-mirror <<'EOF'
+  http://localhost:8080/v1/syncable/movies-mirror <<'EOF'
 [syncable]
-name = "titles-mirror"
+name = "movies-mirror"
 type = "sql"
 
 [sql]
-topic = "title"
+topic = "movie"
 db = "bff"
-table = "titles"
-primaryKey = "tconst"
+table = "movies"
+primaryKey = "movie_id"
 
 [[sql.mappings]]
-jsonPath = "$.tconst"
-column = "tconst"
+jsonPath = "$.movie_id"
+column = "movie_id"
 type = "TEXT"
 [[sql.mappings]]
-jsonPath = "$.primary_title"
-column = "primary_title"
+jsonPath = "$.title"
+column = "title"
 type = "TEXT"
 EOF
 ```
@@ -437,8 +437,8 @@ Rule semantics:
 
 **Folding several topics into one row (multi-source).** A projection can
 consume more than one topic and fold them into a single denormalized
-"BFF" row — e.g. a `movie_card` built from a normalized `title` topic and
-a `rating` topic, one row per `tconst`. Replace the single top-level
+"BFF" row — e.g. a `movie_card` built from a normalized `movie` topic and
+a `rating` topic, one row per `movie_id`. Replace the single top-level
 `topic`/`rules` with a `[[sql-projection.source]]` block per topic. The
 **topic is the discriminator** (an event only ever runs its own source's
 rules), and because each rule sets only its own columns, two sources fold
@@ -449,24 +449,24 @@ columns it owns, the row survives), or `ignore`.
 
 ```toml
 [sql-projection]
-db = "bff"; table = "movie_card"; primaryKey = "tconst"
-# … columns: tconst, primary_title, start_year, genres, average_rating, num_votes …
+db = "bff"; table = "movie_card"; primaryKey = "movie_id"
+# … columns: movie_id, title, year, genres, score, votes …
 
 [[sql-projection.source]]
-topic    = "title"          # this source's discriminator
-keyPath  = "$.tconst"       # correlate by the shared aggregate key
-onDelete = "delete-row"     # title is the spine: its delete drops the movie
+topic    = "movie"          # this source's discriminator
+keyPath  = "$.movie_id"     # correlate by the shared aggregate key
+onDelete = "delete-row"     # movie is the spine: its delete drops the row
   [[sql-projection.source.rules]]
-  set = [ { column = "primary_title", from = "$.primary_title" },
-          { column = "start_year",    from = "$.start_year" },
-          { column = "genres",        from = "$.genres" } ]
+  set = [ { column = "title",  from = "$.title" },
+          { column = "year",   from = "$.year" },
+          { column = "genres", from = "$.genres" } ]
 
 [[sql-projection.source]]
 topic    = "rating"
 onDelete = "clear"          # a contributor: its delete NULLs its columns, keeps the row
   [[sql-projection.source.rules]]
-  set = [ { column = "average_rating", from = "$.average_rating" },
-          { column = "num_votes",      from = "$.num_votes" } ]
+  set = [ { column = "score", from = "$.score" },
+          { column = "votes", from = "$.votes" } ]
 ```
 
 The single-topic form above is the one-source special case. Source topics
@@ -475,7 +475,7 @@ cleanly here — the snapshot-topic misuse warning only fires for a
 single-source projection, where there is genuinely nothing to fold.
 
 **Folding a collection into one column (aggregate).** Some BFF columns are
-*collections*: a movie's `top_cast[]` folds many `principal` rows into one
+*collections*: a movie's `top_cast[]` folds many `credit` rows into one
 JSON array on the movie row. A source declares an `aggregate` block instead
 of `rules`: `column` is the array column, `elementKey` a jsonpath to each
 child's identity within the array (its sort key, and what makes a
@@ -488,35 +488,35 @@ leaving the row.
 
 Because several sources may share one topic, a source's optional `when`
 filters which of the topic's events it folds — so one topic splits into
-different columns. Here the `principal` topic feeds `top_cast` (actors) and
+different columns. Here the `credit` topic feeds `top_cast` (actors) and
 `directors` (directors):
 
 ```toml
 [[sql-projection.source]]
-topic   = "principal"
-keyPath = "$.tconst"                 # which movie row this child folds into
-when    = [ { path = "$.category", equals = "actor" } ]
+topic   = "credit"
+keyPath = "$.movie_id"               # which movie row this child folds into
+when    = [ { path = "$.role", equals = "actor" } ]
   [sql-projection.source.aggregate]
   column         = "top_cast"
-  elementKey     = "$.ordering"      # billing order: identity + numeric sort
+  elementKey     = "$.billing"       # billing order: identity + numeric sort
   elementKeyType = "number"
     [[sql-projection.source.aggregate.element]]
-    field = "nconst"
-    from  = "$.nconst"
+    field = "person_id"
+    from  = "$.person_id"
     [[sql-projection.source.aggregate.element]]
-    field = "ordering"
-    from  = "$.ordering"
+    field = "billing"
+    from  = "$.billing"
 
 [[sql-projection.source]]
-topic   = "principal"
-keyPath = "$.tconst"
-when    = [ { path = "$.category", equals = "director" } ]
+topic   = "credit"
+keyPath = "$.movie_id"
+when    = [ { path = "$.role", equals = "director" } ]
   [sql-projection.source.aggregate]
   column     = "directors"
-  elementKey = "$.ordering"
+  elementKey = "$.billing"
     [[sql-projection.source.aggregate.element]]
-    field = "nconst"
-    from  = "$.nconst"
+    field = "person_id"
+    from  = "$.person_id"
 ```
 
 Each aggregate column is backed by a `<table>__<column>` sidecar table the
@@ -529,10 +529,10 @@ MySQL aggregate ordering is best-effort (`JSON_ARRAYAGG` ignores `ORDER
 BY`).
 
 **Enriching folded data from another topic (lookup).** A folded element often
-carries a foreign key — `top_cast` holds each cast member's `nconst`, but the
+carries a foreign key — `top_cast` holds each cast member's `person_id`, but the
 *interesting* single-table query wants the actor's name, which lives in a
-`name` topic keyed by `nconst`. A **lookup source** ingests that topic into a
-keyed dimension table, and an aggregate element resolves the key into it by a
+`person` topic keyed by `person_id`. A **lookup source** ingests that topic into
+a keyed dimension table, and an aggregate element resolves the key into it by a
 join — so the column carries the name and the query needs no join of its own.
 A lookup source declares a `lookup` block (its `name`, referenced by
 enrichments, and the `field`s it stores) instead of `rules`/`aggregate`; an
@@ -542,27 +542,27 @@ sharing a dimension coalesce into one join:
 
 ```toml
 [[sql-projection.source]]
-topic = "name"                         # the dimension topic, keyed by nconst
+topic = "person"                       # the dimension topic, keyed by person_id
   [sql-projection.source.lookup]
-  name = "names"                       # referenced by element enrichments below
+  name = "people"                      # referenced by element enrichments below
     [[sql-projection.source.lookup.field]]
-    field = "primary_name"
-    from  = "$.primary_name"
+    field = "name"
+    from  = "$.name"
 
 [[sql-projection.source]]
-topic   = "principal"
-keyPath = "$.tconst"
+topic   = "credit"
+keyPath = "$.movie_id"
   [sql-projection.source.aggregate]
   column     = "top_cast"
-  elementKey = "$.ordering"
+  elementKey = "$.billing"
     [[sql-projection.source.aggregate.element]]
-    field = "nconst"                   # the foreign key, stored
-    from  = "$.nconst"
+    field = "person_id"                # the foreign key, stored
+    from  = "$.person_id"
     [[sql-projection.source.aggregate.element]]
-    field  = "name"                    # resolved from the names dimension
-    lookup = "names"
-    on     = "nconst"                  # join the element's nconst …
-    select = "primary_name"            # … to the dimension's primary_name
+    field  = "name"                    # resolved from the people dimension
+    lookup = "people"
+    on     = "person_id"               # join the element's person_id …
+    select = "name"                    # … to the dimension's name
 ```
 
 The dimension is the source of truth (a `<table>__lookup_<name>` housekeeping
@@ -581,8 +581,8 @@ four of these):
 
 ```sh
 curl -X POST -H 'Content-Type: text/toml' \
-  --data-binary @examples/imdb/ingest-title.toml \
-  http://localhost:8080/v1/ingestable/title-ingest
+  --data-binary @examples/movies/ingest-movie.toml \
+  http://localhost:8080/v1/ingestable/movie-ingest
 ```
 
 Append a proposal directly (without going through an ingestable) — entities are
@@ -594,9 +594,9 @@ curl -X POST -H 'Content-Type: application/json' --data-binary @- \
 {
   "entities": [
     {
-      "typeId": "title",
-      "key": "tt0000001",
-      "data": { "tconst": "tt0000001", "primary_title": "Carmencita", "start_year": 1894 }
+      "typeId": "movie",
+      "key": "mv0000099",
+      "data": { "movie_id": "mv0000099", "title": "Plan 9 from Inner Join", "year": 1959 }
     }
   ]
 }

@@ -1,0 +1,28 @@
+[ingestable]
+name = "credit-ingest"
+type = "sql"
+
+[sql]
+dialect = "postgres"
+topic = "credit"
+connectionString = "postgres://test:test@db:5432/catalog?sslmode=disable"
+# Composite primary key: a movie has many credits, keyed by (movie_id, billing).
+primaryKey = ["movie_id", "billing"]
+tables = ["ingress.credit"]
+
+[sql.postgres]
+slot_name = "committed_credit_slot"
+publication = "committed_credit_pub"
+
+[[sql.mappings]]
+jsonName = "movie_id"
+column = "movie_id"
+[[sql.mappings]]
+jsonName = "billing"
+column = "billing"
+[[sql.mappings]]
+jsonName = "person_id"
+column = "person_id"
+[[sql.mappings]]
+jsonName = "role"
+column = "role"

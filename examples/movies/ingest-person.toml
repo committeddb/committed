@@ -1,0 +1,21 @@
+[ingestable]
+name = "person-ingest"
+type = "sql"
+
+[sql]
+dialect = "postgres"
+topic = "person"
+connectionString = "postgres://test:test@db:5432/catalog?sslmode=disable"
+primaryKey = "person_id"
+tables = ["ingress.person"]
+
+[sql.postgres]
+slot_name = "committed_person_slot"
+publication = "committed_person_pub"
+
+[[sql.mappings]]
+jsonName = "person_id"
+column = "person_id"
+[[sql.mappings]]
+jsonName = "name"
+column = "name"

@@ -1,0 +1,27 @@
+[ingestable]
+name = "movie-ingest"
+type = "sql"
+
+[sql]
+dialect = "postgres"
+topic = "movie"
+connectionString = "postgres://test:test@db:5432/catalog?sslmode=disable"
+primaryKey = "movie_id"
+tables = ["ingress.movie"]
+
+[sql.postgres]
+slot_name = "committed_movie_slot"
+publication = "committed_movie_pub"
+
+[[sql.mappings]]
+jsonName = "movie_id"
+column = "movie_id"
+[[sql.mappings]]
+jsonName = "title"
+column = "title"
+[[sql.mappings]]
+jsonName = "year"
+column = "year"
+[[sql.mappings]]
+jsonName = "genres"
+column = "genres"
