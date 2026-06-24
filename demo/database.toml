@@ -1,7 +1,0 @@
-[database]
-name="foo"
-type="sql"
-
-[sql]
-dialect="mysql"
-connectionString="admin:password@tcp(127.0.0.1:3306)/sink"

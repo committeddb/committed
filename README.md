@@ -4,6 +4,8 @@
 
 A single-binary, Raft-backed distributed commit log that is its own source of truth — write events in, sync them out to systems built for querying.
 
+> **New here? Start with the [Quickstart](docs/quickstart.md)** — one `docker compose up` takes a normalized IMDb dataset to a single denormalized table you query with no joins (named cast and all).
+
 Committed is a distributed commit log designed to store data long term in a log structure. Instead of the typical implementation where you are given simple read and write primitives and have to build, use adddons, or 3rd party software to aid in your read activites, Committed's two primitives are write and sync. The sync primitive is designed to move your data somewhere else. The purpose of this is to make it easy to transform or multiplex streams of data in a value added manner, or to move data into a system that has efficient querying (like a traditional SQL or NoSQL database). Committed even works with ephemeral data storage because it provides an efficient way to recreate the ephemeral storage if it fails (think Redis).
 
 Another way to think of Committed is as a serious system for creating distributed Command Query Responsibility Segregation (CQRS) systems. In this case Committed would work as the Command database and provide powerful semantics for replicating transformed data into Query systems.
@@ -184,15 +186,16 @@ OpenAPI spec is available at `/openapi.yaml` with a Swagger UI at
 auth is applied when `COMMITTED_API_TOKEN` is set (see
 [`docs/operations/authentication.md`](docs/operations/authentication.md)).
 
-Canonical example configs live in [`demo/`](demo/) — copy from there
-for working values.
+Runnable example configs live in [`examples/imdb/`](examples/imdb/), wired
+together end to end in the [Quickstart](docs/quickstart.md). The snippets below
+reference them as standalone illustrations of each endpoint.
 
 Define a type:
 
 ```sh
 curl -X POST -H 'Content-Type: text/toml' \
-  --data-binary @demo/type.toml \
-  http://localhost:8080/v1/type/simple
+  --data-binary @examples/imdb/type-title.toml \
+  http://localhost:8080/v1/type/title
 ```
 
 #### Entity kinds
@@ -254,16 +257,36 @@ Configure a database to write into (sink):
 
 ```sh
 curl -X POST -H 'Content-Type: text/toml' \
-  --data-binary @demo/database.toml \
-  http://localhost:8080/v1/database/foo
+  --data-binary @examples/imdb/db-bff.toml \
+  http://localhost:8080/v1/database/bff
 ```
 
-Configure a syncable that projects a type out to that database:
+Configure a syncable that projects a topic out to that database. The simplest
+shape is a plain `sql` syncable with `[[sql.mappings]]` extracting leaf values
+into columns:
 
 ```sh
-curl -X POST -H 'Content-Type: text/toml' \
-  --data-binary @demo/syncable-one.toml \
-  http://localhost:8080/v1/syncable/one
+curl -X POST -H 'Content-Type: text/toml' --data-binary @- \
+  http://localhost:8080/v1/syncable/titles-mirror <<'EOF'
+[syncable]
+name = "titles-mirror"
+type = "sql"
+
+[sql]
+topic = "title"
+db = "bff"
+table = "titles"
+primaryKey = "tconst"
+
+[[sql.mappings]]
+jsonPath = "$.tconst"
+column = "tconst"
+type = "TEXT"
+[[sql.mappings]]
+jsonPath = "$.primary_title"
+column = "primary_title"
+type = "TEXT"
+EOF
 ```
 
 A `[[sql.mappings]]` block usually extracts one leaf value
@@ -552,22 +575,32 @@ is synchronous; for hot, fast-changing dimensions a batched option is planned.
 One syncable fills one table — a dimension is its own internal housekeeping, so
 two syncables that need the same data each keep their own copy.
 
-Configure an ingestable that pulls from an external source into the
-log (MySQL example; see `internal/cluster/ingestable/sql/postgres_ingestable.toml`
-for a Postgres logical-replication config):
+Configure an ingestable that pulls from an external source into the log (a
+Postgres logical-replication source; the [Quickstart](docs/quickstart.md) wires
+four of these):
 
 ```sh
 curl -X POST -H 'Content-Type: text/toml' \
-  --data-binary @demo/ingestable.toml \
-  http://localhost:8080/v1/ingestable/foo
+  --data-binary @examples/imdb/ingest-title.toml \
+  http://localhost:8080/v1/ingestable/title-ingest
 ```
 
-Append a proposal directly (without going through an ingestable):
+Append a proposal directly (without going through an ingestable) — entities are
+`{ typeId, key, data }`:
 
 ```sh
-curl -X POST -H 'Content-Type: application/json' \
-  --data-binary @demo/proposal.json \
-  http://localhost:8080/v1/proposal
+curl -X POST -H 'Content-Type: application/json' --data-binary @- \
+  http://localhost:8080/v1/proposal <<'EOF'
+{
+  "entities": [
+    {
+      "typeId": "title",
+      "key": "tt0000001",
+      "data": { "tconst": "tt0000001", "primary_title": "Carmencita", "start_year": 1894 }
+    }
+  ]
+}
+EOF
 ```
 
 `/v1/proposal` is write-only — there is no endpoint to read the log back

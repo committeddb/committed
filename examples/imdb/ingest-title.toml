@@ -1,0 +1,27 @@
+[ingestable]
+name = "title-ingest"
+type = "sql"
+
+[sql]
+dialect = "postgres"
+topic = "title"
+connectionString = "postgres://test:test@db:5432/imdb?sslmode=disable"
+primaryKey = "tconst"
+tables = ["ingress.title"]
+
+[sql.postgres]
+slot_name = "committed_title_slot"
+publication = "committed_title_pub"
+
+[[sql.mappings]]
+jsonName = "tconst"
+column = "tconst"
+[[sql.mappings]]
+jsonName = "primary_title"
+column = "primary_title"
+[[sql.mappings]]
+jsonName = "start_year"
+column = "start_year"
+[[sql.mappings]]
+jsonName = "genres"
+column = "genres"

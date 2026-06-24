@@ -1,0 +1,38 @@
+# One `docker compose up` brings up everything the quickstart needs:
+#   - db:        Postgres with logical replication, preloaded with the IMDb slice
+#                (ingress schema) and an empty read schema for the BFF output.
+#   - committed: the database node, built from this repo, API on :8080.
+#
+# Then you POST a few configs and query read.movie_card. See docs/quickstart.md.
+services:
+  db:
+    image: postgres:16-alpine
+    command: ["-c", "wal_level=logical"]
+    environment:
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: imdb
+    ports:
+      # Host 55432 to avoid clashing with a local Postgres on 5432. You don't
+      # need this for the quickstart (query via `docker compose exec db psql`);
+      # it's here only if you want to point your own client at the source.
+      - "55432:5432"
+    volumes:
+      # *.sql here runs once, on first boot, as POSTGRES_USER on POSTGRES_DB.
+      - ./source.sql:/docker-entrypoint-initdb.d/source.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test -d imdb"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  committed:
+    build:
+      # The repo root is two levels up; build the committed image from its Dockerfile.
+      context: ../..
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy

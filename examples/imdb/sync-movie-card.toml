@@ -1,0 +1,104 @@
+# The read model: one denormalized row per movie, folded from four topics.
+#   - title    -> the spine (descriptive columns; its delete drops the row)
+#   - rating   -> a contributor (its columns; its delete clears them, row stays)
+#   - name     -> a dimension (nconst -> primary_name), enriched into the arrays
+#   - principal-> split by category into top_cast (actors) and directors,
+#                 each element enriched with the person's name
+# See README § SQL projections for the full mechanics.
+[syncable]
+name = "movie-card"
+type = "sql-projection"
+
+[sql-projection]
+db = "bff"
+table = "movie_card"
+primaryKey = "tconst"
+
+[[sql-projection.columns]]
+name = "tconst"
+type = "VARCHAR(16)"
+[[sql-projection.columns]]
+name = "primary_title"
+type = "VARCHAR(255)"
+[[sql-projection.columns]]
+name = "start_year"
+type = "INT"
+[[sql-projection.columns]]
+name = "genres"
+type = "VARCHAR(255)"
+[[sql-projection.columns]]
+name = "average_rating"
+type = "NUMERIC"
+[[sql-projection.columns]]
+name = "num_votes"
+type = "INT"
+[[sql-projection.columns]]
+name = "top_cast"
+type = "JSONB"
+[[sql-projection.columns]]
+name = "directors"
+type = "JSONB"
+
+[[sql-projection.source]]
+topic = "title"
+onDelete = "delete-row"
+[[sql-projection.source.rules]]
+set = [
+  { column = "primary_title", from = "$.primary_title" },
+  { column = "start_year", from = "$.start_year" },
+  { column = "genres", from = "$.genres" },
+]
+
+[[sql-projection.source]]
+topic = "rating"
+onDelete = "clear"
+[[sql-projection.source.rules]]
+set = [
+  { column = "average_rating", from = "$.average_rating" },
+  { column = "num_votes", from = "$.num_votes" },
+]
+
+[[sql-projection.source]]
+topic = "name"
+[sql-projection.source.lookup]
+name = "names"
+[[sql-projection.source.lookup.field]]
+field = "primary_name"
+from = "$.primary_name"
+
+[[sql-projection.source]]
+topic = "principal"
+keyPath = "$.tconst"
+when = [ { path = "$.category", equals = "actor" } ]
+[sql-projection.source.aggregate]
+column = "top_cast"
+elementKey = "$.ordering"
+elementKeyType = "number"
+[[sql-projection.source.aggregate.element]]
+field = "ordering"
+from = "$.ordering"
+[[sql-projection.source.aggregate.element]]
+field = "nconst"
+from = "$.nconst"
+[[sql-projection.source.aggregate.element]]
+field = "name"
+lookup = "names"
+on = "nconst"
+select = "primary_name"
+
+[[sql-projection.source]]
+topic = "principal"
+keyPath = "$.tconst"
+when = [ { path = "$.category", equals = "director" } ]
+[sql-projection.source.aggregate]
+column = "directors"
+elementKey = "$.ordering"
+elementKeyType = "number"
+[[sql-projection.source.aggregate.element]]
+field = "nconst"
+from = "$.nconst"
+[[sql-projection.source.aggregate.element]]
+field = "name"
+lookup = "names"
+on = "nconst"
+select = "primary_name"

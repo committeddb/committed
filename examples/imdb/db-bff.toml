@@ -1,0 +1,9 @@
+# The sync target. search_path=read makes committed create and write movie_card
+# (and its housekeeping tables) in the read schema, so you query read.movie_card.
+[database]
+name = "bff"
+type = "sql"
+
+[sql]
+dialect = "postgres"
+connectionString = "postgres://test:test@db:5432/imdb?search_path=read&sslmode=disable"

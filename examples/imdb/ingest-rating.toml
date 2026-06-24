@@ -1,0 +1,24 @@
+[ingestable]
+name = "rating-ingest"
+type = "sql"
+
+[sql]
+dialect = "postgres"
+topic = "rating"
+connectionString = "postgres://test:test@db:5432/imdb?sslmode=disable"
+primaryKey = "tconst"
+tables = ["ingress.rating"]
+
+[sql.postgres]
+slot_name = "committed_rating_slot"
+publication = "committed_rating_pub"
+
+[[sql.mappings]]
+jsonName = "tconst"
+column = "tconst"
+[[sql.mappings]]
+jsonName = "average_rating"
+column = "average_rating"
+[[sql.mappings]]
+jsonName = "num_votes"
+column = "num_votes"

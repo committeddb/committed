@@ -1,0 +1,21 @@
+[ingestable]
+name = "name-ingest"
+type = "sql"
+
+[sql]
+dialect = "postgres"
+topic = "name"
+connectionString = "postgres://test:test@db:5432/imdb?sslmode=disable"
+primaryKey = "nconst"
+tables = ["ingress.name"]
+
+[sql.postgres]
+slot_name = "committed_name_slot"
+publication = "committed_name_pub"
+
+[[sql.mappings]]
+jsonName = "nconst"
+column = "nconst"
+[[sql.mappings]]
+jsonName = "primary_name"
+column = "primary_name"
