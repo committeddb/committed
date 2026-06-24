@@ -19,6 +19,15 @@ import (
 // remove the record. See the cluster.Ingestable contract.
 type Dialect interface {
 	Ingest(ctx context.Context, config *Config, pos cluster.Position, pr chan<- *cluster.Proposal, po chan<- cluster.Position) error
+	// Preflight validates that the source can be ingested safely, before any
+	// worker starts. Today it is the replica-identity / binlog-row-image guard:
+	// it connects to the source and verifies every watched table's DELETE change
+	// record carries the configured primaryKey, so deletes can't be silently
+	// dropped (see CheckKeyCoverage). A non-nil error fails the ingestable's
+	// build — surfaced as a degraded config (loud, queryable), and no worker is
+	// started — rather than letting it run and quietly lose deletes. It manages
+	// its own (short) connection timeout.
+	Preflight(config *Config) error
 }
 
 type Config struct {

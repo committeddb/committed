@@ -114,6 +114,83 @@ func buildPgConfig(config *sql.Config) (*pgConfig, error) {
 	return cfg, nil
 }
 
+const preflightTimeout = 10 * time.Second
+
+// Preflight implements sql.Dialect: it verifies each watched table's REPLICA
+// IDENTITY carries the configured primaryKey on a DELETE, so the ingest can emit
+// a keyed tombstone. It is NOT "require FULL" — REPLICA IDENTITY DEFAULT is fine
+// as long as the table's primary key covers primaryKey.
+func (d *PostgreSQLDialect) Preflight(config *sql.Config) error {
+	pgCfg, err := buildPgConfig(config)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), preflightTimeout)
+	defer cancel()
+
+	db, err := gosql.Open("pgx", pgCfg.sqlConnString)
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	for _, table := range pgCfg.tables {
+		if err := checkReplicaIdentity(ctx, db, table, config.PrimaryKey); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkReplicaIdentity verifies the table's replica identity covers primaryKey
+// in a DELETE's old-row image: FULL covers every column; DEFAULT covers the
+// primary key; USING INDEX covers that index's columns; NOTHING covers nothing.
+func checkReplicaIdentity(ctx context.Context, db *gosql.DB, table string, primaryKey []string) error {
+	fix := fmt.Sprintf("set the table's REPLICA IDENTITY to carry the key "+
+		"(e.g. `ALTER TABLE %s REPLICA IDENTITY FULL`) or add a PRIMARY KEY on the configured column(s)", table)
+
+	var ident string
+	if err := db.QueryRowContext(ctx,
+		`SELECT relreplident FROM pg_class WHERE oid = $1::regclass`, table,
+	).Scan(&ident); err != nil {
+		return fmt.Errorf("read replica identity of %q: %w", table, err)
+	}
+
+	switch ident {
+	case "f": // FULL — the whole old row is in the WAL
+		return nil
+	case "n": // NOTHING — no old-row image at all
+		return sql.CheckKeyCoverage(primaryKey, nil, table, fix)
+	}
+
+	// DEFAULT ('d') → the primary-key columns; USING INDEX ('i') → that index's
+	// columns. One query covers both.
+	rows, err := db.QueryContext(ctx, `
+		SELECT a.attname
+		FROM pg_index ix
+		JOIN pg_attribute a ON a.attrelid = ix.indrelid AND a.attnum = ANY(ix.indkey)
+		WHERE ix.indrelid = $1::regclass
+		  AND (($2 = 'd' AND ix.indisprimary) OR ($2 = 'i' AND ix.indisreplident))`,
+		table, ident)
+	if err != nil {
+		return fmt.Errorf("read key columns of %q: %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var surviving []string
+	for rows.Next() {
+		var col string
+		if err := rows.Scan(&col); err != nil {
+			return err
+		}
+		surviving = append(surviving, col)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	return sql.CheckKeyCoverage(primaryKey, surviving, table, fix)
+}
+
 func (d *PostgreSQLDialect) Ingest(ctx context.Context, config *sql.Config, pos cluster.Position, pr chan<- *cluster.Proposal, po chan<- cluster.Position) error {
 	pgCfg, err := buildPgConfig(config)
 	if err != nil {

@@ -27,6 +27,13 @@ func (p *IngestableParser) Parse(v *cluster.ParsedConfig) (cluster.Ingestable, e
 		return nil, err
 	}
 
+	// Preflight before building the worker: a source that would silently drop
+	// deletes (inadequate replica identity / binlog row image) fails the build
+	// here, so it degrades loudly instead of running and quietly losing deletes.
+	if err := dialect.Preflight(config); err != nil {
+		return nil, fmt.Errorf("[ingestable.parser] preflight: %w", err)
+	}
+
 	ingestable := New(dialect, config)
 
 	return ingestable, nil

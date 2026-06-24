@@ -312,6 +312,40 @@ func createDB(t *testing.T) *gosql.DB {
 	return db
 }
 
+// TestMysqlPreflightBinlogRowImage is the guard's success criterion on real
+// MySQL: with FULL the whole before-image is logged (any table passes); with
+// MINIMAL only the row's identifying key survives, so a table whose PRIMARY KEY
+// covers the configured key passes and one without fails loud. Restores the
+// global on the way out — the container is shared.
+func TestMysqlPreflightBinlogRowImage(t *testing.T) {
+	db := createDB(t)
+	defer db.Close()
+	mk := func(q string) { _, err := db.Exec(q); require.Nil(t, err) }
+	mk("DROP TABLE IF EXISTS pf_pk, pf_nopk")
+	mk("CREATE TABLE pf_pk (id VARCHAR(32) PRIMARY KEY, v TEXT)")
+	mk("CREATE TABLE pf_nopk (id VARCHAR(32), v TEXT)")
+
+	var orig string
+	require.Nil(t, db.QueryRow("SELECT @@global.binlog_row_image").Scan(&orig))
+	defer func() { _, _ = db.Exec("SET GLOBAL binlog_row_image = '" + orig + "'") }()
+
+	dialect := &mysql.MySQLDialect{}
+	cfg := func(table string, pk ...string) *sql.Config {
+		return &sql.Config{ConnectionString: ingestURL, Tables: []string{table}, PrimaryKey: pk}
+	}
+
+	mk("SET GLOBAL binlog_row_image = 'FULL'")
+	require.NoError(t, dialect.Preflight(cfg("pf_pk", "id")))
+	require.NoError(t, dialect.Preflight(cfg("pf_nopk", "id")), "FULL logs the whole before-image, key included")
+
+	mk("SET GLOBAL binlog_row_image = 'MINIMAL'")
+	require.NoError(t, dialect.Preflight(cfg("pf_pk", "id")), "MINIMAL carries the PRIMARY KEY")
+	err := dialect.Preflight(cfg("pf_nopk", "id"))
+	require.Error(t, err, "MINIMAL + no PRIMARY KEY drops the key on delete")
+	require.Contains(t, err.Error(), "silently drop deletes")
+	require.Contains(t, err.Error(), "binlog_row_image=FULL", "the error is actionable")
+}
+
 // TestMysqlReconnect verifies that the ingestable reconnects after
 // MySQL goes away mid-stream and resumes delivering proposals once
 // MySQL comes back.

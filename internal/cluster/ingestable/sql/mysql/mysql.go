@@ -53,6 +53,73 @@ const (
 	defaultSnapshotBatchSize = 10000
 )
 
+// Preflight implements sql.Dialect: it verifies the binlog row image carries the
+// configured primaryKey on a DELETE, so the ingest can emit a keyed tombstone.
+// FULL/NOBLOB carry the whole (non-blob) before-image; only MINIMAL trims to the
+// row's identifying key, so only then must the table's PRIMARY KEY cover
+// primaryKey.
+func (m *MySQLDialect) Preflight(config *sql.Config) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	db, err := gosql.Open("mysql", buildDSN(config.ConnectionString))
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	var rowImage string
+	if err := db.QueryRowContext(ctx, `SELECT @@global.binlog_row_image`).Scan(&rowImage); err != nil {
+		return fmt.Errorf("read binlog_row_image: %w", err)
+	}
+	if !strings.EqualFold(rowImage, "MINIMAL") {
+		return nil // FULL / NOBLOB — the key (never a blob) is in the before-image
+	}
+
+	fix := "set `binlog_row_image=FULL`, or add a PRIMARY KEY covering the configured primaryKey"
+	for _, table := range config.Tables {
+		pkCols, err := mysqlPrimaryKey(ctx, db, table)
+		if err != nil {
+			return err
+		}
+		if err := sql.CheckKeyCoverage(config.PrimaryKey, pkCols, table, fix); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// mysqlPrimaryKey returns the PRIMARY KEY columns of a table in the connection's
+// current database — exactly the columns a MINIMAL binlog row image carries on a
+// DELETE.
+func mysqlPrimaryKey(ctx context.Context, db *gosql.DB, table string) ([]string, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT k.column_name
+		FROM information_schema.key_column_usage k
+		JOIN information_schema.table_constraints t
+		  ON t.constraint_schema = k.constraint_schema
+		 AND t.constraint_name = k.constraint_name
+		 AND t.table_name = k.table_name
+		WHERE t.constraint_type = 'PRIMARY KEY'
+		  AND k.table_schema = DATABASE()
+		  AND k.table_name = ?
+		ORDER BY k.ordinal_position`, table)
+	if err != nil {
+		return nil, fmt.Errorf("read primary key of %q: %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var cols []string
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			return nil, err
+		}
+		cols = append(cols, c)
+	}
+	return cols, rows.Err()
+}
+
 func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos cluster.Position, pr chan<- *cluster.Proposal, po chan<- cluster.Position) error {
 	backoff := canalBackoffMin
 

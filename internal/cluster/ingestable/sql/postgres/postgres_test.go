@@ -373,6 +373,39 @@ func TestPostgresTypedPayload(t *testing.T) {
 	}
 }
 
+// TestPostgresPreflightReplicaIdentity is the guard's success criterion on real
+// Postgres: a table whose replica identity carries the configured key passes;
+// one that would drop the key on delete fails loud — and it's coverage, not
+// "require FULL" (DEFAULT + a matching PK passes).
+func TestPostgresPreflightReplicaIdentity(t *testing.T) {
+	db := createDB(t)
+	defer db.Close()
+	mk := func(q string) { _, err := db.Exec(q); require.NoError(t, err) }
+	mk(`DROP TABLE IF EXISTS pf_default, pf_full, pf_nothing, pf_nopk, pf_comp`)
+	mk(`CREATE TABLE pf_default (id TEXT PRIMARY KEY, v TEXT)`) // DEFAULT + PK → covered
+	mk(`CREATE TABLE pf_full (id TEXT PRIMARY KEY, v TEXT)`)
+	mk(`ALTER TABLE pf_full REPLICA IDENTITY FULL`)
+	mk(`CREATE TABLE pf_nothing (id TEXT PRIMARY KEY, v TEXT)`)
+	mk(`ALTER TABLE pf_nothing REPLICA IDENTITY NOTHING`)
+	mk(`CREATE TABLE pf_nopk (id TEXT, v TEXT)`) // no PK + DEFAULT → nothing survives
+	mk(`CREATE TABLE pf_comp (a TEXT, b INT, v TEXT, PRIMARY KEY (a, b))`)
+
+	dialect := &postgres.PostgreSQLDialect{}
+	cfg := func(table string, pk ...string) *sql.Config {
+		return &sql.Config{ConnectionString: connString, Tables: []string{table}, PrimaryKey: pk}
+	}
+
+	require.NoError(t, dialect.Preflight(cfg("pf_default", "id")), "DEFAULT + PK covers the key (no FULL needed)")
+	require.NoError(t, dialect.Preflight(cfg("pf_full", "id")), "FULL covers everything")
+	require.NoError(t, dialect.Preflight(cfg("pf_comp", "a", "b")), "DEFAULT + composite PK covers a composite key")
+	require.Error(t, dialect.Preflight(cfg("pf_nothing", "id")), "NOTHING drops the key on delete")
+	require.Error(t, dialect.Preflight(cfg("pf_nopk", "id")), "no PK + DEFAULT drops the key on delete")
+
+	err := dialect.Preflight(cfg("pf_nothing", "id"))
+	require.Contains(t, err.Error(), "silently drop deletes")
+	require.Contains(t, err.Error(), "REPLICA IDENTITY FULL", "the error is actionable")
+}
+
 func insertOne(t *testing.T, table string) {
 	db := createDB(t)
 	defer db.Close()
