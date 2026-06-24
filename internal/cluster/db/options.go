@@ -70,6 +70,15 @@ type options struct {
 	// nil (the default) leaves the peer transport as plaintext HTTP.
 	tlsInfo *transport.TLSInfo
 
+	// transportFactory builds the peer Transport. The composition root injects
+	// it via WithTransportFactory (cmd wires the HTTP transport) so db never
+	// imports a concrete transport. nil is a wiring error — startRaft panics
+	// rather than run a node that can't reach its peers. It defaults to
+	// pkgDefaultTransportFactory, which production leaves nil but the db test
+	// suite sets once (see SetTestTransportFactory) so its many db.New/NewRaft
+	// call sites don't each have to wire a transport.
+	transportFactory TransportFactory
+
 	// join marks this node as joining an existing cluster rather than
 	// bootstrapping a new one. When true, startRaft calls raft.RestartNode
 	// with an empty initial state instead of raft.StartNode(c, peers): the
@@ -179,6 +188,13 @@ const DefaultMaxProposalBytes uint64 = 16 * 1024 * 1024
 // disables the automatic scheduler.
 const DefaultScrubInterval = time.Hour
 
+// pkgDefaultTransportFactory is the fallback TransportFactory defaultOptions
+// uses when a caller doesn't pass WithTransportFactory. It is nil in production
+// (the composition root passes WithTransportFactory explicitly); the db test
+// suite sets it once via SetTestTransportFactory so its many db.New / NewRaft
+// call sites don't each have to wire a transport.
+var pkgDefaultTransportFactory TransportFactory
+
 func defaultOptions() options {
 	return options{
 		tickInterval:       defaultTickInterval,
@@ -188,7 +204,17 @@ func defaultOptions() options {
 		maxProposalBytes:   DefaultMaxProposalBytes,
 		syncStuckThreshold: defaultSyncStuckThreshold,
 		scrubInterval:      DefaultScrubInterval,
+		transportFactory:   pkgDefaultTransportFactory,
 	}
+}
+
+// WithTransportFactory injects the peer-transport constructor. This is the
+// inversion-of-control seam that keeps db from importing a concrete transport:
+// cmd/node.go passes a factory that builds the HTTP transport, and db drives it
+// only through the Transport interface. Required in production — startRaft
+// panics without a factory (tests register a default via SetTestTransportFactory).
+func WithTransportFactory(f TransportFactory) Option {
+	return func(o *options) { o.transportFactory = f }
 }
 
 // WithSyncStuckThreshold overrides how long a sync worker must be blocked

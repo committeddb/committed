@@ -14,7 +14,6 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/committeddb/committed/internal/cluster"
-	"github.com/committeddb/committed/internal/cluster/db/httptransport"
 	"github.com/committeddb/committed/internal/cluster/metrics"
 )
 
@@ -107,8 +106,12 @@ type Raft struct {
 	// WithTransportWrapperForTest to inject a fault-injection layer
 	// around the real transport.
 	transportWrapper func(Transport) Transport
-	// tlsInfo is captured from the options so startRaft can pass it to
-	// httptransport.New. nil means plaintext peer transport (default).
+	// transportFactory is captured from the options so startRaft can build the
+	// peer Transport without db depending on a concrete implementation. The
+	// composition root injects it (WithTransportFactory); nil is a wiring error.
+	transportFactory TransportFactory
+	// tlsInfo is captured from the options so startRaft can pass it to the
+	// transport factory. nil means plaintext peer transport (default).
 	tlsInfo *tlstransport.TLSInfo
 
 	// closeC is closed by Close() to tell serveChannels (both its inner
@@ -158,6 +161,7 @@ func newRaftWithOptions(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []
 		transportStopC:       make(chan struct{}),
 		transportDoneC:       make(chan struct{}),
 		transportWrapper:     cfg.transportWrapper,
+		transportFactory:     cfg.transportFactory,
 		tlsInfo:              cfg.tlsInfo,
 		join:                 cfg.join,
 		closeC:               make(chan struct{}),
@@ -257,8 +261,15 @@ func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 		n.node = raft.StartNode(c, ps)
 	}
 
+	if n.transportFactory == nil {
+		// A wiring mistake, not a runtime condition: the composition root must
+		// inject a transport (WithTransportFactory). Production passes one; the
+		// db test suite registers a default. Fail loud rather than start a node
+		// that can never reach a peer.
+		panic("db: no transport factory configured — wire one with WithTransportFactory")
+	}
 	r := &httpTransportRaft{node: n.node}
-	var t Transport = httptransport.New(id, ps, n.logger, r, n.tlsInfo)
+	t := n.transportFactory(id, ps, n.logger, r, n.tlsInfo)
 	if n.transportWrapper != nil {
 		// Wrap once, before serveRaft starts driving the transport. The
 		// wrapper returns a Transport that conforms to the same interface,

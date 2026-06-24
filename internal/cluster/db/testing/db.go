@@ -8,6 +8,7 @@ import (
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
+	"github.com/committeddb/committed/internal/cluster/db/httptransport"
 	"github.com/committeddb/committed/internal/cluster/db/parser"
 )
 
@@ -29,7 +30,7 @@ func CreateDBWithStorage(s db.Storage, parser *parser.Parser, sync <-chan *db.Sy
 	peers := make(db.Peers)
 	peers[id] = ""
 
-	d := db.New(id, peers, s, parser, sync, ingest, db.WithTickInterval(testTickInterval))
+	d := db.New(id, peers, s, parser, sync, ingest, db.WithTickInterval(testTickInterval), db.WithTransportFactory(httptransport.Factory()))
 	return &DB{d, s, peers, id}
 }
 

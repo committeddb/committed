@@ -12,6 +12,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/clusterfakes"
 	"github.com/committeddb/committed/internal/cluster/db"
+	"github.com/committeddb/committed/internal/cluster/db/httptransport"
 	parser "github.com/committeddb/committed/internal/cluster/db/parser"
 	"github.com/committeddb/committed/internal/cluster/db/wal"
 )
@@ -239,7 +240,7 @@ func TestProposeIngestable_StartsIngestionWiring(t *testing.T) {
 	// with any other package that constructs a db.DB.
 	id := uint64(1)
 	peers := db.Peers{id: ""}
-	d := db.New(id, peers, storage, p, syncCh, ingest, db.WithTickInterval(1*time.Millisecond))
+	d := db.New(id, peers, storage, p, syncCh, ingest, db.WithTickInterval(1*time.Millisecond), db.WithTransportFactory(httptransport.Factory()))
 	defer d.Close()
 
 	// Register the type referenced by the fake ingestable's emitted

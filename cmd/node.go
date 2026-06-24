@@ -24,6 +24,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/committeddb/committed/internal/cluster/db"
+	"github.com/committeddb/committed/internal/cluster/db/httptransport"
 	parser "github.com/committeddb/committed/internal/cluster/db/parser"
 	"github.com/committeddb/committed/internal/cluster/db/wal"
 	"github.com/committeddb/committed/internal/cluster/http"
@@ -280,6 +281,8 @@ image can be templated per-node by an orchestrator:
 		} else if d, ok := parseDurationEnv("COMMITTED_DISK_REPORT_INTERVAL"); ok {
 			dbOpts = append(dbOpts, db.WithDiskReportInterval(d))
 		}
+
+		dbOpts = append(dbOpts, db.WithTransportFactory(httptransport.Factory()))
 
 		d := db.New(id, peers, s, p, sync, ingest, dbOpts...)
 		fmt.Printf("Raft Running...\n")

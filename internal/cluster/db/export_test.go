@@ -10,6 +10,15 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 )
 
+// SetTestTransportFactory installs the package-default TransportFactory the db
+// test suite uses, so its many db.New / NewRaft call sites don't each have to
+// wire a transport. The test harness calls this once from an init with the real
+// HTTP transport factory. Production never calls it — cmd passes
+// WithTransportFactory explicitly.
+func SetTestTransportFactory(f TransportFactory) {
+	pkgDefaultTransportFactory = f
+}
+
 // PartitionPeerForTest drops the named peer from this Raft's transport so
 // outbound messages to it become no-ops. Combined with calling the same
 // method on the OTHER side of the partition, this simulates a transport-

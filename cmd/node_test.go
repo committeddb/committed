@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/committeddb/committed/internal/cluster/db"
+	"github.com/committeddb/committed/internal/cluster/db/httptransport"
 	"github.com/committeddb/committed/internal/cluster/db/parser"
 	dbtest "github.com/committeddb/committed/internal/cluster/db/testing"
 	clusterhttp "github.com/committeddb/committed/internal/cluster/http"
@@ -33,7 +34,7 @@ func newTestDB(t *testing.T) *db.DB {
 	p := parser.New()
 	peers := make(db.Peers)
 	peers[1] = "" // empty URL skips peer-transport listener
-	d := db.New(1, peers, s, p, nil, nil, db.WithTickInterval(1*time.Millisecond))
+	d := db.New(1, peers, s, p, nil, nil, db.WithTickInterval(1*time.Millisecond), db.WithTransportFactory(httptransport.Factory()))
 	return d
 }
 
