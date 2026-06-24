@@ -13,7 +13,7 @@ Committed is a distributed commit log database built on etcd Raft consensus. It 
 ## Project Structure
 
 ```
-cmd/               CLI commands (Cobra) - node, demo-seeder, proposals
+cmd/               CLI commands (Cobra) - node, proposals
 internal/cluster/  Core domain
   db/              Raft consensus, WAL storage, sync/ingest processing
   http/            REST API handlers (Chi router)
