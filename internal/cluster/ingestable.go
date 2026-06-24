@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"errors"
 
 	"google.golang.org/protobuf/proto"
 
@@ -9,6 +10,11 @@ import (
 )
 
 type Position []byte
+
+// ErrIngestableNotRunning is returned by Cluster.IngestableStatus when no
+// ingest worker is registered for the id on the node that answered. Callers
+// (the HTTP layer) map it to 404.
+var ErrIngestableNotRunning = errors.New("cluster: no ingestable worker is running for this id")
 
 // Ingestable pulls changes from an external source (e.g. a SQL database's
 // change-data-capture stream) and emits them as Proposals into the log. It is
@@ -35,7 +41,62 @@ type Position []byte
 //counterfeiter:generate . Ingestable
 type Ingestable interface {
 	Ingest(ctx context.Context, pos Position, pr chan<- *Proposal, po chan<- Position) error
+	// Status reports the worker's point-in-time progress for pos (the
+	// persisted checkpoint position). It decodes the dialect's own cursor —
+	// snapshot phase vs. streaming, per-table snapshot progress, the CDC
+	// position — and, where the dialect supports it, queries the source for
+	// replication lag. Read-only and side-effect free: safe to call while
+	// Ingest is running. It must tolerate any pos a prior Ingest checkpointed,
+	// including the empty position (a worker that has not checkpointed yet).
+	Status(ctx context.Context, pos Position) (IngestableStatus, error)
 	Close() error
+}
+
+// IngestableStatus is a point-in-time operational snapshot of an ingestable
+// worker: which phase it is in, how far the initial snapshot got, where the
+// change-data-capture cursor sits, and how far behind the source it is. It is
+// what GET /v1/ingestable/{id}/status answers — the ingest analogue of a
+// syncable's progress/lag.
+type IngestableStatus struct {
+	// Phase is "snapshot" while the worker is still dumping existing rows, then
+	// "streaming" once the snapshot is complete and it is following the CDC
+	// stream. Derived from the checkpoint: a position that still carries
+	// snapshot progress is in the snapshot phase.
+	Phase string
+	// SnapshotProgress is per watched table: the keyset cursor reached and
+	// whether that table's snapshot finished. Present in both phases (after the
+	// snapshot completes every table reads Complete=true) so a caller can see
+	// what the snapshot covered.
+	SnapshotProgress []TableSnapshotStatus
+	// Position is the dialect's CDC cursor in its native text form — a Postgres
+	// LSN ("0/1A2B3C8") or a MySQL binlog coordinate ("binlog.000004:1547").
+	// For Postgres this checkpoint LSN is also the effectively-once resume +
+	// dedup point, so there is no separate sequence to report.
+	Position string
+	// Lag is how many bytes the source's write head is ahead of what this
+	// ingest has durably consumed (Postgres: pg_current_wal_lsn −
+	// confirmed_flush_lsn of the slot). nil when it cannot be determined —
+	// during the snapshot phase, on a dialect that does not implement it
+	// (MySQL today), or when the source is unreachable. A non-nil 0 means fully
+	// caught up.
+	Lag *uint64
+	// CaughtUp is true exactly when the snapshot is complete and Lag is a
+	// known 0 — the only state in which the read model is fully current. It is
+	// never true while Lag is nil (an unknown lag is not a caught-up lag).
+	CaughtUp bool
+}
+
+// TableSnapshotStatus is one watched table's place in the initial snapshot.
+type TableSnapshotStatus struct {
+	// Table is the source table name as configured.
+	Table string
+	// LastKey is the keyset-pagination cursor the snapshot has reached for this
+	// table (the last primary-key value dumped). Empty if the table's snapshot
+	// has not started, or once it is Complete (the cursor is no longer
+	// tracked).
+	LastKey string
+	// Complete is whether this table's snapshot finished.
+	Complete bool
 }
 
 //counterfeiter:generate . IngestableParser

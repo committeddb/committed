@@ -175,6 +175,35 @@ func (db *DB) Ingest(_ context.Context, id string, i cluster.Ingestable) error {
 	return nil
 }
 
+// IngestableStatus reports an ingestable worker's operational status — snapshot
+// vs. streaming phase, per-table snapshot progress, the CDC position, source
+// lag, and caught-up. It reads the worker's persisted checkpoint position
+// (replicated apply state, consistent on any node behind the HTTP linearize
+// barrier) and asks the parsed Ingestable to decode it and, where the dialect
+// supports it, query the source for lag.
+//
+// Every node builds and registers the worker when it applies the config
+// (isNode only gates which node actually streams), so the local handle is
+// present on any node that has the config; a missing handle means no ingestable
+// of that id is configured here, surfaced as ErrIngestableNotRunning (404).
+// The Ingestable's Status is called without holding workersMu — it makes a
+// source query and must not block the worker registry.
+func (db *DB) IngestableStatus(ctx context.Context, id string) (cluster.IngestableStatus, error) {
+	db.workersMu.Lock()
+	handle, ok := db.ingestWorkers[id]
+	var ing cluster.Ingestable
+	if ok {
+		ing = handle.ingestable
+	}
+	db.workersMu.Unlock()
+
+	if ing == nil {
+		return cluster.IngestableStatus{}, cluster.ErrIngestableNotRunning
+	}
+
+	return ing.Status(ctx, db.storage.Position(id))
+}
+
 // spawnIngestWorkerLocked installs a fresh ingest worker handle for id
 // in the registry and starts the worker goroutine. Caller MUST hold
 // db.workersMu and MUST have already ensured the registry slot for id
@@ -198,7 +227,7 @@ func (db *DB) spawnIngestWorkerLocked(id string, i cluster.Ingestable) *workerHa
 	// supersedes this worker, so the cancel is not leaked. gosec can't
 	// see through the handle indirection.
 	workerCtx, cancel := context.WithCancel(db.ctx) //nolint:gosec // G118: cancel owned by workerHandle
-	handle := &workerHandle{cancel: cancel, done: make(chan struct{})}
+	handle := &workerHandle{cancel: cancel, done: make(chan struct{}), ingestable: i}
 	db.ingestWorkers[id] = handle
 
 	go func() {

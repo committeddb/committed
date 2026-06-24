@@ -12,6 +12,7 @@ Every API endpoint is served under a major-version URL prefix:
 /v1/proposal
 /v1/database/{id}
 /v1/syncable/{id}/status
+/v1/ingestable/{id}/status
 ...
 ```
 

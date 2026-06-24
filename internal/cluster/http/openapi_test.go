@@ -204,6 +204,23 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 			},
 		},
 		{
+			name:   "GET /ingestable/{id}/status",
+			method: httpgo.MethodGet,
+			path:   "/v1/ingestable/ing-1/status",
+			setup: func(fake *clusterfakes.FakeCluster) {
+				lag := uint64(0)
+				fake.IngestableStatusReturns(cluster.IngestableStatus{
+					Phase:    "streaming",
+					Position: "0/1A2B3C8",
+					SnapshotProgress: []cluster.TableSnapshotStatus{
+						{Table: "region", Complete: true},
+					},
+					Lag:      &lag,
+					CaughtUp: true,
+				}, nil)
+			},
+		},
+		{
 			name:   "POST /ingestable/{id}/rollback",
 			method: httpgo.MethodPost,
 			path:   "/v1/ingestable/ing-1/rollback?to=1",
@@ -502,6 +519,7 @@ func TestOpenAPIContract_SpecCoversAllRoutes(t *testing.T) {
 		"/v1/ingestable/{id}",
 		"/v1/ingestable/{id}/versions",
 		"/v1/ingestable/{id}/versions/{version}",
+		"/v1/ingestable/{id}/status",
 		"/v1/ingestable/{id}/rollback",
 		"/v1/syncable",
 		"/v1/syncable/{id}",

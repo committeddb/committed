@@ -126,6 +126,7 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 			r.Post("/ingestable/{id}", h.addConfig("ingestable", h.c.ProposeIngestable))
 			r.Get("/ingestable/{id}/versions", h.getVersions("ingestable", h.c.IngestableVersions))
 			r.Get("/ingestable/{id}/versions/{version}", h.getVersion("ingestable", h.c.IngestableVersion))
+			r.Get("/ingestable/{id}/status", h.GetIngestableStatus)
 			r.Post("/ingestable/{id}/rollback", h.rollback("ingestable", h.c.IngestableVersion, h.c.ProposeIngestable))
 
 			// /proposal is write-only by design: Committed is a commit log,

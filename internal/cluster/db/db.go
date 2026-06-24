@@ -208,6 +208,10 @@ type workerHandle struct {
 	// syncable) without re-parsing the config — which would re-run Init. It is
 	// nil for ingest workers (deleteSync only reads it for syncables).
 	syncable cluster.Syncable
+	// ingestable is the parsed Ingestable this worker runs, retained so the
+	// status path can ask it to decode its persisted position and query source
+	// lag (IngestableStatus) without re-parsing. It is nil for syncable workers.
+	ingestable cluster.Ingestable
 }
 
 // waiter is the per-request state used by blocking db.Propose. ack is

@@ -103,6 +103,7 @@ Any other value is rejected with `400 invalid_consistency`.
 | `GET /v1/{database,ingestable,syncable,type}` (list) | linearizable by default |
 | `GET /v1/{resource}/{id}/versions` and `.../versions/{version}` | linearizable by default |
 | `GET /v1/syncable/{id}/errors`, `GET /v1/syncable/{id}/status` | linearizable by default |
+| `GET /v1/ingestable/{id}/status` | linearizable by default — the persisted snapshot/CDC position reads behind the barrier; the `lag` number is a live source query |
 | `GET /health`, `GET /ready`, `GET /version` | **never** — these are liveness/readiness/build probes; gating `/ready` on quorum would defeat its purpose |
 | `GET /v1/node/status` | **never** — node-local diagnostics (applied index, degraded configs) are deliberately a per-node view, not a replicated one |
 | `GET /openapi.yaml`, `GET /docs` | **never** — static API documentation |

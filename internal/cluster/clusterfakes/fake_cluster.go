@@ -186,6 +186,20 @@ type FakeCluster struct {
 	ingestReturnsOnCall map[int]struct {
 		result1 error
 	}
+	IngestableStatusStub        func(context.Context, string) (cluster.IngestableStatus, error)
+	ingestableStatusMutex       sync.RWMutex
+	ingestableStatusArgsForCall []struct {
+		arg1 context.Context
+		arg2 string
+	}
+	ingestableStatusReturns struct {
+		result1 cluster.IngestableStatus
+		result2 error
+	}
+	ingestableStatusReturnsOnCall map[int]struct {
+		result1 cluster.IngestableStatus
+		result2 error
+	}
 	IngestableVersionStub        func(string, uint64) (*cluster.Configuration, error)
 	ingestableVersionMutex       sync.RWMutex
 	ingestableVersionArgsForCall []struct {
@@ -1480,6 +1494,71 @@ func (fake *FakeCluster) IngestReturnsOnCall(i int, result1 error) {
 	fake.ingestReturnsOnCall[i] = struct {
 		result1 error
 	}{result1}
+}
+
+func (fake *FakeCluster) IngestableStatus(arg1 context.Context, arg2 string) (cluster.IngestableStatus, error) {
+	fake.ingestableStatusMutex.Lock()
+	ret, specificReturn := fake.ingestableStatusReturnsOnCall[len(fake.ingestableStatusArgsForCall)]
+	fake.ingestableStatusArgsForCall = append(fake.ingestableStatusArgsForCall, struct {
+		arg1 context.Context
+		arg2 string
+	}{arg1, arg2})
+	stub := fake.IngestableStatusStub
+	fakeReturns := fake.ingestableStatusReturns
+	fake.recordInvocation("IngestableStatus", []interface{}{arg1, arg2})
+	fake.ingestableStatusMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeCluster) IngestableStatusCallCount() int {
+	fake.ingestableStatusMutex.RLock()
+	defer fake.ingestableStatusMutex.RUnlock()
+	return len(fake.ingestableStatusArgsForCall)
+}
+
+func (fake *FakeCluster) IngestableStatusCalls(stub func(context.Context, string) (cluster.IngestableStatus, error)) {
+	fake.ingestableStatusMutex.Lock()
+	defer fake.ingestableStatusMutex.Unlock()
+	fake.IngestableStatusStub = stub
+}
+
+func (fake *FakeCluster) IngestableStatusArgsForCall(i int) (context.Context, string) {
+	fake.ingestableStatusMutex.RLock()
+	defer fake.ingestableStatusMutex.RUnlock()
+	argsForCall := fake.ingestableStatusArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2
+}
+
+func (fake *FakeCluster) IngestableStatusReturns(result1 cluster.IngestableStatus, result2 error) {
+	fake.ingestableStatusMutex.Lock()
+	defer fake.ingestableStatusMutex.Unlock()
+	fake.IngestableStatusStub = nil
+	fake.ingestableStatusReturns = struct {
+		result1 cluster.IngestableStatus
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) IngestableStatusReturnsOnCall(i int, result1 cluster.IngestableStatus, result2 error) {
+	fake.ingestableStatusMutex.Lock()
+	defer fake.ingestableStatusMutex.Unlock()
+	fake.IngestableStatusStub = nil
+	if fake.ingestableStatusReturnsOnCall == nil {
+		fake.ingestableStatusReturnsOnCall = make(map[int]struct {
+			result1 cluster.IngestableStatus
+			result2 error
+		})
+	}
+	fake.ingestableStatusReturnsOnCall[i] = struct {
+		result1 cluster.IngestableStatus
+		result2 error
+	}{result1, result2}
 }
 
 func (fake *FakeCluster) IngestableVersion(arg1 string, arg2 uint64) (*cluster.Configuration, error) {

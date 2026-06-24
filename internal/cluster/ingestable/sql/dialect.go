@@ -28,6 +28,13 @@ type Dialect interface {
 	// started — rather than letting it run and quietly lose deletes. It manages
 	// its own (short) connection timeout.
 	Preflight(config *Config) error
+	// Status decodes pos into a point-in-time IngestableStatus — phase, per-table
+	// snapshot progress, and the CDC cursor — and, where the dialect supports it,
+	// queries the source for replication lag. Read-only and side-effect free; it
+	// manages its own short connection timeout for any source query and tolerates
+	// the empty position (a worker that has not checkpointed yet). A source-query
+	// failure leaves Lag nil rather than failing the whole status.
+	Status(ctx context.Context, config *Config, pos cluster.Position) (cluster.IngestableStatus, error)
 }
 
 type Config struct {

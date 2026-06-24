@@ -381,6 +381,37 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/NotLinearizable'
+  /v1/ingestable/{id}/status:
+    get:
+      tags: [ingestable]
+      summary: Report an ingestable worker's snapshot/streaming progress and lag
+      description: |
+        Reports an ingestable worker's operational status: snapshot vs.
+        streaming phase, per-table snapshot progress, the CDC position (a
+        Postgres LSN), how many bytes it is behind the source, and whether it is
+        caught up. The ingest analogue of `GET /v1/syncable/{id}/status`. Read
+        behind a linearize barrier so the persisted position is consistent on
+        whichever node answers; the lag is a live query against the source slot.
+      operationId: getIngestableStatus
+      parameters:
+        - $ref: '#/components/parameters/Consistency'
+        - $ref: '#/components/parameters/ResourceId'
+      responses:
+        '200':
+          description: The ingestable's current worker status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestableStatusResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/NotLinearizable'
+
   /v1/ingestable/{id}/rollback:
     post:
       tags: [ingestable]
@@ -1799,6 +1830,66 @@ components:
         caught_up:
           type: boolean
           description: True iff lag == 0 — the syncable has nothing left to process. Always present.
+
+    IngestableStatusResponse:
+      type: object
+      required: [phase, snapshotProgress, position, lag, caughtUp]
+      description: An ingestable worker's current operational status and progress.
+      properties:
+        phase:
+          type: string
+          enum: [snapshot, streaming]
+          description: |
+            `snapshot` while the worker is still dumping existing rows, then
+            `streaming` once it is following the change-data-capture stream.
+        snapshotProgress:
+          type: array
+          description: |
+            Per watched table. Present in both phases — once the snapshot
+            finishes every table reads `complete: true`.
+          items:
+            $ref: '#/components/schemas/TableSnapshotProgress'
+        position:
+          type: string
+          description: |
+            The dialect's CDC cursor in native text form: a Postgres LSN
+            (`0/1A2B3C8`) or a MySQL binlog coordinate (`binlog.000004:1547`).
+            Empty before the worker has checkpointed. For Postgres this is also
+            the effectively-once resume + dedup point.
+        lag:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
+          description: |
+            Bytes the source's write head is ahead of what this ingest has
+            durably consumed (Postgres: pg_current_wal_lsn − the slot's
+            confirmed_flush_lsn). `null` when it cannot be determined — during
+            the snapshot phase, on MySQL (source lag is a follow-on), or when
+            the source is unreachable. A non-null 0 means fully caught up.
+        caughtUp:
+          type: boolean
+          description: |
+            True exactly when the snapshot is complete and lag is a known 0 —
+            the only state in which the read model is fully current. Never true
+            while lag is null.
+
+    TableSnapshotProgress:
+      type: object
+      required: [table, complete]
+      description: One watched table's place in the initial snapshot.
+      properties:
+        table:
+          type: string
+          description: The source table name, as configured.
+        lastKey:
+          type: string
+          description: |
+            The keyset-pagination cursor reached for this table (the last
+            primary-key value dumped). Omitted once the table is complete or
+            before its snapshot starts.
+        complete:
+          type: boolean
+          description: Whether this table's snapshot finished.
 
     AddMemberRequest:
       type: object

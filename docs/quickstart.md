@@ -84,11 +84,18 @@ for i in movie rating credit person; do post "ingest-$i.toml" "/v1/ingestable/$i
 ```
 
 Each ingestable snapshots its `ingress` table into a topic, then streams live
-changes. Watch the snapshots land:
+changes. Ask any ingestable how it's doing — snapshot vs. streaming, and whether
+it has caught up to the source:
 
 ```sh
-docker compose logs committed | grep "snapshot: table complete"
+curl -fsS localhost:8080/v1/ingestable/movie-ingest/status
+# {"phase":"streaming","snapshotProgress":[{"table":"ingress.movie","complete":true}],
+#  "position":"0/1A2B3C8","lag":0,"caughtUp":true}
 ```
+
+When each ingestable reads `"caughtUp":true`, its snapshot is done and the topic
+is tracking the source live. (`lag` is bytes behind the source; `phase` is
+`snapshot` until the initial dump finishes.)
 
 <details><summary>What each config is</summary>
 

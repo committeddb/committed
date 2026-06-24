@@ -40,6 +40,14 @@ func (i *ProposalIngestable) Ingest(ctx context.Context, pos cluster.Position, p
 	return nil
 }
 
+// Status reports a static status: a ProposalIngestable has no external source,
+// snapshot, or CDC cursor — it emits a fixed set of proposals and finishes — so
+// there is nothing to snapshot, no position to track, and no source lag to
+// measure.
+func (i *ProposalIngestable) Status(context.Context, cluster.Position) (cluster.IngestableStatus, error) {
+	return cluster.IngestableStatus{Phase: "streaming"}, nil
+}
+
 func (i *ProposalIngestable) Close() error {
 	return nil
 }

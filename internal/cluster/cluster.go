@@ -60,6 +60,14 @@ type Cluster interface {
 	DatabaseVersion(id string, version uint64) (*Configuration, error)
 	IngestableVersions(id string) ([]VersionInfo, error)
 	IngestableVersion(id string, version uint64) (*Configuration, error)
+	// IngestableStatus reports an ingestable worker's operational status —
+	// snapshot vs. streaming phase, per-table snapshot progress, the CDC
+	// position, source lag, and whether it is caught up. It reads the worker's
+	// persisted checkpoint (replicated, so consistent on any node behind a
+	// linearize barrier) and asks the dialect to decode it and, where supported,
+	// query the source for lag. Returns ErrIngestableNotRunning if no worker is
+	// registered for id on this node. Powers GET /v1/ingestable/{id}/status.
+	IngestableStatus(ctx context.Context, id string) (IngestableStatus, error)
 	SyncableVersions(id string) ([]VersionInfo, error)
 	SyncableVersion(id string, version uint64) (*Configuration, error)
 	// SyncableDeadLetters returns the proposals a syncable gave up on and

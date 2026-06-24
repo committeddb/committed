@@ -5,6 +5,7 @@ import (
 	gosql "database/sql"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"net/url"
@@ -265,6 +266,89 @@ func encodePosition(lsn pglogrepl.LSN, progress *dialectpb.SnapshotProgress) ([]
 	out = append(out, pgPositionProtoMagic)
 	out = append(out, raw...)
 	return out, nil
+}
+
+// statusLagTimeout bounds the source query Status makes to read replication
+// lag. Status is a read endpoint, so it must not hang on an unreachable source —
+// a failed/late query simply leaves Lag nil.
+const statusLagTimeout = 5 * time.Second
+
+// Status implements sql.Dialect: it decodes the checkpoint position into a
+// point-in-time IngestableStatus and, once streaming, queries the slot for
+// replication lag. A position that still carries snapshot progress is in the
+// snapshot phase (lag isn't meaningful yet — the slot is parked at its creation
+// LSN); once snapshot progress is gone the worker is streaming and lag is the
+// slot's distance behind the source write head.
+func (d *PostgreSQLDialect) Status(ctx context.Context, config *sql.Config, pos cluster.Position) (cluster.IngestableStatus, error) {
+	lsn, progress, err := decodePosition(pos)
+	if err != nil {
+		return cluster.IngestableStatus{}, fmt.Errorf("[postgres.status] decode position: %w", err)
+	}
+
+	status := cluster.IngestableStatus{
+		Position:         lsn.String(),
+		SnapshotProgress: sql.SnapshotTableStatus(config, progress),
+	}
+
+	if progress != nil {
+		status.Phase = "snapshot"
+		return status, nil
+	}
+	status.Phase = "streaming"
+
+	// Streaming: read the slot's lag. A failure (source unreachable, slot not
+	// yet created) leaves Lag nil — the rest of the status is still useful — so
+	// it is logged, not returned.
+	lag, ok, lagErr := d.replicationLag(ctx, config)
+	if lagErr != nil {
+		zap.L().Debug("[postgres.status] replication lag query failed",
+			zap.String("slot", config.Options["slot_name"]), zap.Error(lagErr))
+	} else if ok {
+		status.Lag = &lag
+		status.CaughtUp = lag == 0
+	}
+
+	return status, nil
+}
+
+// replicationLag returns how many bytes the source's write head is ahead of the
+// slot's confirmed flush — the durable backlog this ingest still has to consume.
+// ok is false (lag unknown, not an error) when the slot does not exist yet or
+// has no confirmed flush LSN; a real query failure returns the error so the
+// caller can log it and leave Lag nil.
+func (d *PostgreSQLDialect) replicationLag(ctx context.Context, config *sql.Config) (uint64, bool, error) {
+	pgCfg, err := buildPgConfig(config)
+	if err != nil {
+		return 0, false, err
+	}
+
+	cctx, cancel := context.WithTimeout(ctx, statusLagTimeout)
+	defer cancel()
+
+	db, err := gosql.Open("pgx", pgCfg.sqlConnString)
+	if err != nil {
+		return 0, false, fmt.Errorf("open connection: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	var diff gosql.NullInt64
+	err = db.QueryRowContext(cctx,
+		`SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)::bigint
+		 FROM pg_replication_slots WHERE slot_name = $1`, pgCfg.slotName).Scan(&diff)
+	switch {
+	case errors.Is(err, gosql.ErrNoRows):
+		return 0, false, nil // slot not created yet — lag not yet meaningful
+	case err != nil:
+		return 0, false, fmt.Errorf("query slot lag: %w", err)
+	case !diff.Valid:
+		return 0, false, nil // confirmed_flush_lsn is NULL — slot never confirmed
+	}
+
+	// A healthy slot can momentarily report a tiny negative diff; clamp.
+	if diff.Int64 < 0 {
+		return 0, true, nil
+	}
+	return uint64(diff.Int64), true, nil
 }
 
 // stream runs one replication session. It connects, ensures the publication

@@ -21,6 +21,10 @@ func (i *Ingestable) Ingest(ctx context.Context, pos cluster.Position, pr chan<-
 	return i.dialect.Ingest(ctx, i.config, pos, pr, po)
 }
 
+func (i *Ingestable) Status(ctx context.Context, pos cluster.Position) (cluster.IngestableStatus, error) {
+	return i.dialect.Status(ctx, i.config, pos)
+}
+
 func (i *Ingestable) Close() error {
 	return nil
 }

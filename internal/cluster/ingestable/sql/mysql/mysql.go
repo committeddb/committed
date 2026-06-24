@@ -120,6 +120,39 @@ func mysqlPrimaryKey(ctx context.Context, db *gosql.DB, table string) ([]string,
 	return cols, rows.Err()
 }
 
+// Status implements sql.Dialect: it decodes the binlog checkpoint into a
+// point-in-time IngestableStatus (phase, per-table snapshot progress, and the
+// binlog coordinate as "file:pos"). Lag is left nil: a MySQL binlog
+// file+position has no single-number byte distance from the source write head
+// the way a Postgres LSN does, so source-lag for MySQL is a deliberate
+// follow-on (see the ingest-status-endpoint ticket). With Lag nil, CaughtUp is
+// never true — an unknown lag is not a caught-up lag.
+func (m *MySQLDialect) Status(_ context.Context, config *sql.Config, pos cluster.Position) (cluster.IngestableStatus, error) {
+	var progress *dialectpb.SnapshotProgress
+	var position string
+	if len(pos) > 0 {
+		posProto := &dialectpb.MySQLBinLogPosition{}
+		if err := proto.Unmarshal(pos, posProto); err != nil {
+			return cluster.IngestableStatus{}, fmt.Errorf("[mysql.status] decode position: %w", err)
+		}
+		progress = posProto.SnapshotProgress
+		if posProto.Name != "" {
+			position = fmt.Sprintf("%s:%d", posProto.Name, posProto.Pos)
+		}
+	}
+
+	status := cluster.IngestableStatus{
+		Position:         position,
+		SnapshotProgress: sql.SnapshotTableStatus(config, progress),
+	}
+	if progress != nil {
+		status.Phase = "snapshot"
+	} else {
+		status.Phase = "streaming"
+	}
+	return status, nil
+}
+
 func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos cluster.Position, pr chan<- *cluster.Proposal, po chan<- cluster.Position) error {
 	backoff := canalBackoffMin
 

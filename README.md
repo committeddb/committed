@@ -585,6 +585,15 @@ curl -X POST -H 'Content-Type: text/toml' \
   http://localhost:8080/v1/ingestable/movie-ingest
 ```
 
+Check how an ingestable is doing — snapshot vs. streaming phase, per-table
+snapshot progress, the CDC position, source lag, and whether it has caught up:
+
+```sh
+curl http://localhost:8080/v1/ingestable/movie-ingest/status
+# {"phase":"streaming","snapshotProgress":[{"table":"ingress.movie","complete":true}],
+#  "position":"0/1A2B3C8","lag":0,"caughtUp":true}
+```
+
 Append a proposal directly (without going through an ingestable) — entities are
 `{ typeId, key, data }`:
 
