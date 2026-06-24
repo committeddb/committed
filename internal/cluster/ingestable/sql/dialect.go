@@ -35,12 +35,32 @@ type Dialect interface {
 	// the empty position (a worker that has not checkpointed yet). A source-query
 	// failure leaves Lag nil rather than failing the whole status.
 	Status(ctx context.Context, config *Config, pos cluster.Position) (cluster.IngestableStatus, error)
+	// SourceColumns returns the column names of each watched table (keyed by the
+	// table name as configured), in source order, for expanding a MapAllColumns
+	// config into explicit mappings at build time. Read-only schema
+	// introspection; it manages its own short connection timeout. Only called
+	// when MapAllColumns is set.
+	SourceColumns(config *Config) (map[string][]string, error)
 }
 
 type Config struct {
 	ConnectionString string
 	Type             *cluster.Type
 	Mappings         []Mapping
+	// MapAllColumns infers a jsonName=column mapping for every source column
+	// (across all watched Tables) so a whole-table mirror needs no per-column
+	// [[sql.mappings]]. The column set is FROZEN at config-build time: the
+	// parser introspects the source once and expands MapAllColumns into explicit
+	// Mappings, so a column added to the source later does not silently enter
+	// payloads until the config is re-POSTed. Any explicit Mappings override the
+	// inferred mapping for that column (a rename); ExcludeColumns drops columns
+	// from the inferred set. Once the parser has expanded it, Mappings is the
+	// full explicit set and the runtime never sees MapAllColumns.
+	MapAllColumns bool
+	// ExcludeColumns are source columns to omit from the MapAllColumns set
+	// (secrets, large blobs). Only meaningful with MapAllColumns. Column names
+	// are matched as the source reports them.
+	ExcludeColumns []string
 	// PrimaryKey is the source table's primary-key column(s). A single column
 	// keys each entity by its bare value; multiple columns (a composite PK, e.g.
 	// IMDb principals' (tconst, ordering)) key by all of them so rows sharing a

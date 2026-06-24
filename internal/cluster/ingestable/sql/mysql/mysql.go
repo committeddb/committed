@@ -153,6 +153,58 @@ func (m *MySQLDialect) Status(_ context.Context, config *sql.Config, pos cluster
 	return status, nil
 }
 
+// SourceColumns implements sql.Dialect: it introspects each watched table's
+// columns (in ordinal order) so the parser can expand a MapAllColumns config
+// into explicit mappings. Read-only; one short-lived connection.
+func (m *MySQLDialect) SourceColumns(config *sql.Config) (map[string][]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	db, err := gosql.Open("mysql", buildDSN(config.ConnectionString))
+	if err != nil {
+		return nil, fmt.Errorf("connect: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	out := make(map[string][]string, len(config.Tables))
+	for _, table := range config.Tables {
+		cols, err := mysqlTableColumns(ctx, db, table)
+		if err != nil {
+			return nil, err
+		}
+		if len(cols) == 0 {
+			return nil, fmt.Errorf("source table %q has no columns (does it exist?)", table)
+		}
+		out[table] = cols
+	}
+	return out, nil
+}
+
+// mysqlTableColumns returns a table's columns in ordinal order, from the
+// connection's current database.
+func mysqlTableColumns(ctx context.Context, db *gosql.DB, table string) ([]string, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT column_name
+		FROM information_schema.columns
+		WHERE table_schema = DATABASE()
+		  AND table_name = ?
+		ORDER BY ordinal_position`, table)
+	if err != nil {
+		return nil, fmt.Errorf("read columns of %q: %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var cols []string
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			return nil, err
+		}
+		cols = append(cols, c)
+	}
+	return cols, rows.Err()
+}
+
 func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos cluster.Position, pr chan<- *cluster.Proposal, po chan<- cluster.Position) error {
 	backoff := canalBackoffMin
 

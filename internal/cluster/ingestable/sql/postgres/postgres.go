@@ -351,6 +351,66 @@ func (d *PostgreSQLDialect) replicationLag(ctx context.Context, config *sql.Conf
 	return uint64(diff.Int64), true, nil
 }
 
+// SourceColumns implements sql.Dialect: it introspects each watched table's
+// columns (in source order) so the parser can expand a MapAllColumns config
+// into explicit mappings. Read-only; one short-lived connection bounded by the
+// build-time timeout.
+func (d *PostgreSQLDialect) SourceColumns(config *sql.Config) (map[string][]string, error) {
+	pgCfg, err := buildPgConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), preflightTimeout)
+	defer cancel()
+
+	db, err := gosql.Open("pgx", pgCfg.sqlConnString)
+	if err != nil {
+		return nil, fmt.Errorf("open connection: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	out := make(map[string][]string, len(config.Tables))
+	for _, table := range config.Tables {
+		cols, err := pgTableColumns(ctx, db, table)
+		if err != nil {
+			return nil, err
+		}
+		if len(cols) == 0 {
+			return nil, fmt.Errorf("source table %q has no columns (does it exist?)", table)
+		}
+		out[table] = cols
+	}
+	return out, nil
+}
+
+// pgTableColumns returns a table's user columns in attribute order. It resolves
+// the table via ::regclass so a schema-qualified name ("ingress.movie") works,
+// and skips dropped and system columns.
+func pgTableColumns(ctx context.Context, db *gosql.DB, table string) ([]string, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT a.attname
+		FROM pg_attribute a
+		WHERE a.attrelid = $1::regclass
+		  AND a.attnum > 0
+		  AND NOT a.attisdropped
+		ORDER BY a.attnum`, table)
+	if err != nil {
+		return nil, fmt.Errorf("read columns of %q: %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var cols []string
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			return nil, err
+		}
+		cols = append(cols, c)
+	}
+	return cols, rows.Err()
+}
+
 // stream runs one replication session. It connects, ensures the publication
 // and slot exist, starts streaming, and processes messages until the
 // connection breaks or ctx is canceled. On commit boundaries it updates

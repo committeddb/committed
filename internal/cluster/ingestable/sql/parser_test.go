@@ -110,6 +110,73 @@ column = "pk"
 	require.Contains(t, err.Error(), "oracle")
 }
 
+// TestParseMapAllColumns: ParseConfig records mapAllColumns + excludeColumns and
+// leaves the listed mappings as the (unexpanded) overrides — Parse expands them
+// against the live schema, which ParseConfig does not touch.
+func TestParseMapAllColumns(t *testing.T) {
+	toml := `
+[ingestable]
+name="movies"
+type="sql"
+
+[sql]
+dialect="postgres"
+topic = "movie"
+connectionString="postgres://u:p@localhost:5432/db?sslmode=disable"
+primaryKey = "movie_id"
+tables = ["ingress.movie"]
+mapAllColumns = true
+excludeColumns = ["internal_notes"]
+
+[sql.postgres]
+slot_name = "s"
+
+[[sql.mappings]]
+jsonName = "movieId"
+column = "movie_id"
+`
+	v := readConfig(t, "toml", bytes.NewReader([]byte(toml)))
+	tiper := &sqlfakes.FakeTyper{}
+	tiper.ResolveTypeReturns(simpleType, nil)
+	p := sql.NewIngestableParser(tiper)
+	p.Dialects["postgres"] = &postgres.PostgreSQLDialect{}
+
+	config, _, err := p.ParseConfig(v)
+	require.NoError(t, err)
+	require.True(t, config.MapAllColumns)
+	require.Equal(t, []string{"internal_notes"}, config.ExcludeColumns)
+	require.Equal(t, []sql.Mapping{{JsonName: "movieId", SQLColumn: "movie_id"}}, config.Mappings)
+}
+
+// TestParseExcludeColumnsRequiresMapAll: excludeColumns without mapAllColumns is
+// a misconfiguration (it would silently do nothing), caught at parse.
+func TestParseExcludeColumnsRequiresMapAll(t *testing.T) {
+	toml := `
+[ingestable]
+name="movies"
+type="sql"
+
+[sql]
+dialect="postgres"
+topic = "movie"
+connectionString="postgres://u:p@localhost:5432/db?sslmode=disable"
+primaryKey = "movie_id"
+tables = ["ingress.movie"]
+excludeColumns = ["secret"]
+
+[sql.postgres]
+slot_name = "s"
+`
+	v := readConfig(t, "toml", bytes.NewReader([]byte(toml)))
+	tiper := &sqlfakes.FakeTyper{}
+	tiper.ResolveTypeReturns(simpleType, nil)
+	p := sql.NewIngestableParser(tiper)
+	p.Dialects["postgres"] = &postgres.PostgreSQLDialect{}
+
+	_, _, err := p.ParseConfig(v)
+	require.ErrorContains(t, err, "excludeColumns requires sql.mapAllColumns")
+}
+
 func simpleConfig() *sql.Config {
 	m1 := sql.Mapping{JsonName: "pk", SQLColumn: "pk"}
 	m2 := sql.Mapping{JsonName: "one", SQLColumn: "one"}

@@ -106,8 +106,9 @@ is tracking the source live. (`lag` is bytes behind the source; `phase` is
   rows, the natural shape for a table mirror).
 - **`ingest-*.toml`** — pulls each `ingress` table into its topic over Postgres
   logical replication: an initial snapshot of existing rows, then the live tail.
-  `credit` has a **composite key** `["movie_id", "billing"]` — many cast/crew per
-  movie — so the rows don't collide.
+  Each is just a connection, a table, and `mapAllColumns = true` — that mirrors
+  every column 1:1, no per-column boilerplate. `credit` has a **composite key**
+  `["movie_id", "billing"]` — many cast/crew per movie — so the rows don't collide.
 
 See [README § API tour](../README.md#api-tour) for the config shapes.
 </details>

@@ -8,17 +8,8 @@ topic = "rating"
 connectionString = "postgres://test:test@db:5432/catalog?sslmode=disable"
 primaryKey = "movie_id"
 tables = ["ingress.rating"]
+mapAllColumns = true
 
 [sql.postgres]
 slot_name = "committed_rating_slot"
 publication = "committed_rating_pub"
-
-[[sql.mappings]]
-jsonName = "movie_id"
-column = "movie_id"
-[[sql.mappings]]
-jsonName = "score"
-column = "score"
-[[sql.mappings]]
-jsonName = "votes"
-column = "votes"

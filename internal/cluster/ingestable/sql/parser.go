@@ -27,6 +27,20 @@ func (p *IngestableParser) Parse(v *cluster.ParsedConfig) (cluster.Ingestable, e
 		return nil, err
 	}
 
+	// Expand a map-all config into explicit mappings against the live source
+	// schema, freezing the column set at build time — a column added later does
+	// not silently enter payloads until the config is re-POSTed. Done before
+	// Preflight so the fully-built config is what we validate and run.
+	if config.MapAllColumns {
+		colsByTable, err := dialect.SourceColumns(config)
+		if err != nil {
+			return nil, fmt.Errorf("[ingestable.parser] map all columns: %w", err)
+		}
+		if err := expandMapAllColumns(config, colsByTable); err != nil {
+			return nil, fmt.Errorf("[ingestable.parser] map all columns: %w", err)
+		}
+	}
+
 	// Preflight before building the worker: a source that would silently drop
 	// deletes (inadequate replica identity / binlog row image) fails the build
 	// here, so it degrades loudly instead of running and quietly losing deletes.
@@ -54,6 +68,16 @@ func (p *IngestableParser) ParseConfig(v *cluster.ParsedConfig) (*Config, Dialec
 		return nil, nil, fmt.Errorf("parse sql.mappings: %w", err)
 	}
 
+	// mapAllColumns infers a jsonName=column mapping for every source column;
+	// any listed mappings then override the inferred one (a rename), and
+	// excludeColumns drops columns from the inferred set. The parser expands all
+	// this against the live schema in Parse.
+	mapAllColumns := v.GetBool("sql.mapAllColumns")
+	excludeColumns := v.GetStringSlice("sql.excludeColumns")
+	if len(excludeColumns) > 0 && !mapAllColumns {
+		return nil, nil, fmt.Errorf("sql.excludeColumns requires sql.mapAllColumns = true")
+	}
+
 	tables := v.GetStringSlice("sql.tables")
 	options := v.GetStringMapString("sql." + dialectName)
 
@@ -71,6 +95,8 @@ func (p *IngestableParser) ParseConfig(v *cluster.ParsedConfig) (*Config, Dialec
 		ConnectionString: connectionString,
 		Type:             tipe,
 		Mappings:         mappings,
+		MapAllColumns:    mapAllColumns,
+		ExcludeColumns:   excludeColumns,
 		PrimaryKey:       primaryKey,
 		Tables:           tables,
 		Options:          options,
