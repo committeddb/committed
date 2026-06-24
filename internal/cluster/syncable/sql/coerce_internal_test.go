@@ -1,0 +1,65 @@
+package sql
+
+import (
+	"encoding/json"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
+
+// TestCoerceForColumn covers the typed-payload → sink-column coercion: a
+// JSON-native scalar must be rendered as the form its declared column accepts,
+// since the driver will not bridge a number into a text column (or vice versa).
+func TestCoerceForColumn(t *testing.T) {
+	// A numeric value mapped into a text column binds as its exact digits —
+	// this is the regression that broke the CDC round trip (number into a TEXT
+	// sink: pgx "cannot find encode plan").
+	require.Equal(t, "1", coerceForColumn(json.Number("1"), "TEXT"))
+	require.Equal(t, "1", coerceForColumn(json.Number("1"), "VARCHAR(25)"))
+	require.Equal(t, "9007199254740993", coerceForColumn(json.Number("9007199254740993"), "TEXT"),
+		"json.Number preserves digits beyond float64's exact range")
+	require.Equal(t, "100.00", coerceForColumn(json.Number("100.00"), "TEXT"),
+		"a decimal's exact source text survives, trailing zeros and all")
+
+	// The same numeric value mapped into a numeric column binds as a native
+	// scalar the driver's numeric codec accepts.
+	require.Equal(t, int64(1), coerceForColumn(json.Number("1"), "INTEGER"))
+	require.Equal(t, int64(42), coerceForColumn(json.Number("42"), "BIGINT"))
+	require.Equal(t, 1.5, coerceForColumn(json.Number("1.5"), "NUMERIC(15,2)"))
+	require.Equal(t, int64(7), coerceForColumn(json.Number("7"), "double precision"))
+
+	// Strings pass through for text columns.
+	require.Equal(t, "AMERICA", coerceForColumn("AMERICA", "TEXT"))
+
+	// Booleans: native for a bool column, text for a text column.
+	require.Equal(t, true, coerceForColumn(true, "BOOLEAN"))
+	require.Equal(t, "true", coerceForColumn(true, "TEXT"))
+	require.Equal(t, "false", coerceForColumn(false, "VARCHAR(5)"))
+
+	// An embedded JSON object mapped into a text/json column binds as compact
+	// JSON text.
+	obj := map[string]any{"a": json.Number("1")}
+	require.Equal(t, `{"a":1}`, coerceForColumn(obj, "JSONB"))
+	require.Equal(t, "raw", coerceForColumn(json.RawMessage(`raw`), "TEXT"))
+
+	// SQL NULL passes through untouched regardless of column type.
+	require.Nil(t, coerceForColumn(nil, "TEXT"))
+	require.Nil(t, coerceForColumn(nil, "INTEGER"))
+}
+
+func TestColumnIsNumericOrBool(t *testing.T) {
+	for _, ty := range []string{
+		"INT", "integer", "INT4", "BIGINT", "smallint", "TINYINT",
+		"DECIMAL(15,2)", "NUMERIC(10,0)", "double precision", "REAL",
+		"FLOAT", "MONEY", "SERIAL", "BOOL", "BOOLEAN",
+	} {
+		require.Truef(t, columnIsNumericOrBool(ty), "%q should be numeric/bool", ty)
+	}
+	for _, ty := range []string{
+		"TEXT", "VARCHAR(25)", "CHAR(1)", "CHARACTER VARYING", "UUID",
+		"JSON", "JSONB", "DATE", "TIMESTAMP", "TIMESTAMPTZ", "INTERVAL",
+		"BYTEA", "", "  ",
+	} {
+		require.Falsef(t, columnIsNumericOrBool(ty), "%q should bind as text", ty)
+	}
+}

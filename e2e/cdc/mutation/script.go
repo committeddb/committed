@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -345,10 +346,11 @@ func opKindString(k opKind) string {
 }
 
 // JSONNormalize converts an Expected's Data into the same JSON shape
-// committed produces. pgoutput emits text-encoded column values, so
-// integer keys come through as strings in committed's stream. This
-// helper applies the same coercion to the expected side so the oracle
-// compares like with like.
+// committed produces. committed ingests typed payloads: a numeric source
+// column lands as a JSON number, a boolean as a JSON bool, a text column as a
+// string. This helper applies the same typing to the expected side — keyed off
+// the Go type of the row value the test supplied — so the oracle compares like
+// with like.
 func JSONNormalize(d map[string]any) string {
 	// Sort keys so the JSON is byte-stable.
 	keys := make([]string, 0, len(d))
@@ -358,35 +360,34 @@ func JSONNormalize(d map[string]any) string {
 	sort.Strings(keys)
 	out := map[string]any{}
 	for _, k := range keys {
-		out[k] = coerceForPgout(d[k])
+		out[k] = coerceForTypedPayload(d[k])
 	}
 	b, _ := json.Marshal(out)
 	return string(b)
 }
 
-// coerceForPgout matches pgoutput's text-encoding behavior. pgoutput
-// sends every column as a text string, so committed's tupleToEntity
-// stores everything as string in the JSON. We coerce ints, floats, and
-// nils accordingly.
-func coerceForPgout(v any) any {
+// coerceForTypedPayload models committed's typed-payload encoding. The source
+// column type decides the JSON type, and in these tests the Go type of the row
+// value stands in for the column type: an int column's value is a Go int and
+// renders as a JSON number, a text column's value is a Go string, a bool a JSON
+// bool. Numbers are emitted as json.Number so they marshal as JSON numbers with
+// their exact digits, matching what the ingest writes to the log.
+func coerceForTypedPayload(v any) any {
 	switch x := v.(type) {
 	case nil:
 		return nil
 	case string:
 		return x
 	case int:
-		return fmt.Sprintf("%d", x)
+		return json.Number(strconv.Itoa(x))
 	case int32:
-		return fmt.Sprintf("%d", x)
+		return json.Number(strconv.FormatInt(int64(x), 10))
 	case int64:
-		return fmt.Sprintf("%d", x)
+		return json.Number(strconv.FormatInt(x, 10))
 	case float64:
-		return fmt.Sprintf("%v", x)
+		return json.Number(strconv.FormatFloat(x, 'f', -1, 64))
 	case bool:
-		if x {
-			return "t"
-		}
-		return "f"
+		return x
 	}
 	return fmt.Sprintf("%v", v)
 }

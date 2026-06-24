@@ -1,6 +1,7 @@
 package sql
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -217,13 +218,20 @@ func (c *Syncable) applyEntity(ctx context.Context, tx *sql.Tx, e *cluster.Entit
 		return nil
 	}
 
+	// Decode with UseNumber so a numeric leaf stays json.Number — its exact
+	// source digits — rather than collapsing to float64 (which corrupts
+	// integers above 2^53). coerceForColumn then renders it for the
+	// destination column, and the whole-payload path binds the raw bytes
+	// untouched regardless.
+	dec := json.NewDecoder(bytes.NewReader(e.Data))
+	dec.UseNumber()
 	var jsonData any
-	if err := json.Unmarshal(e.Data, &jsonData); err != nil {
+	if err := dec.Decode(&jsonData); err != nil {
 		return cluster.Permanent(fmt.Errorf("unmarshal entity data: %w", err))
 	}
 
 	var values []any
-	for _, path := range c.insert.JsonPath {
+	for i, path := range c.insert.JsonPath {
 		// A whole-payload mapping binds the raw submitted bytes (already
 		// validated as JSON by the unmarshal above). Re-marshaling jsonData
 		// instead would round-trip numbers through float64 — corrupting
@@ -236,7 +244,11 @@ func (c *Syncable) applyEntity(ctx context.Context, tx *sql.Tx, e *cluster.Entit
 		if err != nil {
 			return cluster.Permanent(fmt.Errorf("jsonpath [%v]: %w", path, err))
 		}
-		values = append(values, res)
+		// A typed payload carries JSON-native scalars; coerce each to the form
+		// its declared sink column expects (e.g. a numeric source value mapped
+		// into a TEXT column must bind as text). JsonPath and Mappings are built
+		// from the same config slice in order, so index i lines up.
+		values = append(values, coerceForColumn(res, c.config.Mappings[i].SQLType))
 	}
 
 	// The dialect decides how values map to placeholders: MySQL repeats them
