@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
+	"github.com/jackc/pgx/v5/pgtype"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
@@ -478,6 +479,38 @@ func ensurePublication(ctx context.Context, conn *pgconn.PgConn, pgCfg *pgConfig
 // result is a delete (tombstone) entity keyed by the row's primary key — the
 // tuple supplies only the key, not a payload (a source DELETE removes the
 // downstream record; see the cluster.Syncable honor-deletes contract).
+// pgCategoryForOID maps a PostgreSQL type OID (carried in a logical-replication
+// relation message, the CDC path) to a JSON category. Unlisted OIDs render as
+// text. Kept in sync with pgCategoryForTypeName so snapshot and CDC agree.
+func pgCategoryForOID(oid uint32) sql.JSONCategory {
+	switch oid {
+	case pgtype.Int2OID, pgtype.Int4OID, pgtype.Int8OID,
+		pgtype.Float4OID, pgtype.Float8OID, pgtype.NumericOID:
+		return sql.CatNumber
+	case pgtype.BoolOID:
+		return sql.CatBool
+	case pgtype.JSONOID, pgtype.JSONBOID:
+		return sql.CatJSON
+	}
+	return sql.CatText
+}
+
+// pgCategoryForTypeName maps a database/sql DatabaseTypeName (the snapshot path,
+// where the driver reports a type name not an OID) to a JSON category. Kept in
+// sync with pgCategoryForOID.
+func pgCategoryForTypeName(name string) sql.JSONCategory {
+	switch strings.ToUpper(name) {
+	case "INT2", "INT4", "INT8", "SMALLINT", "INTEGER", "BIGINT",
+		"FLOAT4", "FLOAT8", "REAL", "DOUBLE PRECISION", "NUMERIC", "DECIMAL":
+		return sql.CatNumber
+	case "BOOL", "BOOLEAN":
+		return sql.CatBool
+	case "JSON", "JSONB":
+		return sql.CatJSON
+	}
+	return sql.CatText
+}
+
 func tupleToEntity(
 	tuple *pglogrepl.TupleData,
 	relationID uint32,
@@ -534,10 +567,15 @@ func tupleToEntity(
 		return cluster.NewDeleteEntity(config.Type, []byte(key))
 	}
 
-	// Apply column mappings.
+	// Each relation column carries its type OID; render mapped values as their
+	// natural JSON type rather than the pgoutput text.
+	cat := make(map[string]sql.JSONCategory, len(rel.Columns))
+	for _, rc := range rel.Columns {
+		cat[strings.ToLower(rc.Name)] = pgCategoryForOID(rc.DataType)
+	}
 	toJSON := make(map[string]any)
 	for _, mapping := range config.Mappings {
-		toJSON[mapping.JsonName] = m[mapping.SQLColumn]
+		toJSON[mapping.JsonName] = sql.JSONValue(m[mapping.SQLColumn], cat[mapping.SQLColumn])
 	}
 
 	jsonBytes, err := json.Marshal(toJSON)
@@ -757,6 +795,14 @@ func readBatch(
 	if err != nil {
 		return nil, "", 0, err
 	}
+	colTypes, err := rows.ColumnTypes()
+	if err != nil {
+		return nil, "", 0, err
+	}
+	cats := make([]sql.JSONCategory, len(colTypes))
+	for i, ct := range colTypes {
+		cats[i] = pgCategoryForTypeName(ct.DatabaseTypeName())
+	}
 
 	var entities []*cluster.Entity
 	var batchLastPK string
@@ -771,21 +817,29 @@ func readBatch(
 			return nil, "", 0, err
 		}
 
+		// m holds the text form, used only for the entity key (unchanged so keys
+		// stay stable and match the CDC path). raw/catByName carry the value and
+		// its type so the payload renders as natural JSON.
 		m := make(map[string]any)
+		raw := make(map[string]any)
+		catByName := make(map[string]sql.JSONCategory)
 		for i, colName := range columns {
+			lc := strings.ToLower(colName)
 			v := vals[i]
+			raw[lc] = v
+			catByName[lc] = cats[i]
 			if v == nil {
-				m[strings.ToLower(colName)] = nil
+				m[lc] = nil
 			} else if b, ok := v.([]byte); ok {
-				m[strings.ToLower(colName)] = string(b)
+				m[lc] = string(b)
 			} else {
-				m[strings.ToLower(colName)] = fmt.Sprintf("%v", v)
+				m[lc] = fmt.Sprintf("%v", v)
 			}
 		}
 
 		toJSON := make(map[string]any)
 		for _, mapping := range config.Mappings {
-			toJSON[mapping.JsonName] = m[mapping.SQLColumn]
+			toJSON[mapping.JsonName] = sql.JSONValue(raw[mapping.SQLColumn], catByName[mapping.SQLColumn])
 		}
 
 		jsonBytes, err := json.Marshal(toJSON)

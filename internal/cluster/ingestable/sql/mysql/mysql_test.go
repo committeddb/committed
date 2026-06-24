@@ -3,8 +3,10 @@
 package mysql_test
 
 import (
+	"bytes"
 	"context"
 	gosql "database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -197,6 +199,81 @@ func TestMysqlDialect(t *testing.T) {
 				t.Fatal("Ingest did not exit after cancel")
 			}
 		})
+	}
+}
+
+// TestMysqlTypedPayload is the type-fidelity criterion on real MySQL via the
+// snapshot path (the one that stringified — canal already types the binlog):
+// int/decimal/tinyint/json columns ingest as their natural JSON types, not
+// strings. MySQL has no native bool, so a tinyint is a number.
+func TestMysqlTypedPayload(t *testing.T) {
+	const table = "typed_table"
+	typedType := &cluster.Type{ID: "typed", Name: "typed"}
+
+	db := createDB(t)
+	_, err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS `%s`", table))
+	require.Nil(t, err)
+	_, err = db.Exec(fmt.Sprintf("CREATE TABLE `%s` (pk VARCHAR(32) NOT NULL PRIMARY KEY, n INT, r DECIMAL(6,2), b TINYINT, j JSON)", table))
+	require.Nil(t, err)
+	// Inserted before Ingest starts → captured by the snapshot.
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, n, r, b, j) VALUES ('a', 1994, 9.50, 1, '{\"k\":1}')", table))
+	require.Nil(t, err)
+	db.Close()
+
+	cfg := sql.Config{
+		Type:             typedType,
+		ConnectionString: ingestURL,
+		Tables:           []string{table},
+		PrimaryKey:       []string{"pk"},
+		Mappings: []sql.Mapping{
+			{JsonName: "pk", SQLColumn: "pk"},
+			{JsonName: "n", SQLColumn: "n"},
+			{JsonName: "r", SQLColumn: "r"},
+			{JsonName: "b", SQLColumn: "b"},
+			{JsonName: "j", SQLColumn: "j"},
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	proposalChan := make(chan *cluster.Proposal)
+	positionChan := make(chan cluster.Position)
+	ingestErr := make(chan error, 1)
+	go func() { ingestErr <- (&mysql.MySQLDialect{}).Ingest(ctx, &cfg, nil, proposalChan, positionChan) }()
+
+	var got *cluster.Entity
+	deadline := time.After(15 * time.Second)
+	for got == nil {
+		select {
+		case p := <-proposalChan:
+			for _, e := range p.Entities {
+				if string(e.Key) == "a" {
+					got = e
+				}
+			}
+		case <-positionChan:
+		case <-deadline:
+			t.Fatal("timed out waiting for the snapshot entity")
+		}
+	}
+	cancel()
+
+	dec := json.NewDecoder(bytes.NewReader(got.Data))
+	dec.UseNumber()
+	var m map[string]any
+	require.NoError(t, dec.Decode(&m))
+	require.IsType(t, json.Number(""), m["n"], "int column is a JSON number")
+	require.Equal(t, "1994", m["n"].(json.Number).String())
+	require.IsType(t, json.Number(""), m["r"], "decimal column is a JSON number")
+	require.IsType(t, json.Number(""), m["b"], "tinyint (mysql bool) is a JSON number")
+	require.IsType(t, map[string]any{}, m["j"], "json column embeds as an object, not a string")
+	require.IsType(t, "", m["pk"], "text column stays a string")
+
+	select {
+	case err := <-ingestErr:
+		require.Nil(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Ingest did not exit after cancel")
 	}
 }
 

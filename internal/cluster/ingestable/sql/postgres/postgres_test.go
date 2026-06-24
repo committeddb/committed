@@ -3,8 +3,10 @@
 package postgres_test
 
 import (
+	"bytes"
 	"context"
 	gosql "database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -270,6 +272,104 @@ func TestPostgresDialect(t *testing.T) {
 				t.Fatal("Ingest did not exit after cancel")
 			}
 		})
+	}
+}
+
+// TestPostgresTypedPayload is the type-fidelity criterion on real Postgres:
+// int/numeric/bool/jsonb columns ingest as their natural JSON types (not
+// strings), and a row captured by the snapshot has the same JSON shape as a row
+// captured by CDC. One row is inserted before Ingest starts (snapshot) and one
+// after the slot is ready (CDC); both must come back typed and identical in
+// shape.
+func TestPostgresTypedPayload(t *testing.T) {
+	const table = "pgtest_typed"
+	typedType := &cluster.Type{ID: "typed", Name: "typed"}
+	config := &sql.Config{
+		Type:             typedType,
+		ConnectionString: connString,
+		Tables:           []string{table},
+		PrimaryKey:       []string{"pk"},
+		Mappings: []sql.Mapping{
+			{JsonName: "pk", SQLColumn: "pk"},
+			{JsonName: "n", SQLColumn: "n"},
+			{JsonName: "r", SQLColumn: "r"},
+			{JsonName: "b", SQLColumn: "b"},
+			{JsonName: "j", SQLColumn: "j"},
+		},
+		Options: map[string]string{"slot_name": "slot_typed", "publication": "pub_typed"},
+	}
+
+	db := createDB(t)
+	_, err := db.Exec(`DROP TABLE IF EXISTS ` + table)
+	require.NoError(t, err)
+	_, err = db.Exec(`CREATE TABLE ` + table + ` (pk VARCHAR(32) PRIMARY KEY, n INT, r NUMERIC, b BOOL, j JSONB)`)
+	require.NoError(t, err)
+	// Snapshot row — inserted before the dialect starts.
+	_, err = db.Exec(`INSERT INTO ` + table + ` VALUES ('a', 1994, 9.50, true, '{"k":1}')`)
+	require.NoError(t, err)
+	db.Close()
+
+	cleanReplication(t, "slot_typed", "pub_typed")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	proposalChan := make(chan *cluster.Proposal, 10)
+	positionChan := make(chan cluster.Position, 10)
+	ingestErr := make(chan error, 1)
+	go func() {
+		ingestErr <- (&postgres.PostgreSQLDialect{}).Ingest(ctx, config, nil, proposalChan, positionChan)
+	}()
+
+	waitForSlot(t, "slot_typed")
+
+	// CDC row — inserted after the slot exists.
+	db = createDB(t)
+	_, err = db.Exec(`INSERT INTO ` + table + ` VALUES ('b', 2008, 9.00, false, '{"k":2}')`)
+	require.NoError(t, err)
+	db.Close()
+
+	seen := map[string]*cluster.Entity{}
+	deadline := time.After(20 * time.Second)
+	for len(seen) < 2 {
+		select {
+		case p := <-proposalChan:
+			for _, e := range p.Entities {
+				seen[string(e.Key)] = e
+			}
+		case <-positionChan:
+		case <-deadline:
+			t.Fatalf("timed out; got %d of 2 entities", len(seen))
+		}
+	}
+	cancel()
+
+	// decode with UseNumber so a JSON number stays a json.Number (not float64),
+	// letting us assert the column came through as a number, not a string.
+	typed := func(key string) map[string]any {
+		dec := json.NewDecoder(bytes.NewReader(seen[key].Data))
+		dec.UseNumber()
+		var m map[string]any
+		require.NoError(t, dec.Decode(&m))
+		return m
+	}
+	for _, key := range []string{"a", "b"} {
+		m := typed(key)
+		require.IsType(t, json.Number(""), m["n"], "int column is a JSON number")
+		require.IsType(t, json.Number(""), m["r"], "numeric column is a JSON number")
+		require.IsType(t, false, m["b"], "bool column is a JSON bool")
+		require.IsType(t, map[string]any{}, m["j"], "jsonb column embeds as an object, not a string")
+		require.IsType(t, "", m["pk"], "text column stays a string")
+	}
+	require.Equal(t, "1994", typed("a")["n"].(json.Number).String(), "snapshot int value")
+	require.Equal(t, "2008", typed("b")["n"].(json.Number).String(), "CDC int value")
+	require.Equal(t, true, typed("a")["b"], "snapshot bool")
+	require.Equal(t, false, typed("b")["b"], "CDC bool")
+
+	select {
+	case err := <-ingestErr:
+		require.Nil(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Ingest did not exit after cancel")
 	}
 }
 

@@ -16,6 +16,7 @@ import (
 	"github.com/go-mysql-org/go-mysql/canal"
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
+	"github.com/go-mysql-org/go-mysql/schema"
 	_ "github.com/go-sql-driver/mysql"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
@@ -272,31 +273,60 @@ type MySQLEventHandler struct {
 	pending []*cluster.Entity
 }
 
+// mysqlCategoryForCanalType maps a canal column type (the binlog/CDC path) to a
+// JSON category. MySQL has no native bool — a tinyint(1) is a number — so there
+// is no bool category. Kept in sync with mysqlCategoryForTypeName.
+func mysqlCategoryForCanalType(t int) sql.JSONCategory {
+	switch t {
+	case schema.TYPE_NUMBER, schema.TYPE_FLOAT, schema.TYPE_DECIMAL, schema.TYPE_MEDIUM_INT:
+		return sql.CatNumber
+	case schema.TYPE_JSON:
+		return sql.CatJSON
+	}
+	return sql.CatText
+}
+
+// mysqlCategoryForTypeName maps a database/sql DatabaseTypeName (the snapshot
+// path) to a JSON category. Kept in sync with mysqlCategoryForCanalType.
+func mysqlCategoryForTypeName(name string) sql.JSONCategory {
+	switch strings.ToUpper(name) {
+	case "TINYINT", "SMALLINT", "MEDIUMINT", "INT", "INTEGER", "BIGINT", "YEAR",
+		"FLOAT", "DOUBLE", "DECIMAL", "NUMERIC":
+		return sql.CatNumber
+	case "JSON":
+		return sql.CatJSON
+	}
+	return sql.CatText
+}
+
 func (h *MySQLEventHandler) OnRow(e *canal.RowsEvent) error {
 	if !slices.Contains(h.tables, strings.ToLower(e.Table.Name)) {
 		return nil
 	}
 
+	// m holds the key form: canal already decodes numbers/floats to typed Go
+	// values; coerce []byte (TEXT/BLOB/JSON) to string so the key is text and
+	// matches the snapshot path. raw/catByName keep the value and its canal type
+	// so the payload renders as natural JSON.
 	m := make(map[string]any)
+	raw := make(map[string]any)
+	catByName := make(map[string]sql.JSONCategory)
 	row := e.Rows[len(e.Rows)-1]
 	for i, c := range e.Table.Columns {
+		lc := strings.ToLower(c.Name)
 		val := row[i]
-		// The MySQL binlog stream delivers TEXT/BLOB columns as []byte
-		// while VARCHAR columns come through as string. Coerce []byte
-		// to string here so json.Marshal produces text rather than
-		// base64 (json.Marshal of a []byte field base64-encodes it,
-		// which would turn "one" into "b25l"). Binary BLOB columns
-		// are not a concern for any current caller of this dialect.
+		raw[lc] = val
+		catByName[lc] = mysqlCategoryForCanalType(c.Type)
 		if b, ok := val.([]byte); ok {
-			val = string(b)
+			m[lc] = string(b)
+		} else {
+			m[lc] = val
 		}
-		m[strings.ToLower(c.Name)] = val
 	}
 
 	toJSON := make(map[string]any)
 	for _, mapping := range h.config.Mappings {
-		value := m[mapping.SQLColumn]
-		toJSON[mapping.JsonName] = value
+		toJSON[mapping.JsonName] = sql.JSONValue(raw[mapping.SQLColumn], catByName[mapping.SQLColumn])
 	}
 
 	jsonString, err := json.Marshal(toJSON)
@@ -857,6 +887,14 @@ func readBatch(
 	if err != nil {
 		return nil, "", 0, err
 	}
+	colTypes, err := rows.ColumnTypes()
+	if err != nil {
+		return nil, "", 0, err
+	}
+	cats := make([]sql.JSONCategory, len(colTypes))
+	for i, ct := range colTypes {
+		cats[i] = mysqlCategoryForTypeName(ct.DatabaseTypeName())
+	}
 
 	var entities []*cluster.Entity
 	var batchLastPK string
@@ -871,21 +909,30 @@ func readBatch(
 			return nil, "", 0, err
 		}
 
+		// m holds the text form, used only for the entity key (unchanged so keys
+		// stay stable and match the CDC path). raw/catByName carry the value and
+		// its type so the payload renders as natural JSON, matching what canal
+		// produces on the binlog path.
 		m := make(map[string]any)
+		raw := make(map[string]any)
+		catByName := make(map[string]sql.JSONCategory)
 		for i, colName := range columns {
+			lc := strings.ToLower(colName)
 			v := vals[i]
+			raw[lc] = v
+			catByName[lc] = cats[i]
 			if v == nil {
-				m[strings.ToLower(colName)] = nil
+				m[lc] = nil
 			} else if b, ok := v.([]byte); ok {
-				m[strings.ToLower(colName)] = string(b)
+				m[lc] = string(b)
 			} else {
-				m[strings.ToLower(colName)] = fmt.Sprintf("%v", v)
+				m[lc] = fmt.Sprintf("%v", v)
 			}
 		}
 
 		toJSON := make(map[string]any)
 		for _, mapping := range config.Mappings {
-			toJSON[mapping.JsonName] = m[mapping.SQLColumn]
+			toJSON[mapping.JsonName] = sql.JSONValue(raw[mapping.SQLColumn], catByName[mapping.SQLColumn])
 		}
 
 		jsonBytes, err := json.Marshal(toJSON)
