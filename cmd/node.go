@@ -165,17 +165,21 @@ image can be templated per-node by an orchestrator:
 		// backends (Prometheus, Datadog, etc.). When unset, m stays nil and
 		// every metrics call is a nil-safe no-op (zero overhead).
 		var m *metrics.Metrics
+		// meterProvider is kept so the observable lag gauges can be registered
+		// after db.New (their callbacks read the live db at scrape time). nil
+		// when metrics are disabled.
+		var meterProvider *sdkmetric.MeterProvider
 		if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "" {
 			ctx := context.Background()
 			exporter, err := otlpmetricgrpc.New(ctx)
 			if err != nil {
 				log.Fatalf("otel exporter: %v", err)
 			}
-			provider := sdkmetric.NewMeterProvider(
+			meterProvider = sdkmetric.NewMeterProvider(
 				sdkmetric.WithReader(sdkmetric.NewPeriodicReader(exporter)),
 			)
-			defer func() { _ = provider.Shutdown(context.Background()) }()
-			m = metrics.New(provider.Meter("committed"))
+			defer func() { _ = meterProvider.Shutdown(context.Background()) }()
+			m = metrics.New(meterProvider.Meter("committed"))
 		}
 
 		// Pass the real logger so storage-layer warnings are visible in
@@ -286,6 +290,14 @@ image can be templated per-node by an orchestrator:
 
 		d := db.New(id, peers, s, p, sync, ingest, dbOpts...)
 		fmt.Printf("Raft Running...\n")
+
+		// Observable sync/ingest lag gauges read the live db at scrape time, so
+		// they register after db.New. No-op when metrics are disabled.
+		if meterProvider != nil {
+			if err := metrics.RegisterLagGauges(meterProvider.Meter("committed"), d); err != nil {
+				log.Fatalf("register lag gauges: %v", err)
+			}
+		}
 
 		var httpOpts []http.Option
 		if apiToken != "" {
