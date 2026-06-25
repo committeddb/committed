@@ -2,7 +2,14 @@
 
 package harness
 
-import "testing"
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/committeddb/committed/e2e/cdc/dataset"
+	"github.com/committeddb/committed/e2e/cdc/mutation"
+)
 
 // Engine abstracts the source-database-specific behavior of the CDC harness so
 // the same scenario/oracle flow can eventually run against Postgres or MySQL.
@@ -25,4 +32,18 @@ type Engine interface {
 	// SlotName returns the Postgres replication slot for a table (preflight +
 	// readiness gating). Empty for engines without slots.
 	SlotName(table string) string
+
+	// WaitReady gates until the table's ingestable is streaming (snapshot done).
+	WaitReady(t *testing.T, table string)
+	// WaitReadyCtx is the context-bounded readiness gate for source-restart paths.
+	WaitReadyCtx(ctx context.Context, table string, timeout time.Duration)
+	// SinkValue reads column col of the sink row keyed by pk, and whether it exists.
+	SinkValue(table, pk, col string) (string, bool)
+	// SinkCount returns the number of rows in a topic's sink table.
+	SinkCount(t *testing.T, table string) int
+	// Load bulk-inserts the dataset into the source database.
+	Load(ctx context.Context, ds dataset.Dataset) error
+
+	// Execer runs mutation scripts against the source (one Txn per recordedTxn).
+	mutation.Execer
 }

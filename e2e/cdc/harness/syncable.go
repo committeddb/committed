@@ -61,13 +61,7 @@ func postSyncable(t *testing.T, table string) {
 // asynchronously) reports (", false) rather than failing — callers poll via
 // WaitForSinkValue.
 func (h *Harness) SinkValue(table, pk, col string) (string, bool) {
-	q := fmt.Sprintf("SELECT %s FROM %s WHERE %s = $1",
-		col, SinkTable(table), dataset.PrimaryKey(table))
-	var v string
-	if err := h.pgConn.QueryRow(h.ctx, q, pk).Scan(&v); err != nil {
-		return "", false
-	}
-	return v, true
+	return h.engine.SinkValue(table, pk, col)
 }
 
 // WaitForSinkValue polls until the sink row pk has col == want, or fails the
@@ -119,10 +113,5 @@ func (h *Harness) WaitForSinkAbsent(t *testing.T, table, pk string, timeout time
 // table does not exist yet.
 func (h *Harness) SinkCount(t *testing.T, table string) int {
 	t.Helper()
-	var n int
-	if err := h.pgConn.QueryRow(h.ctx,
-		fmt.Sprintf("SELECT count(*) FROM %s", SinkTable(table))).Scan(&n); err != nil {
-		return 0
-	}
-	return n
+	return h.engine.SinkCount(t, table)
 }

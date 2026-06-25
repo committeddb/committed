@@ -79,11 +79,15 @@ func New(t *testing.T, opts ...Options) *Harness {
 
 	// 1. Postgres.
 	h.pg, h.pgConnStr = startPostgres(t)
-	h.engine = newPostgresEngine(h.pgConnStr)
 
 	pgConn, err := pgx.Connect(ctx, h.pgConnStr)
 	require.NoError(t, err, "connect pgx")
 	h.pgConn = pgConn
+
+	// The engine borrows the source connection for its source-side ops
+	// (readiness, sink reads, load, mutation execution). The harness still owns
+	// the connection + container lifecycle.
+	h.engine = newPostgresEngine(ctx, pgConn, h.pgConnStr)
 
 	// 2. Schema (DDL) — applied before committed boots so the publication
 	// created later finds the tables it references.
@@ -108,9 +112,9 @@ func New(t *testing.T, opts ...Options) *Harness {
 		h.engine.PostIngestable(t, table)
 	}
 
-	// 6. Wait for every slot to be active.
+	// 6. Wait for every ingestable to reach streaming.
 	for _, table := range o.Tables {
-		h.waitForIngestableReady(t, h.engine.SlotName(table))
+		h.engine.WaitReady(t, table)
 	}
 
 	// 6a. One webhook syncable per topic, POSTing every committed Actual to
@@ -160,7 +164,7 @@ func (h *Harness) Load(t *testing.T, ds dataset.Dataset) {
 			expected[table] = 1
 		}
 	}
-	require.NoError(t, dataset.Load(h.ctx, h.pgConn, ds), "load dataset")
+	require.NoError(t, h.engine.Load(h.ctx, ds), "load dataset")
 	h.waitForCounts(t, expected, 60*time.Second)
 	h.baseline = h.snapshotCounts(t)
 }
@@ -332,7 +336,7 @@ func (h *Harness) RestartCommitted(t *testing.T) {
 	// supervisor spawns the dialect, and the dialect reconnects to
 	// the existing slot from the persisted position.
 	for _, table := range h.topics {
-		h.waitForIngestableReady(t, h.engine.SlotName(table))
+		h.engine.WaitReady(t, table)
 	}
 }
 
@@ -365,33 +369,15 @@ func (h *Harness) RestartPostgres(ctx context.Context) error {
 		return fmt.Errorf("reconnect pgx after restart: %w", err)
 	}
 	h.pgConn = conn
+	// Repoint the engine (which borrows the connection) at the new conn before
+	// re-gating readiness.
+	h.engine.(*postgresEngine).conn = conn
 
 	// Wait for the ingestable's dialect to reconnect — it polls and
 	// retries on its own, but a few hundred ms gives it room before
 	// the test runs more mutations.
 	for _, table := range h.topics {
-		h.waitForIngestableReadyContext(ctx, h.engine.SlotName(table), 30*time.Second)
+		h.engine.WaitReadyCtx(ctx, table, 30*time.Second)
 	}
 	return nil
-}
-
-// waitForIngestableReadyContext is the context-aware counterpart of
-// waitForIngestableReady, used by RestartPostgres where we don't have
-// a *testing.T at the deepest call site (Close uses bg ctx too).
-func (h *Harness) waitForIngestableReadyContext(ctx context.Context, slot string, timeout time.Duration) {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		var active bool
-		err := h.pgConn.QueryRow(ctx,
-			"SELECT active FROM pg_replication_slots WHERE slot_name=$1", slot,
-		).Scan(&active)
-		if err == nil && active {
-			return
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(100 * time.Millisecond):
-		}
-	}
 }

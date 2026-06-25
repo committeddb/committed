@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -67,47 +66,4 @@ func postConfig(t *testing.T, path, body string) {
 	t.Logf("POST %s: %d %s", path, resp.StatusCode, string(b))
 }
 
-// waitForIngestableReady polls Postgres until the replication slot
-// exists AND is active (a consumer is attached). Without this gate,
-// mutations issued immediately after postIngestable race the ingestable
-// startup and produce a flaky "lost initial events" failure mode.
-//
-// Mirrors the waitForSlot helper in
-// internal/cluster/ingestable/sql/postgres/postgres_test.go.
-func (h *Harness) waitForIngestableReady(t *testing.T, slot string) {
-	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		// pg_stat_replication.state == 'streaming' is the right gate
-		// for "snapshot done AND streaming live." The slot's `active`
-		// flag flips true when the dialect connects (before snapshot),
-		// not after, so racing on `active` lets test mutations slip
-		// into the dialect's snapshot REPEATABLE READ batches and
-		// double-count as both snapshot+streaming proposals.
-		var state string
-		err := h.pgConn.QueryRow(h.ctx, `
-			SELECT s.state
-			FROM pg_stat_replication s
-			JOIN pg_replication_slots r ON r.active_pid = s.pid
-			WHERE r.slot_name = $1`, slot,
-		).Scan(&state)
-		if err == nil && state == "streaming" {
-			return
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	// Diagnostic: dump full slot state on timeout.
-	var exists bool
-	_ = h.pgConn.QueryRow(h.ctx,
-		"SELECT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name=$1)", slot,
-	).Scan(&exists)
-	if !exists {
-		t.Fatalf("ingestable slot %q was never created — supervisor likely never spawned the dialect", slot)
-	}
-	var state string
-	_ = h.pgConn.QueryRow(h.ctx, `
-		SELECT s.state FROM pg_stat_replication s
-		JOIN pg_replication_slots r ON r.active_pid = s.pid
-		WHERE r.slot_name = $1`, slot).Scan(&state)
-	t.Fatalf("ingestable slot %q never reached state=streaming (last observed state=%q)", slot, state)
-}
+// Readiness gating moved to postgresEngine.WaitReady (postgres_engine.go).
