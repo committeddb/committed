@@ -57,3 +57,9 @@ type Engine interface {
 	// Execer runs mutation scripts against the source (one Txn per recordedTxn).
 	mutation.Execer
 }
+
+// PostgresEngine and MySQLEngine are the source-engine factories the harness
+// selects between; the scenario suite will run the battery against each.
+func PostgresEngine() Engine { return newPostgresEngine() }
+
+func MySQLEngine() Engine { return newMySQLEngine() }
