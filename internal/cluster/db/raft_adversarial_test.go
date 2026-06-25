@@ -117,15 +117,19 @@ func TestAdversarial_SymmetricPartition(t *testing.T) {
 	minorityRafts := raftsByIDs(rafts, minorityIDs)
 	majorityRafts := raftsByIDs(rafts, majorityIDs)
 
-	// Record per-minority-node commit indexes immediately before the
-	// partition. Post-partition, no new commits may advance these on the
-	// minority side — that's the safety invariant.
-	minorityCommitBefore := map[uint64]uint64{}
-	for _, r := range minorityRafts {
-		minorityCommitBefore[r.id] = r.raft.CommitIndexForTest()
-	}
-
 	cluster.Partition(minorityIDs, majorityIDs)
+
+	// Record the per-minority-node commit baseline, but only after each
+	// minority node's commit index has stopped moving. Capturing it *before*
+	// the partition (or right after, before it settles) races late LeaderCommit
+	// propagation: an entry the pre-partition quorum has already committed can
+	// land on a minority node just after the split and advance its commit by
+	// one. That is safe — the entry had quorum — not a quorum-less commit, but a
+	// too-early baseline misreads it as a safety violation. Waiting for the
+	// commit index to stabilize (rather than a fixed sleep a loaded CI box can
+	// outrun) gives the truly frozen value; any advance past it afterward is a
+	// real violation.
+	minorityCommitBefore := waitForStableCommit(t, minorityRafts, 150*time.Millisecond, 3*time.Second)
 
 	// Give the partition time to settle: the majority may need to
 	// re-elect if the old leader ended up in the minority, and the
@@ -309,6 +313,49 @@ func raftsByIDs(rafts Rafts, ids []uint64) Rafts {
 		}
 	}
 	return out
+}
+
+// waitForStableCommit polls rs until every node's commit index has held steady
+// for stableFor, then returns the per-node commit indexes. It lets a freshly
+// partitioned minority drain any already-quorum'd in-flight commit before a test
+// captures its "frozen" baseline, so late LeaderCommit propagation isn't misread
+// as a quorum-less advance. Bounded by timeout; on timeout it logs and returns
+// the best-effort last reading rather than hanging.
+func waitForStableCommit(t *testing.T, rs Rafts, stableFor, timeout time.Duration) map[uint64]uint64 {
+	t.Helper()
+	read := func() map[uint64]uint64 {
+		m := make(map[uint64]uint64, len(rs))
+		for _, r := range rs {
+			m[r.id] = r.raft.CommitIndexForTest()
+		}
+		return m
+	}
+	deadline := time.Now().Add(timeout)
+	last := read()
+	stableSince := time.Now()
+	for {
+		time.Sleep(20 * time.Millisecond)
+		now := read()
+		changed := false
+		for id, c := range now {
+			if c != last[id] {
+				changed = true
+				break
+			}
+		}
+		last = now
+		switch {
+		case changed:
+			stableSince = time.Now()
+		case time.Since(stableSince) >= stableFor:
+			return last
+		}
+		if time.Now().After(deadline) {
+			t.Logf("waitForStableCommit: commit indexes did not stabilize within %v; "+
+				"using best-effort baseline %v", timeout, last)
+			return last
+		}
+	}
 }
 
 // -----------------------------------------------------------------------------
