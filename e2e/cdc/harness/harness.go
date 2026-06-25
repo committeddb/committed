@@ -9,13 +9,11 @@ package harness
 
 import (
 	"context"
-	"fmt"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
-	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 
 	"github.com/committeddb/committed/e2e/cdc/dataset"
 )
@@ -23,9 +21,6 @@ import (
 // Harness owns the per-test fixture lifecycle. One Harness per test;
 // t.Cleanup tears everything down so the next test starts fresh.
 type Harness struct {
-	pg        *tcpostgres.PostgresContainer
-	pgConnStr string
-	pgConn    *pgx.Conn
 	committed *committedProcess
 	collector *collector
 	topics    []string
@@ -77,21 +72,11 @@ func New(t *testing.T, opts ...Options) *Harness {
 		cancel: cancel,
 	}
 
-	// 1. Postgres.
-	h.pg, h.pgConnStr = startPostgres(t)
-
-	pgConn, err := pgx.Connect(ctx, h.pgConnStr)
-	require.NoError(t, err, "connect pgx")
-	h.pgConn = pgConn
-
-	// The engine borrows the source connection for its source-side ops
-	// (readiness, sink reads, load, mutation execution). The harness still owns
-	// the connection + container lifecycle.
-	h.engine = newPostgresEngine(ctx, pgConn, h.pgConnStr)
-
-	// 2. Schema (DDL) — applied before committed boots so the publication
-	// created later finds the tables it references.
-	require.NoError(t, applySchema(ctx, pgConn, dataset.Statements()), "apply schema")
+	// 1. Source database (engine-owned: container, connection, and schema —
+	// the DDL is applied before committed boots so the publication created later
+	// finds the tables it references).
+	h.engine = newPostgresEngine()
+	h.engine.Start(ctx, t)
 
 	// 3. committed.
 	h.committed = startCommitted(t)
@@ -194,10 +179,10 @@ func rowCount(ds dataset.Dataset, table string) int {
 	return 0
 }
 
-// Conn returns the pgx connection bound to the test Postgres. Tests
-// use this to issue their mutation SQL.
+// Conn returns the pgx connection bound to the test Postgres — a Postgres-only
+// escape hatch for the preflight tests and the hand-rolled-transaction scenarios.
 func (h *Harness) Conn() *pgx.Conn {
-	return h.pgConn
+	return h.engine.(*postgresEngine).Conn()
 }
 
 // Topics returns the topic IDs this harness is watching, one per
@@ -283,19 +268,14 @@ func (h *Harness) waitForCounts(t *testing.T, expected map[string]int, timeout t
 
 // Close releases all resources owned by the harness. Idempotent.
 func (h *Harness) Close() {
-	if h.pgConn != nil {
-		_ = h.pgConn.Close(context.Background())
-		h.pgConn = nil
-	}
 	if h.committed != nil {
 		h.committed.Stop()
 	}
 	if h.collector != nil {
 		h.collector.close()
 	}
-	if h.pg != nil {
-		_ = h.pg.Terminate(context.Background())
-		h.pg = nil
+	if h.engine != nil {
+		h.engine.Close()
 	}
 	if h.cancel != nil {
 		h.cancel()
@@ -305,7 +285,7 @@ func (h *Harness) Close() {
 // ConnString exposes the Postgres connection string. Used by the
 // preflight tests that query Postgres directly.
 func (h *Harness) ConnString() string {
-	return h.pgConnStr
+	return h.engine.ConnString()
 }
 
 // SlotName returns the replication slot name for a given table. Used
@@ -346,36 +326,11 @@ func (h *Harness) RestartCommitted(t *testing.T) {
 // stream exited, will reconnect"). Used by TestRestartResume to verify
 // slot-resume correctness.
 func (h *Harness) RestartPostgres(ctx context.Context) error {
-	if h.pgConn != nil {
-		_ = h.pgConn.Close(ctx)
-		h.pgConn = nil
+	if err := h.engine.RestartContainer(ctx); err != nil {
+		return err
 	}
-	if err := h.pg.Stop(ctx, nil); err != nil {
-		return fmt.Errorf("stop postgres: %w", err)
-	}
-	if err := h.pg.Start(ctx); err != nil {
-		return fmt.Errorf("start postgres: %w", err)
-	}
-	// The connection string includes a dynamic port. testcontainers-go
-	// can reuse the same port across Stop/Start, but ConnectionString
-	// is the authoritative way to find out — re-read it.
-	connStr, err := h.pg.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		return fmt.Errorf("postgres connection string after restart: %w", err)
-	}
-	h.pgConnStr = connStr
-	conn, err := pgx.Connect(ctx, connStr)
-	if err != nil {
-		return fmt.Errorf("reconnect pgx after restart: %w", err)
-	}
-	h.pgConn = conn
-	// Repoint the engine (which borrows the connection) at the new conn before
-	// re-gating readiness.
-	h.engine.(*postgresEngine).conn = conn
-
-	// Wait for the ingestable's dialect to reconnect — it polls and
-	// retries on its own, but a few hundred ms gives it room before
-	// the test runs more mutations.
+	// Wait for the ingestable's dialect to reconnect — it polls and retries on
+	// its own, but re-gating gives it room before the test runs more mutations.
 	for _, table := range h.topics {
 		h.engine.WaitReadyCtx(ctx, table, 30*time.Second)
 	}

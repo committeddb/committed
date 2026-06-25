@@ -9,29 +9,92 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/stretchr/testify/require"
+	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 
 	"github.com/committeddb/committed/e2e/cdc/dataset"
 	"github.com/committeddb/committed/e2e/cdc/mutation"
 )
 
-// postgresEngine is the Postgres backing of Engine. It borrows the harness's
-// source connection (the harness still owns the container + connection lifecycle
-// in this slice) and owns the per-table replication-slot names. It delegates
-// config generation to the existing postIngestable / postSink* helpers and
-// implements the source-side operations the framework needs: readiness gating,
-// sink reads, bulk load, and mutation execution (mutation.Execer).
+// postgresEngine is the Postgres backing of Engine. It owns the source-database
+// lifecycle (container, connection, schema) and the per-table replication-slot
+// names, delegates config generation to the existing postIngestable / postSink*
+// helpers, and implements the source-side operations the framework needs:
+// readiness gating, sink reads, bulk load, and mutation execution
+// (mutation.Execer).
 type postgresEngine struct {
+	container *tcpostgres.PostgresContainer
 	ctx       context.Context
 	conn      *pgx.Conn
 	connStr   string
 	slotNames map[string]string // table → replication slot name
 }
 
-func newPostgresEngine(ctx context.Context, conn *pgx.Conn, connStr string) *postgresEngine {
-	return &postgresEngine{ctx: ctx, conn: conn, connStr: connStr, slotNames: map[string]string{}}
+func newPostgresEngine() *postgresEngine {
+	return &postgresEngine{slotNames: map[string]string{}}
 }
 
 func (*postgresEngine) Dialect() string { return "postgres" }
+
+// Start brings up the Postgres container, opens the source connection, and
+// applies the schema (DDL) before committed boots.
+func (e *postgresEngine) Start(ctx context.Context, t *testing.T) {
+	t.Helper()
+	e.ctx = ctx
+	e.container, e.connStr = startPostgres(t)
+	conn, err := pgx.Connect(ctx, e.connStr)
+	require.NoError(t, err, "connect pgx")
+	e.conn = conn
+	require.NoError(t, applySchema(ctx, conn, dataset.Statements()), "apply schema")
+}
+
+// Close closes the source connection and terminates the container. Idempotent.
+func (e *postgresEngine) Close() {
+	if e.conn != nil {
+		_ = e.conn.Close(context.Background())
+		e.conn = nil
+	}
+	if e.container != nil {
+		_ = e.container.Terminate(context.Background())
+		e.container = nil
+	}
+}
+
+// RestartContainer stops and restarts the Postgres container and reconnects.
+// Used by source-restart tests (slot-resume correctness). Committed's ingestable
+// reconnects on its own; callers re-gate readiness via WaitReadyCtx afterward.
+func (e *postgresEngine) RestartContainer(ctx context.Context) error {
+	if e.conn != nil {
+		_ = e.conn.Close(ctx)
+		e.conn = nil
+	}
+	if err := e.container.Stop(ctx, nil); err != nil {
+		return fmt.Errorf("stop postgres: %w", err)
+	}
+	if err := e.container.Start(ctx); err != nil {
+		return fmt.Errorf("start postgres: %w", err)
+	}
+	// The connection string includes a dynamic port; re-read it authoritatively.
+	connStr, err := e.container.ConnectionString(ctx, "sslmode=disable")
+	if err != nil {
+		return fmt.Errorf("postgres connection string after restart: %w", err)
+	}
+	e.connStr = connStr
+	conn, err := pgx.Connect(ctx, connStr)
+	if err != nil {
+		return fmt.Errorf("reconnect pgx after restart: %w", err)
+	}
+	e.conn = conn
+	return nil
+}
+
+// ConnString exposes the source connection string (preflight tests query it).
+func (e *postgresEngine) ConnString() string { return e.connStr }
+
+// Conn exposes the raw pgx connection — a Postgres-only escape hatch for the
+// preflight tests and the hand-rolled-transaction scenarios. Deliberately NOT on
+// the Engine interface; reached via a type assertion on the harness side.
+func (e *postgresEngine) Conn() *pgx.Conn { return e.conn }
 
 func (e *postgresEngine) PostIngestable(t *testing.T, table string) {
 	t.Helper()

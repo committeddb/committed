@@ -23,6 +23,16 @@ import (
 type Engine interface {
 	// Dialect is the committed ingest/syncable dialect name ("postgres"|"mysql").
 	Dialect() string
+
+	// Start brings up the source container, connection, and schema.
+	Start(ctx context.Context, t *testing.T)
+	// Close tears down the source connection and container. Idempotent.
+	Close()
+	// RestartContainer restarts the source container and reconnects (source
+	// restart tests). Callers re-gate readiness via WaitReadyCtx afterward.
+	RestartContainer(ctx context.Context) error
+	// ConnString exposes the source connection string (preflight tests).
+	ConnString() string
 	// PostIngestable registers the per-table ingestable config for this source.
 	PostIngestable(t *testing.T, table string)
 	// PostSinkDatabase registers the database config the sink syncables target.
