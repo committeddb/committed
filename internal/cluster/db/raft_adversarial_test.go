@@ -326,7 +326,7 @@ func waitForStableCommit(t *testing.T, rs Rafts, stableFor, timeout time.Duratio
 	read := func() map[uint64]uint64 {
 		m := make(map[uint64]uint64, len(rs))
 		for _, r := range rs {
-			m[r.id] = r.raft.CommitIndexForTest()
+			m[r.id] = r.commitIndex() // lock-guarded: safe if a caller restarts nodes
 		}
 		return m
 	}
@@ -2596,14 +2596,18 @@ func TestAdversarial_MembershipChangeUnderPartition(t *testing.T) {
 	majorityRafts := raftsByIDs(rafts, majorityIDs)
 	minorityRafts := raftsByIDs(rafts, minorityIDs)
 
-	// Freeze the minority's commit indexes so we can prove they don't advance
-	// (no quorum-less commit) while the change is in flight.
-	minorityCommitBefore := map[uint64]uint64{}
-	for _, r := range minorityRafts {
-		minorityCommitBefore[r.id] = r.raft.CommitIndexForTest()
-	}
-
 	cluster.Partition(minorityIDs, majorityIDs)
+
+	// Freeze the minority's commit indexes so we can prove they don't advance
+	// (no quorum-less commit) while the change is in flight — but only after
+	// the partition has settled and each minority node's commit index has
+	// stopped moving. Capturing before the partition (or before it settles)
+	// races a pre-partition quorum commit still propagating via the trailing
+	// LeaderCommit bump, which would land just after the split and be misread
+	// as a quorum-less advance. Same fix as TestAdversarial_SymmetricPartition,
+	// and matching this test's LearnerPromoteUnderPartition twin.
+	minorityCommitBefore := waitForStableCommit(t, minorityRafts, 150*time.Millisecond, 3*time.Second)
+
 	time.Sleep(adversarialSettleTime)
 
 	// The majority re-elects among itself if the old leader was stranded.
