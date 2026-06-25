@@ -451,34 +451,56 @@ func mysqlCategoryForTypeName(name string) sql.JSONCategory {
 	return sql.CatText
 }
 
-// decodeEnumSet resolves canal's numeric binlog encoding of ENUM and SET columns
-// to the label text the snapshot path (database/sql) also produces, so both
-// ingest paths render the same JSON for the same value. canal hands back an ENUM
-// as its 1-based ordinal index and a SET as a bitmask of member positions;
-// without this they would leak into the payload as bare numbers (e.g. 'green' →
-// 2), which is both unreadable and fragile (reordering members rewrites the
-// meaning of historical numbers). Any other column type passes through untouched.
-func decodeEnumSet(c schema.TableColumn, val any) any {
+// columnInfo is committed's own per-column metadata for the binlog decode path —
+// the parts the raw binlog row does not carry. In Phase A the binlog stream
+// delivers positionally-decoded values with no column metadata, so committed
+// sources this itself (see the schema cache) rather than relying on canal.
+// enumValues is non-nil only for an ENUM column, setValues only for a SET column;
+// which one is populated is the column's kind. (The cache adds more fields — name,
+// JSON category — as the decode path moves fully off canal.)
+type columnInfo struct {
+	enumValues []string // ENUM member labels in definition order; nil otherwise
+	setValues  []string // SET member labels in definition order; nil otherwise
+}
+
+// columnInfoFromCanal adapts canal's schema.TableColumn to columnInfo. This shim
+// keeps the canal OnRow path working while the decode helpers move onto
+// committed's own metadata; it is deleted when canal is removed.
+func columnInfoFromCanal(c schema.TableColumn) columnInfo {
+	return columnInfo{
+		enumValues: c.EnumValues,
+		setValues:  c.SetValues,
+	}
+}
+
+// decodeEnumSet resolves the numeric binlog encoding of ENUM and SET columns to
+// the label text the snapshot path (database/sql) also produces, so both ingest
+// paths render the same JSON for the same value. The binlog hands back an ENUM as
+// its 1-based ordinal index and a SET as a bitmask of member positions; without
+// this they would leak into the payload as bare numbers (e.g. 'green' → 2), which
+// is both unreadable and fragile (reordering members rewrites the meaning of
+// historical numbers). A column that is neither passes through untouched.
+func decodeEnumSet(ci columnInfo, val any) any {
 	if val == nil {
 		return nil
 	}
-	switch c.Type {
-	case schema.TYPE_ENUM:
+	switch {
+	case len(ci.enumValues) > 0:
 		idx, ok := asInt64(val)
 		if !ok {
 			return val // already a label (string/[]byte) or an unexpected form
 		}
-		if idx <= 0 || int(idx) > len(c.EnumValues) {
+		if idx <= 0 || int(idx) > len(ci.enumValues) {
 			return "" // 0 is MySQL's invalid/empty-enum sentinel; out-of-range guarded
 		}
-		return c.EnumValues[idx-1]
-	case schema.TYPE_SET:
+		return ci.enumValues[idx-1]
+	case len(ci.setValues) > 0:
 		bits, ok := asInt64(val)
 		if !ok {
 			return val
 		}
-		parts := make([]string, 0, len(c.SetValues))
-		for i, name := range c.SetValues {
+		parts := make([]string, 0, len(ci.setValues))
+		for i, name := range ci.setValues {
 			if bits&(int64(1)<<uint(i)) != 0 {
 				parts = append(parts, name)
 			}
@@ -525,7 +547,7 @@ func (h *MySQLEventHandler) OnRow(e *canal.RowsEvent) error {
 	row := e.Rows[len(e.Rows)-1]
 	for i, c := range e.Table.Columns {
 		lc := strings.ToLower(c.Name)
-		val := decodeEnumSet(c, row[i])
+		val := decodeEnumSet(columnInfoFromCanal(c), row[i])
 		raw[lc] = val
 		catByName[lc] = mysqlCategoryForCanalType(c.Type)
 		if b, ok := val.([]byte); ok {

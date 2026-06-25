@@ -1,23 +1,20 @@
 package mysql
 
-import (
-	"testing"
-
-	"github.com/go-mysql-org/go-mysql/schema"
-)
+import "testing"
 
 // TestDecodeEnumSet exercises the ENUM/SET label resolution directly (no MySQL
 // container needed), covering the index/bitmask math and the edge cases the
 // binlog can produce: the empty/invalid-enum sentinel (0), out-of-range guard,
-// NULL, and an already-text value.
+// NULL, and an already-text value. columnInfo is committed's own per-column
+// metadata; which member slice is populated is the column's kind.
 func TestDecodeEnumSet(t *testing.T) {
-	enumCol := schema.TableColumn{Type: schema.TYPE_ENUM, EnumValues: []string{"red", "green", "blue"}}
-	setCol := schema.TableColumn{Type: schema.TYPE_SET, SetValues: []string{"a", "b", "c"}}
-	textCol := schema.TableColumn{Type: schema.TYPE_STRING}
+	enumCol := columnInfo{enumValues: []string{"red", "green", "blue"}}
+	setCol := columnInfo{setValues: []string{"a", "b", "c"}}
+	textCol := columnInfo{}
 
 	tests := []struct {
 		name string
-		col  schema.TableColumn
+		col  columnInfo
 		in   any
 		want any
 	}{
