@@ -189,6 +189,14 @@ type DB struct {
 	transferLeadershipFn func(transferee uint64)
 	pickTransferTargetFn func(now time.Time) uint64
 
+	// Graceful-shutdown leadership transfer (see shutdown.go). Injected as
+	// fields, like the disk-pressure transfer collaborators above, so the
+	// target choice and the wait-for-handoff loop are unit-testable without a
+	// live cluster.
+	shutdownTransferTargetFn func() uint64
+	isLeaderFn               func() bool
+	shutdownTransferTimeout  time.Duration
+
 	logger  *zap.Logger
 	metrics *metrics.Metrics
 }
@@ -358,6 +366,9 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 	// interval (WithDiskReportInterval(<=0)) disables it.
 	db.transferLeadershipFn = db.raft.transferLeadership
 	db.pickTransferTargetFn = db.pickTransferTarget
+	db.shutdownTransferTargetFn = db.shutdownTransferTarget
+	db.isLeaderFn = db.isLeader
+	db.shutdownTransferTimeout = defaultShutdownTransferTimeout
 	if db.diskReportInterval > 0 {
 		go db.diskCoordinator()
 	}
@@ -736,6 +747,13 @@ func (db *DB) Close() error {
 	for _, h := range handles {
 		<-h.done
 	}
+
+	// Hand leadership to a caught-up voter before stopping raft, so a graceful
+	// restart (e.g. a rolling upgrade) doesn't force the cluster through a full
+	// election. Best-effort and bounded — see transferLeadershipBeforeStop. Done
+	// after the worker drain so the workers finish their unwind under this
+	// node's leadership, then we hand off.
+	db.transferLeadershipBeforeStop()
 
 	return db.raft.Close()
 }

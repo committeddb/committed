@@ -13,7 +13,8 @@ runs the graceful-shutdown path:
 1. The HTTP server stops accepting new connections and waits for
    in-flight requests to finish.
 2. The database layer (`db.Close`) is called: sync/ingest worker
-   goroutines are canceled and drained, raft is stopped cleanly, the
+   goroutines are canceled and drained, leadership is handed off if this
+   node is the raft leader (see below), raft is stopped cleanly, and the
    WAL is closed.
 3. The process exits `0`.
 
@@ -88,13 +89,19 @@ TimeoutStopSec=45
 KillSignal=SIGTERM
 ```
 
+## Leadership handoff
+
+If the node is the raft leader when it shuts down, `db.Close` hands
+leadership to the most caught-up voter before stopping raft, so the
+cluster doesn't have to run a full election. The handoff is bounded: if
+no caught-up voter is reachable, or it doesn't complete within a few
+seconds, the node stops anyway and the remaining peers elect a new leader
+the usual way. A follower shutting down skips this entirely. This is what
+keeps a rolling upgrade from stalling writes for ~1 second each time the
+leader restarts.
+
 ## What is *not* done on shutdown
 
-- **Leadership transfer.** If this node is the raft leader, it simply
-  stops; the remaining peers hold an election. That's fine for a
-  single-node rolling restart, but expect a ~1 second window of
-  unavailability while the new leader stabilizes. Pre-shutdown
-  leadership transfer is a planned follow-up.
 - **In-flight proposal drain.** HTTP requests are drained (they finish
   or are dropped by the deadline), but proposals already sent to raft
   are not individually awaited — `db.Close` cancels the contexts that

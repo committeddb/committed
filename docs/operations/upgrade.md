@@ -83,13 +83,13 @@ For each node:
 7. **Move to the next node.** Only proceed once the just-upgraded node is
    `/ready` and caught up, so you never have two nodes out at once.
 
-**The leader goes last.** Stopping the leader triggers an election; the
-survivors elect a new leader in about a second, during which writes
-briefly block (Committed does not yet hand off leadership before
-shutting down — see [shutdown.md → What is *not* done](shutdown.md#what-is-not-done-on-shutdown)).
-Reads with `?consistency=stale` and already-committed data are
-unaffected. After the new leader settles, upgrade the old leader like any
-other follower.
+**The leader goes last.** On a graceful stop the leader hands off to a
+caught-up peer before it exits, so a new leader is usually in place
+almost immediately rather than after a full election (see
+[shutdown.md → Leadership handoff](shutdown.md#leadership-handoff)). Any
+writes in flight during the brief handoff retry; reads with
+`?consistency=stale` and already-committed data are unaffected. After the
+new leader settles, upgrade the old leader like any other follower.
 
 ## Verifying the upgrade
 

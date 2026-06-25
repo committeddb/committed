@@ -379,6 +379,18 @@ func (db *DB) MaybeTransferLeadershipForTest(now time.Time) {
 	db.maybeTransferLeadership(now, db.diskVerdict.Load())
 }
 
+// SetShutdownTransferHooksForTest overrides the graceful-shutdown leadership
+// transfer collaborators so a test can drive Close's hand-off without a live
+// cluster: target returns the voter to hand off to (0 = none), transfer records
+// the transfer call, isLeader reports whether leadership has moved off this node
+// yet, and timeout bounds the wait.
+func (db *DB) SetShutdownTransferHooksForTest(target func() uint64, transfer func(uint64), isLeader func() bool, timeout time.Duration) {
+	db.shutdownTransferTargetFn = target
+	db.transferLeadershipFn = transfer
+	db.isLeaderFn = isLeader
+	db.shutdownTransferTimeout = timeout
+}
+
 // TransferLeadershipForTest exposes the raft-level leadership hand-off so the
 // multinode harness can assert the plumbing under disk-pressure transfers:
 // etcd raft catches the target up, sends MsgTimeoutNow, and the target wins
