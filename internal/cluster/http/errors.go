@@ -98,7 +98,16 @@ func writeProposeError(w httpgo.ResponseWriter, err error, resource, action stri
 		// this layer stays agnostic to what they contain.
 		writeErrorWithDetails(w, httpgo.StatusConflict, rebuildErr.Code(), rebuildErr.Error(), rebuildErr.Details())
 	case errors.As(err, &configErr):
-		writeError(w, httpgo.StatusBadRequest, "invalid_"+resource+"_config", configErr.Error())
+		// 400 Bad Request: the config didn't parse/validate. When the parser
+		// pinned the failure to a specific TOML field, surface it as structured
+		// details ({field, issue}) so a deploy pipeline can point at the offending
+		// key without scraping the message.
+		if configErr.Field != "" {
+			writeErrorWithDetails(w, httpgo.StatusBadRequest, "invalid_"+resource+"_config", configErr.Error(),
+				map[string]string{"field": configErr.Field, "issue": configErr.Issue})
+		} else {
+			writeError(w, httpgo.StatusBadRequest, "invalid_"+resource+"_config", configErr.Error())
+		}
 	case errors.Is(err, cluster.ErrProposalTooLarge):
 		writeError(w, httpgo.StatusRequestEntityTooLarge, "proposal_too_large", resource+" configuration exceeds the configured proposal size limit")
 	case errors.Is(err, cluster.ErrInsufficientStorage):

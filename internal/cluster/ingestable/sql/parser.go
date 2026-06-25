@@ -83,12 +83,19 @@ func (p *IngestableParser) ParseConfig(v *cluster.ParsedConfig) (*Config, Dialec
 
 	dialect, ok := p.Dialects[dialectName]
 	if !ok {
-		return nil, nil, fmt.Errorf("dialect %s not found", dialectName)
+		return nil, nil, cluster.UnknownDialectError(dialectName, dialectNames(p.Dialects))
 	}
 
+	if topic == "" {
+		return nil, nil, &cluster.FieldError{Field: "sql.topic", Issue: "required"}
+	}
 	tipe, err := p.typer.ResolveType(cluster.LatestTypeRef(topic))
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, &cluster.FieldError{
+			Field: "sql.topic",
+			Issue: fmt.Sprintf("type %q not found: create the type (POST /v1/type/%s) before the ingestable", topic, topic),
+			Err:   err,
+		}
 	}
 
 	config := &Config{
@@ -103,4 +110,14 @@ func (p *IngestableParser) ParseConfig(v *cluster.ParsedConfig) (*Config, Dialec
 	}
 
 	return config, dialect, nil
+}
+
+// dialectNames returns the registered dialect names, for the
+// "valid: ..." list in an unknown-dialect error.
+func dialectNames(m map[string]Dialect) []string {
+	names := make([]string, 0, len(m))
+	for k := range m {
+		names = append(names, k)
+	}
+	return names
 }

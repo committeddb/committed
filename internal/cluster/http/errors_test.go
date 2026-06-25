@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 
+	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/clusterfakes"
 	"github.com/committeddb/committed/internal/cluster/http"
 )
@@ -111,4 +112,36 @@ func TestProposeSyncable_RebuildRequired_Returns409WithStructuredDetails(t *test
 	require.Contains(t, body.Message, "rebuild")
 	require.Equal(t, "tenants", body.Details.Table)
 	require.Equal(t, []string{"tier"}, body.Details.AddedColumns)
+}
+
+// A field-scoped ConfigError from propose is rendered as 400 with the config
+// field path in structured details, so a deploy pipeline can point at the
+// offending TOML key without scraping the message.
+func TestProposeSyncable_ConfigError_FieldDetails(t *testing.T) {
+	fake := &clusterfakes.FakeCluster{}
+	fake.ProposeSyncableReturns(cluster.NewConfigError(&cluster.FieldError{
+		Field: "sql.dialect",
+		Issue: `unknown dialect "oracle"; valid: mysql, postgres`,
+	}))
+	h := http.New(fake)
+
+	r := httptest.NewRequest(httpgo.MethodPost, "/v1/syncable/s-1", strings.NewReader("x = 1"))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	require.Equal(t, httpgo.StatusBadRequest, w.Code)
+
+	var body struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+		Details struct {
+			Field string `json:"field"`
+			Issue string `json:"issue"`
+		} `json:"details"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	require.Equal(t, "invalid_syncable_config", body.Code)
+	require.Contains(t, body.Message, "unknown dialect")
+	require.Equal(t, "sql.dialect", body.Details.Field)
+	require.Contains(t, body.Details.Issue, "valid: mysql, postgres")
 }

@@ -1,8 +1,6 @@
 package sql
 
 import (
-	"fmt"
-
 	"github.com/committeddb/committed/internal/cluster"
 )
 
@@ -16,7 +14,7 @@ func (d *DBParser) Parse(v *cluster.ParsedConfig) (cluster.Database, error) {
 
 	dialect, ok := d.Dialects[dialectName]
 	if !ok {
-		return nil, fmt.Errorf("dialect %s not found", dialectName)
+		return nil, cluster.UnknownDialectError(dialectName, dialectNames(d.Dialects))
 	}
 
 	db, err := NewDB(dialect, connectionString)
@@ -25,4 +23,15 @@ func (d *DBParser) Parse(v *cluster.ParsedConfig) (cluster.Database, error) {
 	}
 
 	return db, nil
+}
+
+// dialectNames returns the registered dialect names, for the "valid: ..." list
+// in an unknown-dialect error. Shared by the syncable database parser here and
+// the syncable parser.
+func dialectNames(m map[string]Dialect) []string {
+	names := make([]string, 0, len(m))
+	for k := range m {
+		names = append(names, k)
+	}
+	return names
 }

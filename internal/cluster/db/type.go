@@ -12,7 +12,7 @@ import (
 func (db *DB) ProposeType(ctx context.Context, c *cluster.Configuration) error {
 	_, t, err := ParseType(c, db.storage)
 	if err != nil {
-		return &cluster.ConfigError{Err: err}
+		return cluster.NewConfigError(err)
 	}
 
 	// Delta topics are hostile to the sync contract: at-least-once

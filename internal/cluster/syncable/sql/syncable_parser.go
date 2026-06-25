@@ -39,12 +39,22 @@ func (p *SyncableParser) Parse(v *cluster.ParsedConfig, storage cluster.Database
 
 func (p *SyncableParser) ParseConfig(v *cluster.ParsedConfig, storage cluster.DatabaseStorage) (*Config, error) {
 	sqlDB := v.GetString("sql.db")
+	if sqlDB == "" {
+		return nil, &cluster.FieldError{Field: "sql.db", Issue: "required (name a [database] config)"}
+	}
 	db, err := storage.Database(sqlDB)
 	if err != nil {
-		return nil, err
+		return nil, &cluster.FieldError{
+			Field: "sql.db",
+			Issue: fmt.Sprintf("database %q not found", sqlDB),
+			Err:   err,
+		}
 	}
 
 	topic := v.GetString("sql.topic")
+	if topic == "" {
+		return nil, &cluster.FieldError{Field: "sql.topic", Issue: "required"}
+	}
 	table := v.GetString("sql.table")
 	primaryKey := v.GetString("sql.primaryKey")
 	keyColumn := v.GetString("sql.keyColumn")
