@@ -90,7 +90,7 @@ func TestRestartResume(t *testing.T) {
 	pre := mutation.NewScript()
 	pre.Insert("region", regionRow(1, "BEFORE_A", "phase1-a"))
 	pre.Insert("region", regionRow(2, "BEFORE_B", "phase1-b"))
-	require.NoError(t, pre.Run(context.Background(), h.Conn()), "phase 1 run")
+	require.NoError(t, h.RunScript(context.Background(), pre), "phase 1 run")
 	oracle.Assert(t, pre.Expected(), h.Capture(t, pre.ExpectedCounts()))
 
 	// Restart committed against the same data dir. Position persistence
@@ -104,6 +104,6 @@ func TestRestartResume(t *testing.T) {
 	post := mutation.NewScript()
 	post.Insert("region", regionRow(3, "AFTER_A", "phase2-a"))
 	post.Insert("region", regionRow(4, "AFTER_B", "phase2-b"))
-	require.NoError(t, post.Run(context.Background(), h.Conn()), "phase 2 run")
+	require.NoError(t, h.RunScript(context.Background(), post), "phase 2 run")
 	oracle.Assert(t, post.Expected(), h.Capture(t, post.ExpectedCounts()))
 }

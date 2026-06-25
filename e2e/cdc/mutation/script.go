@@ -10,12 +10,11 @@ package mutation
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
 	"strings"
-
-	"github.com/jackc/pgx/v5"
 
 	"github.com/committeddb/committed/e2e/cdc/dataset"
 )
@@ -181,37 +180,55 @@ type rawSQL struct {
 	args  []any
 }
 
-// Run executes the script against Postgres in declaration order. Each
-// recordedTxn runs inside an explicit BEGIN/COMMIT (or BEGIN/ROLLBACK).
-func (s *Script) Run(ctx context.Context, conn *pgx.Conn) error {
+// Execer runs a Script's transactions against a source database, hiding the
+// driver. The harness adapts Postgres (pgx) and MySQL (database/sql) to it, so
+// this package stays driver-agnostic.
+type Execer interface {
+	// Txn runs fn inside one transaction. If fn returns nil the transaction
+	// commits; if it returns any error the transaction rolls back and that error
+	// is returned. (Script.Run uses an internal sentinel to roll back a
+	// deliberately-rolling-back block without surfacing a failure.)
+	Txn(ctx context.Context, fn func(q Querier) error) error
+}
+
+// Querier executes statements inside a transaction and reports the engine's
+// positional-placeholder syntax — "$1" for Postgres, "?" for MySQL.
+type Querier interface {
+	Exec(ctx context.Context, query string, args ...any) error
+	Placeholder(n int) string
+}
+
+// errRollback signals Execer.Txn to roll back a Rollback() block without
+// surfacing it as a failure. It is created and checked only here, so an Execer
+// implementation just propagates whatever fn returns.
+var errRollback = errors.New("mutation: intentional rollback")
+
+// Run executes the script against the source database via x, in declaration
+// order. Each recordedTxn runs inside one transaction (commit, or rollback for a
+// Rollback block). Behavior matches the previous pgx-only runner.
+func (s *Script) Run(ctx context.Context, x Execer) error {
 	for ti, rec := range s.txns {
-		tx, err := conn.Begin(ctx)
-		if err != nil {
-			return fmt.Errorf("txn %d: begin: %w", ti, err)
-		}
-		for oi, op := range rec.ops {
-			if raw, ok := op.pkVal.(rawSQL); ok && op.expected == nil {
-				if _, err := tx.Exec(ctx, raw.query, raw.args...); err != nil {
-					_ = tx.Rollback(ctx)
-					return fmt.Errorf("txn %d op %d: raw exec: %w", ti, oi, err)
+		err := x.Txn(ctx, func(q Querier) error {
+			for oi, op := range rec.ops {
+				if raw, ok := op.pkVal.(rawSQL); ok && op.expected == nil {
+					if err := q.Exec(ctx, raw.query, raw.args...); err != nil {
+						return fmt.Errorf("op %d: raw exec: %w", oi, err)
+					}
+					continue
 				}
-				continue
+				query, args := buildSQL(op, q.Placeholder)
+				if err := q.Exec(ctx, query, args...); err != nil {
+					return fmt.Errorf("op %d (%s on %s pk=%v): %w",
+						oi, opKindString(op.kind), op.table, op.pkVal, err)
+				}
 			}
-			query, args := buildSQL(op)
-			if _, err := tx.Exec(ctx, query, args...); err != nil {
-				_ = tx.Rollback(ctx)
-				return fmt.Errorf("txn %d op %d (%s on %s pk=%v): %w",
-					ti, oi, opKindString(op.kind), op.table, op.pkVal, err)
+			if rec.rollback {
+				return errRollback
 			}
-		}
-		if rec.rollback {
-			if err := tx.Rollback(ctx); err != nil {
-				return fmt.Errorf("txn %d: rollback: %w", ti, err)
-			}
-			continue
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return fmt.Errorf("txn %d: commit: %w", ti, err)
+			return nil
+		})
+		if err != nil && !errors.Is(err, errRollback) {
+			return fmt.Errorf("txn %d: %w", ti, err)
 		}
 	}
 	return nil
@@ -295,17 +312,17 @@ func expectedDelete(table string, pkVal any) *Expected {
 	}
 }
 
-// buildSQL turns one recordedOp into a parameterized SQL statement.
-// Always uses positional parameters ($1, $2…) — pgx requires them and
-// they sidestep any quoting issues.
-func buildSQL(op *recordedOp) (string, []any) {
+// buildSQL turns one recordedOp into a parameterized SQL statement. Positional
+// placeholders are rendered by ph — "$N" for Postgres, "?" for MySQL — supplied
+// by the executing Querier, so the same DSL targets either engine.
+func buildSQL(op *recordedOp, ph func(n int) string) (string, []any) {
 	switch op.kind {
 	case opInsert:
 		cols := dataset.Columns(op.table)
 		placeholders := make([]string, len(cols))
 		args := make([]any, len(cols))
 		for i, c := range cols {
-			placeholders[i] = fmt.Sprintf("$%d", i+1)
+			placeholders[i] = ph(i + 1)
 			args[i] = op.row[c]
 		}
 		return fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
@@ -319,15 +336,15 @@ func buildSQL(op *recordedOp) (string, []any) {
 			if c == op.pkCol {
 				continue
 			}
-			setParts = append(setParts, fmt.Sprintf("%s=$%d", c, i))
+			setParts = append(setParts, fmt.Sprintf("%s=%s", c, ph(i)))
 			args = append(args, op.row[c])
 			i++
 		}
 		args = append(args, op.pkVal)
-		return fmt.Sprintf("UPDATE %s SET %s WHERE %s=$%d",
-			op.table, strings.Join(setParts, ", "), op.pkCol, i), args
+		return fmt.Sprintf("UPDATE %s SET %s WHERE %s=%s",
+			op.table, strings.Join(setParts, ", "), op.pkCol, ph(i)), args
 	case opDelete:
-		return fmt.Sprintf("DELETE FROM %s WHERE %s=$1", op.table, op.pkCol),
+		return fmt.Sprintf("DELETE FROM %s WHERE %s=%s", op.table, op.pkCol, ph(1)),
 			[]any{op.pkVal}
 	}
 	return "", nil

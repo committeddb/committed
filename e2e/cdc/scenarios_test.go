@@ -38,7 +38,7 @@ func TestSimpleInsert(t *testing.T) {
 	s := mutation.NewScript()
 	s.Insert("region", regionRow(99, "TESTLAND", "smoke-test"))
 
-	if err := s.Run(context.Background(), h.Conn()); err != nil {
+	if err := h.RunScript(context.Background(), s); err != nil {
 		t.Fatalf("script run: %v", err)
 	}
 
@@ -63,7 +63,7 @@ func TestUpdateCaptureKRepeats(t *testing.T) {
 		s.Update("region", regionRow(1, fmt.Sprintf("V%d", i), fmt.Sprintf("comment v%d", i)))
 	}
 
-	if err := s.Run(context.Background(), h.Conn()); err != nil {
+	if err := h.RunScript(context.Background(), s); err != nil {
 		t.Fatalf("script run: %v", err)
 	}
 
@@ -85,7 +85,7 @@ func TestRollback(t *testing.T) {
 	})
 	s.Insert("region", regionRow(4, "AFTER", "post-rollback"))
 
-	if err := s.Run(context.Background(), h.Conn()); err != nil {
+	if err := h.RunScript(context.Background(), s); err != nil {
 		t.Fatalf("script run: %v", err)
 	}
 
@@ -106,7 +106,7 @@ func TestMixedOpTxn(t *testing.T) {
 	seed := mutation.NewScript()
 	seed.Insert("region", regionRow(10, "TO_UPDATE", "v0"))
 	seed.Insert("region", regionRow(20, "TO_DELETE", "v0"))
-	if err := seed.Run(context.Background(), h.Conn()); err != nil {
+	if err := h.RunScript(context.Background(), seed); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
 	// Drain the seed events; Capture waits for the two seed proposals
@@ -121,7 +121,7 @@ func TestMixedOpTxn(t *testing.T) {
 		t.Delete("region", regionRow(20, "TO_DELETE", "v0")) // pass pre-image (REPLICA IDENTITY FULL)
 	})
 
-	if err := mixed.Run(context.Background(), h.Conn()); err != nil {
+	if err := h.RunScript(context.Background(), mixed); err != nil {
 		t.Fatalf("mixed run: %v", err)
 	}
 
@@ -150,7 +150,7 @@ func TestInsertOrderingFKParentBeforeChild(t *testing.T) {
 	s.Insert("region", regionRow(100, "PARENT_REGION", "fk-test parent"))
 	s.Insert("nation", nationRow(200, "CHILD_NATION", 100, "fk-test child"))
 
-	if err := s.Run(context.Background(), h.Conn()); err != nil {
+	if err := h.RunScript(context.Background(), s); err != nil {
 		t.Fatalf("script run: %v", err)
 	}
 	oracle.Assert(t, s.Expected(), h.Capture(t, s.ExpectedCounts()))
@@ -166,7 +166,7 @@ func TestUpdateCaptureSingle(t *testing.T) {
 	s.Insert("region", regionRow(1, "ORIGINAL", "v0"))
 	s.Update("region", regionRow(1, "UPDATED", "v1"))
 
-	if err := s.Run(context.Background(), h.Conn()); err != nil {
+	if err := h.RunScript(context.Background(), s); err != nil {
 		t.Fatalf("script run: %v", err)
 	}
 	oracle.Assert(t, s.Expected(), h.Capture(t, s.ExpectedCounts()))
@@ -186,7 +186,7 @@ func TestDeleteCapture(t *testing.T) {
 	s.Insert("region", preDelete)
 	s.Delete("region", preDelete) // only the PK is load-bearing for a delete
 
-	if err := s.Run(context.Background(), h.Conn()); err != nil {
+	if err := h.RunScript(context.Background(), s); err != nil {
 		t.Fatalf("script run: %v", err)
 	}
 	oracle.Assert(t, s.Expected(), h.Capture(t, s.ExpectedCounts()))
@@ -205,7 +205,7 @@ func TestDeleteWithDependents(t *testing.T) {
 	setup := mutation.NewScript()
 	setup.Insert("region", regionRow(5, "REGION_WITH_DEP", "parent"))
 	setup.Insert("nation", nationRow(6, "DEP_NATION", 5, "dependent"))
-	require.NoError(t, setup.Run(context.Background(), h.Conn()), "setup run")
+	require.NoError(t, h.RunScript(context.Background(), setup), "setup run")
 	_ = h.Capture(t, setup.ExpectedCounts())
 
 	// Try to delete region 5 — should fail with FK violation. Run it
@@ -254,7 +254,7 @@ func TestPrimaryKeyUpdate(t *testing.T) {
 	expected.Insert("region", regionRow(1, "ORIGINAL", "before-pk-change"))
 	expected.Update("region", regionRow(2, "RENAMED", "after-pk-change"))
 
-	if err := s.Run(context.Background(), h.Conn()); err != nil {
+	if err := h.RunScript(context.Background(), s); err != nil {
 		t.Fatalf("script run: %v", err)
 	}
 	oracle.Assert(t, expected.Expected(), h.Capture(t, expected.ExpectedCounts()))
@@ -342,7 +342,7 @@ func TestHotKeyChurn(t *testing.T) {
 		}
 	}
 
-	if err := s.Run(context.Background(), h.Conn()); err != nil {
+	if err := h.RunScript(context.Background(), s); err != nil {
 		t.Fatalf("script run: %v", err)
 	}
 	oracle.Assert(t, s.Expected(), h.Capture(t, s.ExpectedCounts()))
@@ -367,7 +367,7 @@ func TestNullVsEmptyString(t *testing.T) {
 		"r_comment":   nil, // genuine NULL
 	})
 
-	if err := s.Run(context.Background(), h.Conn()); err != nil {
+	if err := h.RunScript(context.Background(), s); err != nil {
 		t.Fatalf("script run: %v", err)
 	}
 	oracle.Assert(t, s.Expected(), h.Capture(t, s.ExpectedCounts()))
@@ -383,7 +383,7 @@ func TestUnicode(t *testing.T) {
 	s.Insert("region", regionRow(2, "🌍🚀", "emoji+combining é"))
 	s.Insert("region", regionRow(3, "Ω≈ç√∫", "mixed math/greek"))
 
-	if err := s.Run(context.Background(), h.Conn()); err != nil {
+	if err := h.RunScript(context.Background(), s); err != nil {
 		t.Fatalf("script run: %v", err)
 	}
 	oracle.Assert(t, s.Expected(), h.Capture(t, s.ExpectedCounts()))
@@ -401,7 +401,7 @@ func TestMaxLength(t *testing.T) {
 	s := mutation.NewScript()
 	s.Insert("region", regionRow(1, maxName, maxComment))
 
-	if err := s.Run(context.Background(), h.Conn()); err != nil {
+	if err := h.RunScript(context.Background(), s); err != nil {
 		t.Fatalf("script run: %v", err)
 	}
 	oracle.Assert(t, s.Expected(), h.Capture(t, s.ExpectedCounts()))

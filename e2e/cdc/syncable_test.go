@@ -23,7 +23,7 @@ func TestSyncableProjectsToSink(t *testing.T) {
 
 	s := mutation.NewScript()
 	s.Insert("region", regionRow(1, "AMERICA", "comment-1"))
-	require.NoError(t, s.Run(context.Background(), h.Conn()), "insert region row")
+	require.NoError(t, h.RunScript(context.Background(), s), "insert region row")
 
 	// The value lands in region_sink with the same text encoding the topic
 	// carries (pgoutput text-encodes everything, so r_regionkey is "1").
@@ -32,7 +32,7 @@ func TestSyncableProjectsToSink(t *testing.T) {
 	// Upsert semantics: updating the same PK replaces, not duplicates.
 	u := mutation.NewScript()
 	u.Update("region", regionRow(1, "AMERICA-2", "comment-1b"))
-	require.NoError(t, u.Run(context.Background(), h.Conn()), "update region row")
+	require.NoError(t, h.RunScript(context.Background(), u), "update region row")
 	h.WaitForSinkValue(t, "region", "1", "r_name", "AMERICA-2", 30*time.Second)
 	require.Equal(t, 1, h.SinkCount(t, "region"), "upsert must not duplicate the row")
 }
@@ -56,7 +56,7 @@ func TestRestartResumeSyncable(t *testing.T) {
 	// Phase 1: a row reaches the sink while the original process runs.
 	pre := mutation.NewScript()
 	pre.Insert("region", regionRow(1, "BEFORE", "phase1"))
-	require.NoError(t, pre.Run(context.Background(), h.Conn()), "phase 1 insert")
+	require.NoError(t, h.RunScript(context.Background(), pre), "phase 1 insert")
 	h.WaitForSinkValue(t, "region", "1", "r_name", "BEFORE", 30*time.Second)
 
 	// Restart committed against the same data dir. RestartCommitted waits for
@@ -69,7 +69,7 @@ func TestRestartResumeSyncable(t *testing.T) {
 	// persisted SyncableIndex.
 	post := mutation.NewScript()
 	post.Insert("region", regionRow(2, "AFTER", "phase2"))
-	require.NoError(t, post.Run(context.Background(), h.Conn()), "phase 2 insert")
+	require.NoError(t, h.RunScript(context.Background(), post), "phase 2 insert")
 	h.WaitForSinkValue(t, "region", "2", "r_name", "AFTER", 30*time.Second)
 
 	// Both rows present, exactly once each: the resume neither lost phase-1
@@ -100,7 +100,7 @@ func TestDeleteHonoredEndToEnd(t *testing.T) {
 	// row reaches the SQL sink.
 	ins := mutation.NewScript()
 	ins.Insert("region", row)
-	require.NoError(t, ins.Run(context.Background(), h.Conn()), "insert region 7")
+	require.NoError(t, h.RunScript(context.Background(), ins), "insert region 7")
 
 	add := h.Capture(t, map[string]int{"region": 1})["region"]
 	require.Len(t, add, 1)
@@ -114,7 +114,7 @@ func TestDeleteHonoredEndToEnd(t *testing.T) {
 	// (not an upsert of the old row), and the sink row is removed.
 	del := mutation.NewScript()
 	del.Delete("region", row)
-	require.NoError(t, del.Run(context.Background(), h.Conn()), "delete region 7")
+	require.NoError(t, h.RunScript(context.Background(), del), "delete region 7")
 
 	gone := h.Capture(t, map[string]int{"region": 1})["region"]
 	require.Len(t, gone, 1)
