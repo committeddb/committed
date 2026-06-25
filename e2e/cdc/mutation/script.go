@@ -323,7 +323,7 @@ func buildSQL(op *recordedOp, ph func(n int) string) (string, []any) {
 		args := make([]any, len(cols))
 		for i, c := range cols {
 			placeholders[i] = ph(i + 1)
-			args[i] = op.row[c]
+			args[i] = bindArg(op.row[c])
 		}
 		return fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
 			op.table, strings.Join(cols, ", "), strings.Join(placeholders, ", ")), args
@@ -337,7 +337,7 @@ func buildSQL(op *recordedOp, ph func(n int) string) (string, []any) {
 				continue
 			}
 			setParts = append(setParts, fmt.Sprintf("%s=%s", c, ph(i)))
-			args = append(args, op.row[c])
+			args = append(args, bindArg(op.row[c]))
 			i++
 		}
 		args = append(args, op.pkVal)
@@ -348,6 +348,19 @@ func buildSQL(op *recordedOp, ph func(n int) string) (string, []any) {
 			[]any{op.pkVal}
 	}
 	return "", nil
+}
+
+// bindArg adapts a row value for the database driver. A json.Number is the
+// DSL's exact-numeric literal (see coerceForTypedPayload): drivers don't
+// recognize the named type, so bind its underlying text — pgx casts the text to
+// the numeric/decimal column and database/sql sends it verbatim — while the
+// expected side still treats the same json.Number as a JSON number. Everything
+// else passes through untouched.
+func bindArg(v any) any {
+	if n, ok := v.(json.Number); ok {
+		return string(n)
+	}
+	return v
 }
 
 func opKindString(k opKind) string {
@@ -393,6 +406,15 @@ func coerceForTypedPayload(v any) any {
 	switch x := v.(type) {
 	case nil:
 		return nil
+	case json.Number:
+		// An exact numeric literal: the test author's way of asserting a
+		// value whose float64 round-trip would lose information — a DECIMAL
+		// with trailing zeros ("9.50"), or an integer past 2^53. Carried
+		// through verbatim so it marshals as a JSON number with those exact
+		// digits, matching what the ingest writes (and what the hardened
+		// oracle keeps on the captured side). buildSQL binds it as text so
+		// the same value also drives the INSERT.
+		return x
 	case string:
 		return x
 	case int:

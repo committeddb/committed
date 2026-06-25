@@ -188,9 +188,19 @@ func capturedKey(e harness.CapturedEntity) string {
 // input isn't valid JSON it returns it unchanged — the diff message
 // then surfaces the bad value verbatim, which is more useful than
 // hiding it.
+//
+// Decoding uses UseNumber so a captured numeric keeps its exact source
+// text (json.Number) instead of being widened to float64. Without it a
+// DECIMAL's trailing zeros ("1234.50" → 1234.5) or a BIGINT past 2^53
+// would be silently mangled on this side, and a precision/scale
+// regression in the decode would slip past the oracle — the exact blind
+// spot the type matrix exists to close. The expected side already keeps
+// json.Number (mutation.JSONNormalize), so both sides compare like text.
 func normalizeJSON(s string) string {
+	dec := json.NewDecoder(strings.NewReader(s))
+	dec.UseNumber()
 	var v map[string]any
-	if err := json.Unmarshal([]byte(s), &v); err != nil {
+	if err := dec.Decode(&v); err != nil {
 		return s
 	}
 	keys := make([]string, 0, len(v))

@@ -4,6 +4,7 @@ package cdc_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -400,6 +401,45 @@ func TestMaxLength(t *testing.T) {
 
 	s := mutation.NewScript()
 	s.Insert("region", regionRow(1, maxName, maxComment))
+
+	if err := h.RunScript(context.Background(), s); err != nil {
+		t.Fatalf("script run: %v", err)
+	}
+	oracle.Assert(t, s.Expected(), h.Capture(t, s.ExpectedCounts()))
+}
+
+// partRow is a fully-populated part row. part is the simplest table that
+// carries a DECIMAL (p_retailprice DECIMAL(15,2)) and has no foreign key, so a
+// lone insert needs no parent rows — making it the natural vehicle for a
+// numeric-fidelity assertion. retail is a json.Number so the test can pin an
+// exact scale (trailing zeros) that a float64 would drop.
+func partRow(key, size int, retail json.Number) map[string]any {
+	return map[string]any{
+		"p_partkey":     key,
+		"p_name":        "type-matrix-part",
+		"p_mfgr":        "MFGR#1",
+		"p_brand":       "Brand#11",
+		"p_type":        "STANDARD BRUSHED",
+		"p_size":        size,
+		"p_container":   "SM BOX",
+		"p_retailprice": retail,
+		"p_comment":     "matrix",
+	}
+}
+
+// TestDecimalPrecision pins exact DECIMAL scale through the full ingest path: a
+// p_retailprice of 1234.50 must arrive as the JSON number 1234.50, trailing
+// zero intact. This is the first type-matrix assertion and the proof that the
+// oracle's numeric hardening matters — before normalizeJSON used UseNumber the
+// captured value collapsed to float64 1234.5 and this test would pass against a
+// mangled value (or fail against an exact expected), exactly the precision blind
+// spot the safety net must not have. p_partkey/p_size also confirm plain
+// integers still compare cleanly under the hardened path.
+func TestDecimalPrecision(t *testing.T) {
+	h := harness.New(t, harness.Options{Tables: []string{"part"}})
+
+	s := mutation.NewScript()
+	s.Insert("part", partRow(1, 7, json.Number("1234.50")))
 
 	if err := h.RunScript(context.Background(), s); err != nil {
 		t.Fatalf("script run: %v", err)
