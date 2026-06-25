@@ -17,6 +17,14 @@ import "strings"
 // Column types are loosely TPC-H-shaped (DECIMAL where TPC-H specifies
 // DECIMAL, VARCHAR for strings, DATE for dates) but not pedantic. The
 // harness is testing CDC correctness, not TPC-H query semantics.
+//
+// Several non-TPC-H tables follow the TPC-H set as dedicated, FK-free
+// decode-fidelity fixtures for the type-matrix tests: typematrix (large
+// integers, high-precision decimals, unicode), tmwide (bool, date, datetime,
+// nullable — tmw_flag is BOOLEAN on PG and TINYINT(1) on MySQL, the one column
+// whose JSON type diverges by engine), tmmysql (BIGINT UNSIGNED past int64 and
+// ENUM — MySQL-only), and tmcomp (composite primary key). None are in Tables, so
+// the default 8-table scenarios and loads ignore them.
 const SchemaSQL = `
 CREATE TABLE region (
     r_regionkey  INTEGER     NOT NULL PRIMARY KEY,
@@ -113,6 +121,31 @@ CREATE TABLE lineitem (
     FOREIGN KEY (l_partkey, l_suppkey) REFERENCES partsupp(ps_partkey, ps_suppkey)
 );
 ALTER TABLE lineitem REPLICA IDENTITY FULL;
+
+CREATE TABLE typematrix (
+    tm_id   INTEGER        NOT NULL PRIMARY KEY,
+    tm_big  BIGINT         NOT NULL,
+    tm_dec  DECIMAL(20,4)  NOT NULL,
+    tm_txt  VARCHAR(255)   NOT NULL
+);
+ALTER TABLE typematrix REPLICA IDENTITY FULL;
+
+CREATE TABLE tmwide (
+    tmw_id    INTEGER       NOT NULL PRIMARY KEY,
+    tmw_flag  BOOLEAN       NOT NULL,
+    tmw_date  DATE          NOT NULL,
+    tmw_ts    TIMESTAMP     NOT NULL,
+    tmw_note  VARCHAR(255)
+);
+ALTER TABLE tmwide REPLICA IDENTITY FULL;
+
+CREATE TABLE tmcomp (
+    tmc_a  INTEGER      NOT NULL,
+    tmc_b  INTEGER      NOT NULL,
+    tmc_v  VARCHAR(64)  NOT NULL,
+    PRIMARY KEY (tmc_a, tmc_b)
+);
+ALTER TABLE tmcomp REPLICA IDENTITY FULL;
 `
 
 // MySQLSchemaSQL is the MySQL DDL for the same 8 TPC-H tables and column names
@@ -218,6 +251,34 @@ CREATE TABLE lineitem (
     FOREIGN KEY (l_orderkey) REFERENCES orders(o_orderkey),
     FOREIGN KEY (l_partkey, l_suppkey) REFERENCES partsupp(ps_partkey, ps_suppkey)
 ) ENGINE=InnoDB;
+
+CREATE TABLE typematrix (
+    tm_id   INTEGER        NOT NULL PRIMARY KEY,
+    tm_big  BIGINT         NOT NULL,
+    tm_dec  DECIMAL(20,4)  NOT NULL,
+    tm_txt  VARCHAR(255)   NOT NULL
+) ENGINE=InnoDB;
+
+CREATE TABLE tmwide (
+    tmw_id    INTEGER       NOT NULL PRIMARY KEY,
+    tmw_flag  TINYINT(1)    NOT NULL,
+    tmw_date  DATE          NOT NULL,
+    tmw_ts    DATETIME      NOT NULL,
+    tmw_note  VARCHAR(255)
+) ENGINE=InnoDB;
+
+CREATE TABLE tmmysql (
+    tmm_id     INTEGER                      NOT NULL PRIMARY KEY,
+    tmm_big    BIGINT UNSIGNED              NOT NULL,
+    tmm_color  ENUM('red','green','blue')   NOT NULL
+) ENGINE=InnoDB;
+
+CREATE TABLE tmcomp (
+    tmc_a  INTEGER      NOT NULL,
+    tmc_b  INTEGER      NOT NULL,
+    tmc_v  VARCHAR(64)  NOT NULL,
+    PRIMARY KEY (tmc_a, tmc_b)
+) ENGINE=InnoDB;
 `
 
 // Tables lists the 8 TPC-H tables in dependency order — parents before
@@ -257,6 +318,14 @@ func PrimaryKey(table string) string {
 		return "o_orderkey"
 	case "lineitem":
 		return "l_orderkey"
+	case "typematrix":
+		return "tm_id"
+	case "tmwide":
+		return "tmw_id"
+	case "tmmysql":
+		return "tmm_id"
+	case "tmcomp":
+		return "tmc_a"
 	}
 	return ""
 }
@@ -282,6 +351,14 @@ func Columns(table string) []string {
 		return []string{"o_orderkey", "o_custkey", "o_orderstatus", "o_totalprice", "o_orderdate", "o_orderpriority", "o_clerk", "o_shippriority", "o_comment"}
 	case "lineitem":
 		return []string{"l_orderkey", "l_partkey", "l_suppkey", "l_linenumber", "l_quantity", "l_extendedprice", "l_discount", "l_tax", "l_returnflag", "l_linestatus", "l_shipdate", "l_commitdate", "l_receiptdate", "l_shipinstruct", "l_shipmode", "l_comment"}
+	case "typematrix":
+		return []string{"tm_id", "tm_big", "tm_dec", "tm_txt"}
+	case "tmwide":
+		return []string{"tmw_id", "tmw_flag", "tmw_date", "tmw_ts", "tmw_note"}
+	case "tmmysql":
+		return []string{"tmm_id", "tmm_big", "tmm_color"}
+	case "tmcomp":
+		return []string{"tmc_a", "tmc_b", "tmc_v"}
 	}
 	return nil
 }
