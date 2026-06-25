@@ -97,6 +97,12 @@ When each ingestable reads `"caughtUp":true`, its snapshot is done and the topic
 is tracking the source live. (`lag` is bytes behind the source; `phase` is
 `snapshot` until the initial dump finishes.)
 
+> Pointing CDC at your **own** database? The source-side prerequisites — Postgres
+> `wal_level`/role/`REPLICA IDENTITY`, or MySQL binlog settings and grants — what
+> committed creates for you, the snapshot→streaming lifecycle, and the
+> troubleshooting are in
+> [`docs/operations/cdc-setup.md`](operations/cdc-setup.md).
+
 <details><summary>What each config is</summary>
 
 - **[`db-bff.toml`](../examples/movies/db-bff.toml)** — the sync target. Its

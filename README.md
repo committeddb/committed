@@ -708,6 +708,7 @@ for the rationale.
 
 ### Runbooks
 
+- [`docs/operations/cdc-setup.md`](docs/operations/cdc-setup.md) — setting up CDC ingest against your own database: Postgres (`wal_level`, the REPLICATION role, `REPLICA IDENTITY`, the publication/slot committed auto-creates, the slot's WAL-retention disk cost) and MySQL (binlog defaults, `binlog_row_image`, the replication grant, and why MySQL `lag`/`caughtUp` read `null`/never-true); plus the shared snapshot→streaming lifecycle and per-engine troubleshooting
 - [`docs/operations/authentication.md`](docs/operations/authentication.md) — bearer token + mTLS setup
 - [`docs/operations/secrets.md`](docs/operations/secrets.md) — `${VAR}` interpolation to keep DB credentials and tokens out of Raft/bbolt (Kubernetes + systemd patterns)
 - [`docs/operations/shutdown.md`](docs/operations/shutdown.md) — `SIGTERM` handling and the graceful-shutdown deadline
