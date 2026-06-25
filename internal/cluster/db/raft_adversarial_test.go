@@ -609,11 +609,20 @@ func tryProposeAndVerify(r *Raft, payload []byte, deadline time.Duration, stopC 
 		return false
 	}
 
-	// Storage poll: wait for the payload to land at any position in
-	// r's user-entry tail. We don't require it at exactly the tail —
-	// concurrent proposes from other goroutines may interleave —
-	// just that it appears somewhere. The per-payload deadline
+	// Storage poll: wait for the payload to appear in r's user-entry tail
+	// AND for that entry to be COMMITTED (its index <= r's commit index),
+	// not merely appended. We don't require it at exactly the tail —
+	// concurrent proposes from other goroutines may interleave — just that
+	// it appears somewhere and has committed. The per-payload deadline
 	// bounds the total wait.
+	//
+	// Committing, not appending, is the durability line: an appended-but-
+	// uncommitted entry can be legitimately discarded when a leader is
+	// deposed before the entry commits (a new leader with a different log
+	// overwrites it — correct raft). Counting that as "acked" would assert a
+	// durability guarantee raft never made for it, which is exactly the
+	// false positive that fails the convergence check downstream — only
+	// committed entries survive leader transitions.
 	poll := time.NewTimer(deadline)
 	defer poll.Stop()
 	for {
@@ -621,9 +630,13 @@ func tryProposeAndVerify(r *Raft, payload []byte, deadline time.Duration, stopC 
 		if err != nil {
 			return false
 		}
+		commit := r.commitIndex()
 		for _, e := range es {
 			if bytes.Equal(e.Data, payload) {
-				return true
+				if e.GetIndex() <= commit {
+					return true
+				}
+				break // found, but not yet committed — keep polling
 			}
 		}
 		select {

@@ -455,6 +455,17 @@ func (rs *Raft) Leader() uint64 {
 	return r.Leader()
 }
 
+// commitIndex returns the node's raft commit index, snapshotting rs.raft under
+// the lock the same way Leader does so a concurrent Restart (which swaps
+// rs.raft) can't tear the read. Used by tryProposeAndVerify to gate "acked" on
+// commit rather than mere append.
+func (rs *Raft) commitIndex() uint64 {
+	rs.mu.RLock()
+	r := rs.raft
+	rs.mu.RUnlock()
+	return r.CommitIndexForTest()
+}
+
 // Close shuts down the underlying db.Raft. db.Raft.Close is idempotent so
 // it's safe to call from both Restart and Rafts.Close.
 func (rs *Raft) Close() error {
