@@ -488,8 +488,11 @@ func decodeEnumSet(c schema.TableColumn, val any) any {
 	return val
 }
 
-// asInt64 widens any of canal's integer encodings to int64. Returns false for
-// non-integer values, so a caller can fall back to passing the value through.
+// asInt64 widens canal's integer encoding of an ENUM index / SET bitmask to
+// int64 — canal decodes both as a signed integer (a SET's high member bit lands
+// in the sign bit, which the bitmask AND in decodeEnumSet handles correctly).
+// Returns false for non-integer values, so a caller falls back to passing the
+// value through.
 func asInt64(v any) (int64, bool) {
 	switch n := v.(type) {
 	case int64:
@@ -501,12 +504,6 @@ func asInt64(v any) (int64, bool) {
 	case int16:
 		return int64(n), true
 	case int8:
-		return int64(n), true
-	case uint64:
-		return int64(n), true
-	case uint:
-		return int64(n), true
-	case uint32:
 		return int64(n), true
 	default:
 		return 0, false
