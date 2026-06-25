@@ -29,7 +29,7 @@ type Harness struct {
 	committed *committedProcess
 	collector *collector
 	topics    []string
-	slotNames map[string]string // topic → slot name
+	engine    Engine
 	ctx       context.Context
 	cancel    context.CancelFunc
 	// baseline is the per-topic proposal count captured AFTER dataset
@@ -72,14 +72,14 @@ func New(t *testing.T, opts ...Options) *Harness {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	h := &Harness{
-		topics:    o.Tables,
-		slotNames: make(map[string]string, len(o.Tables)),
-		ctx:       ctx,
-		cancel:    cancel,
+		topics: o.Tables,
+		ctx:    ctx,
+		cancel: cancel,
 	}
 
 	// 1. Postgres.
 	h.pg, h.pgConnStr = startPostgres(t)
+	h.engine = newPostgresEngine(h.pgConnStr)
 
 	pgConn, err := pgx.Connect(ctx, h.pgConnStr)
 	require.NoError(t, err, "connect pgx")
@@ -103,17 +103,14 @@ func New(t *testing.T, opts ...Options) *Harness {
 		postType(t, table)
 	}
 
-	// 5. One ingestable per table.
+	// 5. One ingestable per table (the engine emits its dialect's config).
 	for _, table := range o.Tables {
-		slot := fmt.Sprintf("slot_%s", table)
-		pub := fmt.Sprintf("pub_%s", table)
-		h.slotNames[table] = slot
-		postIngestable(t, table, h.pgConnStr, slot, pub)
+		h.engine.PostIngestable(t, table)
 	}
 
 	// 6. Wait for every slot to be active.
 	for _, table := range o.Tables {
-		h.waitForIngestableReady(t, h.slotNames[table])
+		h.waitForIngestableReady(t, h.engine.SlotName(table))
 	}
 
 	// 6a. One webhook syncable per topic, POSTing every committed Actual to
@@ -130,9 +127,9 @@ func New(t *testing.T, opts ...Options) *Harness {
 	// The syncable's Init runs CREATE TABLE IF NOT EXISTS on apply, so the
 	// sink tables exist (empty) once these POSTs return.
 	if o.Syncable {
-		postSinkDatabase(t, h.pgConnStr)
+		h.engine.PostSinkDatabase(t)
 		for _, table := range o.Tables {
-			postSyncable(t, table)
+			h.engine.PostSyncable(t, table)
 		}
 	}
 
@@ -310,7 +307,7 @@ func (h *Harness) ConnString() string {
 // SlotName returns the replication slot name for a given table. Used
 // by preflight tests and restart-resume verification.
 func (h *Harness) SlotName(table string) string {
-	return h.slotNames[table]
+	return h.engine.SlotName(table)
 }
 
 // RestartCommitted stops the committed child process and starts a
@@ -335,7 +332,7 @@ func (h *Harness) RestartCommitted(t *testing.T) {
 	// supervisor spawns the dialect, and the dialect reconnects to
 	// the existing slot from the persisted position.
 	for _, table := range h.topics {
-		h.waitForIngestableReady(t, h.slotNames[table])
+		h.waitForIngestableReady(t, h.engine.SlotName(table))
 	}
 }
 
@@ -373,7 +370,7 @@ func (h *Harness) RestartPostgres(ctx context.Context) error {
 	// retries on its own, but a few hundred ms gives it room before
 	// the test runs more mutations.
 	for _, table := range h.topics {
-		h.waitForIngestableReadyContext(ctx, h.slotNames[table], 30*time.Second)
+		h.waitForIngestableReadyContext(ctx, h.engine.SlotName(table), 30*time.Second)
 	}
 	return nil
 }
