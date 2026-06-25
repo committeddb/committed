@@ -139,7 +139,7 @@ topics into one row**:
 
 That last part is why `top_cast` carries `"name": "Organ Freeman"` and not just
 an ID. The full mechanics — multisource folds, split aggregates, enrichment —
-are in [README § SQL projections](../README.md#sql-projections).
+are in the [read-model guide](read-models.md).
 </details>
 
 ## 5. Query the read model
@@ -196,8 +196,8 @@ docker compose down -v
 
 ## Next steps
 
-- [README § SQL projections](../README.md#sql-projections) — the full
-  projection / aggregate / enrichment reference.
+- [docs/read-models.md](read-models.md) — the full projection / aggregate /
+  enrichment / fan-out reference.
 - [docs/event-log-architecture.md](event-log-architecture.md) — why the log is
   the source of truth and the read model is disposable.
 - [docs/consistency.md](consistency.md) — the consistency model.
