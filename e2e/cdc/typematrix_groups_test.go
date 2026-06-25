@@ -145,3 +145,68 @@ func TestTypeMatrixComposite(t *testing.T) { runTypeMatrixComposite(t, harness.P
 
 // TestMySQL_TypeMatrixComposite runs the composite-PK probe on MySQL.
 func TestMySQL_TypeMatrixComposite(t *testing.T) { runTypeMatrixComposite(t, harness.MySQLEngine()) }
+
+// runTypeMatrixJSON probes an embedded JSON/JSONB document. committed renders the
+// column as embedded JSON (not a stringified blob), and the oracle re-sorts
+// nested keys on the captured side — so one expectation, written with keys
+// pre-sorted and no whitespace, matches on both engines even though PG JSONB and
+// MySQL JSON each normalize storage their own way.
+func runTypeMatrixJSON(t *testing.T, engine harness.Engine) {
+	t.Helper()
+	h := harness.NewWith(t, engine, harness.Options{Tables: []string{"tmjson"}})
+
+	s := mutation.NewScript()
+	s.Insert("tmjson", map[string]any{
+		"tmj_id":  1,
+		"tmj_doc": json.RawMessage(`{"a":"x","k":1}`),
+	})
+
+	if err := h.RunScript(context.Background(), s); err != nil {
+		t.Fatalf("script run: %v", err)
+	}
+	oracle.Assert(t, s.Expected(), h.Capture(t, s.ExpectedCounts()))
+}
+
+// TestTypeMatrixJSON runs the JSON document probe on Postgres (JSONB).
+func TestTypeMatrixJSON(t *testing.T) { runTypeMatrixJSON(t, harness.PostgresEngine()) }
+
+// TestMySQL_TypeMatrixJSON runs the JSON document probe on MySQL (JSON).
+func TestMySQL_TypeMatrixJSON(t *testing.T) { runTypeMatrixJSON(t, harness.MySQLEngine()) }
+
+// TestTypeMatrixBinary (Postgres) probes a BYTEA column. The bytes "hello" are
+// inserted raw (pgx encodes []byte -> bytea); pgoutput renders bytea as its
+// "\x.." hex text, so the expectation is that hex — expressed via mutation.Raw
+// because the inserted value (bytes) and the emitted value (hex string) differ.
+func TestTypeMatrixBinary(t *testing.T) {
+	h := harness.NewWith(t, harness.PostgresEngine(), harness.Options{Tables: []string{"tmbin"}})
+
+	s := mutation.NewScript()
+	s.Insert("tmbin", map[string]any{
+		"tmx_id":   1,
+		"tmx_data": mutation.Raw{Insert: []byte("hello"), Expect: `\x68656c6c6f`},
+	})
+
+	if err := h.RunScript(context.Background(), s); err != nil {
+		t.Fatalf("script run: %v", err)
+	}
+	oracle.Assert(t, s.Expected(), h.Capture(t, s.ExpectedCounts()))
+}
+
+// TestMySQL_TypeMatrixBinary probes a BLOB column. canal hands back the raw
+// bytes, which render as the passthrough string "hello" — the MySQL divergence
+// from Postgres's hex. Same inserted bytes, different expected rendering, so the
+// expectation differs by engine (hence two tests rather than a shared runner).
+func TestMySQL_TypeMatrixBinary(t *testing.T) {
+	h := harness.NewWith(t, harness.MySQLEngine(), harness.Options{Tables: []string{"tmbin"}})
+
+	s := mutation.NewScript()
+	s.Insert("tmbin", map[string]any{
+		"tmx_id":   1,
+		"tmx_data": mutation.Raw{Insert: []byte("hello"), Expect: "hello"},
+	})
+
+	if err := h.RunScript(context.Background(), s); err != nil {
+		t.Fatalf("script run: %v", err)
+	}
+	oracle.Assert(t, s.Expected(), h.Capture(t, s.ExpectedCounts()))
+}

@@ -350,17 +350,40 @@ func buildSQL(op *recordedOp, ph func(n int) string) (string, []any) {
 	return "", nil
 }
 
-// bindArg adapts a row value for the database driver. A json.Number is the
-// DSL's exact-numeric literal (see coerceForTypedPayload): drivers don't
-// recognize the named type, so bind its underlying text — pgx casts the text to
-// the numeric/decimal column and database/sql sends it verbatim — while the
-// expected side still treats the same json.Number as a JSON number. Everything
-// else passes through untouched.
+// Raw lets one column carry a different value for the INSERT than for the
+// expectation. It is needed where the source value and committed's emitted JSON
+// differ and can't both be expressed by one Go value — chiefly BYTEA/BLOB, where
+// the bytes are inserted raw but emitted as Postgres's "\x.." hex (which also
+// differs from MySQL's passthrough rendering). Insert is bound as the SQL
+// argument (via bindArg); Expect builds the expected JSON (via
+// coerceForTypedPayload). For columns where one value serves both (the common
+// case), pass the plain value, not a Raw.
+type Raw struct {
+	Insert any
+	Expect any
+}
+
+// bindArg adapts a row value for the database driver:
+//   - json.Number — the DSL's exact-numeric literal (see coerceForTypedPayload):
+//     bind its underlying text; pgx casts text to the numeric/decimal column and
+//     database/sql sends it verbatim, while the expected side still treats it as
+//     a JSON number.
+//   - json.RawMessage — an embedded JSON document: bind its text for the
+//     json/jsonb column.
+//   - Raw — bind the Insert side, independent of the Expect side.
+//
+// Everything else passes through untouched.
 func bindArg(v any) any {
-	if n, ok := v.(json.Number); ok {
+	switch n := v.(type) {
+	case json.Number:
 		return string(n)
+	case json.RawMessage:
+		return string(n)
+	case Raw:
+		return bindArg(n.Insert)
+	default:
+		return v
 	}
-	return v
 }
 
 func opKindString(k opKind) string {
@@ -427,6 +450,15 @@ func coerceForTypedPayload(v any) any {
 		return json.Number(strconv.FormatFloat(x, 'f', -1, 64))
 	case bool:
 		return x
+	case json.RawMessage:
+		// An embedded JSON document, marshaled verbatim. The test must write it
+		// with object keys already sorted: the oracle re-sorts nested keys on the
+		// captured side, so a pre-sorted literal compares equal across engines.
+		return x
+	case Raw:
+		// The Expect side of an insert-value-≠-expected column (see Raw); the
+		// Insert side drove the SQL and is irrelevant to the expectation.
+		return coerceForTypedPayload(x.Expect)
 	}
 	return fmt.Sprintf("%v", v)
 }

@@ -23,9 +23,10 @@ import "strings"
 // integers, high-precision decimals, unicode), tmwide (bool, date, datetime,
 // nullable — tmw_flag is BOOLEAN on PG and TINYINT(1) on MySQL, the one column
 // whose JSON type diverges by engine), tmunsigned (BIGINT UNSIGNED past int64),
-// tmenum (ENUM) and tmset (SET) — those three MySQL-only — and tmcomp (composite
-// primary key). None are in Tables, so the default 8-table scenarios and loads
-// ignore them.
+// tmenum (ENUM) and tmset (SET) — those three MySQL-only — tmcomp (composite
+// primary key), tmjson (JSON/JSONB embedded document), and tmbin (BYTEA/BLOB,
+// whose CDC rendering differs by engine — PG "\x.." hex vs MySQL passthrough).
+// None are in Tables, so the default 8-table scenarios and loads ignore them.
 const SchemaSQL = `
 CREATE TABLE region (
     r_regionkey  INTEGER     NOT NULL PRIMARY KEY,
@@ -147,6 +148,18 @@ CREATE TABLE tmcomp (
     PRIMARY KEY (tmc_a, tmc_b)
 );
 ALTER TABLE tmcomp REPLICA IDENTITY FULL;
+
+CREATE TABLE tmjson (
+    tmj_id   INTEGER  NOT NULL PRIMARY KEY,
+    tmj_doc  JSONB    NOT NULL
+);
+ALTER TABLE tmjson REPLICA IDENTITY FULL;
+
+CREATE TABLE tmbin (
+    tmx_id    INTEGER  NOT NULL PRIMARY KEY,
+    tmx_data  BYTEA    NOT NULL
+);
+ALTER TABLE tmbin REPLICA IDENTITY FULL;
 `
 
 // MySQLSchemaSQL is the MySQL DDL for the same 8 TPC-H tables and column names
@@ -289,6 +302,16 @@ CREATE TABLE tmcomp (
     tmc_v  VARCHAR(64)  NOT NULL,
     PRIMARY KEY (tmc_a, tmc_b)
 ) ENGINE=InnoDB;
+
+CREATE TABLE tmjson (
+    tmj_id   INTEGER  NOT NULL PRIMARY KEY,
+    tmj_doc  JSON     NOT NULL
+) ENGINE=InnoDB;
+
+CREATE TABLE tmbin (
+    tmx_id    INTEGER  NOT NULL PRIMARY KEY,
+    tmx_data  BLOB     NOT NULL
+) ENGINE=InnoDB;
 `
 
 // Tables lists the 8 TPC-H tables in dependency order — parents before
@@ -340,6 +363,10 @@ func PrimaryKey(table string) string {
 		return "tms_id"
 	case "tmcomp":
 		return "tmc_a"
+	case "tmjson":
+		return "tmj_id"
+	case "tmbin":
+		return "tmx_id"
 	}
 	return ""
 }
@@ -377,6 +404,10 @@ func Columns(table string) []string {
 		return []string{"tms_id", "tms_tags"}
 	case "tmcomp":
 		return []string{"tmc_a", "tmc_b", "tmc_v"}
+	case "tmjson":
+		return []string{"tmj_id", "tmj_doc"}
+	case "tmbin":
+		return []string{"tmx_id", "tmx_data"}
 	}
 	return nil
 }
