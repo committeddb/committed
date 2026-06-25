@@ -39,6 +39,14 @@ const multiNodeTickInterval = 10 * time.Millisecond
 // timeout and HTTP transport startup, 5s is a generous upper bound.
 const multiNodeStartupTimeout = 5 * time.Second
 
+// proposeCommitTimeout bounds the total time a retrying propose helper will
+// spend re-proposing (across leader re-selections) before giving up. A single
+// raft Propose is best-effort — etcd/raft drops MsgProp when there is no leader
+// — so a transient election can silently drop one proposal; the helper retries
+// within this window. Generous so genuine drops get several attempts without
+// turning a real cluster stall into a confusing "proposal not committed".
+const proposeCommitTimeout = 30 * time.Second
+
 // TestRaftPropose covers the single-node propose path: a fresh cluster of
 // one, propose N inputs, verify they appear in storage. The single-node
 // shape uses the empty-URL escape hatch in httptransport so it doesn't
@@ -203,23 +211,34 @@ func proposeAndCheck(t *testing.T, r *Raft, input string) {
 	waitForUserEntry(t, r, []byte(input))
 }
 
+// waitForUserEntryWithin polls r's storage until the most recent user entry
+// (EntryNormal with non-nil Data, post-filtering) equals `want`, or `timeout`
+// elapses. Returns true if it landed. Non-fatal, so a caller can retry (e.g. a
+// re-propose) rather than fail the test.
+func waitForUserEntryWithin(r *Raft, want []byte, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		es, _ := r.ents()
+		if len(es) > 0 && cmp.Equal(es[len(es)-1].Data, want) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // waitForUserEntry polls r's storage until the most recent user entry
 // (EntryNormal with non-nil Data, post-filtering) equals `want`. Bounded
 // by multiNodeStartupTimeout so a hung propose surfaces as a useful error
 // instead of a test timeout.
 func waitForUserEntry(t *testing.T, r *Raft, want []byte) {
 	t.Helper()
-	deadline := time.Now().Add(multiNodeStartupTimeout)
-	for {
+	if !waitForUserEntryWithin(r, want, multiNodeStartupTimeout) {
 		es, _ := r.ents()
-		if len(es) > 0 && cmp.Equal(es[len(es)-1].Data, want) {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("node %d: timed out waiting for user entry %q (have %d entries)",
-				r.id, string(want), len(es))
-		}
-		time.Sleep(5 * time.Millisecond)
+		t.Fatalf("node %d: timed out waiting for user entry %q (have %d entries)",
+			r.id, string(want), len(es))
 	}
 }
 

@@ -1617,7 +1617,7 @@ func TestAdversarial_SevereLagFollowerRebuild(t *testing.T) {
 	for i := 0; i < baselineEntries; i++ {
 		seq++
 		baselinePayloads[i] = severeLagProposal(t, seq)
-		proposeAndCheckBytes(t, rafts.waitForLeaderRaft(t), baselinePayloads[i])
+		proposeAndCheckBytes(t, rafts, baselinePayloads[i])
 	}
 	for _, r := range rafts {
 		waitForUserEntry(t, r, baselinePayloads[baselineEntries-1])
@@ -1656,7 +1656,7 @@ func TestAdversarial_SevereLagFollowerRebuild(t *testing.T) {
 	for i := 0; i < duringEntries; i++ {
 		seq++
 		duringPayloads[i] = severeLagProposal(t, seq)
-		proposeAndCheckBytes(t, survivors.waitForLeaderRaft(t), duringPayloads[i])
+		proposeAndCheckBytes(t, survivors, duringPayloads[i])
 	}
 	for _, r := range survivors {
 		waitForUserEntry(t, r, duringPayloads[duringEntries-1])
@@ -1836,7 +1836,7 @@ func TestAdversarial_SevereLagFollowerRebuild(t *testing.T) {
 
 	seq++
 	postRebuildPayload := severeLagProposal(t, seq)
-	proposeAndCheckBytes(t, rafts.waitForLeaderRaft(t), postRebuildPayload)
+	proposeAndCheckBytes(t, rafts, postRebuildPayload)
 	for _, r := range rafts {
 		waitForUserEntry(t, r, postRebuildPayload)
 	}
@@ -2087,10 +2087,33 @@ const severeLagProposalPadBytes = 256
 // LogProposal bytes (see severeLagProposal) and asserts the same bytes
 // round-trip to storage, so it can't go through the string-keyed
 // helper without a double-encode.
-func proposeAndCheckBytes(t *testing.T, r *Raft, payload []byte) {
+//
+// A single raft Propose is best-effort: etcd/raft drops MsgProp when there is
+// no leader, so a transient election right as we propose silently drops that
+// entry and the round never commits. We retry — re-selecting the leader and
+// re-proposing — until the entry lands or proposeCommitTimeout elapses.
+// Re-selecting the leader each attempt also covers a leadership change between
+// attempts. This is safe to retry: payloads are byte-unique per seq and apply
+// idempotently (a re-proposed duplicate is a byte-identical replay no-op), and
+// every downstream assertion is an inequality on applied/compacted indices, so
+// a rare duplicate user entry is harmless.
+func proposeAndCheckBytes(t *testing.T, rs Rafts, payload []byte) {
 	t.Helper()
-	r.proposeC <- payload
-	waitForUserEntry(t, r, payload)
+	deadline := time.Now().Add(proposeCommitTimeout)
+	for attempt := 1; ; attempt++ {
+		r := rs.waitForLeaderRaft(t)
+		r.proposeC <- payload
+		if waitForUserEntryWithin(r, payload, multiNodeStartupTimeout) {
+			return
+		}
+		if time.Now().After(deadline) {
+			es, _ := r.ents()
+			t.Fatalf("node %d: proposal not committed after %d attempts within %v "+
+				"(have %d entries) — each attempt's single Propose was dropped "+
+				"(no leader at propose time?)",
+				r.id, attempt, proposeCommitTimeout, len(es))
+		}
+	}
 }
 
 // newSevereLagCluster builds a `replicas`-node raft cluster backed by
