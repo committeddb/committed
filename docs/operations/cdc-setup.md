@@ -72,10 +72,10 @@ GET /v1/ingestable/{id}/status
 The quickstart polls this endpoint to know when the initial snapshot has landed
 (`"caughtUp": true`).
 
-To debug a whole pipeline at once — "is my data showing up downstream?" — there
-is a composed view that stitches the producing ingestable to the syncables
-consuming the topic, so you don't have to call both endpoints and correlate by
-topic by hand. It is keyed on the topic (the type id):
+To answer "is my data showing up downstream?" in one call, ask for the whole
+pipeline for a topic. It stitches the ingestable feeding the topic to every
+syncable consuming it, so you don't have to call both endpoints and line them up
+by hand. Pass only the topic (the type id):
 
 ```
 GET /v1/type/{topic}/pipeline
@@ -94,15 +94,18 @@ GET /v1/type/{topic}/pipeline
 }
 ```
 
-It resolves the producing-ingestable → topic → consuming-syncables linkage
-server-side (you pass only the topic) and reuses the same numbers as the
-per-resource endpoints. Because it is anchored on the topic, it also covers a
-topic fed by direct proposals — there is simply no `ingestable`/`ingest` section.
-If a producing ingestable exists but its worker isn't running on the node that
-answered, the producer is still named with an `ingestError` rather than dropped.
-Top-level `caughtUp` is true only when the producer (if any) **and** every
-consumer are caught up — the whole pipeline at rest. (Lag-as-metrics for
-alerting is the gauge half: `committed.sync.lag` / `committed.ingest.lag`.)
+committed resolves the linkage server-side and reports the same numbers as the
+per-resource endpoints. Top-level `caughtUp` is true only when every stage — the
+producer (if any) and every consumer — is caught up.
+
+A few edge cases:
+
+- A topic fed by direct proposals has no producer, so the `ingestable` and
+  `ingest` fields are simply absent.
+- If a producer exists but its worker isn't running on the node that answered,
+  the producer is still named, with an `ingestError` instead of being dropped.
+- For alerting, the same lag is exported as metrics: `committed.sync.lag` and
+  `committed.ingest.lag`.
 
 ---
 

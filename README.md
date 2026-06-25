@@ -4,7 +4,7 @@
 
 A single-binary, Raft-backed distributed commit log that is its own source of truth — write events in, sync them out to systems built for querying.
 
-> **New here? Start with the [Quickstart](docs/quickstart.md)** — one `docker compose up` takes a normalized movie catalog to a single denormalized table you query with no joins (named cast and all).
+> **New here? Start with the [Quickstart](docs/quickstart.md)** — one `docker compose up` takes a normalized movie catalog to a single denormalized table you query with no joins (named cast and all). For everything else, see the [documentation index](docs/README.md).
 
 Committed is a distributed commit log designed to store data long term in a log structure. Instead of the typical implementation where you are given simple read and write primitives and have to build, use adddons, or 3rd party software to aid in your read activites, Committed's two primitives are write and sync. The sync primitive is designed to move your data somewhere else. The purpose of this is to make it easy to transform or multiplex streams of data in a value added manner, or to move data into a system that has efficient querying (like a traditional SQL or NoSQL database). Committed even works with ephemeral data storage because it provides an efficient way to recreate the ephemeral storage if it fails (think Redis).
 
@@ -485,8 +485,6 @@ duplicate is externally visible). Raise it only for **idempotent** sinks (the
 where it trades that bounded duplicate exposure for substantially fewer raft
 round-trips on a fast destination. For a `BatchSyncable` (the SQL dialects)
 `checkpointEvery` is the batch size and `checkpointMaxAge` the batch-age flush.
-Making a larger cadence *safe* on a non-idempotent sink is separate work; see
-the cross-reference in `sync-fail-fast-bump-tracking`.
 
 ### Testing
 
@@ -526,14 +524,29 @@ for the rationale.
 
 ### Runbooks
 
-- [`docs/operations/cdc-setup.md`](docs/operations/cdc-setup.md) — setting up CDC ingest against your own database: Postgres (`wal_level`, the REPLICATION role, `REPLICA IDENTITY`, the publication/slot committed auto-creates, the slot's WAL-retention disk cost) and MySQL (binlog defaults, `binlog_row_image`, the replication grant, and why MySQL `lag`/`caughtUp` read `null`/never-true); plus the shared snapshot→streaming lifecycle and per-engine troubleshooting
-- [`docs/operations/authentication.md`](docs/operations/authentication.md) — bearer token + mTLS setup
-- [`docs/operations/secrets.md`](docs/operations/secrets.md) — `${VAR}` interpolation to keep DB credentials and tokens out of Raft/bbolt (Kubernetes + systemd patterns)
-- [`docs/operations/shutdown.md`](docs/operations/shutdown.md) — `SIGTERM` handling and the graceful-shutdown deadline
-- [`docs/operations/upgrade.md`](docs/operations/upgrade.md) — zero-downtime rolling upgrades: the node-by-node procedure (leader last), `/ready` + `/version` gating, and rollback; pairs with the on-disk forward/backward-compatibility contract in [`docs/api-compatibility.md`](docs/api-compatibility.md#on-disk-and-wire-compatibility)
-- [`docs/operations/http-limits.md`](docs/operations/http-limits.md) — proposal-size cap and HTTP server timeouts
-- [`docs/operations/membership.md`](docs/operations/membership.md) — adding/removing nodes with joint consensus, growing safely via learner add → catch-up → promote, and observing membership (`GET /v1/membership`, the leader-read proxy, `COMMITTED_API_URL`)
-- [`docs/operations/disk-limits.md`](docs/operations/disk-limits.md) — disk-pressure behavior: the per-node free-space watcher (warn/critical/full thresholds, 507 rejections) and cluster-aware write admission (admit iff the leader and a quorum of voters have disk headroom; leadership transfers off a constrained leader), with the alerting and incident playbook
-- [`docs/operations/rebuild.md`](docs/operations/rebuild.md) — rebuilding a node after a `storage invariant violation` fatal. Short version: stop the node, rsync its data directory from a healthy peer, restart. Apply determinism keeps subsequent rebuilds O(diff).
-- [`docs/operations/backup.md`](docs/operations/backup.md) — offline `committed backup` / `committed restore`: archive a stopped node's data directory to a portable tar (back up a follower with no cluster downtime) for archival, pre-migration safety, off-box DR, and total-loss recovery rebuild can't cover; includes the backup × right-to-be-forgotten shared-responsibility model
-- [`docs/operations/stuck-syncables.md`](docs/operations/stuck-syncables.md) — spotting a syncable wedged on a transient error (the `committed_sync_stuck` gauge, `GET /v1/syncable/{id}/status`), tracking how far behind a syncable is (`checkpoint_index`/`head_index`/`lag`/`caught_up` on the same status endpoint, where `lag == 0` ⇔ caught up), skipping the bad proposal (`POST /v1/syncable/{id}/deadletter/`), and re-driving it after a fix (`POST /v1/syncable/{id}/replay/{index}`), plus dead letters (`GET /v1/syncable/{id}/errors`) and the type-migration recovery loop (`GET /v1/type/{id}/migration-errors`, `POST /v1/type/{id}/migration-retry/{index}`).
+Operational guides live in [`docs/operations/`](docs/operations/):
+
+- [CDC setup](docs/operations/cdc-setup.md) — point ingest at your own Postgres
+  or MySQL: the source-side settings, what committed creates for you, and the
+  failures you're most likely to hit.
+- [Cluster membership](docs/operations/membership.md) — add, remove, and grow
+  nodes safely (learner → catch up → promote), and read cluster state.
+- [Disk limits](docs/operations/disk-limits.md) — how the cluster protects
+  itself as disks fill, the thresholds and metrics to watch, and what to do in
+  an incident.
+- [Stuck syncables](docs/operations/stuck-syncables.md) — spot a syncable that's
+  wedged or falling behind, skip a bad record, and replay it after a fix.
+- [Rebuilding a node](docs/operations/rebuild.md) — recover a node that fell too
+  far behind or lost its disk by copying from a healthy peer.
+- [Backup and restore](docs/operations/backup.md) — archive a stopped node to a
+  portable tarball for disaster recovery and total-loss rebuilds.
+- [Rolling upgrades](docs/operations/upgrade.md) — upgrade the cluster
+  node-by-node with no downtime, and roll back if needed.
+- [Authentication](docs/operations/authentication.md) — turn on the bearer
+  token, API TLS, and peer mTLS.
+- [Secrets](docs/operations/secrets.md) — keep database passwords and tokens out
+  of the log with `${VAR}` config interpolation.
+- [Graceful shutdown](docs/operations/shutdown.md) — what `SIGTERM` does and how
+  to tune the drain deadline.
+- [HTTP limits](docs/operations/http-limits.md) — the proposal-size cap and HTTP
+  server timeouts.
