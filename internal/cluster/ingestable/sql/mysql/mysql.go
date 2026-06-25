@@ -451,6 +451,68 @@ func mysqlCategoryForTypeName(name string) sql.JSONCategory {
 	return sql.CatText
 }
 
+// decodeEnumSet resolves canal's numeric binlog encoding of ENUM and SET columns
+// to the label text the snapshot path (database/sql) also produces, so both
+// ingest paths render the same JSON for the same value. canal hands back an ENUM
+// as its 1-based ordinal index and a SET as a bitmask of member positions;
+// without this they would leak into the payload as bare numbers (e.g. 'green' →
+// 2), which is both unreadable and fragile (reordering members rewrites the
+// meaning of historical numbers). Any other column type passes through untouched.
+func decodeEnumSet(c schema.TableColumn, val any) any {
+	if val == nil {
+		return nil
+	}
+	switch c.Type {
+	case schema.TYPE_ENUM:
+		idx, ok := asInt64(val)
+		if !ok {
+			return val // already a label (string/[]byte) or an unexpected form
+		}
+		if idx <= 0 || int(idx) > len(c.EnumValues) {
+			return "" // 0 is MySQL's invalid/empty-enum sentinel; out-of-range guarded
+		}
+		return c.EnumValues[idx-1]
+	case schema.TYPE_SET:
+		bits, ok := asInt64(val)
+		if !ok {
+			return val
+		}
+		parts := make([]string, 0, len(c.SetValues))
+		for i, name := range c.SetValues {
+			if bits&(int64(1)<<uint(i)) != 0 {
+				parts = append(parts, name)
+			}
+		}
+		return strings.Join(parts, ",")
+	}
+	return val
+}
+
+// asInt64 widens any of canal's integer encodings to int64. Returns false for
+// non-integer values, so a caller can fall back to passing the value through.
+func asInt64(v any) (int64, bool) {
+	switch n := v.(type) {
+	case int64:
+		return n, true
+	case int:
+		return int64(n), true
+	case int32:
+		return int64(n), true
+	case int16:
+		return int64(n), true
+	case int8:
+		return int64(n), true
+	case uint64:
+		return int64(n), true
+	case uint:
+		return int64(n), true
+	case uint32:
+		return int64(n), true
+	default:
+		return 0, false
+	}
+}
+
 func (h *MySQLEventHandler) OnRow(e *canal.RowsEvent) error {
 	if !slices.Contains(h.tables, strings.ToLower(e.Table.Name)) {
 		return nil
@@ -466,7 +528,7 @@ func (h *MySQLEventHandler) OnRow(e *canal.RowsEvent) error {
 	row := e.Rows[len(e.Rows)-1]
 	for i, c := range e.Table.Columns {
 		lc := strings.ToLower(c.Name)
-		val := row[i]
+		val := decodeEnumSet(c, row[i])
 		raw[lc] = val
 		catByName[lc] = mysqlCategoryForCanalType(c.Type)
 		if b, ok := val.([]byte); ok {

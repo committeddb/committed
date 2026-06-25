@@ -68,23 +68,52 @@ func TestMySQL_TypeMatrixWide(t *testing.T) {
 	runTypeMatrixWide(t, harness.MySQLEngine(), json.Number("1"))
 }
 
-// TestMySQL_TypeMatrixUnsignedEnum probes two MySQL-only types with no Postgres
-// analogue:
-//
-//   - tmm_big BIGINT UNSIGNED at max uint64 (18446744073709551615) — past int64,
-//     so the decode must carry it as uint64, not clamp to int64. This is the
-//     sharpest finding candidate: if canal hands back a signed/overflowed value
-//     the oracle catches it. The hardened oracle keeps the exact digits.
-//   - tmm_color ENUM → predicted to decode to the label string "green".
-func TestMySQL_TypeMatrixUnsignedEnum(t *testing.T) {
-	h := harness.NewWith(t, harness.MySQLEngine(), harness.Options{Tables: []string{"tmmysql"}})
+// TestMySQL_TypeMatrixUnsigned probes BIGINT UNSIGNED at max uint64
+// (18446744073709551615) — past int64, so the decode must carry it as uint64,
+// not clamp to int64. CI-confirmed green: canal returns uint64 and the hardened
+// oracle keeps every digit. (No Postgres analogue — Postgres has no unsigned.)
+func TestMySQL_TypeMatrixUnsigned(t *testing.T) {
+	h := harness.NewWith(t, harness.MySQLEngine(), harness.Options{Tables: []string{"tmunsigned"}})
 
 	s := mutation.NewScript()
-	s.Insert("tmmysql", map[string]any{
-		"tmm_id":    1,
-		"tmm_big":   json.Number("18446744073709551615"),
-		"tmm_color": "green",
+	s.Insert("tmunsigned", map[string]any{
+		"tmu_id":  1,
+		"tmu_big": json.Number("18446744073709551615"),
 	})
+
+	if err := h.RunScript(context.Background(), s); err != nil {
+		t.Fatalf("script run: %v", err)
+	}
+	oracle.Assert(t, s.Expected(), h.Capture(t, s.ExpectedCounts()))
+}
+
+// TestMySQL_TypeMatrixEnum asserts ENUM decodes to its label ("green"), matching
+// the snapshot path. Regression lock for finding mysql-cdc-enum-set-index-decode:
+// canal hands back the 1-based ordinal index, and the ingest now resolves it to
+// the label rather than leaking the bare number. MySQL-only — Postgres has no
+// native ENUM in this schema.
+func TestMySQL_TypeMatrixEnum(t *testing.T) {
+	h := harness.NewWith(t, harness.MySQLEngine(), harness.Options{Tables: []string{"tmenum"}})
+
+	s := mutation.NewScript()
+	s.Insert("tmenum", map[string]any{"tme_id": 1, "tme_color": "green"})
+
+	if err := h.RunScript(context.Background(), s); err != nil {
+		t.Fatalf("script run: %v", err)
+	}
+	oracle.Assert(t, s.Expected(), h.Capture(t, s.ExpectedCounts()))
+}
+
+// TestMySQL_TypeMatrixSet asserts SET decodes to its comma-joined labels in
+// definition order ("a,c"), matching the snapshot path — the SET half of finding
+// mysql-cdc-enum-set-index-decode: canal hands back a member bitmask, and the
+// ingest now resolves it to labels rather than leaking the integer. MySQL-only —
+// Postgres has no SET type.
+func TestMySQL_TypeMatrixSet(t *testing.T) {
+	h := harness.NewWith(t, harness.MySQLEngine(), harness.Options{Tables: []string{"tmset"}})
+
+	s := mutation.NewScript()
+	s.Insert("tmset", map[string]any{"tms_id": 1, "tms_tags": "a,c"})
 
 	if err := h.RunScript(context.Background(), s); err != nil {
 		t.Fatalf("script run: %v", err)

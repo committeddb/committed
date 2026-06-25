@@ -22,9 +22,10 @@ import "strings"
 // decode-fidelity fixtures for the type-matrix tests: typematrix (large
 // integers, high-precision decimals, unicode), tmwide (bool, date, datetime,
 // nullable — tmw_flag is BOOLEAN on PG and TINYINT(1) on MySQL, the one column
-// whose JSON type diverges by engine), tmmysql (BIGINT UNSIGNED past int64 and
-// ENUM — MySQL-only), and tmcomp (composite primary key). None are in Tables, so
-// the default 8-table scenarios and loads ignore them.
+// whose JSON type diverges by engine), tmunsigned (BIGINT UNSIGNED past int64),
+// tmenum (ENUM) and tmset (SET) — those three MySQL-only — and tmcomp (composite
+// primary key). None are in Tables, so the default 8-table scenarios and loads
+// ignore them.
 const SchemaSQL = `
 CREATE TABLE region (
     r_regionkey  INTEGER     NOT NULL PRIMARY KEY,
@@ -267,10 +268,19 @@ CREATE TABLE tmwide (
     tmw_note  VARCHAR(255)
 ) ENGINE=InnoDB;
 
-CREATE TABLE tmmysql (
-    tmm_id     INTEGER                      NOT NULL PRIMARY KEY,
-    tmm_big    BIGINT UNSIGNED              NOT NULL,
-    tmm_color  ENUM('red','green','blue')   NOT NULL
+CREATE TABLE tmunsigned (
+    tmu_id   INTEGER         NOT NULL PRIMARY KEY,
+    tmu_big  BIGINT UNSIGNED NOT NULL
+) ENGINE=InnoDB;
+
+CREATE TABLE tmenum (
+    tme_id     INTEGER                     NOT NULL PRIMARY KEY,
+    tme_color  ENUM('red','green','blue')  NOT NULL
+) ENGINE=InnoDB;
+
+CREATE TABLE tmset (
+    tms_id    INTEGER           NOT NULL PRIMARY KEY,
+    tms_tags  SET('a','b','c')  NOT NULL
 ) ENGINE=InnoDB;
 
 CREATE TABLE tmcomp (
@@ -322,8 +332,12 @@ func PrimaryKey(table string) string {
 		return "tm_id"
 	case "tmwide":
 		return "tmw_id"
-	case "tmmysql":
-		return "tmm_id"
+	case "tmunsigned":
+		return "tmu_id"
+	case "tmenum":
+		return "tme_id"
+	case "tmset":
+		return "tms_id"
 	case "tmcomp":
 		return "tmc_a"
 	}
@@ -355,8 +369,12 @@ func Columns(table string) []string {
 		return []string{"tm_id", "tm_big", "tm_dec", "tm_txt"}
 	case "tmwide":
 		return []string{"tmw_id", "tmw_flag", "tmw_date", "tmw_ts", "tmw_note"}
-	case "tmmysql":
-		return []string{"tmm_id", "tmm_big", "tmm_color"}
+	case "tmunsigned":
+		return []string{"tmu_id", "tmu_big"}
+	case "tmenum":
+		return []string{"tme_id", "tme_color"}
+	case "tmset":
+		return []string{"tms_id", "tms_tags"}
 	case "tmcomp":
 		return []string{"tmc_a", "tmc_b", "tmc_v"}
 	}

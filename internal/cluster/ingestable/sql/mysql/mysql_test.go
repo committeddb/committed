@@ -277,6 +277,83 @@ func TestMysqlTypedPayload(t *testing.T) {
 	}
 }
 
+// TestMysqlEnumSetDecode is the regression lock for finding
+// mysql-cdc-enum-set-index-decode: ENUM and SET columns must decode to their
+// label text — "green", "a,c" — on BOTH ingest paths, not to canal's binlog
+// ordinal index / member bitmask. A 'snap' row seeded before Ingest exercises
+// the snapshot path (and doubles as the snapshot-complete sentinel); a 'stream'
+// row inserted after exercises the binlog/CDC path, the one that used to leak
+// the index.
+func TestMysqlEnumSetDecode(t *testing.T) {
+	const table = "enumset_table"
+
+	db := createDB(t)
+	_, err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS `%s`", table))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf(
+		"CREATE TABLE `%s` (pk VARCHAR(32) NOT NULL PRIMARY KEY, color ENUM('red','green','blue'), tags SET('a','b','c'))", table))
+	require.NoError(t, err)
+	// Seeded before Ingest → snapshot path; also the snapshot-complete sentinel.
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, color, tags) VALUES ('snap', 'green', 'a,c')", table))
+	require.NoError(t, err)
+	db.Close()
+
+	enumType := &cluster.Type{ID: "enumset", Name: "enumset"}
+	config := &sql.Config{
+		Type:             enumType,
+		ConnectionString: ingestURL,
+		Tables:           []string{table},
+		PrimaryKey:       []string{"pk"},
+		Mappings: []sql.Mapping{
+			{JsonName: "pk", SQLColumn: "pk"},
+			{JsonName: "color", SQLColumn: "color"},
+			{JsonName: "tags", SQLColumn: "tags"},
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	proposalChan := make(chan *cluster.Proposal, 10)
+	positionChan := make(chan cluster.Position, 10)
+	go func() { _ = (&mysql.MySQLDialect{}).Ingest(ctx, config, nil, proposalChan, positionChan) }()
+
+	waitForEntity := func(key string) *cluster.Entity {
+		t.Helper()
+		deadline := time.After(15 * time.Second)
+		for {
+			select {
+			case p := <-proposalChan:
+				for _, e := range p.Entities {
+					if string(e.Key) == key {
+						return e
+					}
+				}
+			case <-positionChan:
+			case <-deadline:
+				t.Fatalf("timed out waiting for entity %q", key)
+			}
+		}
+	}
+
+	assertLabels := func(e *cluster.Entity, color, tags string) {
+		t.Helper()
+		var m map[string]any
+		require.NoError(t, json.Unmarshal(e.Data, &m))
+		require.Equal(t, color, m["color"], "ENUM decodes to its label, not its ordinal index")
+		require.Equal(t, tags, m["tags"], "SET decodes to its comma-joined labels, not its bitmask")
+	}
+
+	// Snapshot path.
+	assertLabels(waitForEntity("snap"), "green", "a,c")
+
+	// Binlog/CDC path — the one the fix targets.
+	db = createDB(t)
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, color, tags) VALUES ('stream', 'blue', 'b')", table))
+	require.NoError(t, err)
+	db.Close()
+	assertLabels(waitForEntity("stream"), "blue", "b")
+}
+
 func setup1(t *testing.T) {
 	table := "table"
 
