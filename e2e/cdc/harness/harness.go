@@ -54,6 +54,13 @@ type Options struct {
 // subsequent mutation capture (if you load via Load() it bumps the
 // baseline again after the load completes).
 func New(t *testing.T, opts ...Options) *Harness {
+	return NewWith(t, PostgresEngine(), opts...)
+}
+
+// NewWith is New backed by the given source engine — PostgresEngine() (what New
+// uses) or MySQLEngine(). The committed/collector/capture wiring is identical;
+// only the source-database specifics differ behind the Engine seam.
+func NewWith(t *testing.T, engine Engine, opts ...Options) *Harness {
 	t.Helper()
 
 	o := Options{Tables: dataset.Tables}
@@ -68,6 +75,7 @@ func New(t *testing.T, opts ...Options) *Harness {
 
 	h := &Harness{
 		topics: o.Tables,
+		engine: engine,
 		ctx:    ctx,
 		cancel: cancel,
 	}
@@ -75,7 +83,6 @@ func New(t *testing.T, opts ...Options) *Harness {
 	// 1. Source database (engine-owned: container, connection, and schema —
 	// the DDL is applied before committed boots so the publication created later
 	// finds the tables it references).
-	h.engine = newPostgresEngine()
 	h.engine.Start(ctx, t)
 
 	// 3. committed.
