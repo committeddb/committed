@@ -70,6 +70,19 @@ func (h *HTTP) GetIngestableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 
+	resp := toIngestableStatusResponse(st)
+
+	bs, err := json.Marshal(resp)
+	if err != nil {
+		writeInternalError(w, "failed to marshal response", err)
+		return
+	}
+	writeJson(w, bs)
+}
+
+// toIngestableStatusResponse converts the cluster-level ingestable status into
+// the HTTP response shape. Shared by GetIngestableStatus and the pipeline view.
+func toIngestableStatusResponse(st cluster.IngestableStatus) IngestableStatusResponse {
 	resp := IngestableStatusResponse{
 		Phase:            st.Phase,
 		SnapshotProgress: make([]TableSnapshotProgress, 0, len(st.SnapshotProgress)),
@@ -84,11 +97,5 @@ func (h *HTTP) GetIngestableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 			Complete: t.Complete,
 		})
 	}
-
-	bs, err := json.Marshal(resp)
-	if err != nil {
-		writeInternalError(w, "failed to marshal response", err)
-		return
-	}
-	writeJson(w, bs)
+	return resp
 }

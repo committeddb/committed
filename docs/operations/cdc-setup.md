@@ -72,6 +72,38 @@ GET /v1/ingestable/{id}/status
 The quickstart polls this endpoint to know when the initial snapshot has landed
 (`"caughtUp": true`).
 
+To debug a whole pipeline at once — "is my data showing up downstream?" — there
+is a composed view that stitches the producing ingestable to the syncables
+consuming the topic, so you don't have to call both endpoints and correlate by
+topic by hand. It is keyed on the topic (the type id):
+
+```
+GET /v1/type/{topic}/pipeline
+```
+
+```json
+{
+  "topic": "movie",
+  "headIndex": 12044,
+  "ingestable": "movie-ingest",
+  "ingest": { "phase": "streaming", "lag": 0, "caughtUp": true },
+  "syncables": [
+    { "id": "movie-card", "checkpointIndex": 12044, "lag": 0, "caughtUp": true }
+  ],
+  "caughtUp": true
+}
+```
+
+It resolves the producing-ingestable → topic → consuming-syncables linkage
+server-side (you pass only the topic) and reuses the same numbers as the
+per-resource endpoints. Because it is anchored on the topic, it also covers a
+topic fed by direct proposals — there is simply no `ingestable`/`ingest` section.
+If a producing ingestable exists but its worker isn't running on the node that
+answered, the producer is still named with an `ingestError` rather than dropped.
+Top-level `caughtUp` is true only when the producer (if any) **and** every
+consumer are caught up — the whole pipeline at rest. (Lag-as-metrics for
+alerting is the gauge half: `committed.sync.lag` / `committed.ingest.lag`.)
+
 ---
 
 ## PostgreSQL

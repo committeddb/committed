@@ -221,6 +221,30 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 			},
 		},
 		{
+			name:   "GET /type/{id}/pipeline",
+			method: httpgo.MethodGet,
+			path:   "/v1/type/t/pipeline",
+			setup: func(fake *clusterfakes.FakeCluster) {
+				fake.TypesReturns([]*cluster.Configuration{
+					{ID: "t", MimeType: "text/toml", Data: []byte("[type]\n")},
+				}, nil)
+				fake.IngestablesReturns([]*cluster.Configuration{
+					{ID: "ing-1", MimeType: "text/toml", Data: []byte("[ingestable]\ntype = \"sql\"\n\n[sql]\ntopic = \"t\"\n")},
+				}, nil)
+				lag := uint64(0)
+				fake.IngestableStatusReturns(cluster.IngestableStatus{
+					Phase:    "streaming",
+					Position: "0/1A2B3C8",
+					Lag:      &lag,
+					CaughtUp: true,
+				}, nil)
+				fake.SyncablesReturns([]*cluster.Configuration{
+					{ID: "s-1", MimeType: "text/toml", Data: []byte("[syncable]\ntype = \"sql\"\n\n[sql]\ntopic = \"t\"\n")},
+				}, nil)
+				fake.SyncableProgressReturns(100, 100, nil)
+			},
+		},
+		{
 			name:   "POST /ingestable/{id}/rollback",
 			method: httpgo.MethodPost,
 			path:   "/v1/ingestable/ing-1/rollback?to=1",
@@ -534,6 +558,7 @@ func TestOpenAPIContract_SpecCoversAllRoutes(t *testing.T) {
 		"/v1/type/{id}",
 		"/v1/type/{id}/versions",
 		"/v1/type/{id}/versions/{version}",
+		"/v1/type/{id}/pipeline",
 		"/v1/proposal",
 		"/v1/node/status",
 		"/v1/membership",

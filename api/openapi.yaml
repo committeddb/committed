@@ -412,6 +412,41 @@ paths:
         '503':
           $ref: '#/components/responses/NotLinearizable'
 
+  /v1/type/{id}/pipeline:
+    get:
+      tags: [type]
+      summary: End-to-end status of a topic's pipeline
+      description: |
+        Composes the end-to-end status of the pipeline flowing through topic
+        `{id}` (the type id): its producing ingestable's status (if any), the
+        data head, and every syncable consuming the topic, with an overall
+        `caughtUp` flag. The linkage (producing ingestable → topic → consuming
+        syncables) is resolved server-side from the stored configs — the caller
+        passes only the topic. Because it is anchored on the topic rather than an
+        ingestable, it also covers a topic fed by direct proposals (no
+        ingestable). It reuses the same computations as
+        `GET /v1/ingestable/{id}/status` and `GET /v1/syncable/{id}/status`, so
+        the numbers match. Read behind a linearize barrier.
+      operationId: getPipelineStatus
+      parameters:
+        - $ref: '#/components/parameters/Consistency'
+        - $ref: '#/components/parameters/ResourceId'
+      responses:
+        '200':
+          description: The pipeline's composed status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PipelineStatusResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/NotLinearizable'
+
   /v1/ingestable/{id}/rollback:
     post:
       tags: [ingestable]
@@ -1890,6 +1925,82 @@ components:
         complete:
           type: boolean
           description: Whether this table's snapshot finished.
+
+    PipelineStatusResponse:
+      type: object
+      required: [topic, headIndex, syncables, caughtUp]
+      description: |
+        The end-to-end status of one topic's pipeline: its producing ingestable
+        (if any), the data head, and every syncable consuming the topic. Anchored
+        on the topic (type id), so it also covers a topic fed by direct proposals.
+      properties:
+        topic:
+          type: string
+          description: The topic (type id) this pipeline flows through — the path key.
+        headIndex:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            The data head (the highest data-entry raft index applied locally) —
+            the convergence target the producer and the consumers race toward.
+        ingestable:
+          type: string
+          description: |
+            The id of the ingestable producing this topic. Omitted when the topic
+            is fed by direct proposals (no ingestable).
+        ingest:
+          allOf:
+            - $ref: '#/components/schemas/IngestableStatusResponse'
+          description: |
+            The producer's ingest status. Present only when an ingestable
+            produces this topic and its status was retrievable.
+        ingestError:
+          type: string
+          description: |
+            Set when a producing ingestable exists but its status could not be
+            read — e.g. no ingestable worker is running on the node that answered.
+            The producer is still named (`ingestable`) and the overall `caughtUp`
+            is forced false. Omitted when the producer's status read cleanly or
+            there is no producer.
+        syncables:
+          type: array
+          description: Every syncable consuming the topic, with its lag.
+          items:
+            $ref: '#/components/schemas/PipelineSyncableStatus'
+        caughtUp:
+          type: boolean
+          description: |
+            True only when the producer (if any) is caught up AND every consuming
+            syncable is caught up — the whole pipeline is at rest.
+
+    PipelineSyncableStatus:
+      type: object
+      required: [id, checkpointIndex, lag, caughtUp]
+      description: One consumer's place in the pipeline.
+      properties:
+        id:
+          type: string
+          description: The syncable id.
+        checkpointIndex:
+          type: integer
+          format: int64
+          minimum: 0
+          description: The consumed head this syncable has durably checkpointed through.
+        lag:
+          type: integer
+          format: int64
+          minimum: 0
+          description: max(0, headIndex − checkpointIndex). 0 when caught up.
+        caughtUp:
+          type: boolean
+          description: True when this syncable's lag is 0.
+        error:
+          type: string
+          description: >-
+            Set when this consumer's progress could not be read. The consumer is
+            still listed (rather than silently dropped) and the pipeline's
+            overall caughtUp is forced false. Omitted when progress read cleanly.
 
     AddMemberRequest:
       type: object

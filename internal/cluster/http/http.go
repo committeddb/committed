@@ -166,6 +166,7 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 			r.Get("/type/{id}/versions/{version}", h.getVersion("type", h.c.TypeVersion))
 			r.Get("/type/{id}/migration-errors", h.GetTypeMigrationErrors)
 			r.Post("/type/{id}/migration-retry/{index}", h.ReplayTypeMigrationDeadLetter)
+			r.Get("/type/{id}/pipeline", h.GetPipelineStatus)
 
 			// Per-node diagnostics. /node/ (not /status) scopes this to the
 			// answering node — degraded-build state is node-local and
