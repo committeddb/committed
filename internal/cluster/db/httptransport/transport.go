@@ -11,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"sync"
 	"time"
 
@@ -141,16 +140,19 @@ type peer struct {
 // this concrete transport into db (used by cmd in production and by tests), so
 // db itself never imports this package.
 func Factory() db.TransportFactory {
-	return func(id uint64, peers []raft.Peer, logger *zap.Logger, r db.TransportRaft, tlsInfo *transport.TLSInfo) db.Transport {
-		return New(id, peers, logger, r, tlsInfo)
+	return func(id uint64, peers []raft.Peer, logger *zap.Logger, r db.TransportRaft, tlsInfo *transport.TLSInfo, token string) db.Transport {
+		return New(id, peers, logger, r, tlsInfo, token)
 	}
 }
 
 // New constructs an HttpTransport. The peer registry and dial client are ready
 // immediately so callers can Send/Stop right after New; the listener and the
 // seed peers are wired in Start (mirroring the prior lifecycle). tlsInfo controls
-// mTLS for peer transport — nil means plaintext.
-func New(id uint64, ps []raft.Peer, l *zap.Logger, r db.TransportRaft, tlsInfo *transport.TLSInfo) *HttpTransport {
+// mTLS for peer transport — nil means plaintext. token is the cluster bearer
+// token sent on peer requests — empty means unauthenticated. Both are injected
+// by the composition root (cmd/node.go via db's TransportFactory) rather than
+// read from the environment here.
+func New(id uint64, ps []raft.Peer, l *zap.Logger, r db.TransportRaft, tlsInfo *transport.TLSInfo, token string) *HttpTransport {
 	rt, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
 		log.Fatalf("httptransport: unexpected http.DefaultTransport type %T", http.DefaultTransport)
@@ -182,7 +184,7 @@ func New(id uint64, ps []raft.Peer, l *zap.Logger, r db.TransportRaft, tlsInfo *
 		raft:    r,
 		tlsInfo: tlsInfo,
 		client:  &http.Client{Transport: tr}, // per-request context bounds duration, not Client.Timeout
-		token:   os.Getenv("COMMITTED_API_TOKEN"),
+		token:   token,
 		errorC:  make(chan error),
 		baseCtx: ctx,
 		cancel:  cancel,

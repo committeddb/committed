@@ -281,6 +281,9 @@ image can be templated per-node by an orchestrator:
 		}
 
 		dbOpts = append(dbOpts, db.WithTransportFactory(httptransport.Factory()))
+		// Inject the bearer token the peer transport sends, read once above, so
+		// the transport constructor doesn't reach into the environment itself.
+		dbOpts = append(dbOpts, db.WithAPIToken(apiToken))
 
 		d := db.New(id, peers, s, p, sync, ingest, dbOpts...)
 		fmt.Printf("Raft Running...\n")

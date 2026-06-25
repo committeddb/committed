@@ -83,7 +83,7 @@ func (r *recordingRaft) snapStatus(id uint64) (raft.SnapshotStatus, bool) {
 // method, none of which had direct coverage before.
 func TestHandler_Guards(t *testing.T) {
 	rr := newRecordingRaft()
-	tr := New(1, nil, zap.NewExample(), rr, nil)
+	tr := New(1, nil, zap.NewExample(), rr, nil, "")
 	srv := httptest.NewServer(tr.handler())
 	defer srv.Close()
 
@@ -124,13 +124,14 @@ func TestHandler_Guards(t *testing.T) {
 	require.Equal(t, 1, rr.processedCount())
 }
 
-// TestHandler_Token covers the optional shared-secret guard: when
-// COMMITTED_API_TOKEN is set, only a request carrying the matching bearer is
-// accepted.
+// TestHandler_Token covers the optional shared-secret guard: when a token is
+// configured, only a request carrying the matching bearer is accepted. The
+// token is injected into New directly — no process-environment mutation — which
+// is the point of taking it as a parameter instead of reading COMMITTED_API_TOKEN
+// inside the constructor.
 func TestHandler_Token(t *testing.T) {
-	t.Setenv("COMMITTED_API_TOKEN", "s3cr3t") // read by New
 	rr := newRecordingRaft()
-	tr := New(1, nil, zap.NewExample(), rr, nil)
+	tr := New(1, nil, zap.NewExample(), rr, nil, "s3cr3t")
 	srv := httptest.NewServer(tr.handler())
 	defer srv.Close()
 
@@ -162,12 +163,12 @@ func TestHandler_Token(t *testing.T) {
 // and that a MsgSnap's delivery is reported back as SnapshotFinish.
 func TestSend_RoundTrip(t *testing.T) {
 	rrB := newRecordingRaft()
-	trB := New(2, nil, zap.NewExample(), rrB, nil)
+	trB := New(2, nil, zap.NewExample(), rrB, nil, "")
 	srvB := httptest.NewServer(trB.handler())
 	defer srvB.Close()
 
 	rrA := newRecordingRaft()
-	trA := New(1, nil, zap.NewExample(), rrA, nil)
+	trA := New(1, nil, zap.NewExample(), rrA, nil, "")
 	defer trA.Stop()
 	require.NoError(t, trA.AddPeer(raft.Peer{ID: 2, Context: []byte(srvB.URL)}))
 
@@ -190,7 +191,7 @@ func TestSend_DeadPeerReportsUnreachable(t *testing.T) {
 	dead.Close() // now refuses connections — a fast failure
 
 	rr := newRecordingRaft()
-	tr := New(1, nil, zap.NewExample(), rr, nil)
+	tr := New(1, nil, zap.NewExample(), rr, nil, "")
 	defer tr.Stop()
 	require.NoError(t, tr.AddPeer(raft.Peer{ID: 9, Context: []byte(url)}))
 
@@ -206,7 +207,7 @@ func TestSend_NeverBlocks(t *testing.T) {
 	url := dead.URL
 	dead.Close()
 
-	tr := New(1, nil, zap.NewExample(), newRecordingRaft(), nil)
+	tr := New(1, nil, zap.NewExample(), newRecordingRaft(), nil, "")
 	defer tr.Stop()
 	require.NoError(t, tr.AddPeer(raft.Peer{ID: 9, Context: []byte(url)}))
 

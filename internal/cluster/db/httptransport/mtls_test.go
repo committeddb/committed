@@ -142,7 +142,7 @@ func startTLSTransport(t *testing.T, addr string, tlsInfo *transport.TLSInfo) (c
 	peers := []raft.Peer{
 		{ID: 1, Context: []byte("https://" + addr)},
 	}
-	tr := New(1, peers, zap.NewExample(), &fakeRaft{}, tlsInfo)
+	tr := New(1, peers, zap.NewExample(), &fakeRaft{}, tlsInfo, "")
 	stopC := make(chan struct{})
 	doneC := make(chan struct{})
 	go func() {

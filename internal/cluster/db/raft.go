@@ -114,6 +114,10 @@ type Raft struct {
 	// tlsInfo is captured from the options so startRaft can pass it to the
 	// transport factory. nil means plaintext peer transport (default).
 	tlsInfo *tlstransport.TLSInfo
+	// apiToken is captured from the options so startRaft can pass the cluster
+	// bearer token to the transport factory. Empty means unauthenticated peer
+	// requests.
+	apiToken string
 
 	// closeC is closed by Close() to tell serveChannels (both its inner
 	// proposeC reader and its outer Ready loop) to exit. Without this,
@@ -164,6 +168,7 @@ func newRaftWithOptions(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []
 		transportWrapper:     cfg.transportWrapper,
 		transportFactory:     cfg.transportFactory,
 		tlsInfo:              cfg.tlsInfo,
+		apiToken:             cfg.apiToken,
 		join:                 cfg.join,
 		closeC:               make(chan struct{}),
 		serveChannelsDoneC:   make(chan struct{}),
@@ -270,7 +275,7 @@ func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 		panic("db: no transport factory configured — wire one with WithTransportFactory")
 	}
 	r := &httpTransportRaft{node: n.node}
-	t := n.transportFactory(id, ps, n.logger, r, n.tlsInfo)
+	t := n.transportFactory(id, ps, n.logger, r, n.tlsInfo, n.apiToken)
 	if n.transportWrapper != nil {
 		// Wrap once, before serveRaft starts driving the transport. The
 		// wrapper returns a Transport that conforms to the same interface,

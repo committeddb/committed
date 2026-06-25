@@ -39,5 +39,6 @@ type TransportRaft interface {
 // WithTransportFactory so this package depends only on the Transport abstraction
 // above, never on a concrete transport. The factory gets everything the node can
 // provide — its id, the seed peer set, the logger, the node's TransportRaft
-// callbacks, and the optional mTLS config — and returns a ready Transport.
-type TransportFactory func(id uint64, peers []raft.Peer, logger *zap.Logger, r TransportRaft, tlsInfo *tlstransport.TLSInfo) Transport
+// callbacks, the optional mTLS config, and the cluster API bearer token (empty
+// when auth is off) — and returns a ready Transport.
+type TransportFactory func(id uint64, peers []raft.Peer, logger *zap.Logger, r TransportRaft, tlsInfo *tlstransport.TLSInfo, token string) Transport
