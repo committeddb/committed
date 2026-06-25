@@ -11,6 +11,7 @@ import (
 	bolt "go.etcd.io/bbolt"
 	pb "go.etcd.io/raft/v3/raftpb"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
 )
@@ -298,13 +299,13 @@ func (s *Storage) runScrub(bound uint64) error {
 // one reason.
 func scrubFilterEntry(raw []byte, sel, msel map[string]uint64) (keep bool, payload []byte, err error) {
 	pe := &pb.Entry{}
-	if err := pe.Unmarshal(raw); err != nil {
+	if err := proto.Unmarshal(raw, pe); err != nil {
 		return false, nil, err
 	}
-	if pe.Type != pb.EntryNormal || pe.Data == nil {
+	if pe.GetType() != pb.EntryNormal || pe.Data == nil {
 		return true, raw, nil
 	}
-	idx := pe.Index
+	idx := pe.GetIndex()
 	remove := func(typeID string, key []byte, isDelete bool) bool {
 		tk := string(tombstoneKey(typeID, key))
 		// RTBF: spare deletes (the tombstone must survive).
@@ -330,7 +331,7 @@ func scrubFilterEntry(raw []byte, sel, msel map[string]uint64) (keep bool, paylo
 		return true, raw, nil
 	}
 	pe.Data = newData
-	nb, err := pe.Marshal()
+	nb, err := proto.Marshal(pe)
 	if err != nil {
 		return false, nil, err
 	}
@@ -384,18 +385,18 @@ func (s *Storage) metadataSupersessions(bound uint64) (map[string]uint64, error)
 			return nil, err
 		}
 		pe := &pb.Entry{}
-		if err := pe.Unmarshal(raw); err != nil {
+		if err := proto.Unmarshal(raw, pe); err != nil {
 			return nil, err
 		}
 		// Event-log seqs are append order = raft-index order, so once an entry is
 		// past the freeze line the rest are too — stop before reading the tail.
-		if pe.Index > bound {
+		if pe.GetIndex() > bound {
 			break
 		}
-		if pe.Type != pb.EntryNormal || pe.Data == nil {
+		if pe.GetType() != pb.EntryNormal || pe.Data == nil {
 			continue
 		}
-		idx := pe.Index
+		idx := pe.GetIndex()
 		if err := cluster.ForEachProposalEntity(pe.Data, func(typeID string, key, data []byte, isDelete bool) error {
 			// Learn each user type's declared kind from its registration.
 			if cluster.IsType(typeID) && !isDelete {
@@ -442,12 +443,12 @@ func (s *Storage) recomputeEventBoundsLocked() error {
 		return err
 	}
 	le := &pb.Entry{}
-	if err := le.Unmarshal(lb); err != nil {
+	if err := proto.Unmarshal(lb, le); err != nil {
 		return err
 	}
-	if le.Index != s.eventIndex.Load() {
+	if le.GetIndex() != s.eventIndex.Load() {
 		return fmt.Errorf("scrub changed EventIndex from %d to %d; the tail must be preserved",
-			s.eventIndex.Load(), le.Index)
+			s.eventIndex.Load(), le.GetIndex())
 	}
 
 	first, err := s.firstEventSeqLocked()
@@ -459,10 +460,10 @@ func (s *Storage) recomputeEventBoundsLocked() error {
 		return err
 	}
 	fe := &pb.Entry{}
-	if err := fe.Unmarshal(fb); err != nil {
+	if err := proto.Unmarshal(fb, fe); err != nil {
 		return err
 	}
-	s.firstEventIndex.Store(fe.Index)
+	s.firstEventIndex.Store(fe.GetIndex())
 	return nil
 }
 

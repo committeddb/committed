@@ -9,6 +9,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 
 	pb "go.etcd.io/raft/v3/raftpb"
+	"google.golang.org/protobuf/proto"
 )
 
 // TestEventLog_AppliedEntriesMirrored verifies that ApplyCommitted mirrors
@@ -85,8 +86,8 @@ func TestEventLog_SurvivesRestart(t *testing.T) {
 		data, err := s.ReadEventAt(seq)
 		require.Nil(t, err)
 		e := &pb.Entry{}
-		require.Nil(t, e.Unmarshal(data))
-		require.Equal(t, seq, e.Index, "raft index embedded in event log entry")
+		require.Nil(t, proto.Unmarshal(data, e))
+		require.Equal(t, seq, e.GetIndex(), "raft index embedded in event log entry")
 	}
 }
 
@@ -148,8 +149,8 @@ func TestEventLog_ReaderResumesFromPosition(t *testing.T) {
 		// Save a no-op EntryConfChange at idx-1 to mimic how raft
 		// interleaves conf changes with user entries, but don't Apply
 		// it — so only the EntryNormal lands in EventLog.
-		cc := pb.Entry{Term: 1, Index: idx - 1, Type: pb.EntryConfChange}
-		require.Nil(t, s.Save(defaultHardState, []pb.Entry{cc}, defaultSnap))
+		cc := &pb.Entry{Term: proto.Uint64(1), Index: proto.Uint64(idx - 1), Type: pb.EntryConfChange.Enum()}
+		require.Nil(t, s.Save(&defaultHardState, []*pb.Entry{cc}, &defaultSnap))
 		saveProposal(t, p, s, 1, idx)
 	}
 
@@ -194,8 +195,8 @@ func TestEventLog_ReplaySkipsAlreadyApplied(t *testing.T) {
 	bs, err := p.Marshal()
 	require.Nil(t, err)
 
-	ent := pb.Entry{Term: 1, Index: 2, Type: pb.EntryNormal, Data: bs}
-	require.Nil(t, s.Save(defaultHardState, []pb.Entry{ent}, defaultSnap))
+	ent := &pb.Entry{Term: proto.Uint64(1), Index: proto.Uint64(2), Type: pb.EntryNormal.Enum(), Data: bs}
+	require.Nil(t, s.Save(&defaultHardState, []*pb.Entry{ent}, &defaultSnap))
 	require.Nil(t, s.ApplyCommitted(ent))
 	// Second apply of the same entry is a no-op (replay-on-restart safety).
 	require.Nil(t, s.ApplyCommitted(ent))

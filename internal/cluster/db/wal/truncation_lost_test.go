@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	pb "go.etcd.io/raft/v3/raftpb"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db/wal"
@@ -15,11 +16,11 @@ import (
 // cluster.Proposal with the given RequestID and no entities — enough for
 // truncation detection, which only decodes the RequestID and never resolves
 // types.
-func proposalEntry(t *testing.T, term, index, requestID uint64) pb.Entry {
+func proposalEntry(t *testing.T, term, index, requestID uint64) *pb.Entry {
 	t.Helper()
 	bs, err := (&cluster.Proposal{RequestID: requestID}).Marshal()
 	require.NoError(t, err)
-	return pb.Entry{Term: term, Index: index, Type: pb.EntryNormal, Data: bs}
+	return &pb.Entry{Term: proto.Uint64(term), Index: proto.Uint64(index), Type: pb.EntryNormal.Enum(), Data: bs}
 }
 
 // TestTruncationLostCallback drives the wal_storage truncation path
@@ -43,19 +44,19 @@ func TestTruncationLostCallback(t *testing.T) {
 	// Entry 1 carries RequestID 0 (a system/fire-and-forget proposal with no
 	// waiter); entries 2 and 3 carry real waiter RequestIDs. The clean append
 	// must not invoke the callback at all.
-	require.NoError(t, ws.Save(defaultHardState, []pb.Entry{
+	require.NoError(t, ws.Save(&defaultHardState, []*pb.Entry{
 		proposalEntry(t, 1, 1, 0),
 		proposalEntry(t, 1, 2, 100),
 		proposalEntry(t, 1, 3, 200),
-	}, defaultSnap))
+	}, &defaultSnap))
 	require.Empty(t, got, "a non-conflicting append must not signal lost")
 
 	// A higher-term leader's AppendEntries conflicts at index 2, truncating
 	// the old tail [2,3] before appending its own.
-	require.NoError(t, ws.Save(defaultHardState, []pb.Entry{
+	require.NoError(t, ws.Save(&defaultHardState, []*pb.Entry{
 		proposalEntry(t, 2, 2, 999),
 		proposalEntry(t, 2, 3, 998),
-	}, defaultSnap))
+	}, &defaultSnap))
 
 	require.Len(t, got, 1, "truncation must invoke the callback exactly once")
 	require.ElementsMatch(t, []uint64{100, 200}, got[0],
@@ -79,13 +80,13 @@ func TestTruncationLostCallbackZeroOnlyTail(t *testing.T) {
 		_ = os.RemoveAll(dir)
 	})
 
-	require.NoError(t, ws.Save(defaultHardState, []pb.Entry{
+	require.NoError(t, ws.Save(&defaultHardState, []*pb.Entry{
 		proposalEntry(t, 1, 1, 0),
 		proposalEntry(t, 1, 2, 0),
-	}, defaultSnap))
-	require.NoError(t, ws.Save(defaultHardState, []pb.Entry{
+	}, &defaultSnap))
+	require.NoError(t, ws.Save(&defaultHardState, []*pb.Entry{
 		proposalEntry(t, 2, 2, 0),
-	}, defaultSnap))
+	}, &defaultSnap))
 
 	require.Zero(t, calls, "a tail of only RequestID-0 entries has no waiters to signal")
 }
@@ -104,11 +105,11 @@ func TestTruncationNoCallbackWhenUnset(t *testing.T) {
 		_ = os.RemoveAll(dir)
 	})
 
-	require.NoError(t, ws.Save(defaultHardState, []pb.Entry{
+	require.NoError(t, ws.Save(&defaultHardState, []*pb.Entry{
 		proposalEntry(t, 1, 1, 100),
 		proposalEntry(t, 1, 2, 200),
-	}, defaultSnap))
-	require.NoError(t, ws.Save(defaultHardState, []pb.Entry{
+	}, &defaultSnap))
+	require.NoError(t, ws.Save(&defaultHardState, []*pb.Entry{
 		proposalEntry(t, 2, 2, 999),
-	}, defaultSnap))
+	}, &defaultSnap))
 }

@@ -17,22 +17,23 @@ import (
 
 	"go.etcd.io/raft/v3"
 	pb "go.etcd.io/raft/v3/raftpb"
+	"google.golang.org/protobuf/proto"
 )
 
 var (
 	defaultHardState pb.HardState = pb.HardState{}
 	defaultSnap      pb.Snapshot  = pb.Snapshot{
 		Data: nil,
-		Metadata: pb.SnapshotMetadata{
-			ConfState: pb.ConfState{
+		Metadata: &pb.SnapshotMetadata{
+			ConfState: &pb.ConfState{
 				Voters:         []uint64{},
 				Learners:       []uint64{},
 				VotersOutgoing: []uint64{},
 				LearnersNext:   []uint64{},
-				AutoLeave:      false,
+				AutoLeave:      proto.Bool(false),
 			},
-			Index: 0,
-			Term:  0,
+			Index: proto.Uint64(0),
+			Term:  proto.Uint64(0),
 		},
 	}
 )
@@ -60,11 +61,12 @@ type index uint64
 
 // terms generates a slice of entries at indices [index, index+len(terms)), with
 // the given terms of each entry. Terms must be non-decreasing.
-func (i index) terms(terms ...uint64) []pb.Entry {
+func (i index) terms(terms ...uint64) []*pb.Entry {
 	index := uint64(i)
-	entries := make([]pb.Entry, 0, len(terms))
+	entries := make([]*pb.Entry, 0, len(terms))
 	for _, term := range terms {
-		entries = append(entries, pb.Entry{Term: term, Index: index})
+		t, idx := term, index
+		entries = append(entries, &pb.Entry{Term: &t, Index: &idx})
 		index++
 	}
 	return entries
@@ -118,7 +120,7 @@ func (s *StorageWrapper) Cleanup() {
 	_ = os.RemoveAll(s.path)
 }
 
-func (s *StorageWrapper) ents(t *testing.T) []pb.Entry {
+func (s *StorageWrapper) ents(t *testing.T) []*pb.Entry {
 	fi, err := s.EntryLog.FirstIndex()
 	if err != nil {
 		t.Error(err)
@@ -131,7 +133,7 @@ func (s *StorageWrapper) ents(t *testing.T) []pb.Entry {
 		return nil
 	}
 
-	var es []pb.Entry
+	var es []*pb.Entry
 	for i := fi; i <= li; i++ {
 		raw, err := s.EntryLog.Read(i)
 		if err != nil {
@@ -145,8 +147,8 @@ func (s *StorageWrapper) ents(t *testing.T) []pb.Entry {
 			return nil
 		}
 
-		e := pb.Entry{}
-		err = e.Unmarshal(data)
+		e := &pb.Entry{}
+		err = proto.Unmarshal(data, e)
 		if err != nil {
 			t.Error(err)
 			return nil
@@ -198,11 +200,25 @@ func (s *StorageWrapper) states(t *testing.T) []wal.State {
 	return es
 }
 
-func NewStorage(t *testing.T, ents []pb.Entry) *StorageWrapper {
+// requireEntriesEqual compares two []*pb.Entry by protobuf message content.
+// Since raft 3.7 moved raftpb to google.golang.org/protobuf, pb.Entry carries
+// internal bookkeeping (sizeCache/state) that proto.Unmarshal populates but a
+// hand-built Entry does not, so reflect-based require.Equal spuriously fails
+// when one side was read back off disk. proto.Equal ignores that bookkeeping.
+func requireEntriesEqual(t *testing.T, want, got []*pb.Entry) {
+	t.Helper()
+	require.Equal(t, len(want), len(got), "entry count")
+	for i := range want {
+		require.Truef(t, proto.Equal(want[i], got[i]),
+			"entry %d mismatch:\nwant: %v\ngot:  %v", i, want[i], got[i])
+	}
+}
+
+func NewStorage(t *testing.T, ents []*pb.Entry) *StorageWrapper {
 	return NewStorageWithParser(t, ents, nil)
 }
 
-func NewStorageWithParser(t *testing.T, ents []pb.Entry, p db.Parser) *StorageWrapper {
+func NewStorageWithParser(t *testing.T, ents []*pb.Entry, p db.Parser) *StorageWrapper {
 	dir, err := os.MkdirTemp("", "wal-storage-test-")
 	if err != nil {
 		t.Fatal(err)
@@ -211,7 +227,7 @@ func NewStorageWithParser(t *testing.T, ents []pb.Entry, p db.Parser) *StorageWr
 
 	s := OpenStorage(t, dir, p, nil, nil)
 	if ents != nil {
-		_ = s.Save(defaultHardState, ents, defaultSnap)
+		_ = s.Save(&defaultHardState, ents, &defaultSnap)
 	}
 
 	return s
@@ -301,7 +317,7 @@ func TestStorageEntries(t *testing.T) {
 		lo, hi, maxsize uint64
 
 		werr     error
-		wentries []pb.Entry
+		wentries []*pb.Entry
 	}{
 		{2, 6, math.MaxUint64, raft.ErrCompacted, nil},
 		{3, 4, math.MaxUint64, raft.ErrCompacted, nil},
@@ -311,12 +327,12 @@ func TestStorageEntries(t *testing.T) {
 		// even if maxsize is zero, the first entry should be returned
 		{4, 7, 0, nil, index(4).terms(4)},
 		// limit to 2
-		{4, 7, uint64(ents[1].Size() + ents[2].Size()), nil, index(4).terms(4, 5)},
+		{4, 7, uint64(proto.Size(ents[1]) + proto.Size(ents[2])), nil, index(4).terms(4, 5)},
 		// limit to 2
-		{4, 7, uint64(ents[1].Size() + ents[2].Size() + ents[3].Size()/2), nil, index(4).terms(4, 5)},
-		{4, 7, uint64(ents[1].Size() + ents[2].Size() + ents[3].Size() - 1), nil, index(4).terms(4, 5)},
+		{4, 7, uint64(proto.Size(ents[1]) + proto.Size(ents[2]) + proto.Size(ents[3])/2), nil, index(4).terms(4, 5)},
+		{4, 7, uint64(proto.Size(ents[1]) + proto.Size(ents[2]) + proto.Size(ents[3]) - 1), nil, index(4).terms(4, 5)},
 		// all
-		{4, 7, uint64(ents[1].Size() + ents[2].Size() + ents[3].Size()), nil, index(4).terms(4, 5, 6)},
+		{4, 7, uint64(proto.Size(ents[1]) + proto.Size(ents[2]) + proto.Size(ents[3])), nil, index(4).terms(4, 5, 6)},
 	}
 
 	for _, tt := range tests {
@@ -326,7 +342,7 @@ func TestStorageEntries(t *testing.T) {
 
 			entries, err := s.Entries(tt.lo, tt.hi, tt.maxsize)
 			require.Equal(t, tt.werr, err)
-			require.Equal(t, tt.wentries, entries)
+			requireEntriesEqual(t, tt.wentries, entries)
 		})
 	}
 }
@@ -341,7 +357,7 @@ func TestStorageLastIndex(t *testing.T) {
 	require.Equal(t, uint64(5), last)
 
 	// require.NoError(t, s.Append(index(6).terms(5)))
-	require.NoError(t, s.Save(defaultHardState, index(6).terms(5), defaultSnap))
+	require.NoError(t, s.Save(&defaultHardState, index(6).terms(5), &defaultSnap))
 	last, err = s.LastIndex()
 	require.NoError(t, err)
 	require.Equal(t, uint64(6), last)
@@ -389,8 +405,8 @@ func TestStorageCompact(t *testing.T) {
 			require.Equal(t, tt.werr, s.Compact(tt.i))
 
 			ents := s.ents(t)
-			require.Equal(t, tt.windex, ents[0].Index)
-			require.Equal(t, tt.wterm, ents[0].Term)
+			require.Equal(t, tt.windex, ents[0].GetIndex())
+			require.Equal(t, tt.wterm, ents[0].GetTerm())
 			require.Equal(t, tt.wlen, len(ents))
 		})
 	}
@@ -426,10 +442,10 @@ func TestStorageCompact(t *testing.T) {
 func TestStorageAppend(t *testing.T) {
 	ents := index(3).terms(3, 4, 5)
 	tests := []struct {
-		entries []pb.Entry
+		entries []*pb.Entry
 
 		werr     error
-		wentries []pb.Entry
+		wentries []*pb.Entry
 	}{
 		{
 			index(1).terms(1, 2),
@@ -477,8 +493,8 @@ func TestStorageAppend(t *testing.T) {
 			defer s.Cleanup()
 
 			// require.Equal(t, tt.werr, s.Append(tt.entries))
-			require.Equal(t, tt.werr, s.Save(defaultHardState, tt.entries, defaultSnap))
-			require.Equal(t, tt.wentries, s.ents(t))
+			require.Equal(t, tt.werr, s.Save(&defaultHardState, tt.entries, &defaultSnap))
+			requireEntriesEqual(t, tt.wentries, s.ents(t))
 		})
 	}
 }
@@ -511,7 +527,7 @@ func TestStateStorage(t *testing.T) {
 	t.Run("unchanged state writes no records", func(t *testing.T) {
 		s := NewStorage(t, nil)
 		defer s.Cleanup()
-		require.NoError(t, s.Save(defaultHardState, nil, defaultSnap))
+		require.NoError(t, s.Save(&defaultHardState, nil, &defaultSnap))
 
 		li, err := s.StateLog.LastIndex()
 		require.NoError(t, err)
@@ -522,22 +538,22 @@ func TestStateStorage(t *testing.T) {
 	// HardState record (snapshot first, per the raft persistence contract).
 	t.Run("changed state writes snapshot then hard state", func(t *testing.T) {
 		st := pb.HardState{
-			Term:   1,
-			Vote:   1,
-			Commit: 1,
+			Term:   proto.Uint64(1),
+			Vote:   proto.Uint64(1),
+			Commit: proto.Uint64(1),
 		}
 		snap := pb.Snapshot{
 			Data: []byte("Foo"),
-			Metadata: pb.SnapshotMetadata{
-				ConfState: pb.ConfState{
+			Metadata: &pb.SnapshotMetadata{
+				ConfState: &pb.ConfState{
 					Voters:         []uint64{1},
 					Learners:       []uint64{1},
 					VotersOutgoing: []uint64{1},
 					LearnersNext:   []uint64{1},
-					AutoLeave:      true,
+					AutoLeave:      proto.Bool(true),
 				},
-				Index: 1,
-				Term:  1,
+				Index: proto.Uint64(1),
+				Term:  proto.Uint64(1),
 			},
 		}
 
@@ -547,15 +563,15 @@ func TestStateStorage(t *testing.T) {
 		// non-empty snapshot routes through saveWithSnapshot, which rejects
 		// (persists nothing for) a snapshot past EventIndex — the severe-lag
 		// rebuild path.
-		require.NoError(t, s.Save(defaultHardState, index(1).terms(1), defaultSnap))
+		require.NoError(t, s.Save(&defaultHardState, index(1).terms(1), &defaultSnap))
 		require.NoError(t, s.ApplyCommitted(index(1).terms(1)[0]))
 
-		require.NoError(t, s.Save(st, nil, snap))
+		require.NoError(t, s.Save(&st, nil, &snap))
 
-		stb, err := st.Marshal()
+		stb, err := proto.Marshal(&st)
 		require.NoError(t, err)
 
-		snapb, err := snap.Marshal()
+		snapb, err := proto.Marshal(&snap)
 		require.NoError(t, err)
 
 		states := []wal.State{
@@ -568,7 +584,7 @@ func TestStateStorage(t *testing.T) {
 
 func TestStartupWithExistingLogs(t *testing.T) {
 	tests := []struct {
-		entries []pb.Entry
+		entries []*pb.Entry
 	}{
 		{index(3).terms(3, 4, 5)},
 	}
@@ -581,7 +597,7 @@ func TestStartupWithExistingLogs(t *testing.T) {
 			defer s.Cleanup()
 			require.Equal(t, nil, err)
 
-			require.Equal(t, tt.entries, s.ents(t))
+			requireEntriesEqual(t, tt.entries, s.ents(t))
 		})
 	}
 }
@@ -602,17 +618,17 @@ func saveProposal(t *testing.T, p *cluster.Proposal, s db.Storage, term, index u
 	bs, err := p.Marshal()
 	require.Equal(t, nil, err)
 
-	ent := pb.Entry{Term: term, Index: index, Type: pb.EntryNormal, Data: bs}
+	ent := &pb.Entry{Term: &term, Index: &index, Type: pb.EntryNormal.Enum(), Data: bs}
 
-	saveAndApply(t, s, []pb.Entry{ent})
+	saveAndApply(t, s, []*pb.Entry{ent})
 }
 
 // saveAndApply runs Save then ApplyCommitted on each entry. Use for tests
 // that need bucket state to be queryable. Use s.Save directly when the
 // test only cares about entry-log persistence (e.g., reader_test.go and
 // the persistence-only tests in wal_storage_test.go).
-func saveAndApply(t *testing.T, s db.Storage, ents []pb.Entry) {
-	require.Nil(t, s.Save(defaultHardState, ents, defaultSnap))
+func saveAndApply(t *testing.T, s db.Storage, ents []*pb.Entry) {
+	require.Nil(t, s.Save(&defaultHardState, ents, &defaultSnap))
 	for _, e := range ents {
 		require.Nil(t, s.ApplyCommitted(e))
 	}

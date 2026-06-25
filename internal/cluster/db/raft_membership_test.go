@@ -21,7 +21,7 @@ import (
 // cluster from the static peer set. Mirrors createRaft otherwise.
 func createJoiningRaft(id uint64, peers []raft.Peer, tick time.Duration) *Raft {
 	proposeC := make(chan []byte)
-	confChangeC := make(chan raftpb.ConfChangeV2)
+	confChangeC := make(chan *raftpb.ConfChangeV2)
 	s := NewMemoryStorage()
 
 	errorC, r := db.NewRaft(id, peers, s, proposeC, confChangeC,

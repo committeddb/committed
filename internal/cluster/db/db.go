@@ -63,7 +63,7 @@ type Peers map[uint64]string
 type DB struct {
 	ErrorC      <-chan error
 	proposeC    chan<- []byte
-	confChangeC chan<- raftpb.ConfChangeV2
+	confChangeC chan<- *raftpb.ConfChangeV2
 	raft        *Raft
 	storage     Storage
 	ctx         context.Context
@@ -259,7 +259,7 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 	}
 
 	proposeC := make(chan []byte)
-	confChangeC := make(chan raftpb.ConfChangeV2)
+	confChangeC := make(chan *raftpb.ConfChangeV2)
 
 	rpeers := make([]raft.Peer, len(peers))
 	i := 0
@@ -812,9 +812,9 @@ func (db *DB) AddMember(ctx context.Context, id uint64, rawURL string) error {
 	if rawURL == "" {
 		return fmt.Errorf("%w: url must be non-empty", cluster.ErrInvalidMember)
 	}
-	cc := raftpb.ConfChangeV2{
-		Transition: raftpb.ConfChangeTransitionJointImplicit,
-		Changes:    []raftpb.ConfChangeSingle{{Type: raftpb.ConfChangeAddNode, NodeID: id}},
+	cc := &raftpb.ConfChangeV2{
+		Transition: raftpb.ConfChangeTransitionJointImplicit.Enum(),
+		Changes:    []*raftpb.ConfChangeSingle{{Type: raftpb.ConfChangeAddNode.Enum(), NodeId: &id}},
 		Context:    []byte(rawURL),
 	}
 	return db.proposeConfChange(ctx, cc, id, memberVoter)
@@ -841,9 +841,9 @@ func (db *DB) AddLearner(ctx context.Context, id uint64, rawURL string) error {
 	if rawURL == "" {
 		return fmt.Errorf("%w: url must be non-empty", cluster.ErrInvalidMember)
 	}
-	cc := raftpb.ConfChangeV2{
-		Transition: raftpb.ConfChangeTransitionJointImplicit,
-		Changes:    []raftpb.ConfChangeSingle{{Type: raftpb.ConfChangeAddLearnerNode, NodeID: id}},
+	cc := &raftpb.ConfChangeV2{
+		Transition: raftpb.ConfChangeTransitionJointImplicit.Enum(),
+		Changes:    []*raftpb.ConfChangeSingle{{Type: raftpb.ConfChangeAddLearnerNode.Enum(), NodeId: &id}},
 		Context:    []byte(rawURL),
 	}
 	return db.proposeConfChange(ctx, cc, id, memberLearner)
@@ -882,9 +882,9 @@ func (db *DB) PromoteMember(ctx context.Context, id uint64) error {
 		}
 		return fmt.Errorf("%w: node %d is not a known learner", cluster.ErrNotLearner, id)
 	}
-	cc := raftpb.ConfChangeV2{
-		Transition: raftpb.ConfChangeTransitionJointImplicit,
-		Changes:    []raftpb.ConfChangeSingle{{Type: raftpb.ConfChangeAddNode, NodeID: id}},
+	cc := &raftpb.ConfChangeV2{
+		Transition: raftpb.ConfChangeTransitionJointImplicit.Enum(),
+		Changes:    []*raftpb.ConfChangeSingle{{Type: raftpb.ConfChangeAddNode.Enum(), NodeId: &id}},
 	}
 	return db.proposeConfChange(ctx, cc, id, memberVoter)
 }
@@ -899,9 +899,9 @@ func (db *DB) RemoveMember(ctx context.Context, id uint64) error {
 	if id == 0 {
 		return fmt.Errorf("%w: id must be non-zero", cluster.ErrInvalidMember)
 	}
-	cc := raftpb.ConfChangeV2{
-		Transition: raftpb.ConfChangeTransitionJointImplicit,
-		Changes:    []raftpb.ConfChangeSingle{{Type: raftpb.ConfChangeRemoveNode, NodeID: id}},
+	cc := &raftpb.ConfChangeV2{
+		Transition: raftpb.ConfChangeTransitionJointImplicit.Enum(),
+		Changes:    []*raftpb.ConfChangeSingle{{Type: raftpb.ConfChangeRemoveNode.Enum(), NodeId: &id}},
 	}
 	return db.proposeConfChange(ctx, cc, id, memberAbsent)
 }
@@ -921,7 +921,7 @@ const (
 // waitForMembership) until the membership change has fully taken effect on
 // this node. Submission itself can fail fast if ctx fires or the DB is
 // shutting down before the propose loop accepts the change.
-func (db *DB) proposeConfChange(ctx context.Context, cc raftpb.ConfChangeV2, id uint64, target membershipTarget) error {
+func (db *DB) proposeConfChange(ctx context.Context, cc *raftpb.ConfChangeV2, id uint64, target membershipTarget) error {
 	select {
 	case db.confChangeC <- cc:
 	case <-ctx.Done():

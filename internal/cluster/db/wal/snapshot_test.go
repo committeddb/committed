@@ -28,7 +28,7 @@ func TestSnapshot_RoundTrip(t *testing.T) {
 	// unit test — raft won't use it here.
 	snap, err := src.CreateSnapshot(src.AppliedIndex(), &pb.ConfState{})
 	require.Nil(t, err)
-	require.Equal(t, uint64(1), snap.Metadata.Index)
+	require.Equal(t, uint64(1), snap.Metadata.GetIndex())
 	require.Greater(t, len(snap.Data), 0, "snapshot must have bbolt payload")
 
 	// Build a second storage with no state. Mirror enough of src's
@@ -72,7 +72,7 @@ func TestSnapshot_RestoreRejectsWhenEventLogBehind(t *testing.T) {
 
 	snap, err := src.CreateSnapshot(src.AppliedIndex(), &pb.ConfState{})
 	require.Nil(t, err)
-	require.Equal(t, uint64(2), snap.Metadata.Index)
+	require.Equal(t, uint64(2), snap.Metadata.GetIndex())
 
 	// Destination node has no events applied yet — its EventIndex is 0.
 	// Restoring a snap at index 2 must fail.

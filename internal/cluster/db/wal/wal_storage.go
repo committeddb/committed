@@ -17,6 +17,7 @@ import (
 	"go.etcd.io/raft/v3"
 	pb "go.etcd.io/raft/v3/raftpb"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
@@ -248,8 +249,8 @@ type Storage struct {
 	// Without serialization, the race detector flags the cross-
 	// goroutine read/write of s.snapshot during severe-lag scenarios.
 	snapMu    sync.RWMutex
-	snapshot  pb.Snapshot
-	hardState pb.HardState
+	snapshot  *pb.Snapshot
+	hardState *pb.HardState
 	// firstIndex and lastIndex are mutated only from the raft serveChannels
 	// goroutine (via appendEntries and Compact) but read from many other
 	// goroutines: sync workers (Reader.Read), ingest workers, HTTP handlers
@@ -519,8 +520,8 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		if err != nil {
 			return nil, err
 		}
-		ws.firstIndex.Store(fe.Index - fi + 1)
-		ws.compactedUpTo.Store(fe.Index)
+		ws.firstIndex.Store(fe.GetIndex() - fi + 1)
+		ws.compactedUpTo.Store(fe.GetIndex())
 	}
 
 	li, err := entryLog.LastIndex()
@@ -534,7 +535,7 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		if err != nil {
 			return nil, err
 		}
-		ws.lastIndex.Store(le.Index)
+		ws.lastIndex.Store(le.GetIndex())
 	}
 
 	li, err = stateLog.LastIndex()
@@ -547,8 +548,8 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	if err != nil {
 		return nil, err
 	}
-	ws.hardState = *st
-	ws.snapshot = *snap
+	ws.hardState = st
+	ws.snapshot = snap
 
 	// Complete an in-place snapshot install that crashed between persisting
 	// the snapshot record (saveWithSnapshot's appendState) and cutting the
@@ -621,10 +622,10 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 			return nil, fmt.Errorf("event log read last entry: %w", err)
 		}
 		last := &pb.Entry{}
-		if err := last.Unmarshal(data); err != nil {
+		if err := proto.Unmarshal(data, last); err != nil {
 			return nil, fmt.Errorf("event log unmarshal last entry: %w", err)
 		}
-		ws.eventIndex.Store(last.Index)
+		ws.eventIndex.Store(last.GetIndex())
 
 		// Read the first entry to initialize firstEventIndex so
 		// Reader.Read can map raft index ↔ wal seq.
@@ -637,10 +638,10 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 			return nil, fmt.Errorf("event log read first entry: %w", err)
 		}
 		first := &pb.Entry{}
-		if err := first.Unmarshal(firstData); err != nil {
+		if err := proto.Unmarshal(firstData, first); err != nil {
 			return nil, fmt.Errorf("event log unmarshal first entry: %w", err)
 		}
-		ws.firstEventIndex.Store(first.Index)
+		ws.firstEventIndex.Store(first.GetIndex())
 
 		// Derive dataEventIndex (the head for per-syncable lag) by scanning
 		// the event log backward from the tail to the first user-topic-data
@@ -663,22 +664,22 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 				break
 			}
 			e := &pb.Entry{}
-			if uerr := e.Unmarshal(raw); uerr != nil {
+			if uerr := proto.Unmarshal(raw, e); uerr != nil {
 				ws.logger.Warn("dataEventIndex backscan: entry unmarshal failed; leaving head at 0",
 					zap.Uint64("seq", seq), zap.Error(uerr))
 				break
 			}
-			if e.Type != pb.EntryNormal || len(e.Data) == 0 {
+			if e.GetType() != pb.EntryNormal || len(e.Data) == 0 {
 				continue
 			}
 			typeID, ok, derr := cluster.FirstEntityTypeID(e.Data)
 			if derr != nil {
 				ws.logger.Warn("dataEventIndex backscan: proposal decode failed; leaving head at 0",
-					zap.Uint64("seq", seq), zap.Uint64("index", e.Index), zap.Error(derr))
+					zap.Uint64("seq", seq), zap.Uint64("index", e.GetIndex()), zap.Error(derr))
 				break
 			}
 			if ok && !cluster.IsInternal(typeID) {
-				ws.dataEventIndex.Store(e.Index)
+				ws.dataEventIndex.Store(e.GetIndex())
 				break
 			}
 		}
@@ -739,16 +740,13 @@ func (s *Storage) getLastStates(li uint64) (*pb.HardState, *pb.Snapshot, error) 
 	st := &pb.HardState{}
 	snap := &pb.Snapshot{
 		Data: nil,
-		Metadata: pb.SnapshotMetadata{
-			ConfState: pb.ConfState{
+		Metadata: &pb.SnapshotMetadata{
+			ConfState: &pb.ConfState{
 				Voters:         []uint64{},
 				Learners:       []uint64{},
 				VotersOutgoing: []uint64{},
 				LearnersNext:   []uint64{},
-				AutoLeave:      false,
 			},
-			Index: 0,
-			Term:  0,
 		},
 	}
 
@@ -768,8 +766,8 @@ func (s *Storage) getLastStates(li uint64) (*pb.HardState, *pb.Snapshot, error) 
 			}
 
 			if e.Type == HardState && !stDone {
-				var hs pb.HardState
-				if err := hs.Unmarshal(e.Data); err != nil {
+				hs := &pb.HardState{}
+				if err := proto.Unmarshal(e.Data, hs); err != nil {
 					return nil, nil, err
 				}
 				// Skip empty records: raft hands Save an empty HardState on
@@ -780,11 +778,11 @@ func (s *Storage) getLastStates(li uint64) (*pb.HardState, *pb.Snapshot, error) 
 				// empty one would restart the node at Term 0 (taking the
 				// StartNode bootstrap path) and forget its vote.
 				if !raft.IsEmptyHardState(hs) {
-					*st = hs
+					st = hs
 					stDone = true
 				}
 			} else if e.Type == Snapshot && !snapDone {
-				err = snap.Unmarshal(e.Data)
+				err = proto.Unmarshal(e.Data, snap)
 				if err != nil {
 					return nil, nil, err
 				}
@@ -813,7 +811,15 @@ func (s *Storage) getLastStates(li uint64) (*pb.HardState, *pb.Snapshot, error) 
 func (s *Storage) ConfState(c *pb.ConfState) {
 	s.snapMu.Lock()
 	defer s.snapMu.Unlock()
-	s.snapshot.Metadata.ConfState = *c
+	// raft 3.7's Snapshot/SnapshotMetadata are pointer fields, so a zero-value
+	// snapshot carries nil Metadata — initialize before storing the conf state.
+	if s.snapshot == nil {
+		s.snapshot = &pb.Snapshot{}
+	}
+	if s.snapshot.Metadata == nil {
+		s.snapshot.Metadata = &pb.SnapshotMetadata{}
+	}
+	s.snapshot.Metadata.ConfState = c
 	s.snapDirty = true
 }
 
@@ -842,13 +848,17 @@ func (s *Storage) ConfState(c *pb.ConfState) {
 // REPLACEMENT, not an append, and is handled by saveWithSnapshot: the
 // entries that accompany it follow the snapshot index, not this node's
 // existing entry log, so appending them here would break the seq mapping.
-func (s *Storage) Save(st pb.HardState, ents []pb.Entry, snap pb.Snapshot) error {
+func (s *Storage) Save(st *pb.HardState, ents []*pb.Entry, snap *pb.Snapshot) error {
 	if !raft.IsEmptySnap(snap) {
 		return s.saveWithSnapshot(st, ents, snap)
 	}
 
 	s.snapMu.Lock()
 	if !raft.IsEmptyHardState(st) {
+		// Store raft's HardState pointer directly: raft builds a fresh
+		// HardState value per Ready and never mutates it after return, and
+		// this code never mutates *s.hardState in place — so aliasing is safe
+		// and avoids copying the (lock-bearing) protobuf struct by value.
 		s.hardState = st
 	}
 	hardCopy := s.hardState
@@ -892,8 +902,8 @@ func (s *Storage) Save(st pb.HardState, ents []pb.Entry, snap pb.Snapshot) error
 // cut the entry log over to a dummy at the snapshot point, then append the
 // follow-up entries. A crash between the persist and the cut-over is
 // completed at the next Open by reconcileEntryLogWithSnapshot.
-func (s *Storage) saveWithSnapshot(st pb.HardState, ents []pb.Entry, snap pb.Snapshot) error {
-	if snap.Metadata.Index > s.eventIndex.Load() {
+func (s *Storage) saveWithSnapshot(st *pb.HardState, ents []*pb.Entry, snap *pb.Snapshot) error {
+	if snap.Metadata.GetIndex() > s.eventIndex.Load() {
 		return nil
 	}
 
@@ -901,7 +911,10 @@ func (s *Storage) saveWithSnapshot(st pb.HardState, ents []pb.Entry, snap pb.Sna
 	if !raft.IsEmptyHardState(st) {
 		s.hardState = st
 	}
-	s.snapshot = snap
+	// Clone, don't alias: raft's rd.Snapshot may point at its internal
+	// unstable snapshot, and ConfState() mutates s.snapshot.Metadata in
+	// place — so we must own this copy.
+	s.snapshot = proto.Clone(snap).(*pb.Snapshot)
 	// Consumed by the appendState call below, which always persists this
 	// (newer) snapshot.
 	s.snapDirty = false
@@ -912,7 +925,7 @@ func (s *Storage) saveWithSnapshot(st pb.HardState, ents []pb.Entry, snap pb.Sna
 		return fmt.Errorf("[wal.storage] appendState: %w", err)
 	}
 
-	if err := s.resetEntryLogToSnapshot(snap.Metadata.Index, snap.Metadata.Term); err != nil {
+	if err := s.resetEntryLogToSnapshot(snap.Metadata.GetIndex(), snap.Metadata.GetTerm()); err != nil {
 		return fmt.Errorf("[wal.storage] reset entry log: %w", err)
 	}
 
@@ -948,8 +961,8 @@ func entryLogDiscardDir(entryLogDir string) string {
 // returned, which stops the node (the Save error posture); the next boot
 // heals.
 func (s *Storage) resetEntryLogToSnapshot(index, term uint64) error {
-	dummy := pb.Entry{Index: index, Term: term}
-	data, err := dummy.Marshal()
+	dummy := pb.Entry{Index: &index, Term: &term}
+	data, err := proto.Marshal(&dummy)
 	if err != nil {
 		return err
 	}
@@ -995,11 +1008,11 @@ func (s *Storage) resetEntryLogToSnapshot(index, term uint64) error {
 // snapshot point — every normal node, since compaction keeps the log's tail
 // well past the last snapshot — is left alone.
 func (s *Storage) reconcileEntryLogWithSnapshot() error {
-	snapIdx := s.snapshot.Metadata.Index
+	snapIdx := s.snapshot.Metadata.GetIndex()
 	if snapIdx == 0 || s.lastIndex.Load() >= snapIdx {
 		return nil
 	}
-	return s.resetEntryLogToSnapshot(snapIdx, s.snapshot.Metadata.Term)
+	return s.resetEntryLogToSnapshot(snapIdx, s.snapshot.Metadata.GetTerm())
 }
 
 // ApplyCommitted applies a single committed raft entry to application
@@ -1020,21 +1033,21 @@ func (s *Storage) reconcileEntryLogWithSnapshot() error {
 //
 // Errors here are treated as fatal by raft.go; see the apply error policy
 // comment in raft.go's Ready loop.
-func (s *Storage) ApplyCommitted(entry pb.Entry) error {
+func (s *Storage) ApplyCommitted(entry *pb.Entry) error {
 	// Skip already-applied entries (replay-on-restart safety). A bare
 	// EntryNormal with nil data (e.g. the leader's post-election no-op
 	// entry from raft) still counts as applied — we bump appliedIndex so
 	// the Ready loop's invariant check stays P_local == R_local.
-	if entry.Index <= s.appliedIndex.Load() {
+	if entry.GetIndex() <= s.appliedIndex.Load() {
 		return nil
 	}
 
 	// Mirror the raw raft entry into the permanent event log. The guard
-	// against entry.Index <= eventIndex covers the crash window where
+	// against entry.GetIndex() <= eventIndex covers the crash window where
 	// appendEvent succeeded but saveAppliedIndex didn't persist:
 	// without it, replay would try to append the same entry again and
 	// diverge seq vs. raft index on disk.
-	if entry.Index > s.eventIndex.Load() {
+	if entry.GetIndex() > s.eventIndex.Load() {
 		if err := s.appendEvent(entry); err != nil {
 			return fmt.Errorf("[wal.storage] %w", err)
 		}
@@ -1051,14 +1064,14 @@ func (s *Storage) ApplyCommitted(entry pb.Entry) error {
 	// advance past an entry that wasn't applied, diverging replicas
 	// (node A applies, node B skips) and silently dropping entities
 	// from any future snapshot taken at that index.
-	if entry.Type == pb.EntryNormal && entry.Data != nil {
+	if entry.GetType() == pb.EntryNormal && entry.Data != nil {
 		p := &cluster.Proposal{}
 		if err := p.Unmarshal(entry.Data, s); err != nil {
 			s.logger.Error("unmarshal committed proposal",
-				zap.Uint64("index", entry.Index),
-				zap.Stringer("entryType", entry.Type),
+				zap.Uint64("index", entry.GetIndex()),
+				zap.Stringer("entryType", entry.GetType()),
 				zap.Error(err))
-			return fmt.Errorf("[wal.storage] unmarshal proposal at index %d: %w", entry.Index, err)
+			return fmt.Errorf("[wal.storage] unmarshal proposal at index %d: %w", entry.GetIndex(), err)
 		}
 
 		// Advance the data-entry head iff this is user topic data — exactly
@@ -1069,7 +1082,7 @@ func (s *Storage) ApplyCommitted(entry pb.Entry) error {
 		// reads 0 rather than a phantom backlog of trailing internal
 		// entries. Monotonic: entries apply in index order.
 		if len(p.Entities) > 0 && !cluster.IsInternal(p.Entities[0].Type.ID) {
-			s.dataEventIndex.Store(entry.Index)
+			s.dataEventIndex.Store(entry.GetIndex())
 		}
 
 		for _, entity := range p.Entities {
@@ -1085,7 +1098,7 @@ func (s *Storage) ApplyCommitted(entry pb.Entry) error {
 			// entity and stamped with this entry's raft index, so every replica
 			// stores identical bytes.
 			if isUserDefinedType(entity.Type.ID) && entity.IsDelete() {
-				if err := s.recordEventTombstone(entity.Type.ID, entity.Key, entry.Index); err != nil {
+				if err := s.recordEventTombstone(entity.Type.ID, entity.Key, entry.GetIndex()); err != nil {
 					return fmt.Errorf("[wal.storage] recordEventTombstone: %w", err)
 				}
 			}
@@ -1112,8 +1125,8 @@ func (s *Storage) ApplyCommitted(entry pb.Entry) error {
 		}
 	}
 
-	s.appliedIndex.Store(entry.Index)
-	return s.saveAppliedIndex(entry.Index)
+	s.appliedIndex.Store(entry.GetIndex())
+	return s.saveAppliedIndex(entry.GetIndex())
 }
 
 func (s *Storage) applyEntity(entity *cluster.Entity) error {
@@ -1273,7 +1286,7 @@ func (s *Storage) recordCorrupt(logName string) {
 // eventIndex (crash-window idempotence). Kept on Storage (not inlined
 // into ApplyCommitted) so there's exactly one site that advances
 // P_local.
-func (s *Storage) appendEvent(entry pb.Entry) error {
+func (s *Storage) appendEvent(entry *pb.Entry) error {
 	// RLock for the whole body so the seq it computes (LastIndex+1) and the
 	// Write that consumes it can't straddle a scrub swap that would replace the
 	// handle underneath them. Shared with concurrent readers; only the swap
@@ -1281,7 +1294,7 @@ func (s *Storage) appendEvent(entry pb.Entry) error {
 	s.eventMu.RLock()
 	defer s.eventMu.RUnlock()
 
-	entryBytes, err := entry.Marshal()
+	entryBytes, err := proto.Marshal(entry)
 	if err != nil {
 		return fmt.Errorf("marshal entry for event log: %w", err)
 	}
@@ -1291,12 +1304,12 @@ func (s *Storage) appendEvent(entry pb.Entry) error {
 	}
 	nextSeq++
 	if err := s.eventLog.Write(nextSeq, frame(entryBytes)); err != nil {
-		return fmt.Errorf("event log write seq %d (raft index %d): %w", nextSeq, entry.Index, err)
+		return fmt.Errorf("event log write seq %d (raft index %d): %w", nextSeq, entry.GetIndex(), err)
 	}
 	if nextSeq == 1 {
-		s.firstEventIndex.Store(entry.Index)
+		s.firstEventIndex.Store(entry.GetIndex())
 	}
-	s.eventIndex.Store(entry.Index)
+	s.eventIndex.Store(entry.GetIndex())
 	return nil
 }
 
@@ -1389,13 +1402,13 @@ func (s *Storage) collectTruncatedRequestIDs(firstSeq, lastSeq uint64) []uint64 
 				zap.Uint64("seq", seq), zap.Error(err))
 			continue
 		}
-		if e.Type != pb.EntryNormal || len(e.Data) == 0 {
+		if e.GetType() != pb.EntryNormal || len(e.Data) == 0 {
 			continue
 		}
 		rid, err := cluster.RequestIDFromProposal(e.Data)
 		if err != nil {
 			s.logger.Warn("truncation detection: decode proposal failed; skipping",
-				zap.Uint64("seq", seq), zap.Uint64("index", e.Index), zap.Error(err))
+				zap.Uint64("seq", seq), zap.Uint64("index", e.GetIndex()), zap.Error(err))
 			continue
 		}
 		if rid != 0 {
@@ -1405,7 +1418,7 @@ func (s *Storage) collectTruncatedRequestIDs(firstSeq, lastSeq uint64) []uint64 
 	return ids
 }
 
-func (s *Storage) appendEntries(ents []pb.Entry) error {
+func (s *Storage) appendEntries(ents []*pb.Entry) error {
 	if len(ents) == 0 {
 		return nil
 	}
@@ -1421,18 +1434,18 @@ func (s *Storage) appendEntries(ents []pb.Entry) error {
 	// or below that are already compacted away and must be skipped, not
 	// rewritten.
 	first := s.boundary() + 1
-	last := ents[0].Index + uint64(len(ents)) - 1
+	last := ents[0].GetIndex() + uint64(len(ents)) - 1
 
 	// shortcut if there is no new entry.
 	if last < first {
 		return nil
 	}
 	// truncate compacted entries
-	if first > ents[0].Index {
-		ents = ents[first-ents[0].Index:]
+	if first > ents[0].GetIndex() {
+		ents = ents[first-ents[0].GetIndex():]
 	}
 
-	offset := ents[0].Index - firstIndex
+	offset := ents[0].GetIndex() - firstIndex
 	l := lastIndex - firstIndex + 1
 
 	// Don't error when this is the first write
@@ -1448,7 +1461,7 @@ func (s *Storage) appendEntries(ents []pb.Entry) error {
 		// of any proposals it carries so the lost-callback can give their
 		// blocking-Propose waiters the definitive ErrProposalLost. The
 		// truncated entries occupy wal seqs offset+1..l (raft indexes
-		// ents[0].Index..lastIndex) — the very entries TruncateBack drops.
+		// ents[0].GetIndex()..lastIndex) — the very entries TruncateBack drops.
 		// Skipped unless a callback is registered (the only case that
 		// cares) and there is a prior log to truncate, so the happy path
 		// pays nothing.
@@ -1483,24 +1496,24 @@ func (s *Storage) appendEntries(ents []pb.Entry) error {
 	// }
 
 	if firstIndex == 0 && lastIndex == 0 && ents != nil {
-		firstIndex = ents[0].Index
+		firstIndex = ents[0].GetIndex()
 		s.firstIndex.Store(firstIndex)
 	}
 
 	for _, e := range ents {
-		data, err := e.Marshal()
+		data, err := proto.Marshal(e)
 		if err != nil {
 			return err
 		}
 
-		i := e.Index - firstIndex + 1
+		i := e.GetIndex() - firstIndex + 1
 		err = s.EntryLog.Write(i, frame(data))
 		if err != nil {
-			return fmt.Errorf("index %d to position %d: %w", e.Index, i, err)
+			return fmt.Errorf("index %d to position %d: %w", e.GetIndex(), i, err)
 		}
 	}
 
-	s.lastIndex.Store(ents[len(ents)-1].Index)
+	s.lastIndex.Store(ents[len(ents)-1].GetIndex())
 
 	return nil
 }
@@ -1532,7 +1545,7 @@ var stateLogReanchorFloor = 64 * 1024
 //
 // The Snapshot record is written before the HardState record, matching the
 // raft Ready contract's persist-the-snapshot-first ordering.
-func (s *Storage) appendState(cur pb.HardState, snap pb.Snapshot, hardChanged, snapChanged bool) error {
+func (s *Storage) appendState(cur *pb.HardState, snap *pb.Snapshot, hardChanged, snapChanged bool) error {
 	writeSnap := snapChanged
 	if !writeSnap && hardChanged && s.lastSnapSeq > 0 &&
 		s.hardStateBytesSinceSnap > max(s.lastSnapBytes, stateLogReanchorFloor) {
@@ -1545,7 +1558,7 @@ func (s *Storage) appendState(cur pb.HardState, snap pb.Snapshot, hardChanged, s
 	}
 
 	if writeSnap {
-		data, err := snap.Marshal()
+		data, err := proto.Marshal(snap)
 		if err != nil {
 			return err
 		}
@@ -1559,7 +1572,7 @@ func (s *Storage) appendState(cur pb.HardState, snap pb.Snapshot, hardChanged, s
 	}
 
 	if writeHard {
-		data, err := cur.Marshal()
+		data, err := proto.Marshal(cur)
 		if err != nil {
 			return err
 		}
@@ -1605,10 +1618,18 @@ func (s *Storage) writeStateRecord(typ StateType, data []byte) (int, error) {
 }
 
 // InitialState returns the saved HardState and ConfState information.
-func (s *Storage) InitialState() (pb.HardState, pb.ConfState, error) {
+func (s *Storage) InitialState() (*pb.HardState, *pb.ConfState, error) {
 	s.snapMu.RLock()
 	defer s.snapMu.RUnlock()
-	return s.hardState, s.snapshot.Metadata.ConfState, nil
+	// raft 3.7's Storage contract: the returned ConfState must not be nil —
+	// return an empty one when no snapshot ConfState has been persisted yet.
+	cs := s.snapshot.GetMetadata().GetConfState()
+	if cs == nil {
+		cs = &pb.ConfState{}
+	}
+	// InitialState is read once at node start, before the serve loop can
+	// mutate s.hardState, so returning the pointer directly is safe.
+	return s.hardState, cs, nil
 }
 
 // Entries returns a slice of log entries in the range [lo,hi).
@@ -1622,7 +1643,7 @@ func (s *Storage) InitialState() (pb.HardState, pb.ConfState, error) {
 // the compacted-dummy per existing wal.Storage semantics. On a
 // post-compact storage, compactedUpTo dominates and the boundary
 // moves with each Compact without disturbing the seq mapping.
-func (s *Storage) Entries(lo, hi, maxSize uint64) ([]pb.Entry, error) {
+func (s *Storage) Entries(lo, hi, maxSize uint64) ([]*pb.Entry, error) {
 	var totalSize uint64
 
 	firstIndex := s.firstIndex.Load()
@@ -1630,7 +1651,7 @@ func (s *Storage) Entries(lo, hi, maxSize uint64) ([]pb.Entry, error) {
 		return nil, raft.ErrCompacted
 	}
 
-	var es []pb.Entry
+	var es []*pb.Entry
 	logIndex := lo - firstIndex
 	for x := lo; x < hi; x++ {
 		logIndex++
@@ -1641,7 +1662,7 @@ func (s *Storage) Entries(lo, hi, maxSize uint64) ([]pb.Entry, error) {
 
 		totalSize += size
 		if len(es) == 0 || totalSize <= maxSize {
-			es = append(es, *e)
+			es = append(es, e)
 		}
 	}
 
@@ -1681,7 +1702,7 @@ func (s *Storage) entry(i uint64) (*pb.Entry, uint64, error) {
 		return nil, 0, err
 	}
 
-	err = e.Unmarshal(data)
+	err = proto.Unmarshal(data, e)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -1737,7 +1758,7 @@ func (s *Storage) Term(i uint64) (uint64, error) {
 		return 0, fmt.Errorf("wal index %d: %w", logIndex, err)
 	}
 
-	return e.Term, nil
+	return e.GetTerm(), nil
 }
 
 func (s *Storage) LastIndex() (uint64, error) {
@@ -1753,10 +1774,16 @@ func (s *Storage) FirstIndex() (uint64, error) {
 	return s.boundary() + 1, nil
 }
 
-func (s *Storage) Snapshot() (pb.Snapshot, error) {
+func (s *Storage) Snapshot() (*pb.Snapshot, error) {
 	s.snapMu.RLock()
 	defer s.snapMu.RUnlock()
-	return s.snapshot, nil
+	if s.snapshot == nil {
+		return &pb.Snapshot{}, nil
+	}
+	// Clone under the read lock: this runs on raft's node goroutine,
+	// concurrent with the serve loop's ConfState()/Save() writers that
+	// mutate or replace s.snapshot. Returning the live pointer would race.
+	return proto.Clone(s.snapshot).(*pb.Snapshot), nil
 }
 
 // Compact drops raft log entries up to and including compactIndex.

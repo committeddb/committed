@@ -110,6 +110,10 @@ func TestResolveType(t *testing.T) {
 	// scheduled by the time the test finished.)
 	s := &dbfakes.FakeStorage{}
 	s.FirstIndexReturns(1, nil)
+	// raft 3.7's Storage contract requires a non-nil ConfState from
+	// InitialState (confchange.Restore dereferences it during bootstrap);
+	// the zero-value fake would return nil and panic the node start.
+	s.InitialStateReturns(&raftpb.HardState{}, &raftpb.ConfState{}, nil)
 	s.ResolveTypeReturns(expected.tipe, nil)
 
 	db := createDBWithStorage(s)
@@ -347,7 +351,7 @@ func (db *DB) ents() ([]*cluster.Proposal, error) {
 		return nil, err
 	}
 
-	var ents []raftpb.Entry
+	var ents []*raftpb.Entry
 	// Make sure storage is not empty
 	if li+1 > fi {
 		ents, err = db.storage.Entries(fi, li+1, 10000)
@@ -359,10 +363,10 @@ func (db *DB) ents() ([]*cluster.Proposal, error) {
 	return db.entsToProposals(ents)
 }
 
-func (db *DB) entsToProposals(ents []raftpb.Entry) ([]*cluster.Proposal, error) {
+func (db *DB) entsToProposals(ents []*raftpb.Entry) ([]*cluster.Proposal, error) {
 	var ps []*cluster.Proposal
 	for _, e := range ents {
-		if e.Type == raftpb.EntryNormal && e.Data != nil {
+		if e.GetType() == raftpb.EntryNormal && e.Data != nil {
 			p := &cluster.Proposal{}
 			if err := p.Unmarshal(e.Data, db.storage); err != nil {
 				return nil, err

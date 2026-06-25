@@ -190,8 +190,8 @@ func newSlowApplyStorage(inner *MemoryStorage) *slowApplyStorage {
 // empty-Data entries (the leader-election no-op). The test's only
 // user-data proposal is the one emitted by freezeRecordingIngestable,
 // so this scopes the stall exactly to that proposal's apply path.
-func (s *slowApplyStorage) ApplyCommitted(e raftpb.Entry) error {
-	if s.applyBlocked.Load() == 1 && e.Type == raftpb.EntryNormal && len(e.Data) > 0 {
+func (s *slowApplyStorage) ApplyCommitted(e *raftpb.Entry) error {
+	if s.applyBlocked.Load() == 1 && e.GetType() == raftpb.EntryNormal && len(e.Data) > 0 {
 		<-s.release
 	}
 	return s.MemoryStorage.ApplyCommitted(e)

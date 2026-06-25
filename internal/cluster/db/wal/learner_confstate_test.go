@@ -20,7 +20,7 @@ func TestConfState_LearnerSurvivesRestart(t *testing.T) {
 	// record the resulting ConfState, then persist it via Save.
 	cs := &pb.ConfState{Voters: []uint64{1, 2}, Learners: []uint64{3}}
 	s.ConfState(cs)
-	require.NoError(t, s.Save(defaultHardState, nil, defaultSnap))
+	require.NoError(t, s.Save(&defaultHardState, nil, &defaultSnap))
 
 	s2 := s.CloseAndReopenStorage(t)
 	defer s2.Cleanup()

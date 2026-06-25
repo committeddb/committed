@@ -6,6 +6,7 @@ import (
 
 	bolt "go.etcd.io/bbolt"
 	pb "go.etcd.io/raft/v3/raftpb"
+	"google.golang.org/protobuf/proto"
 )
 
 // BucketSnapshot returns every (bucket, key, value) triple in this
@@ -114,11 +115,11 @@ func (s *Storage) EventLogSnapshot() ([]string, error) {
 			return nil, err
 		}
 		e := &pb.Entry{}
-		if err := e.Unmarshal(raw); err != nil {
+		if err := proto.Unmarshal(raw, e); err != nil {
 			return nil, err
 		}
 		sum := sha256.Sum256(raw)
-		lines = append(lines, fmt.Sprintf("seq=%d idx=%d type=%d sha=%x", seq, e.Index, e.Type, sum))
+		lines = append(lines, fmt.Sprintf("seq=%d idx=%d type=%d sha=%x", seq, e.GetIndex(), e.GetType(), sum))
 	}
 	return lines, nil
 }
@@ -151,10 +152,10 @@ func (s *Storage) EventIndices() ([]uint64, error) {
 			return nil, err
 		}
 		e := &pb.Entry{}
-		if err := e.Unmarshal(raw); err != nil {
+		if err := proto.Unmarshal(raw, e); err != nil {
 			return nil, err
 		}
-		out = append(out, e.Index)
+		out = append(out, e.GetIndex())
 	}
 	return out, nil
 }

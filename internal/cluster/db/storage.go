@@ -14,7 +14,7 @@ type Storage interface {
 	// Save persists raft state and entries durably. It does NOT apply the
 	// entries to application state — that happens via ApplyCommitted, which
 	// the raft Ready loop calls separately on rd.CommittedEntries.
-	Save(st raftpb.HardState, ents []raftpb.Entry, snap raftpb.Snapshot) error
+	Save(st *raftpb.HardState, ents []*raftpb.Entry, snap *raftpb.Snapshot) error
 	// ApplyCommitted dispatches a single committed raft entry to the
 	// per-entity handlers that update application state (BoltDB buckets,
 	// time series, downstream channels). It is called by the raft Ready loop
@@ -23,7 +23,7 @@ type Storage interface {
 	// re-apply (e.g. by skipping entries with index <= AppliedIndex). An
 	// error from ApplyCommitted is treated as fatal by raft.go because
 	// continuing past a half-applied entry diverges the state machine.
-	ApplyCommitted(entry raftpb.Entry) error
+	ApplyCommitted(entry *raftpb.Entry) error
 	// AppliedIndex returns the highest log index that has been fully
 	// applied to application state. Survives restart so the Ready loop's
 	// replay of already-applied committed entries is a no-op. This is
@@ -41,7 +41,7 @@ type Storage interface {
 	// pb.Snapshot keyed at the given raft index. The raft serve loop
 	// calls this periodically so raft has a snapshot to ship to
 	// followers whose raft log has been compacted past.
-	CreateSnapshot(index uint64, confState *raftpb.ConfState) (raftpb.Snapshot, error)
+	CreateSnapshot(index uint64, confState *raftpb.ConfState) (*raftpb.Snapshot, error)
 	// ConfState updates the conf state associated with the storage's
 	// in-memory snapshot metadata. Called by the raft Ready loop after
 	// each EntryConfChange apply, with the new ConfState returned by
@@ -58,7 +58,7 @@ type Storage interface {
 	// permanent event log is NOT in the snapshot; a node whose event
 	// log is behind the snapshot's metadata index is expected to
 	// fatal-exit at the Ready loop's subsequent invariant check.
-	RestoreSnapshot(snap raftpb.Snapshot) error
+	RestoreSnapshot(snap *raftpb.Snapshot) error
 	// Compact drops raft log entries up to and including compactIndex.
 	// Called from the raft serve loop's compaction trigger after a
 	// CreateSnapshot has captured the metadata at the compact point.

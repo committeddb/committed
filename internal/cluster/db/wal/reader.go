@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	pb "go.etcd.io/raft/v3/raftpb"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
@@ -85,14 +86,14 @@ func (r *Reader) Read() (*cluster.Actual, error) {
 		}
 
 		ent := &pb.Entry{}
-		if err := ent.Unmarshal(bs); err != nil {
+		if err := proto.Unmarshal(bs, ent); err != nil {
 			return nil, err
 		}
 
-		r.raftIndex = ent.Index
+		r.raftIndex = ent.GetIndex()
 		r.walSeq++
 
-		if ent.Type != pb.EntryNormal || ent.Data == nil {
+		if ent.GetType() != pb.EntryNormal || ent.Data == nil {
 			continue
 		}
 
@@ -112,7 +113,7 @@ func (r *Reader) Read() (*cluster.Actual, error) {
 		// types). Keep scanning.
 		if len(p.Entities) > 0 {
 			if !cluster.IsInternal(p.Entities[0].Type.ID) {
-				return &cluster.Actual{Index: ent.Index, Entities: p.Entities}, nil
+				return &cluster.Actual{Index: ent.GetIndex(), Entities: p.Entities}, nil
 			}
 		}
 	}
@@ -157,10 +158,10 @@ func (r *Reader) resolveStartSeqLocked() (uint64, error) {
 			return 0, fmt.Errorf("event log read seq %d during resolve: %w", mid, err)
 		}
 		ent := &pb.Entry{}
-		if err := ent.Unmarshal(bs); err != nil {
+		if err := proto.Unmarshal(bs, ent); err != nil {
 			return 0, err
 		}
-		if ent.Index > r.raftIndex {
+		if ent.GetIndex() > r.raftIndex {
 			hi = mid
 		} else {
 			lo = mid + 1
@@ -211,20 +212,20 @@ func (s *Storage) ActualAt(index uint64) (*cluster.Actual, error) {
 			return nil, fmt.Errorf("event log read seq %d: %w", mid, err)
 		}
 		ent := &pb.Entry{}
-		if err := ent.Unmarshal(bs); err != nil {
+		if err := proto.Unmarshal(bs, ent); err != nil {
 			return nil, err
 		}
 		switch {
-		case ent.Index == index:
-			if ent.Type != pb.EntryNormal || ent.Data == nil {
+		case ent.GetIndex() == index:
+			if ent.GetType() != pb.EntryNormal || ent.Data == nil {
 				return nil, ErrActualNotFound
 			}
 			p := &cluster.Proposal{}
 			if err := p.Unmarshal(ent.Data, s); err != nil {
 				return nil, err
 			}
-			return &cluster.Actual{Index: ent.Index, Entities: p.Entities}, nil
-		case ent.Index < index:
+			return &cluster.Actual{Index: ent.GetIndex(), Entities: p.Entities}, nil
+		case ent.GetIndex() < index:
 			lo = mid + 1
 		default:
 			if mid == first {

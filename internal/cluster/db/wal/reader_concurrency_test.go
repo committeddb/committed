@@ -20,7 +20,7 @@ func TestReader_ConcurrentReads(t *testing.T) {
 	s.RegisterType(t, "user-type-123", 1, 1)
 
 	const numEntries = 5
-	entries := make([]pb.Entry, numEntries)
+	entries := make([]*pb.Entry, numEntries)
 	for i := 0; i < numEntries; i++ {
 		entries[i] = makeEntry(t, uint64(i+2), makeUserEntity())
 	}

@@ -22,27 +22,27 @@ const membershipSettleTimeout = 10 * time.Second
 // db.RemoveMember construct in production (JointImplicit + a single change).
 // The *Raft test wrapper has no enclosing db.DB, so tests submit the change
 // straight onto the propose channel and then observe the result.
-func addNodeCC(id uint64, url string) raftpb.ConfChangeV2 {
-	return raftpb.ConfChangeV2{
-		Transition: raftpb.ConfChangeTransitionJointImplicit,
-		Changes:    []raftpb.ConfChangeSingle{{Type: raftpb.ConfChangeAddNode, NodeID: id}},
+func addNodeCC(id uint64, url string) *raftpb.ConfChangeV2 {
+	return &raftpb.ConfChangeV2{
+		Transition: raftpb.ConfChangeTransitionJointImplicit.Enum(),
+		Changes:    []*raftpb.ConfChangeSingle{{Type: raftpb.ConfChangeAddNode.Enum(), NodeId: &id}},
 		Context:    []byte(url),
 	}
 }
 
-func removeNodeCC(id uint64) raftpb.ConfChangeV2 {
-	return raftpb.ConfChangeV2{
-		Transition: raftpb.ConfChangeTransitionJointImplicit,
-		Changes:    []raftpb.ConfChangeSingle{{Type: raftpb.ConfChangeRemoveNode, NodeID: id}},
+func removeNodeCC(id uint64) *raftpb.ConfChangeV2 {
+	return &raftpb.ConfChangeV2{
+		Transition: raftpb.ConfChangeTransitionJointImplicit.Enum(),
+		Changes:    []*raftpb.ConfChangeSingle{{Type: raftpb.ConfChangeRemoveNode.Enum(), NodeId: &id}},
 	}
 }
 
 // addLearnerCC is what db.AddLearner builds: a JointImplicit ConfChangeV2 with
 // a single ConfChangeAddLearnerNode carrying the new node's peer URL.
-func addLearnerCC(id uint64, url string) raftpb.ConfChangeV2 {
-	return raftpb.ConfChangeV2{
-		Transition: raftpb.ConfChangeTransitionJointImplicit,
-		Changes:    []raftpb.ConfChangeSingle{{Type: raftpb.ConfChangeAddLearnerNode, NodeID: id}},
+func addLearnerCC(id uint64, url string) *raftpb.ConfChangeV2 {
+	return &raftpb.ConfChangeV2{
+		Transition: raftpb.ConfChangeTransitionJointImplicit.Enum(),
+		Changes:    []*raftpb.ConfChangeSingle{{Type: raftpb.ConfChangeAddLearnerNode.Enum(), NodeId: &id}},
 		Context:    []byte(url),
 	}
 }
@@ -51,16 +51,16 @@ func addLearnerCC(id uint64, url string) raftpb.ConfChangeV2 {
 // a single ConfChangeAddNode for an existing learner id and no Context (the
 // peer transport entry already exists from the learner add). etcd/raft
 // relocates the id from the Learners set to the Voters set.
-func promoteCC(id uint64) raftpb.ConfChangeV2 {
-	return raftpb.ConfChangeV2{
-		Transition: raftpb.ConfChangeTransitionJointImplicit,
-		Changes:    []raftpb.ConfChangeSingle{{Type: raftpb.ConfChangeAddNode, NodeID: id}},
+func promoteCC(id uint64) *raftpb.ConfChangeV2 {
+	return &raftpb.ConfChangeV2{
+		Transition: raftpb.ConfChangeTransitionJointImplicit.Enum(),
+		Changes:    []*raftpb.ConfChangeSingle{{Type: raftpb.ConfChangeAddNode.Enum(), NodeId: &id}},
 	}
 }
 
 // submitConfChange sends cc on this node's conf-change channel, the same path
 // db.AddMember / db.RemoveMember feed.
-func (rs *Raft) submitConfChange(cc raftpb.ConfChangeV2) {
+func (rs *Raft) submitConfChange(cc *raftpb.ConfChangeV2) {
 	rs.mu.RLock()
 	ch := rs.confChangeC
 	rs.mu.RUnlock()

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	pb "go.etcd.io/raft/v3/raftpb"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/clusterfakes"
@@ -97,7 +98,7 @@ func TestApplyDeterminism(t *testing.T) {
 
 	// Sanity-check: applied indexes should all match (they trace the
 	// last entry index that ApplyCommitted bumped past).
-	wantApplied := entries[len(entries)-1].Index
+	wantApplied := entries[len(entries)-1].GetIndex()
 	for i, s := range storages {
 		require.Equalf(t, wantApplied, s.AppliedIndex(),
 			"node %d appliedIndex mismatch", i)
@@ -116,7 +117,7 @@ func TestApplyDeterminism(t *testing.T) {
 	// but it's still load-bearing for the test as a whole: a Save bug
 	// that drops or reorders entries on one node would diverge here
 	// even though the bbolt walk looks fine.
-	entryLogs := make([][]pb.Entry, nodes)
+	entryLogs := make([][]*pb.Entry, nodes)
 	for i, s := range storages {
 		entryLogs[i] = s.ents(t)
 	}
@@ -146,7 +147,7 @@ func TestApplyDeterminism(t *testing.T) {
 // buildVariedBurst constructs a representative slice of raft entries
 // covering every entity handler in applyEntity. Index/term values are
 // monotonic so the entries form a valid raft log prefix.
-func buildVariedBurst(t *testing.T) []pb.Entry {
+func buildVariedBurst(t *testing.T) []*pb.Entry {
 	t.Helper()
 
 	// Two types so handleType runs more than once. Both go in the
@@ -217,7 +218,7 @@ func buildVariedBurst(t *testing.T) []pb.Entry {
 	// shape that exercises the per-entity loop in ApplyCommitted.
 	idx := uint64(1)
 	term := uint64(1)
-	entries := []pb.Entry{
+	entries := []*pb.Entry{
 		makeEntry(t, idx, t1),
 		makeEntry(t, idx+1, t2),
 		makeEntry(t, idx+2, t3),
@@ -233,7 +234,7 @@ func buildVariedBurst(t *testing.T) []pb.Entry {
 		makeEntry(t, idx+11, delUserA),
 	}
 	for i := range entries {
-		entries[i].Term = term
+		entries[i].Term = proto.Uint64(term)
 	}
 	return entries
 }
@@ -241,10 +242,10 @@ func buildVariedBurst(t *testing.T) []pb.Entry {
 // mustMakeProposal builds a single pb.Entry containing a proposal of
 // multiple entities. Mirrors makeEntry but accepts more than one entity
 // in the same proposal.
-func mustMakeProposal(t *testing.T, idx uint64, entities ...*cluster.Entity) pb.Entry {
+func mustMakeProposal(t *testing.T, idx uint64, entities ...*cluster.Entity) *pb.Entry {
 	t.Helper()
 	p := &cluster.Proposal{Entities: entities}
 	bs, err := p.Marshal()
 	require.NoError(t, err)
-	return pb.Entry{Term: 1, Index: idx, Type: pb.EntryNormal, Data: bs}
+	return &pb.Entry{Term: proto.Uint64(1), Index: proto.Uint64(idx), Type: pb.EntryNormal.Enum(), Data: bs}
 }

@@ -10,6 +10,7 @@ import (
 
 	bolt "go.etcd.io/bbolt"
 	pb "go.etcd.io/raft/v3/raftpb"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
 )
@@ -27,9 +28,9 @@ import (
 // receives this snapshot and whose permanent event log is already
 // current finishes catchup via normal raft replication; a follower too
 // far behind tripls the storage invariant and fatal-exits.
-func (s *Storage) CreateSnapshot(index uint64, confState *pb.ConfState) (pb.Snapshot, error) {
+func (s *Storage) CreateSnapshot(index uint64, confState *pb.ConfState) (*pb.Snapshot, error) {
 	if index > s.appliedIndex.Load() {
-		return pb.Snapshot{}, fmt.Errorf("cannot snapshot at index %d: appliedIndex is only %d", index, s.appliedIndex.Load())
+		return nil, fmt.Errorf("cannot snapshot at index %d: appliedIndex is only %d", index, s.appliedIndex.Load())
 	}
 
 	var buf bytes.Buffer
@@ -38,7 +39,7 @@ func (s *Storage) CreateSnapshot(index uint64, confState *pb.ConfState) (pb.Snap
 		return werr
 	})
 	if err != nil {
-		return pb.Snapshot{}, fmt.Errorf("snapshot bbolt: %w", err)
+		return nil, fmt.Errorf("snapshot bbolt: %w", err)
 	}
 
 	term, err := s.Term(index)
@@ -55,24 +56,24 @@ func (s *Storage) CreateSnapshot(index uint64, confState *pb.ConfState) (pb.Snap
 	s.snapMu.Lock()
 	defer s.snapMu.Unlock()
 
-	cs := s.snapshot.Metadata.ConfState
+	cs := s.snapshot.Metadata.GetConfState()
 	if confState != nil {
-		cs = *confState
+		cs = confState
 	}
 
 	snap := pb.Snapshot{
 		Data: buf.Bytes(),
-		Metadata: pb.SnapshotMetadata{
+		Metadata: &pb.SnapshotMetadata{
 			ConfState: cs,
-			Index:     index,
-			Term:      term,
+			Index:     &index,
+			Term:      &term,
 		},
 	}
-	s.snapshot = snap
+	s.snapshot = &snap
 	// Dirty so the next Save persists the new snapshot to the state log —
 	// Save only writes the snapshot on change, never per Ready.
 	s.snapDirty = true
-	return snap, nil
+	return &snap, nil
 }
 
 // RestoreSnapshot installs the metadata state carried by snap onto this
@@ -94,7 +95,7 @@ func (s *Storage) CreateSnapshot(index uint64, confState *pb.ConfState) (pb.Snap
 // snapshot that advances raft's applied index past this node's
 // permanent event log: that condition is caught before any bbolt
 // content is touched and fatal-exits with the rebuild message.
-func (s *Storage) RestoreSnapshot(snap pb.Snapshot) error {
+func (s *Storage) RestoreSnapshot(snap *pb.Snapshot) error {
 	if len(snap.Data) == 0 {
 		return fmt.Errorf("restore snapshot: empty data")
 	}
@@ -105,10 +106,10 @@ func (s *Storage) RestoreSnapshot(snap pb.Snapshot) error {
 	// bail out; the Ready loop's invariant check will catch this at the
 	// end of the iteration, but failing early here keeps bbolt intact
 	// so the operator can rebuild from a clean starting point.
-	if snap.Metadata.Index > s.eventIndex.Load() {
+	if snap.Metadata.GetIndex() > s.eventIndex.Load() {
 		return fmt.Errorf(
 			"restore snapshot: snap.Metadata.Index=%d exceeds EventIndex=%d; run rebuild procedure",
-			snap.Metadata.Index, s.eventIndex.Load(),
+			snap.Metadata.GetIndex(), s.eventIndex.Load(),
 		)
 	}
 
@@ -198,7 +199,10 @@ func (s *Storage) RestoreSnapshot(snap pb.Snapshot) error {
 	// Record the snapshot so Storage.Snapshot() returns it and so
 	// InitialState reflects the restored confState.
 	s.snapMu.Lock()
-	s.snapshot = snap
+	// Clone, don't alias: snap is raft's rd.Snapshot (it may point at raft's
+	// internal unstable snapshot), and ConfState() later mutates
+	// s.snapshot.Metadata in place — so we must own this copy.
+	s.snapshot = proto.Clone(snap).(*pb.Snapshot)
 	s.snapMu.Unlock()
 
 	return nil

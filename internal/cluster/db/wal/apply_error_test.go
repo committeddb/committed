@@ -8,6 +8,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 
 	pb "go.etcd.io/raft/v3/raftpb"
+	"google.golang.org/protobuf/proto"
 )
 
 // TestApplyCommitted_UnmarshalError_FailsAndPreservesAppliedIndex is the
@@ -30,12 +31,12 @@ func TestApplyCommitted_UnmarshalError_FailsAndPreservesAppliedIndex(t *testing.
 	// will reject it, which is the precondition Proposal.Unmarshal surfaces
 	// as its error return.
 	corrupt := []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
-	entry := pb.Entry{Term: 1, Index: 1, Type: pb.EntryNormal, Data: corrupt}
+	entry := &pb.Entry{Term: proto.Uint64(1), Index: proto.Uint64(1), Type: pb.EntryNormal.Enum(), Data: corrupt}
 
 	// Persist the entry in the raft log, then apply it. Save must not fail
 	// (it doesn't inspect entry.Data) — the failure we care about is in
 	// ApplyCommitted.
-	require.Nil(t, s.Save(defaultHardState, []pb.Entry{entry}, defaultSnap))
+	require.Nil(t, s.Save(&defaultHardState, []*pb.Entry{entry}, &defaultSnap))
 
 	err := s.ApplyCommitted(entry)
 	require.Error(t, err, "ApplyCommitted must propagate unmarshal failures")
@@ -73,8 +74,8 @@ func TestApplyCommitted_MissingTypeVersion_Fails(t *testing.T) {
 	bs, err := p.Marshal()
 	require.Nil(t, err)
 
-	entry := pb.Entry{Term: 1, Index: 1, Type: pb.EntryNormal, Data: bs}
-	require.Nil(t, s.Save(defaultHardState, []pb.Entry{entry}, defaultSnap))
+	entry := &pb.Entry{Term: proto.Uint64(1), Index: proto.Uint64(1), Type: pb.EntryNormal.Enum(), Data: bs}
+	require.Nil(t, s.Save(&defaultHardState, []*pb.Entry{entry}, &defaultSnap))
 
 	err = s.ApplyCommitted(entry)
 	require.Error(t, err, "ApplyCommitted must propagate missing-type-version failures")

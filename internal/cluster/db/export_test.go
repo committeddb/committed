@@ -80,7 +80,7 @@ func (n *Raft) CommitIndexForTest() uint64 {
 	if n.node == nil {
 		return 0
 	}
-	return n.node.Status().Commit
+	return n.node.Status().GetCommit()
 }
 
 // WithTransportWrapperForTest installs a wrapper around the Transport that

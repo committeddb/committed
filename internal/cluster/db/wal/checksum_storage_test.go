@@ -24,7 +24,7 @@ func TestStorage_EntriesChecksummedRoundTrip(t *testing.T) {
 	s := NewStorage(t, want)
 	defer s.Cleanup()
 
-	require.Equal(t, want, s.ents(t))
+	requireEntriesEqual(t, want, s.ents(t))
 
 	raw, err := s.EntryLog.Read(1)
 	require.NoError(t, err)
@@ -43,7 +43,7 @@ func TestStorage_CorruptEntryDetectedOnReopen(t *testing.T) {
 
 	s, err := wal.Open(dir, nil, nil, nil)
 	require.NoError(t, err)
-	require.NoError(t, s.Save(defaultHardState, index(1).terms(1, 1, 1), defaultSnap))
+	require.NoError(t, s.Save(&defaultHardState, index(1).terms(1, 1, 1), &defaultSnap))
 	require.NoError(t, s.Close())
 
 	flipLastByte(t, filepath.Join(dir, "raft", "log"))

@@ -14,9 +14,9 @@ import (
 )
 
 type MemoryStorageSaveArgsForCall struct {
-	st   raftpb.HardState
-	ents []raftpb.Entry
-	snap raftpb.Snapshot
+	st   *raftpb.HardState
+	ents []*raftpb.Entry
+	snap *raftpb.Snapshot
 }
 
 type MemoryStorage struct {
@@ -46,7 +46,7 @@ func (ms *MemoryStorage) Close() error {
 	return nil
 }
 
-func (ms *MemoryStorage) Save(st raftpb.HardState, ents []raftpb.Entry, snap raftpb.Snapshot) error {
+func (ms *MemoryStorage) Save(st *raftpb.HardState, ents []*raftpb.Entry, snap *raftpb.Snapshot) error {
 	err := ms.Append(ents)
 	if err != nil {
 		return err
@@ -64,11 +64,11 @@ func (ms *MemoryStorage) Save(st raftpb.HardState, ents []raftpb.Entry, snap raf
 // AppliedIndex (notably the /ready HTTP probe test, which gates on
 // AppliedIndex > 0). Tests that exercise the real apply path still use
 // wal.Storage.
-func (ms *MemoryStorage) ApplyCommitted(entry raftpb.Entry) error {
+func (ms *MemoryStorage) ApplyCommitted(entry *raftpb.Entry) error {
 	ms.appliedMu.Lock()
 	defer ms.appliedMu.Unlock()
-	if entry.Index > ms.appliedIndex {
-		ms.appliedIndex = entry.Index
+	if entry.GetIndex() > ms.appliedIndex {
+		ms.appliedIndex = entry.GetIndex()
 	}
 	return nil
 }
@@ -105,7 +105,7 @@ func (ms *MemoryStorage) EventIndex() uint64 {
 // restart-correct ConfState persistence was plumbed through wal.Storage.
 func (ms *MemoryStorage) ConfState(c *raftpb.ConfState) {}
 
-func (ms *MemoryStorage) CreateSnapshot(index uint64, confState *raftpb.ConfState) (raftpb.Snapshot, error) {
+func (ms *MemoryStorage) CreateSnapshot(index uint64, confState *raftpb.ConfState) (*raftpb.Snapshot, error) {
 	return ms.MemoryStorage.CreateSnapshot(index, confState, nil)
 }
 
@@ -113,7 +113,7 @@ func (ms *MemoryStorage) CreateSnapshot(index uint64, confState *raftpb.ConfStat
 // raft.MemoryStorage handles raft-log-level snapshot state internally
 // when Save is called with a non-empty rd.Snapshot; there is no
 // application-level state for this in-memory stub to restore.
-func (ms *MemoryStorage) RestoreSnapshot(snap raftpb.Snapshot) error {
+func (ms *MemoryStorage) RestoreSnapshot(snap *raftpb.Snapshot) error {
 	return nil
 }
 
@@ -124,10 +124,10 @@ func (ms *MemoryStorage) RaftLogApproxSize() (uint64, error) {
 	return 0, nil
 }
 
-func (ms *MemoryStorage) maybeAppendArgsForCall(st raftpb.HardState, ents []raftpb.Entry, snap raftpb.Snapshot) {
+func (ms *MemoryStorage) maybeAppendArgsForCall(st *raftpb.HardState, ents []*raftpb.Entry, snap *raftpb.Snapshot) {
 	normalEntry := false
 	for _, ent := range ents {
-		if ent.Type == raftpb.EntryNormal {
+		if ent.GetType() == raftpb.EntryNormal {
 			normalEntry = true
 		}
 	}
@@ -141,7 +141,7 @@ func (ms *MemoryStorage) SaveCallCount() int {
 	return len(ms.saveArgsForCall)
 }
 
-func (ms *MemoryStorage) SaveArgsForCall(i int) (raftpb.HardState, []raftpb.Entry, raftpb.Snapshot) {
+func (ms *MemoryStorage) SaveArgsForCall(i int) (*raftpb.HardState, []*raftpb.Entry, *raftpb.Snapshot) {
 	a := ms.saveArgsForCall[i]
 	return a.st, a.ents, a.snap
 }
@@ -218,10 +218,10 @@ func (ms *MemoryStorage) Proposals() []*cluster.Proposal {
 
 	var ps []*cluster.Proposal
 	for _, e := range ents {
-		if e.Type == raftpb.EntryNormal {
+		if e.GetType() == raftpb.EntryNormal {
 			p := &cluster.Proposal{}
 			if err := p.Unmarshal(e.Data, ms); err != nil {
-				panic(fmt.Sprintf("MemoryStorage.Proposals: unmarshal entry at index %d: %v", e.Index, err))
+				panic(fmt.Sprintf("MemoryStorage.Proposals: unmarshal entry at index %d: %v", e.GetIndex(), err))
 			}
 
 			if len(p.Entities) > 0 {
@@ -317,7 +317,7 @@ func (r *Reader) Read() (*cluster.Actual, error) {
 
 		r.index = readIndex
 
-		if ent.Type == raftpb.EntryNormal {
+		if ent.GetType() == raftpb.EntryNormal {
 			p := &cluster.Proposal{}
 			if err := p.Unmarshal(ent.Data, r.s); err != nil {
 				return nil, err

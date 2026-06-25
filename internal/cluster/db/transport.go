@@ -19,7 +19,7 @@ type Transport interface {
 	Start(stopC <-chan struct{}) error
 	AddPeer(peer raft.Peer) error
 	RemovePeer(id uint64)
-	Send(msgs []raftpb.Message)
+	Send(msgs []*raftpb.Message)
 	Stop()
 }
 
@@ -28,7 +28,7 @@ type Transport interface {
 // (etcd's rafthttp calls this "Raft"; renamed here to avoid colliding with
 // db.Raft.) startRaft passes the node's implementation to the factory.
 type TransportRaft interface {
-	Process(ctx context.Context, m raftpb.Message) error
+	Process(ctx context.Context, m *raftpb.Message) error
 	IsIDRemoved(id uint64) bool
 	ReportUnreachable(id uint64)
 	ReportSnapshot(id uint64, status raft.SnapshotStatus)

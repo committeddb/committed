@@ -372,7 +372,7 @@ func pickFreePorts(n int) []int {
 // cluster.Partition would silently stop affecting it.
 func createRaft(id uint64, peers []raft.Peer, s db.Storage, tickInterval time.Duration, cluster *FaultyCluster) *Raft {
 	proposeC := make(chan []byte)
-	confChangeC := make(chan raftpb.ConfChangeV2)
+	confChangeC := make(chan *raftpb.ConfChangeV2)
 
 	opts := []db.Option{db.WithTickInterval(tickInterval)}
 	if cluster != nil {
@@ -414,7 +414,7 @@ type Raft struct {
 	errorC       <-chan error
 	raft         *db.Raft
 	proposeC     chan<- []byte
-	confChangeC  chan<- raftpb.ConfChangeV2
+	confChangeC  chan<- *raftpb.ConfChangeV2
 	id           uint64
 	tickInterval time.Duration
 	// faultyCluster is nil unless this Raft was built via createFaultyRafts.
@@ -488,7 +488,7 @@ func (rs *Raft) Restart() error {
 	return nil
 }
 
-func (rs *Raft) ents() ([]raftpb.Entry, error) {
+func (rs *Raft) ents() ([]*raftpb.Entry, error) {
 	// Snapshot the storage pointer under the RLock so a concurrent
 	// Restart (which swaps rs.storage) doesn't interleave the field
 	// reassignment with our reads. The actual Storage implementation
@@ -524,9 +524,9 @@ func (rs *Raft) ents() ([]raftpb.Entry, error) {
 		return nil, err
 	}
 
-	var es []raftpb.Entry
+	var es []*raftpb.Entry
 	for _, e := range ents {
-		if e.Type == raftpb.EntryNormal && e.Data != nil {
+		if e.GetType() == raftpb.EntryNormal && e.Data != nil {
 			es = append(es, e)
 		}
 	}
@@ -702,9 +702,9 @@ type MemoryPosition struct {
 }
 
 type MemoryStorageSaveArgsForCall struct {
-	st   raftpb.HardState
-	ents []raftpb.Entry
-	snap raftpb.Snapshot
+	st   *raftpb.HardState
+	ents []*raftpb.Entry
+	snap *raftpb.Snapshot
 }
 
 type MemoryStorage struct {
@@ -747,13 +747,13 @@ func (ms *MemoryStorage) Close() error {
 // reads are serialised against Save's SetHardState. etcd's implementation
 // returns ms.hardState directly without taking its internal lock, which
 // races with concurrent SetHardState writes from the raft worker.
-func (ms *MemoryStorage) InitialState() (raftpb.HardState, raftpb.ConfState, error) {
+func (ms *MemoryStorage) InitialState() (*raftpb.HardState, *raftpb.ConfState, error) {
 	ms.stateMu.RLock()
 	defer ms.stateMu.RUnlock()
 	return ms.MemoryStorage.InitialState()
 }
 
-func (ms *MemoryStorage) Save(st raftpb.HardState, ents []raftpb.Entry, snap raftpb.Snapshot) error {
+func (ms *MemoryStorage) Save(st *raftpb.HardState, ents []*raftpb.Entry, snap *raftpb.Snapshot) error {
 	err := ms.Append(ents)
 	if err != nil {
 		return err
@@ -770,7 +770,7 @@ func (ms *MemoryStorage) Save(st raftpb.HardState, ents []raftpb.Entry, snap raf
 // MemoryStorage is purposely a thin wrapper around etcd's raft.MemoryStorage
 // for testing the raft layer in isolation; there are no buckets to apply
 // to. AppliedIndex always returns 0 for the same reason.
-func (ms *MemoryStorage) ApplyCommitted(entry raftpb.Entry) error {
+func (ms *MemoryStorage) ApplyCommitted(entry *raftpb.Entry) error {
 	return nil
 }
 
@@ -790,7 +790,7 @@ func (ms *MemoryStorage) EventIndex() uint64 {
 // internal API (which carries an arbitrary Data payload); this stub
 // threads through nil because MemoryStorage tests don't exercise the
 // payload path.
-func (ms *MemoryStorage) CreateSnapshot(index uint64, confState *raftpb.ConfState) (raftpb.Snapshot, error) {
+func (ms *MemoryStorage) CreateSnapshot(index uint64, confState *raftpb.ConfState) (*raftpb.Snapshot, error) {
 	return ms.MemoryStorage.CreateSnapshot(index, confState, nil)
 }
 
@@ -803,7 +803,7 @@ func (ms *MemoryStorage) ConfState(c *raftpb.ConfState) {}
 // RestoreSnapshot is a no-op. The raft_test MemoryStorage exists to
 // exercise the raft layer in isolation; there is no application state
 // to restore.
-func (ms *MemoryStorage) RestoreSnapshot(snap raftpb.Snapshot) error {
+func (ms *MemoryStorage) RestoreSnapshot(snap *raftpb.Snapshot) error {
 	return nil
 }
 
@@ -815,10 +815,10 @@ func (ms *MemoryStorage) RaftLogApproxSize() (uint64, error) {
 }
 
 // maybeAppendArgsForCallLocked must be called with stateMu held.
-func (ms *MemoryStorage) maybeAppendArgsForCallLocked(st raftpb.HardState, ents []raftpb.Entry, snap raftpb.Snapshot) {
+func (ms *MemoryStorage) maybeAppendArgsForCallLocked(st *raftpb.HardState, ents []*raftpb.Entry, snap *raftpb.Snapshot) {
 	normalEntry := false
 	for _, ent := range ents {
-		if ent.Type == raftpb.EntryNormal {
+		if ent.GetType() == raftpb.EntryNormal {
 			normalEntry = true
 		}
 	}
@@ -834,7 +834,7 @@ func (ms *MemoryStorage) SaveCallCount() int {
 	return len(ms.saveArgsForCall)
 }
 
-func (ms *MemoryStorage) SaveArgsForCall(i int) (raftpb.HardState, []raftpb.Entry, raftpb.Snapshot) {
+func (ms *MemoryStorage) SaveArgsForCall(i int) (*raftpb.HardState, []*raftpb.Entry, *raftpb.Snapshot) {
 	ms.stateMu.RLock()
 	defer ms.stateMu.RUnlock()
 	a := ms.saveArgsForCall[i]
@@ -920,7 +920,7 @@ func (ms *MemoryStorage) Proposals() []*cluster.Proposal {
 
 	var ps []*cluster.Proposal
 	for _, e := range ents {
-		if e.Type == raftpb.EntryNormal {
+		if e.GetType() == raftpb.EntryNormal {
 			p := &cluster.Proposal{}
 			if err := p.Unmarshal(e.Data, ms); err != nil {
 				continue
@@ -967,7 +967,7 @@ func (r *Reader) Read() (*cluster.Actual, error) {
 
 		r.index = readIndex
 
-		if ent.Type == raftpb.EntryNormal {
+		if ent.GetType() == raftpb.EntryNormal {
 			p := &cluster.Proposal{}
 			if err := p.Unmarshal(ent.Data, r.s); err != nil {
 				return nil, err

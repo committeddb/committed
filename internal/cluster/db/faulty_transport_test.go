@@ -95,7 +95,7 @@ type FaultyTransport struct {
 // or equal deliverAt, they just follow the head immediately once it's
 // delivered, which preserves FIFO while amortizing the delay.
 type pendingMsg struct {
-	msg       raftpb.Message
+	msg       *raftpb.Message
 	deliverAt time.Time
 }
 
@@ -122,37 +122,37 @@ func (t *FaultyTransport) RemovePeer(id uint64)              { t.inner.RemovePee
 // Messages not matched by any fault (no drop, no latency worker) are sent
 // directly via inner.Send. This keeps the no-fault-injection fast path
 // one function call deep, matching phase 1's passthrough behaviour.
-func (t *FaultyTransport) Send(msgs []raftpb.Message) {
+func (t *FaultyTransport) Send(msgs []*raftpb.Message) {
 	// Snapshot the per-destination state under sendMu, then release before
 	// doing any actual work. Holding sendMu across inner.Send or across a
 	// channel enqueue risks contention with DirectionalDrop/AddLatency calls
 	// from test goroutines; since Send is called from one Ready loop
 	// goroutine, the snapshot is race-free for the duration of this call.
-	var direct []raftpb.Message
+	var direct []*raftpb.Message
 	var queued []pendingQueue
 
 	t.sendMu.Lock()
 	for _, m := range msgs {
-		if t.dirDrops != nil && t.dirDrops[m.To] {
+		if t.dirDrops != nil && t.dirDrops[m.GetTo()] {
 			continue
 		}
 		if t.dropRates != nil {
-			if rate, ok := t.dropRates[m.To]; ok && rate > 0 && t.rng.Float64() < rate {
+			if rate, ok := t.dropRates[m.GetTo()]; ok && rate > 0 && t.rng.Float64() < rate {
 				continue
 			}
 		}
 		var delay time.Duration
 		if t.latencies != nil {
-			delay = t.latencies[m.To]
+			delay = t.latencies[m.GetTo()]
 		}
 		// If a worker already exists for this destination, every message
 		// must flow through it — even if the current delay is zero — so
 		// FIFO ordering is preserved across a mid-flight AddLatency(0).
 		t.workersMu.Lock()
-		_, hasWorker := t.workers[m.To]
+		_, hasWorker := t.workers[m.GetTo()]
 		t.workersMu.Unlock()
 		if delay > 0 || hasWorker {
-			queued = append(queued, pendingQueue{to: m.To, msg: m, deliverAt: time.Now().Add(delay)})
+			queued = append(queued, pendingQueue{to: m.GetTo(), msg: m, deliverAt: time.Now().Add(delay)})
 		} else {
 			direct = append(direct, m)
 		}
@@ -173,7 +173,7 @@ func (t *FaultyTransport) Send(msgs []raftpb.Message) {
 // the lock boundary.
 type pendingQueue struct {
 	to        uint64
-	msg       raftpb.Message
+	msg       *raftpb.Message
 	deliverAt time.Time
 }
 
@@ -237,7 +237,7 @@ func (t *FaultyTransport) runWorker(ch chan pendingMsg) {
 		if wait := time.Until(first.deliverAt); wait > 0 {
 			time.Sleep(wait)
 		}
-		batch := []raftpb.Message{first.msg}
+		batch := []*raftpb.Message{first.msg}
 		// Drain any messages that are also already due. Use a non-
 		// blocking receive so we flush the batch promptly when the queue
 		// runs out.
@@ -256,7 +256,7 @@ func (t *FaultyTransport) runWorker(ch chan pendingMsg) {
 					// next batch with it).
 					t.inner.Send(batch)
 					time.Sleep(wait)
-					batch = []raftpb.Message{next.msg}
+					batch = []*raftpb.Message{next.msg}
 					continue
 				}
 				batch = append(batch, next.msg)

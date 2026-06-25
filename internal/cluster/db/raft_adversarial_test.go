@@ -248,7 +248,7 @@ func TestAdversarial_SymmetricPartition(t *testing.T) {
 		}
 		var committed []string
 		for _, e := range es {
-			if e.Index <= minCommit {
+			if e.GetIndex() <= minCommit {
 				committed = append(committed, string(e.Data))
 			}
 		}
@@ -2161,7 +2161,7 @@ func openWalRaft(t *testing.T, id uint64, peers []raft.Peer, dir string, fc *Fau
 	logger := newFatalCapturingLogger(id, fatalC)
 
 	proposeC := make(chan []byte)
-	confChangeC := make(chan raftpb.ConfChangeV2)
+	confChangeC := make(chan *raftpb.ConfChangeV2)
 
 	nodeOpts := make([]db.Option, 0, 3+len(opts))
 	nodeOpts = append(nodeOpts,
@@ -2600,7 +2600,7 @@ func TestAdversarial_MembershipChangeUnderPartition(t *testing.T) {
 		}
 		var got []string
 		for _, e := range es {
-			if e.Index <= minCommit {
+			if e.GetIndex() <= minCommit {
 				got = append(got, string(e.Data))
 			}
 		}

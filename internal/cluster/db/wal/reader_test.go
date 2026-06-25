@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	pb "go.etcd.io/raft/v3/raftpb"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
 )
@@ -202,11 +203,11 @@ func (c *ProposalCreator) saveProposals(t *testing.T, ps []*cluster.Proposal) []
 	for _, p := range ps {
 		c.currentIndex += 1
 		configEntry := &pb.Entry{
-			Term:  c.currentTerm,
-			Index: c.currentIndex,
-			Type:  pb.EntryConfChange,
+			Term:  proto.Uint64(c.currentTerm),
+			Index: proto.Uint64(c.currentIndex),
+			Type:  pb.EntryConfChange.Enum(),
 		}
-		err := c.s.Save(defaultHardState, []pb.Entry{*configEntry}, defaultSnap)
+		err := c.s.Save(&defaultHardState, []*pb.Entry{configEntry}, &defaultSnap)
 		require.Equal(t, nil, err)
 		c.currentIndex += 1
 		saveProposal(t, p, c.s, c.currentTerm, c.currentIndex)

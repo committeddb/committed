@@ -5,6 +5,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	pb "go.etcd.io/raft/v3/raftpb"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
 )
@@ -25,8 +26,8 @@ func applyMigrationDeadLetterEntity(t *testing.T, s *StorageWrapper, entryIdx ui
 	p := &cluster.Proposal{Entities: []*cluster.Entity{ent}}
 	bs, err := p.Marshal()
 	require.NoError(t, err)
-	entry := pb.Entry{Term: 1, Index: entryIdx, Type: pb.EntryNormal, Data: bs}
-	require.NoError(t, s.Save(defaultHardState, []pb.Entry{entry}, defaultSnap))
+	entry := &pb.Entry{Term: proto.Uint64(1), Index: proto.Uint64(entryIdx), Type: pb.EntryNormal.Enum(), Data: bs}
+	require.NoError(t, s.Save(&defaultHardState, []*pb.Entry{entry}, &defaultSnap))
 	require.NoError(t, s.ApplyCommitted(entry))
 }
 

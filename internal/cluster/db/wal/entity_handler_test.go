@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	pb "go.etcd.io/raft/v3/raftpb"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/clusterfakes"
@@ -16,14 +17,14 @@ import (
 )
 
 // makeEntry creates a raftpb.Entry containing a marshaled proposal at the given index.
-func makeEntry(t *testing.T, idx uint64, entities ...*cluster.Entity) pb.Entry {
+func makeEntry(t *testing.T, idx uint64, entities ...*cluster.Entity) *pb.Entry {
 	p := &cluster.Proposal{Entities: entities}
 	bs, err := p.Marshal()
 	require.Nil(t, err)
-	return pb.Entry{
-		Term:  1,
-		Index: idx,
-		Type:  pb.EntryNormal,
+	return &pb.Entry{
+		Term:  proto.Uint64(1),
+		Index: proto.Uint64(idx),
+		Type:  pb.EntryNormal.Enum(),
 		Data:  bs,
 	}
 }
@@ -62,7 +63,7 @@ func TestSave_TypeEntity_Upsert(t *testing.T) {
 	entity := makeTypeEntity(t, "type-1", "MyType")
 	entry := makeEntry(t, 1, entity)
 
-	saveAndApply(t, s, []pb.Entry{entry})
+	saveAndApply(t, s, []*pb.Entry{entry})
 
 	typ, err := s.ResolveType(cluster.LatestTypeRef("type-1"))
 	require.Nil(t, err)
@@ -82,14 +83,14 @@ func TestSave_TypeEntity_Delete(t *testing.T) {
 
 	entity := makeTypeEntity(t, "type-del", "ToDelete")
 	entry := makeEntry(t, 1, entity)
-	saveAndApply(t, s, []pb.Entry{entry})
+	saveAndApply(t, s, []*pb.Entry{entry})
 
 	_, err := s.ResolveType(cluster.LatestTypeRef("type-del"))
 	require.Nil(t, err)
 
 	delEntity := cluster.NewDeleteTypeEntity("type-del")
 	delEntry := makeEntry(t, 2, delEntity)
-	saveAndApply(t, s, []pb.Entry{delEntry})
+	saveAndApply(t, s, []*pb.Entry{delEntry})
 
 	_, err = s.ResolveType(cluster.LatestTypeRef("type-del"))
 	require.NotNil(t, err)
@@ -104,7 +105,7 @@ func TestSave_MultipleTypeEntities(t *testing.T) {
 	e2 := makeTypeEntity(t, "t2", "Type2")
 	entry := makeEntry(t, 1, e1, e2)
 
-	saveAndApply(t, s, []pb.Entry{entry})
+	saveAndApply(t, s, []*pb.Entry{entry})
 
 	cfgs, err := s.Types()
 	require.Nil(t, err)
@@ -121,11 +122,11 @@ func TestSave_SyncableIndexEntity(t *testing.T) {
 
 	userEntity := makeUserEntity()
 	userEntry := makeEntry(t, 2, userEntity)
-	saveAndApply(t, s, []pb.Entry{userEntry})
+	saveAndApply(t, s, []*pb.Entry{userEntry})
 
 	siEntity := makeSyncableIndexEntity(t, "sync-1", 2)
 	siEntry := makeEntry(t, 3, siEntity)
-	saveAndApply(t, s, []pb.Entry{siEntry})
+	saveAndApply(t, s, []*pb.Entry{siEntry})
 
 	// Reader with checkpoint at index 2 should skip the syncable index entry at 3
 	reader := s.Reader("sync-1")
@@ -144,7 +145,7 @@ func TestSave_UserDefinedEntity(t *testing.T) {
 	entity := makeUserEntity()
 	entry := makeEntry(t, 2, entity)
 
-	saveAndApply(t, s, []pb.Entry{entry})
+	saveAndApply(t, s, []*pb.Entry{entry})
 
 	last, err := s.LastIndex()
 	require.Nil(t, err)
@@ -166,7 +167,7 @@ func TestSave_MixedEntities(t *testing.T) {
 	userEntity := makeUserEntity()
 	entry := makeEntry(t, 2, typeEntity, userEntity)
 
-	saveAndApply(t, s, []pb.Entry{entry})
+	saveAndApply(t, s, []*pb.Entry{entry})
 
 	typ, err := s.ResolveType(cluster.LatestTypeRef("type-mix"))
 	require.Nil(t, err)
@@ -183,14 +184,14 @@ func TestSave_ConfChangeEntry_SkipsEntityHandlers(t *testing.T) {
 	s := NewStorage(t, nil)
 	defer s.Cleanup()
 
-	entry := pb.Entry{
-		Term:  1,
-		Index: 1,
-		Type:  pb.EntryConfChange,
+	entry := &pb.Entry{
+		Term:  proto.Uint64(1),
+		Index: proto.Uint64(1),
+		Type:  pb.EntryConfChange.Enum(),
 		Data:  []byte("some conf change data"),
 	}
 
-	saveAndApply(t, s, []pb.Entry{entry})
+	saveAndApply(t, s, []*pb.Entry{entry})
 
 	cfgs, err := s.Types()
 	require.Nil(t, err)
@@ -206,7 +207,7 @@ func TestSave_MultipleEntries(t *testing.T) {
 	e1 := makeTypeEntity(t, "t-first", "First")
 	e2 := makeTypeEntity(t, "t-second", "Second")
 
-	entries := []pb.Entry{
+	entries := []*pb.Entry{
 		makeEntry(t, 1, e1),
 		makeEntry(t, 2, e2),
 	}
@@ -244,7 +245,7 @@ func TestSave_DatabaseEntity(t *testing.T) {
 	require.Nil(t, err)
 
 	entry := makeEntry(t, 1, entity)
-	saveAndApply(t, s, []pb.Entry{entry})
+	saveAndApply(t, s, []*pb.Entry{entry})
 
 	database, err := s.Database("db-1")
 	require.Nil(t, err)
@@ -279,7 +280,7 @@ func TestSave_SyncableEntity_SignalsChannel(t *testing.T) {
 	require.Nil(t, err)
 
 	entry := makeEntry(t, 1, entity)
-	saveAndApply(t, s, []pb.Entry{entry})
+	saveAndApply(t, s, []*pb.Entry{entry})
 
 	received := <-syncCh
 	require.Equal(t, "sync-1", received.ID)
@@ -309,7 +310,7 @@ func TestSave_IngestableEntity_SignalsChannel(t *testing.T) {
 	require.Nil(t, err)
 
 	entry := makeEntry(t, 1, entity)
-	saveAndApply(t, s, []pb.Entry{entry})
+	saveAndApply(t, s, []*pb.Entry{entry})
 
 	received := <-ingestCh
 	require.Equal(t, "ingest-1", received.ID)

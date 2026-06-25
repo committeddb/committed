@@ -144,7 +144,7 @@ func newPerfCluster(t *testing.T, n int) []*perfNode {
 	nodes := make([]*perfNode, 0, n)
 	for _, p := range peers {
 		proposeC := make(chan []byte)
-		confChangeC := make(chan raftpb.ConfChangeV2)
+		confChangeC := make(chan *raftpb.ConfChangeV2)
 		s := dbtesting.NewMemoryStorage()
 
 		_, r := db.NewRaft(p.ID, peers, s, proposeC, confChangeC,

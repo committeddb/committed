@@ -132,7 +132,7 @@ func newFakeStorageWithIndexes(applied, eventIdx, size uint64) *dbfakes.FakeStor
 	f.AppliedIndexReturns(applied)
 	f.EventIndexReturns(eventIdx)
 	f.RaftLogApproxSizeReturns(size, nil)
-	f.CreateSnapshotReturns(raftpb.Snapshot{}, nil)
+	f.CreateSnapshotReturns(&raftpb.Snapshot{}, nil)
 	f.CompactReturns(nil)
 	return f
 }

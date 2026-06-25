@@ -5,6 +5,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	pb "go.etcd.io/raft/v3/raftpb"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
 )
@@ -19,8 +20,8 @@ func applyNodeAPIURL(t *testing.T, s *StorageWrapper, index, nodeID uint64, url 
 	bs, err := (&cluster.Proposal{Entities: []*cluster.Entity{e}}).Marshal()
 	require.NoError(t, err)
 
-	ent := pb.Entry{Term: 1, Index: index, Type: pb.EntryNormal, Data: bs}
-	require.NoError(t, s.Save(defaultHardState, []pb.Entry{ent}, defaultSnap))
+	ent := &pb.Entry{Term: proto.Uint64(1), Index: proto.Uint64(index), Type: pb.EntryNormal.Enum(), Data: bs}
+	require.NoError(t, s.Save(&defaultHardState, []*pb.Entry{ent}, &defaultSnap))
 	require.NoError(t, s.ApplyCommitted(ent))
 }
 

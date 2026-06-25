@@ -9,6 +9,7 @@ import (
 
 	"go.etcd.io/raft/v3"
 	pb "go.etcd.io/raft/v3/raftpb"
+	"google.golang.org/protobuf/proto"
 )
 
 // TestRaftLogApproxSize_GrowsAndShrinks verifies the storage-level
@@ -75,7 +76,7 @@ func TestCompact_ReadAndWriteStillWorkAfterCompact(t *testing.T) {
 
 	// Save 10 entries at raft indices 1..10.
 	entries := index(1).terms(1, 1, 1, 1, 1, 1, 1, 1, 1, 1)
-	require.Nil(t, s.Save(defaultHardState, entries, defaultSnap))
+	require.Nil(t, s.Save(&defaultHardState, entries, &defaultSnap))
 
 	// Compact up to index 5. Raft indices 1..5 become unreadable
 	// (5 is the new compacted dummy); 6..10 stay readable.
@@ -98,7 +99,7 @@ func TestCompact_ReadAndWriteStillWorkAfterCompact(t *testing.T) {
 	require.Nil(t, err)
 	require.Equal(t, 5, len(got))
 	for i, e := range got {
-		require.Equal(t, uint64(6+i), e.Index, "entry %d index", i)
+		require.Equal(t, uint64(6+i), e.GetIndex(), "entry %d index", i)
 	}
 
 	// Reading at or below the compaction boundary returns
@@ -117,7 +118,7 @@ func TestCompact_ReadAndWriteStillWorkAfterCompact(t *testing.T) {
 	// because the recomputed seq was below the wal's surviving
 	// first seq.
 	more := index(11).terms(1, 1, 1)
-	require.Nil(t, s.Save(defaultHardState, more, defaultSnap))
+	require.Nil(t, s.Save(&defaultHardState, more, &defaultSnap))
 
 	li, err = s.LastIndex()
 	require.Nil(t, err)
@@ -129,7 +130,7 @@ func TestCompact_ReadAndWriteStillWorkAfterCompact(t *testing.T) {
 	require.Nil(t, err)
 	require.Equal(t, 3, len(got))
 	for i, e := range got {
-		require.Equal(t, uint64(11+i), e.Index)
+		require.Equal(t, uint64(11+i), e.GetIndex())
 	}
 }
 
@@ -143,7 +144,7 @@ func TestCompact_SurvivesReopen(t *testing.T) {
 	defer s.Cleanup()
 
 	entries := index(1).terms(1, 1, 1, 1, 1, 1, 1, 1, 1, 1)
-	require.Nil(t, s.Save(defaultHardState, entries, defaultSnap))
+	require.Nil(t, s.Save(&defaultHardState, entries, &defaultSnap))
 	require.Nil(t, s.Compact(5))
 
 	s = s.CloseAndReopenStorage(t)
@@ -161,11 +162,11 @@ func TestCompact_SurvivesReopen(t *testing.T) {
 	got, err := s.Entries(6, 11, 1<<30)
 	require.Nil(t, err)
 	require.Equal(t, 5, len(got))
-	require.Equal(t, uint64(6), got[0].Index)
+	require.Equal(t, uint64(6), got[0].GetIndex())
 
 	// Post-reopen writes still honor the compaction boundary.
 	more := index(11).terms(1)
-	require.Nil(t, s.Save(defaultHardState, more, defaultSnap))
+	require.Nil(t, s.Save(&defaultHardState, more, &defaultSnap))
 
 	li, err = s.LastIndex()
 	require.Nil(t, err)
@@ -183,7 +184,7 @@ func TestCompact_SecondCompactAdvancesBoundary(t *testing.T) {
 	defer s.Cleanup()
 
 	entries := index(1).terms(1, 1, 1, 1, 1, 1, 1, 1, 1, 1)
-	require.Nil(t, s.Save(defaultHardState, entries, defaultSnap))
+	require.Nil(t, s.Save(&defaultHardState, entries, &defaultSnap))
 
 	require.Nil(t, s.Compact(3))
 	require.Nil(t, s.Compact(7))
@@ -215,8 +216,8 @@ func TestRaftLogApproxSize_EmptyEventLogStillReadable(t *testing.T) {
 	require.GreaterOrEqual(t, size, uint64(0))
 
 	// Save a single entry directly to the raft log (no apply).
-	ent := pb.Entry{Term: 1, Index: 1, Type: pb.EntryNormal, Data: []byte("x")}
-	require.Nil(t, s.Save(defaultHardState, []pb.Entry{ent}, defaultSnap))
+	ent := &pb.Entry{Term: proto.Uint64(1), Index: proto.Uint64(1), Type: pb.EntryNormal.Enum(), Data: []byte("x")}
+	require.Nil(t, s.Save(&defaultHardState, []*pb.Entry{ent}, &defaultSnap))
 
 	grown, err := s.RaftLogApproxSize()
 	require.Nil(t, err)

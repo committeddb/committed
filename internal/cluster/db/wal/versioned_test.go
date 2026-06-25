@@ -393,7 +393,7 @@ func TestIngestableVersions_WithChannel(t *testing.T) {
 	s := OpenStorage(t, t.TempDir(), p, nil, ingestCh)
 	defer s.Cleanup()
 
-	_ = s.Save(defaultHardState, index(3).terms(3, 4, 5), defaultSnap)
+	_ = s.Save(&defaultHardState, index(3).terms(3, 4, 5), &defaultSnap)
 
 	cfg := &cluster.Configuration{
 		ID:       "ingest-1",

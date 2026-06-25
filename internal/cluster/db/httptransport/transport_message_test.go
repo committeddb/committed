@@ -14,6 +14,7 @@ import (
 	"go.etcd.io/raft/v3"
 	"go.etcd.io/raft/v3/raftpb"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
 )
 
 // recordingRaft records every callback the transport drives, so a test can
@@ -22,7 +23,7 @@ import (
 // guard.
 type recordingRaft struct {
 	mu          sync.Mutex
-	processed   []raftpb.Message
+	processed   []*raftpb.Message
 	unreachable []uint64
 	snapshots   map[uint64]raft.SnapshotStatus
 	removed     map[uint64]bool
@@ -33,7 +34,7 @@ func newRecordingRaft() *recordingRaft {
 	return &recordingRaft{snapshots: map[uint64]raft.SnapshotStatus{}, removed: map[uint64]bool{}}
 }
 
-func (r *recordingRaft) Process(_ context.Context, m raftpb.Message) error {
+func (r *recordingRaft) Process(_ context.Context, m *raftpb.Message) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.processed = append(r.processed, m)
@@ -86,7 +87,7 @@ func TestHandler_Guards(t *testing.T) {
 	srv := httptest.NewServer(tr.handler())
 	defer srv.Close()
 
-	body, err := marshalMessage(raftpb.Message{Type: raftpb.MsgHeartbeat, From: 2, To: 1})
+	body, err := marshalMessage(&raftpb.Message{Type: raftpb.MsgHeartbeat.Enum(), From: proto.Uint64(2), To: proto.Uint64(1)})
 	require.NoError(t, err)
 
 	post := func(method string, headers map[string]string, b []byte) int {
@@ -133,7 +134,7 @@ func TestHandler_Token(t *testing.T) {
 	srv := httptest.NewServer(tr.handler())
 	defer srv.Close()
 
-	body, err := marshalMessage(raftpb.Message{Type: raftpb.MsgHeartbeat, From: 2, To: 1})
+	body, err := marshalMessage(&raftpb.Message{Type: raftpb.MsgHeartbeat.Enum(), From: proto.Uint64(2), To: proto.Uint64(1)})
 	require.NoError(t, err)
 
 	post := func(auth string) int {
@@ -170,11 +171,11 @@ func TestSend_RoundTrip(t *testing.T) {
 	defer trA.Stop()
 	require.NoError(t, trA.AddPeer(raft.Peer{ID: 2, Context: []byte(srvB.URL)}))
 
-	trA.Send([]raftpb.Message{{Type: raftpb.MsgApp, From: 1, To: 2}})
+	trA.Send([]*raftpb.Message{{Type: raftpb.MsgApp.Enum(), From: proto.Uint64(1), To: proto.Uint64(2)}})
 	require.Eventually(t, func() bool { return rrB.processedCount() == 1 },
 		2*time.Second, 10*time.Millisecond, "message should reach the peer's raft")
 
-	trA.Send([]raftpb.Message{{Type: raftpb.MsgSnap, From: 1, To: 2}})
+	trA.Send([]*raftpb.Message{{Type: raftpb.MsgSnap.Enum(), From: proto.Uint64(1), To: proto.Uint64(2)}})
 	require.Eventually(t, func() bool {
 		s, ok := rrA.snapStatus(2)
 		return ok && s == raft.SnapshotFinish
@@ -193,7 +194,7 @@ func TestSend_DeadPeerReportsUnreachable(t *testing.T) {
 	defer tr.Stop()
 	require.NoError(t, tr.AddPeer(raft.Peer{ID: 9, Context: []byte(url)}))
 
-	tr.Send([]raftpb.Message{{Type: raftpb.MsgApp, From: 1, To: 9}})
+	tr.Send([]*raftpb.Message{{Type: raftpb.MsgApp.Enum(), From: proto.Uint64(1), To: proto.Uint64(9)}})
 	require.Eventually(t, func() bool { return rr.wasUnreachable(9) },
 		3*time.Second, 10*time.Millisecond, "a failed send must report the peer unreachable")
 }
@@ -212,7 +213,7 @@ func TestSend_NeverBlocks(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		for range 100 * peerQueueDepth {
-			tr.Send([]raftpb.Message{{Type: raftpb.MsgApp, From: 1, To: 9}})
+			tr.Send([]*raftpb.Message{{Type: raftpb.MsgApp.Enum(), From: proto.Uint64(1), To: proto.Uint64(9)}})
 		}
 		close(done)
 	}()

@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	pb "go.etcd.io/raft/v3/raftpb"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster/db/wal"
 )
@@ -32,20 +33,20 @@ func installReadyStorage(t *testing.T, n int) *StorageWrapper {
 		terms[i] = 1
 	}
 	ents := index(1).terms(terms...)
-	require.NoError(t, s.Save(defaultHardState, ents, defaultSnap))
+	require.NoError(t, s.Save(&defaultHardState, ents, &defaultSnap))
 	for _, e := range ents {
 		require.NoError(t, s.ApplyCommitted(e))
 	}
 	return s
 }
 
-func installSnap(idx, term uint64) pb.Snapshot {
-	return pb.Snapshot{
+func installSnap(idx, term uint64) *pb.Snapshot {
+	return &pb.Snapshot{
 		Data: []byte("leader-bbolt"),
-		Metadata: pb.SnapshotMetadata{
-			ConfState: pb.ConfState{Voters: []uint64{1, 2, 3}},
-			Index:     idx,
-			Term:      term,
+		Metadata: &pb.SnapshotMetadata{
+			ConfState: &pb.ConfState{Voters: []uint64{1, 2, 3}},
+			Index:     proto.Uint64(idx),
+			Term:      proto.Uint64(term),
 		},
 	}
 }
@@ -71,7 +72,7 @@ func assertInstalled(t *testing.T, s *StorageWrapper, snapIdx, term, last uint64
 		got, err := s.Entries(snapIdx+1, last+1, math.MaxUint64)
 		require.NoError(t, err)
 		require.Len(t, got, int(last-snapIdx))
-		require.Equal(t, snapIdx+1, got[0].Index)
+		require.Equal(t, snapIdx+1, got[0].GetIndex())
 	}
 }
 
@@ -84,7 +85,7 @@ func TestSave_SnapshotInstallWithCoalescedEntries(t *testing.T) {
 
 	snap := installSnap(5, 2)
 	ents := index(6).terms(2, 2)
-	require.NoError(t, s.Save(pb.HardState{Term: 2, Vote: 1, Commit: 7}, ents, snap))
+	require.NoError(t, s.Save(&pb.HardState{Term: proto.Uint64(2), Vote: proto.Uint64(1), Commit: proto.Uint64(7)}, ents, snap))
 
 	assertInstalled(t, s, 5, 2, 7)
 
@@ -96,12 +97,12 @@ func TestSave_SnapshotInstallWithCoalescedEntries(t *testing.T) {
 
 	hs, cs, err := s2.InitialState()
 	require.NoError(t, err)
-	require.Equal(t, uint64(7), hs.Commit)
+	require.Equal(t, uint64(7), hs.GetCommit())
 	require.Equal(t, []uint64{1, 2, 3}, cs.Voters)
 
 	got, err := s2.Snapshot()
 	require.NoError(t, err)
-	require.Equal(t, uint64(5), got.Metadata.Index)
+	require.Equal(t, uint64(5), got.Metadata.GetIndex())
 	require.Equal(t, []byte("leader-bbolt"), got.Data)
 }
 
@@ -111,10 +112,10 @@ func TestSave_SnapshotInstallThenLaterEntries(t *testing.T) {
 	s := installReadyStorage(t, 5)
 	defer s.Cleanup()
 
-	require.NoError(t, s.Save(pb.HardState{Term: 2, Vote: 1, Commit: 5}, nil, installSnap(5, 2)))
+	require.NoError(t, s.Save(&pb.HardState{Term: proto.Uint64(2), Vote: proto.Uint64(1), Commit: proto.Uint64(5)}, nil, installSnap(5, 2)))
 	assertInstalled(t, s, 5, 2, 5)
 
-	require.NoError(t, s.Save(pb.HardState{Term: 2, Vote: 1, Commit: 8}, index(6).terms(2, 2, 2), defaultSnap))
+	require.NoError(t, s.Save(&pb.HardState{Term: proto.Uint64(2), Vote: proto.Uint64(1), Commit: proto.Uint64(8)}, index(6).terms(2, 2, 2), &defaultSnap))
 	assertInstalled(t, s, 5, 2, 8)
 }
 
@@ -132,7 +133,7 @@ func TestSave_SevereLagSnapshotPersistsNothing(t *testing.T) {
 	require.NoError(t, err)
 
 	snap := installSnap(50, 3)
-	require.NoError(t, s.Save(pb.HardState{Term: 3, Vote: 2, Commit: 50}, index(51).terms(3), snap))
+	require.NoError(t, s.Save(&pb.HardState{Term: proto.Uint64(3), Vote: proto.Uint64(2), Commit: proto.Uint64(50)}, index(51).terms(3), snap))
 
 	li, err := s.LastIndex()
 	require.NoError(t, err)
@@ -144,7 +145,7 @@ func TestSave_SevereLagSnapshotPersistsNothing(t *testing.T) {
 
 	got, err := s.Snapshot()
 	require.NoError(t, err)
-	require.NotEqual(t, uint64(50), got.Metadata.Index, "snapshot must not be adopted")
+	require.NotEqual(t, uint64(50), got.Metadata.GetIndex(), "snapshot must not be adopted")
 
 	// The fatal trigger the Ready loop relies on must still fire.
 	err = s.RestoreSnapshot(snap)
@@ -162,9 +163,9 @@ func TestOpen_CompletesInterruptedSnapshotInstall(t *testing.T) {
 		// leaves it: a Snapshot record then a HardState record, both past
 		// the entry log's tail (entry log only reaches 5 below).
 		snap := installSnap(9, 3)
-		snapb, err := snap.Marshal()
+		snapb, err := proto.Marshal(snap)
 		require.NoError(t, err)
-		hsb, err := (&pb.HardState{Term: 3, Vote: 1, Commit: 9}).Marshal()
+		hsb, err := proto.Marshal(&pb.HardState{Term: proto.Uint64(3), Vote: proto.Uint64(1), Commit: proto.Uint64(9)})
 		require.NoError(t, err)
 
 		// Rebuild the entry log to only reach 5: simulate by removing the
@@ -183,10 +184,10 @@ func TestOpen_CompletesInterruptedSnapshotInstall(t *testing.T) {
 		assertInstalled(t, s2, 9, 3, 9)
 		hs, _, err := s2.InitialState()
 		require.NoError(t, err)
-		require.Equal(t, uint64(9), hs.Commit)
+		require.Equal(t, uint64(9), hs.GetCommit())
 
 		// And the node must be able to take replication from here.
-		require.NoError(t, s2.Save(pb.HardState{Term: 3, Vote: 1, Commit: 10}, index(10).terms(3), defaultSnap))
+		require.NoError(t, s2.Save(&pb.HardState{Term: proto.Uint64(3), Vote: proto.Uint64(1), Commit: proto.Uint64(10)}, index(10).terms(3), &defaultSnap))
 		assertInstalled(t, s2, 9, 3, 10)
 	})
 
@@ -197,9 +198,9 @@ func TestOpen_CompletesInterruptedSnapshotInstall(t *testing.T) {
 		s := installReadyStorage(t, 9)
 
 		snap := installSnap(9, 3)
-		snapb, err := snap.Marshal()
+		snapb, err := proto.Marshal(snap)
 		require.NoError(t, err)
-		hsb, err := (&pb.HardState{Term: 3, Vote: 1, Commit: 9}).Marshal()
+		hsb, err := proto.Marshal(&pb.HardState{Term: proto.Uint64(3), Vote: proto.Uint64(1), Commit: proto.Uint64(9)})
 		require.NoError(t, err)
 		li, err := s.StateLog.LastIndex()
 		require.NoError(t, err)

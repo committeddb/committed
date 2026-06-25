@@ -76,7 +76,7 @@ func committedIngestSeqs(t *testing.T, s *wal.Storage, id string) []uint64 {
 
 	var seqs []uint64
 	for _, e := range ents {
-		if e.Type != raftpb.EntryNormal || e.Data == nil {
+		if e.GetType() != raftpb.EntryNormal || e.Data == nil {
 			continue
 		}
 		p := &cluster.Proposal{}

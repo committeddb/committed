@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	pb "go.etcd.io/raft/v3/raftpb"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster/db/wal"
 )
@@ -45,13 +46,13 @@ func gobStateRecord(t *testing.T, typ wal.StateType, data []byte) []byte {
 	return wal.Frame(buf.Bytes())
 }
 
-func metaSnapshot(idx uint64, data []byte) pb.Snapshot {
-	return pb.Snapshot{
+func metaSnapshot(idx uint64, data []byte) *pb.Snapshot {
+	return &pb.Snapshot{
 		Data: data,
-		Metadata: pb.SnapshotMetadata{
-			ConfState: pb.ConfState{Voters: []uint64{1}},
-			Index:     idx,
-			Term:      1,
+		Metadata: &pb.SnapshotMetadata{
+			ConfState: &pb.ConfState{Voters: []uint64{1}},
+			Index:     proto.Uint64(idx),
+			Term:      proto.Uint64(1),
 		},
 	}
 }
@@ -63,12 +64,12 @@ func metaSnapshot(idx uint64, data []byte) pb.Snapshot {
 // write nothing, and the real state must survive a reopen.
 func TestStateLog_UnchangedReadysPreserveTerm(t *testing.T) {
 	s := NewStorage(t, nil)
-	require.NoError(t, s.Save(pb.HardState{Term: 7, Vote: 2, Commit: 1}, nil, defaultSnap))
+	require.NoError(t, s.Save(&pb.HardState{Term: proto.Uint64(7), Vote: proto.Uint64(2), Commit: proto.Uint64(1)}, nil, &defaultSnap))
 
 	li, err := s.StateLog.LastIndex()
 	require.NoError(t, err)
 	for range 25 {
-		require.NoError(t, s.Save(defaultHardState, nil, defaultSnap))
+		require.NoError(t, s.Save(&defaultHardState, nil, &defaultSnap))
 	}
 	li2, err := s.StateLog.LastIndex()
 	require.NoError(t, err)
@@ -79,8 +80,8 @@ func TestStateLog_UnchangedReadysPreserveTerm(t *testing.T) {
 
 	hs, _, err := s2.InitialState()
 	require.NoError(t, err)
-	require.Equal(t, uint64(7), hs.Term, "term must survive restart")
-	require.Equal(t, uint64(2), hs.Vote, "vote must survive restart")
+	require.Equal(t, uint64(7), hs.GetTerm(), "term must survive restart")
+	require.Equal(t, uint64(2), hs.GetVote(), "vote must survive restart")
 }
 
 // Records superseded by a newer snapshot + hard state are truncated away:
@@ -94,9 +95,9 @@ func TestStateLog_TruncatesSupersededRecords(t *testing.T) {
 		require.NoError(t, s.ApplyCommitted(e))
 	}
 
-	require.NoError(t, s.Save(pb.HardState{Term: 1, Vote: 1, Commit: 1}, nil, metaSnapshot(1, []byte("meta"))))
+	require.NoError(t, s.Save(&pb.HardState{Term: proto.Uint64(1), Vote: proto.Uint64(1), Commit: proto.Uint64(1)}, nil, metaSnapshot(1, []byte("meta"))))
 	for i := uint64(2); i <= 20; i++ {
-		require.NoError(t, s.Save(pb.HardState{Term: 1, Vote: 1, Commit: i}, nil, defaultSnap))
+		require.NoError(t, s.Save(&pb.HardState{Term: proto.Uint64(1), Vote: proto.Uint64(1), Commit: proto.Uint64(i)}, nil, &defaultSnap))
 	}
 
 	// The old snapshot record pins the truncation cut, so nothing is
@@ -106,7 +107,7 @@ func TestStateLog_TruncatesSupersededRecords(t *testing.T) {
 	require.Equal(t, uint64(1), fi)
 
 	// A new snapshot at the tail advances the cut past every older record.
-	require.NoError(t, s.Save(pb.HardState{Term: 1, Vote: 1, Commit: 21}, nil, metaSnapshot(21, []byte("meta"))))
+	require.NoError(t, s.Save(&pb.HardState{Term: proto.Uint64(1), Vote: proto.Uint64(1), Commit: proto.Uint64(21)}, nil, metaSnapshot(21, []byte("meta"))))
 
 	fi, err = s.StateLog.FirstIndex()
 	require.NoError(t, err)
@@ -119,12 +120,12 @@ func TestStateLog_TruncatesSupersededRecords(t *testing.T) {
 
 	hs, cs, err := s2.InitialState()
 	require.NoError(t, err)
-	require.Equal(t, uint64(21), hs.Commit)
+	require.Equal(t, uint64(21), hs.GetCommit())
 	require.Equal(t, []uint64{1}, cs.Voters)
 
 	snap, err := s2.Snapshot()
 	require.NoError(t, err)
-	require.Equal(t, uint64(21), snap.Metadata.Index)
+	require.Equal(t, uint64(21), snap.Metadata.GetIndex())
 }
 
 // With compaction disabled no new snapshots arrive, so HardState records
@@ -140,9 +141,9 @@ func TestStateLog_ReanchorBoundsHardStateChurn(t *testing.T) {
 
 	// Event log must reach the snapshot point for the install to be accepted.
 	require.NoError(t, s.ApplyCommitted(index(1).terms(1)[0]))
-	require.NoError(t, s.Save(pb.HardState{Term: 1, Vote: 1, Commit: 1}, nil, metaSnapshot(1, []byte("meta"))))
+	require.NoError(t, s.Save(&pb.HardState{Term: proto.Uint64(1), Vote: proto.Uint64(1), Commit: proto.Uint64(1)}, nil, metaSnapshot(1, []byte("meta"))))
 	for i := uint64(2); i <= 100; i++ {
-		require.NoError(t, s.Save(pb.HardState{Term: 1, Vote: 1, Commit: i}, nil, defaultSnap))
+		require.NoError(t, s.Save(&pb.HardState{Term: proto.Uint64(1), Vote: proto.Uint64(1), Commit: proto.Uint64(i)}, nil, &defaultSnap))
 	}
 
 	fi, err := s.StateLog.FirstIndex()
@@ -161,7 +162,7 @@ func TestStateLog_OpenReclaimsLegacyBloat(t *testing.T) {
 	s := NewStorage(t, nil)
 
 	// The real, current hard state — about to be buried under garbage.
-	require.NoError(t, s.Save(pb.HardState{Term: 7, Vote: 2, Commit: 3}, nil, defaultSnap))
+	require.NoError(t, s.Save(&pb.HardState{Term: proto.Uint64(7), Vote: proto.Uint64(2), Commit: proto.Uint64(3)}, nil, &defaultSnap))
 
 	// Forge the legacy tail: one full-snapshot record plus one empty
 	// HardState record per Ready, as written during a crash loop's pre-vote
@@ -169,15 +170,15 @@ func TestStateLog_OpenReclaimsLegacyBloat(t *testing.T) {
 	blob := bytes.Repeat([]byte("x"), 200*1024)
 	legacySnap := pb.Snapshot{
 		Data: blob,
-		Metadata: pb.SnapshotMetadata{
-			ConfState: pb.ConfState{Voters: []uint64{1, 2}},
-			Index:     3,
-			Term:      7,
+		Metadata: &pb.SnapshotMetadata{
+			ConfState: &pb.ConfState{Voters: []uint64{1, 2}},
+			Index:     proto.Uint64(3),
+			Term:      proto.Uint64(7),
 		},
 	}
-	snapb, err := legacySnap.Marshal()
+	snapb, err := proto.Marshal(&legacySnap)
 	require.NoError(t, err)
-	emptyHS, err := (&pb.HardState{}).Marshal()
+	emptyHS, err := proto.Marshal(&pb.HardState{})
 	require.NoError(t, err)
 
 	li, err := s.StateLog.LastIndex()
@@ -195,8 +196,8 @@ func TestStateLog_OpenReclaimsLegacyBloat(t *testing.T) {
 
 	hs, cs, err := s2.InitialState()
 	require.NoError(t, err)
-	require.Equal(t, uint64(7), hs.Term, "recovery must skip the empty records and find the real term")
-	require.Equal(t, uint64(2), hs.Vote)
+	require.Equal(t, uint64(7), hs.GetTerm(), "recovery must skip the empty records and find the real term")
+	require.Equal(t, uint64(2), hs.GetVote())
 	require.Equal(t, []uint64{1, 2}, cs.Voters, "newest snapshot's ConfState must be adopted")
 
 	snap, err := s2.Snapshot()
@@ -218,7 +219,7 @@ func TestStateLog_RebootsDoNotAccumulate(t *testing.T) {
 	snap, err := s.CreateSnapshot(0, &pb.ConfState{Voters: []uint64{1}})
 	require.NoError(t, err)
 	require.NotEmpty(t, snap.Data)
-	require.NoError(t, s.Save(pb.HardState{Term: 2, Vote: 1, Commit: 0}, nil, defaultSnap))
+	require.NoError(t, s.Save(&pb.HardState{Term: proto.Uint64(2), Vote: proto.Uint64(1), Commit: proto.Uint64(0)}, nil, &defaultSnap))
 
 	cur := s
 	for range 5 {
@@ -246,7 +247,7 @@ func TestStateLog_RestartWithoutWritesIsFixedPoint(t *testing.T) {
 	snap, err := s.CreateSnapshot(0, &pb.ConfState{Voters: []uint64{1}})
 	require.NoError(t, err)
 	require.NotEmpty(t, snap.Data)
-	require.NoError(t, s.Save(pb.HardState{Term: 2, Vote: 1, Commit: 0}, nil, defaultSnap))
+	require.NoError(t, s.Save(&pb.HardState{Term: proto.Uint64(2), Vote: proto.Uint64(1), Commit: proto.Uint64(0)}, nil, &defaultSnap))
 
 	cur := s.CloseAndReopenStorage(t)
 	defer func() { cur.Cleanup() }()
@@ -262,8 +263,8 @@ func TestStateLog_RestartWithoutWritesIsFixedPoint(t *testing.T) {
 	// recovered state must still be the one we wrote.
 	hs, cs, err := cur.InitialState()
 	require.NoError(t, err)
-	require.Equal(t, uint64(2), hs.Term)
-	require.Equal(t, uint64(1), hs.Vote)
+	require.Equal(t, uint64(2), hs.GetTerm())
+	require.Equal(t, uint64(1), hs.GetVote())
 	require.Equal(t, []uint64{1}, cs.Voters)
 
 	got, err := cur.Snapshot()

@@ -12,6 +12,7 @@ import (
 	"go.etcd.io/raft/v3"
 	"go.etcd.io/raft/v3/raftpb"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/metrics"
@@ -30,8 +31,8 @@ type configBuildErrorReporter interface {
 }
 
 type Raft struct {
-	proposeC     <-chan []byte              // proposed messages
-	proposeConfC <-chan raftpb.ConfChangeV2 // proposed cluster config changes
+	proposeC     <-chan []byte               // proposed messages
+	proposeConfC <-chan *raftpb.ConfChangeV2 // proposed cluster config changes
 	// join marks this node as joining an existing cluster: startRaft uses
 	// raft.RestartNode (empty state, learn membership from the leader)
 	// instead of raft.StartNode (bootstrap from the static peer set). See
@@ -132,7 +133,7 @@ type Raft struct {
 	metrics *metrics.Metrics
 }
 
-func NewRaft(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, proposeConfC <-chan raftpb.ConfChangeV2, opts ...Option) (<-chan error, *Raft) {
+func NewRaft(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, proposeConfC <-chan *raftpb.ConfChangeV2, opts ...Option) (<-chan error, *Raft) {
 	cfg := defaultOptions()
 	for _, opt := range opts {
 		opt(&cfg)
@@ -140,7 +141,7 @@ func NewRaft(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, propo
 	return newRaftWithOptions(id, ps, s, proposeC, proposeConfC, nil, nil, nil, cfg.logger, cfg)
 }
 
-func newRaftWithOptions(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, proposeConfC <-chan raftpb.ConfChangeV2, applyNotifier func(data []byte), appliedIndexNotifier func(), lostNotifier func([]uint64), logger *zap.Logger, cfg options) (<-chan error, *Raft) {
+func newRaftWithOptions(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, proposeConfC <-chan *raftpb.ConfChangeV2, applyNotifier func(data []byte), appliedIndexNotifier func(), lostNotifier func([]uint64), logger *zap.Logger, cfg options) (<-chan error, *Raft) {
 	errorC := make(chan error)
 
 	n := &Raft{
@@ -243,7 +244,7 @@ func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 	}
 
 	switch {
-	case hs.Term > 0:
+	case hs.GetTerm() > 0:
 		n.logger.Info("restarting node", zap.Uint64("id", id))
 		n.node = raft.RestartNode(c)
 	case n.join:
@@ -310,10 +311,10 @@ func (n *Raft) applyConfChange(cc raftpb.ConfChangeI, ccCtx []byte) {
 		// A node needs no transport entry for itself: skip self so applying
 		// our own AddNode doesn't try to dial our own URL, and so a
 		// self-removal doesn't tear down a peer that was never added.
-		if ch.NodeID == n.id {
+		if ch.GetNodeId() == n.id {
 			continue
 		}
-		switch ch.Type {
+		switch ch.GetType() {
 		case raftpb.ConfChangeAddNode, raftpb.ConfChangeAddLearnerNode:
 			if len(ccCtx) == 0 {
 				// No URL to dial — happens for the bootstrap conf changes a
@@ -321,21 +322,21 @@ func (n *Raft) applyConfChange(cc raftpb.ConfChangeI, ccCtx []byte) {
 				// transport is already wired. Nothing to do.
 				continue
 			}
-			if err := n.transport.AddPeer(raft.Peer{ID: ch.NodeID, Context: ccCtx}); err != nil {
+			if err := n.transport.AddPeer(raft.Peer{ID: ch.GetNodeId(), Context: ccCtx}); err != nil {
 				n.logger.Error("conf change: add peer to transport",
-					zap.Uint64("peer", ch.NodeID), zap.Error(err))
+					zap.Uint64("peer", ch.GetNodeId()), zap.Error(err))
 			}
 		case raftpb.ConfChangeRemoveNode:
-			n.transport.RemovePeer(ch.NodeID)
+			n.transport.RemovePeer(ch.GetNodeId())
 			// Drop the removed node's announced API URL so the
 			// memberAPIURLs map doesn't accumulate stale entries across
 			// the add/remove churn of rebalancing. Best-effort cleanup:
 			// a stale entry is harmless (the node is gone from the
 			// configuration, so it never surfaces in membership reads),
 			// so a delete failure is logged, not fatal.
-			if err := n.storage.DeleteMemberAPIURL(ch.NodeID); err != nil {
+			if err := n.storage.DeleteMemberAPIURL(ch.GetNodeId()); err != nil {
 				n.logger.Error("conf change: delete member api url",
-					zap.Uint64("peer", ch.NodeID), zap.Error(err))
+					zap.Uint64("peer", ch.GetNodeId()), zap.Error(err))
 			}
 		}
 	}
@@ -396,7 +397,7 @@ func (n *Raft) membershipView() (leaderID, term, commit uint64, isLeader bool, m
 	for id := range st.Config.Learners {
 		add(id, true)
 	}
-	return st.Lead, st.Term, st.Commit, st.RaftState == raft.StateLeader, members
+	return st.Lead, st.GetTerm(), st.GetCommit(), st.RaftState == raft.StateLeader, members
 }
 
 func (n *Raft) serveChannels() {
@@ -530,20 +531,20 @@ func (n *Raft) serveChannels() {
 				// takes.)
 				applyStart := time.Now()
 				if err := n.storage.ApplyCommitted(entry); err != nil {
-					n.logger.Fatal("apply committed entry", zap.Uint64("index", entry.Index), zap.Error(err))
+					n.logger.Fatal("apply committed entry", zap.Uint64("index", entry.GetIndex()), zap.Error(err))
 				}
 				if n.metrics != nil {
-					n.metrics.EntryApplied(entry.Index, time.Since(applyStart))
+					n.metrics.EntryApplied(entry.GetIndex(), time.Since(applyStart))
 				}
 				// Fire the apply notifier once the storage apply has
 				// succeeded, so blocking db.Propose unblocks promptly. The
 				// notifier is no-op if nil (raft_test path) or if the
 				// proposal's RequestID is 0 (system-internal proposers
 				// or pre-PR2 entries).
-				if n.applyNotifier != nil && entry.Type == raftpb.EntryNormal && entry.Data != nil {
+				if n.applyNotifier != nil && entry.GetType() == raftpb.EntryNormal && entry.Data != nil {
 					n.applyNotifier(entry.Data)
 				}
-				switch entry.Type {
+				switch entry.GetType() {
 				case raftpb.EntryConfChangeV2:
 					// The normal membership path. db.AddMember / db.RemoveMember
 					// propose ConfChangeV2 entries (joint consensus), and raft
@@ -551,11 +552,11 @@ func (n *Raft) serveChannels() {
 					// joint configuration once it commits (JointImplicit
 					// auto-leave). Both flow through here.
 					var cc raftpb.ConfChangeV2
-					if err := cc.Unmarshal(entry.Data); err != nil {
+					if err := proto.Unmarshal(entry.Data, &cc); err != nil {
 						n.raftErrorC <- err
 						break
 					}
-					n.applyConfChange(cc, cc.Context)
+					n.applyConfChange(&cc, cc.Context)
 				case raftpb.EntryConfChange:
 					// Backward compatibility: a v1 ConfChange can only appear
 					// in a log written by a pre-joint-consensus binary, since
@@ -564,11 +565,11 @@ func (n *Raft) serveChannels() {
 					// keeps an upgraded node consistent with what the old leader
 					// committed. See docs/operations/membership.md.
 					var cc raftpb.ConfChange
-					if err := cc.Unmarshal(entry.Data); err != nil {
+					if err := proto.Unmarshal(entry.Data, &cc); err != nil {
 						n.raftErrorC <- err
 						break
 					}
-					n.applyConfChange(cc, cc.Context)
+					n.applyConfChange(&cc, cc.Context)
 				}
 			}
 
@@ -943,11 +944,11 @@ func (n *Raft) maybeCompact() {
 // "Severe lag — v1 manual rebuild". A RestoreSnapshot error here is
 // also fatal; a half-applied snapshot leaves the node in a hybrid
 // state that is worse than crashing and letting an operator rebuild.
-func (n *Raft) processSnapshot(snap raftpb.Snapshot) {
+func (n *Raft) processSnapshot(snap *raftpb.Snapshot) {
 	if err := n.storage.RestoreSnapshot(snap); err != nil {
 		n.logger.Fatal("restore snapshot failed",
-			zap.Uint64("snapIndex", snap.Metadata.Index),
-			zap.Uint64("snapTerm", snap.Metadata.Term),
+			zap.Uint64("snapIndex", snap.Metadata.GetIndex()),
+			zap.Uint64("snapTerm", snap.Metadata.GetTerm()),
 			zap.Error(err),
 		)
 	}
@@ -958,7 +959,7 @@ type httpTransportRaft struct {
 }
 
 // The next four methods implement the Raft interface in the rafthttp package needed for rafthttp.Transport
-func (n *httpTransportRaft) Process(ctx context.Context, m raftpb.Message) error {
+func (n *httpTransportRaft) Process(ctx context.Context, m *raftpb.Message) error {
 	return n.node.Step(ctx, m)
 }
 func (n *httpTransportRaft) IsIDRemoved(id uint64) bool  { return false }

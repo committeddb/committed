@@ -19,6 +19,7 @@ import (
 	"go.etcd.io/raft/v3"
 	"go.etcd.io/raft/v3/raftpb"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster/db"
 )
@@ -130,7 +131,7 @@ type HttpTransport struct {
 type peer struct {
 	id    uint64
 	url   string
-	msgc  chan raftpb.Message
+	msgc  chan *raftpb.Message
 	stopc chan struct{}
 	done  chan struct{}
 }
@@ -302,7 +303,7 @@ func (t *HttpTransport) handleMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if t.raft.IsIDRemoved(m.From) {
+	if t.raft.IsIDRemoved(m.GetFrom()) {
 		// A removed node must not be able to inject messages.
 		http.Error(w, "sender removed from cluster", http.StatusForbidden)
 		return
@@ -329,7 +330,7 @@ func (t *HttpTransport) AddPeer(p raft.Peer) error {
 	pr := &peer{
 		id:    p.ID,
 		url:   string(p.Context),
-		msgc:  make(chan raftpb.Message, peerQueueDepth),
+		msgc:  make(chan *raftpb.Message, peerQueueDepth),
 		stopc: make(chan struct{}),
 		done:  make(chan struct{}),
 	}
@@ -356,14 +357,14 @@ func (t *HttpTransport) RemovePeer(id uint64) {
 // Send routes each message to its target peer's queue, non-blocking. Messages to
 // self, to id 0, or to an unknown peer are dropped, as are messages for a peer
 // whose queue is full — raft retransmits, and the raft loop must never block.
-func (t *HttpTransport) Send(msgs []raftpb.Message) {
+func (t *HttpTransport) Send(msgs []*raftpb.Message) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	for _, m := range msgs {
-		if m.To == 0 || m.To == t.id {
+		if m.GetTo() == 0 || m.GetTo() == t.id {
 			continue
 		}
-		pr, ok := t.peers[m.To]
+		pr, ok := t.peers[m.GetTo()]
 		if !ok {
 			continue
 		}
@@ -405,22 +406,22 @@ func (t *HttpTransport) runPeer(pr *peer) {
 
 // deliver POSTs one message and feeds the result back to raft: a failure marks
 // the peer unreachable (and fails any snapshot); a success confirms a snapshot.
-func (t *HttpTransport) deliver(pr *peer, m raftpb.Message) {
+func (t *HttpTransport) deliver(pr *peer, m *raftpb.Message) {
 	if err := t.post(pr, m); err != nil {
 		t.logger.Debug("raft peer send failed",
-			zap.Uint64("to", m.To), zap.Error(err))
-		t.raft.ReportUnreachable(m.To)
-		if m.Type == raftpb.MsgSnap {
-			t.raft.ReportSnapshot(m.To, raft.SnapshotFailure)
+			zap.Uint64("to", m.GetTo()), zap.Error(err))
+		t.raft.ReportUnreachable(m.GetTo())
+		if m.GetType() == raftpb.MsgSnap {
+			t.raft.ReportSnapshot(m.GetTo(), raft.SnapshotFailure)
 		}
 		return
 	}
-	if m.Type == raftpb.MsgSnap {
-		t.raft.ReportSnapshot(m.To, raft.SnapshotFinish)
+	if m.GetType() == raftpb.MsgSnap {
+		t.raft.ReportSnapshot(m.GetTo(), raft.SnapshotFinish)
 	}
 }
 
-func (t *HttpTransport) post(pr *peer, m raftpb.Message) error {
+func (t *HttpTransport) post(pr *peer, m *raftpb.Message) error {
 	data, err := marshalMessage(m)
 	if err != nil {
 		return fmt.Errorf("marshal message: %w", err)
@@ -448,19 +449,22 @@ func (t *HttpTransport) post(pr *peer, m raftpb.Message) error {
 	_, _ = io.Copy(io.Discard, resp.Body) // drain so the keep-alive conn is reusable
 
 	if resp.StatusCode != http.StatusNoContent {
-		return fmt.Errorf("peer %d returned %s", m.To, resp.Status)
+		return fmt.Errorf("peer %d returned %s", m.GetTo(), resp.Status)
 	}
 	return nil
 }
 
-// marshalMessage / unmarshalMessage isolate the raftpb wire calls so the raft
-// 3.7 bump (which moves raftpb to google.golang.org/protobuf) touches one place.
-func marshalMessage(m raftpb.Message) ([]byte, error) {
-	return m.Marshal()
+// marshalMessage / unmarshalMessage isolate the raftpb wire calls. raft 3.7
+// moved raftpb to google.golang.org/protobuf, so the gogo Marshal/Unmarshal
+// methods are gone — these go through proto. The wire bytes are unchanged
+// (same field numbers), so a message marshaled by either generation decodes
+// with the other.
+func marshalMessage(m *raftpb.Message) ([]byte, error) {
+	return proto.Marshal(m)
 }
 
-func unmarshalMessage(b []byte) (raftpb.Message, error) {
-	var m raftpb.Message
-	err := m.Unmarshal(b)
+func unmarshalMessage(b []byte) (*raftpb.Message, error) {
+	m := &raftpb.Message{}
+	err := proto.Unmarshal(b, m)
 	return m, err
 }

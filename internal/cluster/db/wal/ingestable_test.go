@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"go.etcd.io/raft/v3/raftpb"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/clusterfakes"
@@ -116,9 +117,9 @@ func TestApplyCommitted_RestartReplay(t *testing.T) {
 	p := &cluster.Proposal{Entities: []*cluster.Entity{entity}}
 	bs, err := p.Marshal()
 	require.Nil(t, err)
-	entry := raftpb.Entry{Term: 1, Index: 1, Type: raftpb.EntryNormal, Data: bs}
+	entry := &raftpb.Entry{Term: proto.Uint64(1), Index: proto.Uint64(1), Type: raftpb.EntryNormal.Enum(), Data: bs}
 
-	require.Nil(t, s.Save(defaultHardState, []raftpb.Entry{entry}, defaultSnap))
+	require.Nil(t, s.Save(&defaultHardState, []*raftpb.Entry{entry}, &defaultSnap))
 	require.Nil(t, s.ApplyCommitted(entry))
 	require.Equal(t, uint64(1), s.AppliedIndex(), "appliedIndex bumped after first apply")
 	require.Equal(t, 1, fakeParser.ParseCallCount(), "parser invoked exactly once on first apply")
@@ -318,12 +319,12 @@ func readNormalProposals(s *wal.Storage) []*cluster.Proposal {
 
 	var ps []*cluster.Proposal
 	for _, e := range ents {
-		if e.Type != raftpb.EntryNormal || e.Data == nil {
+		if e.GetType() != raftpb.EntryNormal || e.Data == nil {
 			continue
 		}
 		p := &cluster.Proposal{}
 		if err := p.Unmarshal(e.Data, s); err != nil {
-			panic(fmt.Sprintf("readNormalProposals: unmarshal entry at index %d: %v", e.Index, err))
+			panic(fmt.Sprintf("readNormalProposals: unmarshal entry at index %d: %v", e.GetIndex(), err))
 		}
 		if len(p.Entities) == 0 {
 			continue

@@ -60,10 +60,10 @@ func (db *DB) Ents() ([]*cluster.Proposal, error) {
 	return db.entsToProposals(ents)
 }
 
-func (db *DB) entsToProposals(ents []raftpb.Entry) ([]*cluster.Proposal, error) {
+func (db *DB) entsToProposals(ents []*raftpb.Entry) ([]*cluster.Proposal, error) {
 	var ps []*cluster.Proposal
 	for _, e := range ents {
-		if e.Type == raftpb.EntryNormal && e.Data != nil {
+		if e.GetType() == raftpb.EntryNormal && e.Data != nil {
 			p := &cluster.Proposal{}
 			if err := p.Unmarshal(e.Data, db.storage); err != nil {
 				return nil, err

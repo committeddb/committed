@@ -57,7 +57,7 @@ func NewFaultyStorage(inner db.Storage, threshold int) *FaultyStorage {
 // failure, not a process crash. The test's correctness argument depends
 // on the surviving two-node quorum observing their own commits, which is
 // independent of what node 1 does with its own apply path.
-func (f *FaultyStorage) Save(st raftpb.HardState, ents []raftpb.Entry, snap raftpb.Snapshot) error {
+func (f *FaultyStorage) Save(st *raftpb.HardState, ents []*raftpb.Entry, snap *raftpb.Snapshot) error {
 	f.mu.Lock()
 	f.saved += len(ents)
 	if f.saved > f.threshold {
