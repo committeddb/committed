@@ -209,7 +209,7 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 	// being non-nil means a prior run was interrupted mid-snapshot
 	// and we should resume from where it left off.
 	var lastPos *mysql.Position
-	var resumeGTID string
+	var lastGTID string
 	var resumeProgress *dialectpb.SnapshotProgress
 	if pos != nil {
 		posProto := &dialectpb.MySQLBinLogPosition{}
@@ -217,7 +217,7 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			return err
 		}
 		lastPos = &mysql.Position{Name: posProto.Name, Pos: posProto.Pos}
-		resumeGTID = posProto.GtidSet
+		lastGTID = posProto.GtidSet
 		resumeProgress = posProto.SnapshotProgress
 	}
 
@@ -243,7 +243,7 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 		// position to stream from. This replaces canal's built-in
 		// mysqldump phase, eliminating the external binary dependency.
 		if lastPos == nil || resumeProgress != nil {
-			snapshotPos, snapshotGTID, err := snapshot(ctx, config, pr, po, lastPos, resumeGTID, resumeProgress)
+			snapshotPos, snapshotGTID, err := snapshot(ctx, config, pr, po, lastPos, lastGTID, resumeProgress)
 			if err != nil {
 				if ctx.Err() != nil {
 					return nil
@@ -264,6 +264,7 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 				continue
 			}
 			lastPos = snapshotPos
+			lastGTID = snapshotGTID
 			resumeProgress = nil
 			backoff = syncerBackoffMin
 			zap.L().Info("snapshot complete",
@@ -337,6 +338,17 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			curFile: lastPos.Name,
 			curPos:  lastPos.Pos,
 		}
+		// Seed the consumed GTID set so streaming checkpoints carry the full set
+		// (snapshot ∪ streamed) and the cursor survives a reconnect/restart. Resume
+		// still uses StartSync(file:pos) — this is the cursor the cutover slice will
+		// switch to. Empty (file:pos-only / gtid_mode=OFF) leaves consumedGTID nil.
+		if lastGTID != "" {
+			consumed, err := mysql.ParseMysqlGTIDSet(lastGTID)
+			if err != nil {
+				return fmt.Errorf("parse resume GTID %q: %w", lastGTID, err)
+			}
+			handler.consumedGTID = consumed
+		}
 
 		// runStream blocks until ctx is canceled (clean exit) or the stream
 		// errors (reconnect). Close the syncer either way; on a stream error
@@ -348,6 +360,9 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 		}
 		if handler.lastPos != nil {
 			lastPos = handler.lastPos
+		}
+		if handler.consumedGTID != nil {
+			lastGTID = handler.consumedGTID.String()
 		}
 		zap.L().Warn("binlog stream exited, will reconnect",
 			zap.Duration("backoff", backoff),
