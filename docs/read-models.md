@@ -1,9 +1,11 @@
 # Read models (SQL projections)
 
-A read model is a current-state table — one row per entity — that a
+A read model is a current-state table (one row per entity) that a
 `sql-projection` syncable maintains by folding an event topic in log order. The
 log stays the source of truth; the table is disposable and rebuildable from
-index 0. This guide is the full projection reference: single-source folds, rule
+index 0.
+
+This guide is the full projection reference: single-source folds, rule
 semantics, multi-source "BFF" rows, collection aggregates, cross-topic
 enrichment, delete lifecycles, and dimension fan-out.
 
@@ -109,7 +111,7 @@ set  = [
   without exactly one of `from`/`value`/`null`, a `when` entry without
   exactly one of `equals`/`null`, a rule setting the primary key) is
   rejected at config time; a *matched* rule whose `from` path is
-  missing — or a matched event with no value at `keyPath` —
+  missing (or a matched event with no value at `keyPath`)
   dead-letters as a permanent error rather than wedging the worker. A
   rule with **no** `when` matches every event of its source (the topic
   is the discriminator) — the natural shape for folding a `snapshot`
@@ -222,7 +224,7 @@ when    = [ { path = "$.role", equals = "director" } ]
 Each aggregate column is backed by a `<table>__<column>` sidecar table the
 projection creates and tears down with the projection — one normalized row
 per child, so the array column is a pure `jsonb_agg` of it (deterministic,
-rebuildable from index 0) and a delete — which carries only the child Key —
+rebuildable from index 0) and a delete (which carries only the child Key)
 finds and removes the right element without the payload. The `read` column
 stays a clean array. Deterministic ordering is a PostgreSQL guarantee;
 MySQL aggregate ordering is best-effort (`JSON_ARRAYAGG` ignores `ORDER
@@ -295,7 +297,7 @@ gracefully instead of vanishing:
   field on every element that referenced it but keeps the element itself: the
   stored foreign key remains, only the joined value clears.
 
-Deleting an absent row — or an element that isn't there — is a no-op, which is
+Deleting an absent row (or an element that isn't there) is a no-op, which is
 what makes a fresh replay of an already-scrubbed log correct.
 
 ## Dimension fan-out
@@ -303,7 +305,7 @@ what makes a fresh replay of an already-scrubbed log correct.
 A lookup dimension is the source of truth for the values it resolves, and it can
 arrive or change in any order relative to the facts that reference it. Committed
 handles cross-topic order by **fanning out**: when a dimension row arrives
-*after* the facts that reference it — or a later change updates it — the
+*after* the facts that reference it (or a later change updates it), the
 projection re-materializes every parent row whose elements reference that key,
 so the resolved values fill in (and a dimension delete NULLs the field on those
 elements while keeping them). Fan-out is synchronous — a dimension change

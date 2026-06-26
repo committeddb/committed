@@ -3,8 +3,8 @@
 **Status:** Proposed (2026-04-09)
 
 This document describes how Committed stores, replicates, and manages its
-application event log. It exists because the standard Raft model — log as
-throwaway transport, snapshot-and-compact aggressively — does not fit
+application event log. It exists because the standard Raft model (log as
+throwaway transport, snapshot-and-compact aggressively) does not fit
 Committed's role as a CQRS event log where the events themselves are the
 product.
 
@@ -554,7 +554,7 @@ entry for the same key supersedes, so the latest delete is always kept.
 keeps the *latest* committed entry per `(type, key)` and drops only entries a
 later surviving entry makes redundant. It never drops the latest value of
 anything. This preserves the invariant that the permanent event log is a
-complete source of truth from which bbolt — a derived materialized view — can be
+complete source of truth from which bbolt (a derived materialized view) can be
 reconstructed by replay: the live value of every key stays in the log. Dropping
 all metadata `<= B` would reclaim only one extra entry per key while forfeiting
 that invariant permanently, a bad trade. The rule, stated as an invariant:
@@ -599,7 +599,7 @@ Identical inputs on every replica yield byte-identical rewritten logs.
 "is there *any* scrubbable work — RTBF erasure **or** enough accumulated
 superseded metadata?", so a metadata-heavy, RTBF-free cluster still triggers the
 automatic scrubber and the one rewrite pass does both jobs. Because metadata GC
-only reclaims space — unlike legally-urgent erasure — it batches behind a small
+only reclaims space (unlike legally-urgent erasure), it batches behind a small
 threshold rather than firing on every superseded write.
 
 ---
@@ -712,7 +712,7 @@ circuits the grant.
 Without CheckQuorum, the adversarial suite's asymmetric-partition
 scenario reveals the gap: a follower that can't receive heartbeats from
 the leader (but can still send) will campaign at a higher term, and
-other followers — still receiving heartbeats from the current leader —
+other followers (still receiving heartbeats from the current leader)
 will grant the pre-vote anyway, forcing a spurious step-down. With
 CheckQuorum, those peers correctly reject the pre-vote because their
 leader lease hasn't expired.
@@ -784,7 +784,7 @@ The reactions form a ladder of severity, deepest cost first:
   `internal/cluster/db/db.go`.
 
 - **Log-and-continue** (sync dead letter). The dead-letter record is
-  observability *about* a decision — the permanent skip — that has already
+  observability *about* a decision (the permanent skip) that has already
   been made and is independent of whether the record persists. Nothing is
   at stake in a wrong guess: the counter and ERROR log already captured the
   event, the proposal is skipped regardless, and because a permanent skip
@@ -948,7 +948,7 @@ see § "Metadata GC (system tombstones)".
 - Ongaro PhD thesis, "Consensus: Bridging Theory and Practice" — covers
   PreVote (§9.6), joint consensus, single-server membership changes,
   leadership transfer, snapshotting tradeoffs
-- etcd raft source — `go.etcd.io/etcd/raft/v3` — the implementation we use
+- etcd raft source `go.etcd.io/etcd/raft/v3` — the implementation we use
 
 ---
 

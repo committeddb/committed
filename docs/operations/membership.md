@@ -131,7 +131,7 @@ committed member promote --id 4 --target http://n1:8080
 ```
 
 This relocates node 4 from the learner set to the voter set. Promotion does
-**not** re-check catch-up — it acts on your decision — so there is a brief
+**not** re-check catch-up (it acts on your decision), so there is a brief
 window where the just-promoted node is in the quorum while only
 *approximately* caught up; polling in step 2 is what keeps that window
 small. Promoting a node that isn't a current learner (already a voter, or
