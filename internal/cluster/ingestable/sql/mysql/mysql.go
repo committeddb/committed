@@ -16,7 +16,6 @@ import (
 	"github.com/go-mysql-org/go-mysql/canal"
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
-	"github.com/go-mysql-org/go-mysql/schema"
 	_ "github.com/go-sql-driver/mysql"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
@@ -222,6 +221,17 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 		resumeProgress = posProto.SnapshotProgress
 	}
 
+	// Schema cache for the streaming decode path — committed sources column
+	// metadata (names, JSON category, enum/set labels) from information_schema
+	// rather than canal's tracking. Opened once and shared across reconnects;
+	// the connection is lazy, so a bad source surfaces on the first row, not here.
+	cacheDB, err := gosql.Open("mysql", buildDSN(config.ConnectionString))
+	if err != nil {
+		return fmt.Errorf("open schema cache db: %w", err)
+	}
+	defer func() { _ = cacheDB.Close() }()
+	cache := newSchemaCache(cacheDB)
+
 	// Outer loop: each iteration either snapshots (first run, or
 	// resuming mid-snapshot) or creates a canal, runs it until it
 	// exits, then reconnects with backoff. Only ctx cancellation
@@ -313,6 +323,7 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			proposalChan: pr,
 			positionChan: po,
 			tables:       tables,
+			cache:        cache,
 			// Seed the live coordinate from the resume position so a
 			// mid-transaction flush before the first commit still stamps
 			// a sane SourceSeq. lastPos is non-nil here (resume or
@@ -391,6 +402,12 @@ type MySQLEventHandler struct {
 	positionChan chan<- cluster.Position
 	tables       []string
 
+	// cache supplies per-column decode metadata (names, JSON category, enum/set
+	// labels) from committed's own information_schema lookups — what the raw
+	// binlog row lacks. Shared across reconnects; cleared on DDL. Accessed only
+	// from the single event goroutine, so it needs no locking.
+	cache *schemaCache
+
 	// mu guards the mutable streaming state below (lastPos, curFile,
 	// curPos, pending). canal.Close invokes OnPosSynced on the goroutine
 	// that calls Close (our Ingest goroutine on the ctx-cancel path),
@@ -425,21 +442,10 @@ type MySQLEventHandler struct {
 	pending []*cluster.Entity
 }
 
-// mysqlCategoryForCanalType maps a canal column type (the binlog/CDC path) to a
-// JSON category. MySQL has no native bool — a tinyint(1) is a number — so there
-// is no bool category. Kept in sync with mysqlCategoryForTypeName.
-func mysqlCategoryForCanalType(t int) sql.JSONCategory {
-	switch t {
-	case schema.TYPE_NUMBER, schema.TYPE_FLOAT, schema.TYPE_DECIMAL, schema.TYPE_MEDIUM_INT:
-		return sql.CatNumber
-	case schema.TYPE_JSON:
-		return sql.CatJSON
-	}
-	return sql.CatText
-}
-
-// mysqlCategoryForTypeName maps a database/sql DatabaseTypeName (the snapshot
-// path) to a JSON category. Kept in sync with mysqlCategoryForCanalType.
+// mysqlCategoryForTypeName maps a MySQL type name (information_schema data_type
+// for the binlog decode path; database/sql DatabaseTypeName for the snapshot
+// path) to a JSON category. MySQL has no native bool — a tinyint(1) is a number —
+// so there is no bool category.
 func mysqlCategoryForTypeName(name string) sql.JSONCategory {
 	switch strings.ToUpper(name) {
 	case "TINYINT", "SMALLINT", "MEDIUMINT", "INT", "INTEGER", "BIGINT", "YEAR",
@@ -449,28 +455,6 @@ func mysqlCategoryForTypeName(name string) sql.JSONCategory {
 		return sql.CatJSON
 	}
 	return sql.CatText
-}
-
-// columnInfo is committed's own per-column metadata for the binlog decode path —
-// the parts the raw binlog row does not carry. In Phase A the binlog stream
-// delivers positionally-decoded values with no column metadata, so committed
-// sources this itself (see the schema cache) rather than relying on canal.
-// enumValues is non-nil only for an ENUM column, setValues only for a SET column;
-// which one is populated is the column's kind. (The cache adds more fields — name,
-// JSON category — as the decode path moves fully off canal.)
-type columnInfo struct {
-	enumValues []string // ENUM member labels in definition order; nil otherwise
-	setValues  []string // SET member labels in definition order; nil otherwise
-}
-
-// columnInfoFromCanal adapts canal's schema.TableColumn to columnInfo. This shim
-// keeps the canal OnRow path working while the decode helpers move onto
-// committed's own metadata; it is deleted when canal is removed.
-func columnInfoFromCanal(c schema.TableColumn) columnInfo {
-	return columnInfo{
-		enumValues: c.EnumValues,
-		setValues:  c.SetValues,
-	}
 }
 
 // decodeEnumSet resolves the numeric binlog encoding of ENUM and SET columns to
@@ -537,23 +521,31 @@ func (h *MySQLEventHandler) OnRow(e *canal.RowsEvent) error {
 		return nil
 	}
 
-	// m holds the key form: canal already decodes numbers/floats to typed Go
-	// values; coerce []byte (TEXT/BLOB/JSON) to string so the key is text and
-	// matches the snapshot path. raw/catByName keep the value and its canal type
-	// so the payload renders as natural JSON.
+	ts, err := h.cache.get(h.ctx, e.Table.Name)
+	if err != nil {
+		return fmt.Errorf("schema of %q: %w", e.Table.Name, err)
+	}
+
+	// m holds the key form: numbers/floats are already typed Go values; coerce
+	// []byte (TEXT/BLOB/JSON) to string so the key is text and matches the
+	// snapshot path. raw/catByName keep the value and its category so the payload
+	// renders as natural JSON. Column metadata — names, category, enum/set member
+	// lists — comes from committed's own schema cache, not canal's tracking.
 	m := make(map[string]any)
 	raw := make(map[string]any)
 	catByName := make(map[string]sql.JSONCategory)
 	row := e.Rows[len(e.Rows)-1]
-	for i, c := range e.Table.Columns {
-		lc := strings.ToLower(c.Name)
-		val := decodeEnumSet(columnInfoFromCanal(c), row[i])
-		raw[lc] = val
-		catByName[lc] = mysqlCategoryForCanalType(c.Type)
+	for i, col := range ts.cols {
+		if i >= len(row) {
+			break // row image has fewer columns than the current schema (DDL skew)
+		}
+		val := decodeEnumSet(col, row[i])
+		raw[col.name] = val
+		catByName[col.name] = col.cat
 		if b, ok := val.([]byte); ok {
-			m[lc] = string(b)
+			m[col.name] = string(b)
 		} else {
-			m[lc] = val
+			m[col.name] = val
 		}
 	}
 
@@ -689,6 +681,10 @@ func (h *MySQLEventHandler) OnPosSynced(header *replication.EventHeader, pos mys
 }
 
 func (h *MySQLEventHandler) OnDDL(header *replication.EventHeader, nextPos mysql.Position, queryEvent *replication.QueryEvent) error {
+	// A DDL may have altered a watched table's columns; drop the cached schema so
+	// the next row reloads the current definition.
+	h.cache.clear()
+
 	if queryEvent == nil {
 		zap.L().Warn("OnDDL: DDL event with nil query",
 			zap.String("pos", nextPos.Name),
