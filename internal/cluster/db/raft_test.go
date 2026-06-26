@@ -795,6 +795,16 @@ func (ms *MemoryStorage) Save(st *raftpb.HardState, ents []*raftpb.Entry, snap *
 		return err
 	}
 	ms.maybeAppendArgsForCallLocked(st, ents, snap)
+	// An empty HardState means "unchanged this Ready" — raft emits one whenever a
+	// Ready carries entries but no Term/Vote/Commit change (e.g. a leader
+	// appending still-uncommitted entries). Overwriting the saved HardState with
+	// it would zero the Term and Commit, leaving the log ahead of a term-0
+	// HardState: exactly the inconsistency that trips assertStorageTermInvariant
+	// on restart, and (via Commit=0) makes a rebuild replay from 0. The production
+	// WAL keeps the newest *non-empty* HardState (wal_storage.go); match that.
+	if st == nil || raft.IsEmptyHardState(st) {
+		return nil
+	}
 	return ms.SetHardState(st)
 }
 
