@@ -245,7 +245,8 @@ standard structured JSON body (`{"code", "message"}`):
 | Status | When                                                                       |
 |--------|----------------------------------------------------------------------------|
 | `400`  | malformed request — zero/missing id, empty url on add, non-numeric id; or `promote` of a non-learner / unknown id |
-| `503`  | a write: submitted but not confirmed before the deadline (this node likely cannot reach a quorum); may still take effect once quorum returns. A `GET`: no known leader, or the leader's API address is unknown — retry or target the leader directly |
+| `503` on a write | submitted but not confirmed before the deadline (this node likely cannot reach a quorum); may still take effect once quorum returns |
+| `503` on a `GET` | no known leader, or the leader's API address is unknown — retry or target the leader directly |
 | `500`  | unexpected internal error                                                  |
 
 ## Notes

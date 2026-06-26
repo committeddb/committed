@@ -86,6 +86,10 @@ set  = [
 
 ### Rule semantics
 
+A rule is an optional `when` (match clauses) plus a `set` (the columns to write).
+Six properties govern its behavior — matching, application order, write shape,
+error handling, deletes, and schema evolution:
+
 - **`when` is data, not an expression**: an array of
   `{ path, equals }` clauses, all of which must hold (AND); express OR
   as another rule. `{ path, null = true }` matches a *present* JSON
@@ -179,13 +183,17 @@ single-source projection, where there is genuinely nothing to fold.
 
 Some BFF columns are *collections*: a movie's `top_cast[]` folds many `credit`
 rows into one JSON array on the movie row. A source declares an `aggregate` block
-instead of `rules`: `column` is the array column, `elementKey` a jsonpath to each
-child's identity within the array (its sort key, and what makes a
-re-delivered child replace rather than duplicate), and `element` an
-array-of-tables naming the per-child object's fields (an array, not an
-inline map, so field names survive byte-exact). `elementKeyType` picks
-`number` (sort 1,2,…,10) or `text` (lexical, the default). A child delete
-removes exactly its element via `onDelete = "remove-from-aggregate"`,
+instead of `rules`:
+
+- **`column`** — the array column.
+- **`elementKey`** — a jsonpath to each child's identity within the array: its
+  sort key, and what makes a re-delivered child replace rather than duplicate.
+- **`elementKeyType`** — `number` (sort 1, 2, …, 10) or `text` (lexical, the
+  default).
+- **`element`** — an array-of-tables naming the per-child object's fields (an
+  array, not an inline map, so field names survive byte-exact).
+
+A child delete removes exactly its element via `onDelete = "remove-from-aggregate"`,
 leaving the row.
 
 Because several sources may share one topic, a source's optional `when`

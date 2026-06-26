@@ -114,13 +114,16 @@ cluster-aware admission.
 
 **Staleness and degraded modes — the gate fails open.** A verdict (or
 a member report, on the leader's side) is trusted for 3× the report
-interval. A node with no fresh verdict — no leader known, the leader
-never announced an API URL, reports failing — falls back to the
-node-local decision; a voter the leader hasn't heard from counts as
-healthy in the quorum math (a crashed follower must not freeze a
-healthy cluster). So the worst degraded mode is exactly the node-local
-behavior, never below it, and a stale verdict can over- or under-admit
-for at most ~30s (3× the default interval).
+interval. A node falls back to its **node-local** decision when:
+
+- no leader is known,
+- the leader never announced an API URL, or
+- reports are failing (no fresh verdict).
+
+A voter the leader hasn't heard from counts as healthy in the quorum math (a
+crashed follower must not freeze a healthy cluster). So the worst degraded mode
+is exactly the node-local behavior, never below it, and a stale verdict can
+over- or under-admit for at most ~30s (3× the default interval).
 
 **Leadership transfer.** When the *leader's own* disk reaches critical
 and some voter has a fresh report below critical, the leader hands
