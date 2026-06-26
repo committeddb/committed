@@ -11,6 +11,10 @@ message MySQLBinLogPosition {
     // resume mid-snapshot instead of re-reading already-flushed rows.
     // Cleared once the snapshot completes.
     SnapshotProgress snapshot_progress = 3;
+    // gtid_set is the consumed GTID set for MySQL GTID positioning (the
+    // failover-safe resume cursor). Empty means file:pos-only — a legacy
+    // checkpoint written before GTID support, or a source with gtid_mode=OFF.
+    string gtid_set = 4;
 }
 
 // PostgresPosition pairs the replication LSN with optional snapshot
