@@ -1,6 +1,8 @@
 package mysql
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/go-mysql-org/go-mysql/mysql"
@@ -42,4 +44,18 @@ func TestMergeGTID(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, got.String(), uuidA+":1-2")
 	require.Contains(t, got.String(), uuidB+":1")
+}
+
+// TestIsGtidPurged covers the error-1236 classifier that drives the re-snapshot
+// recovery: only ER_MASTER_FATAL_ERROR_READING_BINLOG (purged binlogs) counts,
+// including when wrapped, and an ordinary stream error does not.
+func TestIsGtidPurged(t *testing.T) {
+	require.True(t, isGtidPurged(&mysql.MyError{Code: mysql.ER_MASTER_FATAL_ERROR_READING_BINLOG}))
+	require.True(t, isGtidPurged(&mysql.MyError{Code: 1236}))
+	// go-mysql surfaces the error on GetEvent; runStream may wrap it.
+	require.True(t, isGtidPurged(fmt.Errorf("binlog stream: %w", &mysql.MyError{Code: 1236})))
+
+	require.False(t, isGtidPurged(&mysql.MyError{Code: 1234}))
+	require.False(t, isGtidPurged(errors.New("connection reset by peer")))
+	require.False(t, isGtidPurged(nil))
 }

@@ -820,6 +820,13 @@ func TestMysqlPositionResume(t *testing.T) {
 	cancel1()
 	require.NotEmpty(t, lastPos, "should have a checkpointed position")
 
+	// The checkpoint must carry the consumed GTID set (the container runs
+	// gtid_mode=ON), so phase 2 resumes via StartSyncGTID rather than file:pos —
+	// this is the assertion that exercises the GTID cutover.
+	checkpoint := &dialectpb.MySQLBinLogPosition{}
+	require.NoError(t, proto.Unmarshal(lastPos, checkpoint))
+	require.NotEmpty(t, checkpoint.GtidSet, "checkpoint should carry a consumed GTID set under gtid_mode=ON")
+
 	// --- Phase 2: start new dialect from checkpointed position ---
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	defer cancel2()

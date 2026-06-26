@@ -4,6 +4,7 @@ import (
 	"context"
 	gosql "database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"net/url"
@@ -296,18 +297,32 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 		if err != nil {
 			return err
 		}
+		// GTID positioning: when the checkpoint carries a consumed GTID set, resume
+		// by it (StartSyncGTID — failover-safe, file-independent); otherwise fall
+		// back to file:pos (a legacy checkpoint or a gtid_mode=OFF source).
+		var gtidSet mysql.GTIDSet
+		if lastGTID != "" {
+			gtidSet, err = mysql.ParseMysqlGTIDSet(lastGTID)
+			if err != nil {
+				return fmt.Errorf("parse resume GTID %q: %w", lastGTID, err)
+			}
+		}
 		var syncer *replication.BinlogSyncer
 		var streamer *replication.BinlogStreamer
 		for {
 			syncer = replication.NewBinlogSyncer(cfg)
-			streamer, err = syncer.StartSync(*lastPos)
+			if gtidSet != nil && !gtidSet.IsEmpty() {
+				streamer, err = syncer.StartSyncGTID(gtidSet)
+			} else {
+				streamer, err = syncer.StartSync(*lastPos)
+			}
 			if err == nil {
 				backoff = syncerBackoffMin
 				break
 			}
 			syncer.Close()
 
-			zap.L().Warn("StartSync failed, retrying",
+			zap.L().Warn("binlog sync start failed, retrying",
 				zap.Duration("backoff", backoff),
 				zap.Error(err),
 			)
@@ -338,16 +353,13 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			curFile: lastPos.Name,
 			curPos:  lastPos.Pos,
 		}
-		// Seed the consumed GTID set so streaming checkpoints carry the full set
-		// (snapshot ∪ streamed) and the cursor survives a reconnect/restart. Resume
-		// still uses StartSync(file:pos) — this is the cursor the cutover slice will
-		// switch to. Empty (file:pos-only / gtid_mode=OFF) leaves consumedGTID nil.
-		if lastGTID != "" {
-			consumed, err := mysql.ParseMysqlGTIDSet(lastGTID)
-			if err != nil {
-				return fmt.Errorf("parse resume GTID %q: %w", lastGTID, err)
-			}
-			handler.consumedGTID = consumed
+		// Seed the consumed GTID set (the same set we resumed by) so streaming
+		// checkpoints carry the full set (snapshot ∪ streamed) and it keeps advancing
+		// across reconnects. Clone so the handler's in-place Update never mutates the
+		// set handed to StartSyncGTID. Empty (file:pos-only / gtid_mode=OFF) leaves
+		// consumedGTID nil.
+		if gtidSet != nil {
+			handler.consumedGTID = gtidSet.Clone()
 		}
 
 		// runStream blocks until ctx is canceled (clean exit) or the stream
@@ -358,16 +370,30 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 		if ctx.Err() != nil {
 			return nil
 		}
-		if handler.lastPos != nil {
-			lastPos = handler.lastPos
+		if isGtidPurged(streamErr) {
+			// The source purged binlogs past our consumed GTID set (error 1236) —
+			// resume can't continue. Recover by re-snapshotting from the current
+			// source state (the data re-applies idempotently downstream). Loud and
+			// explicit, never a silent gap; retrying the same GTID would just loop.
+			zap.L().Error("binlog purged past consumed position (error 1236) — re-snapshotting",
+				zap.String("consumed_gtid", lastGTID),
+				zap.Error(streamErr),
+			)
+			lastPos = nil
+			lastGTID = ""
+			resumeProgress = nil
+		} else {
+			if handler.lastPos != nil {
+				lastPos = handler.lastPos
+			}
+			if handler.consumedGTID != nil {
+				lastGTID = handler.consumedGTID.String()
+			}
+			zap.L().Warn("binlog stream exited, will reconnect",
+				zap.Duration("backoff", backoff),
+				zap.Error(streamErr),
+			)
 		}
-		if handler.consumedGTID != nil {
-			lastGTID = handler.consumedGTID.String()
-		}
-		zap.L().Warn("binlog stream exited, will reconnect",
-			zap.Duration("backoff", backoff),
-			zap.Error(streamErr),
-		)
 
 		// --- backoff before reconnect ---
 		select {
@@ -622,6 +648,16 @@ func mergeGTID(consumed, txn mysql.GTIDSet) (mysql.GTIDSet, error) {
 		return nil, err
 	}
 	return consumed, nil
+}
+
+// isGtidPurged reports whether err is MySQL error 1236
+// (ER_MASTER_FATAL_ERROR_READING_BINLOG) — the source has purged binlogs past our
+// consumed GTID set, so resume can't continue and a re-snapshot is required.
+// go-mysql surfaces it asynchronously on GetEvent as a *mysql.MyError, so the
+// caller checks the stream error here rather than the StartSyncGTID return.
+func isGtidPurged(err error) bool {
+	var myErr *mysql.MyError
+	return errors.As(err, &myErr) && myErr.Code == mysql.ER_MASTER_FATAL_ERROR_READING_BINLOG
 }
 
 // handleXID handles a transaction commit (XID event): it stamps the post-commit
