@@ -10,10 +10,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/go-mysql-org/go-mysql/canal"
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
 	_ "github.com/go-sql-driver/mysql"
@@ -27,12 +25,13 @@ import (
 
 type MySQLDialect struct{}
 
-// canalBackoff{Min,Max} bound the retry interval for createCanal.
-// A transient MySQL outage (DNS blip, container restart, network
-// partition) at Ingest startup used to immediately return an error,
-// leaving the worker leader-but-not-ingesting with no recovery path.
-// The retry loop below caps at Max and is bounded by ctx so a
-// shutdown still propagates promptly.
+// canalBackoff{Min,Max} bound the retry interval for connecting the binlog
+// syncer (StartSync) and reconnecting after a stream error. A transient MySQL
+// outage (DNS blip, container restart, network partition) at Ingest startup
+// used to immediately return an error, leaving the worker
+// leader-but-not-ingesting with no recovery path. The retry loop below caps at
+// Max and is bounded by ctx so a shutdown still propagates promptly. (Named
+// canal* for historical reasons; the canal library is gone.)
 const (
 	canalBackoffMin = 1 * time.Second
 	canalBackoffMax = 30 * time.Second
@@ -287,18 +286,26 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			}
 		}
 
-		// --- create canal with retry ---
-		var c *canal.Canal
-		var tables []string
+		// --- connect the binlog syncer with retry ---
+		// A malformed connection string is fatal (not retryable); a failed
+		// StartSync (source down, bad position) backs off and retries, the same
+		// posture the canal path had.
+		cfg, err := binlogSyncerConfig(config)
+		if err != nil {
+			return err
+		}
+		var syncer *replication.BinlogSyncer
+		var streamer *replication.BinlogStreamer
 		for {
-			var err error
-			c, tables, err = createCanal(config)
+			syncer = replication.NewBinlogSyncer(cfg)
+			streamer, err = syncer.StartSync(*lastPos)
 			if err == nil {
 				backoff = canalBackoffMin
 				break
 			}
+			syncer.Close()
 
-			zap.L().Warn("createCanal failed, retrying",
+			zap.L().Warn("StartSync failed, retrying",
 				zap.Duration("backoff", backoff),
 				zap.Error(err),
 			)
@@ -315,14 +322,12 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			}
 		}
 
-		// --- set up handler and start the canal goroutine ---
+		// --- set up the handler and run the stream ---
 		handler := &MySQLEventHandler{
-			ctx:          ctx,
 			config:       config,
-			canal:        c,
 			proposalChan: pr,
 			positionChan: po,
-			tables:       tables,
+			tables:       config.Tables,
 			cache:        cache,
 			// Seed the live coordinate from the resume position so a
 			// mid-transaction flush before the first commit still stamps
@@ -332,34 +337,21 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			curPos:  lastPos.Pos,
 		}
 
-		c.SetEventHandler(handler)
-
-		// Always start from a known position — the snapshot or a
-		// previously checkpointed position. canal's built-in
-		// mysqldump is never used.
-		canalDone := make(chan error, 1)
-		go func() { canalDone <- c.RunFrom(*lastPos) }()
-
-		// --- wait for canal exit or context cancel ---
-		select {
-		case <-ctx.Done():
-			c.Close()
+		// runStream blocks until ctx is canceled (clean exit) or the stream
+		// errors (reconnect). Close the syncer either way; on a stream error
+		// capture the last committed position so the next iteration resumes.
+		streamErr := handler.runStream(ctx, streamer)
+		syncer.Close()
+		if ctx.Err() != nil {
 			return nil
-		case err := <-canalDone:
-			// Canal exited on its own — connection lost, fatal
-			// binlog error, or an OnRow error. Capture the last
-			// emitted position before closing so the next iteration
-			// resumes correctly.
-			if handler.lastPos != nil {
-				lastPos = handler.lastPos
-			}
-
-			zap.L().Warn("canal exited, will reconnect",
-				zap.Duration("backoff", backoff),
-				zap.Error(err),
-			)
-			c.Close()
 		}
+		if handler.lastPos != nil {
+			lastPos = handler.lastPos
+		}
+		zap.L().Warn("binlog stream exited, will reconnect",
+			zap.Duration("backoff", backoff),
+			zap.Error(streamErr),
+		)
 
 		// --- backoff before reconnect ---
 		select {
@@ -379,66 +371,35 @@ func (m *MySQLDialect) Close() error {
 	return nil
 }
 
+// MySQLEventHandler holds the per-Ingest streaming state and the logic that turns
+// binlog events into proposals. Its methods are driven by runStream off a single
+// goroutine, so the mutable state below needs no locking and cancellation is
+// threaded through each method's ctx rather than stored on the struct.
 type MySQLEventHandler struct {
-	canal.DummyEventHandler
-	// ctx is the Ingest caller's context. The OnRow / OnPosSynced
-	// callbacks use it to abort their channel sends if the worker is
-	// canceled mid-emit, otherwise the canal goroutine would leak
-	// blocked on a no-receiver channel.
-	//
-	// Storing context.Context on a struct is an anti-pattern that
-	// vet flags by default — Go's guidance is to pass ctx as the
-	// first function argument so it's never long-lived state. We
-	// accept the deviation here because the canal.EventHandler
-	// interface (defined upstream in go-mysql-org/go-mysql) does not
-	// take ctx in OnRow / OnPosSynced and we have no other way to
-	// thread cancellation into those callbacks. The handler's lifetime
-	// is exactly one Ingest call, so the stored ctx isn't long-lived
-	// across calls and the usual "stale ctx" hazard doesn't apply.
-	ctx          context.Context
 	config       *sql.Config
-	canal        *canal.Canal
 	proposalChan chan<- *cluster.Proposal
 	positionChan chan<- cluster.Position
 	tables       []string
 
 	// cache supplies per-column decode metadata (names, JSON category, enum/set
 	// labels) from committed's own information_schema lookups — what the raw
-	// binlog row lacks. Shared across reconnects; cleared on DDL. Accessed only
-	// from the single event goroutine, so it needs no locking.
+	// binlog row lacks. Shared across reconnects; cleared on DDL.
 	cache *schemaCache
 
-	// mu guards the mutable streaming state below (lastPos, curFile,
-	// curPos, pending). canal.Close invokes OnPosSynced on the goroutine
-	// that calls Close (our Ingest goroutine on the ctx-cancel path),
-	// which can run concurrently with canal's own event-processing
-	// goroutine still inside OnXID/OnRow → both reach flushPending and
-	// race on pending. The lock is uncontended on the normal streaming
-	// path — every callback runs on the single canal goroutine. Critical
-	// sections are short (mutate fields / snapshot the buffer); the
-	// blocking proposal send in flushPending happens with the lock
-	// released, so the lock is never held across a channel send.
-	mu sync.Mutex
-
-	// lastPos holds the most recently emitted binlog position so the
-	// outer reconnect loop can resume from where it left off instead
-	// of re-dumping from scratch or replaying from the original pos.
+	// lastPos holds the most recently committed binlog position so the outer
+	// reconnect loop can resume from where it left off.
 	lastPos *mysql.Position
 
-	// curFile / curPos track the live binlog coordinate as events
-	// stream, so every flushed proposal can be stamped with a
-	// strictly-monotonic, resume-deterministic SourceSeq for
-	// effectively-once dedup. curFile follows binlog rotation
-	// (OnRotate) and commits (OnXID); curPos follows each row's
-	// end-of-event offset (OnRow) and the commit offset (OnXID).
+	// curFile / curPos track the live binlog coordinate as events stream, so every
+	// flushed proposal can be stamped with a strictly-monotonic,
+	// resume-deterministic SourceSeq for effectively-once dedup. curFile follows
+	// binlog rotation; curPos follows each row's end-of-event offset and the
+	// commit offset.
 	curFile string
 	curPos  uint32
 
-	// pending accumulates entities from OnRow calls until the
-	// transaction commits (OnXID). This ensures one MySQL transaction
-	// maps to one cluster.Proposal, giving consumers atomic delivery
-	// and enabling exactly-once semantics via post-commit position
-	// checkpointing.
+	// pending accumulates entities from row events until the transaction commits
+	// (an XID event), so one MySQL transaction maps to one cluster.Proposal.
 	pending []*cluster.Entity
 }
 
@@ -516,21 +477,29 @@ func asInt64(v any) (int64, bool) {
 	}
 }
 
-func (h *MySQLEventHandler) OnRow(e *canal.RowsEvent) error {
-	if !slices.Contains(h.tables, strings.ToLower(e.Table.Name)) {
+// handleRows decodes one row event and buffers the resulting entity until the
+// transaction commits. It is the BinlogSyncer successor to canal's OnRow: the row
+// image, the operation (rowsAction), and the table name come straight from the
+// raw replication.RowsEvent, and the column metadata from committed's own schema
+// cache (joined to the positional row image by ordinal).
+func (h *MySQLEventHandler) handleRows(ctx context.Context, header *replication.EventHeader, e *replication.RowsEvent) error {
+	table := string(e.Table.Table)
+	if !slices.Contains(h.tables, strings.ToLower(table)) {
 		return nil
 	}
-
-	ts, err := h.cache.get(h.ctx, e.Table.Name)
-	if err != nil {
-		return fmt.Errorf("schema of %q: %w", e.Table.Name, err)
+	action, ok := rowsAction(e.Type())
+	if !ok {
+		return nil // an unsupported rows-event variant — skip
 	}
 
-	// m holds the key form: numbers/floats are already typed Go values; coerce
-	// []byte (TEXT/BLOB/JSON) to string so the key is text and matches the
-	// snapshot path. raw/catByName keep the value and its category so the payload
-	// renders as natural JSON. Column metadata — names, category, enum/set member
-	// lists — comes from committed's own schema cache, not canal's tracking.
+	ts, err := h.cache.get(ctx, table)
+	if err != nil {
+		return fmt.Errorf("schema of %q: %w", table, err)
+	}
+
+	// m holds the key form: coerce []byte (TEXT/BLOB/JSON) to string so the key is
+	// text and matches the snapshot path. raw/catByName keep the value and its
+	// category so the payload renders as natural JSON.
 	m := make(map[string]any)
 	raw := make(map[string]any)
 	catByName := make(map[string]sql.JSONCategory)
@@ -556,8 +525,8 @@ func (h *MySQLEventHandler) OnRow(e *canal.RowsEvent) error {
 
 	jsonString, err := json.Marshal(toJSON)
 	if err != nil {
-		zap.L().Warn("OnRow: skipping row with unmarshalable data",
-			zap.String("table", e.Table.Name),
+		zap.L().Warn("handleRows: skipping row with unmarshalable data",
+			zap.String("table", table),
 			zap.Error(err),
 		)
 		return nil
@@ -566,13 +535,10 @@ func (h *MySQLEventHandler) OnRow(e *canal.RowsEvent) error {
 	key := sql.CompositeKey(m, h.config.PrimaryKey)
 
 	// A source DELETE becomes a delete (tombstone) entity keyed by the row's
-	// primary key — not an upsert of the deleted row. canal delivers the
-	// deleted row under e.Rows so the key is available, but its column values
-	// are not a payload to write downstream: the syncable must remove the
-	// keyed record (cluster.Syncable honor-deletes contract). INSERT and
-	// UPDATE emit upserts of the post-image as before.
+	// primary key. INSERT and UPDATE emit upserts of the post-image — the last
+	// row of the event, which for an UPDATE is the after-image of the last pair.
 	var entity *cluster.Entity
-	if e.Action == canal.DeleteAction {
+	if action == "delete" {
 		entity = cluster.NewDeleteEntity(h.config.Type, []byte(key))
 	} else {
 		entity = &cluster.Entity{
@@ -582,72 +548,54 @@ func (h *MySQLEventHandler) OnRow(e *canal.RowsEvent) error {
 		}
 	}
 
-	h.mu.Lock()
-	// Buffer the entity until the transaction commits (OnXID).
+	// Buffer until the transaction commits. Track the live offset (the row
+	// event's end position) so a mid-transaction soft-limit flush stamps a
+	// monotonic SourceSeq.
 	h.pending = append(h.pending, entity)
-
-	// Track the live binlog offset so a mid-transaction flush below
-	// stamps a monotonic SourceSeq. e.Header.LogPos is the offset at the
-	// end of this row event.
-	if e.Header != nil {
-		h.curPos = e.Header.LogPos
+	if header != nil {
+		h.curPos = header.LogPos
 	}
 
-	// Soft limit: emit a partial batch to prevent OOM on very large
-	// transactions. This breaks atomicity for oversized transactions
-	// but is the right trade-off versus unbounded memory growth.
-	overLimit := len(h.pending) >= maxPendingEntities
-	h.mu.Unlock()
-
-	if overLimit {
-		if err := h.flushPending(); err != nil {
+	// Soft limit: emit a partial batch to prevent OOM on a very large transaction.
+	if len(h.pending) >= maxPendingEntities {
+		if err := h.flushPending(ctx); err != nil {
 			return err
 		}
 	}
 
-	zap.L().Debug("OnRow", zap.String("table", e.Table.Name), zap.String("action", e.Action))
+	zap.L().Debug("handleRows", zap.String("table", table), zap.String("action", action))
 	return nil
 }
 
-// flushPending emits all buffered entities as a single proposal and
-// resets the buffer. No-op when the buffer is empty. It snapshots and
-// clears the buffer under h.mu, then performs the (possibly blocking)
-// channel send with the lock released — so the Close-time OnPosSynced
-// never waits on the lock behind an in-flight send, and the normal
-// event-loop callbacks never hold the lock across a blocking send.
-func (h *MySQLEventHandler) flushPending() error {
-	h.mu.Lock()
+// flushPending emits all buffered entities as a single proposal and resets the
+// buffer. No-op when the buffer is empty.
+func (h *MySQLEventHandler) flushPending(ctx context.Context) error {
 	if len(h.pending) == 0 {
-		h.mu.Unlock()
 		return nil
 	}
 	p := &cluster.Proposal{Entities: h.pending, SourceSeq: encodeSourceSeq(h.curFile, h.curPos)}
 	h.pending = nil
-	h.mu.Unlock()
 
 	select {
 	case h.proposalChan <- p:
 		return nil
-	case <-h.ctx.Done():
-		return h.ctx.Err()
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
-// OnXID is called when a MySQL transaction commits. It flushes all
-// buffered entities as a single proposal and checkpoints the post-commit
-// binlog position. This ensures one MySQL transaction maps to one
-// cluster.Proposal and that the checkpoint position is always past a
-// fully committed transaction — no duplicates or gaps on restart.
-func (h *MySQLEventHandler) OnXID(header *replication.EventHeader, pos mysql.Position) error {
-	// Stamp the commit coordinate before flushing so the transaction's
-	// proposal carries the post-commit (file, offset) as its SourceSeq —
-	// strictly greater than any mid-transaction flush in the same txn and
-	// than the previous txn's commit.
-	h.mu.Lock()
-	h.curFile = pos.Name
-	h.curPos = pos.Pos
-	h.mu.Unlock()
-	if err := h.flushPending(); err != nil {
+// handleXID handles a transaction commit (XID event): it stamps the post-commit
+// coordinate, flushes the buffered entities as one proposal, and checkpoints the
+// position so a restart resumes past a fully-committed transaction. The commit
+// file is the live curFile (tracked from rotation); the offset is the XID event's
+// end position.
+func (h *MySQLEventHandler) handleXID(ctx context.Context, header *replication.EventHeader) error {
+	if header != nil {
+		h.curPos = header.LogPos
+	}
+	pos := mysql.Position{Name: h.curFile, Pos: h.curPos}
+
+	if err := h.flushPending(ctx); err != nil {
 		return err
 	}
 
@@ -659,63 +607,66 @@ func (h *MySQLEventHandler) OnXID(header *replication.EventHeader, pos mysql.Pos
 
 	select {
 	case h.positionChan <- bs:
-	case <-h.ctx.Done():
-		return h.ctx.Err()
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 
-	h.mu.Lock()
 	h.lastPos = &mysql.Position{Name: pos.Name, Pos: pos.Pos}
-	h.mu.Unlock()
-
-	zap.L().Debug("OnXID", zap.String("pos", pos.Name), zap.Uint32("offset", pos.Pos))
+	zap.L().Debug("handleXID", zap.String("pos", pos.Name), zap.Uint32("offset", pos.Pos))
 	return nil
 }
 
-func (h *MySQLEventHandler) OnPosSynced(header *replication.EventHeader, pos mysql.Position, set mysql.GTIDSet, force bool) error {
-	// During binlog replication OnXID already flushed pending entities
-	// before this callback is invoked, so pending will normally be
-	// empty. Flush as a safety measure. canal.Close also calls this from
-	// a different goroutine than the event loop; flushPending takes h.mu
-	// internally, which is what makes that concurrent call safe.
-	return h.flushPending()
-}
-
-func (h *MySQLEventHandler) OnDDL(header *replication.EventHeader, nextPos mysql.Position, queryEvent *replication.QueryEvent) error {
-	// A DDL may have altered a watched table's columns; drop the cached schema so
-	// the next row reloads the current definition.
+// handleDDL drops the cached schema on any DDL — a column change on a watched
+// table must be re-read before the next row decodes — and logs the statement.
+func (h *MySQLEventHandler) handleDDL(e *replication.QueryEvent) {
 	h.cache.clear()
-
-	if queryEvent == nil {
-		zap.L().Warn("OnDDL: DDL event with nil query",
-			zap.String("pos", nextPos.Name),
-			zap.Uint32("offset", nextPos.Pos),
-		)
-		return nil
+	if e == nil {
+		return
 	}
-	zap.L().Warn("OnDDL: DDL event received",
-		zap.String("schema", string(queryEvent.Schema)),
-		zap.String("query", string(queryEvent.Query)),
-		zap.String("pos", nextPos.Name),
-		zap.Uint32("offset", nextPos.Pos),
+	zap.L().Warn("handleDDL: DDL event received",
+		zap.String("schema", string(e.Schema)),
+		zap.String("query", string(e.Query)),
 	)
-	return nil
 }
 
-// OnRotate follows binlog file rotation so curFile stays correct for a
-// mid-transaction flush that straddles a rotation (rare — rotations
-// usually align with transaction boundaries). rotateEvent.NextLogName is
-// the file the stream rotates into.
-func (h *MySQLEventHandler) OnRotate(header *replication.EventHeader, rotateEvent *replication.RotateEvent) error {
-	if rotateEvent != nil && len(rotateEvent.NextLogName) > 0 {
-		h.mu.Lock()
-		h.curFile = string(rotateEvent.NextLogName)
-		h.mu.Unlock()
+// runStream drives the binlog stream until the context is canceled (clean exit,
+// returns nil) or the stream errors (returns the error; the caller reconnects
+// with backoff). It is the BinlogSyncer replacement for canal's event loop: one
+// GetEvent loop dispatching each event into the same buffer / flush / position
+// logic, with committed owning the loop so cancellation flows through GetEvent's
+// context rather than a stored field, and GTID/format-description events ignored
+// (Phase A stays file:pos).
+func (h *MySQLEventHandler) runStream(ctx context.Context, streamer *replication.BinlogStreamer) error {
+	for {
+		ev, err := streamer.GetEvent(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+
+		switch e := ev.Event.(type) {
+		case *replication.RotateEvent:
+			// A real rotation moves curFile so subsequent commits checkpoint
+			// against the right file; the start-of-stream fake rotate that only
+			// restates the current file is ignored.
+			if isSkippableFakeRotate(ev.Header.Timestamp, string(e.NextLogName), h.curFile) {
+				continue
+			}
+			h.curFile = string(e.NextLogName)
+		case *replication.RowsEvent:
+			if err := h.handleRows(ctx, ev.Header, e); err != nil {
+				return err
+			}
+		case *replication.XIDEvent:
+			if err := h.handleXID(ctx, ev.Header); err != nil {
+				return err
+			}
+		case *replication.QueryEvent:
+			h.handleDDL(e)
+		}
 	}
-	return nil
-}
-
-func (h *MySQLEventHandler) String() string {
-	return "MyEventHandler"
 }
 
 // encodeSourceSeq maps a binlog coordinate (file, offset) to a
@@ -736,38 +687,6 @@ func encodeSourceSeq(name string, pos uint32) uint64 {
 		return 0
 	}
 	return fileNum<<32 | uint64(pos)
-}
-
-func createCanal(config *sql.Config) (*canal.Canal, []string, error) {
-	u, err := url.Parse(config.ConnectionString)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	username := u.User.Username()
-	password, passwordExists := u.User.Password()
-
-	tables := config.Tables
-
-	cfg := canal.NewDefaultConfig()
-	cfg.Addr = u.Host
-	cfg.User = username
-	if passwordExists {
-		cfg.Password = password
-	}
-	// Dump config is intentionally omitted — the pure-SQL snapshot
-	// replaces canal's built-in mysqldump phase.
-	//
-	// Route canal's own logging through zap (see canalSlogHandler) so
-	// MySQL CDC logs share the structured stream instead of going
-	// straight to stdout via slog's default handler. The historical
-	// keep-canal-quiet behavior is preserved by the handler's level
-	// policy (Info demotes to Debug).
-	cfg.Logger = newCanalLogger(zap.L())
-
-	canal, err := canal.NewCanal(cfg)
-
-	return canal, tables, err
 }
 
 // snapshot performs a pure-SQL initial dump of all watched tables using
