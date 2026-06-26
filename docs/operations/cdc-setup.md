@@ -285,8 +285,8 @@ stream a replica reads).
 
 2. **GTID mode on (strongly recommended).** With `gtid_mode=ON` committed resumes
    the binlog by **GTID set** rather than file:offset, which is what makes resume
-   survive a source failover (RDS Multi-AZ, Aurora, any promoted replica — the
-   file name and offset are server-local and meaningless on the new primary) and
+   survive a source failover (a replica promoted to primary, where the file
+   name and offset are server-local and meaningless on the new primary) and
    what lets it report a real transaction-count `lag` and `caughtUp`.
 
    ```ini

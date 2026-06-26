@@ -20,77 +20,48 @@ Committed is specifically NOT a databse designed for querying.
 - **vs. etcd**: same Raft substrate, but append-only log semantics instead of KV — and a worker model for ingest/sync that etcd doesn't have.
 - **vs. an RDBMS / Debezium pipeline**: Committed collapses "replicated log + CDC source + sink connectors" into one process. You don't need Kafka + Debezium + Kafka Connect + a separate consensus layer; the same binary holds the log, the source, and the sink.
 
-## Version 0.6.1
+## Version 0.7
 
-A critical bugfix release for 0.6 — every 0.6 deployment should upgrade.
+A beta release that grows SQL projections into a full read-model engine —
+assembling a row from several topics, folding collections into JSON-array
+columns, and enriching from lookup dimensions on other topics — and makes
+change-data-capture **observable and failover-safe**: every ingestable,
+syncable, and pipeline reports how far behind the source it is and whether it
+is caught up, and MySQL ingest is rebuilt on GTID positioning so resume
+survives a source failover. It keeps 0.6's core — entity kinds, declarative
+SQL projections, learner-based cluster growth, leader-proxied membership, and
+disk-pressure admission control — and adds:
 
-- **Unbounded disk growth fixed** — the raft state log grew continuously
-  during normal operation and was never truncated, enough to fill a 50 GB
-  disk in days. The first boot after upgrading reclaims the space
-  automatically, and term/vote durability across restarts is restored.
-- **Snapshot catch-up fixed** — a follower catching up via a leader
-  snapshot could silently stop replicating; snapshot installs now work
-  in place and complete themselves on the next boot if interrupted.
-- **Projection language null support** — `set` entries can write SQL
-  NULL via `null = true`, and `when` clauses match a present JSON `null`
-  (an absent field remains "no match"). See
-  [SQL projections](#sql-projections).
-
-## Version 0.6
-
-A beta release that gives the log a data model — types now declare what
-their entities *are*, and syncables can fold event history into
-current-state tables — and makes the cluster elastic and self-protecting,
-with learner-based growth, leader-proxied membership reads, and
-disk-pressure admission control. It keeps 0.5's hardened core — the
-Proposal/Actual model, joint-consensus membership changes, linearizable
-reads, WAL checksums, effectively-once ingest, operable syncables
-(replay, dead letters, bounded retry), versioned `/v1` APIs with
-per-config history and rollback, `${VAR}` config secrets, and the
-official container image — and adds:
-
-- **Entity kinds** — a type declares what the entities written under it
-  are (`snapshot`, `event`, `command`, `standalone`, `revision`; `delta`
-  is rejected by design), plus an optional `discriminator` for event
-  variants. Kinds
-  are validated at config time, and a misuse matrix warns (log +
-  `committed_entity_kind_misuse` metric) when a leaf-mapped `sql`
-  syncable targets an `event`-kind topic. See
-  [Entity kinds](#entity-kinds).
-- **SQL projections** — a `sql-projection` syncable folds an
-  `event`-kind topic into a current-state table with declarative TOML
-  rules (`when`/`set`), idempotent absolute writes, hard deletes for
-  right-to-be-forgotten, and fresh-table replay instead of ALTER. See
-  [SQL projections](#sql-projections).
-- **Whole-payload mappings** — `jsonPath = "$"` in a `sql` syncable maps
-  the entire payload into one JSON/text column: the conventional
-  event-log shape of scalar envelope columns plus a payload column.
-- **Cluster growth with learners** — add a node as a non-voting learner
-  (`member add --learner`), watch it catch up, then `member promote` it
-  to a voter — growing the cluster without touching quorum math. See
-  [`docs/operations/membership.md`](docs/operations/membership.md).
-- **Membership observability & leader proxy** — `GET /v1/membership`
-  reports each member's role and replication progress. Followers
-  transparently proxy the read to the leader, so any node — including
-  one behind a load-balancer VIP — answers leader-truthfully; nodes
-  self-announce their API address via `COMMITTED_API_URL`.
-- **Disk-pressure protection** — a per-node free-space watcher
-  (warn/critical/full thresholds, `507` rejections) plus cluster-aware
-  write admission: writes are admitted only while the leader and a
-  quorum of voters have disk headroom, and leadership transfers off a
-  constrained leader. See
-  [`docs/operations/disk-limits.md`](docs/operations/disk-limits.md).
-- **Graceful type-migration failure handling** — a migration program
-  that fails at runtime dead-letters against the type
-  (`GET /v1/type/{id}/migration-errors`), can be re-run after a fix
-  (`POST /v1/type/{id}/migration-retry/{index}`), and feeds
-  `committed_type_migration_errors_total`; `validate_against` pre-flights
-  a program against a sample document at propose time.
-- **HTTP & SQL hardening** — panic recovery on every handler, sanitized
-  `500` responses whose cause is logged server-side with the request id,
-  and SQL syncable transaction hygiene (validate before `BeginTx`,
-  rollback on every error path). Viper was replaced with go-toml/v2 +
-  mapstructure, with tolerance tests pinning config-parsing behavior.
+- **Read models from many topics** — a `sql-projection` can fold several
+  topics into one "BFF" row, fold a collection into a single JSON-array column
+  (with per-element identity and targeted child removal), and enrich folded
+  data from a lookup dimension on another topic that re-materializes when it
+  changes. A drifted projection rebuilds in place
+  (`POST /v1/syncable/{id}/rebuild`), and a column-set change is a clean
+  delete-and-replace rather than a silent no-op. See
+  [Read models](docs/read-models.md).
+- **Failover-safe MySQL CDC** — MySQL ingest is rebuilt on an owned binlog
+  reader with **GTID positioning**, so resume survives a source failover (a
+  replica promoted to primary) instead of breaking on a server-local
+  file:offset. When the source purges binlogs past what was consumed, committed
+  reports `reSnapshotRequired` and re-snapshots rather than losing data
+  silently. See [CDC setup](docs/operations/cdc-setup.md).
+- **Ingest is observable** — `GET /v1/ingestable/{id}/status` reports the
+  snapshot/streaming phase, per-table snapshot progress, the CDC cursor, lag,
+  and caught-up state; `GET /v1/type/{topic}/pipeline` stitches the producer,
+  the log head, and every consuming syncable into one caught-up answer; and
+  `committed.ingest.lag` / `committed.sync.lag` are exported for alerting.
+- **Ingest correctness** — composite primary keys, MySQL ENUM/SET decoded to
+  their labels, a fix for silent row loss, and a config-time preflight that
+  refuses an ingestable whose source can't carry a delete's key, so deletes are
+  never silently dropped.
+- **Backup and restore** — offline `committed backup` / `committed restore`
+  tools to snapshot and rehydrate a node's state. See
+  [backup](docs/operations/backup.md).
+- **Log housekeeping** — dead letters are compacted as snapshots, a metadata-GC
+  scrub pass reclaims superseded internal state, checkpoint cadence is
+  configurable per syncable, and truncated proposals are detected and signaled
+  (`ErrProposalLost`) instead of lost.
 
 ### Concepts
 
@@ -133,10 +104,10 @@ under `/home/nonroot/data`:
 ```sh
 docker run --rm -p 8080:8080 -p 9022:9022 \
   -v committed-data:/home/nonroot/data \
-  committeddb/committed:0.6.1-beta
+  committeddb/committed:0.7.0-beta
 ```
 
-`docker run committeddb/committed:0.6.1-beta --version` prints the build
+`docker run committeddb/committed:0.7.0-beta --version` prints the build
 identity; `:latest` tracks the most recent release. See
 [Configuration](#configuration) for the env vars and `docker-compose.yml`
 for a local single-node setup.
