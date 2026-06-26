@@ -15,6 +15,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql" // database/sql driver for the source/sink connection
 	"github.com/stretchr/testify/require"
+	"github.com/testcontainers/testcontainers-go"
 	tcmysql "github.com/testcontainers/testcontainers-go/modules/mysql"
 
 	"github.com/committeddb/committed/e2e/cdc/dataset"
@@ -55,6 +56,10 @@ func (e *mysqlEngine) Start(ctx context.Context, t *testing.T) {
 		tcmysql.WithDatabase(mysqlDB),
 		tcmysql.WithUsername(mysqlUser),
 		tcmysql.WithPassword(mysqlPass),
+		// GTID positioning (Phase B) needs gtid_mode=ON; enforce_gtid_consistency
+		// is its required companion. Set at startup so the snapshot's
+		// @@gtid_executed and the binlog GTID events are populated.
+		testcontainers.WithCmdArgs("--gtid-mode=ON", "--enforce-gtid-consistency=ON"),
 	)
 	require.NoError(t, err, "start mysql container")
 	e.container = c

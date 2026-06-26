@@ -15,6 +15,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/moby/moby/client"
+	"github.com/testcontainers/testcontainers-go"
 	tcmysql "github.com/testcontainers/testcontainers-go/modules/mysql"
 	"google.golang.org/protobuf/proto"
 
@@ -47,6 +48,9 @@ func TestMain(m *testing.M) {
 		tcmysql.WithDatabase(dbName),
 		tcmysql.WithUsername(username),
 		tcmysql.WithPassword(password),
+		// GTID positioning (Phase B) needs gtid_mode=ON; enforce_gtid_consistency
+		// is its required companion.
+		testcontainers.WithCmdArgs("--gtid-mode=ON", "--enforce-gtid-consistency=ON"),
 	)
 	if err != nil {
 		log.Fatalf("Could not start MySQL container: %v", err)
