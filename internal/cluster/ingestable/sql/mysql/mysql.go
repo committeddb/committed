@@ -66,6 +66,13 @@ func (m *MySQLDialect) Preflight(config *sql.Config) error {
 	}
 	defer func() { _ = db.Close() }()
 
+	// Operational warnings (logged, never fatal): GTID positioning governs
+	// failover-safety and binlog retention governs the no-hold caveat, but
+	// file:pos is a supported fallback and retention is the operator's call — so
+	// these are surfaced, not gated. Delete-correctness (below) is the only hard
+	// gate, matching the codebase's preflight philosophy.
+	warnSourceConfig(ctx, db)
+
 	var rowImage string
 	if err := db.QueryRowContext(ctx, `SELECT @@global.binlog_row_image`).Scan(&rowImage); err != nil {
 		return fmt.Errorf("read binlog_row_image: %w", err)
@@ -85,6 +92,69 @@ func (m *MySQLDialect) Preflight(config *sql.Config) error {
 		}
 	}
 	return nil
+}
+
+// minSafeBinlogRetention is the binlog-retention floor below which Preflight
+// warns: committed holds no binlog on the source (unlike a Postgres slot), so a
+// downtime longer than retention purges unconsumed transactions and forces a
+// re-snapshot. It is a heuristic "this looks risky" line, not a guarantee — the
+// real safe value is the operator's worst-case downtime.
+const minSafeBinlogRetention = time.Hour
+
+// warnSourceConfig logs (never fails) the source-config conditions that degrade
+// MySQL CDC but don't break it: GTID positioning off (no failover-safety, no
+// lag/caughtUp) and short binlog retention (the no-hold caveat). A failed read
+// is itself only logged — these are advisory.
+func warnSourceConfig(ctx context.Context, db *gosql.DB) {
+	var gtidMode, enforce string
+	if err := db.QueryRowContext(ctx,
+		"SELECT @@GLOBAL.gtid_mode, @@GLOBAL.enforce_gtid_consistency").Scan(&gtidMode, &enforce); err != nil {
+		zap.L().Debug("[mysql.preflight] could not read gtid settings", zap.Error(err))
+	} else if w := gtidPreflightWarning(gtidMode, enforce); w != "" {
+		zap.L().Warn("[mysql.preflight] GTID positioning unavailable", zap.String("detail", w))
+	}
+
+	var expireSeconds int64
+	if err := db.QueryRowContext(ctx,
+		"SELECT @@GLOBAL.binlog_expire_logs_seconds").Scan(&expireSeconds); err != nil {
+		zap.L().Debug("[mysql.preflight] could not read binlog retention", zap.Error(err))
+	} else if w := binlogRetentionWarning(expireSeconds); w != "" {
+		zap.L().Warn("[mysql.preflight] short binlog retention", zap.String("detail", w))
+	}
+}
+
+// gtidPreflightWarning returns an advisory message when the source's GTID
+// settings disable failover-safe positioning, or "" when they are fully enabled.
+// gtid_mode != ON means CDC falls back to binlog file:position; enforce off (it
+// can lag ON during a mode transition) means GTIDs may be assigned inconsistently.
+func gtidPreflightWarning(gtidMode, enforce string) string {
+	if !strings.EqualFold(gtidMode, "ON") {
+		return fmt.Sprintf("gtid_mode=%s (not ON): MySQL CDC falls back to binlog file:position, "+
+			"which is not failover-safe and reports no lag/caughtUp. Set gtid_mode=ON and "+
+			"enforce_gtid_consistency=ON for failover-safe positioning.", gtidMode)
+	}
+	if !strings.EqualFold(enforce, "ON") {
+		return fmt.Sprintf("gtid_mode=ON but enforce_gtid_consistency=%s: GTIDs may be assigned "+
+			"inconsistently. Set enforce_gtid_consistency=ON.", enforce)
+	}
+	return ""
+}
+
+// binlogRetentionWarning returns an advisory message when the source's binlog
+// retention is short enough to risk the no-hold caveat, or "" when it is safe.
+// expireSeconds <= 0 means binlogs are never auto-purged (no retention limit —
+// the safest setting); a positive value below minSafeBinlogRetention warns.
+func binlogRetentionWarning(expireSeconds int64) string {
+	if expireSeconds <= 0 {
+		return ""
+	}
+	if retention := time.Duration(expireSeconds) * time.Second; retention < minSafeBinlogRetention {
+		return fmt.Sprintf("binlog_expire_logs_seconds=%d (%s): committed holds no binlog on the "+
+			"source, so if it is down longer than this the source purges unconsumed transactions "+
+			"and a re-snapshot is required. Raise retention to cover your worst-case downtime.",
+			expireSeconds, retention)
+	}
+	return ""
 }
 
 // mysqlPrimaryKey returns the PRIMARY KEY columns of a table in the connection's
