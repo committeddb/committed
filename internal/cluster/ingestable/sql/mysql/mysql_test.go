@@ -877,6 +877,81 @@ func TestMysqlPositionResume(t *testing.T) {
 	}
 }
 
+// TestMysqlGtidStatusCaughtUp verifies the GTID-positioning observability: once
+// the streamer has consumed up to the source's @@gtid_executed, Status reports a
+// real transaction-count Lag (non-nil) that reaches 0 and CaughtUp=true — the
+// states that were impossible under the file:pos cursor. It also confirms a
+// healthy stream never sets ReSnapshotRequired.
+func TestMysqlGtidStatusCaughtUp(t *testing.T) {
+	table := "gtid_status_table"
+
+	db := createDB(t)
+	_, err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS `%s`", table))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf("CREATE TABLE `%s` (pk VARCHAR(32) NOT NULL, val TEXT, PRIMARY KEY (pk));", table))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, val) VALUES ('row1', 'snap');", table))
+	require.NoError(t, err)
+	db.Close()
+
+	config := &sql.Config{
+		Type:             &cluster.Type{ID: "gtidstatus", Name: "gtidstatus"},
+		Mappings:         []sql.Mapping{{JsonName: "pk", SQLColumn: "pk"}, {JsonName: "val", SQLColumn: "val"}},
+		PrimaryKey:       []string{"pk"},
+		ConnectionString: ingestURL,
+		Tables:           []string{table},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	proposalChan := make(chan *cluster.Proposal, 10)
+	positionChan := make(chan cluster.Position, 10)
+
+	dialect := &mysql.MySQLDialect{}
+	go func() { _ = dialect.Ingest(ctx, config, nil, proposalChan, positionChan) }()
+
+	// Poll Status, always feeding it the latest checkpoint, until the streamer is
+	// caught up to the source head. No new rows are written, so once the snapshot
+	// completes the consumed set already equals @@gtid_executed.
+	var lastPos cluster.Position
+	var st cluster.IngestableStatus
+	deadline := time.After(30 * time.Second)
+	for {
+		// Drain any pending proposals/positions without blocking, keeping the most
+		// recent position as the checkpoint to query.
+		drained := true
+		for drained {
+			select {
+			case <-proposalChan:
+			case pos := <-positionChan:
+				lastPos = pos
+			default:
+				drained = false
+			}
+		}
+
+		if lastPos != nil {
+			st, err = dialect.Status(ctx, config, lastPos)
+			require.NoError(t, err)
+			if st.CaughtUp {
+				break
+			}
+		}
+
+		select {
+		case <-deadline:
+			t.Fatalf("never reached caughtUp; last status: phase=%q lag=%v caughtUp=%v reSnapshot=%v",
+				st.Phase, st.Lag, st.CaughtUp, st.ReSnapshotRequired)
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+
+	require.Equal(t, "streaming", st.Phase)
+	require.NotNil(t, st.Lag, "caught up implies a known (non-nil) lag")
+	require.Equal(t, uint64(0), *st.Lag, "caught up implies zero lag")
+	require.False(t, st.ReSnapshotRequired, "a healthy stream must not require a re-snapshot")
+}
+
 // TestMysqlSnapshotOnFreshStart verifies that pre-existing rows are
 // delivered as proposals via the pure-SQL snapshot on a fresh start
 // (no saved position), and that binlog streaming picks up new changes

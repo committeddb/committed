@@ -118,22 +118,29 @@ func mysqlPrimaryKey(ctx context.Context, db *gosql.DB, table string) ([]string,
 	return cols, rows.Err()
 }
 
+// statusLagTimeout bounds the source query Status makes for @@gtid_executed /
+// @@gtid_purged. Status is a read endpoint, so it must not hang on an
+// unreachable source — a failed/late query simply leaves Lag nil.
+const statusLagTimeout = 5 * time.Second
+
 // Status implements sql.Dialect: it decodes the binlog checkpoint into a
 // point-in-time IngestableStatus (phase, per-table snapshot progress, and the
-// binlog coordinate as "file:pos"). Lag is left nil: a MySQL binlog
-// file+position has no single-number byte distance from the source write head
-// the way a Postgres LSN does, so source-lag for MySQL is a deliberate
-// follow-on (see the ingest-status-endpoint ticket). With Lag nil, CaughtUp is
-// never true — an unknown lag is not a caught-up lag.
-func (m *MySQLDialect) Status(_ context.Context, config *sql.Config, pos cluster.Position) (cluster.IngestableStatus, error) {
+// binlog coordinate as "file:pos"). Once streaming under GTID positioning, it
+// diffs the consumed GTID set against the source's @@gtid_executed to report a
+// transaction-count Lag and CaughtUp, and against @@gtid_purged to flag the
+// re-snapshot hole. Without a consumed GTID set (gtid_mode=OFF / a legacy
+// file:pos checkpoint) there is no global head to diff against, so Lag stays nil
+// and CaughtUp stays false — an unknown lag is not a caught-up lag.
+func (m *MySQLDialect) Status(ctx context.Context, config *sql.Config, pos cluster.Position) (cluster.IngestableStatus, error) {
 	var progress *dialectpb.SnapshotProgress
-	var position string
+	var position, consumedGTID string
 	if len(pos) > 0 {
 		posProto := &dialectpb.MySQLBinLogPosition{}
 		if err := proto.Unmarshal(pos, posProto); err != nil {
 			return cluster.IngestableStatus{}, fmt.Errorf("[mysql.status] decode position: %w", err)
 		}
 		progress = posProto.SnapshotProgress
+		consumedGTID = posProto.GtidSet
 		if posProto.Name != "" {
 			position = fmt.Sprintf("%s:%d", posProto.Name, posProto.Pos)
 		}
@@ -145,10 +152,73 @@ func (m *MySQLDialect) Status(_ context.Context, config *sql.Config, pos cluster
 	}
 	if progress != nil {
 		status.Phase = "snapshot"
-	} else {
-		status.Phase = "streaming"
+		return status, nil
 	}
+	status.Phase = "streaming"
+
+	// No consumed GTID set → no global head to diff against (the Phase-A
+	// behavior): leave Lag nil, CaughtUp false.
+	if consumedGTID == "" {
+		return status, nil
+	}
+	consumed, err := mysql.ParseMysqlGTIDSet(consumedGTID)
+	if err != nil {
+		zap.L().Debug("[mysql.status] parse consumed GTID failed",
+			zap.String("gtid_set", consumedGTID), zap.Error(err))
+		return status, nil
+	}
+
+	// Streaming with GTID positioning: read the source's executed/purged sets. A
+	// failure (source unreachable, permissions) leaves Lag nil — the rest of the
+	// status is still useful — so it is logged, not returned.
+	executed, purged, err := readSourceGTIDState(ctx, config)
+	if err != nil {
+		zap.L().Debug("[mysql.status] gtid source query failed", zap.Error(err))
+		return status, nil
+	}
+
+	if needsResnapshot(consumed, purged) {
+		// The source purged change data we never consumed: an unrecoverable hole.
+		// Surface the distinct re-snapshot state rather than a lag number that
+		// would understate a gap streaming can never close.
+		status.ReSnapshotRequired = true
+		return status, nil
+	}
+
+	lag := gtidLag(executed, consumed)
+	status.Lag = &lag
+	status.CaughtUp = consumed.Contain(executed)
 	return status, nil
+}
+
+// readSourceGTIDState reads the source's @@gtid_executed (the global write head)
+// and @@gtid_purged (transactions the source has already dropped) under a short
+// timeout. Read-only; one short-lived connection.
+func readSourceGTIDState(ctx context.Context, config *sql.Config) (executed, purged mysql.GTIDSet, err error) {
+	cctx, cancel := context.WithTimeout(ctx, statusLagTimeout)
+	defer cancel()
+
+	db, err := gosql.Open("mysql", buildDSN(config.ConnectionString))
+	if err != nil {
+		return nil, nil, fmt.Errorf("open connection: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	var executedStr, purgedStr string
+	if err := db.QueryRowContext(cctx,
+		"SELECT @@GLOBAL.gtid_executed, @@GLOBAL.gtid_purged").Scan(&executedStr, &purgedStr); err != nil {
+		return nil, nil, fmt.Errorf("query gtid state: %w", err)
+	}
+
+	executed, err = mysql.ParseMysqlGTIDSet(executedStr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("parse gtid_executed %q: %w", executedStr, err)
+	}
+	purged, err = mysql.ParseMysqlGTIDSet(purgedStr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("parse gtid_purged %q: %w", purgedStr, err)
+	}
+	return executed, purged, nil
 }
 
 // SourceColumns implements sql.Dialect: it introspects each watched table's
@@ -658,6 +728,89 @@ func mergeGTID(consumed, txn mysql.GTIDSet) (mysql.GTIDSet, error) {
 func isGtidPurged(err error) bool {
 	var myErr *mysql.MyError
 	return errors.As(err, &myErr) && myErr.Code == mysql.ER_MASTER_FATAL_ERROR_READING_BINLOG
+}
+
+// needsResnapshot reports whether the source has purged change data this ingest
+// never consumed — a GTID in purged that consumed does not contain is gone from
+// the source and can never be streamed, so the only honest recovery is a fresh
+// snapshot. Empty purged (nothing dropped) is never a hole; a nil consumed with
+// a non-empty purged is a hole (we have consumed nothing the source already
+// dropped). This is the steady-state, queryable complement to the runtime
+// error-1236 detection (isGtidPurged).
+func needsResnapshot(consumed, purged mysql.GTIDSet) bool {
+	if purged == nil || purged.IsEmpty() {
+		return false
+	}
+	return consumed == nil || !consumed.Contain(purged)
+}
+
+// gtidLag returns how many transactions the source has executed but this ingest
+// has not yet consumed — the cardinality of (executed − consumed). It is exact
+// interval arithmetic over the GTID sets, so an errant GTID in consumed that the
+// source never executed cannot drive the count negative; only executed-but-
+// unconsumed transactions count. A nil/empty executed yields 0.
+func gtidLag(executed, consumed mysql.GTIDSet) uint64 {
+	em, ok := executed.(*mysql.MysqlGTIDSet)
+	if !ok || em == nil {
+		return 0
+	}
+	cm, _ := consumed.(*mysql.MysqlGTIDSet)
+
+	var lag uint64
+	for sid := range *em {
+		for tag, have := range (*em)[sid] {
+			var covered mysql.IntervalSlice
+			if cm != nil {
+				if tags, ok := (*cm)[sid]; ok {
+					covered = tags[tag]
+				}
+			}
+			lag += countMissingGTIDs(have, covered)
+		}
+	}
+	return lag
+}
+
+// countMissingGTIDs counts the integers in have's half-open [Start,Stop)
+// intervals that no interval in covered includes — the size of (have − covered)
+// for one (server-uuid, tag). Both slices are normalized (sorted, merged) so the
+// single forward sweep over covered is correct.
+func countMissingGTIDs(have, covered mysql.IntervalSlice) uint64 {
+	have = have.Normalize()
+	covered = covered.Normalize()
+
+	var missing uint64
+	for _, iv := range have {
+		cur := iv.Start
+		for _, cv := range covered {
+			if cv.Stop <= cur {
+				continue // covered region is entirely before the uncounted remainder
+			}
+			if cv.Start >= iv.Stop {
+				break // covered is sorted; nothing further overlaps iv
+			}
+			if cv.Start > cur {
+				missing += nonNeg(cv.Start - cur) // gap before this covered region
+			}
+			if cv.Stop > cur {
+				cur = cv.Stop // skip past the covered region
+			}
+			if cur >= iv.Stop {
+				break
+			}
+		}
+		missing += nonNeg(iv.Stop - cur)
+	}
+	return missing
+}
+
+// nonNeg converts a guaranteed-non-negative int64 difference to uint64, clamping
+// any (unexpected) negative to 0 so the conversion is always well-defined.
+func nonNeg(n int64) uint64 {
+	if n < 0 {
+		return 0
+	}
+	return uint64(n) //nolint:gosec // G115: clamped non-negative immediately above
 }
 
 // handleXID handles a transaction commit (XID event): it stamps the post-commit

@@ -1868,7 +1868,7 @@ components:
 
     IngestableStatusResponse:
       type: object
-      required: [phase, snapshotProgress, position, lag, caughtUp]
+      required: [phase, snapshotProgress, position, lag, caughtUp, reSnapshotRequired]
       description: An ingestable worker's current operational status and progress.
       properties:
         phase:
@@ -1896,17 +1896,30 @@ components:
           format: int64
           minimum: 0
           description: |
-            Bytes the source's write head is ahead of what this ingest has
-            durably consumed (Postgres: pg_current_wal_lsn − the slot's
-            confirmed_flush_lsn). `null` when it cannot be determined — during
-            the snapshot phase, on MySQL (source lag is a follow-on), or when
-            the source is unreachable. A non-null 0 means fully caught up.
+            How far the source's write head is ahead of what this ingest has
+            durably consumed, in the dialect's natural unit: Postgres bytes
+            (pg_current_wal_lsn − the slot's confirmed_flush_lsn); MySQL under
+            GTID positioning transactions (count of @@gtid_executed − the
+            consumed GTID set). `null` when it cannot be determined — during the
+            snapshot phase, when the source is unreachable, on a MySQL source
+            without GTID positioning (gtid_mode=OFF / a legacy file:pos
+            checkpoint), or when a re-snapshot is required. A non-null 0 means
+            fully caught up.
         caughtUp:
           type: boolean
           description: |
             True exactly when the snapshot is complete and lag is a known 0 —
             the only state in which the read model is fully current. Never true
             while lag is null.
+        reSnapshotRequired:
+          type: boolean
+          description: |
+            True when the source has discarded change data this ingest never
+            consumed and can never re-stream — a MySQL source that purged binlogs
+            past the consumed GTID set (@@gtid_purged ⊄ consumed). A distinct,
+            loud state rather than a misleading lag number; recovery means
+            re-running the initial snapshot. Always false for Postgres (the slot
+            holds the WAL, so the source cannot purge unconsumed change data).
 
     TableSnapshotProgress:
       type: object

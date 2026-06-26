@@ -22,13 +22,20 @@ type IngestableStatusResponse struct {
 	// Position is the dialect's CDC cursor in native text form: a Postgres LSN
 	// ("0/1A2B3C8") or a MySQL binlog coordinate ("binlog.000004:1547").
 	Position string `json:"position"`
-	// Lag is bytes the source write head is ahead of what this ingest has
-	// durably consumed. null while snapshotting, on MySQL (lag is a follow-on),
-	// or when the source is unreachable; a non-null 0 means fully caught up.
+	// Lag is how far the source write head is ahead of what this ingest has
+	// durably consumed, in the dialect's natural unit: Postgres bytes, MySQL
+	// (GTID) transactions. null while snapshotting, when the source is
+	// unreachable, on a MySQL source without GTID positioning, or when a
+	// re-snapshot is required; a non-null 0 means fully caught up.
 	Lag *uint64 `json:"lag"`
 	// CaughtUp is true exactly when the snapshot is complete and lag is a known
 	// 0 — never true while lag is null.
 	CaughtUp bool `json:"caughtUp"`
+	// ReSnapshotRequired is true when the source discarded change data this
+	// ingest never consumed (MySQL: binlogs purged past the consumed GTID set) —
+	// a distinct state, not a lag number. Recovery is a fresh snapshot. Always
+	// false for Postgres.
+	ReSnapshotRequired bool `json:"reSnapshotRequired"`
 }
 
 // TableSnapshotProgress is one watched table's place in the initial snapshot.
@@ -84,11 +91,12 @@ func (h *HTTP) GetIngestableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 // the HTTP response shape. Shared by GetIngestableStatus and the pipeline view.
 func toIngestableStatusResponse(st cluster.IngestableStatus) IngestableStatusResponse {
 	resp := IngestableStatusResponse{
-		Phase:            st.Phase,
-		SnapshotProgress: make([]TableSnapshotProgress, 0, len(st.SnapshotProgress)),
-		Position:         st.Position,
-		Lag:              st.Lag,
-		CaughtUp:         st.CaughtUp,
+		Phase:              st.Phase,
+		SnapshotProgress:   make([]TableSnapshotProgress, 0, len(st.SnapshotProgress)),
+		Position:           st.Position,
+		Lag:                st.Lag,
+		CaughtUp:           st.CaughtUp,
+		ReSnapshotRequired: st.ReSnapshotRequired,
 	}
 	for _, t := range st.SnapshotProgress {
 		resp.SnapshotProgress = append(resp.SnapshotProgress, TableSnapshotProgress{

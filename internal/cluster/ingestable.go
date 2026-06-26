@@ -73,17 +73,27 @@ type IngestableStatus struct {
 	// For Postgres this checkpoint LSN is also the effectively-once resume +
 	// dedup point, so there is no separate sequence to report.
 	Position string
-	// Lag is how many bytes the source's write head is ahead of what this
-	// ingest has durably consumed (Postgres: pg_current_wal_lsn −
-	// confirmed_flush_lsn of the slot). nil when it cannot be determined —
-	// during the snapshot phase, on a dialect that does not implement it
-	// (MySQL today), or when the source is unreachable. A non-nil 0 means fully
-	// caught up.
+	// Lag is how far the source's write head is ahead of what this ingest has
+	// durably consumed. The unit is the dialect's natural one: Postgres reports
+	// bytes (pg_current_wal_lsn − confirmed_flush_lsn of the slot); MySQL under
+	// GTID positioning reports transactions (count of @@gtid_executed − the
+	// consumed GTID set). nil when it cannot be determined — during the snapshot
+	// phase, when the source is unreachable, on a MySQL source without GTID
+	// positioning (gtid_mode=OFF / legacy file:pos checkpoint), or when a
+	// re-snapshot is required. A non-nil 0 means fully caught up.
 	Lag *uint64
 	// CaughtUp is true exactly when the snapshot is complete and Lag is a
 	// known 0 — the only state in which the read model is fully current. It is
 	// never true while Lag is nil (an unknown lag is not a caught-up lag).
 	CaughtUp bool
+	// ReSnapshotRequired is true when the source has discarded change data this
+	// ingest never consumed and can never re-stream — a MySQL source that purged
+	// binlogs past the consumed GTID set (@@gtid_purged ⊄ consumed). It is a
+	// distinct, loud state rather than a misleading lag number: recovery means
+	// re-running the initial snapshot. Always false for Postgres (the slot holds
+	// the WAL, so the source cannot purge unconsumed change data out from under
+	// it).
+	ReSnapshotRequired bool
 }
 
 // TableSnapshotStatus is one watched table's place in the initial snapshot.
