@@ -209,6 +209,7 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 	// being non-nil means a prior run was interrupted mid-snapshot
 	// and we should resume from where it left off.
 	var lastPos *mysql.Position
+	var resumeGTID string
 	var resumeProgress *dialectpb.SnapshotProgress
 	if pos != nil {
 		posProto := &dialectpb.MySQLBinLogPosition{}
@@ -216,6 +217,7 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			return err
 		}
 		lastPos = &mysql.Position{Name: posProto.Name, Pos: posProto.Pos}
+		resumeGTID = posProto.GtidSet
 		resumeProgress = posProto.SnapshotProgress
 	}
 
@@ -241,7 +243,7 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 		// position to stream from. This replaces canal's built-in
 		// mysqldump phase, eliminating the external binary dependency.
 		if lastPos == nil || resumeProgress != nil {
-			snapshotPos, err := snapshot(ctx, config, pr, po, lastPos, resumeProgress)
+			snapshotPos, snapshotGTID, err := snapshot(ctx, config, pr, po, lastPos, resumeGTID, resumeProgress)
 			if err != nil {
 				if ctx.Err() != nil {
 					return nil
@@ -273,7 +275,7 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			// snapshot_progress) so a restart after snapshot
 			// completion but before the first binlog commit
 			// starts streaming instead of re-running snapshot.
-			posProto := &dialectpb.MySQLBinLogPosition{Name: lastPos.Name, Pos: lastPos.Pos}
+			posProto := &dialectpb.MySQLBinLogPosition{Name: lastPos.Name, Pos: lastPos.Pos, GtidSet: snapshotGTID}
 			bs, err := proto.Marshal(posProto)
 			if err != nil {
 				return err
@@ -764,25 +766,27 @@ func snapshot(
 	pr chan<- *cluster.Proposal,
 	po chan<- cluster.Position,
 	resumePos *mysql.Position,
+	resumeGTID string,
 	resumeProgress *dialectpb.SnapshotProgress,
-) (*mysql.Position, error) {
+) (*mysql.Position, string, error) {
 	db, err := gosql.Open("mysql", buildDSN(config.ConnectionString))
 	if err != nil {
-		return nil, fmt.Errorf("snapshot: open: %w", err)
+		return nil, "", fmt.Errorf("snapshot: open: %w", err)
 	}
 	defer func() { _ = db.Close() }()
 
-	// Determine the binlog position to resume from. On a fresh start
-	// we capture it now under a brief global lock; on resume we keep
-	// the saved position so the binlog tail covers the pre-snapshot
-	// window.
+	// Determine the binlog position + GTID set to start streaming from. On a fresh
+	// start we capture them now under a brief global lock; on a mid-snapshot resume
+	// we keep the saved coordinate so the binlog tail covers the pre-snapshot
+	// window (the GTID set, like the position, is the original snapshot point).
 	var pos mysql.Position
+	gtid := resumeGTID
 	if resumePos != nil {
 		pos = *resumePos
 	} else {
-		pos, err = captureBinlogPosition(ctx, db)
+		pos, gtid, err = captureBinlogPosition(ctx, db)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 	}
 
@@ -809,45 +813,45 @@ func snapshot(
 			)
 			continue
 		}
-		if err := snapshotTable(ctx, db, config, table, batchSize, progress, &pos, pr, po); err != nil {
-			return nil, fmt.Errorf("snapshot: table %s: %w", table, err)
+		if err := snapshotTable(ctx, db, config, table, batchSize, progress, &pos, gtid, pr, po); err != nil {
+			return nil, "", fmt.Errorf("snapshot: table %s: %w", table, err)
 		}
 		// Mark complete and drop any partial cursor.
 		progress.CompletedTables = append(progress.CompletedTables, table)
 		delete(progress.LastPkByTable, table)
 		completed[table] = true
 
-		if err := emitProgress(ctx, po, pos, progress); err != nil {
-			return nil, err
+		if err := emitProgress(ctx, po, pos, gtid, progress); err != nil {
+			return nil, "", err
 		}
 		zap.L().Info("snapshot: table complete", zap.String("table", table))
 	}
 
-	return &pos, nil
+	return &pos, gtid, nil
 }
 
 // captureBinlogPosition briefly acquires a global read lock to read the
 // current binlog file and offset. The lock is released immediately; it
 // only needs to be held long enough to sample a consistent position.
-func captureBinlogPosition(ctx context.Context, db *gosql.DB) (mysql.Position, error) {
+func captureBinlogPosition(ctx context.Context, db *gosql.DB) (mysql.Position, string, error) {
 	conn, err := db.Conn(ctx)
 	if err != nil {
-		return mysql.Position{}, fmt.Errorf("snapshot: conn: %w", err)
+		return mysql.Position{}, "", fmt.Errorf("snapshot: conn: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
 
 	if _, err := conn.ExecContext(ctx, "FLUSH TABLES WITH READ LOCK"); err != nil {
-		return mysql.Position{}, fmt.Errorf("snapshot: FLUSH TABLES WITH READ LOCK: %w", err)
+		return mysql.Position{}, "", fmt.Errorf("snapshot: FLUSH TABLES WITH READ LOCK: %w", err)
 	}
-	pos, err := binlogStatus(ctx, conn)
+	pos, gtidSet, err := binlogStatus(ctx, conn)
 	// Always release the lock, regardless of binlogStatus success.
 	if _, unlockErr := conn.ExecContext(ctx, "UNLOCK TABLES"); unlockErr != nil && err == nil {
 		err = unlockErr
 	}
 	if err != nil {
-		return mysql.Position{}, fmt.Errorf("snapshot: binlog status: %w", err)
+		return mysql.Position{}, "", fmt.Errorf("snapshot: binlog status: %w", err)
 	}
-	return pos, nil
+	return pos, gtidSet, nil
 }
 
 // parseBatchSize reads "batch_size" from Config.Options, falling back to
@@ -869,6 +873,7 @@ func emitProgress(
 	ctx context.Context,
 	po chan<- cluster.Position,
 	pos mysql.Position,
+	gtid string,
 	progress *dialectpb.SnapshotProgress,
 ) error {
 	// A shallow copy is enough — proto.Marshal will serialize the
@@ -876,6 +881,7 @@ func emitProgress(
 	posProto := &dialectpb.MySQLBinLogPosition{
 		Name:             pos.Name,
 		Pos:              pos.Pos,
+		GtidSet:          gtid,
 		SnapshotProgress: progress,
 	}
 	bs, err := proto.Marshal(posProto)
@@ -893,7 +899,7 @@ func emitProgress(
 // binlogStatus returns the current binlog filename and byte offset. It
 // tries SHOW BINARY LOG STATUS (MySQL 8.4+) first, falling back to
 // SHOW MASTER STATUS for older versions.
-func binlogStatus(ctx context.Context, conn *gosql.Conn) (mysql.Position, error) {
+func binlogStatus(ctx context.Context, conn *gosql.Conn) (mysql.Position, string, error) {
 	for _, query := range []string{"SHOW BINARY LOG STATUS", "SHOW MASTER STATUS"} {
 		rows, err := conn.QueryContext(ctx, query)
 		if err != nil {
@@ -911,16 +917,22 @@ func binlogStatus(ctx context.Context, conn *gosql.Conn) (mysql.Position, error)
 			continue
 		}
 
-		// Scan the first two columns (File, Position) into typed
-		// destinations; discard the rest. database/sql handles the
-		// int64→uint32 conversion for Position automatically.
-		var file string
+		// Scan File (col 0) and Position (col 1) into typed destinations; pull the
+		// Executed_Gtid_Set column by name (the GTID set as of this position —
+		// empty under gtid_mode=OFF); discard the rest. database/sql handles the
+		// int64→uint32 conversion for Position.
+		var file, gtidSet string
 		var pos uint32
 		dest := make([]any, len(cols))
+		for i := range dest {
+			dest[i] = new(any)
+		}
 		dest[0] = &file
 		dest[1] = &pos
-		for i := 2; i < len(cols); i++ {
-			dest[i] = new(any)
+		for i, c := range cols {
+			if strings.EqualFold(c, "Executed_Gtid_Set") {
+				dest[i] = &gtidSet
+			}
 		}
 
 		if err := rows.Scan(dest...); err != nil {
@@ -929,10 +941,10 @@ func binlogStatus(ctx context.Context, conn *gosql.Conn) (mysql.Position, error)
 		}
 		_ = rows.Close()
 
-		return mysql.Position{Name: file, Pos: pos}, nil
+		return mysql.Position{Name: file, Pos: pos}, gtidSet, nil
 	}
 
-	return mysql.Position{}, fmt.Errorf("binlogStatus: could not determine binlog position")
+	return mysql.Position{}, "", fmt.Errorf("binlogStatus: could not determine binlog position")
 }
 
 // snapshotTable reads all rows from a table using keyset pagination.
@@ -951,6 +963,7 @@ func snapshotTable(
 	batchSize int,
 	progress *dialectpb.SnapshotProgress,
 	pos *mysql.Position,
+	gtid string,
 	pr chan<- *cluster.Proposal,
 	po chan<- cluster.Position,
 ) error {
@@ -988,7 +1001,7 @@ func snapshotTable(
 		progress.LastPkByTable[table] = lastPK
 		totalRows += count
 
-		if err := emitProgress(ctx, po, *pos, progress); err != nil {
+		if err := emitProgress(ctx, po, *pos, gtid, progress); err != nil {
 			return err
 		}
 
