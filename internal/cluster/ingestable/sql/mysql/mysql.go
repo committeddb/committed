@@ -25,16 +25,15 @@ import (
 
 type MySQLDialect struct{}
 
-// canalBackoff{Min,Max} bound the retry interval for connecting the binlog
+// syncerBackoff{Min,Max} bound the retry interval for connecting the binlog
 // syncer (StartSync) and reconnecting after a stream error. A transient MySQL
 // outage (DNS blip, container restart, network partition) at Ingest startup
 // used to immediately return an error, leaving the worker
 // leader-but-not-ingesting with no recovery path. The retry loop below caps at
-// Max and is bounded by ctx so a shutdown still propagates promptly. (Named
-// canal* for historical reasons; the canal library is gone.)
+// Max and is bounded by ctx so a shutdown still propagates promptly.
 const (
-	canalBackoffMin = 1 * time.Second
-	canalBackoffMax = 30 * time.Second
+	syncerBackoffMin = 1 * time.Second
+	syncerBackoffMax = 30 * time.Second
 
 	// maxPendingEntities is the soft limit on buffered entities per
 	// transaction. If a single MySQL transaction modifies more than
@@ -204,7 +203,7 @@ func mysqlTableColumns(ctx context.Context, db *gosql.DB, table string) ([]strin
 }
 
 func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos cluster.Position, pr chan<- *cluster.Proposal, po chan<- cluster.Position) error {
-	backoff := canalBackoffMin
+	backoff := syncerBackoffMin
 
 	// Parse the initial resume position, if any. snapshot_progress
 	// being non-nil means a prior run was interrupted mid-snapshot
@@ -257,14 +256,14 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 				case <-time.After(backoff):
 				}
 				backoff *= 2
-				if backoff > canalBackoffMax {
-					backoff = canalBackoffMax
+				if backoff > syncerBackoffMax {
+					backoff = syncerBackoffMax
 				}
 				continue
 			}
 			lastPos = snapshotPos
 			resumeProgress = nil
-			backoff = canalBackoffMin
+			backoff = syncerBackoffMin
 			zap.L().Info("snapshot complete",
 				zap.String("binlog_file", lastPos.Name),
 				zap.Uint32("binlog_pos", lastPos.Pos),
@@ -300,7 +299,7 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			syncer = replication.NewBinlogSyncer(cfg)
 			streamer, err = syncer.StartSync(*lastPos)
 			if err == nil {
-				backoff = canalBackoffMin
+				backoff = syncerBackoffMin
 				break
 			}
 			syncer.Close()
@@ -317,8 +316,8 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			}
 
 			backoff *= 2
-			if backoff > canalBackoffMax {
-				backoff = canalBackoffMax
+			if backoff > syncerBackoffMax {
+				backoff = syncerBackoffMax
 			}
 		}
 
@@ -361,8 +360,8 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 		}
 
 		backoff *= 2
-		if backoff > canalBackoffMax {
-			backoff = canalBackoffMax
+		if backoff > syncerBackoffMax {
+			backoff = syncerBackoffMax
 		}
 	}
 }

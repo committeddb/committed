@@ -54,7 +54,7 @@ func binlogSyncerConfig(config *sql.Config) (replication.BinlogSyncerConfig, err
 		UseDecimal:              false,
 		ParseTime:               false,
 		TimestampStringLocation: nil,
-		Logger:                  newCanalLogger(zap.L()),
+		Logger:                  newSyncerLogger(zap.L()),
 	}, nil
 }
 
