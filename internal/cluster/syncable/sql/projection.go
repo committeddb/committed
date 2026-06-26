@@ -704,8 +704,8 @@ func (p *Projection) removeFromDimension(ctx context.Context, tx *gosql.Tx, src 
 // changed dimension key. For each dependent aggregate it collects the affected
 // parent keys (fully draining the query before any rebuild — a tx holds one
 // connection, so a rebuild cannot run while the cursor is open) and rebuilds
-// each. Synchronous in the dimension change's transaction; bounded by the
-// fan-out degree (see projection-fanout-deferred for the batched option).
+// each. Synchronous in the dimension change's transaction (so the read model is
+// consistent at every checkpoint); bounded by the fan-out degree.
 func (p *Projection) fanOut(ctx context.Context, tx *gosql.Tx, lk *lookupRuntime, dimKey string) error {
 	for _, dep := range lk.dependents {
 		rows, err := tx.StmtContext(ctx, dep.affected).QueryContext(ctx, dimKey)

@@ -306,8 +306,9 @@ handles cross-topic order by **fanning out**: when a dimension row arrives
 *after* the facts that reference it — or a later change updates it — the
 projection re-materializes every parent row whose elements reference that key,
 so the resolved values fill in (and a dimension delete NULLs the field on those
-elements while keeping them). Fan-out is synchronous; for hot, fast-changing
-dimensions a batched option is planned. One syncable fills one table — a
+elements while keeping them). Fan-out is synchronous — a dimension change
+re-materializes its dependents inside the same transaction, so the read model
+stays consistent at every checkpoint. One syncable fills one table — a
 dimension is its own internal housekeeping, so two syncables that need the same
 data each keep their own copy.
 
