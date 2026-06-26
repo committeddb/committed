@@ -730,6 +730,149 @@ func TestMysqlStreamingDelete(t *testing.T) {
 	require.True(t, del.IsDelete(), "a source DELETE must ingest as a delete entity")
 }
 
+// TestMysqlSnapshotConcurrentMutationConverges is the effectively-once
+// re-validation for the convergent snapshot contract (Phase C): the snapshot is
+// NOT point-in-time — it reads per-batch while writes continue — and correctness
+// rests on the binlog stream (started from the pre-snapshot position) replaying
+// every concurrent change so idempotent upsert/delete converges consumers to the
+// exact final source state. This drives inserts, updates, and deletes
+// concurrently DURING the snapshot and asserts the consumed model ends equal to
+// the source table, byte for byte, with deletes honored.
+func TestMysqlSnapshotConcurrentMutationConverges(t *testing.T) {
+	table := "converge_table"
+
+	// Seed enough rows (small batch_size → many batches) that the snapshot spans a
+	// window wide enough for the concurrent mutations to interleave with it.
+	const seedRows = 300
+	db := createDB(t)
+	_, err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS `%s`", table))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf("CREATE TABLE `%s` (pk VARCHAR(32) NOT NULL, val TEXT, PRIMARY KEY (pk));", table))
+	require.NoError(t, err)
+	for i := 0; i < seedRows; i++ {
+		_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, val) VALUES (?, 'v0')", table), fmt.Sprintf("r%04d", i))
+		require.NoError(t, err)
+	}
+	db.Close()
+
+	config := &sql.Config{
+		Type:             &cluster.Type{ID: "converge", Name: "converge"},
+		Mappings:         []sql.Mapping{{JsonName: "pk", SQLColumn: "pk"}, {JsonName: "val", SQLColumn: "val"}},
+		PrimaryKey:       []string{"pk"},
+		ConnectionString: ingestURL,
+		Tables:           []string{table},
+		Options:          map[string]string{"batch_size": "10"},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	proposalChan := make(chan *cluster.Proposal, 10)
+	positionChan := make(chan cluster.Position, 10)
+
+	dialect := &mysql.MySQLDialect{}
+	go func() { _ = dialect.Ingest(ctx, config, nil, proposalChan, positionChan) }()
+
+	// Mutator: starting immediately (while the snapshot runs), update, delete, and
+	// insert rows with small gaps so the changes straddle the snapshot boundary.
+	// When done it commits a unique sentinel last, then reads back the final source
+	// state as the convergence target and publishes it. The connection is opened on
+	// the test goroutine (createDB uses require, which must not run off it); the
+	// goroutine reports failures with t.Errorf only.
+	mdb := createDB(t)
+	defer mdb.Close()
+	expectedCh := make(chan map[string]string, 1)
+	go func() {
+		exec := func(q string, args ...any) {
+			if _, e := mdb.Exec(q, args...); e != nil {
+				t.Errorf("mutator exec: %v", e)
+			}
+		}
+		for i := 0; i < 60; i++ {
+			switch i % 3 {
+			case 0: // update an existing row to a new value
+				exec(fmt.Sprintf("UPDATE `%s` SET val = 'v1' WHERE pk = ?", table), fmt.Sprintf("r%04d", i))
+			case 1: // delete an existing row
+				exec(fmt.Sprintf("DELETE FROM `%s` WHERE pk = ?", table), fmt.Sprintf("r%04d", 100+i))
+			case 2: // insert a brand-new row
+				exec(fmt.Sprintf("INSERT INTO `%s` (pk, val) VALUES (?, 'new')", table), fmt.Sprintf("n%04d", i))
+			}
+			time.Sleep(15 * time.Millisecond)
+		}
+		exec(fmt.Sprintf("INSERT INTO `%s` (pk, val) VALUES ('__sentinel__', 'done')", table))
+
+		rows, e := mdb.Query(fmt.Sprintf("SELECT pk, val FROM `%s`", table))
+		if e != nil {
+			t.Errorf("mutator readback: %v", e)
+			close(expectedCh)
+			return
+		}
+		defer rows.Close()
+		expected := map[string]string{}
+		for rows.Next() {
+			var pk, val string
+			if e := rows.Scan(&pk, &val); e != nil {
+				t.Errorf("mutator scan: %v", e)
+				close(expectedCh)
+				return
+			}
+			expected[pk] = val
+		}
+		if e := rows.Err(); e != nil {
+			t.Errorf("mutator rows: %v", e)
+		}
+		expectedCh <- expected
+	}()
+
+	// Consume proposals into a model (apply upserts and deletes in arrival order)
+	// until it equals the final source state. The model can only equal the target
+	// once every concurrent change has been replayed from the binlog — the
+	// convergence the contract promises.
+	model := map[string]string{}
+	var expected map[string]string
+	deadline := time.After(90 * time.Second)
+	for expected == nil || !mapsEqual(model, expected) {
+		select {
+		case p := <-proposalChan:
+			for _, e := range p.Entities {
+				pk := string(e.Key)
+				if e.IsDelete() {
+					delete(model, pk)
+					continue
+				}
+				var row map[string]string
+				require.NoError(t, json.Unmarshal(e.Data, &row))
+				model[pk] = row["val"]
+			}
+		case e, ok := <-expectedCh:
+			if ok {
+				expected = e
+			}
+			expectedCh = nil // received (or closed): a nil channel stops this case
+		case <-positionChan:
+		case <-deadline:
+			t.Fatalf("model never converged to source state: have %d keys, want %d",
+				len(model), len(expected))
+		}
+	}
+
+	require.Equal(t, expected, model, "consumed model must equal the final source state")
+	require.NotContains(t, model, "r0101", "a row deleted during snapshot must not survive")
+	require.Equal(t, "done", model["__sentinel__"])
+}
+
+// mapsEqual reports whether two string maps have identical keys and values.
+func mapsEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if bv, ok := b[k]; !ok || bv != v {
+			return false
+		}
+	}
+	return true
+}
+
 // TestMysqlPositionResume verifies that checkpointed binlog positions are
 // correctly restored on restart: a new Ingest call with a previously
 // checkpointed position only receives changes committed after that position.

@@ -39,6 +39,25 @@ its own log, and on restart it resumes from that checkpoint and de-duplicates an
 re-delivered changes by source sequence. You do not get duplicates in the topic
 across a restart.
 
+### Snapshot consistency (the convergent contract)
+
+The snapshot is **not** a single point-in-time read. To keep its load on the
+source bounded (short per-batch transactions, no long-held read view or table
+lock) and to stay resumable mid-snapshot, committed reads each batch in its own
+transaction **while the source keeps changing**. Correctness comes from the
+change stream, not from freezing the source: streaming begins at a position
+captured *before* the first snapshot read, so every change that races the
+snapshot is also replayed from the stream. Because an upsert is keyed and a
+delete is a keyed tombstone, re-applying a change is idempotent and the last
+write wins — so consumers **converge to the exact current source state**,
+including rows inserted, updated, or deleted during the snapshot.
+
+The visible cost is a brief transient: a row changed during the snapshot can
+appear at an intermediate value until the stream replays its latest change, then
+settles correct. For committed's eventually-consistent read models this is
+expected. Both engines use this same convergent model — Postgres does not use an
+exported snapshot, MySQL does not hold a consistent-snapshot transaction.
+
 ### What to watch
 
 Every ingestable exposes its status:
@@ -53,7 +72,8 @@ GET /v1/ingestable/{id}/status
   "snapshotProgress": [{ "table": "ingress.movie", "lastKey": "mv0000003", "complete": true }],
   "position": "0/1A2B3C8",
   "lag": 4096,
-  "caughtUp": true
+  "caughtUp": true,
+  "reSnapshotRequired": false
 }
 ```
 
@@ -63,11 +83,18 @@ GET /v1/ingestable/{id}/status
   table's snapshot is complete.
 - **`position`** — the engine-native cursor: a Postgres LSN (`0/1A2B3C8`) or a
   MySQL binlog coordinate (`binlog.000007:4096`).
-- **`lag`** — bytes the source write head is ahead of what this ingest has
-  durably consumed (Postgres only — see the MySQL note below). `null` during
-  snapshot or when it can't be determined.
+- **`lag`** — how far the source write head is ahead of what this ingest has
+  durably consumed, in the engine's natural unit: **Postgres bytes**
+  (`pg_current_wal_lsn − confirmed_flush_lsn`), **MySQL transactions** under GTID
+  positioning (`@@gtid_executed − consumed`). `null` during snapshot, when the
+  source is unreachable, on a MySQL source without GTID positioning, or when a
+  re-snapshot is required.
 - **`caughtUp`** — `true` only when the snapshot is complete **and** lag is a
-  known `0`.
+  known `0`. Never `true` while `lag` is `null`.
+- **`reSnapshotRequired`** — `true` when the source discarded change data this
+  ingest never consumed and can never re-stream (MySQL: binlogs purged past the
+  consumed GTID set). A distinct, loud state, not a lag number; recovery is a
+  fresh snapshot. Always `false` for Postgres (the slot holds the WAL).
 
 The quickstart polls this endpoint to know when the initial snapshot has landed
 (`"caughtUp": true`).
@@ -256,7 +283,25 @@ stream a replica reads).
    only the changed columns plus the key on a `DELETE`, so without a covering PK
    committed can't form a keyed tombstone. `FULL` (or `NOBLOB`) always works.
 
-2. **A replication grant.** The ingest user needs to read rows (snapshot), briefly
+2. **GTID mode on (strongly recommended).** With `gtid_mode=ON` committed resumes
+   the binlog by **GTID set** rather than file:offset, which is what makes resume
+   survive a source failover (RDS Multi-AZ, Aurora, any promoted replica — the
+   file name and offset are server-local and meaningless on the new primary) and
+   what lets it report a real transaction-count `lag` and `caughtUp`.
+
+   ```ini
+   # my.cnf
+   gtid_mode                 = ON
+   enforce_gtid_consistency  = ON   # required to enable gtid_mode
+   ```
+
+   It is **not required**: with `gtid_mode=OFF` committed falls back to file:offset
+   positioning (the pre-0.7 behavior — single-server only, `lag`/`caughtUp` stay
+   `null`). Preflight does not fail on this; it logs a warning so the degraded mode
+   is visible rather than silent. Default MySQL ships `gtid_mode=OFF`, so set this
+   explicitly for any production / failover-capable deployment.
+
+3. **A replication grant.** The ingest user needs to read rows (snapshot), briefly
    lock to capture a consistent position, and stream the binlog:
 
    ```sql
@@ -304,18 +349,33 @@ syncable projecting back into a MySQL sink table — is exercised end-to-end by 
 `e2e/cdc` MySQL tests (`e2e/cdc/harness/mysql.go`, `e2e/cdc/mysql_test.go`); the
 DDL and TOML there are copy-pasteable.
 
-### MySQL lag is `null` by design
+### MySQL lag, caughtUp, and the binlog-retention caveat
 
-Unlike a Postgres LSN, a MySQL binlog coordinate (`file:offset`) has no single
-scalar "distance from the source write head" — the file rolls over, and there is
-no cheap server-side measure of how far behind a given coordinate is. So
-committed reports **`lag: null`** for MySQL, and because `caughtUp` requires a
-known-zero lag, **`caughtUp` is never `true` for a MySQL ingestable.** This is
-expected, not a fault: use `phase == "streaming"` plus `snapshotProgress[*].complete`
-to know the snapshot is done and the ingest is live, and compare the reported
-binlog `position` against the source's `SHOW BINARY LOG STATUS` if you need to
-gauge how current it is. (A real numeric MySQL lag is tracked as a separate
-follow-on.)
+With `gtid_mode=ON`, committed reports a real `lag` and `caughtUp` for MySQL,
+computed by GTID-set arithmetic: it diffs the consumed GTID set against the
+source's `@@gtid_executed`. `lag` is the **number of transactions** the source is
+ahead (not bytes — the units differ by engine), and `caughtUp` is `true` once the
+consumed set covers `@@gtid_executed`. With `gtid_mode=OFF` there is no global
+head to diff against, so MySQL `lag` stays `null` and `caughtUp` stays `false`
+(use `phase == "streaming"` plus `snapshotProgress[*].complete` to know the
+snapshot is done) — another reason to enable GTID mode.
+
+**The retention caveat (the one property a slot gives that a binlog can't).** A
+Postgres slot *holds* the WAL until committed acknowledges it; a MySQL binlog
+dump holds nothing, so the source purges binlogs on its own schedule
+(`binlog_expire_logs_seconds`). In steady state this is fine — committed drains
+the binlog into its own log continuously, even while lagging. The exposure is
+only **downtime longer than retention**: if committed is stopped long enough that
+the source purges transactions committed never consumed, those changes are gone
+from the source and can't be streamed. committed does **not** lose them silently —
+it detects the hole (binlog error 1236 / `@@gtid_purged` ⊄ consumed), surfaces it
+as **`reSnapshotRequired: true`** on the status endpoint, and recovers by
+re-running the initial snapshot (the data re-applies idempotently). Preflight also
+**warns** at config time when `binlog_expire_logs_seconds` is short. The contract:
+**steady-state parity with Postgres; the weaker guarantee is only downtime beyond
+retention, and it is detected loudly, never lost silently.** Keep retention longer
+than your worst-case committed downtime (or set `binlog_expire_logs_seconds=0` to
+never auto-purge).
 
 ### MySQL troubleshooting
 
@@ -326,11 +386,13 @@ follow-on.)
   PRIMARY KEY.
 - **"Access denied" on connect or on the binlog dump.** The user is missing
   `REPLICATION SLAVE`/`REPLICATION CLIENT` (binlog) or `RELOAD` (snapshot lock).
-- **Resume fails after a long outage.** If the source purged the binlog past the
-  position committed checkpointed (e.g. a short `binlog_expire_logs_seconds`),
-  the stream can't resume from there. Keep binlog retention longer than your
-  worst-case committed downtime; recovering requires re-creating the ingestable
-  to re-snapshot.
+- **`reSnapshotRequired: true` after a long outage.** The source purged the binlog
+  past what committed had consumed (e.g. a short `binlog_expire_logs_seconds` and a
+  downtime longer than it). committed detects this (binlog error 1236 /
+  `@@gtid_purged`) and **automatically re-snapshots** to recover — the data
+  re-applies idempotently — so you don't re-create the ingestable by hand. To avoid
+  it, keep binlog retention longer than your worst-case downtime (see the retention
+  caveat above). If it recurs, your retention is too short for your restart window.
 
 ---
 
@@ -343,7 +405,11 @@ that the source still has the data after that position:
 - **Postgres** retains it automatically (that's what the slot does — see the disk
   caveat above), so resume always succeeds while the slot exists.
 - **MySQL** retains it only as long as the binlog isn't purged past the
-  checkpoint; size your binlog retention accordingly.
+  checkpoint; size your binlog retention accordingly. With `gtid_mode=ON` resume
+  is by GTID set, so it also survives a **source failover** (a promoted replica —
+  where the binlog file:offset would be meaningless); if the binlog was purged past
+  the consumed point, committed re-snapshots rather than resuming (see
+  `reSnapshotRequired` above).
 
 The status endpoint goes back to `phase: "streaming"` once the resumed worker is
 following the change stream again.
