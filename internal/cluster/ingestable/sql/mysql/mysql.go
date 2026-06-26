@@ -400,6 +400,14 @@ type MySQLEventHandler struct {
 	// pending accumulates entities from row events until the transaction commits
 	// (an XID event), so one MySQL transaction maps to one cluster.Proposal.
 	pending []*cluster.Entity
+
+	// consumedGTID is the set of transactions fully processed and checkpointed —
+	// the GTID resume cursor (Phase B). curTxnGTID holds the in-flight
+	// transaction's GTID between its GTIDEvent and its commit, when it is merged
+	// into consumedGTID. Both stay nil until the first GTIDEvent, so a file:pos-only
+	// or gtid_mode=OFF source leaves the checkpoint GTID-free.
+	consumedGTID mysql.GTIDSet
+	curTxnGTID   mysql.GTIDSet
 }
 
 // mysqlCategoryForTypeName maps a MySQL type name (information_schema data_type
@@ -583,6 +591,22 @@ func (h *MySQLEventHandler) flushPending(ctx context.Context) error {
 	}
 }
 
+// mergeGTID extends the consumed GTID set with one committed transaction's GTID.
+// A nil consumed starts from a clone of txn; a nil txn (file:pos-only /
+// gtid_mode=OFF source, which emits no GTIDEvent) leaves consumed unchanged.
+func mergeGTID(consumed, txn mysql.GTIDSet) (mysql.GTIDSet, error) {
+	if txn == nil {
+		return consumed, nil
+	}
+	if consumed == nil {
+		return txn.Clone(), nil
+	}
+	if err := consumed.Update(txn.String()); err != nil {
+		return nil, err
+	}
+	return consumed, nil
+}
+
 // handleXID handles a transaction commit (XID event): it stamps the post-commit
 // coordinate, flushes the buffered entities as one proposal, and checkpoints the
 // position so a restart resumes past a fully-committed transaction. The commit
@@ -598,7 +622,20 @@ func (h *MySQLEventHandler) handleXID(ctx context.Context, header *replication.E
 		return err
 	}
 
+	// Merge the just-committed transaction's GTID into the consumed set so the
+	// checkpoint carries the GTID resume cursor alongside file:pos. Resume still
+	// uses file:pos until the cutover slice — the GTID is written, not yet read.
+	merged, err := mergeGTID(h.consumedGTID, h.curTxnGTID)
+	if err != nil {
+		return fmt.Errorf("merge committed GTID: %w", err)
+	}
+	h.consumedGTID = merged
+	h.curTxnGTID = nil
+
 	posProto := &dialectpb.MySQLBinLogPosition{Name: pos.Name, Pos: pos.Pos}
+	if h.consumedGTID != nil {
+		posProto.GtidSet = h.consumedGTID.String()
+	}
 	bs, err := proto.Marshal(posProto)
 	if err != nil {
 		return err
@@ -654,6 +691,14 @@ func (h *MySQLEventHandler) runStream(ctx context.Context, streamer *replication
 				continue
 			}
 			h.curFile = string(e.NextLogName)
+		case *replication.GTIDEvent:
+			// The GTID of the transaction about to stream; merged into the
+			// consumed set when that transaction commits (handleXID).
+			gtid, err := e.GTIDNext()
+			if err != nil {
+				return fmt.Errorf("decode GTID event: %w", err)
+			}
+			h.curTxnGTID = gtid
 		case *replication.RowsEvent:
 			if err := h.handleRows(ctx, ev.Header, e); err != nil {
 				return err
