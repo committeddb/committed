@@ -459,6 +459,35 @@ func (n *Raft) serveChannels() {
 		raftStopOnce.Do(func() { close(n.raftStopC) })
 	}
 
+	// proposeCtx is cancelled when shutdown begins (closeC or raftStopC). It
+	// makes the blocking node.Propose / node.ProposeConfChange below abortable,
+	// so a proposal in flight when Close() is called can't wedge the reader off
+	// its select — which would leave raftStopC unclosed and deadlock Close()'s
+	// wait on serveChannelsDoneC (and then skip node.Stop, leaking raft.Node).
+	proposeCtx, cancelPropose := context.WithCancel(context.Background())
+	defer cancelPropose()
+	go func() {
+		select {
+		case <-n.closeC:
+		case <-n.raftStopC:
+		}
+		cancelPropose()
+	}()
+
+	// sendProposeErr forwards a real propose error without blocking shutdown: a
+	// shutdown cancellation is not a real error and is suppressed, and the send
+	// is guarded by closeC so an unread raftErrorC can't wedge the reader. This
+	// mirrors the non-blocking error send in the Ready loop below.
+	sendProposeErr := func(err error) {
+		if err == nil || proposeCtx.Err() != nil {
+			return
+		}
+		select {
+		case n.raftErrorC <- err:
+		case <-n.closeC:
+		}
+	}
+
 	go func() {
 		for n.proposeC != nil && n.proposeConfC != nil {
 			select {
@@ -467,11 +496,10 @@ func (n *Raft) serveChannels() {
 					n.proposeC = nil
 				} else {
 					n.logger.Debug("proposal being sent to state machine")
-					// blocks until accepted by raft state machine
-					err := n.node.Propose(context.TODO(), []byte(prop))
-					if err != nil {
-						n.raftErrorC <- err
-					}
+					// Blocks until accepted by the raft state machine, or until
+					// proposeCtx is cancelled at shutdown (so Close can't deadlock).
+					err := n.node.Propose(proposeCtx, []byte(prop))
+					sendProposeErr(err)
 					n.logger.Debug("proposal accepted by state machine")
 				}
 			case cc, ok := <-n.proposeConfC:
@@ -486,10 +514,8 @@ func (n *Raft) serveChannels() {
 					// raft tracks the in-flight change by its entry index
 					// (pendingConfIndex), so unlike the old v1 path there is
 					// no application-assigned ID to set here.
-					err := n.node.ProposeConfChange(context.Background(), cc)
-					if err != nil {
-						n.raftErrorC <- err
-					}
+					err := n.node.ProposeConfChange(proposeCtx, cc)
+					sendProposeErr(err)
 				}
 			case <-n.closeC:
 				// Close() asked us to stop, even though proposeC is still

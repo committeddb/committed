@@ -199,6 +199,11 @@ type Storage struct {
 	scrubStop     chan struct{}
 	scrubDone     chan struct{}
 	scrubStopOnce sync.Once
+	// closeOnce makes Close idempotent: db.Close now closes the Storage it owns,
+	// and some callers (and tests) may close it directly too, so a second Close
+	// must be a no-op rather than double-closing the bbolt/WAL handles.
+	closeOnce sync.Once
+	closeErr  error
 	// scrubGen increments on every completed scrub swap. A scrub re-densifies
 	// the wal sequence numbers, so a Reader's cached walSeq cursor becomes
 	// stale across a swap. Readers compare this against the generation they
@@ -700,39 +705,42 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 }
 
 func (s *Storage) Close() error {
-	var finalErr error
+	s.closeOnce.Do(func() {
+		var finalErr error
 
-	// Stop the background scrubber before closing the event log it rewrites.
-	// scrubStop signals it; scrubDone confirms it has returned (so no swap is
-	// mid-flight when we close the handle below). Idempotent close of scrubStop
-	// is handled in stopScrubWorker.
-	s.stopScrubWorker()
+		// Stop the background scrubber before closing the event log it rewrites.
+		// scrubStop signals it; scrubDone confirms it has returned (so no swap is
+		// mid-flight when we close the handle below). Idempotent close of scrubStop
+		// is handled in stopScrubWorker.
+		s.stopScrubWorker()
 
-	finalErr = s.EntryLog.Close()
+		finalErr = s.EntryLog.Close()
 
-	err := s.eventLog.Close()
-	if err != nil && finalErr == nil {
-		finalErr = err
-	}
-
-	err = s.StateLog.Close()
-	if err != nil && finalErr == nil {
-		finalErr = err
-	}
-
-	err = s.keyValueStorage.Close()
-	if err != nil && finalErr == nil {
-		finalErr = err
-	}
-
-	for _, db := range s.databases {
-		err = db.Close()
+		err := s.eventLog.Close()
 		if err != nil && finalErr == nil {
 			finalErr = err
 		}
-	}
 
-	return finalErr
+		err = s.StateLog.Close()
+		if err != nil && finalErr == nil {
+			finalErr = err
+		}
+
+		err = s.keyValueStorage.Close()
+		if err != nil && finalErr == nil {
+			finalErr = err
+		}
+
+		for _, db := range s.databases {
+			err = db.Close()
+			if err != nil && finalErr == nil {
+				finalErr = err
+			}
+		}
+
+		s.closeErr = finalErr
+	})
+	return s.closeErr
 }
 
 // ConfState records the ConfState most recently produced by

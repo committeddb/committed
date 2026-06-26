@@ -755,7 +755,16 @@ func (db *DB) Close() error {
 	// node's leadership, then we hand off.
 	db.transferLeadershipBeforeStop()
 
-	return db.raft.Close()
+	// Close raft first (it Saves into the storage on its serve loop), then the
+	// storage we own — closing its bbolt/WAL handles and stopping the background
+	// scrubber. Without this the WAL Storage (and its scrubWorker goroutine)
+	// leaked on every Close; in long-lived test processes that accumulation
+	// starved the suite into timeouts. Storage.Close is idempotent.
+	err := db.raft.Close()
+	if cerr := db.storage.Close(); cerr != nil && err == nil {
+		err = cerr
+	}
+	return err
 }
 
 // proposeIngestablePosition bumps the persisted Position for an
