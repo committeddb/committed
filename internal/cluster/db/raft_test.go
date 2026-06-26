@@ -754,7 +754,8 @@ type MemoryStorage struct {
 	// MemoryStorage.InitialState is NOT internally synchronised — it just
 	// returns ms.hardState directly — so any test that reads it concurrently
 	// with the raft worker calling Save would race. We override InitialState
-	// to take this mutex and Save acquires it around the SetHardState call.
+	// to take this mutex, and Save holds it across the whole Append+SetHardState
+	// so a reader never sees the log advanced past the HardState.
 	stateMu         sync.RWMutex
 	saveArgsForCall []*MemoryStorageSaveArgsForCall
 }
@@ -784,16 +785,17 @@ func (ms *MemoryStorage) InitialState() (*raftpb.HardState, *raftpb.ConfState, e
 }
 
 func (ms *MemoryStorage) Save(st *raftpb.HardState, ents []*raftpb.Entry, snap *raftpb.Snapshot) error {
-	err := ms.Append(ents)
-	if err != nil {
+	// Hold stateMu across BOTH Append and SetHardState. InitialState also takes
+	// stateMu, so a concurrent reader never observes the log advanced past the
+	// HardState — a "term below its own log" view that violates raft's
+	// Term >= lastLogTerm precondition (see db.assertStorageTermInvariant).
+	ms.stateMu.Lock()
+	defer ms.stateMu.Unlock()
+	if err := ms.Append(ents); err != nil {
 		return err
 	}
-
-	ms.stateMu.Lock()
 	ms.maybeAppendArgsForCallLocked(st, ents, snap)
-	err = ms.SetHardState(st)
-	ms.stateMu.Unlock()
-	return err
+	return ms.SetHardState(st)
 }
 
 // ApplyCommitted is a no-op for the test MemoryStorage. The raft_test

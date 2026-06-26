@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -207,6 +208,31 @@ func newRaftWithOptions(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []
 // — "one election timeout" — rather than duplicating the literal.
 const raftElectionTicks = 10
 
+// assertStorageTermInvariant returns an error when a Storage violates raft's
+// implicit precondition that HardState.Term is at least the term of the last log
+// entry. See the call site in startRaft for why a violation is fatal: it makes a
+// pre-vote rejection emit a sub-term (down to 0) MsgPreVoteResp that panics raft.
+func assertStorageTermInvariant(id uint64, hs *raftpb.HardState, s Storage) error {
+	last, err := s.LastIndex()
+	if err != nil {
+		return fmt.Errorf("node %d: read last index: %w", id, err)
+	}
+	if last == 0 {
+		return nil // empty log — no entry term can outrank HardState.Term
+	}
+	lastTerm, err := s.Term(last)
+	if err != nil {
+		// Can't determine the last entry's term (e.g. compacted past it) — don't
+		// block startup on an edge we can't evaluate.
+		return nil
+	}
+	if hs.GetTerm() < lastTerm {
+		return fmt.Errorf("node %d: storage invariant violated — HardState.Term=%d below lastLogTerm=%d (lastIndex=%d)",
+			id, hs.GetTerm(), lastTerm, last)
+	}
+	return nil
+}
+
 func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 	c := &raft.Config{
 		ID:                        id,
@@ -246,6 +272,20 @@ func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 	hs, _, err := n.storage.InitialState()
 	if err != nil {
 		n.logger.Error("initial state", zap.Error(err))
+	}
+
+	// Enforce raft's implicit Storage precondition — HardState.Term must be at
+	// least the term of the last log entry — at the boundary, before handing the
+	// storage to raft. Correct raft never produces a storage with entries at term
+	// T but a HardState below T, but a torn or inconsistent persist could; raft
+	// started on such a state runs beneath its own log, and a later pre-vote
+	// *rejection* then emits a MsgPreVoteResp with a term down to 0 and trips
+	// raft's "term should be set when sending" assertion — panicking the election
+	// loop with a stack far from the real cause. Fail loud here instead, the same
+	// posture as the missing-transport check below.
+	if err := assertStorageTermInvariant(id, hs, n.storage); err != nil {
+		n.logger.Error("storage invariant", zap.Error(err))
+		panic("db: " + err.Error())
 	}
 
 	switch {
