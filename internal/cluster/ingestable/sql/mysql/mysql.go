@@ -452,7 +452,12 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 		for {
 			syncer = replication.NewBinlogSyncer(cfg)
 			if gtidSet != nil && !gtidSet.IsEmpty() {
-				streamer, err = syncer.StartSyncGTID(gtidSet)
+				// Hand the syncer its OWN clone: BinlogSyncer mutates the GTID set it
+				// is given, in place, on its stream goroutine (handleEventAndACK →
+				// AddGTID). Passing our gtidSet directly would let that write race the
+				// reads committed makes from it below (the handler seed) and on later
+				// reconnect iterations.
+				streamer, err = syncer.StartSyncGTID(gtidSet.Clone())
 			} else {
 				streamer, err = syncer.StartSync(*lastPos)
 			}
@@ -495,9 +500,10 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 		}
 		// Seed the consumed GTID set (the same set we resumed by) so streaming
 		// checkpoints carry the full set (snapshot ∪ streamed) and it keeps advancing
-		// across reconnects. Clone so the handler's in-place Update never mutates the
-		// set handed to StartSyncGTID. Empty (file:pos-only / gtid_mode=OFF) leaves
-		// consumedGTID nil.
+		// across reconnects. A fresh clone: this is committed's own working copy that
+		// handleXID mutates in place, kept separate from both the immutable resume
+		// gtidSet and the clone the syncer owns. Empty (file:pos-only / gtid_mode=OFF)
+		// leaves consumedGTID nil.
 		if gtidSet != nil {
 			handler.consumedGTID = gtidSet.Clone()
 		}
