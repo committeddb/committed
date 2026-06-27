@@ -29,7 +29,7 @@ func newWalDBScrub(t *testing.T, scrubInterval time.Duration) (*db.DB, *wal.Stor
 		db.WithTickInterval(1*time.Millisecond),
 		db.WithScrubInterval(scrubInterval),
 	)
-	t.Cleanup(func() { _ = d.Close() })
+	t.Cleanup(func() { _ = d.Close(); _ = s.Close() })
 	return d, s
 }
 

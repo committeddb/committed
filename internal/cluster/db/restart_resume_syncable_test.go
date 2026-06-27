@@ -86,6 +86,7 @@ func TestRestartResumeSyncable(t *testing.T) {
 	sync1 := make(chan *db.SyncableWithID)
 	s1, err := wal.Open(dir, p1, sync1, nil, wal.WithoutFsync())
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = s1.Close() })
 	d1 := db.New(uint64(1), db.Peers{1: ""}, s1, p1, sync1, nil, db.WithTickInterval(testTickInterval))
 
 	// ProposeSyncable applies the config; saveSyncable's apply-path send
@@ -114,6 +115,7 @@ func TestRestartResumeSyncable(t *testing.T) {
 	sync2 := make(chan *db.SyncableWithID)
 	s2, err := wal.Open(dir, p2, sync2, nil, wal.WithoutFsync())
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = s2.Close() })
 	d2 := db.New(uint64(1), db.Peers{1: ""}, s2, p2, sync2, nil, db.WithTickInterval(testTickInterval))
 	t.Cleanup(func() { _ = d2.Close() })
 

@@ -73,7 +73,7 @@ func newWalDBStuck(t *testing.T) (*db.DB, *wal.Storage) {
 	require.NoError(t, err)
 	d := db.New(uint64(1), db.Peers{1: ""}, s, p, nil, nil,
 		db.WithTickInterval(testTickInterval), db.WithSyncStuckThreshold(50*time.Millisecond))
-	t.Cleanup(func() { _ = d.Close() })
+	t.Cleanup(func() { _ = d.Close(); _ = s.Close() })
 	return d, s
 }
 
@@ -263,6 +263,7 @@ func TestDeadLetterStuckSyncable_SurvivesRestart(t *testing.T) {
 	// Run 1: wedge on the (last) proposal, then operator-skip it.
 	s1, err := wal.Open(dir, p, nil, nil, wal.WithoutFsync())
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = s1.Close() })
 	d1 := db.New(uint64(1), db.Peers{1: ""}, s1, p, nil, nil,
 		db.WithTickInterval(testTickInterval), db.WithSyncStuckThreshold(50*time.Millisecond))
 	seedUserProposals(t, d1, s1, "evt", []string{"poison"})

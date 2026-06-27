@@ -32,6 +32,7 @@ func newWalDB(t *testing.T) (*db.DB, *wal.Storage) {
 	d := db.New(id, peers, s, p, nil, nil, db.WithTickInterval(testTickInterval))
 	t.Cleanup(func() {
 		_ = d.Close()
+		_ = s.Close() // caller owns the Storage; close it to stop the scrubber + free handles
 	})
 	return d, s
 }

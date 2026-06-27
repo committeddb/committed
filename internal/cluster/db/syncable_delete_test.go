@@ -77,6 +77,7 @@ func newDeleteTestDB(t *testing.T, dir string, rec *teardownRecorder) (*db.DB, *
 	sync := make(chan *db.SyncableWithID)
 	s, err := wal.Open(dir, p, sync, nil, wal.WithoutFsync())
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
 	d := db.New(uint64(1), db.Peers{1: ""}, s, p, sync, nil, db.WithTickInterval(testTickInterval))
 	return d, s
 }
@@ -187,7 +188,7 @@ func TestDeleteSyncable_NonTeardownableSyncable(t *testing.T) {
 	s, err := wal.Open(dir, p, sync, nil, wal.WithoutFsync())
 	require.NoError(t, err)
 	d := db.New(uint64(1), db.Peers{1: ""}, s, p, sync, nil, db.WithTickInterval(testTickInterval))
-	t.Cleanup(func() { _ = d.Close() })
+	t.Cleanup(func() { _ = d.Close(); _ = s.Close() })
 
 	require.NoError(t, d.ProposeSyncable(testCtx(t), &cluster.Configuration{
 		ID:       id,

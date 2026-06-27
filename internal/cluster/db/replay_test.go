@@ -70,7 +70,7 @@ func newWalDBWithSync(t *testing.T) (*db.DB, *wal.Storage) {
 	s, err := wal.Open(dir, p, sync, nil, wal.WithoutFsync())
 	require.NoError(t, err)
 	d := db.New(uint64(1), db.Peers{1: ""}, s, p, sync, nil, db.WithTickInterval(testTickInterval))
-	t.Cleanup(func() { _ = d.Close() })
+	t.Cleanup(func() { _ = d.Close(); _ = s.Close() })
 	return d, s
 }
 

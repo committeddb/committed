@@ -40,6 +40,7 @@ func TestAnnounceAPIURL_BootstrapNode(t *testing.T) {
 	p := parser.New()
 	s, err := wal.Open(dir, p, nil, nil, wal.WithoutFsync())
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
 
 	d := db.New(1, db.Peers{1: ""}, s, p, nil, nil,
 		db.WithTickInterval(testTickInterval),
@@ -69,6 +70,7 @@ func TestAnnounceAPIURL_SurvivesRestart(t *testing.T) {
 
 	s, err := wal.Open(dir, p, nil, nil, wal.WithoutFsync())
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
 	d := db.New(1, db.Peers{1: ""}, s, p, nil, nil,
 		db.WithTickInterval(testTickInterval),
 		db.WithAdvertisedAPIURL("http://n1:8080"))
@@ -102,6 +104,7 @@ func TestAnnounceAPIURL_DisabledWhenUnset(t *testing.T) {
 	p := parser.New()
 	s, err := wal.Open(dir, p, nil, nil, wal.WithoutFsync())
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
 
 	d := db.New(1, db.Peers{1: ""}, s, p, nil, nil,
 		db.WithTickInterval(testTickInterval))

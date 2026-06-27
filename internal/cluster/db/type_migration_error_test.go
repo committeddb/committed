@@ -125,6 +125,7 @@ func TestSync_MigrationSuccess_RecordsDuration(t *testing.T) {
 	p := parser.New()
 	s, err := wal.Open(dir, p, nil, nil, wal.WithoutFsync())
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
 	d := db.New(uint64(1), db.Peers{1: ""}, s, p, nil, nil,
 		db.WithTickInterval(testTickInterval), db.WithMetrics(m))
 	t.Cleanup(func() { _ = d.Close() })

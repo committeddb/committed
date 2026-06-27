@@ -88,6 +88,7 @@ func TestProposeType_IncrementsConfigCounter(t *testing.T) {
 	p := parser.New()
 	s, err := wal.Open(dir, p, nil, nil, wal.WithoutFsync())
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
 
 	id := uint64(1)
 	peers := make(db.Peers)

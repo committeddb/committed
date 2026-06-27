@@ -460,6 +460,10 @@ func createProposal(typeID string, key string, one string) *Proposal {
 func createDB(t *testing.T, p *parser.Parser, dir string, sync chan *db.SyncableWithID, ingest chan *db.IngestableWithID) (*wal.Storage, *test.DB) {
 	storage, err := wal.Open(dir, p, sync, ingest)
 	require.Nil(t, err)
+	// The Storage is caller-owned and outlives db.Close (tests query the SQL sink
+	// through it afterward), so close it at test end to stop the scrubber and
+	// release the WAL/bbolt + SQL handles. Idempotent; runs after the test body.
+	t.Cleanup(func() { _ = storage.Close() })
 
 	db := test.CreateDBWithStorage(storage, p, sync, ingest)
 

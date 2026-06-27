@@ -105,7 +105,7 @@ func newWalDBWithMetrics(t *testing.T) (*db.DB, *wal.Storage, *sdkmetric.ManualR
 	id := uint64(1)
 	peers := db.Peers{id: ""}
 	d := db.New(id, peers, s, p, nil, nil, db.WithTickInterval(testTickInterval), db.WithMetrics(m))
-	t.Cleanup(func() { _ = d.Close() })
+	t.Cleanup(func() { _ = d.Close(); _ = s.Close() })
 	return d, s, reader
 }
 

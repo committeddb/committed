@@ -755,16 +755,13 @@ func (db *DB) Close() error {
 	// node's leadership, then we hand off.
 	db.transferLeadershipBeforeStop()
 
-	// Close raft first (it Saves into the storage on its serve loop), then the
-	// storage we own — closing its bbolt/WAL handles and stopping the background
-	// scrubber. Without this the WAL Storage (and its scrubWorker goroutine)
-	// leaked on every Close; in long-lived test processes that accumulation
-	// starved the suite into timeouts. Storage.Close is idempotent.
-	err := db.raft.Close()
-	if cerr := db.storage.Close(); cerr != nil && err == nil {
-		err = cerr
-	}
-	return err
+	// The WAL Storage is owned by the caller — it opens it, passes it to New, and
+	// keeps using it independently of the DB (operators and tests query the
+	// projected SQL sink via storage.Database *after* closing the DB). So Close
+	// stops raft but does NOT close the Storage; the owner closes it (which stops
+	// the scrubber and closes the WAL/bbolt + SQL handles). Storage.Close is
+	// idempotent so the owner can close it unconditionally.
+	return db.raft.Close()
 }
 
 // proposeIngestablePosition bumps the persisted Position for an
