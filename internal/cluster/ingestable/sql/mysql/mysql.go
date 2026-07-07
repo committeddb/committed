@@ -693,13 +693,53 @@ func (h *MySQLEventHandler) handleRows(ctx context.Context, header *replication.
 		return fmt.Errorf("schema of %q: %w", table, err)
 	}
 
+	// Track the live offset (the row event's end position) so a mid-transaction
+	// soft-limit flush stamps a monotonic SourceSeq. It applies to every row of
+	// the event.
+	if header != nil {
+		h.curPos = header.LogPos
+	}
+
+	// A RowsEvent carries EVERY row of its statement, not just one: a multi-row
+	// INSERT or a bulk DELETE has one image per row, and an UPDATE interleaves
+	// [before, after, before, after, ...]. Emit an entity per affected row — the
+	// after-image for an UPDATE (odd indices), every image otherwise — so batch
+	// and bulk DML don't silently lose all rows but the last.
+	start, step := 0, 1
+	if action == "update" {
+		start, step = 1, 2 // after-images only
+	}
+	for ri := start; ri < len(e.Rows); ri += step {
+		entity, ok := h.rowEntity(ts, table, action, e.Rows[ri])
+		if !ok {
+			continue // unmarshalable row, already logged — skip it
+		}
+		// Buffer until the transaction commits.
+		h.pending = append(h.pending, entity)
+
+		// Soft limit: emit a partial batch to prevent OOM on a very large event/txn.
+		if len(h.pending) >= maxPendingEntities {
+			if err := h.flushPending(ctx); err != nil {
+				return err
+			}
+		}
+	}
+
+	zap.L().Debug("handleRows", zap.String("table", table), zap.String("action", action), zap.Int("rows", len(e.Rows)))
+	return nil
+}
+
+// rowEntity decodes one row image (positional values joined to the schema by
+// ordinal) into an upsert or a delete tombstone keyed by the row's primary key.
+// ok is false — the row is to be skipped, having already been logged — when its
+// mapped data can't be marshaled to JSON.
+func (h *MySQLEventHandler) rowEntity(ts *tableSchema, table, action string, row []any) (*cluster.Entity, bool) {
 	// m holds the key form: coerce []byte (TEXT/BLOB/JSON) to string so the key is
 	// text and matches the snapshot path. raw/catByName keep the value and its
 	// category so the payload renders as natural JSON.
 	m := make(map[string]any)
 	raw := make(map[string]any)
 	catByName := make(map[string]sql.JSONCategory)
-	row := e.Rows[len(e.Rows)-1]
 	for i, col := range ts.cols {
 		if i >= len(row) {
 			break // row image has fewer columns than the current schema (DDL skew)
@@ -714,53 +754,31 @@ func (h *MySQLEventHandler) handleRows(ctx context.Context, header *replication.
 		}
 	}
 
+	key := sql.CompositeKey(m, h.config.PrimaryKey)
+
+	// A source DELETE becomes a delete (tombstone) entity keyed by the row's
+	// primary key; INSERT/UPDATE upsert the (after-)image.
+	if action == "delete" {
+		return cluster.NewDeleteEntity(h.config.Type, []byte(key)), true
+	}
+
 	toJSON := make(map[string]any)
 	for _, mapping := range h.config.Mappings {
 		toJSON[mapping.JsonName] = sql.JSONValue(raw[mapping.SQLColumn], catByName[mapping.SQLColumn])
 	}
-
 	jsonString, err := json.Marshal(toJSON)
 	if err != nil {
 		zap.L().Warn("handleRows: skipping row with unmarshalable data",
 			zap.String("table", table),
 			zap.Error(err),
 		)
-		return nil
+		return nil, false
 	}
-
-	key := sql.CompositeKey(m, h.config.PrimaryKey)
-
-	// A source DELETE becomes a delete (tombstone) entity keyed by the row's
-	// primary key. INSERT and UPDATE emit upserts of the post-image — the last
-	// row of the event, which for an UPDATE is the after-image of the last pair.
-	var entity *cluster.Entity
-	if action == "delete" {
-		entity = cluster.NewDeleteEntity(h.config.Type, []byte(key))
-	} else {
-		entity = &cluster.Entity{
-			Type: h.config.Type,
-			Key:  []byte(key),
-			Data: []byte(jsonString),
-		}
-	}
-
-	// Buffer until the transaction commits. Track the live offset (the row
-	// event's end position) so a mid-transaction soft-limit flush stamps a
-	// monotonic SourceSeq.
-	h.pending = append(h.pending, entity)
-	if header != nil {
-		h.curPos = header.LogPos
-	}
-
-	// Soft limit: emit a partial batch to prevent OOM on a very large transaction.
-	if len(h.pending) >= maxPendingEntities {
-		if err := h.flushPending(ctx); err != nil {
-			return err
-		}
-	}
-
-	zap.L().Debug("handleRows", zap.String("table", table), zap.String("action", action))
-	return nil
+	return &cluster.Entity{
+		Type: h.config.Type,
+		Key:  []byte(key),
+		Data: []byte(jsonString),
+	}, true
 }
 
 // flushPending emits all buffered entities as a single proposal and resets the

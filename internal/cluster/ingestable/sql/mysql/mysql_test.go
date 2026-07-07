@@ -730,6 +730,91 @@ func TestMysqlStreamingDelete(t *testing.T) {
 	require.True(t, del.IsDelete(), "a source DELETE must ingest as a delete entity")
 }
 
+// TestMysqlMultiRowDML verifies the CDC decode emits EVERY row of a multi-row
+// statement, not just the last. A batch INSERT, a multi-row UPDATE, and a bulk
+// DELETE each arrive as a single RowsEvent carrying every image; the regression
+// this guards (taking only e.Rows[len-1]) silently lost all rows but the last —
+// including bulk-delete tombstones.
+func TestMysqlMultiRowDML(t *testing.T) {
+	table := "multirow_table"
+
+	db := createDB(t)
+	_, err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS `%s`", table))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf("CREATE TABLE `%s` (pk VARCHAR(32) NOT NULL, val TEXT, PRIMARY KEY (pk));", table))
+	require.NoError(t, err)
+	// Sentinel in the snapshot so we can gate on streaming being live.
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, val) VALUES ('__sentinel__', 'go');", table))
+	require.NoError(t, err)
+	db.Close()
+
+	config := &sql.Config{
+		Type:             &cluster.Type{ID: "multirow", Name: "multirow"},
+		Mappings:         []sql.Mapping{{JsonName: "pk", SQLColumn: "pk"}, {JsonName: "val", SQLColumn: "val"}},
+		PrimaryKey:       []string{"pk"},
+		ConnectionString: ingestURL,
+		Tables:           []string{table},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	proposalChan := make(chan *cluster.Proposal, 10)
+	positionChan := make(chan cluster.Position, 10)
+	dialect := &mysql.MySQLDialect{}
+	go func() { _ = dialect.Ingest(ctx, config, nil, proposalChan, positionChan) }()
+
+	model := map[string]string{}
+	deleted := map[string]bool{}
+	drainUntil := func(pred func() bool, what string) {
+		t.Helper()
+		deadline := time.After(30 * time.Second)
+		for !pred() {
+			select {
+			case p := <-proposalChan:
+				for _, e := range p.Entities {
+					k := string(e.Key)
+					if e.IsDelete() {
+						delete(model, k)
+						deleted[k] = true
+						continue
+					}
+					var row map[string]string
+					require.NoError(t, json.Unmarshal(e.Data, &row))
+					model[k] = row["val"]
+					deleted[k] = false
+				}
+			case <-positionChan:
+			case <-deadline:
+				t.Fatalf("timed out waiting for %s (model=%v deleted=%v)", what, model, deleted)
+			}
+		}
+	}
+
+	drainUntil(func() bool { _, ok := model["__sentinel__"]; return ok }, "streaming to be live")
+
+	mdb := createDB(t)
+	defer mdb.Close()
+
+	// 1. Multi-row INSERT — every row must arrive, not just the last.
+	_, err = mdb.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, val) VALUES ('a','1'),('b','2'),('c','3')", table))
+	require.NoError(t, err)
+	drainUntil(func() bool { return model["a"] == "1" && model["b"] == "2" && model["c"] == "3" },
+		"all 3 rows of the batch INSERT")
+
+	// 2. Multi-row UPDATE — both after-images must arrive; c is untouched.
+	_, err = mdb.Exec(fmt.Sprintf("UPDATE `%s` SET val='X' WHERE pk IN ('a','b')", table))
+	require.NoError(t, err)
+	drainUntil(func() bool { return model["a"] == "X" && model["b"] == "X" },
+		"both after-images of the multi-row UPDATE")
+	require.Equal(t, "3", model["c"], "c must be untouched by the a/b UPDATE")
+
+	// 3. Bulk DELETE — a tombstone per row, not just one.
+	_, err = mdb.Exec(fmt.Sprintf("DELETE FROM `%s` WHERE pk IN ('a','b','c')", table))
+	require.NoError(t, err)
+	drainUntil(func() bool { return deleted["a"] && deleted["b"] && deleted["c"] },
+		"all 3 tombstones of the bulk DELETE")
+}
+
 // TestMysqlSnapshotConcurrentMutationConverges is the effectively-once
 // re-validation for the convergent snapshot contract (Phase C): the snapshot is
 // NOT point-in-time — it reads per-batch while writes continue — and correctness
