@@ -11,16 +11,13 @@ import (
 
 var rootCmd = &cobra.Command{
 	Use:   "committed",
-	Short: "A brief description of your application",
-	Long: `A longer description that spans multiple lines and likely contains
-examples and usage of using your application. For example:
+	Short: "A single-binary, Raft-backed distributed commit log",
+	Long: `Committed is a single-binary, Raft-backed distributed commit log that is its
+own source of truth: write events in, sync them out to systems built for
+querying. It is designed for building distributed CQRS / event-sourced systems.
 
-Cobra is a CLI library for Go that empowers applications.
-This application is a tool to generate the needed files
-to quickly create a Cobra application.`,
-	// Uncomment the following line if your bare application
-	// has an action associated with it:
-	// Run: func(cmd *cobra.Command, args []string) { },
+Start a node with "committed node". Documentation:
+https://github.com/committeddb/committed`,
 }
 
 func Execute() {
@@ -45,8 +42,6 @@ func versionString() string {
 }
 
 func init() {
-	rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
-
 	// Cobra auto-registers --version when Version is non-empty, and
 	// handles the flag before Run is invoked (prints + exits 0). The
 	// template prints just the version string so the stdout payload
