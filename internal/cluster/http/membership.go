@@ -170,16 +170,20 @@ func (h *HTTP) RemoveMember(w httpgo.ResponseWriter, r *httpgo.Request) {
 
 // writeMembershipError maps an Add/Remove/Promote error to a response:
 // a malformed request (cluster.ErrInvalidMember) or a promote of a
-// non-learner / unknown id (cluster.ErrNotLearner) → 400; a context error →
-// 503 (the change was submitted to raft but couldn't be confirmed before the
-// request deadline — typically this node can't currently reach a quorum — and
-// may still take effect); anything else → 500.
+// non-learner / unknown id (cluster.ErrNotLearner) → 400; removing the sole
+// voter (cluster.ErrWouldRemoveLastVoter) → 409 (well-formed but conflicts with
+// the current state); a context error → 503 (the change was submitted to raft
+// but couldn't be confirmed before the request deadline — typically this node
+// can't currently reach a quorum — and may still take effect); anything else →
+// 500.
 func writeMembershipError(w httpgo.ResponseWriter, err error, action string) {
 	switch {
 	case errors.Is(err, cluster.ErrInvalidMember):
 		writeError(w, httpgo.StatusBadRequest, "invalid_member", err.Error())
 	case errors.Is(err, cluster.ErrNotLearner):
 		writeError(w, httpgo.StatusBadRequest, "not_a_learner", err.Error())
+	case errors.Is(err, cluster.ErrWouldRemoveLastVoter):
+		writeError(w, httpgo.StatusConflict, "would_remove_last_voter", err.Error())
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		writeError(w, httpgo.StatusServiceUnavailable, "membership_unconfirmed",
 			"membership change submitted but not confirmed before the request deadline; it may still take effect once a quorum is reachable")

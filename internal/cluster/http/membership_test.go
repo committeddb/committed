@@ -88,6 +88,19 @@ func TestRemoveMember_Success(t *testing.T) {
 	require.Equal(t, uint64(3), id)
 }
 
+// TestRemoveMember_LastVoter maps cluster.ErrWouldRemoveLastVoter to 409 — a
+// well-formed request that conflicts with cluster state (can't remove the sole
+// voter), distinct from the 400 malformed-id cases.
+func TestRemoveMember_LastVoter(t *testing.T) {
+	fake := &clusterfakes.FakeCluster{}
+	fake.RemoveMemberReturns(cluster.ErrWouldRemoveLastVoter)
+	h := http.New(fake)
+
+	status := doRequest(t, h, "DELETE", "http://localhost/v1/membership/1", "")
+
+	require.Equal(t, 409, status)
+}
+
 // TestRemoveMember_BadID rejects a non-numeric id with 400 and never calls
 // the cluster.
 func TestRemoveMember_BadID(t *testing.T) {

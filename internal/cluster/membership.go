@@ -18,6 +18,15 @@ var ErrInvalidMember = errors.New("cluster: invalid member")
 // error (→ 503).
 var ErrNotLearner = errors.New("cluster: not a learner")
 
+// ErrWouldRemoveLastVoter is returned by Cluster.RemoveMember when removing the
+// target id would leave the configuration with no voters. raft rejects an empty
+// incoming voter set only at apply time — by panicking — which commits an
+// unrecoverable conf change that re-panics every node on restart, permanently
+// bricking the cluster. The HTTP layer maps it to 409: the request is
+// well-formed but conflicts with the current state (you cannot remove the sole
+// voter). Add or promote another voter first.
+var ErrWouldRemoveLastVoter = errors.New("cluster: would remove the last voter")
+
 // Member roles reported by Membership. A node is a voter (counts toward
 // quorum) or a learner (replicates the log but does not vote). Learners are
 // not yet added by this build; the role is reported generally so the

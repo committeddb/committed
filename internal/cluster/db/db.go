@@ -923,6 +923,18 @@ func (db *DB) RemoveMember(ctx context.Context, id uint64) error {
 	if id == 0 {
 		return fmt.Errorf("%w: id must be non-zero", cluster.ErrInvalidMember)
 	}
+	// Refuse to remove the last voter. raft rejects an empty incoming voter set
+	// only at apply time — by panicking (raft.go) — which commits an
+	// unrecoverable entry that re-panics every node on restart. This best-effort
+	// guard reads the local config (like PromoteMember it can false-negative
+	// against a briefly stale follower; an operator observes membership via
+	// GET /v1/membership and can retry), catching the foot-gun before it reaches
+	// the log. Removing a learner, or a voter while other voters remain, is fine.
+	voters, _, _ := db.raft.memberStatus()
+	if _, isVoter := voters[id]; isVoter && len(voters) == 1 {
+		return fmt.Errorf("%w: node %d is the only voter; add or promote another voter first",
+			cluster.ErrWouldRemoveLastVoter, id)
+	}
 	cc := &raftpb.ConfChangeV2{
 		Transition: raftpb.ConfChangeTransitionJointImplicit.Enum(),
 		Changes:    []*raftpb.ConfChangeSingle{{Type: raftpb.ConfChangeRemoveNode.Enum(), NodeId: &id}},
