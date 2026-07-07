@@ -12,8 +12,8 @@ require (
 	github.com/jackc/pglogrepl v0.0.0-20260401131349-e37c41485510
 	github.com/maxbrunsfeld/counterfeiter/v6 v6.12.2
 	github.com/moby/moby/client v0.5.0
-	github.com/pb33f/libopenapi v0.38.2
-	github.com/pb33f/libopenapi-validator v0.13.12
+	github.com/pb33f/libopenapi v0.38.5
+	github.com/pb33f/libopenapi-validator v0.13.13
 	github.com/pelletier/go-toml/v2 v2.4.2
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 	github.com/spf13/cobra v1.10.2

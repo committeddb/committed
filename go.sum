@@ -173,10 +173,10 @@ github.com/opencontainers/image-spec v1.1.1 h1:y0fUlFfIZhPF1W537XOLg0/fcx6zcHCJw
 github.com/opencontainers/image-spec v1.1.1/go.mod h1:qpqAh3Dmcf36wStyyWU+kCeDgrGnAve2nCC8+7h8Q0M=
 github.com/pb33f/jsonpath v0.8.2 h1:Ou4C7zjYClBm97dfZjDCjdZGusJoynv/vrtiEKNfj2Y=
 github.com/pb33f/jsonpath v0.8.2/go.mod h1:zBV5LJW4OQOPatmQE2QdKpGQJvhDTlE5IEj6ASaRNTo=
-github.com/pb33f/libopenapi v0.38.2 h1:8GyNJESGw8Gj3Di5pRPRpT05wrFSos0Slz6wwendFqA=
-github.com/pb33f/libopenapi v0.38.2/go.mod h1:8yHl64vr+ICrnzSgiwJmZ54heRqCqrhI/JL1ge+CPIY=
-github.com/pb33f/libopenapi-validator v0.13.12 h1:ImfdtrO0epuYh6fGdq3Kyi9qReuVM1CrF6kErhJwMUg=
-github.com/pb33f/libopenapi-validator v0.13.12/go.mod h1:qLIK1VDB+XAcyrjq9HG8bep+ASvIMYVTUW5WxMmGQM0=
+github.com/pb33f/libopenapi v0.38.5 h1:qSJILKRAMp1jPe/auT3tXGhyBqzvZLsawQMA320HVE8=
+github.com/pb33f/libopenapi v0.38.5/go.mod h1:8yHl64vr+ICrnzSgiwJmZ54heRqCqrhI/JL1ge+CPIY=
+github.com/pb33f/libopenapi-validator v0.13.13 h1:RZk8CUsZ1x0yObHPY7KP+VKiW3iyLE65yOup0Elxfr0=
+github.com/pb33f/libopenapi-validator v0.13.13/go.mod h1:KWbtcurMJX/VZkorPidKRrWQpFjRk4teAO9aYwKu4fY=
 github.com/pb33f/ordered-map/v2 v2.3.1 h1:5319HDO0aw4DA4gzi+zv4FXU9UlSs3xGZ40wcP1nBjY=
 github.com/pb33f/ordered-map/v2 v2.3.1/go.mod h1:qxFQgd0PkVUtOMCkTapqotNgzRhMPL7VvaHKbd1HnmQ=
 github.com/pb33f/testify v0.1.0 h1:g48/HDU/jn2COspS4nM0scptxiKTJ4DnbX/4ehK6IZ8=
