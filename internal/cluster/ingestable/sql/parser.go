@@ -98,6 +98,31 @@ func (p *IngestableParser) ParseConfig(v *cluster.ParsedConfig) (*Config, Dialec
 		}
 	}
 
+	// Required-field validation. Without these an ingestable is accepted at POST
+	// but wedges: an empty primaryKey collapses every row onto the single "[]"
+	// composite key (and the snapshot's `ORDER BY ""` is a SQL syntax error that
+	// the snapshot loop retries forever), an empty tables list snapshots nothing,
+	// and no mappings (without mapAllColumns) produces an empty payload. Fail fast
+	// with an actionable FieldError instead of a silent spin.
+	if len(primaryKey) == 0 {
+		return nil, nil, &cluster.FieldError{
+			Field: "sql.primaryKey",
+			Issue: "required: an ingestable needs a primary key to build per-row entity keys",
+		}
+	}
+	if len(tables) == 0 {
+		return nil, nil, &cluster.FieldError{
+			Field: "sql.tables",
+			Issue: "required: list at least one source table to ingest",
+		}
+	}
+	if len(mappings) == 0 && !mapAllColumns {
+		return nil, nil, &cluster.FieldError{
+			Field: "sql.mappings",
+			Issue: "required: define at least one mapping, or set sql.mapAllColumns = true",
+		}
+	}
+
 	config := &Config{
 		ConnectionString: connectionString,
 		Type:             tipe,

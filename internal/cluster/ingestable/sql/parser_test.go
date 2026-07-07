@@ -177,6 +177,81 @@ slot_name = "s"
 	require.ErrorContains(t, err, "excludeColumns requires sql.mapAllColumns")
 }
 
+// TestParseRejectsMissingRequiredFields is the fail-fast regression: an
+// ingestable missing primaryKey, tables, or a mapping source (mappings /
+// mapAllColumns) is rejected at POST with a field-scoped error, rather than
+// accepted and left to wedge — an empty primaryKey collapses every row onto the
+// single "[]" key and the snapshot's `ORDER BY ""` retries forever; empty tables
+// ingests nothing.
+func TestParseRejectsMissingRequiredFields(t *testing.T) {
+	base := func(extra string) string {
+		return `
+[ingestable]
+name="foo"
+type="sql"
+
+[sql]
+dialect="mysql"
+topic = "simple"
+connectionString="foo"
+` + extra
+	}
+	mappingsBlock := "\n[[sql.mappings]]\njsonName = \"pk\"\ncolumn = \"pk\"\n"
+
+	tests := []struct {
+		name  string
+		toml  string
+		field string
+	}{
+		{"missing primaryKey", base(`tables = ["t"]` + mappingsBlock), "sql.primaryKey"},
+		{"missing tables", base(`primaryKey = "pk"` + mappingsBlock), "sql.tables"},
+		{"no mappings and not mapAllColumns", base("primaryKey = \"pk\"\ntables = [\"t\"]\n"), "sql.mappings"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := readConfig(t, "toml", bytes.NewReader([]byte(tt.toml)))
+			tiper := &sqlfakes.FakeTyper{}
+			tiper.ResolveTypeReturns(simpleType, nil)
+			p := sql.NewIngestableParser(tiper)
+			p.Dialects["mysql"] = &mysql.MySQLDialect{}
+
+			_, _, err := p.ParseConfig(v)
+
+			var fe *cluster.FieldError
+			require.ErrorAs(t, err, &fe)
+			require.Equal(t, tt.field, fe.Field)
+		})
+	}
+}
+
+// TestParseAcceptsMapAllColumnsWithoutMappings confirms the mapping requirement
+// is satisfied by mapAllColumns alone — no explicit [[sql.mappings]] needed.
+func TestParseAcceptsMapAllColumnsWithoutMappings(t *testing.T) {
+	toml := `
+[ingestable]
+name="foo"
+type="sql"
+
+[sql]
+dialect="mysql"
+topic = "simple"
+connectionString="foo"
+primaryKey = "pk"
+tables = ["t"]
+mapAllColumns = true
+`
+	v := readConfig(t, "toml", bytes.NewReader([]byte(toml)))
+	tiper := &sqlfakes.FakeTyper{}
+	tiper.ResolveTypeReturns(simpleType, nil)
+	p := sql.NewIngestableParser(tiper)
+	p.Dialects["mysql"] = &mysql.MySQLDialect{}
+
+	config, _, err := p.ParseConfig(v)
+	require.NoError(t, err)
+	require.True(t, config.MapAllColumns)
+}
+
 func simpleConfig() *sql.Config {
 	m1 := sql.Mapping{JsonName: "pk", SQLColumn: "pk"}
 	m2 := sql.Mapping{JsonName: "one", SQLColumn: "one"}
@@ -187,7 +262,7 @@ func simpleConfig() *sql.Config {
 		Type:             simpleType,
 		Mappings:         m,
 		PrimaryKey:       []string{"pk"},
-		Tables:           nil,
+		Tables:           []string{"simple"},
 		Options:          map[string]string{},
 	}
 }

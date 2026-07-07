@@ -8,6 +8,7 @@ dialect="mysql"
 topic = "simple"
 connectionString="foo"
 primaryKey = "pk"
+tables = ["simple"]
 
 [[sql.mappings]]
 jsonName = "pk"
