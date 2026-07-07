@@ -14,14 +14,14 @@ require (
 	github.com/moby/moby/client v0.5.0
 	github.com/pb33f/libopenapi v0.38.5
 	github.com/pb33f/libopenapi-validator v0.13.13
-	github.com/pelletier/go-toml/v2 v2.4.2
+	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
 	github.com/testcontainers/testcontainers-go v0.43.0
 	github.com/testcontainers/testcontainers-go/modules/mysql v0.43.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.43.0
-	go.etcd.io/etcd/client/pkg/v3 v3.6.12
+	go.etcd.io/etcd/client/pkg/v3 v3.6.13
 	go.etcd.io/raft/v3 v3.7.0
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc v1.44.0
@@ -128,7 +128,7 @@ require (
 	github.com/coreos/go-semver v0.3.1 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/dolthub/go-mysql-server v0.20.0
-	github.com/go-chi/chi/v5 v5.3.0
+	github.com/go-chi/chi/v5 v5.3.1
 	github.com/go-mysql-org/go-mysql v1.15.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/magiconair/properties v1.8.10 // indirect
