@@ -118,11 +118,15 @@ not committed:
   obligations and expire/destroy old backups accordingly.
 - **On restore:** restoring a backup **resurrects** the PII of every subject
   deleted-and-scrubbed *after* that backup was taken — those deletes happened
-  later and aren't in the archive. After a restore, replay the RTBF deletes
-  recorded in the [audit log](../../README.md) that post-date the backup (the
-  restored node's `applied_index`, from `GET /v1/membership`, marks how far the
-  backup covered) to re-forget them.
+  later and aren't in the archive. committed keeps **no ledger of erased
+  subjects** — a right-to-be-forgotten delete physically removes the data from
+  the log, leaving nothing to enumerate. You must therefore record RTBF requests
+  in your own compliance system and **re-issue any that post-date the backup**
+  after a restore. The restored node's `applied_index` (from `GET /v1/membership`)
+  marks how far the backup covered, so you know which of your tracked requests to
+  re-apply.
 
-committed gives you the primitive, the frozen manifest, and the audit log as
-the record of deletes to replay; managing backup retention and post-restore
-re-forgetting within your compliance regime is the operator's responsibility.
+committed gives you the primitive and the frozen manifest; because erasure is
+physical (committed retains no record of what was deleted), managing backup
+retention, the record of RTBF requests, and post-restore re-forgetting within
+your compliance regime is the operator's responsibility.

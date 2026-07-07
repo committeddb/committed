@@ -32,9 +32,10 @@ directory IS a node's directory, so it recovers exactly as it would from its
 own disk.
 
 RTBF note: a backup is a frozen copy. Restoring resurrects any subject that
-was deleted-and-scrubbed AFTER the backup was taken. To stay compliant after a
-restore, replay the right-to-be-forgotten deletes recorded in the audit log
-that post-date the backup. See docs/operations/backup.md.
+was deleted-and-scrubbed AFTER the backup was taken. committed keeps no ledger
+of erased subjects (erasure is physical), so track right-to-be-forgotten
+requests in your own compliance system and re-issue any that post-date the
+backup after a restore. See docs/operations/backup.md.
 
 If --from ends in ".gz" it is read as gzip.`,
 	SilenceUsage: true,
