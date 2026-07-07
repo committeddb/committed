@@ -16,6 +16,13 @@ import (
 
 var testDB = &TestDatabase{}
 
+// Topics with a declared entity kind, so the parser can resolve a kind and
+// exercise the kind-aware primaryKey requirement.
+var (
+	snapshotType = &cluster.Type{ID: "acct", Name: "acct", EntityKind: cluster.EntityKindSnapshot}
+	eventType    = &cluster.Type{ID: "evt", Name: "evt", EntityKind: cluster.EntityKindEvent}
+)
+
 func TestParse(t *testing.T) {
 	tests := []struct {
 		configFileName string
@@ -88,6 +95,107 @@ func TestParseRejectsWholePayloadIntoNonTextColumn(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), `"payload"`)
 	require.Contains(t, err.Error(), `"INT"`)
+}
+
+// TestParseRejectsMissingRequiredFields: a destination table and at least one
+// column mapping are required for any SQL syncable regardless of entity kind — an
+// empty one is rejected at POST with a field-scoped error instead of failing
+// later as malformed DDL.
+func TestParseRejectsMissingRequiredFields(t *testing.T) {
+	tests := []struct {
+		name  string
+		toml  string
+		field string
+	}{
+		{
+			"missing table",
+			`
+[sql]
+topic = "t"
+db = "testdb"
+primaryKey = "pk"
+
+[[sql.mappings]]
+jsonPath = "$.key"
+column   = "pk"
+type     = "TEXT"
+`,
+			"sql.table",
+		},
+		{
+			"missing mappings",
+			`
+[sql]
+topic = "t"
+db = "testdb"
+table = "foo"
+primaryKey = "pk"
+`,
+			"sql.mappings",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := readConfig(t, "toml", strings.NewReader(tt.toml))
+			dbs := map[string]cluster.Database{"testdb": testDB}
+			_, err := (&sql.SyncableParser{}).ParseConfig(v, &TestDatabaseStorage{dbs: dbs})
+			var fe *cluster.FieldError
+			require.ErrorAs(t, err, &fe)
+			require.Equal(t, tt.field, fe.Field)
+		})
+	}
+}
+
+// TestParseSnapshotTopicRequiresPrimaryKey: a snapshot-kind topic is a
+// key-addressed LWW-per-key upsert sink, so an empty primaryKey — which would
+// silently duplicate rows and dead-letter every delete (RTBF loss) — is rejected
+// at POST.
+func TestParseSnapshotTopicRequiresPrimaryKey(t *testing.T) {
+	toml := `
+[sql]
+topic = "acct"
+db = "testdb"
+table = "foo"
+
+[[sql.mappings]]
+jsonPath = "$.key"
+column   = "pk"
+type     = "TEXT"
+`
+	v := readConfig(t, "toml", strings.NewReader(toml))
+	storage := &typeResolvingStorage{
+		TestDatabaseStorage: TestDatabaseStorage{dbs: map[string]cluster.Database{"testdb": testDB}},
+		types:               map[string]*cluster.Type{"acct": snapshotType},
+	}
+	_, err := (&sql.SyncableParser{}).ParseConfig(v, storage)
+	var fe *cluster.FieldError
+	require.ErrorAs(t, err, &fe)
+	require.Equal(t, "sql.primaryKey", fe.Field)
+}
+
+// TestParseEventTopicAllowsEmptyPrimaryKey: an event-kind topic lands as an
+// append-only log (whole-payload "$"), which legitimately has no domain primary
+// key — the snapshot-only requirement must not reject it.
+func TestParseEventTopicAllowsEmptyPrimaryKey(t *testing.T) {
+	toml := `
+[sql]
+topic = "evt"
+db = "testdb"
+table = "events"
+
+[[sql.mappings]]
+jsonPath = "$"
+column   = "payload"
+type     = "JSONB"
+`
+	v := readConfig(t, "toml", strings.NewReader(toml))
+	storage := &typeResolvingStorage{
+		TestDatabaseStorage: TestDatabaseStorage{dbs: map[string]cluster.Database{"testdb": testDB}},
+		types:               map[string]*cluster.Type{"evt": eventType},
+	}
+	config, err := (&sql.SyncableParser{}).ParseConfig(v, storage)
+	require.NoError(t, err)
+	require.Empty(t, config.PrimaryKey)
 }
 
 func simpleConfig(db cluster.Database) *sql.Config {

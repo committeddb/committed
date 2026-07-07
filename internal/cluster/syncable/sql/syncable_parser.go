@@ -67,6 +67,34 @@ func (p *SyncableParser) ParseConfig(v *cluster.ParsedConfig, storage cluster.Da
 		return nil, fmt.Errorf("[sql.syncable-parser] %w", err)
 	}
 
+	// A destination table and at least one column mapping are needed for every
+	// syncable, regardless of entity kind: without them Init emits malformed DDL
+	// (`CREATE TABLE  ()`) / `INSERT INTO t () VALUES ()` that fails at POST when
+	// the DB is reachable and only degrades (no worker) otherwise. Reject up front
+	// with a field-scoped 400 instead of a raw SQL error.
+	if table == "" {
+		return nil, &cluster.FieldError{Field: "sql.table", Issue: "required: name the destination table"}
+	}
+	if len(mappings) == 0 {
+		return nil, &cluster.FieldError{Field: "sql.mappings", Issue: "required: define at least one column mapping"}
+	}
+
+	// primaryKey is structurally required only for a snapshot-kind topic — the
+	// key-addressed, last-writer-wins-per-key upsert this syncable performs.
+	// Without it the upsert has no ON CONFLICT / unique-key target, so rows
+	// duplicate instead of overwriting, and every delete Actual dead-letters (no
+	// key to delete by — RTBF loss). Append/fold/history kinds (event,
+	// standalone, revision, command), unspecified/grandfathered topics, and
+	// topics whose type isn't resolvable at parse time legitimately land without
+	// one, so we require it for snapshot only (best-effort, mirroring
+	// warnKindMisuse's resolution).
+	if primaryKey == "" && requiresPrimaryKey(storage, topic) {
+		return nil, &cluster.FieldError{
+			Field: "sql.primaryKey",
+			Issue: "required for a snapshot-kind topic: this syncable upserts last-writer-wins per key, so without a primary key rows duplicate instead of overwriting and every delete is dropped",
+		}
+	}
+
 	p.warnKindMisuse(storage, topic, mappings)
 
 	var indexes []Index
@@ -133,4 +161,23 @@ func (p *SyncableParser) warnKindMisuse(storage cluster.DatabaseStorage, topic s
 	if p.Metrics != nil {
 		p.Metrics.EntityKindMisuse("sql", topic, t.EntityKind.String())
 	}
+}
+
+// requiresPrimaryKey reports whether the topic's declared entity kind makes a
+// primary key structurally mandatory for this syncable. Only EntityKindSnapshot
+// — the key-addressed, LWW-per-key upsert sink — does: for it an empty primary
+// key silently duplicates rows and dead-letters every delete. Append/fold/
+// history kinds and unspecified or unresolvable topics are grandfathered
+// (best-effort, mirroring warnKindMisuse: an unknown resolver or unknown type
+// means no enforcement, since a syncable may be configured before its topic).
+func requiresPrimaryKey(storage cluster.DatabaseStorage, topic string) bool {
+	resolver, ok := storage.(cluster.TypeResolver)
+	if !ok {
+		return false
+	}
+	t, err := resolver.ResolveType(cluster.LatestTypeRef(topic))
+	if err != nil || t == nil {
+		return false
+	}
+	return t.EntityKind == cluster.EntityKindSnapshot
 }
