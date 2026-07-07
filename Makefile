@@ -103,11 +103,15 @@ test/integration:
 #
 # -race is mandatory here — the whole point of this suite is finding
 # concurrency regressions under partition / flap / concurrent-writer
-# conditions, and those bugs are race-detector-visible. -count=20 gates
-# against timing flakes; a single-count pass under -race isn't enough
-# evidence to trust a scenario.
+# conditions, and those bugs are race-detector-visible. ADVERSARIAL_COUNT
+# gates against timing flakes; a single-count pass under -race isn't enough
+# evidence to trust a scenario. CI shards the count across a 4-way matrix
+# (4 × ADVERSARIAL_COUNT=5 = 20 total runs) to cut wall-clock ~4× without
+# weakening the gate — each shard still accumulates across its 5 in-process
+# iterations. A local `make test/adversarial` runs the full 20.
+ADVERSARIAL_COUNT ?= 20
 test/adversarial:
-	go test -tags adversarial -race -count=20 -timeout 900s ./internal/cluster/db/...
+	go test -tags adversarial -race -count=$(ADVERSARIAL_COUNT) -timeout 900s ./internal/cluster/db/...
 
 # End-to-end CDC pressure-test harness. Drives a real Postgres
 # (testcontainers) and a real committed binary spawned as a child
