@@ -700,13 +700,17 @@ func TestAdversarial_ConcurrentConfigChanges(t *testing.T) {
 	//   - ~2/3 on a follower (forwarded via raft to the leader)
 	//
 	// Whoever the leader happens to be, at least a third of the
-	// proposes exercise the forwarding path. ErrProposalUnknown is the
-	// documented retry-me signal from the leader-change watcher and
-	// ProposeIngestable is idempotent by config ID (saveIngestable's
-	// putVersioned tolerates same-ID re-applies), so we retry instead
-	// of failing on it — otherwise this test flakes ~2% under -count=20
-	// when a transient re-election lands between WaitForLeader and the
-	// concurrent propose burst.
+	// proposes exercise the forwarding path. ErrProposalUnknown ("status
+	// unknown after leader change") and ErrProposalLost ("entry truncated
+	// before commit") are both documented leader-change retry-me signals —
+	// ErrProposalLost is the definitive "this attempt is gone, safe to
+	// retry" — and ProposeIngestable is idempotent by config ID
+	// (saveIngestable's putVersioned tolerates same-ID re-applies), so we
+	// retry on either instead of failing. Otherwise this test flakes when a
+	// transient re-election lands between WaitForLeader and the concurrent
+	// propose burst: a new leader can truncate an uncommitted ingestable
+	// entry (a mid-flight config change flapping leadership), which surfaces
+	// as ErrProposalLost, not ErrProposalUnknown.
 	var wg sync.WaitGroup
 	errs := make([]error, ingestables)
 	for i := 0; i < ingestables; i++ {
@@ -719,7 +723,8 @@ func TestAdversarial_ConcurrentConfigChanges(t *testing.T) {
 			defer cancel()
 			for attempt := 0; attempt < 5; attempt++ {
 				errs[i] = h.dbs[i%replicas].ProposeIngestable(ctx, cfg)
-				if !errors.Is(errs[i], db.ErrProposalUnknown) {
+				if !errors.Is(errs[i], db.ErrProposalUnknown) &&
+					!errors.Is(errs[i], db.ErrProposalLost) {
 					return
 				}
 			}
