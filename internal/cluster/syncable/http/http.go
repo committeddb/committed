@@ -78,14 +78,15 @@ func (s *Syncable) CheckpointPolicy() cluster.CheckpointPolicy {
 // raft Index, so a redelivery (after a retry, leader change, or restart) is
 // recognizable as the same transaction.
 func (s *Syncable) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldSnapshot, error) {
-	for _, e := range a.Entities {
-		if s.config.Topic != e.ID {
-			return false, nil
-		}
-	}
-
+	// A proposal can carry entities from several topics; POST only ours. Filtering
+	// per-entity — rather than dropping the whole Actual on the first foreign
+	// entity — is what keeps a mixed-topic Actual from silently losing this
+	// topic's data.
 	entities := make([]entityPayload, 0, len(a.Entities))
 	for _, e := range a.Entities {
+		if s.config.Topic != e.ID {
+			continue // an entity from another topic in a mixed proposal — not ours
+		}
 		// A delete carries the sentinel in Data, not a payload — emit op
 		// "delete" with no Data so the receiver removes the keyed record;
 		// otherwise emit op "upsert" with the entity's data.
@@ -106,6 +107,11 @@ func (s *Syncable) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldS
 			},
 			Data: data,
 		})
+	}
+
+	// No entity was for our topic — nothing to POST; the checkpoint still advances.
+	if len(entities) == 0 {
+		return false, nil
 	}
 
 	bs, err := json.Marshal(payload{Entities: entities})

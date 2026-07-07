@@ -111,12 +111,20 @@ func (c *Syncable) Init() error {
 }
 
 func (c *Syncable) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldSnapshot, error) {
-	// Topic check before BeginTx so a non-matching Actual costs no
-	// transaction.
+	// A proposal can carry entities from several topics; apply only ours, and
+	// skip the transaction entirely when none match (so a non-matching Actual
+	// costs no transaction). Filtering per-entity below — rather than dropping the
+	// whole Actual on the first foreign entity — is what keeps a mixed-topic
+	// Actual from silently losing this topic's data. This mirrors SyncBatch.
+	matched := false
 	for _, e := range a.Entities {
-		if c.config.Topic != e.Type.ID {
-			return false, nil
+		if c.config.Topic == e.Type.ID {
+			matched = true
+			break
 		}
+	}
+	if !matched {
+		return false, nil
 	}
 
 	// BeginTx / ExecContext let cancellation actually interrupt the
@@ -129,6 +137,9 @@ func (c *Syncable) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldS
 	}
 
 	for _, e := range a.Entities {
+		if c.config.Topic != e.Type.ID {
+			continue // an entity from another topic in a mixed proposal — not ours
+		}
 		if err := c.applyEntity(ctx, tx, e); err != nil {
 			_ = tx.Rollback()
 			return false, err

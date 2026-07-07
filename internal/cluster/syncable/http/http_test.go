@@ -130,6 +130,59 @@ func TestSync_MultipleEntities_OneAtomicRequest(t *testing.T) {
 	require.Equal(t, base64.StdEncoding.EncodeToString([]byte("key2")), received.Entities[1].Key)
 }
 
+// TestSync_MixedTopic_PostsOnlyMatching is the mixed-topic regression: a
+// proposal that mixes this syncable's topic with a foreign one must POST only
+// the matching entity — never drop the whole Actual (silently losing this
+// topic's data), nor forward the foreign entity.
+func TestSync_MixedTopic_PostsOnlyMatching(t *testing.T) {
+	var count atomic.Int32
+	var received webhookBody
+
+	ts := httptest.NewServer(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		count.Add(1)
+		bs, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(bs, &received)
+		w.WriteHeader(200)
+	}))
+	defer ts.Close()
+
+	s := synchttp.New(newConfig(ts.URL)) // Topic "test-topic"
+	defer s.Close()
+
+	a := newActual(
+		newEntity(testType, "mine", map[string]string{"id": "1"}),
+		newEntity(otherType, "foreign", map[string]string{"id": "2"}),
+	)
+	snapshot, err := s.Sync(context.Background(), a)
+	require.NoError(t, err)
+	require.Equal(t, cluster.ShouldSnapshot(true), snapshot)
+
+	require.Equal(t, int32(1), count.Load(), "the matching entity is POSTed, not dropped")
+	require.Len(t, received.Entities, 1, "only the matching entity rides the request")
+	require.Equal(t, base64.StdEncoding.EncodeToString([]byte("mine")), received.Entities[0].Key)
+}
+
+// TestSync_AllForeignTopics_NoRequest verifies an Actual carrying only
+// foreign-topic entities makes no POST and returns cleanly (checkpoint advances).
+func TestSync_AllForeignTopics_NoRequest(t *testing.T) {
+	var count atomic.Int32
+
+	ts := httptest.NewServer(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, _ *nethttp.Request) {
+		count.Add(1)
+		w.WriteHeader(200)
+	}))
+	defer ts.Close()
+
+	s := synchttp.New(newConfig(ts.URL))
+	defer s.Close()
+
+	a := newActual(newEntity(otherType, "foreign", map[string]string{"id": "1"}))
+	snapshot, err := s.Sync(context.Background(), a)
+	require.NoError(t, err)
+	require.Equal(t, cluster.ShouldSnapshot(false), snapshot)
+	require.Equal(t, int32(0), count.Load(), "no request for an all-foreign Actual")
+}
+
 // TestSync_Delete_EmitsDeleteOp verifies a delete entity is delivered as an
 // op:"delete" webhook carrying no data — the downstream half of
 // right-to-be-forgotten. The receiver removes the record keyed by Key, and the

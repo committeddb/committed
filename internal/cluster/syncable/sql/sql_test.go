@@ -95,16 +95,19 @@ func TestSync(t *testing.T) {
 }
 
 func TestDontSyncOtherTypes(t *testing.T) {
-	simpleOne := simpleEntity("key1", "one")
 	notSimpleOne := notSimpleEntity("key1", "one")
+	notSimpleTwo := notSimpleEntity("key2", "two")
 
+	// An Actual whose entities are ALL foreign topics is skipped with no
+	// transaction. (A MIXED Actual — some entities matching — is a different case:
+	// it applies the matching entities; see TestSyncMixedTopicAppliesOnlyMatching.)
 	tests := []struct {
 		name           string
 		data           [][]*Entity
 		configFileName string
 	}{
-		{"one-simple", [][]*Entity{{notSimpleOne}}, "./simple_syncable.toml"},
-		{"two-simple", [][]*Entity{{simpleOne, notSimpleOne}}, "./simple_syncable.toml"},
+		{"one-foreign", [][]*Entity{{notSimpleOne}}, "./simple_syncable.toml"},
+		{"two-foreign", [][]*Entity{{notSimpleOne, notSimpleTwo}}, "./simple_syncable.toml"},
 	}
 
 	for _, tt := range tests {
@@ -277,6 +280,36 @@ func TestSyncUpsertThenDelete(t *testing.T) {
 	require.False(t, errors.Is(err, cluster.ErrPermanent), "delete must not be dead-lettered")
 	require.Equal(t, cluster.ShouldSnapshot(true), ss)
 
+	require.Nil(t, mock.ExpectationsWereMet())
+}
+
+// TestSyncMixedTopicAppliesOnlyMatching is the mixed-topic regression: a proposal
+// that mixes this syncable's topic with a foreign one applies ONLY the matching
+// entity — it must not drop the whole Actual (silently losing this topic's data),
+// nor apply the foreign entity. Mirrors the per-entity filter SyncBatch uses.
+func TestSyncMixedTopicAppliesOnlyMatching(t *testing.T) {
+	dialect, mock, err := dialects.NewSQLMockDialect()
+	require.Nil(t, err)
+	db, err := sql.NewDB(dialect, "")
+	require.Nil(t, err)
+	defer db.Close()
+
+	syncable, insertPrepare, _ := newSimpleSyncable(t, mock, dialect, db)
+
+	// Exactly one Exec — for the matching (simpleType) entity. The foreign
+	// notSimpleType entity is skipped, so no second Exec is expected; had the fix
+	// regressed to dropping the whole Actual, there would be no Begin at all.
+	mock.ExpectBegin()
+	insertPrepare.ExpectExec().WithArgs("key1", "one", "key1", "one").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	ss, err := syncable.Sync(context.Background(), &cluster.Actual{Entities: []*cluster.Entity{
+		cluster.NewUpsertEntity(simpleType, []byte("key1"), simpleJSON(t, "key1", "one")),
+		cluster.NewUpsertEntity(notSimpleType, []byte("foreign"), simpleJSON(t, "foreign", "x")),
+	}})
+	require.Nil(t, err)
+	require.Equal(t, cluster.ShouldSnapshot(true), ss)
 	require.Nil(t, mock.ExpectationsWereMet())
 }
 
