@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	pb "go.etcd.io/raft/v3/raftpb"
+	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
@@ -239,10 +240,27 @@ func (s *Storage) ActualAt(index uint64) (*cluster.Actual, error) {
 
 func (s *Storage) Reader(id string) db.ActualReader {
 	i, err := s.getSyncableIndex(id)
-	if err != nil {
-		// TODO We should log this
+	switch {
+	case err == nil:
+		if id == "" {
+			i = 0
+		}
+	case errors.Is(err, ErrBucketMissing):
+		// No syncable has ever checkpointed (fresh storage) — a legitimate
+		// start-from-head, not an error, so no log.
 		i = 0
-	} else if id == "" {
+	default:
+		// A persisted checkpoint exists but did not decode (corrupt bytes). We
+		// cannot know how far this syncable actually got, so we restart from the
+		// head of the log (index 0) to avoid MISSING data — but that re-syncs the
+		// entire history, which for a non-idempotent sink (webhook /
+		// event-append) means duplicate downstream deliveries. Never silent: log
+		// loudly so an operator can see the full re-sync and watch for
+		// duplicates, instead of an unexplained re-sync storm.
+		zap.L().Error("syncable checkpoint failed to decode (corrupt); restarting this syncable from the head of the log — a full re-sync, non-idempotent sinks may see duplicates",
+			zap.String("syncable", id),
+			zap.Error(err),
+		)
 		i = 0
 	}
 

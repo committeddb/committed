@@ -33,6 +33,21 @@ func (s *Storage) BucketSnapshot() ([]string, error) {
 	return lines, nil
 }
 
+// PutRawSyncableIndexForTest writes raw bytes under the syncable-index key for
+// id, bypassing marshaling, so a test can plant a corrupt (undecodable)
+// checkpoint and exercise Reader's corrupt-vs-fresh-start handling. Defined in
+// export_test.go (package wal) so external tests can reach the unexported
+// bucket.
+func (s *Storage) PutRawSyncableIndexForTest(id string, raw []byte) error {
+	return s.update(func(tx *bolt.Tx) error {
+		b, err := tx.CreateBucketIfNotExists(syncableIndexBucket)
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(id), raw)
+	})
+}
+
 // EventLogLastSeq exposes the event log's wal sequence for test
 // assertions. External callers should use EventIndex() (raft index) —
 // this accessor is only here because a couple of Phase 1 tests assert

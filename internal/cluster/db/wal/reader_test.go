@@ -6,6 +6,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 	pb "go.etcd.io/raft/v3/raftpb"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
@@ -255,4 +257,47 @@ func createSyncableIndexProposalWithIndex(t *testing.T, id string, index uint64)
 	e, err := cluster.NewUpsertSyncableIndexEntity(&cluster.SyncableIndex{ID: id, Index: index})
 	require.Nil(t, err)
 	return &cluster.Proposal{Entities: []*cluster.Entity{e}}
+}
+
+// TestReaderCorruptCheckpointLogsAndRewinds is the regression for a silent
+// rewind: a corrupt persisted checkpoint (undecodable bytes) must not restart a
+// syncable from the head of the log with zero operator signal. Reader still
+// rewinds to 0 (the completeness-safe fallback — we can't know how far it got),
+// but now logs loudly so the full re-sync (and any duplicate downstream
+// deliveries on a non-idempotent sink) is visible.
+func TestReaderCorruptCheckpointLogsAndRewinds(t *testing.T) {
+	s := NewStorage(t, nil)
+	defer s.Cleanup()
+
+	// Precondition: these bytes must be undecodable as a SyncableIndex, else the
+	// test would not exercise the corrupt path.
+	corrupt := []byte{0x0a, 0x05, 0x01} // field 1, length-delimited, claims 5 bytes; 1 present
+	require.Error(t, (&cluster.SyncableIndex{}).Unmarshal(corrupt), "test bytes must fail to decode")
+	require.NoError(t, s.PutRawSyncableIndexForTest("s1", corrupt))
+
+	core, logs := observer.New(zap.ErrorLevel)
+	defer zap.ReplaceGlobals(zap.New(core))()
+
+	r := s.Reader("s1")
+	require.NotNil(t, r)
+
+	entries := logs.FilterMessageSnippet("corrupt").All()
+	require.Len(t, entries, 1, "a corrupt checkpoint must be logged loudly, not silently rewound")
+	require.Equal(t, zap.ErrorLevel, entries[0].Level)
+	require.Equal(t, "s1", entries[0].ContextMap()["syncable"])
+}
+
+// TestReaderFreshCheckpointDoesNotLog: a syncable that has never checkpointed is
+// a legitimate start-from-head and must NOT be reported as corrupt.
+func TestReaderFreshCheckpointDoesNotLog(t *testing.T) {
+	s := NewStorage(t, nil)
+	defer s.Cleanup()
+
+	core, logs := observer.New(zap.ErrorLevel)
+	defer zap.ReplaceGlobals(zap.New(core))()
+
+	r := s.Reader("never-checkpointed")
+	require.NotNil(t, r)
+	require.Zero(t, logs.FilterMessageSnippet("corrupt").Len(),
+		"a fresh start must not be logged as corrupt")
 }
