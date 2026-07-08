@@ -2,7 +2,6 @@ package http
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/committeddb/committed/internal/cluster"
@@ -60,8 +59,14 @@ func (p *SyncableParser) ParseConfig(v *cluster.ParsedConfig) (*Config, error) {
 				return nil, fmt.Errorf("[http.syncable-parser] header name is required")
 			}
 			headers = append(headers, Header{
-				Name:  h.Name,
-				Value: os.ExpandEnv(h.Value),
+				Name: h.Name,
+				// Do NOT expand here. Secret ${VAR} interpolation runs once at the
+				// db/parser boundary (config.Interpolate, fail-closed on an unset
+				// var), exactly as the SQL parsers rely on. A second stdlib
+				// os.ExpandEnv pass would re-expand: it fail-OPENs a bare $VAR to
+				// empty (silently dropping the credential) and mangles a resolved
+				// secret that legitimately contains a literal '$'.
+				Value: h.Value,
 			})
 		}
 	}

@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/config"
 	synchttp "github.com/committeddb/committed/internal/cluster/syncable/http"
 )
 
@@ -128,12 +129,12 @@ url = "http://example.com/hook"
 	require.Error(t, err, "a malformed checkpointMaxAge must be rejected at parse time")
 }
 
-func TestParseConfig_EnvExpansion(t *testing.T) {
-	t.Setenv("TEST_WEBHOOK_TOKEN", "secret123")
-
-	toml := `
+// webhookHeaderTOML is a webhook syncable config with one Authorization header
+// carrying value, used by the secret-interpolation regressions.
+func webhookHeaderTOML(value string) string {
+	return `
 [syncable]
-name = "env"
+name = "hook"
 type = "http"
 
 [http]
@@ -142,14 +143,57 @@ url = "http://example.com/hook"
 
 [[http.headers]]
 name = "Authorization"
-value = "Bearer ${TEST_WEBHOOK_TOKEN}"
+value = "` + value + `"
 `
-	v := readConfig(t, "toml", bytes.NewBufferString(toml))
-	p := &synchttp.SyncableParser{}
-	config, err := p.ParseConfig(v)
-	require.NoError(t, err)
+}
 
-	require.Equal(t, "Bearer secret123", config.Headers[0].Value)
+// TestParseConfig_HeaderValueNotExpandedHere: the webhook parser must NOT
+// interpolate ${VAR} in a header value. Secret interpolation runs exactly once,
+// at the db/parser boundary (config.Interpolate); called directly here (bypassing
+// the boundary) the value passes through verbatim. A second expansion at this
+// layer is the bug this guards against.
+func TestParseConfig_HeaderValueNotExpandedHere(t *testing.T) {
+	v := readConfig(t, "toml", bytes.NewBufferString(webhookHeaderTOML("Bearer ${TEST_WEBHOOK_TOKEN}")))
+	cfg, err := (&synchttp.SyncableParser{}).ParseConfig(v)
+	require.NoError(t, err)
+	require.Equal(t, "Bearer ${TEST_WEBHOOK_TOKEN}", cfg.Headers[0].Value,
+		"the parser must not interpolate; the db/parser boundary already did")
+}
+
+// TestWebhookHeaderSecretWithDollarSurvivesBoundary drives the full production
+// sequence — boundary interpolation, then the parser — and asserts a resolved
+// secret containing a literal '$' survives verbatim. The removed second
+// os.ExpandEnv pass re-expanded the '$…' and corrupted the token.
+func TestWebhookHeaderSecretWithDollarSurvivesBoundary(t *testing.T) {
+	t.Setenv("HOOK_TOKEN", "s3cr3t$with$dollars")
+	v := readConfig(t, "toml", bytes.NewBufferString(webhookHeaderTOML("Bearer ${HOOK_TOKEN}")))
+	require.NoError(t, config.Interpolate(v.Values())) // the db/parser boundary
+	cfg, err := (&synchttp.SyncableParser{}).ParseConfig(v)
+	require.NoError(t, err)
+	require.Equal(t, "Bearer s3cr3t$with$dollars", cfg.Headers[0].Value)
+}
+
+// TestWebhookHeaderUnsetVarIsHardError: an unset ${VAR} must fail loudly at the
+// boundary, never yield an empty credential. The removed os.ExpandEnv fail-OPENed
+// an unset var to "" — silently sending `Authorization: Bearer `.
+func TestWebhookHeaderUnsetVarIsHardError(t *testing.T) {
+	// HOOK_TOKEN is deliberately unset.
+	v := readConfig(t, "toml", bytes.NewBufferString(webhookHeaderTOML("Bearer ${HOOK_TOKEN}")))
+	require.Error(t, config.Interpolate(v.Values()),
+		"an unset ${VAR} must be a hard error, not a silently-empty credential")
+}
+
+// TestWebhookHeaderBareDollarIsLiteral: a bare $VAR (no braces) is not committed's
+// interpolation grammar (${VAR}), so it stays literal — the removed os.ExpandEnv
+// would have shell-expanded it (to empty if unset).
+func TestWebhookHeaderBareDollarIsLiteral(t *testing.T) {
+	t.Setenv("HOOK_TOKEN", "unused")
+	v := readConfig(t, "toml", bytes.NewBufferString(webhookHeaderTOML("Bearer $HOOK_TOKEN")))
+	require.NoError(t, config.Interpolate(v.Values()))
+	cfg, err := (&synchttp.SyncableParser{}).ParseConfig(v)
+	require.NoError(t, err)
+	require.Equal(t, "Bearer $HOOK_TOKEN", cfg.Headers[0].Value,
+		"a bare $VAR is a literal, not a secret reference")
 }
 
 func TestParseConfig_MissingURL(t *testing.T) {
