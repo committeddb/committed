@@ -50,8 +50,8 @@ func TestMain(m *testing.M) {
 			ContainerRequest: testcontainers.ContainerRequest{
 				Cmd: []string{
 					"-c", "wal_level=logical",
-					"-c", "max_replication_slots=10",
-					"-c", "max_wal_senders=10",
+					"-c", "max_replication_slots=16",
+					"-c", "max_wal_senders=16",
 				},
 			},
 		}),
@@ -458,6 +458,9 @@ func TestPostgresUnchangedToastReselect(t *testing.T) {
 	db.Close()
 
 	cleanReplication(t, "slot_toast", "pub_toast")
+	// Drop this run's slot at the end so it doesn't hold a replication slot for
+	// the rest of the suite (the container caps max_replication_slots).
+	defer cleanReplication(t, "slot_toast", "pub_toast")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
