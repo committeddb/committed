@@ -34,3 +34,9 @@ docker/db
 # Docs the binary build doesn't need (none are go:embed'd).
 *.md
 LICENSE
+
+# ...except the legal texts the runtime image and release ship: the final
+# Dockerfile stage COPYs these into the image (see COPY of /licenses).
+!LICENSE
+!NOTICE
+!THIRD_PARTY_NOTICES.md

@@ -172,6 +172,14 @@ lint/gosec:
 # its built-in x64 emulation, so that audience is still covered.
 PLATFORMS := darwin/arm64 darwin/amd64 linux/arm64 linux/amd64 windows/amd64
 
+# Regenerate THIRD_PARTY_NOTICES.md — the license texts of every third-party
+# module linked into the binary — from the current dependency set. The file is
+# committed and ships in the image (/licenses) and on each release; run this
+# after changing dependencies. TestThirdPartyNoticesCoverage guards against drift.
+.PHONY: third-party-notices
+third-party-notices:
+	./scripts/gen-third-party-notices.sh
+
 crosscompile:
 	@for p in $(PLATFORMS); do \
 	  os=$${p%/*}; arch=$${p#*/}; ext=; \
@@ -218,7 +226,7 @@ release:
 	$(MAKE) lint
 	$(MAKE) test/ci
 	$(MAKE) crosscompile
-	gh release create $(VERSION) $(RELEASE_BINS) \
+	gh release create $(VERSION) $(RELEASE_BINS) LICENSE NOTICE THIRD_PARTY_NOTICES.md \
 	  --title $(VERSION) \
 	  --notes-file $(NOTES)
 	$(MAKE) docker/release

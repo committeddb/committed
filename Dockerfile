@@ -72,6 +72,11 @@ LABEL org.opencontainers.image.title="committed" \
 
 COPY --from=builder /out/committed /usr/local/bin/committed
 
+# The Apache-2.0 LICENSE, project NOTICE, and third-party attributions travel
+# with the image — Apache/MIT/MPL all require the license texts to accompany a
+# distribution. /licenses is the conventional path license scanners look for.
+COPY --from=builder /src/LICENSE /src/NOTICE /src/THIRD_PARTY_NOTICES.md /licenses/
+
 # 8080: HTTP API (COMMITTED_API_ADDR default). 9022: raft peer transport
 # (COMMITTED_PEER_URL default). EXPOSE is documentation; publish with -p.
 EXPOSE 8080 9022
