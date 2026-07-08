@@ -559,9 +559,12 @@ func (p *Projection) applyDelete(ctx context.Context, tx *gosql.Tx, src *project
 		stmt, sqlStr = p.delete.Stmt, p.delete.SQL
 	}
 	if stmt == nil {
+		// Do NOT put e.Key in this message — it lands in a permanent, Raft-replicated
+		// dead-letter record, and for an RTBF delete the key is the subject being
+		// erased. The dead-letter's syncable id + raft index identify the row.
 		return cluster.Permanent(fmt.Errorf(
-			"[sql-projection.apply] cannot honor delete for key %q (topic %q): no statement prepared",
-			string(e.Key), src.topic))
+			"[sql-projection.apply] cannot honor delete: no statement prepared (topic %q)",
+			src.topic))
 	}
 	if _, err := tx.StmtContext(ctx, stmt).ExecContext(ctx, string(e.Key)); err != nil {
 		wrapped := fmt.Errorf("[sql-projection.apply] exec [%s]: %w", sqlStr, err)

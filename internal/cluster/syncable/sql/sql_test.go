@@ -395,11 +395,17 @@ func TestSyncDeleteWithoutKeyColumnIsPermanent(t *testing.T) {
 
 	mock.ExpectBegin()
 	mock.ExpectRollback()
+	// The delete key doubles as the RTBF subject identifier being erased.
+	const subjectKey = "subject-pii-key-user@example.com"
 	_, err = syncable.Sync(context.Background(), &cluster.Actual{Entities: []*cluster.Entity{
-		cluster.NewDeleteEntity(simpleType, []byte("key1")),
+		cluster.NewDeleteEntity(simpleType, []byte(subjectKey)),
 	}})
 	require.Error(t, err)
 	require.True(t, errors.Is(err, cluster.ErrPermanent))
+	// RTBF: this error becomes a permanent, Raft-replicated dead-letter Message, so
+	// it must not carry the subject key being erased.
+	require.NotContains(t, err.Error(), subjectKey,
+		"the delete-misconfig dead-letter message must not leak the subject key")
 	require.Nil(t, mock.ExpectationsWereMet())
 }
 

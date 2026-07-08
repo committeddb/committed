@@ -249,9 +249,14 @@ func (c *Syncable) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool, e
 func (c *Syncable) applyEntity(ctx context.Context, tx *sql.Tx, e *cluster.Entity, index uint64, seq int) error {
 	if e.IsDelete() {
 		if c.delete == nil {
+			// Do NOT put e.Key in this message. It becomes a permanent,
+			// Raft-replicated dead-letter record (recordSyncDeadLetter), and for a
+			// right-to-be-forgotten delete the key IS the subject identifier being
+			// erased — logging it would defeat the erasure and survive the scrub.
+			// The dead-letter's syncable id + raft index already identify the row.
 			return cluster.Permanent(fmt.Errorf(
-				"[sql.apply] cannot honor delete for key %q: no keyColumn or primaryKey configured",
-				string(e.Key)))
+				"[sql.apply] cannot honor delete: no keyColumn or primaryKey configured (topic %q)",
+				c.config.Topic))
 		}
 		_, err := tx.StmtContext(ctx, c.delete.Stmt).ExecContext(ctx, string(e.Key))
 		if err != nil {
