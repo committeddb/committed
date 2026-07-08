@@ -430,6 +430,51 @@ func (d *PostgreSQLDialect) stream(
 	}
 	defer func() { _ = conn.Close(ctx) }()
 
+	// A normal (non-replication) connection for re-selecting columns a pgoutput
+	// UPDATE omitted as unchanged TOASTed values — the replication conn above
+	// cannot run queries. See tupleToEntity / fillUnchanged.
+	sqlDB, err := gosql.Open("pgx", pgCfg.sqlConnString)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = sqlDB.Close() }()
+
+	resolve := func(ctx context.Context, table string, pk map[string]string, cols []string) (map[string]string, error) {
+		sel := make([]string, len(cols))
+		for i, c := range cols {
+			sel[i] = quoteIdent(c) + "::text"
+		}
+		where := make([]string, 0, len(pk))
+		args := make([]any, 0, len(pk))
+		i := 1
+		for k, v := range pk {
+			where = append(where, fmt.Sprintf("%s = $%d", quoteIdent(k), i))
+			args = append(args, v)
+			i++
+		}
+		//nolint:gosec // G201: identifiers are quoteIdent/quoteTable-escaped and all values are bound as $N parameters
+		query := fmt.Sprintf("SELECT %s FROM %s WHERE %s",
+			strings.Join(sel, ", "), quoteTable(table), strings.Join(where, " AND "))
+		dest := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for j := range dest {
+			ptrs[j] = &dest[j]
+		}
+		if err := sqlDB.QueryRowContext(ctx, query, args...).Scan(ptrs...); err != nil {
+			return nil, err
+		}
+		out := make(map[string]string, len(cols))
+		for j, c := range cols {
+			switch v := dest[j].(type) {
+			case string:
+				out[c] = v
+			case []byte:
+				out[c] = string(v)
+			}
+		}
+		return out, nil
+	}
+
 	if err := ensurePublication(ctx, conn, pgCfg); err != nil {
 		return err
 	}
@@ -548,7 +593,7 @@ func (d *PostgreSQLDialect) stream(
 				if skippingTxn {
 					break
 				}
-				if e := tupleToEntity(m.Tuple, m.RelationID, relations, config, pgCfg, false); e != nil {
+				if e := tupleToEntity(ctx, m.Tuple, m.RelationID, relations, config, pgCfg, false, resolve); e != nil {
 					pending = append(pending, e)
 				}
 				if len(pending) >= maxPendingEntities {
@@ -561,7 +606,7 @@ func (d *PostgreSQLDialect) stream(
 				if skippingTxn {
 					break
 				}
-				if e := tupleToEntity(m.NewTuple, m.RelationID, relations, config, pgCfg, false); e != nil {
+				if e := tupleToEntity(ctx, m.NewTuple, m.RelationID, relations, config, pgCfg, false, resolve); e != nil {
 					pending = append(pending, e)
 				}
 				if len(pending) >= maxPendingEntities {
@@ -581,7 +626,7 @@ func (d *PostgreSQLDialect) stream(
 				// pre-image is not a payload to write downstream. The
 				// syncable removes the keyed record (cluster.Syncable
 				// honor-deletes contract).
-				if e := tupleToEntity(m.OldTuple, m.RelationID, relations, config, pgCfg, true); e != nil {
+				if e := tupleToEntity(ctx, m.OldTuple, m.RelationID, relations, config, pgCfg, true, resolve); e != nil {
 					pending = append(pending, e)
 				}
 				if len(pending) >= maxPendingEntities {
@@ -732,13 +777,46 @@ func pgCategoryForTypeName(name string) sql.JSONCategory {
 	return sql.CatText
 }
 
+// unchangedResolver fetches the current text values of columns a pgoutput UPDATE
+// left unchanged (Postgres omits unchanged TOASTed values from the new tuple),
+// keyed by lowercased column name, by re-selecting the row by primary key.
+type unchangedResolver func(ctx context.Context, table string, pk map[string]string, cols []string) (map[string]string, error)
+
+// fillUnchanged re-selects the current values of columns an UPDATE left unchanged
+// and merges them into m so the emitted row is complete. On any failure it logs
+// and leaves those columns absent (the pre-fix behavior, now visible) rather than
+// dropping the whole row.
+func fillUnchanged(ctx context.Context, resolve unchangedResolver, rel *pglogrepl.RelationMessage, primaryKey []string, m map[string]any, cols []string) {
+	pk := make(map[string]string, len(primaryKey))
+	for _, k := range primaryKey {
+		v, ok := m[strings.ToLower(k)]
+		if !ok || v == nil {
+			zap.L().Warn("cannot re-select unchanged TOAST columns: primary key absent from the tuple",
+				zap.String("table", rel.RelationName), zap.String("pk", k))
+			return
+		}
+		pk[strings.ToLower(k)] = fmt.Sprint(v)
+	}
+	vals, err := resolve(ctx, rel.Namespace+"."+rel.RelationName, pk, cols)
+	if err != nil {
+		zap.L().Warn("re-select of unchanged TOAST columns failed; emitting row without them",
+			zap.String("table", rel.RelationName), zap.Error(err))
+		return
+	}
+	for c, v := range vals {
+		m[c] = v
+	}
+}
+
 func tupleToEntity(
+	ctx context.Context,
 	tuple *pglogrepl.TupleData,
 	relationID uint32,
 	relations map[uint32]*pglogrepl.RelationMessage,
 	config *sql.Config,
 	pgCfg *pgConfig,
 	isDelete bool,
+	resolve unchangedResolver,
 ) *cluster.Entity {
 	if tuple == nil {
 		return nil
@@ -767,6 +845,7 @@ func tupleToEntity(
 
 	// Build column name → value map from the tuple.
 	m := make(map[string]any)
+	var unchanged []string // columns pgoutput omitted as unchanged TOASTed ('u')
 	for i, col := range tuple.Columns {
 		if i >= len(rel.Columns) {
 			break
@@ -775,7 +854,8 @@ func tupleToEntity(
 		switch col.DataType {
 		case 'n': // null
 			m[colName] = nil
-		case 'u': // unchanged TOASTed value — skip
+		case 'u': // unchanged TOASTed value — not sent; re-select it below
+			unchanged = append(unchanged, colName)
 		case 't': // text representation
 			m[colName] = string(col.Data)
 		}
@@ -786,6 +866,14 @@ func tupleToEntity(
 	// A delete carries no payload — emit a tombstone keyed by the PK.
 	if isDelete {
 		return cluster.NewDeleteEntity(config.Type, []byte(key))
+	}
+
+	// An UPDATE that left a TOASTed column unchanged omits it from the new tuple
+	// (pgoutput status 'u'). Re-select the current values so the emitted row is a
+	// complete image — otherwise the full-row payload nulls those columns and
+	// clobbers them downstream on every such UPDATE.
+	if len(unchanged) > 0 && resolve != nil {
+		fillUnchanged(ctx, resolve, rel, config.PrimaryKey, m, unchanged)
 	}
 
 	// Each relation column carries its type OID; render mapped values as their

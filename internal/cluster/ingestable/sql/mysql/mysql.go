@@ -77,19 +77,15 @@ func (m *MySQLDialect) Preflight(config *sql.Config) error {
 	if err := db.QueryRowContext(ctx, `SELECT @@global.binlog_row_image`).Scan(&rowImage); err != nil {
 		return fmt.Errorf("read binlog_row_image: %w", err)
 	}
-	if !strings.EqualFold(rowImage, "MINIMAL") {
-		return nil // FULL / NOBLOB — the key (never a blob) is in the before-image
-	}
-
-	fix := "set `binlog_row_image=FULL`, or add a PRIMARY KEY covering the configured primaryKey"
-	for _, table := range config.Tables {
-		pkCols, err := mysqlPrimaryKey(ctx, db, table)
-		if err != nil {
-			return err
-		}
-		if err := sql.CheckKeyCoverage(config.PrimaryKey, pkCols, table, fix); err != nil {
-			return err
-		}
+	// FULL is required. NOBLOB omits an unchanged BLOB/TEXT column from the UPDATE
+	// after-image, and MINIMAL omits every unchanged column, so a partial UPDATE
+	// would null those columns downstream — silent mirror corruption, the same
+	// class as Postgres unchanged-TOAST. FULL also guarantees the primary key is
+	// in the before-image, so deletes stay keyed.
+	if !strings.EqualFold(rowImage, "FULL") {
+		return fmt.Errorf(
+			"binlog_row_image is %q, but committed requires FULL: NOBLOB and MINIMAL omit unchanged columns from the UPDATE after-image, so a partial UPDATE silently nulls them downstream. Set `binlog_row_image=FULL`",
+			rowImage)
 	}
 	return nil
 }
@@ -155,37 +151,6 @@ func binlogRetentionWarning(expireSeconds int64) string {
 			expireSeconds, retention)
 	}
 	return ""
-}
-
-// mysqlPrimaryKey returns the PRIMARY KEY columns of a table in the connection's
-// current database — exactly the columns a MINIMAL binlog row image carries on a
-// DELETE.
-func mysqlPrimaryKey(ctx context.Context, db *gosql.DB, table string) ([]string, error) {
-	rows, err := db.QueryContext(ctx, `
-		SELECT k.column_name
-		FROM information_schema.key_column_usage k
-		JOIN information_schema.table_constraints t
-		  ON t.constraint_schema = k.constraint_schema
-		 AND t.constraint_name = k.constraint_name
-		 AND t.table_name = k.table_name
-		WHERE t.constraint_type = 'PRIMARY KEY'
-		  AND k.table_schema = DATABASE()
-		  AND k.table_name = ?
-		ORDER BY k.ordinal_position`, table)
-	if err != nil {
-		return nil, fmt.Errorf("read primary key of %q: %w", table, err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var cols []string
-	for rows.Next() {
-		var c string
-		if err := rows.Scan(&c); err != nil {
-			return nil, err
-		}
-		cols = append(cols, c)
-	}
-	return cols, rows.Err()
 }
 
 // statusLagTimeout bounds the source query Status makes for @@gtid_executed /

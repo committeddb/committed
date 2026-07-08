@@ -417,14 +417,19 @@ func TestMysqlPreflightBinlogRowImage(t *testing.T) {
 
 	mk("SET GLOBAL binlog_row_image = 'FULL'")
 	require.NoError(t, dialect.Preflight(cfg("pf_pk", "id")))
-	require.NoError(t, dialect.Preflight(cfg("pf_nopk", "id")), "FULL logs the whole before-image, key included")
+	require.NoError(t, dialect.Preflight(cfg("pf_nopk", "id")), "FULL sends complete after-images")
 
+	// MINIMAL and NOBLOB omit unchanged columns from the UPDATE after-image, which
+	// would null them downstream — committed requires FULL and rejects both.
 	mk("SET GLOBAL binlog_row_image = 'MINIMAL'")
-	require.NoError(t, dialect.Preflight(cfg("pf_pk", "id")), "MINIMAL carries the PRIMARY KEY")
-	err := dialect.Preflight(cfg("pf_nopk", "id"))
-	require.Error(t, err, "MINIMAL + no PRIMARY KEY drops the key on delete")
-	require.Contains(t, err.Error(), "silently drop deletes")
+	err := dialect.Preflight(cfg("pf_pk", "id"))
+	require.Error(t, err, "MINIMAL omits unchanged columns from the after-image")
 	require.Contains(t, err.Error(), "binlog_row_image=FULL", "the error is actionable")
+
+	mk("SET GLOBAL binlog_row_image = 'NOBLOB'")
+	err = dialect.Preflight(cfg("pf_pk", "id"))
+	require.Error(t, err, "NOBLOB omits unchanged BLOB/TEXT columns from the after-image")
+	require.Contains(t, err.Error(), "binlog_row_image=FULL")
 }
 
 // TestMysqlReconnect verifies that the ingestable reconnects after

@@ -422,6 +422,88 @@ func insertTwo(t *testing.T, table string) {
 	require.NoError(t, err)
 }
 
+// TestPostgresUnchangedToastReselect is the TOAST regression end-to-end against
+// real Postgres: a row with a large out-of-line (TOASTed) column, updated on a
+// DIFFERENT column, must keep the TOASTed value downstream. Postgres omits the
+// unchanged TOASTed column from the pgoutput UPDATE new tuple ('u'); the ingest
+// re-selects it so the row stays complete instead of nulling the column.
+func TestPostgresUnchangedToastReselect(t *testing.T) {
+	const table = "pgtest_toast"
+	big := string(bytes.Repeat([]byte("abcdefgh"), 1024)) // 8 KB, > the ~2 KB TOAST threshold
+
+	config := &sql.Config{
+		Type:             &cluster.Type{ID: "toast", Name: "toast"},
+		ConnectionString: connString,
+		Tables:           []string{table},
+		PrimaryKey:       []string{"pk"},
+		Mappings: []sql.Mapping{
+			{JsonName: "pk", SQLColumn: "pk"},
+			{JsonName: "n", SQLColumn: "n"},
+			{JsonName: "big", SQLColumn: "big"},
+		},
+		Options: map[string]string{"slot_name": "slot_toast", "publication": "pub_toast"},
+	}
+
+	db := createDB(t)
+	_, err := db.Exec(`DROP TABLE IF EXISTS ` + table)
+	require.NoError(t, err)
+	_, err = db.Exec(`CREATE TABLE ` + table + ` (pk VARCHAR(32) PRIMARY KEY, n INT, big TEXT)`)
+	require.NoError(t, err)
+	// EXTERNAL storage disables compression, so the value is stored out-of-line
+	// (TOASTed) and an UPDATE of another column reports it as unchanged ('u').
+	_, err = db.Exec(`ALTER TABLE ` + table + ` ALTER COLUMN big SET STORAGE EXTERNAL`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO `+table+` VALUES ('a', 1, $1)`, big)
+	require.NoError(t, err)
+	db.Close()
+
+	cleanReplication(t, "slot_toast", "pub_toast")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	proposalChan := make(chan *cluster.Proposal, 10)
+	positionChan := make(chan cluster.Position, 10)
+	ingestErr := make(chan error, 1)
+	go func() {
+		ingestErr <- (&postgres.PostgreSQLDialect{}).Ingest(ctx, config, nil, proposalChan, positionChan)
+	}()
+
+	waitForSlot(t, "slot_toast")
+
+	// Update a DIFFERENT column; Postgres leaves the TOASTed `big` out of the
+	// UPDATE's new tuple.
+	db = createDB(t)
+	_, err = db.Exec(`UPDATE ` + table + ` SET n = 2 WHERE pk = 'a'`)
+	require.NoError(t, err)
+	db.Close()
+
+	// Collect until the UPDATE (n == 2) arrives, then assert big survived.
+	var updated map[string]any
+	deadline := time.After(20 * time.Second)
+	for updated == nil {
+		select {
+		case p := <-proposalChan:
+			for _, e := range p.Entities {
+				if string(e.Key) != "a" {
+					continue
+				}
+				var m map[string]any
+				require.NoError(t, json.Unmarshal(e.Data, &m))
+				if m["n"] == float64(2) {
+					updated = m
+				}
+			}
+		case <-positionChan:
+		case <-deadline:
+			t.Fatal("timed out waiting for the UPDATE entity (n=2)")
+		}
+	}
+	cancel()
+
+	require.Equal(t, big, updated["big"],
+		"an unchanged TOASTed column must be re-selected and preserved, not nulled by the partial UPDATE")
+}
+
 // TestPostgresPositionResume verifies that checkpointed LSN positions are
 // correctly restored on restart: a new Ingest call with a previously
 // checkpointed position only receives changes committed after that LSN.
