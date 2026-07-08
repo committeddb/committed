@@ -82,6 +82,19 @@ func (l *ingressLifecycle) start(parent context.Context, i cluster.Ingestable, p
 	ictx, cancel := context.WithCancel(parent)
 	l.cancel = cancel
 	l.wg.Go(func() {
+		// Backstop: a panic in a dialect's Ingest (e.g. a decode panic on a
+		// malformed CDC frame that escapes the dialect's own recover) must not
+		// unwind this goroutine and crash the whole node. Recover it into a loud
+		// log; this ingestable stops (the outer loop idles on its timer) but the
+		// node — and every other syncable/ingestable — stays up, pending an
+		// operator re-POST. The Postgres dialect additionally recovers in-stream
+		// so a transient bad frame self-heals via reconnect (see stream).
+		defer func() {
+			if r := recover(); r != nil {
+				zap.L().Error("ingest worker panicked; ingestable stopped, node stays up — investigate and re-POST it",
+					zap.Any("panic", r), zap.Stack("stack"))
+			}
+		}()
 		err := i.Ingest(ictx, pos, l.proposalChan, l.positionChan)
 		if err != nil {
 			zap.L().Warn("ingest error", zap.Error(err))

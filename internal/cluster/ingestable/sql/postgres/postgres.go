@@ -415,6 +415,21 @@ func pgTableColumns(ctx context.Context, db *gosql.DB, table string) ([]string, 
 // and slot exist, starts streaming, and processes messages until the
 // connection breaks or ctx is canceled. On commit boundaries it updates
 // *lastLSN so the outer retry loop can resume from the correct position.
+// decodeLogicalMessage wraps pglogrepl.Parse with a recover. The pgoutput
+// decoder indexes tuple fields and reads fixed-width integers without
+// bounds-checking (pglogrepl message.go), so a malformed or truncated frame
+// panics rather than returning an error. Convert that panic into an error so the
+// caller reconnects (stream's own defer is the belt to this suspenders) instead
+// of the panic escaping the ingest goroutine and crashing the whole node.
+func decodeLogicalMessage(walData []byte) (msg pglogrepl.Message, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic parsing pgoutput message (%d bytes): %v", len(walData), r)
+		}
+	}()
+	return pglogrepl.Parse(walData)
+}
+
 func (d *PostgreSQLDialect) stream(
 	ctx context.Context,
 	config *sql.Config,
@@ -423,7 +438,22 @@ func (d *PostgreSQLDialect) stream(
 	resumeProgress **dialectpb.SnapshotProgress,
 	pr chan<- *cluster.Proposal,
 	po chan<- cluster.Position,
-) error {
+) (err error) {
+	// A malformed or truncated pgoutput frame can panic the pglogrepl decoder
+	// (it doesn't bounds-check every tuple field) — but external input across the
+	// CDC trust boundary must never crash the node. Recover any decode panic into
+	// a stream error so the reconnect loop re-establishes from the last checkpoint
+	// instead: a transient corruption clears on the re-read, a persistent one just
+	// retries under the loop's backoff. (decodeLogicalMessage wraps the most
+	// panic-prone call with the same guard, and is unit-tested.)
+	defer func() {
+		if r := recover(); r != nil {
+			zap.L().Error("recovered from a panic decoding the Postgres replication stream; reconnecting",
+				zap.Strings("tables", config.Tables), zap.Any("panic", r), zap.Stack("stack"))
+			err = fmt.Errorf("panic decoding replication stream: %v", r)
+		}
+	}()
+
 	conn, err := pgconn.Connect(ctx, pgCfg.connString)
 	if err != nil {
 		return err
@@ -544,6 +574,9 @@ func (d *PostgreSQLDialect) stream(
 		if !ok {
 			continue
 		}
+		if len(msg.Data) == 0 {
+			continue // an empty CopyData body carries no message-type byte — msg.Data[0] would panic
+		}
 
 		switch msg.Data[0] {
 		case pglogrepl.PrimaryKeepaliveMessageByteID:
@@ -567,7 +600,7 @@ func (d *PostgreSQLDialect) stream(
 				return err
 			}
 
-			logicalMsg, err := pglogrepl.Parse(xld.WALData)
+			logicalMsg, err := decodeLogicalMessage(xld.WALData)
 			if err != nil {
 				return err
 			}
