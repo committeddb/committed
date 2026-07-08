@@ -1176,6 +1176,13 @@ func binlogStatus(ctx context.Context, conn *gosql.Conn) (mysql.Position, string
 			_ = rows.Close()
 			continue
 		}
+		if len(cols) < 2 {
+			// A conformant SHOW ...STATUS returns at least File + Position; a
+			// non-standard fork/proxy that returns fewer is skipped rather than
+			// indexed blindly — dest[0]/dest[1] below would panic.
+			_ = rows.Close()
+			continue
+		}
 
 		if !rows.Next() {
 			_ = rows.Close()
