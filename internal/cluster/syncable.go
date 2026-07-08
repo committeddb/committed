@@ -24,6 +24,15 @@ func Permanent(err error) error {
 	return fmt.Errorf("%w: %w", ErrPermanent, err)
 }
 
+// ErrCorruptEntry marks a stored WAL entry that failed its CRC32C checksum on
+// read, or a log that will not open. It is the corruption sentinel raised by the
+// WAL layer (aliased there as wal.ErrCorruptEntry) and lives in this shared
+// domain package so the sync worker can classify a corrupt read as fatal without
+// importing the wal package (which imports db — an import cycle). A torn tail is
+// repairable with `committed wal repair`; an in-record bitflip needs a rebuild
+// from a healthy replica. See docs/operations/rebuild.md.
+var ErrCorruptEntry = errors.New("wal: entry checksum mismatch (data corruption); see docs/operations/rebuild.md")
+
 // ErrSyncNotStuck is returned by Cluster.DeadLetterStuckSyncable when the
 // syncable is not currently blocked retrying a transient error on this node
 // — it is healthy, its id is unknown, or the request reached a node other

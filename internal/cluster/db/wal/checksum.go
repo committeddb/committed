@@ -2,21 +2,18 @@ package wal
 
 import (
 	"encoding/binary"
-	"errors"
 	"hash/crc32"
+
+	"github.com/committeddb/committed/internal/cluster"
 )
 
-// ErrCorruptEntry marks a WAL entry that cannot be trusted. It arises two ways,
-// with different recoveries:
-//   - a torn tail: a partial TRAILING record left by a power loss mid-append.
-//     It was never acknowledged, so `committed wal repair` truncates it safely
-//     and the node restarts clean — no rebuild.
-//   - an in-record bitflip / filesystem corruption of a committed entry: fatal.
-//     The on-disk log can't be trusted, so rebuild from a healthy peer (or
-//     restore/splice from a backup on a single node).
-//
-// Both point at docs/operations/rebuild.md, which routes between the two.
-var ErrCorruptEntry = errors.New("wal: entry checksum mismatch (data corruption); see docs/operations/rebuild.md")
+// ErrCorruptEntry is the wal package's alias for cluster.ErrCorruptEntry. The
+// canonical sentinel lives in cluster so the db sync worker can classify a
+// corrupt read as fatal without importing wal (an import cycle). unframe returns
+// it on a CRC mismatch; openLog wraps it on a corrupt Open. See its cluster
+// definition (and docs/operations/rebuild.md) for the torn-tail-vs-bitflip
+// recovery split.
+var ErrCorruptEntry = cluster.ErrCorruptEntry
 
 // On-disk frame for a checksummed WAL entry (format v1):
 //

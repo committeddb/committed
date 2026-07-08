@@ -353,6 +353,7 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 					}
 				}
 			case readErr != nil:
+				db.fatalOnCorruptRead(id, readErr)
 				db.logger.Warn("sync read error", zap.String("id", id), zap.Error(readErr))
 			default:
 				// A proposal already dead-lettered (a permanent skip, or an
@@ -636,6 +637,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 					}
 				}
 			case readErr != nil:
+				db.fatalOnCorruptRead(id, readErr)
 				db.logger.Warn("sync read error", zap.String("id", id), zap.Error(readErr))
 			default:
 				i := a.Index
@@ -776,6 +778,25 @@ func (db *DB) syncBatchFallback(ctx context.Context, id string, s cluster.Syncab
 //
 // On a successful (durable) bump the round-trip latency is recorded to
 // committed_sync_bump_duration_seconds so the extra cost is observable.
+// fatalOnCorruptRead fatal-exits the node when a sync read returned a corrupt
+// (checksum-failed) committed event. Reader.Read does NOT advance past a corrupt
+// entry, so the syncable would otherwise re-read the same seq forever; and the
+// on-disk event log is untrustworthy. A mid-log corruption can't self-heal via
+// raft — the node's matchIndex already covers that index, so AppendEntries never
+// re-sends it, and an applied event sits downstream of the raft log entirely —
+// so the node must be restarted and rebuilt from a healthy replica (single-node:
+// restore/splice from a backup). This mirrors raft.go's fatal on a failed
+// apply-committed-entry: a committed record we cannot process means the log is
+// no longer trustworthy. `committed wal repair` confirms whether it is instead a
+// truncatable torn tail. Non-corrupt (transient) read errors fall through to a
+// warn-and-retry.
+func (db *DB) fatalOnCorruptRead(id string, readErr error) {
+	if errors.Is(readErr, cluster.ErrCorruptEntry) {
+		db.logger.Fatal("corrupt event-log entry on sync read; the on-disk log is untrustworthy — rebuild this node from a healthy replica, or run `committed wal repair` to check for a torn tail (see docs/operations/rebuild.md)",
+			zap.String("id", id), zap.Error(readErr))
+	}
+}
+
 func (db *DB) proposeSyncableIndex(ctx context.Context, i *cluster.SyncableIndex) error {
 	entity, err := cluster.NewUpsertSyncableIndexEntity(i)
 	if err != nil {
