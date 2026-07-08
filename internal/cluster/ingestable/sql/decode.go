@@ -3,6 +3,7 @@ package sql
 import (
 	"encoding/json"
 	"regexp"
+	"strings"
 )
 
 // JSONCategory is how a source column's value should be rendered in the
@@ -69,4 +70,20 @@ func JSONValue(raw any, cat JSONCategory) any {
 		}
 	}
 	return text
+}
+
+// BuildEntityJSON maps a decoded source row into the topic payload, keyed by each
+// mapping's JsonName. Both the value and category maps are keyed by LOWERCASED
+// column name — every decode path (snapshot and CDC, both dialects) lowercases
+// column names when it builds them. So the mapping's configured SQL column is
+// lowercased here for the lookup; without it a mixed-case config (column =
+// "CreatedAt") misses the "createdat" map entry and silently emits a null field.
+// Shared by all four decode sites so the case handling can't drift between them.
+func BuildEntityJSON(mappings []Mapping, values map[string]any, cats map[string]JSONCategory) map[string]any {
+	out := make(map[string]any, len(mappings))
+	for _, m := range mappings {
+		col := strings.ToLower(m.SQLColumn)
+		out[m.JsonName] = JSONValue(values[col], cats[col])
+	}
+	return out
 }

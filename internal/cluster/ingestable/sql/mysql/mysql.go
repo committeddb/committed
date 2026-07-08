@@ -729,10 +729,7 @@ func (h *MySQLEventHandler) rowEntity(ts *tableSchema, table, action string, row
 		return cluster.NewDeleteEntity(h.config.Type, []byte(key)), true
 	}
 
-	toJSON := make(map[string]any)
-	for _, mapping := range h.config.Mappings {
-		toJSON[mapping.JsonName] = sql.JSONValue(raw[mapping.SQLColumn], catByName[mapping.SQLColumn])
-	}
+	toJSON := sql.BuildEntityJSON(h.config.Mappings, raw, catByName)
 	jsonString, err := json.Marshal(toJSON)
 	if err != nil {
 		zap.L().Warn("handleRows: skipping row with unmarshalable data",
@@ -1407,10 +1404,7 @@ func readBatch(
 			}
 		}
 
-		toJSON := make(map[string]any)
-		for _, mapping := range config.Mappings {
-			toJSON[mapping.JsonName] = sql.JSONValue(raw[mapping.SQLColumn], catByName[mapping.SQLColumn])
-		}
+		toJSON := sql.BuildEntityJSON(config.Mappings, raw, catByName)
 
 		jsonBytes, err := json.Marshal(toJSON)
 		if err != nil {

@@ -915,10 +915,7 @@ func tupleToEntity(
 	for _, rc := range rel.Columns {
 		cat[strings.ToLower(rc.Name)] = pgCategoryForOID(rc.DataType)
 	}
-	toJSON := make(map[string]any)
-	for _, mapping := range config.Mappings {
-		toJSON[mapping.JsonName] = sql.JSONValue(m[mapping.SQLColumn], cat[mapping.SQLColumn])
-	}
+	toJSON := sql.BuildEntityJSON(config.Mappings, m, cat)
 
 	jsonBytes, err := json.Marshal(toJSON)
 	if err != nil {
@@ -1179,10 +1176,7 @@ func readBatch(
 			}
 		}
 
-		toJSON := make(map[string]any)
-		for _, mapping := range config.Mappings {
-			toJSON[mapping.JsonName] = sql.JSONValue(raw[mapping.SQLColumn], catByName[mapping.SQLColumn])
-		}
+		toJSON := sql.BuildEntityJSON(config.Mappings, raw, catByName)
 
 		jsonBytes, err := json.Marshal(toJSON)
 		if err != nil {

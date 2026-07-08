@@ -373,6 +373,86 @@ func TestPostgresTypedPayload(t *testing.T) {
 	}
 }
 
+// TestPostgresMixedCaseColumn is the mixed-case-column regression on real
+// Postgres: a quoted CamelCase source column ("CreatedAt") mapped by a
+// case-matching config must carry its value through BOTH the snapshot and CDC
+// paths, not silently emit null. Before the fix the lookup used the config's
+// exact case against the lowercased decode map and missed.
+func TestPostgresMixedCaseColumn(t *testing.T) {
+	const table = "pgtest_mixedcase"
+	mcType := &cluster.Type{ID: "mixedcase", Name: "mixedcase"}
+	config := &sql.Config{
+		Type:             mcType,
+		ConnectionString: connString,
+		Tables:           []string{table},
+		PrimaryKey:       []string{"pk"},
+		Mappings: []sql.Mapping{
+			{JsonName: "pk", SQLColumn: "pk"},
+			{JsonName: "createdAt", SQLColumn: "CreatedAt"}, // quoted CamelCase source column
+		},
+		Options: map[string]string{"slot_name": "slot_mixedcase", "publication": "pub_mixedcase"},
+	}
+
+	db := createDB(t)
+	_, err := db.Exec(`DROP TABLE IF EXISTS ` + table)
+	require.NoError(t, err)
+	_, err = db.Exec(`CREATE TABLE ` + table + ` (pk VARCHAR(32) PRIMARY KEY, "CreatedAt" TEXT)`)
+	require.NoError(t, err)
+	// Snapshot row — inserted before the dialect starts.
+	_, err = db.Exec(`INSERT INTO ` + table + ` VALUES ('a', 'snap-value')`)
+	require.NoError(t, err)
+	db.Close()
+
+	cleanReplication(t, "slot_mixedcase", "pub_mixedcase")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	proposalChan := make(chan *cluster.Proposal, 10)
+	positionChan := make(chan cluster.Position, 10)
+	ingestErr := make(chan error, 1)
+	go func() {
+		ingestErr <- (&postgres.PostgreSQLDialect{}).Ingest(ctx, config, nil, proposalChan, positionChan)
+	}()
+
+	waitForSlot(t, "slot_mixedcase")
+
+	// CDC row — inserted after the slot exists.
+	db = createDB(t)
+	_, err = db.Exec(`INSERT INTO ` + table + ` VALUES ('b', 'cdc-value')`)
+	require.NoError(t, err)
+	db.Close()
+
+	seen := map[string]*cluster.Entity{}
+	deadline := time.After(20 * time.Second)
+	for len(seen) < 2 {
+		select {
+		case p := <-proposalChan:
+			for _, e := range p.Entities {
+				seen[string(e.Key)] = e
+			}
+		case <-positionChan:
+		case <-deadline:
+			t.Fatalf("timed out; got %d of 2 entities", len(seen))
+		}
+	}
+	cancel()
+
+	field := func(key string) any {
+		var m map[string]any
+		require.NoError(t, json.Unmarshal(seen[key].Data, &m))
+		return m["createdAt"]
+	}
+	require.Equal(t, "snap-value", field("a"), "snapshot: mixed-case column must carry its value, not null")
+	require.Equal(t, "cdc-value", field("b"), "CDC: mixed-case column must carry its value, not null")
+
+	select {
+	case err := <-ingestErr:
+		require.Nil(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Ingest did not exit after cancel")
+	}
+}
+
 // TestPostgresPreflightReplicaIdentity is the guard's success criterion on real
 // Postgres: a table whose replica identity carries the configured key passes;
 // one that would drop the key on delete fails loud — and it's coverage, not

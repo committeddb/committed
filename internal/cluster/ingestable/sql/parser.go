@@ -27,18 +27,31 @@ func (p *IngestableParser) Parse(v *cluster.ParsedConfig) (cluster.Ingestable, e
 		return nil, err
 	}
 
+	// Introspect the live source schema once, up front — needed both to expand a
+	// map-all config and to validate that every mapping references a real column.
+	// Parse always reaches the source here anyway (Preflight below connects too),
+	// so this adds no new connectivity requirement.
+	colsByTable, err := dialect.SourceColumns(config)
+	if err != nil {
+		return nil, fmt.Errorf("[ingestable.parser] source columns: %w", err)
+	}
+
 	// Expand a map-all config into explicit mappings against the live source
 	// schema, freezing the column set at build time — a column added later does
 	// not silently enter payloads until the config is re-POSTed. Done before
 	// Preflight so the fully-built config is what we validate and run.
 	if config.MapAllColumns {
-		colsByTable, err := dialect.SourceColumns(config)
-		if err != nil {
-			return nil, fmt.Errorf("[ingestable.parser] map all columns: %w", err)
-		}
 		if err := expandMapAllColumns(config, colsByTable); err != nil {
 			return nil, fmt.Errorf("[ingestable.parser] map all columns: %w", err)
 		}
+	}
+
+	// Validate every mapping resolves (case-insensitively) to a real source
+	// column, so a typo / renamed-or-dropped column / unresolvable case is a loud
+	// rejection at POST rather than a silent null on every row. Runs for map-all
+	// too, so it also catches a source table whose columns collide when lowercased.
+	if err := validateMappingColumns(config, colsByTable); err != nil {
+		return nil, fmt.Errorf("[ingestable.parser] %w", err)
 	}
 
 	// Preflight before building the worker: a source that would silently drop
