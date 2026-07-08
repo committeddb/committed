@@ -751,8 +751,10 @@ func (db *DB) Close() error {
 	}
 	db.workersMu.Unlock()
 
-	for _, h := range handles {
-		<-h.done
+	if abandoned := drainWorkers(handles, closeDrainTimeout); abandoned > 0 {
+		db.logger.Warn("close: worker drain timed out; abandoned wedged worker(s) and proceeded with shutdown "+
+			"(a syncable stuck in tx.Commit against an unreachable destination is the usual cause)",
+			zap.Int("abandoned", abandoned), zap.Duration("timeout", closeDrainTimeout))
 	}
 
 	// Hand leadership to a caught-up voter before stopping raft, so a graceful
@@ -769,6 +771,48 @@ func (db *DB) Close() error {
 	// the scrubber and closes the WAL/bbolt + SQL handles). Storage.Close is
 	// idempotent so the owner can close it unconditionally.
 	return db.raft.Close()
+}
+
+// closeDrainTimeout bounds how long Close waits for in-flight sync/ingest workers
+// to exit. A syncable wedged in tx.Commit (database/sql exposes no CommitContext,
+// so a canceled worker ctx cannot interrupt an in-flight commit to an unreachable
+// destination) can never close its done channel; without a bound, Close would
+// block forever — defeating graceful shutdown and leadership hand-off and forcing
+// the orchestrator to SIGKILL. Stragglers are abandoned: their goroutines die on
+// process exit and the sync re-applies idempotently on the next start.
+const closeDrainTimeout = 10 * time.Second
+
+// drainWorkers waits for each worker handle's done channel, up to timeout in
+// total, and returns the count still running when the deadline passed. Workers
+// that have already exited drain instantly; the bound only bites on a wedged one.
+func drainWorkers(handles []*workerHandle, timeout time.Duration) int {
+	deadline := time.Now().Add(timeout)
+	abandoned := 0
+	for _, h := range handles {
+		// Check "already exited?" first, in its own non-blocking select (the
+		// default makes it not wait), and skip on the fast path. This is NOT just
+		// an optimization for the common case: once the deadline has passed,
+		// time.Until(deadline) is negative, so the timer case in the second select
+		// is ALSO ready — and when multiple select cases are ready Go picks one at
+		// RANDOM. So a worker that exited cleanly could randomly land on the timeout
+		// branch and be miscounted as abandoned. Draining a done worker here, before
+		// it can reach the racy second select, keeps the abandoned count honest.
+		select {
+		case <-h.done:
+			continue
+		default:
+		}
+		// Still running: wait for it to exit, but no later than the shared
+		// deadline. done wins -> drained; deadline wins -> abandoned (a wedged
+		// worker). The deadline is shared across all handles, so the whole drain is
+		// bounded by timeout regardless of how many workers are wedged.
+		select {
+		case <-h.done:
+		case <-time.After(time.Until(deadline)):
+			abandoned++
+		}
+	}
+	return abandoned
 }
 
 // proposeIngestablePosition bumps the persisted Position for an
