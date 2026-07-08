@@ -58,6 +58,14 @@ func (d *GoMySQLServerDialect) CreateAggregateAffectedParentsSQL(spec sql.Aggreg
 	return (&dialects.MySQLDialect{}).CreateAggregateAffectedParentsSQL(spec, onField)
 }
 
+func (d *GoMySQLServerDialect) CreateAppliedSidecarDDL(config *sql.Config) string {
+	return (&dialects.MySQLDialect{}).CreateAppliedSidecarDDL(config)
+}
+
+func (d *GoMySQLServerDialect) CreateAppliedMarkSQL(config *sql.Config) string {
+	return (&dialects.MySQLDialect{}).CreateAppliedMarkSQL(config)
+}
+
 func (d *GoMySQLServerDialect) Open(connectionString string) (*gosql.DB, error) {
 	conn, err := d.Driver.OpenConnector(connectionString)
 	if err != nil {

@@ -76,6 +76,14 @@ func (d *SQLMockDialect) CreateAggregateAffectedParentsSQL(spec sql.AggregateSpe
 	return (&dialects.MySQLDialect{}).CreateAggregateAffectedParentsSQL(spec, onField)
 }
 
+func (d *SQLMockDialect) CreateAppliedSidecarDDL(config *sql.Config) string {
+	return (&dialects.MySQLDialect{}).CreateAppliedSidecarDDL(config)
+}
+
+func (d *SQLMockDialect) CreateAppliedMarkSQL(config *sql.Config) string {
+	return (&dialects.MySQLDialect{}).CreateAppliedMarkSQL(config)
+}
+
 func (d *SQLMockDialect) CreateSQL(config *sql.Config) string {
 	var sql strings.Builder
 

@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 
@@ -384,6 +385,10 @@ func TestSyncDeleteWithoutKeyColumnIsPermanent(t *testing.T) {
 	}
 	mock.ExpectExec(dialect.CreateDDL(config)).WillReturnResult(driver.ResultNoRows)
 	mock.ExpectPrepare(dialect.CreateSQL(config))
+	// This config is keyless (no primaryKey), so Init also creates the dedup
+	// sidecar and prepares its mark.
+	mock.ExpectExec(dialect.CreateAppliedSidecarDDL(config)).WillReturnResult(driver.ResultNoRows)
+	mock.ExpectPrepare(dialect.CreateAppliedMarkSQL(config))
 
 	syncable := sql.New(db, config)
 	require.Nil(t, syncable.Init())
@@ -396,6 +401,54 @@ func TestSyncDeleteWithoutKeyColumnIsPermanent(t *testing.T) {
 	require.Error(t, err)
 	require.True(t, errors.Is(err, cluster.ErrPermanent))
 	require.Nil(t, mock.ExpectationsWereMet())
+}
+
+// TestSyncKeylessAppendIdempotentMySQL is the no-primaryKey replay regression on
+// the MySQL path (the INSERT IGNORE dedup mark): re-syncing the same Actuals must
+// not duplicate rows in an append/history table. Runs against the in-process
+// go-mysql-server engine.
+func TestSyncKeylessAppendIdempotentMySQL(t *testing.T) {
+	db := newGoMySQLServerDB(t, "klessappend")
+	defer db.Close()
+
+	cfg := &sql.Config{
+		Topic: simpleType.ID,
+		Table: "history",
+		Mappings: []sql.Mapping{
+			{JsonPath: "$.k", Column: "k", SQLType: "TEXT"},
+			{JsonPath: "$.v", Column: "v", SQLType: "TEXT"},
+		},
+		// no PrimaryKey — an append/history table
+	}
+	syncable := sql.New(db, cfg)
+	require.Nil(t, syncable.Init())
+	defer syncable.Close()
+
+	up := func(k, v string) *cluster.Entity {
+		return cluster.NewUpsertEntity(simpleType, []byte(k), []byte(fmt.Sprintf(`{"k":%q,"v":%q}`, k, v)))
+	}
+	// 4 rows: index 1 & 2 share key "a" (append keeps both), index 3 has two
+	// entities in one Actual (seq 0, 1).
+	actuals := []*cluster.Actual{
+		{Index: 1, Entities: []*cluster.Entity{up("a", "1")}},
+		{Index: 2, Entities: []*cluster.Entity{up("a", "2")}},
+		{Index: 3, Entities: []*cluster.Entity{up("b", "3a"), up("b", "3b")}},
+	}
+	apply := func() {
+		for _, a := range actuals {
+			_, err := syncable.Sync(context.Background(), a)
+			require.NoError(t, err)
+		}
+	}
+
+	apply()
+	var count int
+	require.Nil(t, db.DB.QueryRow("SELECT COUNT(*) FROM history").Scan(&count))
+	require.Equal(t, 4, count, "append keeps one row per entity")
+
+	apply() // replay — the INSERT IGNORE mark suppresses re-appends
+	require.Nil(t, db.DB.QueryRow("SELECT COUNT(*) FROM history").Scan(&count))
+	require.Equal(t, 4, count, "replay is a no-op on the MySQL path")
 }
 
 // TestSyncRollsBackOnApplyError is the tx-leak regression for the error path:

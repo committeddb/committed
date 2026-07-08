@@ -95,6 +95,22 @@ func (p *SyncableParser) ParseConfig(v *cluster.ParsedConfig, storage cluster.Da
 		}
 	}
 
+	// A keyless (append/history) syncable gets a dedup sidecar named
+	// <table>__committed_applied so replay doesn't duplicate rows. If the table
+	// name is long enough that the sidecar name exceeds the 63-char identifier
+	// limit, the database would silently truncate it and collide with the base
+	// table — reject up front with a field-scoped 400.
+	if primaryKey == "" {
+		if name := AppliedSidecarName(table); len(name) > maxSidecarIdentifierLen {
+			return nil, &cluster.FieldError{
+				Field: "sql.table",
+				Issue: fmt.Sprintf(
+					"too long for a keyless syncable: its dedup sidecar %q is %d chars, over the %d-char identifier limit — use a table name of at most %d chars, or configure a primaryKey",
+					name, len(name), maxSidecarIdentifierLen, maxSidecarIdentifierLen-len("__committed_applied")),
+			}
+		}
+	}
+
 	p.warnKindMisuse(storage, topic, mappings)
 
 	var indexes []Index

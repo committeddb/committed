@@ -146,6 +146,24 @@ func (d *MySQLDialect) CreateSQL(config *sql.Config) string {
 	return sql.String()
 }
 
+// CreateAppliedSidecarDDL implements Dialect: the dedup sidecar for a keyless
+// (append) syncable — (committed_index, committed_seq) under a composite PK.
+func (d *MySQLDialect) CreateAppliedSidecarDDL(config *sql.Config) string {
+	return fmt.Sprintf(
+		"CREATE TABLE IF NOT EXISTS %s (%s BIGINT NOT NULL,%s INT NOT NULL,PRIMARY KEY (%s,%s));",
+		sql.AppliedSidecarName(config.Table),
+		sql.AppliedIndexColumn, sql.AppliedSeqColumn,
+		sql.AppliedIndexColumn, sql.AppliedSeqColumn)
+}
+
+// CreateAppliedMarkSQL implements Dialect: INSERT IGNORE, so RowsAffected is 1 on
+// a first apply and 0 on a replay of the same (index, seq).
+func (d *MySQLDialect) CreateAppliedMarkSQL(config *sql.Config) string {
+	return fmt.Sprintf(
+		"INSERT IGNORE INTO %s (%s,%s) VALUES (?,?)",
+		sql.AppliedSidecarName(config.Table), sql.AppliedIndexColumn, sql.AppliedSeqColumn)
+}
+
 func (d *MySQLDialect) Open(connectionString string) (*gosql.DB, error) {
 	return gosql.Open("mysql", connectionString)
 }

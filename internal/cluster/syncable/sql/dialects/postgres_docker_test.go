@@ -321,6 +321,83 @@ func TestPostgreSQLIntegration_FullSyncableFlow(t *testing.T) {
 	require.Equal(t, "3", aValue)
 }
 
+// TestPostgreSQLIntegration_KeylessAppendIdempotentOnReplay is the no-primaryKey
+// replay regression: an append/history syncable (no key to upsert on) must NOT
+// duplicate rows when the same Actuals are re-synced — a crash mid-batch, a
+// leader-change re-sync, or a corrupt-checkpoint restart. committed dedups on a
+// sidecar keyed by (raft index, entity ordinal), and the user's own table stays
+// pristine: the dedup columns live only in the sidecar.
+func TestPostgreSQLIntegration_KeylessAppendIdempotentOnReplay(t *testing.T) {
+	d := &dialects.PostgreSQLDialect{}
+	db, err := sql.NewDB(d, pgConnString)
+	require.Nil(t, err)
+	defer db.Close()
+
+	table := "kless_append_replay" // short: sidecar name must fit the 63-char limit
+	dropTable(t, table)
+	dropTable(t, sql.AppliedSidecarName(table))
+	defer dropTable(t, table)
+	defer dropTable(t, sql.AppliedSidecarName(table))
+
+	cfg := &sql.Config{
+		Topic: eventType.ID,
+		Table: table,
+		Mappings: []sql.Mapping{
+			{JsonPath: "$.k", Column: "k", SQLType: "TEXT"},
+			{JsonPath: "$.v", Column: "v", SQLType: "TEXT"},
+		},
+		// no PrimaryKey — an append/history table
+	}
+	syncable := sql.New(db, cfg)
+	require.Nil(t, syncable.Init())
+	defer syncable.Close()
+
+	up := func(k, v string) *cluster.Entity {
+		return cluster.NewUpsertEntity(eventType, []byte(k), []byte(fmt.Sprintf(`{"k":%q,"v":%q}`, k, v)))
+	}
+	// 5 rows: index 1 and 3 share key "a" (an append table keeps BOTH), and index
+	// 4 carries two entities in one Actual (seq 0 and 1).
+	actuals := []*cluster.Actual{
+		{Index: 1, Entities: []*cluster.Entity{up("a", "1")}},
+		{Index: 2, Entities: []*cluster.Entity{up("b", "2")}},
+		{Index: 3, Entities: []*cluster.Entity{up("a", "3")}},
+		{Index: 4, Entities: []*cluster.Entity{up("c", "4a"), up("c", "4b")}},
+	}
+	apply := func() {
+		for _, a := range actuals {
+			_, serr := syncable.Sync(context.Background(), a)
+			require.NoError(t, serr)
+		}
+	}
+
+	apply() // first pass
+	var count int
+	require.Nil(t, db.DB.QueryRow("SELECT COUNT(*) FROM "+table).Scan(&count))
+	require.Equal(t, 5, count, "append keeps one row per entity, including the repeated key 'a'")
+
+	apply() // replay — every (index, seq) is already marked
+	require.Nil(t, db.DB.QueryRow("SELECT COUNT(*) FROM "+table).Scan(&count))
+	require.Equal(t, 5, count, "replay is a no-op: the dedup sidecar suppresses re-appends")
+
+	var sidecarCount int
+	require.Nil(t, db.DB.QueryRow("SELECT COUNT(*) FROM "+sql.AppliedSidecarName(table)).Scan(&sidecarCount))
+	require.Equal(t, 5, sidecarCount, "one sidecar mark per applied row")
+
+	// The user's table stays pristine — no committed_index/committed_seq leaked in.
+	nameRows, err := db.DB.Query(
+		"SELECT column_name FROM information_schema.columns WHERE table_name = $1 ORDER BY column_name", table)
+	require.NoError(t, err)
+	defer nameRows.Close()
+	var names []string
+	for nameRows.Next() {
+		var n string
+		require.NoError(t, nameRows.Scan(&n))
+		names = append(names, n)
+	}
+	require.NoError(t, nameRows.Err())
+	require.Equal(t, []string{"k", "v"}, names, "dedup metadata lives in the sidecar, not the user's table")
+}
+
 // --- Whole-payload ("$") mappings ---
 
 var eventType = &cluster.Type{ID: "controlplane-event"}

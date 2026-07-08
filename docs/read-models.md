@@ -28,6 +28,18 @@ from index 0. Use `sql` for event-log/history tables (and for
 use `sql-projection` to maintain current-state tables from an
 `event`-kind topic. One topic typically feeds both.
 
+A keyless history table (no `primaryKey`) is **replay-safe**: committed dedups
+each appended row on a hidden sidecar (`<table>__committed_applied`, keyed by the
+event's raft index and its ordinal within the proposal), so a crash mid-batch, a
+leader-change re-sync, or a corrupt-checkpoint restart re-applies as a no-op
+rather than duplicating rows. The sidecar is committed-managed and never queried
+by the application — your history table keeps exactly the columns you mapped. (A
+`snapshot`-kind or otherwise keyed `sql` syncable needs none of this: its upsert
+is already idempotent on the key.) Because the sidecar name is derived from the
+table name, a keyless syncable's table must be short enough that
+`<table>__committed_applied` fits the database's 63-char identifier limit;
+committed rejects a longer one at config time.
+
 ## A single-source projection
 
 ```toml

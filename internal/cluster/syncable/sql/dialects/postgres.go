@@ -178,6 +178,24 @@ func (d *PostgreSQLDialect) CreateSQL(config *sql.Config) string {
 	return sql.String()
 }
 
+// CreateAppliedSidecarDDL implements Dialect: the dedup sidecar for a keyless
+// (append) syncable — (committed_index, committed_seq) under a composite PK.
+func (d *PostgreSQLDialect) CreateAppliedSidecarDDL(config *sql.Config) string {
+	return fmt.Sprintf(
+		"CREATE TABLE IF NOT EXISTS %s (%s BIGINT NOT NULL,%s INT NOT NULL,PRIMARY KEY (%s,%s));",
+		sql.AppliedSidecarName(config.Table),
+		sql.AppliedIndexColumn, sql.AppliedSeqColumn,
+		sql.AppliedIndexColumn, sql.AppliedSeqColumn)
+}
+
+// CreateAppliedMarkSQL implements Dialect: ON CONFLICT DO NOTHING, so RowsAffected
+// is 1 on a first apply and 0 on a replay of the same (index, seq).
+func (d *PostgreSQLDialect) CreateAppliedMarkSQL(config *sql.Config) string {
+	return fmt.Sprintf(
+		"INSERT INTO %s (%s,%s) VALUES ($1,$2) ON CONFLICT DO NOTHING",
+		sql.AppliedSidecarName(config.Table), sql.AppliedIndexColumn, sql.AppliedSeqColumn)
+}
+
 func (d *PostgreSQLDialect) Open(connectionString string) (*gosql.DB, error) {
 	return gosql.Open("pgx", connectionString)
 }

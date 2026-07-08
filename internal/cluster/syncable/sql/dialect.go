@@ -70,6 +70,19 @@ type Dialect interface {
 	// array column must be re-materialized. The single bound argument is the
 	// changed dimension key.
 	CreateAggregateAffectedParentsSQL(spec AggregateSpec, onField string) string
+	// CreateAppliedSidecarDDL returns the CREATE TABLE for a keyless (append)
+	// syncable's dedup sidecar: (committed_index, committed_seq) under a composite
+	// PRIMARY KEY. committed marks each applied row here so replaying the same
+	// Actual is a no-op — giving an append/history table exactly-once semantics
+	// without adding committed-managed columns to the user's own table. The
+	// sidecar name is AppliedSidecarName(config.Table); dropped via DropDDL on it.
+	CreateAppliedSidecarDDL(config *Config) string
+	// CreateAppliedMarkSQL returns the mark-and-detect insert into the applied
+	// sidecar: `INSERT ... ON CONFLICT DO NOTHING` (PostgreSQL) / `INSERT IGNORE`
+	// (MySQL). RowsAffected is 1 on a first apply and 0 on a replay, which the
+	// runtime uses to skip the (non-idempotent) history insert on replay. Its two
+	// placeholders bind the Actual's raft index and the entity's ordinal.
+	CreateAppliedMarkSQL(config *Config) string
 	Open(connectionString string) (*gosql.DB, error)
 	// IsPermanent returns true if the given SQL error is non-retryable
 	// (e.g., constraint violations, data-type mismatches). The sync loop
@@ -191,6 +204,16 @@ type Delete struct {
 	Stmt *gosql.Stmt
 }
 
+// AppliedMark is the prepared dedup-sidecar mark for a KEYLESS (append) syncable:
+// `INSERT ... ON CONFLICT DO NOTHING` keyed on (committed_index, committed_seq).
+// It is nil for a keyed syncable, whose upsert is already idempotent. Run before
+// the history insert in the same transaction; RowsAffected == 0 means the row was
+// already applied (a replay), so the history insert is skipped.
+type AppliedMark struct {
+	SQL  string
+	Stmt *gosql.Stmt
+}
+
 // Sidecar* are the fixed column names of an aggregate source's backing table.
 // They are shared between projection.go (which builds the sidecar upsert and
 // delete through the generic CreateSQL / CreateDeleteSQL path) and the dialects
@@ -202,6 +225,29 @@ const (
 	SidecarElementKey = "element_key"
 	SidecarElement    = "element"
 )
+
+// AppliedIndexColumn / AppliedSeqColumn are the dedup sidecar's columns: the
+// Actual's raft index and the entity's ordinal within that Actual. Together they
+// are a deterministic, log-derived identity for each appended row, so replay
+// re-inserts the same pair and the ON CONFLICT DO NOTHING mark reports it as
+// already-applied. Shared between the dialects (which build the DDL + mark SQL)
+// and sql.go (which creates/drops the sidecar), so the two never drift.
+const (
+	AppliedIndexColumn = "committed_index"
+	AppliedSeqColumn   = "committed_seq"
+)
+
+// AppliedSidecarName is the dedup sidecar backing a keyless syncable's table —
+// distinct from the projection aggregate/lookup sidecars (sidecarName).
+func AppliedSidecarName(table string) string {
+	return table + "__committed_applied"
+}
+
+// maxSidecarIdentifierLen is the tightest table-identifier length across the
+// supported dialects (PostgreSQL 63, MySQL 64). A keyless syncable's dedup
+// sidecar name must fit it; a longer name would be silently truncated by the
+// database and collide with the base table, so the parser rejects it up front.
+const maxSidecarIdentifierLen = 63
 
 // Lookup* are the fixed column names of an enrichment dimension table: the
 // foreign-key target and the stored JSON object of dimension fields.

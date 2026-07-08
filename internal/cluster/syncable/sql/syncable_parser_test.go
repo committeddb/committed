@@ -198,6 +198,35 @@ type     = "JSONB"
 	require.Empty(t, config.PrimaryKey)
 }
 
+// TestParseKeylessTableTooLongRejected: a keyless (event-topic, no primaryKey)
+// syncable whose table name makes the dedup sidecar (<table>__committed_applied)
+// exceed the 63-char identifier limit is rejected at parse — the database would
+// otherwise silently truncate the sidecar name and collide with the base table.
+func TestParseKeylessTableTooLongRejected(t *testing.T) {
+	longTable := strings.Repeat("t", 50) // 50 + len("__committed_applied")=19 = 69 > 63
+	toml := `
+[sql]
+topic = "evt"
+db = "testdb"
+table = "` + longTable + `"
+
+[[sql.mappings]]
+jsonPath = "$"
+column   = "payload"
+type     = "JSONB"
+`
+	v := readConfig(t, "toml", strings.NewReader(toml))
+	storage := &typeResolvingStorage{
+		TestDatabaseStorage: TestDatabaseStorage{dbs: map[string]cluster.Database{"testdb": testDB}},
+		types:               map[string]*cluster.Type{"evt": eventType},
+	}
+	_, err := (&sql.SyncableParser{}).ParseConfig(v, storage)
+	var fe *cluster.FieldError
+	require.ErrorAs(t, err, &fe)
+	require.Equal(t, "sql.table", fe.Field)
+	require.Contains(t, fe.Issue, "keyless")
+}
+
 func simpleConfig(db cluster.Database) *sql.Config {
 	m1 := sql.Mapping{JsonPath: "$.key", Column: "pk", SQLType: "TEXT"}
 	m2 := sql.Mapping{JsonPath: "$.one", Column: "one", SQLType: "TEXT"}

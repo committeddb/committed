@@ -24,6 +24,10 @@ type Syncable struct {
 	// Actual is a permanent misconfiguration rather than a silent
 	// retention. See Config.DeleteKeyColumn.
 	delete *Delete
+	// appliedMark is the dedup-sidecar mark, non-nil ONLY for a keyless
+	// (append/history) syncable — the one shape whose bare INSERT would
+	// duplicate rows on replay. See AppliedMark and applyEntity.
+	appliedMark *AppliedMark
 }
 
 func New(d *DB, config *Config) *Syncable {
@@ -62,6 +66,14 @@ func (c *Syncable) Teardown() error {
 	dropString := c.dialect.DropDDL(c.config)
 	if _, err := c.db.Exec(dropString); err != nil {
 		return fmt.Errorf("teardown [%s]: %w", dropString, err)
+	}
+	// Drop the keyless syncable's dedup sidecar too — DropDDL on its name. A
+	// keyed syncable has none, so this is skipped.
+	if c.config.PrimaryKey == "" {
+		sidecarDrop := c.dialect.DropDDL(&Config{Table: AppliedSidecarName(c.config.Table)})
+		if _, err := c.db.Exec(sidecarDrop); err != nil {
+			return fmt.Errorf("teardown applied-sidecar [%s]: %w", sidecarDrop, err)
+		}
 	}
 	return nil
 }
@@ -107,6 +119,26 @@ func (c *Syncable) Init() error {
 		c.delete = &Delete{deleteString, deleteStmt}
 	}
 
+	// A keyless (append/history) syncable has no key to be idempotent on, so its
+	// bare INSERT would duplicate rows on replay (crash mid-batch, leader-change
+	// re-sync, corrupt-checkpoint restart). Give it a dedup sidecar keyed on
+	// (raft index, entity ordinal) — a deterministic, log-derived identity — and
+	// guard each history insert with a mark (see applyEntity): a replay marks a
+	// no-op and skips the insert. Keyed syncables need none of this; their upsert
+	// is already idempotent, so they carry no sidecar and pay nothing.
+	if c.config.PrimaryKey == "" {
+		sidecarDDL := c.dialect.CreateAppliedSidecarDDL(c.config)
+		if _, err := c.db.Exec(sidecarDDL); err != nil {
+			return fmt.Errorf("applied-sidecar ddl [%s]: %w", sidecarDDL, err)
+		}
+		markSQL := c.dialect.CreateAppliedMarkSQL(c.config)
+		markStmt, err := c.db.Prepare(markSQL)
+		if err != nil {
+			return fmt.Errorf("prepare applied-mark sql [%s]: %w", markSQL, err)
+		}
+		c.appliedMark = &AppliedMark{markSQL, markStmt}
+	}
+
 	return nil
 }
 
@@ -136,11 +168,14 @@ func (c *Syncable) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldS
 		return false, err
 	}
 
-	for _, e := range a.Entities {
+	for i, e := range a.Entities {
 		if c.config.Topic != e.Type.ID {
 			continue // an entity from another topic in a mixed proposal — not ours
 		}
-		if err := c.applyEntity(ctx, tx, e); err != nil {
+		// a.Index + the entity's ordinal i is this row's dedup identity (used
+		// only by a keyless syncable's applied sidecar); i is the absolute
+		// position in a.Entities, so it's stable across replay.
+		if err := c.applyEntity(ctx, tx, e, a.Index, i); err != nil {
 			_ = tx.Rollback()
 			return false, err
 		}
@@ -177,12 +212,12 @@ func (c *Syncable) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool, e
 	}
 
 	for _, a := range as {
-		for _, e := range a.Entities {
+		for i, e := range a.Entities {
 			if c.config.Topic != e.Type.ID {
 				continue
 			}
 
-			if err := c.applyEntity(ctx, tx, e); err != nil {
+			if err := c.applyEntity(ctx, tx, e, a.Index, i); err != nil {
 				_ = tx.Rollback()
 				return false, err
 			}
@@ -211,7 +246,7 @@ func (c *Syncable) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool, e
 // syncable replaying an already-scrubbed log correct. Returns a
 // cluster.Permanent error for non-retryable failures so the worker skips
 // rather than retries. The caller owns the transaction (commit/rollback).
-func (c *Syncable) applyEntity(ctx context.Context, tx *sql.Tx, e *cluster.Entity) error {
+func (c *Syncable) applyEntity(ctx context.Context, tx *sql.Tx, e *cluster.Entity, index uint64, seq int) error {
 	if e.IsDelete() {
 		if c.delete == nil {
 			return cluster.Permanent(fmt.Errorf(
@@ -267,6 +302,25 @@ func (c *Syncable) applyEntity(ctx context.Context, tx *sql.Tx, e *cluster.Entit
 	// (ON CONFLICT ... EXCLUDED).
 	allValues := c.dialect.BindArgs(values)
 
+	// Keyless (append) syncable: mark this row's (index, seq) in the dedup
+	// sidecar first. RowsAffected == 0 means the pair was already there — a
+	// replay — so skip the non-idempotent history insert. The mark and the
+	// insert share the caller's transaction, so they commit or roll back
+	// together. int64(index) is safe: a raft log index never approaches 2^63.
+	if c.appliedMark != nil {
+		res, err := tx.StmtContext(ctx, c.appliedMark.Stmt).ExecContext(ctx, int64(index), seq) //nolint:gosec // G115: raft index is far below 2^63
+		if err != nil {
+			wrapped := fmt.Errorf("[sql.apply] exec [%s]: %w", c.appliedMark.SQL, err)
+			if c.dialect.IsPermanent(err) {
+				return cluster.Permanent(wrapped)
+			}
+			return wrapped
+		}
+		if n, aerr := res.RowsAffected(); aerr == nil && n == 0 {
+			return nil // already applied — replay no-op, don't re-append
+		}
+	}
+
 	if _, err := tx.StmtContext(ctx, c.insert.Stmt).ExecContext(ctx, allValues...); err != nil {
 		wrapped := fmt.Errorf("[sql.apply] exec [%s]: %w", c.insert.SQL, err)
 		if c.dialect.IsPermanent(err) {
@@ -284,6 +338,11 @@ func (c *Syncable) Close() error {
 	if c.delete != nil {
 		if derr := c.delete.Stmt.Close(); err == nil {
 			err = derr
+		}
+	}
+	if c.appliedMark != nil {
+		if merr := c.appliedMark.Stmt.Close(); err == nil {
+			err = merr
 		}
 	}
 	return err
