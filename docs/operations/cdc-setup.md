@@ -264,24 +264,38 @@ stream a replica reads).
 
 ### Prerequisites (operator)
 
-1. **Binlog enabled, row format, full row image.** MySQL 8.0+ ships with all of
-   these on by default (`log_bin` on, `binlog_format=ROW`,
-   `binlog_row_image=FULL`, a non-zero `server_id`), so a stock MySQL 8/9 needs no
-   changes. If your server has been customized, ensure:
+1. **Binlog enabled, row format, full row image, full row metadata.** committed's
+   MySQL CDC requires **MySQL 8.0.1+** (or MariaDB 10.5+) and the settings below. A
+   stock MySQL 8/9 already has `log_bin` on, `binlog_format=ROW`,
+   `binlog_row_image=FULL`, and a non-zero `server_id` — so in practice only
+   `binlog_row_metadata` (which defaults to `MINIMAL`) needs changing.
 
    ```ini
    # my.cnf
-   log_bin            = ON
-   binlog_format      = ROW
-   binlog_row_image   = FULL      # see the MINIMAL note below
-   server_id          = 1         # any unique non-zero id
+   log_bin             = ON
+   binlog_format       = ROW
+   binlog_row_image    = FULL      # committed rejects MINIMAL and NOBLOB
+   binlog_row_metadata = FULL      # MySQL 8.0.1+; default is MINIMAL
+   server_id           = 1         # any unique non-zero id
    ```
 
-   committed's preflight reads `@@global.binlog_row_image` and, if it is
-   `MINIMAL`, refuses to start **unless** every watched table has a PRIMARY KEY
-   covering the configured `primaryKey`. The reason: a `MINIMAL` row image ships
-   only the changed columns plus the key on a `DELETE`, so without a covering PK
-   committed can't form a keyed tombstone. `FULL` (or `NOBLOB`) always works.
+   Preflight reads `@@global.binlog_row_image` and `@@global.binlog_row_metadata`
+   and refuses to start unless **both are `FULL`**:
+
+   - **`binlog_row_image=FULL`** — `MINIMAL` and `NOBLOB` omit unchanged columns
+     from the UPDATE after-image, so a partial `UPDATE` would silently null those
+     columns in the mirror. `FULL` always ships the complete before/after image
+     (which also carries the key for a keyed `DELETE` tombstone).
+   - **`binlog_row_metadata=FULL`** — a binlog row image is *positional* (values
+     only, no column names). committed decodes each row against the column names
+     and ENUM/SET labels carried in that row's own binlog `TableMapEvent` — the
+     schema *as of the write* — so an online `ALTER` on the source cannot mis-join
+     a still-replaying old row against the post-change columns. MySQL writes those
+     names/labels into the event only under `FULL`; the default `MINIMAL` omits
+     them. This is the same setting Debezium and other CDC tools require. It is a
+     dynamic global (`SET GLOBAL binlog_row_metadata = 'FULL'` — no restart;
+     persist it in `my.cnf`), and it exists only on MySQL 8.0.1+ / MariaDB 10.5+,
+     which is therefore the minimum source version for committed's MySQL CDC.
 
 2. **GTID mode on (strongly recommended).** With `gtid_mode=ON` committed resumes
    the binlog by **GTID set** rather than file:offset, which is what makes resume
@@ -380,10 +394,13 @@ never auto-purge).
 ### MySQL troubleshooting
 
 - **Ingest won't start, "binlog_row_image" in the error.** The server is on
-  `binlog_row_image=MINIMAL` and a watched table lacks a PK covering your
-  `primaryKey`. Set `binlog_row_image=FULL` (global, no restart:
-  `SET GLOBAL binlog_row_image = 'FULL'`, and persist it in `my.cnf`) or add the
-  PRIMARY KEY.
+  `binlog_row_image=MINIMAL` or `NOBLOB`. Set `binlog_row_image=FULL` (global, no
+  restart: `SET GLOBAL binlog_row_image = 'FULL'`, and persist it in `my.cnf`).
+- **Ingest won't start, "binlog_row_metadata" in the error.** The server is on
+  `binlog_row_metadata=MINIMAL` (the MySQL default). Set `binlog_row_metadata=FULL`
+  (global, no restart: `SET GLOBAL binlog_row_metadata = 'FULL'`, and persist it in
+  `my.cnf`). This needs MySQL 8.0.1+ / MariaDB 10.5+; on an older server committed's
+  MySQL CDC can't run.
 - **"Access denied" on connect or on the binlog dump.** The user is missing
   `REPLICATION SLAVE`/`REPLICATION CLIENT` (binlog) or `RELOAD` (snapshot lock).
 - **`reSnapshotRequired: true` after a long outage.** The source purged the binlog

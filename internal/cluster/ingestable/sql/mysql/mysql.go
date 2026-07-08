@@ -87,6 +87,22 @@ func (m *MySQLDialect) Preflight(config *sql.Config) error {
 			"binlog_row_image is %q, but committed requires FULL: NOBLOB and MINIMAL omit unchanged columns from the UPDATE after-image, so a partial UPDATE silently nulls them downstream. Set `binlog_row_image=FULL`",
 			rowImage)
 	}
+
+	var rowMetadata string
+	if err := db.QueryRowContext(ctx, `SELECT @@global.binlog_row_metadata`).Scan(&rowMetadata); err != nil {
+		return fmt.Errorf("read binlog_row_metadata: %w", err)
+	}
+	// FULL is required: committed decodes each row image against the schema carried
+	// in its OWN binlog TableMapEvent (column names + ENUM/SET labels), which the
+	// server emits only under FULL. Under MINIMAL the event has no column names, so
+	// an online schema change on the source would leave committed decoding a
+	// still-replaying old-image row against the post-ALTER columns — silent mirror
+	// corruption (see columnsFromTableMap).
+	if !strings.EqualFold(rowMetadata, "FULL") {
+		return fmt.Errorf(
+			"binlog_row_metadata is %q, but committed requires FULL: the binlog carries column names and ENUM/SET labels only under FULL, and committed decodes each row against its own event's schema to stay correct across source DDL. Set `binlog_row_metadata=FULL`",
+			rowMetadata)
+	}
 	return nil
 }
 
@@ -327,17 +343,6 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 		resumeProgress = posProto.SnapshotProgress
 	}
 
-	// Schema cache for the streaming decode path — committed sources column
-	// metadata (names, JSON category, enum/set labels) from information_schema
-	// rather than canal's tracking. Opened once and shared across reconnects;
-	// the connection is lazy, so a bad source surfaces on the first row, not here.
-	cacheDB, err := gosql.Open("mysql", buildDSN(config.ConnectionString))
-	if err != nil {
-		return fmt.Errorf("open schema cache db: %w", err)
-	}
-	defer func() { _ = cacheDB.Close() }()
-	cache := newSchemaCache(cacheDB)
-
 	// Outer loop: each iteration either snapshots (first run, or
 	// resuming mid-snapshot) or creates a canal, runs it until it
 	// exits, then reconnects with backoff. Only ctx cancellation
@@ -455,7 +460,6 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			proposalChan: pr,
 			positionChan: po,
 			tables:       config.Tables,
-			cache:        cache,
 			// Seed the live coordinate from the resume position so a
 			// mid-transaction flush before the first commit still stamps
 			// a sane SourceSeq. lastPos is non-nil here (resume or
@@ -533,11 +537,6 @@ type MySQLEventHandler struct {
 	proposalChan chan<- *cluster.Proposal
 	positionChan chan<- cluster.Position
 	tables       []string
-
-	// cache supplies per-column decode metadata (names, JSON category, enum/set
-	// labels) from committed's own information_schema lookups — what the raw
-	// binlog row lacks. Shared across reconnects; cleared on DDL.
-	cache *schemaCache
 
 	// lastPos holds the most recently committed binlog position so the outer
 	// reconnect loop can resume from where it left off.
@@ -653,9 +652,12 @@ func (h *MySQLEventHandler) handleRows(ctx context.Context, header *replication.
 		return nil // an unsupported rows-event variant — skip
 	}
 
-	ts, err := h.cache.get(ctx, table)
+	// Decode against the schema carried by THIS row's binlog TableMapEvent — the
+	// schema as of the write — not live information_schema, which reflects the
+	// post-ALTER columns and would silently mis-join a still-replaying old image.
+	ts, err := columnsFromTableMap(e.Table)
 	if err != nil {
-		return fmt.Errorf("schema of %q: %w", table, err)
+		return fmt.Errorf("decode schema of %q from binlog: %w", table, err)
 	}
 
 	// Track the live offset (the row event's end position) so a mid-transaction
@@ -917,10 +919,10 @@ func (h *MySQLEventHandler) handleXID(ctx context.Context, header *replication.E
 	return nil
 }
 
-// handleDDL drops the cached schema on any DDL — a column change on a watched
-// table must be re-read before the next row decodes — and logs the statement.
+// handleDDL logs a DDL statement observed on the source. The decode holds no
+// cached schema — each row image decodes against the schema in its own binlog
+// TableMapEvent (see columnsFromTableMap) — so a DDL needs no cache invalidation.
 func (h *MySQLEventHandler) handleDDL(e *replication.QueryEvent) {
-	h.cache.clear()
 	if e == nil {
 		return
 	}

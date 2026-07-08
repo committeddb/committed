@@ -49,8 +49,11 @@ func TestMain(m *testing.M) {
 		tcmysql.WithUsername(username),
 		tcmysql.WithPassword(password),
 		// GTID positioning (Phase B) needs gtid_mode=ON; enforce_gtid_consistency
-		// is its required companion.
-		testcontainers.WithCmdArgs("--gtid-mode=ON", "--enforce-gtid-consistency=ON"),
+		// is its required companion. binlog-row-metadata=FULL makes each binlog
+		// TableMapEvent carry column names + ENUM/SET labels, which committed
+		// decodes against (see columnsFromTableMap) and Preflight now requires.
+		testcontainers.WithCmdArgs("--gtid-mode=ON", "--enforce-gtid-consistency=ON",
+			"--binlog-row-metadata=FULL"),
 	)
 	if err != nil {
 		log.Fatalf("Could not start MySQL container: %v", err)
@@ -430,6 +433,39 @@ func TestMysqlPreflightBinlogRowImage(t *testing.T) {
 	err = dialect.Preflight(cfg("pf_pk", "id"))
 	require.Error(t, err, "NOBLOB omits unchanged BLOB/TEXT columns from the after-image")
 	require.Contains(t, err.Error(), "binlog_row_image=FULL")
+}
+
+// TestMysqlPreflightBinlogRowMetadata locks the binlog_row_metadata=FULL
+// requirement: committed decodes each row against the schema (column names,
+// ENUM/SET labels) carried in its binlog TableMapEvent, which the server emits
+// only under FULL. MINIMAL leaves the event nameless, so Preflight must reject.
+func TestMysqlPreflightBinlogRowMetadata(t *testing.T) {
+	db := createDB(t)
+	defer db.Close()
+	mk := func(q string) { _, err := db.Exec(q); require.Nil(t, err) }
+	mk("DROP TABLE IF EXISTS pf_meta")
+	mk("CREATE TABLE pf_meta (id VARCHAR(32) PRIMARY KEY, v TEXT)")
+
+	var origImg, origMeta string
+	require.Nil(t, db.QueryRow("SELECT @@global.binlog_row_image").Scan(&origImg))
+	require.Nil(t, db.QueryRow("SELECT @@global.binlog_row_metadata").Scan(&origMeta))
+	defer func() {
+		_, _ = db.Exec("SET GLOBAL binlog_row_image = '" + origImg + "'")
+		_, _ = db.Exec("SET GLOBAL binlog_row_metadata = '" + origMeta + "'")
+	}()
+
+	dialect := &mysql.MySQLDialect{}
+	cfg := &sql.Config{ConnectionString: ingestURL, Tables: []string{"pf_meta"}, PrimaryKey: []string{"id"}}
+
+	mk("SET GLOBAL binlog_row_image = 'FULL'") // so Preflight reaches the metadata check
+
+	mk("SET GLOBAL binlog_row_metadata = 'FULL'")
+	require.NoError(t, dialect.Preflight(cfg), "FULL carries the column names committed decodes against")
+
+	mk("SET GLOBAL binlog_row_metadata = 'MINIMAL'")
+	err := dialect.Preflight(cfg)
+	require.Error(t, err, "MINIMAL strips column names/ENUM-SET labels from the binlog table map")
+	require.Contains(t, err.Error(), "binlog_row_metadata=FULL", "the error is actionable")
 }
 
 // TestMysqlReconnect verifies that the ingestable reconnects after
@@ -963,6 +999,137 @@ func mapsEqual(a, b map[string]string) bool {
 	return true
 }
 
+// TestMysqlDDLDrift_OldImageDecodesAgainstWriteTimeSchema is the DDL-drift
+// regression: an online schema change on the source that shifts column ordinality
+// (ADD COLUMN ... AFTER) must NOT corrupt still-replaying old-image rows.
+// committed decodes each row against the schema carried in its own binlog
+// TableMapEvent, so a row written under the OLD (a,b) schema joins to the OLD
+// columns even after the source is already on the NEW (a,mid,b) schema.
+//
+// Determinism: capture a streaming position, THEN (while ingest is stopped)
+// insert the old-schema rows and run the ALTER, THEN resume from that position —
+// so when committed streams+decodes the old-image rows the source is
+// unambiguously post-ALTER. On the pre-fix code (which read live
+// information_schema) every such row mis-joined: b's value landed under the added
+// `mid` column and b serialized as null.
+func TestMysqlDDLDrift_OldImageDecodesAgainstWriteTimeSchema(t *testing.T) {
+	table := "ddl_drift"
+
+	db := createDB(t)
+	_, err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS `%s`", table))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf("CREATE TABLE `%s` (a VARCHAR(32) NOT NULL, b TEXT, PRIMARY KEY (a));", table))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (a, b) VALUES ('seed', 'seedval');", table))
+	require.NoError(t, err)
+	db.Close()
+
+	config := &sql.Config{
+		Type:             &cluster.Type{ID: "drift", Name: "drift"},
+		Mappings:         []sql.Mapping{{JsonName: "a", SQLColumn: "a"}, {JsonName: "b", SQLColumn: "b"}},
+		PrimaryKey:       []string{"a"},
+		ConnectionString: ingestURL,
+		Tables:           []string{table},
+	}
+
+	// Phase 1 — snapshot the seed, then insert a marker during streaming and
+	// capture a position emitted AFTER it (guaranteed a pure streaming position,
+	// so the resume below streams rather than re-snapshots the post-ALTER table).
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	pr1 := make(chan *cluster.Proposal, 10)
+	po1 := make(chan cluster.Position, 10)
+	go func() { _ = (&mysql.MySQLDialect{}).Ingest(ctx1, config, nil, pr1, po1) }()
+
+	seen := map[string]bool{}
+	deadline := time.After(15 * time.Second)
+	for !seen["seed"] {
+		select {
+		case p := <-pr1:
+			for _, e := range p.Entities {
+				seen[string(e.Key)] = true
+			}
+		case <-po1:
+		case <-deadline:
+			t.Fatal("timed out waiting for the seed snapshot")
+		}
+	}
+	db = createDB(t)
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (a, b) VALUES ('marker', 'm');", table))
+	require.NoError(t, err)
+	db.Close()
+	var pos cluster.Position
+	deadline = time.After(15 * time.Second)
+	for !seen["marker"] || pos == nil {
+		select {
+		case p := <-pr1:
+			for _, e := range p.Entities {
+				seen[string(e.Key)] = true
+			}
+		case pp := <-po1:
+			if seen["marker"] {
+				pos = pp
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for the marker + a streaming position")
+		}
+	}
+	cancel1()
+
+	// While ingest is stopped: write old-schema (a,b) rows, THEN change column
+	// ordinality. The source is now (a, mid, b); the just-written rows' binlog
+	// images (and their TableMapEvents) are still (a, b).
+	db = createDB(t)
+	for i := 0; i < 5; i++ {
+		_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (a, b) VALUES ('r%d', 'old%d');", table, i, i))
+		require.NoError(t, err)
+	}
+	_, err = db.Exec(fmt.Sprintf("ALTER TABLE `%s` ADD COLUMN mid INT AFTER a;", table))
+	require.NoError(t, err)
+	db.Close()
+
+	// Phase 2 — resume from the captured position; committed streams the
+	// old-image (a,b) inserts while the source schema is already (a, mid, b).
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	pr2 := make(chan *cluster.Proposal, 20)
+	po2 := make(chan cluster.Position, 20)
+	go func() { _ = (&mysql.MySQLDialect{}).Ingest(ctx2, config, pos, pr2, po2) }()
+
+	got := map[string]string{}
+	sawSeed := false
+	deadline = time.After(20 * time.Second)
+	for len(got) < 5 {
+		select {
+		case p := <-pr2:
+			for _, e := range p.Entities {
+				key := string(e.Key)
+				if key == "seed" {
+					sawSeed = true // a re-snapshot would re-emit the seed
+					continue
+				}
+				if key == "marker" {
+					continue
+				}
+				var m map[string]any
+				require.NoError(t, json.Unmarshal(e.Data, &m))
+				b, _ := m["b"].(string)
+				got[key] = b
+			}
+		case <-po2:
+		case <-deadline:
+			t.Fatalf("timed out; decoded %d of 5 old-image rows: %v", len(got), got)
+		}
+	}
+	// The test is only meaningful if phase 2 STREAMED the old-image rows from the
+	// binlog: a re-snapshot reads current rows via SELECT against the post-ALTER
+	// schema, which never drifts, and would hide the bug (and pass on the old code).
+	require.False(t, sawSeed, "phase 2 must resume streaming, not re-snapshot")
+	for i := 0; i < 5; i++ {
+		require.Equalf(t, fmt.Sprintf("old%d", i), got[fmt.Sprintf("r%d", i)],
+			"old-image row r%d must decode b against its write-time (a,b) schema, not the post-ALTER (a,mid,b) schema", i)
+	}
+}
+
 // TestMysqlPositionResume verifies that checkpointed binlog positions are
 // correctly restored on restart: a new Ingest call with a previously
 // checkpointed position only receives changes committed after that position.
@@ -1016,36 +1183,44 @@ func TestMysqlPositionResume(t *testing.T) {
 		}
 	}
 
-	// Insert another row while phase 1 is running so the binlog advances
-	// past "before". Then collect the position after "during" commits.
+	// Insert "during" while phase 1 is running so the binlog advances past
+	// "before", then a "sync" row right after it. handleXID sends a transaction's
+	// proposal and THEN its position, in commit order on one goroutine — so once
+	// "sync"'s proposal arrives, "during"'s position is already buffered on
+	// positionChan1. Draining to the LATEST buffered position then yields a
+	// checkpoint whose GTID set includes "during" deterministically: an earlier
+	// stale position (from the snapshot phase) can no longer be mistaken for it.
+	// (Without the sync sentinel + drain this raced: a faster decode path lets a
+	// stale position arrive right after "during"'s proposal.)
 	db = createDB(t)
 	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, val) VALUES ('during', 'phase1');", table))
 	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, val) VALUES ('sync', 'phase1');", table))
+	require.NoError(t, err)
 	db.Close()
 
-	// Collect until we've seen "during" AND received a position
-	// checkpoint emitted after it. OnXID sends the proposal first and
-	// then the position, so requiring a post-"during" position guarantees
-	// lastPos is past the "during" commit.
 	deadline = time.After(15 * time.Second)
-	seenDuring := false
-	posAfterDuring := false
-	for !seenDuring || !posAfterDuring {
+	for !seen["sync"] {
 		select {
 		case p := <-proposalChan1:
 			for _, e := range p.Entities {
 				seen[string(e.Key)] = true
-				if string(e.Key) == "during" {
-					seenDuring = true
-				}
 			}
 		case pos := <-positionChan1:
 			lastPos = pos
-			if seenDuring {
-				posAfterDuring = true
-			}
 		case <-deadline:
-			t.Fatal("timed out waiting for 'during' proposal and position")
+			t.Fatal("timed out waiting for 'during' and 'sync' proposals")
+		}
+	}
+	require.True(t, seen["during"], "'during' commits before 'sync', so it must arrive first")
+	// Drain every already-buffered position; the latest is at least "during"'s.
+	draining := true
+	for draining {
+		select {
+		case pos := <-positionChan1:
+			lastPos = pos
+		default:
+			draining = false
 		}
 	}
 
