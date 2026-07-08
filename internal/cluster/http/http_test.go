@@ -27,7 +27,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster/http"
 	"github.com/committeddb/committed/internal/cluster/ingestable"
 	"github.com/committeddb/committed/internal/cluster/syncable/sql"
-	"github.com/committeddb/committed/internal/cluster/syncable/sql/dialects"
+	"github.com/committeddb/committed/internal/cluster/syncable/sql/dialects/testdialects"
 )
 
 // TestEndToEnd verifies the full HTTP → raft → syncable → destination database
@@ -153,7 +153,7 @@ func createDialect(t *testing.T, connectionString string) sql.Dialect {
 	memdbs := dbs{memdb}
 
 	drv := driver.New(memdbs, nil)
-	dialect := &dialects.GoMySQLServerDialect{Driver: drv}
+	dialect := &testdialects.GoMySQLServerDialect{Driver: drv}
 
 	conn, err := drv.OpenConnector(connectionString)
 	require.Nil(t, err)

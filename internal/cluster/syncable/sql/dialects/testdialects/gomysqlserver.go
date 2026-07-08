@@ -1,4 +1,4 @@
-package dialects
+package testdialects
 
 import (
 	gosql "database/sql"
@@ -7,6 +7,7 @@ import (
 	"github.com/dolthub/go-mysql-server/driver"
 
 	"github.com/committeddb/committed/internal/cluster/syncable/sql"
+	"github.com/committeddb/committed/internal/cluster/syncable/sql/dialects"
 )
 
 type GoMySQLServerDialect struct {
@@ -14,48 +15,47 @@ type GoMySQLServerDialect struct {
 }
 
 func (d *GoMySQLServerDialect) CreateDDL(c *sql.Config) string {
-	return createDDL(c)
+	return (&dialects.MySQLDialect{}).CreateDDL(c)
 }
 
 func (d *GoMySQLServerDialect) DropDDL(c *sql.Config) string {
-	return dropDDL(c)
+	return (&dialects.MySQLDialect{}).DropDDL(c)
 }
 
 func (d *GoMySQLServerDialect) CreateSQL(config *sql.Config) string {
-	mySQL := &MySQLDialect{}
-	return mySQL.CreateSQL(config)
+	return (&dialects.MySQLDialect{}).CreateSQL(config)
 }
 
 func (d *GoMySQLServerDialect) CreateDeleteSQL(config *sql.Config) string {
-	return (&MySQLDialect{}).CreateDeleteSQL(config)
+	return (&dialects.MySQLDialect{}).CreateDeleteSQL(config)
 }
 
 func (d *GoMySQLServerDialect) CreateClearSQL(config *sql.Config, columns []string) string {
-	return (&MySQLDialect{}).CreateClearSQL(config, columns)
+	return (&dialects.MySQLDialect{}).CreateClearSQL(config, columns)
 }
 
 func (d *GoMySQLServerDialect) CreateAggregateSidecarDDL(spec sql.AggregateSpec) string {
-	return (&MySQLDialect{}).CreateAggregateSidecarDDL(spec)
+	return (&dialects.MySQLDialect{}).CreateAggregateSidecarDDL(spec)
 }
 
 func (d *GoMySQLServerDialect) CreateAggregateMaterializeSQL(spec sql.AggregateSpec) string {
-	return (&MySQLDialect{}).CreateAggregateMaterializeSQL(spec)
+	return (&dialects.MySQLDialect{}).CreateAggregateMaterializeSQL(spec)
 }
 
 func (d *GoMySQLServerDialect) CreateAggregateRebuildSQL(spec sql.AggregateSpec) string {
-	return (&MySQLDialect{}).CreateAggregateRebuildSQL(spec)
+	return (&dialects.MySQLDialect{}).CreateAggregateRebuildSQL(spec)
 }
 
 func (d *GoMySQLServerDialect) CreateAggregateParentLookupSQL(spec sql.AggregateSpec) string {
-	return (&MySQLDialect{}).CreateAggregateParentLookupSQL(spec)
+	return (&dialects.MySQLDialect{}).CreateAggregateParentLookupSQL(spec)
 }
 
 func (d *GoMySQLServerDialect) CreateLookupDimensionDDL(spec sql.LookupSpec) string {
-	return (&MySQLDialect{}).CreateLookupDimensionDDL(spec)
+	return (&dialects.MySQLDialect{}).CreateLookupDimensionDDL(spec)
 }
 
 func (d *GoMySQLServerDialect) CreateAggregateAffectedParentsSQL(spec sql.AggregateSpec, onField string) string {
-	return (&MySQLDialect{}).CreateAggregateAffectedParentsSQL(spec, onField)
+	return (&dialects.MySQLDialect{}).CreateAggregateAffectedParentsSQL(spec, onField)
 }
 
 func (d *GoMySQLServerDialect) Open(connectionString string) (*gosql.DB, error) {
@@ -86,5 +86,5 @@ func (d *GoMySQLServerDialect) IsPermanent(err error) bool {
 // BindArgs mirrors MySQLDialect: CreateSQL delegates to it, so the same
 // value doubling applies.
 func (d *GoMySQLServerDialect) BindArgs(values []any) []any {
-	return (&MySQLDialect{}).BindArgs(values)
+	return (&dialects.MySQLDialect{}).BindArgs(values)
 }

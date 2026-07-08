@@ -13,7 +13,7 @@ import (
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/syncable/sql"
-	"github.com/committeddb/committed/internal/cluster/syncable/sql/dialects"
+	"github.com/committeddb/committed/internal/cluster/syncable/sql/dialects/testdialects"
 
 	"github.com/DATA-DOG/go-sqlmock"
 )
@@ -40,7 +40,7 @@ func TestSync(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dialect, mock, err := dialects.NewSQLMockDialect()
+			dialect, mock, err := testdialects.NewSQLMockDialect()
 			require.Nil(t, err)
 
 			bs, err := os.ReadFile(tt.configFileName)
@@ -112,7 +112,7 @@ func TestDontSyncOtherTypes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dialect, mock, err := dialects.NewSQLMockDialect()
+			dialect, mock, err := testdialects.NewSQLMockDialect()
 			require.Nil(t, err)
 
 			bs, err := os.ReadFile(tt.configFileName)
@@ -251,7 +251,7 @@ func simpleJSON(t *testing.T, key, one string) []byte {
 // regression: a delete Actual no longer unmarshals invalid JSON into a
 // permanent error / dead letter.
 func TestSyncUpsertThenDelete(t *testing.T) {
-	dialect, mock, err := dialects.NewSQLMockDialect()
+	dialect, mock, err := testdialects.NewSQLMockDialect()
 	require.Nil(t, err)
 	db, err := sql.NewDB(dialect, "")
 	require.Nil(t, err)
@@ -288,7 +288,7 @@ func TestSyncUpsertThenDelete(t *testing.T) {
 // entity — it must not drop the whole Actual (silently losing this topic's data),
 // nor apply the foreign entity. Mirrors the per-entity filter SyncBatch uses.
 func TestSyncMixedTopicAppliesOnlyMatching(t *testing.T) {
-	dialect, mock, err := dialects.NewSQLMockDialect()
+	dialect, mock, err := testdialects.NewSQLMockDialect()
 	require.Nil(t, err)
 	db, err := sql.NewDB(dialect, "")
 	require.Nil(t, err)
@@ -317,7 +317,7 @@ func TestSyncMixedTopicAppliesOnlyMatching(t *testing.T) {
 // row that was never inserted (e.g. a fresh syncable replaying an
 // already-scrubbed log) affects zero rows but is still a success.
 func TestSyncDeleteAbsentKeyIsNoOp(t *testing.T) {
-	dialect, mock, err := dialects.NewSQLMockDialect()
+	dialect, mock, err := testdialects.NewSQLMockDialect()
 	require.Nil(t, err)
 	db, err := sql.NewDB(dialect, "")
 	require.Nil(t, err)
@@ -339,7 +339,7 @@ func TestSyncDeleteAbsentKeyIsNoOp(t *testing.T) {
 // TestSyncBatchMixedUpsertsAndDeletes verifies a single batch transaction
 // applies upserts and deletes together, in order.
 func TestSyncBatchMixedUpsertsAndDeletes(t *testing.T) {
-	dialect, mock, err := dialects.NewSQLMockDialect()
+	dialect, mock, err := testdialects.NewSQLMockDialect()
 	require.Nil(t, err)
 	db, err := sql.NewDB(dialect, "")
 	require.Nil(t, err)
@@ -371,7 +371,7 @@ func TestSyncBatchMixedUpsertsAndDeletes(t *testing.T) {
 // permanently (a visible misconfiguration) rather than silently retaining the
 // PII. Init prepares no delete statement in this case.
 func TestSyncDeleteWithoutKeyColumnIsPermanent(t *testing.T) {
-	dialect, mock, err := dialects.NewSQLMockDialect()
+	dialect, mock, err := testdialects.NewSQLMockDialect()
 	require.Nil(t, err)
 	db, err := sql.NewDB(dialect, "")
 	require.Nil(t, err)
@@ -403,7 +403,7 @@ func TestSyncDeleteWithoutKeyColumnIsPermanent(t *testing.T) {
 // return with it open (an open tx pins its pooled connection until db.Close).
 func TestSyncRollsBackOnApplyError(t *testing.T) {
 	t.Run("permanent-unmarshal-error", func(t *testing.T) {
-		dialect, mock, err := dialects.NewSQLMockDialect()
+		dialect, mock, err := testdialects.NewSQLMockDialect()
 		require.Nil(t, err)
 		db, err := sql.NewDB(dialect, "")
 		require.Nil(t, err)
@@ -423,7 +423,7 @@ func TestSyncRollsBackOnApplyError(t *testing.T) {
 	})
 
 	t.Run("exec-error", func(t *testing.T) {
-		dialect, mock, err := dialects.NewSQLMockDialect()
+		dialect, mock, err := testdialects.NewSQLMockDialect()
 		require.Nil(t, err)
 		db, err := sql.NewDB(dialect, "")
 		require.Nil(t, err)

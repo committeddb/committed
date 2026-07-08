@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/committeddb/committed/internal/cluster/syncable/sql"
-	"github.com/committeddb/committed/internal/cluster/syncable/sql/dialects"
+	"github.com/committeddb/committed/internal/cluster/syncable/sql/dialects/testdialects"
 )
 
 func teardownConfig() *sql.Config {
@@ -25,7 +25,7 @@ func teardownConfig() *sql.Config {
 // statements — only the config + DB handle — which is what lets the delete
 // path reconstruct a teardown handle from the pre-delete config.
 func TestSyncable_Teardown(t *testing.T) {
-	dialect, mock, err := dialects.NewSQLMockDialect()
+	dialect, mock, err := testdialects.NewSQLMockDialect()
 	require.NoError(t, err)
 	db, err := sql.NewDB(dialect, "")
 	require.NoError(t, err)
@@ -42,7 +42,7 @@ func TestSyncable_Teardown(t *testing.T) {
 // A failed drop returns a typed, wrapped error (never panics) so the caller
 // can log it and continue — the logical delete has already succeeded.
 func TestSyncable_Teardown_WrapsError(t *testing.T) {
-	dialect, mock, err := dialects.NewSQLMockDialect()
+	dialect, mock, err := testdialects.NewSQLMockDialect()
 	require.NoError(t, err)
 	db, err := sql.NewDB(dialect, "")
 	require.NoError(t, err)
@@ -61,7 +61,7 @@ func TestSyncable_Teardown_WrapsError(t *testing.T) {
 // Idempotency: a second teardown of an already-dropped table is still just a
 // DROP TABLE IF EXISTS, a no-op at the database, not an error.
 func TestSyncable_Teardown_Idempotent(t *testing.T) {
-	dialect, mock, err := dialects.NewSQLMockDialect()
+	dialect, mock, err := testdialects.NewSQLMockDialect()
 	require.NoError(t, err)
 	db, err := sql.NewDB(dialect, "")
 	require.NoError(t, err)

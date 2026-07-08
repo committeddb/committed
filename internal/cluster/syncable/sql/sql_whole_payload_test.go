@@ -15,7 +15,7 @@ import (
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/syncable/sql"
-	"github.com/committeddb/committed/internal/cluster/syncable/sql/dialects"
+	"github.com/committeddb/committed/internal/cluster/syncable/sql/dialects/testdialects"
 )
 
 // wholePayloadConfig is the read-model shape the "$" mapping exists for: one
@@ -52,7 +52,7 @@ func decodeJSON(t *testing.T, s string) any {
 // and could reorder keys, so the exact-args expectation proves the raw-bytes
 // path.
 func TestSyncWholePayloadBindsRawBytes(t *testing.T) {
-	dialect, mock, err := dialects.NewSQLMockDialect()
+	dialect, mock, err := testdialects.NewSQLMockDialect()
 	require.Nil(t, err)
 	db, err := sql.NewDB(dialect, "")
 	require.Nil(t, err)
@@ -88,7 +88,7 @@ func TestSyncWholePayloadBindsRawBytes(t *testing.T) {
 // destination database; the mock has no expectations, so a DDL exec would
 // also fail the test.
 func TestInitRejectsWholePayloadIntoNonTextColumn(t *testing.T) {
-	dialect, mock, err := dialects.NewSQLMockDialect()
+	dialect, mock, err := testdialects.NewSQLMockDialect()
 	require.Nil(t, err)
 	db, err := sql.NewDB(dialect, "")
 	require.Nil(t, err)
@@ -116,7 +116,7 @@ func newGoMySQLServerDB(t *testing.T, name string) *sql.DB {
 	memdb := memory.NewDatabase(name)
 	memdb.EnablePrimaryKeyIndexes()
 	drv := mysqldriver.New(memDBs{memdb}, nil)
-	db, err := sql.NewDB(&dialects.GoMySQLServerDialect{Driver: drv}, name)
+	db, err := sql.NewDB(&testdialects.GoMySQLServerDialect{Driver: drv}, name)
 	require.Nil(t, err)
 	return db
 }

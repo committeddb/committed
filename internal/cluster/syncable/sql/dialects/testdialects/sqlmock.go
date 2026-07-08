@@ -1,14 +1,20 @@
-package dialects
+// Package testdialects holds Dialect implementations used only by tests
+// (DATA-DOG/go-sqlmock and an in-process dolthub/go-mysql-server). They live in
+// their own package, imported solely from _test.go files, so those heavy
+// test/dev dependencies are linked into test binaries but NOT the shipped
+// `committed` binary. SQL generation delegates to dialects.MySQLDialect — the
+// dialect these stand in for — so behavior matches production exactly.
+package testdialects
 
 import (
+	gosql "database/sql"
 	"fmt"
 	"strings"
-
-	gosql "database/sql"
 
 	"github.com/DATA-DOG/go-sqlmock"
 
 	"github.com/committeddb/committed/internal/cluster/syncable/sql"
+	"github.com/committeddb/committed/internal/cluster/syncable/sql/dialects"
 )
 
 type SQLMockDialect struct {
@@ -25,49 +31,49 @@ func NewSQLMockDialect() (*SQLMockDialect, sqlmock.Sqlmock, error) {
 }
 
 func (d *SQLMockDialect) CreateDDL(c *sql.Config) string {
-	return createDDL(c)
+	return (&dialects.MySQLDialect{}).CreateDDL(c)
 }
 
 func (d *SQLMockDialect) DropDDL(c *sql.Config) string {
-	return dropDDL(c)
+	return (&dialects.MySQLDialect{}).DropDDL(c)
 }
 
 // CreateDeleteSQL implements Dialect, mirroring MySQL's ? placeholder (the
 // dialect the mock stands in for).
 func (d *SQLMockDialect) CreateDeleteSQL(c *sql.Config) string {
-	return createDeleteSQL(c, "?")
+	return (&dialects.MySQLDialect{}).CreateDeleteSQL(c)
 }
 
 // CreateClearSQL implements Dialect, mirroring MySQL's ? placeholder.
 func (d *SQLMockDialect) CreateClearSQL(c *sql.Config, columns []string) string {
-	return createClearSQL(c, columns, "?")
+	return (&dialects.MySQLDialect{}).CreateClearSQL(c, columns)
 }
 
 // The aggregate builders mirror MySQL (the dialect the mock stands in for); the
 // projection unit tests assert exec/prepare SQL through this same dialect, with
 // real-database behavior validated against PostgreSQL in the docker tests.
 func (d *SQLMockDialect) CreateAggregateSidecarDDL(spec sql.AggregateSpec) string {
-	return (&MySQLDialect{}).CreateAggregateSidecarDDL(spec)
+	return (&dialects.MySQLDialect{}).CreateAggregateSidecarDDL(spec)
 }
 
 func (d *SQLMockDialect) CreateAggregateMaterializeSQL(spec sql.AggregateSpec) string {
-	return (&MySQLDialect{}).CreateAggregateMaterializeSQL(spec)
+	return (&dialects.MySQLDialect{}).CreateAggregateMaterializeSQL(spec)
 }
 
 func (d *SQLMockDialect) CreateAggregateRebuildSQL(spec sql.AggregateSpec) string {
-	return (&MySQLDialect{}).CreateAggregateRebuildSQL(spec)
+	return (&dialects.MySQLDialect{}).CreateAggregateRebuildSQL(spec)
 }
 
 func (d *SQLMockDialect) CreateAggregateParentLookupSQL(spec sql.AggregateSpec) string {
-	return (&MySQLDialect{}).CreateAggregateParentLookupSQL(spec)
+	return (&dialects.MySQLDialect{}).CreateAggregateParentLookupSQL(spec)
 }
 
 func (d *SQLMockDialect) CreateLookupDimensionDDL(spec sql.LookupSpec) string {
-	return (&MySQLDialect{}).CreateLookupDimensionDDL(spec)
+	return (&dialects.MySQLDialect{}).CreateLookupDimensionDDL(spec)
 }
 
 func (d *SQLMockDialect) CreateAggregateAffectedParentsSQL(spec sql.AggregateSpec, onField string) string {
-	return (&MySQLDialect{}).CreateAggregateAffectedParentsSQL(spec, onField)
+	return (&dialects.MySQLDialect{}).CreateAggregateAffectedParentsSQL(spec, onField)
 }
 
 func (d *SQLMockDialect) CreateSQL(config *sql.Config) string {

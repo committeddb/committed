@@ -10,7 +10,7 @@ import (
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/syncable/sql"
-	"github.com/committeddb/committed/internal/cluster/syncable/sql/dialects"
+	"github.com/committeddb/committed/internal/cluster/syncable/sql/dialects/testdialects"
 )
 
 var principalType = &cluster.Type{ID: "principal", Name: "Principal"}
@@ -56,7 +56,7 @@ type aggregatePrepares struct {
 // computed through the same dialect, so the strings match byte-for-byte.
 func newMockAggregateProjection(t *testing.T) (*sql.Projection, sqlmock.Sqlmock, aggregatePrepares) {
 	t.Helper()
-	dialect, mock, err := dialects.NewSQLMockDialect()
+	dialect, mock, err := testdialects.NewSQLMockDialect()
 	require.NoError(t, err)
 	db, err := sql.NewDB(dialect, "")
 	require.NoError(t, err)
@@ -215,7 +215,7 @@ type enrichedPrepares struct {
 // the handles the fan-out tests attach to.
 func newMockEnrichedProjection(t *testing.T) (*sql.Projection, sqlmock.Sqlmock, enrichedPrepares) {
 	t.Helper()
-	dialect, mock, err := dialects.NewSQLMockDialect()
+	dialect, mock, err := testdialects.NewSQLMockDialect()
 	require.NoError(t, err)
 	db, err := sql.NewDB(dialect, "")
 	require.NoError(t, err)

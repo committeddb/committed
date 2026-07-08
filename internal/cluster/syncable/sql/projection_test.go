@@ -16,7 +16,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/metrics"
 	"github.com/committeddb/committed/internal/cluster/syncable/sql"
-	"github.com/committeddb/committed/internal/cluster/syncable/sql/dialects"
+	"github.com/committeddb/committed/internal/cluster/syncable/sql/dialects/testdialects"
 )
 
 var tenantEventType = &cluster.Type{ID: "controlplane-event", Name: "ControlplaneEvent"}
@@ -84,7 +84,7 @@ func newMockProjection(t *testing.T, config *sql.ProjectionConfig, m *metrics.Me
 	*sql.Projection, sqlmock.Sqlmock, []*sqlmock.ExpectedPrepare, *sqlmock.ExpectedPrepare,
 ) {
 	t.Helper()
-	dialect, mock, err := dialects.NewSQLMockDialect()
+	dialect, mock, err := testdialects.NewSQLMockDialect()
 	require.NoError(t, err)
 	db, err := sql.NewDB(dialect, "")
 	require.NoError(t, err)
