@@ -126,6 +126,7 @@ func (db *DB) Sync(_ context.Context, id string, s cluster.Syncable) error {
 			}
 			close(handle.done)
 		}()
+		db.resetSyncBreaker(id) // fresh breaker state for this worker run (e.g. after a replace)
 		_ = db.sync(workerCtx, id, s)
 	}()
 
@@ -392,6 +393,10 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 				}
 				if syncErr != nil {
 					if errors.Is(syncErr, cluster.ErrPermanent) {
+						if c, tripped := db.recordSyncPermanent(id); tripped {
+							db.tripSyncBreaker(id, c, syncErr)
+							return nil // park: hold the checkpoint, stop dead-lettering the topic
+						}
 						db.logger.Error("permanent sync error, skipping proposal",
 							zap.String("id", id), zap.Uint64("index", i), zap.Error(syncErr))
 						db.recordSyncPermanentError(ctx, id, i, syncErr)
@@ -578,6 +583,13 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 	}
 
 	for {
+		// A prior flush's per-proposal fallback may have tripped the circuit
+		// breaker; park the worker (checkpoint held) rather than spin on the
+		// systematically-failing batch. The reset is per worker launch, so a
+		// replacement after a config fix starts fresh.
+		if db.syncBreakerTripped(id) {
+			return nil
+		}
 		select {
 		case <-ctx.Done():
 			return nil
@@ -711,6 +723,10 @@ func (db *DB) syncBatchFallback(ctx context.Context, id string, s cluster.Syncab
 		}
 		if syncErr != nil {
 			if errors.Is(syncErr, cluster.ErrPermanent) {
+				if c, tripped := db.recordSyncPermanent(id); tripped {
+					db.tripSyncBreaker(id, c, syncErr)
+					return false // stop the batch; syncBatch parks (checks syncBreakerTripped)
+				}
 				db.logger.Error("permanent sync error, skipping proposal",
 					zap.String("id", id), zap.Uint64("index", e.Index), zap.Error(syncErr))
 				db.recordSyncPermanentError(ctx, id, e.Index, syncErr)

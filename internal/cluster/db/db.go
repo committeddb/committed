@@ -133,6 +133,13 @@ type DB struct {
 	ingestSupervisorMu     sync.Mutex
 	ingestSupervisorStates map[string]*ingestSupervisorState
 
+	// syncBreakerMu guards syncBreakerStates, the per-syncable run of
+	// consecutive permanent sync errors (within a healthy window) driving the
+	// sync circuit breaker (see sync_breaker.go). Separate from workersMu to
+	// stay off the hot worker-registry path.
+	syncBreakerMu     sync.Mutex
+	syncBreakerStates map[string]*syncBreakerState
+
 	// Cached supervisor tuning; resolved in New from options/defaults so
 	// the freeze-restart hot path reads a struct field rather than
 	// dereferencing the options config on each call.

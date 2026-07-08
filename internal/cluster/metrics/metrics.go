@@ -40,6 +40,7 @@ type Metrics struct {
 	ingestFrozen               metric.Float64Gauge
 	ingestRestarts             metric.Int64Counter
 	ingestSupervisorGiveups    metric.Int64Counter
+	syncBreakerTrips           metric.Int64Counter
 	ingestPositionBumpDuration metric.Float64Histogram
 	ingestDedupSkipped         metric.Int64Counter
 
@@ -142,6 +143,9 @@ func New(meter metric.Meter) *Metrics {
 
 	m.ingestSupervisorGiveups, _ = meter.Int64Counter("committed.ingest.supervisor_giveup_total",
 		metric.WithDescription("Ingest supervisor give-ups after hitting the consecutive-freeze cap for an id."))
+
+	m.syncBreakerTrips, _ = meter.Int64Counter("committed.sync.breaker_tripped_total",
+		metric.WithDescription("Sync circuit-breaker trips: a syncable hit the consecutive-permanent-error cap and parked."))
 
 	m.ingestPositionBumpDuration, _ = meter.Float64Histogram("committed.ingest.position.bump.duration",
 		metric.WithDescription("Time from submitting an ingestable Position bump after a batch of ingested proposals until it is durably applied."),
@@ -415,6 +419,14 @@ func (m *Metrics) IngestRestart(id string) {
 // after the consecutive-freeze cap.
 func (m *Metrics) IngestSupervisorGiveup(id string) {
 	m.ingestSupervisorGiveups.Add(context.Background(), 1,
+		metric.WithAttributes(attribute.String("id", id)))
+}
+
+// SyncBreakerTripped counts a sync circuit-breaker trip for a syncable id. Fires
+// once when consecutive permanent errors cross the cap and the worker parks for
+// operator intervention rather than dead-lettering the whole topic.
+func (m *Metrics) SyncBreakerTripped(id string) {
+	m.syncBreakerTrips.Add(context.Background(), 1,
 		metric.WithAttributes(attribute.String("id", id)))
 }
 
