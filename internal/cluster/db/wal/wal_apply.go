@@ -163,6 +163,16 @@ func (s *Storage) saveAppliedIndex(idx uint64) error {
 	})
 }
 
+// SetAppliedIndexForTest rewinds the applied index (in memory and in bbolt) to
+// simulate a crash in the apply window: the event log has fsync'd entry N but
+// saveAppliedIndex persisted only N-1. Reopening the storage then presents the
+// eventIndex-ahead-of-appliedIndex gap that restart replay must heal. Test-only;
+// never called in production.
+func (s *Storage) SetAppliedIndexForTest(idx uint64) error {
+	s.appliedIndex.Store(idx)
+	return s.saveAppliedIndex(idx)
+}
+
 // loadAppliedIndex reads the persisted applied index from bbolt, or returns
 // 0 if no apply has happened yet (fresh storage).
 func (s *Storage) loadAppliedIndex() (uint64, error) {

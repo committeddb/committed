@@ -269,6 +269,16 @@ func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 		CheckQuorum: true,
 	}
 
+	// Applied tells raft which committed entries this node has already applied,
+	// so on restart it re-delivers only [Applied+1 …] rather than the entire
+	// uncompacted log from the last compaction point. Without it, a node that
+	// crashed in the apply window (event log fsync'd through N, appliedIndex
+	// persisted behind it) re-replays a multi-MiB tail in MaxCommittedSizePerReady
+	// (1 MiB) batches; the first partial batch never reaches N, so appliedIndex
+	// stays behind eventIndex mid-replay. Combined with the checkStorageInvariant
+	// relaxation below, this stops the crash-window restart from fatal-looping.
+	c.Applied = n.storage.AppliedIndex()
+
 	hs, _, err := n.storage.InitialState()
 	if err != nil {
 		n.logger.Error("initial state", zap.Error(err))
@@ -894,7 +904,14 @@ func (n *Raft) dispatchReadStates(states []raft.ReadState) {
 func (n *Raft) checkStorageInvariant() {
 	p := n.storage.EventIndex()
 	r := n.storage.AppliedIndex()
-	if p == r {
+	// Only p < r is unrecoverable: the event log has fallen BEHIND the applied
+	// index, meaning raft advanced applied past a gap the event log can't fill
+	// (an InstallSnapshot that didn't backfill the event log). p >= r is benign —
+	// p == r is steady state, and p > r is the crash-apply window (appendEvent
+	// fsync'd, saveAppliedIndex didn't) that restart replay closes as raft
+	// re-delivers the unapplied tail. Fatal-ing on p > r turned that transient
+	// into a permanent crash loop when the tail exceeded one Ready's batch.
+	if p >= r {
 		return
 	}
 	n.logger.Fatal(
