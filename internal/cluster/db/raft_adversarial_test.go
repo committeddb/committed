@@ -719,7 +719,15 @@ func TestAdversarial_ConcurrentConfigChanges(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			cfg := createTestIngestableConfig(fmt.Sprintf("adv-%d", i))
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			// 30s, not 10s: WaitForLeader clears the initial election, but a
+			// spontaneous re-election can still land during the burst (a split vote
+			// is likely — all three nodes' election timers are near-synchronized at
+			// startup), leaving the cluster leaderless for several rounds. Under CI
+			// load the tick loop is starved, so each round stretches. A leaderless
+			// propose just blocks — there's no ErrProposalLost/Unknown for the retry
+			// loop to catch — so the deadline must outlast the re-election. Matches
+			// the sibling multi-node propose test's 30s budget.
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			for attempt := 0; attempt < 5; attempt++ {
 				errs[i] = h.dbs[i%replicas].ProposeIngestable(ctx, cfg)

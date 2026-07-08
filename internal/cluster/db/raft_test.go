@@ -29,13 +29,22 @@ import (
 // the 10-tick election timeout, triggering re-election thrash that prevents
 // any user proposal from being committed before the next election starts.
 //
-// 10ms gives a 100ms election timeout, which is comfortable for loopback
-// HTTP. The trade-off is that multi-node tests pay ~100ms of startup latency
-// (one election cycle) instead of ~10ms.
-const multiNodeTickInterval = 10 * time.Millisecond
+// 20ms gives a 200ms election timeout (randomized 200–400ms). Two reasons it's
+// not tighter: loopback HTTP needs a comfortable heartbeat round trip, and — the
+// reason it was raised from 10ms — a wider randomized window de-synchronizes the
+// three nodes' startup election timers. All three timers start at ~the same
+// instant, so the first campaigner wins cleanly only if its votes arrive before
+// the next node's timer fires; under CI load (-race, parallel packages) the tick
+// loop is starved and those votes arrive late, so with a narrow window all three
+// time out together → split vote → an extended leaderless window (which flaked
+// TestAdversarial_ConcurrentConfigChanges). A wider window widens that gap. This
+// reduces the split-vote rate; it is not a guarantee (severe starvation can still
+// batch the timers), so the proposer deadlines remain the real safety net.
+// Trade-off: multi-node tests pay ~200ms of startup latency (one election cycle).
+const multiNodeTickInterval = 20 * time.Millisecond
 
 // multiNodeStartupTimeout bounds how long a multi-node test will wait for
-// the cluster to elect a stable leader before failing. With a 100ms election
+// the cluster to elect a stable leader before failing. With a 200ms election
 // timeout and HTTP transport startup, 5s is a generous upper bound.
 const multiNodeStartupTimeout = 5 * time.Second
 
