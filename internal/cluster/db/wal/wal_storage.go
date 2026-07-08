@@ -390,6 +390,26 @@ type Storage struct {
 	lostCallback func([]uint64)
 }
 
+// openLog opens one of a node's tidwall logs, turning tidwall's opaque
+// ErrCorrupt ("log corrupt") into an actionable ErrCorruptEntry: it records the
+// corruption metric and points the operator at the offline repair CLI and the
+// rebuild runbook, so a torn tail or bit-flip fails startup with a message they
+// can act on instead of a bare "log corrupt". Other open errors pass through.
+func openLog(dir, logName string, m *metrics.Metrics) (*wal.Log, error) {
+	lg, err := wal.Open(dir, nil)
+	if err == nil {
+		return lg, nil
+	}
+	if errors.Is(err, wal.ErrCorrupt) {
+		if m != nil {
+			m.WalCorruptEntry(logName)
+		}
+		return nil, fmt.Errorf("%w: the %s at %q will not open (%v) — stop the node and run `committed wal repair --data <node-data-dir>` to truncate a torn tail, or rebuild this node from a healthy replica; see docs/operations/rebuild.md",
+			ErrCorruptEntry, logName, dir, err)
+	}
+	return nil, fmt.Errorf("open %s: %w", logName, err)
+}
+
 // Returns a *WalStorage, whether this storage existed already, or an error
 // func Open() (*WalStorage, bool, error) {
 func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<- *db.IngestableWithID, opts ...Option) (*Storage, error) {
@@ -431,15 +451,15 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		}
 	}
 
-	entryLog, err := wal.Open(entryLogDir, nil)
+	entryLog, err := openLog(entryLogDir, "entry_log", cfg.metrics)
 	if err != nil {
 		return nil, err
 	}
-	stateLog, err := wal.Open(stateLogDir, nil)
+	stateLog, err := openLog(stateLogDir, "state_log", cfg.metrics)
 	if err != nil {
 		return nil, err
 	}
-	eventLog, err := wal.Open(eventLogDir, nil)
+	eventLog, err := openLog(eventLogDir, "event_log", cfg.metrics)
 	if err != nil {
 		return nil, err
 	}

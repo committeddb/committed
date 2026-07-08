@@ -37,9 +37,9 @@ Rebuild is the right response when any of these hold:
   leave it in the same "severely behind" state the fatal exit is
   describing — rebuild it up-front instead.
 
-- The node's disk is damaged (bit rot, incomplete write after power
-  loss, partial restore) and `committed` refuses to start. The rebuild
-  procedure replaces the data directory with a known-good copy.
+- The node's disk is damaged (bit rot, a partial restore, or an in-record
+  corruption of a committed entry) and `committed` refuses to start. The
+  rebuild procedure replaces the data directory with a known-good copy.
 
   Each WAL entry (raft log, permanent event log, and state log) carries a
   CRC32C checksum, verified on read. A detected mismatch fails the read
@@ -51,10 +51,26 @@ Rebuild is the right response when any of these hold:
 
   and increments the `committed_wal_corrupt_entries_total` metric (labelled
   by `log`). Hit during the startup recovery reads, this aborts `Open` and
-  the node fatal-exits — the data directory is no longer trustworthy, so
-  rebuild it from a healthy peer. Logs written before checksums existed are
-  read transparently (trust-on-first-read) and are not flagged; new appends
-  are always checksummed, so coverage grows as the log compacts.
+  the node fatal-exits.
+
+  **First, rule out a torn tail — it doesn't need a rebuild.** A power loss
+  mid-append can leave a partial *trailing* record; that record was never
+  acknowledged, so dropping it is safe. With the node stopped, run:
+
+  ```
+  committed wal repair --data <node-data-dir>
+  ```
+
+  It reports what it finds and changes nothing; re-run with `--commit` to
+  truncate a torn tail, after which the node restarts cleanly. The tool
+  **refuses** anything that is not a torn tail — a bitflip in a committed
+  record, mid-log — because that data is genuinely gone locally. *That* is
+  when you rebuild from a healthy peer (below), or restore/splice from a
+  backup on a single node.
+
+  Logs written before checksums existed are read transparently
+  (trust-on-first-read) and are not flagged; new appends are always
+  checksummed, so coverage grows as the log compacts.
 
 - A node ran out of disk and you can't expand the volume in place.
   The cluster keeps admitting writes while a quorum of voters has disk

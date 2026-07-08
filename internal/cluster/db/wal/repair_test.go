@@ -124,3 +124,27 @@ func TestDiagnoseLog_Clean(t *testing.T) {
 	require.Equal(t, LogClean, d.Status)
 	require.Equal(t, 2, d.Records)
 }
+
+// TestOpenLog_WrapsTornTailWithActionableError: a torn tail makes tidwall's Open
+// fail with an opaque "log corrupt"; openLog turns that into an ErrCorruptEntry
+// that points the operator at `committed wal repair`, instead of a bare error
+// with no metric and no runbook pointer.
+func TestOpenLog_WrapsTornTailWithActionableError(t *testing.T) {
+	dir := t.TempDir()
+	segPath := writeSegment(t, dir, 1, [][]byte{[]byte("one"), []byte("two")})
+
+	// Append a torn record so tidwall's Open fails.
+	var hdr [binary.MaxVarintLen64]byte
+	n := binary.PutUvarint(hdr[:], 100)
+	f, err := os.OpenFile(segPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	require.NoError(t, err)
+	_, err = f.Write(append(hdr[:n], []byte("xx")...))
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	_, err = openLog(dir, "event_log", nil)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrCorruptEntry, "a corrupt Open must surface as ErrCorruptEntry")
+	require.Contains(t, err.Error(), "committed wal repair", "must point at the repair CLI")
+	require.Contains(t, err.Error(), "event_log")
+}

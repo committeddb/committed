@@ -6,10 +6,16 @@ import (
 	"hash/crc32"
 )
 
-// ErrCorruptEntry is returned by unframe when a checksummed (v1) WAL entry
-// fails CRC32C verification — a bitflip, a torn write, or filesystem
-// corruption. It is fatal: the node cannot trust the on-disk log. Operators
-// rebuild from a healthy peer per docs/operations/rebuild.md.
+// ErrCorruptEntry marks a WAL entry that cannot be trusted. It arises two ways,
+// with different recoveries:
+//   - a torn tail: a partial TRAILING record left by a power loss mid-append.
+//     It was never acknowledged, so `committed wal repair` truncates it safely
+//     and the node restarts clean — no rebuild.
+//   - an in-record bitflip / filesystem corruption of a committed entry: fatal.
+//     The on-disk log can't be trusted, so rebuild from a healthy peer (or
+//     restore/splice from a backup on a single node).
+//
+// Both point at docs/operations/rebuild.md, which routes between the two.
 var ErrCorruptEntry = errors.New("wal: entry checksum mismatch (data corruption); see docs/operations/rebuild.md")
 
 // On-disk frame for a checksummed WAL entry (format v1):
