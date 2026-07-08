@@ -24,6 +24,20 @@ func Permanent(err error) error {
 	return fmt.Errorf("%w: %w", ErrPermanent, err)
 }
 
+// RedactedError is an error that can supply a message safe to persist into the
+// permanent, Raft-replicated dead-letter log — free of entity Key/Data and of
+// values a driver may echo back (a Postgres foreign-key violation, for instance,
+// includes "Key (col)=(value)"). recordSyncDeadLetter persists RedactedMessage()
+// into the replicated record and keeps the full Error() node-local, so an
+// operator can still find complete detail in the node's logs without the erasure
+// target — or any other bound value — surviving in the log.
+type RedactedError interface {
+	error
+	// RedactedMessage is the PII-free message to replicate. Error() may still
+	// carry the full, possibly PII-bearing detail for node-local logging.
+	RedactedMessage() string
+}
+
 // ErrCorruptEntry marks a stored WAL entry that failed its CRC32C checksum on
 // read, or a log that will not open. It is the corruption sentinel raised by the
 // WAL layer (aliased there as wal.ErrCorruptEntry) and lives in this shared

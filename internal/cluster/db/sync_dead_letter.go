@@ -26,13 +26,34 @@ import (
 // `kind` is "permanent" (Sync returned ErrPermanent) or "manual" (an
 // operator skipped a syncable wedged on a transient error). ctx is the
 // sync worker's context.
+// safeDeadLetterMessage returns the message to persist into the permanent,
+// replicated dead-letter record, and whether it was redacted. An error that
+// implements cluster.RedactedError — a driver error that may echo a bound value
+// (an entity key or data) — yields its PII-free RedactedMessage; the caller logs
+// the full Error() node-locally instead. committed's own error text is already
+// PII-safe and used verbatim.
+func safeDeadLetterMessage(syncErr error) (string, bool) {
+	if syncErr == nil {
+		return "operator dead-letter", false
+	}
+	var red cluster.RedactedError
+	if errors.As(syncErr, &red) {
+		return red.RedactedMessage(), true
+	}
+	return syncErr.Error(), false
+}
+
 func (db *DB) recordSyncDeadLetter(ctx context.Context, id string, index uint64, kind string, syncErr error) {
 	if db.metrics != nil {
 		db.metrics.SyncError(id, kind)
 	}
-	msg := "operator dead-letter"
-	if syncErr != nil {
-		msg = syncErr.Error()
+	msg, redacted := safeDeadLetterMessage(syncErr)
+	if redacted {
+		// The full detail can carry PII a driver echoed from a bound value (the
+		// deleted subject key, upserted row data); keep it in this node's logs and
+		// replicate only the PII-free classifier into the permanent record.
+		db.logger.Warn("sync dead-letter: full detail kept node-local, replicated record redacted",
+			zap.String("id", id), zap.Uint64("index", index), zap.Error(syncErr))
 	}
 	dl := &cluster.SyncableDeadLetter{
 		ID:                id,

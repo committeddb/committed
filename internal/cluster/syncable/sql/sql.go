@@ -260,11 +260,7 @@ func (c *Syncable) applyEntity(ctx context.Context, tx *sql.Tx, e *cluster.Entit
 		}
 		_, err := tx.StmtContext(ctx, c.delete.Stmt).ExecContext(ctx, string(e.Key))
 		if err != nil {
-			wrapped := fmt.Errorf("[sql.apply] exec [%s]: %w", c.delete.SQL, err)
-			if c.dialect.IsPermanent(err) {
-				return cluster.Permanent(wrapped)
-			}
-			return wrapped
+			return execFailure(fmt.Sprintf("[sql.apply] exec [%s]", c.delete.SQL), err, c.dialect.IsPermanent(err))
 		}
 		return nil
 	}
@@ -315,11 +311,7 @@ func (c *Syncable) applyEntity(ctx context.Context, tx *sql.Tx, e *cluster.Entit
 	if c.appliedMark != nil {
 		res, err := tx.StmtContext(ctx, c.appliedMark.Stmt).ExecContext(ctx, int64(index), seq) //nolint:gosec // G115: raft index is far below 2^63
 		if err != nil {
-			wrapped := fmt.Errorf("[sql.apply] exec [%s]: %w", c.appliedMark.SQL, err)
-			if c.dialect.IsPermanent(err) {
-				return cluster.Permanent(wrapped)
-			}
-			return wrapped
+			return execFailure(fmt.Sprintf("[sql.apply] exec [%s]", c.appliedMark.SQL), err, c.dialect.IsPermanent(err))
 		}
 		if n, aerr := res.RowsAffected(); aerr == nil && n == 0 {
 			return nil // already applied — replay no-op, don't re-append
@@ -327,11 +319,7 @@ func (c *Syncable) applyEntity(ctx context.Context, tx *sql.Tx, e *cluster.Entit
 	}
 
 	if _, err := tx.StmtContext(ctx, c.insert.Stmt).ExecContext(ctx, allValues...); err != nil {
-		wrapped := fmt.Errorf("[sql.apply] exec [%s]: %w", c.insert.SQL, err)
-		if c.dialect.IsPermanent(err) {
-			return cluster.Permanent(wrapped)
-		}
-		return wrapped
+		return execFailure(fmt.Sprintf("[sql.apply] exec [%s]", c.insert.SQL), err, c.dialect.IsPermanent(err))
 	}
 	return nil
 }

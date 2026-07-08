@@ -533,11 +533,7 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 		}
 		args := p.dialect.BindArgs(values)
 		if _, err := tx.StmtContext(ctx, r.Stmt).ExecContext(ctx, args...); err != nil {
-			wrapped := fmt.Errorf("[sql-projection.apply] exec [%s]: %w", r.SQL, err)
-			if p.dialect.IsPermanent(err) {
-				return cluster.Permanent(wrapped)
-			}
-			return wrapped
+			return execFailure(fmt.Sprintf("[sql-projection.apply] exec [%s]", r.SQL), err, p.dialect.IsPermanent(err))
 		}
 	}
 	return nil
@@ -567,11 +563,7 @@ func (p *Projection) applyDelete(ctx context.Context, tx *gosql.Tx, src *project
 			src.topic))
 	}
 	if _, err := tx.StmtContext(ctx, stmt).ExecContext(ctx, string(e.Key)); err != nil {
-		wrapped := fmt.Errorf("[sql-projection.apply] exec [%s]: %w", sqlStr, err)
-		if p.dialect.IsPermanent(err) {
-			return cluster.Permanent(wrapped)
-		}
-		return wrapped
+		return execFailure(fmt.Sprintf("[sql-projection.apply] exec [%s]", sqlStr), err, p.dialect.IsPermanent(err))
 	}
 	return nil
 }
@@ -652,11 +644,7 @@ func (p *Projection) removeFromAggregate(ctx context.Context, tx *gosql.Tx, src 
 // the same way the rule path does.
 func (p *Projection) aggExec(ctx context.Context, tx *gosql.Tx, stmt *gosql.Stmt, sqlStr string, args ...any) error {
 	if _, err := tx.StmtContext(ctx, stmt).ExecContext(ctx, args...); err != nil {
-		wrapped := fmt.Errorf("[sql-projection.aggregate] exec [%s]: %w", sqlStr, err)
-		if p.dialect.IsPermanent(err) {
-			return cluster.Permanent(wrapped)
-		}
-		return wrapped
+		return execFailure(fmt.Sprintf("[sql-projection.aggregate] exec [%s]", sqlStr), err, p.dialect.IsPermanent(err))
 	}
 	return nil
 }
