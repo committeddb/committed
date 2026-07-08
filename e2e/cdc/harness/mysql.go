@@ -15,6 +15,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql" // database/sql driver for the harness's own source/sink connection
 	"github.com/stretchr/testify/require"
+	"github.com/testcontainers/testcontainers-go"
 	tcmysql "github.com/testcontainers/testcontainers-go/modules/mysql"
 )
 
@@ -69,13 +70,16 @@ func NewMySQL(t *testing.T) *MySQLHarness {
 	h := &MySQLHarness{ctx: ctx, cancel: cancel}
 
 	// 1. MySQL. mysql:9 ships binlog enabled by default (log_bin,
-	// binlog_format=ROW, binlog_row_image=FULL, a non-zero server_id), so no
-	// custom server config is needed for CDC — the ingest preflight passes out
-	// of the box.
+	// binlog_format=ROW, binlog_row_image=FULL, a non-zero server_id). Only
+	// binlog_row_metadata needs setting: it defaults to MINIMAL, but committed
+	// decodes each row against the column names carried in its binlog
+	// TableMapEvent, which the server emits only under FULL — the ingest
+	// preflight requires it.
 	my, err := tcmysql.Run(ctx, "mysql:9",
 		tcmysql.WithDatabase(mysqlDB),
 		tcmysql.WithUsername(mysqlUser),
 		tcmysql.WithPassword(mysqlPass),
+		testcontainers.WithCmdArgs("--binlog-row-metadata=FULL"),
 	)
 	require.NoError(t, err, "start mysql container")
 	h.my = my

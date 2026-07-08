@@ -57,9 +57,12 @@ func (e *mysqlEngine) Start(ctx context.Context, t *testing.T) {
 		tcmysql.WithUsername(mysqlUser),
 		tcmysql.WithPassword(mysqlPass),
 		// GTID positioning (Phase B) needs gtid_mode=ON; enforce_gtid_consistency
-		// is its required companion. Set at startup so the snapshot's
+		// is its required companion. binlog_row_metadata=FULL makes each binlog
+		// TableMapEvent carry column names (default MINIMAL omits them), which the
+		// ingest preflight requires. Set at startup so the snapshot's
 		// @@gtid_executed and the binlog GTID events are populated.
-		testcontainers.WithCmdArgs("--gtid-mode=ON", "--enforce-gtid-consistency=ON"),
+		testcontainers.WithCmdArgs("--gtid-mode=ON", "--enforce-gtid-consistency=ON",
+			"--binlog-row-metadata=FULL"),
 	)
 	require.NoError(t, err, "start mysql container")
 	e.container = c
