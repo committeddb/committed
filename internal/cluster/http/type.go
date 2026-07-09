@@ -118,7 +118,7 @@ func (h *HTTP) ReplayTypeMigrationDeadLetter(w httpgo.ResponseWriter, r *httpgo.
 		// The chain still fails on this payload; the record is left in
 		// place. Surface the cause so the operator can see what failed.
 		writeErrorWithDetails(w, httpgo.StatusBadGateway, "migration_retry_failed",
-			"the migration chain still fails on this proposal; dead letter left in place", capError(err))
+			"the migration chain still fails on this proposal; dead letter left in place", redactedDetail(err))
 	default:
 		writeInternalError(w, "failed to retry the migration", err)
 	}

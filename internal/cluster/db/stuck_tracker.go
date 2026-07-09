@@ -44,7 +44,16 @@ func (t *stuckTracker) wedged(ctx context.Context, index uint64, lastErr error) 
 	}
 	msg := ""
 	if lastErr != nil {
-		msg = truncateDeadLetterMessage(lastErr.Error())
+		// SyncableStuck is proposed through Raft (replicated, permanent) and
+		// exposed over the status API, so redact like dead letters do: a
+		// RedactedError (e.g. a transient execError) may echo entity PII in its
+		// full text. Keep the full detail node-local, replicate the classifier.
+		safe, redacted := safeDeadLetterMessage(lastErr)
+		if redacted {
+			t.db.logger.Warn("stuck syncable: full retry-error detail kept node-local, replicated status redacted",
+				zap.String("id", t.id), zap.Uint64("index", index), zap.Error(lastErr))
+		}
+		msg = truncateDeadLetterMessage(safe)
 	}
 	s := &cluster.SyncableStuck{ID: t.id, Index: index, SinceUnixNano: t.since.UnixNano(), Message: msg}
 	if err := t.db.proposeSyncableStuck(ctx, s); err != nil {

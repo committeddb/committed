@@ -161,6 +161,37 @@ func TestSyncableStuck_PublishedAfterDebounce(t *testing.T) {
 	require.Contains(t, stuck.Message, "downstream rejected the row")
 }
 
+// stubRedactedErr is a cluster.RedactedError whose full text carries entity PII,
+// used to prove the stuck-status record redacts like dead letters do.
+type stubRedactedErr struct{}
+
+func (stubRedactedErr) Error() string           { return `driver: Key (id)=(123-45-6789) still referenced` }
+func (stubRedactedErr) RedactedMessage() string { return "exec failed (detail in node logs)" }
+
+// TestSyncableStuck_RedactsRetryError: when the retry error is a RedactedError
+// (e.g. a transient execError echoing entity data), the replicated + API-exposed
+// SyncableStuck record must carry only the redacted classifier, never the PII.
+func TestSyncableStuck_RedactsRetryError(t *testing.T) {
+	d, s := newWalDBStuck(t)
+	id := "stuck-redact"
+	seedUserProposals(t, d, s, "evt", []string{"poison"})
+
+	syncable := &transientSyncable{
+		stuck:        map[string]bool{"poison": true},
+		transientErr: stubRedactedErr{},
+	}
+	require.NoError(t, d.Sync(context.Background(), id, syncable))
+
+	var stuck cluster.SyncableStuck
+	require.Eventually(t, func() bool {
+		var ok bool
+		stuck, ok, _ = d.SyncableStuck(id)
+		return ok
+	}, 10*time.Second, 10*time.Millisecond, "worker should publish a replicated stuck record")
+	require.NotContains(t, stuck.Message, "123-45-6789", "the replicated record must not carry the PII")
+	require.Contains(t, stuck.Message, "exec failed", "it carries the redacted classifier")
+}
+
 // batchTransientSyncable is a BatchSyncable: a batch containing the poison
 // payload fails atomically (transient), and per-proposal Sync (used by the
 // worker's isolation fallback) fails only on the poison and succeeds on

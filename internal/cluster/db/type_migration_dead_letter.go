@@ -107,7 +107,12 @@ func (db *DB) ReplayTypeMigrationDeadLetter(ctx context.Context, typeID string, 
 			return fmt.Errorf("resolve latest type %s: %w", typeID, err)
 		}
 		if _, chainErr := migration.Chain(db.storage, typeID, e.Version, latest.Version, e.Data); chainErr != nil {
-			return fmt.Errorf("%w: %v", cluster.ErrReplayMigrationFailed, chainErr)
+			// Full detail node-local (the jq error inlines entity PII); chain with
+			// %w so the HTTP layer can reach the RedactedError and expose only the
+			// classifier.
+			db.logger.Warn("type-migration replay re-failed",
+				zap.String("type_id", typeID), zap.Uint64("index", index), zap.Error(chainErr))
+			return fmt.Errorf("%w: %w", cluster.ErrReplayMigrationFailed, chainErr)
 		}
 	}
 

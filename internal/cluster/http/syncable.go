@@ -324,19 +324,33 @@ func (h *HTTP) ReplaySyncableDeadLetter(w httpgo.ResponseWriter, r *httpgo.Reque
 		// The downstream rejected the proposal again; the dead letter is left
 		// in place. Surface the cause so the operator can see what failed.
 		writeErrorWithDetails(w, httpgo.StatusBadGateway, "replay_failed",
-			"the syncable rejected the proposal again; dead letter left in place", capError(err))
+			"the syncable rejected the proposal again; dead letter left in place", redactedDetail(err))
 	default:
 		writeInternalError(w, "failed to replay the dead-lettered proposal", err)
 	}
 }
 
-// capError bounds an error string before it goes into a response detail so a
-// chatty driver error can't bloat the body.
-func capError(err error) string {
+// capString bounds a detail string before it goes into a response body so a
+// chatty error can't bloat it.
+func capString(s string) string {
 	const max = 512
-	s := err.Error()
 	if len(s) > max {
 		return s[:max] + "…"
 	}
 	return s
+}
+
+func capError(err error) string { return capString(err.Error()) }
+
+// redactedDetail returns an error string safe to put in a response body: if the
+// error chain carries a cluster.RedactedError (a driver or migration error that
+// may echo entity PII in its full text), only its PII-free RedactedMessage is
+// exposed; otherwise the committed-authored error text is used. The full detail
+// is kept in this node's logs (see the db replay path). Use this — not capError
+// — for any detail derived from a Sync/apply error.
+func redactedDetail(err error) string {
+	if red, ok := errors.AsType[cluster.RedactedError](err); ok {
+		return capString(red.RedactedMessage())
+	}
+	return capError(err)
 }

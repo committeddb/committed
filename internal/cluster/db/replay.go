@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	"go.uber.org/zap"
+
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/migration"
 )
@@ -43,7 +45,12 @@ func (db *DB) ReplaySyncableDeadLetter(ctx context.Context, id string, index uin
 	defer func() { _ = syncable.Close() }()
 
 	if _, syncErr := syncable.Sync(ctx, a); syncErr != nil {
-		return fmt.Errorf("%w: %v", cluster.ErrReplaySyncFailed, syncErr)
+		// Keep the full detail node-local (it may echo entity PII via a driver
+		// error), and chain syncErr with %w — not %v — so the HTTP layer can reach
+		// a cluster.RedactedError in the chain and surface only its classifier.
+		db.logger.Warn("syncable replay re-failed",
+			zap.String("id", id), zap.Uint64("index", index), zap.Error(syncErr))
+		return fmt.Errorf("%w: %w", cluster.ErrReplaySyncFailed, syncErr)
 	}
 
 	// Re-sync succeeded — clear the dead letter through Raft so the record is
