@@ -47,7 +47,22 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("migration chain: type %s v%d->v%d: %v", e.TypeID, e.FromVersion, e.ToVersion, e.Err)
 }
 
+// RedactedMessage is the PII-free form to persist into the permanent, replicated
+// dead-letter record. The wrapped Err is a gojq runtime error that inlines the
+// entity's field values (e.g. `cannot iterate over: string ("123-45-6789")`), so
+// only the classifier — the type id and the failing chain step — is safe to
+// replicate; the full detail stays in this node's logs. Satisfies
+// cluster.RedactedError, which recordSyncDeadLetter and
+// recordTypeMigrationDeadLetter honor so migration PII never reaches the log.
+func (e *Error) RedactedMessage() string {
+	return fmt.Sprintf("migration chain: type %s v%d->v%d: transform failed (full detail in this node's logs)", e.TypeID, e.FromVersion, e.ToVersion)
+}
+
 func (e *Error) Unwrap() error { return e.Err }
+
+// Error satisfies cluster.RedactedError so its full text (which inlines entity
+// PII) is kept node-local while only RedactedMessage is replicated.
+var _ cluster.RedactedError = (*Error)(nil)
 
 // Chain walks the type history for typeID from stampedVersion up to
 // latestVersion and applies each registered Migration program to data

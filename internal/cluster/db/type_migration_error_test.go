@@ -87,8 +87,14 @@ func TestSync_MigrationRuntimeError_DeadLettersTypeAndSyncable(t *testing.T) {
 	require.Equal(t, "person", dls[0].TypeID)
 	require.Equal(t, 1, dls[0].FromVersion, "the failing step starts at the stamped version")
 	require.Equal(t, 2, dls[0].ToVersion, "the v2 program is the one that errored")
-	require.Contains(t, dls[0].Message, "cannot derive email for alice",
-		"the record must carry the jq runtime error")
+	// Redacted: this record is replicated into the permanent log and queryable
+	// over HTTP, so it must carry only the classifier — never the jq runtime
+	// error, which inlines entity field values (PII). Full detail stays in the
+	// node's logs.
+	require.NotContains(t, dls[0].Message, "alice",
+		"the replicated record must not carry the jq error's inlined entity data")
+	require.Contains(t, dls[0].Message, "transform failed",
+		"the record carries the redacted classifier instead")
 	require.Greater(t, dls[0].Index, uint64(0))
 	require.NotZero(t, dls[0].TimestampUnixNano)
 
@@ -102,6 +108,8 @@ func TestSync_MigrationRuntimeError_DeadLettersTypeAndSyncable(t *testing.T) {
 	require.Equal(t, "permanent", sdls[0].Kind)
 	require.Equal(t, index, sdls[0].Index,
 		"both records must point at the same skipped proposal")
+	require.NotContains(t, sdls[0].Message, "alice",
+		"the syncable twin is redacted too, via safeDeadLetterMessage")
 
 	// The migration error counter incremented for the failing step.
 	require.Eventually(t, func() bool {

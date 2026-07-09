@@ -41,7 +41,10 @@ func (db *DB) recordTypeMigrationDeadLetter(ctx context.Context, index uint64, m
 		TimestampUnixNano: time.Now().UnixNano(),
 		FromVersion:       merr.FromVersion,
 		ToVersion:         merr.ToVersion,
-		Message:           truncateDeadLetterMessage(merr.Err.Error()),
+		// Redacted: this record is replicated into the permanent log and queryable
+		// over HTTP. merr.Err is a gojq error that inlines entity field values
+		// (PII); the full detail is kept node-local in the zap line above.
+		Message: truncateDeadLetterMessage(merr.RedactedMessage()),
 	}
 	entity, err := cluster.NewUpsertTypeMigrationDeadLetterEntity(dl)
 	if err == nil {

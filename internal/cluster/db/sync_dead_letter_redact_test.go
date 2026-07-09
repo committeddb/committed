@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/migration"
 )
 
 // fakeRedacted is a cluster.RedactedError: Error() carries full (PII-bearing)
@@ -36,5 +37,18 @@ func TestSafeDeadLetterMessage(t *testing.T) {
 		msg, redacted := safeDeadLetterMessage(nil)
 		require.False(t, redacted)
 		require.Equal(t, "operator dead-letter", msg)
+	})
+
+	t.Run("migration error is redacted through the syncable twin", func(t *testing.T) {
+		// The real type migrated the syncable path: a gojq error inlining a field
+		// value, reached via cluster.Permanent as the sync worker wraps it.
+		merr := &migration.Error{
+			TypeID: "person", FromVersion: 2, ToVersion: 3,
+			Err: errors.New(`cannot iterate over: string ("123-45-6789")`),
+		}
+		msg, redacted := safeDeadLetterMessage(cluster.Permanent(merr))
+		require.True(t, redacted)
+		require.NotContains(t, msg, "123-45-6789")
+		require.Contains(t, msg, "person")
 	})
 }
