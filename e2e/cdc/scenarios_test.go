@@ -227,33 +227,32 @@ func TestDeleteWithDependents(t *testing.T) {
 // TestPrimaryKeyUpdate exercises an UPDATE that changes the primary
 // key. pgoutput's behavior under REPLICA IDENTITY FULL: emits an
 // Update message with the old PK tuple as the OldTuple and the new
-// row as the NewTuple. The committed dialect today only forwards the
-// NewTuple (postgres.go:309) — so the resulting Entity has the NEW
-// key and NEW data; the old key's history "ends" silently with no
-// delete-like event. The oracle reflects that: one expected Entity at
-// the new key.
-//
-// This is the test the plan specifically calls out as likely to
-// surface a real bug; if the user wants old-key-delete semantics, the
-// dialect's UpdateMessage handler needs to be extended.
+// row as the NewTuple. The committed dialect forwards the NewTuple as
+// an upsert at the NEW key AND — since the orphan-row fix — a delete
+// tombstone at the OLD key, so the old key doesn't linger downstream
+// as an un-deletable stale row. The PK-change txn therefore produces
+// two entities in one proposal: the new-key upsert and the old-key
+// delete.
 func TestPrimaryKeyUpdate(t *testing.T) {
 	h := harness.New(t, harness.Options{Tables: []string{"region"}})
 
 	s := mutation.NewScript()
 	s.Insert("region", regionRow(1, "ORIGINAL", "before-pk-change"))
 	// Raw SQL: the mutation DSL's Update changes the row in place by
-	// PK; PK-change is a different operation. The expected entity is
-	// the new row at the new PK.
+	// PK; PK-change is a different operation.
 	s.Txn(func(t *mutation.Txn) {
 		t.Exec("UPDATE region SET r_regionkey=$1, r_name=$2, r_comment=$3 WHERE r_regionkey=$4",
 			2, "RENAMED", "after-pk-change", 1)
 	})
-	// The PK-change txn produces ONE Entity at the new key with the
-	// new data (the dialect emits NewTuple only — old-key history end
-	// is silent). Express that as a manual single-op script.
+	// The PK-change txn produces one proposal with two entities: the new
+	// row at the new key, and a delete tombstone at the old key. Model
+	// both in a single txn so they land in the same expected proposal.
 	expected := mutation.NewScript()
 	expected.Insert("region", regionRow(1, "ORIGINAL", "before-pk-change"))
-	expected.Update("region", regionRow(2, "RENAMED", "after-pk-change"))
+	expected.Txn(func(t *mutation.Txn) {
+		t.Update("region", regionRow(2, "RENAMED", "after-pk-change"))
+		t.Delete("region", regionRow(1, "ORIGINAL", "before-pk-change"))
+	})
 
 	if err := h.RunScript(context.Background(), s); err != nil {
 		t.Fatalf("script run: %v", err)

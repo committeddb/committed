@@ -8,18 +8,39 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql" // database/sql driver for the harness's own source/sink connection
+	"github.com/go-sql-driver/mysql" // database/sql driver for the harness's own source/sink connection
 	networktypes "github.com/moby/moby/api/types/network"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	tcmysql "github.com/testcontainers/testcontainers-go/modules/mysql"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
+
+// The harness opens *sql.DB pools against MySQL containers that Ryuk tears down
+// at test end. As each stopped server drops its pooled connections, go-sql-driver
+// logs "unexpected EOF" for every one — thousands of benign lines per run that
+// bury real failures in CI output. Filter that single message at the driver's
+// package logger; forward anything else unchanged so genuine driver errors stay
+// visible.
+func init() {
+	_ = mysql.SetLogger(quietMySQLLog{out: log.New(os.Stderr, "[mysql] ", log.LstdFlags)})
+}
+
+type quietMySQLLog struct{ out *log.Logger }
+
+func (q quietMySQLLog) Print(v ...any) {
+	if strings.Contains(fmt.Sprint(v...), "unexpected EOF") {
+		return
+	}
+	q.out.Print(v...)
+}
 
 // mysqlReadyWait is the container readiness strategy both MySQL harnesses use in
 // place of the mysql module's default log-line check. The default watches for a
