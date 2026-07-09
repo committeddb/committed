@@ -17,6 +17,9 @@ A map of the docs. Start with the quickstart; reach for the rest as you need the
   compatibility contract that makes rolling upgrades safe.
 - [Event-log architecture](event-log-architecture.md) — the design doc behind
   the log, entity kinds, and apply determinism (background, not a how-to).
+- [Storage architecture](storage-architecture.md) — the three write-ahead logs
+  plus BoltDB, why raft persistence is two logs (not one), and the crash-recovery
+  invariants that hold them together.
 
 ## Operations
 
