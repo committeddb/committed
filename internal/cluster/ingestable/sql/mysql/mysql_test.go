@@ -872,6 +872,84 @@ func TestMysqlMultiRowDML(t *testing.T) {
 		"all 3 tombstones of the bulk DELETE")
 }
 
+// TestMysqlPKChangingUpdateTombstonesOldKey is the orphan-row regression: an
+// UPDATE that changes the primary key must emit a delete tombstone for the old
+// key alongside the new-key upsert, so one source row maps to exactly one
+// downstream row (not two — a divergence and an un-deletable stale record, an
+// RTBF concern). binlog_row_image=FULL (the mysql:9 default; Preflight requires
+// it) carries the before-image the old key is read from.
+func TestMysqlPKChangingUpdateTombstonesOldKey(t *testing.T) {
+	table := "pkchange_table"
+
+	db := createDB(t)
+	_, err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS `%s`", table))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf("CREATE TABLE `%s` (pk VARCHAR(32) NOT NULL, val TEXT, PRIMARY KEY (pk));", table))
+	require.NoError(t, err)
+	// Sentinel in the snapshot so we can gate on streaming being live.
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, val) VALUES ('__sentinel__', 'go');", table))
+	require.NoError(t, err)
+	db.Close()
+
+	config := &sql.Config{
+		Type:             &cluster.Type{ID: "pkchange", Name: "pkchange"},
+		Mappings:         []sql.Mapping{{JsonName: "pk", SQLColumn: "pk"}, {JsonName: "val", SQLColumn: "val"}},
+		PrimaryKey:       []string{"pk"},
+		ConnectionString: ingestURL,
+		Tables:           []string{table},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	proposalChan := make(chan *cluster.Proposal, 10)
+	positionChan := make(chan cluster.Position, 10)
+	dialect := &mysql.MySQLDialect{}
+	go func() { _ = dialect.Ingest(ctx, config, nil, proposalChan, positionChan) }()
+
+	model := map[string]string{}
+	deleted := map[string]bool{}
+	drainUntil := func(pred func() bool, what string) {
+		t.Helper()
+		deadline := time.After(30 * time.Second)
+		for !pred() {
+			select {
+			case p := <-proposalChan:
+				for _, e := range p.Entities {
+					k := string(e.Key)
+					if e.IsDelete() {
+						delete(model, k)
+						deleted[k] = true
+						continue
+					}
+					var row map[string]string
+					require.NoError(t, json.Unmarshal(e.Data, &row))
+					model[k] = row["val"]
+					deleted[k] = false
+				}
+			case <-positionChan:
+			case <-deadline:
+				t.Fatalf("timed out waiting for %s (model=%v deleted=%v)", what, model, deleted)
+			}
+		}
+	}
+
+	drainUntil(func() bool { _, ok := model["__sentinel__"]; return ok }, "streaming to be live")
+
+	mdb := createDB(t)
+	defer mdb.Close()
+
+	_, err = mdb.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, val) VALUES ('old', 'v')", table))
+	require.NoError(t, err)
+	drainUntil(func() bool { return model["old"] == "v" }, "the inserted row")
+
+	// PK-changing UPDATE: the new key must upsert AND the old key must tombstone.
+	_, err = mdb.Exec(fmt.Sprintf("UPDATE `%s` SET pk='new' WHERE pk='old'", table))
+	require.NoError(t, err)
+	drainUntil(func() bool { return model["new"] == "v" && deleted["old"] },
+		"new-key upsert and old-key tombstone")
+	require.False(t, deleted["new"], "the new key must be an upsert, not a tombstone")
+}
+
 // TestMysqlSnapshotConcurrentMutationConverges is the effectively-once
 // re-validation for the convergent snapshot contract (Phase C): the snapshot is
 // NOT point-in-time — it reads per-batch while writes continue — and correctness

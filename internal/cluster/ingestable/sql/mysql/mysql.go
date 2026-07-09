@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"bytes"
 	"context"
 	gosql "database/sql"
 	"encoding/json"
@@ -707,6 +708,19 @@ func (h *MySQLEventHandler) handleRows(ctx context.Context, header *replication.
 		}
 		// Buffer until the transaction commits.
 		h.pending = append(h.pending, entity)
+
+		// A PK-changing UPDATE must tombstone the old key too, or the old-key row
+		// lingers downstream forever — two rows for one source row (divergence +
+		// an un-deletable stale record, RTBF concern). The before-image sits at
+		// ri-1 (the UPDATE stride is [before, after]); when its key differs from
+		// the after-image key, emit a delete for it, mirroring the Postgres path.
+		// binlog_row_image=FULL (Preflight-required) guarantees the before-image
+		// carries the primary key.
+		if action == "update" {
+			if old, ok := h.rowEntity(ts, table, "delete", e.Rows[ri-1]); ok && !bytes.Equal(old.Key, entity.Key) {
+				h.pending = append(h.pending, old)
+			}
+		}
 
 		// Soft limit: emit a partial batch to prevent OOM on a very large event/txn.
 		if len(h.pending) >= maxPendingEntities {
