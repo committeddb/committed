@@ -269,6 +269,70 @@ func (s *Storage) reconcileEntryLogWithSnapshot() error {
 	return s.resetEntryLogToSnapshot(snapIdx, s.snapshot.Metadata.GetTerm())
 }
 
+// reconcileEntryLogWithHardState heals the one-fsync-behind crash. Save persists
+// Entries then HardState to two separately-fsync'd logs (appendEntries then
+// appendState); a crash between the two fsyncs leaves the entry log one Ready
+// ahead of the durable HardState — HardState.Term below the last entry's term.
+// raft's start-time precondition (assertStorageTermInvariant) then fatals on
+// every restart: a rebuild-only brick, and under a correlated power event (rack /
+// AZ) it can hit the window on several nodes at once and brick quorum.
+//
+// Fix: truncate the entry tail down to the highest entry whose term is
+// <= HardState.Term. The over-term entries were never durably acked at that term
+// (this node crashed before persisting HardState, i.e. before Advance/ack), so no
+// promise was broken; anything actually committed elsewhere returns on raft
+// catch-up (log-matching + the leader's commit index). Safe to run
+// unconditionally: torn/checksum corruption is already fatal upstream (openLog /
+// repair.go), so a surviving term mismatch here is the benign one-fsync-behind
+// window, not arbitrary damage.
+//
+// Terms are non-decreasing with index, so the over-term entries are a contiguous
+// suffix. A non-empty HardState is at a term >= every entry it acked, so the walk
+// always finds a keep boundary at or above firstIndex (for a snapshot'd log the
+// boundary dummy carries the snapshot term, which is <= HardState.Term). An empty
+// HardState is skipped: it arises only when a brand-new node crashed during its
+// very first Save, before any HardState existed — nothing was committed, and there
+// is no non-zero term to reconcile against.
+func (s *Storage) reconcileEntryLogWithHardState() error {
+	last := s.lastIndex.Load()
+	if last == 0 || raft.IsEmptyHardState(s.hardState) {
+		return nil
+	}
+	lastTerm, err := s.Term(last)
+	if err != nil {
+		return nil // can't evaluate the last entry's term — leave it to the strict assert
+	}
+	hsTerm := s.hardState.GetTerm()
+	if hsTerm >= lastTerm {
+		return nil // invariant already holds
+	}
+
+	first := s.firstIndex.Load()
+	keep := last
+	for keep > first {
+		t, terr := s.Term(keep)
+		if terr != nil {
+			return fmt.Errorf("read term at index %d: %w", keep, terr)
+		}
+		if t <= hsTerm {
+			break
+		}
+		keep--
+	}
+
+	s.logger.Warn("recovering a one-fsync-behind crash: truncating the entry-log tail above the durable HardState.Term",
+		zap.Uint64("hardStateTerm", hsTerm),
+		zap.Uint64("lastLogTerm", lastTerm),
+		zap.Uint64("lastIndex", last),
+		zap.Uint64("truncateToIndex", keep))
+
+	if err := s.EntryLog.TruncateBack(keep - first + 1); err != nil {
+		return fmt.Errorf("truncate entry log to index %d: %w", keep, err)
+	}
+	s.lastIndex.Store(keep)
+	return nil
+}
+
 // SetLostNotifier installs the truncation lost-callback. db.New calls it
 // (via the lostNotifierSetter optional interface) with db.notifyLost
 // because the callback can't be passed at Open time — the DB it closes

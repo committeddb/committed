@@ -584,6 +584,15 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		return nil, fmt.Errorf("reconcile entry log with snapshot: %w", err)
 	}
 
+	// Heal the one-fsync-behind crash: Save persists Entries then HardState to two
+	// separately-fsync'd logs, so a crash between the two fsyncs can leave
+	// HardState.Term below the last entry's term — which fatals raft's start-time
+	// invariant (assertStorageTermInvariant) on every restart, a rebuild-only
+	// brick. Truncate the entry tail down to HardState.Term instead. See the method.
+	if err := ws.reconcileEntryLogWithHardState(); err != nil {
+		return nil, fmt.Errorf("reconcile entry log with hard state: %w", err)
+	}
+
 	// Rewrite the recovered state as fresh records at the state-log tail,
 	// then truncate everything older (appendState does both). Recovery above
 	// only ever uses the newest Snapshot and the newest non-empty HardState
