@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/metrics"
 )
 
 // Default CORS request methods and headers, applied when WithCORS is
@@ -22,6 +23,39 @@ var (
 	defaultCORSHeaders = []string{"Content-Type", "Authorization", "X-Request-ID"}
 )
 
+// defaultMaxBodyBytes is the default request-body cap: 2x the 16 MiB default
+// proposal size (db.DefaultMaxProposalBytes), giving headroom for the JSON/TOML
+// body being larger than the marshaled proposal it produces. cmd overrides it
+// via WithMaxBodyBytes to track a raised proposal cap.
+const defaultMaxBodyBytes int64 = 32 * 1024 * 1024
+
+// maxBytes wraps each request body in http.MaxBytesReader so an over-limit body
+// fails the read (with *http.MaxBytesError → 413) instead of being buffered into
+// memory — an OOM-DoS guard. The propose layer still enforces the exact
+// marshaled proposal size; this only bounds what a node will read into RAM.
+func maxBytes(limit int64) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if limit > 0 && r.Body != nil {
+				r.Body = http.MaxBytesReader(w, r.Body, limit)
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// routePattern returns the matched chi route pattern (e.g. "/v1/proposal") for
+// logs and metrics, falling back to the raw path. The pattern is bounded
+// cardinality (path params collapse to "{id}"), so it is safe as a metric label.
+func routePattern(r *http.Request) string {
+	if rc := chi.RouteContext(r.Context()); rc != nil {
+		if p := rc.RoutePattern(); p != "" {
+			return p
+		}
+	}
+	return r.URL.Path
+}
+
 type HTTP struct {
 	r                *chi.Mux
 	c                cluster.Cluster
@@ -33,6 +67,8 @@ type HTTP struct {
 	// system-root TLS; cmd/node.go overrides it via WithProxyClient to trust
 	// the cluster's CA or skip verification for self-signed peer certs.
 	proxyClient *http.Client
+	// metrics is nil when instrumentation is disabled; call sites nil-check.
+	metrics *metrics.Metrics
 }
 
 func New(c cluster.Cluster, opts ...Option) *HTTP {
@@ -71,6 +107,14 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 	// bearerAuth and every handler so the net covers the whole surface.
 	r.Use(recoverPanic)
 
+	maxBody := o.maxBodyBytes
+	if maxBody <= 0 {
+		maxBody = defaultMaxBodyBytes
+	}
+	// Bound every request body so a large upload can't OOM the node before the
+	// propose-layer size check runs. An over-cap body fails the read with 413.
+	r.Use(maxBytes(maxBody))
+
 	readIndexTimeout := o.readIndexTimeout
 	if readIndexTimeout <= 0 {
 		readIndexTimeout = defaultReadIndexTimeout
@@ -81,7 +125,7 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 		proxyClient = &http.Client{Timeout: defaultProxyTimeout}
 	}
 
-	h := &HTTP{r: r, c: c, bearerToken: o.bearerToken, readIndexTimeout: readIndexTimeout, proxyClient: proxyClient}
+	h := &HTTP{r: r, c: c, bearerToken: o.bearerToken, readIndexTimeout: readIndexTimeout, proxyClient: proxyClient, metrics: o.metrics}
 
 	if o.bearerToken != "" {
 		zap.L().Info("API bearer-token authentication enabled")

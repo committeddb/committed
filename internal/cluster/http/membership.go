@@ -105,7 +105,7 @@ type AddMemberRequest struct {
 func (h *HTTP) AddMember(w httpgo.ResponseWriter, r *httpgo.Request) {
 	req := &AddMemberRequest{}
 	if err := unmarshalBody(r, req); err != nil {
-		writeError(w, httpgo.StatusBadRequest, "invalid_json", "request body is not valid JSON")
+		h.writeReadError(w, r, err, "invalid_json", "request body is not valid JSON")
 		return
 	}
 

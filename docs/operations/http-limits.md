@@ -27,11 +27,29 @@ before they reach raft. HTTP translates that to:
 {"code":"proposal_too_large","message":"<resource> exceeds the configured proposal size limit"}
 ```
 
-The check lives at the propose layer (not at the HTTP body read)
-because raft is what the cap actually protects: an oversize entry
+The *exact* size check lives at the propose layer (not the HTTP body
+read) because raft is what the cap protects: an oversize entry
 replicates to every peer's WAL, stalls the message pipeline, and
-bloats snapshot/compaction work. Putting the check at HTTP would
+bloats snapshot/compaction work. Putting the exact check at HTTP would
 miss the ingest path entirely.
+
+But the HTTP handler must buffer the whole request body into memory
+before it can marshal and size-check the proposal, so a separate
+**request-body cap** guards the node's heap: every API request body is
+wrapped in a `MaxBytesReader`, and an over-cap body is rejected with
+`413 request_too_large` *at the read*, before it can OOM the node. The
+body cap tracks the proposal cap with headroom (2×, since the JSON/TOML
+body is larger than the marshaled proposal it produces), so raising
+`COMMITTED_MAX_PROPOSAL_BYTES` raises it too — there is no separate knob.
+The two 413s are distinct: `proposal_too_large` means the marshaled entry
+exceeds the raft cap; `request_too_large` means the raw body exceeded the
+memory guard.
+
+Watch the body cap in the wild: each `request_too_large` rejection is
+counted on the `committed.http.request_too_large` metric (labeled by
+`route`) and logged with its route. A rising count on `/v1/proposal` means
+the cap may be too tight for legitimate proposals — raise
+`COMMITTED_MAX_PROPOSAL_BYTES` (which raises the body cap with it).
 
 | Env var | Default | Notes |
 |---|---|---|

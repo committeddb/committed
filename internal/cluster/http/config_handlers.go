@@ -28,7 +28,7 @@ func (h *HTTP) addConfig(name string, propose func(context.Context, *cluster.Con
 	return func(w httpgo.ResponseWriter, r *httpgo.Request) {
 		c, err := createConfiguration(r)
 		if err != nil {
-			writeError(w, httpgo.StatusBadRequest, "invalid_config", "invalid "+name+" configuration")
+			h.writeReadError(w, r, err, "invalid_config", "invalid "+name+" configuration")
 			return
 		}
 

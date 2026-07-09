@@ -42,7 +42,7 @@ type DiskReportResponse struct {
 func (h *HTTP) DiskReport(w httpgo.ResponseWriter, r *httpgo.Request) {
 	req := &DiskReportRequest{}
 	if err := unmarshalBody(r, req); err != nil {
-		writeError(w, httpgo.StatusBadRequest, "invalid_json", "request body is not valid JSON")
+		h.writeReadError(w, r, err, "invalid_json", "request body is not valid JSON")
 		return
 	}
 	if req.Node == 0 {

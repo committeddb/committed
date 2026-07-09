@@ -21,6 +21,24 @@ type ErrorResponse struct {
 // writeError writes a structured JSON error response. The message is
 // treated as safe to return to callers — do not pass raw error strings
 // that could contain SQL fragments, file paths, or stack traces.
+// writeReadError responds to a request-body read/decode failure: an over-limit
+// body (rejected by the maxBytes middleware's http.MaxBytesReader) is 413
+// request_too_large — counted on committed.http.request_too_large and logged
+// with its route so an operator can watch for the body cap false-rejecting
+// legitimate proposals — and any other failure uses the caller's 400.
+func (h *HTTP) writeReadError(w httpgo.ResponseWriter, r *httpgo.Request, err error, code, message string) {
+	if mbe, ok := errors.AsType[*httpgo.MaxBytesError](err); ok {
+		route := routePattern(r)
+		if h.metrics != nil {
+			h.metrics.HTTPRequestTooLarge(route)
+		}
+		writeErrorf(w, httpgo.StatusRequestEntityTooLarge, "request_too_large",
+			"request body exceeds the %d-byte limit (route %s)", mbe.Limit, route)
+		return
+	}
+	writeError(w, httpgo.StatusBadRequest, code, message)
+}
+
 func writeError(w httpgo.ResponseWriter, status int, code string, message string) {
 	resp := ErrorResponse{
 		Code:    code,

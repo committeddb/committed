@@ -3,6 +3,8 @@ package http
 import (
 	httpgo "net/http"
 	"time"
+
+	"github.com/committeddb/committed/internal/cluster/metrics"
 )
 
 // Option configures behaviour of New.
@@ -15,6 +17,8 @@ type options struct {
 	corsHeaders      []string
 	readIndexTimeout time.Duration
 	proxyClient      *httpgo.Client
+	maxBodyBytes     int64
+	metrics          *metrics.Metrics
 }
 
 // WithBearerToken enables bearer-token authentication on every route
@@ -23,6 +27,21 @@ type options struct {
 // authentication (dev mode).
 func WithBearerToken(token string) Option {
 	return func(o *options) { o.bearerToken = token }
+}
+
+// WithMaxBodyBytes caps the size of any request body the API will buffer into
+// memory, protecting the node from an OOM DoS: a body over the cap is rejected
+// with 413 before it is fully read (see the maxBytes middleware). Should sit
+// above the proposal-size limit with headroom, since the JSON/TOML body is
+// larger than the marshaled proposal it produces. n <= 0 keeps the default.
+func WithMaxBodyBytes(n int64) Option {
+	return func(o *options) { o.maxBodyBytes = n }
+}
+
+// WithMetrics wires the node's metrics into the HTTP layer so it can count
+// API-level events (e.g. request_too_large rejections). Nil disables them.
+func WithMetrics(m *metrics.Metrics) Option {
+	return func(o *options) { o.metrics = m }
 }
 
 // WithCORS enables CORS handling for the given allowed origins. Origins

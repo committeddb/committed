@@ -52,6 +52,8 @@ type Metrics struct {
 
 	walCorruptEntries metric.Int64Counter
 
+	httpRequestTooLarge metric.Int64Counter
+
 	diskFreeBytes   metric.Float64Gauge
 	diskFreePercent metric.Float64Gauge
 	diskState       metric.Float64Gauge
@@ -172,6 +174,9 @@ func New(meter metric.Meter) *Metrics {
 
 	m.walCorruptEntries, _ = meter.Int64Counter("committed.wal.corrupt_entries",
 		metric.WithDescription("WAL entries that failed CRC32C checksum verification on read, by log (entry_log|event_log|state_log). Any non-zero value means on-disk corruption was detected (bit rot, torn write, filesystem damage); the node will fatal-exit. Alert on this and rebuild from a healthy peer per docs/operations/rebuild.md."))
+
+	m.httpRequestTooLarge, _ = meter.Int64Counter("committed.http.request_too_large",
+		metric.WithDescription("API requests rejected (413) because the body exceeded the max-body cap, by route. A rising count on /v1/proposal means the body cap may be too tight for legitimate proposals — raise COMMITTED_MAX_PROPOSAL_BYTES (which also raises the body cap)."))
 
 	m.diskFreeBytes, _ = meter.Float64Gauge("committed.disk.free_bytes",
 		metric.WithDescription("Free bytes on the filesystem backing the data directory, sampled by the disk-usage watcher."),
@@ -463,6 +468,15 @@ func (m *Metrics) SetConfigBuildErrors(n int) {
 func (m *Metrics) WalCorruptEntry(log string) {
 	m.walCorruptEntries.Add(context.Background(), 1,
 		metric.WithAttributes(attribute.String("log", log)))
+}
+
+// HTTPRequestTooLarge counts one API request rejected with 413 because its body
+// exceeded the max-body cap, labeled by route. Alert on it: a non-zero count on
+// /v1/proposal is the signal that the body cap is rejecting legitimate proposals
+// and COMMITTED_MAX_PROPOSAL_BYTES (which also raises the body cap) should go up.
+func (m *Metrics) HTTPRequestTooLarge(route string) {
+	m.httpRequestTooLarge.Add(context.Background(), 1,
+		metric.WithAttributes(attribute.String("route", route)))
 }
 
 // SetDiskFree records the most recent free-space sample for the data

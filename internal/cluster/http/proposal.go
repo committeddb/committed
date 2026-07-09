@@ -39,7 +39,7 @@ func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
 	pr := &AddProposalRequest{}
 	err := unmarshalBody(r, pr)
 	if err != nil {
-		writeError(w, httpgo.StatusBadRequest, "invalid_json", "request body is not valid JSON")
+		h.writeReadError(w, r, err, "invalid_json", "request body is not valid JSON")
 		return
 	}
 

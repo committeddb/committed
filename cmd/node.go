@@ -300,6 +300,15 @@ image can be templated per-node by an orchestrator:
 		if apiToken != "" {
 			httpOpts = append(httpOpts, http.WithBearerToken(apiToken))
 		}
+		if m != nil {
+			httpOpts = append(httpOpts, http.WithMetrics(m))
+		}
+		if n, ok := parseInt64Env("COMMITTED_MAX_PROPOSAL_BYTES"); ok {
+			// Keep the request-body cap above the (raised) proposal cap so a large
+			// but valid proposal isn't false-rejected at the HTTP body read; the
+			// body is JSON/TOML and larger than the marshaled proposal it produces.
+			httpOpts = append(httpOpts, http.WithMaxBodyBytes(n*2))
+		}
 
 		corsOrigins, err := loadCORSOrigins()
 		if err != nil {
