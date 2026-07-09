@@ -484,6 +484,43 @@ func TestMysqlPreflightBinlogRowMetadata(t *testing.T) {
 	require.Contains(t, err.Error(), "binlog_row_metadata=FULL", "the error is actionable")
 }
 
+// TestMysqlPreflightBinlogRowValueOptions locks the empty-binlog_row_value_options
+// requirement: PARTIAL_JSON logs only a JSON diff for a partially-updated JSON
+// column, which go-mysql surfaces as a *replication.JsonDiff committed cannot
+// reconstruct — so Preflight must reject it rather than silently corrupt JSON.
+func TestMysqlPreflightBinlogRowValueOptions(t *testing.T) {
+	db := createDB(t)
+	defer db.Close()
+	mk := func(q string) { _, err := db.Exec(q); require.Nil(t, err) }
+	mk("DROP TABLE IF EXISTS pf_json")
+	mk("CREATE TABLE pf_json (id VARCHAR(32) PRIMARY KEY, doc JSON)")
+
+	var origImg, origMeta, origOpts string
+	require.Nil(t, db.QueryRow("SELECT @@global.binlog_row_image").Scan(&origImg))
+	require.Nil(t, db.QueryRow("SELECT @@global.binlog_row_metadata").Scan(&origMeta))
+	require.Nil(t, db.QueryRow("SELECT @@global.binlog_row_value_options").Scan(&origOpts))
+	defer func() {
+		_, _ = db.Exec("SET GLOBAL binlog_row_image = '" + origImg + "'")
+		_, _ = db.Exec("SET GLOBAL binlog_row_metadata = '" + origMeta + "'")
+		_, _ = db.Exec("SET GLOBAL binlog_row_value_options = '" + origOpts + "'")
+	}()
+
+	dialect := &mysql.MySQLDialect{}
+	cfg := &sql.Config{ConnectionString: ingestURL, Tables: []string{"pf_json"}, PrimaryKey: []string{"id"}}
+
+	// Reach the value-options check: the row-image and row-metadata gates precede it.
+	mk("SET GLOBAL binlog_row_image = 'FULL'")
+	mk("SET GLOBAL binlog_row_metadata = 'FULL'")
+
+	mk("SET GLOBAL binlog_row_value_options = ''")
+	require.NoError(t, dialect.Preflight(cfg), "empty logs the full JSON document")
+
+	mk("SET GLOBAL binlog_row_value_options = 'PARTIAL_JSON'")
+	err := dialect.Preflight(cfg)
+	require.Error(t, err, "PARTIAL_JSON logs a JSON diff committed cannot reconstruct")
+	require.Contains(t, err.Error(), "binlog_row_value_options", "the error is actionable")
+}
+
 // TestMysqlReconnect verifies that the ingestable reconnects after
 // MySQL goes away mid-stream and resumes delivering proposals once
 // MySQL comes back.

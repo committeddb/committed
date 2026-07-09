@@ -104,6 +104,21 @@ func (m *MySQLDialect) Preflight(config *sql.Config) error {
 			"binlog_row_metadata is %q, but committed requires FULL: the binlog carries column names and ENUM/SET labels only under FULL, and committed decodes each row against its own event's schema to stay correct across source DDL. Set `binlog_row_metadata=FULL`",
 			rowMetadata)
 	}
+
+	var rowValueOptions string
+	if err := db.QueryRowContext(ctx, `SELECT @@global.binlog_row_value_options`).Scan(&rowValueOptions); err != nil {
+		return fmt.Errorf("read binlog_row_value_options: %w", err)
+	}
+	// Must be empty. PARTIAL_JSON logs only the JSON *diff* for a partially-updated
+	// JSON column, which go-mysql surfaces as a *replication.JsonDiff rather than
+	// the document bytes; committed can't reconstruct the document from a diff and
+	// would marshal the diff struct into structurally wrong JSON — silent mirror
+	// corruption. Require the full JSON document in the binlog.
+	if strings.TrimSpace(rowValueOptions) != "" {
+		return fmt.Errorf(
+			"binlog_row_value_options is %q, but committed requires it empty: PARTIAL_JSON logs only a JSON diff for a partially-updated JSON column, which committed cannot reconstruct and would corrupt downstream. Set `binlog_row_value_options=''`",
+			rowValueOptions)
+	}
 	return nil
 }
 
