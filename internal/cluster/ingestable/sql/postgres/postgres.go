@@ -144,6 +144,44 @@ func (d *PostgreSQLDialect) Preflight(config *sql.Config) error {
 	return nil
 }
 
+// TeardownSource drops the replication slot and publication this ingestable
+// created on the source. The slot is what pins the source's WAL (its restart_lsn
+// holds WAL back), so an orphaned slot from a deleted ingestable grows the
+// source's disk without bound — this releases it. Called by the ingest delete
+// path on the owner node only, AFTER the worker has stopped, so the slot is
+// inactive and droppable. Idempotent: the slot drop is guarded on existence
+// (pg_drop_replication_slot errors on a missing name) and the publication uses IF
+// EXISTS, so a re-run after a leadership flap is a clean no-op.
+func (d *PostgreSQLDialect) TeardownSource(config *sql.Config) error {
+	pgCfg, err := buildPgConfig(config)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), preflightTimeout)
+	defer cancel()
+
+	db, err := gosql.Open("pgx", pgCfg.sqlConnString)
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	// Drop the slot first — it's what holds WAL. The WHERE-guarded form drops it
+	// only if present, so a missing slot is not an error (unlike a bare
+	// pg_drop_replication_slot call).
+	if _, err := db.ExecContext(ctx,
+		`SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1`,
+		pgCfg.slotName); err != nil {
+		return fmt.Errorf("drop replication slot %q: %w", pgCfg.slotName, err)
+	}
+	// Then the publication — it pins no WAL, but leaving it clutters the source.
+	if _, err := db.ExecContext(ctx,
+		fmt.Sprintf("DROP PUBLICATION IF EXISTS %s", quoteIdent(pgCfg.publication))); err != nil {
+		return fmt.Errorf("drop publication %q: %w", pgCfg.publication, err)
+	}
+	return nil
+}
+
 // checkReplicaIdentity verifies the table's replica identity covers primaryKey
 // in a DELETE's old-row image: FULL covers every column; DEFAULT covers the
 // primary key; USING INDEX covers that index's columns; NOTHING covers nothing.

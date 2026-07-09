@@ -9,6 +9,12 @@ import (
 type IngestableWithID struct {
 	ID         string
 	Ingestable cluster.Ingestable
+	// Delete signals that the ingestable with ID was removed from the log
+	// (deleteIngestable on the apply path), rather than upserted. The DB-layer
+	// consumer (listenForIngestables) cancels the worker and, on the owner, tears
+	// down the source-side replication resources (drops the Postgres slot +
+	// publication). Ingestable is nil for a delete.
+	Delete bool
 }
 
 func (db *DB) AddIngestableParser(name string, p cluster.IngestableParser) {

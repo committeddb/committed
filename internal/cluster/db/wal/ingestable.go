@@ -74,7 +74,7 @@ func (s *Storage) saveIngestable(t *cluster.Configuration) error {
 }
 
 func (s *Storage) deleteIngestable(id []byte) error {
-	return s.update(func(tx *bolt.Tx) error {
+	err := s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(ingestableBucket)
 		if b == nil {
 			return ErrBucketMissing
@@ -87,6 +87,21 @@ func (s *Storage) deleteIngestable(id []byte) error {
 		// an ingestable and database happened to share an id.
 		return deleteVersioned(b, id)
 	})
+	if err != nil {
+		return err
+	}
+
+	// Signal the DB layer to cancel the worker and, on the owner, tear down the
+	// source-side replication resources (drop the Postgres slot + publication) so
+	// an orphaned slot can't pin the source's WAL. Mirrors deleteSyncable; the DB
+	// layer reuses the worker's already-built ingestable handle for the teardown,
+	// so the signal carries only the ID.
+	if s.ingest != nil {
+		s.logger.Debug("sending ingestable delete to channel", zap.String("id", string(id)))
+		s.ingest <- &db.IngestableWithID{ID: string(id), Delete: true}
+	}
+
+	return nil
 }
 
 // RestoreIngestableWorkers walks the ingestable bucket and re-sends each

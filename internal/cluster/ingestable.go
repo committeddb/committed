@@ -52,6 +52,22 @@ type Ingestable interface {
 	Close() error
 }
 
+// IngestableTeardownable is the optional Ingestable extension implemented by
+// ingestables that own destructive teardown of their SOURCE-side replication
+// resources (the Postgres dialect drops its replication slot + publication; an
+// orphaned slot pins the source's WAL and can fill the source's disk). The
+// ingest delete path type-asserts it — exactly like Syncable's Teardownable —
+// and, on the owner node only, calls Teardown AFTER the logical (consensus)
+// deletion succeeds and the worker has stopped (so the slot is inactive).
+//
+// Teardown must be idempotent (safe to re-run after a leadership flap, e.g. via
+// IF EXISTS) and is a destructive side effect: owner-gated and live-only, never
+// on a replaying or non-owner node. Best-effort — the logical delete already
+// committed, so a failure only leaves an orphaned slot an operator can drop.
+type IngestableTeardownable interface {
+	Teardown() error
+}
+
 // IngestableStatus is a point-in-time operational snapshot of an ingestable
 // worker: which phase it is in, how far the initial snapshot got, where the
 // change-data-capture cursor sits, and how far behind the source it is. It is

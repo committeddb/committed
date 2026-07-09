@@ -28,3 +28,22 @@ func (i *Ingestable) Status(ctx context.Context, pos cluster.Position) (cluster.
 func (i *Ingestable) Close() error {
 	return nil
 }
+
+// sourceTeardowner is the optional Dialect capability to drop the source-side
+// replication resources it created. Postgres implements it (drop slot +
+// publication); MySQL does not — a binlog reader holds no persistent server-side
+// resource, so there is nothing to drop once the worker's connection closes.
+type sourceTeardowner interface {
+	TeardownSource(config *Config) error
+}
+
+// Teardown satisfies cluster.IngestableTeardownable: on ingestable delete the
+// owner node drops the source-side replication resources so an orphaned slot
+// can't pin the source's WAL. Delegates to the dialect when it owns such
+// resources; a no-op otherwise. Idempotent, so a re-run after a flap is safe.
+func (i *Ingestable) Teardown() error {
+	if td, ok := i.dialect.(sourceTeardowner); ok {
+		return td.TeardownSource(i.config)
+	}
+	return nil
+}

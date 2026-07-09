@@ -188,6 +188,57 @@ func (db *DB) Ingest(_ context.Context, id string, i cluster.Ingestable) error {
 	return nil
 }
 
+// deleteIngest cancels the ingest worker for id and, on the owner node only,
+// tears down the source-side replication resources (drops the Postgres slot +
+// publication). It is the ingest analogue of deleteSync, run on apply of an
+// ingestable config delete.
+//
+// Two planes, as the delete design requires:
+//   - Worker cancel is node-local and idempotent: every node that built the
+//     config has a worker, so each stops its own goroutine; a node with none is
+//     a no-op. The worker clears its own running metric on exit.
+//   - The source teardown is the destructive side effect (drop the slot), so it
+//     is gated on db.isNode(id) and run live only — never reconstructed from
+//     replay. By the time this runs the config is already deleted, so isNode
+//     resolves to "this node is the leader"; the leader tears down using its own
+//     already-built ingestable handle.
+//
+// Best-effort: the logical deletion already succeeded via consensus, so a
+// teardown failure only leaves an orphaned slot an operator can drop — it must
+// never fail or panic.
+func (db *DB) deleteIngest(id string) {
+	db.workersMu.Lock()
+	handle, ok := db.ingestWorkers[id]
+	if ok {
+		handle.cancel()
+		db.workersMu.Unlock()
+		<-handle.done
+		db.workersMu.Lock()
+		if db.ingestWorkers[id] == handle {
+			delete(db.ingestWorkers, id)
+		}
+	}
+	db.workersMu.Unlock()
+
+	if !ok || handle.ingestable == nil {
+		return // no worker built on this node — nothing to tear down
+	}
+	if !db.isNode(id) {
+		return // this node isn't the owner
+	}
+
+	teardownable, ok := handle.ingestable.(cluster.IngestableTeardownable)
+	if !ok {
+		return // ingestable owns no source-side replication resource
+	}
+	if err := teardownable.Teardown(); err != nil {
+		// Best-effort: the logical delete already committed. Log loudly and move
+		// on — the worst case is an orphaned slot pinning the source's WAL.
+		db.logger.Error("ingestable deleted but source teardown failed (an orphaned replication slot may pin the source's WAL; drop it manually)",
+			zap.String("id", id), zap.Error(err))
+	}
+}
+
 // IngestableStatus reports an ingestable worker's operational status — snapshot
 // vs. streaming phase, per-table snapshot progress, the CDC position, source
 // lag, and caught-up. It reads the worker's persisted checkpoint position

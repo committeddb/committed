@@ -452,6 +452,10 @@ func (db *DB) listenForIngestables(ingest <-chan *IngestableWithID) {
 			if !ok {
 				return
 			}
+			if ingestable.Delete {
+				db.deleteIngest(ingestable.ID)
+				continue
+			}
 			if err := db.Ingest(context.Background(), ingestable.ID, ingestable.Ingestable); err != nil {
 				// Ingest only returns ErrClosed, which means db.Close
 				// fired between our channel receive and the registry

@@ -628,6 +628,68 @@ func TestPostgresSnapshotStreamByteIdentity(t *testing.T) {
 	}
 }
 
+// TestPostgresTeardownSourceDropsSlot is the slot-leak success criterion:
+// tearing down a deleted ingestable drops its replication slot (and publication)
+// on the source, so the orphaned slot can't pin the source's WAL and fill its
+// disk. Idempotent — a second teardown after the slot is gone is a clean no-op.
+func TestPostgresTeardownSourceDropsSlot(t *testing.T) {
+	const table = "pgtest_teardown"
+	db := createDB(t)
+	_, err := db.Exec(`DROP TABLE IF EXISTS ` + table)
+	require.NoError(t, err)
+	_, err = db.Exec(`CREATE TABLE ` + table + ` (pk VARCHAR(32) PRIMARY KEY, val TEXT)`)
+	require.NoError(t, err)
+	db.Close()
+
+	cleanReplication(t, "slot_teardown", "pub_teardown")
+
+	config := &sql.Config{
+		Type:             &cluster.Type{ID: "teardown", Name: "teardown"},
+		Mappings:         []sql.Mapping{{JsonName: "pk", SQLColumn: "pk"}, {JsonName: "val", SQLColumn: "val"}},
+		PrimaryKey:       []string{"pk"},
+		ConnectionString: connString,
+		Tables:           []string{table},
+		Options:          map[string]string{"slot_name": "slot_teardown", "publication": "pub_teardown"},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	proposalChan := make(chan *cluster.Proposal, 10)
+	positionChan := make(chan cluster.Position, 10)
+	dialect := &postgres.PostgreSQLDialect{}
+	ingestErr := make(chan error, 1)
+	go func() { ingestErr <- dialect.Ingest(ctx, config, nil, proposalChan, positionChan) }()
+
+	waitForSlot(t, "slot_teardown") // the slot now exists on the source
+
+	// Stop the worker so the slot goes inactive — a live slot can't be dropped.
+	cancel()
+	select {
+	case <-ingestErr:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Ingest did not exit after cancel")
+	}
+
+	require.NoError(t, dialect.TeardownSource(config))
+
+	check := createDB(t)
+	defer check.Close()
+	slotCount := func() int {
+		var n int
+		require.NoError(t, check.QueryRow(
+			`SELECT COUNT(*) FROM pg_replication_slots WHERE slot_name = $1`, "slot_teardown").Scan(&n))
+		return n
+	}
+	var pubs int
+	require.NoError(t, check.QueryRow(
+		`SELECT COUNT(*) FROM pg_publication WHERE pubname = $1`, "pub_teardown").Scan(&pubs))
+	require.Equal(t, 0, slotCount(), "the replication slot must be dropped")
+	require.Equal(t, 0, pubs, "the publication must be dropped")
+
+	// Idempotent: a second teardown after the slot is already gone is a no-op.
+	require.NoError(t, dialect.TeardownSource(config))
+	require.Equal(t, 0, slotCount())
+}
+
 // TestPostgresMixedCaseColumn is the mixed-case-column regression on real
 // Postgres: a quoted CamelCase source column ("CreatedAt") mapped by a
 // case-matching config must carry its value through BOTH the snapshot and CDC
