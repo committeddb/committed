@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	gosql "database/sql"
 	"encoding/binary"
@@ -641,6 +642,19 @@ func (d *PostgreSQLDialect) stream(
 				}
 				if e := tupleToEntity(ctx, m.NewTuple, m.RelationID, relations, config, pgCfg, false, resolve); e != nil {
 					pending = append(pending, e)
+					// A PK-changing UPDATE writes the new-key row above but would
+					// orphan the old-key row downstream (two rows for one source
+					// row — a divergence and an un-deletable stale record, RTBF
+					// concern). When the old tuple carries a different key, emit a
+					// delete tombstone for the old key too, mirroring DeleteMessage.
+					// REPLICA IDENTITY DEFAULT sends OldTuple only on a key change;
+					// FULL sends it always, so the key-equality guard suppresses a
+					// spurious tombstone on a non-key UPDATE.
+					if m.OldTuple != nil {
+						if old := tupleToEntity(ctx, m.OldTuple, m.RelationID, relations, config, pgCfg, true, resolve); old != nil && !bytes.Equal(old.Key, e.Key) {
+							pending = append(pending, old)
+						}
+					}
 				}
 				if len(pending) >= maxPendingEntities {
 					if err := flushPending(ctx, &pending, pr, curLSN); err != nil {

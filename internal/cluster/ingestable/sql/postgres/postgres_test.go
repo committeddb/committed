@@ -275,6 +275,90 @@ func TestPostgresDialect(t *testing.T) {
 	}
 }
 
+// TestPostgresPKChangingUpdateTombstonesOldKey is the orphan-row regression: an
+// UPDATE that changes the primary key must emit a delete tombstone for the old
+// key alongside the new-key upsert, so one source row maps to exactly one
+// downstream row. Without the tombstone the old key lingers downstream forever
+// (divergence + an un-deletable stale record — an RTBF concern). REPLICA
+// IDENTITY DEFAULT populates the old tuple on a key change, so no FULL is needed.
+func TestPostgresPKChangingUpdateTombstonesOldKey(t *testing.T) {
+	const table = "pgtest_pkchange"
+	simpleType := &cluster.Type{ID: "simple", Name: "simple"}
+	config := &sql.Config{
+		Type: simpleType,
+		Mappings: []sql.Mapping{
+			{JsonName: "one", SQLColumn: "one"},
+			{JsonName: "pk", SQLColumn: "pk"},
+		},
+		PrimaryKey: []string{"pk"},
+	}
+
+	db := createDB(t)
+	_, err := db.Exec(fmt.Sprintf(`DROP TABLE IF EXISTS %s`, table))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf(`CREATE TABLE %s (pk VARCHAR(32) NOT NULL PRIMARY KEY, one TEXT)`, table))
+	require.NoError(t, err)
+	db.Close()
+
+	slotName, pubName := "slot_pkchange", "pub_pkchange"
+	cleanReplication(t, slotName, pubName)
+
+	dialect := &postgres.PostgreSQLDialect{}
+	config.ConnectionString = connString
+	config.Tables = []string{table}
+	config.Options = map[string]string{"slot_name": slotName, "publication": pubName}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	proposalChan := make(chan *cluster.Proposal, 10)
+	positionChan := make(chan cluster.Position, 10)
+	ingestErr := make(chan error, 1)
+	go func() { ingestErr <- dialect.Ingest(ctx, config, nil, proposalChan, positionChan) }()
+
+	waitForSlot(t, slotName)
+
+	// Insert then change the primary key. Both happen after the slot is ready so
+	// pgoutput captures them: INSERT pk=old, then UPDATE pk old→new.
+	db2 := createDB(t)
+	_, err = db2.Exec(fmt.Sprintf(`INSERT INTO %s (pk, one) VALUES ('old', 'v')`, table))
+	require.NoError(t, err)
+	_, err = db2.Exec(fmt.Sprintf(`UPDATE %s SET pk = 'new' WHERE pk = 'old'`, table))
+	require.NoError(t, err)
+	db2.Close()
+
+	// The PK-changing UPDATE must yield both a new-key upsert and an old-key
+	// tombstone; timing out on either is the regression (fails today).
+	haveNewUpsert, haveOldTombstone := false, false
+	deadline := time.After(15 * time.Second)
+	for !haveNewUpsert || !haveOldTombstone {
+		select {
+		case proposal := <-proposalChan:
+			for _, e := range proposal.Entities {
+				switch {
+				case string(e.Key) == "new" && !e.IsDelete():
+					haveNewUpsert = true
+				case string(e.Key) == "new" && e.IsDelete():
+					t.Fatal("the new key must be an upsert, not a tombstone")
+				case string(e.Key) == "old" && e.IsDelete():
+					haveOldTombstone = true
+				}
+			}
+		case <-positionChan:
+		case <-deadline:
+			t.Fatalf("timed out: new-key upsert=%v old-key tombstone=%v", haveNewUpsert, haveOldTombstone)
+		}
+	}
+
+	cancel()
+	select {
+	case err := <-ingestErr:
+		require.Nil(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Ingest did not exit after cancel")
+	}
+}
+
 // TestPostgresTypedPayload is the type-fidelity criterion on real Postgres:
 // int/numeric/bool/jsonb columns ingest as their natural JSON types (not
 // strings), and a row captured by the snapshot has the same JSON shape as a row
