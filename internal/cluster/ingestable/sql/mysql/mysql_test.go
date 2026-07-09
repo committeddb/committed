@@ -19,6 +19,8 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	tcmysql "github.com/testcontainers/testcontainers-go/modules/mysql"
 	"github.com/testcontainers/testcontainers-go/wait"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/stretchr/testify/require"
@@ -1678,6 +1680,13 @@ func TestMysqlSnapshotOnFreshStart(t *testing.T) {
 // multiple proposals. With keyset pagination and tx-per-batch, a 25-row
 // table at batch_size=10 should yield ≥3 proposals.
 func TestMysqlSnapshotChunking(t *testing.T) {
+	// Capture logs to assert the snapshot never logs the primary-key value
+	// (snapshot-primarykey-logged-info-pii): natural keys are often source PII and
+	// the batch line is Info-level. Installed before Ingest so the snapshot's logs
+	// are observed.
+	core, observed := observer.New(zap.InfoLevel)
+	defer zap.ReplaceGlobals(zap.New(core))()
+
 	table := "chunk_table"
 
 	db := createDB(t)
@@ -1743,6 +1752,15 @@ func TestMysqlSnapshotChunking(t *testing.T) {
 
 	for i := 0; i < rowCount; i++ {
 		require.True(t, seen[fmt.Sprintf("%03d", i)], "missing row %03d", i)
+	}
+
+	// PII guard: the per-batch "snapshot: batch flushed" line must not carry the
+	// primary key. The batch/row counts give progress; the PK stays out of logs.
+	batchLogs := observed.FilterMessage("snapshot: batch flushed").All()
+	require.NotEmpty(t, batchLogs, "the multi-batch snapshot must log at least one flushed batch")
+	for _, e := range batchLogs {
+		_, hasPK := e.ContextMap()["last_pk"]
+		require.False(t, hasPK, "snapshot batch log must not include the primary-key value")
 	}
 }
 

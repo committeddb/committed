@@ -1060,12 +1060,15 @@ func (d *PostgreSQLDialect) snapshotTable(
 			return err
 		}
 
+		// Deliberately no last_pk: a natural primary key is often source PII
+		// (email, national id, account no), and this line is Info-level and
+		// shipped to log aggregation. The batch/row counts give progress; the
+		// resume cursor lives in progress.LastPkByTable, not the logs.
 		zap.L().Info("snapshot: batch flushed",
 			zap.String("table", table),
 			zap.Int("batch", batchNum),
 			zap.Int("rows_in_batch", count),
 			zap.Int("rows_total", totalRows),
-			zap.String("last_pk", lastPK),
 		)
 
 		if count < batchSize {

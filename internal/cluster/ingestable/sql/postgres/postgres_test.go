@@ -16,6 +16,8 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/stretchr/testify/require"
@@ -1025,6 +1027,13 @@ func TestPostgresSnapshotOnNewSlot(t *testing.T) {
 // deliver all rows across multiple proposals when batch_size is smaller
 // than the row count.
 func TestPostgresSnapshotChunking(t *testing.T) {
+	// Capture logs to assert the snapshot never logs the primary-key value
+	// (snapshot-primarykey-logged-info-pii): natural keys are often source PII and
+	// the batch line is Info-level. Installed before Ingest so the snapshot's logs
+	// are observed.
+	core, observed := observer.New(zap.InfoLevel)
+	defer zap.ReplaceGlobals(zap.New(core))()
+
 	table := "pg_chunk_table"
 
 	db := createDB(t)
@@ -1094,6 +1103,15 @@ func TestPostgresSnapshotChunking(t *testing.T) {
 
 	for i := 0; i < chunkTestRowCount; i++ {
 		require.Truef(t, seen[fmt.Sprintf("%03d", i)], "missing row %03d", i)
+	}
+
+	// PII guard: the per-batch "snapshot: batch flushed" line must not carry the
+	// primary key. The batch/row counts give progress; the PK stays out of logs.
+	batchLogs := observed.FilterMessage("snapshot: batch flushed").All()
+	require.NotEmpty(t, batchLogs, "the multi-batch snapshot must log at least one flushed batch")
+	for _, e := range batchLogs {
+		_, hasPK := e.ContextMap()["last_pk"]
+		require.False(t, hasPK, "snapshot batch log must not include the primary-key value")
 	}
 }
 
