@@ -56,5 +56,18 @@ func validateMappingColumns(config *Config, colsByTable map[string][]string) err
 				m.SQLColumn, config.Tables)
 		}
 	}
+	// Every primaryKey column must resolve too: a nonexistent PK column decodes to
+	// nothing, so CompositeKey collapses every row onto the key "<nil>" (all rows
+	// overwrite one another downstream, deletes tombstone the wrong key).
+	for _, pk := range config.PrimaryKey {
+		if pk == "" {
+			continue
+		}
+		if !sourceCols[strings.ToLower(pk)] {
+			return fmt.Errorf(
+				"primaryKey column %q not found in source table(s) %v — check the spelling and case; a nonexistent PK column collapses every row onto a single entity key",
+				pk, config.Tables)
+		}
+	}
 	return nil
 }

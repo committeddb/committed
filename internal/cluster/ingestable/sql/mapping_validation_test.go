@@ -36,4 +36,25 @@ func TestValidateMappingColumns(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "differ only by case")
 	})
+
+	t.Run("mixed-case primaryKey resolves; nonexistent primaryKey rejected", func(t *testing.T) {
+		ok := &Config{
+			Tables:     []string{"users"},
+			PrimaryKey: []string{"ID"}, // mixed case vs source column CreatedAt/id... "id" not present; use a real col
+			Mappings:   []Mapping{{JsonName: "e", SQLColumn: "email"}},
+		}
+		// "ID" must resolve case-insensitively to a real column; add "id" to source.
+		ok2cols := map[string][]string{"users": {"id", "CreatedAt", "email"}}
+		require.NoError(t, validateMappingColumns(ok, ok2cols))
+
+		bad := &Config{
+			Tables:     []string{"users"},
+			PrimaryKey: []string{"user_idd"}, // typo
+			Mappings:   []Mapping{{JsonName: "e", SQLColumn: "email"}},
+		}
+		err := validateMappingColumns(bad, ok2cols)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "user_idd")
+		require.Contains(t, err.Error(), "primaryKey")
+	})
 }

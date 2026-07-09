@@ -15,6 +15,19 @@ func TestCompositeKey_SingleColumnIsBareValue(t *testing.T) {
 	require.Equal(t, "5", sql.CompositeKey(map[string]any{"pk": 5}, []string{"pk"}))
 }
 
+func TestCompositeKey_CaseInsensitiveColumnLookup(t *testing.T) {
+	// The decode map is keyed by lowercased column names, so a primaryKey
+	// configured in another case (primaryKey = "ID" vs column id) must still
+	// resolve to the value — not miss and collapse every row onto key "<nil>".
+	m := map[string]any{"id": 42} // decode map: lowercased key
+	require.Equal(t, "42", sql.CompositeKey(m, []string{"ID"}))
+	require.Equal(t, "42", sql.CompositeKey(m, []string{"Id"}))
+
+	// Composite key, mixed case on both columns.
+	mc := map[string]any{"tconst": "tt1", "ordering": "2"}
+	require.Equal(t, `["tt1","2"]`, sql.CompositeKey(mc, []string{"TConst", "Ordering"}))
+}
+
 func TestCompositeKey_MultiColumnIsJSONArray(t *testing.T) {
 	m := map[string]any{"tconst": "tt0111161", "ordering": "2"}
 	require.Equal(t, `["tt0111161","2"]`, sql.CompositeKey(m, []string{"tconst", "ordering"}))

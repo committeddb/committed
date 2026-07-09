@@ -3,6 +3,7 @@ package sql
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // CompositeKey builds an entity key from a row's primary-key column values.
@@ -14,12 +15,16 @@ import (
 // "ab" the way a delimiter join would). m holds stringified column values (both
 // dialects stringify before keying), so the []string marshal never errors.
 func CompositeKey(m map[string]any, cols []string) string {
+	// m is keyed by LOWERCASED column names (every decode path lowercases), so a
+	// PK column configured in any other case (primaryKey = "ID" vs column id) must
+	// be lowercased for the lookup — otherwise it misses and every row keys to
+	// "<nil>", collapsing all rows onto one entity key.
 	if len(cols) == 1 {
-		return fmt.Sprintf("%v", m[cols[0]])
+		return fmt.Sprintf("%v", m[strings.ToLower(cols[0])])
 	}
 	vals := make([]string, len(cols))
 	for i, c := range cols {
-		vals[i] = fmt.Sprintf("%v", m[c])
+		vals[i] = fmt.Sprintf("%v", m[strings.ToLower(c)])
 	}
 	b, _ := json.Marshal(vals)
 	return string(b)

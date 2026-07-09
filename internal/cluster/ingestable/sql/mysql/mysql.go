@@ -459,7 +459,13 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			config:       config,
 			proposalChan: pr,
 			positionChan: po,
-			tables:       config.Tables,
+			// Lowercase the filter list so the binlog row filter (which lowercases
+			// the incoming table name) matches regardless of the config's case;
+			// without this a `tables = ["Users"]` config drops every streamed row.
+			// config.Tables itself stays as written — the snapshot SELECTs use it
+			// verbatim and MySQL table-name case-sensitivity is a server setting we
+			// must not override.
+			tables: lowerAll(config.Tables),
 			// Seed the live coordinate from the resume position so a
 			// mid-transaction flush before the first commit still stamps
 			// a sane SourceSeq. lastPos is non-nil here (resume or
@@ -642,9 +648,27 @@ func asInt64(v any) (int64, bool) {
 // image, the operation (rowsAction), and the table name come straight from the
 // raw replication.RowsEvent, and the column metadata from committed's own schema
 // cache (joined to the positional row image by ordinal).
+// lowerAll returns a lowercased copy of ss, used to normalize the watched-table
+// filter list so binlog table-name matching is case-insensitive.
+func lowerAll(ss []string) []string {
+	out := make([]string, len(ss))
+	for i, s := range ss {
+		out[i] = strings.ToLower(s)
+	}
+	return out
+}
+
+// watches reports whether table is one of the configured watched tables,
+// case-insensitively. h.tables is lowercased at construction and the binlog
+// reports the table's stored case; without the case-insensitive match a
+// mixed-case `tables` config (e.g. ["Users"]) would drop every streamed row.
+func (h *MySQLEventHandler) watches(table string) bool {
+	return slices.Contains(h.tables, strings.ToLower(table))
+}
+
 func (h *MySQLEventHandler) handleRows(ctx context.Context, header *replication.EventHeader, e *replication.RowsEvent) error {
 	table := string(e.Table.Table)
-	if !slices.Contains(h.tables, strings.ToLower(table)) {
+	if !h.watches(table) {
 		return nil
 	}
 	action, ok := rowsAction(e.Type())
