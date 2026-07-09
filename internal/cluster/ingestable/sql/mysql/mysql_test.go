@@ -909,6 +909,96 @@ func TestMysqlMultiRowDML(t *testing.T) {
 		"all 3 tombstones of the bulk DELETE")
 }
 
+// TestMysqlSingleLargeRowsEventDistinctSeqs is the dedup-loss success criterion:
+// a single RowsEvent larger than maxPendingEntities soft-flushes several times,
+// all stamped with that one event's binlog offset. Each flush must carry a
+// distinct, strictly-increasing SourceSeq (via the intra-coordinate sub-index) or
+// the ingest dedup's <= drop silently loses every flush after the first. The soft
+// limit is lowered so a small INSERT reproduces it without a giant event.
+func TestMysqlSingleLargeRowsEventDistinctSeqs(t *testing.T) {
+	defer mysql.SetMaxPendingEntitiesForTest(3)()
+
+	table := "bigevent_table"
+	db := createDB(t)
+	_, err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS `%s`", table))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf("CREATE TABLE `%s` (pk VARCHAR(32) NOT NULL, val TEXT, PRIMARY KEY (pk));", table))
+	require.NoError(t, err)
+	// Sentinel in the snapshot so we can gate on streaming being live.
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, val) VALUES ('__sentinel__', 'go');", table))
+	require.NoError(t, err)
+	db.Close()
+
+	config := &sql.Config{
+		Type:             &cluster.Type{ID: "bigevent", Name: "bigevent"},
+		Mappings:         []sql.Mapping{{JsonName: "pk", SQLColumn: "pk"}, {JsonName: "val", SQLColumn: "val"}},
+		PrimaryKey:       []string{"pk"},
+		ConnectionString: ingestURL,
+		Tables:           []string{table},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	proposalChan := make(chan *cluster.Proposal, 32)
+	positionChan := make(chan cluster.Position, 32)
+	dialect := &mysql.MySQLDialect{}
+	go func() { _ = dialect.Ingest(ctx, config, nil, proposalChan, positionChan) }()
+
+	seen := map[string]bool{}
+	var cdcSeqs []uint64
+	collect := func(pred func() bool, what string) {
+		t.Helper()
+		deadline := time.After(30 * time.Second)
+		for !pred() {
+			select {
+			case p := <-proposalChan:
+				if p.SourceSeq > 0 { // streaming proposals only; snapshot rows are seq 0
+					cdcSeqs = append(cdcSeqs, p.SourceSeq)
+				}
+				for _, e := range p.Entities {
+					seen[string(e.Key)] = true
+				}
+			case <-positionChan:
+			case <-deadline:
+				t.Fatalf("timed out waiting for %s (seen=%d)", what, len(seen))
+			}
+		}
+	}
+	collect(func() bool { return seen["__sentinel__"] }, "streaming to be live")
+
+	// A single 10-row INSERT is one WRITE_ROWS event (well under
+	// binlog_row_event_max_size); with the soft limit at 3 it soft-flushes several
+	// times at that event's offset, then the remainder flushes at commit.
+	values := ""
+	for i := 0; i < 10; i++ {
+		if i > 0 {
+			values += ","
+		}
+		values += fmt.Sprintf("('r%02d','v')", i)
+	}
+	mdb := createDB(t)
+	defer mdb.Close()
+	_, err = mdb.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, val) VALUES %s", table, values))
+	require.NoError(t, err)
+
+	collect(func() bool {
+		for i := 0; i < 10; i++ {
+			if !seen[fmt.Sprintf("r%02d", i)] {
+				return false
+			}
+		}
+		return true
+	}, "all 10 rows of the single large event")
+
+	// The event partial-flushed more than once, and every streaming SourceSeq is
+	// strictly greater than the last — identical seqs (the bug) would have the
+	// dedup drop rows.
+	require.Greater(t, len(cdcSeqs), 1, "the single event must have partial-flushed more than once")
+	for i := 1; i < len(cdcSeqs); i++ {
+		require.Greater(t, cdcSeqs[i], cdcSeqs[i-1],
+			"streaming SourceSeqs must strictly increase (flush %d=%d vs %d=%d)", i, cdcSeqs[i], i-1, cdcSeqs[i-1])
+	}
+}
+
 // TestMysqlPKChangingUpdateTombstonesOldKey is the orphan-row regression: an
 // UPDATE that changes the primary key must emit a delete tombstone for the old
 // key alongside the new-key upsert, so one source row maps to exactly one

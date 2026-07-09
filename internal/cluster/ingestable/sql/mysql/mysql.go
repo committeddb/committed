@@ -33,16 +33,17 @@ type MySQLDialect struct{}
 // used to immediately return an error, leaving the worker
 // leader-but-not-ingesting with no recovery path. The retry loop below caps at
 // Max and is bounded by ctx so a shutdown still propagates promptly.
+// maxPendingEntities is the soft limit on buffered entities per transaction. If a
+// single MySQL transaction (or one oversized RowsEvent) modifies more than this
+// many rows, the handler emits a partial proposal to avoid unbounded memory
+// growth. This breaks atomicity for oversized transactions — an acceptable
+// trade-off versus OOM-ing the process. A var, not a const, so a test can lower
+// it to exercise the multi-flush-per-event path without a giant event.
+var maxPendingEntities = 10000
+
 const (
 	syncerBackoffMin = 1 * time.Second
 	syncerBackoffMax = 30 * time.Second
-
-	// maxPendingEntities is the soft limit on buffered entities per
-	// transaction. If a single MySQL transaction modifies more than
-	// this many rows, the handler emits a partial proposal to avoid
-	// unbounded memory growth. This breaks atomicity for oversized
-	// transactions — an acceptable trade-off versus OOM-ing the process.
-	maxPendingEntities = 10000
 
 	// defaultSnapshotBatchSize is the number of rows read per snapshot
 	// batch when Config.Options has no "batch_size" override. The
@@ -572,6 +573,19 @@ type MySQLEventHandler struct {
 	curFile string
 	curPos  uint32
 
+	// flushSub disambiguates several partial flushes that share one binlog
+	// coordinate. All rows of one RowsEvent carry that event's end offset, so an
+	// event larger than maxPendingEntities soft-flushes twice at the SAME (file,
+	// pos) — identical SourceSeqs, and the ingest dedup's <= drop would silently
+	// lose every flush after the first. flushSub increments per flush at an
+	// unchanged coordinate and resets when the coordinate advances, making the
+	// SourceSeq strictly monotonic. It is derived purely from the (deterministic,
+	// in-order) event stream, so a resume replays the same coordinates and
+	// reproduces the same seqs — cross-reconnect dedup still holds.
+	flushFile string
+	flushPos  uint32
+	flushSub  uint32
+
 	// pending accumulates entities from row events until the transaction commits
 	// (an XID event), so one MySQL transaction maps to one cluster.Proposal.
 	pending []*cluster.Entity
@@ -804,7 +818,17 @@ func (h *MySQLEventHandler) flushPending(ctx context.Context) error {
 	if len(h.pending) == 0 {
 		return nil
 	}
-	p := &cluster.Proposal{Entities: h.pending, SourceSeq: encodeSourceSeq(h.curFile, h.curPos)}
+	// Disambiguate repeated flushes at one coordinate: a RowsEvent bigger than
+	// maxPendingEntities flushes several times at the same (file, pos). Increment a
+	// sub-index per same-coordinate flush (reset when the coordinate advances) so
+	// each proposal's SourceSeq is strictly greater than the last and none is
+	// dropped by the ingest dedup.
+	if h.curFile == h.flushFile && h.curPos == h.flushPos {
+		h.flushSub++
+	} else {
+		h.flushFile, h.flushPos, h.flushSub = h.curFile, h.curPos, 0
+	}
+	p := &cluster.Proposal{Entities: h.pending, SourceSeq: encodeSourceSeq(h.curFile, h.curPos, h.flushSub)}
 	h.pending = nil
 
 	select {
@@ -1030,15 +1054,20 @@ func (h *MySQLEventHandler) runStream(ctx context.Context, streamer *replication
 	}
 }
 
-// encodeSourceSeq maps a binlog coordinate (file, offset) to a
-// strictly-monotonic uint64 used as a proposal's SourceSeq for
-// effectively-once dedup. The file's numeric suffix occupies the high 32
-// bits and the offset the low 32 bits, so ordering matches binlog order:
-// a later file always outranks an earlier one regardless of offset, and
-// within a file the offset orders. Returns 0 (which disables dedup for
-// the proposal — never a false positive) when the file name has no
-// parseable numeric suffix, e.g. an unexpected naming scheme.
-func encodeSourceSeq(name string, pos uint32) uint64 {
+// encodeSourceSeq maps a binlog coordinate (file, offset) plus an intra-coordinate
+// sub-index to a strictly-monotonic uint64 used as a proposal's SourceSeq for
+// effectively-once dedup. The file's numeric suffix occupies the high 32 bits and
+// the offset the low 32 bits, so ordering matches binlog order: a later file
+// always outranks an earlier one regardless of offset, and within a file the
+// offset orders. sub is added on top to separate several partial flushes that
+// share one coordinate (an oversized RowsEvent) — sub==0 yields exactly the
+// bare-coordinate value, so single-flush events (the common case) keep the same
+// seq as before and a persisted highwater stays valid across upgrade. sub is
+// bounded in practice by the gap to the next coordinate (>= the minimum binlog
+// event size, ~19 bytes), which one RowsEvent's flush count never approaches.
+// Returns 0 (which disables dedup for the proposal — never a false positive) when
+// the file name has no parseable numeric suffix, e.g. an unexpected naming scheme.
+func encodeSourceSeq(name string, pos uint32, sub uint32) uint64 {
 	dot := strings.LastIndexByte(name, '.')
 	if dot < 0 || dot == len(name)-1 {
 		return 0
@@ -1047,7 +1076,7 @@ func encodeSourceSeq(name string, pos uint32) uint64 {
 	if err != nil {
 		return 0
 	}
-	return fileNum<<32 | uint64(pos)
+	return (fileNum<<32 | uint64(pos)) + uint64(sub)
 }
 
 // snapshot performs a pure-SQL initial dump of all watched tables using
