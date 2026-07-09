@@ -1,6 +1,7 @@
 package sql
 
 import (
+	"bytes"
 	"context"
 	gosql "database/sql"
 	"encoding/json"
@@ -442,6 +443,20 @@ func (p *Projection) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool,
 	return true, nil
 }
 
+// columnType returns the declared SQL type of a projection column, or "" if the
+// name is not a declared column. coerceForColumn treats "" as text-binding — the
+// safe default — so an unknown column falls back to the pre-typed all-strings
+// shape rather than erroring. The column set is small and fixed, so a linear scan
+// per bind is cheaper than maintaining a map.
+func (p *Projection) columnType(name string) string {
+	for _, c := range p.config.Columns {
+		if c.Name == name {
+			return c.SQLType
+		}
+	}
+	return ""
+}
+
 // applyEntity applies one entity from source src to an open transaction. A
 // delete follows the source's onDelete (see applyDelete); the sentinel payload
 // is never unmarshaled. Any other entity is matched against that source's rules
@@ -469,8 +484,14 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 		return p.applyDelete(ctx, tx, src, e)
 	}
 
+	// UseNumber keeps every numeric leaf as its exact source digits (json.Number)
+	// instead of a lossy float64, so a Snowflake id above 2^53 or a high-precision
+	// decimal survives the fold. The bind sites below (key, rule values) then hand
+	// those digits to the driver via coerceForColumn / bindable, never a float64.
+	dec := json.NewDecoder(bytes.NewReader(e.Data))
+	dec.UseNumber()
 	var jsonData any
-	if err := json.Unmarshal(e.Data, &jsonData); err != nil {
+	if err := dec.Decode(&jsonData); err != nil {
 		return cluster.Permanent(fmt.Errorf("[sql-projection.apply] unmarshal entity data: %w", err))
 	}
 
@@ -516,7 +537,10 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 
 	for _, r := range matched {
 		values := make([]any, 0, len(r.rule.Set)+1)
-		values = append(values, key)
+		// The key binds into the primaryKey column; coerce it to that column's
+		// declared type so a numeric key reaches the driver as a native scalar
+		// (or exact text), not a raw json.Number.
+		values = append(values, coerceForColumn(key, p.columnType(p.config.PrimaryKey)))
 		for _, s := range r.rule.Set {
 			switch {
 			case s.From != "":
@@ -524,7 +548,7 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 				if err != nil {
 					return cluster.Permanent(fmt.Errorf("[sql-projection.apply] jsonpath [%s]: %w", s.From, err))
 				}
-				values = append(values, bindable(v))
+				values = append(values, coerceForColumn(v, p.columnType(s.Column)))
 			case s.Null:
 				values = append(values, nil)
 			default:

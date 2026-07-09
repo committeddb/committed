@@ -132,6 +132,48 @@ func TestProjectionSyncAppliesMatchingRule(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+// TestProjectionPreservesNumericPrecision is the sql-projection-number-precision
+// regression: a Snowflake-scale id above float64's exact integer range and a
+// high-precision decimal must reach the driver as their exact source digits, not
+// a lossy float64. The fold decodes with UseNumber and binds each value through
+// coerceForColumn against its declared column type.
+func TestProjectionPreservesNumericPrecision(t *testing.T) {
+	config := &sql.ProjectionConfig{
+		Topic:      "controlplane-event",
+		Table:      "ledger",
+		PrimaryKey: "id",
+		Columns: []sql.ProjectionColumn{
+			{Name: "id", SQLType: "BIGINT"},
+			{Name: "balance", SQLType: "DECIMAL(30,2)"},
+			{Name: "rate", SQLType: "DOUBLE PRECISION"},
+		},
+		Rules: []sql.ProjectionRule{{
+			When: []sql.WhenClause{{Path: "$.event_type", Equals: "posted"}},
+			Set: []sql.ProjectionSet{
+				{Column: "balance", From: "$.balance"},
+				{Column: "rate", From: "$.rate"},
+			},
+		}},
+	}
+	projection, mock, rules, _ := newMockProjection(t, config, nil)
+
+	mock.ExpectBegin()
+	// id → BIGINT: exact int64 (float64 cannot represent 2^53+1). balance →
+	// DECIMAL: exact source digits as a string (float64 would round to ...434).
+	// rate → DOUBLE: an IEEE float, so native float64 is correct.
+	args := []driver.Value{int64(9007199254740993), "7922816251426433.75", 1.5}
+	rules[0].ExpectExec().WithArgs(append(args, args...)...).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	data := []byte(`{"id":9007199254740993,"event_type":"posted","balance":7922816251426433.75,"rate":1.5}`)
+	a := &cluster.Actual{Entities: []*cluster.Entity{
+		cluster.NewUpsertEntity(tenantEventType, []byte("9007199254740993"), data),
+	}}
+	_, err := projection.Sync(context.Background(), a)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 // A null set entry binds SQL NULL — the only way to clear a column,
 // since TOML has no null literal for value and a missing from path on
 // a matched rule is a permanent error, not NULL.

@@ -267,6 +267,39 @@ func TestPostgreSQLIntegration_CreateSQL_Upsert(t *testing.T) {
 	require.Equal(t, "second", name, "upsert should leave the most recent value")
 }
 
+// TestPostgreSQLIntegration_NumericPrecisionBinding confirms the real-DB half of
+// the projection/syncable number-precision fix: coerceForColumn hands the driver
+// a Go string for an exact-numeric (NUMERIC/DECIMAL) column and an int64 for an
+// integer column, and pgx must store both losslessly. A float64 round trip (the
+// former behavior) would corrupt a high-precision decimal and any integer above
+// 2^53 — this proves binding the exact source digits as a string round-trips.
+func TestPostgreSQLIntegration_NumericPrecisionBinding(t *testing.T) {
+	d := &dialects.PostgreSQLDialect{}
+	db, err := d.Open(pgConnString)
+	require.Nil(t, err)
+	defer db.Close()
+
+	table := uniqueTable(t)
+	defer dropTable(t, table)
+
+	_, err = db.Exec(fmt.Sprintf(
+		"CREATE TABLE %s (id BIGINT PRIMARY KEY, balance NUMERIC(30,2))", table))
+	require.Nil(t, err)
+
+	// Bind exactly what coerceForColumn now produces: an int64 for the BIGINT key,
+	// the exact source digits as a string for the NUMERIC column.
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO %s (id, balance) VALUES ($1, $2)", table),
+		int64(9007199254740993), "7922816251426433.75")
+	require.Nil(t, err, "pgx must accept a string bound to a NUMERIC column")
+
+	var id int64
+	var balance string
+	err = db.QueryRow(fmt.Sprintf("SELECT id, balance FROM %s", table)).Scan(&id, &balance)
+	require.Nil(t, err)
+	require.Equal(t, int64(9007199254740993), id, "the 2^53+1 id survives as an exact int64")
+	require.Equal(t, "7922816251426433.75", balance, "the high-precision decimal survives digit-for-digit")
+}
+
 // TestPostgreSQLIntegration_FullSyncableFlow exercises the dialect end-to-end
 // in the same shape the SQL Syncable uses it: CreateDDL → Exec, then
 // CreateSQL → Prepare → Exec for each row.

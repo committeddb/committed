@@ -83,19 +83,32 @@ func toFloat(v any) (float64, bool) {
 		return float64(n), true
 	case float64:
 		return n, true
+	case json.Number:
+		// Payloads now decode with UseNumber, so a JSON numeric leaf arrives as
+		// json.Number; float64 comparison preserves the prior (float64-decoded)
+		// when-clause matching exactly. A when clause filters small discriminator
+		// values, so the float64 range is not a concern here (unlike value binding,
+		// which keeps exact digits via coerceForColumn).
+		f, err := n.Float64()
+		return f, err == nil
 	}
 	return 0, false
 }
 
 // bindable converts a jsonpath result into something database/sql can
-// bind. Scalars pass through; objects and arrays (e.g. an allocs
-// subtree headed for a JSONB column) re-marshal to JSON text — drivers
-// cannot bind a Go map. This is a re-marshal of the decoded value, so
-// the whole-payload byte-exactness caveat applies: key order and
-// number formatting normalize, and integers above 2^53 lose precision.
-// For byte-exact documents use the plain syncable's "$" mapping.
+// bind. A json.Number binds as its source digits (payloads are decoded
+// with UseNumber, so a numeric key or value keeps full precision — a raw
+// float64 would round-trip-corrupt integers above 2^53 and any decimal).
+// Objects and arrays (e.g. an allocs subtree headed for a JSONB column)
+// re-marshal to JSON text — drivers cannot bind a Go map; that re-marshal
+// normalizes key order but, with UseNumber, no longer mangles numbers.
+// Other scalars pass through. For type-aware value binding (a number into
+// an INTEGER vs a DECIMAL column) callers route through coerceForColumn;
+// bindable is the untyped fallback for keys, which are text.
 func bindable(v any) any {
-	switch v.(type) {
+	switch x := v.(type) {
+	case json.Number:
+		return x.String()
 	case map[string]any, []any:
 		bs, err := json.Marshal(v)
 		if err != nil {

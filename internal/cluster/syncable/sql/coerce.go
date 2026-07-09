@@ -33,6 +33,14 @@ func coerceForColumn(v any, sqlType string) any {
 			if i, err := n.Int64(); err == nil {
 				return i
 			}
+			// Not an integer. For an exact-numeric column (DECIMAL/NUMERIC/MONEY)
+			// bind the source digits as a string — the driver parses them losslessly,
+			// whereas a float64 round-trip corrupts a value it can't represent
+			// (e.g. 7922816251426433.75). Only approximate columns (FLOAT/DOUBLE/REAL),
+			// which are IEEE floats anyway, take the native float64.
+			if columnIsExactNumeric(sqlType) {
+				return n.String()
+			}
 			if f, err := n.Float64(); err == nil {
 				return f
 			}
@@ -94,6 +102,18 @@ func columnIsNumericOrBool(sqlType string) bool {
 		"DECIMAL", "NUMERIC", "DEC", "FIXED", "NUMBER",
 		"REAL", "DOUBLE", "FLOAT", "FLOAT4", "FLOAT8", "MONEY",
 		"BOOL", "BOOLEAN":
+		return true
+	}
+	return false
+}
+
+// columnIsExactNumeric reports whether a declared type stores numbers exactly
+// (fixed/arbitrary precision), so a non-integer value must be bound as its source
+// digits rather than a lossy float64. Approximate types (FLOAT/DOUBLE/REAL) are
+// excluded — they are IEEE floats where float64 is the native, correct form.
+func columnIsExactNumeric(sqlType string) bool {
+	switch leadingTypeToken(sqlType) {
+	case "DECIMAL", "NUMERIC", "DEC", "FIXED", "NUMBER", "MONEY":
 		return true
 	}
 	return false

@@ -22,11 +22,25 @@ func TestCoerceForColumn(t *testing.T) {
 		"a decimal's exact source text survives, trailing zeros and all")
 
 	// The same numeric value mapped into a numeric column binds as a native
-	// scalar the driver's numeric codec accepts.
+	// scalar the driver's numeric codec accepts. An integer binds as int64
+	// regardless of the column being exact or approximate.
 	require.Equal(t, int64(1), coerceForColumn(json.Number("1"), "INTEGER"))
 	require.Equal(t, int64(42), coerceForColumn(json.Number("42"), "BIGINT"))
-	require.Equal(t, 1.5, coerceForColumn(json.Number("1.5"), "NUMERIC(15,2)"))
 	require.Equal(t, int64(7), coerceForColumn(json.Number("7"), "double precision"))
+
+	// A non-integer into an EXACT-numeric column (DECIMAL/NUMERIC/MONEY) binds as
+	// its source digits — a float64 round trip would corrupt a value the type
+	// exists to store exactly. This is the sql-syncable-decimal-float64 regression.
+	require.Equal(t, "1.5", coerceForColumn(json.Number("1.5"), "NUMERIC(15,2)"))
+	require.Equal(t, "7922816251426433.75",
+		coerceForColumn(json.Number("7922816251426433.75"), "DECIMAL(30,2)"),
+		"a high-precision decimal survives; float64 would round it to 7922816251426434")
+	require.Equal(t, "12.34", coerceForColumn(json.Number("12.34"), "MONEY"))
+
+	// A non-integer into an APPROXIMATE column (FLOAT/DOUBLE/REAL) is an IEEE
+	// float already, so float64 is its native, correct form.
+	require.Equal(t, 1.5, coerceForColumn(json.Number("1.5"), "double precision"))
+	require.Equal(t, 2.5, coerceForColumn(json.Number("2.5"), "REAL"))
 
 	// Strings pass through for text columns.
 	require.Equal(t, "AMERICA", coerceForColumn("AMERICA", "TEXT"))
@@ -61,5 +75,23 @@ func TestColumnIsNumericOrBool(t *testing.T) {
 		"BYTEA", "", "  ",
 	} {
 		require.Falsef(t, columnIsNumericOrBool(ty), "%q should bind as text", ty)
+	}
+}
+
+// TestColumnIsExactNumeric pins the exact/approximate split that decides whether
+// a non-integer number binds as its source digits (exact) or a native float64
+// (approximate). Integer types are not "exact-numeric" here — an integer value
+// takes the Int64 path before the split is consulted.
+func TestColumnIsExactNumeric(t *testing.T) {
+	for _, ty := range []string{
+		"DECIMAL(15,2)", "NUMERIC(10,0)", "DEC(5)", "FIXED", "NUMBER", "MONEY", "numeric",
+	} {
+		require.Truef(t, columnIsExactNumeric(ty), "%q should be exact-numeric", ty)
+	}
+	for _, ty := range []string{
+		"FLOAT", "double precision", "REAL", "FLOAT4", "FLOAT8",
+		"INT", "BIGINT", "TEXT", "", "  ",
+	} {
+		require.Falsef(t, columnIsExactNumeric(ty), "%q should not be exact-numeric", ty)
 	}
 }
