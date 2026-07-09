@@ -115,12 +115,73 @@ func TestProjectionAggregateUpsert(t *testing.T) {
 	sidecarArgs = append(sidecarArgs, sidecarArgs...) // mock dialect doubles like MySQL
 
 	mock.ExpectBegin()
+	// The prior-parent lookup runs first; a new child has no sidecar row, so no
+	// old parent to rebuild.
+	p.lookup.ExpectQuery().WithArgs(`["tt1","1"]`).
+		WillReturnRows(sqlmock.NewRows([]string{"parent_key"}))
 	p.upsertSidecar.ExpectExec().WithArgs(sidecarArgs...).WillReturnResult(sqlmock.NewResult(0, 1))
 	p.materialize.ExpectExec().WithArgs("tt1", "tt1").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
 	actual := &cluster.Actual{Entities: []*cluster.Entity{cluster.NewUpsertEntity(
 		principalType, []byte(`["tt1","1"]`),
+		[]byte(`{"tconst":"tt1","ordering":1,"nconst":"nm1","category":"actor"}`),
+	)}}
+	_, err := projection.Sync(context.Background(), actual)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestProjectionAggregateReparenting is the stale-element regression: a child
+// re-delivered under a different parent must have its OLD parent rebuilt too, or
+// that parent's array keeps an element the child no longer belongs to. The
+// sidecar records the new parent; the fix additionally rebuilds the old one.
+func TestProjectionAggregateReparenting(t *testing.T) {
+	projection, mock, p := newMockAggregateProjection(t)
+
+	const childKey = "nm1"
+	sidecarArgs := []driver.Value{childKey, "tt2", "1", `{"nconst":"nm1"}`}
+	sidecarArgs = append(sidecarArgs, sidecarArgs...) // mock dialect doubles like MySQL
+
+	mock.ExpectBegin()
+	// The child currently sits under tt1; this event moves it to tt2.
+	p.lookup.ExpectQuery().WithArgs(childKey).
+		WillReturnRows(sqlmock.NewRows([]string{"parent_key"}).AddRow("tt1"))
+	p.upsertSidecar.ExpectExec().WithArgs(sidecarArgs...).WillReturnResult(sqlmock.NewResult(0, 1))
+	p.materialize.ExpectExec().WithArgs("tt2", "tt2").WillReturnResult(sqlmock.NewResult(0, 1))
+	// The fix: the old parent tt1 is rebuilt so it drops the moved element.
+	p.rebuild.ExpectExec().WithArgs("tt1", "tt1").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	actual := &cluster.Actual{Entities: []*cluster.Entity{cluster.NewUpsertEntity(
+		principalType, []byte(childKey),
+		[]byte(`{"tconst":"tt2","ordering":1,"nconst":"nm1","category":"actor"}`),
+	)}}
+	_, err := projection.Sync(context.Background(), actual)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestProjectionAggregateInPlaceUpdateNoRebuild pins the guard: a child
+// re-delivered under the SAME parent must not trigger a redundant old-parent
+// rebuild — only the sidecar upsert and the single materialize run.
+func TestProjectionAggregateInPlaceUpdateNoRebuild(t *testing.T) {
+	projection, mock, p := newMockAggregateProjection(t)
+
+	const childKey = "nm1"
+	sidecarArgs := []driver.Value{childKey, "tt1", "1", `{"nconst":"nm1"}`}
+	sidecarArgs = append(sidecarArgs, sidecarArgs...) // mock dialect doubles like MySQL
+
+	mock.ExpectBegin()
+	// The child already sits under tt1 and stays there — no rebuild expected.
+	p.lookup.ExpectQuery().WithArgs(childKey).
+		WillReturnRows(sqlmock.NewRows([]string{"parent_key"}).AddRow("tt1"))
+	p.upsertSidecar.ExpectExec().WithArgs(sidecarArgs...).WillReturnResult(sqlmock.NewResult(0, 1))
+	p.materialize.ExpectExec().WithArgs("tt1", "tt1").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	actual := &cluster.Actual{Entities: []*cluster.Entity{cluster.NewUpsertEntity(
+		principalType, []byte(childKey),
 		[]byte(`{"tconst":"tt1","ordering":1,"nconst":"nm1","category":"actor"}`),
 	)}}
 	_, err := projection.Sync(context.Background(), actual)

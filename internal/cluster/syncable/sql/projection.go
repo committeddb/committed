@@ -605,6 +605,16 @@ func (p *Projection) applyAggregate(ctx context.Context, tx *gosql.Tx, src *proj
 	if err != nil {
 		return cluster.Permanent(fmt.Errorf("[sql-projection.aggregate] keyPath [%s]: %w", src.keyPath, err))
 	}
+
+	// Capture the child's prior parent before the sidecar upsert overwrites it. A
+	// child re-delivered under a different parent (re-parenting) must have its old
+	// parent rebuilt too, or that parent's array keeps an element the child no
+	// longer belongs to — and never self-corrects.
+	oldParent, hadOldParent, err := p.aggPriorParent(ctx, tx, ag, string(e.Key))
+	if err != nil {
+		return err
+	}
+
 	elementKey, err := jsonpath.Get(ag.elementKey, jsonData)
 	if err != nil {
 		return cluster.Permanent(fmt.Errorf("[sql-projection.aggregate] elementKey [%s]: %w", ag.elementKey, err))
@@ -630,9 +640,19 @@ func (p *Projection) applyAggregate(ctx context.Context, tx *gosql.Tx, src *proj
 	if err := p.aggExec(ctx, tx, ag.upsertSidecar, ag.upsertSidecarSQL, p.dialect.BindArgs(scValues)...); err != nil {
 		return err
 	}
-	// Both materialize placeholders bind the parent key (insert value + subquery
-	// filter); the dialect repeats the placeholder so the arg shape is uniform.
-	return p.aggExec(ctx, tx, ag.materialize, ag.materializeSQL, pk, pk)
+	// Materialize the (new) parent's array from the sidecar. Both materialize
+	// placeholders bind the parent key (insert value + subquery filter); the
+	// dialect repeats the placeholder so the arg shape is uniform.
+	if err := p.aggExec(ctx, tx, ag.materialize, ag.materializeSQL, pk, pk); err != nil {
+		return err
+	}
+	// Re-parented: rebuild the old parent so its array drops the moved element.
+	// Mirrors removeFromAggregate — an UPDATE that no-ops if the old parent has no
+	// row, never a ghost. Skipped when the child is new or its parent is unchanged.
+	if hadOldParent && oldParent != keyString(parentKey) {
+		return p.aggExec(ctx, tx, ag.rebuild, ag.rebuildSQL, oldParent, oldParent)
+	}
+	return nil
 }
 
 // removeFromAggregate honors a child delete: recover the child's parent from the
@@ -644,24 +664,40 @@ func (p *Projection) removeFromAggregate(ctx context.Context, tx *gosql.Tx, src 
 	ag := src.agg
 	childKey := string(e.Key)
 
-	var parentKey string
-	row := tx.StmtContext(ctx, ag.lookup).QueryRowContext(ctx, childKey)
-	switch err := row.Scan(&parentKey); err {
-	case nil:
-	case gosql.ErrNoRows:
+	parentKey, folded, err := p.aggPriorParent(ctx, tx, ag, childKey)
+	if err != nil {
+		return err
+	}
+	if !folded {
 		return nil // this source never folded the child — nothing to remove
-	default:
-		wrapped := fmt.Errorf("[sql-projection.aggregate] exec [%s]: %w", ag.lookupSQL, err)
-		if p.dialect.IsPermanent(err) {
-			return cluster.Permanent(wrapped)
-		}
-		return wrapped
 	}
 
 	if err := p.aggExec(ctx, tx, ag.deleteSidecar, ag.deleteSidecarSQL, childKey); err != nil {
 		return err
 	}
 	return p.aggExec(ctx, tx, ag.rebuild, ag.rebuildSQL, parentKey, parentKey)
+}
+
+// aggPriorParent returns the parent key currently recorded for childKey in the
+// sidecar, or ("", false) if this aggregate has never folded the child. It reuses
+// the parent-lookup statement, classifying a query error the same way the rest of
+// the aggregate path does. Both re-parenting (applyAggregate) and child deletes
+// (removeFromAggregate) need the old parent, so the read lives here once.
+func (p *Projection) aggPriorParent(ctx context.Context, tx *gosql.Tx, ag *aggregateRuntime, childKey string) (string, bool, error) {
+	var parentKey string
+	row := tx.StmtContext(ctx, ag.lookup).QueryRowContext(ctx, childKey)
+	switch err := row.Scan(&parentKey); err {
+	case nil:
+		return parentKey, true, nil
+	case gosql.ErrNoRows:
+		return "", false, nil
+	default:
+		wrapped := fmt.Errorf("[sql-projection.aggregate] exec [%s]: %w", ag.lookupSQL, err)
+		if p.dialect.IsPermanent(err) {
+			return "", false, cluster.Permanent(wrapped)
+		}
+		return "", false, wrapped
+	}
 }
 
 // aggExec runs one prepared aggregate statement, classifying a permanent error

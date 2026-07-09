@@ -447,6 +447,88 @@ func TestPostgreSQLIntegration_AggregateProjection(t *testing.T) {
 	require.Empty(t, nconstsOf("directors"), "rebuild-from-0 reproduces directors")
 }
 
+var employeeType = &cluster.Type{ID: "employee", Name: "Employee"}
+
+// deptRosterConfig folds employees into a department.members array. The element
+// is keyed by the employee id carried as the entity Key — stable across parents,
+// unlike a key that embeds its parent — so a re-delivered employee under a new
+// department is a move, which is what exercises re-parenting.
+func deptRosterConfig(table string) *sql.ProjectionConfig {
+	return &sql.ProjectionConfig{
+		Table:      table,
+		PrimaryKey: "dept",
+		Columns: []sql.ProjectionColumn{
+			{Name: "dept", SQLType: "VARCHAR(16)"},
+			{Name: "members", SQLType: "JSONB"},
+		},
+		Sources: []sql.ProjectionSource{{
+			Topic:    "employee",
+			KeyPath:  "$.dept",
+			OnDelete: "remove-from-aggregate",
+			Aggregate: &sql.ProjectionAggregate{
+				Column:     "members",
+				ElementKey: "$.emp",
+				Element:    []sql.ProjectionElementField{{Field: "emp", From: "$.emp"}},
+			},
+		}},
+	}
+}
+
+// TestPostgreSQLIntegration_AggregateReparenting is the stale-element success
+// criterion on real Postgres: an employee (a child whose key is stable across
+// parents) re-delivered under a new department must vanish from the old
+// department's members array, not linger in both. Fails before the old-parent
+// rebuild the fix adds.
+func TestPostgreSQLIntegration_AggregateReparenting(t *testing.T) {
+	const table = "agg_dept_roster"
+	dropTable(t, table)
+	defer dropTable(t, table)
+	defer dropTable(t, table+"__members")
+
+	db, err := sql.NewDB(&dialects.PostgreSQLDialect{}, pgConnString)
+	require.Nil(t, err)
+	defer db.Close()
+
+	projection := sql.NewProjection(db, deptRosterConfig(table), nil, "dept_roster")
+	require.Nil(t, projection.Init())
+	ctx := context.Background()
+
+	membersOf := func(dept string) []string {
+		var raw gosql.NullString
+		err := db.DB.QueryRow("SELECT members FROM "+table+" WHERE dept = $1", dept).Scan(&raw)
+		if err == gosql.ErrNoRows || !raw.Valid {
+			return nil
+		}
+		require.NoError(t, err)
+		var arr []map[string]any
+		require.NoError(t, json.Unmarshal([]byte(raw.String), &arr))
+		out := make([]string, len(arr))
+		for i, m := range arr {
+			out[i] = m["emp"].(string)
+		}
+		return out
+	}
+	apply := func(as ...*cluster.Actual) {
+		for _, a := range as {
+			_, err := projection.Sync(ctx, a)
+			require.NoError(t, err)
+		}
+	}
+	emp := func(id, dept string) *cluster.Actual {
+		return sourceEvent(t, employeeType, id, map[string]any{"dept": dept, "emp": id})
+	}
+
+	// Two employees under dept A, one under dept B.
+	apply(emp("e1", "A"), emp("e2", "A"), emp("e3", "B"))
+	require.Equal(t, []string{"e1", "e2"}, membersOf("A"))
+	require.Equal(t, []string{"e3"}, membersOf("B"))
+
+	// Move e1 from A to B: it must leave A and join B, not appear in both.
+	apply(emp("e1", "B"))
+	require.Equal(t, []string{"e2"}, membersOf("A"), "the moved employee is gone from the old department")
+	require.Equal(t, []string{"e1", "e3"}, membersOf("B"), "the moved employee joins the new department")
+}
+
 var nameType = &cluster.Type{ID: "name", Name: "Name"}
 
 // movieCardEnrichedConfig folds the title spine and a principal aggregate whose
