@@ -196,6 +196,27 @@ On its first streaming connection committed runs, idempotently:
 
 You don't create either by hand.
 
+### TRUNCATE is not propagated (caveat)
+
+committed replicates `INSERT`, `UPDATE`, and `DELETE`, but **not `TRUNCATE`**. It
+has no "clear-all" primitive yet, so a `TRUNCATE` on a watched table empties the
+source but leaves the sink's rows in place — the sink **diverges** from the source
+until you reconcile it. committed does not swallow this silently: each dropped
+truncate is logged at `Warn`, naming the tables, so you can alert on it:
+
+```
+TRUNCATE on a watched table is not propagated to the sink; the sink now
+diverges from the source and must be re-snapshotted to reconcile   tables=[public.movie]
+```
+
+To reconcile after a truncate, **re-snapshot** the ingestable (rebuild it from
+zero — see [rebuild.md](rebuild.md)). To avoid the divergence entirely, prefer
+`DELETE FROM <table>` over `TRUNCATE` on watched tables: each row delete
+replicates as a keyed tombstone and clears the sink row-by-row.
+
+Full truncate propagation is planned (a clear-all signal applied downstream as
+`DELETE FROM <sink>`); until then this caveat stands.
+
 ### Configuration
 
 ```toml

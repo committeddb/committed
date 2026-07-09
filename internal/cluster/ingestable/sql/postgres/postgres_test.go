@@ -361,6 +361,75 @@ func TestPostgresPKChangingUpdateTombstonesOldKey(t *testing.T) {
 	}
 }
 
+// TestPostgresTruncateNotSilentlyDropped is the truncate-divergence guard: a
+// source TRUNCATE on a watched table is not propagated (committed has no
+// clear-all primitive), but it must NOT be swallowed silently — it must be logged
+// at Warn naming the affected table so an operator can alert and re-snapshot.
+func TestPostgresTruncateNotSilentlyDropped(t *testing.T) {
+	core, observed := observer.New(zap.WarnLevel)
+	defer zap.ReplaceGlobals(zap.New(core))()
+
+	const table = "pgtest_truncate"
+	db := createDB(t)
+	_, err := db.Exec(fmt.Sprintf(`DROP TABLE IF EXISTS %s`, table))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf(`CREATE TABLE %s (pk VARCHAR(32) PRIMARY KEY, val TEXT)`, table))
+	require.NoError(t, err)
+	db.Close()
+
+	cleanReplication(t, "slot_trunc", "pub_trunc")
+
+	config := &sql.Config{
+		Type:             &cluster.Type{ID: "trunc", Name: "trunc"},
+		Mappings:         []sql.Mapping{{JsonName: "pk", SQLColumn: "pk"}, {JsonName: "val", SQLColumn: "val"}},
+		PrimaryKey:       []string{"pk"},
+		ConnectionString: connString,
+		Tables:           []string{table},
+		Options:          map[string]string{"slot_name": "slot_trunc", "publication": "pub_trunc"},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	proposalChan := make(chan *cluster.Proposal, 10)
+	positionChan := make(chan cluster.Position, 10)
+	dialect := &postgres.PostgreSQLDialect{}
+	ingestErr := make(chan error, 1)
+	go func() { ingestErr <- dialect.Ingest(ctx, config, nil, proposalChan, positionChan) }()
+
+	waitForSlot(t, "slot_trunc")
+
+	// Insert then TRUNCATE the watched table (both after the slot is ready).
+	db2 := createDB(t)
+	_, err = db2.Exec(fmt.Sprintf(`INSERT INTO %s (pk, val) VALUES ('a','1')`, table))
+	require.NoError(t, err)
+	_, err = db2.Exec(fmt.Sprintf(`TRUNCATE %s`, table))
+	require.NoError(t, err)
+	db2.Close()
+
+	// Drain the stream while watching for the loud, table-named TRUNCATE warning.
+	deadline := time.After(20 * time.Second)
+	for {
+		got := observed.FilterMessageSnippet("TRUNCATE on a watched table is not propagated").
+			FilterField(zap.Strings("tables", []string{"public." + table})).All()
+		if len(got) > 0 {
+			break
+		}
+		select {
+		case <-proposalChan:
+		case <-positionChan:
+		case <-deadline:
+			t.Fatal("timed out: the TRUNCATE must be logged loudly, naming the table")
+		}
+	}
+
+	cancel()
+	select {
+	case err := <-ingestErr:
+		require.Nil(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Ingest did not exit after cancel")
+	}
+}
+
 // TestPostgresTypedPayload is the type-fidelity criterion on real Postgres:
 // int/numeric/bool/jsonb columns ingest as their natural JSON types (not
 // strings), and a row captured by the snapshot has the same JSON shape as a row

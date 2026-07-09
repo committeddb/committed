@@ -739,7 +739,21 @@ func (d *PostgreSQLDialect) stream(
 				nextStandby = time.Now().Add(standbyTimeout)
 
 			case *pglogrepl.TruncateMessage:
-				zap.L().Warn("TruncateMessage received, ignoring")
+				// committed has no clear-all primitive yet, so a source TRUNCATE is
+				// not propagated: the sink keeps the truncated rows until a
+				// re-snapshot. Do NOT swallow it silently (the old behavior) — name
+				// the affected tables at Warn so an operator can reconcile. Full
+				// propagation is tracked separately; see the TRUNCATE caveat in
+				// docs/operations/cdc-setup.md.
+				names := make([]string, 0, len(m.RelationIDs))
+				for _, relID := range m.RelationIDs {
+					if rel, ok := relations[relID]; ok {
+						names = append(names, rel.Namespace+"."+rel.RelationName)
+					}
+				}
+				zap.L().Warn("TRUNCATE on a watched table is not propagated to the sink; "+
+					"the sink now diverges from the source and must be re-snapshotted to reconcile",
+					zap.Strings("tables", names))
 			}
 
 			// Advance the WAL position for standby feedback.
