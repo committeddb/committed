@@ -14,10 +14,28 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql" // database/sql driver for the harness's own source/sink connection
+	networktypes "github.com/moby/moby/api/types/network"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	tcmysql "github.com/testcontainers/testcontainers-go/modules/mysql"
+	"github.com/testcontainers/testcontainers-go/wait"
 )
+
+// mysqlReadyWait is the container readiness strategy both MySQL harnesses use in
+// place of the mysql module's default log-line check. The default watches for a
+// specific "port: 3306  MySQL Community Server" line that a slow CI host can
+// leave unmatched inside the timeout, and a log line can't tell "logged ready"
+// from "accepts a query" — the entrypoint's init server and a mid-startup
+// restart both drop early connections with EOF. ForSQL opens a real connection
+// and runs a query, retrying until it succeeds, so it returns only on true
+// readiness; the generous timeout absorbs slow container starts on loaded CI.
+func mysqlReadyWait() testcontainers.CustomizeRequestOption {
+	return testcontainers.WithWaitStrategy(
+		wait.ForSQL("3306/tcp", "mysql", func(host string, port networktypes.Port) string {
+			return fmt.Sprintf("%s:%s@tcp(%s:%s)/%s", mysqlUser, mysqlPass, host, port.Port(), mysqlDB)
+		}).WithStartupTimeout(3 * time.Minute),
+	)
+}
 
 // The MySQL e2e fixture wires a single source table → topic → sink table. One
 // table keeps setup minimal: the MySQL ingest dialect's breadth (snapshot
@@ -80,6 +98,7 @@ func NewMySQL(t *testing.T) *MySQLHarness {
 		tcmysql.WithUsername(mysqlUser),
 		tcmysql.WithPassword(mysqlPass),
 		testcontainers.WithCmdArgs("--binlog-row-metadata=FULL"),
+		mysqlReadyWait(),
 	)
 	require.NoError(t, err, "start mysql container")
 	h.my = my

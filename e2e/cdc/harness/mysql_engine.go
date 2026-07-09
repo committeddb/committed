@@ -63,6 +63,7 @@ func (e *mysqlEngine) Start(ctx context.Context, t *testing.T) {
 		// @@gtid_executed and the binlog GTID events are populated.
 		testcontainers.WithCmdArgs("--gtid-mode=ON", "--enforce-gtid-consistency=ON",
 			"--binlog-row-metadata=FULL"),
+		mysqlReadyWait(),
 	)
 	require.NoError(t, err, "start mysql container")
 	e.container = c

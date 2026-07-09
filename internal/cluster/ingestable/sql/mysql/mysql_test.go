@@ -14,9 +14,11 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	networktypes "github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/client"
 	"github.com/testcontainers/testcontainers-go"
 	tcmysql "github.com/testcontainers/testcontainers-go/modules/mysql"
+	"github.com/testcontainers/testcontainers-go/wait"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/stretchr/testify/require"
@@ -54,6 +56,20 @@ func TestMain(m *testing.M) {
 		// decodes against (see columnsFromTableMap) and Preflight now requires.
 		testcontainers.WithCmdArgs("--gtid-mode=ON", "--enforce-gtid-consistency=ON",
 			"--binlog-row-metadata=FULL"),
+		// Override the module's default readiness check. It watches for a specific
+		// "port: 3306  MySQL Community Server" log line, which a slow CI host can
+		// leave unmatched inside the default timeout (the observed failure) and
+		// which is brittle to the image's edition/spacing. A log line also can't
+		// tell "logged ready" from "accepts a real query" — the entrypoint's init
+		// server and a mid-startup restart both drop early connections with EOF.
+		// ForSQL opens an actual connection and runs a query, retrying until it
+		// succeeds, so it returns only on true readiness; the generous timeout
+		// absorbs slow container starts on loaded CI runners.
+		testcontainers.WithWaitStrategy(
+			wait.ForSQL("3306/tcp", "mysql", func(host string, port networktypes.Port) string {
+				return fmt.Sprintf("%s:%s@tcp(%s:%s)/%s", username, password, host, port.Port(), dbName)
+			}).WithStartupTimeout(3*time.Minute),
+		),
 	)
 	if err != nil {
 		log.Fatalf("Could not start MySQL container: %v", err)
