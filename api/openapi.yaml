@@ -326,6 +326,41 @@ paths:
           $ref: '#/components/responses/InternalError'
         '507':
           $ref: '#/components/responses/InsufficientStorage'
+    delete:
+      tags: [ingestable]
+      summary: Delete an ingestable
+      description: |
+        Removes an ingestable: its configuration and its checkpoint position are
+        deleted atomically (one committed Actual), the worker is stopped, and the
+        owner drops the source-side replication resources (for a Postgres source,
+        the replication slot and publication) on a best-effort basis. Dropping
+        the slot is important on decommission: an orphaned slot holds the source's
+        WAL and can fill the source's disk. The logical deletion is the
+        authoritative act and completes before this returns; the source teardown
+        settles shortly after on the leader and, if it fails, only orphans the
+        slot (the delete still succeeds — drop it manually). After deletion a
+        later same-id POST starts fresh from a full snapshot. Leader-pinned.
+      operationId: deleteIngestable
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      responses:
+        '200':
+          description: Ingestable deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/MembershipUnconfirmed'
+        '500':
+          $ref: '#/components/responses/InternalError'
   /v1/ingestable/{id}/versions:
     get:
       tags: [ingestable]

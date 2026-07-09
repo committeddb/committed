@@ -172,6 +172,11 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 			r.Get("/ingestable/{id}/versions/{version}", h.getVersion("ingestable", h.c.IngestableVersion))
 			r.Get("/ingestable/{id}/status", h.GetIngestableStatus)
 			r.Post("/ingestable/{id}/rollback", h.rollback("ingestable", h.c.IngestableVersion, h.c.ProposeIngestable))
+			// DELETE is leader-pinned (leaderRead reverse-proxies a follower's
+			// request to the leader): the owner-gated source teardown — dropping the
+			// Postgres replication slot + publication — runs on the leader, so the
+			// request must land where the teardown does.
+			r.Delete("/ingestable/{id}", h.leaderRead(h.DeleteIngestable))
 
 			// /proposal is write-only by design: Committed is a commit log,
 			// not a query interface. Reads happen on the synced query side

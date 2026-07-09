@@ -130,6 +130,18 @@ type FakeCluster struct {
 		result1 uint64
 		result2 error
 	}
+	DeleteIngestableStub        func(context.Context, string) error
+	deleteIngestableMutex       sync.RWMutex
+	deleteIngestableArgsForCall []struct {
+		arg1 context.Context
+		arg2 string
+	}
+	deleteIngestableReturns struct {
+		result1 error
+	}
+	deleteIngestableReturnsOnCall map[int]struct {
+		result1 error
+	}
 	DeleteSyncableStub        func(context.Context, string, bool) error
 	deleteSyncableMutex       sync.RWMutex
 	deleteSyncableArgsForCall []struct {
@@ -1209,6 +1221,68 @@ func (fake *FakeCluster) DeadLetterStuckSyncableReturnsOnCall(i int, result1 uin
 		result1 uint64
 		result2 error
 	}{result1, result2}
+}
+
+func (fake *FakeCluster) DeleteIngestable(arg1 context.Context, arg2 string) error {
+	fake.deleteIngestableMutex.Lock()
+	ret, specificReturn := fake.deleteIngestableReturnsOnCall[len(fake.deleteIngestableArgsForCall)]
+	fake.deleteIngestableArgsForCall = append(fake.deleteIngestableArgsForCall, struct {
+		arg1 context.Context
+		arg2 string
+	}{arg1, arg2})
+	stub := fake.DeleteIngestableStub
+	fakeReturns := fake.deleteIngestableReturns
+	fake.recordInvocation("DeleteIngestable", []interface{}{arg1, arg2})
+	fake.deleteIngestableMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeCluster) DeleteIngestableCallCount() int {
+	fake.deleteIngestableMutex.RLock()
+	defer fake.deleteIngestableMutex.RUnlock()
+	return len(fake.deleteIngestableArgsForCall)
+}
+
+func (fake *FakeCluster) DeleteIngestableCalls(stub func(context.Context, string) error) {
+	fake.deleteIngestableMutex.Lock()
+	defer fake.deleteIngestableMutex.Unlock()
+	fake.DeleteIngestableStub = stub
+}
+
+func (fake *FakeCluster) DeleteIngestableArgsForCall(i int) (context.Context, string) {
+	fake.deleteIngestableMutex.RLock()
+	defer fake.deleteIngestableMutex.RUnlock()
+	argsForCall := fake.deleteIngestableArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2
+}
+
+func (fake *FakeCluster) DeleteIngestableReturns(result1 error) {
+	fake.deleteIngestableMutex.Lock()
+	defer fake.deleteIngestableMutex.Unlock()
+	fake.DeleteIngestableStub = nil
+	fake.deleteIngestableReturns = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *FakeCluster) DeleteIngestableReturnsOnCall(i int, result1 error) {
+	fake.deleteIngestableMutex.Lock()
+	defer fake.deleteIngestableMutex.Unlock()
+	fake.DeleteIngestableStub = nil
+	if fake.deleteIngestableReturnsOnCall == nil {
+		fake.deleteIngestableReturnsOnCall = make(map[int]struct {
+			result1 error
+		})
+	}
+	fake.deleteIngestableReturnsOnCall[i] = struct {
+		result1 error
+	}{result1}
 }
 
 func (fake *FakeCluster) DeleteSyncable(arg1 context.Context, arg2 string, arg3 bool) error {

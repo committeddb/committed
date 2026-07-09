@@ -56,6 +56,15 @@ func (s *Storage) saveIngestablePosition(e *cluster.Entity) error {
 		if b == nil {
 			return ErrBucketMissing
 		}
+		if e.IsDelete() {
+			// A delete tombstone clears the checkpoint (an ingestable DELETE), so a
+			// same-id recreate starts from a full snapshot instead of resuming from
+			// a stale LSN whose replication slot has been dropped.
+			if err := b.Delete(e.Key); err != nil {
+				return fmt.Errorf("[wal.ingestable_position] delete: %w", err)
+			}
+			return nil
+		}
 		if err := b.Put(e.Key, e.Data); err != nil {
 			return fmt.Errorf("[wal.ingestable_position] put: %w", err)
 		}

@@ -87,6 +87,44 @@ func (h *HTTP) GetIngestableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 	writeJson(w, bs)
 }
 
+// IngestableDeleteResponse confirms an ingestable was deleted.
+type IngestableDeleteResponse struct {
+	ID string `json:"id"`
+}
+
+// DeleteIngestable (DELETE /ingestable/{id}) removes an ingestable: its config
+// and checkpoint position are deleted atomically (consensus), the worker is
+// stopped, and the owner drops the source-side replication resources (the
+// Postgres slot + publication) best-effort — an orphaned slot would otherwise
+// pin the source's WAL and fill its disk. A later same-id POST starts fresh from
+// a full snapshot.
+//
+// The logical deletion is authoritative and completes before this returns
+// (Propose blocks until the Actual applies); the source teardown is a best-effort
+// side effect that settles shortly after on the leader. The route is leader-
+// pinned so this runs where the teardown does.
+func (h *HTTP) DeleteIngestable(w httpgo.ResponseWriter, r *httpgo.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, httpgo.StatusBadRequest, "invalid_parameter", "id is empty")
+		return
+	}
+
+	if err := h.c.DeleteIngestable(r.Context(), id); err != nil {
+		writeProposeError(w, err, "ingestable", "delete ingestable")
+		return
+	}
+
+	bs, err := json.Marshal(IngestableDeleteResponse{ID: id})
+	if err != nil {
+		writeInternalError(w, "failed to marshal response", err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(httpgo.StatusOK)
+	_, _ = w.Write(bs)
+}
+
 // toIngestableStatusResponse converts the cluster-level ingestable status into
 // the HTTP response shape. Shared by GetIngestableStatus and the pipeline view.
 func toIngestableStatusResponse(st cluster.IngestableStatus) IngestableStatusResponse {

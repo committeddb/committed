@@ -41,6 +41,17 @@ func (db *DB) ParseIngestable(mimeType string, data []byte) (string, cluster.Ing
 	return db.parser.ParseIngestable(mimeType, data)
 }
 
+// DeleteIngestable removes an ingestable: its config and checkpoint position are
+// deleted atomically (one proposal), and on apply the owner node cancels the
+// worker and tears down the source-side replication resources (drops the Postgres
+// slot + publication) so an orphaned slot can't pin the source's WAL. Blocks
+// until applied (Propose returns after the delete is durable). There is no
+// keep-data option — dropping the slot is always the right thing on decommission.
+func (db *DB) DeleteIngestable(ctx context.Context, id string) error {
+	p := &cluster.Proposal{Entities: cluster.NewDeleteIngestableEntities(id)}
+	return db.Propose(ctx, p)
+}
+
 func (db *DB) Ingestables() ([]*cluster.Configuration, error) {
 	return db.storage.Ingestables()
 }

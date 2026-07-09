@@ -152,6 +152,19 @@ func NewUpsertIngestableEntity(c *Configuration) (*Entity, error) {
 	return NewUpsertEntity(ingestableType, []byte(c.ID), bs), nil
 }
 
+// NewDeleteIngestableEntities builds the tombstones that remove an ingestable:
+// its config AND its checkpoint position. Both go in one proposal so DELETE is
+// atomic — the config removal stops the worker (and, on the owner, tears down the
+// source slot), and clearing the checkpoint means a same-id recreate starts from
+// a full snapshot rather than resuming from a stale LSN whose slot was dropped.
+// The keys mirror the upsert constructors (the ingestable ID).
+func NewDeleteIngestableEntities(id string) []*Entity {
+	return []*Entity{
+		NewDeleteEntity(ingestableType, []byte(id)),
+		NewDeleteEntity(ingestablePositionType, []byte(id)),
+	}
+}
+
 var ingestablePositionType = registerSystemType(&Type{
 	ID:         "8ea60a68-e22a-41cd-b09d-31352b0356f1",
 	Name:       "InternalIngestablePosition",

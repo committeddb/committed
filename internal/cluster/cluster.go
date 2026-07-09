@@ -15,6 +15,12 @@ type Cluster interface {
 	ProposeType(ctx context.Context, c *Configuration) error
 	ProposeDeleteType(ctx context.Context, id string) error
 	ProposeIngestable(ctx context.Context, c *Configuration) error
+	// DeleteIngestable removes an ingestable: its config and checkpoint position
+	// are deleted atomically and, on apply, the owner cancels the worker and tears
+	// down the source-side replication resources (drops the Postgres slot +
+	// publication) so an orphaned slot can't pin the source's WAL and fill its
+	// disk. A later same-id create starts fresh from a full snapshot.
+	DeleteIngestable(ctx context.Context, id string) error
 	ProposeSyncable(ctx context.Context, c *Configuration) error
 	// DeleteSyncable removes a syncable: its config and checkpoint are deleted
 	// atomically and, unless keepData is set, the owner tears down the
