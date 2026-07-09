@@ -88,46 +88,74 @@ func (db *DB) guardSyncableConfigChange(id string, next cluster.Syncable) error 
 // syncable the teardown/re-init is a DROP + CREATE of its table.)
 //
 // Sequence (the config stays on the log throughout):
-//  1. Consensus: reset the checkpoint to 0 (delete the SyncableIndex entity).
+//  1. Owner, live-only: stop the worker (drain the goroutine). This MUST
+//     precede the checkpoint reset — see below.
+//  2. Consensus: reset the checkpoint to 0 (delete the SyncableIndex entity).
 //     Replicated and deterministic — every node's Reader will seed from 0.
-//  2. Owner, live-only: stop the worker and tear the destination down (clean
-//     slate).
-//  3. Re-apply the unchanged config: the normal apply path re-initializes the
+//  3. Owner, live-only: tear the destination down (clean slate) now that the
+//     checkpoint is 0.
+//  4. Re-apply the unchanged config: the normal apply path re-initializes the
 //     destination (Init) and restarts the worker, which reads from the reset
 //     checkpoint (0) and replays — reusing all of saveSyncable's machinery
 //     (migration wrap, worker replace) for free.
 //
+// Why stop the worker (step 1) before the reset (step 2): the worker persists
+// its checkpoint with an async consensus bump (proposeSyncableIndex) that lands
+// the line AFTER the Sync a caller observes. If the reset were proposed while
+// the worker still ran, a bump already in flight could commit just after the
+// delete — apply order delete(→0) then bump(→N) — re-establishing a non-zero
+// checkpoint, and the re-applied worker would seed from N and skip the replay
+// entirely (the intermittent TestRebuildSyncable_ReRunnable CI failure; see the
+// deterministic TestRebuildSyncable_StaleWorkerBumpDoesNotDefeatReset). Draining
+// the worker first guarantees any bump it submitted was enqueued before this
+// delete on the single ordered propose channel, so the delete commits at a
+// higher log index and is the last write to the checkpoint — leaving it at 0.
+//
+// The destination teardown (step 3) deliberately stays AFTER the reset so a
+// failure between the reset and the re-apply self-heals: a restart re-sends the
+// config, and the worker seeds from the reset checkpoint (0) and replays.
+//
 // Re-runnable by construction (idempotent teardown + Init + replay from 0), so
 // a leadership flap mid-rebuild just means the operator runs it again.
 // Leader-pinned at the HTTP layer; since Storage.Node is 0 today the leader is
-// the owner, so step 2 runs where step 3's re-init will.
+// the owner, so the live-only steps run where the re-init will.
 func (db *DB) RebuildSyncable(ctx context.Context, id string) error {
 	cfg := db.currentSyncableConfig(id)
 	if cfg == nil {
 		return cluster.ErrResourceNotFound
 	}
 
-	// 1. Reset the checkpoint to 0 (consensus). Blocks until applied.
+	// 1. Stop the local worker first so it can't bump the checkpoint after the
+	//    reset below. Returns its handle so step 3 can tear the destination down.
+	handle := db.rebuildStopWorkerLocal(id)
+
+	// 2. Reset the checkpoint to 0 (consensus). Blocks until applied.
 	reset := &cluster.Proposal{Entities: []*cluster.Entity{cluster.NewDeleteSyncableIndexEntity(id)}}
 	if err := db.Propose(ctx, reset); err != nil {
 		return err
 	}
+	if db.afterRebuildCheckpointReset != nil {
+		db.afterRebuildCheckpointReset() // test-only seam; nil in production
+	}
 
-	// 2. Owner clean-slate: stop the worker, then tear the destination down.
-	db.rebuildTeardownLocal(id)
+	// 3. Owner clean-slate: tear the destination down now that the checkpoint
+	//    is 0, so the re-apply recreates it empty.
+	db.rebuildTeardownDestinationLocal(id, handle)
 
-	// 3. Re-apply the unchanged config: re-initializes the destination and
+	// 4. Re-apply the unchanged config: re-initializes the destination and
 	//    restarts the worker reading from index 0. The config is identical, so
 	//    the in-place-change guard sees no change and allows it.
 	return db.ProposeSyncable(ctx, cfg)
 }
 
-// rebuildTeardownLocal stops the local worker and, on the owner, tears the
-// syncable's destination down so the re-apply that follows recreates it empty.
-// It is the owner-gated, best-effort, live-only half of a rebuild — a failed
-// teardown is logged and the rebuild continues (replay then writes over the
-// existing destination, a degraded-but-not-fatal rebuild).
-func (db *DB) rebuildTeardownLocal(id string) {
+// rebuildStopWorkerLocal cancels and drains the local sync worker (if any) and
+// deregisters it, returning its handle so the caller can later tear the
+// destination down via the still-referenced syncable. Draining the goroutine
+// (<-done) is what makes it safe to reset the checkpoint next: once it returns,
+// the worker makes no further proposals, and any checkpoint bump it did submit
+// was necessarily enqueued before the caller's subsequent reset — see
+// RebuildSyncable. Returns nil if no worker was registered.
+func (db *DB) rebuildStopWorkerLocal(id string) *workerHandle {
 	db.workersMu.Lock()
 	handle, ok := db.syncWorkers[id]
 	if ok {
@@ -140,8 +168,21 @@ func (db *DB) rebuildTeardownLocal(id string) {
 		}
 	}
 	db.workersMu.Unlock()
+	if !ok {
+		return nil
+	}
+	return handle
+}
 
-	if !ok || handle.syncable == nil || !db.isNode(id) {
+// rebuildTeardownDestinationLocal tears the syncable's destination down on the
+// owner so the re-apply that follows recreates it empty. It is the owner-gated,
+// best-effort, live-only half of a rebuild — a failed teardown is logged and
+// the rebuild continues (replay then writes over the existing destination, a
+// degraded-but-not-fatal rebuild). handle is the worker stopped in
+// rebuildStopWorkerLocal; nil (no worker was running) or a non-Teardownable
+// syncable is a no-op.
+func (db *DB) rebuildTeardownDestinationLocal(id string, handle *workerHandle) {
+	if handle == nil || handle.syncable == nil || !db.isNode(id) {
 		return
 	}
 	teardownable, ok := handle.syncable.(cluster.Teardownable)

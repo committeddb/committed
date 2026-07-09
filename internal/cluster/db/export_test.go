@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"go.etcd.io/raft/v3"
@@ -9,6 +10,30 @@ import (
 
 	"github.com/committeddb/committed/internal/cluster"
 )
+
+// InjectStaleWorkerBumpOnRebuildResetForTest arms RebuildSyncable's post-reset
+// seam to reproduce the checkpoint-bump-vs-reset race deterministically. The
+// first time a rebuild resets id's checkpoint, if a sync worker for id is still
+// live at that instant (i.e. the rebuild has not yet stopped it), it injects
+// exactly one stale checkpoint bump to staleIndex — the bump an in-flight worker
+// would land just after the reset. If the rebuild has already stopped the worker,
+// the injection is skipped, faithfully mirroring reality: a stopped worker cannot
+// bump. Picking staleIndex >= the replay head makes the re-applied worker seed
+// past all history, so a defeated reset shows up as "no replay happened".
+func (db *DB) InjectStaleWorkerBumpOnRebuildResetForTest(id string, staleIndex uint64) {
+	var once sync.Once
+	db.afterRebuildCheckpointReset = func() {
+		once.Do(func() {
+			db.workersMu.Lock()
+			_, live := db.syncWorkers[id]
+			db.workersMu.Unlock()
+			if !live {
+				return // worker already stopped — a real worker could not bump here
+			}
+			_ = db.proposeSyncableIndex(context.Background(), &cluster.SyncableIndex{ID: id, Index: staleIndex})
+		})
+	}
+}
 
 // SetTestTransportFactory installs the package-default TransportFactory the db
 // test suite uses, so its many db.New / NewRaft call sites don't each have to

@@ -204,6 +204,14 @@ type DB struct {
 	isLeaderFn               func() bool
 	shutdownTransferTimeout  time.Duration
 
+	// afterRebuildCheckpointReset is a test-only seam invoked by RebuildSyncable
+	// immediately after the checkpoint-reset proposal applies (nil in
+	// production, so zero overhead). It lets a test deterministically inject the
+	// checkpoint-bump-vs-reset race that RebuildSyncable's ordering is
+	// responsible for closing — see rebuildStopWorkerLocal and
+	// TestRebuildSyncable_StaleWorkerBumpDoesNotDefeatReset.
+	afterRebuildCheckpointReset func()
+
 	logger  *zap.Logger
 	metrics *metrics.Metrics
 }
