@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"bytes"
 	"fmt"
 
 	bolt "go.etcd.io/bbolt"
@@ -39,8 +40,17 @@ func (s *Storage) saveDatabase(t *cluster.Configuration) error {
 		// below), so every replica converges on the same config bucket
 		// state regardless of whether THIS node can build the live
 		// connection.
-		if _, err := putVersioned(b, []byte(t.ID), bs); err != nil {
-			return fmt.Errorf("[wal.database] putVersioned: %w", err)
+		//
+		// Skip the version APPEND on a byte-identical replay: a crash-apply-window
+		// entry is re-delivered (entity fsynced, applied-index not), and appending
+		// again would duplicate the version on the replaying node — diverging its
+		// version history and rollback-by-number from nodes that didn't crash
+		// there. Mirrors saveType. The node-local build below still runs, so a
+		// replay re-establishes the cached connection.
+		if existing, gerr := getVersioned(b, []byte(t.ID)); gerr != nil || !bytes.Equal(existing, bs) {
+			if _, err := putVersioned(b, []byte(t.ID), bs); err != nil {
+				return fmt.Errorf("[wal.database] putVersioned: %w", err)
+			}
 		}
 
 		// Node-local construction: build the live Database. ParseDatabase

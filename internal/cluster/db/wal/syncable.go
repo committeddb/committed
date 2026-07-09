@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"bytes"
 	"fmt"
 
 	bolt "go.etcd.io/bbolt"
@@ -51,8 +52,17 @@ func (s *Storage) saveSyncable(t *cluster.Configuration) error {
 		// Deterministic state-machine write FIRST: persist the raw config
 		// bytes so every replica converges, then attempt the node-local
 		// build (which can fail on a missing ${VAR} secret).
-		if _, err := putVersioned(b, []byte(t.ID), bs); err != nil {
-			return fmt.Errorf("[wal.syncable] putVersioned: %w", err)
+		//
+		// Skip the version APPEND on a byte-identical replay: a crash-apply-window
+		// entry is re-delivered (entity fsynced, applied-index not), and appending
+		// again would duplicate the version on the replaying node — diverging its
+		// version history and rollback-by-number from nodes that didn't crash
+		// there. Mirrors saveType. The node-local build below still runs, so a
+		// replay re-establishes the worker.
+		if existing, gerr := getVersioned(b, []byte(t.ID)); gerr != nil || !bytes.Equal(existing, bs) {
+			if _, err := putVersioned(b, []byte(t.ID), bs); err != nil {
+				return fmt.Errorf("[wal.syncable] putVersioned: %w", err)
+			}
 		}
 
 		_, parsed, parsedMode, err := s.parser.ParseSyncable(t.MimeType, t.Data, s)
