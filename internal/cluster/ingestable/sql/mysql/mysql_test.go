@@ -1764,6 +1764,89 @@ func TestMysqlSnapshotChunking(t *testing.T) {
 	}
 }
 
+// TestMysqlSnapshotStreamTimeByteIdentity is the snapshot==CDC invariant for
+// temporal columns: a TIMESTAMP/DATETIME/DATE row read by the snapshot must
+// produce byte-identical payload bytes to the same row read by CDC. TIMESTAMP is
+// the tz-sensitive one — CDC decodes it in UTC (TimestampStringLocation) and the
+// snapshot forces its session to UTC (SET time_zone), so they agree instead of
+// the snapshot using the server tz and CDC the node's local tz.
+func TestMysqlSnapshotStreamTimeByteIdentity(t *testing.T) {
+	table := "timeident_table"
+	db := createDB(t)
+	_, err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS `%s`", table))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf(
+		"CREATE TABLE `%s` (pk VARCHAR(32) PRIMARY KEY, ts TIMESTAMP NULL, dt DATETIME, d DATE)", table))
+	require.NoError(t, err)
+	// Snapshot row 'a' and CDC row 'b' carry identical values; only the pk differs.
+	const vals = "'2024-01-15 10:30:00', '2024-01-15 10:30:00', '2024-01-15'"
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, ts, dt, d) VALUES ('a', %s)", table, vals))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, ts, dt, d) VALUES ('__sentinel__', %s)", table, vals))
+	require.NoError(t, err)
+	db.Close()
+
+	config := &sql.Config{
+		Type: &cluster.Type{ID: "timeident", Name: "timeident"},
+		Mappings: []sql.Mapping{
+			{JsonName: "pk", SQLColumn: "pk"},
+			{JsonName: "ts", SQLColumn: "ts"},
+			{JsonName: "dt", SQLColumn: "dt"},
+			{JsonName: "d", SQLColumn: "d"},
+		},
+		PrimaryKey:       []string{"pk"},
+		ConnectionString: ingestURL,
+		Tables:           []string{table},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	proposalChan := make(chan *cluster.Proposal, 10)
+	positionChan := make(chan cluster.Position, 10)
+	go func() { _ = (&mysql.MySQLDialect{}).Ingest(ctx, config, nil, proposalChan, positionChan) }()
+
+	seen := map[string][]byte{}
+	drainUntil := func(pred func() bool, what string) {
+		t.Helper()
+		deadline := time.After(30 * time.Second)
+		for !pred() {
+			select {
+			case p := <-proposalChan:
+				for _, e := range p.Entities {
+					seen[string(e.Key)] = e.Data
+				}
+			case <-positionChan:
+			case <-deadline:
+				t.Fatalf("timed out waiting for %s", what)
+			}
+		}
+	}
+	// The snapshot delivers 'a' and the sentinel; the sentinel gates streaming live.
+	drainUntil(func() bool {
+		_, a := seen["a"]
+		_, s := seen["__sentinel__"]
+		return a && s
+	}, "snapshot")
+
+	mdb := createDB(t)
+	defer mdb.Close()
+	_, err = mdb.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, ts, dt, d) VALUES ('b', %s)", table, vals))
+	require.NoError(t, err)
+	drainUntil(func() bool { _, ok := seen["b"]; return ok }, "CDC row b")
+
+	field := func(payload []byte, name string) any {
+		var m map[string]any
+		require.NoError(t, json.Unmarshal(payload, &m))
+		return m[name]
+	}
+	for _, col := range []string{"ts", "dt", "d"} {
+		require.Equal(t, field(seen["a"], col), field(seen["b"], col),
+			"snapshot and CDC must emit identical %q bytes for the same value", col)
+	}
+	require.Equal(t, "2024-01-15 10:30:00", field(seen["a"], "ts"), "TIMESTAMP renders as UTC text")
+	require.Equal(t, "2024-01-15", field(seen["a"], "d"), "DATE text form")
+}
+
 // TestMysqlSnapshotResume verifies that an interrupted snapshot resumes
 // from the checkpointed per-table pk instead of re-reading already-
 // flushed rows. A synthetic resume position with snapshot_progress is

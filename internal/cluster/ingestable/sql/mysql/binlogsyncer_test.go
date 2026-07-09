@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"testing"
+	"time"
 
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
@@ -28,7 +29,8 @@ func TestBinlogSyncerConfig(t *testing.T) {
 
 	require.False(t, cfg.UseDecimal, "DECIMAL must stay exact source text, not decimal.Decimal")
 	require.False(t, cfg.ParseTime, "DATE/DATETIME/TIMESTAMP must stay strings, not time.Time")
-	require.Nil(t, cfg.TimestampStringLocation)
+	require.Equal(t, time.UTC, cfg.TimestampStringLocation,
+		"TIMESTAMP must decode in UTC (deterministic across nodes and identical to the snapshot), not the node's local tz")
 }
 
 // TestBinlogSyncerConfigErrors covers the parse failures that should surface as

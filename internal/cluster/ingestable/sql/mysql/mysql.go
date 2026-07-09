@@ -1399,6 +1399,14 @@ func readBatch(
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// Read TIMESTAMP columns in UTC so the snapshot's text matches the CDC path,
+	// which decodes TIMESTAMP in UTC too (see binlogSyncerConfig). Without this the
+	// snapshot uses the server's session tz, so a TIMESTAMP diverges from CDC on a
+	// non-UTC server. DATETIME/DATE/TIME are tz-agnostic literals and unaffected.
+	if _, err := tx.ExecContext(ctx, "SET time_zone = '+00:00'"); err != nil {
+		return nil, "", 0, fmt.Errorf("set session time_zone: %w", err)
+	}
+
 	// Keyset pagination ordered by the full PK. A single column is `c > ?`; a
 	// composite is the row-value comparison `(c1, c2) > (?, ?)` — MySQL coerces
 	// the bound string cursor values to each column's type. The cursor is the

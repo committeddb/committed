@@ -1093,6 +1093,33 @@ func (d *PostgreSQLDialect) snapshotTable(
 	return nil
 }
 
+// snapshotColumnMeta returns a table's column names (in order) and each column's
+// JSON category, read from a zero-row probe (SELECT * … LIMIT 0) inside the given
+// snapshot transaction. readBatch casts the value columns to text, which would
+// erase the real types from the result set's ColumnTypes, so the categories are
+// captured here from the untyped-cast probe instead.
+func snapshotColumnMeta(ctx context.Context, tx *gosql.Tx, quotedTable string) ([]string, []sql.JSONCategory, error) {
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf("SELECT * FROM %s LIMIT 0", quotedTable))
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	columns, err := rows.Columns()
+	if err != nil {
+		return nil, nil, err
+	}
+	colTypes, err := rows.ColumnTypes()
+	if err != nil {
+		return nil, nil, err
+	}
+	cats := make([]sql.JSONCategory, len(colTypes))
+	for i, ct := range colTypes {
+		cats[i] = pgCategoryForTypeName(ct.DatabaseTypeName())
+	}
+	return columns, cats, nil
+}
+
 // readBatch opens a short REPEATABLE READ transaction and reads up to
 // batchSize rows with pk > lastPK (or the first batchSize rows when
 // haveLastPK is false). Returns the entities, the last pk scanned, and
@@ -1129,6 +1156,23 @@ func readBatch(
 	}
 	orderBy := strings.Join(orderCols, ", ")
 
+	// Discover the columns and their real JSON categories once per batch via a
+	// zero-row probe. The value query then casts every column to text so the
+	// snapshot emits byte-identical payloads to the CDC path (pgoutput is text): a
+	// timestamp/date/bytea/numeric column otherwise diverges — pgx typed-decodes it
+	// (time.Time/[]byte/float64) and json.Marshal renders it differently than the
+	// Postgres text form, so a column's bytes would flip on its first CDC update
+	// after snapshot. Categories must come from the real types, not the text cast.
+	columns, cats, err := snapshotColumnMeta(ctx, tx, quotedTable)
+	if err != nil {
+		return nil, "", 0, err
+	}
+	selected := make([]string, len(columns))
+	for i, c := range columns {
+		selected[i] = quoteIdent(c) + "::text AS " + quoteIdent(c)
+	}
+	selectList := strings.Join(selected, ", ")
+
 	var query string
 	var args []any
 	if haveLastPK {
@@ -1144,14 +1188,16 @@ func readBatch(
 			placeholders[i] = fmt.Sprintf("$%d", i+1)
 			args[i] = cursor[i]
 		}
+		// WHERE/ORDER BY reference the real columns, so keyset ordering and the
+		// cursor comparison are unaffected by the text cast in the SELECT list.
 		query = fmt.Sprintf(
-			"SELECT * FROM %s WHERE (%s) > (%s) ORDER BY %s LIMIT %d",
-			quotedTable, strings.Join(cols, ", "), strings.Join(placeholders, ", "), orderBy, batchSize,
+			"SELECT %s FROM %s WHERE (%s) > (%s) ORDER BY %s LIMIT %d",
+			selectList, quotedTable, strings.Join(cols, ", "), strings.Join(placeholders, ", "), orderBy, batchSize,
 		)
 	} else {
 		query = fmt.Sprintf(
-			"SELECT * FROM %s ORDER BY %s LIMIT %d",
-			quotedTable, orderBy, batchSize,
+			"SELECT %s FROM %s ORDER BY %s LIMIT %d",
+			selectList, quotedTable, orderBy, batchSize,
 		)
 	}
 
@@ -1160,19 +1206,6 @@ func readBatch(
 		return nil, "", 0, err
 	}
 	defer func() { _ = rows.Close() }()
-
-	columns, err := rows.Columns()
-	if err != nil {
-		return nil, "", 0, err
-	}
-	colTypes, err := rows.ColumnTypes()
-	if err != nil {
-		return nil, "", 0, err
-	}
-	cats := make([]sql.JSONCategory, len(colTypes))
-	for i, ct := range colTypes {
-		cats[i] = pgCategoryForTypeName(ct.DatabaseTypeName())
-	}
 
 	var entities []*cluster.Entity
 	var batchLastPK string

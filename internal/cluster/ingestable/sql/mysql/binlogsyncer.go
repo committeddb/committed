@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/url"
 	"strconv"
+	"time"
 
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
@@ -21,10 +22,15 @@ import (
 //
 //   - UseDecimal=false keeps DECIMAL columns as their exact source text (a
 //     string), not a decimal.Decimal.
-//   - ParseTime=false + TimestampStringLocation=nil keep DATE/DATETIME/TIMESTAMP/
-//     TIME as their text form, not a time.Time.
+//   - ParseTime=false keeps DATE/DATETIME/TIMESTAMP/TIME as their text form, not a
+//     time.Time.
+//   - TimestampStringLocation=time.UTC renders a TIMESTAMP (stored as a UTC epoch,
+//     tz-converted on read) in UTC. nil would use the committed node's LOCAL tz,
+//     which is both non-deterministic across nodes and divergent from the snapshot
+//     (the snapshot forces its session to UTC — see readBatch). DATETIME/DATE/TIME
+//     are tz-agnostic literals, so this only affects TIMESTAMP.
 //
-// Both are asserted by the e2e type matrix; getting them wrong silently corrupts
+// These are asserted by the e2e type matrix; getting them wrong silently corrupts
 // the payload. ServerID is a non-zero random id (the replica id this connection
 // registers under — NewBinlogSyncer panics on 0), as canal also randomized it.
 func binlogSyncerConfig(config *sql.Config) (replication.BinlogSyncerConfig, error) {
@@ -53,7 +59,7 @@ func binlogSyncerConfig(config *sql.Config) (replication.BinlogSyncerConfig, err
 		Charset:                 mysql.DEFAULT_CHARSET,
 		UseDecimal:              false,
 		ParseTime:               false,
-		TimestampStringLocation: nil,
+		TimestampStringLocation: time.UTC,
 		Logger:                  newSyncerLogger(zap.L()),
 	}, nil
 }

@@ -528,6 +528,106 @@ func TestPostgresTypedPayload(t *testing.T) {
 	}
 }
 
+// TestPostgresSnapshotStreamByteIdentity is the snapshot==CDC invariant for the
+// types that used to diverge: a timestamp/date/timestamptz/bytea/numeric row read
+// by the snapshot must produce byte-identical payload bytes to the same row read
+// by CDC. Before the ::text-cast fix, the snapshot went through pgx typed decode
+// (time.Time → RFC3339, bytea → raw/base64, numeric → float64) while CDC used
+// pgoutput text, so the same value differed and flipped format on its first CDC
+// update after snapshot.
+func TestPostgresSnapshotStreamByteIdentity(t *testing.T) {
+	const table = "pgtest_byteident"
+	config := &sql.Config{
+		Type:             &cluster.Type{ID: "byteident", Name: "byteident"},
+		ConnectionString: connString,
+		Tables:           []string{table},
+		PrimaryKey:       []string{"pk"},
+		Mappings: []sql.Mapping{
+			{JsonName: "pk", SQLColumn: "pk"},
+			{JsonName: "ts", SQLColumn: "ts"},
+			{JsonName: "tstz", SQLColumn: "tstz"},
+			{JsonName: "d", SQLColumn: "d"},
+			{JsonName: "by", SQLColumn: "by"},
+			{JsonName: "num", SQLColumn: "num"},
+		},
+		Options: map[string]string{"slot_name": "slot_byteident", "publication": "pub_byteident"},
+	}
+
+	db := createDB(t)
+	_, err := db.Exec(`DROP TABLE IF EXISTS ` + table)
+	require.NoError(t, err)
+	_, err = db.Exec(`CREATE TABLE ` + table +
+		` (pk VARCHAR(32) PRIMARY KEY, ts TIMESTAMP, tstz TIMESTAMPTZ, d DATE, by BYTEA, num NUMERIC)`)
+	require.NoError(t, err)
+	// The snapshot row and the CDC row carry IDENTICAL values (only the pk
+	// differs), so any byte difference between their payloads is the bug.
+	const vals = `'2024-01-15 10:30:00', '2024-01-15 10:30:00+00', '2024-01-15', '\x48656c6c6f', 9.50`
+	_, err = db.Exec(`INSERT INTO ` + table + ` VALUES ('a', ` + vals + `)`)
+	require.NoError(t, err)
+	db.Close()
+
+	cleanReplication(t, "slot_byteident", "pub_byteident")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	proposalChan := make(chan *cluster.Proposal, 10)
+	positionChan := make(chan cluster.Position, 10)
+	ingestErr := make(chan error, 1)
+	go func() {
+		ingestErr <- (&postgres.PostgreSQLDialect{}).Ingest(ctx, config, nil, proposalChan, positionChan)
+	}()
+
+	waitForSlot(t, "slot_byteident")
+
+	db = createDB(t)
+	_, err = db.Exec(`INSERT INTO ` + table + ` VALUES ('b', ` + vals + `)`)
+	require.NoError(t, err)
+	db.Close()
+
+	seen := map[string][]byte{}
+	deadline := time.After(20 * time.Second)
+	for len(seen) < 2 {
+		select {
+		case p := <-proposalChan:
+			for _, e := range p.Entities {
+				seen[string(e.Key)] = e.Data
+			}
+		case <-positionChan:
+		case <-deadline:
+			t.Fatalf("timed out; got %d of 2 entities", len(seen))
+		}
+	}
+	cancel()
+
+	// UseNumber so a numeric stays json.Number (exact source text), not float64 —
+	// otherwise "9.50" would compare equal to "9.5" and hide a trailing-zero drift.
+	field := func(payload []byte, name string) any {
+		dec := json.NewDecoder(bytes.NewReader(payload))
+		dec.UseNumber()
+		var m map[string]any
+		require.NoError(t, dec.Decode(&m))
+		return m[name]
+	}
+	// The invariant: snapshot ('a') and CDC ('b') emit identical bytes per field.
+	for _, col := range []string{"ts", "tstz", "d", "by", "num"} {
+		require.Equal(t, field(seen["a"], col), field(seen["b"], col),
+			"snapshot and CDC must emit identical %q bytes for the same value", col)
+	}
+	// And the form is the Postgres text form, not pgx's typed rendering: a
+	// timestamp has no 'T' (RFC3339 would, if a time.Time leaked through), bytea is
+	// hex-prefixed (not base64/raw), and numeric keeps its trailing zero.
+	require.NotContains(t, field(seen["a"], "ts"), "T", "timestamp is Postgres text, not RFC3339")
+	require.Contains(t, field(seen["a"], "by"), `\x`, "bytea is hex text, not base64/raw")
+	require.Equal(t, json.Number("9.50"), field(seen["a"], "num"), "numeric keeps its exact source text")
+
+	select {
+	case err := <-ingestErr:
+		require.Nil(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Ingest did not exit after cancel")
+	}
+}
+
 // TestPostgresMixedCaseColumn is the mixed-case-column regression on real
 // Postgres: a quoted CamelCase source column ("CreatedAt") mapped by a
 // case-matching config must carry its value through BOTH the snapshot and CDC
