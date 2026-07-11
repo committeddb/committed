@@ -399,6 +399,25 @@ binary-searches by raft index (`resolveStartSeq`, `ActualAt`) and so
 tolerates gaps natively, as long as the column stays ascending — which
 removal preserves.
 
+**A transient copy lives in the raft consensus log — by design, and bounded.**
+The removal above is about the *permanent event log* — the tier syncables read,
+and the system of record. Every committed entity is also written to the **raft
+consensus log** (the replication/replay tier), which the scrubber does not
+rewrite: it is trimmed by the normal compaction policy (size or age — see
+*Compaction policy*), so a deleted subject's payload persists there only until
+compaction passes its index — on the order of **an hour at most**, and usually
+far less on a busy node. This is the same category as an OS **page cache**, a
+database **WAL**, or a filesystem **journal**: a transient buffer that holds
+recently-written data for a bounded window and self-clears. It is never read by a
+syncable, never returned over the API, and never captured in a snapshot (the raft
+snapshot serializes BoltDB, into which user topic entities do not materialize).
+The expectation is therefore that erased personal data may linger in this
+consensus buffer for up to **~1 hour** after removal from the permanent log — a
+bounded, non-exposed window, well within GDPR's "without undue delay." (Backups
+are a separate concern: a backup that captures on-disk state can outlive this
+window, and erasure from backups is handled by the backup-retention process, not
+by the scrubber.)
+
 ### Scope boundaries
 
 Two adjacent concerns are deliberately **not** part of the scrubber:
