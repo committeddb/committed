@@ -4,6 +4,8 @@ package db
 
 import (
 	"context"
+	crand "crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"sync"
@@ -324,6 +326,12 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		logger:                         cfg.logger,
 		metrics:                        cfg.metrics,
 	}
+	// Seed the RequestID counter at a random point in the top half of the uint64
+	// space so each process lifetime's contiguous block of ids is disjoint from
+	// every other process's — see randomRequestIDBase and notifyApplied. Set
+	// before any proposal (the raft/goroutine wiring below) can draw an id.
+	db.nextRequestID.Store(randomRequestIDBase())
+
 	if db.diskReportInterval == 0 {
 		db.diskReportInterval = DefaultDiskReportInterval
 	}
@@ -516,6 +524,37 @@ func (db *DB) Propose(ctx context.Context, p *cluster.Proposal) error {
 	case <-db.ctx.Done():
 		return db.ctx.Err()
 	}
+}
+
+// randomRequestIDBase returns a per-process starting point for RequestID
+// assignment, in the top half of the uint64 space (bit 63 set). New seeds
+// nextRequestID with it and proposeAsync increments from there, so each process
+// lifetime consumes a contiguous block of ids at an independent random offset —
+// disjoint from every other lifetime's block with overwhelming probability.
+//
+// That is what keeps notifyApplied from matching a waiter THIS process
+// registered against a proposal from a DIFFERENT process that carries the same
+// RequestID: a replayed committed/uncommitted tail entry after a restart (the
+// counter used to reset to 0 each start), or a concurrently-forwarded proposal
+// from another node (each node's counter is independent). Both are the false-ACK
+// root cause; a per-process-random block removes the collision rather than
+// patching one path to it.
+//
+// The base is confined to [2^62, 2^63): bit 62 set keeps every assigned id far
+// above 0 (the notifyApplied "no waiter" sentinel) and above the small ids in any
+// pre-upgrade log (so a replayed old id can't match a new one); bit 63 clear
+// leaves ~2^63 of headroom above the block so the counter can never wrap back
+// toward 0/small, even over an absurdly long process lifetime.
+func randomRequestIDBase() uint64 {
+	var b [8]byte
+	if _, err := crand.Read(b[:]); err != nil {
+		// crypto/rand is backed by the OS CSPRNG and does not fail on a supported
+		// platform. A failure means no entropy is available, which we can't safely
+		// start without: a fixed fallback base would reintroduce the cross-process
+		// collision this seed exists to prevent.
+		panic("db: crypto/rand failed generating a RequestID base: " + err.Error())
+	}
+	return (binary.LittleEndian.Uint64(b[:]) &^ (uint64(1) << 63)) | (uint64(1) << 62)
 }
 
 // proposeAsync is the unified submit primitive. It assigns a

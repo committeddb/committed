@@ -35,6 +35,13 @@ func (db *DB) InjectStaleWorkerBumpOnRebuildResetForTest(id string, staleIndex u
 	}
 }
 
+// NextRequestIDForTest draws the next RequestID exactly as proposeAsync would,
+// so a test can observe the per-process seed (randomRequestIDBase) without
+// standing up the full propose→raft→apply path.
+func (db *DB) NextRequestIDForTest() uint64 {
+	return db.nextRequestID.Add(1)
+}
+
 // SetTestTransportFactory installs the package-default TransportFactory the db
 // test suite uses, so its many db.New / NewRaft call sites don't each have to
 // wire a transport. The test harness calls this once from an init with the real
