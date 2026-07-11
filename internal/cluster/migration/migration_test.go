@@ -146,3 +146,33 @@ func TestRun_SingleProgram(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "boom")
 }
+
+// TestRun_PreservesLargeIntegerPrecision is the migration-precision regression:
+// Run decoded entity JSON through float64 (json.Unmarshal into any), silently
+// rounding any integer above 2^53 — a >2^53 ID / money value / key corrupted by
+// an ordinary migration, then persisted to the sink. The decode must preserve
+// exact digits (json.Number) so gojq round-trips large integers losslessly.
+//
+// NOTE: assert on the raw digit string, NOT require.JSONEq — testify parses JSON
+// numbers as float64, so JSONEq would treat ...807 and ...808 as equal and mask
+// the very corruption under test.
+func TestRun_PreservesLargeIntegerPrecision(t *testing.T) {
+	// 9223372036854775807 = max int64 (a realistic BIGINT / snowflake id), far
+	// above 2^53; float64 rounds it up to ...808.
+	const bigID = "9223372036854775807"
+	const rounded = "9223372036854775808"
+
+	t.Run("identity passthrough", func(t *testing.T) {
+		out, err := migration.Run([]byte(`.`), []byte(`{"id":`+bigID+`}`))
+		require.NoError(t, err)
+		require.Contains(t, string(out), bigID, "the >2^53 integer must survive byte-exact")
+		require.NotContains(t, string(out), rounded, "float64 rounding must not occur")
+	})
+
+	t.Run("field restructure", func(t *testing.T) {
+		out, err := migration.Run([]byte(`{account: .id}`), []byte(`{"id":`+bigID+`}`))
+		require.NoError(t, err)
+		require.Contains(t, string(out), bigID, "the >2^53 integer must survive a restructuring migration")
+		require.NotContains(t, string(out), rounded)
+	})
+}

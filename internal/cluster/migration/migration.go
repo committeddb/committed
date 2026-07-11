@@ -11,6 +11,7 @@
 package migration
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 
@@ -113,8 +114,15 @@ func Run(program, data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("parse jq: %w", err)
 	}
 
+	// Decode with UseNumber so numeric leaves stay json.Number instead of
+	// float64 — otherwise any integer above 2^53 (a BIGINT id, money value, or
+	// key) is silently rounded on the round-trip and that corruption is
+	// persisted to the sink. gojq handles json.Number natively (preserving large
+	// integers as *big.Int), so the transform round-trips exact digits.
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
 	var input any
-	if err := json.Unmarshal(data, &input); err != nil {
+	if err := dec.Decode(&input); err != nil {
 		return nil, fmt.Errorf("unmarshal entity data: %w", err)
 	}
 
