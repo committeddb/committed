@@ -27,7 +27,14 @@ type MissingVarError struct {
 }
 
 func (e *MissingVarError) Error() string {
-	return fmt.Sprintf("environment variable %q referenced in config is not set", e.Name)
+	// Interpolation runs on every string value, so this same error fires
+	// whether the ${...} is a real secret reference or a literal that
+	// happens to live in a non-secret field (a projection default, a
+	// webhook body). Name both fixes so the operator doesn't have to
+	// guess which case they are in.
+	return fmt.Sprintf("environment variable %q referenced in config is not set; "+
+		"provide it in this node's environment, or — if ${%s} is meant as literal config text — escape it as $${%s}",
+		e.Name, e.Name, e.Name)
 }
 
 // lookupFunc resolves a variable name to its value, the bool reporting
@@ -89,6 +96,12 @@ func interpolateValue(v interface{}, lookup lookupFunc) (interface{}, error) {
 //	         loudly rather than silently sending an empty credential.
 //	$$       escapes a literal '$', so a password may contain a dollar
 //	         sign (e.g. "p$$w0rd" → "p$w0rd").
+//	$${NAME} escapes a literal "${NAME}": the leading $$ collapses to a
+//	         single '$' and the following "{NAME}" is copied verbatim, so
+//	         nothing is expanded. Use this when a config VALUE must hold a
+//	         literal "${...}" that is not a secret reference — remember
+//	         interpolation runs on every string, not only connection
+//	         strings (e.g. "$${HOME}" → "${HOME}").
 //	$        any other '$' is preserved verbatim. Bare $VAR shell-style
 //	         expansion is deliberately unsupported: ${...} is required so
 //	         the syntax never collides with values that just happen to

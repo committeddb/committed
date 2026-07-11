@@ -134,3 +134,20 @@ func TestInterpolate_Tree_MissingVarPropagates(t *testing.T) {
 	require.True(t, errors.As(err, &missing))
 	require.Equal(t, "PW", missing.Name)
 }
+
+// TestMissingVarError_MessageHintsAtEscape locks in the operator-facing
+// guidance: interpolation runs on EVERY string value, so a literal
+// "${...}" in a non-secret field (a projection default, a webhook body)
+// trips the same unset-variable error as a real secret reference. The
+// message must therefore point at the escape ($${NAME}) so an operator
+// who meant the text literally can fix it without guessing.
+func TestMissingVarError_MessageHintsAtEscape(t *testing.T) {
+	msg := (&MissingVarError{Name: "MYSQL_PASSWORD"}).Error()
+
+	// The core statement the secrets runbook and the degraded-config log
+	// quote — kept intact so those references still read correctly.
+	require.Contains(t, msg,
+		`environment variable "MYSQL_PASSWORD" referenced in config is not set`)
+	// The escape hint, naming the specific variable.
+	require.Contains(t, msg, "$${MYSQL_PASSWORD}")
+}

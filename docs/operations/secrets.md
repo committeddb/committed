@@ -33,14 +33,39 @@ Secret, a Vault agent's `EnvironmentFile`, a systemd unit's
 
 ### Grammar
 
-| Syntax    | Meaning                                                        |
-| --------- | ------------------------------------------------------------- |
-| `${NAME}` | Expands to env var `NAME`. **Unset → rejected at submit (HTTP 400); degrades the config at startup/apply** (see Failure mode). |
-| `$$`      | A literal `$` (escape). Use in a password like `p$$w0rd`.      |
-| `$`       | Any other `$` is preserved verbatim. Bare `$VAR` is **not** expanded — `${...}` is required. |
+| Syntax     | Meaning                                                       |
+| ---------- | ------------------------------------------------------------- |
+| `${NAME}`  | Expands to env var `NAME`. **Unset → rejected at submit (HTTP 400); degrades the config at startup/apply** (see Failure mode). |
+| `$$`       | A literal `$` (escape). Use in a password like `p$$w0rd`.     |
+| `$${NAME}` | A literal `${NAME}` (escape). Use when a config **value** must contain the literal text `${...}` — see "Escaping a literal `${...}`" below. |
+| `$`        | Any other `$` is preserved verbatim. Bare `$VAR` is **not** expanded — `${...}` is required. |
 
 A set-but-empty variable expands to the empty string (distinct from
 unset).
+
+### Escaping a literal `${...}` in a non-secret value
+
+Interpolation runs on **every string value** in the config — not only
+connection strings and auth headers, but user-data fields too: a
+projection column default, a rule/mapping value, a webhook URL or body.
+That is deliberate (it lets you reference a secret anywhere, e.g.
+`${WEBHOOK_TOKEN}` inside a webhook body), but it means a value that
+contains the literal characters `${...}` is treated as a reference and
+expanded — or, if the named variable is unset, the whole config is
+rejected/degraded with the usual missing-variable error.
+
+If a value must contain a **literal** `${...}` that is not a secret
+reference, escape the leading `$`:
+
+```toml
+# Wanted the literal string "${orderId}" as a projection default, not an
+# env-var expansion:
+default = "$${orderId}"   # stored/used as the literal "${orderId}"
+```
+
+The same applies to a literal double-dollar: write `$$$$` for a literal
+`$$`. A lone `$` not followed by `$` or `{` (for example `$5`) is left
+alone and needs no escaping.
 
 ### Example: MySQL database config
 
@@ -104,7 +129,10 @@ credential. What happens depends on where it is caught:
   ERROR  config persisted but a required ${VAR} secret is unset on this node
          (degraded); the node stays in quorum, fix the environment and
          restart to build it   {"kind": "database", "id": "orders",
-         "error": "environment variable \"MYSQL_PASSWORD\" ... is not set"}
+         "error": "environment variable \"MYSQL_PASSWORD\" referenced in
+         config is not set; provide it in this node's environment, or — if
+         ${MYSQL_PASSWORD} is meant as literal config text — escape it as
+         $${MYSQL_PASSWORD}"}
   ```
 
 - **At apply time**, if a config is proposed (and committed) while a
