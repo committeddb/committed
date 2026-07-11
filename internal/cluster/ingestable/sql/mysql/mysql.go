@@ -483,6 +483,10 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			// verbatim and MySQL table-name case-sensitivity is a server setting we
 			// must not override.
 			tables: lowerAll(config.Tables),
+			// Scope the server-wide binlog to the configured database so a
+			// same-named table in another database can't contaminate the topic
+			// (see watches). Lowercased to match the case-insensitive filter.
+			schema: strings.ToLower(dsnDatabase(config.ConnectionString)),
 			// Seed the live coordinate from the resume position so a
 			// mid-transaction flush before the first commit still stamps
 			// a sane SourceSeq. lastPos is non-nil here (resume or
@@ -560,6 +564,14 @@ type MySQLEventHandler struct {
 	proposalChan chan<- *cluster.Proposal
 	positionChan chan<- cluster.Position
 	tables       []string
+
+	// schema is the configured (DSN) database, lowercased. MySQL's binlog is
+	// server-wide, so the row filter scopes to this database to keep a
+	// same-named table in another database (otherdb.users) out of the topic —
+	// see watches. Empty when the connection string names no database (an
+	// unusual config the DSN-scoped snapshot itself can't handle), in which
+	// case the filter falls back to a table-name-only match.
+	schema string
 
 	// lastPos holds the most recently committed binlog position so the outer
 	// reconnect loop can resume from where it left off.
@@ -688,17 +700,32 @@ func lowerAll(ss []string) []string {
 	return out
 }
 
-// watches reports whether table is one of the configured watched tables,
-// case-insensitively. h.tables is lowercased at construction and the binlog
-// reports the table's stored case; without the case-insensitive match a
-// mixed-case `tables` config (e.g. ["Users"]) would drop every streamed row.
-func (h *MySQLEventHandler) watches(table string) bool {
+// watches reports whether a binlog row event for schema.table should be
+// ingested. Two independent conditions must both hold:
+//
+//   - Database scope. MySQL's binlog is server-wide — it carries events for
+//     every database on the server — so a bare table-name match would ingest
+//     otherdb.users into a topic configured for the DSN's database (silent
+//     cross-database/tenant contamination, and it disagrees with the
+//     DSN-scoped initial snapshot). The event's schema must equal the
+//     handler's configured database. h.schema == "" means the connection
+//     string named no database (an unusual config the snapshot can't scope
+//     either); there we can't qualify, so we fall back to the table match
+//     alone rather than drop every row.
+//   - Table match, case-insensitively. h.tables is lowercased at construction
+//     and the binlog reports the table's stored case; without the
+//     case-insensitive match a mixed-case `tables` config (e.g. ["Users"])
+//     would drop every streamed row. Database case is handled the same way.
+func (h *MySQLEventHandler) watches(schema, table string) bool {
+	if h.schema != "" && strings.ToLower(schema) != h.schema {
+		return false
+	}
 	return slices.Contains(h.tables, strings.ToLower(table))
 }
 
 func (h *MySQLEventHandler) handleRows(ctx context.Context, header *replication.EventHeader, e *replication.RowsEvent) error {
 	table := string(e.Table.Table)
-	if !h.watches(table) {
+	if !h.watches(string(e.Table.Schema), table) {
 		return nil
 	}
 	action, ok := rowsAction(e.Type())
@@ -1562,4 +1589,16 @@ func buildDSN(connectionString string) string {
 	database := strings.TrimPrefix(u.Path, "/")
 
 	return fmt.Sprintf("%s:%s@tcp(%s)/%s", username, password, u.Host, database)
+}
+
+// dsnDatabase returns the database (schema) named in a mysql:// connection
+// string, or "" if it can't be parsed or names no database. The binlog row
+// filter scopes to it (see MySQLEventHandler.watches) so a server-wide binlog
+// doesn't bleed same-named tables from other databases into the topic.
+func dsnDatabase(connectionString string) string {
+	u, err := url.Parse(connectionString)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimPrefix(u.Path, "/")
 }
