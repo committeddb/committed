@@ -12,13 +12,23 @@ package migration
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/itchyny/gojq"
 
 	"github.com/committeddb/committed/internal/cluster"
 )
+
+// runTimeout bounds a single jq transform. jq has no wall-clock or iteration
+// cap, so an accidental infinite recursion or a huge allocation in an
+// operator-supplied program would otherwise run unbounded on the goroutine that
+// invoked it — wedging the sync worker (un-cancellable, defeating shutdown) or
+// the propose handler. 30s is far above any legitimate single-entity transform
+// and only trips on a genuinely pathological program.
+const runTimeout = 30 * time.Second
 
 // Resolver fetches type definitions by (ID, Version). The chain walker
 // uses it to pull each step's Migration program from storage. Storage
@@ -71,7 +81,7 @@ var _ cluster.RedactedError = (*Error)(nil)
 // Migration is empty are skipped (no-op step). If stampedVersion equals
 // or exceeds latestVersion, data is returned unchanged. A program that
 // fails at runtime is reported as an *Error naming the failing step.
-func Chain(r Resolver, typeID string, stampedVersion, latestVersion int, data []byte) ([]byte, error) {
+func Chain(ctx context.Context, r Resolver, typeID string, stampedVersion, latestVersion int, data []byte) ([]byte, error) {
 	if stampedVersion >= latestVersion {
 		return data, nil
 	}
@@ -85,7 +95,7 @@ func Chain(r Resolver, typeID string, stampedVersion, latestVersion int, data []
 		if len(t.Migration) == 0 {
 			continue
 		}
-		next, err := Run(t.Migration, current)
+		next, err := Run(ctx, t.Migration, current)
 		if err != nil {
 			return nil, &Error{TypeID: typeID, FromVersion: v - 1, ToVersion: v, Err: err}
 		}
@@ -108,7 +118,7 @@ func Compile(program []byte) error {
 // exactly one transformed document per input document. Chain calls it per
 // step; ParseType's pre-flight validation calls it directly to try a
 // proposed program against an operator-supplied sample payload.
-func Run(program, data []byte) ([]byte, error) {
+func Run(ctx context.Context, program, data []byte) ([]byte, error) {
 	q, err := gojq.Parse(string(program))
 	if err != nil {
 		return nil, fmt.Errorf("parse jq: %w", err)
@@ -126,7 +136,12 @@ func Run(program, data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("unmarshal entity data: %w", err)
 	}
 
-	iter := q.Run(input)
+	// Bound execution and honor cancellation: RunWithContext observes both the
+	// parent ctx (worker shutdown / request cancel) and this per-run deadline, so
+	// a pathological program can't hang the goroutine that invoked it.
+	ctx, cancel := context.WithTimeout(ctx, runTimeout)
+	defer cancel()
+	iter := q.RunWithContext(ctx, input)
 	first, ok := iter.Next()
 	if !ok {
 		return nil, fmt.Errorf("jq program produced no output")

@@ -106,7 +106,7 @@ func (db *DB) ReplayTypeMigrationDeadLetter(ctx context.Context, typeID string, 
 		if err != nil {
 			return fmt.Errorf("resolve latest type %s: %w", typeID, err)
 		}
-		if _, chainErr := migration.Chain(db.storage, typeID, e.Version, latest.Version, e.Data); chainErr != nil {
+		if _, chainErr := migration.Chain(ctx, db.storage, typeID, e.Version, latest.Version, e.Data); chainErr != nil {
 			// Full detail node-local (the jq error inlines entity PII); chain with
 			// %w so the HTTP layer can reach the RedactedError and expose only the
 			// classifier.

@@ -1,9 +1,11 @@
 package migration_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -35,7 +37,7 @@ func TestChain_NoUpgradeNeeded(t *testing.T) {
 	r := &stubResolver{types: map[string]*cluster.Type{}}
 	data := []byte(`{"name":"alice"}`)
 
-	got, err := migration.Chain(r, "person", 3, 3, data)
+	got, err := migration.Chain(context.Background(), r, "person", 3, 3, data)
 	require.NoError(t, err)
 	require.Equal(t, data, got)
 }
@@ -46,7 +48,7 @@ func TestChain_SingleStep(t *testing.T) {
 		"person@2": {ID: "person", Version: 2, Migration: []byte(`. + {email: "unknown@example.com"}`)},
 	}}
 
-	got, err := migration.Chain(r, "person", 1, 2, []byte(`{"name":"alice"}`))
+	got, err := migration.Chain(context.Background(), r, "person", 1, 2, []byte(`{"name":"alice"}`))
 	require.NoError(t, err)
 	require.JSONEq(t, `{"name":"alice","email":"unknown@example.com"}`, string(got))
 }
@@ -58,7 +60,7 @@ func TestChain_MultipleSteps(t *testing.T) {
 		"person@3": {ID: "person", Version: 3, Migration: []byte(`{name, contact: .email}`)},
 	}}
 
-	got, err := migration.Chain(r, "person", 1, 3, []byte(`{"name":"alice"}`))
+	got, err := migration.Chain(context.Background(), r, "person", 1, 3, []byte(`{"name":"alice"}`))
 	require.NoError(t, err)
 	require.JSONEq(t, `{"name":"alice","contact":"unknown@example.com"}`, string(got))
 }
@@ -71,7 +73,7 @@ func TestChain_EmptyMigrationIsNoOp(t *testing.T) {
 		"person@3": {ID: "person", Version: 3, Migration: []byte(`{full_name: .name}`)},
 	}}
 
-	got, err := migration.Chain(r, "person", 1, 3, []byte(`{"name":"alice"}`))
+	got, err := migration.Chain(context.Background(), r, "person", 1, 3, []byte(`{"name":"alice"}`))
 	require.NoError(t, err)
 	require.JSONEq(t, `{"full_name":"alice"}`, string(got))
 }
@@ -81,7 +83,7 @@ func TestChain_BadJQProgram(t *testing.T) {
 		"person@2": {ID: "person", Version: 2, Migration: []byte(`this is not jq`)},
 	}}
 
-	_, err := migration.Chain(r, "person", 1, 2, []byte(`{"name":"alice"}`))
+	_, err := migration.Chain(context.Background(), r, "person", 1, 2, []byte(`{"name":"alice"}`))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "v1->v2")
 }
@@ -91,14 +93,14 @@ func TestChain_BadInputJSON(t *testing.T) {
 		"person@2": {ID: "person", Version: 2, Migration: []byte(`.`)},
 	}}
 
-	_, err := migration.Chain(r, "person", 1, 2, []byte(`not json`))
+	_, err := migration.Chain(context.Background(), r, "person", 1, 2, []byte(`not json`))
 	require.Error(t, err)
 }
 
 func TestChain_ResolverError(t *testing.T) {
 	r := &stubResolver{types: map[string]*cluster.Type{}} // no types
 
-	_, err := migration.Chain(r, "missing", 1, 2, []byte(`{}`))
+	_, err := migration.Chain(context.Background(), r, "missing", 1, 2, []byte(`{}`))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "fetch type")
 }
@@ -122,7 +124,7 @@ func TestChain_RuntimeErrorIsStructured(t *testing.T) {
 		"person@3": {ID: "person", Version: 3, Migration: []byte(`error("cannot derive contact for " + .name)`)},
 	}}
 
-	_, err := migration.Chain(r, "person", 1, 3, []byte(`{"name":"alice"}`))
+	_, err := migration.Chain(context.Background(), r, "person", 1, 3, []byte(`{"name":"alice"}`))
 	require.Error(t, err)
 
 	merr, ok := errors.AsType[*migration.Error](err)
@@ -138,11 +140,11 @@ func TestChain_RuntimeErrorIsStructured(t *testing.T) {
 // ParseType pre-flight uses: a good sample transforms, a runtime failure
 // reports the cause.
 func TestRun_SingleProgram(t *testing.T) {
-	out, err := migration.Run([]byte(`. + {email: "x"}`), []byte(`{"name":"alice"}`))
+	out, err := migration.Run(context.Background(), []byte(`. + {email: "x"}`), []byte(`{"name":"alice"}`))
 	require.NoError(t, err)
 	require.JSONEq(t, `{"name":"alice","email":"x"}`, string(out))
 
-	_, err = migration.Run([]byte(`error("boom")`), []byte(`{"name":"alice"}`))
+	_, err = migration.Run(context.Background(), []byte(`error("boom")`), []byte(`{"name":"alice"}`))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "boom")
 }
@@ -163,16 +165,41 @@ func TestRun_PreservesLargeIntegerPrecision(t *testing.T) {
 	const rounded = "9223372036854775808"
 
 	t.Run("identity passthrough", func(t *testing.T) {
-		out, err := migration.Run([]byte(`.`), []byte(`{"id":`+bigID+`}`))
+		out, err := migration.Run(context.Background(), []byte(`.`), []byte(`{"id":`+bigID+`}`))
 		require.NoError(t, err)
 		require.Contains(t, string(out), bigID, "the >2^53 integer must survive byte-exact")
 		require.NotContains(t, string(out), rounded, "float64 rounding must not occur")
 	})
 
 	t.Run("field restructure", func(t *testing.T) {
-		out, err := migration.Run([]byte(`{account: .id}`), []byte(`{"id":`+bigID+`}`))
+		out, err := migration.Run(context.Background(), []byte(`{account: .id}`), []byte(`{"id":`+bigID+`}`))
 		require.NoError(t, err)
 		require.Contains(t, string(out), bigID, "the >2^53 integer must survive a restructuring migration")
 		require.NotContains(t, string(out), rounded)
 	})
+}
+
+// TestRun_RespectsContextDeadline is the jq-migration-unbounded-execution
+// regression: Run used gojq's non-context runner (q.Run), so an operator's
+// non-terminating program ran unbounded on the caller's goroutine — wedging the
+// sync worker (un-cancellable, defeating shutdown) or the propose handler. Run
+// must honor ctx cancellation (and its own per-run timeout) so a pathological
+// program returns an error instead of hanging.
+func TestRun_RespectsContextDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		// `def f: f; f` recurses forever — gojq's non-context runner never returns.
+		_, err := migration.Run(ctx, []byte(`def f: f; f`), []byte(`{}`))
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		require.Error(t, err, "a non-terminating program must return an error, not a value")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not honor the context deadline — a non-terminating program hung the goroutine")
+	}
 }

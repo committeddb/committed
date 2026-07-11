@@ -37,8 +37,16 @@ type single struct {
 }
 
 func (s *single) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldSnapshot, error) {
-	entities, err := migrateEntities(s.resolver, s.metrics, a.Entities)
+	entities, err := migrateEntities(ctx, s.resolver, s.metrics, a.Entities)
 	if err != nil {
+		if ctx.Err() != nil {
+			// The worker ctx was cancelled mid-migration (shutdown / replace) — a
+			// transient interruption, not a bad program. Return it unwrapped so the
+			// worker retries this entity on restart rather than dead-lettering
+			// (permanently skipping) a valid proposal. A per-run TIMEOUT leaves the
+			// parent ctx live, so it still falls through to Permanent below.
+			return false, ctx.Err()
+		}
 		return false, cluster.Permanent(err)
 	}
 	return s.inner.Sync(ctx, &cluster.Actual{Index: a.Index, Entities: entities})
@@ -68,8 +76,11 @@ type batchSyncable struct {
 func (b *batchSyncable) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool, error) {
 	migrated := make([]*cluster.Actual, len(as))
 	for i, a := range as {
-		entities, err := migrateEntities(b.resolver, b.metrics, a.Entities)
+		entities, err := migrateEntities(ctx, b.resolver, b.metrics, a.Entities)
 		if err != nil {
+			if ctx.Err() != nil {
+				return false, ctx.Err() // shutdown/replace mid-migration — retry, don't dead-letter
+			}
 			return false, cluster.Permanent(err)
 		}
 		migrated[i] = &cluster.Actual{Index: a.Index, Entities: entities}
@@ -82,7 +93,7 @@ func (b *batchSyncable) SyncBatch(ctx context.Context, as []*cluster.Actual) (bo
 // System entities (config entries) pass through untouched. The input
 // entities are not modified — retry paths see consistent input across
 // attempts.
-func migrateEntities(r Resolver, m *metrics.Metrics, es []*cluster.Entity) ([]*cluster.Entity, error) {
+func migrateEntities(ctx context.Context, r Resolver, m *metrics.Metrics, es []*cluster.Entity) ([]*cluster.Entity, error) {
 	out := make([]*cluster.Entity, 0, len(es))
 	for _, e := range es {
 		// System entities (config) and deletes pass through untouched: a
@@ -103,7 +114,7 @@ func migrateEntities(r Resolver, m *metrics.Metrics, es []*cluster.Entity) ([]*c
 			continue
 		}
 		start := time.Now()
-		data, err := Chain(r, e.ID, e.Version, latest.Version, e.Data)
+		data, err := Chain(ctx, r, e.ID, e.Version, latest.Version, e.Data)
 		if err != nil {
 			return nil, err
 		}

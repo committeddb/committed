@@ -216,7 +216,10 @@ func compileMigration(program []byte) error {
 // compileMigration, it lives outside ParseType because the local `migration`
 // variable there shadows the package name.
 func runMigrationSample(program, sample []byte) error {
-	_, err := migration.Run(program, sample)
+	// ParseType carries no ctx (it runs under the propose handler), so pass a
+	// background ctx; migration.Run's internal per-run timeout still bounds a
+	// pathological validate_against program so it can't wedge the handler.
+	_, err := migration.Run(context.Background(), program, sample)
 	return err
 }
 
