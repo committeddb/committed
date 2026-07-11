@@ -1,6 +1,6 @@
 module github.com/committeddb/committed
 
-go 1.26.4
+go 1.26.5
 
 require (
 	github.com/PaesslerAG/jsonpath v0.1.1
