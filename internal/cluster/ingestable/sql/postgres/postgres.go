@@ -544,7 +544,8 @@ func (d *PostgreSQLDialect) stream(
 		return out, nil
 	}
 
-	if err := ensurePublication(ctx, conn, pgCfg); err != nil {
+	addedTables, err := ensurePublication(ctx, conn, pgCfg)
+	if err != nil {
 		return err
 	}
 
@@ -558,14 +559,25 @@ func (d *PostgreSQLDialect) stream(
 		return err
 	}
 
-	// Snapshot existing data if either (a) the slot was just created
-	// and we have no prior checkpoint, or (b) a prior run was
-	// interrupted mid-snapshot and left a progress checkpoint.
-	if (slotIsNew && *lastLSN == 0) || *resumeProgress != nil {
-		if err := d.snapshot(ctx, config, pgCfg, *resumeProgress, *lastLSN, pr, po); err != nil {
+	switch {
+	case (slotIsNew && *lastLSN == 0) || *resumeProgress != nil:
+		// (a) the slot was just created and we have no prior checkpoint, or
+		// (b) a prior run was interrupted mid-snapshot: full snapshot of every
+		// configured table.
+		if err := d.snapshot(ctx, config, pgCfg, pgCfg.tables, *resumeProgress, *lastLSN, pr, po); err != nil {
 			return err
 		}
 		*resumeProgress = nil
+	case len(addedTables) > 0:
+		// Resuming an existing slot, but ensurePublication just (re-)added tables
+		// to the publication (a re-POST added one, or a dropped-then-recreated
+		// source table was re-added). Backfill ONLY those — the rest are already
+		// streaming — then StartReplication below picks up their ongoing changes
+		// from *lastLSN. Add-to-publication-happened-first, so the overlap window
+		// is covered by the sink's keyed upsert, not lost.
+		if err := d.snapshot(ctx, config, pgCfg, addedTables, nil, *lastLSN, pr, po); err != nil {
+			return err
+		}
 	}
 
 	err = pglogrepl.StartReplication(ctx, conn, pgCfg.slotName, *lastLSN,
@@ -811,31 +823,54 @@ func quoteIdent(s string) string {
 	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }
 
-// ensurePublication creates the publication if it does not already exist.
-// The connection must be in replication=database mode which allows SQL.
+// ensurePublication creates the publication if it does not exist, or — if it
+// already exists — reconciles its table set so every configured table is
+// published. It returns the tables that were (re-)added, so the caller can
+// backfill just those on a resumed slot. The connection must be in
+// replication=database mode which allows SQL.
 //
-// Table names are quoted via quoteTable (not quoteIdent) so that
-// schema-qualified entries like "public.orders" become "public"."orders"
-// — a schema-qualified reference — instead of a single literal
-// identifier "public.orders" with a dot in the name. The TOML examples
-// in this repo (postgres_ingestable.toml, postgres_multi_table_ingestable.toml)
-// all use schema-qualified names; quoteIdent here used to break them.
-func ensurePublication(ctx context.Context, conn *pgconn.PgConn, pgCfg *pgConfig) error {
+// Without reconciliation, pgoutput only streams the tables the publication had
+// when first created, so two silent-row-loss cases slip through: (a) a re-POST
+// adds a table to sql.tables — the publication is untouched, and because the
+// slot already exists no snapshot runs either, so the table is never streamed;
+// (b) a watched table is DROPped + reCREATEd on the source — Postgres auto-drops
+// it from the publication and the recreated table (new OID) is never re-added.
+// ADD-ing each configured table (skipping "already member") covers both.
+//
+// Table names are quoted via quoteTable (not quoteIdent) so schema-qualified
+// entries like "public.orders" become "public"."orders" — a schema-qualified
+// reference — instead of one literal identifier with a dot in it.
+func ensurePublication(ctx context.Context, conn *pgconn.PgConn, pgCfg *pgConfig) ([]string, error) {
 	quoted := make([]string, len(pgCfg.tables))
 	for i, t := range pgCfg.tables {
 		quoted[i] = quoteTable(t)
 	}
 	tableList := strings.Join(quoted, ", ")
-	query := fmt.Sprintf("CREATE PUBLICATION %s FOR TABLE %s", quoteIdent(pgCfg.publication), tableList)
-	result := conn.Exec(ctx, query)
-	_, err := result.ReadAll()
-	if err != nil {
-		if strings.Contains(err.Error(), "already exists") {
-			return nil
+	create := fmt.Sprintf("CREATE PUBLICATION %s FOR TABLE %s", quoteIdent(pgCfg.publication), tableList)
+	if _, err := conn.Exec(ctx, create).ReadAll(); err != nil {
+		if !strings.Contains(err.Error(), "already exists") {
+			return nil, err
 		}
-		return err
+		// Publication exists — reconcile. ADD each configured table; Postgres
+		// reports the ones already present ("already member"), which we skip. The
+		// ones that ADD accepts are new to the publication and need a backfill.
+		var added []string
+		for _, t := range pgCfg.tables {
+			alter := fmt.Sprintf("ALTER PUBLICATION %s ADD TABLE %s", quoteIdent(pgCfg.publication), quoteTable(t))
+			if _, err := conn.Exec(ctx, alter).ReadAll(); err != nil {
+				if strings.Contains(err.Error(), "already member") {
+					continue
+				}
+				return nil, fmt.Errorf("reconcile publication: add table %s: %w", t, err)
+			}
+			added = append(added, t)
+		}
+		return added, nil
 	}
-	return nil
+	// Freshly created with every configured table. The caller's slot-is-new
+	// branch does the full snapshot; if the slot somehow already exists, these
+	// are treated as newly-added and backfilled.
+	return pgCfg.tables, nil
 }
 
 // tupleToEntity converts a pgoutput tuple into a cluster.Entity using the
@@ -1014,6 +1049,7 @@ func (d *PostgreSQLDialect) snapshot(
 	ctx context.Context,
 	config *sql.Config,
 	pgCfg *pgConfig,
+	tables []string,
 	resumeProgress *dialectpb.SnapshotProgress,
 	lsn pglogrepl.LSN,
 	pr chan<- *cluster.Proposal,
@@ -1040,7 +1076,7 @@ func (d *PostgreSQLDialect) snapshot(
 		}
 	}
 
-	for _, table := range pgCfg.tables {
+	for _, table := range tables {
 		if completed[table] {
 			zap.L().Info("snapshot: skipping already-completed table",
 				zap.String("table", table),
