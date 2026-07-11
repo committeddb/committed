@@ -163,7 +163,10 @@ func (db *DB) Ingest(_ context.Context, id string, i cluster.Ingestable) error {
 		replaced = true
 		existing.cancel()
 		db.workersMu.Unlock()
-		<-existing.done
+		if !waitDone(existing.done, db.workerDrainTimeout) {
+			db.logger.Warn("ingest replace: prior worker did not exit in time; abandoning it (wedged on its source?) and proceeding",
+				zap.String("id", id), zap.Duration("timeout", db.workerDrainTimeout))
+		}
 		db.workersMu.Lock()
 		if db.closed {
 			db.workersMu.Unlock()
@@ -212,7 +215,10 @@ func (db *DB) deleteIngest(id string) {
 	if ok {
 		handle.cancel()
 		db.workersMu.Unlock()
-		<-handle.done
+		if !waitDone(handle.done, db.workerDrainTimeout) {
+			db.logger.Warn("delete ingest: worker did not exit in time; abandoning it (wedged on its source?) and proceeding",
+				zap.String("id", id), zap.Duration("timeout", db.workerDrainTimeout))
+		}
 		db.workersMu.Lock()
 		if db.ingestWorkers[id] == handle {
 			delete(db.ingestWorkers, id)

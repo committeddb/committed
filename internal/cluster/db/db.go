@@ -214,6 +214,22 @@ type DB struct {
 	// TestRebuildSyncable_StaleWorkerBumpDoesNotDefeatReset.
 	afterRebuildCheckpointReset func()
 
+	// syncCh / ingestCh are the config-notification channels the apply path
+	// (wal.Storage) sends on and listenForSyncables/Ingestables receive from.
+	// Close keeps a drain goroutine reading them while it stops raft, so a
+	// config entity applied during shutdown can't block the apply loop's send
+	// (with the listeners already gone) and hang raft.Close.
+	syncCh   <-chan *SyncableWithID
+	ingestCh <-chan *IngestableWithID
+
+	// workerDrainTimeout bounds how long the listener-path worker handoffs
+	// (Sync/Ingest replace, deleteSync/deleteIngest) wait for a cancelled worker
+	// to exit before abandoning it. Unbounded, a worker wedged in tx.Commit
+	// against an unreachable destination would park the single-threaded listener
+	// and stall the raft apply loop on its next config send. Defaults to
+	// closeDrainTimeout; tests override it to keep the wedged-worker cases fast.
+	workerDrainTimeout time.Duration
+
 	logger  *zap.Logger
 	metrics *metrics.Metrics
 }
@@ -293,6 +309,7 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		i++
 	}
 
+	//nolint:gosec // G118: cancelSyncs is stored in db.cancelSyncs and called by Close.
 	ctx, cancelSyncs := context.WithCancel(context.Background())
 
 	db := &DB{
@@ -331,6 +348,10 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 	// every other process's — see randomRequestIDBase and notifyApplied. Set
 	// before any proposal (the raft/goroutine wiring below) can draw an id.
 	db.nextRequestID.Store(randomRequestIDBase())
+
+	db.syncCh = sync
+	db.ingestCh = ingest
+	db.workerDrainTimeout = closeDrainTimeout
 
 	if db.diskReportInterval == 0 {
 		db.diskReportInterval = DefaultDiskReportInterval
@@ -787,6 +808,32 @@ func (db *DB) Close() error {
 
 	db.cancelSyncs()
 
+	// The listeners have now been told to exit, but the raft apply loop is still
+	// running below (until db.raft.Close). If it applies a committed config
+	// entity, wal.Storage sends on syncCh/ingestCh — and with no listener
+	// receiving, that bare send blocks the serveChannels goroutine forever, so
+	// the db.raft.Close() that waits on it would hang, defeating graceful
+	// shutdown. Drain the channels for the rest of Close so the send always has a
+	// receiver. A config notification dropped here is re-emitted from storage on
+	// the next start, so nothing is lost.
+	drainStop := make(chan struct{})
+	drainDone := make(chan struct{})
+	go func() {
+		defer close(drainDone)
+		for {
+			select {
+			case <-db.syncCh:
+			case <-db.ingestCh:
+			case <-drainStop:
+				return
+			}
+		}
+	}()
+	defer func() {
+		close(drainStop)
+		<-drainDone
+	}()
+
 	db.workersMu.Lock()
 	db.closed = true
 	handles := make([]*workerHandle, 0, len(db.ingestWorkers)+len(db.syncWorkers))
@@ -832,6 +879,23 @@ func (db *DB) Close() error {
 // the orchestrator to SIGKILL. Stragglers are abandoned: their goroutines die on
 // process exit and the sync re-applies idempotently on the next start.
 const closeDrainTimeout = 10 * time.Second
+
+// waitDone waits for a cancelled worker's done channel, up to timeout. It
+// returns true if the worker exited, false if the timeout fired first (a wedged
+// worker to abandon). The listener-path handoffs (Sync/Ingest replace,
+// deleteSync/deleteIngest) use it so a worker stuck in tx.Commit against an
+// unreachable destination can't park the single-threaded listener — and thereby
+// stall the raft apply loop on its next config send — indefinitely. An abandoned
+// worker was already cancelled; it exits when its tx unwedges, and it's removed
+// from the registry regardless so the caller doesn't spin on it.
+func waitDone(done <-chan struct{}, timeout time.Duration) bool {
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
 
 // drainWorkers waits for each worker handle's done channel, up to timeout in
 // total, and returns the count still running when the deadline passed. Workers

@@ -35,6 +35,25 @@ func (db *DB) InjectStaleWorkerBumpOnRebuildResetForTest(id string, staleIndex u
 	}
 }
 
+// SetWorkerDrainTimeoutForTest overrides the bound the listener-path worker
+// handoffs (Sync/Ingest replace, deleteSync/deleteIngest) wait for a cancelled
+// worker before abandoning it, so a wedged-worker test runs fast.
+func (db *DB) SetWorkerDrainTimeoutForTest(d time.Duration) { db.workerDrainTimeout = d }
+
+// InjectWedgedSyncWorkerForTest registers a sync worker handle whose done
+// channel never closes — modelling a worker stuck in tx.Commit against an
+// unreachable destination that ignores its cancelled context. deleteSync/replace
+// must abandon it within workerDrainTimeout rather than block the listener (and
+// thus the raft apply loop) forever.
+func (db *DB) InjectWedgedSyncWorkerForTest(id string) {
+	db.workersMu.Lock()
+	db.syncWorkers[id] = &workerHandle{cancel: func() {}, done: make(chan struct{})}
+	db.workersMu.Unlock()
+}
+
+// DeleteSyncForTest drives the apply-path syncable teardown directly.
+func (db *DB) DeleteSyncForTest(id string) { db.deleteSync(id) }
+
 // NextRequestIDForTest draws the next RequestID exactly as proposeAsync would,
 // so a test can observe the per-process seed (randomRequestIDBase) without
 // standing up the full propose→raft→apply path.

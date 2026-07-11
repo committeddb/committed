@@ -91,7 +91,10 @@ func (db *DB) Sync(_ context.Context, id string, s cluster.Syncable) error {
 		replaced = true
 		existing.cancel()
 		db.workersMu.Unlock()
-		<-existing.done
+		if !waitDone(existing.done, db.workerDrainTimeout) {
+			db.logger.Warn("sync replace: prior worker did not exit in time; abandoning it (wedged on its destination?) and proceeding",
+				zap.String("id", id), zap.Duration("timeout", db.workerDrainTimeout))
+		}
 		db.workersMu.Lock()
 		if db.closed {
 			db.workersMu.Unlock()
@@ -165,7 +168,10 @@ func (db *DB) deleteSync(id string) {
 	if ok {
 		handle.cancel()
 		db.workersMu.Unlock()
-		<-handle.done
+		if !waitDone(handle.done, db.workerDrainTimeout) {
+			db.logger.Warn("delete sync: worker did not exit in time; abandoning it (wedged on its destination?) and proceeding",
+				zap.String("id", id), zap.Duration("timeout", db.workerDrainTimeout))
+		}
 		db.workersMu.Lock()
 		if db.syncWorkers[id] == handle {
 			delete(db.syncWorkers, id)
