@@ -1023,35 +1023,57 @@ func (h *MySQLEventHandler) runStream(ctx context.Context, streamer *replication
 			return err
 		}
 
-		switch e := ev.Event.(type) {
-		case *replication.RotateEvent:
-			// A real rotation moves curFile so subsequent commits checkpoint
-			// against the right file; the start-of-stream fake rotate that only
-			// restates the current file is ignored.
-			if isSkippableFakeRotate(ev.Header.Timestamp, string(e.NextLogName), h.curFile) {
-				continue
-			}
-			h.curFile = string(e.NextLogName)
-		case *replication.GTIDEvent:
-			// The GTID of the transaction about to stream; merged into the
-			// consumed set when that transaction commits (handleXID).
-			gtid, err := e.GTIDNext()
-			if err != nil {
-				return fmt.Errorf("decode GTID event: %w", err)
-			}
-			h.curTxnGTID = gtid
-		case *replication.RowsEvent:
-			if err := h.handleRows(ctx, ev.Header, e); err != nil {
-				return err
-			}
-		case *replication.XIDEvent:
-			if err := h.handleXID(ctx, ev.Header); err != nil {
-				return err
-			}
-		case *replication.QueryEvent:
-			h.handleDDL(e)
+		if err := h.dispatchEvent(ctx, ev.Header, ev.Event); err != nil {
+			return err
 		}
 	}
+}
+
+// dispatchEvent routes one binlog event (its header + payload) into the
+// buffer/flush/position handlers. It is called once per top-level GetEvent, and
+// recursively for each sub-event of a compressed TransactionPayloadEvent — with
+// the OUTER event's header in the recursive case (see that case for why).
+func (h *MySQLEventHandler) dispatchEvent(ctx context.Context, header *replication.EventHeader, event replication.Event) error {
+	switch e := event.(type) {
+	case *replication.RotateEvent:
+		// A real rotation moves curFile so subsequent commits checkpoint
+		// against the right file; the start-of-stream fake rotate that only
+		// restates the current file is ignored.
+		if isSkippableFakeRotate(header.Timestamp, string(e.NextLogName), h.curFile) {
+			return nil
+		}
+		h.curFile = string(e.NextLogName)
+	case *replication.GTIDEvent:
+		// The GTID of the transaction about to stream; merged into the
+		// consumed set when that transaction commits (handleXID).
+		gtid, err := e.GTIDNext()
+		if err != nil {
+			return fmt.Errorf("decode GTID event: %w", err)
+		}
+		h.curTxnGTID = gtid
+	case *replication.RowsEvent:
+		return h.handleRows(ctx, header, e)
+	case *replication.XIDEvent:
+		return h.handleXID(ctx, header)
+	case *replication.QueryEvent:
+		h.handleDDL(e)
+	case *replication.TransactionPayloadEvent:
+		// A compressed transaction (binlog_transaction_compression=ON, GA since
+		// MySQL 8.0.20 and common on managed MySQL): the server wraps this txn's
+		// TableMap/Rows/XID events inside one payload event that go-mysql decodes
+		// but does NOT auto-expand. Without dispatching the sub-events, every
+		// compressed transaction is silently dropped — no rows, and the XID never
+		// fires so the binlog position never advances (a stalled, silent-data-loss
+		// ingest). Route each decompressed sub-event through the same handlers,
+		// passing THIS (outer) header so the commit position is the payload's real
+		// file offset: the inner sub-events carry end_log_pos == 0.
+		for _, sub := range e.Events {
+			if err := h.dispatchEvent(ctx, header, sub.Event); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // encodeSourceSeq maps a binlog coordinate (file, offset) plus an intra-coordinate
