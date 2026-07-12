@@ -618,12 +618,31 @@ type MySQLEventHandler struct {
 func mysqlCategoryForTypeName(name string) sql.JSONCategory {
 	switch strings.ToUpper(name) {
 	case "TINYINT", "SMALLINT", "MEDIUMINT", "INT", "INTEGER", "BIGINT", "YEAR",
-		"FLOAT", "DOUBLE", "DECIMAL", "NUMERIC":
+		"FLOAT", "DOUBLE", "DECIMAL", "NUMERIC",
+		// BIT is an integer: the binlog path decodes it to an int64 (rendered as a
+		// JSON number), so the snapshot must classify it numeric too — readBatch
+		// converts the driver's raw BIT bytes to that same int64 (see bitToInt64)
+		// so both paths emit an identical number instead of the snapshot's byte
+		// string ("A") diverging from CDC's number (65).
+		"BIT":
 		return sql.CatNumber
 	case "JSON":
 		return sql.CatJSON
 	}
 	return sql.CatText
+}
+
+// bitToInt64 converts a BIT column's bytes — as database/sql returns them, the
+// value's bytes most-significant first — into the same int64 the binlog path
+// produces (go-mysql accumulates BIT bytes big-endian into an int64). This keeps
+// a BIT column's snapshot render byte-identical to its CDC render, both as a JSON
+// number and in the composite key. BIT is at most 64 bits (8 bytes).
+func bitToInt64(b []byte) int64 {
+	var u uint64
+	for _, x := range b {
+		u = u<<8 | uint64(x)
+	}
+	return int64(u)
 }
 
 // decodeEnumSet resolves the numeric binlog encoding of ENUM and SET columns to
@@ -1523,6 +1542,18 @@ func readBatch(
 		}
 		if err := rows.Scan(ptrs...); err != nil {
 			return nil, "", 0, err
+		}
+
+		// database/sql returns a BIT column as its raw bytes, but the binlog path
+		// decodes BIT to an int64. Convert here so a BIT value renders as the same
+		// JSON number (and keys identically) on both paths, instead of the snapshot
+		// emitting the bytes as a text string ("A") while CDC emits the number (65).
+		for i, ct := range colTypes {
+			if ct.DatabaseTypeName() == "BIT" {
+				if b, ok := vals[i].([]byte); ok {
+					vals[i] = bitToInt64(b)
+				}
+			}
 		}
 
 		// m holds the text form, used only for the entity key (unchanged so keys

@@ -48,7 +48,7 @@ func TestTupleToEntity_UnchangedToastReselected(t *testing.T) {
 	pgCfg := &pgConfig{tables: []string{"public.t"}}
 
 	// Without a resolver: the unchanged TOAST column is null — the bug this fixes.
-	eNull := tupleToEntity(context.Background(), tuple, 1, relations, config, pgCfg, false, nil)
+	eNull := tupleToEntity(context.Background(), tuple, 1, relations, config, pgCfg, false, nil, nil)
 	require.NotNil(t, eNull)
 	var pNull map[string]any
 	require.NoError(t, json.Unmarshal(eNull.Data, &pNull))
@@ -61,7 +61,7 @@ func TestTupleToEntity_UnchangedToastReselected(t *testing.T) {
 		require.Equal(t, []string{"big"}, cols)
 		return map[string]string{"big": "restored-toast-value"}, nil
 	}
-	eFilled := tupleToEntity(context.Background(), tuple, 1, relations, config, pgCfg, false, resolve)
+	eFilled := tupleToEntity(context.Background(), tuple, 1, relations, config, pgCfg, false, resolve, nil)
 	require.NotNil(t, eFilled)
 	var pFilled map[string]any
 	require.NoError(t, json.Unmarshal(eFilled.Data, &pFilled))
@@ -121,7 +121,7 @@ func TestTupleToEntity_UnchangedToastMixedCaseColumn(t *testing.T) {
 		return out, nil
 	}
 
-	e := tupleToEntity(context.Background(), tuple, 1, relations, config, pgCfg, false, resolve)
+	e := tupleToEntity(context.Background(), tuple, 1, relations, config, pgCfg, false, resolve, nil)
 	require.NotNil(t, e)
 	var p map[string]any
 	require.NoError(t, json.Unmarshal(e.Data, &p))

@@ -508,6 +508,11 @@ func (d *PostgreSQLDialect) stream(
 	}
 	defer func() { _ = sqlDB.Close() }()
 
+	// Resolves relation-message type OIDs to JSON categories, following user
+	// DOMAIN types to their base type so a domain column classifies the same as
+	// it does on the snapshot path. Backed by the same non-replication conn.
+	catResolver := newOIDCategoryResolver(sqlDB)
+
 	resolve := func(ctx context.Context, table string, pk map[string]string, cols []string) (map[string]string, error) {
 		sel := make([]string, len(cols))
 		for i, c := range cols {
@@ -677,7 +682,7 @@ func (d *PostgreSQLDialect) stream(
 				if skippingTxn {
 					break
 				}
-				if e := tupleToEntity(ctx, m.Tuple, m.RelationID, relations, config, pgCfg, false, resolve); e != nil {
+				if e := tupleToEntity(ctx, m.Tuple, m.RelationID, relations, config, pgCfg, false, resolve, catResolver); e != nil {
 					pending = append(pending, e)
 				}
 				if len(pending) >= maxPendingEntities {
@@ -690,7 +695,7 @@ func (d *PostgreSQLDialect) stream(
 				if skippingTxn {
 					break
 				}
-				if e := tupleToEntity(ctx, m.NewTuple, m.RelationID, relations, config, pgCfg, false, resolve); e != nil {
+				if e := tupleToEntity(ctx, m.NewTuple, m.RelationID, relations, config, pgCfg, false, resolve, catResolver); e != nil {
 					pending = append(pending, e)
 					// A PK-changing UPDATE writes the new-key row above but would
 					// orphan the old-key row downstream (two rows for one source
@@ -701,7 +706,7 @@ func (d *PostgreSQLDialect) stream(
 					// FULL sends it always, so the key-equality guard suppresses a
 					// spurious tombstone on a non-key UPDATE.
 					if m.OldTuple != nil {
-						if old := tupleToEntity(ctx, m.OldTuple, m.RelationID, relations, config, pgCfg, true, resolve); old != nil && !bytes.Equal(old.Key, e.Key) {
+						if old := tupleToEntity(ctx, m.OldTuple, m.RelationID, relations, config, pgCfg, true, resolve, catResolver); old != nil && !bytes.Equal(old.Key, e.Key) {
 							pending = append(pending, old)
 						}
 					}
@@ -723,7 +728,7 @@ func (d *PostgreSQLDialect) stream(
 				// pre-image is not a payload to write downstream. The
 				// syncable removes the keyed record (cluster.Syncable
 				// honor-deletes contract).
-				if e := tupleToEntity(ctx, m.OldTuple, m.RelationID, relations, config, pgCfg, true, resolve); e != nil {
+				if e := tupleToEntity(ctx, m.OldTuple, m.RelationID, relations, config, pgCfg, true, resolve, catResolver); e != nil {
 					pending = append(pending, e)
 				}
 				if len(pending) >= maxPendingEntities {
@@ -911,6 +916,65 @@ func pgCategoryForTypeName(name string) sql.JSONCategory {
 	return sql.CatText
 }
 
+// oidCategoryResolver maps a relation-message type OID to a JSON category,
+// resolving user-defined DOMAIN types to the base type they wrap. A domain's OID
+// is dynamic and unknown to pgCategoryForOID, so a domain-over-numeric column
+// would fall through to CatText (a JSON string) on the CDC path while the snapshot
+// classifies it by its base type (DatabaseTypeName reports "NUMERIC") and renders
+// a number — a byte divergence on the first CDC update after snapshot. Resolving
+// the domain to its base makes both paths agree. Lookups are cached; the CDC
+// stream is single-goroutine, so no lock is needed. A nil resolver (tests, or if
+// the connection is unavailable) falls back to pgCategoryForOID via columnCategory.
+type oidCategoryResolver struct {
+	db    *gosql.DB
+	cache map[uint32]sql.JSONCategory
+}
+
+func newOIDCategoryResolver(db *gosql.DB) *oidCategoryResolver {
+	return &oidCategoryResolver{db: db, cache: make(map[uint32]sql.JSONCategory)}
+}
+
+// category returns the JSON category for oid, resolving a domain to its base type.
+func (r *oidCategoryResolver) category(ctx context.Context, oid uint32) sql.JSONCategory {
+	// A base type pgCategoryForOID already recognizes needs no lookup.
+	if c := pgCategoryForOID(oid); c != sql.CatText {
+		return c
+	}
+	if c, ok := r.cache[oid]; ok {
+		return c
+	}
+	c := r.resolveDomain(ctx, oid)
+	r.cache[oid] = c
+	return c
+}
+
+// resolveDomain follows a chain of domains (a domain can wrap another domain) to
+// the underlying base type and classifies by it. Anything that is not a domain,
+// or that can't be read, keeps the CatText default — the pre-fix behavior.
+func (r *oidCategoryResolver) resolveDomain(ctx context.Context, oid uint32) sql.JSONCategory {
+	cur := oid
+	for range 16 { // bound the walk; a domain chain is short and can't cycle
+		var typtype string
+		var typbasetype uint32
+		err := r.db.QueryRowContext(ctx,
+			"SELECT typtype, typbasetype FROM pg_type WHERE oid = $1", cur).Scan(&typtype, &typbasetype)
+		if err != nil || typtype != "d" || typbasetype == 0 {
+			return pgCategoryForOID(cur) // not a domain (or unreadable) — classify by this OID
+		}
+		cur = typbasetype // domain over cur's base — follow it
+	}
+	return sql.CatText
+}
+
+// columnCategory resolves a column's OID to a category, using the domain-aware
+// resolver when present and falling back to the plain OID map otherwise.
+func columnCategory(ctx context.Context, r *oidCategoryResolver, oid uint32) sql.JSONCategory {
+	if r == nil {
+		return pgCategoryForOID(oid)
+	}
+	return r.category(ctx, oid)
+}
+
 // unchangedResolver fetches the current text values of columns a pgoutput UPDATE
 // left unchanged (Postgres omits unchanged TOASTed values from the new tuple),
 // keyed by lowercased column name, by re-selecting the row by primary key.
@@ -987,6 +1051,7 @@ func tupleToEntity(
 	pgCfg *pgConfig,
 	isDelete bool,
 	resolve unchangedResolver,
+	catResolver *oidCategoryResolver,
 ) *cluster.Entity {
 	if tuple == nil {
 		return nil
@@ -1050,7 +1115,7 @@ func tupleToEntity(
 	// natural JSON type rather than the pgoutput text.
 	cat := make(map[string]sql.JSONCategory, len(rel.Columns))
 	for _, rc := range rel.Columns {
-		cat[strings.ToLower(rc.Name)] = pgCategoryForOID(rc.DataType)
+		cat[strings.ToLower(rc.Name)] = columnCategory(ctx, catResolver, rc.DataType)
 	}
 	toJSON := sql.BuildEntityJSON(config.Mappings, m, cat)
 

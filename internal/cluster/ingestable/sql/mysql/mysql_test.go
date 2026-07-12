@@ -1847,6 +1847,95 @@ func TestMysqlSnapshotStreamTimeByteIdentity(t *testing.T) {
 	require.Equal(t, "2024-01-15", field(seen["a"], "d"), "DATE text form")
 }
 
+// TestMysqlSnapshotStreamJSONBitByteIdentity is the snapshot==CDC invariant for
+// JSON and BIT columns. A JSON column's bytes must match (key order, spacing,
+// number formatting) and a BIT column must render identically, or the same row's
+// bytes flip on its first CDC update after snapshot (replay/dedup compares bytes).
+func TestMysqlSnapshotStreamJSONBitByteIdentity(t *testing.T) {
+	table := "jsonbit_table"
+	db := createDB(t)
+	_, err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS `%s`", table))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf(
+		"CREATE TABLE `%s` (pk VARCHAR(32) PRIMARY KEY, j JSON, b BIT(8))", table))
+	require.NoError(t, err)
+	// Keys deliberately out of alphabetical AND length order to expose key-order
+	// divergence; a >2^53 int and a decimal to expose number reformatting.
+	const vals = `'{"zebra": 1, "id": 2, "apple": 3, "big": 10000000000000001, "dec": 1.50}', b'01000001'`
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, j, b) VALUES ('a', %s)", table, vals))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, j, b) VALUES ('__sentinel__', %s)", table, vals))
+	require.NoError(t, err)
+	db.Close()
+
+	config := &sql.Config{
+		Type: &cluster.Type{ID: "jsonbit", Name: "jsonbit"},
+		Mappings: []sql.Mapping{
+			{JsonName: "pk", SQLColumn: "pk"},
+			{JsonName: "j", SQLColumn: "j"},
+			{JsonName: "b", SQLColumn: "b"},
+		},
+		PrimaryKey:       []string{"pk"},
+		ConnectionString: ingestURL,
+		Tables:           []string{table},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	proposalChan := make(chan *cluster.Proposal, 10)
+	positionChan := make(chan cluster.Position, 10)
+	go func() { _ = (&mysql.MySQLDialect{}).Ingest(ctx, config, nil, proposalChan, positionChan) }()
+
+	seen := map[string][]byte{}
+	drainUntil := func(pred func() bool, what string) {
+		t.Helper()
+		deadline := time.After(30 * time.Second)
+		for !pred() {
+			select {
+			case p := <-proposalChan:
+				for _, e := range p.Entities {
+					seen[string(e.Key)] = e.Data
+				}
+			case <-positionChan:
+			case <-deadline:
+				t.Fatalf("timed out waiting for %s", what)
+			}
+		}
+	}
+	drainUntil(func() bool {
+		_, a := seen["a"]
+		_, s := seen["__sentinel__"]
+		return a && s
+	}, "snapshot")
+
+	mdb := createDB(t)
+	defer mdb.Close()
+	_, err = mdb.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, j, b) VALUES ('b', %s)", table, vals))
+	require.NoError(t, err)
+	drainUntil(func() bool { _, ok := seen["b"]; return ok }, "CDC row b")
+
+	// Compare the RAW bytes of each field (not the decoded value — a semantic
+	// compare would hide key-order/spacing divergence in a JSON column).
+	rawField := func(payload []byte, name string) string {
+		var m map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(payload, &m))
+		return string(m[name])
+	}
+	t.Logf("snapshot j = %s", rawField(seen["a"], "j"))
+	t.Logf("CDC      j = %s", rawField(seen["b"], "j"))
+	t.Logf("snapshot b = %s", rawField(seen["a"], "b"))
+	t.Logf("CDC      b = %s", rawField(seen["b"], "b"))
+	require.Equal(t, rawField(seen["a"], "j"), rawField(seen["b"], "j"),
+		"snapshot and CDC must emit byte-identical JSON")
+	require.Equal(t, rawField(seen["a"], "b"), rawField(seen["b"], "b"),
+		"snapshot and CDC must emit byte-identical BIT")
+
+	// Pin the canonical forms both paths converge on.
+	require.Equal(t, `{"apple":3,"big":10000000000000001,"dec":1.5,"id":2,"zebra":1}`,
+		rawField(seen["a"], "j"), "JSON canonicalized to recursively-sorted keys, exact numbers")
+	require.Equal(t, "65", rawField(seen["a"], "b"), "BIT renders as a JSON number")
+}
+
 // TestMysqlSnapshotResume verifies that an interrupted snapshot resumes
 // from the checkpointed per-table pk instead of re-reading already-
 // flushed rows. A synthetic resume position with snapshot_progress is

@@ -628,6 +628,107 @@ func TestPostgresSnapshotStreamByteIdentity(t *testing.T) {
 	}
 }
 
+// TestPostgresSnapshotStreamDomainByteIdentity is the snapshot==CDC invariant for
+// user-defined DOMAIN columns. The snapshot classifies a domain by its base type
+// (DatabaseTypeName reports "NUMERIC"/"BOOL"), so it renders a domain-over-numeric
+// as a JSON number; CDC gets the domain's own OID in the relation message, which
+// is unknown to pgCategoryForOID and so fell through to a string — diverging on
+// the first CDC update after snapshot. The fix resolves the domain OID to its
+// base type on the CDC path.
+func TestPostgresSnapshotStreamDomainByteIdentity(t *testing.T) {
+	const table = "pgtest_domainident"
+	config := &sql.Config{
+		Type:             &cluster.Type{ID: "domainident", Name: "domainident"},
+		ConnectionString: connString,
+		Tables:           []string{table},
+		PrimaryKey:       []string{"pk"},
+		Mappings: []sql.Mapping{
+			{JsonName: "pk", SQLColumn: "pk"},
+			{JsonName: "amt", SQLColumn: "amt"},
+			{JsonName: "flag", SQLColumn: "flag"},
+		},
+		Options: map[string]string{"slot_name": "slot_domainident", "publication": "pub_domainident"},
+	}
+
+	db := createDB(t)
+	_, err := db.Exec(`DROP TABLE IF EXISTS ` + table)
+	require.NoError(t, err)
+	// Drop the domains after the table (the table depends on them), then recreate.
+	_, err = db.Exec(`DROP DOMAIN IF EXISTS test_amount`)
+	require.NoError(t, err)
+	_, err = db.Exec(`DROP DOMAIN IF EXISTS test_flag`)
+	require.NoError(t, err)
+	_, err = db.Exec(`CREATE DOMAIN test_amount AS NUMERIC(12,2)`)
+	require.NoError(t, err)
+	_, err = db.Exec(`CREATE DOMAIN test_flag AS BOOLEAN`)
+	require.NoError(t, err)
+	_, err = db.Exec(`CREATE TABLE ` + table +
+		` (pk VARCHAR(32) PRIMARY KEY, amt test_amount, flag test_flag)`)
+	require.NoError(t, err)
+	const vals = `9.50, true`
+	_, err = db.Exec(`INSERT INTO ` + table + ` VALUES ('a', ` + vals + `)`)
+	require.NoError(t, err)
+	db.Close()
+
+	cleanReplication(t, "slot_domainident", "pub_domainident")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	proposalChan := make(chan *cluster.Proposal, 10)
+	positionChan := make(chan cluster.Position, 10)
+	ingestErr := make(chan error, 1)
+	go func() {
+		ingestErr <- (&postgres.PostgreSQLDialect{}).Ingest(ctx, config, nil, proposalChan, positionChan)
+	}()
+
+	waitForSlot(t, "slot_domainident")
+
+	db = createDB(t)
+	_, err = db.Exec(`INSERT INTO ` + table + ` VALUES ('b', ` + vals + `)`)
+	require.NoError(t, err)
+	db.Close()
+
+	seen := map[string][]byte{}
+	deadline := time.After(20 * time.Second)
+	for len(seen) < 2 {
+		select {
+		case p := <-proposalChan:
+			for _, e := range p.Entities {
+				seen[string(e.Key)] = e.Data
+			}
+		case <-positionChan:
+		case <-deadline:
+			t.Fatalf("timed out; got %d of 2 entities", len(seen))
+		}
+	}
+	cancel()
+
+	field := func(payload []byte, name string) any {
+		dec := json.NewDecoder(bytes.NewReader(payload))
+		dec.UseNumber()
+		var m map[string]any
+		require.NoError(t, dec.Decode(&m))
+		return m[name]
+	}
+	for _, col := range []string{"amt", "flag"} {
+		require.Equal(t, field(seen["a"], col), field(seen["b"], col),
+			"snapshot and CDC must emit identical %q bytes for the same value", col)
+	}
+	// The domain resolves to its base type on both paths: numeric → number
+	// (exact text), boolean → bool — not a quoted string.
+	require.Equal(t, json.Number("9.50"), field(seen["a"], "amt"),
+		"domain-over-numeric renders as an exact number")
+	require.Equal(t, true, field(seen["a"], "flag"),
+		"domain-over-bool renders as a bool")
+
+	select {
+	case err := <-ingestErr:
+		require.Nil(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Ingest did not exit after cancel")
+	}
+}
+
 // TestPostgresTeardownSourceDropsSlot is the slot-leak success criterion:
 // tearing down a deleted ingestable drops its replication slot (and publication)
 // on the source, so the orphaned slot can't pin the source's WAL and fill its

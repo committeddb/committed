@@ -65,11 +65,41 @@ func JSONValue(raw any, cat JSONCategory) any {
 			return false
 		}
 	case CatJSON:
-		if json.Valid([]byte(text)) {
-			return json.RawMessage(text)
+		if canon, ok := canonicalJSON(text); ok {
+			return canon
 		}
 	}
 	return text
+}
+
+// canonicalJSON re-serializes a JSON document into a stable canonical form so the
+// snapshot and CDC paths emit byte-identical bytes for the same value. Both paths
+// hand JSONValue a valid JSON document, but in different spellings — e.g. MySQL's
+// snapshot returns keys in length-then-bytes order while go-mysql's binlog decode
+// re-marshals them alphabetically, so `{"id":2,"apple":3}` (snapshot) diverged
+// from `{"apple":3,"id":2}` (CDC) on the first CDC update after snapshot,
+// defeating the byte-compare that replay/dedup relies on.
+//
+// Decoding with UseNumber and re-marshalling normalizes it: encoding/json sorts
+// object keys (recursively) and json.Number carries each number's exact source
+// text through unchanged, so precision and formatting survive. Returns ok=false
+// for anything that is not a single well-formed JSON value, so a malformed source
+// falls back to a plain string rather than an invalid payload (as before).
+func canonicalJSON(text string) (json.RawMessage, bool) {
+	dec := json.NewDecoder(strings.NewReader(text))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return nil, false
+	}
+	if dec.More() {
+		return nil, false // trailing content — not a single JSON value
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil, false
+	}
+	return json.RawMessage(b), true
 }
 
 // BuildEntityJSON maps a decoded source row into the topic payload, keyed by each
