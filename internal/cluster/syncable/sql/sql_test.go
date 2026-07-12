@@ -502,3 +502,38 @@ func TestSyncRollsBackOnApplyError(t *testing.T) {
 		require.Nil(t, mock.ExpectationsWereMet())
 	})
 }
+
+// TestSyncableCommitErrorRedacted is the commit-boundary PII-egress regression for
+// the plain SQL syncable: a deferred-constraint violation surfaces at tx.Commit()
+// (past the per-exec RedactedError coverage) and pgx/mysql can echo the bound
+// entity key as Key (col)=(value). The commit error must be a cluster.RedactedError
+// so the replicated dead-letter + stuck-status egress redacts it.
+func TestSyncableCommitErrorRedacted(t *testing.T) {
+	dialect, mock, err := testdialects.NewSQLMockDialect()
+	require.NoError(t, err)
+	db, err := sql.NewDB(dialect, "")
+	require.NoError(t, err)
+	defer db.Close()
+
+	syncable, insertPrepare, _ := newSimpleSyncable(t, mock, dialect, db)
+
+	const key = "pii-subject@example.com" // the entity Key, an RTBF subject
+	commitErr := errors.New("pq: deferred constraint violated; Key (k)=(" + key + ")")
+
+	mock.ExpectBegin()
+	insertPrepare.ExpectExec().WithArgs(key, "one", key, "one").WillReturnResult(sqlmock.NewResult(0, 1))
+	// A failed Commit finalizes the tx itself; the code does not (and must not)
+	// Rollback after it, so no ExpectRollback here.
+	mock.ExpectCommit().WillReturnError(commitErr)
+
+	_, err = syncable.Sync(context.Background(), &cluster.Actual{Entities: []*cluster.Entity{
+		cluster.NewUpsertEntity(simpleType, []byte(key), simpleJSON(t, key, "one")),
+	}})
+	require.Error(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+
+	var red cluster.RedactedError
+	require.True(t, errors.As(err, &red), "plain-syncable commit error must be a RedactedError")
+	require.NotContains(t, red.RedactedMessage(), key, "redacted message must not echo the bound key")
+	require.Contains(t, err.Error(), key)
+}

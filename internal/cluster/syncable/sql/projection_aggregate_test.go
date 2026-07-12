@@ -3,6 +3,7 @@ package sql_test
 import (
 	"context"
 	"database/sql/driver"
+	"errors"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -367,4 +368,98 @@ func TestProjectionLookupDeleteFansOut(t *testing.T) {
 	_, err := projection.Sync(context.Background(), actual)
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestProjectionAggregateLookupErrorRedacted is the PII-egress regression for the
+// aggregate prior-parent lookup: the query binds the child's entity Key (an RTBF
+// subject), and a driver error can echo the bound value. The dead-letter + stuck-
+// status egress redacts only cluster.RedactedError-typed errors, so this path's
+// error MUST satisfy it — otherwise the raw driver text (with the subject key)
+// lands in the permanent replicated dead-letter and the GET status/errors
+// responses.
+func TestProjectionAggregateLookupErrorRedacted(t *testing.T) {
+	projection, mock, p := newMockAggregateProjection(t)
+
+	const childKey = "pii-subject@example.com" // the entity Key bound into the lookup
+	driverErr := errors.New("pq: could not serialize access; Key (child_key)=(" + childKey + ") conflicts")
+
+	mock.ExpectBegin()
+	p.lookup.ExpectQuery().WithArgs(childKey).WillReturnError(driverErr)
+	mock.ExpectRollback()
+
+	actual := &cluster.Actual{Entities: []*cluster.Entity{cluster.NewUpsertEntity(
+		principalType, []byte(childKey),
+		[]byte(`{"tconst":"tt1","ordering":1,"nconst":"nm1","category":"actor"}`),
+	)}}
+	_, err := projection.Sync(context.Background(), actual)
+	require.Error(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+
+	var red cluster.RedactedError
+	require.True(t, errors.As(err, &red), "aggregate prior-parent lookup error must be a RedactedError")
+	require.NotContains(t, red.RedactedMessage(), childKey, "redacted message must not echo the bound key")
+	require.Contains(t, err.Error(), childKey, "node-local Error() keeps the full driver detail")
+}
+
+// TestProjectionFanOutErrorRedacted is the same regression for the lookup/fan-out
+// path: the affected-parents query binds the changed dimension key, and a driver
+// error can echo it. The error must be a RedactedError so the egress redacts it.
+func TestProjectionFanOutErrorRedacted(t *testing.T) {
+	projection, mock, p := newMockEnrichedProjection(t)
+
+	const dimKey = "nm-pii-subject@example.com" // the dimension entity Key bound into fan-out
+	dimArgs := []driver.Value{dimKey, `{"primary_name":"Al Pacino"}`}
+	dimArgs = append(dimArgs, dimArgs...) // mock dialect doubles like MySQL
+	driverErr := errors.New("pq: deadlock detected; Key (nconst)=(" + dimKey + ") referenced")
+
+	mock.ExpectBegin()
+	p.dimUpsert.ExpectExec().WithArgs(dimArgs...).WillReturnResult(sqlmock.NewResult(0, 1))
+	p.affected.ExpectQuery().WithArgs(dimKey).WillReturnError(driverErr)
+	mock.ExpectRollback()
+
+	actual := &cluster.Actual{Entities: []*cluster.Entity{cluster.NewUpsertEntity(
+		nameType, []byte(dimKey), []byte(`{"nconst":"`+dimKey+`","primary_name":"Al Pacino"}`),
+	)}}
+	_, err := projection.Sync(context.Background(), actual)
+	require.Error(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+
+	var red cluster.RedactedError
+	require.True(t, errors.As(err, &red), "fan-out affected-parents query error must be a RedactedError")
+	require.NotContains(t, red.RedactedMessage(), dimKey, "redacted message must not echo the bound key")
+	require.Contains(t, err.Error(), dimKey)
+}
+
+// TestProjectionCommitErrorRedacted covers the commit boundary: a deferred-
+// constraint violation surfaces at tx.Commit() (past the per-exec RedactedError
+// coverage) and pgx/mysql can echo Key (col)=(value). The commit error must also
+// be redacted before it reaches the replicated dead-letter / stuck status.
+func TestProjectionCommitErrorRedacted(t *testing.T) {
+	projection, mock, p := newMockAggregateProjection(t)
+
+	const childKey = "pii-subject@example.com"
+	sidecarArgs := []driver.Value{childKey, "tt1", "1", `{"nconst":"nm1"}`}
+	sidecarArgs = append(sidecarArgs, sidecarArgs...) // mock dialect doubles like MySQL
+	commitErr := errors.New("pq: deferred constraint violated; Key (parent_key)=(" + childKey + ")")
+
+	mock.ExpectBegin()
+	p.lookup.ExpectQuery().WithArgs(childKey).WillReturnRows(sqlmock.NewRows([]string{"parent_key"}))
+	p.upsertSidecar.ExpectExec().WithArgs(sidecarArgs...).WillReturnResult(sqlmock.NewResult(0, 1))
+	p.materialize.ExpectExec().WithArgs("tt1", "tt1").WillReturnResult(sqlmock.NewResult(0, 1))
+	// A failed Commit finalizes the tx itself; the code does not (and must not)
+	// Rollback after it, so no ExpectRollback here.
+	mock.ExpectCommit().WillReturnError(commitErr)
+
+	actual := &cluster.Actual{Entities: []*cluster.Entity{cluster.NewUpsertEntity(
+		principalType, []byte(childKey),
+		[]byte(`{"tconst":"tt1","ordering":1,"nconst":"nm1","category":"actor"}`),
+	)}}
+	_, err := projection.Sync(context.Background(), actual)
+	require.Error(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+
+	var red cluster.RedactedError
+	require.True(t, errors.As(err, &red), "commit error must be a RedactedError")
+	require.NotContains(t, red.RedactedMessage(), childKey, "redacted message must not echo the bound key")
+	require.Contains(t, err.Error(), childKey)
 }

@@ -194,11 +194,13 @@ func (c *Syncable) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldS
 	// something we can fix without per-driver hacks.
 	err = tx.Commit()
 	if err != nil {
-		rollbackErr := tx.Rollback()
-		if rollbackErr != nil {
-			return false, rollbackErr
-		}
-		return false, err
+		// A deferred-constraint violation surfaces here (past the per-exec
+		// RedactedError coverage) and can echo Key (col)=(value); redact it so the
+		// replicated dead-letter + stuck status never carry the bound value. No
+		// rollback: a failed Commit already finalized the tx and freed the
+		// connection, so a Rollback now only returns ErrTxDone and would mask this
+		// error.
+		return false, execFailure("[sql.apply] commit", err, c.dialect.IsPermanent(err))
 	}
 	zap.L().Debug("sql syncable committed")
 
@@ -227,11 +229,13 @@ func (c *Syncable) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool, e
 	zap.L().Debug("sql syncable batch committing", zap.Int("batch_size", len(as)))
 	err = tx.Commit()
 	if err != nil {
-		rollbackErr := tx.Rollback()
-		if rollbackErr != nil {
-			return false, rollbackErr
-		}
-		return false, err
+		// A deferred-constraint violation surfaces here (past the per-exec
+		// RedactedError coverage) and can echo Key (col)=(value); redact it so the
+		// replicated dead-letter + stuck status never carry the bound value. No
+		// rollback: a failed Commit already finalized the tx and freed the
+		// connection, so a Rollback now only returns ErrTxDone and would mask this
+		// error.
+		return false, execFailure("[sql.apply] commit", err, c.dialect.IsPermanent(err))
 	}
 	zap.L().Debug("sql syncable batch committed", zap.Int("batch_size", len(as)))
 

@@ -406,10 +406,12 @@ func (p *Projection) Sync(ctx context.Context, a *cluster.Actual) (cluster.Shoul
 	// in Syncable.Sync (sql.go): a hung commit is uninterruptible, a
 	// database/sql limitation.
 	if err := tx.Commit(); err != nil {
-		if rollbackErr := tx.Rollback(); rollbackErr != nil {
-			return false, rollbackErr
-		}
-		return false, err
+		// A deferred-constraint violation surfaces here (past the per-exec
+		// RedactedError coverage) and can echo Key (col)=(value); redact it. No
+		// rollback: a failed Commit already finalized the tx and freed the
+		// connection, so a Rollback now only returns ErrTxDone and would mask
+		// this error.
+		return false, execFailure("[sql-projection.apply] commit", err, p.dialect.IsPermanent(err))
 	}
 
 	return true, nil
@@ -434,10 +436,12 @@ func (p *Projection) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool,
 
 	zap.L().Debug("sql projection batch committing", zap.Int("batch_size", len(as)))
 	if err := tx.Commit(); err != nil {
-		if rollbackErr := tx.Rollback(); rollbackErr != nil {
-			return false, rollbackErr
-		}
-		return false, err
+		// A deferred-constraint violation surfaces here (past the per-exec
+		// RedactedError coverage) and can echo Key (col)=(value); redact it. No
+		// rollback: a failed Commit already finalized the tx and freed the
+		// connection, so a Rollback now only returns ErrTxDone and would mask
+		// this error.
+		return false, execFailure("[sql-projection.apply] commit", err, p.dialect.IsPermanent(err))
 	}
 
 	return true, nil
@@ -692,11 +696,12 @@ func (p *Projection) aggPriorParent(ctx context.Context, tx *gosql.Tx, ag *aggre
 	case gosql.ErrNoRows:
 		return "", false, nil
 	default:
-		wrapped := fmt.Errorf("[sql-projection.aggregate] exec [%s]: %w", ag.lookupSQL, err)
-		if p.dialect.IsPermanent(err) {
-			return "", false, cluster.Permanent(wrapped)
-		}
-		return "", false, wrapped
+		// The lookup binds childKey (an entity key = an RTBF subject); a driver
+		// error can echo it, so route through execFailure (a RedactedError) like
+		// the sibling exec sites — otherwise the raw text lands in the replicated
+		// dead-letter + stuck status.
+		return "", false, execFailure(
+			fmt.Sprintf("[sql-projection.aggregate] exec [%s]", ag.lookupSQL), err, p.dialect.IsPermanent(err))
 	}
 }
 
@@ -759,26 +764,26 @@ func (p *Projection) removeFromDimension(ctx context.Context, tx *gosql.Tx, src 
 // consistent at every checkpoint); bounded by the fan-out degree.
 func (p *Projection) fanOut(ctx context.Context, tx *gosql.Tx, lk *lookupRuntime, dimKey string) error {
 	for _, dep := range lk.dependents {
+		// The fan-out query binds dimKey (the changed dimension entity key = an
+		// RTBF subject); a driver error can echo it, so route these three egress
+		// points through execFailure (a RedactedError) like the sibling exec sites.
 		rows, err := tx.StmtContext(ctx, dep.affected).QueryContext(ctx, dimKey)
 		if err != nil {
-			wrapped := fmt.Errorf("[sql-projection.lookup] exec [%s]: %w", dep.affectedSQL, err)
-			if p.dialect.IsPermanent(err) {
-				return cluster.Permanent(wrapped)
-			}
-			return wrapped
+			return execFailure(
+				fmt.Sprintf("[sql-projection.lookup] exec [%s]", dep.affectedSQL), err, p.dialect.IsPermanent(err))
 		}
 		var parents []string
 		for rows.Next() {
 			var pk string
 			if err := rows.Scan(&pk); err != nil {
 				_ = rows.Close()
-				return fmt.Errorf("[sql-projection.lookup] scan affected parent: %w", err)
+				return execFailure("[sql-projection.lookup] scan affected parent", err, p.dialect.IsPermanent(err))
 			}
 			parents = append(parents, pk)
 		}
 		if err := rows.Err(); err != nil {
 			_ = rows.Close()
-			return fmt.Errorf("[sql-projection.lookup] affected parents: %w", err)
+			return execFailure("[sql-projection.lookup] affected parents", err, p.dialect.IsPermanent(err))
 		}
 		_ = rows.Close()
 
