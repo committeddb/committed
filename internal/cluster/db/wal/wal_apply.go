@@ -82,7 +82,10 @@ func (s *Storage) ApplyCommitted(entry *pb.Entry) error {
 		}
 
 		for _, entity := range p.Entities {
-			s.logger.Debug("applying entity", zap.String("typeID", entity.Type.ID), zap.String("key", string(entity.Key)))
+			// Never log the raw entity Key: for a user topic entity (and especially
+			// an RTBF delete) it is the erasure subject's PII. The typeID + raft
+			// index correlate the entry without exposing the subject.
+			s.logger.Debug("applying entity", zap.String("typeID", entity.Type.ID), zap.Uint64("index", entry.GetIndex()))
 			if err := s.applyEntity(entity); err != nil {
 				return err
 			}
