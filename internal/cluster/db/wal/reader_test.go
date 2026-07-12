@@ -145,6 +145,7 @@ func TestResumeReader(t *testing.T) {
 			id := "qux"
 			s := NewStorage(t, nil)
 			defer s.Cleanup()
+			require.NoError(t, s.SeedSyncableConfigForTest(id))
 
 			pc := newProposalCreatorForString(t, s)
 			ps := pc.createAndSaveProposals(t, tt.firstRead)

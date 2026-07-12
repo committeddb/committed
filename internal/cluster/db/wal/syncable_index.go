@@ -27,6 +27,22 @@ func (s *Storage) saveSyncableIndex(t *cluster.SyncableIndex) error {
 		if b == nil {
 			return ErrBucketMissing
 		}
+
+		// Invariant: a checkpoint persists only while its syncable config exists.
+		// A worker submits its checkpoint via an async consensus bump
+		// (proposeSyncableIndex) that can commit AFTER the config was deleted;
+		// without this guard the Put would re-establish an orphaned SyncableIndex
+		// (config gone, checkpoint lingering) that a later same-id recreate resumes
+		// from, silently skipping history. So if the config is gone, drop the stale
+		// bump — and clear any lingering value, reaping an orphan rather than
+		// creating one. Deterministic: config existence is replicated state applied
+		// in identical log order on every node. (Rebuild keeps the config, so its
+		// separate worker-drain fix is unaffected — the config is present here and
+		// the Put proceeds.)
+		if cfg := tx.Bucket(syncableBucket); cfg == nil || cfg.Bucket([]byte(t.ID)) == nil {
+			return b.Delete([]byte(t.ID))
+		}
+
 		bs, err := t.Marshal()
 		if err != nil {
 			return fmt.Errorf("[wal.syncable-index] marshal: %w", err)

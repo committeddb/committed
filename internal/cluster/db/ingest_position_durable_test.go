@@ -71,6 +71,21 @@ func (p *positionProbeIngestable) recorded() []string {
 	return out
 }
 
+// seedIngestableConfig persists a minimal ingestable config for id so a test
+// that injects a fake worker via db.Ingest also establishes the production
+// invariant the position guard depends on: an IngestablePosition bump only
+// persists while its config exists in bbolt (see saveIngestablePosition). The
+// build degrades under newWalDB's no-ingestable parser, which is fine —
+// saveIngestable persists the config bytes before the local build.
+func seedIngestableConfig(t *testing.T, d *db.DB, id string) {
+	t.Helper()
+	e, err := cluster.NewUpsertIngestableEntity(&cluster.Configuration{
+		ID: id, MimeType: "application/json", Data: []byte("{}"),
+	})
+	require.NoError(t, err)
+	require.NoError(t, d.Propose(testCtx(t), &cluster.Proposal{Entities: []*cluster.Entity{e}}))
+}
+
 // TestIngestPosition_DurableBeforeNextIteration proves the core
 // guarantee: a position bump is durably applied before the worker
 // processes the next upstream event. The probe records storage.Position
@@ -79,6 +94,7 @@ func (p *positionProbeIngestable) recorded() []string {
 func TestIngestPosition_DurableBeforeNextIteration(t *testing.T) {
 	d, s := newWalDB(t)
 	id := "durable-ingest"
+	seedIngestableConfig(t, d, id)
 
 	const n = 4
 	proposeTypeTOML(t, d, "evt", "evt", "", "")
@@ -232,4 +248,33 @@ func TestIngestPosition_FreezesOnErrProposalUnknown(t *testing.T) {
 
 	s.Unblock()
 	require.NoError(t, d.Close())
+}
+
+// TestDeleteIngestable_StalePositionBumpDoesNotOrphan is the ingest delete-race
+// regression: a worker position bump that commits AFTER the config+position
+// delete must not re-establish an orphaned IngestablePosition — otherwise a
+// same-id recreate resumes CDC from a stale LSN whose replication slot Teardown
+// has since dropped (error) or a silent data gap. The invariant enforced in
+// saveIngestablePosition ("a position persists only while its config exists")
+// makes the stale bump a no-op, independent of worker/propose timing.
+func TestDeleteIngestable_StalePositionBumpDoesNotOrphan(t *testing.T) {
+	d, s := newWalDB(t)
+	const id = "orphan-ingest"
+	seedIngestableConfig(t, d, id)
+
+	bump := func(pos string) {
+		e, err := cluster.NewUpsertIngestablePositionEntity(&cluster.IngestablePosition{ID: id, Position: []byte(pos)})
+		require.NoError(t, err)
+		require.NoError(t, d.Propose(testCtx(t), &cluster.Proposal{Entities: []*cluster.Entity{e}}))
+	}
+	bump("lsn-5")
+	require.Equal(t, cluster.Position("lsn-5"), s.Position(id), "position persists while the config exists")
+
+	// Delete the ingestable (config + position tombstone).
+	require.NoError(t, d.Propose(testCtx(t), &cluster.Proposal{Entities: cluster.NewDeleteIngestableEntities(id)}))
+	require.Nil(t, s.Position(id), "position cleared by the delete")
+
+	// A stale bump commits after the delete — must NOT re-orphan the position.
+	bump("lsn-9")
+	require.Nil(t, s.Position(id), "a position bump for a deleted ingestable must be dropped (no orphan)")
 }

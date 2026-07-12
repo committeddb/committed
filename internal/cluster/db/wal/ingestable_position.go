@@ -65,6 +65,24 @@ func (s *Storage) saveIngestablePosition(e *cluster.Entity) error {
 			}
 			return nil
 		}
+
+		// Invariant: a position persists only while its ingestable config exists.
+		// A worker submits its position via an async consensus bump
+		// (proposeIngestablePosition) that can commit AFTER the config was deleted;
+		// without this guard the Put would re-establish an orphaned position (config
+		// gone, LSN lingering) that a same-id recreate resumes from — resuming CDC
+		// from an LSN whose replication slot Teardown has since dropped (error) or a
+		// silent data gap. So if the config is gone, drop the stale bump and clear
+		// any lingering value, reaping an orphan rather than creating one.
+		// Deterministic: config existence is replicated state applied in identical
+		// log order on every node.
+		if cfg := tx.Bucket(ingestableBucket); cfg == nil || cfg.Bucket(e.Key) == nil {
+			if err := b.Delete(e.Key); err != nil {
+				return fmt.Errorf("[wal.ingestable_position] reap orphan: %w", err)
+			}
+			return nil
+		}
+
 		if err := b.Put(e.Key, e.Data); err != nil {
 			return fmt.Errorf("[wal.ingestable_position] put: %w", err)
 		}

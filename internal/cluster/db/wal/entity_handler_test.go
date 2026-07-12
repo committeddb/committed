@@ -118,6 +118,7 @@ func TestSave_SyncableIndexEntity(t *testing.T) {
 	s := NewStorage(t, nil)
 	defer s.Cleanup()
 	// Type at index 1; user entity at index 2; syncable index at 3.
+	require.NoError(t, s.SeedSyncableConfigForTest("sync-1"))
 	s.RegisterType(t, "user-type-123", 1, 1)
 
 	userEntity := makeUserEntity()

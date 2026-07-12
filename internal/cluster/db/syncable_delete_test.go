@@ -244,3 +244,43 @@ func TestDeleteSyncable_RestartDoesNotResurrect(t *testing.T) {
 	s2.RestoreSyncableWorkers()
 	require.False(t, hasSyncable(t, s2, id), "RestoreSyncableWorkers must not rebuild a deleted syncable")
 }
+
+// TestDeleteSyncable_StaleCheckpointBumpDoesNotOrphan is the delete-race
+// regression: a worker checkpoint bump that commits AFTER the config+checkpoint
+// delete must not re-establish an orphaned SyncableIndex — otherwise a same-id
+// recreate resumes from it and silently skips history. The invariant enforced in
+// saveSyncableIndex ("a checkpoint persists only while its config exists") makes
+// the stale bump a no-op, independent of worker/propose timing.
+func TestDeleteSyncable_StaleCheckpointBumpDoesNotOrphan(t *testing.T) {
+	dir := t.TempDir()
+	const id = "orphan-sync"
+	rec := &teardownRecorder{}
+	d, s := newDeleteTestDB(t, dir, rec)
+	t.Cleanup(func() { _ = d.Close() })
+
+	configureDeleteSyncable(t, d, id)
+
+	// Establish a checkpoint, as a running worker would.
+	bump := func(n uint64) {
+		e, err := cluster.NewUpsertSyncableIndexEntity(&cluster.SyncableIndex{ID: id, Index: n})
+		require.NoError(t, err)
+		require.NoError(t, d.Propose(testCtx(t), &cluster.Proposal{Entities: []*cluster.Entity{e}}))
+	}
+	bump(5)
+	cp, err := s.GetSyncableIndex(id)
+	require.NoError(t, err)
+	require.Equal(t, uint64(5), cp, "checkpoint persists while the config exists")
+
+	// Delete the syncable (config + checkpoint tombstone, one Actual).
+	require.NoError(t, d.DeleteSyncable(testCtx(t), id, false))
+	require.False(t, hasSyncable(t, s, id), "config removed")
+	cp, err = s.GetSyncableIndex(id)
+	require.NoError(t, err)
+	require.Equal(t, uint64(0), cp, "checkpoint cleared by the delete")
+
+	// A stale bump commits after the delete — must NOT re-orphan the checkpoint.
+	bump(9)
+	cp, err = s.GetSyncableIndex(id)
+	require.NoError(t, err)
+	require.Equal(t, uint64(0), cp, "a checkpoint bump for a deleted syncable must be dropped (no orphan)")
+}

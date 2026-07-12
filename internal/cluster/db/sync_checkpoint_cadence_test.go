@@ -73,6 +73,7 @@ func (c *cadenceSyncable) syncedIndices() []uint64 {
 func TestCheckpointCadence_EveryStridesByN(t *testing.T) {
 	d, s := newWalDB(t)
 	const id = "cadence-stride"
+	seedSyncableConfig(t, d, id)
 
 	seedUserProposals(t, d, s, "evt", []string{"v0", "v1", "v2", "v3", "v4", "v5"})
 
@@ -113,6 +114,7 @@ func TestCheckpointCadence_EveryStridesByN(t *testing.T) {
 func TestCheckpointCadence_EOFFlushesSubEveryTail(t *testing.T) {
 	d, s := newWalDB(t)
 	const id = "cadence-eof"
+	seedSyncableConfig(t, d, id)
 
 	seedUserProposals(t, d, s, "evt", []string{"v0", "v1", "v2"})
 
@@ -139,6 +141,7 @@ func TestCheckpointCadence_EOFFlushesSubEveryTail(t *testing.T) {
 func TestCheckpointCadence_RecoveryReDeliversAtMostEvery(t *testing.T) {
 	d, s := newWalDB(t)
 	const id = "cadence-recovery"
+	seedSyncableConfig(t, d, id)
 	const every = 4
 
 	// 8 proposals: with Every=4 the worker bumps once (after the 4th), then
@@ -204,6 +207,7 @@ func TestCheckpointCadence_RecoveryReDeliversAtMostEvery(t *testing.T) {
 func TestCheckpointCadence_MaxAgeFlushesUnderEvery(t *testing.T) {
 	d, s := newWalDB(t)
 	const id = "cadence-maxage"
+	seedSyncableConfig(t, d, id)
 
 	seedUserProposals(t, d, s, "evt", []string{"v0", "v1", "v2", "v3"})
 

@@ -41,6 +41,8 @@ func userSnapshotType(t *testing.T, id string) *cluster.Entity {
 func TestScrub_MetadataKeepsLatestDropsSuperseded(t *testing.T) {
 	s := NewStorage(t, nil)
 	defer s.Cleanup()
+	require.NoError(t, s.SeedSyncableConfigForTest("A"))
+	require.NoError(t, s.SeedSyncableConfigForTest("B"))
 
 	saveEntity(t, syncIndex(t, "A", 10), s, 1, 1)
 	saveEntity(t, syncIndex(t, "A", 20), s, 1, 2)

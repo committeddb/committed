@@ -7,6 +7,8 @@ import (
 	bolt "go.etcd.io/bbolt"
 	pb "go.etcd.io/raft/v3/raftpb"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 // BucketSnapshot returns every (bucket, key, value) triple in this
@@ -219,4 +221,39 @@ func walkBucket(prefix string, b *bolt.Bucket, lines *[]string) error {
 		*lines = append(*lines, fmt.Sprintf("%s/%x=%x", prefix, k, v))
 		return nil
 	})
+}
+
+// SeedSyncableConfigForTest / SeedIngestableConfigForTest create a minimal
+// versioned config entry for id so the checkpoint/position guards
+// (saveSyncableIndex / saveIngestablePosition) see the config as present. They
+// enforce the production invariant that a progress record persists only for a
+// live config; a test that saves a SyncableIndex / IngestablePosition directly,
+// without a real config apply, must first establish that the config exists.
+func (s *Storage) SeedSyncableConfigForTest(id string) error {
+	bs, err := minimalConfigBytesForTest(id)
+	if err != nil {
+		return err
+	}
+	return s.update(func(tx *bolt.Tx) error {
+		_, err := putVersioned(tx.Bucket(syncableBucket), []byte(id), bs)
+		return err
+	})
+}
+
+func (s *Storage) SeedIngestableConfigForTest(id string) error {
+	bs, err := minimalConfigBytesForTest(id)
+	if err != nil {
+		return err
+	}
+	return s.update(func(tx *bolt.Tx) error {
+		_, err := putVersioned(tx.Bucket(ingestableBucket), []byte(id), bs)
+		return err
+	})
+}
+
+// minimalConfigBytesForTest marshals a well-formed Configuration so the seeded
+// entry survives the startup secret re-validation (which unmarshals every stored
+// config). Empty Data carries no ${VAR}, so interpolation is a no-op.
+func minimalConfigBytesForTest(id string) ([]byte, error) {
+	return (&cluster.Configuration{ID: id, MimeType: "application/json", Data: []byte("{}")}).Marshal()
 }

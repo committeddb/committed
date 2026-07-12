@@ -39,6 +39,23 @@ func seedUserProposals(t *testing.T, d *db.DB, s *wal.Storage, typeID string, pa
 	}
 }
 
+// seedSyncableConfig persists a minimal syncable config for id so a test that
+// injects a fake worker via db.Sync also establishes the production invariant
+// the checkpoint guard depends on: a SyncableIndex bump only persists while its
+// config exists in bbolt (see saveSyncableIndex). In production the config is
+// always applied before its worker runs; the direct-db.Sync test idiom skips
+// that, so tests seed it here. The build degrades under newWalDB's no-syncable
+// parser, which is fine — saveSyncable persists the config bytes before the
+// local build, so syncableBucket has the id either way.
+func seedSyncableConfig(t *testing.T, d *db.DB, id string) {
+	t.Helper()
+	e, err := cluster.NewUpsertSyncableEntity(&cluster.Configuration{
+		ID: id, MimeType: "application/json", Data: []byte("{}"),
+	})
+	require.NoError(t, err)
+	require.NoError(t, d.Propose(testCtx(t), &cluster.Proposal{Entities: []*cluster.Entity{e}}))
+}
+
 // allSystem reports whether every entity in p is a system entity (type,
 // syncable, database, syncable-index). The per-syncable reader now filters
 // committed's internal entries out of the stream entirely (see
@@ -139,6 +156,7 @@ func TestSyncBump_DurableBeforeNextSync(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	seedSyncableConfig(t, d, id)
 	probe := &probeSyncable{s: s, id: id, doneAt: n, cancel: cancel}
 	require.NoError(t, d.Sync(context.Background(), id, probe))
 
@@ -218,6 +236,7 @@ func (s *recordingSyncable) syncedPayloads() []string {
 func TestSyncBump_RecoveryReSyncsOnlyUnbumpedTail(t *testing.T) {
 	d, s := newWalDB(t)
 	id := "recovery-sync"
+	seedSyncableConfig(t, d, id)
 
 	seedUserProposals(t, d, s, "evt", []string{"v0", "v1", "v2"})
 

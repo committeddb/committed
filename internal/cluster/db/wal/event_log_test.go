@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/db/parser"
 
 	pb "go.etcd.io/raft/v3/raftpb"
 	"google.golang.org/protobuf/proto"
@@ -131,7 +132,9 @@ func TestEventLog_ReaderBootstrapFromIndex1(t *testing.T) {
 // aren't contiguous (the test harness does Save-without-Apply for
 // conf-change entries, which mirrors a future-compacted log).
 func TestEventLog_ReaderResumesFromPosition(t *testing.T) {
-	s := NewStorage(t, nil)
+	// A real (no-op) parser: this test reopens the storage, and startup
+	// re-validates the seeded syncable config's secrets via the parser.
+	s := NewStorageWithParser(t, nil, parser.New())
 	defer s.Cleanup()
 	// Register type-x at index 1; user-data proposals follow at
 	// indices 3, 5, 7 (with conf-change filler at 2, 4, 6). The
@@ -156,6 +159,7 @@ func TestEventLog_ReaderResumesFromPosition(t *testing.T) {
 
 	// Persist a syncable position of raft index 3 (already processed).
 	id := "partly-done"
+	require.NoError(t, s.SeedSyncableConfigForTest(id))
 	posEntity, err := cluster.NewUpsertSyncableIndexEntity(&cluster.SyncableIndex{ID: id, Index: 3})
 	require.Nil(t, err)
 	saveEntity(t, posEntity, s, 1, 8)

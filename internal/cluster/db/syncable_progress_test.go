@@ -91,6 +91,7 @@ func waitCaughtUp(t *testing.T, d *db.DB, id string, wantHead uint64) {
 func TestSyncableProgress_SelectiveSingleZeroLagWithOtherTopicTail(t *testing.T) {
 	d, s := newWalDB(t)
 	const id = "selective-1"
+	seedSyncableConfig(t, d, id)
 	const mine, other = "topic-mine", "topic-other"
 
 	proposeTypeTOML(t, d, mine, mine, "", "")
@@ -133,6 +134,7 @@ func TestSyncableProgress_SelectiveSingleZeroLagWithOtherTopicTail(t *testing.T)
 func TestSyncableProgress_BatchZeroLag(t *testing.T) {
 	d, s := newWalDB(t)
 	const id = "batch-1"
+	seedSyncableConfig(t, d, id)
 	const a, b = "topic-a", "topic-b"
 
 	proposeTypeTOML(t, d, a, a, "", "")
