@@ -920,25 +920,61 @@ type unchangedResolver func(ctx context.Context, table string, pk map[string]str
 // and merges them into m so the emitted row is complete. On any failure it logs
 // and leaves those columns absent (the pre-fix behavior, now visible) rather than
 // dropping the whole row.
+//
+// m is keyed by lowercased column name, but the re-SELECT must quote each
+// column's PHYSICAL (stored-case) identifier: a quoted mixed-case column
+// ("CreatedAt") does not resolve from a lowercased "createdat", the re-select
+// errors, and that error is swallowed below — the column is then emitted null,
+// silently clobbering the real value on every such UPDATE. So translate the
+// lowercased column and primary-key names to their physical form (from the
+// relation metadata) for the query, then map the results back to the lowercased
+// keys m uses.
 func fillUnchanged(ctx context.Context, resolve unchangedResolver, rel *pglogrepl.RelationMessage, primaryKey []string, m map[string]any, cols []string) {
+	physical := make(map[string]string, len(rel.Columns))
+	for _, rc := range rel.Columns {
+		physical[strings.ToLower(rc.Name)] = rc.Name
+	}
+	phys := func(lower string) string {
+		if p, ok := physical[lower]; ok {
+			return p
+		}
+		return lower // not in the relation (shouldn't happen) — best effort
+	}
+
 	pk := make(map[string]string, len(primaryKey))
 	for _, k := range primaryKey {
-		v, ok := m[strings.ToLower(k)]
+		lk := strings.ToLower(k)
+		v, ok := m[lk]
 		if !ok || v == nil {
 			zap.L().Warn("cannot re-select unchanged TOAST columns: primary key absent from the tuple",
 				zap.String("table", rel.RelationName), zap.String("pk", k))
 			return
 		}
-		pk[strings.ToLower(k)] = fmt.Sprint(v)
+		pk[phys(lk)] = fmt.Sprint(v)
 	}
-	vals, err := resolve(ctx, rel.Namespace+"."+rel.RelationName, pk, cols)
+
+	// Request physical column names; remember each one's lowercased key so the
+	// results merge back into m (which is lowercased-keyed).
+	physCols := make([]string, len(cols))
+	lowerByPhys := make(map[string]string, len(cols))
+	for i, c := range cols {
+		p := phys(c)
+		physCols[i] = p
+		lowerByPhys[p] = c
+	}
+
+	vals, err := resolve(ctx, rel.Namespace+"."+rel.RelationName, pk, physCols)
 	if err != nil {
 		zap.L().Warn("re-select of unchanged TOAST columns failed; emitting row without them",
 			zap.String("table", rel.RelationName), zap.Error(err))
 		return
 	}
 	for c, v := range vals {
-		m[c] = v
+		if lc, ok := lowerByPhys[c]; ok {
+			m[lc] = v
+		} else {
+			m[strings.ToLower(c)] = v
+		}
 	}
 }
 
