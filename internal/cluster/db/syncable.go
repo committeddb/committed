@@ -142,6 +142,11 @@ func (db *DB) RebuildSyncable(ctx context.Context, id string) error {
 	//    is 0, so the re-apply recreates it empty.
 	db.rebuildTeardownDestinationLocal(id, handle)
 
+	// Release the stopped worker's prepared statements before step 4 builds a
+	// fresh syncable — otherwise a rebuild leaks a statement set on the pool.
+	// rebuildStopWorkerLocal drained the worker (blocking <-done), so it's safe.
+	db.closeDrainedSyncable(handle, id)
+
 	// 4. Re-apply the unchanged config: re-initializes the destination and
 	//    restarts the worker reading from index 0. The config is identical, so
 	//    the in-place-change guard sees no change and allows it.

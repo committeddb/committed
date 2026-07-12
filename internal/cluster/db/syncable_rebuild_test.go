@@ -37,6 +37,11 @@ func TestRebuildSyncable_DropsAndReplaysFromZero(t *testing.T) {
 	require.Eventually(t, func() bool { return rec.count() >= 1 },
 		10*time.Second, 10*time.Millisecond, "rebuild should drop the table on the owner")
 
+	// The stopped worker's prepared statements were released (Close) before the
+	// re-apply built a fresh syncable — a rebuild must not leak a statement set.
+	require.Eventually(t, func() bool { return rec.closeCount() >= 1 },
+		10*time.Second, 10*time.Millisecond, "rebuild should close the stopped syncable")
+
 	// Replay from 0 re-delivers the prior payloads: the synced count climbs
 	// past the original 2.
 	require.Eventually(t, func() bool { return rec.syncedCount() >= 4 },

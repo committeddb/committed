@@ -333,3 +333,41 @@ func checkSyncs(t *testing.T, db *DB, syncable *MemorySyncable, ps []*cluster.Pr
 		}
 	}
 }
+
+// TestSyncReplaceClosesPriorSyncable is the prepared-statement-leak regression:
+// a re-POST (replace) must Close() the superseded syncable so its SQL prepared
+// statements are released on the shared pool, instead of leaking a statement set
+// on every redeploy. The Close happens only after the prior worker has drained,
+// so it can't race the worker's use of those statements.
+func TestSyncReplaceClosesPriorSyncable(t *testing.T) {
+	db := createDBWithStorage(NewMemoryStorage())
+	defer db.Close()
+
+	id := "leaky"
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	defer cancel1()
+	syncable1 := NewSyncable(math.MaxInt, cancel1) // never self-cancels
+	require.NoError(t, db.Sync(ctx1, id, syncable1))
+
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	syncable2 := NewSyncable(math.MaxInt, cancel2)
+	require.NoError(t, db.Sync(ctx2, id, syncable2)) // replace: cancels, drains, closes syncable1
+
+	require.Equal(t, 1, syncable1.Closed(), "the superseded syncable must be closed exactly once")
+	require.Equal(t, 0, syncable2.Closed(), "the live syncable must not be closed")
+}
+
+// TestCloseClosesRunningSyncable asserts db.Close releases a running syncable's
+// prepared statements as it drains the workers on shutdown.
+func TestCloseClosesRunningSyncable(t *testing.T) {
+	db := createDBWithStorage(NewMemoryStorage())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	syncable := NewSyncable(math.MaxInt, cancel)
+	require.NoError(t, db.Sync(ctx, "x", syncable))
+
+	require.NoError(t, db.Close())
+	require.Equal(t, 1, syncable.Closed(), "db.Close must close the running syncable")
+}

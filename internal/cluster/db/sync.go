@@ -95,6 +95,10 @@ func (db *DB) Sync(_ context.Context, id string, s cluster.Syncable) error {
 			db.logger.Warn("sync replace: prior worker did not exit in time; abandoning it (wedged on its destination?) and proceeding",
 				zap.String("id", id), zap.Duration("timeout", db.workerDrainTimeout))
 		}
+		// Release the superseded syncable's prepared statements (only if it
+		// drained, so we don't race a wedged worker) — otherwise every re-POST
+		// leaks a statement set on the shared pool.
+		db.closeDrainedSyncable(existing, id)
 		db.workersMu.Lock()
 		if db.closed {
 			db.workersMu.Unlock()
@@ -182,6 +186,12 @@ func (db *DB) deleteSync(id string) {
 	if !ok || handle.syncable == nil {
 		return // no worker built on this node — nothing to tear down
 	}
+
+	// Release the deleted syncable's prepared statements. Node-local resource
+	// cleanup — done on every node that built a worker (if it drained), before
+	// and independent of the owner-only destination teardown below.
+	db.closeDrainedSyncable(handle, id)
+
 	if keepData || !db.isNode(id) {
 		return // operator opted to keep the data, or this node isn't the owner
 	}

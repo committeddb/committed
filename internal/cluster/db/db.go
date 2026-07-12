@@ -854,6 +854,12 @@ func (db *DB) Close() error {
 			"(a syncable stuck in tx.Commit against an unreachable destination is the usual cause)",
 			zap.Int("abandoned", abandoned), zap.Duration("timeout", closeDrainTimeout))
 	}
+	// Release each drained syncable's prepared statements (ingest handles have a
+	// nil syncable and are skipped). A worker abandoned above is still running, so
+	// closeDrainedSyncable leaves it alone.
+	for _, h := range handles {
+		db.closeDrainedSyncable(h, "")
+	}
 
 	// Hand leadership to a caught-up voter before stopping raft, so a graceful
 	// restart (e.g. a rolling upgrade) doesn't force the cluster through a full
@@ -894,6 +900,40 @@ func waitDone(done <-chan struct{}, timeout time.Duration) bool {
 		return true
 	case <-time.After(timeout):
 		return false
+	}
+}
+
+// closeDrainedSyncable releases a torn-down syncable's resources — a SQL
+// syncable's prepared statements, a webhook syncable's idle connections — via
+// Close, so an ordinary redeploy (re-POST / delete / rebuild / shutdown) doesn't
+// leak a statement set on the shared, long-lived connection pool every time.
+// Syncable.Close closes only what Init prepared, never the shared pool (other
+// syncables share it).
+//
+// It closes ONLY once the worker goroutine has drained: a still-running worker
+// (its drain timed out — wedged on an unreachable destination) may be mid-Sync
+// against those statements, and closing them under it would race. The done
+// channel is closed by the worker's defer after db.sync returns, so a
+// non-blocking receive on it is the "no Sync in flight" signal. Best-effort:
+// a close error is logged, not fatal. Safe with a nil handle or an ingest
+// handle (nil syncable).
+func (db *DB) closeDrainedSyncable(handle *workerHandle, id string) {
+	if handle == nil || handle.syncable == nil {
+		return
+	}
+	select {
+	case <-handle.done:
+		// Drained: the worker goroutine has returned, so no Sync is in flight and
+		// the prepared statements are idle — safe to close.
+	default:
+		// Still running (drain timed out). Closing its statements now would race
+		// the worker's use of them, so leave them; the pool reclaims them when the
+		// connection is eventually recycled.
+		return
+	}
+	if err := handle.syncable.Close(); err != nil {
+		db.logger.Warn("syncable close on teardown failed; prepared statements may linger until the pool recycles the connection",
+			zap.String("id", id), zap.Error(err))
 	}
 }
 

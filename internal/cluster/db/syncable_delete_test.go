@@ -22,6 +22,7 @@ import (
 type teardownRecorder struct {
 	mu        sync.Mutex
 	teardowns int
+	closes    int
 	failWith  error
 	synced    []string
 }
@@ -30,6 +31,14 @@ func (r *teardownRecorder) count() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.teardowns
+}
+
+// closeCount reports how many times a syncable's Close (prepared-statement
+// release) ran — worker teardown must call it so redeploys don't leak.
+func (r *teardownRecorder) closeCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.closes
 }
 
 func (r *teardownRecorder) syncedCount() int {
@@ -55,7 +64,12 @@ func (s *teardownSyncable) Sync(_ context.Context, p *cluster.Actual) (cluster.S
 	return cluster.ShouldSnapshot(true), nil
 }
 
-func (s *teardownSyncable) Close() error { return nil }
+func (s *teardownSyncable) Close() error {
+	s.rec.mu.Lock()
+	s.rec.closes++
+	s.rec.mu.Unlock()
+	return nil
+}
 
 func (s *teardownSyncable) Teardown() error {
 	s.rec.mu.Lock()
@@ -134,6 +148,11 @@ func TestDeleteSyncable_RemovesConfigAndIndex_AndTearsDownOnOwner(t *testing.T) 
 	// The owner drops the table (async via deleteSync).
 	require.Eventually(t, func() bool { return rec.count() == 1 },
 		10*time.Second, 10*time.Millisecond, "owner should tear the table down exactly once")
+
+	// And the worker teardown releases the syncable's prepared statements
+	// (Close) — node-local, so it runs on delete regardless of ownership.
+	require.Eventually(t, func() bool { return rec.closeCount() == 1 },
+		10*time.Second, 10*time.Millisecond, "delete must close the syncable exactly once")
 }
 
 // keepData preserves the destination: the logical delete still happens, but

@@ -389,6 +389,7 @@ type MemorySyncable struct {
 	cancel      func()
 	count       int
 	doneAtCount int
+	closed      int
 }
 
 func NewSyncable(doneAtCount int, cancel func()) *MemorySyncable {
@@ -441,7 +442,18 @@ func (ms *MemorySyncable) Sync(ctx context.Context, p *cluster.Actual) (cluster.
 }
 
 func (ms *MemorySyncable) Close() error {
+	ms.mu.Lock()
+	ms.closed++
+	ms.mu.Unlock()
 	return nil
+}
+
+// Closed returns how many times Close has been called. A torn-down syncable's
+// worker must call Close exactly once so its prepared statements are released.
+func (ms *MemorySyncable) Closed() int {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	return ms.closed
 }
 
 // MemoryBatchSyncable extends MemorySyncable with BatchSyncable support.
