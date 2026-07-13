@@ -61,6 +61,41 @@ func TestDecodeCompositeCursor_RoundTrip(t *testing.T) {
 	require.Equal(t, []string{"tt0111161", "2"}, got)
 }
 
+func TestCompositeKey_BinaryValuesNeverCollide(t *testing.T) {
+	// A BINARY/VARBINARY/BLOB column value with non-UTF-8 bytes must not collapse
+	// distinct tuples onto one key. json.Marshal replaces every invalid byte with
+	// U+FFFD, so "\xff\xfe" and "\xfe\xff" both mangled to the same string —
+	// silent row loss (one overwrites the other; a delete tombstones the wrong key).
+	cols := []string{"tenant", "blob"}
+	k1 := sql.CompositeKey(map[string]any{"tenant": "acme", "blob": "\xff\xfe"}, cols)
+	k2 := sql.CompositeKey(map[string]any{"tenant": "acme", "blob": "\xfe\xff"}, cols)
+	require.NotEqual(t, k1, k2, "distinct binary composite values must not collide")
+}
+
+func TestDecodeCompositeCursor_BinaryRoundTrip(t *testing.T) {
+	// A resume cursor built from a binary composite key must recover the EXACT
+	// bytes, or the (c1,c2) > (?,?) keyset boundary is wrong and a mid-snapshot
+	// restart skips or duplicates rows.
+	cols := []string{"tenant", "blob"}
+	raw := "\x00\xff\x10\xfe\x7f" // non-UTF-8, includes NUL and high bytes
+	key := sql.CompositeKey(map[string]any{"tenant": "acme", "blob": raw}, cols)
+	got, err := sql.DecodeCompositeCursor(key, len(cols))
+	require.NoError(t, err)
+	require.Equal(t, []string{"acme", raw}, got, "binary composite cursor must round-trip byte-for-byte")
+}
+
+func TestCompositeKey_TextEncodingUnchanged(t *testing.T) {
+	// The fix must NOT change the bytes of an existing text/number composite key
+	// (all values valid UTF-8) — a changed encoding would re-key every row
+	// downstream. It stays the JSON-array form and round-trips.
+	cols := []string{"tconst", "ordering"}
+	key := sql.CompositeKey(map[string]any{"tconst": "tt0111161", "ordering": "2"}, cols)
+	require.Equal(t, `["tt0111161","2"]`, key)
+	got, err := sql.DecodeCompositeCursor(key, len(cols))
+	require.NoError(t, err)
+	require.Equal(t, []string{"tt0111161", "2"}, got)
+}
+
 func TestDecodeCompositeCursor_Errors(t *testing.T) {
 	_, err := sql.DecodeCompositeCursor("not json", 2)
 	require.Error(t, err)
