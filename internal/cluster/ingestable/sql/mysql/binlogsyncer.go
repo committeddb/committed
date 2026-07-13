@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"net"
-	"net/url"
 	"strconv"
 	"time"
 
@@ -34,9 +33,12 @@ import (
 // the payload. ServerID is a non-zero random id (the replica id this connection
 // registers under — NewBinlogSyncer panics on 0), as canal also randomized it.
 func binlogSyncerConfig(config *sql.Config) (replication.BinlogSyncerConfig, error) {
-	u, err := url.Parse(config.ConnectionString)
+	// sql.ParseConnString, not url.Parse: url.Parse's *url.Error embeds the raw
+	// (already ${VAR}-resolved) connection string — password included — which
+	// this path then logs at ingest runtime. The helper strips the value.
+	u, err := sql.ParseConnString(config.ConnectionString)
 	if err != nil {
-		return replication.BinlogSyncerConfig{}, fmt.Errorf("parse connection string: %w", err)
+		return replication.BinlogSyncerConfig{}, err
 	}
 	host, portStr, err := net.SplitHostPort(u.Host)
 	if err != nil {

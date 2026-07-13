@@ -128,11 +128,15 @@ func expand(s string, lookup lookupFunc) (string, error) {
 		if i+1 < len(s) && s[i+1] == '{' {
 			rel := strings.IndexByte(s[i+2:], '}')
 			if rel < 0 {
-				return "", fmt.Errorf("unterminated ${...} reference in %q", s)
+				// Report the position, never the value: interpolation runs on
+				// every string, so s may be a connection string an operator
+				// inlined a plaintext password into — %q of it would leak the
+				// secret into an HTTP 400 body.
+				return "", fmt.Errorf("unterminated ${...} reference at position %d", i)
 			}
 			name := s[i+2 : i+2+rel]
 			if name == "" {
-				return "", fmt.Errorf("empty ${} reference in %q", s)
+				return "", fmt.Errorf("empty ${} reference at position %d", i)
 			}
 			val, ok := lookup(name)
 			if !ok {

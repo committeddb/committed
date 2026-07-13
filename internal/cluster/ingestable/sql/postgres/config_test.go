@@ -119,6 +119,24 @@ func TestBuildPgConfigInvalidURL(t *testing.T) {
 	require.Error(t, err)
 }
 
+// TestBuildPgConfigErrorDoesNotLeakPassword is the connection-string secret-leak
+// regression: the ConnectionString is already ${VAR}-interpolated (holds the
+// resolved plaintext password) by the time the dialect parses it, and this error
+// reaches an HTTP 400 body via SourceColumns -> ParseIngestable -> NewConfigError.
+// url.Parse wraps failures in *url.Error whose Error() embeds the raw URL — so the
+// password must never appear in the returned error. It must still name the reason.
+func TestBuildPgConfigErrorDoesNotLeakPassword(t *testing.T) {
+	const secret = "sup3rSecretPassw0rd"
+	// A bad %-escape in the path makes url.Parse fail while carrying the userinfo.
+	config := &sql.Config{
+		ConnectionString: "postgres://user:" + secret + "@localhost:5432/db%zz",
+	}
+	_, err := buildPgConfig(config)
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), secret, "connection-string password leaked into the config error")
+	require.Contains(t, err.Error(), "invalid connection string", "error should still name the problem")
+}
+
 func TestQuoteTable(t *testing.T) {
 	tests := []struct {
 		input string

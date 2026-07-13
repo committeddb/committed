@@ -87,6 +87,22 @@ func TestExpand(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "empty")
 	})
+
+	// Interpolation runs on every string value, including a connection string an
+	// operator may (against guidance) have inlined a plaintext password into
+	// rather than using ${VAR}. A malformed ${ in that value must not echo the
+	// whole value — the error names the position, not the secret.
+	t.Run("malformed reference does not echo the value", func(t *testing.T) {
+		const secret = "sup3rSecretPassw0rd"
+		for _, in := range []string{
+			"postgres://u:" + secret + "@h/db?x=${PW", // unterminated
+			"postgres://u:" + secret + "@h/db?x=${}",  // empty
+		} {
+			_, err := expand(in, vars)
+			require.Error(t, err)
+			require.NotContains(t, err.Error(), secret, "malformed ${} error leaked the surrounding value")
+		}
+	})
 }
 
 func TestInterpolate_Tree(t *testing.T) {

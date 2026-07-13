@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -78,7 +77,11 @@ type pgConfig struct {
 // Config.Tables. The connection string should be a plain Postgres URL
 // with no application-level params.
 func buildPgConfig(config *sql.Config) (*pgConfig, error) {
-	u, err := url.Parse(config.ConnectionString)
+	// sql.ParseConnString, not url.Parse: on a parse failure url.Parse's
+	// *url.Error embeds the raw (already ${VAR}-resolved) connection string —
+	// password and all — and this error reaches an HTTP 400 body via
+	// SourceColumns -> ParseIngestable. The helper strips the value.
+	u, err := sql.ParseConnString(config.ConnectionString)
 	if err != nil {
 		return nil, err
 	}

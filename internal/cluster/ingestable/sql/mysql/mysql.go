@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -1646,7 +1645,10 @@ func readBatch(
 
 // buildDSN converts a mysql:// URL to a go-sql-driver/mysql DSN string.
 func buildDSN(connectionString string) string {
-	u, err := url.Parse(connectionString)
+	// sql.ParseConnString, never a bare url.Parse: connection-string parsing lives
+	// in the one helper whose error can't leak the (${VAR}-resolved) password, so
+	// a future non-swallowing caller — or a copy-paste of this block — stays safe.
+	u, err := sql.ParseConnString(connectionString)
 	if err != nil {
 		return connectionString
 	}
@@ -1663,7 +1665,8 @@ func buildDSN(connectionString string) string {
 // filter scopes to it (see MySQLEventHandler.watches) so a server-wide binlog
 // doesn't bleed same-named tables from other databases into the topic.
 func dsnDatabase(connectionString string) string {
-	u, err := url.Parse(connectionString)
+	// sql.ParseConnString, never a bare url.Parse — see buildDSN.
+	u, err := sql.ParseConnString(connectionString)
 	if err != nil {
 		return ""
 	}

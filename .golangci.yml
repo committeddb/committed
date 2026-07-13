@@ -28,6 +28,13 @@ linters:
     - misspell
     - bodyclose
     - prealloc
+    # Scoped to the SQL subsystem only (see exclusions below): bans a bare
+    # url.Parse on a connection string, which must go through sql.ParseConnString
+    # so a parse error can't echo the ${VAR}-resolved password. This is the one
+    # narrow place a lint guard earns its keep — the risk (secret leak) is high
+    # and the correct call is non-obvious, so a copy-paste of url.Parse should
+    # fail CI rather than silently reintroduce the leak.
+    - forbidigo
     # NOTE: gosec is intentionally NOT in this blocking lint. It runs in the
     # `gosec (security)` CI job instead (scripts/gosec.sh + .golangci.gosec.yml),
     # which carries the heavier SSA/taint analyzers — including G115 and the
@@ -37,6 +44,13 @@ linters:
     # and clear of that landmine. See .golangci.gosec.yml.
 
   settings:
+    forbidigo:
+      # Providing our own forbid list REPLACES forbidigo's default (which bans
+      # fmt.Print*); we only want the url.Parse rule, scoped by the exclusions
+      # below to the SQL subsystem.
+      forbid:
+        - pattern: '^url\.Parse$'
+          msg: "parse connection strings with sql.ParseConnString, not url.Parse: url.Parse's error embeds the raw (secret-bearing) URL. See internal/cluster/ingestable/sql/connstring.go."
     staticcheck:
       # Start from golangci-lint's default set (which omits the
       # opinionated ST* "stylecheck" family), then drop QF1008 —
@@ -67,6 +81,17 @@ linters:
         linters:
           - errcheck
           - bodyclose
+      # forbidigo's url.Parse ban applies ONLY in the SQL subsystem, where the
+      # string being parsed is a ${VAR}-resolved connection string. path-except
+      # suppresses forbidigo everywhere else, so legitimate url.Parse on webhook
+      # endpoints / HTTP URLs is untouched.
+      - linters:
+          - forbidigo
+        path-except: internal/cluster/(ingestable|syncable)/sql/
+      # connstring.go IS the one sanctioned url.Parse call site (sql.ParseConnString).
+      - linters:
+          - forbidigo
+        path: internal/cluster/ingestable/sql/connstring\.go
 
 formatters:
   enable:

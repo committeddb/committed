@@ -46,6 +46,23 @@ func TestBinlogSyncerConfigErrors(t *testing.T) {
 	}
 }
 
+// TestBinlogSyncerConfigErrorDoesNotLeakPassword is the connection-string
+// secret-leak regression: the ConnectionString is already ${VAR}-interpolated
+// (holds the resolved plaintext password) when the dialect parses it, and this
+// error is logged at ingest runtime. url.Parse wraps failures in *url.Error whose
+// Error() embeds the raw URL, so %w-wrapping it leaks the password into the log.
+// The error must name the reason without the secret.
+func TestBinlogSyncerConfigErrorDoesNotLeakPassword(t *testing.T) {
+	const secret = "sup3rSecretPassw0rd"
+	// A bad %-escape in the path makes url.Parse fail while carrying the userinfo.
+	_, err := binlogSyncerConfig(&sql.Config{
+		ConnectionString: "mysql://root:" + secret + "@127.0.0.1:3306/cdc%zz",
+	})
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), secret, "connection-string password leaked into the error")
+	require.Contains(t, err.Error(), "invalid connection string", "error should still name the problem")
+}
+
 func TestIsSkippableFakeRotate(t *testing.T) {
 	require.True(t, isSkippableFakeRotate(0, "binlog.000007", "binlog.000007"), "fake rotate to same file is skipped")
 	require.False(t, isSkippableFakeRotate(0, "binlog.000008", "binlog.000007"), "fake rotate to a new file is a real rotation")
