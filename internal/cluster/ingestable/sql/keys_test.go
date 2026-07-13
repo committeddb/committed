@@ -103,3 +103,21 @@ func TestDecodeCompositeCursor_Errors(t *testing.T) {
 	_, err = sql.DecodeCompositeCursor(`["only-one"]`, 2)
 	require.Error(t, err, "arity mismatch must error rather than silently page wrong")
 }
+
+func TestDecodeCompositeCursor_ErrorOmitsPKValue(t *testing.T) {
+	// The cursor IS the composite primary key = PII. A decode error bubbles into a
+	// Warn log on snapshot retry/reconnect, so its message must not echo the value —
+	// only a non-PII classifier (arity numbers, the parse error without the input).
+	const pii = "ssn-123-45-6789"
+
+	// Arity mismatch — the realistic trigger: primaryKey arity changed via re-POST
+	// mid-snapshot, so a 2-value cursor is decoded expecting 3.
+	_, err := sql.DecodeCompositeCursor(`["`+pii+`","secret"]`, 3)
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), pii, "arity-mismatch error must not echo the PK cursor value")
+
+	// Malformed cursor.
+	_, err = sql.DecodeCompositeCursor(`["`+pii+`" bad`, 2)
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), pii, "decode error must not echo the PK cursor value")
+}

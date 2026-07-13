@@ -84,11 +84,15 @@ func DecodeCompositeCursor(cursor string, n int) ([]string, error) {
 		return vals, nil
 	}
 	var vals []string
+	// The cursor is the composite primary key = PII, and this error bubbles into a
+	// Warn log on snapshot retry — so report only the parse error / arity numbers,
+	// never the %q(cursor) value. (The JSON parse error names at most the offending
+	// token, not the PK values.)
 	if err := json.Unmarshal([]byte(cursor), &vals); err != nil {
-		return nil, fmt.Errorf("decode composite cursor %q: %w", cursor, err)
+		return nil, fmt.Errorf("decode composite cursor: %w", err)
 	}
 	if len(vals) != n {
-		return nil, fmt.Errorf("composite cursor %q has %d values, want %d", cursor, len(vals), n)
+		return nil, fmt.Errorf("composite cursor has %d values, want %d", len(vals), n)
 	}
 	return vals, nil
 }
