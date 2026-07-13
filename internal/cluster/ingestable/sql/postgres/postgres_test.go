@@ -1524,3 +1524,131 @@ func TestPostgresSnapshotCompositePrimaryKey(t *testing.T) {
 	}
 	require.Equal(t, want, seen, "every composite-PK row must land with a distinct key (no collision)")
 }
+
+// dropSlotWhenInactive waits for the named replication slot to be released by a
+// stopping ingest, then drops it — modelling an out-of-band slot loss (an
+// operator dropping it, expiry, or a max_slot_wal_keep_size reap).
+func dropSlotWhenInactive(t *testing.T, slotName string) {
+	t.Helper()
+	db := createDB(t)
+	defer db.Close()
+	require.Eventually(t, func() bool {
+		var active bool
+		if err := db.QueryRow(
+			`SELECT active FROM pg_replication_slots WHERE slot_name = $1`, slotName).Scan(&active); err != nil {
+			return false // not present yet
+		}
+		if active {
+			return false // still held by the stopping ingest
+		}
+		_, derr := db.Exec(`SELECT pg_drop_replication_slot($1)`, slotName)
+		return derr == nil
+	}, 15*time.Second, 200*time.Millisecond, "slot should become inactive and droppable")
+}
+
+// TestPostgresSlotRecreatedResnapshots is the slot-ConsistentPoint regression: if
+// the replication slot is dropped (operator, expiry, or a max_slot_wal_keep_size
+// reap) while a prior checkpoint survives, resuming from that now-stale LSN would
+// silently skip every change between it and the recreated slot's ConsistentPoint.
+// The dialect must instead re-snapshot from the new ConsistentPoint. A 'gap' row
+// is inserted after the slot is dropped but before the restart; the resumed
+// ingest must capture it via the re-snapshot (without the fix it is lost).
+func TestPostgresSlotRecreatedResnapshots(t *testing.T) {
+	table := "slotrecreate_table"
+
+	db := createDB(t)
+	_, err := db.Exec(fmt.Sprintf(`DROP TABLE IF EXISTS %s`, table))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf(`CREATE TABLE %s (pk VARCHAR(32) NOT NULL PRIMARY KEY, val TEXT)`, table))
+	require.NoError(t, err)
+	db.Close()
+
+	cleanReplication(t, "slot_recreate", "pub_recreate")
+	// Drop this run's slot at the end so it doesn't hold a replication slot for
+	// the rest of the suite (the container caps max_replication_slots).
+	defer cleanReplication(t, "slot_recreate", "pub_recreate")
+
+	config := &sql.Config{
+		Type:             &cluster.Type{ID: "slotrecreate", Name: "slotrecreate"},
+		Mappings:         []sql.Mapping{{JsonName: "pk", SQLColumn: "pk"}, {JsonName: "val", SQLColumn: "val"}},
+		PrimaryKey:       []string{"pk"},
+		ConnectionString: connString,
+		Tables:           []string{table},
+		Options:          map[string]string{"slot_name": "slot_recreate", "publication": "pub_recreate"},
+	}
+
+	// Phase 1: ingest, stream 'before', capture the commit position that will
+	// become stale, then stop.
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	proposalChan1 := make(chan *cluster.Proposal, 10)
+	positionChan1 := make(chan cluster.Position, 10)
+	go func() { _ = (&postgres.PostgreSQLDialect{}).Ingest(ctx1, config, nil, proposalChan1, positionChan1) }()
+	waitForSlot(t, "slot_recreate")
+
+	db = createDB(t)
+	_, err = db.Exec(fmt.Sprintf(`INSERT INTO %s (pk, val) VALUES ('before', 'v1')`, table))
+	require.NoError(t, err)
+	db.Close()
+
+	deadline := time.After(15 * time.Second)
+	seen := map[string]bool{}
+	var lastPos cluster.Position
+	for !seen["before"] || lastPos == nil {
+		select {
+		case p := <-proposalChan1:
+			for _, e := range p.Entities {
+				seen[string(e.Key)] = true
+			}
+		case pos := <-positionChan1:
+			if isCommitPosition(t, pos) {
+				lastPos = pos
+			}
+		case <-deadline:
+			t.Fatal("phase 1: timed out waiting for 'before' + a commit position")
+		}
+	}
+	cancel1()
+	require.NotEmpty(t, lastPos, "should have a checkpointed commit position")
+
+	// Drop ONLY the slot (keep the publication, so this is a slot-recreate, not a
+	// table-add backfill), then insert 'gap' — the row a resume from the stale
+	// LSN would skip.
+	dropSlotWhenInactive(t, "slot_recreate")
+	db = createDB(t)
+	_, err = db.Exec(fmt.Sprintf(`INSERT INTO %s (pk, val) VALUES ('gap', 'v2')`, table))
+	require.NoError(t, err)
+	db.Close()
+
+	// Phase 2: resume from the (now stale) checkpoint. The slot is gone, so the
+	// dialect must re-snapshot from the new ConsistentPoint and capture 'gap'.
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	proposalChan2 := make(chan *cluster.Proposal, 10)
+	positionChan2 := make(chan cluster.Position, 10)
+	ingestErr := make(chan error, 1)
+	go func() {
+		ingestErr <- (&postgres.PostgreSQLDialect{}).Ingest(ctx2, config, lastPos, proposalChan2, positionChan2)
+	}()
+	waitForSlot(t, "slot_recreate")
+
+	deadline = time.After(20 * time.Second)
+	seen2 := map[string]bool{}
+	for !seen2["gap"] {
+		select {
+		case p := <-proposalChan2:
+			for _, e := range p.Entities {
+				seen2[string(e.Key)] = true
+			}
+		case <-positionChan2:
+		case <-deadline:
+			t.Fatal("phase 2: 'gap' never arrived — a slot-recreate with a surviving checkpoint silently skipped it (no re-snapshot)")
+		}
+	}
+	cancel2()
+	select {
+	case err := <-ingestErr:
+		require.Nil(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Ingest did not exit after cancel")
+	}
+}

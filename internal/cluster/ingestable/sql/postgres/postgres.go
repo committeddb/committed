@@ -554,10 +554,10 @@ func (d *PostgreSQLDialect) stream(
 		return err
 	}
 
-	// Create the replication slot if it doesn't already exist.
-	// When newly created (not resuming), the slot's starting LSN is
-	// captured so streaming resumes from there.
-	_, err = pglogrepl.CreateReplicationSlot(ctx, conn, pgCfg.slotName, "pgoutput",
+	// Create the replication slot if it doesn't already exist. The result's
+	// ConsistentPoint is the new slot's starting LSN — the earliest point from
+	// which it retains WAL.
+	slotRes, err := pglogrepl.CreateReplicationSlot(ctx, conn, pgCfg.slotName, "pgoutput",
 		pglogrepl.CreateReplicationSlotOptions{})
 	slotIsNew := err == nil
 	if err != nil && !strings.Contains(err.Error(), "already exists") {
@@ -565,10 +565,32 @@ func (d *PostgreSQLDialect) stream(
 	}
 
 	switch {
+	case slotIsNew && *lastLSN != 0:
+		// The slot was recreated (dropped, expired, or reaped by
+		// max_slot_wal_keep_size) while a prior checkpoint survived. That LSN is
+		// now stale: the WAL between it and the new slot's ConsistentPoint was
+		// released with the old slot, so resuming from it would silently skip
+		// every change in that window (or wedge StartReplication on a missing
+		// LSN). The new slot only retains WAL from its ConsistentPoint, so the
+		// only recoverable path is a full re-snapshot starting there.
+		cp, perr := pglogrepl.ParseLSN(slotRes.ConsistentPoint)
+		if perr != nil {
+			return fmt.Errorf("parse recreated-slot ConsistentPoint %q: %w", slotRes.ConsistentPoint, perr)
+		}
+		zap.L().Warn("replication slot was recreated while a checkpoint survived; the prior LSN is unrecoverable — re-snapshotting from the new slot's consistent point",
+			zap.String("slot", pgCfg.slotName),
+			zap.Stringer("staleLSN", *lastLSN),
+			zap.String("consistentPoint", slotRes.ConsistentPoint))
+		*lastLSN = cp
+		*resumeProgress = nil
+		if err := d.snapshot(ctx, config, pgCfg, pgCfg.tables, nil, *lastLSN, pr, po); err != nil {
+			return err
+		}
 	case (slotIsNew && *lastLSN == 0) || *resumeProgress != nil:
-		// (a) the slot was just created and we have no prior checkpoint, or
-		// (b) a prior run was interrupted mid-snapshot: full snapshot of every
-		// configured table.
+		// (a) the slot was just created and we have no prior checkpoint (first
+		// run — StartReplication(0) below starts from the new slot's consistent
+		// point), or (b) a prior run was interrupted mid-snapshot: full snapshot
+		// of every configured table.
 		if err := d.snapshot(ctx, config, pgCfg, pgCfg.tables, *resumeProgress, *lastLSN, pr, po); err != nil {
 			return err
 		}
