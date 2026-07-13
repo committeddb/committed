@@ -111,6 +111,57 @@ func TestIngest_FreezesOnErrProposalUnknown(t *testing.T) {
 	require.NoError(t, d.Close())
 }
 
+// TestIngest_FreezesOnErrProposalLost is the ErrProposalLost twin of
+// TestIngest_FreezesOnErrProposalUnknown. ErrProposalLost ("proposal
+// truncated before commit") is the signal that wins precisely on the node
+// that physically held the truncated entry — the old leader, which is
+// where the ingest worker runs — so on the common leader-change orphan of
+// an ingest proposal it is the LIKELY delivered signal, not the rarer
+// Unknown. The worker must freeze on either signal identically; branching
+// only on Unknown (the pre-fix shape) let a Lost proposal log-and-continue
+// and advance the persisted position past data that never committed.
+func TestIngest_FreezesOnErrProposalLost(t *testing.T) {
+	id := "freeze-ingest-lost"
+
+	d, s := newIngestFailFastDB(t)
+
+	require.Eventually(t,
+		func() bool { return d.ObservedLeaderForTest() == 1 },
+		2*time.Second, 2*time.Millisecond,
+	)
+
+	proposal := &cluster.Proposal{
+		Entities: []*cluster.Entity{{
+			Type: &cluster.Type{ID: "string"},
+			Key:  []byte("freeze-key"),
+			Data: []byte("freeze-value"),
+		}},
+	}
+	ing := newFreezeRecordingIngestable(proposal, cluster.Position([]byte("pos-1")))
+
+	require.NoError(t, d.Ingest(context.Background(), id, ing))
+
+	rid := d.WaitForAnyWaiterForTest(2 * time.Second)
+	require.NotZero(t, rid, "ingest worker never registered a Propose waiter")
+
+	// Inject ErrProposalLost (the truncated-entry signal) rather than
+	// ErrProposalUnknown. Pre-fix this fell through the freeze branch.
+	d.SignalWaiterForTest(rid, db.ErrProposalLost)
+
+	require.Never(t,
+		func() bool { return ing.PositionSendCount() > 0 },
+		200*time.Millisecond, 10*time.Millisecond,
+		"ingest worker advanced past ErrProposalLost — regression",
+	)
+
+	require.False(t, s.HasIngestablePositionEntity(id),
+		"IngestablePosition entity appeared in log — regression",
+	)
+
+	s.Unblock()
+	require.NoError(t, d.Close())
+}
+
 // newIngestFailFastDB constructs a single-node DB backed by a
 // slow-apply wrapper around MemoryStorage. The wrapper stalls each
 // ApplyCommitted call until the test explicitly unblocks it; this

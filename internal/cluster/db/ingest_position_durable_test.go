@@ -250,6 +250,51 @@ func TestIngestPosition_FreezesOnErrProposalUnknown(t *testing.T) {
 	require.NoError(t, d.Close())
 }
 
+// TestIngestPosition_FreezesOnErrProposalLost is the ErrProposalLost twin of
+// TestIngestPosition_FreezesOnErrProposalUnknown: a position bump that comes
+// back ErrProposalLost (the truncated-entry signal that wins on the old
+// leader, where the ingest worker runs) must freeze the worker just like
+// Unknown. Without it, a Lost bump on a leader flap would advance the durable
+// checkpoint past data that never committed.
+func TestIngestPosition_FreezesOnErrProposalLost(t *testing.T) {
+	id := "freeze-on-position-lost"
+
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { provider.Shutdown(context.Background()) })
+	m := metrics.New(provider.Meter("test"))
+
+	d, s := newIngestFailFastDBWith(t,
+		db.WithMetrics(m),
+		db.WithIngestSupervisorInitialBackoff(1*time.Hour),
+	)
+
+	require.Eventually(t,
+		func() bool { return d.ObservedLeaderForTest() == 1 },
+		2*time.Second, 2*time.Millisecond,
+	)
+
+	require.NoError(t, d.Ingest(context.Background(), id,
+		&positionOnlyIngestable{position: cluster.Position([]byte("pos-1"))}))
+
+	rid := d.WaitForAnyWaiterForTest(2 * time.Second)
+	require.NotZero(t, rid, "ingest worker never submitted the position bump")
+
+	d.SignalWaiterForTest(rid, db.ErrProposalLost)
+
+	require.Eventually(t, func() bool {
+		var rm metricdata.ResourceMetrics
+		if err := reader.Collect(context.Background(), &rm); err != nil {
+			return false
+		}
+		return findSupervisorGaugeForID(rm, "committed.ingest.frozen", id) == 1.0
+	}, 2*time.Second, 10*time.Millisecond,
+		"position-bump ErrProposalLost must freeze the ingest worker")
+
+	s.Unblock()
+	require.NoError(t, d.Close())
+}
+
 // TestDeleteIngestable_StalePositionBumpDoesNotOrphan is the ingest delete-race
 // regression: a worker position bump that commits AFTER the config+position
 // delete must not re-establish an orphaned IngestablePosition — otherwise a

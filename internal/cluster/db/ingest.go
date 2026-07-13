@@ -382,9 +382,17 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 					if db.metrics != nil && ctx.Err() == nil {
 						db.metrics.IngestError(id, "propose")
 					}
-					if errors.Is(err, ErrProposalUnknown) {
+					if errors.Is(err, ErrProposalUnknown) || errors.Is(err, ErrProposalLost) {
 						// Freeze: we don't know if this proposal
-						// committed. Because position bumps are now
+						// committed. ErrProposalUnknown (status unknown
+						// after a leader change) and ErrProposalLost
+						// (entry truncated before commit) are the two
+						// leader-flap orphan signals; on the old leader —
+						// where this worker runs — Lost is the likely one,
+						// so both must freeze or a truncated proposal would
+						// log-and-continue and advance the position past
+						// data that never committed. Because position bumps
+						// are now
 						// blocking (one in flight at a time, fully
 						// resolved before the next channel event),
 						// there are no outstanding bumps to drain —
@@ -413,17 +421,19 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 				// sends a checkpoint AFTER the proposals it covers have
 				// been handed off (and those Proposes already blocked
 				// to apply), so a durable position implies durable
-				// proposals through it. On ErrProposalUnknown we freeze
-				// exactly like an unknown user proposal: the supervisor
-				// restarts the ingestable from the un-advanced
-				// (persisted) position.
+				// proposals through it. On ErrProposalUnknown OR
+				// ErrProposalLost we freeze exactly like an orphaned user
+				// proposal: the supervisor restarts the ingestable from the
+				// un-advanced (persisted) position. Both leader-flap orphan
+				// signals must freeze — Lost is the one that wins on the old
+				// leader where this worker runs.
 				err := db.proposeIngestablePosition(ctx, &cluster.IngestablePosition{ID: id, Position: position})
 				if err != nil {
 					db.logger.Warn("proposeIngestablePosition error", zap.String("id", id), zap.Error(err))
 					if db.metrics != nil && ctx.Err() == nil {
 						db.metrics.IngestError(id, "position")
 					}
-					if errors.Is(err, ErrProposalUnknown) {
+					if errors.Is(err, ErrProposalUnknown) || errors.Is(err, ErrProposalLost) {
 						if db.metrics != nil {
 							db.metrics.IngestFrozen(id, true)
 						}
