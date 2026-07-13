@@ -44,6 +44,12 @@ func TestJSONValue(t *testing.T) {
 		{"json canonicalizes key order", `{"zebra":1,"apple":2}`, sql.CatJSON, `{"apple":2,"zebra":1}`},
 		{"json canonicalizes nested keys + spacing", `{"b": {"y": 1, "x": 2}}`, sql.CatJSON, `{"b":{"x":2,"y":1}}`},
 		{"json preserves big int exactly", `{"n":900719925474099267}`, sql.CatJSON, `{"n":900719925474099267}`},
+		// canonicalJSON preserves number TEXT (UseNumber) — it sorts keys but does
+		// NOT reformat numbers; a whole double's ".0" survives here (Postgres jsonb
+		// precision is preserved). MySQL-snapshot number normalization is separate
+		// (CanonicalizeMySQLJSONNumbers) — see TestCanonicalizeMySQLJSONNumbers.
+		{"json preserves a whole double's .0", `{"x":100.0}`, sql.CatJSON, `{"x":100.0}`},
+		{"json preserves a high-precision decimal", `{"x":1.234567890123456789}`, sql.CatJSON, `{"x":1.234567890123456789}`},
 		{"json keeps array order", `{"a":[3,1,2]}`, sql.CatJSON, `{"a":[3,1,2]}`},
 		{"invalid json -> string", `{not json`, sql.CatJSON, `"{not json"`},
 		{"json with trailing garbage -> string", `{"a":1} x`, sql.CatJSON, `"{\"a\":1} x"`},
@@ -57,6 +63,26 @@ func TestJSONValue(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.Equal(t, tc.want, marshal(sql.JSONValue(tc.raw, tc.cat)))
+		})
+	}
+}
+
+// TestCanonicalizeMySQLJSONNumbers pins the MySQL-snapshot-only number
+// normalization: float-syntax numbers (whole doubles, exponents) collapse to Go's
+// float form (matching the go-mysql CDC path); integers stay exact; invalid input
+// passes through. Deliberately NOT applied to Postgres (jsonb precision preserved).
+func TestCanonicalizeMySQLJSONNumbers(t *testing.T) {
+	for _, tc := range []struct{ name, in, want string }{
+		{"whole double -> int", `{"x":100.0}`, `{"x":100}`},
+		{"negative zero", `{"x":-0.0}`, `{"x":-0}`},
+		{"exponent expands", `{"x":1e2}`, `{"x":100}`},
+		{"real decimal kept", `{"x":1.5}`, `{"x":1.5}`},
+		{"big integer exact (no float rounding)", `{"x":900719925474099267}`, `{"x":900719925474099267}`},
+		{"nested + array normalized", `{"a":{"b":2.0},"c":[3.0,4]}`, `{"a":{"b":2},"c":[3,4]}`},
+		{"invalid passes through", `{not json`, `{not json`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, string(sql.CanonicalizeMySQLJSONNumbers([]byte(tc.in))))
 		})
 	}
 }

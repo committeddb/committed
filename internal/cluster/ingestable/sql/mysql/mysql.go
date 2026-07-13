@@ -645,6 +645,24 @@ func bitToInt64(b []byte) int64 {
 	return int64(u)
 }
 
+// stripZeroTimeFraction removes an all-zero fractional part from a MySQL TIME
+// value ("13:45:30.000000" → "13:45:30") so the snapshot matches the CDC render:
+// go-mysql's TIME2 decoder drops the fraction entirely when it is zero, while the
+// driver's snapshot text pads it to the column's declared precision. A non-zero
+// fraction is left intact (both paths keep it).
+func stripZeroTimeFraction(s string) string {
+	dot := strings.IndexByte(s, '.')
+	if dot < 0 {
+		return s
+	}
+	for _, c := range s[dot+1:] {
+		if c != '0' {
+			return s // a real fraction — keep it
+		}
+	}
+	return s[:dot]
+}
+
 // decodeEnumSet resolves the numeric binlog encoding of ENUM and SET columns to
 // the label text the snapshot path (database/sql) also produces, so both ingest
 // paths render the same JSON for the same value. The binlog hands back an ENUM as
@@ -1548,10 +1566,28 @@ func readBatch(
 		// decodes BIT to an int64. Convert here so a BIT value renders as the same
 		// JSON number (and keys identically) on both paths, instead of the snapshot
 		// emitting the bytes as a text string ("A") while CDC emits the number (65).
+		//
+		// TIME(N): the snapshot pads a zero fraction to N digits
+		// ("13:45:30.000000") but go-mysql's TIME2 decoder drops it entirely
+		// ("13:45:30"); strip an all-zero fraction so both paths agree. (DATETIME2/
+		// TIMESTAMP2 pad on both sides — only TIME2 diverges.)
 		for i, ct := range colTypes {
-			if ct.DatabaseTypeName() == "BIT" {
+			switch ct.DatabaseTypeName() {
+			case "BIT":
 				if b, ok := vals[i].([]byte); ok {
 					vals[i] = bitToInt64(b)
+				}
+			case "TIME":
+				if b, ok := vals[i].([]byte); ok {
+					vals[i] = []byte(stripZeroTimeFraction(string(b)))
+				}
+			case "JSON":
+				// MySQL's snapshot JSON keeps a whole double's trailing ".0"
+				// ("100.0"/"-0.0") that the binlog path (go-mysql float64) drops
+				// ("100"/"-0"); normalize the snapshot to match. MySQL-only — see
+				// CanonicalizeMySQLJSONNumbers.
+				if b, ok := vals[i].([]byte); ok {
+					vals[i] = sql.CanonicalizeMySQLJSONNumbers(b)
 				}
 			}
 		}

@@ -1,6 +1,7 @@
 package sql
 
 import (
+	"bytes"
 	"encoding/json"
 	"regexp"
 	"strings"
@@ -100,6 +101,60 @@ func canonicalJSON(text string) (json.RawMessage, bool) {
 		return nil, false
 	}
 	return json.RawMessage(b), true
+}
+
+// CanonicalizeMySQLJSONNumbers rewrites float-syntax JSON numbers in raw to Go's
+// canonical float form (float64), matching what the MySQL binlog (CDC) path
+// already produces — go-mysql decodes a JSON double to float64 and json.Marshals
+// it. The MySQL SNAPSHOT path calls this so a whole double's "1.0"/"-0.0" text
+// (MySQL's normalized JSON) agrees with CDC's "1"/"-0", closing the byte
+// divergence dedup relies on. Pure-integer tokens (no '.'/'e'/'E') stay exact —
+// the UseNumber contract that keeps >2^53 IDs/keys byte-for-byte.
+//
+// DELIBERATELY MySQL-snapshot-only, not in the shared canonicalJSON: Postgres
+// renders jsonb identically on both its paths (no divergence to fix), and jsonb
+// preserves arbitrary-precision numerics — float64-normalizing there would
+// silently round a high-precision decimal, a corruption with no upside. Returns
+// raw unchanged on a parse error.
+func CanonicalizeMySQLJSONNumbers(raw []byte) []byte {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil || dec.More() {
+		return raw
+	}
+	b, err := json.Marshal(normalizeJSONNumbers(v))
+	if err != nil {
+		return raw
+	}
+	return b
+}
+
+func normalizeJSONNumbers(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		for k, e := range x {
+			x[k] = normalizeJSONNumbers(e)
+		}
+		return x
+	case []any:
+		for i, e := range x {
+			x[i] = normalizeJSONNumbers(e)
+		}
+		return x
+	case json.Number:
+		s := x.String()
+		if !strings.ContainsAny(s, ".eE") {
+			return x // integer syntax — keep exact (big-int safe)
+		}
+		f, err := x.Float64()
+		if err != nil {
+			return x // not representable as float64 — leave the token as-is
+		}
+		return f
+	default:
+		return v
+	}
 }
 
 // BuildEntityJSON maps a decoded source row into the topic payload, keyed by each

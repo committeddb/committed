@@ -1857,14 +1857,17 @@ func TestMysqlSnapshotStreamJSONBitByteIdentity(t *testing.T) {
 	_, err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS `%s`", table))
 	require.NoError(t, err)
 	_, err = db.Exec(fmt.Sprintf(
-		"CREATE TABLE `%s` (pk VARCHAR(32) PRIMARY KEY, j JSON, b BIT(8))", table))
+		"CREATE TABLE `%s` (pk VARCHAR(32) PRIMARY KEY, j JSON, b BIT(8), t TIME(6))", table))
 	require.NoError(t, err)
 	// Keys deliberately out of alphabetical AND length order to expose key-order
-	// divergence; a >2^53 int and a decimal to expose number reformatting.
-	const vals = `'{"zebra": 1, "id": 2, "apple": 3, "big": 10000000000000001, "dec": 1.50}', b'01000001'`
-	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, j, b) VALUES ('a', %s)", table, vals))
+	// divergence; a >2^53 int (exactness), a decimal, and whole-valued doubles
+	// (100.0 / -0.0 — go-mysql marshals these to 100 / 0 on CDC while the snapshot
+	// keeps MySQL's "100.0"/"-0.0" text). t is a TIME(6) with a zero fraction
+	// (go-mysql drops it to "13:45:30"; the snapshot pads to "13:45:30.000000").
+	const vals = `'{"zebra": 1, "id": 2, "apple": 3, "big": 10000000000000001, "dec": 1.50, "whole": 100.0, "negz": -0.0}', b'01000001', '13:45:30'`
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, j, b, t) VALUES ('a', %s)", table, vals))
 	require.NoError(t, err)
-	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, j, b) VALUES ('__sentinel__', %s)", table, vals))
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, j, b, t) VALUES ('__sentinel__', %s)", table, vals))
 	require.NoError(t, err)
 	db.Close()
 
@@ -1874,6 +1877,7 @@ func TestMysqlSnapshotStreamJSONBitByteIdentity(t *testing.T) {
 			{JsonName: "pk", SQLColumn: "pk"},
 			{JsonName: "j", SQLColumn: "j"},
 			{JsonName: "b", SQLColumn: "b"},
+			{JsonName: "t", SQLColumn: "t"},
 		},
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: ingestURL,
@@ -1910,7 +1914,7 @@ func TestMysqlSnapshotStreamJSONBitByteIdentity(t *testing.T) {
 
 	mdb := createDB(t)
 	defer mdb.Close()
-	_, err = mdb.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, j, b) VALUES ('b', %s)", table, vals))
+	_, err = mdb.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, j, b, t) VALUES ('b', %s)", table, vals))
 	require.NoError(t, err)
 	drainUntil(func() bool { _, ok := seen["b"]; return ok }, "CDC row b")
 
@@ -1921,19 +1925,21 @@ func TestMysqlSnapshotStreamJSONBitByteIdentity(t *testing.T) {
 		require.NoError(t, json.Unmarshal(payload, &m))
 		return string(m[name])
 	}
-	t.Logf("snapshot j = %s", rawField(seen["a"], "j"))
-	t.Logf("CDC      j = %s", rawField(seen["b"], "j"))
-	t.Logf("snapshot b = %s", rawField(seen["a"], "b"))
-	t.Logf("CDC      b = %s", rawField(seen["b"], "b"))
-	require.Equal(t, rawField(seen["a"], "j"), rawField(seen["b"], "j"),
-		"snapshot and CDC must emit byte-identical JSON")
-	require.Equal(t, rawField(seen["a"], "b"), rawField(seen["b"], "b"),
-		"snapshot and CDC must emit byte-identical BIT")
+	for _, col := range []string{"j", "b", "t"} {
+		t.Logf("snapshot %s = %s", col, rawField(seen["a"], col))
+		t.Logf("CDC      %s = %s", col, rawField(seen["b"], col))
+		require.Equal(t, rawField(seen["a"], col), rawField(seen["b"], col),
+			"snapshot and CDC must emit byte-identical %q", col)
+	}
 
-	// Pin the canonical forms both paths converge on.
-	require.Equal(t, `{"apple":3,"big":10000000000000001,"dec":1.5,"id":2,"zebra":1}`,
-		rawField(seen["a"], "j"), "JSON canonicalized to recursively-sorted keys, exact numbers")
+	// Pin the canonical forms both paths converge on: keys sorted; big int exact;
+	// whole-valued doubles collapse to integers (100.0→100, -0.0→0); TIME(6) with
+	// a zero fraction renders without the fraction.
+	require.Equal(t,
+		`{"apple":3,"big":10000000000000001,"dec":1.5,"id":2,"negz":-0,"whole":100,"zebra":1}`,
+		rawField(seen["a"], "j"), "JSON canonicalized: sorted keys, exact int, normalized doubles")
 	require.Equal(t, "65", rawField(seen["a"], "b"), "BIT renders as a JSON number")
+	require.Equal(t, `"13:45:30"`, rawField(seen["a"], "t"), "TIME(6) zero-fraction renders without fraction")
 }
 
 // TestMysqlSnapshotResume verifies that an interrupted snapshot resumes
