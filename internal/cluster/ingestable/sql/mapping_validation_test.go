@@ -37,6 +37,40 @@ func TestValidateMappingColumns(t *testing.T) {
 		require.Contains(t, err.Error(), "differ only by case")
 	})
 
+	// A multi-table ingestable emits every table's rows under ONE entity key, so a
+	// primaryKey column must exist in EVERY watched table — not just the union.
+	// A PK absent from one table decodes to nothing for that table's rows and
+	// CompositeKey collapses them all onto "<nil>" (silent overwrite + wrong-key
+	// deletes). Mappings may still be table-specific (union); the key can't be.
+	t.Run("primaryKey missing from one of several tables is rejected", func(t *testing.T) {
+		multi := map[string][]string{
+			"orders": {"id", "amount"},
+			"events": {"amount", "ts"}, // no "id"
+		}
+		cfg := &Config{
+			Tables:     []string{"orders", "events"},
+			PrimaryKey: []string{"id"}, // present in orders, absent from events
+			Mappings:   []Mapping{{JsonName: "a", SQLColumn: "amount"}},
+		}
+		err := validateMappingColumns(cfg, multi)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "id")
+		require.Contains(t, err.Error(), "events", "the error must name the table missing the PK column")
+	})
+
+	t.Run("primaryKey present in every table is accepted (case-insensitively)", func(t *testing.T) {
+		multi := map[string][]string{
+			"orders": {"ID", "amount"}, // CamelCase
+			"events": {"id", "ts"},     // lowercase
+		}
+		cfg := &Config{
+			Tables:     []string{"orders", "events"},
+			PrimaryKey: []string{"Id"}, // resolves case-insensitively in both
+			Mappings:   []Mapping{},
+		}
+		require.NoError(t, validateMappingColumns(cfg, multi))
+	})
+
 	t.Run("mixed-case primaryKey resolves; nonexistent primaryKey rejected", func(t *testing.T) {
 		ok := &Config{
 			Tables:     []string{"users"},

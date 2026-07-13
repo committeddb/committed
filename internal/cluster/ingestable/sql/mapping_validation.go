@@ -59,15 +59,42 @@ func validateMappingColumns(config *Config, colsByTable map[string][]string) err
 	// Every primaryKey column must resolve too: a nonexistent PK column decodes to
 	// nothing, so CompositeKey collapses every row onto the key "<nil>" (all rows
 	// overwrite one another downstream, deletes tombstone the wrong key).
+	//
+	// Unlike a mapping, a PK column must resolve in EVERY watched table, not just
+	// the union: a multi-table ingestable emits all tables' rows under ONE entity
+	// key, so a PK column present in some tables but absent from another still
+	// collapses that table's rows onto "<nil>". A column in NO table is a typo;
+	// one in some-but-not-all is a coverage gap — distinct cases, each with its
+	// own actionable message.
 	for _, pk := range config.PrimaryKey {
 		if pk == "" {
 			continue
 		}
-		if !sourceCols[strings.ToLower(pk)] {
+		lc := strings.ToLower(pk)
+		if !sourceCols[lc] {
 			return fmt.Errorf(
 				"primaryKey column %q not found in source table(s) %v — check the spelling and case; a nonexistent PK column collapses every row onto a single entity key",
 				pk, config.Tables)
 		}
+		for _, table := range config.Tables {
+			if !columnInTableFold(colsByTable[table], lc) {
+				return fmt.Errorf(
+					"primaryKey column %q is missing from watched table %q (it exists in another watched table, but a PK column must exist in EVERY table — otherwise that table's rows collapse onto the entity key \"<nil>\")",
+					pk, table)
+			}
+		}
 	}
 	return nil
+}
+
+// columnInTableFold reports whether cols contains a column that equals lowerName
+// when lowercased. lowerName must already be lowercase; committed decodes column
+// names case-insensitively, so the match is case-folded.
+func columnInTableFold(cols []string, lowerName string) bool {
+	for _, c := range cols {
+		if strings.ToLower(c) == lowerName {
+			return true
+		}
+	}
+	return false
 }
