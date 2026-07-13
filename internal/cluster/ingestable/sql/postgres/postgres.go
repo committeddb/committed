@@ -951,12 +951,24 @@ func pgCategoryForTypeName(name string) sql.JSONCategory {
 // stream is single-goroutine, so no lock is needed. A nil resolver (tests, or if
 // the connection is unavailable) falls back to pgCategoryForOID via columnCategory.
 type oidCategoryResolver struct {
-	db    *gosql.DB
 	cache map[uint32]sql.JSONCategory
+	// lookupType returns oid's pg_type (typtype, typbasetype). It's a field so a
+	// test can inject a transient error; production wires it to the DB in
+	// newOIDCategoryResolver.
+	lookupType func(ctx context.Context, oid uint32) (typtype string, typbasetype uint32, err error)
 }
 
 func newOIDCategoryResolver(db *gosql.DB) *oidCategoryResolver {
-	return &oidCategoryResolver{db: db, cache: make(map[uint32]sql.JSONCategory)}
+	return &oidCategoryResolver{
+		cache: make(map[uint32]sql.JSONCategory),
+		lookupType: func(ctx context.Context, oid uint32) (string, uint32, error) {
+			var typtype string
+			var typbasetype uint32
+			err := db.QueryRowContext(ctx,
+				"SELECT typtype, typbasetype FROM pg_type WHERE oid = $1", oid).Scan(&typtype, &typbasetype)
+			return typtype, typbasetype, err
+		},
+	}
 }
 
 // category returns the JSON category for oid, resolving a domain to its base type.
@@ -968,27 +980,41 @@ func (r *oidCategoryResolver) category(ctx context.Context, oid uint32) sql.JSON
 	if c, ok := r.cache[oid]; ok {
 		return c
 	}
-	c := r.resolveDomain(ctx, oid)
-	r.cache[oid] = c
+	c, resolved := r.resolveDomain(ctx, oid)
+	// Cache only a REAL classification. A transient pg_type lookup error resolves
+	// to CatText for THIS value but must NOT be cached: caching it would render
+	// every later value of a domain-over-numeric/bool/json column as a JSON string
+	// for the rest of the session — diverging from the snapshot (which classifies
+	// by base type) and from other nodes, which defeats dedup. Leaving it uncached
+	// makes the next value retry the lookup.
+	if resolved {
+		r.cache[oid] = c
+	}
 	return c
 }
 
 // resolveDomain follows a chain of domains (a domain can wrap another domain) to
-// the underlying base type and classifies by it. Anything that is not a domain,
-// or that can't be read, keeps the CatText default — the pre-fix behavior.
-func (r *oidCategoryResolver) resolveDomain(ctx context.Context, oid uint32) sql.JSONCategory {
+// the underlying base type and classifies by it. The bool reports whether the
+// classification is REAL and cacheable: true when every pg_type lookup answered
+// (the OID is a base type, a resolved domain, or a bounded-out chain), false when
+// a lookup ERRORED — a transient blip that must not be cached as CatText.
+// Anything that is not a domain keeps the CatText default — the pre-fix behavior.
+func (r *oidCategoryResolver) resolveDomain(ctx context.Context, oid uint32) (sql.JSONCategory, bool) {
 	cur := oid
 	for range 16 { // bound the walk; a domain chain is short and can't cycle
-		var typtype string
-		var typbasetype uint32
-		err := r.db.QueryRowContext(ctx,
-			"SELECT typtype, typbasetype FROM pg_type WHERE oid = $1", cur).Scan(&typtype, &typbasetype)
-		if err != nil || typtype != "d" || typbasetype == 0 {
-			return pgCategoryForOID(cur) // not a domain (or unreadable) — classify by this OID
+		typtype, typbasetype, err := r.lookupType(ctx, cur)
+		if err != nil {
+			// A relation-message OID always exists in pg_type, so this is a
+			// transient failure (connection/timeout), not a missing type: don't
+			// cache, retry on the next value.
+			return sql.CatText, false
+		}
+		if typtype != "d" || typbasetype == 0 {
+			return pgCategoryForOID(cur), true // not a domain — classify by this OID
 		}
 		cur = typbasetype // domain over cur's base — follow it
 	}
-	return sql.CatText
+	return sql.CatText, true // chain too deep — a bounded (non-error) result, cacheable
 }
 
 // columnCategory resolves a column's OID to a category, using the domain-aware
