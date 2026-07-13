@@ -113,6 +113,58 @@ func TestCompile_InvalidProgram(t *testing.T) {
 	require.Error(t, migration.Compile([]byte(`this is not jq`)))
 }
 
+// TestCompile_RejectsNondeterministicBuiltins is the determinism-sandbox
+// regression: a migration runs at READ time (always-current sync, rebuild,
+// dead-letter replay), so it must be a pure function of the entity. A program
+// referencing a nondeterministic / unsandboxed builtin must be rejected at
+// Compile (Type-registration) time, naming the offender, rather than silently
+// drifting sink data or diverging per node later.
+func TestCompile_RejectsNondeterministicBuiltins(t *testing.T) {
+	for _, tc := range []struct {
+		name, program, wantBuiltin string
+	}{
+		{"now assignment", `.ts = now`, "now"},
+		{"now piped", `.ts = (now | floor)`, "now"},
+		{"now nested in object", `{a: .a, b: {c: now}}`, "now"},
+		{"localtime", `.t = (.epoch | localtime)`, "localtime"},
+		{"gmtime", `.t = (.epoch | gmtime)`, "gmtime"},
+		{"mktime", `.t = (.broken | mktime)`, "mktime"},
+		{"strftime", `.t = (.epoch | strftime("%Y"))`, "strftime"},
+		{"strflocaltime", `.t = (.epoch | strflocaltime("%Y"))`, "strflocaltime"},
+		{"strptime", `.t = (.s | strptime("%Y"))`, "strptime"},
+		{"date", `.t = (.epoch | date)`, "date"},
+		{"loc", `.l = $__loc__`, "$__loc__"},
+		{"env", `.e = env`, "env"},
+		{"ENV var", `.e = $ENV`, "$ENV"},
+		{"input", `. + input`, "input"},
+		{"inputs", `[inputs]`, "inputs"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := migration.Compile([]byte(tc.program))
+			require.Error(t, err, "program must be rejected")
+			require.Contains(t, err.Error(), tc.wantBuiltin, "error must name the offending builtin")
+		})
+	}
+}
+
+// TestCompile_AllowsDeterministicPrograms guards against the sandbox
+// over-rejecting: pure programs — including ones with fields/strings that merely
+// share a builtin's name, arithmetic, and big-int round-trips — must still compile.
+func TestCompile_AllowsDeterministicPrograms(t *testing.T) {
+	for _, program := range []string{
+		`. + {email: "x"}`,
+		`.a + .b`,
+		`.now`,                      // field named "now", not the builtin
+		`{ts: .now, note: "now"}`,   // field access + string literal
+		`.id | tonumber + 1`,        // deterministic arithmetic
+		`.big = 900719925474099267`, // big int
+		`.items | map(select(.n > 0))`,
+		`.t | fromdate`, // deterministic given input (not denied)
+	} {
+		require.NoError(t, migration.Compile([]byte(program)), program)
+	}
+}
+
 // TestChain_RuntimeErrorIsStructured asserts a program failing at runtime
 // surfaces as a *migration.Error naming the exact failing step — the
 // identity the sync worker uses to dead-letter the failure against the

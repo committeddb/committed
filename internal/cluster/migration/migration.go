@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/itchyny/gojq"
@@ -104,12 +105,103 @@ func Chain(ctx context.Context, r Resolver, typeID string, stampedVersion, lates
 	return current, nil
 }
 
-// Compile parses a jq program and returns an error if the program is
-// syntactically invalid. Called at Type-registration time so operators
-// see bad programs immediately instead of at first-sync.
+// Compile parses a jq program and returns an error if it is syntactically
+// invalid OR references a nondeterministic/unsandboxed builtin. Called at
+// Type-registration time so operators see a bad program immediately (a
+// POST /type/{id} 400) instead of at first-sync — or, worse, never: a
+// nondeterministic migration doesn't error, it silently drifts.
 func Compile(program []byte) error {
-	_, err := gojq.Parse(string(program))
-	return err
+	q, err := gojq.Parse(string(program))
+	if err != nil {
+		return err
+	}
+	return rejectNondeterministicBuiltins(q)
+}
+
+// nondeterministicBuiltins are jq builtins a migration transform must not use. A
+// migration runs at READ time — on every ModeAlwaysCurrent sync, every
+// RebuildSyncable, every dead-letter replay — so it must be a PURE function of
+// the entity: identical input must yield identical output, on every node. These
+// break that:
+//
+//   - now, date            wall-clock — a different value every execution.
+//   - localtime,           depend on the node's time.Local — per-node
+//     strflocaltime        divergence even for identical input.
+//   - gmtime, mktime,      the rest of the time family, denied wholesale (a
+//     strftime, strptime   deterministic subset is future work, not worth
+//     risking the edge cases today).
+//   - $__loc__             source position — couples output to program text.
+//   - env, $ENV            the node's environment (inert today — no
+//     EnvironmentLoader — but denied so it can't become a
+//     leak if one is ever added).
+//   - input, inputs        external input beyond the entity (already inert, but
+//     denied for the same defense-in-depth reason).
+var nondeterministicBuiltins = map[string]struct{}{
+	"now": {}, "date": {},
+	"localtime": {}, "strflocaltime": {},
+	"gmtime": {}, "mktime": {}, "strftime": {}, "strptime": {},
+	"$__loc__": {},
+	"env":      {}, "$ENV": {},
+	"input": {}, "inputs": {},
+}
+
+var gojqFuncType = reflect.TypeFor[gojq.Func]()
+
+// rejectNondeterministicBuiltins rejects a parsed program that calls any builtin
+// in nondeterministicBuiltins, naming the first offender. It reflection-walks the
+// AST rather than type-switching over gojq's ~15 node types on purpose: reflection
+// visits EVERY node — including any node type a future gojq version adds — so a
+// denied builtin can't slip through an un-walked branch. That fail-safe property
+// is what a security/correctness guard needs; the reflection cost is irrelevant
+// since this runs once, at registration.
+func rejectNondeterministicBuiltins(q *gojq.Query) error {
+	var offender string
+	walkFuncNames(reflect.ValueOf(q), func(name string) bool {
+		if _, denied := nondeterministicBuiltins[name]; denied {
+			offender = name
+			return false // found one — stop walking
+		}
+		return true
+	})
+	if offender != "" {
+		return fmt.Errorf("migration references the non-deterministic builtin %q; a migration "+
+			"must be a pure function of the entity so a rebuild, replay, or leader change "+
+			"reproduces the same result — remove it", offender)
+	}
+	return nil
+}
+
+// walkFuncNames calls visit with the Name of every *gojq.Func reachable from v,
+// stopping early (returning false) as soon as visit returns false.
+func walkFuncNames(v reflect.Value, visit func(name string) bool) bool {
+	switch v.Kind() {
+	case reflect.Pointer, reflect.Interface:
+		return v.IsNil() || walkFuncNames(v.Elem(), visit)
+	case reflect.Struct:
+		if v.Type() == gojqFuncType {
+			if !visit(v.FieldByName("Name").String()) {
+				return false
+			}
+		}
+		for i := 0; i < v.NumField(); i++ {
+			if !walkFuncNames(v.Field(i), visit) {
+				return false
+			}
+		}
+	case reflect.Slice, reflect.Array:
+		for i := 0; i < v.Len(); i++ {
+			if !walkFuncNames(v.Index(i), visit) {
+				return false
+			}
+		}
+	case reflect.Map:
+		for _, k := range v.MapKeys() {
+			if !walkFuncNames(v.MapIndex(k), visit) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // Run executes a single jq program against a JSON document and returns
