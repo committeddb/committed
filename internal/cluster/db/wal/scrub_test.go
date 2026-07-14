@@ -102,6 +102,34 @@ func TestScrub_ErasesTombstoneKeyFromBboltAndSnapshot(t *testing.T) {
 		"the delete entry must keep the raw key for downstream erasure")
 }
 
+// TestScrub_NoLeakInPruneCompactWindow pins the fix for the prune→compact race:
+// the tombstone prune and the bbolt compaction must be one atomic step, so no
+// snapshot can be taken in a gap between them and copy the freed-but-uncompacted
+// page (the erased key). It asserts the invariant directly — the instant
+// markScrubComplete (prune + compact, fused) returns, a fresh snapshot carries no
+// erased key. Before the fix, compaction ran as a separate later step, so a
+// snapshot here leaked the free page.
+func TestScrub_NoLeakInPruneCompactWindow(t *testing.T) {
+	const subject = "carol@example.com"
+
+	s := NewStorage(t, nil)
+	defer s.Cleanup()
+
+	s.RegisterType(t, "u", 1, 1)
+	saveEntity(t, userUpsert("u", subject, `{"pii":true}`), s, 1, 2)
+	saveEntity(t, userDelete("u", subject), s, 1, 3) // tombstone @3
+
+	// markScrubComplete prunes the tombstone AND compacts, atomically.
+	require.Nil(t, s.MarkScrubCompleteForTest(3))
+
+	// A snapshot taken the instant it returns must not carry the erased key — there
+	// is no pruned-but-uncompacted window for a concurrent CreateSnapshot to catch.
+	snap, err := s.CreateSnapshot(s.AppliedIndex(), &pb.ConfState{})
+	require.Nil(t, err)
+	require.NotContains(t, string(snap.Data), subject,
+		"a snapshot taken the instant markScrubComplete returns must not carry the erased key")
+}
+
 // TestScrub_EntityGranular verifies a multi-entity proposal keeps its
 // untombstoned siblings: only the tombstoned entity is erased, the record is
 // re-marshaled in place.

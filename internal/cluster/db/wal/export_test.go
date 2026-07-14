@@ -88,14 +88,14 @@ func (s *Storage) RunScrubForTest(bound uint64) error {
 	if err := s.runScrub(bound); err != nil {
 		return err
 	}
-	pruned, err := s.markScrubComplete(bound)
-	if err != nil {
-		return err
-	}
-	if pruned {
-		return s.compactKV()
-	}
-	return nil
+	return s.markScrubComplete(bound)
+}
+
+// MarkScrubCompleteForTest exposes markScrubComplete (prune + compact, fused) so a
+// test can assert that the instant it returns, a snapshot carries no erased key —
+// i.e. no prune→compact window a concurrent CreateSnapshot could slip through.
+func (s *Storage) MarkScrubCompleteForTest(bound uint64) error {
+	return s.markScrubComplete(bound)
 }
 
 // FirstEventIndex exposes the firstEventIndex atomic (raft index of the first

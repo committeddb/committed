@@ -249,20 +249,22 @@ func (s *Storage) refreshAfterRestore() {
 	s.RestoreIngestableWorkers()
 }
 
-// compactKV rewrites the bbolt database in place, dropping free pages so the bytes
-// of deleted keys — notably pruned RTBF tombstones (raw subject identifiers) — no
-// longer linger in the file. bbolt's Delete only frees a page, it doesn't zero it,
-// and CreateSnapshot serializes the whole file via tx.WriteTo (free pages
-// included), so without this an erased key would keep riding in snapshots until
-// its page happened to be reused. bolt.Compact copies only live data into a fresh
-// file; we then atomically rename it over the live file and reopen, mirroring
-// RestoreSnapshot's swap. Held under kvMu.Lock for the whole swap so no reader
-// observes a closed/torn handle; the logical content is unchanged, so the
-// in-memory caches (databases, appliedIndex, …) stay valid.
-func (s *Storage) compactKV() error {
-	s.kvMu.Lock()
-	defer s.kvMu.Unlock()
-
+// compactLocked rewrites the bbolt database in place, dropping free pages so the
+// bytes of deleted keys — notably pruned RTBF tombstones (raw subject identifiers)
+// — no longer linger in the file. bbolt's Delete only frees a page, it doesn't
+// zero it, and CreateSnapshot serializes the whole file via tx.WriteTo (free pages
+// included), so without this an erased key would keep riding in snapshots until its
+// page happened to be reused. bolt.Compact copies only live data into a fresh file;
+// we then atomically rename it over the live file and reopen, mirroring
+// RestoreSnapshot's swap. The logical content is unchanged, so the in-memory caches
+// (databases, appliedIndex, …) stay valid.
+//
+// The CALLER must hold kvMu.Lock — not just so no reader observes a closed/torn
+// handle, but so it can be fused with the tombstone prune into one critical
+// section: CreateSnapshot copies free pages under kvMu.RLock, so a gap between a
+// committed prune and this compaction would let a snapshot serialize the
+// freed-but-uncompacted key. markScrubComplete holds the lock across both.
+func (s *Storage) compactLocked() error {
 	boltPath := s.keyValueStorage.Path()
 	boltOpts := &bolt.Options{Timeout: 1 * time.Second}
 	tmpPath := filepath.Join(filepath.Dir(boltPath), fmt.Sprintf("bbolt.db.compact.%d", time.Now().UnixNano()))
