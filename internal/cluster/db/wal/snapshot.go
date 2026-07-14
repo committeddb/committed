@@ -10,6 +10,7 @@ import (
 
 	bolt "go.etcd.io/bbolt"
 	pb "go.etcd.io/raft/v3/raftpb"
+	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
@@ -205,5 +206,45 @@ func (s *Storage) RestoreSnapshot(snap *pb.Snapshot) error {
 	s.snapshot = proto.Clone(snap).(*pb.Snapshot)
 	s.snapMu.Unlock()
 
+	// The swapped-in bbolt may carry syncable/ingestable configs whose creating
+	// raft entry was compacted out of the log — a lagging follower learns them
+	// ONLY via this InstallSnapshot. They now exist on disk but have no worker:
+	// RestoreSnapshot only swaps bbolt, and the apply path (the only other thing
+	// that sends a config to the worker channels) is skipped for the compacted
+	// entries the snapshot stands in for. Without a re-drive the node has the
+	// config but does nothing — and if it is later elected leader without a
+	// process restart, that syncable/ingestable silently stops projecting.
+	// Re-drive them (and refresh the scrub bound + config-secret gauge, which also
+	// derive from the swapped bbolt) off the Ready loop; see refreshAfterRestore.
+	go s.refreshAfterRestore()
+
 	return nil
+}
+
+// refreshAfterRestore re-derives the in-memory state that hangs off bbolt after
+// RestoreSnapshot swaps in a new database file: the syncable/ingestable workers,
+// the scrub bound, and the config-secret/build-error gauge. It mirrors what the
+// Open path does (cmd/node calls RestoreSyncableWorkers/RestoreIngestableWorkers
+// after Open) for the snapshot-install path, which previously did none of it.
+//
+// Launched in its own goroutine by RestoreSnapshot, mirroring the Open path's
+// `go RestoreSyncableWorkers`: it keeps the raft Ready loop from blocking on the
+// worker-channel sends, and lets its s.view reads wait cleanly for RestoreSnapshot's
+// deferred kvMu.Unlock instead of deadlocking against the held write lock.
+// Duplicate sends racing a concurrent apply of the same config are collapsed by
+// db.Sync/db.Ingest (replace-by-id), so this is idempotent.
+func (s *Storage) refreshAfterRestore() {
+	if bound, err := s.loadScrubCompleted(); err != nil {
+		s.logger.Warn("restore: reload scrub bound", zap.Error(err))
+	} else {
+		// Adopt the restored bbolt's completed bound, as Open does. A value below
+		// the current one only re-GCs an already-clean range (idempotent); the
+		// scrub skip/gauge logic stays correct either way.
+		s.lastScrubbedBound.Store(bound)
+	}
+	if err := s.validateConfigSecrets(); err != nil {
+		s.logger.Warn("restore: validate config secrets", zap.Error(err))
+	}
+	s.RestoreSyncableWorkers()
+	s.RestoreIngestableWorkers()
 }
