@@ -410,7 +410,9 @@ far less on a busy node. This is the same category as an OS **page cache**, a
 database **WAL**, or a filesystem **journal**: a transient buffer that holds
 recently-written data for a bounded window and self-clears. It is never read by a
 syncable, never returned over the API, and never captured in a snapshot (the raft
-snapshot serializes BoltDB, into which user topic entities do not materialize).
+snapshot serializes BoltDB, into which user topic entity *payloads* do not
+materialize — the one identifier that does, the RTBF delete-tombstone key, is
+pruned + compacted out of bbolt when its scrub runs, see *Phase 2* above).
 The expectation is therefore that erased personal data may linger in this
 consensus buffer for up to **~1 hour** after removal from the permanent log — a
 bounded, non-exposed window, well within GDPR's "without undue delay." (Backups
@@ -466,6 +468,20 @@ verbatim. It writes a fresh sibling directory and swaps it in under a
 short lock (`eventMu`, mirroring how `kvMu` guards the bbolt handle during
 `RestoreSnapshot`).
 
+The same scrub also **erases the subject's identifier from bbolt**. The
+`eventTombstones` bucket is keyed by `(type, key)`, so the raw subject key sits in
+bbolt — and, because a raft snapshot serializes the whole bbolt file, it would
+otherwise ride in every snapshot shipped to followers and written to disk. Once a
+tombstone's scrub has run it is dead weight (log indices are monotonic, so nothing
+can ever precede an already-scrubbed delete), so the worker **prunes** the
+tombstone and then **compacts** bbolt. The compaction is load-bearing: bbolt's
+logical `Delete` only frees the page, and `tx.WriteTo` copies free pages, so
+without a live-data-only rewrite the raw key would linger in the file. After the
+scrub, the erased subject's identifier is gone from bbolt and from every
+subsequent snapshot. (Determinism is unaffected: the prune is a pure function of
+the tombstone set and B; compaction only changes physical layout, which raft
+never compares across nodes.)
+
 Removal is **entity-granular**: a proposal that bundled several entities
 is re-marshaled to keep its untombstoned siblings; the whole record is
 dropped only when every entity in it is removed. (A referential constraint
@@ -473,12 +489,18 @@ from a *retained* entity to a *scrubbed* one can break a new syncable's
 replay — inherent to time-traveled deletion, and the schema designer's
 responsibility.)
 
-The **delete-tombstone entries are retained** (they are instructions, not
-PII, and are tiny). Keeping them is required for correctness: a syncable
-that has read the originals but not yet the delete must still receive the
-delete to drop its row, and a fresh syncable replaying a scrubbed log sees
-only the delete → a `DELETE` of a row that was never inserted → harmless
-no-op.
+The **delete-tombstone entries are retained** in the permanent event log.
+They are erasure *instructions* and are tiny — but the entry's `key` is the
+subject's natural identifier, so it **is** PII (an earlier version of this doc
+wrongly called it "not PII"). Keeping them is required for correctness: a syncable
+that has read the originals but not yet the delete must still receive the delete
+to drop its row, and a fresh syncable replaying a scrubbed log sees only the
+delete → a `DELETE` of a row that was never inserted → harmless no-op. That
+retained identifier lives only in each node's **local event log** — it is *not* in
+the bbolt snapshot (the snapshot's copy is pruned + compacted, above), so it is
+never fanned out cluster-wide via `InstallSnapshot`. Erasing it from the local
+event log too (rewriting the retained delete's key once every syncable has
+consumed it) is tracked as a future item — see the RTBF erasure runbook/ledger.
 
 **Triggers.** A `Scrub` command is proposed two ways: automatically by the
 leader on a cadence (`COMMITTED_SCRUB_INTERVAL`, default 1h) whenever there

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	pb "go.etcd.io/raft/v3/raftpb"
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db/wal"
@@ -59,6 +60,46 @@ func TestScrub_RemovesPIIKeepsTombstoneAndSiblings(t *testing.T) {
 	// retained type entry (idx 1, not removed).
 	require.Equal(t, uint64(5), s.EventIndex(), "EventIndex must not regress")
 	require.Equal(t, uint64(1), s.FirstEventIndex())
+}
+
+// TestScrub_ErasesTombstoneKeyFromBboltAndSnapshot pins the RTBF completeness
+// fix: after the scrub runs, the erased subject's raw key is gone from the
+// tombstone bucket — and therefore from every snapshot (CreateSnapshot serializes
+// the whole bbolt) — while the retained WAL delete entry keeps the raw key so a
+// lagging or rebuilt syncable can still DELETE the downstream row.
+func TestScrub_ErasesTombstoneKeyFromBboltAndSnapshot(t *testing.T) {
+	const subject = "alice@example.com" // a natural identifier (PII), per the docs' own examples
+
+	s := NewStorage(t, nil)
+	defer s.Cleanup()
+
+	s.RegisterType(t, "u", 1, 1)
+	saveEntity(t, userUpsert("u", subject, `{"pii":true}`), s, 1, 2)
+	saveEntity(t, userDelete("u", subject), s, 1, 3) // tombstone the subject @3
+
+	// Before the scrub, the raw key lives in the tombstone bucket, so it rides in
+	// a snapshot — the leak this fix closes.
+	pre, err := s.CreateSnapshot(s.AppliedIndex(), &pb.ConfState{})
+	require.Nil(t, err)
+	require.Contains(t, string(pre.Data), subject,
+		"precondition: the raw subject key is in bbolt/snapshot before the scrub")
+
+	require.Nil(t, s.RunScrubForTest(3))
+
+	// After the scrub, the raw key must be gone from bbolt — and therefore from a
+	// fresh snapshot shipped to followers / persisted to disk.
+	post, err := s.CreateSnapshot(s.AppliedIndex(), &pb.ConfState{})
+	require.Nil(t, err)
+	require.NotContains(t, string(post.Data), subject,
+		"the erased subject's raw key must not survive in bbolt/snapshot")
+
+	// Correctness preserved: the retained WAL delete entry still carries the raw
+	// key, so a lagging or rebuilt syncable can still DELETE the downstream row.
+	del, err := s.ActualAt(3)
+	require.Nil(t, err)
+	require.True(t, del.Entities[0].IsDelete())
+	require.Equal(t, []byte(subject), del.Entities[0].Key,
+		"the delete entry must keep the raw key for downstream erasure")
 }
 
 // TestScrub_EntityGranular verifies a multi-entity proposal keeps its

@@ -248,3 +248,60 @@ func (s *Storage) refreshAfterRestore() {
 	s.RestoreSyncableWorkers()
 	s.RestoreIngestableWorkers()
 }
+
+// compactKV rewrites the bbolt database in place, dropping free pages so the bytes
+// of deleted keys — notably pruned RTBF tombstones (raw subject identifiers) — no
+// longer linger in the file. bbolt's Delete only frees a page, it doesn't zero it,
+// and CreateSnapshot serializes the whole file via tx.WriteTo (free pages
+// included), so without this an erased key would keep riding in snapshots until
+// its page happened to be reused. bolt.Compact copies only live data into a fresh
+// file; we then atomically rename it over the live file and reopen, mirroring
+// RestoreSnapshot's swap. Held under kvMu.Lock for the whole swap so no reader
+// observes a closed/torn handle; the logical content is unchanged, so the
+// in-memory caches (databases, appliedIndex, …) stay valid.
+func (s *Storage) compactKV() error {
+	s.kvMu.Lock()
+	defer s.kvMu.Unlock()
+
+	boltPath := s.keyValueStorage.Path()
+	boltOpts := &bolt.Options{Timeout: 1 * time.Second}
+	tmpPath := filepath.Join(filepath.Dir(boltPath), fmt.Sprintf("bbolt.db.compact.%d", time.Now().UnixNano()))
+
+	dst, err := bolt.Open(tmpPath, 0o600, boltOpts)
+	if err != nil {
+		return fmt.Errorf("open compaction target: %w", err)
+	}
+	if err := bolt.Compact(dst, s.keyValueStorage, 0); err != nil {
+		_ = dst.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("compact bbolt: %w", err)
+	}
+	if err := dst.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("close compaction target: %w", err)
+	}
+
+	// Swap: close the live handle, rename the compacted file over it (atomic on
+	// POSIX), reopen. A crash between the close and the rename leaves the original
+	// intact; the tombstone was already logically pruned durably, and the next
+	// scrub re-compacts.
+	if err := s.keyValueStorage.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("close bbolt before compaction swap: %w", err)
+	}
+	if err := os.Rename(tmpPath, boltPath); err != nil {
+		_ = os.Remove(tmpPath)
+		// The live handle is closed; reopen the original so the storage isn't
+		// left dead.
+		if reopened, rerr := bolt.Open(boltPath, 0o600, boltOpts); rerr == nil {
+			s.keyValueStorage = reopened
+		}
+		return fmt.Errorf("rename compacted bbolt: %w", err)
+	}
+	reopened, err := bolt.Open(boltPath, 0o600, boltOpts)
+	if err != nil {
+		return fmt.Errorf("reopen bbolt after compaction: %w", err)
+	}
+	s.keyValueStorage = reopened
+	return nil
+}

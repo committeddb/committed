@@ -115,3 +115,67 @@ func (s *Storage) tombstoneSelections(bound uint64) (map[string]uint64, error) {
 	}
 	return sel, nil
 }
+
+// pruneTombstonesLE removes every delete index <= bound from the tombstone
+// bucket, deleting a (type, key) entry once all its indices are consumed. Runs
+// in the same transaction that records the completed scrub bound.
+//
+// This is what actually ERASES the erased subject's raw key (RTBF). A tombstone
+// is pure scrub bookkeeping keyed by `typeID + 0x00 + rawKey`: once the scrub for
+// its delete D has run (D <= bound), it can never match another entry — event-log
+// indices are monotonic, so nothing can ever appear before an already-scrubbed
+// delete — so keeping it only retains the raw identifier for no purpose. And
+// because CreateSnapshot serializes the whole bbolt, that raw key would otherwise
+// ride in every snapshot to every follower and onto disk forever. Deletes with an
+// index > bound are still pending (a later scrub handles them) and are kept.
+//
+// Deterministic: bound is the replicated Scrub command's freeze line and the
+// tombstone contents are byte-identical on every replica, so every node prunes
+// the same bytes.
+//
+// Returns whether it changed the bucket. A logical Delete only frees the page, it
+// does not zero it, and CreateSnapshot's tx.WriteTo copies free pages too — so the
+// caller compacts bbolt when this reports a change, to actually drop the stale
+// key bytes from the file (and thus from every snapshot).
+func pruneTombstonesLE(tx *bolt.Tx, bound uint64) (changed bool, err error) {
+	b := tx.Bucket(eventTombstoneBucket)
+	if b == nil {
+		return false, ErrBucketMissing
+	}
+	type rewrite struct{ k, v []byte }
+	var rewrites []rewrite
+	var deletes [][]byte
+	// Collect first, mutate after: bbolt disallows modifying a bucket while its
+	// cursor is iterating it. Cursor keys/values are only valid during the scan,
+	// so copy anything retained.
+	c := b.Cursor()
+	for k, v := c.First(); k != nil; k, v = c.Next() {
+		kept := make([]byte, 0, len(v))
+		for off := 0; off+8 <= len(v); off += 8 {
+			if binary.BigEndian.Uint64(v[off:off+8]) > bound {
+				kept = append(kept, v[off:off+8]...)
+			}
+		}
+		if len(kept) == len(v) {
+			continue // nothing pruned for this (type, key)
+		}
+		kc := make([]byte, len(k))
+		copy(kc, k)
+		if len(kept) == 0 {
+			deletes = append(deletes, kc)
+		} else {
+			rewrites = append(rewrites, rewrite{kc, kept})
+		}
+	}
+	for _, r := range rewrites {
+		if err := b.Put(r.k, r.v); err != nil {
+			return false, err
+		}
+	}
+	for _, dk := range deletes {
+		if err := b.Delete(dk); err != nil {
+			return false, err
+		}
+	}
+	return len(rewrites) > 0 || len(deletes) > 0, nil
+}

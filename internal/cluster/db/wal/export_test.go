@@ -88,7 +88,14 @@ func (s *Storage) RunScrubForTest(bound uint64) error {
 	if err := s.runScrub(bound); err != nil {
 		return err
 	}
-	return s.markScrubComplete(bound)
+	pruned, err := s.markScrubComplete(bound)
+	if err != nil {
+		return err
+	}
+	if pruned {
+		return s.compactKV()
+	}
+	return nil
 }
 
 // FirstEventIndex exposes the firstEventIndex atomic (raft index of the first

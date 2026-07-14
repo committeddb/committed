@@ -126,8 +126,18 @@ func (s *Storage) runPendingScrub() error {
 		if err := s.runScrub(bound); err != nil {
 			return err
 		}
-		if err := s.markScrubComplete(bound); err != nil {
+		pruned, err := s.markScrubComplete(bound)
+		if err != nil {
 			return err
+		}
+		// Pruning a tombstone only frees its bbolt page; the raw key bytes linger
+		// in that free page and tx.WriteTo copies free pages into snapshots. Compact
+		// to physically drop them so an erased key can't ride in a snapshot. Only
+		// when something was pruned — compaction is an O(bbolt) rewrite.
+		if pruned {
+			if err := s.compactKV(); err != nil {
+				return err
+			}
 		}
 	}
 }
@@ -495,8 +505,8 @@ func (s *Storage) loadScrubUint(key []byte) (uint64, error) {
 
 // markScrubComplete advances the persisted + in-memory completed bound after a
 // successful swap.
-func (s *Storage) markScrubComplete(bound uint64) error {
-	err := s.update(func(tx *bolt.Tx) error {
+func (s *Storage) markScrubComplete(bound uint64) (pruned bool, err error) {
+	err = s.update(func(tx *bolt.Tx) error {
 		bkt := tx.Bucket(pendingScrubBucket)
 		if bkt == nil {
 			return ErrBucketMissing
@@ -504,12 +514,22 @@ func (s *Storage) markScrubComplete(bound uint64) error {
 		if cur := bkt.Get(scrubCompletedKey); len(cur) == 8 && binary.BigEndian.Uint64(cur) >= bound {
 			return nil
 		}
+		// RTBF: the rewrite that just ran removed the upserts these tombstones
+		// pointed at, so the tombstones (raw subject keys) are now dead weight —
+		// prune them in the same tx that advances the bound. That erases the raw
+		// key from bbolt's logical tree; the caller compacts to drop the freed
+		// bytes so they don't ride in a snapshot.
+		var perr error
+		pruned, perr = pruneTombstonesLE(tx, bound)
+		if perr != nil {
+			return perr
+		}
 		var buf [8]byte
 		binary.BigEndian.PutUint64(buf[:], bound)
 		return bkt.Put(scrubCompletedKey, buf[:])
 	})
 	if err != nil {
-		return err
+		return false, err
 	}
 	// Advance the atomic only after the durable write succeeds.
 	for {
@@ -523,7 +543,7 @@ func (s *Storage) markScrubComplete(bound uint64) error {
 	// during the scrub (index > bound) aren't reflected; they re-accumulate and
 	// drive the next scrub. Exactness isn't required (see metadataBacklog).
 	s.metadataBacklog.Store(0)
-	return nil
+	return pruned, nil
 }
 
 // metadataBacklogThreshold is how many system-tombstonable metadata writes must
