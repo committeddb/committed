@@ -51,6 +51,10 @@ type payloadType struct {
 type Syncable struct {
 	client *nethttp.Client
 	config *Config
+	// endpoint is the URL's scheme://host only (no path/query/userinfo) — the
+	// replicate-safe form used in delivery errors and logs, since the path/query
+	// is where secret-in-URL webhooks (Slack/Discord/?token=) carry the secret.
+	endpoint string
 }
 
 // New creates an HTTP webhook Syncable.
@@ -59,7 +63,8 @@ func New(config *Config) *Syncable {
 		client: &nethttp.Client{
 			Timeout: time.Duration(config.TimeoutMs) * time.Millisecond,
 		},
-		config: config,
+		config:   config,
+		endpoint: redactedTarget(config.URL),
 	}
 }
 
@@ -121,7 +126,9 @@ func (s *Syncable) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldS
 
 	req, err := nethttp.NewRequestWithContext(ctx, s.config.Method, s.config.URL, bytes.NewReader(bs))
 	if err != nil {
-		return false, cluster.Permanent(fmt.Errorf("[http.Sync] create request: %w", err))
+		// The error can be a *url.Error echoing the full (secret-bearing) URL —
+		// wrap it so only the redacted endpoint reaches the replicated dead-letter.
+		return false, cluster.Permanent(&syncError{label: "[http.Sync] create request", target: s.endpoint, err: err})
 	}
 
 	idempotencyKey := strconv.FormatUint(a.Index, 10)
@@ -132,13 +139,17 @@ func (s *Syncable) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldS
 	}
 
 	zap.L().Debug("http syncable sending",
-		zap.String("url", s.config.URL),
+		zap.String("endpoint", s.endpoint),
 		zap.Uint64("index", a.Index),
 		zap.Int("entities", len(entities)))
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return false, fmt.Errorf("[http.Sync] request failed: %w", err)
+		// A transport failure returns a *url.Error whose text embeds the full
+		// (secret-bearing) request URL; wrap it so the replicated dead-letter /
+		// stuck record / status API sees only the redacted endpoint. Transient
+		// (not Permanent) — a blip should retry.
+		return false, &syncError{label: "[http.Sync] request failed", target: s.endpoint, err: err}
 	}
 	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, resp.Body)

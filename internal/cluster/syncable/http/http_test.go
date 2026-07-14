@@ -61,6 +61,40 @@ type webhookType struct {
 	Version int    `json:"version"`
 }
 
+// TestSync_TransportError_RedactsURLSecret pins the webhook secret-leak fix: a
+// transport failure returns a *url.Error whose text embeds the full request URL —
+// path included, where Slack/Discord/?token= webhooks carry the secret. The value
+// the dead-letter/stuck record and the status/errors/replay APIs persist and expose
+// (RedactedMessage, via safeDeadLetterMessage) must not contain that secret.
+func TestSync_TransportError_RedactsURLSecret(t *testing.T) {
+	const secret = "SUPERSECRETTOKEN123"
+
+	// A closed server → connection refused → client.Do returns a *url.Error whose
+	// text includes the full secret-bearing URL.
+	ts := httptest.NewServer(nethttp.HandlerFunc(func(nethttp.ResponseWriter, *nethttp.Request) {}))
+	url := ts.URL + "/services/T000/B000/" + secret
+	ts.Close()
+
+	cfg := newConfig(url)
+	cfg.TimeoutMs = 1000
+	s := synchttp.New(cfg)
+
+	_, err := s.Sync(context.Background(), newActual(newEntity(testType, "k", map[string]any{"x": 1})))
+	require.Error(t, err)
+
+	// Reproduce exactly what the dead-letter/status path persists + exposes:
+	// RedactedMessage() when the error is a RedactedError, else the raw Error().
+	persisted := err.Error()
+	var red cluster.RedactedError
+	if errors.As(err, &red) {
+		persisted = red.RedactedMessage()
+	}
+	require.NotContains(t, persisted, secret,
+		"the replicated dead-letter/status message must not carry the webhook URL secret")
+	require.Contains(t, persisted, "127.0.0.1",
+		"the message should still name the endpoint host to stay actionable")
+}
+
 func TestSync_SingleEntity_Success(t *testing.T) {
 	var received webhookBody
 	var headers nethttp.Header
