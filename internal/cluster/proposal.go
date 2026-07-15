@@ -52,6 +52,20 @@ type Entity struct {
 	*Type
 	Key  []byte
 	Data []byte
+	// Generation is the ingest refresh epoch that stamped this entity — a
+	// per-ingestable monotonic counter (from 1) the worker applies to every
+	// emitted entity, snapshot and streaming alike. It drives reconciling
+	// ("full-refresh") snapshots: a keyed sink writes it on upsert and, on a
+	// RefreshBoundary marker at epoch G, sweeps any row still carrying a
+	// generation < G — the rows a positive re-enumeration can never signal are
+	// gone (deleted at the source in a lost change-data window). 0 means "not
+	// stamped by a refresh-managed ingest" (direct user writes, config records,
+	// pre-feature log entries) and is never swept.
+	Generation uint64
+	// RefreshBoundary marks this entity as a refresh-boundary MARKER, not row
+	// data: it carries no Key/Data, and Generation is the epoch G at which its
+	// topic was fully refreshed. See NewRefreshBoundaryEntity and IsRefreshBoundary.
+	RefreshBoundary bool
 }
 
 func NewUpsertEntity(t *Type, key []byte, data []byte) *Entity {
@@ -62,8 +76,29 @@ func NewDeleteEntity(t *Type, key []byte) *Entity {
 	return &Entity{Type: t, Key: key, Data: delete}
 }
 
+// NewRefreshBoundaryEntity builds the marker an ingest worker emits once per
+// topic at the end of an all-tables full refresh: it names the topic (via t)
+// and the epoch G the refresh reached, and instructs a keyed sink to sweep
+// every row of that topic whose generation is < G. It carries no Key/Data — it
+// is a control entity, not a row — so IsDelete is false for it and a sink that
+// does not implement reconciliation applies it as a no-op. It must ride only
+// on an all-tables refresh, never a partial added-table backfill (which would
+// sweep the topic's sibling tables). epoch MUST be >= 1.
+func NewRefreshBoundaryEntity(t *Type, epoch uint64) *Entity {
+	return &Entity{Type: t, RefreshBoundary: true, Generation: epoch}
+}
+
 func (e *Entity) IsDelete() bool {
 	return string(e.Data) == string(delete)
+}
+
+// IsRefreshBoundary reports whether this entity is a refresh-boundary marker
+// (see NewRefreshBoundaryEntity) rather than row data. A marker and a delete
+// are mutually exclusive — a marker carries no Data, so IsDelete is false —
+// and a sink must branch on IsRefreshBoundary before treating an entity as an
+// upsert or a delete.
+func (e *Entity) IsRefreshBoundary() bool {
+	return e.RefreshBoundary
 }
 
 func (p *Proposal) String() string {
@@ -92,8 +127,10 @@ func (p *Proposal) Marshal() ([]byte, error) {
 				// versions).
 				Version: uint32(e.Version), //nolint:gosec // G115: bounded by domain
 			},
-			Key:  e.Key,
-			Data: e.Data,
+			Key:             e.Key,
+			Data:            e.Data,
+			Generation:      e.Generation,
+			RefreshBoundary: e.RefreshBoundary,
 		})
 	}
 
@@ -169,9 +206,11 @@ func (p *Proposal) Unmarshal(bs []byte, r TypeResolver) error {
 			return err
 		}
 		p.Entities = append(p.Entities, &Entity{
-			Type: t,
-			Key:  e.Key,
-			Data: e.Data,
+			Type:            t,
+			Key:             e.Key,
+			Data:            e.Data,
+			Generation:      e.GetGeneration(),
+			RefreshBoundary: e.GetRefreshBoundary(),
 		})
 	}
 

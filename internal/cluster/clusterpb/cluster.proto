@@ -25,6 +25,26 @@ message LogEntity {
 	// reused with an incompatible meaning against any on-disk data.
 	reserved 4;
 	reserved "Timestamp";
+	// generation is the ingest refresh epoch that stamped this entity — a
+	// per-ingestable monotonic counter (starting at 1) the worker carries in
+	// its position and applies to EVERY emitted entity, snapshot and streaming
+	// alike. It drives reconciling ("full-refresh") snapshots: on a full
+	// re-snapshot the worker bumps the epoch, re-emits every live source row at
+	// the new epoch, and closes with a refresh-boundary marker; a keyed sink
+	// then sweeps any row still carrying an older generation (a row deleted at
+	// the source in a lost change-data window, which a positive re-enumeration
+	// can never signal). 0 means "not stamped by a refresh-managed ingest"
+	// (direct user writes, config records, pre-feature log entries) and is
+	// never swept. Backward compatible: old entries unmarshal as 0.
+	uint64 generation = 5;
+	// refresh_boundary marks this entity as a refresh-boundary MARKER rather
+	// than row data: it carries no Key/Data, and `generation` is the epoch G at
+	// which its topic was fully refreshed. A keyed sink reacts by sweeping every
+	// row of that topic whose generation is < G (>= 1). Emitted once per topic
+	// at the end of an all-tables full refresh — NEVER after a partial
+	// added-table backfill (that would delete the topic's sibling tables). A
+	// consumer that does not implement reconciliation treats it as a no-op.
+	bool refresh_boundary = 6;
 }
 
 message LogProposal {

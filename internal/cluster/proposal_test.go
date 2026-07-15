@@ -1,9 +1,14 @@
 package cluster
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 	"testing"
+
+	"google.golang.org/protobuf/proto"
+
+	"github.com/committeddb/committed/internal/cluster/clusterpb"
 )
 
 // stubResolver is a test TypeResolver that returns pre-loaded Types.
@@ -265,5 +270,121 @@ func TestSystemTypesDeclareKindAndTombstonability(t *testing.T) {
 			t.Errorf("system type %q (%s): IsSystemTombstonable = %v, want %v (kind %q)",
 				tp.Name, id, got, want, tp.EntityKind)
 		}
+	}
+}
+
+// TestRefreshGenerationRoundTrip proves the reconciling-refresh fields
+// (Entity.Generation and the RefreshBoundary marker) survive Marshal →
+// Unmarshal, that a marker is neither a delete nor row data, and that an
+// ordinary upsert stays a non-marker gen-0 entity. This is the wire contract
+// the SQL sink and webhook then build on.
+func TestRefreshGenerationRoundTrip(t *testing.T) {
+	tp := &Type{ID: "topic-id", Name: "Topic", Version: 1, EntityKind: EntityKindSnapshot}
+
+	upsert := NewUpsertEntity(tp, []byte("k1"), []byte("d1"))
+	upsert.Generation = 7 // stamped by the ingest worker at emit time
+	del := NewDeleteEntity(tp, []byte("k2"))
+	del.Generation = 7
+	marker := NewRefreshBoundaryEntity(tp, 7)
+
+	p := &Proposal{Entities: []*Entity{upsert, del, marker}}
+	bs, err := p.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	resolver := &stubResolver{
+		types:    map[string]*Type{tp.ID: tp},
+		versions: map[string]*Type{fmt.Sprintf("%s@%d", tp.ID, tp.Version): tp},
+	}
+	got := &Proposal{}
+	if err := got.Unmarshal(bs, resolver); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if len(got.Entities) != 3 {
+		t.Fatalf("got %d entities, want 3", len(got.Entities))
+	}
+
+	gu, gd, gm := got.Entities[0], got.Entities[1], got.Entities[2]
+
+	// Upsert: generation preserved; not a marker, not a delete.
+	if gu.Generation != 7 {
+		t.Errorf("upsert Generation = %d, want 7", gu.Generation)
+	}
+	if gu.IsRefreshBoundary() || gu.IsDelete() {
+		t.Errorf("upsert: IsRefreshBoundary=%v IsDelete=%v, want both false", gu.IsRefreshBoundary(), gu.IsDelete())
+	}
+
+	// Delete: generation preserved and still a delete (marker orthogonal).
+	if gd.Generation != 7 {
+		t.Errorf("delete Generation = %d, want 7", gd.Generation)
+	}
+	if !gd.IsDelete() || gd.IsRefreshBoundary() {
+		t.Errorf("delete: IsDelete=%v IsRefreshBoundary=%v, want true/false", gd.IsDelete(), gd.IsRefreshBoundary())
+	}
+
+	// Marker: carries the epoch, is a boundary, is NOT a delete, and carries no row.
+	if !gm.IsRefreshBoundary() {
+		t.Error("marker: IsRefreshBoundary = false, want true")
+	}
+	if gm.IsDelete() {
+		t.Error("marker: IsDelete = true, want false (a marker carries no Data sentinel)")
+	}
+	if gm.Generation != 7 {
+		t.Errorf("marker Generation = %d, want 7 (the sweep epoch)", gm.Generation)
+	}
+	if len(gm.Key) != 0 || len(gm.Data) != 0 {
+		t.Errorf("marker carried Key=%q Data=%q, want both empty", gm.Key, gm.Data)
+	}
+	if gm.Type.ID != tp.ID {
+		t.Errorf("marker Type.ID = %q, want %q (names the topic to sweep)", gm.Type.ID, tp.ID)
+	}
+}
+
+// TestZeroGenerationWireBackCompatible proves the new fields cost nothing on
+// the wire when unused and that a pre-feature log entry (no fields 5/6) decodes
+// cleanly. proto3 omits zero-valued scalars, so an ordinary upsert must
+// marshal byte-identically to a LogProposal built without ever touching
+// Generation/RefreshBoundary — i.e. old readers ignore the new tags and old
+// bytes still round-trip to gen 0 / non-marker.
+func TestZeroGenerationWireBackCompatible(t *testing.T) {
+	tp := &Type{ID: "topic-id", Name: "Topic", Version: 1}
+
+	// An ordinary upsert with the new fields left at their zero values.
+	p := &Proposal{Entities: []*Entity{NewUpsertEntity(tp, []byte("k"), []byte("d"))}}
+	got, err := p.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	// The equivalent "pre-feature" wire form: a LogProposal that never sets
+	// fields 5/6. If our Marshal emitted a zero generation or marker tag, these
+	// would differ.
+	want, err := proto.Marshal(&clusterpb.LogProposal{
+		LogEntities: []*clusterpb.LogEntity{{
+			Type: &clusterpb.TypeRef{ID: tp.ID, Version: uint32(tp.Version)},
+			Key:  []byte("k"),
+			Data: []byte("d"),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("proto.Marshal: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("zero-generation upsert is not wire-identical to a pre-feature entry:\n got  %x\n want %x", got, want)
+	}
+
+	// And a pre-feature entry decodes to gen 0 / non-marker via our Unmarshal.
+	resolver := &stubResolver{
+		types:    map[string]*Type{tp.ID: tp},
+		versions: map[string]*Type{fmt.Sprintf("%s@%d", tp.ID, tp.Version): tp},
+	}
+	dec := &Proposal{}
+	if err := dec.Unmarshal(want, resolver); err != nil {
+		t.Fatalf("Unmarshal pre-feature bytes: %v", err)
+	}
+	e := dec.Entities[0]
+	if e.Generation != 0 || e.IsRefreshBoundary() {
+		t.Errorf("pre-feature entry decoded to Generation=%d RefreshBoundary=%v, want 0/false", e.Generation, e.IsRefreshBoundary())
 	}
 }
