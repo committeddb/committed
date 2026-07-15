@@ -25,20 +25,34 @@ type payload struct {
 }
 
 type entityPayload struct {
-	// Op is "upsert" or "delete". A delete carries no Data and the receiver
-	// MUST remove the record keyed by Key (a delete for a record that does
-	// not exist MUST be a harmless no-op) — this is the downstream half of
-	// right-to-be-forgotten erasure. Op is always present so receivers
-	// branch on it explicitly rather than inferring intent from missing Data.
+	// Op is "upsert", "delete", or "refresh". A delete carries no Data and the
+	// receiver MUST remove the record keyed by Key (a delete for a record that
+	// does not exist MUST be a harmless no-op) — the downstream half of
+	// right-to-be-forgotten erasure. A refresh carries no Key/Data, only
+	// Generation: it closes a reconciling full refresh and a keyed receiver
+	// MUST sweep every row still below that generation (see Generation). Op is
+	// always present so receivers branch on it explicitly rather than inferring
+	// intent from missing Data.
 	Op   string          `json:"op"`
 	Key  string          `json:"key"`
 	Type payloadType     `json:"type"`
 	Data json.RawMessage `json:"data,omitempty"`
+	// Generation is committed's reconciling-refresh epoch: the source ingest
+	// stamps it on every entity, monotonically increasing, and a full refresh
+	// re-emits every live row at a new epoch. A keyed receiver SHOULD store it
+	// on each upserted row, so that on the closing op:"refresh" (which carries
+	// the epoch G the refresh reached) it can `DELETE WHERE generation < G` —
+	// removing rows deleted at the source during a lost change-data window that
+	// the upsert-only refresh could not re-emit. Omitted (0) for entities from
+	// a source that predates the feature or for direct writes; a receiver that
+	// ignores it keeps today's upsert/delete-only behavior.
+	Generation uint64 `json:"generation,omitempty"`
 }
 
 const (
-	opUpsert = "upsert"
-	opDelete = "delete"
+	opUpsert  = "upsert"
+	opDelete  = "delete"
+	opRefresh = "refresh"
 )
 
 type payloadType struct {
@@ -92,12 +106,21 @@ func (s *Syncable) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldS
 		if s.config.Topic != e.ID {
 			continue // an entity from another topic in a mixed proposal — not ours
 		}
-		// A refresh-boundary marker (reconciling full-refresh) carries no row.
-		// Forwarding it to the receiver as a "refresh" op — so a remote sink can
-		// sweep stale rows — is Stage 4 of the reconciling-refresh work; until
-		// then skip it rather than POST a bogus empty-data upsert. (No marker
-		// reaches a webhook before the ingest dialects emit one.)
+		// A refresh-boundary marker closes a reconciling full refresh: forward it
+		// as op "refresh" carrying only the generation the refresh reached, so a
+		// keyed receiver can sweep every row still below it (rows deleted at the
+		// source in a lost change-data window, never re-emitted). It has no
+		// key/data. A receiver that ignores "refresh" keeps today's behavior.
 		if e.IsRefreshBoundary() {
+			entities = append(entities, entityPayload{
+				Op: opRefresh,
+				Type: payloadType{
+					ID:      e.ID,
+					Name:    e.Name,
+					Version: e.Version,
+				},
+				Generation: e.Generation,
+			})
 			continue
 		}
 		// A delete carries the sentinel in Data, not a payload — emit op
@@ -118,7 +141,8 @@ func (s *Syncable) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldS
 				Name:    e.Name,
 				Version: e.Version,
 			},
-			Data: data,
+			Data:       data,
+			Generation: e.Generation,
 		})
 	}
 

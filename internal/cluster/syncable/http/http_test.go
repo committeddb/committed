@@ -49,10 +49,11 @@ type webhookBody struct {
 }
 
 type webhookEntity struct {
-	Op   string          `json:"op"`
-	Key  string          `json:"key"`
-	Type webhookType     `json:"type"`
-	Data json.RawMessage `json:"data"`
+	Op         string          `json:"op"`
+	Key        string          `json:"key"`
+	Type       webhookType     `json:"type"`
+	Data       json.RawMessage `json:"data"`
+	Generation uint64          `json:"generation"`
 }
 
 type webhookType struct {
@@ -271,6 +272,124 @@ func TestSync_Upsert_EmitsUpsertOp(t *testing.T) {
 	require.Len(t, received.Entities, 1)
 	require.Equal(t, "upsert", received.Entities[0].Op)
 	require.JSONEq(t, `{"id":"1"}`, string(received.Entities[0].Data))
+}
+
+// TestSync_Upsert_CarriesGeneration verifies an upsert forwards the source
+// ingest's reconciling-refresh generation so a keyed receiver can stamp it on
+// the row and later sweep by it. A zero generation (pre-feature / direct write)
+// is omitted from the wire body.
+func TestSync_Upsert_CarriesGeneration(t *testing.T) {
+	var received webhookBody
+	var rawBody []byte
+
+	ts := httptest.NewServer(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		rawBody, _ = io.ReadAll(r.Body)
+		_ = json.Unmarshal(rawBody, &received)
+		w.WriteHeader(200)
+	}))
+	defer ts.Close()
+
+	s := synchttp.New(newConfig(ts.URL))
+	defer s.Close()
+
+	withGen := newEntity(testType, "key1", map[string]string{"id": "1"})
+	withGen.Generation = 3
+	zeroGen := newEntity(testType, "key2", map[string]string{"id": "2"})
+
+	_, err := s.Sync(context.Background(), newActual(withGen, zeroGen))
+	require.NoError(t, err)
+	require.Len(t, received.Entities, 2)
+	require.Equal(t, uint64(3), received.Entities[0].Generation, "the upsert must carry the source generation")
+	require.Equal(t, uint64(0), received.Entities[1].Generation, "a zero generation decodes as 0")
+	// The zero-generation entity omits the field entirely (omitempty), so a
+	// receiver that predates the feature sees exactly today's wire body.
+	require.NotContains(t, string(rawBody), `"generation":0`)
+}
+
+// TestSync_RefreshBoundary_EmitsRefreshOp is the Stage 4 red→green: a
+// refresh-boundary marker (the close of a reconciling full refresh) is
+// forwarded as op:"refresh" carrying the epoch the refresh reached and no
+// key/data, so a keyed receiver can sweep every row still below that
+// generation. Before Stage 4 the marker was silently dropped.
+func TestSync_RefreshBoundary_EmitsRefreshOp(t *testing.T) {
+	var received webhookBody
+	var rawBody []byte
+
+	ts := httptest.NewServer(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		rawBody, _ = io.ReadAll(r.Body)
+		_ = json.Unmarshal(rawBody, &received)
+		w.WriteHeader(200)
+	}))
+	defer ts.Close()
+
+	s := synchttp.New(newConfig(ts.URL))
+	defer s.Close()
+
+	// A full-refresh Actual: the re-emitted row at epoch 5, then the marker.
+	row := newEntity(testType, "key1", map[string]string{"id": "1"})
+	row.Generation = 5
+	marker := cluster.NewRefreshBoundaryEntity(testType, 5)
+
+	snapshot, err := s.Sync(context.Background(), newActual(row, marker))
+	require.NoError(t, err)
+	require.Equal(t, cluster.ShouldSnapshot(true), snapshot)
+
+	require.Len(t, received.Entities, 2, "the marker rides the request alongside the row")
+	require.Equal(t, "upsert", received.Entities[0].Op)
+	require.Equal(t, uint64(5), received.Entities[0].Generation)
+
+	refresh := received.Entities[1]
+	require.Equal(t, "refresh", refresh.Op)
+	require.Equal(t, uint64(5), refresh.Generation, "the refresh carries the epoch to sweep below")
+	require.Equal(t, "test-topic", refresh.Type.ID)
+	require.Empty(t, refresh.Key, "a refresh op carries no key")
+	require.Empty(t, refresh.Data, "a refresh op carries no data")
+}
+
+// TestSync_RefreshBoundary_OnlyMarker verifies a marker-only Actual (a refresh
+// whose window re-emitted no rows in this transaction) still POSTs the refresh
+// op — the sweep must happen even when the boundary arrives alone.
+func TestSync_RefreshBoundary_OnlyMarker(t *testing.T) {
+	var count atomic.Int32
+	var received webhookBody
+
+	ts := httptest.NewServer(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		count.Add(1)
+		bs, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(bs, &received)
+		w.WriteHeader(200)
+	}))
+	defer ts.Close()
+
+	s := synchttp.New(newConfig(ts.URL))
+	defer s.Close()
+
+	_, err := s.Sync(context.Background(), newActual(cluster.NewRefreshBoundaryEntity(testType, 2)))
+	require.NoError(t, err)
+	require.Equal(t, int32(1), count.Load(), "a marker-only Actual must still POST the refresh")
+	require.Len(t, received.Entities, 1)
+	require.Equal(t, "refresh", received.Entities[0].Op)
+	require.Equal(t, uint64(2), received.Entities[0].Generation)
+}
+
+// TestSync_RefreshBoundary_ForeignTopicNotForwarded verifies a marker for a
+// different topic is filtered out like any other foreign entity — the sweep is
+// topic-scoped and must not reach a syncable watching another topic.
+func TestSync_RefreshBoundary_ForeignTopicNotForwarded(t *testing.T) {
+	var count atomic.Int32
+
+	ts := httptest.NewServer(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, _ *nethttp.Request) {
+		count.Add(1)
+		w.WriteHeader(200)
+	}))
+	defer ts.Close()
+
+	s := synchttp.New(newConfig(ts.URL)) // Topic "test-topic"
+	defer s.Close()
+
+	_, err := s.Sync(context.Background(), newActual(cluster.NewRefreshBoundaryEntity(otherType, 4)))
+	require.NoError(t, err)
+	require.Equal(t, int32(0), count.Load(), "a foreign-topic marker must not be POSTed")
 }
 
 func TestSync_TopicMismatch(t *testing.T) {
