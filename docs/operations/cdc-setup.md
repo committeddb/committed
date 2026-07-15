@@ -39,6 +39,27 @@ its own log, and on restart it resumes from that checkpoint and de-duplicates an
 re-delivered changes by source sequence. You do not get duplicates in the topic
 across a restart.
 
+### One writer per topic
+
+A topic is reconciled against a **single producer**, so it must have exactly one:
+
+- **One ingestable per topic — enforced.** Creating a second ingestable on a
+  topic another ingestable already produces is rejected at config time (`POST
+  /v1/ingestable` returns `400`, naming the topic and the ingestable that already
+  owns it). The two would reconcile the topic independently, and one's
+  reconciliation would delete the rows the other produced. If you need to move a
+  topic to a different ingestable, delete the old one first.
+
+- **No direct writes into an ingest-fed topic — unsupported (not blocked).** A
+  topic fed by an ingestable should not also receive direct `POST /v1/proposal`
+  writes. Such rows don't come from the source, so a reconciliation never accounts
+  for them: they are never removed even when they should be, and a manual row whose
+  key collides with a source row is overwritten by ingest. This is *not* enforced —
+  a proposal is data-plane traffic, not config — so it's on you to keep an
+  ingest-fed topic ingest-only. If you must hand-seed a topic before ingesting into
+  it, load it before the ingestable starts, and note the seeded rows stay outside
+  reconciliation.
+
 ### Snapshot consistency (the convergent contract)
 
 The snapshot is **not** a single point-in-time read. To keep its load on the
