@@ -1,10 +1,10 @@
-//go:build integration
+//go:build docker || integration
 
 package http_test
 
 import (
 	"bytes"
-	gosql "database/sql"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,10 +14,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dolthub/go-mysql-server/driver"
-	"github.com/dolthub/go-mysql-server/memory"
-	sqle "github.com/dolthub/go-mysql-server/sql"
+	_ "github.com/go-sql-driver/mysql"
+	networktypes "github.com/moby/moby/api/types/network"
 	"github.com/stretchr/testify/require"
+	"github.com/testcontainers/testcontainers-go"
+	tcmysql "github.com/testcontainers/testcontainers-go/modules/mysql"
+	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
@@ -27,12 +29,27 @@ import (
 	"github.com/committeddb/committed/internal/cluster/http"
 	"github.com/committeddb/committed/internal/cluster/ingestable"
 	"github.com/committeddb/committed/internal/cluster/syncable/sql"
-	"github.com/committeddb/committed/internal/cluster/syncable/sql/dialects/testdialects"
+	"github.com/committeddb/committed/internal/cluster/syncable/sql/dialects"
+)
+
+const (
+	mysqlImage = "mysql:9"
+	mysqlDB    = "committed"
+	mysqlUser  = "root"
+	mysqlPass  = "secret"
 )
 
 // TestEndToEnd verifies the full HTTP → raft → syncable → destination database
 // pipeline: data submitted via the HTTP /proposal endpoint must eventually
 // appear in a configured destination database after a syncable is wired up.
+//
+// The destination is a real MySQL container (testcontainers), not the in-memory
+// go-mysql-server emulator this test used to drive. The emulator's SQL semantics
+// diverged from real MySQL — it rejected a TEXT primary key and mis-resolved a
+// schema-qualified ALTER — which silently wedged the syncable's Init and
+// surfaced only as a sync-never-caught-up timeout. Running against the engine
+// production targets makes a green here mean the pipeline works on MySQL, and
+// costs a container the CI integration job already pays for other packages.
 //
 // Intermediate raft-log inspection that this test used to do has moved to
 // dedicated unit tests:
@@ -53,8 +70,7 @@ func TestEndToEnd(t *testing.T) {
 	require.Nil(t, err)
 	defer os.RemoveAll(dir)
 
-	connectionString := "bar"
-	dialect := createDialect(t, connectionString)
+	dsn := startMySQL(t)
 
 	parser := parser.New()
 	sync := make(chan *db.SyncableWithID)
@@ -63,29 +79,28 @@ func TestEndToEnd(t *testing.T) {
 	h := http.New(db)
 
 	typeID := addType(t, h, "foo")
-	addParsers(t, db, dialect, typeID)
+	addParsers(t, db, typeID)
 
 	p1 := createProposal(typeID, "key", "one")
 	propose(t, h, p1.p)
 	_ = addIngestable(t, h, "")
-	databaseID := addDatabase(t, h, "go-mysql-server")
+	databaseID := addDatabase(t, h, "mysql", dsn)
 
 	syncableID := addSyncable(t, h, typeID, databaseID)
 
-	// Wait for the sync worker to finish syncing every normal proposal in
-	// the wal before tearing the db down. We can't simply close the db and
-	// read — closing too early loses the row. We can't poll the destination
-	// database either, because go-mysql-server's in-memory backing store is
-	// not safe under concurrent connections (the race detector trips on its
-	// internal map). Polling the wal-side syncable index is fine because
-	// it's bbolt-backed and goroutine-safe.
+	// Wait for the sync worker to finish syncing every normal proposal in the
+	// wal before reading the destination back. We poll the persisted syncable
+	// index (bbolt-backed, goroutine-safe) rather than the sink because it is a
+	// precise "caught up" signal — it advances only when a proposal has actually
+	// been applied downstream.
 	waitForSyncCaughtUp(t, storage, syncableID)
 
-	// Tear the db down so the sync goroutine stops touching go-mysql-server
-	// before view's SELECT runs. wal storage stays open for view's reads.
+	// Quiesce the syncable before reading: closing the db stops the sync
+	// goroutine so nothing writes the sink concurrently with view's SELECT. wal
+	// storage stays open (closed at test end) for view's read-back.
 	require.Nil(t, db.Close())
 
-	view(t, storage, syncableID, databaseID, p1, connectionString)
+	view(t, storage, databaseID, p1)
 
 	// TODO Restart/persistence coverage:
 	// - Do a second proposal
@@ -107,8 +122,7 @@ func TestEndToEnd_HonorsDelete(t *testing.T) {
 	require.Nil(t, err)
 	defer os.RemoveAll(dir)
 
-	connectionString := "bar"
-	dialect := createDialect(t, connectionString)
+	dsn := startMySQL(t)
 
 	parser := parser.New()
 	sync := make(chan *db.SyncableWithID)
@@ -117,17 +131,17 @@ func TestEndToEnd_HonorsDelete(t *testing.T) {
 	h := http.New(db)
 
 	typeID := addType(t, h, "foo")
-	addParsers(t, db, dialect, typeID)
+	addParsers(t, db, typeID)
 
 	upsert := createProposal(typeID, "key", "one")
 	propose(t, h, upsert.p)
 	_ = addIngestable(t, h, "")
-	databaseID := addDatabase(t, h, "go-mysql-server")
+	databaseID := addDatabase(t, h, "mysql", dsn)
 	syncableID := addSyncable(t, h, typeID, databaseID)
 
 	// The upsert must land downstream first.
 	waitForSyncCaughtUp(t, storage, syncableID)
-	view(t, storage, syncableID, databaseID, upsert, connectionString)
+	view(t, storage, databaseID, upsert)
 
 	// Now erase it: a delete proposal for the same key must remove the row.
 	floor, err := storage.GetSyncableIndex(syncableID)
@@ -136,36 +150,41 @@ func TestEndToEnd_HonorsDelete(t *testing.T) {
 	waitForSyncIndexAbove(t, storage, syncableID, floor)
 
 	require.Nil(t, db.Close())
-	viewDeleted(t, storage, databaseID, connectionString, "key")
+	viewDeleted(t, storage, databaseID, "key")
 }
 
-type dbs []sqle.Database
+// startMySQL brings up a throwaway MySQL container for one test and returns the
+// go-sql-driver DSN the syncable dialect opens it with. Ryuk (the testcontainers
+// reaper) and the registered cleanup tear it down at test end. Each test gets
+// its own container so the two never share (or collide on) the sink table.
+func startMySQL(t *testing.T) string {
+	t.Helper()
+	ctx := context.Background()
 
-var _ driver.Provider = dbs{}
+	c, err := tcmysql.Run(ctx, mysqlImage,
+		tcmysql.WithDatabase(mysqlDB),
+		tcmysql.WithUsername(mysqlUser),
+		tcmysql.WithPassword(mysqlPass),
+		// Override the module's default log-line readiness check. It watches for
+		// a "port: 3306  MySQL Community Server" line that a slow CI host can
+		// leave unmatched inside the timeout, and a log line can't tell "logged
+		// ready" from "accepts a query" — the entrypoint's init server drops
+		// early connections with EOF. ForSQL opens a real connection and runs a
+		// query, retrying until it succeeds, so it returns only on true
+		// readiness.
+		testcontainers.WithWaitStrategy(
+			wait.ForSQL("3306/tcp", "mysql", func(host string, port networktypes.Port) string {
+				return fmt.Sprintf("%s:%s@tcp(%s:%s)/%s", mysqlUser, mysqlPass, host, port.Port(), mysqlDB)
+			}).WithStartupTimeout(3*time.Minute),
+		),
+	)
+	require.NoError(t, err, "start mysql container")
+	t.Cleanup(func() { _ = c.Terminate(context.Background()) })
 
-func (d dbs) Resolve(name string, options *driver.Options) (string, sqle.DatabaseProvider, error) {
-	return name, memory.NewDBProvider(d...), nil
-}
+	dsn, err := c.ConnectionString(ctx)
+	require.NoError(t, err, "mysql dsn")
 
-func createDialect(t *testing.T, connectionString string) sql.Dialect {
-	memdb := memory.NewDatabase(connectionString)
-	memdb.EnablePrimaryKeyIndexes()
-	memdbs := dbs{memdb}
-
-	drv := driver.New(memdbs, nil)
-	dialect := &testdialects.GoMySQLServerDialect{Driver: drv}
-
-	conn, err := drv.OpenConnector(connectionString)
-	require.Nil(t, err)
-
-	db := gosql.OpenDB(conn)
-	_, err = db.Exec("USE " + connectionString)
-	require.Nil(t, err)
-
-	err = db.Close()
-	require.Nil(t, err)
-
-	return dialect
+	return dsn
 }
 
 type Proposal struct {
@@ -174,9 +193,8 @@ type Proposal struct {
 	p   *http.AddProposalRequest
 }
 
-func addParsers(t *testing.T, db *test.DB, dialect sql.Dialect, typeID string) {
-	ds := make(map[string]sql.Dialect)
-	ds["go-mysql-server"] = dialect
+func addParsers(t *testing.T, db *test.DB, typeID string) {
+	ds := map[string]sql.Dialect{"mysql": &dialects.MySQLDialect{}}
 	sqlParser := &sql.DBParser{Dialects: ds}
 	db.AddDatabaseParser("sql", sqlParser)
 	db.AddSyncableParser("sql", &sql.SyncableParser{})
@@ -208,7 +226,7 @@ func addParsers(t *testing.T, db *test.DB, dialect sql.Dialect, typeID string) {
 func waitForSyncCaughtUp(t *testing.T, s *wal.Storage, syncableID string) {
 	t.Helper()
 	const interval = 10 * time.Millisecond
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	var prev uint64
 	have := false
 	for time.Now().Before(deadline) {
@@ -225,14 +243,12 @@ func waitForSyncCaughtUp(t *testing.T, s *wal.Storage, syncableID string) {
 	t.Fatalf("timed out waiting for sync to catch up on %q", syncableID)
 }
 
-func view(t *testing.T, s *wal.Storage, syncableID string, databaseID string, p *Proposal, connectionString string) {
+func view(t *testing.T, s *wal.Storage, databaseID string, p *Proposal) {
 	database, err := s.Database(databaseID)
 	require.Nil(t, err)
 	db := database.(*sql.DB).DB
-	_, err = db.Exec("USE " + connectionString)
-	require.Nil(t, err)
 
-	rows, err := db.Query("SELECT pk, one FROM "+connectionString+".foo WHERE pk = ?", p.key)
+	rows, err := db.Query("SELECT pk, one FROM foo WHERE pk = ?", p.key)
 	require.Nil(t, err)
 	defer rows.Close()
 	count := 0
@@ -254,7 +270,7 @@ func view(t *testing.T, s *wal.Storage, syncableID string, databaseID string, p 
 	}
 }
 
-func addDatabase(t *testing.T, h *http.HTTP, dialect string) string {
+func addDatabase(t *testing.T, h *http.HTTP, dialect string, connectionString string) string {
 	name := "bar"
 	id := "test-db-id"
 
@@ -262,8 +278,8 @@ func addDatabase(t *testing.T, h *http.HTTP, dialect string) string {
 type = "sql"
 name = "%s"
 [sql]
-dialect="%s"
-connectionString="%s"`, name, dialect, name)
+dialect=%q
+connectionString=%q`, name, dialect, connectionString)
 
 	req := httptest.NewRequest("POST", fmt.Sprintf("http://localhost/v1/database/%s", id), strings.NewReader(body))
 	req.Header["Content-Type"] = []string{"text/toml"}
@@ -317,7 +333,7 @@ column = "one"`, name, dialect, name)
 
 func addSyncable(t *testing.T, h *http.HTTP, topicId string, databaseID string) string {
 	name := "bar"
-	tableName := name + ".foo"
+	tableName := "foo"
 	id := "test-syncable-id"
 
 	body := fmt.Sprintf(`[syncable]
@@ -410,7 +426,7 @@ func createDeleteProposal(typeID string, key string) *http.AddProposalRequest {
 func waitForSyncIndexAbove(t *testing.T, s *wal.Storage, syncableID string, floor uint64) {
 	t.Helper()
 	const interval = 10 * time.Millisecond
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		idx, err := s.GetSyncableIndex(syncableID)
 		if err == nil && idx > floor {
@@ -422,14 +438,12 @@ func waitForSyncIndexAbove(t *testing.T, s *wal.Storage, syncableID string, floo
 }
 
 // viewDeleted asserts the row keyed by key is gone from the destination table.
-func viewDeleted(t *testing.T, s *wal.Storage, databaseID string, connectionString string, key string) {
+func viewDeleted(t *testing.T, s *wal.Storage, databaseID string, key string) {
 	database, err := s.Database(databaseID)
 	require.Nil(t, err)
 	db := database.(*sql.DB).DB
-	_, err = db.Exec("USE " + connectionString)
-	require.Nil(t, err)
 
-	rows, err := db.Query("SELECT pk, one FROM "+connectionString+".foo WHERE pk = ?", key)
+	rows, err := db.Query("SELECT pk, one FROM foo WHERE pk = ?", key)
 	require.Nil(t, err)
 	defer rows.Close()
 	count := 0
