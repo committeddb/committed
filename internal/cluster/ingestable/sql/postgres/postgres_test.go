@@ -1632,19 +1632,42 @@ func TestPostgresSlotRecreatedResnapshots(t *testing.T) {
 	waitForSlot(t, "slot_recreate")
 
 	deadline = time.After(20 * time.Second)
-	seen2 := map[string]bool{}
-	for !seen2["gap"] {
+	genByKey := map[string]uint64{}
+	var sawMarker bool
+	var markerEpoch uint64
+	for {
+		if _, haveGap := genByKey["gap"]; haveGap && sawMarker {
+			break
+		}
 		select {
 		case p := <-proposalChan2:
 			for _, e := range p.Entities {
-				seen2[string(e.Key)] = true
+				// The re-snapshot closes with a refresh-boundary marker at the
+				// bumped epoch; a keyed sink sweeps rows left at an older one.
+				if e.IsRefreshBoundary() {
+					sawMarker = true
+					markerEpoch = e.Generation
+					continue
+				}
+				genByKey[string(e.Key)] = e.Generation
 			}
 		case <-positionChan2:
 		case <-deadline:
-			t.Fatal("phase 2: 'gap' never arrived — a slot-recreate with a surviving checkpoint silently skipped it (no re-snapshot)")
+			t.Fatal("phase 2: 'gap' + a refresh-boundary marker never arrived — a slot-recreate must re-snapshot and close with a reconciling marker")
 		}
 	}
 	cancel2()
+
+	// The gap-recovery re-snapshot bumped the epoch to 2 (phase 1 was the
+	// initial epoch-1 snapshot), re-emitted the live rows at epoch 2, and closed
+	// with a refresh-boundary marker at epoch 2 — so a keyed sink sweeps any row
+	// still at epoch 1 (a row deleted at the source in the lost window, which the
+	// upsert-only re-snapshot cannot signal). The row-level sweep itself is
+	// covered by the syncable dialect docker test.
+	require.Equal(t, uint64(2), markerEpoch, "gap-recovery re-snapshot must emit a refresh-boundary marker at the bumped epoch")
+	require.Equal(t, uint64(2), genByKey["gap"], "a re-snapshotted row carries the bumped epoch")
+	require.Equal(t, uint64(2), genByKey["before"], "a re-snapshotted row carries the bumped epoch")
+
 	select {
 	case err := <-ingestErr:
 		require.Nil(t, err)

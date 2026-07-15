@@ -24,6 +24,13 @@ message MySQLBinLogPosition {
 message PostgresPosition {
     uint64 lsn = 1;
     SnapshotProgress snapshot_progress = 2;
+    // refresh_epoch is the ingest reconciling-refresh generation the worker
+    // stamps on every emitted entity and carries across checkpoints. It starts
+    // at 1 on the initial snapshot and bumps on each gap-recovery re-snapshot;
+    // after a full re-snapshot the worker emits a refresh-boundary marker at
+    // this epoch so a keyed sink sweeps rows left at an older one. 0 means a
+    // pre-feature checkpoint (treated as the epoch-1 baseline on resume).
+    uint64 refresh_epoch = 3;
 }
 
 // SnapshotProgress tracks where a chunked (keyset-paginated) snapshot

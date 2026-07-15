@@ -181,17 +181,19 @@ func TestDecodePositionLegacyLSN(t *testing.T) {
 	legacy := make([]byte, 8)
 	binary.BigEndian.PutUint64(legacy, 0x0123456789ABCDEF)
 
-	lsn, progress, err := decodePosition(legacy)
+	lsn, progress, epoch, err := decodePosition(legacy)
 	require.NoError(t, err)
 	require.Equal(t, pglogrepl.LSN(0x0123456789ABCDEF), lsn)
 	require.Nil(t, progress)
+	require.Equal(t, uint64(0), epoch, "a legacy position predates the refresh epoch")
 }
 
 func TestDecodePositionEmpty(t *testing.T) {
-	lsn, progress, err := decodePosition(nil)
+	lsn, progress, epoch, err := decodePosition(nil)
 	require.NoError(t, err)
 	require.Equal(t, pglogrepl.LSN(0), lsn)
 	require.Nil(t, progress)
+	require.Equal(t, uint64(0), epoch)
 }
 
 func TestEncodeDecodePositionRoundtrip(t *testing.T) {
@@ -199,6 +201,7 @@ func TestEncodeDecodePositionRoundtrip(t *testing.T) {
 		name     string
 		lsn      pglogrepl.LSN
 		progress *dialectpb.SnapshotProgress
+		epoch    uint64
 	}{
 		{
 			name:     "lsn_only",
@@ -220,18 +223,24 @@ func TestEncodeDecodePositionRoundtrip(t *testing.T) {
 				LastPkByTable: map[string]string{"t": "k"},
 			},
 		},
+		{
+			name:  "streaming_with_refresh_epoch",
+			lsn:   pglogrepl.LSN(0xABCD),
+			epoch: 3,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			bs, err := encodePosition(tt.lsn, tt.progress)
+			bs, err := encodePosition(tt.lsn, tt.progress, tt.epoch)
 			require.NoError(t, err)
 			require.Equal(t, pgPositionProtoMagic, bs[0],
 				"encoded position must start with the magic byte")
 
-			gotLSN, gotProgress, err := decodePosition(bs)
+			gotLSN, gotProgress, gotEpoch, err := decodePosition(bs)
 			require.NoError(t, err)
 			require.Equal(t, tt.lsn, gotLSN)
+			require.Equal(t, tt.epoch, gotEpoch)
 			if tt.progress == nil {
 				require.Nil(t, gotProgress)
 			} else {

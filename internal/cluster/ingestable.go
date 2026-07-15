@@ -106,9 +106,13 @@ type IngestableStatus struct {
 	// ingest never consumed and can never re-stream — a MySQL source that purged
 	// binlogs past the consumed GTID set (@@gtid_purged ⊄ consumed). It is a
 	// distinct, loud state rather than a misleading lag number: recovery means
-	// re-running the initial snapshot. Always false for Postgres (the slot holds
-	// the WAL, so the source cannot purge unconsumed change data out from under
-	// it).
+	// re-running the initial snapshot. Always false for Postgres — NOT because a
+	// slot can't lose WAL (a reaped slot via max_slot_wal_keep_size, drop, or
+	// expiry DOES discard unconsumed WAL), but because the dialect recovers
+	// automatically: it re-snapshots from the new slot's consistent point and
+	// bumps the refresh epoch, emitting a refresh-boundary marker that sweeps the
+	// rows deleted in the lost window off the downstream sink (reconciliation, not
+	// just re-load). So the gap is handled in-band rather than surfaced here.
 	ReSnapshotRequired bool
 }
 

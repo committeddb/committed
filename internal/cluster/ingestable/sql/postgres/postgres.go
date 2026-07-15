@@ -240,7 +240,7 @@ func (d *PostgreSQLDialect) Ingest(ctx context.Context, config *sql.Config, pos 
 		return err
 	}
 
-	startLSN, resumeProgress, err := decodePosition(pos)
+	startLSN, resumeProgress, epoch, err := decodePosition(pos)
 	if err != nil {
 		return err
 	}
@@ -248,7 +248,7 @@ func (d *PostgreSQLDialect) Ingest(ctx context.Context, config *sql.Config, pos 
 	backoff := backoffMin
 
 	for {
-		err := d.stream(ctx, config, pgCfg, &startLSN, &resumeProgress, pr, po)
+		err := d.stream(ctx, config, pgCfg, &startLSN, &resumeProgress, &epoch, pr, po)
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -275,30 +275,32 @@ func (d *PostgreSQLDialect) Ingest(ctx context.Context, config *sql.Config, pos 
 // raw 8-byte big-endian LSN; the new format is proto-encoded
 // PostgresPosition prefixed with pgPositionProtoMagic so a resume can
 // carry snapshot progress alongside the LSN.
-func decodePosition(pos cluster.Position) (pglogrepl.LSN, *dialectpb.SnapshotProgress, error) {
+func decodePosition(pos cluster.Position) (pglogrepl.LSN, *dialectpb.SnapshotProgress, uint64, error) {
 	if len(pos) == 0 {
-		return 0, nil, nil
+		return 0, nil, 0, nil
 	}
 	if len(pos) > 0 && pos[0] == pgPositionProtoMagic {
 		pp := &dialectpb.PostgresPosition{}
 		if err := proto.Unmarshal(pos[1:], pp); err != nil {
-			return 0, nil, fmt.Errorf("decode position: %w", err)
+			return 0, nil, 0, fmt.Errorf("decode position: %w", err)
 		}
-		return pglogrepl.LSN(pp.Lsn), pp.SnapshotProgress, nil
+		return pglogrepl.LSN(pp.Lsn), pp.SnapshotProgress, pp.RefreshEpoch, nil
 	}
 	if len(pos) == 8 {
-		return pglogrepl.LSN(binary.BigEndian.Uint64(pos)), nil, nil
+		return pglogrepl.LSN(binary.BigEndian.Uint64(pos)), nil, 0, nil
 	}
-	return 0, nil, fmt.Errorf("unrecognized position format (len=%d)", len(pos))
+	return 0, nil, 0, fmt.Errorf("unrecognized position format (len=%d)", len(pos))
 }
 
 // encodePosition writes a position using the new proto format with the
 // magic byte prefix. Passing progress=nil omits the snapshot section so
-// streaming-phase checkpoints stay compact.
-func encodePosition(lsn pglogrepl.LSN, progress *dialectpb.SnapshotProgress) ([]byte, error) {
+// streaming-phase checkpoints stay compact. epoch is the reconciling-refresh
+// generation carried across checkpoints (see PostgresPosition.refresh_epoch).
+func encodePosition(lsn pglogrepl.LSN, progress *dialectpb.SnapshotProgress, epoch uint64) ([]byte, error) {
 	pp := &dialectpb.PostgresPosition{
 		Lsn:              uint64(lsn),
 		SnapshotProgress: progress,
+		RefreshEpoch:     epoch,
 	}
 	raw, err := proto.Marshal(pp)
 	if err != nil {
@@ -322,7 +324,7 @@ const statusLagTimeout = 5 * time.Second
 // LSN); once snapshot progress is gone the worker is streaming and lag is the
 // slot's distance behind the source write head.
 func (d *PostgreSQLDialect) Status(ctx context.Context, config *sql.Config, pos cluster.Position) (cluster.IngestableStatus, error) {
-	lsn, progress, err := decodePosition(pos)
+	lsn, progress, _, err := decodePosition(pos)
 	if err != nil {
 		return cluster.IngestableStatus{}, fmt.Errorf("[postgres.status] decode position: %w", err)
 	}
@@ -478,6 +480,7 @@ func (d *PostgreSQLDialect) stream(
 	pgCfg *pgConfig,
 	lastLSN *pglogrepl.LSN,
 	resumeProgress **dialectpb.SnapshotProgress,
+	epoch *uint64,
 	pr chan<- *cluster.Proposal,
 	po chan<- cluster.Position,
 ) (err error) {
@@ -580,34 +583,63 @@ func (d *PostgreSQLDialect) stream(
 		if perr != nil {
 			return fmt.Errorf("parse recreated-slot ConsistentPoint %q: %w", slotRes.ConsistentPoint, perr)
 		}
-		zap.L().Warn("replication slot was recreated while a checkpoint survived; the prior LSN is unrecoverable — re-snapshotting from the new slot's consistent point",
+		// Bump the refresh epoch: the re-snapshot re-emits every live row at the
+		// new epoch, and the closing refresh-boundary marker sweeps rows left at
+		// an older one — reconciling the deletes this upsert-only enumeration
+		// cannot signal. Floor to 1 first so a pre-feature checkpoint (epoch 0)
+		// bumps to 2, past the epoch-1 baseline stamped on existing sink rows.
+		*epoch = max(*epoch, 1) + 1
+		zap.L().Warn("replication slot was recreated while a checkpoint survived; re-snapshotting from the new slot's consistent point. "+
+			"Rows deleted at the source in the lost WAL window (RTBF-erased subjects among them) are reconciled off the downstream "+
+			"sink by the refresh-boundary sweep that closes this re-snapshot.",
 			zap.String("slot", pgCfg.slotName),
 			zap.Stringer("staleLSN", *lastLSN),
-			zap.String("consistentPoint", slotRes.ConsistentPoint))
+			zap.String("consistentPoint", slotRes.ConsistentPoint),
+			zap.Uint64("refreshEpoch", *epoch))
 		*lastLSN = cp
 		*resumeProgress = nil
-		if err := d.snapshot(ctx, config, pgCfg, pgCfg.tables, nil, *lastLSN, pr, po); err != nil {
+		if err := d.snapshot(ctx, config, pgCfg, pgCfg.tables, nil, *lastLSN, *epoch, pr, po); err != nil {
+			return err
+		}
+		if err := emitRefreshBoundary(ctx, config, pr, po, *lastLSN, *epoch); err != nil {
 			return err
 		}
 	case (slotIsNew && *lastLSN == 0) || *resumeProgress != nil:
 		// (a) the slot was just created and we have no prior checkpoint (first
 		// run — StartReplication(0) below starts from the new slot's consistent
 		// point), or (b) a prior run was interrupted mid-snapshot: full snapshot
-		// of every configured table.
-		if err := d.snapshot(ctx, config, pgCfg, pgCfg.tables, *resumeProgress, *lastLSN, pr, po); err != nil {
+		// of every configured table. The initial snapshot is epoch 1; a resume
+		// keeps the epoch the checkpoint carries (floored to 1 for a pre-feature
+		// checkpoint). The closing marker is a no-op on a fresh sink but makes a
+		// rebuild against a pre-populated sink reconcile.
+		*epoch = max(*epoch, 1)
+		if err := d.snapshot(ctx, config, pgCfg, pgCfg.tables, *resumeProgress, *lastLSN, *epoch, pr, po); err != nil {
 			return err
 		}
 		*resumeProgress = nil
+		if err := emitRefreshBoundary(ctx, config, pr, po, *lastLSN, *epoch); err != nil {
+			return err
+		}
 	case len(addedTables) > 0:
 		// Resuming an existing slot, but ensurePublication just (re-)added tables
 		// to the publication (a re-POST added one, or a dropped-then-recreated
 		// source table was re-added). Backfill ONLY those — the rest are already
 		// streaming — then StartReplication below picks up their ongoing changes
 		// from *lastLSN. Add-to-publication-happened-first, so the overlap window
-		// is covered by the sink's keyed upsert, not lost.
-		if err := d.snapshot(ctx, config, pgCfg, addedTables, nil, *lastLSN, pr, po); err != nil {
+		// is covered by the sink's keyed upsert, not lost. Stamp the backfilled
+		// rows with the current epoch but emit NO marker: this is a PARTIAL
+		// refresh, and a topic-level sweep would delete the sibling tables' rows
+		// this backfill did not re-emit.
+		*epoch = max(*epoch, 1)
+		if err := d.snapshot(ctx, config, pgCfg, addedTables, nil, *lastLSN, *epoch, pr, po); err != nil {
 			return err
 		}
+	}
+
+	// Any streaming path that did not snapshot still stamps entities, so ensure
+	// the epoch is at least 1 (a pre-feature checkpoint resumes at 0).
+	if *epoch < 1 {
+		*epoch = 1
 	}
 
 	err = pglogrepl.StartReplication(ctx, conn, pgCfg.slotName, *lastLSN,
@@ -711,7 +743,7 @@ func (d *PostgreSQLDialect) stream(
 					pending = append(pending, e)
 				}
 				if len(pending) >= maxPendingEntities {
-					if err := flushPending(ctx, &pending, pr, curLSN); err != nil {
+					if err := flushPending(ctx, &pending, pr, curLSN, *epoch); err != nil {
 						return err
 					}
 				}
@@ -737,7 +769,7 @@ func (d *PostgreSQLDialect) stream(
 					}
 				}
 				if len(pending) >= maxPendingEntities {
-					if err := flushPending(ctx, &pending, pr, curLSN); err != nil {
+					if err := flushPending(ctx, &pending, pr, curLSN, *epoch); err != nil {
 						return err
 					}
 				}
@@ -757,7 +789,7 @@ func (d *PostgreSQLDialect) stream(
 					pending = append(pending, e)
 				}
 				if len(pending) >= maxPendingEntities {
-					if err := flushPending(ctx, &pending, pr, curLSN); err != nil {
+					if err := flushPending(ctx, &pending, pr, curLSN, *epoch); err != nil {
 						return err
 					}
 				}
@@ -772,7 +804,7 @@ func (d *PostgreSQLDialect) stream(
 					// why we're skipping.
 					break
 				}
-				if err := flushPending(ctx, &pending, pr, curLSN); err != nil {
+				if err := flushPending(ctx, &pending, pr, curLSN, *epoch); err != nil {
 					return err
 				}
 
@@ -780,7 +812,7 @@ func (d *PostgreSQLDialect) stream(
 				// transaction) so a resume from this position does
 				// not replay the already-processed transaction.
 				endLSN := m.TransactionEndLSN
-				posBytes, err := encodePosition(endLSN, nil)
+				posBytes, err := encodePosition(endLSN, nil, *epoch)
 				if err != nil {
 					return err
 				}
@@ -1204,6 +1236,7 @@ func (d *PostgreSQLDialect) snapshot(
 	tables []string,
 	resumeProgress *dialectpb.SnapshotProgress,
 	lsn pglogrepl.LSN,
+	epoch uint64,
 	pr chan<- *cluster.Proposal,
 	po chan<- cluster.Position,
 ) error {
@@ -1235,14 +1268,14 @@ func (d *PostgreSQLDialect) snapshot(
 			)
 			continue
 		}
-		if err := d.snapshotTable(ctx, db, config, table, batchSize, progress, lsn, pr, po); err != nil {
+		if err := d.snapshotTable(ctx, db, config, table, batchSize, progress, lsn, epoch, pr, po); err != nil {
 			return fmt.Errorf("snapshot: table %s: %w", table, err)
 		}
 		progress.CompletedTables = append(progress.CompletedTables, table)
 		delete(progress.LastPkByTable, table)
 		completed[table] = true
 
-		if err := emitSnapshotProgress(ctx, po, lsn, progress); err != nil {
+		if err := emitSnapshotProgress(ctx, po, lsn, progress, epoch); err != nil {
 			return err
 		}
 		zap.L().Info("snapshot: table complete", zap.String("table", table))
@@ -1262,6 +1295,7 @@ func (d *PostgreSQLDialect) snapshotTable(
 	batchSize int,
 	progress *dialectpb.SnapshotProgress,
 	lsn pglogrepl.LSN,
+	epoch uint64,
 	pr chan<- *cluster.Proposal,
 	po chan<- cluster.Position,
 ) error {
@@ -1284,6 +1318,10 @@ func (d *PostgreSQLDialect) snapshotTable(
 			break
 		}
 
+		// Stamp the snapshot rows with the refresh epoch (a re-snapshot bumps it;
+		// the initial snapshot is epoch 1) so a closing refresh-boundary marker
+		// can sweep the rows this positive enumeration could not re-emit.
+		stampGeneration(entities, epoch)
 		p := &cluster.Proposal{Entities: entities}
 		select {
 		case pr <- p:
@@ -1296,7 +1334,7 @@ func (d *PostgreSQLDialect) snapshotTable(
 		progress.LastPkByTable[table] = lastPK
 		totalRows += count
 
-		if err := emitSnapshotProgress(ctx, po, lsn, progress); err != nil {
+		if err := emitSnapshotProgress(ctx, po, lsn, progress, epoch); err != nil {
 			return err
 		}
 
@@ -1516,8 +1554,9 @@ func emitSnapshotProgress(
 	po chan<- cluster.Position,
 	lsn pglogrepl.LSN,
 	progress *dialectpb.SnapshotProgress,
+	epoch uint64,
 ) error {
-	bs, err := encodePosition(lsn, progress)
+	bs, err := encodePosition(lsn, progress, epoch)
 	if err != nil {
 		return err
 	}
@@ -1548,10 +1587,15 @@ func quoteTable(table string) string {
 // (effectively-once). Monotonic because clientXLogPos only advances, and
 // deterministic because a resume re-reads the same messages in the same
 // order, producing the same flush LSNs.
-func flushPending(ctx context.Context, pending *[]*cluster.Entity, pr chan<- *cluster.Proposal, lsn pglogrepl.LSN) error {
+func flushPending(ctx context.Context, pending *[]*cluster.Entity, pr chan<- *cluster.Proposal, lsn pglogrepl.LSN, epoch uint64) error {
 	if len(*pending) == 0 {
 		return nil
 	}
+	// Stamp every entity with the current refresh epoch so a later
+	// refresh-boundary marker can sweep rows a re-snapshot left behind. All
+	// entities in a flush share the epoch (it only changes on a reconnect that
+	// triggers a gap-recovery re-snapshot).
+	stampGeneration(*pending, epoch)
 	p := &cluster.Proposal{Entities: *pending, SourceSeq: uint64(lsn)}
 	select {
 	case pr <- p:
@@ -1560,4 +1604,48 @@ func flushPending(ctx context.Context, pending *[]*cluster.Entity, pr chan<- *cl
 	}
 	*pending = nil
 	return nil
+}
+
+// stampGeneration sets the reconciling-refresh epoch on every entity in a batch
+// (see cluster.Entity.Generation). The whole batch shares one epoch: the worker
+// holds a single "current epoch" that only changes on a gap-recovery
+// re-snapshot, so stamping at flush time is enough.
+func stampGeneration(entities []*cluster.Entity, epoch uint64) {
+	for _, e := range entities {
+		e.Generation = epoch
+	}
+}
+
+// emitRefreshBoundary emits the refresh-boundary marker that closes a full
+// re-snapshot: a single control entity carrying the topic type and the epoch
+// the refresh reached, so a keyed sink sweeps every row still at an older epoch
+// (a row deleted at the source in the lost window, never re-emitted). It then
+// checkpoints the position with no snapshot progress at this epoch, transitioning
+// the worker to streaming; a restart after the marker resumes streaming rather
+// than re-running the refresh. Emitted ONLY after an all-tables refresh — never a
+// partial added-table backfill, which would sweep the topic's sibling tables.
+func emitRefreshBoundary(
+	ctx context.Context,
+	config *sql.Config,
+	pr chan<- *cluster.Proposal,
+	po chan<- cluster.Position,
+	lsn pglogrepl.LSN,
+	epoch uint64,
+) error {
+	marker := cluster.NewRefreshBoundaryEntity(config.Type, epoch)
+	select {
+	case pr <- &cluster.Proposal{Entities: []*cluster.Entity{marker}}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	bs, err := encodePosition(lsn, nil, epoch)
+	if err != nil {
+		return err
+	}
+	select {
+	case po <- bs:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
