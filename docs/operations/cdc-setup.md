@@ -115,7 +115,10 @@ GET /v1/ingestable/{id}/status
 - **`reSnapshotRequired`** — `true` when the source discarded change data this
   ingest never consumed and can never re-stream (MySQL: binlogs purged past the
   consumed GTID set). A distinct, loud state, not a lag number; recovery is a
-  fresh snapshot. Always `false` for Postgres (the slot holds the WAL).
+  fresh snapshot. Always `false` for Postgres — not because a slot can't lose WAL
+  (a reaped or dropped slot does), but because the dialect recovers in-band: it
+  re-snapshots from the new slot's consistent point and sweeps the rows deleted
+  in the lost window off the sink, so the gap is reconciled rather than surfaced.
 
 The quickstart polls this endpoint to know when the initial snapshot has landed
 (`"caughtUp": true`).
