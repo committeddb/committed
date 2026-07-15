@@ -32,6 +32,12 @@ func TestReopenKVAfterSwap_ReopensClosedHandle(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
 
+	// Quiesce the scrub worker Open started: its one-shot startup runPendingScrub
+	// reads keyValueStorage via s.view, which would race this test's bare (no-kvMu)
+	// handle swap below. stopScrubWorker waits for that startup pass to finish and
+	// is idempotent, so t.Cleanup's Close stays well-defined.
+	s.stopScrubWorker()
+
 	boltPath := s.keyValueStorage.Path()
 	require.NoError(t, s.keyValueStorage.Close()) // the post-close point in the swap
 
@@ -60,6 +66,10 @@ func TestReopenEventLogAfterSwap_ReopensClosedHandle(t *testing.T) {
 	s, err := Open(t.TempDir(), nil, nil, nil, WithoutFsync())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
+
+	// Quiesce the Open-started scrub worker before the bare handle swap, as in
+	// TestReopenKVAfterSwap_ReopensClosedHandle.
+	s.stopScrubWorker()
 
 	require.NoError(t, s.eventLog.Close()) // the post-close point in the swap
 
