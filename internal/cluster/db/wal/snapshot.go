@@ -186,29 +186,31 @@ func (s *Storage) RestoreSnapshot(snap *pb.Snapshot) error {
 	}
 	s.keyValueStorage = db
 
-	// Post-swap reloads. We can't use the s.view / s.update helpers
-	// here because we still hold kvMu.Lock and they take kvMu.RLock —
-	// that would deadlock. Read directly against the local db handle;
-	// the lock ensures nothing else is touching it.
-	var idx uint64
-	if err := db.View(func(tx *bolt.Tx) error {
+	// Reconcile appliedIndex to the snapshot's raft index. The serialized bbolt
+	// embeds the leader's LIVE appliedIndex (its applied position when it
+	// serialized), which is >= snap.Metadata.Index — the snapshot's raft index
+	// (compactTo = applied-8, below applied). Adopting the embedded value would set
+	// this node's appliedIndex ABOVE the snapshot's raft index, disagreeing with
+	// raft and, when eventIndex sits in [Metadata.Index, embedded), tripping the
+	// eventIndex >= appliedIndex invariant. Set it to Metadata.Index instead: the
+	// bbolt content is over-complete (state as of applied), so re-applying the
+	// (Metadata.Index, applied] tail after restore is idempotent. Persist it
+	// directly against db — not saveAppliedIndex/s.update, which take kvMu.RLock
+	// and would deadlock on the kvMu.Lock we hold — so a restart's loadAppliedIndex
+	// reads the reconciled value, not the embedded one.
+	reconciledIndex := snap.Metadata.GetIndex()
+	if err := db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(appliedIndexBucket)
 		if b == nil {
 			return ErrBucketMissing
 		}
-		v := b.Get(appliedIndexKey)
-		if v == nil {
-			return nil
-		}
-		if len(v) != 8 {
-			return fmt.Errorf("appliedIndex: expected 8 bytes, got %d", len(v))
-		}
-		idx = binary.BigEndian.Uint64(v)
-		return nil
+		var buf [8]byte
+		binary.BigEndian.PutUint64(buf[:], reconciledIndex)
+		return b.Put(appliedIndexKey, buf[:])
 	}); err != nil {
-		return fmt.Errorf("reload appliedIndex: %w", err)
+		return fmt.Errorf("reconcile appliedIndex after restore: %w", err)
 	}
-	s.appliedIndex.Store(idx)
+	s.appliedIndex.Store(reconciledIndex)
 
 	// Drop any in-memory database handles and rebuild from the
 	// restored bucket. Walks the `databases` bucket directly since the
