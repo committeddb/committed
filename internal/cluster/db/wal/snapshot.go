@@ -221,6 +221,17 @@ func (s *Storage) RestoreSnapshot(snap *pb.Snapshot) error {
 	}
 	s.appliedIndex.Store(reconciledIndex)
 
+	// Reset the metadata-GC backlog accumulator. It is a non-durable, leader-local
+	// counter of EntityKindSnapshot entities applied since the last scrub (not in
+	// bbolt, so there is nothing to "reload" from the swapped-in file). The
+	// snapshot is a compacted metadata baseline, so a pre-restore count no longer
+	// maps onto the state — reset it, exactly as a restart does (Open starts it at
+	// zero and re-accumulates from post-restart applies). Done here, synchronously
+	// on the Ready-loop goroutine, rather than in the async refreshAfterRestore: a
+	// later ApplyCommitted (same goroutine) may bump it, and an async reset would
+	// race and clobber that legitimate post-restore increment.
+	s.metadataBacklog.Store(0)
+
 	// Re-derive the in-memory database-handle cache from the swapped-in bbolt
 	// through Open's shared routine, so the restore path keeps ONE error policy
 	// with startup: an unbuildable config (a missing ${VAR} secret present on the
