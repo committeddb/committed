@@ -179,10 +179,25 @@ func mysqlUpsertSQL(config *sql.Config, withGeneration bool) string {
 // column) and an upgraded pre-feature table. Existing rows baseline to
 // generation 1.
 func (d *MySQLDialect) EnsureGenerationColumn(db *gosql.DB, config *sql.Config) error {
+	// information_schema.table_name holds only the bare table, so a
+	// schema-qualified sink ("db.tbl") must bind the schema and table halves
+	// apart. Binding the whole "db.tbl" to table_name never matches, so the
+	// count stays 0 and every Init re-ALTERs — which succeeds the first time but
+	// fails with duplicate-column on the second Init (restart), wedging the
+	// keyed syncable's Init. An unqualified sink resolves against the
+	// connection's current database, so it keeps DATABASE(). Both statements are
+	// constant and fully parameterized (no identifier is interpolated).
 	var n int
-	err := db.QueryRow(
-		"SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?",
-		config.Table, sql.GenerationColumn).Scan(&n)
+	var err error
+	if dot := strings.IndexByte(config.Table, '.'); dot >= 0 {
+		err = db.QueryRow(
+			"SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = ? AND table_name = ? AND column_name = ?",
+			config.Table[:dot], config.Table[dot+1:], sql.GenerationColumn).Scan(&n)
+	} else {
+		err = db.QueryRow(
+			"SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?",
+			config.Table, sql.GenerationColumn).Scan(&n)
+	}
 	if err != nil {
 		return fmt.Errorf("ensure generation column: introspect %s: %w", config.Table, err)
 	}
