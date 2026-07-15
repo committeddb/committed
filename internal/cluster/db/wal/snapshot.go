@@ -331,17 +331,35 @@ func (s *Storage) compactLocked() error {
 	}
 	if err := os.Rename(tmpPath, boltPath); err != nil {
 		_ = os.Remove(tmpPath)
-		// The live handle is closed; reopen the original so the storage isn't
-		// left dead.
-		if reopened, rerr := bolt.Open(boltPath, 0o600, boltOpts); rerr == nil {
-			s.keyValueStorage = reopened
-		}
+		// The live handle is already closed and this rename failed, so boltPath is
+		// still the original file. Reopen it so the node survives (the scrub retries
+		// later); reopenKVAfterSwapOrFatal fatals if that also fails, so a closed
+		// handle never reaches the apply path.
+		s.reopenKVAfterSwapOrFatal(boltPath, boltOpts, "rename compacted bbolt failed")
 		return fmt.Errorf("rename compacted bbolt: %w", err)
 	}
+	// Rename succeeded: boltPath is now the compacted file. Reopen it or fatal —
+	// previously a failed reopen here returned into the survive-and-continue scrub
+	// worker and left the closed handle for the apply path to hit later, as a
+	// delayed ErrDatabaseNotOpen crash mis-attributed to apply.
+	s.reopenKVAfterSwapOrFatal(boltPath, boltOpts, "reopen bbolt after compaction")
+	return nil
+}
+
+// reopenKVAfterSwapOrFatal reopens bbolt at boltPath and reassigns
+// s.keyValueStorage, or FATALS if the reopen fails. Every post-close branch of
+// compactLocked calls it: the live handle is already closed, so returning an
+// error into the scrub worker (which only logs and continues — see
+// runPendingScrub) would leave the closed handle for the apply path to trip over
+// later, as an ErrDatabaseNotOpen crash in saveAppliedIndex long after and
+// mis-attributed to the real swap failure. Fataling here gives correct
+// attribution at the swap site; the on-disk file is a valid bbolt (the rename is
+// atomic), so a restart recovers cleanly. Caller holds kvMu.Lock.
+func (s *Storage) reopenKVAfterSwapOrFatal(boltPath string, boltOpts *bolt.Options, what string) {
 	reopened, err := bolt.Open(boltPath, 0o600, boltOpts)
 	if err != nil {
-		return fmt.Errorf("reopen bbolt after compaction: %w", err)
+		s.logger.Fatal("bbolt swap could not reopen storage; the node cannot continue (restart to recover from the on-disk file)",
+			zap.String("op", what), zap.String("path", boltPath), zap.Error(err))
 	}
 	s.keyValueStorage = reopened
-	return nil
 }

@@ -253,18 +253,32 @@ func (s *Storage) runScrub(bound uint64) error {
 		return err
 	}
 	if err := os.Rename(s.eventLogDir, retired); err != nil {
-		return err
+		// eventLog is already closed but this rename failed, so s.eventLogDir is
+		// untouched (still the original log). Reopen it so the node survives; fatal
+		// only if that also fails, so a closed handle never reaches appendEvent.
+		s.reopenEventLogAfterSwapOrFatal("event-log scrub aborted before swap")
+		return fmt.Errorf("move events aside for scrub swap: %w", err)
 	}
 	if err := os.Rename(tmpDir, s.eventLogDir); err != nil {
-		return err
+		// eventLog is closed and the original was already moved to `retired`, so
+		// s.eventLogDir is now missing. Roll the first rename back to restore the
+		// original, then reopen it (mirroring recoverScrubDirs). If the rollback
+		// fails we cannot restore the log and must NOT reopen a missing dir — that
+		// would create an empty log (silent event loss) — so fatal. swapped stays
+		// false, so the defer drops tmpDir.
+		if rbErr := os.Rename(retired, s.eventLogDir); rbErr != nil {
+			s.logger.Fatal("event-log scrub swap failed and rollback failed; the node cannot continue (restart to recover via recoverScrubDirs)",
+				zap.Error(err), zap.NamedError("rollback", rbErr))
+		}
+		s.reopenEventLogAfterSwapOrFatal("event-log scrub swap rolled back")
+		return fmt.Errorf("rename scrubbed event log into place: %w", err)
 	}
 	swapped = true
 
-	reopened, err := wal.Open(s.eventLogDir, nil)
-	if err != nil {
-		return fmt.Errorf("reopen event log after scrub: %w", err)
-	}
-	s.eventLog = reopened
+	// Post-swap reopen: s.eventLogDir now holds the scrubbed log. Reopen it or
+	// fatal — a returned error here previously left s.eventLog closed for the next
+	// appendEvent to hit as ErrClosed, a delayed crash mis-attributed to append.
+	s.reopenEventLogAfterSwapOrFatal("reopen event log after scrub")
 	if err := s.recomputeEventBoundsLocked(); err != nil {
 		return err
 	}
@@ -279,6 +293,23 @@ func (s *Storage) runScrub(bound uint64) error {
 	s.logger.Info("scrubbed permanent event log",
 		zap.Uint64("bound", bound), zap.Int("tombstonedKeys", len(sel)))
 	return nil
+}
+
+// reopenEventLogAfterSwapOrFatal reopens the permanent event log at
+// s.eventLogDir and reassigns s.eventLog, or FATALS if the reopen fails — the
+// event-log analogue of reopenKVAfterSwapOrFatal. A returned error would leave
+// s.eventLog closed for the next appendEvent to hit as ErrClosed: a delayed
+// crash mis-attributed to the append path, since runScrub's caller only logs and
+// continues. The caller MUST ensure s.eventLogDir holds the intended (non-empty)
+// log before calling — reopening a missing dir would create an empty log (silent
+// event loss). Caller holds eventMu.Lock.
+func (s *Storage) reopenEventLogAfterSwapOrFatal(what string) {
+	reopened, err := wal.Open(s.eventLogDir, nil)
+	if err != nil {
+		s.logger.Fatal("event-log swap could not reopen storage; the node cannot continue (restart to recover via recoverScrubDirs)",
+			zap.String("op", what), zap.Error(err))
+	}
+	s.eventLog = reopened
 }
 
 // scrubFilterEntry decides the fate of one event-log record (raw = unframed
