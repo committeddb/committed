@@ -50,6 +50,15 @@ type collectType struct {
 	Version int    `json:"version"`
 }
 
+// opRefresh mirrors the op the HTTP webhook syncable emits for a
+// reconciling-refresh boundary marker (internal/cluster/syncable/http's
+// opRefresh): op "refresh" carrying only the generation the refresh reached,
+// no key/data. The ingest dialects emit one per topic after a full snapshot so
+// a keyed SQL sink can run its generation sweep. It is a control signal on the
+// stream, not a row a CDC consumer counts, so the collector drops it (a
+// receiver that ignores "refresh" keeps prior behavior).
+const opRefresh = "refresh"
+
 func newCollector() *collector {
 	c := &collector{
 		byTopic: make(map[string][]CapturedProposal),
@@ -76,6 +85,11 @@ func (c *collector) handle(w http.ResponseWriter, r *http.Request) {
 
 	cp := CapturedProposal{}
 	for _, e := range body.Entities {
+		// Drop the reconciling-refresh boundary marker (see opRefresh): it is a
+		// control signal, not row data, and the oracle counts row proposals.
+		if e.Op == opRefresh {
+			continue
+		}
 		// The webhook base64-encodes the entity key; decode it back so the
 		// CapturedEntity matches what the oracle expects (the raw key).
 		key, _ := base64.StdEncoding.DecodeString(e.Key)
@@ -86,6 +100,15 @@ func (c *collector) handle(w http.ResponseWriter, r *http.Request) {
 			Key:      string(key),
 			Data:     string(e.Data),
 		})
+	}
+
+	// A proposal that carried only the refresh marker has no entities left;
+	// don't record it — a marker-only Actual must not count as a topic
+	// proposal (it would inflate every count and per-key history the oracle
+	// checks, and leak into the "uncommitted must not propose" assertion).
+	if len(cp.Entities) == 0 {
+		w.WriteHeader(http.StatusOK)
+		return
 	}
 
 	c.mu.Lock()

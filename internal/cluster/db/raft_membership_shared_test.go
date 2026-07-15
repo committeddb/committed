@@ -15,8 +15,15 @@ import (
 // membershipSettleTimeout bounds how long a membership test waits for a
 // joint-consensus change (two committed entries: enter joint, then the
 // JointImplicit auto-leave) to converge. Generous because it also covers a
-// freshly-added node catching up on the full log.
-const membershipSettleTimeout = 10 * time.Second
+// freshly-added node catching up on the full log — and because these tests run
+// in the -race test-integration job alongside container-heavy packages
+// (testcontainers MySQL/Postgres) whose startup can starve the in-process raft
+// cluster's goroutines and timers. Settling takes well under a second when the
+// runner isn't loaded (the waiters return as soon as the config is observed),
+// so this ceiling only governs how long a genuinely starved run waits before
+// failing; a too-tight value turns CI load into a spurious membership failure
+// (observed: TestMembership_PromoteLearner timing out right at the old 10s).
+const membershipSettleTimeout = 30 * time.Second
 
 // addNodeCC / removeNodeCC build the exact ConfChangeV2 values db.AddMember /
 // db.RemoveMember construct in production (JointImplicit + a single change).
