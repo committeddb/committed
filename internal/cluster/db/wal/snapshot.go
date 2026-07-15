@@ -13,8 +13,6 @@ import (
 	pb "go.etcd.io/raft/v3/raftpb"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
-
-	"github.com/committeddb/committed/internal/cluster"
 )
 
 // boltRestoreTmpPrefix / boltCompactTmpPrefix name the full-DB temp files
@@ -186,6 +184,17 @@ func (s *Storage) RestoreSnapshot(snap *pb.Snapshot) error {
 	}
 	s.keyValueStorage = db
 
+	// The swapped-in bbolt came from another node's CreateSnapshot. That node
+	// normally already migrated to the versioned-bucket layout before
+	// snapshotting, but a snapshot from a pre-migration node would arrive flat;
+	// run the idempotent migration so forEachCurrent — in the database reload
+	// below and in every later reader — sees versioned buckets rather than
+	// silently finding nothing. Mirrors Open, which migrates immediately after
+	// bolt.Open.
+	if err := db.Update(migrateToVersionedBuckets); err != nil {
+		return fmt.Errorf("migrate restored bbolt to versioned buckets: %w", err)
+	}
+
 	// Reconcile appliedIndex to the snapshot's raft index. The serialized bbolt
 	// embeds the leader's LIVE appliedIndex (its applied position when it
 	// serialized), which is >= snap.Metadata.Index — the snapshot's raft index
@@ -212,28 +221,14 @@ func (s *Storage) RestoreSnapshot(snap *pb.Snapshot) error {
 	}
 	s.appliedIndex.Store(reconciledIndex)
 
-	// Drop any in-memory database handles and rebuild from the
-	// restored bucket. Walks the `databases` bucket directly since the
-	// loadDatabases helper routes through s.view.
-	s.databases = make(map[string]cluster.Database)
-	if err := db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket(databaseBucket)
-		if b == nil {
-			return ErrBucketMissing
-		}
-		return forEachCurrent(b, func(id, data []byte) error {
-			cfg := &cluster.Configuration{}
-			if err := cfg.Unmarshal(data); err != nil {
-				return err
-			}
-			_, parsed, err := s.parser.ParseDatabase(cfg.MimeType, cfg.Data)
-			if err != nil {
-				return err
-			}
-			s.databases[cfg.ID] = parsed
-			return nil
-		})
-	}); err != nil {
+	// Re-derive the in-memory database-handle cache from the swapped-in bbolt
+	// through Open's shared routine, so the restore path keeps ONE error policy
+	// with startup: an unbuildable config (a missing ${VAR} secret present on the
+	// leader but not here) degrades and is recorded rather than aborting the
+	// restore — which processSnapshot turns into a node-fataling — and the
+	// superseded handles are closed rather than leaked. Pass db directly:
+	// loadDatabases/s.view would re-lock the kvMu we already hold.
+	if err := db.View(s.loadDatabasesFromTx); err != nil {
 		return fmt.Errorf("reload databases: %w", err)
 	}
 
@@ -263,9 +258,11 @@ func (s *Storage) RestoreSnapshot(snap *pb.Snapshot) error {
 
 // refreshAfterRestore re-derives the in-memory state that hangs off bbolt after
 // RestoreSnapshot swaps in a new database file: the syncable/ingestable workers,
-// the scrub bound, and the config-secret/build-error gauge. It mirrors what the
-// Open path does (cmd/node calls RestoreSyncableWorkers/RestoreIngestableWorkers
-// after Open) for the snapshot-install path, which previously did none of it.
+// the scrub bound (and a poke for any pending scrub the snapshot carried), and
+// the config-secret/build-error gauge. It mirrors what the Open path does
+// (cmd/node calls RestoreSyncableWorkers/RestoreIngestableWorkers after Open;
+// scrubWorker resumes pending scrubs at startup) for the snapshot-install path,
+// which previously did none of it.
 //
 // Launched in its own goroutine by RestoreSnapshot, mirroring the Open path's
 // `go RestoreSyncableWorkers`: it keeps the raft Ready loop from blocking on the
@@ -282,6 +279,14 @@ func (s *Storage) refreshAfterRestore() {
 		// scrub skip/gauge logic stays correct either way.
 		s.lastScrubbedBound.Store(bound)
 	}
+	// The swapped-in bbolt may carry a PENDING scrub bound — an RTBF erasure that
+	// was in flight on the leader when it snapshotted. Open resumes pending scrubs
+	// because scrubWorker runs runPendingScrub at startup, but here the worker was
+	// started at this node's Open and sits idle; without a poke the restored bound
+	// waits until the next Scrub command or a restart. Signal it now (after
+	// adopting the completed bound above, so runPendingScrub compares against the
+	// fresh value).
+	s.signalScrub()
 	if err := s.validateConfigSecrets(); err != nil {
 		s.logger.Warn("restore: validate config secrets", zap.Error(err))
 	}

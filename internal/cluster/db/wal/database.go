@@ -92,35 +92,58 @@ func (s *Storage) deleteDatabase(id []byte) error {
 }
 
 func (s *Storage) loadDatabases() error {
-	return s.view(func(tx *bolt.Tx) error {
-		b := tx.Bucket(databaseBucket)
-		if b == nil {
-			return ErrBucketMissing
+	return s.view(s.loadDatabasesFromTx)
+}
+
+// loadDatabasesFromTx rebuilds the in-memory database-handle cache from the
+// databaseBucket in tx. It is shared by Open (via loadDatabases → s.view) and
+// RestoreSnapshot (which passes the freshly-swapped bbolt handle directly, since
+// it already holds kvMu.Lock and s.view would re-lock), so the two paths cannot
+// drift on error policy: a node-local build failure (a missing ${VAR} secret, a
+// parse error) is recorded and skipped so the node degrades and stays in quorum,
+// while genuine corruption (a config that won't Unmarshal) stays fatal. The
+// handles being replaced are closed first, so a rebuild — notably RestoreSnapshot
+// swapping in a new bbolt — does not leak the superseded connection pools. (At
+// Open the map is empty, so the close loop is a no-op.)
+func (s *Storage) loadDatabasesFromTx(tx *bolt.Tx) error {
+	b := tx.Bucket(databaseBucket)
+	if b == nil {
+		return ErrBucketMissing
+	}
+
+	for id, db := range s.databases {
+		if db == nil {
+			continue
+		}
+		if err := db.Close(); err != nil {
+			s.logger.Warn("close superseded database handle",
+				zap.String("id", id), zap.Error(err))
+		}
+	}
+	s.databases = make(map[string]cluster.Database)
+
+	return forEachCurrent(b, func(id, data []byte) error {
+		cfg := &cluster.Configuration{}
+		if err := cfg.Unmarshal(data); err != nil {
+			return err // genuine corruption — stays fatal
 		}
 
-		return forEachCurrent(b, func(id, data []byte) error {
-			cfg := &cluster.Configuration{}
-			if err := cfg.Unmarshal(data); err != nil {
-				return err // genuine corruption — stays fatal
-			}
-
-			_, db, err := s.parser.ParseDatabase(cfg.MimeType, cfg.Data)
-			if err != nil {
-				// Node-local build failure (e.g. missing ${VAR} secret).
-				// Degrade: skip caching the connection and keep going,
-				// rather than failing startup. Dependent syncables/
-				// ingestables will surface connection errors; the operator
-				// fixes the env and a restart builds it.
-				s.recordConfigError("database", cfg.ID, err)
-				s.logger.Error("database config could not be built on this node at startup (degraded)",
-					zap.String("id", cfg.ID), zap.Error(err))
-				return nil
-			}
-
-			s.clearConfigError("database", cfg.ID)
-			s.databases[cfg.ID] = db
+		_, db, err := s.parser.ParseDatabase(cfg.MimeType, cfg.Data)
+		if err != nil {
+			// Node-local build failure (e.g. missing ${VAR} secret).
+			// Degrade: skip caching the connection and keep going, rather
+			// than failing. Dependent syncables/ingestables will surface
+			// connection errors; the operator fixes the env and a restart
+			// (or the next snapshot install) builds it.
+			s.recordConfigError("database", cfg.ID, err)
+			s.logger.Error("database config could not be built on this node (degraded)",
+				zap.String("id", cfg.ID), zap.Error(err))
 			return nil
-		})
+		}
+
+		s.clearConfigError("database", cfg.ID)
+		s.databases[cfg.ID] = db
+		return nil
 	})
 }
 
