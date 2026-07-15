@@ -60,8 +60,9 @@ func TestSyncWholePayloadBindsRawBytes(t *testing.T) {
 
 	config := wholePayloadConfig("TEXT")
 	mock.ExpectExec(dialect.CreateDDL(config)).WillReturnResult(driver.ResultNoRows)
-	insertPrepare := mock.ExpectPrepare(dialect.CreateSQL(config))
+	insertPrepare := mock.ExpectPrepare(dialect.CreateGenerationUpsertSQL(config))
 	mock.ExpectPrepare(dialect.CreateDeleteSQL(config))
+	mock.ExpectPrepare(dialect.CreateGenerationSweepSQL(config))
 
 	syncable := sql.New(db, config)
 	require.Nil(t, syncable.Init())
@@ -69,8 +70,9 @@ func TestSyncWholePayloadBindsRawBytes(t *testing.T) {
 	raw := `{"key":"key1","big":9007199254740993,"zfirst":true,"after":"kept"}`
 
 	mock.ExpectBegin()
-	// The sqlmock dialect doubles the args like MySQL.
-	insertPrepare.ExpectExec().WithArgs("key1", raw, "key1", raw).
+	// The sqlmock dialect doubles the args like MySQL; a keyed sink also stamps
+	// the generation column (0 here — no refresh epoch on this entity).
+	insertPrepare.ExpectExec().WithArgs(keyedInsertArgs("key1", raw)...).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 

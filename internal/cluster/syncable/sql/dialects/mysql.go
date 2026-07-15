@@ -116,34 +116,92 @@ func (d *MySQLDialect) CreateAggregateAffectedParentsSQL(spec sql.AggregateSpec,
 
 // CreateSQL implements Dialect
 func (d *MySQLDialect) CreateSQL(config *sql.Config) string {
-	var sql strings.Builder
+	return mysqlUpsertSQL(config, false)
+}
 
-	fmt.Fprintf(&sql, "INSERT INTO %s(", config.Table)
+// CreateGenerationUpsertSQL implements Dialect: CreateSQL plus the
+// committed-managed generation column (last column / placeholder / update
+// assignment), used only by the keyed plain Syncable so a refresh sweep can find
+// stale rows. Projections and keyless syncables keep the plain CreateSQL.
+func (d *MySQLDialect) CreateGenerationUpsertSQL(config *sql.Config) string {
+	return mysqlUpsertSQL(config, true)
+}
+
+// mysqlUpsertSQL builds the INSERT ... ON DUPLICATE KEY UPDATE upsert.
+// withGeneration appends the GenerationColumn as the final column, VALUES
+// placeholder, and update assignment; BindArgs doubles every value for the
+// UPDATE clause, so the appended epoch value is bound in both halves. With
+// withGeneration=false the output is byte-identical to the pre-feature CreateSQL.
+func mysqlUpsertSQL(config *sql.Config, withGeneration bool) string {
+	var sqlb strings.Builder
+
+	fmt.Fprintf(&sqlb, "INSERT INTO %s(", config.Table)
 	for i, item := range config.Mappings {
 		if i == 0 {
-			fmt.Fprintf(&sql, "%s", item.Column)
+			fmt.Fprintf(&sqlb, "%s", item.Column)
 		} else {
-			fmt.Fprintf(&sql, ",%s", item.Column)
+			fmt.Fprintf(&sqlb, ",%s", item.Column)
 		}
 	}
-	fmt.Fprint(&sql, ") VALUES (")
-	for i := range config.Mappings {
+	if withGeneration {
+		fmt.Fprintf(&sqlb, ",%s", sql.GenerationColumn)
+	}
+	fmt.Fprint(&sqlb, ") VALUES (")
+	n := len(config.Mappings)
+	if withGeneration {
+		n++
+	}
+	for i := 0; i < n; i++ {
 		if i == 0 {
-			fmt.Fprint(&sql, "?")
+			fmt.Fprint(&sqlb, "?")
 		} else {
-			fmt.Fprint(&sql, ",?")
+			fmt.Fprint(&sqlb, ",?")
 		}
 	}
-	fmt.Fprint(&sql, ") ON DUPLICATE KEY UPDATE ")
+	fmt.Fprint(&sqlb, ") ON DUPLICATE KEY UPDATE ")
 	for i, item := range config.Mappings {
 		if i == 0 {
-			fmt.Fprintf(&sql, "%s=?", item.Column)
+			fmt.Fprintf(&sqlb, "%s=?", item.Column)
 		} else {
-			fmt.Fprintf(&sql, ",%s=?", item.Column)
+			fmt.Fprintf(&sqlb, ",%s=?", item.Column)
 		}
 	}
+	if withGeneration {
+		fmt.Fprintf(&sqlb, ",%s=?", sql.GenerationColumn)
+	}
 
-	return sql.String()
+	return sqlb.String()
+}
+
+// EnsureGenerationColumn implements Dialect. MySQL has no ADD COLUMN IF NOT
+// EXISTS, so it checks information_schema first and adds the column only when
+// absent — idempotent across a freshly-created table (CreateDDL omits the
+// column) and an upgraded pre-feature table. Existing rows baseline to
+// generation 1.
+func (d *MySQLDialect) EnsureGenerationColumn(db *gosql.DB, config *sql.Config) error {
+	var n int
+	err := db.QueryRow(
+		"SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?",
+		config.Table, sql.GenerationColumn).Scan(&n)
+	if err != nil {
+		return fmt.Errorf("ensure generation column: introspect %s: %w", config.Table, err)
+	}
+	if n > 0 {
+		return nil
+	}
+	//nolint:gosec // G201: table is a config identifier, GenerationColumn is a package constant — no user value interpolated
+	stmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s BIGINT NOT NULL DEFAULT 1",
+		config.Table, sql.GenerationColumn)
+	if _, err := db.Exec(stmt); err != nil {
+		return fmt.Errorf("ensure generation column [%s]: %w", stmt, err)
+	}
+	return nil
+}
+
+// CreateGenerationSweepSQL implements Dialect; MySQL binds the epoch with ?.
+func (d *MySQLDialect) CreateGenerationSweepSQL(config *sql.Config) string {
+	return fmt.Sprintf("DELETE FROM %s WHERE %s >= 1 AND %s < ?",
+		config.Table, sql.GenerationColumn, sql.GenerationColumn)
 }
 
 // CreateAppliedSidecarDDL implements Dialect: the dedup sidecar for a keyless

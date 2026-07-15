@@ -26,6 +26,18 @@ func (d *GoMySQLServerDialect) CreateSQL(config *sql.Config) string {
 	return (&dialects.MySQLDialect{}).CreateSQL(config)
 }
 
+func (d *GoMySQLServerDialect) CreateGenerationUpsertSQL(config *sql.Config) string {
+	return (&dialects.MySQLDialect{}).CreateGenerationUpsertSQL(config)
+}
+
+func (d *GoMySQLServerDialect) EnsureGenerationColumn(db *gosql.DB, config *sql.Config) error {
+	return (&dialects.MySQLDialect{}).EnsureGenerationColumn(db, config)
+}
+
+func (d *GoMySQLServerDialect) CreateGenerationSweepSQL(config *sql.Config) string {
+	return (&dialects.MySQLDialect{}).CreateGenerationSweepSQL(config)
+}
+
 func (d *GoMySQLServerDialect) CreateDeleteSQL(config *sql.Config) string {
 	return (&dialects.MySQLDialect{}).CreateDeleteSQL(config)
 }

@@ -144,38 +144,85 @@ func (d *PostgreSQLDialect) CreateAggregateAffectedParentsSQL(spec sql.Aggregate
 // that was proposed for insertion, so no extra placeholders are needed for
 // the update clause.
 func (d *PostgreSQLDialect) CreateSQL(config *sql.Config) string {
-	var sql strings.Builder
+	return pgUpsertSQL(config, false)
+}
 
-	fmt.Fprintf(&sql, "INSERT INTO %s(", config.Table)
+// CreateGenerationUpsertSQL implements Dialect: CreateSQL plus the
+// committed-managed generation column (last column / placeholder / EXCLUDED
+// assignment), used only by the keyed plain Syncable so a refresh sweep can find
+// stale rows. Projections and keyless syncables keep the plain CreateSQL.
+func (d *PostgreSQLDialect) CreateGenerationUpsertSQL(config *sql.Config) string {
+	return pgUpsertSQL(config, true)
+}
+
+// pgUpsertSQL builds the INSERT ... ON CONFLICT upsert. withGeneration appends
+// the GenerationColumn as the final column/placeholder and its EXCLUDED update
+// assignment; it is only ever set for a keyed config (PrimaryKey != ""), so the
+// extra assignment always lands inside the ON CONFLICT clause. With
+// withGeneration=false the output is byte-identical to the pre-feature CreateSQL.
+func pgUpsertSQL(config *sql.Config, withGeneration bool) string {
+	var sqlb strings.Builder
+
+	fmt.Fprintf(&sqlb, "INSERT INTO %s(", config.Table)
 	for i, item := range config.Mappings {
 		if i == 0 {
-			fmt.Fprintf(&sql, "%s", item.Column)
+			fmt.Fprintf(&sqlb, "%s", item.Column)
 		} else {
-			fmt.Fprintf(&sql, ",%s", item.Column)
+			fmt.Fprintf(&sqlb, ",%s", item.Column)
 		}
 	}
-	fmt.Fprint(&sql, ") VALUES (")
-	for i := range config.Mappings {
+	if withGeneration {
+		fmt.Fprintf(&sqlb, ",%s", sql.GenerationColumn)
+	}
+	fmt.Fprint(&sqlb, ") VALUES (")
+	n := len(config.Mappings)
+	if withGeneration {
+		n++
+	}
+	for i := 0; i < n; i++ {
 		if i == 0 {
-			fmt.Fprintf(&sql, "$%d", i+1)
+			fmt.Fprintf(&sqlb, "$%d", i+1)
 		} else {
-			fmt.Fprintf(&sql, ",$%d", i+1)
+			fmt.Fprintf(&sqlb, ",$%d", i+1)
 		}
 	}
-	fmt.Fprint(&sql, ")")
+	fmt.Fprint(&sqlb, ")")
 
 	if config.PrimaryKey != "" {
-		fmt.Fprintf(&sql, " ON CONFLICT (%s) DO UPDATE SET ", config.PrimaryKey)
+		fmt.Fprintf(&sqlb, " ON CONFLICT (%s) DO UPDATE SET ", config.PrimaryKey)
 		for i, item := range config.Mappings {
 			if i == 0 {
-				fmt.Fprintf(&sql, "%s=EXCLUDED.%s", item.Column, item.Column)
+				fmt.Fprintf(&sqlb, "%s=EXCLUDED.%s", item.Column, item.Column)
 			} else {
-				fmt.Fprintf(&sql, ",%s=EXCLUDED.%s", item.Column, item.Column)
+				fmt.Fprintf(&sqlb, ",%s=EXCLUDED.%s", item.Column, item.Column)
 			}
+		}
+		if withGeneration {
+			fmt.Fprintf(&sqlb, ",%s=EXCLUDED.%s", sql.GenerationColumn, sql.GenerationColumn)
 		}
 	}
 
-	return sql.String()
+	return sqlb.String()
+}
+
+// EnsureGenerationColumn implements Dialect. PostgreSQL supports ADD COLUMN IF
+// NOT EXISTS, so a single idempotent statement covers both a freshly-created
+// table (CreateDDL omits the column) and an upgraded pre-feature table. Existing
+// rows baseline to generation 1.
+func (d *PostgreSQLDialect) EnsureGenerationColumn(db *gosql.DB, config *sql.Config) error {
+	//nolint:gosec // G201: table is a config identifier, GenerationColumn is a package constant — no user value interpolated
+	stmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s BIGINT NOT NULL DEFAULT 1",
+		config.Table, sql.GenerationColumn)
+	if _, err := db.Exec(stmt); err != nil {
+		return fmt.Errorf("ensure generation column [%s]: %w", stmt, err)
+	}
+	return nil
+}
+
+// CreateGenerationSweepSQL implements Dialect; PostgreSQL binds the epoch with $1.
+func (d *PostgreSQLDialect) CreateGenerationSweepSQL(config *sql.Config) string {
+	return fmt.Sprintf("DELETE FROM %s WHERE %s >= 1 AND %s < $1",
+		config.Table, sql.GenerationColumn, sql.GenerationColumn)
 }
 
 // CreateAppliedSidecarDDL implements Dialect: the dedup sidecar for a keyless

@@ -538,3 +538,79 @@ func TestPostgreSQLIntegration_WholePayloadTextByteExact(t *testing.T) {
 	).Scan(&payload))
 	require.Equal(t, raw, payload)
 }
+
+// TestPostgreSQLIntegration_RefreshBoundarySweepsGapDeletedRows is the Stage 1
+// red→green for the reconciling-refresh primitive: a keyed sink stamps each
+// upsert with the entity's generation, and a refresh-boundary marker sweeps the
+// rows left at an older generation. It reproduces the broken promise — a row
+// deleted at the source during a lost change-data window survives an
+// upsert-only re-snapshot — and proves the marker reconciles it, while a
+// re-emitted row and a generation-0 (direct user) row survive.
+func TestPostgreSQLIntegration_RefreshBoundarySweepsGapDeletedRows(t *testing.T) {
+	d := &dialects.PostgreSQLDialect{}
+	db, err := sql.NewDB(d, pgConnString)
+	require.Nil(t, err)
+	defer db.Close()
+
+	table := uniqueTable(t)
+	defer dropTable(t, table)
+
+	cfg := &sql.Config{
+		Topic: eventType.ID,
+		Table: table,
+		Mappings: []sql.Mapping{
+			{JsonPath: "$.k", Column: "k", SQLType: "TEXT"},
+			{JsonPath: "$.v", Column: "v", SQLType: "TEXT"},
+		},
+		PrimaryKey: "k",
+	}
+	syncable := sql.New(db, cfg)
+	require.Nil(t, syncable.Init())
+	defer syncable.Close()
+
+	up := func(k, v string, gen uint64) *cluster.Entity {
+		e := cluster.NewUpsertEntity(eventType, []byte(k), []byte(fmt.Sprintf(`{"k":%q,"v":%q}`, k, v)))
+		e.Generation = gen
+		return e
+	}
+	sync := func(a *cluster.Actual) {
+		_, serr := syncable.Sync(context.Background(), a)
+		require.NoError(t, serr)
+	}
+	present := func(k string) bool {
+		var n int
+		require.Nil(t, db.DB.QueryRow("SELECT COUNT(*) FROM "+table+" WHERE k = $1", k).Scan(&n))
+		return n == 1
+	}
+
+	// Epoch 1 — initial snapshot of a, b, c.
+	sync(&cluster.Actual{Index: 1, Entities: []*cluster.Entity{up("a", "1", 1), up("b", "2", 1), up("c", "3", 1)}})
+	// A direct user write carries no refresh epoch (generation 0); the sweep's
+	// >= 1 floor must never touch it.
+	sync(&cluster.Actual{Index: 2, Entities: []*cluster.Entity{up("u", "user", 0)}})
+	// Epoch 2 — a gap-recovery re-snapshot re-emits the rows still live at the
+	// source (a, c) at the new epoch. b was DELETED at the source during the lost
+	// window, so it is not re-emitted — an upsert-only re-snapshot cannot signal
+	// its removal.
+	sync(&cluster.Actual{Index: 3, Entities: []*cluster.Entity{up("a", "1b", 2), up("c", "3b", 2)}})
+
+	// The broken promise: before the refresh boundary, the gap-deleted row still
+	// sits on the sink at its stale epoch.
+	require.True(t, present("b"), "gap-deleted row is retained by an upsert-only re-snapshot (the bug this fixes)")
+
+	// The fix: the refresh-boundary marker at epoch 2 sweeps every row left at an
+	// older generation.
+	sync(&cluster.Actual{Index: 4, Entities: []*cluster.Entity{cluster.NewRefreshBoundaryEntity(eventType, 2)}})
+
+	require.False(t, present("b"), "the gap-deleted row must be swept by the refresh boundary")
+	require.True(t, present("a"), "a re-emitted row (stamped the new epoch) survives")
+	require.True(t, present("c"), "a re-emitted row (stamped the new epoch) survives")
+	require.True(t, present("u"), "a direct user write (generation 0) is never swept")
+
+	// The survivors carry the epoch that last wrote them; the user row keeps 0.
+	var aGen, uGen int64
+	require.Nil(t, db.DB.QueryRow("SELECT "+sql.GenerationColumn+" FROM "+table+" WHERE k = $1", "a").Scan(&aGen))
+	require.Equal(t, int64(2), aGen, "a was re-emitted at epoch 2")
+	require.Nil(t, db.DB.QueryRow("SELECT "+sql.GenerationColumn+" FROM "+table+" WHERE k = $1", "u").Scan(&uGen))
+	require.Equal(t, int64(0), uGen, "the user row is never stamped with a refresh epoch")
+}

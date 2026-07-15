@@ -108,6 +108,37 @@ func (d *SQLMockDialect) CreateSQL(config *sql.Config) string {
 	return sql.String()
 }
 
+// CreateGenerationUpsertSQL mirrors the mock's simplified CreateSQL with the
+// committed-managed generation column appended, so a keyed syncable's unit test
+// can assert the shape it prepares.
+func (d *SQLMockDialect) CreateGenerationUpsertSQL(config *sql.Config) string {
+	var sqlb strings.Builder
+
+	fmt.Fprintf(&sqlb, "INSERT INTO %s(", config.Table)
+	for _, item := range config.Mappings {
+		fmt.Fprintf(&sqlb, "%s,", item.Column)
+	}
+	fmt.Fprintf(&sqlb, "%s) VALUES (", sql.GenerationColumn)
+	for range config.Mappings {
+		fmt.Fprint(&sqlb, "?,")
+	}
+	fmt.Fprint(&sqlb, "?)")
+
+	return sqlb.String()
+}
+
+// EnsureGenerationColumn is a no-op for the mock: the real migration is covered
+// by the docker dialect tests, and keeping it side-effect-free means a keyed
+// syncable's Init needs no extra sqlmock expectation.
+func (d *SQLMockDialect) EnsureGenerationColumn(db *gosql.DB, config *sql.Config) error {
+	return nil
+}
+
+// CreateGenerationSweepSQL mirrors MySQL (the dialect the mock stands in for).
+func (d *SQLMockDialect) CreateGenerationSweepSQL(config *sql.Config) string {
+	return (&dialects.MySQLDialect{}).CreateGenerationSweepSQL(config)
+}
+
 func (d *SQLMockDialect) Open(connectionString string) (*gosql.DB, error) {
 	return d.db, nil
 }

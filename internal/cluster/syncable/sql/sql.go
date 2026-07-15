@@ -28,6 +28,13 @@ type Syncable struct {
 	// (append/history) syncable — the one shape whose bare INSERT would
 	// duplicate rows on replay. See AppliedMark and applyEntity.
 	appliedMark *AppliedMark
+	// sweep is the prepared reconciling delete run on a refresh-boundary marker
+	// (see cluster.Entity.IsRefreshBoundary): DELETE the rows carrying an epoch
+	// older than the refresh. Non-nil ONLY for a keyed syncable (PrimaryKey set)
+	// — the shape whose keyed upsert stamps GenerationColumn on every row. It is
+	// nil for keyless/append syncables, where a refresh marker is a no-op (there
+	// is no current-row identity to reconcile). See Init and applyEntity.
+	sweep *sql.Stmt
 }
 
 func New(d *DB, config *Config) *Syncable {
@@ -92,7 +99,21 @@ func (c *Syncable) Init() error {
 		return fmt.Errorf("ddl [%s]: %w", ddlString, err)
 	}
 
+	keyed := c.config.PrimaryKey != ""
+
+	// A keyed sink stamps the committed-managed generation column on every upsert
+	// so a refresh-boundary marker can sweep rows left at an older epoch. That
+	// column is not in CreateDDL, so add it idempotently first (covering a
+	// pre-feature table upgraded in place), then prepare the generation-aware
+	// upsert. A keyless/append table has no keyed current row to reconcile, so it
+	// keeps the plain insert and prepares no sweep.
 	sqlString := c.dialect.CreateSQL(c.config)
+	if keyed {
+		if err := c.dialect.EnsureGenerationColumn(c.db, c.config); err != nil {
+			return err
+		}
+		sqlString = c.dialect.CreateGenerationUpsertSQL(c.config)
+	}
 
 	stmt, err := c.db.Prepare(sqlString)
 	if err != nil {
@@ -117,6 +138,17 @@ func (c *Syncable) Init() error {
 			return fmt.Errorf("prepare delete sql [%s]: %w", deleteString, err)
 		}
 		c.delete = &Delete{deleteString, deleteStmt}
+	}
+
+	// Prepare the reconciling sweep run on a refresh-boundary marker (keyed
+	// sinks only — see the sweep field and applyRefreshBoundary).
+	if keyed {
+		sweepSQL := c.dialect.CreateGenerationSweepSQL(c.config)
+		sweepStmt, err := c.db.Prepare(sweepSQL)
+		if err != nil {
+			return fmt.Errorf("prepare sweep sql [%s]: %w", sweepSQL, err)
+		}
+		c.sweep = sweepStmt
 	}
 
 	// A keyless (append/history) syncable has no key to be idempotent on, so its
@@ -251,6 +283,13 @@ func (c *Syncable) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool, e
 // cluster.Permanent error for non-retryable failures so the worker skips
 // rather than retries. The caller owns the transaction (commit/rollback).
 func (c *Syncable) applyEntity(ctx context.Context, tx *sql.Tx, e *cluster.Entity, index uint64, seq int) error {
+	// A refresh-boundary marker carries no row (IsDelete is false, there is no
+	// Data to unmarshal); it triggers the reconciling sweep on a keyed sink and
+	// is a no-op elsewhere. Branch on it first, before the delete/upsert paths.
+	if e.IsRefreshBoundary() {
+		return c.applyRefreshBoundary(ctx, tx, e)
+	}
+
 	if e.IsDelete() {
 		if c.delete == nil {
 			// Do NOT put e.Key in this message. It becomes a permanent,
@@ -302,6 +341,17 @@ func (c *Syncable) applyEntity(ctx context.Context, tx *sql.Tx, e *cluster.Entit
 		values = append(values, coerceForColumn(res, c.config.Mappings[i].SQLType))
 	}
 
+	// A keyed sink stamps the entity's refresh epoch into the committed-managed
+	// generation column — the trailing placeholder CreateGenerationUpsertSQL
+	// added. Every re-emitted row of a re-snapshot carries the new epoch; a row
+	// deleted at the source is never re-emitted, so it keeps its older epoch and
+	// the next refresh-boundary sweep removes it. Appended after the mapped
+	// values so it fills that last placeholder. Keyless syncables have no such
+	// column and append nothing.
+	if c.config.PrimaryKey != "" {
+		values = append(values, int64(e.Generation)) //nolint:gosec // G115: a refresh epoch is a small monotonic counter, far below 2^63
+	}
+
 	// The dialect decides how values map to placeholders: MySQL repeats them
 	// (INSERT ? + ON DUPLICATE KEY UPDATE ?), PostgreSQL binds them once
 	// (ON CONFLICT ... EXCLUDED).
@@ -328,6 +378,25 @@ func (c *Syncable) applyEntity(ctx context.Context, tx *sql.Tx, e *cluster.Entit
 	return nil
 }
 
+// applyRefreshBoundary reconciles the sink to a completed full refresh at the
+// marker's epoch: it deletes every row still carrying an older generation — the
+// rows a positive re-enumeration could not signal because they were deleted at
+// the source in a lost change-data window (an RTBF-erased subject among them).
+// It runs only on a keyed sink (c.sweep != nil); on a keyless/append table there
+// is no current-row identity to reconcile, so the marker is a no-op. The sweep
+// is idempotent, so a replayed marker (rebuild-from-0, re-sync) reproduces the
+// same reconciled state.
+func (c *Syncable) applyRefreshBoundary(ctx context.Context, tx *sql.Tx, e *cluster.Entity) error {
+	if c.sweep == nil {
+		return nil // keyless/append: nothing to reconcile
+	}
+	//nolint:gosec // G115: a refresh epoch is a small monotonic counter, far below 2^63
+	if _, err := tx.StmtContext(ctx, c.sweep).ExecContext(ctx, int64(e.Generation)); err != nil {
+		return execFailure("[sql.apply] generation sweep", err, c.dialect.IsPermanent(err))
+	}
+	return nil
+}
+
 func (c *Syncable) Close() error {
 	// Close both prepared statements; report the first error but always
 	// attempt the delete close so it does not leak when insert close fails.
@@ -340,6 +409,11 @@ func (c *Syncable) Close() error {
 	if c.appliedMark != nil {
 		if merr := c.appliedMark.Stmt.Close(); err == nil {
 			err = merr
+		}
+	}
+	if c.sweep != nil {
+		if serr := c.sweep.Close(); err == nil {
+			err = serr
 		}
 	}
 	return err

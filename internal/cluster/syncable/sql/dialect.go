@@ -16,6 +16,31 @@ type Dialect interface {
 	// table's indexes with it.
 	DropDDL(config *Config) string
 	CreateSQL(config *Config) string
+	// CreateGenerationUpsertSQL is CreateSQL with the committed-managed
+	// GenerationColumn appended as the final column/placeholder (and, for a keyed
+	// upsert, its update assignment). Only the keyed plain Syncable uses it, so a
+	// refresh-boundary sweep can find rows carrying an older epoch; projections
+	// and keyless syncables keep the plain CreateSQL. applyEntity appends the
+	// entity's epoch after the mapped values to fill the extra placeholder.
+	CreateGenerationUpsertSQL(config *Config) string
+	// EnsureGenerationColumn idempotently adds the committed-managed
+	// GenerationColumn to an EXISTING keyed sink (one created before the
+	// reconciling-refresh feature, or freshly created by CreateDDL — which does
+	// not carry the column). It is a no-op when the column already exists, so
+	// Init can call it unconditionally on every keyed syncable. Existing rows are
+	// baselined to generation 1 (the initial-snapshot epoch) so the first
+	// gap-recovery refresh — at a later epoch — still reconciles a pre-existing
+	// row that has since vanished at the source. Postgres uses ADD COLUMN IF NOT
+	// EXISTS; MySQL (no such clause) checks information_schema first.
+	EnsureGenerationColumn(db *gosql.DB, config *Config) error
+	// CreateGenerationSweepSQL returns the reconciling sweep a keyed sink runs on
+	// a refresh-boundary marker: `DELETE FROM <table> WHERE <GenerationColumn>
+	// >= 1 AND <GenerationColumn> < <placeholder>`. Its single bound argument is
+	// the marker's epoch G. The `>= 1` floor protects generation-0 rows (direct
+	// user writes, pre-feature rows never re-upserted) from a sweep; `< G` removes
+	// any row still carrying an older epoch — the rows a positive re-enumeration
+	// could not signal because they were deleted at the source in the lost window.
+	CreateGenerationSweepSQL(config *Config) string
 	// CreateDeleteSQL returns the statement that removes one downstream row
 	// by its key column: `DELETE FROM <table> WHERE <keyCol> = <placeholder>`.
 	// The placeholder is dialect-specific (? for MySQL, $1 for PostgreSQL).
@@ -122,6 +147,15 @@ type Mapping struct {
 // columns for indexing plus one payload column the read side folds.
 const wholePayloadPath = "$"
 
+// GenerationColumn is the committed-managed column a KEYED sink carries to track
+// the ingest refresh epoch that last wrote each row (see cluster.Entity.
+// Generation). committed adds it to the sink itself (via EnsureGenerationColumn,
+// not the user's mappings) and stamps every upsert with the entity's epoch; a
+// refresh-boundary marker then sweeps rows whose generation is older than the
+// refresh (CreateGenerationSweepSQL). It is namespaced to avoid colliding with a
+// user column; validateMappings rejects a config that maps to this name.
+const GenerationColumn = "committed_generation"
+
 // wholePayloadColumnTypes are the case-insensitive column-type prefixes a
 // whole-payload mapping may target. The raw document binds as a JSON string,
 // so the column must hold arbitrary text or native JSON ("JSON" also covers
@@ -138,6 +172,15 @@ var wholePayloadColumnTypes = []string{
 // target a column type that can hold the raw JSON document.
 func validateMappings(mappings []Mapping) error {
 	for _, m := range mappings {
+		// GenerationColumn is committed-managed: a keyed sink's CreateSQL appends
+		// it and EnsureGenerationColumn creates it. A user mapping to the same
+		// name would collide (a duplicate column in CREATE/INSERT), failing only
+		// at Init — so reject it at config time with an actionable message.
+		if strings.EqualFold(strings.TrimSpace(m.Column), GenerationColumn) {
+			return fmt.Errorf(
+				"mapping column %q is reserved: committed manages a %q column on keyed sinks for reconciling refreshes; rename this mapping",
+				m.Column, GenerationColumn)
+		}
 		if m.JsonPath != wholePayloadPath {
 			continue
 		}

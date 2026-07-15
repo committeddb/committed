@@ -61,11 +61,13 @@ func TestSync(t *testing.T) {
 
 			ddlSQL := dialect.CreateDDL(config)
 			mock.ExpectExec(ddlSQL).WillReturnResult(driver.ResultNoRows)
-			insertSQL := dialect.CreateSQL(config)
+			insertSQL := dialect.CreateGenerationUpsertSQL(config)
 			expectedPrepare := mock.ExpectPrepare(insertSQL)
 			// Init also prepares the DELETE-by-key statement (the config
-			// names a primaryKey, so deletes are honorable).
+			// names a primaryKey, so deletes are honorable) and the reconciling
+			// generation sweep.
 			mock.ExpectPrepare(dialect.CreateDeleteSQL(config))
+			mock.ExpectPrepare(dialect.CreateGenerationSweepSQL(config))
 
 			syncable := sql.New(db, config)
 			err = syncable.Init()
@@ -81,7 +83,7 @@ func TestSync(t *testing.T) {
 					total++
 					dvs := getDriverValues(e.Args)
 					result := sqlmock.NewResult(total, 1)
-					allDVS := append(dvs, dvs...)
+					allDVS := keyedInsertArgs(dvs...)
 					expectedPrepare.ExpectExec().WithArgs(allDVS...).WillReturnResult(result)
 				}
 				mock.ExpectCommit()
@@ -133,9 +135,10 @@ func TestDontSyncOtherTypes(t *testing.T) {
 
 			ddlSQL := dialect.CreateDDL(config)
 			mock.ExpectExec(ddlSQL).WillReturnResult(driver.ResultNoRows)
-			insertSQL := dialect.CreateSQL(config)
+			insertSQL := dialect.CreateGenerationUpsertSQL(config)
 			mock.ExpectPrepare(insertSQL)
 			mock.ExpectPrepare(dialect.CreateDeleteSQL(config))
+			mock.ExpectPrepare(dialect.CreateGenerationSweepSQL(config))
 
 			syncable := sql.New(db, config)
 			err = syncable.Init()
@@ -165,6 +168,15 @@ func getDriverValues(vs []any) []driver.Value {
 	}
 
 	return ds
+}
+
+// keyedInsertArgs is the bound-arg shape a keyed upsert exec receives now that a
+// keyed sink stamps the committed-managed generation column: the mapped column
+// values with the entity's generation appended (0 for these tests, which build
+// entities without a refresh epoch), then doubled to mirror the mock's BindArgs.
+func keyedInsertArgs(vals ...driver.Value) []driver.Value {
+	withGen := append(append([]driver.Value{}, vals...), int64(0))
+	return append(append([]driver.Value{}, withGen...), withGen...)
 }
 
 func createProposals(t *testing.T, data [][]*Entity) []*cluster.Actual {
@@ -231,12 +243,53 @@ func newSimpleSyncable(t *testing.T, mock sqlmock.Sqlmock, dialect sql.Dialect, 
 	require.Nil(t, err)
 
 	mock.ExpectExec(dialect.CreateDDL(config)).WillReturnResult(driver.ResultNoRows)
-	insertPrepare := mock.ExpectPrepare(dialect.CreateSQL(config))
+	// A keyed sink prepares the generation-stamping upsert and the reconciling
+	// sweep (EnsureGenerationColumn is a no-op in the mock).
+	insertPrepare := mock.ExpectPrepare(dialect.CreateGenerationUpsertSQL(config))
 	deletePrepare := mock.ExpectPrepare(dialect.CreateDeleteSQL(config))
+	mock.ExpectPrepare(dialect.CreateGenerationSweepSQL(config))
 
 	syncable := sql.New(db, config)
 	require.Nil(t, syncable.Init())
 	return syncable, insertPrepare, deletePrepare
+}
+
+// TestSyncRefreshBoundaryRunsSweep verifies a refresh-boundary marker triggers
+// the reconciling generation sweep, bound to the marker's epoch, in its own
+// transaction. The row-level reconciliation outcome (which rows survive) is
+// covered by the docker integration test; this asserts the wiring.
+func TestSyncRefreshBoundaryRunsSweep(t *testing.T) {
+	dialect, mock, err := testdialects.NewSQLMockDialect()
+	require.Nil(t, err)
+	db, err := sql.NewDB(dialect, "")
+	require.Nil(t, err)
+	defer db.Close()
+
+	bs, err := os.ReadFile("./simple_syncable.toml")
+	require.Nil(t, err)
+	v := readConfig(t, "toml", bytes.NewReader(bs))
+	config, err := (&sql.SyncableParser{}).ParseConfig(v, &TestDatabaseStorage{dbs: map[string]cluster.Database{"testdb": db}})
+	require.Nil(t, err)
+
+	mock.ExpectExec(dialect.CreateDDL(config)).WillReturnResult(driver.ResultNoRows)
+	mock.ExpectPrepare(dialect.CreateGenerationUpsertSQL(config))
+	mock.ExpectPrepare(dialect.CreateDeleteSQL(config))
+	sweepPrepare := mock.ExpectPrepare(dialect.CreateGenerationSweepSQL(config))
+
+	syncable := sql.New(db, config)
+	require.Nil(t, syncable.Init())
+	defer syncable.Close()
+
+	// A refresh-boundary marker at epoch 5 → one sweep bound to 5.
+	mock.ExpectBegin()
+	sweepPrepare.ExpectExec().WithArgs(int64(5)).WillReturnResult(sqlmock.NewResult(0, 3))
+	mock.ExpectCommit()
+
+	marker := cluster.NewRefreshBoundaryEntity(simpleType, 5)
+	ss, err := syncable.Sync(context.Background(), &cluster.Actual{Index: 9, Entities: []*cluster.Entity{marker}})
+	require.Nil(t, err)
+	require.Equal(t, cluster.ShouldSnapshot(true), ss)
+	require.Nil(t, mock.ExpectationsWereMet())
 }
 
 func simpleJSON(t *testing.T, key, one string) []byte {
@@ -262,7 +315,7 @@ func TestSyncUpsertThenDelete(t *testing.T) {
 	ctx := context.Background()
 
 	mock.ExpectBegin()
-	insertPrepare.ExpectExec().WithArgs("key1", "one", "key1", "one").
+	insertPrepare.ExpectExec().WithArgs(keyedInsertArgs("key1", "one")...).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 	ss, err := syncable.Sync(ctx, &cluster.Actual{Entities: []*cluster.Entity{
@@ -301,7 +354,7 @@ func TestSyncMixedTopicAppliesOnlyMatching(t *testing.T) {
 	// notSimpleType entity is skipped, so no second Exec is expected; had the fix
 	// regressed to dropping the whole Actual, there would be no Begin at all.
 	mock.ExpectBegin()
-	insertPrepare.ExpectExec().WithArgs("key1", "one", "key1", "one").
+	insertPrepare.ExpectExec().WithArgs(keyedInsertArgs("key1", "one")...).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 
@@ -349,10 +402,10 @@ func TestSyncBatchMixedUpsertsAndDeletes(t *testing.T) {
 	syncable, insertPrepare, deletePrepare := newSimpleSyncable(t, mock, dialect, db)
 
 	mock.ExpectBegin()
-	insertPrepare.ExpectExec().WithArgs("key1", "one", "key1", "one").
+	insertPrepare.ExpectExec().WithArgs(keyedInsertArgs("key1", "one")...).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	deletePrepare.ExpectExec().WithArgs("key2").WillReturnResult(sqlmock.NewResult(0, 1))
-	insertPrepare.ExpectExec().WithArgs("key3", "three", "key3", "three").
+	insertPrepare.ExpectExec().WithArgs(keyedInsertArgs("key3", "three")...).
 		WillReturnResult(sqlmock.NewResult(2, 1))
 	mock.ExpectCommit()
 
@@ -491,7 +544,7 @@ func TestSyncRollsBackOnApplyError(t *testing.T) {
 		syncable, insertPrepare, _ := newSimpleSyncable(t, mock, dialect, db)
 
 		mock.ExpectBegin()
-		insertPrepare.ExpectExec().WithArgs("key1", "one", "key1", "one").
+		insertPrepare.ExpectExec().WithArgs(keyedInsertArgs("key1", "one")...).
 			WillReturnError(errors.New("destination unhappy"))
 		mock.ExpectRollback()
 		ss, err := syncable.Sync(context.Background(), &cluster.Actual{Entities: []*cluster.Entity{
@@ -521,7 +574,7 @@ func TestSyncableCommitErrorRedacted(t *testing.T) {
 	commitErr := errors.New("pq: deferred constraint violated; Key (k)=(" + key + ")")
 
 	mock.ExpectBegin()
-	insertPrepare.ExpectExec().WithArgs(key, "one", key, "one").WillReturnResult(sqlmock.NewResult(0, 1))
+	insertPrepare.ExpectExec().WithArgs(keyedInsertArgs(key, "one")...).WillReturnResult(sqlmock.NewResult(0, 1))
 	// A failed Commit finalizes the tx itself; the code does not (and must not)
 	// Rollback after it, so no ExpectRollback here.
 	mock.ExpectCommit().WillReturnError(commitErr)

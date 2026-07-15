@@ -92,6 +92,14 @@ func (s *Syncable) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldS
 		if s.config.Topic != e.ID {
 			continue // an entity from another topic in a mixed proposal — not ours
 		}
+		// A refresh-boundary marker (reconciling full-refresh) carries no row.
+		// Forwarding it to the receiver as a "refresh" op — so a remote sink can
+		// sweep stale rows — is Stage 4 of the reconciling-refresh work; until
+		// then skip it rather than POST a bogus empty-data upsert. (No marker
+		// reaches a webhook before the ingest dialects emit one.)
+		if e.IsRefreshBoundary() {
+			continue
+		}
 		// A delete carries the sentinel in Data, not a payload — emit op
 		// "delete" with no Data so the receiver removes the keyed record;
 		// otherwise emit op "upsert" with the entity's data.

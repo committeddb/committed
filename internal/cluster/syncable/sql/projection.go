@@ -470,6 +470,15 @@ func (p *Projection) columnType(name string) string {
 // Returns cluster.Permanent for non-retryable failures so the worker skips
 // rather than retries. The caller owns the transaction.
 func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *projectionSource, e *cluster.Entity) error {
+	// A refresh-boundary marker (reconciling full-refresh) is a no-op for a
+	// projection: one source entity fans out to many/aggregated sink rows, so a
+	// topic-level generation sweep does not map onto the projection's shape.
+	// Projection reconciliation is a separate, later design; until then a gap
+	// recovery on a projected topic still needs an operator rebuild.
+	if e.IsRefreshBoundary() {
+		return nil
+	}
+
 	if e.IsDelete() {
 		// A delete carries no payload, so the source-level when cannot be
 		// evaluated — route it to every source on the topic. An aggregate's
