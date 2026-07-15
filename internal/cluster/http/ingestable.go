@@ -3,6 +3,7 @@ package http
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	httpgo "net/http"
 
 	"github.com/committeddb/committed/internal/cluster"
@@ -85,6 +86,81 @@ func (h *HTTP) GetIngestableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 	writeJson(w, bs)
+}
+
+// AddIngestable handles POST /ingestable/{id}: it is the shared config-create
+// path plus the single-authority-per-topic guard. It exists as a bespoke handler
+// (rather than the generic addConfig factory) because an ingestable carries a
+// cross-config invariant the other resources don't — see
+// rejectSecondIngestableOnTopic.
+func (h *HTTP) AddIngestable(w httpgo.ResponseWriter, r *httpgo.Request) {
+	c, err := createConfiguration(r)
+	if err != nil {
+		h.writeReadError(w, r, err, "invalid_config", "invalid ingestable configuration")
+		return
+	}
+
+	if err := h.rejectSecondIngestableOnTopic(c); err != nil {
+		writeProposeError(w, err, "ingestable", "propose ingestable")
+		return
+	}
+
+	if err := h.c.ProposeIngestable(r.Context(), c); err != nil {
+		writeProposeError(w, err, "ingestable", "propose ingestable")
+		return
+	}
+
+	// text/plain defeats content-sniffing; the body is the ID echoed to the
+	// same client that POSTed (see addConfig for the G705 rationale).
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write([]byte(c.ID)) //nolint:gosec // G705
+}
+
+// rejectSecondIngestableOnTopic enforces the single-authority-per-topic
+// invariant the reconciling-refresh sweep depends on. Each ingestable holds its
+// own refresh-generation epoch and re-emits every live row at a new epoch on a
+// full refresh; a keyed sink then sweeps `DELETE WHERE committed_generation < G`.
+// If two ingestables fed one topic, one's refresh sweep would delete the other's
+// rows (they sit at an unrelated, lower epoch) — silent cross-deletion. So a
+// create whose topic another ingestable already produces is rejected up front.
+//
+// Same-id re-config and rollback are allowed: that's the same authority, not a
+// second one. Returns a *cluster.ConfigError (→ 400, with a sql.topic field
+// detail) on a conflict; nil when the topic is free or can't be determined.
+//
+// Best-effort: it reads this node's committed view, so two simultaneous creates
+// racing the same topic on different nodes could both pass — a TOCTOU an
+// operator resolves by deleting one. It closes the misconfiguration hole, not a
+// concurrent-consensus race.
+func (h *HTTP) rejectSecondIngestableOnTopic(c *cluster.Configuration) error {
+	want := topicsOf(c, "ingestable")
+	if len(want) == 0 {
+		return nil // topic undeterminable (unparseable / non-topic config) — nothing to enforce
+	}
+
+	existing, err := h.c.Ingestables()
+	if err != nil {
+		return fmt.Errorf("list ingestables to validate topic uniqueness: %w", err)
+	}
+
+	wanted := make(map[string]bool, len(want))
+	for _, t := range want {
+		wanted[t] = true
+	}
+	for _, e := range existing {
+		if e.ID == c.ID {
+			continue // the same ingestable being re-configured or rolled back
+		}
+		for _, t := range topicsOf(e, "ingestable") {
+			if wanted[t] {
+				return cluster.NewConfigError(&cluster.FieldError{
+					Field: "sql.topic",
+					Issue: fmt.Sprintf("topic %q is already produced by ingestable %q; a topic may have only one ingestable (delete the other first)", t, e.ID),
+				})
+			}
+		}
+	}
+	return nil
 }
 
 // IngestableDeleteResponse confirms an ingestable was deleted.
