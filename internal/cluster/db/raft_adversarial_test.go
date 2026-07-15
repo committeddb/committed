@@ -2510,6 +2510,7 @@ func TestAdversarial_ReadIndexPartitionedFollower(t *testing.T) {
 	}
 	if follower == nil {
 		t.Fatal("expected at least one follower besides the leader")
+		return
 	}
 
 	// Before the partition the follower is still in the quorum, so it CAN

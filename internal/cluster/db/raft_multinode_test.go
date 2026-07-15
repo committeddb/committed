@@ -158,6 +158,7 @@ func TestRaftPropose_FromFollower(t *testing.T) {
 	follower := rafts.FollowerRaft()
 	if follower == nil {
 		t.Fatal("FollowerRaft returned nil after WaitForLeader; cluster has no follower?")
+		return
 	}
 
 	// Sanity check: the follower really is a follower (not the leader).
@@ -357,6 +358,7 @@ func TestTransferLeadership_MovesLeaderToTarget(t *testing.T) {
 	follower := rafts.FollowerRaft()
 	if follower == nil {
 		t.Fatal("FollowerRaft returned nil after WaitForLeader; cluster has no follower")
+		return
 	}
 
 	leader.mu.RLock()
