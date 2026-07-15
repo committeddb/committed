@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -15,6 +16,43 @@ import (
 
 	"github.com/committeddb/committed/internal/cluster"
 )
+
+// boltRestoreTmpPrefix / boltCompactTmpPrefix name the full-DB temp files
+// RestoreSnapshot and compactLocked write beside the live bbolt.db before the
+// atomic rename over it. A crash between the write and the rename orphans one;
+// sweepBoltTempFiles removes it on the next Open. The trailing '.' before the
+// nanosecond suffix keeps both prefixes from ever matching the live "bbolt.db".
+const (
+	boltRestoreTmpPrefix = "bbolt.db.restore."
+	boltCompactTmpPrefix = "bbolt.db.compact."
+)
+
+// sweepBoltTempFiles removes orphaned bbolt.db.restore.* / bbolt.db.compact.*
+// temp files from the metadata dir — the residue of a crash between a full-DB
+// temp write (RestoreSnapshot / compactLocked) and its atomic rename. Open calls
+// it before opening bbolt, mirroring recoverScrubDirs for the events dir. The
+// bbolt.db.restore.* form is RTBF-relevant: it holds a leader-supplied snapshot
+// payload that can carry an erased key, so a lingering copy must not survive a
+// restart (a disk leak besides). A missing metadata dir is a no-op (fresh node);
+// the live "bbolt.db" never matches either prefix.
+func sweepBoltTempFiles(metadataDir string) error {
+	entries, err := os.ReadDir(metadataDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // fresh data dir; nothing to sweep
+		}
+		return err
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, boltRestoreTmpPrefix) || strings.HasPrefix(name, boltCompactTmpPrefix) {
+			if err := os.RemoveAll(filepath.Join(metadataDir, name)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
 
 // CreateSnapshot captures the current metadata state (bbolt content) as
 // a pb.Snapshot keyed at the given raft index. It is called periodically
@@ -130,7 +168,7 @@ func (s *Storage) RestoreSnapshot(snap *pb.Snapshot) error {
 	// over the live file. Rename is atomic on POSIX, so a crash between
 	// the Write and Rename leaves the original file untouched and the
 	// next Open sees a consistent state.
-	tmpPath := filepath.Join(filepath.Dir(boltPath), fmt.Sprintf("bbolt.db.restore.%d", time.Now().UnixNano()))
+	tmpPath := filepath.Join(filepath.Dir(boltPath), fmt.Sprintf("%s%d", boltRestoreTmpPrefix, time.Now().UnixNano()))
 	if err := os.WriteFile(tmpPath, snap.Data, 0o600); err != nil {
 		return fmt.Errorf("write restored bbolt to tmp: %w", err)
 	}
@@ -267,7 +305,7 @@ func (s *Storage) refreshAfterRestore() {
 func (s *Storage) compactLocked() error {
 	boltPath := s.keyValueStorage.Path()
 	boltOpts := &bolt.Options{Timeout: 1 * time.Second}
-	tmpPath := filepath.Join(filepath.Dir(boltPath), fmt.Sprintf("bbolt.db.compact.%d", time.Now().UnixNano()))
+	tmpPath := filepath.Join(filepath.Dir(boltPath), fmt.Sprintf("%s%d", boltCompactTmpPrefix, time.Now().UnixNano()))
 
 	dst, err := bolt.Open(tmpPath, 0o600, boltOpts)
 	if err != nil {

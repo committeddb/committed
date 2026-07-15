@@ -464,6 +464,16 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		return nil, err
 	}
 
+	// Sweep any bbolt.db.restore.* / bbolt.db.compact.* temp file a crash left
+	// between a full-DB write and its atomic rename (RestoreSnapshot /
+	// compactLocked). Nothing else references these, so without this they linger
+	// indefinitely — a disk leak, and for the restore form an RTBF residual (a
+	// leader snapshot payload that may hold an erased key). Mirrors the scrub-dir
+	// and entry-log-discard recovery above.
+	if err := sweepBoltTempFiles(keyValueStorageDir); err != nil {
+		return nil, fmt.Errorf("sweep orphaned bbolt temp files: %w", err)
+	}
+
 	// bbolt is excluded from the per-entry WAL checksums below: it is a
 	// B+tree with built-in page-level checksums (meta-page CRC64 + per-page
 	// validation), so torn or bitflipped pages are already detected on read.
