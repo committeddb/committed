@@ -183,6 +183,11 @@ func TestMysqlDialect(t *testing.T) {
 				select {
 				case proposal := <-proposalChan:
 					for _, e := range proposal.Entities {
+						// The snapshot closes with a refresh-boundary marker
+						// (empty key); it is not a data row — skip it.
+						if e.IsRefreshBoundary() {
+							continue
+						}
 						seen[string(e.Key)] = e
 					}
 				case <-positionChan:
@@ -198,6 +203,9 @@ func TestMysqlDialect(t *testing.T) {
 				select {
 				case proposal := <-proposalChan:
 					for _, e := range proposal.Entities {
+						if e.IsRefreshBoundary() {
+							continue
+						}
 						seen[string(e.Key)] = e
 					}
 				case <-positionChan:
@@ -208,6 +216,10 @@ func TestMysqlDialect(t *testing.T) {
 
 			entities := make([]*cluster.Entity, 0, len(seen))
 			for _, e := range seen {
+				// Every ingested entity now carries the refresh generation; this
+				// fidelity test asserts on Type/Key/Data, so normalize it out. The
+				// generation stamp itself is covered by the snapshot marker test.
+				e.Generation = 0
 				entities = append(entities, e)
 			}
 
@@ -718,6 +730,12 @@ func TestMysqlTransactionGrouping(t *testing.T) {
 	for txProposal == nil {
 		select {
 		case p := <-proposalChan:
+			// The snapshot's refresh-boundary marker (its own single-entity
+			// proposal) is still buffered after the sentinel loop — skip it so
+			// txProposal is the 10-row transaction, not the marker.
+			if isRefreshMarkerProposal(p) {
+				continue
+			}
 			txProposal = p
 		case <-positionChan:
 		case <-deadline:
@@ -868,6 +886,12 @@ func TestMysqlMultiRowDML(t *testing.T) {
 			select {
 			case p := <-proposalChan:
 				for _, e := range p.Entities {
+					// The snapshot closes with a refresh-boundary marker (empty
+					// key, no Data, not a delete); it is not a data row and would
+					// fail the json.Unmarshal below — skip it.
+					if e.IsRefreshBoundary() {
+						continue
+					}
 					k := string(e.Key)
 					if e.IsDelete() {
 						delete(model, k)
@@ -1044,6 +1068,12 @@ func TestMysqlPKChangingUpdateTombstonesOldKey(t *testing.T) {
 			select {
 			case p := <-proposalChan:
 				for _, e := range p.Entities {
+					// The snapshot closes with a refresh-boundary marker (empty
+					// key, no Data, not a delete); it is not a data row and would
+					// fail the json.Unmarshal below — skip it.
+					if e.IsRefreshBoundary() {
+						continue
+					}
 					k := string(e.Key)
 					if e.IsDelete() {
 						delete(model, k)
@@ -1183,6 +1213,12 @@ func TestMysqlSnapshotConcurrentMutationConverges(t *testing.T) {
 		select {
 		case p := <-proposalChan:
 			for _, e := range p.Entities {
+				// The snapshot closes with a refresh-boundary marker (empty key,
+				// no Data, not a delete); it is not a data row and would fail the
+				// json.Unmarshal below — skip it.
+				if e.IsRefreshBoundary() {
+					continue
+				}
 				pk := string(e.Key)
 				if e.IsDelete() {
 					delete(model, pk)
@@ -1220,6 +1256,14 @@ func mapsEqual(a, b map[string]string) bool {
 		}
 	}
 	return true
+}
+
+// isRefreshMarkerProposal reports whether p is the refresh-boundary marker the
+// dialect emits to close a snapshot (its own single-entity proposal, carrying no
+// data row and no binlog coordinate). Fidelity tests that count/compare data
+// rows skip it.
+func isRefreshMarkerProposal(p *cluster.Proposal) bool {
+	return len(p.Entities) == 1 && p.Entities[0].IsRefreshBoundary()
 }
 
 // TestMysqlDDLDrift_OldImageDecodesAgainstWriteTimeSchema is the DDL-drift
@@ -1665,6 +1709,94 @@ func TestMysqlSnapshotOnFreshStart(t *testing.T) {
 	}
 
 	require.NotNil(t, seen["post1"])
+
+	cancel()
+	select {
+	case err := <-ingestErr:
+		require.Nil(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Ingest did not exit after cancel")
+	}
+}
+
+// TestMysqlSnapshotStampsGenerationAndMarker is the Stage 3 red→green: the
+// initial snapshot stamps every emitted row with the reconciling-refresh
+// generation (epoch 1) and closes with a refresh-boundary marker at that epoch.
+// The marker is what lets a keyed sink sweep rows a later re-snapshot cannot
+// re-emit (a source-side delete in a lost binlog window); before Stage 3 the
+// MySQL dialect emitted neither, so this test would hang waiting for the marker.
+func TestMysqlSnapshotStampsGenerationAndMarker(t *testing.T) {
+	table := "gen_marker_table"
+
+	db := createDB(t)
+	_, err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS `%s`", table))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf("CREATE TABLE `%s` (pk VARCHAR(32) NOT NULL, val TEXT, PRIMARY KEY (pk));", table))
+	require.NoError(t, err)
+
+	// Insert rows BEFORE starting the dialect — these arrive via the snapshot.
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, val) VALUES ('a', '1'), ('b', '2');", table))
+	require.NoError(t, err)
+	db.Close()
+
+	config := &sql.Config{
+		Type: &cluster.Type{ID: "genmark", Name: "genmark"},
+		Mappings: []sql.Mapping{
+			{JsonName: "pk", SQLColumn: "pk"},
+			{JsonName: "val", SQLColumn: "val"},
+		},
+		PrimaryKey:       []string{"pk"},
+		ConnectionString: ingestURL,
+		Tables:           []string{table},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	proposalChan := make(chan *cluster.Proposal, 10)
+	positionChan := make(chan cluster.Position, 10)
+
+	dialect := &mysql.MySQLDialect{}
+	ingestErr := make(chan error, 1)
+	go func() {
+		ingestErr <- dialect.Ingest(ctx, config, nil, proposalChan, positionChan)
+	}()
+
+	// Collect until both snapshot rows AND the closing refresh-boundary marker
+	// have arrived (the marker is emitted only after every table's snapshot
+	// completes, so it always follows the rows).
+	genByKey := map[string]uint64{}
+	var sawMarker bool
+	var markerEpoch uint64
+	deadline := time.After(15 * time.Second)
+	for {
+		_, haveA := genByKey["a"]
+		_, haveB := genByKey["b"]
+		if haveA && haveB && sawMarker {
+			break
+		}
+		select {
+		case p := <-proposalChan:
+			for _, e := range p.Entities {
+				if e.IsRefreshBoundary() {
+					sawMarker = true
+					markerEpoch = e.Generation
+					continue
+				}
+				genByKey[string(e.Key)] = e.Generation
+			}
+		case <-positionChan:
+		case <-deadline:
+			t.Fatalf("timed out waiting for snapshot rows + refresh-boundary marker (rows=%v sawMarker=%v)", genByKey, sawMarker)
+		}
+	}
+
+	// The initial snapshot is epoch 1: every row carries generation 1 and the
+	// closing marker is at epoch 1, so a rebuild against a pre-populated keyed
+	// sink sweeps any row still at a lower generation.
+	require.Equal(t, uint64(1), genByKey["a"], "a snapshot row must carry the epoch-1 generation")
+	require.Equal(t, uint64(1), genByKey["b"], "a snapshot row must carry the epoch-1 generation")
+	require.Equal(t, uint64(1), markerEpoch, "the snapshot must close with a refresh-boundary marker at epoch 1")
 
 	cancel()
 	select {

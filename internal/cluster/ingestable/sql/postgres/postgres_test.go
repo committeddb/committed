@@ -152,6 +152,13 @@ func waitForSlot(t *testing.T, slotName string) {
 	}, 10*time.Second, 100*time.Millisecond)
 }
 
+// isRefreshMarkerProposal reports whether p is the refresh-boundary marker the
+// dialect emits to close a snapshot (its own single-entity proposal, carrying no
+// data row and no LSN). Fidelity tests that count/compare data rows skip it.
+func isRefreshMarkerProposal(p *cluster.Proposal) bool {
+	return len(p.Entities) == 1 && p.Entities[0].IsRefreshBoundary()
+}
+
 func TestPostgresDialect(t *testing.T) {
 	simpleType := &cluster.Type{
 		ID:   "simple",
@@ -239,6 +246,13 @@ func TestPostgresDialect(t *testing.T) {
 			for len(seen) < expected {
 				select {
 				case proposal := <-proposalChan:
+					// The initial snapshot closes with a refresh-boundary marker
+					// (its own single-entity proposal, SourceSeq 0). It is not a
+					// data row and carries no LSN — skip it before it inflates the
+					// count or the SourceSeq stream.
+					if isRefreshMarkerProposal(proposal) {
+						continue
+					}
 					seqs = append(seqs, proposal.SourceSeq)
 					for _, e := range proposal.Entities {
 						seen[string(e.Key)] = e
@@ -261,6 +275,11 @@ func TestPostgresDialect(t *testing.T) {
 
 			entities := make([]*cluster.Entity, 0, len(seen))
 			for _, e := range seen {
+				// Every ingested entity now carries the refresh generation; this
+				// fidelity test asserts on Type/Key/Data, so normalize it out. The
+				// generation stamp itself is covered by
+				// TestPostgresSlotRecreatedResnapshots.
+				e.Generation = 0
 				entities = append(entities, e)
 			}
 
@@ -489,6 +508,12 @@ func TestPostgresTypedPayload(t *testing.T) {
 		select {
 		case p := <-proposalChan:
 			for _, e := range p.Entities {
+				// The initial snapshot closes with a refresh-boundary marker
+				// (empty key) that would otherwise reach the count before the
+				// CDC row 'b' — skip it.
+				if e.IsRefreshBoundary() {
+					continue
+				}
 				seen[string(e.Key)] = e
 			}
 		case <-positionChan:
@@ -590,6 +615,12 @@ func TestPostgresSnapshotStreamByteIdentity(t *testing.T) {
 		select {
 		case p := <-proposalChan:
 			for _, e := range p.Entities {
+				// The initial snapshot closes with a refresh-boundary marker
+				// (empty key) that would otherwise reach the count before the
+				// CDC row 'b' — skip it.
+				if e.IsRefreshBoundary() {
+					continue
+				}
 				seen[string(e.Key)] = e.Data
 			}
 		case <-positionChan:
@@ -694,6 +725,12 @@ func TestPostgresSnapshotStreamDomainByteIdentity(t *testing.T) {
 		select {
 		case p := <-proposalChan:
 			for _, e := range p.Entities {
+				// The initial snapshot closes with a refresh-boundary marker
+				// (empty key) that would otherwise reach the count before the
+				// CDC row 'b' — skip it.
+				if e.IsRefreshBoundary() {
+					continue
+				}
 				seen[string(e.Key)] = e.Data
 			}
 		case <-positionChan:
@@ -846,6 +883,12 @@ func TestPostgresMixedCaseColumn(t *testing.T) {
 		select {
 		case p := <-proposalChan:
 			for _, e := range p.Entities {
+				// The initial snapshot closes with a refresh-boundary marker
+				// (empty key) that would otherwise reach the count before the
+				// CDC row 'b' — skip it.
+				if e.IsRefreshBoundary() {
+					continue
+				}
 				seen[string(e.Key)] = e
 			}
 		case <-positionChan:

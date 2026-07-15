@@ -15,6 +15,13 @@ message MySQLBinLogPosition {
     // failover-safe resume cursor). Empty means file:pos-only — a legacy
     // checkpoint written before GTID support, or a source with gtid_mode=OFF.
     string gtid_set = 4;
+    // refresh_epoch is the ingest reconciling-refresh generation the worker
+    // stamps on every emitted entity and carries across checkpoints. It starts
+    // at 1 on the initial snapshot and bumps when a binlog purge (error 1236)
+    // forces an in-place re-snapshot; after a full re-snapshot the worker emits
+    // a refresh-boundary marker at this epoch so a keyed sink sweeps rows left
+    // at an older one. 0 means a pre-feature checkpoint (epoch-1 baseline).
+    uint64 refresh_epoch = 5;
 }
 
 // PostgresPosition pairs the replication LSN with optional snapshot

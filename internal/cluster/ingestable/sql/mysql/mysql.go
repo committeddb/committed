@@ -349,6 +349,7 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 	var lastPos *mysql.Position
 	var lastGTID string
 	var resumeProgress *dialectpb.SnapshotProgress
+	var currentEpoch uint64
 	if pos != nil {
 		posProto := &dialectpb.MySQLBinLogPosition{}
 		if err := proto.Unmarshal(pos, posProto); err != nil {
@@ -357,6 +358,7 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 		lastPos = &mysql.Position{Name: posProto.Name, Pos: posProto.Pos}
 		lastGTID = posProto.GtidSet
 		resumeProgress = posProto.SnapshotProgress
+		currentEpoch = posProto.RefreshEpoch
 	}
 
 	// Outer loop: each iteration either snapshots (first run, or
@@ -370,7 +372,12 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 		// position to stream from. This replaces canal's built-in
 		// mysqldump phase, eliminating the external binary dependency.
 		if lastPos == nil || resumeProgress != nil {
-			snapshotPos, snapshotGTID, err := snapshot(ctx, config, pr, po, lastPos, lastGTID, resumeProgress)
+			// The initial snapshot is epoch 1; a mid-snapshot resume keeps the
+			// epoch the checkpoint carries; a purge re-snapshot arrives here with
+			// the epoch already bumped (see the isGtidPurged branch). Floor to 1
+			// for a pre-feature checkpoint.
+			currentEpoch = max(currentEpoch, 1)
+			snapshotPos, snapshotGTID, err := snapshot(ctx, config, pr, po, lastPos, lastGTID, resumeProgress, currentEpoch)
 			if err != nil {
 				if ctx.Err() != nil {
 					return nil
@@ -399,11 +406,23 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 				zap.Uint32("binlog_pos", lastPos.Pos),
 			)
 
+			// Close the full re-snapshot with a refresh-boundary marker at this
+			// epoch so a keyed sink sweeps rows left at an older one (a row
+			// deleted at the source in the purged window, never re-emitted). MySQL
+			// has no partial added-table backfill, so every snapshot is a full
+			// refresh and always emits the marker.
+			marker := cluster.NewRefreshBoundaryEntity(config.Type, currentEpoch)
+			select {
+			case pr <- &cluster.Proposal{Entities: []*cluster.Entity{marker}}:
+			case <-ctx.Done():
+				return nil
+			}
+
 			// Checkpoint the final snapshot position (no
 			// snapshot_progress) so a restart after snapshot
 			// completion but before the first binlog commit
 			// starts streaming instead of re-running snapshot.
-			posProto := &dialectpb.MySQLBinLogPosition{Name: lastPos.Name, Pos: lastPos.Pos, GtidSet: snapshotGTID}
+			posProto := &dialectpb.MySQLBinLogPosition{Name: lastPos.Name, Pos: lastPos.Pos, GtidSet: snapshotGTID, RefreshEpoch: currentEpoch}
 			bs, err := proto.Marshal(posProto)
 			if err != nil {
 				return err
@@ -471,10 +490,16 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 		}
 
 		// --- set up the handler and run the stream ---
+		// Every streamed entity carries the current refresh epoch, floored to the
+		// epoch-1 baseline for a pre-feature checkpoint that resumed straight to
+		// streaming (snapshot already floors it). Keeping it on the handler means
+		// handleXID's checkpoints and the stamped entities agree on the epoch.
+		currentEpoch = max(currentEpoch, 1)
 		handler := &MySQLEventHandler{
 			config:       config,
 			proposalChan: pr,
 			positionChan: po,
+			epoch:        currentEpoch,
 			// Lowercase the filter list so the binlog row filter (which lowercases
 			// the incoming table name) matches regardless of the config's case;
 			// without this a `tables = ["Users"]` config drops every streamed row.
@@ -520,6 +545,12 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 				zap.String("consumed_gtid", lastGTID),
 				zap.Error(streamErr),
 			)
+			// Bump the refresh epoch so the recovery re-snapshot enumerates every
+			// live row at a NEW generation and its closing refresh-boundary marker
+			// sweeps rows a source-side delete removed during the purged window
+			// (they keep their older generation and are never re-emitted). The gap
+			// is reconciled in-band, not just re-loaded.
+			currentEpoch = max(currentEpoch, 1) + 1
 			lastPos = nil
 			lastGTID = ""
 			resumeProgress = nil
@@ -563,6 +594,12 @@ type MySQLEventHandler struct {
 	proposalChan chan<- *cluster.Proposal
 	positionChan chan<- cluster.Position
 	tables       []string
+
+	// epoch is the reconciling-refresh generation stamped on every streamed
+	// entity and written into every streaming checkpoint, so it survives a
+	// reconnect and a keyed sink can sweep by it. Seeded from the resume
+	// position (or the just-completed snapshot's epoch) by the Ingest loop.
+	epoch uint64
 
 	// schema is the configured (DSN) database, lowercased. MySQL's binlog is
 	// server-wide, so the row filter scopes to this database to keep a
@@ -891,6 +928,10 @@ func (h *MySQLEventHandler) flushPending(ctx context.Context) error {
 	} else {
 		h.flushFile, h.flushPos, h.flushSub = h.curFile, h.curPos, 0
 	}
+	// Stamp streamed rows with the current refresh epoch so a later
+	// refresh-boundary marker can sweep rows a re-snapshot left behind (a
+	// streamed-then-gap-deleted row still carries this epoch until the sweep).
+	stampGeneration(h.pending, h.epoch)
 	p := &cluster.Proposal{Entities: h.pending, SourceSeq: encodeSourceSeq(h.curFile, h.curPos, h.flushSub)}
 	h.pending = nil
 
@@ -899,6 +940,16 @@ func (h *MySQLEventHandler) flushPending(ctx context.Context) error {
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	}
+}
+
+// stampGeneration sets the reconciling-refresh epoch on every entity in a batch
+// (see cluster.Entity.Generation). The whole batch shares one epoch: the worker
+// holds a single "current epoch" that only changes when a binlog purge forces an
+// in-place re-snapshot, so stamping at flush time is enough.
+func stampGeneration(entities []*cluster.Entity, epoch uint64) {
+	for _, e := range entities {
+		e.Generation = epoch
 	}
 }
 
@@ -1036,7 +1087,7 @@ func (h *MySQLEventHandler) handleXID(ctx context.Context, header *replication.E
 	h.consumedGTID = merged
 	h.curTxnGTID = nil
 
-	posProto := &dialectpb.MySQLBinLogPosition{Name: pos.Name, Pos: pos.Pos}
+	posProto := &dialectpb.MySQLBinLogPosition{Name: pos.Name, Pos: pos.Pos, RefreshEpoch: h.epoch}
 	if h.consumedGTID != nil {
 		posProto.GtidSet = h.consumedGTID.String()
 	}
@@ -1197,6 +1248,7 @@ func snapshot(
 	resumePos *mysql.Position,
 	resumeGTID string,
 	resumeProgress *dialectpb.SnapshotProgress,
+	epoch uint64,
 ) (*mysql.Position, string, error) {
 	db, err := gosql.Open("mysql", buildDSN(config.ConnectionString))
 	if err != nil {
@@ -1242,7 +1294,7 @@ func snapshot(
 			)
 			continue
 		}
-		if err := snapshotTable(ctx, db, config, table, batchSize, progress, &pos, gtid, pr, po); err != nil {
+		if err := snapshotTable(ctx, db, config, table, batchSize, progress, &pos, gtid, epoch, pr, po); err != nil {
 			return nil, "", fmt.Errorf("snapshot: table %s: %w", table, err)
 		}
 		// Mark complete and drop any partial cursor.
@@ -1250,7 +1302,7 @@ func snapshot(
 		delete(progress.LastPkByTable, table)
 		completed[table] = true
 
-		if err := emitProgress(ctx, po, pos, gtid, progress); err != nil {
+		if err := emitProgress(ctx, po, pos, gtid, progress, epoch); err != nil {
 			return nil, "", err
 		}
 		zap.L().Info("snapshot: table complete", zap.String("table", table))
@@ -1304,6 +1356,7 @@ func emitProgress(
 	pos mysql.Position,
 	gtid string,
 	progress *dialectpb.SnapshotProgress,
+	epoch uint64,
 ) error {
 	// A shallow copy is enough — proto.Marshal will serialize the
 	// current state of the maps/slices at call time.
@@ -1312,6 +1365,7 @@ func emitProgress(
 		Pos:              pos.Pos,
 		GtidSet:          gtid,
 		SnapshotProgress: progress,
+		RefreshEpoch:     epoch,
 	}
 	bs, err := proto.Marshal(posProto)
 	if err != nil {
@@ -1400,6 +1454,7 @@ func snapshotTable(
 	progress *dialectpb.SnapshotProgress,
 	pos *mysql.Position,
 	gtid string,
+	epoch uint64,
 	pr chan<- *cluster.Proposal,
 	po chan<- cluster.Position,
 ) error {
@@ -1425,6 +1480,11 @@ func snapshotTable(
 			break
 		}
 
+		// Stamp the snapshot rows with the refresh epoch (a purge re-snapshot
+		// bumps it; the initial snapshot is epoch 1) so the closing
+		// refresh-boundary marker can sweep the rows this positive enumeration
+		// could not re-emit.
+		stampGeneration(rows, epoch)
 		p := &cluster.Proposal{Entities: rows}
 		select {
 		case pr <- p:
@@ -1437,7 +1497,7 @@ func snapshotTable(
 		progress.LastPkByTable[table] = lastPK
 		totalRows += count
 
-		if err := emitProgress(ctx, po, *pos, gtid, progress); err != nil {
+		if err := emitProgress(ctx, po, *pos, gtid, progress, epoch); err != nil {
 			return err
 		}
 
