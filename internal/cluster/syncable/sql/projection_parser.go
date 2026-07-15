@@ -82,6 +82,34 @@ type rawProjectionLookup struct {
 	Fields []ProjectionElementField `mapstructure:"field"`
 }
 
+// TopicsFromConfig implements cluster.SyncableTopicExtractor: a projection
+// consumes every topic named across its sources (multi-source folds several
+// topics into one row), plus the back-compat single-source top-level topic.
+// Read straight from the config (no Init / no DDL) and best-effort — a source
+// block that won't decode is skipped rather than failing enumeration — so
+// config-change enumeration runs no I/O. Order-preserving, de-duplicated.
+func (p *ProjectionSyncableParser) TopicsFromConfig(v *cluster.ParsedConfig) []string {
+	seen := map[string]bool{}
+	var topics []string
+	add := func(t string) {
+		if t != "" && !seen[t] {
+			seen[t] = true
+			topics = append(topics, t)
+		}
+	}
+
+	var rawSources []rawProjectionSource
+	if err := v.UnmarshalKey("sql-projection.source", &rawSources); err == nil {
+		for _, rs := range rawSources {
+			add(rs.Topic)
+		}
+	}
+	// Back-compat single-source shape: top-level topic (used when no source
+	// blocks are present).
+	add(v.GetString("sql-projection.topic"))
+	return topics
+}
+
 func (p *ProjectionSyncableParser) ParseConfig(v *cluster.ParsedConfig, storage cluster.DatabaseStorage) (*ProjectionConfig, error) {
 	sqlDB := v.GetString("sql-projection.db")
 	db, err := storage.Database(sqlDB)

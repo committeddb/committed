@@ -37,6 +37,17 @@ func (p *SyncableParser) Parse(v *cluster.ParsedConfig, storage cluster.Database
 	return syncable, nil
 }
 
+// TopicsFromConfig implements cluster.SyncableTopicExtractor: a plain sql
+// syncable consumes the single topic named at sql.topic. Read straight from the
+// config (no Init / no DDL), so config-change enumeration runs no I/O.
+func (p *SyncableParser) TopicsFromConfig(v *cluster.ParsedConfig) []string {
+	topic := v.GetString("sql.topic")
+	if topic == "" {
+		return nil
+	}
+	return []string{topic}
+}
+
 func (p *SyncableParser) ParseConfig(v *cluster.ParsedConfig, storage cluster.DatabaseStorage) (*Config, error) {
 	sqlDB := v.GetString("sql.db")
 	if sqlDB == "" {

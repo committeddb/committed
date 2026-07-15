@@ -18,6 +18,17 @@ func (p *SyncableParser) Parse(v *cluster.ParsedConfig, _ cluster.DatabaseStorag
 	return New(config), nil
 }
 
+// TopicsFromConfig implements cluster.SyncableTopicExtractor: a webhook syncable
+// consumes the single topic named at http.topic. Read straight from the config
+// (no Init), so config-change enumeration runs no I/O.
+func (p *SyncableParser) TopicsFromConfig(v *cluster.ParsedConfig) []string {
+	topic := v.GetString("http.topic")
+	if topic == "" {
+		return nil
+	}
+	return []string{topic}
+}
+
 func (p *SyncableParser) ParseConfig(v *cluster.ParsedConfig) (*Config, error) {
 	topic := v.GetString("http.topic")
 	if topic == "" {

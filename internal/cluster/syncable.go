@@ -235,6 +235,41 @@ type RebuildRequiredError interface {
 	Details() any
 }
 
+// DependentSyncable identifies one syncable that consumes a topic affected by an
+// ingestable change and so must be rebuilt after it. Id + name only — no
+// destination shape — so it is safe to surface in a generic 409 details payload.
+type DependentSyncable struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// SyncableTopicExtractor is the optional SyncableParser extension that reports
+// which topics a syncable config consumes, read straight from the parsed config
+// WITHOUT building or initializing the syncable (no DDL, no destination
+// connection). The propose path uses it to find the syncables an ingestable
+// primaryKey change re-keys (see IngestableConfigChangeValidator), so a rejected
+// change can name exactly which syncables to rebuild. A parser that does not
+// implement it contributes no dependents.
+type SyncableTopicExtractor interface {
+	TopicsFromConfig(v *ParsedConfig) []string
+}
+
+// DependentsAware is the optional RebuildRequiredError extension a destination
+// error implements when it wants the propose path to enrich it with the
+// syncables that consume the affected topic. The propose path owns the topology
+// (which syncables consume which topic); the destination owns the error shape.
+// This keeps topology out of the destination package and destination shape out
+// of the propose path.
+type DependentsAware interface {
+	// AffectedTopic is the id of the topic whose entity keys the change
+	// re-keys; the propose path finds the syncables consuming it.
+	AffectedTopic() string
+	// SetDependents hands back those syncables so the error can render them in
+	// its Details (and message). Called at most once, before the error is
+	// returned up the stack.
+	SetDependents(dependents []DependentSyncable)
+}
+
 // CheckpointPolicy tunes how often a syncable worker persists its
 // SyncableIndex checkpoint — the trade-off between the per-checkpoint raft
 // round-trip and how many already-synced proposals a crash re-delivers.

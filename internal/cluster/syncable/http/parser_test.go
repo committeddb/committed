@@ -27,6 +27,23 @@ func readConfig(t *testing.T, configType string, r io.Reader) *cluster.ParsedCon
 	return v
 }
 
+func TestTopicsFromConfig_Webhook(t *testing.T) {
+	v := readConfig(t, "toml", bytes.NewBufferString(`
+[syncable]
+name = "hook"
+type = "http"
+
+[http]
+topic = "orders"
+url = "http://example.com/hook"
+`))
+	require.Equal(t, []string{"orders"}, (&synchttp.SyncableParser{}).TopicsFromConfig(v))
+
+	// No topic configured → no consumed topic (not a crash).
+	empty := readConfig(t, "toml", bytes.NewBufferString("[http]\nurl = \"http://x\"\n"))
+	require.Nil(t, (&synchttp.SyncableParser{}).TopicsFromConfig(empty))
+}
+
 func TestParseConfig_Simple(t *testing.T) {
 	bs, err := os.ReadFile("./simple_webhook.toml")
 	require.NoError(t, err)

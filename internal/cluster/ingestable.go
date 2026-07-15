@@ -68,6 +68,31 @@ type IngestableTeardownable interface {
 	Teardown() error
 }
 
+// IngestableConfigChangeValidator is the optional Ingestable extension that
+// vets an in-place config replacement — the ingestable analogue of
+// ConfigChangeValidator for syncables. The propose path calls ValidateReplace on
+// the newly-parsed ingestable, passing the ingestable built from the
+// currently-persisted config; a non-nil result rejects the re-POST.
+//
+// It exists because an ingestable's primaryKey is part of its on-disk snapshot
+// state contract: it defines the entity-key encoding (CompositeKey), the
+// snapshot resume cursor (SnapshotProgress.LastPkByTable), and therefore the
+// downstream sink's row identity. A persisted Position is inherited wholesale on
+// re-POST (keyed by ingestable id) with NO check that it was written under the
+// same primaryKey, so changing the primaryKey in place would silently mis-page
+// the resume cursor (duplicate rows) and orphan already-synced rows under their
+// old keys. A SQL ingestable answers by comparing its primaryKey against prior's
+// and returns a RebuildRequiredError steering the operator to delete + recreate
+// (which clears the Position — see NewDeleteIngestableEntities) and rebuild the
+// syncables consuming its topic. The validator is destination-specific; the
+// generic layers never see the destination shape.
+type IngestableConfigChangeValidator interface {
+	// ValidateReplace reports whether replacing prior's config with this
+	// ingestable's config is safe to apply in place, returning a
+	// RebuildRequiredError (or other error) if not, nil if it is.
+	ValidateReplace(prior Ingestable) error
+}
+
 // IngestableStatus is a point-in-time operational snapshot of an ingestable
 // worker: which phase it is in, how far the initial snapshot got, where the
 // change-data-capture cursor sits, and how far behind the source it is. It is

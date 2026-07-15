@@ -29,6 +29,54 @@ func (i *Ingestable) Close() error {
 	return nil
 }
 
+// ValidateReplace implements cluster.IngestableConfigChangeValidator: it rejects
+// a re-POST that changes this ingestable's primaryKey while a prior config
+// exists, because the persisted snapshot Position is encoded under the old key
+// and is inherited by ingestable id without re-checking it (see
+// cluster.IngestableConfigChangeValidator). Returns a *PrimaryKeyChangeError (a
+// cluster.RebuildRequiredError) describing the change, or nil when the key is
+// unchanged. Fail-open if prior is not a SQL ingestable — a different
+// dialect/kind has no comparable primaryKey.
+//
+// The guard is config-level, not runtime-level: it fires whenever a prior config
+// exists, regardless of whether a snapshot has actually checkpointed a Position
+// yet. A pre-checkpoint change is caught too because the initial snapshot may
+// already have emitted rows to the sink under the old key before its first
+// checkpoint, so "no persisted Position" does not mean "no old-key rows". This
+// mirrors the syncable schema guard, which likewise rejects on any prior config.
+func (i *Ingestable) ValidateReplace(prior cluster.Ingestable) error {
+	p, ok := prior.(*Ingestable)
+	if !ok {
+		return nil // different ingestable kind — nothing to compare
+	}
+	if primaryKeyEqual(p.config.PrimaryKey, i.config.PrimaryKey) {
+		return nil
+	}
+	return &PrimaryKeyChangeError{
+		TopicID:       i.topicID(),
+		TopicName:     i.topicName(),
+		OldPrimaryKey: p.config.PrimaryKey,
+		NewPrimaryKey: i.config.PrimaryKey,
+	}
+}
+
+// topicID / topicName read the produced topic's identity, tolerating a nil Type
+// (a config built without one) so ValidateReplace never panics on a malformed
+// prior.
+func (i *Ingestable) topicID() string {
+	if i.config.Type == nil {
+		return ""
+	}
+	return i.config.Type.ID
+}
+
+func (i *Ingestable) topicName() string {
+	if i.config.Type == nil {
+		return ""
+	}
+	return i.config.Type.Name
+}
+
 // sourceTeardowner is the optional Dialect capability to drop the source-side
 // replication resources it created. Postgres implements it (drop slot +
 // publication); MySQL does not — a binlog reader holds no persistent server-side
