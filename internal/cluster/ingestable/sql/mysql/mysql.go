@@ -340,7 +340,7 @@ func mysqlTableColumns(ctx context.Context, db *gosql.DB, table string) ([]strin
 	return cols, rows.Err()
 }
 
-func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos cluster.Position, pr chan<- *cluster.Proposal, po chan<- cluster.Position) error {
+func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos cluster.Position, epochFloor uint64, pr chan<- *cluster.Proposal, po chan<- cluster.Position) error {
 	backoff := syncerBackoffMin
 
 	// Parse the initial resume position, if any. snapshot_progress
@@ -372,11 +372,19 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 		// position to stream from. This replaces canal's built-in
 		// mysqldump phase, eliminating the external binary dependency.
 		if lastPos == nil || resumeProgress != nil {
-			// The initial snapshot is epoch 1; a mid-snapshot resume keeps the
-			// epoch the checkpoint carries; a purge re-snapshot arrives here with
-			// the epoch already bumped (see the isGtidPurged branch). Floor to 1
-			// for a pre-feature checkpoint.
-			currentEpoch = max(currentEpoch, 1)
+			// A mid-snapshot resume keeps the in-progress epoch the checkpoint
+			// carries (its closing marker has not committed, so the topic highwater
+			// does not yet reflect this refresh) — do NOT bump. A fresh full
+			// snapshot uses RefreshSnapshotEpoch: strictly ABOVE the delete-surviving
+			// topic highwater on a same-topic recreate (whose cleared position reset
+			// the checkpoint epoch to 0 while the sink still holds rows up to the
+			// highwater), else epoch 1. A purge re-snapshot arrives here with the
+			// epoch already bumped (see the isGtidPurged branch).
+			if resumeProgress != nil {
+				currentEpoch = max(currentEpoch, 1)
+			} else {
+				currentEpoch = sql.RefreshSnapshotEpoch(currentEpoch, epochFloor)
+			}
 			snapshotPos, snapshotGTID, err := snapshot(ctx, config, pr, po, lastPos, lastGTID, resumeProgress, currentEpoch)
 			if err != nil {
 				if ctx.Err() != nil {
@@ -490,11 +498,12 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 		}
 
 		// --- set up the handler and run the stream ---
-		// Every streamed entity carries the current refresh epoch, floored to the
-		// epoch-1 baseline for a pre-feature checkpoint that resumed straight to
-		// streaming (snapshot already floors it). Keeping it on the handler means
-		// handleXID's checkpoints and the stamped entities agree on the epoch.
-		currentEpoch = max(currentEpoch, 1)
+		// Every streamed entity carries the current refresh epoch, floored to
+		// max(topic highwater, 1): never stamp a streamed row below a generation
+		// already on the sink, and cover a pre-feature checkpoint that resumed
+		// straight to streaming (snapshot already floors it). Keeping it on the
+		// handler means handleXID's checkpoints and the stamped entities agree.
+		currentEpoch = max(currentEpoch, epochFloor, 1)
 		handler := &MySQLEventHandler{
 			config:       config,
 			proposalChan: pr,
@@ -549,8 +558,9 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			// live row at a NEW generation and its closing refresh-boundary marker
 			// sweeps rows a source-side delete removed during the purged window
 			// (they keep their older generation and are never re-emitted). The gap
-			// is reconciled in-band, not just re-loaded.
-			currentEpoch = max(currentEpoch, 1) + 1
+			// is reconciled in-band, not just re-loaded. Floor to the topic highwater
+			// so the bump lands strictly above every generation already on the sink.
+			currentEpoch = max(currentEpoch, epochFloor, 1) + 1
 			lastPos = nil
 			lastGTID = ""
 			resumeProgress = nil

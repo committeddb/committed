@@ -56,7 +56,9 @@ func TestPostgresPublicationReconciledOnAddedTable(t *testing.T) {
 	ctx1, cancel1 := context.WithCancel(context.Background())
 	pr1 := make(chan *cluster.Proposal, 10)
 	po1 := make(chan cluster.Position, 10)
-	go func() { _ = (&postgres.PostgreSQLDialect{}).Ingest(ctx1, newConfig([]string{tableA}), nil, pr1, po1) }()
+	go func() {
+		_ = (&postgres.PostgreSQLDialect{}).Ingest(ctx1, newConfig([]string{tableA}), nil, 0, pr1, po1)
+	}()
 
 	waitForSlot(t, "slot_recon")
 
@@ -92,7 +94,7 @@ func TestPostgresPublicationReconciledOnAddedTable(t *testing.T) {
 	pr2 := make(chan *cluster.Proposal, 10)
 	po2 := make(chan cluster.Position, 10)
 	go func() {
-		_ = (&postgres.PostgreSQLDialect{}).Ingest(ctx2, newConfig([]string{tableA, tableB}), lastPos, pr2, po2)
+		_ = (&postgres.PostgreSQLDialect{}).Ingest(ctx2, newConfig([]string{tableA, tableB}), lastPos, 0, pr2, po2)
 	}()
 
 	deadline = time.After(20 * time.Second)

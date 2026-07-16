@@ -18,7 +18,12 @@ import (
 // well-behaved ingestable: only a delete entity makes the downstream Syncable
 // remove the record. See the cluster.Ingestable contract.
 type Dialect interface {
-	Ingest(ctx context.Context, config *Config, pos cluster.Position, pr chan<- *cluster.Proposal, po chan<- cluster.Position) error
+	// Ingest streams source changes as Proposals. epochFloor is the
+	// delete-surviving per-topic refresh-epoch highwater (see TopicEpochReader):
+	// on a full snapshot with a cleared position it is the generation the sink
+	// still carries, so the snapshot must stamp ABOVE it. 0 means the topic has
+	// never been refreshed (a genuine first snapshot starts at epoch 1).
+	Ingest(ctx context.Context, config *Config, pos cluster.Position, epochFloor uint64, pr chan<- *cluster.Proposal, po chan<- cluster.Position) error
 	// Preflight validates that the source can be ingested safely, before any
 	// worker starts. Today it is the replica-identity / binlog-row-image guard:
 	// it connects to the source and verifies every watched table's DELETE change

@@ -178,6 +178,14 @@ func (ms *MemoryStorage) IngestSourceSeqHighwater(id string) uint64 {
 	return 0
 }
 
+// TopicRefreshEpoch is a stub: this in-memory test double has no apply path to
+// advance the per-topic refresh-epoch highwater, so it always reports 0 (a fresh
+// snapshot starts at epoch 1). Tests that exercise the recreate-bumps-epoch path
+// use the real wal.Storage.
+func (ms *MemoryStorage) TopicRefreshEpoch(topic string) uint64 {
+	return 0
+}
+
 func (ms *MemoryStorage) Database(id string) (cluster.Database, error) {
 	return nil, nil
 }

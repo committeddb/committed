@@ -8,17 +8,40 @@ import (
 
 //go:generate go run github.com/maxbrunsfeld/counterfeiter/v6 -generate
 
+// TopicEpochReader supplies the delete-surviving per-topic refresh-epoch floor —
+// the highest generation ever committed for a topic, which the sink still
+// carries even after the ingestable's position is cleared by a DeleteIngestable.
+// The worker reads it at snapshot start so a same-topic recreate stamps above
+// those rows instead of resetting to epoch 1. Backed by the wal storage's
+// TopicRefreshEpoch (via the db); nil in tests degrades to floor 0 (the
+// pre-feature first-snapshot-at-epoch-1 behavior).
+type TopicEpochReader interface {
+	TopicRefreshEpoch(topic string) uint64
+}
+
 type Ingestable struct {
-	config  *Config
-	dialect Dialect
+	config     *Config
+	dialect    Dialect
+	epochFloor TopicEpochReader
 }
 
 func New(d Dialect, config *Config) *Ingestable {
 	return &Ingestable{config: config, dialect: d}
 }
 
+// WithEpochFloor injects the per-topic refresh-epoch reader. Set by the parser
+// from the db; left nil by tests that construct an Ingestable directly.
+func (i *Ingestable) WithEpochFloor(r TopicEpochReader) *Ingestable {
+	i.epochFloor = r
+	return i
+}
+
 func (i *Ingestable) Ingest(ctx context.Context, pos cluster.Position, pr chan<- *cluster.Proposal, po chan<- cluster.Position) error {
-	return i.dialect.Ingest(ctx, i.config, pos, pr, po)
+	var floor uint64
+	if i.epochFloor != nil && i.config.Type != nil {
+		floor = i.epochFloor.TopicRefreshEpoch(i.config.Type.ID)
+	}
+	return i.dialect.Ingest(ctx, i.config, pos, floor, pr, po)
 }
 
 func (i *Ingestable) Status(ctx context.Context, pos cluster.Position) (cluster.IngestableStatus, error) {

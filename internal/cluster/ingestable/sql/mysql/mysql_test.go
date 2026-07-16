@@ -168,7 +168,7 @@ func TestMysqlDialect(t *testing.T) {
 
 			ingestErr := make(chan error, 1)
 			go func() {
-				ingestErr <- dialect.Ingest(ctx, &cfg, nil, proposalChan, positionChan)
+				ingestErr <- dialect.Ingest(ctx, &cfg, nil, 0, proposalChan, positionChan)
 			}()
 
 			// Collect entities until we've seen the expected count.
@@ -276,7 +276,7 @@ func TestMysqlTypedPayload(t *testing.T) {
 	proposalChan := make(chan *cluster.Proposal)
 	positionChan := make(chan cluster.Position)
 	ingestErr := make(chan error, 1)
-	go func() { ingestErr <- (&mysql.MySQLDialect{}).Ingest(ctx, &cfg, nil, proposalChan, positionChan) }()
+	go func() { ingestErr <- (&mysql.MySQLDialect{}).Ingest(ctx, &cfg, nil, 0, proposalChan, positionChan) }()
 
 	var got *cluster.Entity
 	deadline := time.After(15 * time.Second)
@@ -352,7 +352,7 @@ func TestMysqlEnumSetDecode(t *testing.T) {
 	defer cancel()
 	proposalChan := make(chan *cluster.Proposal, 10)
 	positionChan := make(chan cluster.Position, 10)
-	go func() { _ = (&mysql.MySQLDialect{}).Ingest(ctx, config, nil, proposalChan, positionChan) }()
+	go func() { _ = (&mysql.MySQLDialect{}).Ingest(ctx, config, nil, 0, proposalChan, positionChan) }()
 
 	waitForEntity := func(key string) *cluster.Entity {
 		t.Helper()
@@ -572,7 +572,7 @@ func TestMysqlReconnect(t *testing.T) {
 	dialect := &mysql.MySQLDialect{}
 	ingestErr := make(chan error, 1)
 	go func() {
-		ingestErr <- dialect.Ingest(ctx, config, nil, proposalChan, positionChan)
+		ingestErr <- dialect.Ingest(ctx, config, nil, 0, proposalChan, positionChan)
 	}()
 
 	// --- collect the initial "before" proposal ---
@@ -690,7 +690,7 @@ func TestMysqlTransactionGrouping(t *testing.T) {
 
 	dialect := &mysql.MySQLDialect{}
 	go func() {
-		_ = dialect.Ingest(ctx, config, nil, proposalChan, positionChan)
+		_ = dialect.Ingest(ctx, config, nil, 0, proposalChan, positionChan)
 	}()
 
 	// Wait for the sentinel row to arrive — this means the snapshot
@@ -800,7 +800,7 @@ func TestMysqlStreamingDelete(t *testing.T) {
 	positionChan := make(chan cluster.Position, 10)
 
 	dialect := &mysql.MySQLDialect{}
-	go func() { _ = dialect.Ingest(ctx, config, nil, proposalChan, positionChan) }()
+	go func() { _ = dialect.Ingest(ctx, config, nil, 0, proposalChan, positionChan) }()
 
 	// waitForEntity drains proposals (and positions) until an entity with the
 	// given key arrives, returning it. Insert and delete run as separate
@@ -875,7 +875,7 @@ func TestMysqlMultiRowDML(t *testing.T) {
 	proposalChan := make(chan *cluster.Proposal, 10)
 	positionChan := make(chan cluster.Position, 10)
 	dialect := &mysql.MySQLDialect{}
-	go func() { _ = dialect.Ingest(ctx, config, nil, proposalChan, positionChan) }()
+	go func() { _ = dialect.Ingest(ctx, config, nil, 0, proposalChan, positionChan) }()
 
 	model := map[string]string{}
 	deleted := map[string]bool{}
@@ -967,7 +967,7 @@ func TestMysqlSingleLargeRowsEventDistinctSeqs(t *testing.T) {
 	proposalChan := make(chan *cluster.Proposal, 32)
 	positionChan := make(chan cluster.Position, 32)
 	dialect := &mysql.MySQLDialect{}
-	go func() { _ = dialect.Ingest(ctx, config, nil, proposalChan, positionChan) }()
+	go func() { _ = dialect.Ingest(ctx, config, nil, 0, proposalChan, positionChan) }()
 
 	seen := map[string]bool{}
 	var cdcSeqs []uint64
@@ -1057,7 +1057,7 @@ func TestMysqlPKChangingUpdateTombstonesOldKey(t *testing.T) {
 	proposalChan := make(chan *cluster.Proposal, 10)
 	positionChan := make(chan cluster.Position, 10)
 	dialect := &mysql.MySQLDialect{}
-	go func() { _ = dialect.Ingest(ctx, config, nil, proposalChan, positionChan) }()
+	go func() { _ = dialect.Ingest(ctx, config, nil, 0, proposalChan, positionChan) }()
 
 	model := map[string]string{}
 	deleted := map[string]bool{}
@@ -1149,7 +1149,7 @@ func TestMysqlSnapshotConcurrentMutationConverges(t *testing.T) {
 	positionChan := make(chan cluster.Position, 10)
 
 	dialect := &mysql.MySQLDialect{}
-	go func() { _ = dialect.Ingest(ctx, config, nil, proposalChan, positionChan) }()
+	go func() { _ = dialect.Ingest(ctx, config, nil, 0, proposalChan, positionChan) }()
 
 	// Mutator: starting immediately (while the snapshot runs), update, delete, and
 	// insert rows with small gaps so the changes straddle the snapshot boundary.
@@ -1305,7 +1305,7 @@ func TestMysqlDDLDrift_OldImageDecodesAgainstWriteTimeSchema(t *testing.T) {
 	ctx1, cancel1 := context.WithCancel(context.Background())
 	pr1 := make(chan *cluster.Proposal, 10)
 	po1 := make(chan cluster.Position, 10)
-	go func() { _ = (&mysql.MySQLDialect{}).Ingest(ctx1, config, nil, pr1, po1) }()
+	go func() { _ = (&mysql.MySQLDialect{}).Ingest(ctx1, config, nil, 0, pr1, po1) }()
 
 	seen := map[string]bool{}
 	deadline := time.After(15 * time.Second)
@@ -1360,7 +1360,7 @@ func TestMysqlDDLDrift_OldImageDecodesAgainstWriteTimeSchema(t *testing.T) {
 	defer cancel2()
 	pr2 := make(chan *cluster.Proposal, 20)
 	po2 := make(chan cluster.Position, 20)
-	go func() { _ = (&mysql.MySQLDialect{}).Ingest(ctx2, config, pos, pr2, po2) }()
+	go func() { _ = (&mysql.MySQLDialect{}).Ingest(ctx2, config, pos, 0, pr2, po2) }()
 
 	got := map[string]string{}
 	sawSeed := false
@@ -1431,7 +1431,7 @@ func TestMysqlPositionResume(t *testing.T) {
 
 	dialect1 := &mysql.MySQLDialect{}
 	go func() {
-		_ = dialect1.Ingest(ctx1, config, nil, proposalChan1, positionChan1)
+		_ = dialect1.Ingest(ctx1, config, nil, 0, proposalChan1, positionChan1)
 	}()
 
 	deadline := time.After(15 * time.Second)
@@ -1519,7 +1519,7 @@ func TestMysqlPositionResume(t *testing.T) {
 	dialect2 := &mysql.MySQLDialect{}
 	ingestErr := make(chan error, 1)
 	go func() {
-		ingestErr <- dialect2.Ingest(ctx2, config, lastPos, proposalChan2, positionChan2)
+		ingestErr <- dialect2.Ingest(ctx2, config, lastPos, 0, proposalChan2, positionChan2)
 	}()
 
 	// Collect: "after" should appear. "before" and "during" should NOT
@@ -1583,7 +1583,7 @@ func TestMysqlGtidStatusCaughtUp(t *testing.T) {
 	positionChan := make(chan cluster.Position, 10)
 
 	dialect := &mysql.MySQLDialect{}
-	go func() { _ = dialect.Ingest(ctx, config, nil, proposalChan, positionChan) }()
+	go func() { _ = dialect.Ingest(ctx, config, nil, 0, proposalChan, positionChan) }()
 
 	// Poll Status, always feeding it the latest checkpoint, until the streamer is
 	// caught up to the source head. No new rows are written, so once the snapshot
@@ -1668,7 +1668,7 @@ func TestMysqlSnapshotOnFreshStart(t *testing.T) {
 	dialect := &mysql.MySQLDialect{}
 	ingestErr := make(chan error, 1)
 	go func() {
-		ingestErr <- dialect.Ingest(ctx, config, nil, proposalChan, positionChan)
+		ingestErr <- dialect.Ingest(ctx, config, nil, 0, proposalChan, positionChan)
 	}()
 
 	// Collect snapshot entities — the 2 pre-existing rows.
@@ -1759,7 +1759,7 @@ func TestMysqlSnapshotStampsGenerationAndMarker(t *testing.T) {
 	dialect := &mysql.MySQLDialect{}
 	ingestErr := make(chan error, 1)
 	go func() {
-		ingestErr <- dialect.Ingest(ctx, config, nil, proposalChan, positionChan)
+		ingestErr <- dialect.Ingest(ctx, config, nil, 0, proposalChan, positionChan)
 	}()
 
 	// Collect until both snapshot rows AND the closing refresh-boundary marker
@@ -1856,7 +1856,7 @@ func TestMysqlSnapshotChunking(t *testing.T) {
 	dialect := &mysql.MySQLDialect{}
 	ingestErr := make(chan error, 1)
 	go func() {
-		ingestErr <- dialect.Ingest(ctx, config, nil, proposalChan, positionChan)
+		ingestErr <- dialect.Ingest(ctx, config, nil, 0, proposalChan, positionChan)
 	}()
 
 	deadline := time.After(15 * time.Second)
@@ -1935,7 +1935,7 @@ func TestMysqlSnapshotStreamTimeByteIdentity(t *testing.T) {
 	defer cancel()
 	proposalChan := make(chan *cluster.Proposal, 10)
 	positionChan := make(chan cluster.Position, 10)
-	go func() { _ = (&mysql.MySQLDialect{}).Ingest(ctx, config, nil, proposalChan, positionChan) }()
+	go func() { _ = (&mysql.MySQLDialect{}).Ingest(ctx, config, nil, 0, proposalChan, positionChan) }()
 
 	seen := map[string][]byte{}
 	drainUntil := func(pred func() bool, what string) {
@@ -2020,7 +2020,7 @@ func TestMysqlSnapshotStreamJSONBitByteIdentity(t *testing.T) {
 	defer cancel()
 	proposalChan := make(chan *cluster.Proposal, 10)
 	positionChan := make(chan cluster.Position, 10)
-	go func() { _ = (&mysql.MySQLDialect{}).Ingest(ctx, config, nil, proposalChan, positionChan) }()
+	go func() { _ = (&mysql.MySQLDialect{}).Ingest(ctx, config, nil, 0, proposalChan, positionChan) }()
 
 	seen := map[string][]byte{}
 	drainUntil := func(pred func() bool, what string) {
@@ -2113,7 +2113,7 @@ func TestMysqlSnapshotResume(t *testing.T) {
 
 	dialect1 := &mysql.MySQLDialect{}
 	go func() {
-		_ = dialect1.Ingest(ctx1, config, nil, proposalChan1, positionChan1)
+		_ = dialect1.Ingest(ctx1, config, nil, 0, proposalChan1, positionChan1)
 	}()
 
 	// Collect the first position with snapshot_progress so we know the
@@ -2162,7 +2162,7 @@ waitProgress:
 
 	dialect2 := &mysql.MySQLDialect{}
 	go func() {
-		_ = dialect2.Ingest(ctx2, config, resumeBytes, proposalChan2, positionChan2)
+		_ = dialect2.Ingest(ctx2, config, resumeBytes, 0, proposalChan2, positionChan2)
 	}()
 
 	// Rows with pk ≤ "005" must not appear in phase 2 snapshot output.
@@ -2253,7 +2253,7 @@ func TestMysqlSnapshotCompositePrimaryKey(t *testing.T) {
 	positionChan := make(chan cluster.Position, 20)
 
 	dialect := &mysql.MySQLDialect{}
-	go func() { _ = dialect.Ingest(ctx, config, nil, proposalChan, positionChan) }()
+	go func() { _ = dialect.Ingest(ctx, config, nil, 0, proposalChan, positionChan) }()
 
 	want := map[string]bool{
 		`["tt1","1"]`: true, `["tt1","2"]`: true, `["tt1","3"]`: true,

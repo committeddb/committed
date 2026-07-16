@@ -53,7 +53,7 @@ func TestPostgresStatusStreamingLag(t *testing.T) {
 	positionChan := make(chan cluster.Position, 10)
 
 	dialect := &postgres.PostgreSQLDialect{}
-	go func() { _ = dialect.Ingest(ctx, config, nil, proposalChan, positionChan) }()
+	go func() { _ = dialect.Ingest(ctx, config, nil, 0, proposalChan, positionChan) }()
 
 	waitForSlot(t, "slot_status")
 

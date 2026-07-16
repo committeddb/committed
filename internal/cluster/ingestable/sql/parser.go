@@ -14,6 +14,11 @@ type Typer interface {
 type IngestableParser struct {
 	Dialects map[string]Dialect
 	typer    Typer
+	// EpochFloor supplies the delete-surviving per-topic refresh-epoch floor to
+	// every built Ingestable (see TopicEpochReader). Wired by the node to the db;
+	// left nil in tests, where an Ingestable degrades to floor 0 (first snapshot at
+	// epoch 1).
+	EpochFloor TopicEpochReader
 }
 
 func NewIngestableParser(t Typer) *IngestableParser {
@@ -61,7 +66,7 @@ func (p *IngestableParser) Parse(v *cluster.ParsedConfig) (cluster.Ingestable, e
 		return nil, fmt.Errorf("[ingestable.parser] preflight: %w", err)
 	}
 
-	ingestable := New(dialect, config)
+	ingestable := New(dialect, config).WithEpochFloor(p.EpochFloor)
 
 	return ingestable, nil
 }

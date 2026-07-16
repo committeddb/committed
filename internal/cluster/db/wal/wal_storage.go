@@ -44,6 +44,12 @@ var (
 	// it to physically remove a subject's PII from the permanent event log. See
 	// tombstone.go for the encoding and the determinism rationale.
 	eventTombstoneBucket = []byte("eventTombstones")
+	// topicRefreshEpochBucket maps a topic (type id) to the big-endian uint64
+	// highwater of the highest refresh generation ever committed for it. Drives
+	// the delete-surviving epoch floor so a same-topic recreate stamps above the
+	// generations still on the sink — see topic_refresh_epoch.go. NOT cleared by
+	// DeleteIngestable (topic-scoped, outlives any ingestable incarnation).
+	topicRefreshEpochBucket = []byte("topicRefreshEpoch")
 	// memberAPIURLBucket maps a raft node id (8 big-endian bytes, the key
 	// cluster.NodeAPIURLKey produces) to a marshaled cluster.NodeAPIURL — the
 	// node's self-announced advertised HTTP API base URL. Written from the
@@ -130,11 +136,11 @@ var internalEntities = []internalEntity{
 // (derived from internalEntities) plus the ones that aren't entity-driven — the
 // ingest source-seq highwater and the applied-index marker.
 var buckets = func() [][]byte {
-	bs := make([][]byte, 0, len(internalEntities)+3)
+	bs := make([][]byte, 0, len(internalEntities)+4)
 	for _, ie := range internalEntities {
 		bs = append(bs, ie.bucket)
 	}
-	return append(bs, ingestSourceSeqBucket, appliedIndexBucket, eventTombstoneBucket)
+	return append(bs, ingestSourceSeqBucket, appliedIndexBucket, eventTombstoneBucket, topicRefreshEpochBucket)
 }()
 
 type StateType int
@@ -598,6 +604,21 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	// panic on a hard-state commit past lastIndex, so the cut-over is re-run.
 	if err := ws.reconcileEntryLogWithSnapshot(); err != nil {
 		return nil, fmt.Errorf("reconcile entry log with snapshot: %w", err)
+	}
+
+	// Complete the OTHER half of the same crashed install: reconcileEntryLogWithSnapshot
+	// above heals the entry-log cut, but a crash between that cut and RestoreSnapshot's
+	// bbolt swap leaves bbolt's applied index below the snapshot index — raft's
+	// RestartNode then panics in appliedTo (a brick). Re-run the bbolt swap from the
+	// persisted snapshot payload. A no-op on every normal node (applied >= snapshot
+	// index). Runs BEFORE validateConfigSecrets/loadDatabases below so they read the
+	// restored bbolt, not the stale pre-install one. Recover eventIndex first so the
+	// reconcile can apply the same snapIdx <= eventIndex guard RestoreSnapshot uses.
+	if err := ws.recoverEventIndex(); err != nil {
+		return nil, fmt.Errorf("recover event index: %w", err)
+	}
+	if err := ws.reconcileBboltWithSnapshot(); err != nil {
+		return nil, fmt.Errorf("reconcile bbolt with snapshot: %w", err)
 	}
 
 	// Heal the one-fsync-behind crash: Save persists Entries then HardState to two

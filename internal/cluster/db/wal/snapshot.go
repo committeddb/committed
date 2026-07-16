@@ -156,82 +156,12 @@ func (s *Storage) RestoreSnapshot(snap *pb.Snapshot) error {
 	s.kvMu.Lock()
 	defer s.kvMu.Unlock()
 
-	// Close the current bolt handle so we can overwrite its file.
-	boltPath := s.keyValueStorage.Path()
-	if err := s.keyValueStorage.Close(); err != nil {
-		return fmt.Errorf("close bbolt before restore: %w", err)
+	// Swap the live bbolt file for the snapshot's serialized database and
+	// reconcile the applied index to the snapshot's raft index. Shared with the
+	// Open-time completion of a crashed install (reconcileBboltWithSnapshot).
+	if err := s.swapBboltToSnapshotData(snap.Data, snap.Metadata.GetIndex()); err != nil {
+		return err
 	}
-
-	// Write the snapshot's bbolt content to a sibling file, then rename
-	// over the live file. Rename is atomic on POSIX, so a crash between
-	// the Write and Rename leaves the original file untouched and the
-	// next Open sees a consistent state.
-	tmpPath := filepath.Join(filepath.Dir(boltPath), fmt.Sprintf("%s%d", boltRestoreTmpPrefix, time.Now().UnixNano()))
-	if err := os.WriteFile(tmpPath, snap.Data, 0o600); err != nil {
-		return fmt.Errorf("write restored bbolt to tmp: %w", err)
-	}
-	// fsync the temp file BEFORE the rename: os.WriteFile does not sync, so
-	// without this a crash right after Rename could surface boltPath with
-	// unflushed/zero data blocks and the next bolt.Open would fail — defeating
-	// the atomic swap this function exists to provide. Abort (leaving the live
-	// file untouched) if the sync fails.
-	if err := s.syncFile(tmpPath); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("fsync restored bbolt tmp: %w", err)
-	}
-	if err := os.Rename(tmpPath, boltPath); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("rename restored bbolt: %w", err)
-	}
-	// Persist the rename itself (the parent directory entry) so the swapped-in
-	// file survives a crash. Best-effort: the rename is already visible here.
-	s.syncDirBestEffort(filepath.Dir(boltPath), "restore snapshot bbolt swap")
-
-	// Reopen bbolt. Match the Open-path options: 1s timeout, NoSync
-	// stays off (fsync path; restored snapshots should be durable).
-	boltOpts := &bolt.Options{Timeout: 1 * time.Second}
-	db, err := bolt.Open(boltPath, 0o600, boltOpts)
-	if err != nil {
-		return fmt.Errorf("reopen bbolt after restore: %w", err)
-	}
-	s.keyValueStorage = db
-
-	// The swapped-in bbolt came from another node's CreateSnapshot. That node
-	// normally already migrated to the versioned-bucket layout before
-	// snapshotting, but a snapshot from a pre-migration node would arrive flat;
-	// run the idempotent migration so forEachCurrent — in the database reload
-	// below and in every later reader — sees versioned buckets rather than
-	// silently finding nothing. Mirrors Open, which migrates immediately after
-	// bolt.Open.
-	if err := db.Update(migrateToVersionedBuckets); err != nil {
-		return fmt.Errorf("migrate restored bbolt to versioned buckets: %w", err)
-	}
-
-	// Reconcile appliedIndex to the snapshot's raft index. The serialized bbolt
-	// embeds the leader's LIVE appliedIndex (its applied position when it
-	// serialized), which is >= snap.Metadata.Index — the snapshot's raft index
-	// (compactTo = applied-8, below applied). Adopting the embedded value would set
-	// this node's appliedIndex ABOVE the snapshot's raft index, disagreeing with
-	// raft and, when eventIndex sits in [Metadata.Index, embedded), tripping the
-	// eventIndex >= appliedIndex invariant. Set it to Metadata.Index instead: the
-	// bbolt content is over-complete (state as of applied), so re-applying the
-	// (Metadata.Index, applied] tail after restore is idempotent. Persist it
-	// directly against db — not saveAppliedIndex/s.update, which take kvMu.RLock
-	// and would deadlock on the kvMu.Lock we hold — so a restart's loadAppliedIndex
-	// reads the reconciled value, not the embedded one.
-	reconciledIndex := snap.Metadata.GetIndex()
-	if err := db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(appliedIndexBucket)
-		if b == nil {
-			return ErrBucketMissing
-		}
-		var buf [8]byte
-		binary.BigEndian.PutUint64(buf[:], reconciledIndex)
-		return b.Put(appliedIndexKey, buf[:])
-	}); err != nil {
-		return fmt.Errorf("reconcile appliedIndex after restore: %w", err)
-	}
-	s.appliedIndex.Store(reconciledIndex)
 
 	// Reset the metadata-GC backlog accumulator. It is a non-durable, leader-local
 	// counter of EntityKindSnapshot entities applied since the last scrub (not in
@@ -249,9 +179,9 @@ func (s *Storage) RestoreSnapshot(snap *pb.Snapshot) error {
 	// with startup: an unbuildable config (a missing ${VAR} secret present on the
 	// leader but not here) degrades and is recorded rather than aborting the
 	// restore — which processSnapshot turns into a node-fataling — and the
-	// superseded handles are closed rather than leaked. Pass db directly:
+	// superseded handles are closed rather than leaked. Read the handle directly:
 	// loadDatabases/s.view would re-lock the kvMu we already hold.
-	if err := db.View(s.loadDatabasesFromTx); err != nil {
+	if err := s.keyValueStorage.View(s.loadDatabasesFromTx); err != nil {
 		return fmt.Errorf("reload databases: %w", err)
 	}
 
@@ -276,6 +206,148 @@ func (s *Storage) RestoreSnapshot(snap *pb.Snapshot) error {
 	// derive from the swapped bbolt) off the Ready loop; see refreshAfterRestore.
 	go s.refreshAfterRestore()
 
+	return nil
+}
+
+// swapBboltToSnapshotData replaces the live bbolt file with the serialized
+// database in data and reconciles the applied index to reconciledIndex. It is
+// the shared core of an on-disk bbolt install: RestoreSnapshot calls it for the
+// live InstallSnapshot, and reconcileBboltWithSnapshot calls it at Open to
+// complete an install that crashed after the entry-log cut but before the bbolt
+// swap. Callers must exclude concurrent bbolt access (RestoreSnapshot holds
+// kvMu; Open is single-threaded during recovery). It closes the current handle,
+// atomically swaps the file (fsync temp → rename → fsync dir), reopens, migrates
+// to the versioned layout, and persists reconciledIndex into the swapped-in
+// bbolt so a later loadAppliedIndex reads it.
+func (s *Storage) swapBboltToSnapshotData(data []byte, reconciledIndex uint64) error {
+	// Close the current bolt handle so we can overwrite its file.
+	boltPath := s.keyValueStorage.Path()
+	if err := s.keyValueStorage.Close(); err != nil {
+		return fmt.Errorf("close bbolt before swap: %w", err)
+	}
+
+	// Write the snapshot's bbolt content to a sibling file, then rename over the
+	// live file. Rename is atomic on POSIX, so a crash between the Write and
+	// Rename leaves the original file untouched and the next Open sees a
+	// consistent state — and re-runs this swap, since the applied index is
+	// unchanged until the Put below commits.
+	tmpPath := filepath.Join(filepath.Dir(boltPath), fmt.Sprintf("%s%d", boltRestoreTmpPrefix, time.Now().UnixNano()))
+	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
+		return fmt.Errorf("write restored bbolt to tmp: %w", err)
+	}
+	// fsync the temp file BEFORE the rename: os.WriteFile does not sync, so
+	// without this a crash right after Rename could surface boltPath with
+	// unflushed/zero data blocks and the next bolt.Open would fail — defeating
+	// the atomic swap this function exists to provide. Abort (leaving the live
+	// file untouched) if the sync fails.
+	if err := s.syncFile(tmpPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("fsync restored bbolt tmp: %w", err)
+	}
+	if err := os.Rename(tmpPath, boltPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("rename restored bbolt: %w", err)
+	}
+	// Persist the rename itself (the parent directory entry) so the swapped-in
+	// file survives a crash. Best-effort: the rename is already visible here.
+	s.syncDirBestEffort(filepath.Dir(boltPath), "bbolt snapshot swap")
+
+	// Reopen bbolt. Match the Open-path options: 1s timeout, NoSync stays off
+	// (fsync path; restored snapshots should be durable).
+	boltOpts := &bolt.Options{Timeout: 1 * time.Second}
+	db, err := bolt.Open(boltPath, 0o600, boltOpts)
+	if err != nil {
+		return fmt.Errorf("reopen bbolt after swap: %w", err)
+	}
+	s.keyValueStorage = db
+
+	// The swapped-in bbolt came from another node's CreateSnapshot. That node
+	// normally already migrated to the versioned-bucket layout before
+	// snapshotting, but a snapshot from a pre-migration node would arrive flat;
+	// run the idempotent migration so forEachCurrent — in every later reader —
+	// sees versioned buckets rather than silently finding nothing. Mirrors Open,
+	// which migrates immediately after bolt.Open.
+	if err := db.Update(migrateToVersionedBuckets); err != nil {
+		return fmt.Errorf("migrate swapped bbolt to versioned buckets: %w", err)
+	}
+
+	// Reconcile appliedIndex to reconciledIndex (the snapshot's raft index). The
+	// serialized bbolt embeds the source node's LIVE appliedIndex, which is >=
+	// the snapshot's raft index (compactTo = applied-8, below applied). Adopting
+	// the embedded value would set this node's appliedIndex ABOVE the snapshot's
+	// raft index, disagreeing with raft and, when eventIndex sits in
+	// [reconciledIndex, embedded), tripping the eventIndex >= appliedIndex
+	// invariant. Set it to reconciledIndex instead: the bbolt content is
+	// over-complete (state as of applied), so re-applying the tail is idempotent.
+	// Persist directly against db — not saveAppliedIndex/s.update, which take
+	// kvMu.RLock and would deadlock under a caller holding kvMu.Lock — so a
+	// restart's loadAppliedIndex reads the reconciled value, not the embedded one.
+	if err := db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(appliedIndexBucket)
+		if b == nil {
+			return ErrBucketMissing
+		}
+		var buf [8]byte
+		binary.BigEndian.PutUint64(buf[:], reconciledIndex)
+		return b.Put(appliedIndexKey, buf[:])
+	}); err != nil {
+		return fmt.Errorf("reconcile appliedIndex after swap: %w", err)
+	}
+	s.appliedIndex.Store(reconciledIndex)
+	return nil
+}
+
+// reconcileBboltWithSnapshot completes an in-place snapshot install that crashed
+// after saveWithSnapshot cut the entry log to the snapshot point (healed at Open
+// by reconcileEntryLogWithSnapshot) but before RestoreSnapshot swapped bbolt. It
+// is the symmetric other half: the persisted snapshot record is the durable
+// intent, so the bbolt swap is re-run at Open too, from the snapshot payload
+// appendState stored alongside the record.
+//
+// Detected by snapshotIndex > durable appliedIndex. A completed install, and
+// every normal node (whose snapshot index is <= its applied index by
+// construction — CreateSnapshot requires index <= appliedIndex), leaves
+// appliedIndex >= snapshotIndex, so this is a no-op there.
+//
+// Without it the entry log sits cut to snapIdx while bbolt's appliedIndex lags
+// below it: raft's RestartNode then panics in raftLog.appliedTo (applied <
+// snapshot index) — a crash-loop brick — or, when appliedIndex is 0, boots on
+// stale bbolt silently missing the snapshot's metadata.
+func (s *Storage) reconcileBboltWithSnapshot() error {
+	snapIdx := s.snapshot.Metadata.GetIndex()
+	if snapIdx == 0 {
+		return nil
+	}
+	applied, err := s.loadAppliedIndex()
+	if err != nil {
+		return err
+	}
+	if applied >= snapIdx {
+		return nil
+	}
+	// A persisted snapshot record always satisfies snapIdx <= eventIndex in
+	// production (CreateSnapshot: snapIdx <= appliedIndex <= eventIndex;
+	// saveWithSnapshot: guarded on it — the same invariant RestoreSnapshot
+	// enforces). A record beyond the event log is not a recoverable crashed
+	// install (e.g. a legacy/forged state-log tail whose payload isn't even a
+	// bbolt file); leave bbolt intact and let raft's start-time invariant or the
+	// rebuild path handle it rather than swapping in a payload we can't stand
+	// behind. Requires Open's recoverEventIndex to have run first.
+	if snapIdx > s.eventIndex.Load() {
+		return nil
+	}
+	// The bbolt swap never ran. Empty payload cannot be reconstructed here and
+	// must fail Open loudly (operator rebuild) rather than silently boot
+	// divergent; saveWithSnapshot always persists snap.Data, so this is a
+	// corruption guard, not an expected path.
+	if len(s.snapshot.Data) == 0 {
+		return fmt.Errorf("incomplete snapshot install: appliedIndex=%d below snapshot index=%d but the persisted snapshot carries no data; run the rebuild procedure", applied, snapIdx)
+	}
+	if err := s.swapBboltToSnapshotData(s.snapshot.Data, snapIdx); err != nil {
+		return fmt.Errorf("reconcile bbolt with snapshot: %w", err)
+	}
+	s.logger.Info("completed crashed snapshot install at open: swapped bbolt to the persisted snapshot and reconciled the applied index",
+		zap.Uint64("snapshotIndex", snapIdx), zap.Uint64("priorAppliedIndex", applied))
 	return nil
 }
 

@@ -66,4 +66,21 @@ func postConfig(t *testing.T, path, body string) {
 	t.Logf("POST %s: %d %s", path, resp.StatusCode, string(b))
 }
 
+// deleteConfig issues DELETE against a versioned config resource and fails the
+// test on a non-2xx response. Used to remove an ingestable so a later re-POST
+// starts fresh from a full snapshot (the reconciling-refresh recreate path).
+func deleteConfig(t *testing.T, path string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodDelete, committedURL(path), nil)
+	require.NoError(t, err, "build request")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err, "DELETE %s", path)
+	defer func() { _ = resp.Body.Close() }()
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		t.Fatalf("DELETE %s: %d %s", path, resp.StatusCode, string(b))
+	}
+	t.Logf("DELETE %s: %d %s", path, resp.StatusCode, string(b))
+}
+
 // Readiness gating moved to postgresEngine.WaitReady (postgres_engine.go).

@@ -112,6 +112,19 @@ func (s *Storage) ApplyCommitted(entry *pb.Entry) error {
 			if entity.Type.EntityKind == cluster.EntityKindSnapshot {
 				s.metadataBacklog.Add(1)
 			}
+
+			// Raise the per-topic refresh-epoch floor to the highest generation
+			// ever stamped on this topic (data rows and refresh-boundary markers
+			// alike carry Generation). Survives DeleteIngestable, so a same-topic
+			// recreate — whose cleared position resets the epoch to 0 — resumes
+			// ABOVE the generations still on the sink instead of re-emitting at
+			// epoch 1 and leaving a vacuous "gen < 1" sweep. See
+			// topic_refresh_epoch.go.
+			if entity.Generation > 0 {
+				if err := s.bumpTopicRefreshEpoch(entity.Type.ID, entity.Generation); err != nil {
+					return fmt.Errorf("[wal.storage] bumpTopicRefreshEpoch: %w", err)
+				}
+			}
 		}
 
 		// Advance the per-ingestable source-seq highwater for ingest

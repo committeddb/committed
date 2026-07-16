@@ -15,7 +15,7 @@ import (
 // method is an inert stub, so a test can focus on one behavior.
 type stubDialect struct{}
 
-func (stubDialect) Ingest(context.Context, *sql.Config, cluster.Position, chan<- *cluster.Proposal, chan<- cluster.Position) error {
+func (stubDialect) Ingest(context.Context, *sql.Config, cluster.Position, uint64, chan<- *cluster.Proposal, chan<- cluster.Position) error {
 	return nil
 }
 func (stubDialect) Preflight(*sql.Config) error { return nil }

@@ -932,6 +932,13 @@ func (ms *MemoryStorage) IngestSourceSeqHighwater(id string) uint64 {
 	return 0
 }
 
+// TopicRefreshEpoch stubs the delete-surviving per-topic refresh-epoch
+// highwater. This in-memory double doesn't run the entity apply path that would
+// advance it, so it reports 0; recreate-epoch tests use the real wal.Storage.
+func (ms *MemoryStorage) TopicRefreshEpoch(topic string) uint64 {
+	return 0
+}
+
 func (ms *MemoryStorage) Node(id string) uint64 {
 	ms.nodeMu.RLock()
 	defer ms.nodeMu.RUnlock()

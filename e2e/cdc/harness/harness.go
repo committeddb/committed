@@ -198,6 +198,34 @@ func (h *Harness) Topics() []string {
 	return h.topics
 }
 
+// DeleteIngestable removes the ingestable for a topic via
+// DELETE /v1/ingestable/{table}. The config and checkpoint position are
+// deleted atomically; the source-side replication resources (the Postgres
+// slot + publication) are dropped best-effort shortly after on the leader.
+// The topic's sink syncable is left running, so rows already projected stay on
+// the sink — which is exactly what a same-topic recreate must reconcile.
+//
+// Callers that recreate should first wait for the slot to disappear (see the
+// refresh-epoch reconcile test's slot-absence gate) so the recreate hits the
+// fresh-snapshot branch; an un-dropped slot would resume from LSN 0 and emit no
+// refresh-boundary marker, so no sweep would run.
+func (h *Harness) DeleteIngestable(t *testing.T, table string) {
+	t.Helper()
+	deleteConfig(t, "/v1/ingestable/"+table)
+}
+
+// RecreateIngestable re-registers the ingestable for a topic (same config the
+// harness posted at startup) and waits until it is streaming again. Paired with
+// DeleteIngestable, it drives the delete+recreate-on-the-same-topic path: the
+// recreate's fresh full snapshot re-emits live rows at a bumped refresh epoch
+// and its closing refresh-boundary marker sweeps sink rows the enumeration did
+// not re-emit (source-deleted rows, RTBF-erased subjects).
+func (h *Harness) RecreateIngestable(t *testing.T, table string) {
+	t.Helper()
+	h.engine.PostIngestable(t, table)
+	h.engine.WaitReady(t, table)
+}
+
 // Capture waits for at least expected[topic] new proposals on each
 // topic, then returns all new proposals per topic in commit order AND
 // advances the baseline. Use `h.Capture(t, script.ExpectedCounts())`.

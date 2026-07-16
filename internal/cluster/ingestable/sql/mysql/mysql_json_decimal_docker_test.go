@@ -67,7 +67,7 @@ func TestMysqlSnapshotStreamJSONDecimalByteIdentity(t *testing.T) {
 	defer cancel()
 	proposalChan := make(chan *cluster.Proposal, 10)
 	positionChan := make(chan cluster.Position, 10)
-	go func() { _ = (&mysql.MySQLDialect{}).Ingest(ctx, config, nil, proposalChan, positionChan) }()
+	go func() { _ = (&mysql.MySQLDialect{}).Ingest(ctx, config, nil, 0, proposalChan, positionChan) }()
 
 	seen := map[string][]byte{}
 	drainUntil := func(pred func() bool, what string) {

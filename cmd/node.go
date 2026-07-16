@@ -349,7 +349,7 @@ image can be templated per-node by an orchestrator:
 		// NB: the database parser is registered earlier, before wal.Open (see
 		// above). These three need *d (the ingestable parser) or are simply
 		// fine to register here alongside it.
-		d.AddIngestableParser("sql", ingestableParser(d))
+		d.AddIngestableParser("sql", ingestableParser(d, d))
 		d.AddSyncableParser("sql", &syncsql.SyncableParser{Metrics: m})
 		d.AddSyncableParser("sql-projection", &syncsql.ProjectionSyncableParser{Metrics: m})
 		d.AddSyncableParser("http", &synchttp.SyncableParser{})
@@ -501,10 +501,13 @@ func dbParser() *syncsql.DBParser {
 	return p
 }
 
-func ingestableParser(t ingestablesql.Typer) *ingestablesql.IngestableParser {
+func ingestableParser(t ingestablesql.Typer, epoch ingestablesql.TopicEpochReader) *ingestablesql.IngestableParser {
 	p := ingestablesql.NewIngestableParser(t)
 	p.Dialects["mysql"] = &ingestablemysql.MySQLDialect{}
 	p.Dialects["postgres"] = &ingestablepostgres.PostgreSQLDialect{}
+	// Wire the delete-surviving per-topic refresh-epoch floor so a same-topic
+	// recreate resumes its generation above the rows still on the sink.
+	p.EpochFloor = epoch
 	return p
 }
 

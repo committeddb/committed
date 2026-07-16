@@ -16,6 +16,31 @@ func (s *Storage) EventIndex() uint64 {
 	return s.eventIndex.Load()
 }
 
+// recoverEventIndex sets eventIndex from the last durable event-log entry's raft
+// index. Open calls it early so reconcileBboltWithSnapshot can apply the same
+// snapIdx <= eventIndex guard RestoreSnapshot uses before any bbolt swap. It is
+// idempotent with the fuller event-log recovery later in Open, which re-derives
+// the same value alongside firstEventIndex/dataEventIndex.
+func (s *Storage) recoverEventIndex() error {
+	last, err := s.eventLog.LastIndex()
+	if err != nil {
+		return err
+	}
+	if last == 0 {
+		return nil
+	}
+	data, err := s.readEventAt(last)
+	if err != nil {
+		return fmt.Errorf("event log read last entry: %w", err)
+	}
+	e := &pb.Entry{}
+	if err := proto.Unmarshal(data, e); err != nil {
+		return fmt.Errorf("event log unmarshal last entry: %w", err)
+	}
+	s.eventIndex.Store(e.GetIndex())
+	return nil
+}
+
 // DataEventIndex returns the highest raft index of a DATA (non-metadata)
 // entry applied on this node — the head a per-syncable reader converges to
 // at EOF. It is the reference for per-syncable lag (lag = max(0,

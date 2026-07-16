@@ -274,6 +274,15 @@ func (db *DB) IngestableStatus(ctx context.Context, id string) (cluster.Ingestab
 	return ing.Status(ctx, db.storage.Position(id))
 }
 
+// TopicRefreshEpoch exposes the storage's delete-surviving per-topic
+// refresh-epoch highwater to the SQL ingest worker (wired as the
+// IngestableParser's EpochFloor), so a same-topic recreate resumes its
+// generation above the rows still on the sink rather than resetting to epoch 1.
+// See wal.Storage.TopicRefreshEpoch. Satisfies ingestablesql.TopicEpochReader.
+func (db *DB) TopicRefreshEpoch(topic string) uint64 {
+	return db.storage.TopicRefreshEpoch(topic)
+}
+
 // spawnIngestWorkerLocked installs a fresh ingest worker handle for id
 // in the registry and starts the worker goroutine. Caller MUST hold
 // db.workersMu and MUST have already ensured the registry slot for id

@@ -234,7 +234,7 @@ func checkReplicaIdentity(ctx context.Context, db *gosql.DB, table string, prima
 	return sql.CheckKeyCoverage(primaryKey, surviving, table, fix)
 }
 
-func (d *PostgreSQLDialect) Ingest(ctx context.Context, config *sql.Config, pos cluster.Position, pr chan<- *cluster.Proposal, po chan<- cluster.Position) error {
+func (d *PostgreSQLDialect) Ingest(ctx context.Context, config *sql.Config, pos cluster.Position, epochFloor uint64, pr chan<- *cluster.Proposal, po chan<- cluster.Position) error {
 	pgCfg, err := buildPgConfig(config)
 	if err != nil {
 		return err
@@ -248,7 +248,7 @@ func (d *PostgreSQLDialect) Ingest(ctx context.Context, config *sql.Config, pos 
 	backoff := backoffMin
 
 	for {
-		err := d.stream(ctx, config, pgCfg, &startLSN, &resumeProgress, &epoch, pr, po)
+		err := d.stream(ctx, config, pgCfg, &startLSN, &resumeProgress, &epoch, epochFloor, pr, po)
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -481,6 +481,7 @@ func (d *PostgreSQLDialect) stream(
 	lastLSN *pglogrepl.LSN,
 	resumeProgress **dialectpb.SnapshotProgress,
 	epoch *uint64,
+	epochFloor uint64,
 	pr chan<- *cluster.Proposal,
 	po chan<- cluster.Position,
 ) (err error) {
@@ -586,9 +587,10 @@ func (d *PostgreSQLDialect) stream(
 		// Bump the refresh epoch: the re-snapshot re-emits every live row at the
 		// new epoch, and the closing refresh-boundary marker sweeps rows left at
 		// an older one — reconciling the deletes this upsert-only enumeration
-		// cannot signal. Floor to 1 first so a pre-feature checkpoint (epoch 0)
-		// bumps to 2, past the epoch-1 baseline stamped on existing sink rows.
-		*epoch = max(*epoch, 1) + 1
+		// cannot signal. Floor to max(checkpoint, topic highwater, 1) first so the
+		// bump lands strictly above every generation already on the sink (the
+		// highwater survives a DeleteIngestable that cleared the checkpoint epoch).
+		*epoch = max(*epoch, epochFloor, 1) + 1
 		zap.L().Warn("replication slot was recreated while a checkpoint survived; re-snapshotting from the new slot's consistent point. "+
 			"Rows deleted at the source in the lost WAL window (RTBF-erased subjects among them) are reconciled off the downstream "+
 			"sink by the refresh-boundary sweep that closes this re-snapshot.",
@@ -608,11 +610,20 @@ func (d *PostgreSQLDialect) stream(
 		// (a) the slot was just created and we have no prior checkpoint (first
 		// run — StartReplication(0) below starts from the new slot's consistent
 		// point), or (b) a prior run was interrupted mid-snapshot: full snapshot
-		// of every configured table. The initial snapshot is epoch 1; a resume
-		// keeps the epoch the checkpoint carries (floored to 1 for a pre-feature
-		// checkpoint). The closing marker is a no-op on a fresh sink but makes a
-		// rebuild against a pre-populated sink reconcile.
-		*epoch = max(*epoch, 1)
+		// of every configured table. The closing marker is a no-op on a fresh sink
+		// but makes a rebuild against a pre-populated sink reconcile.
+		if *resumeProgress != nil {
+			// Mid-snapshot resume: continue the in-progress epoch the checkpoint
+			// carries (its closing marker has not committed, so the topic highwater
+			// does not yet reflect this refresh) — do NOT bump.
+			*epoch = max(*epoch, 1)
+		} else {
+			// Fresh full snapshot, no prior checkpoint. refreshSnapshotEpoch stamps
+			// strictly above the delete-surviving topic highwater on a same-topic
+			// recreate (whose cleared position reset the checkpoint epoch to 0 while
+			// the sink still holds rows up to the highwater), else epoch 1.
+			*epoch = sql.RefreshSnapshotEpoch(*epoch, epochFloor)
+		}
 		if err := d.snapshot(ctx, config, pgCfg, pgCfg.tables, *resumeProgress, *lastLSN, *epoch, pr, po); err != nil {
 			return err
 		}
@@ -629,17 +640,19 @@ func (d *PostgreSQLDialect) stream(
 		// is covered by the sink's keyed upsert, not lost. Stamp the backfilled
 		// rows with the current epoch but emit NO marker: this is a PARTIAL
 		// refresh, and a topic-level sweep would delete the sibling tables' rows
-		// this backfill did not re-emit.
-		*epoch = max(*epoch, 1)
+		// this backfill did not re-emit. Floor to the topic highwater so the
+		// backfilled rows never land below a generation already on the sink.
+		*epoch = max(*epoch, epochFloor, 1)
 		if err := d.snapshot(ctx, config, pgCfg, addedTables, nil, *lastLSN, *epoch, pr, po); err != nil {
 			return err
 		}
 	}
 
 	// Any streaming path that did not snapshot still stamps entities, so ensure
-	// the epoch is at least 1 (a pre-feature checkpoint resumes at 0).
-	if *epoch < 1 {
-		*epoch = 1
+	// the epoch is at least max(highwater, 1): never stamp a streamed row below a
+	// generation already on the sink (a pre-feature checkpoint resumes at 0).
+	if lo := max(epochFloor, 1); *epoch < lo {
+		*epoch = lo
 	}
 
 	err = pglogrepl.StartReplication(ctx, conn, pgCfg.slotName, *lastLSN,

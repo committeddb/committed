@@ -229,7 +229,7 @@ func TestPostgresDialect(t *testing.T) {
 
 			ingestErr := make(chan error, 1)
 			go func() {
-				ingestErr <- dialect.Ingest(ctx, tt.config, nil, proposalChan, positionChan)
+				ingestErr <- dialect.Ingest(ctx, tt.config, nil, 0, proposalChan, positionChan)
 			}()
 
 			waitForSlot(t, slotName)
@@ -335,7 +335,7 @@ func TestPostgresPKChangingUpdateTombstonesOldKey(t *testing.T) {
 	proposalChan := make(chan *cluster.Proposal, 10)
 	positionChan := make(chan cluster.Position, 10)
 	ingestErr := make(chan error, 1)
-	go func() { ingestErr <- dialect.Ingest(ctx, config, nil, proposalChan, positionChan) }()
+	go func() { ingestErr <- dialect.Ingest(ctx, config, nil, 0, proposalChan, positionChan) }()
 
 	waitForSlot(t, slotName)
 
@@ -412,7 +412,7 @@ func TestPostgresTruncateNotSilentlyDropped(t *testing.T) {
 	positionChan := make(chan cluster.Position, 10)
 	dialect := &postgres.PostgreSQLDialect{}
 	ingestErr := make(chan error, 1)
-	go func() { ingestErr <- dialect.Ingest(ctx, config, nil, proposalChan, positionChan) }()
+	go func() { ingestErr <- dialect.Ingest(ctx, config, nil, 0, proposalChan, positionChan) }()
 
 	waitForSlot(t, "slot_trunc")
 
@@ -491,7 +491,7 @@ func TestPostgresTypedPayload(t *testing.T) {
 	positionChan := make(chan cluster.Position, 10)
 	ingestErr := make(chan error, 1)
 	go func() {
-		ingestErr <- (&postgres.PostgreSQLDialect{}).Ingest(ctx, config, nil, proposalChan, positionChan)
+		ingestErr <- (&postgres.PostgreSQLDialect{}).Ingest(ctx, config, nil, 0, proposalChan, positionChan)
 	}()
 
 	waitForSlot(t, "slot_typed")
@@ -599,7 +599,7 @@ func TestPostgresSnapshotStreamByteIdentity(t *testing.T) {
 	positionChan := make(chan cluster.Position, 10)
 	ingestErr := make(chan error, 1)
 	go func() {
-		ingestErr <- (&postgres.PostgreSQLDialect{}).Ingest(ctx, config, nil, proposalChan, positionChan)
+		ingestErr <- (&postgres.PostgreSQLDialect{}).Ingest(ctx, config, nil, 0, proposalChan, positionChan)
 	}()
 
 	waitForSlot(t, "slot_byteident")
@@ -709,7 +709,7 @@ func TestPostgresSnapshotStreamDomainByteIdentity(t *testing.T) {
 	positionChan := make(chan cluster.Position, 10)
 	ingestErr := make(chan error, 1)
 	go func() {
-		ingestErr <- (&postgres.PostgreSQLDialect{}).Ingest(ctx, config, nil, proposalChan, positionChan)
+		ingestErr <- (&postgres.PostgreSQLDialect{}).Ingest(ctx, config, nil, 0, proposalChan, positionChan)
 	}()
 
 	waitForSlot(t, "slot_domainident")
@@ -795,7 +795,7 @@ func TestPostgresTeardownSourceDropsSlot(t *testing.T) {
 	positionChan := make(chan cluster.Position, 10)
 	dialect := &postgres.PostgreSQLDialect{}
 	ingestErr := make(chan error, 1)
-	go func() { ingestErr <- dialect.Ingest(ctx, config, nil, proposalChan, positionChan) }()
+	go func() { ingestErr <- dialect.Ingest(ctx, config, nil, 0, proposalChan, positionChan) }()
 
 	waitForSlot(t, "slot_teardown") // the slot now exists on the source
 
@@ -866,7 +866,7 @@ func TestPostgresMixedCaseColumn(t *testing.T) {
 	positionChan := make(chan cluster.Position, 10)
 	ingestErr := make(chan error, 1)
 	go func() {
-		ingestErr <- (&postgres.PostgreSQLDialect{}).Ingest(ctx, config, nil, proposalChan, positionChan)
+		ingestErr <- (&postgres.PostgreSQLDialect{}).Ingest(ctx, config, nil, 0, proposalChan, positionChan)
 	}()
 
 	waitForSlot(t, "slot_mixedcase")
@@ -1009,7 +1009,7 @@ func TestPostgresUnchangedToastReselect(t *testing.T) {
 	positionChan := make(chan cluster.Position, 10)
 	ingestErr := make(chan error, 1)
 	go func() {
-		ingestErr <- (&postgres.PostgreSQLDialect{}).Ingest(ctx, config, nil, proposalChan, positionChan)
+		ingestErr <- (&postgres.PostgreSQLDialect{}).Ingest(ctx, config, nil, 0, proposalChan, positionChan)
 	}()
 
 	waitForSlot(t, "slot_toast")
@@ -1086,7 +1086,7 @@ func TestPostgresPositionResume(t *testing.T) {
 
 	dialect1 := &postgres.PostgreSQLDialect{}
 	go func() {
-		_ = dialect1.Ingest(ctx1, config, nil, proposalChan1, positionChan1)
+		_ = dialect1.Ingest(ctx1, config, nil, 0, proposalChan1, positionChan1)
 	}()
 
 	waitForSlot(t, "slot_resume")
@@ -1136,7 +1136,7 @@ func TestPostgresPositionResume(t *testing.T) {
 	dialect2 := &postgres.PostgreSQLDialect{}
 	ingestErr := make(chan error, 1)
 	go func() {
-		ingestErr <- dialect2.Ingest(ctx2, config, lastPos, proposalChan2, positionChan2)
+		ingestErr <- dialect2.Ingest(ctx2, config, lastPos, 0, proposalChan2, positionChan2)
 	}()
 
 	waitForSlot(t, "slot_resume")
@@ -1212,7 +1212,7 @@ func TestPostgresTransactionGrouping(t *testing.T) {
 
 	dialect := &postgres.PostgreSQLDialect{}
 	go func() {
-		_ = dialect.Ingest(ctx, config, nil, proposalChan, positionChan)
+		_ = dialect.Ingest(ctx, config, nil, 0, proposalChan, positionChan)
 	}()
 
 	waitForSlot(t, "slot_txgroup")
@@ -1344,7 +1344,7 @@ func TestPostgresSnapshotOnNewSlot(t *testing.T) {
 	dialect := &postgres.PostgreSQLDialect{}
 	ingestErr := make(chan error, 1)
 	go func() {
-		ingestErr <- dialect.Ingest(ctx, config, nil, proposalChan, positionChan)
+		ingestErr <- dialect.Ingest(ctx, config, nil, 0, proposalChan, positionChan)
 	}()
 
 	// Collect snapshot entities — the 2 pre-existing rows.
@@ -1452,7 +1452,7 @@ func TestPostgresSnapshotChunking(t *testing.T) {
 	dialect := &postgres.PostgreSQLDialect{}
 	ingestErr := make(chan error, 1)
 	go func() {
-		ingestErr <- dialect.Ingest(ctx, config, nil, proposalChan, positionChan)
+		ingestErr <- dialect.Ingest(ctx, config, nil, 0, proposalChan, positionChan)
 	}()
 
 	deadline := time.After(20 * time.Second)
@@ -1546,7 +1546,7 @@ func TestPostgresSnapshotCompositePrimaryKey(t *testing.T) {
 	positionChan := make(chan cluster.Position, 20)
 
 	dialect := &postgres.PostgreSQLDialect{}
-	go func() { _ = dialect.Ingest(ctx, config, nil, proposalChan, positionChan) }()
+	go func() { _ = dialect.Ingest(ctx, config, nil, 0, proposalChan, positionChan) }()
 
 	want := map[string]bool{
 		`["tt1","1"]`: true, `["tt1","2"]`: true, `["tt1","3"]`: true,
@@ -1625,7 +1625,7 @@ func TestPostgresSlotRecreatedResnapshots(t *testing.T) {
 	ctx1, cancel1 := context.WithCancel(context.Background())
 	proposalChan1 := make(chan *cluster.Proposal, 10)
 	positionChan1 := make(chan cluster.Position, 10)
-	go func() { _ = (&postgres.PostgreSQLDialect{}).Ingest(ctx1, config, nil, proposalChan1, positionChan1) }()
+	go func() { _ = (&postgres.PostgreSQLDialect{}).Ingest(ctx1, config, nil, 0, proposalChan1, positionChan1) }()
 	waitForSlot(t, "slot_recreate")
 
 	db = createDB(t)
@@ -1670,7 +1670,7 @@ func TestPostgresSlotRecreatedResnapshots(t *testing.T) {
 	positionChan2 := make(chan cluster.Position, 10)
 	ingestErr := make(chan error, 1)
 	go func() {
-		ingestErr <- (&postgres.PostgreSQLDialect{}).Ingest(ctx2, config, lastPos, proposalChan2, positionChan2)
+		ingestErr <- (&postgres.PostgreSQLDialect{}).Ingest(ctx2, config, lastPos, 0, proposalChan2, positionChan2)
 	}()
 	waitForSlot(t, "slot_recreate")
 

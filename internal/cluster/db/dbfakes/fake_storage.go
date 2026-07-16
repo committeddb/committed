@@ -532,6 +532,17 @@ type FakeStorage struct {
 		result1 []cluster.VersionInfo
 		result2 error
 	}
+	TopicRefreshEpochStub        func(string) uint64
+	topicRefreshEpochMutex       sync.RWMutex
+	topicRefreshEpochArgsForCall []struct {
+		arg1 string
+	}
+	topicRefreshEpochReturns struct {
+		result1 uint64
+	}
+	topicRefreshEpochReturnsOnCall map[int]struct {
+		result1 uint64
+	}
 	TypesStub        func() ([]*cluster.Configuration, error)
 	typesMutex       sync.RWMutex
 	typesArgsForCall []struct{}
@@ -3147,6 +3158,67 @@ func (fake *FakeStorage) TypeVersionsReturnsOnCall(i int, result1 []cluster.Vers
 		result1 []cluster.VersionInfo
 		result2 error
 	}{result1, result2}
+}
+
+func (fake *FakeStorage) TopicRefreshEpoch(arg1 string) uint64 {
+	fake.topicRefreshEpochMutex.Lock()
+	ret, specificReturn := fake.topicRefreshEpochReturnsOnCall[len(fake.topicRefreshEpochArgsForCall)]
+	fake.topicRefreshEpochArgsForCall = append(fake.topicRefreshEpochArgsForCall, struct {
+		arg1 string
+	}{arg1})
+	stub := fake.TopicRefreshEpochStub
+	fakeReturns := fake.topicRefreshEpochReturns
+	fake.recordInvocation("TopicRefreshEpoch", []interface{}{arg1})
+	fake.topicRefreshEpochMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeStorage) TopicRefreshEpochCallCount() int {
+	fake.topicRefreshEpochMutex.RLock()
+	defer fake.topicRefreshEpochMutex.RUnlock()
+	return len(fake.topicRefreshEpochArgsForCall)
+}
+
+func (fake *FakeStorage) TopicRefreshEpochCalls(stub func(string) uint64) {
+	fake.topicRefreshEpochMutex.Lock()
+	defer fake.topicRefreshEpochMutex.Unlock()
+	fake.TopicRefreshEpochStub = stub
+}
+
+func (fake *FakeStorage) TopicRefreshEpochArgsForCall(i int) string {
+	fake.topicRefreshEpochMutex.RLock()
+	defer fake.topicRefreshEpochMutex.RUnlock()
+	argsForCall := fake.topicRefreshEpochArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeStorage) TopicRefreshEpochReturns(result1 uint64) {
+	fake.topicRefreshEpochMutex.Lock()
+	defer fake.topicRefreshEpochMutex.Unlock()
+	fake.TopicRefreshEpochStub = nil
+	fake.topicRefreshEpochReturns = struct {
+		result1 uint64
+	}{result1}
+}
+
+func (fake *FakeStorage) TopicRefreshEpochReturnsOnCall(i int, result1 uint64) {
+	fake.topicRefreshEpochMutex.Lock()
+	defer fake.topicRefreshEpochMutex.Unlock()
+	fake.TopicRefreshEpochStub = nil
+	if fake.topicRefreshEpochReturnsOnCall == nil {
+		fake.topicRefreshEpochReturnsOnCall = make(map[int]struct {
+			result1 uint64
+		})
+	}
+	fake.topicRefreshEpochReturnsOnCall[i] = struct {
+		result1 uint64
+	}{result1}
 }
 
 func (fake *FakeStorage) Types() ([]*cluster.Configuration, error) {

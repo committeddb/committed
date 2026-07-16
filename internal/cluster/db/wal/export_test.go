@@ -58,6 +58,16 @@ func (s *Storage) EventLogLastSeq() (uint64, error) {
 	return s.lastEventSeq()
 }
 
+// SimulateCrashedSnapshotInstallForTest reproduces the durable state left by a
+// crash DURING an in-place snapshot install: saveWithSnapshot has persisted the
+// snapshot record and cut the entry log to the snapshot point, but
+// RestoreSnapshot has NOT yet swapped bbolt — so the applied index still lags
+// below the snapshot index and bbolt holds the pre-install content. The next
+// Open must heal it via reconcileBboltWithSnapshot. Test-only.
+func (s *Storage) SimulateCrashedSnapshotInstallForTest(snap *pb.Snapshot) error {
+	return s.saveWithSnapshot(s.hardState, nil, snap)
+}
+
 // ReadEventAt exposes event-log entries by wal seq for test assertions.
 // Production callers go through Reader.
 func (s *Storage) ReadEventAt(seq uint64) ([]byte, error) {

@@ -86,6 +86,11 @@ type Storage interface {
 	// re-emitted proposals (effectively-once ingest). 0 for an unknown id
 	// means "never ingested — dedup nothing".
 	IngestSourceSeqHighwater(id string) uint64
+	// TopicRefreshEpoch returns the highest refresh generation ever committed
+	// for a topic (type id), or 0 if none. Keyed by topic and NOT cleared by
+	// DeleteIngestable, so a same-topic recreate reads the generation still on the
+	// sink and resumes its epoch above it (see wal.Storage.TopicRefreshEpoch).
+	TopicRefreshEpoch(topic string) uint64
 	Node(id string) uint64 // Gets the node id that a worker is assigned to run on
 	Database(id string) (cluster.Database, error)
 	Databases() ([]*cluster.Configuration, error)
