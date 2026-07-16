@@ -25,8 +25,9 @@ type FakeStorage struct {
 	}
 	AppliedIndexStub        func() uint64
 	appliedIndexMutex       sync.RWMutex
-	appliedIndexArgsForCall []struct{}
-	appliedIndexReturns     struct {
+	appliedIndexArgsForCall []struct {
+	}
+	appliedIndexReturns struct {
 		result1 uint64
 	}
 	appliedIndexReturnsOnCall map[int]struct {
@@ -45,8 +46,9 @@ type FakeStorage struct {
 	}
 	CloseStub        func() error
 	closeMutex       sync.RWMutex
-	closeArgsForCall []struct{}
-	closeReturns     struct {
+	closeArgsForCall []struct {
+	}
+	closeReturns struct {
 		result1 error
 	}
 	closeReturnsOnCall map[int]struct {
@@ -124,8 +126,9 @@ type FakeStorage struct {
 	}
 	DatabasesStub        func() ([]*cluster.Configuration, error)
 	databasesMutex       sync.RWMutex
-	databasesArgsForCall []struct{}
-	databasesReturns     struct {
+	databasesArgsForCall []struct {
+	}
+	databasesReturns struct {
 		result1 []*cluster.Configuration
 		result2 error
 	}
@@ -161,8 +164,9 @@ type FakeStorage struct {
 	}
 	EventIndexStub        func() uint64
 	eventIndexMutex       sync.RWMutex
-	eventIndexArgsForCall []struct{}
-	eventIndexReturns     struct {
+	eventIndexArgsForCall []struct {
+	}
+	eventIndexReturns struct {
 		result1 uint64
 	}
 	eventIndexReturnsOnCall map[int]struct {
@@ -170,8 +174,9 @@ type FakeStorage struct {
 	}
 	FirstIndexStub        func() (uint64, error)
 	firstIndexMutex       sync.RWMutex
-	firstIndexArgsForCall []struct{}
-	firstIndexReturns     struct {
+	firstIndexArgsForCall []struct {
+	}
+	firstIndexReturns struct {
 		result1 uint64
 		result2 error
 	}
@@ -247,8 +252,9 @@ type FakeStorage struct {
 	}
 	IngestablesStub        func() ([]*cluster.Configuration, error)
 	ingestablesMutex       sync.RWMutex
-	ingestablesArgsForCall []struct{}
-	ingestablesReturns     struct {
+	ingestablesArgsForCall []struct {
+	}
+	ingestablesReturns struct {
 		result1 []*cluster.Configuration
 		result2 error
 	}
@@ -258,8 +264,9 @@ type FakeStorage struct {
 	}
 	InitialStateStub        func() (*raftpb.HardState, *raftpb.ConfState, error)
 	initialStateMutex       sync.RWMutex
-	initialStateArgsForCall []struct{}
-	initialStateReturns     struct {
+	initialStateArgsForCall []struct {
+	}
+	initialStateReturns struct {
 		result1 *raftpb.HardState
 		result2 *raftpb.ConfState
 		result3 error
@@ -271,8 +278,9 @@ type FakeStorage struct {
 	}
 	LastIndexStub        func() (uint64, error)
 	lastIndexMutex       sync.RWMutex
-	lastIndexArgsForCall []struct{}
-	lastIndexReturns     struct {
+	lastIndexArgsForCall []struct {
+	}
+	lastIndexReturns struct {
 		result1 uint64
 		result2 error
 	}
@@ -295,8 +303,9 @@ type FakeStorage struct {
 	}
 	MemberAPIURLsStub        func() map[uint64]string
 	memberAPIURLsMutex       sync.RWMutex
-	memberAPIURLsArgsForCall []struct{}
-	memberAPIURLsReturns     struct {
+	memberAPIURLsArgsForCall []struct {
+	}
+	memberAPIURLsReturns struct {
 		result1 map[uint64]string
 	}
 	memberAPIURLsReturnsOnCall map[int]struct {
@@ -326,8 +335,9 @@ type FakeStorage struct {
 	}
 	RaftLogApproxSizeStub        func() (uint64, error)
 	raftLogApproxSizeMutex       sync.RWMutex
-	raftLogApproxSizeArgsForCall []struct{}
-	raftLogApproxSizeReturns     struct {
+	raftLogApproxSizeArgsForCall []struct {
+	}
+	raftLogApproxSizeReturns struct {
 		result1 uint64
 		result2 error
 	}
@@ -385,8 +395,9 @@ type FakeStorage struct {
 	}
 	SnapshotStub        func() (*raftpb.Snapshot, error)
 	snapshotMutex       sync.RWMutex
-	snapshotArgsForCall []struct{}
-	snapshotReturns     struct {
+	snapshotArgsForCall []struct {
+	}
+	snapshotReturns struct {
 		result1 *raftpb.Snapshot
 		result2 error
 	}
@@ -468,8 +479,9 @@ type FakeStorage struct {
 	}
 	SyncablesStub        func() ([]*cluster.Configuration, error)
 	syncablesMutex       sync.RWMutex
-	syncablesArgsForCall []struct{}
-	syncablesReturns     struct {
+	syncablesArgsForCall []struct {
+	}
+	syncablesReturns struct {
 		result1 []*cluster.Configuration
 		result2 error
 	}
@@ -489,6 +501,17 @@ type FakeStorage struct {
 	termReturnsOnCall map[int]struct {
 		result1 uint64
 		result2 error
+	}
+	TopicRefreshEpochStub        func(string) uint64
+	topicRefreshEpochMutex       sync.RWMutex
+	topicRefreshEpochArgsForCall []struct {
+		arg1 string
+	}
+	topicRefreshEpochReturns struct {
+		result1 uint64
+	}
+	topicRefreshEpochReturnsOnCall map[int]struct {
+		result1 uint64
 	}
 	TypeMigrationDeadLettersStub        func(string, uint64, int) ([]cluster.TypeMigrationDeadLetter, error)
 	typeMigrationDeadLettersMutex       sync.RWMutex
@@ -532,21 +555,11 @@ type FakeStorage struct {
 		result1 []cluster.VersionInfo
 		result2 error
 	}
-	TopicRefreshEpochStub        func(string) uint64
-	topicRefreshEpochMutex       sync.RWMutex
-	topicRefreshEpochArgsForCall []struct {
-		arg1 string
-	}
-	topicRefreshEpochReturns struct {
-		result1 uint64
-	}
-	topicRefreshEpochReturnsOnCall map[int]struct {
-		result1 uint64
-	}
 	TypesStub        func() ([]*cluster.Configuration, error)
 	typesMutex       sync.RWMutex
-	typesArgsForCall []struct{}
-	typesReturns     struct {
+	typesArgsForCall []struct {
+	}
+	typesReturns struct {
 		result1 []*cluster.Configuration
 		result2 error
 	}
@@ -625,7 +638,8 @@ func (fake *FakeStorage) ActualAtReturnsOnCall(i int, result1 *cluster.Actual, r
 func (fake *FakeStorage) AppliedIndex() uint64 {
 	fake.appliedIndexMutex.Lock()
 	ret, specificReturn := fake.appliedIndexReturnsOnCall[len(fake.appliedIndexArgsForCall)]
-	fake.appliedIndexArgsForCall = append(fake.appliedIndexArgsForCall, struct{}{})
+	fake.appliedIndexArgsForCall = append(fake.appliedIndexArgsForCall, struct {
+	}{})
 	stub := fake.AppliedIndexStub
 	fakeReturns := fake.appliedIndexReturns
 	fake.recordInvocation("AppliedIndex", []interface{}{})
@@ -738,7 +752,8 @@ func (fake *FakeStorage) ApplyCommittedReturnsOnCall(i int, result1 error) {
 func (fake *FakeStorage) Close() error {
 	fake.closeMutex.Lock()
 	ret, specificReturn := fake.closeReturnsOnCall[len(fake.closeArgsForCall)]
-	fake.closeArgsForCall = append(fake.closeArgsForCall, struct{}{})
+	fake.closeArgsForCall = append(fake.closeArgsForCall, struct {
+	}{})
 	stub := fake.CloseStub
 	fakeReturns := fake.closeReturns
 	fake.recordInvocation("Close", []interface{}{})
@@ -1141,7 +1156,8 @@ func (fake *FakeStorage) DatabaseVersionsReturnsOnCall(i int, result1 []cluster.
 func (fake *FakeStorage) Databases() ([]*cluster.Configuration, error) {
 	fake.databasesMutex.Lock()
 	ret, specificReturn := fake.databasesReturnsOnCall[len(fake.databasesArgsForCall)]
-	fake.databasesArgsForCall = append(fake.databasesArgsForCall, struct{}{})
+	fake.databasesArgsForCall = append(fake.databasesArgsForCall, struct {
+	}{})
 	stub := fake.DatabasesStub
 	fakeReturns := fake.databasesReturns
 	fake.recordInvocation("Databases", []interface{}{})
@@ -1323,7 +1339,8 @@ func (fake *FakeStorage) EntriesReturnsOnCall(i int, result1 []*raftpb.Entry, re
 func (fake *FakeStorage) EventIndex() uint64 {
 	fake.eventIndexMutex.Lock()
 	ret, specificReturn := fake.eventIndexReturnsOnCall[len(fake.eventIndexArgsForCall)]
-	fake.eventIndexArgsForCall = append(fake.eventIndexArgsForCall, struct{}{})
+	fake.eventIndexArgsForCall = append(fake.eventIndexArgsForCall, struct {
+	}{})
 	stub := fake.EventIndexStub
 	fakeReturns := fake.eventIndexReturns
 	fake.recordInvocation("EventIndex", []interface{}{})
@@ -1375,7 +1392,8 @@ func (fake *FakeStorage) EventIndexReturnsOnCall(i int, result1 uint64) {
 func (fake *FakeStorage) FirstIndex() (uint64, error) {
 	fake.firstIndexMutex.Lock()
 	ret, specificReturn := fake.firstIndexReturnsOnCall[len(fake.firstIndexArgsForCall)]
-	fake.firstIndexArgsForCall = append(fake.firstIndexArgsForCall, struct{}{})
+	fake.firstIndexArgsForCall = append(fake.firstIndexArgsForCall, struct {
+	}{})
 	stub := fake.FirstIndexStub
 	fakeReturns := fake.firstIndexReturns
 	fake.recordInvocation("FirstIndex", []interface{}{})
@@ -1750,7 +1768,8 @@ func (fake *FakeStorage) IngestableVersionsReturnsOnCall(i int, result1 []cluste
 func (fake *FakeStorage) Ingestables() ([]*cluster.Configuration, error) {
 	fake.ingestablesMutex.Lock()
 	ret, specificReturn := fake.ingestablesReturnsOnCall[len(fake.ingestablesArgsForCall)]
-	fake.ingestablesArgsForCall = append(fake.ingestablesArgsForCall, struct{}{})
+	fake.ingestablesArgsForCall = append(fake.ingestablesArgsForCall, struct {
+	}{})
 	stub := fake.IngestablesStub
 	fakeReturns := fake.ingestablesReturns
 	fake.recordInvocation("Ingestables", []interface{}{})
@@ -1805,7 +1824,8 @@ func (fake *FakeStorage) IngestablesReturnsOnCall(i int, result1 []*cluster.Conf
 func (fake *FakeStorage) InitialState() (*raftpb.HardState, *raftpb.ConfState, error) {
 	fake.initialStateMutex.Lock()
 	ret, specificReturn := fake.initialStateReturnsOnCall[len(fake.initialStateArgsForCall)]
-	fake.initialStateArgsForCall = append(fake.initialStateArgsForCall, struct{}{})
+	fake.initialStateArgsForCall = append(fake.initialStateArgsForCall, struct {
+	}{})
 	stub := fake.InitialStateStub
 	fakeReturns := fake.initialStateReturns
 	fake.recordInvocation("InitialState", []interface{}{})
@@ -1863,7 +1883,8 @@ func (fake *FakeStorage) InitialStateReturnsOnCall(i int, result1 *raftpb.HardSt
 func (fake *FakeStorage) LastIndex() (uint64, error) {
 	fake.lastIndexMutex.Lock()
 	ret, specificReturn := fake.lastIndexReturnsOnCall[len(fake.lastIndexArgsForCall)]
-	fake.lastIndexArgsForCall = append(fake.lastIndexArgsForCall, struct{}{})
+	fake.lastIndexArgsForCall = append(fake.lastIndexArgsForCall, struct {
+	}{})
 	stub := fake.LastIndexStub
 	fakeReturns := fake.lastIndexReturns
 	fake.recordInvocation("LastIndex", []interface{}{})
@@ -1982,7 +2003,8 @@ func (fake *FakeStorage) MemberAPIURLReturnsOnCall(i int, result1 string, result
 func (fake *FakeStorage) MemberAPIURLs() map[uint64]string {
 	fake.memberAPIURLsMutex.Lock()
 	ret, specificReturn := fake.memberAPIURLsReturnsOnCall[len(fake.memberAPIURLsArgsForCall)]
-	fake.memberAPIURLsArgsForCall = append(fake.memberAPIURLsArgsForCall, struct{}{})
+	fake.memberAPIURLsArgsForCall = append(fake.memberAPIURLsArgsForCall, struct {
+	}{})
 	stub := fake.MemberAPIURLsStub
 	fakeReturns := fake.memberAPIURLsReturns
 	fake.recordInvocation("MemberAPIURLs", []interface{}{})
@@ -2156,7 +2178,8 @@ func (fake *FakeStorage) PositionReturnsOnCall(i int, result1 cluster.Position) 
 func (fake *FakeStorage) RaftLogApproxSize() (uint64, error) {
 	fake.raftLogApproxSizeMutex.Lock()
 	ret, specificReturn := fake.raftLogApproxSizeReturnsOnCall[len(fake.raftLogApproxSizeArgsForCall)]
-	fake.raftLogApproxSizeArgsForCall = append(fake.raftLogApproxSizeArgsForCall, struct{}{})
+	fake.raftLogApproxSizeArgsForCall = append(fake.raftLogApproxSizeArgsForCall, struct {
+	}{})
 	stub := fake.RaftLogApproxSizeStub
 	fakeReturns := fake.raftLogApproxSizeReturns
 	fake.recordInvocation("RaftLogApproxSize", []interface{}{})
@@ -2465,7 +2488,8 @@ func (fake *FakeStorage) SaveReturnsOnCall(i int, result1 error) {
 func (fake *FakeStorage) Snapshot() (*raftpb.Snapshot, error) {
 	fake.snapshotMutex.Lock()
 	ret, specificReturn := fake.snapshotReturnsOnCall[len(fake.snapshotArgsForCall)]
-	fake.snapshotArgsForCall = append(fake.snapshotArgsForCall, struct{}{})
+	fake.snapshotArgsForCall = append(fake.snapshotArgsForCall, struct {
+	}{})
 	stub := fake.SnapshotStub
 	fakeReturns := fake.snapshotReturns
 	fake.recordInvocation("Snapshot", []interface{}{})
@@ -2849,7 +2873,8 @@ func (fake *FakeStorage) SyncableVersionsReturnsOnCall(i int, result1 []cluster.
 func (fake *FakeStorage) Syncables() ([]*cluster.Configuration, error) {
 	fake.syncablesMutex.Lock()
 	ret, specificReturn := fake.syncablesReturnsOnCall[len(fake.syncablesArgsForCall)]
-	fake.syncablesArgsForCall = append(fake.syncablesArgsForCall, struct{}{})
+	fake.syncablesArgsForCall = append(fake.syncablesArgsForCall, struct {
+	}{})
 	stub := fake.SyncablesStub
 	fakeReturns := fake.syncablesReturns
 	fake.recordInvocation("Syncables", []interface{}{})
@@ -2963,6 +2988,67 @@ func (fake *FakeStorage) TermReturnsOnCall(i int, result1 uint64, result2 error)
 		result1 uint64
 		result2 error
 	}{result1, result2}
+}
+
+func (fake *FakeStorage) TopicRefreshEpoch(arg1 string) uint64 {
+	fake.topicRefreshEpochMutex.Lock()
+	ret, specificReturn := fake.topicRefreshEpochReturnsOnCall[len(fake.topicRefreshEpochArgsForCall)]
+	fake.topicRefreshEpochArgsForCall = append(fake.topicRefreshEpochArgsForCall, struct {
+		arg1 string
+	}{arg1})
+	stub := fake.TopicRefreshEpochStub
+	fakeReturns := fake.topicRefreshEpochReturns
+	fake.recordInvocation("TopicRefreshEpoch", []interface{}{arg1})
+	fake.topicRefreshEpochMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeStorage) TopicRefreshEpochCallCount() int {
+	fake.topicRefreshEpochMutex.RLock()
+	defer fake.topicRefreshEpochMutex.RUnlock()
+	return len(fake.topicRefreshEpochArgsForCall)
+}
+
+func (fake *FakeStorage) TopicRefreshEpochCalls(stub func(string) uint64) {
+	fake.topicRefreshEpochMutex.Lock()
+	defer fake.topicRefreshEpochMutex.Unlock()
+	fake.TopicRefreshEpochStub = stub
+}
+
+func (fake *FakeStorage) TopicRefreshEpochArgsForCall(i int) string {
+	fake.topicRefreshEpochMutex.RLock()
+	defer fake.topicRefreshEpochMutex.RUnlock()
+	argsForCall := fake.topicRefreshEpochArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeStorage) TopicRefreshEpochReturns(result1 uint64) {
+	fake.topicRefreshEpochMutex.Lock()
+	defer fake.topicRefreshEpochMutex.Unlock()
+	fake.TopicRefreshEpochStub = nil
+	fake.topicRefreshEpochReturns = struct {
+		result1 uint64
+	}{result1}
+}
+
+func (fake *FakeStorage) TopicRefreshEpochReturnsOnCall(i int, result1 uint64) {
+	fake.topicRefreshEpochMutex.Lock()
+	defer fake.topicRefreshEpochMutex.Unlock()
+	fake.TopicRefreshEpochStub = nil
+	if fake.topicRefreshEpochReturnsOnCall == nil {
+		fake.topicRefreshEpochReturnsOnCall = make(map[int]struct {
+			result1 uint64
+		})
+	}
+	fake.topicRefreshEpochReturnsOnCall[i] = struct {
+		result1 uint64
+	}{result1}
 }
 
 func (fake *FakeStorage) TypeMigrationDeadLetters(arg1 string, arg2 uint64, arg3 int) ([]cluster.TypeMigrationDeadLetter, error) {
@@ -3160,71 +3246,11 @@ func (fake *FakeStorage) TypeVersionsReturnsOnCall(i int, result1 []cluster.Vers
 	}{result1, result2}
 }
 
-func (fake *FakeStorage) TopicRefreshEpoch(arg1 string) uint64 {
-	fake.topicRefreshEpochMutex.Lock()
-	ret, specificReturn := fake.topicRefreshEpochReturnsOnCall[len(fake.topicRefreshEpochArgsForCall)]
-	fake.topicRefreshEpochArgsForCall = append(fake.topicRefreshEpochArgsForCall, struct {
-		arg1 string
-	}{arg1})
-	stub := fake.TopicRefreshEpochStub
-	fakeReturns := fake.topicRefreshEpochReturns
-	fake.recordInvocation("TopicRefreshEpoch", []interface{}{arg1})
-	fake.topicRefreshEpochMutex.Unlock()
-	if stub != nil {
-		return stub(arg1)
-	}
-	if specificReturn {
-		return ret.result1
-	}
-	return fakeReturns.result1
-}
-
-func (fake *FakeStorage) TopicRefreshEpochCallCount() int {
-	fake.topicRefreshEpochMutex.RLock()
-	defer fake.topicRefreshEpochMutex.RUnlock()
-	return len(fake.topicRefreshEpochArgsForCall)
-}
-
-func (fake *FakeStorage) TopicRefreshEpochCalls(stub func(string) uint64) {
-	fake.topicRefreshEpochMutex.Lock()
-	defer fake.topicRefreshEpochMutex.Unlock()
-	fake.TopicRefreshEpochStub = stub
-}
-
-func (fake *FakeStorage) TopicRefreshEpochArgsForCall(i int) string {
-	fake.topicRefreshEpochMutex.RLock()
-	defer fake.topicRefreshEpochMutex.RUnlock()
-	argsForCall := fake.topicRefreshEpochArgsForCall[i]
-	return argsForCall.arg1
-}
-
-func (fake *FakeStorage) TopicRefreshEpochReturns(result1 uint64) {
-	fake.topicRefreshEpochMutex.Lock()
-	defer fake.topicRefreshEpochMutex.Unlock()
-	fake.TopicRefreshEpochStub = nil
-	fake.topicRefreshEpochReturns = struct {
-		result1 uint64
-	}{result1}
-}
-
-func (fake *FakeStorage) TopicRefreshEpochReturnsOnCall(i int, result1 uint64) {
-	fake.topicRefreshEpochMutex.Lock()
-	defer fake.topicRefreshEpochMutex.Unlock()
-	fake.TopicRefreshEpochStub = nil
-	if fake.topicRefreshEpochReturnsOnCall == nil {
-		fake.topicRefreshEpochReturnsOnCall = make(map[int]struct {
-			result1 uint64
-		})
-	}
-	fake.topicRefreshEpochReturnsOnCall[i] = struct {
-		result1 uint64
-	}{result1}
-}
-
 func (fake *FakeStorage) Types() ([]*cluster.Configuration, error) {
 	fake.typesMutex.Lock()
 	ret, specificReturn := fake.typesReturnsOnCall[len(fake.typesArgsForCall)]
-	fake.typesArgsForCall = append(fake.typesArgsForCall, struct{}{})
+	fake.typesArgsForCall = append(fake.typesArgsForCall, struct {
+	}{})
 	stub := fake.TypesStub
 	fakeReturns := fake.typesReturns
 	fake.recordInvocation("Types", []interface{}{})

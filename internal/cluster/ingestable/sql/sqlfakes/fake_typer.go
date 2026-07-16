@@ -93,8 +93,6 @@ func (fake *FakeTyper) ResolveTypeReturnsOnCall(i int, result1 *cluster.Type, re
 func (fake *FakeTyper) Invocations() map[string][][]interface{} {
 	fake.invocationsMutex.RLock()
 	defer fake.invocationsMutex.RUnlock()
-	fake.resolveTypeMutex.RLock()
-	defer fake.resolveTypeMutex.RUnlock()
 	copiedInvocations := map[string][][]interface{}{}
 	for key, value := range fake.invocations {
 		copiedInvocations[key] = value
