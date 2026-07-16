@@ -57,6 +57,21 @@ func (s *Storage) saveTypeMigrationDeadLetter(d *cluster.TypeMigrationDeadLetter
 		if top == nil {
 			return ErrBucketMissing
 		}
+		// Invariant: a migration dead-letter persists only while its type config
+		// exists. An always-current syncable proposes these on a migration failure,
+		// and the write can commit AFTER the type was deleted (ProposeDeleteType) — or
+		// replay from the log before a same-id recreate. Without this guard that write
+		// re-establishes an orphaned sub-bucket a same-id type recreate consults
+		// (HasTypeMigrationDeadLetter) and then silently skips those indices. So if the
+		// config is gone, drop the stale bump and reap any lingering sub-bucket.
+		// Deterministic: config existence is replicated state applied in identical log
+		// order on every node. Mirrors saveSyncableDeadLetter.
+		if !configExists(tx, typeBucket, []byte(d.TypeID)) {
+			if top.Bucket([]byte(d.TypeID)) != nil {
+				return top.DeleteBucket([]byte(d.TypeID))
+			}
+			return nil
+		}
 		// One nested sub-bucket per type id keeps the query a tight
 		// per-type cursor scan and the keyspace naturally partitioned.
 		sub, err := top.CreateBucketIfNotExists([]byte(d.TypeID))

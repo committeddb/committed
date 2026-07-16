@@ -51,6 +51,20 @@ func sweepSyncableSiblingState(tx *bolt.Tx, id []byte) error {
 	return nil
 }
 
+// sweepTypeSiblingState removes the per-type-id state kept OUTSIDE the type config
+// sub-bucket and not tombstoned in the delete bundle: the migration dead-letter
+// sub-bucket (the type-domain twin of the syncable dead-letter). Called in the same
+// bbolt tx as the config delete (deleteType) so a same-id type recreate does not
+// inherit stale migration dead-letters and skip those indices.
+func sweepTypeSiblingState(tx *bolt.Tx, id []byte) error {
+	if dl := tx.Bucket(typeMigrationDeadLetterBucket); dl != nil && dl.Bucket(id) != nil {
+		if err := dl.DeleteBucket(id); err != nil {
+			return fmt.Errorf("[wal.type] sweep migration dead-letters: %w", err)
+		}
+	}
+	return nil
+}
+
 // sweepIngestableSiblingState removes the per-ingestable-id state kept outside the
 // ingestable config sub-bucket and not tombstoned in the delete bundle: the
 // source-seq highwater. Called in the same tx as the config delete

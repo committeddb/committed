@@ -101,7 +101,13 @@ func (s *Storage) deleteType(id []byte) error {
 		if b == nil {
 			return ErrBucketMissing
 		}
-		return deleteVersioned(b, id)
+		if err := deleteVersioned(b, id); err != nil {
+			return err
+		}
+		// Sweep the per-type-id migration dead-letters (kept outside the config
+		// sub-bucket, not a delete-bundle tombstone) so a same-id type recreate starts
+		// clean. Same tx as the config delete → atomic.
+		return sweepTypeSiblingState(tx, id)
 	})
 }
 
