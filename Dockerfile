@@ -16,8 +16,13 @@ WORKDIR /src
 
 # Copy module manifests first so `go mod download` is cached on its own
 # layer and only re-runs when go.mod/go.sum change, not on every source
-# edit.
+# edit. go.mod has a `replace` pointing at the vendored fork under
+# third_party/forked/go-mysql, so that module's manifest must be present for
+# `go mod download` to resolve the build list before the full source is copied.
+# Copying only the fork's manifests keeps this layer cached across ordinary
+# source edits (it re-runs only when a go.mod/go.sum — root or fork — changes).
 COPY go.mod go.sum ./
+COPY third_party/forked/go-mysql/go.mod third_party/forked/go-mysql/go.sum third_party/forked/go-mysql/
 RUN go mod download
 
 COPY . .
