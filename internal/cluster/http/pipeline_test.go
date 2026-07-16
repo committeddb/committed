@@ -265,6 +265,61 @@ func TestGetPipelineStatus_ConsumerProgressErrorSurfaced(t *testing.T) {
 	require.False(t, body.CaughtUp, "a consumer with unknown progress means the pipeline can't be at rest")
 }
 
+// redactedProgressErr is a cluster.RedactedError whose full text embeds
+// connection identity (as a wrapped driver error would), while its
+// RedactedMessage is PII-free — so the pipeline handler can be checked for
+// leaking the former.
+type redactedProgressErr struct{}
+
+func (redactedProgressErr) Error() string {
+	return "dial tcp: user=admin password=hunter2 host=10.0.0.5:5432 database=orders"
+}
+
+func (redactedProgressErr) RedactedMessage() string {
+	return "progress read failed (detail in node logs)"
+}
+
+// TestGetPipelineStatus_ConsumerProgressErrorRedacted: a consumer's progress
+// error that wraps a driver error (a cluster.RedactedError echoing connection
+// identity) must surface as its PII-free RedactedMessage in the response, never
+// the raw text — GET /type/{id}/pipeline is a plain read anyone can hit.
+func TestGetPipelineStatus_ConsumerProgressErrorRedacted(t *testing.T) {
+	fake := &clusterfakes.FakeCluster{}
+	fake.TypesReturns(typeConfigs("movie"), nil)
+	fake.IngestablesReturns([]*cluster.Configuration{
+		{ID: "movie-ingest", MimeType: "text/toml", Data: ingestableTOML("movie")},
+	}, nil)
+	fake.SyncablesReturns([]*cluster.Configuration{
+		{ID: "movie-broken", MimeType: "text/toml", Data: syncableTOML("movie")},
+	}, nil)
+	zero := uint64(0)
+	fake.IngestableStatusReturns(cluster.IngestableStatus{Phase: "streaming", Lag: &zero, CaughtUp: true}, nil)
+	fake.SyncableProgressStub = func(id string) (uint64, uint64, error) {
+		if id == "movie-broken" {
+			return 0, 0, redactedProgressErr{}
+		}
+		return 0, 100, nil // head sentinel
+	}
+
+	h := http.New(fake)
+	r := httptest.NewRequest(httpgo.MethodGet, "/v1/type/movie/pipeline", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	require.Equal(t, httpgo.StatusOK, w.Code)
+	require.NotContains(t, w.Body.String(), "hunter2", "response leaked the password")
+	require.NotContains(t, w.Body.String(), "10.0.0.5", "response leaked the host")
+	require.NotContains(t, w.Body.String(), "admin", "response leaked the user")
+
+	var body struct {
+		Syncables []pipeSync `json:"syncables"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	broken, ok := findSync(body.Syncables, "movie-broken")
+	require.True(t, ok)
+	require.Equal(t, "progress read failed (detail in node logs)", broken.Error)
+}
+
 // A topic fed by direct proposals (no ingestable) still composes: there is no
 // producer section, just the head and the consuming syncables.
 func TestGetPipelineStatus_ProposalFedTopicHasNoProducer(t *testing.T) {

@@ -107,9 +107,13 @@ func (s *Storage) ConfigBuildErrorCount() int {
 // ConfigBuildErrorCount gives the gauge its "how many", this gives GET
 // /node/status its "which, and why".
 //
-// The error string is taken verbatim from the recorded build error, which
-// names the failing ${VAR} but never an interpolated value — interpolation
-// failed, so no secret value exists to leak.
+// The error string routes through cluster.RedactedMessage — the shared sink
+// redaction choke point. A missing-${VAR} or parse error is committed-authored
+// and passes through verbatim (naming the failing var, never an interpolated
+// value — interpolation failed, so no secret exists). A post-interpolation
+// driver error that reached here and implements RedactedError (e.g. one echoing
+// the resolved connection string) is reduced to its PII-free classifier, so this
+// replicated-status surface can't leak a secret even as new error sources appear.
 func (s *Storage) ConfigBuildErrors() []cluster.ConfigBuildError {
 	s.configErrMu.Lock()
 	defer s.configErrMu.Unlock()
@@ -120,7 +124,8 @@ func (s *Storage) ConfigBuildErrors() []cluster.ConfigBuildError {
 		// database/ingestable/syncable and never contains a slash, so the
 		// first separator splits them unambiguously.
 		kind, id, _ := strings.Cut(key, "/")
-		out = append(out, cluster.ConfigBuildError{Kind: kind, ID: id, Error: err.Error()})
+		msg, _ := cluster.RedactedMessage(err)
+		out = append(out, cluster.ConfigBuildError{Kind: kind, ID: id, Error: msg})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Kind != out[j].Kind {

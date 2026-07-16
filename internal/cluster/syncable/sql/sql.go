@@ -205,7 +205,12 @@ func (c *Syncable) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldS
 	// which on a slow destination database can be many seconds.
 	tx, err := c.db.BeginTx(ctx, nil)
 	if err != nil {
-		return false, err
+		// A failed BeginTx returns the driver's raw connect error, which embeds
+		// user=/database=/host:port; redact it (as every other Sync driver call
+		// is) so the replicated stuck status and any permanent dead-letter carry
+		// only the classifier. Transient: a begin failure is a connection issue to
+		// retry and surface as stuck, never a permanent dead-letter.
+		return false, execFailure("[sql.apply] begin", err, false)
 	}
 
 	for i, e := range a.Entities {
@@ -250,7 +255,9 @@ func (c *Syncable) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldS
 func (c *Syncable) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool, error) {
 	tx, err := c.db.BeginTx(ctx, nil)
 	if err != nil {
-		return false, err
+		// Redact the raw connect error (user=/database=/host:port); transient — see
+		// the matching note in Sync.
+		return false, execFailure("[sql.apply] begin", err, false)
 	}
 
 	for _, a := range as {

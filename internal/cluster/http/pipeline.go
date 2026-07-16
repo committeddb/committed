@@ -148,7 +148,9 @@ func (h *HTTP) GetPipelineStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 			// Fail loud: list the consumer with its error rather than dropping
 			// it, and force the pipeline's caughtUp false — we can't claim the
 			// pipeline is at rest with a consumer whose progress is unknown.
-			consumers = append(consumers, PipelineSyncableStatus{ID: c.ID, Error: err.Error()})
+			// redactedDetail, not err.Error(): a progress-read error may wrap a
+			// driver error that echoes connection identity or a bound value.
+			consumers = append(consumers, PipelineSyncableStatus{ID: c.ID, Error: redactedDetail(err)})
 			caughtUp = false
 			continue
 		}

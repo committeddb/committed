@@ -70,7 +70,7 @@ func TestEndToEnd(t *testing.T) {
 	require.Nil(t, err)
 	defer os.RemoveAll(dir)
 
-	dsn := startMySQL(t)
+	connURL := startMySQL(t)
 
 	parser := parser.New()
 	sync := make(chan *db.SyncableWithID)
@@ -84,7 +84,7 @@ func TestEndToEnd(t *testing.T) {
 	p1 := createProposal(typeID, "key", "one")
 	propose(t, h, p1.p)
 	_ = addIngestable(t, h, "")
-	databaseID := addDatabase(t, h, "mysql", dsn)
+	databaseID := addDatabase(t, h, "mysql", connURL)
 
 	syncableID := addSyncable(t, h, typeID, databaseID)
 
@@ -122,7 +122,7 @@ func TestEndToEnd_HonorsDelete(t *testing.T) {
 	require.Nil(t, err)
 	defer os.RemoveAll(dir)
 
-	dsn := startMySQL(t)
+	connURL := startMySQL(t)
 
 	parser := parser.New()
 	sync := make(chan *db.SyncableWithID)
@@ -136,7 +136,7 @@ func TestEndToEnd_HonorsDelete(t *testing.T) {
 	upsert := createProposal(typeID, "key", "one")
 	propose(t, h, upsert.p)
 	_ = addIngestable(t, h, "")
-	databaseID := addDatabase(t, h, "mysql", dsn)
+	databaseID := addDatabase(t, h, "mysql", connURL)
 	syncableID := addSyncable(t, h, typeID, databaseID)
 
 	// The upsert must land downstream first.
@@ -154,9 +154,11 @@ func TestEndToEnd_HonorsDelete(t *testing.T) {
 }
 
 // startMySQL brings up a throwaway MySQL container for one test and returns the
-// go-sql-driver DSN the syncable dialect opens it with. Ryuk (the testcontainers
-// reaper) and the registered cleanup tear it down at test end. Each test gets
-// its own container so the two never share (or collide on) the sink table.
+// canonical mysql:// URL the syncable dialect opens it with (connection strings
+// are URLs everywhere; the dialect converts to a driver DSN internally). Ryuk
+// (the testcontainers reaper) and the registered cleanup tear it down at test
+// end. Each test gets its own container so the two never share (or collide on)
+// the sink table.
 func startMySQL(t *testing.T) string {
 	t.Helper()
 	ctx := context.Background()
@@ -181,10 +183,12 @@ func startMySQL(t *testing.T) string {
 	require.NoError(t, err, "start mysql container")
 	t.Cleanup(func() { _ = c.Terminate(context.Background()) })
 
-	dsn, err := c.ConnectionString(ctx)
-	require.NoError(t, err, "mysql dsn")
+	host, err := c.Host(ctx)
+	require.NoError(t, err, "mysql host")
+	port, err := c.MappedPort(ctx, "3306/tcp")
+	require.NoError(t, err, "mysql port")
 
-	return dsn
+	return fmt.Sprintf("mysql://%s:%s@%s:%s/%s", mysqlUser, mysqlPass, host, port.Port(), mysqlDB)
 }
 
 type Proposal struct {

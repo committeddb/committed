@@ -91,8 +91,8 @@ const (
 type MySQLHarness struct {
 	my        *tcmysql.MySQLContainer
 	db        *gosql.DB // host-side connection: drive source mutations, read the sink
-	ingestURL string    // mysql://root:secret@host:port/db — URL form the ingest dialect parses
-	sinkDSN   string    // root:secret@tcp(host:port)/db — Go-driver DSN the syncable opens
+	connURL   string    // mysql://root:secret@host:port/db — the URL both the ingest and sink configs parse
+	hostDSN   string    // root:secret@tcp(host:port)/db — Go-driver DSN for the harness's own *gosql.DB above
 	committed *committedProcess
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -128,10 +128,10 @@ func NewMySQL(t *testing.T) *MySQLHarness {
 	require.NoError(t, err, "mysql host")
 	port, err := my.MappedPort(ctx, "3306/tcp")
 	require.NoError(t, err, "mysql port")
-	h.ingestURL = fmt.Sprintf("mysql://%s:%s@%s:%s/%s", mysqlUser, mysqlPass, host, port.Port(), mysqlDB)
-	h.sinkDSN = fmt.Sprintf("%s:%s@tcp(%s:%s)/%s", mysqlUser, mysqlPass, host, port.Port(), mysqlDB)
+	h.connURL = fmt.Sprintf("mysql://%s:%s@%s:%s/%s", mysqlUser, mysqlPass, host, port.Port(), mysqlDB)
+	h.hostDSN = fmt.Sprintf("%s:%s@tcp(%s:%s)/%s", mysqlUser, mysqlPass, host, port.Port(), mysqlDB)
 
-	db, err := gosql.Open("mysql", h.sinkDSN)
+	db, err := gosql.Open("mysql", h.hostDSN)
 	require.NoError(t, err, "open mysql")
 	h.db = db
 
@@ -147,12 +147,12 @@ func NewMySQL(t *testing.T) *MySQLHarness {
 
 	// 4. Type + ingestable + readiness.
 	postType(t, mysqlTopic)
-	postMySQLIngestable(t, h.ingestURL)
+	postMySQLIngestable(t, h.connURL)
 	h.waitForStreaming(t, mysqlTopic, 60*time.Second)
 
 	// 5. Sink database + syncable (project topic → sink table). Posted after the
 	// ingestable so the topic already has a producer when the syncable starts.
-	postMySQLSinkDatabase(t, h.sinkDSN)
+	postMySQLSinkDatabase(t, h.connURL)
 	postMySQLSyncable(t)
 
 	t.Cleanup(h.Close)
@@ -178,14 +178,15 @@ func postMySQLIngestable(t *testing.T, url string) {
 }
 
 // postMySQLSinkDatabase registers the sink database — the same MySQL instance,
-// reached via the Go-driver DSN the mysql syncable dialect opens with
-// gosql.Open("mysql", ...).
-func postMySQLSinkDatabase(t *testing.T, dsn string) {
+// reached via the canonical mysql:// URL. The mysql syncable dialect converts it
+// to a Go-driver DSN internally (cluster.MySQLDSN), so ingest and sink configs
+// share one connection-string format.
+func postMySQLSinkDatabase(t *testing.T, url string) {
 	t.Helper()
 	var b strings.Builder
 	fmt.Fprintf(&b, "[database]\nname = %q\ntype = \"sql\"\n\n", mysqlSinkDB)
 	fmt.Fprintf(&b, "[sql]\ndialect = \"mysql\"\n")
-	fmt.Fprintf(&b, "connectionString = %q\n", dsn)
+	fmt.Fprintf(&b, "connectionString = %q\n", url)
 	postConfig(t, "/v1/database/"+mysqlSinkDB, b.String())
 }
 

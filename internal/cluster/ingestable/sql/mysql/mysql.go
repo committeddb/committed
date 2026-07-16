@@ -1914,21 +1914,17 @@ func readBatch(
 	return entities, batchLastPK, len(entities), nil
 }
 
-// buildDSN converts a mysql:// URL to a go-sql-driver/mysql DSN string.
+// buildDSN converts a mysql:// URL to a go-sql-driver/mysql DSN string via the
+// shared cluster.MySQLDSN (the same conversion the syncable sink dialect uses).
+// It swallows a conversion error and returns the input unchanged: this ingest
+// path already validated the URL upstream (binlogSyncerConfig), and go-sql-driver
+// then surfaces any residual problem without echoing the DSN.
 func buildDSN(connectionString string) string {
-	// sql.ParseConnString, never a bare url.Parse: connection-string parsing lives
-	// in the one helper whose error can't leak the (${VAR}-resolved) password, so
-	// a future non-swallowing caller — or a copy-paste of this block — stays safe.
-	u, err := sql.ParseConnString(connectionString)
+	dsn, err := cluster.MySQLDSN(connectionString)
 	if err != nil {
 		return connectionString
 	}
-
-	username := u.User.Username()
-	password, _ := u.User.Password()
-	database := strings.TrimPrefix(u.Path, "/")
-
-	return fmt.Sprintf("%s:%s@tcp(%s)/%s", username, password, u.Host, database)
+	return dsn
 }
 
 // dsnDatabase returns the database (schema) named in a mysql:// connection
@@ -1936,8 +1932,8 @@ func buildDSN(connectionString string) string {
 // filter scopes to it (see MySQLEventHandler.watches) so a server-wide binlog
 // doesn't bleed same-named tables from other databases into the topic.
 func dsnDatabase(connectionString string) string {
-	// sql.ParseConnString, never a bare url.Parse — see buildDSN.
-	u, err := sql.ParseConnString(connectionString)
+	// cluster.ParseConnString, never a bare url.Parse — see buildDSN.
+	u, err := cluster.ParseConnString(connectionString)
 	if err != nil {
 		return ""
 	}

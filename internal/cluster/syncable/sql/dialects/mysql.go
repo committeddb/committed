@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 
+	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/syncable/sql"
 )
 
@@ -238,7 +239,16 @@ func (d *MySQLDialect) CreateAppliedMarkSQL(config *sql.Config) string {
 }
 
 func (d *MySQLDialect) Open(connectionString string) (*gosql.DB, error) {
-	return gosql.Open("mysql", connectionString)
+	// Connection strings are canonically mysql:// URLs everywhere (ingest AND
+	// syncable); cluster.MySQLDSN validates the URL and converts it to the
+	// go-sql-driver DSN this driver opens with — the same conversion the ingest
+	// snapshot uses, so a URL means the same thing wherever it is opened. A
+	// malformed URL yields a redaction-safe error (never echoes the string).
+	dsn, err := cluster.MySQLDSN(connectionString)
+	if err != nil {
+		return nil, err
+	}
+	return gosql.Open("mysql", dsn)
 }
 
 // IsPermanent classifies a MySQL error as permanent (non-retryable) only when

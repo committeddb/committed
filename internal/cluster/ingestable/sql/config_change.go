@@ -142,8 +142,8 @@ func serverIdentityChanged(oldCS, newCS string) bool {
 	if oldCS == newCS {
 		return false
 	}
-	ou, oerr := ParseConnString(oldCS)
-	nu, nerr := ParseConnString(newCS)
+	ou, oerr := cluster.ParseConnString(oldCS)
+	nu, nerr := cluster.ParseConnString(newCS)
 	if oerr != nil || nerr != nil {
 		return true
 	}

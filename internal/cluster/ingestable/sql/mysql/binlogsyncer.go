@@ -11,6 +11,7 @@ import (
 	"github.com/go-mysql-org/go-mysql/replication"
 	"go.uber.org/zap"
 
+	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/ingestable/sql"
 )
 
@@ -33,10 +34,10 @@ import (
 // the payload. ServerID is a non-zero random id (the replica id this connection
 // registers under — NewBinlogSyncer panics on 0), as canal also randomized it.
 func binlogSyncerConfig(config *sql.Config) (replication.BinlogSyncerConfig, error) {
-	// sql.ParseConnString, not url.Parse: url.Parse's *url.Error embeds the raw
+	// cluster.ParseConnString, not url.Parse: url.Parse's *url.Error embeds the raw
 	// (already ${VAR}-resolved) connection string — password included — which
 	// this path then logs at ingest runtime. The helper strips the value.
-	u, err := sql.ParseConnString(config.ConnectionString)
+	u, err := cluster.ParseConnString(config.ConnectionString)
 	if err != nil {
 		return replication.BinlogSyncerConfig{}, err
 	}

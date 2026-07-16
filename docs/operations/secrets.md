@@ -76,7 +76,7 @@ type = "sql"
 
 [sql]
 dialect = "mysql"
-connectionString = "app:${MYSQL_PASSWORD}@tcp(db.internal:3306)/orders"
+connectionString = "mysql://app:${MYSQL_PASSWORD}@db.internal:3306/orders"
 ```
 
 `${MYSQL_PASSWORD}` is resolved from the node's environment when the

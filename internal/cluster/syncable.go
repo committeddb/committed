@@ -38,6 +38,26 @@ type RedactedError interface {
 	RedactedMessage() string
 }
 
+// RedactedMessage returns the message safe to put into ANY persisted or exposed
+// sink — a replicated dead-letter/stuck record, an HTTP body, or the node-status
+// config-build-error list. If err (anywhere in its chain) is a RedactedError — a
+// driver/migration error that may echo a bound value or connection identity —
+// only its PII-free classifier is returned and ok is true; otherwise committed's
+// own error text is returned verbatim (it is authored PII-free) and ok is false.
+// The full Error() is meant to stay in this node's logs. This is the single
+// redaction choke point every sink shares (safeDeadLetterMessage, redactedDetail,
+// and the config-build-error recorder all route through it) so the contract can't
+// drift between them. A nil err yields ("", false).
+func RedactedMessage(err error) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+	if red, ok := errors.AsType[RedactedError](err); ok {
+		return red.RedactedMessage(), true
+	}
+	return err.Error(), false
+}
+
 // ErrCorruptEntry marks a stored WAL entry that failed its CRC32C checksum on
 // read, or a log that will not open. It is the corruption sentinel raised by the
 // WAL layer (aliased there as wal.ErrCorruptEntry) and lives in this shared

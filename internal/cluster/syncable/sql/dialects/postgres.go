@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib" // registers "pgx" with database/sql
 
+	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/syncable/sql"
 )
 
@@ -244,6 +245,19 @@ func (d *PostgreSQLDialect) CreateAppliedMarkSQL(config *sql.Config) string {
 }
 
 func (d *PostgreSQLDialect) Open(connectionString string) (*gosql.DB, error) {
+	// Connection strings are canonically postgres:// URLs everywhere; validate via
+	// cluster.ParseConnString (which also keeps a malformed-URL error from echoing
+	// the ${VAR}-resolved password onto GET /node/status — pgx would surface
+	// url.Parse's raw *url.Error). Require a postgres/postgresql scheme so a bare
+	// libpq keyword string is rejected up front rather than parsed by the driver
+	// under different escaping rules. pgx opens the URL directly (no conversion).
+	u, err := cluster.ParseConnString(connectionString)
+	if err != nil {
+		return nil, err
+	}
+	if s := strings.ToLower(u.Scheme); s != "postgres" && s != "postgresql" {
+		return nil, errors.New("postgres connection string must be a postgres:// URL")
+	}
 	return gosql.Open("pgx", connectionString)
 }
 

@@ -34,8 +34,8 @@ type mysqlEngine struct {
 	container *tcmysql.MySQLContainer
 	ctx       context.Context
 	db        *gosql.DB
-	ingestURL string // mysql://user:pass@host:port/db — URL the ingest dialect parses
-	sinkDSN   string // user:pass@tcp(host:port)/db — the Go-driver DSN the sink opens
+	connURL   string // mysql://user:pass@host:port/db — URL both the ingest and sink configs parse
+	hostDSN   string // user:pass@tcp(host:port)/db — the Go-driver DSN the engine's own *gosql.DB opens
 }
 
 func newMySQLEngine() *mysqlEngine { return &mysqlEngine{} }
@@ -45,7 +45,7 @@ func (*mysqlEngine) Dialect() string { return "mysql" }
 // SlotName is empty — MySQL has no replication slots.
 func (*mysqlEngine) SlotName(string) string { return "" }
 
-func (e *mysqlEngine) ConnString() string { return e.ingestURL }
+func (e *mysqlEngine) ConnString() string { return e.connURL }
 
 // Start brings up the MySQL container (binlog ROW/FULL on by default in mysql:9),
 // opens the source/sink connection, and applies the MySQL TPC-H schema.
@@ -81,9 +81,9 @@ func (e *mysqlEngine) refreshConn(ctx context.Context, t *testing.T) {
 	require.NoError(t, err, "mysql host")
 	port, err := e.container.MappedPort(ctx, "3306/tcp")
 	require.NoError(t, err, "mysql port")
-	e.ingestURL = fmt.Sprintf("mysql://%s:%s@%s:%s/%s", mysqlUser, mysqlPass, host, port.Port(), mysqlDB)
-	e.sinkDSN = fmt.Sprintf("%s:%s@tcp(%s:%s)/%s", mysqlUser, mysqlPass, host, port.Port(), mysqlDB)
-	db, err := gosql.Open("mysql", e.sinkDSN)
+	e.connURL = fmt.Sprintf("mysql://%s:%s@%s:%s/%s", mysqlUser, mysqlPass, host, port.Port(), mysqlDB)
+	e.hostDSN = fmt.Sprintf("%s:%s@tcp(%s:%s)/%s", mysqlUser, mysqlPass, host, port.Port(), mysqlDB)
+	db, err := gosql.Open("mysql", e.hostDSN)
 	require.NoError(t, err, "open mysql")
 	e.db = db
 }
@@ -119,9 +119,9 @@ func (e *mysqlEngine) RestartContainer(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("mysql port after restart: %w", err)
 	}
-	e.ingestURL = fmt.Sprintf("mysql://%s:%s@%s:%s/%s", mysqlUser, mysqlPass, host, port.Port(), mysqlDB)
-	e.sinkDSN = fmt.Sprintf("%s:%s@tcp(%s:%s)/%s", mysqlUser, mysqlPass, host, port.Port(), mysqlDB)
-	db, err := gosql.Open("mysql", e.sinkDSN)
+	e.connURL = fmt.Sprintf("mysql://%s:%s@%s:%s/%s", mysqlUser, mysqlPass, host, port.Port(), mysqlDB)
+	e.hostDSN = fmt.Sprintf("%s:%s@tcp(%s:%s)/%s", mysqlUser, mysqlPass, host, port.Port(), mysqlDB)
+	db, err := gosql.Open("mysql", e.hostDSN)
 	if err != nil {
 		return fmt.Errorf("reopen mysql after restart: %w", err)
 	}
@@ -135,7 +135,7 @@ func (e *mysqlEngine) PostIngestable(t *testing.T, table string) {
 	fmt.Fprintf(&b, "[ingestable]\nname = %q\ntype = \"sql\"\n\n", table)
 	fmt.Fprintf(&b, "[sql]\ndialect = \"mysql\"\n")
 	fmt.Fprintf(&b, "topic = %q\n", table)
-	fmt.Fprintf(&b, "connectionString = %q\n", e.ingestURL)
+	fmt.Fprintf(&b, "connectionString = %q\n", e.connURL)
 	fmt.Fprintf(&b, "primaryKey = %q\n", dataset.PrimaryKey(table))
 	fmt.Fprintf(&b, "tables = [%q]\n\n", table)
 	for _, col := range dataset.Columns(table) {
@@ -149,7 +149,7 @@ func (e *mysqlEngine) PostSinkDatabase(t *testing.T) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[database]\nname = %q\ntype = \"sql\"\n\n", mysqlSinkDB)
 	fmt.Fprintf(&b, "[sql]\ndialect = \"mysql\"\n")
-	fmt.Fprintf(&b, "connectionString = %q\n", e.sinkDSN)
+	fmt.Fprintf(&b, "connectionString = %q\n", e.connURL)
 	postConfig(t, "/v1/database/"+mysqlSinkDB, b.String())
 }
 

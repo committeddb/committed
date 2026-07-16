@@ -36,11 +36,7 @@ func safeDeadLetterMessage(syncErr error) (string, bool) {
 	if syncErr == nil {
 		return "operator dead-letter", false
 	}
-	var red cluster.RedactedError
-	if errors.As(syncErr, &red) {
-		return red.RedactedMessage(), true
-	}
-	return syncErr.Error(), false
+	return cluster.RedactedMessage(syncErr)
 }
 
 func (db *DB) recordSyncDeadLetter(ctx context.Context, id string, index uint64, kind string, syncErr error) {

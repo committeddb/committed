@@ -232,13 +232,13 @@ type = "sql"
 name = "mydb"
 [sql]
 dialect = "mysql"
-connectionString = "user:${TEST_DB_PASSWORD}@tcp(localhost:3306)/db"`)
+connectionString = "mysql://user:${TEST_DB_PASSWORD}@localhost:3306/db"`)
 
 	_, _, err := p.ParseDatabase("text/toml", data)
 	require.NoError(t, err)
 
 	v := fakeParser.ParseArgsForCall(0)
-	require.Equal(t, "user:s3cr3t@tcp(localhost:3306)/db", v.GetString("sql.connectionString"))
+	require.Equal(t, "mysql://user:s3cr3t@localhost:3306/db", v.GetString("sql.connectionString"))
 	// Non-secret fields round-trip unchanged through interpolation.
 	require.Equal(t, "mysql", v.GetString("sql.dialect"))
 }
@@ -257,7 +257,7 @@ type = "sql"
 name = "mydb"
 [sql]
 dialect = "mysql"
-connectionString = "user:${DEFINITELY_UNSET_VAR}@tcp"`)
+connectionString = "mysql://user:${DEFINITELY_UNSET_VAR}@host/db"`)
 
 	_, _, err := p.ParseDatabase("text/toml", data)
 	require.Error(t, err)
@@ -277,7 +277,7 @@ func TestValidate(t *testing.T) {
 type = "sql"
 name = "ing"
 [sql]
-connectionString = "user:${TEST_VALIDATE_PW}@tcp"`)
+connectionString = "mysql://user:${TEST_VALIDATE_PW}@host/db"`)
 
 	t.Run("missing var errors", func(t *testing.T) {
 		err := p.Validate("text/toml", tmpl)

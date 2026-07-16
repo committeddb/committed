@@ -24,9 +24,9 @@ func TestExpand(t *testing.T) {
 	})
 
 	t.Run("no reference is unchanged", func(t *testing.T) {
-		got, err := expand("user:pass@tcp(localhost:3306)/db", vars)
+		got, err := expand("mysql://user:pass@localhost:3306/db", vars)
 		require.NoError(t, err)
-		require.Equal(t, "user:pass@tcp(localhost:3306)/db", got)
+		require.Equal(t, "mysql://user:pass@localhost:3306/db", got)
 	})
 
 	t.Run("single reference expands", func(t *testing.T) {

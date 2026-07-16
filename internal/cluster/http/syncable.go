@@ -340,17 +340,14 @@ func capString(s string) string {
 	return s
 }
 
-func capError(err error) string { return capString(err.Error()) }
-
-// redactedDetail returns an error string safe to put in a response body: if the
-// error chain carries a cluster.RedactedError (a driver or migration error that
-// may echo entity PII in its full text), only its PII-free RedactedMessage is
-// exposed; otherwise the committed-authored error text is used. The full detail
-// is kept in this node's logs (see the db replay path). Use this — not capError
-// — for any detail derived from a Sync/apply error.
+// redactedDetail returns an error string safe to put in a response body: it
+// routes through cluster.RedactedMessage (the shared sink choke point), so an
+// error chain carrying a cluster.RedactedError (a driver or migration error that
+// may echo entity PII or connection identity) exposes only its PII-free
+// RedactedMessage, while committed-authored text passes through. The full detail
+// is kept in this node's logs (see the db replay path). Use this for any detail
+// derived from a Sync/apply error, then cap it for the response body.
 func redactedDetail(err error) string {
-	if red, ok := errors.AsType[cluster.RedactedError](err); ok {
-		return capString(red.RedactedMessage())
-	}
-	return capError(err)
+	msg, _ := cluster.RedactedMessage(err)
+	return capString(msg)
 }
