@@ -40,6 +40,25 @@ HDR
 				printf '```\n'
 				cat "$lic"
 				printf '\n```\n'
+				# Secondary license texts beyond the primary file — e.g. go-mysql's
+				# `vitess_license` (BSD-3-Clause code it embeds), which the single
+				# primary grab above would miss. A binary that links such a module
+				# must reproduce these too. Match license texts only, skip the
+				# already-emitted primary, and skip .go sources.
+				if [ -n "$dir" ]; then
+					find "$dir" -maxdepth 1 -type f 2>/dev/null | sort | while read -r extra; do
+						[ "$extra" = "$lic" ] && continue
+						base=$(basename "$extra")
+						case "$(printf '%s' "$base" | tr 'A-Z' 'a-z')" in
+							*.go|*.sh|*.py|*.pl|*.rb|*.js|*.ts|*.bat|*.ps1|*.yml|*.yaml|*.json|*.mod|*.sum) continue ;;
+							*license*|*licence*|copying*)
+								printf '\n### %s\n\n```\n' "$base"
+								cat "$extra"
+								printf '\n```\n'
+								;;
+						esac
+					done
+				fi
 			else
 				printf '_License file not found in the module cache; see https://%s_\n' "$path"
 			fi

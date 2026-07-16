@@ -52,14 +52,21 @@ func binlogSyncerConfig(config *sql.Config) (replication.BinlogSyncerConfig, err
 
 	return replication.BinlogSyncerConfig{
 		//nolint:gosec // G404: a MySQL replica id, not security-sensitive; weak rand is fine (canal randomizes it the same way).
-		ServerID:                1001 + rand.Uint32N(1<<31),
-		Flavor:                  mysql.DEFAULT_FLAVOR,
-		Host:                    host,
-		Port:                    uint16(port),
-		User:                    u.User.Username(),
-		Password:                password,
-		Charset:                 mysql.DEFAULT_CHARSET,
-		UseDecimal:              false,
+		ServerID:   1001 + rand.Uint32N(1<<31),
+		Flavor:     mysql.DEFAULT_FLAVOR,
+		Host:       host,
+		Port:       uint16(port),
+		User:       u.User.Username(),
+		Password:   password,
+		Charset:    mysql.DEFAULT_CHARSET,
+		UseDecimal: false,
+		// Emit JSON-embedded DECIMAL leaves as exact unquoted numbers so a CDC
+		// payload is byte-identical to the initial-snapshot path (which renders
+		// the same decimal exact and unquoted — see readBatch's type-aware JSON
+		// rendering). Without this, go-mysql quotes a JSON decimal ("1.50") while
+		// the snapshot emits a number (1.50), breaking replay/dedup byte-compare.
+		// Backed by committed's forked go-mysql (third_party/forked/go-mysql).
+		UseNumberForJSONDecimal: true,
 		ParseTime:               false,
 		TimestampStringLocation: time.UTC,
 		Logger:                  newSyncerLogger(zap.L()),

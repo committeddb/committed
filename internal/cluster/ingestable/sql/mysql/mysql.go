@@ -1563,7 +1563,12 @@ func readBatch(
 	}
 	orderBy := strings.Join(orderCols, ", ")
 
-	var query string
+	// The batch predicate (FROM … WHERE … ORDER BY … LIMIT) is shared verbatim by
+	// the row read below and the JSON type-resolution query in phase 2, so under
+	// this REPEATABLE READ tx both see the same rows in the same order and zip
+	// one-for-one. The type query prepends its own `?` JSON-path args ahead of
+	// these cursor args (SELECT placeholders bind before WHERE placeholders).
+	var fromWhere string
 	var args []any
 	if haveLastPK {
 		cursor, derr := sql.DecodeCompositeCursor(lastPK, len(pkCols))
@@ -1578,18 +1583,18 @@ func readBatch(
 			placeholders[i] = "?"
 			args[i] = cursor[i]
 		}
-		query = fmt.Sprintf(
-			"SELECT * FROM `%s` WHERE (%s) > (%s) ORDER BY %s LIMIT %d",
+		fromWhere = fmt.Sprintf(
+			"FROM `%s` WHERE (%s) > (%s) ORDER BY %s LIMIT %d",
 			table, strings.Join(cols, ", "), strings.Join(placeholders, ", "), orderBy, batchSize,
 		)
 	} else {
-		query = fmt.Sprintf(
-			"SELECT * FROM `%s` ORDER BY %s LIMIT %d",
+		fromWhere = fmt.Sprintf(
+			"FROM `%s` ORDER BY %s LIMIT %d",
 			table, orderBy, batchSize,
 		)
 	}
 
-	rows, err := tx.QueryContext(ctx, query, args...)
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf("SELECT * %s", fromWhere), args...)
 	if err != nil {
 		return nil, "", 0, err
 	}
@@ -1604,13 +1609,27 @@ func readBatch(
 		return nil, "", 0, err
 	}
 	cats := make([]sql.JSONCategory, len(colTypes))
+	jsonCol := make([]bool, len(colTypes))
 	for i, ct := range colTypes {
 		cats[i] = mysqlCategoryForTypeName(ct.DatabaseTypeName())
+		jsonCol[i] = ct.DatabaseTypeName() == "JSON"
 	}
 
-	var entities []*cluster.Entity
-	var batchLastPK string
-
+	// Phase 1: read and buffer the whole batch. The JSON type-resolution query
+	// (phase 2) can't run while this cursor is open on the same tx, so buffer
+	// every row first. BIT/TIME are fixed inline here; JSON rendering is deferred
+	// to phase 3 because it needs the per-leaf DECIMAL/DOUBLE types phase 2
+	// resolves — the rendered text alone can't tell a DECIMAL 1.5 from a DOUBLE
+	// 1.5, and they must be emitted differently to match CDC byte-for-byte.
+	type pathKey struct {
+		col  int
+		path string
+	}
+	var (
+		buffered  [][]any
+		unionList []pathKey
+		unionSeen = map[pathKey]bool{}
+	)
 	for rows.Next() {
 		vals := make([]any, len(columns))
 		ptrs := make([]any, len(columns))
@@ -1641,13 +1660,116 @@ func readBatch(
 					vals[i] = []byte(stripZeroTimeFraction(string(b)))
 				}
 			case "JSON":
-				// MySQL's snapshot JSON keeps a whole double's trailing ".0"
-				// ("100.0"/"-0.0") that the binlog path (go-mysql float64) drops
-				// ("100"/"-0"); normalize the snapshot to match. MySQL-only — see
-				// CanonicalizeMySQLJSONNumbers.
+				// Collect the float-syntax leaf paths whose DECIMAL-vs-DOUBLE type
+				// phase 2 must resolve. Integer/string leaves are unambiguous and
+				// never queried; a JSON cell with no fractional numbers adds nothing,
+				// so the type query is skipped entirely when the batch has none.
 				if b, ok := vals[i].([]byte); ok {
-					vals[i] = sql.CanonicalizeMySQLJSONNumbers(b)
+					for _, p := range sql.JSONNumberPaths(b) {
+						k := pathKey{col: i, path: p}
+						if !unionSeen[k] {
+							unionSeen[k] = true
+							unionList = append(unionList, k)
+						}
+					}
 				}
+			}
+		}
+
+		buffered = append(buffered, vals)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", 0, err
+	}
+	_ = rows.Close() // free the cursor before phase 2 queries the same tx
+
+	// Phase 2: resolve each collected JSON leaf's real type (DECIMAL vs DOUBLE,
+	// which the rendered text has lost) with a SINGLE query over the same rows in
+	// the same tx, reusing the batch predicate so the result set matches the
+	// buffered rows one-for-one. typesByRow[r][col] is the path->type map for that
+	// cell. On any failure — query error, scan error, or a row-count mismatch — we
+	// fall back to blanket float-normalization (CanonicalizeMySQLJSONNumbers),
+	// which preserves the existing double parity with no regression, forfeiting
+	// only the new decimal exactness.
+	typesByRow := make([]map[int]map[string]string, len(buffered))
+	typeResolveFailed := false
+	if len(unionList) > 0 {
+		sel := make([]string, len(unionList))
+		typeArgs := make([]any, 0, len(unionList)+len(args))
+		for i, uk := range unionList {
+			sel[i] = fmt.Sprintf("JSON_TYPE(JSON_EXTRACT(`%s`, ?))", columns[uk.col])
+			typeArgs = append(typeArgs, uk.path)
+		}
+		typeArgs = append(typeArgs, args...)
+		// The SELECT list is a JSON_TYPE(JSON_EXTRACT(`col`, ?)) expression per
+		// leaf over backtick-escaped result-set column names, and fromWhere is the
+		// same escaped-identifier predicate the batch query already used. Every
+		// runtime value — the JSON paths and the cursor — is a bound parameter in
+		// typeArgs, so nothing user-controlled is concatenated into the SQL.
+		//nolint:gosec // G202: identifiers are escaped result-set column names; all values are bound params.
+		typeQuery := fmt.Sprintf("SELECT %s %s", strings.Join(sel, ", "), fromWhere)
+
+		trows, terr := tx.QueryContext(ctx, typeQuery, typeArgs...)
+		if terr != nil {
+			typeResolveFailed = true
+		} else {
+			r := 0
+			for trows.Next() {
+				dest := make([]gosql.NullString, len(unionList))
+				dptrs := make([]any, len(unionList))
+				for i := range dest {
+					dptrs[i] = &dest[i]
+				}
+				if err := trows.Scan(dptrs...); err != nil {
+					typeResolveFailed = true
+					break
+				}
+				if r < len(typesByRow) {
+					for j, uk := range unionList {
+						if !dest[j].Valid {
+							continue // path absent in this row (JSON_EXTRACT -> NULL)
+						}
+						if typesByRow[r] == nil {
+							typesByRow[r] = map[int]map[string]string{}
+						}
+						if typesByRow[r][uk.col] == nil {
+							typesByRow[r][uk.col] = map[string]string{}
+						}
+						typesByRow[r][uk.col][uk.path] = dest[j].String
+					}
+				}
+				r++
+			}
+			_ = trows.Close()
+			if !typeResolveFailed && (trows.Err() != nil || r != len(buffered)) {
+				typeResolveFailed = true
+			}
+		}
+		if typeResolveFailed {
+			zap.L().Warn("readBatch: JSON leaf type resolution failed; using float-normalization fallback",
+				zap.String("table", table),
+			)
+		}
+	}
+
+	// Phase 3: build entities. Render JSON columns with the resolved per-leaf types
+	// (decimals kept exact, doubles float64-normalized to match CDC); other
+	// columns are unchanged from phase 1.
+	var entities []*cluster.Entity
+	var batchLastPK string
+	for r, vals := range buffered {
+		for i := range vals {
+			if !jsonCol[i] {
+				continue
+			}
+			b, ok := vals[i].([]byte)
+			if !ok {
+				continue // SQL NULL
+			}
+			if typeResolveFailed {
+				vals[i] = sql.CanonicalizeMySQLJSONNumbers(b)
+			} else {
+				vals[i] = sql.RenderMySQLJSONByType(b, typesByRow[r][i])
 			}
 		}
 
@@ -1693,9 +1815,6 @@ func readBatch(
 		})
 	}
 
-	if err := rows.Err(); err != nil {
-		return nil, "", 0, err
-	}
 	if err := tx.Commit(); err != nil {
 		return nil, "", 0, err
 	}

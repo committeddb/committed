@@ -2,6 +2,12 @@ module github.com/committeddb/committed
 
 go 1.26.5
 
+// Patched, stripped fork: adds UseNumberForJSONDecimal so JSON-embedded MySQL
+// DECIMAL leaves stream as exact unquoted numbers (CDC↔snapshot byte parity).
+// See third_party/forked/go-mysql/README.committeddb.md. Upstream candidate —
+// drop this replace once merged.
+replace github.com/go-mysql-org/go-mysql => ./third_party/forked/go-mysql
+
 require (
 	github.com/PaesslerAG/jsonpath v0.1.1
 	github.com/bufbuild/protocompile v0.14.1

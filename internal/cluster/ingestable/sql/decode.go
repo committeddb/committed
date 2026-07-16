@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -155,6 +156,100 @@ func normalizeJSONNumbers(v any) any {
 	default:
 		return v
 	}
+}
+
+// mysqlJSONPathKey renders a JSON object key as a MySQL JSON path step, always
+// double-quoting so an arbitrary user key (spaces, dots, unicode, digits) is a
+// valid path member. MySQL accepts a quoted key everywhere an unquoted one is
+// allowed, so quoting unconditionally keeps the path builder total; the escapes
+// match MySQL's path-string grammar (backslash and double-quote).
+func mysqlJSONPathKey(k string) string {
+	return `."` + jsonPathKeyEscaper.Replace(k) + `"`
+}
+
+var jsonPathKeyEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+
+// JSONNumberPaths returns the MySQL JSON paths (e.g. `$."a"[0]`) of every
+// float-syntax number leaf in a MySQL-rendered JSON document — the leaves whose
+// DECIMAL-vs-DOUBLE type the snapshot must resolve before it can render them the
+// same way CDC does (CDC reads the type off the binlog; the snapshot only has
+// this text, where a DECIMAL 1.5 and a DOUBLE 1.5 are identical). Integer leaves
+// are unambiguous and omitted, so a doc with no fractional numbers needs no type
+// query at all. Returns nil on a parse error (caller falls back).
+func JSONNumberPaths(raw []byte) []string {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil || dec.More() {
+		return nil
+	}
+	var out []string
+	var walk func(any, string)
+	walk = func(v any, path string) {
+		switch x := v.(type) {
+		case map[string]any:
+			for k, e := range x {
+				walk(e, path+mysqlJSONPathKey(k))
+			}
+		case []any:
+			for i, e := range x {
+				walk(e, path+"["+strconv.Itoa(i)+"]")
+			}
+		case json.Number:
+			if strings.ContainsAny(x.String(), ".eE") {
+				out = append(out, path)
+			}
+		}
+	}
+	walk(v, "$")
+	return out
+}
+
+// RenderMySQLJSONByType canonicalizes a MySQL-rendered JSON document using a
+// per-path type map (MySQL JSON path -> the column's JSON_TYPE, "DECIMAL" /
+// "DOUBLE" / …). A DOUBLE leaf is normalized through float64 — matching what the
+// CDC path emits for the same value, and preserving the existing "100.0"->"100"
+// double canonicalization. A DECIMAL leaf (and any leaf absent from types, and
+// every integer) keeps its exact token, so a high-precision or >2^53 decimal is
+// no longer silently rounded. Returns raw unchanged on a parse error, mirroring
+// CanonicalizeMySQLJSONNumbers; the path builder matches JSONNumberPaths exactly
+// so the map lookups line up.
+func RenderMySQLJSONByType(raw []byte, types map[string]string) []byte {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil || dec.More() {
+		return raw
+	}
+	var conv func(any, string) any
+	conv = func(v any, path string) any {
+		switch x := v.(type) {
+		case map[string]any:
+			for k, e := range x {
+				x[k] = conv(e, path+mysqlJSONPathKey(k))
+			}
+			return x
+		case []any:
+			for i, e := range x {
+				x[i] = conv(e, path+"["+strconv.Itoa(i)+"]")
+			}
+			return x
+		case json.Number:
+			if types[path] == "DOUBLE" && strings.ContainsAny(x.String(), ".eE") {
+				if f, err := x.Float64(); err == nil {
+					return f
+				}
+			}
+			return x // DECIMAL / unresolved / integer — keep exact
+		default:
+			return v
+		}
+	}
+	b, err := json.Marshal(conv(v, "$"))
+	if err != nil {
+		return raw
+	}
+	return b
 }
 
 // BuildEntityJSON maps a decoded source row into the topic payload, keyed by each

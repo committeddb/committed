@@ -223,6 +223,16 @@ release:
 	esac
 	@test -n "$(NOTES)" || { echo "set NOTES=<path/to/release-notes.md>"; exit 1; }
 	@test -f "$(NOTES)" || { echo "NOTES file not found: $(NOTES)"; exit 1; }
+	# Diff-guard: regenerate third-party notices and fail if they drift from the
+	# committed file. A stale THIRD_PARTY_NOTICES.md ships wrong/missing license
+	# attributions in both the release assets and the image /licenses. It's a
+	# guard (not an in-place regen) so the tag ships exactly the reviewed file and
+	# the tree stays clean — VERSION's --dirty check above keeps holding. Runs
+	# before the long lint/test/compile so a stale file fails in a second.
+	@$(MAKE) third-party-notices
+	@git diff --exit-code -- THIRD_PARTY_NOTICES.md || { \
+	  echo "THIRD_PARTY_NOTICES.md is stale — run 'make third-party-notices' and commit before tagging"; \
+	  exit 1; }
 	$(MAKE) lint
 	$(MAKE) test/ci
 	$(MAKE) crosscompile
