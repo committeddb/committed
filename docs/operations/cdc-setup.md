@@ -79,6 +79,59 @@ settles correct. For committed's eventually-consistent read models this is
 expected. Both engines use this same convergent model — Postgres does not use an
 exported snapshot, MySQL does not hold a consistent-snapshot transaction.
 
+### Reconciling refresh: how a re-snapshot removes rows deleted at the source
+
+Several recovery paths re-run a **full snapshot** against a topic that already has
+rows downstream: rebuilding an ingestable, the Postgres lost-slot recovery
+(above), or deleting an ingestable and recreating it on the same topic. A snapshot
+is **upsert-only** — it enumerates the rows that *exist* in the source, so it has
+no way to emit a delete for a row removed while it wasn't watching. committed
+reconciles those deletions with a **generation watermark** instead of a diff.
+
+Each keyed SQL sink carries one committed-managed column, `committed_generation`.
+Every ingest snapshot runs at a generation `G` (a per-topic number that increases
+by one on each full refresh), stamps every row it emits with `G`, and closes with
+a one-entity **refresh-boundary marker** carrying `G`. The syncable applies the
+stream in commit order: each upsert writes the row *and* its generation; the
+marker runs
+
+```
+DELETE FROM <sink> WHERE committed_generation >= 1 AND committed_generation < G
+```
+
+This is deletion-by-omission: a full refresh re-stamps every surviving row at `G`,
+so anything the sink is still holding *below* `G` was not re-emitted — it no longer
+exists in the source — and the sweep removes it. (The `>= 1` floor spares
+generation-0 rows: direct `POST /v1/proposal` writes committed does not own.)
+
+Worked example — a row deleted at the source between two refreshes. The topic is
+snapshotted at generation 1 (rows 1, 2, 3); row 2 is later deleted at the source
+while nothing is watching; then the topic is refreshed again at generation 2:
+
+```
+gen-1 refresh:  upsert 1,2,3 @g1 ; marker g1 → sweep <1 (no-op)
+                sink: 1→g1, 2→g1, 3→g1
+(row 2 deleted at the source; nothing observes it)
+gen-2 refresh:  upsert 1,3   @g2 ; marker g2 → sweep <2
+                sink: 1→g2, 3→g2         (row 2, still g1, is swept)
+```
+
+Two consequences worth internalizing:
+
+- **The delete is a sink-side `DELETE`, never a log entry.** The commit log holds
+  no delete for row 2 — it only ever recorded upserts. Row 2 leaves the sink
+  because the marker's sweep removes what the refresh did not re-stamp.
+- **No duplication despite re-emitting every row.** The log is append-only, so the
+  re-snapshot appends a second copy of the surviving rows — but the sink is keyed,
+  so re-upserting rows 1 and 3 overwrites them in place (`g1 → g2`), not adds them.
+
+The watermark only holds if each refresh's `G` is **strictly above every
+generation already on the sink**. committed keeps a delete-surviving, per-topic
+generation high-water mark for exactly this, so a delete-and-recreate on the same
+topic resumes *above* the rows the sink still holds instead of restarting at 1 and
+sweeping nothing. It is also why a topic may have only one ingestable ([above](#one-writer-per-topic)):
+two producers would stamp generations independently and sweep each other's rows.
+
 ### What to watch
 
 Every ingestable exposes its status:
