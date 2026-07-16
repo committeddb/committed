@@ -39,7 +39,7 @@ func (s *Storage) saveSyncableIndex(t *cluster.SyncableIndex) error {
 		// in identical log order on every node. (Rebuild keeps the config, so its
 		// separate worker-drain fix is unaffected — the config is present here and
 		// the Put proceeds.)
-		if cfg := tx.Bucket(syncableBucket); cfg == nil || cfg.Bucket([]byte(t.ID)) == nil {
+		if !configExists(tx, syncableBucket, []byte(t.ID)) {
 			return b.Delete([]byte(t.ID))
 		}
 

@@ -66,6 +66,21 @@ func (s *Storage) saveSyncableDeadLetter(d *cluster.SyncableDeadLetter) error {
 		if top == nil {
 			return ErrBucketMissing
 		}
+		// Invariant: a dead-letter persists only while its syncable config exists.
+		// The sync worker (or an operator's manual dead-letter) proposes these, and
+		// DeleteSyncable does not drain the worker first, so a dead-letter can commit
+		// AFTER the config was deleted — or an old one can replay from the log before
+		// a same-id recreate. Without this guard that write re-establishes an orphaned
+		// sub-bucket a same-id recreate consults (HasSyncableDeadLetter) and then
+		// silently skips those indices. So if the config is gone, drop the stale bump
+		// and reap any lingering sub-bucket. Deterministic: config existence is
+		// replicated state applied in identical log order on every node.
+		if !configExists(tx, syncableBucket, []byte(d.ID)) {
+			if top.Bucket([]byte(d.ID)) != nil {
+				return top.DeleteBucket([]byte(d.ID))
+			}
+			return nil
+		}
 		// One nested sub-bucket per syncable id keeps the query a tight
 		// per-syncable cursor scan and the keyspace naturally partitioned.
 		sub, err := top.CreateBucketIfNotExists([]byte(d.ID))

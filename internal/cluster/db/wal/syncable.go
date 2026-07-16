@@ -117,7 +117,13 @@ func (s *Storage) deleteSyncable(id []byte) error {
 		if b == nil {
 			return ErrBucketMissing
 		}
-		return deleteVersioned(b, id)
+		if err := deleteVersioned(b, id); err != nil {
+			return err
+		}
+		// Sweep the per-syncable-id state kept outside the config sub-bucket and not
+		// carried as its own delete-bundle tombstone (dead-letters, stuck, skip) so a
+		// same-id recreate starts clean. Same tx as the config delete → atomic.
+		return sweepSyncableSiblingState(tx, id)
 	})
 	if err != nil {
 		return err

@@ -20,7 +20,11 @@ func (s *Storage) handleSyncableStuck(e *cluster.Entity) error {
 	if err := st.Unmarshal(e.Data); err != nil {
 		return err
 	}
-	return s.putKeyed(syncableStuckBucket, []byte(st.ID), e.Data)
+	// Guard: a stuck record persists only while the syncable config exists, so a
+	// worker bump that commits after DeleteSyncable (or replays before a same-id
+	// recreate) can't leave an orphan a recreate would misreport as "blocked on
+	// index N". Reaps any lingering value when the config is gone.
+	return s.putConfigGuardedKeyed(syncableBucket, syncableStuckBucket, []byte(st.ID), e.Data)
 }
 
 // SyncableStuck returns the syncable's current stuck record, or ok=false if
@@ -62,7 +66,10 @@ func (s *Storage) handleSyncableSkipRequest(e *cluster.Entity) error {
 	if err := r.Unmarshal(e.Data); err != nil {
 		return err
 	}
-	return s.putKeyed(syncableSkipRequestBucket, []byte(r.ID), e.Data)
+	// Guard: a skip request persists only while the syncable config exists, so a
+	// stale request can't be honored against a matching index on a same-id recreate
+	// (a silent skip of a live proposal). Reaps any lingering value when gone.
+	return s.putConfigGuardedKeyed(syncableBucket, syncableSkipRequestBucket, []byte(r.ID), e.Data)
 }
 
 // SyncableSkipRequest returns the pending operator skip request for the
@@ -92,17 +99,6 @@ func (s *Storage) SyncableSkipRequest(id string) (cluster.SyncableSkipRequest, b
 		return cluster.SyncableSkipRequest{}, false, err
 	}
 	return out, ok, nil
-}
-
-// putKeyed writes value under key in the named flat bucket.
-func (s *Storage) putKeyed(bucket, key, value []byte) error {
-	return s.update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(bucket)
-		if b == nil {
-			return ErrBucketMissing
-		}
-		return b.Put(key, value)
-	})
 }
 
 // deleteKeyed removes key from the named flat bucket (no-op if absent).

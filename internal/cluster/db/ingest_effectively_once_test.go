@@ -121,6 +121,9 @@ func newWalDBWithMetrics(t *testing.T) (*db.DB, *wal.Storage, *sdkmetric.ManualR
 func TestIngestDedup_RecoveryHasNoDuplicateCommittedEntries(t *testing.T) {
 	d, s, reader := newWalDBWithMetrics(t)
 	id := "dedup-ingest"
+	// The source-seq highwater now advances only while the ingestable config exists;
+	// the direct-d.Ingest idiom skips config application, so seed it.
+	seedIngestableConfig(t, d, id)
 
 	proposeTypeTOML(t, d, "evt", "evt", "", "")
 	typ, err := s.ResolveType(cluster.LatestTypeRef("evt"))

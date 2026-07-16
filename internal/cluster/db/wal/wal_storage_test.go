@@ -608,6 +608,34 @@ func saveEntity(t *testing.T, e *cluster.Entity, s db.Storage, term, index uint6
 	return p
 }
 
+// seedSyncableConfig applies a minimal syncable config upsert at raft index idx so
+// the config sub-bucket exists — the precondition the per-syncable sibling writers
+// (dead-letter, stuck, skip-request) guard on. The config need not be buildable:
+// saveSyncable persists the bytes before the node-local parser build, so an empty
+// parser (parser.New) degrades cleanly and the sub-bucket — hence configExists(id)
+// — is still established. Requires a parser-backed storage (NewStorageWithParser),
+// since a nil parser would panic in the build step.
+func seedSyncableConfig(t *testing.T, s db.Storage, id string, idx uint64) {
+	t.Helper()
+	e, err := cluster.NewUpsertSyncableEntity(&cluster.Configuration{
+		ID: id, MimeType: "text/toml", Data: []byte("[syncable]\nname = \"" + id + "\""),
+	})
+	require.NoError(t, err)
+	saveEntity(t, e, s, 1, idx)
+}
+
+// seedIngestableConfig is the ingestable twin of seedSyncableConfig: it establishes
+// the ingestable config sub-bucket so the source-seq highwater writer's guard sees
+// a live config. Same degrade-cleanly rationale.
+func seedIngestableConfig(t *testing.T, s db.Storage, id string, idx uint64) {
+	t.Helper()
+	e, err := cluster.NewUpsertIngestableEntity(&cluster.Configuration{
+		ID: id, MimeType: "text/toml", Data: []byte("[ingestable]\nname = \"" + id + "\""),
+	})
+	require.NoError(t, err)
+	saveEntity(t, e, s, 1, idx)
+}
+
 // saveProposal persists an entity proposal AND applies it via
 // ApplyCommitted, so that downstream test assertions against bucket state
 // (s.Type, s.Database, etc.) see the entity. After PR1 split Save into

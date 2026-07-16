@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/committeddb/committed/internal/cluster"
+	parser "github.com/committeddb/committed/internal/cluster/db/parser"
 	"github.com/committeddb/committed/internal/cluster/db/wal"
 )
 
@@ -214,18 +215,24 @@ func TestScrub_SyncableDeadLettersCompact(t *testing.T) {
 	}
 
 	t.Run("distinct dead letters survive", func(t *testing.T) {
-		s := NewStorage(t, nil)
+		s := NewStorageWithParser(t, nil, parser.New())
 		defer s.Cleanup()
 
-		saveEntity(t, dl("X", 100), s, 1, 1)         // key X+100
-		saveEntity(t, dl("X", 200), s, 1, 2)         // key X+200 — distinct
-		saveEntity(t, syncIndex(t, "A", 1), s, 1, 3) // tail
+		// Seed config X first so the dead-letters persist in bbolt (the
+		// per-config-id write-guard reaps them otherwise). The config is a
+		// retained versioned entity, so it also survives the scrub at index 1.
+		seedSyncableConfig(t, s, "X", 1)
+		saveEntity(t, dl("X", 100), s, 1, 2)         // key X+100
+		saveEntity(t, dl("X", 200), s, 1, 3)         // key X+200 — distinct
+		saveEntity(t, syncIndex(t, "A", 1), s, 1, 4) // tail
 
-		require.Nil(t, s.RunScrubForTest(2))
+		// Scrub window covers through index 3 so both dead-letters are in it
+		// (the config seed shifted them up by one).
+		require.Nil(t, s.RunScrubForTest(3))
 
 		got, err := s.EventIndices()
 		require.Nil(t, err)
-		require.Equal(t, []uint64{1, 2, 3}, got) // both survive (distinct keys)
+		require.Equal(t, []uint64{1, 2, 3, 4}, got) // config + both dead-letters + tail survive
 
 		dls, err := s.SyncableDeadLetters("X", 0, 10)
 		require.Nil(t, err)
@@ -233,18 +240,21 @@ func TestScrub_SyncableDeadLettersCompact(t *testing.T) {
 	})
 
 	t.Run("re-propose collapses to latest", func(t *testing.T) {
-		s := NewStorage(t, nil)
+		s := NewStorageWithParser(t, nil, parser.New())
 		defer s.Cleanup()
 
-		saveEntity(t, dl("X", 100), s, 1, 1)         // key X+100
-		saveEntity(t, dl("X", 100), s, 1, 2)         // re-propose, same key X+100
-		saveEntity(t, syncIndex(t, "A", 1), s, 1, 3) // tail
+		seedSyncableConfig(t, s, "X", 1)
+		saveEntity(t, dl("X", 100), s, 1, 2)         // key X+100
+		saveEntity(t, dl("X", 100), s, 1, 3)         // re-propose, same key X+100
+		saveEntity(t, syncIndex(t, "A", 1), s, 1, 4) // tail
 
-		require.Nil(t, s.RunScrubForTest(2))
+		// Scrub window covers through index 3 so the re-propose is in it (the
+		// config seed shifted both writes up by one).
+		require.Nil(t, s.RunScrubForTest(3))
 
 		got, err := s.EventIndices()
 		require.Nil(t, err)
-		require.Equal(t, []uint64{2, 3}, got) // superseded upsert (1) dropped
+		require.Equal(t, []uint64{1, 3, 4}, got) // config (1) + latest dl (3) kept; superseded upsert (2) dropped
 
 		dls, err := s.SyncableDeadLetters("X", 0, 10)
 		require.Nil(t, err)

@@ -93,6 +93,7 @@ func TestDeadLetterStuckSyncable_NotStuck(t *testing.T) {
 func TestDeadLetterStuckSyncable_SingleProposalSkipped(t *testing.T) {
 	d, s := newWalDBStuck(t)
 	id := "stuck-single"
+	seedSyncableConfig(t, d, id) // sibling state (dead-letter/stuck) persists only while the config exists
 	seedUserProposals(t, d, s, "evt", []string{"poison", "ok"})
 
 	syncable := &transientSyncable{
@@ -142,6 +143,7 @@ func TestDeadLetterStuckSyncable_SingleProposalSkipped(t *testing.T) {
 func TestSyncableStuck_PublishedAfterDebounce(t *testing.T) {
 	d, s := newWalDBStuck(t)
 	id := "stuck-status"
+	seedSyncableConfig(t, d, id)
 	seedUserProposals(t, d, s, "evt", []string{"poison"})
 
 	syncable := &transientSyncable{
@@ -174,6 +176,7 @@ func (stubRedactedErr) RedactedMessage() string { return "exec failed (detail in
 func TestSyncableStuck_RedactsRetryError(t *testing.T) {
 	d, s := newWalDBStuck(t)
 	id := "stuck-redact"
+	seedSyncableConfig(t, d, id)
 	seedUserProposals(t, d, s, "evt", []string{"poison"})
 
 	syncable := &transientSyncable{
@@ -252,6 +255,7 @@ func (s *batchTransientSyncable) soloSynced() []string {
 func TestDeadLetterStuckSyncable_BatchIsolation(t *testing.T) {
 	d, s := newWalDBStuck(t)
 	id := "stuck-batch"
+	seedSyncableConfig(t, d, id)
 	seedUserProposals(t, d, s, "evt", []string{"a", "poison", "b"})
 
 	syncable := &batchTransientSyncable{
@@ -298,6 +302,7 @@ func TestDeadLetterStuckSyncable_SurvivesRestart(t *testing.T) {
 	d1 := db.New(uint64(1), db.Peers{1: ""}, s1, p, nil, nil,
 		db.WithTickInterval(testTickInterval), db.WithSyncStuckThreshold(50*time.Millisecond))
 	seedUserProposals(t, d1, s1, "evt", []string{"poison"})
+	seedSyncableConfig(t, d1, id) // the run-1 dead-letter persists (bbolt) into run 2 only if the config exists when it's written
 
 	syncable1 := &transientSyncable{
 		stuck:        map[string]bool{"poison": true},

@@ -49,6 +49,17 @@ func (s *Storage) advanceIngestSourceSeq(id string, seq uint64) error {
 		if b == nil {
 			return ErrBucketMissing
 		}
+		// Invariant: the highwater tracks a live ingestable only. An ingest proposal
+		// can apply after the config was deleted (an in-flight proposal committing
+		// post-delete, or an old proposal replayed from the log before a same-id
+		// recreate). Without this guard it re-establishes an orphaned highwater that
+		// makes a same-id recreate's re-emitted CDC proposals get dropped pre-raft
+		// (SourceSeq <= highwater — see IngestSourceSeqHighwater's caller). So if the
+		// config is gone, drop the advance and reap any lingering value. Deterministic:
+		// config existence is replicated state applied in identical log order.
+		if !configExists(tx, ingestableBucket, []byte(id)) {
+			return b.Delete([]byte(id))
+		}
 		if raw := b.Get([]byte(id)); len(raw) == 8 {
 			if cur := binary.BigEndian.Uint64(raw); seq <= cur {
 				return nil

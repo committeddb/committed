@@ -78,6 +78,10 @@ func deadLetterMigration(t *testing.T, d *db.DB, s *wal.Storage, syncID string, 
 func TestSync_MigrationRuntimeError_DeadLettersTypeAndSyncable(t *testing.T) {
 	d, s, reader := newWalDBWithMetrics(t)
 	const syncID = "ac-sync"
+	// The syncable dead-letter persists only while the syncable config exists (the
+	// type-migration dead-letter, keyed by type id, is unaffected — see the sibling
+	// follow-up ticket).
+	seedSyncableConfig(t, d, syncID)
 
 	index, _ := deadLetterMigration(t, d, s, syncID, nil)
 

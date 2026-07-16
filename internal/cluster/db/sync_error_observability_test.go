@@ -53,6 +53,9 @@ func (s *permanentSyncable) Close() error { return nil }
 func TestSync_PermanentError_DeadLettersAndCounts(t *testing.T) {
 	d, s, reader := newWalDBWithMetrics(t)
 	id := "perm-sync"
+	// The dead-letter now persists only while the syncable config exists; the
+	// direct-d.Sync idiom skips config application, so seed it (see seedSyncableConfig).
+	seedSyncableConfig(t, d, id)
 	seedUserProposals(t, d, s, "evt", []string{"bad-row"})
 
 	ctx, cancel := context.WithCancel(context.Background())

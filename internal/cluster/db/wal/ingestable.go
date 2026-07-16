@@ -95,7 +95,14 @@ func (s *Storage) deleteIngestable(id []byte) error {
 		// `s.databases[id] = nil` here was a copy-paste leftover from
 		// deleteDatabase that could nil out a live database connection if
 		// an ingestable and database happened to share an id.
-		return deleteVersioned(b, id)
+		if err := deleteVersioned(b, id); err != nil {
+			return err
+		}
+		// Sweep the per-ingestable-id source-seq highwater (kept outside the config
+		// sub-bucket and not a delete-bundle tombstone) so a same-id recreate's
+		// re-emitted CDC proposals aren't dropped pre-raft. Same tx → atomic. The
+		// topic refresh-epoch is deliberately NOT swept (topic-keyed, must survive).
+		return sweepIngestableSiblingState(tx, id)
 	})
 	if err != nil {
 		return err

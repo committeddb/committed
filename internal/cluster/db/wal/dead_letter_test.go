@@ -8,6 +8,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
+	parser "github.com/committeddb/committed/internal/cluster/db/parser"
 )
 
 // applyDeadLetter commits one SyncableDeadLetter entity at raft entry
@@ -31,13 +32,16 @@ func applyDeadLetter(t *testing.T, s *StorageWrapper, entryIdx uint64, dl *clust
 // the HTTP endpoint relies on: records come back in ascending raft-index
 // order, `since` is an exclusive cursor, and `limit` bounds the page.
 func TestSyncableDeadLetters_StoreOrderingAndCursor(t *testing.T) {
-	s := NewStorage(t, nil)
+	s := NewStorageWithParser(t, nil, parser.New())
 	defer s.Cleanup()
 
 	const id = "orders-sync"
-	applyDeadLetter(t, s, 1, &cluster.SyncableDeadLetter{ID: id, Index: 30, TimestampUnixNano: 300, Kind: "permanent", Message: "c"})
-	applyDeadLetter(t, s, 2, &cluster.SyncableDeadLetter{ID: id, Index: 10, TimestampUnixNano: 100, Kind: "permanent", Message: "a"})
-	applyDeadLetter(t, s, 3, &cluster.SyncableDeadLetter{ID: id, Index: 20, TimestampUnixNano: 200, Kind: "permanent", Message: "b"})
+	// A dead-letter now persists only while its syncable config exists (the
+	// per-config-id write-guard), so seed the config before recording failures.
+	seedSyncableConfig(t, s, id, 1)
+	applyDeadLetter(t, s, 2, &cluster.SyncableDeadLetter{ID: id, Index: 30, TimestampUnixNano: 300, Kind: "permanent", Message: "c"})
+	applyDeadLetter(t, s, 3, &cluster.SyncableDeadLetter{ID: id, Index: 10, TimestampUnixNano: 100, Kind: "permanent", Message: "a"})
+	applyDeadLetter(t, s, 4, &cluster.SyncableDeadLetter{ID: id, Index: 20, TimestampUnixNano: 200, Kind: "permanent", Message: "b"})
 
 	// Ascending by failed-proposal index, regardless of apply order.
 	all, err := s.SyncableDeadLetters(id, 0, 100)
@@ -69,11 +73,13 @@ func TestSyncableDeadLetters_StoreOrderingAndCursor(t *testing.T) {
 // partitioned by syncable id and an unknown id is an empty result, not an
 // error.
 func TestSyncableDeadLetters_PerSyncableAndUnknown(t *testing.T) {
-	s := NewStorage(t, nil)
+	s := NewStorageWithParser(t, nil, parser.New())
 	defer s.Cleanup()
 
-	applyDeadLetter(t, s, 1, &cluster.SyncableDeadLetter{ID: "a", Index: 5, Kind: "permanent", Message: "x"})
-	applyDeadLetter(t, s, 2, &cluster.SyncableDeadLetter{ID: "b", Index: 7, Kind: "permanent", Message: "y"})
+	seedSyncableConfig(t, s, "a", 1)
+	seedSyncableConfig(t, s, "b", 2)
+	applyDeadLetter(t, s, 3, &cluster.SyncableDeadLetter{ID: "a", Index: 5, Kind: "permanent", Message: "x"})
+	applyDeadLetter(t, s, 4, &cluster.SyncableDeadLetter{ID: "b", Index: 7, Kind: "permanent", Message: "y"})
 
 	a, err := s.SyncableDeadLetters("a", 0, 100)
 	require.NoError(t, err)
@@ -96,22 +102,24 @@ func TestSyncableDeadLetters_PerSyncableAndUnknown(t *testing.T) {
 func TestSyncableDeadLetters_IdempotentAndDeterministic(t *testing.T) {
 	const id = "sync"
 
-	s1 := NewStorage(t, nil)
+	s1 := NewStorageWithParser(t, nil, parser.New())
 	defer s1.Cleanup()
-	applyDeadLetter(t, s1, 1, &cluster.SyncableDeadLetter{ID: id, Index: 10, TimestampUnixNano: 100, Kind: "permanent", Message: "a"})
-	applyDeadLetter(t, s1, 2, &cluster.SyncableDeadLetter{ID: id, Index: 20, TimestampUnixNano: 200, Kind: "permanent", Message: "b"})
+	seedSyncableConfig(t, s1, id, 1)
+	applyDeadLetter(t, s1, 2, &cluster.SyncableDeadLetter{ID: id, Index: 10, TimestampUnixNano: 100, Kind: "permanent", Message: "a"})
+	applyDeadLetter(t, s1, 3, &cluster.SyncableDeadLetter{ID: id, Index: 20, TimestampUnixNano: 200, Kind: "permanent", Message: "b"})
 	// Re-apply index 10 (replay) — must overwrite, not duplicate.
-	applyDeadLetter(t, s1, 3, &cluster.SyncableDeadLetter{ID: id, Index: 10, TimestampUnixNano: 100, Kind: "permanent", Message: "a"})
+	applyDeadLetter(t, s1, 4, &cluster.SyncableDeadLetter{ID: id, Index: 10, TimestampUnixNano: 100, Kind: "permanent", Message: "a"})
 
 	got, err := s1.SyncableDeadLetters(id, 0, 100)
 	require.NoError(t, err)
 	require.Equal(t, []uint64{10, 20}, indexesOf(got), "re-applying the same index must not duplicate the record")
 
 	// A second replica applies the same records in the opposite order.
-	s2 := NewStorage(t, nil)
+	s2 := NewStorageWithParser(t, nil, parser.New())
 	defer s2.Cleanup()
-	applyDeadLetter(t, s2, 1, &cluster.SyncableDeadLetter{ID: id, Index: 20, TimestampUnixNano: 200, Kind: "permanent", Message: "b"})
-	applyDeadLetter(t, s2, 2, &cluster.SyncableDeadLetter{ID: id, Index: 10, TimestampUnixNano: 100, Kind: "permanent", Message: "a"})
+	seedSyncableConfig(t, s2, id, 1)
+	applyDeadLetter(t, s2, 2, &cluster.SyncableDeadLetter{ID: id, Index: 20, TimestampUnixNano: 200, Kind: "permanent", Message: "b"})
+	applyDeadLetter(t, s2, 3, &cluster.SyncableDeadLetter{ID: id, Index: 10, TimestampUnixNano: 100, Kind: "permanent", Message: "a"})
 
 	got2, err := s2.SyncableDeadLetters(id, 0, 100)
 	require.NoError(t, err)
@@ -123,9 +131,10 @@ func TestSyncableDeadLetters_IdempotentAndDeterministic(t *testing.T) {
 // what was skipped after a node bounce.
 func TestSyncableDeadLetters_SurvivesReopen(t *testing.T) {
 	const id = "sync"
-	s := NewStorage(t, nil)
+	s := NewStorageWithParser(t, nil, parser.New())
 	defer s.Cleanup()
-	applyDeadLetter(t, s, 1, &cluster.SyncableDeadLetter{ID: id, Index: 42, TimestampUnixNano: 1, Kind: "permanent", Message: "boom"})
+	seedSyncableConfig(t, s, id, 1)
+	applyDeadLetter(t, s, 2, &cluster.SyncableDeadLetter{ID: id, Index: 42, TimestampUnixNano: 1, Kind: "permanent", Message: "boom"})
 
 	reopened, err := s.CloseAndReopen()
 	require.NoError(t, err)

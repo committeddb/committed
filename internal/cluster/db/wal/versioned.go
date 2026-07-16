@@ -139,6 +139,19 @@ func deleteVersioned(resourceBucket *bolt.Bucket, id []byte) error {
 	return resourceBucket.DeleteBucket(id)
 }
 
+// configExists reports whether a versioned config of the given kind is currently
+// present for id — i.e. the id's versioned sub-bucket exists under configBucket
+// (deleteVersioned removes exactly that sub-bucket). The per-config-id sibling
+// writers gate their Puts on this so a worker bump that commits AFTER the config
+// was deleted reaps the orphan instead of re-establishing it; otherwise a same-id
+// recreate resumes from stale sibling state and silently skips work. Config
+// existence is replicated state applied in identical log order on every node, so
+// the gate is deterministic.
+func configExists(tx *bolt.Tx, configBucket, id []byte) bool {
+	cfg := tx.Bucket(configBucket)
+	return cfg != nil && cfg.Bucket(id) != nil
+}
+
 // forEachCurrent iterates over all resources in a bucket, calling fn with
 // the resource ID and the current version's data.
 func forEachCurrent(resourceBucket *bolt.Bucket, fn func(id []byte, data []byte) error) error {

@@ -8,6 +8,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
+	parser "github.com/committeddb/committed/internal/cluster/db/parser"
 )
 
 // applyIngestSeq commits one ingest proposal at raft index idx tagged
@@ -39,17 +40,21 @@ func applyIngestSeq(t *testing.T, s *StorageWrapper, idx uint64, ingestableID st
 func TestSourceSeqHighwater_DeterministicAndIdempotent(t *testing.T) {
 	const id = "ing"
 
-	s1 := NewStorage(t, nil)
+	s1 := NewStorageWithParser(t, nil, parser.New())
 	defer s1.Cleanup()
+	// The highwater now advances only while the ingestable config exists (the
+	// per-config-id write-guard), so seed the config before applying seqs.
+	seedIngestableConfig(t, s1, id, 1)
 	for i, seq := range []uint64{1, 2, 3, 4, 5} {
-		applyIngestSeq(t, s1, uint64(i+1), id, seq)
+		applyIngestSeq(t, s1, uint64(i+2), id, seq)
 	}
 
-	s2 := NewStorage(t, nil)
+	s2 := NewStorageWithParser(t, nil, parser.New())
 	defer s2.Cleanup()
+	seedIngestableConfig(t, s2, id, 1)
 	// Different order, and seq 5 applied twice — max() must absorb both.
 	for i, seq := range []uint64{3, 1, 5, 2, 5, 4} {
-		applyIngestSeq(t, s2, uint64(i+1), id, seq)
+		applyIngestSeq(t, s2, uint64(i+2), id, seq)
 	}
 
 	require.Equal(t, uint64(5), s1.IngestSourceSeqHighwater(id))
@@ -68,10 +73,11 @@ func TestSourceSeqHighwater_DeterministicAndIdempotent(t *testing.T) {
 func TestSourceSeqHighwater_SurvivesReopen(t *testing.T) {
 	const id = "ing"
 
-	s := NewStorage(t, nil)
+	s := NewStorageWithParser(t, nil, parser.New())
 	defer s.Cleanup()
+	seedIngestableConfig(t, s, id, 1)
 	for i, seq := range []uint64{10, 20, 30} {
-		applyIngestSeq(t, s, uint64(i+1), id, seq)
+		applyIngestSeq(t, s, uint64(i+2), id, seq)
 	}
 	require.Equal(t, uint64(30), s.IngestSourceSeqHighwater(id))
 

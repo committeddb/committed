@@ -76,7 +76,7 @@ func (s *Storage) saveIngestablePosition(e *cluster.Entity) error {
 		// any lingering value, reaping an orphan rather than creating one.
 		// Deterministic: config existence is replicated state applied in identical
 		// log order on every node.
-		if cfg := tx.Bucket(ingestableBucket); cfg == nil || cfg.Bucket(e.Key) == nil {
+		if !configExists(tx, ingestableBucket, e.Key) {
 			if err := b.Delete(e.Key); err != nil {
 				return fmt.Errorf("[wal.ingestable_position] reap orphan: %w", err)
 			}
