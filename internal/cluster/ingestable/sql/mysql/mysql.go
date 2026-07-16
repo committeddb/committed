@@ -288,6 +288,23 @@ func readSourceGTIDState(ctx context.Context, config *sql.Config) (executed, pur
 	return executed, purged, nil
 }
 
+// fetchCharsetPlans reads the source's collation catalog into a collation-id ->
+// UTF-8 transcoding plan (see resolveCharsetPlans) over one short-lived
+// connection, so the stream can transcode a non-utf8mb4 character column to match
+// the snapshot path.
+func fetchCharsetPlans(ctx context.Context, config *sql.Config) (map[uint64]charsetPlan, error) {
+	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	db, err := gosql.Open("mysql", buildDSN(config.ConnectionString))
+	if err != nil {
+		return nil, fmt.Errorf("open connection: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	return resolveCharsetPlans(cctx, db)
+}
+
 // SourceColumns implements sql.Dialect: it introspects each watched table's
 // columns (in ordinal order) so the parser can expand a MapAllColumns config
 // into explicit mappings. Read-only; one short-lived connection.
@@ -360,6 +377,13 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 		resumeProgress = posProto.SnapshotProgress
 		currentEpoch = posProto.RefreshEpoch
 	}
+
+	// charsetPlans is the source's collation catalog, read once and reused across
+	// reconnects (collation ids are server-immutable). It lets the stream
+	// transcode a non-utf8mb4 character column to UTF-8 so CDC matches the
+	// snapshot. Fetched lazily inside the loop so a source that is briefly down at
+	// start backs off and retries like any other connect step.
+	var charsetPlans map[uint64]charsetPlan
 
 	// Outer loop: each iteration either snapshots (first run, or
 	// resuming mid-snapshot) or creates a canal, runs it until it
@@ -497,6 +521,31 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			}
 		}
 
+		// Read the source's collation catalog once (reused across reconnects) so
+		// the stream can transcode a non-utf8mb4 character column to UTF-8. Backs
+		// off and retries like a failed StartSync — the syncer just connected, so
+		// close it before looping to avoid leaking the connection.
+		if charsetPlans == nil {
+			charsetPlans, err = fetchCharsetPlans(ctx, config)
+			if err != nil {
+				syncer.Close()
+				zap.L().Warn("read source collation catalog failed, retrying",
+					zap.Duration("backoff", backoff),
+					zap.Error(err),
+				)
+				select {
+				case <-ctx.Done():
+					return nil
+				case <-time.After(backoff):
+				}
+				backoff *= 2
+				if backoff > syncerBackoffMax {
+					backoff = syncerBackoffMax
+				}
+				continue
+			}
+		}
+
 		// --- set up the handler and run the stream ---
 		// Every streamed entity carries the current refresh epoch, floored to
 		// max(topic highwater, 1): never stamp a streamed row below a generation
@@ -509,6 +558,7 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			proposalChan: pr,
 			positionChan: po,
 			epoch:        currentEpoch,
+			charsetPlans: charsetPlans,
 			// Lowercase the filter list so the binlog row filter (which lowercases
 			// the incoming table name) matches regardless of the config's case;
 			// without this a `tables = ["Users"]` config drops every streamed row.
@@ -604,6 +654,14 @@ type MySQLEventHandler struct {
 	proposalChan chan<- *cluster.Proposal
 	positionChan chan<- cluster.Position
 	tables       []string
+
+	// charsetPlans is the source's collation catalog (collation id -> UTF-8
+	// transcoding plan), read once at stream start. handleRows hands it to
+	// columnsFromTableMap so a non-utf8mb4 character column's CDC bytes are
+	// transcoded to UTF-8 and agree with the snapshot path. Nil degrades to
+	// passthrough (every column treated as already-UTF-8) — the pre-feature
+	// behavior, kept for tests that construct a handler directly.
+	charsetPlans map[uint64]charsetPlan
 
 	// epoch is the reconciling-refresh generation stamped on every streamed
 	// entity and written into every streaming checkpoint, so it survives a
@@ -819,7 +877,7 @@ func (h *MySQLEventHandler) handleRows(ctx context.Context, header *replication.
 	// Decode against the schema carried by THIS row's binlog TableMapEvent — the
 	// schema as of the write — not live information_schema, which reflects the
 	// post-ALTER columns and would silently mis-join a still-replaying old image.
-	ts, err := columnsFromTableMap(e.Table)
+	ts, err := columnsFromTableMap(e.Table, h.charsetPlans)
 	if err != nil {
 		return fmt.Errorf("decode schema of %q from binlog: %w", table, err)
 	}
@@ -888,7 +946,31 @@ func (h *MySQLEventHandler) rowEntity(ts *tableSchema, table, action string, row
 		if i >= len(row) {
 			break // row image has fewer columns than the current schema (DDL skew)
 		}
-		val := decodeEnumSet(col, row[i])
+		// Transcode a non-utf8mb4 character column's raw binlog bytes to UTF-8
+		// BEFORE they feed either the key or the payload, so both match the
+		// snapshot path (which reads UTF-8 via the driver's utf8mb4 session). Only
+		// character columns carry a transcoder; ENUM/SET labels were transcoded at
+		// schema time and BLOB/binary stay passthrough. go-mysql hands a
+		// VARCHAR/CHAR back as a string and a TEXT/BLOB as []byte, so both forms are
+		// transcoded and the original form preserved; a NULL (nil) is left alone. A
+		// byte sequence the decoder rejects skips the row (logged) rather than
+		// emitting corrupt data.
+		cell := row[i]
+		if col.transcode != nil {
+			transcoded, ok, err := transcodeCell(col.transcode, cell)
+			if err != nil {
+				zap.L().Warn("handleRows: skipping row with untranscodable text",
+					zap.String("table", table),
+					zap.String("column", col.name),
+					zap.Error(err),
+				)
+				return nil, false
+			}
+			if ok {
+				cell = transcoded
+			}
+		}
+		val := decodeEnumSet(col, cell)
 		raw[col.name] = val
 		catByName[col.name] = col.cat
 		if b, ok := val.([]byte); ok {
