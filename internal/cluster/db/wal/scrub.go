@@ -275,20 +275,35 @@ func (s *Storage) runScrub(bound uint64) error {
 	}
 	swapped = true
 
+	// The two renames above changed the events/ parent directory; fsync it so the
+	// completed swap survives an immediate crash (an un-persisted rename could
+	// resurrect the pre-scrub log, or leave events/ missing until recoverScrubDirs
+	// runs). Best-effort — the swap is already committed and visible here.
+	s.syncDirBestEffort(filepath.Dir(s.eventLogDir), "event-log scrub swap")
+
 	// Post-swap reopen: s.eventLogDir now holds the scrubbed log. Reopen it or
 	// fatal — a returned error here previously left s.eventLog closed for the next
 	// appendEvent to hit as ErrClosed, a delayed crash mis-attributed to append.
 	s.reopenEventLogAfterSwapOrFatal("reopen event log after scrub")
-	if err := s.recomputeEventBoundsLocked(); err != nil {
-		return err
-	}
+	// Recompute the in-memory bounds against the re-densified log, or fatal. The
+	// swap has committed, so a failure here is NOT survivable: returning it into
+	// the survive-and-continue scrub worker would leave stale eventIndex/
+	// firstEventIndex and an un-bumped scrubGen (below) while the on-disk log is
+	// the new one — in-flight Readers would never re-derive their walSeq cursor
+	// and would silently read wrong offsets. A restart recomputes cleanly (Open
+	// does the same). Same reason as reopenEventLogAfterSwapOrFatal.
+	s.recomputeEventBoundsAfterSwapOrFatal("recompute event bounds after scrub")
 	// Bump the generation so in-flight Readers re-derive their walSeq cursor
 	// (the rewrite re-densified the seqs underneath them). Done under
 	// eventMu.Lock, before releasing it, so no Reader can observe the new log
 	// without also observing the new generation.
 	s.scrubGen.Add(1)
 	if err := os.RemoveAll(retired); err != nil {
-		return err
+		// The swap already succeeded; a leftover events.retired/ is harmless — the
+		// next Open's recoverScrubDirs (and temp sweep) reaps it. Warn and continue
+		// rather than returning a failure the survive-worker only logs anyway.
+		s.logger.Warn("could not remove retired event-log dir after scrub swap; it will be reaped on the next restart",
+			zap.String("dir", retired), zap.Error(err))
 	}
 	s.logger.Info("scrubbed permanent event log",
 		zap.Uint64("bound", bound), zap.Int("tombstonedKeys", len(sel)))
@@ -310,6 +325,22 @@ func (s *Storage) reopenEventLogAfterSwapOrFatal(what string) {
 			zap.String("op", what), zap.Error(err))
 	}
 	s.eventLog = reopened
+}
+
+// recomputeEventBoundsAfterSwapOrFatal recomputes the in-memory event bounds
+// after a committed event-log swap, or FATALS if the recompute fails — the
+// post-swap analogue of reopenEventLogAfterSwapOrFatal. Once the swap has
+// committed, the on-disk log is the new (re-densified) one; a returned error
+// would drop into the survive-and-continue scrub worker, which keeps serving
+// with stale eventIndex/firstEventIndex and an un-bumped scrubGen — so in-flight
+// Readers never re-derive their walSeq cursor and silently read wrong offsets.
+// A restart recomputes the bounds cleanly (Open does). Caller holds eventMu.Lock
+// and has already reopened s.eventLog at the swapped-in dir.
+func (s *Storage) recomputeEventBoundsAfterSwapOrFatal(what string) {
+	if err := s.recomputeEventBoundsLocked(); err != nil {
+		s.logger.Fatal("event-log swap committed but in-memory bounds could not be recomputed; the node cannot continue with stale bounds (restart to recover)",
+			zap.String("op", what), zap.Error(err))
+	}
 }
 
 // scrubFilterEntry decides the fate of one event-log record (raw = unframed

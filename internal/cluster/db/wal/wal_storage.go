@@ -373,6 +373,11 @@ type Storage struct {
 	dataEventIndex atomic.Uint64
 
 	logger *zap.Logger
+	// fsyncDisabled mirrors the WithoutFsync option (also passed to bbolt as
+	// NoSync at Open). The file/directory swaps in snapshot.go and scrub.go read
+	// it to skip their fsync legs so the test suite stays fast; production leaves
+	// it false so a rename is crash-durable.
+	fsyncDisabled bool
 	// metrics drives the committed.wal.corrupt_entries counter, bumped by
 	// recordCorrupt when a per-entry checksum verification fails on read.
 	// Nil when metrics are disabled (no OTel endpoint); every use is
@@ -524,6 +529,7 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		sync:            sync,
 		ingest:          ingest,
 		logger:          logger,
+		fsyncDisabled:   cfg.fsyncDisabled,
 		configErrors:    make(map[string]error),
 		metrics:         cfg.metrics,
 		lostCallback:    cfg.lostCallback,

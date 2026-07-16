@@ -170,10 +170,22 @@ func (s *Storage) RestoreSnapshot(snap *pb.Snapshot) error {
 	if err := os.WriteFile(tmpPath, snap.Data, 0o600); err != nil {
 		return fmt.Errorf("write restored bbolt to tmp: %w", err)
 	}
+	// fsync the temp file BEFORE the rename: os.WriteFile does not sync, so
+	// without this a crash right after Rename could surface boltPath with
+	// unflushed/zero data blocks and the next bolt.Open would fail — defeating
+	// the atomic swap this function exists to provide. Abort (leaving the live
+	// file untouched) if the sync fails.
+	if err := s.syncFile(tmpPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("fsync restored bbolt tmp: %w", err)
+	}
 	if err := os.Rename(tmpPath, boltPath); err != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("rename restored bbolt: %w", err)
 	}
+	// Persist the rename itself (the parent directory entry) so the swapped-in
+	// file survives a crash. Best-effort: the rename is already visible here.
+	s.syncDirBestEffort(filepath.Dir(boltPath), "restore snapshot bbolt swap")
 
 	// Reopen bbolt. Match the Open-path options: 1s timeout, NoSync
 	// stays off (fsync path; restored snapshots should be durable).
@@ -361,6 +373,11 @@ func (s *Storage) compactLocked() error {
 	// worker and left the closed handle for the apply path to hit later, as a
 	// delayed ErrDatabaseNotOpen crash mis-attributed to apply.
 	s.reopenKVAfterSwapOrFatal(boltPath, boltOpts, "reopen bbolt after compaction")
+	// bolt.Compact already fsync'd the compacted data (Close with NoSync off), but
+	// the rename's parent-directory entry is not durable until the dir is fsync'd.
+	// Best-effort: a lost rename only resurrects the pre-compaction file (still
+	// openable; the next scrub re-compacts), so this need not fail the swap.
+	s.syncDirBestEffort(filepath.Dir(boltPath), "compaction bbolt swap")
 	return nil
 }
 
