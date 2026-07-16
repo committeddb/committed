@@ -45,12 +45,26 @@ func (s *Storage) saveDatabase(t *cluster.Configuration) error {
 		// entry is re-delivered (entity fsynced, applied-index not), and appending
 		// again would duplicate the version on the replaying node — diverging its
 		// version history and rollback-by-number from nodes that didn't crash
-		// there. Mirrors saveType. The node-local build below still runs, so a
-		// replay re-establishes the cached connection.
-		if existing, gerr := getVersioned(b, []byte(t.ID)); gerr != nil || !bytes.Equal(existing, bs) {
+		// there. Mirrors saveType.
+		existing, gerr := getVersioned(b, []byte(t.ID))
+		identical := gerr == nil && bytes.Equal(existing, bs)
+		if !identical {
 			if _, err := putVersioned(b, []byte(t.ID), bs); err != nil {
 				return fmt.Errorf("[wal.database] putVersioned: %w", err)
 			}
+		}
+
+		// Keep the existing live pool on a byte-identical re-POST (or crash-apply
+		// replay): rebuilding would orphan the current *sql.DB — leaking its
+		// connection pool — and worse, any syncable that captured this handle at
+		// build time would keep using it while s.databases points at a duplicate.
+		// A syncable resolves storage.Database(id) once and a database apply does
+		// not rebuild syncables, so the cached handle MUST be preserved when the
+		// connection is unchanged. (Only rebuild when the prior build failed and
+		// left no handle — a fixed ${VAR} may now succeed.)
+		if cur, ok := s.databases[t.ID]; ok && cur != nil && identical {
+			s.logger.Debug("database re-POST byte-identical; keeping existing connection pool", zap.String("id", t.ID))
+			return nil
 		}
 
 		// Node-local construction: build the live Database. ParseDatabase
@@ -69,6 +83,16 @@ func (s *Storage) saveDatabase(t *cluster.Configuration) error {
 		}
 		s.clearConfigError("database", t.ID)
 
+		// Close the superseded pool before swapping so a changed-connection re-POST
+		// doesn't leak it. Safe: the propose-time guard (guardDatabaseConfigChange)
+		// rejects a connection change while syncables reference this database, so a
+		// changed config reaching here has no live dependents mid-use of this handle.
+		if prev, ok := s.databases[t.ID]; ok && prev != nil {
+			if cerr := prev.Close(); cerr != nil {
+				s.logger.Warn("close superseded database handle", zap.String("id", t.ID), zap.Error(cerr))
+			}
+		}
+
 		s.logger.Debug("database saved", zap.String("id", t.ID), zap.String("name", name))
 		s.databases[t.ID] = db
 
@@ -86,6 +110,17 @@ func (s *Storage) deleteDatabase(id []byte) error {
 			return err
 		}
 
+		// Close the superseded pool before dropping it from the cache so a delete
+		// doesn't leak its connections. There is no DELETE /database route today, so
+		// this is unreachable in practice; a future delete route MUST reject the
+		// delete while syncables reference the database (mirror ProposeDatabase's
+		// guardDatabaseConfigChange), because a syncable captures this pool at build
+		// time and would be left on a closed handle otherwise.
+		if prev, ok := s.databases[string(id)]; ok && prev != nil {
+			if cerr := prev.Close(); cerr != nil {
+				s.logger.Warn("close superseded database handle on delete", zap.String("id", string(id)), zap.Error(cerr))
+			}
+		}
 		s.databases[string(id)] = nil
 		return nil
 	})

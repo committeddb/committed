@@ -48,6 +48,18 @@ func (p *SyncableParser) TopicsFromConfig(v *cluster.ParsedConfig) []string {
 	return []string{topic}
 }
 
+// DatabasesFromConfig implements cluster.SyncableDatabaseExtractor: a plain sql
+// syncable writes to the single destination database named at sql.db. Read
+// straight from the config so a database connection change can enumerate the
+// syncables that captured its pool.
+func (p *SyncableParser) DatabasesFromConfig(v *cluster.ParsedConfig) []string {
+	db := v.GetString("sql.db")
+	if db == "" {
+		return nil
+	}
+	return []string{db}
+}
+
 func (p *SyncableParser) ParseConfig(v *cluster.ParsedConfig, storage cluster.DatabaseStorage) (*Config, error) {
 	sqlDB := v.GetString("sql.db")
 	if sqlDB == "" {

@@ -16,5 +16,10 @@ type Parser interface {
 	// the syncables an ingestable primaryKey change affects. Returns nil for a
 	// syncable kind whose parser can't extract topics.
 	SyncableTopics(mimeType string, data []byte) ([]string, error)
+	// SyncableDatabases reports which destination databases the syncable config
+	// references, read from the config alone, so the propose path can enumerate
+	// the syncables a database connection change would break. Returns nil for a
+	// syncable kind whose parser can't extract databases.
+	SyncableDatabases(mimeType string, data []byte) ([]string, error)
 	Validate(mimeType string, data []byte) error
 }

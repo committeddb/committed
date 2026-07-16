@@ -274,6 +274,18 @@ type SyncableTopicExtractor interface {
 	TopicsFromConfig(v *ParsedConfig) []string
 }
 
+// SyncableDatabaseExtractor is the optional SyncableParser extension that reports
+// which database configs a syncable references for its destination pool, read
+// straight from the parsed config WITHOUT building the syncable (no Init, no
+// destination connection). The propose path uses it to find the syncables a
+// database connection change would break — they capture storage.Database(id) at
+// build time and are not rebuilt when the database re-applies — so a rejected
+// change can name exactly which syncables to tear down (see DatabaseInUseError).
+// A parser that does not implement it contributes no dependents.
+type SyncableDatabaseExtractor interface {
+	DatabasesFromConfig(v *ParsedConfig) []string
+}
+
 // DependentsAware is the optional RebuildRequiredError extension a destination
 // error implements when it wants the propose path to enrich it with the
 // syncables that consume the affected topic. The propose path owns the topology

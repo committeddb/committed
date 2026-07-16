@@ -110,6 +110,18 @@ func (p *ProjectionSyncableParser) TopicsFromConfig(v *cluster.ParsedConfig) []s
 	return topics
 }
 
+// DatabasesFromConfig implements cluster.SyncableDatabaseExtractor: a projection
+// writes to the single destination database named at sql-projection.db. Read
+// straight from the config so a database connection change can enumerate the
+// syncables that captured its pool.
+func (p *ProjectionSyncableParser) DatabasesFromConfig(v *cluster.ParsedConfig) []string {
+	db := v.GetString("sql-projection.db")
+	if db == "" {
+		return nil
+	}
+	return []string{db}
+}
+
 func (p *ProjectionSyncableParser) ParseConfig(v *cluster.ParsedConfig, storage cluster.DatabaseStorage) (*ProjectionConfig, error) {
 	sqlDB := v.GetString("sql-projection.db")
 	db, err := storage.Database(sqlDB)
