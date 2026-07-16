@@ -8,5 +8,6 @@ package dialects
 
 import (
 	_ "github.com/testcontainers/testcontainers-go"
+	_ "github.com/testcontainers/testcontainers-go/modules/mysql"
 	_ "github.com/testcontainers/testcontainers-go/modules/postgres"
 )
