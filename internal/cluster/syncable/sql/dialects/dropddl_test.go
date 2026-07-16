@@ -11,7 +11,8 @@ import (
 
 // DropDDL is the destructive mirror of CreateDDL: an idempotent
 // DROP TABLE IF EXISTS that cascades to the table's indexes, so it needs no
-// separate index-drop. Every dialect produces the same statement.
+// separate index-drop. The table is a config identifier, so each dialect quotes
+// it with its own delimiter.
 func TestDropDDL(t *testing.T) {
 	cfg := &sql.Config{
 		Table:      "mytable",
@@ -23,8 +24,6 @@ func TestDropDDL(t *testing.T) {
 		Indexes: []sql.Index{{IndexName: "idx_name", ColumnNames: "name"}},
 	}
 
-	want := "DROP TABLE IF EXISTS mytable;"
-
-	require.Equal(t, want, (&dialects.PostgreSQLDialect{}).DropDDL(cfg))
-	require.Equal(t, want, (&dialects.MySQLDialect{}).DropDDL(cfg))
+	require.Equal(t, `DROP TABLE IF EXISTS "mytable";`, (&dialects.PostgreSQLDialect{}).DropDDL(cfg))
+	require.Equal(t, "DROP TABLE IF EXISTS `mytable`;", (&dialects.MySQLDialect{}).DropDDL(cfg))
 }

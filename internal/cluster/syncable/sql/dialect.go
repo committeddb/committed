@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/sqlident"
 )
 
 type Dialect interface {
@@ -196,6 +197,47 @@ func validateMappings(mappings []Mapping) error {
 			return fmt.Errorf(
 				"whole-payload mapping for column %q: jsonPath %q binds the entire payload as JSON text and requires a JSON or text column type (JSONB, JSON, TEXT, VARCHAR, …); got %q",
 				m.Column, wholePayloadPath, m.SQLType)
+		}
+	}
+	return nil
+}
+
+// validateConfigIdentifiers gates the config-supplied SQL identifiers and type
+// expressions at config time, so a bad one is a clean 400 rather than a deferred
+// driver error (or, before the identifier-quoting seam, a raw interpolation).
+// Every identifier is quoted before it reaches SQL — so this is a conservative
+// guard (reject control chars / empty), NOT the injection defense; a type
+// expression cannot be quoted, so SQLType gets a strict charset. table may be
+// schema-qualified (a dot is a legitimate separator, so it is validated as a
+// whole rather than rejected for the dot). Empty table / mappings are already
+// rejected upstream, and an empty primaryKey/keyColumn means "not set", so those
+// are validated only when present.
+func validateConfigIdentifiers(table, primaryKey, keyColumn string, mappings []Mapping, indexes []Index) error {
+	if !sqlident.ValidIdent(table) {
+		return &cluster.FieldError{Field: "sql.table", Issue: fmt.Sprintf("not a valid SQL identifier: %q", table)}
+	}
+	if primaryKey != "" && !sqlident.ValidIdent(primaryKey) {
+		return &cluster.FieldError{Field: "sql.primaryKey", Issue: fmt.Sprintf("not a valid SQL identifier: %q", primaryKey)}
+	}
+	if keyColumn != "" && !sqlident.ValidIdent(keyColumn) {
+		return &cluster.FieldError{Field: "sql.keyColumn", Issue: fmt.Sprintf("not a valid SQL identifier: %q", keyColumn)}
+	}
+	for _, m := range mappings {
+		if !sqlident.ValidIdent(m.Column) {
+			return &cluster.FieldError{Field: "sql.mappings", Issue: fmt.Sprintf("column is not a valid SQL identifier: %q", m.Column)}
+		}
+		if !sqlident.ValidTypeExpr(m.SQLType) {
+			return &cluster.FieldError{Field: "sql.mappings", Issue: fmt.Sprintf("column %q has an invalid SQL type %q: only letters, digits, spaces, underscores, parentheses and commas are allowed", m.Column, m.SQLType)}
+		}
+	}
+	for _, idx := range indexes {
+		if !sqlident.ValidIdent(idx.IndexName) {
+			return &cluster.FieldError{Field: "sql.indexes", Issue: fmt.Sprintf("index name is not a valid SQL identifier: %q", idx.IndexName)}
+		}
+		for col := range strings.SplitSeq(idx.ColumnNames, ",") {
+			if !sqlident.ValidIdent(strings.TrimSpace(col)) {
+				return &cluster.FieldError{Field: "sql.indexes", Issue: fmt.Sprintf("index %q references an invalid column %q", idx.IndexName, strings.TrimSpace(col))}
+			}
 		}
 	}
 	return nil

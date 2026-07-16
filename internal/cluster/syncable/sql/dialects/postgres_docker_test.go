@@ -431,6 +431,70 @@ func TestPostgreSQLIntegration_KeylessAppendIdempotentOnReplay(t *testing.T) {
 	require.Equal(t, []string{"k", "v"}, names, "dedup metadata lives in the sidecar, not the user's table")
 }
 
+// TestPostgreSQLIntegration_SpecialIdentifiersRoundTrip is the end-to-end proof of
+// the identifier-quoting seam: a syncable whose table and columns are a reserved
+// word, a hyphen, a space, and mixed case — every one of which would be a syntax
+// error or resolve to the wrong (case-folded) name if interpolated raw — creates
+// its table, upserts on its quoted primary key, and honors a delete on its quoted
+// key column, all against real Postgres.
+func TestPostgreSQLIntegration_SpecialIdentifiersRoundTrip(t *testing.T) {
+	d := &dialects.PostgreSQLDialect{}
+	db, err := sql.NewDB(d, pgConnString)
+	require.Nil(t, err)
+	defer db.Close()
+
+	// Unique but deliberately special: uppercase + hyphen + space in the table,
+	// a space in a column, and the reserved word "select" as a column.
+	table := fmt.Sprintf("Order-Items %d", time.Now().UnixNano())
+	defer func() { _, _ = db.DB.Exec(d.DropDDL(&sql.Config{Table: table})) }()
+
+	q := func(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
+
+	cfg := &sql.Config{
+		Topic: eventType.ID,
+		Table: table,
+		Mappings: []sql.Mapping{
+			{JsonPath: "$.id", Column: "User Id", SQLType: "TEXT"},
+			{JsonPath: "$.sel", Column: "select", SQLType: "TEXT"},
+		},
+		PrimaryKey: "User Id",
+		KeyColumn:  "User Id",
+	}
+	syncable := sql.New(db, cfg)
+	require.Nil(t, syncable.Init(), "quoted CreateDDL must be valid PostgreSQL")
+	defer syncable.Close()
+
+	up := func(id, sel string) *cluster.Actual {
+		return &cluster.Actual{Entities: []*cluster.Entity{
+			cluster.NewUpsertEntity(eventType, []byte(id), []byte(fmt.Sprintf(`{"id":%q,"sel":%q}`, id, sel))),
+		}}
+	}
+
+	_, err = syncable.Sync(context.Background(), up("a", "one"))
+	require.NoError(t, err)
+	// Upsert the same key: the quoted ON CONFLICT target replaces in place.
+	_, err = syncable.Sync(context.Background(), up("a", "two"))
+	require.NoError(t, err)
+
+	var sel string
+	require.NoError(t, db.DB.QueryRow(
+		`SELECT `+q("select")+` FROM `+q(table)+` WHERE `+q("User Id")+` = $1`, "a").Scan(&sel))
+	require.Equal(t, "two", sel, "upsert on the quoted primary key replaced the value")
+
+	var count int
+	require.NoError(t, db.DB.QueryRow(`SELECT COUNT(*) FROM `+q(table)).Scan(&count))
+	require.Equal(t, 1, count, "upsert left exactly one row")
+
+	// A delete Actual exercises the quoted DELETE ... WHERE <keyCol> path.
+	_, err = syncable.Sync(context.Background(), &cluster.Actual{
+		Entities: []*cluster.Entity{cluster.NewDeleteEntity(eventType, []byte("a"))},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, db.DB.QueryRow(`SELECT COUNT(*) FROM `+q(table)).Scan(&count))
+	require.Equal(t, 0, count, "delete on the quoted key column removed the row")
+}
+
 // --- Whole-payload ("$") mappings ---
 
 var eventType = &cluster.Type{ID: "controlplane-event"}

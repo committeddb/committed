@@ -24,6 +24,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/ingestable/sql"
 	"github.com/committeddb/committed/internal/cluster/ingestable/sql/dialectpb"
+	"github.com/committeddb/committed/internal/cluster/sqlident"
 )
 
 // PostgreSQLDialect implements sql.Dialect for Postgres logical replication
@@ -935,9 +936,11 @@ func (d *PostgreSQLDialect) stream(
 }
 
 // quoteIdent double-quotes a PostgreSQL identifier to safely handle
-// special characters (hyphens, spaces, etc.) in names.
+// special characters (hyphens, spaces, etc.) in names. It delegates to the shared
+// sqlident seam so the ingest read path and the syncable write path escape
+// identifiers identically.
 func quoteIdent(s string) string {
-	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+	return sqlident.Postgres.Ident(s)
 }
 
 // ensurePublication creates the publication if it does not exist, or — if it
@@ -1624,14 +1627,10 @@ func emitSnapshotProgress(
 }
 
 // quoteTable quotes a potentially schema-qualified table name for use
-// in SQL queries. "public.orders" becomes "public"."orders".
+// in SQL queries. "public.orders" becomes "public"."orders". Delegates to the
+// shared sqlident seam (the syncable side quotes tables the same way).
 func quoteTable(table string) string {
-	parts := strings.Split(table, ".")
-	quoted := make([]string, len(parts))
-	for i, p := range parts {
-		quoted[i] = quoteIdent(p)
-	}
-	return strings.Join(quoted, ".")
+	return sqlident.Postgres.Table(table)
 }
 
 // flushPending emits all buffered entities as a single proposal and

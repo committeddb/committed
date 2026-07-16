@@ -4,16 +4,18 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/committeddb/committed/internal/cluster/sqlident"
 	"github.com/committeddb/committed/internal/cluster/syncable/sql"
 )
 
 // createDeleteSQL builds `DELETE FROM <table> WHERE <keyCol> = <placeholder>`.
 // The placeholder is the only dialect-specific bit (? for MySQL, $1 for
 // PostgreSQL); the single bound argument is the entity Key. Shared by every
-// dialect so the delete shape stays identical across them.
-func createDeleteSQL(config *sql.Config, placeholder string) string {
+// dialect so the delete shape stays identical across them. The table and key
+// column are config identifiers, so q quotes them for the dialect.
+func createDeleteSQL(config *sql.Config, placeholder string, q sqlident.Quoter) string {
 	return fmt.Sprintf("DELETE FROM %s WHERE %s = %s",
-		config.Table, config.DeleteKeyColumn(), placeholder)
+		q.Table(config.Table), q.Ident(config.DeleteKeyColumn()), placeholder)
 }
 
 // createClearSQL builds `UPDATE <table> SET <c1>=NULL,<c2>=NULL WHERE <keyCol>
@@ -21,17 +23,18 @@ func createDeleteSQL(config *sql.Config, placeholder string) string {
 // dialect-specific bit and the single bound argument is the entity Key; the SET
 // columns are all literal NULLs (no placeholders). Shared so the clear shape
 // stays identical across dialects. An UPDATE, not an upsert, so clearing an
-// absent row is a no-op.
-func createClearSQL(config *sql.Config, columns []string, placeholder string) string {
+// absent row is a no-op. Table and every SET/WHERE column are config
+// identifiers quoted by q.
+func createClearSQL(config *sql.Config, columns []string, placeholder string, q sqlident.Quoter) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "UPDATE %s SET ", config.Table)
+	fmt.Fprintf(&b, "UPDATE %s SET ", q.Table(config.Table))
 	for i, c := range columns {
 		if i > 0 {
 			b.WriteString(",")
 		}
-		fmt.Fprintf(&b, "%s=NULL", c)
+		fmt.Fprintf(&b, "%s=NULL", q.Ident(c))
 	}
-	fmt.Fprintf(&b, " WHERE %s = %s", config.DeleteKeyColumn(), placeholder)
+	fmt.Fprintf(&b, " WHERE %s = %s", q.Ident(config.DeleteKeyColumn()), placeholder)
 	return b.String()
 }
 
@@ -40,8 +43,8 @@ func createClearSQL(config *sql.Config, columns []string, placeholder string) st
 // index-drop is needed. IF EXISTS makes it idempotent: tearing down a table
 // that is already gone (a re-run, or a node that never created it) is a no-op,
 // not an error. Shared by every dialect so teardown is identical across them.
-func dropDDL(config *sql.Config) string {
-	return fmt.Sprintf("DROP TABLE IF EXISTS %s;", config.Table)
+func dropDDL(config *sql.Config, q sqlident.Quoter) string {
+	return fmt.Sprintf("DROP TABLE IF EXISTS %s;", q.Table(config.Table))
 }
 
 // aggregateSidecarConfig synthesizes the plain Config that createDDL /
@@ -70,9 +73,9 @@ func aggregateSidecarConfig(spec sql.AggregateSpec, jsonType, keyType string) *s
 // parent. The placeholder is the only dialect-specific bit; the single bound
 // argument is the child Key. Shared so the shape stays identical across
 // dialects.
-func createAggregateParentLookupSQL(spec sql.AggregateSpec, placeholder string) string {
+func createAggregateParentLookupSQL(spec sql.AggregateSpec, placeholder string, q sqlident.Quoter) string {
 	return fmt.Sprintf("SELECT %s FROM %s WHERE %s = %s",
-		sql.SidecarParentKey, spec.Sidecar, sql.SidecarChildKey, placeholder)
+		sql.SidecarParentKey, q.Table(spec.Sidecar), sql.SidecarChildKey, placeholder)
 }
 
 // createAggregateAffectedParentsSQL builds `SELECT DISTINCT parent_key FROM
@@ -80,9 +83,9 @@ func createAggregateParentLookupSQL(spec sql.AggregateSpec, placeholder string) 
 // change. The text-extraction syntax differs (PostgreSQL `element->>'k'`, MySQL
 // `element->>'$.k'`), so the dialect passes the built expression; the single
 // bound argument is the changed dimension key.
-func createAggregateAffectedParentsSQL(spec sql.AggregateSpec, extract, placeholder string) string {
+func createAggregateAffectedParentsSQL(spec sql.AggregateSpec, extract, placeholder string, q sqlident.Quoter) string {
 	return fmt.Sprintf("SELECT DISTINCT %s FROM %s WHERE %s = %s",
-		sql.SidecarParentKey, spec.Sidecar, extract, placeholder)
+		sql.SidecarParentKey, q.Table(spec.Sidecar), extract, placeholder)
 }
 
 // lookupDimensionConfig synthesizes the plain Config that createDDL / CreateDDL
@@ -100,20 +103,26 @@ func lookupDimensionConfig(spec sql.LookupSpec, jsonType, keyType string) *sql.C
 	}
 }
 
-func createDDL(config *sql.Config) string {
+// createDDL builds the MySQL `CREATE TABLE IF NOT EXISTS` (MySQL accepts inline
+// INDEX clauses; PostgreSQL builds its own in postgres.go). Every identifier —
+// table, column, primary key, index name, and each index column — is a config
+// value quoted by q; only SQLType is interpolated raw, so it is charset-validated
+// at config time (sqlident.ValidTypeExpr in the parser) since a type expression
+// cannot be quoted.
+func createDDL(config *sql.Config, q sqlident.Quoter) string {
 	var ddl strings.Builder
-	fmt.Fprintf(&ddl, "CREATE TABLE IF NOT EXISTS %s (", config.Table)
+	fmt.Fprintf(&ddl, "CREATE TABLE IF NOT EXISTS %s (", q.Table(config.Table))
 	for i, column := range config.Mappings {
-		fmt.Fprintf(&ddl, "%s %s", column.Column, column.SQLType)
+		fmt.Fprintf(&ddl, "%s %s", q.Ident(column.Column), column.SQLType)
 		if i < len(config.Mappings)-1 {
 			ddl.WriteString(",")
 		}
 	}
 	if config.PrimaryKey != "" {
-		fmt.Fprintf(&ddl, ",PRIMARY KEY (%s)", config.PrimaryKey)
+		fmt.Fprintf(&ddl, ",PRIMARY KEY (%s)", q.Ident(config.PrimaryKey))
 	}
 	for _, index := range config.Indexes {
-		fmt.Fprintf(&ddl, ",INDEX %s (%s)", index.IndexName, index.ColumnNames)
+		fmt.Fprintf(&ddl, ",INDEX %s (%s)", q.Ident(index.IndexName), q.Columns(index.ColumnNames))
 	}
 	ddl.WriteString(");")
 

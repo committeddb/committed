@@ -10,33 +10,40 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib" // registers "pgx" with database/sql
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/sqlident"
 	"github.com/committeddb/committed/internal/cluster/syncable/sql"
 )
 
 type PostgreSQLDialect struct{}
 
+// pgIdent quotes config identifiers with PostgreSQL double-quote rules.
+var pgIdent = sqlident.Postgres
+
 // CreateDDL implements Dialect.
 //
 // PostgreSQL does not accept inline INDEX clauses inside CREATE TABLE, so we
 // build CREATE TABLE without indexes and then append a separate
-// CREATE INDEX IF NOT EXISTS for each declared index.
+// CREATE INDEX IF NOT EXISTS for each declared index. Table, columns, primary
+// key, index names and index columns are config identifiers quoted for
+// PostgreSQL; only SQLType is interpolated raw (charset-validated at config time,
+// since a type expression cannot be quoted).
 func (d *PostgreSQLDialect) CreateDDL(c *sql.Config) string {
 	var ddl strings.Builder
-	fmt.Fprintf(&ddl, "CREATE TABLE IF NOT EXISTS %s (", c.Table)
+	fmt.Fprintf(&ddl, "CREATE TABLE IF NOT EXISTS %s (", pgIdent.Table(c.Table))
 	for i, column := range c.Mappings {
-		fmt.Fprintf(&ddl, "%s %s", column.Column, column.SQLType)
+		fmt.Fprintf(&ddl, "%s %s", pgIdent.Ident(column.Column), column.SQLType)
 		if i < len(c.Mappings)-1 {
 			ddl.WriteString(",")
 		}
 	}
 	if c.PrimaryKey != "" {
-		fmt.Fprintf(&ddl, ",PRIMARY KEY (%s)", c.PrimaryKey)
+		fmt.Fprintf(&ddl, ",PRIMARY KEY (%s)", pgIdent.Ident(c.PrimaryKey))
 	}
 	ddl.WriteString(");")
 
 	for _, index := range c.Indexes {
 		fmt.Fprintf(&ddl, "CREATE INDEX IF NOT EXISTS %s ON %s (%s);",
-			index.IndexName, c.Table, index.ColumnNames)
+			pgIdent.Ident(index.IndexName), pgIdent.Table(c.Table), pgIdent.Columns(index.ColumnNames))
 	}
 
 	return ddl.String()
@@ -46,18 +53,18 @@ func (d *PostgreSQLDialect) CreateDDL(c *sql.Config) string {
 // so the separate CREATE INDEX statements CreateDDL emits need no separate
 // drop.
 func (d *PostgreSQLDialect) DropDDL(c *sql.Config) string {
-	return dropDDL(c)
+	return dropDDL(c, pgIdent)
 }
 
 // CreateDeleteSQL implements Dialect. PostgreSQL binds the WHERE value with a
 // $1 positional placeholder.
 func (d *PostgreSQLDialect) CreateDeleteSQL(c *sql.Config) string {
-	return createDeleteSQL(c, "$1")
+	return createDeleteSQL(c, "$1", pgIdent)
 }
 
 // CreateClearSQL implements Dialect; PostgreSQL binds the WHERE value with $1.
 func (d *PostgreSQLDialect) CreateClearSQL(c *sql.Config, columns []string) string {
-	return createClearSQL(c, columns, "$1")
+	return createClearSQL(c, columns, "$1", pgIdent)
 }
 
 // pgAggSubquery is the scalar subquery that re-aggregates one parent's children
@@ -75,7 +82,7 @@ func pgAggSubquery(spec sql.AggregateSpec, ph string) string {
 			sort = sql.SidecarElementKey + "::numeric"
 		}
 		return fmt.Sprintf("(SELECT COALESCE(jsonb_agg(%s ORDER BY %s), '[]'::jsonb) FROM %s WHERE %s = %s)",
-			sql.SidecarElement, sort, spec.Sidecar, sql.SidecarParentKey, ph)
+			sql.SidecarElement, sort, pgIdent.Table(spec.Sidecar), sql.SidecarParentKey, ph)
 	}
 
 	sort := "s." + sql.SidecarElementKey
@@ -85,15 +92,21 @@ func pgAggSubquery(spec sql.AggregateSpec, ph string) string {
 	var joins, build strings.Builder
 	for i, e := range spec.Enrichments {
 		alias := fmt.Sprintf("d%d", i)
+		// e.Dimension is a config-derived table (quote); e.OnField is a JSON key
+		// landing inside a ->>'<key>' literal (escape the ' so it can't break out).
+		// The alias and Sidecar*/Lookup* columns are fixed, so they stay raw.
 		fmt.Fprintf(&joins, " LEFT JOIN %s %s ON s.%s->>'%s' = %s.%s",
-			e.Dimension, alias, sql.SidecarElement, e.OnField, alias, sql.LookupKey)
+			pgIdent.Table(e.Dimension), alias, sql.SidecarElement, sqlident.EscapeStringLiteral(e.OnField), alias, sql.LookupKey)
 		for _, f := range e.Selects {
-			fmt.Fprintf(&build, ",'%s',%s.%s->'%s'", f.Output, alias, sql.LookupFields, f.Source)
+			// f.Output lands in an object-key literal, f.Source in a ->'<key>'
+			// literal — escape both.
+			fmt.Fprintf(&build, ",'%s',%s.%s->'%s'",
+				sqlident.EscapeStringLiteral(f.Output), alias, sql.LookupFields, sqlident.EscapeStringLiteral(f.Source))
 		}
 	}
 	element := fmt.Sprintf("s.%s || jsonb_build_object(%s)", sql.SidecarElement, strings.TrimPrefix(build.String(), ","))
 	return fmt.Sprintf("(SELECT COALESCE(jsonb_agg(%s ORDER BY %s), '[]'::jsonb) FROM %s s%s WHERE s.%s = %s)",
-		element, sort, spec.Sidecar, joins.String(), sql.SidecarParentKey, ph)
+		element, sort, pgIdent.Table(spec.Sidecar), joins.String(), sql.SidecarParentKey, ph)
 }
 
 // CreateAggregateSidecarDDL implements Dialect; PostgreSQL stores the element
@@ -106,23 +119,23 @@ func (d *PostgreSQLDialect) CreateAggregateSidecarDDL(spec sql.AggregateSpec) st
 // parent key) and $2 (the subquery's parent_key filter) bind the same parent
 // key.
 func (d *PostgreSQLDialect) CreateAggregateMaterializeSQL(spec sql.AggregateSpec) string {
+	table, pk, col := pgIdent.Table(spec.Table), pgIdent.Ident(spec.PrimaryKey), pgIdent.Ident(spec.Column)
 	return fmt.Sprintf(
 		"INSERT INTO %s (%s,%s) VALUES ($1,%s) ON CONFLICT (%s) DO UPDATE SET %s=EXCLUDED.%s",
-		spec.Table, spec.PrimaryKey, spec.Column, pgAggSubquery(spec, "$2"),
-		spec.PrimaryKey, spec.Column, spec.Column)
+		table, pk, col, pgAggSubquery(spec, "$2"), pk, col, col)
 }
 
 // CreateAggregateRebuildSQL implements Dialect; $1 (the subquery filter) and $2
 // (the WHERE) both bind the parent key.
 func (d *PostgreSQLDialect) CreateAggregateRebuildSQL(spec sql.AggregateSpec) string {
 	return fmt.Sprintf("UPDATE %s SET %s=%s WHERE %s=$2",
-		spec.Table, spec.Column, pgAggSubquery(spec, "$1"), spec.PrimaryKey)
+		pgIdent.Table(spec.Table), pgIdent.Ident(spec.Column), pgAggSubquery(spec, "$1"), pgIdent.Ident(spec.PrimaryKey))
 }
 
 // CreateAggregateParentLookupSQL implements Dialect; PostgreSQL binds the child
 // key with $1.
 func (d *PostgreSQLDialect) CreateAggregateParentLookupSQL(spec sql.AggregateSpec) string {
-	return createAggregateParentLookupSQL(spec, "$1")
+	return createAggregateParentLookupSQL(spec, "$1", pgIdent)
 }
 
 // CreateLookupDimensionDDL implements Dialect; PostgreSQL stores the fields as
@@ -134,8 +147,10 @@ func (d *PostgreSQLDialect) CreateLookupDimensionDDL(spec sql.LookupSpec) string
 // CreateAggregateAffectedParentsSQL implements Dialect; PostgreSQL extracts the
 // element field with `->>'field'` and binds the changed dimension key with $1.
 func (d *PostgreSQLDialect) CreateAggregateAffectedParentsSQL(spec sql.AggregateSpec, onField string) string {
-	extract := fmt.Sprintf("%s->>'%s'", sql.SidecarElement, onField)
-	return createAggregateAffectedParentsSQL(spec, extract, "$1")
+	// onField is a JSON key inside a ->>'<key>' literal, so its single quotes are
+	// escaped; SidecarElement is a fixed column.
+	extract := fmt.Sprintf("%s->>'%s'", sql.SidecarElement, sqlident.EscapeStringLiteral(onField))
+	return createAggregateAffectedParentsSQL(spec, extract, "$1", pgIdent)
 }
 
 // CreateSQL implements Dialect.
@@ -164,12 +179,12 @@ func (d *PostgreSQLDialect) CreateGenerationUpsertSQL(config *sql.Config) string
 func pgUpsertSQL(config *sql.Config, withGeneration bool) string {
 	var sqlb strings.Builder
 
-	fmt.Fprintf(&sqlb, "INSERT INTO %s(", config.Table)
+	fmt.Fprintf(&sqlb, "INSERT INTO %s(", pgIdent.Table(config.Table))
 	for i, item := range config.Mappings {
 		if i == 0 {
-			fmt.Fprintf(&sqlb, "%s", item.Column)
+			fmt.Fprintf(&sqlb, "%s", pgIdent.Ident(item.Column))
 		} else {
-			fmt.Fprintf(&sqlb, ",%s", item.Column)
+			fmt.Fprintf(&sqlb, ",%s", pgIdent.Ident(item.Column))
 		}
 	}
 	if withGeneration {
@@ -190,12 +205,13 @@ func pgUpsertSQL(config *sql.Config, withGeneration bool) string {
 	fmt.Fprint(&sqlb, ")")
 
 	if config.PrimaryKey != "" {
-		fmt.Fprintf(&sqlb, " ON CONFLICT (%s) DO UPDATE SET ", config.PrimaryKey)
+		fmt.Fprintf(&sqlb, " ON CONFLICT (%s) DO UPDATE SET ", pgIdent.Ident(config.PrimaryKey))
 		for i, item := range config.Mappings {
+			col := pgIdent.Ident(item.Column)
 			if i == 0 {
-				fmt.Fprintf(&sqlb, "%s=EXCLUDED.%s", item.Column, item.Column)
+				fmt.Fprintf(&sqlb, "%s=EXCLUDED.%s", col, col)
 			} else {
-				fmt.Fprintf(&sqlb, ",%s=EXCLUDED.%s", item.Column, item.Column)
+				fmt.Fprintf(&sqlb, ",%s=EXCLUDED.%s", col, col)
 			}
 		}
 		if withGeneration {
@@ -211,9 +227,11 @@ func pgUpsertSQL(config *sql.Config, withGeneration bool) string {
 // table (CreateDDL omits the column) and an upgraded pre-feature table. Existing
 // rows baseline to generation 1.
 func (d *PostgreSQLDialect) EnsureGenerationColumn(db *gosql.DB, config *sql.Config) error {
-	//nolint:gosec // G201: table is a config identifier, GenerationColumn is a package constant — no user value interpolated
+	// Table is a config identifier quoted for PostgreSQL; GenerationColumn is a
+	// package constant. No user value is interpolated unquoted, so no gosec
+	// suppression.
 	stmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s BIGINT NOT NULL DEFAULT 1",
-		config.Table, sql.GenerationColumn)
+		pgIdent.Table(config.Table), sql.GenerationColumn)
 	if _, err := db.Exec(stmt); err != nil {
 		return fmt.Errorf("ensure generation column [%s]: %w", stmt, err)
 	}
@@ -223,7 +241,7 @@ func (d *PostgreSQLDialect) EnsureGenerationColumn(db *gosql.DB, config *sql.Con
 // CreateGenerationSweepSQL implements Dialect; PostgreSQL binds the epoch with $1.
 func (d *PostgreSQLDialect) CreateGenerationSweepSQL(config *sql.Config) string {
 	return fmt.Sprintf("DELETE FROM %s WHERE %s >= 1 AND %s < $1",
-		config.Table, sql.GenerationColumn, sql.GenerationColumn)
+		pgIdent.Table(config.Table), sql.GenerationColumn, sql.GenerationColumn)
 }
 
 // CreateAppliedSidecarDDL implements Dialect: the dedup sidecar for a keyless
@@ -231,7 +249,7 @@ func (d *PostgreSQLDialect) CreateGenerationSweepSQL(config *sql.Config) string 
 func (d *PostgreSQLDialect) CreateAppliedSidecarDDL(config *sql.Config) string {
 	return fmt.Sprintf(
 		"CREATE TABLE IF NOT EXISTS %s (%s BIGINT NOT NULL,%s INT NOT NULL,PRIMARY KEY (%s,%s));",
-		sql.AppliedSidecarName(config.Table),
+		pgIdent.Table(sql.AppliedSidecarName(config.Table)),
 		sql.AppliedIndexColumn, sql.AppliedSeqColumn,
 		sql.AppliedIndexColumn, sql.AppliedSeqColumn)
 }
@@ -241,7 +259,7 @@ func (d *PostgreSQLDialect) CreateAppliedSidecarDDL(config *sql.Config) string {
 func (d *PostgreSQLDialect) CreateAppliedMarkSQL(config *sql.Config) string {
 	return fmt.Sprintf(
 		"INSERT INTO %s (%s,%s) VALUES ($1,$2) ON CONFLICT DO NOTHING",
-		sql.AppliedSidecarName(config.Table), sql.AppliedIndexColumn, sql.AppliedSeqColumn)
+		pgIdent.Table(sql.AppliedSidecarName(config.Table)), sql.AppliedIndexColumn, sql.AppliedSeqColumn)
 }
 
 func (d *PostgreSQLDialect) Open(connectionString string) (*gosql.DB, error) {

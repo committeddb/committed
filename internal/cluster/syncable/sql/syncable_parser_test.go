@@ -227,6 +227,81 @@ type     = "JSONB"
 	require.Contains(t, fe.Issue, "keyless")
 }
 
+// TestParseRejectsUnsafeTypeAndIdentifier: a free-text SQLType that can't be
+// quoted (it is a keyword phrase) is charset-validated at POST, and an empty /
+// whitespace identifier is rejected there too — both as a field-scoped 400, not a
+// deferred driver error at Init. Identifiers are otherwise quoted, so this gate is
+// conservative (it does NOT reject legitimate specials — see the positive test).
+func TestParseRejectsUnsafeTypeAndIdentifier(t *testing.T) {
+	base := func(colType, col string) string {
+		return `
+[sql]
+topic = "t"
+db = "testdb"
+table = "foo"
+primaryKey = "pk"
+
+[[sql.mappings]]
+jsonPath = "$.key"
+column   = "pk"
+type     = "TEXT"
+
+[[sql.mappings]]
+jsonPath = "$.v"
+column   = "` + col + `"
+type     = "` + colType + `"
+`
+	}
+	tests := []struct {
+		name  string
+		toml  string
+		field string
+	}{
+		{"sqltype with statement terminator", base("TEXT; DROP TABLE students", "v"), "sql.mappings"},
+		{"sqltype with quote", base("TEXT'--", "v"), "sql.mappings"},
+		{"whitespace-only column", base("TEXT", "   "), "sql.mappings"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := readConfig(t, "toml", strings.NewReader(tt.toml))
+			dbs := map[string]cluster.Database{"testdb": testDB}
+			_, err := (&sql.SyncableParser{}).ParseConfig(v, &TestDatabaseStorage{dbs: dbs})
+			var fe *cluster.FieldError
+			require.ErrorAs(t, err, &fe)
+			require.Equal(t, tt.field, fe.Field)
+		})
+	}
+}
+
+// TestParseAcceptsSpecialIdentifiers is the acceptance half: a reserved word
+// table, a hyphenated column/primaryKey, and a mixed-case index all PARSE — they
+// are quoted downstream, so the parser must not reject them (matching the
+// ingest-side acceptance the ticket calls for).
+func TestParseAcceptsSpecialIdentifiers(t *testing.T) {
+	toml := `
+[sql]
+topic = "t"
+db = "testdb"
+table = "order"
+primaryKey = "user-name"
+
+[[sql.mappings]]
+jsonPath = "$.key"
+column   = "user-name"
+type     = "TEXT"
+
+[[sql.indexes]]
+name  = "By-Name"
+index = "user-name"
+`
+	v := readConfig(t, "toml", strings.NewReader(toml))
+	dbs := map[string]cluster.Database{"testdb": testDB}
+	config, err := (&sql.SyncableParser{}).ParseConfig(v, &TestDatabaseStorage{dbs: dbs})
+	require.NoError(t, err)
+	require.Equal(t, "order", config.Table)
+	require.Equal(t, "user-name", config.PrimaryKey)
+}
+
 func simpleConfig(db cluster.Database) *sql.Config {
 	m1 := sql.Mapping{JsonPath: "$.key", Column: "pk", SQLType: "TEXT"}
 	m2 := sql.Mapping{JsonPath: "$.one", Column: "one", SQLType: "TEXT"}

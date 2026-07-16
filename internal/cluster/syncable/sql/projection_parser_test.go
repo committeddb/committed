@@ -143,6 +143,62 @@ set  = [ { column = "v", from = "$.camelCase" } ]
 	require.Equal(t, "$.camelCase", config.Sources[0].Rules[0].Set[0].From)
 }
 
+// TestParseProjectionRejectsUnsafeType: a projection column's free-text type is
+// charset-validated at POST — a type carrying a statement terminator is a config
+// error here, not a deferred driver failure at Init.
+func TestParseProjectionRejectsUnsafeType(t *testing.T) {
+	toml := `
+[sql-projection]
+topic      = "t"
+db         = "testdb"
+table      = "rows"
+primaryKey = "id"
+
+[[sql-projection.columns]]
+name = "id"
+type = "TEXT"
+
+[[sql-projection.columns]]
+name = "v"
+type = "TEXT; DROP TABLE x"
+
+[[sql-projection.rules]]
+set = [ { column = "v", from = "$.v" } ]
+`
+	v := readConfig(t, "toml", strings.NewReader(toml))
+	_, err := (&sql.ProjectionSyncableParser{}).ParseConfig(v, projectionStorage())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid SQL type")
+}
+
+// TestParseProjectionAcceptsSpecialIdentifiers: a reserved-word table and a
+// hyphenated column PARSE — they are quoted downstream, so the parser must not
+// reject them.
+func TestParseProjectionAcceptsSpecialIdentifiers(t *testing.T) {
+	toml := `
+[sql-projection]
+topic      = "t"
+db         = "testdb"
+table      = "order"
+primaryKey = "id"
+
+[[sql-projection.columns]]
+name = "id"
+type = "TEXT"
+
+[[sql-projection.columns]]
+name = "user-name"
+type = "TEXT"
+
+[[sql-projection.rules]]
+set = [ { column = "user-name", from = "$.n" } ]
+`
+	v := readConfig(t, "toml", strings.NewReader(toml))
+	config, err := (&sql.ProjectionSyncableParser{}).ParseConfig(v, projectionStorage())
+	require.NoError(t, err)
+	require.Equal(t, "order", config.Table)
+}
+
 func TestParseProjectionConfigKeyPathOverride(t *testing.T) {
 	toml := strings.Replace(projectionTOML,
 		`primaryKey = "tenant_id"`,

@@ -31,13 +31,14 @@ func TestPostgreSQLDialect_CreateDDL(t *testing.T) {
 	d := &dialects.PostgreSQLDialect{}
 	ddl := d.CreateDDL(testConfig())
 
-	require.Contains(t, ddl, "CREATE TABLE IF NOT EXISTS mytable")
-	require.Contains(t, ddl, "id VARCHAR(128)")
-	require.Contains(t, ddl, "name TEXT")
-	require.Contains(t, ddl, "PRIMARY KEY (id)")
+	// Config identifiers are quoted for PostgreSQL; SQLType is interpolated raw.
+	require.Contains(t, ddl, `CREATE TABLE IF NOT EXISTS "mytable"`)
+	require.Contains(t, ddl, `"id" VARCHAR(128)`)
+	require.Contains(t, ddl, `"name" TEXT`)
+	require.Contains(t, ddl, `PRIMARY KEY ("id")`)
 	// PostgreSQL emits a separate CREATE INDEX statement, not an inline INDEX clause.
-	require.NotContains(t, ddl, "INDEX idx_name (name)")
-	require.Contains(t, ddl, "CREATE INDEX IF NOT EXISTS idx_name ON mytable (name);")
+	require.NotContains(t, ddl, `INDEX "idx_name" ("name")`)
+	require.Contains(t, ddl, `CREATE INDEX IF NOT EXISTS "idx_name" ON "mytable" ("name");`)
 	require.True(t, strings.HasSuffix(ddl, ");"))
 }
 
@@ -52,8 +53,8 @@ func TestPostgreSQLDialect_CreateDDL_NoIndexes(t *testing.T) {
 	}
 	ddl := d.CreateDDL(cfg)
 
-	require.Contains(t, ddl, "CREATE TABLE IF NOT EXISTS simple")
-	require.Contains(t, ddl, "PRIMARY KEY (col1)")
+	require.Contains(t, ddl, `CREATE TABLE IF NOT EXISTS "simple"`)
+	require.Contains(t, ddl, `PRIMARY KEY ("col1")`)
 	require.NotContains(t, ddl, "INDEX")
 }
 
@@ -69,13 +70,13 @@ func TestPostgreSQLDialect_CreateSQL(t *testing.T) {
 	}
 	result := d.CreateSQL(cfg)
 
-	require.Contains(t, result, "INSERT INTO mytable(id,name)")
+	require.Contains(t, result, `INSERT INTO "mytable"("id","name")`)
 	require.Contains(t, result, "VALUES ($1,$2)")
 
 	// PostgreSQL upsert uses ON CONFLICT ... DO UPDATE SET col = EXCLUDED.col.
-	require.Contains(t, result, "ON CONFLICT (id) DO UPDATE SET")
-	require.Contains(t, result, "id=EXCLUDED.id")
-	require.Contains(t, result, "name=EXCLUDED.name")
+	require.Contains(t, result, `ON CONFLICT ("id") DO UPDATE SET`)
+	require.Contains(t, result, `"id"=EXCLUDED."id"`)
+	require.Contains(t, result, `"name"=EXCLUDED."name"`)
 	require.NotContains(t, result, "ON DUPLICATE KEY UPDATE")
 
 	// Verify it does NOT use MySQL ? placeholders
@@ -91,9 +92,9 @@ func TestPostgreSQLDialect_CreateSQL_SingleColumn(t *testing.T) {
 	}
 	result := d.CreateSQL(cfg)
 
-	require.Contains(t, result, "INSERT INTO t(pk)")
+	require.Contains(t, result, `INSERT INTO "t"("pk")`)
 	require.Contains(t, result, "VALUES ($1)")
-	require.Contains(t, result, "ON CONFLICT (pk) DO UPDATE SET pk=EXCLUDED.pk")
+	require.Contains(t, result, `ON CONFLICT ("pk") DO UPDATE SET "pk"=EXCLUDED."pk"`)
 }
 
 func TestDialect_PlaceholderDifference(t *testing.T) {

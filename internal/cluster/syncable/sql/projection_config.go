@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/sqlident"
 )
 
 // ProjectionColumn declares one column of the projection table. Unlike
@@ -240,6 +241,13 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 	if c.Table == "" {
 		return fmt.Errorf("table is required")
 	}
+	// Table and column names are quoted before they reach SQL (the projection
+	// table, its aggregate sidecars, and lookup dimensions all derive from them),
+	// but a control-char / empty identifier — or a free-text column type that can't
+	// be quoted — should fail here as a config error, not a deferred driver error.
+	if !sqlident.ValidIdent(c.Table) {
+		return fmt.Errorf("table is not a valid SQL identifier: %q", c.Table)
+	}
 	if c.PrimaryKey == "" {
 		return fmt.Errorf("primaryKey is required")
 	}
@@ -251,8 +259,14 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 		if col.Name == "" {
 			return fmt.Errorf("column with empty name")
 		}
+		if !sqlident.ValidIdent(col.Name) {
+			return fmt.Errorf("column %q is not a valid SQL identifier", col.Name)
+		}
 		if col.SQLType == "" {
 			return fmt.Errorf("column %q: type is required", col.Name)
+		}
+		if !sqlident.ValidTypeExpr(col.SQLType) {
+			return fmt.Errorf("column %q has an invalid SQL type %q: only letters, digits, spaces, underscores, parentheses and commas are allowed", col.Name, col.SQLType)
 		}
 		if declared[col.Name] {
 			return fmt.Errorf("column %q declared twice", col.Name)
@@ -275,6 +289,11 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 		}
 		if src.Lookup.Name == "" {
 			return fmt.Errorf("source %d (topic %q): lookup name is required", si+1, src.Topic)
+		}
+		// The lookup name becomes part of its dimension table (dimensionName), which
+		// is quoted — but reject a control-char / empty name here as a config error.
+		if !sqlident.ValidIdent(src.Lookup.Name) {
+			return fmt.Errorf("source %d (topic %q): lookup name is not a valid SQL identifier: %q", si+1, src.Topic, src.Lookup.Name)
 		}
 		if prev, ok := lookups[src.Lookup.Name]; ok {
 			return fmt.Errorf("source %d (topic %q): lookup %q already declared by source %d", si+1, src.Topic, src.Lookup.Name, prev+1)

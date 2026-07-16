@@ -63,7 +63,8 @@ func TestMySQLDialect_EnsureGenerationColumn_SchemaQualifiedAddsColumn(t *testin
 	mock.ExpectQuery("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = ? AND table_name = ? AND column_name = ?").
 		WithArgs("otherdb", "widget", sql.GenerationColumn).
 		WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(0))
-	mock.ExpectExec("ALTER TABLE otherdb.widget ADD COLUMN " + sql.GenerationColumn + " BIGINT NOT NULL DEFAULT 1").
+	// The schema-qualified table is quoted part-by-part for MySQL.
+	mock.ExpectExec("ALTER TABLE `otherdb`.`widget` ADD COLUMN " + sql.GenerationColumn + " BIGINT NOT NULL DEFAULT 1").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	require.NoError(t, (&dialects.MySQLDialect{}).EnsureGenerationColumn(db, config))

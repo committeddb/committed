@@ -9,30 +9,34 @@ import (
 	"github.com/go-sql-driver/mysql"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/sqlident"
 	"github.com/committeddb/committed/internal/cluster/syncable/sql"
 )
 
 type MySQLDialect struct{}
 
+// mysqlIdent quotes config identifiers with MySQL backtick rules.
+var mysqlIdent = sqlident.MySQL
+
 // CreateDDL implements Dialect
 func (d *MySQLDialect) CreateDDL(c *sql.Config) string {
-	return createDDL(c)
+	return createDDL(c, mysqlIdent)
 }
 
 // DropDDL implements Dialect.
 func (d *MySQLDialect) DropDDL(c *sql.Config) string {
-	return dropDDL(c)
+	return dropDDL(c, mysqlIdent)
 }
 
 // CreateDeleteSQL implements Dialect. MySQL binds the WHERE value with a ?
 // placeholder.
 func (d *MySQLDialect) CreateDeleteSQL(c *sql.Config) string {
-	return createDeleteSQL(c, "?")
+	return createDeleteSQL(c, "?", mysqlIdent)
 }
 
 // CreateClearSQL implements Dialect; MySQL binds the WHERE value with ?.
 func (d *MySQLDialect) CreateClearSQL(c *sql.Config, columns []string) string {
-	return createClearSQL(c, columns, "?")
+	return createClearSQL(c, columns, "?", mysqlIdent)
 }
 
 // mysqlAggSubquery re-aggregates one parent's children into a JSON array.
@@ -50,7 +54,7 @@ func mysqlAggSubquery(spec sql.AggregateSpec, ph string) string {
 		}
 		return fmt.Sprintf(
 			"(SELECT COALESCE(JSON_ARRAYAGG(%s), JSON_ARRAY()) FROM (SELECT %s,%s FROM %s WHERE %s = %s ORDER BY %s) AS ordered)",
-			sql.SidecarElement, sql.SidecarElement, sql.SidecarElementKey, spec.Sidecar, sql.SidecarParentKey, ph, sort)
+			sql.SidecarElement, sql.SidecarElement, sql.SidecarElementKey, mysqlIdent.Table(spec.Sidecar), sql.SidecarParentKey, ph, sort)
 	}
 
 	sort := "s." + sql.SidecarElementKey
@@ -60,59 +64,68 @@ func mysqlAggSubquery(spec sql.AggregateSpec, ph string) string {
 	var joins, build strings.Builder
 	for i, e := range spec.Enrichments {
 		alias := fmt.Sprintf("d%d", i)
+		// e.Dimension is a config-derived table (quote); e.OnField is a JSON key
+		// landing inside a '$.<key>' path literal (escape the ' so it can't break
+		// out). The alias and Sidecar* columns are fixed, so they stay raw.
 		fmt.Fprintf(&joins, " LEFT JOIN %s %s ON s.%s->>'$.%s' = %s.%s",
-			e.Dimension, alias, sql.SidecarElement, e.OnField, alias, sql.LookupKey)
+			mysqlIdent.Table(e.Dimension), alias, sql.SidecarElement, sqlident.EscapeStringLiteral(e.OnField), alias, sql.LookupKey)
 		for _, f := range e.Selects {
-			fmt.Fprintf(&build, ",'%s',JSON_EXTRACT(%s.%s,'$.%s')", f.Output, alias, sql.LookupFields, f.Source)
+			// f.Output lands in a '<key>' object-key literal, f.Source in a
+			// '$.<key>' path literal — escape both.
+			fmt.Fprintf(&build, ",'%s',JSON_EXTRACT(%s.%s,'$.%s')",
+				sqlident.EscapeStringLiteral(f.Output), alias, sql.LookupFields, sqlident.EscapeStringLiteral(f.Source))
 		}
 	}
 	element := fmt.Sprintf("JSON_MERGE_PATCH(s.%s,JSON_OBJECT(%s))", sql.SidecarElement, strings.TrimPrefix(build.String(), ","))
 	return fmt.Sprintf(
 		"(SELECT COALESCE(JSON_ARRAYAGG(%s), JSON_ARRAY()) FROM (SELECT %s AS %s,s.%s FROM %s s%s WHERE s.%s = %s ORDER BY %s) AS ordered)",
-		sql.SidecarElement, element, sql.SidecarElement, sql.SidecarElementKey, spec.Sidecar, joins.String(), sql.SidecarParentKey, ph, sort)
+		sql.SidecarElement, element, sql.SidecarElement, sql.SidecarElementKey, mysqlIdent.Table(spec.Sidecar), joins.String(), sql.SidecarParentKey, ph, sort)
 }
 
 // CreateAggregateSidecarDDL implements Dialect; MySQL stores the element as
 // JSON and the keys as VARCHAR(255) (a bounded type so child_key can be a
 // PRIMARY KEY).
 func (d *MySQLDialect) CreateAggregateSidecarDDL(spec sql.AggregateSpec) string {
-	return createDDL(aggregateSidecarConfig(spec, "JSON", "VARCHAR(255)"))
+	return createDDL(aggregateSidecarConfig(spec, "JSON", "VARCHAR(255)"), mysqlIdent)
 }
 
 // CreateAggregateMaterializeSQL implements Dialect; both ? placeholders bind
-// the parent key (the inserted row's key and the subquery filter).
+// the parent key (the inserted row's key and the subquery filter). Table,
+// primary key and aggregate column are config identifiers quoted for MySQL.
 func (d *MySQLDialect) CreateAggregateMaterializeSQL(spec sql.AggregateSpec) string {
+	table, pk, col := mysqlIdent.Table(spec.Table), mysqlIdent.Ident(spec.PrimaryKey), mysqlIdent.Ident(spec.Column)
 	return fmt.Sprintf(
 		"INSERT INTO %s (%s,%s) VALUES (?,%s) ON DUPLICATE KEY UPDATE %s=VALUES(%s)",
-		spec.Table, spec.PrimaryKey, spec.Column, mysqlAggSubquery(spec, "?"),
-		spec.Column, spec.Column)
+		table, pk, col, mysqlAggSubquery(spec, "?"), col, col)
 }
 
 // CreateAggregateRebuildSQL implements Dialect; both ? placeholders bind the
 // parent key (the subquery filter and the WHERE).
 func (d *MySQLDialect) CreateAggregateRebuildSQL(spec sql.AggregateSpec) string {
 	return fmt.Sprintf("UPDATE %s SET %s=%s WHERE %s=?",
-		spec.Table, spec.Column, mysqlAggSubquery(spec, "?"), spec.PrimaryKey)
+		mysqlIdent.Table(spec.Table), mysqlIdent.Ident(spec.Column), mysqlAggSubquery(spec, "?"), mysqlIdent.Ident(spec.PrimaryKey))
 }
 
 // CreateAggregateParentLookupSQL implements Dialect; MySQL binds the child key
 // with ?.
 func (d *MySQLDialect) CreateAggregateParentLookupSQL(spec sql.AggregateSpec) string {
-	return createAggregateParentLookupSQL(spec, "?")
+	return createAggregateParentLookupSQL(spec, "?", mysqlIdent)
 }
 
 // CreateLookupDimensionDDL implements Dialect; MySQL stores the fields as JSON
 // and the key as VARCHAR(255) (a bounded type so lookup_key can be a PRIMARY
 // KEY).
 func (d *MySQLDialect) CreateLookupDimensionDDL(spec sql.LookupSpec) string {
-	return createDDL(lookupDimensionConfig(spec, "JSON", "VARCHAR(255)"))
+	return createDDL(lookupDimensionConfig(spec, "JSON", "VARCHAR(255)"), mysqlIdent)
 }
 
 // CreateAggregateAffectedParentsSQL implements Dialect; MySQL extracts the
 // element field with `->>'$.field'` and binds the changed dimension key with ?.
+// onField is a JSON key inside a '$.<key>' path literal, so its single quotes are
+// escaped; SidecarElement is a fixed column.
 func (d *MySQLDialect) CreateAggregateAffectedParentsSQL(spec sql.AggregateSpec, onField string) string {
-	extract := fmt.Sprintf("%s->>'$.%s'", sql.SidecarElement, onField)
-	return createAggregateAffectedParentsSQL(spec, extract, "?")
+	extract := fmt.Sprintf("%s->>'$.%s'", sql.SidecarElement, sqlident.EscapeStringLiteral(onField))
+	return createAggregateAffectedParentsSQL(spec, extract, "?", mysqlIdent)
 }
 
 // CreateSQL implements Dialect
@@ -136,12 +149,12 @@ func (d *MySQLDialect) CreateGenerationUpsertSQL(config *sql.Config) string {
 func mysqlUpsertSQL(config *sql.Config, withGeneration bool) string {
 	var sqlb strings.Builder
 
-	fmt.Fprintf(&sqlb, "INSERT INTO %s(", config.Table)
+	fmt.Fprintf(&sqlb, "INSERT INTO %s(", mysqlIdent.Table(config.Table))
 	for i, item := range config.Mappings {
 		if i == 0 {
-			fmt.Fprintf(&sqlb, "%s", item.Column)
+			fmt.Fprintf(&sqlb, "%s", mysqlIdent.Ident(item.Column))
 		} else {
-			fmt.Fprintf(&sqlb, ",%s", item.Column)
+			fmt.Fprintf(&sqlb, ",%s", mysqlIdent.Ident(item.Column))
 		}
 	}
 	if withGeneration {
@@ -162,9 +175,9 @@ func mysqlUpsertSQL(config *sql.Config, withGeneration bool) string {
 	fmt.Fprint(&sqlb, ") ON DUPLICATE KEY UPDATE ")
 	for i, item := range config.Mappings {
 		if i == 0 {
-			fmt.Fprintf(&sqlb, "%s=?", item.Column)
+			fmt.Fprintf(&sqlb, "%s=?", mysqlIdent.Ident(item.Column))
 		} else {
-			fmt.Fprintf(&sqlb, ",%s=?", item.Column)
+			fmt.Fprintf(&sqlb, ",%s=?", mysqlIdent.Ident(item.Column))
 		}
 	}
 	if withGeneration {
@@ -205,9 +218,10 @@ func (d *MySQLDialect) EnsureGenerationColumn(db *gosql.DB, config *sql.Config) 
 	if n > 0 {
 		return nil
 	}
-	//nolint:gosec // G201: table is a config identifier, GenerationColumn is a package constant — no user value interpolated
+	// Table is a config identifier quoted for MySQL; GenerationColumn is a package
+	// constant. No user value is interpolated unquoted, so no gosec suppression.
 	stmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s BIGINT NOT NULL DEFAULT 1",
-		config.Table, sql.GenerationColumn)
+		mysqlIdent.Table(config.Table), sql.GenerationColumn)
 	if _, err := db.Exec(stmt); err != nil {
 		return fmt.Errorf("ensure generation column [%s]: %w", stmt, err)
 	}
@@ -217,7 +231,7 @@ func (d *MySQLDialect) EnsureGenerationColumn(db *gosql.DB, config *sql.Config) 
 // CreateGenerationSweepSQL implements Dialect; MySQL binds the epoch with ?.
 func (d *MySQLDialect) CreateGenerationSweepSQL(config *sql.Config) string {
 	return fmt.Sprintf("DELETE FROM %s WHERE %s >= 1 AND %s < ?",
-		config.Table, sql.GenerationColumn, sql.GenerationColumn)
+		mysqlIdent.Table(config.Table), sql.GenerationColumn, sql.GenerationColumn)
 }
 
 // CreateAppliedSidecarDDL implements Dialect: the dedup sidecar for a keyless
@@ -225,7 +239,7 @@ func (d *MySQLDialect) CreateGenerationSweepSQL(config *sql.Config) string {
 func (d *MySQLDialect) CreateAppliedSidecarDDL(config *sql.Config) string {
 	return fmt.Sprintf(
 		"CREATE TABLE IF NOT EXISTS %s (%s BIGINT NOT NULL,%s INT NOT NULL,PRIMARY KEY (%s,%s));",
-		sql.AppliedSidecarName(config.Table),
+		mysqlIdent.Table(sql.AppliedSidecarName(config.Table)),
 		sql.AppliedIndexColumn, sql.AppliedSeqColumn,
 		sql.AppliedIndexColumn, sql.AppliedSeqColumn)
 }
@@ -235,7 +249,7 @@ func (d *MySQLDialect) CreateAppliedSidecarDDL(config *sql.Config) string {
 func (d *MySQLDialect) CreateAppliedMarkSQL(config *sql.Config) string {
 	return fmt.Sprintf(
 		"INSERT IGNORE INTO %s (%s,%s) VALUES (?,?)",
-		sql.AppliedSidecarName(config.Table), sql.AppliedIndexColumn, sql.AppliedSeqColumn)
+		mysqlIdent.Table(sql.AppliedSidecarName(config.Table)), sql.AppliedIndexColumn, sql.AppliedSeqColumn)
 }
 
 func (d *MySQLDialect) Open(connectionString string) (*gosql.DB, error) {

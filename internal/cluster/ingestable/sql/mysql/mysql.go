@@ -22,6 +22,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/ingestable/sql"
 	"github.com/committeddb/committed/internal/cluster/ingestable/sql/dialectpb"
+	"github.com/committeddb/committed/internal/cluster/sqlident"
 )
 
 type MySQLDialect struct{}
@@ -1651,7 +1652,7 @@ func readBatch(
 	// values here.
 	orderCols := make([]string, len(pkCols))
 	for i, c := range pkCols {
-		orderCols[i] = fmt.Sprintf("`%s` ASC", c)
+		orderCols[i] = sqlident.MySQL.Ident(c) + " ASC"
 	}
 	orderBy := strings.Join(orderCols, ", ")
 
@@ -1671,18 +1672,18 @@ func readBatch(
 		placeholders := make([]string, len(pkCols))
 		args = make([]any, len(pkCols))
 		for i, c := range pkCols {
-			cols[i] = fmt.Sprintf("`%s`", c)
+			cols[i] = sqlident.MySQL.Ident(c)
 			placeholders[i] = "?"
 			args[i] = cursor[i]
 		}
 		fromWhere = fmt.Sprintf(
-			"FROM `%s` WHERE (%s) > (%s) ORDER BY %s LIMIT %d",
-			table, strings.Join(cols, ", "), strings.Join(placeholders, ", "), orderBy, batchSize,
+			"FROM %s WHERE (%s) > (%s) ORDER BY %s LIMIT %d",
+			sqlident.MySQL.Ident(table), strings.Join(cols, ", "), strings.Join(placeholders, ", "), orderBy, batchSize,
 		)
 	} else {
 		fromWhere = fmt.Sprintf(
-			"FROM `%s` ORDER BY %s LIMIT %d",
-			table, orderBy, batchSize,
+			"FROM %s ORDER BY %s LIMIT %d",
+			sqlident.MySQL.Ident(table), orderBy, batchSize,
 		)
 	}
 
@@ -1789,16 +1790,17 @@ func readBatch(
 		sel := make([]string, len(unionList))
 		typeArgs := make([]any, 0, len(unionList)+len(args))
 		for i, uk := range unionList {
-			sel[i] = fmt.Sprintf("JSON_TYPE(JSON_EXTRACT(`%s`, ?))", columns[uk.col])
+			sel[i] = fmt.Sprintf("JSON_TYPE(JSON_EXTRACT(%s, ?))", sqlident.MySQL.Ident(columns[uk.col]))
 			typeArgs = append(typeArgs, uk.path)
 		}
 		typeArgs = append(typeArgs, args...)
-		// The SELECT list is a JSON_TYPE(JSON_EXTRACT(`col`, ?)) expression per
-		// leaf over backtick-escaped result-set column names, and fromWhere is the
-		// same escaped-identifier predicate the batch query already used. Every
-		// runtime value — the JSON paths and the cursor — is a bound parameter in
-		// typeArgs, so nothing user-controlled is concatenated into the SQL.
-		//nolint:gosec // G202: identifiers are escaped result-set column names; all values are bound params.
+		// The SELECT list is a JSON_TYPE(JSON_EXTRACT(`col`, ?)) expression per leaf
+		// over result-set column names quoted through the shared sqlident seam (any
+		// embedded backtick doubled), and fromWhere is the same quoted-identifier
+		// predicate the batch query already used. Every runtime value — the JSON
+		// paths and the cursor — is a bound parameter in typeArgs, so nothing
+		// user-controlled is concatenated into the SQL.
+		//nolint:gosec // G202: identifiers are quoted via sqlident (backticks doubled); all values are bound params.
 		typeQuery := fmt.Sprintf("SELECT %s %s", strings.Join(sel, ", "), fromWhere)
 
 		trows, terr := tx.QueryContext(ctx, typeQuery, typeArgs...)

@@ -141,6 +141,13 @@ func (p *SyncableParser) ParseConfig(v *cluster.ParsedConfig, storage cluster.Da
 		return nil, fmt.Errorf("[sql.syncable-parser] parse sql.indexes: %w", err)
 	}
 
+	// Config identifiers are quoted before they reach SQL, but a control-char /
+	// empty identifier — or a free-text SQLType that can't be quoted — should fail
+	// as a field-scoped 400 here, not as a deferred driver error at Init.
+	if err := validateConfigIdentifiers(table, primaryKey, keyColumn, mappings, indexes); err != nil {
+		return nil, err
+	}
+
 	policy, err := cluster.ParseCheckpointPolicy(v)
 	if err != nil {
 		return nil, fmt.Errorf("[sql.syncable-parser] %w", err)
