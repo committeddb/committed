@@ -63,6 +63,12 @@ time, exactly like a rolling upgrade ([upgrade.md](upgrade.md)):
 A follower's backup is a complete, restorable snapshot of the cluster's
 committed state — every node holds the full event log.
 
+`--data` must point at the node's **real** directory. Backup fails closed on a
+symlinked data root or a symlinked store under it (and on a directory with no
+files), rather than silently walking past it and writing a hollow archive that
+would still pass every restore check. If your deployment mounts the data
+directory behind a symlink, resolve it to the real path before backing up.
+
 ## Restoring
 
 Restore into a **fresh, empty** directory (restore refuses to overwrite
@@ -82,6 +88,11 @@ exactly as it would after a normal restart. Start it with the **same**
 Restore validates the manifest, refuses an archive that isn't a committed
 backup or declares an incompatible format version, and rejects any archive
 entry whose path would escape the target directory.
+
+Restore is **atomic**: it unpacks into a staging directory alongside the target
+and renames it into place only after the whole archive validates. A failed
+restore (a truncated archive, a full disk) leaves the target directory
+untouched, so a retry is never blocked by a half-restored directory.
 
 ### Cluster identity
 

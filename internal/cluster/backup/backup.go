@@ -75,11 +75,23 @@ type Marker struct {
 //
 // Only regular files are archived; directories are recreated by Restore from
 // the file paths, so empty directories are not preserved (a node recreates the
-// ones it needs on startup). Symlinks and other irregular entries are skipped.
+// ones it needs on startup).
+//
+// A symlink — the data root itself, or any entry under it — is a hard error, NOT
+// a skip. filepath.Walk does not follow symlinks (it Lstats each entry), so a
+// symlinked store dir or a symlinked data root would otherwise be dropped from
+// both the archive AND the manifest built from the same walk: a hollow backup
+// that passes every completeness check on restore. Create fails closed instead,
+// and refuses a data dir with no regular files at all.
 func Create(w io.Writer, dataDir string, nodeID uint64, now time.Time) (*Manifest, error) {
-	info, err := os.Stat(dataDir)
+	// Lstat, not Stat: Stat follows a symlinked root, which would then walk to
+	// zero files and report a hollow success. Reject the symlink up front.
+	info, err := os.Lstat(dataDir)
 	if err != nil {
 		return nil, fmt.Errorf("backup: stat data dir: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("backup: data dir %q is a symlink; point --data at the real directory so a symlinked store can't be silently dropped from the archive", dataDir)
 	}
 	if !info.IsDir() {
 		return nil, fmt.Errorf("backup: data dir %q is not a directory", dataDir)
@@ -97,8 +109,14 @@ func Create(w io.Writer, dataDir string, nodeID uint64, now time.Time) (*Manifes
 		if err != nil {
 			return err
 		}
-		if fi.IsDir() || !fi.Mode().IsRegular() {
+		if fi.IsDir() {
 			return nil
+		}
+		// Fail closed on anything that is not a regular file (symlink, device,
+		// socket, …). Walk won't descend a symlinked dir, so archiving it would
+		// silently omit the real files.
+		if !fi.Mode().IsRegular() {
+			return fmt.Errorf("backup: refusing to archive %q: not a regular file (mode %s) — a symlinked or special entry under the data dir would be silently dropped; materialize the real files under the data dir", path, fi.Mode())
 		}
 		rel, err := filepath.Rel(dataDir, path)
 		if err != nil {
@@ -109,6 +127,9 @@ func Create(w io.Writer, dataDir string, nodeID uint64, now time.Time) (*Manifes
 	})
 	if walkErr != nil {
 		return nil, fmt.Errorf("backup: walk data dir: %w", walkErr)
+	}
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("backup: data dir %q has no regular files to archive — refusing to write an empty backup", dataDir)
 	}
 
 	manifest := &Manifest{
@@ -149,13 +170,38 @@ func Create(w io.Writer, dataDir string, nodeID uint64, now time.Time) (*Manifes
 // not already exist or must be empty — Restore never overwrites an existing
 // populated directory. On success it writes a RESTORED.json marker and returns
 // the manifest.
+//
+// Restore is atomic: it unpacks into a staging directory alongside targetDir and
+// renames it into place only after the archive validates completely. A mid-restore
+// failure (a truncated archive, a bad entry, a disk-full write) leaves targetDir
+// untouched — no half-populated directory to block a retry (requireEmptyDir) or
+// boot a Frankenstein node.
 func Restore(r io.Reader, targetDir string, now time.Time) (*Manifest, error) {
+	// Normalize away a trailing slash so filepath.Dir yields the real parent for
+	// the staging sibling (Dir("/data/node/") would otherwise be "/data/node").
+	targetDir = filepath.Clean(targetDir)
 	if err := requireEmptyDir(targetDir); err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(targetDir, 0o700); err != nil {
-		return nil, fmt.Errorf("restore: create target dir: %w", err)
+
+	// Stage in a sibling of targetDir so the final publish is a same-filesystem
+	// rename (atomic); os.MkdirTemp needs the parent to exist.
+	parent := filepath.Dir(targetDir)
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return nil, fmt.Errorf("restore: create parent dir: %w", err)
 	}
+	staging, err := os.MkdirTemp(parent, ".committed-restore-*")
+	if err != nil {
+		return nil, fmt.Errorf("restore: create staging dir: %w", err)
+	}
+	// Disarmed only once the staging dir is renamed into place; until then any
+	// early return removes the partial restore so nothing is left behind.
+	published := false
+	defer func() {
+		if !published {
+			_ = os.RemoveAll(staging)
+		}
+	}()
 
 	tr := tar.NewReader(r)
 	var manifest *Manifest
@@ -187,7 +233,7 @@ func Restore(r io.Reader, targetDir string, now time.Time) (*Manifest, error) {
 			continue
 		}
 
-		dest, err := safeJoin(targetDir, hdr.Name)
+		dest, err := safeJoin(staging, hdr.Name)
 		if err != nil {
 			return nil, err
 		}
@@ -207,7 +253,7 @@ func Restore(r io.Reader, targetDir string, now time.Time) (*Manifest, error) {
 	// truncated archive is caught here rather than silently restoring a
 	// partial node directory.
 	for _, rel := range manifest.Files {
-		dest, err := safeJoin(targetDir, rel)
+		dest, err := safeJoin(staging, rel)
 		if err != nil {
 			return nil, err
 		}
@@ -221,9 +267,20 @@ func Restore(r io.Reader, targetDir string, now time.Time) (*Manifest, error) {
 	if err != nil {
 		return nil, fmt.Errorf("restore: marshal marker: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(targetDir, markerName), markerBytes, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(staging, markerName), markerBytes, 0o600); err != nil {
 		return nil, fmt.Errorf("restore: write marker: %w", err)
 	}
+
+	// Publish atomically. requireEmptyDir guaranteed targetDir was absent or
+	// empty; remove an empty existing one so the rename lands on a clean name
+	// (renaming onto an existing dir is not portable).
+	if err := os.Remove(targetDir); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("restore: clear target dir: %w", err)
+	}
+	if err := os.Rename(staging, targetDir); err != nil {
+		return nil, fmt.Errorf("restore: publish staged restore to target dir: %w", err)
+	}
+	published = true
 
 	return manifest, nil
 }
