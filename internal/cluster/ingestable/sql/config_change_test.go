@@ -30,6 +30,76 @@ func ingestableWith(topicID, topicName string, pk ...string) *sql.Ingestable {
 	})
 }
 
+// ingestableSrc builds an *Ingestable carrying a topic, a connection string,
+// and a primary key — the source-identity fields ValidateReplace compares.
+func ingestableSrc(topicID, conn string, pk ...string) *sql.Ingestable {
+	return sql.New(nil, &sql.Config{
+		Type:             &cluster.Type{ID: topicID, Name: topicID},
+		ConnectionString: conn,
+		PrimaryKey:       pk,
+	})
+}
+
+// A topic re-point (same source, different produced topic) starts the new topic
+// mid-stream with no snapshot of the source's existing rows — silent data loss.
+// It is rejected with a *SourceIdentityChangeError.
+func TestIngestable_ValidateReplace_TopicChangeRejected(t *testing.T) {
+	prior := ingestableSrc("t1", "postgres://h/db", "id")
+	next := ingestableSrc("t2", "postgres://h/db", "id")
+
+	err := next.ValidateReplace(prior)
+	require.Error(t, err)
+	var rebuild cluster.RebuildRequiredError
+	require.ErrorAs(t, err, &rebuild)
+	require.Equal(t, "ingestable_source_change_requires_recreate", rebuild.Code())
+	details, ok := rebuild.Details().(*sql.SourceIdentityChangeError)
+	require.True(t, ok)
+	require.Equal(t, []string{"topic"}, details.ChangedFields)
+}
+
+// A server re-point (different host) leaves the persisted binlog/WAL position
+// pointing at a position that does not exist on the new server. Rejected.
+func TestIngestable_ValidateReplace_ServerRepointRejected(t *testing.T) {
+	prior := ingestableSrc("t1", "postgres://host-a:5432/db", "id")
+	next := ingestableSrc("t1", "postgres://host-b:5432/db", "id")
+
+	var details *sql.SourceIdentityChangeError
+	require.ErrorAs(t, next.ValidateReplace(prior), &details)
+	require.Equal(t, []string{"connectionString"}, details.ChangedFields)
+}
+
+// A database-name change on the same host is also a re-point.
+func TestIngestable_ValidateReplace_DatabaseChangeRejected(t *testing.T) {
+	prior := ingestableSrc("t1", "postgres://host/db-a", "id")
+	next := ingestableSrc("t1", "postgres://host/db-b", "id")
+
+	var details *sql.SourceIdentityChangeError
+	require.ErrorAs(t, next.ValidateReplace(prior), &details)
+	require.Equal(t, []string{"connectionString"}, details.ChangedFields)
+}
+
+// A credential-only change (same host + database, rotated user/password) is NOT
+// a re-point: the persisted position is still valid. Rejecting it would force a
+// needless full re-snapshot on every routine password rotation.
+func TestIngestable_ValidateReplace_CredentialRotationAllowed(t *testing.T) {
+	prior := ingestableSrc("t1", "postgres://alice:pw1@host:5432/db", "id")
+	next := ingestableSrc("t1", "postgres://bob:pw2@host:5432/db", "id")
+	require.NoError(t, next.ValidateReplace(prior))
+}
+
+// The rejection carries no connection string — a secret. Neither the message nor
+// the details payload may echo the host, user, or password.
+func TestIngestable_ValidateReplace_SourceChangeCarriesNoSecret(t *testing.T) {
+	prior := ingestableSrc("t1", "postgres://alice:hunter2@host-a/db", "id")
+	next := ingestableSrc("t1", "postgres://alice:hunter2@host-b/db", "id")
+
+	err := next.ValidateReplace(prior)
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "hunter2")
+	require.NotContains(t, err.Error(), "host-a")
+	require.NotContains(t, err.Error(), "host-b")
+}
+
 // A primaryKey change (composite widening) is rejected with a
 // *PrimaryKeyChangeError that satisfies the generic cluster.RebuildRequiredError
 // — all the generic layers ever see — carrying the affected topic and the old

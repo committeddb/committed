@@ -202,7 +202,14 @@ func validateMappings(mappings []Mapping) error {
 }
 
 type Config struct {
-	Database   cluster.Database
+	Database cluster.Database
+	// DatabaseID is the id of the [database] config Database was resolved from
+	// (the sql.db value). The resolved Database handle exposes no id, so the
+	// parser threads it here for identity comparison: re-pointing a syncable at a
+	// different database while its SyncableIndex checkpoint is inherited by id
+	// would materialize the new database only from the checkpoint forward. Empty
+	// for directly-constructed configs (tests), which compare equal to each other.
+	DatabaseID string
 	Topic      string
 	Table      string
 	Mappings   []Mapping

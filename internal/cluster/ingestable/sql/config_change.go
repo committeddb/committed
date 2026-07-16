@@ -2,6 +2,7 @@ package sql
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/committeddb/committed/internal/cluster"
@@ -87,6 +88,72 @@ func (e *PrimaryKeyChangeError) AffectedTopic() string { return e.TopicID }
 // the syncables consuming AffectedTopic so they appear in the message + details.
 func (e *PrimaryKeyChangeError) SetDependents(deps []cluster.DependentSyncable) {
 	e.DependentSyncables = deps
+}
+
+// sourceChangeCode is the machine-readable code a deploy pipeline branches on to
+// drive the delete + recreate recovery for a source-identity change.
+const sourceChangeCode = "ingestable_source_change_requires_recreate"
+
+// SourceIdentityChangeError reports that a re-POST changes an ingestable's
+// SOURCE identity — the database server it reads (connectionString) or the topic
+// it produces (Type.ID) — while a prior config exists. The persisted snapshot
+// Position is inherited by ingestable id, so an in-place change would leave it
+// stale: a server re-point resumes from a binlog/WAL position that does not
+// exist on the new server (MySQL streams garbage or gaps; see mysql.go resume
+// path), and a topic re-point starts the new topic mid-stream with no snapshot
+// of the source's existing rows. The recovery is delete + recreate, which clears
+// the Position (see NewDeleteIngestableEntities) and forces a clean full
+// snapshot.
+//
+// Deliberately NOT flagged: a credential-only connectionString change (same host
+// + database — a routine password rotation); a slot_name change (a recreated
+// Postgres slot self-heals via the re-snapshot branch — the orphaned slot is a
+// resource concern, not data loss); and a tables add/remove (the in-place
+// reconcile owned by the publication / added-table backfill tickets).
+//
+// It implements cluster.RebuildRequiredError so the HTTP layer renders it (409 +
+// code + details) without importing this package. It carries NO connection
+// string (a secret) — only the names of the changed fields.
+type SourceIdentityChangeError struct {
+	TopicID       string   `json:"topic"`
+	TopicName     string   `json:"topicName,omitempty"`
+	ChangedFields []string `json:"changedFields"`
+}
+
+func (e *SourceIdentityChangeError) Error() string {
+	return fmt.Sprintf(
+		"ingestable source-identity change (%s) will not be applied in place: the persisted snapshot position is inherited by ingestable id. Changing the source (connectionString) leaves it pointing at a position that does not exist on the new server (streaming garbage or a gap); changing the produced topic starts the new topic mid-stream with no snapshot of the source's existing rows. Delete and recreate this ingestable (DELETE then POST /v1/ingestable/{id}) to re-snapshot cleanly. A credential-only connection-string change (same host and database) is not flagged.",
+		strings.Join(e.ChangedFields, ", "))
+}
+
+// Code implements cluster.RebuildRequiredError.
+func (e *SourceIdentityChangeError) Code() string { return sourceChangeCode }
+
+// Details implements cluster.RebuildRequiredError.
+func (e *SourceIdentityChangeError) Details() any { return e }
+
+// serverIdentityChanged reports whether two connection strings name a different
+// database SERVER — host, port, or database name — the part that makes a
+// persisted binlog/WAL position meaningful. Credentials (user/password) are
+// ignored so a routine password rotation is not flagged as a re-point. On a
+// parse failure (a malformed string that nonetheless reached here) it falls back
+// to a raw comparison: conservative, treating any change as a change.
+func serverIdentityChanged(oldCS, newCS string) bool {
+	if oldCS == newCS {
+		return false
+	}
+	ou, oerr := ParseConnString(oldCS)
+	nu, nerr := ParseConnString(newCS)
+	if oerr != nil || nerr != nil {
+		return true
+	}
+	return ou.Host != nu.Host || connDatabase(ou) != connDatabase(nu)
+}
+
+// connDatabase is the database name a connection-string URL addresses (the path
+// with its leading slash trimmed), e.g. "postgres://h/app" -> "app".
+func connDatabase(u *url.URL) string {
+	return strings.TrimPrefix(u.Path, "/")
 }
 
 // formatKey renders a primary-key column list for a human message.

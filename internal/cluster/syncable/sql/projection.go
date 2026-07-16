@@ -130,11 +130,28 @@ func NewProjection(d *DB, config *ProjectionConfig, m *metrics.Metrics, name str
 }
 
 // ValidateReplace implements cluster.ConfigChangeValidator: it rejects a
-// re-POST whose materialized table schema differs from prior's, which
-// CREATE TABLE IF NOT EXISTS would silently ignore. Returns a
-// *SchemaChangeError (a cluster.RebuildRequiredError) or nil.
+// re-POST that either changes this projection's identity (its set of source
+// topics, or the destination table — the inherited checkpoint would be stale) or
+// changes its materialized table schema (CREATE TABLE IF NOT EXISTS would
+// silently ignore it). Returns an *IdentityChangeError or *SchemaChangeError
+// (both cluster.RebuildRequiredError) or nil.
 func (p *Projection) ValidateReplace(prior cluster.Syncable) error {
-	return validateSchemaReplace(prior, p.materializedSchema())
+	return validateReplace(prior, p.syncableIdentity(), p.materializedSchema())
+}
+
+// syncableIdentity is the config identity that makes this projection's
+// checkpoint meaningful: the set of source topics it consumes and the
+// destination table. Reads the shorthand Topic when Sources is not yet folded so
+// it is correct whether or not applyDefaults has run.
+func (p *Projection) syncableIdentity() SyncableIdentity {
+	topics := make([]string, 0, len(p.config.Sources))
+	for _, s := range p.config.Sources {
+		topics = append(topics, s.Topic)
+	}
+	if len(topics) == 0 && p.config.Topic != "" {
+		topics = append(topics, p.config.Topic)
+	}
+	return SyncableIdentity{Topics: topics, Database: p.config.DatabaseID, Table: p.config.Table}
 }
 
 // materializedSchema is the projection's table shape: its declared columns +

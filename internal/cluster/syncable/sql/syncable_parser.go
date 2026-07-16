@@ -136,6 +136,7 @@ func (p *SyncableParser) ParseConfig(v *cluster.ParsedConfig, storage cluster.Da
 
 	config := &Config{
 		Database:   db,
+		DatabaseID: sqlDB,
 		Topic:      topic,
 		Table:      table,
 		Mappings:   mappings,

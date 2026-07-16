@@ -116,9 +116,10 @@ func schemaOf(c *Config) SyncableSchema {
 // two produce the same table.
 //
 // Scope: only the same-table case is a silent no-op (CREATE TABLE IF NOT EXISTS
-// sees the existing table and changes nothing). A different table name is a
-// different operation — CREATE makes the new table fresh — so it is out of this
-// guard's scope and returns nil.
+// sees the existing table and changes nothing). A different table name is not a
+// schema change but an IDENTITY change — the inherited checkpoint is stale for
+// the new table — and is caught earlier by identityChange (see validateReplace),
+// so this function stays same-table-scoped and returns nil for a rename.
 //
 // Column names are compared exactly; SQL types are normalized (upper-cased and
 // trimmed) so a cosmetic "varchar(128)" → "VARCHAR(128)" edit is not treated as
@@ -195,23 +196,33 @@ func indexesEqual(a, b []SchemaIndex) bool {
 }
 
 // materializedSchemaProvider is the sql-internal seam ValidateReplace uses to
-// read a prior syncable's schema: both *Projection and *Syncable implement it.
+// read a prior syncable's identity and schema: both *Projection and *Syncable
+// implement it.
 type materializedSchemaProvider interface {
 	materializedSchema() SyncableSchema
+	syncableIdentity() SyncableIdentity
 }
 
-// validateSchemaReplace is the shared body of the *Projection/*Syncable
-// ValidateReplace methods: it reports a *SchemaChangeError if replacing prior
-// with a syncable whose materialized schema is next would change the table.
-// Fail-open if prior exposes no schema (a different syncable kind, or one that
-// couldn't be built). The returned *SchemaChangeError implements
-// cluster.RebuildRequiredError.
-func validateSchemaReplace(prior cluster.Syncable, next SyncableSchema) error {
+// validateReplace is the shared body of the *Projection/*Syncable
+// ValidateReplace methods. It rejects, in order:
+//   - an IDENTITY change (topic re-point or table rename): the inherited
+//     SyncableIndex checkpoint is stale for the new destination → data loss;
+//   - a same-identity SCHEMA change: CREATE TABLE IF NOT EXISTS never ALTERs, so
+//     the change would silently no-op.
+//
+// Identity is checked first because a table rename is not a schema change (it
+// makes a fresh table) but IS a stale-checkpoint hazard. Fail-open if prior
+// exposes no identity/schema (a different syncable kind, or one that couldn't be
+// built). The returned errors implement cluster.RebuildRequiredError.
+func validateReplace(prior cluster.Syncable, nextIdentity SyncableIdentity, nextSchema SyncableSchema) error {
 	provider, ok := prior.(materializedSchemaProvider)
 	if !ok {
 		return nil
 	}
-	if change := materializedSchemaChange(provider.materializedSchema(), next); change != nil {
+	if change := identityChange(provider.syncableIdentity(), nextIdentity); change != nil {
+		return change
+	}
+	if change := materializedSchemaChange(provider.materializedSchema(), nextSchema); change != nil {
 		return change
 	}
 	return nil

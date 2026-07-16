@@ -50,11 +50,19 @@ func (c *Syncable) CheckpointPolicy() cluster.CheckpointPolicy {
 }
 
 // ValidateReplace implements cluster.ConfigChangeValidator: it rejects a
-// re-POST whose materialized table schema differs from prior's, which
-// CREATE TABLE IF NOT EXISTS would silently ignore. Returns a
-// *SchemaChangeError (a cluster.RebuildRequiredError) or nil.
+// re-POST that either changes this syncable's identity (topic re-point / table
+// rename — the inherited checkpoint would be stale) or changes its materialized
+// table schema (CREATE TABLE IF NOT EXISTS would silently ignore it). Returns an
+// *IdentityChangeError or *SchemaChangeError (both cluster.RebuildRequiredError)
+// or nil.
 func (c *Syncable) ValidateReplace(prior cluster.Syncable) error {
-	return validateSchemaReplace(prior, c.materializedSchema())
+	return validateReplace(prior, c.syncableIdentity(), c.materializedSchema())
+}
+
+// syncableIdentity is the config identity that makes this syncable's checkpoint
+// meaningful: the consumed topic and the destination table.
+func (c *Syncable) syncableIdentity() SyncableIdentity {
+	return identityOf(c.config)
 }
 
 // materializedSchema is the table syncable's shape: its mappings (columns +

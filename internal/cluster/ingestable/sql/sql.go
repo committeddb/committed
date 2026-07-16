@@ -72,15 +72,34 @@ func (i *Ingestable) ValidateReplace(prior cluster.Ingestable) error {
 	if !ok {
 		return nil // different ingestable kind — nothing to compare
 	}
-	if primaryKeyEqual(p.config.PrimaryKey, i.config.PrimaryKey) {
-		return nil
+	// A primaryKey change re-keys every row; keep the dedicated error, which
+	// carries the dependent-syncable enumeration a re-key needs.
+	if !primaryKeyEqual(p.config.PrimaryKey, i.config.PrimaryKey) {
+		return &PrimaryKeyChangeError{
+			TopicID:       i.topicID(),
+			TopicName:     i.topicName(),
+			OldPrimaryKey: p.config.PrimaryKey,
+			NewPrimaryKey: i.config.PrimaryKey,
+		}
 	}
-	return &PrimaryKeyChangeError{
-		TopicID:       i.topicID(),
-		TopicName:     i.topicName(),
-		OldPrimaryKey: p.config.PrimaryKey,
-		NewPrimaryKey: i.config.PrimaryKey,
+	// Source-identity changes leave the persisted Position stale for the new
+	// source or the new topic (see SourceIdentityChangeError for what is and is
+	// not flagged, and why).
+	var changed []string
+	if p.topicID() != i.topicID() {
+		changed = append(changed, "topic")
 	}
+	if serverIdentityChanged(p.config.ConnectionString, i.config.ConnectionString) {
+		changed = append(changed, "connectionString")
+	}
+	if len(changed) > 0 {
+		return &SourceIdentityChangeError{
+			TopicID:       i.topicID(),
+			TopicName:     i.topicName(),
+			ChangedFields: changed,
+		}
+	}
+	return nil
 }
 
 // topicID / topicName read the produced topic's identity, tolerating a nil Type

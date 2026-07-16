@@ -155,7 +155,11 @@ type ProjectionSource struct {
 // sources fold several normalized topics into one denormalized row (the topic is
 // each event's discriminator). See README § SQL projections.
 type ProjectionConfig struct {
-	Database   cluster.Database
+	Database cluster.Database
+	// DatabaseID is the id of the [database] config Database was resolved from
+	// (the sql-projection.db value), threaded by the parser for identity
+	// comparison (see Config.DatabaseID). Empty for directly-constructed configs.
+	DatabaseID string
 	Table      string
 	PrimaryKey string
 	Columns    []ProjectionColumn

@@ -132,6 +132,7 @@ func (p *ProjectionSyncableParser) ParseConfig(v *cluster.ParsedConfig, storage 
 
 	config := &ProjectionConfig{
 		Database:   db,
+		DatabaseID: sqlDB,
 		Table:      table,
 		PrimaryKey: primaryKey,
 		Columns:    columns,
