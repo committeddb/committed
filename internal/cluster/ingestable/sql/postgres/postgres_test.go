@@ -828,6 +828,94 @@ func TestPostgresTeardownSourceDropsSlot(t *testing.T) {
 	require.Equal(t, 0, slotCount())
 }
 
+// TestPostgresTeardownSourceDropsActiveSlot is the A8c regression: teardown must
+// drop the replication slot even when a walsender still holds it ACTIVE. That is
+// the wedged/abandoned-worker case — the delete path's worker drain timed out and
+// left the worker's replication connection live, so at teardown the slot is still
+// active. pg_drop_replication_slot errors on an active slot ("replication slot ...
+// is active for PID ..."), so before the fix teardown returned that error and left
+// the slot orphaned, pinning the source's WAL indefinitely. The fix terminates the
+// walsender holding the slot first, then drops.
+//
+// Unlike TestPostgresTeardownSourceDropsSlot, the worker is deliberately NOT
+// cancelled before teardown — the slot is genuinely active when TeardownSource runs.
+func TestPostgresTeardownSourceDropsActiveSlot(t *testing.T) {
+	const (
+		table = "pgtest_teardown_active"
+		slot  = "slot_active_teardown"
+		pub   = "pub_active_teardown"
+	)
+	db := createDB(t)
+	_, err := db.Exec(`DROP TABLE IF EXISTS ` + table)
+	require.NoError(t, err)
+	_, err = db.Exec(`CREATE TABLE ` + table + ` (pk VARCHAR(32) PRIMARY KEY, val TEXT)`)
+	require.NoError(t, err)
+	db.Close()
+
+	cleanReplication(t, slot, pub)
+
+	config := &sql.Config{
+		Type:             &cluster.Type{ID: "teardownactive", Name: "teardownactive"},
+		Mappings:         []sql.Mapping{{JsonName: "pk", SQLColumn: "pk"}, {JsonName: "val", SQLColumn: "val"}},
+		PrimaryKey:       []string{"pk"},
+		ConnectionString: connString,
+		Tables:           []string{table},
+		Options:          map[string]string{"slot_name": slot, "publication": pub},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	proposalChan := make(chan *cluster.Proposal, 10)
+	positionChan := make(chan cluster.Position, 10)
+
+	// Drain the worker's output so it can never block on a send while we hold the
+	// slot active (an empty table streams nothing, but stay defensive).
+	go func() {
+		for {
+			select {
+			case <-proposalChan:
+			case <-positionChan:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	dialect := &postgres.PostgreSQLDialect{}
+	ingestErr := make(chan error, 1)
+	go func() { ingestErr <- dialect.Ingest(ctx, config, nil, 0, proposalChan, positionChan) }()
+
+	waitForSlot(t, slot) // the slot is now active — a walsender is streaming it
+
+	// Confirm the slot is genuinely ACTIVE before teardown, so the test can't
+	// silently degrade into the inactive-slot happy path.
+	check := createDB(t)
+	defer check.Close()
+	var activePID gosql.NullInt64
+	require.NoError(t, check.QueryRow(
+		`SELECT active_pid FROM pg_replication_slots WHERE slot_name = $1`, slot).Scan(&activePID))
+	require.True(t, activePID.Valid, "the slot must be active (walsender attached) for this regression to be meaningful")
+
+	// Tear down WITHOUT cancelling the worker: the walsender is live, so the slot is
+	// active. Pre-fix this returned "replication slot ... is active for PID ..." and
+	// orphaned the slot; the fix terminates the walsender, then drops.
+	require.NoError(t, dialect.TeardownSource(config),
+		"teardown must drop an active slot by terminating its walsender first")
+
+	// Stop the (now walsender-killed) dialect before its reconnect backoff can
+	// recreate the slot, then confirm the drop stuck.
+	cancel()
+	select {
+	case <-ingestErr:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Ingest did not exit after cancel")
+	}
+
+	var slotCount int
+	require.NoError(t, check.QueryRow(
+		`SELECT COUNT(*) FROM pg_replication_slots WHERE slot_name = $1`, slot).Scan(&slotCount))
+	require.Equal(t, 0, slotCount, "the active slot must be dropped")
+}
+
 // TestPostgresMixedCaseColumn is the mixed-case-column regression on real
 // Postgres: a quoted CamelCase source column ("CreatedAt") mapped by a
 // case-matching config must carry its value through BOTH the snapshot and CDC

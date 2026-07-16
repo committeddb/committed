@@ -167,6 +167,9 @@ func (db *DB) Ingest(_ context.Context, id string, i cluster.Ingestable) error {
 			db.logger.Warn("ingest replace: prior worker did not exit in time; abandoning it (wedged on its source?) and proceeding",
 				zap.String("id", id), zap.Duration("timeout", db.workerDrainTimeout))
 		}
+		// Release the superseded ingestable's source resources (only if it drained,
+		// so we don't race a wedged worker) — otherwise every re-POST leaks them.
+		db.closeDrainedIngestable(existing, id)
 		db.workersMu.Lock()
 		if db.closed {
 			db.workersMu.Unlock()
@@ -229,6 +232,12 @@ func (db *DB) deleteIngest(id string) {
 	if !ok || handle.ingestable == nil {
 		return // no worker built on this node — nothing to tear down
 	}
+
+	// Release the deleted ingestable's source resources (Close). Node-local
+	// cleanup — done on every node that built a worker (if it drained), before and
+	// independent of the owner-only slot teardown below.
+	db.closeDrainedIngestable(handle, id)
+
 	if !db.isNode(id) {
 		return // this node isn't the owner
 	}

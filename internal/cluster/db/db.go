@@ -854,11 +854,13 @@ func (db *DB) Close() error {
 			"(a syncable stuck in tx.Commit against an unreachable destination is the usual cause)",
 			zap.Int("abandoned", abandoned), zap.Duration("timeout", closeDrainTimeout))
 	}
-	// Release each drained syncable's prepared statements (ingest handles have a
-	// nil syncable and are skipped). A worker abandoned above is still running, so
-	// closeDrainedSyncable leaves it alone.
+	// Release each drained worker's held resources: a syncable's prepared
+	// statements, an ingestable's source handles. Each helper skips the other
+	// kind (nil syncable / nil ingestable) and any worker still running after an
+	// abandoned drain, so the two calls together cover every drained handle.
 	for _, h := range handles {
 		db.closeDrainedSyncable(h, "")
+		db.closeDrainedIngestable(h, "")
 	}
 
 	// Hand leadership to a caught-up voter before stopping raft, so a graceful
@@ -933,6 +935,39 @@ func (db *DB) closeDrainedSyncable(handle *workerHandle, id string) {
 	}
 	if err := handle.syncable.Close(); err != nil {
 		db.logger.Warn("syncable close on teardown failed; prepared statements may linger until the pool recycles the connection",
+			zap.String("id", id), zap.Error(err))
+	}
+}
+
+// closeDrainedIngestable releases a torn-down ingest worker's Ingestable
+// resources via Close — the ingest twin of closeDrainedSyncable — so an ordinary
+// redeploy (replace / delete / shutdown) doesn't leak whatever the Ingestable
+// holds (a source connection pool, a binlog syncer). Ingestable.Close is the
+// release half of the lifecycle contract; the destructive source teardown (drop
+// the replication slot) is separate and owner-only (see deleteIngest).
+//
+// It closes ONLY once the worker goroutine has drained: a still-running worker
+// (its drain timed out — wedged on its source) may be mid-Ingest against those
+// resources, and closing them under it would race. The done channel is closed by
+// the worker's defer after ingest returns, so a non-blocking receive on it is the
+// "no Ingest in flight" signal; an abandoned worker releases its resources when it
+// finally exits (or on process exit). Best-effort: a close error is logged, not
+// fatal. Safe with a nil handle or a sync handle (nil ingestable).
+func (db *DB) closeDrainedIngestable(handle *workerHandle, id string) {
+	if handle == nil || handle.ingestable == nil {
+		return
+	}
+	select {
+	case <-handle.done:
+		// Drained: the worker goroutine has returned, so no Ingest is in flight and
+		// the Ingestable's resources are idle — safe to close.
+	default:
+		// Still running (drain timed out). Closing its resources now would race the
+		// worker's use of them, so leave them; they release when it eventually exits.
+		return
+	}
+	if err := handle.ingestable.Close(); err != nil {
+		db.logger.Warn("ingestable close on teardown failed; source resources may linger until the worker exits",
 			zap.String("id", id), zap.Error(err))
 	}
 }

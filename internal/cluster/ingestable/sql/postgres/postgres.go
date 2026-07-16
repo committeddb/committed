@@ -169,12 +169,29 @@ func (d *PostgreSQLDialect) TeardownSource(config *sql.Config) error {
 	}
 	defer func() { _ = db.Close() }()
 
-	// Drop the slot first — it's what holds WAL. The WHERE-guarded form drops it
-	// only if present, so a missing slot is not an error (unlike a bare
-	// pg_drop_replication_slot call).
+	// Terminate any walsender still holding the slot active before dropping it.
+	// The delete path tears down AFTER cancelling the worker, but a worker that
+	// wedged on its source (its drain timed out and the delete path abandoned it)
+	// can keep its replication connection — and thus the slot — active. An active
+	// slot cannot be dropped (pg_drop_replication_slot raises "replication slot
+	// ... is active for PID ..."), so without this the slot orphans and pins the
+	// source's WAL indefinitely. A no-op when the slot is already inactive
+	// (active_pid IS NULL) or absent (no row matches).
 	if _, err := db.ExecContext(ctx,
-		`SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1`,
+		`SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots
+			WHERE slot_name = $1 AND active_pid IS NOT NULL`,
 		pgCfg.slotName); err != nil {
+		return fmt.Errorf("terminate walsender holding replication slot %q: %w", pgCfg.slotName, err)
+	}
+
+	// Drop the slot — it's what holds WAL. The WHERE-guarded form drops it only if
+	// present, so a missing slot is not an error (unlike a bare
+	// pg_drop_replication_slot call). The terminated walsender clears the slot's
+	// active flag asynchronously as it exits, so a drop immediately after the
+	// terminate can still observe a not-yet-released slot; retry on the ctx cadence
+	// until it releases (or the deadline fires). On the common already-inactive
+	// path the first attempt succeeds, so the retry costs nothing.
+	if err := dropReplicationSlotWithRetry(ctx, db, pgCfg.slotName); err != nil {
 		return fmt.Errorf("drop replication slot %q: %w", pgCfg.slotName, err)
 	}
 	// Then the publication — it pins no WAL, but leaving it clutters the source.
@@ -183,6 +200,31 @@ func (d *PostgreSQLDialect) TeardownSource(config *sql.Config) error {
 		return fmt.Errorf("drop publication %q: %w", pgCfg.publication, err)
 	}
 	return nil
+}
+
+// dropReplicationSlotWithRetry drops the named slot, retrying while it is still
+// active. TeardownSource terminates the walsender holding the slot before calling
+// this, but that backend releases the slot asynchronously as it exits, so the
+// first drop can still race a not-yet-cleared active flag ("replication slot ...
+// is active for PID ..."). Retry on the ctx cadence until the drop succeeds — the
+// WHERE guard makes an already-gone slot a zero-row no-op — or ctx expires, in
+// which case the last error is returned. Mirrors cleanReplication's async-death
+// handling in the tests.
+func dropReplicationSlotWithRetry(ctx context.Context, db *gosql.DB, slotName string) error {
+	const retryInterval = 100 * time.Millisecond
+	for {
+		_, err := db.ExecContext(ctx,
+			`SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1`,
+			slotName)
+		if err == nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(retryInterval):
+		}
+	}
 }
 
 // checkReplicaIdentity verifies the table's replica identity covers primaryKey
