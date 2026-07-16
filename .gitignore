@@ -13,6 +13,7 @@ state-log
 .idea
 .claude/
 .claude-scratch/
+.worktrees/
 docker/db
 demo/db
 
