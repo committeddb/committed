@@ -2116,22 +2116,28 @@ func TestMysqlSnapshotResume(t *testing.T) {
 		_ = dialect1.Ingest(ctx1, config, nil, 0, proposalChan1, positionChan1)
 	}()
 
-	// Collect the first position with snapshot_progress so we know the
-	// pre-snapshot binlog position. Keep draining until a checkpoint
-	// names a non-zero progress.
+	// Collect the first snapshot-progress checkpoint so we know the pre-snapshot
+	// binlog position. It now rides INLINE on the batch proposal
+	// (Proposal.Position) — committed atomically with the rows in one raft entry
+	// — instead of on the position channel, so read it from the proposal.
 	var firstProgressPos cluster.Position
 	deadline := time.After(15 * time.Second)
 waitProgress:
 	for {
 		select {
-		case <-proposalChan1:
-		case pos := <-positionChan1:
+		case p := <-proposalChan1:
+			if len(p.Position) == 0 {
+				continue
+			}
 			posProto := &dialectpb.MySQLBinLogPosition{}
-			require.NoError(t, proto.Unmarshal(pos, posProto))
+			require.NoError(t, proto.Unmarshal(p.Position, posProto))
 			if posProto.SnapshotProgress != nil && len(posProto.SnapshotProgress.LastPkByTable) > 0 {
-				firstProgressPos = pos
+				firstProgressPos = p.Position
 				break waitProgress
 			}
+		case <-positionChan1:
+			// Streaming/table-done checkpoints still arrive here; drain them so
+			// the dialect never blocks on a full channel.
 		case <-deadline:
 			t.Fatal("timed out waiting for snapshot progress checkpoint")
 		}

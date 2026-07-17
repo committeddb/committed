@@ -1451,16 +1451,7 @@ func emitProgress(
 	progress *dialectpb.SnapshotProgress,
 	epoch uint64,
 ) error {
-	// A shallow copy is enough — proto.Marshal will serialize the
-	// current state of the maps/slices at call time.
-	posProto := &dialectpb.MySQLBinLogPosition{
-		Name:             pos.Name,
-		Pos:              pos.Pos,
-		GtidSet:          gtid,
-		SnapshotProgress: progress,
-		RefreshEpoch:     epoch,
-	}
-	bs, err := proto.Marshal(posProto)
+	bs, err := encodeProgress(pos, gtid, progress, epoch)
 	if err != nil {
 		return err
 	}
@@ -1470,6 +1461,22 @@ func emitProgress(
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// encodeProgress marshals a binlog position + snapshot progress into the
+// dialect's checkpoint bytes. Shared by emitProgress (out-of-band checkpoint)
+// and the snapshot loop, which carries the checkpoint INLINE on the batch
+// proposal (Proposal.Position) so rows and checkpoint commit in one atomic raft
+// entry. A shallow copy is enough — proto.Marshal serializes the maps/slices at
+// call time.
+func encodeProgress(pos mysql.Position, gtid string, progress *dialectpb.SnapshotProgress, epoch uint64) ([]byte, error) {
+	return proto.Marshal(&dialectpb.MySQLBinLogPosition{
+		Name:             pos.Name,
+		Pos:              pos.Pos,
+		GtidSet:          gtid,
+		SnapshotProgress: progress,
+		RefreshEpoch:     epoch,
+	})
 }
 
 // binlogStatus returns the current binlog filename and byte offset. It
@@ -1578,21 +1585,29 @@ func snapshotTable(
 		// refresh-boundary marker can sweep the rows this positive enumeration
 		// could not re-emit.
 		stampGeneration(rows, epoch)
-		p := &cluster.Proposal{Entities: rows}
+
+		// Advance the resume cursor to this batch, then carry the encoded
+		// checkpoint INLINE on the batch proposal (Proposal.Position) so the rows
+		// and their checkpoint commit in ONE raft entry. Atomic apply means a
+		// crash can never land between a committed batch and its checkpoint — the
+		// effectively-once gap a separate position proposal left open for snapshot
+		// rows (SourceSeq 0, so the streaming dedup can't cover them). No
+		// out-of-band emitProgress for a batch.
+		lastPK = lastKey
+		haveLastPK = true
+		progress.LastPkByTable[table] = lastPK
+
+		posBytes, err := encodeProgress(*pos, gtid, progress, epoch)
+		if err != nil {
+			return err
+		}
+		p := &cluster.Proposal{Entities: rows, Position: posBytes}
 		select {
 		case pr <- p:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
-
-		lastPK = lastKey
-		haveLastPK = true
-		progress.LastPkByTable[table] = lastPK
 		totalRows += count
-
-		if err := emitProgress(ctx, po, *pos, gtid, progress, epoch); err != nil {
-			return err
-		}
 
 		// Deliberately no last_pk: a natural primary key is often source PII
 		// (email, national id, account no), and this line is Info-level and

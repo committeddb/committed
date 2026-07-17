@@ -135,6 +135,21 @@ func (s *Storage) ApplyCommitted(entry *pb.Entry) error {
 		if err := s.advanceIngestSourceSeq(p.IngestableID, p.SourceSeq); err != nil {
 			return fmt.Errorf("[wal.storage] advanceIngestSourceSeq: %w", err)
 		}
+
+		// Persist a bundled resume checkpoint ATOMICALLY with the proposal's
+		// data: a snapshot batch carries its own position (Proposal.Position) so
+		// the checkpoint advances in the SAME raft entry as the rows. This closes
+		// the crash window between a committed batch and a separate position
+		// proposal — the gap SourceSeq dedup can't cover, because snapshot rows
+		// carry SourceSeq 0 (see the effectively-once guarantee in
+		// docs/operations/cdc-setup.md). Before saveAppliedIndex so a replayed
+		// entry re-applies the idempotent (last-writer-wins) put; guarded on the
+		// config existing, exactly like a standalone position entity.
+		if len(p.Position) > 0 {
+			if err := s.applyBundledIngestablePosition(p.IngestableID, p.Position); err != nil {
+				return fmt.Errorf("[wal.storage] apply bundled position: %w", err)
+			}
+		}
 	}
 
 	s.appliedIndex.Store(entry.GetIndex())

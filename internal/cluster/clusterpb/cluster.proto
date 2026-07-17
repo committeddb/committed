@@ -67,6 +67,14 @@ message LogProposal {
     // compatible: pre-feature entries unmarshal as "" / 0.
     string ingestableID = 3;
     uint64 sourceSeq = 4;
+    // position, when set, is the ingest resume checkpoint this proposal
+    // establishes, applied ATOMICALLY with the proposal's entities in one raft
+    // entry (the apply path calls the same guarded put as a standalone position
+    // entity, keyed by ingestableID). Snapshot batches carry it so a crash can
+    // never land between a committed batch and its checkpoint — the case
+    // SourceSeq dedup cannot cover (snapshot rows have sourceSeq 0). Streaming
+    // still checkpoints out-of-band. Empty means "no bundled position".
+    bytes position = 5;
 }
 
 enum LogValidationStrategy {

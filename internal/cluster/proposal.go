@@ -46,6 +46,16 @@ type Proposal struct {
 	// enter raft. Zero/"" means "not an ingest proposal" — never deduped.
 	IngestableID string
 	SourceSeq    uint64
+
+	// Position, when set, is the ingest resume checkpoint this proposal
+	// establishes (the dialect's encoded position bytes). The apply path
+	// persists it — via the same config-guarded put as a standalone position
+	// entity, keyed by IngestableID — ATOMICALLY with this proposal's entities,
+	// in one raft entry. Snapshot batches set it so a crash can never fall
+	// between a committed batch and its checkpoint (the gap SourceSeq dedup can't
+	// cover, since snapshot rows carry SourceSeq 0). Empty for non-ingest and
+	// streaming proposals, which checkpoint out-of-band.
+	Position Position
 }
 
 type Entity struct {
@@ -139,6 +149,7 @@ func (p *Proposal) Marshal() ([]byte, error) {
 		RequestID:    p.RequestID,
 		IngestableID: p.IngestableID,
 		SourceSeq:    p.SourceSeq,
+		Position:     p.Position,
 	}
 
 	return proto.Marshal(lp)
@@ -199,6 +210,7 @@ func (p *Proposal) Unmarshal(bs []byte, r TypeResolver) error {
 	p.RequestID = lp.RequestID
 	p.IngestableID = lp.IngestableID
 	p.SourceSeq = lp.SourceSeq
+	p.Position = lp.Position
 	for _, e := range lp.LogEntities {
 		ref := TypeRef{ID: e.Type.GetID(), Version: int(e.Type.GetVersion())}
 		t, err := resolveType(ref, r)

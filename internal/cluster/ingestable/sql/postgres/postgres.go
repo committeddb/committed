@@ -1380,21 +1380,29 @@ func (d *PostgreSQLDialect) snapshotTable(
 		// the initial snapshot is epoch 1) so a closing refresh-boundary marker
 		// can sweep the rows this positive enumeration could not re-emit.
 		stampGeneration(entities, epoch)
-		p := &cluster.Proposal{Entities: entities}
+
+		// Advance the resume cursor to this batch, then carry the encoded
+		// checkpoint INLINE on the batch proposal (Proposal.Position) so the rows
+		// and their checkpoint commit in ONE raft entry. Atomic apply means a
+		// crash can never land between a committed batch and its checkpoint — the
+		// effectively-once gap a separate position proposal left open for snapshot
+		// rows (SourceSeq 0, so the streaming dedup can't cover them). No
+		// out-of-band emitSnapshotProgress for a batch.
+		lastPK = batchLastPK
+		haveLastPK = true
+		progress.LastPkByTable[table] = lastPK
+
+		posBytes, err := encodePosition(lsn, progress, epoch)
+		if err != nil {
+			return err
+		}
+		p := &cluster.Proposal{Entities: entities, Position: posBytes}
 		select {
 		case pr <- p:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
-
-		lastPK = batchLastPK
-		haveLastPK = true
-		progress.LastPkByTable[table] = lastPK
 		totalRows += count
-
-		if err := emitSnapshotProgress(ctx, po, lsn, progress, epoch); err != nil {
-			return err
-		}
 
 		// Deliberately no last_pk: a natural primary key is often source PII
 		// (email, national id, account no), and this line is Info-level and

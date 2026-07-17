@@ -52,40 +52,69 @@ func (s *Storage) Position(id string) cluster.Position {
 // most-recent position is needed for resume.
 func (s *Storage) saveIngestablePosition(e *cluster.Entity) error {
 	return s.update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(ingestablePositionBucket)
-		if b == nil {
-			return ErrBucketMissing
-		}
 		if e.IsDelete() {
 			// A delete tombstone clears the checkpoint (an ingestable DELETE), so a
 			// same-id recreate starts from a full snapshot instead of resuming from
 			// a stale LSN whose replication slot has been dropped.
+			b := tx.Bucket(ingestablePositionBucket)
+			if b == nil {
+				return ErrBucketMissing
+			}
 			if err := b.Delete(e.Key); err != nil {
 				return fmt.Errorf("[wal.ingestable_position] delete: %w", err)
 			}
 			return nil
 		}
+		return putIngestablePositionGuarded(tx, e.Key, e.Data)
+	})
+}
 
-		// Invariant: a position persists only while its ingestable config exists.
-		// A worker submits its position via an async consensus bump
-		// (proposeIngestablePosition) that can commit AFTER the config was deleted;
-		// without this guard the Put would re-establish an orphaned position (config
-		// gone, LSN lingering) that a same-id recreate resumes from — resuming CDC
-		// from an LSN whose replication slot Teardown has since dropped (error) or a
-		// silent data gap. So if the config is gone, drop the stale bump and clear
-		// any lingering value, reaping an orphan rather than creating one.
-		// Deterministic: config existence is replicated state applied in identical
-		// log order on every node.
-		if !configExists(tx, ingestableBucket, e.Key) {
-			if err := b.Delete(e.Key); err != nil {
-				return fmt.Errorf("[wal.ingestable_position] reap orphan: %w", err)
-			}
-			return nil
-		}
-
-		if err := b.Put(e.Key, e.Data); err != nil {
-			return fmt.Errorf("[wal.ingestable_position] put: %w", err)
+// putIngestablePositionGuarded persists a checkpoint (data is the marshaled
+// LogIngestablePosition, keyed by the ingestable id bytes) but ONLY while the
+// ingestable config still exists — otherwise it reaps any lingering value
+// rather than re-establishing an orphan.
+//
+// Invariant: a position persists only while its ingestable config exists. A
+// worker submits its position via an async consensus bump that can commit AFTER
+// the config was deleted; without this guard the Put would re-establish an
+// orphaned position (config gone, LSN lingering) that a same-id recreate
+// resumes from — resuming CDC from an LSN whose replication slot Teardown has
+// since dropped (error) or a silent data gap. Deterministic: config existence
+// is replicated state applied in identical log order on every node. Shared by
+// the entity-apply path (saveIngestablePosition) and the atomic bundled-position
+// path (applyBundledIngestablePosition).
+func putIngestablePositionGuarded(tx *bolt.Tx, key, data []byte) error {
+	b := tx.Bucket(ingestablePositionBucket)
+	if b == nil {
+		return ErrBucketMissing
+	}
+	if !configExists(tx, ingestableBucket, key) {
+		if err := b.Delete(key); err != nil {
+			return fmt.Errorf("[wal.ingestable_position] reap orphan: %w", err)
 		}
 		return nil
+	}
+	if err := b.Put(key, data); err != nil {
+		return fmt.Errorf("[wal.ingestable_position] put: %w", err)
+	}
+	return nil
+}
+
+// applyBundledIngestablePosition persists the resume checkpoint a proposal
+// carried inline (Proposal.Position), keyed by its IngestableID, through the
+// SAME guarded put a standalone position entity uses. Called from ApplyCommitted
+// so the checkpoint advances in the same raft entry as the proposal's rows —
+// closing the crash window between a committed snapshot batch and a separate
+// position proposal (the window SourceSeq dedup can't cover, since snapshot rows
+// carry SourceSeq 0). pos is the raw dialect position bytes; we wrap it in a
+// LogIngestablePosition exactly as proposeIngestablePosition would, so Position()
+// unwraps it identically.
+func (s *Storage) applyBundledIngestablePosition(id string, pos cluster.Position) error {
+	data, err := (&cluster.IngestablePosition{ID: id, Position: pos}).Marshal()
+	if err != nil {
+		return fmt.Errorf("[wal.ingestable_position] marshal bundled: %w", err)
+	}
+	return s.update(func(tx *bolt.Tx) error {
+		return putIngestablePositionGuarded(tx, []byte(id), data)
 	})
 }
