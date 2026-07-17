@@ -98,6 +98,46 @@ newer one wrote (backward compatibility, i.e. rollback). A node that
 cannot read its on-disk state does not run on it; it fails to start with
 `ErrCorruptEntry` (see [operations/rebuild.md](operations/rebuild.md)).
 
+**Wire-decodable is not the same as semantically compatible.** "An older
+binary can *decode* the bytes" (proto3 ignores unknown fields) does not
+imply "an older binary *applies* them correctly." An additive field or a
+new entity type can be perfectly decodable yet change what an older
+consumer must *do* — and a consumer that decodes but mishandles it (a
+crash, a dead-letter, a wrong projection) is a backward-incompatibility
+just as real as an unreadable byte. Committed closes that gap with a
+**cluster feature level** (below): anything an older peer would mishandle
+is not *emitted* until every member advertises that it can apply it, so
+the incompatible entry is never committed while a node that would mishandle
+it is present. The one-way-transitions list must grow whenever an additive
+change alters how an *older* consumer has to behave — not only when it
+changes the bytes.
+
+### Cluster feature level (semantic compatibility gate)
+
+`version.FeatureLevel` is a monotonic integer each binary supports and
+**self-announces** into the replicated `memberVersions` bucket on startup
+(`LogNodeVersion`, applied like `LogNodeAPIURL`; survives restart and rides
+snapshots). Any node can therefore compute the **cluster-agreed minimum**
+feature level — the lowest level across current members, with an
+un-announced member (one still starting, or a binary predating the
+mechanism) counted as level 0.
+
+A feature whose entries an older peer would mishandle gates its *emission*
+on that minimum: the entry is proposed only once every member is at the
+required level. During a rolling upgrade the minimum is held down by the
+not-yet-upgraded nodes, so the feature stays dormant; it activates
+cluster-wide the moment the last node upgrades and announces. This is how
+"new entity types ship disabled until the whole cluster is upgraded" is
+*enforced* rather than merely documented, and it keeps a rolling upgrade
+safe in both directions: an old node is never handed state it can't apply.
+
+To introduce such a feature: bump `version.FeatureLevel`, add a
+`featureLevel*` requirement constant at the emitting site, and gate the
+emission on `featureEnabled(that level)`. Never renumber or reuse a level.
+The gate protects forward from the first release that carries it; a
+rollback to a binary that *predates the mechanism itself* is inherently
+one-way (see the list at the end).
+
 ### Log entities (protobuf)
 
 Every committed proposal, type, syncable record, etc. is a protobuf
@@ -105,7 +145,7 @@ message on the permanent event log (`internal/cluster/clusterpb`):
 `LogProposal`, `LogEntity`, `LogType`, `LogConfiguration`,
 `LogSyncableIndex`, `LogIngestablePosition`, `LogSyncableDeadLetter`,
 `LogSyncableStuck`, `LogSyncableSkipRequest`, `LogTypeMigrationDeadLetter`,
-`LogScrub`, `LogNodeAPIURL`. The rule is **add-only**:
+`LogScrub`, `LogNodeAPIURL`, `LogNodeVersion`. The rule is **add-only**:
 
 - A new field gets a new, never-before-used tag number. Old binaries
   ignore unknown fields (proto3); new binaries treat an absent field as
@@ -115,10 +155,15 @@ message on the permanent event log (`internal/cluster/clusterpb`):
   entry that used it. Retire a field by leaving it unused, not by reusing
   its number.
 
-New entity *types* (a new system type ID) are additive: an old binary
-that meets one it doesn't recognize must not be in the cluster yet — which
-is why upgrades go one major line at a time and new entity types ship
-disabled until the whole cluster is upgraded.
+New entity *types* (a new system type ID) are additive on the wire, but an
+old binary that meets one it doesn't recognize can't *resolve* it (a system
+type UUID is indistinguishable from an unknown user type) and would
+fatal-exit applying it. This is exactly a "wire-decodable but not
+semantically compatible" case, so a new system type MUST gate its emission
+on a **cluster feature level** (above): it is not proposed until every
+member advertises support, so an old node never receives it. That is what
+makes "new entity types ship disabled until the whole cluster is upgraded"
+an enforced invariant rather than an operator's promise.
 
 ### WAL / event-log framing
 
@@ -141,7 +186,7 @@ new binaries read old versions; the bump itself is a one-way transition.
 
 Replicated metadata lives in named BoltDB buckets: `types`, `databases`,
 `ingestables`, `ingestablePositions`, `ingestSourceSeq`, `eventTombstones`,
-`memberAPIURLs`, `syncables`, `syncableIndexes`, `syncableDeadLetters`,
+`memberAPIURLs`, `memberVersions`, `syncables`, `syncableIndexes`, `syncableDeadLetters`,
 `syncableStuck`, `syncableSkipRequests`, `typeMigrationDeadLetters`,
 `appliedIndex`, `pendingScrub`. Adding a bucket is additive (a new binary
 creates it on open; an old binary ignores it). **Renaming or removing** a
@@ -168,6 +213,21 @@ the old binary cannot read:
   binary means a [rebuild](operations/rebuild.md), not a binary swap.
 - **A frame-version or snapshot-format bump**, when one ships, is called
   out as one-way in that release's notes.
+- **Rolling back below a feature whose entries are already on your log.**
+  The cluster feature level keeps a feature dormant until every member can
+  apply it, but once it activates its entries are committed permanently.
+  Rolling a node back to a binary that *predates that feature* (in
+  particular a binary predating the feature-level mechanism itself, which
+  can't be gated retroactively) means it meets entries it can't apply — a
+  rebuild, not a binary swap. Concretely today: rolling back past the
+  **ingest refresh-boundary marker** (`RefreshBoundary`/`Generation` on
+  `LogEntity`) to a pre-marker binary, which decodes the marker but has no
+  `IsRefreshBoundary` branch and would dead-letter it.
+- **A raft transport `protocolVersion` bump.** The peer transport
+  currently accepts only an exact protocol-version match, so a bump is a
+  flag-day: it partitions a half-upgraded cluster until every node is on
+  the new version. Ship such a bump stop-the-world, or behind a future
+  negotiated dual-accept built on the same cluster-feature-level mechanism.
 
 Routine upgrades *between* two releases that already share these formats
 have no one-way transition and roll back with a plain binary swap. When in

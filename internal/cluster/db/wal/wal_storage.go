@@ -69,6 +69,14 @@ var (
 	// Rides along in snapshots (bbolt is serialized whole into CreateSnapshot).
 	// See member_peer_url.go and raft.applyConfChange / reconcileTransport.
 	memberPeerURLBucket = []byte("memberPeerURLs")
+	// memberVersionBucket maps a raft node id (8 big-endian bytes, the key
+	// cluster.NodeVersionKey produces) to a marshaled cluster.NodeVersion — the
+	// node's self-announced cluster feature level. Entity-driven (written from
+	// the apply path, handleNodeVersion) so it replicates to every node and
+	// rides snapshots. Read to compute the cluster-agreed minimum feature level
+	// that gates semantically-skewed emission (a new system type, a
+	// refresh-boundary marker). See node_version.go and db.featureEnabled.
+	memberVersionBucket = []byte("memberVersions")
 )
 
 var (
@@ -141,6 +149,7 @@ var internalEntities = []internalEntity{
 	{cluster.IsIngestablePosition, "saveIngestablePosition", ingestablePositionBucket, (*Storage).saveIngestablePosition},
 	{cluster.IsScrub, "handleScrub", pendingScrubBucket, (*Storage).handleScrub},
 	{cluster.IsNodeAPIURL, "handleNodeAPIURL", memberAPIURLBucket, (*Storage).handleNodeAPIURL},
+	{cluster.IsNodeVersion, "handleNodeVersion", memberVersionBucket, (*Storage).handleNodeVersion},
 }
 
 // buckets is every bbolt bucket Open must create: one per internal entity type

@@ -34,6 +34,15 @@ type Option func(*options)
 
 type options struct {
 	tickInterval time.Duration
+	// announceVersion enables the startup feature-level self-announce
+	// (db.announceVersion), which proposes this node's version.FeatureLevel so
+	// the version-skew gate can compute the cluster-agreed minimum. Production
+	// enables it via WithVersionAnnounce; it defaults OFF so the bulk of unit
+	// tests — which build single-node DBs and assert exact committed-entry
+	// counts — aren't perturbed by the extra background proposal (and its commit
+	// racing their assertions). A node that never announces reads as level 0,
+	// which only ever holds emission (the conservative, safe direction).
+	announceVersion bool
 	// leaderChangeGrace is how long db.DB's leader-change watcher waits
 	// after observing a raft leader transition before signaling at-risk
 	// waiters with ErrProposalUnknown. The grace period gives the
@@ -237,6 +246,17 @@ func WithSyncStuckThreshold(d time.Duration) Option {
 // is unacceptable. Production callers should leave this at the default.
 func WithTickInterval(d time.Duration) Option {
 	return func(o *options) { o.tickInterval = d }
+}
+
+// WithVersionAnnounce enables the startup feature-level self-announce: the node
+// proposes its version.FeatureLevel into the replicated memberVersions map so
+// the semantic version-skew gate (db.featureEnabled) can compute the
+// cluster-agreed minimum. Production (cmd/node.go) sets this; it is off by
+// default so unit tests that assert exact committed-entry counts aren't
+// perturbed by the background proposal. A node that never announces reads as
+// level 0, which only holds emission — never crashes or diverges.
+func WithVersionAnnounce() Option {
+	return func(o *options) { o.announceVersion = true }
 }
 
 // WithJoin marks this node as joining an existing cluster. A joining node

@@ -159,6 +159,15 @@ type Storage interface {
 	PutMemberPeerURL(id uint64, rawURL []byte) error
 	MemberPeerURLs() map[uint64]string
 	DeleteMemberPeerURL(id uint64) error
+	// MemberVersion / MemberVersions / DeleteMemberVersion persist each member's
+	// self-announced cluster feature level (entity-driven, applied via
+	// handleNodeVersion). MemberVersions feeds the cluster-agreed minimum that
+	// gates semantically-skewed emission (a new system type, a refresh-boundary
+	// marker) until every member can apply it; DeleteMemberVersion drops a
+	// removed node's entry from applyConfChange. See node_version.go.
+	MemberVersion(id uint64) (uint64, bool)
+	MemberVersions() map[uint64]uint64
+	DeleteMemberVersion(id uint64) error
 }
 
 // lostNotifierSetter is the optional Storage extension that accepts the

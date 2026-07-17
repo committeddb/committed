@@ -249,3 +249,16 @@ message LogNodeAPIURL {
     uint64 nodeID = 1;
     string apiURL = 2;
 }
+
+// LogNodeVersion is a node's self-announcement of the highest cluster feature
+// level its binary supports (version.FeatureLevel). Replicated so any node can
+// compute the cluster-agreed minimum and gate emission of a feature's entries
+// until every member can apply them — the fix for semantic version skew (a new
+// system type must not reach an old node, a refresh-boundary marker must not
+// reach a node that can't interpret it). Upsert keyed by node id; the apply
+// path stores it in the memberVersions bucket. See node_version.go and
+// docs/api-compatibility.md.
+message LogNodeVersion {
+    uint64 nodeID = 1;
+    uint64 featureLevel = 2;
+}

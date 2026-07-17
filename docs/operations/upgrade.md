@@ -109,6 +109,16 @@ After the last node:
   Committed exports metrics via OTLP, it does not serve a `/metrics`
   endpoint) should be flat.
 
+> **Feature activation is automatic.** A release may carry features that
+> stay dormant until *every* node is upgraded — anything an older peer
+> would mishandle is held back by the [cluster feature
+> level](../api-compatibility.md#cluster-feature-level-semantic-compatibility-gate)
+> until the whole cluster advertises support, then activates on its own.
+> You don't enable anything; just finish the roll. The corollary: don't
+> run half-upgraded indefinitely (a stalled roll leaves those features
+> off), and once a feature has activated, rolling a node back below it is a
+> one-way transition (see the compatibility contract).
+
 ## Rolling back
 
 If the new binary misbehaves on a node — fails to start, fails `/ready`,

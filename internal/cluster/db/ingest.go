@@ -386,6 +386,20 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 					continue
 				}
 
+				// Hold a refresh-boundary marker until every member can apply
+				// it (semantic version-skew gate): a pre-mechanism sink has no
+				// IsRefreshBoundary branch and would dead-letter it permanently.
+				// The worker blocks on its pr send until we accept the marker,
+				// so this backpressure holds its position checkpoint too — the
+				// marker commits before the position advances. A false return
+				// (shutdown / leadership loss) drops the un-advanced marker; a
+				// restart re-runs the refresh and re-emits it. See
+				// awaitRefreshBoundaryEnabled.
+				if containsRefreshBoundary(proposal) && !db.awaitRefreshBoundaryEnabled(ctx, id) {
+					backoff = ingestBackoffMin
+					continue
+				}
+
 				// Ingest worker proposes user data; we use the worker
 				// context (ctx) so cancel-on-stop interrupts the wait.
 				// proposeIngestData retries (not drops) on disk-pressure

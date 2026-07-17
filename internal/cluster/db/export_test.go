@@ -11,6 +11,13 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 )
 
+// MemberVersionForTest reports the feature level node id announced (and whether
+// one is known), reading the same replicated bucket the gate does. Lets a test
+// observe that the startup announce landed.
+func (db *DB) MemberVersionForTest(id uint64) (uint64, bool) {
+	return db.storage.MemberVersion(id)
+}
+
 // InjectStaleWorkerBumpOnRebuildResetForTest arms RebuildSyncable's post-reset
 // seam to reproduce the checkpoint-bump-vs-reset race deterministically. The
 // first time a rebuild resets id's checkpoint, if a sync worker for id is still

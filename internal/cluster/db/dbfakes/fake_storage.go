@@ -158,6 +158,17 @@ type FakeStorage struct {
 	deleteMemberPeerURLReturnsOnCall map[int]struct {
 		result1 error
 	}
+	DeleteMemberVersionStub        func(uint64) error
+	deleteMemberVersionMutex       sync.RWMutex
+	deleteMemberVersionArgsForCall []struct {
+		arg1 uint64
+	}
+	deleteMemberVersionReturns struct {
+		result1 error
+	}
+	deleteMemberVersionReturnsOnCall map[int]struct {
+		result1 error
+	}
 	EntriesStub        func(uint64, uint64, uint64) ([]*raftpb.Entry, error)
 	entriesMutex       sync.RWMutex
 	entriesArgsForCall []struct {
@@ -331,6 +342,29 @@ type FakeStorage struct {
 	}
 	memberPeerURLsReturnsOnCall map[int]struct {
 		result1 map[uint64]string
+	}
+	MemberVersionStub        func(uint64) (uint64, bool)
+	memberVersionMutex       sync.RWMutex
+	memberVersionArgsForCall []struct {
+		arg1 uint64
+	}
+	memberVersionReturns struct {
+		result1 uint64
+		result2 bool
+	}
+	memberVersionReturnsOnCall map[int]struct {
+		result1 uint64
+		result2 bool
+	}
+	MemberVersionsStub        func() map[uint64]uint64
+	memberVersionsMutex       sync.RWMutex
+	memberVersionsArgsForCall []struct {
+	}
+	memberVersionsReturns struct {
+		result1 map[uint64]uint64
+	}
+	memberVersionsReturnsOnCall map[int]struct {
+		result1 map[uint64]uint64
 	}
 	NodeStub        func(string) uint64
 	nodeMutex       sync.RWMutex
@@ -1364,6 +1398,67 @@ func (fake *FakeStorage) DeleteMemberPeerURLReturnsOnCall(i int, result1 error) 
 	}{result1}
 }
 
+func (fake *FakeStorage) DeleteMemberVersion(arg1 uint64) error {
+	fake.deleteMemberVersionMutex.Lock()
+	ret, specificReturn := fake.deleteMemberVersionReturnsOnCall[len(fake.deleteMemberVersionArgsForCall)]
+	fake.deleteMemberVersionArgsForCall = append(fake.deleteMemberVersionArgsForCall, struct {
+		arg1 uint64
+	}{arg1})
+	stub := fake.DeleteMemberVersionStub
+	fakeReturns := fake.deleteMemberVersionReturns
+	fake.recordInvocation("DeleteMemberVersion", []interface{}{arg1})
+	fake.deleteMemberVersionMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeStorage) DeleteMemberVersionCallCount() int {
+	fake.deleteMemberVersionMutex.RLock()
+	defer fake.deleteMemberVersionMutex.RUnlock()
+	return len(fake.deleteMemberVersionArgsForCall)
+}
+
+func (fake *FakeStorage) DeleteMemberVersionCalls(stub func(uint64) error) {
+	fake.deleteMemberVersionMutex.Lock()
+	defer fake.deleteMemberVersionMutex.Unlock()
+	fake.DeleteMemberVersionStub = stub
+}
+
+func (fake *FakeStorage) DeleteMemberVersionArgsForCall(i int) uint64 {
+	fake.deleteMemberVersionMutex.RLock()
+	defer fake.deleteMemberVersionMutex.RUnlock()
+	argsForCall := fake.deleteMemberVersionArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeStorage) DeleteMemberVersionReturns(result1 error) {
+	fake.deleteMemberVersionMutex.Lock()
+	defer fake.deleteMemberVersionMutex.Unlock()
+	fake.DeleteMemberVersionStub = nil
+	fake.deleteMemberVersionReturns = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *FakeStorage) DeleteMemberVersionReturnsOnCall(i int, result1 error) {
+	fake.deleteMemberVersionMutex.Lock()
+	defer fake.deleteMemberVersionMutex.Unlock()
+	fake.DeleteMemberVersionStub = nil
+	if fake.deleteMemberVersionReturnsOnCall == nil {
+		fake.deleteMemberVersionReturnsOnCall = make(map[int]struct {
+			result1 error
+		})
+	}
+	fake.deleteMemberVersionReturnsOnCall[i] = struct {
+		result1 error
+	}{result1}
+}
+
 func (fake *FakeStorage) Entries(arg1 uint64, arg2 uint64, arg3 uint64) ([]*raftpb.Entry, error) {
 	fake.entriesMutex.Lock()
 	ret, specificReturn := fake.entriesReturnsOnCall[len(fake.entriesArgsForCall)]
@@ -2197,6 +2292,123 @@ func (fake *FakeStorage) MemberPeerURLsReturnsOnCall(i int, result1 map[uint64]s
 	}
 	fake.memberPeerURLsReturnsOnCall[i] = struct {
 		result1 map[uint64]string
+	}{result1}
+}
+
+func (fake *FakeStorage) MemberVersion(arg1 uint64) (uint64, bool) {
+	fake.memberVersionMutex.Lock()
+	ret, specificReturn := fake.memberVersionReturnsOnCall[len(fake.memberVersionArgsForCall)]
+	fake.memberVersionArgsForCall = append(fake.memberVersionArgsForCall, struct {
+		arg1 uint64
+	}{arg1})
+	stub := fake.MemberVersionStub
+	fakeReturns := fake.memberVersionReturns
+	fake.recordInvocation("MemberVersion", []interface{}{arg1})
+	fake.memberVersionMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeStorage) MemberVersionCallCount() int {
+	fake.memberVersionMutex.RLock()
+	defer fake.memberVersionMutex.RUnlock()
+	return len(fake.memberVersionArgsForCall)
+}
+
+func (fake *FakeStorage) MemberVersionCalls(stub func(uint64) (uint64, bool)) {
+	fake.memberVersionMutex.Lock()
+	defer fake.memberVersionMutex.Unlock()
+	fake.MemberVersionStub = stub
+}
+
+func (fake *FakeStorage) MemberVersionArgsForCall(i int) uint64 {
+	fake.memberVersionMutex.RLock()
+	defer fake.memberVersionMutex.RUnlock()
+	argsForCall := fake.memberVersionArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeStorage) MemberVersionReturns(result1 uint64, result2 bool) {
+	fake.memberVersionMutex.Lock()
+	defer fake.memberVersionMutex.Unlock()
+	fake.MemberVersionStub = nil
+	fake.memberVersionReturns = struct {
+		result1 uint64
+		result2 bool
+	}{result1, result2}
+}
+
+func (fake *FakeStorage) MemberVersionReturnsOnCall(i int, result1 uint64, result2 bool) {
+	fake.memberVersionMutex.Lock()
+	defer fake.memberVersionMutex.Unlock()
+	fake.MemberVersionStub = nil
+	if fake.memberVersionReturnsOnCall == nil {
+		fake.memberVersionReturnsOnCall = make(map[int]struct {
+			result1 uint64
+			result2 bool
+		})
+	}
+	fake.memberVersionReturnsOnCall[i] = struct {
+		result1 uint64
+		result2 bool
+	}{result1, result2}
+}
+
+func (fake *FakeStorage) MemberVersions() map[uint64]uint64 {
+	fake.memberVersionsMutex.Lock()
+	ret, specificReturn := fake.memberVersionsReturnsOnCall[len(fake.memberVersionsArgsForCall)]
+	fake.memberVersionsArgsForCall = append(fake.memberVersionsArgsForCall, struct {
+	}{})
+	stub := fake.MemberVersionsStub
+	fakeReturns := fake.memberVersionsReturns
+	fake.recordInvocation("MemberVersions", []interface{}{})
+	fake.memberVersionsMutex.Unlock()
+	if stub != nil {
+		return stub()
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeStorage) MemberVersionsCallCount() int {
+	fake.memberVersionsMutex.RLock()
+	defer fake.memberVersionsMutex.RUnlock()
+	return len(fake.memberVersionsArgsForCall)
+}
+
+func (fake *FakeStorage) MemberVersionsCalls(stub func() map[uint64]uint64) {
+	fake.memberVersionsMutex.Lock()
+	defer fake.memberVersionsMutex.Unlock()
+	fake.MemberVersionsStub = stub
+}
+
+func (fake *FakeStorage) MemberVersionsReturns(result1 map[uint64]uint64) {
+	fake.memberVersionsMutex.Lock()
+	defer fake.memberVersionsMutex.Unlock()
+	fake.MemberVersionsStub = nil
+	fake.memberVersionsReturns = struct {
+		result1 map[uint64]uint64
+	}{result1}
+}
+
+func (fake *FakeStorage) MemberVersionsReturnsOnCall(i int, result1 map[uint64]uint64) {
+	fake.memberVersionsMutex.Lock()
+	defer fake.memberVersionsMutex.Unlock()
+	fake.MemberVersionsStub = nil
+	if fake.memberVersionsReturnsOnCall == nil {
+		fake.memberVersionsReturnsOnCall = make(map[int]struct {
+			result1 map[uint64]uint64
+		})
+	}
+	fake.memberVersionsReturnsOnCall[i] = struct {
+		result1 map[uint64]uint64
 	}{result1}
 }
 

@@ -197,6 +197,12 @@ image can be templated per-node by an orchestrator:
 			dbOpts = append(dbOpts, db.WithMetrics(m))
 		}
 
+		// Self-announce this node's cluster feature level so the version-skew
+		// gate can compute the cluster-agreed minimum and hold emission of
+		// anything an older peer can't yet apply. Real nodes always announce;
+		// only unit tests (which assert exact entry counts) leave it off.
+		dbOpts = append(dbOpts, db.WithVersionAnnounce())
+
 		// Wire the global zap logger into db so internal supervisor /
 		// raft / leader-transition logs are visible. Without this, the
 		// DB defaults to zap.NewNop and operators have no visibility

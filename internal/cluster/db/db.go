@@ -393,6 +393,9 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 	go db.listenForIngestables(ingest)
 	go db.scrubScheduler()
 	go db.announceAPIURL()
+	if cfg.announceVersion {
+		go db.announceVersion()
+	}
 
 	// Start the disk-usage watcher last, once db.raft is wired, so its
 	// onDiskState callback can drive the compaction-pressure hint. An empty
