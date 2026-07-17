@@ -54,12 +54,10 @@ func TestMysqlSnapshotStreamTypeMatrix(t *testing.T) {
 		{"c_vc_latin1", "VARCHAR(64) CHARACTER SET latin1", "'café'", `"café"`},
 		{"c_char", "CHAR(8) CHARACTER SET utf8mb4", "'abc'", `"abc"`},
 		{"c_text", "TEXT", "'hello world'", `"hello world"`},
-		// BLOB is binary: committed renders it CatText (bytes→string), so non-UTF8
-		// content becomes U+FFFD identically on both paths. Parity holds (both
-		// paths produce the same bytes → replay/dedup is safe), but there is no
-		// canonical UTF-8 for arbitrary bytes, so this row pins parity only, not a
-		// render. (Binary-BLOB fidelity — e.g. base64 — is a separate concern.)
-		{"c_blob", "BLOB", "x'DEADBEEF'", ``},
+		// BLOB is binary: committed renders it CatBinary → base64, so arbitrary
+		// (non-UTF-8) bytes round-trip faithfully and identically on both paths.
+		// 0xDEADBEEF → base64 "3q2+7w==". The sink base64-decodes back to bytes.
+		{"c_blob", "BLOB", "x'DEADBEEF'", `"3q2+7w=="`},
 		{"c_enum", "ENUM('a','b','c')", "'b'", `"b"`},
 		{"c_set", "SET('x','y','z')", "'x,z'", `"x,z"`},
 		{"c_json", "JSON", `'{"z":1,"a":"x"}'`, `{"a":"x","z":1}`},

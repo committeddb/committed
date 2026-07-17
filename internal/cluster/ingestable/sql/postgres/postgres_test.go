@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	gosql "database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -645,10 +646,15 @@ func TestPostgresSnapshotStreamByteIdentity(t *testing.T) {
 			"snapshot and CDC must emit identical %q bytes for the same value", col)
 	}
 	// And the form is the Postgres text form, not pgx's typed rendering: a
-	// timestamp has no 'T' (RFC3339 would, if a time.Time leaked through), bytea is
-	// hex-prefixed (not base64/raw), and numeric keeps its trailing zero.
+	// timestamp has no 'T' (RFC3339 would, if a time.Time leaked through), and
+	// numeric keeps its trailing zero. A bytea renders base64 (the one binary
+	// encoding shared across dialects), decoding back to the exact source bytes —
+	// \x48656c6c6f is "Hello", base64 "SGVsbG8=".
 	require.NotContains(t, field(seen["a"], "ts"), "T", "timestamp is Postgres text, not RFC3339")
-	require.Contains(t, field(seen["a"], "by"), `\x`, "bytea is hex text, not base64/raw")
+	require.Equal(t, "SGVsbG8=", field(seen["a"], "by"), "bytea is base64, not \\x hex")
+	decoded, err := base64.StdEncoding.DecodeString(field(seen["a"], "by").(string))
+	require.NoError(t, err)
+	require.Equal(t, []byte("Hello"), decoded, "bytea base64 decodes back to the exact source bytes")
 	require.Equal(t, json.Number("9.50"), field(seen["a"], "num"), "numeric keeps its exact source text")
 
 	select {

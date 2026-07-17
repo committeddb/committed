@@ -57,7 +57,7 @@ Each entity:
 | `op` | always | `"upsert"`, `"delete"`, or `"refresh"` — branch on this explicitly. |
 | `key` | upsert, delete | **base64** of the raw entity key bytes. Your record identity. |
 | `type` | always | `{id, name, version}` of the committed type the entity belongs to. |
-| `data` | upsert | the entity's JSON body. Omitted for delete/refresh. |
+| `data` | upsert | the entity's JSON body. Binary columns (Postgres `bytea`, MySQL `BLOB`/`BINARY`/`VARBINARY`) are **base64** strings — decode them to recover the raw bytes. Omitted for delete/refresh. |
 | `generation` | when known | committed's reconciling-refresh epoch (see [refresh](#op-refresh--the-sweep)). Omitted/`0` for sources predating the feature or for direct writes. |
 
 A proposal can span several topics; committed sends you **only** the entities

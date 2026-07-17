@@ -60,11 +60,36 @@ func TestJSONValue(t *testing.T) {
 		{"already-typed bool passes through", true, sql.CatBool, `true`},
 		{"already-typed float passes through", 9.3, sql.CatNumber, `9.3`},
 		{"nil is null", nil, sql.CatNumber, `null`},
+		// Binary: raw bytes render as a base64 string (0xDEADBEEF → "3q2+7w==").
+		// The value must already be bytes — Postgres decodes its \x hex text with
+		// DecodeByteaText before it reaches here (see TestDecodeByteaText).
+		{"binary bytes -> base64", []byte{0xDE, 0xAD, 0xBE, 0xEF}, sql.CatBinary, `"3q2+7w=="`},
+		{"binary empty -> empty base64 string", []byte{}, sql.CatBinary, `""`},
+		{"binary nil is null", nil, sql.CatBinary, `null`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.Equal(t, tc.want, marshal(sql.JSONValue(tc.raw, tc.cat)))
 		})
 	}
+}
+
+// TestDecodeByteaText pins the Postgres bytea-text → raw-bytes decode that feeds
+// the shared base64 binary rendering. Postgres casts every column ::text, so a
+// bytea arrives as "\xDEADBEEF" on both the snapshot and CDC paths; this turns it
+// back into bytes so CatBinary base64s the bytes, not the hex text. Anything not
+// in \x… form is returned unchanged.
+func TestDecodeByteaText(t *testing.T) {
+	require.Equal(t, []byte{0xDE, 0xAD, 0xBE, 0xEF}, sql.DecodeByteaText(`\xdeadbeef`))
+	require.Equal(t, []byte{0xDE, 0xAD, 0xBE, 0xEF}, sql.DecodeByteaText([]byte(`\xdeadbeef`)))
+	require.Equal(t, []byte{}, sql.DecodeByteaText(`\x`), "empty bytea")
+	require.Equal(t, "plain", sql.DecodeByteaText("plain"), "non-\\x string is unchanged")
+	require.Equal(t, `\xZZ`, sql.DecodeByteaText(`\xZZ`), "invalid hex is left as-is, not corrupted")
+	require.Nil(t, sql.DecodeByteaText(nil))
+
+	// The whole binary path end to end: PG hex text → bytes → base64 payload.
+	bs, err := json.Marshal(sql.JSONValue(sql.DecodeByteaText(`\xdeadbeef`), sql.CatBinary))
+	require.NoError(t, err)
+	require.Equal(t, `"3q2+7w=="`, string(bs))
 }
 
 // TestCanonicalizeMySQLJSONNumbers pins the MySQL-snapshot-only number

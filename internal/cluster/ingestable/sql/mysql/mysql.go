@@ -733,6 +733,12 @@ func mysqlCategoryForTypeName(name string) sql.JSONCategory {
 		return sql.CatNumber
 	case "JSON":
 		return sql.CatJSON
+	// Binary columns render as base64 (see sql.JSONValue): the driver and the
+	// binlog both hand these back as raw []byte, and a bytes→string coercion
+	// would silently U+FFFD any non-UTF-8 content. TEXT/CHAR/VARCHAR stay text
+	// (transcoded to UTF-8); only the no-charset BLOB/BINARY family is binary.
+	case "BLOB", "TINYBLOB", "MEDIUMBLOB", "LONGBLOB", "BINARY", "VARBINARY":
+		return sql.CatBinary
 	}
 	return sql.CatText
 }

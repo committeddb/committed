@@ -79,6 +79,10 @@ var charsetEncodings = map[string]encoding.Encoding{
 	"big5":     traditionalchinese.Big5,
 }
 
+// binaryCharset is the charset a BLOB/BINARY/VARBINARY column reports (MySQL's
+// binary collation). It marks the column CatBinary (base64) rather than text.
+const binaryCharset = "binary"
+
 // passthroughCharsets need no transcoding: already UTF-8 (utf8/utf8mb3/utf8mb4),
 // 7-bit (ascii), or opaque bytes (binary — a BLOB/VARBINARY column, which must
 // NOT be reinterpreted as text). A character column reported under one of these

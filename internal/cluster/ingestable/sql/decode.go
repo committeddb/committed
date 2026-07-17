@@ -2,6 +2,8 @@ package sql
 
 import (
 	"bytes"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"regexp"
 	"strconv"
@@ -16,10 +18,11 @@ import (
 type JSONCategory int
 
 const (
-	CatText   JSONCategory = iota // string — the default: text, dates, uuid, bytea, …
+	CatText   JSONCategory = iota // string — the default: text, dates, uuid, …
 	CatNumber                     // JSON number — int, float, numeric/decimal
 	CatBool                       // JSON bool
 	CatJSON                       // embedded JSON — json/jsonb columns
+	CatBinary                     // base64 string — binary columns (bytea, BLOB, VARBINARY)
 )
 
 // jsonNumberRe matches a JSON number literal (the RFC 8259 grammar). It rejects
@@ -42,10 +45,19 @@ var jsonNumberRe = regexp.MustCompile(`^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][
 // numbers as their source text is also what makes the snapshot and CDC paths
 // produce identical payload bytes for the same row.
 func JSONValue(raw any, cat JSONCategory) any {
+	if raw == nil {
+		return nil
+	}
+	// Binary is handled before the []byte→string coercion below, because it needs
+	// the value's original form: MySQL hands a binary column back as raw []byte,
+	// while Postgres (which casts every column ::text) hands it back as its
+	// "\xDEADBEEF" hex text. Both become the same base64 string.
+	if cat == CatBinary {
+		return binaryToBase64(raw)
+	}
+
 	var text string
 	switch x := raw.(type) {
-	case nil:
-		return nil
 	case string:
 		text = x
 	case []byte:
@@ -72,6 +84,51 @@ func JSONValue(raw any, cat JSONCategory) any {
 		}
 	}
 	return text
+}
+
+// binaryToBase64 renders a binary column value as a base64 JSON string — the one
+// encoding for bytes shared across dialects, matching how the entity key already
+// encodes binary (see CompositeKey). The value must already be the raw bytes:
+// MySQL returns BLOB/BINARY/VARBINARY as []byte, and Postgres decodes its
+// "\xDEADBEEF" bytea text to bytes with DecodeByteaText before it reaches here —
+// so this never has to sniff hex-text vs raw bytes (which are indistinguishable
+// once both are []byte). A nil is handled by the caller.
+func binaryToBase64(raw any) any {
+	switch v := raw.(type) {
+	case []byte:
+		return base64.StdEncoding.EncodeToString(v)
+	case string:
+		return base64.StdEncoding.EncodeToString([]byte(v))
+	default:
+		return raw
+	}
+}
+
+// DecodeByteaText decodes Postgres's hex bytea text ("\xDEADBEEF") to raw bytes,
+// so the shared base64 binary rendering (binaryToBase64 / CatBinary) sees bytes,
+// not the hex text. Postgres casts every column ::text and pgoutput emits text,
+// so a bytea arrives in this form on BOTH the snapshot and CDC paths; the dialect
+// runs its CatBinary payload values through here first. A value not in "\x…" form
+// is returned unchanged.
+func DecodeByteaText(v any) any {
+	var s string
+	switch x := v.(type) {
+	case string:
+		s = x
+	case []byte:
+		s = string(x)
+	default:
+		return v
+	}
+	rest, ok := strings.CutPrefix(s, `\x`)
+	if !ok {
+		return v
+	}
+	b, err := hex.DecodeString(rest)
+	if err != nil {
+		return v
+	}
+	return b
 }
 
 // canonicalJSON re-serializes a JSON document into a stable canonical form so the

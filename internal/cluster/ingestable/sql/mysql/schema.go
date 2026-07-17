@@ -85,27 +85,31 @@ func columnsFromTableMap(tm *replication.TableMapEvent, charsetPlans map[uint64]
 	for i := 0; i < n; i++ {
 		ci := columnInfo{name: strings.ToLower(names[i])}
 
-		// JSON is never disguised (always type 0xf5) and go-mysql has no exported
-		// IsJSONColumn, so a raw byte check is correct here. IsNumericColumn
-		// resolves the real type and matches mysqlCategoryForTypeName's numeric set
-		// exactly; ENUM, SET, BIT, dates, text, blob, geometry all fall to text.
-		switch {
-		case tm.ColumnType[i] == mysql.MYSQL_TYPE_JSON:
-			ci.cat = sql.CatJSON
-		case tm.IsNumericColumn(i):
-			ci.cat = sql.CatNumber
-		default:
-			ci.cat = sql.CatText
-		}
-
 		// A character column's value is transcoded lazily per row (its bytes live
 		// in the row image); an ENUM/SET column's labels are transcoded once here
-		// (they live in the table map, not the row).
+		// (they live in the table map, not the row). A binary column (BLOB/BINARY/
+		// VARBINARY) reports the binary collation, whose plan charset is "binary".
 		plan := planFor(charsetPlans, charCollations[i])
 		if !plan.supported {
 			return nil, unsupportedCharsetError(tm, names[i], plan.charset)
 		}
 		ci.transcode = plan.enc
+
+		// JSON is never disguised (always type 0xf5) and go-mysql has no exported
+		// IsJSONColumn, so a raw byte check is correct here. IsNumericColumn
+		// resolves the real type and matches mysqlCategoryForTypeName's numeric set
+		// exactly. BLOB/BINARY/VARBINARY are binary (base64, matching the snapshot's
+		// CatBinary); ENUM, SET, BIT, dates, text, geometry fall to text.
+		switch {
+		case tm.ColumnType[i] == mysql.MYSQL_TYPE_JSON:
+			ci.cat = sql.CatJSON
+		case tm.IsNumericColumn(i):
+			ci.cat = sql.CatNumber
+		case plan.charset == binaryCharset:
+			ci.cat = sql.CatBinary
+		default:
+			ci.cat = sql.CatText
+		}
 
 		if labels, ok := enums[i]; ok {
 			transcoded, err := transcodeLabels(tm, names[i], charsetPlans, enumSetCollations[i], labels)

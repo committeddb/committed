@@ -56,9 +56,35 @@ func TestCoerceForColumn(t *testing.T) {
 	require.Equal(t, `{"a":1}`, coerceForColumn(obj, "JSONB"))
 	require.Equal(t, "raw", coerceForColumn(json.RawMessage(`raw`), "TEXT"))
 
+	// A base64 payload string mapped into a binary column decodes back to raw
+	// bytes and binds as []byte — the form both pgx and go-sql-driver write to a
+	// binary column. 0xDEADBEEF ⇄ "3q2+7w==".
+	require.Equal(t, []byte{0xDE, 0xAD, 0xBE, 0xEF}, coerceForColumn("3q2+7w==", "BYTEA"))
+	require.Equal(t, []byte{0xDE, 0xAD, 0xBE, 0xEF}, coerceForColumn("3q2+7w==", "BLOB"))
+	require.Equal(t, []byte("hello"), coerceForColumn("aGVsbG8=", "VARBINARY(32)"))
+	// A value that isn't valid base64 — e.g. a legacy mapping sending Postgres's
+	// "\x…" hex straight into a bytea column — falls back to text so Postgres's own
+	// bytea parser still handles it, unchanged.
+	require.Equal(t, `\xdeadbeef`, coerceForColumn(`\xdeadbeef`, "BYTEA"))
+
 	// SQL NULL passes through untouched regardless of column type.
 	require.Nil(t, coerceForColumn(nil, "TEXT"))
 	require.Nil(t, coerceForColumn(nil, "INTEGER"))
+	require.Nil(t, coerceForColumn(nil, "BYTEA"))
+}
+
+func TestColumnIsBinary(t *testing.T) {
+	for _, ty := range []string{
+		"BYTEA", "bytea", "BLOB", "TINYBLOB", "MEDIUMBLOB", "LONGBLOB",
+		"BINARY(16)", "VARBINARY(255)", "varbinary",
+	} {
+		require.Truef(t, columnIsBinary(ty), "%q should be binary", ty)
+	}
+	for _, ty := range []string{
+		"TEXT", "VARCHAR(25)", "INT", "JSON", "JSONB", "UUID", "", "  ",
+	} {
+		require.Falsef(t, columnIsBinary(ty), "%q should not be binary", ty)
+	}
 }
 
 func TestColumnIsNumericOrBool(t *testing.T) {
@@ -72,7 +98,7 @@ func TestColumnIsNumericOrBool(t *testing.T) {
 	for _, ty := range []string{
 		"TEXT", "VARCHAR(25)", "CHAR(1)", "CHARACTER VARYING", "UUID",
 		"JSON", "JSONB", "DATE", "TIMESTAMP", "TIMESTAMPTZ", "INTERVAL",
-		"BYTEA", "", "  ",
+		"", "  ",
 	} {
 		require.Falsef(t, columnIsNumericOrBool(ty), "%q should bind as text", ty)
 	}

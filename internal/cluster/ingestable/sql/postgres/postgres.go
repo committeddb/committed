@@ -1012,6 +1012,8 @@ func pgCategoryForOID(oid uint32) sql.JSONCategory {
 		return sql.CatBool
 	case pgtype.JSONOID, pgtype.JSONBOID:
 		return sql.CatJSON
+	case pgtype.ByteaOID:
+		return sql.CatBinary
 	}
 	return sql.CatText
 }
@@ -1028,6 +1030,8 @@ func pgCategoryForTypeName(name string) sql.JSONCategory {
 		return sql.CatBool
 	case "JSON", "JSONB":
 		return sql.CatJSON
+	case "BYTEA":
+		return sql.CatBinary
 	}
 	return sql.CatText
 }
@@ -1258,6 +1262,15 @@ func tupleToEntity(
 	cat := make(map[string]sql.JSONCategory, len(rel.Columns))
 	for _, rc := range rel.Columns {
 		cat[strings.ToLower(rc.Name)] = columnCategory(ctx, catResolver, rc.DataType)
+	}
+	// bytea arrives as "\xDEADBEEF" text; decode CatBinary columns to raw bytes so
+	// the payload renders base64. Safe to mutate m in place here — the key was
+	// already computed above from the \x hex form, so it stays byte-stable and
+	// matches the snapshot path.
+	for name, c := range cat {
+		if c == sql.CatBinary {
+			m[name] = sql.DecodeByteaText(m[name])
+		}
 	}
 	toJSON := sql.BuildEntityJSON(config.Mappings, m, cat)
 
@@ -1560,7 +1573,14 @@ func readBatch(
 		for i, colName := range columns {
 			lc := strings.ToLower(colName)
 			v := vals[i]
-			raw[lc] = v
+			// bytea arrives ::text as "\xDEADBEEF"; decode it to raw bytes for the
+			// payload so CatBinary renders base64. The key (m) keeps the \x hex form
+			// unchanged, so existing entity keys stay byte-stable.
+			if cats[i] == sql.CatBinary {
+				raw[lc] = sql.DecodeByteaText(v)
+			} else {
+				raw[lc] = v
+			}
 			catByName[lc] = cats[i]
 			if v == nil {
 				m[lc] = nil

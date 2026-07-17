@@ -1,6 +1,7 @@
 package sql
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -24,6 +25,21 @@ import (
 func coerceForColumn(v any, sqlType string) any {
 	if v == nil {
 		return nil
+	}
+	if columnIsBinary(sqlType) {
+		// A binary target column: the payload carries the bytes base64-encoded
+		// (see sql.JSONValue's CatBinary). Decode back to raw bytes and bind []byte,
+		// which both pgx and go-sql-driver write to a binary column. Fall back to
+		// text-binding when the value isn't valid base64 — e.g. a legacy mapping
+		// that sends Postgres's "\x…" hex text straight into a bytea column, which
+		// Postgres itself parses; base64 decoding rejects it (the '\' isn't in the
+		// alphabet), so that path keeps working untouched.
+		if s, ok := v.(string); ok {
+			if b, err := base64.StdEncoding.DecodeString(s); err == nil {
+				return b
+			}
+		}
+		return asText(v)
 	}
 	if columnIsNumericOrBool(sqlType) {
 		// Numeric/bool target: the driver wants a native scalar. A JSON bool is
@@ -102,6 +118,18 @@ func columnIsNumericOrBool(sqlType string) bool {
 		"DECIMAL", "NUMERIC", "DEC", "FIXED", "NUMBER",
 		"REAL", "DOUBLE", "FLOAT", "FLOAT4", "FLOAT8", "MONEY",
 		"BOOL", "BOOLEAN":
+		return true
+	}
+	return false
+}
+
+// columnIsBinary reports whether a declared type is a binary column — the types
+// whose payload value is a base64 string that must be decoded back to raw bytes
+// before binding, rather than text-bound. Covers Postgres bytea and the MySQL
+// BLOB/BINARY family; compared on the leading type token like the others.
+func columnIsBinary(sqlType string) bool {
+	switch leadingTypeToken(sqlType) {
+	case "BYTEA", "BLOB", "TINYBLOB", "MEDIUMBLOB", "LONGBLOB", "BINARY", "VARBINARY":
 		return true
 	}
 	return false
