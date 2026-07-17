@@ -500,6 +500,15 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 	// Projection reconciliation is a separate, later design; until then a gap
 	// recovery on a projected topic still needs an operator rebuild.
 	if e.IsRefreshBoundary() {
+		// A re-snapshot boundary (generation > 1) just recovered a source gap that
+		// this projection could NOT reconcile (one source entity fans out to
+		// many/aggregated sink rows, so a topic sweep doesn't map onto it) — the
+		// gap's source-side deletes are not reflected, and recovery is a rebuild.
+		// The initial snapshot (generation 1) has nothing to reconcile, so stay quiet.
+		if e.Generation > 1 {
+			zap.L().Warn("refresh boundary on a projection sink is NOT reconciled: a re-snapshot recovered a source gap, so rows the source deleted in that window (RTBF/GDPR erasures among them) remain here. A rebuild does NOT fix this (the delete was never captured, and the marker no-ops on replay too) — manual reconciliation is required (and manual erasure of any source-side-forgotten subject) until projection reconciliation is implemented.",
+				zap.String("syncable", p.name), zap.String("topic", e.Type.ID), zap.Uint64("generation", e.Generation))
+		}
 		return nil
 	}
 

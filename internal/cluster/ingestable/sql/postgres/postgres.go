@@ -635,8 +635,9 @@ func (d *PostgreSQLDialect) stream(
 		// highwater survives a DeleteIngestable that cleared the checkpoint epoch).
 		*epoch = max(*epoch, epochFloor, 1) + 1
 		zap.L().Warn("replication slot was recreated while a checkpoint survived; re-snapshotting from the new slot's consistent point. "+
-			"Rows deleted at the source in the lost WAL window (RTBF-erased subjects among them) are reconciled off the downstream "+
-			"sink by the refresh-boundary sweep that closes this re-snapshot.",
+			"Rows deleted at the source in the lost WAL window (RTBF-erased subjects among them) are reconciled on KEYED sinks by the "+
+			"refresh-boundary sweep that closes this re-snapshot; keyless/append and projection sinks are NOT reconciled and require "+
+			"an operator rebuild for gap recovery.",
 			zap.String("slot", pgCfg.slotName),
 			zap.Stringer("staleLSN", *lastLSN),
 			zap.String("consistentPoint", slotRes.ConsistentPoint),

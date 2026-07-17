@@ -86,7 +86,11 @@ rows downstream: rebuilding an ingestable, the Postgres lost-slot recovery
 (above), or deleting an ingestable and recreating it on the same topic. A snapshot
 is **upsert-only** — it enumerates the rows that *exist* in the source, so it has
 no way to emit a delete for a row removed while it wasn't watching. committed
-reconciles those deletions with a **generation watermark** instead of a diff.
+reconciles those deletions with a **generation watermark** instead of a diff — on
+sinks that can apply it. **Keyed** SQL sinks (and HTTP receivers that honor
+`op:"refresh"`) reconcile automatically; **keyless/append and projection sinks
+cannot sweep and are NOT reconciled** — see [Sinks that don't
+reconcile](#sinks-that-dont-reconcile) below.
 
 Each keyed SQL sink carries one committed-managed column, `committed_generation`.
 Every ingest snapshot runs at a generation `G` (a per-topic number that increases
@@ -132,10 +136,43 @@ topic resumes *above* the rows the sink still holds instead of restarting at 1 a
 sweeping nothing. It is also why a topic may have only one ingestable ([above](#one-writer-per-topic)):
 two producers would stamp generations independently and sweep each other's rows.
 
-For a **SQL** syncable committed runs this sweep for you (`DELETE WHERE
+For a **keyed SQL** syncable committed runs this sweep for you (`DELETE WHERE
 generation < G`). For an **HTTP** syncable the same reconciliation is delivered
 to your endpoint as an `op:"refresh"` carrying `G`, and the receiver runs the
 sweep — see [writing a webhook receiver](../webhook-receiver.md).
+
+#### Sinks that don't reconcile
+
+A refresh boundary is a **no-op** for two sink shapes, because a generation sweep
+has nothing to act on:
+
+- **Keyless/append (history) tables** have no current-row identity — they record
+  one row per event. A source-side delete lost in the gap was never captured, so
+  it is simply **absent from the history**. A rebuild reconstructs the captured
+  events; it cannot recover the uncaptured delete (this is the documented
+  downtime-beyond-retention limitation, not a bug).
+- **Projections** fan one source entity out to many/aggregated rows, so a
+  topic-level sweep doesn't map onto their shape. After a gap, rows the source
+  deleted **remain in the projection**, and — unlike a keyed sink — **a rebuild
+  does NOT fix it** (the delete was never in the log, and the marker no-ops on
+  replay too). Until projection reconciliation is implemented, recovery is
+  **manual** (correct the stale rows, or re-derive the projection from a keyed
+  sink that did reconcile).
+
+Both cases log a `WARN` when a re-snapshot boundary reaches them (generation > 1).
+For a **Postgres** source this log is the *only* signal — `reSnapshotRequired`
+stays `false` on Postgres because the dialect auto-re-snapshots, which reconciles
+*keyed* sinks but leaves these two shapes silently affected. Watch for that WARN
+if you fan a Postgres topic into a projection or history table.
+
+> **Compliance (RTBF/GDPR).** A source-side *erasure* — a subject deleted at the
+> source for right-to-be-forgotten — lost in the gap is exactly what a keyed
+> sink's sweep removes. On keyless/projection sinks it is **retained**: the
+> subject's PII lingers with no delete. committed's own RTBF path (a delete
+> proposal + event-log scrub) still erases these sinks when the erasure goes
+> *through* committed; the exposure is specifically a source-side erasure
+> committed never captured. Treat a re-snapshot `WARN` on a PII-bearing
+> keyless/projection sink as a **manual-erasure** action item, not just stale data.
 
 ### What to watch
 
@@ -176,7 +213,10 @@ GET /v1/ingestable/{id}/status
   fresh snapshot. Always `false` for Postgres — not because a slot can't lose WAL
   (a reaped or dropped slot does), but because the dialect recovers in-band: it
   re-snapshots from the new slot's consistent point and sweeps the rows deleted
-  in the lost window off the sink, so the gap is reconciled rather than surfaced.
+  in the lost window off **keyed** sinks, so for them the gap is reconciled rather
+  than surfaced. Keyless/append and projection consumers of a Postgres topic are
+  neither reconciled nor flagged here — only the sink-side `WARN` signals them
+  (see [Sinks that don't reconcile](#sinks-that-dont-reconcile)).
 
 The quickstart polls this endpoint to know when the initial snapshot has landed
 (`"caughtUp": true`).

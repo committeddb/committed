@@ -403,7 +403,18 @@ func (c *Syncable) applyEntity(ctx context.Context, tx *sql.Tx, e *cluster.Entit
 // same reconciled state.
 func (c *Syncable) applyRefreshBoundary(ctx context.Context, tx *sql.Tx, e *cluster.Entity) error {
 	if c.sweep == nil {
-		return nil // keyless/append: nothing to reconcile
+		// Keyless/append: no current-row identity, so the marker is a no-op BY
+		// DESIGN. But a re-snapshot boundary (generation > 1) means an upstream full
+		// refresh just recovered a source gap this sink could NOT reconcile —
+		// source-side deletes in that window are not reflected here, and the recovery
+		// is a manual rebuild. The ingest-side warn can't know the sink type, so
+		// signal it here. The initial snapshot (generation 1) has no pre-existing
+		// state to reconcile, so stay quiet.
+		if e.Generation > 1 {
+			zap.L().Warn("refresh boundary on a keyless/append (history) sink is a no-op: a re-snapshot recovered a source gap, but a delete in that window (an RTBF/GDPR erasure among them) was never captured, so the subject's earlier rows remain in this history with no delete. A rebuild reconstructs the captured events; it cannot recover the uncaptured delete. Erase any source-side-forgotten subject manually.",
+				zap.String("topic", e.Type.ID), zap.Uint64("generation", e.Generation))
+		}
+		return nil // keyless/append: nothing to sweep
 	}
 	//nolint:gosec // G115: a refresh epoch is a small monotonic counter, far below 2^63
 	if _, err := tx.StmtContext(ctx, c.sweep).ExecContext(ctx, int64(e.Generation)); err != nil {
