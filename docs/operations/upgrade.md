@@ -30,6 +30,12 @@ clear error (see [rebuild.md](rebuild.md)) rather than running on
 corrupt data — so a node that comes back up `/ready` has, by
 construction, read its prior state successfully.
 
+**One exception — some releases can't be rolled.** A release that introduces a
+new *internal* entry type is a **full-stop** upgrade: a not-yet-upgraded node
+fatal-exits when it applies an entry type its binary doesn't recognize, so
+rolling would crash the nodes you haven't upgraded yet. See the warning under
+*Before you upgrade*.
+
 ## Before you upgrade
 
 1. **Read the release notes** for every version between your current one
@@ -49,6 +55,21 @@ construction, read its prior state successfully.
    orchestrator's kill grace period are set per
    [shutdown.md](shutdown.md) so the graceful path isn't `SIGKILL`ed
    mid-drain.
+
+> **⚠️ Some upgrades must be full-stop, not rolling.** A release that
+> introduces a new *internal* entry type crosses a forward-only boundary: once
+> the first upgraded node commits an entry of that type, every node still on the
+> old binary **fatal-exits** when it applies it (it cannot resolve a type it
+> doesn't know). Upgrade such a release **all nodes at once** — stop the whole
+> cluster, replace every binary, restart — rather than node-by-node. It is a
+> one-time boundary; once every node carries the change, rolling upgrades are
+> safe again. The release notes for such a version say so explicitly.
+>
+> **This applies to any pre-0.7.2 → 0.7.2+ multi-node upgrade.** 0.7.2
+> introduced the cluster feature-level mechanism, which announces a new internal
+> entry. Single-node deployments and fresh installs are unaffected. If you have
+> already started rolling and old nodes are crash-looping, do **not** roll back —
+> finish upgrading them all; they recover once the whole cluster is on 0.7.2+.
 
 ## The procedure
 
@@ -142,10 +163,13 @@ same quorum rule applies in reverse.
   That's expected and safe within a major line; the forward/backward
   read compatibility contract is what makes it so. Keep the window short
   — finish the roll rather than parking the cluster mid-upgrade.
-- **No cluster-wide version coordination.** Committed does not gate
-  features on a cluster-agreed version. At single-digit node counts the
-  manual node-by-node procedure is sufficient; there is no version-bump
-  barrier to wait on.
+- **Feature coordination is automatic, not manual.** Committed *does* gate a
+  semantically-incompatible feature on the [cluster feature
+  level](../api-compatibility.md#cluster-feature-level-semantic-compatibility-gate):
+  it stays dormant until every node advertises support, then activates on its
+  own (see the callout under *Verifying the upgrade*). You never run a manual
+  version-bump barrier — just finish the roll. (Introducing the mechanism itself
+  is the one full-stop exception; see *Before you upgrade*.)
 - **Scaling during an upgrade.** Don't combine a membership change
   (add/remove/promote a node) with a rolling upgrade — finish one before
   starting the other, so you're only changing one variable at a time. See
