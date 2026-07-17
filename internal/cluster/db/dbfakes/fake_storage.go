@@ -147,6 +147,17 @@ type FakeStorage struct {
 	deleteMemberAPIURLReturnsOnCall map[int]struct {
 		result1 error
 	}
+	DeleteMemberPeerURLStub        func(uint64) error
+	deleteMemberPeerURLMutex       sync.RWMutex
+	deleteMemberPeerURLArgsForCall []struct {
+		arg1 uint64
+	}
+	deleteMemberPeerURLReturns struct {
+		result1 error
+	}
+	deleteMemberPeerURLReturnsOnCall map[int]struct {
+		result1 error
+	}
 	EntriesStub        func(uint64, uint64, uint64) ([]*raftpb.Entry, error)
 	entriesMutex       sync.RWMutex
 	entriesArgsForCall []struct {
@@ -311,6 +322,16 @@ type FakeStorage struct {
 	memberAPIURLsReturnsOnCall map[int]struct {
 		result1 map[uint64]string
 	}
+	MemberPeerURLsStub        func() map[uint64]string
+	memberPeerURLsMutex       sync.RWMutex
+	memberPeerURLsArgsForCall []struct {
+	}
+	memberPeerURLsReturns struct {
+		result1 map[uint64]string
+	}
+	memberPeerURLsReturnsOnCall map[int]struct {
+		result1 map[uint64]string
+	}
 	NodeStub        func(string) uint64
 	nodeMutex       sync.RWMutex
 	nodeArgsForCall []struct {
@@ -332,6 +353,18 @@ type FakeStorage struct {
 	}
 	positionReturnsOnCall map[int]struct {
 		result1 cluster.Position
+	}
+	PutMemberPeerURLStub        func(uint64, []byte) error
+	putMemberPeerURLMutex       sync.RWMutex
+	putMemberPeerURLArgsForCall []struct {
+		arg1 uint64
+		arg2 []byte
+	}
+	putMemberPeerURLReturns struct {
+		result1 error
+	}
+	putMemberPeerURLReturnsOnCall map[int]struct {
+		result1 error
 	}
 	RaftLogApproxSizeStub        func() (uint64, error)
 	raftLogApproxSizeMutex       sync.RWMutex
@@ -1270,6 +1303,67 @@ func (fake *FakeStorage) DeleteMemberAPIURLReturnsOnCall(i int, result1 error) {
 	}{result1}
 }
 
+func (fake *FakeStorage) DeleteMemberPeerURL(arg1 uint64) error {
+	fake.deleteMemberPeerURLMutex.Lock()
+	ret, specificReturn := fake.deleteMemberPeerURLReturnsOnCall[len(fake.deleteMemberPeerURLArgsForCall)]
+	fake.deleteMemberPeerURLArgsForCall = append(fake.deleteMemberPeerURLArgsForCall, struct {
+		arg1 uint64
+	}{arg1})
+	stub := fake.DeleteMemberPeerURLStub
+	fakeReturns := fake.deleteMemberPeerURLReturns
+	fake.recordInvocation("DeleteMemberPeerURL", []interface{}{arg1})
+	fake.deleteMemberPeerURLMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeStorage) DeleteMemberPeerURLCallCount() int {
+	fake.deleteMemberPeerURLMutex.RLock()
+	defer fake.deleteMemberPeerURLMutex.RUnlock()
+	return len(fake.deleteMemberPeerURLArgsForCall)
+}
+
+func (fake *FakeStorage) DeleteMemberPeerURLCalls(stub func(uint64) error) {
+	fake.deleteMemberPeerURLMutex.Lock()
+	defer fake.deleteMemberPeerURLMutex.Unlock()
+	fake.DeleteMemberPeerURLStub = stub
+}
+
+func (fake *FakeStorage) DeleteMemberPeerURLArgsForCall(i int) uint64 {
+	fake.deleteMemberPeerURLMutex.RLock()
+	defer fake.deleteMemberPeerURLMutex.RUnlock()
+	argsForCall := fake.deleteMemberPeerURLArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeStorage) DeleteMemberPeerURLReturns(result1 error) {
+	fake.deleteMemberPeerURLMutex.Lock()
+	defer fake.deleteMemberPeerURLMutex.Unlock()
+	fake.DeleteMemberPeerURLStub = nil
+	fake.deleteMemberPeerURLReturns = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *FakeStorage) DeleteMemberPeerURLReturnsOnCall(i int, result1 error) {
+	fake.deleteMemberPeerURLMutex.Lock()
+	defer fake.deleteMemberPeerURLMutex.Unlock()
+	fake.DeleteMemberPeerURLStub = nil
+	if fake.deleteMemberPeerURLReturnsOnCall == nil {
+		fake.deleteMemberPeerURLReturnsOnCall = make(map[int]struct {
+			result1 error
+		})
+	}
+	fake.deleteMemberPeerURLReturnsOnCall[i] = struct {
+		result1 error
+	}{result1}
+}
+
 func (fake *FakeStorage) Entries(arg1 uint64, arg2 uint64, arg3 uint64) ([]*raftpb.Entry, error) {
 	fake.entriesMutex.Lock()
 	ret, specificReturn := fake.entriesReturnsOnCall[len(fake.entriesArgsForCall)]
@@ -2053,6 +2147,59 @@ func (fake *FakeStorage) MemberAPIURLsReturnsOnCall(i int, result1 map[uint64]st
 	}{result1}
 }
 
+func (fake *FakeStorage) MemberPeerURLs() map[uint64]string {
+	fake.memberPeerURLsMutex.Lock()
+	ret, specificReturn := fake.memberPeerURLsReturnsOnCall[len(fake.memberPeerURLsArgsForCall)]
+	fake.memberPeerURLsArgsForCall = append(fake.memberPeerURLsArgsForCall, struct {
+	}{})
+	stub := fake.MemberPeerURLsStub
+	fakeReturns := fake.memberPeerURLsReturns
+	fake.recordInvocation("MemberPeerURLs", []interface{}{})
+	fake.memberPeerURLsMutex.Unlock()
+	if stub != nil {
+		return stub()
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeStorage) MemberPeerURLsCallCount() int {
+	fake.memberPeerURLsMutex.RLock()
+	defer fake.memberPeerURLsMutex.RUnlock()
+	return len(fake.memberPeerURLsArgsForCall)
+}
+
+func (fake *FakeStorage) MemberPeerURLsCalls(stub func() map[uint64]string) {
+	fake.memberPeerURLsMutex.Lock()
+	defer fake.memberPeerURLsMutex.Unlock()
+	fake.MemberPeerURLsStub = stub
+}
+
+func (fake *FakeStorage) MemberPeerURLsReturns(result1 map[uint64]string) {
+	fake.memberPeerURLsMutex.Lock()
+	defer fake.memberPeerURLsMutex.Unlock()
+	fake.MemberPeerURLsStub = nil
+	fake.memberPeerURLsReturns = struct {
+		result1 map[uint64]string
+	}{result1}
+}
+
+func (fake *FakeStorage) MemberPeerURLsReturnsOnCall(i int, result1 map[uint64]string) {
+	fake.memberPeerURLsMutex.Lock()
+	defer fake.memberPeerURLsMutex.Unlock()
+	fake.MemberPeerURLsStub = nil
+	if fake.memberPeerURLsReturnsOnCall == nil {
+		fake.memberPeerURLsReturnsOnCall = make(map[int]struct {
+			result1 map[uint64]string
+		})
+	}
+	fake.memberPeerURLsReturnsOnCall[i] = struct {
+		result1 map[uint64]string
+	}{result1}
+}
+
 func (fake *FakeStorage) Node(arg1 string) uint64 {
 	fake.nodeMutex.Lock()
 	ret, specificReturn := fake.nodeReturnsOnCall[len(fake.nodeArgsForCall)]
@@ -2172,6 +2319,73 @@ func (fake *FakeStorage) PositionReturnsOnCall(i int, result1 cluster.Position) 
 	}
 	fake.positionReturnsOnCall[i] = struct {
 		result1 cluster.Position
+	}{result1}
+}
+
+func (fake *FakeStorage) PutMemberPeerURL(arg1 uint64, arg2 []byte) error {
+	var arg2Copy []byte
+	if arg2 != nil {
+		arg2Copy = make([]byte, len(arg2))
+		copy(arg2Copy, arg2)
+	}
+	fake.putMemberPeerURLMutex.Lock()
+	ret, specificReturn := fake.putMemberPeerURLReturnsOnCall[len(fake.putMemberPeerURLArgsForCall)]
+	fake.putMemberPeerURLArgsForCall = append(fake.putMemberPeerURLArgsForCall, struct {
+		arg1 uint64
+		arg2 []byte
+	}{arg1, arg2Copy})
+	stub := fake.PutMemberPeerURLStub
+	fakeReturns := fake.putMemberPeerURLReturns
+	fake.recordInvocation("PutMemberPeerURL", []interface{}{arg1, arg2Copy})
+	fake.putMemberPeerURLMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeStorage) PutMemberPeerURLCallCount() int {
+	fake.putMemberPeerURLMutex.RLock()
+	defer fake.putMemberPeerURLMutex.RUnlock()
+	return len(fake.putMemberPeerURLArgsForCall)
+}
+
+func (fake *FakeStorage) PutMemberPeerURLCalls(stub func(uint64, []byte) error) {
+	fake.putMemberPeerURLMutex.Lock()
+	defer fake.putMemberPeerURLMutex.Unlock()
+	fake.PutMemberPeerURLStub = stub
+}
+
+func (fake *FakeStorage) PutMemberPeerURLArgsForCall(i int) (uint64, []byte) {
+	fake.putMemberPeerURLMutex.RLock()
+	defer fake.putMemberPeerURLMutex.RUnlock()
+	argsForCall := fake.putMemberPeerURLArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2
+}
+
+func (fake *FakeStorage) PutMemberPeerURLReturns(result1 error) {
+	fake.putMemberPeerURLMutex.Lock()
+	defer fake.putMemberPeerURLMutex.Unlock()
+	fake.PutMemberPeerURLStub = nil
+	fake.putMemberPeerURLReturns = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *FakeStorage) PutMemberPeerURLReturnsOnCall(i int, result1 error) {
+	fake.putMemberPeerURLMutex.Lock()
+	defer fake.putMemberPeerURLMutex.Unlock()
+	fake.PutMemberPeerURLStub = nil
+	if fake.putMemberPeerURLReturnsOnCall == nil {
+		fake.putMemberPeerURLReturnsOnCall = make(map[int]struct {
+			result1 error
+		})
+	}
+	fake.putMemberPeerURLReturnsOnCall[i] = struct {
+		result1 error
 	}{result1}
 }
 

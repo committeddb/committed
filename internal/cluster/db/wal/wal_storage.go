@@ -58,6 +58,17 @@ var (
 	// peer's (in particular the leader's) API address. See member_api_url.go
 	// and raft-leader-read-proxy.md.
 	memberAPIURLBucket = []byte("memberAPIURLs")
+	// memberPeerURLBucket maps a raft node id (8 big-endian bytes) to its raft
+	// PEER URL (the address the transport dials for raft messages), stored as the
+	// raw URL bytes. Unlike memberAPIURLBucket it is NOT entity-driven: raft's
+	// ConfState replicates member IDs only, never addresses, and the peer URL
+	// rides transiently on the ConfChange Context — so applyConfChange writes it
+	// here (and deletes it on remove) to make it durable. On restart / snapshot
+	// install the transport is reconciled from this bucket instead of the stale
+	// static COMMITTED_PEERS set, so a dynamically-added peer is still reachable.
+	// Rides along in snapshots (bbolt is serialized whole into CreateSnapshot).
+	// See member_peer_url.go and raft.applyConfChange / reconcileTransport.
+	memberPeerURLBucket = []byte("memberPeerURLs")
 )
 
 var (
@@ -140,7 +151,7 @@ var buckets = func() [][]byte {
 	for _, ie := range internalEntities {
 		bs = append(bs, ie.bucket)
 	}
-	return append(bs, ingestSourceSeqBucket, appliedIndexBucket, eventTombstoneBucket, topicRefreshEpochBucket)
+	return append(bs, ingestSourceSeqBucket, appliedIndexBucket, eventTombstoneBucket, topicRefreshEpochBucket, memberPeerURLBucket)
 }()
 
 type StateType int

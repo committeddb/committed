@@ -335,8 +335,38 @@ func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 	}
 	n.transport = t
 
+	// Reconcile the transport against durable membership BEFORE the raft loop
+	// starts driving it. On a RestartNode/join path raft rebuilds the (possibly
+	// grown) voter set from the persisted ConfState, but the transport above was
+	// seeded ONLY from the static COMMITTED_PEERS set — which a doc-following
+	// operator never updates after growing the cluster. Without this, a
+	// dynamically-added peer has no transport entry after restart and the cluster
+	// wedges leaderless. AddPeer is idempotent, so re-adding a COMMITTED_PEERS
+	// seed is a no-op. (serveRaft calls transport.Start, which also seeds from the
+	// static set and binds this node's listener — order doesn't matter.)
+	n.reconcileTransportFromMembership()
+
 	go n.serveRaft()
 	go n.serveChannels()
+}
+
+// reconcileTransportFromMembership (re)connects the transport to every member
+// whose raft URL is durably recorded (memberPeerURLBucket), skipping self. It is
+// called after the transport is created at startup and after a snapshot install,
+// so a dynamically-added peer stays reachable even though its live AddPeer (from
+// the original applyConfChange) does not re-run on restart — raft's ConfState and
+// snapshots replicate member IDs only, never addresses. AddPeer is idempotent, so
+// overlapping with the COMMITTED_PEERS seed is harmless.
+func (n *Raft) reconcileTransportFromMembership() {
+	for id, rawURL := range n.storage.MemberPeerURLs() {
+		if id == n.id {
+			continue
+		}
+		if err := n.transport.AddPeer(raft.Peer{ID: id, Context: []byte(rawURL)}); err != nil {
+			n.logger.Error("reconcile transport: add peer",
+				zap.Uint64("peer", id), zap.Error(err))
+		}
+	}
 }
 
 // applyConfChange applies a committed membership change (v1 or v2 wire form)
@@ -377,18 +407,32 @@ func (n *Raft) applyConfChange(cc raftpb.ConfChangeI, ccCtx []byte) {
 				// transport is already wired. Nothing to do.
 				continue
 			}
+			// Persist the peer's raft URL BEFORE wiring the live transport, so
+			// the durable record exists even if the AddPeer below fails — a
+			// restart or snapshot install reconciles the transport from this
+			// bucket instead of the stale static COMMITTED_PEERS set (raft's
+			// ConfState replicates the member id only, never the address).
+			if err := n.storage.PutMemberPeerURL(ch.GetNodeId(), ccCtx); err != nil {
+				n.logger.Error("conf change: persist member peer url",
+					zap.Uint64("peer", ch.GetNodeId()), zap.Error(err))
+			}
 			if err := n.transport.AddPeer(raft.Peer{ID: ch.GetNodeId(), Context: ccCtx}); err != nil {
 				n.logger.Error("conf change: add peer to transport",
 					zap.Uint64("peer", ch.GetNodeId()), zap.Error(err))
 			}
 		case raftpb.ConfChangeRemoveNode:
 			n.transport.RemovePeer(ch.GetNodeId())
-			// Drop the removed node's announced API URL so the
-			// memberAPIURLs map doesn't accumulate stale entries across
-			// the add/remove churn of rebalancing. Best-effort cleanup:
-			// a stale entry is harmless (the node is gone from the
-			// configuration, so it never surfaces in membership reads),
-			// so a delete failure is logged, not fatal.
+			// Drop the removed node's announced API URL and durable peer URL so
+			// neither map accumulates stale entries across the add/remove churn
+			// of rebalancing, and so a restart's transport reconcile doesn't
+			// re-add a member that is gone. Best-effort cleanup: a stale entry is
+			// harmless (the node is out of the configuration, so it never
+			// surfaces in membership reads), so a delete failure is logged, not
+			// fatal.
+			if err := n.storage.DeleteMemberPeerURL(ch.GetNodeId()); err != nil {
+				n.logger.Error("conf change: delete member peer url",
+					zap.Uint64("peer", ch.GetNodeId()), zap.Error(err))
+			}
 			if err := n.storage.DeleteMemberAPIURL(ch.GetNodeId()); err != nil {
 				n.logger.Error("conf change: delete member api url",
 					zap.Uint64("peer", ch.GetNodeId()), zap.Error(err))
@@ -1040,6 +1084,12 @@ func (n *Raft) processSnapshot(snap *raftpb.Snapshot) {
 			zap.Error(err),
 		)
 	}
+	// The snapshot restored the (ids-only) ConfState into raft and swapped in the
+	// snapshot's bbolt — which carries the durable peer-URL bucket. Reconcile the
+	// transport from it so a node caught up via InstallSnapshot is connected to
+	// every current member, including ones added while it was lagging (whose live
+	// AddPeer it never saw). Mirrors the restart-path reconcile.
+	n.reconcileTransportFromMembership()
 }
 
 type httpTransportRaft struct {

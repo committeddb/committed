@@ -61,12 +61,15 @@ image can be templated per-node by an orchestrator:
   COMMITTED_PEER_URL   this node's advertised raft peer URL
                        (default "http://127.0.0.1:9022"); used when
                        COMMITTED_PEERS is unset
-  COMMITTED_PEERS      full static cluster membership as id=url pairs,
+  COMMITTED_PEERS      the initial cluster membership as id=url pairs,
                        e.g. "1=http://n1:9022,2=http://n2:9022". The
                        same value is given to every node and must
-                       include this node's own COMMITTED_NODE_ID.
-                       Consumed only on first boot; thereafter
-                       membership is restored from the WAL.
+                       include this node's own COMMITTED_NODE_ID. On the
+                       first boot it bootstraps the cluster; on every boot
+                       it seeds the peer transport. You do NOT need to
+                       update it after growing the cluster — a member added
+                       at runtime has its raft URL persisted and reconciled
+                       onto the transport automatically on restart.
   COMMITTED_JOIN       when truthy, this node joins an existing cluster
                        instead of bootstrapping a new one: it starts with
                        no raft configuration and learns its membership from

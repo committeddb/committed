@@ -150,6 +150,15 @@ type Storage interface {
 	// membership-remove apply path so entries don't accumulate across the
 	// add/remove churn of rebalancing. Idempotent.
 	DeleteMemberAPIURL(id uint64) error
+	// PutMemberPeerURL / MemberPeerURLs / DeleteMemberPeerURL persist the raft
+	// PEER URL (the transport dial address) per member id. raft's ConfState
+	// replicates member IDs only, so applyConfChange writes the URL here on add
+	// (and deletes on remove) to make it durable; reconcileTransport reads the
+	// map at restart and after a snapshot install to re-connect the transport to
+	// dynamically-added members the stale static COMMITTED_PEERS set omits.
+	PutMemberPeerURL(id uint64, rawURL []byte) error
+	MemberPeerURLs() map[uint64]string
+	DeleteMemberPeerURL(id uint64) error
 }
 
 // lostNotifierSetter is the optional Storage extension that accepts the

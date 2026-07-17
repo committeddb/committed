@@ -123,6 +123,71 @@ func TestMembership_AddNode(t *testing.T) {
 	waitForUserEntry(t, node4, []byte("after-add"))
 }
 
+// TestMembership_AddNodePersistsPeerURL is the durability half of the
+// restart-wedge fix, exercised through real consensus: when an add-node conf
+// change commits, every existing node persists the new member's raft URL to
+// durable membership (the memberPeerURLBucket a restart reconciles the transport
+// from), and a subsequent remove deletes it. Without the persistence the restored
+// ConfState would carry the member id with no address, and a restart would seed
+// the transport only from the stale static COMMITTED_PEERS set.
+func TestMembership_AddNodePersistsPeerURL(t *testing.T) {
+	ports := pickFreePorts(4)
+	allPeers := make([]raft.Peer, 4)
+	for i := 0; i < 4; i++ {
+		allPeers[i] = raft.Peer{ID: uint64(i + 1), Context: []byte(fmt.Sprintf("http://127.0.0.1:%d", ports[i]))}
+	}
+	bootstrapPeers := allPeers[:3]
+
+	tick := multiNodeTickInterval
+	rafts := make(Rafts, 0, 4)
+	for _, p := range bootstrapPeers {
+		rafts = append(rafts, createRaft(p.ID, bootstrapPeers, NewMemoryStorage(), tick, nil))
+	}
+	defer func() { rafts.Close() }()
+
+	rafts.WaitForLeader(t)
+	leader := rafts.LeaderRaft()
+
+	node4 := createJoiningRaft(4, allPeers, tick)
+	rafts = append(rafts, node4)
+	node4URL := string(allPeers[3].Context)
+
+	leader.submitConfChange(addNodeCC(4, node4URL))
+	waitForMembership(t, leader, map[uint64]bool{1: true, 2: true, 3: true, 4: true})
+
+	peerURL := func(r *Raft, id uint64) (string, bool) {
+		u, ok := r.storage.(*MemoryStorage).MemberPeerURLs()[id]
+		return u, ok
+	}
+
+	// Every original node persisted node 4's URL. Node 4 skips persisting its own
+	// (applyConfChange skips self), so it is not asserted.
+	for _, r := range rafts {
+		if r.id == 4 {
+			continue
+		}
+		require.Eventuallyf(t, func() bool {
+			u, ok := peerURL(r, 4)
+			return ok && u == node4URL
+		}, membershipSettleTimeout, 20*time.Millisecond, "node %d must persist the added peer's URL", r.id)
+	}
+
+	// Removing node 4 deletes its durable URL everywhere, so a later restart's
+	// reconcile can't re-add a member that is gone.
+	leader.submitConfChange(removeNodeCC(4))
+	waitForMembership(t, leader, map[uint64]bool{1: true, 2: true, 3: true})
+
+	for _, r := range rafts {
+		if r.id == 4 {
+			continue
+		}
+		require.Eventuallyf(t, func() bool {
+			_, ok := peerURL(r, 4)
+			return !ok
+		}, membershipSettleTimeout, 20*time.Millisecond, "node %d must delete the removed peer's URL", r.id)
+	}
+}
+
 // startClusterWithJoiner brings up a 3-node bootstrap cluster (ids 1-3) plus a
 // 4th node in join mode that is reachable but not yet a member. It returns the
 // full rafts slice (close it via defer), the leader, node 4, and node 4's

@@ -293,6 +293,10 @@ func (StorageStubs) MemberAPIURL(id uint64) (string, bool) { return "", false }
 func (StorageStubs) MemberAPIURLs() map[uint64]string      { return nil }
 func (StorageStubs) DeleteMemberAPIURL(id uint64) error    { return nil }
 
+func (StorageStubs) PutMemberPeerURL(id uint64, rawURL []byte) error { return nil }
+func (StorageStubs) MemberPeerURLs() map[uint64]string               { return nil }
+func (StorageStubs) DeleteMemberPeerURL(id uint64) error             { return nil }
+
 // TODO Pull this reader out and make it concrete instead of an interface
 type Reader struct {
 	sync.Mutex

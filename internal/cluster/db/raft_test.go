@@ -767,6 +767,14 @@ type MemoryStorage struct {
 	// so a reader never sees the log advanced past the HardState.
 	stateMu         sync.RWMutex
 	saveArgsForCall []*MemoryStorageSaveArgsForCall
+
+	// peerURLMu guards peerURLs, the durable id → raft peer URL map. Overrides
+	// the StorageStubs no-ops so membership tests can observe applyConfChange
+	// persisting/deleting peer URLs and the startup reconcile reading them. It
+	// survives a Restart() (which reuses the same *MemoryStorage pointer), the
+	// in-RAM stand-in for the bbolt memberPeerURLBucket.
+	peerURLMu sync.Mutex
+	peerURLs  map[uint64]string
 }
 
 func NewMemoryStorage() *MemoryStorage {
@@ -850,6 +858,33 @@ func (ms *MemoryStorage) CreateSnapshot(index uint64, confState *raftpb.ConfStat
 // about restart semantics use wal.Storage; the raft-only MemoryStorage
 // is constructed fresh per test and never replays from disk.
 func (ms *MemoryStorage) ConfState(c *raftpb.ConfState) {}
+
+func (ms *MemoryStorage) PutMemberPeerURL(id uint64, rawURL []byte) error {
+	ms.peerURLMu.Lock()
+	defer ms.peerURLMu.Unlock()
+	if ms.peerURLs == nil {
+		ms.peerURLs = make(map[uint64]string)
+	}
+	ms.peerURLs[id] = string(rawURL)
+	return nil
+}
+
+func (ms *MemoryStorage) MemberPeerURLs() map[uint64]string {
+	ms.peerURLMu.Lock()
+	defer ms.peerURLMu.Unlock()
+	out := make(map[uint64]string, len(ms.peerURLs))
+	for k, v := range ms.peerURLs {
+		out[k] = v
+	}
+	return out
+}
+
+func (ms *MemoryStorage) DeleteMemberPeerURL(id uint64) error {
+	ms.peerURLMu.Lock()
+	defer ms.peerURLMu.Unlock()
+	delete(ms.peerURLs, id)
+	return nil
+}
 
 // RestoreSnapshot is a no-op. The raft_test MemoryStorage exists to
 // exercise the raft layer in isolation; there is no application state

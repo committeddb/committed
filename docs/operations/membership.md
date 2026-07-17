@@ -251,10 +251,16 @@ standard structured JSON body (`{"code", "message"}`):
 
 ## Notes
 
-- **Restart vs. membership.** `COMMITTED_PEERS` is consumed only on first
-  boot. After a node has state, its membership is restored from the WAL,
-  so editing `COMMITTED_PEERS` has no effect — use these commands for any
-  live change.
+- **Restart vs. membership.** The voter/learner set is restored from the WAL
+  (`ConfState`), not from `COMMITTED_PEERS` — so use these commands, not an env
+  edit, for any live membership change. `COMMITTED_PEERS` still seeds the peer
+  transport on every boot, but you do **not** need to update it after adding a
+  member: the new member's raft URL is persisted durably and reconciled onto the
+  transport automatically on restart (and rides snapshots to a node catching up
+  via InstallSnapshot). Before this was durable, a member added at runtime was
+  unreachable after a routine restart and the grown cluster could wedge
+  leaderless — updating `COMMITTED_PEERS` on every node was the manual
+  workaround, and is no longer required.
 - **Backward compatibility.** A node upgraded from a pre-joint-consensus
   build correctly replays any single-step (`ConfChange` v1) entries left
   in its log; the cluster proposes only v2 entries going forward.
