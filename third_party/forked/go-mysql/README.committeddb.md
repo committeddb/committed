@@ -16,27 +16,26 @@ and `vitess_license`, retained verbatim).
 ## Upstream baseline
 
 - **Version:** `v1.15.0`
-- **Re-sync:** bump the tag, re-drop the upstream tree (see below), reapply the
-  patch.
+- **Re-sync:** bump the tag, re-drop the upstream tree, re-apply committed's
+  changes (see below).
 
 ## Why it's forked
 
-go-mysql marshals a JSON-embedded MySQL **opaque DECIMAL** leaf as a *quoted
-string* (`{"d":"1.50"}`). committed's initial-snapshot path renders the same
-leaf as an *exact, unquoted number* (`{"d":1.50}`), so the CDC and snapshot
-payloads diverged byte-for-byte, breaking the byte-compare that replay/dedup
-relies on. There is no upstream option and no non-fork hook that fixes this
-(`RowsEventDecodeFunc` replaces the whole row decode; `useDecimal=true` +
-shopspring trims trailing zeros and corrupts top-level decimals).
+committed's CDC (binlog) path must emit bytes identical to the initial-snapshot
+path for every value, or replay/dedup breaks on the byte-compare. Upstream
+go-mysql diverges on JSON-embedded scalars, with no upstream option or non-fork
+hook to fix it (`RowsEventDecodeFunc` replaces the whole row decode):
 
-The patch adds one decode option, `UseNumberForJSONDecimal`, mirroring the
-existing `UseFloatWithTrailingZero` plumbing 1:1. When set, a JSON DECIMAL leaf
-is emitted as a scale-preserving `json.Number` (unquoted, exact, >2^53-safe).
-committed sets it in `binlogSyncerConfig`. **Upstream candidate** — once merged,
-delete this directory and the `replace` line.
+- an opaque **DECIMAL** marshals as a quoted string (`{"d":"1.50"}`); the
+  snapshot renders an exact, unquoted number (`{"d":1.50}`).
+- an opaque **DATE** marshals as a full DATETIME (`"2021-06-15 00:00:00.000000"`);
+  the snapshot renders it date-only (`"2021-06-15"`).
 
-The full patch is `committeddb-json-decimal.patch` (5 hunks across
-`replication/{binlogsyncer,parser,row_event,json_binary}.go`).
+committed's changes are marked `committeddb fork patch` in the source (mostly
+`replication/json_binary.go`, plus the `UseNumberForJSONDecimal` decode option
+plumbed through `binlogsyncer`). They're all **upstream candidates** — once
+merged, delete this directory and the `replace` line. The snapshot↔CDC parity is
+pinned by committed's own docker tests (`TestMysqlSnapshotStreamJSON*`).
 
 ## What was stripped
 
@@ -53,9 +52,13 @@ patched behavior with its own snapshot↔CDC parity test). `go.mod` was
    bumping the version in the root `go.mod`'s `require`).
 2. Copy the 8 kept packages + `go.mod go.sum LICENSE vitess_license` over this
    directory; `chmod -R u+w`; delete `*_test.go` and `testdata/`.
-3. `git apply third_party/forked/go-mysql/committeddb-json-decimal.patch`
-   (the hunks sit next to the `useFloatWithTrailingZero` lines, so conflicts are
-   rare and obvious). Regenerate the patch afterward if line numbers shifted.
+3. Re-apply committed's changes — `git diff` the pre-bump tree against the new
+   upstream is the authoritative list. The spots carry a `committeddb fork patch`
+   comment or the `UseNumberForJSONDecimal` identifier (absent upstream) and sit
+   next to the `useFloatWithTrailingZero` lines and the temporal switch, so
+   they're easy to find and conflicts are rare.
 4. `go -C third_party/forked/go-mysql mod tidy && go -C third_party/forked/go-mysql build ./...`
-5. From the repo root: `make test/ci`, and run the MySQL docker parity test
-   (`TestMysqlSnapshotStreamJSONDecimalByteIdentity`) to confirm parity holds.
+5. From the repo root: `make test/ci`, and run the MySQL docker parity tests
+   (`TestMysqlSnapshotStreamJSONDecimalByteIdentity`,
+   `TestMysqlSnapshotStreamJSONTemporalByteIdentity`) — a missed change fails the
+   byte-compare there.

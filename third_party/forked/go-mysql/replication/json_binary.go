@@ -461,7 +461,14 @@ func (d *jsonBinaryDecoder) decodeOpaque(data []byte) any {
 		return d.decodeDecimal(data)
 	case mysql.MYSQL_TYPE_TIME:
 		return d.decodeTime(data)
-	case mysql.MYSQL_TYPE_DATE, mysql.MYSQL_TYPE_DATETIME, mysql.MYSQL_TYPE_TIMESTAMP:
+	case mysql.MYSQL_TYPE_DATE:
+		// committeddb fork patch: split DATE out. Upstream lumps it with
+		// DATETIME/TIMESTAMP and emits the full "2021-06-15 00:00:00.000000",
+		// which diverges from the snapshot path (the server text-renders a
+		// JSON-embedded DATE date-only, "2021-06-15") and breaks snapshot==CDC
+		// byte-parity. Upstream candidate.
+		return d.decodeDate(data)
+	case mysql.MYSQL_TYPE_DATETIME, mysql.MYSQL_TYPE_TIMESTAMP:
 		return d.decodeDateTime(data)
 	default:
 		return utils.ByteSliceToString(data)
@@ -513,6 +520,30 @@ func (d *jsonBinaryDecoder) decodeTime(data []byte) any {
 	frac := v % (1 << 24)
 
 	return fmt.Sprintf("%s%02d:%02d:%02d.%06d", sign, hour, minute, sec, frac)
+}
+
+// decodeDate renders a JSON-embedded DATE opaque leaf date-only ("2021-06-15"),
+// matching the snapshot path. The binary layout is the same int64 as DATETIME
+// with a zero time part; only the y/m/d fields are rendered. committeddb fork
+// patch (see the DATE case in decodeLiteral / json_binary switch).
+func (d *jsonBinaryDecoder) decodeDate(data []byte) any {
+	v := d.decodeInt64(data)
+	if v == 0 {
+		return "0000-00-00"
+	}
+	if v < 0 {
+		v = -v
+	}
+
+	intPart := v >> 24
+	ymd := intPart >> 17
+	ym := ymd >> 5
+
+	year := ym / 13
+	month := ym % 13
+	day := ymd % (1 << 5)
+
+	return fmt.Sprintf("%04d-%02d-%02d", year, month, day)
 }
 
 func (d *jsonBinaryDecoder) decodeDateTime(data []byte) any {
