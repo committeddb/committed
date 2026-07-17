@@ -122,3 +122,32 @@ tested recovery invariant**, not merging the stores. The most robust way to keep
 these honest is crash-injection testing that kills the process at each fsync
 boundary and asserts recovery — the natural next step beyond the per-bug tests
 that established each invariant above.
+
+## Filesystem and platform requirements
+
+Everything above assumes an `fsync` that is honored and a filesystem that makes a
+file's — and its directory entry's — durability survive power loss. committed
+therefore **requires a crash-consistent filesystem** for its durability
+guarantee: a journaling filesystem (ext4, xfs, NTFS) or a copy-on-write one
+(btrfs, zfs, ReFS, APFS). This is the same requirement every durable database
+has; a non-journaling filesystem (ext2, FAT) is not supported for a data
+directory.
+
+One consequence, made explicit so it isn't mistaken for a gap: committed does not
+`fsync` a directory on every internal WAL **segment cut** (`tidwall/wal` doesn't
+expose the hook). On a crash-consistent filesystem that is covered two ways — the
+filesystem commits the new segment's directory entry through its journal or
+transaction, and committed's per-`Ready` `fsync` transitively persists recent
+metadata — so a segment cut is durable within a bounded window that the next
+`Save` closes. This holds on every filesystem committed supports; it is another
+reason the crash-consistent requirement is a hard one rather than a suggestion.
+(committed *does* explicitly directory-`fsync` its own swap/reset paths — the
+event-log scrub swap and the entry-log snapshot reset — so those do not depend on
+this.)
+
+**Platform.** committed's production target is **Linux**. It cross-compiles to
+Windows and macOS for development and the CLI, but **Windows is not a supported
+production node** at this point — for example, the disk-usage watcher is
+unavailable there (no `statfs`; see
+[disk-limits.md](operations/disk-limits.md)). Run production nodes on Linux with
+a crash-consistent filesystem.

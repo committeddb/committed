@@ -5,6 +5,7 @@ import (
 	"encoding/gob"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/tidwall/wal"
 	"go.etcd.io/raft/v3"
@@ -246,6 +247,13 @@ func (s *Storage) resetEntryLogToSnapshot(index, term uint64) error {
 		return fmt.Errorf("write snapshot dummy: %w", err)
 	}
 	s.EntryLog = fresh
+	// Durability: fsync the reset dir (its dummy segment's entry) and its parent
+	// (the rename + mkdir), so the cut-over survives power loss without relying on
+	// the Open-time entry-log reconcile to heal it. Best-effort, mirroring the
+	// other swap paths; on a crash-consistent filesystem the writes above already
+	// committed these.
+	s.syncDirBestEffort(s.raftLogDir, "entry-log reset dir")
+	s.syncDirBestEffort(filepath.Dir(s.raftLogDir), "entry-log reset parent")
 	// Best effort — Open clears a leftover before the next boot's open.
 	_ = os.RemoveAll(discard)
 

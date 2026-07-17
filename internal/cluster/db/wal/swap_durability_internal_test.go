@@ -57,6 +57,28 @@ func TestSwapDurability_RestoreSnapshotFsyncEnabled(t *testing.T) {
 		"restore must reconcile appliedIndex to the snapshot index after the fsync'd swap")
 }
 
+// resetEntryLogToSnapshot cuts the entry log over to a snapshot point; C2 added
+// dir-fsyncs (the reset dir + its parent) so the cut-over survives power loss
+// without relying on the Open-time reconcile to heal it. The WithoutFsync suite
+// skips those fsyncs, so run it with fsync ENABLED and confirm the reset still
+// produces a correct, reopenable entry log — exercising the new fsync legs on the
+// real path (they are best-effort, so this is a smoke test; the true power-loss
+// guarantee is process-level crash injection).
+func TestSwapDurability_EntryLogResetFsyncEnabled(t *testing.T) {
+	s, err := Open(t.TempDir(), nil, nil, nil) // fsync enabled (no WithoutFsync)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+	s.stopScrubWorker()
+
+	require.NoError(t, s.resetEntryLogToSnapshot(9, 3))
+	require.Equal(t, uint64(9), s.firstIndex.Load(), "reset must set firstIndex to the snapshot index")
+	require.Equal(t, uint64(9), s.lastIndex.Load(), "reset must set lastIndex to the snapshot index")
+
+	li, err := s.LastIndex()
+	require.NoError(t, err)
+	require.Equal(t, uint64(9), li, "the cut-over log must be live and reopenable at the snapshot index")
+}
+
 // After a committed event-log scrub swap, a recomputeEventBoundsLocked failure is
 // NOT survivable — returning it into the survive-and-continue scrub worker would
 // leave stale bounds and an un-bumped scrubGen against the swapped-in log. The

@@ -241,6 +241,12 @@ func (s *Storage) runScrub(bound uint64) error {
 	if err := newLog.Close(); err != nil {
 		return err
 	}
+	// Durability: fsync the freshly-written swap dir so its segment entries survive
+	// power loss BEFORE it is renamed into place. The parent-dir fsync after the
+	// swap (below) makes the *rename* durable, but not the segment filenames inside
+	// the swapped-in dir. Best-effort, like the parent fsync; on a crash-consistent
+	// filesystem the segment writes' own fsyncs already committed these entries.
+	s.syncDirBestEffort(tmpDir, "event-log scrub swap dir")
 
 	// Swap: events -> events.retired, events.scrub.<B> -> events. Renames are
 	// atomic on POSIX; a crash between them is rolled back by recoverScrubDirs
