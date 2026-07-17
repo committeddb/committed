@@ -17,7 +17,8 @@ import (
 func TestSnapshotTableStatus(t *testing.T) {
 	cfg := &sql.Config{Tables: []string{"region", "nation", "supplier"}}
 
-	// Mid-snapshot: region finished, nation has a cursor, supplier untouched.
+	// Mid-snapshot: region finished, nation in progress, supplier untouched. The
+	// keyset cursor (PK) is deliberately not surfaced — it is often source PII.
 	progress := &dialectpb.SnapshotProgress{
 		CompletedTables: []string{"region"},
 		LastPkByTable:   map[string]string{"nation": "42"},
@@ -25,7 +26,7 @@ func TestSnapshotTableStatus(t *testing.T) {
 	got := sql.SnapshotTableStatus(cfg, progress)
 	require.Equal(t, []cluster.TableSnapshotStatus{
 		{Table: "region", Complete: true},
-		{Table: "nation", LastKey: "42"},
+		{Table: "nation"},
 		{Table: "supplier"},
 	}, got)
 

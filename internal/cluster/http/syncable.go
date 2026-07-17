@@ -94,7 +94,7 @@ type SyncableDeadLetterStuckResponse struct {
 }
 
 // DeadLetterStuckSyncable skips the proposal a syncable is currently blocked
-// retrying (POST /syncable/{id}/deadletter/). A transient sync error retries
+// retrying (POST /syncable/{id}/deadletter). A transient sync error retries
 // forever by design, so a syncable wedged on a proposal the downstream will
 // never accept stalls visibly rather than losing data; this is the operator's
 // lever to dead-letter that one proposal (kind "manual") and let the worker
@@ -245,7 +245,7 @@ type SyncableStatusResponse struct {
 // linearize barrier, so any node answers identically and without a leader
 // hop — this is how an operator (or a dashboard) discovers a wedged syncable
 // behind a load balancer (and the index to expect when they POST
-// .../deadletter/), and answers "is it caught up?" (lag == 0).
+// .../deadletter), and answers "is it caught up?" (lag == 0).
 func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 	id := r.PathValue("id")
 	if id == "" {

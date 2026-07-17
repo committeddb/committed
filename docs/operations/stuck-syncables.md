@@ -102,7 +102,7 @@ is healthy, but *this* row won't go in — skip it:
 
 ```bash
 curl -X POST -H "Authorization: Bearer $TOKEN" \
-  http://node:8080/v1/syncable/orders/deadletter/
+  http://node:8080/v1/syncable/orders/deadletter
 # 202 {"index":4123}   — the worker will skip raft index 4123 and advance
 # 409                  — the syncable isn't currently blocked
 ```
@@ -140,7 +140,7 @@ curl -H "Authorization: Bearer $TOKEN" \
 `kind` says why the proposal was skipped:
 
 - `permanent` — the syncable rejected it automatically.
-- `manual` — you skipped it via `.../deadletter/`.
+- `manual` — you skipped it via `.../deadletter`.
 
 Dead letters survive restart: the worker excludes an already-dead-lettered
 proposal on re-read, so a stuck syncable you've cleared does not re-wedge

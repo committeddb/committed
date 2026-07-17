@@ -35,7 +35,7 @@ func TestPostgresStatusSnapshotPhase(t *testing.T) {
 	require.False(t, st.CaughtUp)
 	require.Equal(t, []cluster.TableSnapshotStatus{
 		{Table: "region", Complete: true},
-		{Table: "nation", LastKey: "7"},
+		{Table: "nation"}, // in progress; the keyset PK is redacted (often source PII)
 	}, st.SnapshotProgress)
 }
 

@@ -142,14 +142,13 @@ type IngestableStatus struct {
 }
 
 // TableSnapshotStatus is one watched table's place in the initial snapshot.
+// The keyset cursor (the last primary-key value dumped) is deliberately NOT
+// carried here: a natural PK is often source PII, so it is not exposed via the
+// status API — see the status endpoint and the snapshot logger, which omits it
+// for the same reason.
 type TableSnapshotStatus struct {
 	// Table is the source table name as configured.
 	Table string
-	// LastKey is the keyset-pagination cursor the snapshot has reached for this
-	// table (the last primary-key value dumped). Empty if the table's snapshot
-	// has not started, or once it is Complete (the cursor is no longer
-	// tracked).
-	LastKey string
 	// Complete is whether this table's snapshot finished.
 	Complete bool
 }

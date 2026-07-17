@@ -83,6 +83,14 @@ func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
 		})
 	}
 
+	// Reject an empty proposal rather than committing a no-op raft entry: an
+	// entity-less proposal is a client error (there is nothing to write), and
+	// accepting it lets a caller bloat the log with empty entries.
+	if len(es) == 0 {
+		writeError(w, httpgo.StatusBadRequest, "empty_proposal", "proposal must contain at least one entity")
+		return
+	}
+
 	p := &cluster.Proposal{
 		Entities: es,
 	}

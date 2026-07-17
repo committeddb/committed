@@ -185,7 +185,7 @@ GET /v1/ingestable/{id}/status
 ```json
 {
   "phase": "streaming",
-  "snapshotProgress": [{ "table": "ingress.movie", "lastKey": "mv0000003", "complete": true }],
+  "snapshotProgress": [{ "table": "ingress.movie", "complete": true }],
   "position": "0/1A2B3C8",
   "lag": 4096,
   "caughtUp": true,

@@ -39,6 +39,17 @@ func (h *HTTP) writeReadError(w httpgo.ResponseWriter, r *httpgo.Request, err er
 	writeError(w, httpgo.StatusBadRequest, code, message)
 }
 
+// notFoundHandler and methodNotAllowedHandler replace chi's raw defaults (a
+// text/plain 404 and an empty-body 405) so the router's own error paths honor the
+// same JSON error-envelope contract every handler uses.
+func notFoundHandler(w httpgo.ResponseWriter, _ *httpgo.Request) {
+	writeError(w, httpgo.StatusNotFound, "not_found", "no matching route")
+}
+
+func methodNotAllowedHandler(w httpgo.ResponseWriter, _ *httpgo.Request) {
+	writeError(w, httpgo.StatusMethodNotAllowed, "method_not_allowed", "method not allowed for this route")
+}
+
 func writeError(w httpgo.ResponseWriter, status int, code string, message string) {
 	resp := ErrorResponse{
 		Code:    code,

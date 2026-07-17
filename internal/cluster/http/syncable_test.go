@@ -201,7 +201,7 @@ func TestDeadLetterStuckSyncableHandler_Accepted(t *testing.T) {
 	h, fake := setupTest()
 	fake.DeadLetterStuckSyncableReturns(42, nil)
 
-	req := httptest.NewRequest("POST", "http://localhost/v1/syncable/sync-1/deadletter/", nil)
+	req := httptest.NewRequest("POST", "http://localhost/v1/syncable/sync-1/deadletter", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -227,7 +227,7 @@ func TestDeadLetterStuckSyncableHandler_NotStuck(t *testing.T) {
 	h, fake := setupTest()
 	fake.DeadLetterStuckSyncableReturns(0, cluster.ErrSyncNotStuck)
 
-	req := httptest.NewRequest("POST", "http://localhost/v1/syncable/sync-1/deadletter/", nil)
+	req := httptest.NewRequest("POST", "http://localhost/v1/syncable/sync-1/deadletter", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 

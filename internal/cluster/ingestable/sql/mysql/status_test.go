@@ -46,7 +46,9 @@ func TestMysqlStatus(t *testing.T) {
 	st, err = d.Status(context.Background(), cfg, snap)
 	require.NoError(t, err)
 	require.Equal(t, "snapshot", st.Phase)
-	require.Equal(t, "9", st.SnapshotProgress[1].LastKey)
+	// nation is mid-snapshot (not complete); the keyset PK is redacted (source PII).
+	require.Equal(t, "nation", st.SnapshotProgress[1].Table)
+	require.False(t, st.SnapshotProgress[1].Complete)
 
 	// Empty position (never checkpointed): streaming, no coordinate.
 	st, err = d.Status(context.Background(), cfg, nil)

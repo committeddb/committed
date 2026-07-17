@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
 
 	"github.com/committeddb/committed/internal/cluster"
@@ -38,10 +39,14 @@ func createConfiguration(r *http.Request) (*cluster.Configuration, error) {
 		return nil, errors.New("id is empty")
 	}
 
+	// Derive the config's MIME type from the Content-Type header, defaulting to
+	// text/toml. ParseMediaType strips any parameters (e.g. "; charset=utf-8") and
+	// lowercases the base type, so downstream exact-match parsing isn't tripped by
+	// a charset or a header-case quirk; an absent or malformed header keeps the
+	// default.
 	mimeType := "text/toml"
-	header, ok := r.Header["Content-Type"]
-	if ok && len(header) == 1 {
-		mimeType = header[0]
+	if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err == nil && mt != "" {
+		mimeType = mt
 	}
 
 	body, err := io.ReadAll(r.Body)

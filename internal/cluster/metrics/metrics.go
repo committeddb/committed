@@ -115,7 +115,7 @@ func New(meter metric.Meter) *Metrics {
 		metric.WithUnit("s"))
 
 	m.syncStuck, _ = meter.Float64Gauge("committed.sync.stuck",
-		metric.WithDescription("1 if a syncable's worker has been blocked retrying a transient error past the stuck threshold (an operator can skip it via POST /syncable/{id}/deadletter/), 0 otherwise. Alert on this."))
+		metric.WithDescription("1 if a syncable's worker has been blocked retrying a transient error past the stuck threshold (an operator can skip it via POST /syncable/{id}/deadletter), 0 otherwise. Alert on this."))
 
 	m.ingestErrors, _ = meter.Int64Counter("committed.ingest.errors",
 		metric.WithDescription("Ingest errors by ingestable_id and kind (propose|position). A failure to commit an ingested proposal or its position checkpoint."))

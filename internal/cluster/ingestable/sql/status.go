@@ -19,13 +19,11 @@ func SnapshotTableStatus(config *Config, progress *dialectpb.SnapshotProgress) [
 	out := make([]cluster.TableSnapshotStatus, 0, len(config.Tables))
 	for _, t := range config.Tables {
 		st := cluster.TableSnapshotStatus{Table: t}
-		switch {
-		case progress == nil:
+		// A table is complete when there's no in-progress snapshot, or it's in the
+		// completed set. The keyset cursor (PK) is deliberately not surfaced — it is
+		// often source PII (see TableSnapshotStatus).
+		if progress == nil || slices.Contains(progress.CompletedTables, t) {
 			st.Complete = true
-		case slices.Contains(progress.CompletedTables, t):
-			st.Complete = true
-		default:
-			st.LastKey = progress.LastPkByTable[t]
 		}
 		out = append(out, st)
 	}

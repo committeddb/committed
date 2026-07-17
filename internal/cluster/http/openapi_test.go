@@ -304,9 +304,9 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 			},
 		},
 		{
-			name:   "POST /syncable/{id}/deadletter/",
+			name:   "POST /syncable/{id}/deadletter",
 			method: httpgo.MethodPost,
-			path:   "/v1/syncable/sync-1/deadletter/",
+			path:   "/v1/syncable/sync-1/deadletter",
 			setup: func(fake *clusterfakes.FakeCluster) {
 				fake.DeadLetterStuckSyncableReturns(7, nil)
 			},
@@ -550,7 +550,7 @@ func TestOpenAPIContract_SpecCoversAllRoutes(t *testing.T) {
 		"/v1/syncable/{id}/versions",
 		"/v1/syncable/{id}/versions/{version}",
 		"/v1/syncable/{id}/errors",
-		"/v1/syncable/{id}/deadletter/",
+		"/v1/syncable/{id}/deadletter",
 		"/v1/syncable/{id}/status",
 		"/v1/syncable/{id}/replay/{index}",
 		"/v1/syncable/{id}/rollback",

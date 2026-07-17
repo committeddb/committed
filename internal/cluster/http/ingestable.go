@@ -40,11 +40,10 @@ type IngestableStatusResponse struct {
 }
 
 // TableSnapshotProgress is one watched table's place in the initial snapshot.
+// The keyset cursor (last PK dumped) is intentionally not exposed — a natural PK
+// is often source PII; Complete answers "is this table done" without it.
 type TableSnapshotProgress struct {
-	Table string `json:"table"`
-	// LastKey is the keyset cursor reached; omitted once the table is complete
-	// (the cursor is no longer tracked) or before its snapshot starts.
-	LastKey  string `json:"lastKey,omitempty"`
+	Table    string `json:"table"`
 	Complete bool   `json:"complete"`
 }
 
@@ -215,7 +214,6 @@ func toIngestableStatusResponse(st cluster.IngestableStatus) IngestableStatusRes
 	for _, t := range st.SnapshotProgress {
 		resp.SnapshotProgress = append(resp.SnapshotProgress, TableSnapshotProgress{
 			Table:    t.Table,
-			LastKey:  t.LastKey,
 			Complete: t.Complete,
 		})
 	}

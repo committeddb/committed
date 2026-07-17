@@ -133,6 +133,13 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 		zap.L().Warn("API authentication disabled (no COMMITTED_API_TOKEN set)")
 	}
 
+	// Router-level error paths honor the JSON error-envelope contract instead of
+	// chi's raw text/plain 404 / empty-body 405. The /v1 subrouter sets its own
+	// NotFound below so an unmatched /v1 path is answered from INSIDE the auth
+	// group (authenticated) rather than leaking a 404 to an unauthenticated caller.
+	r.NotFound(notFoundHandler)
+	r.MethodNotAllowed(methodNotAllowedHandler)
+
 	// /health, /ready, /version, /openapi.yaml, and /docs are exempt
 	// from authentication — orchestrators need the first two without
 	// credentials, /version is useful during rolling upgrades before
@@ -202,7 +209,7 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 			r.Get("/syncable/{id}/versions/{version}", h.getVersion("syncable", h.c.SyncableVersion))
 			r.Get("/syncable/{id}/errors", h.GetSyncableErrors)
 			r.Get("/syncable/{id}/status", h.GetSyncableStatus)
-			r.Post("/syncable/{id}/deadletter/", h.DeadLetterStuckSyncable)
+			r.Post("/syncable/{id}/deadletter", h.DeadLetterStuckSyncable)
 			r.Post("/syncable/{id}/replay/{index}", h.ReplaySyncableDeadLetter)
 			r.Post("/syncable/{id}/rollback", h.rollback("syncable", h.c.SyncableVersion, h.c.ProposeSyncable))
 			// Rebuild is leader-pinned for the same reason as DELETE: the
@@ -245,6 +252,13 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 			r.Post("/membership", h.AddMember)
 			r.Post("/membership/{id}/promote", h.PromoteMember)
 			r.Delete("/membership/{id}", h.RemoveMember)
+
+			// Answer unmatched /v1 paths from inside this (authenticated)
+			// subrouter, so a probe for a nonexistent /v1 route requires the
+			// bearer token and returns the JSON envelope — not chi's
+			// unauthenticated default 404 outside the auth group.
+			r.NotFound(notFoundHandler)
+			r.MethodNotAllowed(methodNotAllowedHandler)
 		})
 	})
 

@@ -110,6 +110,13 @@ func (h *HTTP) rollback(
 		if !ok {
 			return
 		}
+		// Reading the target version is a linearizable read, exactly like
+		// getVersion: without the barrier a lagging follower can 404 a version it
+		// simply hasn't applied yet, turning a valid rollback into a spurious
+		// not-found.
+		if !h.linearize(w, r) {
+			return
+		}
 		cfg, err := version(id, to)
 		if err != nil {
 			writeVersionError(w, err, name)

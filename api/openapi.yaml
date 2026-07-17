@@ -740,7 +740,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/NotLinearizable'
-  /v1/syncable/{id}/deadletter/:
+  /v1/syncable/{id}/deadletter:
     post:
       tags: [syncable]
       summary: Skip the proposal a syncable is currently blocked on
@@ -795,7 +795,7 @@ paths:
         losing data). Backed by replicated state, so any node answers
         identically — this is how you discover a wedged syncable behind a
         load balancer, and the `index` to expect when you POST
-        `.../deadletter/`. The `committed_sync_stuck` gauge carries the same
+        `.../deadletter`. The `committed_sync_stuck` gauge carries the same
         signal for Prometheus alarms.
       operationId: getSyncableStatus
       parameters:
@@ -1861,7 +1861,7 @@ components:
           type: integer
           format: int64
           minimum: 0
-          description: Raft index the worker is blocked on (pass to .../deadletter/). Present only when stuck.
+          description: Raft index the worker is blocked on (pass to .../deadletter). Present only when stuck.
         since:
           type: string
           format: date-time
