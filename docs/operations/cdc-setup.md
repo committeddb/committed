@@ -473,6 +473,23 @@ stream a replica reads).
 There is **no publication or slot** to manage on MySQL — committed connects as a
 binlog replica using its own replica id.
 
+### Unsupported column types
+
+committed does **not** support MySQL **spatial** columns (`GEOMETRY` and its
+subtypes: `POINT`, `LINESTRING`, `POLYGON`, `MULTIPOINT`, `MULTILINESTRING`,
+`MULTIPOLYGON`, `GEOMETRYCOLLECTION`) or **`VECTOR`** (MySQL 9.0+). MySQL ships
+these as raw bytes on both the binlog and snapshot paths, and they have no
+lossless JSON representation — so rather than silently corrupt them, **preflight
+rejects a config that maps one**, naming the column. Leave the column out of your
+mappings (or `excludeColumns` it under map-all) to ingest the rest of the table;
+its data is then simply not replicated.
+
+Every other MySQL type is supported: numbers, `DECIMAL` (exact), `BIT`, `DATE`/
+`TIME`/`DATETIME`/`TIMESTAMP`, `CHAR`/`VARCHAR`/`TEXT`/`ENUM`/`SET`, `JSON`, and
+binary (`BLOB`/`BINARY`/`VARBINARY`, emitted as base64). (Postgres has no such
+gap — PostGIS `geometry`/`geography` and `pgvector` come through as their
+lossless `::text` form.)
+
 ### Configuration
 
 ```toml

@@ -120,7 +120,86 @@ func (m *MySQLDialect) Preflight(config *sql.Config) error {
 			"binlog_row_value_options is %q, but committed requires it empty: PARTIAL_JSON logs only a JSON diff for a partially-updated JSON column, which committed cannot reconstruct and would corrupt downstream. Set `binlog_row_value_options=''`",
 			rowValueOptions)
 	}
+
+	// Reject a mapped spatial/VECTOR column rather than silently corrupt it.
+	if err := checkUnsupportedColumnTypes(ctx, db, config); err != nil {
+		return err
+	}
 	return nil
+}
+
+// unsupportedColumnTypes are MySQL column types committed cannot represent
+// without silent corruption. The binary CDC and snapshot paths both hand these
+// back as raw bytes with no lossless JSON form (json.Marshal would mangle them to
+// U+FFFD), so committed rejects a config that maps one instead of corrupting it:
+// spatial (GEOMETRY and its subtypes) and VECTOR (MySQL 9.0+). These are
+// information_schema `data_type` spellings. (Postgres renders the equivalent
+// PostGIS/pgvector columns as lossless `::text` and is unaffected.)
+var unsupportedColumnTypes = map[string]bool{
+	"geometry":           true,
+	"point":              true,
+	"linestring":         true,
+	"polygon":            true,
+	"multipoint":         true,
+	"multilinestring":    true,
+	"multipolygon":       true,
+	"geometrycollection": true,
+	"vector":             true,
+}
+
+// checkUnsupportedColumnTypes fails loudly if a mapped or primary-key column is a
+// spatial or VECTOR type (see unsupportedColumnTypes). Only mapped/PK columns are
+// checked: an unmapped spatial column is read but never rendered into a payload
+// or key, so committed leaves it alone rather than rejecting the whole table.
+func checkUnsupportedColumnTypes(ctx context.Context, db *gosql.DB, config *sql.Config) error {
+	used := make(map[string]bool, len(config.Mappings)+len(config.PrimaryKey))
+	for _, m := range config.Mappings {
+		used[strings.ToLower(m.SQLColumn)] = true
+	}
+	for _, pk := range config.PrimaryKey {
+		used[strings.ToLower(pk)] = true
+	}
+
+	for _, table := range config.Tables {
+		offenders, err := unsupportedMappedColumns(ctx, db, table, used)
+		if err != nil {
+			return err
+		}
+		if len(offenders) > 0 {
+			return fmt.Errorf(
+				"table %q maps unsupported column type(s) %s: MySQL spatial and VECTOR columns have no "+
+					"lossless representation on committed's binary CDC/snapshot paths and would be silently "+
+					"corrupted. Remove them from the mapping (or exclude them under map-all)",
+				table, strings.Join(offenders, ", "))
+		}
+	}
+	return nil
+}
+
+// unsupportedMappedColumns returns the "name (data_type)" of each column in table
+// that is both used (mapped or PK) and an unsupported spatial/VECTOR type.
+func unsupportedMappedColumns(ctx context.Context, db *gosql.DB, table string, used map[string]bool) ([]string, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT column_name, data_type
+		FROM information_schema.columns
+		WHERE table_schema = DATABASE()
+		  AND table_name = ?`, table)
+	if err != nil {
+		return nil, fmt.Errorf("read column types of %q: %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var offenders []string
+	for rows.Next() {
+		var col, dtype string
+		if err := rows.Scan(&col, &dtype); err != nil {
+			return nil, err
+		}
+		if used[strings.ToLower(col)] && unsupportedColumnTypes[strings.ToLower(dtype)] {
+			offenders = append(offenders, fmt.Sprintf("%s (%s)", col, dtype))
+		}
+	}
+	return offenders, rows.Err()
 }
 
 // minSafeBinlogRetention is the binlog-retention floor below which Preflight

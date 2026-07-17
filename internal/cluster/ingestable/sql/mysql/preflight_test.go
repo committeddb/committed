@@ -23,6 +23,22 @@ func TestGtidPreflightWarning(t *testing.T) {
 	require.NotContains(t, w, "file:position")
 }
 
+// TestUnsupportedColumnTypes pins the spatial/VECTOR set committed rejects rather
+// than silently corrupt (these have no lossless form on the binary CDC/snapshot
+// paths). Asserted here so VECTOR is covered without a MySQL 9.0 container.
+func TestUnsupportedColumnTypes(t *testing.T) {
+	for _, ty := range []string{
+		"geometry", "point", "linestring", "polygon",
+		"multipoint", "multilinestring", "multipolygon", "geometrycollection",
+		"vector",
+	} {
+		require.Truef(t, unsupportedColumnTypes[ty], "%q should be unsupported", ty)
+	}
+	for _, ty := range []string{"int", "bigint", "varchar", "text", "blob", "json", "decimal", "datetime", "enum"} {
+		require.Falsef(t, unsupportedColumnTypes[ty], "%q should be supported", ty)
+	}
+}
+
 // TestBinlogRetentionWarning covers the no-hold retention heuristic: 0 (never
 // auto-purged) is safest and silent, a long retention is silent, and a short
 // positive retention warns.
