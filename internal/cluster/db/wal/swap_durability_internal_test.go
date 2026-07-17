@@ -77,3 +77,21 @@ func TestRecomputeEventBoundsAfterSwap_FatalsOnRecomputeFailure(t *testing.T) {
 	// — only the handle was closed).
 	s.reopenEventLogAfterSwapOrFatal("restore for cleanup")
 }
+
+// A failed close of the LIVE event-log handle BEFORE the scrub rename is not
+// survivable: returning it into the survive-and-continue scrub worker would leave
+// the dead handle for appendEvent to hit later as a mis-attributed ErrClosed
+// crash. closeEventLogBeforeSwapOrFatal must fatal at the true site instead.
+func TestCloseEventLogBeforeSwap_FatalsOnCloseFailure(t *testing.T) {
+	s := fatalPanicStorage(t)
+	s.stopScrubWorker()
+
+	// Pre-close the event log so the helper's close is a double-close, which
+	// tidwall/wal reports as ErrClosed — the forced close failure. Assert the swap
+	// site fatals (panics, via the WriteThenPanic fatal hook) rather than returning.
+	require.NoError(t, s.eventLog.Close())
+	require.Panics(t, func() { s.closeEventLogBeforeSwapOrFatal("test") })
+
+	// Restore a live handle so t.Cleanup's Close is well-defined (dir intact).
+	s.reopenEventLogAfterSwapOrFatal("restore for cleanup")
+}

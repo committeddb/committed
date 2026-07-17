@@ -249,9 +249,11 @@ func (s *Storage) runScrub(bound uint64) error {
 	if err := os.RemoveAll(retired); err != nil {
 		return err
 	}
-	if err := s.eventLog.Close(); err != nil {
-		return err
-	}
+	// Close the LIVE event-log handle ahead of the rename, or fatal — a returned
+	// error would leave the dead handle for appendEvent to hit later as a
+	// mis-attributed ErrClosed crash. (The newLog.Close above is the temp log, not
+	// the live handle, so it correctly returns instead of fataling.)
+	s.closeEventLogBeforeSwapOrFatal("close event log before scrub swap")
 	if err := os.Rename(s.eventLogDir, retired); err != nil {
 		// eventLog is already closed but this rename failed, so s.eventLogDir is
 		// untouched (still the original log). Reopen it so the node survives; fatal
@@ -318,6 +320,21 @@ func (s *Storage) runScrub(bound uint64) error {
 // continues. The caller MUST ensure s.eventLogDir holds the intended (non-empty)
 // log before calling — reopening a missing dir would create an empty log (silent
 // event loss). Caller holds eventMu.Lock.
+// closeEventLogBeforeSwapOrFatal closes the live event-log handle ahead of the
+// scrub rename, or FATALS if the close fails — the pre-swap analogue of the
+// reopen/recompute ...OrFatal helpers. A returned error would drop into the
+// survive-and-continue scrub worker (runPendingScrub only logs and continues),
+// leaving the dead handle for the next appendEvent to hit as an ErrClosed crash
+// mis-attributed to append. Fataling attributes it at the true site;
+// s.eventLogDir is still the original intact log (no rename yet), so a restart
+// recovers. Caller holds eventMu.Lock.
+func (s *Storage) closeEventLogBeforeSwapOrFatal(what string) {
+	if err := s.eventLog.Close(); err != nil {
+		s.logger.Fatal("close event log before scrub swap failed; the node cannot continue (restart to recover from the on-disk log)",
+			zap.String("op", what), zap.String("path", s.eventLogDir), zap.Error(err))
+	}
+}
+
 func (s *Storage) reopenEventLogAfterSwapOrFatal(what string) {
 	reopened, err := wal.Open(s.eventLogDir, nil)
 	if err != nil {

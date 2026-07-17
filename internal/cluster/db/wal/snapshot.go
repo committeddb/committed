@@ -429,6 +429,14 @@ func (s *Storage) compactLocked() error {
 	// scrub re-compacts.
 	if err := s.keyValueStorage.Close(); err != nil {
 		_ = os.Remove(tmpPath)
+		// A failed close leaves s.keyValueStorage in an indeterminate (dead) state;
+		// returning it into the survive-and-continue scrub worker would leave that
+		// handle for the apply path to trip over later as a mis-attributed
+		// ErrDatabaseNotOpen crash. Fatal at the true site — boltPath is still the
+		// original valid file (the rename hasn't run), so a restart recovers cleanly.
+		// Mirrors the post-swap reopenKVAfterSwapOrFatal legs.
+		s.logger.Fatal("close bbolt before compaction swap failed; the node cannot continue (restart to recover from the on-disk file)",
+			zap.String("op", "close bbolt before compaction swap"), zap.String("path", boltPath), zap.Error(err))
 		return fmt.Errorf("close bbolt before compaction swap: %w", err)
 	}
 	if err := os.Rename(tmpPath, boltPath); err != nil {
