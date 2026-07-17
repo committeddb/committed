@@ -20,48 +20,54 @@ Committed is specifically NOT a databse designed for querying.
 - **vs. etcd**: same Raft substrate, but append-only log semantics instead of KV — and a worker model for ingest/sync that etcd doesn't have.
 - **vs. an RDBMS / Debezium pipeline**: Committed collapses "replicated log + CDC source + sink connectors" into one process. You don't need Kafka + Debezium + Kafka Connect + a separate consensus layer; the same binary holds the log, the source, and the sink.
 
-## Version 0.7
+## Version 0.7.x
 
-A beta release that grows SQL projections into a full read-model engine —
-assembling a row from several topics, folding collections into JSON-array
-columns, and enriching from lookup dimensions on other topics — and makes
-change-data-capture **observable and failover-safe**: every ingestable,
-syncable, and pipeline reports how far behind the source it is and whether it
-is caught up, and MySQL ingest is rebuilt on GTID positioning so resume
-survives a source failover. It keeps 0.6's core — entity kinds, declarative
-SQL projections, learner-based cluster growth, leader-proxied membership, and
-disk-pressure admission control — and adds:
+The 0.7 line grows SQL projections into a full **read-model engine** and makes
+change-data-capture **observable and failover-safe**, then hardens the entire
+write, CDC, and compliance surface across three betas. It keeps 0.6's core —
+entity kinds, declarative SQL projections, learner-based cluster growth,
+leader-proxied membership, and disk-pressure admission control. Highlights by
+release:
 
-- **Read models from many topics** — a `sql-projection` can fold several
-  topics into one "BFF" row, fold a collection into a single JSON-array column
-  (with per-element identity and targeted child removal), and enrich folded
-  data from a lookup dimension on another topic that re-materializes when it
-  changes. A drifted projection rebuilds in place
-  (`POST /v1/syncable/{id}/rebuild`), and a column-set change is a clean
-  delete-and-replace rather than a silent no-op. See
+**0.7.0 — read models & observable, failover-safe CDC**
+
+- **Read models from many topics** — a `sql-projection` folds several topics
+  into one "BFF" row, folds a collection into a single JSON-array column (with
+  per-element identity and targeted child removal), and enriches from a lookup
+  dimension on another topic that re-materializes when it changes. A drifted
+  projection rebuilds in place (`POST /v1/syncable/{id}/rebuild`). See
   [Read models](docs/read-models.md).
-- **Failover-safe MySQL CDC** — MySQL ingest is rebuilt on an owned binlog
-  reader with **GTID positioning**, so resume survives a source failover (a
-  replica promoted to primary) instead of breaking on a server-local
-  file:offset. When the source purges binlogs past what was consumed, committed
-  reports `reSnapshotRequired` and re-snapshots rather than losing data
-  silently. See [CDC setup](docs/operations/cdc-setup.md).
-- **Ingest is observable** — `GET /v1/ingestable/{id}/status` reports the
-  snapshot/streaming phase, per-table snapshot progress, the CDC cursor, lag,
-  and caught-up state; `GET /v1/type/{topic}/pipeline` stitches the producer,
-  the log head, and every consuming syncable into one caught-up answer; and
-  `committed.ingest.lag` / `committed.sync.lag` are exported for alerting.
-- **Ingest correctness** — composite primary keys, MySQL ENUM/SET decoded to
-  their labels, a fix for silent row loss, and a config-time preflight that
-  refuses an ingestable whose source can't carry a delete's key, so deletes are
-  never silently dropped.
-- **Backup and restore** — offline `committed backup` / `committed restore`
-  tools to snapshot and rehydrate a node's state. See
+- **Failover-safe MySQL CDC** — an owned binlog reader with **GTID positioning**
+  survives a source failover instead of breaking on a server-local file:offset;
+  a purged-binlog gap is reported as `reSnapshotRequired` and re-snapshotted, not
+  lost silently. See [CDC setup](docs/operations/cdc-setup.md).
+- **Observability** — per-ingestable/syncable/pipeline lag and caught-up state
+  over HTTP, plus `committed.ingest.lag` / `committed.sync.lag` metrics.
+- **Backup & restore** — offline `committed backup` / `committed restore`. See
   [backup](docs/operations/backup.md).
-- **Log housekeeping** — dead letters are compacted as snapshots, a metadata-GC
-  scrub pass reclaims superseded internal state, checkpoint cadence is
-  configurable per syncable, and truncated proposals are detected and signaled
-  (`ErrProposalLost`) instead of lost.
+
+**0.7.1 — data-safety, correctness & compliance hardening**
+
+- Multi-front audits closed dozens of ways data could be **silently lost or
+  corrupted**, a node **bricked**, or a **secret or identifier leaked** — across
+  consensus and storage, CDC and ingest, syncables and projections, migrations,
+  and HTTP.
+- MySQL/Postgres CDC stopped dropping rows (batch DML, DDL drift, TOAST
+  null-clobber, case-mismatched identifiers, a reaped replication slot), and
+  connection-string passwords, keys, and driver errors no longer reach logs,
+  dead letters, or API responses — including a right-to-be-forgotten erasure that
+  no longer survives in a snapshot.
+
+**0.7.2 — CDC correctness & data fidelity**
+
+- **Reconciling refresh** — a row deleted at the source *during a CDC gap* is
+  removed downstream on re-snapshot (keyed SQL sinks), so an erasure is honored
+  even if its delete was missed; sinks that can't reconcile signal or forward it.
+- **Full snapshot↔CDC byte parity** — the last type divergences (JSON-embedded
+  `DECIMAL`/`DATE`, out-of-range `TIME`, non-utf8mb4 text) are closed and pinned
+  by a golden type matrix, and binary columns round-trip faithfully as base64.
+  Spatial/`VECTOR` columns, which have no lossless form, are rejected loudly at
+  config time rather than silently corrupted.
 
 ### Concepts
 
@@ -104,10 +110,10 @@ under `/home/nonroot/data`:
 ```sh
 docker run --rm -p 8080:8080 -p 9022:9022 \
   -v committed-data:/home/nonroot/data \
-  committeddb/committed:0.7.0-beta
+  committeddb/committed:0.7.2-beta
 ```
 
-`docker run committeddb/committed:0.7.0-beta --version` prints the build
+`docker run committeddb/committed:0.7.2-beta --version` prints the build
 identity; `:latest` tracks the most recent release. See
 [Configuration](#configuration) for the env vars and `docker-compose.yml`
 for a local single-node setup.
