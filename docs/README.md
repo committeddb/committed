@@ -8,6 +8,9 @@ A map of the docs. Start with the quickstart; reach for the rest as you need the
   catalog to a single denormalized table you query with no joins.
 - [Read models (SQL projections)](read-models.md) — fold CDC topics into
   current-state tables: rules, multi-source rows, aggregates, and enrichment.
+- [Writing a webhook receiver](webhook-receiver.md) — consume a topic over HTTP
+  instead of SQL: the request/payload contract, the upsert/delete/refresh ops,
+  and the idempotency and sweep responsibilities you own on the receiver side.
 
 ## Concepts
 

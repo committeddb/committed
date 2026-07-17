@@ -132,6 +132,11 @@ topic resumes *above* the rows the sink still holds instead of restarting at 1 a
 sweeping nothing. It is also why a topic may have only one ingestable ([above](#one-writer-per-topic)):
 two producers would stamp generations independently and sweep each other's rows.
 
+For a **SQL** syncable committed runs this sweep for you (`DELETE WHERE
+generation < G`). For an **HTTP** syncable the same reconciliation is delivered
+to your endpoint as an `op:"refresh"` carrying `G`, and the receiver runs the
+sweep — see [writing a webhook receiver](../webhook-receiver.md).
+
 ### What to watch
 
 Every ingestable exposes its status:
