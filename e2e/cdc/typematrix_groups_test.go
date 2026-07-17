@@ -174,16 +174,17 @@ func TestTypeMatrixJSON(t *testing.T) { runTypeMatrixJSON(t, harness.PostgresEng
 func TestMySQL_TypeMatrixJSON(t *testing.T) { runTypeMatrixJSON(t, harness.MySQLEngine()) }
 
 // TestTypeMatrixBinary (Postgres) probes a BYTEA column. The bytes "hello" are
-// inserted raw (pgx encodes []byte -> bytea); pgoutput renders bytea as its
-// "\x.." hex text, so the expectation is that hex — expressed via mutation.Raw
-// because the inserted value (bytes) and the emitted value (hex string) differ.
+// inserted raw (pgx encodes []byte -> bytea); committed emits a binary column as
+// base64, so the expectation is base64("hello") = "aGVsbG8=" — expressed via
+// mutation.Raw because the inserted value (bytes) and the emitted value (base64
+// string) differ.
 func TestTypeMatrixBinary(t *testing.T) {
 	h := harness.NewWith(t, harness.PostgresEngine(), harness.Options{Tables: []string{"tmbin"}})
 
 	s := mutation.NewScript()
 	s.Insert("tmbin", map[string]any{
 		"tmx_id":   1,
-		"tmx_data": mutation.Raw{Insert: []byte("hello"), Expect: `\x68656c6c6f`},
+		"tmx_data": mutation.Raw{Insert: []byte("hello"), Expect: "aGVsbG8="},
 	})
 
 	if err := h.RunScript(context.Background(), s); err != nil {
@@ -192,17 +193,18 @@ func TestTypeMatrixBinary(t *testing.T) {
 	oracle.Assert(t, s.Expected(), h.Capture(t, s.ExpectedCounts()))
 }
 
-// TestMySQL_TypeMatrixBinary probes a BLOB column. canal hands back the raw
-// bytes, which render as the passthrough string "hello" — the MySQL divergence
-// from Postgres's hex. Same inserted bytes, different expected rendering, so the
-// expectation differs by engine (hence two tests rather than a shared runner).
+// TestMySQL_TypeMatrixBinary probes a BLOB column. The binlog hands back the raw
+// bytes, which committed emits as base64 — the same rendering as Postgres's bytea,
+// so both engines now expect base64("hello") = "aGVsbG8=". The two tests remain
+// because they exercise the two distinct ingest paths (binlog vs logical
+// replication), not because the expected value differs.
 func TestMySQL_TypeMatrixBinary(t *testing.T) {
 	h := harness.NewWith(t, harness.MySQLEngine(), harness.Options{Tables: []string{"tmbin"}})
 
 	s := mutation.NewScript()
 	s.Insert("tmbin", map[string]any{
 		"tmx_id":   1,
-		"tmx_data": mutation.Raw{Insert: []byte("hello"), Expect: "hello"},
+		"tmx_data": mutation.Raw{Insert: []byte("hello"), Expect: "aGVsbG8="},
 	})
 
 	if err := h.RunScript(context.Background(), s); err != nil {
