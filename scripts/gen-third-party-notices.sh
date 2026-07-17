@@ -6,6 +6,16 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
+# Deterministic + hermetic output regardless of the caller's environment:
+#   LC_ALL=C pins sort order to bytes (not the locale's collation), so the module
+#   list and per-module license files order identically on every machine.
+#   `go mod download` guarantees every module's source is in the cache, so the
+#   per-module license lookup below never comes up empty.
+# Without these, a fresh tag checkout can reorder entries or drop license blocks,
+# failing `make release`'s diff-guard on a file that is in fact correct.
+export LC_ALL=C
+go mod download
+
 out="THIRD_PARTY_NOTICES.md"
 {
 	cat <<'HDR'
