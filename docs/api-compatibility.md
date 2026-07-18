@@ -127,16 +127,28 @@ on that minimum: the entry is proposed only once every member is at the
 required level. During a rolling upgrade the minimum is held down by the
 not-yet-upgraded nodes, so the feature stays dormant; it activates
 cluster-wide the moment the last node upgrades and announces. This is how
-"new entity types ship disabled until the whole cluster is upgraded" is
-*enforced* rather than merely documented, and it keeps a rolling upgrade
-safe in both directions: an old node is never handed state it can't apply.
+Once every node carries the mechanism, a *gated* feature ships disabled until
+the whole cluster is upgraded, keeping a rolling upgrade safe in both directions
+between those releases: an old node is never handed gated state it can't apply.
+This is a discipline the emitter must follow (bump + gate, below), not a
+framework-enforced invariant — an ungated new entity type would ship anyway.
 
 To introduce such a feature: bump `version.FeatureLevel`, add a
 `featureLevel*` requirement constant at the emitting site, and gate the
 emission on `featureEnabled(that level)`. Never renumber or reuse a level.
-The gate protects forward from the first release that carries it; a
-rollback to a binary that *predates the mechanism itself* is inherently
-one-way (see the list at the end).
+
+Two boundaries the gate cannot cover:
+
+- **Introducing the mechanism itself is a forward full-stop.** The mechanism
+  bootstraps by announcing a new system entity type (`LogNodeVersion`) that
+  *cannot* be gated — it is the bootstrap. A node still on a pre-mechanism binary
+  **fatal-exits** when it applies that announcement, so upgrading a multi-node
+  cluster *into* the first mechanism-carrying release (0.7.2) must be done
+  all-nodes-at-once, not rolling. See [upgrade.md](operations/upgrade.md). ("Safe
+  in both directions" holds only *between* releases that already carry the
+  mechanism.)
+- **Rolling back past the mechanism is one-way** — a pre-mechanism binary meets
+  entries it can't apply (see the list at the end).
 
 ### Log entities (protobuf)
 
@@ -216,13 +228,18 @@ the old binary cannot read:
 - **Rolling back below a feature whose entries are already on your log.**
   The cluster feature level keeps a feature dormant until every member can
   apply it, but once it activates its entries are committed permanently.
-  Rolling a node back to a binary that *predates that feature* (in
-  particular a binary predating the feature-level mechanism itself, which
-  can't be gated retroactively) means it meets entries it can't apply — a
-  rebuild, not a binary swap. Concretely today: rolling back past the
-  **ingest refresh-boundary marker** (`RefreshBoundary`/`Generation` on
-  `LogEntity`) to a pre-marker binary, which decodes the marker but has no
-  `IsRefreshBoundary` branch and would dead-letter it.
+  Rolling a node back to a binary that *predates that feature* means it meets
+  entries it can't apply — a rebuild, not a binary swap. Concretely, rolling
+  back past **0.7.2** to a pre-0.7.2 binary is barred: the `LogNodeVersion`
+  announcement is a system type the old binary can't resolve, so it
+  **fatal-exits** on apply; and the **ingest refresh-boundary marker**
+  (`RefreshBoundary`/`Generation` on `LogEntity`) decodes but dead-letters on a
+  pre-marker binary. Separately, 0.7.2 changed **binary-column payloads to
+  base64** (was Postgres `\x` hex / MySQL raw text); a pre-0.7.2 syncable would
+  mishandle those, but it can't run this far anyway, so the change needs no
+  separate gate — it rides this same one-way boundary. External payload consumers
+  (webhooks, tools) that decode binary fields *were* release-noted and must
+  base64-decode.
 - **A raft transport `protocolVersion` bump.** The peer transport
   currently accepts only an exact protocol-version match, so a bump is a
   flag-day: it partitions a half-upgraded cluster until every node is on
