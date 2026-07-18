@@ -34,7 +34,7 @@ type entityPayload struct {
 	// always present so receivers branch on it explicitly rather than inferring
 	// intent from missing Data.
 	Op   string          `json:"op"`
-	Key  string          `json:"key"`
+	Key  string          `json:"key,omitempty"`
 	Type payloadType     `json:"type"`
 	Data json.RawMessage `json:"data,omitempty"`
 	// Generation is committed's reconciling-refresh epoch: the source ingest

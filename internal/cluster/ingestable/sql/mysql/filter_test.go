@@ -44,3 +44,18 @@ func TestWatches_NoConfiguredSchema(t *testing.T) {
 	require.True(t, h.watches("anydb", "users"), "no configured database → table match alone")
 	require.False(t, h.watches("anydb", "payments"), "still filters by table name")
 }
+
+// TestCheckTablesAreBareNames pins the preflight guard: a schema-qualified
+// `tables` entry is rejected (MySQL ingest addresses tables by bare name within
+// the connection's database, so a `schema.table` entry would silently bypass the
+// watch filter, the snapshot SELECTs, and the spatial/VECTOR reject); bare names
+// pass.
+func TestCheckTablesAreBareNames(t *testing.T) {
+	require.NoError(t, checkTablesAreBareNames([]string{"users", "OrderItems"}), "bare names are accepted")
+	require.NoError(t, checkTablesAreBareNames(nil), "no tables is not an error here")
+
+	err := checkTablesAreBareNames([]string{"users", "shop.widget"})
+	require.Error(t, err, "a schema-qualified entry is rejected")
+	require.Contains(t, err.Error(), "shop.widget")
+	require.Contains(t, err.Error(), "bare name")
+}

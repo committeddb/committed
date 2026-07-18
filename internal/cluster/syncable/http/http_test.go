@@ -352,11 +352,12 @@ func TestSync_RefreshBoundary_EmitsRefreshOp(t *testing.T) {
 func TestSync_RefreshBoundary_OnlyMarker(t *testing.T) {
 	var count atomic.Int32
 	var received webhookBody
+	var rawBody []byte
 
 	ts := httptest.NewServer(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
 		count.Add(1)
-		bs, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(bs, &received)
+		rawBody, _ = io.ReadAll(r.Body)
+		_ = json.Unmarshal(rawBody, &received)
 		w.WriteHeader(200)
 	}))
 	defer ts.Close()
@@ -370,6 +371,10 @@ func TestSync_RefreshBoundary_OnlyMarker(t *testing.T) {
 	require.Len(t, received.Entities, 1)
 	require.Equal(t, "refresh", received.Entities[0].Op)
 	require.Equal(t, uint64(2), received.Entities[0].Generation)
+	// A refresh carries no key, and the wire body omits the field entirely (not
+	// `"key":""`), matching webhook-receiver.md's stated shape — a marker-only
+	// body is the clean case to assert it, having no keyed entity.
+	require.NotContains(t, string(rawBody), `"key"`, "the refresh body must omit the key field")
 }
 
 // TestSync_RefreshBoundary_ForeignTopicNotForwarded verifies a marker for a

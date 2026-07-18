@@ -59,6 +59,17 @@ const (
 // row's identifying key, so only then must the table's PRIMARY KEY cover
 // primaryKey.
 func (m *MySQLDialect) Preflight(config *sql.Config) error {
+	// Refuse a schema-qualified `tables` entry before touching the database:
+	// MySQL ingest is DSN-scoped and addresses tables by bare name everywhere —
+	// the binlog watch filter (watches), the snapshot SELECTs, and the
+	// spatial/VECTOR column check are all `table` within DATABASE(), never
+	// `schema.table`. A qualified entry silently bypasses all three, most
+	// dangerously the spatial/VECTOR reject (it matches no information_schema row,
+	// so the corrupting column slips through), so fail loudly here.
+	if err := checkTablesAreBareNames(config.Tables); err != nil {
+		return err
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -145,6 +156,24 @@ var unsupportedColumnTypes = map[string]bool{
 	"multipolygon":       true,
 	"geometrycollection": true,
 	"vector":             true,
+}
+
+// checkTablesAreBareNames rejects a schema-qualified `tables` entry (one
+// containing "."). MySQL ingest addresses tables by bare name within the
+// connection's database throughout — the binlog watch filter (watches), the
+// snapshot SELECTs, and checkUnsupportedColumnTypes all scope to DATABASE() and
+// match a bare name — so a `schema.table` entry is not a supported config and
+// would silently bypass all three. Refusing it is more honest than half-handling
+// it (the spatial/VECTOR reject in particular would be silently skipped).
+func checkTablesAreBareNames(tables []string) error {
+	for _, table := range tables {
+		if strings.Contains(table, ".") {
+			return fmt.Errorf(
+				"table %q is schema-qualified, but committed's MySQL ingest addresses tables by bare name within the connection's database; list just the table name and point the connection string at its schema",
+				table)
+		}
+	}
+	return nil
 }
 
 // checkUnsupportedColumnTypes fails loudly if a mapped or primary-key column is a

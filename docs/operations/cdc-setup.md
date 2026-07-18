@@ -43,12 +43,15 @@ across a restart.
 
 A topic is reconciled against a **single producer**, so it must have exactly one:
 
-- **One ingestable per topic — enforced.** Creating a second ingestable on a
-  topic another ingestable already produces is rejected at config time (`POST
-  /v1/ingestable` returns `400`, naming the topic and the ingestable that already
-  owns it). The two would reconcile the topic independently, and one's
-  reconciliation would delete the rows the other produced. If you need to move a
-  topic to a different ingestable, delete the old one first.
+- **One ingestable per topic — rejected best-effort.** Creating a second
+  ingestable on a topic another ingestable already produces is rejected at config
+  time (`POST /v1/ingestable` returns `400`, naming the topic and the ingestable
+  that already owns it). This closes the misconfiguration hole against the
+  handling node's committed view; it is not a consensus-level lock, so two
+  *simultaneous* creates racing the same topic on different nodes could both pass —
+  resolve that by deleting one. The two would reconcile the topic independently,
+  and one's reconciliation would delete the rows the other produced. If you need to
+  move a topic to a different ingestable, delete the old one first.
 
 - **No direct writes into an ingest-fed topic — unsupported (not blocked).** A
   topic fed by an ingestable should not also receive direct `POST /v1/proposal`
