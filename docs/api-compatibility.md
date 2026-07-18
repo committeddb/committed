@@ -197,10 +197,11 @@ new binaries read old versions; the bump itself is a one-way transition.
 ### BoltDB metadata buckets
 
 Replicated metadata lives in named BoltDB buckets: `types`, `databases`,
-`ingestables`, `ingestablePositions`, `ingestSourceSeq`, `eventTombstones`,
-`memberAPIURLs`, `memberVersions`, `syncables`, `syncableIndexes`, `syncableDeadLetters`,
-`syncableStuck`, `syncableSkipRequests`, `typeMigrationDeadLetters`,
-`appliedIndex`, `pendingScrub`. Adding a bucket is additive (a new binary
+`ingestables`, `ingestablePositions`, `ingestSourceSeq`, `topicRefreshEpoch`,
+`eventTombstones`, `memberAPIURLs`, `memberPeerURLs`, `memberVersions`,
+`syncables`, `syncableIndexes`, `syncableDeadLetters`, `syncableStuck`,
+`syncableSkipRequests`, `typeMigrationDeadLetters`, `appliedIndex`,
+`pendingScrub`. Adding a bucket is additive (a new binary
 creates it on open; an old binary ignores it). **Renaming or removing** a
 bucket, or changing the encoding of the values within one, requires an
 explicit migration step at open time and is a release-noted change.

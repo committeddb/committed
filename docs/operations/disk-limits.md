@@ -7,10 +7,12 @@ that decides, cluster-wide, whether writes are accepted at all — plus
 the knobs, metrics, and what to actually do during a disk-pressure
 incident.
 
-The short version: nodes degrade gracefully instead of fatal-exiting
-on `ENOSPC`. A write is admitted iff the leader and a quorum of voters
-have disk headroom; a constrained leader hands leadership away; a
-constrained follower is deliberately sacrificed and is yours to fix.
+The short version: the **cluster** degrades gracefully instead of losing quorum
+to `ENOSPC`. A write is admitted iff the leader and a quorum of voters have disk
+headroom; a constrained leader hands leadership away; a constrained follower is
+deliberately **sacrificed** — its replication write path is *not* disk-gated, so
+it keeps filling and will still `ENOSPC`-exit — and is yours to rebuild onto a
+bigger volume (see [rebuild.md](rebuild.md)).
 
 Request-size caps and HTTP timeouts live in
 [http-limits.md](http-limits.md); compaction (what actually frees

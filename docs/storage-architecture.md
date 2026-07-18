@@ -137,10 +137,14 @@ One consequence, made explicit so it isn't mistaken for a gap: committed does no
 `fsync` a directory on every internal WAL **segment cut** (`tidwall/wal` doesn't
 expose the hook). On a crash-consistent filesystem that is covered two ways — the
 filesystem commits the new segment's directory entry through its journal or
-transaction, and committed's per-`Ready` `fsync` transitively persists recent
-metadata — so a segment cut is durable within a bounded window that the next
-`Save` closes. This holds on every filesystem committed supports; it is another
-reason the crash-consistent requirement is a hard one rather than a suggestion.
+transaction, and if a just-cut segment were nonetheless lost, the fail-loud
+storage-invariant / checksum check turns it into a *fail-to-start* (a rebuild),
+never a silent gap. (A plain file `fsync` does **not** by itself persist the
+parent directory entry on ext4/xfs — that is the FS journal's job — so the
+durability here rests on the journal plus the fail-loud backstop, not on the
+per-`Ready` `fsync`.) A segment cut is therefore durable within a bounded window
+on every filesystem committed supports; it is another reason the crash-consistent
+requirement is a hard one rather than a suggestion.
 (committed *does* explicitly directory-`fsync` its own swap/reset paths — the
 event-log scrub swap and the entry-log snapshot reset — so those do not depend on
 this.)

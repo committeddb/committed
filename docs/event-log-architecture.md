@@ -50,8 +50,13 @@ This document describes how that separation works.
 ## Goals
 
 - **Infinite retention of application events.** Every event committed to
-  the cluster lives forever (subject only to right-to-be-forgotten
-  deletes — see below).
+  the cluster lives forever, with two exceptions (both below):
+  right-to-be-forgotten deletes, and topics declared `EntityKind =
+  snapshot`, which the metadata GC compacts to the latest event **per key**
+  (a later write supersedes earlier ones, so replay still yields the correct
+  final state — but the intermediate history of a snapshot topic is not
+  retained, so don't model a topic as `snapshot` if you need to replay its
+  transitions).
 - **Bootstrap from index 1.** A newly-created syncable starts at the first
   event in the log and reads forward.
 - **Cross-type total ordering preserved.** All events across all topics
@@ -204,26 +209,24 @@ production data telling us what to optimize for.
 
 ## Compaction policy
 
-The raft log is compacted when **all** of these are true:
+The raft log is compacted when **both** of these are true:
 
-- Size > 10GB **or** age > 1 hour (whichever fires first)
+- Size > 10GB **or** age > 1 hour (whichever fires first), or disk pressure
+  demands it
 - The compact point ≤ the local permanent event log highwatermark
-- The compact point ≤ the quorum-graduated index (the highest index a
-  quorum of nodes has applied to their permanent logs)
+  (`min(applied − 8, EventIndex)`)
 
-The first constraint bounds disk usage. The second guarantees that this
-node has the events safely in its permanent log before forgetting them
-from the raft log. The third guarantees that even if this node crashes
-mid-compact, a quorum exists that can continue serving from their
-permanent logs.
+The first constraint bounds disk usage. The second guarantees this node has the
+events safely in its own permanent log before forgetting them from the raft log:
+**a node never compacts past its own permanent-log highwatermark.**
 
-**A node never compacts past its own permanent-log highwatermark, even if
-a quorum has graduated higher.** This is the safety invariant for local
-recovery — see "Storage invariant" below.
-
-Compaction is triggered per-node, not coordinated globally. Each node
-checks the constraints against its own state and the cluster's
-quorum-graduated index (which it learns from raft heartbeats).
+Compaction is a local, per-node decision — each node checks these constraints
+against its own state, not a cluster-wide index. It does **not** consult a
+"quorum-graduated index" (an earlier design not implemented in v1): raft's own
+commit rule already guarantees every compacted entry was committed to a quorum's
+raft logs, and each node graduates a committed entry to its permanent log on
+apply, so durability holds without a separate quorum constraint. The storage
+invariant (below) is the local-recovery backstop.
 
 ---
 
@@ -236,8 +239,13 @@ quorum-graduated index (which it learns from raft heartbeats).
 - `R_local` = local raft applied index (the highest raft index
   acknowledged to raft)
 
-If this invariant is ever violated, the node fatal-exits with a clear
-error message pointing at the rebuild runbook.
+The node **fatal-exits when `P_local < R_local`** — raft has acknowledged an
+index the permanent log doesn't have (the dangerous direction; e.g. an
+InstallSnapshot advanced `R_local` past the events), with a clear error pointing
+at the rebuild runbook. The reverse, `P_local > R_local`, is the *benign*
+crash-apply window (events the Ready loop wrote but hasn't re-acknowledged),
+which restart replay closes — it is not fatal. In steady state, after each Ready
+iteration, the two are equal.
 
 This invariant is the contract that makes everything else safe:
 
@@ -958,7 +966,7 @@ see § "Metadata GC (system tombstones)".
 | Compaction trigger                | 10GB or 1hr, whichever first                    | Operator-friendly, bounds disk                                                         |
 | Indexing                          | Raft index                                      | Never renumbered (only made sparse) by a scrub; tidwall/wal positions are not stable   |
 | New syncables start at            | Index 1                                         | CQRS bootstrap is the use case; no concrete need for other start points                |
-| Compaction safety                 | Quorum-graduated AND local-graduated            | Survives any single-node loss                                                          |
+| Compaction safety                 | Local-graduated only (never past own permanent log) | Raft commit already places each entry in a quorum; the quorum-graduated constraint is unimplemented in v1 |
 | Read consistency for syncables    | Historical only                                 | No linearizability needed; cheap to fan out later                                      |
 | Apply determinism                 | Required                                        | Load-bearing for rsync rebuilds and verification                                       |
 | Catch-up v1                       | Manual rsync after fatal-exit                   | Operator-friendly; no silent stale reads                                               |
@@ -966,7 +974,7 @@ see § "Metadata GC (system tombstones)".
 | Permanent log format v1           | tidwall/wal                                     | Reuse existing dependency; custom format later when measurements demand it             |
 | RTBF mechanism                    | Physical removal (not redaction/crypto-shred)   | Only option that shrinks the log → serves metadata-GC too, keeping us single-raft      |
 | Scrub trigger                     | Committed `Scrub{B}` command; auto + manual     | One committed bound makes the background rewrite deterministic across replicas         |
-| Delete-tombstone retention        | Retained (never scrubbed)                       | In-flight/fresh syncables still need the delete; tiny and non-PII                      |
+| Delete-tombstone retention        | RTBF-spared (but a superseded snapshot-topic delete may still be metadata-GC'd) | In-flight/fresh syncables still need the delete. The tombstone key **is** PII (the subject's identifier); RTBF scrub spares it deliberately, it is not inherently non-PII |
 | Delete addressing                 | `(type, key)`, not raft index                   | Matches existing `NewDeleteEntity` model; one delete covers all history for an entity  |
 | Metadata GC predicate             | Keep-latest per `(type, key)`; never drop-all   | Event log stays a replayable source of truth for the derived bbolt view                |
 | Metadata GC gate                  | `EntityKind == Snapshot` (internal + user)      | Keep-latest is sound only for LWW with a record-unique key; version-stored configs are Revision (history retained) → excluded. Dead-letter keys reshaped to `id+index` so they compact too. User kinds harvested from the log prefix for determinism |

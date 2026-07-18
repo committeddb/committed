@@ -89,10 +89,14 @@ Restore validates the manifest, refuses an archive that isn't a committed
 backup or declares an incompatible format version, and rejects any archive
 entry whose path would escape the target directory.
 
-Restore is **atomic**: it unpacks into a staging directory alongside the target
-and renames it into place only after the whole archive validates. A failed
-restore (a truncated archive, a full disk) leaves the target directory
-untouched, so a retry is never blocked by a half-restored directory.
+Restore is **atomic on failure**: it unpacks into a staging directory alongside
+the target and renames it into place only after the whole archive validates, so a
+failed restore (a truncated archive, a full disk) leaves the target directory
+untouched and a retry is never blocked by a half-restored directory. This is
+visibility-atomicity, not crash-durability — the staging files aren't `fsync`'d
+before the publish rename, so a power loss *during* the rename leans on the
+[crash-consistent filesystem](../storage-architecture.md) requirement; restore is
+fully re-runnable.
 
 ### Cluster identity
 
@@ -102,9 +106,13 @@ different cluster into this one is an ETL job, not a restore.
 
 ### Version compatibility
 
-Back up and restore with the **same binary version**, then upgrade (see
-[upgrade.md](upgrade.md)). Cross-version restore is not supported in this
-release.
+Restore validates the archive's **format version** (it refuses a non-committed or
+future-format archive), but it does **not** check the binary version — a restore
+across binary versions that share the archive format is *allowed but unvalidated*.
+Recommendation: back up and restore with the **same binary version**, then
+upgrade (see [upgrade.md](upgrade.md)); a cross-version restore is yours to reason
+about against the on-disk compatibility contract in
+[api-compatibility.md](../api-compatibility.md).
 
 ## Off-box shipping
 

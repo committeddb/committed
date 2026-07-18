@@ -198,8 +198,12 @@ rows into one JSON array on the movie row. A source declares an `aggregate` bloc
 instead of `rules`:
 
 - **`column`** — the array column.
-- **`elementKey`** — a jsonpath to each child's identity within the array: its
-  sort key, and what makes a re-delivered child replace rather than duplicate.
+- **`elementKey`** — a jsonpath giving each child's **sort position** within the
+  array (ordered per `elementKeyType`). It is *only* the sort key: a re-delivered
+  child replaces rather than duplicates because the sidecar is keyed on the child
+  **entity's Key**, not on `elementKey`. (Two *distinct* child entities that
+  happen to share an `elementKey` value therefore both appear — dedup is by
+  entity identity, not by `elementKey`.)
 - **`elementKeyType`** — `number` (sort 1, 2, …, 10) or `text` (lexical, the
   default).
 - **`element`** — an array-of-tables naming the per-child object's fields (an
@@ -310,9 +314,9 @@ gracefully instead of vanishing:
 - **`onDelete = "ignore"`.** The delete changes nothing — for a source whose
   events should never retract what they wrote.
 - **Aggregate element (`onDelete = "remove-from-aggregate"`).** A child delete
-  removes exactly its element from the collection column — matched by
-  `elementKey`, so the delete needs only the child Key, not the payload — and
-  leaves the row and the other elements.
+  removes exactly its element from the collection column — matched by the child
+  **entity's Key** (the sidecar's key), so the delete needs only that key, not
+  the payload — and leaves the row and the other elements.
 - **Enriched element (lookup).** Deleting a dimension row NULLs the enriched
   field on every element that referenced it but keeps the element itself: the
   stored foreign key remains, only the joined value clears.

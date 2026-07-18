@@ -371,17 +371,20 @@ For Postgres, `lag` is real: committed reads it in bytes from
 the slot.
 
 The flip side: **a replication slot retains WAL until its consumer acknowledges
-it.** While committed is running this is bounded (it acks continuously). But if
-committed is **stopped** (or an ingestable is removed) while its slot still
-exists, the slot pins WAL on the source and the source's disk grows without
-bound until it fills. Two consequences:
+it.** While committed is running this is bounded (it acks continuously), and
+deleting an ingestable through the API drops its slot and publication for you —
+best-effort, on the owning node, via the ingestable's teardown. The risk is a
+**hard-stopped** committed: it acks nothing and never runs teardown, so its slot
+keeps pinning WAL on the source and the source's disk grows without bound until
+it fills. Two consequences:
 
 - Don't leave a stopped committed pointed at a production database for long.
-- When you **decommission** an ingestable, drop its slot on the source —
-  committed does not drop it for you:
+- Drop a slot **manually only as a fallback** — if committed was hard-stopped
+  before you deleted the ingestable, or its teardown logged a failure (a wedged
+  worker). A normal `DELETE /ingestable` has already dropped it:
 
   ```sql
-  SELECT pg_drop_replication_slot('committed_movie_slot');
+  SELECT pg_drop_replication_slot('committed_movie_slot');  -- errors harmlessly if already gone
   DROP PUBLICATION committed_movie_pub;   -- optional cleanup
   ```
 

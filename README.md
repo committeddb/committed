@@ -61,8 +61,10 @@ release:
 **0.7.2 — CDC correctness & data fidelity**
 
 - **Reconciling refresh** — a row deleted at the source *during a CDC gap* is
-  removed downstream on re-snapshot (keyed SQL sinks), so an erasure is honored
-  even if its delete was missed; sinks that can't reconcile signal or forward it.
+  removed downstream on re-snapshot for **keyed plain SQL syncables**, so an
+  erasure is honored even if its delete was missed. Sinks that can't reconcile —
+  **SQL projections**, keyless/append tables, and webhooks — signal or forward
+  the refresh instead (a projection warns; a webhook forwards an `op:refresh`).
 - **Full snapshot↔CDC byte parity** — the last type divergences (JSON-embedded
   `DECIMAL`/`DATE`, out-of-range `TIME`, non-utf8mb4 text) are closed and pinned
   by a golden type matrix, and binary columns round-trip faithfully as base64.

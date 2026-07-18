@@ -154,10 +154,12 @@ node) always succeeds; only the local construction — the part that reads
 the environment — is deferred. The config is persisted everywhere and is
 degraded only on the nodes that can't resolve the secret.
 
-This covers any node-local build failure, missing secret or otherwise.
-Genuine corruption — config bytes that don't even decode — is a separate
-case that does stop the node; that's disk corruption, not a missing
-secret.
+This covers any node-local build failure, missing secret or otherwise —
+**including config bytes that don't even decode**: those are recorded as a
+degraded config too and the node stays in quorum, not a node halt. The only
+corruption that *stops* a node is a bad checksum on a **WAL entry** itself
+(`ErrCorruptEntry` at startup — see [rebuild.md](rebuild.md)), a lower layer than
+any individual config's contents.
 
 ### Observing and recovering a degraded config
 
