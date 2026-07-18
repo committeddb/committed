@@ -66,7 +66,9 @@ level), and three gauges track it for alerting:
 | `COMMITTED_DISK_FULL_PERCENT` | `3` | Free-space percent at which config writes are also frozen. |
 
 Thresholds must be descending (`warn > critical > full`). A value
-outside `(0, 100)` logs a warning and falls back to its default. This
+outside `(0, 100)`, or a set that is not descending, logs a warning
+and falls back to the defaults (a non-descending set would leave a band
+unreachable). This
 only nudges the existing compaction trigger to free space; it does
 *not* delete WAL segments or event-log data on its own — that remains
 compaction's job (see

@@ -117,6 +117,24 @@ func newDiskWatcher(cfg DiskWatcherConfig, onState func(diskState), logger *zap.
 	if full <= 0 {
 		full = DefaultDiskFullPercent
 	}
+	// The bands must be strictly descending (warn > critical > full) or a band
+	// is unreachable — e.g. warn <= critical makes classify() reach the critical
+	// band first, so the warn state never fires. Per-value validation (the
+	// <=0/>=100 fallback above, and parsePercentEnv upstream) can't catch a bad
+	// *combination* — a set like warn=5, critical=10 is each individually valid —
+	// so guard the ordering here. On a non-descending set, warn and fall back to
+	// the (descending-by-construction) defaults, mirroring the per-value fallback
+	// policy rather than silently accepting an unreachable band.
+	if !(warn > critical && critical > full) {
+		logger.Warn("disk watcher thresholds must be descending (warn > critical > full); using defaults",
+			zap.Float64("warn", warn),
+			zap.Float64("critical", critical),
+			zap.Float64("full", full),
+		)
+		warn = DefaultDiskWarnPercent
+		critical = DefaultDiskCriticalPercent
+		full = DefaultDiskFullPercent
+	}
 	return &diskWatcher{
 		path:        cfg.Path,
 		interval:    interval,

@@ -11,6 +11,7 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/metrics"
@@ -34,6 +35,48 @@ func newTestWatcher(states *[]diskState) (*diskWatcher, func(free, total uint64)
 	w.usage = func(string) (uint64, uint64, error) { return free, total, nil }
 	set := func(f, t uint64) { free, total = f, t }
 	return w, set
+}
+
+// TestNewDiskWatcher_RejectsNonDescendingThresholds pins the descending-order
+// guard: the bands must be warn > critical > full (or a band is unreachable —
+// classify() reaches the lower band first). A non-descending set — each value
+// individually valid, so per-value validation misses it — warns and falls back to
+// the defaults, matching the per-value fallback policy documented in
+// disk-limits.md; a valid descending set is preserved as-is.
+func TestNewDiskWatcher_RejectsNonDescendingThresholds(t *testing.T) {
+	tests := map[string]struct {
+		warn, critical, full float64
+		wantDefaulted        bool
+	}{
+		"valid descending custom": {50, 25, 10, false},
+		"warn below critical":     {5, 10, 3, true}, // the ticket's misconfig
+		"warn equals critical":    {10, 10, 3, true},
+		"critical equals full":    {20, 5, 5, true},
+		"fully ascending":         {3, 10, 20, true},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			core, observed := observer.New(zap.WarnLevel)
+			w := newDiskWatcher(
+				DiskWatcherConfig{Path: "/data", WarnPercent: tt.warn, CriticalPercent: tt.critical, FullPercent: tt.full},
+				func(diskState) {}, zap.New(core), nil,
+			)
+
+			if tt.wantDefaulted {
+				require.Equal(t, DefaultDiskWarnPercent, w.warnPct)
+				require.Equal(t, DefaultDiskCriticalPercent, w.criticalPct)
+				require.Equal(t, DefaultDiskFullPercent, w.fullPct)
+				require.Len(t, observed.FilterMessageSnippet("must be descending").All(), 1,
+					"a non-descending set warns and falls back to defaults")
+			} else {
+				require.Equal(t, tt.warn, w.warnPct)
+				require.Equal(t, tt.critical, w.criticalPct)
+				require.Equal(t, tt.full, w.fullPct)
+				require.Empty(t, observed.All(), "a valid descending set is accepted silently")
+			}
+		})
+	}
 }
 
 func TestDiskWatcher_Classify(t *testing.T) {
