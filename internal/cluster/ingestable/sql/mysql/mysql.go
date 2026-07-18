@@ -1288,14 +1288,68 @@ func (h *MySQLEventHandler) handleXID(ctx context.Context, header *replication.E
 // handleDDL logs a DDL statement observed on the source. The decode holds no
 // cached schema — each row image decodes against the schema in its own binlog
 // TableMapEvent (see columnsFromTableMap) — so a DDL needs no cache invalidation.
+//
+// A watched-table TRUNCATE is the MySQL analogue of the Postgres logical-
+// replication TruncateMessage: committed has no clear-all primitive, so the
+// truncate is NOT propagated and the sink now diverges from the source until a
+// re-snapshot. It gets the same specific divergence Warn Postgres emits (see
+// postgres.go and the TRUNCATE caveat in docs/operations/cdc-setup.md) instead of
+// being buried in the generic DDL warn. Filtered through watches() because MySQL's
+// binlog is server-wide: a TRUNCATE on an unwatched table diverges no sink of
+// this ingest, and warning on it would cry wolf.
 func (h *MySQLEventHandler) handleDDL(e *replication.QueryEvent) {
 	if e == nil {
 		return
+	}
+	if schema, table, isTruncate := truncateTarget(string(e.Query)); isTruncate {
+		if schema == "" {
+			schema = string(e.Schema) // unqualified TRUNCATE — the session's current database
+		}
+		if h.watches(schema, table) {
+			zap.L().Warn("TRUNCATE on a watched table is not propagated to the sink; "+
+				"the sink now diverges from the source and must be re-snapshotted to reconcile",
+				zap.Strings("tables", []string{schema + "." + table}),
+			)
+			return
+		}
 	}
 	zap.L().Warn("handleDDL: DDL event received",
 		zap.String("schema", string(e.Schema)),
 		zap.String("query", string(e.Query)),
 	)
+}
+
+// truncateTarget parses "TRUNCATE [TABLE] [schema.]table" out of a binlog DDL
+// QueryEvent. It returns the referenced table (and schema, when the statement
+// qualified one) and whether the statement is a TRUNCATE at all. The binlog
+// carries the exact executed statement, so a keyword scan recognizes TRUNCATE and
+// names its single target without a full SQL grammar (MySQL TRUNCATE takes exactly
+// one table). Identifiers are unquoted (backticks stripped); a TRUNCATE whose
+// target can't be named still reports ok=true so the caller treats it as a
+// TRUNCATE, just an unnamed one (it won't match a watched table and falls through
+// to the generic DDL warn).
+func truncateTarget(query string) (schema, table string, ok bool) {
+	fields := strings.Fields(query)
+	if len(fields) == 0 || !strings.EqualFold(fields[0], "TRUNCATE") {
+		return "", "", false
+	}
+	rest := fields[1:]
+	if len(rest) > 0 && strings.EqualFold(rest[0], "TABLE") {
+		rest = rest[1:]
+	}
+	if len(rest) == 0 {
+		return "", "", true // a TRUNCATE we can't name — still a TRUNCATE
+	}
+	ref := strings.TrimRight(rest[0], ";")
+	if s, tbl, qualified := strings.Cut(ref, "."); qualified {
+		return unquoteMySQLIdent(s), unquoteMySQLIdent(tbl), true
+	}
+	return "", unquoteMySQLIdent(ref), true
+}
+
+// unquoteMySQLIdent strips MySQL backtick quoting from a single identifier.
+func unquoteMySQLIdent(s string) string {
+	return strings.Trim(s, "`")
 }
 
 // runStream drives the binlog stream until the context is canceled (clean exit,

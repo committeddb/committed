@@ -256,6 +256,33 @@ A few edge cases:
 - For alerting, the same lag is exported as metrics: `committed.sync.lag` and
   `committed.ingest.lag`.
 
+### TRUNCATE is not propagated (caveat)
+
+committed replicates `INSERT`, `UPDATE`, and `DELETE`, but **not `TRUNCATE`** — on
+either engine. It has no "clear-all" primitive yet, so a `TRUNCATE` on a watched
+table empties the source but leaves the sink's rows in place — the sink
+**diverges** from the source until you reconcile it. committed does not swallow
+this silently: each dropped truncate is logged at `Warn`, naming the affected
+`schema.table`, so you can alert on it:
+
+```
+TRUNCATE on a watched table is not propagated to the sink; the sink now
+diverges from the source and must be re-snapshotted to reconcile   tables=[public.movie]
+```
+
+This applies to both PostgreSQL and MySQL: on Postgres the truncate arrives as a
+logical-replication `TRUNCATE` message, on MySQL as a binlog DDL statement, and
+each is recognized, filtered to watched tables, and logged with the identical
+message above (the `tables` field is the affected `schema.table`).
+
+To reconcile after a truncate, **re-snapshot** the ingestable (rebuild it from
+zero — see [rebuild.md](rebuild.md)). To avoid the divergence entirely, prefer
+`DELETE FROM <table>` over `TRUNCATE` on watched tables: each row delete
+replicates as a keyed tombstone and clears the sink row-by-row.
+
+Full truncate propagation is planned (a clear-all signal applied downstream as
+`DELETE FROM <sink>`); until then this caveat stands.
+
 ---
 
 ## PostgreSQL
@@ -317,27 +344,6 @@ On its first streaming connection committed runs, idempotently:
 - the logical replication **slot** (`pgoutput`).
 
 You don't create either by hand.
-
-### TRUNCATE is not propagated (caveat)
-
-committed replicates `INSERT`, `UPDATE`, and `DELETE`, but **not `TRUNCATE`**. It
-has no "clear-all" primitive yet, so a `TRUNCATE` on a watched table empties the
-source but leaves the sink's rows in place — the sink **diverges** from the source
-until you reconcile it. committed does not swallow this silently: each dropped
-truncate is logged at `Warn`, naming the tables, so you can alert on it:
-
-```
-TRUNCATE on a watched table is not propagated to the sink; the sink now
-diverges from the source and must be re-snapshotted to reconcile   tables=[public.movie]
-```
-
-To reconcile after a truncate, **re-snapshot** the ingestable (rebuild it from
-zero — see [rebuild.md](rebuild.md)). To avoid the divergence entirely, prefer
-`DELETE FROM <table>` over `TRUNCATE` on watched tables: each row delete
-replicates as a keyed tombstone and clears the sink row-by-row.
-
-Full truncate propagation is planned (a clear-all signal applied downstream as
-`DELETE FROM <sink>`); until then this caveat stands.
 
 ### Configuration
 
