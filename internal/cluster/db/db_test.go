@@ -294,7 +294,6 @@ func createProposals(input [][]string) []*cluster.Proposal {
 	ps := make([]*cluster.Proposal, 0, len(input))
 
 	for fi, entities := range input {
-		fmt.Printf("Entities: %v\n", entities)
 		proposal := &cluster.Proposal{}
 		for si, entity := range entities {
 			logEntity := &cluster.Entity{
