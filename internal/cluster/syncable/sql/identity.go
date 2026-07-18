@@ -20,8 +20,8 @@ import (
 // This is the identity sibling of SyncableSchema: SyncableSchema guards a
 // silent no-op on the SAME table (CREATE TABLE IF NOT EXISTS never ALTERs);
 // SyncableIdentity guards a stale checkpoint when the table, topic, or database
-// itself changes. The two are checked together in validateReplace, identity
-// first.
+// itself changes. The two are checked together in schemaComparable.SchemaChange,
+// identity first.
 type SyncableIdentity struct {
 	// Topics are the topics the syncable consumes, sorted for order-insensitive
 	// comparison: one for a plain syncable, N for a multi-source projection.

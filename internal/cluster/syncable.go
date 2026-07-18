@@ -221,27 +221,28 @@ type Teardownable interface {
 	Teardown() error
 }
 
-// ConfigChangeValidator is the optional Syncable extension that vets an
-// in-place config replacement. The propose path calls ValidateReplace on the
-// newly-parsed syncable, passing the syncable built from the currently-
-// persisted config; a non-nil result rejects the re-POST.
+// SyncableSchemaComparable is a config's materialized destination schema, produced
+// config-alone by SyncableSchemaExtractor.SchemaFromConfig (no database
+// resolution). The config-change guard compares the two configs of a re-POST with
+// SchemaChange: a non-nil result rejects the re-POST.
 //
-// It exists because some destinations can't absorb every config change in
-// place: a SQL projection's table is created with CREATE TABLE IF NOT EXISTS
-// and never ALTERed, so a re-POST that changes its columns would silently
-// no-op. Such a syncable returns a RebuildRequiredError to steer the operator
-// to the rebuild verb. A syncable whose destination can take any change in
-// place (e.g. an HTTP webhook) does not implement this interface. The validator
-// is destination-specific; the generic layers never see the destination shape.
-type ConfigChangeValidator interface {
-	// ValidateReplace reports whether replacing prior's config with this
-	// syncable's config is safe to apply in place, returning a
-	// RebuildRequiredError (or other error) if not, nil if it is.
-	ValidateReplace(prior Syncable) error
+// It exists because some destinations can't absorb every config change in place: a
+// SQL projection's table is created with CREATE TABLE IF NOT EXISTS and never
+// ALTERed, so a re-POST that changes its columns or aggregate/lookup shape would
+// silently no-op. SchemaChange returns a RebuildRequiredError to steer the operator
+// to the rebuild verb. A destination that can take any change in place (e.g. an
+// HTTP webhook) has no schema extractor. The generic layers never see the
+// destination shape — only this interface and RebuildRequiredError.
+type SyncableSchemaComparable interface {
+	// SchemaChange reports whether replacing prior's config with the receiver's is
+	// safe to apply in place, returning a RebuildRequiredError if not, nil if it
+	// is. Comparing against a prior of a different, incomparable kind returns nil.
+	SchemaChange(prior SyncableSchemaComparable) error
 }
 
-// RebuildRequiredError is returned by a ConfigChangeValidator when a config
-// change can't be applied in place and needs a rebuild instead. The HTTP layer
+// RebuildRequiredError is returned by SyncableSchemaComparable.SchemaChange (and
+// the ingestable/database config-change validators) when a config change can't be
+// applied in place and needs a rebuild instead. The HTTP layer
 // renders it as 409 with Code and Details — without knowing what kind of
 // syncable (or destination) produced it, so destination-specific shapes
 // (e.g. SQL table/column names) stay out of the generic layers.
@@ -284,6 +285,17 @@ type SyncableTopicExtractor interface {
 // A parser that does not implement it contributes no dependents.
 type SyncableDatabaseExtractor interface {
 	DatabasesFromConfig(v *ParsedConfig) []string
+}
+
+// SyncableSchemaExtractor is the optional SyncableParser extension that builds a
+// config's comparable destination schema from the config alone — WITHOUT resolving
+// the config's database, so a missing database secret on this node cannot defeat
+// the config-change guard. The destination schema is a pure function of the config
+// document, not of the database connection. Returns (nil, nil) for a kind with no
+// materialized schema (e.g. a webhook). s is used only for type resolution (e.g. a
+// `when` discriminator shorthand), never for the database connection.
+type SyncableSchemaExtractor interface {
+	SchemaFromConfig(v *ParsedConfig, s DatabaseStorage) (SyncableSchemaComparable, error)
 }
 
 // DependentsAware is the optional RebuildRequiredError extension a destination

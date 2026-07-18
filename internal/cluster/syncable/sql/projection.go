@@ -129,36 +129,21 @@ func NewProjection(d *DB, config *ProjectionConfig, m *metrics.Metrics, name str
 	return &Projection{db: d.DB, config: config, dialect: d.dialect, metrics: m, name: name}
 }
 
-// ValidateReplace implements cluster.ConfigChangeValidator: it rejects a
-// re-POST that either changes this projection's identity (its set of source
-// topics, or the destination table — the inherited checkpoint would be stale) or
-// changes its materialized table schema (CREATE TABLE IF NOT EXISTS would
-// silently ignore it). Returns an *IdentityChangeError or *SchemaChangeError
-// (both cluster.RebuildRequiredError) or nil.
-func (p *Projection) ValidateReplace(prior cluster.Syncable) error {
-	return validateReplace(prior, p.syncableIdentity(), p.materializedSchema())
-}
-
-// syncableIdentity is the config identity that makes this projection's
-// checkpoint meaningful: the set of source topics it consumes and the
-// destination table. Reads the shorthand Topic when Sources is not yet folded so
-// it is correct whether or not applyDefaults has run.
-func (p *Projection) syncableIdentity() SyncableIdentity {
-	topics := make([]string, 0, len(p.config.Sources))
-	for _, s := range p.config.Sources {
+// projectionIdentity is the SyncableIdentity of a projection config — its source
+// topics, database, and table. It makes the projection's checkpoint meaningful; a
+// re-POST that changes it re-points to a destination whose inherited checkpoint is
+// stale. Used by the config-alone schema parse (SchemaFromConfig). Reads the
+// shorthand Topic when Sources is not yet folded, so it is correct whether or not
+// applyDefaults has run.
+func projectionIdentity(c *ProjectionConfig) SyncableIdentity {
+	topics := make([]string, 0, len(c.Sources))
+	for _, s := range c.Sources {
 		topics = append(topics, s.Topic)
 	}
-	if len(topics) == 0 && p.config.Topic != "" {
-		topics = append(topics, p.config.Topic)
+	if len(topics) == 0 && c.Topic != "" {
+		topics = append(topics, c.Topic)
 	}
-	return SyncableIdentity{Topics: topics, Database: p.config.DatabaseID, Table: p.config.Table}
-}
-
-// materializedSchema is the projection's table shape: its declared columns +
-// primary key (projections create no indexes), exactly the ddlConfig CreateDDL
-// runs.
-func (p *Projection) materializedSchema() SyncableSchema {
-	return schemaOf(p.config.ddlConfig())
+	return SyncableIdentity{Topics: topics, Database: c.DatabaseID, Table: c.Table}
 }
 
 // Teardown implements cluster.Teardownable: it drops the projection's

@@ -1,43 +1,41 @@
-package sql_test
+package sql
 
 import (
-	"context"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/committeddb/committed/internal/cluster"
-	"github.com/committeddb/committed/internal/cluster/syncable/sql"
 )
 
-// noSchemaSyncable is a syncable that exposes no materialized schema (the
-// stand-in for a different syncable kind, e.g. an HTTP webhook).
-type noSchemaSyncable struct{}
+// otherComparable is a cluster.SyncableSchemaComparable of a different concrete
+// kind (the stand-in for e.g. an HTTP webhook). schemaComparable.SchemaChange must
+// fail open against it — it can't compare shapes across kinds.
+type otherComparable struct{}
 
-func (noSchemaSyncable) Sync(context.Context, *cluster.Actual) (cluster.ShouldSnapshot, error) {
-	return false, nil
-}
-func (noSchemaSyncable) Close() error { return nil }
+func (otherComparable) SchemaChange(cluster.SyncableSchemaComparable) error { return nil }
 
-// ValidateReplace reads only the parsed config (no DB), so a zero-value *sql.DB
-// is enough to construct the syncables.
-
-func projectionWith(cols ...[2]string) *sql.Projection {
-	cfg := &sql.ProjectionConfig{Table: "tenants", PrimaryKey: "id"}
+// projectionComparable builds a *schemaComparable from a projection config —
+// destination shape (main columns + aggregate/lookup fingerprint) + identity, no
+// DB — exactly as ProjectionSyncableParser.SchemaFromConfig does.
+func projectionComparable(cols ...[2]string) *schemaComparable {
+	cfg := &ProjectionConfig{Table: "tenants", PrimaryKey: "id"}
 	for _, c := range cols {
-		cfg.Columns = append(cfg.Columns, sql.ProjectionColumn{Name: c[0], SQLType: c[1]})
+		cfg.Columns = append(cfg.Columns, ProjectionColumn{Name: c[0], SQLType: c[1]})
 	}
-	return sql.NewProjection(&sql.DB{}, cfg, nil, "tenants")
+	s := schemaOf(cfg.ddlConfig())
+	s.ProjectionShape = cfg.projectionShapeFingerprint()
+	return &schemaComparable{schema: s, identity: projectionIdentity(cfg)}
 }
 
-// A projection rejects an added-column replacement with a *SchemaChangeError
-// that satisfies the generic cluster.RebuildRequiredError — which is all the
-// generic layers ever see.
-func TestProjection_ValidateReplace_AddedColumn(t *testing.T) {
-	prior := projectionWith([2]string{"id", "VARCHAR(128)"})
-	next := projectionWith([2]string{"id", "VARCHAR(128)"}, [2]string{"tier", "TEXT"})
+// A projection rejects an added-column replacement with a *SchemaChangeError that
+// satisfies the generic cluster.RebuildRequiredError — which is all the generic
+// layers ever see.
+func TestProjection_SchemaChange_AddedColumn(t *testing.T) {
+	prior := projectionComparable([2]string{"id", "VARCHAR(128)"})
+	next := projectionComparable([2]string{"id", "VARCHAR(128)"}, [2]string{"tier", "TEXT"})
 
-	err := next.ValidateReplace(prior)
+	err := next.SchemaChange(prior)
 	require.Error(t, err)
 
 	var rebuild cluster.RebuildRequiredError
@@ -46,42 +44,42 @@ func TestProjection_ValidateReplace_AddedColumn(t *testing.T) {
 	require.Contains(t, rebuild.Error(), "tier")
 
 	// The structured details carry the table + added column for a pipeline.
-	details, ok := rebuild.Details().(*sql.SchemaChangeError)
+	details, ok := rebuild.Details().(*SchemaChangeError)
 	require.True(t, ok)
 	require.Equal(t, "tenants", details.Table)
 	require.Equal(t, []string{"tier"}, details.AddedColumns)
 }
 
-// An identical (or rule-only) replacement validates fine — no rebuild needed.
-func TestProjection_ValidateReplace_NoChange(t *testing.T) {
-	prior := projectionWith([2]string{"id", "VARCHAR(128)"})
-	next := projectionWith([2]string{"id", "VARCHAR(128)"})
-	require.NoError(t, next.ValidateReplace(prior))
+// An identical (or rule-only) replacement compares clean — no rebuild needed.
+func TestProjection_SchemaChange_NoChange(t *testing.T) {
+	prior := projectionComparable([2]string{"id", "VARCHAR(128)"})
+	next := projectionComparable([2]string{"id", "VARCHAR(128)"})
+	require.NoError(t, next.SchemaChange(prior))
 }
 
-// Fail-open: replacing a prior syncable that exposes no schema (a different
-// kind, or one that couldn't be built) is allowed rather than blocked.
-func TestProjection_ValidateReplace_FailsOpenAgainstUnknownPrior(t *testing.T) {
-	next := projectionWith([2]string{"id", "VARCHAR(128)"}, [2]string{"tier", "TEXT"})
-	require.NoError(t, next.ValidateReplace(&noSchemaSyncable{}))
+// Fail-open: comparing against a prior of a different, incomparable kind (one that
+// is not a *schemaComparable) is allowed rather than blocked.
+func TestProjection_SchemaChange_FailsOpenAgainstUnknownPrior(t *testing.T) {
+	next := projectionComparable([2]string{"id", "VARCHAR(128)"}, [2]string{"tier", "TEXT"})
+	require.NoError(t, next.SchemaChange(otherComparable{}))
 }
 
-// The plain table syncable validates the same way, including its indexes.
-func TestSyncable_ValidateReplace_IndexChange(t *testing.T) {
-	base := &sql.Config{
+// The plain table syncable compares the same way, including its indexes.
+func TestSyncable_SchemaChange_IndexChange(t *testing.T) {
+	base := &Config{
 		Table: "events", PrimaryKey: "id",
-		Mappings: []sql.Mapping{{Column: "id", SQLType: "VARCHAR(64)"}},
+		Mappings: []Mapping{{Column: "id", SQLType: "VARCHAR(64)"}},
 	}
-	withIdx := &sql.Config{
+	withIdx := &Config{
 		Table: "events", PrimaryKey: "id",
-		Mappings: []sql.Mapping{{Column: "id", SQLType: "VARCHAR(64)"}},
-		Indexes:  []sql.Index{{IndexName: "idx_id", ColumnNames: "id"}},
+		Mappings: []Mapping{{Column: "id", SQLType: "VARCHAR(64)"}},
+		Indexes:  []Index{{IndexName: "idx_id", ColumnNames: "id"}},
 	}
 
-	prior := sql.New(&sql.DB{}, base)
-	next := sql.New(&sql.DB{}, withIdx)
+	prior := &schemaComparable{schema: schemaOf(base), identity: identityOf(base)}
+	next := &schemaComparable{schema: schemaOf(withIdx), identity: identityOf(withIdx)}
 
-	err := next.ValidateReplace(prior)
+	err := next.SchemaChange(prior)
 	require.Error(t, err)
 	var rebuild cluster.RebuildRequiredError
 	require.ErrorAs(t, err, &rebuild)

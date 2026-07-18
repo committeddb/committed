@@ -49,28 +49,6 @@ func (c *Syncable) CheckpointPolicy() cluster.CheckpointPolicy {
 	return c.config.Checkpoint
 }
 
-// ValidateReplace implements cluster.ConfigChangeValidator: it rejects a
-// re-POST that either changes this syncable's identity (topic re-point / table
-// rename — the inherited checkpoint would be stale) or changes its materialized
-// table schema (CREATE TABLE IF NOT EXISTS would silently ignore it). Returns an
-// *IdentityChangeError or *SchemaChangeError (both cluster.RebuildRequiredError)
-// or nil.
-func (c *Syncable) ValidateReplace(prior cluster.Syncable) error {
-	return validateReplace(prior, c.syncableIdentity(), c.materializedSchema())
-}
-
-// syncableIdentity is the config identity that makes this syncable's checkpoint
-// meaningful: the consumed topic and the destination table.
-func (c *Syncable) syncableIdentity() SyncableIdentity {
-	return identityOf(c.config)
-}
-
-// materializedSchema is the table syncable's shape: its mappings (columns +
-// types), primary key, and indexes — exactly what CreateDDL runs.
-func (c *Syncable) materializedSchema() SyncableSchema {
-	return schemaOf(c.config)
-}
-
 // Teardown implements cluster.Teardownable: it drops the syncable's
 // destination table (DROP TABLE IF EXISTS), the destructive mirror of Init's
 // CREATE. It is idempotent and reconstructable from the persisted config alone

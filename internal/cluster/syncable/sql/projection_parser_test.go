@@ -69,6 +69,29 @@ func projectionStorage() *TestDatabaseStorage {
 	return &TestDatabaseStorage{dbs: map[string]cluster.Database{"testdb": testDB}}
 }
 
+// TestProjectionSchemaFromConfig_WorksWithoutDatabaseSecret pins the P2 fix: the
+// config-change guard compares the prior config's schema via SchemaFromConfig,
+// which does NOT resolve the database — so a prior config whose ${secret} is
+// unresolvable on this node no longer defeats the guard (it used to fail open).
+func TestProjectionSchemaFromConfig_WorksWithoutDatabaseSecret(t *testing.T) {
+	v := readConfig(t, "toml", strings.NewReader(projectionTOML))
+	noDB := &TestDatabaseStorage{dbs: map[string]cluster.Database{}} // "testdb" absent → Database() fails
+
+	// The full parse fails when the database can't be resolved (the old guard path,
+	// which is what forced the fail-open)…
+	_, err := (&sql.ProjectionSyncableParser{}).ParseConfig(v, noDB)
+	require.Error(t, err)
+
+	// …but the config-alone schema parse succeeds: the destination shape is a pure
+	// function of the config document, and the result is a comparable the guard can
+	// diff. (Schema correctness itself is covered by the materializedSchemaChange /
+	// projectionShapeFingerprint unit tests.)
+	prior, err := (&sql.ProjectionSyncableParser{}).SchemaFromConfig(v, noDB)
+	require.NoError(t, err)
+	require.NotNil(t, prior)
+	require.Implements(t, (*cluster.SyncableSchemaComparable)(nil), prior)
+}
+
 func TestParseProjectionConfig(t *testing.T) {
 	v := readConfig(t, "toml", strings.NewReader(projectionTOML))
 

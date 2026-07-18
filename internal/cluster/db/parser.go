@@ -21,5 +21,13 @@ type Parser interface {
 	// the syncables a database connection change would break. Returns nil for a
 	// syncable kind whose parser can't extract databases.
 	SyncableDatabases(mimeType string, data []byte) ([]string, error)
+	// SyncableSchemaChange reports whether replacing the prior syncable config
+	// document with next would change the materialized destination in a way that
+	// CREATE TABLE IF NOT EXISTS can't apply in place (returning a
+	// cluster.RebuildRequiredError), or nil if it is safe. Both schemas are derived
+	// from the config documents alone (no database resolution), so a missing
+	// database secret on this node can't defeat the guard. Fails open (returns nil)
+	// when either document is unparseable or the kind has no materialized schema.
+	SyncableSchemaChange(mimeType string, prior, next []byte, s cluster.DatabaseStorage) error
 	Validate(mimeType string, data []byte) error
 }

@@ -139,9 +139,11 @@ error handling, deletes, and schema evolution:
   already-scrubbed log correct. (Multi-source rows have richer delete
   behavior — see [Deletes and partial deletes](#deletes-and-partial-deletes).)
 - **Schema evolution = fresh-table replay, not ALTER.** DDL is
-  `CREATE TABLE IF NOT EXISTS` only, so re-POSTing a config with a
-  changed column set is *rejected* (409 `schema_change_requires_rebuild`,
-  with the changed columns in `details`) rather than silently no-op'd. To
+  `CREATE TABLE IF NOT EXISTS` only, so re-POSTing a config that changes the
+  destination shape — the **column set**, *or* a projection's **aggregate/lookup
+  shape** (an element field, `elementKey`, `elementKeyType`, or a lookup field) —
+  is *rejected* (409 `schema_change_requires_rebuild`, with what changed in
+  `details`) rather than silently no-op'd. To
   add or change a column, replace the syncable in place:
   `DELETE /v1/syncable/{id}` (removes the config + checkpoint atomically
   and drops the table), then re-POST the new config — the fresh table

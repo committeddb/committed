@@ -23,7 +23,7 @@ func (db *DB) AddSyncableParser(name string, p cluster.SyncableParser) {
 }
 
 func (db *DB) ProposeSyncable(ctx context.Context, c *cluster.Configuration) error {
-	name, syncable, _, err := db.ParseSyncable(c.MimeType, c.Data, db.storage)
+	name, _, _, err := db.ParseSyncable(c.MimeType, c.Data, db.storage)
 	if err != nil {
 		return cluster.NewConfigError(err)
 	}
@@ -31,11 +31,11 @@ func (db *DB) ProposeSyncable(ctx context.Context, c *cluster.Configuration) err
 
 	// Guard: a re-POST some destinations can't absorb in place (e.g. a SQL
 	// projection whose CREATE-only DDL never ALTERs the table) is rejected and
-	// steered to the rebuild verb, rather than silently no-op'd. The syncable
-	// itself decides (ConfigChangeValidator); this layer stays destination-
-	// agnostic. Returns a cluster.RebuildRequiredError the HTTP layer renders as
-	// 409. Best-effort/fail-open — see the helper.
-	if err := db.guardSyncableConfigChange(c.ID, syncable); err != nil {
+	// steered to the rebuild verb, rather than silently no-op'd. The comparison
+	// is destination-specific (a SQL kind compares config-derived schemas); this
+	// layer stays destination-agnostic. Returns a cluster.RebuildRequiredError the
+	// HTTP layer renders as 409. Best-effort/fail-open — see the helper.
+	if err := db.guardSyncableConfigChange(c); err != nil {
 		return err
 	}
 
@@ -48,36 +48,24 @@ func (db *DB) ProposeSyncable(ctx context.Context, c *cluster.Configuration) err
 	return db.Propose(ctx, p)
 }
 
-// guardSyncableConfigChange asks the newly-parsed syncable whether replacing
-// the currently-persisted config with it is safe to apply in place. The
-// syncable owns the decision (cluster.ConfigChangeValidator) — this layer never
-// inspects the destination shape — and a SQL syncable answers by comparing
+// guardSyncableConfigChange reports whether replacing the currently-persisted
+// config for c.ID with c is safe to apply in place. It compares the two config
+// documents' materialized schemas directly (SyncableSchemaChange) — this layer
+// never inspects the destination shape, and a SQL kind answers from
 // config-derived schemas, so no schema query hits the destination DB.
 //
-// Fail-open: if the new syncable doesn't validate replacements (no
-// ConfigChangeValidator), there is no prior config, or the prior config can't
-// be rebuilt on this node, the guard allows the POST. It is a signpost toward
-// the rebuild verb, not a correctness gate — blocking a deploy on an
-// un-rebuildable old config would be worse than the silent no-op it guards
-// against, which only recurs in that already-degraded case.
-func (db *DB) guardSyncableConfigChange(id string, next cluster.Syncable) error {
-	validator, ok := next.(cluster.ConfigChangeValidator)
-	if !ok {
-		return nil // syncable absorbs any config change in place — nothing to guard
-	}
-
-	prior := db.currentSyncableConfig(id)
+// Both schemas are read from the config documents alone (no database resolution),
+// so a config whose ${secret} is unresolvable on this node does NOT defeat the
+// guard: the destination shape is a pure function of the document, not of the
+// connection. Fail-open remains only for the genuinely un-comparable cases — there
+// is no prior config, a document doesn't parse at all, or the syncable kind has no
+// materialized schema.
+func (db *DB) guardSyncableConfigChange(c *cluster.Configuration) error {
+	prior := db.currentSyncableConfig(c.ID)
 	if prior == nil {
 		return nil // first POST for this id — nothing to compare against
 	}
-
-	_, priorSyncable, _, err := db.ParseSyncable(prior.MimeType, prior.Data, db.storage)
-	if err != nil {
-		return nil // prior config not buildable on this node — fail open
-	}
-	defer func() { _ = priorSyncable.Close() }() // releases the prepared stmts (not the shared pool)
-
-	return validator.ValidateReplace(priorSyncable)
+	return db.parser.SyncableSchemaChange(c.MimeType, prior.Data, c.Data, db.storage)
 }
 
 // RebuildSyncable re-materializes a syncable's destination in place from index

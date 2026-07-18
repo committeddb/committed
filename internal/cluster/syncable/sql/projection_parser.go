@@ -122,16 +122,13 @@ func (p *ProjectionSyncableParser) DatabasesFromConfig(v *cluster.ParsedConfig) 
 	return []string{db}
 }
 
-func (p *ProjectionSyncableParser) ParseConfig(v *cluster.ParsedConfig, storage cluster.DatabaseStorage) (*ProjectionConfig, error) {
-	sqlDB := v.GetString("sql-projection.db")
-	db, err := storage.Database(sqlDB)
-	if err != nil {
-		return nil, err
-	}
-
-	table := v.GetString("sql-projection.table")
-	primaryKey := v.GetString("sql-projection.primaryKey")
-
+// parseProjectionConfigFields reads the schema-determining config fields WITHOUT
+// resolving the destination database, so a schema comparison (the config-change
+// guard, via SchemaFromConfig) works even when the config's database secret is
+// unresolvable on this node. storage is used only for type resolution (a `when`
+// discriminator shorthand), never for storage.Database. Database is left nil;
+// ParseConfig resolves and sets it.
+func parseProjectionConfigFields(v *cluster.ParsedConfig, storage cluster.DatabaseStorage) (*ProjectionConfig, error) {
 	var columns []ProjectionColumn
 	if err := v.UnmarshalKey("sql-projection.columns", &columns); err != nil {
 		return nil, fmt.Errorf("[sql-projection.parser] parse sql-projection.columns: %w", err)
@@ -143,14 +140,41 @@ func (p *ProjectionSyncableParser) ParseConfig(v *cluster.ParsedConfig, storage 
 	}
 
 	config := &ProjectionConfig{
-		Database:   db,
-		DatabaseID: sqlDB,
-		Table:      table,
-		PrimaryKey: primaryKey,
+		DatabaseID: v.GetString("sql-projection.db"),
+		Table:      v.GetString("sql-projection.table"),
+		PrimaryKey: v.GetString("sql-projection.primaryKey"),
 		Columns:    columns,
 		Sources:    sources,
 	}
 	config.applyDefaults()
+	return config, nil
+}
+
+// SchemaFromConfig implements cluster.SyncableSchemaExtractor: it builds the
+// projection's comparable destination shape + identity from the config document
+// alone (no database resolution), for the config-change guard.
+func (p *ProjectionSyncableParser) SchemaFromConfig(v *cluster.ParsedConfig, storage cluster.DatabaseStorage) (cluster.SyncableSchemaComparable, error) {
+	config, err := parseProjectionConfigFields(v, storage)
+	if err != nil {
+		return nil, err
+	}
+	schema := schemaOf(config.ddlConfig())
+	schema.ProjectionShape = config.projectionShapeFingerprint()
+	return &schemaComparable{schema: schema, identity: projectionIdentity(config)}, nil
+}
+
+func (p *ProjectionSyncableParser) ParseConfig(v *cluster.ParsedConfig, storage cluster.DatabaseStorage) (*ProjectionConfig, error) {
+	config, err := parseProjectionConfigFields(v, storage)
+	if err != nil {
+		return nil, err
+	}
+
+	db, err := storage.Database(config.DatabaseID)
+	if err != nil {
+		return nil, err
+	}
+	config.Database = db
+
 	if err := validateProjectionConfig(config); err != nil {
 		return nil, fmt.Errorf("[sql-projection.parser] %w", err)
 	}

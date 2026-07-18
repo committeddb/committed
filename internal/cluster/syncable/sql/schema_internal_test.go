@@ -94,6 +94,59 @@ func TestMaterializedSchemaChange_ColumnReorderIsNoChange(t *testing.T) {
 	require.Nil(t, materializedSchemaChange(old, next))
 }
 
+func TestMaterializedSchemaChange_ProjectionShapeChanged(t *testing.T) {
+	// Identical table columns, but the aggregate/lookup shape differs — the case
+	// the main-table schema alone (ddlConfig) misses.
+	old := schema("bff", "id", [2]string{"id", "VARCHAR(128)"}, [2]string{"top_cast", "JSONB"})
+	next := old
+	old.ProjectionShape = "agg(col=top_cast,key=$.ordering,keyType=number,elem=name{from=$.name,lookup=,on=,select=})|"
+	next.ProjectionShape = "agg(col=top_cast,key=$.ordering,keyType=number,elem=name{from=$.name,lookup=,on=,select=},role{from=$.category,lookup=,on=,select=})|"
+
+	change := materializedSchemaChange(old, next)
+	require.NotNil(t, change)
+	require.True(t, change.ProjectionShapeChanged)
+	require.Empty(t, change.AddedColumns) // the miss: no column-level diff
+	require.Contains(t, change.Error(), "aggregate/lookup shape")
+	require.Equal(t, "schema_change_requires_rebuild", change.Code())
+}
+
+// TestProjectionShapeFingerprint pins what counts as an aggregate/lookup shape
+// change (rebuild-required) vs a benign reorder.
+func TestProjectionShapeFingerprint(t *testing.T) {
+	name := ProjectionElementField{Field: "name", From: "$.name"}
+	role := ProjectionElementField{Field: "role", From: "$.category"}
+	mk := func(keyType string, fields ...ProjectionElementField) *ProjectionConfig {
+		return &ProjectionConfig{Sources: []ProjectionSource{{Aggregate: &ProjectionAggregate{
+			Column: "top_cast", ElementKey: "$.ordering", ElementKeyType: keyType, Element: fields,
+		}}}}
+	}
+	base := mk("number", name, role).projectionShapeFingerprint()
+
+	require.Equal(t, base, mk("number", role, name).projectionShapeFingerprint(),
+		"a field reorder is not a shape change")
+	require.NotEqual(t, base, mk("number", name, role, ProjectionElementField{Field: "billing", From: "$.billing"}).projectionShapeFingerprint(),
+		"adding an element field is a shape change")
+	require.NotEqual(t, base, mk("text", name, role).projectionShapeFingerprint(),
+		"flipping elementKeyType is a shape change")
+
+	changedKey := mk("number", name, role)
+	changedKey.Sources[0].Aggregate.ElementKey = "$.billing"
+	require.NotEqual(t, base, changedKey.projectionShapeFingerprint(), "changing elementKey is a shape change")
+
+	oneField := &ProjectionConfig{Sources: []ProjectionSource{{Lookup: &ProjectionLookup{
+		Name: "names", Fields: []ProjectionElementField{{Field: "full", From: "$.full"}},
+	}}}}
+	twoField := &ProjectionConfig{Sources: []ProjectionSource{{Lookup: &ProjectionLookup{
+		Name: "names", Fields: []ProjectionElementField{{Field: "full", From: "$.full"}, {Field: "born", From: "$.born"}},
+	}}}}
+	require.NotEqual(t, oneField.projectionShapeFingerprint(), twoField.projectionShapeFingerprint(),
+		"adding a lookup field is a shape change")
+
+	require.Equal(t, (&ProjectionConfig{}).projectionShapeFingerprint(),
+		(&ProjectionConfig{Sources: []ProjectionSource{{Topic: "x"}}}).projectionShapeFingerprint(),
+		"a projection with no aggregate/lookup source has a stable, empty shape")
+}
+
 func TestSchemaChangeError_NoFormatMishaps(t *testing.T) {
 	old := schema("tenants", "id", [2]string{"id", "VARCHAR(128)"}, [2]string{"old", "TEXT"})
 	next := schema("tenants", "id", [2]string{"id", "VARCHAR(128)"}, [2]string{"new", "TEXT"})

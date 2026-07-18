@@ -2,6 +2,8 @@ package sql
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/sqlident"
@@ -216,6 +218,43 @@ func (c *ProjectionConfig) ddlConfig() *Config {
 		mappings = append(mappings, Mapping{Column: col.Name, SQLType: col.SQLType})
 	}
 	return &Config{Table: c.Table, Mappings: mappings, PrimaryKey: c.PrimaryKey}
+}
+
+// projectionShapeFingerprint is a canonical, order-independent description of the
+// parts of the destination shape that ddlConfig/schemaOf do NOT capture: each
+// aggregate column's element fields, elementKey, and elementKeyType, and each
+// lookup dimension's fields. materializedSchema folds it into SyncableSchema so
+// materializedSchemaChange rejects a re-POST that changes the aggregate/lookup
+// shape (which CREATE TABLE IF NOT EXISTS would silently no-op) as a rebuild.
+// Sorted so a benign source/field reorder is not flagged; empty when the config
+// has no aggregate or lookup source (so plain projections are unaffected).
+func (c *ProjectionConfig) projectionShapeFingerprint() string {
+	var aggs, lookups []string
+	for _, s := range c.Sources {
+		if a := s.Aggregate; a != nil {
+			aggs = append(aggs, fmt.Sprintf("agg(col=%s,key=%s,keyType=%s,elem=%s)",
+				a.Column, a.ElementKey, a.ElementKeyType, fingerprintFields(a.Element)))
+		}
+		if l := s.Lookup; l != nil {
+			lookups = append(lookups, fmt.Sprintf("lookup(name=%s,fields=%s)",
+				l.Name, fingerprintFields(l.Fields)))
+		}
+	}
+	sort.Strings(aggs)
+	sort.Strings(lookups)
+	return strings.Join(aggs, ";") + "|" + strings.Join(lookups, ";")
+}
+
+// fingerprintFields canonicalizes a set of element/dimension fields (order-
+// independent) into a stable string carrying every shape-determining attribute.
+func fingerprintFields(fields []ProjectionElementField) string {
+	fs := make([]string, 0, len(fields))
+	for _, f := range fields {
+		fs = append(fs, fmt.Sprintf("%s{from=%s,lookup=%s,on=%s,select=%s}",
+			f.Field, f.From, f.Lookup, f.On, f.Select))
+	}
+	sort.Strings(fs)
+	return strings.Join(fs, ",")
 }
 
 // ruleConfig synthesizes the per-rule upsert Config: the primary-key

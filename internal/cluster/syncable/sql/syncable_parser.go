@@ -60,6 +60,30 @@ func (p *SyncableParser) DatabasesFromConfig(v *cluster.ParsedConfig) []string {
 	return []string{db}
 }
 
+// SchemaFromConfig implements cluster.SyncableSchemaExtractor: it builds the
+// syncable's comparable destination shape + identity from the config document
+// alone (no database resolution), for the config-change guard. storage is unused —
+// a plain syncable's schema needs no type resolution.
+func (p *SyncableParser) SchemaFromConfig(v *cluster.ParsedConfig, _ cluster.DatabaseStorage) (cluster.SyncableSchemaComparable, error) {
+	var mappings []Mapping
+	if err := v.UnmarshalKey("sql.mappings", &mappings); err != nil {
+		return nil, fmt.Errorf("[sql.syncable-parser] parse sql.mappings: %w", err)
+	}
+	var indexes []Index
+	if err := v.UnmarshalKey("sql.indexes", &indexes); err != nil {
+		return nil, fmt.Errorf("[sql.syncable-parser] parse sql.indexes: %w", err)
+	}
+	config := &Config{
+		DatabaseID: v.GetString("sql.db"),
+		Topic:      v.GetString("sql.topic"),
+		Table:      v.GetString("sql.table"),
+		Mappings:   mappings,
+		Indexes:    indexes,
+		PrimaryKey: v.GetString("sql.primaryKey"),
+	}
+	return &schemaComparable{schema: schemaOf(config), identity: identityOf(config)}, nil
+}
+
 func (p *SyncableParser) ParseConfig(v *cluster.ParsedConfig, storage cluster.DatabaseStorage) (*Config, error) {
 	sqlDB := v.GetString("sql.db")
 	if sqlDB == "" {

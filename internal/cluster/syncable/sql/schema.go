@@ -7,6 +7,37 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 )
 
+// schemaComparable is a config's materialized destination schema + identity, built
+// config-alone by SchemaFromConfig (no database resolution). It implements
+// cluster.SyncableSchemaComparable so the config-change guard can compare a
+// re-POST's prior and next shapes without building either syncable.
+type schemaComparable struct {
+	schema   SyncableSchema
+	identity SyncableIdentity
+}
+
+// SchemaChange implements cluster.SyncableSchemaComparable. It rejects, in order,
+// an identity change (a topic/table re-point — the inherited SyncableIndex
+// checkpoint is stale for the new destination → data loss) then a materialized
+// schema change (CREATE TABLE IF NOT EXISTS never ALTERs, so the change would
+// silently no-op). Identity is checked first because a table rename makes a fresh
+// table (not a schema change) but IS a stale-checkpoint hazard. A prior of a
+// different, incomparable kind returns nil (fail open). The returned errors
+// implement cluster.RebuildRequiredError.
+func (s *schemaComparable) SchemaChange(prior cluster.SyncableSchemaComparable) error {
+	p, ok := prior.(*schemaComparable)
+	if !ok {
+		return nil
+	}
+	if change := identityChange(p.identity, s.identity); change != nil {
+		return change
+	}
+	if change := materializedSchemaChange(p.schema, s.schema); change != nil {
+		return change
+	}
+	return nil
+}
+
 // SyncableSchema is a comparable description of the destination table a SQL
 // syncable materializes: the table name, its columns (in declared order) with
 // their SQL types, the primary key, and any indexes. It is exactly the shape
@@ -17,13 +48,21 @@ import (
 // with CREATE TABLE IF NOT EXISTS and never ALTERed: re-POSTing a config whose
 // schema changed would persist the new config but leave the live table
 // untouched — a silent no-op. This whole model is SQL-specific and lives in the
-// sql package; the generic layers see only cluster.ConfigChangeValidator and
+// sql package; the generic layers see only cluster.SyncableSchemaComparable and
 // cluster.RebuildRequiredError.
 type SyncableSchema struct {
 	Table      string
 	Columns    []SchemaColumn
 	PrimaryKey string
 	Indexes    []SchemaIndex
+	// ProjectionShape is a canonical, order-independent fingerprint of the parts
+	// of a projection's destination shape that Columns does NOT capture: each
+	// aggregate column's element fields / elementKey / elementKeyType, and each
+	// lookup dimension's fields. A change to any of these needs a rebuild
+	// (CREATE TABLE IF NOT EXISTS never re-materializes the aggregate/lookup
+	// shape). Empty for a plain syncable and for a projection with no
+	// aggregate/lookup source, so it never affects those.
+	ProjectionShape string
 }
 
 // SchemaColumn is one column of a materialized table.
@@ -58,6 +97,10 @@ type SchemaChangeError struct {
 	ChangedColumns    []string `json:"changedColumns,omitempty"`
 	PrimaryKeyChanged bool     `json:"primaryKeyChanged,omitempty"`
 	IndexesChanged    bool     `json:"indexesChanged,omitempty"`
+	// ProjectionShapeChanged is set when a projection's aggregate/lookup shape
+	// (element fields, elementKey, elementKeyType, lookup fields) changed — the
+	// part of the destination CREATE TABLE IF NOT EXISTS never re-materializes.
+	ProjectionShapeChanged bool `json:"projectionShapeChanged,omitempty"`
 }
 
 func (e *SchemaChangeError) Error() string {
@@ -77,6 +120,9 @@ func (e *SchemaChangeError) Error() string {
 	}
 	if e.IndexesChanged {
 		b.WriteString(" indexes changed.")
+	}
+	if e.ProjectionShapeChanged {
+		b.WriteString(" projection aggregate/lookup shape changed (element fields, elementKey, elementKeyType, or lookup fields).")
 	}
 	return b.String()
 }
@@ -118,8 +164,9 @@ func schemaOf(c *Config) SyncableSchema {
 // Scope: only the same-table case is a silent no-op (CREATE TABLE IF NOT EXISTS
 // sees the existing table and changes nothing). A different table name is not a
 // schema change but an IDENTITY change — the inherited checkpoint is stale for
-// the new table — and is caught earlier by identityChange (see validateReplace),
-// so this function stays same-table-scoped and returns nil for a rename.
+// the new table — and is caught earlier by identityChange (see
+// schemaComparable.SchemaChange), so this function stays same-table-scoped and
+// returns nil for a rename.
 //
 // Column names are compared exactly; SQL types are normalized (upper-cased and
 // trimmed) so a cosmetic "varchar(128)" → "VARCHAR(128)" edit is not treated as
@@ -151,18 +198,20 @@ func materializedSchemaChange(old, next SyncableSchema) *SchemaChangeError {
 
 	pkChanged := old.PrimaryKey != next.PrimaryKey
 	indexesChanged := !indexesEqual(old.Indexes, next.Indexes)
+	shapeChanged := old.ProjectionShape != next.ProjectionShape
 
-	if len(added) == 0 && len(removed) == 0 && len(changed) == 0 && !pkChanged && !indexesChanged {
+	if len(added) == 0 && len(removed) == 0 && len(changed) == 0 && !pkChanged && !indexesChanged && !shapeChanged {
 		return nil
 	}
 
 	return &SchemaChangeError{
-		Table:             next.Table,
-		AddedColumns:      added,
-		RemovedColumns:    removed,
-		ChangedColumns:    changed,
-		PrimaryKeyChanged: pkChanged,
-		IndexesChanged:    indexesChanged,
+		Table:                  next.Table,
+		AddedColumns:           added,
+		RemovedColumns:         removed,
+		ChangedColumns:         changed,
+		PrimaryKeyChanged:      pkChanged,
+		IndexesChanged:         indexesChanged,
+		ProjectionShapeChanged: shapeChanged,
 	}
 }
 
@@ -193,37 +242,4 @@ func indexesEqual(a, b []SchemaIndex) bool {
 		}
 	}
 	return true
-}
-
-// materializedSchemaProvider is the sql-internal seam ValidateReplace uses to
-// read a prior syncable's identity and schema: both *Projection and *Syncable
-// implement it.
-type materializedSchemaProvider interface {
-	materializedSchema() SyncableSchema
-	syncableIdentity() SyncableIdentity
-}
-
-// validateReplace is the shared body of the *Projection/*Syncable
-// ValidateReplace methods. It rejects, in order:
-//   - an IDENTITY change (topic re-point or table rename): the inherited
-//     SyncableIndex checkpoint is stale for the new destination → data loss;
-//   - a same-identity SCHEMA change: CREATE TABLE IF NOT EXISTS never ALTERs, so
-//     the change would silently no-op.
-//
-// Identity is checked first because a table rename is not a schema change (it
-// makes a fresh table) but IS a stale-checkpoint hazard. Fail-open if prior
-// exposes no identity/schema (a different syncable kind, or one that couldn't be
-// built). The returned errors implement cluster.RebuildRequiredError.
-func validateReplace(prior cluster.Syncable, nextIdentity SyncableIdentity, nextSchema SyncableSchema) error {
-	provider, ok := prior.(materializedSchemaProvider)
-	if !ok {
-		return nil
-	}
-	if change := identityChange(provider.syncableIdentity(), nextIdentity); change != nil {
-		return change
-	}
-	if change := materializedSchemaChange(provider.materializedSchema(), nextSchema); change != nil {
-		return change
-	}
-	return nil
 }
