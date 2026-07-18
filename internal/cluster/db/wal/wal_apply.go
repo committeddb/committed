@@ -70,14 +70,14 @@ func (s *Storage) ApplyCommitted(entry *pb.Entry) error {
 			return fmt.Errorf("[wal.storage] unmarshal proposal at index %d: %w", entry.GetIndex(), err)
 		}
 
-		// Advance the data-entry head iff this is user topic data — exactly
-		// the filter the per-syncable reader applies in reader.go, so
-		// dataEventIndex tracks the index the reader converges to at EOF.
-		// Internal entries (committed's config + coordination) are skipped
-		// here just as the reader skips them, so an idle syncable's lag
-		// reads 0 rather than a phantom backlog of trailing internal
-		// entries. Monotonic: entries apply in index order.
-		if len(p.Entities) > 0 && !cluster.IsInternal(p.Entities[0].Type.ID) {
+		// Advance the data-entry head iff this proposal carries user topic data —
+		// exactly the filter the per-syncable reader applies in reader.go (same
+		// userTopicEntities helper, per-entity), so dataEventIndex tracks the
+		// index the reader converges to at EOF. Internal entries (committed's
+		// config + coordination) are skipped here just as the reader skips them,
+		// so an idle syncable's lag reads 0 rather than a phantom backlog of
+		// trailing internal entries. Monotonic: entries apply in index order.
+		if len(userTopicEntities(p.Entities)) > 0 {
 			s.dataEventIndex.Store(entry.GetIndex())
 		}
 

@@ -92,6 +92,49 @@ func TestReaderSkipsSyncableIndexes(t *testing.T) {
 	}
 }
 
+// TestReaderMixedProposalFiltersPerEntity pins the read path's documented
+// promise — "skipping internal metadata entries" — at entity granularity. A
+// proposal that mixes a user entity with an internal syncable-index bump is not
+// emitted on any current path, but if one ever were, the reader must hand the
+// syncable ONLY the user entity: it can neither drop the user entity (were it
+// classified internal because Entities[0] is internal) nor leak the internal one
+// (were it classified user because Entities[0] is user). Both orderings prove the
+// filter is per-entity, not by Entities[0].
+func TestReaderMixedProposalFiltersPerEntity(t *testing.T) {
+	tests := map[string]struct{ internalFirst bool }{
+		"user-entity-first":     {internalFirst: false},
+		"internal-entity-first": {internalFirst: true},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			id := "s1"
+			s := NewStorage(t, nil)
+			defer s.Cleanup()
+
+			pc := newProposalCreatorForString(t, s)
+
+			userEntity := createProposal([]string{"foo"}).Entities[0]
+			internalEntity := createSyncableIndexProposal(t, id).Entities[0]
+
+			mixed := &cluster.Proposal{Entities: []*cluster.Entity{userEntity, internalEntity}}
+			if tt.internalFirst {
+				mixed.Entities = []*cluster.Entity{internalEntity, userEntity}
+			}
+			pc.saveProposals(t, []*cluster.Proposal{mixed})
+
+			r := s.Reader(id)
+			got, err := r.Read()
+			require.NoError(t, err)
+			require.Equal(t, []*cluster.Entity{userEntity}, got.Entities,
+				"the reader must surface only the user entity, filtering the internal one per-entity")
+
+			_, err = r.Read()
+			require.Equal(t, io.EOF, err, "the mixed proposal is the only user data; the reader is at EOF after it")
+		})
+	}
+}
+
 func TestEOF(t *testing.T) {
 	tests := map[string]struct {
 		inputs [][]string

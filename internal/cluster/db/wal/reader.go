@@ -103,21 +103,58 @@ func (r *Reader) Read() (*cluster.Actual, error) {
 			return nil, err
 		}
 
-		// Internal proposals — committed's own config (type / database /
+		// Internal metadata entities — committed's own config (type / database /
 		// syncable / ingestable) and coordination (syncable index +
 		// dead-letters + stuck/skip, ingestable position, scrub, etc.) —
 		// are not topic data and must NOT be projected into a syncable: a
 		// syncable would otherwise re-Sync its own dead letters, and
 		// committed's control plane would leak out of band into every
-		// downstream sink. Skip them so a syncable sees only user-defined
-		// topic data (ingested data included — it rides under user topic
-		// types). Keep scanning.
-		if len(p.Entities) > 0 {
-			if !cluster.IsInternal(p.Entities[0].Type.ID) {
-				return &cluster.Actual{Index: ent.GetIndex(), Entities: p.Entities}, nil
-			}
+		// downstream sink. Skip them per-entity so a syncable sees only
+		// user-defined topic data (ingested data included — it rides under user
+		// topic types). This is the "skipping internal metadata entries" the
+		// read path documents; filtering per-entity (not by Entities[0]) makes
+		// that literally true regardless of proposal composition. Keep scanning.
+		if userEntities := userTopicEntities(p.Entities); len(userEntities) > 0 {
+			return &cluster.Actual{Index: ent.GetIndex(), Entities: userEntities}, nil
 		}
 	}
+}
+
+// userTopicEntities returns the user-topic entities of a committed proposal,
+// dropping committed's internal config/coordination entities (syncable-index
+// bumps, ingestable positions, dead-letters, scrub tombstones, …). It is the
+// per-entity form of the read path's promise to skip internal metadata entries,
+// so a syncable is handed only user topic data.
+//
+// It returns the input slice unchanged when every entity is a user entity — the
+// overwhelmingly common case, since every production proposer emits a homogeneous
+// proposal, so the hot path allocates nothing — and nil when every entity is
+// internal (the whole proposal is skipped). Only a mixed proposal, which no
+// current path emits, allocates a filtered slice; deciding per-entity means such
+// a proposal can neither drop a trailing user entity nor leak a trailing internal
+// one, rather than being classified wholesale by Entities[0].
+func userTopicEntities(entities []*cluster.Entity) []*cluster.Entity {
+	allUser, anyUser := true, false
+	for _, e := range entities {
+		if cluster.IsInternal(e.Type.ID) {
+			allUser = false
+		} else {
+			anyUser = true
+		}
+	}
+	if allUser {
+		return entities // homogeneous user proposal (or empty) — no allocation
+	}
+	if !anyUser {
+		return nil // homogeneous internal proposal — skip it whole
+	}
+	filtered := make([]*cluster.Entity, 0, len(entities))
+	for _, e := range entities {
+		if !cluster.IsInternal(e.Type.ID) {
+			filtered = append(filtered, e)
+		}
+	}
+	return filtered
 }
 
 // resolveStartSeqLocked binary-searches the event log for the first wal seq
