@@ -50,7 +50,7 @@ const truncateDivergenceMsg = "TRUNCATE on a watched table is not propagated to 
 // non-TRUNCATE DDL fall through to the generic DDL warn, so the signal doesn't cry
 // wolf.
 func TestHandleDDL_WatchedTruncateEmitsDivergenceWarn(t *testing.T) {
-	h := &MySQLEventHandler{schema: "appdb", tables: lowerAll([]string{"Users"})}
+	h := &MySQLEventHandler{tableRefs: resolveTableRefs([]string{"Users"}, "appdb")}
 
 	t.Run("watched truncate → divergence warn naming the table", func(t *testing.T) {
 		core, observed := observer.New(zap.WarnLevel)

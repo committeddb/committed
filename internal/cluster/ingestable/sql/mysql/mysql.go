@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -59,17 +58,6 @@ const (
 // row's identifying key, so only then must the table's PRIMARY KEY cover
 // primaryKey.
 func (m *MySQLDialect) Preflight(config *sql.Config) error {
-	// Refuse a schema-qualified `tables` entry before touching the database:
-	// MySQL ingest is DSN-scoped and addresses tables by bare name everywhere —
-	// the binlog watch filter (watches), the snapshot SELECTs, and the
-	// spatial/VECTOR column check are all `table` within DATABASE(), never
-	// `schema.table`. A qualified entry silently bypasses all three, most
-	// dangerously the spatial/VECTOR reject (it matches no information_schema row,
-	// so the corrupting column slips through), so fail loudly here.
-	if err := checkTablesAreBareNames(config.Tables); err != nil {
-		return err
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -158,24 +146,6 @@ var unsupportedColumnTypes = map[string]bool{
 	"vector":             true,
 }
 
-// checkTablesAreBareNames rejects a schema-qualified `tables` entry (one
-// containing "."). MySQL ingest addresses tables by bare name within the
-// connection's database throughout — the binlog watch filter (watches), the
-// snapshot SELECTs, and checkUnsupportedColumnTypes all scope to DATABASE() and
-// match a bare name — so a `schema.table` entry is not a supported config and
-// would silently bypass all three. Refusing it is more honest than half-handling
-// it (the spatial/VECTOR reject in particular would be silently skipped).
-func checkTablesAreBareNames(tables []string) error {
-	for _, table := range tables {
-		if strings.Contains(table, ".") {
-			return fmt.Errorf(
-				"table %q is schema-qualified, but committed's MySQL ingest addresses tables by bare name within the connection's database; list just the table name and point the connection string at its schema",
-				table)
-		}
-	}
-	return nil
-}
-
 // checkUnsupportedColumnTypes fails loudly if a mapped or primary-key column is a
 // spatial or VECTOR type (see unsupportedColumnTypes). Only mapped/PK columns are
 // checked: an unmapped spatial column is read but never rendered into a payload
@@ -208,11 +178,12 @@ func checkUnsupportedColumnTypes(ctx context.Context, db *gosql.DB, config *sql.
 // unsupportedMappedColumns returns the "name (data_type)" of each column in table
 // that is both used (mapped or PK) and an unsupported spatial/VECTOR type.
 func unsupportedMappedColumns(ctx context.Context, db *gosql.DB, table string, used map[string]bool) ([]string, error) {
+	schema, name := splitQualifiedTable(table)
 	rows, err := db.QueryContext(ctx, `
 		SELECT column_name, data_type
 		FROM information_schema.columns
-		WHERE table_schema = DATABASE()
-		  AND table_name = ?`, table)
+		WHERE table_schema = COALESCE(NULLIF(?, ''), DATABASE())
+		  AND table_name = ?`, schema, name)
 	if err != nil {
 		return nil, fmt.Errorf("read column types of %q: %w", table, err)
 	}
@@ -444,12 +415,13 @@ func (m *MySQLDialect) SourceColumns(config *sql.Config) (map[string][]string, e
 // mysqlTableColumns returns a table's columns in ordinal order, from the
 // connection's current database.
 func mysqlTableColumns(ctx context.Context, db *gosql.DB, table string) ([]string, error) {
+	schema, name := splitQualifiedTable(table)
 	rows, err := db.QueryContext(ctx, `
 		SELECT column_name
 		FROM information_schema.columns
-		WHERE table_schema = DATABASE()
+		WHERE table_schema = COALESCE(NULLIF(?, ''), DATABASE())
 		  AND table_name = ?
-		ORDER BY ordinal_position`, table)
+		ORDER BY ordinal_position`, schema, name)
 	if err != nil {
 		return nil, fmt.Errorf("read columns of %q: %w", table, err)
 	}
@@ -668,17 +640,14 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			positionChan: po,
 			epoch:        currentEpoch,
 			charsetPlans: charsetPlans,
-			// Lowercase the filter list so the binlog row filter (which lowercases
-			// the incoming table name) matches regardless of the config's case;
-			// without this a `tables = ["Users"]` config drops every streamed row.
-			// config.Tables itself stays as written — the snapshot SELECTs use it
-			// verbatim and MySQL table-name case-sensitivity is a server setting we
-			// must not override.
-			tables: lowerAll(config.Tables),
-			// Scope the server-wide binlog to the configured database so a
-			// same-named table in another database can't contaminate the topic
-			// (see watches). Lowercased to match the case-insensitive filter.
-			schema: strings.ToLower(dsnDatabase(config.ConnectionString)),
+			// Resolve each `tables` entry to a (schema, table) the binlog row filter
+			// matches against: a bare entry is scoped to the DSN database (so a
+			// same-named table in another database can't contaminate the topic — the
+			// binlog is server-wide), a schema-qualified entry keeps its own schema.
+			// Lowercased for the case-insensitive match; config.Tables itself stays as
+			// written for the snapshot SELECTs, since MySQL table-name case-sensitivity
+			// is a server setting we must not override.
+			tableRefs: resolveTableRefs(config.Tables, strings.ToLower(dsnDatabase(config.ConnectionString))),
 			// Seed the live coordinate from the resume position so a
 			// mid-transaction flush before the first commit still stamps
 			// a sane SourceSeq. lastPos is non-nil here (resume or
@@ -762,7 +731,13 @@ type MySQLEventHandler struct {
 	config       *sql.Config
 	proposalChan chan<- *cluster.Proposal
 	positionChan chan<- cluster.Position
-	tables       []string
+
+	// tableRefs are the resolved source tables (schema + table, lowercased) the
+	// binlog row filter matches against — see watches / resolveTableRefs. MySQL's
+	// binlog is server-wide, so each ref's schema scopes the match to the right
+	// database (the DSN's default for a bare `tables` entry, or a schema-qualified
+	// entry's own), keeping a same-named table in another database out of the topic.
+	tableRefs []tableRef
 
 	// charsetPlans is the source's collation catalog (collation id -> UTF-8
 	// transcoding plan), read once at stream start. handleRows hands it to
@@ -777,14 +752,6 @@ type MySQLEventHandler struct {
 	// reconnect and a keyed sink can sweep by it. Seeded from the resume
 	// position (or the just-completed snapshot's epoch) by the Ingest loop.
 	epoch uint64
-
-	// schema is the configured (DSN) database, lowercased. MySQL's binlog is
-	// server-wide, so the row filter scopes to this database to keep a
-	// same-named table in another database (otherdb.users) out of the topic —
-	// see watches. Empty when the connection string names no database (an
-	// unusual config the DSN-scoped snapshot itself can't handle), in which
-	// case the filter falls back to a table-name-only match.
-	schema string
 
 	// lastPos holds the most recently committed binlog position so the outer
 	// reconnect loop can resume from where it left off.
@@ -946,37 +913,65 @@ func asInt64(v any) (int64, bool) {
 // image, the operation (rowsAction), and the table name come straight from the
 // raw replication.RowsEvent, and the column metadata from committed's own schema
 // cache (joined to the positional row image by ordinal).
-// lowerAll returns a lowercased copy of ss, used to normalize the watched-table
-// filter list so binlog table-name matching is case-insensitive.
-func lowerAll(ss []string) []string {
-	out := make([]string, len(ss))
-	for i, s := range ss {
-		out[i] = strings.ToLower(s)
-	}
-	return out
+// tableRef is a resolved source table: its database schema and table name, both
+// lowercased for case-insensitive binlog matching. A bare `tables` entry resolves
+// its schema to the connection's database; a schema-qualified entry
+// ("schema.table") carries its own. schema == "" means the connection named no
+// database and the entry was bare — matched on table name alone (any schema).
+type tableRef struct {
+	schema string
+	table  string
 }
 
-// watches reports whether a binlog row event for schema.table should be
-// ingested. Two independent conditions must both hold:
-//
-//   - Database scope. MySQL's binlog is server-wide — it carries events for
-//     every database on the server — so a bare table-name match would ingest
-//     otherdb.users into a topic configured for the DSN's database (silent
-//     cross-database/tenant contamination, and it disagrees with the
-//     DSN-scoped initial snapshot). The event's schema must equal the
-//     handler's configured database. h.schema == "" means the connection
-//     string named no database (an unusual config the snapshot can't scope
-//     either); there we can't qualify, so we fall back to the table match
-//     alone rather than drop every row.
-//   - Table match, case-insensitively. h.tables is lowercased at construction
-//     and the binlog reports the table's stored case; without the
-//     case-insensitive match a mixed-case `tables` config (e.g. ["Users"])
-//     would drop every streamed row. Database case is handled the same way.
-func (h *MySQLEventHandler) watches(schema, table string) bool {
-	if h.schema != "" && strings.ToLower(schema) != h.schema {
-		return false
+// splitQualifiedTable splits a config `tables` entry into an optional schema
+// qualifier and the table name, preserving case for use in queries. A bare entry
+// returns an empty schema. It splits on the first dot; a table name legitimately
+// containing a dot is not supported (and never was — the same shape that made
+// schema qualification ambiguous).
+func splitQualifiedTable(entry string) (schema, table string) {
+	if s, t, ok := strings.Cut(entry, "."); ok {
+		return s, t
 	}
-	return slices.Contains(h.tables, strings.ToLower(table))
+	return "", entry
+}
+
+// resolveTableRefs resolves each config `tables` entry to a lowercased tableRef
+// for the binlog row filter (watches). A bare entry takes dbSchema (the
+// connection's database, already lowercased) as its schema; a schema-qualified
+// entry keeps its own. When dbSchema is empty (the DSN named no database) a bare
+// entry's schema stays empty, matching any schema by table name alone.
+func resolveTableRefs(tables []string, dbSchema string) []tableRef {
+	refs := make([]tableRef, 0, len(tables))
+	for _, entry := range tables {
+		schema, table := splitQualifiedTable(entry)
+		if schema == "" {
+			schema = dbSchema
+		}
+		refs = append(refs, tableRef{schema: strings.ToLower(schema), table: strings.ToLower(table)})
+	}
+	return refs
+}
+
+// watches reports whether a binlog row event for schema.table should be ingested:
+// the event must match one of the resolved tableRefs by table name (case-
+// insensitively) AND by schema — either the ref's own schema (a schema-qualified
+// `tables` entry, or a bare entry scoped to the connection's database) or, when the
+// ref carries no schema (a bare entry with a DSN that named no database), any
+// schema.
+//
+// The schema scope matters because MySQL's binlog is server-wide — it carries
+// events for every database on the server — so without it a bare table-name match
+// would ingest otherdb.users into a topic configured for appdb.users (silent
+// cross-database/tenant contamination). A schema-qualified entry, conversely, lets
+// one ingestable read a table outside the DSN's default database.
+func (h *MySQLEventHandler) watches(schema, table string) bool {
+	s, t := strings.ToLower(schema), strings.ToLower(table)
+	for _, ref := range h.tableRefs {
+		if ref.table == t && (ref.schema == "" || ref.schema == s) {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *MySQLEventHandler) handleRows(ctx context.Context, header *replication.EventHeader, e *replication.RowsEvent) error {
@@ -1861,12 +1856,12 @@ func readBatch(
 		}
 		fromWhere = fmt.Sprintf(
 			"FROM %s WHERE (%s) > (%s) ORDER BY %s LIMIT %d",
-			sqlident.MySQL.Ident(table), strings.Join(cols, ", "), strings.Join(placeholders, ", "), orderBy, batchSize,
+			sqlident.MySQL.Table(table), strings.Join(cols, ", "), strings.Join(placeholders, ", "), orderBy, batchSize,
 		)
 	} else {
 		fromWhere = fmt.Sprintf(
 			"FROM %s ORDER BY %s LIMIT %d",
-			sqlident.MySQL.Ident(table), orderBy, batchSize,
+			sqlident.MySQL.Table(table), orderBy, batchSize,
 		)
 	}
 

@@ -530,6 +530,11 @@ there is no `[sql.mysql]` subsection — MySQL has nothing analogous to a slot o
 publication to name. (`mapAllColumns = true` works here too, in place of the
 explicit `[[sql.mappings]]` blocks.)
 
+A `tables` entry may be **schema-qualified** (`["otherdb.widget"]`) to read a table
+outside the connection string's default database, exactly as on PostgreSQL; a bare
+entry (`["widget"]`) resolves to the connection's database. The connection user
+needs the usual read + `REPLICATION` grants on the qualified schema.
+
 A complete worked MySQL setup — source DDL, the grant, an ingestable, and a
 syncable projecting back into a MySQL sink table — is exercised end-to-end by the
 `e2e/cdc` MySQL tests (`e2e/cdc/harness/mysql.go`, `e2e/cdc/mysql_test.go`); the
