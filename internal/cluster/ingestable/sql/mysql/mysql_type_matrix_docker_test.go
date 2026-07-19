@@ -47,6 +47,13 @@ func TestMysqlSnapshotStreamTypeMatrix(t *testing.T) {
 	rows := []typeMatrixRow{
 		{"c_int", "INT", "2147483647", `2147483647`},
 		{"c_bigint", "BIGINT", "9223372036854775807", `9223372036854775807`},
+		// UNSIGNED integers ride on binlog_row_metadata=FULL (SignednessBitmap) for
+		// the CDC decode; the snapshot reads the driver's unsigned value. BIGINT
+		// UNSIGNED past 2^63 is the case that decodes as -1 if signedness is ever
+		// lost — pin it (and the common auto-increment PK types) here.
+		{"c_bigint_u", "BIGINT UNSIGNED", "18446744073709551615", `18446744073709551615`},
+		{"c_int_u", "INT UNSIGNED", "4294967295", `4294967295`},
+		{"c_tinyint_u", "TINYINT UNSIGNED", "200", `200`},
 		{"c_decimal", "DECIMAL(30,4)", "'123456789012345678.9012'", `123456789012345678.9012`},
 		{"c_double", "DOUBLE", "3.5", `3.5`},
 		{"c_bit", "BIT(8)", "b'10101010'", `170`},
