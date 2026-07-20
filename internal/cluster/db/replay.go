@@ -44,7 +44,7 @@ func (db *DB) ReplaySyncableDeadLetter(ctx context.Context, id string, index uin
 	}
 	defer func() { _ = syncable.Close() }()
 
-	if _, syncErr := syncable.Sync(ctx, a); syncErr != nil {
+	if _, syncErr := db.callSync(ctx, id, syncable, a); syncErr != nil {
 		// Keep the full detail node-local (it may echo entity PII via a driver
 		// error), and chain syncErr with %w — not %v — so the HTTP layer can reach
 		// a cluster.RedactedError in the chain and surface only its classifier.

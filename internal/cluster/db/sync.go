@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"time"
 
@@ -10,6 +11,60 @@ import (
 
 	"github.com/committeddb/committed/internal/cluster"
 )
+
+// callSync invokes the syncable implementation's Sync across the
+// framework→implementation trust boundary, converting a panic into a TRANSIENT
+// sync error instead of letting it unwind the process. A Sync panic originates
+// in the implementation zone — a syncable's renderers, the migration wrapper,
+// a driver — processing per-entry data: the same class the ingest side already
+// converts at its boundary ("external input across the CDC trust boundary must
+// never crash the node", see decodeLogicalMessage). Unrecovered, the panic
+// killed the node and RestoreSyncableWorkers resumed into the SAME entry on
+// restart — a deterministic panic became a whole-node crash-loop.
+//
+// As a transient error it instead enters the machinery that already exists for
+// exactly this shape: retry, the stuck tracker's replicated + alertable signal,
+// and the operator's manual dead-letter skip + replay. No new operational
+// state, no new escape hatch. Transient — never permanent — because a panic is
+// an unknown, and auto-dead-lettering would skip data on a guess (the
+// stall-visibly posture stuck-syncables.md documents).
+//
+// PII: the returned error carries only the panic's TYPE — sync errors reach
+// replicated stuck records, and a panic value can embed row data. The full
+// value + stack go to the node-local log only.
+//
+// The worker FRAMEWORK outside this call deliberately stays fail-fast: a panic
+// in committed's own reader/checkpoint logic is a core bug, the same posture
+// as the apply path.
+func (db *DB) callSync(ctx context.Context, id string, s cluster.Syncable, a *cluster.Actual) (snap cluster.ShouldSnapshot, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			db.logger.Error("panic in syncable implementation; converted to a transient sync error (the worker retries; the stuck/skip flow applies)",
+				zap.String("id", id), zap.Uint64("index", a.Index), zap.Any("panic", r), zap.Stack("stack"))
+			snap = false
+			err = fmt.Errorf("panic in syncable implementation (%T) at index %d; see the owning node's log for the value and stack", r, a.Index)
+		}
+	}()
+	return s.Sync(ctx, a)
+}
+
+// callSyncBatch is callSync's batch twin — same boundary, same conversion. A
+// batch-wide transient error retries the whole batch (and the stuck flow
+// applies); if the operator skips, the batch fallback isolates per entry
+// through callSync.
+func (db *DB) callSyncBatch(ctx context.Context, id string, bs cluster.BatchSyncable, batch []*cluster.Actual) (snap bool, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			first, last := batch[0].Index, batch[len(batch)-1].Index
+			db.logger.Error("panic in syncable implementation (batch); converted to a transient sync error (the worker retries; the stuck/skip flow applies)",
+				zap.String("id", id), zap.Uint64("firstIndex", first), zap.Uint64("lastIndex", last),
+				zap.Any("panic", r), zap.Stack("stack"))
+			snap = false
+			err = fmt.Errorf("panic in syncable implementation (%T) in batch [%d..%d]; see the owning node's log for the value and stack", r, first, last)
+		}
+	}()
+	return bs.SyncBatch(ctx, batch)
+}
 
 // This file holds the sync worker core: registration (Sync), the
 // single-vs-batch dispatch (sync), the two worker state machines
@@ -410,7 +465,7 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 				// it via upsert; non-idempotent sinks are the operator's
 				// responsibility — see cluster.Syncable).
 				syncStart := time.Now()
-				shouldSnapshot, syncErr := s.Sync(ctx, a)
+				shouldSnapshot, syncErr := db.callSync(ctx, id, s, a)
 				if db.metrics != nil {
 					db.metrics.SyncCompleted(id, time.Since(syncStart))
 				}
@@ -547,7 +602,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 		}
 
 		syncStart := time.Now()
-		shouldSnapshot, syncErr := bs.SyncBatch(ctx, batch)
+		shouldSnapshot, syncErr := db.callSyncBatch(ctx, id, bs, batch)
 		if db.metrics != nil {
 			db.metrics.SyncCompleted(id, time.Since(syncStart))
 		}
@@ -740,7 +795,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 func (db *DB) syncBatchFallback(ctx context.Context, id string, s cluster.Syncable, entries []*cluster.Actual, transientSkipKind string) bool {
 	for _, e := range entries {
 		syncStart := time.Now()
-		shouldSnapshot, syncErr := s.Sync(ctx, e)
+		shouldSnapshot, syncErr := db.callSync(ctx, id, s, e)
 		if db.metrics != nil {
 			db.metrics.SyncCompleted(id, time.Since(syncStart))
 		}
