@@ -376,7 +376,13 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 				if tracker.skipRequested(ctx, i) {
 					db.logger.Warn("operator dead-letter: skipping wedged proposal",
 						zap.String("id", id), zap.Uint64("index", i), zap.Error(retryErr))
-					db.recordSyncDeadLetter(ctx, id, i, "manual", retryErr)
+					if !db.recordSyncDeadLetter(ctx, id, i, "manual", retryErr) {
+						// Record orphaned (leader flap / ctx). Stay wedged —
+						// the skip request is still pending (honored() not
+						// called), so the next iteration re-records. Never
+						// advance past a skip with no durable record.
+						break
+					}
 					retryActual = nil
 					retryErr = nil
 					lastSeen = i // decided (dead-lettered); part of the consumed head
@@ -477,7 +483,16 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 						}
 						db.logger.Error("permanent sync error, skipping proposal",
 							zap.String("id", id), zap.Uint64("index", i), zap.Error(syncErr))
-						db.recordSyncPermanentError(ctx, id, i, syncErr)
+						if !db.recordSyncPermanentError(ctx, id, i, syncErr) {
+							// Record orphaned. Hold position (lastSeen must not
+							// reach i) and re-run decide+record next iteration —
+							// re-invoking Sync is safe under the contract's
+							// replay-idempotency requirement, and a permanent
+							// error is deterministic by declaration.
+							retryActual = a
+							retryErr = syncErr
+							break
+						}
 						retryActual = nil
 						retryErr = nil
 						tracker.cleared(ctx)
@@ -807,7 +822,13 @@ func (db *DB) syncBatchFallback(ctx context.Context, id string, s cluster.Syncab
 				}
 				db.logger.Error("permanent sync error, skipping proposal",
 					zap.String("id", id), zap.Uint64("index", e.Index), zap.Error(syncErr))
-				db.recordSyncPermanentError(ctx, id, e.Index, syncErr)
+				if !db.recordSyncPermanentError(ctx, id, e.Index, syncErr) {
+					// Record orphaned — same posture as the bump failure below:
+					// stop the fallback and leave the batch for the caller to
+					// retry rather than advancing past an unrecorded skip
+					// (replay-idempotency covers the re-pushed prefix).
+					return false
+				}
 				continue
 			}
 			if transientSkipKind != "" {
@@ -815,7 +836,9 @@ func (db *DB) syncBatchFallback(ctx context.Context, id string, s cluster.Syncab
 				// proposal rather than re-blocking on it.
 				db.logger.Warn("operator dead-letter: skipping proposal that still fails in isolation",
 					zap.String("id", id), zap.Uint64("index", e.Index), zap.Error(syncErr))
-				db.recordSyncDeadLetter(ctx, id, e.Index, transientSkipKind, syncErr)
+				if !db.recordSyncDeadLetter(ctx, id, e.Index, transientSkipKind, syncErr) {
+					return false // stop; retry re-records (see the permanent twin above)
+				}
 				continue
 			}
 			// Transient error in fallback — stop here. The caller

@@ -206,6 +206,11 @@ type DB struct {
 	isLeaderFn               func() bool
 	shutdownTransferTimeout  time.Duration
 
+	// deadLetterProposeHookForTest is a test-only failure-injection seam: when
+	// set, proposeSyncableDeadLetter consults it first and a non-nil error
+	// stands in for an orphaned propose (leader flap). nil in production.
+	deadLetterProposeHookForTest func(*cluster.SyncableDeadLetter) error
+
 	// afterRebuildCheckpointReset is a test-only seam invoked by RebuildSyncable
 	// immediately after the checkpoint-reset proposal applies (nil in
 	// production, so zero overhead). It lets a test deterministically inject the

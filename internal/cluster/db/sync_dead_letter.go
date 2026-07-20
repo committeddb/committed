@@ -39,7 +39,16 @@ func safeDeadLetterMessage(syncErr error) (string, bool) {
 	return cluster.RedactedMessage(syncErr)
 }
 
-func (db *DB) recordSyncDeadLetter(ctx context.Context, id string, index uint64, kind string, syncErr error) {
+// recordSyncDeadLetter durably records that the syncable skipped index, and
+// reports whether the record LANDED. The return value is load-bearing: the
+// worker's consumed head may only advance past a skipped entry once its
+// dead-letter is durable — the EOF checkpoint advance and the restart-time
+// HasSyncableDeadLetter re-exclusion both assume every skipped entry has a
+// record. A false (the propose was orphaned by a leader flap, or ctx ended)
+// means the caller must HOLD POSITION and re-run the decide+record on its next
+// iteration, exactly like an orphaned checkpoint bump; advancing anyway would
+// leave a skip with no durable record and no replayability.
+func (db *DB) recordSyncDeadLetter(ctx context.Context, id string, index uint64, kind string, syncErr error) bool {
 	if db.metrics != nil {
 		db.metrics.SyncError(id, kind)
 	}
@@ -59,25 +68,28 @@ func (db *DB) recordSyncDeadLetter(ctx context.Context, id string, index uint64,
 		Message:           truncateDeadLetterMessage(msg),
 	}
 	if err := db.proposeSyncableDeadLetter(ctx, dl); err != nil {
-		db.logger.Warn("dead-letter record not persisted (best-effort; proposal still skipped)",
+		db.logger.Error("dead-letter record not persisted; the worker holds position and will re-record rather than advance past an unrecorded skip",
 			zap.String("id", id), zap.Uint64("index", index), zap.String("kind", kind), zap.Error(err))
+		return false
 	}
 
 	// A failure inside the type-migration chain is attributed to the type as
 	// well: the syncable record above says "syncable S skipped index N", the
 	// type-keyed twin says which type's migration program broke it, so an
-	// operator can enumerate (and retry) failures per type. See
-	// type_migration_dead_letter.go.
+	// operator can enumerate (and retry) failures per type. Best-effort — the
+	// syncable-keyed record above is the durable source of truth for the skip.
+	// See type_migration_dead_letter.go.
 	if merr, ok := errors.AsType[*migration.Error](syncErr); ok {
 		db.recordTypeMigrationDeadLetter(ctx, index, merr)
 	}
+	return true
 }
 
 // recordSyncPermanentError dead-letters a proposal that Sync rejected with a
-// permanent error. Thin wrapper over recordSyncDeadLetter for the
-// "permanent" kind.
-func (db *DB) recordSyncPermanentError(ctx context.Context, id string, index uint64, syncErr error) {
-	db.recordSyncDeadLetter(ctx, id, index, "permanent", syncErr)
+// permanent error, reporting whether the record landed (see
+// recordSyncDeadLetter). Thin wrapper for the "permanent" kind.
+func (db *DB) recordSyncPermanentError(ctx context.Context, id string, index uint64, syncErr error) bool {
+	return db.recordSyncDeadLetter(ctx, id, index, "permanent", syncErr)
 }
 
 // recordSyncTransientError emits the transient-error metric. Each
@@ -102,14 +114,17 @@ const maxDeadLetterMessageBytes = 1024
 // node and queryable from any of them — not stranded on whichever node
 // was leader at failure time.
 //
-// Unlike proposeSyncableIndex, a failure here does NOT change control
-// flow: a permanent error skips the proposal regardless, and the dead
-// letter is best-effort observability layered on top (the metric counter
-// and the structured ERROR log already fired). A ctx cancellation
-// (replace/Close) or ErrProposalUnknown (leader change) just means this
-// one record didn't land; the caller logs and moves on rather than
-// freezing the worker. ctx is the sync worker's context.
+// A failure here DOES change control flow (see recordSyncDeadLetter): the
+// consumed head must never advance past a skip whose record is not durable, so
+// an orphaned propose (ErrProposalUnknown after a leader flap, ctx ended) makes
+// the worker hold position and re-run the decide+record — exactly the posture
+// an orphaned checkpoint bump already takes. ctx is the sync worker's context.
 func (db *DB) proposeSyncableDeadLetter(ctx context.Context, d *cluster.SyncableDeadLetter) error {
+	if db.deadLetterProposeHookForTest != nil {
+		if err := db.deadLetterProposeHookForTest(d); err != nil {
+			return err
+		}
+	}
 	entity, err := cluster.NewUpsertSyncableDeadLetterEntity(d)
 	if err != nil {
 		return err

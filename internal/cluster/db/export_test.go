@@ -61,6 +61,13 @@ func (db *DB) InjectWedgedSyncWorkerForTest(id string) {
 // DeleteSyncForTest drives the apply-path syncable teardown directly.
 func (db *DB) DeleteSyncForTest(id string) { db.deleteSync(id) }
 
+// SetDeadLetterProposeHookForTest installs the dead-letter propose
+// failure-injection seam: a non-nil error from the hook stands in for an
+// orphaned propose (leader flap) without touching raft.
+func (db *DB) SetDeadLetterProposeHookForTest(h func(*cluster.SyncableDeadLetter) error) {
+	db.deadLetterProposeHookForTest = h
+}
+
 // SetAfterRebuildCheckpointResetForTest installs the rebuild reset seam
 // directly, so a test can assert the checkpoint reset did (or did not) run.
 func (db *DB) SetAfterRebuildCheckpointResetForTest(f func()) { db.afterRebuildCheckpointReset = f }
