@@ -108,8 +108,9 @@ const sourceChangeCode = "ingestable_source_change_requires_recreate"
 // Deliberately NOT flagged: a credential-only connectionString change (same host
 // + database — a routine password rotation); a slot_name change (a recreated
 // Postgres slot self-heals via the re-snapshot branch — the orphaned slot is a
-// resource concern, not data loss); and a tables add/remove (the in-place
-// reconcile owned by the publication / added-table backfill tickets).
+// resource concern, not data loss); and a tables ADD (additive — the
+// publication / added-table backfill reconciles it in place). A tables REMOVAL
+// is flagged separately — see TableRemovalError.
 //
 // It implements cluster.RebuildRequiredError so the HTTP layer renders it (409 +
 // code + details) without importing this package. It carries NO connection
@@ -131,6 +132,69 @@ func (e *SourceIdentityChangeError) Code() string { return sourceChangeCode }
 
 // Details implements cluster.RebuildRequiredError.
 func (e *SourceIdentityChangeError) Details() any { return e }
+
+// tableRemovalCode is the machine-readable code a deploy pipeline branches on
+// to drive the delete + recreate recovery for an in-place table removal.
+const tableRemovalCode = "ingestable_table_removal_requires_recreate"
+
+// TableRemovalError reports that a re-POST removes tables from an ingestable's
+// set while a prior config exists. The table set is part of the ingestable's
+// SOURCE IDENTITY (the same class as topic/connectionString/primaryKey): a
+// multi-table ingestable unions its tables into one topic's entity space, and a
+// keyed sink's reconciling-refresh sweep deletes any row a full refresh did not
+// re-stamp. A refresh enumerates only the currently-configured tables, so an
+// in-place removal ARMS a delayed sweep of the removed tables' sink rows at
+// the next refresh event (slot recreate, binlog purge, delete+recreate) —
+// destruction causally disconnected from the config edit — while a syncable
+// replay from the log would resurrect the very same rows. In-place removal
+// therefore has no coherent semantics and is rejected; a tables ADD stays
+// allowed (additive; Postgres backfills it).
+//
+// To drop a table AND its sink rows, delete + recreate the ingestable: the
+// recreate's initial snapshot + closing marker sweeps the removed tables' rows
+// as the documented, explicit, immediate semantics of that operation. To keep
+// the rows, keep the table listed.
+//
+// Implements cluster.RebuildRequiredError so the HTTP layer renders it (409 +
+// code + details) without importing this package.
+type TableRemovalError struct {
+	TopicID       string   `json:"topic"`
+	TopicName     string   `json:"topicName,omitempty"`
+	RemovedTables []string `json:"removedTables"`
+}
+
+func (e *TableRemovalError) Error() string {
+	return fmt.Sprintf(
+		"ingestable table removal (%s) will not be applied in place: a later full refresh would silently sweep the removed tables' rows from keyed sinks (a refresh re-stamps only configured tables, and the closing marker deletes everything it did not re-stamp), while a syncable replay would resurrect them. To drop the tables AND their sink rows, delete and recreate this ingestable (DELETE then POST /v1/ingestable/{id}); to keep the rows, keep the tables listed.",
+		strings.Join(e.RemovedTables, ", "))
+}
+
+// Code implements cluster.RebuildRequiredError.
+func (e *TableRemovalError) Code() string { return tableRemovalCode }
+
+// Details implements cluster.RebuildRequiredError.
+func (e *TableRemovalError) Details() any { return e }
+
+// removedTables returns the entries of old absent from new, compared
+// case-insensitively (the binlog/watch filters match tables case-insensitively,
+// so a pure case edit addresses the same table and removes nothing). Order
+// changes and additions yield nothing.
+func removedTables(old, new []string) []string {
+	var removed []string
+	for _, o := range old {
+		found := false
+		for _, n := range new {
+			if strings.EqualFold(o, n) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			removed = append(removed, o)
+		}
+	}
+	return removed
+}
 
 // serverIdentityChanged reports whether two connection strings name a different
 // database SERVER — host, port, or database name — the part that makes a

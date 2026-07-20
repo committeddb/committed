@@ -99,6 +99,16 @@ func (i *Ingestable) ValidateReplace(prior cluster.Ingestable) error {
 			ChangedFields: changed,
 		}
 	}
+	// The table set is identity too: removing a table in place arms a delayed
+	// sweep of its sink rows at the next full refresh (see TableRemovalError).
+	// Additions and reorders pass.
+	if removed := removedTables(p.config.Tables, i.config.Tables); len(removed) > 0 {
+		return &TableRemovalError{
+			TopicID:       i.topicID(),
+			TopicName:     i.topicName(),
+			RemovedTables: removed,
+		}
+	}
 	return nil
 }
 

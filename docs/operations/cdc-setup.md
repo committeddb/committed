@@ -132,6 +132,16 @@ Two consequences worth internalizing:
   re-snapshot appends a second copy of the surviving rows — but the sink is keyed,
   so re-upserting rows 1 and 3 overwrites them in place (`g1 → g2`), not adds them.
 
+> **Removing a table from a multi-table ingestable is rejected** (409,
+> `ingestable_table_removal_requires_recreate`). A refresh re-stamps only the
+> currently-configured tables, so an in-place removal would arm this sweep to
+> silently delete the removed table's rows from keyed sinks at the *next*
+> refresh event — possibly months after the config edit — while a syncable
+> replay from the log would resurrect them. To drop a table **and** its sink
+> rows, delete and recreate the ingestable (the recreate's snapshot + marker
+> sweeps them as the explicit, immediate semantics of that operation); to keep
+> the rows, keep the table listed. Adding a table remains allowed.
+
 The watermark only holds if each refresh's `G` is **strictly above every
 generation already on the sink**. committed keeps a delete-surviving, per-topic
 generation high-water mark for exactly this, so a delete-and-recreate on the same

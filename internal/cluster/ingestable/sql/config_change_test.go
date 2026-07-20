@@ -198,3 +198,46 @@ func TestPrimaryKeyChangeError_SetDependents(t *testing.T) {
 	require.Contains(t, err.Error(), "principals_sink (sync-a)")
 	require.Contains(t, err.Error(), "sync-b")
 }
+
+// ingestableTables builds an *Ingestable carrying a topic + table set — the
+// table-set-identity fields ValidateReplace compares.
+func ingestableTables(topicID string, tables ...string) *sql.Ingestable {
+	return sql.New(nil, &sql.Config{
+		Type:       &cluster.Type{ID: topicID, Name: topicID},
+		PrimaryKey: []string{"id"},
+		Tables:     tables,
+	})
+}
+
+// TestIngestable_ValidateReplace_TableRemovalRejected pins the table-set half
+// of source identity: an in-place removal arms a delayed sweep of the removed
+// table's sink rows at the next full refresh (while a replay would resurrect
+// them) — an undefined operation, so it is rejected with the recreate path.
+func TestIngestable_ValidateReplace_TableRemovalRejected(t *testing.T) {
+	prior := ingestableTables("t1", "users", "orders")
+	next := ingestableTables("t1", "users")
+
+	err := next.ValidateReplace(prior)
+	require.Error(t, err)
+	var trErr *sql.TableRemovalError
+	require.ErrorAs(t, err, &trErr)
+	require.Equal(t, []string{"orders"}, trErr.RemovedTables)
+	require.Equal(t, "ingestable_table_removal_requires_recreate", trErr.Code())
+	require.Contains(t, trErr.Error(), "orders")
+	require.Contains(t, trErr.Error(), "sweep")
+	require.NotContains(t, trErr.Error(), "%!", "no format mishaps")
+}
+
+// Additions are additive (Postgres backfills them) — not identity-breaking.
+func TestIngestable_ValidateReplace_TableAdditionAllowed(t *testing.T) {
+	prior := ingestableTables("t1", "users")
+	next := ingestableTables("t1", "users", "orders")
+	require.NoError(t, next.ValidateReplace(prior))
+}
+
+// Reorders and pure case edits address the same tables — nothing removed.
+func TestIngestable_ValidateReplace_TableReorderAndCaseAllowed(t *testing.T) {
+	prior := ingestableTables("t1", "users", "Orders")
+	next := ingestableTables("t1", "ORDERS", "users")
+	require.NoError(t, next.ValidateReplace(prior))
+}
