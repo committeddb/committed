@@ -12,7 +12,7 @@ import (
 )
 
 // preflightTOML builds a type config whose [migration] section carries the
-// given extra keys (transform, none, validate_against) verbatim.
+// given extra keys (transform, none, validateAgainst) verbatim.
 func preflightTOML(migrationSection string) *cluster.Configuration {
 	data := fmt.Sprintf("[type]\nname = \"Person\"\n\n[migration]\n%s\n", migrationSection)
 	return &cluster.Configuration{ID: "person", MimeType: "text/toml", Data: []byte(data)}
@@ -22,7 +22,7 @@ func preflightTOML(migrationSection string) *cluster.Configuration {
 // passes pre-flight and parses as usual.
 func TestParseType_ValidateAgainst_OK(t *testing.T) {
 	cfg := preflightTOML(
-		"transform = '. + {email: \"unknown@example.com\"}'\nvalidate_against = '{\"name\":\"alice\"}'")
+		"transform = '. + {email: \"unknown@example.com\"}'\nvalidateAgainst = '{\"name\":\"alice\"}'")
 
 	_, typ, err := db.ParseType(cfg, nil)
 	require.NoError(t, err)
@@ -35,31 +35,31 @@ func TestParseType_ValidateAgainst_OK(t *testing.T) {
 // catching exactly the class of error compile-time validation can't.
 func TestParseType_ValidateAgainst_RuntimeFailure(t *testing.T) {
 	cfg := preflightTOML(
-		"transform = 'error(\"cannot derive email for \" + .name)'\nvalidate_against = '{\"name\":\"alice\"}'")
+		"transform = 'error(\"cannot derive email for \" + .name)'\nvalidateAgainst = '{\"name\":\"alice\"}'")
 
 	_, _, err := db.ParseType(cfg, nil)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "validate_against")
+	require.Contains(t, err.Error(), "validateAgainst")
 	require.Contains(t, err.Error(), "cannot derive email for alice")
 }
 
 // TestParseType_ValidateAgainst_BadSampleJSON: a sample that isn't JSON is
 // itself a pre-flight failure (the program can't run against it).
 func TestParseType_ValidateAgainst_BadSampleJSON(t *testing.T) {
-	cfg := preflightTOML("transform = '.'\nvalidate_against = 'not json'")
+	cfg := preflightTOML("transform = '.'\nvalidateAgainst = 'not json'")
 
 	_, _, err := db.ParseType(cfg, nil)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "validate_against")
+	require.Contains(t, err.Error(), "validateAgainst")
 }
 
-// TestParseType_ValidateAgainst_RequiresTransform: validate_against with no
+// TestParseType_ValidateAgainst_RequiresTransform: validateAgainst with no
 // transform (none = true, or no [migration] keys at all) is a config error —
 // there is no program to validate.
 func TestParseType_ValidateAgainst_RequiresTransform(t *testing.T) {
 	for name, section := range map[string]string{
-		"with none = true": "none = true\nvalidate_against = '{}'",
-		"alone":            "validate_against = '{}'",
+		"with none = true": "none = true\nvalidateAgainst = '{}'",
+		"alone":            "validateAgainst = '{}'",
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, _, err := db.ParseType(preflightTOML(section), nil)
@@ -78,7 +78,7 @@ func TestProposeType_ValidateAgainstFailure_NothingProposed(t *testing.T) {
 
 	cfg := &cluster.Configuration{ID: "person", MimeType: "text/toml", Data: []byte(
 		"[type]\nname = \"Person\"\nschemaType = \"JSONSchema\"\nschema = '{\"type\":\"object\",\"required\":[\"email\"]}'\n\n" +
-			"[migration]\ntransform = 'error(\"boom\")'\nvalidate_against = '{\"name\":\"alice\"}'\n")}
+			"[migration]\ntransform = 'error(\"boom\")'\nvalidateAgainst = '{\"name\":\"alice\"}'\n")}
 
 	err := d.ProposeType(testCtx(t), cfg)
 	var cerr *cluster.ConfigError

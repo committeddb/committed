@@ -232,16 +232,16 @@ type SyncableStatusResponse struct {
 	// max(0, HeadIndex − CheckpointIndex) and CaughtUp is Lag == 0, which is
 	// true exactly when the worker has nothing left to process. See the
 	// consumed-head semantics in syncable-progress-lag.
-	CheckpointIndex uint64 `json:"checkpoint_index"`
-	HeadIndex       uint64 `json:"head_index"`
+	CheckpointIndex uint64 `json:"checkpointIndex"`
+	HeadIndex       uint64 `json:"headIndex"`
 	Lag             uint64 `json:"lag"`
-	CaughtUp        bool   `json:"caught_up"`
+	CaughtUp        bool   `json:"caughtUp"`
 }
 
 // GetSyncableStatus reports a syncable worker's operational status
 // (GET /syncable/{id}/status): whether it is blocked retrying a transient
-// error, and its numeric progress — checkpoint_index / head_index / lag /
-// caught_up. Backed by replicated + local apply state read behind the same
+// error, and its numeric progress — checkpointIndex / headIndex / lag /
+// caughtUp. Backed by replicated + local apply state read behind the same
 // linearize barrier, so any node answers identically and without a leader
 // hop — this is how an operator (or a dashboard) discovers a wedged syncable
 // behind a load balancer (and the index to expect when they POST

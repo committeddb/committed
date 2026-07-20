@@ -85,6 +85,22 @@ func writeConfigurations(w http.ResponseWriter, cfgs []*cluster.Configuration) {
 	writeArrayBody(w, rs)
 }
 
+// writeConfiguration writes ONE configuration as a bare object — the by-key
+// GET shape (a single-element array made every client unwrap [0] forever).
+func writeConfiguration(w http.ResponseWriter, cfg *cluster.Configuration) {
+	bs, err := json.Marshal(&ConfigurationResponse{
+		ID:       cfg.ID,
+		Name:     cfg.Name,
+		MimeType: cfg.MimeType,
+		Data:     string(cfg.Data),
+	})
+	if err != nil {
+		writeInternalError(w, "failed to marshal response", err)
+		return
+	}
+	writeJson(w, bs)
+}
+
 func writeArrayBody[T any](w http.ResponseWriter, body []T) {
 	if body == nil {
 		writeJson(w, []byte("[]"))

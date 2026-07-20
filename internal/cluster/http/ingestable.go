@@ -109,10 +109,7 @@ func (h *HTTP) AddIngestable(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 
-	// text/plain defeats content-sniffing; the body is the ID echoed to the
-	// same client that POSTed (see addConfig for the G705 rationale).
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = w.Write([]byte(c.ID)) //nolint:gosec // G705
+	writeJSONStatus(w, httpgo.StatusOK, ConfigWriteResponse{ID: c.ID, Version: currentVersion(h.c.IngestableVersions, c.ID)})
 }
 
 // rejectSecondIngestableOnTopic enforces the single-authority-per-topic

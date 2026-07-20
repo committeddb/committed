@@ -140,20 +140,20 @@ func New(meter metric.Meter) *Metrics {
 	m.ingestFrozen, _ = meter.Float64Gauge("committed.ingest.frozen",
 		metric.WithDescription("1 if an ingest worker is parked in the ErrProposalUnknown freeze branch awaiting supervisor restart, 0 otherwise."))
 
-	m.ingestRestarts, _ = meter.Int64Counter("committed.ingest.restart_total",
+	m.ingestRestarts, _ = meter.Int64Counter("committed.ingest.restarts",
 		metric.WithDescription("Supervisor-triggered ingest worker re-registrations after a freeze."))
 
-	m.ingestSupervisorGiveups, _ = meter.Int64Counter("committed.ingest.supervisor_giveup_total",
+	m.ingestSupervisorGiveups, _ = meter.Int64Counter("committed.ingest.supervisor_giveups",
 		metric.WithDescription("Ingest supervisor give-ups after hitting the consecutive-freeze cap for an id."))
 
-	m.syncBreakerTrips, _ = meter.Int64Counter("committed.sync.breaker_tripped_total",
+	m.syncBreakerTrips, _ = meter.Int64Counter("committed.sync.breaker_trips",
 		metric.WithDescription("Sync circuit-breaker trips: a syncable hit the consecutive-permanent-error cap and parked."))
 
 	m.ingestPositionBumpDuration, _ = meter.Float64Histogram("committed.ingest.position.bump.duration",
 		metric.WithDescription("Time from submitting an ingestable Position bump after a batch of ingested proposals until it is durably applied."),
 		metric.WithUnit("s"))
 
-	m.ingestDedupSkipped, _ = meter.Int64Counter("committed.ingest.dedup_skipped_total",
+	m.ingestDedupSkipped, _ = meter.Int64Counter("committed.ingest.dedup_skipped",
 		metric.WithDescription("Re-emitted ingest proposals skipped before raft because their source sequence was at or below the durable highwater (effectively-once dedup)."))
 
 	m.typeMigrationErrors, _ = meter.Int64Counter("committed.type.migration.errors",

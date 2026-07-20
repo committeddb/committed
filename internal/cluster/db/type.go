@@ -173,19 +173,19 @@ func ParseType(c *cluster.Configuration, s cluster.DatabaseStorage) (string, *cl
 		}
 	}
 
-	// Optional pre-flight: migration.validate_against carries a sample
+	// Optional pre-flight: migration.validateAgainst carries a sample
 	// JSON payload in the previous version's shape to run the proposed
 	// transform against, so a program that parses but breaks on real data
 	// is caught at propose time instead of at first-sync. Validation-only:
 	// it never becomes part of the Type (though, like the rest of the
 	// TOML, it stays visible in the raw config version history).
-	if v.IsSet("migration.validate_against") {
+	if v.IsSet("migration.validateAgainst") {
 		if !hasMigrationTransform {
-			return "", nil, fmt.Errorf("migration.validate_against requires migration.transform (there is no program to validate)")
+			return "", nil, fmt.Errorf("migration.validateAgainst requires migration.transform (there is no program to validate)")
 		}
-		sample := []byte(v.GetString("migration.validate_against"))
+		sample := []byte(v.GetString("migration.validateAgainst"))
 		if err := runMigrationSample(migration, sample); err != nil {
-			return "", nil, fmt.Errorf("migration.transform failed against the validate_against sample: %w", err)
+			return "", nil, fmt.Errorf("migration.transform failed against the validateAgainst sample: %w", err)
 		}
 	}
 
@@ -218,7 +218,7 @@ func compileMigration(program []byte) error {
 func runMigrationSample(program, sample []byte) error {
 	// ParseType carries no ctx (it runs under the propose handler), so pass a
 	// background ctx; migration.Run's internal per-run timeout still bounds a
-	// pathological validate_against program so it can't wedge the handler.
+	// pathological validateAgainst program so it can't wedge the handler.
 	_, err := migration.Run(context.Background(), program, sample)
 	return err
 }

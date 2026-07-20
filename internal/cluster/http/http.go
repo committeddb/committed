@@ -168,17 +168,17 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 		// hidden inside a registrar.
 		r.Route("/v1", func(r chi.Router) {
 			r.Get("/database", h.listConfig("database", h.c.Databases))
-			r.Post("/database/{id}", h.addConfig("database", h.c.ProposeDatabase))
+			r.Post("/database/{id}", h.addConfig("database", h.c.ProposeDatabase, h.c.DatabaseVersions))
 			r.Get("/database/{id}/versions", h.getVersions("database", h.c.DatabaseVersions))
 			r.Get("/database/{id}/versions/{version}", h.getVersion("database", h.c.DatabaseVersion))
-			r.Post("/database/{id}/rollback", h.rollback("database", h.c.DatabaseVersion, h.c.ProposeDatabase))
+			r.Post("/database/{id}/rollback", h.rollback("database", h.c.DatabaseVersion, h.c.ProposeDatabase, h.c.DatabaseVersions))
 
 			r.Get("/ingestable", h.listConfig("ingestable", h.c.Ingestables))
 			r.Post("/ingestable/{id}", h.AddIngestable)
 			r.Get("/ingestable/{id}/versions", h.getVersions("ingestable", h.c.IngestableVersions))
 			r.Get("/ingestable/{id}/versions/{version}", h.getVersion("ingestable", h.c.IngestableVersion))
 			r.Get("/ingestable/{id}/status", h.GetIngestableStatus)
-			r.Post("/ingestable/{id}/rollback", h.rollback("ingestable", h.c.IngestableVersion, h.c.ProposeIngestable))
+			r.Post("/ingestable/{id}/rollback", h.rollback("ingestable", h.c.IngestableVersion, h.c.ProposeIngestable, h.c.IngestableVersions))
 			// DELETE is leader-pinned (leaderRead reverse-proxies a follower's
 			// request to the leader): the owner-gated source teardown — dropping the
 			// Postgres replication slot + publication — runs on the leader, so the
@@ -198,7 +198,7 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 			r.Post("/scrub", h.Scrub)
 
 			r.Get("/syncable", h.listConfig("syncable", h.c.Syncables))
-			r.Post("/syncable/{id}", h.addConfig("syncable", h.c.ProposeSyncable))
+			r.Post("/syncable/{id}", h.addConfig("syncable", h.c.ProposeSyncable, h.c.SyncableVersions))
 			// DELETE is leader-pinned (leaderRead reverse-proxies a follower's
 			// request to the leader): the owner-gated destination teardown runs on
 			// the leader and honors the keepData flag recorded there, so the
@@ -211,13 +211,13 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 			r.Get("/syncable/{id}/status", h.GetSyncableStatus)
 			r.Post("/syncable/{id}/deadletter", h.DeadLetterStuckSyncable)
 			r.Post("/syncable/{id}/replay/{index}", h.ReplaySyncableDeadLetter)
-			r.Post("/syncable/{id}/rollback", h.rollback("syncable", h.c.SyncableVersion, h.c.ProposeSyncable))
+			r.Post("/syncable/{id}/rollback", h.rollback("syncable", h.c.SyncableVersion, h.c.ProposeSyncable, h.c.SyncableVersions))
 			// Rebuild is leader-pinned for the same reason as DELETE: the
 			// owner-side destination teardown/re-init runs on the leader.
 			r.Post("/syncable/{id}/rebuild", h.leaderRead(h.RebuildSyncable))
 
 			r.Get("/type", h.listConfig("type", h.c.Types))
-			r.Post("/type/{id}", h.addConfig("type", h.c.ProposeType))
+			r.Post("/type/{id}", h.addConfig("type", h.c.ProposeType, h.c.TypeVersions))
 			r.Get("/type/{id}/versions", h.getVersions("type", h.c.TypeVersions))
 			r.Get("/type/{id}/versions/{version}", h.getVersion("type", h.c.TypeVersion))
 			r.Get("/type/{id}/migration-errors", h.GetTypeMigrationErrors)

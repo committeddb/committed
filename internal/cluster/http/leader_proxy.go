@@ -32,7 +32,7 @@ const forwardedHeader = "X-Committed-Forwarded"
 // there is no known leader; the leader has not announced an API URL (no
 // COMMITTED_API_URL — the documented degraded path); the request already
 // carries the loop-guard marker; or the leader can't be reached before the
-// deadline. The caller can retry, or use leader_id to target the leader
+// deadline. The caller can retry, or use leaderId to target the leader
 // directly. See raft-leader-read-proxy.md.
 func (h *HTTP) leaderRead(next httpgo.HandlerFunc) httpgo.HandlerFunc {
 	return func(w httpgo.ResponseWriter, r *httpgo.Request) {
@@ -120,5 +120,5 @@ func copyHeader(dst, src httpgo.Header, keys ...string) {
 // caller behind a load balancer can target the leader directly (or retry).
 func writeLeaderUnavailable(w httpgo.ResponseWriter, leaderID uint64, message string) {
 	writeErrorWithDetails(w, httpgo.StatusServiceUnavailable, "leader_unavailable",
-		message, map[string]any{"leader_id": leaderID})
+		message, map[string]any{"leaderId": leaderID})
 }

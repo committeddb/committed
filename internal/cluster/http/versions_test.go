@@ -189,12 +189,11 @@ func TestGetVersion_Success(t *testing.T) {
 			body, err := io.ReadAll(resp.Body)
 			require.Nil(t, err)
 
-			var result []configResponse
+			var result configResponse
 			err = json.Unmarshal(body, &result)
 			require.Nil(t, err)
-			require.Equal(t, 1, len(result))
-			require.Equal(t, "res-1", result[0].ID)
-			require.Equal(t, "data-v1", result[0].Data)
+			require.Equal(t, "res-1", result.ID)
+			require.Equal(t, "data-v1", result.Data)
 		})
 	}
 }
@@ -303,7 +302,7 @@ func TestRollback_Success(t *testing.T) {
 
 			body, err := io.ReadAll(resp.Body)
 			require.Nil(t, err)
-			require.Equal(t, "res-1", string(body))
+			require.JSONEq(t, `{"id":"res-1"}`, string(body))
 
 			tc.verifyFn(fake)
 		})

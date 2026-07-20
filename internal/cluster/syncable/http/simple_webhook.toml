@@ -6,7 +6,7 @@ type = "http"
 topic = "test-topic"
 url = "http://localhost:8080/webhook"
 method = "POST"
-timeout_ms = 3000
+timeoutMs = 3000
 
 [[http.headers]]
 name = "Authorization"

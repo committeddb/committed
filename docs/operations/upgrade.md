@@ -44,8 +44,8 @@ rolling would crash the nodes you haven't upgraded yet. See the warning under
    Confirm the upgrade does not cross a major version (`/v1` → `/v2`) or
    trigger a one-way transition you can't roll back from.
 2. **Confirm the cluster is healthy first.** `GET /v1/membership` on any
-   node should show every member present with `applied_index` close to
-   `commit_index`. Don't start an upgrade on a degraded cluster — you'd
+   node should show every member present with `appliedIndex` close to
+   `commitIndex`. Don't start an upgrade on a degraded cluster — you'd
    be removing redundancy you may need.
 3. **Have a recovery path.** A node's data directory is reusable by the
    previous binary (rollback, below); a node that loses its disk entirely
@@ -74,8 +74,8 @@ rolling would crash the nodes you haven't upgraded yet. See the warning under
 ## The procedure
 
 Upgrade **one node at a time, followers first, the leader last.** Find
-the leader with `GET /v1/membership` (the `leader_id` field, or the
-member whose `is_leader` is true).
+the leader with `GET /v1/membership` (the `leaderId` field, or the
+member whose `isLeader` is true).
 
 For each node:
 
@@ -100,7 +100,7 @@ For each node:
    `/ready`.)
 6. **Confirm the new build.** `GET /version` should report the new
    `version`/`commit`. Re-confirm membership: `GET /v1/membership`'s
-   `applied_index` for this node should be tracking `commit_index`.
+   `appliedIndex` for this node should be tracking `commitIndex`.
 7. **Move to the next node.** Only proceed once the just-upgraded node is
    `/ready` and caught up, so you never have two nodes out at once.
 
@@ -118,7 +118,7 @@ After the last node:
 
 - **Every node reports the new build.** `GET /version` on each node.
 - **Every node is caught up.** `GET /v1/membership` shows every member's
-  `applied_index` close to `commit_index`, and there is exactly one
+  `appliedIndex` close to `commitIndex`, and there is exactly one
   leader.
 - **A write round-trips.** `POST /v1/proposal` (or any config write) and
   confirm it commits — proof the new cluster is accepting and applying

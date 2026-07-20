@@ -141,7 +141,7 @@ not committed:
   subjects** — a right-to-be-forgotten delete physically removes the data from
   the log, leaving nothing to enumerate. You must therefore record RTBF requests
   in your own compliance system and **re-issue any that post-date the backup**
-  after a restore. The restored node's `applied_index` (from `GET /v1/membership`)
+  after a restore. The restored node's `appliedIndex` (from `GET /v1/membership`)
   marks how far the backup covered, so you know which of your tracked requests to
   re-apply.
 

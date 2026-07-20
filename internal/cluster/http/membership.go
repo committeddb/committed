@@ -13,16 +13,16 @@ import (
 // MembershipResponse is the body of GET /v1/membership: the raft cluster
 // configuration and replication progress, as produced by the leader (the
 // route is leaderRead-wrapped, so a follower proxies to the leader and the
-// per-member match_index is always populated). CommitIndex is the catch-up
+// per-member matchIndex is always populated). CommitIndex is the catch-up
 // target; a caller decides a member is "caught up" by comparing its
-// match_index against commit_index with its own threshold.
+// matchIndex against commitIndex with its own threshold.
 type MembershipResponse struct {
-	NodeID       uint64           `json:"node_id"`
-	LeaderID     uint64           `json:"leader_id"`
+	NodeID       uint64           `json:"nodeId"`
+	LeaderID     uint64           `json:"leaderId"`
 	Term         uint64           `json:"term"`
-	CommitIndex  uint64           `json:"commit_index"`
-	AppliedIndex uint64           `json:"applied_index"`
-	IsLeader     bool             `json:"is_leader"`
+	CommitIndex  uint64           `json:"commitIndex"`
+	AppliedIndex uint64           `json:"appliedIndex"`
+	IsLeader     bool             `json:"isLeader"`
 	Members      []MemberResponse `json:"members"`
 }
 
@@ -32,8 +32,8 @@ type MembershipResponse struct {
 type MemberResponse struct {
 	ID         uint64  `json:"id"`
 	Role       string  `json:"role"`
-	MatchIndex *uint64 `json:"match_index,omitempty"`
-	APIURL     string  `json:"api_url,omitempty"`
+	MatchIndex *uint64 `json:"matchIndex,omitempty"`
+	APIURL     string  `json:"apiUrl,omitempty"`
 }
 
 // GetMembership handles GET /v1/membership. It returns the cluster

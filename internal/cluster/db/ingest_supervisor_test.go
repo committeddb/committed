@@ -23,7 +23,7 @@ import (
 // raises it to 2.
 //
 // The metric side-effects (frozen → 1 on freeze, frozen → 0 on
-// successful restart, restart_total incremented) are collected via
+// successful restart, restarts incremented) are collected via
 // an OTel ManualReader so we can assert the operator-visible
 // observability story too.
 func TestIngest_SupervisorRestartsAfterFreeze(t *testing.T) {
@@ -84,10 +84,10 @@ func TestIngest_SupervisorRestartsAfterFreeze(t *testing.T) {
 			return false
 		}
 		frozen := findSupervisorGaugeForID(rm, "committed.ingest.frozen", id)
-		restart := findSupervisorCounterForID(rm, "committed.ingest.restart_total", id)
+		restart := findSupervisorCounterForID(rm, "committed.ingest.restarts", id)
 		return frozen == 0.0 && restart >= 1
 	}, 5*time.Second, 25*time.Millisecond,
-		"expected frozen=0 and restart_total>=1 for id=%s", id,
+		"expected frozen=0 and restarts>=1 for id=%s", id,
 	)
 
 	// Teardown: unblock raft's apply path so the restart worker's

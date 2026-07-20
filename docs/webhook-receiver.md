@@ -14,13 +14,16 @@ guarantees become contracts *you* implement. This page is that contract.
 [syncable]
 name = "movies-mirror"
 type = "http"
+
+[http]
 topic = "<type-id>"
 url = "https://example.internal/committed/movies"
 method = "POST"          # POST (default) or PUT
 timeoutMs = 5000
+
 # Static headers on every request — e.g. auth. Use ${VAR} interpolation
 # (see docs/operations/secrets.md) to keep tokens out of the config.
-[[syncable.headers]]
+[[http.headers]]
 name = "Authorization"
 value = "Bearer ${MOVIES_WEBHOOK_TOKEN}"
 ```

@@ -162,7 +162,7 @@ func TestIngestDedup_RecoveryHasNoDuplicateCommittedEntries(t *testing.T) {
 		if err := reader.Collect(context.Background(), &rm); err != nil {
 			return false
 		}
-		return findSupervisorCounterForID(rm, "committed.ingest.dedup_skipped_total", id) == 2
+		return findSupervisorCounterForID(rm, "committed.ingest.dedup_skipped", id) == 2
 	}, 5*time.Second, 5*time.Millisecond, "expected exactly 2 deduped re-emits")
 }
 

@@ -21,10 +21,42 @@ import (
 // handler, syncable adds errors/status/deadletter/replay routes — without
 // special-casing inside a generic registrar.
 
+// ConfigWriteResponse is the body of a config POST or rollback: the id the
+// caller addressed and the server-assigned version the config now has (a
+// rollback creates a NEW version; a byte-identical re-POST retains the
+// existing one). Version is the one field the caller cannot know a priori —
+// versions are assigned at apply — which is what makes this response carry
+// information the old plain-text id echo did not. Version is omitted only if
+// the post-propose version read fails (the write itself succeeded).
+type ConfigWriteResponse struct {
+	ID      string `json:"id"`
+	Version uint64 `json:"version,omitempty"`
+}
+
+// currentVersion reads the version currently marked current for id, or 0 if
+// it cannot be determined. Propose blocks until the entry is applied locally,
+// so a read here observes the version the propose just created.
+func currentVersion(versions func(string) ([]cluster.VersionInfo, error), id string) uint64 {
+	vs, err := versions(id)
+	if err != nil {
+		return 0
+	}
+	for _, v := range vs {
+		if v.Current {
+			return v.Version
+		}
+	}
+	return 0
+}
+
 // addConfig handles POST /{resource}/{id}: build a Configuration from the
-// request body and propose it. The plain-text ID echo is unchanged from
-// the original per-resource handlers.
-func (h *HTTP) addConfig(name string, propose func(context.Context, *cluster.Configuration) error) httpgo.HandlerFunc {
+// request body, propose it, and return {id, version} — the server-assigned
+// version the caller cannot otherwise know.
+func (h *HTTP) addConfig(
+	name string,
+	propose func(context.Context, *cluster.Configuration) error,
+	versions func(string) ([]cluster.VersionInfo, error),
+) httpgo.HandlerFunc {
 	return func(w httpgo.ResponseWriter, r *httpgo.Request) {
 		c, err := createConfiguration(r)
 		if err != nil {
@@ -37,11 +69,7 @@ func (h *HTTP) addConfig(name string, propose func(context.Context, *cluster.Con
 			return
 		}
 
-		// text/plain defeats browser content-sniffing; the response is a
-		// plain ID echoed back to the same client that POSTed the config,
-		// so there's no cross-user XSS surface even with a hostile ID.
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = w.Write([]byte(c.ID)) //nolint:gosec // G705
+		writeJSONStatus(w, httpgo.StatusOK, ConfigWriteResponse{ID: c.ID, Version: currentVersion(versions, c.ID)})
 	}
 }
 
@@ -93,16 +121,19 @@ func (h *HTTP) getVersion(name string, version func(string, uint64) (*cluster.Co
 			writeVersionError(w, err, name)
 			return
 		}
-		writeConfigurations(w, []*cluster.Configuration{cfg})
+		// A by-key GET returns the bare object; 404 already covers absence.
+		writeConfiguration(w, cfg)
 	}
 }
 
 // rollback handles POST /{resource}/{id}/rollback?to=<version>: re-propose
-// the named historical version as the current configuration.
+// the named historical version as the current configuration, returning
+// {id, version} where version is the NEW version the rollback created.
 func (h *HTTP) rollback(
 	name string,
 	version func(string, uint64) (*cluster.Configuration, error),
 	propose func(context.Context, *cluster.Configuration) error,
+	versions func(string) ([]cluster.VersionInfo, error),
 ) httpgo.HandlerFunc {
 	return func(w httpgo.ResponseWriter, r *httpgo.Request) {
 		id := r.PathValue("id")
@@ -126,8 +157,6 @@ func (h *HTTP) rollback(
 			writeProposeError(w, err, name, "propose "+name+" rollback")
 			return
 		}
-		// See addConfig for the G705 rationale.
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = w.Write([]byte(cfg.ID)) //nolint:gosec // G705
+		writeJSONStatus(w, httpgo.StatusOK, ConfigWriteResponse{ID: cfg.ID, Version: currentVersion(versions, cfg.ID)})
 	}
 }

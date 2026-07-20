@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Committed API
-  version: 0.3.0
+  version: 0.7.3
   description: |
     HTTP API for Committed — a distributed commit log database.
 
@@ -208,7 +208,7 @@ paths:
               type: string
       responses:
         '200':
-          $ref: '#/components/responses/ResourceIdPlainText'
+          $ref: '#/components/responses/ConfigWritten'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -253,15 +253,11 @@ paths:
         - $ref: '#/components/parameters/VersionNumber'
       responses:
         '200':
-          description: |
-            The configuration at the requested version. Returned as a
-            single-element array for consistency with the list endpoint.
+          description: The configuration at the requested version.
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/ConfigurationResponse'
+                $ref: '#/components/schemas/ConfigurationResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -285,7 +281,7 @@ paths:
         - $ref: '#/components/parameters/RollbackTo'
       responses:
         '200':
-          $ref: '#/components/responses/ResourceIdPlainText'
+          $ref: '#/components/responses/ConfigWritten'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -336,7 +332,7 @@ paths:
               type: string
       responses:
         '200':
-          $ref: '#/components/responses/ResourceIdPlainText'
+          $ref: '#/components/responses/ConfigWritten'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -416,15 +412,11 @@ paths:
         - $ref: '#/components/parameters/VersionNumber'
       responses:
         '200':
-          description: |
-            The configuration at the requested version, returned as a
-            single-element array for consistency with the list endpoint.
+          description: The configuration at the requested version.
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/ConfigurationResponse'
+                $ref: '#/components/schemas/ConfigurationResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -511,7 +503,7 @@ paths:
         - $ref: '#/components/parameters/RollbackTo'
       responses:
         '200':
-          $ref: '#/components/responses/ResourceIdPlainText'
+          $ref: '#/components/responses/ConfigWritten'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -582,7 +574,7 @@ paths:
               type: string
       responses:
         '200':
-          $ref: '#/components/responses/ResourceIdPlainText'
+          $ref: '#/components/responses/ConfigWritten'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -686,15 +678,11 @@ paths:
         - $ref: '#/components/parameters/VersionNumber'
       responses:
         '200':
-          description: |
-            The configuration at the requested version, returned as a
-            single-element array for consistency with the list endpoint.
+          description: The configuration at the requested version.
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/ConfigurationResponse'
+                $ref: '#/components/schemas/ConfigurationResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -892,7 +880,7 @@ paths:
         - $ref: '#/components/parameters/RollbackTo'
       responses:
         '200':
-          $ref: '#/components/responses/ResourceIdPlainText'
+          $ref: '#/components/responses/ConfigWritten'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -1008,7 +996,7 @@ paths:
               type: string
       responses:
         '200':
-          $ref: '#/components/responses/ResourceIdPlainText'
+          $ref: '#/components/responses/ConfigWritten'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -1053,15 +1041,11 @@ paths:
         - $ref: '#/components/parameters/VersionNumber'
       responses:
         '200':
-          description: |
-            The type configuration at the requested version, returned as
-            a single-element array for consistency with the list endpoint.
+          description: The type configuration at the requested version.
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/ConfigurationResponse'
+                $ref: '#/components/schemas/ConfigurationResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -1300,7 +1284,7 @@ paths:
         Authenticated with the same bearer token as every other write,
         which is why `COMMITTED_API_TOKEN` must be cluster-uniform. Only
         the leader aggregates reports: any other node answers 503
-        `leader_unavailable` with the believed `leader_id`, and the
+        `leader_unavailable` with the believed `leaderId`, and the
         reporter re-resolves the leader on its next cycle. See
         docs/operations/disk-limits.md.
       operationId: reportDisk
@@ -1324,7 +1308,7 @@ paths:
         '503':
           description: |
             This node is not the raft leader (reports are aggregated only
-            there). The error details carry the believed `leader_id`; the
+            there). The error details carry the believed `leaderId`; the
             reporter re-resolves the leader's announced API URL and retries
             on its next cycle.
           content:
@@ -1342,16 +1326,16 @@ paths:
         matched index — plus the answering snapshot's leader, term, commit, and
         applied indices.
 
-        Per-member `match_index` is leader-only state in raft, so this read is
+        Per-member `matchIndex` is leader-only state in raft, so this read is
         answered by the leader: a request that lands on a follower is
         transparently proxied to the leader, giving a caller behind a load
         balancer a leader-truthful answer from any node. If the leader has not
         announced an API address (`COMMITTED_API_URL` unset) or no leader is
-        known, the follower returns 503 with the believed `leader_id` in the
+        known, the follower returns 503 with the believed `leaderId` in the
         error details so the caller can target the leader directly.
 
-        A caller decides a member is "caught up" by comparing its `match_index`
-        against `commit_index` with its own threshold; the server does not
+        A caller decides a member is "caught up" by comparing its `matchIndex`
+        against `commitIndex` with its own threshold; the server does not
         judge readiness. See docs/operations/membership.md.
       operationId: getMembership
       responses:
@@ -1367,7 +1351,7 @@ paths:
           description: |
             No leader is known, or the leader's API address is unknown, so a
             leader-truthful answer can't be produced here. The error details
-            carry `leader_id`. Retry, or target the leader directly.
+            carry `leaderId`. Retry, or target the leader directly.
           content:
             application/json:
               schema:
@@ -1534,12 +1518,15 @@ components:
         default: linearizable
 
   responses:
-    ResourceIdPlainText:
-      description: Resource ID as plain text
+    ConfigWritten:
+      description: |
+        The config was committed. `version` is the server-assigned version the
+        config now has — a rollback creates a NEW version; a byte-identical
+        re-POST retains the existing one.
       content:
-        text/plain:
+        application/json:
           schema:
-            type: string
+            $ref: '#/components/schemas/ConfigWriteResponse'
     Unauthorized:
       description: Missing or invalid bearer token
       content:
@@ -1810,6 +1797,21 @@ components:
             is unset; never contains an interpolated secret value
             (interpolation failed, so no value exists).
 
+    ConfigWriteResponse:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: string
+          description: The config id the write addressed.
+        version:
+          type: integer
+          format: int64
+          minimum: 1
+          description: |
+            The server-assigned version the config now has. Omitted only if the
+            post-write version read failed (the write itself succeeded).
+
     ConfigurationResponse:
       type: object
       required: [id, name, mimeType, data]
@@ -1920,7 +1922,7 @@ components:
 
     SyncableStatusResponse:
       type: object
-      required: [stuck, checkpoint_index, head_index, lag, caught_up]
+      required: [stuck, checkpointIndex, headIndex, lag, caughtUp]
       description: A syncable worker's current operational status and progress.
       properties:
         stuck:
@@ -1941,7 +1943,7 @@ components:
         message:
           type: string
           description: Truncated last transient error. Present only when stuck.
-        checkpoint_index:
+        checkpointIndex:
           type: integer
           format: int64
           minimum: 0
@@ -1949,7 +1951,7 @@ components:
             Persisted SyncableIndex — the consumed head this worker has synced,
             topic-skipped, or dead-lettered through. 0 if it has never
             checkpointed. Always present.
-        head_index:
+        headIndex:
           type: integer
           format: int64
           minimum: 0
@@ -1964,12 +1966,12 @@ components:
           format: int64
           minimum: 0
           description: |
-            max(0, head_index - checkpoint_index) — how many data entries this
+            max(0, headIndex - checkpointIndex) — how many data entries this
             syncable still has to process. 0 exactly when caught up. A
             selective syncable may transiently report a small positive lag under
             sustained cross-topic load (it reads and cheaply skips other topics
             to advance its consumed head) and returns to 0 at rest. Always present.
-        caught_up:
+        caughtUp:
           type: boolean
           description: True iff lag == 0 — the syncable has nothing left to process. Always present.
 
@@ -2149,13 +2151,13 @@ components:
 
     MembershipResponse:
       type: object
-      required: [node_id, leader_id, term, commit_index, applied_index, is_leader, members]
+      required: [nodeId, leaderId, term, commitIndex, appliedIndex, isLeader, members]
       properties:
-        node_id:
+        nodeId:
           type: integer
           format: int64
           description: Raft node id that produced this snapshot.
-        leader_id:
+        leaderId:
           type: integer
           format: int64
           description: Raft leader this node believes in (0 if none known).
@@ -2163,33 +2165,33 @@ components:
           type: integer
           format: int64
           description: Current raft term.
-        commit_index:
+        commitIndex:
           type: integer
           format: int64
           description: |
             Highest committed raft index — the catch-up target a caller
-            compares a member's match_index against.
-        applied_index:
+            compares a member's matchIndex against.
+        appliedIndex:
           type: integer
           format: int64
           description: How far this node has applied committed entries.
-        is_leader:
+        isLeader:
           type: boolean
-          description: Whether this node is the leader (and thus whether member match_index values are populated).
+          description: Whether this node is the leader (and thus whether member matchIndex values are populated).
         members:
           type: array
           items:
             $ref: '#/components/schemas/Member'
       example:
-        node_id: 1
-        leader_id: 1
+        nodeId: 1
+        leaderId: 1
         term: 5
-        commit_index: 1234
-        applied_index: 1234
-        is_leader: true
+        commitIndex: 1234
+        appliedIndex: 1234
+        isLeader: true
         members:
-          - { id: 1, role: voter, match_index: 1234, api_url: "http://n1:8080" }
-          - { id: 4, role: learner, match_index: 1200, api_url: "http://n4:8080" }
+          - { id: 1, role: voter, matchIndex: 1234, apiUrl: "http://n1:8080" }
+          - { id: 4, role: learner, matchIndex: 1200, apiUrl: "http://n4:8080" }
 
     Member:
       type: object
@@ -2206,14 +2208,14 @@ components:
             voter — counts toward quorum; learner — replicates the log but does
             not vote. (Learners are added by a later change; today every member
             is a voter.)
-        match_index:
+        matchIndex:
           type: integer
           format: int64
           description: |
             Highest log index the leader has confirmed this member replicated.
             Present only on a leader-produced snapshot (the read is proxied to
             the leader, so it is normally populated).
-        api_url:
+        apiUrl:
           type: string
           description: |
             Member's advertised HTTP API base URL, as self-announced. Omitted

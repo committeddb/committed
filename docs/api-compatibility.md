@@ -81,8 +81,14 @@ from this contract (and from authentication):
 - `/docs` — Swagger UI
 
 The OpenAPI document at `/openapi.yaml` is the authoritative description
-of the versioned surface; its `info.version` tracks the spec revision,
-which is independent of the `/v1` URL major version.
+of the versioned surface; its `info.version` tracks the release that last
+revised the spec (bumped as part of cutting a release), which is
+independent of the `/v1` URL major version.
+
+List endpoints return bare JSON arrays. When pagination is needed it
+arrives additively as query parameters (the dead-letter and error lists
+already paginate via `since`/`limit`) — never as a breaking envelope
+change around the array.
 
 ## On-disk and wire compatibility
 

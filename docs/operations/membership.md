@@ -123,13 +123,13 @@ It begins replicating with zero effect on quorum.
 ### Step 2 — wait until it has caught up
 
 Poll `GET /v1/membership` (see "Observing membership") and compare node
-4's `match_index` against `commit_index`. You own the threshold — "caught
+4's `matchIndex` against `commitIndex`. You own the threshold — "caught
 up" might mean exactly equal, or within a few thousand entries you're
 comfortable closing under load. The server does not decide this for you.
 
 ```
 curl -s http://n1:8080/v1/membership | jq '.members[] | select(.id==4)'
-# { "id": 4, "role": "learner", "match_index": 11920, ... }   commit_index: 11931
+# { "id": 4, "role": "learner", "matchIndex": 11920, ... }   commitIndex: 11931
 ```
 
 ### Step 3 — promote it to a voter
@@ -178,16 +178,16 @@ alongside the snapshot's leader, term, commit, and applied indices.
 
 ```json
 {
-  "node_id": 1, "leader_id": 1, "term": 5,
-  "commit_index": 1234, "applied_index": 1234, "is_leader": true,
+  "nodeId": 1, "leaderId": 1, "term": 5,
+  "commitIndex": 1234, "appliedIndex": 1234, "isLeader": true,
   "members": [
-    { "id": 1, "role": "voter", "match_index": 1234, "api_url": "http://n1:8080" },
-    { "id": 2, "role": "voter", "match_index": 1230, "api_url": "http://n2:8080" }
+    { "id": 1, "role": "voter", "matchIndex": 1234, "apiUrl": "http://n1:8080" },
+    { "id": 2, "role": "voter", "matchIndex": 1230, "apiUrl": "http://n2:8080" }
   ]
 }
 ```
 
-The per-member `match_index` is **leader-only** state in raft, so the read
+The per-member `matchIndex` is **leader-only** state in raft, so the read
 is always answered by the leader: a request that lands on a follower is
 transparently **proxied to the leader**. This is what lets a caller behind
 a load balancer (a single VIP, no per-node addressing) get a
@@ -202,11 +202,11 @@ own.
 
 If the leader has not announced an API URL (`COMMITTED_API_URL` unset), or
 no leader is currently known, a follower can't proxy and returns **503**
-with the believed leader id in the error details (`{"details":{"leader_id":
+with the believed leader id in the error details (`{"details":{"leaderId":
 N}}`) — target node `N` directly, or retry.
 
-> **Catch-up is the caller's call.** The server reports `match_index` and
-> `commit_index` but does not judge "caught up" — a caller compares them
+> **Catch-up is the caller's call.** The server reports `matchIndex` and
+> `commitIndex` but does not judge "caught up" — a caller compares them
 > with its own threshold. (This is the observability the learner-promotion
 > workflow builds on.)
 

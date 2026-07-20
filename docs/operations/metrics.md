@@ -80,7 +80,7 @@ Labels are shown in `{braces}`.
 | `committed.sync.duration` | Time to apply one Actual to a sink (histogram). |
 | `committed.sync.errors` | Sync errors, by `{syncable_id}`. |
 | `committed.sync.stuck` | 1 when a `{syncable_id}` worker has been blocked past the stuck threshold. **Alert on this.** |
-| `committed.sync.breaker_tripped_total` | A syncable's consecutive-permanent-error breaker tripped (dead-lettering en masse). |
+| `committed.sync.breaker_trips` | A syncable's consecutive-permanent-error breaker tripped (dead-lettering en masse). |
 | `committed.sync.bump.duration` | Latency of the post-sync checkpoint bump (histogram). |
 | `committed.sync.last_error.timestamp` | Unix time of a syncable's most recent error. |
 | `committed.sync.rules_unmatched` | Rows a syncable's rules matched no case for (dropped by config). |
@@ -92,9 +92,9 @@ Labels are shown in `{braces}`.
 | `committed.ingest.lag` | Per-`{ingestable_id}` replication lag from the source. |
 | `committed.ingest.errors` | Ingest errors, by `{ingestable_id}`. |
 | `committed.ingest.frozen` | 1 when an ingestable is frozen (supervisor gave up); needs operator attention. |
-| `committed.ingest.dedup_skipped_total` | Source events skipped as already-consumed (effectively-once dedup). |
-| `committed.ingest.restart_total` | Ingest worker restarts (reconnect/backoff churn). |
-| `committed.ingest.supervisor_giveup_total` | Times the ingest supervisor exhausted its retry budget and parked the worker. |
+| `committed.ingest.dedup_skipped` | Source events skipped as already-consumed (effectively-once dedup). |
+| `committed.ingest.restarts` | Ingest worker restarts (reconnect/backoff churn). |
+| `committed.ingest.supervisor_giveups` | Times the ingest supervisor exhausted its retry budget and parked the worker. |
 | `committed.ingest.position.bump.duration` | Latency of the ingest position checkpoint (histogram). |
 | `committed.ingest.last_error.timestamp` | Unix time of an ingestable's most recent error. |
 

@@ -111,7 +111,7 @@ later rebuilds it ships only what diverged.
 - A **healthy peer** — another node in the cluster whose data
   directory is complete and current. Verify this by confirming the
   peer is accepting writes and serving the `/ready` probe with
-  `applied_index > 0`.
+  `appliedIndex > 0`.
 
 - **SSH access** from the failed node to the healthy peer (or,
   equivalently, a shared filesystem or object-store staging area).

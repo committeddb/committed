@@ -370,6 +370,16 @@ slot_name   = "committed_movie_slot"   # optional; default "committed_slot"
 publication = "committed_movie_pub"    # optional; default "committed_pub"
 ```
 
+> **Why ingest configs carry `connectionString` inline** (while syncables
+> reference a shared `[database]` config by `sql.db`): a `[database]` config is
+> a shared, long-lived **sink** pool that many syncables reuse — one place to
+> rotate credentials for a destination. An ingest **source** is different: the
+> worker owns its connections (the replication-protocol stream plus short-lived
+> SQL sessions), opens them itself, and tears them down with the worker — there
+> is no shared pool to reference. The two idioms are deliberate, not drift.
+> Use `${VAR}` interpolation to keep source passwords out of the config either
+> way (see [secrets.md](secrets.md)).
+
 Give each ingestable its own `slot_name` and `publication` so they don't collide.
 A runnable, end-to-end Postgres example lives in
 [`examples/movies/`](../../examples/movies/) (`source.sql`, `ingest-*.toml`,

@@ -277,17 +277,17 @@ func TestGetSyncableStatus_NotStuck(t *testing.T) {
 	require.Equal(t, 200, resp.StatusCode)
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	require.JSONEq(t, `{"stuck":false,"checkpoint_index":0,"head_index":0,"lag":0,"caught_up":true}`, string(body))
+	require.JSONEq(t, `{"stuck":false,"checkpointIndex":0,"headIndex":0,"lag":0,"caughtUp":true}`, string(body))
 }
 
 // progressResponse decodes the full status response including the
 // always-present progress fields.
 type progressResponse struct {
 	Stuck           bool   `json:"stuck"`
-	CheckpointIndex uint64 `json:"checkpoint_index"`
-	HeadIndex       uint64 `json:"head_index"`
+	CheckpointIndex uint64 `json:"checkpointIndex"`
+	HeadIndex       uint64 `json:"headIndex"`
 	Lag             uint64 `json:"lag"`
-	CaughtUp        bool   `json:"caught_up"`
+	CaughtUp        bool   `json:"caughtUp"`
 }
 
 func getStatus(t *testing.T, h *http.HTTP) progressResponse {
@@ -306,7 +306,7 @@ func getStatus(t *testing.T, h *http.HTTP) progressResponse {
 
 // TestGetSyncableStatus_Behind renders the "X of Y, N behind" case: a healthy
 // (not stuck) syncable whose checkpoint trails the data head reports a
-// positive lag and caught_up=false. The progress fields are present even
+// positive lag and caughtUp=false. The progress fields are present even
 // though the syncable is not stuck.
 func TestGetSyncableStatus_Behind(t *testing.T) {
 	h, fake := setupTest()
@@ -321,7 +321,7 @@ func TestGetSyncableStatus_Behind(t *testing.T) {
 	require.False(t, got.CaughtUp)
 }
 
-// TestGetSyncableStatus_CaughtUp reports lag 0 / caught_up true when the
+// TestGetSyncableStatus_CaughtUp reports lag 0 / caughtUp true when the
 // checkpoint has reached the head.
 func TestGetSyncableStatus_CaughtUp(t *testing.T) {
 	h, fake := setupTest()

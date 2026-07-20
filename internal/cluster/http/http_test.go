@@ -294,10 +294,15 @@ connectionString=%q`, name, dialect, connectionString)
 
 	resp := w.Result()
 	require.Equal(t, 200, resp.StatusCode)
-	respID, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
 	require.Nil(t, err)
 
-	return string(respID)
+	// Config writes return {id, version}; the helpers hand back the id.
+	var wr struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(respBody, &wr))
+	return wr.ID
 }
 
 func addIngestable(t *testing.T, h *http.HTTP, dialect string) string {
@@ -329,10 +334,15 @@ column = "one"`, name, dialect, name)
 
 	resp := w.Result()
 	require.Equal(t, 200, resp.StatusCode)
-	respID, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
 	require.Nil(t, err)
 
-	return string(respID)
+	// Config writes return {id, version}; the helpers hand back the id.
+	var wr struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(respBody, &wr))
+	return wr.ID
 }
 
 func addSyncable(t *testing.T, h *http.HTTP, topicId string, databaseID string) string {
@@ -372,10 +382,15 @@ type = "VARCHAR(128)"`, name, topicId, databaseID, tableName)
 
 	resp := w.Result()
 	require.Equal(t, 200, resp.StatusCode)
-	respID, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
 	require.Nil(t, err)
 
-	return string(respID)
+	// Config writes return {id, version}; the helpers hand back the id.
+	var wr struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(respBody, &wr))
+	return wr.ID
 }
 
 func addType(t *testing.T, h *http.HTTP, name string) string {
@@ -391,10 +406,15 @@ func addType(t *testing.T, h *http.HTTP, name string) string {
 
 	resp := w.Result()
 	require.Equal(t, 200, resp.StatusCode)
-	respID, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
 	require.Nil(t, err)
 
-	return string(respID)
+	// Config writes return {id, version}; the helpers hand back the id.
+	var wr struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(respBody, &wr))
+	return wr.ID
 }
 
 func propose(t *testing.T, h *http.HTTP, proposal *http.AddProposalRequest) {

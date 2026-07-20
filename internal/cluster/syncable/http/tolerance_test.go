@@ -21,7 +21,7 @@ func TestHTTPParseConfigToleratesCaseVariantKeys(t *testing.T) {
 Topic      = "simple"
 URL        = "https://example.test/hook"
 Method     = "put"
-Timeout_MS = 250
+TimeoutMS  = 250
 
 [[HTTP.Headers]]
 Name  = "X-Auth"

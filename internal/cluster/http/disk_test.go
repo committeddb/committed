@@ -67,7 +67,7 @@ func TestDiskReport_NotLeader(t *testing.T) {
 
 	require.Equal(t, 503, status)
 	require.Contains(t, string(bs), "leader_unavailable")
-	require.Contains(t, string(bs), `"leader_id":3`)
+	require.Contains(t, string(bs), `"leaderId":3`)
 }
 
 // TestDiskReport_BadRequests verifies the 400 paths: malformed JSON, a

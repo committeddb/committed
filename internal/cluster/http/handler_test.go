@@ -87,7 +87,7 @@ type = "sql"`
 			// ID is the last segment of the path
 			parts := strings.Split(tc.path, "/")
 			expectedID := parts[len(parts)-1]
-			require.Equal(t, expectedID, string(respBody))
+			require.JSONEq(t, `{"id":"`+expectedID+`"}`, string(respBody))
 
 			callCount, cfg := tc.verifyFn(fake)
 			require.Equal(t, 1, callCount)

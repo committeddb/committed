@@ -362,7 +362,7 @@ func WithScrubInterval(d time.Duration) Option {
 // leader-only read (GET /v1/membership) — can resolve this node's API
 // address. Empty (the default) disables the announce: the node's address
 // stays unknown to the proxy and a leader-only read on a follower degrades to
-// 503 + leader_id. cmd/node.go wires COMMITTED_API_URL to this. See
+// 503 + leaderId. cmd/node.go wires COMMITTED_API_URL to this. See
 // raft-leader-read-proxy.md.
 func WithAdvertisedAPIURL(url string) Option {
 	return func(o *options) { o.advertisedAPIURL = url }

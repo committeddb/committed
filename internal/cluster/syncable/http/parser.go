@@ -48,7 +48,7 @@ func (p *SyncableParser) ParseConfig(v *cluster.ParsedConfig) (*Config, error) {
 		return nil, fmt.Errorf("[http.syncable-parser] http.method must be POST or PUT, got %q", method)
 	}
 
-	timeoutMs := v.GetInt("http.timeout_ms")
+	timeoutMs := v.GetInt("http.timeoutMs")
 	if timeoutMs <= 0 {
 		timeoutMs = 5000
 	}

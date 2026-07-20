@@ -95,7 +95,7 @@ func TestMembership_ReportsLearnerRole(t *testing.T) {
 // leader's announced API URL and returns the leader's response verbatim,
 // carrying the loop-guard marker and forwarding the Authorization header.
 func TestMembership_ProxiedFromFollower(t *testing.T) {
-	const leaderBody = `{"node_id":1,"leader_id":1,"is_leader":true,"members":[{"id":1,"role":"voter","match_index":99}]}`
+	const leaderBody = `{"nodeId":1,"leaderId":1,"isLeader":true,"members":[{"id":1,"role":"voter","matchIndex":99}]}`
 
 	var (
 		mu       sync.Mutex
@@ -163,7 +163,7 @@ func TestMembership_LeaderUnreachable(t *testing.T) {
 // TLS-serving leader when the proxy client is configured to trust it
 // (WithProxyClient), exercising the TLS path cmd/node.go wires up.
 func TestMembership_ProxiedOverTLS(t *testing.T) {
-	const leaderBody = `{"node_id":1,"leader_id":1,"is_leader":true,"members":[]}`
+	const leaderBody = `{"nodeId":1,"leaderId":1,"isLeader":true,"members":[]}`
 	leader := httptest.NewTLSServer(httpgo.HandlerFunc(func(w httpgo.ResponseWriter, r *httpgo.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, leaderBody)
@@ -240,7 +240,7 @@ func leaderIDDetail(t *testing.T, body []byte) float64 {
 	t.Helper()
 	var e struct {
 		Details struct {
-			LeaderID float64 `json:"leader_id"`
+			LeaderID float64 `json:"leaderId"`
 		} `json:"details"`
 	}
 	require.NoError(t, json.Unmarshal(body, &e))
