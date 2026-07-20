@@ -250,6 +250,13 @@ type Storage struct {
 	// deterministic, and a restart simply re-accumulates from the still-present
 	// log. Reset on scrub completion (markScrubComplete).
 	metadataBacklog atomic.Int64
+	// metadataBacklogBytes approximates the BYTES a metadata-GC scrub would
+	// reclaim: each counted supersession adds ~the size of the superseding
+	// entity (same-key entries are similarly sized). The volume gate
+	// (hasMetadataBacklog) compares it against the event log's size so an
+	// O(total-log) rewrite only fires when it reclaims a meaningful fraction
+	// of what it rewrites. Reset with metadataBacklog.
+	metadataBacklogBytes atomic.Int64
 	// StateLog persists raft's HardState and snapshot. Records are written
 	// only when the state actually changes, and appendState truncates behind
 	// the newest Snapshot + HardState records, so the log holds a handful of
@@ -881,6 +888,32 @@ func (s *Storage) ConfState(c *pb.ConfState) {
 // on-disk length by a few kB — close enough for a trigger decision.
 // Errors walking the directory are returned as (0, err); callers
 // treat that as "no trigger" rather than panicking.
+// eventLogApproxSize sums the on-disk size of the permanent event log's
+// segment files — the cost basis for the metadata-GC volume gate (a scrub
+// rewrite reads the whole log twice and rewrites it once). Same shape as
+// RaftLogApproxSize; advisory, so a file vanishing mid-walk (a concurrent
+// scrub swap) is skipped rather than failed.
+func (s *Storage) eventLogApproxSize() (uint64, error) {
+	entries, err := os.ReadDir(s.eventLogDir)
+	if err != nil {
+		return 0, err
+	}
+	var total uint64
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if sz := info.Size(); sz > 0 {
+			total += uint64(sz)
+		}
+	}
+	return total, nil
+}
+
 func (s *Storage) RaftLogApproxSize() (uint64, error) {
 	entries, err := os.ReadDir(s.raftLogDir)
 	if err != nil {

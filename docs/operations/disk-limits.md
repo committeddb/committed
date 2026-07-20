@@ -76,6 +76,13 @@ compaction's job (see
 watcher is unavailable on Windows (no `statfs`); there it disables
 itself and the node stays fully writable.
 
+> **Scrub headroom:** the RTBF/metadata-GC scrub rewrites the permanent event
+> log into a sibling directory before swapping it in, so a scrub cycle
+> transiently needs up to **~2× the event log's size** in free space. Size the
+> volume with that in mind. (The metadata-only scrub is volume-gated — on a
+> large log it runs only when it would reclaim a meaningful fraction of what it
+> rewrites — but an RTBF erasure runs regardless, as it must.)
+
 ## Cluster-aware write admission
 
 Every node stores the full replicated log, so a node fills from the

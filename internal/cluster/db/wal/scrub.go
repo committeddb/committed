@@ -644,6 +644,7 @@ func (s *Storage) markScrubComplete(bound uint64) error {
 	// during the scrub (index > bound) aren't reflected; they re-accumulate and
 	// drive the next scrub. Exactness isn't required (see metadataBacklog).
 	s.metadataBacklog.Store(0)
+	s.metadataBacklogBytes.Store(0)
 	return nil
 }
 
@@ -658,6 +659,45 @@ func (s *Storage) markScrubComplete(bound uint64) error {
 // A var (not const) only so a test can lower it (SetMetadataBacklogThresholdForTest).
 var metadataBacklogThreshold int64 = 128
 
+// metadataEntryOverhead is the per-entry framing/protobuf overhead added to a
+// counted supersession's key+data size when estimating reclaimable bytes.
+const metadataEntryOverhead = 64
+
+// Volume gate for the metadata-only scrub. The rewrite's COST is O(total log
+// size) — read the whole log twice, rewrite every survivor — while its BENEFIT
+// is only the superseded metadata it drops. The count threshold alone let a
+// steady trickle of checkpoint bumps (seconds' worth under sync load) trigger a
+// full-log rewrite EVERY scheduler tick, forever: at a 50 GiB log that is
+// ~150 GiB of I/O per node per hour to reclaim kilobytes, plus a transient ~2×
+// disk spike per cycle. On a log larger than metadataScrubMinLogBytes the
+// metadata term therefore also requires the estimated reclaimable bytes to be
+// at least logSize/metadataScrubReclaimDivisor (~6%), so scrub I/O is
+// proportional to what it reclaims. Below the floor the rewrite is cheap and
+// the count threshold alone governs — the pre-gate behavior, which keeps small
+// deployments (and the test suite) unchanged. RTBF erasure is deliberately NOT
+// gated (legally urgent — see HasScrubBacklog). Vars so tests can shrink them.
+var (
+	metadataScrubMinLogBytes    int64 = 256 << 20
+	metadataScrubReclaimDivisor int64 = 16
+)
+
+// hasMetadataBacklog reports whether enough superseded metadata has accumulated
+// to be WORTH an O(total-log) rewrite — the count threshold plus, on a large
+// log, the reclaimable-volume gate above. On a size-read error (e.g. a
+// concurrent scrub swap moved the directory) it falls back to the count-only
+// behavior: mid-swap means a scrub just ran and the counters are about to
+// reset, so the conservative fallback is momentary.
+func (s *Storage) hasMetadataBacklog() bool {
+	if s.metadataBacklog.Load() < metadataBacklogThreshold {
+		return false
+	}
+	size, err := s.eventLogApproxSize()
+	if err != nil || int64(size) <= metadataScrubMinLogBytes { //nolint:gosec // G115: segment-file sums are far below int64 max
+		return true
+	}
+	return s.metadataBacklogBytes.Load() >= int64(size)/metadataScrubReclaimDivisor //nolint:gosec // G115: as above
+}
+
 // HasScrubBacklog reports whether the next scrub has anything to physically
 // remove — either RTBF erasure (a delete-tombstone beyond the highest completed
 // bound) or enough accumulated superseded metadata to be worth an O(N) rewrite.
@@ -666,7 +706,7 @@ var metadataBacklogThreshold int64 = 128
 // pass does, so an idle cadence tick skips the rewrite. A metadata-heavy,
 // RTBF-free cluster triggers via the metadata term (see metadata-gc-scrubber).
 func (s *Storage) HasScrubBacklog() bool {
-	return s.hasRTBFBacklog() || s.metadataBacklog.Load() >= metadataBacklogThreshold
+	return s.hasRTBFBacklog() || s.hasMetadataBacklog()
 }
 
 // hasRTBFBacklog reports whether any tombstone records a delete at an index

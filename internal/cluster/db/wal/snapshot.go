@@ -173,6 +173,7 @@ func (s *Storage) RestoreSnapshot(snap *pb.Snapshot) error {
 	// later ApplyCommitted (same goroutine) may bump it, and an async reset would
 	// race and clobber that legitimate post-restore increment.
 	s.metadataBacklog.Store(0)
+	s.metadataBacklogBytes.Store(0)
 
 	// Re-derive the in-memory database-handle cache from the swapped-in bbolt
 	// through Open's shared routine, so the restore path keeps ONE error policy

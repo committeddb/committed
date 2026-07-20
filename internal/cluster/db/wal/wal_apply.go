@@ -111,6 +111,9 @@ func (s *Storage) ApplyCommitted(entry *pb.Entry) error {
 			// slightly, which is harmless (see metadataBacklog).
 			if entity.Type.EntityKind == cluster.EntityKindSnapshot {
 				s.metadataBacklog.Add(1)
+				// Approximate the reclaimable bytes: the superseded prior entry
+				// is ~the size of this, its same-key successor (+ framing).
+				s.metadataBacklogBytes.Add(int64(len(entity.Key)+len(entity.Data)) + metadataEntryOverhead)
 			}
 
 			// Raise the per-topic refresh-epoch floor to the highest generation

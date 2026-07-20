@@ -209,6 +209,15 @@ func SetMetadataBacklogThresholdForTest(n int64) func() {
 	return func() { metadataBacklogThreshold = old }
 }
 
+// SetMetadataScrubMinLogBytesForTest shrinks the volume gate's small-log floor
+// so a test can exercise the reclaimable-ratio term with a kilobyte-scale log.
+// Returns a func that restores the production value.
+func SetMetadataScrubMinLogBytesForTest(n int64) func() {
+	old := metadataScrubMinLogBytes
+	metadataScrubMinLogBytes = n
+	return func() { metadataScrubMinLogBytes = old }
+}
+
 // Frame applies the per-entry checksum frame, so tests can forge
 // legacy-format state-log records directly on disk (the pre-truncation code
 // appended a HardState + full-snapshot record pair on every Ready; recovery
