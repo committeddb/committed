@@ -54,7 +54,8 @@ func TestMysqlSnapshotStreamFloatParity(t *testing.T) {
 	colDefs := make([]string, 0, len(rows))
 	insertCols := make([]string, 0, len(rows))
 	insertVals := make([]string, 0, len(rows))
-	mappings := []sql.Mapping{{JsonName: "pk", SQLColumn: "pk"}}
+	mappings := make([]sql.Mapping, 0, 1+len(rows))
+	mappings = append(mappings, sql.Mapping{JsonName: "pk", SQLColumn: "pk"})
 	for _, r := range rows {
 		colDefs = append(colDefs, fmt.Sprintf("`%s` %s", r.name, r.ddl))
 		insertCols = append(insertCols, r.name)
