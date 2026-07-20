@@ -183,6 +183,25 @@ func (d *PostgreSQLDialect) Preflight(config *sql.Config) error {
 	}
 	defer func() { _ = db.Close() }()
 
+	// wal_level=logical is the foundation of logical replication and requires a
+	// server RESTART to change — the prerequisite a first-time setup most often
+	// misses (stock postgresql.conf ships wal_level=replica). Without it, slot
+	// creation fails at worker start, surfacing as a frozen ingest an operator
+	// has to diagnose from logs; reject at POST time with a clean 400 instead —
+	// parity with the MySQL binlog gates. Unlike MySQL's binlog_format there is
+	// no silent part-working variant (logical decoding is row-level by
+	// construction and a wrong wal_level fails loudly), so this gate is
+	// failure-UX, not data safety.
+	var walLevel string
+	if err := db.QueryRowContext(ctx, `SHOW wal_level`).Scan(&walLevel); err != nil {
+		return fmt.Errorf("read wal_level: %w", err)
+	}
+	if !strings.EqualFold(walLevel, "logical") {
+		return fmt.Errorf(
+			"wal_level is %q, but logical replication requires \"logical\": the replication slot cannot be created, so ingest would never start. Set `wal_level = logical` in postgresql.conf and restart the server",
+			walLevel)
+	}
+
 	for _, table := range pgCfg.tables {
 		if err := checkReplicaIdentity(ctx, db, table, config.PrimaryKey); err != nil {
 			return err

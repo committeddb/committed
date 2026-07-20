@@ -295,8 +295,10 @@ plugin.
 
 ### Prerequisites (operator)
 
-1. **`wal_level = logical`.** This requires a server restart. Without it, the
-   replication slot can't be created and ingest fails to start.
+1. **`wal_level = logical`.** This requires a server restart. Preflight checks
+   it, so `POST /v1/ingestable` fails with a clear 400 until it is set (without
+   the check, the replication slot simply can't be created and ingest would
+   never start).
 
    ```ini
    # postgresql.conf
