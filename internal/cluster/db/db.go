@@ -908,6 +908,31 @@ func waitDone(done <-chan struct{}, timeout time.Duration) bool {
 	}
 }
 
+// runBounded runs fn on its own goroutine and waits at most timeout for it to
+// return, reporting fn's error and whether it completed. On timeout fn keeps
+// running detached (a blocked Exec/Close cannot be interrupted from here) and
+// its eventual error is discarded — a bounded leak that unwinds when the
+// destination recovers or the kernel TCP timeout fires.
+//
+// This is the liveness guard for destination-touching calls on the
+// single-threaded config-listener path (Teardown, Close): the drain leg of a
+// delete/replace is already waitDone-bounded, but the teardown/close that
+// FOLLOWS an abandoned drain talks to the same unreachable destination, and an
+// unbounded call there parks the listener — the apply path's next config-channel
+// send then blocks the raft Ready loop, stalling apply of ALL further committed
+// entries. The bound holds for any implementation, including ones that don't
+// ctx-bound themselves internally.
+func runBounded(timeout time.Duration, fn func() error) (err error, completed bool) {
+	done := make(chan error, 1)
+	go func() { done <- fn() }()
+	select {
+	case err := <-done:
+		return err, true
+	case <-time.After(timeout):
+		return nil, false
+	}
+}
+
 // closeDrainedSyncable releases a torn-down syncable's resources — a SQL
 // syncable's prepared statements, a webhook syncable's idle connections — via
 // Close, so an ordinary redeploy (re-POST / delete / rebuild / shutdown) doesn't
@@ -936,7 +961,13 @@ func (db *DB) closeDrainedSyncable(handle *workerHandle, id string) {
 		// connection is eventually recycled.
 		return
 	}
-	if err := handle.syncable.Close(); err != nil {
+	// Bounded: Close writes statement-close packets to the destination, which
+	// can block on a dead network until the TCP timeout — and this runs on the
+	// config-listener path (see runBounded).
+	if err, completed := runBounded(db.workerDrainTimeout, handle.syncable.Close); !completed {
+		db.logger.Warn("syncable close did not return in time (unreachable destination?); abandoning it — prepared statements linger until the pool recycles the connection",
+			zap.String("id", id), zap.Duration("timeout", db.workerDrainTimeout))
+	} else if err != nil {
 		db.logger.Warn("syncable close on teardown failed; prepared statements may linger until the pool recycles the connection",
 			zap.String("id", id), zap.Error(err))
 	}

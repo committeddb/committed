@@ -200,7 +200,14 @@ func (db *DB) deleteSync(id string) {
 	if !ok {
 		return // syncable owns no external destination state
 	}
-	if err := teardownable.Teardown(); err != nil {
+	// Bounded (runBounded): this runs on the single-threaded config listener,
+	// and the destination that wedged the worker above is the same one Teardown
+	// is about to talk to — an unbounded DROP there would park the listener and
+	// stall the raft apply loop on its next config send.
+	if err, completed := runBounded(db.workerDrainTimeout, teardownable.Teardown); !completed {
+		db.logger.Error("syncable deleted but destination teardown did not return in time (unreachable destination?); abandoning it (orphaned destination state; remove it manually)",
+			zap.String("id", id), zap.Duration("timeout", db.workerDrainTimeout))
+	} else if err != nil {
 		// Best-effort: the logical delete already committed. Log loudly and
 		// move on — the worst case is orphaned destination state.
 		db.logger.Error("syncable deleted but destination teardown failed (orphaned destination state; remove it manually)",

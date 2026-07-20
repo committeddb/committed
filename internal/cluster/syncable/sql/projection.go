@@ -153,6 +153,10 @@ func projectionIdentity(c *ProjectionConfig) SyncableIdentity {
 // name + DB handle), which is what the delete/rebuild paths rely on. It never
 // touches prepared statements or the connection pool; call Close for those.
 func (p *Projection) Teardown() error {
+	// Self-bounded — see Syncable.Teardown for the rationale.
+	ctx, cancel := context.WithTimeout(context.Background(), teardownTimeout)
+	defer cancel()
+
 	p.config.applyDefaults()
 	// Drop each aggregate source's sidecar, then the projection table. Order is
 	// not load-bearing (DROP IF EXISTS is independent), but dropping sidecars
@@ -168,12 +172,12 @@ func (p *Projection) Teardown() error {
 			continue
 		}
 		drop := p.dialect.DropDDL(&Config{Table: housekeeping})
-		if _, err := p.db.Exec(drop); err != nil {
+		if _, err := p.db.ExecContext(ctx, drop); err != nil {
 			return fmt.Errorf("teardown [%s]: %w", drop, err)
 		}
 	}
 	dropString := p.dialect.DropDDL(p.config.ddlConfig())
-	if _, err := p.db.Exec(dropString); err != nil {
+	if _, err := p.db.ExecContext(ctx, dropString); err != nil {
 		return fmt.Errorf("teardown [%s]: %w", dropString, err)
 	}
 	return nil

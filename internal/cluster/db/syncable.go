@@ -182,7 +182,13 @@ func (db *DB) rebuildTeardownDestinationLocal(id string, handle *workerHandle) {
 	if !ok {
 		return
 	}
-	if err := teardownable.Teardown(); err != nil {
+	// Bounded (runBounded): rebuild runs on an HTTP handler goroutine, and a
+	// destination that wedged the worker would otherwise hang the request (and
+	// leak the goroutine) until the kernel TCP timeout.
+	if err, completed := runBounded(db.workerDrainTimeout, teardownable.Teardown); !completed {
+		db.logger.Error("rebuild: destination teardown did not return in time (unreachable destination?); replay will write over the existing destination (rebuild not clean)",
+			zap.String("id", id), zap.Duration("timeout", db.workerDrainTimeout))
+	} else if err != nil {
 		db.logger.Error("rebuild: destination teardown failed; replay will write over the existing destination (rebuild not clean)",
 			zap.String("id", id), zap.Error(err))
 	}

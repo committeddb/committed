@@ -246,7 +246,13 @@ func (db *DB) deleteIngest(id string) {
 	if !ok {
 		return // ingestable owns no source-side replication resource
 	}
-	if err := teardownable.Teardown(); err != nil {
+	// Bounded (runBounded): this runs on the single-threaded config listener.
+	// The SQL implementation ctx-bounds itself (TeardownSource), but the guard
+	// must hold for any implementation.
+	if err, completed := runBounded(db.workerDrainTimeout, teardownable.Teardown); !completed {
+		db.logger.Error("ingestable deleted but source teardown did not return in time (unreachable source?); abandoning it (an orphaned replication slot may pin the source's WAL; drop it manually)",
+			zap.String("id", id), zap.Duration("timeout", db.workerDrainTimeout))
+	} else if err != nil {
 		// Best-effort: the logical delete already committed. Log loudly and move
 		// on — the worst case is an orphaned slot pinning the source's WAL.
 		db.logger.Error("ingestable deleted but source teardown failed (an orphaned replication slot may pin the source's WAL; drop it manually)",

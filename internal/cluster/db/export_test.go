@@ -61,6 +61,23 @@ func (db *DB) InjectWedgedSyncWorkerForTest(id string) {
 // DeleteSyncForTest drives the apply-path syncable teardown directly.
 func (db *DB) DeleteSyncForTest(id string) { db.deleteSync(id) }
 
+// InjectDrainedSyncWorkerForTest registers a sync worker handle whose done
+// channel is already closed (a cleanly-drained worker) carrying the given
+// syncable — so a delete proceeds past the drain into the Close/Teardown legs.
+// Used by the bounded-teardown/close tests, whose syncables block there.
+func (db *DB) InjectDrainedSyncWorkerForTest(id string, s cluster.Syncable) {
+	done := make(chan struct{})
+	close(done)
+	db.workersMu.Lock()
+	db.syncWorkers[id] = &workerHandle{cancel: func() {}, done: done, syncable: s}
+	db.workersMu.Unlock()
+}
+
+// IsLeaderForTest reports whether this node currently believes it is leader —
+// the gate deleteSync's owner check (isNode) resolves through when the config
+// is already gone. Tests wait on it before driving an owner-only teardown.
+func (db *DB) IsLeaderForTest() bool { return db.leaderState.IsLeader() }
+
 // NextRequestIDForTest draws the next RequestID exactly as proposeAsync would,
 // so a test can observe the per-process seed (randomRequestIDBase) without
 // standing up the full propose→raft→apply path.

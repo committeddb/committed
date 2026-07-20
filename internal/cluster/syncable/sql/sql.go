@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/PaesslerAG/jsonpath"
 	"go.uber.org/zap"
@@ -55,16 +56,30 @@ func (c *Syncable) CheckpointPolicy() cluster.CheckpointPolicy {
 // (only the table name + DB handle), which the delete/rebuild paths rely on.
 // It never touches prepared statements or the connection pool; call Close for
 // those.
+// teardownTimeout bounds a Teardown's DROP statements against the destination.
+// Teardown is best-effort by contract (a failure logs and leaves orphaned
+// state), so a generous-but-finite bound is strictly better than hanging on an
+// unreachable destination.
+const teardownTimeout = 10 * time.Second
+
 func (c *Syncable) Teardown() error {
+	// Self-bounded (teardownTimeout): teardown targets a destination that may be
+	// the very reason the worker was torn down — a hung DROP must not run
+	// unbounded. Mirrors the ingest twin (TeardownSource). The db-layer caller
+	// additionally bounds the whole call (runBounded), but the ctx is what
+	// actually cancels the query/pool-wait instead of leaking it.
+	ctx, cancel := context.WithTimeout(context.Background(), teardownTimeout)
+	defer cancel()
+
 	dropString := c.dialect.DropDDL(c.config)
-	if _, err := c.db.Exec(dropString); err != nil {
+	if _, err := c.db.ExecContext(ctx, dropString); err != nil {
 		return fmt.Errorf("teardown [%s]: %w", dropString, err)
 	}
 	// Drop the keyless syncable's dedup sidecar too — DropDDL on its name. A
 	// keyed syncable has none, so this is skipped.
 	if c.config.PrimaryKey == "" {
 		sidecarDrop := c.dialect.DropDDL(&Config{Table: AppliedSidecarName(c.config.Table)})
-		if _, err := c.db.Exec(sidecarDrop); err != nil {
+		if _, err := c.db.ExecContext(ctx, sidecarDrop); err != nil {
 			return fmt.Errorf("teardown applied-sidecar [%s]: %w", sidecarDrop, err)
 		}
 	}
