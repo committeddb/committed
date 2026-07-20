@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/pb33f/libopenapi"
 	validator "github.com/pb33f/libopenapi-validator"
 	valerrors "github.com/pb33f/libopenapi-validator/errors"
@@ -518,52 +519,14 @@ func TestOpenAPIContract_UnauthorizedShape(t *testing.T) {
 	require.True(t, valid, "401 response did not match spec: %s", formatValidationErrors(errs))
 }
 
-// TestOpenAPIContract_SpecCoversAllRoutes is a belt-and-suspenders
-// check: every route the Chi router serves must have an entry in the
-// spec. If someone adds a new route without documenting it, this fails.
-// It uses a lightweight, hand-maintained list of router paths because
-// chi doesn't expose a stable route walker in this code path and the
-// list is short.
+// TestOpenAPIContract_SpecCoversAllRoutes is the drift guard: every route the
+// live Chi router serves must have a path item in the spec. It walks the ACTUAL
+// mounted router (chi.Walk) rather than a hand-maintained list — the old list
+// silently omitted routes it never checked (scrub, version, rebuild, promote,
+// disk-report, migration-*), passing green while the spec drifted. Adding a route
+// to http.go without a spec entry now fails here automatically.
 func TestOpenAPIContract_SpecCoversAllRoutes(t *testing.T) {
 	doc, _ := newValidator(t)
-
-	// The set of routes registered in http.go. Keep in sync when adding
-	// new handlers.
-	expected := []string{
-		"/health",
-		"/ready",
-		"/openapi.yaml",
-		"/docs",
-		"/v1/database",
-		"/v1/database/{id}",
-		"/v1/database/{id}/versions",
-		"/v1/database/{id}/versions/{version}",
-		"/v1/database/{id}/rollback",
-		"/v1/ingestable",
-		"/v1/ingestable/{id}",
-		"/v1/ingestable/{id}/versions",
-		"/v1/ingestable/{id}/versions/{version}",
-		"/v1/ingestable/{id}/status",
-		"/v1/ingestable/{id}/rollback",
-		"/v1/syncable",
-		"/v1/syncable/{id}",
-		"/v1/syncable/{id}/versions",
-		"/v1/syncable/{id}/versions/{version}",
-		"/v1/syncable/{id}/errors",
-		"/v1/syncable/{id}/deadletter",
-		"/v1/syncable/{id}/status",
-		"/v1/syncable/{id}/replay/{index}",
-		"/v1/syncable/{id}/rollback",
-		"/v1/type",
-		"/v1/type/{id}",
-		"/v1/type/{id}/versions",
-		"/v1/type/{id}/versions/{version}",
-		"/v1/type/{id}/pipeline",
-		"/v1/proposal",
-		"/v1/node/status",
-		"/v1/membership",
-		"/v1/membership/{id}",
-	}
 
 	model, errs := doc.BuildV3Model()
 	require.Empty(t, errs, "must build v3 model from spec")
@@ -573,12 +536,26 @@ func TestOpenAPIContract_SpecCoversAllRoutes(t *testing.T) {
 		specPaths[p] = true
 	}
 
-	var missing []string
-	for _, p := range expected {
-		if !specPaths[p] {
-			missing = append(missing, p)
+	// Walk the real router. chi reports each (method, pattern); the pattern uses
+	// {param}, matching OpenAPI path templating, so patterns map straight to spec
+	// paths. Dedupe by path (a path with several methods walks several times).
+	h := httppkg.New(&clusterfakes.FakeCluster{})
+	seen := map[string]bool{}
+	var undocumented []string
+	err := chi.Walk(h.RouterForTest(), func(method, route string, _ httpgo.Handler, _ ...func(httpgo.Handler) httpgo.Handler) error {
+		if route != "/" {
+			route = strings.TrimSuffix(route, "/")
 		}
-	}
-	sort.Strings(missing)
-	require.Empty(t, missing, "routes registered in http.go are missing from api/openapi.yaml")
+		if seen[route] {
+			return nil
+		}
+		seen[route] = true
+		if !specPaths[route] {
+			undocumented = append(undocumented, method+" "+route)
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	sort.Strings(undocumented)
+	require.Empty(t, undocumented, "routes registered in http.go are missing from api/openapi.yaml (add a path item for each)")
 }

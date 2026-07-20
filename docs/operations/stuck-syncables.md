@@ -33,9 +33,10 @@ the one running the worker, and it survives a leader change.
 
 - **Metric (alert on this).** `committed_sync_stuck{syncable_id}` is a gauge
   that goes to `1` once a worker has been blocked past the stuck threshold
-  (~30 seconds), `0` otherwise. Prometheus scrapes each node directly, so an
-  alert like `max by (syncable_id) (committed_sync_stuck) == 1 for 5m`
-  fires regardless of which node holds the worker.
+  (~30 seconds), `0` otherwise. Every node pushes it via OTLP to your collector
+  (see [metrics.md](metrics.md)), so an alert like
+  `max by (syncable_id) (committed_sync_stuck) == 1 for 5m` fires regardless of
+  which node holds the worker.
 - **Status endpoint.** `GET /v1/syncable/{id}/status` reports it on demand:
 
   ```bash

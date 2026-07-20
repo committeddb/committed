@@ -85,6 +85,16 @@ learns node 4's address, the leader replicates the log (or a snapshot) to
 it, and node 4 becomes a voter. The command returns once the change has
 taken effect.
 
+> **Joining an established cluster? Rebuild the node first.** A brand-new node
+> started with an **empty** data directory can only join a cluster whose raft log
+> has not yet compacted past `raft index 1` — a young cluster. On any multi-day-old
+> cluster with real write traffic the log has compacted, so the leader can only
+> ship a snapshot, and a fresh node applying that snapshot lands in the
+> "severely behind" state that **fatal-exits on start**. Seed the new node from a
+> healthy peer's data directory *before* you add it — see
+> [rebuild.md](rebuild.md). This applies whether you add it as a voter (above) or
+> as a learner (below).
+
 ## Growing safely with a learner
 
 Adding a node straight as a voter (above) has a subtle cost: the new node

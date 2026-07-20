@@ -155,6 +155,9 @@ and the gauges below.
 
 ## Observability and alerting
 
+Metrics are pushed via OTLP to your collector, not scraped — see
+[metrics.md](metrics.md) for enablement and the full catalog.
+
 Per node:
 
 - `committed_disk_state{level=...}` — this node's own disk level.

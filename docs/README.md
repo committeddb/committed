@@ -30,6 +30,8 @@ A map of the docs. Start with the quickstart; reach for the rest as you need the
   MySQL: the source-side settings, what committed creates, and common failures.
 - [Cluster membership](operations/membership.md) — add, remove, and grow nodes
   safely, and read cluster state.
+- [Metrics & observability](operations/metrics.md) — turn on metrics (OTLP push,
+  no scrape endpoint), bridge to Prometheus, and the full metric catalog.
 - [Disk limits](operations/disk-limits.md) — how the cluster protects itself as
   disks fill, the thresholds and metrics, and the incident playbook.
 - [Stuck syncables](operations/stuck-syncables.md) — spot a syncable that's

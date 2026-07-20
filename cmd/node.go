@@ -117,7 +117,15 @@ image can be templated per-node by an orchestrator:
   COMMITTED_HTTP_CORS_HEADERS
                        comma-separated allowed request headers (default
                        "Content-Type,Authorization,X-Request-ID"). Only
-                       applies when CORS is enabled.`,
+                       applies when CORS is enabled.
+
+  OTEL_EXPORTER_OTLP_ENDPOINT
+                       OpenTelemetry Collector address (e.g.
+                       "http://otel-collector:4317"). Setting it enables
+                       metrics, which are PUSHED via OTLP — committed serves
+                       no /metrics scrape endpoint. Unset (default) disables
+                       metrics with zero overhead. See
+                       docs/operations/metrics.md.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		v := version.Get()
 		zap.L().Info("committed starting",

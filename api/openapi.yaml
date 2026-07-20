@@ -148,6 +148,25 @@ paths:
               schema:
                 type: string
 
+  /version:
+    get:
+      tags: [meta]
+      summary: Build identity of the running binary
+      description: |
+        Returns the build-time identity (version, commit, build date, Go
+        toolchain) of the node that answered. Unauthenticated and state-free,
+        like `/health` — operators use it to confirm every node is on the same
+        build without needing a token or the leader.
+      operationId: getVersion
+      security: []
+      responses:
+        '200':
+          description: Build identity of the answering node.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VersionResponse'
+
   /v1/database:
     get:
       tags: [database]
@@ -1201,6 +1220,31 @@ paths:
         '507':
           $ref: '#/components/responses/InsufficientStorage'
 
+  /v1/scrub:
+    post:
+      tags: [proposal]
+      summary: Erase delete-proposed entities (right-to-be-forgotten)
+      description: |
+        The manual right-to-be-forgotten lever: physically removes entities
+        already marked deleted (via a `delete` proposal) from the permanent
+        event log, up to the current applied index. The automatic scrubber does
+        the same on a cadence; this triggers it on demand. Authenticated like
+        every other write, and idempotent. Returns 202 once the scrub is
+        submitted and confirmed by consensus.
+
+        See docs/event-log-architecture.md for what the scrub removes (and the
+        delete tombstone it deliberately retains).
+      operationId: scrub
+      responses:
+        '202':
+          description: Scrub submitted and confirmed by consensus.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/ScrubUnconfirmed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /v1/node/status:
     get:
       tags: [node]
@@ -1556,6 +1600,16 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
+    ScrubUnconfirmed:
+      description: |
+        The scrub was submitted to raft but could not be confirmed to have taken
+        effect before the request deadline (`code` is `scrub_unconfirmed`) —
+        typically this node cannot currently reach a quorum. It may still take
+        effect once a quorum is reachable; the request is idempotent, so retry.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
 
   schemas:
     HealthResponse:
@@ -1573,6 +1627,24 @@ components:
         status:
           type: string
           enum: [ok, "not ready"]
+
+    VersionResponse:
+      type: object
+      required: [version, commit, buildDate, goVersion]
+      description: Build-time identity of the running binary.
+      properties:
+        version:
+          type: string
+          description: Release version (e.g. "0.7.3-beta"), or "dev" for an unstamped build.
+        commit:
+          type: string
+          description: Git commit the binary was built from, or "unknown".
+        buildDate:
+          type: string
+          description: Build timestamp, or "unknown".
+        goVersion:
+          type: string
+          description: Go toolchain version the binary was built with.
 
     NodeStatusResponse:
       type: object
