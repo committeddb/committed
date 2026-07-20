@@ -31,7 +31,50 @@ import (
 // via the pgoutput plugin. It connects using the replication protocol,
 // decodes INSERT/UPDATE/DELETE row events, groups them by transaction, and
 // emits one cluster.Proposal per committed transaction.
-type PostgreSQLDialect struct{}
+type PostgreSQLDialect struct {
+	// snapshotBatchHook is a test-only failure-injection seam, called before
+	// each snapshot batch read with the table and 1-based batch number; a
+	// non-nil error aborts the snapshot as if the source connection failed.
+	// Always nil in production (set via SetSnapshotBatchHookForTest).
+	snapshotBatchHook func(table string, batch int) error
+}
+
+// snapshotIntent records a snapshot stream() has decided to run but not yet
+// completed. It is held by Ingest's reconnect loop — NOT re-derived per attempt —
+// because the signals the decision comes from are non-repeatable: slot creation
+// is durable server-side (slotIsNew is false on a retry), ensurePublication
+// reports a table as "newly added" only once, and the in-memory resume cursor is
+// consumed when the snapshot starts. Before this existed, a transient error
+// mid-snapshot meant the retry matched no snapshot case and went straight to
+// streaming — silently abandoning the enumeration — and the first streaming
+// checkpoint (progress=nil, last-writer-wins) then erased the durable cursor
+// too, so rows never enumerated never reached the log while status reported
+// healthy. The intent survives in-process retries so a failed snapshot resumes
+// instead; progress advances as batches hand off, completed tables skip
+// entirely, and a snapshot that finished but whose closing marker failed
+// retries as a no-op enumeration + marker re-emit. (The MySQL dialect retries
+// its snapshot in-loop for the same reason; a process crash is covered
+// separately by the durable inline batch checkpoints.)
+type snapshotIntent struct {
+	tables   []string
+	progress *dialectpb.SnapshotProgress
+	// marker: emit the closing refresh-boundary marker when the enumeration
+	// completes (full refreshes reconcile; a partial added-table backfill must
+	// NOT sweep, so it carries no marker).
+	marker bool
+}
+
+// newSnapshotProgress returns a fresh, caller-owned SnapshotProgress seeded
+// from a durable resume cursor (nil for a from-scratch snapshot). The clone
+// keeps the intent's live cursor independent of the decoded checkpoint value.
+func newSnapshotProgress(seed *dialectpb.SnapshotProgress) *dialectpb.SnapshotProgress {
+	p := &dialectpb.SnapshotProgress{LastPkByTable: map[string]string{}}
+	if seed != nil {
+		maps.Copy(p.LastPkByTable, seed.LastPkByTable)
+		p.CompletedTables = append(p.CompletedTables, seed.CompletedTables...)
+	}
+	return p
+}
 
 const (
 	backoffMin = 1 * time.Second
@@ -290,8 +333,14 @@ func (d *PostgreSQLDialect) Ingest(ctx context.Context, config *sql.Config, pos 
 
 	backoff := backoffMin
 
+	// intent is the pending-snapshot record that survives stream() retries —
+	// see snapshotIntent. stream() forms it before running a snapshot and
+	// clears it only on completion, so a transient error resumes the snapshot
+	// on the next attempt instead of silently skipping to streaming.
+	var intent *snapshotIntent
+
 	for {
-		err := d.stream(ctx, config, pgCfg, &startLSN, &resumeProgress, &epoch, epochFloor, pr, po)
+		err := d.stream(ctx, config, pgCfg, &startLSN, &resumeProgress, &epoch, epochFloor, &intent, pr, po)
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -525,6 +574,7 @@ func (d *PostgreSQLDialect) stream(
 	resumeProgress **dialectpb.SnapshotProgress,
 	epoch *uint64,
 	epochFloor uint64,
+	intent **snapshotIntent,
 	pr chan<- *cluster.Proposal,
 	po chan<- cluster.Position,
 ) (err error) {
@@ -614,6 +664,14 @@ func (d *PostgreSQLDialect) stream(
 		return err
 	}
 
+	// Decide what (if anything) to snapshot, recording the decision as a
+	// snapshotIntent BEFORE running it — the signals below are one-shot, so the
+	// decision must outlive a failed attempt (see snapshotIntent). Order
+	// matters: slot recreation overrides a pending intent (its LSN base moved
+	// and rows already emitted carry the pre-bump epoch, so a resumed partial
+	// enumeration would leave completed tables below the new marker's sweep —
+	// start over); otherwise a pending intent resumes as-is and the one-shot
+	// signals are NOT re-derived.
 	switch {
 	case slotIsNew && *lastLSN != 0:
 		// The slot was recreated (dropped, expired, or reaped by
@@ -644,12 +702,10 @@ func (d *PostgreSQLDialect) stream(
 			zap.Uint64("refreshEpoch", *epoch))
 		*lastLSN = cp
 		*resumeProgress = nil
-		if err := d.snapshot(ctx, config, pgCfg, pgCfg.tables, nil, *lastLSN, *epoch, pr, po); err != nil {
-			return err
-		}
-		if err := emitRefreshBoundary(ctx, config, pr, po, *lastLSN, *epoch); err != nil {
-			return err
-		}
+		*intent = &snapshotIntent{tables: pgCfg.tables, progress: newSnapshotProgress(nil), marker: true}
+	case *intent != nil:
+		// A prior attempt's snapshot is unfinished — resume it below. The epoch
+		// and LSN base were already set when the intent was formed.
 	case (slotIsNew && *lastLSN == 0) || *resumeProgress != nil:
 		// (a) the slot was just created and we have no prior checkpoint (first
 		// run — StartReplication(0) below starts from the new slot's consistent
@@ -668,13 +724,8 @@ func (d *PostgreSQLDialect) stream(
 			// the sink still holds rows up to the highwater), else epoch 1.
 			*epoch = sql.RefreshSnapshotEpoch(*epoch, epochFloor)
 		}
-		if err := d.snapshot(ctx, config, pgCfg, pgCfg.tables, *resumeProgress, *lastLSN, *epoch, pr, po); err != nil {
-			return err
-		}
+		*intent = &snapshotIntent{tables: pgCfg.tables, progress: newSnapshotProgress(*resumeProgress), marker: true}
 		*resumeProgress = nil
-		if err := emitRefreshBoundary(ctx, config, pr, po, *lastLSN, *epoch); err != nil {
-			return err
-		}
 	case len(addedTables) > 0:
 		// Resuming an existing slot, but ensurePublication just (re-)added tables
 		// to the publication (a re-POST added one, or a dropped-then-recreated
@@ -687,9 +738,26 @@ func (d *PostgreSQLDialect) stream(
 		// this backfill did not re-emit. Floor to the topic highwater so the
 		// backfilled rows never land below a generation already on the sink.
 		*epoch = max(*epoch, epochFloor, 1)
-		if err := d.snapshot(ctx, config, pgCfg, addedTables, nil, *lastLSN, *epoch, pr, po); err != nil {
+		*intent = &snapshotIntent{tables: addedTables, progress: newSnapshotProgress(nil), marker: false}
+	}
+
+	if in := *intent; in != nil {
+		// snapshot advances in.progress as each batch hands off, so a retry
+		// resumes from the last handed-off batch and completed tables skip
+		// entirely; a snapshot that finished but whose marker send failed
+		// retries as a no-op enumeration + marker re-emit. The intent clears
+		// only after everything it promised has been handed to the channels —
+		// streaming (whose checkpoints erase the durable snapshot cursor)
+		// cannot start before that.
+		if err := d.snapshot(ctx, config, pgCfg, in.tables, in.progress, *lastLSN, *epoch, pr, po); err != nil {
 			return err
 		}
+		if in.marker {
+			if err := emitRefreshBoundary(ctx, config, pr, po, *lastLSN, *epoch); err != nil {
+				return err
+			}
+		}
+		*intent = nil
 	}
 
 	// Any streaming path that did not snapshot still stamps entities, so ensure
@@ -1306,7 +1374,7 @@ func (d *PostgreSQLDialect) snapshot(
 	config *sql.Config,
 	pgCfg *pgConfig,
 	tables []string,
-	resumeProgress *dialectpb.SnapshotProgress,
+	progress *dialectpb.SnapshotProgress,
 	lsn pglogrepl.LSN,
 	epoch uint64,
 	pr chan<- *cluster.Proposal,
@@ -1320,17 +1388,13 @@ func (d *PostgreSQLDialect) snapshot(
 
 	batchSize := parseBatchSize(config.Options)
 
-	progress := &dialectpb.SnapshotProgress{
-		LastPkByTable:   map[string]string{},
-		CompletedTables: nil,
-	}
-	completed := map[string]bool{}
-	if resumeProgress != nil {
-		maps.Copy(progress.LastPkByTable, resumeProgress.LastPkByTable)
-		progress.CompletedTables = append(progress.CompletedTables, resumeProgress.CompletedTables...)
-		for _, t := range resumeProgress.CompletedTables {
-			completed[t] = true
-		}
+	// progress is caller-owned (the snapshotIntent's live cursor) and mutated
+	// IN PLACE as batches hand off, so a failed attempt resumes from exactly
+	// the last handed-off batch instead of restarting the enumeration. It was
+	// seeded from the durable resume cursor by newSnapshotProgress.
+	completed := make(map[string]bool, len(progress.CompletedTables))
+	for _, t := range progress.CompletedTables {
+		completed[t] = true
 	}
 
 	for _, table := range tables {
@@ -1381,6 +1445,15 @@ func (d *PostgreSQLDialect) snapshotTable(
 			return err
 		}
 		batchNum++
+
+		// Test-only failure injection: lets the resume-after-transient-error
+		// tests abort a snapshot mid-enumeration exactly as a dropped source
+		// connection would. Nil in production.
+		if d.snapshotBatchHook != nil {
+			if err := d.snapshotBatchHook(table, batchNum); err != nil {
+				return err
+			}
+		}
 
 		entities, batchLastPK, count, err := readBatch(ctx, db, config, table, pkCols, lastPK, haveLastPK, batchSize)
 		if err != nil {
