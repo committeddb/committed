@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -532,18 +533,11 @@ func (n *Raft) serveChannels() {
 		cancelPropose()
 	}()
 
-	// sendProposeErr forwards a real propose error without blocking shutdown: a
-	// shutdown cancellation is not a real error and is suppressed, and the send
-	// is guarded by closeC so an unread raftErrorC can't wedge the reader. This
-	// mirrors the non-blocking error send in the Ready loop below.
+	// sendProposeErr routes a propose error: shutdown cancellations and
+	// per-proposal outcomes (raft.ErrProposalDropped) are absorbed, real node
+	// faults are forwarded to ErrorC shutdown-guarded. See forwardProposeErr.
 	sendProposeErr := func(err error) {
-		if err == nil || proposeCtx.Err() != nil {
-			return
-		}
-		select {
-		case n.raftErrorC <- err:
-		case <-n.closeC:
-		}
+		n.forwardProposeErr(err, proposeCtx.Err() != nil)
 	}
 
 	go func() {
@@ -682,7 +676,11 @@ func (n *Raft) serveChannels() {
 					// auto-leave). Both flow through here.
 					var cc raftpb.ConfChangeV2
 					if err := proto.Unmarshal(entry.Data, &cc); err != nil {
-						n.raftErrorC <- err
+						// Guarded send (sendRaftError): the one-shot ErrorC
+						// consumer may already be gone (SIGTERM path reads it
+						// zero times), and a raw send here parks the Ready
+						// loop forever — deadlocking Close into SIGKILL.
+						n.sendRaftError(err)
 						break
 					}
 					n.applyConfChange(&cc, cc.Context)
@@ -695,7 +693,7 @@ func (n *Raft) serveChannels() {
 					// committed. See docs/operations/membership.md.
 					var cc raftpb.ConfChange
 					if err := proto.Unmarshal(entry.Data, &cc); err != nil {
-						n.raftErrorC <- err
+						n.sendRaftError(err) // guarded — see the v2 twin above
 						break
 					}
 					n.applyConfChange(&cc, cc.Context)
@@ -756,9 +754,50 @@ func (n *Raft) serveChannels() {
 
 func (n *Raft) writeError(err error) {
 	n.stopTransport()
-	n.raftErrorC <- err
+	n.sendRaftError(err)
 	close(n.raftErrorC)
 	n.node.Stop()
+}
+
+// sendRaftError forwards a fatal raft error to ErrorC without ever blocking
+// past shutdown. ErrorC has a one-shot consumer (cmd/node reads it once, and
+// the SIGTERM path reads it zero times), so a raw send with no reader left
+// would park the sending goroutine — the Ready loop or the propose reader —
+// forever, deadlocking Close's wait on serveChannelsDoneC and leaving the
+// process killable only by SIGKILL. The closeC guard is the same shape the
+// propose-reader and Save-failure sends already used; this centralizes it so
+// no send site can miss it.
+func (n *Raft) sendRaftError(err error) {
+	select {
+	case n.raftErrorC <- err:
+	case <-n.closeC:
+	}
+}
+
+// forwardProposeErr routes an error from node.Propose/ProposeConfChange.
+// shuttingDown suppresses shutdown cancellations (not real errors). A
+// raft.ErrProposalDropped is a PER-PROPOSAL outcome, not a node fault: raft
+// drops (rather than queues) a proposal while a leadership transfer is in
+// progress, when this node has been removed from the configuration, or when
+// the uncommitted-entries buffer is full. The disk-pressure leadership
+// transfer makes the transfer case a routine healthy-cluster event that fires
+// exactly when the leader is busy proposing — forwarding it to ErrorC
+// self-killed the whole node on a designed event. The caller is not left
+// hanging: the fail-fast machinery resolves its waiter with a retryable
+// ErrProposalUnknown after the leader transition (watchLeaderTransitions →
+// signalAfterGrace), or its ctx deadline expires — the same contract as any
+// other proposal whose commit was never observed. Everything else is a real
+// node fault and is forwarded (guarded, see sendRaftError).
+func (n *Raft) forwardProposeErr(err error, shuttingDown bool) {
+	if err == nil || shuttingDown {
+		return
+	}
+	if errors.Is(err, raft.ErrProposalDropped) {
+		n.logger.Warn("proposal dropped by raft (leadership transfer in progress, node removed, or uncommitted-entries buffer full); the caller resolves via fail-fast or its deadline",
+			zap.Error(err))
+		return
+	}
+	n.sendRaftError(err)
 }
 
 func (n *Raft) stopTransport() {
