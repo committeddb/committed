@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"fmt"
 
 	"go.uber.org/zap"
 
@@ -115,7 +116,17 @@ func (db *DB) RebuildSyncable(ctx context.Context, id string) error {
 
 	// 1. Stop the local worker first so it can't bump the checkpoint after the
 	//    reset below. Returns its handle so step 3 can tear the destination down.
-	handle := db.rebuildStopWorkerLocal(id)
+	//    The drain is BOUNDED (workerDrainTimeout, like every sibling handoff) —
+	//    but unlike delete/replace, rebuild must NOT proceed past a failed
+	//    drain: a still-live worker's in-flight checkpoint bump could land after
+	//    the reset and silently defeat the replay (the exact stale-bump hazard
+	//    the drain exists to prevent). Abort instead, with nothing changed; the
+	//    wedged handle stays registered so a retry re-checks it (and a re-POST's
+	//    replace path can still abandon it under its own semantics).
+	handle, drained := db.rebuildStopWorkerLocal(id)
+	if !drained {
+		return fmt.Errorf("%w: rebuild aborted before the checkpoint reset — nothing changed; wait out (or fix) the destination and retry, or re-POST the config to replace the worker", cluster.ErrWorkerWedged)
+	}
 
 	// 2. Reset the checkpoint to 0 (consensus). Blocks until applied.
 	reset := &cluster.Proposal{Entities: []*cluster.Entity{cluster.NewDeleteSyncableIndexEntity(id)}}
@@ -132,7 +143,7 @@ func (db *DB) RebuildSyncable(ctx context.Context, id string) error {
 
 	// Release the stopped worker's prepared statements before step 4 builds a
 	// fresh syncable — otherwise a rebuild leaks a statement set on the pool.
-	// rebuildStopWorkerLocal drained the worker (blocking <-done), so it's safe.
+	// rebuildStopWorkerLocal confirmed the drain (we aborted otherwise), so it's safe.
 	db.closeDrainedSyncable(handle, id)
 
 	// 4. Re-apply the unchanged config: re-initializes the destination and
@@ -143,28 +154,39 @@ func (db *DB) RebuildSyncable(ctx context.Context, id string) error {
 
 // rebuildStopWorkerLocal cancels and drains the local sync worker (if any) and
 // deregisters it, returning its handle so the caller can later tear the
-// destination down via the still-referenced syncable. Draining the goroutine
-// (<-done) is what makes it safe to reset the checkpoint next: once it returns,
-// the worker makes no further proposals, and any checkpoint bump it did submit
-// was necessarily enqueued before the caller's subsequent reset — see
-// RebuildSyncable. Returns nil if no worker was registered.
-func (db *DB) rebuildStopWorkerLocal(id string) *workerHandle {
+// destination down via the still-referenced syncable, plus whether the drain
+// completed. A completed drain is what makes it safe to reset the checkpoint
+// next: once the worker exited, it makes no further proposals, and any
+// checkpoint bump it did submit was necessarily enqueued before the caller's
+// subsequent reset — see RebuildSyncable. Returns (nil, true) if no worker was
+// registered, and (handle, false) on a wedged worker the caller must abort on.
+func (db *DB) rebuildStopWorkerLocal(id string) (*workerHandle, bool) {
 	db.workersMu.Lock()
 	handle, ok := db.syncWorkers[id]
-	if ok {
-		handle.cancel()
+	if !ok {
 		db.workersMu.Unlock()
-		<-handle.done
-		db.workersMu.Lock()
-		if db.syncWorkers[id] == handle {
-			delete(db.syncWorkers, id)
-		}
+		return nil, true // no local worker — nothing to drain
+	}
+	handle.cancel()
+	db.workersMu.Unlock()
+	// Bounded, on the HTTP handler goroutine: a worker wedged in an
+	// uninterruptible tx.Commit never closes done, and an unbounded wait here
+	// hung the request past its write timeout and leaked the goroutine (each
+	// retry parking another one). On timeout the handle stays REGISTERED —
+	// unlike the delete/replace abandons — because the caller aborts and a
+	// retry must find (and re-check) the still-live worker rather than run a
+	// reset it could still defeat.
+	if !waitDone(handle.done, db.workerDrainTimeout) {
+		db.logger.Warn("rebuild: worker did not exit in time (wedged on its destination?); aborting the rebuild",
+			zap.String("id", id), zap.Duration("timeout", db.workerDrainTimeout))
+		return handle, false
+	}
+	db.workersMu.Lock()
+	if db.syncWorkers[id] == handle {
+		delete(db.syncWorkers, id)
 	}
 	db.workersMu.Unlock()
-	if !ok {
-		return nil
-	}
-	return handle
+	return handle, true
 }
 
 // rebuildTeardownDestinationLocal tears the syncable's destination down on the

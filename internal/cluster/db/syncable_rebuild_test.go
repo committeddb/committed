@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 // TestRebuildSyncable_DropsAndReplaysFromZero is the core Phase 3 proof: rebuild
@@ -142,4 +144,43 @@ func TestRebuildSyncable_StaleWorkerBumpDoesNotDefeatReset(t *testing.T) {
 	require.Eventually(t, func() bool { return rec.syncedCount() >= 2 },
 		10*time.Second, 10*time.Millisecond,
 		"rebuild must replay from 0 even when a stale worker bump races the reset")
+}
+
+// TestRebuildSyncable_AbortsOnWedgedWorker pins the bounded-drain abort: a
+// worker wedged in an uninterruptible tx.Commit never closes its done channel,
+// and rebuild's drain used to wait on it UNBOUNDED on the HTTP handler
+// goroutine — hanging the request forever and leaking a goroutine per retry.
+// Rebuild must instead abort within the drain bound, BEFORE the checkpoint
+// reset (a still-live worker's in-flight bump could land after the reset and
+// silently defeat the replay), returning the retryable ErrWorkerWedged with
+// nothing changed.
+func TestRebuildSyncable_AbortsOnWedgedWorker(t *testing.T) {
+	dir := t.TempDir()
+	const id = "rebuild-wedged"
+	rec := &teardownRecorder{}
+	d, _ := newDeleteTestDB(t, dir, rec)
+	t.Cleanup(func() { _ = d.Close() })
+
+	configureDeleteSyncable(t, d, id)
+
+	// The reset must never run on an aborted rebuild.
+	d.SetAfterRebuildCheckpointResetForTest(func() {
+		t.Error("checkpoint reset ran despite a wedged worker — an in-flight bump could defeat the replay")
+	})
+
+	// Replace the worker's registry entry with a wedged handle (done never
+	// closes), modeling a worker stuck in tx.Commit that ignores cancel.
+	d.SetWorkerDrainTimeoutForTest(100 * time.Millisecond)
+	d.InjectWedgedSyncWorkerForTest(id)
+
+	done := make(chan error, 1)
+	go func() { done <- d.RebuildSyncable(testCtx(t), id) }()
+
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, cluster.ErrWorkerWedged,
+			"a wedged worker must abort the rebuild with the retryable sentinel")
+	case <-time.After(5 * time.Second):
+		t.Fatal("RebuildSyncable blocked on a wedged worker's unbounded drain — the HTTP request would hang forever")
+	}
 }

@@ -205,6 +205,16 @@ type BatchSyncable interface {
 	SyncBatch(ctx context.Context, as []*Actual) (shouldSnapshot bool, err error)
 }
 
+// ErrWorkerWedged is returned by RebuildSyncable when the syncable's local
+// worker did not stop within the drain bound — typically wedged in an
+// uninterruptible tx.Commit against an unreachable destination. The rebuild is
+// aborted BEFORE the checkpoint reset (nothing changed): proceeding past a
+// still-live worker would let its in-flight checkpoint bump land after the
+// reset and silently defeat the replay. The HTTP layer renders it 503 — wait
+// out (or fix) the destination and retry, or re-POST the config to replace the
+// worker.
+var ErrWorkerWedged = errors.New("syncable worker did not stop in time (wedged on its destination?)")
+
 // Teardownable is the optional Syncable extension implemented by syncables that
 // own destructive teardown of their destination state (a SQL syncable drops its
 // table). The delete and rebuild paths type-assert it (exactly like

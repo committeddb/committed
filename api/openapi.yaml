@@ -917,7 +917,17 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
         '503':
-          $ref: '#/components/responses/MembershipUnconfirmed'
+          description: |
+            Retryable. Either the underlying write could not be confirmed
+            before the request deadline, or (`code: worker_wedged`) the
+            syncable's local worker is wedged on its destination and did not
+            stop within the drain bound — the rebuild aborted BEFORE the
+            checkpoint reset, so nothing changed. Wait out (or fix) the
+            destination and retry, or re-POST the config to replace the worker.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '500':
           $ref: '#/components/responses/InternalError'
 

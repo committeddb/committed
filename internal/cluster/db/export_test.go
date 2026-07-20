@@ -61,6 +61,10 @@ func (db *DB) InjectWedgedSyncWorkerForTest(id string) {
 // DeleteSyncForTest drives the apply-path syncable teardown directly.
 func (db *DB) DeleteSyncForTest(id string) { db.deleteSync(id) }
 
+// SetAfterRebuildCheckpointResetForTest installs the rebuild reset seam
+// directly, so a test can assert the checkpoint reset did (or did not) run.
+func (db *DB) SetAfterRebuildCheckpointResetForTest(f func()) { db.afterRebuildCheckpointReset = f }
+
 // InjectDrainedSyncWorkerForTest registers a sync worker handle whose done
 // channel is already closed (a cleanly-drained worker) carrying the given
 // syncable — so a delete proceeds past the drain into the Close/Teardown legs.

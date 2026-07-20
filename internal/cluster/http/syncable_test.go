@@ -83,6 +83,23 @@ func TestRebuildSyncable(t *testing.T) {
 	require.Equal(t, "sync-1", gotID)
 }
 
+// A wedged worker aborts the rebuild retryably: 503 with code worker_wedged
+// (the rebuild changed nothing; the caller waits out the destination and
+// retries, or re-POSTs the config to replace the worker).
+func TestRebuildSyncable_WedgedWorkerIs503(t *testing.T) {
+	h, fake := setupTest()
+	fake.IDReturns(1)
+	fake.LeaderReturns(1)
+	fake.RebuildSyncableReturns(fmt.Errorf("%w: rebuild aborted", cluster.ErrWorkerWedged))
+
+	req := httptest.NewRequest("POST", "http://localhost/v1/syncable/sync-1/rebuild", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	require.Equal(t, 503, w.Code)
+	requireErrorResponse(t, w.Result(), "worker_wedged")
+}
+
 // An unknown syncable rebuilds to 404.
 func TestRebuildSyncable_NotFound(t *testing.T) {
 	h, fake := setupTest()

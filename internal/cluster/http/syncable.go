@@ -202,6 +202,13 @@ func (h *HTTP) RebuildSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
 			writeError(w, httpgo.StatusNotFound, "not_found", "syncable not found")
 			return
 		}
+		// A wedged worker aborts the rebuild before anything changed — a
+		// retryable condition (wait out the destination, or re-POST the config
+		// to replace the worker), so 503 rather than a generic failure.
+		if errors.Is(err, cluster.ErrWorkerWedged) {
+			writeError(w, httpgo.StatusServiceUnavailable, "worker_wedged", err.Error())
+			return
+		}
 		writeProposeError(w, err, "syncable", "rebuild syncable")
 		return
 	}
