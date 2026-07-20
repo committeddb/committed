@@ -340,10 +340,21 @@ type Storage struct {
 	// copies even when compaction (the usual snapshot refresher) is disabled.
 	hardStateBytesSinceSnap int
 	lastSnapBytes           int
-	databases               map[string]cluster.Database
-	parser                  db.Parser
-	sync                    chan<- *db.SyncableWithID
-	ingest                  chan<- *db.IngestableWithID
+	// databasesMu guards the databases handle cache. Writers (saveDatabase,
+	// deleteDatabase, loadDatabasesFromTx) all run on the single raft
+	// apply/restore goroutine, but readers do NOT: Database(id) is hit from
+	// HTTP handler goroutines (every syncable POST/rollback/replay parses its
+	// config, which resolves the database) and from the startup
+	// RestoreSyncableWorkers goroutine racing catch-up applies. An unguarded
+	// read against a concurrent map write is an unrecoverable runtime fatal
+	// (node crash). Single-writer discipline means individual ops only need to
+	// be atomic — no check-then-act window to protect — so accesses take the
+	// mutex briefly and never hold it across parsing or handle Close.
+	databasesMu sync.RWMutex
+	databases   map[string]cluster.Database
+	parser      db.Parser
+	sync        chan<- *db.SyncableWithID
+	ingest      chan<- *db.IngestableWithID
 
 	// configErrMu guards configErrors. configErrors records, per
 	// "kind/id" (e.g. "database/orders"), the most recent failure to
@@ -817,7 +828,14 @@ func (s *Storage) Close() error {
 			finalErr = err
 		}
 
-		for _, db := range s.databases {
+		// Swap the cache out under its mutex (a straggler HTTP read must not
+		// race this range), then close the handles outside it. Skip cached
+		// nils — a deleted entry stores nil, and Close on a nil interface
+		// would panic.
+		for _, db := range s.resetDatabaseCache() {
+			if db == nil {
+				continue
+			}
 			err = db.Close()
 			if err != nil && finalErr == nil {
 				finalErr = err

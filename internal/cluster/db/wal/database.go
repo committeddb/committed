@@ -62,7 +62,7 @@ func (s *Storage) saveDatabase(t *cluster.Configuration) error {
 		// not rebuild syncables, so the cached handle MUST be preserved when the
 		// connection is unchanged. (Only rebuild when the prior build failed and
 		// left no handle — a fixed ${VAR} may now succeed.)
-		if cur, ok := s.databases[t.ID]; ok && cur != nil && identical {
+		if cur, ok := s.cachedDatabase(t.ID); ok && cur != nil && identical {
 			s.logger.Debug("database re-POST byte-identical; keeping existing connection pool", zap.String("id", t.ID))
 			return nil
 		}
@@ -87,14 +87,14 @@ func (s *Storage) saveDatabase(t *cluster.Configuration) error {
 		// doesn't leak it. Safe: the propose-time guard (guardDatabaseConfigChange)
 		// rejects a connection change while syncables reference this database, so a
 		// changed config reaching here has no live dependents mid-use of this handle.
-		if prev, ok := s.databases[t.ID]; ok && prev != nil {
+		if prev, ok := s.cachedDatabase(t.ID); ok && prev != nil {
 			if cerr := prev.Close(); cerr != nil {
 				s.logger.Warn("close superseded database handle", zap.String("id", t.ID), zap.Error(cerr))
 			}
 		}
 
 		s.logger.Debug("database saved", zap.String("id", t.ID), zap.String("name", name))
-		s.databases[t.ID] = db
+		s.setCachedDatabase(t.ID, db)
 
 		return nil
 	})
@@ -116,12 +116,12 @@ func (s *Storage) deleteDatabase(id []byte) error {
 		// delete while syncables reference the database (mirror ProposeDatabase's
 		// guardDatabaseConfigChange), because a syncable captures this pool at build
 		// time and would be left on a closed handle otherwise.
-		if prev, ok := s.databases[string(id)]; ok && prev != nil {
+		if prev, ok := s.cachedDatabase(string(id)); ok && prev != nil {
 			if cerr := prev.Close(); cerr != nil {
 				s.logger.Warn("close superseded database handle on delete", zap.String("id", string(id)), zap.Error(cerr))
 			}
 		}
-		s.databases[string(id)] = nil
+		s.setCachedDatabase(string(id), nil)
 		return nil
 	})
 }
@@ -146,7 +146,11 @@ func (s *Storage) loadDatabasesFromTx(tx *bolt.Tx) error {
 		return ErrBucketMissing
 	}
 
-	for id, db := range s.databases {
+	// Swap in a fresh cache under the mutex, then close the superseded handles
+	// outside it (Close can block on network teardown; never hold the mutex
+	// across it). Readers see an empty cache during the rebuild — the same
+	// transient ErrDatabaseMissing window the incremental repopulation always had.
+	for id, db := range s.resetDatabaseCache() {
 		if db == nil {
 			continue
 		}
@@ -155,7 +159,6 @@ func (s *Storage) loadDatabasesFromTx(tx *bolt.Tx) error {
 				zap.String("id", id), zap.Error(err))
 		}
 	}
-	s.databases = make(map[string]cluster.Database)
 
 	return forEachCurrent(b, func(id, data []byte) error {
 		cfg := &cluster.Configuration{}
@@ -177,18 +180,48 @@ func (s *Storage) loadDatabasesFromTx(tx *bolt.Tx) error {
 		}
 
 		s.clearConfigError("database", cfg.ID)
-		s.databases[cfg.ID] = db
+		s.setCachedDatabase(cfg.ID, db)
 		return nil
 	})
 }
 
+// Database returns the live handle for a database config id. Called from HTTP
+// handler goroutines (config parsing resolves databases) and the startup
+// worker-restore goroutine, concurrently with the apply path's cache writes —
+// hence the mutex; see databasesMu.
 func (s *Storage) Database(id string) (cluster.Database, error) {
-	db, ok := s.databases[id]
+	db, ok := s.cachedDatabase(id)
 	if !ok {
 		return nil, ErrDatabaseMissing
 	}
 
 	return db, nil
+}
+
+// cachedDatabase reads the handle cache under databasesMu. ok distinguishes
+// "never built on this node / unknown id" from a cached nil (a deleted entry).
+func (s *Storage) cachedDatabase(id string) (cluster.Database, bool) {
+	s.databasesMu.RLock()
+	defer s.databasesMu.RUnlock()
+	db, ok := s.databases[id]
+	return db, ok
+}
+
+// setCachedDatabase writes one handle-cache entry under databasesMu.
+func (s *Storage) setCachedDatabase(id string, db cluster.Database) {
+	s.databasesMu.Lock()
+	defer s.databasesMu.Unlock()
+	s.databases[id] = db
+}
+
+// resetDatabaseCache swaps in a fresh, empty handle cache and returns the old
+// one so the caller can close its handles OUTSIDE the mutex (Close can block).
+func (s *Storage) resetDatabaseCache() map[string]cluster.Database {
+	s.databasesMu.Lock()
+	defer s.databasesMu.Unlock()
+	old := s.databases
+	s.databases = make(map[string]cluster.Database)
+	return old
 }
 
 func (s *Storage) Databases() ([]*cluster.Configuration, error) {
