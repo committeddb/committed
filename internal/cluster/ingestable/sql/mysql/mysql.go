@@ -74,6 +74,22 @@ func (m *MySQLDialect) Preflight(config *sql.Config) error {
 	// gate, matching the codebase's preflight philosophy.
 	warnSourceConfig(ctx, db)
 
+	var binlogFormat string
+	if err := db.QueryRowContext(ctx, `SELECT @@global.binlog_format`).Scan(&binlogFormat); err != nil {
+		return fmt.Errorf("read binlog_format: %w", err)
+	}
+	// ROW is required — the most fundamental gate: under STATEMENT (and MIXED's
+	// statement-chosen paths) DML arrives as statement TEXT, not row events, so
+	// committed's row-CDC silently captures nothing while the snapshot works —
+	// silent, unbounded source/mirror divergence. The statement text also embeds
+	// row VALUES (potential PII), which must never reach the (shipped) log path
+	// that observes query events. Reject loudly instead of part-working.
+	if !strings.EqualFold(binlogFormat, "ROW") {
+		return fmt.Errorf(
+			"binlog_format is %q, but committed requires ROW: STATEMENT and MIXED deliver DML as statement text rather than row events, so change capture would silently miss rows. Set `binlog_format=ROW`",
+			binlogFormat)
+	}
+
 	var rowImage string
 	if err := db.QueryRowContext(ctx, `SELECT @@global.binlog_row_image`).Scan(&rowImage); err != nil {
 		return fmt.Errorf("read binlog_row_image: %w", err)
@@ -1321,11 +1337,22 @@ func (h *MySQLEventHandler) handleXID(ctx context.Context, header *replication.E
 // being buried in the generic DDL warn. Filtered through watches() because MySQL's
 // binlog is server-wide: a TRUNCATE on an unwatched table diverges no sink of
 // this ingest, and warning on it would cry wolf.
+//
+// The generic log line carries a BOUNDED classifier — leading keyword, schema,
+// statement length — never the statement text. Query text can embed customer
+// row values (a DDL literal like SET DEFAULT '<value>'; and under a
+// misconfigured binlog_format, whole INSERT ... VALUES statements): node logs
+// ship to aggregation and outlive an RTBF scrub, so raw statement text must
+// never reach them (Preflight also hard-rejects non-ROW formats). The
+// per-transaction BEGIN query event every ROW-format transaction opens with is
+// skipped entirely — it is not DDL, and logging it would warn once per
+// transaction.
 func (h *MySQLEventHandler) handleDDL(e *replication.QueryEvent) {
 	if e == nil {
 		return
 	}
-	if schema, table, isTruncate := truncateTarget(string(e.Query)); isTruncate {
+	query := string(e.Query)
+	if schema, table, isTruncate := truncateTarget(query); isTruncate {
 		if schema == "" {
 			schema = string(e.Schema) // unqualified TRUNCATE — the session's current database
 		}
@@ -1337,10 +1364,25 @@ func (h *MySQLEventHandler) handleDDL(e *replication.QueryEvent) {
 			return
 		}
 	}
+	keyword := leadingKeyword(query)
+	if keyword == "BEGIN" {
+		return // ROW-format transaction wrapper, one per txn — not DDL, pure noise
+	}
 	zap.L().Warn("handleDDL: DDL event received",
 		zap.String("schema", string(e.Schema)),
-		zap.String("query", string(e.Query)),
+		zap.String("keyword", keyword),
+		zap.Int("statement_len", len(query)),
 	)
+}
+
+// leadingKeyword returns the statement's first token, upper-cased — the bounded
+// classifier handleDDL logs in place of the (potentially value-bearing) text.
+func leadingKeyword(query string) string {
+	fields := strings.Fields(query)
+	if len(fields) == 0 {
+		return ""
+	}
+	return strings.ToUpper(fields[0])
 }
 
 // truncateTarget parses "TRUNCATE [TABLE] [schema.]table" out of a binlog DDL

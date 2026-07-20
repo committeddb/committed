@@ -434,9 +434,13 @@ stream a replica reads).
    server_id           = 1         # any unique non-zero id
    ```
 
-   Preflight reads `@@global.binlog_row_image` and `@@global.binlog_row_metadata`
-   and refuses to start unless **both are `FULL`**:
+   Preflight reads `@@global.binlog_format`, `@@global.binlog_row_image`, and
+   `@@global.binlog_row_metadata` and refuses to start unless the format is
+   `ROW` and **both row settings are `FULL`**:
 
+   - **`binlog_format=ROW`** — `STATEMENT` (and `MIXED`'s statement-chosen
+     paths) deliver DML as statement text rather than row events, so change
+     capture would silently miss rows while the initial snapshot still works.
    - **`binlog_row_image=FULL`** — `MINIMAL` and `NOBLOB` omit unchanged columns
      from the UPDATE after-image, so a partial `UPDATE` would silently null those
      columns in the mirror. `FULL` always ships the complete before/after image

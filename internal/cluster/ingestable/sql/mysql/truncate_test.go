@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/go-mysql-org/go-mysql/replication"
@@ -83,5 +84,44 @@ func TestHandleDDL_WatchedTruncateEmitsDivergenceWarn(t *testing.T) {
 
 		require.Empty(t, observed.FilterMessage(truncateDivergenceMsg).All())
 		require.Len(t, observed.FilterMessage("handleDDL: DDL event received").All(), 1)
+	})
+}
+
+// TestHandleDDL_RedactsStatementText pins the log-redaction half of the
+// binlog-format finding: query-event text can embed customer row values (a DDL
+// literal, or whole DML statements under a misconfigured binlog_format), and
+// node logs ship to aggregation and outlive an RTBF scrub — so the generic DDL
+// log line must carry only the bounded classifier (keyword, schema, length),
+// never the statement text.
+func TestHandleDDL_RedactsStatementText(t *testing.T) {
+	h := &MySQLEventHandler{tableRefs: resolveTableRefs([]string{"Users"}, "appdb")}
+
+	t.Run("an embedded literal never reaches the log", func(t *testing.T) {
+		core, observed := observer.New(zap.WarnLevel)
+		defer zap.ReplaceGlobals(zap.New(core))()
+
+		const secret = "123-45-6789"
+		q := "ALTER TABLE users ALTER COLUMN ssn SET DEFAULT '" + secret + "'"
+		h.handleDDL(&replication.QueryEvent{Schema: []byte("appdb"), Query: []byte(q)})
+
+		entries := observed.FilterMessage("handleDDL: DDL event received").All()
+		require.Len(t, entries, 1)
+		ctx := entries[0].ContextMap()
+		require.Equal(t, "ALTER", ctx["keyword"])
+		require.Equal(t, "appdb", ctx["schema"])
+		require.Equal(t, int64(len(q)), ctx["statement_len"])
+		for k, v := range ctx {
+			require.NotContains(t, fmt.Sprintf("%v", v), secret,
+				"log field %q carries statement text — statement values must never reach the (shipped) logs", k)
+		}
+	})
+
+	t.Run("per-transaction BEGIN is skipped entirely", func(t *testing.T) {
+		core, observed := observer.New(zap.WarnLevel)
+		defer zap.ReplaceGlobals(zap.New(core))()
+
+		h.handleDDL(&replication.QueryEvent{Schema: []byte("appdb"), Query: []byte("BEGIN")})
+
+		require.Empty(t, observed.All(), "ROW-format transactions open with a BEGIN query event — logging it would warn once per transaction")
 	})
 }
