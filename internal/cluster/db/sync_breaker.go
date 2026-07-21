@@ -25,12 +25,20 @@ const (
 type syncBreakerState struct {
 	lastPermanentAt time.Time
 	consecutive     int
+	// lastIndex is the raft index of the last counted permanent. Retries of
+	// the SAME entry (the worker holds position and re-runs decide+record
+	// when the dead-letter record itself could not persist — e.g. its
+	// propose 507'd at disk-full) must not inflate the run: the breaker's
+	// premise is "N DISTINCT entries failing consecutively means a
+	// systematic fault", and one poison entry retried under disk pressure
+	// once tripped it in ~a minute.
+	lastIndex uint64
 }
 
 // recordSyncPermanent counts one permanent sync error for id and reports the run
 // length and whether it has crossed the breaker threshold. A gap longer than
 // syncBreakerHealthyWindow since the previous permanent starts a fresh run.
-func (db *DB) recordSyncPermanent(id string) (consecutive int, tripped bool) {
+func (db *DB) recordSyncPermanent(id string, index uint64) (consecutive int, tripped bool) {
 	db.syncBreakerMu.Lock()
 	defer db.syncBreakerMu.Unlock()
 	if db.syncBreakerStates == nil {
@@ -42,7 +50,12 @@ func (db *DB) recordSyncPermanent(id string) (consecutive int, tripped bool) {
 		st = &syncBreakerState{}
 		db.syncBreakerStates[id] = st
 	}
-	st.consecutive++
+	// Count DISTINCT entries only: a retry of the same index (record-persist
+	// failure, not a new sink verdict) refreshes the window but not the run.
+	if st.lastIndex != index || st.consecutive == 0 {
+		st.consecutive++
+		st.lastIndex = index
+	}
 	st.lastPermanentAt = now
 	return st.consecutive, st.consecutive >= syncBreakerMaxConsecutivePermanent
 }

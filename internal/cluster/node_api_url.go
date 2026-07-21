@@ -22,7 +22,7 @@ var nodeAPIURLType = registerSystemType(&Type{
 	Name:       "InternalNodeAPIURL",
 	Version:    1,
 	EntityKind: EntityKindSnapshot,
-})
+}, AdmissionConfig)
 
 func IsNodeAPIURL(id string) bool {
 	return id == nodeAPIURLType.ID

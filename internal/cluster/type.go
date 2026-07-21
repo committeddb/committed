@@ -190,7 +190,7 @@ var typeType = registerSystemType(&Type{
 	Name:       "InternalType",
 	Version:    1,
 	EntityKind: EntityKindRevision,
-})
+}, AdmissionConfig)
 
 func IsType(id string) bool {
 	return id == typeType.ID

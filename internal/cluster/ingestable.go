@@ -165,7 +165,7 @@ var ingestableType = registerSystemType(&Type{
 	Name:       "InternalIngestableParser",
 	Version:    1,
 	EntityKind: EntityKindRevision,
-})
+}, AdmissionConfig)
 
 func IsIngestable(id string) bool {
 	return id == ingestableType.ID
@@ -198,7 +198,7 @@ var ingestablePositionType = registerSystemType(&Type{
 	Name:       "InternalIngestablePosition",
 	Version:    1,
 	EntityKind: EntityKindSnapshot,
-})
+}, AdmissionPosition)
 
 type IngestablePosition struct {
 	ID       string

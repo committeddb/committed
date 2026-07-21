@@ -418,12 +418,54 @@ var systemTypes = map[string]*Type{}
 // registerSystemType records a built-in type and returns it, so a type's var
 // definition doubles as its registration:
 //
-//	var fooType = registerSystemType(&Type{...})
+//	var fooType = registerSystemType(&Type{...}, AdmissionConfig)
 //
 // Called from package-var initialisers, which Go runs (after systemTypes is
 // initialised, by dependency order) before any proposal is applied.
-func registerSystemType(t *Type) *Type {
+// AdmissionClass is a system type's write-admission classification — what the
+// disk-pressure propose gate (db.proposalKind/diskRejection) does with a
+// proposal of this type as the data directory fills. Declared AT REGISTRATION
+// so a new system type must choose its class deliberately: the old
+// enumeration in db.proposalKind silently defaulted everything internal to
+// "config", which froze the sync FAILURE PLANE (dead-letter/stuck/skip
+// records) at disk-full — one poison entry then permanently parked its
+// syncable, exactly when the disk-limits contract promises "syncables keep
+// delivering".
+type AdmissionClass string
+
+const (
+	// AdmissionConfig: control-plane writes (the configs themselves, scrub
+	// commands, announcements). Rejected at disk-full; still admitted at
+	// critical.
+	AdmissionConfig AdmissionClass = "config"
+	// AdmissionPosition / AdmissionIndex: the ingest / sync resume
+	// checkpoints. Always admitted — tiny, and blocking them turns
+	// at-most-one-duplicate into a duplicate storm (see disk-limits.md).
+	AdmissionPosition AdmissionClass = "position"
+	AdmissionIndex    AdmissionClass = "index"
+	// AdmissionCoordination: the failure-plane records — dead-letters,
+	// stuck markers, skip requests, and their clears. The same class of
+	// essential small write as checkpoints: they are what keeps delivery
+	// honest under pressure, they are bounded (the sync breaker caps
+	// consecutive permanents per worker), and freezing them converts one
+	// poison entry into a permanent park. Always admitted.
+	AdmissionCoordination AdmissionClass = "coordination"
+)
+
+// systemTypeAdmission maps a registered system type ID to its admission
+// class. Populated by registerSystemType; membership mirrors systemTypes.
+var systemTypeAdmission = map[string]AdmissionClass{}
+
+// AdmissionClassOf returns the registered admission class for a system type
+// ID; ok is false for user-defined types (whose class is implicitly "user").
+func AdmissionClassOf(id string) (AdmissionClass, bool) {
+	c, ok := systemTypeAdmission[id]
+	return c, ok
+}
+
+func registerSystemType(t *Type, admission AdmissionClass) *Type {
 	systemTypes[t.ID] = t
+	systemTypeAdmission[t.ID] = admission
 	return t
 }
 

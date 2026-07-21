@@ -517,7 +517,7 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 				}
 				if syncErr != nil {
 					if errors.Is(syncErr, cluster.ErrPermanent) {
-						if c, tripped := db.recordSyncPermanent(id); tripped {
+						if c, tripped := db.recordSyncPermanent(id, i); tripped {
 							db.tripSyncBreaker(id, c, syncErr)
 							return nil // park: hold the checkpoint, stop dead-lettering the topic
 						}
@@ -856,7 +856,7 @@ func (db *DB) syncBatchFallback(ctx context.Context, id string, s cluster.Syncab
 		}
 		if syncErr != nil {
 			if errors.Is(syncErr, cluster.ErrPermanent) {
-				if c, tripped := db.recordSyncPermanent(id); tripped {
+				if c, tripped := db.recordSyncPermanent(id, e.Index); tripped {
 					db.tripSyncBreaker(id, c, syncErr)
 					return false // stop the batch; syncBatch parks (checks syncBreakerTripped)
 				}

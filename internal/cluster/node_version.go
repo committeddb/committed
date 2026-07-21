@@ -23,7 +23,7 @@ var nodeVersionType = registerSystemType(&Type{
 	Name:       "InternalNodeVersion",
 	Version:    1,
 	EntityKind: EntityKindSnapshot,
-})
+}, AdmissionConfig)
 
 func IsNodeVersion(id string) bool {
 	return id == nodeVersionType.ID

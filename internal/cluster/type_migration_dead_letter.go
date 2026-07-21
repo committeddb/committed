@@ -24,7 +24,7 @@ var typeMigrationDeadLetterType = registerSystemType(&Type{
 	Name:       "InternalTypeMigrationDeadLetter",
 	Version:    1,
 	EntityKind: EntityKindSnapshot,
-})
+}, AdmissionCoordination)
 
 // TypeMigrationDeadLetter records that a type-migration program (jq) failed
 // at runtime while upgrading the entity at raft Index. It is the type-keyed

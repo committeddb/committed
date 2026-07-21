@@ -30,7 +30,7 @@ four states:
 | `ok` | free > 20% | All writes flow. |
 | `warn` | free ≤ 20% | Logged warning. All writes still flow. |
 | `critical` | free ≤ 10% | **User-data proposals rejected** with 507 (API writes + ingest data). Config changes and checkpoints (sync index / ingest position bumps) still flow, and compaction is nudged to run sooner to free raft-log disk. |
-| `full` | free ≤ 3% | **User data and config frozen** with 507. Checkpoints still flow so syncables keep delivering and recording progress; compaction continues. |
+| `full` | free ≤ 3% | **User data and config frozen** with 507. Checkpoints AND the sync failure plane (dead-letter / stuck / skip records) still flow so syncables keep delivering, recording progress, and surfacing failures — freezing the failure records would turn one poison entry into a permanently parked syncable; compaction continues. |
 
 Rejections surface as:
 
@@ -41,7 +41,14 @@ Rejections surface as:
 
 The gate lives at the propose choke point (`db.proposeAsync`), so it
 covers the HTTP API, the ingest path, and internal config proposes
-uniformly. Checkpoints are deliberately *not* blocked at `full`: they
+uniformly. Each internal write's admission class is declared where its
+system type registers (`cluster.AdmissionClass`), so a future internal
+write chooses its disk-pressure behavior deliberately instead of
+inheriting a default. Note that a **scrub cannot be initiated at
+`full`** (a Scrub command is a config-class write, and the rewrite
+needs up to ~2× the event log's size in headroom anyway — see the
+scrub-headroom note below): during a disk-full incident, free space
+first, then erase. Checkpoints are deliberately *not* blocked at `full`: they
 are tiny (an index integer), and blocking them would make a syncable
 re-deliver the same record in a loop and turn its "at most one
 duplicate on crash" guarantee into a duplicate storm. The ingest path

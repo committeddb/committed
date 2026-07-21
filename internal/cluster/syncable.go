@@ -413,7 +413,7 @@ var syncableType = registerSystemType(&Type{
 	Name:       "InternalSyncableParser",
 	Version:    1,
 	EntityKind: EntityKindRevision,
-})
+}, AdmissionConfig)
 
 func IsSyncable(id string) bool {
 	return id == syncableType.ID
@@ -433,7 +433,7 @@ var syncableIndexType = registerSystemType(&Type{
 	Name:       "InternalSyncableIndex",
 	Version:    1,
 	EntityKind: EntityKindSnapshot,
-})
+}, AdmissionIndex)
 
 type SyncableIndex struct {
 	ID    string
@@ -511,7 +511,7 @@ var syncableDeadLetterType = registerSystemType(&Type{
 	Name:       "InternalSyncableDeadLetter",
 	Version:    1,
 	EntityKind: EntityKindSnapshot,
-})
+}, AdmissionCoordination)
 
 // SyncableDeadLetter records that a syncable gave up on and skipped (dead-
 // lettered) the proposal at raft Index. It is proposed by the sync worker —
@@ -614,7 +614,7 @@ var syncableStuckType = registerSystemType(&Type{
 	Name:       "InternalSyncableStuck",
 	Version:    1,
 	EntityKind: EntityKindSnapshot,
-})
+}, AdmissionCoordination)
 
 // SyncableStuck records that a syncable's worker is currently blocked
 // retrying a transient error on the proposal at Index (for a batch syncable,
@@ -676,7 +676,7 @@ var syncableSkipRequestType = registerSystemType(&Type{
 	Name:       "InternalSyncableSkipRequest",
 	Version:    1,
 	EntityKind: EntityKindSnapshot,
-})
+}, AdmissionCoordination)
 
 // SyncableSkipRequest is the operator's request (proposed by the dead-letter
 // endpoint from any node) for a syncable's worker to skip what it is blocked

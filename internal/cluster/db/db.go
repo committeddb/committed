@@ -690,24 +690,17 @@ func (db *DB) unregisterWaiter(rid uint64) {
 // bucketed separately from user-data and config proposals so
 // operators can see ingestion-vs-sync-vs-user traffic at a glance.
 //
-// Order matters: the position/index checks run before the IsInternal
-// catch-all so those two get their own buckets rather than being lumped
-// under the generic "config" — both are internal, so without the earlier
-// specific checks they'd fall into "config". Everything else internal
-// (the configs themselves, dead-letters, scrub, …) is "config"; user
-// topic data is "user".
+// The kind derives from the systemTypes registry: every system type declares
+// its cluster.AdmissionClass at registration, so a new system type must
+// choose deliberately instead of silently inheriting "config" (the silent
+// default that once froze the sync failure plane at disk-full). User topic
+// data is the implicit "user" class.
 func proposalKind(p *cluster.Proposal) string {
 	if len(p.Entities) == 0 || p.Entities[0].Type == nil {
 		return "user"
 	}
-	typeID := p.Entities[0].Type.ID
-	switch {
-	case cluster.IsIngestablePosition(typeID):
-		return "position"
-	case cluster.IsSyncableIndex(typeID):
-		return "index"
-	case cluster.IsInternal(typeID):
-		return "config"
+	if class, ok := cluster.AdmissionClassOf(p.Entities[0].Type.ID); ok {
+		return string(class)
 	}
 	return "user"
 }

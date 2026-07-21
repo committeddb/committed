@@ -99,7 +99,7 @@ var databaseType = registerSystemType(&Type{
 	Name:       "InternalDatabaseParser",
 	Version:    1,
 	EntityKind: EntityKindRevision,
-})
+}, AdmissionConfig)
 
 func IsDatabase(id string) bool {
 	return id == databaseType.ID
