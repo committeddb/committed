@@ -27,6 +27,43 @@ func parseVersionKey(k []byte) uint64 {
 	return binary.BigEndian.Uint64(k)
 }
 
+// versionLastIndexKey stores, per versioned id, the raft index of its most
+// recent version-write — a direct key in the id sub-bucket alongside
+// currentKey (versions live in the versionsBucket sub-bucket, so there is no
+// collision).
+var versionLastIndexKey = []byte("lastIndex")
+
+// versionedLastIndex returns the raft index of id's most recent version-write,
+// or 0 if id has no versions yet. It is the replay guard for
+// ApplyCommittedBatch's widened crash window: a versioned apply whose entry
+// index is <= this value has already been applied and MUST be skipped —
+// otherwise putVersioned's last+1 allocator appends a phantom version on
+// replay, diverging version history across replicas (config-version-replay).
+func versionedLastIndex(resourceBucket *bolt.Bucket, id []byte) uint64 {
+	idBucket := resourceBucket.Bucket(id)
+	if idBucket == nil {
+		return 0
+	}
+	v := idBucket.Get(versionLastIndexKey)
+	if len(v) != 8 {
+		return 0
+	}
+	return binary.BigEndian.Uint64(v)
+}
+
+// setVersionedLastIndex records raftIndex as id's most-recent version-write
+// index, creating the id sub-bucket if needed. Called inside the same bbolt
+// transaction as the version write, so a failure rolls back both.
+func setVersionedLastIndex(resourceBucket *bolt.Bucket, id []byte, raftIndex uint64) error {
+	idBucket, err := resourceBucket.CreateBucketIfNotExists(id)
+	if err != nil {
+		return fmt.Errorf("create resource bucket %q: %w", id, err)
+	}
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], raftIndex)
+	return idBucket.Put(versionLastIndexKey, buf[:])
+}
+
 // putVersioned stores a new version of a resource within a resource bucket.
 // It creates the resource sub-bucket and versions sub-bucket if they don't exist,
 // determines the next version number, writes the data, and updates "current".

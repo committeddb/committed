@@ -39,7 +39,7 @@ import (
 // and signals the worker; the O(N) rewrite happens off the Ready loop. Skipping
 // when the bound is already completed avoids a redundant full rewrite for a
 // stale or duplicate command.
-func (s *Storage) handleScrub(e *cluster.Entity) error {
+func (s *Storage) handleScrub(e *cluster.Entity, _ uint64) error {
 	sc := &cluster.Scrub{}
 	if err := sc.Unmarshal(e.Data); err != nil {
 		return err

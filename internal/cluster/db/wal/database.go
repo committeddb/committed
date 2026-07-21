@@ -10,7 +10,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 )
 
-func (s *Storage) handleDatabase(e *cluster.Entity) error {
+func (s *Storage) handleDatabase(e *cluster.Entity, raftIndex uint64) error {
 	s.logger.Debug("saving database", zap.String("key", string(e.Key)))
 	if e.IsDelete() {
 		return s.deleteDatabase(e.Key)
@@ -20,15 +20,27 @@ func (s *Storage) handleDatabase(e *cluster.Entity) error {
 		if err != nil {
 			return err
 		}
-		return s.saveDatabase(t)
+		return s.saveDatabase(t, raftIndex)
 	}
 }
 
-func (s *Storage) saveDatabase(t *cluster.Configuration) error {
+func (s *Storage) saveDatabase(t *cluster.Configuration, raftIndex uint64) error {
 	return s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(databaseBucket)
 		if b == nil {
 			return ErrBucketMissing
+		}
+
+		// Replay guard (config-version-replay): ApplyCommittedBatch can replay a
+		// whole Ready on a crash-window restart. A versioned apply whose entry
+		// index already produced a version is a replay — skip it, or the last+1
+		// allocator appends a phantom version, diverging history across replicas.
+		// The set below rides this same atomic tx, so a failure rolls both back.
+		if versionedLastIndex(b, []byte(t.ID)) >= raftIndex {
+			return nil
+		}
+		if err := setVersionedLastIndex(b, []byte(t.ID), raftIndex); err != nil {
+			return err
 		}
 		bs, err := t.Marshal()
 		if err != nil {

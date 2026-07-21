@@ -50,7 +50,7 @@ func (s *Storage) Position(id string) cluster.Position {
 // Last-writer-wins: every new checkpoint overwrites the previous one
 // for this ingestable ID. There is no version history — only the
 // most-recent position is needed for resume.
-func (s *Storage) saveIngestablePosition(e *cluster.Entity) error {
+func (s *Storage) saveIngestablePosition(e *cluster.Entity, _ uint64) error {
 	return s.update(func(tx *bolt.Tx) error {
 		if e.IsDelete() {
 			// A delete tombstone clears the checkpoint (an ingestable DELETE), so a

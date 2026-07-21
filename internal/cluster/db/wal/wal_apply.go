@@ -49,9 +49,15 @@ func (s *Storage) ApplyCommitted(entry *pb.Entry) error {
 // Crash semantics are the existing p > r window, widened from one entry to at
 // most one Ready batch (explicitly tolerated by checkStorageInvariant): a
 // crash after the event batch fsyncs but before saveAppliedIndex persists
-// replays the whole batch on restart — entity applies are replay-idempotent
-// by construction and appendEvent skips via the eventIndex guard, exactly the
-// recovery today's per-entry window uses.
+// replays the whole batch on restart. Every entity apply is replay-idempotent:
+// keyed puts are last-writer-wins, source-seq/refresh-epoch are monotonic max,
+// bundled positions are config-guarded LWW, and VERSIONED applies (type /
+// syncable / ingestable / database) skip re-applies via the raft-index replay
+// guard (versionedLastIndex) — the last+1 version allocator alone was NOT
+// idempotent over a whole-batch replay (it appended phantom versions;
+// config-version-replay). appendEvent skips via the eventIndex guard. This is
+// the recovery today's per-entry window uses, now proven whole-batch by
+// wal/apply_conformance_test.go.
 func (s *Storage) ApplyCommittedBatch(entries []*pb.Entry) error {
 	fresh := entries[:0:0]
 	for _, e := range entries {
@@ -133,7 +139,7 @@ func (s *Storage) applyCommitted(entry *pb.Entry) (bool, error) {
 			// an RTBF delete) it is the erasure subject's PII. The typeID + raft
 			// index correlate the entry without exposing the subject.
 			s.logger.Debug("applying entity", zap.String("typeID", entity.Type.ID), zap.Uint64("index", entry.GetIndex()))
-			if err := s.applyEntity(entity); err != nil {
+			if err := s.applyEntity(entity, entry.GetIndex()); err != nil {
 				return false, err
 			}
 
@@ -206,7 +212,7 @@ func (s *Storage) applyCommitted(entry *pb.Entry) (bool, error) {
 	return true, nil
 }
 
-func (s *Storage) applyEntity(entity *cluster.Entity) error {
+func (s *Storage) applyEntity(entity *cluster.Entity, raftIndex uint64) error {
 	for _, ie := range internalEntities {
 		if ie.is(entity.ID) {
 			// Every internal handler understands exactly two shapes: a config/
@@ -219,7 +225,7 @@ func (s *Storage) applyEntity(entity *cluster.Entity) error {
 			default:
 				return fmt.Errorf("[wal.storage] %s: entity variant %q is not applicable to internal type %s", ie.name, v, entity.ID)
 			}
-			if err := ie.handler(s, entity); err != nil {
+			if err := ie.handler(s, entity, raftIndex); err != nil {
 				return fmt.Errorf("[wal.storage] %s: %w", ie.name, err)
 			}
 			return nil

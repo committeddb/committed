@@ -18,7 +18,7 @@ import (
 // snapshots (bbolt is serialized whole into CreateSnapshot), so the mapping is
 // durable across restart, log compaction, and InstallSnapshot to a lagging
 // follower.
-func (s *Storage) handleNodeVersion(e *cluster.Entity) error {
+func (s *Storage) handleNodeVersion(e *cluster.Entity, _ uint64) error {
 	return s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(memberVersionBucket)
 		if b == nil {

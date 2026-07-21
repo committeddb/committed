@@ -11,7 +11,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster/db"
 )
 
-func (s *Storage) handleIngestable(e *cluster.Entity) error {
+func (s *Storage) handleIngestable(e *cluster.Entity, raftIndex uint64) error {
 	if e.IsDelete() {
 		return s.deleteIngestable(e.Key)
 	} else {
@@ -20,20 +20,32 @@ func (s *Storage) handleIngestable(e *cluster.Entity) error {
 		if err != nil {
 			return err
 		}
-		return s.saveIngestable(t)
+		return s.saveIngestable(t, raftIndex)
 	}
 }
 
 // saveIngestable persists an ingestable Configuration as a new version in
 // bbolt and then notifies the consumer channel. See saveSyncable for the
 // rationale on why the channel send happens outside the bbolt Update closure.
-func (s *Storage) saveIngestable(t *cluster.Configuration) error {
+func (s *Storage) saveIngestable(t *cluster.Configuration, raftIndex uint64) error {
 	var ingestable cluster.Ingestable
 	var built bool
 	err := s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(ingestableBucket)
 		if b == nil {
 			return ErrBucketMissing
+		}
+
+		// Replay guard (config-version-replay): ApplyCommittedBatch can replay a
+		// whole Ready on a crash-window restart. A versioned apply whose entry
+		// index already produced a version is a replay — skip it, or the last+1
+		// allocator appends a phantom version, diverging history across replicas.
+		// The set below rides this same atomic tx, so a failure rolls both back.
+		if versionedLastIndex(b, []byte(t.ID)) >= raftIndex {
+			return nil
+		}
+		if err := setVersionedLastIndex(b, []byte(t.ID), raftIndex); err != nil {
+			return err
 		}
 		bs, err := t.Marshal()
 		if err != nil {

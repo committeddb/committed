@@ -12,7 +12,7 @@ import (
 // clears the syncable's stuck record, an upsert replaces it. One entry per
 // syncable id (last-writer-wins) — the worker publishes "blocked on index N"
 // and deletes it on progress.
-func (s *Storage) handleSyncableStuck(e *cluster.Entity) error {
+func (s *Storage) handleSyncableStuck(e *cluster.Entity, _ uint64) error {
 	if e.IsDelete() {
 		return s.deleteKeyed(syncableStuckBucket, e.Key)
 	}
@@ -58,7 +58,7 @@ func (s *Storage) SyncableStuck(id string) (cluster.SyncableStuck, bool, error) 
 // handleSyncableSkipRequest applies a committed SyncableSkipRequest entity:
 // a delete clears the request, an upsert records it. One entry per syncable
 // id — the endpoint proposes it, the worker deletes it once honored or stale.
-func (s *Storage) handleSyncableSkipRequest(e *cluster.Entity) error {
+func (s *Storage) handleSyncableSkipRequest(e *cluster.Entity, _ uint64) error {
 	if e.IsDelete() {
 		return s.deleteKeyed(syncableSkipRequestBucket, e.Key)
 	}

@@ -26,7 +26,7 @@ const maxDeadLetterPageLimit = 1000
 // proposal's raft index, a re-propose after a crash-replay simply
 // overwrites the same key with a fresh timestamp rather than duplicating
 // the row.
-func (s *Storage) handleSyncableDeadLetter(e *cluster.Entity) error {
+func (s *Storage) handleSyncableDeadLetter(e *cluster.Entity, _ uint64) error {
 	if e.IsDelete() {
 		id, index, ok := cluster.DecodeSyncableDeadLetterKey(e.Key)
 		if !ok {

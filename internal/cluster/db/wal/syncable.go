@@ -12,7 +12,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster/migration"
 )
 
-func (s *Storage) handleSyncable(e *cluster.Entity) error {
+func (s *Storage) handleSyncable(e *cluster.Entity, raftIndex uint64) error {
 	if e.IsDelete() {
 		return s.deleteSyncable(e.Key, e.KeepData)
 	} else {
@@ -21,7 +21,7 @@ func (s *Storage) handleSyncable(e *cluster.Entity) error {
 		if err != nil {
 			return err
 		}
-		return s.saveSyncable(t)
+		return s.saveSyncable(t, raftIndex)
 	}
 }
 
@@ -36,13 +36,25 @@ func (s *Storage) handleSyncable(e *cluster.Entity) error {
 //     been notified about state that doesn't exist on disk.
 //  3. The consumer (db.listenForSyncables) calls db.Sync, which can re-enter
 //     the proposal path; that would deadlock under the writer lock.
-func (s *Storage) saveSyncable(t *cluster.Configuration) error {
+func (s *Storage) saveSyncable(t *cluster.Configuration, raftIndex uint64) error {
 	var syncable cluster.Syncable
 	var built bool
 	err := s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(syncableBucket)
 		if b == nil {
 			return ErrBucketMissing
+		}
+
+		// Replay guard (config-version-replay): ApplyCommittedBatch can replay a
+		// whole Ready on a crash-window restart. A versioned apply whose entry
+		// index already produced a version is a replay — skip it, or the last+1
+		// allocator appends a phantom version, diverging history across replicas.
+		// The set below rides this same atomic tx, so a failure rolls both back.
+		if versionedLastIndex(b, []byte(t.ID)) >= raftIndex {
+			return nil
+		}
+		if err := setVersionedLastIndex(b, []byte(t.ID), raftIndex); err != nil {
+			return err
 		}
 		bs, err := t.Marshal()
 		if err != nil {

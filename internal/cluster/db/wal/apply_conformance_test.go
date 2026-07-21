@@ -128,3 +128,46 @@ func TestApplyConformance_CrashReplayConverges(t *testing.T) {
 	seed, entities := distinctKeyWorkload(t)
 	applyBatchCrashReplayConverges(t, seed, entities)
 }
+
+// sameIDConfigWorkload is the config-version-replay red case: two upserts of
+// the SAME type id (v1 then v2) in one batch. On a crash-window replay the
+// last+1 version allocator used to append phantom versions ({v1,v2,v1,v2}),
+// diverging version history across replicas. The raft-index replay guard makes
+// the whole-batch replay idempotent, so the crash-replay harness converges.
+func sameIDConfigWorkload(t *testing.T) (func(s *StorageWrapper), []*cluster.Entity) {
+	seed := func(s *StorageWrapper) {} // no pre-seed; the entities register the type
+	v1, err := cluster.NewUpsertTypeEntity(&cluster.Type{ID: "revved", Name: "Revved", Version: 1})
+	require.NoError(t, err)
+	v2, err := cluster.NewUpsertTypeEntity(&cluster.Type{ID: "revved", Name: "Revved", Version: 2, Schema: []byte("{}"), SchemaType: "JSONSchema"})
+	require.NoError(t, err)
+	return seed, []*cluster.Entity{v1, v2}
+}
+
+// TestApplyConformance_SameIDConfigCrashReplay is the red-proof: replaying a
+// batch of two same-id type versions after a crash-window rewind must converge
+// to exactly two versions, not append phantoms. Fails on the pre-guard
+// last+1 allocator.
+func TestApplyConformance_SameIDConfigCrashReplay(t *testing.T) {
+	seed, entities := sameIDConfigWorkload(t)
+	applyBatchCrashReplayConverges(t, seed, entities)
+}
+
+// TestApplyConformance_SameIDConfigVersionCount pins the exact history: after
+// applying and crash-replaying the two-version batch, the type has exactly two
+// versions (1 and 2), current is 2 — no phantoms.
+func TestApplyConformance_SameIDConfigVersionCount(t *testing.T) {
+	s := NewStorageWithParser(t, nil, parser.New())
+	defer s.Cleanup()
+	_, entities := sameIDConfigWorkload(t)
+	ents := buildEntries(t, entities, 2)
+	require.NoError(t, s.Save(&defaultHardState, ents, &defaultSnap))
+	require.NoError(t, s.ApplyCommittedBatch(ents))
+	// Crash-window replay of the whole batch.
+	require.NoError(t, s.SetAppliedIndexForTest(2))
+	require.NoError(t, s.ApplyCommittedBatch(ents))
+
+	versions, err := s.TypeVersions("revved")
+	require.NoError(t, err)
+	require.Len(t, versions, 2, "replay must not append phantom versions")
+	require.Equal(t, uint64(2), versions[len(versions)-1].Version)
+}

@@ -17,7 +17,7 @@ import (
 // stores identical bytes, and re-keyed by the failed proposal's raft index a
 // re-propose simply overwrites the same row. Two always-current syncables
 // tripping over the same proposal converge on one record per (type, index).
-func (s *Storage) handleTypeMigrationDeadLetter(e *cluster.Entity) error {
+func (s *Storage) handleTypeMigrationDeadLetter(e *cluster.Entity, _ uint64) error {
 	if e.IsDelete() {
 		typeID, index, ok := cluster.DecodeTypeMigrationDeadLetterKey(e.Key)
 		if !ok {

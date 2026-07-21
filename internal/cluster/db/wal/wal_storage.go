@@ -133,7 +133,7 @@ type internalEntity struct {
 	is      func(string) bool
 	name    string // for apply-error wrapping; matches the handler's name
 	bucket  []byte
-	handler func(*Storage, *cluster.Entity) error
+	handler func(*Storage, *cluster.Entity, uint64) error
 }
 
 var internalEntities = []internalEntity{

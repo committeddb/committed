@@ -8,7 +8,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 )
 
-func (s *Storage) handleSyncableIndex(e *cluster.Entity) error {
+func (s *Storage) handleSyncableIndex(e *cluster.Entity, _ uint64) error {
 	if e.IsDelete() {
 		return s.deleteSyncableIndex(e.Key)
 	} else {
