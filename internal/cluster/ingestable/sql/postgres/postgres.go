@@ -80,12 +80,6 @@ const (
 	backoffMin = 1 * time.Second
 	backoffMax = 30 * time.Second
 
-	// maxPendingEntities is the soft limit on buffered entities per
-	// transaction. Mirrors the MySQL dialect's behavior: if a single
-	// Postgres transaction modifies more rows than this, a partial
-	// proposal is emitted to cap memory usage.
-	maxPendingEntities = 10000
-
 	// standbyTimeout controls how often we send standby status updates
 	// to Postgres. Must be shorter than wal_sender_timeout (default 60s)
 	// to prevent the server from dropping the connection.
@@ -799,6 +793,7 @@ func (d *PostgreSQLDialect) stream(
 
 	relations := make(map[uint32]*pglogrepl.RelationMessage)
 	var pending []*cluster.Entity
+	pendingBytes := 0
 	clientXLogPos := *lastLSN
 	nextStandby := time.Now().Add(standbyTimeout)
 
@@ -885,9 +880,10 @@ func (d *PostgreSQLDialect) stream(
 				}
 				if e := tupleToEntity(ctx, m.Tuple, m.RelationID, relations, config, pgCfg, false, resolve, catResolver); e != nil {
 					pending = append(pending, e)
+					pendingBytes += sql.EntityFlushBytes(e)
 				}
-				if len(pending) >= maxPendingEntities {
-					if err := flushPending(ctx, &pending, pr, curLSN, *epoch); err != nil {
+				if pendingBytes >= sql.TxnSoftFlushBytes {
+					if err := flushPending(ctx, &pending, &pendingBytes, pr, curLSN, *epoch); err != nil {
 						return err
 					}
 				}
@@ -898,6 +894,7 @@ func (d *PostgreSQLDialect) stream(
 				}
 				if e := tupleToEntity(ctx, m.NewTuple, m.RelationID, relations, config, pgCfg, false, resolve, catResolver); e != nil {
 					pending = append(pending, e)
+					pendingBytes += sql.EntityFlushBytes(e)
 					// A PK-changing UPDATE writes the new-key row above but would
 					// orphan the old-key row downstream (two rows for one source
 					// row — a divergence and an un-deletable stale record, RTBF
@@ -909,11 +906,12 @@ func (d *PostgreSQLDialect) stream(
 					if m.OldTuple != nil {
 						if old := tupleToEntity(ctx, m.OldTuple, m.RelationID, relations, config, pgCfg, true, resolve, catResolver); old != nil && !bytes.Equal(old.Key, e.Key) {
 							pending = append(pending, old)
+							pendingBytes += sql.EntityFlushBytes(old)
 						}
 					}
 				}
-				if len(pending) >= maxPendingEntities {
-					if err := flushPending(ctx, &pending, pr, curLSN, *epoch); err != nil {
+				if pendingBytes >= sql.TxnSoftFlushBytes {
+					if err := flushPending(ctx, &pending, &pendingBytes, pr, curLSN, *epoch); err != nil {
 						return err
 					}
 				}
@@ -931,9 +929,10 @@ func (d *PostgreSQLDialect) stream(
 				// honor-deletes contract).
 				if e := tupleToEntity(ctx, m.OldTuple, m.RelationID, relations, config, pgCfg, true, resolve, catResolver); e != nil {
 					pending = append(pending, e)
+					pendingBytes += sql.EntityFlushBytes(e)
 				}
-				if len(pending) >= maxPendingEntities {
-					if err := flushPending(ctx, &pending, pr, curLSN, *epoch); err != nil {
+				if pendingBytes >= sql.TxnSoftFlushBytes {
+					if err := flushPending(ctx, &pending, &pendingBytes, pr, curLSN, *epoch); err != nil {
 						return err
 					}
 				}
@@ -948,7 +947,7 @@ func (d *PostgreSQLDialect) stream(
 					// why we're skipping.
 					break
 				}
-				if err := flushPending(ctx, &pending, pr, curLSN, *epoch); err != nil {
+				if err := flushPending(ctx, &pending, &pendingBytes, pr, curLSN, *epoch); err != nil {
 					return err
 				}
 
@@ -1502,14 +1501,15 @@ func (d *PostgreSQLDialect) snapshotTable(
 		if err != nil {
 			return err
 		}
-		// Byte-budget the batch into one or more proposals (row-count batching
-		// can't see bytes; an oversized proposal is rejected whole at the size
-		// cap). The bundled checkpoint rides ONLY the final chunk so it trails
-		// every row it covers.
-		chunks := sql.ChunkEntitiesByBytes(entities)
-		for ci, chunk := range chunks {
-			p := &cluster.Proposal{Entities: chunk}
-			if ci == len(chunks)-1 {
+		// One proposal PER ROW: each row is an independent single-row
+		// TRANSACTION (see cluster.Proposal) — the read window is read tuning,
+		// never proposal composition. The window's FINAL row bundles the
+		// checkpoint so the position commits atomically with the last row it
+		// covers and trails every other row (the ingest worker drains its
+		// snapshot pipeline before proposing a position-bearing row).
+		for ri, row := range entities {
+			p := &cluster.Proposal{Entities: []*cluster.Entity{row}}
+			if ri == len(entities)-1 {
 				p.Position = posBytes
 			}
 			select {
@@ -1772,7 +1772,7 @@ func quoteTable(table string) string {
 // (effectively-once). Monotonic because clientXLogPos only advances, and
 // deterministic because a resume re-reads the same messages in the same
 // order, producing the same flush LSNs.
-func flushPending(ctx context.Context, pending *[]*cluster.Entity, pr chan<- *cluster.Proposal, lsn pglogrepl.LSN, epoch uint64) error {
+func flushPending(ctx context.Context, pending *[]*cluster.Entity, pendingBytes *int, pr chan<- *cluster.Proposal, lsn pglogrepl.LSN, epoch uint64) error {
 	if len(*pending) == 0 {
 		return nil
 	}
@@ -1788,6 +1788,7 @@ func flushPending(ctx context.Context, pending *[]*cluster.Entity, pr chan<- *cl
 		return ctx.Err()
 	}
 	*pending = nil
+	*pendingBytes = 0
 	return nil
 }
 

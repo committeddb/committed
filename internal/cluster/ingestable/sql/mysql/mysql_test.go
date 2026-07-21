@@ -936,13 +936,14 @@ func TestMysqlMultiRowDML(t *testing.T) {
 }
 
 // TestMysqlSingleLargeRowsEventDistinctSeqs is the dedup-loss success criterion:
-// a single RowsEvent larger than maxPendingEntities soft-flushes several times,
-// all stamped with that one event's binlog offset. Each flush must carry a
-// distinct, strictly-increasing SourceSeq (via the intra-coordinate sub-index) or
-// the ingest dedup's <= drop silently loses every flush after the first. The soft
-// limit is lowered so a small INSERT reproduces it without a giant event.
+// a single RowsEvent larger than the transaction soft-flush byte budget
+// soft-flushes several times, all stamped with that one event's binlog offset.
+// Each flush must carry a distinct, strictly-increasing SourceSeq (via the
+// intra-coordinate sub-index) or the ingest dedup's <= drop silently loses
+// every flush after the first. The budget is lowered so a small INSERT
+// reproduces it without a giant event.
 func TestMysqlSingleLargeRowsEventDistinctSeqs(t *testing.T) {
-	defer mysql.SetMaxPendingEntitiesForTest(3)()
+	defer mysql.SetTxnSoftFlushBytesForTest(300)()
 
 	table := "bigevent_table"
 	db := createDB(t)
@@ -2279,4 +2280,87 @@ func TestMysqlSnapshotCompositePrimaryKey(t *testing.T) {
 		}
 	}
 	require.Equal(t, want, seen, "every composite-PK row must land with a distinct key (no collision)")
+}
+
+// TestMysqlLargeTxnUnderBudgetOneProposal pins the byte-bounded exception's
+// flip side: a source transaction LARGER than the old 10k-row count cap but
+// well under the byte budget must ride ONE proposal — the transaction
+// boundary is preserved for everything the budget can carry, and splitting
+// happens only when the source data genuinely cannot fit
+// (sql.TxnSoftFlushBytes). Under the old row-count soft-flush this
+// transaction split into two proposals.
+func TestMysqlLargeTxnUnderBudgetOneProposal(t *testing.T) {
+	const rows = 11000 // > the old 10k cap; ~1.2MB estimated, far under 12MiB
+
+	table := "bigtxn_table"
+	db := createDB(t)
+	_, err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS `%s`", table))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf("CREATE TABLE `%s` (pk VARCHAR(32) NOT NULL, val TEXT, PRIMARY KEY (pk));", table))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, val) VALUES ('__sentinel__', 'go');", table))
+	require.NoError(t, err)
+	db.Close()
+
+	config := &sql.Config{
+		Type:             &cluster.Type{ID: "bigtxn", Name: "bigtxn"},
+		Mappings:         []sql.Mapping{{JsonName: "pk", SQLColumn: "pk"}, {JsonName: "val", SQLColumn: "val"}},
+		PrimaryKey:       []string{"pk"},
+		ConnectionString: ingestURL,
+		Tables:           []string{table},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	proposalChan := make(chan *cluster.Proposal, 64)
+	positionChan := make(chan cluster.Position, 64)
+	dialect := &mysql.MySQLDialect{}
+	go func() { _ = dialect.Ingest(ctx, config, nil, 0, proposalChan, positionChan) }()
+
+	seen := map[string]bool{}
+	var cdcProposals []*cluster.Proposal
+	collect := func(pred func() bool, what string) {
+		t.Helper()
+		deadline := time.After(60 * time.Second)
+		for !pred() {
+			select {
+			case p := <-proposalChan:
+				if p.SourceSeq > 0 {
+					cdcProposals = append(cdcProposals, p)
+				}
+				for _, e := range p.Entities {
+					seen[string(e.Key)] = true
+				}
+			case <-positionChan:
+			case <-deadline:
+				t.Fatalf("timed out waiting for %s (seen=%d)", what, len(seen))
+			}
+		}
+	}
+	collect(func() bool { return seen["__sentinel__"] }, "streaming to be live")
+
+	// One transaction inserting 11k rows across several statements — a
+	// single COMMIT, several RowsEvents, all buffered to one proposal.
+	mdb := createDB(t)
+	defer mdb.Close()
+	tx, err := mdb.Begin()
+	require.NoError(t, err)
+	const per = 1000
+	for base := 0; base < rows; base += per {
+		values := ""
+		for i := 0; i < per; i++ {
+			if i > 0 {
+				values += ","
+			}
+			values += fmt.Sprintf("('r%05d','v')", base+i)
+		}
+		_, err = tx.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, val) VALUES %s", table, values))
+		require.NoError(t, err)
+	}
+	require.NoError(t, tx.Commit())
+
+	collect(func() bool { return seen[fmt.Sprintf("r%05d", rows-1)] }, "the transaction's last row")
+
+	require.Len(t, cdcProposals, 1,
+		"an under-budget transaction must ride ONE proposal (the boundary is a transaction, not a row-count batch)")
+	require.Len(t, cdcProposals[0].Entities, rows)
 }

@@ -492,3 +492,27 @@ func (n *Raft) TransferLeadershipForTest(transferee uint64) {
 func HTTPDiskReportSenderForTest(token string) func(ctx context.Context, leaderURL string, nodeID uint64, state string) (cluster.DiskVerdict, error) {
 	return newHTTPDiskReportSender(nil, token)
 }
+
+// WaiterCountForTest reports how many Propose waiters are currently
+// registered — the pipelined ingest worker's in-flight window is directly
+// observable as concurrent waiters (the synchronous worker never held more
+// than one).
+func (db *DB) WaiterCountForTest() int {
+	db.waitersMu.Lock()
+	defer db.waitersMu.Unlock()
+	return len(db.waiters)
+}
+
+// WaiterIDsForTest snapshots the RequestIDs of all currently registered
+// Propose waiters. Lets a test fail EVERY in-flight proposal (its own rows
+// plus any internal announce proposals the harness parked) when it cannot
+// distinguish which rid belongs to which proposer.
+func (db *DB) WaiterIDsForTest() []uint64 {
+	db.waitersMu.Lock()
+	defer db.waitersMu.Unlock()
+	ids := make([]uint64, 0, len(db.waiters))
+	for rid := range db.waiters {
+		ids = append(ids, rid)
+	}
+	return ids
+}

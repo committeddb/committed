@@ -72,7 +72,7 @@ func TestEncodeSourceSeq(t *testing.T) {
 	}
 }
 
-// TestFlushPendingSubIndex is the >2x-maxPendingEntities dedup-loss regression at
+// TestFlushPendingSubIndex is the multi-flush-per-coordinate dedup-loss regression at
 // the flush boundary: partial flushes that share one binlog coordinate (an
 // oversized RowsEvent stamps every flush with the event's end offset) must get
 // strictly-increasing SourceSeqs, or the ingest dedup's <= drop silently loses

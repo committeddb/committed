@@ -39,6 +39,17 @@ const (
 const (
 	ingestBackoffMin = 1 * time.Millisecond
 	ingestBackoffMax = 500 * time.Millisecond
+
+	// ingestPipelineDepth bounds the snapshot pipeline's in-flight window:
+	// bare snapshot rows submitted without waiting for apply, so raft
+	// coalesces their entries into shared Ready fsyncs. Measured on the
+	// BenchmarkIngestShape 512-row window (256B rows, real fsync): depth 64
+	// → 462ms, 256 → 150ms, 1024 → 89ms vs 29ms for the old counterfeit
+	// batch — each Ready cycle has a ~25ms fsync floor, so the window must
+	// hold several cycles' worth of rows. Freeze abandonment is bounded by
+	// this depth and restart re-emission by the dialect read window (10k),
+	// both idempotent for seq-0 rows.
+	ingestPipelineDepth = 1024
 )
 
 // ingressLifecycle owns the inner Ingest goroutine plus the channels
@@ -373,6 +384,86 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 	// resume position past the dropped batch).
 	dataProposeFailed := false
 
+	// The snapshot pipeline: bare snapshot rows (SourceSeq 0, no bundled
+	// Position, no refresh marker) are submitted WITHOUT waiting for apply,
+	// up to ingestPipelineDepth in flight, so raft coalesces their entries
+	// into shared Ready fsyncs. ONLY those rows pipeline: they are
+	// independent single-row transactions whose relative log order is
+	// meaningless (unique keys within a snapshot), so a leader-flap hole
+	// re-filled after restart cannot reorder anything observable. Everything
+	// ORDERED — CDC transactions (seq>0, source order must survive into the
+	// immutable log), bundled-position rows (checkpoint must trail every row
+	// it covers), refresh markers (sweep must follow the rows it stamps) —
+	// first DRAINS the pipeline to success and then proposes synchronously.
+	// Any submit or ack failure arms the position barrier and freezes; the
+	// supervisor's restart-from-durable-position re-emits at most one read
+	// window of seq-0 rows (upsert-idempotent duplicates, today's crash
+	// semantics).
+	type inflight struct {
+		rid uint64
+		ack <-chan error
+	}
+	pipeline := make([]inflight, 0, ingestPipelineDepth)
+	defer func() {
+		// Whatever path exits the worker, no waiter may leak.
+		for _, f := range pipeline {
+			db.unregisterWaiter(f.rid)
+		}
+	}()
+	// awaitOldest blocks on the front in-flight ack. ctx cancellation
+	// resolves to ctx.Err() (worker shutdown).
+	awaitOldest := func() error {
+		f := pipeline[0]
+		pipeline = pipeline[1:]
+		defer db.unregisterWaiter(f.rid)
+		select {
+		case err := <-f.ack:
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	// drainPipeline awaits every in-flight ack in FIFO order; the first
+	// failure abandons (unregisters) the rest — the worker is about to
+	// freeze, and their outcomes no longer matter.
+	drainPipeline := func() error {
+		for len(pipeline) > 0 {
+			if err := awaitOldest(); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	// submitPipelined submits without waiting, mirroring
+	// proposeIngestData's disk-pressure pause, and applies backpressure by
+	// awaiting the oldest ack once the window is full.
+	submitPipelined := func(p *cluster.Proposal) error {
+		pauseBackoff := ingestBackoffMin
+		for {
+			rid, ack, err := db.proposeAsync(ctx, p)
+			if err == nil {
+				pipeline = append(pipeline, inflight{rid: rid, ack: ack})
+				break
+			}
+			if !errors.Is(err, cluster.ErrInsufficientStorage) {
+				return err
+			}
+			db.logger.Warn("ingest paused: insufficient disk space, will retry",
+				zap.String("id", p.IngestableID),
+				zap.Duration("backoff", pauseBackoff))
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(pauseBackoff):
+			}
+			pauseBackoff = min(pauseBackoff*2, ingestBackoffMax)
+		}
+		if len(pipeline) >= ingestPipelineDepth {
+			return awaitOldest()
+		}
+		return nil
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -417,12 +508,21 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 					continue
 				}
 
-				// Ingest worker proposes user data; we use the worker
-				// context (ctx) so cancel-on-stop interrupts the wait.
+				// Lane split. Bare snapshot rows pipeline; ordered
+				// proposals (CDC, bundled-position rows, markers) drain the
+				// pipeline to success first and then propose synchronously —
 				// proposeIngestData retries (not drops) on disk-pressure
 				// rejection so a full disk pauses ingestion cleanly without
 				// advancing the position past uncommitted data.
-				err := db.proposeIngestData(ctx, proposal)
+				var err error
+				if proposal.SourceSeq == 0 && len(proposal.Position) == 0 && !containsRefreshBoundary(proposal) {
+					err = submitPipelined(proposal)
+				} else {
+					err = drainPipeline()
+					if err == nil {
+						err = db.proposeIngestData(ctx, proposal)
+					}
+				}
 				if err != nil {
 					// Arm the position barrier BEFORE classifying the error:
 					// no later standalone checkpoint may pass this hole,
@@ -448,10 +548,10 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 						// an error this code has never seen. The worker never
 						// rewrites a proposal to make it fit: a proposal is an
 						// opaque atomic unit whose composition (grouping AND
-						// sizing) belongs to its emitter — the dialects
-						// byte-budget their snapshot batches under the cap
-						// (sql.ChunkEntitiesByBytes), and an emitter that
-						// exceeds it anyway freezes here loudly. The
+						// sizing) belongs to its emitter — snapshot dialects
+						// emit one row per proposal, so only a single row
+						// larger than the cap (or a giant CDC transaction)
+						// lands here, and it freezes loudly. The
 						// pre-barrier bug was exactly a branch that chose to
 						// continue; the default must hold the line, and the
 						// supervisor's restart-from-durable-position is the
@@ -480,6 +580,23 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 			}
 			backoff = ingestBackoffMin
 		case position := <-ingress.positionChan:
+			// A standalone checkpoint summarizes "all data through here
+			// committed" — every pipelined row ahead of it must succeed
+			// before it may propose.
+			if err := drainPipeline(); err != nil {
+				dataProposeFailed = true
+				db.logger.Warn("ingest pipeline drain failed before checkpoint", zap.String("id", id), zap.Error(err))
+				if db.metrics != nil && ctx.Err() == nil {
+					db.metrics.IngestError(id, "propose")
+				}
+				if ctx.Err() == nil {
+					if db.metrics != nil {
+						db.metrics.IngestFrozen(id, true)
+					}
+					return ingestExitFreeze
+				}
+				continue
+			}
 			if dataProposeFailed {
 				// POSITION BARRIER (see declaration above): a data proposal
 				// failed and some branch continued instead of freezing — a

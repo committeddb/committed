@@ -291,11 +291,13 @@ func TestTransactionAtomicity(t *testing.T) {
 	oracle.Assert(t, expected.Expected(), h.Capture(t, expected.ExpectedCounts()))
 }
 
-// TestLargeTransaction stresses the dialect's maxPendingEntities
-// guard (postgres.go) by inserting many rows in one COMMIT. We use
-// 2000 rows rather than the plan's 100k — empirically 100k slows the
-// test enough to be miserable in a tight inner loop, and 2000 already
-// exceeds the in-code guard threshold so the relevant branch fires.
+// TestLargeTransaction stresses a large single-COMMIT transaction end to
+// end (2000 rows rather than the plan's 100k — empirically 100k slows the
+// test enough to be miserable in a tight inner loop). Note: since the
+// soft-flush became byte-bounded (sql.TxnSoftFlushBytes), 2000 small rows
+// ride ONE proposal — the transaction boundary is preserved; the oracle
+// asserts the delivered stream either way, and the split branch is covered
+// by TestMysqlSingleLargeRowsEventDistinctSeqs with a lowered budget.
 func TestLargeTransaction(t *testing.T) {
 	h := harness.New(t, harness.Options{Tables: []string{"region"}})
 

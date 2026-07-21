@@ -122,7 +122,9 @@ type ShouldSnapshot bool
 //     failure dead-letters the whole Actual, never part of one. A consumer
 //     must never observe a partially applied Actual: the proposal boundary
 //     carries source-transaction and delete-bundle atomicity end to end
-//     (see cluster.Proposal).
+//     (see cluster.Proposal — including its one bounded exception: a source
+//     transaction too large for one proposal arrives as ordered contiguous
+//     parts, each atomic, converging when the parts complete).
 //
 //   - Sync MUST honor deletes. A syncable applies each entity by switching
 //     on Entity.Variant() (a variant it does not handle belongs in the

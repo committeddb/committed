@@ -32,13 +32,12 @@ type MySQLDialect struct{}
 // used to immediately return an error, leaving the worker
 // leader-but-not-ingesting with no recovery path. The retry loop below caps at
 // Max and is bounded by ctx so a shutdown still propagates promptly.
-// maxPendingEntities is the soft limit on buffered entities per transaction. If a
-// single MySQL transaction (or one oversized RowsEvent) modifies more than this
-// many rows, the handler emits a partial proposal to avoid unbounded memory
-// growth. This breaks atomicity for oversized transactions — an acceptable
-// trade-off versus OOM-ing the process. A var, not a const, so a test can lower
-// it to exercise the multi-flush-per-event path without a giant event.
-var maxPendingEntities = 10000
+// The per-transaction soft-flush is byte-bounded by sql.TxnSoftFlushBytes: a
+// source transaction that cannot fit in one proposal is applied as ordered
+// contiguous parts — the one documented exception to the
+// proposal-is-a-transaction invariant (see cluster.Proposal and
+// sql.TxnSoftFlushBytes), forced by the source data rather than chosen for
+// convenience. flushSub keeps the parts' SourceSeqs strictly monotonic.
 
 const (
 	syncerBackoffMin = 1 * time.Second
@@ -796,7 +795,10 @@ type MySQLEventHandler struct {
 
 	// pending accumulates entities from row events until the transaction commits
 	// (an XID event), so one MySQL transaction maps to one cluster.Proposal.
-	pending []*cluster.Entity
+	// pendingBytes tracks their estimated marshaled size against
+	// sql.TxnSoftFlushBytes.
+	pending      []*cluster.Entity
+	pendingBytes int
 
 	// consumedGTID is the set of transactions fully processed and checkpointed —
 	// the GTID resume cursor (Phase B). curTxnGTID holds the in-flight
@@ -1031,6 +1033,7 @@ func (h *MySQLEventHandler) handleRows(ctx context.Context, header *replication.
 		}
 		// Buffer until the transaction commits.
 		h.pending = append(h.pending, entity)
+		h.pendingBytes += sql.EntityFlushBytes(entity)
 
 		// A PK-changing UPDATE must tombstone the old key too, or the old-key row
 		// lingers downstream forever — two rows for one source row (divergence +
@@ -1042,11 +1045,14 @@ func (h *MySQLEventHandler) handleRows(ctx context.Context, header *replication.
 		if action == "update" {
 			if old, ok := h.rowEntity(ts, table, "delete", e.Rows[ri-1]); ok && !bytes.Equal(old.Key, entity.Key) {
 				h.pending = append(h.pending, old)
+				h.pendingBytes += sql.EntityFlushBytes(old)
 			}
 		}
 
-		// Soft limit: emit a partial batch to prevent OOM on a very large event/txn.
-		if len(h.pending) >= maxPendingEntities {
+		// Byte-bounded soft flush: a transaction that cannot fit one proposal
+		// is applied as ordered parts (the documented bounded exception — see
+		// sql.TxnSoftFlushBytes).
+		if h.pendingBytes >= sql.TxnSoftFlushBytes {
 			if err := h.flushPending(ctx); err != nil {
 				return err
 			}
@@ -1152,6 +1158,7 @@ func (h *MySQLEventHandler) flushPending(ctx context.Context) error {
 	stampGeneration(h.pending, h.epoch)
 	p := &cluster.Proposal{Entities: h.pending, SourceSeq: encodeSourceSeq(h.curFile, h.curPos, h.flushSub)}
 	h.pending = nil
+	h.pendingBytes = 0
 
 	select {
 	case h.proposalChan <- p:
@@ -1806,14 +1813,15 @@ func snapshotTable(
 		if err != nil {
 			return err
 		}
-		// Byte-budget the batch into one or more proposals (row-count batching
-		// can't see bytes; an oversized proposal is rejected whole at the size
-		// cap). The bundled checkpoint rides ONLY the final chunk so it trails
-		// every row it covers.
-		chunks := sql.ChunkEntitiesByBytes(rows)
-		for ci, chunk := range chunks {
-			p := &cluster.Proposal{Entities: chunk}
-			if ci == len(chunks)-1 {
+		// One proposal PER ROW: each row is an independent single-row
+		// TRANSACTION (see cluster.Proposal) — the read window is read tuning,
+		// never proposal composition. The window's FINAL row bundles the
+		// checkpoint so the position commits atomically with the last row it
+		// covers and trails every other row (the ingest worker drains its
+		// snapshot pipeline before proposing a position-bearing row).
+		for ri, row := range rows {
+			p := &cluster.Proposal{Entities: []*cluster.Entity{row}}
+			if ri == len(rows)-1 {
 				p.Position = posBytes
 			}
 			select {

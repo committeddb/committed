@@ -471,17 +471,20 @@ func (s *Storage) appendEntries(ents []*pb.Entry) error {
 		s.firstIndex.Store(firstIndex)
 	}
 
+	// One batched write (one sync) for the whole Ready's entries — the
+	// raft-log twin of appendEvents' fsync batching. Per-entry Writes made
+	// Save linear at ~one fsync per entry, which throttled pipelined
+	// proposers (each Ready's Save cost grew with the entries it carried).
+	batch := new(wal.Batch)
 	for _, e := range ents {
 		data, err := proto.Marshal(e)
 		if err != nil {
 			return err
 		}
-
-		i := e.GetIndex() - firstIndex + 1
-		err = s.EntryLog.Write(i, frame(data))
-		if err != nil {
-			return fmt.Errorf("index %d to position %d: %w", e.GetIndex(), i, err)
-		}
+		batch.Write(e.GetIndex()-firstIndex+1, frame(data))
+	}
+	if err := s.EntryLog.WriteBatch(batch); err != nil {
+		return fmt.Errorf("append batch (%d entries from index %d): %w", len(ents), ents[0].GetIndex(), err)
 	}
 
 	s.lastIndex.Store(ents[len(ents)-1].GetIndex())

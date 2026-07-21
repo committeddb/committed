@@ -19,6 +19,28 @@ type TopicEpochReader interface {
 	TopicRefreshEpoch(topic string) uint64
 }
 
+// TxnSoftFlushBytes is the byte budget at which a dialect soft-flushes a
+// source transaction's buffered entities as a partial proposal. A proposal is
+// a TRANSACTION (see cluster.Proposal), and this is the one BOUNDED EXCEPTION
+// to that invariant: a source transaction larger than one proposal can carry
+// cannot ride a single atomic unit, so it is applied as ordered contiguous
+// parts — an exception forced by the source data, not by composition
+// convenience. The budget sits under the default proposal size cap (16MiB)
+// with headroom for the wire envelope and estimate error, so the exception
+// fires only for transactions that genuinely could not fit. A var, not a
+// const, so tests can lower it to force multi-part flushes cheaply.
+var TxnSoftFlushBytes = 12 << 20
+
+// entityFlushOverheadBytes approximates per-entity wire overhead beyond
+// Key+Data (type ref, field tags, generation stamp).
+const entityFlushOverheadBytes = 64
+
+// EntityFlushBytes estimates one entity's marshaled contribution toward
+// TxnSoftFlushBytes.
+func EntityFlushBytes(e *cluster.Entity) int {
+	return len(e.Key) + len(e.Data) + entityFlushOverheadBytes
+}
+
 type Ingestable struct {
 	config     *Config
 	dialect    Dialect
@@ -146,40 +168,4 @@ func (i *Ingestable) Teardown() error {
 		return td.TeardownSource(i.config)
 	}
 	return nil
-}
-
-// snapshotProposalMaxBytes is the byte budget for one snapshot batch proposal.
-// Row-count batching (snapshotBatchSize) cannot see bytes: 10k rows of ~2KB
-// each marshal past the cluster's proposal size cap (16MiB default) and the
-// propose is rejected whole. ChunkEntitiesByBytes splits a read batch into
-// proposals under this budget, chosen to clear the default cap with a wide
-// margin for the per-entity estimate error. The ingest worker's TooLarge
-// split-and-freeze handling remains the backstop when an estimate misses.
-const snapshotProposalMaxBytes = 4 << 20
-
-// chunkEntityOverheadBytes approximates the per-entity wire overhead beyond
-// Key+Data (type ref, field tags, generation stamp).
-const chunkEntityOverheadBytes = 64
-
-// ChunkEntitiesByBytes splits a snapshot read batch into consecutive chunks
-// whose estimated marshaled size stays under snapshotProposalMaxBytes. Every
-// chunk is non-empty; an entity larger than the whole budget gets a chunk of
-// its own (the worker freezes on it loudly if it exceeds the cluster cap).
-// Order is preserved — the caller attaches the batch's bundled position to
-// the FINAL chunk only, so the checkpoint trails every row it covers.
-func ChunkEntitiesByBytes(entities []*cluster.Entity) [][]*cluster.Entity {
-	var chunks [][]*cluster.Entity
-	start, curBytes := 0, 0
-	for i, e := range entities {
-		sz := len(e.Key) + len(e.Data) + chunkEntityOverheadBytes
-		if i > start && curBytes+sz > snapshotProposalMaxBytes {
-			chunks = append(chunks, entities[start:i])
-			start, curBytes = i, 0
-		}
-		curBytes += sz
-	}
-	if start < len(entities) {
-		chunks = append(chunks, entities[start:])
-	}
-	return chunks
 }

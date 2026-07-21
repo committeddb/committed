@@ -34,10 +34,27 @@ how to guarantee that, and committed's **preflight** check refuses to start an
 ingestable whose source can't, so it fails loudly at config time instead of
 silently dropping deletes.
 
-Ingest is **effectively-once**: committed checkpoints its stream position into
-its own log, and on restart it resumes from that checkpoint and de-duplicates any
-re-delivered changes by source sequence. You do not get duplicates in the topic
-across a restart.
+Ingest is **effectively-once** for the change stream: committed checkpoints its
+stream position into its own log, and on restart it resumes from that
+checkpoint and de-duplicates any re-delivered changes by source sequence. You
+do not get duplicate stream changes in the topic across a restart.
+
+A change-stream transaction lands in the topic as **one atomic unit**: sinks
+apply all of its rows in a single destination transaction, so consumers never
+observe a partial source transaction — with one bounded exception. A source
+transaction too large to fit a single committed proposal (larger than the
+~12MiB soft-flush budget) is applied as ordered contiguous parts; a consumer
+can transiently observe such a giant transaction partially applied, and
+converges as the parts complete. This exception exists because the only
+alternative is refusing to ingest oversized transactions.
+
+Snapshot rows are **convergent re-observations** rather than deduplicated
+events: each snapshot row is its own single-row proposal, and the resume
+checkpoint rides the final row of each read window — so a restart mid-window
+re-emits that window and rows the crash had already committed appear in the
+log again. That is the same semantics as a reconciling refresh (which
+re-observes every row): keyed upserts, last write wins, consumers converge
+identically.
 
 ### One writer per topic
 

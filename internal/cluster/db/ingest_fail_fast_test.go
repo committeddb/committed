@@ -73,13 +73,14 @@ func TestIngest_FreezesOnErrProposalUnknown(t *testing.T) {
 	// observed leader transition; we shortcut the timing path here.
 	d.SignalWaiterForTest(rid, db.ErrProposalUnknown)
 
-	// Assert that positionChan is NOT drained. If the worker had
-	// log-and-continued (the pre-fix regression shape), it would
-	// advance on positionChan and record a position send. We give it
-	// a generous window so scheduler noise can't mask a misbehaving
-	// worker.
+	// Assert the position NEVER persists. The pipelined worker may
+	// legitimately CONSUME the positionChan send (its drain-then-check
+	// path receives the value before discovering the failed row), so
+	// send-consumption is no longer the freeze signal — the invariant is
+	// that no IngestablePosition ever lands in the log. We give it a
+	// generous window so scheduler noise can't mask a misbehaving worker.
 	require.Never(t,
-		func() bool { return ing.PositionSendCount() > 0 },
+		func() bool { return s.HasIngestablePositionEntity(id) },
 		200*time.Millisecond, 10*time.Millisecond,
 		"ingest worker advanced past ErrProposalUnknown — regression",
 	)
@@ -148,8 +149,10 @@ func TestIngest_FreezesOnErrProposalLost(t *testing.T) {
 	// ErrProposalUnknown. Pre-fix this fell through the freeze branch.
 	d.SignalWaiterForTest(rid, db.ErrProposalLost)
 
+	// See the Unknown twin: send-consumption is no longer the freeze
+	// signal under the pipelined worker; position-never-persists is.
 	require.Never(t,
-		func() bool { return ing.PositionSendCount() > 0 },
+		func() bool { return s.HasIngestablePositionEntity(id) },
 		200*time.Millisecond, 10*time.Millisecond,
 		"ingest worker advanced past ErrProposalLost — regression",
 	)
