@@ -99,7 +99,9 @@ func (db *DB) ReplayTypeMigrationDeadLetter(ctx context.Context, typeID string, 
 	// current version no longer needs migrating both fall through to
 	// success — there is nothing left to fail, so the record clears.
 	for _, e := range a.Entities {
-		if e.ID != typeID || cluster.IsInternal(e.ID) || e.IsDelete() {
+		// Only row data re-runs the chain — a delete or refresh marker never
+		// migrated in the first place (see migrateEntities).
+		if e.ID != typeID || cluster.IsInternal(e.ID) || e.Variant() != cluster.EntityVariantRow {
 			continue
 		}
 		latest, err := db.storage.ResolveType(cluster.LatestTypeRef(typeID))

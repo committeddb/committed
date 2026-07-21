@@ -214,3 +214,91 @@ func TestScrubTraversalsHandleBothEncodings(t *testing.T) {
 		})
 	}
 }
+
+// TestEntityVariantClassification pins Variant(): each constructor maps to its
+// variant, and the precedence (refresh > delete > row) is centralized — an
+// impossible in-memory combination (marker flag AND sentinel Data) resolves
+// the same way every consumer switch will see it.
+func TestEntityVariantClassification(t *testing.T) {
+	tp := &Type{ID: "topic-id", Name: "Topic", Version: 1}
+	if v := NewUpsertEntity(tp, []byte("k"), []byte("d")).Variant(); v != EntityVariantRow {
+		t.Errorf("upsert classifies as %v, want row", v)
+	}
+	if v := NewDeleteEntity(tp, []byte("k")).Variant(); v != EntityVariantDelete {
+		t.Errorf("delete classifies as %v, want delete", v)
+	}
+	if v := NewRefreshBoundaryEntity(tp, 2).Variant(); v != EntityVariantRefresh {
+		t.Errorf("refresh marker classifies as %v, want refresh", v)
+	}
+	// The impossible combination: marker flag set AND sentinel Data. The
+	// precedence must resolve it as refresh, mirroring the old mandatory
+	// check-IsRefreshBoundary-first ritual.
+	impossible := NewDeleteEntity(tp, []byte("k"))
+	impossible.RefreshBoundary = true
+	if v := impossible.Variant(); v != EntityVariantRefresh {
+		t.Errorf("marker+sentinel classifies as %v, want refresh (precedence)", v)
+	}
+}
+
+// unknownFieldEntity returns a marshaled proposal whose single entity carries
+// a LogEntity-level wire tag this binary does not know — what a future
+// release's new body variant looks like to us (field 10, bytes wire type).
+func unknownFieldEntity(t *testing.T, tp *Type) []byte {
+	t.Helper()
+	le := &clusterpb.LogEntity{
+		Type: &clusterpb.TypeRef{ID: tp.ID, Version: uint32(tp.Version)},
+	}
+	// field 10, wire type 2 (bytes): tag byte (10<<3)|2 = 0x52, length 3.
+	le.ProtoReflect().SetUnknown([]byte{0x52, 0x03, 'f', 'u', 't'})
+	bs, err := proto.Marshal(&clusterpb.LogProposal{LogEntities: []*clusterpb.LogEntity{le}})
+	if err != nil {
+		t.Fatalf("proto.Marshal: %v", err)
+	}
+	return bs
+}
+
+// TestUnknownBodyVariantIsALoudDecodeError is the defense-in-depth behind the
+// feature gate: an entity carrying LogEntity-level wire tags this binary does
+// not know (a body variant from a newer release) must FAIL decode — in
+// Unmarshal and in both scrub traversals — not fall into the legacy flat path
+// and silently apply as an empty entity.
+func TestUnknownBodyVariantIsALoudDecodeError(t *testing.T) {
+	tp := &Type{ID: "topic-id", Name: "Topic", Version: 1}
+	raw := unknownFieldEntity(t, tp)
+
+	if err := (&Proposal{}).Unmarshal(raw, envelopeTestResolver(tp)); err == nil {
+		t.Error("Unmarshal accepted an unknown body variant; want a loud error")
+	}
+	if _, _, _, err := FilterProposalEntities(raw, func(string, []byte, bool) bool { return false }); err == nil {
+		t.Error("FilterProposalEntities accepted an unknown body variant; want a loud error")
+	}
+	err := ForEachProposalEntity(raw, func(string, []byte, []byte, bool) error { return nil })
+	if err == nil {
+		t.Error("ForEachProposalEntity accepted an unknown body variant; want a loud error")
+	}
+}
+
+// TestUnknownFieldInsideVariantStaysAddOnly pins the boundary of the guard:
+// unknown tags INSIDE a known variant's message (a future release adding a
+// field to LogRow) are ordinary add-only protobuf evolution and must decode
+// fine — only LogEntity-level unknowns are a variant this binary can't apply.
+func TestUnknownFieldInsideVariantStaysAddOnly(t *testing.T) {
+	tp := &Type{ID: "topic-id", Name: "Topic", Version: 1}
+	row := &clusterpb.LogRow{Key: []byte("k"), Data: []byte("d")}
+	// field 4, wire type 2: tag byte (4<<3)|2 = 0x22, length 2.
+	row.ProtoReflect().SetUnknown([]byte{0x22, 0x02, 'h', 'i'})
+	bs, err := proto.Marshal(&clusterpb.LogProposal{LogEntities: []*clusterpb.LogEntity{{
+		Type: &clusterpb.TypeRef{ID: tp.ID, Version: uint32(tp.Version)},
+		Body: &clusterpb.LogEntity_Row{Row: row},
+	}}})
+	if err != nil {
+		t.Fatalf("proto.Marshal: %v", err)
+	}
+	dec := &Proposal{}
+	if err := dec.Unmarshal(bs, envelopeTestResolver(tp)); err != nil {
+		t.Fatalf("a new field inside LogRow must stay add-only compatible, got error: %v", err)
+	}
+	if len(dec.Entities) != 1 || string(dec.Entities[0].Key) != "k" || string(dec.Entities[0].Data) != "d" {
+		t.Errorf("row with an extra unknown field decoded wrong: %+v", dec.Entities)
+	}
+}

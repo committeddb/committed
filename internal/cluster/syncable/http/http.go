@@ -106,12 +106,20 @@ func (s *Syncable) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldS
 		if s.config.Topic != e.ID {
 			continue // an entity from another topic in a mixed proposal — not ours
 		}
-		// A refresh-boundary marker closes a reconciling full refresh: forward it
-		// as op "refresh" carrying only the generation the refresh reached, so a
-		// keyed receiver can sweep every row still below it (rows deleted at the
-		// source in a lost change-data window, never re-emitted). It has no
-		// key/data. A receiver that ignores "refresh" keeps today's behavior.
-		if e.IsRefreshBoundary() {
+		// One exhaustive switch on the entity's variant. A refresh-boundary
+		// marker closes a reconciling full refresh: forward it as op "refresh"
+		// carrying only the generation the refresh reached, so a keyed receiver
+		// can sweep every row still below it (rows deleted at the source in a
+		// lost change-data window, never re-emitted); it has no key/data, and a
+		// receiver that ignores "refresh" keeps today's behavior. A delete
+		// carries no payload — op "delete" with no Data removes the keyed
+		// record. The default case is future-proofing: a variant this binary
+		// does not implement dead-letters loudly instead of being forwarded as
+		// an upsert.
+		op := opUpsert
+		var data json.RawMessage
+		switch v := e.Variant(); v {
+		case cluster.EntityVariantRefresh:
 			entities = append(entities, entityPayload{
 				Op: opRefresh,
 				Type: payloadType{
@@ -122,16 +130,14 @@ func (s *Syncable) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldS
 				Generation: e.Generation,
 			})
 			continue
-		}
-		// A delete carries the sentinel in Data, not a payload — emit op
-		// "delete" with no Data so the receiver removes the keyed record;
-		// otherwise emit op "upsert" with the entity's data.
-		op := opUpsert
-		var data json.RawMessage
-		if e.IsDelete() {
+		case cluster.EntityVariantDelete:
 			op = opDelete
-		} else {
+		case cluster.EntityVariantRow:
 			data = json.RawMessage(e.Data)
+		default:
+			return false, cluster.Permanent(fmt.Errorf(
+				"[http.Sync] entity variant %q is not supported by this binary (topic %q); upgrade the node before syncing this topic",
+				v, e.ID))
 		}
 		entities = append(entities, entityPayload{
 			Op:  op,

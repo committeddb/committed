@@ -48,19 +48,34 @@ func (v logEntityWireView) isDelete() bool {
 // logEntityView maps a wire LogEntity to its logical view. A set body variant
 // wins; an unset body means the entity was written by a pre-envelope binary
 // (<= 0.7.2-beta) and the legacy flat fields carry the payload.
-func logEntityView(le *clusterpb.LogEntity) logEntityWireView {
+//
+// An entity carrying wire tags this binary does not know — a body variant (or
+// LogEntity field) from a newer release — is an ERROR, not a legacy entity:
+// proto3 would otherwise drop the unknown tags into the legacy path and the
+// entity would silently apply as empty. The cluster feature level keeps a new
+// variant from being committed while an older member is present, so this
+// guard is the defense-in-depth behind that gate, converting a gate bypass
+// from silent misapply into a loud apply failure. Unknown tags INSIDE a known
+// variant's message are still fine (adding a field to LogRow stays add-only);
+// only LogEntity-level unknowns trip this.
+func logEntityView(le *clusterpb.LogEntity) (logEntityWireView, error) {
+	if u := le.ProtoReflect().GetUnknown(); len(u) > 0 {
+		return logEntityWireView{}, fmt.Errorf(
+			"log entity of type %s carries wire fields this binary does not recognize (a body variant from a newer release?); upgrade this node before it applies this entry",
+			le.Type.GetID())
+	}
 	switch b := le.GetBody().(type) {
 	case *clusterpb.LogEntity_Row:
-		return logEntityWireView{key: b.Row.GetKey(), data: b.Row.GetData(), generation: b.Row.GetGeneration()}
+		return logEntityWireView{key: b.Row.GetKey(), data: b.Row.GetData(), generation: b.Row.GetGeneration()}, nil
 	case *clusterpb.LogEntity_Delete:
 		return logEntityWireView{
 			key:        b.Delete.GetKey(),
 			data:       delete,
 			generation: b.Delete.GetGeneration(),
 			keepData:   b.Delete.GetKeepData(),
-		}
+		}, nil
 	case *clusterpb.LogEntity_Refresh:
-		return logEntityWireView{generation: b.Refresh.GetGeneration(), refreshBoundary: true}
+		return logEntityWireView{generation: b.Refresh.GetGeneration(), refreshBoundary: true}, nil
 	default:
 		return logEntityWireView{
 			key:             le.GetKey(),
@@ -68,7 +83,7 @@ func logEntityView(le *clusterpb.LogEntity) logEntityWireView {
 			generation:      le.GetGeneration(),
 			refreshBoundary: le.GetRefreshBoundary(),
 			// keepData has no legacy flat field — it shipped with the envelope.
-		}
+		}, nil
 	}
 }
 
@@ -159,11 +174,54 @@ func (e *Entity) IsDelete() bool {
 
 // IsRefreshBoundary reports whether this entity is a refresh-boundary marker
 // (see NewRefreshBoundaryEntity) rather than row data. A marker and a delete
-// are mutually exclusive — a marker carries no Data, so IsDelete is false —
-// and a sink must branch on IsRefreshBoundary before treating an entity as an
-// upsert or a delete.
+// are mutually exclusive — a marker carries no Data, so IsDelete is false.
+// Single-property checks (is this a delete? is this a marker?) may use these
+// accessors; a consumer choosing how to APPLY an entity must switch on
+// Variant() instead, so the precedence lives in one place and a future
+// variant lands in its default case rather than being misapplied.
 func (e *Entity) IsRefreshBoundary() bool {
 	return e.RefreshBoundary
+}
+
+// EntityVariant classifies an Entity into exactly one of the typed control
+// envelope's body variants (clusterpb.LogEntity's oneof): a row datum, a
+// delete tombstone, or a refresh-boundary marker.
+type EntityVariant int
+
+const (
+	EntityVariantRow EntityVariant = iota
+	EntityVariantDelete
+	EntityVariantRefresh
+)
+
+func (v EntityVariant) String() string {
+	switch v {
+	case EntityVariantRow:
+		return "row"
+	case EntityVariantDelete:
+		return "delete"
+	case EntityVariantRefresh:
+		return "refresh"
+	default:
+		return fmt.Sprintf("unknown(%d)", int(v))
+	}
+}
+
+// Variant resolves the Entity flag-union into its single logical variant,
+// centralizing the precedence (refresh before delete before row) that every
+// consumer previously re-implemented by convention as an order-sensitive
+// accessor ritual. Consumers switch on it exhaustively; the switch's default
+// case is where a variant this consumer does not handle surfaces explicitly
+// (a loud error / dead-letter) instead of being misapplied as a row.
+func (e *Entity) Variant() EntityVariant {
+	switch {
+	case e.RefreshBoundary:
+		return EntityVariantRefresh
+	case e.IsDelete():
+		return EntityVariantDelete
+	default:
+		return EntityVariantRow
+	}
 }
 
 func (p *Proposal) String() string {
@@ -197,10 +255,10 @@ func (p *Proposal) Marshal() ([]byte, error) {
 		// control envelope. The legacy flat fields are decode-only (see
 		// unmarshal); the delete sentinel exists only in memory, never on the
 		// wire (the Delete variant is explicit).
-		switch {
-		case e.RefreshBoundary:
+		switch e.Variant() {
+		case EntityVariantRefresh:
 			le.Body = &clusterpb.LogEntity_Refresh{Refresh: &clusterpb.LogRefresh{Generation: e.Generation}}
-		case e.IsDelete():
+		case EntityVariantDelete:
 			le.Body = &clusterpb.LogEntity_Delete{Delete: &clusterpb.LogDelete{
 				Key:        e.Key,
 				Generation: e.Generation,
@@ -289,7 +347,10 @@ func (p *Proposal) Unmarshal(bs []byte, r TypeResolver) error {
 		if err != nil {
 			return err
 		}
-		v := logEntityView(e)
+		v, err := logEntityView(e)
+		if err != nil {
+			return err
+		}
 		p.Entities = append(p.Entities, &Entity{
 			Type:            t,
 			Key:             v.key,

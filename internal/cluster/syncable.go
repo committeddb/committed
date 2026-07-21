@@ -117,10 +117,13 @@ type ShouldSnapshot bool
 //     mechanism may bound the duplicate window; see
 //     .claude-scratch/tickets/sync-two-phase-syncable.md.
 //
-//   - Sync MUST honor deletes. When an entity reports IsDelete(), the
-//     syncable MUST remove the corresponding downstream record keyed by
-//     the entity's Key — it has no Data to apply (Data carries the delete
-//     sentinel, not a payload, so it must NOT be unmarshaled). This is the
+//   - Sync MUST honor deletes. A syncable applies each entity by switching
+//     on Entity.Variant() (a variant it does not handle belongs in the
+//     switch's default case as an explicit error, never a fallthrough into
+//     the row path). For EntityVariantDelete it MUST remove the downstream
+//     record keyed by the entity's Key — a delete has no Data to apply
+//     (Data carries the delete sentinel, not a payload, so it must NOT be
+//     unmarshaled). This is the
 //     downstream half of right-to-be-forgotten erasure: the scrubber
 //     removes a subject's entries from the permanent log, and honoring the
 //     delete proposal is what removes the same subject from every

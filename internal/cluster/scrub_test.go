@@ -38,7 +38,9 @@ func decodeEntities(t *testing.T, raw []byte) [][2]string {
 	require.Nil(t, proto.Unmarshal(raw, lp))
 	out := make([][2]string, 0, len(lp.LogEntities))
 	for _, le := range lp.LogEntities {
-		out = append(out, [2]string{le.Type.GetID(), string(logEntityView(le).key)})
+		v, err := logEntityView(le)
+		require.Nil(t, err)
+		out = append(out, [2]string{le.Type.GetID(), string(v.key)})
 	}
 	return out
 }

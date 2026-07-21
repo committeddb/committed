@@ -100,7 +100,10 @@ func FilterProposalEntities(raw []byte, remove func(typeID string, key []byte, i
 
 	kept := make([]*clusterpb.LogEntity, 0, len(lp.LogEntities))
 	for _, le := range lp.LogEntities {
-		v := logEntityView(le)
+		v, err := logEntityView(le)
+		if err != nil {
+			return nil, false, false, err
+		}
 		if remove(le.Type.GetID(), v.key, v.isDelete()) {
 			continue
 		}
@@ -139,7 +142,10 @@ func ForEachProposalEntity(raw []byte, fn func(typeID string, key, data []byte, 
 		return err
 	}
 	for _, le := range lp.LogEntities {
-		v := logEntityView(le)
+		v, err := logEntityView(le)
+		if err != nil {
+			return err
+		}
 		if err := fn(le.Type.GetID(), v.key, v.data, v.isDelete()); err != nil {
 			return err
 		}

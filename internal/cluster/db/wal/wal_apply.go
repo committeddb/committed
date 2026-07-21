@@ -162,6 +162,16 @@ func (s *Storage) ApplyCommitted(entry *pb.Entry) error {
 func (s *Storage) applyEntity(entity *cluster.Entity) error {
 	for _, ie := range internalEntities {
 		if ie.is(entity.ID) {
+			// Every internal handler understands exactly two shapes: a config/
+			// coordination row and its delete tombstone. Reject anything else
+			// (a refresh-boundary marker, or a future variant) at the dispatch
+			// boundary so no handler can misread it as an upsert with empty
+			// data — one guard here instead of a ritual in every handler.
+			switch v := entity.Variant(); v {
+			case cluster.EntityVariantRow, cluster.EntityVariantDelete:
+			default:
+				return fmt.Errorf("[wal.storage] %s: entity variant %q is not applicable to internal type %s", ie.name, v, entity.ID)
+			}
 			if err := ie.handler(s, entity); err != nil {
 				return fmt.Errorf("[wal.storage] %s: %w", ie.name, err)
 			}

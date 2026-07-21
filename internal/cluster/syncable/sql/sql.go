@@ -291,14 +291,15 @@ func (c *Syncable) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool, e
 // cluster.Permanent error for non-retryable failures so the worker skips
 // rather than retries. The caller owns the transaction (commit/rollback).
 func (c *Syncable) applyEntity(ctx context.Context, tx *sql.Tx, e *cluster.Entity, index uint64, seq int) error {
-	// A refresh-boundary marker carries no row (IsDelete is false, there is no
-	// Data to unmarshal); it triggers the reconciling sweep on a keyed sink and
-	// is a no-op elsewhere. Branch on it first, before the delete/upsert paths.
-	if e.IsRefreshBoundary() {
+	// One exhaustive switch on the entity's variant: a refresh-boundary marker
+	// (no row; triggers the reconciling sweep on a keyed sink), a delete
+	// tombstone, or a row upsert (the body below the switch). The default case
+	// is deliberate future-proofing: a variant this binary does not implement
+	// dead-letters loudly instead of being misapplied as an upsert.
+	switch v := e.Variant(); v {
+	case cluster.EntityVariantRefresh:
 		return c.applyRefreshBoundary(ctx, tx, e)
-	}
-
-	if e.IsDelete() {
+	case cluster.EntityVariantDelete:
 		if c.delete == nil {
 			// Do NOT put e.Key in this message. It becomes a permanent,
 			// Raft-replicated dead-letter record (recordSyncDeadLetter), and for a
@@ -314,6 +315,12 @@ func (c *Syncable) applyEntity(ctx context.Context, tx *sql.Tx, e *cluster.Entit
 			return execFailure(fmt.Sprintf("[sql.apply] exec [%s]", c.delete.SQL), err, c.dialect.IsPermanent(err))
 		}
 		return nil
+	case cluster.EntityVariantRow:
+		// Fall through to the row apply below.
+	default:
+		return cluster.Permanent(fmt.Errorf(
+			"[sql.apply] entity variant %q is not supported by this binary (topic %q); upgrade the node before syncing this topic",
+			v, c.config.Topic))
 	}
 
 	// Decode with UseNumber so a numeric leaf stays json.Number — its exact

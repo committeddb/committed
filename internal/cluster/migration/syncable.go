@@ -96,12 +96,14 @@ func (b *batchSyncable) SyncBatch(ctx context.Context, as []*cluster.Actual) (bo
 func migrateEntities(ctx context.Context, r Resolver, m *metrics.Metrics, es []*cluster.Entity) ([]*cluster.Entity, error) {
 	out := make([]*cluster.Entity, 0, len(es))
 	for _, e := range es {
-		// System entities (config) and deletes pass through untouched: a
-		// delete carries the sentinel, not a payload, so running it through
-		// the migration chain would corrupt it into a permanent error and
-		// silently drop the erasure. The downstream syncable branches on
-		// IsDelete() to honor it.
-		if cluster.IsInternal(e.ID) || e.IsDelete() {
+		// Only row data migrates. System entities (config) and every non-row
+		// variant pass through untouched: a delete carries the sentinel and a
+		// refresh-boundary marker carries no Data at all, so running either
+		// through the migration chain would corrupt it into a permanent error
+		// — silently dropping an erasure, or dead-lettering a control marker
+		// on any topic whose type has since gained a version. The downstream
+		// syncable switches on Variant() to honor each shape.
+		if cluster.IsInternal(e.ID) || e.Variant() != cluster.EntityVariantRow {
 			out = append(out, e)
 			continue
 		}

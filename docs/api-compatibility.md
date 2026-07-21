@@ -193,7 +193,17 @@ Extending the envelope with a **new variant** is a fixed recipe:
    it. "Decodes as unset" is *not* compatible-enough for the apply path — an
    old binary would misapply the entity as empty, so the gate is mandatory.
 3. Handle it in `logEntityView` — every reader (unmarshal, scrub traversals)
-   goes through that one switch.
+   goes through that one switch. An entity carrying `LogEntity`-level wire
+   tags the binary does not know fails decode loudly (it is a variant from a
+   newer release, not a legacy entity) — so a feature-gate bypass surfaces as
+   an apply failure, never a silent empty-entity misapply. Unknown tags
+   *inside* a known variant's message stay ordinary add-only evolution.
+4. Give it a `cluster.EntityVariant` constant and handle it in every consumer
+   switch. Consumers apply an entity by switching on `Entity.Variant()`
+   (sinks; the wal apply dispatch admits only row/delete to internal
+   handlers; the migration chain migrates only rows) — a variant a consumer
+   does not handle lands in its `default` case and dead-letters/errors
+   explicitly.
 
 The envelope's own introduction is the one deliberate exception to step 2: at
 0.7.3-beta every entity — including plain rows — switched to the envelope

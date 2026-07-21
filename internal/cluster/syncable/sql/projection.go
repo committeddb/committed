@@ -488,7 +488,8 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 	// topic-level generation sweep does not map onto the projection's shape.
 	// Projection reconciliation is a separate, later design; until then a gap
 	// recovery on a projected topic still needs an operator rebuild.
-	if e.IsRefreshBoundary() {
+	switch v := e.Variant(); v {
+	case cluster.EntityVariantRefresh:
 		// A re-snapshot boundary (generation > 1) just recovered a source gap that
 		// this projection could NOT reconcile (one source entity fans out to
 		// many/aggregated sink rows, so a topic sweep doesn't map onto it) — the
@@ -499,9 +500,7 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 				zap.String("syncable", p.name), zap.String("topic", e.Type.ID), zap.Uint64("generation", e.Generation))
 		}
 		return nil
-	}
-
-	if e.IsDelete() {
+	case cluster.EntityVariantDelete:
 		// A delete carries no payload, so the source-level when cannot be
 		// evaluated — route it to every source on the topic. An aggregate's
 		// remove is keyed by the child Key in its sidecar, so it self-selects:
@@ -517,6 +516,14 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 			return p.removeFromAggregate(ctx, tx, src, e)
 		}
 		return p.applyDelete(ctx, tx, src, e)
+	case cluster.EntityVariantRow:
+		// Fall through to the row fold below.
+	default:
+		// Future-proofing: a variant this binary does not implement
+		// dead-letters loudly instead of folding as a row.
+		return cluster.Permanent(fmt.Errorf(
+			"[sql-projection.apply] entity variant %q is not supported by this binary (topic %q); upgrade the node before syncing this topic",
+			v, e.Type.ID))
 	}
 
 	// UseNumber keeps every numeric leaf as its exact source digits (json.Number)
