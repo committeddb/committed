@@ -162,3 +162,23 @@ func TestAdvanceIngestSourceSeq_GuardReapsPostDeleteApply(t *testing.T) {
 	require.Equal(t, uint64(0), s.IngestSourceSeqHighwater(id),
 		"an ingest proposal applied after the config delete must not re-establish the highwater")
 }
+
+// TestDeleteSyncable_ClearsDegradedConfigRecord: a deleted config's
+// degraded-record must not outlive it. seedSyncableConfig's document names no
+// registered syncable.type, so the apply-path build fails and records the
+// config as degraded; the delete must drop that record — nothing ever
+// re-checks a deleted id, so a survivor would overcount the
+// committed_config_build_errors gauge forever.
+func TestDeleteSyncable_ClearsDegradedConfigRecord(t *testing.T) {
+	s := NewStorageWithParser(t, nil, parser.New())
+	defer s.Cleanup()
+
+	const id = "degraded-then-deleted"
+	seedSyncableConfig(t, s, id, 1)
+	require.GreaterOrEqual(t, s.ConfigBuildErrorCount(), 1,
+		"the unbuildable syncable must be recorded as degraded while its config exists")
+
+	saveProposal(t, &cluster.Proposal{Entities: cluster.NewDeleteSyncableEntities(id, false)}, s, 1, 2)
+	require.Equal(t, 0, s.ConfigBuildErrorCount(),
+		"deleting the config must clear its degraded record")
+}

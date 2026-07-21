@@ -372,7 +372,7 @@ type Storage struct {
 	// the entry. db.DB reads the count via ConfigBuildErrorCount to emit
 	// a gauge. See secrets.go / saveDatabase for the rationale.
 	configErrMu  sync.Mutex
-	configErrors map[string]error
+	configErrors map[string]configErr
 	// appliedIndex is the highest raft entry index that ApplyCommitted has
 	// fully applied. Bumped after each successful per-entry apply (and
 	// persisted to bbolt in the same step). Loaded from bbolt on Open.
@@ -574,7 +574,7 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		ingest:          ingest,
 		logger:          logger,
 		fsyncDisabled:   cfg.fsyncDisabled,
-		configErrors:    make(map[string]error),
+		configErrors:    make(map[string]configErr),
 		metrics:         cfg.metrics,
 		lostCallback:    cfg.lostCallback,
 		scrubSignal:     make(chan struct{}, 1),

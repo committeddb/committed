@@ -76,12 +76,12 @@ func (s *Storage) saveDatabase(t *cluster.Configuration) error {
 		// the proposing node has but others don't, every follower at once).
 		name, db, err := s.parser.ParseDatabase(t.MimeType, t.Data)
 		if err != nil {
-			s.recordConfigError("database", t.ID, err)
+			s.recordConfigError("database", t.ID, configErrBuild, err)
 			s.logger.Error("database config persisted but could not be built on this node (degraded); fix the environment and the config will build on next restart",
 				zap.String("id", t.ID), zap.Error(err))
 			return nil
 		}
-		s.clearConfigError("database", t.ID)
+		s.clearConfigError("database", t.ID, configErrBuild)
 
 		// Close the superseded pool before swapping so a changed-connection re-POST
 		// doesn't leak it. Safe: the propose-time guard (guardDatabaseConfigChange)
@@ -101,7 +101,7 @@ func (s *Storage) saveDatabase(t *cluster.Configuration) error {
 }
 
 func (s *Storage) deleteDatabase(id []byte) error {
-	return s.update(func(tx *bolt.Tx) error {
+	err := s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(databaseBucket)
 		if b == nil {
 			return ErrBucketMissing
@@ -124,6 +124,14 @@ func (s *Storage) deleteDatabase(id []byte) error {
 		s.setCachedDatabase(string(id), nil)
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	// The config is gone; a degraded-config record for it must not outlive it
+	// (the gauge would overcount forever — nothing re-checks a deleted id).
+	// Deletion is definitive, so clear at build strength.
+	s.clearConfigError("database", string(id), configErrBuild)
+	return nil
 }
 
 func (s *Storage) loadDatabases() error {
@@ -173,13 +181,13 @@ func (s *Storage) loadDatabasesFromTx(tx *bolt.Tx) error {
 			// than failing. Dependent syncables/ingestables will surface
 			// connection errors; the operator fixes the env and a restart
 			// (or the next snapshot install) builds it.
-			s.recordConfigError("database", cfg.ID, err)
+			s.recordConfigError("database", cfg.ID, configErrBuild, err)
 			s.logger.Error("database config could not be built on this node (degraded)",
 				zap.String("id", cfg.ID), zap.Error(err))
 			return nil
 		}
 
-		s.clearConfigError("database", cfg.ID)
+		s.clearConfigError("database", cfg.ID, configErrBuild)
 		s.setCachedDatabase(cfg.ID, db)
 		return nil
 	})

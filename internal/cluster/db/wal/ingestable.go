@@ -61,12 +61,12 @@ func (s *Storage) saveIngestable(t *cluster.Configuration) error {
 			// Degrade rather than fail the apply (which would crash the
 			// node). The config is persisted; no worker is started until
 			// the build succeeds.
-			s.recordConfigError("ingestable", t.ID, err)
+			s.recordConfigError("ingestable", t.ID, configErrBuild, err)
 			s.logger.Error("ingestable config persisted but could not be built on this node (degraded); fix the environment and the config will build on next restart",
 				zap.String("id", t.ID), zap.Error(err))
 			return nil
 		}
-		s.clearConfigError("ingestable", t.ID)
+		s.clearConfigError("ingestable", t.ID, configErrBuild)
 		ingestable = parsed
 		built = true
 
@@ -107,6 +107,9 @@ func (s *Storage) deleteIngestable(id []byte) error {
 	if err != nil {
 		return err
 	}
+	// The config is gone; its degraded-config record must not outlive it
+	// (nothing re-checks a deleted id, so the gauge would overcount forever).
+	s.clearConfigError("ingestable", string(id), configErrBuild)
 
 	// Signal the DB layer to cancel the worker and, on the owner, tear down the
 	// source-side replication resources (drop the Postgres slot + publication) so
@@ -156,12 +159,12 @@ func (s *Storage) RestoreIngestableWorkers() {
 			// Degraded: record so the build-errors gauge reflects the
 			// build path too (validateConfigSecrets uses the cheaper
 			// Validate; a config can pass that but fail the full parse).
-			s.recordConfigError("ingestable", cfg.ID, err)
+			s.recordConfigError("ingestable", cfg.ID, configErrBuild, err)
 			s.logger.Warn("restoreIngestableWorkers: parse (degraded)",
 				zap.String("id", cfg.ID), zap.Error(err))
 			continue
 		}
-		s.clearConfigError("ingestable", cfg.ID)
+		s.clearConfigError("ingestable", cfg.ID, configErrBuild)
 		s.ingest <- &db.IngestableWithID{ID: cfg.ID, Ingestable: ingestable}
 	}
 }

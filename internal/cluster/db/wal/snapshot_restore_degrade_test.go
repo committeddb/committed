@@ -65,4 +65,16 @@ func TestSnapshot_RestoreDegradesOnUnbuildableDatabaseConfig(t *testing.T) {
 		"the unbuildable database config must be recorded as a build error, mirroring Open")
 	_, err = dst.Database("degrades")
 	require.Error(t, err, "the unbuildable database must not be cached")
+
+	// Deterministic pin of the restore/validate race: refreshAfterRestore runs
+	// validateConfigSecrets on its own goroutine, and Parser.Validate PASSES for
+	// this config (it is a side-effect-free structural check that never invokes
+	// the registered database parser whose build fails). That weaker success
+	// must not clear the build failure recorded above — before the evidence
+	// ranking it did, so this test flaked green-or-red on goroutine timing.
+	require.Nil(t, dst.ValidateConfigSecretsForTest())
+	require.GreaterOrEqual(t, dst.ConfigBuildErrorCount(), 1,
+		"a passing Validate must not clear a recorded build failure")
+	_, err = dst.Database("degrades")
+	require.Error(t, err, "the database is still unbuildable and must stay uncached")
 }

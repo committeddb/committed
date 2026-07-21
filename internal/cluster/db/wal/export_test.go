@@ -283,3 +283,10 @@ func (s *Storage) SeedIngestableConfigForTest(id string) error {
 func minimalConfigBytesForTest(id string) ([]byte, error) {
 	return (&cluster.Configuration{ID: id, MimeType: "application/json", Data: []byte("{}")}).Marshal()
 }
+
+// ValidateConfigSecretsForTest runs the startup/restore config re-validation
+// synchronously, so tests can pin its interaction with build-recorded config
+// errors deterministically instead of racing refreshAfterRestore's goroutine.
+func (s *Storage) ValidateConfigSecretsForTest() error {
+	return s.validateConfigSecrets()
+}

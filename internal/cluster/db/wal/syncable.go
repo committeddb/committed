@@ -70,12 +70,12 @@ func (s *Storage) saveSyncable(t *cluster.Configuration) error {
 			// Degrade rather than fail the apply (which would crash the
 			// node). The config is persisted; no worker is started until
 			// the build succeeds.
-			s.recordConfigError("syncable", t.ID, err)
+			s.recordConfigError("syncable", t.ID, configErrBuild, err)
 			s.logger.Error("syncable config persisted but could not be built on this node (degraded); fix the environment and the config will build on next restart",
 				zap.String("id", t.ID), zap.Error(err))
 			return nil
 		}
-		s.clearConfigError("syncable", t.ID)
+		s.clearConfigError("syncable", t.ID, configErrBuild)
 		// ModeAlwaysCurrent decorates the user syncable with a
 		// migration wrapper so the worker loop stays oblivious to
 		// version-upgrade concerns. ModeAsStored hands the syncable
@@ -129,6 +129,9 @@ func (s *Storage) deleteSyncable(id []byte, keepData bool) error {
 	if err != nil {
 		return err
 	}
+	// The config is gone; its degraded-config record must not outlive it
+	// (nothing re-checks a deleted id, so the gauge would overcount forever).
+	s.clearConfigError("syncable", string(id), configErrBuild)
 
 	if s.sync != nil {
 		s.logger.Debug("sending syncable delete to channel", zap.String("id", string(id)))
@@ -181,12 +184,12 @@ func (s *Storage) RestoreSyncableWorkers() {
 			// Degraded: record so the build-errors gauge reflects the
 			// build path too (validateConfigSecrets uses the cheaper
 			// Validate; a config can pass that but fail the full parse).
-			s.recordConfigError("syncable", cfg.ID, err)
+			s.recordConfigError("syncable", cfg.ID, configErrBuild, err)
 			s.logger.Warn("restoreSyncableWorkers: parse (degraded)",
 				zap.String("id", cfg.ID), zap.Error(err))
 			continue
 		}
-		s.clearConfigError("syncable", cfg.ID)
+		s.clearConfigError("syncable", cfg.ID, configErrBuild)
 		// Mirror saveSyncable: ModeAlwaysCurrent decorates the syncable
 		// with the migration wrapper so the worker loop stays oblivious
 		// to version-upgrade concerns.

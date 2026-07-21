@@ -50,10 +50,10 @@ func (s *Storage) validateConfigSecrets() error {
 		for _, cfg := range cfgs {
 			err := s.parser.Validate(cfg.MimeType, cfg.Data)
 			if err == nil {
-				s.clearConfigError(g.kind, cfg.ID)
+				s.clearConfigError(g.kind, cfg.ID, configErrValidate)
 				continue
 			}
-			s.recordConfigError(g.kind, cfg.ID, err)
+			s.recordConfigError(g.kind, cfg.ID, configErrValidate, err)
 			var missing *config.MissingVarError
 			if errors.As(err, &missing) {
 				s.logger.Error("config persisted but a required ${VAR} secret is unset on this node (degraded); the node stays in quorum, fix the environment and restart to build it",
@@ -72,23 +72,57 @@ func (s *Storage) validateConfigSecrets() error {
 	return nil
 }
 
+// configErrEvidence ranks how a config's buildability was checked.
+// configErrValidate is Parser.Validate — a side-effect-free prediction.
+// configErrBuild is the live-object construction (ParseDatabase and friends)
+// — the fact. A success clears only records at or below its own strength:
+// build success clears everything; validate success never erases a build
+// failure. Without the ranking, RestoreSnapshot's synchronous build failure
+// was cleared by refreshAfterRestore's ASYNC validateConfigSecrets whenever
+// Validate passed but the build didn't (a driver-level constructor error),
+// leaving the handle missing while the gauge read healthy.
+type configErrEvidence int
+
+const (
+	configErrValidate configErrEvidence = iota
+	configErrBuild
+)
+
+// configErr is one degraded-config record: the failure and the strongest
+// evidence class that observed it.
+type configErr struct {
+	err      error
+	evidence configErrEvidence
+}
+
 // recordConfigError marks a config as failed-to-build on this node — a
 // node-local condition (missing ${VAR} secret, parse error). The raw
 // config bytes are persisted regardless; only the live-object
 // construction is deferred, so the node stays in quorum instead of
-// fatal-exiting. A later successful build clears the entry.
-func (s *Storage) recordConfigError(kind, id string, err error) {
+// fatal-exiting. A later successful build clears the entry. A re-record
+// keeps the strongest evidence seen: a validate failure on a config whose
+// build already failed must still require a build success to clear.
+func (s *Storage) recordConfigError(kind, id string, evidence configErrEvidence, err error) {
 	s.configErrMu.Lock()
 	defer s.configErrMu.Unlock()
-	s.configErrors[kind+"/"+id] = err
+	key := kind + "/" + id
+	if prev, ok := s.configErrors[key]; ok && prev.evidence > evidence {
+		evidence = prev.evidence
+	}
+	s.configErrors[key] = configErr{err: err, evidence: evidence}
 }
 
-// clearConfigError removes a config's recorded build error after a
-// successful build (idempotent — a no-op if none was recorded).
-func (s *Storage) clearConfigError(kind, id string) {
+// clearConfigError removes a config's recorded build error after a success
+// of the given evidence strength (idempotent — a no-op if none was
+// recorded). A record survives a success of weaker evidence than the
+// failure that created it.
+func (s *Storage) clearConfigError(kind, id string, evidence configErrEvidence) {
 	s.configErrMu.Lock()
 	defer s.configErrMu.Unlock()
-	delete(s.configErrors, kind+"/"+id)
+	key := kind + "/" + id
+	if prev, ok := s.configErrors[key]; ok && prev.evidence <= evidence {
+		delete(s.configErrors, key)
+	}
 }
 
 // ConfigBuildErrorCount returns how many configs are currently degraded
@@ -119,12 +153,12 @@ func (s *Storage) ConfigBuildErrors() []cluster.ConfigBuildError {
 	defer s.configErrMu.Unlock()
 
 	out := make([]cluster.ConfigBuildError, 0, len(s.configErrors))
-	for key, err := range s.configErrors {
+	for key, rec := range s.configErrors {
 		// Keys are "kind/id" (recordConfigError); kind is one of
 		// database/ingestable/syncable and never contains a slash, so the
 		// first separator splits them unambiguously.
 		kind, id, _ := strings.Cut(key, "/")
-		msg, _ := cluster.RedactedMessage(err)
+		msg, _ := cluster.RedactedMessage(rec.err)
 		out = append(out, cluster.ConfigBuildError{Kind: kind, ID: id, Error: msg})
 	}
 	sort.Slice(out, func(i, j int) bool {
