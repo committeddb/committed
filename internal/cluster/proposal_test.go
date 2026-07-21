@@ -341,12 +341,13 @@ func TestRefreshGenerationRoundTrip(t *testing.T) {
 	}
 }
 
-// TestZeroGenerationWireBackCompatible proves the new fields cost nothing on
-// the wire when unused and that a pre-feature log entry (no fields 5/6) decodes
-// cleanly. proto3 omits zero-valued scalars, so an ordinary upsert must
-// marshal byte-identically to a LogProposal built without ever touching
-// Generation/RefreshBoundary — i.e. old readers ignore the new tags and old
-// bytes still round-trip to gen 0 / non-marker.
+// TestZeroGenerationWireBackCompatible proves an unused generation costs
+// nothing on the wire and that a legacy flat log entry (written by
+// <= 0.7.2-beta, before the control envelope) decodes cleanly. proto3 omits
+// zero-valued scalars, so an ordinary upsert must marshal byte-identically to
+// an envelope Row built without ever touching Generation — and legacy flat
+// bytes still round-trip to gen 0 / non-marker through the logEntityView
+// chokepoint.
 func TestZeroGenerationWireBackCompatible(t *testing.T) {
 	tp := &Type{ID: "topic-id", Name: "Topic", Version: 1}
 
@@ -357,10 +358,28 @@ func TestZeroGenerationWireBackCompatible(t *testing.T) {
 		t.Fatalf("Marshal: %v", err)
 	}
 
-	// The equivalent "pre-feature" wire form: a LogProposal that never sets
-	// fields 5/6. If our Marshal emitted a zero generation or marker tag, these
-	// would differ.
+	// The equivalent hand-built envelope form: a Row variant that never sets
+	// generation. If our Marshal emitted a zero generation tag, these would
+	// differ.
 	want, err := proto.Marshal(&clusterpb.LogProposal{
+		LogEntities: []*clusterpb.LogEntity{{
+			Type: &clusterpb.TypeRef{ID: tp.ID, Version: uint32(tp.Version)},
+			Body: &clusterpb.LogEntity_Row{Row: &clusterpb.LogRow{
+				Key:  []byte("k"),
+				Data: []byte("d"),
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("proto.Marshal: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("zero-generation upsert is not wire-identical to a zero-generation Row:\n got  %x\n want %x", got, want)
+	}
+
+	// A legacy flat entry (no body variant) decodes to gen 0 / non-marker via
+	// our Unmarshal.
+	want, err = proto.Marshal(&clusterpb.LogProposal{
 		LogEntities: []*clusterpb.LogEntity{{
 			Type: &clusterpb.TypeRef{ID: tp.ID, Version: uint32(tp.Version)},
 			Key:  []byte("k"),
@@ -368,13 +387,8 @@ func TestZeroGenerationWireBackCompatible(t *testing.T) {
 		}},
 	})
 	if err != nil {
-		t.Fatalf("proto.Marshal: %v", err)
+		t.Fatalf("proto.Marshal legacy: %v", err)
 	}
-	if !bytes.Equal(got, want) {
-		t.Errorf("zero-generation upsert is not wire-identical to a pre-feature entry:\n got  %x\n want %x", got, want)
-	}
-
-	// And a pre-feature entry decodes to gen 0 / non-marker via our Unmarshal.
 	resolver := &stubResolver{
 		types:    map[string]*Type{tp.ID: tp},
 		versions: map[string]*Type{fmt.Sprintf("%s@%d", tp.ID, tp.Version): tp},

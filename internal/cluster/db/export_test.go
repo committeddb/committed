@@ -58,8 +58,9 @@ func (db *DB) InjectWedgedSyncWorkerForTest(id string) {
 	db.workersMu.Unlock()
 }
 
-// DeleteSyncForTest drives the apply-path syncable teardown directly.
-func (db *DB) DeleteSyncForTest(id string) { db.deleteSync(id) }
+// DeleteSyncForTest drives the apply-path syncable teardown directly
+// (keepData=false — the teardown-exercising shape the wedge tests need).
+func (db *DB) DeleteSyncForTest(id string) { db.deleteSync(id, false) }
 
 // SetDeadLetterProposeHookForTest installs the dead-letter propose
 // failure-injection seam: a non-nil error from the hook stands in for an

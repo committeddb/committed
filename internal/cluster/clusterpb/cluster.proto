@@ -45,6 +45,51 @@ message LogEntity {
 	// added-table backfill (that would delete the topic's sibling tables). A
 	// consumer that does not implement reconciliation treats it as a no-op.
 	bool refresh_boundary = 6;
+
+	// body is the typed control envelope: exactly one variant per entity, so an
+	// entity's role — row datum, delete tombstone, refresh marker — is explicit
+	// on the wire, and impossible states (a refresh carrying a key, a row
+	// carrying keep_data) are unrepresentable. Writers encode EVERY entity as a
+	// body variant; the flat Key/Data/generation/refresh_boundary fields above
+	// are LEGACY (logs written by <= 0.7.2-beta), mapped into the same view at
+	// decode and never written again. Do not add new flat fields — add a new
+	// body variant instead: wire-level add-only (an old reader sees body unset),
+	// with its EMISSION feature-gated (db.featureEnabled) so the variant is only
+	// committed once every member can apply it. See docs/api-compatibility.md.
+	oneof body {
+		LogRow row = 7;
+		LogDelete delete = 8;
+		LogRefresh refresh = 9;
+	}
+}
+
+// LogRow is an upsert: a keyed datum on a topic (or an internal config write).
+message LogRow {
+	bytes key = 1;
+	bytes data = 2;
+	// generation is the ingest reconciling-refresh epoch stamped on the row;
+	// 0 = not stamped by a refresh-managed ingest.
+	uint64 generation = 3;
+}
+
+// LogDelete is a keyed tombstone: remove the record keyed by key downstream.
+message LogDelete {
+	bytes key = 1;
+	// generation mirrors LogRow's — CDC delete tombstones are epoch-stamped too.
+	uint64 generation = 2;
+	// keep_data marks a syncable-config delete whose operator asked to PRESERVE
+	// the destination data (DELETE ?keepData=true): the owner node skips the
+	// destination teardown on apply. Entity-borne so every node applies the same
+	// intent deterministically — a node-local intent map was lost on a
+	// propose→apply leadership change and wrongly cleared on ambiguous propose
+	// failures.
+	bool keep_data = 3;
+}
+
+// LogRefresh is the reconciling-refresh boundary marker: the topic was fully
+// refreshed at epoch generation; keyed sinks sweep rows below it.
+message LogRefresh {
+	uint64 generation = 1;
 }
 
 message LogProposal {

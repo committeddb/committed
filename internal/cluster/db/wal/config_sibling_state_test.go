@@ -51,7 +51,7 @@ func TestDeleteSyncable_SweepsSiblingStateSoRecreateStartsClean(t *testing.T) {
 
 	// Delete the syncable (config + checkpoint tombstones). The sweep must drop all
 	// three siblings in the same apply.
-	saveProposal(t, &cluster.Proposal{Entities: cluster.NewDeleteSyncableEntities(id)}, s, 1, 5)
+	saveProposal(t, &cluster.Proposal{Entities: cluster.NewDeleteSyncableEntities(id, false)}, s, 1, 5)
 
 	has, err = s.HasSyncableDeadLetter(id, 5)
 	require.NoError(t, err)
@@ -90,7 +90,7 @@ func TestSaveSyncableSiblings_GuardReapsPostDeleteWrite(t *testing.T) {
 
 	const id = "sync"
 	seedSyncableConfig(t, s, id, 1)
-	saveProposal(t, &cluster.Proposal{Entities: cluster.NewDeleteSyncableEntities(id)}, s, 1, 2)
+	saveProposal(t, &cluster.Proposal{Entities: cluster.NewDeleteSyncableEntities(id, false)}, s, 1, 2)
 
 	// These commit after the delete (higher raft index) with no config present.
 	applyDeadLetter(t, s, 3, &cluster.SyncableDeadLetter{ID: id, Index: 9, Kind: "permanent", Message: "late"})

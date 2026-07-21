@@ -173,6 +173,36 @@ message on the permanent event log (`internal/cluster/clusterpb`):
   entry that used it. Retire a field by leaving it unused, not by reusing
   its number.
 
+**The typed control envelope (0.7.3-beta).** A `LogEntity`'s payload is a
+`oneof body` — exactly one of `LogRow` (an upsert), `LogDelete` (a keyed
+tombstone, carrying `keep_data`), or `LogRefresh` (a reconciling-refresh
+boundary marker) — so an entity's role is explicit on the wire and impossible
+states (a refresh with a key, a row with `keep_data`) are unrepresentable. The
+flat `Key`/`Data`/`generation`/`refresh_boundary` fields on `LogEntity` are
+**legacy, decode-only**: logs written by ≤ 0.7.2-beta carry them, and readers
+map both encodings into one view at a single chokepoint
+(`cluster.logEntityView`) — writers never emit them again. The delete sentinel
+value exists only in memory; on the wire a delete is the explicit variant.
+
+Extending the envelope with a **new variant** is a fixed recipe:
+
+1. Add a new `oneof body` message with a fresh tag number — wire-level
+   add-only (an old reader decodes `body` as unset).
+2. **Feature-gate its emission** (`db.featureEnabled`, see cluster feature
+   level above) so the variant is only committed once every member can apply
+   it. "Decodes as unset" is *not* compatible-enough for the apply path — an
+   old binary would misapply the entity as empty, so the gate is mandatory.
+3. Handle it in `logEntityView` — every reader (unmarshal, scrub traversals)
+   goes through that one switch.
+
+The envelope's own introduction is the one deliberate exception to step 2: at
+0.7.3-beta every entity — including plain rows — switched to the envelope
+without a feature gate (gating would have threaded cluster state into
+`Proposal.Marshal`, which is a pure function used far from the db), making
+0.7.2 → 0.7.3 a **full-stop upgrade** (see
+[upgrade.md](operations/upgrade.md)). Every later variant follows the recipe
+and stays rolling-safe.
+
 New entity *types* (a new system type ID) are additive on the wire, but an
 old binary that meets one it doesn't recognize can't *resolve* it (a system
 type UUID is indistinguishable from an unknown user type) and would
@@ -247,6 +277,14 @@ the old binary cannot read:
   separate gate — it rides this same one-way boundary. External payload consumers
   (webhooks, tools) that decode binary fields *were* release-noted and must
   base64-decode.
+- **Rolling back past 0.7.3 (the typed control envelope).** From 0.7.3-beta
+  every committed entity is envelope-encoded (`LogEntity.body`, above). A
+  ≤ 0.7.2 binary decodes such an entry *without error* but sees it as an
+  **empty entity** (proto3 ignores the unknown `body` tags and the legacy flat
+  fields are unset) and silently misapplies it — worse than a fatal-exit.
+  Rolling back means a rebuild; and the forward upgrade must be **full-stop**,
+  not rolling, for the same reason (see
+  [upgrade.md](operations/upgrade.md)).
 - **A raft transport `protocolVersion` bump.** The peer transport
   currently accepts only an exact protocol-version match, so a bump is a
   flag-day: it partitions a half-upgraded cluster until every node is on

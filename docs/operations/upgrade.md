@@ -70,6 +70,15 @@ rolling would crash the nodes you haven't upgraded yet. See the warning under
 > entry. Single-node deployments and fresh installs are unaffected. If you have
 > already started rolling and old nodes are crash-looping, do **not** roll back —
 > finish upgrading them all; they recover once the whole cluster is on 0.7.2+.
+>
+> **It also applies to any 0.7.2 → 0.7.3+ multi-node upgrade**, with a sharper
+> failure mode: 0.7.3 encodes every committed entity in a typed envelope
+> (see [api-compatibility.md → Log entities](../api-compatibility.md#log-entities-protobuf)),
+> which a 0.7.2 node decodes **without error as an empty entity** and silently
+> misapplies — no crash-loop warns you. Never run a mixed 0.7.2/0.7.3 cluster:
+> stop all nodes, replace every binary, restart. Single-node deployments and
+> fresh installs are unaffected, and rolling back a node to ≤ 0.7.2 after any
+> 0.7.3 entry is committed means a [rebuild](rebuild.md), not a binary swap.
 
 ## The procedure
 

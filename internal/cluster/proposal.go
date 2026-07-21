@@ -24,6 +24,54 @@ var ErrInsufficientStorage = errors.New("insufficient disk space to accept the p
 
 var delete []byte = []byte("7ec589c2-3318-4a3c-839b-a9af9c9443be")
 
+// logEntityWireView is the encoding-agnostic read of a wire LogEntity: the
+// same logical fields whether the entity was written as a typed body variant
+// (the control envelope, >= 0.7.3-beta) or as the legacy flat fields
+// (<= 0.7.2-beta). It is the single decode chokepoint — Proposal.Unmarshal and
+// the scrub traversals (FilterProposalEntities, ForEachProposalEntity) all
+// read the wire through it — so a new body variant is handled here once.
+type logEntityWireView struct {
+	key             []byte
+	data            []byte
+	generation      uint64
+	refreshBoundary bool
+	keepData        bool
+}
+
+// isDelete mirrors Entity.IsDelete on the wire view: the in-memory delete
+// representation is the sentinel Data, which logEntityView synthesizes for the
+// explicit Delete variant so both encodings answer uniformly.
+func (v logEntityWireView) isDelete() bool {
+	return string(v.data) == string(delete)
+}
+
+// logEntityView maps a wire LogEntity to its logical view. A set body variant
+// wins; an unset body means the entity was written by a pre-envelope binary
+// (<= 0.7.2-beta) and the legacy flat fields carry the payload.
+func logEntityView(le *clusterpb.LogEntity) logEntityWireView {
+	switch b := le.GetBody().(type) {
+	case *clusterpb.LogEntity_Row:
+		return logEntityWireView{key: b.Row.GetKey(), data: b.Row.GetData(), generation: b.Row.GetGeneration()}
+	case *clusterpb.LogEntity_Delete:
+		return logEntityWireView{
+			key:        b.Delete.GetKey(),
+			data:       delete,
+			generation: b.Delete.GetGeneration(),
+			keepData:   b.Delete.GetKeepData(),
+		}
+	case *clusterpb.LogEntity_Refresh:
+		return logEntityWireView{generation: b.Refresh.GetGeneration(), refreshBoundary: true}
+	default:
+		return logEntityWireView{
+			key:             le.GetKey(),
+			data:            le.GetData(),
+			generation:      le.GetGeneration(),
+			refreshBoundary: le.GetRefreshBoundary(),
+			// keepData has no legacy flat field — it shipped with the envelope.
+		}
+	}
+}
+
 type Proposal struct {
 	Entities []*Entity
 	// RequestID lets db.Propose's caller wait for *its* proposal to be
@@ -76,6 +124,13 @@ type Entity struct {
 	// data: it carries no Key/Data, and Generation is the epoch G at which its
 	// topic was fully refreshed. See NewRefreshBoundaryEntity and IsRefreshBoundary.
 	RefreshBoundary bool
+
+	// KeepData marks a syncable-config delete tombstone whose operator asked to
+	// preserve the destination data: the owner node skips the destination
+	// teardown on apply. Carried ON THE ENTITY so every node applies the same
+	// intent deterministically, wherever leadership sits when the delete
+	// applies. See NewDeleteSyncableEntities.
+	KeepData bool
 }
 
 func NewUpsertEntity(t *Type, key []byte, data []byte) *Entity {
@@ -128,7 +183,7 @@ func (p *Proposal) String() string {
 func (p *Proposal) Marshal() ([]byte, error) {
 	es := make([]*clusterpb.LogEntity, 0, len(p.Entities))
 	for _, e := range p.Entities {
-		es = append(es, &clusterpb.LogEntity{
+		le := &clusterpb.LogEntity{
 			Type: &clusterpb.TypeRef{
 				ID: e.ID,
 				// Type.Version is monotonically assigned by ProposeType
@@ -137,11 +192,28 @@ func (p *Proposal) Marshal() ([]byte, error) {
 				// versions).
 				Version: uint32(e.Version), //nolint:gosec // G115: bounded by domain
 			},
-			Key:             e.Key,
-			Data:            e.Data,
-			Generation:      e.Generation,
-			RefreshBoundary: e.RefreshBoundary,
-		})
+		}
+		// Every entity is encoded as exactly one body variant — the typed
+		// control envelope. The legacy flat fields are decode-only (see
+		// unmarshal); the delete sentinel exists only in memory, never on the
+		// wire (the Delete variant is explicit).
+		switch {
+		case e.RefreshBoundary:
+			le.Body = &clusterpb.LogEntity_Refresh{Refresh: &clusterpb.LogRefresh{Generation: e.Generation}}
+		case e.IsDelete():
+			le.Body = &clusterpb.LogEntity_Delete{Delete: &clusterpb.LogDelete{
+				Key:        e.Key,
+				Generation: e.Generation,
+				KeepData:   e.KeepData,
+			}}
+		default:
+			le.Body = &clusterpb.LogEntity_Row{Row: &clusterpb.LogRow{
+				Key:        e.Key,
+				Data:       e.Data,
+				Generation: e.Generation,
+			}}
+		}
+		es = append(es, le)
 	}
 
 	lp := &clusterpb.LogProposal{
@@ -217,12 +289,14 @@ func (p *Proposal) Unmarshal(bs []byte, r TypeResolver) error {
 		if err != nil {
 			return err
 		}
+		v := logEntityView(e)
 		p.Entities = append(p.Entities, &Entity{
 			Type:            t,
-			Key:             e.Key,
-			Data:            e.Data,
-			Generation:      e.GetGeneration(),
-			RefreshBoundary: e.GetRefreshBoundary(),
+			Key:             v.key,
+			Data:            v.data,
+			Generation:      v.generation,
+			RefreshBoundary: v.refreshBoundary,
+			KeepData:        v.keepData,
 		})
 	}
 

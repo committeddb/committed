@@ -17,6 +17,10 @@ type SyncableWithID struct {
 	// consumer (listenForSyncables) cancels the worker and, on the owner, tears
 	// down the syncable's destination. Syncable is nil for a delete.
 	Delete bool
+	// KeepData carries the delete tombstone's entity-borne preserve-the-
+	// destination intent (see cluster.Entity.KeepData): the owner skips the
+	// destination teardown. Deterministic on every node — no node-local state.
+	KeepData bool
 }
 
 func (db *DB) AddSyncableParser(name string, p cluster.SyncableParser) {
@@ -248,23 +252,15 @@ func (db *DB) ParseSyncable(mimeType string, data []byte, s cluster.DatabaseStor
 // node-locally (this node is the leader the write proxied to, and the owner
 // that performs the teardown), then consumed by deleteSync on apply.
 func (db *DB) DeleteSyncable(ctx context.Context, id string, keepData bool) error {
-	if keepData {
-		db.workersMu.Lock()
-		db.syncDeleteKeep[id] = true
-		db.workersMu.Unlock()
-	}
-
-	p := &cluster.Proposal{Entities: cluster.NewDeleteSyncableEntities(id)}
-	if err := db.Propose(ctx, p); err != nil {
-		// Propose failed → the delete never applies, so drop the stale intent.
-		if keepData {
-			db.workersMu.Lock()
-			delete(db.syncDeleteKeep, id)
-			db.workersMu.Unlock()
-		}
-		return err
-	}
-	return nil
+	// keepData rides the delete tombstone itself (cluster.Entity.KeepData), so
+	// every node — whichever holds leadership when the entry applies — honors
+	// the operator's intent deterministically. The former node-local intent map
+	// was lost on a propose→apply leadership change (the new leader applied
+	// keepData=false and dropped the table) and was wrongly cleared on
+	// AMBIGUOUS propose failures (ctx deadline / ErrProposalUnknown — the entry
+	// could still commit); an entity-borne flag has neither failure mode.
+	p := &cluster.Proposal{Entities: cluster.NewDeleteSyncableEntities(id, keepData)}
+	return db.Propose(ctx, p)
 }
 
 func (db *DB) Syncables() ([]*cluster.Configuration, error) {

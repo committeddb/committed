@@ -468,9 +468,17 @@ func NewUpsertSyncableIndexEntity(i *SyncableIndex) (*Entity, error) {
 // atomically, leaving no window in which a later same-named syncable could
 // resume from a stale checkpoint and come back un-backfilled. The keys mirror
 // the upsert constructors (the syncable ID).
-func NewDeleteSyncableEntities(id string) []*Entity {
+//
+// keepData rides the CONFIG tombstone (see Entity.KeepData): every node applies
+// the operator's preserve-the-destination intent deterministically, wherever
+// leadership sits at apply time — replacing a node-local intent map that a
+// propose→apply leadership change lost and an ambiguous propose failure
+// wrongly cleared.
+func NewDeleteSyncableEntities(id string, keepData bool) []*Entity {
+	cfg := NewDeleteEntity(syncableType, []byte(id))
+	cfg.KeepData = keepData
 	return []*Entity{
-		NewDeleteEntity(syncableType, []byte(id)),
+		cfg,
 		NewDeleteEntity(syncableIndexType, []byte(id)),
 	}
 }

@@ -123,11 +123,7 @@ type DB struct {
 	workersMu     sync.Mutex
 	syncWorkers   map[string]*workerHandle
 	ingestWorkers map[string]*workerHandle
-	// syncDeleteKeep records, per syncable ID, that an operator asked DELETE to
-	// keep the destination state (keepData). DeleteSyncable sets it before
-	// proposing; deleteSync reads-and-clears it on apply. Guarded by workersMu.
-	syncDeleteKeep map[string]bool
-	closed         bool
+	closed        bool
 
 	// ingestSupervisorMu guards ingestSupervisorStates. Deliberately
 	// separate from workersMu so the supervisor's bookkeeping doesn't
@@ -329,7 +325,6 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		leaderChangeGrace:              cfg.leaderChangeGrace,
 		syncWorkers:                    make(map[string]*workerHandle),
 		ingestWorkers:                  make(map[string]*workerHandle),
-		syncDeleteKeep:                 make(map[string]bool),
 		syncStuckThreshold:             cfg.syncStuckThreshold,
 		scrubInterval:                  cfg.scrubInterval,
 		advertisedAPIURL:               cfg.advertisedAPIURL,
@@ -470,7 +465,7 @@ func (db *DB) listenForSyncables(sync <-chan *SyncableWithID) {
 				return
 			}
 			if syncable.Delete {
-				db.deleteSync(syncable.ID)
+				db.deleteSync(syncable.ID, syncable.KeepData)
 				continue
 			}
 			if err := db.Sync(context.Background(), syncable.ID, syncable.Syncable); err != nil {

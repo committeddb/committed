@@ -219,11 +219,9 @@ func (db *DB) Sync(_ context.Context, id string, s cluster.Syncable) error {
 // The leader tears down using its own already-built syncable handle, which is
 // also the node the DELETE request landed on (writes proxy to the leader), so
 // its keepData intent is the one that applies.
-func (db *DB) deleteSync(id string) {
+func (db *DB) deleteSync(id string, keepData bool) {
 	db.workersMu.Lock()
 	handle, ok := db.syncWorkers[id]
-	keepData := db.syncDeleteKeep[id]
-	delete(db.syncDeleteKeep, id)
 	if ok {
 		handle.cancel()
 		db.workersMu.Unlock()

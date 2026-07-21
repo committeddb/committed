@@ -688,6 +688,23 @@ The apply-path determinism audit is **complete**. Findings:
   fields only, and channel notifies in `saveSyncable`/`saveIngestable`
   happen *after* the bucket write so they don't race the state.
 
+**The rule, stated positively — operation parameters ride the committed
+command.** Anything that affects the *outcome* of applying a committed entry
+must itself be carried by that entry (or by prior committed state): never by a
+node-local side channel keyed to the operation. A parameterized operation
+therefore puts its parameters in the command it commits — the scrub commits
+its `Scrub{Bound}`, a syncable delete carries its `keepData` intent on the
+tombstone entity — so every replica, whichever holds leadership when the entry
+applies, decides identically. (A node-local `keepData` intent map once
+violated this: a leadership change between propose and apply made the new
+leader decide differently than the proposing node intended.) The one sanctioned
+exception is *execution* of destructive external side effects — a destination
+teardown, a source-slot drop — which is owner-gated and live-only precisely so
+it never replays; the *decision* to perform it must still be a pure function of
+committed state. Node-local state that feeds only observability (a stuck
+tracker's debounce, metrics) is exempt: its staleness can misreport, but it can
+never mis-apply.
+
 A regression test, `wal.TestApplyDeterminism`
 (`internal/cluster/db/wal/determinism_test.go`), constructs three fresh
 `wal.Storage` instances on disjoint temp dirs, applies the same varied

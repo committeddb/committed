@@ -14,7 +14,7 @@ import (
 
 func (s *Storage) handleSyncable(e *cluster.Entity) error {
 	if e.IsDelete() {
-		return s.deleteSyncable(e.Key)
+		return s.deleteSyncable(e.Key, e.KeepData)
 	} else {
 		t := &cluster.Configuration{}
 		err := t.Unmarshal(e.Data)
@@ -109,9 +109,10 @@ func (s *Storage) saveSyncable(t *cluster.Configuration) error {
 //
 // The DB layer does the teardown, not this wal layer (the wal layer must not
 // touch the destination DB), and it reuses the worker's already-built syncable
-// handle rather than re-parsing here — so the delete signal carries only the
-// ID.
-func (s *Storage) deleteSyncable(id []byte) error {
+// handle rather than re-parsing here — so the delete signal carries the ID and
+// the entity-borne keepData intent (deterministic on every node; see
+// cluster.NewDeleteSyncableEntities).
+func (s *Storage) deleteSyncable(id []byte, keepData bool) error {
 	err := s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(syncableBucket)
 		if b == nil {
@@ -131,7 +132,7 @@ func (s *Storage) deleteSyncable(id []byte) error {
 
 	if s.sync != nil {
 		s.logger.Debug("sending syncable delete to channel", zap.String("id", string(id)))
-		s.sync <- &db.SyncableWithID{ID: string(id), Delete: true}
+		s.sync <- &db.SyncableWithID{ID: string(id), Delete: true, KeepData: keepData}
 	}
 
 	return nil

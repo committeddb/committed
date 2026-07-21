@@ -1,8 +1,6 @@
 package cluster
 
 import (
-	"bytes"
-
 	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster/clusterpb"
@@ -102,8 +100,8 @@ func FilterProposalEntities(raw []byte, remove func(typeID string, key []byte, i
 
 	kept := make([]*clusterpb.LogEntity, 0, len(lp.LogEntities))
 	for _, le := range lp.LogEntities {
-		isDelete := bytes.Equal(le.Data, delete)
-		if remove(le.Type.GetID(), le.Key, isDelete) {
+		v := logEntityView(le)
+		if remove(le.Type.GetID(), v.key, v.isDelete()) {
 			continue
 		}
 		kept = append(kept, le)
@@ -141,7 +139,8 @@ func ForEachProposalEntity(raw []byte, fn func(typeID string, key, data []byte, 
 		return err
 	}
 	for _, le := range lp.LogEntities {
-		if err := fn(le.Type.GetID(), le.Key, le.Data, bytes.Equal(le.Data, delete)); err != nil {
+		v := logEntityView(le)
+		if err := fn(le.Type.GetID(), v.key, v.data, v.isDelete()); err != nil {
 			return err
 		}
 	}
