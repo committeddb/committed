@@ -204,26 +204,32 @@ func (s *Syncable) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldS
 //   - other 4xx: permanent (skip proposal)
 //   - 5xx: transient (retryable)
 //
-// The 4xx/5xx split is the deliberate boundary, and it upholds the
-// asymmetric-risk principle (bias toward transient): a 4xx says the receiver
-// rejected *this request* as malformed/unacceptable (400, 422, 404, 405) —
-// the proposal will never be accepted as-is, so it's permanent and gets
-// dead-lettered; 408 (timeout) and 429 (rate limited) are the two 4xx that are
-// about timing, not the payload, so they stay transient. A 5xx is a
-// server-side failure — including 501 Not Implemented and 503 Unavailable —
-// and is always transient: retrying is safe, and if the endpoint is
-// permanently wrong (e.g. never implements the method) the worker wedges
-// visibly for an operator instead of silently dead-lettering every proposal.
-// A transport error (no status at all) is handled by the caller and is also
-// transient.
+// The boundary is the Syncable contract's classification rule: Permanent MUST
+// mean ENTRY-SPECIFIC — the receiver rejected THIS payload and will reject it
+// identically forever (400, 413, 415, 422, 451), so dead-lettering it and
+// moving on is correct. An error that would fail EVERY entry identically is
+// access- or config-shaped — auth (401/403/407: a rotated token), routing
+// (404/405/410: a wrong path or retired endpoint), redirects (3xx surfacing
+// means redirect misconfiguration), timing (408/429), and every server-side
+// 5xx — and stays TRANSIENT: the worker wedges visibly (the stuck machinery
+// engages, the operator fixes the token/URL, delivery resumes with zero data
+// missing downstream) instead of dead-lettering up to a breaker-run of real
+// events that then need one-at-a-time replay. Unknown codes default to
+// transient for the same asymmetric-risk reason: a wrongful wedge is loud and
+// recoverable, a wrongful dead-letter silently loses delivered data. (This
+// mirrors the SQL dialects' access-error carve-out — e.g. Postgres 42501
+// insufficient_privilege stays transient.) A transport error (no status at
+// all) is handled by the caller and is also transient.
 func ClassifyStatus(code int) error {
 	if code >= 200 && code < 300 {
 		return nil
 	}
-	if code == 408 || code == 429 || code >= 500 {
-		return fmt.Errorf("[http.Sync] unexpected status %d", code)
+	switch code {
+	case 400, 413, 415, 422, 451:
+		// Payload-shaped: this entry can never be accepted as-is.
+		return cluster.Permanent(fmt.Errorf("[http.Sync] unexpected status %d", code))
 	}
-	return cluster.Permanent(fmt.Errorf("[http.Sync] unexpected status %d", code))
+	return fmt.Errorf("[http.Sync] unexpected status %d", code)
 }
 
 func (s *Syncable) Close() error {

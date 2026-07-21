@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	nethttp "net/http"
 	"net/http/httptest"
@@ -419,7 +420,7 @@ func TestSync_TopicMismatch(t *testing.T) {
 }
 
 func TestSync_PermanentError_4xx(t *testing.T) {
-	codes := []int{400, 401, 403, 404, 405, 422}
+	codes := []int{400, 413, 415, 422}
 
 	for _, code := range codes {
 		code := code
@@ -577,17 +578,29 @@ func TestClassifyStatus(t *testing.T) {
 		{201, false, false},
 		{204, false, false},
 		{299, false, false},
+		// Payload-shaped: THIS entry can never be accepted — permanent.
 		{400, true, true},
-		{401, true, true},
-		{403, true, true},
-		{404, true, true},
-		{405, true, true},
-		{408, true, false},
+		{413, true, true},
+		{415, true, true},
 		{422, true, true},
+		{451, true, true},
+		// Access/config-shaped — would fail EVERY entry identically, so
+		// transient: wedge visibly, zero dead-letters (a rotated token used
+		// to dead-letter up to a breaker-run of real events).
+		{401, true, false},
+		{403, true, false},
+		{404, true, false},
+		{405, true, false},
+		{407, true, false},
+		{410, true, false},
+		{301, true, false},
+		{408, true, false},
 		{429, true, false},
 		{500, true, false},
 		{502, true, false},
 		{503, true, false},
+		// Unknown codes default transient (conservative default).
+		{418, true, false},
 	}
 
 	for _, tt := range tests {
@@ -602,5 +615,33 @@ func TestClassifyStatus(t *testing.T) {
 				require.False(t, errors.Is(err, cluster.ErrPermanent), "status %d should be transient", tt.code)
 			}
 		}
+	}
+}
+
+// TestSync_AuthErrorsAreTransient pins the taxonomy fix: a rotated/expired
+// receiver token (401/403) must WEDGE the worker — transient, stuck machinery
+// engages, operator fixes the token, delivery resumes with zero data missing —
+// never dead-letter committed events. An auth failure fails every entry
+// identically, the exact criterion the Syncable contract's classification
+// rule (and the SQL dialects' 42501 carve-out) names as access-shaped.
+func TestSync_AuthErrorsAreTransient(t *testing.T) {
+	for _, code := range []int{401, 403} {
+		t.Run(fmt.Sprintf("%d", code), func(t *testing.T) {
+			ts := httptest.NewServer(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+				w.WriteHeader(code)
+			}))
+			defer ts.Close()
+
+			s := synchttp.New(newConfig(ts.URL))
+			defer s.Close()
+
+			entity := newEntity(testType, "key1", map[string]string{"id": "1"})
+			a := newActual(entity)
+
+			_, err := s.Sync(context.Background(), a)
+			require.Error(t, err)
+			require.False(t, errors.Is(err, cluster.ErrPermanent),
+				"status %d is access-shaped and must be transient (wedge, not dead-letter)", code)
+		})
 	}
 }

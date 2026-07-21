@@ -15,6 +15,17 @@ import (
 // ErrPermanent wraps a Sync error that retrying will not fix (e.g.,
 // constraint violations, malformed data). db.sync logs and skips
 // proposals returning a permanent error instead of retrying.
+//
+// CLASSIFICATION RULE (binding on every sink): Permanent MUST mean
+// ENTRY-SPECIFIC — this Actual's payload will be rejected identically
+// forever. An error that would fail EVERY entry identically is access- or
+// config-shaped (a missing GRANT, a rotated bearer token, a wrong URL) and
+// MUST stay transient so the worker wedges visibly and resumes on the
+// operator's fix with nothing missing downstream. The asymmetric risk is the
+// reason: a wrongful wedge is loud and fully recoverable; a wrongful
+// dead-letter silently drops delivered data and needs one-at-a-time replay.
+// See the SQL dialects' IsPermanent allowlists and http.ClassifyStatus for
+// the per-sink applications of this rule.
 var ErrPermanent = errors.New("syncable: permanent error")
 
 // Permanent marks err as non-retryable by wrapping it with ErrPermanent.
