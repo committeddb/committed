@@ -298,3 +298,11 @@ func (s *Storage) ValidateConfigSecretsForTest() error {
 func (s *Storage) ApplyFsyncOpsForTest() (eventLogWrites, appliedIndexPersists int64) {
 	return s.eventLogWriteOps.Load(), s.appliedIndexPersists.Load()
 }
+
+// AppendEventsForTest publishes entries to the event log WITHOUT applying their
+// entities to bbolt — reproducing the mid-batch / p>r state where a committed
+// entry is durable and reader-visible but its type is not yet applied. Used to
+// pin the reader visibility watermark (reader-sees-unapplied).
+func (s *Storage) AppendEventsForTest(entries []*pb.Entry) error {
+	return s.appendEvents(entries)
+}

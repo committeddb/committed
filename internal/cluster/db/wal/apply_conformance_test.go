@@ -1,6 +1,7 @@
 package wal_test
 
 import (
+	"io"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -170,4 +171,40 @@ func TestApplyConformance_SameIDConfigVersionCount(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, versions, 2, "replay must not append phantom versions")
 	require.Equal(t, uint64(2), versions[len(versions)-1].Version)
+}
+
+// TestReaderWatermark_DoesNotSurfaceUnappliedEntry pins reader-sees-unapplied:
+// ApplyCommittedBatch publishes a whole Ready's entries to the event log before
+// applying them, so a reader can reach a data entry whose type isn't in bbolt
+// yet. The reader must EOF at the applied watermark (holding its cursor), not
+// surface the entry, fail type resolution, and skip it forever.
+func TestReaderWatermark_DoesNotSurfaceUnappliedEntry(t *testing.T) {
+	s := NewStorageWithParser(t, nil, parser.New())
+	defer s.Cleanup()
+
+	tp := &cluster.Type{ID: "wm-topic", Name: "wm", Version: 1}
+	reg, err := cluster.NewUpsertTypeEntity(tp) // the type entry (M)
+	require.NoError(t, err)
+	data := cluster.NewUpsertEntity(tp, []byte("k"), []byte("v")) // data of type M (N)
+	ents := buildEntries(t, []*cluster.Entity{reg, data}, 1)      // M@1, N@2
+
+	// Publish to the event log WITHOUT applying: type M is durable+visible but
+	// not yet in bbolt (the mid-batch window).
+	require.NoError(t, s.AppendEventsForTest(ents))
+
+	r := s.Reader("wm-reader")
+	_, err = r.Read()
+	require.ErrorIs(t, err, io.EOF,
+		"the reader must not surface an unapplied entry; it must wait at the watermark")
+
+	// Apply (the batch's appendEvents no-ops via the eventIndex guard; the
+	// entities apply, appliedIndex advances).
+	require.NoError(t, s.ApplyCommittedBatch(ents))
+
+	// The SAME reader now surfaces N — it was held, not skipped.
+	a, err := r.Read()
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), a.Index)
+	require.Len(t, a.Entities, 1)
+	require.Equal(t, "k", string(a.Entities[0].Key))
 }

@@ -88,20 +88,45 @@ func (r *Reader) Read() (*cluster.Actual, error) {
 
 		ent := &pb.Entry{}
 		if err := proto.Unmarshal(bs, ent); err != nil {
+			// A decode failure does NOT advance the cursor: a corrupt or
+			// undecodable committed entry must surface loudly and retry the
+			// same seq (the caller classifies ErrCorruptEntry as fatal),
+			// never be silently skipped by advancing past it.
 			return nil, err
 		}
 
-		r.raftIndex = ent.GetIndex()
-		r.walSeq++
+		// Visibility watermark: never surface an entry whose apply has not
+		// completed. appendEvents publishes a whole Ready's entries to the
+		// event log BEFORE their entities are applied to bbolt (the tolerated
+		// p>r window, and restart replay), so an entry whose raft index
+		// exceeds AppliedIndex may reference a type not yet written — resolving
+		// it would fail, and pre-watermark the cursor had already advanced, so
+		// the row was skipped forever (reader-sees-unapplied). Treat
+		// not-yet-applied as EOF WITHOUT advancing; a later Read surfaces it
+		// once AppliedIndex catches up (sub-millisecond in steady state, and
+		// as replay progresses on a restart). AppliedIndex is an atomic load,
+		// safe under the eventMu.RLock held here.
+		if ent.GetIndex() > r.s.AppliedIndex() {
+			return nil, io.EOF
+		}
 
 		if ent.GetType() != pb.EntryNormal || ent.Data == nil {
+			r.raftIndex = ent.GetIndex()
+			r.walSeq++
 			continue
 		}
 
 		p := &cluster.Proposal{}
 		if err := p.Unmarshal(ent.Data, r.s); err != nil {
+			// Do not advance (as above). With the watermark, a within-
+			// AppliedIndex entry's type is guaranteed applied, so a resolution
+			// failure here is genuine corruption/bug — retry-loudly beats
+			// skip-silently.
 			return nil, err
 		}
+
+		r.raftIndex = ent.GetIndex()
+		r.walSeq++
 
 		// Internal metadata entities — committed's own config (type / database /
 		// syncable / ingestable) and coordination (syncable index +
