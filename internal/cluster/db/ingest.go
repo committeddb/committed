@@ -362,6 +362,17 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 
 	backoff := ingestBackoffMin
 
+	// dataProposeFailed is the POSITION BARRIER: armed the moment any data
+	// proposal fails, before the error is even classified. A standalone
+	// position checkpoint summarizes "all data through here committed", so
+	// once a data proposal has failed, proposing any later position would
+	// checkpoint past a hole. Every failure branch below freezes the worker
+	// anyway — the barrier is the structural enforcement that survives a
+	// future mishandled error branch (the oversized-proposal bug: TooLarge
+	// was warn-and-continue, and the next checkpoint silently committed the
+	// resume position past the dropped batch).
+	dataProposeFailed := false
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -413,6 +424,10 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 				// advancing the position past uncommitted data.
 				err := db.proposeIngestData(ctx, proposal)
 				if err != nil {
+					// Arm the position barrier BEFORE classifying the error:
+					// no later standalone checkpoint may pass this hole,
+					// whatever the branches below decide.
+					dataProposeFailed = true
 					db.logger.Warn("ingest propose error", zap.String("id", id), zap.Error(err))
 					// Count real failures only — a ctx cancellation here is
 					// the worker shutting down (replace/Close), not an
@@ -420,39 +435,62 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 					if db.metrics != nil && ctx.Err() == nil {
 						db.metrics.IngestError(id, "propose")
 					}
-					if errors.Is(err, ErrProposalUnknown) || errors.Is(err, ErrProposalLost) {
-						// Freeze: we don't know if this proposal
-						// committed. ErrProposalUnknown (status unknown
-						// after a leader change) and ErrProposalLost
-						// (entry truncated before commit) are the two
-						// leader-flap orphan signals; on the old leader —
-						// where this worker runs — Lost is the likely one,
-						// so both must freeze or a truncated proposal would
-						// log-and-continue and advance the position past
-						// data that never committed. Because position bumps
-						// are now
-						// blocking (one in flight at a time, fully
-						// resolved before the next channel event),
-						// there are no outstanding bumps to drain —
-						// storage.Position is already definitive, so
-						// the supervisor's post-restart read is
-						// correct without any drain step.
+					if ctx.Err() == nil {
+						// Freeze on EVERY propose failure — the conservative
+						// default. ErrProposalUnknown (status unknown after a
+						// leader change) and ErrProposalLost (entry truncated
+						// before commit) are the classic leader-flap orphan
+						// signals: we don't know (or know it didn't) commit,
+						// and continuing would let the next checkpoint advance
+						// the position past data that never committed. The
+						// same reasoning holds for ANY other failure — a
+						// deterministic rejection like ErrProposalTooLarge or
+						// an error this code has never seen. The worker never
+						// rewrites a proposal to make it fit: a proposal is an
+						// opaque atomic unit whose composition (grouping AND
+						// sizing) belongs to its emitter — the dialects
+						// byte-budget their snapshot batches under the cap
+						// (sql.ChunkEntitiesByBytes), and an emitter that
+						// exceeds it anyway freezes here loudly. The
+						// pre-barrier bug was exactly a branch that chose to
+						// continue; the default must hold the line, and the
+						// supervisor's restart-from-durable-position is the
+						// one recovery that is always correct. Because
+						// position bumps are blocking (one in flight at a
+						// time, fully resolved before the next channel
+						// event), there are no outstanding bumps to drain —
+						// storage.Position is already definitive, so the
+						// supervisor's post-restart read is correct without
+						// any drain step.
 						//
-						// ingress.stop (from the defer above) cancels
-						// the inner Ingest goroutine cleanly on
-						// return, unblocking its pending positionChan
-						// send. The position value is discarded (we
-						// must not advance past the unknown proposal),
-						// which is the whole point of freezing here.
+						// ingress.stop (from the defer above) cancels the
+						// inner Ingest goroutine cleanly on return,
+						// unblocking its pending positionChan send. The
+						// position value is discarded (we must not advance
+						// past the failed proposal), which is the whole
+						// point of freezing here.
 						if db.metrics != nil {
 							db.metrics.IngestFrozen(id, true)
 						}
 						return ingestExitFreeze
 					}
+					// ctx canceled mid-propose: worker shutdown, not an
+					// ingest failure — the next select observes ctx.Done.
 				}
 			}
 			backoff = ingestBackoffMin
 		case position := <-ingress.positionChan:
+			if dataProposeFailed {
+				// POSITION BARRIER (see declaration above): a data proposal
+				// failed and some branch continued instead of freezing — a
+				// path that should not exist. Never checkpoint past the
+				// hole; freeze now.
+				db.logger.Error("ingest position barrier: refusing checkpoint after a failed data proposal", zap.String("id", id))
+				if db.metrics != nil {
+					db.metrics.IngestFrozen(id, true)
+				}
+				return ingestExitFreeze
+			}
 			if db.isNode(id) {
 				// Block until the position is durably applied. The
 				// unbuffered positionChan means the inner Ingest only

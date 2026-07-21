@@ -147,3 +147,39 @@ func (i *Ingestable) Teardown() error {
 	}
 	return nil
 }
+
+// snapshotProposalMaxBytes is the byte budget for one snapshot batch proposal.
+// Row-count batching (snapshotBatchSize) cannot see bytes: 10k rows of ~2KB
+// each marshal past the cluster's proposal size cap (16MiB default) and the
+// propose is rejected whole. ChunkEntitiesByBytes splits a read batch into
+// proposals under this budget, chosen to clear the default cap with a wide
+// margin for the per-entity estimate error. The ingest worker's TooLarge
+// split-and-freeze handling remains the backstop when an estimate misses.
+const snapshotProposalMaxBytes = 4 << 20
+
+// chunkEntityOverheadBytes approximates the per-entity wire overhead beyond
+// Key+Data (type ref, field tags, generation stamp).
+const chunkEntityOverheadBytes = 64
+
+// ChunkEntitiesByBytes splits a snapshot read batch into consecutive chunks
+// whose estimated marshaled size stays under snapshotProposalMaxBytes. Every
+// chunk is non-empty; an entity larger than the whole budget gets a chunk of
+// its own (the worker freezes on it loudly if it exceeds the cluster cap).
+// Order is preserved — the caller attaches the batch's bundled position to
+// the FINAL chunk only, so the checkpoint trails every row it covers.
+func ChunkEntitiesByBytes(entities []*cluster.Entity) [][]*cluster.Entity {
+	var chunks [][]*cluster.Entity
+	start, curBytes := 0, 0
+	for i, e := range entities {
+		sz := len(e.Key) + len(e.Data) + chunkEntityOverheadBytes
+		if i > start && curBytes+sz > snapshotProposalMaxBytes {
+			chunks = append(chunks, entities[start:i])
+			start, curBytes = i, 0
+		}
+		curBytes += sz
+	}
+	if start < len(entities) {
+		chunks = append(chunks, entities[start:])
+	}
+	return chunks
+}

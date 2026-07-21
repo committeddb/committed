@@ -117,6 +117,13 @@ type ShouldSnapshot bool
 //     mechanism may bound the duplicate window; see
 //     .claude-scratch/tickets/sync-two-phase-syncable.md.
 //
+//   - An Actual is a TRANSACTION. Sync MUST apply its entities atomically —
+//     all or none, in one destination transaction (or one delivery) — and a
+//     failure dead-letters the whole Actual, never part of one. A consumer
+//     must never observe a partially applied Actual: the proposal boundary
+//     carries source-transaction and delete-bundle atomicity end to end
+//     (see cluster.Proposal).
+//
 //   - Sync MUST honor deletes. A syncable applies each entity by switching
 //     on Entity.Variant() (a variant it does not handle belongs in the
 //     switch's default case as an explicit error, never a fallthrough into
@@ -131,9 +138,6 @@ type ShouldSnapshot bool
 //     harmless no-op — that is what makes a fresh syncable replaying an
 //     already-scrubbed log correct (the bootstrap edge case: the original
 //     upsert may have been scrubbed away before this syncable ever saw it).
-//
-//   - An Actual's entities are one atomic unit (one committed transaction);
-//     apply them together (e.g. in one destination transaction).
 //
 //   - A syncable sees ONLY user-defined topic data — including data an
 //     ingestable pulled in, which is written under user topic types.

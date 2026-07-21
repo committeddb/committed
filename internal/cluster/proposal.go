@@ -88,6 +88,24 @@ func logEntityView(le *clusterpb.LogEntity) (logEntityWireView, error) {
 	}
 }
 
+// Proposal is a TRANSACTION: its entities commit in one raft entry, and a
+// sink applies the resulting Actual's entities in one destination transaction
+// — if one entity syncs, they all do. That boundary is a system invariant,
+// preserved end to end: a CDC source transaction becomes one proposal, a
+// config delete-bundle rides one proposal, and consumers may rely on never
+// observing a partial application. Nothing may subdivide a proposal,
+// dead-letter part of one, or otherwise split the boundary — which is also
+// why the proposal size cap is a hard rejection, never a split.
+//
+// KNOWN DEVIATION (tracked for redesign in the 0.8 series): the snapshot
+// ingest path packs INDEPENDENT rows into one proposal to amortize the
+// fsync-bound raft round-trip, minting a proposal that looks like a
+// transaction but is not — and the system cannot tell. This is safe (atomic
+// application of independent upserts strengthens, never breaks, a promise)
+// but wrong: the counterfeit inherits transaction-sized blast radii — a
+// poison row dead-letters its whole batch, and the size cap constrains an
+// arbitrary packing rather than a real transaction. The correct shape is one
+// row = one proposal with pipelined proposing to recover throughput.
 type Proposal struct {
 	Entities []*Entity
 	// RequestID lets db.Propose's caller wait for *its* proposal to be

@@ -1806,11 +1806,21 @@ func snapshotTable(
 		if err != nil {
 			return err
 		}
-		p := &cluster.Proposal{Entities: rows, Position: posBytes}
-		select {
-		case pr <- p:
-		case <-ctx.Done():
-			return ctx.Err()
+		// Byte-budget the batch into one or more proposals (row-count batching
+		// can't see bytes; an oversized proposal is rejected whole at the size
+		// cap). The bundled checkpoint rides ONLY the final chunk so it trails
+		// every row it covers.
+		chunks := sql.ChunkEntitiesByBytes(rows)
+		for ci, chunk := range chunks {
+			p := &cluster.Proposal{Entities: chunk}
+			if ci == len(chunks)-1 {
+				p.Position = posBytes
+			}
+			select {
+			case pr <- p:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		}
 		totalRows += count
 
