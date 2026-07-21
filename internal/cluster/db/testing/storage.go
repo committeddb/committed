@@ -73,8 +73,13 @@ func (ms *MemoryStorage) ApplyCommitted(entry *raftpb.Entry) error {
 	return nil
 }
 
-// ApplyCommittedBatch applies per entry; the production fsync batching is
-// invisible at this level.
+// ApplyCommittedBatch applies per entry. This in-memory double has no event
+// log, reader, or version history, so it CANNOT reproduce the real batch's
+// publish-before-apply or persist-once ordering — it is a liveness/wiring
+// stand-in, not an ordering oracle. Tests that assert batch-vs-per-entry
+// equivalence or crash-replay convergence MUST use real wal.Storage (see
+// wal/apply_conformance_test.go); driving them through this double would pass
+// spuriously.
 func (ms *MemoryStorage) ApplyCommittedBatch(entries []*raftpb.Entry) error {
 	for _, e := range entries {
 		if err := ms.ApplyCommitted(e); err != nil {

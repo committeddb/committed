@@ -833,8 +833,12 @@ func (ms *MemoryStorage) ApplyCommitted(entry *raftpb.Entry) error {
 	return nil
 }
 
-// ApplyCommittedBatch mirrors production semantics: per-entry apply with the
-// durable-write batching invisible at this level.
+// ApplyCommittedBatch applies per entry. This raft-only double has no event
+// log or bbolt state, so it CANNOT reproduce the real batch's
+// publish-before-apply or persist-once ordering (AppliedIndex here is always
+// 0). It is a raft-layer wiring stand-in, not an ordering oracle; batch-vs-
+// per-entry ordering is guarded against real wal.Storage in
+// wal/apply_conformance_test.go.
 func (ms *MemoryStorage) ApplyCommittedBatch(entries []*raftpb.Entry) error {
 	for _, e := range entries {
 		if err := ms.ApplyCommitted(e); err != nil {
