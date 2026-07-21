@@ -239,6 +239,12 @@ invariant (below) is the local-recovery backstop.
 - `R_local` = local raft applied index (the highest raft index
   acknowledged to raft)
 
+The two advance together within each Ready iteration: the batch apply
+appends every committed entry's event-log record in one batched write,
+applies the entities, then persists the applied index once — so `P > R`
+transiently inside a batch (and across a crash, which restart replay
+closes) and the invariant is checked only at iteration end.
+
 The node **fatal-exits when `P_local < R_local`** — raft has acknowledged an
 index the permanent log doesn't have (the dangerous direction; e.g. an
 InstallSnapshot advanced `R_local` past the events), with a clear error pointing

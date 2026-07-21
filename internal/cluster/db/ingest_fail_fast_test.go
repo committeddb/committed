@@ -248,6 +248,19 @@ func (s *slowApplyStorage) ApplyCommitted(e *raftpb.Entry) error {
 	return s.MemoryStorage.ApplyCommitted(e)
 }
 
+// ApplyCommittedBatch must route through THIS wrapper's blocking
+// ApplyCommitted — without the override, the promoted embedded method would
+// bypass the park entirely and the Ready loop would drain applies the test
+// needs held (Go embedding does not virtual-dispatch back into the wrapper).
+func (s *slowApplyStorage) ApplyCommittedBatch(entries []*raftpb.Entry) error {
+	for _, e := range entries {
+		if err := s.ApplyCommitted(e); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Unblock lets queued ApplyCommitted calls proceed. Idempotent — safe
 // for t.Cleanup to call even if the test already unblocked inline.
 func (s *slowApplyStorage) Unblock() {

@@ -44,6 +44,17 @@ type FakeStorage struct {
 	applyCommittedReturnsOnCall map[int]struct {
 		result1 error
 	}
+	ApplyCommittedBatchStub        func([]*raftpb.Entry) error
+	applyCommittedBatchMutex       sync.RWMutex
+	applyCommittedBatchArgsForCall []struct {
+		arg1 []*raftpb.Entry
+	}
+	applyCommittedBatchReturns struct {
+		result1 error
+	}
+	applyCommittedBatchReturnsOnCall map[int]struct {
+		result1 error
+	}
 	CloseStub        func() error
 	closeMutex       sync.RWMutex
 	closeArgsForCall []struct {
@@ -812,6 +823,72 @@ func (fake *FakeStorage) ApplyCommittedReturnsOnCall(i int, result1 error) {
 		})
 	}
 	fake.applyCommittedReturnsOnCall[i] = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *FakeStorage) ApplyCommittedBatch(arg1 []*raftpb.Entry) error {
+	var arg1Copy []*raftpb.Entry
+	if arg1 != nil {
+		arg1Copy = make([]*raftpb.Entry, len(arg1))
+		copy(arg1Copy, arg1)
+	}
+	fake.applyCommittedBatchMutex.Lock()
+	ret, specificReturn := fake.applyCommittedBatchReturnsOnCall[len(fake.applyCommittedBatchArgsForCall)]
+	fake.applyCommittedBatchArgsForCall = append(fake.applyCommittedBatchArgsForCall, struct {
+		arg1 []*raftpb.Entry
+	}{arg1Copy})
+	stub := fake.ApplyCommittedBatchStub
+	fakeReturns := fake.applyCommittedBatchReturns
+	fake.recordInvocation("ApplyCommittedBatch", []interface{}{arg1Copy})
+	fake.applyCommittedBatchMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeStorage) ApplyCommittedBatchCallCount() int {
+	fake.applyCommittedBatchMutex.RLock()
+	defer fake.applyCommittedBatchMutex.RUnlock()
+	return len(fake.applyCommittedBatchArgsForCall)
+}
+
+func (fake *FakeStorage) ApplyCommittedBatchCalls(stub func([]*raftpb.Entry) error) {
+	fake.applyCommittedBatchMutex.Lock()
+	defer fake.applyCommittedBatchMutex.Unlock()
+	fake.ApplyCommittedBatchStub = stub
+}
+
+func (fake *FakeStorage) ApplyCommittedBatchArgsForCall(i int) []*raftpb.Entry {
+	fake.applyCommittedBatchMutex.RLock()
+	defer fake.applyCommittedBatchMutex.RUnlock()
+	argsForCall := fake.applyCommittedBatchArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeStorage) ApplyCommittedBatchReturns(result1 error) {
+	fake.applyCommittedBatchMutex.Lock()
+	defer fake.applyCommittedBatchMutex.Unlock()
+	fake.ApplyCommittedBatchStub = nil
+	fake.applyCommittedBatchReturns = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *FakeStorage) ApplyCommittedBatchReturnsOnCall(i int, result1 error) {
+	fake.applyCommittedBatchMutex.Lock()
+	defer fake.applyCommittedBatchMutex.Unlock()
+	fake.ApplyCommittedBatchStub = nil
+	if fake.applyCommittedBatchReturnsOnCall == nil {
+		fake.applyCommittedBatchReturnsOnCall = make(map[int]struct {
+			result1 error
+		})
+	}
+	fake.applyCommittedBatchReturnsOnCall[i] = struct {
 		result1 error
 	}{result1}
 }

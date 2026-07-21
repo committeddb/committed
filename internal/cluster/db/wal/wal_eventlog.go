@@ -3,6 +3,8 @@ package wal
 import (
 	"fmt"
 
+	"github.com/tidwall/wal"
+
 	pb "go.etcd.io/raft/v3/raftpb"
 	"google.golang.org/protobuf/proto"
 )
@@ -130,6 +132,54 @@ func (s *Storage) recordCorrupt(logName string) {
 // eventIndex (crash-window idempotence). Kept on Storage (not inlined
 // into ApplyCommitted) so there's exactly one site that advances
 // P_local.
+// appendEvents is appendEvent for one Ready's worth of entries: all frames go
+// to the event log in ONE batched write (one sync) instead of one write+sync
+// per entry — the apply loop's dominant fsync cost. Entries already in the log
+// (index <= eventIndex) are skipped, mirroring ApplyCommitted's guard, so a
+// restart replay never double-appends. Same eventMu.RLock scope as appendEvent
+// for the same scrub-swap reason.
+func (s *Storage) appendEvents(entries []*pb.Entry) error {
+	s.eventMu.RLock()
+	defer s.eventMu.RUnlock()
+
+	nextSeq, err := s.eventLog.LastIndex()
+	if err != nil {
+		return fmt.Errorf("event log last index: %w", err)
+	}
+	batch := new(wal.Batch)
+	first, last := uint64(0), uint64(0)
+	wroteSeqOne := nextSeq == 0
+	for _, entry := range entries {
+		if entry.GetIndex() <= s.eventIndex.Load() {
+			continue
+		}
+		entryBytes, err := proto.Marshal(entry)
+		if err != nil {
+			return fmt.Errorf("marshal entry for event log: %w", err)
+		}
+		nextSeq++
+		batch.Write(nextSeq, frame(entryBytes))
+		if first == 0 {
+			first = entry.GetIndex()
+		}
+		last = entry.GetIndex()
+	}
+	if last == 0 {
+		return nil
+	}
+	if err := s.eventLog.WriteBatch(batch); err != nil {
+		return fmt.Errorf("event log write batch (raft indexes %d-%d): %w", first, last, err)
+	}
+	s.eventLogWriteOps.Add(1)
+	if wroteSeqOne {
+		// The log was empty before this batch: record the raft index its
+		// first record carries, as appendEvent does for seq 1.
+		s.firstEventIndex.Store(first)
+	}
+	s.eventIndex.Store(last)
+	return nil
+}
+
 func (s *Storage) appendEvent(entry *pb.Entry) error {
 	// RLock for the whole body so the seq it computes (LastIndex+1) and the
 	// Write that consumes it can't straddle a scrub swap that would replace the
@@ -150,6 +200,7 @@ func (s *Storage) appendEvent(entry *pb.Entry) error {
 	if err := s.eventLog.Write(nextSeq, frame(entryBytes)); err != nil {
 		return fmt.Errorf("event log write seq %d (raft index %d): %w", nextSeq, entry.GetIndex(), err)
 	}
+	s.eventLogWriteOps.Add(1)
 	if nextSeq == 1 {
 		s.firstEventIndex.Store(entry.GetIndex())
 	}

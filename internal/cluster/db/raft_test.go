@@ -833,6 +833,17 @@ func (ms *MemoryStorage) ApplyCommitted(entry *raftpb.Entry) error {
 	return nil
 }
 
+// ApplyCommittedBatch mirrors production semantics: per-entry apply with the
+// durable-write batching invisible at this level.
+func (ms *MemoryStorage) ApplyCommittedBatch(entries []*raftpb.Entry) error {
+	for _, e := range entries {
+		if err := ms.ApplyCommitted(e); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (ms *MemoryStorage) AppliedIndex() uint64 {
 	return 0
 }

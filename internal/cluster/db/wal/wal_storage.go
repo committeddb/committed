@@ -373,6 +373,14 @@ type Storage struct {
 	// a gauge. See secrets.go / saveDatabase for the rationale.
 	configErrMu  sync.Mutex
 	configErrors map[string]configErr
+
+	// eventLogWriteOps and appliedIndexPersists count write OPERATIONS (each
+	// op is one sync when fsync is on) against the event log and the
+	// appliedIndex bucket. Observability for the apply-loop fsync-batching
+	// regression test: a Ready batch of N entries must cost 1+1 ops, not N+N.
+	eventLogWriteOps     atomic.Int64
+	appliedIndexPersists atomic.Int64
+
 	// appliedIndex is the highest raft entry index that ApplyCommitted has
 	// fully applied. Bumped after each successful per-entry apply (and
 	// persisted to bbolt in the same step). Loaded from bbolt on Open.

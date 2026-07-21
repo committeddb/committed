@@ -290,3 +290,11 @@ func minimalConfigBytesForTest(id string) ([]byte, error) {
 func (s *Storage) ValidateConfigSecretsForTest() error {
 	return s.validateConfigSecrets()
 }
+
+// ApplyFsyncOpsForTest reports the write-operation counters behind the
+// apply-loop fsync batching: ops against the event log and persists of
+// appliedIndex. Each op is one sync when fsync is enabled, so a Ready batch
+// of N entries must cost (1, 1) — not (N, N).
+func (s *Storage) ApplyFsyncOpsForTest() (eventLogWrites, appliedIndexPersists int64) {
+	return s.eventLogWriteOps.Load(), s.appliedIndexPersists.Load()
+}

@@ -644,20 +644,27 @@ func (n *Raft) serveChannels() {
 			if !raft.IsEmptySnap(rd.Snapshot) {
 				n.processSnapshot(rd.Snapshot)
 			}
+			// Apply MUST complete before Advance() per the etcd raft
+			// contract. Apply errors are crash-fatal: continuing past a
+			// half-applied entry diverges the state machine, retrying
+			// risks masking programming bugs, and disk failures leave
+			// the node inconsistent in a way that's worse to keep
+			// running than to crash. (Same posture etcd's raftexample
+			// takes.) The batch call hoists the per-entry fsyncs (event-log
+			// append, appliedIndex persist) to per-Ready; the loop below
+			// keeps the per-entry bookkeeping (notifier, conf changes,
+			// metrics) in entry order.
+			applyStart := time.Now()
+			if err := n.storage.ApplyCommittedBatch(rd.CommittedEntries); err != nil {
+				n.logger.Fatal("apply committed entries", zap.Int("count", len(rd.CommittedEntries)), zap.Error(err))
+			}
+			applyDur := time.Since(applyStart)
 			for _, entry := range rd.CommittedEntries {
-				// Apply MUST complete before Advance() per the etcd raft
-				// contract. Apply errors are crash-fatal: continuing past a
-				// half-applied entry diverges the state machine, retrying
-				// risks masking programming bugs, and disk failures leave
-				// the node inconsistent in a way that's worse to keep
-				// running than to crash. (Same posture etcd's raftexample
-				// takes.)
-				applyStart := time.Now()
-				if err := n.storage.ApplyCommitted(entry); err != nil {
-					n.logger.Fatal("apply committed entry", zap.Uint64("index", entry.GetIndex()), zap.Error(err))
-				}
 				if n.metrics != nil {
-					n.metrics.EntryApplied(entry.GetIndex(), time.Since(applyStart))
+					// Batch-amortized share: per-entry apply is no longer
+					// individually timed; the shares sum to the batch's
+					// true duration so rate/latency aggregates stay honest.
+					n.metrics.EntryApplied(entry.GetIndex(), applyDur/time.Duration(len(rd.CommittedEntries)))
 				}
 				// Fire the apply notifier once the storage apply has
 				// succeeded, so blocking db.Propose unblocks promptly. The
@@ -981,8 +988,10 @@ func (n *Raft) dispatchReadStates(states []raft.ReadState) {
 //   - R_local is storage.AppliedIndex() — the highest raft index this
 //     node has acknowledged as applied to raft.
 //
-// Under normal operation ApplyCommitted writes the event and bumps
-// appliedIndex atomically per entry, so the two stay equal. The only
+// Under normal operation ApplyCommittedBatch appends the Ready's events
+// and persists appliedIndex within one iteration, so the two are equal
+// again by the time this check runs (transiently p > r inside the batch —
+// see below). The only
 // way they diverge is an InstallSnapshot that advanced appliedIndex
 // past the permanent event log highwatermark — i.e., the cluster's
 // raft log has been compacted past a gap this node can't fill. v1

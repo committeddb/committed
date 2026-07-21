@@ -24,6 +24,15 @@ type Storage interface {
 	// error from ApplyCommitted is treated as fatal by raft.go because
 	// continuing past a half-applied entry diverges the state machine.
 	ApplyCommitted(entry *raftpb.Entry) error
+	// ApplyCommittedBatch applies one Ready's worth of committed entries,
+	// hoisting the per-entry durable writes (event-log append, appliedIndex
+	// persist) to per-batch — the apply loop's fsync-batching. Semantically
+	// identical to calling ApplyCommitted per entry (same order, same
+	// idempotent skip of already-applied entries); the crash-replay window
+	// widens from one entry to at most one batch, which restart replay
+	// already covers. The Ready loop calls this once per Ready instead of
+	// looping ApplyCommitted.
+	ApplyCommittedBatch(entries []*raftpb.Entry) error
 	// AppliedIndex returns the highest log index that has been fully
 	// applied to application state. Survives restart so the Ready loop's
 	// replay of already-applied committed entries is a no-op. This is

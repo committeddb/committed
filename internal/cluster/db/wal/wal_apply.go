@@ -17,9 +17,11 @@ import (
 // node.Advance(). Apply must complete before Advance per etcd-raft contract.
 //
 // ApplyCommitted is idempotent on re-apply: entries with index <=
-// AppliedIndex are skipped. The applied index is bumped (and persisted to
-// bbolt) after each successful apply, so a restart that replays committed
-// entries through the Ready loop will skip the already-applied portion.
+// AppliedIndex are skipped. The applied index is bumped after each
+// successful apply and persisted to bbolt by the caller-facing entry points
+// (per entry via ApplyCommitted, once per Ready via ApplyCommittedBatch), so
+// a restart that replays committed entries through the Ready loop will skip
+// the already-applied portion.
 //
 // It also mirrors the raw entry into the permanent EventLog — every
 // committed entry, regardless of EntryType or entity kind, so EventLog's
@@ -30,12 +32,57 @@ import (
 // Errors here are treated as fatal by raft.go; see the apply error policy
 // comment in raft.go's Ready loop.
 func (s *Storage) ApplyCommitted(entry *pb.Entry) error {
+	advanced, err := s.applyCommitted(entry)
+	if err != nil || !advanced {
+		return err
+	}
+	return s.saveAppliedIndex(entry.GetIndex())
+}
+
+// ApplyCommittedBatch applies one Ready's worth of committed entries with the
+// per-entry fsyncs hoisted to per-batch: every fresh entry's event-log record
+// is appended in ONE batched write (one sync), and appliedIndex is persisted
+// ONCE after the last apply — collapsing the 2-fsyncs-per-entry apply ceiling
+// to 2 per Ready. The per-entry applies then skip their own appendEvent via
+// the eventIndex guard.
+//
+// Crash semantics are the existing p > r window, widened from one entry to at
+// most one Ready batch (explicitly tolerated by checkStorageInvariant): a
+// crash after the event batch fsyncs but before saveAppliedIndex persists
+// replays the whole batch on restart — entity applies are replay-idempotent
+// by construction and appendEvent skips via the eventIndex guard, exactly the
+// recovery today's per-entry window uses.
+func (s *Storage) ApplyCommittedBatch(entries []*pb.Entry) error {
+	fresh := entries[:0:0]
+	for _, e := range entries {
+		if e.GetIndex() > s.appliedIndex.Load() {
+			fresh = append(fresh, e)
+		}
+	}
+	if len(fresh) == 0 {
+		return nil
+	}
+	if err := s.appendEvents(fresh); err != nil {
+		return fmt.Errorf("[wal.storage] %w", err)
+	}
+	for _, e := range fresh {
+		if _, err := s.applyCommitted(e); err != nil {
+			return err
+		}
+	}
+	return s.saveAppliedIndex(fresh[len(fresh)-1].GetIndex())
+}
+
+// applyCommitted applies one committed entry WITHOUT persisting appliedIndex
+// (the caller owns that — per entry via ApplyCommitted, per batch via
+// ApplyCommittedBatch). Reports whether the entry advanced appliedIndex.
+func (s *Storage) applyCommitted(entry *pb.Entry) (bool, error) {
 	// Skip already-applied entries (replay-on-restart safety). A bare
 	// EntryNormal with nil data (e.g. the leader's post-election no-op
 	// entry from raft) still counts as applied — we bump appliedIndex so
 	// the Ready loop's invariant check stays P_local == R_local.
 	if entry.GetIndex() <= s.appliedIndex.Load() {
-		return nil
+		return false, nil
 	}
 
 	// Mirror the raw raft entry into the permanent event log. The guard
@@ -45,7 +92,7 @@ func (s *Storage) ApplyCommitted(entry *pb.Entry) error {
 	// diverge seq vs. raft index on disk.
 	if entry.GetIndex() > s.eventIndex.Load() {
 		if err := s.appendEvent(entry); err != nil {
-			return fmt.Errorf("[wal.storage] %w", err)
+			return false, fmt.Errorf("[wal.storage] %w", err)
 		}
 	}
 
@@ -67,7 +114,7 @@ func (s *Storage) ApplyCommitted(entry *pb.Entry) error {
 				zap.Uint64("index", entry.GetIndex()),
 				zap.Stringer("entryType", entry.GetType()),
 				zap.Error(err))
-			return fmt.Errorf("[wal.storage] unmarshal proposal at index %d: %w", entry.GetIndex(), err)
+			return false, fmt.Errorf("[wal.storage] unmarshal proposal at index %d: %w", entry.GetIndex(), err)
 		}
 
 		// Advance the data-entry head iff this proposal carries user topic data —
@@ -87,7 +134,7 @@ func (s *Storage) ApplyCommitted(entry *pb.Entry) error {
 			// index correlate the entry without exposing the subject.
 			s.logger.Debug("applying entity", zap.String("typeID", entity.Type.ID), zap.Uint64("index", entry.GetIndex()))
 			if err := s.applyEntity(entity); err != nil {
-				return err
+				return false, err
 			}
 
 			// Record an event-log tombstone for a user-defined delete so a
@@ -98,7 +145,7 @@ func (s *Storage) ApplyCommitted(entry *pb.Entry) error {
 			// stores identical bytes.
 			if isUserDefinedType(entity.Type.ID) && entity.IsDelete() {
 				if err := s.recordEventTombstone(entity.Type.ID, entity.Key, entry.GetIndex()); err != nil {
-					return fmt.Errorf("[wal.storage] recordEventTombstone: %w", err)
+					return false, fmt.Errorf("[wal.storage] recordEventTombstone: %w", err)
 				}
 			}
 
@@ -125,7 +172,7 @@ func (s *Storage) ApplyCommitted(entry *pb.Entry) error {
 			// topic_refresh_epoch.go.
 			if entity.Generation > 0 {
 				if err := s.bumpTopicRefreshEpoch(entity.Type.ID, entity.Generation); err != nil {
-					return fmt.Errorf("[wal.storage] bumpTopicRefreshEpoch: %w", err)
+					return false, fmt.Errorf("[wal.storage] bumpTopicRefreshEpoch: %w", err)
 				}
 			}
 		}
@@ -136,7 +183,7 @@ func (s *Storage) ApplyCommitted(entry *pb.Entry) error {
 		// replayed entry re-applies the idempotent max. Non-ingest
 		// proposals carry "" / 0 and no-op here.
 		if err := s.advanceIngestSourceSeq(p.IngestableID, p.SourceSeq); err != nil {
-			return fmt.Errorf("[wal.storage] advanceIngestSourceSeq: %w", err)
+			return false, fmt.Errorf("[wal.storage] advanceIngestSourceSeq: %w", err)
 		}
 
 		// Persist a bundled resume checkpoint ATOMICALLY with the proposal's
@@ -150,13 +197,13 @@ func (s *Storage) ApplyCommitted(entry *pb.Entry) error {
 		// config existing, exactly like a standalone position entity.
 		if len(p.Position) > 0 {
 			if err := s.applyBundledIngestablePosition(p.IngestableID, p.Position); err != nil {
-				return fmt.Errorf("[wal.storage] apply bundled position: %w", err)
+				return false, fmt.Errorf("[wal.storage] apply bundled position: %w", err)
 			}
 		}
 	}
 
 	s.appliedIndex.Store(entry.GetIndex())
-	return s.saveAppliedIndex(entry.GetIndex())
+	return true, nil
 }
 
 func (s *Storage) applyEntity(entity *cluster.Entity) error {
@@ -196,6 +243,7 @@ func (s *Storage) AppliedIndex() uint64 {
 // own short bbolt transaction; this is acceptable because the per-entity
 // handlers are not atomic with each other today either.
 func (s *Storage) saveAppliedIndex(idx uint64) error {
+	s.appliedIndexPersists.Add(1)
 	return s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(appliedIndexBucket)
 		if b == nil {

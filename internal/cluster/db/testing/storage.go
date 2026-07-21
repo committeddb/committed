@@ -73,6 +73,17 @@ func (ms *MemoryStorage) ApplyCommitted(entry *raftpb.Entry) error {
 	return nil
 }
 
+// ApplyCommittedBatch applies per entry; the production fsync batching is
+// invisible at this level.
+func (ms *MemoryStorage) ApplyCommittedBatch(entries []*raftpb.Entry) error {
+	for _, e := range entries {
+		if err := ms.ApplyCommitted(e); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // AppliedIndex returns the highest entry index that ApplyCommitted has
 // observed. For MemoryStorage there is no real apply step, so this
 // reflects "raft told us this entry was committed" rather than "we
