@@ -168,7 +168,17 @@ func (s *Storage) loadDatabasesFromTx(tx *bolt.Tx) error {
 		}
 	}
 
+	present := make(map[string]struct{})
+	defer func() {
+		// A database config deleted via a compacted InstallSnapshot has no
+		// apply-path delete event to clear its degraded record; sweep records
+		// for ids no longer in the bucket (the handle cache was already reset
+		// wholesale above, so only the record can go stale).
+		s.sweepConfigErrorsExcept("database", present)
+	}()
+
 	return forEachCurrent(b, func(id, data []byte) error {
+		present[string(id)] = struct{}{}
 		cfg := &cluster.Configuration{}
 		if err := cfg.Unmarshal(data); err != nil {
 			return err // genuine corruption — stays fatal

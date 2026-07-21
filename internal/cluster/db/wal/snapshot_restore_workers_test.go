@@ -66,12 +66,17 @@ func TestRestoreSnapshot_RespawnsSyncableWorker(t *testing.T) {
 
 	require.NoError(t, dst.RestoreSnapshot(snap))
 
-	// The restore must re-drive the snapshot-learned syncable to the worker channel.
+	// The restore must request a reconcile whose closure lists the
+	// snapshot-learned syncable (the db listener executes it at dequeue).
 	select {
 	case got := <-dstCh:
-		require.Equal(t, "sync-1", got.ID, "RestoreSnapshot must respawn the snapshot-learned syncable's worker")
+		require.NotNil(t, got.ReconcileList, "restore must send a reconcile request")
+		listed, err := got.ReconcileList()
+		require.NoError(t, err)
+		require.Len(t, listed, 1)
+		require.Equal(t, "sync-1", listed[0].ID, "the reconcile must list the snapshot-learned syncable")
 	case <-time.After(3 * time.Second):
-		t.Fatal("RestoreSnapshot did not respawn a worker for the snapshot-learned syncable")
+		t.Fatal("RestoreSnapshot did not request a sync reconcile")
 	}
 }
 
@@ -119,8 +124,12 @@ func TestRestoreSnapshot_RespawnsIngestableWorker(t *testing.T) {
 
 	select {
 	case got := <-dstCh:
-		require.Equal(t, "ingest-1", got.ID, "RestoreSnapshot must respawn the snapshot-learned ingestable's worker")
+		require.NotNil(t, got.ReconcileList, "restore must send a reconcile request")
+		listed, err := got.ReconcileList()
+		require.NoError(t, err)
+		require.Len(t, listed, 1)
+		require.Equal(t, "ingest-1", listed[0].ID, "the reconcile must list the snapshot-learned ingestable")
 	case <-time.After(3 * time.Second):
-		t.Fatal("RestoreSnapshot did not respawn a worker for the snapshot-learned ingestable")
+		t.Fatal("RestoreSnapshot did not request an ingest reconcile")
 	}
 }

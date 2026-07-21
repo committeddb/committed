@@ -386,12 +386,17 @@ func TestRestoreIngestableWorkers(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 	}
 
-	// The explicit restore re-sends the persisted ingestable.
-	s2.RestoreIngestableWorkers()
+	// The explicit reconcile request carries a closure; executing it (as the
+	// db listener does at dequeue) lists + parses the persisted ingestable.
+	s2.RequestIngestReconcile()
 	select {
 	case got := <-ingestCh2:
-		require.Equal(t, "ing-1", got.ID)
+		require.NotNil(t, got.ReconcileList, "reconcile request must carry the list closure")
+		listed, err := got.ReconcileList()
+		require.NoError(t, err)
+		require.Len(t, listed, 1)
+		require.Equal(t, "ing-1", listed[0].ID)
 	case <-time.After(2 * time.Second):
-		t.Fatal("RestoreIngestableWorkers did not re-send the persisted ingestable")
+		t.Fatal("RequestIngestReconcile did not send the reconcile request")
 	}
 }

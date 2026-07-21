@@ -516,3 +516,19 @@ func (db *DB) WaiterIDsForTest() []uint64 {
 	}
 	return ids
 }
+
+// HasSyncWorkerForTest reports whether a sync worker is registered for id.
+func (db *DB) HasSyncWorkerForTest(id string) bool {
+	db.workersMu.Lock()
+	defer db.workersMu.Unlock()
+	_, ok := db.syncWorkers[id]
+	return ok
+}
+
+// HasIngestWorkerForTest reports whether an ingest worker is registered for id.
+func (db *DB) HasIngestWorkerForTest(id string) bool {
+	db.workersMu.Lock()
+	defer db.workersMu.Unlock()
+	_, ok := db.ingestWorkers[id]
+	return ok
+}

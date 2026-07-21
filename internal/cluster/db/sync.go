@@ -219,6 +219,48 @@ func (db *DB) Sync(_ context.Context, id string, s cluster.Syncable) error {
 // The leader tears down using its own already-built syncable handle, which is
 // also the node the DELETE request landed on (writes proxy to the leader), so
 // its keepData intent is the one that applies.
+// reconcileSyncWorkers converges the running sync workers to the CURRENT
+// config set: the closure (executed here, on the listener goroutine,
+// serialized with the apply path's events) parses every config in bbolt; each
+// listed worker is installed (replace-by-id) and every RUNNING worker whose
+// id is absent is cancelled — the compacted-delete zombie: a delete that
+// arrived inside an InstallSnapshot never ran the apply-path delete event, so
+// nothing else will ever cancel it. Cancellation here is cancel-and-local-
+// cleanup ONLY (keepData=true): reconcile never touches destinations — the
+// live delete path did (or the owner will do) any teardown.
+func (db *DB) reconcileSyncWorkers(list func() ([]*SyncableWithID, error)) {
+	parsed, err := list()
+	if err != nil {
+		db.logger.Warn("sync reconcile: list configs", zap.Error(err))
+		return
+	}
+	present := make(map[string]struct{}, len(parsed))
+	for _, sw := range parsed {
+		present[sw.ID] = struct{}{}
+		if err := db.Sync(context.Background(), sw.ID, sw.Syncable); err != nil {
+			return // ErrClosed: db shutting down
+		}
+	}
+	for _, id := range db.syncWorkerIDs() {
+		if _, ok := present[id]; !ok {
+			db.logger.Warn("sync reconcile: cancelling worker with no config (delete arrived via snapshot?)",
+				zap.String("id", id))
+			db.deleteSync(id, true)
+		}
+	}
+}
+
+// syncWorkerIDs snapshots the registered sync worker ids.
+func (db *DB) syncWorkerIDs() []string {
+	db.workersMu.Lock()
+	defer db.workersMu.Unlock()
+	ids := make([]string, 0, len(db.syncWorkers))
+	for id := range db.syncWorkers {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
 func (db *DB) deleteSync(id string, keepData bool) {
 	db.workersMu.Lock()
 	handle, ok := db.syncWorkers[id]

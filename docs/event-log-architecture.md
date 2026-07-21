@@ -711,6 +711,24 @@ committed state. Node-local state that feeds only observability (a stuck
 tracker's debounce, metrics) is exempt: its staleness can misreport, but it can
 never mis-apply.
 
+**The companion rule — derived node-local state is a function of applied
+state, converged by serialized reconciliation, never an accumulation of racing
+events.** The live objects a node derives from committed configs (sync/ingest
+workers, degraded-config records) are legitimately node-local, but their
+correctness still depends on ordering against the applied log. Maintaining
+them purely event-by-event fails twice: an event can be *raced* (a restore
+path listing configs on its own goroutine once resurrected just-deleted
+workers and rolled updated ones back to stale versions), and an event can be
+*missing entirely* (a delete compacted into an InstallSnapshot has no apply
+event, leaving a zombie worker and a stale gauge record forever). The fix
+shape is a reconcile: the worker-channel listener — already serialized with
+the apply path's own events — executes a list-and-converge against the
+CURRENT config state (`RequestSyncReconcile` / `RequestIngestReconcile`),
+installing what exists and cancelling what does not, at startup and after
+every snapshot install. Apply-path events remain the cheap steady-state
+increment; the reconcile is the fixpoint that makes their loss or reordering
+harmless.
+
 A regression test, `wal.TestApplyDeterminism`
 (`internal/cluster/db/wal/determinism_test.go`), constructs three fresh
 `wal.Storage` instances on disjoint temp dirs, applies the same varied

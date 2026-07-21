@@ -223,7 +223,7 @@ func TestDeleteSyncable_NonTeardownableSyncable(t *testing.T) {
 
 // Restart-then-apply safety: after DELETE the config is off the log, so a
 // node restart must NOT resurrect it (no re-Init of the removed schema), even
-// through RestoreSyncableWorkers.
+// through a sync reconcile.
 func TestDeleteSyncable_RestartDoesNotResurrect(t *testing.T) {
 	dir := t.TempDir()
 	const id = "del-restart"
@@ -241,8 +241,10 @@ func TestDeleteSyncable_RestartDoesNotResurrect(t *testing.T) {
 	d2, s2 := newDeleteTestDB(t, dir, rec)
 	t.Cleanup(func() { _ = d2.Close() })
 	require.False(t, hasSyncable(t, s2, id), "deleted syncable must not be resurrected on restart")
-	s2.RestoreSyncableWorkers()
-	require.False(t, hasSyncable(t, s2, id), "RestoreSyncableWorkers must not rebuild a deleted syncable")
+	s2.RequestSyncReconcile()
+	require.Never(t, func() bool { return hasSyncable(t, s2, id) },
+		300*time.Millisecond, 20*time.Millisecond,
+		"a reconcile must not rebuild a deleted syncable")
 }
 
 // TestDeleteSyncable_StaleCheckpointBumpDoesNotOrphan is the delete-race

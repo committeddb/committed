@@ -125,6 +125,27 @@ func (s *Storage) clearConfigError(kind, id string, evidence configErrEvidence) 
 	}
 }
 
+// sweepConfigErrorsExcept deletes every degraded-config record of kind whose
+// id is NOT in present — the ids remaining in the config bucket. A deleted
+// config's record must not outlive it (nothing re-checks a deleted id), and
+// the apply-path delete clear cannot cover a delete that arrived compacted
+// inside an InstallSnapshot; the reconcile/load paths call this with the
+// fresh bucket contents instead.
+func (s *Storage) sweepConfigErrorsExcept(kind string, present map[string]struct{}) {
+	s.configErrMu.Lock()
+	defer s.configErrMu.Unlock()
+	prefix := kind + "/"
+	for key := range s.configErrors {
+		id, ok := strings.CutPrefix(key, prefix)
+		if !ok {
+			continue
+		}
+		if _, live := present[id]; !live {
+			delete(s.configErrors, key)
+		}
+	}
+}
+
 // ConfigBuildErrorCount returns how many configs are currently degraded
 // (persisted but not buildable on this node — usually a missing secret).
 // db.DB reads this to emit the committed_config_build_errors gauge so the

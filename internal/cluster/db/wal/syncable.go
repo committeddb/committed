@@ -141,51 +141,55 @@ func (s *Storage) deleteSyncable(id []byte, keepData bool) error {
 	return nil
 }
 
-// RestoreSyncableWorkers walks the syncable bucket and re-sends each persisted
-// syncable to the supervisor's sync channel so a restarted node spawns workers
-// for them. It is the syncable twin of RestoreIngestableWorkers.
+// RequestSyncReconcile asks the db-layer listener to converge the running
+// sync workers to the CURRENT syncable config set. It replaces the old
+// RestoreSyncableWorkers, which listed and parsed configs on ITS CALLER'S
+// goroutine and then sent the results — a stale snapshot that raced the apply
+// path (resurrecting a just-deleted worker, rolling an updated one back to a
+// superseded version, and corrupting the config-error gauge through
+// same-strength stale records). The reconcile message instead carries a
+// closure the LISTENER executes at dequeue time, serialized with the apply
+// path's own channel events, so the list+parse can never observe anything
+// older than every event already delivered; and the db layer cancels workers
+// whose id the fresh list lacks — closing the compacted-delete hole, where a
+// delete that arrived inside an InstallSnapshot has no apply event at all.
 //
-// Why this is needed: on a clean restart, ApplyCommitted's idempotency guard
-// (entry.Index <= appliedIndex) means handleSyncable is NOT re-called, so the
-// only thing that ever sends on s.sync (saveSyncable, on the apply path) does
-// not fire. Without an explicit restore, a previously-configured syncable's
-// worker never respawns and it silently stops syncing until the config is
-// re-applied.
+// Why a restart needs this at all: on a clean restart, ApplyCommitted's
+// idempotency guard (entry.Index <= appliedIndex) means handleSyncable is NOT
+// re-called, so the only thing that ever sends worker events on s.sync
+// (saveSyncable, on the apply path) does not fire; without a reconcile a
+// previously-configured syncable's worker never respawns.
 //
-// ORDERING CONTRACT (identical to RestoreIngestableWorkers): the caller MUST
+// ORDERING CONTRACT (identical to RequestIngestReconcile): the caller MUST
 // have registered the syncable sub-parsers (Parser.AddSyncableParser "sql" /
-// "http") AND started the channel consumer (db.New's listenForSyncables drains
-// s.sync) before calling this. Open deliberately does NOT auto-spawn it: when
-// the ingestable side did, the goroutine raced the caller's parser
-// registration and, on a loaded machine, usually lost — every syncable then
-// failed ParseSyncable with "cannot parse syncable of type: sql", was logged
-// as a (silent, under the default Nop logger) degraded parse, and skipped, so
-// the restarted node never resumed syncing. Run it once setup is complete
-// instead (cmd/node spawns `go s.RestoreSyncableWorkers()` after the parsers
-// are wired). It also races the apply path: a config re-applied on restart
-// (handleSyncable) re-sends the same syncable, but db.Sync's replace-by-id
-// collapses the duplicate to a single worker, so last-writer-wins.
-//
-// Errors here are warnings, not fatals: a corrupted single config shouldn't
-// stop the rest from running. The dialect will surface a real connection or
-// schema error in its own retry loop later.
-func (s *Storage) RestoreSyncableWorkers() {
+// "http") AND started the channel consumer (db.New's listenForSyncables
+// drains s.sync) before calling this — the closure parses with whatever
+// sub-parsers exist when the LISTENER runs it.
+func (s *Storage) RequestSyncReconcile() {
 	if s.sync == nil {
 		return
 	}
+	s.sync <- &db.SyncableWithID{ReconcileList: s.reconcileSyncableList}
+}
+
+// reconcileSyncableList is the reconcile closure body: list + parse the
+// CURRENT config set (recording/clearing build-evidence config errors), and
+// sweep degraded records for ids no longer in the bucket — nothing re-checks
+// a deleted id, so a record surviving its config would overcount the gauge
+// forever (the compacted-delete stale-record hole).
+func (s *Storage) reconcileSyncableList() ([]*db.SyncableWithID, error) {
 	cfgs, err := s.Syncables()
 	if err != nil {
-		s.logger.Warn("restoreSyncableWorkers: list syncables", zap.Error(err))
-		return
+		return nil, err
 	}
+	present := make(map[string]struct{}, len(cfgs))
+	out := make([]*db.SyncableWithID, 0, len(cfgs))
 	for _, cfg := range cfgs {
+		present[cfg.ID] = struct{}{}
 		_, syncable, mode, err := s.parser.ParseSyncable(cfg.MimeType, cfg.Data, s)
 		if err != nil {
-			// Degraded: record so the build-errors gauge reflects the
-			// build path too (validateConfigSecrets uses the cheaper
-			// Validate; a config can pass that but fail the full parse).
 			s.recordConfigError("syncable", cfg.ID, configErrBuild, err)
-			s.logger.Warn("restoreSyncableWorkers: parse (degraded)",
+			s.logger.Warn("sync reconcile: parse (degraded)",
 				zap.String("id", cfg.ID), zap.Error(err))
 			continue
 		}
@@ -196,8 +200,10 @@ func (s *Storage) RestoreSyncableWorkers() {
 		if mode == cluster.ModeAlwaysCurrent {
 			syncable = migration.Wrap(syncable, s, s.metrics)
 		}
-		s.sync <- &db.SyncableWithID{ID: cfg.ID, Syncable: syncable}
+		out = append(out, &db.SyncableWithID{ID: cfg.ID, Syncable: syncable})
 	}
+	s.sweepConfigErrorsExcept("syncable", present)
+	return out, nil
 }
 
 func (s *Storage) Syncables() ([]*cluster.Configuration, error) {

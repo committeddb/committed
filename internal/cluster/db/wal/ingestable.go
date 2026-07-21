@@ -124,49 +124,40 @@ func (s *Storage) deleteIngestable(id []byte) error {
 	return nil
 }
 
-// RestoreIngestableWorkers walks the ingestable bucket and re-sends each
-// persisted ingestable to the supervisor's ingest channel so a restarted node
-// spawns workers for them.
-//
-// ORDERING CONTRACT: the caller MUST have registered the ingestable
-// sub-parsers (Parser.AddIngestableParser) AND started the channel consumer
-// (db.New's listenForIngestables drains s.ingest) before calling this. Open
-// deliberately does NOT auto-spawn it: when it did, the goroutine raced the
-// caller's parser registration, and on a loaded machine usually lost — every
-// ingestable then failed ParseIngestable with "cannot parse ingestable of
-// type: sql", was logged as a (silent, with the default Nop logger) degraded
-// parse, and skipped, so the restarted node never resumed ingestion. Run it
-// once setup is complete instead (cmd/node spawns `go s.RestoreIngestableWorkers()`
-// after the parsers are wired). It also races the apply path: a config
-// re-applied on restart (handleIngestable) re-sends the same ingestable, but
-// db.Ingest's replace-by-id makes the duplicate a no-op, so last-writer-wins.
-//
-// Errors here are warnings, not fatals: a corrupted single config shouldn't
-// stop the rest from running. The dialect will surface a real connection or
-// schema error in its own retry loop later.
-func (s *Storage) RestoreIngestableWorkers() {
+// RequestIngestReconcile is the ingest twin of RequestSyncReconcile: the
+// listener converges running ingest workers to the CURRENT config set via the
+// closure below, executed at dequeue time. See RequestSyncReconcile for the
+// staleness rationale and the ORDERING CONTRACT (sub-parsers registered and
+// db.New's listener draining s.ingest before this is called).
+func (s *Storage) RequestIngestReconcile() {
 	if s.ingest == nil {
 		return
 	}
+	s.ingest <- &db.IngestableWithID{ReconcileList: s.reconcileIngestableList}
+}
+
+// reconcileIngestableList: see reconcileSyncableList.
+func (s *Storage) reconcileIngestableList() ([]*db.IngestableWithID, error) {
 	cfgs, err := s.Ingestables()
 	if err != nil {
-		s.logger.Warn("restoreIngestableWorkers: list ingestables", zap.Error(err))
-		return
+		return nil, err
 	}
+	present := make(map[string]struct{}, len(cfgs))
+	out := make([]*db.IngestableWithID, 0, len(cfgs))
 	for _, cfg := range cfgs {
+		present[cfg.ID] = struct{}{}
 		_, ingestable, err := s.parser.ParseIngestable(cfg.MimeType, cfg.Data)
 		if err != nil {
-			// Degraded: record so the build-errors gauge reflects the
-			// build path too (validateConfigSecrets uses the cheaper
-			// Validate; a config can pass that but fail the full parse).
 			s.recordConfigError("ingestable", cfg.ID, configErrBuild, err)
-			s.logger.Warn("restoreIngestableWorkers: parse (degraded)",
+			s.logger.Warn("ingest reconcile: parse (degraded)",
 				zap.String("id", cfg.ID), zap.Error(err))
 			continue
 		}
 		s.clearConfigError("ingestable", cfg.ID, configErrBuild)
-		s.ingest <- &db.IngestableWithID{ID: cfg.ID, Ingestable: ingestable}
+		out = append(out, &db.IngestableWithID{ID: cfg.ID, Ingestable: ingestable})
 	}
+	s.sweepConfigErrorsExcept("ingestable", present)
+	return out, nil
 }
 
 func (s *Storage) Ingestables() ([]*cluster.Configuration, error) {

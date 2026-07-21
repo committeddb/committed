@@ -223,7 +223,12 @@ func (db *DB) Ingest(_ context.Context, id string, i cluster.Ingestable) error {
 // Best-effort: the logical deletion already succeeded via consensus, so a
 // teardown failure only leaves an orphaned slot an operator can drop — it must
 // never fail or panic.
-func (db *DB) deleteIngest(id string) {
+// cancelIngestWorker cancels and deregisters id's worker and releases its
+// node-local source resources — the shared front half of deleteIngest and the
+// reconcile absent-worker cancel (which must NOT run the owner-only source
+// teardown: reconcile never touches sources). Returns the drained handle (nil
+// if no worker was built here).
+func (db *DB) cancelIngestWorker(id string) *workerHandle {
 	db.workersMu.Lock()
 	handle, ok := db.ingestWorkers[id]
 	if ok {
@@ -241,13 +246,51 @@ func (db *DB) deleteIngest(id string) {
 	db.workersMu.Unlock()
 
 	if !ok || handle.ingestable == nil {
-		return // no worker built on this node — nothing to tear down
+		return nil // no worker built on this node — nothing to clean up
 	}
 
-	// Release the deleted ingestable's source resources (Close). Node-local
-	// cleanup — done on every node that built a worker (if it drained), before and
-	// independent of the owner-only slot teardown below.
+	// Release the ingestable's source resources (Close). Node-local cleanup —
+	// done on every node that built a worker (if it drained), before and
+	// independent of any owner-only slot teardown the caller may run.
 	db.closeDrainedIngestable(handle, id)
+	return handle
+}
+
+// reconcileIngestWorkers is the ingest twin of reconcileSyncWorkers; see it
+// for the serialization and cancel-only rationale.
+func (db *DB) reconcileIngestWorkers(list func() ([]*IngestableWithID, error)) {
+	parsed, err := list()
+	if err != nil {
+		db.logger.Warn("ingest reconcile: list configs", zap.Error(err))
+		return
+	}
+	present := make(map[string]struct{}, len(parsed))
+	for _, iw := range parsed {
+		present[iw.ID] = struct{}{}
+		if err := db.Ingest(context.Background(), iw.ID, iw.Ingestable); err != nil {
+			return // ErrClosed: db shutting down
+		}
+	}
+	db.workersMu.Lock()
+	ids := make([]string, 0, len(db.ingestWorkers))
+	for id := range db.ingestWorkers {
+		ids = append(ids, id)
+	}
+	db.workersMu.Unlock()
+	for _, id := range ids {
+		if _, ok := present[id]; !ok {
+			db.logger.Warn("ingest reconcile: cancelling worker with no config (delete arrived via snapshot?)",
+				zap.String("id", id))
+			db.cancelIngestWorker(id)
+		}
+	}
+}
+
+func (db *DB) deleteIngest(id string) {
+	handle := db.cancelIngestWorker(id)
+	if handle == nil {
+		return
+	}
 
 	if !db.isNode(id) {
 		return // this node isn't the owner

@@ -17,6 +17,8 @@ type IngestableWithID struct {
 	// down the source-side replication resources (drops the Postgres slot +
 	// publication). Ingestable is nil for a delete.
 	Delete bool
+	// ReconcileList: see SyncableWithID.ReconcileList — the ingest twin.
+	ReconcileList func() ([]*IngestableWithID, error)
 }
 
 func (db *DB) AddIngestableParser(name string, p cluster.IngestableParser) {

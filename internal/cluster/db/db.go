@@ -464,6 +464,10 @@ func (db *DB) listenForSyncables(sync <-chan *SyncableWithID) {
 			if !ok {
 				return
 			}
+			if syncable.ReconcileList != nil {
+				db.reconcileSyncWorkers(syncable.ReconcileList)
+				continue
+			}
 			if syncable.Delete {
 				db.deleteSync(syncable.ID, syncable.KeepData)
 				continue
@@ -491,6 +495,10 @@ func (db *DB) listenForIngestables(ingest <-chan *IngestableWithID) {
 		case ingestable, ok := <-ingest:
 			if !ok {
 				return
+			}
+			if ingestable.ReconcileList != nil {
+				db.reconcileIngestWorkers(ingestable.ReconcileList)
+				continue
 			}
 			if ingestable.Delete {
 				db.deleteIngest(ingestable.ID)

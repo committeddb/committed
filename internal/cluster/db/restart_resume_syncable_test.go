@@ -131,13 +131,13 @@ func TestRestartResumeSyncable(t *testing.T) {
 	seedUserProposals(t, d2, s2, "evt1", []string{"phase2"})
 	require.Never(t, func() bool { return rec.has("phase2") },
 		300*time.Millisecond, 20*time.Millisecond,
-		"without RestoreSyncableWorkers the resumed node must not sync new data")
+		"without a reconcile request the resumed node must not sync new data")
 
-	// The explicit restore — exactly what cmd/node.go runs after wiring the
-	// parsers — respawns the worker, which resumes from the persisted
-	// SyncableIndex and delivers the post-restart proposal.
-	s2.RestoreSyncableWorkers()
+	// The explicit reconcile request — exactly what cmd/node.go runs after
+	// wiring the parsers — respawns the worker, which resumes from the
+	// persisted SyncableIndex and delivers the post-restart proposal.
+	s2.RequestSyncReconcile()
 	require.Eventually(t, func() bool { return rec.has("phase2") },
 		10*time.Second, 10*time.Millisecond,
-		"RestoreSyncableWorkers must respawn the worker so post-restart data syncs")
+		"the sync reconcile must respawn the worker so post-restart data syncs")
 }

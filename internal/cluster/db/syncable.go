@@ -21,6 +21,16 @@ type SyncableWithID struct {
 	// destination intent (see cluster.Entity.KeepData): the owner skips the
 	// destination teardown. Deterministic on every node — no node-local state.
 	KeepData bool
+	// ReconcileList, when non-nil, makes this message a RECONCILE REQUEST
+	// instead of a worker event: the listener executes the closure at
+	// dequeue time — serialized with the apply path's own events — to get
+	// the parsed CURRENT config set, then converges the running workers to
+	// it (install every listed id, cancel every unlisted one). Executing at
+	// dequeue is what makes a stale read structurally impossible: the old
+	// RestoreSyncableWorkers listed configs on its caller's goroutine and
+	// could resurrect a deleted worker or roll one back to a superseded
+	// version. All other fields are ignored on a reconcile request.
+	ReconcileList func() ([]*SyncableWithID, error)
 }
 
 func (db *DB) AddSyncableParser(name string, p cluster.SyncableParser) {

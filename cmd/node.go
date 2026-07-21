@@ -378,8 +378,8 @@ image can be templated per-node by an orchestrator:
 		// RestoreSyncableWorkers. Spawning them from inside wal.Open (as the
 		// ingestable side once did) raced this registration and silently
 		// dropped the workers on restart under load.
-		go s.RestoreIngestableWorkers()
-		go s.RestoreSyncableWorkers()
+		go s.RequestIngestReconcile()
+		go s.RequestSyncReconcile()
 
 		var serverOpts []http.ServerOption
 		if d, ok := parseDurationEnv("COMMITTED_HTTP_READ_HEADER_TIMEOUT"); ok {

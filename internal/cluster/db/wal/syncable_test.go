@@ -87,14 +87,14 @@ func TestSyncable(t *testing.T) {
 }
 
 // TestRestoreSyncableWorkers is the syncable twin of
-// TestRestoreIngestableWorkers. It pins the restart-resume contract:
+// TestRestoreIngestableWorkers (reconcile-request flavor). It pins the restart-resume contract:
 //
 //  1. Open does NOT auto-restore workers — doing so would race the caller's
 //     parser registration and, on a loaded machine, silently drop every
 //     syncable ("cannot parse syncable of type: ..." → degraded → skipped),
 //     so a restarted node would never resume syncing.
-//  2. The explicit RestoreSyncableWorkers, called once parsers are wired,
-//     re-sends each persisted syncable to the sync channel.
+//  2. The explicit RequestSyncReconcile, called once parsers are wired,
+//     sends a reconcile request whose closure lists each persisted syncable.
 func TestRestoreSyncableWorkers(t *testing.T) {
 	dir := t.TempDir()
 	p := parser.New()
@@ -138,13 +138,19 @@ func TestRestoreSyncableWorkers(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 	}
 
-	// The explicit restore re-sends the persisted syncable.
-	s2.RestoreSyncableWorkers()
+	// The explicit reconcile request carries a closure; executing it (as the
+	// db listener does at dequeue) lists + parses the persisted syncable.
+	s2.RequestSyncReconcile()
 	select {
 	case got := <-syncCh2:
-		require.Equal(t, "sync-1", got.ID)
+		require.NotNil(t, got.ReconcileList, "reconcile request must carry the list closure")
+		listed, err := got.ReconcileList()
+		require.NoError(t, err)
+		require.Len(t, listed, 1)
+		require.Equal(t, "sync-1", listed[0].ID)
+		require.NotNil(t, listed[0].Syncable)
 	case <-time.After(2 * time.Second):
-		t.Fatal("RestoreSyncableWorkers did not re-send the persisted syncable")
+		t.Fatal("RequestSyncReconcile did not send the reconcile request")
 	}
 }
 

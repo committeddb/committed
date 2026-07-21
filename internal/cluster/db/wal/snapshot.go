@@ -386,8 +386,8 @@ func (s *Storage) refreshAfterRestore() {
 	if err := s.validateConfigSecrets(); err != nil {
 		s.logger.Warn("restore: validate config secrets", zap.Error(err))
 	}
-	s.RestoreSyncableWorkers()
-	s.RestoreIngestableWorkers()
+	s.RequestSyncReconcile()
+	s.RequestIngestReconcile()
 }
 
 // compactLocked rewrites the bbolt database in place, dropping free pages so the
