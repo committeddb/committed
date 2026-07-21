@@ -21,7 +21,10 @@ Two properties make a rolling upgrade safe:
 - **A new binary reads the old node's on-disk state.** The WAL, the
   permanent event log, and the BoltDB metadata are forward-compatible
   across a release within the same major line — a node upgraded in place
-  reads everything its predecessor wrote. This is a contract, documented
+  reads everything its predecessor wrote, for data dirs created on
+  **0.7.2-beta or later** (the supported floor; an older dir must be
+  recreated, not upgraded — see
+  [api-compatibility.md](../api-compatibility.md#log-entities-protobuf)). This is a contract, documented
   in [api-compatibility.md → On-disk and wire compatibility](../api-compatibility.md#on-disk-and-wire-compatibility);
   read it before upgrading, especially the **one-way transitions** list.
 

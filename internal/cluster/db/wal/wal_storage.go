@@ -1001,6 +1001,16 @@ func (s *Storage) Entries(lo, hi, maxSize uint64) ([]*pb.Entry, error) {
 		logIndex++
 		e, size, err := s.entry(logIndex)
 		if err != nil {
+			// A Compact can win the race between the boundary check above and
+			// this read: compactedUpTo advances, TruncateFront removes the seq,
+			// and the read fails with the wal's not-found. The raft Storage
+			// contract requires a racing compaction to surface as ErrCompacted
+			// (etcd panics on anything else) — re-check the boundary and return
+			// the sentinel if the range's head is now compacted. A failure with
+			// the boundary UNMOVED is genuine corruption and still propagates.
+			if lo <= s.boundary() {
+				return nil, raft.ErrCompacted
+			}
 			return nil, err
 		}
 
@@ -1099,6 +1109,12 @@ func (s *Storage) Term(i uint64) (uint64, error) {
 	logIndex := i - firstIndex + 1
 	e, _, err := s.entry(logIndex)
 	if err != nil {
+		// Same race as Entries: a Compact between the boundary check and the
+		// read removes the seq. Return the BARE raft.ErrCompacted sentinel —
+		// raft compares it directly, so it must not be wrapped.
+		if i < s.boundary() {
+			return 0, raft.ErrCompacted
+		}
 		return 0, fmt.Errorf("wal index %d: %w", logIndex, err)
 	}
 

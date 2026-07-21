@@ -49,19 +49,20 @@ func (v logEntityWireView) isDelete() bool {
 // wins; an unset body means the entity was written by a pre-envelope binary
 // (<= 0.7.2-beta) and the legacy flat fields carry the payload.
 //
-// An entity carrying wire tags this binary does not know — a body variant (or
-// LogEntity field) from a newer release — is an ERROR, not a legacy entity:
-// proto3 would otherwise drop the unknown tags into the legacy path and the
-// entity would silently apply as empty. The cluster feature level keeps a new
-// variant from being committed while an older member is present, so this
-// guard is the defense-in-depth behind that gate, converting a gate bypass
-// from silent misapply into a loud apply failure. Unknown tags INSIDE a known
-// variant's message are still fine (adding a field to LogRow stays add-only);
-// only LogEntity-level unknowns trip this.
+// An entity carrying LogEntity-level wire tags this binary does not know is an
+// ERROR, not a legacy entity: proto3 would otherwise drop the unknown tags
+// into the legacy path and the entity would silently apply as empty. Two
+// populations can trip it: a body variant from a NEWER release (the cluster
+// feature level keeps one from being committed while an older member is
+// present — this guard is the defense-in-depth behind that gate), and bytes
+// from a data dir OLDER than the supported floor (0.7.2-beta; pre-v0.5 logs
+// carry the long-removed Timestamp field 4 — see docs/api-compatibility.md).
+// Unknown tags INSIDE a known variant's message are still fine (adding a
+// field to LogRow stays add-only); only LogEntity-level unknowns trip this.
 func logEntityView(le *clusterpb.LogEntity) (logEntityWireView, error) {
 	if u := le.ProtoReflect().GetUnknown(); len(u) > 0 {
 		return logEntityWireView{}, fmt.Errorf(
-			"log entity of type %s carries wire fields this binary does not recognize (a body variant from a newer release?); upgrade this node before it applies this entry",
+			"log entity of type %s carries wire fields this binary does not recognize: either a newer release wrote it (upgrade this node) or the data dir predates the supported floor of 0.7.2-beta (recreate it; see docs/api-compatibility.md)",
 			le.Type.GetID())
 	}
 	switch b := le.GetBody().(type) {

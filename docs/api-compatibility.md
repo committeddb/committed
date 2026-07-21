@@ -194,10 +194,13 @@ Extending the envelope with a **new variant** is a fixed recipe:
    old binary would misapply the entity as empty, so the gate is mandatory.
 3. Handle it in `logEntityView` — every reader (unmarshal, scrub traversals)
    goes through that one switch. An entity carrying `LogEntity`-level wire
-   tags the binary does not know fails decode loudly (it is a variant from a
-   newer release, not a legacy entity) — so a feature-gate bypass surfaces as
-   an apply failure, never a silent empty-entity misapply. Unknown tags
-   *inside* a known variant's message stay ordinary add-only evolution.
+   tags the binary does not know fails decode loudly — so a feature-gate
+   bypass surfaces as an apply failure, never a silent empty-entity misapply.
+   Unknown tags *inside* a known variant's message stay ordinary add-only
+   evolution. The same guard defines the **data-dir support floor**: 0.7.3+
+   reads data dirs written by **0.7.2-beta and later**. Dirs older than that
+   are unsupported — pre-v0.5-beta logs carry the long-removed `Timestamp`
+   field 4, which trips the guard — and must be recreated, not upgraded.
 4. Give it a `cluster.EntityVariant` constant and handle it in every consumer
    switch. Consumers apply an entity by switching on `Entity.Variant()`
    (sinks; the wal apply dispatch admits only row/delete to internal
