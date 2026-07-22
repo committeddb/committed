@@ -567,6 +567,23 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 				// it. SourceSeq==0 (snapshot rows / non-CDC / legacy) is
 				// never deduped.
 				if proposal.SourceSeq > 0 && proposal.SourceSeq <= db.storage.IngestSourceSeqHighwater(id) {
+					// A dialect that can no longer trust SourceSeq as a
+					// content-identity against the highwater (source lineage
+					// regressed on failover, or a same-coordinate multi-part
+					// replay under changed chunking) flags the proposal
+					// DedupUnsafe. Dropping it could silently lose real data, so
+					// FREEZE loudly instead — the fail-safe the system-of-record
+					// contract requires. See cluster.Proposal.DedupUnsafe.
+					if proposal.DedupUnsafe {
+						db.logger.Error("ingest dedup: proposal below the source-seq highwater is flagged unsafe to drop (source lineage regression or re-chunk under changed config/binary); freezing to avoid silent data loss — operator intervention required",
+							zap.String("id", id),
+							zap.Uint64("sourceSeq", proposal.SourceSeq),
+							zap.Uint64("highwater", db.storage.IngestSourceSeqHighwater(id)))
+						if db.metrics != nil {
+							db.metrics.IngestFrozen(id, true)
+						}
+						return ingestExitFreeze
+					}
 					db.logger.Debug("ingest dedup skip",
 						zap.String("id", id), zap.Uint64("sourceSeq", proposal.SourceSeq))
 					if db.metrics != nil {

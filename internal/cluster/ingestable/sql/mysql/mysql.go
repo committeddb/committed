@@ -669,6 +669,10 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			// snapshot-derived).
 			curFile: lastPos.Name,
 			curPos:  lastPos.Pos,
+			// The lineage baseline for failover-regression detection. lastPos is
+			// non-nil here; a name without a numeric suffix yields 0 (no baseline
+			// → never trips), matching encodeSourceSeq's dedup-disabled fallback.
+			resumeFileNum: func() uint64 { n, _ := binlogFileNum(lastPos.Name); return n }(),
 		}
 		// Seed the consumed GTID set (the same set we resumed by) so streaming
 		// checkpoints carry the full set (snapshot ∪ streamed) and it keeps advancing
@@ -792,6 +796,17 @@ type MySQLEventHandler struct {
 	flushFile string
 	flushPos  uint32
 	flushSub  uint32
+
+	// resumeFileNum is the binlog file number this handler resumed from (the
+	// checkpoint's file, or 0 when there is no numeric baseline). If the live
+	// stream's file number ever drops below it, the source's binlog lineage
+	// regressed — a failover to a replica whose numbering restarts low, or a
+	// RESET MASTER — and every coordinate it now emits encodes below the durable
+	// SourceSeq highwater. Those proposals are stamped DedupUnsafe so the ingest
+	// worker freezes rather than silently dedup-dropping real post-failover data.
+	// Set once at construction from the resume position; never advanced (a normal
+	// stream only rotates the file number upward, so it never trips falsely).
+	resumeFileNum uint64
 
 	// pending accumulates entities from row events until the transaction commits
 	// (an XID event), so one MySQL transaction maps to one cluster.Proposal.
@@ -1157,6 +1172,17 @@ func (h *MySQLEventHandler) flushPending(ctx context.Context) error {
 	// streamed-then-gap-deleted row still carries this epoch until the sweep).
 	stampGeneration(h.pending, h.epoch)
 	p := &cluster.Proposal{Entities: h.pending, SourceSeq: encodeSourceSeq(h.curFile, h.curPos, h.flushSub)}
+	// Failover-lineage guard: if the live coordinate's file number has dropped
+	// below the resume baseline, this stream is a different binlog lineage (a
+	// promoted replica / RESET MASTER) whose low coordinates encode below the
+	// durable highwater. Flag the proposal so the ingest worker freezes instead
+	// of silently dedup-dropping it — this data would otherwise be lost. See
+	// cluster.Proposal.DedupUnsafe and h.resumeFileNum.
+	if h.resumeFileNum > 0 {
+		if n, ok := binlogFileNum(h.curFile); ok && n < h.resumeFileNum {
+			p.DedupUnsafe = true
+		}
+	}
 	h.pending = nil
 	h.pendingBytes = 0
 
@@ -1509,15 +1535,30 @@ func (h *MySQLEventHandler) dispatchEvent(ctx context.Context, header *replicati
 // Returns 0 (which disables dedup for the proposal — never a false positive) when
 // the file name has no parseable numeric suffix, e.g. an unexpected naming scheme.
 func encodeSourceSeq(name string, pos uint32, sub uint32) uint64 {
-	dot := strings.LastIndexByte(name, '.')
-	if dot < 0 || dot == len(name)-1 {
-		return 0
-	}
-	fileNum, err := strconv.ParseUint(name[dot+1:], 10, 32)
-	if err != nil {
+	fileNum, ok := binlogFileNum(name)
+	if !ok {
 		return 0
 	}
 	return (fileNum<<32 | uint64(pos)) + uint64(sub)
+}
+
+// binlogFileNum parses the numeric suffix of a binlog file name (e.g.
+// "binlog.000042" -> 42). ok is false for a name with no parseable numeric
+// suffix. It is the shared basis of both the SourceSeq's high 32 bits
+// (encodeSourceSeq) and the failover-regression check (a stream whose file
+// number drops below the resume baseline is a different binlog lineage — a
+// promoted replica or RESET MASTER — whose low coordinates would otherwise
+// encode below the durable highwater and be silently deduped away).
+func binlogFileNum(name string) (uint64, bool) {
+	dot := strings.LastIndexByte(name, '.')
+	if dot < 0 || dot == len(name)-1 {
+		return 0, false
+	}
+	fileNum, err := strconv.ParseUint(name[dot+1:], 10, 32)
+	if err != nil {
+		return 0, false
+	}
+	return fileNum, true
 }
 
 // snapshot performs a pure-SQL initial dump of all watched tables using

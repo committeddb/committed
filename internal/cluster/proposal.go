@@ -141,6 +141,22 @@ type Proposal struct {
 	// cover, since snapshot rows carry SourceSeq 0). Empty for non-ingest and
 	// streaming proposals, which checkpoint out-of-band.
 	Position Position
+
+	// DedupUnsafe is a TRANSIENT pre-raft hint, set by an ingest dialect and
+	// consumed only by the leader's ingest-worker dedup — it is deliberately NOT
+	// marshaled into the log (see Marshal), so it never reaches raft, replay, or a
+	// syncable. It means: "if this proposal would be dropped as a SourceSeq
+	// duplicate (SourceSeq <= highwater), do NOT drop it silently — FREEZE the
+	// worker instead, because the drop may not be a true duplicate." A dialect
+	// sets it when the SourceSeq's meaning is no longer trustworthy against the
+	// durable highwater: the source's coordinate lineage regressed (a failover to
+	// a replica whose binlog numbering restarts low, so new data encodes below the
+	// old highwater) or a same-coordinate multi-part transaction is being replayed
+	// under changed chunking inputs (config re-POST / binary upgrade), where the
+	// seq->content mapping may have shifted. The freeze converts an otherwise
+	// silent data-loss drop into an operator-visible halt. See db.ingest's dedup
+	// branch and the mysql dialect's flush path.
+	DedupUnsafe bool
 }
 
 type Entity struct {
