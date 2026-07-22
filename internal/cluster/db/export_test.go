@@ -380,6 +380,16 @@ func (db *DB) RecordFreezeAndNextBackoffForTest(id string, pos cluster.Position)
 	return db.recordFreezeAndNextBackoff(id, pos)
 }
 
+// SupervisorStateExistsForTest reports whether the supervisor still holds
+// give-up bookkeeping for id — used to pin that a config delete prunes it
+// (bounding the map and granting a recreated id a fresh budget).
+func (db *DB) SupervisorStateExistsForTest(id string) bool {
+	db.ingestSupervisorMu.Lock()
+	defer db.ingestSupervisorMu.Unlock()
+	_, ok := db.ingestSupervisorStates[id]
+	return ok
+}
+
 // IngestWorkerIDsForTest returns a snapshot of the ingest worker registry
 // keys — one entry per actively-running ingest worker. Used by the
 // adversarial suite's concurrent-config-change scenario to assert that

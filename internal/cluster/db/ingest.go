@@ -198,8 +198,16 @@ func (db *DB) Ingest(_ context.Context, id string, i cluster.Ingestable) error {
 		}
 	}
 
-	if replaced && db.metrics != nil {
-		db.metrics.WorkerReplaced("ingest", id)
+	if replaced {
+		// A re-POST replaced the worker — a new worker generation. Drop the
+		// supervisor give-up state so the fresh worker starts with a full restart
+		// budget instead of inheriting a prior give-up (this is the "raise the cap
+		// and re-POST" recovery). Works for a byte-identical re-POST too, which
+		// does not bump the config version but still replaces the worker here.
+		db.pruneIngestSupervisorState(id)
+		if db.metrics != nil {
+			db.metrics.WorkerReplaced("ingest", id)
+		}
 	}
 
 	db.spawnIngestWorkerLocked(id, i)
@@ -261,6 +269,12 @@ func (db *DB) cancelIngestWorker(id string) *workerHandle {
 		}
 	}
 	db.workersMu.Unlock()
+
+	// cancelIngestWorker's only callers are delete and the reconcile
+	// absent-cancel — both mean this id's config is GONE. Drop its supervisor
+	// give-up state so a later recreate of the same id starts with a fresh
+	// restart budget (and the state map stays bounded).
+	db.pruneIngestSupervisorState(id)
 
 	if !ok || handle.ingestable == nil {
 		return nil // no worker built on this node — nothing to clean up

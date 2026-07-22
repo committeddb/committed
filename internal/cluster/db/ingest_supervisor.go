@@ -157,6 +157,19 @@ func (db *DB) superviseRestartIngest(id string, i cluster.Ingestable, frozen *wo
 	}
 }
 
+// pruneIngestSupervisorState drops the give-up bookkeeping for id. It is called
+// whenever the worker is torn down for an operator recovery — a re-POST (via
+// db.Ingest's replace loop) or a delete (via cancelIngestWorker) — because the
+// restart budget's lifetime is tied to the worker GENERATION: a fresh worker
+// (any re-POST, even a byte-identical one that does not bump the config version)
+// must start with a full budget, not inherit a prior give-up. It also bounds the
+// state map (a deleted/recreated id can't accumulate). Idempotent.
+func (db *DB) pruneIngestSupervisorState(id string) {
+	db.ingestSupervisorMu.Lock()
+	delete(db.ingestSupervisorStates, id)
+	db.ingestSupervisorMu.Unlock()
+}
+
 // recordFreezeAndNextBackoff bumps the consecutive-freeze counter for id and
 // returns the backoff to apply before the next restart. pos is the durable
 // resume position at freeze time (db.storage.Position(id)): a freeze at the
@@ -174,10 +187,14 @@ func (db *DB) recordFreezeAndNextBackoff(id string, pos cluster.Position) (backo
 		st = &ingestSupervisorState{backoff: db.ingestSupervisorInitialBackoff}
 		db.ingestSupervisorStates[id] = st
 	}
-	// Reset the run only on genuine progress — an advanced resume position.
-	// Wall-clock elapsed is NOT progress: a slow source or a snapshot re-read
-	// can take minutes to reach the same poison row, and resetting on that let
-	// the run churn forever without ever reaching give-up.
+	// Reset the run only on genuine progress — an advanced resume position. A
+	// slow re-read to the SAME poison position is NOT progress (resetting on
+	// wall-clock let the run churn forever). An operator recovery (re-POST or
+	// delete) resets the run a different way: it tears down the worker, and the
+	// budget's lifetime is tied to the worker generation — the teardown paths
+	// prune this state, so the fresh worker starts clean. See
+	// pruneIngestSupervisorState (called from db.Ingest's replace loop and
+	// cancelIngestWorker).
 	if st.consecutiveFreezes > 0 && !bytes.Equal(pos, st.lastFreezePosition) {
 		st.consecutiveFreezes = 0
 		st.backoff = db.ingestSupervisorInitialBackoff
