@@ -428,7 +428,7 @@ func (db *DB) spawnIngestWorkerLocked(id string, i cluster.Ingestable) *workerHa
 	// supersedes this worker, so the cancel is not leaked. gosec can't
 	// see through the handle indirection.
 	workerCtx, cancel := context.WithCancel(db.ctx) //nolint:gosec // G118: cancel owned by workerHandle
-	handle := &workerHandle{cancel: cancel, done: make(chan struct{}), ingestable: i}
+	handle := &workerHandle{cancel: cancel, ctx: workerCtx, done: make(chan struct{}), ingestable: i}
 	db.ingestWorkers[id] = handle
 
 	go func() {

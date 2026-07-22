@@ -567,3 +567,10 @@ func (db *DB) SetIngestSupervisorRaceSeamsForTest(beforePreflight, afterAttempt 
 	db.beforeIngestSupervisorRelockForTest = beforePreflight
 	db.afterIngestSupervisorAttemptForTest = afterAttempt
 }
+
+// SetAfterIngestSupervisorRestartForTest installs the seam that fires after a
+// supervisor restart, carrying the frozen handle's ctx.Err() — so a test can
+// assert the restart cancelled it (no leaked context node).
+func (db *DB) SetAfterIngestSupervisorRestartForTest(fn func(frozenCtxErr error)) {
+	db.afterIngestSupervisorRestartForTest = fn
+}

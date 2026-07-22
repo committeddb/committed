@@ -141,9 +141,21 @@ func (db *DB) superviseRestartIngest(id string, i cluster.Ingestable, frozen *wo
 	// (we're downstream of that exit) and its handle.done is closed,
 	// so no drain step is needed — unlike db.Ingest's public replace
 	// loop, which must assume the existing worker is still running.
+	//
+	// Cancel the frozen worker's context before dropping the handle. The
+	// goroutine returned via ingestExitFreeze — a normal return, NOT a ctx
+	// cancel — so workerCtx is still an un-cancelled child of db.ctx; without
+	// this, each restart leaks one context node on the long-lived db.ctx (and
+	// pins the handle) until db.Close. Cancelling an already-exited worker is a
+	// harmless no-op that just releases the node.
+	frozen.cancel()
 	delete(db.ingestWorkers, id)
 	db.spawnIngestWorkerLocked(id, i)
 	db.workersMu.Unlock()
+
+	if db.afterIngestSupervisorRestartForTest != nil {
+		db.afterIngestSupervisorRestartForTest(frozen.ctx.Err())
+	}
 
 	// Do NOT clear the frozen gauge here. A restart is not recovery — the worker
 	// re-reads to the same poison proposal and freezes again, so clearing on

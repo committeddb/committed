@@ -296,3 +296,47 @@ func findSupervisorCounterForID(rm metricdata.ResourceMetrics, name, id string) 
 	}
 	return 0
 }
+
+// TestIngestSupervisor_RestartCancelsFrozenContext pins round-8 #7: the
+// supervisor restart must cancel the frozen worker's context before dropping the
+// handle. The worker exited via ingestExitFreeze (not a ctx cancel), so its
+// context is an un-cancelled child of db.ctx; leaving it uncancelled leaks one
+// context node (and pins the handle) per restart until db.Close.
+func TestIngestSupervisor_RestartCancelsFrozenContext(t *testing.T) {
+	id := "restart-ctx"
+	d, s := newIngestFailFastDBWith(t,
+		db.WithIngestSupervisorInitialBackoff(1*time.Millisecond),
+		db.WithIngestSupervisorMaxBackoff(1*time.Millisecond),
+	)
+	require.Eventually(t, func() bool { return d.ObservedLeaderForTest() == 1 },
+		2*time.Second, 2*time.Millisecond)
+
+	frozenErr := make(chan error, 1)
+	d.SetAfterIngestSupervisorRestartForTest(func(e error) {
+		select {
+		case frozenErr <- e:
+		default:
+		}
+	})
+
+	proposal := &cluster.Proposal{Entities: []*cluster.Entity{{
+		Type: &cluster.Type{ID: "string"}, Key: []byte("k"), Data: []byte("v"),
+	}}}
+	ing := newFreezeRecordingIngestable(proposal, cluster.Position([]byte("pos")))
+	require.NoError(t, d.Ingest(context.Background(), id, ing))
+	rid := d.WaitForAnyWaiterForTest(2 * time.Second)
+	require.NotZero(t, rid, "ingest worker never registered a Propose waiter")
+
+	d.SignalWaiterForTest(rid, db.ErrProposalUnknown)
+
+	select {
+	case e := <-frozenErr:
+		require.ErrorIs(t, e, context.Canceled,
+			"the supervisor restart must cancel the frozen worker's context (else the node leaks)")
+	case <-time.After(5 * time.Second):
+		t.Fatal("supervisor never restarted (or the hook never fired)")
+	}
+
+	s.Unblock()
+	require.NoError(t, d.Close())
+}

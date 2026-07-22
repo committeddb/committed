@@ -233,6 +233,11 @@ type DB struct {
 	// supervisor race deterministic without relying on backoff timing.
 	beforeIngestSupervisorRelockForTest func()
 	afterIngestSupervisorAttemptForTest func()
+	// afterIngestSupervisorRestartForTest fires after a supervisor restart
+	// installs the fresh worker, carrying the frozen handle's ctx.Err() — so a
+	// test can assert the restart cancelled it (no leaked context node). nil in
+	// production.
+	afterIngestSupervisorRestartForTest func(frozenCtxErr error)
 
 	// syncCh / ingestCh are the config-notification channels the apply path
 	// (wal.Storage) sends on and listenForSyncables/Ingestables receive from.
@@ -263,7 +268,13 @@ type DB struct {
 // proceeding.
 type workerHandle struct {
 	cancel context.CancelFunc
-	done   chan struct{}
+	// ctx is the worker goroutine's context (the one cancel cancels). Retained so
+	// a teardown path that must release the context node — notably the ingest
+	// supervisor's restart, which drops a frozen handle whose goroutine exited via
+	// ingestExitFreeze rather than a cancel — can cancel it, and so a test can
+	// observe that it did.
+	ctx  context.Context
+	done chan struct{}
 	// condemned marks a handle whose owner has begun tearing it down. A teardown
 	// path (cancelIngestWorker, db.Ingest's replace loop) sets it under workersMu
 	// BEFORE dropping the lock to drain, so the ingest supervisor's restart
