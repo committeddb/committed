@@ -364,3 +364,36 @@ func contains(xs []string, want string) bool {
 	}
 	return false
 }
+
+// TestStuckRecord_ClearedByHealthyReplacementWorker pins stuck-record-latches:
+// after a worker wedges and publishes its replicated SyncableStuck record, the
+// natural operator fix — re-POST the config (which now recovers a rotated
+// webhook token, since auth failures are transient) — replaces the worker. The
+// replacement, once healthy, MUST clear the replicated record. Before the fix
+// the fresh tracker started published=false, so its cleared() skipped the
+// delete and stuck:true latched forever on a healthy syncable.
+func TestStuckRecord_ClearedByHealthyReplacementWorker(t *testing.T) {
+	d, s := newWalDBStuck(t)
+	id := "stuck-repost"
+	seedSyncableConfig(t, d, id)
+	seedUserProposals(t, d, s, "evt", []string{"poison", "ok"})
+
+	// Worker A wedges on "poison" and publishes the replicated stuck record.
+	wedged := &transientSyncable{
+		stuck:        map[string]bool{"poison": true},
+		transientErr: fmt.Errorf("token expired"),
+	}
+	require.NoError(t, d.Sync(context.Background(), id, wedged))
+	require.Eventually(t, func() bool { _, ok, _ := d.SyncableStuck(id); return ok },
+		10*time.Second, 10*time.Millisecond, "worker A must publish the stuck record")
+
+	// Operator "fixes the token" by re-POSTing the config: a healthy worker B
+	// replaces A. It adopts the replicated record and, once it syncs past the
+	// poison, clears it.
+	healthy := &transientSyncable{stuck: map[string]bool{}}
+	require.NoError(t, d.Sync(context.Background(), id, healthy))
+
+	require.Eventually(t, func() bool { _, ok, _ := d.SyncableStuck(id); return !ok },
+		10*time.Second, 10*time.Millisecond,
+		"the healthy replacement worker must clear the replicated stuck record (not latch it forever)")
+}

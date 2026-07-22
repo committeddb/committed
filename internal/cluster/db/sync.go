@@ -383,7 +383,7 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 	// permanent error, manual skip, or leadership transition.
 	var retryActual *cluster.Actual
 	var retryErr error
-	tracker := &stuckTracker{db: db, id: id}
+	tracker := db.newStuckTracker(id)
 
 	// lastSeen is the highest index this worker has fully DECIDED on in the
 	// current leadership stint — synced, skipped because it wasn't this
@@ -688,7 +688,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 	// retryBatch is set when a flush fails with a transient error. The
 	// next iteration retries the flush instead of reading more proposals.
 	retryBatch := false
-	tracker := &stuckTracker{db: db, id: id}
+	tracker := db.newStuckTracker(id)
 
 	flush := func() bool {
 		if len(batch) == 0 {
