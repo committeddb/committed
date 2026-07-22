@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"fmt"
 
+	"google.golang.org/protobuf/proto"
+
 	bolt "go.etcd.io/bbolt"
 	pb "go.etcd.io/raft/v3/raftpb"
 	"go.uber.org/zap"
@@ -66,6 +68,13 @@ func (s *Storage) ApplyCommittedBatch(entries []*pb.Entry) error {
 		}
 	}
 	if len(fresh) == 0 {
+		// Nothing fresh to advance appliedIndex for. Any ConfState staged this
+		// Ready was for an already-applied conf (durable from its original
+		// apply) — drop it so it can't later flush against an unrelated
+		// appliedIndex write.
+		s.snapMu.Lock()
+		s.pendingConfState = nil
+		s.snapMu.Unlock()
 		return nil
 	}
 	if err := s.appendEvents(fresh); err != nil {
@@ -250,15 +259,78 @@ func (s *Storage) AppliedIndex() uint64 {
 // handlers are not atomic with each other today either.
 func (s *Storage) saveAppliedIndex(idx uint64) error {
 	s.appliedIndexPersists.Add(1)
-	return s.update(func(tx *bolt.Tx) error {
+
+	// Snapshot the pending ConfState (staged by ConfState this Ready) and
+	// marshal it BEFORE taking the bbolt write lock, so we never nest snapMu
+	// inside kvMu. It is then written in the SAME transaction as appliedIndex:
+	// a crash leaves either both durable (membership current, applied index
+	// past the conf) or neither (membership stale/missing, applied index
+	// behind the conf → raft re-delivers and applies it fresh). There is no
+	// window where the applied index leads a stale ConfState.
+	s.snapMu.Lock()
+	pending := s.pendingConfState
+	s.snapMu.Unlock()
+	var pendingData []byte
+	if pending != nil {
+		d, err := proto.Marshal(pending)
+		if err != nil {
+			return fmt.Errorf("marshal conf state: %w", err)
+		}
+		pendingData = d
+	}
+
+	err := s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(appliedIndexBucket)
 		if b == nil {
 			return ErrBucketMissing
 		}
 		var buf [8]byte
 		binary.BigEndian.PutUint64(buf[:], idx)
-		return b.Put(appliedIndexKey, buf[:])
+		if err := b.Put(appliedIndexKey, buf[:]); err != nil {
+			return err
+		}
+		if pendingData != nil {
+			cb := tx.Bucket(confStateBucket)
+			if cb == nil {
+				return ErrBucketMissing
+			}
+			if err := cb.Put(confStateKey, pendingData); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
+	if err == nil && pending != nil {
+		s.snapMu.Lock()
+		if s.pendingConfState == pending {
+			s.pendingConfState = nil
+		}
+		s.snapMu.Unlock()
+	}
+	return err
+}
+
+// durableConfState reads the ConfState written atomically with appliedIndex,
+// or nil if none has been written (fresh node, or a pre-confStateBucket dir).
+func (s *Storage) durableConfState() *pb.ConfState {
+	var out *pb.ConfState
+	_ = s.view(func(tx *bolt.Tx) error {
+		b := tx.Bucket(confStateBucket)
+		if b == nil {
+			return nil
+		}
+		data := b.Get(confStateKey)
+		if len(data) == 0 {
+			return nil
+		}
+		cs := &pb.ConfState{}
+		if err := proto.Unmarshal(data, cs); err != nil {
+			return nil
+		}
+		out = cs
+		return nil
+	})
+	return out
 }
 
 // SetAppliedIndexForTest rewinds the applied index (in memory and in bbolt) to

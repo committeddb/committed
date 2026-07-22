@@ -654,6 +654,51 @@ func (n *Raft) serveChannels() {
 			// append, appliedIndex persist) to per-Ready; the loop below
 			// keeps the per-entry bookkeeping (notifier, conf changes,
 			// metrics) in entry order.
+			// Apply conf-changes FIRST — BEFORE ApplyCommittedBatch advances
+			// the durable applied index. applyConfChange calls
+			// node.ApplyConfChange (which computes the authoritative ConfState)
+			// and stages it via storage.ConfState; ApplyCommittedBatch then
+			// writes that ConfState ATOMICALLY with the applied index. If the
+			// applied index were persisted first (as it was when this ran
+			// after ApplyCommittedBatch), a crash before the ConfState became
+			// durable would — with c.Applied suppressing re-delivery — restart
+			// raft on a stale voter set (confstate-lost-in-crash-window). We
+			// keep using raft's ApplyConfChange for the config computation and
+			// only fix WHEN its result becomes durable.
+			for _, entry := range rd.CommittedEntries {
+				switch entry.GetType() {
+				case raftpb.EntryConfChangeV2:
+					// The normal membership path. db.AddMember / db.RemoveMember
+					// propose ConfChangeV2 entries (joint consensus), and raft
+					// itself proposes a zero-change ConfChangeV2 to leave the
+					// joint configuration once it commits (JointImplicit
+					// auto-leave). Both flow through here.
+					var cc raftpb.ConfChangeV2
+					if err := proto.Unmarshal(entry.Data, &cc); err != nil {
+						// Guarded send (sendRaftError): the one-shot ErrorC
+						// consumer may already be gone (SIGTERM path reads it
+						// zero times), and a raw send here parks the Ready
+						// loop forever — deadlocking Close into SIGKILL.
+						n.sendRaftError(err)
+						continue
+					}
+					n.applyConfChange(&cc, cc.Context)
+				case raftpb.EntryConfChange:
+					// Backward compatibility: a v1 ConfChange can only appear
+					// in a log written by a pre-joint-consensus binary, since
+					// this node now proposes v2 exclusively. etcd raft still
+					// applies v1 (ConfChangeI.AsV2 promotes it), so replaying it
+					// keeps an upgraded node consistent with what the old leader
+					// committed. See docs/operations/membership.md.
+					var cc raftpb.ConfChange
+					if err := proto.Unmarshal(entry.Data, &cc); err != nil {
+						n.sendRaftError(err) // guarded — see the v2 twin above
+						continue
+					}
+					n.applyConfChange(&cc, cc.Context)
+				}
+			}
+
 			applyStart := time.Now()
 			if err := n.storage.ApplyCommittedBatch(rd.CommittedEntries); err != nil {
 				n.logger.Fatal("apply committed entries", zap.Int("count", len(rd.CommittedEntries)), zap.Error(err))
@@ -673,37 +718,6 @@ func (n *Raft) serveChannels() {
 				// or pre-PR2 entries).
 				if n.applyNotifier != nil && entry.GetType() == raftpb.EntryNormal && entry.Data != nil {
 					n.applyNotifier(entry.Data)
-				}
-				switch entry.GetType() {
-				case raftpb.EntryConfChangeV2:
-					// The normal membership path. db.AddMember / db.RemoveMember
-					// propose ConfChangeV2 entries (joint consensus), and raft
-					// itself proposes a zero-change ConfChangeV2 to leave the
-					// joint configuration once it commits (JointImplicit
-					// auto-leave). Both flow through here.
-					var cc raftpb.ConfChangeV2
-					if err := proto.Unmarshal(entry.Data, &cc); err != nil {
-						// Guarded send (sendRaftError): the one-shot ErrorC
-						// consumer may already be gone (SIGTERM path reads it
-						// zero times), and a raw send here parks the Ready
-						// loop forever — deadlocking Close into SIGKILL.
-						n.sendRaftError(err)
-						break
-					}
-					n.applyConfChange(&cc, cc.Context)
-				case raftpb.EntryConfChange:
-					// Backward compatibility: a v1 ConfChange can only appear
-					// in a log written by a pre-joint-consensus binary, since
-					// this node now proposes v2 exclusively. etcd raft still
-					// applies v1 (ConfChangeI.AsV2 promotes it), so replaying it
-					// keeps an upgraded node consistent with what the old leader
-					// committed. See docs/operations/membership.md.
-					var cc raftpb.ConfChange
-					if err := proto.Unmarshal(entry.Data, &cc); err != nil {
-						n.sendRaftError(err) // guarded — see the v2 twin above
-						break
-					}
-					n.applyConfChange(&cc, cc.Context)
 				}
 			}
 

@@ -110,6 +110,13 @@ var (
 var (
 	appliedIndexBucket = []byte("appliedIndex")
 	appliedIndexKey    = []byte("idx")
+
+	// confStateBucket durably holds the raft membership ConfState that
+	// ApplyConfChange returns. It is written ATOMICALLY with appliedIndex (in
+	// saveAppliedIndex) so a crash can never leave the applied index ahead of
+	// a stale membership config — see ConfState / confstate-lost-in-crash-window.
+	confStateBucket = []byte("confState")
+	confStateKey    = []byte("cs")
 )
 
 // pendingScrubBucket holds the scrubber's durable state: the highest requested
@@ -160,7 +167,7 @@ var buckets = func() [][]byte {
 	for _, ie := range internalEntities {
 		bs = append(bs, ie.bucket)
 	}
-	return append(bs, ingestSourceSeqBucket, appliedIndexBucket, eventTombstoneBucket, topicRefreshEpochBucket, memberPeerURLBucket)
+	return append(bs, ingestSourceSeqBucket, appliedIndexBucket, confStateBucket, eventTombstoneBucket, topicRefreshEpochBucket, memberPeerURLBucket)
 }()
 
 type StateType int
@@ -387,6 +394,13 @@ type Storage struct {
 	//
 	// This is "R_local" in the storage invariant P_local == R_local.
 	appliedIndex atomic.Uint64
+
+	// pendingConfState holds the ConfState from a conf-change applied this
+	// Ready, staged by ConfState() and flushed to confStateBucket ATOMICALLY
+	// with appliedIndex by saveAppliedIndex — so membership durability can
+	// never lag the applied index (confstate-lost-in-crash-window). Guarded by
+	// snapMu (ConfState already holds it); accessed only on the Ready loop.
+	pendingConfState *pb.ConfState
 	// eventIndex is the highest raft index written to EventLog. Bumped
 	// before appliedIndex in ApplyCommitted so that a crash between the
 	// EventLog write and the bbolt appliedIndex persist doesn't lose
@@ -885,6 +899,11 @@ func (s *Storage) ConfState(c *pb.ConfState) {
 	}
 	s.snapshot.Metadata.ConfState = c
 	s.snapDirty = true
+	// Stage for the atomic durable write paired with appliedIndex. The
+	// snapshot-metadata copy above is for CreateSnapshot; confStateBucket
+	// (written with appliedIndex) is the crash-authoritative one InitialState
+	// reads back.
+	s.pendingConfState = c
 }
 
 // RaftLogApproxSize returns the approximate on-disk size (bytes) of the
@@ -975,7 +994,15 @@ func (s *Storage) InitialState() (*pb.HardState, *pb.ConfState, error) {
 	defer s.snapMu.RUnlock()
 	// raft 3.7's Storage contract: the returned ConfState must not be nil —
 	// return an empty one when no snapshot ConfState has been persisted yet.
-	cs := s.snapshot.GetMetadata().GetConfState()
+	// Prefer the crash-authoritative ConfState written atomically with
+	// appliedIndex (confStateBucket); it can never lag the applied index the
+	// way the snapshot-metadata copy (persisted lazily on the next Save) could.
+	// Fall back to the snapshot metadata for a fresh node that has not applied
+	// a conf-change yet, or a data dir written before confStateBucket existed.
+	cs := s.durableConfState()
+	if cs == nil {
+		cs = s.snapshot.GetMetadata().GetConfState()
+	}
 	if cs == nil {
 		cs = &pb.ConfState{}
 	}
