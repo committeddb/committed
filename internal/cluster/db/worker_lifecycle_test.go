@@ -2,7 +2,6 @@ package db_test
 
 import (
 	"context"
-	"slices"
 	"testing"
 	"time"
 
@@ -65,10 +64,22 @@ func TestWorkerLifecycle_CancelCondemnsAgainstSupervisorResurrection(t *testing.
 		<-attemptDone  // and finish (bail) before we relock and delete
 	})
 
-	// Freeze the worker: it returns ingestExitFreeze and its supervisor spawns.
+	// Freeze the worker, then wait until its supervisor has actually spawned and
+	// reached the poise seam (poised closed) BEFORE cancelling. This ordering is
+	// load-bearing: the worker spawns a supervisor only if it returns
+	// ingestExitFreeze, and that branch is gated on ctx.Err()==nil. If we
+	// cancelled first, cancel's handle.cancel() would race the worker's freeze
+	// decision and could flip it to ingestExitShutdown — no supervisor spawns, and
+	// the rendezvous below then deadlocks forever on <-poised. Gating cancel on
+	// "supervisor poised" makes the freeze strictly happen-before the cancel, so
+	// the race can't occur; the bounded wait turns a missed freeze into a fast,
+	// legible failure instead of a 15-minute hang.
 	d.SignalWaiterForTest(rid, db.ErrProposalUnknown)
-	require.Eventually(t, func() bool { return !slices.Contains(d.WaitersForTest(), rid) },
-		2*time.Second, 5*time.Millisecond, "worker never reached the freeze branch")
+	select {
+	case <-poised:
+	case <-time.After(5 * time.Second):
+		t.Fatal("supervisor never poised — the worker did not freeze (ingestExitShutdown?)")
+	}
 
 	// Cancel the frozen worker (the shared delete/reconcile front half).
 	d.CancelIngestWorkerForTest(id)
