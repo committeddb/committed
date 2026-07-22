@@ -225,9 +225,18 @@ func ClassifyStatus(code int) error {
 		return nil
 	}
 	switch code {
-	case 400, 413, 415, 422, 451:
-		// Payload-shaped: this entry can never be accepted as-is.
+	case 400, 413, 422, 451:
+		// Payload-shaped: THIS entry can never be accepted as-is.
 		return cluster.Permanent(fmt.Errorf("[http.Sync] unexpected status %d", code))
+	case 415:
+		// 415 Unsupported Media Type is NOT entry-specific and must stay
+		// transient: committed sends a constant Content-Type (application/json)
+		// on every request, so a 415 rejects every entity identically — a
+		// receiver/content-negotiation misconfiguration, not a property of this
+		// row's data. Dead-lettering it would silently discard a whole topic's
+		// committed events one breaker-run at a time; instead the worker wedges
+		// so an operator fixes the receiver and delivery resumes with nothing
+		// shunted. (Same carve-out reasoning as the auth/routing 4xx below.)
 	}
 	return fmt.Errorf("[http.Sync] unexpected status %d", code)
 }
