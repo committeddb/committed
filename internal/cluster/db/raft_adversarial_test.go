@@ -1586,8 +1586,9 @@ func TestAdversarial_DiskFull(t *testing.T) {
 //
 //   - Storage invariant (P_local == R_local) holds on every node after
 //     the rebuilt follower rejoins, per docs/event-log-architecture.md
-//     § "The storage invariant". If the invariant breaks on any node,
-//     checkStorageInvariant fatal-exits the Ready loop.
+//     § "The central invariant" (Face 1 — the storage highwatermark). If
+//     the invariant breaks on any node, checkStorageInvariant fatal-exits
+//     the Ready loop.
 //
 //   - Determinism invariant — every node's permanent event log is byte-
 //     identical for the full applied prefix after convergence, per

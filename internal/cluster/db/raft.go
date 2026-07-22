@@ -743,7 +743,8 @@ func (n *Raft) serveChannels() {
 			}
 
 			// Storage invariant: P_local == R_local. See
-			// docs/event-log-architecture.md § "The storage invariant".
+			// docs/event-log-architecture.md § "The central invariant"
+			// (Face 1 — the storage highwatermark).
 			// On violation the cluster has compacted past this node's
 			// recoverable window (almost always via an InstallSnapshot
 			// that advanced the raft side without backfilling the event

@@ -128,12 +128,15 @@ Your status code tells committed what to do next:
 | Status | committed's action |
 |--------|--------------------|
 | `2xx` | Success — checkpoint advances. Return this **only once you've durably applied** the transaction. |
-| `408`, `429`, `5xx` | Transient — **retry** the same request later. Use `5xx`/`429` to apply backpressure. |
-| other `4xx` (400, 404, 405, 422, …) | Permanent — the transaction is **dead-lettered** (see [stuck syncables](operations/stuck-syncables.md)) and the syncable moves on. Return this only for a genuinely un-processable payload. |
+| `422`, `451` | Permanent — the transaction is **dead-lettered** (see [stuck syncables](operations/stuck-syncables.md)) and the syncable moves on. Return one of these **only** for a fault in *this record's data*: an un-processable payload (`422`) or content you are legally barred from storing (`451`). |
+| any other non-`2xx` (incl. `400`, `401`, `403`, `404`, `405`, `408`, `413`, `415`, `429`, `3xx`, `5xx`) | Transient — committed **retries**, and if the failure persists the syncable **wedges visibly** for an operator. These are receiver-wide faults (auth, routing, envelope format, body-size cap, media type, overload) that would reject *every* record identically, so committed never silently dead-letters your topic over them. Use `5xx`/`429` to apply backpressure. |
 
-Because a permanent `4xx` skips the record, prefer `5xx` when in doubt: a retry
-is safe (you dedup), and a persistently failing endpoint **wedges visibly** for
-an operator instead of silently dead-lettering everything.
+committed dead-letters **only** a genuine `422`/`451` (a fault in the record's
+own data); everything else it retries. So when in doubt, prefer a transient code:
+a retry is safe (you dedup), and a persistently failing endpoint **wedges
+visibly** for an operator instead of silently dead-lettering a whole topic. Do
+not reach for `400` to reject one bad record — it is receiver-wide and will
+wedge the syncable; use `422` for that.
 
 ## A minimal receiver
 

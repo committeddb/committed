@@ -8,9 +8,11 @@ throwaway transport, snapshot-and-compact aggressively) does not fit
 Committed's role as a CQRS event log where the events themselves are the
 product.
 
-This document is the source of truth for the architecture. Implementation
-tickets reference it; if a ticket conflicts with this doc, this doc wins.
-Update the doc first, then the tickets.
+This document is the **authoritative design reference** for the architecture.
+Implementation tickets reference it; if a ticket conflicts with this doc, this
+doc wins. Update the doc first, then the tickets. ("Source of truth" is reserved
+in this document for the permanent event log itself — the system of record from
+which all derived state is rebuilt; see **Principles**.)
 
 ---
 
@@ -93,6 +95,80 @@ to future work; others may never be needed.
 
 ---
 
+## Principles
+
+Everything below is an instance of a small set of principles. If you remember
+these, the detailed sections read as "the same idea, applied here" rather than
+as a catalogue of independent rules. Read this section first and treat the rest
+as worked examples; each later section names the principle it instantiates.
+
+**One source of truth: the committed log, ordered by raft index.** The permanent
+event log is the system of record. Every other durable structure — the bbolt
+metadata view, every downstream projection — is a *derived* materialization that
+a replay of the log must be able to reconstruct. The raft index is the sole
+ordering authority: no wall clock, no per-node sequence. (The log is a *subset*
+of the committed index space, not a 1:1 mirror — an RTBF scrub physically
+removes entries, so the index column is ascending-but-sparse. Never assume every
+committed index is present.)
+
+**One central invariant: the applied index is the durability watermark.** The
+raft applied index may never advance past state the node has durably stored.
+This one contract is what makes reads, compaction, and voting safe, and it is
+upheld by four disciplines:
+
+- **Determinism** — applying a committed entry produces byte-identical state and
+  log writes on every node. Operation parameters ride the committed command;
+  derived node-local state converges by serialized reconciliation, never by
+  event accumulation.
+- **Idempotency** — durable state written *before* the watermark advances must be
+  safe to re-apply on replay (keyed last-writer-wins, monotonic max, or a replay
+  guard). This is what lets recovery re-run the crash-apply gap harmlessly.
+- **Durability** — every durable write is crash-safe by one of exactly two
+  strategies: written-before-the-watermark-*and*-idempotent, or written
+  *atomically* with the watermark. Nothing durable may lag the watermark under
+  neither.
+- **Visibility** — a node that cannot satisfy the invariant fails loud (fatal
+  exit pointing at the rebuild runbook) rather than serving stale reads or
+  voting. State that feeds only observability is exempt: it may misreport, but it
+  can never mis-apply.
+
+**Two boundary contracts** govern data crossing the consensus boundary, one per
+direction:
+
+- **Ingest is effectively-once.** A source's records enter the log at most once
+  in effect, deduplicated against a durable per-ingestable highwater keyed on the
+  source's own resume identity. (See the ingest resume/dedup design.)
+- **Egress classifies by entry, not by transport.** A syncable dead-letters a
+  proposal as *permanent* only when the failure is specific to THIS entry's data
+  and would recur identically on replay. An access/schema/routing/format failure
+  that would reject *every* entry stays transient, so the worker wedges visibly
+  and an operator fixes the cause instead of real data being silently shunted.
+  (See the Syncable classification rule, mirrored by the SQL dialects and the
+  [webhook receiver](webhook-receiver.md).)
+
+**One evolution gate: add-only, behind the cluster feature level.** New durable
+state and new on-disk/wire fields are *added*, never repurposed, and a
+mixed-version cluster gates new behavior on the negotiated
+[cluster feature level](api-compatibility.md) — the lowest level across current
+members — so a rolling upgrade never lets one node commit an entry an older peer
+would mishandle.
+
+**One posture: fail loud, proportional to stakes.** When a node cannot prove
+safety it stops loudly rather than guessing — but the *depth* of the reaction
+scales to what a wrong guess costs. Corrupting the log (data loss or duplication)
+earns a freeze; a lost diagnostic earns a log line. The deciding question is
+always "if I am wrong here, what breaks, and can I recover?"
+
+| Principle | Instantiated by |
+|-----------|-----------------|
+| One source of truth | Architecture overview · Indexing · Right-to-be-forgotten · Metadata GC |
+| Central invariant / four disciplines | The central invariant · Determinism · Compaction policy |
+| Two boundary contracts | Ingest dedup design · Syncable classification · [webhook-receiver.md](webhook-receiver.md) |
+| One evolution gate | [api-compatibility.md](api-compatibility.md) · Implementation phases |
+| Fail loud, proportional to stakes | The central invariant (fatal-exit) · Commit ambiguity on leadership change |
+
+---
+
 ## Architecture overview
 
 ### Three storage tiers
@@ -142,8 +218,10 @@ both share the same code; that is the bug this architecture fixes.
    permanent event log. **Per-write `fsync` for durability** (matches raft
    semantics).
 7. Once the entry is durably in the permanent event log, it becomes
-   "graduated" — eligible for raft log compaction once a quorum has
-   graduated.
+   "graduated" on that node — eligible for raft log compaction of its index
+   there. Compaction is a **local, per-node decision** against the node's own
+   graduated highwatermark; it does not wait on a quorum-graduated index (see
+   *Compaction policy*).
 
 **Metadata proposals** (~0.001%):
 
@@ -225,12 +303,21 @@ against its own state, not a cluster-wide index. It does **not** consult a
 "quorum-graduated index" (an earlier design not implemented in v1): raft's own
 commit rule already guarantees every compacted entry was committed to a quorum's
 raft logs, and each node graduates a committed entry to its permanent log on
-apply, so durability holds without a separate quorum constraint. The storage
-invariant (below) is the local-recovery backstop.
+apply, so durability holds without a separate quorum constraint. The central
+invariant (below, Face 1) is the local-recovery backstop.
 
 ---
 
-## The storage invariant
+## The central invariant: the applied index is the durability watermark
+
+*This is the central invariant the four disciplines uphold (see **Principles**).
+It wears two faces — a highwatermark equality at the storage tier, and a
+crash-safety discipline at the write tier — but they are one fact: **the raft
+applied index may never advance past state the node has durably stored.** Face 1
+is the steady-state check; Face 2 is the rule you apply when adding any new piece
+of durable state.*
+
+### Face 1 — the storage highwatermark: `P_local == R_local`
 
 **After any Ready loop iteration, `P_local == R_local`** where:
 
@@ -265,6 +352,40 @@ This invariant is the contract that makes everything else safe:
 The invariant can only be broken in one way: an `InstallSnapshot` from a
 leader advances `R_local` past `P_local`. v1 catches this and exits; v2
 backfills before allowing the advance.
+
+### Face 2 — the durability-watermark rule (adding new durable state)
+
+Face 1 checks the invariant in steady state; Face 2 is how you *keep* it true
+whenever you add a new piece of durable applied state. It is the **durability**
+and **idempotency** disciplines stated as one rule.
+
+**Every piece of durable applied state must be crash-safe by one of exactly two
+strategies: (1) written before the applied index advances *and* idempotent on
+replay, or (2) written atomically with the applied index. The applied index is
+the durability watermark; nothing durable may let the watermark move past it
+unless it satisfies one of those two.** A crash can strike between any two
+durable writes, and on restart `c.Applied` is set to the persisted applied index,
+so raft only re-delivers entries *above* it. State written *before* the watermark
+advances is therefore covered by re-delivery — but only if re-applying it is
+idempotent. State that cannot be made idempotent-on-replay, or whose re-delivery
+is suppressed, must instead be written in the *same* bbolt transaction as the
+applied index, so the two are atomically all-or-nothing.
+
+| Strategy | When to use it | Idempotency mechanism | Example |
+|----------|----------------|-----------------------|---------|
+| (1) before-watermark + idempotent | State written inside the apply path, before `saveAppliedIndex` | keyed last-writer-wins · monotonic max · per-id raft-index replay guard (config-version allocator) | almost all applied state |
+| (2) atomic-with-watermark | State produced out of band, or whose re-delivery is suppressed by `c.Applied` | none needed — same bbolt txn as `appliedIndex` | raft membership `ConfState` |
+
+Almost all applied state takes strategy (1). The raft membership `ConfState` is
+the one piece that needed strategy (2): it is produced out of band (raft's Ready
+loop, via `node.ApplyConfChange`) and its re-delivery is suppressed by
+`c.Applied`, so it is staged by `ConfState()` and flushed to `confStateBucket` in
+the same transaction as `appliedIndex` (see `saveAppliedIndex`). The violation
+this rule names — durable state that lagged the watermark and was neither
+idempotent nor atomic — was `confstate-lost-in-crash-window`: `ConfState`
+persisted lazily (`snapDirty` → next `Save`), after the applied index, so a crash
+restarted the node on a stale voter set. Adding new durable applied state means
+choosing (1) or (2) deliberately, never neither.
 
 ### How a node decides whether to be a voting member
 
@@ -694,8 +815,13 @@ The apply-path determinism audit is **complete**. Findings:
   fields only, and channel notifies in `saveSyncable`/`saveIngestable`
   happen *after* the bucket write so they don't race the state.
 
-**The rule, stated positively — operation parameters ride the committed
-command.** Anything that affects the *outcome* of applying a committed entry
+Determinism (the first of the four disciplines — see **Principles**) is not one
+rule but two faces of the same discipline: what a node *reads* to decide an
+outcome, and how it *maintains* the state it derives. Both must be a pure
+function of the applied log, never of node-local timing or event accumulation.
+
+**Face one — operation parameters ride the committed command.** Anything that
+affects the *outcome* of applying a committed entry
 must itself be carried by that entry (or by prior committed state): never by a
 node-local side channel keyed to the operation. A parameterized operation
 therefore puts its parameters in the command it commits — the scrub commits
@@ -711,9 +837,8 @@ committed state. Node-local state that feeds only observability (a stuck
 tracker's debounce, metrics) is exempt: its staleness can misreport, but it can
 never mis-apply.
 
-**The companion rule — derived node-local state is a function of applied
-state, converged by serialized reconciliation, never an accumulation of racing
-events.** The live objects a node derives from committed configs (sync/ingest
+**Face two — derived node-local state is a function of applied state, converged
+by serialized reconciliation, never an accumulation of racing events.** The live objects a node derives from committed configs (sync/ingest
 workers, degraded-config records) are legitimately node-local, but their
 correctness still depends on ordering against the applied log. Maintaining
 them purely event-by-event fails twice: an event can be *raced* (a restore
@@ -729,31 +854,11 @@ every snapshot install. Apply-path events remain the cheap steady-state
 increment; the reconcile is the fixpoint that makes their loss or reordering
 harmless.
 
-**The durability-watermark rule — every piece of durable applied state must be
-crash-safe by one of exactly two strategies: (1) written before the applied
-index advances *and* idempotent on replay, or (2) written atomically with the
-applied index. The applied index is the durability watermark; nothing durable
-may let the watermark move past it unless it satisfies one of those two.** A
-crash can strike between any two durable writes, and on restart `c.Applied` is
-set to the persisted applied index, so raft only re-delivers entries *above*
-it. State written *before* the watermark advances is therefore covered by
-re-delivery — but only if re-applying it is idempotent (keyed last-writer-wins,
-monotonic max, or a replay guard such as the per-id raft-index guard on
-versioned config; see the config-version allocator). State that cannot be made
-idempotent-on-replay, or whose re-delivery is suppressed, must instead be
-written in the *same* bbolt transaction as the applied index, so the two are
-atomically all-or-nothing. Almost all applied state takes strategy (1) — it is
-written inside the apply path, before `saveAppliedIndex`, and its handlers are
-idempotent. The raft membership `ConfState` is the one piece that needed
-strategy (2): it is produced out of band (raft's Ready loop, via
-`node.ApplyConfChange`) and its re-delivery is suppressed by `c.Applied`, so it
-is staged by `ConfState()` and flushed to `confStateBucket` in the same
-transaction as `appliedIndex` (see `saveAppliedIndex`). The violation this rule
-names — durable state that lagged the watermark and was neither idempotent nor
-atomic — was `confstate-lost-in-crash-window`: `ConfState` persisted lazily
-(`snapDirty` → next `Save`), after the applied index, so a crash restarted the
-node on a stale voter set. Adding new durable applied state means choosing (1)
-or (2) deliberately, never neither.
+A closely related rule — that durable state written by an apply must be
+crash-safe against the watermark — is the **durability-watermark rule**, stated
+once in *The central invariant* (Face 2). It is deliberately *not* a determinism
+rule and does not live here: determinism is about producing identical state; the
+watermark rule is about not losing that state in a crash.
 
 A regression test, `wal.TestApplyDeterminism`
 (`internal/cluster/db/wal/determinism_test.go`), constructs three fresh
@@ -862,8 +967,9 @@ with **`ErrProposalUnknown`**: literally "proposal status unknown after
 leader change." The proposal *might* have committed (and will apply) or
 *might* have been dropped by the transition. The proposer cannot tell.
 
-Every in-flight propose has to decide what to do with that ambiguity. The
-governing principle is:
+Every in-flight propose has to decide what to do with that ambiguity. This is
+the **fail loud, proportional to stakes** posture (see **Principles**) at its
+sharpest — the governing principle is:
 
 > **The reaction to commit ambiguity is proportional to what is lost if
 > you guess wrong.**
@@ -924,8 +1030,8 @@ The operator-facing runbook lives at
 canonical reference for anyone actually rebuilding a node, and it
 covers the failure modes ("when to rebuild" / "when not to rebuild"),
 the procedure, and post-restart verification. The summary below is
-design-level only; treat the runbook as source of truth when the two
-drift.
+design-level only; treat the runbook as the **canonical operator
+reference** when the two drift.
 
 ### Manual rebuild of an existing follower
 
