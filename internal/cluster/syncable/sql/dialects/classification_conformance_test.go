@@ -33,10 +33,12 @@ func TestClassificationRule_EntrySpecific(t *testing.T) {
 	require.True(t, pgPerm("23502"), "pg not_null_violation")
 	require.True(t, myPerm(1264), "mysql out_of_range_value")
 	require.True(t, myPerm(1062), "mysql duplicate_entry")
-	require.True(t, httpPerm(422), "http unprocessable entity")
-	require.True(t, httpPerm(400), "http bad request")
+	require.True(t, httpPerm(422), "http unprocessable entity (payload data semantics)")
 
-	// ACCESS / SCHEMA / ROUTING-SHAPED (fails every row) → TRANSIENT on every sink.
+	// ACCESS / SCHEMA / ROUTING / REQUEST-SHAPED (fails every row) → TRANSIENT on
+	// every sink. For the webhook, committed's fixed, size-bounded envelope makes
+	// 400 (envelope format), 413 (receiver body cap), and 415 (media type)
+	// every-row faults, not entry-specific — never silently shunt real events.
 	require.False(t, pgPerm("42P01"), "pg undefined_table")
 	require.False(t, pgPerm("42703"), "pg undefined_column")
 	require.False(t, pgPerm("42501"), "pg insufficient_privilege")
@@ -46,4 +48,7 @@ func TestClassificationRule_EntrySpecific(t *testing.T) {
 	require.False(t, httpPerm(401), "http unauthorized")
 	require.False(t, httpPerm(403), "http forbidden")
 	require.False(t, httpPerm(404), "http not found (routing)")
+	require.False(t, httpPerm(400), "http bad request (envelope format)")
+	require.False(t, httpPerm(413), "http payload too large (receiver body cap)")
+	require.False(t, httpPerm(415), "http unsupported media type (constant Content-Type)")
 }

@@ -326,6 +326,19 @@ func (d *PostgreSQLDialect) IsPermanent(err error) bool {
 	// fail every entry identically (a dropped table, an operator ALTER, a
 	// missing GRANT), exactly the mirror of the SQL-side auth carve-out the
 	// webhook sink applies to 401/403.
+	//
+	// KNOWN LIMITATION (dialect asymmetry): Postgres raises the SAME SQLSTATE
+	// 23502 not_null_violation for two different faults — (a) a mapped column
+	// bound an explicit NULL for THIS row (entry-specific; permanent is right),
+	// and (b) a NOT-NULL destination column absent from the config mapping, so
+	// every INSERT omits it and EVERY row fails (schema-shaped). MySQL splits
+	// these (1048 permanent vs 1364 transient) and we classify them oppositely,
+	// but Postgres cannot — 23502 covers both, so case (b) dead-letters here
+	// rather than wedging. Only reachable with an OPERATOR-managed table that has
+	// a required column outside the mapping; when committed owns the table via
+	// CreateDDL every NOT-NULL column is mapped, so 23502 is only the (a) case.
+	// The 0.8 GTID/classification work does not fix this (it is inherent to
+	// Postgres's SQLSTATE granularity); documented so it isn't mistaken for a bug.
 	switch code[:2] {
 	case "22", "23":
 		return true

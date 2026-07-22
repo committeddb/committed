@@ -420,7 +420,7 @@ func TestSync_TopicMismatch(t *testing.T) {
 }
 
 func TestSync_PermanentError_4xx(t *testing.T) {
-	codes := []int{400, 413, 422}
+	codes := []int{422, 451}
 
 	for _, code := range codes {
 		code := code
@@ -467,23 +467,30 @@ func TestSync_TransientError_5xx(t *testing.T) {
 	}
 }
 
-// TestSync_UnsupportedMediaTypeIsTransient pins the round-8 fix: 415 must NOT
-// dead-letter. committed sends a constant Content-Type, so a 415 rejects every
-// entity identically — dead-lettering it would silently discard a whole topic's
-// committed events. It must wedge (transient) so an operator fixes the receiver.
-func TestSync_UnsupportedMediaTypeIsTransient(t *testing.T) {
-	ts := httptest.NewServer(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, _ *nethttp.Request) {
-		w.WriteHeader(415)
-	}))
-	defer ts.Close()
+// TestSync_RequestShaped4xxAreTransient pins the round-8 classification rule:
+// request-shaped 4xx (400 envelope format, 413 receiver body cap, 415 media
+// type) must NOT dead-letter. committed sends a fixed, size-bounded envelope
+// with a constant Content-Type, so each rejects every entity identically —
+// dead-lettering them would silently shunt a whole topic's committed events.
+// They must wedge (transient) so an operator fixes the receiver, nothing shunted.
+func TestSync_RequestShaped4xxAreTransient(t *testing.T) {
+	for _, code := range []int{400, 413, 415} {
+		code := code
+		t.Run(nethttp.StatusText(code), func(t *testing.T) {
+			ts := httptest.NewServer(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, _ *nethttp.Request) {
+				w.WriteHeader(code)
+			}))
+			defer ts.Close()
 
-	s := synchttp.New(newConfig(ts.URL))
-	defer s.Close()
+			s := synchttp.New(newConfig(ts.URL))
+			defer s.Close()
 
-	_, err := s.Sync(context.Background(), newActual(newEntity(testType, "key1", map[string]string{"id": "1"})))
-	require.Error(t, err)
-	require.False(t, errors.Is(err, cluster.ErrPermanent),
-		"415 must be transient (constant Content-Type → every-row error), never a silent dead-letter")
+			_, err := s.Sync(context.Background(), newActual(newEntity(testType, "key1", map[string]string{"id": "1"})))
+			require.Error(t, err)
+			require.False(t, errors.Is(err, cluster.ErrPermanent),
+				"status %d is request-shaped (every-row) and must be transient, never a silent dead-letter", code)
+		})
+	}
 }
 
 func TestSync_TransientError_429(t *testing.T) {
@@ -597,14 +604,14 @@ func TestClassifyStatus(t *testing.T) {
 		{201, false, false},
 		{204, false, false},
 		{299, false, false},
-		// Payload-shaped: THIS entry can never be accepted — permanent.
-		{400, true, true},
-		{413, true, true},
+		// Entry-DATA-specific: THIS payload's content is rejected — permanent.
 		{422, true, true},
 		{451, true, true},
-		// 415 is NOT entry-specific: committed sends a constant Content-Type, so
-		// a 415 fails every entity identically — transient (wedge), never a
-		// silent whole-topic dead-letter.
+		// Request-shaped (format/size/media-type): committed's fixed, bounded
+		// envelope makes these fail every entity identically — transient (wedge
+		// loudly), never a silent whole-topic dead-letter.
+		{400, true, false},
+		{413, true, false},
 		{415, true, false},
 		// Access/config-shaped — would fail EVERY entry identically, so
 		// transient: wedge visibly, zero dead-letters (a rotated token used

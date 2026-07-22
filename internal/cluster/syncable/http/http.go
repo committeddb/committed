@@ -225,18 +225,24 @@ func ClassifyStatus(code int) error {
 		return nil
 	}
 	switch code {
-	case 400, 413, 422, 451:
-		// Payload-shaped: THIS entry can never be accepted as-is.
+	case 422, 451:
+		// PERMANENT only when the error is about THIS entry's DATA — provable
+		// from the protocol: 422 Unprocessable Entity is a semantic rejection of
+		// this payload's content; 451 is this content being legally blocked. A
+		// genuinely-bad entry is dead-lettered (recorded, replayable) so one
+		// poison record can't wedge every good entry behind it.
 		return cluster.Permanent(fmt.Errorf("[http.Sync] unexpected status %d", code))
-	case 415:
-		// 415 Unsupported Media Type is NOT entry-specific and must stay
-		// transient: committed sends a constant Content-Type (application/json)
-		// on every request, so a 415 rejects every entity identically — a
-		// receiver/content-negotiation misconfiguration, not a property of this
-		// row's data. Dead-lettering it would silently discard a whole topic's
-		// committed events one breaker-run at a time; instead the worker wedges
-		// so an operator fixes the receiver and delivery resumes with nothing
-		// shunted. (Same carve-out reasoning as the auth/routing 4xx below.)
+	case 400, 413, 415:
+		// Request-shaped, NOT entry-specific — TRANSIENT. committed sends a fixed,
+		// size-bounded envelope with a constant Content-Type, so these reject
+		// every entity identically: a receiver/format/size/media-type
+		// misconfiguration, not a property of this row's data. Dead-lettering them
+		// would silently shunt a whole topic's committed events (one breaker-run
+		// at a time) to dead-letters; instead the worker wedges LOUDLY so an
+		// operator fixes the receiver and delivery resumes with nothing shunted.
+		// 400 = envelope format; 413 = receiver body cap (fixable — committed's
+		// Actuals are bounded by COMMITTED_MAX_PROPOSAL_BYTES); 415 = media type.
+		// (Falls through to the transient return below.)
 	}
 	return fmt.Errorf("[http.Sync] unexpected status %d", code)
 }
