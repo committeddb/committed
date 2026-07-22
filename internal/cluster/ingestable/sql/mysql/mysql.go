@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	gosql "database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"maps"
 	"strconv"
 	"strings"
@@ -463,6 +465,7 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 	var lastGTID string
 	var resumeProgress *dialectpb.SnapshotProgress
 	var currentEpoch uint64
+	var resumeChunkTag uint64
 	if pos != nil {
 		posProto := &dialectpb.MySQLBinLogPosition{}
 		if err := proto.Unmarshal(pos, posProto); err != nil {
@@ -472,6 +475,7 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 		lastGTID = posProto.GtidSet
 		resumeProgress = posProto.SnapshotProgress
 		currentEpoch = posProto.RefreshEpoch
+		resumeChunkTag = posProto.ChunkTag
 	}
 
 	// charsetPlans is the source's collation catalog, read once and reused across
@@ -550,7 +554,7 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			// snapshot_progress) so a restart after snapshot
 			// completion but before the first binlog commit
 			// starts streaming instead of re-running snapshot.
-			posProto := &dialectpb.MySQLBinLogPosition{Name: lastPos.Name, Pos: lastPos.Pos, GtidSet: snapshotGTID, RefreshEpoch: currentEpoch}
+			posProto := &dialectpb.MySQLBinLogPosition{Name: lastPos.Name, Pos: lastPos.Pos, GtidSet: snapshotGTID, RefreshEpoch: currentEpoch, ChunkTag: chunkTag(config)}
 			bs, err := proto.Marshal(posProto)
 			if err != nil {
 				return err
@@ -673,6 +677,12 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			// non-nil here; a name without a numeric suffix yields 0 (no baseline
 			// → never trips), matching encodeSourceSeq's dedup-disabled fallback.
 			resumeFileNum: func() uint64 { n, _ := binlogFileNum(lastPos.Name); return n }(),
+			// Re-chunk guard: the checkpoint recorded the chunkTag under which its
+			// parts were committed. A mismatch now means the budget/config/binary
+			// changed and a replayed same-coordinate multi-part could mis-drop a
+			// row — flag its soft-flushes. 0 (a pre-feature checkpoint) means no
+			// baseline, so never trip.
+			chunkingChanged: resumeChunkTag != 0 && resumeChunkTag != chunkTag(config),
 		}
 		// Seed the consumed GTID set (the same set we resumed by) so streaming
 		// checkpoints carry the full set (snapshot ∪ streamed) and it keeps advancing
@@ -807,6 +817,18 @@ type MySQLEventHandler struct {
 	// Set once at construction from the resume position; never advanced (a normal
 	// stream only rotates the file number upward, so it never trips falsely).
 	resumeFileNum uint64
+
+	// chunkingChanged is set at construction when the current chunkTag differs
+	// from the one recorded in the resume checkpoint — the flush budget, config
+	// rendering, or binary rendering version changed since the parts were
+	// committed. While true, every soft-flush (a same-coordinate multi-part
+	// piece) is flagged DedupUnsafe: re-chunking under changed inputs can move an
+	// as-yet-uncommitted row into a part the SourceSeq dedup would drop, so a
+	// replay of such a part must freeze rather than risk silent loss. The commit
+	// flush needs no flag — a re-chunked replay always trips on an earlier
+	// soft-flush at/below the highwater first, and a transaction no longer
+	// oversized under the new budget re-applies idempotently to the keyed sink.
+	chunkingChanged bool
 
 	// pending accumulates entities from row events until the transaction commits
 	// (an XID event), so one MySQL transaction maps to one cluster.Proposal.
@@ -1068,7 +1090,7 @@ func (h *MySQLEventHandler) handleRows(ctx context.Context, header *replication.
 		// is applied as ordered parts (the documented bounded exception — see
 		// sql.TxnSoftFlushBytes).
 		if h.pendingBytes >= sql.TxnSoftFlushBytes {
-			if err := h.flushPending(ctx); err != nil {
+			if err := h.flushPending(ctx, true); err != nil {
 				return err
 			}
 		}
@@ -1152,8 +1174,10 @@ func (h *MySQLEventHandler) rowEntity(ts *tableSchema, table, action string, row
 }
 
 // flushPending emits all buffered entities as a single proposal and resets the
-// buffer. No-op when the buffer is empty.
-func (h *MySQLEventHandler) flushPending(ctx context.Context) error {
+// buffer. No-op when the buffer is empty. isSoftFlush is true for a
+// mid-transaction byte-budget flush (a same-coordinate multi-part piece) and
+// false for the commit flush — it drives the re-chunk DedupUnsafe guard.
+func (h *MySQLEventHandler) flushPending(ctx context.Context, isSoftFlush bool) error {
 	if len(h.pending) == 0 {
 		return nil
 	}
@@ -1182,6 +1206,13 @@ func (h *MySQLEventHandler) flushPending(ctx context.Context) error {
 		if n, ok := binlogFileNum(h.curFile); ok && n < h.resumeFileNum {
 			p.DedupUnsafe = true
 		}
+	}
+	// Re-chunk guard (F1): the chunking inputs changed since this coordinate's
+	// parts were committed, so a replayed soft-flush may carry rows re-grouped
+	// into a part the dedup would drop. Freeze rather than risk silent loss. Only
+	// soft-flushes need it — see h.chunkingChanged.
+	if h.chunkingChanged && isSoftFlush {
+		p.DedupUnsafe = true
 	}
 	h.pending = nil
 	h.pendingBytes = 0
@@ -1324,7 +1355,7 @@ func (h *MySQLEventHandler) handleXID(ctx context.Context, header *replication.E
 	}
 	pos := mysql.Position{Name: h.curFile, Pos: h.curPos}
 
-	if err := h.flushPending(ctx); err != nil {
+	if err := h.flushPending(ctx, false); err != nil {
 		return err
 	}
 
@@ -1338,7 +1369,7 @@ func (h *MySQLEventHandler) handleXID(ctx context.Context, header *replication.E
 	h.consumedGTID = merged
 	h.curTxnGTID = nil
 
-	posProto := &dialectpb.MySQLBinLogPosition{Name: pos.Name, Pos: pos.Pos, RefreshEpoch: h.epoch}
+	posProto := &dialectpb.MySQLBinLogPosition{Name: pos.Name, Pos: pos.Pos, RefreshEpoch: h.epoch, ChunkTag: chunkTag(h.config)}
 	if h.consumedGTID != nil {
 		posProto.GtidSet = h.consumedGTID.String()
 	}
@@ -1559,6 +1590,55 @@ func binlogFileNum(name string) (uint64, bool) {
 		return 0, false
 	}
 	return fileNum, true
+}
+
+// chunkRenderingVersion is folded into chunkTag so a binary change that alters
+// how a row renders to JSON — and therefore where an oversized transaction's
+// same-coordinate part boundaries fall (via sql.EntityFlushBytes) — is detected
+// on resume and freezes a re-chunked replay rather than silently mis-dropping a
+// shifted row. BUMP THIS whenever a change to row→JSON rendering could move
+// those boundaries. (Config and budget changes are captured directly; this
+// constant is the escape hatch for pure-code rendering changes, until the 0.8
+// resume+dedup unification removes the reliance — see the
+// unify-ingest-resume-dedup-gtid-watermark ticket.)
+const chunkRenderingVersion = 1
+
+// chunkTag fingerprints the inputs that determine how an oversized transaction
+// is split into same-coordinate parts: the flush byte budget, the config's
+// rendering-relevant fields (mappings, primary key, type), and the binary
+// rendering version. It is stamped on every checkpoint; a mismatch on resume
+// means re-chunking a replayed same-coordinate multi-part transaction could
+// shift an as-yet-uncommitted row into a part whose SourceSeq the dedup would
+// drop — silent loss — so those replayed parts are flagged DedupUnsafe and the
+// worker freezes. Never returns 0 (reserved for "no baseline recorded").
+func chunkTag(config *sql.Config) uint64 {
+	h := fnv.New64a()
+	var buf [8]byte
+	binary.LittleEndian.PutUint64(buf[:], uint64(sql.TxnSoftFlushBytes)) //nolint:gosec // G115: budget is a positive byte count
+	_, _ = h.Write(buf[:])
+	binary.LittleEndian.PutUint64(buf[:], chunkRenderingVersion)
+	_, _ = h.Write(buf[:])
+	if config != nil {
+		for _, m := range config.Mappings {
+			_, _ = h.Write([]byte(m.JsonName))
+			_, _ = h.Write([]byte{0})
+			_, _ = h.Write([]byte(m.SQLColumn))
+			_, _ = h.Write([]byte{0})
+		}
+		_, _ = h.Write([]byte{0xff})
+		for _, pk := range config.PrimaryKey {
+			_, _ = h.Write([]byte(pk))
+			_, _ = h.Write([]byte{0})
+		}
+		if config.Type != nil {
+			_, _ = h.Write([]byte(config.Type.ID))
+		}
+	}
+	t := h.Sum64()
+	if t == 0 {
+		t = 1 // 0 is reserved for "no baseline" (pre-feature checkpoint)
+	}
+	return t
 }
 
 // snapshot performs a pure-SQL initial dump of all watched tables using

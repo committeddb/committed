@@ -22,6 +22,16 @@ message MySQLBinLogPosition {
     // a refresh-boundary marker at this epoch so a keyed sink sweeps rows left
     // at an older one. 0 means a pre-feature checkpoint (epoch-1 baseline).
     uint64 refresh_epoch = 5;
+    // chunk_tag fingerprints the inputs that determine how an oversized
+    // transaction is split into same-coordinate parts (the flush byte budget,
+    // the config's rendering, a binary rendering version). It is stamped on
+    // every checkpoint. On resume, if the current tag differs from the one
+    // recorded here, re-chunking a replayed same-coordinate multi-part
+    // transaction could shift a row across a part boundary and mis-drop it under
+    // SourceSeq dedup — so those replayed parts are flagged DedupUnsafe and the
+    // worker freezes rather than risk silent loss. 0 means a pre-feature
+    // checkpoint (no baseline → never trips). See mysql.go chunkTag.
+    uint64 chunk_tag = 6;
 }
 
 // PostgresPosition pairs the replication LSN with optional snapshot

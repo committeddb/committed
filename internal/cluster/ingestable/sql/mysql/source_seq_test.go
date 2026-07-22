@@ -83,7 +83,7 @@ func TestFlushPendingSubIndex(t *testing.T) {
 
 	flush := func() uint64 {
 		h.pending = []*cluster.Entity{{Key: []byte("k")}}
-		require.NoError(t, h.flushPending(context.Background()))
+		require.NoError(t, h.flushPending(context.Background(), false))
 		return (<-ch).SourceSeq
 	}
 

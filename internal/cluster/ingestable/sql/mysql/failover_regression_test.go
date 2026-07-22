@@ -37,7 +37,7 @@ func TestFlushPending_FlagsFailoverLineageRegression(t *testing.T) {
 		// Resumed from binlog.000047; now streaming binlog.000001 (a promoted
 		// replica). Its coordinate encodes below the old highwater.
 		h, ch := newHandler("binlog.000047", "binlog.000001")
-		require.NoError(t, h.flushPending(context.Background()))
+		require.NoError(t, h.flushPending(context.Background(), false))
 		p := <-ch
 		require.True(t, p.DedupUnsafe,
 			"a coordinate below the resume baseline must be flagged DedupUnsafe")
@@ -46,7 +46,7 @@ func TestFlushPending_FlagsFailoverLineageRegression(t *testing.T) {
 	t.Run("forward coordinate is not flagged", func(t *testing.T) {
 		// Same lineage, file rotated forward — the normal case.
 		h, ch := newHandler("binlog.000047", "binlog.000048")
-		require.NoError(t, h.flushPending(context.Background()))
+		require.NoError(t, h.flushPending(context.Background(), false))
 		p := <-ch
 		require.False(t, p.DedupUnsafe,
 			"a forward coordinate must not be flagged, or every ordinary flush would freeze")
@@ -56,7 +56,7 @@ func TestFlushPending_FlagsFailoverLineageRegression(t *testing.T) {
 		// An unparseable resume file name yields resumeFileNum 0 (dedup already
 		// disabled for such coordinates) — it must never trip the guard.
 		h, ch := newHandler("mysql-bin", "binlog.000001")
-		require.NoError(t, h.flushPending(context.Background()))
+		require.NoError(t, h.flushPending(context.Background(), false))
 		p := <-ch
 		require.False(t, p.DedupUnsafe, "no numeric baseline must never flag")
 	})
