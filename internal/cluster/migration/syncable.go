@@ -2,12 +2,19 @@ package migration
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/metrics"
 )
+
+// errTypeUnavailable marks a migration failure caused by the topic's latest
+// type not being resolvable (see migrateEntities). It is schema/timing-shaped —
+// it fails every entity of the topic identically, so the Sync wrappers classify
+// it TRANSIENT, not cluster.Permanent.
+var errTypeUnavailable = errors.New("migration: latest type unavailable")
 
 // Wrap returns a cluster.Syncable that transforms each proposal's
 // user-data entities through the migration chain from their stamped
@@ -18,8 +25,11 @@ import (
 // Wrap is the wal-layer hook for ModeAlwaysCurrent syncables. The
 // rest of the system (db.Sync, the worker loop, tests that don't care
 // about migration) sees a plain Syncable with the usual contract.
-// Migration failures are reported as cluster.Permanent errors so the
-// worker logs and skips the bad proposal rather than retrying.
+// Migration failures are classified per the egress rule: a type-unavailable
+// failure (schema/timing-shaped, every entity of the topic alike) stays
+// TRANSIENT so the worker wedges until the type resolves; a migration-program
+// failure on an entity is reported cluster.Permanent so the worker dead-letters
+// that proposal and moves on.
 //
 // m drives the committed.type.migration.duration histogram (recorded per
 // migrated entity, on success). Nil when metrics are disabled.
@@ -46,6 +56,11 @@ func (s *single) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldSna
 			// (permanently skipping) a valid proposal. A per-run TIMEOUT leaves the
 			// parent ctx live, so it still falls through to Permanent below.
 			return false, ctx.Err()
+		}
+		if errors.Is(err, errTypeUnavailable) {
+			// The topic's latest type isn't resolvable → every entity fails alike →
+			// TRANSIENT (wedge until it's available), not a per-entity dead-letter.
+			return false, err
 		}
 		return false, cluster.Permanent(err)
 	}
@@ -81,6 +96,9 @@ func (b *batchSyncable) SyncBatch(ctx context.Context, as []*cluster.Actual) (bo
 			if ctx.Err() != nil {
 				return false, ctx.Err() // shutdown/replace mid-migration — retry, don't dead-letter
 			}
+			if errors.Is(err, errTypeUnavailable) {
+				return false, err // topic's latest type unavailable → transient, wedge
+			}
 			return false, cluster.Permanent(err)
 		}
 		migrated[i] = &cluster.Actual{Index: a.Index, Entities: entities}
@@ -109,7 +127,14 @@ func migrateEntities(ctx context.Context, r Resolver, m *metrics.Metrics, es []*
 		}
 		latest, err := r.ResolveType(cluster.LatestTypeRef(e.ID))
 		if err != nil {
-			return nil, fmt.Errorf("resolve latest type %s: %w", e.ID, err)
+			// The latest type isn't resolvable. The ref is keyed on e.ID (the
+			// topic's type), never this entity's data/key, so this fails EVERY
+			// entity of the topic identically — a not-yet-replicated or a deleted
+			// type: schema/timing-shaped, not entry-specific. Per the egress
+			// classification rule (permanent ⟺ entry-specific) it must stay
+			// TRANSIENT — wedge until the type is available — not be dead-lettered.
+			// Mark it so the Sync wrappers keep it transient instead of Permanent.
+			return nil, fmt.Errorf("%w: resolve latest type %s: %w", errTypeUnavailable, e.ID, err)
 		}
 		if latest.Version <= e.Version {
 			out = append(out, e)
@@ -118,6 +143,15 @@ func migrateEntities(ctx context.Context, r Resolver, m *metrics.Metrics, es []*
 		start := time.Now()
 		data, err := Chain(ctx, r, e.ID, e.Version, latest.Version, e.Data)
 		if err != nil {
+			// KNOWN LIMITATION (ambiguous classification): unlike ResolveType above,
+			// Chain takes e.Data, so a failure here can be EITHER entry-specific (a
+			// malformed row this program can't transform → permanent is right) OR
+			// config-shaped (a broken/incompatible migration program that fails every
+			// row of that version-range → should be transient). They are
+			// indistinguishable at the failure point, so it stays Permanent (the same
+			// accepted asymmetry as Postgres 23502). The clean fix is config-time
+			// migration-program validation — see the 0.8 ticket
+			// classify-config-shaped-syncable-errors.
 			return nil, err
 		}
 		if m != nil {

@@ -347,6 +347,15 @@ func (c *Syncable) applyEntity(ctx context.Context, tx *sql.Tx, e *cluster.Entit
 		}
 		res, err := jsonpath.Get(path, jsonData)
 		if err != nil {
+			// KNOWN LIMITATION (ambiguous classification): a jsonpath.Get failure is
+			// EITHER entry-specific (the field is genuinely absent in THIS row →
+			// permanent is right) OR config-shaped (a wrong-for-the-whole-topic path,
+			// an operator typo, that fails EVERY row → should be transient). The path
+			// is evaluated per-row, not validated at config time, so the two are
+			// indistinguishable here and it stays Permanent (the same accepted
+			// asymmetry as Postgres 23502; the projection sink's jsonpath.Get sites
+			// share it). The clean fix is config-time jsonpath validation — see the
+			// 0.8 ticket classify-config-shaped-syncable-errors.
 			return cluster.Permanent(fmt.Errorf("jsonpath [%v]: %w", path, err))
 		}
 		// A typed payload carries JSON-native scalars; coerce each to the form
