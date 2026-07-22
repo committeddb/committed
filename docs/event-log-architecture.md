@@ -729,6 +729,32 @@ every snapshot install. Apply-path events remain the cheap steady-state
 increment; the reconcile is the fixpoint that makes their loss or reordering
 harmless.
 
+**The durability-watermark rule — every piece of durable applied state must be
+crash-safe by one of exactly two strategies: (1) written before the applied
+index advances *and* idempotent on replay, or (2) written atomically with the
+applied index. The applied index is the durability watermark; nothing durable
+may let the watermark move past it unless it satisfies one of those two.** A
+crash can strike between any two durable writes, and on restart `c.Applied` is
+set to the persisted applied index, so raft only re-delivers entries *above*
+it. State written *before* the watermark advances is therefore covered by
+re-delivery — but only if re-applying it is idempotent (keyed last-writer-wins,
+monotonic max, or a replay guard such as the per-id raft-index guard on
+versioned config; see the config-version allocator). State that cannot be made
+idempotent-on-replay, or whose re-delivery is suppressed, must instead be
+written in the *same* bbolt transaction as the applied index, so the two are
+atomically all-or-nothing. Almost all applied state takes strategy (1) — it is
+written inside the apply path, before `saveAppliedIndex`, and its handlers are
+idempotent. The raft membership `ConfState` is the one piece that needed
+strategy (2): it is produced out of band (raft's Ready loop, via
+`node.ApplyConfChange`) and its re-delivery is suppressed by `c.Applied`, so it
+is staged by `ConfState()` and flushed to `confStateBucket` in the same
+transaction as `appliedIndex` (see `saveAppliedIndex`). The violation this rule
+names — durable state that lagged the watermark and was neither idempotent nor
+atomic — was `confstate-lost-in-crash-window`: `ConfState` persisted lazily
+(`snapDirty` → next `Save`), after the applied index, so a crash restarted the
+node on a stale voter set. Adding new durable applied state means choosing (1)
+or (2) deliberately, never neither.
+
 A regression test, `wal.TestApplyDeterminism`
 (`internal/cluster/db/wal/determinism_test.go`), constructs three fresh
 `wal.Storage` instances on disjoint temp dirs, applies the same varied

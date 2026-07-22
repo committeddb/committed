@@ -208,3 +208,56 @@ func TestReaderWatermark_DoesNotSurfaceUnappliedEntry(t *testing.T) {
 	require.Len(t, a.Entities, 1)
 	require.Equal(t, "k", string(a.Entities[0].Key))
 }
+
+// TestApplyConformance_OutOfBandStateCrashReplay extends the harness to the
+// OUT-OF-BAND applied state produced by raft's conf-change apply (raft.go),
+// which runs outside the ApplyCommittedBatch entity path. It pins the
+// durability-watermark rule (docs/event-log-architecture.md) for both
+// strategies: the ConfState is staged before the batch and written ATOMICALLY
+// with the applied index (strategy 2); the peer URL is a keyed put written
+// before the index advances and idempotent on replay (strategy 1). Both must
+// be durable the instant the index passes the conf entry, and converge under
+// crash-replay.
+func TestApplyConformance_OutOfBandStateCrashReplay(t *testing.T) {
+	s := NewStorageWithParser(t, nil, parser.New())
+	defer s.Cleanup()
+
+	tp := &cluster.Type{ID: "oob", Name: "oob", Version: 1}
+	reg, err := cluster.NewUpsertTypeEntity(tp)
+	require.NoError(t, err)
+	saveEntity(t, reg, s, 1, 1)
+
+	cs := &pb.ConfState{Voters: []uint64{1}, Learners: []uint64{2}}
+	peerURL := []byte("http://127.0.0.1:2")
+
+	// Conf pre-pass: stage the ConfState and persist the peer URL BEFORE the
+	// batch that advances the applied index past the conf entry.
+	s.ConfState(cs)
+	require.NoError(t, s.PutMemberPeerURL(2, peerURL))
+
+	ents := buildEntries(t, []*cluster.Entity{cluster.NewUpsertEntity(tp, []byte("k"), []byte("v"))}, 2)
+	require.NoError(t, s.Save(&defaultHardState, ents, &defaultSnap))
+	require.NoError(t, s.ApplyCommittedBatch(ents))
+
+	// Durable (in confStateBucket), not merely in the in-memory snapshot copy.
+	dcs := s.DurableConfStateForTest()
+	require.NotNil(t, dcs, "ConfState must be durable after the applied index passed the conf entry")
+	require.Equal(t, []uint64{2}, dcs.GetLearners())
+	require.Contains(t, s.MemberPeerURLs(), uint64(2))
+
+	// Crash-replay: raft re-delivers the conf, so re-stage (as applyConfChange
+	// would) and re-apply. Out-of-band state must CONVERGE — survive, not be
+	// lost or duplicated.
+	require.NoError(t, s.SetAppliedIndexForTest(1))
+	s.ConfState(cs)
+	require.NoError(t, s.PutMemberPeerURL(2, peerURL))
+	require.NoError(t, s.ApplyCommittedBatch(ents))
+
+	dcs2 := s.DurableConfStateForTest()
+	require.NotNil(t, dcs2)
+	require.Equal(t, []uint64{2}, dcs2.GetLearners(), "ConfState must survive crash-replay")
+	require.Equal(t, []uint64{1}, dcs2.GetVoters())
+	urls := s.MemberPeerURLs()
+	require.Len(t, urls, 1, "peer URL must be idempotent across replay (no duplicate)")
+	require.Contains(t, urls, uint64(2))
+}

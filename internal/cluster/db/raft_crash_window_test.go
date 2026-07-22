@@ -113,3 +113,39 @@ func TestRaftRestart_CrashWindowGapWithLargeTail(t *testing.T) {
 	require.Eventually(t, func() bool { return s2.AppliedIndex() >= N }, 3*time.Second, 5*time.Millisecond,
 		"restart replay must close the applied/event gap and advance appliedIndex to >= N")
 }
+
+// TestRaftRestart_LearnerMembershipSurvivesRestart drives a membership change
+// through the REAL Ready loop and confirms the out-of-band durable state it
+// produces survives a restart — the raft-loop half of the durability-watermark
+// rule (docs/event-log-architecture.md). AddLearner runs the conf pre-pass
+// (applyConfChange stages the ConfState and persists the peer URL) before
+// ApplyCommittedBatch writes the ConfState atomically with the applied index,
+// so both are durable once the applied index passes the conf entry. A learner
+// (not a voter) is used so the change commits on a single node without needing
+// the phantom peer's vote to leave the joint config.
+func TestRaftRestart_LearnerMembershipSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	p := parser.New()
+
+	s, err := wal.Open(dir, p, nil, nil, wal.WithoutFsync())
+	require.NoError(t, err)
+	d := db.New(1, db.Peers{1: ""}, s, p, nil, nil, db.WithTickInterval(testTickInterval))
+	require.Eventually(t, func() bool { return d.Leader() == 1 }, 5*time.Second, 5*time.Millisecond)
+
+	const peerURL = "http://127.0.0.1:29321"
+	require.NoError(t, d.AddLearner(testCtx(t), 2, peerURL))
+	require.Eventually(t, func() bool { _, ok := s.MemberPeerURLs()[2]; return ok },
+		5*time.Second, 5*time.Millisecond, "learner-add must commit + apply")
+
+	require.NoError(t, d.Close())
+	require.NoError(t, s.Close())
+
+	s2, err := wal.Open(dir, p, nil, nil, wal.WithoutFsync())
+	require.NoError(t, err)
+	defer s2.Close()
+	_, cs, err := s2.InitialState()
+	require.NoError(t, err)
+	require.Contains(t, cs.GetLearners(), uint64(2), "learner membership must survive restart")
+	require.Contains(t, cs.GetVoters(), uint64(1))
+	require.Contains(t, s2.MemberPeerURLs(), uint64(2), "peer URL must survive restart")
+}

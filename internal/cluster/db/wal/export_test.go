@@ -306,3 +306,11 @@ func (s *Storage) ApplyFsyncOpsForTest() (eventLogWrites, appliedIndexPersists i
 func (s *Storage) AppendEventsForTest(entries []*pb.Entry) error {
 	return s.appendEvents(entries)
 }
+
+// DurableConfStateForTest returns the ConfState written to confStateBucket
+// (atomically with appliedIndex), or nil if none — distinct from InitialState,
+// which falls back to the in-memory snapshot metadata. A test asserting the
+// ConfState is CRASH-SAFE (not merely in memory) must check this.
+func (s *Storage) DurableConfStateForTest() *pb.ConfState {
+	return s.durableConfState()
+}
