@@ -171,19 +171,27 @@ always "if I am wrong here, what breaks, and can I recover?"
 
 ## Architecture overview
 
-### Three storage tiers
+### Four storage tiers
 
-A Committed node has three storage tiers, each with very different
-characteristics:
+A Committed node keeps four durable stores, each with very different
+characteristics. Where the distinction doesn't matter, the rest of this document
+says "the raft log" for the two raft-plumbing stores together; see
+[storage-architecture.md](storage-architecture.md) for why raft persistence is
+two logs, not one.
 
 | Tier                  | Purpose                          | Retention                   | Size       | Compactable?       |
 |-----------------------|----------------------------------|-----------------------------|------------|--------------------|
-| Raft log              | Consensus transport              | 10GB or 1hr (whichever first) | Bounded    | Yes (aggressively) |
-| Permanent event log   | Application events; product output | Infinite (modulo deletes) | TB scale   | No (only via deletes) |
-| Metadata buckets (bbolt) | Type/database/syncable/ingestable definitions | Lifetime of cluster | MB scale | Snapshottable    |
+| Raft entry log (`raft/log`) | Consensus transport        | 10GB or 1hr (whichever first) | Bounded    | Yes (aggressively) |
+| Raft state (`raft/state`) | Node-local raft `HardState` (term/vote/commit) + snapshot metadata | Latest-wins (a handful of records) | KB scale | Latest-wins re-anchor |
+| Permanent event log (`events`) | Application events; product output | Infinite (modulo deletes) | TB scale   | No (only via deletes) |
+| Metadata buckets (`metadata`, bbolt) | Applied state: applied index, `ConfState` (membership), versioned type/database/syncable/ingestable configs, ingest/sync positions, dead-letters | Lifetime of cluster | MB scale | Snapshottable |
 
-Roughly: the raft log is the "now", the permanent event log is the
-"forever", and the metadata buckets are the "control plane."
+Roughly: the raft entry log is the "now", the raft state is the node's private
+consensus bookkeeping, the permanent event log is the "forever", and the
+metadata buckets are the "control plane." The two raft stores are separated
+because `HardState` is node-local and must survive a snapshot install, while the
+entry log is replicated and compactable — a split explained in full in
+[storage-architecture.md](storage-architecture.md).
 
 ### Proposals and Actuals
 
@@ -249,10 +257,10 @@ committed entry" call.
 <datadir>/
 ├── raft/
 │   ├── log/         # raft consensus log; bounded ~10GB; tidwall/wal
-│   └── state/       # HardState + ConfState (currently state-log/)
+│   └── state/       # node-local raft HardState + snapshot metadata; tidwall/wal
 ├── events/          # permanent event log; infinite retention; terabytes
 └── metadata/
-    └── bbolt.db     # types, databases, ingestables, syncables, syncableIndex, appliedIndex
+    └── bbolt.db     # appliedIndex, confState (membership), types, databases, ingestables, syncables, syncableIndex
 ```
 
 `events/` at the top level makes the rebuild story trivial to explain and
