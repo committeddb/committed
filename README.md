@@ -24,7 +24,7 @@ Committed is specifically NOT a databse designed for querying.
 
 The 0.7 line grows SQL projections into a full **read-model engine** and makes
 change-data-capture **observable and failover-safe**, then hardens the entire
-write, CDC, and compliance surface across three betas. It keeps 0.6's core —
+write, CDC, and compliance surface across four betas. It keeps 0.6's core —
 entity kinds, declarative SQL projections, learner-based cluster growth,
 leader-proxied membership, and disk-pressure admission control. Highlights by
 release:
@@ -71,6 +71,26 @@ release:
   Spatial/`VECTOR` columns, which have no lossless form, are rejected loudly at
   config time rather than silently corrupted.
 
+**0.7.3 — durability & control-plane hardening**
+
+- The storage design is formalized into an explicit **spine** — one source of
+  truth, one central invariant (the applied index is the durability watermark),
+  and the disciplines that uphold it — and the code is audited against it. Crash-
+  window gaps close: raft `ConfState` now persists atomically with the applied
+  index, a right-to-be-forgotten erasure **always completes** (its physical
+  compaction is durably re-driven even if disk-full or a crash interrupts it), and
+  event-log bookkeeping is idempotent on replay.
+- **Egress classified by row, not transport** — a syncable dead-letters a proposal
+  only when the failure is specific to that row's data; auth, routing, request-
+  shape, and schema errors that would reject *every* row now **wedge visibly** for
+  an operator instead of silently dead-lettering good data. A wedged syncable
+  stays visible and skippable across a leader change or a restart.
+- Ingest never advances a position past unacknowledged data, and a source failover
+  or an oversized-transaction re-chunk **freezes rather than dropping or
+  duplicating** rows; schema-qualified MySQL tables and FLOAT/DOUBLE parity land
+  too. **Multi-node 0.7.2 → 0.7.3 is a full-stop upgrade** (see
+  [upgrade.md](docs/operations/upgrade.md)).
+
 ### Concepts
 
 - **Type** — schema/metadata for a topic's payload. Identified by ID;
@@ -112,10 +132,10 @@ under `/home/nonroot/data`:
 ```sh
 docker run --rm -p 8080:8080 -p 9022:9022 \
   -v committed-data:/home/nonroot/data \
-  committeddb/committed:0.7.2-beta
+  committeddb/committed:0.7.3-beta
 ```
 
-`docker run committeddb/committed:0.7.2-beta --version` prints the build
+`docker run committeddb/committed:0.7.3-beta --version` prints the build
 identity; `:latest` tracks the most recent release. See
 [Configuration](#configuration) for the env vars and `docker-compose.yml`
 for a local single-node setup.
