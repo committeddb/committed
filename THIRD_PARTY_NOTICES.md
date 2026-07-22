@@ -6047,7 +6047,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ```
 
-## google.golang.org/grpc v1.81.1
+## google.golang.org/grpc v1.82.1
 
 ```
 
