@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	bolt "go.etcd.io/bbolt"
+	"go.uber.org/zap"
 
 	"github.com/committeddb/committed/internal/cluster"
 )
@@ -42,6 +43,35 @@ func (s *Storage) handleSyncableStuck(e *cluster.Entity, _ uint64) error {
 		s.metrics.SetSyncStuck(id, present)
 	}
 	return nil
+}
+
+// refreshSyncStuckGauges re-derives the committed.sync.stuck gauge for every
+// syncable that has an applied stuck record. handleSyncableStuck derives the
+// gauge on the APPLY path — but apply does not run for entries already applied
+// before a restart (replay skips <= appliedIndex), nor for a snapshot install
+// (RestoreSnapshot bulk-swaps bbolt without running any entity handler). Without
+// this, a node that restarts or receives a snapshot while a syncable is stuck
+// reads the gauge as 0/unset even though the durable record says stuck, so a
+// sustained-1 alert silently never fires. Called at Open and after a snapshot
+// restore. Ids with no record need no action — the gauge defaults to unset and
+// the apply path sets it to 0 on the clearing delete.
+func (s *Storage) refreshSyncStuckGauges() {
+	if s.metrics == nil {
+		return
+	}
+	err := s.view(func(tx *bolt.Tx) error {
+		b := tx.Bucket(syncableStuckBucket)
+		if b == nil {
+			return nil
+		}
+		return b.ForEach(func(k, _ []byte) error {
+			s.metrics.SetSyncStuck(string(k), true)
+			return nil
+		})
+	})
+	if err != nil {
+		s.logger.Warn("refresh sync-stuck gauges", zap.Error(err))
+	}
 }
 
 // SyncableStuck returns the syncable's current stuck record, or ok=false if

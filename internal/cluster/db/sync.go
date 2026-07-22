@@ -442,6 +442,14 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 			retryActual = nil
 			lastSeen, lastBumped = 0, 0
 			pendingCount = 0
+			// Re-derive the tracker from the applied record. This worker goroutine
+			// outlives a leadership flap, so its in-memory published/index can be
+			// stale (another node cleared or re-indexed the record while we idled).
+			// resync adopts a present record and resets on an absent one, so a
+			// genuine re-wedge re-publishes instead of being suppressed as already-
+			// published — see stuckTracker.resync. This is NOT a clear: the record
+			// itself is untouched, so a still-stuck syncable never flaps.
+			tracker.resync()
 			// Do NOT clear the stuck record on startup. A replacement/restart
 			// worker adopts any replicated SyncableStuck record (published=true);
 			// clearing here would DELETE it before the worker re-tries the wedge,
@@ -797,6 +805,10 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 			isNode = true
 			batch = batch[:0]
 			retryBatch = false
+			// Re-derive the tracker from the applied record — the worker outlives a
+			// leadership flap, so its in-memory published/index can be stale. See
+			// the single-flush worker's start branch and stuckTracker.resync.
+			tracker.resync()
 			// Do NOT clear the stuck record on startup — the adopted record must
 			// survive until genuine progress past the wedge, or a still-stuck
 			// replacement flaps it. See the single-flush worker's start branch.

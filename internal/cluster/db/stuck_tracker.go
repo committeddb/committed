@@ -31,28 +31,48 @@ type stuckTracker struct {
 }
 
 // newStuckTracker builds a worker's stuck tracker, ADOPTING any replicated
-// SyncableStuck record already present for id. Without adoption a replacement
-// worker (after a config re-POST — the natural fix for a rotated webhook token,
-// now that auth failures are transient — or a restart) starts with
-// published=false, so its first successful sync's cleared() would skip deleting
-// the replicated record, leaving stuck:true latched forever on a healthy
-// syncable (and the manual dead-letter endpoint acting on a stale record).
-// Adoption keys the clear on the REPLICATED record, not this instance's memory
-// (the companion determinism rule): the new tracker takes over the record so
-// the next progress clears it, and a re-wedge at the same index leaves it in
-// place rather than re-proposing.
+// SyncableStuck record already present for id (via resync). Without adoption a
+// replacement worker (after a config re-POST — the natural fix for a rotated
+// webhook token, now that auth failures are transient — or a restart) starts
+// with published=false, so its first successful sync's cleared() would skip
+// deleting the replicated record, leaving stuck:true latched forever on a
+// healthy syncable (and the manual dead-letter endpoint acting on a stale
+// record). Adoption keys the clear on the REPLICATED record, not this
+// instance's memory (the companion determinism rule).
 func (db *DB) newStuckTracker(id string) *stuckTracker {
 	t := &stuckTracker{db: db, id: id}
-	if rec, ok, err := db.storage.SyncableStuck(id); err == nil && ok {
+	t.resync()
+	return t
+}
+
+// resync re-derives the tracker's local debounce memory (published/index/since)
+// from the applied SyncableStuck record — the companion-determinism rule made
+// repeatable. It runs at construction AND on every leadership GAIN, because the
+// sync worker goroutine OUTLIVES a raft leadership flap (it toggles isNode; it
+// does not exit and rebuild the tracker). Across a flap the worker's in-memory
+// published/index can go stale against the replicated record: another node that
+// held leadership may have durably CLEARED the record (it made progress past the
+// wedge), or published it at a DIFFERENT index. Trusting the stale memory let
+// wedged() early-return on published and never re-publish a genuine re-wedge —
+// stranding the syncable stuck-but-invisible (no record, gauge 0, and the
+// operator's skip/dead-letter lever 409ing). Re-deriving from applied state on
+// every gain fixes that: record present ⇒ adopt it (a re-wedge at the same index
+// is then idempotent — no flap), absent ⇒ reset (a re-wedge re-publishes). A
+// read error resets too, so a failed probe re-publishes rather than latching
+// stale. The gauge is NOT toggled here — it is derived from the applied record
+// on every node by handleSyncableStuck, so an adopting worker (and every
+// follower) already reflects it; toggling it here is what latched it at 1 on
+// followers.
+func (t *stuckTracker) resync() {
+	if rec, ok, err := t.db.storage.SyncableStuck(t.id); err == nil && ok {
 		t.published = true
 		t.index = rec.Index
 		t.since = time.Unix(0, rec.SinceUnixNano)
-		// The gauge is NOT set here: it is derived from the applied SyncableStuck
-		// record on every node (handleSyncableStuck), so an adopting worker — and
-		// every follower — already reflects it. Toggling it here is what latched
-		// it at 1 on followers.
+		return
 	}
-	return t
+	t.published = false
+	t.index = 0
+	t.since = time.Time{}
 }
 
 // wedged is called on every transient failure of the proposal at `index`. It

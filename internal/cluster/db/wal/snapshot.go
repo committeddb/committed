@@ -386,6 +386,10 @@ func (s *Storage) refreshAfterRestore() {
 	if err := s.validateConfigSecrets(); err != nil {
 		s.logger.Warn("restore: validate config secrets", zap.Error(err))
 	}
+	// The swapped-in bbolt may carry stuck records the apply path never ran
+	// handlers for (a snapshot install bulk-swaps bbolt), so re-derive the
+	// sync-stuck gauge from them. See refreshSyncStuckGauges.
+	s.refreshSyncStuckGauges()
 	s.RequestSyncReconcile()
 	s.RequestIngestReconcile()
 }

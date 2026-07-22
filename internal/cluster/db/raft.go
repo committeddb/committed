@@ -389,6 +389,28 @@ func (n *Raft) reconcileTransportFromMembership() {
 // carries a single ConfChangeSingle and one shared Context. A hand-built
 // multi-add v2 would share that one Context across every add, which can't
 // express distinct URLs — not a concern for the paths we expose.
+// persistPeerURLOrFatal durably records a newly-added peer's raft URL. A write
+// failure here is FATAL, not logged-and-continued, because of WHERE it runs:
+// applyConfChange executes in the Ready loop BEFORE ApplyCommittedBatch advances
+// the durable applied index, and once the watermark passes the conf-change entry
+// raft's c.Applied SUPPRESSES its re-delivery. So a swallowed write error would
+// let the watermark move past a peer URL that is now permanently absent — the
+// exact durability-watermark violation that produced confstate-lost-in-crash-
+// window (docs/event-log-architecture.md § "The central invariant", Face 2). The
+// peer URL is out-of-band, re-delivery-suppressed state, so it owes strategy (2):
+// write it atomically with the applied index, or refuse to advance the watermark
+// past a lost write. Crashing does the latter — a restart finds the applied index
+// unadvanced, raft re-delivers the conf change, and this re-runs (PutMemberPeerURL
+// is idempotent LWW). Matches the fatal-on-disk-error posture ApplyCommittedBatch
+// itself takes. (The remove-path deletes stay best-effort: a stale entry for a
+// node that LEFT the configuration never surfaces in membership reads.)
+func (n *Raft) persistPeerURLOrFatal(peer uint64, rawURL []byte) {
+	if err := n.storage.PutMemberPeerURL(peer, rawURL); err != nil {
+		n.logger.Fatal("conf change: persist member peer url — refusing to advance the applied index past a lost peer URL (rebuild the node or fix the disk; see docs/operations/rebuild.md)",
+			zap.Uint64("peer", peer), zap.Error(err))
+	}
+}
+
 func (n *Raft) applyConfChange(cc raftpb.ConfChangeI, ccCtx []byte) {
 	cs := n.node.ApplyConfChange(cc)
 	n.storage.ConfState(cs)
@@ -413,10 +435,7 @@ func (n *Raft) applyConfChange(cc raftpb.ConfChangeI, ccCtx []byte) {
 			// restart or snapshot install reconciles the transport from this
 			// bucket instead of the stale static COMMITTED_PEERS set (raft's
 			// ConfState replicates the member id only, never the address).
-			if err := n.storage.PutMemberPeerURL(ch.GetNodeId(), ccCtx); err != nil {
-				n.logger.Error("conf change: persist member peer url",
-					zap.Uint64("peer", ch.GetNodeId()), zap.Error(err))
-			}
+			n.persistPeerURLOrFatal(ch.GetNodeId(), ccCtx)
 			if err := n.transport.AddPeer(raft.Peer{ID: ch.GetNodeId(), Context: ccCtx}); err != nil {
 				n.logger.Error("conf change: add peer to transport",
 					zap.Uint64("peer", ch.GetNodeId()), zap.Error(err))

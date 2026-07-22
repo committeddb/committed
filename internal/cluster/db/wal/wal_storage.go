@@ -827,6 +827,13 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	ws.lastScrubbedBound.Store(completed)
 	go ws.scrubWorker()
 
+	// Re-derive the sync-stuck gauge from any applied stuck records. The apply
+	// path (handleSyncableStuck) is what normally sets it, but it doesn't run for
+	// entries already applied before this restart (replay skips <= appliedIndex),
+	// so a syncable that was stuck at shutdown would otherwise read 0 until it
+	// next makes progress. See refreshSyncStuckGauges.
+	ws.refreshSyncStuckGauges()
+
 	return ws, nil
 }
 

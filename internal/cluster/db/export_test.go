@@ -7,9 +7,23 @@ import (
 
 	"go.etcd.io/raft/v3"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 
 	"github.com/committeddb/committed/internal/cluster"
 )
+
+// NewRaftWithPanicFatalForTest builds a bare Raft wired with a panic-on-fatal
+// logger and the given storage — enough to exercise persistPeerURLOrFatal
+// without a running raft node. See TestPersistPeerURL_FatalOnWriteError.
+func NewRaftWithPanicFatalForTest(storage Storage) *Raft {
+	return &Raft{storage: storage, logger: zap.New(zapcore.NewNopCore(), zap.WithFatalHook(panicOnFatal{}))}
+}
+
+// PersistPeerURLOrFatalForTest exposes persistPeerURLOrFatal for the
+// durability-watermark red-proof (#2).
+func (n *Raft) PersistPeerURLOrFatalForTest(peer uint64, rawURL []byte) {
+	n.persistPeerURLOrFatal(peer, rawURL)
+}
 
 // MemberVersionForTest reports the feature level node id announced (and whether
 // one is known), reading the same replicated bucket the gate does. Lets a test
@@ -56,6 +70,23 @@ func (db *DB) InjectWedgedSyncWorkerForTest(id string) {
 	db.workersMu.Lock()
 	db.syncWorkers[id] = &workerHandle{cancel: func() {}, done: make(chan struct{})}
 	db.workersMu.Unlock()
+}
+
+// StuckTrackerPublishedAfterGainForTest models the sync worker's leadership-GAIN
+// re-derivation for id: it builds the worker's tracker (adopting any applied
+// record), marks it as though this worker had published `index` before a
+// leadership flap, then runs the same resync() the gain branch runs. It returns
+// whether the tracker still believes it has published. Executable guard for the
+// leadership-flap staleness fix: with the record absent (a former leader cleared
+// it during the flap), the re-derivation must reset published to false so a
+// re-wedge re-publishes instead of being suppressed as already-published.
+func (db *DB) StuckTrackerPublishedAfterGainForTest(id string, index uint64) bool {
+	t := db.newStuckTracker(id)
+	t.published = true
+	t.index = index
+	t.since = time.Unix(1, 0)
+	t.resync()
+	return t.published
 }
 
 // DeleteSyncForTest drives the apply-path syncable teardown directly

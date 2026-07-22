@@ -122,6 +122,92 @@ func TestStuckRecordConformance_StillStuckReplacementKeepsRecord(t *testing.T) {
 		"a still-stuck replacement must keep the adopted record continuously (no delete-on-startup flap)")
 }
 
+// TestStuckTrackerConformance_LeadershipGainResyncsFromRecord pins Tier-1 #1: the
+// sync worker's tracker re-derives its published/index memory from the applied
+// SyncableStuck record on every leadership GAIN, because the worker goroutine
+// OUTLIVES a raft leadership flap (it toggles isNode, it does not rebuild the
+// tracker). Before the fix the gain branch left the in-memory published flag
+// untouched, so a worker that had published at index N and then — across a flap
+// — saw another node clear the record kept published=true and, via wedged()'s
+// early-return, never re-published a genuine re-wedge: the syncable stranded
+// stuck-but-invisible (no record, gauge 0, and DeadLetterStuckSyncable 409ing).
+// Record absent ⇒ gain resets published so a re-wedge re-publishes; record
+// present ⇒ gain re-adopts it (no delete→re-publish flap).
+func TestStuckTrackerConformance_LeadershipGainResyncsFromRecord(t *testing.T) {
+	d, s := newWalDBStuck(t)
+	id := "flap-resync"
+	seedSyncableConfig(t, d, id)
+
+	// Record ABSENT (a former leader cleared it during the flap): gain must
+	// re-derive published=false so a genuine re-wedge re-publishes.
+	require.False(t, d.StuckTrackerPublishedAfterGainForTest(id, 7),
+		"leadership gain with the record absent must re-derive published=false (else the syncable stalls stuck-but-invisible)")
+
+	// Record PRESENT: publish a real record via a wedged worker, then a gain must
+	// re-adopt it — published stays true so a re-wedge at the same index is
+	// idempotent (no delete→re-publish flap).
+	seedUserProposals(t, d, s, "evt", []string{"poison"})
+	require.NoError(t, d.Sync(context.Background(), id,
+		&transientSyncable{stuck: map[string]bool{"poison": true}, transientErr: fmt.Errorf("boom")}))
+	var recIndex uint64
+	require.Eventually(t, func() bool {
+		rec, ok, _ := d.SyncableStuck(id)
+		recIndex = rec.Index
+		return ok
+	}, 10*time.Second, 10*time.Millisecond, "worker must publish the stuck record")
+	require.True(t, d.StuckTrackerPublishedAfterGainForTest(id, recIndex),
+		"leadership gain with the record present must re-adopt it (published stays true)")
+}
+
+// TestStuckGaugeConformance_ReDerivedOnRestart pins Tier-1 #3: the
+// committed.sync.stuck gauge is derived on the APPLY path (handleSyncableStuck),
+// which does NOT run for entries already applied before a restart (replay skips
+// <= appliedIndex) nor for a snapshot install. So a node that restarts while a
+// syncable is stuck would read the gauge as 0/absent even though the durable
+// record says stuck, silently defeating a sustained-1 alert. The fix re-derives
+// the gauge from the persisted stuck records at Open (and after a snapshot
+// restore). This test wedges a worker so the record is durably applied, closes
+// the process, then re-opens the SAME data dir with FRESH metrics and asserts the
+// gauge is re-derived to 1 with no worker running.
+func TestStuckGaugeConformance_ReDerivedOnRestart(t *testing.T) {
+	dir := t.TempDir()
+	p := parser.New()
+	id := "gauge-restart"
+
+	// First process: wedge a worker so a stuck record is durably applied.
+	reader1 := sdkmetric.NewManualReader()
+	prov1 := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader1))
+	m1 := metrics.New(prov1.Meter("test"))
+	s1, err := wal.Open(dir, p, nil, nil, wal.WithoutFsync(), wal.WithMetrics(m1))
+	require.NoError(t, err)
+	d1 := db.New(uint64(1), db.Peers{1: ""}, s1, p, nil, nil,
+		db.WithTickInterval(testTickInterval), db.WithMetrics(m1),
+		db.WithSyncStuckThreshold(50*time.Millisecond))
+	seedSyncableConfig(t, d1, id)
+	seedUserProposals(t, d1, s1, "evt", []string{"poison"})
+	require.NoError(t, d1.Sync(context.Background(), id,
+		&transientSyncable{stuck: map[string]bool{"poison": true}, transientErr: fmt.Errorf("boom")}))
+	require.Eventually(t, func() bool { return syncStuckGauge(t, reader1, id) == 1.0 },
+		10*time.Second, 10*time.Millisecond, "worker must publish the stuck record and light the gauge")
+	require.NoError(t, d1.Close())
+	require.NoError(t, s1.Close())
+	_ = prov1.Shutdown(context.Background())
+
+	// Restart: re-open the SAME dir with FRESH metrics and NO worker. The stuck
+	// record and appliedIndex persist, so replay skips the stuck entity's apply —
+	// the gauge must be re-derived from the durable record at Open, not left at 0.
+	reader2 := sdkmetric.NewManualReader()
+	prov2 := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader2))
+	t.Cleanup(func() { _ = prov2.Shutdown(context.Background()) })
+	m2 := metrics.New(prov2.Meter("test"))
+	s2, err := wal.Open(dir, p, nil, nil, wal.WithoutFsync(), wal.WithMetrics(m2))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s2.Close() })
+
+	require.Equal(t, 1.0, syncStuckGauge(t, reader2, id),
+		"after a restart the stuck gauge must be re-derived to 1 from the persisted record (apply is skipped on replay)")
+}
+
 // TestStuckGaugeConformance_DerivedFromAppliedRecord pins round-8 #4: the
 // committed.sync.stuck gauge is DERIVED from the applied SyncableStuck record on
 // the apply path (handleSyncableStuck) — set when the record applies, cleared
