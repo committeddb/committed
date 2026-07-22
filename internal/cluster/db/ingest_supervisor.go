@@ -1,6 +1,7 @@
 package db
 
 import (
+	"bytes"
 	"math/rand/v2"
 	"time"
 
@@ -27,19 +28,21 @@ const (
 	defaultIngestSupervisorInitialBackoff = 100 * time.Millisecond
 	defaultIngestSupervisorMaxBackoff     = 30 * time.Second
 	defaultIngestSupervisorMaxAttempts    = 20
-	defaultIngestSupervisorHealthyWindow  = 60 * time.Second
 )
 
 // ingestSupervisorState tracks consecutive freeze-restart cycles for a
-// single ingestable id. A freeze observed within
-// ingestSupervisorHealthyWindow of the previous one counts as
-// consecutive and grows the backoff; a longer gap means the restarted
-// worker ran healthy long enough to reset the counter. giveup is set
-// once the supervisor has declared the id unrecoverable so subsequent
-// freezes (e.g., if an operator replaces the config later) don't
-// silently carry forward old state forever.
+// single ingestable id. Consecutiveness is keyed on the durable resume
+// POSITION at freeze time, not wall-clock: a freeze at the same position is
+// the same poison proposal re-read (a >cap row, a persistently-orphaned
+// transaction) and counts consecutive no matter how long the re-read took;
+// a freeze at an advanced position means the worker made real progress and
+// resets the run. This is the sync breaker's distinct-entry keying inverted
+// (there, distinct entries are the systematic signal; here, the SAME position
+// is). Keying on wall-clock instead let a poison row whose restart cycle
+// exceeded the healthy window reset every time and churn forever without ever
+// reaching give-up.
 type ingestSupervisorState struct {
-	lastFreezeAt       time.Time
+	lastFreezePosition cluster.Position
 	consecutiveFreezes int
 	backoff            time.Duration
 }
@@ -51,10 +54,10 @@ type ingestSupervisorState struct {
 //
 // Behavior:
 //
-//   - Records the freeze in the per-id state map; resets the
-//     consecutive counter if the gap since the last freeze exceeds
-//     ingestSupervisorHealthyWindow (the worker ran cleanly long enough
-//     that this flap is "new", not a continuation).
+//   - Records the freeze in the per-id state map, keyed on the durable
+//     resume position; resets the consecutive counter only when that
+//     position has advanced since the last freeze (real progress — this
+//     flap is "new", not the same poison proposal re-read).
 //   - Gives up + emits IngestSupervisorGiveup once the consecutive
 //     count exceeds ingestSupervisorMaxAttempts. The worker stays
 //     parked; operator intervention is required.
@@ -68,17 +71,23 @@ type ingestSupervisorState struct {
 //     supervisor's replacement without releasing the lock. A user
 //     replace that arrives after the unlock still wins the final
 //     state via db.Ingest's own replacement loop.
-//   - On successful install, clears the frozen gauge and bumps the
-//     IngestRestart counter.
+//   - On successful install, bumps the IngestRestart counter. It does
+//     NOT clear the frozen gauge — a restart is not recovery; the worker
+//     clears it only once it makes real progress past the freeze position.
 func (db *DB) superviseRestartIngest(id string, i cluster.Ingestable, frozen *workerHandle) {
 	if db.afterIngestSupervisorAttemptForTest != nil {
 		defer db.afterIngestSupervisorAttemptForTest()
 	}
-	backoff, consecutive, giveup := db.recordFreezeAndNextBackoff(id)
+	// The durable resume position at freeze time keys consecutiveness and locates
+	// the wedge for an operator. The frozen worker never advanced past it, so it
+	// is the same across re-reads of a poison proposal.
+	pos := db.storage.Position(id)
+	backoff, consecutive, giveup := db.recordFreezeAndNextBackoff(id, pos)
 	if giveup {
-		db.logger.Error("ingest supervisor giving up after repeated freezes",
+		db.logger.Error("ingest supervisor giving up after repeated freezes at the same resume position — the worker is wedged on a proposal it cannot commit (most often a single row or transaction over COMMITTED_MAX_PROPOSAL_BYTES; see the freeze warnings above for its SourceSeq/coordinate). It stays parked until an operator intervenes: raise the cap and restart, or fix the source",
 			zap.String("id", id),
-			zap.Int("consecutive_freezes", consecutive))
+			zap.Int("consecutive_freezes", consecutive),
+			zap.Binary("stuck_position", pos))
 		if db.metrics != nil {
 			db.metrics.IngestSupervisorGiveup(id)
 		}
@@ -136,22 +145,27 @@ func (db *DB) superviseRestartIngest(id string, i cluster.Ingestable, frozen *wo
 	db.spawnIngestWorkerLocked(id, i)
 	db.workersMu.Unlock()
 
+	// Do NOT clear the frozen gauge here. A restart is not recovery — the worker
+	// re-reads to the same poison proposal and freezes again, so clearing on
+	// restart made the gauge flap 1→0→1 and defeated any sustained-1 alert. The
+	// worker clears it only once it makes real progress past the freeze position
+	// (see db.ingest's position-advance clear). SetWorkerRunning is fine — the
+	// goroutine really is running again.
 	if db.metrics != nil {
 		db.metrics.SetWorkerRunning("ingest", id, true)
-		db.metrics.IngestFrozen(id, false)
 		db.metrics.IngestRestart(id)
 	}
 }
 
-// recordFreezeAndNextBackoff bumps the consecutive-freeze counter for
-// id and returns the backoff to apply before the next restart. If the
-// gap since the previous freeze exceeds ingestSupervisorHealthyWindow
-// the counter is reset first — the worker ran cleanly long enough that
-// this flap is a fresh episode, not a continuation. Returns giveup =
-// true when the (post-increment) counter exceeds
-// ingestSupervisorMaxAttempts; callers surface the giveup metric and
-// skip the restart.
-func (db *DB) recordFreezeAndNextBackoff(id string) (backoff time.Duration, consecutive int, giveup bool) {
+// recordFreezeAndNextBackoff bumps the consecutive-freeze counter for id and
+// returns the backoff to apply before the next restart. pos is the durable
+// resume position at freeze time (db.storage.Position(id)): a freeze at the
+// SAME position as the previous is the same poison proposal re-read and grows
+// the run; a freeze at a DIFFERENT (advanced) position means the worker made
+// real progress and resets the run to a fresh episode. Returns giveup = true
+// when the (post-increment) counter exceeds ingestSupervisorMaxAttempts;
+// callers surface the giveup metric and skip the restart.
+func (db *DB) recordFreezeAndNextBackoff(id string, pos cluster.Position) (backoff time.Duration, consecutive int, giveup bool) {
 	db.ingestSupervisorMu.Lock()
 	defer db.ingestSupervisorMu.Unlock()
 
@@ -160,13 +174,16 @@ func (db *DB) recordFreezeAndNextBackoff(id string) (backoff time.Duration, cons
 		st = &ingestSupervisorState{backoff: db.ingestSupervisorInitialBackoff}
 		db.ingestSupervisorStates[id] = st
 	}
-	now := time.Now()
-	if !st.lastFreezeAt.IsZero() && now.Sub(st.lastFreezeAt) > db.ingestSupervisorHealthyWindow {
+	// Reset the run only on genuine progress — an advanced resume position.
+	// Wall-clock elapsed is NOT progress: a slow source or a snapshot re-read
+	// can take minutes to reach the same poison row, and resetting on that let
+	// the run churn forever without ever reaching give-up.
+	if st.consecutiveFreezes > 0 && !bytes.Equal(pos, st.lastFreezePosition) {
 		st.consecutiveFreezes = 0
 		st.backoff = db.ingestSupervisorInitialBackoff
 	}
 	st.consecutiveFreezes++
-	st.lastFreezeAt = now
+	st.lastFreezePosition = pos
 
 	if st.consecutiveFreezes > db.ingestSupervisorMaxAttempts {
 		return 0, st.consecutiveFreezes, true

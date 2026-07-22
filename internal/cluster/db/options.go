@@ -107,20 +107,18 @@ type options struct {
 	// COMMITTED_JOIN is truthy. See docs/operations/membership.md.
 	join bool
 
-	// ingestSupervisor{InitialBackoff,MaxBackoff,MaxAttempts,HealthyWindow}
-	// govern the auto-restart behavior when an ingest worker parks in the
-	// ErrProposalUnknown freeze branch. The supervisor waits backoff (starting
-	// at InitialBackoff, doubling on each successive freeze, capped at
-	// MaxBackoff) before re-registering the ingestable via db.Ingest. After
-	// MaxAttempts consecutive freezes within HealthyWindow the supervisor
-	// gives up and emits IngestSupervisorGiveup; any freeze-free run longer
-	// than HealthyWindow resets the counter so a fresh flap starts clean.
-	// Zero values mean "use package defaults" (see default* constants in
-	// db.go).
+	// ingestSupervisor{InitialBackoff,MaxBackoff,MaxAttempts} govern the
+	// auto-restart behavior when an ingest worker parks in a freeze branch. The
+	// supervisor waits backoff (starting at InitialBackoff, doubling on each
+	// successive freeze at the SAME resume position, capped at MaxBackoff)
+	// before re-registering the ingestable via db.Ingest. After MaxAttempts
+	// consecutive freezes at the same position the supervisor gives up and emits
+	// IngestSupervisorGiveup; a freeze at an advanced position (real progress)
+	// resets the run. Zero values mean "use package defaults" (see default*
+	// constants in ingest_supervisor.go).
 	ingestSupervisorInitialBackoff time.Duration
 	ingestSupervisorMaxBackoff     time.Duration
 	ingestSupervisorMaxAttempts    int
-	ingestSupervisorHealthyWindow  time.Duration
 
 	maxProposalBytes uint64
 
@@ -331,14 +329,6 @@ func WithIngestSupervisorMaxBackoff(d time.Duration) Option {
 // deadline.
 func WithIngestSupervisorMaxAttempts(n int) Option {
 	return func(o *options) { o.ingestSupervisorMaxAttempts = n }
-}
-
-// WithIngestSupervisorHealthyWindow controls how long an ingestable has
-// to run freeze-free before the supervisor considers the previous flap
-// sequence "resolved" and resets the consecutive-freeze counter.
-// Defaults to 60s.
-func WithIngestSupervisorHealthyWindow(d time.Duration) Option {
-	return func(o *options) { o.ingestSupervisorHealthyWindow = d }
 }
 
 // WithMaxProposalBytes overrides the marshaled-proposal size cap.

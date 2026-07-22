@@ -75,20 +75,26 @@ func TestIngest_SupervisorRestartsAfterFreeze(t *testing.T) {
 		"supervisor did not restart the ingestable within the deadline",
 	)
 
-	// Collect metrics and verify the frozen gauge flipped to 0 (i.e.,
-	// the supervisor's successful-restart path ran) and that the
-	// restart counter recorded the event.
+	// The restart counter recorded the event.
 	require.Eventually(t, func() bool {
 		var rm metricdata.ResourceMetrics
 		if err := reader.Collect(context.Background(), &rm); err != nil {
 			return false
 		}
-		frozen := findSupervisorGaugeForID(rm, "committed.ingest.frozen", id)
-		restart := findSupervisorCounterForID(rm, "committed.ingest.restarts", id)
-		return frozen == 0.0 && restart >= 1
+		return findSupervisorCounterForID(rm, "committed.ingest.restarts", id) >= 1
 	}, 5*time.Second, 25*time.Millisecond,
-		"expected frozen=0 and restarts>=1 for id=%s", id,
+		"expected restarts>=1 for id=%s", id,
 	)
+
+	// The frozen gauge must STAY 1 across the restart — the flap fix. A restart
+	// is not recovery; the gauge clears only on real progress past the freeze
+	// position, which the blocked-apply harness prevents here. (Pre-fix the
+	// supervisor cleared it on every restart, so it flapped 1→0→1 and no
+	// sustained-1 alert could fire.)
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	require.Equal(t, 1.0, findSupervisorGaugeForID(rm, "committed.ingest.frozen", id),
+		"frozen gauge must not flap to 0 on restart")
 
 	// Teardown: unblock raft's apply path so the restart worker's
 	// in-flight Propose can complete, then Close cleanly.
@@ -181,11 +187,13 @@ func TestIngestSupervisor_BackoffAndGiveup(t *testing.T) {
 		db.WithIngestSupervisorInitialBackoff(5*time.Millisecond),
 		db.WithIngestSupervisorMaxBackoff(40*time.Millisecond),
 		db.WithIngestSupervisorMaxAttempts(maxAttempts),
-		db.WithIngestSupervisorHealthyWindow(1*time.Hour),
 	)
 	t.Cleanup(func() { _ = d.Close() })
 
 	id := "bookkeeping-id"
+	// All freezes at the SAME position (a poison proposal re-read) — the run
+	// must climb to give-up regardless of wall-clock.
+	poison := cluster.Position("poison")
 
 	// First maxAttempts freezes: supervisor schedules a restart, not a
 	// giveup. Backoff doubles each time until it hits the max cap.
@@ -195,7 +203,7 @@ func TestIngestSupervisor_BackoffAndGiveup(t *testing.T) {
 		20 * time.Millisecond, // 3rd
 	}
 	for i, want := range expectedBackoffs {
-		backoff, consecutive, giveup := d.RecordFreezeAndNextBackoffForTest(id)
+		backoff, consecutive, giveup := d.RecordFreezeAndNextBackoffForTest(id, poison)
 		require.Falsef(t, giveup, "unexpected giveup at consecutive=%d", i+1)
 		require.Equal(t, i+1, consecutive)
 		require.Equal(t, want, backoff, "backoff ladder mismatch at consecutive=%d", i+1)
@@ -204,42 +212,43 @@ func TestIngestSupervisor_BackoffAndGiveup(t *testing.T) {
 	// (maxAttempts+1)th observation triggers giveup. Backoff value is
 	// irrelevant on giveup, but consecutive keeps climbing so operators
 	// can see in debug logs how deep the flap ran.
-	_, consecutive, giveup := d.RecordFreezeAndNextBackoffForTest(id)
+	_, consecutive, giveup := d.RecordFreezeAndNextBackoffForTest(id, poison)
 	require.True(t, giveup, "expected giveup at consecutive=%d", consecutive)
 	require.Equal(t, maxAttempts+1, consecutive)
 }
 
-// TestIngestSupervisor_HealthyWindowResetsCounter verifies that a
-// freeze observed after HealthyWindow has elapsed since the last one
-// resets the consecutive count to 1. This prevents a long-running
-// ingestable that occasionally encounters an ErrProposalUnknown (a
-// routine leader hand-off a day later) from eventually tripping the
-// giveup cap on cumulative, non-consecutive flaps.
-func TestIngestSupervisor_HealthyWindowResetsCounter(t *testing.T) {
+// TestIngestSupervisor_ProgressResetsCounter verifies that a freeze at an
+// ADVANCED resume position (the worker made real progress) resets the
+// consecutive count to 1, while freezes at the SAME position keep climbing.
+// This is the position-keyed replacement for the old wall-clock healthy window:
+// a routine leader hand-off after the worker has advanced starts a fresh run,
+// but a poison proposal re-read at a fixed position never gets a free reset (so
+// it eventually reaches give-up — see the churn-forever bug this fixed).
+func TestIngestSupervisor_ProgressResetsCounter(t *testing.T) {
 	d, _ := newIngestFailFastDBWith(t,
 		db.WithIngestSupervisorInitialBackoff(5*time.Millisecond),
 		db.WithIngestSupervisorMaxBackoff(40*time.Millisecond),
 		db.WithIngestSupervisorMaxAttempts(10),
-		db.WithIngestSupervisorHealthyWindow(20*time.Millisecond),
 	)
 	t.Cleanup(func() { _ = d.Close() })
 
 	id := "reset-id"
+	posA := cluster.Position("pos-a")
+	posB := cluster.Position("pos-b")
 
-	// Two back-to-back freezes → consecutive=1, then 2. Backoff grows.
-	_, c1, _ := d.RecordFreezeAndNextBackoffForTest(id)
+	// Two freezes at the SAME position → consecutive=1, then 2. Backoff grows.
+	_, c1, _ := d.RecordFreezeAndNextBackoffForTest(id, posA)
 	require.Equal(t, 1, c1)
-	b2, c2, _ := d.RecordFreezeAndNextBackoffForTest(id)
+	b2, c2, _ := d.RecordFreezeAndNextBackoffForTest(id, posA)
 	require.Equal(t, 2, c2)
 	require.Equal(t, 10*time.Millisecond, b2)
 
-	// Wait past HealthyWindow so the next observation is "fresh".
-	time.Sleep(30 * time.Millisecond)
-
-	b3, c3, giveup := d.RecordFreezeAndNextBackoffForTest(id)
+	// A freeze at an ADVANCED position → real progress → reset to 1, backoff
+	// resets. No wall-clock wait: elapsed time is not progress.
+	b3, c3, giveup := d.RecordFreezeAndNextBackoffForTest(id, posB)
 	require.False(t, giveup)
-	require.Equal(t, 1, c3, "expected consecutive counter to reset after healthy window")
-	require.Equal(t, 5*time.Millisecond, b3, "expected backoff to reset to initial value")
+	require.Equal(t, 1, c3, "an advanced resume position must reset the consecutive counter")
+	require.Equal(t, 5*time.Millisecond, b3, "backoff must reset to initial on progress")
 }
 
 // findSupervisorGaugeForID looks up a gauge metric by name and returns

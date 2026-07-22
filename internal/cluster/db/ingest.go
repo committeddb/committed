@@ -435,6 +435,29 @@ func (db *DB) spawnIngestWorkerLocked(id string, i cluster.Ingestable) *workerHa
 	return handle
 }
 
+// clearIngestFrozen marks id un-frozen after the worker makes durable progress
+// (a checkpoint advanced past a freeze). Idempotent and nil-safe. The supervisor
+// no longer clears the gauge on restart — a restart is not recovery — so this
+// progress signal is what un-sets it. It fires only on a committed checkpoint,
+// which a poison proposal blocks, so it never flaps against the freeze that set
+// the gauge.
+func (db *DB) clearIngestFrozen(id string) {
+	if db.metrics != nil {
+		db.metrics.IngestFrozen(id, false)
+	}
+}
+
+// proposalTopic returns the topic/type id of a proposal's first entity for
+// freeze diagnostics (which topic an ingest proposal targets), or "" when
+// unknown. The source table itself is not on the proposal — the dialect has
+// already mapped it to this type.
+func proposalTopic(p *cluster.Proposal) string {
+	if p == nil || len(p.Entities) == 0 || p.Entities[0].Type == nil {
+		return ""
+	}
+	return p.Entities[0].Type.ID
+}
+
 func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) ingestExitReason {
 	isNode := false
 
@@ -627,7 +650,12 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 					// no later standalone checkpoint may pass this hole,
 					// whatever the branches below decide.
 					dataProposeFailed = true
-					db.logger.Warn("ingest propose error", zap.String("id", id), zap.Error(err))
+					db.logger.Warn("ingest propose failed; freezing the worker (the supervisor restarts it from the durable resume position). If this is ErrProposalTooLarge, one row or transaction exceeds COMMITTED_MAX_PROPOSAL_BYTES — raise the cap and restart, or split the source write",
+						zap.String("id", id),
+						zap.Uint64("sourceSeq", proposal.SourceSeq),
+						zap.String("topic", proposalTopic(proposal)),
+						zap.Int("entities", len(proposal.Entities)),
+						zap.Error(err))
 					// Count real failures only — a ctx cancellation here is
 					// the worker shutting down (replace/Close), not an
 					// ingest error.
@@ -675,6 +703,13 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 					}
 					// ctx canceled mid-propose: worker shutdown, not an
 					// ingest failure — the next select observes ctx.Done.
+				}
+				if err == nil && len(proposal.Position) > 0 {
+					// A committed bundled checkpoint advanced the durable
+					// position — real progress. Clear the frozen gauge (the
+					// supervisor no longer clears on restart). A poison proposal
+					// never reaches here, so this never flaps against a freeze.
+					db.clearIngestFrozen(id)
 				}
 			}
 			backoff = ingestBackoffMin
@@ -731,6 +766,12 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 						}
 						return ingestExitFreeze
 					}
+				} else {
+					// A standalone checkpoint committed — the durable position
+					// advanced, so the worker is making progress. Clear the frozen
+					// gauge (see clearIngestFrozen); a poison proposal blocks this
+					// path, so it never flaps against a freeze.
+					db.clearIngestFrozen(id)
 				}
 			}
 			backoff = ingestBackoffMin

@@ -91,7 +91,7 @@ Labels are shown in `{braces}`.
 |---|---|
 | `committed.ingest.lag` | Per-`{ingestable_id}` replication lag from the source. |
 | `committed.ingest.errors` | Ingest errors, by `{ingestable_id}`. |
-| `committed.ingest.frozen` | 1 when an ingestable is frozen (supervisor gave up); needs operator attention. |
+| `committed.ingest.frozen` | 1 while an ingestable is frozen — wedged on a proposal it cannot commit (e.g. a row/transaction over `COMMITTED_MAX_PROPOSAL_BYTES`). It stays 1 across supervisor restarts and clears only when the worker makes durable progress past the wedge, so a **sustained** 1 is the alert signal (needs operator attention — see [cdc-setup.md](cdc-setup.md)). `committed.ingest.supervisor_giveups` fires once the supervisor stops retrying. |
 | `committed.ingest.dedup_skipped` | Source events skipped as already-consumed (effectively-once dedup). |
 | `committed.ingest.restarts` | Ingest worker restarts (reconnect/backoff churn). |
 | `committed.ingest.supervisor_giveups` | Times the ingest supervisor exhausted its retry budget and parked the worker. |

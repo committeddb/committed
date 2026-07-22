@@ -643,10 +643,45 @@ that the source still has the data after that position:
   caveat above), so resume always succeeds while the slot exists.
 - **MySQL** retains it only as long as the binlog isn't purged past the
   checkpoint; size your binlog retention accordingly. With `gtid_mode=ON` resume
-  is by GTID set, so it also survives a **source failover** (a promoted replica —
-  where the binlog file:offset would be meaningless); if the binlog was purged past
+  is by GTID set, so it follows the stream across a **source failover** (a
+  promoted replica — where the binlog file:offset would be meaningless). One
+  caveat in this release: a promoted replica's binlog file numbering can restart
+  *below* the old primary's, and committed's effectively-once dedup is keyed on
+  file:offset — so if the new coordinates would fall below the last-consumed
+  position, committed **freezes the ingestable** as a fail-safe (it never
+  silently drops the post-failover writes). Recover by re-POSTing the ingestable,
+  which re-snapshots from the new source state. A future release removes this
+  freeze by keying dedup on the GTID set directly. If the binlog was purged past
   the consumed point, committed re-snapshots rather than resuming (see
   `reSnapshotRequired` above).
 
 The status endpoint goes back to `phase: "streaming"` once the resumed worker is
 following the change stream again.
+
+### An ingestable frozen on an oversized row or transaction
+
+A single source row — or a whole transaction — whose committed proposal exceeds
+`COMMITTED_MAX_PROPOSAL_BYTES` (default 16MiB) cannot be committed. committed
+never silently drops it or advances past it: the worker **freezes** at that
+position and the supervisor restarts it from the durable checkpoint, which
+re-reads to the same row and freezes again. `committed.ingest.frozen` stays `1`
+for that ingestable (it does not flap on restart), and after enough consecutive
+freezes at the same position the supervisor gives up and emits
+`committed.ingest.supervisor_giveups` plus an error log naming the stuck
+position. Each freeze also logs a warning with the proposal's `sourceSeq`
+(binlog coordinate) and `topic`, so you can identify the offending write.
+
+To recover:
+
+1. Raise `COMMITTED_MAX_PROPOSAL_BYTES` past the row/transaction size (it caps
+   the marshaled proposal, so allow headroom over the raw row bytes), or reduce
+   the source write so it fits.
+2. Restart the node (or re-POST the ingestable).
+
+Because the checkpoint never advanced past the frozen row, resume replays from
+exactly that position — the oversized row is applied on the next attempt and no
+data between the last checkpoint and the freeze is lost or duplicated. An
+oversized *transaction* (not a single row) is instead split into ordered parts
+under the ~12MiB soft-flush budget (see [How ingest works](#how-ingest-works-both-engines)),
+so only a single row larger than the cap, or a transaction whose one part still
+exceeds it, reaches this freeze.

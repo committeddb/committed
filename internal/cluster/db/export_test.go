@@ -376,8 +376,8 @@ func (db *DB) WaitForAnyWaiterForTest(timeout time.Duration) uint64 {
 // supervisor would apply before its next restart attempt; consecutive
 // is the post-increment freeze count for this id; giveup is true once
 // the count exceeds the configured max-attempts cap.
-func (db *DB) RecordFreezeAndNextBackoffForTest(id string) (backoff time.Duration, consecutive int, giveup bool) {
-	return db.recordFreezeAndNextBackoff(id)
+func (db *DB) RecordFreezeAndNextBackoffForTest(id string, pos cluster.Position) (backoff time.Duration, consecutive int, giveup bool) {
+	return db.recordFreezeAndNextBackoff(id, pos)
 }
 
 // IngestWorkerIDsForTest returns a snapshot of the ingest worker registry

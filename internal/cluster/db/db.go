@@ -144,7 +144,6 @@ type DB struct {
 	ingestSupervisorInitialBackoff time.Duration
 	ingestSupervisorMaxBackoff     time.Duration
 	ingestSupervisorMaxAttempts    int
-	ingestSupervisorHealthyWindow  time.Duration
 
 	// syncStuckThreshold is how long a worker must be continuously blocked
 	// retrying a transient error before it publishes a replicated
@@ -329,9 +328,6 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 	if cfg.ingestSupervisorMaxAttempts == 0 {
 		cfg.ingestSupervisorMaxAttempts = defaultIngestSupervisorMaxAttempts
 	}
-	if cfg.ingestSupervisorHealthyWindow == 0 {
-		cfg.ingestSupervisorHealthyWindow = defaultIngestSupervisorHealthyWindow
-	}
 	if cfg.maxProposalBytes == 0 {
 		cfg.maxProposalBytes = DefaultMaxProposalBytes
 	}
@@ -369,7 +365,6 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		ingestSupervisorInitialBackoff: cfg.ingestSupervisorInitialBackoff,
 		ingestSupervisorMaxBackoff:     cfg.ingestSupervisorMaxBackoff,
 		ingestSupervisorMaxAttempts:    cfg.ingestSupervisorMaxAttempts,
-		ingestSupervisorHealthyWindow:  cfg.ingestSupervisorHealthyWindow,
 		maxProposalBytes:               cfg.maxProposalBytes,
 		diskReports:                    make(map[uint64]diskReport),
 		diskNudgeC:                     make(chan struct{}, 1),
