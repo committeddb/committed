@@ -291,6 +291,11 @@ type freezeRecordingIngestable struct {
 	posMu       sync.Mutex
 	posSent     int
 	ingestCalls int
+
+	// closes counts Close() invocations. The worker-lifecycle race test asserts
+	// the frozen instance is Closed exactly once (a resurrection would build a
+	// second handle wrapping this same instance and Close it again).
+	closes atomic.Int32
 }
 
 func newFreezeRecordingIngestable(p *cluster.Proposal, pos cluster.Position) *freezeRecordingIngestable {
@@ -298,7 +303,13 @@ func newFreezeRecordingIngestable(p *cluster.Proposal, pos cluster.Position) *fr
 }
 
 func (f *freezeRecordingIngestable) Init(context.Context) error { return nil }
-func (f *freezeRecordingIngestable) Close() error               { return nil }
+
+func (f *freezeRecordingIngestable) Close() error {
+	f.closes.Add(1)
+	return nil
+}
+
+func (f *freezeRecordingIngestable) CloseCalls() int32 { return f.closes.Load() }
 
 func (f *freezeRecordingIngestable) Ingest(
 	ctx context.Context,

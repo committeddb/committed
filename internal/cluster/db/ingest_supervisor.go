@@ -71,6 +71,9 @@ type ingestSupervisorState struct {
 //   - On successful install, clears the frozen gauge and bumps the
 //     IngestRestart counter.
 func (db *DB) superviseRestartIngest(id string, i cluster.Ingestable, frozen *workerHandle) {
+	if db.afterIngestSupervisorAttemptForTest != nil {
+		defer db.afterIngestSupervisorAttemptForTest()
+	}
 	backoff, consecutive, giveup := db.recordFreezeAndNextBackoff(id)
 	if giveup {
 		db.logger.Error("ingest supervisor giving up after repeated freezes",
@@ -102,16 +105,26 @@ func (db *DB) superviseRestartIngest(id string, i cluster.Ingestable, frozen *wo
 		return
 	}
 
+	if db.beforeIngestSupervisorRelockForTest != nil {
+		db.beforeIngestSupervisorRelockForTest()
+	}
+
 	db.workersMu.Lock()
 	if db.closed {
 		db.workersMu.Unlock()
 		return
 	}
-	if db.ingestWorkers[id] != frozen {
-		// A user-initiated replace already installed a fresh handle
-		// while we were waiting. Nothing for us to do.
+	if db.ingestWorkers[id] != frozen || frozen.condemned {
+		// Either a user-initiated replace already installed a fresh handle while
+		// we were waiting (!= frozen), or a delete/reconcile has condemned this
+		// handle and is mid-teardown — it set condemned under workersMu before
+		// dropping the lock to drain, and we reacquired the lock inside that
+		// window (the map entry is deleted only after its relock). Resurrecting a
+		// condemned handle would build a fresh worker on the same Ingestable
+		// instance the teardown is about to Close. Bail in both cases; a user
+		// replace that arrives later still wins via db.Ingest's own loop.
 		db.workersMu.Unlock()
-		db.logger.Debug("ingest supervisor skipping restart; handle replaced",
+		db.logger.Debug("ingest supervisor skipping restart; handle replaced or condemned",
 			zap.String("id", id))
 		return
 	}

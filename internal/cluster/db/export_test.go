@@ -532,3 +532,28 @@ func (db *DB) HasIngestWorkerForTest(id string) bool {
 	_, ok := db.ingestWorkers[id]
 	return ok
 }
+
+// CancelIngestWorkerForTest drives the unexported cancelIngestWorker (the
+// delete/reconcile front half) so a test can exercise its supervisor-race
+// window directly, without wiring a full reconcile or delete proposal.
+func (db *DB) CancelIngestWorkerForTest(id string) {
+	db.cancelIngestWorker(id)
+}
+
+// SetBeforeCancelIngestRelockForTest installs the drain-window seam
+// cancelIngestWorker calls after it drops workersMu and drains, before it
+// relocks to delete the map entry — the window a racing supervisor restart
+// must not resurrect a condemned handle in.
+func (db *DB) SetBeforeCancelIngestRelockForTest(fn func()) {
+	db.beforeCancelIngestRelockForTest = fn
+}
+
+// SetIngestSupervisorRaceSeamsForTest installs the two superviseRestartIngest
+// seams that make the cancel-vs-supervisor resurrection race deterministic:
+// beforePreflight fires after the backoff, just before the supervisor
+// reacquires workersMu (a poise point); afterAttempt fires when the
+// supervisor's restart goroutine exits, on every path.
+func (db *DB) SetIngestSupervisorRaceSeamsForTest(beforePreflight, afterAttempt func()) {
+	db.beforeIngestSupervisorRelockForTest = beforePreflight
+	db.afterIngestSupervisorAttemptForTest = afterAttempt
+}

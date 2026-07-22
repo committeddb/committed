@@ -215,6 +215,26 @@ type DB struct {
 	// TestRebuildSyncable_StaleWorkerBumpDoesNotDefeatReset.
 	afterRebuildCheckpointReset func()
 
+	// beforeCancelIngestRelockForTest is a test-only seam invoked by
+	// cancelIngestWorker inside its drain window — after it drops workersMu and
+	// drains, before it reacquires the lock to delete the map entry (nil in
+	// production, so zero overhead). It lets a test deterministically drive an
+	// ingest supervisor's restart attempt into that window to prove a condemned
+	// handle is not resurrected — see
+	// TestWorkerLifecycle_CancelCondemnsAgainstSupervisorResurrection.
+	beforeCancelIngestRelockForTest func()
+
+	// beforeIngestSupervisorRelockForTest and afterIngestSupervisorAttemptForTest
+	// are test-only seams in superviseRestartIngest (both nil in production). The
+	// first is called after the backoff, just before the supervisor reacquires
+	// workersMu — a poise point a test can hold the supervisor at until it has a
+	// condemned handle ready. The second is deferred at the top of the goroutine
+	// so it fires on every exit path, letting a test wait until the supervisor's
+	// restart attempt has fully completed. Together they make the cancel-vs-
+	// supervisor race deterministic without relying on backoff timing.
+	beforeIngestSupervisorRelockForTest func()
+	afterIngestSupervisorAttemptForTest func()
+
 	// syncCh / ingestCh are the config-notification channels the apply path
 	// (wal.Storage) sends on and listenForSyncables/Ingestables receive from.
 	// Close keeps a drain goroutine reading them while it stops raft, so a
@@ -245,6 +265,22 @@ type DB struct {
 type workerHandle struct {
 	cancel context.CancelFunc
 	done   chan struct{}
+	// condemned marks a handle whose owner has begun tearing it down. A teardown
+	// path (cancelIngestWorker, db.Ingest's replace loop) sets it under workersMu
+	// BEFORE dropping the lock to drain, so the ingest supervisor's restart
+	// preflight — which reacquires workersMu during that drain window — sees the
+	// frozen handle is being removed and refuses to resurrect it. Without this,
+	// the supervisor's `ingestWorkers[id] != frozen` check passes during the
+	// window (the map entry is deleted only after the relock), and it installs a
+	// fresh worker on the SAME Ingestable instance that the teardown then Closes
+	// out from under it. Guarded by workersMu.
+	condemned bool
+	// closeResources runs this handle's resource release (its Syncable or
+	// Ingestable Close) at most once, however many teardown paths reach it
+	// concurrently (delete, reconcile, db.Close, replace). The Close contract
+	// does not promise concurrency safety — a binlog syncer is not safe to Close
+	// twice — so the drain-then-close helpers route the actual Close through it.
+	closeResources sync.Once
 	// syncable is the parsed Syncable this worker runs, retained so the delete
 	// path can reuse it as a teardown handle (e.g. DROP TABLE for a SQL
 	// syncable) without re-parsing the config — which would re-run Init. It is
@@ -964,14 +1000,19 @@ func (db *DB) closeDrainedSyncable(handle *workerHandle, id string) {
 	}
 	// Bounded: Close writes statement-close packets to the destination, which
 	// can block on a dead network until the TCP timeout — and this runs on the
-	// config-listener path (see runBounded).
-	if err, completed := runBounded(db.workerDrainTimeout, handle.syncable.Close); !completed {
-		db.logger.Warn("syncable close did not return in time (unreachable destination?); abandoning it — prepared statements linger until the pool recycles the connection",
-			zap.String("id", id), zap.Duration("timeout", db.workerDrainTimeout))
-	} else if err != nil {
-		db.logger.Warn("syncable close on teardown failed; prepared statements may linger until the pool recycles the connection",
-			zap.String("id", id), zap.Error(err))
-	}
+	// config-listener path (see runBounded). closeResources.Do makes it exactly
+	// once even if another teardown path (db.Close, a replace) reaches this
+	// handle concurrently — a second path that lost the race returns without
+	// re-closing rather than double-closing the prepared statements.
+	handle.closeResources.Do(func() {
+		if err, completed := runBounded(db.workerDrainTimeout, handle.syncable.Close); !completed {
+			db.logger.Warn("syncable close did not return in time (unreachable destination?); abandoning it — prepared statements linger until the pool recycles the connection",
+				zap.String("id", id), zap.Duration("timeout", db.workerDrainTimeout))
+		} else if err != nil {
+			db.logger.Warn("syncable close on teardown failed; prepared statements may linger until the pool recycles the connection",
+				zap.String("id", id), zap.Error(err))
+		}
+	})
 }
 
 // closeDrainedIngestable releases a torn-down ingest worker's Ingestable
@@ -1001,10 +1042,16 @@ func (db *DB) closeDrainedIngestable(handle *workerHandle, id string) {
 		// worker's use of them, so leave them; they release when it eventually exits.
 		return
 	}
-	if err := handle.ingestable.Close(); err != nil {
-		db.logger.Warn("ingestable close on teardown failed; source resources may linger until the worker exits",
-			zap.String("id", id), zap.Error(err))
-	}
+	// closeResources.Do makes this exactly once even if another teardown path
+	// (db.Close, a replace) reaches the same handle concurrently — the Close
+	// contract isn't concurrency-safe (a binlog syncer is not safe to Close
+	// twice), so a path that lost the race returns without re-closing.
+	handle.closeResources.Do(func() {
+		if err := handle.ingestable.Close(); err != nil {
+			db.logger.Warn("ingestable close on teardown failed; source resources may linger until the worker exits",
+				zap.String("id", id), zap.Error(err))
+		}
+	})
 }
 
 // drainWorkers waits for each worker handle's done channel, up to timeout in

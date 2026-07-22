@@ -172,6 +172,13 @@ func (db *DB) Ingest(_ context.Context, id string, i cluster.Ingestable) error {
 			break
 		}
 		replaced = true
+		// Condemn before dropping the lock to drain: if existing is a frozen
+		// handle with a pending supervisor, the supervisor could otherwise
+		// reacquire the lock in the drain window and resurrect existing on its
+		// Ingestable instance — which closeDrainedIngestable below then Closes.
+		// The loop re-check converges the MAP, but only the flag stops the Close
+		// from racing a resurrected worker. See workerHandle.condemned.
+		existing.condemned = true
 		existing.cancel()
 		db.workersMu.Unlock()
 		if !waitDone(existing.done, db.workerDrainTimeout) {
@@ -232,11 +239,21 @@ func (db *DB) cancelIngestWorker(id string) *workerHandle {
 	db.workersMu.Lock()
 	handle, ok := db.ingestWorkers[id]
 	if ok {
+		// Condemn under this first lock hold, before dropping it to drain. A
+		// frozen worker's supervisor may reacquire workersMu inside the drain
+		// window below and, seeing the (not-yet-deleted) map entry still equal to
+		// its frozen handle, resurrect it on the same Ingestable instance we are
+		// about to Close. The condemned flag makes that preflight bail. See
+		// workerHandle.condemned and superviseRestartIngest.
+		handle.condemned = true
 		handle.cancel()
 		db.workersMu.Unlock()
 		if !waitDone(handle.done, db.workerDrainTimeout) {
 			db.logger.Warn("delete ingest: worker did not exit in time; abandoning it (wedged on its source?) and proceeding",
 				zap.String("id", id), zap.Duration("timeout", db.workerDrainTimeout))
+		}
+		if db.beforeCancelIngestRelockForTest != nil {
+			db.beforeCancelIngestRelockForTest()
 		}
 		db.workersMu.Lock()
 		if db.ingestWorkers[id] == handle {
