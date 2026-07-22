@@ -438,7 +438,15 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 			retryActual = nil
 			lastSeen, lastBumped = 0, 0
 			pendingCount = 0
-			tracker.cleared(ctx)
+			// Do NOT clear the stuck record on startup. A replacement/restart
+			// worker adopts any replicated SyncableStuck record (published=true);
+			// clearing here would DELETE it before the worker re-tries the wedge,
+			// so a still-stuck syncable would flap (delete → re-wedge → re-publish
+			// after the debounce), 409ing the operator's skip/dead-letter lever in
+			// between. The record is deleted only on genuine PROGRESS past the
+			// wedge (the cleared() on a successful sync below), per the tracker's
+			// own contract. The resumed worker re-reads AT the wedge index (the
+			// checkpoint sits at N-1), so progress means the wedge itself cleared.
 			progressed = true
 		case isNode && db.isNode(id):
 			var i uint64
@@ -784,7 +792,9 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 			isNode = true
 			batch = batch[:0]
 			retryBatch = false
-			tracker.cleared(ctx)
+			// Do NOT clear the stuck record on startup — the adopted record must
+			// survive until genuine progress past the wedge, or a still-stuck
+			// replacement flaps it. See the single-flush worker's start branch.
 			progressed = true
 		case isNode && db.isNode(id):
 			// If a previous flush failed with a transient error, retry

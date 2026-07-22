@@ -2,6 +2,7 @@ package db_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -56,4 +57,32 @@ func TestSupervisorConformance_ConfigDeletePrunesGiveupState(t *testing.T) {
 	d.CancelIngestWorkerForTest(id) // the delete / reconcile-absent-cancel path
 	require.False(t, d.SupervisorStateExistsForTest(id),
 		"a config delete must prune the supervisor give-up state")
+}
+
+// TestStuckRecordConformance_StillStuckReplacementKeepsRecord pins round-8 #3: a
+// replacement worker that is STILL stuck (adopts the record and re-wedges on the
+// same poison) must keep the replicated stuck record CONTINUOUSLY — the record
+// is deleted only on genuine progress, not on the worker's startup. Before the
+// fix the leadership-gain "starting sync" branch cleared the adopted record, so
+// a still-stuck syncable flapped (delete → re-wedge → re-publish after the
+// debounce), 409ing the operator's skip/dead-letter lever in between.
+func TestStuckRecordConformance_StillStuckReplacementKeepsRecord(t *testing.T) {
+	d, s := newWalDBStuck(t)
+	id := "still-stuck"
+	seedSyncableConfig(t, d, id)
+	seedUserProposals(t, d, s, "evt", []string{"poison"})
+
+	// Worker A wedges on poison and publishes the replicated stuck record.
+	require.NoError(t, d.Sync(context.Background(), id,
+		&transientSyncable{stuck: map[string]bool{"poison": true}, transientErr: fmt.Errorf("boom")}))
+	require.Eventually(t, func() bool { _, ok, _ := d.SyncableStuck(id); return ok },
+		10*time.Second, 10*time.Millisecond, "worker A must publish the stuck record")
+
+	// Replacement B is ALSO stuck on poison: it adopts the record. The record
+	// must never disappear (no delete-on-startup flap).
+	require.NoError(t, d.Sync(context.Background(), id,
+		&transientSyncable{stuck: map[string]bool{"poison": true}, transientErr: fmt.Errorf("boom")}))
+	require.Never(t, func() bool { _, ok, _ := d.SyncableStuck(id); return !ok },
+		1*time.Second, 20*time.Millisecond,
+		"a still-stuck replacement must keep the adopted record continuously (no delete-on-startup flap)")
 }
