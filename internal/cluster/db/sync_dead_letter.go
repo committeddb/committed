@@ -14,9 +14,14 @@ import (
 // This file holds the dead-letter side of the sync worker: classifying a
 // failed Sync into permanent / transient / manual, recording the durable
 // dead-letter entity through Raft, and reading those records back out. The
-// worker state machines in sync.go call recordSync* on failure; everything
-// here is observability layered on top of the skip decision the worker has
-// already made, never control flow (see proposeSyncableDeadLetter).
+// worker state machines in sync.go call recordSync* on failure. The record is
+// observability ABOUT a skip the worker has already decided — it never changes
+// WHETHER a proposal is skipped — but its durability IS load-bearing on control
+// flow: the worker must not advance its consumed head past a skip whose record
+// has not landed (the EOF checkpoint advance and the restart-time
+// HasSyncableDeadLetter re-exclusion both assume every skipped entry has a
+// record), so a failed record propose holds position and re-records rather than
+// advancing (see recordSyncDeadLetter and proposeSyncableDeadLetter).
 
 // recordSyncDeadLetter emits the error metric for `kind` and durably
 // dead-letters the skipped proposal so an operator can later query (and,
