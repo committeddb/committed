@@ -259,17 +259,35 @@ func (db *DB) cancelIngestWorker(id string) *workerHandle {
 // reconcileIngestWorkers is the ingest twin of reconcileSyncWorkers; see it
 // for the serialization and cancel-only rationale.
 func (db *DB) reconcileIngestWorkers(list func() ([]*IngestableWithID, error)) {
-	parsed, err := list()
-	if err != nil {
-		db.logger.Warn("ingest reconcile: list configs", zap.Error(err))
-		return
+	backoff := reconcileRetryMin
+	var parsed []*IngestableWithID
+	for {
+		var err error
+		parsed, err = list()
+		if err == nil {
+			break
+		}
+		db.logger.Error("ingest reconcile: listing configs failed; ingest workers not reconciled (data plane degraded), retrying",
+			zap.Error(err))
+		select {
+		case <-db.ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		backoff = min(backoff*2, reconcileRetryMax)
 	}
 	present := make(map[string]struct{}, len(parsed))
+	installed, degraded := 0, 0
 	for _, iw := range parsed {
 		present[iw.ID] = struct{}{}
+		if iw.Ingestable == nil {
+			degraded++
+			continue // existing-but-degraded: keep the running worker
+		}
 		if err := db.Ingest(context.Background(), iw.ID, iw.Ingestable); err != nil {
 			return // ErrClosed: db shutting down
 		}
+		installed++
 	}
 	db.workersMu.Lock()
 	ids := make([]string, 0, len(db.ingestWorkers))
@@ -277,13 +295,17 @@ func (db *DB) reconcileIngestWorkers(list func() ([]*IngestableWithID, error)) {
 		ids = append(ids, id)
 	}
 	db.workersMu.Unlock()
+	cancelled := 0
 	for _, id := range ids {
 		if _, ok := present[id]; !ok {
-			db.logger.Warn("ingest reconcile: cancelling worker with no config (delete arrived via snapshot?)",
+			db.logger.Warn("ingest reconcile: cancelling worker for a config that no longer exists (deleted, incl. via snapshot)",
 				zap.String("id", id))
 			db.cancelIngestWorker(id)
+			cancelled++
 		}
 	}
+	db.logger.Info("ingest reconcile complete",
+		zap.Int("installed", installed), zap.Int("degraded", degraded), zap.Int("cancelled", cancelled))
 }
 
 func (db *DB) deleteIngest(id string) {

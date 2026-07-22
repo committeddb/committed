@@ -150,23 +150,30 @@ func (s *Storage) RequestIngestReconcile() {
 
 // reconcileIngestableList: see reconcileSyncableList.
 func (s *Storage) reconcileIngestableList() ([]*db.IngestableWithID, error) {
-	cfgs, err := s.Ingestables()
+	raws, present, err := s.listRawConfigs(ingestableBucket)
 	if err != nil {
 		return nil, err
 	}
-	present := make(map[string]struct{}, len(cfgs))
-	out := make([]*db.IngestableWithID, 0, len(cfgs))
-	for _, cfg := range cfgs {
-		present[cfg.ID] = struct{}{}
-		_, ingestable, err := s.parser.ParseIngestable(cfg.MimeType, cfg.Data)
-		if err != nil {
-			s.recordConfigError("ingestable", cfg.ID, configErrBuild, err)
-			s.logger.Warn("ingest reconcile: parse (degraded)",
-				zap.String("id", cfg.ID), zap.Error(err))
+	out := make([]*db.IngestableWithID, 0, len(raws))
+	for _, r := range raws {
+		// Degraded → nil Ingestable → present-but-kept (see reconcileSyncableList).
+		if r.decodeErr != nil {
+			s.recordConfigError("ingestable", r.id, configErrBuild, r.decodeErr)
+			s.logger.Warn("ingest reconcile: undecodable config (degraded — kept)",
+				zap.String("id", r.id), zap.Error(r.decodeErr))
+			out = append(out, &db.IngestableWithID{ID: r.id})
 			continue
 		}
-		s.clearConfigError("ingestable", cfg.ID, configErrBuild)
-		out = append(out, &db.IngestableWithID{ID: cfg.ID, Ingestable: ingestable})
+		_, ingestable, perr := s.parser.ParseIngestable(r.cfg.MimeType, r.cfg.Data)
+		if perr != nil {
+			s.recordConfigError("ingestable", r.id, configErrBuild, perr)
+			s.logger.Warn("ingest reconcile: parse (degraded — kept)",
+				zap.String("id", r.id), zap.Error(perr))
+			out = append(out, &db.IngestableWithID{ID: r.id})
+			continue
+		}
+		s.clearConfigError("ingestable", r.id, configErrBuild)
+		out = append(out, &db.IngestableWithID{ID: r.id, Ingestable: ingestable})
 	}
 	s.sweepConfigErrorsExcept("ingestable", present)
 	return out, nil

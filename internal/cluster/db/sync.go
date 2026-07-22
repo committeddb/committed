@@ -219,6 +219,16 @@ func (db *DB) Sync(_ context.Context, id string, s cluster.Syncable) error {
 // The leader tears down using its own already-built syncable handle, which is
 // also the node the DELETE request landed on (writes proxy to the leader), so
 // its keepData intent is the one that applies.
+// reconcileRetryMin/Max bound the backoff for retrying a reconcile whose config
+// LISTING failed (a genuine bbolt error — per-config decode/parse failures are
+// tolerated by the closure). A listing failure leaves the data plane
+// un-reconciled and the only other reconcile triggers are restart/snapshot, so
+// the reconciler retries rather than silently stranding the node.
+const (
+	reconcileRetryMin = 50 * time.Millisecond
+	reconcileRetryMax = 5 * time.Second
+)
+
 // reconcileSyncWorkers converges the running sync workers to the CURRENT
 // config set: the closure (executed here, on the listener goroutine,
 // serialized with the apply path's events) parses every config in bbolt; each
@@ -229,25 +239,54 @@ func (db *DB) Sync(_ context.Context, id string, s cluster.Syncable) error {
 // cleanup ONLY (keepData=true): reconcile never touches destinations — the
 // live delete path did (or the owner will do) any teardown.
 func (db *DB) reconcileSyncWorkers(list func() ([]*SyncableWithID, error)) {
-	parsed, err := list()
-	if err != nil {
-		db.logger.Warn("sync reconcile: list configs", zap.Error(err))
-		return
+	backoff := reconcileRetryMin
+	var parsed []*SyncableWithID
+	for {
+		var err error
+		parsed, err = list()
+		if err == nil {
+			break
+		}
+		// A genuine listing failure (not a per-config degrade, which the closure
+		// tolerates). Do NOT silently return — the only other reconcile triggers
+		// are restart/snapshot, so a transient failure would strand every worker
+		// until then. Log loudly and retry until it succeeds or the db closes.
+		db.logger.Error("sync reconcile: listing configs failed; sync workers not reconciled (data plane degraded), retrying",
+			zap.Error(err))
+		select {
+		case <-db.ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		backoff = min(backoff*2, reconcileRetryMax)
 	}
 	present := make(map[string]struct{}, len(parsed))
+	installed, degraded := 0, 0
 	for _, sw := range parsed {
 		present[sw.ID] = struct{}{}
+		// A nil Syncable marks an existing-but-degraded config: it is PRESENT
+		// (its worker is not cancelled) but not reconfigured — the prior good
+		// worker keeps delivering until the config parses again.
+		if sw.Syncable == nil {
+			degraded++
+			continue
+		}
 		if err := db.Sync(context.Background(), sw.ID, sw.Syncable); err != nil {
 			return // ErrClosed: db shutting down
 		}
+		installed++
 	}
+	cancelled := 0
 	for _, id := range db.syncWorkerIDs() {
 		if _, ok := present[id]; !ok {
-			db.logger.Warn("sync reconcile: cancelling worker with no config (delete arrived via snapshot?)",
+			db.logger.Warn("sync reconcile: cancelling worker for a config that no longer exists (deleted, incl. via snapshot)",
 				zap.String("id", id))
 			db.deleteSync(id, true)
+			cancelled++
 		}
 	}
+	db.logger.Info("sync reconcile complete",
+		zap.Int("installed", installed), zap.Int("degraded", degraded), zap.Int("cancelled", cancelled))
 }
 
 // syncWorkerIDs snapshots the registered sync worker ids.

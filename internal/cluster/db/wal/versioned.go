@@ -191,6 +191,47 @@ func configExists(tx *bolt.Tx, configBucket, id []byte) bool {
 
 // forEachCurrent iterates over all resources in a bucket, calling fn with
 // the resource ID and the current version's data.
+// rawConfig is one config listed tolerantly for reconcile: an undecodable
+// entry is degraded (decodeErr set, cfg nil) rather than aborting the whole
+// list, so a single corrupt config cannot strand the entire data plane.
+type rawConfig struct {
+	id        string
+	cfg       *cluster.Configuration
+	decodeErr error
+}
+
+// listRawConfigs lists the current version of every config in the named bucket
+// TOLERANTLY — an undecodable one is marked degraded, not fatal. It performs NO
+// parsing (that runs outside the view lock in the caller: a parser may call
+// back into view-backed storage methods, which would recursively lock kvMu).
+// Returns the raw configs, the set of present ids, and only a genuine bbolt
+// error (never a per-config decode failure).
+func (s *Storage) listRawConfigs(bucketName []byte) ([]rawConfig, map[string]struct{}, error) {
+	var raws []rawConfig
+	present := make(map[string]struct{})
+	err := s.view(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketName)
+		if b == nil {
+			return ErrBucketMissing
+		}
+		return forEachCurrent(b, func(id, data []byte) error {
+			idStr := string(id)
+			present[idStr] = struct{}{}
+			cfg := &cluster.Configuration{}
+			if err := cfg.Unmarshal(data); err != nil {
+				raws = append(raws, rawConfig{id: idStr, decodeErr: err})
+				return nil
+			}
+			raws = append(raws, rawConfig{id: idStr, cfg: cfg})
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return raws, present, nil
+}
+
 func forEachCurrent(resourceBucket *bolt.Bucket, fn func(id []byte, data []byte) error) error {
 	return resourceBucket.ForEach(func(k, v []byte) error {
 		if v != nil {

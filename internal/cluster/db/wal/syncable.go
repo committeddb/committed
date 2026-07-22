@@ -190,29 +190,38 @@ func (s *Storage) RequestSyncReconcile() {
 // a deleted id, so a record surviving its config would overcount the gauge
 // forever (the compacted-delete stale-record hole).
 func (s *Storage) reconcileSyncableList() ([]*db.SyncableWithID, error) {
-	cfgs, err := s.Syncables()
+	raws, present, err := s.listRawConfigs(syncableBucket)
 	if err != nil {
 		return nil, err
 	}
-	present := make(map[string]struct{}, len(cfgs))
-	out := make([]*db.SyncableWithID, 0, len(cfgs))
-	for _, cfg := range cfgs {
-		present[cfg.ID] = struct{}{}
-		_, syncable, mode, err := s.parser.ParseSyncable(cfg.MimeType, cfg.Data, s)
-		if err != nil {
-			s.recordConfigError("syncable", cfg.ID, configErrBuild, err)
-			s.logger.Warn("sync reconcile: parse (degraded)",
-				zap.String("id", cfg.ID), zap.Error(err))
+	out := make([]*db.SyncableWithID, 0, len(raws))
+	for _, r := range raws {
+		// A degraded config (undecodable, or unparseable on this node) is
+		// returned with a nil Syncable: it is PRESENT so its worker is kept
+		// (not cancelled as a phantom delete), just not reconfigured.
+		if r.decodeErr != nil {
+			s.recordConfigError("syncable", r.id, configErrBuild, r.decodeErr)
+			s.logger.Warn("sync reconcile: undecodable config (degraded — kept)",
+				zap.String("id", r.id), zap.Error(r.decodeErr))
+			out = append(out, &db.SyncableWithID{ID: r.id})
 			continue
 		}
-		s.clearConfigError("syncable", cfg.ID, configErrBuild)
+		_, syncable, mode, perr := s.parser.ParseSyncable(r.cfg.MimeType, r.cfg.Data, s)
+		if perr != nil {
+			s.recordConfigError("syncable", r.id, configErrBuild, perr)
+			s.logger.Warn("sync reconcile: parse (degraded — kept)",
+				zap.String("id", r.id), zap.Error(perr))
+			out = append(out, &db.SyncableWithID{ID: r.id})
+			continue
+		}
+		s.clearConfigError("syncable", r.id, configErrBuild)
 		// Mirror saveSyncable: ModeAlwaysCurrent decorates the syncable
 		// with the migration wrapper so the worker loop stays oblivious
 		// to version-upgrade concerns.
 		if mode == cluster.ModeAlwaysCurrent {
 			syncable = migration.Wrap(syncable, s, s.metrics)
 		}
-		out = append(out, &db.SyncableWithID{ID: cfg.ID, Syncable: syncable})
+		out = append(out, &db.SyncableWithID{ID: r.id, Syncable: syncable})
 	}
 	s.sweepConfigErrorsExcept("syncable", present)
 	return out, nil

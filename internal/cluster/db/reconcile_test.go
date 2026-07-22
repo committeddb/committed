@@ -2,7 +2,9 @@ package db_test
 
 import (
 	"context"
+	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -111,4 +113,50 @@ func TestReconcile_CancelsIngestWorkerWithoutConfig(t *testing.T) {
 	require.Eventually(t, func() bool { return !d.HasIngestWorkerForTest("zombie-ing") },
 		5*time.Second, 10*time.Millisecond,
 		"the reconcile must cancel an ingest worker whose config no longer exists")
+}
+
+// TestReconcile_DegradedConfigKeepsWorker pins reconcile-robustness F4: a config
+// that EXISTS but is degraded (returned with a nil Syncable — undecodable or
+// unparseable on this node) must keep its running worker, not have it cancelled
+// as a phantom snapshot-delete. Before the fix the db-layer present-set was
+// built only from successfully-parsed configs, so a degraded config's worker
+// was wrongly cancelled.
+func TestReconcile_DegradedConfigKeepsWorker(t *testing.T) {
+	d, syncCh, _ := reconcileHarness(t)
+
+	fake := &reconcileFakeSyncable{}
+	require.NoError(t, d.Sync(context.Background(), "keep", fake))
+	require.Eventually(t, func() bool { return d.HasSyncWorkerForTest("keep") },
+		2*time.Second, 5*time.Millisecond)
+
+	// Reconcile: "keep" is present but degraded (nil Syncable).
+	syncCh <- &db.SyncableWithID{ReconcileList: func() ([]*db.SyncableWithID, error) {
+		return []*db.SyncableWithID{{ID: "keep"}}, nil
+	}}
+
+	require.Never(t, func() bool { return !d.HasSyncWorkerForTest("keep") },
+		500*time.Millisecond, 20*time.Millisecond,
+		"a present-but-degraded config must keep its worker")
+	require.Zero(t, fake.teardownCount(), "a kept degraded config must not tear down its destination")
+}
+
+// TestReconcile_RetriesListFailure pins reconcile-robustness F1: a genuine
+// listing failure must not silently strand the data plane (the only other
+// reconcile triggers are restart/snapshot) — the reconciler retries with
+// backoff until the list succeeds.
+func TestReconcile_RetriesListFailure(t *testing.T) {
+	d, syncCh, _ := reconcileHarness(t)
+
+	var attempts atomic.Int32
+	syncCh <- &db.SyncableWithID{ReconcileList: func() ([]*db.SyncableWithID, error) {
+		if attempts.Add(1) < 3 {
+			return nil, errors.New("transient list failure")
+		}
+		return []*db.SyncableWithID{{ID: "ok", Syncable: &reconcileFakeSyncable{}}}, nil
+	}}
+
+	require.Eventually(t, func() bool { return d.HasSyncWorkerForTest("ok") },
+		5*time.Second, 10*time.Millisecond,
+		"reconcile must retry a listing failure and eventually install")
+	require.GreaterOrEqual(t, attempts.Load(), int32(3))
 }
