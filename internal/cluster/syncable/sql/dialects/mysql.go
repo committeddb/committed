@@ -292,16 +292,20 @@ func (d *MySQLDialect) IsPermanent(err error) bool {
 		1406, // Data too long for column
 		1690: // Numeric value out of range (e.g. BIGINT overflow)
 		return true
-	// Schema / constraint: the proposal structurally cannot apply.
-	case 1054, // Unknown column
-		1062, // Duplicate entry (only reachable on the no-PK path; upsert masks it otherwise)
-		1136, // Column count doesn't match value count
-		1364, // Field has no default value
+	// Constraint: THIS row violates an integrity constraint (entry-specific).
+	case 1062, // Duplicate entry (only reachable on the no-PK path; upsert masks it otherwise)
 		1452, // FK constraint fails (matches PostgreSQL class 23; see the FK note below)
 		3819, // Check constraint violated
 		4025: // CHECK constraint is violated (column-level; MySQL 8.0.16+)
 		return true
 	}
+	// Deliberately NOT permanent (entry-specific rule, cluster.ErrPermanent):
+	// 1054 unknown column, 1136 column-count mismatch, and 1364 field-has-no-
+	// default are SCHEMA / MAPPING shaped — they fail EVERY row identically (a
+	// destination column dropped, an operator ALTER, a sink/mapping mismatch),
+	// not a bad row value. They stay transient so the worker wedges visibly and
+	// resumes on the fix, dead-lettering nothing — the MySQL mirror of the
+	// Postgres class-42 carve-out and the webhook 401/403 carve-out.
 	// FK note: 1452 / PostgreSQL 23503 are treated permanent for parity. A FK
 	// failure *could* be transient if the parent row is synced later by
 	// another syncable, but committed has no cross-syncable ordering guarantee

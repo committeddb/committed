@@ -307,14 +307,27 @@ func (d *PostgreSQLDialect) IsPermanent(err error) bool {
 		return false
 	}
 	code := pgErr.Code
-	if code == "42501" { // insufficient_privilege — access, not data/schema
-		return false
-	}
 	if len(code) < 2 {
 		return false
 	}
+	// Permanent MUST mean ENTRY-SPECIFIC (see cluster.ErrPermanent): the error
+	// is about THIS row's value and would NOT fail every other entry. Only two
+	// SQLSTATE classes qualify:
+	//   22 data exception       — out-of-range, bad format, truncation: the
+	//                             row's own value.
+	//   23 integrity constraint — not-null, unique, FK, check: the row violates
+	//                             it (FK is treated permanent for parity — see
+	//                             the note below).
+	// Everything else stays TRANSIENT so the worker wedges visibly and resumes
+	// once the operator fixes it, with ZERO data dead-lettered. In particular
+	// class 42 (undefined_table 42P01, undefined_column 42703,
+	// insufficient_privilege 42501, syntax_error 42601, …) and class 0A
+	// (feature_not_supported) are SCHEMA / STATEMENT / ACCESS shaped — they
+	// fail every entry identically (a dropped table, an operator ALTER, a
+	// missing GRANT), exactly the mirror of the SQL-side auth carve-out the
+	// webhook sink applies to 401/403.
 	switch code[:2] {
-	case "22", "23", "42", "0A":
+	case "22", "23":
 		return true
 	}
 	return false

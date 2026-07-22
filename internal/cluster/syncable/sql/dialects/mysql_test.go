@@ -33,14 +33,16 @@ func TestMySQLDialect_IsPermanent(t *testing.T) {
 		{"incorrect_value_for_column", 1366, true},
 		{"data_too_long", 1406, true},
 		{"numeric_out_of_range", 1690, true},
-		// Schema / constraint: the proposal structurally cannot apply.
-		{"unknown_column", 1054, true},
+		// Integrity constraint: THIS row violates it (entry-specific).
 		{"duplicate_entry", 1062, true},
-		{"column_count_mismatch", 1136, true},
-		{"field_no_default", 1364, true},
 		{"fk_constraint_fails", 1452, true},
 		{"check_constraint_violated", 3819, true},
 		{"check_constraint_column", 4025, true},
+		// Schema / mapping shaped — fails EVERY row identically, so TRANSIENT
+		// (the MySQL mirror of the Postgres class-42 carve-out).
+		{"unknown_column_is_transient", 1054, false},
+		{"column_count_mismatch_is_transient", 1136, false},
+		{"field_no_default_is_transient", 1364, false},
 
 		// Infrastructure stays transient — retry forever, wedge visibly.
 		{"lock_wait_timeout", 1205, false},

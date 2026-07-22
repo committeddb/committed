@@ -176,16 +176,15 @@ func TestPostgreSQLDialect_IsPermanent(t *testing.T) {
 		{"foreign_key_violation", "23503", true},
 		{"unique_violation", "23505", true},
 		{"check_violation", "23514", true},
-		// Syntax / access rule (class 42): schema mismatch, malformed SQL.
-		{"undefined_column", "42703", true},
-		{"undefined_table", "42P01", true},
-		{"datatype_mismatch", "42804", true},
-		{"syntax_error", "42601", true},
-		// Feature not supported (class 0A).
-		{"feature_not_supported", "0A000", true},
-
-		// Carve-out: insufficient_privilege is access/config, not data/schema.
+		// Schema / statement / access (class 42) is NOT entry-specific — it
+		// fails EVERY row identically, so it is TRANSIENT (wedge, fix, resume;
+		// zero dead-lettered). Same for feature_not_supported (class 0A).
+		{"undefined_column_is_transient", "42703", false},
+		{"undefined_table_is_transient", "42P01", false},
+		{"datatype_mismatch_is_transient", "42804", false},
+		{"syntax_error_is_transient", "42601", false},
 		{"insufficient_privilege_is_transient", "42501", false},
+		{"feature_not_supported_is_transient", "0A000", false},
 
 		// Infrastructure classes stay transient — retry forever, wedge visibly.
 		{"connection_exception", "08000", false},
