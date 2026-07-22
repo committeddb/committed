@@ -30,6 +30,32 @@ func TestTombstone_RecordedOnUserDelete(t *testing.T) {
 	}, sel)
 }
 
+// TestTombstone_ReplayIdempotent pins the Face-2 idempotency guard on the
+// tombstone list. The apply-path bbolt handlers re-run on a crash-replay (only
+// the event-log write is guarded), and a crash within a Ready loop re-delivers
+// the whole batch — so two same-(type, key) deletes at I1<I2 get recorded, then
+// re-recorded. The stored list must stay [I1, I2], not grow to [I1, I2, I1, I2]
+// (duplicated + non-ascending), which would diverge this replica's bbolt bytes
+// from a node that did not crash. Before the fix the tail-only dedup missed the
+// non-tail repeat (I1) and the list duplicated.
+func TestTombstone_ReplayIdempotent(t *testing.T) {
+	s := NewStorage(t, nil)
+	defer s.Cleanup()
+
+	typeID, key := "user-events", []byte("dave")
+	// First apply of the batch: two deletes of the same (type, key), I1=2, I2=3.
+	require.NoError(t, s.RecordEventTombstoneForTest(typeID, key, 2))
+	require.NoError(t, s.RecordEventTombstoneForTest(typeID, key, 3))
+	require.Equal(t, []uint64{2, 3}, s.EventTombstoneIndicesForTest(typeID, key))
+
+	// Crash-replay re-delivers the same batch → both handlers re-run.
+	require.NoError(t, s.RecordEventTombstoneForTest(typeID, key, 2))
+	require.NoError(t, s.RecordEventTombstoneForTest(typeID, key, 3))
+
+	require.Equal(t, []uint64{2, 3}, s.EventTombstoneIndicesForTest(typeID, key),
+		"recordEventTombstone must be idempotent on replay: a re-presented index anywhere in the list must not duplicate it")
+}
+
 // TestTombstone_NotRecordedForConfigDelete verifies built-in config deletes
 // (here a Type delete) do NOT create event-log tombstones — only user data is
 // scrubbed.

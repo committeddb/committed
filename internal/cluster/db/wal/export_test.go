@@ -2,6 +2,7 @@ package wal
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 
 	bolt "go.etcd.io/bbolt"
@@ -10,6 +11,33 @@ import (
 
 	"github.com/committeddb/committed/internal/cluster"
 )
+
+// RecordEventTombstoneForTest exposes recordEventTombstone so a test can drive
+// the crash-replay idempotency guard directly (replay = re-calling it with the
+// same committed delete indices, exactly what ApplyCommittedBatch does).
+func (s *Storage) RecordEventTombstoneForTest(typeID string, key []byte, deleteIndex uint64) error {
+	return s.recordEventTombstone(typeID, key, deleteIndex)
+}
+
+// EventTombstoneIndicesForTest returns the decoded delete-index list stored for
+// (typeID, key), or nil if none — so a test can assert the raw stored bytes, not
+// just the tombstoneSelections view (which is dedup-insensitive and would hide a
+// non-idempotent append).
+func (s *Storage) EventTombstoneIndicesForTest(typeID string, key []byte) []uint64 {
+	var out []uint64
+	_ = s.view(func(tx *bolt.Tx) error {
+		b := tx.Bucket(eventTombstoneBucket)
+		if b == nil {
+			return nil
+		}
+		v := b.Get(tombstoneKey(typeID, key))
+		for off := 0; off+8 <= len(v); off += 8 {
+			out = append(out, binary.BigEndian.Uint64(v[off:off+8]))
+		}
+		return nil
+	})
+	return out
+}
 
 // BucketSnapshot returns every (bucket, key, value) triple in this
 // storage's bbolt as a slice of formatted "path/hex(key)=hex(value)"

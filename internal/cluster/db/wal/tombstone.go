@@ -65,11 +65,21 @@ func (s *Storage) recordEventTombstone(typeID string, key []byte, deleteIndex ui
 			return ErrBucketMissing
 		}
 		existing := b.Get(tk)
-		// Dedupe the only repeat that can occur: the same (type, key) deleted
-		// twice within one entry (identical raft index). Across entries the
-		// index strictly increases, so the list stays ascending by appending.
-		if n := len(existing); n >= 8 && binary.BigEndian.Uint64(existing[n-8:]) == deleteIndex {
-			return nil
+		// Idempotent on replay: skip if this delete index is already recorded
+		// ANYWHERE in the list, not just at the tail. The apply-path bbolt handlers
+		// re-run on a crash-replay (unlike the guarded event-log write), and a crash
+		// within a Ready batch re-delivers the whole batch — so two same-(type, key)
+		// deletes I1<I2 would otherwise replay to [I1,I2,I1,I2]: duplicated and
+		// non-ascending, diverging this replica's bbolt bytes from a non-crashed
+		// one (violating Face 2 idempotency and byte-identical bbolt). A full scan
+		// is cheap (a (type, key) accrues few deletes) and also covers the same key
+		// deleted twice within one entry. Deletes apply in raft-index order, so a
+		// genuinely new index is always > the tail and still appends in order; only
+		// a replay (or an in-entry repeat) re-presents an existing index.
+		for off := 0; off+8 <= len(existing); off += 8 {
+			if binary.BigEndian.Uint64(existing[off:off+8]) == deleteIndex {
+				return nil
+			}
 		}
 		// bbolt values are only valid for the transaction's lifetime and must
 		// not be aliased into the new value — copy before appending.
