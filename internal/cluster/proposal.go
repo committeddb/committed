@@ -517,13 +517,15 @@ func IsInternal(id string) bool {
 // entry implies, so none are compactable (only an RTBF "user tombstone" removes
 // those, regardless of kind).
 //
-// This predicate currently covers committed-internal metadata only: it is true
-// for a built-in iff that built-in is EntityKindSnapshot. Every system type is
-// Snapshot today (see TestSystemTypesAreSnapshotKind), but the kind is checked
-// rather than assumed so a future non-LWW internal type (e.g. an append-only
-// audit log) is excluded automatically. The follow-up
-// (compact-user-snapshot-streams) relaxes the internal restriction to also cover
-// user-defined EntityKindSnapshot types, which requires a TypeResolver.
+// This predicate covers committed-internal metadata only: it is true for a
+// built-in iff that built-in is EntityKindSnapshot. Every system type is Snapshot
+// today (see TestSystemTypesAreSnapshotKind), but the kind is checked rather than
+// assumed so a future non-LWW internal type (e.g. an append-only audit log) is
+// excluded automatically. User-defined EntityKindSnapshot topics are ALSO
+// metadata-GC-compacted, but not through this predicate: metadataSupersessions
+// (scrub.go) harvests a user type's kind from its registration entries in the log
+// prefix <= bound — a pure function, no live TypeResolver — keeping the selection
+// deterministic across replicas.
 func IsSystemTombstonable(id string) bool {
 	t := systemType(id)
 	return t != nil && t.EntityKind == EntityKindSnapshot

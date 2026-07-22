@@ -157,8 +157,12 @@ func (s *Storage) runScrub(bound uint64) error {
 	// system-tombstonable (type, key). The rewrite keeps only that latest entry
 	// per key and drops earlier ones. Derived from the log prefix <= bound, so —
 	// like sel — it is a pure function of (log bytes, bound), identical on every
-	// replica. The two selections range over disjoint type sets (user-defined vs
-	// internal-snapshot), so they never collide despite sharing tombstoneKey.
+	// replica. sel (RTBF) and msel (metadata GC) are NOT disjoint — a user
+	// EntityKindSnapshot key with a delete appears in both — but scrubFilterEntry
+	// ORs the two predicates and, where they overlap, they provably agree (RTBF
+	// spares the delete-tombstone; metadata GC keeps the latest per key), so the
+	// removal set is well-defined regardless. Do NOT re-derive an optimization
+	// from a disjointness assumption.
 	msel, err := s.metadataSupersessions(bound)
 	if err != nil {
 		return err
@@ -384,13 +388,16 @@ func (s *Storage) recomputeEventBoundsAfterSwapOrFatal(what string) {
 //     (type, key) has a delete at D with I < D <= bound — the entity was written
 //     before a delete within the freeze line. Deletes are spared so the
 //     tombstone survives. (sel values are the max delete index <= bound.)
-//   - Metadata GC (system tombstone): a system-tombstonable (internal-snapshot)
-//     entity — upsert OR delete — at index I superseded by a later entry for the
-//     same (type, key) at M <= bound (I < M). Only the latest per key survives;
-//     a superseded internal delete is droppable too. (msel values are that M.)
+//   - Metadata GC (system tombstone): an EntityKindSnapshot entity — an internal
+//     built-in OR a user topic — upsert OR delete, at index I superseded by a
+//     later entry for the same (type, key) at M <= bound (I < M). Only the latest
+//     per key survives; a superseded delete is droppable too. (msel values are
+//     that M.)
 //
-// The two selections range over disjoint type sets, so an entity matches at most
-// one reason.
+// sel and msel are NOT disjoint (a user EntityKindSnapshot key with a delete is
+// in both), but the two predicates are ORed and provably agree on any overlap —
+// RTBF spares the delete-tombstone, metadata GC keeps the latest per key — so an
+// entity is removed iff either fires, with no conflict.
 func scrubFilterEntry(raw []byte, sel, msel map[string]uint64) (keep bool, payload []byte, err error) {
 	pe := &pb.Entry{}
 	if err := proto.Unmarshal(raw, pe); err != nil {
