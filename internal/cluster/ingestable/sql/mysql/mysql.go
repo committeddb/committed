@@ -466,6 +466,10 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 	var resumeProgress *dialectpb.SnapshotProgress
 	var currentEpoch uint64
 	var resumeChunkTag uint64
+	// Snapshot the soft-flush budget once, before the streaming goroutine sends
+	// anything, so no per-row / per-checkpoint read of the mutable global races a
+	// test override (and the budget is stable across this session's reconnects).
+	flushBudget := sql.TxnSoftFlushBytes
 	if pos != nil {
 		posProto := &dialectpb.MySQLBinLogPosition{}
 		if err := proto.Unmarshal(pos, posProto); err != nil {
@@ -554,7 +558,7 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			// snapshot_progress) so a restart after snapshot
 			// completion but before the first binlog commit
 			// starts streaming instead of re-running snapshot.
-			posProto := &dialectpb.MySQLBinLogPosition{Name: lastPos.Name, Pos: lastPos.Pos, GtidSet: snapshotGTID, RefreshEpoch: currentEpoch, ChunkTag: chunkTag(config)}
+			posProto := &dialectpb.MySQLBinLogPosition{Name: lastPos.Name, Pos: lastPos.Pos, GtidSet: snapshotGTID, RefreshEpoch: currentEpoch, ChunkTag: chunkTag(config, flushBudget)}
 			bs, err := proto.Marshal(posProto)
 			if err != nil {
 				return err
@@ -682,7 +686,8 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			// changed and a replayed same-coordinate multi-part could mis-drop a
 			// row — flag its soft-flushes. 0 (a pre-feature checkpoint) means no
 			// baseline, so never trip.
-			chunkingChanged: resumeChunkTag != 0 && resumeChunkTag != chunkTag(config),
+			chunkingChanged: resumeChunkTag != 0 && resumeChunkTag != chunkTag(config, flushBudget),
+			flushBudget:     flushBudget,
 		}
 		// Seed the consumed GTID set (the same set we resumed by) so streaming
 		// checkpoints carry the full set (snapshot ∪ streamed) and it keeps advancing
@@ -829,6 +834,13 @@ type MySQLEventHandler struct {
 	// soft-flush at/below the highwater first, and a transaction no longer
 	// oversized under the new budget re-applies idempotently to the keyed sink.
 	chunkingChanged bool
+
+	// flushBudget is the soft-flush byte budget captured once at Ingest start
+	// (a snapshot of the global sql.TxnSoftFlushBytes). The worker reads THIS,
+	// not the mutable global, on every row and checkpoint — so a test overriding
+	// the budget can't race the streaming goroutine, and the budget stays stable
+	// for the whole session.
+	flushBudget int
 
 	// pending accumulates entities from row events until the transaction commits
 	// (an XID event), so one MySQL transaction maps to one cluster.Proposal.
@@ -1089,7 +1101,7 @@ func (h *MySQLEventHandler) handleRows(ctx context.Context, header *replication.
 		// Byte-bounded soft flush: a transaction that cannot fit one proposal
 		// is applied as ordered parts (the documented bounded exception — see
 		// sql.TxnSoftFlushBytes).
-		if h.pendingBytes >= sql.TxnSoftFlushBytes {
+		if h.pendingBytes >= h.flushBudget {
 			if err := h.flushPending(ctx, true); err != nil {
 				return err
 			}
@@ -1369,7 +1381,7 @@ func (h *MySQLEventHandler) handleXID(ctx context.Context, header *replication.E
 	h.consumedGTID = merged
 	h.curTxnGTID = nil
 
-	posProto := &dialectpb.MySQLBinLogPosition{Name: pos.Name, Pos: pos.Pos, RefreshEpoch: h.epoch, ChunkTag: chunkTag(h.config)}
+	posProto := &dialectpb.MySQLBinLogPosition{Name: pos.Name, Pos: pos.Pos, RefreshEpoch: h.epoch, ChunkTag: chunkTag(h.config, h.flushBudget)}
 	if h.consumedGTID != nil {
 		posProto.GtidSet = h.consumedGTID.String()
 	}
@@ -1611,10 +1623,15 @@ const chunkRenderingVersion = 1
 // shift an as-yet-uncommitted row into a part whose SourceSeq the dedup would
 // drop — silent loss — so those replayed parts are flagged DedupUnsafe and the
 // worker freezes. Never returns 0 (reserved for "no baseline recorded").
-func chunkTag(config *sql.Config) uint64 {
+//
+// budget is passed in (not read from the global sql.TxnSoftFlushBytes) so it is
+// captured once at Ingest start — the checkpoint path runs on the worker
+// goroutine, and a test that overrides the budget must not race a per-checkpoint
+// global read.
+func chunkTag(config *sql.Config, budget int) uint64 {
 	h := fnv.New64a()
 	var buf [8]byte
-	binary.LittleEndian.PutUint64(buf[:], uint64(sql.TxnSoftFlushBytes)) //nolint:gosec // G115: budget is a positive byte count
+	binary.LittleEndian.PutUint64(buf[:], uint64(budget)) //nolint:gosec // G115: budget is a positive byte count
 	_, _ = h.Write(buf[:])
 	binary.LittleEndian.PutUint64(buf[:], chunkRenderingVersion)
 	_, _ = h.Write(buf[:])

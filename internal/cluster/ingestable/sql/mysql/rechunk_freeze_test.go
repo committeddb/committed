@@ -23,15 +23,13 @@ func TestChunkTag_SensitiveToBudgetAndConfig(t *testing.T) {
 		PrimaryKey: []string{"id"},
 	}
 
-	base := chunkTag(cfg)
+	base := chunkTag(cfg, sql.TxnSoftFlushBytes)
 	require.NotZero(t, base, "chunkTag must never be 0 for a real config (0 = no baseline)")
-	require.Equal(t, base, chunkTag(cfg), "chunkTag must be deterministic for the same inputs")
+	require.Equal(t, base, chunkTag(cfg, sql.TxnSoftFlushBytes), "chunkTag must be deterministic for the same inputs")
 
 	// A flush-budget change (the ticket's "test hook on budget") must change it.
-	restore := SetTxnSoftFlushBytesForTest(sql.TxnSoftFlushBytes / 2)
-	changedBudget := chunkTag(cfg)
-	restore()
-	require.NotEqual(t, base, changedBudget, "a flush-budget change must change the chunk tag")
+	require.NotEqual(t, base, chunkTag(cfg, sql.TxnSoftFlushBytes/2),
+		"a flush-budget change must change the chunk tag")
 
 	// A config rendering change (a column rename) must change it.
 	cfg2 := &sql.Config{
@@ -39,7 +37,7 @@ func TestChunkTag_SensitiveToBudgetAndConfig(t *testing.T) {
 		Mappings:   []sql.Mapping{{JsonName: "a", SQLColumn: "col_RENAMED"}},
 		PrimaryKey: []string{"id"},
 	}
-	require.NotEqual(t, base, chunkTag(cfg2), "a mapping change must change the chunk tag")
+	require.NotEqual(t, base, chunkTag(cfg2, sql.TxnSoftFlushBytes), "a mapping change must change the chunk tag")
 }
 
 // TestFlushPending_FlagsRechunkSoftFlush pins the re-chunk half of the freeze
