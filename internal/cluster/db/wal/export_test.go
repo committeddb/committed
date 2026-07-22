@@ -136,6 +136,30 @@ func (s *Storage) MarkScrubCompleteForTest(bound uint64) error {
 	return s.markScrubComplete(bound)
 }
 
+// SetFailCompactionForTest forces compactLocked to fail, reproducing an
+// ENOSPC/crashed compaction so a test can assert the erased key is re-driven out
+// of bbolt on the next Open. Pass nil to restore normal compaction.
+func (s *Storage) SetFailCompactionForTest(fn func() error) { s.failCompactionForTest = fn }
+
+// IsCompactOwedForTest reports whether the durable compaction-owed marker is set
+// (a scrub pruned tombstones but hasn't finished compacting bbolt).
+func (s *Storage) IsCompactOwedForTest() bool {
+	var owed bool
+	_ = s.view(func(tx *bolt.Tx) error {
+		bkt := tx.Bucket(pendingScrubBucket)
+		if bkt == nil {
+			return nil
+		}
+		owed = bkt.Get(scrubCompactOwedKey) != nil
+		return nil
+	})
+	return owed
+}
+
+// BoltPathForTest returns the on-disk path of the live bbolt file so a test can
+// read its raw bytes and assert an erased subject key is physically gone.
+func (s *Storage) BoltPathForTest() string { return s.keyValueStorage.Path() }
+
 // FirstEventIndex exposes the firstEventIndex atomic (raft index of the first
 // event-log entry) for determinism assertions after a scrub.
 func (s *Storage) FirstEventIndex() uint64 {

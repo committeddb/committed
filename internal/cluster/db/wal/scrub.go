@@ -102,6 +102,12 @@ func (s *Storage) scrubWorker() {
 		case <-s.scrubStop:
 			return
 		case <-s.scrubSignal:
+			// Finish any physical erasure a prior scrub pruned but couldn't
+			// compact (crash/ENOSPC) before processing new bounds — the completed
+			// bound wouldn't otherwise re-drive it. See runOwedCompaction.
+			if err := s.runOwedCompaction(); err != nil {
+				s.logger.Error("run owed compaction", zap.Error(err))
+			}
 			if err := s.runPendingScrub(); err != nil {
 				// Leave the pending bound set; a later signal or a restart
 				// retries. The rewrite is idempotent, so a retry is safe.
@@ -617,6 +623,18 @@ func (s *Storage) markScrubComplete(bound uint64) error {
 		if perr != nil {
 			return perr
 		}
+		if pruned {
+			// A prune only FREES the pages holding the raw subject key; the bytes
+			// remain until compaction rewrites the file, and CreateSnapshot copies
+			// free pages. Record "compaction owed" IN THIS TX so that if the
+			// compaction below fails (ENOSPC) or the process crashes before it
+			// finishes, the physical erasure is re-driven on the next Open / scrub
+			// signal (runOwedCompaction) — the "completed" bound advanced here must
+			// NOT be the only gate, or the erasure would be suppressed forever.
+			if err := bkt.Put(scrubCompactOwedKey, []byte{1}); err != nil {
+				return err
+			}
+		}
 		var buf [8]byte
 		binary.BigEndian.PutUint64(buf[:], bound)
 		return bkt.Put(scrubCompletedKey, buf[:])
@@ -626,9 +644,10 @@ func (s *Storage) markScrubComplete(bound uint64) error {
 	}
 	// Still under kvMu.Lock: compact away the freed tombstone pages before any
 	// reader (CreateSnapshot) can observe them. Only when something was pruned —
-	// compaction is an O(bbolt) rewrite.
+	// compaction is an O(bbolt) rewrite. On success this clears the owed marker;
+	// on failure the marker persists so the erasure completes on a later retry.
 	if pruned {
-		if err := s.compactLocked(); err != nil {
+		if err := s.compactAndClearOwedLocked(); err != nil {
 			return err
 		}
 	}
@@ -646,6 +665,53 @@ func (s *Storage) markScrubComplete(bound uint64) error {
 	s.metadataBacklog.Store(0)
 	s.metadataBacklogBytes.Store(0)
 	return nil
+}
+
+// compactAndClearOwedLocked physically compacts bbolt — dropping the freed
+// tombstone-key pages so the erased subject identifier leaves the file and every
+// subsequent snapshot — and, ONLY on success, clears the durable
+// compaction-owed marker. Caller holds kvMu.Lock. On a compaction failure the
+// marker stays set, so runOwedCompaction re-drives the erasure later.
+func (s *Storage) compactAndClearOwedLocked() error {
+	if err := s.compactLocked(); err != nil {
+		return err
+	}
+	return s.keyValueStorage.Update(func(tx *bolt.Tx) error {
+		bkt := tx.Bucket(pendingScrubBucket)
+		if bkt == nil {
+			return ErrBucketMissing
+		}
+		return bkt.Delete(scrubCompactOwedKey)
+	})
+}
+
+// runOwedCompaction re-drives a bbolt compaction that a prior markScrubComplete
+// pruned RTBF tombstones for but did not finish — a crash or a non-fatal
+// compaction error (e.g. ENOSPC) in the window after the prune committed and the
+// "completed" bound advanced. Because compaction is gated on "did THIS call
+// prune", a retry never re-satisfies it and the already-advanced bound
+// suppresses re-run; the durable scrubCompactOwedKey marker breaks that, so the
+// physical erasure completes on the next Open / scrub signal instead of leaving
+// the subject key in bbolt (and every snapshot) forever. Idempotent — a no-op
+// when nothing is owed, and compacting an already-compact file is harmless.
+func (s *Storage) runOwedCompaction() error {
+	s.kvMu.Lock()
+	defer s.kvMu.Unlock()
+	var owed bool
+	if err := s.keyValueStorage.View(func(tx *bolt.Tx) error {
+		bkt := tx.Bucket(pendingScrubBucket)
+		if bkt == nil {
+			return nil
+		}
+		owed = bkt.Get(scrubCompactOwedKey) != nil
+		return nil
+	}); err != nil {
+		return err
+	}
+	if !owed {
+		return nil
+	}
+	return s.compactAndClearOwedLocked()
 }
 
 // metadataBacklogThreshold is how many system-tombstonable metadata writes must

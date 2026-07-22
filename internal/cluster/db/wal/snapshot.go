@@ -410,6 +410,11 @@ func (s *Storage) refreshAfterRestore() {
 // committed prune and this compaction would let a snapshot serialize the
 // freed-but-uncompacted key. markScrubComplete holds the lock across both.
 func (s *Storage) compactLocked() error {
+	if s.failCompactionForTest != nil {
+		if err := s.failCompactionForTest(); err != nil {
+			return err
+		}
+	}
 	boltPath := s.keyValueStorage.Path()
 	boltOpts := &bolt.Options{Timeout: 1 * time.Second}
 	tmpPath := filepath.Join(filepath.Dir(boltPath), fmt.Sprintf("%s%d", boltCompactTmpPrefix, time.Now().UnixNano()))

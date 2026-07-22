@@ -129,6 +129,14 @@ var (
 	pendingScrubBucket   = []byte("pendingScrub")
 	pendingScrubBoundKey = []byte("bound")
 	scrubCompletedKey    = []byte("completed")
+	// scrubCompactOwedKey marks that a scrub PRUNED RTBF tombstones but has not
+	// yet physically compacted bbolt. It is written in the SAME tx as the prune
+	// and cleared only after compaction succeeds, so a compaction that ENOSPCs or
+	// crashes (leaving the erased subject key in freed pages that CreateSnapshot
+	// would copy) is re-driven on the next Open / scrub signal instead of being
+	// suppressed forever by the already-advanced "completed" bound. See
+	// markScrubComplete / runOwedCompaction.
+	scrubCompactOwedKey = []byte("compactOwed")
 )
 
 // internalEntity binds a built-in entity type to the bucket it lives in and
@@ -232,6 +240,10 @@ type Storage struct {
 	scrubStop     chan struct{}
 	scrubDone     chan struct{}
 	scrubStopOnce sync.Once
+	// failCompactionForTest, when non-nil, forces compactLocked to fail — used to
+	// reproduce an ENOSPC/crashed compaction so a test can assert the erased key
+	// is re-driven out of bbolt on the next Open. Nil in production.
+	failCompactionForTest func() error
 	// closeOnce makes Close idempotent: db.Close now closes the Storage it owns,
 	// and some callers (and tests) may close it directly too, so a second Close
 	// must be a no-op rather than double-closing the bbolt/WAL handles.
@@ -826,6 +838,15 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	}
 	ws.lastScrubbedBound.Store(completed)
 	go ws.scrubWorker()
+
+	// Complete any RTBF compaction a prior scrub pruned tombstones for but didn't
+	// finish (crash/ENOSPC after the prune committed). The already-advanced
+	// "completed" bound would otherwise suppress the re-run, leaving the erased
+	// subject key physically in bbolt and every snapshot. Synchronous at Open so a
+	// restart heals it before this node can serve/snapshot. See runOwedCompaction.
+	if err := ws.runOwedCompaction(); err != nil {
+		ws.logger.Error("run owed compaction on open", zap.Error(err))
+	}
 
 	// Re-derive the sync-stuck gauge from any applied stuck records. The apply
 	// path (handleSyncableStuck) is what normally sets it, but it doesn't run for
