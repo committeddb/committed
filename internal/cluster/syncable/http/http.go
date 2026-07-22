@@ -200,18 +200,20 @@ func (s *Syncable) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldS
 
 // ClassifyStatus maps HTTP status codes to error semantics:
 //   - 2xx: success (nil)
-//   - 408, 429: transient (retryable)
-//   - other 4xx: permanent (skip proposal)
-//   - 5xx: transient (retryable)
+//   - 422, 451: permanent (this entry's DATA is rejected — dead-letter it)
+//   - every other non-2xx (400, 401, 403, 404, 405, 407, 408, 410, 413, 415,
+//     429, 3xx, 5xx, unknown): transient
 //
 // The boundary is the Syncable contract's classification rule: Permanent MUST
-// mean ENTRY-SPECIFIC — the receiver rejected THIS payload and will reject it
-// identically forever (400, 413, 415, 422, 451), so dead-lettering it and
-// moving on is correct. An error that would fail EVERY entry identically is
-// access- or config-shaped — auth (401/403/407: a rotated token), routing
-// (404/405/410: a wrong path or retired endpoint), redirects (3xx surfacing
-// means redirect misconfiguration), timing (408/429), and every server-side
-// 5xx — and stays TRANSIENT: the worker wedges visibly (the stuck machinery
+// mean ENTRY-SPECIFIC — the receiver rejected THIS payload's data and will
+// reject it identically forever (422 unprocessable, 451 legally blocked), so
+// dead-lettering it and moving on is correct. An error that would fail EVERY
+// entry identically is access-, config-, or request-shaped — auth (401/403/407:
+// a rotated token), routing (404/405/410: a wrong path or retired endpoint),
+// envelope/size/media (400/413/415: a receiver rejecting committed's fixed
+// envelope, its body cap, or its constant Content-Type — every entity alike),
+// redirects (3xx surfacing means redirect misconfiguration), timing (408/429),
+// and every server-side 5xx — and stays TRANSIENT: the worker wedges visibly (the stuck machinery
 // engages, the operator fixes the token/URL, delivery resumes with zero data
 // missing downstream) instead of dead-lettering up to a breaker-run of real
 // events that then need one-at-a-time replay. Unknown codes default to
