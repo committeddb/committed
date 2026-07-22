@@ -7,9 +7,44 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/db"
+	parser "github.com/committeddb/committed/internal/cluster/db/parser"
+	"github.com/committeddb/committed/internal/cluster/db/wal"
+	"github.com/committeddb/committed/internal/cluster/metrics"
 )
+
+// syncStuckGauge reads the committed.sync.stuck gauge for a syncable id (its
+// attribute key is syncable_id, not id).
+func syncStuckGauge(t *testing.T, reader *sdkmetric.ManualReader, id string) float64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		return -1
+	}
+	for _, sm := range rm.ScopeMetrics {
+		for _, met := range sm.Metrics {
+			if met.Name != "committed.sync.stuck" {
+				continue
+			}
+			g, ok := met.Data.(metricdata.Gauge[float64])
+			if !ok {
+				return -1
+			}
+			for _, dp := range g.DataPoints {
+				for _, a := range dp.Attributes.ToSlice() {
+					if string(a.Key) == "syncable_id" && a.Value.AsString() == id {
+						return dp.Value
+					}
+				}
+			}
+		}
+	}
+	return -1
+}
 
 // Worker-lifecycle conformance: the executable guards for the control-plane
 // contracts the round-8 fixes restore. Each asserts a recovery/derived state
@@ -85,4 +120,47 @@ func TestStuckRecordConformance_StillStuckReplacementKeepsRecord(t *testing.T) {
 	require.Never(t, func() bool { _, ok, _ := d.SyncableStuck(id); return !ok },
 		1*time.Second, 20*time.Millisecond,
 		"a still-stuck replacement must keep the adopted record continuously (no delete-on-startup flap)")
+}
+
+// TestStuckGaugeConformance_DerivedFromAppliedRecord pins round-8 #4: the
+// committed.sync.stuck gauge is DERIVED from the applied SyncableStuck record on
+// the apply path (handleSyncableStuck) — set when the record applies, cleared
+// when the delete applies — not toggled imperatively by the worker. Because
+// every node runs the apply path, the gauge converges cluster-wide (a follower
+// no longer latches it at 1). This test exercises the derivation single-node
+// (publish→apply→1, delete→apply→0); the multi-node convergence follows from the
+// derivation being on the apply path every node runs.
+func TestStuckGaugeConformance_DerivedFromAppliedRecord(t *testing.T) {
+	// Metrics must be wired to the WAL (so the apply path can emit) AND the DB,
+	// exactly as cmd does; a reader collects the gauge.
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+	m := metrics.New(provider.Meter("test"))
+
+	dir := t.TempDir()
+	p := parser.New()
+	s, err := wal.Open(dir, p, nil, nil, wal.WithoutFsync(), wal.WithMetrics(m))
+	require.NoError(t, err)
+	d := db.New(uint64(1), db.Peers{1: ""}, s, p, nil, nil,
+		db.WithTickInterval(testTickInterval), db.WithMetrics(m),
+		db.WithSyncStuckThreshold(50*time.Millisecond))
+	t.Cleanup(func() { _ = d.Close(); _ = s.Close() })
+
+	id := "gauge-derive"
+	seedSyncableConfig(t, d, id)
+	seedUserProposals(t, d, s, "evt", []string{"poison", "ok"})
+
+	// Worker wedges → publishes the record → the apply derives the gauge to 1.
+	require.NoError(t, d.Sync(context.Background(), id,
+		&transientSyncable{stuck: map[string]bool{"poison": true}, transientErr: fmt.Errorf("boom")}))
+	require.Eventually(t, func() bool { return syncStuckGauge(t, reader, id) == 1.0 },
+		10*time.Second, 10*time.Millisecond,
+		"the stuck gauge must derive to 1 from the applied SyncableStuck record")
+
+	// Healthy replacement clears on progress → the delete applies → gauge to 0.
+	require.NoError(t, d.Sync(context.Background(), id, &transientSyncable{stuck: map[string]bool{}}))
+	require.Eventually(t, func() bool { return syncStuckGauge(t, reader, id) == 0.0 },
+		10*time.Second, 10*time.Millisecond,
+		"the stuck gauge must derive to 0 when the record's delete applies")
 }

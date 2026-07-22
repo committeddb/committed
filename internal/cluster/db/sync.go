@@ -429,7 +429,11 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 			retryActual = nil
 			lastSeen, lastBumped = 0, 0
 			pendingCount = 0
-			tracker.cleared(ctx)
+			// Do NOT clear the stuck record on leadership loss. The record is
+			// cluster-wide replicated state — losing leadership does not unstick
+			// the syncable; the new owner adopts it (or re-wedges) and clears it on
+			// progress. Deleting it here would flap it (and, via the derived gauge,
+			// drop then re-raise the alert) on every leadership change.
 			progressed = true
 		case !isNode && db.isNode(id):
 			db.logger.Info("starting sync", zap.String("id", id))
@@ -784,7 +788,8 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 			isNode = false
 			batch = batch[:0]
 			retryBatch = false
-			tracker.cleared(ctx)
+			// Do NOT clear the stuck record on leadership loss — it is cluster-wide;
+			// the new owner clears it on progress. See the single-flush worker.
 			progressed = true
 		case !isNode && db.isNode(id):
 			db.logger.Info("starting sync", zap.String("id", id))

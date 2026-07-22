@@ -47,11 +47,10 @@ func (db *DB) newStuckTracker(id string) *stuckTracker {
 		t.published = true
 		t.index = rec.Index
 		t.since = time.Unix(0, rec.SinceUnixNano)
-		if db.metrics != nil {
-			// Reflect the adopted record on this node's gauge (it may be a
-			// freshly-elected leader that never published it itself).
-			db.metrics.SetSyncStuck(id, true)
-		}
+		// The gauge is NOT set here: it is derived from the applied SyncableStuck
+		// record on every node (handleSyncableStuck), so an adopting worker — and
+		// every follower — already reflects it. Toggling it here is what latched
+		// it at 1 on followers.
 	}
 	return t
 }
@@ -88,9 +87,8 @@ func (t *stuckTracker) wedged(ctx context.Context, index uint64, lastErr error) 
 		return
 	}
 	t.published = true
-	if t.db.metrics != nil {
-		t.db.metrics.SetSyncStuck(t.id, true)
-	}
+	// Gauge derived from the applied record (handleSyncableStuck), not toggled
+	// here — the proposeSyncableStuck above applies on every node and sets it.
 }
 
 // skipRequested reports whether an operator has asked the worker to skip the
@@ -121,9 +119,8 @@ func (t *stuckTracker) cleared(ctx context.Context) {
 		if err := t.db.proposeDeleteSyncableStuck(ctx, t.id); err != nil {
 			t.db.logger.Warn("clear stuck status failed", zap.String("id", t.id), zap.Error(err))
 		}
-		if t.db.metrics != nil {
-			t.db.metrics.SetSyncStuck(t.id, false)
-		}
+		// Gauge derived from the applied record (handleSyncableStuck): the delete
+		// above applies on every node and clears it. Not toggled here.
 	}
 	t.since = time.Time{}
 	t.index = 0

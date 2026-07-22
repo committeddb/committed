@@ -13,18 +13,35 @@ import (
 // syncable id (last-writer-wins) — the worker publishes "blocked on index N"
 // and deletes it on progress.
 func (s *Storage) handleSyncableStuck(e *cluster.Entity, _ uint64) error {
+	id := string(e.Key)
 	if e.IsDelete() {
-		return s.deleteKeyed(syncableStuckBucket, e.Key)
+		if err := s.deleteKeyed(syncableStuckBucket, e.Key); err != nil {
+			return err
+		}
+	} else {
+		st := &cluster.SyncableStuck{}
+		if err := st.Unmarshal(e.Data); err != nil {
+			return err
+		}
+		id = st.ID
+		// Guard: a stuck record persists only while the syncable config exists, so a
+		// worker bump that commits after DeleteSyncable (or replays before a same-id
+		// recreate) can't leave an orphan a recreate would misreport as "blocked on
+		// index N". Reaps any lingering value when the config is gone.
+		if err := s.putConfigGuardedKeyed(syncableBucket, syncableStuckBucket, []byte(st.ID), e.Data); err != nil {
+			return err
+		}
 	}
-	st := &cluster.SyncableStuck{}
-	if err := st.Unmarshal(e.Data); err != nil {
-		return err
+	// Derive the sync-stuck gauge from the APPLIED record on THIS node — present
+	// ⇒ stuck, absent (deleted, or reaped by the config guard) ⇒ not. Every node
+	// runs the apply path, so the gauge converges cluster-wide by construction
+	// (companion determinism); the worker no longer toggles it imperatively,
+	// which latched it at 1 on followers that never ran the owner's clear.
+	if s.metrics != nil {
+		_, present, _ := s.SyncableStuck(id)
+		s.metrics.SetSyncStuck(id, present)
 	}
-	// Guard: a stuck record persists only while the syncable config exists, so a
-	// worker bump that commits after DeleteSyncable (or replays before a same-id
-	// recreate) can't leave an orphan a recreate would misreport as "blocked on
-	// index N". Reaps any lingering value when the config is gone.
-	return s.putConfigGuardedKeyed(syncableBucket, syncableStuckBucket, []byte(st.ID), e.Data)
+	return nil
 }
 
 // SyncableStuck returns the syncable's current stuck record, or ok=false if
