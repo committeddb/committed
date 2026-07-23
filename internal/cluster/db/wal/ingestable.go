@@ -89,7 +89,11 @@ func (s *Storage) saveIngestable(t *cluster.Configuration, raftIndex uint64) err
 	}
 
 	if built && s.ingest != nil {
-		s.ingest <- &db.IngestableWithID{ID: t.ID, Ingestable: ingestable}
+		select {
+		case s.ingest <- &db.IngestableWithID{ID: t.ID, Ingestable: ingestable}:
+		case <-s.closeC:
+			s.logger.Debug("storage closing; dropped ingestable notification (reconcile re-emits on next start)", zap.String("id", t.ID))
+		}
 	}
 
 	return nil
@@ -130,7 +134,11 @@ func (s *Storage) deleteIngestable(id []byte) error {
 	// so the signal carries only the ID.
 	if s.ingest != nil {
 		s.logger.Debug("sending ingestable delete to channel", zap.String("id", string(id)))
-		s.ingest <- &db.IngestableWithID{ID: string(id), Delete: true}
+		select {
+		case s.ingest <- &db.IngestableWithID{ID: string(id), Delete: true}:
+		case <-s.closeC:
+			s.logger.Debug("storage closing; dropped ingestable delete notification (reconcile re-emits on next start)", zap.String("id", string(id)))
+		}
 	}
 
 	return nil
@@ -145,7 +153,13 @@ func (s *Storage) RequestIngestReconcile() {
 	if s.ingest == nil {
 		return
 	}
-	s.ingest <- &db.IngestableWithID{ReconcileList: s.reconcileIngestableList}
+	// Detached-goroutine sender; escape on closeC so it can't strand past
+	// shutdown. See RequestSyncReconcile.
+	select {
+	case s.ingest <- &db.IngestableWithID{ReconcileList: s.reconcileIngestableList}:
+	case <-s.closeC:
+		s.logger.Debug("storage closing; skipped ingest reconcile request")
+	}
 }
 
 // reconcileIngestableList: see reconcileSyncableList.

@@ -410,6 +410,18 @@ image can be templated per-node by an orchestrator:
 		}
 
 		exitCode := runNode(d, h.NewServer(addr, serverOpts...))
+
+		// runNode always closes the DB (raft + workers) before returning; now
+		// close the WAL Storage we own. db.Close deliberately leaves this to the
+		// owner (so post-close storage.Database queries still work), but nothing
+		// was ever calling it — leaking the background scrubber goroutine and the
+		// SQL sink connection pools, and skipping the final WAL/bbolt handle close,
+		// on every shutdown. Closing here also releases any config-notification
+		// sender still blocked on the sync/ingest channel (see Storage.closeC).
+		if err := s.Close(); err != nil {
+			zap.L().Warn("shutdown.storage_close_error", zap.Error(err))
+		}
+
 		if exitCode != 0 {
 			os.Exit(exitCode)
 		}

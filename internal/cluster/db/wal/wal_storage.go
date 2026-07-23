@@ -244,11 +244,20 @@ type Storage struct {
 	// reproduce an ENOSPC/crashed compaction so a test can assert the erased key
 	// is re-driven out of bbolt on the next Open. Nil in production.
 	failCompactionForTest func() error
-	// closeOnce makes Close idempotent: db.Close now closes the Storage it owns,
-	// and some callers (and tests) may close it directly too, so a second Close
-	// must be a no-op rather than double-closing the bbolt/WAL handles.
+	// closeOnce makes Close idempotent: the owner (cmd/node) closes the Storage
+	// after db.Close returns, and some callers (and tests) may close it more than
+	// once, so a second Close must be a no-op rather than double-closing the
+	// bbolt/WAL handles.
 	closeOnce sync.Once
 	closeErr  error
+	// closeC is closed (once, at the top of Close) to signal "this Storage is
+	// shutting down." The config-notification sends (saveSyncable/deleteSyncable
+	// and their ingest twins on the apply path, plus RequestSyncReconcile/
+	// RequestIngestReconcile from the detached restore/startup goroutines) select
+	// on it so a send whose db-layer listener has already stopped draining escapes
+	// instead of stranding on the unbuffered channel forever. A dropped
+	// notification is re-emitted by reconcile on the next start, so nothing is lost.
+	closeC chan struct{}
 	// scrubGen increments on every completed scrub swap. A scrub re-densifies
 	// the wal sequence numbers, so a Reader's cached walSeq cursor becomes
 	// stale across a swap. Readers compare this against the generation they
@@ -614,6 +623,7 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		scrubSignal:     make(chan struct{}, 1),
 		scrubStop:       make(chan struct{}),
 		scrubDone:       make(chan struct{}),
+		closeC:          make(chan struct{}),
 	}
 
 	fi, err := entryLog.FirstIndex()
@@ -861,6 +871,13 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 func (s *Storage) Close() error {
 	s.closeOnce.Do(func() {
 		var finalErr error
+
+		// Release any config-notification sender (apply-path or a detached
+		// reconcile goroutine) that is blocked on the unbuffered sync/ingest
+		// channel because the db-layer listener has already stopped draining.
+		// Closed before the log/handle closes below so a straggler send unblocks
+		// promptly rather than stranding for the life of the process.
+		close(s.closeC)
 
 		// Stop the background scrubber before closing the event log it rewrites.
 		// scrubStop signals it; scrubDone confirms it has returned (so no swap is
