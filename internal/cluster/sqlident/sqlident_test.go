@@ -48,6 +48,19 @@ func TestEscapeStringLiteral_DoublesSingleQuotes(t *testing.T) {
 	require.Equal(t, "O''Brien", sqlident.EscapeStringLiteral("O'Brien"))
 	// A JSON-key breakout attempt: the closing quote is neutralized by doubling.
 	require.Equal(t, "x'','' ; DROP", sqlident.EscapeStringLiteral("x',' ; DROP"))
+	// The PostgreSQL form leaves a backslash literal (standard_conforming_strings=on):
+	// doubling it would corrupt a legitimate backslash-bearing key.
+	require.Equal(t, `k\`, sqlident.EscapeStringLiteral(`k\`))
+}
+
+func TestEscapeStringLiteralMySQL_DoublesBackslashAndQuote(t *testing.T) {
+	require.Equal(t, "plain", sqlident.EscapeStringLiteralMySQL("plain"))
+	require.Equal(t, "O''Brien", sqlident.EscapeStringLiteralMySQL("O'Brien"))
+	// Under MySQL's default sql_mode a trailing backslash would escape the closing
+	// quote of the surrounding literal; doubling it keeps the value contained.
+	require.Equal(t, `k\\`, sqlident.EscapeStringLiteralMySQL(`k\`))
+	// Mixed backslash + quote: both are doubled (the two passes are independent).
+	require.Equal(t, `a\\''b`, sqlident.EscapeStringLiteralMySQL(`a\'b`))
 }
 
 func TestValidIdent(t *testing.T) {

@@ -65,15 +65,16 @@ func mysqlAggSubquery(spec sql.AggregateSpec, ph string) string {
 	for i, e := range spec.Enrichments {
 		alias := fmt.Sprintf("d%d", i)
 		// e.Dimension is a config-derived table (quote); e.OnField is a JSON key
-		// landing inside a '$.<key>' path literal (escape the ' so it can't break
-		// out). The alias and Sidecar* columns are fixed, so they stay raw.
+		// landing inside a '$.<key>' path literal (MySQL-escape the ' AND the \ so
+		// it can't break out). The alias and Sidecar* columns are fixed, so they
+		// stay raw.
 		fmt.Fprintf(&joins, " LEFT JOIN %s %s ON s.%s->>'$.%s' = %s.%s",
-			mysqlIdent.Table(e.Dimension), alias, sql.SidecarElement, sqlident.EscapeStringLiteral(e.OnField), alias, sql.LookupKey)
+			mysqlIdent.Table(e.Dimension), alias, sql.SidecarElement, sqlident.EscapeStringLiteralMySQL(e.OnField), alias, sql.LookupKey)
 		for _, f := range e.Selects {
 			// f.Output lands in a '<key>' object-key literal, f.Source in a
-			// '$.<key>' path literal — escape both.
+			// '$.<key>' path literal — MySQL-escape both.
 			fmt.Fprintf(&build, ",'%s',JSON_EXTRACT(%s.%s,'$.%s')",
-				sqlident.EscapeStringLiteral(f.Output), alias, sql.LookupFields, sqlident.EscapeStringLiteral(f.Source))
+				sqlident.EscapeStringLiteralMySQL(f.Output), alias, sql.LookupFields, sqlident.EscapeStringLiteralMySQL(f.Source))
 		}
 	}
 	element := fmt.Sprintf("JSON_MERGE_PATCH(s.%s,JSON_OBJECT(%s))", sql.SidecarElement, strings.TrimPrefix(build.String(), ","))
@@ -121,10 +122,10 @@ func (d *MySQLDialect) CreateLookupDimensionDDL(spec sql.LookupSpec) string {
 
 // CreateAggregateAffectedParentsSQL implements Dialect; MySQL extracts the
 // element field with `->>'$.field'` and binds the changed dimension key with ?.
-// onField is a JSON key inside a '$.<key>' path literal, so its single quotes are
-// escaped; SidecarElement is a fixed column.
+// onField is a JSON key inside a '$.<key>' path literal, so its single quotes AND
+// backslashes are MySQL-escaped; SidecarElement is a fixed column.
 func (d *MySQLDialect) CreateAggregateAffectedParentsSQL(spec sql.AggregateSpec, onField string) string {
-	extract := fmt.Sprintf("%s->>'$.%s'", sql.SidecarElement, sqlident.EscapeStringLiteral(onField))
+	extract := fmt.Sprintf("%s->>'$.%s'", sql.SidecarElement, sqlident.EscapeStringLiteralMySQL(onField))
 	return createAggregateAffectedParentsSQL(spec, extract, "?", mysqlIdent)
 }
 

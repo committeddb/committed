@@ -137,6 +137,39 @@ func TestMySQL_EscapesEnrichmentJSONKeyLiterals(t *testing.T) {
 	require.NotContains(t, got, `->>'$.cust'id'`)
 }
 
+// backslashSpec has enrichment JSON keys ending in a backslash — the character
+// MySQL (default sql_mode, NO_BACKSLASH_ESCAPES off) treats as an escape inside a
+// '...' literal, so a raw `k\` would escape the literal's closing quote and malform
+// the subquery. PostgreSQL (standard_conforming_strings=on) treats it literally, so
+// the two dialects must escape it differently.
+func backslashSpec() sql.AggregateSpec {
+	s := enrichedSpec()
+	s.Enrichments[0].OnField = `k\`
+	s.Enrichments[0].Selects = []sql.AggregateEnrichmentField{{Output: `out\`, Source: `src\`}}
+	return s
+}
+
+// TestMySQL_EscapesEnrichmentJSONKeyBackslash pins the S5 fix: MySQL must double a
+// backslash in every JSON-key literal (not only the single quote), or a
+// `\`-terminated key escapes the closing quote of its '$.<key>' literal — malforming
+// the subquery, and breaking a legitimate backslash key. Pre-fix (EscapeStringLiteral,
+// which leaves `\` untouched) the doubled forms below are absent and this fails.
+func TestMySQL_EscapesEnrichmentJSONKeyBackslash(t *testing.T) {
+	got := (&dialects.MySQLDialect{}).CreateAggregateMaterializeSQL(backslashSpec())
+	require.Contains(t, got, `'$.k\\'`, "OnField backslash must be doubled for MySQL")
+	require.Contains(t, got, `'out\\'`, "Output backslash must be doubled for MySQL")
+	require.Contains(t, got, `'$.src\\'`, "Source backslash must be doubled for MySQL")
+}
+
+// TestPostgres_LeavesEnrichmentBackslashLiteral pins the dialect difference: with
+// standard_conforming_strings a backslash is literal, so the PG form must NOT double
+// it — doubling would corrupt a legitimate backslash key.
+func TestPostgres_LeavesEnrichmentBackslashLiteral(t *testing.T) {
+	got := (&dialects.PostgreSQLDialect{}).CreateAggregateMaterializeSQL(backslashSpec())
+	require.Contains(t, got, `->>'k\'`, "PG must leave the backslash literal (single)")
+	require.NotContains(t, got, `->>'k\\'`, "PG must NOT double the backslash")
+}
+
 // TestAffectedParents_EscapesOnFieldLiteral covers the other JSON-key literal
 // site — the dimension-change fan-out query.
 func TestAffectedParents_EscapesOnFieldLiteral(t *testing.T) {

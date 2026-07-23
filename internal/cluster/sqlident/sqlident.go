@@ -56,10 +56,26 @@ func (q Quoter) Columns(s string) string {
 
 // EscapeStringLiteral doubles single quotes so s can be safely embedded inside a
 // '...' SQL string literal — e.g. a projection enrichment's JSON key/path, which
-// pgAggSubquery/mysqlAggSubquery interpolate into `->>'...'`. Dialect-independent:
-// both PostgreSQL and MySQL escape ' by doubling. It does NOT add the surrounding
-// quotes (the caller owns the literal's delimiters and any JSON-path prefix).
+// pgAggSubquery interpolates into `->>'...'`. This is the PostgreSQL form: with
+// the default standard_conforming_strings=on a backslash is literal, so doubling
+// the single quote is sufficient. MySQL's default sql_mode treats backslash as an
+// escape inside a literal, so it needs EscapeStringLiteralMySQL — do NOT use this
+// for MySQL. It does NOT add the surrounding quotes (the caller owns the literal's
+// delimiters and any JSON-path prefix).
 func EscapeStringLiteral(s string) string {
+	return strings.ReplaceAll(s, "'", "''")
+}
+
+// EscapeStringLiteralMySQL is the MySQL form of EscapeStringLiteral. Under MySQL's
+// default sql_mode (NO_BACKSLASH_ESCAPES off) a backslash is an escape character
+// inside a '...' literal, so a value ending in '\' would escape the closing quote
+// and run the literal on — malforming the surrounding SQL (e.g. mysqlAggSubquery's
+// `->>'$.<key>'`), and breaking a legitimate JSON key that merely contains a
+// backslash. Doubling both '\' and ' contains any value. The two replacements are
+// independent (neither introduces a character the other operates on), so order
+// does not matter. Like EscapeStringLiteral it does not add the surrounding quotes.
+func EscapeStringLiteralMySQL(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
 	return strings.ReplaceAll(s, "'", "''")
 }
 
