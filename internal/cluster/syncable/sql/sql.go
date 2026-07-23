@@ -87,6 +87,18 @@ func (c *Syncable) Teardown() error {
 }
 
 func (c *Syncable) Init() error {
+	// If Init fails after preparing one or more statements, close them before
+	// returning: the caller (the parser) discards this half-built Syncable, but
+	// the statements live server-side on the shared, re-POST-preserved *sql.DB
+	// pool, so without this they accumulate on the destination across every
+	// restart/reconcile re-parse until it hits its prepared-statement ceiling.
+	success := false
+	defer func() {
+		if !success {
+			_ = c.closeStatements()
+		}
+	}()
+
 	// Re-validate even though ParseConfig already did: directly constructed
 	// configs (tests, future callers) must hit the same wall before any DDL
 	// reaches the destination database.
@@ -172,6 +184,7 @@ func (c *Syncable) Init() error {
 		c.appliedMark = &AppliedMark{markSQL, markStmt}
 	}
 
+	success = true
 	return nil
 }
 
@@ -433,23 +446,32 @@ func (c *Syncable) applyRefreshBoundary(ctx context.Context, tx *sql.Tx, e *clus
 }
 
 func (c *Syncable) Close() error {
-	// Close both prepared statements; report the first error but always
-	// attempt the delete close so it does not leak when insert close fails.
-	err := c.insert.Stmt.Close()
-	if c.delete != nil {
-		if derr := c.delete.Stmt.Close(); err == nil {
-			err = derr
+	return c.closeStatements()
+}
+
+// closeStatements closes every prepared statement this syncable built, reporting
+// the first error but always attempting the rest so none leaks when one close
+// fails. It tolerates a partially-initialized syncable (any statement may be nil
+// if Init failed partway), so Init's error path reuses it to avoid leaking the
+// statements it already prepared onto the shared, long-lived *sql.DB pool.
+func (c *Syncable) closeStatements() error {
+	var err error
+	closeStmt := func(s *sql.Stmt) {
+		if s != nil {
+			if cerr := s.Close(); err == nil {
+				err = cerr
+			}
 		}
+	}
+	if c.insert != nil {
+		closeStmt(c.insert.Stmt)
+	}
+	if c.delete != nil {
+		closeStmt(c.delete.Stmt)
 	}
 	if c.appliedMark != nil {
-		if merr := c.appliedMark.Stmt.Close(); err == nil {
-			err = merr
-		}
+		closeStmt(c.appliedMark.Stmt)
 	}
-	if c.sweep != nil {
-		if serr := c.sweep.Close(); err == nil {
-			err = serr
-		}
-	}
+	closeStmt(c.sweep)
 	return err
 }

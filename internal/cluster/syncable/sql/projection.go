@@ -184,6 +184,22 @@ func (p *Projection) Teardown() error {
 }
 
 func (p *Projection) Init() error {
+	// If Init fails after preparing one or more statements, close them before
+	// returning: the parser discards this half-built Projection, but the
+	// statements live server-side on the shared, re-POST-preserved *sql.DB pool,
+	// so without this they accumulate on the destination across every
+	// restart/reconcile re-parse until it hits its prepared-statement ceiling.
+	// Every source is appended to p.sources at the top of the loop below (before
+	// its statements are prepared), and the two nested inits self-clean, so Close
+	// reaches everything this Init built. Projections prepare far more statements
+	// than a plain syncable, so this path matters more here.
+	success := false
+	defer func() {
+		if !success {
+			_ = p.Close()
+		}
+	}()
+
 	// Re-validate even though ParseConfig already did: directly
 	// constructed configs (tests, future callers) must hit the same
 	// wall before any DDL reaches the destination database.
@@ -206,6 +222,10 @@ func (p *Projection) Init() error {
 	enrichRefs := map[string][]enrichRef{}
 	for si, src := range p.config.Sources {
 		ps := &projectionSource{topic: src.Topic, keyPath: src.KeyPath, onDelete: src.OnDelete, when: src.When}
+		// Register ps NOW, before preparing its statements, so a partway failure
+		// leaves the statements it did prepare reachable from p.sources for the
+		// error-cleanup defer's Close (a failed nested init self-cleans separately).
+		p.sources[src.Topic] = append(p.sources[src.Topic], ps)
 		switch {
 		case src.Aggregate != nil:
 			spec := p.config.aggregateSpec(src.Aggregate)
@@ -252,7 +272,6 @@ func (p *Projection) Init() error {
 				ps.clear = clearStmt
 			}
 		}
-		p.sources[src.Topic] = append(p.sources[src.Topic], ps)
 	}
 
 	// Second pass: wire each lookup's fan-out. For every aggregate that enriches
@@ -283,6 +302,7 @@ func (p *Projection) Init() error {
 	}
 	p.delete = &Delete{deleteString, deleteStmt}
 
+	success = true
 	return nil
 }
 
@@ -313,6 +333,14 @@ func (p *Projection) initLookup(si int, src ProjectionSource) (*lookupRuntime, e
 		fields:    lk.Fields,
 		dimension: spec.Dimension,
 	}
+	// A partway failure below leaves rt unreturned (never stored on its source),
+	// so Projection.Close can't reach its statements — close them here.
+	success := false
+	defer func() {
+		if !success {
+			rt.closeStmts()
+		}
+	}()
 	dimConfig := dimensionConfig(spec.Dimension)
 	var err error
 	rt.upsertDimSQL = p.dialect.CreateSQL(dimConfig)
@@ -323,6 +351,7 @@ func (p *Projection) initLookup(si int, src ProjectionSource) (*lookupRuntime, e
 	if rt.deleteDim, err = p.db.Prepare(rt.deleteDimSQL); err != nil {
 		return nil, fmt.Errorf("%s prepare dimension delete [%s]: %w", where, rt.deleteDimSQL, err)
 	}
+	success = true
 	return rt, nil
 }
 
@@ -347,6 +376,14 @@ func (p *Projection) initAggregate(si int, src ProjectionSource, spec AggregateS
 		fields:     plainElementFields(ag.Element), // enriched fields are joined in, not stored
 		sidecar:    spec.Sidecar,
 	}
+	// A partway failure below leaves rt unreturned (never stored on its source),
+	// so Projection.Close can't reach its statements — close them here.
+	success := false
+	defer func() {
+		if !success {
+			rt.closeStmts()
+		}
+	}()
 	scConfig := sidecarConfig(spec.Sidecar)
 	prepare := func(label, sqlString string) (*gosql.Stmt, error) {
 		stmt, err := p.db.Prepare(sqlString)
@@ -377,6 +414,7 @@ func (p *Projection) initAggregate(si int, src ProjectionSource, spec AggregateS
 	if rt.rebuild, err = prepare("rebuild", rt.rebuildSQL); err != nil {
 		return nil, err
 	}
+	success = true
 	return rt, nil
 }
 
@@ -875,4 +913,26 @@ func (p *Projection) Close() error {
 		}
 	}
 	return err
+}
+
+// closeStmts closes the aggregate runtime's prepared statements (nil-tolerant).
+// initAggregate calls it on its own error path to avoid leaking the statements it
+// prepared before the failure — a failed runtime is never stored on its source,
+// so Projection.Close cannot reach it.
+func (rt *aggregateRuntime) closeStmts() {
+	for _, s := range []*gosql.Stmt{rt.upsertSidecar, rt.deleteSidecar, rt.lookup, rt.materialize, rt.rebuild} {
+		if s != nil {
+			_ = s.Close()
+		}
+	}
+}
+
+// closeStmts closes the lookup runtime's prepared statements (nil-tolerant). See
+// aggregateRuntime.closeStmts — initLookup uses it the same way on its error path.
+func (rt *lookupRuntime) closeStmts() {
+	for _, s := range []*gosql.Stmt{rt.upsertDim, rt.deleteDim} {
+		if s != nil {
+			_ = s.Close()
+		}
+	}
 }
