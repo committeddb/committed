@@ -2294,13 +2294,17 @@ func readBatch(
 
 // buildDSN converts a mysql:// URL to a go-sql-driver/mysql DSN string via the
 // shared cluster.MySQLDSN (the same conversion the syncable sink dialect uses).
-// It swallows a conversion error and returns the input unchanged: this ingest
-// path already validated the URL upstream (binlogSyncerConfig), and go-sql-driver
-// then surfaces any residual problem without echoing the DSN.
+// On a conversion error it returns "" rather than the input: this ingest path
+// already validated the URL upstream (binlogSyncerConfig), so the error branch
+// is effectively unreachable — but the resolved connection string carries the
+// ${VAR}-interpolated password, and it must never be handed onward as a value
+// that could later surface in a log or error. An empty DSN makes the subsequent
+// sql.Open fail cleanly (the raw mysql:// URL isn't a valid go-sql-driver DSN
+// either, so Open failed on this branch before too — now without the secret).
 func buildDSN(connectionString string) string {
 	dsn, err := cluster.MySQLDSN(connectionString)
 	if err != nil {
-		return connectionString
+		return ""
 	}
 	return dsn
 }
