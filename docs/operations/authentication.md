@@ -22,8 +22,37 @@ tokens travel in the clear), and production deployments should have
 all three.
 
 There is no authorization layer yet. "Authenticated = full access" is
-the current model. A per-resource RBAC layer is filed as a follow-up
-on the `http-authentication.md` ticket.
+the current model. This is acceptable for the supported deployment
+(one isolated cluster per tenant — the token holder is the tenant, and
+full access to their own cluster is expected); a per-resource RBAC layer
+becomes necessary only if distinct actors ever share one cluster, and is
+filed as a follow-up on the `http-authentication.md` ticket.
+
+## Trust model
+
+Committed's authentication is **off by default**, and it does **not**
+refuse to start without it. That is a deliberate choice tied to how
+Committed is meant to be run:
+
+- **Managed / hosted (production).** The perimeter is owned by the
+  orchestration, which always injects `COMMITTED_API_TOKEN` (and TLS /
+  mTLS) into every node. A node serving real data is never unauthenticated
+  — enforcement lives in the deploy templates, not in the binary.
+- **Self-hosted (test only, today).** Running the image yourself is a
+  supported way to evaluate Committed, but the operator story is still in
+  progress: **do not put production data on a self-hosted node yet.** Use
+  it to kick the tires, then move real workloads to the managed offering.
+
+### The insecure-by-default floor
+
+Because a wide-open node is easy to stand up by accident, Committed makes
+it loud. When the API is bound to a **non-loopback** address (anything
+other than `127.0.0.1` / `::1` / `localhost` — note the default `:8080`
+binds all interfaces) with **no authentication** (no bearer token and no
+mTLS), the node prints a `SECURITY:` banner to stderr and logs an
+`ERROR` at startup. It still starts — so the test flow above is
+frictionless — but you cannot miss that the node is exposed. Set a token
+(and TLS), or bind to loopback, to silence it. Configure auth as below.
 
 ## HTTP API bearer token
 

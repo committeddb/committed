@@ -225,8 +225,9 @@ image can be templated per-node by an orchestrator:
 		// other combination is a hard startup error — silently running
 		// partial-TLS ("I thought we had TLS") is the failure mode this
 		// check exists to prevent.
-		if tlsInfo := loadPeerTLSInfo(); tlsInfo != nil {
-			dbOpts = append(dbOpts, db.WithTLSInfo(tlsInfo))
+		peerTLS := loadPeerTLSInfo()
+		if peerTLS != nil {
+			dbOpts = append(dbOpts, db.WithTLSInfo(peerTLS))
 		}
 
 		if n, ok := parseInt64Env("COMMITTED_MAX_PROPOSAL_BYTES"); ok {
@@ -405,9 +406,11 @@ image can be templated per-node by an orchestrator:
 			serverOpts = append(serverOpts, http.WithTLSConfig(tlsCfg))
 			zap.L().Info("API TLS enabled",
 				zap.Bool("clientCertAuth", tlsCfg.ClientAuth == tls.RequireAndVerifyClientCert))
-		} else {
-			zap.L().Warn("API TLS disabled (no COMMITTED_HTTP_TLS_CERT_FILE/KEY_FILE set) — do not expose the API to untrusted networks in this state")
 		}
+		// Security-posture floor: loud Error + startup banner if the write API is
+		// reachable off-host with no auth (see docs/operations/authentication.md).
+		// Deliberately not a refuse-to-boot — self-hosted test use is supported.
+		warnInsecurePosture(addr, apiToken, tlsCfg, peerTLS != nil)
 
 		exitCode := runNode(d, h.NewServer(addr, serverOpts...))
 

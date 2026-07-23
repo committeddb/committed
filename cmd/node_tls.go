@@ -5,12 +5,82 @@ import (
 	"crypto/x509"
 	"fmt"
 	"log"
+	"net"
 	nethttp "net/http"
 	"os"
 	"time"
 
 	"go.etcd.io/etcd/client/pkg/v3/transport"
+	"go.uber.org/zap"
 )
+
+// isLoopbackBind reports whether addr (an HTTP listen address like "127.0.0.1:8080"
+// or ":8080") binds ONLY the loopback interface. An empty host (":8080") binds all
+// interfaces and is NOT loopback. A hostname we can't cheaply classify is treated
+// as non-loopback — the safe default is to assume the node is reachable and warn.
+func isLoopbackBind(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr // no :port present
+	}
+	switch host {
+	case "":
+		return false // all interfaces
+	case "localhost":
+		return true
+	default:
+		if ip := net.ParseIP(host); ip != nil {
+			return ip.IsLoopback()
+		}
+		return false
+	}
+}
+
+// apiUnauthenticatedOffHost is the security-floor trigger: the write API is
+// reachable off this host (bound a non-loopback address) AND has no authentication
+// — neither a bearer token nor mTLS client-cert verification. Pure and testable;
+// warnInsecurePosture does the logging.
+func apiUnauthenticatedOffHost(addr, apiToken string, apiTLS *tls.Config) bool {
+	authed := apiToken != "" || (apiTLS != nil && apiTLS.ClientAuth == tls.RequireAndVerifyClientCert)
+	return !isLoopbackBind(addr) && !authed
+}
+
+// warnInsecurePosture is committed's security-posture floor. When the write API is
+// reachable off this host with no authentication it logs a loud Error and prints a
+// startup banner to stderr — committed deliberately does NOT refuse to boot (self-
+// hosted "kick the tires" with no real data is supported, and the hosted deployment
+// is secured by its orchestration), but an operator who exposes an unauthenticated
+// node must SEE it. Quiet when bound to loopback or when auth is configured.
+func warnInsecurePosture(addr, apiToken string, apiTLS *tls.Config, peerMTLS bool) {
+	if apiUnauthenticatedOffHost(addr, apiToken, apiTLS) {
+		plaintext := ""
+		if apiTLS == nil {
+			plaintext = " over PLAINTEXT HTTP"
+		}
+		peerNote := ""
+		if !peerMTLS && apiToken == "" {
+			peerNote = "\n  The raft peer transport is also unauthenticated — anyone who can reach the\n  peer port can impersonate a cluster member."
+		}
+		fmt.Fprintf(os.Stderr, `
+========================================================================
+  SECURITY: committed's write API is UNAUTHENTICATED and reachable off
+  this host (bound %q)%s. Anyone who can reach it can READ and WRITE the
+  log and reconfigure the cluster.%s
+
+  Fine for local testing, but DO NOT put production data on this node.
+  Set COMMITTED_API_TOKEN (and TLS), or bind to loopback.
+  See docs/operations/authentication.md.
+========================================================================
+`, addr, plaintext, peerNote)
+		zap.L().Error("serving an UNAUTHENTICATED write API on a non-loopback address; do not put production data here — set COMMITTED_API_TOKEN and TLS (see docs/operations/authentication.md)",
+			zap.String("addr", addr), zap.Bool("tls", apiTLS != nil), zap.Bool("peerMTLS", peerMTLS))
+		return
+	}
+	if apiTLS == nil {
+		zap.L().Warn("API TLS disabled (no COMMITTED_HTTP_TLS_CERT_FILE/KEY_FILE set); fine for loopback/local use, otherwise set TLS — see docs/operations/authentication.md",
+			zap.String("addr", addr))
+	}
+}
 
 // loadPeerTLSInfo reads the three COMMITTED_TLS_* env vars and returns
 // the corresponding transport.TLSInfo. Returns nil when none of them are
