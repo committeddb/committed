@@ -605,3 +605,28 @@ func (db *DB) SetIngestSupervisorRaceSeamsForTest(beforePreflight, afterAttempt 
 func (db *DB) SetAfterIngestSupervisorRestartForTest(fn func(frozenCtxErr error)) {
 	db.afterIngestSupervisorRestartForTest = fn
 }
+
+// SuperviseRestartIngestGiveupForTest drives superviseRestartIngest straight to
+// its give-up branch: it primes the consecutive-freeze count to the max-attempts
+// threshold (all at the same resume position) and then invokes the supervisor
+// once more with a freshly-built frozen handle whose goroutine is treated as
+// already exited (done closed). It returns the frozen handle's ctx.Err() so a
+// test can assert the give-up path cancelled it — the terminal-branch analogue of
+// SetAfterIngestSupervisorRestartForTest. Full-stack give-up is impractical to
+// synchronize (a stalled apply loop wedges further Proposes), so this drives the
+// decision + terminal cleanup directly, mirroring TestIngestSupervisor_BackoffAndGiveup.
+func (db *DB) SuperviseRestartIngestGiveupForTest(id string, i cluster.Ingestable) error {
+	pos := db.storage.Position(id)
+	for k := 0; k < db.ingestSupervisorMaxAttempts; k++ {
+		db.recordFreezeAndNextBackoff(id, pos)
+	}
+	ctx, cancel := context.WithCancel(db.ctx)
+	done := make(chan struct{})
+	close(done) // the frozen worker's goroutine already exited (ingestExitFreeze)
+	h := &workerHandle{cancel: cancel, ctx: ctx, done: done, ingestable: i}
+	db.workersMu.Lock()
+	db.ingestWorkers[id] = h
+	db.workersMu.Unlock()
+	db.superviseRestartIngest(id, i, h) // the (maxAttempts+1)th observation → give-up
+	return h.ctx.Err()
+}

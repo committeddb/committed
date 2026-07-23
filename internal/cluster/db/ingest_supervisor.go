@@ -91,6 +91,15 @@ func (db *DB) superviseRestartIngest(id string, i cluster.Ingestable, frozen *wo
 		if db.metrics != nil {
 			db.metrics.IngestSupervisorGiveup(id)
 		}
+		// Cancel the frozen worker's context, same as the restart path below. The
+		// goroutine exited via ingestExitFreeze (a normal return, NOT a ctx cancel),
+		// so workerCtx is still an un-cancelled child of the long-lived db.ctx; on
+		// this terminal branch it is never restarted, so without this the context
+		// node leaks until db.Close (the un-fixed sibling of the restart-path leak).
+		// The handle stays registered so an operator re-POST/delete still finds and
+		// fully tears it down; cancelling an already-exited worker is a harmless
+		// no-op that just releases the node.
+		frozen.cancel()
 		return
 	}
 
