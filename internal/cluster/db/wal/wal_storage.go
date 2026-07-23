@@ -1273,6 +1273,16 @@ func (s *Storage) Compact(compactIndex uint64) error {
 		return ErrOutOfBounds
 	}
 
+	// Persist-before-truncate: flush a snapshot that CreateSnapshot staged in
+	// memory (the maybeCompact path calls CreateSnapshot(compactIndex) immediately
+	// before this) so it is durable BEFORE we physically remove the entries it
+	// covers. A crash after the truncation but before the snapshot's lazy persist
+	// would otherwise leave the durable snapshot below the new first index — see
+	// persistPendingSnapshot. No-op when nothing is pending.
+	if err := s.persistPendingSnapshot(); err != nil {
+		return err
+	}
+
 	s.compactedUpTo.Store(compactIndex)
 
 	i := compactIndex - firstIndex + 1

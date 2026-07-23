@@ -12,6 +12,48 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// TestCompact_PersistsSnapshotBeforeTruncate is the persist-before-truncate
+// regression: maybeCompact takes a metadata snapshot (CreateSnapshot) and then
+// truncates the raft log against it (Compact). CreateSnapshot only stages the
+// snapshot in memory (snapDirty) — Save persists it lazily on a later Ready — so a
+// crash after Compact but before that Save left the durable snapshot lagging the
+// log's new first index. A follower needing the compacted-away gap would then be
+// shipped a stale snapshot and loop. Compact must make the pending snapshot durable
+// FIRST, so on reopen the durable snapshot covers the compaction boundary.
+func TestCompact_PersistsSnapshotBeforeTruncate(t *testing.T) {
+	s := NewStorage(t, nil)
+	defer s.Cleanup()
+
+	// Apply six entities so appliedIndex reaches 6 (CreateSnapshot requires the
+	// snapshot index <= appliedIndex) and the entry log holds indices 1..6.
+	tp, err := cluster.NewUpsertTypeEntity(&cluster.Type{ID: "events", Name: "Events", Version: 1})
+	require.Nil(t, err)
+	for i := uint64(1); i <= 6; i++ {
+		saveEntity(t, tp, s, 1, i)
+	}
+	require.Equal(t, uint64(6), s.AppliedIndex())
+
+	// maybeCompact's core, WITHOUT the trailing Save that would lazily persist the
+	// snapshot: snapshot at 5, then truncate the log against it. Crash (Close) here.
+	_, err = s.CreateSnapshot(5, &pb.ConfState{})
+	require.NoError(t, err)
+	require.NoError(t, s.Compact(5))
+
+	s = s.CloseAndReopenStorage(t)
+	defer s.Cleanup()
+
+	// The compaction boundary moved to 5 (first live index 6); the durable snapshot
+	// must cover it, not lag behind at 0.
+	fi, err := s.FirstIndex()
+	require.NoError(t, err)
+	require.Equal(t, uint64(6), fi)
+
+	snap, err := s.Snapshot()
+	require.NoError(t, err)
+	require.Equal(t, uint64(5), snap.Metadata.GetIndex(),
+		"the snapshot must be durable before Compact truncates the log against it")
+}
+
 // TestRaftLogApproxSize_GrowsAndShrinks verifies the storage-level
 // accounting the compaction trigger keys off: RaftLogApproxSize
 // should grow with Save and shrink when Compact drops segments from

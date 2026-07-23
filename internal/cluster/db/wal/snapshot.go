@@ -126,6 +126,35 @@ func (s *Storage) CreateSnapshot(index uint64, confState *pb.ConfState) (*pb.Sna
 	return &snap, nil
 }
 
+// persistPendingSnapshot durably writes a snapshot that CreateSnapshot staged in
+// memory (snapDirty) to the state log and fsyncs it, then clears the dirty flag.
+// Compact calls it before physically truncating the entry log so the snapshot that
+// justifies the truncation is on disk FIRST — persist-before-truncate. Otherwise a
+// crash between the truncation and the next Save (which would have persisted the
+// snapshot lazily) leaves the durable snapshot lagging the log's new first index:
+// Storage.Snapshot() then reports an index below the compaction boundary, and a
+// follower needing the gap is shipped that stale snapshot and loops until the
+// leader's next compaction refreshes it. No-op when no snapshot is pending (a direct
+// Compact with no preceding CreateSnapshot). Mirrors the persist half of Save and,
+// like Save, runs on the raft serve goroutine, so it shares Save's snapMu discipline
+// (copy under the lock, append without it).
+func (s *Storage) persistPendingSnapshot() error {
+	s.snapMu.Lock()
+	if !s.snapDirty {
+		s.snapMu.Unlock()
+		return nil
+	}
+	hardCopy := s.hardState
+	snapCopy := s.snapshot
+	s.snapDirty = false
+	s.snapMu.Unlock()
+
+	if err := s.appendState(hardCopy, snapCopy, false, true); err != nil {
+		return fmt.Errorf("[wal.storage] persist pending snapshot: %w", err)
+	}
+	return nil
+}
+
 // RestoreSnapshot installs the metadata state carried by snap onto this
 // node, replacing the current bbolt contents. Called from
 // raft.processSnapshot when raft delivers a non-empty rd.Snapshot in
