@@ -144,6 +144,12 @@ type BinlogSyncerConfig struct {
 	// Default 0,  this will be set to GOMAXPROCS.
 	PayloadDecoderConcurrency int
 
+	// PayloadDecoderMaxDecompressedSize bounds the uncompressed size (bytes) of a
+	// compressed TransactionPayloadEvent. 0 (default) is unbounded. Set it to a
+	// finite value to stop a large or zstd-bomb transaction from OOM-ing the
+	// process. committeddb fork patch: re-apply on any go-mysql bump.
+	PayloadDecoderMaxDecompressedSize uint64
+
 	// SynchronousEventHandler is used for synchronous event handling.
 	// This should not be used together with StartBackupWithHandler.
 	// If this is not nil, GetEvent does not need to be called.
@@ -220,6 +226,7 @@ func NewBinlogSyncer(cfg BinlogSyncerConfig) *BinlogSyncer {
 	b.parser.SetUseNumberForJSONDecimal(b.cfg.UseNumberForJSONDecimal)
 	b.parser.SetVerifyChecksum(b.cfg.VerifyChecksum)
 	b.parser.SetPayloadDecoderConcurrency(cfg.PayloadDecoderConcurrency)
+	b.parser.SetPayloadDecoderMaxDecompressedSize(cfg.PayloadDecoderMaxDecompressedSize)
 	b.parser.SetRowsEventDecodeFunc(b.cfg.RowsEventDecodeFunc)
 	b.parser.SetTableMapOptionalMetaDecodeFunc(b.cfg.TableMapOptionalMetaDecodeFunc)
 	b.running = false

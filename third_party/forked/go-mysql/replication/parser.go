@@ -42,6 +42,10 @@ type BinlogParser struct {
 	verifyChecksum           bool
 
 	payloadDecoderConcurrency int
+	// payloadDecoderMaxDecompressedSize bounds the uncompressed size of a
+	// compressed TransactionPayloadEvent. 0 = unbounded (upstream default).
+	// committeddb fork patch: re-apply on any go-mysql bump.
+	payloadDecoderMaxDecompressedSize uint64
 
 	rowsEventDecodeFunc func(*RowsEvent, []byte) error
 
@@ -224,6 +228,13 @@ func (p *BinlogParser) SetFlavor(flavor string) {
 
 func (p *BinlogParser) SetPayloadDecoderConcurrency(concurrency int) {
 	p.payloadDecoderConcurrency = concurrency
+}
+
+// SetPayloadDecoderMaxDecompressedSize bounds the uncompressed size (bytes) of a
+// compressed TransactionPayloadEvent. 0 disables the bound (upstream default).
+// committeddb fork patch: re-apply on any go-mysql bump.
+func (p *BinlogParser) SetPayloadDecoderMaxDecompressedSize(size uint64) {
+	p.payloadDecoderMaxDecompressedSize = size
 }
 
 func (p *BinlogParser) SetRowsEventDecodeFunc(rowsEventDecodeFunc func(*RowsEvent, []byte) error) {
@@ -483,6 +494,7 @@ func (p *BinlogParser) newTransactionPayloadEvent() *TransactionPayloadEvent {
 	e := &TransactionPayloadEvent{}
 	e.format = *p.format
 	e.concurrency = p.payloadDecoderConcurrency
+	e.maxDecompressedSize = p.payloadDecoderMaxDecompressedSize
 
 	return e
 }

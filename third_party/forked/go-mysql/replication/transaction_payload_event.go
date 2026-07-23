@@ -29,13 +29,17 @@ const (
 )
 
 type TransactionPayloadEvent struct {
-	format           FormatDescriptionEvent
-	concurrency      int
-	Size             uint64
-	UncompressedSize uint64
-	CompressionType  uint64
-	Payload          []byte
-	Events           []*BinlogEvent
+	format      FormatDescriptionEvent
+	concurrency int
+	// maxDecompressedSize bounds the uncompressed transaction size in bytes.
+	// 0 means unbounded (upstream default). Set from
+	// BinlogParser.payloadDecoderMaxDecompressedSize via newTransactionPayloadEvent.
+	maxDecompressedSize uint64
+	Size                uint64
+	UncompressedSize    uint64
+	CompressionType     uint64
+	Payload             []byte
+	Events              []*BinlogEvent
 }
 
 func (e *TransactionPayloadEvent) compressionType() string {
@@ -105,7 +109,26 @@ func (e *TransactionPayloadEvent) decodePayload() error {
 			e.CompressionType, e.compressionType())
 	}
 
-	decoder, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(e.concurrency))
+	// Bound the decompression. Without a limit a large (or maliciously crafted
+	// zstd-bomb) compressed transaction decompresses unbounded into a single
+	// []byte and OOM-kills the process — which recover() cannot catch — and
+	// re-OOMs at the same binlog coordinate on restart (a crash-loop). committeddb
+	// fork patch: re-apply on any go-mysql bump. maxDecompressedSize == 0 preserves
+	// the upstream unbounded behavior; committed always sets it.
+	opts := []zstd.DOption{zstd.WithDecoderConcurrency(e.concurrency)}
+	if e.maxDecompressedSize > 0 {
+		// Cheap early reject on the declared size (avoids starting the decode for
+		// an honestly-oversized transaction)...
+		if e.UncompressedSize > e.maxDecompressedSize {
+			return fmt.Errorf("TransactionPayloadEvent declared uncompressed size %d exceeds the configured limit %d",
+				e.UncompressedSize, e.maxDecompressedSize)
+		}
+		// ...and enforce it on the ACTUAL decoded size, since UncompressedSize is
+		// attacker-controlled metadata a bomb can understate. DecodeAll returns an
+		// error instead of allocating past the cap.
+		opts = append(opts, zstd.WithDecoderMaxMemory(e.maxDecompressedSize))
+	}
+	decoder, err := zstd.NewReader(nil, opts...)
 	if err != nil {
 		return err
 	}

@@ -31,6 +31,18 @@ type TopicEpochReader interface {
 // const, so tests can lower it to force multi-part flushes cheaply.
 var TxnSoftFlushBytes = 12 << 20
 
+// MaxDecompressedTxnBytes bounds the uncompressed size of a single compressed
+// source transaction (a MySQL binlog TransactionPayloadEvent, emitted when the
+// source has binlog_transaction_compression=ON — default-on on some managed
+// MySQL). The whole transaction is materialized in memory before it is split
+// into proposals, so without a bound a large — or maliciously crafted zstd-bomb —
+// compressed transaction decompresses unbounded and OOM-kills the node (an OOM
+// recover() cannot catch), then re-OOMs at the same binlog coordinate on restart:
+// a crash-loop. Generous (a legitimate bulk-load transaction can be large) but
+// finite, replacing the go-mysql default of effectively-unbounded (64 GiB). A
+// var, not a const, so tests can lower it and a future env knob can raise it.
+var MaxDecompressedTxnBytes uint64 = 1 << 30 // 1 GiB
+
 // entityFlushOverheadBytes approximates per-entity wire overhead beyond
 // Key+Data (type ref, field tags, generation stamp).
 const entityFlushOverheadBytes = 64

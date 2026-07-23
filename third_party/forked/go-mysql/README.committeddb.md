@@ -37,6 +37,15 @@ plumbed through `binlogsyncer`). They're all **upstream candidates** — once
 merged, delete this directory and the `replace` line. The snapshot↔CDC parity is
 pinned by committed's own docker tests (`TestMysqlSnapshotStreamJSON*`).
 
+A second, unrelated patch **bounds transaction-payload decompression**
+(`replication/transaction_payload_event.go`, plumbed as
+`PayloadDecoderMaxDecompressedSize` through `parser.go`/`binlogsyncer.go`): a
+compressed transaction (source `binlog_transaction_compression=ON`) decompressed
+unbounded — a large or zstd-bomb transaction OOM-crash-loops the node. Also an
+upstream candidate. Pinned by `replication/transaction_payload_bound_test.go`
+(committed-added, in this fork — see re-sync note) and, on the committed side, by
+`TestBinlogSyncerConfig` asserting the bound is plumbed non-zero.
+
 ## What was stripped
 
 Only the 8 packages committed's build closure actually compiles are kept:
@@ -51,14 +60,19 @@ patched behavior with its own snapshot↔CDC parity test). `go.mod` was
 1. `GM=$(go list -m -f '{{.Dir}}' github.com/go-mysql-org/go-mysql)` (after
    bumping the version in the root `go.mod`'s `require`).
 2. Copy the 8 kept packages + `go.mod go.sum LICENSE vitess_license` over this
-   directory; `chmod -R u+w`; delete `*_test.go` and `testdata/`.
+   directory; `chmod -R u+w`; delete `*_test.go` and `testdata/`. Exception:
+   `replication/transaction_payload_bound_test.go` is committed-added (not
+   upstream), so it comes back with the changes in step 3 — don't leave it out.
 3. Re-apply committed's changes — `git diff` the pre-bump tree against the new
    upstream is the authoritative list. The spots carry a `committeddb fork patch`
-   comment or the `UseNumberForJSONDecimal` identifier (absent upstream) and sit
-   next to the `useFloatWithTrailingZero` lines and the temporal switch, so
-   they're easy to find and conflicts are rare.
+   comment or the `UseNumberForJSONDecimal` / `PayloadDecoderMaxDecompressedSize`
+   identifiers (absent upstream) and sit next to the `useFloatWithTrailingZero`
+   lines and the temporal switch, so they're easy to find and conflicts are rare.
 4. `go -C third_party/forked/go-mysql mod tidy && go -C third_party/forked/go-mysql build ./...`
 5. From the repo root: `make test/ci`, and run the MySQL docker parity tests
    (`TestMysqlSnapshotStreamJSONDecimalByteIdentity`,
    `TestMysqlSnapshotStreamJSONTemporalByteIdentity`) — a missed change fails the
-   byte-compare there.
+   byte-compare there. Also run the decompression-bound unit test in the fork:
+   `go -C third_party/forked/go-mysql test ./replication/ -run TestTransactionPayload_DecompressionBounded`
+   — it catches a re-sync that re-adds the field but drops the enforcement (which
+   the committed-side wiring test cannot see).

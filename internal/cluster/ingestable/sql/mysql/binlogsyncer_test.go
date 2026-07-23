@@ -31,6 +31,13 @@ func TestBinlogSyncerConfig(t *testing.T) {
 	require.False(t, cfg.ParseTime, "DATE/DATETIME/TIMESTAMP must stay strings, not time.Time")
 	require.Equal(t, time.UTC, cfg.TimestampStringLocation,
 		"TIMESTAMP must decode in UTC (deterministic across nodes and identical to the snapshot), not the node's local tz")
+
+	// Compressed-transaction decompression must be bounded (security B4 / S2): an
+	// unset (0) cap lets a large or zstd-bomb transaction OOM-crash-loop the node.
+	// Guards the fork wiring — a go-mysql bump that drops the patch would zero this.
+	require.NotZero(t, cfg.PayloadDecoderMaxDecompressedSize,
+		"compressed-transaction decompression must be bounded, not unbounded (would OOM-crash-loop the node)")
+	require.Equal(t, sql.MaxDecompressedTxnBytes, cfg.PayloadDecoderMaxDecompressedSize)
 }
 
 // TestBinlogSyncerConfigErrors covers the parse failures that should surface as

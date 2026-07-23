@@ -71,6 +71,10 @@ func binlogSyncerConfig(config *sql.Config) (replication.BinlogSyncerConfig, err
 		ParseTime:               false,
 		TimestampStringLocation: time.UTC,
 		Logger:                  newSyncerLogger(zap.L()),
+		// Bound compressed-transaction decompression so a large or zstd-bomb
+		// transaction can't OOM-crash-loop the node (see sql.MaxDecompressedTxnBytes).
+		// Backed by committed's forked go-mysql (third_party/forked/go-mysql).
+		PayloadDecoderMaxDecompressedSize: sql.MaxDecompressedTxnBytes,
 	}, nil
 }
 
