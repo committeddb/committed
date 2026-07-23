@@ -177,12 +177,24 @@ func (s *Storage) runScrub(bound uint64) error {
 		return err
 	}
 	swapped := false
+	retired := s.eventRetiredDir()
 	defer func() {
-		// On any pre-swap failure, drop the half-built log so a retry starts
-		// clean. After a successful swap newLog is already closed and renamed.
 		if !swapped {
+			// On any pre-swap failure, drop the half-built log so a retry starts
+			// clean. After a successful swap newLog is already closed and renamed.
 			_ = newLog.Close()
 			_ = os.RemoveAll(tmpDir)
+			return
+		}
+		// Swap succeeded: reap the retired pre-scrub log — potentially thousands of
+		// segment files. This defer is registered BEFORE the eventMu.Lock defer, so
+		// LIFO runs it AFTER eventMu is released: doing the O(files) os.RemoveAll
+		// under eventMu.Lock would stall the Ready loop's appendEvents for the whole
+		// unlink duration, which scales with log size. A leftover events.retired/ is
+		// harmless — recoverScrubDirs reaps it on the next Open — so warn, don't fail.
+		if err := os.RemoveAll(retired); err != nil {
+			s.logger.Warn("could not remove retired event-log dir after scrub swap; it will be reaped on the next restart",
+				zap.String("dir", retired), zap.Error(err))
 		}
 	}()
 
@@ -260,8 +272,8 @@ func (s *Storage) runScrub(bound uint64) error {
 
 	// Swap: events -> events.retired, events.scrub.<B> -> events. Renames are
 	// atomic on POSIX; a crash between them is rolled back by recoverScrubDirs
-	// on the next Open.
-	retired := s.eventRetiredDir()
+	// on the next Open. Clear any stale events.retired/ first (usually absent —
+	// recoverScrubDirs reaps it on Open — so this is a fast no-op).
 	if err := os.RemoveAll(retired); err != nil {
 		return err
 	}
@@ -316,13 +328,9 @@ func (s *Storage) runScrub(bound uint64) error {
 	// eventMu.Lock, before releasing it, so no Reader can observe the new log
 	// without also observing the new generation.
 	s.scrubGen.Add(1)
-	if err := os.RemoveAll(retired); err != nil {
-		// The swap already succeeded; a leftover events.retired/ is harmless — the
-		// next Open's recoverScrubDirs (and temp sweep) reaps it. Warn and continue
-		// rather than returning a failure the survive-worker only logs anyway.
-		s.logger.Warn("could not remove retired event-log dir after scrub swap; it will be reaped on the next restart",
-			zap.String("dir", retired), zap.Error(err))
-	}
+	// The retired pre-scrub log is reaped by the deferred cleanup AFTER eventMu is
+	// released (see the swapped branch of the defer above), NOT here under the
+	// lock — so the O(files) removal can't stall the apply path.
 	s.logger.Info("scrubbed permanent event log",
 		zap.Uint64("bound", bound), zap.Int("tombstonedKeys", len(sel)))
 	return nil
