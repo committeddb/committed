@@ -31,6 +31,12 @@ services:
       # The repo root is two levels up; build the committed image from its Dockerfile.
       context: ../..
       dockerfile: Dockerfile
+    environment:
+      # The configs reference the source/sink password as ${CATALOG_DB_PASSWORD}
+      # rather than inlining it — committed rejects an inline connection-string
+      # password so a secret is never written into its replicated log or snapshots.
+      # committed resolves this at config-parse time from its own environment.
+      CATALOG_DB_PASSWORD: test
     ports:
       - "8080:8080"
     depends_on:

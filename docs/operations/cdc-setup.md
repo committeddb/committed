@@ -387,7 +387,7 @@ type = "sql"
 [sql]
 dialect          = "postgres"
 topic            = "movie"
-connectionString = "postgres://committed:…@db:5432/catalog?sslmode=disable"
+connectionString = "postgres://committed:${PG_PASSWORD}@db:5432/catalog?sslmode=disable"
 primaryKey       = "movie_id"
 tables           = ["ingress.movie"]   # schema-qualified
 mapAllColumns    = true                # mirror every column 1:1
@@ -404,8 +404,9 @@ publication = "committed_movie_pub"    # optional; default "committed_pub"
 > worker owns its connections (the replication-protocol stream plus short-lived
 > SQL sessions), opens them itself, and tears them down with the worker — there
 > is no shared pool to reference. The two idioms are deliberate, not drift.
-> Use `${VAR}` interpolation to keep source passwords out of the config either
-> way (see [secrets.md](secrets.md)).
+> Write the password as `${VAR}` (as above) — committed **rejects an inline
+> connection-string password** (HTTP 400) so it is never stored in the replicated
+> log or a snapshot. See [secrets.md](secrets.md).
 
 Give each ingestable its own `slot_name` and `publication` so they don't collide.
 A runnable, end-to-end Postgres example lives in
@@ -555,7 +556,7 @@ type = "sql"
 [sql]
 dialect          = "mysql"
 topic            = "widget"
-connectionString = "mysql://committed:…@db:3306/shop"
+connectionString = "mysql://committed:${MYSQL_PASSWORD}@db:3306/shop"
 primaryKey       = "wid"
 tables           = ["widget"]
 
@@ -568,7 +569,8 @@ jsonName = "name"
 column   = "name"
 ```
 
-Note the connection string uses the `mysql://user:pass@host:port/db` URL form, and
+Note the connection string uses the `mysql://user:${VAR}@host:port/db` URL form
+(the password is a `${VAR}` reference — an inline password is rejected), and
 there is no `[sql.mysql]` subsection — MySQL has nothing analogous to a slot or
 publication to name. (`mapAllColumns = true` works here too, in place of the
 explicit `[[sql.mappings]]` blocks.)

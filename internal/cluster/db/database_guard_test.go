@@ -43,6 +43,9 @@ func newWalDBWithSQLParsers(t *testing.T) (*db.DB, *wal.Storage) {
 // allowed. Fails on the pre-fix code, which had no guard and accepted every
 // re-POST.
 func TestProposeDatabase_GuardsConnectionChangeWithDependents(t *testing.T) {
+	// The propose path rejects an inlined plaintext password, so reference it via
+	// ${VAR} (resolved from the environment at parse time) like a real config.
+	t.Setenv("TEST_PGPW", "p")
 	d, _ := newWalDBWithSQLParsers(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -51,8 +54,8 @@ func TestProposeDatabase_GuardsConnectionChangeWithDependents(t *testing.T) {
 		return &cluster.Configuration{ID: "sink", MimeType: "text/toml", Data: []byte(
 			"[database]\ntype = \"sql\"\nname = \"sink\"\n[sql]\ndialect = \"postgres\"\nconnectionString = \"" + conn + "\"\n")}
 	}
-	const connA = "postgres://u:p@hostA:5432/db"
-	const connB = "postgres://u:p@hostB:5432/db"
+	const connA = "postgres://u:${TEST_PGPW}@hostA:5432/db"
+	const connB = "postgres://u:${TEST_PGPW}@hostB:5432/db"
 
 	// First POST — allowed (no prior config to preserve).
 	require.NoError(t, d.ProposeDatabase(ctx, dbCfg(connA)))

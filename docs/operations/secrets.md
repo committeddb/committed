@@ -14,6 +14,16 @@ by anyone with the bbolt file, a proposal dump, or an API response.
 
 Committed has to store *config*; it does not have to store *secrets*.
 
+### Enforced for connection-string passwords
+
+Committed does not merely *recommend* `${VAR}` for a database or ingestable
+`connectionString` — it **rejects a connection string whose password is written
+as a literal**, at submit time (HTTP 400), so a plaintext credential can never be
+proposed into the replicated log or a snapshot. A password given as `${VAR}` (or a
+string with no password) is accepted; a literal password is refused with a message
+pointing here. This applies only to the password position of `connectionString`:
+hosts, usernames, database names, and every non-connection field are unaffected.
+
 ## The mechanism: `${VAR}` templates
 
 Any string value in a database, ingestable, or syncable config may

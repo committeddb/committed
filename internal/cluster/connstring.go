@@ -39,6 +39,38 @@ func ParseConnString(connectionString string) (*url.URL, error) {
 	return u, nil
 }
 
+// ConnStringHasInlinePassword reports whether raw — a PRE-interpolation connection
+// string, i.e. one that still carries any ${VAR} references — embeds a literal
+// password in its userinfo instead of referencing one via ${VAR}. It is the
+// propose-time gate that keeps a plaintext credential out of the cluster's durable,
+// replicated, API-readable state: committed stores configs pre-interpolation, so a
+// literal user:password@ here would be written verbatim into the raft log, bbolt,
+// and every snapshot, and handed back by GET /database/{id}.
+//
+// A ${VAR} in the password position makes the string unparseable as a URL, so
+// url.Parse fails and we report false (accept) — which is exactly how the operator
+// is meant to externalize the secret. No password, a whole-string ${VAR}, or any
+// non-URL likewise report false. A literal password that fails to parse for some
+// other reason also reports false, but such a string fails the real ParseConnString
+// downstream anyway, so the config never runs.
+//
+// NEVER pass raw into an error message — it holds the secret; the caller's
+// rejection must be value-free.
+func ConnStringHasInlinePassword(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.User == nil {
+		return false
+	}
+	pw, ok := u.User.Password()
+	if !ok || pw == "" {
+		return false
+	}
+	// Belt-and-suspenders: a ${VAR} in the password normally fails url.Parse above,
+	// but if it ever parses leniently, a var reference is still the operator
+	// externalizing the secret, not an inline literal.
+	return !strings.Contains(pw, "${")
+}
+
 // MySQLDSN converts a canonical mysql:// connection URL into the
 // go-sql-driver/mysql DSN its Open expects ("user:pw@tcp(host:port)/db"). It is
 // the single URL→DSN conversion shared by the ingest snapshot connection and the

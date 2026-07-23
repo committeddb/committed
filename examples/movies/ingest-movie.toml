@@ -5,7 +5,7 @@ type = "sql"
 [sql]
 dialect = "postgres"
 topic = "movie"
-connectionString = "postgres://test:test@db:5432/catalog?sslmode=disable"
+connectionString = "postgres://test:${CATALOG_DB_PASSWORD}@db:5432/catalog?sslmode=disable"
 primaryKey = "movie_id"
 tables = ["ingress.movie"]
 # Mirror every column 1:1 (jsonName = column) — no per-column mappings needed.

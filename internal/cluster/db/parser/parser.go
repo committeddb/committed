@@ -1,9 +1,19 @@
 package parser
 
 import (
+	"errors"
+
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/config"
 )
+
+// ErrInlineConnStringPassword rejects a config whose connectionString embeds a
+// literal password instead of a ${VAR} reference. Value-free by construction — it
+// must never carry the offending string (which holds the secret).
+var ErrInlineConnStringPassword = errors.New(
+	`connectionString contains an inline password; reference the secret from the environment with ${VAR} ` +
+		`(e.g. connectionString = "postgres://user:${DB_PASSWORD}@host:5432/db") so it is not stored in the ` +
+		`cluster's replicated log, snapshots, or returned by GET`)
 
 type Parser struct {
 	databaseParsers   map[string]cluster.DatabaseParser
@@ -35,6 +45,17 @@ func parseBytes(mimeType string, data []byte) (*cluster.ParsedConfig, error) {
 	v, err := cluster.ParseConfigBytes(mimeType, data)
 	if err != nil {
 		return nil, err
+	}
+
+	// Reject an inlined plaintext connection-string password BEFORE interpolation,
+	// while ${VAR} references are still visible. Stored configs are the raw,
+	// pre-interpolation bytes, so a literal user:password@ here would be written
+	// verbatim into the raft log, bbolt, and every snapshot — and returned by GET.
+	// ${VAR} keeps the secret in the environment. Covers database and ingestable
+	// configs (both carry sql.connectionString); syncables reference a database by
+	// id. The check reads the raw (still-templated) value; the error is value-free.
+	if cluster.ConnStringHasInlinePassword(v.GetString("sql.connectionString")) {
+		return nil, ErrInlineConnStringPassword
 	}
 
 	// Expand ${VAR} secret references against this node's environment.

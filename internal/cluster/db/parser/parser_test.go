@@ -39,6 +39,53 @@ dialect = "mysql"`)
 	require.Equal(t, "mysql", v.GetString("sql.dialect"))
 }
 
+// TestParse_RejectsInlineConnStringPassword pins the S3 propose-time guard: a
+// connectionString with a literal password is rejected (with a value-free error)
+// before it can be persisted into the replicated log/snapshots, while a ${VAR}
+// reference and a passwordless string are accepted. The check lives in the shared
+// parseBytes, so it covers database AND ingestable configs.
+func TestParse_RejectsInlineConnStringPassword(t *testing.T) {
+	const secret = "hunter2"
+	dbCfg := func(conn string) []byte {
+		return []byte("[database]\ntype = \"sql\"\nname = \"mydb\"\n[sql]\ndialect = \"postgres\"\nconnectionString = \"" + conn + "\"\n")
+	}
+	newParser := func() *parser.Parser {
+		p := parser.New()
+		fp := &clusterfakes.FakeDatabaseParser{}
+		fp.ParseReturns(&clusterfakes.FakeDatabase{}, nil)
+		p.AddDatabaseParser("sql", fp)
+		return p
+	}
+
+	t.Run("database: inline password rejected, error omits the secret", func(t *testing.T) {
+		_, _, err := newParser().ParseDatabase("text/toml", dbCfg("postgres://user:"+secret+"@host:5432/db"))
+		require.ErrorIs(t, err, parser.ErrInlineConnStringPassword)
+		require.NotContains(t, err.Error(), secret, "the rejection must not echo the password")
+	})
+
+	t.Run("database: ${VAR} password accepted", func(t *testing.T) {
+		t.Setenv("TEST_DBPW", secret)
+		_, _, err := newParser().ParseDatabase("text/toml", dbCfg("postgres://user:${TEST_DBPW}@host:5432/db"))
+		require.NoError(t, err)
+	})
+
+	t.Run("database: no password accepted", func(t *testing.T) {
+		_, _, err := newParser().ParseDatabase("text/toml", dbCfg("postgres://user@host:5432/db"))
+		require.NoError(t, err)
+	})
+
+	t.Run("ingestable: inline password rejected too (shared parseBytes)", func(t *testing.T) {
+		p := parser.New()
+		fp := &clusterfakes.FakeIngestableParser{}
+		fp.ParseReturns(&clusterfakes.FakeIngestable{}, nil)
+		p.AddIngestableParser("sql", fp)
+		data := []byte("[ingestable]\ntype = \"sql\"\nname = \"src\"\n[sql]\ndialect = \"postgres\"\nconnectionString = \"postgres://user:" + secret + "@host:5432/db\"\n")
+		_, _, err := p.ParseIngestable("text/toml", data)
+		require.ErrorIs(t, err, parser.ErrInlineConnStringPassword)
+		require.NotContains(t, err.Error(), secret)
+	})
+}
+
 func TestParseDatabase_JSON_Success(t *testing.T) {
 	p := parser.New()
 
