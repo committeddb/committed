@@ -53,6 +53,14 @@ func postIngestable(t *testing.T, table, pgConnStr, slotName, pubName string) {
 // in the body, which we discard (we already know it).
 func postConfig(t *testing.T, path, body string) {
 	t.Helper()
+	// committed rejects an inline connection-string password (a plaintext secret
+	// would be written into its replicated log and snapshots). The container
+	// password is a fixed constant, so externalize it to ${TEST_DB_PASSWORD} —
+	// which startCommitted sets in the node's environment — before POSTing. The
+	// harness's own direct DB connections keep the real password; they never go
+	// through committed. mysqlPass == pgPass, so one replace covers both.
+	body = strings.ReplaceAll(body, ":"+mysqlPass+"@", ":${TEST_DB_PASSWORD}@")
+	body = strings.ReplaceAll(body, ":"+pgPass+"@", ":${TEST_DB_PASSWORD}@")
 	req, err := http.NewRequest(http.MethodPost, committedURL(path), bytes.NewBufferString(body))
 	require.NoError(t, err, "build request")
 	req.Header.Set("Content-Type", "text/toml")

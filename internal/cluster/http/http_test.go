@@ -161,6 +161,12 @@ func TestEndToEnd_HonorsDelete(t *testing.T) {
 // the sink table.
 func startMySQL(t *testing.T) string {
 	t.Helper()
+	// The returned URL (used in POSTed database/ingestable configs) references the
+	// password as ${TEST_DB_PASSWORD} rather than inlining it — committed rejects an
+	// inline connection-string password. This in-process node resolves it from the
+	// test process's environment at config-parse time. The readiness DSN below keeps
+	// the real password (a direct driver connection, not a committed config).
+	t.Setenv("TEST_DB_PASSWORD", mysqlPass)
 	ctx := context.Background()
 
 	c, err := tcmysql.Run(ctx, mysqlImage,
@@ -188,7 +194,7 @@ func startMySQL(t *testing.T) string {
 	port, err := c.MappedPort(ctx, "3306/tcp")
 	require.NoError(t, err, "mysql port")
 
-	return fmt.Sprintf("mysql://%s:%s@%s:%s/%s", mysqlUser, mysqlPass, host, port.Port(), mysqlDB)
+	return fmt.Sprintf("mysql://%s:${TEST_DB_PASSWORD}@%s:%s/%s", mysqlUser, host, port.Port(), mysqlDB)
 }
 
 type Proposal struct {

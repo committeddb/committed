@@ -116,6 +116,11 @@ func startCommittedAt(t *testing.T, dataDir string) *committedProcess {
 
 	cmd := exec.Command(bin, "node") //nolint:gosec // G204: bin is the result of our own go build into os.MkdirTemp — trusted by construction
 	cmd.Dir = dataDir
+	// The POSTed configs reference the (constant) container DB password as
+	// ${TEST_DB_PASSWORD} rather than inlining it — committed rejects an inline
+	// connection-string password. The node resolves it from this environment at
+	// config-parse time. mysqlPass == pgPass, so one variable serves both dialects.
+	cmd.Env = append(os.Environ(), "TEST_DB_PASSWORD="+mysqlPass)
 	cmd.Stdout = testWriter{t, "committed:stdout"}
 	cmd.Stderr = testWriter{t, "committed:stderr"}
 	// SysProcAttr lets us send SIGTERM to the whole process group on
