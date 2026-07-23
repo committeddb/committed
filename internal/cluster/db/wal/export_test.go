@@ -141,6 +141,12 @@ func (s *Storage) MarkScrubCompleteForTest(bound uint64) error {
 // of bbolt on the next Open. Pass nil to restore normal compaction.
 func (s *Storage) SetFailCompactionForTest(fn func() error) { s.failCompactionForTest = fn }
 
+// SetBoltTmpPathForTest overrides the sibling temp path the atomic bbolt swaps
+// (restore/compact) write before renaming into place, so a test can point the
+// temp create/write at a path it controls (e.g. a pre-planted directory) and
+// assert the error branch removes the stray. Pass nil to restore the default.
+func (s *Storage) SetBoltTmpPathForTest(fn func(prefix string) string) { s.boltTmpPathForTest = fn }
+
 // IsCompactOwedForTest reports whether the durable compaction-owed marker is set
 // (a scrub pruned tombstones but hasn't finished compacting bbolt).
 func (s *Storage) IsCompactOwedForTest() bool {

@@ -244,6 +244,12 @@ type Storage struct {
 	// reproduce an ENOSPC/crashed compaction so a test can assert the erased key
 	// is re-driven out of bbolt on the next Open. Nil in production.
 	failCompactionForTest func() error
+	// boltTmpPathForTest, when non-nil, overrides the sibling temp path that the
+	// atomic bbolt swaps (restore/compact) write before renaming into place. Tests
+	// point it at a path they control (a pre-planted directory) to force the
+	// temp create/write to fail and assert the error branch removes the stray. Nil
+	// in production, where newBoltTmpPath returns a unique nanosecond-suffixed path.
+	boltTmpPathForTest func(prefix string) string
 	// closeOnce makes Close idempotent: the owner (cmd/node) closes the Storage
 	// after db.Close returns, and some callers (and tests) may close it more than
 	// once, so a second Close must be a no-op rather than double-closing the

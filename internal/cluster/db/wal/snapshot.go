@@ -25,6 +25,19 @@ const (
 	boltCompactTmpPrefix = "bbolt.db.compact."
 )
 
+// newBoltTmpPath builds the sibling temp path an atomic bbolt swap (restore or
+// compact) writes before renaming it over boltPath. The nanosecond suffix keeps
+// each attempt's path unique, so a retrying swap never collides with a
+// not-yet-swept stray from a prior failed attempt. Overridable in tests
+// (boltTmpPathForTest) to force the temp create/write onto a path the test
+// controls. The prefix is one of the two constants above.
+func (s *Storage) newBoltTmpPath(boltPath, prefix string) string {
+	if s.boltTmpPathForTest != nil {
+		return s.boltTmpPathForTest(prefix)
+	}
+	return filepath.Join(filepath.Dir(boltPath), fmt.Sprintf("%s%d", prefix, time.Now().UnixNano()))
+}
+
 // sweepBoltTempFiles removes orphaned bbolt.db.restore.* / bbolt.db.compact.*
 // temp files from the metadata dir — the residue of a crash between a full-DB
 // temp write (RestoreSnapshot / compactLocked) and its atomic rename. Open calls
@@ -232,8 +245,14 @@ func (s *Storage) swapBboltToSnapshotData(data []byte, reconciledIndex uint64) e
 	// Rename leaves the original file untouched and the next Open sees a
 	// consistent state — and re-runs this swap, since the applied index is
 	// unchanged until the Put below commits.
-	tmpPath := filepath.Join(filepath.Dir(boltPath), fmt.Sprintf("%s%d", boltRestoreTmpPrefix, time.Now().UnixNano()))
+	tmpPath := s.newBoltTmpPath(boltPath, boltRestoreTmpPrefix)
 	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
+		// WriteFile creates the file (O_CREATE) before it writes, so a failure
+		// partway (ENOSPC on a full disk) leaves a partial temp behind. Remove it
+		// like the fsync/rename branches below — the temp name is unique per
+		// attempt (nanosecond suffix), so a retrying follower would otherwise
+		// orphan a fresh full-payload file each time until the next Open sweeps.
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("write restored bbolt to tmp: %w", err)
 	}
 	// fsync the temp file BEFORE the rename: os.WriteFile does not sync, so
@@ -417,10 +436,17 @@ func (s *Storage) compactLocked() error {
 	}
 	boltPath := s.keyValueStorage.Path()
 	boltOpts := &bolt.Options{Timeout: 1 * time.Second}
-	tmpPath := filepath.Join(filepath.Dir(boltPath), fmt.Sprintf("%s%d", boltCompactTmpPrefix, time.Now().UnixNano()))
+	tmpPath := s.newBoltTmpPath(boltPath, boltCompactTmpPrefix)
 
 	dst, err := bolt.Open(tmpPath, 0o600, boltOpts)
 	if err != nil {
+		// bolt.Open creates the file, then writes+fsyncs the initial meta/freelist
+		// pages — the step that fails first on a full disk. bbolt does not unlink on
+		// that failure, so remove the stray here like the Compact/Close/Rename
+		// branches below. The temp name is unique per attempt, and runOwedCompaction
+		// re-drives this every scrub signal under sustained ENOSPC, so without the
+		// remove each retry would orphan a fresh file until the next Open sweeps.
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("open compaction target: %w", err)
 	}
 	if err := bolt.Compact(dst, s.keyValueStorage, 0); err != nil {
