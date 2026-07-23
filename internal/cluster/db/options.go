@@ -52,8 +52,19 @@ type options struct {
 	// spurious ErrProposalUnknowns. 0 means "derive from tickInterval
 	// at New time" — see defaultLeaderChangeGracePeriod and db.New.
 	leaderChangeGrace time.Duration
-	logger            *zap.Logger
-	metrics           *metrics.Metrics
+	// proposeTimeout bounds how long db.Propose waits for a proposal to resolve
+	// (apply, be declared lost, or ride a leader change) before returning
+	// ErrProposalUnknown. It is the backstop for a proposal raft DROPS without a
+	// leader change — an uncommitted-entries buffer full, or an expired leadership
+	// transfer — which forwardProposeErr absorbs, so nothing else would ever
+	// signal the waiter and the calling worker would hang silently (gauge stuck at
+	// 1, no stuck record, no freeze). Generous by default so a legitimately slow
+	// apply never trips it; a spurious fire is a safe, bounded, idempotent retry
+	// through the commit-ambiguity ladder. 0 means the New-time default
+	// (defaultProposeTimeout).
+	proposeTimeout time.Duration
+	logger         *zap.Logger
+	metrics        *metrics.Metrics
 	// compactMaxSize is the on-disk raft log size in bytes that, once
 	// exceeded, triggers a CreateSnapshot + Compact at the end of the
 	// current Ready iteration. 0 disables the size limb of the
@@ -278,6 +289,13 @@ func WithJoin() Option {
 // default.
 func WithLeaderChangeGracePeriod(d time.Duration) Option {
 	return func(o *options) { o.leaderChangeGrace = d }
+}
+
+// WithProposeTimeout overrides how long db.Propose waits for a proposal to
+// resolve before returning ErrProposalUnknown (see options.proposeTimeout). The
+// backstop against a silent worker hang on a raft-dropped proposal.
+func WithProposeTimeout(d time.Duration) Option {
+	return func(o *options) { o.proposeTimeout = d }
 }
 
 // WithLogger overrides the logger used by DB and its internal Raft instance.

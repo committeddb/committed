@@ -60,6 +60,15 @@ var ErrProposalUnknown = errors.New("db: proposal status unknown after leader ch
 // arrives.
 var ErrProposalLost = errors.New("db: proposal truncated before commit")
 
+// defaultProposeTimeout is the backstop db.Propose applies when a waiter is
+// never signaled — the state a raft-dropped proposal reaches when no leader
+// change follows (forwardProposeErr absorbs ErrProposalDropped). Set well beyond
+// any legitimate propose+apply+leader-change latency so it only ever fires on a
+// genuine hang; when it does, db.Propose returns ErrProposalUnknown so the
+// worker surfaces the wedge (freeze / re-sync / stuck record) instead of hanging
+// silently. Overridable via WithProposeTimeout (tests drop it to milliseconds).
+const defaultProposeTimeout = 30 * time.Second
+
 type Peers map[uint64]string
 
 type DB struct {
@@ -103,6 +112,10 @@ type DB struct {
 	// Populated from options (default 3× tickInterval; tests override
 	// via WithLeaderChangeGracePeriod).
 	leaderChangeGrace time.Duration
+	// proposeTimeout bounds db.Propose's wait for a waiter to resolve — the
+	// backstop against a silently-hung worker on a raft-dropped proposal.
+	// Populated from options (default defaultProposeTimeout).
+	proposeTimeout time.Duration
 
 	// workersMu guards syncWorkers / ingestWorkers / closed. The two
 	// maps key running per-ID worker goroutines (one per syncable /
@@ -329,6 +342,9 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 	if cfg.leaderChangeGrace == 0 {
 		cfg.leaderChangeGrace = 3 * cfg.tickInterval
 	}
+	if cfg.proposeTimeout == 0 {
+		cfg.proposeTimeout = defaultProposeTimeout
+	}
 
 	if cfg.ingestSupervisorInitialBackoff == 0 {
 		cfg.ingestSupervisorInitialBackoff = defaultIngestSupervisorInitialBackoff
@@ -366,6 +382,7 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		waiters:                        make(map[uint64]*waiter),
 		appliedNotifyCh:                make(chan struct{}),
 		leaderChangeGrace:              cfg.leaderChangeGrace,
+		proposeTimeout:                 cfg.proposeTimeout,
 		syncWorkers:                    make(map[string]*workerHandle),
 		ingestWorkers:                  make(map[string]*workerHandle),
 		syncStuckThreshold:             cfg.syncStuckThreshold,
@@ -582,6 +599,15 @@ func (db *DB) Propose(ctx context.Context, p *cluster.Proposal) error {
 	}
 	defer db.unregisterWaiter(rid)
 
+	// Backstop timer: a proposal raft DROPS without a leader change (uncommitted-
+	// entries buffer full, an expired leadership transfer) is absorbed by
+	// forwardProposeErr, so nothing would ever signal this waiter and the calling
+	// worker would hang here forever — silently, with a healthy-looking gauge.
+	// NewTimer+Stop (not time.After) so the success path doesn't leave a 30s timer
+	// pinned per propose.
+	timer := time.NewTimer(db.proposeTimeout)
+	defer timer.Stop()
+
 	select {
 	case err := <-ack:
 		// Only record "applied" duration on a successful apply.
@@ -593,6 +619,15 @@ func (db *DB) Propose(ctx context.Context, p *cluster.Proposal) error {
 		}
 		db.logger.Debug("proposal completed", zap.Uint64("requestID", rid), zap.Error(err))
 		return err
+	case <-timer.C:
+		// Unresolved past the timeout — treat as ambiguous. A dropped proposal
+		// never entered the log, so ErrProposalUnknown is correct (and, if it did
+		// somehow commit, the worker's re-run is idempotent via dedup/UPSERT). The
+		// point is that the wedge now SURFACES through the commit-ambiguity ladder
+		// (freeze / don't-advance / stuck record) instead of hanging invisibly.
+		db.logger.Warn("proposal unresolved past the propose timeout; surfacing as ErrProposalUnknown so the caller resolves it visibly rather than hanging",
+			zap.Uint64("requestID", rid), zap.Duration("timeout", db.proposeTimeout))
+		return ErrProposalUnknown
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-db.ctx.Done():
