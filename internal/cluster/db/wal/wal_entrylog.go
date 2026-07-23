@@ -263,6 +263,50 @@ func (s *Storage) resetEntryLogToSnapshot(index, term uint64) error {
 	return nil
 }
 
+// resetEntryLogToEmpty discards the entire entry log, leaving a fresh empty one
+// (firstIndex/compactedUpTo/lastIndex = 0 — byte-for-byte the state of a
+// never-written node). reconcileEntryLogWithHardState calls it to recover a
+// brand-new node that crashed during its very first Save (entries fsync'd,
+// HardState not): every entry is un-acked, so dropping them all is loss-free and
+// appendEntries re-establishes the seq mapping on the next Save exactly as it does
+// for a fresh node (the firstIndex==0 && lastIndex==0 branch). Mirrors
+// resetEntryLogToSnapshot's crash-safe dir swap but writes no boundary dummy.
+func (s *Storage) resetEntryLogToEmpty() error {
+	discard := entryLogDiscardDir(s.raftLogDir)
+	if err := os.RemoveAll(discard); err != nil {
+		return fmt.Errorf("clear stale discard dir: %w", err)
+	}
+
+	s.entryMu.Lock()
+	defer s.entryMu.Unlock()
+
+	if err := s.EntryLog.Close(); err != nil {
+		return fmt.Errorf("close entry log: %w", err)
+	}
+	if err := os.Rename(s.raftLogDir, discard); err != nil {
+		return fmt.Errorf("rename entry log dir: %w", err)
+	}
+	if err := os.MkdirAll(s.raftLogDir, 0o700); err != nil {
+		return err
+	}
+	fresh, err := wal.Open(s.raftLogDir, nil)
+	if err != nil {
+		return fmt.Errorf("reopen entry log: %w", err)
+	}
+	s.EntryLog = fresh
+	// Durability mirrors resetEntryLogToSnapshot: fsync the reset dir and its
+	// parent so the discard survives power loss without relying on the next boot
+	// to re-heal.
+	s.syncDirBestEffort(s.raftLogDir, "entry-log reset dir")
+	s.syncDirBestEffort(filepath.Dir(s.raftLogDir), "entry-log reset parent")
+	_ = os.RemoveAll(discard)
+
+	s.firstIndex.Store(0)
+	s.compactedUpTo.Store(0)
+	s.lastIndex.Store(0)
+	return nil
+}
+
 // reconcileEntryLogWithSnapshot completes an in-place snapshot install that
 // crashed between saveWithSnapshot's appendState (snapshot persisted) and
 // its resetEntryLogToSnapshot (entry log cut over). Called from Open after
@@ -297,14 +341,37 @@ func (s *Storage) reconcileEntryLogWithSnapshot() error {
 // Terms are non-decreasing with index, so the over-term entries are a contiguous
 // suffix. A non-empty HardState is at a term >= every entry it acked, so the walk
 // always finds a keep boundary at or above firstIndex (for a snapshot'd log the
-// boundary dummy carries the snapshot term, which is <= HardState.Term). An empty
-// HardState is skipped: it arises only when a brand-new node crashed during its
-// very first Save, before any HardState existed — nothing was committed, and there
-// is no non-zero term to reconcile against.
+// boundary dummy carries the snapshot term, which is <= HardState.Term).
+//
+// An EMPTY HardState is the first-Save variant of the same crash: a brand-new node
+// (initial bootstrap, or one freshly member-add'd taking its first AppendEntries)
+// fsync'd its first entries but lost the HardState fsync, so on restart the term>=1
+// entries outrank the term-0 HardState and trip the same assert on every boot — a
+// rebuild-only brick loop. There is no term to reconcile *down to* here (an empty
+// HardState admits only an empty log), and nothing was ever committed or acked, so
+// the whole entry log is discarded: appendEntries re-establishes the seq mapping on
+// the next Save exactly as for a fresh node, and the node re-bootstraps (StartNode)
+// or re-catches-up from the leader (RestartNode on a join) with zero data loss.
+// Guarded to a GENESIS log with no snapshot (first retained entry at raft index 1):
+// that is the only way production reaches entries + an empty durable HardState. A
+// log whose first entry sits above index 1, or that carries a durable snapshot, has
+// a history — it once committed, so a HardState existed — so an empty HardState
+// there is a torn/inconsistent persist, left to the loud assert rather than silently
+// reset over. (boundary() == 1 only for a genesis log; a snapshot's companion
+// HardState is written by appendState, so snapshot + empty-HardState cannot arise
+// from a correct persist.)
 func (s *Storage) reconcileEntryLogWithHardState() error {
 	last := s.lastIndex.Load()
-	if last == 0 || raft.IsEmptyHardState(s.hardState) {
+	if last == 0 {
 		return nil
+	}
+	if raft.IsEmptyHardState(s.hardState) {
+		if s.boundary() != 1 || s.snapshot.Metadata.GetIndex() != 0 {
+			return nil // not a genesis first-Save crash — leave to the loud assert
+		}
+		s.logger.Warn("recovering a first-Save crash: discarding the un-acked genesis entry log written before any durable HardState",
+			zap.Uint64("lastIndex", last))
+		return s.resetEntryLogToEmpty()
 	}
 	lastTerm, err := s.Term(last)
 	if err != nil {
