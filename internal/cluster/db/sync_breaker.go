@@ -1,9 +1,12 @@
 package db
 
 import (
+	"context"
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 // Sync circuit-breaker tuning. This many permanent errors in a row — each within
@@ -78,9 +81,10 @@ func (db *DB) syncBreakerTripped(id string) bool {
 	return st != nil && st.consecutive >= syncBreakerMaxConsecutivePermanent
 }
 
-// tripSyncBreaker emits the high-severity signal when the breaker trips — a
-// distinct ERROR log and the SyncBreakerTripped metric. The caller parks the
-// worker (returns) after calling this.
+// tripSyncBreaker emits the loud, node-local signals when the breaker trips — a
+// distinct ERROR log and the one-shot SyncBreakerTripped counter. The durable,
+// replicated parked record is published separately (publishSyncableParked). The
+// caller parks the worker (returns) after calling both.
 func (db *DB) tripSyncBreaker(id string, consecutive int, cause error) {
 	db.logger.Error("sync circuit breaker tripped: consecutive permanent errors hit the cap; parking this syncable's worker without further dead-lettering — fix the config and replace the syncable",
 		zap.String("id", id),
@@ -89,5 +93,32 @@ func (db *DB) tripSyncBreaker(id string, consecutive int, cause error) {
 		zap.Error(cause))
 	if db.metrics != nil {
 		db.metrics.SyncBreakerTripped(id)
+	}
+}
+
+// publishSyncableParked writes the replicated, TERMINAL SyncableStuck record
+// (Parked=true) for a syncable whose breaker just tripped, so the parked state is
+// queryable from any node (status) and drives the sustained committed.worker.parked
+// gauge on every node. It BLOCKS on the Raft round-trip; the worker calls it just
+// before it parks (returns). The record deliberately outlives the worker and clears
+// only on an operator fix (a new config version) or a delete. Redacts like the
+// stuck tracker: the record is replicated and exposed over the status API, so a
+// RedactedError (a transient execError) must not echo entity PII — full detail
+// stays in tripSyncBreaker's node-local ERROR log, only the safe classifier is
+// replicated.
+func (db *DB) publishSyncableParked(ctx context.Context, id string, index uint64, cause error) {
+	msg := ""
+	if cause != nil {
+		safe, redacted := safeDeadLetterMessage(cause)
+		if redacted {
+			db.logger.Warn("parked syncable: full breaker-trip error kept node-local, replicated status redacted",
+				zap.String("id", id), zap.Uint64("index", index), zap.Error(cause))
+		}
+		msg = truncateDeadLetterMessage(safe)
+	}
+	s := &cluster.SyncableStuck{ID: id, Index: index, SinceUnixNano: time.Now().UnixNano(), Message: msg, Parked: true}
+	if err := db.proposeSyncableStuck(ctx, s); err != nil {
+		db.logger.Warn("publish parked status failed (worker parks regardless; status not visible until republished)",
+			zap.String("id", id), zap.Uint64("index", index), zap.Error(err))
 	}
 }

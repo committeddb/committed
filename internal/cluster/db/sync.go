@@ -578,6 +578,7 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 					if errors.Is(syncErr, cluster.ErrPermanent) {
 						if c, tripped := db.recordSyncPermanent(id, i); tripped {
 							db.tripSyncBreaker(id, c, syncErr)
+							db.publishSyncableParked(ctx, id, i, syncErr)
 							return nil // park: hold the checkpoint, stop dead-lettering the topic
 						}
 						db.logger.Error("permanent sync error, skipping proposal",
@@ -924,6 +925,7 @@ func (db *DB) syncBatchFallback(ctx context.Context, id string, s cluster.Syncab
 			if errors.Is(syncErr, cluster.ErrPermanent) {
 				if c, tripped := db.recordSyncPermanent(id, e.Index); tripped {
 					db.tripSyncBreaker(id, c, syncErr)
+					db.publishSyncableParked(ctx, id, e.Index, syncErr)
 					return false // stop the batch; syncBatch parks (checks syncBreakerTripped)
 				}
 				db.logger.Error("permanent sync error, skipping proposal",

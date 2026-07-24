@@ -22,6 +22,7 @@ type Metrics struct {
 	syncDuration     metric.Float64Histogram
 	syncBumpDuration metric.Float64Histogram
 	workerRunning    metric.Float64Gauge
+	workerParked     metric.Float64Gauge
 	workerReplaces   metric.Int64Counter
 
 	syncErrors          metric.Int64Counter
@@ -103,6 +104,9 @@ func New(meter metric.Meter) *Metrics {
 
 	m.workerRunning, _ = meter.Float64Gauge("committed.worker.running",
 		metric.WithDescription("1 if a worker goroutine is running for this kind+id, 0 otherwise."))
+
+	m.workerParked, _ = meter.Float64Gauge("committed.worker.parked",
+		metric.WithDescription("1 if a worker for this kind+id has TERMINALLY parked and needs operator intervention (a sync circuit-breaker trip, or an ingest supervisor give-up), 0 otherwise. Sustained until the operator fixes the config or deletes the resource. Alert on this."))
 
 	m.workerReplaces, _ = meter.Int64Counter("committed.worker.replaces",
 		metric.WithDescription("Number of times a worker was replaced via the registry."))
@@ -337,6 +341,24 @@ func (m *Metrics) SetWorkerRunning(kind, id string, running bool) {
 		v = 1.0
 	}
 	m.workerRunning.Record(context.Background(), v,
+		metric.WithAttributes(
+			attribute.String("kind", kind),
+			attribute.String("id", id),
+		))
+}
+
+// SetWorkerParked sets the sustained parked gauge for a worker kind+id (1 = the
+// worker has terminally parked and needs operator intervention, 0 = not). Unlike
+// SyncBreakerTripped (a one-shot counter), this stays 1 until the parked record
+// clears, so an alert can fire on it indefinitely. Derived from the replicated
+// parked record on every node (see wal.handleSyncableParked), so it is truthful
+// on followers, not only the owner.
+func (m *Metrics) SetWorkerParked(kind, id string, parked bool) {
+	v := 0.0
+	if parked {
+		v = 1.0
+	}
+	m.workerParked.Record(context.Background(), v,
 		metric.WithAttributes(
 			attribute.String("kind", kind),
 			attribute.String("id", id),

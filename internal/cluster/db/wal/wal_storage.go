@@ -869,7 +869,7 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	// entries already applied before this restart (replay skips <= appliedIndex),
 	// so a syncable that was stuck at shutdown would otherwise read 0 until it
 	// next makes progress. See refreshSyncStuckGauges.
-	ws.refreshSyncStuckGauges()
+	ws.refreshWorkerStateGauges()
 
 	return ws, nil
 }

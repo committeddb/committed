@@ -118,6 +118,7 @@ Labels are shown in `{braces}`.
 | `committed.type.migration.duration` | Time to run a type-version migration transform (histogram). |
 | `committed.type.migration.errors` | Type-migration transform failures. |
 | `committed.worker.running` | Sync/ingest workers currently running on this node. |
+| `committed.worker.parked` | 1 while a `{kind, id}` worker has TERMINALLY parked and needs operator intervention — a sync circuit-breaker trip, or (once wired) an ingest supervisor give-up. Replicated, so it reads truthfully from any node; stays 1 until the operator fixes the config (re-POST) or deletes the resource. **Alert on a sustained 1.** |
 | `committed.worker.replaces` | Worker replacements (config re-apply, rebuild). |
 | `committed.config.build_errors` | Configs this node persisted but could not build (degraded — usually a missing `${VAR}`). Diagnose with `GET /v1/node/status`. |
 | `committed.entity_kind.misuse` | Entities whose declared kind doesn't match how they're used (config warning). |

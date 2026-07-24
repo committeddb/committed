@@ -9,10 +9,13 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 )
 
-// handleSyncableStuck applies a committed SyncableStuck entity: a delete
-// clears the syncable's stuck record, an upsert replaces it. One entry per
-// syncable id (last-writer-wins) — the worker publishes "blocked on index N"
-// and deletes it on progress.
+// handleSyncableStuck applies a committed SyncableStuck entity: a delete clears
+// the syncable's worker-state record, an upsert replaces it. One entry per
+// syncable id (last-writer-wins). The record is either a transient stuck
+// (Parked=false — the worker publishes "blocked on index N" and deletes it on
+// progress) or a terminal park (Parked=true — published once at a circuit-breaker
+// trip and cleared only by an operator fix or a delete). Both worker-state gauges
+// are derived from it below.
 func (s *Storage) handleSyncableStuck(e *cluster.Entity, _ uint64) error {
 	id := string(e.Key)
 	if e.IsDelete() {
@@ -33,29 +36,33 @@ func (s *Storage) handleSyncableStuck(e *cluster.Entity, _ uint64) error {
 			return err
 		}
 	}
-	// Derive the sync-stuck gauge from the APPLIED record on THIS node — present
-	// ⇒ stuck, absent (deleted, or reaped by the config guard) ⇒ not. Every node
-	// runs the apply path, so the gauge converges cluster-wide by construction
-	// (companion determinism); the worker no longer toggles it imperatively,
-	// which latched it at 1 on followers that never ran the owner's clear.
+	// Derive BOTH worker-state gauges from the APPLIED record on THIS node — a
+	// present record is either transient-stuck (Parked=false ⇒ sync.stuck) or a
+	// terminal park (Parked=true ⇒ worker.parked); absent (deleted, or reaped by
+	// the config guard) ⇒ neither. Every node runs the apply path, so both gauges
+	// converge cluster-wide by construction (companion determinism), truthful on
+	// followers; the worker no longer toggles them imperatively, which latched them
+	// at 1 on followers that never ran the owner's clear.
 	if s.metrics != nil {
-		_, present, _ := s.SyncableStuck(id)
-		s.metrics.SetSyncStuck(id, present)
+		rec, present, _ := s.SyncableStuck(id)
+		s.metrics.SetSyncStuck(id, present && !rec.Parked)
+		s.metrics.SetWorkerParked("sync", id, present && rec.Parked)
 	}
 	return nil
 }
 
-// refreshSyncStuckGauges re-derives the committed.sync.stuck gauge for every
-// syncable that has an applied stuck record. handleSyncableStuck derives the
-// gauge on the APPLY path — but apply does not run for entries already applied
-// before a restart (replay skips <= appliedIndex), nor for a snapshot install
-// (RestoreSnapshot bulk-swaps bbolt without running any entity handler). Without
-// this, a node that restarts or receives a snapshot while a syncable is stuck
-// reads the gauge as 0/unset even though the durable record says stuck, so a
-// sustained-1 alert silently never fires. Called at Open and after a snapshot
-// restore. Ids with no record need no action — the gauge defaults to unset and
-// the apply path sets it to 0 on the clearing delete.
-func (s *Storage) refreshSyncStuckGauges() {
+// refreshWorkerStateGauges re-derives the sync worker-state gauges
+// (committed.sync.stuck and committed.worker.parked) for every syncable that has
+// an applied record. handleSyncableStuck derives them on the APPLY path — but
+// apply does not run for entries already applied before a restart (replay skips
+// <= appliedIndex), nor for a snapshot install (RestoreSnapshot bulk-swaps bbolt
+// without running any entity handler). Without this, a node that restarts or
+// receives a snapshot while a syncable is stuck/parked reads the gauge as 0/unset
+// even though the durable record says otherwise, so a sustained-1 alert silently
+// never fires. Called at Open and after a snapshot restore. Ids with no record
+// need no action — the gauge defaults to unset and the apply path sets it to 0 on
+// the clearing delete.
+func (s *Storage) refreshWorkerStateGauges() {
 	if s.metrics == nil {
 		return
 	}
@@ -64,14 +71,36 @@ func (s *Storage) refreshSyncStuckGauges() {
 		if b == nil {
 			return nil
 		}
-		return b.ForEach(func(k, _ []byte) error {
-			s.metrics.SetSyncStuck(string(k), true)
+		return b.ForEach(func(k, v []byte) error {
+			var rec cluster.SyncableStuck
+			if err := rec.Unmarshal(v); err != nil {
+				return fmt.Errorf("[wal.stuck] refresh unmarshal id=%s: %w", string(k), err)
+			}
+			s.metrics.SetSyncStuck(string(k), !rec.Parked)
+			s.metrics.SetWorkerParked("sync", string(k), rec.Parked)
 			return nil
 		})
 	})
 	if err != nil {
-		s.logger.Warn("refresh sync-stuck gauges", zap.Error(err))
+		s.logger.Warn("refresh worker-state gauges", zap.Error(err))
 	}
+}
+
+// deleteKeyedTx removes key from the named flat bucket within an existing write
+// tx, reporting whether it was present. Used by saveSyncable to clear a worker-
+// state record atomically with the config-version write it makes.
+func deleteKeyedTx(tx *bolt.Tx, bucket, key []byte) (bool, error) {
+	b := tx.Bucket(bucket)
+	if b == nil {
+		return false, nil
+	}
+	if b.Get(key) == nil {
+		return false, nil
+	}
+	if err := b.Delete(key); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // SyncableStuck returns the syncable's current stuck record, or ok=false if

@@ -437,7 +437,7 @@ func (s *Storage) refreshAfterRestore() {
 	// The swapped-in bbolt may carry stuck records the apply path never ran
 	// handlers for (a snapshot install bulk-swaps bbolt), so re-derive the
 	// sync-stuck gauge from them. See refreshSyncStuckGauges.
-	s.refreshSyncStuckGauges()
+	s.refreshWorkerStateGauges()
 	s.RequestSyncReconcile()
 	s.RequestIngestReconcile()
 }

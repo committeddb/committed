@@ -237,6 +237,13 @@ message LogSyncableStuck {
     int64 sinceUnixNano = 3;
     // message is the (truncated) last transient error.
     string message = 4;
+    // parked is true when the syncable's worker has TERMINALLY parked — the sync
+    // circuit breaker tripped on a systematic config fault — rather than being
+    // transiently stuck retrying. A parked record survives the worker's exit and
+    // clears only on an operator fix (a new config version) or a delete. Default
+    // false = transiently stuck, so records written before this field (and records
+    // read by an older binary that ignores it) read as transiently stuck.
+    bool parked = 5;
 }
 
 // LogSyncableSkipRequest is proposed by the dead-letter endpoint (from any

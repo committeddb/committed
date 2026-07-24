@@ -23,6 +23,49 @@ func applySkipRequest(t *testing.T, s *StorageWrapper, idx uint64, id string, in
 	saveEntity(t, e, s, 1, idx)
 }
 
+func applyParked(t *testing.T, s *StorageWrapper, idx uint64, id string, index uint64) {
+	t.Helper()
+	e, err := cluster.NewUpsertSyncableStuckEntity(&cluster.SyncableStuck{ID: id, Index: index, Parked: true})
+	require.NoError(t, err)
+	saveEntity(t, e, s, 1, idx)
+}
+
+// TestSyncableParked_ClearsOnNewConfigVersion proves the terminal parked-worker
+// record's lifecycle: it is recorded distinctly from a transient stall (Parked),
+// SURVIVES until the operator fixes the config, and clears deterministically when a
+// NEW config version is applied — the only path that bumps a syncable's version and
+// the only operator fix. This is what keeps a parked syncable visibly parked across
+// a leadership change / restart (a bare respawn replays the same version and does
+// NOT reach the clear) instead of silently un-parking and re-accumulating errors.
+func TestSyncableParked_ClearsOnNewConfigVersion(t *testing.T) {
+	s := NewStorageWithParser(t, nil, parser.New())
+	defer s.Cleanup()
+
+	const id = "sync"
+	seedSyncableConfig(t, s, id, 1) // config v1
+	applyParked(t, s, 2, id, 7)
+
+	rec, ok, err := s.SyncableStuck(id)
+	require.NoError(t, err)
+	require.True(t, ok, "parked record present")
+	require.True(t, rec.Parked, "recorded as a terminal park, not a transient stall")
+	require.Equal(t, uint64(7), rec.Index)
+
+	// The operator's fix: re-POST the config (a new version). It clears the record.
+	seedSyncableConfig(t, s, id, 3)
+
+	_, ok, err = s.SyncableStuck(id)
+	require.NoError(t, err)
+	require.False(t, ok, "a new config version clears the parked record")
+
+	// Durable across a restart.
+	reopened := s.CloseAndReopenStorage(t)
+	defer reopened.Cleanup()
+	_, ok, err = reopened.SyncableStuck(id)
+	require.NoError(t, err)
+	require.False(t, ok, "the clear must not resurrect on reopen")
+}
+
 // TestDeleteSyncable_SweepsSiblingStateSoRecreateStartsClean is the A7a/A7c/A7d
 // half-A (sweep) proof: deleting a syncable removes the per-id state that lives
 // outside the config sub-bucket and is not carried as its own delete-bundle

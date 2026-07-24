@@ -627,18 +627,33 @@ var syncableStuckType = registerSystemType(&Type{
 	EntityKind: EntityKindSnapshot,
 }, AdmissionCoordination)
 
-// SyncableStuck records that a syncable's worker is currently blocked
-// retrying a transient error on the proposal at Index (for a batch syncable,
-// the head of the wedged batch). The worker proposes it through Raft after a
-// debounce window so every node can report the stall (GET status) and so an
-// operator's skip request can be served from any node, not just the one
-// running the worker. Upsert/delete keyed by the syncable id — one current
-// value per syncable; the worker deletes it on progress.
+// SyncableStuck records that a syncable's worker is in a notable bad state,
+// keyed by the syncable id (one current value per syncable), proposed through
+// Raft so every node can report it (GET status) from replicated state. It has
+// two variants distinguished by Parked:
+//
+//   - Parked == false (TRANSIENT stuck): the worker is currently blocked retrying
+//     a transient error on the proposal at Index (for a batch syncable, the head
+//     of the wedged batch). Published after a debounce window; the worker DELETES
+//     it on progress, and an operator's skip request can be served from any node.
+//   - Parked == true (TERMINAL park): the sync circuit breaker tripped on a
+//     systematic config fault and the worker STOPPED. Nothing clears it until an
+//     operator fixes the config (a new config version) or deletes the syncable —
+//     which is exactly why it must survive the worker's exit / leadership change.
+//     Index/Message record what the worker last failed on.
+//
+// The two are mutually exclusive (the permanent-error path clears any transient
+// record before the breaker trips, and a parked worker publishes no more), so the
+// single record models "at most one state" structurally.
 type SyncableStuck struct {
 	ID            string
 	Index         uint64
 	SinceUnixNano int64
 	Message       string
+	// Parked distinguishes a terminal breaker-park (true) from a transient retry
+	// stall (false). Field 5 on the wire; default false so records written before
+	// it — and records read by an older binary that ignores it — read as transient.
+	Parked bool
 }
 
 func (s *SyncableStuck) Marshal() ([]byte, error) {
@@ -647,6 +662,7 @@ func (s *SyncableStuck) Marshal() ([]byte, error) {
 		Index:         s.Index,
 		SinceUnixNano: s.SinceUnixNano,
 		Message:       s.Message,
+		Parked:        s.Parked,
 	}
 	return proto.Marshal(ls)
 }
@@ -660,6 +676,7 @@ func (s *SyncableStuck) Unmarshal(bs []byte) error {
 	s.Index = ls.Index
 	s.SinceUnixNano = ls.SinceUnixNano
 	s.Message = ls.Message
+	s.Parked = ls.Parked
 	return nil
 }
 

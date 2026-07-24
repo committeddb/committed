@@ -43,7 +43,12 @@ type PipelineStatusResponse struct {
 // PipelineSyncableStatus is one consumer's place in the pipeline: how far it has
 // checkpointed, how far behind the head it is, and whether it is caught up.
 type PipelineSyncableStatus struct {
-	ID              string `json:"id"`
+	ID string `json:"id"`
+	// WorkerState ("running" or "parked") and Stuck mirror GET /syncable/{id}/status
+	// so the pipeline view is not less informative than the single-resource one — a
+	// parked or transiently-stuck consumer is visible here, not just as bare lag.
+	WorkerState     string `json:"workerState"`
+	Stuck           bool   `json:"stuck"`
 	CheckpointIndex uint64 `json:"checkpointIndex"`
 	Lag             uint64 `json:"lag"`
 	CaughtUp        bool   `json:"caughtUp"`
@@ -143,6 +148,15 @@ func (h *HTTP) GetPipelineStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 		if !slices.Contains(topicsOf(c, "syncable"), topic) {
 			continue
 		}
+		// Worker state (replicated) is read separately from progress, so a consumer
+		// whose progress read fails still reports whether its worker parked.
+		st, stOK, _ := h.c.SyncableStuck(c.ID)
+		workerState := workerStateRunning
+		if stOK && st.Parked {
+			workerState = workerStateParked
+		}
+		stuck := stOK && !st.Parked
+
 		checkpoint, _, err := h.c.SyncableProgress(c.ID)
 		if err != nil {
 			// Fail loud: list the consumer with its error rather than dropping
@@ -150,7 +164,7 @@ func (h *HTTP) GetPipelineStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 			// pipeline is at rest with a consumer whose progress is unknown.
 			// redactedDetail, not err.Error(): a progress-read error may wrap a
 			// driver error that echoes connection identity or a bound value.
-			consumers = append(consumers, PipelineSyncableStatus{ID: c.ID, Error: redactedDetail(err)})
+			consumers = append(consumers, PipelineSyncableStatus{ID: c.ID, WorkerState: workerState, Stuck: stuck, Error: redactedDetail(err)})
 			caughtUp = false
 			continue
 		}
@@ -164,6 +178,8 @@ func (h *HTTP) GetPipelineStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 		}
 		consumers = append(consumers, PipelineSyncableStatus{
 			ID:              c.ID,
+			WorkerState:     workerState,
+			Stuck:           stuck,
 			CheckpointIndex: checkpoint,
 			Lag:             lag,
 			CaughtUp:        cu,

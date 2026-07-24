@@ -219,12 +219,25 @@ func (h *HTTP) RebuildSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
 	w.WriteHeader(httpgo.StatusAccepted)
 }
 
+// Worker lifecycle states reported by the syncable status + pipeline endpoints,
+// derived from the replicated SyncableStuck record so any node reports identically.
+const (
+	workerStateRunning = "running" // healthy, or transiently stuck retrying (see Stuck)
+	workerStateParked  = "parked"  // breaker tripped on a systematic fault; operator must act
+)
+
 // SyncableStatusResponse is the operational status of a syncable's worker:
 // whether it is blocked (and on what), plus its numeric progress (how far it
 // has synced vs. how far there is to sync).
 type SyncableStatusResponse struct {
 	Stuck bool `json:"stuck"`
-	// Index, Since, and Message are present only when stuck.
+	// WorkerState is the worker's lifecycle state: "running" (healthy, or
+	// transiently stuck retrying — see Stuck) or "parked" (the circuit breaker
+	// tripped on a systematic config fault and the worker STOPPED; fix the config
+	// and re-POST it, or delete the syncable). Replicated, so any node reports it.
+	WorkerState string `json:"workerState"`
+	// Index, Since, and Message are present when stuck OR parked — what the worker
+	// last blocked or failed on.
 	Index   uint64 `json:"index,omitempty"`
 	Since   string `json:"since,omitempty"`
 	Message string `json:"message,omitempty"`
@@ -276,7 +289,13 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 
-	resp := SyncableStatusResponse{Stuck: ok}
+	// A present record is either transient-stuck (Parked=false) or a terminal park
+	// (Parked=true), never both — Stuck reports the transient case, WorkerState the
+	// terminal one.
+	resp := SyncableStatusResponse{Stuck: ok && !stuck.Parked, WorkerState: workerStateRunning}
+	if ok && stuck.Parked {
+		resp.WorkerState = workerStateParked
+	}
 	if ok {
 		resp.Index = stuck.Index
 		resp.Since = time.Unix(0, stuck.SinceUnixNano).UTC().Format(time.RFC3339Nano)

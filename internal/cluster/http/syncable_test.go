@@ -267,16 +267,50 @@ func TestGetSyncableStatus_Stuck(t *testing.T) {
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	var got struct {
-		Stuck   bool   `json:"stuck"`
-		Index   uint64 `json:"index"`
-		Since   string `json:"since"`
-		Message string `json:"message"`
+		Stuck       bool   `json:"stuck"`
+		WorkerState string `json:"workerState"`
+		Index       uint64 `json:"index"`
+		Since       string `json:"since"`
+		Message     string `json:"message"`
 	}
 	require.NoError(t, json.Unmarshal(body, &got))
 	require.True(t, got.Stuck)
+	require.Equal(t, "running", got.WorkerState, "a transiently-stuck worker is still running")
 	require.Equal(t, uint64(9), got.Index)
 	require.Equal(t, "2023-11-14T22:13:20Z", got.Since)
 	require.Equal(t, "downstream rejected the row", got.Message)
+}
+
+// TestGetSyncableStatus_Parked reports a syncable whose worker TERMINALLY parked
+// (the circuit breaker tripped). workerState is "parked" and — unlike a transient
+// stall — stuck is false: the operator's remedy is to fix the config and re-POST
+// it, not to skip a proposal.
+func TestGetSyncableStatus_Parked(t *testing.T) {
+	h, fake := setupTest()
+	fake.SyncableStuckReturns(cluster.SyncableStuck{
+		ID: "sync-1", Index: 9, SinceUnixNano: 1_700_000_000_000_000_000, Message: "every row violates the config", Parked: true,
+	}, true, nil)
+	fake.SyncableProgressReturns(0, 100, nil)
+
+	req := httptest.NewRequest("GET", "http://localhost/v1/syncable/sync-1/status", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	resp := w.Result()
+	require.Equal(t, 200, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	var got struct {
+		Stuck       bool   `json:"stuck"`
+		WorkerState string `json:"workerState"`
+		Index       uint64 `json:"index"`
+		Message     string `json:"message"`
+	}
+	require.NoError(t, json.Unmarshal(body, &got))
+	require.Equal(t, "parked", got.WorkerState)
+	require.False(t, got.Stuck, "parked is a terminal state, not a transient stall")
+	require.Equal(t, uint64(9), got.Index)
+	require.Equal(t, "every row violates the config", got.Message)
 }
 
 // TestGetSyncableStatus_NotStuck reports a healthy syncable as not stuck. The
@@ -294,7 +328,7 @@ func TestGetSyncableStatus_NotStuck(t *testing.T) {
 	require.Equal(t, 200, resp.StatusCode)
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	require.JSONEq(t, `{"stuck":false,"checkpointIndex":0,"headIndex":0,"lag":0,"caughtUp":true}`, string(body))
+	require.JSONEq(t, `{"stuck":false,"workerState":"running","checkpointIndex":0,"headIndex":0,"lag":0,"caughtUp":true}`, string(body))
 }
 
 // progressResponse decodes the full status response including the

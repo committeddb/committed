@@ -26,6 +26,33 @@ one proposal forever and never advances. It does not lose data, but it does
 not make progress either. That's a **stuck** syncable, and clearing it is a
 human decision — see [Unsticking it](#unsticking-it).
 
+## When a syncable parks (a systematic fault)
+
+The permanent-error path above dead-letters one bad proposal and moves on —
+fine for the occasional bad row. But if a syncable hits **many** permanent
+errors back-to-back (100 consecutive, by default), that is not a few bad rows;
+it is a **systematic fault** — a config typo that every event of a variant
+violates. Rather than dead-letter a whole topic one proposal at a time, the
+worker's circuit breaker trips and the worker **parks**: it stops entirely and
+waits for you. This is terminal and distinct from a transient stall — the worker
+is not retrying, it has stopped.
+
+**Telling.** Like the stuck signal, this is replicated, so **any node** answers:
+
+- **Metric (alert on this).** `committed_worker_parked{kind="sync",id}` is a
+  gauge that stays `1` until you fix it. Alert with
+  `max by (id) (committed_worker_parked{kind="sync"}) == 1 for 5m`.
+- **Status endpoint.** `GET /v1/syncable/{id}/status` reports
+  `"workerState":"parked"` (and `"stuck":false` — a park is not a transient
+  stall, so the skip lever below does not apply).
+
+**Fixing.** A park means the *config* is wrong, so the remedy is to fix it, not
+to skip a proposal: correct the syncable config and **re-POST it**
+(`POST /v1/syncable/{id}`). A new config version clears the parked record and
+starts a fresh worker; deleting the syncable also clears it. A bare restart or
+leadership change does **not** clear a park — it stays visibly parked until you
+act.
+
 ## Telling a syncable is stuck
 
 The signal is replicated, so **any node** answers — you don't need to find

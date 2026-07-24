@@ -39,6 +39,7 @@ func (s *Storage) handleSyncable(e *cluster.Entity, raftIndex uint64) error {
 func (s *Storage) saveSyncable(t *cluster.Configuration, raftIndex uint64) error {
 	var syncable cluster.Syncable
 	var built bool
+	var clearedWorkerState bool
 	err := s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(syncableBucket)
 		if b == nil {
@@ -56,6 +57,19 @@ func (s *Storage) saveSyncable(t *cluster.Configuration, raftIndex uint64) error
 		if err := setVersionedLastIndex(b, []byte(t.ID), raftIndex); err != nil {
 			return err
 		}
+
+		// A new config version is the operator's fix (the only path that bumps a
+		// syncable's version). Clear any worker-state record — a stale transient
+		// stuck OR a terminal park — ATOMICALLY with the version write, so the fixed
+		// config can't sit beside a stale/parked record. A bare respawn replays the
+		// same version (deduped by the guard above) and never reaches here, so a park
+		// correctly survives leadership change / restart. See handleSyncableStuck.
+		if cleared, derr := deleteKeyedTx(tx, syncableStuckBucket, []byte(t.ID)); derr != nil {
+			return derr
+		} else if cleared {
+			clearedWorkerState = true
+		}
+
 		bs, err := t.Marshal()
 		if err != nil {
 			return fmt.Errorf("[wal.syncable] marshal: %w", err)
@@ -103,6 +117,14 @@ func (s *Storage) saveSyncable(t *cluster.Configuration, raftIndex uint64) error
 	})
 	if err != nil {
 		return err
+	}
+
+	// Gauge update rides outside the tx (metrics are not transactional). Every node
+	// applies this config change and clears its own record, so both gauges converge
+	// to 0 cluster-wide by construction.
+	if clearedWorkerState && s.metrics != nil {
+		s.metrics.SetSyncStuck(t.ID, false)
+		s.metrics.SetWorkerParked("sync", t.ID, false)
 	}
 
 	if built && s.sync != nil {

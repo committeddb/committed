@@ -1932,27 +1932,36 @@ components:
 
     SyncableStatusResponse:
       type: object
-      required: [stuck, checkpointIndex, headIndex, lag, caughtUp]
+      required: [stuck, workerState, checkpointIndex, headIndex, lag, caughtUp]
       description: A syncable worker's current operational status and progress.
       properties:
         stuck:
           type: boolean
           description: |
-            True if the worker has been blocked retrying a transient error
-            past the stuck threshold. The `index`, `since`, and `message`
-            fields are present only when true.
+            True if the worker has been blocked retrying a TRANSIENT error past
+            the stuck threshold (it is still running). False for a healthy worker
+            and for a terminal park (see `workerState`). The `index`, `since`, and
+            `message` fields are present when stuck or parked.
+        workerState:
+          type: string
+          enum: [running, parked]
+          description: |
+            The worker's lifecycle state: `running` (healthy, or transiently stuck
+            retrying — see `stuck`) or `parked` (the circuit breaker tripped on a
+            systematic config fault and the worker STOPPED — fix the config and
+            re-POST it, or delete the syncable). Replicated, so any node reports it.
         index:
           type: integer
           format: int64
           minimum: 0
-          description: Raft index the worker is blocked on (pass to .../deadletter). Present only when stuck.
+          description: Raft index the worker is blocked on (pass to .../deadletter). Present when stuck or parked.
         since:
           type: string
           format: date-time
-          description: When the worker first wedged on this proposal (RFC 3339, UTC). Present only when stuck.
+          description: When the worker first wedged on this proposal (RFC 3339, UTC). Present when stuck or parked.
         message:
           type: string
-          description: Truncated last transient error. Present only when stuck.
+          description: Truncated last transient error. Present when stuck or parked.
         checkpointIndex:
           type: integer
           format: int64
@@ -2108,12 +2117,22 @@ components:
 
     PipelineSyncableStatus:
       type: object
-      required: [id, checkpointIndex, lag, caughtUp]
+      required: [id, workerState, stuck, checkpointIndex, lag, caughtUp]
       description: One consumer's place in the pipeline.
       properties:
         id:
           type: string
           description: The syncable id.
+        workerState:
+          type: string
+          enum: [running, parked]
+          description: >-
+            The consumer worker's lifecycle state — `running` or `parked` (breaker
+            tripped; operator must act). Mirrors GET /syncable/{id}/status so the
+            pipeline view is not less informative.
+        stuck:
+          type: boolean
+          description: True if this consumer is transiently stuck retrying (still running).
         checkpointIndex:
           type: integer
           format: int64
