@@ -28,14 +28,24 @@ func TestReservedSystemNamespace_RoundTrip(t *testing.T) {
 }
 
 func TestReservedSystemNamespace_NonReserved(t *testing.T) {
-	// A legacy (grandfathered) system UUID has no reserved prefix.
-	_, ok := reservedSystemClass("d3f5a7b9-2e4c-4f6a-8b1d-3c5e7a9f0b24")
+	// A grandfathered built-in system UUID (random, no reserved prefix).
+	_, ok := reservedSystemClass(databaseType.ID)
 	require.False(t, ok)
 	// A user-defined name is not a UUID and not reserved; nor is the empty id.
 	_, ok = reservedSystemClass("controlplane-event")
 	require.False(t, ok)
 	_, ok = reservedSystemClass("")
 	require.False(t, ok)
+}
+
+// ingestableStuck is the first re-keyed built-in: it must be a namespaced,
+// UNGATED type (so an older node skips it) that still resolves as internal via
+// the registry on a binary that knows it.
+func TestIngestableStuck_IsUngatedNamespaced(t *testing.T) {
+	state, ok := reservedSystemClass(ingestableStuckType.ID)
+	require.True(t, ok, "ingestableStuck must be in the reserved system-type namespace")
+	require.Equal(t, compatUngated, state, "a terminal-park record is skippable observability")
+	require.True(t, IsInternal(ingestableStuckType.ID), "still resolved as internal via the registry")
 }
 
 func TestReservedSystemID_PanicsOutOfRange(t *testing.T) {

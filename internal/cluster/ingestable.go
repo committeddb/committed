@@ -214,8 +214,12 @@ func NewDeleteIngestableEntities(id string) []*Entity {
 	}
 }
 
+// ingestableStuckType is the first namespaced system type: a terminal-park
+// coordination record is pure observability, so it is UNGATED (index 0) — an
+// older node that doesn't know it skips-and-warns rather than bricking, and it
+// needs no FeatureLevel gate. See system_type_namespace.go.
 var ingestableStuckType = registerSystemType(&Type{
-	ID:         "d3f5a7b9-2e4c-4f6a-8b1d-3c5e7a9f0b24",
+	ID:         reservedSystemID(compatUngated, 0),
 	Name:       "InternalIngestableStuck",
 	Version:    1,
 	EntityKind: EntityKindSnapshot,
