@@ -2,6 +2,7 @@ package wal
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 
 	"google.golang.org/protobuf/proto"
@@ -125,6 +126,22 @@ func (s *Storage) applyCommitted(entry *pb.Entry) (bool, error) {
 	if entry.GetType() == pb.EntryNormal && entry.Data != nil {
 		p := &cluster.Proposal{}
 		if err := p.Unmarshal(entry.Data, s); err != nil {
+			// A namespaced system type from a NEWER version, marked skippable
+			// (ungated): this binary can't apply it, but skipping-and-advancing
+			// is safe (a coordination/observability record) and far better than
+			// bricking. The raw entry is already in the event log (appended
+			// above), so nothing is lost from the log; only this node's derived
+			// state doesn't reflect it. A gated or unknown-state reserved type —
+			// and any user-type inconsistency — still returns the error, which
+			// the raft loop fatals: the loud backstop against a missed gate.
+			var ure *cluster.UnknownReservedTypeError
+			if errors.As(err, &ure) && ure.Skippable() {
+				s.logger.Warn("skipping an unknown skippable (ungated) system entry from a newer version; advancing applied index",
+					zap.Uint64("index", entry.GetIndex()),
+					zap.String("typeID", ure.ID))
+				s.appliedIndex.Store(entry.GetIndex())
+				return true, nil
+			}
 			s.logger.Error("unmarshal committed proposal",
 				zap.Uint64("index", entry.GetIndex()),
 				zap.Stringer("entryType", entry.GetType()),

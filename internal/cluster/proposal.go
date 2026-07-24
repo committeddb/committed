@@ -413,6 +413,14 @@ func resolveType(ref TypeRef, r TypeResolver) (*Type, error) {
 	if t := systemType(ref.ID); t != nil {
 		return t, nil
 	}
+	if state, ok := reservedSystemClass(ref.ID); ok {
+		// A namespaced system type this binary doesn't register — from a newer
+		// committed version. Surface it typed so the apply path and the reader
+		// decide skip (ungated) vs fatal (gated / undefined) from the compat
+		// state, structurally, without knowing the type. A user-defined type
+		// (no reserved prefix) still falls through to the resolver below.
+		return nil, &UnknownReservedTypeError{ID: ref.ID, State: state}
+	}
 	return r.ResolveType(ref)
 }
 

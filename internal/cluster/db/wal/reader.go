@@ -118,10 +118,20 @@ func (r *Reader) Read() (*cluster.Actual, error) {
 
 		p := &cluster.Proposal{}
 		if err := p.Unmarshal(ent.Data, r.s); err != nil {
-			// Do not advance (as above). With the watermark, a within-
-			// AppliedIndex entry's type is guaranteed applied, so a resolution
-			// failure here is genuine corruption/bug — retry-loudly beats
-			// skip-silently.
+			// A namespaced system type from a NEWER version, marked skippable
+			// (ungated): the apply path skipped it too (compat namespace), so
+			// skip it here — advance the cursor and keep scanning — rather than
+			// stalling the syncable on a coordination record it never wanted.
+			var ure *cluster.UnknownReservedTypeError
+			if errors.As(err, &ure) && ure.Skippable() {
+				r.raftIndex = ent.GetIndex()
+				r.walSeq++
+				continue
+			}
+			// Otherwise: do not advance (as above). With the watermark, a
+			// within-AppliedIndex entry's type is guaranteed applied, so a
+			// resolution failure here is genuine corruption/bug — retry-loudly
+			// beats skip-silently.
 			return nil, err
 		}
 
