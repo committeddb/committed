@@ -49,16 +49,17 @@ func coerceForColumn(v any, sqlType string) any {
 			if i, err := n.Int64(); err == nil {
 				return i
 			}
-			// Not an integer. For an exact-numeric column (DECIMAL/NUMERIC/MONEY)
-			// bind the source digits as a string — the driver parses them losslessly,
-			// whereas a float64 round-trip corrupts a value it can't represent
-			// (e.g. 7922816251426433.75). Only approximate columns (FLOAT/DOUBLE/REAL),
-			// which are IEEE floats anyway, take the native float64.
-			if columnIsExactNumeric(sqlType) {
-				return n.String()
-			}
-			if f, err := n.Float64(); err == nil {
-				return f
+			// Int64 overflowed: a BIGINT UNSIGNED value above 2^63 is an integer
+			// that simply does not fit int64, or the value is a genuine non-integer.
+			// Bind the exact source digits as a string, which the driver parses
+			// losslessly, for EVERY column except the approximate IEEE-float types
+			// (FLOAT/DOUBLE/REAL): only those take a native float64, their on-the-wire
+			// form. Rounding a large unsigned integer, or an exact decimal like
+			// 7922816251426433.75, through float64 would silently corrupt the value.
+			if columnIsApproximateFloat(sqlType) {
+				if f, err := n.Float64(); err == nil {
+					return f
+				}
 			}
 			return n.String()
 		}
@@ -135,13 +136,17 @@ func columnIsBinary(sqlType string) bool {
 	return false
 }
 
-// columnIsExactNumeric reports whether a declared type stores numbers exactly
-// (fixed/arbitrary precision), so a non-integer value must be bound as its source
-// digits rather than a lossy float64. Approximate types (FLOAT/DOUBLE/REAL) are
-// excluded — they are IEEE floats where float64 is the native, correct form.
-func columnIsExactNumeric(sqlType string) bool {
+// columnIsApproximateFloat reports whether a declared type is an approximate
+// IEEE-float column (FLOAT/DOUBLE/REAL and their aliases) — the only columns for
+// which a non-integer, or an integer too large for int64, is correctly bound as
+// a native float64. Every other numeric column binds its source digits as a
+// string instead: the integer types, and the exact fixed-precision
+// DECIMAL/NUMERIC/MONEY family. So a value float64 cannot represent — a BIGINT
+// UNSIGNED above 2^63, or a high-precision decimal — reaches the driver
+// uncorrupted rather than silently rounded.
+func columnIsApproximateFloat(sqlType string) bool {
 	switch leadingTypeToken(sqlType) {
-	case "DECIMAL", "NUMERIC", "DEC", "FIXED", "NUMBER", "MONEY":
+	case "REAL", "DOUBLE", "FLOAT", "FLOAT4", "FLOAT8":
 		return true
 	}
 	return false

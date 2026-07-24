@@ -28,6 +28,19 @@ func TestCoerceForColumn(t *testing.T) {
 	require.Equal(t, int64(42), coerceForColumn(json.Number("42"), "BIGINT"))
 	require.Equal(t, int64(7), coerceForColumn(json.Number("7"), "double precision"))
 
+	// A BIGINT UNSIGNED value above 2^63 is an integer that overflows int64, so
+	// Int64 fails — but it must still bind as its exact digits, NOT round through
+	// float64. This is the silent MySQL-UNSIGNED corruption the coercion guards
+	// against: 10000000000000000001 as a float64 collapses to 1e19 (…000), and
+	// 18446744073709551615 (2^64-1) rounds up to …616. The earlier precision
+	// tickets only covered values through 2^53+1, which still parse as int64.
+	require.Equal(t, "10000000000000000001",
+		coerceForColumn(json.Number("10000000000000000001"), "BIGINT UNSIGNED"),
+		"a BIGINT UNSIGNED above 2^63 must survive as exact digits, not the 1e19 float64 approximation")
+	require.Equal(t, "18446744073709551615",
+		coerceForColumn(json.Number("18446744073709551615"), "BIGINT UNSIGNED"),
+		"2^64-1 must not round up through float64 to 18446744073709551616")
+
 	// A non-integer into an EXACT-numeric column (DECIMAL/NUMERIC/MONEY) binds as
 	// its source digits — a float64 round trip would corrupt a value the type
 	// exists to store exactly. This is the sql-syncable-decimal-float64 regression.
@@ -104,20 +117,22 @@ func TestColumnIsNumericOrBool(t *testing.T) {
 	}
 }
 
-// TestColumnIsExactNumeric pins the exact/approximate split that decides whether
-// a non-integer number binds as its source digits (exact) or a native float64
-// (approximate). Integer types are not "exact-numeric" here — an integer value
-// takes the Int64 path before the split is consulted.
-func TestColumnIsExactNumeric(t *testing.T) {
+// TestColumnIsApproximateFloat pins the set of columns that bind a non-integer
+// value — or an integer too large for int64 — as a native float64. Only the
+// approximate IEEE-float types qualify; the integer types and the exact
+// DECIMAL/NUMERIC/MONEY family bind their source digits as a string, so an
+// int64-overflowing BIGINT UNSIGNED or a high-precision decimal reaches the
+// driver uncorrupted.
+func TestColumnIsApproximateFloat(t *testing.T) {
 	for _, ty := range []string{
-		"DECIMAL(15,2)", "NUMERIC(10,0)", "DEC(5)", "FIXED", "NUMBER", "MONEY", "numeric",
+		"FLOAT", "float", "DOUBLE", "double precision", "REAL", "FLOAT4", "FLOAT8",
 	} {
-		require.Truef(t, columnIsExactNumeric(ty), "%q should be exact-numeric", ty)
+		require.Truef(t, columnIsApproximateFloat(ty), "%q should be approximate-float", ty)
 	}
 	for _, ty := range []string{
-		"FLOAT", "double precision", "REAL", "FLOAT4", "FLOAT8",
+		"DECIMAL(15,2)", "NUMERIC(10,0)", "DEC(5)", "FIXED", "NUMBER", "MONEY", "numeric",
 		"INT", "BIGINT", "TEXT", "", "  ",
 	} {
-		require.Falsef(t, columnIsExactNumeric(ty), "%q should not be exact-numeric", ty)
+		require.Falsef(t, columnIsApproximateFloat(ty), "%q should not be approximate-float", ty)
 	}
 }
