@@ -895,6 +895,38 @@ func (db *DB) maybeProposeScrub() {
 // multiple times), the registry drain is a no-op on the second call
 // (the maps are empty after the first), and raft.Close uses sync.Once.
 func (db *DB) Close() error {
+	return db.closeUntil(time.Time{})
+}
+
+// CloseWithDeadline is Close bounded by a single overall deadline: each waited
+// phase (the worker drain and the leadership hand-off) is clamped to the time
+// remaining until deadline, so the whole shutdown stays within one budget. This is
+// how cmd's graceful shutdown makes COMMITTED_SHUTDOWN_TIMEOUT bound the TOTAL path
+// (HTTP drain + worker drain + hand-off), not just the HTTP drain. raft.Close,
+// normally instant, is the one unclamped tail. A zero deadline is Close's unbounded
+// per-phase behavior.
+func (db *DB) CloseWithDeadline(deadline time.Time) error {
+	return db.closeUntil(deadline)
+}
+
+// clampToDeadline returns d, or the smaller time remaining until deadline (floored
+// at 0) when that is less. A zero deadline means "no overall budget" and returns d
+// unchanged, so Close keeps each phase's full per-phase timeout.
+func clampToDeadline(d time.Duration, deadline time.Time) time.Duration {
+	if deadline.IsZero() {
+		return d
+	}
+	switch remaining := time.Until(deadline); {
+	case remaining <= 0:
+		return 0
+	case remaining < d:
+		return remaining
+	default:
+		return d
+	}
+}
+
+func (db *DB) closeUntil(deadline time.Time) error {
 	db.logger.Info("closing db")
 
 	db.cancelSyncs()
@@ -940,7 +972,7 @@ func (db *DB) Close() error {
 	}
 	db.workersMu.Unlock()
 
-	if abandoned := drainWorkers(handles, closeDrainTimeout); abandoned > 0 {
+	if abandoned := drainWorkers(handles, clampToDeadline(closeDrainTimeout, deadline)); abandoned > 0 {
 		db.logger.Warn("close: worker drain timed out; abandoned wedged worker(s) and proceeded with shutdown "+
 			"(a syncable stuck in tx.Commit against an unreachable destination is the usual cause)",
 			zap.Int("abandoned", abandoned), zap.Duration("timeout", closeDrainTimeout))
@@ -959,7 +991,7 @@ func (db *DB) Close() error {
 	// election. Best-effort and bounded — see transferLeadershipBeforeStop. Done
 	// after the worker drain so the workers finish their unwind under this
 	// node's leadership, then we hand off.
-	db.transferLeadershipBeforeStop()
+	db.transferLeadershipBeforeStop(clampToDeadline(db.shutdownTransferTimeout, deadline))
 
 	// The WAL Storage is owned by the caller — it opens it, passes it to New, and
 	// keeps using it independently of the DB (operators and tests query the

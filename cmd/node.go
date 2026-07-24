@@ -32,10 +32,12 @@ import (
 	"github.com/committeddb/committed/internal/version"
 )
 
-// defaultShutdownTimeout bounds how long graceful shutdown waits for the
-// HTTP server to drain. Kubernetes pod terminationGracePeriodSeconds
-// defaults to 30s; staying inside that envelope keeps the graceful path
-// reachable in a normal rolling restart.
+// defaultShutdownTimeout is the TOTAL budget for graceful shutdown — the HTTP
+// drain, then the worker drain and leadership hand-off in db.Close, all clamped to
+// this one deadline (COMMITTED_SHUTDOWN_TIMEOUT). Kubernetes pod
+// terminationGracePeriodSeconds defaults to 30s; keep it at least a few seconds
+// above this so the final raft stop — the one unclamped, normally-instant tail —
+// finishes before SIGKILL.
 const defaultShutdownTimeout = 30 * time.Second
 
 var nodeCmd = &cobra.Command{
@@ -496,7 +498,8 @@ func runNode(d *db.DB, httpServer *nethttp.Server) int {
 // to prevent.
 func gracefulShutdown(d *db.DB, httpServer *nethttp.Server) int {
 	timeout := shutdownTimeout()
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	deadline := time.Now().Add(timeout)
+	shutdownCtx, cancel := context.WithDeadline(context.Background(), deadline)
 	defer cancel()
 
 	exitCode := 0
@@ -510,7 +513,10 @@ func gracefulShutdown(d *db.DB, httpServer *nethttp.Server) int {
 		zap.L().Info("shutdown.http_closed")
 	}
 
-	if err := d.Close(); err != nil {
+	// db.Close gets whatever budget remains under the SAME deadline, so the total
+	// graceful path (HTTP drain + worker drain + leadership hand-off) stays within
+	// COMMITTED_SHUTDOWN_TIMEOUT rather than running additive to it.
+	if err := d.CloseWithDeadline(deadline); err != nil {
 		zap.L().Warn("shutdown.db_close_error", zap.Error(err))
 		exitCode = 1
 	} else {

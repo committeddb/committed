@@ -35,13 +35,15 @@ orchestrator can see that the graceful window was blown.
 
 ## Configuring the deadline
 
-The drain deadline is set by the `COMMITTED_SHUTDOWN_TIMEOUT`
-environment variable. It accepts Go duration syntax (`30s`, `45s`,
-`1m`, `2m30s`, ...). When unset, the default is **30 seconds**, chosen
-to fit inside Kubernetes' default
-`terminationGracePeriodSeconds: 30` — if your pod spec raises that
-value, raise `COMMITTED_SHUTDOWN_TIMEOUT` to match so
-`SIGKILL` doesn't preempt the graceful path.
+The **total** graceful-shutdown budget is set by the
+`COMMITTED_SHUTDOWN_TIMEOUT` environment variable — it bounds the whole path:
+the HTTP drain, then the worker drain and leadership hand-off in `db.Close`,
+all clamped to this one deadline (only the final raft stop, normally instant,
+runs after it). It accepts Go duration syntax (`30s`, `45s`, `1m`, `2m30s`,
+...). When unset, the default is **30 seconds**, chosen to fit inside
+Kubernetes' default `terminationGracePeriodSeconds: 30` — if your pod spec
+raises that value, raise `COMMITTED_SHUTDOWN_TIMEOUT` to match so `SIGKILL`
+doesn't preempt the graceful path.
 
 ```bash
 COMMITTED_SHUTDOWN_TIMEOUT=45s ./committed node --id 1 ...

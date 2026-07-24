@@ -51,7 +51,7 @@ func TestTransferLeadershipBeforeStop_TransfersAndWaits(t *testing.T) {
 	d.isLeaderFn = stillLeader.Load
 
 	start := time.Now()
-	d.transferLeadershipBeforeStop()
+	d.transferLeadershipBeforeStop(d.shutdownTransferTimeout)
 
 	require.Equal(t, []uint64{2}, transferred, "leadership transferred to the chosen target")
 	require.Less(t, time.Since(start), time.Second, "returned promptly once leadership moved")
@@ -65,9 +65,46 @@ func TestTransferLeadershipBeforeStop_NoTargetSkips(t *testing.T) {
 	d.transferLeadershipFn = func(uint64) { called = true }
 	d.isLeaderFn = func() bool { return true }
 
-	d.transferLeadershipBeforeStop()
+	d.transferLeadershipBeforeStop(d.shutdownTransferTimeout)
 
 	require.False(t, called, "no transfer attempted when there is no target")
+}
+
+// TestClampToDeadline is the total-shutdown-budget helper: each waited phase is
+// clamped to the time remaining until the overall deadline, so HTTP drain + worker
+// drain + hand-off stay within COMMITTED_SHUTDOWN_TIMEOUT instead of running
+// additive to it.
+func TestClampToDeadline(t *testing.T) {
+	const d = 3 * time.Second
+
+	require.Equal(t, d, clampToDeadline(d, time.Time{}),
+		"a zero deadline means no overall budget — full per-phase timeout")
+	require.Equal(t, d, clampToDeadline(d, time.Now().Add(time.Hour)),
+		"plenty of budget left — full per-phase timeout")
+
+	got := clampToDeadline(d, time.Now().Add(500*time.Millisecond))
+	require.Positive(t, got)
+	require.Less(t, got, d, "less budget left than the phase wants — clamped down")
+
+	require.Zero(t, clampToDeadline(d, time.Now().Add(-time.Second)),
+		"deadline already passed — 0, so the phase skips its wait")
+}
+
+// TestTransferLeadershipBeforeStop_TimeoutParamBoundsWait proves the hand-off is
+// bounded by the timeout ARGUMENT (the clamped remaining budget CloseWithDeadline
+// passes), not the node's configured shutdownTransferTimeout: a 0 budget from an
+// exhausted deadline must not block the stop.
+func TestTransferLeadershipBeforeStop_TimeoutParamBoundsWait(t *testing.T) {
+	d := &DB{logger: zap.NewNop(), shutdownTransferTimeout: 5 * time.Second}
+	d.shutdownTransferTargetFn = func() uint64 { return 2 }
+	d.transferLeadershipFn = func(uint64) {}
+	d.isLeaderFn = func() bool { return true } // never hands off
+
+	start := time.Now()
+	d.transferLeadershipBeforeStop(0)
+
+	require.Less(t, time.Since(start), 200*time.Millisecond,
+		"the 0-budget argument, not the 5s field, must bound the wait")
 }
 
 // If leadership never moves, the hand-off gives up after the bounded timeout and
@@ -80,7 +117,7 @@ func TestTransferLeadershipBeforeStop_TimeoutFallsThrough(t *testing.T) {
 	d.isLeaderFn = func() bool { return true } // never hands off
 
 	start := time.Now()
-	d.transferLeadershipBeforeStop()
+	d.transferLeadershipBeforeStop(d.shutdownTransferTimeout)
 	elapsed := time.Since(start)
 
 	require.Equal(t, []uint64{2}, transferred, "the transfer was attempted")

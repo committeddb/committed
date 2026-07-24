@@ -9,9 +9,12 @@ import (
 const (
 	// defaultShutdownTransferTimeout bounds how long Close waits for a graceful
 	// leadership hand-off to complete before stopping anyway. A transfer to a
-	// caught-up voter normally settles in well under a second (one catch-up
-	// round plus an immediate election); 3s is generous headroom on a loaded
-	// node, and stays comfortably inside cmd's 30s graceful-shutdown deadline.
+	// caught-up voter normally settles in well under a second (one catch-up round
+	// plus an immediate election); 3s is generous headroom on a loaded node. On the
+	// cmd graceful-shutdown path CloseWithDeadline clamps this to whatever budget is
+	// left under COMMITTED_SHUTDOWN_TIMEOUT, so the whole shutdown — HTTP drain,
+	// worker drain, AND this hand-off — stays within that single deadline (the final
+	// raft stop, normally instant, is the one unclamped tail).
 	defaultShutdownTransferTimeout = 3 * time.Second
 
 	// shutdownTransferPollInterval is how often the wait loop checks whether
@@ -26,7 +29,7 @@ const (
 // single-node cluster, or a hand-off that doesn't complete within
 // shutdownTransferTimeout all fall through to the normal stop. A forced election
 // is the fallback, never a hang.
-func (db *DB) transferLeadershipBeforeStop() {
+func (db *DB) transferLeadershipBeforeStop(timeout time.Duration) {
 	target := db.shutdownTransferTargetFn()
 	if target == 0 {
 		// Not the leader, or no voter to hand off to — nothing to do.
@@ -37,7 +40,7 @@ func (db *DB) transferLeadershipBeforeStop() {
 		zap.Uint64("target", target))
 	db.transferLeadershipFn(target)
 
-	deadline := time.Now().Add(db.shutdownTransferTimeout)
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if !db.isLeaderFn() {
 			db.logger.Info("graceful shutdown: leadership handed off",
@@ -47,7 +50,7 @@ func (db *DB) transferLeadershipBeforeStop() {
 		time.Sleep(shutdownTransferPollInterval)
 	}
 	db.logger.Warn("graceful shutdown: leadership did not hand off before timeout; stopping anyway",
-		zap.Duration("timeout", db.shutdownTransferTimeout), zap.Uint64("target", target))
+		zap.Duration("timeout", timeout), zap.Uint64("target", target))
 }
 
 // shutdownTransferTarget is the default shutdownTransferTargetFn: it returns the
