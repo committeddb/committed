@@ -784,7 +784,7 @@ func (d *PostgreSQLDialect) stream(
 		pglogrepl.StartReplicationOptions{
 			PluginArgs: []string{
 				"proto_version '1'",
-				fmt.Sprintf("publication_names '%s'", pgCfg.publication),
+				publicationNamesArg(pgCfg.publication),
 			},
 		})
 	if err != nil {
@@ -1028,6 +1028,17 @@ func (d *PostgreSQLDialect) stream(
 // identifiers identically.
 func quoteIdent(s string) string {
 	return sqlident.Postgres.Ident(s)
+}
+
+// publicationNamesArg builds the START_REPLICATION `publication_names '...'`
+// plugin argument. The publication name is config-controlled and a quote-bearing
+// name is creatable (ensurePublication quotes it as a double-quoted identifier,
+// which admits an embedded '), so it must be escaped for the '...' string-literal
+// position here — every other use quotes it as an identifier, but this one sits
+// in a literal. Postgres form (double the single quote); the caller owns the
+// surrounding quotes.
+func publicationNamesArg(publication string) string {
+	return fmt.Sprintf("publication_names '%s'", sqlident.EscapeStringLiteral(publication))
 }
 
 // ensurePublication creates the publication if it does not exist, or — if it
