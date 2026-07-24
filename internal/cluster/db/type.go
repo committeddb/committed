@@ -97,6 +97,14 @@ func (db *DB) ProposeType(ctx context.Context, c *cluster.Configuration) error {
 }
 
 func ParseType(c *cluster.Configuration, s cluster.DatabaseStorage) (string, *cluster.Type, error) {
+	// A user cannot author a type whose id lands in committed's reserved
+	// system-type namespace: an older node would treat it as a (skippable or
+	// must-gate) system record rather than user data. Built-in system types
+	// register directly and never reach here, so this only guards submissions.
+	if cluster.IsReservedSystemID(c.ID) {
+		return "", nil, fmt.Errorf("type id %q is in committed's reserved system-type namespace and cannot be used for a user type", c.ID)
+	}
+
 	// Type configs decode without ${VAR} interpolation, deliberately:
 	// schemas and jq programs are not secrets, and a literal "${" in a
 	// schema document must not error on a missing env var.

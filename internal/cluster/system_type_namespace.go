@@ -57,6 +57,15 @@ func reservedSystemClass(id string) (state uint8, ok bool) {
 	return 0, false
 }
 
+// IsReservedSystemID reports whether id lies in committed's reserved system-type
+// namespace (any state). User type IDs are rejected from it at propose time so a
+// user can't author a type an older node would treat as a system record it
+// should skip or gate.
+func IsReservedSystemID(id string) bool {
+	_, ok := reservedSystemClass(id)
+	return ok
+}
+
 // reservedSystemID mints a namespaced system-type UUID for the given compat
 // state and index — used to author built-in system types and by tests. Panics
 // on an out-of-range state/index (a programming error at authoring time).
