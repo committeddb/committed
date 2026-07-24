@@ -106,6 +106,13 @@ const (
 	WorkerStateParked  = "parked"  // terminally parked — operator must fix the config
 )
 
+// ParkedWorker identifies a terminally-parked worker for the /node/status summary.
+// Detail (since / message / blocked index) is on the per-resource status endpoint.
+type ParkedWorker struct {
+	Kind string // "sync" or "ingest"
+	ID   string
+}
+
 type IngestableStatus struct {
 	// WorkerState is the worker's lifecycle state: "running" or "parked" (the
 	// freeze/restart supervisor gave up; fix the config and re-POST it, or delete).

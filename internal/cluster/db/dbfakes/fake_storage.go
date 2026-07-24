@@ -403,6 +403,18 @@ type FakeStorage struct {
 	nodeReturnsOnCall map[int]struct {
 		result1 uint64
 	}
+	ParkedWorkersStub        func() ([]cluster.ParkedWorker, error)
+	parkedWorkersMutex       sync.RWMutex
+	parkedWorkersArgsForCall []struct {
+	}
+	parkedWorkersReturns struct {
+		result1 []cluster.ParkedWorker
+		result2 error
+	}
+	parkedWorkersReturnsOnCall map[int]struct {
+		result1 []cluster.ParkedWorker
+		result2 error
+	}
 	PositionStub        func(string) cluster.Position
 	positionMutex       sync.RWMutex
 	positionArgsForCall []struct {
@@ -2630,6 +2642,62 @@ func (fake *FakeStorage) NodeReturnsOnCall(i int, result1 uint64) {
 	fake.nodeReturnsOnCall[i] = struct {
 		result1 uint64
 	}{result1}
+}
+
+func (fake *FakeStorage) ParkedWorkers() ([]cluster.ParkedWorker, error) {
+	fake.parkedWorkersMutex.Lock()
+	ret, specificReturn := fake.parkedWorkersReturnsOnCall[len(fake.parkedWorkersArgsForCall)]
+	fake.parkedWorkersArgsForCall = append(fake.parkedWorkersArgsForCall, struct {
+	}{})
+	stub := fake.ParkedWorkersStub
+	fakeReturns := fake.parkedWorkersReturns
+	fake.recordInvocation("ParkedWorkers", []interface{}{})
+	fake.parkedWorkersMutex.Unlock()
+	if stub != nil {
+		return stub()
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeStorage) ParkedWorkersCallCount() int {
+	fake.parkedWorkersMutex.RLock()
+	defer fake.parkedWorkersMutex.RUnlock()
+	return len(fake.parkedWorkersArgsForCall)
+}
+
+func (fake *FakeStorage) ParkedWorkersCalls(stub func() ([]cluster.ParkedWorker, error)) {
+	fake.parkedWorkersMutex.Lock()
+	defer fake.parkedWorkersMutex.Unlock()
+	fake.ParkedWorkersStub = stub
+}
+
+func (fake *FakeStorage) ParkedWorkersReturns(result1 []cluster.ParkedWorker, result2 error) {
+	fake.parkedWorkersMutex.Lock()
+	defer fake.parkedWorkersMutex.Unlock()
+	fake.ParkedWorkersStub = nil
+	fake.parkedWorkersReturns = struct {
+		result1 []cluster.ParkedWorker
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeStorage) ParkedWorkersReturnsOnCall(i int, result1 []cluster.ParkedWorker, result2 error) {
+	fake.parkedWorkersMutex.Lock()
+	defer fake.parkedWorkersMutex.Unlock()
+	fake.ParkedWorkersStub = nil
+	if fake.parkedWorkersReturnsOnCall == nil {
+		fake.parkedWorkersReturnsOnCall = make(map[int]struct {
+			result1 []cluster.ParkedWorker
+			result2 error
+		})
+	}
+	fake.parkedWorkersReturnsOnCall[i] = struct {
+		result1 []cluster.ParkedWorker
+		result2 error
+	}{result1, result2}
 }
 
 func (fake *FakeStorage) Position(arg1 string) cluster.Position {

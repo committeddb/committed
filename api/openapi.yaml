@@ -1275,6 +1275,34 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /v1/cluster/status:
+    get:
+      tags: [node]
+      summary: Cluster-wide diagnostics that read the same from any node
+      description: |
+        Returns cluster-wide state backed by replicated data, so every node
+        answers identically — which makes this endpoint safe behind a load
+        balancer, unlike GET /node/status (whose fields are node-local).
+
+        Today it carries `parkedWorkers`: the syncable and ingestable workers
+        that have TERMINALLY parked (a sync circuit-breaker trip or an ingest
+        supervisor give-up) and need operator intervention — the one call that
+        answers "is anything parked anywhere?" A healthy cluster returns an empty
+        array. Drill into the per-resource GET /{syncable,ingestable}/{id}/status
+        for detail.
+      operationId: getClusterStatus
+      responses:
+        '200':
+          description: The cluster-wide diagnostics.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClusterStatusResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /v1/node/disk-report:
     post:
       tags: [node]
@@ -1650,6 +1678,8 @@ components:
         Per-node diagnostics for the node that served the request. The
         fields are node-local and ephemeral (not replicated), so two nodes
         can legitimately return different bodies for the same cluster state.
+        Behind a load balancer you can't target a node — use GET /cluster/status
+        for the cluster-wide view.
       properties:
         node:
           type: integer
@@ -1679,6 +1709,35 @@ components:
             $ref: '#/components/schemas/DegradedConfig'
         disk:
           $ref: '#/components/schemas/DiskStatus'
+
+    ClusterStatusResponse:
+      type: object
+      required: [parkedWorkers]
+      description: |
+        Cluster-wide diagnostics that read the same from any node (backed by
+        replicated state), so — unlike NodeStatusResponse — this endpoint is safe
+        behind a load balancer.
+      properties:
+        parkedWorkers:
+          type: array
+          description: |
+            Workers (sync or ingest) that have TERMINALLY parked and need operator
+            intervention. Empty on a healthy cluster.
+          items:
+            $ref: '#/components/schemas/ParkedWorker'
+
+    ParkedWorker:
+      type: object
+      required: [kind, id]
+      description: One terminally-parked worker named in the /node/status summary.
+      properties:
+        kind:
+          type: string
+          enum: [sync, ingest]
+          description: Which worker subsystem parked.
+        id:
+          type: string
+          description: The syncable or ingestable id — drill into its per-resource status for detail.
 
     DiskStatus:
       type: object

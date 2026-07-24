@@ -225,10 +225,18 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 			r.Get("/type/{id}/pipeline", h.GetPipelineStatus)
 
 			// Per-node diagnostics. /node/ (not /status) scopes this to the
-			// answering node — degraded-build state is node-local and
-			// ephemeral, unlike the replicated config content — and reserves
-			// /cluster/status for a future fan-out sibling.
+			// answering node — degraded-build state, applied index, and disk
+			// pressure are node-local and ephemeral, unlike the replicated
+			// config content. Behind a load balancer you can't target a node,
+			// so use it against a node's direct address; /cluster/status below
+			// carries the cluster-wide, node-agnostic view.
 			r.Get("/node/status", h.NodeStatus)
+
+			// Cluster-wide diagnostics that read the same from ANY node (the
+			// fan-out sibling reserved by /node/status). Today: the parked-worker
+			// summary. Backed by replicated state only, so no leader hop is needed
+			// — which is what makes it safe behind a load balancer.
+			r.Get("/cluster/status", h.ClusterStatus)
 
 			// Node-to-node: members push their disk state to the leader
 			// here and take the cluster write-admission verdict home from

@@ -1400,3 +1400,9 @@ func (db *DB) ConfigBuildErrors() []cluster.ConfigBuildError {
 	}
 	return nil
 }
+
+// ParkedWorkers lists every terminally-parked worker (sync + ingest) from
+// replicated state, so any node answers identically. Served by GET /node/status.
+func (db *DB) ParkedWorkers() ([]cluster.ParkedWorker, error) {
+	return db.storage.ParkedWorkers()
+}

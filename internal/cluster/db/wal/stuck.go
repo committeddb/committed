@@ -2,6 +2,7 @@ package wal
 
 import (
 	"fmt"
+	"sort"
 
 	bolt "go.etcd.io/bbolt"
 	"go.uber.org/zap"
@@ -244,6 +245,49 @@ func (s *Storage) SyncableSkipRequest(id string) (cluster.SyncableSkipRequest, b
 		return cluster.SyncableSkipRequest{}, false, err
 	}
 	return out, ok, nil
+}
+
+// ParkedWorkers lists every worker with a terminal parked record — syncables whose
+// SyncableStuck record has Parked=true, and every ingestable with an IngestableStuck
+// record. Replicated state, so any node answers identically; powers the
+// /node/status worker summary. Sorted (kind, id) for a stable response.
+func (s *Storage) ParkedWorkers() ([]cluster.ParkedWorker, error) {
+	var out []cluster.ParkedWorker
+	err := s.view(func(tx *bolt.Tx) error {
+		if b := tx.Bucket(syncableStuckBucket); b != nil {
+			if err := b.ForEach(func(k, v []byte) error {
+				var rec cluster.SyncableStuck
+				if err := rec.Unmarshal(v); err != nil {
+					return fmt.Errorf("[wal.stuck] parked-workers unmarshal syncable id=%s: %w", string(k), err)
+				}
+				if rec.Parked {
+					out = append(out, cluster.ParkedWorker{Kind: "sync", ID: string(k)})
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		if b := tx.Bucket(ingestableStuckBucket); b != nil {
+			if err := b.ForEach(func(k, _ []byte) error {
+				out = append(out, cluster.ParkedWorker{Kind: "ingest", ID: string(k)})
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Kind != out[j].Kind {
+			return out[i].Kind < out[j].Kind
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out, nil
 }
 
 // deleteKeyed removes key from the named flat bucket (no-op if absent).

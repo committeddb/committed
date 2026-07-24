@@ -45,6 +45,10 @@ is not retrying, it has stopped.
 - **Status endpoint.** `GET /v1/syncable/{id}/status` reports
   `"workerState":"parked"` (and `"stuck":false` — a park is not a transient
   stall, so the skip lever below does not apply).
+- **Cluster summary.** `GET /v1/cluster/status` lists every parked worker (sync
+  *and* ingest) under `parkedWorkers` — the one call that answers "is anything
+  parked anywhere?" without polling each resource. Unlike `/node/status`, it
+  reads the same from any node, so it's safe behind a load balancer.
 
 **Fixing.** A park means the *config* is wrong, so the remedy is to fix it, not
 to skip a proposal: correct the syncable config and **re-POST it**

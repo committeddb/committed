@@ -304,6 +304,10 @@ func (StorageStubs) IngestableStuck(id string) (cluster.IngestableStuck, bool, e
 	return cluster.IngestableStuck{}, false, nil
 }
 
+func (StorageStubs) ParkedWorkers() ([]cluster.ParkedWorker, error) {
+	return nil, nil
+}
+
 func (StorageStubs) SyncableSkipRequest(id string) (cluster.SyncableSkipRequest, bool, error) {
 	return cluster.SyncableSkipRequest{}, false, nil
 }

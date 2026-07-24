@@ -295,6 +295,18 @@ type FakeCluster struct {
 	membershipReturnsOnCall map[int]struct {
 		result1 cluster.Membership
 	}
+	ParkedWorkersStub        func() ([]cluster.ParkedWorker, error)
+	parkedWorkersMutex       sync.RWMutex
+	parkedWorkersArgsForCall []struct {
+	}
+	parkedWorkersReturns struct {
+		result1 []cluster.ParkedWorker
+		result2 error
+	}
+	parkedWorkersReturnsOnCall map[int]struct {
+		result1 []cluster.ParkedWorker
+		result2 error
+	}
 	PromoteMemberStub        func(context.Context, uint64) error
 	promoteMemberMutex       sync.RWMutex
 	promoteMemberArgsForCall []struct {
@@ -2049,6 +2061,62 @@ func (fake *FakeCluster) MembershipReturnsOnCall(i int, result1 cluster.Membersh
 	fake.membershipReturnsOnCall[i] = struct {
 		result1 cluster.Membership
 	}{result1}
+}
+
+func (fake *FakeCluster) ParkedWorkers() ([]cluster.ParkedWorker, error) {
+	fake.parkedWorkersMutex.Lock()
+	ret, specificReturn := fake.parkedWorkersReturnsOnCall[len(fake.parkedWorkersArgsForCall)]
+	fake.parkedWorkersArgsForCall = append(fake.parkedWorkersArgsForCall, struct {
+	}{})
+	stub := fake.ParkedWorkersStub
+	fakeReturns := fake.parkedWorkersReturns
+	fake.recordInvocation("ParkedWorkers", []interface{}{})
+	fake.parkedWorkersMutex.Unlock()
+	if stub != nil {
+		return stub()
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeCluster) ParkedWorkersCallCount() int {
+	fake.parkedWorkersMutex.RLock()
+	defer fake.parkedWorkersMutex.RUnlock()
+	return len(fake.parkedWorkersArgsForCall)
+}
+
+func (fake *FakeCluster) ParkedWorkersCalls(stub func() ([]cluster.ParkedWorker, error)) {
+	fake.parkedWorkersMutex.Lock()
+	defer fake.parkedWorkersMutex.Unlock()
+	fake.ParkedWorkersStub = stub
+}
+
+func (fake *FakeCluster) ParkedWorkersReturns(result1 []cluster.ParkedWorker, result2 error) {
+	fake.parkedWorkersMutex.Lock()
+	defer fake.parkedWorkersMutex.Unlock()
+	fake.ParkedWorkersStub = nil
+	fake.parkedWorkersReturns = struct {
+		result1 []cluster.ParkedWorker
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) ParkedWorkersReturnsOnCall(i int, result1 []cluster.ParkedWorker, result2 error) {
+	fake.parkedWorkersMutex.Lock()
+	defer fake.parkedWorkersMutex.Unlock()
+	fake.ParkedWorkersStub = nil
+	if fake.parkedWorkersReturnsOnCall == nil {
+		fake.parkedWorkersReturnsOnCall = make(map[int]struct {
+			result1 []cluster.ParkedWorker
+			result2 error
+		})
+	}
+	fake.parkedWorkersReturnsOnCall[i] = struct {
+		result1 []cluster.ParkedWorker
+		result2 error
+	}{result1, result2}
 }
 
 func (fake *FakeCluster) PromoteMember(arg1 context.Context, arg2 uint64) error {

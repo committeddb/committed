@@ -200,6 +200,12 @@ type Cluster interface {
 	// /node/status, the queryable counterpart of the
 	// committed_config_build_errors gauge.
 	ConfigBuildErrors() []ConfigBuildError
+	// ParkedWorkers lists every worker (sync or ingest) that has TERMINALLY parked
+	// and needs operator intervention, from replicated state — so any node answers
+	// identically (unlike ConfigBuildErrors, which is node-local). Powers the GET
+	// /node/status worker summary, the queryable counterpart of the
+	// committed_worker_parked gauge; a healthy cluster returns none.
+	ParkedWorkers() ([]ParkedWorker, error)
 	// ReportDisk records member nodeID's node-local disk-pressure level
 	// ("ok", "warn", "critical", or "full") on this node and returns the
 	// cluster write-admission verdict computed from all the collected

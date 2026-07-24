@@ -136,6 +136,9 @@ type Storage interface {
 	// the worker is not parked). Replicated from the apply path, so any node answers
 	// identically — that's what makes the parked state visible cluster-wide.
 	IngestableStuck(id string) (cluster.IngestableStuck, bool, error)
+	// ParkedWorkers lists every worker with a terminal parked record (sync + ingest),
+	// replicated so any node answers identically. Powers the /node/status summary.
+	ParkedWorkers() ([]cluster.ParkedWorker, error)
 	// TypeMigrationDeadLetters returns the proposals whose entities failed
 	// the type's migration program at runtime, in ascending raft-index
 	// order — the type-keyed twin of SyncableDeadLetters with the same

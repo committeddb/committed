@@ -398,6 +398,17 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 			},
 		},
 		{
+			name:   "GET /cluster/status",
+			method: httpgo.MethodGet,
+			path:   "/v1/cluster/status",
+			setup: func(fake *clusterfakes.FakeCluster) {
+				fake.ParkedWorkersReturns([]cluster.ParkedWorker{
+					{Kind: "sync", ID: "orders-sync"},
+					{Kind: "ingest", ID: "catalog-ingest"},
+				}, nil)
+			},
+		},
+		{
 			name:        "POST /node/disk-report",
 			method:      httpgo.MethodPost,
 			path:        "/v1/node/disk-report",
