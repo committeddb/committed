@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"bytes"
 	"fmt"
 	"time"
 
@@ -165,6 +166,34 @@ type Type struct {
 	// requirement that every version after v1 declares its migration
 	// intent explicitly.
 	MigrationExplicit bool
+}
+
+// MigrationEditAdvisory returns an operator-facing notice when an in-place type
+// update changed only the [migration] transform — schema and version unchanged,
+// the "fix a forgotten or buggy migration" path in ProposeType. Such an edit
+// changes how FUTURE Actuals of the type are read, but does NOT re-materialize
+// rows already synced through the previous migration on the type's dependent
+// projections; rebuilding those projections to reach already-synced history is
+// the operator's responsibility (see docs/read-models.md). before is the type as
+// it stood before the update (nil for a brand-new type); after is the current
+// type. Returns "" when no advisory is warranted — a new type, a schema/version
+// bump (which forces a new version and its own migration), or a byte-identical
+// no-op.
+func MigrationEditAdvisory(before, after *Type) string {
+	if before == nil || after == nil {
+		return ""
+	}
+	migrationOnlyInPlace := before.Version == after.Version &&
+		bytes.Equal(before.Schema, after.Schema) &&
+		!bytes.Equal(before.Migration, after.Migration)
+	if !migrationOnlyInPlace {
+		return ""
+	}
+	return "the [migration] transform was updated in place at the same version, so it " +
+		"applies only to Actuals synced from now on; rows already synced through the " +
+		"previous migration are unchanged on every projection that consumes this type's " +
+		"topic. Rebuild those projections to re-materialize already-synced history — see " +
+		"docs/read-models.md, \"Changing the rules after a projection is live\"."
 }
 
 type TimePoint struct {

@@ -217,7 +217,7 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 			r.Post("/syncable/{id}/rebuild", h.leaderRead(h.RebuildSyncable))
 
 			r.Get("/type", h.listConfig("type", h.c.Types))
-			r.Post("/type/{id}", h.addConfig("type", h.c.ProposeType, h.c.TypeVersions))
+			r.Post("/type/{id}", h.addTypeConfig())
 			r.Get("/type/{id}/versions", h.getVersions("type", h.c.TypeVersions))
 			r.Get("/type/{id}/versions/{version}", h.getVersion("type", h.c.TypeVersion))
 			r.Get("/type/{id}/migration-errors", h.GetTypeMigrationErrors)

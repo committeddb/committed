@@ -4,6 +4,8 @@ import (
 	"context"
 	httpgo "net/http"
 
+	"go.uber.org/zap"
+
 	"github.com/committeddb/committed/internal/cluster"
 )
 
@@ -31,6 +33,12 @@ import (
 type ConfigWriteResponse struct {
 	ID      string `json:"id"`
 	Version uint64 `json:"version,omitempty"`
+	// Advisory, when present, is a non-fatal notice about a side-effect of an
+	// accepted write the caller should act on — currently, an in-place type
+	// [migration] edit that does not re-materialize already-synced history
+	// (see cluster.MigrationEditAdvisory). The write itself succeeded; the
+	// advisory is informational.
+	Advisory string `json:"advisory,omitempty"`
 }
 
 // currentVersion reads the version currently marked current for id, or 0 if
@@ -70,6 +78,42 @@ func (h *HTTP) addConfig(
 		}
 
 		writeJSONStatus(w, httpgo.StatusOK, ConfigWriteResponse{ID: c.ID, Version: currentVersion(versions, c.ID)})
+	}
+}
+
+// addTypeConfig handles POST /type/{id} — addConfig plus a migration-edit
+// advisory. An in-place edit that changes only a type's [migration] transform is
+// accepted, but it does not re-materialize rows already synced through the old
+// migration on the type's dependent projections; the response body (and a
+// node-log line) tells the operator to rebuild those projections. before/after
+// snapshots bracket the propose — ProposeType blocks until the entry is applied
+// locally, so the after-read on this node observes the update the propose made,
+// exactly as currentVersion relies on. The reads are best-effort (a nil/error
+// snapshot simply yields no advisory), never gating the accepted write.
+func (h *HTTP) addTypeConfig() httpgo.HandlerFunc {
+	return func(w httpgo.ResponseWriter, r *httpgo.Request) {
+		c, err := createConfiguration(r)
+		if err != nil {
+			h.writeReadError(w, r, err, "invalid_config", "invalid type configuration")
+			return
+		}
+
+		before, _ := h.c.ResolveType(cluster.LatestTypeRef(c.ID))
+
+		if err := h.c.ProposeType(r.Context(), c); err != nil {
+			writeProposeError(w, err, "type", "propose type")
+			return
+		}
+
+		resp := ConfigWriteResponse{ID: c.ID, Version: currentVersion(h.c.TypeVersions, c.ID)}
+		after, _ := h.c.ResolveType(cluster.LatestTypeRef(c.ID))
+		if adv := cluster.MigrationEditAdvisory(before, after); adv != "" {
+			resp.Advisory = adv
+			zap.L().Warn("in-place type migration edit accepted: applies to new Actuals only — rebuild dependent projections to re-materialize already-synced history",
+				zap.String("type", c.ID))
+		}
+
+		writeJSONStatus(w, httpgo.StatusOK, resp)
 	}
 }
 
