@@ -340,6 +340,47 @@ stays consistent at every checkpoint. One syncable fills one table — a
 dimension is its own internal housekeeping, so two syncables that need the same
 data each keep their own copy.
 
+## Changing the rules after a projection is live
+
+A projection is a **disposable view of an immutable log** — its fold rules, and
+the type migration that feeds it, are *derivation logic*, not data. When you
+change that logic, committed applies the new logic to Actuals it processes *from
+that point on*; it does **not** retroactively re-render rows already written to
+the sink. Correcting history is a deliberate rebuild, and running it is your
+responsibility.
+
+**Changing one projection's own rules — blue-green.** Because a projection
+replays from index 0 and the log stays the source of truth, the clean way to fix
+or evolve a syncable's rules is to stand a *second* projection up beside the
+first rather than mutate a live table:
+
+1. `POST` a new `sql-projection` with the corrected rules, pointed at a **new
+   table**. It replays the whole log from the start and materializes the fixed
+   view — the old table keeps serving reads the entire time, so there is no
+   downtime.
+2. Watch it catch up (its progress reaches the log head) and validate the new
+   table against the old however you trust it.
+3. Cut your readers over to the new table, then delete the old syncable.
+
+This is the recommended pattern precisely because the view is disposable: you
+never mutate a live table in place, and you get to *verify* the fix before
+trusting it.
+
+**Fixing a type's migration — the fan-out case.** A type's `[migration]` jq (the
+transform that brings older-version Actuals up to the current schema) is read by
+**every** projection on that topic. Committed lets you correct a buggy migration
+in place, at the same version — but that edit, too, changes only how *future*
+reads transform the data. Every row already synced through the old migration
+stays as it was, on **all** dependent projections, and committed does not
+currently tell you which projections are now stale or rebuild them for you.
+
+**After an in-place migration fix, rebuilding the dependent projections is your
+responsibility** — blue-green each one as above — for the correction to reach
+already-synced history. Treat a migration edit as "applies going forward;
+rebuild the dependents to fix the past." If you only need the correction for new
+data and accept the historical rows as-is, that is a valid choice — just make it
+knowingly, because nothing rebuilds them on your behalf.
+
 ## See also
 
 - [Quickstart](quickstart.md) — a working four-topic `movie_card` read model
