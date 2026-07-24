@@ -132,8 +132,8 @@ A feature whose entries an older peer would mishandle gates its *emission*
 on that minimum: the entry is proposed only once every member is at the
 required level. During a rolling upgrade the minimum is held down by the
 not-yet-upgraded nodes, so the feature stays dormant; it activates
-cluster-wide the moment the last node upgrades and announces. This is how
-Once every node carries the mechanism, a *gated* feature ships disabled until
+cluster-wide the moment the last node upgrades and announces. Once every
+node carries the mechanism, a *gated* feature ships disabled until
 the whole cluster is upgraded, keeping a rolling upgrade safe in both directions
 between those releases: an old node is never handed gated state it can't apply.
 This is a discipline the emitter must follow (bump + gate, below), not a
@@ -222,9 +222,14 @@ type UUID is indistinguishable from an unknown user type) and would
 fatal-exit applying it. This is exactly a "wire-decodable but not
 semantically compatible" case, so a new system type MUST gate its emission
 on a **cluster feature level** (above): it is not proposed until every
-member advertises support, so an old node never receives it. That is what
-makes "new entity types ship disabled until the whole cluster is upgraded"
-an enforced invariant rather than an operator's promise.
+member advertises support — *provided the emitter actually gates it*. "New
+entity types ship disabled until the whole cluster is upgraded" is therefore a
+discipline the emitter must follow (bump + gate, per the feature-level section
+above), not a mechanically enforced invariant: an ungated new system type ships
+anyway and fatal-exits older peers. (0.7.x has one such lapse in its own history
+— `ingestableStuck` was added ungated at feature level 1; harmless because
+pre-0.7.4 is not a supported customer upgrade origin, but a real instance of the
+gap this discipline exists to prevent.)
 
 ### WAL / event-log framing
 
