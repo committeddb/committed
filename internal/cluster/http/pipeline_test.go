@@ -67,7 +67,8 @@ func TestGetPipelineStatus_ComposesLinkage(t *testing.T) {
 	}, nil)
 	lag := uint64(5)
 	fake.IngestableStatusReturns(cluster.IngestableStatus{
-		Phase: "streaming", Position: "0/ABCD", Lag: &lag, CaughtUp: false,
+		WorkerState: cluster.WorkerStateRunning,
+		Phase:       "streaming", Position: "0/ABCD", Lag: &lag, CaughtUp: false,
 	}, nil)
 	fake.SyncableProgressReturns(90, 100, nil) // checkpoint 90, head 100 → lag 10
 
@@ -119,7 +120,7 @@ func TestGetPipelineStatus_EndToEndCaughtUp(t *testing.T) {
 		{ID: "s1", MimeType: "text/toml", Data: syncableTOML("t")},
 	}, nil)
 	zero := uint64(0)
-	fake.IngestableStatusReturns(cluster.IngestableStatus{Phase: "streaming", Lag: &zero, CaughtUp: true}, nil)
+	fake.IngestableStatusReturns(cluster.IngestableStatus{WorkerState: cluster.WorkerStateRunning, Phase: "streaming", Lag: &zero, CaughtUp: true}, nil)
 	fake.SyncableProgressReturns(100, 100, nil) // checkpoint == head → lag 0
 
 	h := http.New(fake)
@@ -157,7 +158,7 @@ func TestGetPipelineStatus_MultipleConsumersFanOut(t *testing.T) {
 		{ID: "unrelated", MimeType: "text/toml", Data: syncableTOML("other")},
 	}, nil)
 	zero := uint64(0)
-	fake.IngestableStatusReturns(cluster.IngestableStatus{Phase: "streaming", Lag: &zero, CaughtUp: true}, nil)
+	fake.IngestableStatusReturns(cluster.IngestableStatus{WorkerState: cluster.WorkerStateRunning, Phase: "streaming", Lag: &zero, CaughtUp: true}, nil)
 	// Head is 100 for everyone; only movie-webhook is behind (checkpoint 70).
 	fake.SyncableProgressStub = func(id string) (uint64, uint64, error) {
 		const head = uint64(100)
@@ -222,7 +223,7 @@ func TestGetPipelineStatus_ConsumerProgressErrorSurfaced(t *testing.T) {
 		{ID: "movie-broken", MimeType: "text/toml", Data: syncableTOML("movie")},
 	}, nil)
 	zero := uint64(0)
-	fake.IngestableStatusReturns(cluster.IngestableStatus{Phase: "streaming", Lag: &zero, CaughtUp: true}, nil)
+	fake.IngestableStatusReturns(cluster.IngestableStatus{WorkerState: cluster.WorkerStateRunning, Phase: "streaming", Lag: &zero, CaughtUp: true}, nil)
 	fake.SyncableProgressStub = func(id string) (uint64, uint64, error) {
 		const head = uint64(100)
 		switch id {
@@ -293,7 +294,7 @@ func TestGetPipelineStatus_ConsumerProgressErrorRedacted(t *testing.T) {
 		{ID: "movie-broken", MimeType: "text/toml", Data: syncableTOML("movie")},
 	}, nil)
 	zero := uint64(0)
-	fake.IngestableStatusReturns(cluster.IngestableStatus{Phase: "streaming", Lag: &zero, CaughtUp: true}, nil)
+	fake.IngestableStatusReturns(cluster.IngestableStatus{WorkerState: cluster.WorkerStateRunning, Phase: "streaming", Lag: &zero, CaughtUp: true}, nil)
 	fake.SyncableProgressStub = func(id string) (uint64, uint64, error) {
 		if id == "movie-broken" {
 			return 0, 0, redactedProgressErr{}
@@ -368,7 +369,7 @@ func TestGetPipelineStatus_ProducerNotRunningSurfaced(t *testing.T) {
 	fake.SyncablesReturns([]*cluster.Configuration{
 		{ID: "movie-card", MimeType: "text/toml", Data: syncableTOML("movie")},
 	}, nil)
-	fake.IngestableStatusReturns(cluster.IngestableStatus{}, cluster.ErrIngestableNotRunning)
+	fake.IngestableStatusReturns(cluster.IngestableStatus{WorkerState: cluster.WorkerStateRunning}, cluster.ErrIngestableNotRunning)
 	fake.SyncableProgressReturns(100, 100, nil) // the consumer itself is caught up
 
 	h := http.New(fake)

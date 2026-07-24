@@ -14,9 +14,14 @@ import (
 // sits, how far behind the source it is, and whether it is fully caught up. It
 // is the ingest analogue of SyncableStatusResponse.
 type IngestableStatusResponse struct {
+	// WorkerState is the worker's lifecycle state: "running" or "parked" (the
+	// freeze/restart supervisor gave up — fix the config and re-POST it, or delete).
+	// Replicated, so it is reported truthfully from any node.
+	WorkerState string `json:"workerState"`
 	// Phase is "snapshot" while dumping existing rows, then "streaming" once on
-	// the change-data-capture stream.
-	Phase string `json:"phase"`
+	// the change-data-capture stream. Omitted when workerState is "parked" (a
+	// stopped worker has no phase).
+	Phase string `json:"phase,omitempty"`
 	// SnapshotProgress is per watched table — present in both phases (every
 	// table reads complete once the snapshot finishes).
 	SnapshotProgress []TableSnapshotProgress `json:"snapshotProgress"`
@@ -201,6 +206,7 @@ func (h *HTTP) DeleteIngestable(w httpgo.ResponseWriter, r *httpgo.Request) {
 // the HTTP response shape. Shared by GetIngestableStatus and the pipeline view.
 func toIngestableStatusResponse(st cluster.IngestableStatus) IngestableStatusResponse {
 	resp := IngestableStatusResponse{
+		WorkerState:        st.WorkerState,
 		Phase:              st.Phase,
 		SnapshotProgress:   make([]TableSnapshotProgress, 0, len(st.SnapshotProgress)),
 		Position:           st.Position,

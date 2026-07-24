@@ -211,8 +211,9 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 			setup: func(fake *clusterfakes.FakeCluster) {
 				lag := uint64(0)
 				fake.IngestableStatusReturns(cluster.IngestableStatus{
-					Phase:    "streaming",
-					Position: "0/1A2B3C8",
+					WorkerState: cluster.WorkerStateRunning,
+					Phase:       "streaming",
+					Position:    "0/1A2B3C8",
 					SnapshotProgress: []cluster.TableSnapshotStatus{
 						{Table: "region", Complete: true},
 					},
@@ -234,10 +235,11 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 				}, nil)
 				lag := uint64(0)
 				fake.IngestableStatusReturns(cluster.IngestableStatus{
-					Phase:    "streaming",
-					Position: "0/1A2B3C8",
-					Lag:      &lag,
-					CaughtUp: true,
+					WorkerState: cluster.WorkerStateRunning,
+					Phase:       "streaming",
+					Position:    "0/1A2B3C8",
+					Lag:         &lag,
+					CaughtUp:    true,
 				}, nil)
 				fake.SyncablesReturns([]*cluster.Configuration{
 					{ID: "s-1", MimeType: "text/toml", Data: []byte("[syncable]\ntype = \"sql\"\n\n[sql]\ntopic = \"t\"\n")},

@@ -2,6 +2,8 @@ package db
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"math/rand/v2"
 	"time"
 
@@ -91,6 +93,10 @@ func (db *DB) superviseRestartIngest(id string, i cluster.Ingestable, frozen *wo
 		if db.metrics != nil {
 			db.metrics.IngestSupervisorGiveup(id)
 		}
+		// Publish the replicated terminal parked record so the give-up is visible
+		// from any node (status + the sustained worker.parked gauge), not just a log
+		// line on the owner. db.ctx (not the frozen worker's ctx, cancelled below).
+		db.publishIngestableParked(db.ctx, id, consecutive)
 		// Cancel the frozen worker's context, same as the restart path below. The
 		// goroutine exited via ingestExitFreeze (a normal return, NOT a ctx cancel),
 		// so workerCtx is still an un-cancelled child of the long-lived db.ctx; on
@@ -233,4 +239,30 @@ func (db *DB) recordFreezeAndNextBackoff(id string, pos cluster.Position) (backo
 		st.backoff = db.ingestSupervisorMaxBackoff
 	}
 	return backoff, st.consecutiveFreezes, false
+}
+
+// publishIngestableParked writes the replicated, TERMINAL IngestableStuck record
+// for an ingestable whose freeze/restart supervisor gave up, so the parked state is
+// queryable from any node (GET /ingestable/{id}/status) and drives the sustained
+// committed.worker.parked{kind:ingest} gauge on every node. The record outlives the
+// worker and clears only on an operator fix (a new config version) or a delete. The
+// give-up carries no user error (the freeze cause, with its SourceSeq, was logged at
+// each freeze), so the replicated message is a generic, PII-free remedy hint.
+func (db *DB) publishIngestableParked(ctx context.Context, id string, consecutiveFreezes int) {
+	msg := fmt.Sprintf("freeze/restart supervisor gave up after %d consecutive freezes at the same resume position — the worker is wedged on a proposal it cannot commit (most often a row or transaction over COMMITTED_MAX_PROPOSAL_BYTES); raise the cap and re-POST the config, or fix the source", consecutiveFreezes)
+	s := &cluster.IngestableStuck{ID: id, SinceUnixNano: time.Now().UnixNano(), Message: msg}
+	if err := db.proposeIngestableStuck(ctx, s); err != nil {
+		db.logger.Warn("publish ingestable parked status failed (worker stays parked regardless; status not visible until republished)",
+			zap.String("id", id), zap.Error(err))
+	}
+}
+
+// proposeIngestableStuck publishes an ingestable's terminal parked record through
+// Raft so every node applies it.
+func (db *DB) proposeIngestableStuck(ctx context.Context, s *cluster.IngestableStuck) error {
+	e, err := cluster.NewUpsertIngestableStuckEntity(s)
+	if err != nil {
+		return err
+	}
+	return db.Propose(ctx, &cluster.Proposal{Entities: []*cluster.Entity{e}})
 }

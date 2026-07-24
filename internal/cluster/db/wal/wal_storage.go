@@ -93,6 +93,7 @@ var (
 	// index N" status and the operator's pending skip request. Replicated
 	// metadata for the node-agnostic manual dead-letter flow; see stuck.go.
 	syncableStuckBucket       = []byte("syncableStuck")
+	ingestableStuckBucket     = []byte("ingestableStuck")
 	syncableSkipRequestBucket = []byte("syncableSkipRequests")
 	// typeMigrationDeadLetterBucket is the type-keyed twin of
 	// syncableDeadLetterBucket: one nested sub-bucket per type id, mapping
@@ -160,6 +161,7 @@ var internalEntities = []internalEntity{
 	{cluster.IsSyncableDeadLetter, "handleSyncableDeadLetter", syncableDeadLetterBucket, (*Storage).handleSyncableDeadLetter},
 	{cluster.IsTypeMigrationDeadLetter, "handleTypeMigrationDeadLetter", typeMigrationDeadLetterBucket, (*Storage).handleTypeMigrationDeadLetter},
 	{cluster.IsSyncableStuck, "handleSyncableStuck", syncableStuckBucket, (*Storage).handleSyncableStuck},
+	{cluster.IsIngestableStuck, "handleIngestableStuck", ingestableStuckBucket, (*Storage).handleIngestableStuck},
 	{cluster.IsSyncableSkipRequest, "handleSyncableSkipRequest", syncableSkipRequestBucket, (*Storage).handleSyncableSkipRequest},
 	{cluster.IsIngestablePosition, "saveIngestablePosition", ingestablePositionBucket, (*Storage).saveIngestablePosition},
 	{cluster.IsScrub, "handleScrub", pendingScrubBucket, (*Storage).handleScrub},

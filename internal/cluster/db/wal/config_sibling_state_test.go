@@ -30,6 +30,45 @@ func applyParked(t *testing.T, s *StorageWrapper, idx uint64, id string, index u
 	saveEntity(t, e, s, 1, idx)
 }
 
+func applyIngestableParked(t *testing.T, s *StorageWrapper, idx uint64, id string) {
+	t.Helper()
+	e, err := cluster.NewUpsertIngestableStuckEntity(&cluster.IngestableStuck{ID: id, Message: "gave up"})
+	require.NoError(t, err)
+	saveEntity(t, e, s, 1, idx)
+}
+
+// TestIngestableParked_ClearsOnNewConfigVersion is the ingest twin of
+// TestSyncableParked_ClearsOnNewConfigVersion: a terminal parked record survives
+// until the operator fixes the config (a new ingestable config version), the only
+// path that clears it — so a parked ingestable stays visibly parked across a
+// leadership change / restart instead of silently un-parking.
+func TestIngestableParked_ClearsOnNewConfigVersion(t *testing.T) {
+	s := NewStorageWithParser(t, nil, parser.New())
+	defer s.Cleanup()
+
+	const id = "ingest"
+	seedIngestableConfig(t, s, id, 1) // config v1
+	applyIngestableParked(t, s, 2, id)
+
+	_, ok, err := s.IngestableStuck(id)
+	require.NoError(t, err)
+	require.True(t, ok, "parked record present")
+
+	// The operator's fix: re-POST the config (a new version). It clears the record.
+	seedIngestableConfig(t, s, id, 3)
+
+	_, ok, err = s.IngestableStuck(id)
+	require.NoError(t, err)
+	require.False(t, ok, "a new config version clears the parked record")
+
+	// Durable across a restart.
+	reopened := s.CloseAndReopenStorage(t)
+	defer reopened.Cleanup()
+	_, ok, err = reopened.IngestableStuck(id)
+	require.NoError(t, err)
+	require.False(t, ok, "the clear must not resurrect on reopen")
+}
+
 // TestSyncableParked_ClearsOnNewConfigVersion proves the terminal parked-worker
 // record's lifecycle: it is recorded distinctly from a transient stall (Parked),
 // SURVIVES until the operator fixes the config, and clears deterministically when a

@@ -246,6 +246,21 @@ message LogSyncableStuck {
     bool parked = 5;
 }
 
+// LogIngestableStuck records that an ingestable's worker has TERMINALLY parked —
+// the freeze/restart supervisor gave up after repeated freezes at the same resume
+// position (a proposal it cannot commit, most often a row or transaction over the
+// proposal-size cap). Keyed by ingestable id; replicated so any node reports it.
+// Like the syncable parked record it survives the worker's exit and clears only on
+// an operator fix (a new config version) or a delete.
+message LogIngestableStuck {
+    // ID is the parked ingestable.
+    string ID = 1;
+    // sinceUnixNano is when the supervisor gave up.
+    int64 sinceUnixNano = 2;
+    // message is the (truncated, redacted) give-up cause.
+    string message = 3;
+}
+
 // LogSyncableSkipRequest is proposed by the dead-letter endpoint (from any
 // node) to ask the syncable's worker to skip what it is currently blocked
 // on. It carries the index from the matching LogSyncableStuck so the worker

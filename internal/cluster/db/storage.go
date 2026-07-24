@@ -132,6 +132,10 @@ type Storage interface {
 	// what makes the manual dead-letter flow node-agnostic.
 	SyncableStuck(id string) (cluster.SyncableStuck, bool, error)
 	SyncableSkipRequest(id string) (cluster.SyncableSkipRequest, bool, error)
+	// IngestableStuck returns the ingestable's terminal parked record (ok=false if
+	// the worker is not parked). Replicated from the apply path, so any node answers
+	// identically — that's what makes the parked state visible cluster-wide.
+	IngestableStuck(id string) (cluster.IngestableStuck, bool, error)
 	// TypeMigrationDeadLetters returns the proposals whose entities failed
 	// the type's migration program at runtime, in ascending raft-index
 	// order — the type-keyed twin of SyncableDeadLetters with the same

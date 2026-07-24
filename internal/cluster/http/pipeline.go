@@ -151,9 +151,9 @@ func (h *HTTP) GetPipelineStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 		// Worker state (replicated) is read separately from progress, so a consumer
 		// whose progress read fails still reports whether its worker parked.
 		st, stOK, _ := h.c.SyncableStuck(c.ID)
-		workerState := workerStateRunning
+		workerState := cluster.WorkerStateRunning
 		if stOK && st.Parked {
-			workerState = workerStateParked
+			workerState = cluster.WorkerStateParked
 		}
 		stuck := stOK && !st.Parked
 

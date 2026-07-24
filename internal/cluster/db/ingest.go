@@ -381,6 +381,15 @@ func (db *DB) deleteIngest(id string) {
 // The Ingestable's Status is called without holding workersMu — it makes a
 // source query and must not block the worker registry.
 func (db *DB) IngestableStatus(ctx context.Context, id string) (cluster.IngestableStatus, error) {
+	// Parked is a REPLICATED terminal state — report it from ANY node, even one
+	// with no local worker handle (a follower, or the owner after the supervisor
+	// gave up and stopped the worker). Checked before the local-handle lookup so a
+	// follower does not 404 a parked worker; this is what makes a dead ingest worker
+	// visible cluster-wide instead of only where its worker last ran.
+	if _, parked, err := db.storage.IngestableStuck(id); err == nil && parked {
+		return cluster.IngestableStatus{WorkerState: cluster.WorkerStateParked}, nil
+	}
+
 	db.workersMu.Lock()
 	handle, ok := db.ingestWorkers[id]
 	var ing cluster.Ingestable
@@ -393,7 +402,12 @@ func (db *DB) IngestableStatus(ctx context.Context, id string) (cluster.Ingestab
 		return cluster.IngestableStatus{}, cluster.ErrIngestableNotRunning
 	}
 
-	return ing.Status(ctx, db.storage.Position(id))
+	st, err := ing.Status(ctx, db.storage.Position(id))
+	if err != nil {
+		return st, err
+	}
+	st.WorkerState = cluster.WorkerStateRunning
+	return st, nil
 }
 
 // TopicRefreshEpoch exposes the storage's delete-surviving per-topic

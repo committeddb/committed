@@ -98,7 +98,20 @@ type IngestableConfigChangeValidator interface {
 // change-data-capture cursor sits, and how far behind the source it is. It is
 // what GET /v1/ingestable/{id}/status answers — the ingest analogue of a
 // syncable's progress/lag.
+// Worker lifecycle states reported by the syncable/ingestable status and pipeline
+// endpoints, derived from the replicated stuck/parked records so any node reports
+// identically.
+const (
+	WorkerStateRunning = "running" // healthy (sync: or transiently stuck; ingest: or recovering)
+	WorkerStateParked  = "parked"  // terminally parked — operator must fix the config
+)
+
 type IngestableStatus struct {
+	// WorkerState is the worker's lifecycle state: "running" or "parked" (the
+	// freeze/restart supervisor gave up; fix the config and re-POST it, or delete).
+	// Replicated, so it is reported truthfully from any node — even one with no
+	// local worker handle.
+	WorkerState string
 	// Phase is "snapshot" while the worker is still dumping existing rows, then
 	// "streaming" once the snapshot is complete and it is following the CDC
 	// stream. Derived from the checkpoint: a position that still carries
@@ -191,6 +204,65 @@ func NewDeleteIngestableEntities(id string) []*Entity {
 		NewDeleteEntity(ingestableType, []byte(id)),
 		NewDeleteEntity(ingestablePositionType, []byte(id)),
 	}
+}
+
+var ingestableStuckType = registerSystemType(&Type{
+	ID:         "d3f5a7b9-2e4c-4f6a-8b1d-3c5e7a9f0b24",
+	Name:       "InternalIngestableStuck",
+	Version:    1,
+	EntityKind: EntityKindSnapshot,
+}, AdmissionCoordination)
+
+// IngestableStuck records that an ingestable's worker has TERMINALLY parked: the
+// freeze/restart supervisor gave up after repeated freezes at the same resume
+// position (a proposal it cannot commit). It is the ingest analogue of a parked
+// SyncableStuck — replicated so any node reports it, and it survives the worker's
+// exit so the parked state stays visible across a leadership change / restart. It
+// clears only on an operator fix (a new config version) or a delete. Keyed by the
+// ingestable id, one current value per ingestable.
+type IngestableStuck struct {
+	ID            string
+	SinceUnixNano int64
+	Message       string
+}
+
+func (i *IngestableStuck) Marshal() ([]byte, error) {
+	li := &clusterpb.LogIngestableStuck{
+		ID:            i.ID,
+		SinceUnixNano: i.SinceUnixNano,
+		Message:       i.Message,
+	}
+	return proto.Marshal(li)
+}
+
+func (i *IngestableStuck) Unmarshal(bs []byte) error {
+	li := &clusterpb.LogIngestableStuck{}
+	if err := proto.Unmarshal(bs, li); err != nil {
+		return err
+	}
+	i.ID = li.ID
+	i.SinceUnixNano = li.SinceUnixNano
+	i.Message = li.Message
+	return nil
+}
+
+func IsIngestableStuck(id string) bool {
+	return id == ingestableStuckType.ID
+}
+
+// NewUpsertIngestableStuckEntity wraps a parked-worker record, keyed by the
+// ingestable id.
+func NewUpsertIngestableStuckEntity(i *IngestableStuck) (*Entity, error) {
+	bs, err := i.Marshal()
+	if err != nil {
+		return nil, err
+	}
+	return NewUpsertEntity(ingestableStuckType, []byte(i.ID), bs), nil
+}
+
+// NewDeleteIngestableStuckEntity clears the parked record for an ingestable.
+func NewDeleteIngestableStuckEntity(id string) *Entity {
+	return NewDeleteEntity(ingestableStuckType, []byte(id))
 }
 
 var ingestablePositionType = registerSystemType(&Type{

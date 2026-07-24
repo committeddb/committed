@@ -219,13 +219,6 @@ func (h *HTTP) RebuildSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
 	w.WriteHeader(httpgo.StatusAccepted)
 }
 
-// Worker lifecycle states reported by the syncable status + pipeline endpoints,
-// derived from the replicated SyncableStuck record so any node reports identically.
-const (
-	workerStateRunning = "running" // healthy, or transiently stuck retrying (see Stuck)
-	workerStateParked  = "parked"  // breaker tripped on a systematic fault; operator must act
-)
-
 // SyncableStatusResponse is the operational status of a syncable's worker:
 // whether it is blocked (and on what), plus its numeric progress (how far it
 // has synced vs. how far there is to sync).
@@ -292,9 +285,9 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 	// A present record is either transient-stuck (Parked=false) or a terminal park
 	// (Parked=true), never both — Stuck reports the transient case, WorkerState the
 	// terminal one.
-	resp := SyncableStatusResponse{Stuck: ok && !stuck.Parked, WorkerState: workerStateRunning}
+	resp := SyncableStatusResponse{Stuck: ok && !stuck.Parked, WorkerState: cluster.WorkerStateRunning}
 	if ok && stuck.Parked {
-		resp.WorkerState = workerStateParked
+		resp.WorkerState = cluster.WorkerStateParked
 	}
 	if ok {
 		resp.Index = stuck.Index

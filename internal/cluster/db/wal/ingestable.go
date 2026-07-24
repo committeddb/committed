@@ -30,6 +30,7 @@ func (s *Storage) handleIngestable(e *cluster.Entity, raftIndex uint64) error {
 func (s *Storage) saveIngestable(t *cluster.Configuration, raftIndex uint64) error {
 	var ingestable cluster.Ingestable
 	var built bool
+	var clearedWorkerState bool
 	err := s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(ingestableBucket)
 		if b == nil {
@@ -47,6 +48,17 @@ func (s *Storage) saveIngestable(t *cluster.Configuration, raftIndex uint64) err
 		if err := setVersionedLastIndex(b, []byte(t.ID), raftIndex); err != nil {
 			return err
 		}
+
+		// A new config version is the operator's fix — clear any parked record for
+		// this ingestable ATOMICALLY with the version write (mirrors saveSyncable).
+		// A bare respawn replays the same version (deduped above) and never reaches
+		// here, so a park survives leadership change / restart.
+		if cleared, derr := deleteKeyedTx(tx, ingestableStuckBucket, []byte(t.ID)); derr != nil {
+			return derr
+		} else if cleared {
+			clearedWorkerState = true
+		}
+
 		bs, err := t.Marshal()
 		if err != nil {
 			return fmt.Errorf("[wal.ingestable] marshal: %w", err)
@@ -86,6 +98,10 @@ func (s *Storage) saveIngestable(t *cluster.Configuration, raftIndex uint64) err
 	})
 	if err != nil {
 		return err
+	}
+
+	if clearedWorkerState && s.metrics != nil {
+		s.metrics.SetWorkerParked("ingest", t.ID, false)
 	}
 
 	if built && s.ingest != nil {

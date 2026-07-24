@@ -256,6 +256,21 @@ type FakeStorage struct {
 	ingestSourceSeqHighwaterReturnsOnCall map[int]struct {
 		result1 uint64
 	}
+	IngestableStuckStub        func(string) (cluster.IngestableStuck, bool, error)
+	ingestableStuckMutex       sync.RWMutex
+	ingestableStuckArgsForCall []struct {
+		arg1 string
+	}
+	ingestableStuckReturns struct {
+		result1 cluster.IngestableStuck
+		result2 bool
+		result3 error
+	}
+	ingestableStuckReturnsOnCall map[int]struct {
+		result1 cluster.IngestableStuck
+		result2 bool
+		result3 error
+	}
 	IngestableVersionStub        func(string, uint64) (*cluster.Configuration, error)
 	ingestableVersionMutex       sync.RWMutex
 	ingestableVersionArgsForCall []struct {
@@ -1900,6 +1915,73 @@ func (fake *FakeStorage) IngestSourceSeqHighwaterReturnsOnCall(i int, result1 ui
 	fake.ingestSourceSeqHighwaterReturnsOnCall[i] = struct {
 		result1 uint64
 	}{result1}
+}
+
+func (fake *FakeStorage) IngestableStuck(arg1 string) (cluster.IngestableStuck, bool, error) {
+	fake.ingestableStuckMutex.Lock()
+	ret, specificReturn := fake.ingestableStuckReturnsOnCall[len(fake.ingestableStuckArgsForCall)]
+	fake.ingestableStuckArgsForCall = append(fake.ingestableStuckArgsForCall, struct {
+		arg1 string
+	}{arg1})
+	stub := fake.IngestableStuckStub
+	fakeReturns := fake.ingestableStuckReturns
+	fake.recordInvocation("IngestableStuck", []interface{}{arg1})
+	fake.ingestableStuckMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2, ret.result3
+	}
+	return fakeReturns.result1, fakeReturns.result2, fakeReturns.result3
+}
+
+func (fake *FakeStorage) IngestableStuckCallCount() int {
+	fake.ingestableStuckMutex.RLock()
+	defer fake.ingestableStuckMutex.RUnlock()
+	return len(fake.ingestableStuckArgsForCall)
+}
+
+func (fake *FakeStorage) IngestableStuckCalls(stub func(string) (cluster.IngestableStuck, bool, error)) {
+	fake.ingestableStuckMutex.Lock()
+	defer fake.ingestableStuckMutex.Unlock()
+	fake.IngestableStuckStub = stub
+}
+
+func (fake *FakeStorage) IngestableStuckArgsForCall(i int) string {
+	fake.ingestableStuckMutex.RLock()
+	defer fake.ingestableStuckMutex.RUnlock()
+	argsForCall := fake.ingestableStuckArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeStorage) IngestableStuckReturns(result1 cluster.IngestableStuck, result2 bool, result3 error) {
+	fake.ingestableStuckMutex.Lock()
+	defer fake.ingestableStuckMutex.Unlock()
+	fake.IngestableStuckStub = nil
+	fake.ingestableStuckReturns = struct {
+		result1 cluster.IngestableStuck
+		result2 bool
+		result3 error
+	}{result1, result2, result3}
+}
+
+func (fake *FakeStorage) IngestableStuckReturnsOnCall(i int, result1 cluster.IngestableStuck, result2 bool, result3 error) {
+	fake.ingestableStuckMutex.Lock()
+	defer fake.ingestableStuckMutex.Unlock()
+	fake.IngestableStuckStub = nil
+	if fake.ingestableStuckReturnsOnCall == nil {
+		fake.ingestableStuckReturnsOnCall = make(map[int]struct {
+			result1 cluster.IngestableStuck
+			result2 bool
+			result3 error
+		})
+	}
+	fake.ingestableStuckReturnsOnCall[i] = struct {
+		result1 cluster.IngestableStuck
+		result2 bool
+		result3 error
+	}{result1, result2, result3}
 }
 
 func (fake *FakeStorage) IngestableVersion(arg1 string, arg2 uint64) (*cluster.Configuration, error) {

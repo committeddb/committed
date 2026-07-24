@@ -51,39 +51,108 @@ func (s *Storage) handleSyncableStuck(e *cluster.Entity, _ uint64) error {
 	return nil
 }
 
-// refreshWorkerStateGauges re-derives the sync worker-state gauges
-// (committed.sync.stuck and committed.worker.parked) for every syncable that has
-// an applied record. handleSyncableStuck derives them on the APPLY path — but
-// apply does not run for entries already applied before a restart (replay skips
-// <= appliedIndex), nor for a snapshot install (RestoreSnapshot bulk-swaps bbolt
-// without running any entity handler). Without this, a node that restarts or
-// receives a snapshot while a syncable is stuck/parked reads the gauge as 0/unset
-// even though the durable record says otherwise, so a sustained-1 alert silently
-// never fires. Called at Open and after a snapshot restore. Ids with no record
-// need no action — the gauge defaults to unset and the apply path sets it to 0 on
-// the clearing delete.
+// refreshWorkerStateGauges re-derives the worker-state gauges (committed.sync.stuck
+// and committed.worker.parked, for both sync and ingest) for every syncable/
+// ingestable that has an applied record. The per-kind handlers derive them on the
+// APPLY path — but apply does not run for entries already applied before a restart
+// (replay skips <= appliedIndex), nor for a snapshot install (RestoreSnapshot
+// bulk-swaps bbolt without running any entity handler). Without this, a node that
+// restarts or receives a snapshot while a worker is stuck/parked reads the gauge as
+// 0/unset even though the durable record says otherwise, so a sustained-1 alert
+// silently never fires. Called at Open and after a snapshot restore. Ids with no
+// record need no action — the gauge defaults to unset and the apply path sets it to
+// 0 on the clearing delete.
 func (s *Storage) refreshWorkerStateGauges() {
 	if s.metrics == nil {
 		return
 	}
 	err := s.view(func(tx *bolt.Tx) error {
-		b := tx.Bucket(syncableStuckBucket)
-		if b == nil {
-			return nil
-		}
-		return b.ForEach(func(k, v []byte) error {
-			var rec cluster.SyncableStuck
-			if err := rec.Unmarshal(v); err != nil {
-				return fmt.Errorf("[wal.stuck] refresh unmarshal id=%s: %w", string(k), err)
+		if b := tx.Bucket(syncableStuckBucket); b != nil {
+			if err := b.ForEach(func(k, v []byte) error {
+				var rec cluster.SyncableStuck
+				if err := rec.Unmarshal(v); err != nil {
+					return fmt.Errorf("[wal.stuck] refresh unmarshal syncable id=%s: %w", string(k), err)
+				}
+				s.metrics.SetSyncStuck(string(k), !rec.Parked)
+				s.metrics.SetWorkerParked("sync", string(k), rec.Parked)
+				return nil
+			}); err != nil {
+				return err
 			}
-			s.metrics.SetSyncStuck(string(k), !rec.Parked)
-			s.metrics.SetWorkerParked("sync", string(k), rec.Parked)
-			return nil
-		})
+		}
+		// Ingest: a present record is a terminal park (no transient variant yet).
+		if b := tx.Bucket(ingestableStuckBucket); b != nil {
+			if err := b.ForEach(func(k, _ []byte) error {
+				s.metrics.SetWorkerParked("ingest", string(k), true)
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		s.logger.Warn("refresh worker-state gauges", zap.Error(err))
 	}
+}
+
+// handleIngestableStuck applies a committed IngestableStuck entity: a delete clears
+// the ingestable's parked record, an upsert records it. One entry per ingestable id.
+// Mirrors handleSyncableStuck for the ingest side — a parked record is published at
+// the freeze/restart supervisor's give-up and clears only on an operator fix
+// (saveIngestable, a new config version) or a delete (config-guard reaped). Derives
+// the worker.parked{kind:ingest} gauge from the applied record on every node, so it
+// is truthful on followers.
+func (s *Storage) handleIngestableStuck(e *cluster.Entity, _ uint64) error {
+	id := string(e.Key)
+	if e.IsDelete() {
+		if err := s.deleteKeyed(ingestableStuckBucket, e.Key); err != nil {
+			return err
+		}
+	} else {
+		st := &cluster.IngestableStuck{}
+		if err := st.Unmarshal(e.Data); err != nil {
+			return err
+		}
+		id = st.ID
+		if err := s.putConfigGuardedKeyed(ingestableBucket, ingestableStuckBucket, []byte(st.ID), e.Data); err != nil {
+			return err
+		}
+	}
+	if s.metrics != nil {
+		_, present, _ := s.IngestableStuck(id)
+		s.metrics.SetWorkerParked("ingest", id, present)
+	}
+	return nil
+}
+
+// IngestableStuck returns the ingestable's parked record, or ok=false if its worker
+// is not parked. Replicated, so any node answers identically — powers the
+// workerState field of GET /ingestable/{id}/status.
+func (s *Storage) IngestableStuck(id string) (cluster.IngestableStuck, bool, error) {
+	var (
+		out cluster.IngestableStuck
+		ok  bool
+	)
+	err := s.view(func(tx *bolt.Tx) error {
+		b := tx.Bucket(ingestableStuckBucket)
+		if b == nil {
+			return ErrBucketMissing
+		}
+		v := b.Get([]byte(id))
+		if v == nil {
+			return nil
+		}
+		if err := out.Unmarshal(v); err != nil {
+			return fmt.Errorf("[wal.stuck] unmarshal ingestable id=%s: %w", id, err)
+		}
+		ok = true
+		return nil
+	})
+	if err != nil {
+		return cluster.IngestableStuck{}, false, err
+	}
+	return out, ok, nil
 }
 
 // deleteKeyedTx removes key from the named flat bucket within an existing write

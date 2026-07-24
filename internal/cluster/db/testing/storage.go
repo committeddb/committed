@@ -300,6 +300,10 @@ func (StorageStubs) SyncableStuck(id string) (cluster.SyncableStuck, bool, error
 	return cluster.SyncableStuck{}, false, nil
 }
 
+func (StorageStubs) IngestableStuck(id string) (cluster.IngestableStuck, bool, error) {
+	return cluster.IngestableStuck{}, false, nil
+}
+
 func (StorageStubs) SyncableSkipRequest(id string) (cluster.SyncableSkipRequest, bool, error) {
 	return cluster.SyncableSkipRequest{}, false, nil
 }
