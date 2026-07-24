@@ -637,6 +637,27 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 		return nil
 	}
 
+	// loseOwnership tears the running ingress session down the moment this node
+	// stops owning the ingestable (a leadership change on a leader-based
+	// ingestable). It cancels the inner Ingest — releasing the source's
+	// replication slot / read cursor — flips the local ownership flag, and
+	// ABANDONS the in-flight snapshot pipeline. Those bare rows (SourceSeq 0)
+	// never advanced the durable position, so restart-from-position re-reads
+	// them idempotently; abandoning rather than draining keeps a deposed
+	// session's residue from contaminating the next session's pipeline (a stale
+	// flap-lost ack would otherwise spuriously freeze the fresh worker). Called
+	// from the data cases (prompt teardown while the source is active) and the
+	// timer branch (the idle path). Idempotent.
+	loseOwnership := func() {
+		db.logger.Info("stopping ingestion: node no longer owns this ingestable", zap.String("id", id))
+		isNode = false
+		ingress.stop()
+		for _, f := range pipeline {
+			db.unregisterWaiter(f.rid)
+		}
+		pipeline = pipeline[:0]
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -779,9 +800,26 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 					// never reaches here, so this never flaps against a freeze.
 					db.clearIngestFrozen(id)
 				}
+			} else {
+				// Lost leadership mid-stream: the row we just received belongs
+				// to a source this node no longer owns. Drop it and tear the
+				// session down — the durable position never advanced past it,
+				// so restart-from-position re-reads it. A clean handoff, never
+				// a "propose failed".
+				loseOwnership()
 			}
 			backoff = ingestBackoffMin
 		case position := <-ingress.positionChan:
+			if !db.isNode(id) {
+				// Lost leadership: don't drain or checkpoint. Draining here
+				// could await a flap-lost in-flight ack and spuriously freeze a
+				// clean handoff; instead tear down and abandon the pipeline —
+				// restart-from-position re-reads. The position is discarded (we
+				// must never advance it while not the owner).
+				loseOwnership()
+				backoff = ingestBackoffMin
+				continue
+			}
 			// A standalone checkpoint summarizes "all data through here
 			// committed" — every pipelined row ahead of it must succeed
 			// before it may propose.
@@ -846,10 +884,11 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 		case <-time.After(backoff):
 			progressed := false
 			if isNode && !db.isNode(id) {
-				db.logger.Info("stopping ingestion", zap.String("id", id))
-				// leader -> not-leader - stop ingesting
-				isNode = false
-				ingress.stop()
+				// leader -> not-leader - stop ingesting. This is the idle path:
+				// the data cases above tear down promptly while the source is
+				// active (when this timer is starved), so this fires only when
+				// the source has gone quiet.
+				loseOwnership()
 				progressed = true
 			} else if !isNode && db.isNode(id) {
 				db.logger.Info("starting ingestion", zap.String("id", id))
