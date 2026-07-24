@@ -1236,6 +1236,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '503':
           $ref: '#/components/responses/ScrubUnconfirmed'
+        '507':
+          $ref: '#/components/responses/InsufficientStorage'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -1628,7 +1630,7 @@ components:
     ScrubUnconfirmed:
       description: |
         The scrub was submitted to raft but could not be confirmed to have taken
-        effect before the request deadline (`code` is `scrub_unconfirmed`) —
+        effect before the request deadline (`code` is `request_unconfirmed`) —
         typically this node cannot currently reach a quorum. It may still take
         effect once a quorum is reachable; the request is idempotent, so retry.
       content:

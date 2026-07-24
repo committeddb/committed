@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/clusterfakes"
 	"github.com/committeddb/committed/internal/cluster/http"
 )
@@ -44,4 +45,18 @@ func TestScrub_InternalError(t *testing.T) {
 	status := doRequest(t, h, "POST", "http://localhost/v1/scrub", "")
 
 	require.Equal(t, 500, status)
+}
+
+// TestScrub_DiskFull maps a disk-full rejection to a truthful 507 — scrub is
+// admission-config-class, rejected at disk-full, and an operator (or the legally-
+// urgent RTBF path) must be able to tell it's a transient, retryable condition, not
+// the opaque 500 the hand-rolled switch used to return.
+func TestScrub_DiskFull(t *testing.T) {
+	fake := &clusterfakes.FakeCluster{}
+	fake.ScrubReturns(cluster.ErrInsufficientStorage)
+	h := http.New(fake)
+
+	status := doRequest(t, h, "POST", "http://localhost/v1/scrub", "")
+
+	require.Equal(t, 507, status)
 }

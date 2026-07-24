@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -138,10 +139,16 @@ func writeProposeError(w httpgo.ResponseWriter, err error, resource, action stri
 			writeError(w, httpgo.StatusBadRequest, "invalid_"+resource+"_config", configErr.Error())
 		}
 	case errors.Is(err, cluster.ErrProposalTooLarge):
-		writeError(w, httpgo.StatusRequestEntityTooLarge, "proposal_too_large", resource+" configuration exceeds the configured proposal size limit")
+		writeError(w, httpgo.StatusRequestEntityTooLarge, "proposal_too_large", resource+" exceeds the configured proposal size limit")
 	case errors.Is(err, cluster.ErrInsufficientStorage):
 		writeError(w, httpgo.StatusInsufficientStorage, "insufficient_storage",
 			"the cluster (or this node) is low on disk space and is rejecting writes; see GET /v1/node/status disk.admission, retry once disk space recovers")
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		// 503, never 500: the request was accepted for consensus but not confirmed
+		// before the caller's deadline (or the caller disconnected). The proposal
+		// MAY still commit, so this is a retryable "unknown", not a server fault.
+		writeError(w, httpgo.StatusServiceUnavailable, "request_unconfirmed",
+			"the request was submitted but not confirmed before the deadline; it may still take effect once a quorum is reachable — retry to confirm")
 	default:
 		writeInternalError(w, "failed to "+action, err)
 	}

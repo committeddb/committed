@@ -97,16 +97,10 @@ func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
 
 	err = h.c.Propose(r.Context(), p)
 	if err != nil {
-		if errors.Is(err, cluster.ErrProposalTooLarge) {
-			writeError(w, httpgo.StatusRequestEntityTooLarge, "proposal_too_large", "proposal exceeds the configured size limit")
-			return
-		}
-		if errors.Is(err, cluster.ErrInsufficientStorage) {
-			writeError(w, httpgo.StatusInsufficientStorage, "insufficient_storage",
-				"the cluster (or this node) is low on disk space and is rejecting writes; see GET /v1/node/status disk.admission, retry once disk space recovers")
-			return
-		}
-		writeInternalError(w, "failed to propose", err)
+		// Shared choke point: 413 too-large, 507 disk-full, 503 on a deadline
+		// (never 500 — the proposal may still commit), else 500. The config/rebuild
+		// cases are inert for a data proposal.
+		writeProposeError(w, err, "proposal", "propose")
 		return
 	}
 }
