@@ -152,9 +152,10 @@ func TestHandler_Token(t *testing.T) {
 		return resp.StatusCode
 	}
 
-	require.Equal(t, httpgo.StatusUnauthorized, post(""))            // missing
-	require.Equal(t, httpgo.StatusUnauthorized, post("Bearer nope")) // wrong
-	require.Equal(t, httpgo.StatusNoContent, post("Bearer s3cr3t"))  // right
+	require.Equal(t, httpgo.StatusUnauthorized, post(""))              // missing
+	require.Equal(t, httpgo.StatusUnauthorized, post("Bearer nope"))   // wrong (length mismatch)
+	require.Equal(t, httpgo.StatusUnauthorized, post("Bearer x3cr3t")) // wrong (same length as s3cr3t — exercises the equal-length constant-time compare)
+	require.Equal(t, httpgo.StatusNoContent, post("Bearer s3cr3t"))    // right
 	require.Equal(t, 1, rr.processedCount())
 }
 

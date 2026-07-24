@@ -3,6 +3,7 @@ package httptransport
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -289,7 +290,11 @@ func (t *HttpTransport) handleMessage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "wrong cluster or protocol", http.StatusPreconditionFailed)
 		return
 	}
-	if t.token != "" && r.Header.Get("Authorization") != "Bearer "+t.token {
+	// Constant-time compare so a peer that can reach this port (token auth, no
+	// mTLS) can't recover the shared token byte-by-byte via response timing and
+	// then inject raft messages. Mirrors the API path's bearerAuth. A length
+	// mismatch returns 0 (leaks length, not content), same as the API path.
+	if t.token != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+t.token)) != 1 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
