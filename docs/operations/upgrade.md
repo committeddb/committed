@@ -82,6 +82,15 @@ rolling would crash the nodes you haven't upgraded yet. See the warning under
 > stop all nodes, replace every binary, restart. Single-node deployments and
 > fresh installs are unaffected, and rolling back a node to ≤ 0.7.2 after any
 > 0.7.3 entry is committed means a [rebuild](rebuild.md), not a binary swap.
+>
+> **And to any 0.7.3 → 0.7.4 multi-node upgrade.** 0.7.4 adds a new internal
+> type (the ingest terminal-park record) a 0.7.3 node can't resolve, so it is a
+> full-stop for the same reason. 0.7.4 also lands the **system-type compat
+> namespace** (see
+> [api-compatibility.md](../api-compatibility.md#log-entities-protobuf)): from
+> 0.7.4 forward a new *ungated* internal type — skippable coordination /
+> observability — no longer forces a full-stop, because a node that doesn't know
+> it skips it rather than crashing; only a *gated* (must-understand) type does.
 
 ## The procedure
 

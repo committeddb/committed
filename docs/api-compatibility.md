@@ -216,20 +216,39 @@ without a feature gate (gating would have threaded cluster state into
 [upgrade.md](operations/upgrade.md)). Every later variant follows the recipe
 and stays rolling-safe.
 
-New entity *types* (a new system type ID) are additive on the wire, but an
-old binary that meets one it doesn't recognize can't *resolve* it (a system
-type UUID is indistinguishable from an unknown user type) and would
-fatal-exit applying it. This is exactly a "wire-decodable but not
-semantically compatible" case, so a new system type MUST gate its emission
-on a **cluster feature level** (above): it is not proposed until every
-member advertises support — *provided the emitter actually gates it*. "New
-entity types ship disabled until the whole cluster is upgraded" is therefore a
-discipline the emitter must follow (bump + gate, per the feature-level section
-above), not a mechanically enforced invariant: an ungated new system type ships
-anyway and fatal-exits older peers. (0.7.x has one such lapse in its own history
-— `ingestableStuck` was added ungated at feature level 1; harmless because
-pre-0.7.4 is not a supported customer upgrade origin, but a real instance of the
-gap this discipline exists to prevent.)
+New entity *types* (a new system type ID) are additive on the wire, but an old
+binary that meets one it doesn't recognize can't *resolve* it and, before 0.7.4,
+would fatal-exit applying it — a system-type UUID was indistinguishable from an
+unknown user type. As of 0.7.4 the handling is **structural**: a built-in system
+type's UUID carries a reserved 112-bit prefix plus a 4-bit **compat state**
+(`cluster.reservedSystemClass`), so a node that has never seen the type still
+knows how to treat it. Two states are defined:
+
+- **ungated** — a skippable coordination/observability record (e.g.
+  `ingestableStuck`). An older node **skips-and-warns** and advances past it (the
+  raw entry stays in the event log; only that node's derived state is
+  unreflected). No feature gate is needed — an ungated type is rolling-safe by
+  construction.
+- **gated** — a must-understand record (data/compliance: deletes, scrub, skip
+  requests). An older node **fatal-exits** on it, so its emission must still be
+  feature-gated (bump + gate, above) to roll safely. What the namespace adds is
+  that a *forgotten* gate becomes a loud brick, not a silent skip of — say — an
+  un-applied RTBF tombstone.
+
+An undefined state (a future compat class an old node doesn't recognize) also
+fatal-exits: the conservative default, so new compat classes themselves roll out
+disciplined. User type IDs are rejected from the reserved prefix at propose time
+(`ParseType`); the pre-namespace built-ins keep their original random UUIDs and
+resolve via the registry (every current binary compiles them all in, so they
+never take the unknown path). A tripwire test
+(`TestSystemTypesAreClassifiedForUpgrade`) fails if a `registerSystemType` is
+added without a compat state — the enforcement missing when `ingestableStuck`
+first shipped ungated-and-unclassified (now re-keyed as the first ungated type).
+
+Introducing the namespace is itself a forward full-stop, like the feature-level
+mechanism above: a pre-0.7.4 binary doesn't recognize the reserved prefix (and
+`ingestableStuck` was re-keyed into it), so 0.7.3 → 0.7.4 is all-nodes-at-once —
+harmless, since pre-0.7.4 is not a supported customer upgrade origin.
 
 ### WAL / event-log framing
 
