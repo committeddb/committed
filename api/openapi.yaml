@@ -2060,15 +2060,16 @@ components:
       properties:
         workerState:
           type: string
-          enum: [running, parked]
+          enum: [running, recovering, parked]
           description: |
-            The worker's lifecycle state: `running` or `parked` (the freeze/restart
+            The worker's lifecycle state: `running`; `recovering` (frozen on a
+            proposal it can't yet commit — the supervisor is restarting it; the
+            phase/position below still show where it wedged); or `parked` (the
             supervisor gave up after repeated freezes at the same resume position —
             most often a row or transaction over the proposal-size cap; raise the cap
-            and re-POST the config, or delete the ingestable). Replicated, so it is
-            reported truthfully from ANY node, even one with no local worker — unlike
-            the phase/position/lag fields below, which come from the local worker and
-            are absent (404) on a node not running it.
+            and re-POST the config, or delete the ingestable). `parked` is replicated
+            and reported truthfully from ANY node; `running`/`recovering` are read
+            from the local worker, so a node not running it answers 404.
         phase:
           type: string
           enum: [snapshot, streaming]

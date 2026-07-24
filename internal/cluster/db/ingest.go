@@ -406,7 +406,14 @@ func (db *DB) IngestableStatus(ctx context.Context, id string) (cluster.Ingestab
 	if err != nil {
 		return st, err
 	}
+	// A live worker is either running or — if the supervisor is restarting it after
+	// a freeze — recovering, a node-local, self-healing state (contrast the
+	// replicated terminal parked state above). The phase/position still reflect
+	// where it wedged; workerState is the health headline.
 	st.WorkerState = cluster.WorkerStateRunning
+	if db.isIngestFrozen(id) {
+		st.WorkerState = cluster.WorkerStateRecovering
+	}
 	return st, nil
 }
 
@@ -456,6 +463,10 @@ func (db *DB) spawnIngestWorkerLocked(id string, i cluster.Ingestable) *workerHa
 		// them unblocked uniformly.
 		close(handle.done)
 		if reason == ingestExitFreeze {
+			// The worker froze and the supervisor is about to restart it — mark it
+			// recovering (node-local) so the status endpoint stops reporting a live
+			// "streaming" phase for a worker that is actually wedged and retrying.
+			db.setIngestFrozen(id, true)
 			go db.superviseRestartIngest(id, i, handle)
 		}
 	}()
@@ -470,9 +481,38 @@ func (db *DB) spawnIngestWorkerLocked(id string, i cluster.Ingestable) *workerHa
 // which a poison proposal blocks, so it never flaps against the freeze that set
 // the gauge.
 func (db *DB) clearIngestFrozen(id string) {
+	db.setIngestFrozen(id, false)
 	if db.metrics != nil {
 		db.metrics.IngestFrozen(id, false)
 	}
+}
+
+// setIngestFrozen sets or clears id's node-local frozen flag — the "recovering"
+// state the status endpoint reports for a live worker on this node. Node-local by
+// design: recovering is a LIVE state tied to the owner running the worker (a
+// follower has no worker to recover), so it rides ingest's node-local live-status
+// model rather than the replicated terminal parked record. Tracked independently of
+// the committed.ingest.frozen gauge (a no-op when no metrics endpoint is wired — the
+// common beta case), so the status endpoint works regardless.
+func (db *DB) setIngestFrozen(id string, frozen bool) {
+	db.ingestFrozenMu.Lock()
+	defer db.ingestFrozenMu.Unlock()
+	if frozen {
+		if db.ingestFrozen == nil {
+			db.ingestFrozen = make(map[string]bool)
+		}
+		db.ingestFrozen[id] = true
+		return
+	}
+	delete(db.ingestFrozen, id)
+}
+
+// isIngestFrozen reports whether id's worker is currently frozen/recovering on this
+// node (the supervisor is restarting it).
+func (db *DB) isIngestFrozen(id string) bool {
+	db.ingestFrozenMu.Lock()
+	defer db.ingestFrozenMu.Unlock()
+	return db.ingestFrozen[id]
 }
 
 // proposalTopic returns the topic/type id of a proposal's first entity for

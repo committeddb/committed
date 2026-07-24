@@ -195,6 +195,9 @@ func (db *DB) pruneIngestSupervisorState(id string) {
 	db.ingestSupervisorMu.Lock()
 	delete(db.ingestSupervisorStates, id)
 	db.ingestSupervisorMu.Unlock()
+	// A worker teardown (re-POST or delete) ends any recovering state, so a fresh
+	// worker starts reported as running rather than inheriting a stale frozen flag.
+	db.setIngestFrozen(id, false)
 }
 
 // recordFreezeAndNextBackoff bumps the consecutive-freeze counter for id and

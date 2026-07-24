@@ -102,8 +102,9 @@ type IngestableConfigChangeValidator interface {
 // endpoints, derived from the replicated stuck/parked records so any node reports
 // identically.
 const (
-	WorkerStateRunning = "running" // healthy (sync: or transiently stuck; ingest: or recovering)
-	WorkerStateParked  = "parked"  // terminally parked — operator must fix the config
+	WorkerStateRunning    = "running"    // healthy (sync: or transiently stuck)
+	WorkerStateRecovering = "recovering" // ingest-only: frozen, the supervisor is restarting it
+	WorkerStateParked     = "parked"     // terminally parked — operator must fix the config
 )
 
 // ParkedWorker identifies a terminally-parked worker for the /node/status summary.

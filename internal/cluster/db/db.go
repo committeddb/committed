@@ -144,6 +144,16 @@ type DB struct {
 	ingestSupervisorMu     sync.Mutex
 	ingestSupervisorStates map[string]*ingestSupervisorState
 
+	// ingestFrozenMu guards ingestFrozen, the node-local set of ingestables whose
+	// worker is currently FROZEN and being restarted by the supervisor (the
+	// "recovering" state). It drives the workerState the status endpoint reports
+	// for a live worker on this node, so it must be tracked independently of the
+	// committed.ingest.frozen gauge (which is a no-op when no metrics endpoint is
+	// wired — the common beta case). Set at freeze-exit, cleared on durable
+	// progress or worker teardown.
+	ingestFrozenMu sync.Mutex
+	ingestFrozen   map[string]bool
+
 	// syncBreakerMu guards syncBreakerStates, the per-syncable run of
 	// consecutive permanent sync errors (within a healthy window) driving the
 	// sync circuit breaker (see sync_breaker.go). Separate from workersMu to
