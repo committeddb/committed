@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/committeddb/committed/internal/cluster/fsutil"
 )
 
 // Offline WAL repair. A node's tidwall-backed logs store records as
@@ -192,8 +194,19 @@ func RepairLog(dir string, commit bool) (*Diagnosis, error) {
 		if err := os.Remove(d.truncateSeg); err != nil {
 			return d, fmt.Errorf("remove torn segment %s: %w", d.truncateSeg, err)
 		}
-	} else if err := os.Truncate(d.truncateSeg, d.truncateOff); err != nil {
-		return d, fmt.Errorf("truncate torn tail in %s: %w", d.truncateSeg, err)
+		// Persist the removal in the parent directory so the torn segment doesn't
+		// reappear after a crash immediately following the repair.
+		if err := fsutil.SyncDir(filepath.Dir(d.truncateSeg)); err != nil {
+			return d, fmt.Errorf("fsync dir after removing torn segment %s: %w", d.truncateSeg, err)
+		}
+	} else {
+		if err := os.Truncate(d.truncateSeg, d.truncateOff); err != nil {
+			return d, fmt.Errorf("truncate torn tail in %s: %w", d.truncateSeg, err)
+		}
+		// Persist the truncation so the torn tail doesn't reappear after a crash.
+		if err := fsutil.SyncFile(d.truncateSeg); err != nil {
+			return d, fmt.Errorf("fsync truncated segment %s: %w", d.truncateSeg, err)
+		}
 	}
 	d.Repaired = true
 	return d, nil

@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/committeddb/committed/internal/cluster/backup"
+	"github.com/committeddb/committed/internal/cluster/fsutil"
 )
 
 var (
@@ -101,6 +102,13 @@ func runBackup() error {
 			return fmt.Errorf("finalize gzip: %w", err)
 		}
 	}
+	// fsync the archive content before Close+rename so a crash after "backed up"
+	// can't leave a torn or zero-length backup that only surfaces on restore.
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("fsync %q: %w", tmp, err)
+	}
 	if err := f.Close(); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("finalize %q: %w", tmp, err)
@@ -108,6 +116,10 @@ func runBackup() error {
 	if err := os.Rename(tmp, backupTo); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("publish backup to %q: %w", backupTo, err)
+	}
+	// Persist the rename in the destination's parent directory.
+	if err := fsutil.SyncDir(filepath.Dir(backupTo)); err != nil {
+		return fmt.Errorf("fsync backup dir after publish: %w", err)
 	}
 
 	_, _ = fmt.Fprintf(os.Stdout, "backed up %d files from %s to %s\n", len(m.Files), dataDir, backupTo)

@@ -23,10 +23,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/committeddb/committed/internal/cluster/fsutil"
 )
 
 // FormatVersion is the backup archive format. Restore refuses an archive whose
@@ -267,8 +270,21 @@ func Restore(r io.Reader, targetDir string, now time.Time) (*Manifest, error) {
 	if err != nil {
 		return nil, fmt.Errorf("restore: marshal marker: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(staging, markerName), markerBytes, 0o600); err != nil {
+	markerPath := filepath.Join(staging, markerName)
+	if err := os.WriteFile(markerPath, markerBytes, 0o600); err != nil {
 		return nil, fmt.Errorf("restore: write marker: %w", err)
+	}
+	if err := fsutil.SyncFile(markerPath); err != nil {
+		return nil, fmt.Errorf("restore: fsync marker: %w", err)
+	}
+
+	// Make the whole staged tree durable before publishing: every file's content is
+	// already fsync'd (writeFile / marker), so fsync every directory to persist
+	// their entries. Otherwise `restore` could report success with the
+	// reconstituted node still only in the page cache — a crash then leaves a torn
+	// or partial data dir, which is the disaster-recovery path this tool exists for.
+	if err := syncDirTree(staging); err != nil {
+		return nil, fmt.Errorf("restore: fsync staged tree before publish: %w", err)
 	}
 
 	// Publish atomically. requireEmptyDir guaranteed targetDir was absent or
@@ -281,6 +297,12 @@ func Restore(r io.Reader, targetDir string, now time.Time) (*Manifest, error) {
 		return nil, fmt.Errorf("restore: publish staged restore to target dir: %w", err)
 	}
 	published = true
+
+	// Persist the rename itself: it is atomic for a concurrent reader but not
+	// durable until the target's parent directory is fsync'd.
+	if err := fsutil.SyncDir(filepath.Dir(targetDir)); err != nil {
+		return nil, fmt.Errorf("restore: fsync target parent after publish: %w", err)
+	}
 
 	return manifest, nil
 }
@@ -373,8 +395,31 @@ func writeFile(dest string, r io.Reader, mode os.FileMode) error {
 		_ = f.Close()
 		return fmt.Errorf("restore: write %q: %w", dest, err)
 	}
+	// fsync the content before Close so a crash after the publish rename cannot
+	// surface a torn or zero-length file (io.Copy does not fsync). syncDirTree
+	// then persists the directory entries before the rename.
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("restore: fsync %q: %w", dest, err)
+	}
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("restore: close %q: %w", dest, err)
 	}
 	return nil
+}
+
+// syncDirTree fsyncs every directory under root (inclusive), so that renaming root
+// into place persists all of its entries — not just root's top level. File contents
+// are already fsync'd at write time (writeFile / the marker write); this covers the
+// directory entries that point at them.
+func syncDirTree(root string) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return fsutil.SyncDir(path)
+		}
+		return nil
+	})
 }

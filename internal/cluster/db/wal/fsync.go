@@ -1,9 +1,9 @@
 package wal
 
 import (
-	"os"
-
 	"go.uber.org/zap"
+
+	"github.com/committeddb/committed/internal/cluster/fsutil"
 )
 
 // syncFile fsyncs the file at path to stable storage. It exists to make a file
@@ -13,21 +13,13 @@ import (
 // on the pre-rename temp file, where a failure means the swap must abort (the
 // live file is still untouched), so the error is returned rather than tolerated.
 // No-op when fsync is disabled (the WithoutFsync test option), keeping the wal
-// test suite off the fsync path.
+// test suite off the fsync path. Delegates to fsutil so the storage engine and the
+// backup/repair tooling share one fsync implementation.
 func (s *Storage) syncFile(path string) error {
 	if s.fsyncDisabled {
 		return nil
 	}
-	//nolint:gosec // G304: path is an internal wal swap file (data dir), never user input.
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		return err
-	}
-	return f.Close()
+	return fsutil.SyncFile(path)
 }
 
 // syncDirBestEffort fsyncs a directory's entry list so a rename into or out of it
@@ -41,16 +33,8 @@ func (s *Storage) syncDirBestEffort(path, what string) {
 	if s.fsyncDisabled {
 		return
 	}
-	//nolint:gosec // G304: path is an internal wal swap directory (data dir), never user input.
-	d, err := os.Open(path)
-	if err != nil {
-		s.logger.Warn("could not open directory to fsync after swap; the rename may not survive an immediate crash until the next sync",
-			zap.String("op", what), zap.String("dir", path), zap.Error(err))
-		return
-	}
-	if err := d.Sync(); err != nil {
+	if err := fsutil.SyncDir(path); err != nil {
 		s.logger.Warn("could not fsync directory after swap; the rename may not survive an immediate crash until the next sync",
 			zap.String("op", what), zap.String("dir", path), zap.Error(err))
 	}
-	_ = d.Close()
 }
