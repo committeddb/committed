@@ -99,10 +99,9 @@ type Raft struct {
 	readWaiters map[string]chan uint64
 	nextReadReq atomic.Uint64
 
-	transport         Transport
-	transportStopC    chan struct{} // signals http transport to shutdown
-	transportDoneC    chan struct{} // signals http transport shutdown complete
-	stopTransportOnce sync.Once     // stopTransport is called from both the transport-error path and Close; guard the close
+	transport      Transport
+	transportStopC chan struct{} // signals http transport to shutdown
+	transportDoneC chan struct{} // signals http transport shutdown complete
 
 	// transportWrapper is captured from the options in newRaftWithOptions
 	// so startRaft can apply it after constructing the HttpTransport. nil
@@ -782,9 +781,6 @@ func (n *Raft) serveChannels() {
 			n.maybeCompact()
 
 			n.node.Advance()
-		case err := <-n.transport.GetErrorC():
-			n.writeError(err)
-			return
 		case <-n.raftStopC:
 			return
 		case <-n.closeC:
@@ -792,13 +788,6 @@ func (n *Raft) serveChannels() {
 			return
 		}
 	}
-}
-
-func (n *Raft) writeError(err error) {
-	n.stopTransport()
-	n.sendRaftError(err)
-	close(n.raftErrorC)
-	n.node.Stop()
 }
 
 // sendRaftError forwards a fatal raft error to ErrorC without ever blocking
@@ -842,19 +831,14 @@ func (n *Raft) forwardProposeErr(err error, shuttingDown bool) {
 	n.sendRaftError(err)
 }
 
+// stopTransport stops the peer transport and blocks until serveRaft has actually
+// exited (transportDoneC). It runs exactly once because its only caller, Close,
+// runs its whole body under closeOnce.
 func (n *Raft) stopTransport() {
-	// stopTransport is reachable from BOTH the transport-error path (writeError)
-	// and Close. Guard the non-idempotent parts — transport.Stop and
-	// close(transportStopC) — with a Once so a second call can't panic on a
-	// double close. Both callers still wait on transportDoneC below (a receive on
-	// an already-closed channel returns immediately), so each returns only once
-	// the transport has actually stopped.
-	n.stopTransportOnce.Do(func() {
-		if n.transport != nil {
-			n.transport.Stop()
-		}
-		close(n.transportStopC)
-	})
+	if n.transport != nil {
+		n.transport.Stop()
+	}
+	close(n.transportStopC)
 	<-n.transportDoneC
 }
 

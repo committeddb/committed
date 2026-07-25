@@ -101,7 +101,6 @@ type pendingMsg struct {
 
 // --- db.Transport passthroughs ---
 
-func (t *FaultyTransport) GetErrorC() chan error             { return t.inner.GetErrorC() }
 func (t *FaultyTransport) Start(stopC <-chan struct{}) error { return t.inner.Start(stopC) }
 func (t *FaultyTransport) AddPeer(p raft.Peer) error         { return t.inner.AddPeer(p) }
 func (t *FaultyTransport) RemovePeer(id uint64)              { t.inner.RemovePeer(id) }

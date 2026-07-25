@@ -20,10 +20,8 @@ import (
 type recordingTransport struct {
 	mu    sync.Mutex
 	added []raft.Peer
-	errC  chan error
 }
 
-func (r *recordingTransport) GetErrorC() chan error { return r.errC }
 func (r *recordingTransport) Start(stopC <-chan struct{}) error {
 	<-stopC
 	return nil
@@ -56,7 +54,7 @@ func TestReconcileTransport_ConnectsDurablePeerMissingFromSeed(t *testing.T) {
 	s := NewMemoryStorage()
 	require.NoError(t, s.PutMemberPeerURL(2, []byte("http://n2:2380")))
 
-	spy := &recordingTransport{errC: make(chan error, 1)}
+	spy := &recordingTransport{}
 	proposeC := make(chan []byte)
 	confChangeC := make(chan *raftpb.ConfChangeV2)
 
@@ -84,7 +82,7 @@ func TestReconcileTransport_SkipsSelf(t *testing.T) {
 	require.NoError(t, s.PutMemberPeerURL(1, []byte("http://n1:2380"))) // self
 	require.NoError(t, s.PutMemberPeerURL(2, []byte("http://n2:2380")))
 
-	spy := &recordingTransport{errC: make(chan error, 1)}
+	spy := &recordingTransport{}
 	proposeC := make(chan []byte)
 	confChangeC := make(chan *raftpb.ConfChangeV2)
 	ps := []raft.Peer{{ID: 1, Context: []byte("http://n1:2380")}}

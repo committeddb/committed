@@ -20,14 +20,13 @@ func (f *fakeRaft) ReportUnreachable(id uint64)                          {}
 func (f *fakeRaft) ReportSnapshot(id uint64, status raft.SnapshotStatus) {}
 
 // TestNew_CreatesTransport verifies that the constructor returns a non-nil
-// transport with an accessible error channel.
+// transport.
 func TestNew_CreatesTransport(t *testing.T) {
 	peers := []raft.Peer{
 		{ID: 1, Context: []byte("http://127.0.0.1:12379")},
 	}
 	tr := New(1, peers, zap.NewExample(), &fakeRaft{}, nil, "")
 	require.NotNil(t, tr)
-	require.NotNil(t, tr.GetErrorC())
 }
 
 // TestAddPeer_InvalidURL verifies that AddPeer returns an error when given

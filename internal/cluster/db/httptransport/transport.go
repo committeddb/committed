@@ -116,8 +116,6 @@ type HttpTransport struct {
 	// so a sender without the shared secret can't inject raft messages.
 	token string
 
-	errorC chan error
-
 	// baseCtx is canceled by Stop so in-flight POSTs abort promptly.
 	baseCtx context.Context
 	cancel  context.CancelFunc
@@ -186,19 +184,10 @@ func New(id uint64, ps []raft.Peer, l *zap.Logger, r db.TransportRaft, tlsInfo *
 		tlsInfo: tlsInfo,
 		client:  &http.Client{Transport: tr}, // per-request context bounds duration, not Client.Timeout
 		token:   token,
-		errorC:  make(chan error),
 		baseCtx: ctx,
 		cancel:  cancel,
 		peers:   make(map[uint64]*peer),
 	}
-}
-
-// GetErrorC returns the fatal-transport-error channel the raft loop selects on.
-// Like rafthttp's, it stays dormant in normal operation: a fatal serve error
-// surfaces through Start's return (serveRaft log.Fatals on it), and a slow or
-// dead peer is a ReportUnreachable, not a transport-fatal.
-func (t *HttpTransport) GetErrorC() chan error {
-	return t.errorC
 }
 
 // Start applies the seed peers, binds the listener on this node's own URL, and

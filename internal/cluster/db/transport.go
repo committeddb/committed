@@ -15,7 +15,6 @@ import (
 // is injected by the composition root through a TransportFactory, so db itself
 // does not depend on any transport implementation.
 type Transport interface {
-	GetErrorC() chan error
 	Start(stopC <-chan struct{}) error
 	AddPeer(peer raft.Peer) error
 	RemovePeer(id uint64)
