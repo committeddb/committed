@@ -62,23 +62,45 @@ func TestMaybeCompact_BothDisabled(t *testing.T) {
 	require.Equal(t, 0, fake.CompactCallCount())
 }
 
-// TestMaybeCompact_CappedAtEventIndex is the safety constraint:
-// compact point must never exceed EventIndex, because a raft log
-// that forgot entries the event log doesn't have would be the exact
-// shape that trips the storage invariant on a follower receiving
-// InstallSnapshot.
-func TestMaybeCompact_CappedAtEventIndex(t *testing.T) {
-	// Applied = 200 but EventIndex = 50 (event log far behind —
-	// should never happen under the Ready loop's invariant check,
-	// but maybeCompact is defensive). Compact target should cap at
-	// 50 instead of (200 - 8) = 192.
+// TestMaybeCompact_SkipsWhenAppliedPastEventIndex is the safety constraint:
+// the snapshot is taken AT applied, so if applied somehow exceeds EventIndex
+// there is no internally consistent state to snapshot — the payload (as-of
+// applied) would claim state past the durable event log. maybeCompact must skip
+// entirely rather than ship such a snapshot. This is a defensive path
+// (checkStorageInvariant fatals on this P<R state earlier in the same Ready
+// iteration, so it should never be reached), but the guard must hold.
+func TestMaybeCompact_SkipsWhenAppliedPastEventIndex(t *testing.T) {
+	// Applied = 200 but EventIndex = 50 (event log far behind — a P<R state that
+	// should never occur under the Ready loop's invariant check).
 	fake := newFakeStorageWithIndexes(200 /*applied*/, 50 /*eventIdx*/, 1<<30 /*size>threshold*/)
 	r := db.NewRaftForCompactionTest(fake, 4096, 0, zap.NewNop())
 
 	r.MaybeCompactForTest()
 
-	require.Equal(t, 1, fake.CompactCallCount())
-	require.Equal(t, uint64(50), r.LastCompactedIndexForTest(), "compact point must be capped at EventIndex")
+	require.Equal(t, 0, fake.CreateSnapshotCallCount(), "must not snapshot state past the event log")
+	require.Equal(t, 0, fake.CompactCallCount(), "and must not compact")
+}
+
+// TestMaybeCompact_SnapshotsAtAppliedNotCompactPoint pins the decouple of the
+// snapshot index from the raft-log truncation point. The snapshot payload is the
+// whole live bbolt (state as-of applied) and its ConfState is the live one, so
+// the snapshot MUST be taken at applied. Taking it at the trailing compact point
+// (applied - safetyBuffer, the old behavior) shipped a snapshot whose
+// payload/ConfState led its own Index by safetyBuffer entries — panicking a
+// lagging follower that replays the intervening conf-change, and bricking a
+// crashed install whose embedded applied index sat ahead of the Index.
+func TestMaybeCompact_SnapshotsAtAppliedNotCompactPoint(t *testing.T) {
+	fake := newFakeStorageWithIndexes(100 /*applied*/, 100 /*eventIdx*/, 4096 /*size>threshold*/)
+	r := db.NewRaftForCompactionTest(fake, 4096, 0, zap.NewNop())
+
+	r.MaybeCompactForTest()
+
+	require.Equal(t, 1, fake.CreateSnapshotCallCount())
+	snapIndex, _ := fake.CreateSnapshotArgsForCall(0)
+	require.Equal(t, uint64(100), snapIndex,
+		"snapshot must be taken AT applied (100), not the trailing compact point (92)")
+	require.Equal(t, uint64(92), fake.CompactArgsForCall(0),
+		"but the raft-log truncation still trails applied by safetyBuffer")
 }
 
 // TestMaybeCompact_BelowSafetyBufferIsNoOp verifies that a node that

@@ -1105,31 +1105,40 @@ func (n *Raft) maybeCompact() {
 		return
 	}
 
-	// Hold back from the very tip of applied so brief-lag followers can
-	// still use AppendEntries instead of the costlier InstallSnapshot
-	// path. Eight entries is arbitrary — small enough that compaction
-	// still buys real disk savings, large enough that a short network
-	// blip doesn't force a snapshot install.
+	// Hold the raft-log TRUNCATION back from the tip of applied so brief-lag
+	// followers can still catch up via AppendEntries instead of the costlier
+	// InstallSnapshot path. The snapshot itself is taken AT applied (below); only
+	// the compaction point trails by this buffer. Eight entries is arbitrary —
+	// small enough that compaction still buys real disk savings, large enough that
+	// a short network blip doesn't force a snapshot install.
 	const safetyBuffer = uint64(8)
 	if applied <= safetyBuffer {
 		return
 	}
-	compactTo := applied - safetyBuffer
 
-	// Never compact past the permanent event log — if we do, a
-	// follower could receive an InstallSnapshot advancing raft's
-	// state past its event log and trip the storage invariant.
-	if eventIdx := n.storage.EventIndex(); compactTo > eventIdx {
-		compactTo = eventIdx
+	// The snapshot is taken AT applied, so applied must not exceed the durable
+	// event log — otherwise the snapshot would claim state past it. Under the P>=R
+	// storage invariant applied <= EventIndex always holds (checkStorageInvariant
+	// fatals earlier this Ready iteration otherwise), so this is defensive: if it
+	// ever fails there is no internally consistent state to snapshot, so skip
+	// rather than ship a snapshot whose Index exceeds the event log.
+	if applied > n.storage.EventIndex() {
+		return
 	}
+	compactTo := applied - safetyBuffer
 	if compactTo <= n.lastCompactedIndex.Load() {
 		return
 	}
 
-	// Take a metadata snapshot first so raft has something to ship to
-	// followers that fall behind the new first index.
-	if _, err := n.storage.CreateSnapshot(compactTo, nil); err != nil {
-		n.logger.Warn("create snapshot for compaction", zap.Uint64("compactTo", compactTo), zap.Error(err))
+	// Take the metadata snapshot AT applied (not compactTo) so its Index matches
+	// the state it embeds — the live bbolt payload (as-of applied) and the live
+	// ConfState (as-of applied). A snapshot whose payload/ConfState lead its Index
+	// makes a lagging follower replay an already-applied conf-change (etcd's
+	// Changer panics "config is already joint") and bricks a crashed install (the
+	// embedded applied index sits ahead of the snapshot Index). Only the raft-log
+	// truncation below trails by safetyBuffer, preserving the AppendEntries window.
+	if _, err := n.storage.CreateSnapshot(applied, nil); err != nil {
+		n.logger.Warn("create snapshot for compaction", zap.Uint64("index", applied), zap.Error(err))
 		return
 	}
 	if err := n.storage.Compact(compactTo); err != nil {
@@ -1138,7 +1147,10 @@ func (n *Raft) maybeCompact() {
 	}
 	n.lastCompactedIndex.Store(compactTo)
 	n.lastCompactTime = time.Now()
-	n.logger.Debug("raft log compacted", zap.Uint64("compactTo", compactTo), zap.String("reason", reason))
+	n.logger.Debug("raft log compacted",
+		zap.Uint64("snapshotIndex", applied),
+		zap.Uint64("compactTo", compactTo),
+		zap.String("reason", reason))
 }
 
 // processSnapshot installs a snapshot delivered by the raft Ready
