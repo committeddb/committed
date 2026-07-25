@@ -54,7 +54,9 @@ checkpoint rides the final row of each read window — so a restart mid-window
 re-emits that window and rows the crash had already committed appear in the
 log again. That is the same semantics as a reconciling refresh (which
 re-observes every row): keyed upserts, last write wins, consumers converge
-identically.
+identically. A keyless/append sink has no key to converge on, so it appends each
+re-observation as another row — see [History tables vs. read
+models](../read-models.md#history-tables-vs-read-models).
 
 ### One writer per topic
 

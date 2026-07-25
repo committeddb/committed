@@ -40,6 +40,26 @@ table name, a keyless syncable's table must be short enough that
 `<table>__committed_applied` fits the database's 63-char identifier limit;
 committed rejects a longer one at config time.
 
+The sidecar keys on the event's *raft index*, so it makes re-applying the **same
+committed event** a no-op — but each *distinct* event is still its own row. A
+history table records one row per event by design, so the same logical data
+committed as two separate events lands as two rows. That happens two ways:
+
+- **You propose the same unkeyed data more than once.** Direct proposals are
+  yours to control, and committed faithfully appends each.
+- **An ingestable re-emits a row.** A snapshot is at-least-once at the source-row
+  level: a crash mid-snapshot re-reads the current window, and a *full
+  re-snapshot* — a Postgres replication-slot recreate, deleting and recreating
+  the ingestable, or a node rebuild — re-reads the whole source table, so one
+  source row can arrive as several events. (CDC *stream* changes are deduplicated
+  by source sequence and do not duplicate this way; only the snapshot phase
+  does.)
+
+Either way the history table faithfully records each event — that is what an
+append log is. If you want one row per logical entity instead, give the `sql`
+syncable a `primaryKey` (its upsert then converges on the key) or maintain a
+current-state table with `sql-projection`.
+
 ## A single-source projection
 
 ```toml
