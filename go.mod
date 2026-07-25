@@ -8,6 +8,14 @@ go 1.26.5
 // drop this replace once merged.
 replace github.com/go-mysql-org/go-mysql => ./third_party/forked/go-mysql
 
+// Patched fork: fsyncs the log directory on every segment create/rename so a
+// newly cycled segment's directory entry is durable before the acked write it
+// holds — upstream fsyncs segment content but never the parent dir, so a power
+// loss after a cycle silently drops just-acked entries (P<R on restart). See
+// third_party/forked/tidwall-wal/README.committeddb.md. Upstream candidate —
+// drop this replace once merged.
+replace github.com/tidwall/wal => ./third_party/forked/tidwall-wal
+
 require (
 	github.com/PaesslerAG/jsonpath v0.1.1
 	github.com/bufbuild/protocompile v0.14.1

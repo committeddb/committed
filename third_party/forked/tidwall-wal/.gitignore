@@ -1,0 +1,6 @@
+testlog
+.idea
+vendor
+# committeddb: upstream TestIssue33 opens Open("log", ...) but only cleans up
+# "testlog", leaving ./log behind — ignore it so a re-sync test run can't stage it.
+log
