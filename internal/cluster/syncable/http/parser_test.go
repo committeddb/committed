@@ -59,7 +59,9 @@ func TestParseConfig_Simple(t *testing.T) {
 	require.Equal(t, 3000, config.TimeoutMs)
 	require.Len(t, config.Headers, 2)
 	require.Equal(t, "Authorization", config.Headers[0].Name)
-	require.Equal(t, "Bearer test-token", config.Headers[0].Value)
+	// The example uses a ${VAR} reference for the auth secret (resolved in memory
+	// only at the db/parser boundary); the http parser stores it verbatim.
+	require.Equal(t, "Bearer ${WEBHOOK_TOKEN}", config.Headers[0].Value)
 	require.Equal(t, "X-Custom", config.Headers[1].Name)
 	require.Equal(t, "custom-value", config.Headers[1].Value)
 }

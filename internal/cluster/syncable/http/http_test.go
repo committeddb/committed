@@ -65,9 +65,9 @@ type webhookType struct {
 
 // TestSync_TransportError_RedactsURLSecret pins the webhook secret-leak fix: a
 // transport failure returns a *url.Error whose text embeds the full request URL —
-// path included, where Slack/Discord/?token= webhooks carry the secret. The value
-// the dead-letter/stuck record and the status/errors/replay APIs persist and expose
-// (RedactedMessage, via safeDeadLetterMessage) must not contain that secret.
+// path included, where Slack/Discord/?token= webhooks carry the secret. Neither the
+// value the dead-letter/stuck record and the status/errors/replay APIs persist
+// (RedactedMessage) NOR the node-local log render (Error) may contain that secret.
 func TestSync_TransportError_RedactsURLSecret(t *testing.T) {
 	const secret = "SUPERSECRETTOKEN123"
 
@@ -95,6 +95,13 @@ func TestSync_TransportError_RedactsURLSecret(t *testing.T) {
 		"the replicated dead-letter/status message must not carry the webhook URL secret")
 	require.Contains(t, persisted, "127.0.0.1",
 		"the message should still name the endpoint host to stay actionable")
+
+	// The node-local LOG render (Error) must redact the URL too — node logs may
+	// reach the tenant, and the DB connection error is redacted here as well.
+	require.NotContains(t, err.Error(), secret,
+		"the node-log message (Error) must not carry the webhook URL secret")
+	require.Contains(t, err.Error(), "127.0.0.1",
+		"the node-log message should still name the endpoint host")
 }
 
 func TestSync_SingleEntity_Success(t *testing.T) {

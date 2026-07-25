@@ -8,9 +8,12 @@ url = "http://localhost:8080/webhook"
 method = "POST"
 timeoutMs = 3000
 
+# Put webhook auth in an Authorization header sourced from ${VAR}: the raw config
+# is stored/replicated/backed-up and returned by GET verbatim, so an inlined
+# secret would land at rest — a ${VAR} reference is resolved in memory only.
 [[http.headers]]
 name = "Authorization"
-value = "Bearer test-token"
+value = "Bearer ${WEBHOOK_TOKEN}"
 
 [[http.headers]]
 name = "X-Custom"

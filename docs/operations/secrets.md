@@ -24,6 +24,28 @@ string with no password) is accepted; a literal password is refused with a messa
 pointing here. This applies only to the password position of `connectionString`:
 hosts, usernames, database names, and every non-connection field are unaffected.
 
+### Recommended for webhook auth
+
+Webhook (`http` syncable) secrets are **not** enforced the way connection-string
+passwords are: a webhook token can live in many shapes — a header value, a URL
+path segment, a query parameter — so there is no single position to gate. Put
+webhook auth in an **`Authorization` header sourced from `${VAR}`**:
+
+```toml
+[[http.headers]]
+name = "Authorization"
+value = "Bearer ${WEBHOOK_TOKEN}"
+```
+
+That keeps the secret out of everything at rest — the config stores the `${VAR}`
+template, resolved in memory only — and committed redacts a failed webhook's URL
+to `scheme://host` in every log, error, dead-letter, and status surface. A secret
+written **inline** instead — a literal header value, or embedded in the `url`
+(e.g. a Slack `…/services/T/B/XXXX` webhook) — is stored verbatim in the event
+log, bbolt, snapshots, and backups, and is returned by `GET /syncable/{id}`. If
+your receiver needs an auth scheme a header can't carry, let us know — support is
+demand-driven.
+
 ## The mechanism: `${VAR}` templates
 
 Any string value in a database, ingestable, or syncable config may
