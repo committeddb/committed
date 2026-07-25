@@ -44,3 +44,41 @@ func TestPropose_TimesOutInsteadOfHangingUnresolved(t *testing.T) {
 		t.Fatal("Propose hung on an unresolved (committed-but-unapplied) proposal instead of timing out to ErrProposalUnknown")
 	}
 }
+
+// TestIngestPipeline_TimesOutInsteadOfHangingOnOrphanedSnapshotRow is the
+// pipelined-path twin of the test above. A bare snapshot row (SourceSeq 0, no
+// Position) takes the pipelined lane; its trailing position triggers
+// drainPipeline → awaitOldest. With apply blocked, the row's waiter is never
+// signaled — the orphaned-waiter state a raft-DROPPED snapshot proposal reaches
+// when no leader change follows to fail-fast it. awaitOldest must TIME OUT to
+// ErrProposalUnknown, freezing the worker VISIBLY (recovering), instead of
+// hanging there forever with a healthy-looking gauge. This is the backstop
+// db.Propose already has but the pipeline lane was built without.
+func TestIngestPipeline_TimesOutInsteadOfHangingOnOrphanedSnapshotRow(t *testing.T) {
+	id := "pipeline-timeout-ingest"
+	d, s := newIngestFailFastDBWith(t,
+		db.WithProposeTimeout(150*time.Millisecond),
+		db.WithIngestSupervisorInitialBackoff(1*time.Hour), // don't restart-and-refreeze during the assert
+	)
+	t.Cleanup(func() { s.Unblock(); _ = d.Close() })
+
+	require.Eventually(t, d.IsLeaderForTest, 5*time.Second, 5*time.Millisecond,
+		"single-node db never became leader")
+
+	// freezeRecordingIngestable emits a bare row (SourceSeq 0, no Position → the
+	// pipeline lane), then a position (→ drainPipeline over that row).
+	proposal := &cluster.Proposal{Entities: []*cluster.Entity{{
+		Type: &cluster.Type{ID: "string"}, Key: []byte("k"), Data: []byte("v"),
+	}}}
+	require.NoError(t, d.Ingest(context.Background(), id,
+		newFreezeRecordingIngestable(proposal, cluster.Position([]byte("pos-1")))))
+
+	// No manual fail-fast signal — the awaitOldest timeout ALONE must produce the
+	// visible freeze. Without the timeout the worker hangs in drainPipeline and
+	// this never reaches recovering.
+	require.Eventually(t, func() bool {
+		st, err := d.IngestableStatus(context.Background(), id)
+		return err == nil && st.WorkerState == cluster.WorkerStateRecovering
+	}, 3*time.Second, 20*time.Millisecond,
+		"pipeline awaitOldest hung on an orphaned snapshot-row waiter instead of timing out to a visible freeze")
+}

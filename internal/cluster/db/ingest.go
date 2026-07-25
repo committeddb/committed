@@ -589,9 +589,22 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 		f := pipeline[0]
 		pipeline = pipeline[1:]
 		defer db.unregisterWaiter(f.rid)
+		// Backstop timer, mirroring db.Propose: a proposal raft DROPS without a
+		// leader change (uncommitted-entries buffer full, an expired transfer, or a
+		// leaderless-window submit the Old==0 fail-fast skip doesn't cover) is
+		// absorbed by forwardProposeErr, so this ack would never fire and the
+		// snapshot worker would hang here forever — silently, with a healthy-looking
+		// gauge. Surface it as ErrProposalUnknown so the worker freezes visibly and
+		// the supervisor restarts from the durable position (snapshot re-read is
+		// upsert-idempotent). NewTimer+Stop, not time.After, so a fast ack doesn't
+		// leave a 30s timer pinned per drained row.
+		timer := time.NewTimer(db.proposeTimeout)
+		defer timer.Stop()
 		select {
 		case err := <-f.ack:
 			return err
+		case <-timer.C:
+			return ErrProposalUnknown
 		case <-ctx.Done():
 			return ctx.Err()
 		}
