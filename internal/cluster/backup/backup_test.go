@@ -151,6 +151,77 @@ func TestRestore_MidFailureLeavesTargetCleanAndRetryable(t *testing.T) {
 	}
 }
 
+// TestCreate_ExcludesRecoveryResidue: a backup must archive the canonical,
+// post-recovery node state — never the transient recovery residue a crash/scrub
+// leaves, which the node's Open sweeps. Two of these residuals (the pre-scrub
+// events.retired/ log and the bbolt.db.restore.* snapshot temp) hold data a scrub
+// already erased on the live node; archiving them would carry already-erased
+// right-to-be-forgotten subjects into an immutable off-box archive.
+func TestCreate_ExcludesRecoveryResidue(t *testing.T) {
+	dir := t.TempDir()
+	canonical := []string{
+		"raft/log/00000000000000000001",
+		"raft/state/00000000000000000001",
+		"events/00000000000000000001",
+		"metadata/bbolt.db",
+	}
+	residue := []string{
+		"events.retired/00000000000000000001",     // pre-scrub log — erased PII
+		"events.scrub.5/00000000000000000001",     // in-progress rewrite temp
+		"raft/log.discarded/00000000000000000001", // superseded entry log
+		"metadata/bbolt.db.restore.1720000000",    // orphaned snapshot temp — erased key
+		"metadata/bbolt.db.compact.1720000001",    // orphaned compaction temp
+	}
+	for _, rel := range append(append([]string{}, canonical...), residue...) {
+		full := filepath.Join(dir, filepath.FromSlash(rel))
+		require.NoError(t, os.MkdirAll(filepath.Dir(full), 0o700))
+		require.NoError(t, os.WriteFile(full, []byte("data:"+rel), 0o600))
+	}
+
+	var buf bytes.Buffer
+	m, err := backup.Create(&buf, dir, 0, time.Now())
+	require.NoError(t, err)
+	require.ElementsMatch(t, canonical, m.Files,
+		"the archive must contain exactly the canonical node state, none of the swept-at-Open recovery residue")
+}
+
+// TestCreate_RemapsRetiredEventLogWhenEventsAbsent: a scrub swap crashed after
+// renaming events/ out, so events.retired/ is the ONLY event log — the node's
+// Open rolls it back to events/. The backup must do the same (remap it to
+// events/), or it would restore an empty log. This is NOT a leak: the erasure did
+// not complete, so the pre-scrub log is the node's current canonical state.
+func TestCreate_RemapsRetiredEventLogWhenEventsAbsent(t *testing.T) {
+	dir := t.TempDir()
+	files := map[string]string{
+		"raft/log/00000000000000000001":       "entry",
+		"raft/state/00000000000000000001":     "state",
+		"metadata/bbolt.db":                   "bolt",
+		"events.retired/00000000000000000001": "the-only-event-log",
+		"events.scrub.9/00000000000000000001": "half-built-clean-log", // discarded by Open
+	}
+	for rel, content := range files {
+		full := filepath.Join(dir, filepath.FromSlash(rel))
+		require.NoError(t, os.MkdirAll(filepath.Dir(full), 0o700))
+		require.NoError(t, os.WriteFile(full, []byte(content), 0o600))
+	}
+
+	var buf bytes.Buffer
+	m, err := backup.Create(&buf, dir, 0, time.Now())
+	require.NoError(t, err)
+	require.Contains(t, m.Files, "events/00000000000000000001",
+		"the retired log must be archived remapped to events/ so the restore is not empty")
+	require.NotContains(t, m.Files, "events.retired/00000000000000000001")
+	require.NotContains(t, m.Files, "events.scrub.9/00000000000000000001")
+
+	// Round-trip: the restored events/ holds the retired log's bytes.
+	dst := filepath.Join(t.TempDir(), "r")
+	_, err = backup.Restore(&buf, dst, time.Now())
+	require.NoError(t, err)
+	got, err := os.ReadFile(filepath.Join(dst, "events", "00000000000000000001"))
+	require.NoError(t, err)
+	require.Equal(t, "the-only-event-log", string(got))
+}
+
 // TestRestore_RefusesNonEmptyTarget guards against clobbering an existing
 // (possibly live) node directory.
 func TestRestore_RefusesNonEmptyTarget(t *testing.T) {

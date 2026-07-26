@@ -102,11 +102,15 @@ func Create(w io.Writer, dataDir string, nodeID uint64, now time.Time) (*Manifes
 
 	// One walk to collect the regular files (the directory is quiescent, so it
 	// won't change between listing and copying); the manifest lists exactly
-	// what we then write.
+	// what we then write. Recovery residue is excluded — see canonicalArchiveEntry.
 	type entry struct {
 		rel  string
 		full string
 	}
+	// A node's Open rolls a crashed scrub swap back to events.retired/ when
+	// events/ is absent; the archive must follow suit, so decide once whether the
+	// canonical event log lives in events/ or in events.retired/.
+	eventsPresent := dirExists(filepath.Join(dataDir, "events"))
 	var entries []entry
 	walkErr := filepath.Walk(dataDir, func(path string, fi os.FileInfo, err error) error {
 		if err != nil {
@@ -115,17 +119,24 @@ func Create(w io.Writer, dataDir string, nodeID uint64, now time.Time) (*Manifes
 		if fi.IsDir() {
 			return nil
 		}
-		// Fail closed on anything that is not a regular file (symlink, device,
-		// socket, …). Walk won't descend a symlinked dir, so archiving it would
-		// silently omit the real files.
-		if !fi.Mode().IsRegular() {
-			return fmt.Errorf("backup: refusing to archive %q: not a regular file (mode %s) — a symlinked or special entry under the data dir would be silently dropped; materialize the real files under the data dir", path, fi.Mode())
-		}
 		rel, err := filepath.Rel(dataDir, path)
 		if err != nil {
 			return err
 		}
-		entries = append(entries, entry{rel: filepath.ToSlash(rel), full: path})
+		keep, archiveRel := canonicalArchiveEntry(filepath.ToSlash(rel), eventsPresent)
+		if !keep {
+			// Recovery residue the node's Open would sweep — never part of the
+			// logical node, and (events.retired/, bbolt.db.restore.*) a carrier of
+			// already-erased right-to-be-forgotten data that must not go off-box.
+			return nil
+		}
+		// Fail closed on a non-regular canonical entry (symlink, device, …): Walk
+		// won't descend a symlinked dir, so archiving it would silently omit the
+		// real files.
+		if !fi.Mode().IsRegular() {
+			return fmt.Errorf("backup: refusing to archive %q: not a regular file (mode %s) — a symlinked or special entry under the data dir would be silently dropped; materialize the real files under the data dir", path, fi.Mode())
+		}
+		entries = append(entries, entry{rel: archiveRel, full: path})
 		return nil
 	})
 	if walkErr != nil {
@@ -166,6 +177,59 @@ func Create(w io.Writer, dataDir string, nodeID uint64, now time.Time) (*Manifes
 		return nil, fmt.Errorf("backup: close archive: %w", err)
 	}
 	return manifest, nil
+}
+
+// dirExists reports whether path is an existing directory.
+func dirExists(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.IsDir()
+}
+
+// canonicalArchiveEntry decides whether the walked data-dir file at rel (a
+// forward-slash path relative to the data dir) belongs in the archive, and under
+// what path. It mirrors the node's Open-time recovery sweep READ-ONLY, so a
+// backup captures the canonical, post-recovery node state rather than the
+// transient recovery residue a crash can leave behind. Two of those residuals —
+// the retired PRE-scrub event log (events.retired/) and an orphaned bbolt
+// snapshot temp (metadata/bbolt.db.restore.*) — hold data a scrub already erased
+// on the live node, so a plain file walk would carry already-erased
+// (right-to-be-forgotten) subjects into an immutable off-box archive.
+//
+// eventsPresent is whether the canonical events/ directory exists. These residual
+// names MUST match the wal package's data-dir layout:
+//   - events.retired/, events.scrub.<n>/     internal/cluster/db/wal/scrub.go (recoverScrubDirs)
+//   - raft/log.discarded/                    internal/cluster/db/wal/wal_storage.go (entryLogDiscardDir)
+//   - metadata/bbolt.db.{restore,compact}.*  internal/cluster/db/wal/snapshot.go (sweepBoltTempFiles)
+func canonicalArchiveEntry(rel string, eventsPresent bool) (keep bool, archiveRel string) {
+	seg := strings.Split(rel, "/")
+	switch {
+	case seg[0] == "events.retired":
+		if eventsPresent {
+			// events/ is canonical; the retired copy is a stale, swept-at-Open
+			// leak of the pre-scrub (erased) log.
+			return false, ""
+		}
+		// events/ is absent: a scrub swap crashed after renaming events out, so
+		// events.retired/ is the only (canonical) log and Open rolls it back to
+		// events/. Archive it remapped so the restore is not empty. Not a leak:
+		// the erasure did not complete, so the node still holds this log pending a
+		// re-scrub.
+		seg[0] = "events"
+		return true, strings.Join(seg, "/")
+	case strings.HasPrefix(seg[0], "events.scrub."):
+		// An in-progress scrub rewrite's temp log; Open removes it.
+		return false, ""
+	case seg[0] == "raft" && len(seg) > 1 && seg[1] == "log.discarded":
+		// A superseded entry log a snapshot install reset aside; Open removes it.
+		return false, ""
+	case seg[0] == "metadata" && len(seg) > 1 &&
+		(strings.HasPrefix(seg[1], "bbolt.db.restore.") || strings.HasPrefix(seg[1], "bbolt.db.compact.")):
+		// An orphaned bbolt swap temp (.restore.* can hold an erased key); Open
+		// removes it via sweepBoltTempFiles.
+		return false, ""
+	default:
+		return true, rel
+	}
 }
 
 // Restore unpacks a backup tar stream from r into targetDir, validating the
