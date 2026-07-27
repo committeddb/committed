@@ -3,7 +3,10 @@ package backup_test
 import (
 	"archive/tar"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -31,6 +34,47 @@ func writeTree(t *testing.T) (string, map[string]string) {
 		require.NoError(t, os.WriteFile(full, []byte(content), 0o600))
 	}
 	return dir, files
+}
+
+// --- helpers for hand-built archives (manifest LAST, per-file hashes) ---
+
+type tarEntry struct{ name, content string }
+
+func hashHex(content string) string {
+	sum := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(sum[:])
+}
+
+// fileEntry is the manifest record for content stored under name.
+func fileEntry(name, content string) backup.FileEntry {
+	return backup.FileEntry{Path: name, Size: int64(len(content)), SHA256: hashHex(content)}
+}
+
+// writeArchive writes the given file entries (in order) followed by the manifest
+// as the LAST entry — the same layout Create produces — letting a test control
+// exactly what the tar holds versus what the manifest claims.
+func writeArchive(t *testing.T, w io.Writer, files []tarEntry, m backup.Manifest) {
+	t.Helper()
+	tw := tar.NewWriter(w)
+	for _, e := range files {
+		require.NoError(t, tw.WriteHeader(&tar.Header{Name: e.name, Mode: 0o600, Size: int64(len(e.content)), Typeflag: tar.TypeReg}))
+		_, err := tw.Write([]byte(e.content))
+		require.NoError(t, err)
+	}
+	mb, err := json.MarshalIndent(m, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, tw.WriteHeader(&tar.Header{Name: backup.ManifestName, Mode: 0o600, Size: int64(len(mb)), Typeflag: tar.TypeReg}))
+	_, err = tw.Write(mb)
+	require.NoError(t, err)
+	require.NoError(t, tw.Close())
+}
+
+func paths(fes []backup.FileEntry) []string {
+	out := make([]string, len(fes))
+	for i, fe := range fes {
+		out[i] = fe.Path
+	}
+	return out
 }
 
 func TestCreateRestore_RoundTrip(t *testing.T) {
@@ -112,15 +156,10 @@ func TestCreate_RejectsEmptyDataDir(t *testing.T) {
 func TestRestore_MidFailureLeavesTargetCleanAndRetryable(t *testing.T) {
 	// Archive whose manifest lists two files but contains only one.
 	var bad bytes.Buffer
-	tw := tar.NewWriter(&bad)
-	m := backup.Manifest{FormatVersion: backup.FormatVersion, Files: []string{"events/0001", "raft/log/0001"}}
-	mb, _ := json.MarshalIndent(m, "", "  ")
-	require.NoError(t, tw.WriteHeader(&tar.Header{Name: backup.ManifestName, Mode: 0o600, Size: int64(len(mb)), Typeflag: tar.TypeReg}))
-	_, _ = tw.Write(mb)
-	payload := []byte("present")
-	require.NoError(t, tw.WriteHeader(&tar.Header{Name: "events/0001", Mode: 0o600, Size: int64(len(payload)), Typeflag: tar.TypeReg}))
-	_, _ = tw.Write(payload)
-	require.NoError(t, tw.Close())
+	writeArchive(t, &bad, []tarEntry{{"events/0001", "present"}}, backup.Manifest{
+		FormatVersion: backup.FormatVersion,
+		Files:         []backup.FileEntry{fileEntry("events/0001", "present"), fileEntry("raft/log/0001", "gone")},
+	})
 
 	parent := t.TempDir()
 	target := filepath.Join(parent, "restored")
@@ -181,7 +220,7 @@ func TestCreate_ExcludesRecoveryResidue(t *testing.T) {
 	var buf bytes.Buffer
 	m, err := backup.Create(&buf, dir, 0, time.Now())
 	require.NoError(t, err)
-	require.ElementsMatch(t, canonical, m.Files,
+	require.ElementsMatch(t, canonical, paths(m.Files),
 		"the archive must contain exactly the canonical node state, none of the swept-at-Open recovery residue")
 }
 
@@ -208,10 +247,10 @@ func TestCreate_RemapsRetiredEventLogWhenEventsAbsent(t *testing.T) {
 	var buf bytes.Buffer
 	m, err := backup.Create(&buf, dir, 0, time.Now())
 	require.NoError(t, err)
-	require.Contains(t, m.Files, "events/00000000000000000001",
+	require.Contains(t, paths(m.Files), "events/00000000000000000001",
 		"the retired log must be archived remapped to events/ so the restore is not empty")
-	require.NotContains(t, m.Files, "events.retired/00000000000000000001")
-	require.NotContains(t, m.Files, "events.scrub.9/00000000000000000001")
+	require.NotContains(t, paths(m.Files), "events.retired/00000000000000000001")
+	require.NotContains(t, paths(m.Files), "events.scrub.9/00000000000000000001")
 
 	// Round-trip: the restored events/ holds the retired log's bytes.
 	dst := filepath.Join(t.TempDir(), "r")
@@ -239,20 +278,13 @@ func TestRestore_RefusesNonEmptyTarget(t *testing.T) {
 }
 
 // TestRestore_RejectsPathTraversal proves the zip-slip guard: a crafted
-// archive entry escaping the target is rejected.
+// archive entry escaping the target is rejected during staging.
 func TestRestore_RejectsPathTraversal(t *testing.T) {
 	var buf bytes.Buffer
-	tw := tar.NewWriter(&buf)
-	// A valid-looking manifest...
-	m := backup.Manifest{FormatVersion: backup.FormatVersion, Files: []string{"../escape"}}
-	mb, _ := json.MarshalIndent(m, "", "  ")
-	require.NoError(t, tw.WriteHeader(&tar.Header{Name: backup.ManifestName, Mode: 0o600, Size: int64(len(mb)), Typeflag: tar.TypeReg}))
-	_, _ = tw.Write(mb)
-	// ...and a malicious entry climbing out of the target.
-	payload := []byte("pwned")
-	require.NoError(t, tw.WriteHeader(&tar.Header{Name: "../escape", Mode: 0o600, Size: int64(len(payload)), Typeflag: tar.TypeReg}))
-	_, _ = tw.Write(payload)
-	require.NoError(t, tw.Close())
+	writeArchive(t, &buf, []tarEntry{{"../escape", "pwned"}}, backup.Manifest{
+		FormatVersion: backup.FormatVersion,
+		Files:         []backup.FileEntry{fileEntry("../escape", "pwned")},
+	})
 
 	dst := filepath.Join(t.TempDir(), "restored")
 	_, err := backup.Restore(&buf, dst, time.Now())
@@ -261,15 +293,11 @@ func TestRestore_RejectsPathTraversal(t *testing.T) {
 }
 
 // TestRestore_RejectsWrongFormatVersion refuses an archive from an
-// incompatible backup format.
+// incompatible backup format (including an old v1 archive this binary no longer
+// decodes).
 func TestRestore_RejectsWrongFormatVersion(t *testing.T) {
 	var buf bytes.Buffer
-	tw := tar.NewWriter(&buf)
-	m := backup.Manifest{FormatVersion: backup.FormatVersion + 1}
-	mb, _ := json.MarshalIndent(m, "", "  ")
-	require.NoError(t, tw.WriteHeader(&tar.Header{Name: backup.ManifestName, Mode: 0o600, Size: int64(len(mb)), Typeflag: tar.TypeReg}))
-	_, _ = tw.Write(mb)
-	require.NoError(t, tw.Close())
+	writeArchive(t, &buf, nil, backup.Manifest{FormatVersion: backup.FormatVersion + 1})
 
 	_, err := backup.Restore(&buf, filepath.Join(t.TempDir(), "r"), time.Now())
 	require.Error(t, err)
@@ -294,15 +322,65 @@ func TestRestore_RejectsMissingManifest(t *testing.T) {
 // doesn't actually contain.
 func TestRestore_DetectsTruncatedArchive(t *testing.T) {
 	var buf bytes.Buffer
-	tw := tar.NewWriter(&buf)
-	m := backup.Manifest{FormatVersion: backup.FormatVersion, Files: []string{"events/0001"}}
-	mb, _ := json.MarshalIndent(m, "", "  ")
-	require.NoError(t, tw.WriteHeader(&tar.Header{Name: backup.ManifestName, Mode: 0o600, Size: int64(len(mb)), Typeflag: tar.TypeReg}))
-	_, _ = tw.Write(mb)
-	// ...but never write events/0001.
-	require.NoError(t, tw.Close())
+	writeArchive(t, &buf, nil, backup.Manifest{
+		FormatVersion: backup.FormatVersion,
+		Files:         []backup.FileEntry{fileEntry("events/0001", "whatever")},
+	})
 
 	_, err := backup.Restore(&buf, filepath.Join(t.TempDir(), "r"), time.Now())
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "missing from the archive")
+}
+
+// TestRestore_DetectsCorruptFile is the core Fix A pin: a same-size bit-flip in an
+// archived file (bit-rot / at-rest tamper) that the manifest hash does not match
+// must fail the restore — before the corrupt bytes are ever published or a node
+// opens them — rather than silently restoring wrong node state.
+func TestRestore_DetectsCorruptFile(t *testing.T) {
+	var buf bytes.Buffer
+	writeArchive(t, &buf, []tarEntry{{"metadata/bbolt.db", "evil"}}, backup.Manifest{
+		FormatVersion: backup.FormatVersion,
+		Files:         []backup.FileEntry{fileEntry("metadata/bbolt.db", "good")}, // hash of "good", same size
+	})
+
+	_, err := backup.Restore(&buf, filepath.Join(t.TempDir(), "r"), time.Now())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "checksum mismatch")
+}
+
+// TestRestore_RejectsUnlistedEntry: a tampered archive that injects a file the
+// manifest does not list — e.g. a stray segment dropped into raft/log/ — is
+// refused by the allow-list, not silently written into the node dir.
+func TestRestore_RejectsUnlistedEntry(t *testing.T) {
+	var buf bytes.Buffer
+	writeArchive(t, &buf, []tarEntry{
+		{"events/0001", "legit"},
+		{"raft/log/injected", "evil"},
+	}, backup.Manifest{
+		FormatVersion: backup.FormatVersion,
+		Files:         []backup.FileEntry{fileEntry("events/0001", "legit")},
+	})
+
+	_, err := backup.Restore(&buf, filepath.Join(t.TempDir(), "r"), time.Now())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "does not list")
+}
+
+// TestRestore_RejectsSameNameOverride: two entries for the same path — the second
+// (malicious) overwrites the good one in staging (O_TRUNC). The manifest's hash is
+// for the good content, so the HASH check catches the substituted bytes; an
+// allow-list alone would not (both entries are "listed").
+func TestRestore_RejectsSameNameOverride(t *testing.T) {
+	var buf bytes.Buffer
+	writeArchive(t, &buf, []tarEntry{
+		{"events/0001", "good"},
+		{"events/0001", "evil"},
+	}, backup.Manifest{
+		FormatVersion: backup.FormatVersion,
+		Files:         []backup.FileEntry{fileEntry("events/0001", "good")},
+	})
+
+	_, err := backup.Restore(&buf, filepath.Join(t.TempDir(), "r"), time.Now())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "checksum mismatch")
 }

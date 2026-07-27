@@ -21,6 +21,8 @@ package backup
 
 import (
 	"archive/tar"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -35,12 +37,15 @@ import (
 )
 
 // FormatVersion is the backup archive format. Restore refuses an archive whose
-// manifest declares a different version rather than guessing at an
-// incompatible layout.
-const FormatVersion = 1
+// manifest declares a different version rather than guessing at an incompatible
+// layout — including an older v1 archive, whose manifest carried only file paths
+// with no per-file integrity, which this binary no longer decodes.
+const FormatVersion = 2
 
-// ManifestName is the reserved archive entry holding the backup metadata. It is
-// written first so `tar tf` and Restore both see it before the data.
+// ManifestName is the reserved archive entry holding the backup metadata. Create
+// writes it LAST — the per-file hashes it carries are only known after each file
+// has been streamed and hashed — so Restore reads it after staging the files and
+// verifies the staged tree against it before publishing.
 const ManifestName = "MANIFEST.json"
 
 // markerName is written into a restored data directory so the node (and an
@@ -48,7 +53,16 @@ const ManifestName = "MANIFEST.json"
 // grown in place. It is informational — startup behavior is unchanged.
 const markerName = "RESTORED.json"
 
-// Manifest describes a backup archive. It travels as the first archive entry.
+// FileEntry is one archived file's manifest record: its data-dir-relative path
+// (forward-slash), byte size, and SHA-256 (hex) of its content. Restore verifies
+// each staged file against these before publishing.
+type FileEntry struct {
+	Path   string `json:"path"`
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256"`
+}
+
+// Manifest describes a backup archive. It travels as the LAST archive entry.
 type Manifest struct {
 	FormatVersion int    `json:"formatVersion"`
 	CreatedAt     string `json:"createdAt"` // RFC3339
@@ -59,11 +73,15 @@ type Manifest struct {
 	NodeID uint64 `json:"nodeID,omitempty"`
 	// Source is the data directory the backup was taken from (provenance).
 	Source string `json:"source,omitempty"`
-	// Files are the archived entries' paths, relative to the data directory,
-	// in forward-slash form. Restore checks every one is present after
-	// unpacking, so a truncated archive fails loudly instead of restoring a
-	// partial directory.
-	Files []string `json:"files"`
+	// Files lists every archived entry with its size and SHA-256. Restore treats
+	// it as the authoritative set: it verifies each staged file's hash, rejects
+	// any staged entry the manifest does not list, and requires every listed file
+	// to be present — so bit-rot, a truncated transfer, an injected/extra entry,
+	// or a same-name override in the archive fails the restore loudly instead of
+	// silently reconstituting corrupt node state. (Integrity, not authenticity: a
+	// tamperer who rewrites the manifest to match altered files is not defended
+	// here — that needs a signed manifest.)
+	Files []FileEntry `json:"files,omitempty"`
 }
 
 // Marker is written to RESTORED.json in a restored data directory.
@@ -72,11 +90,12 @@ type Marker struct {
 	From       Manifest `json:"from"`
 }
 
-// Create archives the data directory at dataDir into a tar stream written to
-// w, prefixed by a MANIFEST.json entry. dataDir MUST belong to a stopped node
-// (the caller is responsible for that — see the CLI's lock probe); a live
-// directory would produce an inconsistent archive. Returns the manifest it
-// wrote.
+// Create archives the data directory at dataDir into a tar stream written to w,
+// followed by a trailing MANIFEST.json entry (each file is hashed as it streams,
+// so the manifest's per-file hashes are known only after the files are written).
+// dataDir MUST belong to a stopped node (the caller is responsible for that — see
+// the CLI's held shared lock); a live directory would produce an inconsistent
+// archive. Returns the manifest it wrote.
 //
 // Only regular files are archived; directories are recreated by Restore from
 // the file paths, so empty directories are not preserved (a node recreates the
@@ -153,26 +172,33 @@ func Create(w io.Writer, dataDir string, nodeID uint64, now time.Time) (*Manifes
 		CreatedAt:     now.UTC().Format(time.RFC3339),
 		NodeID:        nodeID,
 		Source:        dataDir,
-		Files:         make([]string, 0, len(entries)),
-	}
-	for _, e := range entries {
-		manifest.Files = append(manifest.Files, e.rel)
+		Files:         make([]FileEntry, 0, len(entries)),
 	}
 
 	tw := tar.NewWriter(w)
 
+	// Single pass: stream each file into the archive while hashing it, so its
+	// FileEntry (size + SHA-256) is recorded without a second read of the data —
+	// the event log can be very large, and a two-pass "hash then copy" would
+	// double the read.
+	for _, e := range entries {
+		fe, err := copyTarFile(tw, e.rel, e.full)
+		if err != nil {
+			return nil, err
+		}
+		manifest.Files = append(manifest.Files, fe)
+	}
+
+	// The manifest is the LAST entry — its per-file hashes are only known after
+	// the files are streamed. Restore reads it after staging and verifies the
+	// staged tree against it before publishing. (A truncated archive drops the
+	// trailing manifest, and Restore rejects it as "not a committed backup".)
 	manifestBytes, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("backup: marshal manifest: %w", err)
 	}
 	if err := writeTarFile(tw, ManifestName, 0o600, manifestBytes); err != nil {
 		return nil, err
-	}
-
-	for _, e := range entries {
-		if err := copyTarFile(tw, e.rel, e.full); err != nil {
-			return nil, err
-		}
 	}
 
 	if err := tw.Close(); err != nil {
@@ -227,6 +253,7 @@ func Restore(r io.Reader, targetDir string, now time.Time) (*Manifest, error) {
 
 	tr := tar.NewReader(r)
 	var manifest *Manifest
+	staged := make(map[string]FileEntry) // archive entry name -> {size, sha256} as written to staging
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -262,29 +289,30 @@ func Restore(r io.Reader, targetDir string, now time.Time) (*Manifest, error) {
 		if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
 			return nil, fmt.Errorf("restore: create dir for %q: %w", hdr.Name, err)
 		}
-		if err := writeFile(dest, tr, os.FileMode(hdr.Mode)); err != nil {
+		n, sum, err := writeFile(dest, tr, os.FileMode(hdr.Mode))
+		if err != nil {
 			return nil, err
 		}
+		staged[hdr.Name] = FileEntry{Path: hdr.Name, Size: n, SHA256: sum}
 	}
 
 	if manifest == nil {
 		return nil, fmt.Errorf("restore: archive has no %s — not a committed backup", ManifestName)
 	}
 
-	// Completeness: every file the manifest lists must be present, so a
-	// truncated archive is caught here rather than silently restoring a
-	// partial node directory.
-	for _, rel := range manifest.Files {
-		dest, err := safeJoin(staging, rel)
-		if err != nil {
-			return nil, err
-		}
-		if _, err := os.Stat(dest); err != nil {
-			return nil, fmt.Errorf("restore: manifest lists %q but it is missing from the archive: %w", rel, err)
-		}
+	// Verify the staged tree against the manifest BEFORE publishing: allow-list
+	// (no entry the manifest didn't list), completeness (nothing listed is
+	// missing), and per-file integrity (size + SHA-256). Any mismatch — bit-rot,
+	// a truncated transfer, an injected or same-name-overridden entry — aborts
+	// here with targetDir untouched (the deferred RemoveAll of the staging dir).
+	if err := verifyStaged(staged, manifest.Files); err != nil {
+		return nil, err
 	}
 
-	marker := Marker{RestoredAt: now.UTC().Format(time.RFC3339), From: *manifest}
+	// Record provenance in the marker, not the full (possibly large) file list.
+	provenance := *manifest
+	provenance.Files = nil
+	marker := Marker{RestoredAt: now.UTC().Format(time.RFC3339), From: provenance}
 	markerBytes, err := json.MarshalIndent(marker, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("restore: marshal marker: %w", err)
@@ -367,6 +395,41 @@ func requireEmptyDir(dir string) error {
 	return nil
 }
 
+// verifyStaged checks the staged tree against the manifest before publish. staged
+// maps each written archive entry (by forward-slash name) to the size and SHA-256
+// observed while staging it; want is the manifest's authoritative file list. It
+// enforces three things, failing on the first violation:
+//   - allow-list: every staged entry is one the manifest lists (an unlisted entry
+//     is an injected/malformed archive — e.g. a stray file dropped into raft/log/
+//     that would break the node's Open);
+//   - completeness: every listed file is present (else the archive is truncated);
+//   - integrity: each listed file's staged size and SHA-256 match (else bit-rot, a
+//     torn transfer, or a same-name entry that overwrote a good one in staging).
+func verifyStaged(staged map[string]FileEntry, want []FileEntry) error {
+	wantByPath := make(map[string]FileEntry, len(want))
+	for _, fe := range want {
+		wantByPath[fe.Path] = fe
+	}
+	for name := range staged {
+		if _, ok := wantByPath[name]; !ok {
+			return fmt.Errorf("restore: archive contains %q which the manifest does not list — refusing a tampered or malformed archive", name)
+		}
+	}
+	for _, fe := range want {
+		got, ok := staged[fe.Path]
+		if !ok {
+			return fmt.Errorf("restore: manifest lists %q but it is missing from the archive", fe.Path)
+		}
+		if got.Size != fe.Size {
+			return fmt.Errorf("restore: %q size mismatch: archive has %d bytes, manifest expects %d — the archive is corrupt or truncated", fe.Path, got.Size, fe.Size)
+		}
+		if got.SHA256 != fe.SHA256 {
+			return fmt.Errorf("restore: %q checksum mismatch — the archive is corrupt or tampered; rebuild from a healthy source (see docs/operations/rebuild.md)", fe.Path)
+		}
+	}
+	return nil
+}
+
 func writeTarFile(tw *tar.Writer, name string, mode int64, data []byte) error {
 	hdr := &tar.Header{Name: name, Mode: mode, Size: int64(len(data)), Typeflag: tar.TypeReg}
 	if err := tw.WriteHeader(hdr); err != nil {
@@ -378,53 +441,63 @@ func writeTarFile(tw *tar.Writer, name string, mode int64, data []byte) error {
 	return nil
 }
 
-func copyTarFile(tw *tar.Writer, name, full string) error {
+// copyTarFile streams the file at full into the archive as name while hashing it,
+// returning its FileEntry (size + SHA-256). One read feeds both the tar and the
+// hash via io.MultiWriter, so recording the hash costs no extra read.
+func copyTarFile(tw *tar.Writer, name, full string) (FileEntry, error) {
 	fi, err := os.Stat(full)
 	if err != nil {
-		return fmt.Errorf("backup: stat %q: %w", full, err)
+		return FileEntry{}, fmt.Errorf("backup: stat %q: %w", full, err)
 	}
 	hdr, err := tar.FileInfoHeader(fi, "")
 	if err != nil {
-		return fmt.Errorf("backup: header %q: %w", full, err)
+		return FileEntry{}, fmt.Errorf("backup: header %q: %w", full, err)
 	}
 	hdr.Name = name
 	if err := tw.WriteHeader(hdr); err != nil {
-		return fmt.Errorf("backup: write header %q: %w", name, err)
+		return FileEntry{}, fmt.Errorf("backup: write header %q: %w", name, err)
 	}
 	f, err := os.Open(full) //nolint:gosec // G304: full is a file under the operator-supplied data dir being archived
 	if err != nil {
-		return fmt.Errorf("backup: open %q: %w", full, err)
+		return FileEntry{}, fmt.Errorf("backup: open %q: %w", full, err)
 	}
 	defer func() { _ = f.Close() }()
-	if _, err := io.Copy(tw, f); err != nil {
-		return fmt.Errorf("backup: copy %q: %w", name, err)
+	h := sha256.New()
+	n, err := io.Copy(io.MultiWriter(tw, h), f)
+	if err != nil {
+		return FileEntry{}, fmt.Errorf("backup: copy %q: %w", name, err)
 	}
-	return nil
+	return FileEntry{Path: name, Size: n, SHA256: hex.EncodeToString(h.Sum(nil))}, nil
 }
 
-func writeFile(dest string, r io.Reader, mode os.FileMode) error {
+// writeFile writes r into dest (fsync'd before Close for crash-durability),
+// hashing the content as it streams, and returns the bytes written and the
+// SHA-256 (hex). Restore verifies these against the manifest before publishing.
+func writeFile(dest string, r io.Reader, mode os.FileMode) (int64, string, error) {
 	if mode == 0 {
 		mode = 0o600
 	}
 	f, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode) //nolint:gosec // G304: dest is validated by safeJoin to be within the target dir
 	if err != nil {
-		return fmt.Errorf("restore: create %q: %w", dest, err)
+		return 0, "", fmt.Errorf("restore: create %q: %w", dest, err)
 	}
-	if _, err := io.Copy(f, r); err != nil { //nolint:gosec // G110: restoring an operator's own backup; tar entries are bounded by the source node's on-disk state
+	h := sha256.New()
+	n, err := io.Copy(io.MultiWriter(f, h), r) //nolint:gosec // G110: restoring an operator's own backup; tar entries are bounded by the source node's on-disk state
+	if err != nil {
 		_ = f.Close()
-		return fmt.Errorf("restore: write %q: %w", dest, err)
+		return 0, "", fmt.Errorf("restore: write %q: %w", dest, err)
 	}
 	// fsync the content before Close so a crash after the publish rename cannot
 	// surface a torn or zero-length file (io.Copy does not fsync). syncDirTree
 	// then persists the directory entries before the rename.
 	if err := f.Sync(); err != nil {
 		_ = f.Close()
-		return fmt.Errorf("restore: fsync %q: %w", dest, err)
+		return 0, "", fmt.Errorf("restore: fsync %q: %w", dest, err)
 	}
 	if err := f.Close(); err != nil {
-		return fmt.Errorf("restore: close %q: %w", dest, err)
+		return 0, "", fmt.Errorf("restore: close %q: %w", dest, err)
 	}
-	return nil
+	return n, hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // syncDirTree fsyncs every directory under root (inclusive), so that renaming root
