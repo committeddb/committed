@@ -34,6 +34,7 @@ import (
 
 	"github.com/committeddb/committed/internal/cluster/db/datadir"
 	"github.com/committeddb/committed/internal/cluster/fsutil"
+	"github.com/committeddb/committed/internal/version"
 )
 
 // FormatVersion is the backup archive format. Restore refuses an archive whose
@@ -66,6 +67,17 @@ type FileEntry struct {
 type Manifest struct {
 	FormatVersion int    `json:"formatVersion"`
 	CreatedAt     string `json:"createdAt"` // RFC3339
+	// Version and Commit record the committed build that produced the archive —
+	// provenance for diagnosing a restore that won't boot. FeatureLevel is the
+	// data's compat axis (version.FeatureLevel): Restore REFUSES an archive whose
+	// feature level exceeds the running binary's, because it may carry feature
+	// entries this binary cannot correctly apply — the runtime apply-path gate
+	// only holds back EMITTING a feature, not ingesting one already emitted into a
+	// backup. All three are omitempty so a future read of an archive that predates
+	// them treats them as zero (no gate) rather than needing a format bump.
+	Version      string `json:"version,omitempty"`
+	Commit       string `json:"commit,omitempty"`
+	FeatureLevel uint64 `json:"featureLevel,omitempty"`
 	// NodeID is the COMMITTED_NODE_ID the operator recorded for the source
 	// node (0 if not supplied). The id is runtime config, not stored in the
 	// data directory, so it is captured here only for provenance — restore
@@ -182,6 +194,9 @@ func Create(w io.Writer, dataDir string, nodeID uint64, now time.Time) (*Manifes
 	manifest := &Manifest{
 		FormatVersion: FormatVersion,
 		CreatedAt:     now.UTC().Format(time.RFC3339),
+		Version:       version.Version,
+		Commit:        version.Commit,
+		FeatureLevel:  version.FeatureLevel,
 		NodeID:        nodeID,
 		Source:        dataDir,
 		Files:         make([]FileEntry, 0, len(entries)),
@@ -289,6 +304,13 @@ func Restore(r io.Reader, targetDir string, now time.Time) (*Manifest, error) {
 			}
 			if m.FormatVersion != FormatVersion {
 				return nil, fmt.Errorf("restore: unsupported backup format version %d (this binary supports %d)", m.FormatVersion, FormatVersion)
+			}
+			// FeatureLevel gate: an archive from a NEWER binary may carry feature
+			// entries this build cannot correctly apply, so refuse it early (before
+			// verify/publish) with an operator-legible message rather than a cryptic
+			// runtime fatal after boot. Older/equal levels are accepted.
+			if m.FeatureLevel > version.FeatureLevel {
+				return nil, fmt.Errorf("restore: backup was produced at feature level %d but this binary supports only %d — restore with a build at feature level %d or newer; see docs/operations/backup.md", m.FeatureLevel, version.FeatureLevel, m.FeatureLevel)
 			}
 			manifest = m
 			continue

@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/committeddb/committed/internal/cluster/backup"
+	"github.com/committeddb/committed/internal/version"
 )
 
 // writeTree lays out a mock node data directory: the same shape wal.Open
@@ -429,4 +430,32 @@ func TestRestore_RejectsHollowArchive(t *testing.T) {
 	_, err := backup.Restore(&buf, filepath.Join(t.TempDir(), "r"), time.Now())
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "metadata/bbolt.db")
+}
+
+// TestCreate_StampsBuildProvenance: the manifest records the build that produced
+// the archive (version, commit, feature level) for provenance and the compat gate.
+func TestCreate_StampsBuildProvenance(t *testing.T) {
+	src, _ := writeTree(t)
+	var buf bytes.Buffer
+	m, err := backup.Create(&buf, src, 0, time.Now())
+	require.NoError(t, err)
+	require.Equal(t, version.Version, m.Version)
+	require.Equal(t, version.Commit, m.Commit)
+	require.Equal(t, version.FeatureLevel, m.FeatureLevel)
+}
+
+// TestRestore_RefusesNewerFeatureLevel: an archive produced at a feature level
+// beyond what this binary supports may carry entries it cannot correctly apply, so
+// Restore refuses it early with an operator-legible error (older/equal is fine,
+// covered by the round-trip). Fires at the manifest before verify/publish.
+func TestRestore_RefusesNewerFeatureLevel(t *testing.T) {
+	var buf bytes.Buffer
+	writeArchive(t, &buf, nil, backup.Manifest{
+		FormatVersion: backup.FormatVersion,
+		FeatureLevel:  version.FeatureLevel + 1, // a newer binary produced it
+	})
+
+	_, err := backup.Restore(&buf, filepath.Join(t.TempDir(), "r"), time.Now())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "feature level")
 }
