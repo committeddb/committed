@@ -14,6 +14,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/db/datadir"
 )
 
 func (s *Storage) getLastStates(li uint64) (*pb.HardState, *pb.Snapshot, error) {
@@ -191,13 +192,6 @@ func (s *Storage) saveWithSnapshot(st *pb.HardState, ents []*pb.Entry, snap *pb.
 	return nil
 }
 
-// entryLogDiscardDir is where resetEntryLogToSnapshot renames the
-// superseded entry log before recreating a fresh one. A crash can strand
-// it; Open removes it before opening the live dir.
-func entryLogDiscardDir(entryLogDir string) string {
-	return entryLogDir + ".discarded"
-}
-
 // resetEntryLogToSnapshot replaces the entry log with a single dummy entry
 // at the snapshot point — the durable analogue of etcd
 // MemoryStorage.ApplySnapshot's ents = [{Index, Term}]. The dummy sits at
@@ -222,7 +216,7 @@ func (s *Storage) resetEntryLogToSnapshot(index, term uint64) error {
 		return err
 	}
 
-	discard := entryLogDiscardDir(s.raftLogDir)
+	discard := datadir.EntryLogDiscardDir(s.raftLogDir)
 	if err := os.RemoveAll(discard); err != nil {
 		return fmt.Errorf("clear stale discard dir: %w", err)
 	}
@@ -272,7 +266,7 @@ func (s *Storage) resetEntryLogToSnapshot(index, term uint64) error {
 // for a fresh node (the firstIndex==0 && lastIndex==0 branch). Mirrors
 // resetEntryLogToSnapshot's crash-safe dir swap but writes no boundary dummy.
 func (s *Storage) resetEntryLogToEmpty() error {
-	discard := entryLogDiscardDir(s.raftLogDir)
+	discard := datadir.EntryLogDiscardDir(s.raftLogDir)
 	if err := os.RemoveAll(discard); err != nil {
 		return fmt.Errorf("clear stale discard dir: %w", err)
 	}

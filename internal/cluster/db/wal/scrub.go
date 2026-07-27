@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/tidwall/wal"
 	bolt "go.etcd.io/bbolt"
@@ -14,6 +13,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/db/datadir"
 )
 
 // This file implements the RTBF scrubber: physical removal of already-delete-
@@ -820,55 +820,13 @@ func (s *Storage) hasRTBFBacklog() bool {
 }
 
 // Scrub working-directory names, all siblings of events/ so a rename is an
-// atomic same-filesystem operation.
+// atomic same-filesystem operation. The names, and the Open-time recovery that
+// reaps them (datadir.RecoverScrubDirs), live in the datadir package so they
+// cannot drift from the backup tool's read-only view of the same residue.
 func (s *Storage) scrubTmpDir(bound uint64) string {
-	return fmt.Sprintf("%s.scrub.%d", s.eventLogDir, bound)
+	return datadir.ScrubDir(s.eventLogDir, bound)
 }
 
 func (s *Storage) eventRetiredDir() string {
-	return s.eventLogDir + ".retired"
-}
-
-// recoverScrubDirs repairs an interrupted scrub before the event log is opened.
-// dir is the storage root (events/ lives at dir/events).
-//
-//   - If events/ is missing but events.retired/ exists, a swap crashed after
-//     renaming events out: roll back to the retired (pre-swap) state. The
-//     pending bound re-drives an idempotent rewrite once the worker starts.
-//   - Remove any leftover events.retired/ (a swap that completed but crashed
-//     before cleanup) and any events.scrub.*/ temp dirs (a rewrite that crashed
-//     before swapping).
-func recoverScrubDirs(dir string) error {
-	eventsDir := filepath.Join(dir, "events")
-	retiredDir := eventsDir + ".retired"
-
-	if !dirExists(eventsDir) && dirExists(retiredDir) {
-		if err := os.Rename(retiredDir, eventsDir); err != nil {
-			return err
-		}
-	}
-	if err := os.RemoveAll(retiredDir); err != nil {
-		return err
-	}
-
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil // fresh data dir; nothing to recover
-		}
-		return err
-	}
-	for _, e := range entries {
-		if e.IsDir() && strings.HasPrefix(e.Name(), "events.scrub.") {
-			if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-func dirExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.IsDir()
+	return datadir.RetiredDir(s.eventLogDir)
 }

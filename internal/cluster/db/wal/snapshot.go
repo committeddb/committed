@@ -6,23 +6,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
 	pb "go.etcd.io/raft/v3/raftpb"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
-)
 
-// boltRestoreTmpPrefix / boltCompactTmpPrefix name the full-DB temp files
-// RestoreSnapshot and compactLocked write beside the live bbolt.db before the
-// atomic rename over it. A crash between the write and the rename orphans one;
-// sweepBoltTempFiles removes it on the next Open. The trailing '.' before the
-// nanosecond suffix keeps both prefixes from ever matching the live "bbolt.db".
-const (
-	boltRestoreTmpPrefix = "bbolt.db.restore."
-	boltCompactTmpPrefix = "bbolt.db.compact."
+	"github.com/committeddb/committed/internal/cluster/db/datadir"
 )
 
 // newBoltTmpPath builds the sibling temp path an atomic bbolt swap (restore or
@@ -30,39 +21,13 @@ const (
 // each attempt's path unique, so a retrying swap never collides with a
 // not-yet-swept stray from a prior failed attempt. Overridable in tests
 // (boltTmpPathForTest) to force the temp create/write onto a path the test
-// controls. The prefix is one of the two constants above.
+// controls. The prefix is datadir.BoltRestorePrefix or datadir.BoltCompactPrefix;
+// datadir.SweepBoltTempFiles reaps an orphaned one at the next Open.
 func (s *Storage) newBoltTmpPath(boltPath, prefix string) string {
 	if s.boltTmpPathForTest != nil {
 		return s.boltTmpPathForTest(prefix)
 	}
 	return filepath.Join(filepath.Dir(boltPath), fmt.Sprintf("%s%d", prefix, time.Now().UnixNano()))
-}
-
-// sweepBoltTempFiles removes orphaned bbolt.db.restore.* / bbolt.db.compact.*
-// temp files from the metadata dir — the residue of a crash between a full-DB
-// temp write (RestoreSnapshot / compactLocked) and its atomic rename. Open calls
-// it before opening bbolt, mirroring recoverScrubDirs for the events dir. The
-// bbolt.db.restore.* form is RTBF-relevant: it holds a leader-supplied snapshot
-// payload that can carry an erased key, so a lingering copy must not survive a
-// restart (a disk leak besides). A missing metadata dir is a no-op (fresh node);
-// the live "bbolt.db" never matches either prefix.
-func sweepBoltTempFiles(metadataDir string) error {
-	entries, err := os.ReadDir(metadataDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil // fresh data dir; nothing to sweep
-		}
-		return err
-	}
-	for _, e := range entries {
-		name := e.Name()
-		if strings.HasPrefix(name, boltRestoreTmpPrefix) || strings.HasPrefix(name, boltCompactTmpPrefix) {
-			if err := os.RemoveAll(filepath.Join(metadataDir, name)); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
 }
 
 // CreateSnapshot captures the current metadata state (bbolt content) as
@@ -274,7 +239,7 @@ func (s *Storage) swapBboltToSnapshotData(data []byte, reconciledIndex uint64) e
 	// Rename leaves the original file untouched and the next Open sees a
 	// consistent state — and re-runs this swap, since the applied index is
 	// unchanged until the Put below commits.
-	tmpPath := s.newBoltTmpPath(boltPath, boltRestoreTmpPrefix)
+	tmpPath := s.newBoltTmpPath(boltPath, datadir.BoltRestorePrefix)
 	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
 		// WriteFile creates the file (O_CREATE) before it writes, so a failure
 		// partway (ENOSPC on a full disk) leaves a partial temp behind. Remove it
@@ -465,7 +430,7 @@ func (s *Storage) compactLocked() error {
 	}
 	boltPath := s.keyValueStorage.Path()
 	boltOpts := &bolt.Options{Timeout: 1 * time.Second}
-	tmpPath := s.newBoltTmpPath(boltPath, boltCompactTmpPrefix)
+	tmpPath := s.newBoltTmpPath(boltPath, datadir.BoltCompactPrefix)
 
 	dst, err := bolt.Open(tmpPath, 0o600, boltOpts)
 	if err != nil {

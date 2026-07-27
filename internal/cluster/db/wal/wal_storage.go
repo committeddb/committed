@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,6 +19,7 @@ import (
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
+	"github.com/committeddb/committed/internal/cluster/db/datadir"
 	"github.com/committeddb/committed/internal/cluster/metrics"
 )
 
@@ -518,10 +518,10 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		opt(&cfg)
 	}
 
-	entryLogDir := filepath.Join(dir, "raft", "log")
-	stateLogDir := filepath.Join(dir, "raft", "state")
-	eventLogDir := filepath.Join(dir, "events")
-	keyValueStorageDir := filepath.Join(dir, "metadata")
+	entryLogDir := datadir.EntryLogDir(dir)
+	stateLogDir := datadir.StateLogDir(dir)
+	eventLogDir := datadir.EventsDir(dir)
+	keyValueStorageDir := datadir.MetadataDir(dir)
 
 	// Recover from a scrub that crashed mid-rewrite or mid-swap BEFORE the
 	// MkdirAll below — otherwise, if a swap had renamed events/ out of the way,
@@ -530,7 +530,7 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	// interrupted swap back to the pre-swap directory and removes temp/leftover
 	// dirs; the persisted pending bound re-drives the rewrite once the worker
 	// starts. See scrub.go.
-	if err := recoverScrubDirs(dir); err != nil {
+	if err := datadir.RecoverScrubDirs(dir); err != nil {
 		return nil, fmt.Errorf("recover scrub dirs: %w", err)
 	}
 
@@ -538,7 +538,7 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	// entry log dir aside before recreating it; a crash can leave the renamed
 	// dir behind. Remove it before opening — it's discarded consensus
 	// transport, never data (the permanent event log is untouched by resets).
-	if err := os.RemoveAll(entryLogDiscardDir(entryLogDir)); err != nil {
+	if err := os.RemoveAll(datadir.EntryLogDiscardDir(entryLogDir)); err != nil {
 		return nil, fmt.Errorf("remove discarded entry log: %w", err)
 	}
 
@@ -570,7 +570,7 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	// indefinitely — a disk leak, and for the restore form an RTBF residual (a
 	// leader snapshot payload that may hold an erased key). Mirrors the scrub-dir
 	// and entry-log-discard recovery above.
-	if err := sweepBoltTempFiles(keyValueStorageDir); err != nil {
+	if err := datadir.SweepBoltTempFiles(keyValueStorageDir); err != nil {
 		return nil, fmt.Errorf("sweep orphaned bbolt temp files: %w", err)
 	}
 
@@ -578,7 +578,7 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	// B+tree with built-in page-level checksums (meta-page CRC64 + per-page
 	// validation), so torn or bitflipped pages are already detected on read.
 	boltOpts := &bolt.Options{Timeout: 1 * time.Second, NoSync: cfg.fsyncDisabled}
-	keyValueStorage, err := bolt.Open(filepath.Join(keyValueStorageDir, "bbolt.db"), 0o600, boltOpts)
+	keyValueStorage, err := bolt.Open(datadir.BoltPath(keyValueStorageDir), 0o600, boltOpts)
 	if err != nil {
 		return nil, err
 	}
