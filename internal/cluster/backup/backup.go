@@ -323,7 +323,10 @@ func Restore(r io.Reader, targetDir string, now time.Time) (*Manifest, error) {
 		if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
 			return nil, fmt.Errorf("restore: create dir for %q: %w", hdr.Name, err)
 		}
-		n, sum, err := writeFile(dest, tr, os.FileMode(hdr.Mode))
+		// Mask to the 12 Unix mode bits (perm + setuid/setgid/sticky) before the
+		// int64->uint32 conversion: it's all writeFile can honor, and the bound
+		// makes the narrowing provably safe (no gosec G115 truncation risk).
+		n, sum, err := writeFile(dest, tr, os.FileMode(hdr.Mode&0o7777))
 		if err != nil {
 			return nil, err
 		}
