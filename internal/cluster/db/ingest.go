@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -13,8 +14,10 @@ import (
 
 // ingestExitReason classifies why db.ingest returned. The worker-launch
 // goroutine inspects it to decide whether to spawn the supervisor:
-// ingestExitFreeze means "parked in the ErrProposalUnknown branch,
-// operator-style restart needed"; ingestExitShutdown means the worker
+// ingestExitFreeze means the worker needs an operator-style supervised
+// restart — either it parked in the ErrProposalUnknown branch, or its inner
+// Ingest exited unexpectedly (a fatal source/config error or a panic) while
+// the node still owned the ingestable. ingestExitShutdown means the worker
 // exited because its ctx was canceled for another reason (db.Close or
 // registry replace) and the normal teardown already handles recovery.
 type ingestExitReason int
@@ -76,6 +79,13 @@ type ingressLifecycle struct {
 	wg           sync.WaitGroup
 	proposalChan chan *cluster.Proposal
 	positionChan chan cluster.Position
+	// exited signals an UNEXPECTED inner-Ingest exit — a fatal source/config
+	// error or a panic while the session was still meant to be running — so
+	// db.ingest's loop can freeze and hand the worker to the supervisor instead
+	// of idling forever with a healthy-looking gauge. A clean, ctx-driven
+	// teardown (stop/loseOwnership/shutdown) never sends on it. nil between
+	// sessions: start() makes a fresh buffered channel, stop() clears it.
+	exited chan error
 }
 
 func newIngressLifecycle() *ingressLifecycle {
@@ -92,24 +102,33 @@ func newIngressLifecycle() *ingressLifecycle {
 func (l *ingressLifecycle) start(parent context.Context, i cluster.Ingestable, pos cluster.Position) {
 	ictx, cancel := context.WithCancel(parent)
 	l.cancel = cancel
+	exited := make(chan error, 1)
+	l.exited = exited
 	l.wg.Go(func() {
+		var err error
 		// Backstop: a panic in a dialect's Ingest (e.g. a decode panic on a
 		// malformed CDC frame that escapes the dialect's own recover) must not
 		// unwind this goroutine and crash the whole node. Recover it into a loud
-		// log; this ingestable stops (the outer loop idles on its timer) but the
-		// node — and every other syncable/ingestable — stays up, pending an
-		// operator re-POST. The Postgres dialect additionally recovers in-stream
-		// so a transient bad frame self-heals via reconnect (see stream).
+		// log and treat it as an unexpected exit so the worker freezes and the
+		// supervisor restarts it — the node, and every other syncable/ingestable,
+		// stays up. (The Postgres dialect additionally recovers in-stream so a
+		// transient bad frame self-heals via reconnect.)
 		defer func() {
 			if r := recover(); r != nil {
-				zap.L().Error("ingest worker panicked; ingestable stopped, node stays up — investigate and re-POST it",
+				zap.L().Error("ingest worker panicked; freezing for supervised restart",
 					zap.Any("panic", r), zap.Stack("stack"))
+				err = fmt.Errorf("ingest worker panicked: %v", r)
+			}
+			// Signal ONLY an unexpected exit: a non-nil error (or panic) while
+			// this session's ctx is still live. A clean teardown cancels ictx
+			// (stop/loseOwnership/db.Close), on which Ingest returns nil or a ctx
+			// error — expected, so stay silent and let the normal path run.
+			// Buffered channel: the send never blocks and needs no reader.
+			if err != nil && ictx.Err() == nil {
+				exited <- err
 			}
 		}()
-		err := i.Ingest(ictx, pos, l.proposalChan, l.positionChan)
-		if err != nil {
-			zap.L().Warn("ingest error", zap.Error(err))
-		}
+		err = i.Ingest(ictx, pos, l.proposalChan, l.positionChan)
 	})
 }
 
@@ -124,6 +143,12 @@ func (l *ingressLifecycle) stop() {
 		l.cancel = nil
 	}
 	l.wg.Wait()
+	// Drop this session's exit channel: a freeze signal buffered just before an
+	// intentional teardown (a fatal error racing loseOwnership/replace) must not
+	// spuriously freeze the next session — the teardown wins. start() makes a
+	// fresh one. Safe: same goroutine as the loop's select, and the worker has
+	// already exited (wg.Wait above).
+	l.exited = nil
 }
 
 // Ingest registers an Ingestable to run as a worker for the given ID.
@@ -675,6 +700,24 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 		select {
 		case <-ctx.Done():
 			return ingestExitShutdown
+		case err := <-ingress.exited:
+			// The inner Ingest returned on its own while we still owned the
+			// ingestable and weren't tearing it down — a fatal source/config
+			// error or a panic (a portless MySQL URL that passes the lenient
+			// admission DSN but binlogSyncerConfig rejects, an unrecoverable
+			// stream fault, etc.). Freeze so the supervisor restarts it and the
+			// parked state is observable, instead of idling forever reporting a
+			// live "streaming" phase — a silently-dead CDC worker whose mirror
+			// diverges. A racing shutdown is just a normal teardown.
+			if ctx.Err() != nil {
+				return ingestExitShutdown
+			}
+			db.logger.Error("ingest worker exited unexpectedly; freezing for supervised restart",
+				zap.String("id", id), zap.Error(err))
+			if db.metrics != nil {
+				db.metrics.IngestFrozen(id, true)
+			}
+			return ingestExitFreeze
 		case proposal := <-ingress.proposalChan:
 			if db.isNode(id) {
 				// Stamp the ingestable id so the apply path advances this
