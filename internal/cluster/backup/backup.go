@@ -10,12 +10,13 @@
 // is no raft-state reconstruction, the restored directory IS a node's
 // directory.
 //
-// The node holds an exclusive OS lock on its BoltDB file for its whole life,
-// so a backup cannot be read from a running node's directory by a second
-// process — the CLI enforces this with a lock probe before archiving. To back
-// up a live cluster, stop one follower (quorum holds on the rest), archive it,
-// and start it again — the same rolling discipline as a rolling upgrade. See
-// docs/operations/backup.md.
+// The node holds an exclusive OS lock on its BoltDB file for its whole life, so
+// a backup cannot be read from a running node's directory by a second process —
+// the CLI takes a shared lock on it and HOLDS it for the whole archive, so a node
+// can neither be running when the backup starts nor start (and write) part-way
+// through it. To back up a live cluster, stop one follower (quorum holds on the
+// rest), archive it, and start it again — the same rolling discipline as a
+// rolling upgrade. See docs/operations/backup.md.
 package backup
 
 import (

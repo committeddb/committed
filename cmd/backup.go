@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/committeddb/committed/internal/cluster/backup"
+	"github.com/committeddb/committed/internal/cluster/db/datadir"
 	"github.com/committeddb/committed/internal/cluster/fsutil"
 )
 
@@ -35,10 +36,11 @@ and disaster recovery. Restore it with "committed restore".
 
 OFFLINE by design: the node whose --data directory you archive MUST be
 stopped. BoltDB holds an exclusive lock while a node runs, so a backup taken
-from a live directory would be inconsistent — this command probes that lock
-and refuses if the node is up. To back up a live cluster, stop one follower
-(quorum holds on the rest), back it up, and start it again, the same rolling
-discipline as a rolling upgrade. See docs/operations/backup.md.
+from a live directory would be inconsistent — this command takes a SHARED lock
+on it and holds it for the whole archive, refusing a node that is up and
+blocking one from starting mid-backup. To back up a live cluster, stop one
+follower (quorum holds on the rest), back it up, and start it again, the same
+rolling discipline as a rolling upgrade. See docs/operations/backup.md.
 
 If --to ends in ".gz" the archive is gzip-compressed. The archive is written
 atomically: a failed backup leaves no file at the destination.
@@ -68,8 +70,16 @@ func runBackup() error {
 		}
 	}
 
-	if err := ensureNodeStopped(dataDir); err != nil {
+	// Hold a shared lock on the node's BoltDB for the whole archive: a running
+	// node holds it exclusively (so this refuses one that is up), and keeping the
+	// shared lock across the walk blocks the node from starting and writing into
+	// the data dir mid-copy.
+	lockDB, err := lockStoppedNode(dataDir)
+	if err != nil {
 		return err
+	}
+	if lockDB != nil {
+		defer func() { _ = lockDB.Close() }()
 	}
 
 	// Write to a temp file alongside the destination, then rename on success,
@@ -126,28 +136,37 @@ func runBackup() error {
 	return nil
 }
 
-// ensureNodeStopped refuses to back up a data directory a running node holds
-// open. It probes BoltDB's exclusive lock by trying to acquire a read lock
-// with a short timeout; success (node stopped) is released immediately. A
-// missing BoltDB file is allowed through so Create can surface a clearer
-// "empty/not a data dir" error.
-func ensureNodeStopped(dataDir string) error {
-	boltPath := filepath.Join(dataDir, "metadata", "bbolt.db")
+// lockStoppedNode opens the node's BoltDB with a SHARED lock and returns the open
+// handle. The caller must HOLD it — Close it only AFTER the archive is fully
+// written. A running node holds BoltDB's EXCLUSIVE lock, so acquiring the shared
+// lock both proves the node is stopped (contention -> ErrTimeout -> refuse) and,
+// held for the whole walk, keeps it stopped: the node's own exclusive Open (its
+// 1s lock timeout) then fails, so it cannot start and mutate the data dir
+// mid-backup — the race the old "probe then release immediately" left open. A
+// missing BoltDB file returns a nil handle (a fresh node with no committed data
+// yet, where Create surfaces the clearer "empty data dir" error).
+//
+// Note: the lock guards only BoltDB. A node that races to start during the walk
+// fails at its bbolt Open, but not before running the earlier WAL-recovery steps
+// of Open — a small residual window a filesystem-level snapshot would close (see
+// docs/operations/backup.md). This holds against the dominant race.
+func lockStoppedNode(dataDir string) (*bolt.DB, error) {
+	boltPath := datadir.BoltPath(datadir.MetadataDir(dataDir))
 	if _, err := os.Stat(boltPath); err != nil {
-		return nil
+		return nil, nil //nolint:nilnil // absent bbolt: no lock to take; Create surfaces the empty-dir error.
 	}
 	db, err := bolt.Open(boltPath, 0o600, &bolt.Options{ReadOnly: true, Timeout: 2 * time.Second})
 	if errors.Is(err, bolterrors.ErrTimeout) {
 		// Lock contention specifically means another process (the node) holds
 		// the DB open.
-		return fmt.Errorf("data directory %q appears to be in use by a running node "+
+		return nil, fmt.Errorf("data directory %q appears to be in use by a running node "+
 			"(could not lock %s). Stop the node — or one follower of a live cluster — "+
 			"before backing up; see docs/operations/backup.md", dataDir, boltPath)
 	}
 	if err != nil {
-		return fmt.Errorf("open metadata db %s: %w", boltPath, err)
+		return nil, fmt.Errorf("open metadata db %s: %w", boltPath, err)
 	}
-	return db.Close()
+	return db, nil
 }
 
 func init() {

@@ -23,8 +23,18 @@ A running node holds an **exclusive lock** on its BoltDB metadata for its whole
 life, so a second process can't read the directory consistently — and a naive
 copy of a live directory would be torn. `committed backup` therefore operates
 on a **stopped** node's data directory, which is quiescent and trivially
-consistent, and it **refuses to run against a live node** (it probes the lock
-and errors if the node is up).
+consistent. It takes a **shared lock** on the BoltDB file and **holds it for the
+whole archive**: a live node is refused (its exclusive lock blocks the shared
+one), and a node that tries to start part-way through the copy is blocked (its
+exclusive open fails) so it can't write into the directory mid-walk.
+
+> The shared lock guards BoltDB, which is the only lock in the data dir. It
+> closes the dominant race (an orchestrator restarting the stopped node while the
+> backup runs). It does not make the copy a true point-in-time image: a node
+> racing to start still runs the WAL-recovery steps of its open before it fails
+> on the locked BoltDB, a small residual window. For a fully atomic image, snapshot
+> the filesystem (LVM/ZFS/reflink) and back up the snapshot. Simplest of all:
+> keep the node stopped for the backup, as intended.
 
 This is a deliberate, in-lane primitive: it does not run against a live
 database, and there is no backup *endpoint*. Automation (periodic backups,
