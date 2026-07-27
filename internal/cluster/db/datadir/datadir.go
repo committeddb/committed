@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -185,6 +186,40 @@ func CanonicalArchiveEntry(rel string, eventsPresent bool) (keep bool, archiveRe
 	default:
 		return true, rel
 	}
+}
+
+// RequireCompleteNodeDir verifies that files — forward-slash paths relative to a
+// node data directory — covers every canonical subtree a bootable node needs,
+// returning an error naming the first missing one. A backup missing any would
+// restore a hollow node that silently loses state: no metadata/bbolt.db makes the
+// node's Open create a fresh EMPTY DB (every config, checkpoint, the applied
+// index, and the conf state gone, presented as a clean boot); a missing event log
+// loses committed data; a missing raft state log resets HardState. It guards
+// backup Create (refuse to mint a hollow archive) and Restore (refuse to publish
+// a hollow tree — catching a tampered or under-listing manifest).
+func RequireCompleteNodeDir(files []string) error {
+	boltPath := metadataName + "/" + boltFileName // metadata/bbolt.db
+	required := []struct {
+		desc  string
+		match func(string) bool
+	}{
+		{eventsName + "/ (event log)", underDir(eventsName)},
+		{raftName + "/" + entryLogName + "/ (raft entry log)", underDir(raftName + "/" + entryLogName)},
+		{raftName + "/" + stateLogName + "/ (raft state log)", underDir(raftName + "/" + stateLogName)},
+		{boltPath + " (metadata db)", func(p string) bool { return p == boltPath }},
+	}
+	for _, req := range required {
+		if !slices.ContainsFunc(files, req.match) {
+			return fmt.Errorf("data directory is missing %s — not a complete committed node directory", req.desc)
+		}
+	}
+	return nil
+}
+
+// underDir returns a predicate matching forward-slash paths inside dir.
+func underDir(dir string) func(string) bool {
+	prefix := dir + "/"
+	return func(p string) bool { return strings.HasPrefix(p, prefix) }
 }
 
 func dirExists(path string) bool {

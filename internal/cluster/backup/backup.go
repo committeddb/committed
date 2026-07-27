@@ -167,6 +167,18 @@ func Create(w io.Writer, dataDir string, nodeID uint64, now time.Time) (*Manifes
 		return nil, fmt.Errorf("backup: data dir %q has no regular files to archive — refusing to write an empty backup", dataDir)
 	}
 
+	// Refuse to mint a hollow archive before writing anything: a data dir missing
+	// a canonical subtree (most dangerously metadata/bbolt.db) would restore a
+	// node that boots with fresh-empty metadata, silently losing all config and
+	// checkpoints. Guards against a wrong or partially-wiped --data.
+	entryPaths := make([]string, len(entries))
+	for i, e := range entries {
+		entryPaths[i] = e.rel
+	}
+	if err := datadir.RequireCompleteNodeDir(entryPaths); err != nil {
+		return nil, fmt.Errorf("backup: %w", err)
+	}
+
 	manifest := &Manifest{
 		FormatVersion: FormatVersion,
 		CreatedAt:     now.UTC().Format(time.RFC3339),
@@ -309,6 +321,13 @@ func Restore(r io.Reader, targetDir string, now time.Time) (*Manifest, error) {
 		return nil, err
 	}
 
+	// Refuse to publish a hollow tree: a valid-but-incomplete archive (a tampered
+	// or under-listing manifest) missing a canonical subtree would restore a node
+	// that boots with fresh-empty metadata, silently losing all config.
+	if err := datadir.RequireCompleteNodeDir(filePaths(manifest.Files)); err != nil {
+		return nil, fmt.Errorf("restore: %w", err)
+	}
+
 	// Record provenance in the marker, not the full (possibly large) file list.
 	provenance := *manifest
 	provenance.Files = nil
@@ -393,6 +412,15 @@ func requireEmptyDir(dir string) error {
 		return fmt.Errorf("restore: target dir %q is not empty; restore refuses to overwrite existing data", dir)
 	}
 	return nil
+}
+
+// filePaths extracts the forward-slash paths from a manifest's file list.
+func filePaths(fes []FileEntry) []string {
+	out := make([]string, len(fes))
+	for i, fe := range fes {
+		out[i] = fe.Path
+	}
+	return out
 }
 
 // verifyStaged checks the staged tree against the manifest before publish. staged

@@ -93,3 +93,35 @@ func TestSweepBoltTempFiles(t *testing.T) {
 	require.NoFileExists(t, filepath.Join(md, "bbolt.db.restore.1"))
 	require.NoFileExists(t, filepath.Join(md, "bbolt.db.compact.2"))
 }
+
+// TestRequireCompleteNodeDir: a complete node dir passes; dropping any canonical
+// subtree fails with a message naming it (so a backup can't mint or restore a
+// hollow node that boots with fresh-empty metadata).
+func TestRequireCompleteNodeDir(t *testing.T) {
+	complete := []string{
+		"events/00000000000000000001",
+		"raft/log/00000000000000000001",
+		"raft/state/00000000000000000001",
+		"metadata/bbolt.db",
+	}
+	require.NoError(t, datadir.RequireCompleteNodeDir(complete))
+
+	for _, tt := range []struct{ name, drop, wantErr string }{
+		{"missing metadata db", "metadata/bbolt.db", "metadata/bbolt.db"},
+		{"missing event log", "events/00000000000000000001", "event log"},
+		{"missing raft entry log", "raft/log/00000000000000000001", "raft entry log"},
+		{"missing raft state log", "raft/state/00000000000000000001", "raft state log"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var files []string
+			for _, p := range complete {
+				if p != tt.drop {
+					files = append(files, p)
+				}
+			}
+			err := datadir.RequireCompleteNodeDir(files)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}

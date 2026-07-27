@@ -384,3 +384,49 @@ func TestRestore_RejectsSameNameOverride(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "checksum mismatch")
 }
+
+// TestCreate_RejectsHollowDataDir: a data dir missing a canonical subtree (here
+// metadata/bbolt.db) is refused — it would restore a node that boots with fresh
+// empty metadata, silently losing all config/checkpoints. Guards a wrong or
+// partially-wiped --data.
+func TestCreate_RejectsHollowDataDir(t *testing.T) {
+	dir := t.TempDir()
+	for _, rel := range []string{ // everything but metadata/bbolt.db
+		"events/00000000000000000001",
+		"raft/log/00000000000000000001",
+		"raft/state/00000000000000000001",
+	} {
+		full := filepath.Join(dir, filepath.FromSlash(rel))
+		require.NoError(t, os.MkdirAll(filepath.Dir(full), 0o700))
+		require.NoError(t, os.WriteFile(full, []byte("x"), 0o600))
+	}
+
+	var buf bytes.Buffer
+	_, err := backup.Create(&buf, dir, 0, time.Now())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "metadata/bbolt.db")
+}
+
+// TestRestore_RejectsHollowArchive: an archive whose per-file hashes all verify
+// but that is structurally incomplete (no metadata/bbolt.db) is refused before
+// publish — otherwise the node would boot with fresh-empty metadata. This is the
+// axis Fix A's hashing does NOT cover: a valid-but-hollow archive.
+func TestRestore_RejectsHollowArchive(t *testing.T) {
+	var buf bytes.Buffer
+	writeArchive(t, &buf, []tarEntry{
+		{"events/0001", "e"},
+		{"raft/log/0001", "l"},
+		{"raft/state/0001", "s"},
+	}, backup.Manifest{
+		FormatVersion: backup.FormatVersion,
+		Files: []backup.FileEntry{
+			fileEntry("events/0001", "e"),
+			fileEntry("raft/log/0001", "l"),
+			fileEntry("raft/state/0001", "s"),
+		},
+	})
+
+	_, err := backup.Restore(&buf, filepath.Join(t.TempDir(), "r"), time.Now())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "metadata/bbolt.db")
+}
