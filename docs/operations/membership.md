@@ -278,3 +278,10 @@ standard structured JSON body (`{"code", "message"}`):
 - **Learners.** A learner survives restart as a learner (the role is part
   of the replicated `ConfState`), not silently promoted. Promotion is a
   separate, explicit step (see "Growing safely with a learner").
+- **Restored nodes carry the source's identity.** A node restored from a backup
+  (see [backup.md](backup.md)) keeps the **source node's raft id**. Never start a
+  restored node into a cluster where that id is still alive — two peers sharing one
+  identity is split-brain (conflicting raft state, divergent committed history).
+  Restore only when the source id is gone (total-loss recovery) or bring the
+  restored cluster up network-isolated (cloning); confirm with `GET /v1/membership`
+  first.

@@ -99,20 +99,35 @@ Restore validates the manifest, refuses an archive that isn't a committed
 backup or declares an incompatible format version, and rejects any archive
 entry whose path would escape the target directory.
 
-Restore is **atomic on failure**: it unpacks into a staging directory alongside
-the target and renames it into place only after the whole archive validates, so a
-failed restore (a truncated archive, a full disk) leaves the target directory
-untouched and a retry is never blocked by a half-restored directory. This is
-visibility-atomicity, not crash-durability — the staging files aren't `fsync`'d
-before the publish rename, so a power loss *during* the rename leans on the
-[crash-consistent filesystem](../storage-architecture.md) requirement; restore is
-fully re-runnable.
+Restore is **atomic and crash-durable**: it unpacks into a staging directory
+alongside the target and renames it into place only after the whole archive
+validates, so a failed restore (a truncated archive, a full disk) leaves the
+target directory untouched and a retry is never blocked by a half-restored
+directory. Before the publish it `fsync`s every staged file's content and every
+staged directory, and after the rename it `fsync`s the target's parent — so a
+crash can never surface a torn or zero-length restored file. The publish itself is
+a single rename, which the [crash-consistent filesystem](../storage-architecture.md)
+requirement makes atomic: after any crash the target is either absent (retry it)
+or fully populated and durable, never partial. Restore is fully re-runnable.
 
 ### Cluster identity
 
-A restored node keeps the **source cluster's identity**. Restoring is for
-recovering or *cloning* a cluster, not merging two — pulling data from a
-different cluster into this one is an ETL job, not a restore.
+A restored node keeps the **source cluster's identity** — the same
+`COMMITTED_NODE_ID` and the same view of its peers. Restoring is for recovering or
+*cloning* a cluster, not merging two — pulling data from a different cluster into
+this one is an ETL job, not a restore.
+
+> **Never start a restored node into a cluster where its source is still alive.**
+> The restore carries the source node's raft identity, so the restored node and
+> the original both claim the same node id in the same cluster. Two peers sharing
+> one identity is **split-brain**: conflicting raft state, and a cluster that can
+> commit divergent history. Restore is safe in exactly two shapes — **total-loss
+> recovery**, where the source node (ideally the whole cluster) is gone before you
+> start the restore; and **cloning**, where the restored cluster comes up
+> **network-isolated** from the original (its own peer addresses, unable to reach
+> the source's members). If unsure whether the source id is still live, check `GET
+> /v1/membership` on the running cluster before starting the restored node. See
+> also [membership.md](membership.md).
 
 ### Version compatibility
 
