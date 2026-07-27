@@ -22,26 +22,30 @@ tokens travel in the clear), and production deployments should have
 all three.
 
 There is no authorization layer yet. "Authenticated = full access" is
-the current model. This is acceptable for the supported deployment
-(one isolated cluster per tenant — the token holder is the tenant, and
-full access to their own cluster is expected); a per-resource RBAC layer
-becomes necessary only if distinct actors ever share one cluster, and is
-filed as a follow-up on the `http-authentication.md` ticket.
+the current model: any credential holder is a full cluster admin. This
+is acceptable when a cluster has a single trust domain — one team or one
+application owns the whole cluster, so the token holder is expected to
+have full access. A per-resource RBAC layer becomes necessary only if
+distinct actors ever share one cluster, and is filed as a follow-up on
+the `http-authentication.md` ticket.
 
 ## Trust model
 
 Committed's authentication is **off by default**, and it does **not**
-refuse to start without it. That is a deliberate choice tied to how
-Committed is meant to be run:
+refuse to start without it. That is a deliberate choice: like etcd,
+Redis, and PostgreSQL, Committed is a **trusted-network appliance**. It
+expects to run behind a perimeter you control — a private network, a
+service mesh, or an orchestrator that injects credentials — and securing
+that perimeter before a node is exposed is the operator's responsibility.
 
-- **Managed / hosted (production).** The perimeter is owned by the
-  orchestration, which always injects `COMMITTED_API_TOKEN` (and TLS /
-  mTLS) into every node. A node serving real data is never unauthenticated
-  — enforcement lives in the deploy templates, not in the binary.
-- **Self-hosted (test only, today).** Running the image yourself is a
-  supported way to evaluate Committed, but the operator story is still in
-  progress: **do not put production data on a self-hosted node yet.** Use
-  it to kick the tires, then move real workloads to the managed offering.
+- **Local development.** Bind to loopback and run with no auth — zero
+  friction on a laptop.
+- **Exposed beyond a trusted network.** Set the bearer token **over
+  TLS** at a minimum, and all three layers for production; a node serving
+  real data must never be unauthenticated. Where an orchestrator manages
+  your nodes, inject `COMMITTED_API_TOKEN` (and TLS / mTLS) through the
+  deploy templates so every node comes up secured — enforcement then
+  lives in the templates, not the binary.
 
 ### The insecure-by-default floor
 
@@ -50,7 +54,7 @@ it loud. When the API is bound to a **non-loopback** address (anything
 other than `127.0.0.1` / `::1` / `localhost` — note the default `:8080`
 binds all interfaces) with **no authentication** (no bearer token and no
 mTLS), the node prints a `SECURITY:` banner to stderr and logs an
-`ERROR` at startup. It still starts — so the test flow above is
+`ERROR` at startup. It still starts — so local development stays
 frictionless — but you cannot miss that the node is exposed. Set a token
 (and TLS), or bind to loopback, to silence it. Configure auth as below.
 

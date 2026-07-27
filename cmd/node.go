@@ -139,7 +139,7 @@ image can be templated per-node by an orchestrator:
 
 		// Node identity and addressing come from the environment so the
 		// same image can be templated per-node by an orchestrator (Docker,
-		// Nomad, k8s). The historical stdlib `flag` calls here were dead —
+		// Kubernetes). The historical stdlib `flag` calls here were dead —
 		// flag.Parse() was never invoked, so they always returned defaults.
 		id := nodeID()
 		addr := getenvDefault("COMMITTED_API_ADDR", ":8080")

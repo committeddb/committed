@@ -163,8 +163,8 @@ lint/gosec:
 
 # Release artifacts: arm64 + amd64 for darwin/linux, amd64-only for
 # windows. arm64 matters on both ends now — Apple Silicon dev machines
-# and the Graviton (i8g) production target — so we ship native binaries
-# for both architectures rather than relying on Rosetta/emulation.
+# and arm64 servers — so we ship native binaries for both architectures
+# rather than relying on Rosetta/emulation.
 #
 # windows/arm64 is intentionally omitted: the tstorage dependency's
 # mmap_windows.go only defines maxMapSize for amd64, so it doesn't

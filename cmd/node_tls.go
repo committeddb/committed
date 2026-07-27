@@ -47,10 +47,10 @@ func apiUnauthenticatedOffHost(addr, apiToken string, apiTLS *tls.Config) bool {
 
 // warnInsecurePosture is committed's security-posture floor. When the write API is
 // reachable off this host with no authentication it logs a loud Error and prints a
-// startup banner to stderr — committed deliberately does NOT refuse to boot (self-
-// hosted "kick the tires" with no real data is supported, and the hosted deployment
-// is secured by its orchestration), but an operator who exposes an unauthenticated
-// node must SEE it. Quiet when bound to loopback or when auth is configured.
+// startup banner to stderr — committed deliberately does NOT refuse to boot
+// (loopback/local development is frictionless, and a node run behind a perimeter
+// that injects credentials is already secured), but an operator who exposes an
+// unauthenticated node must SEE it. Quiet when bound to loopback or when auth is configured.
 func warnInsecurePosture(addr, apiToken string, apiTLS *tls.Config, peerMTLS bool) {
 	if apiUnauthenticatedOffHost(addr, apiToken, apiTLS) {
 		plaintext := ""

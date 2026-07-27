@@ -78,9 +78,9 @@ This document describes how that separation works.
 These are explicitly out of scope for the initial design. Some are deferred
 to future work; others may never be needed.
 
-- **Tiered storage** to object stores (S3 etc). AWS i7ie offers 120TB local
-  NVMe per node; tiered storage is not necessary at the scale we are
-  targeting.
+- **Tiered storage** to object stores (S3 etc). Modern cloud instances offer
+  100TB+ of local NVMe per node, so tiered storage is not necessary at this
+  design's target scale.
 - **Automated catch-up** of severely-behind followers. v1 is manual rsync
   triggered by a fatal-exit error message; automation is v2 future work.
 - **Per-topic raft groups.** Cross-type ordering is preserved by having
