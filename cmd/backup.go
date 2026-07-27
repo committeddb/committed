@@ -84,10 +84,22 @@ func runBackup() error {
 
 	// Write to a temp file alongside the destination, then rename on success,
 	// so a partial/failed backup never appears at --to.
+	//
+	// A backup archive holds the node's entire state — the event log and BoltDB
+	// metadata, including any PII — so create it owner-only (0600), not
+	// os.Create's world-readable 0666&~umask. The mode survives the rename to
+	// --to. Chmod after open forces 0600 even when O_CREATE reuses a stale
+	// .partial from a hard-killed prior run (which O_CREATE would otherwise leave
+	// at its old, possibly looser, perms).
 	tmp := backupTo + ".partial"
-	f, err := os.Create(tmp) //nolint:gosec // G304: the destination is operator-supplied via --to
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) //nolint:gosec // G304: the destination is operator-supplied via --to
 	if err != nil {
 		return fmt.Errorf("create %q: %w", tmp, err)
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("secure %q: %w", tmp, err)
 	}
 	cleanup := func() {
 		_ = f.Close()
