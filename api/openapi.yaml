@@ -213,8 +213,12 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/RequestEntityTooLarge'
         '500':
           $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/RequestUnconfirmed'
         '507':
           $ref: '#/components/responses/InsufficientStorage'
   /v1/database/{id}/versions:
@@ -290,6 +294,10 @@ paths:
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/RequestUnconfirmed'
+        '507':
+          $ref: '#/components/responses/InsufficientStorage'
 
   /v1/ingestable:
     get:
@@ -337,8 +345,12 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/RequestEntityTooLarge'
         '500':
           $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/RequestUnconfirmed'
         '507':
           $ref: '#/components/responses/InsufficientStorage'
     delete:
@@ -372,10 +384,12 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
-        '503':
-          $ref: '#/components/responses/MembershipUnconfirmed'
         '500':
           $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/RequestUnconfirmed'
+        '507':
+          $ref: '#/components/responses/InsufficientStorage'
   /v1/ingestable/{id}/versions:
     get:
       tags: [ingestable]
@@ -512,6 +526,10 @@ paths:
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/RequestUnconfirmed'
+        '507':
+          $ref: '#/components/responses/InsufficientStorage'
 
   /v1/syncable:
     get:
@@ -592,8 +610,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          $ref: '#/components/responses/RequestEntityTooLarge'
         '500':
           $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/RequestUnconfirmed'
         '507':
           $ref: '#/components/responses/InsufficientStorage'
     delete:
@@ -638,10 +660,12 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
-        '503':
-          $ref: '#/components/responses/MembershipUnconfirmed'
         '500':
           $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/RequestUnconfirmed'
+        '507':
+          $ref: '#/components/responses/InsufficientStorage'
   /v1/syncable/{id}/versions:
     get:
       tags: [syncable]
@@ -889,6 +913,10 @@ paths:
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/RequestUnconfirmed'
+        '507':
+          $ref: '#/components/responses/InsufficientStorage'
 
   /v1/syncable/{id}/rebuild:
     post:
@@ -930,6 +958,8 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '500':
           $ref: '#/components/responses/InternalError'
+        '507':
+          $ref: '#/components/responses/InsufficientStorage'
 
   /v1/type:
     get:
@@ -1011,8 +1041,12 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/RequestEntityTooLarge'
         '500':
           $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/RequestUnconfirmed'
         '507':
           $ref: '#/components/responses/InsufficientStorage'
   /v1/type/{id}/versions:
@@ -1221,8 +1255,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          $ref: '#/components/responses/RequestEntityTooLarge'
         '500':
           $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/RequestUnconfirmed'
         '507':
           $ref: '#/components/responses/InsufficientStorage'
 
@@ -1474,6 +1512,15 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: |
+            Refused: removing this member would remove the last voter, leaving no
+            node able to commit (`would_remove_last_voter`). Add another voter
+            first. See docs/operations/membership.md.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '503':
           $ref: '#/components/responses/MembershipUnconfirmed'
         '500':
@@ -1615,6 +1662,27 @@ components:
         space recovers. The error `code` is `insufficient_storage`; diagnose
         with GET /v1/node/status (`disk.admission`). See
         docs/operations/disk-limits.md.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    RequestEntityTooLarge:
+      description: |
+        The request body exceeded the 32 MiB read cap (`request_too_large`), or a
+        proposal's marshaled size exceeded the configured proposal-size limit
+        (`proposal_too_large`, default 16 MiB). Split the write; large blobs do
+        not belong in the log.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    RequestUnconfirmed:
+      description: |
+        The write was submitted to raft but could not be confirmed to have taken
+        effect before the request deadline (or the caller disconnected) — typically
+        this node cannot currently reach a quorum. It MAY still take effect, so this
+        is a retryable unknown (`request_unconfirmed`), not a server fault; retry to
+        confirm (keyed writes are idempotent).
       content:
         application/json:
           schema:
@@ -1894,6 +1962,13 @@ components:
           description: |
             The server-assigned version the config now has. Omitted only if the
             post-write version read failed (the write itself succeeded).
+        advisory:
+          type: string
+          description: |
+            A non-fatal notice about a side effect of an accepted write, present
+            only on a `POST /type/{id}` that changed just the `[migration]`
+            transform in place (schema and version unchanged). The write
+            succeeded; the advisory is informational.
 
     ConfigurationResponse:
       type: object
@@ -2142,12 +2217,6 @@ components:
         table:
           type: string
           description: The source table name, as configured.
-        lastKey:
-          type: string
-          description: |
-            The keyset-pagination cursor reached for this table (the last
-            primary-key value dumped). Omitted once the table is complete or
-            before its snapshot starts.
         complete:
           type: boolean
           description: Whether this table's snapshot finished.

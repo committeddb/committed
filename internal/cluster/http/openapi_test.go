@@ -532,43 +532,74 @@ func TestOpenAPIContract_UnauthorizedShape(t *testing.T) {
 	require.True(t, valid, "401 response did not match spec: %s", formatValidationErrors(errs))
 }
 
-// TestOpenAPIContract_SpecCoversAllRoutes is the drift guard: every route the
-// live Chi router serves must have a path item in the spec. It walks the ACTUAL
-// mounted router (chi.Walk) rather than a hand-maintained list — the old list
-// silently omitted routes it never checked (scrub, version, rebuild, promote,
-// disk-report, migration-*), passing green while the spec drifted. Adding a route
-// to http.go without a spec entry now fails here automatically.
+// TestOpenAPIContract_SpecCoversAllRoutes is the drift guard: it walks the ACTUAL
+// mounted Chi router (not a hand-maintained list) and checks coverage in BOTH
+// directions AND by METHOD, so the spec and the code cannot drift apart silently:
+//   - forward: every (method, route) the server serves is documented — a new
+//     route, or a new method on an existing path, added to http.go without a spec
+//     operation fails here;
+//   - reverse: every (method, path) the spec documents is actually served — a
+//     spec entry the server doesn't back (a typo'd path, a removed handler, an
+//     aspirational operation) fails here.
+//
+// The old version deduped by path and ignored the method, so a method swap or a
+// documented-but-unserved operation passed green. OPTIONS/HEAD are chi/CORS
+// infrastructure, not part of the documented contract, so they're excluded.
 func TestOpenAPIContract_SpecCoversAllRoutes(t *testing.T) {
 	doc, _ := newValidator(t)
 
 	model, errs := doc.BuildV3Model()
 	require.Empty(t, errs, "must build v3 model from spec")
 
-	specPaths := make(map[string]bool)
-	for p := range model.Model.Paths.PathItems.FromOldest() {
-		specPaths[p] = true
+	// spec: path -> set of documented methods (upper-cased for comparison).
+	specOps := map[string]map[string]bool{}
+	for p, item := range model.Model.Paths.PathItems.FromOldest() {
+		methods := map[string]bool{}
+		for m := range item.GetOperations().FromOldest() {
+			methods[strings.ToUpper(m)] = true
+		}
+		specOps[p] = methods
 	}
 
-	// Walk the real router. chi reports each (method, pattern); the pattern uses
-	// {param}, matching OpenAPI path templating, so patterns map straight to spec
-	// paths. Dedupe by path (a path with several methods walks several times).
+	// router: route -> set of served methods. chi reports each (method, pattern);
+	// the pattern uses {param}, matching OpenAPI templating, so patterns map
+	// straight to spec paths.
 	h := httppkg.New(&clusterfakes.FakeCluster{})
-	seen := map[string]bool{}
-	var undocumented []string
+	routerOps := map[string]map[string]bool{}
 	err := chi.Walk(h.RouterForTest(), func(method, route string, _ httpgo.Handler, _ ...func(httpgo.Handler) httpgo.Handler) error {
 		if route != "/" {
 			route = strings.TrimSuffix(route, "/")
 		}
-		if seen[route] {
-			return nil
+		if method == httpgo.MethodOptions || method == httpgo.MethodHead {
+			return nil // CORS / probe infrastructure, not part of the documented contract
 		}
-		seen[route] = true
-		if !specPaths[route] {
-			undocumented = append(undocumented, method+" "+route)
+		if routerOps[route] == nil {
+			routerOps[route] = map[string]bool{}
 		}
+		routerOps[route][method] = true
 		return nil
 	})
 	require.NoError(t, err)
+
+	var undocumented []string
+	for route, methods := range routerOps {
+		for m := range methods {
+			if !specOps[route][m] {
+				undocumented = append(undocumented, m+" "+route)
+			}
+		}
+	}
 	sort.Strings(undocumented)
-	require.Empty(t, undocumented, "routes registered in http.go are missing from api/openapi.yaml (add a path item for each)")
+	require.Empty(t, undocumented, "routes/methods served by http.go are missing from api/openapi.yaml (add the path item / operation)")
+
+	var unserved []string
+	for path, methods := range specOps {
+		for m := range methods {
+			if !routerOps[path][m] {
+				unserved = append(unserved, m+" "+path)
+			}
+		}
+	}
+	sort.Strings(unserved)
+	require.Empty(t, unserved, "operations documented in api/openapi.yaml are not served by http.go (remove them, or implement the route)")
 }
