@@ -57,3 +57,48 @@ func TestParseConnString(t *testing.T) {
 		})
 	}
 }
+
+// TestParseMySQLConn pins the single MySQL URL parse authority both the DSN path
+// and the CDC binlog syncer derive from: a portless URL defaults to 3306 (so the
+// two sides agree instead of the DSN path defaulting while binlog rejected it), an
+// explicit port is honored, and a bad port / bad scheme is rejected at parse.
+func TestParseMySQLConn(t *testing.T) {
+	t.Run("explicit port", func(t *testing.T) {
+		c, err := cluster.ParseMySQLConn("mysql://root:secret@10.0.0.5:3307/shop")
+		require.NoError(t, err)
+		require.Equal(t, "10.0.0.5", c.Host)
+		require.Equal(t, uint16(3307), c.Port)
+		require.Equal(t, "root", c.User)
+		require.Equal(t, "secret", c.Password)
+		require.Equal(t, "shop", c.Database)
+		require.Equal(t, "root:secret@tcp(10.0.0.5:3307)/shop", c.DSN())
+	})
+
+	t.Run("portless defaults to 3306 (the unification)", func(t *testing.T) {
+		c, err := cluster.ParseMySQLConn("mysql://root:secret@dbhost/shop")
+		require.NoError(t, err)
+		require.Equal(t, "dbhost", c.Host)
+		require.Equal(t, uint16(3306), c.Port, "a portless URL must resolve to 3306, not be rejected")
+		require.Equal(t, "root:secret@tcp(dbhost:3306)/shop", c.DSN(),
+			"the DSN carries the defaulted port so both consumers target the same endpoint")
+	})
+
+	for _, tc := range []struct{ name, in string }{
+		{"non-numeric port", "mysql://root@host:notaport/db"},
+		{"port out of range", "mysql://root@host:99999/db"},
+		{"zero port", "mysql://root@host:0/db"},
+		{"wrong scheme", "postgres://root@host:3306/db"},
+	} {
+		t.Run("rejects "+tc.name, func(t *testing.T) {
+			_, err := cluster.ParseMySQLConn(tc.in)
+			require.Error(t, err)
+		})
+	}
+
+	t.Run("port error is redaction-safe", func(t *testing.T) {
+		const secret = "sup3rSecretPassw0rd"
+		_, err := cluster.ParseMySQLConn("mysql://root:" + secret + "@host:notaport/db")
+		require.Error(t, err)
+		require.NotContains(t, err.Error(), secret)
+	})
+}

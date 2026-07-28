@@ -3,9 +3,17 @@ package cluster
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
+	"strconv"
 	"strings"
 )
+
+// defaultMySQLPort is used when a mysql:// URL omits the port, so a portless URL
+// resolves to the same endpoint on every consumer (the database/sql DSN and the
+// CDC binlog syncer) instead of the DSN path defaulting it while the binlog path
+// rejected it.
+const defaultMySQLPort = 3306
 
 // ParseConnString parses a database connection-string URL, returning an error
 // that NEVER echoes the connection string itself. Every dialect — ingest AND
@@ -71,26 +79,72 @@ func ConnStringHasInlinePassword(raw string) bool {
 	return !strings.Contains(pw, "${")
 }
 
-// MySQLDSN converts a canonical mysql:// connection URL into the
-// go-sql-driver/mysql DSN its Open expects ("user:pw@tcp(host:port)/db"). It is
-// the single URL→DSN conversion shared by the ingest snapshot connection and the
-// syncable sink dialect, so one URL yields the same DSN regardless of which side
-// opens it — committed's connection strings are canonically URLs everywhere, and
-// only this seam knows the driver's native shape.
-//
-// It requires a mysql (or mysqls) scheme so a legacy bare DSN or a non-URL is
-// rejected up front rather than silently mis-parsed. Errors are redaction-safe:
-// like ParseConnString they never echo the (${VAR}-resolved) connection string.
-func MySQLDSN(connectionString string) (string, error) {
+// MySQLConn is the parsed, validated shape of a canonical mysql:// (or mysqls://)
+// URL. It is the SINGLE parse authority every MySQL consumer derives from — the
+// go-sql-driver DSN (syncable sink + ingest snapshot) and the CDC binlog syncer —
+// so one URL yields identical host/port/credentials on both sides and admission
+// can never accept a URL the runtime then rejects. Build it with ParseMySQLConn;
+// render the driver DSN with DSN().
+type MySQLConn struct {
+	Host     string // hostname without port or IPv6 brackets (net/url Hostname())
+	Port     uint16 // the URL's explicit port, or defaultMySQLPort when omitted
+	User     string
+	Password string
+	Database string
+}
+
+// ParseMySQLConn parses and validates a canonical mysql:// / mysqls:// URL. It
+// requires a mysql(s) scheme (a legacy bare DSN or non-URL is rejected up front),
+// defaults the port to 3306 when omitted, and rejects a non-numeric or
+// out-of-range port — so a portless or bad-port URL resolves identically (or is
+// rejected) at both admission and runtime, rather than passing the lenient DSN
+// path and failing the strict binlog path. Errors are redaction-safe: like
+// ParseConnString they never echo the (${VAR}-resolved) connection string (the
+// port is not secret, so it may appear in a port error).
+func ParseMySQLConn(connectionString string) (MySQLConn, error) {
 	u, err := ParseConnString(connectionString)
+	if err != nil {
+		return MySQLConn{}, err
+	}
+	if s := strings.ToLower(u.Scheme); s != "mysql" && s != "mysqls" {
+		return MySQLConn{}, errors.New("mysql connection string must be a mysql:// or mysqls:// URL")
+	}
+	port := uint16(defaultMySQLPort)
+	// net.SplitHostPort errors only when no port is present (missing port) — a
+	// portless URL keeps the default. A present port section is validated as
+	// numeric and in range (SplitHostPort itself does not check numericness).
+	if _, portStr, splitErr := net.SplitHostPort(u.Host); splitErr == nil {
+		n, perr := strconv.ParseUint(portStr, 10, 16)
+		if perr != nil || n == 0 {
+			return MySQLConn{}, fmt.Errorf("invalid mysql connection port %q: must be 1-65535", portStr)
+		}
+		port = uint16(n)
+	}
+	password, _ := u.User.Password()
+	return MySQLConn{
+		Host:     u.Hostname(),
+		Port:     port,
+		User:     u.User.Username(),
+		Password: password,
+		Database: strings.TrimPrefix(u.Path, "/"),
+	}, nil
+}
+
+// DSN renders the go-sql-driver/mysql DSN ("user:pw@tcp(host:port)/db") the
+// database/sql consumers (syncable sink + ingest snapshot) Open with. The port is
+// always explicit (defaulted by ParseMySQLConn), so the DSN and the binlog syncer
+// target the same endpoint.
+func (c MySQLConn) DSN() string {
+	addr := net.JoinHostPort(c.Host, strconv.Itoa(int(c.Port)))
+	return fmt.Sprintf("%s:%s@tcp(%s)/%s", c.User, c.Password, addr, c.Database)
+}
+
+// MySQLDSN is a convenience wrapper: ParseMySQLConn(connectionString).DSN(). It
+// is kept for the call sites that only need the driver DSN string.
+func MySQLDSN(connectionString string) (string, error) {
+	c, err := ParseMySQLConn(connectionString)
 	if err != nil {
 		return "", err
 	}
-	if s := strings.ToLower(u.Scheme); s != "mysql" && s != "mysqls" {
-		return "", errors.New("mysql connection string must be a mysql:// URL")
-	}
-	username := u.User.Username()
-	password, _ := u.User.Password()
-	database := strings.TrimPrefix(u.Path, "/")
-	return fmt.Sprintf("%s:%s@tcp(%s)/%s", username, password, u.Host, database), nil
+	return c.DSN(), nil
 }

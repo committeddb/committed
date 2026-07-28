@@ -1,10 +1,7 @@
 package mysql
 
 import (
-	"fmt"
 	"math/rand/v2"
-	"net"
-	"strconv"
 	"time"
 
 	"github.com/go-mysql-org/go-mysql/mysql"
@@ -34,31 +31,24 @@ import (
 // the payload. ServerID is a non-zero random id (the replica id this connection
 // registers under — NewBinlogSyncer panics on 0), as canal also randomized it.
 func binlogSyncerConfig(config *sql.Config) (replication.BinlogSyncerConfig, error) {
-	// cluster.ParseConnString, not url.Parse: url.Parse's *url.Error embeds the raw
-	// (already ${VAR}-resolved) connection string — password included — which
-	// this path then logs at ingest runtime. The helper strips the value.
-	u, err := cluster.ParseConnString(config.ConnectionString)
+	// cluster.ParseMySQLConn, not url.Parse or a bare split: it is the SINGLE
+	// MySQL URL parse authority the DSN path also uses, so admission and this
+	// runtime path resolve the same host/port (a portless URL defaults to 3306
+	// on both, instead of the DSN path defaulting it while this path rejected
+	// it). Errors are redaction-safe — never echo the ${VAR}-resolved string.
+	conn, err := cluster.ParseMySQLConn(config.ConnectionString)
 	if err != nil {
 		return replication.BinlogSyncerConfig{}, err
 	}
-	host, portStr, err := net.SplitHostPort(u.Host)
-	if err != nil {
-		return replication.BinlogSyncerConfig{}, fmt.Errorf("connection host %q must be host:port: %w", u.Host, err)
-	}
-	port, err := strconv.ParseUint(portStr, 10, 16)
-	if err != nil {
-		return replication.BinlogSyncerConfig{}, fmt.Errorf("connection port %q: %w", portStr, err)
-	}
-	password, _ := u.User.Password()
 
 	return replication.BinlogSyncerConfig{
 		//nolint:gosec // G404: a MySQL replica id, not security-sensitive; weak rand is fine (canal randomizes it the same way).
 		ServerID:   1001 + rand.Uint32N(1<<31),
 		Flavor:     mysql.DEFAULT_FLAVOR,
-		Host:       host,
-		Port:       uint16(port),
-		User:       u.User.Username(),
-		Password:   password,
+		Host:       conn.Host,
+		Port:       conn.Port,
+		User:       conn.User,
+		Password:   conn.Password,
 		Charset:    mysql.DEFAULT_CHARSET,
 		UseDecimal: false,
 		// Emit JSON-embedded DECIMAL leaves as exact unquoted numbers so a CDC

@@ -40,13 +40,24 @@ func TestBinlogSyncerConfig(t *testing.T) {
 	require.Equal(t, sql.MaxDecompressedTxnBytes, cfg.PayloadDecoderMaxDecompressedSize)
 }
 
+// TestBinlogSyncerConfigPortlessDefaults3306 is the parser-unification regression:
+// a portless URL is accepted and resolves to 3306 (the same default the DSN path
+// always used), instead of the binlog path rejecting it — the divergence that let
+// a portless config pass admission and then silently stall CDC.
+func TestBinlogSyncerConfigPortlessDefaults3306(t *testing.T) {
+	cfg, err := binlogSyncerConfig(&sql.Config{ConnectionString: "mysql://root:secret@hostwithoutport/cdc"})
+	require.NoError(t, err, "a portless URL must be accepted, not rejected")
+	require.Equal(t, "hostwithoutport", cfg.Host)
+	require.Equal(t, uint16(3306), cfg.Port)
+}
+
 // TestBinlogSyncerConfigErrors covers the parse failures that should surface as
 // config errors rather than a bad connection later.
 func TestBinlogSyncerConfigErrors(t *testing.T) {
 	for _, cs := range []string{
-		"mysql://root@hostwithoutport/cdc", // host has no :port
-		"mysql://root@host:notaport/cdc",   // port not numeric
-		"://bad",                           // unparseable
+		"mysql://root@host:notaport/cdc", // port not numeric
+		"mysql://root@host:99999/cdc",    // port out of range
+		"://bad",                         // unparseable
 	} {
 		_, err := binlogSyncerConfig(&sql.Config{ConnectionString: cs})
 		require.Error(t, err, cs)
