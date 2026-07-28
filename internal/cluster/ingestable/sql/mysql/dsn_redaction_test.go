@@ -6,22 +6,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestBuildDSN_DoesNotEchoSecretOnConversionFailure guards the S6 landmine:
-// buildDSN must never return the raw ${VAR}-resolved connection string (which
-// carries the interpolated password) when the mysql:// -> DSN conversion fails.
-// A postgres:// URL is a valid URL but MySQLDSN rejects the scheme, so it lands
+// TestOpenMySQL_DoesNotEchoSecretOnParseFailure guards the S6 landmine: opening
+// the MySQL source must never surface the raw ${VAR}-resolved connection string
+// (which carries the interpolated password) when the URL is rejected. A
+// postgres:// URL is a valid URL but the mysql parser rejects the scheme, landing
 // on the error branch with a password in the userinfo.
-func TestBuildDSN_DoesNotEchoSecretOnConversionFailure(t *testing.T) {
+func TestOpenMySQL_DoesNotEchoSecretOnParseFailure(t *testing.T) {
 	const secret = "sup3rSecretPw"
 
-	got := buildDSN("postgres://user:" + secret + "@db.example.com:5432/app")
-	require.NotContains(t, got, secret,
-		"buildDSN leaked the resolved connection-string password on conversion failure")
-	require.Empty(t, got,
-		"buildDSN should return an empty DSN on conversion failure so sql.Open fails cleanly without the secret")
+	_, err := openMySQL("postgres://user:" + secret + "@db.example.com:5432/app")
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), secret,
+		"openMySQL leaked the resolved connection-string password on parse failure")
 
-	// Happy path unchanged: a valid mysql:// URL still converts to a usable DSN
-	// (which legitimately embeds the password — that's what sql.Open needs).
-	ok := buildDSN("mysql://user:" + secret + "@db.example.com:3306/app")
-	require.NotEmpty(t, ok, "buildDSN must still convert a valid mysql:// URL")
+	// Happy path: a valid mysql:// URL yields a usable (lazy) handle. OpenDB does
+	// not dial, so this needs no live server.
+	db, err := openMySQL("mysql://user:" + secret + "@db.example.com:3306/app")
+	require.NoError(t, err)
+	require.NotNil(t, db)
+	require.NoError(t, db.Close())
 }

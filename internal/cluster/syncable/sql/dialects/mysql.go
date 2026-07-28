@@ -255,15 +255,33 @@ func (d *MySQLDialect) CreateAppliedMarkSQL(config *sql.Config) string {
 
 func (d *MySQLDialect) Open(connectionString string) (*gosql.DB, error) {
 	// Connection strings are canonically mysql:// URLs everywhere (ingest AND
-	// syncable); cluster.MySQLDSN validates the URL and converts it to the
-	// go-sql-driver DSN this driver opens with — the same conversion the ingest
-	// snapshot uses, so a URL means the same thing wherever it is opened. A
-	// malformed URL yields a redaction-safe error (never echoes the string).
-	dsn, err := cluster.MySQLDSN(connectionString)
+	// syncable). cluster.ParseMySQLConn is the single parse authority the ingest
+	// side uses too, and it carries the TLS posture (sslmode / custom CA / client
+	// cert) into mysql.Config.TLS — the same *tls.Config the ingest snapshot and
+	// CDC stream use — so a URL means, and secures, the same thing wherever it is
+	// opened. (Twin of ingestable/sql/mysql.openMySQL; the shared TLS logic lives
+	// in cluster.MySQLConn.) A malformed/TLS-misconfigured URL yields a
+	// redaction-safe error (never echoes the ${VAR}-resolved string).
+	conn, err := cluster.ParseMySQLConn(connectionString)
 	if err != nil {
 		return nil, err
 	}
-	return gosql.Open("mysql", dsn)
+	tlsCfg, err := conn.TLSClientConfig()
+	if err != nil {
+		return nil, err
+	}
+	cfg := mysql.NewConfig()
+	cfg.User = conn.User
+	cfg.Passwd = conn.Password
+	cfg.Net = "tcp"
+	cfg.Addr = conn.Addr()
+	cfg.DBName = conn.Database
+	cfg.TLS = tlsCfg
+	connector, err := mysql.NewConnector(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return gosql.OpenDB(connector), nil
 }
 
 // IsPermanent classifies a MySQL error as permanent (non-retryable) only when

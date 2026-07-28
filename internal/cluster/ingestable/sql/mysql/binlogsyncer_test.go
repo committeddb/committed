@@ -51,6 +51,20 @@ func TestBinlogSyncerConfigPortlessDefaults3306(t *testing.T) {
 	require.Equal(t, uint16(3306), cfg.Port)
 }
 
+// TestBinlogSyncerConfigTLS proves the CDC stream is secured from the URL, the
+// same posture the snapshot connection gets: mysqls:// (and an explicit sslmode)
+// yields a *tls.Config on the syncer; plain mysql:// stays plaintext (nil).
+func TestBinlogSyncerConfigTLS(t *testing.T) {
+	secure, err := binlogSyncerConfig(&sql.Config{ConnectionString: "mysqls://root:secret@db.internal:3306/cdc"})
+	require.NoError(t, err)
+	require.NotNil(t, secure.TLSConfig, "mysqls:// must secure the CDC stream")
+	require.Equal(t, "db.internal", secure.TLSConfig.ServerName, "verify-full checks the hostname")
+
+	plain, err := binlogSyncerConfig(&sql.Config{ConnectionString: "mysql://root:secret@db.internal:3306/cdc"})
+	require.NoError(t, err)
+	require.Nil(t, plain.TLSConfig, "plain mysql:// is not silently upgraded")
+}
+
 // TestBinlogSyncerConfigErrors covers the parse failures that should surface as
 // config errors rather than a bad connection later.
 func TestBinlogSyncerConfigErrors(t *testing.T) {

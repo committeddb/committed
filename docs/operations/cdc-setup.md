@@ -577,6 +577,26 @@ there is no `[sql.mysql]` subsection — MySQL has nothing analogous to a slot o
 publication to name. (`mapAllColumns = true` works here too, in place of the
 explicit `[[sql.mappings]]` blocks.)
 
+**TLS.** A MySQL connection takes the same libpq-style TLS parameters as
+PostgreSQL, so a MySQL source (or sink) is secured the same way. Use the
+`mysqls://` scheme (shorthand for full verification) or an explicit `?sslmode=`:
+
+- `sslmode=disable` — no TLS (the default for `mysql://`)
+- `sslmode=require` — encrypt, but do not authenticate the server
+- `sslmode=verify-ca` — verify the certificate chain (against `sslrootcert` if
+  given, otherwise the system roots), but not the hostname
+- `sslmode=verify-full` — verify the chain **and** the hostname (the default for
+  `mysqls://`)
+
+`sslrootcert` names a custom CA PEM; `sslcert` + `sslkey` add a client
+certificate for mutual TLS. All three are node-local file paths that must exist
+on every node. The same posture secures both the snapshot connection and the CDC
+binlog stream, and any query parameter other than these four is rejected. Example:
+
+```toml
+connectionString = "mysqls://committed:${MYSQL_PASSWORD}@db:3306/shop?sslrootcert=/etc/committed/db-ca.pem"
+```
+
 A `tables` entry may be **schema-qualified** (`["otherdb.widget"]`) to read a table
 outside the connection string's default database, exactly as on PostgreSQL; a bare
 entry (`["widget"]`) resolves to the connection's database. The connection user

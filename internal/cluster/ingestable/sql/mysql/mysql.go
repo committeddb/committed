@@ -16,7 +16,7 @@ import (
 
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
-	_ "github.com/go-sql-driver/mysql"
+	mysqldriver "github.com/go-sql-driver/mysql"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 
@@ -62,7 +62,7 @@ func (m *MySQLDialect) Preflight(config *sql.Config) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	db, err := gosql.Open("mysql", buildDSN(config.ConnectionString))
+	db, err := openMySQL(config.ConnectionString)
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
@@ -362,7 +362,7 @@ func readSourceGTIDState(ctx context.Context, config *sql.Config) (executed, pur
 	cctx, cancel := context.WithTimeout(ctx, statusLagTimeout)
 	defer cancel()
 
-	db, err := gosql.Open("mysql", buildDSN(config.ConnectionString))
+	db, err := openMySQL(config.ConnectionString)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open connection: %w", err)
 	}
@@ -393,7 +393,7 @@ func fetchCharsetPlans(ctx context.Context, config *sql.Config) (map[uint64]char
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	db, err := gosql.Open("mysql", buildDSN(config.ConnectionString))
+	db, err := openMySQL(config.ConnectionString)
 	if err != nil {
 		return nil, fmt.Errorf("open connection: %w", err)
 	}
@@ -409,7 +409,7 @@ func (m *MySQLDialect) SourceColumns(config *sql.Config) (map[string][]string, e
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	db, err := gosql.Open("mysql", buildDSN(config.ConnectionString))
+	db, err := openMySQL(config.ConnectionString)
 	if err != nil {
 		return nil, fmt.Errorf("connect: %w", err)
 	}
@@ -1693,7 +1693,7 @@ func snapshot(
 	resumeProgress *dialectpb.SnapshotProgress,
 	epoch uint64,
 ) (*mysql.Position, string, error) {
-	db, err := gosql.Open("mysql", buildDSN(config.ConnectionString))
+	db, err := openMySQL(config.ConnectionString)
 	if err != nil {
 		return nil, "", fmt.Errorf("snapshot: open: %w", err)
 	}
@@ -2292,21 +2292,35 @@ func readBatch(
 	return entities, batchLastPK, len(entities), nil
 }
 
-// buildDSN converts a mysql:// URL to a go-sql-driver/mysql DSN string via the
-// shared cluster.MySQLDSN (the same conversion the syncable sink dialect uses).
-// On a conversion error it returns "" rather than the input: this ingest path
-// already validated the URL upstream (binlogSyncerConfig), so the error branch
-// is effectively unreachable — but the resolved connection string carries the
-// ${VAR}-interpolated password, and it must never be handed onward as a value
-// that could later surface in a log or error. An empty DSN makes the subsequent
-// sql.Open fail cleanly (the raw mysql:// URL isn't a valid go-sql-driver DSN
-// either, so Open failed on this branch before too — now without the secret).
-func buildDSN(connectionString string) string {
-	dsn, err := cluster.MySQLDSN(connectionString)
+// openMySQL opens a database/sql connection to the MySQL source (snapshot +
+// preflight queries), applying the connection's TLS posture — sslmode / custom
+// CA / client cert — via mysql.Config.TLS. That is the SAME *tls.Config the CDC
+// binlog syncer uses (both from cluster.ParseMySQLConn), so the snapshot and the
+// stream are secured identically, mirroring Postgres where pgx carries sslmode to
+// both. A parse or TLS-build error surfaces here rather than as a silently
+// plaintext connection, and is redaction-safe (never echoes the ${VAR}-resolved
+// connection string).
+func openMySQL(connectionString string) (*gosql.DB, error) {
+	conn, err := cluster.ParseMySQLConn(connectionString)
 	if err != nil {
-		return ""
+		return nil, err
 	}
-	return dsn
+	tlsCfg, err := conn.TLSClientConfig()
+	if err != nil {
+		return nil, err
+	}
+	cfg := mysqldriver.NewConfig()
+	cfg.User = conn.User
+	cfg.Passwd = conn.Password
+	cfg.Net = "tcp"
+	cfg.Addr = conn.Addr()
+	cfg.DBName = conn.Database
+	cfg.TLS = tlsCfg
+	connector, err := mysqldriver.NewConnector(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return gosql.OpenDB(connector), nil
 }
 
 // dsnDatabase returns the database (schema) named in a mysql:// connection

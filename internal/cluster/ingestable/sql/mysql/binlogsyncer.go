@@ -40,6 +40,13 @@ func binlogSyncerConfig(config *sql.Config) (replication.BinlogSyncerConfig, err
 	if err != nil {
 		return replication.BinlogSyncerConfig{}, err
 	}
+	// The same *tls.Config the go-sql-driver snapshot connection uses (both from
+	// conn), so the CDC stream is secured identically to the snapshot — nil when
+	// sslmode=disable. Mirrors Postgres, whose pgx URL carries sslmode to both.
+	tlsCfg, err := conn.TLSClientConfig()
+	if err != nil {
+		return replication.BinlogSyncerConfig{}, err
+	}
 
 	return replication.BinlogSyncerConfig{
 		//nolint:gosec // G404: a MySQL replica id, not security-sensitive; weak rand is fine (canal randomizes it the same way).
@@ -49,6 +56,7 @@ func binlogSyncerConfig(config *sql.Config) (replication.BinlogSyncerConfig, err
 		Port:       conn.Port,
 		User:       conn.User,
 		Password:   conn.Password,
+		TLSConfig:  tlsCfg,
 		Charset:    mysql.DEFAULT_CHARSET,
 		UseDecimal: false,
 		// Emit JSON-embedded DECIMAL leaves as exact unquoted numbers so a CDC
