@@ -40,7 +40,7 @@ var ErrClosed = errors.New("db: closed")
 // transition (see WithLeaderChangeGracePeriod); the grace lets the
 // normal apply path win for quick-transition cases where the new
 // leader inherits and commits the entry within a handful of ticks.
-var ErrProposalUnknown = errors.New("db: proposal status unknown after leader change")
+var ErrProposalUnknown = fmt.Errorf("db: proposal status unknown after leader change: %w", cluster.ErrProposalUnconfirmed)
 
 // ErrProposalLost is returned from db.Propose when the raft log entry
 // carrying this proposal was physically truncated by a higher-term
@@ -58,7 +58,7 @@ var ErrProposalUnknown = errors.New("db: proposal status unknown after leader ch
 // exists, it does not replace the leader-change path. The two can race on
 // the same waiter — both mean "retry", and Lost simply wins when it
 // arrives.
-var ErrProposalLost = errors.New("db: proposal truncated before commit")
+var ErrProposalLost = fmt.Errorf("db: proposal truncated before commit: %w", cluster.ErrProposalUnconfirmed)
 
 // defaultProposeTimeout is the backstop db.Propose applies when a waiter is
 // never signaled — the state a raft-dropped proposal reaches when no leader

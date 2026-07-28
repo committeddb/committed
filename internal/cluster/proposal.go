@@ -14,6 +14,16 @@ import (
 // the configured size limit.
 var ErrProposalTooLarge = errors.New("proposal exceeds configured size limit")
 
+// ErrProposalUnconfirmed marks a propose failure whose outcome is not a confirmed
+// commit but that is SAFE TO RETRY: the proposal was submitted, but the caller's
+// deadline passed, or a leader change (outcome unknown) or a log truncation
+// (definitely not committed) left it unconfirmed. It is never a server fault — the
+// HTTP layer maps it to 503 request_unconfirmed (retry to confirm; keyed writes
+// are idempotent), not 500. The db layer's ErrProposalUnknown and ErrProposalLost
+// wrap it, so a caller across the cluster.Cluster boundary can classify the
+// outcome without importing db.
+var ErrProposalUnconfirmed = errors.New("proposal not confirmed committed")
+
 // ErrInsufficientStorage is returned from Propose when the node's disk-usage
 // watcher has put the data directory into a write-rejecting state: at
 // "critical" free space, user-data proposals are rejected (config changes and

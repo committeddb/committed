@@ -389,6 +389,25 @@ func TestAddProposal_Success(t *testing.T) {
 	require.JSONEq(t, `{"foo": "bar"}`, string(p.Entities[0].Data))
 }
 
+// TestAddProposal_UnconfirmedIs503: a propose whose outcome is unconfirmed
+// (cluster.ErrProposalUnconfirmed — what db's ErrProposalUnknown/ErrProposalLost
+// wrap, e.g. a leader change mid-flight) is a retryable 503 request_unconfirmed,
+// not a 500 that reads as a server fault to a retrying client.
+func TestAddProposal_UnconfirmedIs503(t *testing.T) {
+	h, fake := setupTest()
+	fake.ResolveTypeReturns(&cluster.Type{ID: "t1", Name: "T"}, nil)
+	fake.ProposeReturns(fmt.Errorf("propose: %w", cluster.ErrProposalUnconfirmed))
+
+	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"a": 1}}]}`
+	req := httptest.NewRequest("POST", "http://localhost/v1/proposal", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	resp := w.Result()
+	require.Equal(t, 503, resp.StatusCode, "an unconfirmed propose outcome is retryable, not a server fault")
+	requireErrorResponse(t, resp, "request_unconfirmed")
+}
+
 func TestAddProposal_MultipleEntities(t *testing.T) {
 	h, fake := setupTest()
 

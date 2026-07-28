@@ -143,10 +143,14 @@ func writeProposeError(w httpgo.ResponseWriter, err error, resource, action stri
 	case errors.Is(err, cluster.ErrInsufficientStorage):
 		writeError(w, httpgo.StatusInsufficientStorage, "insufficient_storage",
 			"the cluster (or this node) is low on disk space and is rejecting writes; see GET /v1/node/status disk.admission, retry once disk space recovers")
-	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-		// 503, never 500: the request was accepted for consensus but not confirmed
-		// before the caller's deadline (or the caller disconnected). The proposal
-		// MAY still commit, so this is a retryable "unknown", not a server fault.
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded),
+		errors.Is(err, cluster.ErrProposalUnconfirmed):
+		// 503, never 500: the request was accepted for consensus but its outcome is
+		// not a confirmed commit — the caller's deadline passed or the caller
+		// disconnected, or a leader change / log truncation left it unconfirmed
+		// (cluster.ErrProposalUnconfirmed, which db's ErrProposalUnknown/Lost wrap).
+		// It MAY still commit (or cleanly didn't), so this is a retryable "unknown",
+		// not a server fault.
 		writeError(w, httpgo.StatusServiceUnavailable, "request_unconfirmed",
 			"the request was submitted but not confirmed before the deadline; it may still take effect once a quorum is reachable — retry to confirm")
 	default:
