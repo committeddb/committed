@@ -1209,6 +1209,18 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '422':
+          description: |
+            A referenced type's schema cannot be compiled
+            (`type_schema_invalid`) — a permanent, config-shaped condition, not
+            a retryable server fault. Fix by re-POSTing the type with a valid
+            schema. Only reachable for a type created before schema validation
+            at `POST /type/{id}`; new types with a broken schema are rejected
+            there.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '500':
           $ref: '#/components/responses/InternalError'
         '507':

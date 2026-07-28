@@ -373,6 +373,10 @@ image can be templated per-node by an orchestrator:
 		d.AddSyncableParser("sql", &syncsql.SyncableParser{Metrics: m})
 		d.AddSyncableParser("sql-projection", &syncsql.ProjectionSyncableParser{Metrics: m})
 		d.AddSyncableParser("http", &synchttp.SyncableParser{})
+		// Inject the entity-schema compiler so ProposeType rejects a broken schema
+		// at POST /type (the compilers live in the http layer, which db can't
+		// import — see cluster.TypeSchemaValidator).
+		d.SetTypeSchemaValidator(http.SchemaValidator{})
 
 		// Restore ingestable and syncable workers for configs applied in a
 		// previous run. These MUST run after the sub-parsers above are

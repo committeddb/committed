@@ -168,6 +168,25 @@ type Type struct {
 	MigrationExplicit bool
 }
 
+// TypeSchemaValidator validates that a Type's entity schema is structurally
+// usable — that a known SchemaType's schema actually compiles. It closes the gap
+// where a broken schema is accepted at POST /type (200) but then fails EVERY
+// proposal to that type (a permanent error reported as a retryable 500). The
+// check runs at admission (ProposeType), symmetric with how the jq migration is
+// compiled at ParseType.
+//
+// It is INJECTED into the db layer (DB.SetTypeSchemaValidator) rather than called
+// directly, because the concrete schema compilers (JSONSchema, Protobuf) live in
+// the http layer, which db must not import — the same dependency inversion as the
+// SyncableParser / IngestableParser / DatabaseParser seams.
+type TypeSchemaValidator interface {
+	// ValidateTypeSchema returns nil for a valid schema, a non-validating type,
+	// or an UNKNOWN SchemaType (fail-open, so a schema type a newer producer
+	// understands is not rejected here); it returns an error only when a KNOWN
+	// SchemaType's schema will not compile.
+	ValidateTypeSchema(t *Type) error
+}
+
 // MigrationEditAdvisory returns an operator-facing notice when an in-place type
 // update changed only the [migration] transform — schema and version unchanged,
 // the "fix a forgotten or buggy migration" path in ProposeType. Such an edit

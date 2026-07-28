@@ -740,7 +740,7 @@ func TestAddProposal_ProtobufValidation_BadProtoSource(t *testing.T) {
 	h, fake := setupTest()
 
 	// Schema is not valid .proto syntax. Compilation should fail, which
-	// surfaces as a 500 (internal_error) at proposal time.
+	// surfaces as a permanent 422 (type_schema_invalid) at proposal time.
 	fake.ResolveTypeReturns(&cluster.Type{
 		ID:         "t1",
 		Name:       "Person",
@@ -755,16 +755,16 @@ func TestAddProposal_ProtobufValidation_BadProtoSource(t *testing.T) {
 	h.ServeHTTP(w, req)
 
 	resp := w.Result()
-	require.Equal(t, 500, resp.StatusCode)
+	require.Equal(t, 422, resp.StatusCode) // a type whose schema won't compile is permanent config-shaped, not a server fault
 	require.Equal(t, 0, fake.ProposeCallCount())
-	requireErrorResponse(t, resp, "internal_error")
+	requireErrorResponse(t, resp, "type_schema_invalid")
 }
 
 func TestAddProposal_ProtobufValidation_MissingMessageName(t *testing.T) {
 	h, fake := setupTest()
 
 	// .proto compiles fine but declares no `message Person`. The
-	// validator surfaces this as a compile failure -> 500.
+	// validator surfaces this as a compile failure -> permanent 422.
 	fake.ResolveTypeReturns(&cluster.Type{
 		ID:         "t1",
 		Name:       "Person",
@@ -779,9 +779,9 @@ func TestAddProposal_ProtobufValidation_MissingMessageName(t *testing.T) {
 	h.ServeHTTP(w, req)
 
 	resp := w.Result()
-	require.Equal(t, 500, resp.StatusCode)
+	require.Equal(t, 422, resp.StatusCode) // a type whose schema won't compile is permanent config-shaped, not a server fault
 	require.Equal(t, 0, fake.ProposeCallCount())
-	requireErrorResponse(t, resp, "internal_error")
+	requireErrorResponse(t, resp, "type_schema_invalid")
 }
 
 // The same (typeID, version) compiles once and is served from cache.
@@ -869,7 +869,7 @@ func TestAddProposal_SchemaValidation_UnknownSchemaType(t *testing.T) {
 func TestAddProposal_SchemaValidation_EmptySchema(t *testing.T) {
 	h, fake := setupTest()
 
-	// ValidateSchema + JSONSchema but no actual schema content — should 500
+	// ValidateSchema + JSONSchema but no actual schema content — should 422
 	fake.ResolveTypeReturns(&cluster.Type{
 		ID:         "t1",
 		Name:       "Bad",
@@ -885,9 +885,9 @@ func TestAddProposal_SchemaValidation_EmptySchema(t *testing.T) {
 	h.ServeHTTP(w, req)
 
 	resp := w.Result()
-	require.Equal(t, 500, resp.StatusCode)
+	require.Equal(t, 422, resp.StatusCode) // a type whose schema won't compile is permanent config-shaped, not a server fault
 	require.Equal(t, 0, fake.ProposeCallCount())
-	requireErrorResponse(t, resp, "internal_error")
+	requireErrorResponse(t, resp, "type_schema_invalid")
 }
 
 func TestAddProposal_SchemaValidation_InvalidSchemaJSON(t *testing.T) {
@@ -909,9 +909,9 @@ func TestAddProposal_SchemaValidation_InvalidSchemaJSON(t *testing.T) {
 	h.ServeHTTP(w, req)
 
 	resp := w.Result()
-	require.Equal(t, 500, resp.StatusCode)
+	require.Equal(t, 422, resp.StatusCode) // a type whose schema won't compile is permanent config-shaped, not a server fault
 	require.Equal(t, 0, fake.ProposeCallCount())
-	requireErrorResponse(t, resp, "internal_error")
+	requireErrorResponse(t, resp, "type_schema_invalid")
 }
 
 func TestAddProposal_SchemaValidation_EmptySchemaType(t *testing.T) {

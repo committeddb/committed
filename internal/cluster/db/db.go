@@ -80,7 +80,12 @@ type DB struct {
 	ctx         context.Context
 	cancelSyncs context.CancelFunc
 	parser      Parser
-	leaderState *LeaderState
+	// schemaValidator, when injected (SetTypeSchemaValidator), compiles a type's
+	// entity schema at ProposeType so a broken schema is rejected at POST /type
+	// rather than accepted then failing every proposal. Nil-safe: a DB without it
+	// (some tests) simply skips the admission schema check.
+	schemaValidator cluster.TypeSchemaValidator
+	leaderState     *LeaderState
 
 	// waiters maps request IDs (set in db.Propose) to waiter records
 	// whose ack channel receives nil after the proposal is applied.

@@ -15,6 +15,18 @@ func (db *DB) ProposeType(ctx context.Context, c *cluster.Configuration) error {
 		return cluster.NewConfigError(err)
 	}
 
+	// Admission schema check: compile the entity schema here so a broken one is a
+	// ConfigError (400) at POST /type, not an accepted-then-permanent-500 on every
+	// proposal to the type — symmetric with the jq migration compiled in ParseType.
+	// Nil-safe (some tests inject no validator); the schema is self-contained, so
+	// this admission check need not re-run on apply. Fail-open for unknown
+	// SchemaTypeS is preserved by the validator (returns nil).
+	if db.schemaValidator != nil {
+		if err := db.schemaValidator.ValidateTypeSchema(t); err != nil {
+			return cluster.NewConfigError(err)
+		}
+	}
+
 	// Delta topics are hostile to the sync contract: at-least-once
 	// delivery redelivers, and a redelivered non-idempotent patch
 	// ("add 3") corrupts. Rejected at creation rather than carried as a
@@ -229,6 +241,14 @@ func runMigrationSample(program, sample []byte) error {
 	// pathological validateAgainst program so it can't wedge the handler.
 	_, err := migration.Run(context.Background(), program, sample)
 	return err
+}
+
+// SetTypeSchemaValidator injects the entity-schema compiler that ProposeType uses
+// to reject a broken schema at admission. Wired in cmd/node.go with the http-layer
+// implementation, which db must not import directly (see
+// cluster.TypeSchemaValidator). Call once after db.New, before serving.
+func (db *DB) SetTypeSchemaValidator(v cluster.TypeSchemaValidator) {
+	db.schemaValidator = v
 }
 
 func (db *DB) Types() ([]*cluster.Configuration, error) {

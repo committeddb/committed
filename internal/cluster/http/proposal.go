@@ -60,7 +60,12 @@ func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
 
 		v, err := h.compiledValidator(t)
 		if err != nil {
-			writeInternalError(w, fmt.Sprintf("failed to compile schema for type %q", t.ID), err)
+			// The referenced type's schema won't compile — a permanent, config-shaped
+			// condition, not a server fault, so 422 (don't retry) rather than 500. A
+			// newly POSTed type can't reach here (ProposeType rejects a broken schema
+			// at admission); this covers a type created before that check shipped.
+			writeErrorf(w, httpgo.StatusUnprocessableEntity, "type_schema_invalid",
+				"type %q has an invalid schema that cannot be compiled (re-POST the type with a valid schema): %v", t.ID, err)
 			return
 		}
 		if v != nil {

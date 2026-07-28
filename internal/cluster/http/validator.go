@@ -41,6 +41,22 @@ type schemaValidationError struct {
 func (e *schemaValidationError) Error() string { return e.err.Error() }
 func (e *schemaValidationError) Unwrap() error { return e.err }
 
+// SchemaValidator implements cluster.TypeSchemaValidator by compiling a type's
+// entity schema with the SAME compilers the proposal path uses (compileValidator),
+// so the schema a POST /type accepts is exactly the one every proposal will run
+// against. It is injected into the db layer (DB.SetTypeSchemaValidator) in
+// cmd/node.go, which is why the compilers can live here in the http layer while
+// the admission check runs in db — db never imports http.
+type SchemaValidator struct{}
+
+// ValidateTypeSchema returns nil for a valid schema, a non-validating type, or an
+// unknown SchemaType (compileValidator fails open with (nil, nil)); it returns the
+// compile error only when a known SchemaType's schema will not compile.
+func (SchemaValidator) ValidateTypeSchema(t *cluster.Type) error {
+	_, err := compileValidator(t)
+	return err
+}
+
 // compileValidator builds an entityValidator for the given type, or
 // returns (nil, nil) if this type shouldn't be validated. Unknown
 // SchemaType values with ValidateSchema fall through to (nil, nil) —
