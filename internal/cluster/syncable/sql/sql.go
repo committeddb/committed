@@ -360,15 +360,17 @@ func (c *Syncable) applyEntity(ctx context.Context, tx *sql.Tx, e *cluster.Entit
 		}
 		res, err := jsonpath.Get(path, jsonData)
 		if err != nil {
-			// KNOWN LIMITATION (ambiguous classification): a jsonpath.Get failure is
-			// EITHER entry-specific (the field is genuinely absent in THIS row →
-			// permanent is right) OR config-shaped (a wrong-for-the-whole-topic path,
-			// an operator typo, that fails EVERY row → should be transient). The path
-			// is evaluated per-row, not validated at config time, so the two are
-			// indistinguishable here and it stays Permanent (the same accepted
-			// asymmetry as Postgres 23502; the projection sink's jsonpath.Get sites
-			// share it). The clean fix is config-time jsonpath validation — see the
-			// 0.8 ticket classify-config-shaped-syncable-errors.
+			// NARROWED LIMITATION (ambiguous classification): a SYNTACTICALLY invalid
+			// path can no longer reach here — validateMappings compiles every mapping
+			// jsonpath at ParseSyncable, so a broken path is a 400 at config time. What
+			// remains is a syntactically-VALID path that is nonetheless wrong: either
+			// entry-specific (the field is genuinely absent in THIS row → permanent is
+			// right) or an operator typo wrong for the whole topic (fails every row →
+			// should be transient). Those two are indistinguishable per-row, so it
+			// stays Permanent (the same accepted asymmetry as Postgres 23502; the
+			// projection sink's jsonpath.Get sites share it). The remaining fix — flip
+			// to transient on a run of consecutive-DISTINCT-row misses — is the 0.8
+			// ticket classify-config-shaped-syncable-errors.
 			return cluster.Permanent(fmt.Errorf("jsonpath [%v]: %w", path, err))
 		}
 		// A typed payload carries JSON-native scalars; coerce each to the form

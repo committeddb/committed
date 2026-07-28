@@ -5,6 +5,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/PaesslerAG/jsonpath"
+
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/sqlident"
 )
@@ -427,6 +429,89 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 		}
 		if src.OnDelete == onDeleteClear && !ownsColumn {
 			return fmt.Errorf("%s: onDelete = %q needs at least one column set by its rules to clear", where, onDeleteClear)
+		}
+	}
+	return validateProjectionJSONPaths(c)
+}
+
+// validateJSONPath compiles a configured jsonpath so a syntactically-invalid one
+// is rejected at ParseSyncable (a clean 400) instead of failing per-row at
+// runtime — where an extraction path dead-letters every row (config-shaped, but
+// classified permanent) and a when-clause path silently never matches (the rule
+// never fires → wrong/empty output, no error anywhere). jsonpath.Get compiles the
+// path internally on every call; jsonpath.New is the same compile without the
+// evaluation. The path is config, not secret, so it may appear in the error.
+func validateJSONPath(path, where string) error {
+	if _, err := jsonpath.New(path); err != nil {
+		return fmt.Errorf("%s: invalid jsonpath %q: %w", where, path, err)
+	}
+	return nil
+}
+
+// validateProjectionJSONPaths compiles every configured jsonpath in a projection —
+// each source's keyPath, its when-clause paths (source- and rule-level), each
+// rule set's from, an aggregate's elementKey and its plain element froms, and a
+// lookup's plain field froms. Runs after the structural validation above, so a
+// path reaching here is already non-empty where required; a from left empty
+// (a value/null set, or an enriched field) is legitimately skipped.
+func validateProjectionJSONPaths(c *ProjectionConfig) error {
+	for si, src := range c.Sources {
+		where := fmt.Sprintf("source %d (topic %q)", si+1, src.Topic)
+		if src.KeyPath != "" {
+			if err := validateJSONPath(src.KeyPath, where+" keyPath"); err != nil {
+				return err
+			}
+		}
+		for _, cl := range src.When {
+			if err := validateJSONPath(cl.Path, where+" when"); err != nil {
+				return err
+			}
+		}
+		for ri, r := range src.Rules {
+			rwhere := fmt.Sprintf("%s rule %d", where, ri+1)
+			for _, cl := range r.When {
+				if err := validateJSONPath(cl.Path, rwhere+" when"); err != nil {
+					return err
+				}
+			}
+			for _, s := range r.Set {
+				if s.From == "" {
+					continue // a value/null set carries no path
+				}
+				if err := validateJSONPath(s.From, fmt.Sprintf("%s column %q from", rwhere, s.Column)); err != nil {
+					return err
+				}
+			}
+		}
+		if ag := src.Aggregate; ag != nil {
+			if ag.ElementKey != "" {
+				if err := validateJSONPath(ag.ElementKey, where+" aggregate elementKey"); err != nil {
+					return err
+				}
+			}
+			if err := validateElementFieldPaths(ag.Element, where+" aggregate"); err != nil {
+				return err
+			}
+		}
+		if src.Lookup != nil {
+			if err := validateElementFieldPaths(src.Lookup.Fields, where+" lookup"); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// validateElementFieldPaths compiles the from jsonpath of each PLAIN element
+// field (an enriched field pulls from a dimension via lookup/on/select and has no
+// from path to validate).
+func validateElementFieldPaths(fields []ProjectionElementField, where string) error {
+	for _, f := range fields {
+		if f.enriched() || f.From == "" {
+			continue
+		}
+		if err := validateJSONPath(f.From, fmt.Sprintf("%s field %q from", where, f.Field)); err != nil {
+			return err
 		}
 	}
 	return nil

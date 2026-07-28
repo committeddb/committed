@@ -173,6 +173,12 @@ var wholePayloadColumnTypes = []string{
 // target a column type that can hold the raw JSON document.
 func validateMappings(mappings []Mapping) error {
 	for _, m := range mappings {
+		// Compile the extraction jsonpath at config time so a syntactically-invalid
+		// (or empty) path is a clean 400 here, not a per-row failure that
+		// dead-letters every Actual of the topic once the worker runs.
+		if err := validateJSONPath(m.JsonPath, fmt.Sprintf("mapping for column %q", m.Column)); err != nil {
+			return err
+		}
 		// GenerationColumn is committed-managed: a keyed sink's CreateSQL appends
 		// it and EnsureGenerationColumn creates it. A user mapping to the same
 		// name would collide (a duplicate column in CREATE/INSERT), failing only
