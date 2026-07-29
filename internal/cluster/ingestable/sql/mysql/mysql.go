@@ -716,6 +716,18 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 		if ctx.Err() != nil {
 			return nil
 		}
+		if errors.Is(streamErr, sql.ErrPrimaryKeyColumnMissing) {
+			// Permanent schema drift: a configured primaryKey column was renamed or
+			// dropped at the source, so every row would collapse onto one key.
+			// Reconnecting re-reads the same event and loops forever — return so the
+			// worker parks (freeze → supervisor → committed.worker.parked), loud and
+			// observable, rather than silently corrupting the sink.
+			zap.L().Error("ingest stopping: a primaryKey column is missing from the source schema (renamed or dropped) — worker will park until the ingestable is re-POSTed or the column restored",
+				zap.Strings("primary_key", handler.config.PrimaryKey),
+				zap.Error(streamErr),
+			)
+			return streamErr
+		}
 		if isGtidPurged(streamErr) {
 			// The source purged binlogs past our consumed GTID set (error 1236) —
 			// resume can't continue. Recover by re-snapshotting from the current
@@ -865,6 +877,15 @@ type MySQLEventHandler struct {
 	// or gtid_mode=OFF source leaves the checkpoint GTID-free.
 	consumedGTID mysql.GTIDSet
 	curTxnGTID   mysql.GTIDSet
+
+	// driftWarned dedups the DIVERGENCE-tier warning (a mapped non-key column
+	// dropped/renamed at the source): the check runs per RowsEvent — i.e. per
+	// transaction touching a watched table — so a bare warn would spam. Keyed by
+	// "table\x00column", it fires once per drifted column per session (a fresh
+	// handler is built on every reconnect, so a still-present drift re-warns once
+	// after a reconnect, which is the right cadence). The CORRUPTION tier needs no
+	// dedup — it parks on the first occurrence.
+	driftWarned map[string]bool
 }
 
 // mysqlCategoryForTypeName maps a MySQL type name (information_schema data_type
@@ -1068,6 +1089,21 @@ func (h *MySQLEventHandler) handleRows(ctx context.Context, header *replication.
 		return fmt.Errorf("decode schema of %q from binlog: %w", table, err)
 	}
 
+	// Reconcile the config's column contract against the schema THIS row was
+	// written under. A vanished primaryKey column is corruption — every row would
+	// collapse onto "<nil>" — so park (the reconnect loop returns the sentinel
+	// rather than busy-retry); a vanished mapped non-key column is divergence — the
+	// field renders null but rows stay correctly keyed — so warn once and continue.
+	observed := make(map[string]bool, len(ts.cols))
+	for _, c := range ts.cols {
+		observed[c.name] = true // ts.cols names are already lowercased
+	}
+	drift := sql.ReconcileSchema(h.config, observed)
+	if err := drift.ParkError(); err != nil {
+		return err
+	}
+	h.warnSchemaDivergence(table, drift.MissingMapped)
+
 	// Track the live offset (the row event's end position) so a mid-transaction
 	// soft-limit flush stamps a monotonic SourceSeq. It applies to every row of
 	// the event.
@@ -1119,6 +1155,31 @@ func (h *MySQLEventHandler) handleRows(ctx context.Context, header *replication.
 
 	zap.L().Debug("handleRows", zap.String("table", table), zap.String("action", action), zap.Int("rows", len(e.Rows)))
 	return nil
+}
+
+// warnSchemaDivergence emits the divergence-tier warning once per (table, column)
+// per session for each mapped non-key column a source rename/drop removed: the
+// sink now renders it null and diverges from the source until re-snapshotted,
+// mirroring handleDDL's TRUNCATE-on-a-watched-table policy. Deduped because the
+// caller runs per RowsEvent (see driftWarned).
+func (h *MySQLEventHandler) warnSchemaDivergence(table string, missingMapped []string) {
+	if len(missingMapped) == 0 {
+		return
+	}
+	if h.driftWarned == nil {
+		h.driftWarned = make(map[string]bool)
+	}
+	for _, col := range missingMapped {
+		k := table + "\x00" + col
+		if h.driftWarned[k] {
+			continue
+		}
+		h.driftWarned[k] = true
+		zap.L().Warn("mapped column dropped or renamed at the source; it now renders null on the sink, which diverges from the source and must be re-snapshotted to reconcile",
+			zap.String("table", table),
+			zap.String("column", col),
+		)
+	}
 }
 
 // rowEntity decodes one row image (positional values joined to the schema by

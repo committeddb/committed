@@ -554,6 +554,171 @@ func TestPostgresTypedPayload(t *testing.T) {
 	}
 }
 
+// TestPostgresPrimaryKeyDrift_ParksInsteadOfCollapsing is the pg-cdc-pk-drift
+// regression: a mid-stream source rename of a configured primaryKey column arrives
+// as a fresh RelationMessage whose column set no longer carries it, so CompositeKey
+// would key every later tuple on "<nil>" and collapse them onto one entity — a
+// keyed sink keeps one row and mis-tombstones deletes, silently. The
+// RelationMessage handler must instead PARK the worker: Ingest returns
+// ErrPrimaryKeyColumnMissing (a permanent condition) so the supervisor freezes it,
+// rather than reconnect-spinning the same relation forever.
+//
+// Postgres emits the new RelationMessage inline before the next changed tuple, so
+// no resume dance is needed: rename the column mid-session, insert under the new
+// schema, and the streamed relation refresh trips the guard.
+func TestPostgresPrimaryKeyDrift_ParksInsteadOfCollapsing(t *testing.T) {
+	const table = "pgtest_pkdrift"
+	config := &sql.Config{
+		Type:             &cluster.Type{ID: "pkdrift", Name: "pkdrift"},
+		ConnectionString: connString,
+		Tables:           []string{table},
+		PrimaryKey:       []string{"pk"},
+		Mappings: []sql.Mapping{
+			{JsonName: "pk", SQLColumn: "pk"},
+			{JsonName: "val", SQLColumn: "val"},
+		},
+		Options: map[string]string{"slot_name": "slot_pkdrift", "publication": "pub_pkdrift"},
+	}
+
+	db := createDB(t)
+	_, err := db.Exec(`DROP TABLE IF EXISTS ` + table)
+	require.NoError(t, err)
+	_, err = db.Exec(`CREATE TABLE ` + table + ` (pk VARCHAR(32) PRIMARY KEY, val TEXT)`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO ` + table + ` VALUES ('seed', 'seedval')`)
+	require.NoError(t, err)
+	db.Close()
+
+	cleanReplication(t, "slot_pkdrift", "pub_pkdrift")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+	proposalChan := make(chan *cluster.Proposal, 10)
+	positionChan := make(chan cluster.Position, 10)
+	ingestErr := make(chan error, 1)
+	go func() {
+		ingestErr <- (&postgres.PostgreSQLDialect{}).Ingest(ctx, config, nil, 0, proposalChan, positionChan)
+	}()
+
+	waitForSlot(t, "slot_pkdrift")
+
+	// Rename the primary-key column mid-session, then insert under the new schema.
+	// The streamed RelationMessage now carries `pk_renamed`, not the configured PK
+	// `pk` — the guard must park rather than collapse every row onto "<nil>".
+	db = createDB(t)
+	_, err = db.Exec(`ALTER TABLE ` + table + ` RENAME COLUMN pk TO pk_renamed`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO ` + table + ` VALUES ('drifted', 'x')`)
+	require.NoError(t, err)
+	db.Close()
+
+	// Drain any pre-drift emissions (the seed snapshot) while waiting for the park.
+	for {
+		select {
+		case <-proposalChan:
+		case <-positionChan:
+		case err := <-ingestErr:
+			require.ErrorIs(t, err, sql.ErrPrimaryKeyColumnMissing,
+				"a renamed primary-key column must park the worker (exit with the sentinel), not silently collapse rows or reconnect-spin")
+			return
+		case <-ctx.Done():
+			t.Fatal("Ingest did not park within the deadline — a renamed PK column must exit, not reconnect-spin")
+		}
+	}
+}
+
+// TestPostgresMappedColumnDrift_DivergesButKeepsGoing is the divergence-tier
+// sibling of the PG PK-drift test: dropping a mapped NON-key column mid-stream must
+// NOT park (tuples stay correctly keyed by the intact primary key) — the dropped
+// field just renders null. committed warns that the sink diverges and must be
+// re-snapshotted, and keeps streaming.
+func TestPostgresMappedColumnDrift_DivergesButKeepsGoing(t *testing.T) {
+	const table = "pgtest_mapdrift"
+	config := &sql.Config{
+		Type:             &cluster.Type{ID: "mapdrift", Name: "mapdrift"},
+		ConnectionString: connString,
+		Tables:           []string{table},
+		PrimaryKey:       []string{"pk"},
+		Mappings: []sql.Mapping{
+			{JsonName: "pk", SQLColumn: "pk"},
+			{JsonName: "val", SQLColumn: "val"},
+			{JsonName: "extra", SQLColumn: "extra"},
+		},
+		Options: map[string]string{"slot_name": "slot_mapdrift", "publication": "pub_mapdrift"},
+	}
+
+	db := createDB(t)
+	_, err := db.Exec(`DROP TABLE IF EXISTS ` + table)
+	require.NoError(t, err)
+	_, err = db.Exec(`CREATE TABLE ` + table + ` (pk VARCHAR(32) PRIMARY KEY, val TEXT, extra TEXT)`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO ` + table + ` VALUES ('seed', 'seedval', 'e')`)
+	require.NoError(t, err)
+	db.Close()
+
+	cleanReplication(t, "slot_mapdrift", "pub_mapdrift")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+	proposalChan := make(chan *cluster.Proposal, 10)
+	positionChan := make(chan cluster.Position, 10)
+	ingestErr := make(chan error, 1)
+	go func() {
+		ingestErr <- (&postgres.PostgreSQLDialect{}).Ingest(ctx, config, nil, 0, proposalChan, positionChan)
+	}()
+
+	waitForSlot(t, "slot_mapdrift")
+
+	// Capture warns emitted from here on, then drop the mapped non-key column and
+	// insert under the new schema. pgoutput sends a fresh RelationMessage (lacking
+	// `extra`) before the insert — that's where the divergence is detected.
+	core, observed := observer.New(zap.WarnLevel)
+	defer zap.ReplaceGlobals(zap.New(core))()
+
+	db = createDB(t)
+	_, err = db.Exec(`ALTER TABLE ` + table + ` DROP COLUMN extra`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO ` + table + ` VALUES ('drifted', 'x')`)
+	require.NoError(t, err)
+	db.Close()
+
+	var drifted map[string]any
+	deadline := time.After(20 * time.Second)
+	for drifted == nil {
+		select {
+		case p := <-proposalChan:
+			for _, e := range p.Entities {
+				if e.IsRefreshBoundary() || string(e.Key) != "drifted" {
+					continue
+				}
+				require.NoError(t, json.Unmarshal(e.Data, &drifted))
+			}
+		case <-positionChan:
+		case err := <-ingestErr:
+			t.Fatalf("Ingest parked on a mapped non-key column drop (should only diverge+warn): %v", err)
+		case <-deadline:
+			t.Fatal("timed out waiting for the drifted row; a mapped-column drop must keep streaming, not park")
+		}
+	}
+	cancel()
+
+	// Correctly keyed by the intact PK, dropped column simply gone from the payload.
+	require.Equal(t, "drifted", drifted["pk"])
+	require.Equal(t, "x", drifted["val"])
+	require.Nil(t, drifted["extra"], "the dropped column renders null/absent, not a stale value")
+
+	// And the divergence was announced.
+	warns := observed.FilterMessageSnippet("diverges from the source").All()
+	require.NotEmpty(t, warns, "a dropped mapped column must warn that the sink diverges")
+	sawExtra := false
+	for _, w := range warns {
+		if w.ContextMap()["column"] == "extra" {
+			sawExtra = true
+		}
+	}
+	require.True(t, sawExtra, "the divergence warn must name the dropped column")
+}
+
 // TestPostgresSnapshotStreamByteIdentity is the snapshot==CDC invariant for the
 // types that used to diverge: a timestamp/date/timestamptz/bytea/numeric row read
 // by the snapshot must produce byte-identical payload bytes to the same row read

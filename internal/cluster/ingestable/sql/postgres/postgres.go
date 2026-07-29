@@ -373,6 +373,18 @@ func (d *PostgreSQLDialect) Ingest(ctx context.Context, config *sql.Config, pos 
 		if ctx.Err() != nil {
 			return nil
 		}
+		if errors.Is(err, sql.ErrPrimaryKeyColumnMissing) {
+			// Permanent schema drift: a configured primaryKey column was renamed or
+			// dropped at the source, so every row would collapse onto one key.
+			// Reconnecting re-reads the same RelationMessage and loops forever — return
+			// so the worker parks (freeze → supervisor → committed.worker.parked), loud
+			// and observable, rather than silently corrupting the sink.
+			zap.L().Error("ingest stopping: a primaryKey column is missing from the source schema (renamed or dropped) — worker will park until the ingestable is re-POSTed or the column restored",
+				zap.Strings("primary_key", config.PrimaryKey),
+				zap.Error(err),
+			)
+			return err
+		}
 
 		zap.L().Warn("postgres replication stream exited, will reconnect",
 			zap.Duration("backoff", backoff),
@@ -892,6 +904,28 @@ func (d *PostgreSQLDialect) stream(
 
 			switch m := logicalMsg.(type) {
 			case *pglogrepl.RelationMessage:
+				// Reconcile the config's column contract against this refreshed
+				// relation. A vanished primaryKey column is corruption — every tuple
+				// would key on "<nil>" and collapse onto one entity — so park (the
+				// reconnect loop returns the sentinel rather than busy-retry); a
+				// vanished mapped non-key column is divergence — the field renders null
+				// but tuples stay correctly keyed — so warn and continue. A
+				// RelationMessage is pgoutput's schema-change boundary (one per relation
+				// per schema version), so the warn needs no dedup.
+				observed := make(map[string]bool, len(m.Columns))
+				for _, c := range m.Columns {
+					observed[strings.ToLower(c.Name)] = true
+				}
+				drift := sql.ReconcileSchema(config, observed)
+				if err := drift.ParkError(); err != nil {
+					return err
+				}
+				for _, col := range drift.MissingMapped {
+					zap.L().Warn("mapped column dropped or renamed at the source; it now renders null on the sink, which diverges from the source and must be re-snapshotted to reconcile",
+						zap.String("table", m.RelationName),
+						zap.String("column", col),
+					)
+				}
 				relations[m.RelationID] = m
 
 			case *pglogrepl.BeginMessage:

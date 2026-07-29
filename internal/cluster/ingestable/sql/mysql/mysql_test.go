@@ -1398,6 +1398,247 @@ func TestMysqlDDLDrift_OldImageDecodesAgainstWriteTimeSchema(t *testing.T) {
 	}
 }
 
+// TestMysqlPrimaryKeyDrift_ParksInsteadOfCollapsing is the mysql-cdc-pk-drift
+// regression: a mid-stream source rename of a configured primaryKey column drops
+// it from the streamed row image's schema, so CompositeKey would key every row on
+// "<nil>" and collapse them onto one entity — a keyed sink keeps one row and
+// mis-tombstones deletes, silently. handleRows must instead PARK the worker: the
+// Ingest goroutine returns ErrPrimaryKeyColumnMissing (a permanent condition) so
+// the supervisor freezes it, rather than reconnect-spinning the same event forever.
+//
+// Determinism mirrors the DDL-drift test: capture a pure streaming position while
+// ingest is stopped, THEN rename the PK column and insert under the new schema,
+// THEN resume — so the drifted insert is unambiguously streamed (not re-snapshotted
+// against the current schema, which would never carry the old PK name and hide the
+// distinction).
+func TestMysqlPrimaryKeyDrift_ParksInsteadOfCollapsing(t *testing.T) {
+	table := "pk_drift"
+
+	db := createDB(t)
+	_, err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS `%s`", table))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf("CREATE TABLE `%s` (id VARCHAR(32) NOT NULL, val TEXT, PRIMARY KEY (id));", table))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (id, val) VALUES ('seed', 'seedval');", table))
+	require.NoError(t, err)
+	db.Close()
+
+	config := &sql.Config{
+		Type:             &cluster.Type{ID: "pkdrift", Name: "pkdrift"},
+		Mappings:         []sql.Mapping{{JsonName: "id", SQLColumn: "id"}, {JsonName: "val", SQLColumn: "val"}},
+		PrimaryKey:       []string{"id"},
+		ConnectionString: ingestURL,
+		Tables:           []string{table},
+	}
+
+	// Phase 1 — snapshot the seed, then insert a marker during streaming and
+	// capture a position emitted AFTER it (a pure streaming position, so the resume
+	// streams the drifted insert rather than re-snapshotting the post-ALTER table).
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	pr1 := make(chan *cluster.Proposal, 10)
+	po1 := make(chan cluster.Position, 10)
+	go func() { _ = (&mysql.MySQLDialect{}).Ingest(ctx1, config, nil, 0, pr1, po1) }()
+
+	seen := map[string]bool{}
+	deadline := time.After(15 * time.Second)
+	for !seen["seed"] {
+		select {
+		case p := <-pr1:
+			for _, e := range p.Entities {
+				seen[string(e.Key)] = true
+			}
+		case <-po1:
+		case <-deadline:
+			t.Fatal("timed out waiting for the seed snapshot")
+		}
+	}
+	db = createDB(t)
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (id, val) VALUES ('marker', 'm');", table))
+	require.NoError(t, err)
+	db.Close()
+	var pos cluster.Position
+	deadline = time.After(15 * time.Second)
+	for !seen["marker"] || pos == nil {
+		select {
+		case p := <-pr1:
+			for _, e := range p.Entities {
+				seen[string(e.Key)] = true
+			}
+		case pp := <-po1:
+			if seen["marker"] {
+				pos = pp
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for the marker + a streaming position")
+		}
+	}
+	cancel1()
+
+	// While ingest is stopped: RENAME the primary-key column, then insert a row
+	// under the new schema. The streamed insert's TableMapEvent now carries
+	// `id_renamed`, not the configured PK `id`.
+	db = createDB(t)
+	_, err = db.Exec(fmt.Sprintf("ALTER TABLE `%s` CHANGE COLUMN id id_renamed VARCHAR(32) NOT NULL;", table))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (id_renamed, val) VALUES ('drifted', 'x');", table))
+	require.NoError(t, err)
+	db.Close()
+
+	// Phase 2 — resume from the captured streaming position; the drifted insert
+	// must make Ingest RETURN ErrPrimaryKeyColumnMissing (park), not reconnect-spin.
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel2()
+	pr2 := make(chan *cluster.Proposal, 20)
+	po2 := make(chan cluster.Position, 20)
+	errCh := make(chan error, 1)
+	go func() { errCh <- (&mysql.MySQLDialect{}).Ingest(ctx2, config, pos, 0, pr2, po2) }()
+
+	// Drain any pre-drift emissions defensively while waiting for the park.
+	for {
+		select {
+		case <-pr2:
+		case <-po2:
+		case ingestErr := <-errCh:
+			require.ErrorIs(t, ingestErr, sql.ErrPrimaryKeyColumnMissing,
+				"a renamed primary-key column must park the worker (exit with the sentinel), not silently collapse rows or reconnect-spin")
+			return
+		case <-ctx2.Done():
+			t.Fatal("Ingest did not park within the deadline — a renamed PK column must exit, not reconnect-spin")
+		}
+	}
+}
+
+// TestMysqlMappedColumnDrift_DivergesButKeepsGoing is the divergence-tier sibling
+// of the PK-drift test: dropping a mapped NON-key column mid-stream must NOT park
+// (rows stay correctly keyed by the intact primary key) — the dropped field just
+// renders null from there on. committed warns that the sink diverges and must be
+// re-snapshotted, mirroring handleDDL's TRUNCATE policy, and keeps streaming.
+func TestMysqlMappedColumnDrift_DivergesButKeepsGoing(t *testing.T) {
+	table := "mapped_drift"
+
+	db := createDB(t)
+	_, err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS `%s`", table))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf("CREATE TABLE `%s` (id VARCHAR(32) NOT NULL, val TEXT, extra TEXT, PRIMARY KEY (id));", table))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (id, val, extra) VALUES ('seed', 'seedval', 'e');", table))
+	require.NoError(t, err)
+	db.Close()
+
+	config := &sql.Config{
+		Type: &cluster.Type{ID: "mapdrift", Name: "mapdrift"},
+		Mappings: []sql.Mapping{
+			{JsonName: "id", SQLColumn: "id"},
+			{JsonName: "val", SQLColumn: "val"},
+			{JsonName: "extra", SQLColumn: "extra"},
+		},
+		PrimaryKey:       []string{"id"},
+		ConnectionString: ingestURL,
+		Tables:           []string{table},
+	}
+
+	// Phase 1 — snapshot the seed, then capture a pure streaming position after a
+	// marker (so the resume streams the drifted insert rather than re-snapshotting).
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	pr1 := make(chan *cluster.Proposal, 10)
+	po1 := make(chan cluster.Position, 10)
+	go func() { _ = (&mysql.MySQLDialect{}).Ingest(ctx1, config, nil, 0, pr1, po1) }()
+
+	seen := map[string]bool{}
+	deadline := time.After(15 * time.Second)
+	for !seen["seed"] {
+		select {
+		case p := <-pr1:
+			for _, e := range p.Entities {
+				seen[string(e.Key)] = true
+			}
+		case <-po1:
+		case <-deadline:
+			t.Fatal("timed out waiting for the seed snapshot")
+		}
+	}
+	db = createDB(t)
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (id, val, extra) VALUES ('marker', 'm', 'e');", table))
+	require.NoError(t, err)
+	db.Close()
+	var pos cluster.Position
+	deadline = time.After(15 * time.Second)
+	for !seen["marker"] || pos == nil {
+		select {
+		case p := <-pr1:
+			for _, e := range p.Entities {
+				seen[string(e.Key)] = true
+			}
+		case pp := <-po1:
+			if seen["marker"] {
+				pos = pp
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for the marker + a streaming position")
+		}
+	}
+	cancel1()
+
+	// While ingest is stopped: DROP the mapped non-key column, then insert a row
+	// under the new schema. The streamed insert's TableMapEvent now lacks `extra`.
+	db = createDB(t)
+	_, err = db.Exec(fmt.Sprintf("ALTER TABLE `%s` DROP COLUMN extra;", table))
+	require.NoError(t, err)
+	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (id, val) VALUES ('drifted', 'x');", table))
+	require.NoError(t, err)
+	db.Close()
+
+	// Capture warns emitted during phase 2 to assert the divergence warning fires.
+	core, observed := observer.New(zap.WarnLevel)
+	defer zap.ReplaceGlobals(zap.New(core))()
+
+	// Phase 2 — resume; the drifted insert must come through correctly keyed by the
+	// intact primary key (id), with `extra` gone, and Ingest must NOT park.
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel2()
+	pr2 := make(chan *cluster.Proposal, 20)
+	po2 := make(chan cluster.Position, 20)
+	errCh := make(chan error, 1)
+	go func() { errCh <- (&mysql.MySQLDialect{}).Ingest(ctx2, config, pos, 0, pr2, po2) }()
+
+	var drifted map[string]any
+	deadline = time.After(20 * time.Second)
+	for drifted == nil {
+		select {
+		case p := <-pr2:
+			for _, e := range p.Entities {
+				if string(e.Key) != "drifted" {
+					continue
+				}
+				require.NoError(t, json.Unmarshal(e.Data, &drifted))
+			}
+		case <-po2:
+		case ingestErr := <-errCh:
+			t.Fatalf("Ingest parked on a mapped non-key column drop (should only diverge+warn): %v", ingestErr)
+		case <-deadline:
+			t.Fatal("timed out waiting for the drifted row; a mapped-column drop must keep streaming, not park")
+		}
+	}
+	cancel2()
+
+	// The row is correctly keyed by the intact PK, and the dropped column is simply
+	// gone from the payload — not a collapsed "<nil>" key, not a lost row.
+	require.Equal(t, "drifted", drifted["id"])
+	require.Equal(t, "x", drifted["val"])
+	require.Nil(t, drifted["extra"], "the dropped column renders null/absent, not a stale value")
+
+	// And the divergence was announced (deduped to one warn per column per session).
+	warns := observed.FilterMessageSnippet("diverges from the source").All()
+	require.NotEmpty(t, warns, "a dropped mapped column must warn that the sink diverges")
+	extraWarns := 0
+	for _, w := range warns {
+		if w.ContextMap()["column"] == "extra" {
+			extraWarns++
+		}
+	}
+	require.Equal(t, 1, extraWarns, "the divergence warn must fire exactly once per column per session (deduped)")
+}
+
 // TestMysqlPositionResume verifies that checkpointed binlog positions are
 // correctly restored on restart: a new Ingest call with a previously
 // checkpointed position only receives changes committed after that position.
