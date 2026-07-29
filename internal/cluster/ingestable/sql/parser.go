@@ -116,6 +116,21 @@ func (p *IngestableParser) ParseConfig(v *cluster.ParsedConfig) (*Config, Dialec
 	if topic == "" {
 		return nil, nil, &cluster.FieldError{Field: "sql.topic", Issue: "required"}
 	}
+	// The ingest topic must be a USER type, never a committed-internal/system type.
+	// Emitted rows carry this type, and at apply resolveType is systemType-first, so
+	// an internal topic id would route user row bytes into an internal config handler
+	// that Fatals on the decode mismatch — a committed, deterministic entry that
+	// crash-loops every node. ParseType blocks creating such a type on a fresh
+	// cluster, but a colliding type from a pre-guard binary or a restore must not be
+	// usable as an ingest topic either — mirror the AddProposal / ParseType guard
+	// structurally here (this is the one user-controlled type resolution the propose
+	// path's guard doesn't cover).
+	if cluster.IsInternal(topic) || cluster.IsReservedSystemID(topic) {
+		return nil, nil, &cluster.FieldError{
+			Field: "sql.topic",
+			Issue: fmt.Sprintf("type %q is a committed system-type id and cannot be used as an ingest topic", topic),
+		}
+	}
 	tipe, err := p.typer.ResolveType(cluster.LatestTypeRef(topic))
 	if err != nil {
 		return nil, nil, &cluster.FieldError{

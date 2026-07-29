@@ -225,6 +225,51 @@ connectionString="foo"
 	}
 }
 
+// TestParseRejectsInternalTopicType is the ingest half of the cluster-brick guard
+// (the sibling of the AddProposal / ParseType guards): an ingest sql.topic whose id
+// is a committed-internal/system type must be rejected at admission. Emitted rows
+// carry this type, and at apply resolveType is systemType-first, so an internal
+// topic would route user row bytes into an internal config handler that Fatals —
+// crash-looping every node. ParseType blocks CREATING such a type on a fresh
+// cluster, but a colliding type from a pre-guard binary or a restore must not be
+// usable as an ingest topic either, so the guard must fire structurally, BEFORE the
+// topic type is even resolved (asserted via ResolveTypeCallCount == 0).
+func TestParseRejectsInternalTopicType(t *testing.T) {
+	// databaseType's grandfathered built-in id (frozen; cluster.IsInternal == true).
+	const systemTypeID = "4698b77e-9a7c-41a2-aae4-984da0cd33c1"
+	require.True(t, cluster.IsInternal(systemTypeID), "guard test needs a real internal type id")
+
+	toml := `
+[ingestable]
+name="foo"
+type="sql"
+
+[sql]
+dialect="mysql"
+topic = "` + systemTypeID + `"
+connectionString="foo"
+primaryKey = "pk"
+tables = ["t"]
+
+[[sql.mappings]]
+jsonName = "pk"
+column = "pk"
+`
+	v := readConfig(t, "toml", bytes.NewReader([]byte(toml)))
+	tiper := &sqlfakes.FakeTyper{}
+	tiper.ResolveTypeReturns(simpleType, nil) // even if a colliding user type exists...
+	p := sql.NewIngestableParser(tiper)
+	p.Dialects["mysql"] = &mysql.MySQLDialect{}
+
+	_, _, err := p.ParseConfig(v)
+
+	var fe *cluster.FieldError
+	require.ErrorAs(t, err, &fe)
+	require.Equal(t, "sql.topic", fe.Field)
+	require.Equal(t, 0, tiper.ResolveTypeCallCount(),
+		"the guard must reject before resolving the topic type — a pre-existing colliding type must not be usable as an ingest topic")
+}
+
 // TestParseAcceptsMapAllColumnsWithoutMappings confirms the mapping requirement
 // is satisfied by mapAllColumns alone — no explicit [[sql.mappings]] needed.
 func TestParseAcceptsMapAllColumnsWithoutMappings(t *testing.T) {
