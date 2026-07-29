@@ -643,9 +643,12 @@ to drop its row, and a fresh syncable replaying a scrubbed log sees only the
 delete → a `DELETE` of a row that was never inserted → harmless no-op. That
 retained identifier lives only in each node's **local event log** — it is *not* in
 the bbolt snapshot (the snapshot's copy is pruned + compacted, above), so it is
-never fanned out cluster-wide via `InstallSnapshot`. Erasing it from the local
-event log too (rewriting the retained delete's key once every syncable has
-consumed it) is tracked as a future item — see the RTBF erasure runbook/ledger.
+never fanned out cluster-wide via `InstallSnapshot`. committed does **not** erase the delete key — the replay correctness above requires
+it — so the erased subject's identifier in a retained tombstone persists for the life
+of the event log on each node, and in any backup taken of it. Treat it as personal
+data that outlives the payload scrub, and bound backup retention to your RTBF
+obligations accordingly (the same shared-responsibility split as
+[backups](operations/backup.md) and [logs](operations/logging.md)).
 
 **Triggers.** A `Scrub` command is proposed two ways: automatically by the
 leader on a cadence (`COMMITTED_SCRUB_INTERVAL`, default 1h) whenever there

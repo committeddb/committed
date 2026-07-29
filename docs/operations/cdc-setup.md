@@ -635,6 +635,20 @@ retention, and it is detected loudly, never lost silently.** Keep retention long
 than your worst-case committed downtime (or set `binlog_expire_logs_seconds=0` to
 never auto-purge).
 
+### Very large compressed transactions
+
+If the source runs with `binlog_transaction_compression=ON`, MySQL writes each
+transaction as a single compressed event. committed's change dedup keys on the
+transaction's binlog position, and a **single transaction of several gigabytes** in
+one commit can advance that key far enough that the very next change — the one
+committed immediately after it — is treated as already-seen and **not delivered
+downstream**. Ordinary workloads never hit this: well-behaved bulk loads commit in
+batches, not one multi-gigabyte transaction. If you do drive multi-gigabyte single
+transactions into a compressed source, either **chunk the load into smaller commits**
+(recommended anyway, to avoid replication lag and long lock holds) or **turn off
+`binlog_transaction_compression`** on the source — the uncompressed path is
+unaffected.
+
 ### MySQL troubleshooting
 
 - **Ingest won't start, "binlog_row_image" in the error.** The server is on
