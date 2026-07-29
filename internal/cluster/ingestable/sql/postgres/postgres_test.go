@@ -590,6 +590,10 @@ func TestPostgresPrimaryKeyDrift_ParksInsteadOfCollapsing(t *testing.T) {
 	db.Close()
 
 	cleanReplication(t, "slot_pkdrift", "pub_pkdrift")
+	// Free the slot at test END too, not just at start: the shared container caps
+	// max_replication_slots (16) and later tests rely on that budget, so a leaked
+	// slot starves tests that run after this one in the package.
+	t.Cleanup(func() { cleanReplication(t, "slot_pkdrift", "pub_pkdrift") })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
@@ -657,6 +661,9 @@ func TestPostgresMappedColumnDrift_DivergesButKeepsGoing(t *testing.T) {
 	db.Close()
 
 	cleanReplication(t, "slot_mapdrift", "pub_mapdrift")
+	// Free the slot at test end too, so it doesn't count against the container's
+	// max_replication_slots budget for the rest of the package (see the pk-drift test).
+	t.Cleanup(func() { cleanReplication(t, "slot_mapdrift", "pub_mapdrift") })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
