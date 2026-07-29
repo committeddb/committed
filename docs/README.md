@@ -46,6 +46,9 @@ A map of the docs. Start with the quickstart; reach for the rest as you need the
   TLS, and peer mTLS.
 - [Secrets](operations/secrets.md) — keep database passwords and tokens out of
   the log with `${VAR}` config interpolation.
+- [Logging & personal data](operations/logging.md) — what committed writes to its
+  logs, why node logs carry customer data by design, and bounding log retention to
+  your right-to-be-forgotten obligations.
 - [Graceful shutdown](operations/shutdown.md) — what `SIGTERM` does and how to
   tune the drain deadline.
 - [HTTP limits](operations/http-limits.md) — the proposal-size cap and HTTP
