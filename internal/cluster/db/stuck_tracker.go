@@ -78,14 +78,23 @@ func (t *stuckTracker) resync() {
 // wedged is called on every transient failure of the proposal at `index`. It
 // (re)starts the debounce when the wedged proposal changes and publishes the
 // replicated stuck record once the worker has been blocked past the threshold.
-func (t *stuckTracker) wedged(ctx context.Context, index uint64, lastErr error) {
+//
+// It returns true only on the FIRST failure of a new `index` — the wedge
+// transition — so the caller logs the transient error ONCE per wedge rather than
+// on every retry. The retry loop spins at syncBackoffMax (~2/s) and a per-retry
+// log floods for a persistently-wedged worker; the per-retry signal is the
+// sync.errors{transient} counter, and past the threshold the replicated stuck
+// record.
+func (t *stuckTracker) wedged(ctx context.Context, index uint64, lastErr error) bool {
+	newWedge := false
 	if t.since.IsZero() || t.index != index {
 		t.since = time.Now()
 		t.index = index
 		t.published = false
+		newWedge = true
 	}
 	if t.published || time.Since(t.since) < t.db.syncStuckThreshold {
-		return
+		return newWedge
 	}
 	msg := ""
 	if lastErr != nil {
@@ -104,11 +113,12 @@ func (t *stuckTracker) wedged(ctx context.Context, index uint64, lastErr error) 
 	if err := t.db.proposeSyncableStuck(ctx, s); err != nil {
 		t.db.logger.Warn("publish stuck status failed (will retry)",
 			zap.String("id", t.id), zap.Uint64("index", index), zap.Error(err))
-		return
+		return newWedge
 	}
 	t.published = true
 	// Gauge derived from the applied record (handleSyncableStuck), not toggled
 	// here — the proposeSyncableStuck above applies on every node and sets it.
+	return newWedge
 }
 
 // skipRequested reports whether an operator has asked the worker to skip the

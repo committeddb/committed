@@ -10,6 +10,8 @@ import (
 	"github.com/stretchr/testify/require"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
@@ -137,6 +139,47 @@ func TestSync_TransientError_Counts(t *testing.T) {
 		require.Zero(t, syncErrorCount(rm, id, "permanent"))
 		return syncErrorCount(rm, id, "transient") >= 1
 	}, 5*time.Second, 5*time.Millisecond, "committed.sync.errors{kind=transient} must increment on a transient failure")
+}
+
+// TestSync_TransientError_LogsOncePerWedge is the log-noise guard: the
+// transient-retry loop spins at syncBackoffMax (~2/s), so logging on every retry
+// floods the operator's log store with the same line for a persistently-wedged
+// worker. The "transient sync error, will retry" line must fire ONCE per wedge —
+// the sync.errors{transient} counter is the per-retry signal, and the replicated
+// stuck record is the escalation.
+func TestSync_TransientError_LogsOncePerWedge(t *testing.T) {
+	core, logs := observer.New(zap.WarnLevel)
+
+	s := NewMemoryStorage()
+	d := db.New(uint64(1), db.Peers{1: ""}, s, parser.New(), nil, nil,
+		db.WithTickInterval(testTickInterval), db.WithLogger(zap.New(core)))
+	defer d.Close()
+	s.SetNode(d.ID())
+
+	id := "wedge-log-dedup"
+	require.NoError(t, d.Propose(testCtx(t), createProposals([][]string{{"x"}})[0]))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Fail transiently on the same proposal several times, then stop the worker.
+	syncable := &ErrorSyncable{
+		syncErr:       fmt.Errorf("downstream temporarily unavailable"),
+		maxBeforeStop: 8,
+		cancel:        cancel,
+	}
+	require.NoError(t, d.Sync(ctx, id, syncable))
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("syncable never retried the proposal to the stop count")
+	}
+
+	// The worker retried the same index many times...
+	require.GreaterOrEqual(t, syncable.Count(), 4, "the test needs several retries to be meaningful")
+	// ...but the transient-retry line was logged exactly once (one wedge episode).
+	require.Equal(t, 1, logs.FilterMessage("transient sync error, will retry").Len(),
+		"the transient-retry line must be logged once per wedge, not once per retry")
 }
 
 // syncErrorCount returns the committed.sync.errors counter value for a

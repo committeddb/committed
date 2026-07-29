@@ -597,16 +597,19 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 						retryErr = nil
 						tracker.cleared(ctx)
 					} else {
-						db.logger.Warn("transient sync error, will retry",
-							zap.String("id", id), zap.Uint64("index", i), zap.Error(syncErr))
 						db.recordSyncTransientError(id)
 						retryActual = a
 						retryErr = syncErr
 						// Publish (after the debounce) the index the worker is
 						// blocked on so any node can report it and an operator
 						// can skip it. Don't set progressed — the backoff slows
-						// the retry loop.
-						tracker.wedged(ctx, i, syncErr)
+						// the retry loop. Log the transient error only on the wedge
+						// transition (wedged returns true once per new index), not on
+						// every retry — that would flood the log for a stuck worker.
+						if tracker.wedged(ctx, i, syncErr) {
+							db.logger.Warn("transient sync error, will retry",
+								zap.String("id", id), zap.Uint64("index", i), zap.Error(syncErr))
+						}
 						break
 					}
 				} else {
@@ -739,16 +742,17 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 			}
 			// Transient error — don't clear the batch so it will be
 			// retried on the next iteration.
-			db.logger.Warn("transient batch sync error, will retry",
-				zap.String("id", id), zap.Int("batch_size", len(batch)), zap.Error(syncErr))
 			db.recordSyncTransientError(id)
 			retryBatch = true
 			// Publish (after the debounce) the head of the blocked batch so
 			// an operator can dead-letter what the syncable is stuck on. A
 			// batch fails atomically, so the head is the cursor; honoring the
 			// request isolates the batch per-proposal (see the retryBatch
-			// branch).
-			tracker.wedged(ctx, batch[0].Index, syncErr)
+			// branch). Log only on the wedge transition, not every retry.
+			if tracker.wedged(ctx, batch[0].Index, syncErr) {
+				db.logger.Warn("transient batch sync error, will retry",
+					zap.String("id", id), zap.Int("batch_size", len(batch)), zap.Error(syncErr))
+			}
 			return false
 		}
 
