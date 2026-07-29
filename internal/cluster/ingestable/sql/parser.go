@@ -36,17 +36,26 @@ func (p *IngestableParser) Parse(v *cluster.ParsedConfig) (cluster.Ingestable, e
 	// map-all config and to validate that every mapping references a real column.
 	// Parse always reaches the source here anyway (Preflight below connects too),
 	// so this adds no new connectivity requirement.
-	colsByTable, err := dialect.SourceColumns(config)
+	colsByTable, generatedByTable, err := dialect.SourceColumns(config)
 	if err != nil {
 		return nil, fmt.Errorf("[ingestable.parser] source columns: %w", err)
 	}
 
+	// A generated/computed column can't be replicated (the change stream omits it,
+	// so it is present on the snapshot but null on every later CDC row). Refuse an
+	// explicit mapping/PK of one loudly at POST; MapAllColumns skips it (below).
+	if err := rejectGeneratedColumnRefs(config, generatedByTable); err != nil {
+		return nil, fmt.Errorf("[ingestable.parser] %w", err)
+	}
+
 	// Expand a map-all config into explicit mappings against the live source
 	// schema, freezing the column set at build time — a column added later does
-	// not silently enter payloads until the config is re-POSTed. Done before
-	// Preflight so the fully-built config is what we validate and run.
+	// not silently enter payloads until the config is re-POSTed. Generated columns
+	// are excluded (and logged), so map-all mirrors only what committed can
+	// faithfully replicate. Done before Preflight so the fully-built config is what
+	// we validate and run.
 	if config.MapAllColumns {
-		if err := expandMapAllColumns(config, colsByTable); err != nil {
+		if err := expandMapAllColumns(config, excludeGeneratedFromMapAll(colsByTable, generatedByTable)); err != nil {
 			return nil, fmt.Errorf("[ingestable.parser] map all columns: %w", err)
 		}
 	}

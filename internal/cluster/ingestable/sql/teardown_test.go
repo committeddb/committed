@@ -23,7 +23,10 @@ func (stubDialect) Preflight(*sql.Config) error { return nil }
 func (stubDialect) Status(context.Context, *sql.Config, cluster.Position) (cluster.IngestableStatus, error) {
 	return cluster.IngestableStatus{}, nil
 }
-func (stubDialect) SourceColumns(*sql.Config) (map[string][]string, error) { return nil, nil }
+
+func (stubDialect) SourceColumns(*sql.Config) (map[string][]string, map[string][]string, error) {
+	return nil, nil, nil
+}
 
 // teardownDialect adds the optional source-teardown capability, recording the
 // call so the test can assert delegation.

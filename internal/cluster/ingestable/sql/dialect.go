@@ -40,12 +40,15 @@ type Dialect interface {
 	// the empty position (a worker that has not checkpointed yet). A source-query
 	// failure leaves Lag nil rather than failing the whole status.
 	Status(ctx context.Context, config *Config, pos cluster.Position) (cluster.IngestableStatus, error)
-	// SourceColumns returns the column names of each watched table (keyed by the
-	// table name as configured), in source order, for expanding a MapAllColumns
-	// config into explicit mappings at build time. Read-only schema
-	// introspection; it manages its own short connection timeout. Only called
-	// when MapAllColumns is set.
-	SourceColumns(config *Config) (map[string][]string, error)
+	// SourceColumns returns, per watched table (keyed by the table name as
+	// configured), the column names in source order AND the subset that are
+	// generated/computed columns. The columns expand a MapAllColumns config into
+	// explicit mappings and validate every mapping resolves; the generated set is
+	// excluded from MapAllColumns and rejected if explicitly mapped, because
+	// committed cannot replicate a generated column (the source's change stream
+	// omits its value, so it is present on the snapshot but null on every later
+	// CDC row). Read-only introspection with its own short connection timeout.
+	SourceColumns(config *Config) (columns, generated map[string][]string, err error)
 }
 
 type Config struct {

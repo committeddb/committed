@@ -405,54 +405,63 @@ func fetchCharsetPlans(ctx context.Context, config *sql.Config) (map[uint64]char
 // SourceColumns implements sql.Dialect: it introspects each watched table's
 // columns (in ordinal order) so the parser can expand a MapAllColumns config
 // into explicit mappings. Read-only; one short-lived connection.
-func (m *MySQLDialect) SourceColumns(config *sql.Config) (map[string][]string, error) {
+func (m *MySQLDialect) SourceColumns(config *sql.Config) (map[string][]string, map[string][]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	db, err := openMySQL(config.ConnectionString)
 	if err != nil {
-		return nil, fmt.Errorf("connect: %w", err)
+		return nil, nil, fmt.Errorf("connect: %w", err)
 	}
 	defer func() { _ = db.Close() }()
 
 	out := make(map[string][]string, len(config.Tables))
+	generated := make(map[string][]string, len(config.Tables))
 	for _, table := range config.Tables {
-		cols, err := mysqlTableColumns(ctx, db, table)
+		cols, gen, err := mysqlTableColumns(ctx, db, table)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if len(cols) == 0 {
-			return nil, fmt.Errorf("source table %q has no columns (does it exist?)", table)
+			return nil, nil, fmt.Errorf("source table %q has no columns (does it exist?)", table)
 		}
 		out[table] = cols
+		if len(gen) > 0 {
+			generated[table] = gen
+		}
 	}
-	return out, nil
+	return out, generated, nil
 }
 
-// mysqlTableColumns returns a table's columns in ordinal order, from the
-// connection's current database.
-func mysqlTableColumns(ctx context.Context, db *gosql.DB, table string) ([]string, error) {
+// mysqlTableColumns returns a table's columns in ordinal order (from the
+// connection's current database) plus the subset that are generated/computed
+// (information_schema EXTRA carries "VIRTUAL GENERATED" / "STORED GENERATED") —
+// committed cannot replicate a generated column (the binlog omits its value), so
+// the caller excludes/rejects it.
+func mysqlTableColumns(ctx context.Context, db *gosql.DB, table string) (cols, generated []string, err error) {
 	schema, name := splitQualifiedTable(table)
 	rows, err := db.QueryContext(ctx, `
-		SELECT column_name
+		SELECT column_name, extra
 		FROM information_schema.columns
 		WHERE table_schema = COALESCE(NULLIF(?, ''), DATABASE())
 		  AND table_name = ?
 		ORDER BY ordinal_position`, schema, name)
 	if err != nil {
-		return nil, fmt.Errorf("read columns of %q: %w", table, err)
+		return nil, nil, fmt.Errorf("read columns of %q: %w", table, err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	var cols []string
 	for rows.Next() {
-		var c string
-		if err := rows.Scan(&c); err != nil {
-			return nil, err
+		var c, extra string
+		if err := rows.Scan(&c, &extra); err != nil {
+			return nil, nil, err
 		}
 		cols = append(cols, c)
+		if strings.Contains(strings.ToUpper(extra), "GENERATED") {
+			generated = append(generated, c)
+		}
 	}
-	return cols, rows.Err()
+	return cols, generated, rows.Err()
 }
 
 func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos cluster.Position, epochFloor uint64, pr chan<- *cluster.Proposal, po chan<- cluster.Position) error {

@@ -137,7 +137,7 @@ func TestSchemaQualified_PreflightSpatialReject(t *testing.T) {
 func TestSchemaQualified_SourceColumns(t *testing.T) {
 	setupQualifiedSchema(t)
 
-	cols, err := (&mysql.MySQLDialect{}).SourceColumns(&sql.Config{
+	cols, _, err := (&mysql.MySQLDialect{}).SourceColumns(&sql.Config{
 		ConnectionString: ingestURL,
 		Tables:           []string{qualifiedSchema + ".widget"},
 	})

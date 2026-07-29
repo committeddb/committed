@@ -22,7 +22,7 @@ func TestMysqlSourceColumns(t *testing.T) {
 	mk("DROP TABLE IF EXISTS mapall_t")
 	mk("CREATE TABLE mapall_t (id INT PRIMARY KEY, name VARCHAR(50), qty INT)")
 
-	cols, err := (&mysql.MySQLDialect{}).SourceColumns(&sql.Config{
+	cols, _, err := (&mysql.MySQLDialect{}).SourceColumns(&sql.Config{
 		ConnectionString: ingestURL,
 		Tables:           []string{"mapall_t"},
 	})

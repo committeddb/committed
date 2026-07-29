@@ -504,10 +504,10 @@ func (d *PostgreSQLDialect) replicationLag(ctx context.Context, config *sql.Conf
 // columns (in source order) so the parser can expand a MapAllColumns config
 // into explicit mappings. Read-only; one short-lived connection bounded by the
 // build-time timeout.
-func (d *PostgreSQLDialect) SourceColumns(config *sql.Config) (map[string][]string, error) {
+func (d *PostgreSQLDialect) SourceColumns(config *sql.Config) (map[string][]string, map[string][]string, error) {
 	pgCfg, err := buildPgConfig(config)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), preflightTimeout)
@@ -515,49 +515,60 @@ func (d *PostgreSQLDialect) SourceColumns(config *sql.Config) (map[string][]stri
 
 	db, err := gosql.Open("pgx", pgCfg.sqlConnString)
 	if err != nil {
-		return nil, fmt.Errorf("open connection: %w", err)
+		return nil, nil, fmt.Errorf("open connection: %w", err)
 	}
 	defer func() { _ = db.Close() }()
 
 	out := make(map[string][]string, len(config.Tables))
+	generated := make(map[string][]string, len(config.Tables))
 	for _, table := range config.Tables {
-		cols, err := pgTableColumns(ctx, db, table)
+		cols, gen, err := pgTableColumns(ctx, db, table)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if len(cols) == 0 {
-			return nil, fmt.Errorf("source table %q has no columns (does it exist?)", table)
+			return nil, nil, fmt.Errorf("source table %q has no columns (does it exist?)", table)
 		}
 		out[table] = cols
+		if len(gen) > 0 {
+			generated[table] = gen
+		}
 	}
-	return out, nil
+	return out, generated, nil
 }
 
-// pgTableColumns returns a table's user columns in attribute order. It resolves
-// the table via ::regclass so a schema-qualified name ("ingress.movie") works,
-// and skips dropped and system columns.
-func pgTableColumns(ctx context.Context, db *gosql.DB, table string) ([]string, error) {
+// pgTableColumns returns a table's user columns in attribute order plus the
+// subset that are generated/computed (attgenerated <> ”). It resolves the table
+// via ::regclass so a schema-qualified name ("ingress.movie") works, and skips
+// dropped and system columns. committed cannot replicate a generated column
+// (pgoutput omits it), so the caller excludes/rejects it.
+func pgTableColumns(ctx context.Context, db *gosql.DB, table string) (cols, generated []string, err error) {
 	rows, err := db.QueryContext(ctx, `
-		SELECT a.attname
+		SELECT a.attname, (a.attgenerated <> '') AS is_generated
 		FROM pg_attribute a
 		WHERE a.attrelid = $1::regclass
 		  AND a.attnum > 0
 		  AND NOT a.attisdropped
 		ORDER BY a.attnum`, table)
 	if err != nil {
-		return nil, fmt.Errorf("read columns of %q: %w", table, err)
+		return nil, nil, fmt.Errorf("read columns of %q: %w", table, err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	var cols []string
 	for rows.Next() {
-		var c string
-		if err := rows.Scan(&c); err != nil {
-			return nil, err
+		var (
+			c     string
+			isGen bool
+		)
+		if err := rows.Scan(&c, &isGen); err != nil {
+			return nil, nil, err
 		}
 		cols = append(cols, c)
+		if isGen {
+			generated = append(generated, c)
+		}
 	}
-	return cols, rows.Err()
+	return cols, generated, rows.Err()
 }
 
 // stream runs one replication session. It connects, ensures the publication
