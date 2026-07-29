@@ -109,12 +109,18 @@ func (db *DB) ProposeType(ctx context.Context, c *cluster.Configuration) error {
 }
 
 func ParseType(c *cluster.Configuration, s cluster.DatabaseStorage) (string, *cluster.Type, error) {
-	// A user cannot author a type whose id lands in committed's reserved
-	// system-type namespace: an older node would treat it as a (skippable or
-	// must-gate) system record rather than user data. Built-in system types
-	// register directly and never reach here, so this only guards submissions.
-	if cluster.IsReservedSystemID(c.ID) {
-		return "", nil, fmt.Errorf("type id %q is in committed's reserved system-type namespace and cannot be used for a user type", c.ID)
+	// A user cannot author a type whose id collides with committed's internal
+	// system types — either the reserved system-type namespace (an older node
+	// would treat it as a skippable/must-gate system record) OR a grandfathered
+	// built-in id. The built-in case is load-bearing: the apply path resolves a
+	// built-in id to the system type (systemType-first, see resolveType), so a
+	// user type sitting in the bucket under that id lets a later proposal's user
+	// bytes reach an internal config handler that Fatals on the decode mismatch —
+	// a committed, deterministic entry that crash-loops every node. Built-in
+	// system types register directly and never reach here, so this only guards
+	// user submissions.
+	if cluster.IsReservedSystemID(c.ID) || cluster.IsInternal(c.ID) {
+		return "", nil, fmt.Errorf("type id %q is a committed system-type id (reserved namespace or built-in) and cannot be used for a user type", c.ID)
 	}
 
 	// Type configs decode without ${VAR} interpolation, deliberately:

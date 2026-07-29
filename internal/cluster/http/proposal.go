@@ -45,6 +45,17 @@ func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
 
 	var es []*cluster.Entity
 	for _, e := range pr.Entities {
+		// The public proposal API only accepts entities of USER topic types. A
+		// committed-internal/system type id (a built-in, or the reserved
+		// namespace) resolves to a system type on the apply path (systemType-first)
+		// and hands the user's bytes to an internal config handler that Fatals on a
+		// decode mismatch — a committed, deterministic entry that crash-loops every
+		// node. Reject at the boundary so such an entry never enters the log.
+		if cluster.IsInternal(e.TypeID) || cluster.IsReservedSystemID(e.TypeID) {
+			writeErrorf(w, httpgo.StatusBadRequest, "type_reserved",
+				"type %q is a committed system-type id and cannot be used in a proposal", e.TypeID)
+			return
+		}
 		t, err := h.c.ResolveType(cluster.LatestTypeRef(e.TypeID))
 		if err != nil {
 			writeErrorf(w, httpgo.StatusBadRequest, "type_not_found", "type %q not found", e.TypeID)

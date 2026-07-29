@@ -408,6 +408,33 @@ func TestAddProposal_UnconfirmedIs503(t *testing.T) {
 	requireErrorResponse(t, resp, "request_unconfirmed")
 }
 
+// TestAddProposal_RejectsInternalTypeID is the cluster-brick guard: a proposal
+// referencing a committed-internal/system type id must be rejected at the boundary
+// (400) and must NEVER reach Propose. Without it, the entry commits, apply resolves
+// the system type (systemType-first), hands the user's bytes to an internal config
+// handler, and Fatals on the decode mismatch — crash-looping every node on a
+// deterministic committed entry, unrecoverable without raft-log surgery.
+func TestAddProposal_RejectsInternalTypeID(t *testing.T) {
+	h, fake := setupTest()
+
+	// databaseType's grandfathered built-in id (frozen; cluster.IsInternal == true).
+	const systemTypeID = "4698b77e-9a7c-41a2-aae4-984da0cd33c1"
+	require.True(t, cluster.IsInternal(systemTypeID), "guard test needs a real internal type id")
+
+	body := `{"entities": [{"typeId": "` + systemTypeID + `", "key": "k1", "data": {"not": "a Configuration protobuf"}}]}`
+	req := httptest.NewRequest("POST", "http://localhost/v1/proposal", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	resp := w.Result()
+	require.Equal(t, 400, resp.StatusCode)
+	requireErrorResponse(t, resp, "type_reserved")
+	require.Equal(t, 0, fake.ProposeCallCount(),
+		"an internal-type proposal must never be committed — it would Fatal every node at apply")
+	require.Equal(t, 0, fake.ResolveTypeCallCount(),
+		"the guard must reject before resolving the type")
+}
+
 func TestAddProposal_MultipleEntities(t *testing.T) {
 	h, fake := setupTest()
 
