@@ -60,4 +60,40 @@ func TestFlushPending_FlagsFailoverLineageRegression(t *testing.T) {
 		p := <-ch
 		require.False(t, p.DedupUnsafe, "no numeric baseline must never flag")
 	})
+
+	// A failover to a promoted replica whose current binlog coincidentally shares
+	// the resume file ORDINAL but sits at a LOWER offset. The old file-number-only
+	// guard (`n < resumeFileNum`) missed this — n == resumeFileNum — so the
+	// coordinate encoded below the highwater and genuinely-new data was SILENTLY
+	// dedup-dropped (SourceSeq = fileNum<<32 | pos). The full-coordinate guard
+	// must flag it. This is the silent-LOSS case, strictly worse than the < case.
+	sameOrdinal := func(resumePos, curPos uint32) (*MySQLEventHandler, chan *cluster.Proposal) {
+		ch := make(chan *cluster.Proposal, 1)
+		rn, _ := binlogFileNum("binlog.000042")
+		h := &MySQLEventHandler{
+			proposalChan:  ch,
+			resumeFileNum: rn,
+			resumePos:     resumePos,
+			curFile:       "binlog.000042",
+			curPos:        curPos,
+			pending:       []*cluster.Entity{{Key: []byte("k"), Data: []byte("v")}},
+		}
+		return h, ch
+	}
+
+	t.Run("equal ordinal, lower offset is flagged (silent-loss case)", func(t *testing.T) {
+		h, ch := sameOrdinal(8_000_000, 500_000) // resumed at 8M; replica at 500k
+		require.NoError(t, h.flushPending(context.Background(), false))
+		p := <-ch
+		require.True(t, p.DedupUnsafe,
+			"same file ordinal at a lower offset encodes below the highwater and must be flagged, not silently dropped")
+	})
+
+	t.Run("equal ordinal, higher offset is not flagged (normal forward progress)", func(t *testing.T) {
+		h, ch := sameOrdinal(8_000_000, 9_000_000) // same lineage, advanced within the file
+		require.NoError(t, h.flushPending(context.Background(), false))
+		p := <-ch
+		require.False(t, p.DedupUnsafe,
+			"same-lineage forward progress within the resume file must not freeze")
+	})
 }

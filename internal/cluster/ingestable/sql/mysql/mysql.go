@@ -690,6 +690,7 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			// non-nil here; a name without a numeric suffix yields 0 (no baseline
 			// → never trips), matching encodeSourceSeq's dedup-disabled fallback.
 			resumeFileNum: func() uint64 { n, _ := binlogFileNum(lastPos.Name); return n }(),
+			resumePos:     lastPos.Pos,
 			// Re-chunk guard: the checkpoint recorded the chunkTag under which its
 			// parts were committed. A mismatch now means the budget/config/binary
 			// changed and a replayed same-coordinate multi-part could mis-drop a
@@ -833,16 +834,22 @@ type MySQLEventHandler struct {
 	flushPos  uint32
 	flushSub  uint32
 
-	// resumeFileNum is the binlog file number this handler resumed from (the
-	// checkpoint's file, or 0 when there is no numeric baseline). If the live
-	// stream's file number ever drops below it, the source's binlog lineage
-	// regressed — a failover to a replica whose numbering restarts low, or a
-	// RESET MASTER — and every coordinate it now emits encodes below the durable
-	// SourceSeq highwater. Those proposals are stamped DedupUnsafe so the ingest
-	// worker freezes rather than silently dedup-dropping real post-failover data.
-	// Set once at construction from the resume position; never advanced (a normal
-	// stream only rotates the file number upward, so it never trips falsely).
+	// resumeFileNum / resumePos are the (file number, byte offset) of the position
+	// this handler resumed from — the failover-lineage baseline (resumeFileNum is 0
+	// when there is no numeric baseline). If the live coordinate ever lands at or
+	// below this baseline — a lower file number, OR the same file number at an
+	// equal/lower offset — the source's binlog lineage regressed (a failover to a
+	// replica whose numbering restarts low or coincidentally shares the file
+	// ordinal, or a RESET MASTER), so the coordinate it now emits encodes at or
+	// below the durable SourceSeq highwater (SourceSeq = fileNum<<32 | pos). Those
+	// proposals are stamped DedupUnsafe so the ingest worker freezes rather than
+	// silently dedup-dropping real post-failover data. Comparing the file number
+	// alone missed the equal-ordinal/lower-offset case, which is silent LOSS — so
+	// the full coordinate is compared. Set once at construction; never advanced (a
+	// normal same-lineage stream only ever advances above the baseline, so this
+	// never trips falsely).
 	resumeFileNum uint64
+	resumePos     uint32
 
 	// chunkingChanged is set at construction when the current chunkTag differs
 	// from the one recorded in the resume checkpoint — the flush budget, config
@@ -1278,14 +1285,18 @@ func (h *MySQLEventHandler) flushPending(ctx context.Context, isSoftFlush bool) 
 	// streamed-then-gap-deleted row still carries this epoch until the sweep).
 	stampGeneration(h.pending, h.epoch)
 	p := &cluster.Proposal{Entities: h.pending, SourceSeq: encodeSourceSeq(h.curFile, h.curPos, h.flushSub)}
-	// Failover-lineage guard: if the live coordinate's file number has dropped
-	// below the resume baseline, this stream is a different binlog lineage (a
-	// promoted replica / RESET MASTER) whose low coordinates encode below the
-	// durable highwater. Flag the proposal so the ingest worker freezes instead
-	// of silently dedup-dropping it — this data would otherwise be lost. See
-	// cluster.Proposal.DedupUnsafe and h.resumeFileNum.
+	// Failover-lineage guard: if the live coordinate is at or below the resume
+	// baseline — a lower file number, OR the same file number at an equal/lower
+	// byte offset — this stream is a different binlog lineage (a promoted replica
+	// / RESET MASTER) whose coordinate encodes at or below the durable highwater
+	// (SourceSeq = fileNum<<32 | pos). Flag the proposal so the ingest worker
+	// freezes instead of silently dedup-dropping it — this data would otherwise be
+	// lost. A normal same-lineage resume only ever streams ABOVE the baseline, so
+	// this never trips falsely. Comparing the file number alone missed the
+	// equal-ordinal/lower-offset case (silent loss). See cluster.Proposal.DedupUnsafe.
 	if h.resumeFileNum > 0 {
-		if n, ok := binlogFileNum(h.curFile); ok && n < h.resumeFileNum {
+		if n, ok := binlogFileNum(h.curFile); ok &&
+			(n < h.resumeFileNum || (n == h.resumeFileNum && h.curPos <= h.resumePos)) {
 			p.DedupUnsafe = true
 		}
 	}
