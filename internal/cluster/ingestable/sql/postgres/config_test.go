@@ -111,6 +111,23 @@ func TestBuildPgConfig(t *testing.T) {
 	}
 }
 
+// TestBuildPgConfig_PinsCanonicalGUCs: both the snapshot and replication conn
+// strings pin timezone=UTC (+ datestyle / bytea_output) as session GUCs, so
+// timestamptz and friends render canonically on every source regardless of the
+// server's defaults — overriding even a value the operator put in the URL.
+func TestBuildPgConfig_PinsCanonicalGUCs(t *testing.T) {
+	cfg, err := buildPgConfig(&sql.Config{
+		ConnectionString: "postgres://u:p@h:5432/db?timezone=America%2FNew_York",
+	})
+	require.NoError(t, err)
+	for name, cs := range map[string]string{"sql": cfg.sqlConnString, "replication": cfg.connString} {
+		require.Contains(t, cs, "timezone=UTC", name)
+		require.NotContains(t, cs, "New_York", name, "the URL's timezone must be overridden to UTC")
+		require.Contains(t, cs, "bytea_output=hex", name)
+		require.Contains(t, cs, "datestyle=", name)
+	}
+}
+
 func TestBuildPgConfigInvalidURL(t *testing.T) {
 	config := &sql.Config{
 		ConnectionString: "://invalid",

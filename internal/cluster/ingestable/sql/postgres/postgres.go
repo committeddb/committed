@@ -125,6 +125,22 @@ func buildPgConfig(config *sql.Config) (*pgConfig, error) {
 	}
 
 	q := u.Query()
+
+	// Pin the session GUCs that govern how the source renders values into Actuals,
+	// so ingest is deterministic and identical across nodes regardless of the
+	// source server's defaults — mirroring the MySQL path's SET time_zone = '+00:00'.
+	// pgx sends unrecognized connection params as startup RuntimeParams (session
+	// GUCs), so these apply to BOTH the snapshot and replication connections built
+	// below (a value the operator put in the URL is deliberately overridden):
+	//   - timezone=UTC canonicalizes timestamptz to +00 — else a non-UTC server
+	//     renders local-offset text that silently shifts when mapped into a
+	//     timestamp-WITHOUT-tz sink column;
+	//   - datestyle and bytea_output keep date / bytea rendering canonical (bytea
+	//     decode on the sink expects the \x hex form).
+	q.Set("timezone", "UTC")
+	q.Set("datestyle", "ISO, MDY")
+	q.Set("bytea_output", "hex")
+
 	cfg := &pgConfig{
 		tables: config.Tables,
 	}
