@@ -45,6 +45,10 @@ var ErrPrimaryKeyColumnMissing = errors.New("ingest: a configured primaryKey col
 // against a freshly-observed source schema. A column that is both keyed and mapped
 // is reported only in MissingKey — corruption dominates divergence.
 type SchemaDrift struct {
+	// Topic is the id of the topic whose contract drifted (the spec's Type.ID), so
+	// the park message names which topic of a multi-topic ingestable to fix. Empty
+	// when the spec carries no Type (a hand-built config).
+	Topic string
 	// MissingKey are configured primaryKey columns absent from the source schema
 	// (CORRUPTION → park). Original config casing, for the operator-facing message.
 	MissingKey []string
@@ -61,6 +65,9 @@ type SchemaDrift struct {
 // a deduped warn for divergence).
 func ReconcileSchema(spec *TopicSpec, observed map[string]bool) SchemaDrift {
 	var d SchemaDrift
+	if spec.Type != nil {
+		d.Topic = spec.Type.ID
+	}
 	key := make(map[string]bool, len(spec.PrimaryKey))
 	for _, pk := range spec.PrimaryKey {
 		if pk == "" {
@@ -88,12 +95,13 @@ func ReconcileSchema(spec *TopicSpec, observed map[string]bool) SchemaDrift {
 
 // ParkError returns a non-nil error wrapping ErrPrimaryKeyColumnMissing when the
 // drift includes a missing primaryKey column — the caller must PARK the worker —
-// or nil. It names the missing key columns for the operator.
+// or nil. It names the affected topic and the missing key columns, so an operator
+// of a multi-topic ingestable knows which topic to fix.
 func (d SchemaDrift) ParkError() error {
 	if len(d.MissingKey) == 0 {
 		return nil
 	}
 	return fmt.Errorf(
-		"primaryKey column(s) %v missing from the source table's current schema (renamed or dropped after the ingestable was created); every CDC row would collapse onto one key — re-POST the ingestable with the current primary key, or restore the column: %w",
-		d.MissingKey, ErrPrimaryKeyColumnMissing)
+		"topic %q: primaryKey column(s) %v missing from the source table's current schema (renamed or dropped after the ingestable was created); every CDC row would collapse onto one key — re-POST the ingestable with the current primary key, or restore the column: %w",
+		d.Topic, d.MissingKey, ErrPrimaryKeyColumnMissing)
 }

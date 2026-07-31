@@ -739,8 +739,11 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			// Reconnecting re-reads the same event and loops forever — return so the
 			// worker parks (freeze → supervisor → committed.worker.parked), loud and
 			// observable, rather than silently corrupting the sink.
+			// streamErr (the ParkError) names the affected topic and the missing
+			// columns, so it is the authoritative detail — no separate primary_key
+			// field, which would show only the first topic's key on a multi-topic
+			// ingestable.
 			zap.L().Error("ingest stopping: a primaryKey column is missing from the source schema (renamed or dropped) — worker will park until the ingestable is re-POSTed or the column restored",
-				zap.Strings("primary_key", handler.config.PrimaryKey),
 				zap.Error(streamErr),
 			)
 			return streamErr

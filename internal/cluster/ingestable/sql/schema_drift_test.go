@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/ingestable/sql"
 )
 
@@ -86,6 +87,16 @@ func TestReconcileSchema(t *testing.T) {
 
 	t.Run("wrapped park sentinel is matchable", func(t *testing.T) {
 		err := sql.ReconcileSchema(cfg([]string{"id"}), observed("other")).ParkError()
+		require.True(t, errors.Is(err, sql.ErrPrimaryKeyColumnMissing))
+	})
+
+	// The park error names the affected topic so an operator of a multi-topic
+	// ingestable knows which topic's config to fix (the park halts all N topics).
+	t.Run("park error names the affected topic", func(t *testing.T) {
+		spec := &sql.TopicSpec{Type: &cluster.Type{ID: "orders"}, PrimaryKey: []string{"id"}}
+		err := sql.ReconcileSchema(spec, observed("other")).ParkError()
+		require.ErrorContains(t, err, `topic "orders"`)
+		require.ErrorContains(t, err, "id") // the missing key column
 		require.True(t, errors.Is(err, sql.ErrPrimaryKeyColumnMissing))
 	})
 }
