@@ -2,6 +2,7 @@ package sql
 
 import (
 	"context"
+	"strings"
 
 	"github.com/committeddb/committed/internal/cluster"
 )
@@ -51,10 +52,37 @@ type Dialect interface {
 	SourceColumns(config *Config) (columns, generated map[string][]string, err error)
 }
 
+// TopicSpec routes one topic (its Type) to be fed from one-or-more source Tables,
+// with its own Mappings and PrimaryKey. An ingestable holds one or more specs
+// (Config.Topics): the flat single-topic config is one spec; the [[sql.topics]]
+// form is N. All specs share the one connection / slot / publication / binlog
+// reader and the one resume/dedup cursor.
+type TopicSpec struct {
+	Type           *cluster.Type
+	Tables         []string
+	Mappings       []Mapping
+	MapAllColumns  bool
+	ExcludeColumns []string
+	PrimaryKey     []string
+}
+
 type Config struct {
 	ConnectionString string
-	Type             *cluster.Type
-	Mappings         []Mapping
+
+	// Topics is the per-table routing model — one entry per topic. Every
+	// entity-building site resolves its table's spec via SpecForTable and stamps
+	// that spec's Type / Mappings / PrimaryKey. The flat single-topic config
+	// parses to a one-element Topics.
+	Topics []TopicSpec
+	// tableToSpec routes a source table name (lowercased) to its owning spec;
+	// built by index() from Topics. A table may belong to at most one spec.
+	tableToSpec map[string]*TopicSpec
+
+	// The fields below mirror Topics[0] for the single-topic (flat) form and are
+	// what the flat parser fills; multi-topic call sites read the per-table spec
+	// instead. Tables is the derived union of every spec's tables.
+	Type     *cluster.Type
+	Mappings []Mapping
 	// MapAllColumns infers a jsonName=column mapping for every source column
 	// (across all watched Tables) so a whole-table mirror needs no per-column
 	// [[sql.mappings]]. The column set is FROZEN at config-build time: the
@@ -76,6 +104,29 @@ type Config struct {
 	PrimaryKey []string
 	Tables     []string
 	Options    map[string]string
+}
+
+// SpecForTable returns the TopicSpec routing the given source table (matched
+// case-insensitively), or nil if the table is not watched by this config. The
+// table→spec map is built lazily on first use: the ingest worker resolves specs
+// from a single streaming goroutine (snapshot then stream, sequentially), so no
+// lock is needed, and keeping it nil until first use leaves a freshly parsed
+// Config comparable by value. Cross-spec table-routing conflicts are rejected at
+// parse time (see the parser), so first-appearance wins here is never ambiguous.
+func (c *Config) SpecForTable(table string) *TopicSpec {
+	if c.tableToSpec == nil {
+		c.tableToSpec = make(map[string]*TopicSpec, len(c.Tables))
+		for i := range c.Topics {
+			spec := &c.Topics[i]
+			for _, t := range spec.Tables {
+				key := strings.ToLower(t)
+				if _, ok := c.tableToSpec[key]; !ok {
+					c.tableToSpec[key] = spec
+				}
+			}
+		}
+	}
+	return c.tableToSpec[strings.ToLower(table)]
 }
 
 // The mapstructure tags drive viper.UnmarshalKey when parsing the

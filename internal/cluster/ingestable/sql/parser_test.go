@@ -31,31 +31,31 @@ func TestParse(t *testing.T) {
 		{
 			"mysql_simple",
 			"./simple_ingestable.toml",
-			simpleConfig(),
+			withFlatTopic(simpleConfig()),
 			&mysql.MySQLDialect{},
 		},
 		{
 			"mysql_with_tables",
 			"./mysql_with_tables_ingestable.toml",
-			mysqlWithTablesConfig(),
+			withFlatTopic(mysqlWithTablesConfig()),
 			&mysql.MySQLDialect{},
 		},
 		{
 			"postgres_with_options",
 			"./postgres_ingestable.toml",
-			postgresConfig(),
+			withFlatTopic(postgresConfig()),
 			&postgres.PostgreSQLDialect{},
 		},
 		{
 			"postgres_multi_table",
 			"./postgres_multi_table_ingestable.toml",
-			postgresMultiTableConfig(),
+			withFlatTopic(postgresMultiTableConfig()),
 			&postgres.PostgreSQLDialect{},
 		},
 		{
 			"postgres_default_options",
 			"./postgres_defaults_ingestable.toml",
-			postgresDefaultsConfig(),
+			withFlatTopic(postgresDefaultsConfig()),
 			&postgres.PostgreSQLDialect{},
 		},
 	}
@@ -295,6 +295,21 @@ mapAllColumns = true
 	config, _, err := p.ParseConfig(v)
 	require.NoError(t, err)
 	require.True(t, config.MapAllColumns)
+}
+
+// withFlatTopic mirrors the singular per-topic fields into a one-element Topics,
+// matching what the flat-form parser builds, so the expected configs stay in sync
+// with the parser without repeating the spec in every helper.
+func withFlatTopic(c *sql.Config) *sql.Config {
+	c.Topics = []sql.TopicSpec{{
+		Type:           c.Type,
+		Tables:         c.Tables,
+		Mappings:       c.Mappings,
+		MapAllColumns:  c.MapAllColumns,
+		ExcludeColumns: c.ExcludeColumns,
+		PrimaryKey:     c.PrimaryKey,
+	}}
+	return c
 }
 
 func simpleConfig() *sql.Config {

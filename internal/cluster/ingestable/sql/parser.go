@@ -175,6 +175,17 @@ func (p *IngestableParser) ParseConfig(v *cluster.ParsedConfig) (*Config, Dialec
 		Tables:           tables,
 		Options:          options,
 	}
+	// The flat form is a single topic-spec (Config.Tables above is already the
+	// union for one spec). Per-table call sites resolve via config.SpecForTable;
+	// nothing reads Topics until then.
+	config.Topics = []TopicSpec{{
+		Type:           tipe,
+		Tables:         tables,
+		Mappings:       mappings,
+		MapAllColumns:  mapAllColumns,
+		ExcludeColumns: excludeColumns,
+		PrimaryKey:     primaryKey,
+	}}
 
 	return config, dialect, nil
 }
