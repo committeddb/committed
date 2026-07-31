@@ -101,9 +101,21 @@ func (i *Ingestable) WithEpochFloor(r TopicEpochReader) *Ingestable {
 }
 
 func (i *Ingestable) Ingest(ctx context.Context, pos cluster.Position, pr chan<- *cluster.Proposal, po chan<- cluster.Position) error {
+	// One shared refresh epoch across all topics: floor it to the MAX highwater
+	// over every spec's topic, so a snapshot stamps ABOVE the highest generation
+	// any of this ingestable's topics still carries on its sink. Each topic's
+	// closing marker at the shared epoch then sweeps its own rows below it (the
+	// per-topic sweep at apply is what makes one shared epoch correct — see the
+	// per-table-topic-routing plan). One spec → the single topic's highwater, as
+	// before.
+	i.config.EnsureTopics()
 	var floor uint64
-	if i.epochFloor != nil && i.config.Type != nil {
-		floor = i.epochFloor.TopicRefreshEpoch(i.config.Type.ID)
+	if i.epochFloor != nil {
+		for idx := range i.config.Topics {
+			if t := i.config.Topics[idx].Type; t != nil {
+				floor = max(floor, i.epochFloor.TopicRefreshEpoch(t.ID))
+			}
+		}
 	}
 	return i.dialect.Ingest(ctx, i.config, pos, floor, pr, po)
 }

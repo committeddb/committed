@@ -1920,13 +1920,15 @@ func stampGeneration(entities []*cluster.Entity, epoch uint64) {
 }
 
 // emitRefreshBoundary emits the refresh-boundary marker that closes a full
-// re-snapshot: a single control entity carrying the topic type and the epoch
-// the refresh reached, so a keyed sink sweeps every row still at an older epoch
-// (a row deleted at the source in the lost window, never re-emitted). It then
-// checkpoints the position with no snapshot progress at this epoch, transitioning
-// the worker to streaming; a restart after the marker resumes streaming rather
-// than re-running the refresh. Emitted ONLY after an all-tables refresh — never a
-// partial added-table backfill, which would sweep the topic's sibling tables.
+// re-snapshot: one control entity PER TOPIC carrying the topic type and the shared
+// epoch the refresh reached, so each keyed sink sweeps every row still at an older
+// epoch (a row deleted at the source in the lost window, never re-emitted). Each
+// marker rides its own proposal (homogeneous, one topic, matching the flush path).
+// It then checkpoints the position once, with no snapshot progress at this epoch,
+// transitioning the worker to streaming; a restart after the markers resumes
+// streaming rather than re-running the refresh. Emitted ONLY after an all-tables
+// refresh — never a partial added-table backfill, which would sweep a topic's
+// sibling tables. One spec (the flat form) emits exactly one marker as before.
 func emitRefreshBoundary(
 	ctx context.Context,
 	config *sql.Config,
@@ -1935,11 +1937,18 @@ func emitRefreshBoundary(
 	lsn pglogrepl.LSN,
 	epoch uint64,
 ) error {
-	marker := cluster.NewRefreshBoundaryEntity(config.Type, epoch)
-	select {
-	case pr <- &cluster.Proposal{Entities: []*cluster.Entity{marker}}:
-	case <-ctx.Done():
-		return ctx.Err()
+	config.EnsureTopics()
+	for i := range config.Topics {
+		spec := &config.Topics[i]
+		if spec.Type == nil {
+			continue
+		}
+		marker := cluster.NewRefreshBoundaryEntity(spec.Type, epoch)
+		select {
+		case pr <- &cluster.Proposal{Entities: []*cluster.Entity{marker}}:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	bs, err := encodePosition(lsn, nil, epoch)
 	if err != nil {

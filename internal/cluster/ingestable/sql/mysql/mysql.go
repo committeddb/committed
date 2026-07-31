@@ -555,16 +555,25 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 				zap.Uint32("binlog_pos", lastPos.Pos),
 			)
 
-			// Close the full re-snapshot with a refresh-boundary marker at this
-			// epoch so a keyed sink sweeps rows left at an older one (a row
-			// deleted at the source in the purged window, never re-emitted). MySQL
-			// has no partial added-table backfill, so every snapshot is a full
-			// refresh and always emits the marker.
-			marker := cluster.NewRefreshBoundaryEntity(config.Type, currentEpoch)
-			select {
-			case pr <- &cluster.Proposal{Entities: []*cluster.Entity{marker}}:
-			case <-ctx.Done():
-				return nil
+			// Close the full re-snapshot with a refresh-boundary marker PER TOPIC at
+			// this shared epoch so each keyed sink sweeps its rows left at an older one
+			// (a row deleted at the source in the purged window, never re-emitted).
+			// MySQL has no partial added-table backfill, so every snapshot is a full
+			// refresh and always emits the markers. One marker per proposal keeps each
+			// proposal homogeneous (one topic), matching the flush path; one spec for
+			// the flat form emits exactly one marker as before.
+			config.EnsureTopics()
+			for ti := range config.Topics {
+				spec := &config.Topics[ti]
+				if spec.Type == nil {
+					continue
+				}
+				marker := cluster.NewRefreshBoundaryEntity(spec.Type, currentEpoch)
+				select {
+				case pr <- &cluster.Proposal{Entities: []*cluster.Entity{marker}}:
+				case <-ctx.Done():
+					return nil
+				}
 			}
 
 			// Checkpoint the final snapshot position (no
