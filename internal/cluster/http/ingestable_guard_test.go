@@ -3,6 +3,7 @@ package http_test
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	httpgo "net/http"
 	"net/http/httptest"
 	"strings"
@@ -33,6 +34,85 @@ func postIngestable(h *http.HTTP, id, topic string) *httptest.ResponseRecorder {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 	return w
+}
+
+// multiTopicConfigBody is a well-formed [[sql.topics]] ingestable config producing
+// one topic per name — the multi-topic shape topicsOf must read every topic from.
+func multiTopicConfigBody(topics ...string) string {
+	var b strings.Builder
+	b.WriteString("[ingestable]\ntype = \"sql\"\n\n[sql]\ndialect = \"postgres\"\n")
+	for _, tp := range topics {
+		fmt.Fprintf(&b, "\n[[sql.topics]]\ntopic = %q\ntables = [\"t_%s\"]\nprimaryKey = \"id\"\n", tp, tp)
+	}
+	return b.String()
+}
+
+func multiTopicIngestableConfig(id string, topics ...string) *cluster.Configuration {
+	return &cluster.Configuration{ID: id, MimeType: "text/toml", Data: []byte(multiTopicConfigBody(topics...))}
+}
+
+func postMultiTopicIngestable(h *http.HTTP, id string, topics ...string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(httpgo.MethodPost, "http://localhost/v1/ingestable/"+id, strings.NewReader(multiTopicConfigBody(topics...)))
+	req.Header["Content-Type"] = []string{"text/toml"}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	return w
+}
+
+// TestAddIngestable_RejectsWhenExistingMultiTopicOwnsTopic verifies the guard sees
+// EVERY topic an existing multi-topic ([[sql.topics]]) ingestable produces: a new
+// ingestable claiming one of them is rejected. Without topicsOf reading sql.topics,
+// the existing owner would be invisible and the collision would slip through.
+func TestAddIngestable_RejectsWhenExistingMultiTopicOwnsTopic(t *testing.T) {
+	fake := &clusterfakes.FakeCluster{}
+	fake.IngestablesReturns([]*cluster.Configuration{multiTopicIngestableConfig("db-ing", "orders", "customers")}, nil)
+	h := http.New(fake)
+
+	// A new flat ingestable claiming "customers" — the SECOND topic of the multi set.
+	w := postIngestable(h, "customers-ing", "customers")
+
+	require.Equal(t, httpgo.StatusBadRequest, w.Code)
+	require.Equal(t, 0, fake.ProposeIngestableCallCount(),
+		"the collision with the existing multi-topic ingestable must be caught")
+
+	var body struct {
+		Details struct {
+			Issue string `json:"issue"`
+		} `json:"details"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	require.Contains(t, body.Details.Issue, "customers")
+	require.Contains(t, body.Details.Issue, "db-ing")
+}
+
+// TestAddIngestable_MultiTopicIncomingCheckedOnEveryTopic verifies the guard checks
+// EVERY topic an INCOMING multi-topic ingestable would produce: one colliding with
+// an existing owner is rejected. Without topicsOf reading sql.topics, the incoming
+// config's topics would be empty and the guard would return early (no check).
+func TestAddIngestable_MultiTopicIncomingCheckedOnEveryTopic(t *testing.T) {
+	fake := &clusterfakes.FakeCluster{}
+	fake.IngestablesReturns([]*cluster.Configuration{sqlIngestableConfig("orders-ing", "orders")}, nil)
+	h := http.New(fake)
+
+	// A new multi-topic ingestable whose SECOND topic ("orders") collides.
+	w := postMultiTopicIngestable(h, "db-ing", "customers", "orders")
+
+	require.Equal(t, httpgo.StatusBadRequest, w.Code)
+	require.Equal(t, 0, fake.ProposeIngestableCallCount(),
+		"a multi-topic ingestable must be checked on every topic it produces")
+}
+
+// TestAddIngestable_MultiTopicDistinctTopicsAllowed verifies a multi-topic
+// ingestable whose topics are all free is proposed normally.
+func TestAddIngestable_MultiTopicDistinctTopicsAllowed(t *testing.T) {
+	fake := &clusterfakes.FakeCluster{}
+	fake.IngestablesReturns([]*cluster.Configuration{sqlIngestableConfig("orders-ing", "orders")}, nil)
+	h := http.New(fake)
+
+	w := postMultiTopicIngestable(h, "db-ing", "customers", "shipments")
+
+	require.Equal(t, httpgo.StatusOK, w.Code)
+	require.Equal(t, 1, fake.ProposeIngestableCallCount())
 }
 
 // TestAddIngestable_RejectsSecondIngestableOnSameTopic is the single-authority

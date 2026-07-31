@@ -227,6 +227,19 @@ func topicsOf(c *cluster.Configuration, kind string) []string {
 	}
 
 	add(v.GetString(typ + ".topic"))
+	// A multi-topic SQL ingestable ([[sql.topics]]) produces one topic per entry.
+	// The key is absent for the flat form and for syncables, so this is a no-op
+	// there. Without it the single-authority-per-topic guard would skip a
+	// multi-topic ingestable entirely (topicsOf empty → guard returns early),
+	// letting two ingestables produce the same topic and silently cross-delete on
+	// refresh; the pipeline producer lookup would likewise miss it.
+	var multiTopics []struct {
+		Topic string `mapstructure:"topic"`
+	}
+	_ = v.UnmarshalKey(typ+".topics", &multiTopics)
+	for _, s := range multiTopics {
+		add(s.Topic)
+	}
 	if typ == "sql-projection" {
 		var srcs []struct {
 			Topic string `mapstructure:"topic"`
