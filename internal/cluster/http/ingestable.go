@@ -49,6 +49,7 @@ type IngestableStatusResponse struct {
 // is often source PII; Complete answers "is this table done" without it.
 type TableSnapshotProgress struct {
 	Table    string `json:"table"`
+	Topic    string `json:"topic"`
 	Complete bool   `json:"complete"`
 }
 
@@ -217,6 +218,7 @@ func toIngestableStatusResponse(st cluster.IngestableStatus) IngestableStatusRes
 	for _, t := range st.SnapshotProgress {
 		resp.SnapshotProgress = append(resp.SnapshotProgress, TableSnapshotProgress{
 			Table:    t.Table,
+			Topic:    t.Topic,
 			Complete: t.Complete,
 		})
 	}

@@ -19,6 +19,12 @@ func SnapshotTableStatus(config *Config, progress *dialectpb.SnapshotProgress) [
 	out := make([]cluster.TableSnapshotStatus, 0, len(config.Tables))
 	for _, t := range config.Tables {
 		st := cluster.TableSnapshotStatus{Table: t}
+		// Tag each table with the topic it feeds so per-topic snapshot progress is
+		// readable off the flat list (one topic for the flat form; N for
+		// [[sql.topics]]). SpecForTable resolves the raw config entry directly.
+		if spec := config.SpecForTable(t); spec != nil && spec.Type != nil {
+			st.Topic = spec.Type.ID
+		}
 		// A table is complete when there's no in-progress snapshot, or it's in the
 		// completed set. The keyset cursor (PK) is deliberately not surfaced — it is
 		// often source PII (see TableSnapshotStatus).

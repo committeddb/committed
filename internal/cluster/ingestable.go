@@ -170,6 +170,11 @@ type IngestableStatus struct {
 type TableSnapshotStatus struct {
 	// Table is the source table name as configured.
 	Table string
+	// Topic is the id of the topic this table feeds (its spec's Type.ID). A
+	// single-topic ingestable tags every table with the one topic; a multi-topic
+	// ingestable ([[sql.topics]]) shows which topic each table routes to, so an
+	// operator can read per-topic snapshot progress off the flat table list.
+	Topic string
 	// Complete is whether this table's snapshot finished.
 	Complete bool
 }

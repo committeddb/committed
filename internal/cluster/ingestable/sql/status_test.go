@@ -40,3 +40,21 @@ func TestSnapshotTableStatus(t *testing.T) {
 	// No configured tables → empty, non-nil slice.
 	require.Empty(t, sql.SnapshotTableStatus(&sql.Config{}, nil))
 }
+
+// TestSnapshotTableStatus_TagsTopic tags each table with the topic it feeds, so a
+// multi-topic ingestable's per-topic snapshot progress is readable off the flat
+// table list.
+func TestSnapshotTableStatus_TagsTopic(t *testing.T) {
+	cfg := &sql.Config{
+		Topics: []sql.TopicSpec{
+			{Type: &cluster.Type{ID: "orders"}, Tables: []string{"orders_us", "orders_eu"}},
+			{Type: &cluster.Type{ID: "customers"}, Tables: []string{"customers"}},
+		},
+		Tables: []string{"orders_us", "orders_eu", "customers"},
+	}
+	require.Equal(t, []cluster.TableSnapshotStatus{
+		{Table: "orders_us", Topic: "orders", Complete: true},
+		{Table: "orders_eu", Topic: "orders", Complete: true},
+		{Table: "customers", Topic: "customers", Complete: true},
+	}, sql.SnapshotTableStatus(cfg, nil))
+}
