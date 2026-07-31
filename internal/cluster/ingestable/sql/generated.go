@@ -18,7 +18,7 @@ import (
 // generated column. generatedByTable is the generated-column set per watched
 // table (from Dialect.SourceColumns); a column generated in ANY watched table is
 // treated as generated (mirroring how mapping resolution unions the tables).
-func rejectGeneratedColumnRefs(config *Config, generatedByTable map[string][]string) error {
+func rejectGeneratedColumnRefs(spec *TopicSpec, generatedByTable map[string][]string) error {
 	generated := make(map[string]bool)
 	for _, cols := range generatedByTable {
 		for _, c := range cols {
@@ -28,14 +28,14 @@ func rejectGeneratedColumnRefs(config *Config, generatedByTable map[string][]str
 	if len(generated) == 0 {
 		return nil
 	}
-	for _, m := range config.Mappings {
+	for _, m := range spec.Mappings {
 		if m.SQLColumn != "" && generated[strings.ToLower(m.SQLColumn)] {
 			return fmt.Errorf(
 				"mapping column %q is a generated/computed column, which committed cannot replicate: the source's change stream omits it, so it would be present on the initial snapshot but null on every later change — remove it from the mapping",
 				m.SQLColumn)
 		}
 	}
-	for _, pk := range config.PrimaryKey {
+	for _, pk := range spec.PrimaryKey {
 		if pk != "" && generated[strings.ToLower(pk)] {
 			return fmt.Errorf(
 				"primaryKey column %q is a generated/computed column, which committed cannot replicate (the change stream omits it) — a generated column cannot be an ingest primary key",

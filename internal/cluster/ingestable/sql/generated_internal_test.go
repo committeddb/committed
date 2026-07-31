@@ -14,24 +14,24 @@ func TestRejectGeneratedColumnRefs(t *testing.T) {
 	gen := map[string][]string{"orders": {"total"}}
 
 	t.Run("explicit mapping of a generated column is rejected", func(t *testing.T) {
-		err := rejectGeneratedColumnRefs(&Config{Mappings: []Mapping{{JsonName: "total", SQLColumn: "total"}}}, gen)
+		err := rejectGeneratedColumnRefs(&TopicSpec{Mappings: []Mapping{{JsonName: "total", SQLColumn: "total"}}}, gen)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "generated")
 	})
 	t.Run("case-insensitive", func(t *testing.T) {
-		require.Error(t, rejectGeneratedColumnRefs(&Config{Mappings: []Mapping{{JsonName: "t", SQLColumn: "TOTAL"}}}, gen))
+		require.Error(t, rejectGeneratedColumnRefs(&TopicSpec{Mappings: []Mapping{{JsonName: "t", SQLColumn: "TOTAL"}}}, gen))
 	})
 	t.Run("generated primaryKey is rejected", func(t *testing.T) {
-		err := rejectGeneratedColumnRefs(&Config{PrimaryKey: []string{"total"}}, gen)
+		err := rejectGeneratedColumnRefs(&TopicSpec{PrimaryKey: []string{"total"}}, gen)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "primaryKey")
 	})
 	t.Run("normal mapping/PK passes", func(t *testing.T) {
-		cfg := &Config{Mappings: []Mapping{{JsonName: "price", SQLColumn: "price"}}, PrimaryKey: []string{"id"}}
+		cfg := &TopicSpec{Mappings: []Mapping{{JsonName: "price", SQLColumn: "price"}}, PrimaryKey: []string{"id"}}
 		require.NoError(t, rejectGeneratedColumnRefs(cfg, gen))
 	})
 	t.Run("no generated columns is a no-op", func(t *testing.T) {
-		require.NoError(t, rejectGeneratedColumnRefs(&Config{Mappings: []Mapping{{JsonName: "total", SQLColumn: "total"}}}, nil))
+		require.NoError(t, rejectGeneratedColumnRefs(&TopicSpec{Mappings: []Mapping{{JsonName: "total", SQLColumn: "total"}}}, nil))
 	})
 }
 

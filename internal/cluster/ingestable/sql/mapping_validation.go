@@ -22,9 +22,9 @@ import (
 //   - A source table with two columns differing only by case is rejected: the
 //     lowercased decode map cannot distinguish them, so one would silently shadow
 //     the other. Legal only via quoted identifiers in Postgres; pathological.
-func validateMappingColumns(config *Config, colsByTable map[string][]string) error {
+func validateMappingColumns(spec *TopicSpec, colsByTable map[string][]string) error {
 	// A table whose columns collide when lowercased can't be decoded unambiguously.
-	for _, table := range config.Tables {
+	for _, table := range spec.Tables {
 		lowerToActual := make(map[string]string, len(colsByTable[table]))
 		for _, col := range colsByTable[table] {
 			lc := strings.ToLower(col)
@@ -41,19 +41,19 @@ func validateMappingColumns(config *Config, colsByTable map[string][]string) err
 	// valid if it resolves in any watched table — a multi-table ingestable may map
 	// a column that only some tables carry.
 	sourceCols := make(map[string]bool)
-	for _, table := range config.Tables {
+	for _, table := range spec.Tables {
 		for _, col := range colsByTable[table] {
 			sourceCols[strings.ToLower(col)] = true
 		}
 	}
-	for _, m := range config.Mappings {
+	for _, m := range spec.Mappings {
 		if m.SQLColumn == "" {
 			continue // malformed mappings are caught elsewhere; nothing to resolve here
 		}
 		if !sourceCols[strings.ToLower(m.SQLColumn)] {
 			return fmt.Errorf(
 				"mapping column %q not found in source table(s) %v — check the spelling and case, and that the column still exists; a mapping to a column the source lacks silently emits null on every row",
-				m.SQLColumn, config.Tables)
+				m.SQLColumn, spec.Tables)
 		}
 	}
 	// Every primaryKey column must resolve too: a nonexistent PK column decodes to
@@ -66,7 +66,7 @@ func validateMappingColumns(config *Config, colsByTable map[string][]string) err
 	// collapses that table's rows onto "<nil>". A column in NO table is a typo;
 	// one in some-but-not-all is a coverage gap — distinct cases, each with its
 	// own actionable message.
-	for _, pk := range config.PrimaryKey {
+	for _, pk := range spec.PrimaryKey {
 		if pk == "" {
 			continue
 		}
@@ -74,9 +74,9 @@ func validateMappingColumns(config *Config, colsByTable map[string][]string) err
 		if !sourceCols[lc] {
 			return fmt.Errorf(
 				"primaryKey column %q not found in source table(s) %v — check the spelling and case; a nonexistent PK column collapses every row onto a single entity key",
-				pk, config.Tables)
+				pk, spec.Tables)
 		}
-		for _, table := range config.Tables {
+		for _, table := range spec.Tables {
 			if !columnInTableFold(colsByTable[table], lc) {
 				return fmt.Errorf(
 					"primaryKey column %q is missing from watched table %q (it exists in another watched table, but a PK column must exist in EVERY table — otherwise that table's rows collapse onto the entity key \"<nil>\")",

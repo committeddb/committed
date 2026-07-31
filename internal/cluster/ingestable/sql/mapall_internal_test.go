@@ -8,7 +8,7 @@ import (
 
 func TestExpandMapAllColumns(t *testing.T) {
 	t.Run("maps every column 1:1 in source order", func(t *testing.T) {
-		cfg := &Config{Tables: []string{"movie"}}
+		cfg := &TopicSpec{Tables: []string{"movie"}}
 		require.NoError(t, expandMapAllColumns(cfg, map[string][]string{
 			"movie": {"movie_id", "title", "year"},
 		}))
@@ -20,7 +20,7 @@ func TestExpandMapAllColumns(t *testing.T) {
 	})
 
 	t.Run("explicit mapping overrides the inferred jsonName, keeping source order", func(t *testing.T) {
-		cfg := &Config{
+		cfg := &TopicSpec{
 			Tables:   []string{"movie"},
 			Mappings: []Mapping{{JsonName: "movieId", SQLColumn: "movie_id"}},
 		}
@@ -34,7 +34,7 @@ func TestExpandMapAllColumns(t *testing.T) {
 	})
 
 	t.Run("excludeColumns drops columns from the set", func(t *testing.T) {
-		cfg := &Config{Tables: []string{"users"}, ExcludeColumns: []string{"password_hash"}}
+		cfg := &TopicSpec{Tables: []string{"users"}, ExcludeColumns: []string{"password_hash"}}
 		require.NoError(t, expandMapAllColumns(cfg, map[string][]string{
 			"users": {"id", "email", "password_hash"},
 		}))
@@ -45,7 +45,7 @@ func TestExpandMapAllColumns(t *testing.T) {
 	})
 
 	t.Run("unions columns across tables, first-seen wins", func(t *testing.T) {
-		cfg := &Config{Tables: []string{"a", "b"}}
+		cfg := &TopicSpec{Tables: []string{"a", "b"}}
 		require.NoError(t, expandMapAllColumns(cfg, map[string][]string{
 			"a": {"id", "name"},
 			"b": {"id", "val"}, // shared id mapped once
@@ -58,7 +58,7 @@ func TestExpandMapAllColumns(t *testing.T) {
 	})
 
 	t.Run("override for a non-existent column is a build error", func(t *testing.T) {
-		cfg := &Config{
+		cfg := &TopicSpec{
 			Tables:   []string{"movie"},
 			Mappings: []Mapping{{JsonName: "x", SQLColumn: "nope"}},
 		}
@@ -67,13 +67,13 @@ func TestExpandMapAllColumns(t *testing.T) {
 	})
 
 	t.Run("excludeColumns for a non-existent column is a build error (typo would leak the secret)", func(t *testing.T) {
-		cfg := &Config{Tables: []string{"users"}, ExcludeColumns: []string{"pasword_hash"}}
+		cfg := &TopicSpec{Tables: []string{"users"}, ExcludeColumns: []string{"pasword_hash"}}
 		err := expandMapAllColumns(cfg, map[string][]string{"users": {"id", "password_hash"}})
 		require.ErrorContains(t, err, `"pasword_hash" not found`)
 	})
 
 	t.Run("a column both excluded and explicitly mapped is contradictory", func(t *testing.T) {
-		cfg := &Config{
+		cfg := &TopicSpec{
 			Tables:         []string{"users"},
 			Mappings:       []Mapping{{JsonName: "pw", SQLColumn: "password_hash"}},
 			ExcludeColumns: []string{"password_hash"},
@@ -83,7 +83,7 @@ func TestExpandMapAllColumns(t *testing.T) {
 	})
 
 	t.Run("excluding every column leaves nothing to map", func(t *testing.T) {
-		cfg := &Config{Tables: []string{"t"}, ExcludeColumns: []string{"a", "b"}}
+		cfg := &TopicSpec{Tables: []string{"t"}, ExcludeColumns: []string{"a", "b"}}
 		err := expandMapAllColumns(cfg, map[string][]string{"t": {"a", "b"}})
 		require.ErrorContains(t, err, "no columns to map")
 	})

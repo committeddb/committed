@@ -137,9 +137,13 @@ func (m *MySQLDialect) Preflight(config *sql.Config) error {
 			rowValueOptions)
 	}
 
-	// Reject a mapped spatial/VECTOR column rather than silently corrupt it.
-	if err := checkUnsupportedColumnTypes(ctx, db, config); err != nil {
-		return err
+	// Reject a mapped spatial/VECTOR column rather than silently corrupt it. Each
+	// topic-spec is checked against its own mapped/PK columns (one spec for the
+	// flat form, N for [[sql.topics]]).
+	for i := range config.Topics {
+		if err := checkUnsupportedColumnTypes(ctx, db, &config.Topics[i]); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -167,16 +171,16 @@ var unsupportedColumnTypes = map[string]bool{
 // spatial or VECTOR type (see unsupportedColumnTypes). Only mapped/PK columns are
 // checked: an unmapped spatial column is read but never rendered into a payload
 // or key, so committed leaves it alone rather than rejecting the whole table.
-func checkUnsupportedColumnTypes(ctx context.Context, db *gosql.DB, config *sql.Config) error {
-	used := make(map[string]bool, len(config.Mappings)+len(config.PrimaryKey))
-	for _, m := range config.Mappings {
+func checkUnsupportedColumnTypes(ctx context.Context, db *gosql.DB, spec *sql.TopicSpec) error {
+	used := make(map[string]bool, len(spec.Mappings)+len(spec.PrimaryKey))
+	for _, m := range spec.Mappings {
 		used[strings.ToLower(m.SQLColumn)] = true
 	}
-	for _, pk := range config.PrimaryKey {
+	for _, pk := range spec.PrimaryKey {
 		used[strings.ToLower(pk)] = true
 	}
 
-	for _, table := range config.Tables {
+	for _, table := range spec.Tables {
 		offenders, err := unsupportedMappedColumns(ctx, db, table, used)
 		if err != nil {
 			return err

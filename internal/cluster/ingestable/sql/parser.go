@@ -41,32 +41,49 @@ func (p *IngestableParser) Parse(v *cluster.ParsedConfig) (cluster.Ingestable, e
 		return nil, fmt.Errorf("[ingestable.parser] source columns: %w", err)
 	}
 
-	// A generated/computed column can't be replicated (the change stream omits it,
-	// so it is present on the snapshot but null on every later CDC row). Refuse an
-	// explicit mapping/PK of one loudly at POST; MapAllColumns skips it (below).
-	if err := rejectGeneratedColumnRefs(config, generatedByTable); err != nil {
-		return nil, fmt.Errorf("[ingestable.parser] %w", err)
-	}
+	// Validate and expand each topic-spec independently against the one
+	// introspected source schema (SourceColumns returns the union per-table map;
+	// each spec filters to its own tables). The flat single-topic config is one
+	// spec, so this loop runs once and is behavior-identical to the pre-routing
+	// path; the [[sql.topics]] form runs it N times.
+	for i := range config.Topics {
+		spec := &config.Topics[i]
 
-	// Expand a map-all config into explicit mappings against the live source
-	// schema, freezing the column set at build time — a column added later does
-	// not silently enter payloads until the config is re-POSTed. Generated columns
-	// are excluded (and logged), so map-all mirrors only what committed can
-	// faithfully replicate. Done before Preflight so the fully-built config is what
-	// we validate and run.
-	if config.MapAllColumns {
-		if err := expandMapAllColumns(config, excludeGeneratedFromMapAll(colsByTable, generatedByTable)); err != nil {
-			return nil, fmt.Errorf("[ingestable.parser] map all columns: %w", err)
+		// A generated/computed column can't be replicated (the change stream omits
+		// it, so it is present on the snapshot but null on every later CDC row).
+		// Refuse an explicit mapping/PK of one loudly at POST; MapAllColumns skips
+		// it (below).
+		if err := rejectGeneratedColumnRefs(spec, generatedByTable); err != nil {
+			return nil, fmt.Errorf("[ingestable.parser] %w", err)
+		}
+
+		// Expand a map-all spec into explicit mappings against the live source
+		// schema, freezing the column set at build time — a column added later
+		// does not silently enter payloads until the config is re-POSTed. Generated
+		// columns are excluded (and logged), so map-all mirrors only what committed
+		// can faithfully replicate. Done before Preflight so the fully-built config
+		// is what we validate and run.
+		if spec.MapAllColumns {
+			if err := expandMapAllColumns(spec, excludeGeneratedFromMapAll(colsByTable, generatedByTable)); err != nil {
+				return nil, fmt.Errorf("[ingestable.parser] map all columns: %w", err)
+			}
+		}
+
+		// Validate every mapping resolves (case-insensitively) to a real source
+		// column, so a typo / renamed-or-dropped column / unresolvable case is a
+		// loud rejection at POST rather than a silent null on every row. Runs for
+		// map-all too, so it also catches a source table whose columns collide when
+		// lowercased.
+		if err := validateMappingColumns(spec, colsByTable); err != nil {
+			return nil, fmt.Errorf("[ingestable.parser] %w", err)
 		}
 	}
 
-	// Validate every mapping resolves (case-insensitively) to a real source
-	// column, so a typo / renamed-or-dropped column / unresolvable case is a loud
-	// rejection at POST rather than a silent null on every row. Runs for map-all
-	// too, so it also catches a source table whose columns collide when lowercased.
-	if err := validateMappingColumns(config, colsByTable); err != nil {
-		return nil, fmt.Errorf("[ingestable.parser] %w", err)
-	}
+	// The runtime still reads the singular Config.Mappings until per-spec entity
+	// build lands; keep it in sync with the (single) spec, whose Mappings map-all
+	// expansion may have rewritten. Harmless for the flat form (one spec); the
+	// [[sql.topics]] path routes per spec and does not depend on this.
+	config.Mappings = config.Topics[0].Mappings
 
 	// Preflight before building the worker: a source that would silently drop
 	// deletes (inadequate replica identity / binlog row image) fails the build

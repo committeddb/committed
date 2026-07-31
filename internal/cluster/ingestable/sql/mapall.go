@@ -19,19 +19,19 @@ import "fmt"
 // there silently does nothing, and a typo'd exclude would leak the very secret
 // it was meant to drop — or when a column is both excluded and explicitly
 // mapped, or when the result is empty.
-func expandMapAllColumns(config *Config, colsByTable map[string][]string) error {
-	overrides := make(map[string]Mapping, len(config.Mappings))
-	for _, m := range config.Mappings {
+func expandMapAllColumns(spec *TopicSpec, colsByTable map[string][]string) error {
+	overrides := make(map[string]Mapping, len(spec.Mappings))
+	for _, m := range spec.Mappings {
 		overrides[m.SQLColumn] = m
 	}
-	exclude := make(map[string]bool, len(config.ExcludeColumns))
-	for _, c := range config.ExcludeColumns {
+	exclude := make(map[string]bool, len(spec.ExcludeColumns))
+	for _, c := range spec.ExcludeColumns {
 		exclude[c] = true
 	}
 
 	seen := make(map[string]bool)
 	var mappings []Mapping
-	for _, table := range config.Tables {
+	for _, table := range spec.Tables {
 		for _, col := range colsByTable[table] {
 			if seen[col] {
 				continue
@@ -67,6 +67,6 @@ func expandMapAllColumns(config *Config, colsByTable map[string][]string) error 
 		return fmt.Errorf("mapAllColumns produced no columns to map (every source column excluded?)")
 	}
 
-	config.Mappings = mappings
+	spec.Mappings = mappings
 	return nil
 }
