@@ -415,6 +415,72 @@ A runnable, end-to-end Postgres example lives in
 [`examples/movies/`](../../examples/movies/) (`source.sql`, `ingest-*.toml`,
 `compose.yml`).
 
+### Multiple topics from one ingestable
+
+By default an ingestable feeds **one** topic: every table in `tables` merges into
+that single topic. To ingest a source database's tables as **distinct** topics —
+each with its own type, primary key, and column mapping — list them under
+`[[sql.topics]]` instead of the flat `topic`/`tables`/`primaryKey`/`mappings`
+fields:
+
+```toml
+[ingestable]
+name = "shop-ingest"
+type = "sql"
+
+[sql]
+dialect          = "postgres"
+connectionString = "postgres://committed:${PG_PASSWORD}@db:5432/shop?sslmode=disable"
+
+[sql.postgres]
+slot_name   = "committed_shop_slot"
+publication = "committed_shop_pub"
+
+[[sql.topics]]
+topic      = "orders"
+tables     = ["orders_us", "orders_eu"]   # several same-shape tables fan into one topic
+primaryKey = "id"
+
+[[sql.topics.mappings]]
+jsonName = "id"
+column   = "id"
+
+[[sql.topics]]
+topic      = "customers"
+tables     = ["customers"]
+primaryKey = "cust_id"
+
+[[sql.topics.mappings]]
+jsonName = "custId"
+column   = "cust_id"
+```
+
+`dialect`, `connectionString`, and the `[sql.<dialect>]` options stay top-level:
+every topic shares **one** source connection and **one** replication slot /
+publication (Postgres) or **one** binlog reader (MySQL). That is the point — a
+whole-database feed no longer needs one slot per table.
+
+Each `[[sql.topics]]` entry is self-contained and carries the same fields as the
+flat form (`topic`, `tables`, `primaryKey`, and `mappings` / `mapAllColumns` /
+`excludeColumns`). committed enforces at config time (HTTP `400`):
+
+- **The flat form and `[[sql.topics]]` are mutually exclusive** — don't set
+  `sql.topic`/`sql.tables`/`sql.primaryKey`/`sql.mappings` alongside `[[sql.topics]]`.
+- **Every table feeds exactly one topic** — a table listed under two topics is
+  rejected (each row has a single destination topic).
+- **Each topic id is claimed once**, and each topic must already exist as a type
+  (`POST /v1/type/{id}`) before the ingestable, exactly like the flat form.
+
+Because all the topics share one change stream, they share its **failure domain**:
+a fatal drift in one topic — a `primaryKey` column dropped at the source — parks the
+**whole** ingestable, so every topic stops together (the park message names which
+topic). This is deliberate: silently pausing one topic while the shared cursor kept
+advancing would drop that topic's changes. `GET /v1/ingestable/{id}/status` tags
+each table in `snapshotProgress` with the topic it feeds, so per-topic snapshot
+progress is readable at a glance. The [one-writer-per-topic](#one-writer-per-topic)
+rule is unchanged — a multi-topic ingestable is the single producer of *each* of its
+topics.
+
 ### Lag and the slot's disk cost
 
 For Postgres, `lag` is real: committed reads it in bytes from
