@@ -104,6 +104,21 @@ func (e *postgresEngine) PostIngestable(t *testing.T, table string) {
 	postIngestable(t, table, e.connStr, slot, pub)
 }
 
+// PostMultiTopicIngestable registers ONE ingestable producing a topic per table over
+// a single slot/publication (the [[sql.topics]] form). It registers the shared slot
+// under EVERY table so WaitReady/SlotName resolve it per topic (the slot reaches
+// streaming only after every table's snapshot, so gating on it once covers them all).
+// Reached by a type assertion off the Engine seam (like Conn), so the interface and
+// the MySQL engine stay untouched — SingleIngestable is Postgres-only.
+func (e *postgresEngine) PostMultiTopicIngestable(t *testing.T, tables []string) {
+	t.Helper()
+	const slot, pub, id = "slot_multitopic", "pub_multitopic", "multitopic"
+	for _, table := range tables {
+		e.slotNames[table] = slot
+	}
+	postMultiTopicIngestable(t, id, tables, e.connStr, slot, pub)
+}
+
 func (e *postgresEngine) PostSinkDatabase(t *testing.T) {
 	t.Helper()
 	postSinkDatabase(t, e.connStr)

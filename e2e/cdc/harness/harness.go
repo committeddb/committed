@@ -44,6 +44,11 @@ type Options struct {
 	// the syncable path end-to-end (e.g. restart-resume). Off by default
 	// so the ingestable-only tests pay nothing for it.
 	Syncable bool
+	// SingleIngestable, when set, produces every table's topic from ONE
+	// [[sql.topics]] ingestable over a single slot/publication (the multi-topic
+	// demux) instead of one ingestable per table. Topic ids stay table-named, so
+	// the collector/oracle are unchanged. Postgres-only.
+	SingleIngestable bool
 }
 
 // New brings up Postgres + committed + ingestables and returns a ready
@@ -69,6 +74,7 @@ func NewWith(t *testing.T, engine Engine, opts ...Options) *Harness {
 			o.Tables = opts[0].Tables
 		}
 		o.Syncable = opts[0].Syncable
+		o.SingleIngestable = opts[0].SingleIngestable
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -99,12 +105,22 @@ func NewWith(t *testing.T, engine Engine, opts ...Options) *Harness {
 		postType(t, table)
 	}
 
-	// 5. One ingestable per table (the engine emits its dialect's config).
-	for _, table := range o.Tables {
-		h.engine.PostIngestable(t, table)
+	// 5. Ingestable(s). By default one per table (topic == table); with
+	// SingleIngestable, ONE [[sql.topics]] ingestable produces every table's topic
+	// over a single slot — the multi-topic demux, Postgres-only.
+	if o.SingleIngestable {
+		pe, ok := h.engine.(*postgresEngine)
+		require.True(t, ok, "SingleIngestable is Postgres-only")
+		pe.PostMultiTopicIngestable(t, o.Tables)
+	} else {
+		for _, table := range o.Tables {
+			h.engine.PostIngestable(t, table)
+		}
 	}
 
-	// 6. Wait for every ingestable to reach streaming.
+	// 6. Wait for the ingestable(s) to reach streaming. With SingleIngestable every
+	// table shares one slot, which reaches streaming only after all their snapshots,
+	// so gating per table (all on the same slot) still covers the whole ingestable.
 	for _, table := range o.Tables {
 		h.engine.WaitReady(t, table)
 	}

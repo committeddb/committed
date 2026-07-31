@@ -48,6 +48,32 @@ func postIngestable(t *testing.T, table, pgConnStr, slotName, pubName string) {
 	postConfig(t, "/v1/ingestable/"+table, b.String())
 }
 
+// postMultiTopicIngestable registers ONE ingestable that produces a topic per table
+// (topic named after the table) over a SINGLE connection / slot / publication, using
+// the [[sql.topics]] form. Because each table still maps to a same-named topic, the
+// collector/oracle keying (topic == table) is identical to the per-table path — only
+// the producer changes from N ingestables to one, which is exactly the demux the
+// multi-topic feature adds. id is the single ingestable's id.
+func postMultiTopicIngestable(t *testing.T, id string, tables []string, pgConnStr, slotName, pubName string) {
+	t.Helper()
+	var b strings.Builder
+	fmt.Fprintf(&b, "[ingestable]\nname = %q\ntype = \"sql\"\n\n", id)
+	fmt.Fprintf(&b, "[sql]\ndialect = \"postgres\"\n")
+	fmt.Fprintf(&b, "connectionString = %q\n\n", pgConnStr)
+	fmt.Fprintf(&b, "[sql.postgres]\nslot_name = %q\npublication = %q\n", slotName, pubName)
+	for _, table := range tables {
+		// Scalar keys first, then the nested [[sql.topics.mappings]] blocks: once a
+		// sub-table array is opened, later bare keys would attach to it, not the topic.
+		fmt.Fprintf(&b, "\n[[sql.topics]]\ntopic = %q\n", table)
+		fmt.Fprintf(&b, "primaryKey = %q\n", dataset.PrimaryKey(table))
+		fmt.Fprintf(&b, "tables = [\"public.%s\"]\n", table)
+		for _, col := range dataset.Columns(table) {
+			fmt.Fprintf(&b, "[[sql.topics.mappings]]\njsonName = %q\ncolumn = %q\n", col, col)
+		}
+	}
+	postConfig(t, "/v1/ingestable/"+id, b.String())
+}
+
 // postConfig POSTs a TOML configuration body to the given path. Fails
 // the test if the response is not 2xx — committed returns the new ID
 // in the body, which we discard (we already know it).
