@@ -53,14 +53,16 @@ type SchemaDrift struct {
 	MissingMapped []string
 }
 
-// ReconcileSchema classifies the drift between config's column contract
+// ReconcileSchema classifies the drift between a topic-spec's column contract
 // (primaryKey ∪ mapped columns) and observed — the set of lowercased column names
-// the live decode schema carries. It is pure; the caller decides the response from
-// the tiers (ParkError for corruption, a deduped warn for divergence).
-func ReconcileSchema(config *Config, observed map[string]bool) SchemaDrift {
+// the live decode schema carries. It is per-spec: each watched table's rows are
+// reconciled against the spec that routes it (the flat config is one spec). It is
+// pure; the caller decides the response from the tiers (ParkError for corruption,
+// a deduped warn for divergence).
+func ReconcileSchema(spec *TopicSpec, observed map[string]bool) SchemaDrift {
 	var d SchemaDrift
-	key := make(map[string]bool, len(config.PrimaryKey))
-	for _, pk := range config.PrimaryKey {
+	key := make(map[string]bool, len(spec.PrimaryKey))
+	for _, pk := range spec.PrimaryKey {
 		if pk == "" {
 			continue
 		}
@@ -69,7 +71,7 @@ func ReconcileSchema(config *Config, observed map[string]bool) SchemaDrift {
 			d.MissingKey = append(d.MissingKey, pk)
 		}
 	}
-	for _, m := range config.Mappings {
+	for _, m := range spec.Mappings {
 		if m.SQLColumn == "" {
 			continue
 		}

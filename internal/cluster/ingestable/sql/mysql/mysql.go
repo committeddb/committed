@@ -684,6 +684,9 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			// written for the snapshot SELECTs, since MySQL table-name case-sensitivity
 			// is a server setting we must not override.
 			tableRefs: resolveTableRefs(config.Tables, strings.ToLower(dsnDatabase(config.ConnectionString))),
+			// Per-topic routing map: same resolution as tableRefs, carrying each
+			// table's owning spec so handleRows stamps a row with its own topic.
+			refSpecs: resolveRefSpecs(config, strings.ToLower(dsnDatabase(config.ConnectionString))),
 			// Seed the live coordinate from the resume position so a
 			// mid-transaction flush before the first commit still stamps
 			// a sane SourceSeq. lastPos is non-nil here (resume or
@@ -798,6 +801,14 @@ type MySQLEventHandler struct {
 	// database (the DSN's default for a bare `tables` entry, or a schema-qualified
 	// entry's own), keeping a same-named table in another database out of the topic.
 	tableRefs []tableRef
+
+	// refSpecs pairs each resolved table filter with the topic-spec that routes it,
+	// so a streamed row is stamped with its own table's Type / Mappings / PrimaryKey
+	// (see specFor). The flat config has one spec, so every ref points to it;
+	// [[sql.topics]] gives N. Matching mirrors watches exactly (the same schema
+	// scoping); tableRefs stays the fast row-filter gate, refSpecs the post-gate
+	// routing lookup.
+	refSpecs []tableRefSpec
 
 	// charsetPlans is the source's collation catalog (collation id -> UTF-8
 	// transcoding plan), read once at stream start. handleRows hands it to
@@ -1060,6 +1071,44 @@ func resolveTableRefs(tables []string, dbSchema string) []tableRef {
 	return refs
 }
 
+// tableRefSpec pairs a resolved binlog table filter with the topic-spec that owns
+// that table, so a matched row is routed to its own topic (see specFor).
+type tableRefSpec struct {
+	ref  tableRef
+	spec *sql.TopicSpec
+}
+
+// resolveRefSpecs resolves every spec's tables to (schema, table) filters paired
+// with the owning spec, mirroring resolveTableRefs (bare entries scoped to the DSN
+// database). Cross-spec table-routing conflicts are rejected at parse time, so a
+// given table appears under exactly one spec.
+func resolveRefSpecs(config *sql.Config, dbSchema string) []tableRefSpec {
+	config.EnsureTopics()
+	var out []tableRefSpec
+	for i := range config.Topics {
+		spec := &config.Topics[i]
+		for _, ref := range resolveTableRefs(spec.Tables, dbSchema) {
+			out = append(out, tableRefSpec{ref: ref, spec: spec})
+		}
+	}
+	return out
+}
+
+// specFor returns the topic-spec that routes binlog rows for schema.table, or nil
+// if none does. It applies the same match as watches (case-insensitive table name;
+// a ref's own schema scopes the match, or any schema when the ref carries none), so
+// a table watches() admits always resolves to its spec.
+func (h *MySQLEventHandler) specFor(schema, table string) *sql.TopicSpec {
+	s, t := strings.ToLower(schema), strings.ToLower(table)
+	for i := range h.refSpecs {
+		ref := h.refSpecs[i].ref
+		if ref.table == t && (ref.schema == "" || ref.schema == s) {
+			return h.refSpecs[i].spec
+		}
+	}
+	return nil
+}
+
 // watches reports whether a binlog row event for schema.table should be ingested:
 // the event must match one of the resolved tableRefs by table name (case-
 // insensitively) AND by schema — either the ref's own schema (a schema-qualified
@@ -1084,12 +1133,23 @@ func (h *MySQLEventHandler) watches(schema, table string) bool {
 
 func (h *MySQLEventHandler) handleRows(ctx context.Context, header *replication.EventHeader, e *replication.RowsEvent) error {
 	table := string(e.Table.Table)
-	if !h.watches(string(e.Table.Schema), table) {
+	schema := string(e.Table.Schema)
+	if !h.watches(schema, table) {
 		return nil
 	}
 	action, ok := rowsAction(e.Type())
 	if !ok {
 		return nil // an unsupported rows-event variant — skip
+	}
+
+	// Route this table's rows to their own topic: specFor uses the same match as
+	// watches, so a watched table always resolves. A nil is a gate/routing-map
+	// disagreement (a bug) — skip rather than stamp a nil Type onto every row.
+	spec := h.specFor(schema, table)
+	if spec == nil {
+		zap.L().Error("handleRows: no topic-spec routes a watched table; skipping event",
+			zap.String("schema", schema), zap.String("table", table))
+		return nil
 	}
 
 	// Decode against the schema carried by THIS row's binlog TableMapEvent — the
@@ -1109,7 +1169,7 @@ func (h *MySQLEventHandler) handleRows(ctx context.Context, header *replication.
 	for _, c := range ts.cols {
 		observed[c.name] = true // ts.cols names are already lowercased
 	}
-	drift := sql.ReconcileSchema(h.config, observed)
+	drift := sql.ReconcileSchema(spec, observed)
 	if err := drift.ParkError(); err != nil {
 		return err
 	}
@@ -1132,7 +1192,7 @@ func (h *MySQLEventHandler) handleRows(ctx context.Context, header *replication.
 		start, step = 1, 2 // after-images only
 	}
 	for ri := start; ri < len(e.Rows); ri += step {
-		entity, ok := h.rowEntity(ts, table, action, e.Rows[ri])
+		entity, ok := h.rowEntity(ts, spec, table, action, e.Rows[ri])
 		if !ok {
 			continue // unmarshalable row, already logged — skip it
 		}
@@ -1148,7 +1208,7 @@ func (h *MySQLEventHandler) handleRows(ctx context.Context, header *replication.
 		// binlog_row_image=FULL (Preflight-required) guarantees the before-image
 		// carries the primary key.
 		if action == "update" {
-			if old, ok := h.rowEntity(ts, table, "delete", e.Rows[ri-1]); ok && !bytes.Equal(old.Key, entity.Key) {
+			if old, ok := h.rowEntity(ts, spec, table, "delete", e.Rows[ri-1]); ok && !bytes.Equal(old.Key, entity.Key) {
 				h.pending = append(h.pending, old)
 				h.pendingBytes += sql.EntityFlushBytes(old)
 			}
@@ -1197,7 +1257,7 @@ func (h *MySQLEventHandler) warnSchemaDivergence(table string, missingMapped []s
 // ordinal) into an upsert or a delete tombstone keyed by the row's primary key.
 // ok is false — the row is to be skipped, having already been logged — when its
 // mapped data can't be marshaled to JSON.
-func (h *MySQLEventHandler) rowEntity(ts *tableSchema, table, action string, row []any) (*cluster.Entity, bool) {
+func (h *MySQLEventHandler) rowEntity(ts *tableSchema, spec *sql.TopicSpec, table, action string, row []any) (*cluster.Entity, bool) {
 	// m holds the key form: coerce []byte (TEXT/BLOB/JSON) to string so the key is
 	// text and matches the snapshot path. raw/catByName keep the value and its
 	// category so the payload renders as natural JSON.
@@ -1242,15 +1302,15 @@ func (h *MySQLEventHandler) rowEntity(ts *tableSchema, table, action string, row
 		}
 	}
 
-	key := sql.CompositeKey(m, h.config.PrimaryKey)
+	key := sql.CompositeKey(m, spec.PrimaryKey)
 
 	// A source DELETE becomes a delete (tombstone) entity keyed by the row's
 	// primary key; INSERT/UPDATE upsert the (after-)image.
 	if action == "delete" {
-		return cluster.NewDeleteEntity(h.config.Type, []byte(key)), true
+		return cluster.NewDeleteEntity(spec.Type, []byte(key)), true
 	}
 
-	toJSON := sql.BuildEntityJSON(h.config.Mappings, raw, catByName)
+	toJSON := sql.BuildEntityJSON(spec.Mappings, raw, catByName)
 	jsonString, err := json.Marshal(toJSON)
 	if err != nil {
 		zap.L().Warn("handleRows: skipping row with unmarshalable data",
@@ -1260,7 +1320,7 @@ func (h *MySQLEventHandler) rowEntity(ts *tableSchema, table, action string, row
 		return nil, false
 	}
 	return &cluster.Entity{
-		Type: h.config.Type,
+		Type: spec.Type,
 		Key:  []byte(key),
 		Data: []byte(jsonString),
 	}, true
@@ -1993,7 +2053,12 @@ func snapshotTable(
 	pr chan<- *cluster.Proposal,
 	po chan<- cluster.Position,
 ) error {
-	pkCols := config.PrimaryKey
+	// Resolve this table's topic-spec (the snapshot iterates config.Tables, so table
+	// is a config entry SpecForTable keys on directly). One spec for the flat form.
+	spec := config.SpecForTable(table)
+	if spec == nil {
+		return fmt.Errorf("snapshot: no topic-spec routes table %q", table)
+	}
 	// lastPK, haveLastPK distinguish "no rows yet flushed" from
 	// "last flushed pk was the empty string".
 	lastPK, haveLastPK := progress.LastPkByTable[table]
@@ -2006,7 +2071,7 @@ func snapshotTable(
 		}
 		batchNum++
 
-		rows, lastKey, count, err := readBatch(ctx, db, config, table, pkCols, lastPK, haveLastPK, batchSize)
+		rows, lastKey, count, err := readBatch(ctx, db, table, spec, lastPK, haveLastPK, batchSize)
 		if err != nil {
 			return err
 		}
@@ -2082,13 +2147,13 @@ func snapshotTable(
 func readBatch(
 	ctx context.Context,
 	db *gosql.DB,
-	config *sql.Config,
 	table string,
-	pkCols []string,
+	spec *sql.TopicSpec,
 	lastPK string,
 	haveLastPK bool,
 	batchSize int,
 ) ([]*cluster.Entity, string, int, error) {
+	pkCols := spec.PrimaryKey
 	tx, err := db.BeginTx(ctx, &gosql.TxOptions{
 		Isolation: gosql.LevelRepeatableRead,
 		ReadOnly:  true,
@@ -2349,7 +2414,7 @@ func readBatch(
 			}
 		}
 
-		toJSON := sql.BuildEntityJSON(config.Mappings, raw, catByName)
+		toJSON := sql.BuildEntityJSON(spec.Mappings, raw, catByName)
 
 		jsonBytes, err := json.Marshal(toJSON)
 		if err != nil {
@@ -2360,11 +2425,11 @@ func readBatch(
 			continue
 		}
 
-		key := sql.CompositeKey(m, config.PrimaryKey)
+		key := sql.CompositeKey(m, spec.PrimaryKey)
 		batchLastPK = key
 
 		entities = append(entities, &cluster.Entity{
-			Type: config.Type,
+			Type: spec.Type,
 			Key:  []byte(key),
 			Data: jsonBytes,
 		})

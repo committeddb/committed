@@ -21,12 +21,12 @@ func TestReconcileSchema(t *testing.T) {
 		}
 		return s
 	}
-	cfg := func(pk []string, mapped ...string) *sql.Config {
+	cfg := func(pk []string, mapped ...string) *sql.TopicSpec {
 		ms := make([]sql.Mapping, 0, len(mapped))
 		for _, c := range mapped {
 			ms = append(ms, sql.Mapping{JsonName: c, SQLColumn: c})
 		}
-		return &sql.Config{PrimaryKey: pk, Mappings: ms}
+		return &sql.TopicSpec{PrimaryKey: pk, Mappings: ms}
 	}
 
 	t.Run("whole contract present is clean", func(t *testing.T) {

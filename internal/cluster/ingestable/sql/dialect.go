@@ -106,6 +106,26 @@ type Config struct {
 	Options    map[string]string
 }
 
+// EnsureTopics backfills Topics from the flat singular fields (Type, Tables,
+// Mappings, PrimaryKey, MapAllColumns, ExcludeColumns) when a Config was built
+// without them. The parser always fills Topics, so this is a no-op on a parsed
+// config; it lets a hand-constructed Config (tests, or any non-parser path) route
+// through the same per-spec machinery, with the flat singular fields as the one
+// spec. Idempotent — once Topics is non-empty it never rewrites it.
+func (c *Config) EnsureTopics() {
+	if len(c.Topics) > 0 {
+		return
+	}
+	c.Topics = []TopicSpec{{
+		Type:           c.Type,
+		Tables:         c.Tables,
+		Mappings:       c.Mappings,
+		MapAllColumns:  c.MapAllColumns,
+		ExcludeColumns: c.ExcludeColumns,
+		PrimaryKey:     c.PrimaryKey,
+	}}
+}
+
 // SpecForTable returns the TopicSpec routing the given source table (matched
 // case-insensitively), or nil if the table is not watched by this config. The
 // table→spec map is built lazily on first use: the ingest worker resolves specs
@@ -114,6 +134,7 @@ type Config struct {
 // Config comparable by value. Cross-spec table-routing conflicts are rejected at
 // parse time (see the parser), so first-appearance wins here is never ambiguous.
 func (c *Config) SpecForTable(table string) *TopicSpec {
+	c.EnsureTopics()
 	if c.tableToSpec == nil {
 		c.tableToSpec = make(map[string]*TopicSpec, len(c.Tables))
 		for i := range c.Topics {

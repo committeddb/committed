@@ -213,7 +213,14 @@ func (d *PostgreSQLDialect) Preflight(config *sql.Config) error {
 	}
 
 	for _, table := range pgCfg.tables {
-		if err := checkReplicaIdentity(ctx, db, table, config.PrimaryKey); err != nil {
+		// Check each table's DELETE-key coverage against its own topic-spec's
+		// primaryKey (pgCfg.tables entries are config entries SpecForTable keys on;
+		// one spec for the flat form).
+		pk := config.PrimaryKey
+		if spec := config.SpecForTable(table); spec != nil {
+			pk = spec.PrimaryKey
+		}
+		if err := checkReplicaIdentity(ctx, db, table, pk); err != nil {
 			return err
 		}
 	}
@@ -904,27 +911,32 @@ func (d *PostgreSQLDialect) stream(
 
 			switch m := logicalMsg.(type) {
 			case *pglogrepl.RelationMessage:
-				// Reconcile the config's column contract against this refreshed
+				// Reconcile the routing spec's column contract against this refreshed
 				// relation. A vanished primaryKey column is corruption — every tuple
 				// would key on "<nil>" and collapse onto one entity — so park (the
 				// reconnect loop returns the sentinel rather than busy-retry); a
 				// vanished mapped non-key column is divergence — the field renders null
 				// but tuples stay correctly keyed — so warn and continue. A
 				// RelationMessage is pgoutput's schema-change boundary (one per relation
-				// per schema version), so the warn needs no dedup.
-				observed := make(map[string]bool, len(m.Columns))
-				for _, c := range m.Columns {
-					observed[strings.ToLower(c.Name)] = true
-				}
-				drift := sql.ReconcileSchema(config, observed)
-				if err := drift.ParkError(); err != nil {
-					return err
-				}
-				for _, col := range drift.MissingMapped {
-					zap.L().Warn("mapped column dropped or renamed at the source; it now renders null on the sink, which diverges from the source and must be re-snapshotted to reconcile",
-						zap.String("table", m.RelationName),
-						zap.String("column", col),
-					)
+				// per schema version), so the warn needs no dedup. Reconcile against the
+				// spec that routes this relation (one for the flat config); a relation
+				// the config does not watch has no spec — none should reach here, as the
+				// publication is scoped to watched tables — so skip it.
+				if spec := specForRelation(config, m); spec != nil {
+					observed := make(map[string]bool, len(m.Columns))
+					for _, c := range m.Columns {
+						observed[strings.ToLower(c.Name)] = true
+					}
+					drift := sql.ReconcileSchema(spec, observed)
+					if err := drift.ParkError(); err != nil {
+						return err
+					}
+					for _, col := range drift.MissingMapped {
+						zap.L().Warn("mapped column dropped or renamed at the source; it now renders null on the sink, which diverges from the source and must be re-snapshotted to reconcile",
+							zap.String("table", m.RelationName),
+							zap.String("column", col),
+						)
+					}
 				}
 				relations[m.RelationID] = m
 
@@ -1346,6 +1358,26 @@ func fillUnchanged(ctx context.Context, resolve unchangedResolver, rel *pglogrep
 	}
 }
 
+// specForRelation returns the topic-spec that routes the given source relation, or
+// nil if no watched spec does. It applies the same match tupleToEntity uses against
+// the union table list — the bare relation name or the namespace-qualified name,
+// case-insensitively — so a relation the config watches always resolves to exactly
+// one spec (cross-spec table conflicts are rejected at parse time).
+func specForRelation(config *sql.Config, rel *pglogrepl.RelationMessage) *sql.TopicSpec {
+	config.EnsureTopics()
+	tableName := strings.ToLower(rel.RelationName)
+	qualifiedName := strings.ToLower(rel.Namespace + "." + rel.RelationName)
+	for i := range config.Topics {
+		for _, t := range config.Topics[i].Tables {
+			tl := strings.ToLower(t)
+			if tl == tableName || tl == qualifiedName {
+				return &config.Topics[i]
+			}
+		}
+	}
+	return nil
+}
+
 func tupleToEntity(
 	ctx context.Context,
 	tuple *pglogrepl.TupleData,
@@ -1367,18 +1399,9 @@ func tupleToEntity(
 		return nil
 	}
 
-	// Filter by watched tables.
-	tableName := strings.ToLower(rel.RelationName)
-	qualifiedName := strings.ToLower(rel.Namespace + "." + rel.RelationName)
-	found := false
-	for _, t := range pgCfg.tables {
-		tLower := strings.ToLower(t)
-		if tLower == tableName || tLower == qualifiedName {
-			found = true
-			break
-		}
-	}
-	if !found {
+	// Route to the spec that owns this relation's table; nil means unwatched, skip.
+	spec := specForRelation(config, rel)
+	if spec == nil {
 		return nil
 	}
 
@@ -1400,11 +1423,11 @@ func tupleToEntity(
 		}
 	}
 
-	key := sql.CompositeKey(m, config.PrimaryKey)
+	key := sql.CompositeKey(m, spec.PrimaryKey)
 
 	// A delete carries no payload — emit a tombstone keyed by the PK.
 	if isDelete {
-		return cluster.NewDeleteEntity(config.Type, []byte(key))
+		return cluster.NewDeleteEntity(spec.Type, []byte(key))
 	}
 
 	// An UPDATE that left a TOASTed column unchanged omits it from the new tuple
@@ -1412,7 +1435,7 @@ func tupleToEntity(
 	// complete image — otherwise the full-row payload nulls those columns and
 	// clobbers them downstream on every such UPDATE.
 	if len(unchanged) > 0 && resolve != nil {
-		fillUnchanged(ctx, resolve, rel, config.PrimaryKey, m, unchanged)
+		fillUnchanged(ctx, resolve, rel, spec.PrimaryKey, m, unchanged)
 	}
 
 	// Each relation column carries its type OID; render mapped values as their
@@ -1430,7 +1453,7 @@ func tupleToEntity(
 			m[name] = sql.DecodeByteaText(m[name])
 		}
 	}
-	toJSON := sql.BuildEntityJSON(config.Mappings, m, cat)
+	toJSON := sql.BuildEntityJSON(spec.Mappings, m, cat)
 
 	jsonBytes, err := json.Marshal(toJSON)
 	if err != nil {
@@ -1442,7 +1465,7 @@ func tupleToEntity(
 	}
 
 	return &cluster.Entity{
-		Type: config.Type,
+		Type: spec.Type,
 		Key:  []byte(key),
 		Data: jsonBytes,
 	}
@@ -1525,7 +1548,12 @@ func (d *PostgreSQLDialect) snapshotTable(
 	pr chan<- *cluster.Proposal,
 	po chan<- cluster.Position,
 ) error {
-	pkCols := config.PrimaryKey
+	// Resolve this table's topic-spec (snapshot iterates config entries, so table is
+	// one SpecForTable keys on directly). One spec for the flat form.
+	spec := config.SpecForTable(table)
+	if spec == nil {
+		return fmt.Errorf("snapshot: no topic-spec routes table %q", table)
+	}
 	lastPK, haveLastPK := progress.LastPkByTable[table]
 
 	batchNum := 0
@@ -1545,7 +1573,7 @@ func (d *PostgreSQLDialect) snapshotTable(
 			}
 		}
 
-		entities, batchLastPK, count, err := readBatch(ctx, db, config, table, pkCols, lastPK, haveLastPK, batchSize)
+		entities, batchLastPK, count, err := readBatch(ctx, db, table, spec, lastPK, haveLastPK, batchSize)
 		if err != nil {
 			return err
 		}
@@ -1645,13 +1673,13 @@ func snapshotColumnMeta(ctx context.Context, tx *gosql.Tx, quotedTable string) (
 func readBatch(
 	ctx context.Context,
 	db *gosql.DB,
-	config *sql.Config,
 	table string,
-	pkCols []string,
+	spec *sql.TopicSpec,
 	lastPK string,
 	haveLastPK bool,
 	batchSize int,
 ) ([]*cluster.Entity, string, int, error) {
+	pkCols := spec.PrimaryKey
 	tx, err := db.BeginTx(ctx, &gosql.TxOptions{
 		Isolation: gosql.LevelRepeatableRead,
 		ReadOnly:  true,
@@ -1765,7 +1793,7 @@ func readBatch(
 			}
 		}
 
-		toJSON := sql.BuildEntityJSON(config.Mappings, raw, catByName)
+		toJSON := sql.BuildEntityJSON(spec.Mappings, raw, catByName)
 
 		jsonBytes, err := json.Marshal(toJSON)
 		if err != nil {
@@ -1780,7 +1808,7 @@ func readBatch(
 		batchLastPK = key
 
 		entities = append(entities, &cluster.Entity{
-			Type: config.Type,
+			Type: spec.Type,
 			Key:  []byte(key),
 			Data: jsonBytes,
 		})

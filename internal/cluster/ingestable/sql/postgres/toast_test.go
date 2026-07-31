@@ -39,6 +39,7 @@ func TestTupleToEntity_UnchangedToastReselected(t *testing.T) {
 	}
 	config := &sql.Config{
 		Type:       &cluster.Type{ID: "t", Name: "t"},
+		Tables:     []string{"public.t"},
 		PrimaryKey: []string{"id"},
 		Mappings: []sql.Mapping{
 			{JsonName: "id", SQLColumn: "id"},
@@ -97,6 +98,7 @@ func TestTupleToEntity_UnchangedToastMixedCaseColumn(t *testing.T) {
 	}
 	config := &sql.Config{
 		Type:       &cluster.Type{ID: "t", Name: "t"},
+		Tables:     []string{"public.Orders"},
 		PrimaryKey: []string{"Id"},
 		Mappings: []sql.Mapping{
 			{JsonName: "id", SQLColumn: "Id"},
