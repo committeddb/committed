@@ -1326,60 +1326,73 @@ func (h *MySQLEventHandler) rowEntity(ts *tableSchema, spec *sql.TopicSpec, tabl
 	}, true
 }
 
-// flushPending emits all buffered entities as a single proposal and resets the
-// buffer. No-op when the buffer is empty. isSoftFlush is true for a
-// mid-transaction byte-budget flush (a same-coordinate multi-part piece) and
-// false for the commit flush — it drives the re-chunk DedupUnsafe guard.
+// flushPending emits the buffered entities and resets the buffer. No-op when the
+// buffer is empty. A mixed-table transaction is split into one HOMOGENEOUS proposal
+// per topic (one group for the flat single-topic form); the db/WAL layer routes by
+// topic and dedups on a per-ingestable SourceSeq, so each per-topic proposal at this
+// coordinate must get a strictly-greater SourceSeq or the ingest dedup would drop
+// every group after the first. isSoftFlush is true for a mid-transaction byte-budget
+// flush (a same-coordinate multi-part piece) and false for the commit flush — it
+// drives the re-chunk DedupUnsafe guard.
 func (h *MySQLEventHandler) flushPending(ctx context.Context, isSoftFlush bool) error {
 	if len(h.pending) == 0 {
 		return nil
-	}
-	// Disambiguate repeated flushes at one coordinate: a RowsEvent bigger than
-	// maxPendingEntities flushes several times at the same (file, pos). Increment a
-	// sub-index per same-coordinate flush (reset when the coordinate advances) so
-	// each proposal's SourceSeq is strictly greater than the last and none is
-	// dropped by the ingest dedup.
-	if h.curFile == h.flushFile && h.curPos == h.flushPos {
-		h.flushSub++
-	} else {
-		h.flushFile, h.flushPos, h.flushSub = h.curFile, h.curPos, 0
 	}
 	// Stamp streamed rows with the current refresh epoch so a later
 	// refresh-boundary marker can sweep rows a re-snapshot left behind (a
 	// streamed-then-gap-deleted row still carries this epoch until the sweep).
 	stampGeneration(h.pending, h.epoch)
-	p := &cluster.Proposal{Entities: h.pending, SourceSeq: encodeSourceSeq(h.curFile, h.curPos, h.flushSub)}
-	// Failover-lineage guard: if the live coordinate is at or below the resume
-	// baseline — a lower file number, OR the same file number at an equal/lower
-	// byte offset — this stream is a different binlog lineage (a promoted replica
-	// / RESET MASTER) whose coordinate encodes at or below the durable highwater
-	// (SourceSeq = fileNum<<32 | pos). Flag the proposal so the ingest worker
-	// freezes instead of silently dedup-dropping it — this data would otherwise be
-	// lost. A normal same-lineage resume only ever streams ABOVE the baseline, so
-	// this never trips falsely. Comparing the file number alone missed the
-	// equal-ordinal/lower-offset case (silent loss). See cluster.Proposal.DedupUnsafe.
-	if h.resumeFileNum > 0 {
-		if n, ok := binlogFileNum(h.curFile); ok &&
-			(n < h.resumeFileNum || (n == h.resumeFileNum && h.curPos <= h.resumePos)) {
-			p.DedupUnsafe = true
-		}
-	}
-	// Re-chunk guard (F1): the chunking inputs changed since this coordinate's
-	// parts were committed, so a replayed soft-flush may carry rows re-grouped
-	// into a part the dedup would drop. Freeze rather than risk silent loss. Only
-	// soft-flushes need it — see h.chunkingChanged.
-	if h.chunkingChanged && isSoftFlush {
-		p.DedupUnsafe = true
-	}
+
+	// One proposal per topic, in first-appearance order (deterministic for replay).
+	// A single-topic flush yields one group == the original buffer, so its proposal
+	// is byte-identical to the pre-routing single-proposal flush.
+	groups := sql.PartitionByTopic(h.pending)
 	h.pending = nil
 	h.pendingBytes = 0
 
-	select {
-	case h.proposalChan <- p:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+	for _, group := range groups {
+		// Disambiguate repeated proposals at one coordinate: a RowsEvent bigger than
+		// maxPendingEntities flushes several times at the same (file, pos), and a
+		// mixed-table flush emits several per-topic proposals at one (file, pos).
+		// Increment a sub-index per emitted proposal (reset when the coordinate
+		// advances) so each proposal's SourceSeq is strictly greater than the last and
+		// none is dropped by the ingest dedup.
+		if h.curFile == h.flushFile && h.curPos == h.flushPos {
+			h.flushSub++
+		} else {
+			h.flushFile, h.flushPos, h.flushSub = h.curFile, h.curPos, 0
+		}
+		p := &cluster.Proposal{Entities: group, SourceSeq: encodeSourceSeq(h.curFile, h.curPos, h.flushSub)}
+		// Failover-lineage guard: if the live coordinate is at or below the resume
+		// baseline — a lower file number, OR the same file number at an equal/lower
+		// byte offset — this stream is a different binlog lineage (a promoted replica
+		// / RESET MASTER) whose coordinate encodes at or below the durable highwater
+		// (SourceSeq = fileNum<<32 | pos). Flag the proposal so the ingest worker
+		// freezes instead of silently dedup-dropping it — this data would otherwise be
+		// lost. A normal same-lineage resume only ever streams ABOVE the baseline, so
+		// this never trips falsely. Comparing the file number alone missed the
+		// equal-ordinal/lower-offset case (silent loss). See cluster.Proposal.DedupUnsafe.
+		if h.resumeFileNum > 0 {
+			if n, ok := binlogFileNum(h.curFile); ok &&
+				(n < h.resumeFileNum || (n == h.resumeFileNum && h.curPos <= h.resumePos)) {
+				p.DedupUnsafe = true
+			}
+		}
+		// Re-chunk guard (F1): the chunking inputs changed since this coordinate's
+		// parts were committed, so a replayed soft-flush may carry rows re-grouped
+		// into a part the dedup would drop. Freeze rather than risk silent loss. Only
+		// soft-flushes need it — see h.chunkingChanged.
+		if h.chunkingChanged && isSoftFlush {
+			p.DedupUnsafe = true
+		}
+
+		select {
+		case h.proposalChan <- p:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
+	return nil
 }
 
 // stampGeneration sets the reconciling-refresh epoch on every entity in a batch

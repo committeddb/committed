@@ -53,6 +53,36 @@ func EntityFlushBytes(e *cluster.Entity) int {
 	return len(e.Key) + len(e.Data) + entityFlushOverheadBytes
 }
 
+// PartitionByTopic splits a flush's entities into per-topic groups keyed by
+// Type.ID, so a mixed-table source transaction (one ingestable, N topics) emits one
+// HOMOGENEOUS proposal per topic instead of one proposal spanning topics — the
+// db/WAL layer routes by topic (proposalTopic; the per-ingestable SourceSeq dedup),
+// and a per-topic proposal keeps those clean. First-appearance order is preserved
+// both of the groups and of the entities within each group, so the result is
+// DETERMINISTIC: a resume re-reads the same source changes in the same order and
+// reproduces identical groups (hence identical per-topic SourceSeqs after the flush
+// stamps each group). A single-topic batch returns exactly one group in input
+// order, so a flush is byte-identical to the pre-routing single-proposal flush.
+func PartitionByTopic(entities []*cluster.Entity) [][]*cluster.Entity {
+	var order []string
+	groups := make(map[string][]*cluster.Entity)
+	for _, e := range entities {
+		id := ""
+		if e.Type != nil {
+			id = e.Type.ID
+		}
+		if _, ok := groups[id]; !ok {
+			order = append(order, id)
+		}
+		groups[id] = append(groups[id], e)
+	}
+	out := make([][]*cluster.Entity, 0, len(order))
+	for _, id := range order {
+		out = append(out, groups[id])
+	}
+	return out
+}
+
 type Ingestable struct {
 	config     *Config
 	dialect    Dialect

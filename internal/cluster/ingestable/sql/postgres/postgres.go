@@ -1864,14 +1864,15 @@ func quoteTable(table string) string {
 	return sqlident.Postgres.Table(table)
 }
 
-// flushPending emits all buffered entities as a single proposal and
-// resets the buffer. No-op when the buffer is empty. lsn is the WAL
-// position of the message that triggered the flush; it becomes the
-// proposal's SourceSeq, a strictly-monotonic per-proposal key the
-// ingest worker uses to dedup re-emitted proposals after a crash/flap
-// (effectively-once). Monotonic because clientXLogPos only advances, and
-// deterministic because a resume re-reads the same messages in the same
-// order, producing the same flush LSNs.
+// flushPending emits the buffered entities and resets the buffer. No-op when the
+// buffer is empty. A mixed-table transaction is split into one HOMOGENEOUS proposal
+// per topic (one group for the flat single-topic form); the db/WAL layer routes by
+// topic and dedups on a per-ingestable SourceSeq. lsn is the WAL position of the
+// message that triggered the flush; it forms the proposal's SourceSeq, a
+// strictly-monotonic per-proposal key the ingest worker uses to dedup re-emitted
+// proposals after a crash/flap (effectively-once). Monotonic because clientXLogPos
+// only advances, and deterministic because a resume re-reads the same messages in
+// the same order, producing the same flush LSNs.
 func flushPending(ctx context.Context, pending *[]*cluster.Entity, pendingBytes *int, pr chan<- *cluster.Proposal, lsn pglogrepl.LSN, epoch uint64) error {
 	if len(*pending) == 0 {
 		return nil
@@ -1881,14 +1882,30 @@ func flushPending(ctx context.Context, pending *[]*cluster.Entity, pendingBytes 
 	// entities in a flush share the epoch (it only changes on a reconnect that
 	// triggers a gap-recovery re-snapshot).
 	stampGeneration(*pending, epoch)
-	p := &cluster.Proposal{Entities: *pending, SourceSeq: uint64(lsn)}
-	select {
-	case pr <- p:
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+
+	// One proposal per topic, in first-appearance order (deterministic for replay).
+	// Per-topic proposals share this flush's LSN, so they need strictly-increasing
+	// SourceSeqs or the per-ingestable dedup drops all but the first: add an additive
+	// sub-index to the LSN, mirroring the MySQL flush's flushSub. A flush never
+	// repeats an LSN — each XLogData message has a distinct, strictly-increasing
+	// WALStart and the commit flush uses the commit message's — and the gap to the
+	// next flush's LSN is a whole WAL record (tens of bytes) >> the topic count, so
+	// lsn+sub never reaches the next flush's base (the coordinate-gap safety the
+	// MySQL SourceSeq relies on too). Single-topic -> sub 0 -> SourceSeq ==
+	// uint64(lsn), byte-identical to the pre-routing single-proposal flush.
+	groups := sql.PartitionByTopic(*pending)
 	*pending = nil
 	*pendingBytes = 0
+
+	for sub, group := range groups {
+		//nolint:gosec // G115: sub is a small non-negative topic-group index (< number of topics in a transaction).
+		p := &cluster.Proposal{Entities: group, SourceSeq: uint64(lsn) + uint64(sub)}
+		select {
+		case pr <- p:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	return nil
 }
 
