@@ -148,21 +148,40 @@ func (i *Ingestable) ValidateReplace(prior cluster.Ingestable) error {
 	if !ok {
 		return nil // different ingestable kind — nothing to compare
 	}
-	// A primaryKey change re-keys every row; keep the dedicated error, which
-	// carries the dependent-syncable enumeration a re-key needs.
-	if !primaryKeyEqual(p.config.PrimaryKey, i.config.PrimaryKey) {
-		return &PrimaryKeyChangeError{
-			TopicID:       i.topicID(),
-			TopicName:     i.topicName(),
-			OldPrimaryKey: p.config.PrimaryKey,
-			NewPrimaryKey: i.config.PrimaryKey,
+	// Compare per topic-spec (one spec for the flat form): each topic keeps its own
+	// primaryKey and table set, matched across prior↔next by topic id.
+	p.config.EnsureTopics()
+	i.config.EnsureTopics()
+	priorByTopic := specsByTopicID(p.config.Topics)
+
+	// A primaryKey change re-keys a topic's every row; keep the dedicated error,
+	// which carries the dependent-syncable enumeration a re-key needs. Checked per
+	// topic present on BOTH sides (highest precedence, matching the prior order); a
+	// topic present only in next is an addition, handled by the source-identity
+	// tier below (it flags nothing — additions are additive).
+	for ni := range i.config.Topics {
+		ns := &i.config.Topics[ni]
+		ps, ok := priorByTopic[topicIDOf(ns)]
+		if !ok {
+			continue
+		}
+		if !primaryKeyEqual(ps.PrimaryKey, ns.PrimaryKey) {
+			return &PrimaryKeyChangeError{
+				TopicID:       topicIDOf(ns),
+				TopicName:     topicNameOf(ns),
+				OldPrimaryKey: ps.PrimaryKey,
+				NewPrimaryKey: ns.PrimaryKey,
+			}
 		}
 	}
-	// Source-identity changes leave the persisted Position stale for the new
-	// source or the new topic (see SourceIdentityChangeError for what is and is
-	// not flagged, and why).
+
+	// Source-identity changes leave the persisted Position stale (see
+	// SourceIdentityChangeError). The produced TOPIC SET shrinking — a topic
+	// removed, or the flat form's one topic re-pointed to a different id — and the
+	// shared source SERVER changing both invalidate it. A topic ADD is additive
+	// (the publication / added-table backfill reconciles it) and is not flagged.
 	var changed []string
-	if p.topicID() != i.topicID() {
+	if topicSetShrank(priorByTopic, i.config.Topics) {
 		changed = append(changed, "topic")
 	}
 	if serverIdentityChanged(p.config.ConnectionString, i.config.ConnectionString) {
@@ -175,14 +194,22 @@ func (i *Ingestable) ValidateReplace(prior cluster.Ingestable) error {
 			ChangedFields: changed,
 		}
 	}
-	// The table set is identity too: removing a table in place arms a delayed
-	// sweep of its sink rows at the next full refresh (see TableRemovalError).
-	// Additions and reorders pass.
-	if removed := removedTables(p.config.Tables, i.config.Tables); len(removed) > 0 {
-		return &TableRemovalError{
-			TopicID:       i.topicID(),
-			TopicName:     i.topicName(),
-			RemovedTables: removed,
+
+	// The table set feeding a topic is identity too: removing a table in place arms
+	// a delayed sweep of its sink rows at the next full refresh (see
+	// TableRemovalError). Checked per matched topic; additions and reorders pass.
+	for ni := range i.config.Topics {
+		ns := &i.config.Topics[ni]
+		ps, ok := priorByTopic[topicIDOf(ns)]
+		if !ok {
+			continue
+		}
+		if removed := removedTables(ps.Tables, ns.Tables); len(removed) > 0 {
+			return &TableRemovalError{
+				TopicID:       topicIDOf(ns),
+				TopicName:     topicNameOf(ns),
+				RemovedTables: removed,
+			}
 		}
 	}
 	return nil

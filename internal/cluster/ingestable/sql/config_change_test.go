@@ -241,3 +241,87 @@ func TestIngestable_ValidateReplace_TableReorderAndCaseAllowed(t *testing.T) {
 	next := ingestableTables("t1", "ORDERS", "users")
 	require.NoError(t, next.ValidateReplace(prior))
 }
+
+// topicSpec / multiTopic build the multi-topic ([[sql.topics]]) shape directly, so
+// the per-spec ValidateReplace paths are covered before the parser can emit more
+// than one spec.
+func topicSpec(topicID string, pk []string, tables ...string) sql.TopicSpec {
+	return sql.TopicSpec{
+		Type:       &cluster.Type{ID: topicID, Name: topicID},
+		PrimaryKey: pk,
+		Tables:     tables,
+	}
+}
+
+func multiTopic(specs ...sql.TopicSpec) *sql.Ingestable {
+	return sql.New(nil, &sql.Config{Topics: specs})
+}
+
+// A primaryKey change in ONE topic of a multi-topic ingestable is rejected for
+// exactly that topic — the others are untouched.
+func TestIngestable_ValidateReplace_MultiTopic_PerTopicPrimaryKeyChange(t *testing.T) {
+	prior := multiTopic(
+		topicSpec("orders", []string{"id"}, "orders"),
+		topicSpec("customers", []string{"cust_id"}, "customers"),
+	)
+	next := multiTopic(
+		topicSpec("orders", []string{"id"}, "orders"),
+		topicSpec("customers", []string{"cust_id", "region"}, "customers"), // re-keyed
+	)
+	var pkErr *sql.PrimaryKeyChangeError
+	require.ErrorAs(t, next.ValidateReplace(prior), &pkErr)
+	require.Equal(t, "customers", pkErr.TopicID)
+	require.Equal(t, []string{"cust_id"}, pkErr.OldPrimaryKey)
+	require.Equal(t, []string{"cust_id", "region"}, pkErr.NewPrimaryKey)
+}
+
+// Removing a table from ONE topic (keeping the topic itself) is a per-topic table
+// removal, reported against that topic.
+func TestIngestable_ValidateReplace_MultiTopic_PerTopicTableRemoval(t *testing.T) {
+	prior := multiTopic(
+		topicSpec("orders", []string{"id"}, "orders_us", "orders_eu"),
+		topicSpec("customers", []string{"cust_id"}, "customers"),
+	)
+	next := multiTopic(
+		topicSpec("orders", []string{"id"}, "orders_us"), // dropped orders_eu
+		topicSpec("customers", []string{"cust_id"}, "customers"),
+	)
+	var trErr *sql.TableRemovalError
+	require.ErrorAs(t, next.ValidateReplace(prior), &trErr)
+	require.Equal(t, "orders", trErr.TopicID)
+	require.Equal(t, []string{"orders_eu"}, trErr.RemovedTables)
+}
+
+// Adding a whole new topic-spec is additive — the existing topics are unaffected.
+func TestIngestable_ValidateReplace_MultiTopic_AddTopicAllowed(t *testing.T) {
+	prior := multiTopic(topicSpec("orders", []string{"id"}, "orders"))
+	next := multiTopic(
+		topicSpec("orders", []string{"id"}, "orders"),
+		topicSpec("customers", []string{"cust_id"}, "customers"), // new topic
+	)
+	require.NoError(t, next.ValidateReplace(prior))
+}
+
+// Removing a whole topic-spec shrinks the produced-topic set (its sink rows would be
+// orphaned) — a source-identity change, rejected with the recreate path.
+func TestIngestable_ValidateReplace_MultiTopic_RemoveTopicRejected(t *testing.T) {
+	prior := multiTopic(
+		topicSpec("orders", []string{"id"}, "orders"),
+		topicSpec("customers", []string{"cust_id"}, "customers"),
+	)
+	next := multiTopic(topicSpec("orders", []string{"id"}, "orders")) // dropped customers
+	var srcErr *sql.SourceIdentityChangeError
+	require.ErrorAs(t, next.ValidateReplace(prior), &srcErr)
+	require.Equal(t, []string{"topic"}, srcErr.ChangedFields)
+}
+
+// An unchanged multi-topic config validates fine.
+func TestIngestable_ValidateReplace_MultiTopic_Identical(t *testing.T) {
+	build := func() *sql.Ingestable {
+		return multiTopic(
+			topicSpec("orders", []string{"id"}, "orders"),
+			topicSpec("customers", []string{"cust_id"}, "customers"),
+		)
+	}
+	require.NoError(t, build().ValidateReplace(build()))
+}

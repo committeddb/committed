@@ -175,6 +175,50 @@ func (e *TableRemovalError) Code() string { return tableRemovalCode }
 // Details implements cluster.RebuildRequiredError.
 func (e *TableRemovalError) Details() any { return e }
 
+// topicIDOf / topicNameOf read a spec's produced-topic identity, tolerating a nil
+// Type (a config built without one) so ValidateReplace never panics on a malformed
+// spec.
+func topicIDOf(s *TopicSpec) string {
+	if s.Type == nil {
+		return ""
+	}
+	return s.Type.ID
+}
+
+func topicNameOf(s *TopicSpec) string {
+	if s.Type == nil {
+		return ""
+	}
+	return s.Type.Name
+}
+
+// specsByTopicID indexes a config's specs by their topic id, so ValidateReplace can
+// match a prior topic to its next counterpart. A topic id appears at most once (the
+// parser rejects a duplicate topic across specs), so last-wins is never reached.
+func specsByTopicID(topics []TopicSpec) map[string]*TopicSpec {
+	m := make(map[string]*TopicSpec, len(topics))
+	for i := range topics {
+		m[topicIDOf(&topics[i])] = &topics[i]
+	}
+	return m
+}
+
+// topicSetShrank reports whether any prior topic id is absent from next — a topic
+// removed, or (in the flat form) the one topic re-pointed to a new id. A topic
+// present only in next is an addition and does not shrink the set.
+func topicSetShrank(priorByTopic map[string]*TopicSpec, next []TopicSpec) bool {
+	nextIDs := make(map[string]bool, len(next))
+	for i := range next {
+		nextIDs[topicIDOf(&next[i])] = true
+	}
+	for id := range priorByTopic {
+		if !nextIDs[id] {
+			return true
+		}
+	}
+	return false
+}
+
 // removedTables returns the entries of old absent from new, compared
 // case-insensitively (the binlog/watch filters match tables case-insensitively,
 // so a pure case edit addresses the same table and removes nothing). Order
