@@ -1783,13 +1783,18 @@ func binlogFileNum(name string) (uint64, bool) {
 const chunkRenderingVersion = 1
 
 // chunkTag fingerprints the inputs that determine how an oversized transaction
-// is split into same-coordinate parts: the flush byte budget, the config's
+// is split into same-coordinate parts: the flush byte budget, every topic-spec's
 // rendering-relevant fields (mappings, primary key, type), and the binary
 // rendering version. It is stamped on every checkpoint; a mismatch on resume
 // means re-chunking a replayed same-coordinate multi-part transaction could
 // shift an as-yet-uncommitted row into a part whose SourceSeq the dedup would
 // drop — silent loss — so those replayed parts are flagged DedupUnsafe and the
 // worker freezes. Never returns 0 (reserved for "no baseline recorded").
+//
+// Every spec is hashed so a change to ANY topic's mappings/PK/type re-fingerprints
+// the ingestable. The specs are separated only BETWEEN entries (not after the
+// last), so a single-topic config hashes byte-identically to the pre-routing
+// version — a persisted single-topic checkpoint stays valid across the upgrade.
 //
 // budget is passed in (not read from the global sql.TxnSoftFlushBytes) so it is
 // captured once at Ingest start — the checkpoint path runs on the worker
@@ -1803,19 +1808,26 @@ func chunkTag(config *sql.Config, budget int) uint64 {
 	binary.LittleEndian.PutUint64(buf[:], chunkRenderingVersion)
 	_, _ = h.Write(buf[:])
 	if config != nil {
-		for _, m := range config.Mappings {
-			_, _ = h.Write([]byte(m.JsonName))
-			_, _ = h.Write([]byte{0})
-			_, _ = h.Write([]byte(m.SQLColumn))
-			_, _ = h.Write([]byte{0})
-		}
-		_, _ = h.Write([]byte{0xff})
-		for _, pk := range config.PrimaryKey {
-			_, _ = h.Write([]byte(pk))
-			_, _ = h.Write([]byte{0})
-		}
-		if config.Type != nil {
-			_, _ = h.Write([]byte(config.Type.ID))
+		config.EnsureTopics()
+		for si := range config.Topics {
+			if si > 0 {
+				_, _ = h.Write([]byte{0xfe}) // between-specs separator; absent for one spec
+			}
+			spec := &config.Topics[si]
+			for _, m := range spec.Mappings {
+				_, _ = h.Write([]byte(m.JsonName))
+				_, _ = h.Write([]byte{0})
+				_, _ = h.Write([]byte(m.SQLColumn))
+				_, _ = h.Write([]byte{0})
+			}
+			_, _ = h.Write([]byte{0xff})
+			for _, pk := range spec.PrimaryKey {
+				_, _ = h.Write([]byte(pk))
+				_, _ = h.Write([]byte{0})
+			}
+			if spec.Type != nil {
+				_, _ = h.Write([]byte(spec.Type.ID))
+			}
 		}
 	}
 	t := h.Sum64()

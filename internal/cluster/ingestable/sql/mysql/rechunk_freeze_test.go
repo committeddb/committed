@@ -2,6 +2,8 @@ package mysql
 
 import (
 	"context"
+	"encoding/binary"
+	"hash/fnv"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -38,6 +40,64 @@ func TestChunkTag_SensitiveToBudgetAndConfig(t *testing.T) {
 		PrimaryKey: []string{"id"},
 	}
 	require.NotEqual(t, base, chunkTag(cfg2, sql.TxnSoftFlushBytes), "a mapping change must change the chunk tag")
+}
+
+// TestChunkTag_SingleTopicByteCompat locks the single-topic wire format: a
+// one-topic config must hash to the EXACT pre-multi-topic byte sequence (budget,
+// rendering version, then mappings, 0xff, primaryKey, type id — with NO
+// between-specs separator), so a chunk_tag a pre-routing binary persisted on a
+// checkpoint still matches on resume and does not falsely freeze the worker.
+func TestChunkTag_SingleTopicByteCompat(t *testing.T) {
+	cfg := &sql.Config{
+		Type:       &cluster.Type{ID: "topic-1"},
+		Mappings:   []sql.Mapping{{JsonName: "a", SQLColumn: "col_a"}, {JsonName: "b", SQLColumn: "col_b"}},
+		PrimaryKey: []string{"id", "ordering"},
+	}
+	budget := sql.TxnSoftFlushBytes
+
+	// Replicate the exact legacy byte sequence a pre-routing binary hashed.
+	h := fnv.New64a()
+	var buf [8]byte
+	binary.LittleEndian.PutUint64(buf[:], uint64(budget)) //nolint:gosec // G115: test budget is a positive constant
+	_, _ = h.Write(buf[:])
+	binary.LittleEndian.PutUint64(buf[:], chunkRenderingVersion)
+	_, _ = h.Write(buf[:])
+	for _, m := range cfg.Mappings {
+		_, _ = h.Write([]byte(m.JsonName))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(m.SQLColumn))
+		_, _ = h.Write([]byte{0})
+	}
+	_, _ = h.Write([]byte{0xff})
+	for _, pk := range cfg.PrimaryKey {
+		_, _ = h.Write([]byte(pk))
+		_, _ = h.Write([]byte{0})
+	}
+	_, _ = h.Write([]byte(cfg.Type.ID))
+	want := h.Sum64()
+
+	require.Equal(t, want, chunkTag(cfg, budget),
+		"single-topic chunkTag must match the legacy byte format so checkpoints stay valid across the multi-topic upgrade")
+}
+
+// TestChunkTag_HashesAllTopics proves every spec feeds the fingerprint: a change to
+// the SECOND topic's mapping changes the tag (a hash of only Topics[0] would miss
+// it), and a two-topic config differs from either topic alone.
+func TestChunkTag_HashesAllTopics(t *testing.T) {
+	specA := sql.TopicSpec{Type: &cluster.Type{ID: "a"}, Mappings: []sql.Mapping{{JsonName: "x", SQLColumn: "x"}}, PrimaryKey: []string{"id"}}
+	specB := sql.TopicSpec{Type: &cluster.Type{ID: "b"}, Mappings: []sql.Mapping{{JsonName: "y", SQLColumn: "y"}}, PrimaryKey: []string{"id"}}
+	specBRenamed := specB
+	specBRenamed.Mappings = []sql.Mapping{{JsonName: "y", SQLColumn: "y_RENAMED"}}
+
+	two := &sql.Config{Topics: []sql.TopicSpec{specA, specB}}
+	twoRenamed := &sql.Config{Topics: []sql.TopicSpec{specA, specBRenamed}}
+	onlyA := &sql.Config{Topics: []sql.TopicSpec{specA}}
+
+	base := chunkTag(two, sql.TxnSoftFlushBytes)
+	require.NotEqual(t, base, chunkTag(twoRenamed, sql.TxnSoftFlushBytes),
+		"a change to the SECOND topic's mapping must change the tag — every spec is hashed")
+	require.NotEqual(t, base, chunkTag(onlyA, sql.TxnSoftFlushBytes),
+		"adding a topic must change the tag")
 }
 
 // TestFlushPending_FlagsRechunkSoftFlush pins the re-chunk half of the freeze
