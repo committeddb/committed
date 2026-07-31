@@ -59,6 +59,11 @@ const (
 // row's identifying key, so only then must the table's PRIMARY KEY cover
 // primaryKey.
 func (m *MySQLDialect) Preflight(config *sql.Config) error {
+	// Normalize to the per-topic model up front, single-threaded: a dialect entered
+	// directly (a hand-built config, bypassing the sql.Ingestable wrapper) carries
+	// only the flat singular fields, so the per-spec loops below (and Ingest/Status)
+	// would otherwise see an empty Topics.
+	config.EnsureTopics()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -300,6 +305,7 @@ const statusLagTimeout = 5 * time.Second
 // file:pos checkpoint) there is no global head to diff against, so Lag stays nil
 // and CaughtUp stays false — an unknown lag is not a caught-up lag.
 func (m *MySQLDialect) Status(ctx context.Context, config *sql.Config, pos cluster.Position) (cluster.IngestableStatus, error) {
+	config.EnsureTopics()
 	var progress *dialectpb.SnapshotProgress
 	var position, consumedGTID string
 	if len(pos) > 0 {
@@ -469,6 +475,10 @@ func mysqlTableColumns(ctx context.Context, db *gosql.DB, table string) (cols, g
 }
 
 func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos cluster.Position, epochFloor uint64, pr chan<- *cluster.Proposal, po chan<- cluster.Position) error {
+	// Populate Topics before any snapshot/stream goroutine spawns, so per-spec
+	// routing (SpecForTable, specFor, refSpecs) never has to lazily mutate the shared
+	// config concurrently — a dialect entered directly has only the flat fields.
+	config.EnsureTopics()
 	backoff := syncerBackoffMin
 
 	// Parse the initial resume position, if any. snapshot_progress

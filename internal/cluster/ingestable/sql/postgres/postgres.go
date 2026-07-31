@@ -180,6 +180,9 @@ const preflightTimeout = 10 * time.Second
 // a keyed tombstone. It is NOT "require FULL" — REPLICA IDENTITY DEFAULT is fine
 // as long as the table's primary key covers primaryKey.
 func (d *PostgreSQLDialect) Preflight(config *sql.Config) error {
+	// Normalize to the per-topic model up front, single-threaded — see the MySQL
+	// Preflight note; per-spec preflight (checkReplicaIdentity) reads it below.
+	config.EnsureTopics()
 	pgCfg, err := buildPgConfig(config)
 	if err != nil {
 		return err
@@ -357,6 +360,11 @@ func checkReplicaIdentity(ctx context.Context, db *gosql.DB, table string, prima
 }
 
 func (d *PostgreSQLDialect) Ingest(ctx context.Context, config *sql.Config, pos cluster.Position, epochFloor uint64, pr chan<- *cluster.Proposal, po chan<- cluster.Position) error {
+	// Populate Topics before the snapshot and stream run, so per-spec routing
+	// (SpecForTable in the snapshot, specForRelation in the stream) never lazily
+	// mutates the shared config from concurrent goroutines — a dialect entered
+	// directly has only the flat fields.
+	config.EnsureTopics()
 	pgCfg, err := buildPgConfig(config)
 	if err != nil {
 		return err
@@ -466,6 +474,7 @@ const statusLagTimeout = 5 * time.Second
 // LSN); once snapshot progress is gone the worker is streaming and lag is the
 // slot's distance behind the source write head.
 func (d *PostgreSQLDialect) Status(ctx context.Context, config *sql.Config, pos cluster.Position) (cluster.IngestableStatus, error) {
+	config.EnsureTopics()
 	lsn, progress, _, err := decodePosition(pos)
 	if err != nil {
 		return cluster.IngestableStatus{}, fmt.Errorf("[postgres.status] decode position: %w", err)

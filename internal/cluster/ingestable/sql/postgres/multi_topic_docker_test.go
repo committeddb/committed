@@ -99,6 +99,9 @@ func TestPostgresMultiTopicSnapshotRoutesToOwnTopics(t *testing.T) {
 
 	slot, pub := "slot_mt_snap", "pub_mt_snap"
 	cleanReplication(t, slot, pub)
+	// Free the slot at test END too: the shared container caps max_replication_slots
+	// (16), so a leaked slot starves later tests in the package.
+	t.Cleanup(func() { cleanReplication(t, slot, pub) })
 
 	dialect := &postgres.PostgreSQLDialect{}
 	config := multiTopicConfig(slot, pub)
@@ -167,6 +170,9 @@ func TestPostgresMultiTopicMixedTransactionSplitsByTopic(t *testing.T) {
 
 	slot, pub := "slot_mt_cdc", "pub_mt_cdc"
 	cleanReplication(t, slot, pub)
+	// Free the slot at test END too (see the snapshot test) so it doesn't starve
+	// later tests of the capped max_replication_slots budget.
+	t.Cleanup(func() { cleanReplication(t, slot, pub) })
 
 	dialect := &postgres.PostgreSQLDialect{}
 	config := multiTopicConfig(slot, pub)

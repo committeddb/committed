@@ -215,9 +215,14 @@ func TestPostgresDialect(t *testing.T) {
 			cleanReplication(t, slotName, pubName)
 
 			dialect := &postgres.PostgreSQLDialect{}
-			tt.config.ConnectionString = connString
-			tt.config.Tables = []string{tt.table}
-			tt.config.Options = map[string]string{
+			// Copy the shared config per subtest: Ingest normalizes it to the
+			// per-topic model (EnsureTopics) in place, so mutating the shared
+			// basicConfig directly would leave the next subtable routed to the
+			// previous subtest's table. (Mirrors the MySQL dialect test.)
+			cfg := *tt.config
+			cfg.ConnectionString = connString
+			cfg.Tables = []string{tt.table}
+			cfg.Options = map[string]string{
 				"slot_name":   slotName,
 				"publication": pubName,
 			}
@@ -230,7 +235,7 @@ func TestPostgresDialect(t *testing.T) {
 
 			ingestErr := make(chan error, 1)
 			go func() {
-				ingestErr <- dialect.Ingest(ctx, tt.config, nil, 0, proposalChan, positionChan)
+				ingestErr <- dialect.Ingest(ctx, &cfg, nil, 0, proposalChan, positionChan)
 			}()
 
 			waitForSlot(t, slotName)
