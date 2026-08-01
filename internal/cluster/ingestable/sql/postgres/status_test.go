@@ -39,6 +39,28 @@ func TestPostgresStatusSnapshotPhase(t *testing.T) {
 	}, st.SnapshotProgress)
 }
 
+// TestPostgresStatusPendingPhase: an EMPTY position (nothing has ever durably
+// checkpointed — a just-created ingestable, or one still retrying its first
+// snapshot batch) reports phase=pending with every table incomplete, and never
+// queries the source (the slot may not exist yet). This used to render
+// "streaming" with every table complete — the false green that defeated the
+// silent-skip forensics. The topic tag still resolves per table.
+func TestPostgresStatusPendingPhase(t *testing.T) {
+	d := &PostgreSQLDialect{}
+	cfg := &sql.Config{Tables: []string{"region", "nation"}}
+
+	st, err := d.Status(context.Background(), cfg, nil)
+	require.NoError(t, err)
+	require.Equal(t, "pending", st.Phase)
+	require.Empty(t, st.Position)
+	require.Nil(t, st.Lag)
+	require.False(t, st.CaughtUp)
+	require.Equal(t, []cluster.TableSnapshotStatus{
+		{Table: "region"},
+		{Table: "nation"},
+	}, st.SnapshotProgress, "no table may read complete before anything has run")
+}
+
 // TestPostgresStatusBadPosition: an unrecognized checkpoint blob is a hard
 // error (a corrupt position should surface, not be silently reported as 0).
 func TestPostgresStatusBadPosition(t *testing.T) {

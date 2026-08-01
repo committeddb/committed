@@ -2161,15 +2161,19 @@ components:
             from the local worker, so a node not running it answers 404.
         phase:
           type: string
-          enum: [snapshot, streaming]
+          enum: [pending, snapshot, streaming]
           description: |
-            `snapshot` while the worker is still dumping existing rows, then
-            `streaming` once it is following the change-data-capture stream.
+            `pending` until anything has durably checkpointed (a just-created
+            ingestable, or one still retrying its first snapshot batch — check
+            `workerState` for whether it is running or recovering); `snapshot`
+            while the worker is still dumping existing rows; then `streaming`
+            once it is following the change-data-capture stream.
         snapshotProgress:
           type: array
           description: |
-            Per watched table. Present in both phases — once the snapshot
-            finishes every table reads `complete: true`.
+            Per watched table. Present in every phase — `complete: false` for
+            every table while `pending`; once the snapshot finishes every table
+            reads `complete: true`.
           items:
             $ref: '#/components/schemas/TableSnapshotProgress'
         position:

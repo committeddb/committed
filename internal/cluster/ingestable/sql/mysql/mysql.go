@@ -306,6 +306,14 @@ const statusLagTimeout = 5 * time.Second
 // and CaughtUp stays false — an unknown lag is not a caught-up lag.
 func (m *MySQLDialect) Status(ctx context.Context, config *sql.Config, pos cluster.Position) (cluster.IngestableStatus, error) {
 	config.EnsureTopics()
+	// An EMPTY position means nothing has ever durably checkpointed — phase
+	// "pending", every table incomplete. It must not fall through to the
+	// progress==nil arm below, which renders the completed-streaming state
+	// (see sql.PendingStatus for the false-green incident this prevents). No
+	// source query: the binlog reader may not have run yet.
+	if len(pos) == 0 {
+		return sql.PendingStatus(config), nil
+	}
 	var progress *dialectpb.SnapshotProgress
 	var position, consumedGTID string
 	if len(pos) > 0 {

@@ -225,8 +225,10 @@ GET /v1/ingestable/{id}/status
 }
 ```
 
-- **`phase`** — `"snapshot"` while dumping existing rows, `"streaming"` once it is
-  following the change stream.
+- **`phase`** — `"pending"` until anything has durably checkpointed (a
+  just-created ingestable, or one still retrying its first snapshot batch — read
+  `workerState` for whether it is running or recovering), `"snapshot"` while
+  dumping existing rows, `"streaming"` once it is following the change stream.
 - **`snapshotProgress`** — per watched table: the last key dumped and whether that
   table's snapshot is complete.
 - **`position`** — the engine-native cursor: a Postgres LSN (`0/1A2B3C8`) or a

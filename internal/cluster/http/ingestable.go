@@ -18,8 +18,9 @@ type IngestableStatusResponse struct {
 	// freeze/restart supervisor gave up — fix the config and re-POST it, or delete).
 	// Replicated, so it is reported truthfully from any node.
 	WorkerState string `json:"workerState"`
-	// Phase is "snapshot" while dumping existing rows, then "streaming" once on
-	// the change-data-capture stream. Omitted when workerState is "parked" (a
+	// Phase is "pending" until anything has durably checkpointed, "snapshot"
+	// while dumping existing rows, then "streaming" once on the
+	// change-data-capture stream. Omitted when workerState is "parked" (a
 	// stopped worker has no phase).
 	Phase string `json:"phase,omitempty"`
 	// SnapshotProgress is per watched table — present in both phases (every

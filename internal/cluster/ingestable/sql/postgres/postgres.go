@@ -499,6 +499,14 @@ const statusLagTimeout = 5 * time.Second
 // slot's distance behind the source write head.
 func (d *PostgreSQLDialect) Status(ctx context.Context, config *sql.Config, pos cluster.Position) (cluster.IngestableStatus, error) {
 	config.EnsureTopics()
+	// An EMPTY position means nothing has ever durably checkpointed — phase
+	// "pending", every table incomplete. It must not fall through to the
+	// progress==nil arm below, which renders the completed-streaming state
+	// (see sql.PendingStatus for the false-green incident this prevents). No
+	// lag query: the slot may not exist yet.
+	if len(pos) == 0 {
+		return sql.PendingStatus(config), nil
+	}
 	lsn, progress, _, err := decodePosition(pos)
 	if err != nil {
 		return cluster.IngestableStatus{}, fmt.Errorf("[postgres.status] decode position: %w", err)

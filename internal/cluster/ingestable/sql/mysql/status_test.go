@@ -50,9 +50,18 @@ func TestMysqlStatus(t *testing.T) {
 	require.Equal(t, "nation", st.SnapshotProgress[1].Table)
 	require.False(t, st.SnapshotProgress[1].Complete)
 
-	// Empty position (never checkpointed): streaming, no coordinate.
+	// Empty position (never checkpointed): PENDING, no coordinate, every table
+	// incomplete. This used to render "streaming" with every table complete —
+	// the false green that made a zero-progress worker indistinguishable from a
+	// healthy caught-up one.
 	st, err = d.Status(context.Background(), cfg, nil)
 	require.NoError(t, err)
-	require.Equal(t, "streaming", st.Phase)
+	require.Equal(t, "pending", st.Phase)
 	require.Empty(t, st.Position)
+	require.Nil(t, st.Lag)
+	require.False(t, st.CaughtUp)
+	require.Equal(t, []cluster.TableSnapshotStatus{
+		{Table: "region"},
+		{Table: "nation"},
+	}, st.SnapshotProgress, "no table may read complete before anything has run")
 }

@@ -7,8 +7,39 @@ import (
 	"github.com/committeddb/committed/internal/cluster/ingestable/sql/dialectpb"
 )
 
+// PendingStatus is the status of an ingestable whose durable position is EMPTY —
+// nothing has ever durably checkpointed: a just-created ingestable, or one whose
+// worker keeps freeze-restarting before its first checkpoint commits. Shared by
+// both dialects so the pending shape has one source of truth.
+//
+// This state must never render as streaming/complete: the durable state space is
+// three-valued (never-progressed / mid-snapshot / completed-streaming), and
+// before this helper existed both dialects collapsed it to two — an empty
+// position decoded to a nil snapshot-progress, which SnapshotTableStatus (below)
+// reads as "snapshot done, all tables complete" and the phase branch reads as
+// "streaming". That false green (phase "streaming", complete true, for an
+// ingestable that had ingested NOTHING) defeated three rounds of incident
+// forensics. Lag is left nil (the slot/binlog reader may not even exist yet) so
+// CaughtUp can never be true.
+func PendingStatus(config *Config) cluster.IngestableStatus {
+	tables := make([]cluster.TableSnapshotStatus, 0, len(config.Tables))
+	for _, t := range config.Tables {
+		st := cluster.TableSnapshotStatus{Table: t}
+		if spec := config.SpecForTable(t); spec != nil && spec.Type != nil {
+			st.Topic = spec.Type.ID
+		}
+		tables = append(tables, st) // Complete deliberately false: nothing has run
+	}
+	return cluster.IngestableStatus{
+		Phase:            "pending",
+		SnapshotProgress: tables,
+	}
+}
+
 // SnapshotTableStatus reports each configured table's place in the initial
 // snapshot, shared by both dialects since the snapshot-progress proto is shared.
+// Callers must route an EMPTY position to PendingStatus first — this helper's
+// progress==nil arm is only correct for a NON-empty (streaming) position.
 //
 // During the snapshot phase (progress != nil) it reflects the live cursor: a
 // table in CompletedTables reads Complete, the rest carry their keyset cursor

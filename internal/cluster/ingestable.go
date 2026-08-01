@@ -120,9 +120,11 @@ type IngestableStatus struct {
 	// Replicated, so it is reported truthfully from any node — even one with no
 	// local worker handle.
 	WorkerState string
-	// Phase is "snapshot" while the worker is still dumping existing rows, then
-	// "streaming" once the snapshot is complete and it is following the CDC
-	// stream. Derived from the checkpoint: a position that still carries
+	// Phase is "pending" until anything has durably checkpointed (a just-created
+	// ingestable, or one still retrying its first snapshot batch), "snapshot"
+	// while the worker is still dumping existing rows, then "streaming" once the
+	// snapshot is complete and it is following the CDC stream. Derived from the
+	// checkpoint: an empty position is pending; a position that still carries
 	// snapshot progress is in the snapshot phase.
 	Phase string
 	// SnapshotProgress is per watched table: the keyset cursor reached and
