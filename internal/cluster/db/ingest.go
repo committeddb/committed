@@ -488,6 +488,37 @@ func (db *DB) spawnIngestWorkerLocked(id string, i cluster.Ingestable) *workerHa
 		// them unblocked uniformly.
 		close(handle.done)
 		if reason == ingestExitFreeze {
+			// Drain apply up to the current commit index BEFORE the supervisor
+			// restarts this worker from its durable position. Any freeze path can
+			// leave pipelined rows or a just-failed proposal COMMITTED but not yet
+			// APPLIED (acks fire at apply, which can lag commit under a busy Ready
+			// loop). The durable position advances only at apply, so restarting on a
+			// stale position would re-read behind those committed batches and re-emit
+			// them — duplicating them in the permanent event log, which is a raw
+			// mirror of the committed raft log and cannot drop a duplicate at apply
+			// (P_local==R_local). Every index <= commit is committed and therefore
+			// guaranteed to apply (or the node fatals), so this returns once the
+			// position reflects all committed data — restoring the effectively-once
+			// ingest contract (docs/event-log-architecture.md) at the one point it
+			// can be: before the re-read. It sits here, at the shared freeze exit,
+			// because every ingestExitFreeze path has the same hazard. Fix #1 keeps
+			// the wait short (apply is no longer scrub-starved); a longer wait is the
+			// intended backpressure. workerCtx is still live on a freeze (a normal
+			// return, not a cancel); if a concurrent replace/Close cancels it mid-
+			// drain, waitForApplied returns its error and we restart anyway — the
+			// supervisor's preflight resolves that race.
+			if db.raft != nil {
+				drainCtx := workerCtx
+				if db.ingestDrainTimeoutForTest > 0 {
+					var cancel context.CancelFunc
+					drainCtx, cancel = context.WithTimeout(workerCtx, db.ingestDrainTimeoutForTest)
+					defer cancel()
+				}
+				if derr := db.waitForApplied(drainCtx, db.raft.CommitIndex()); derr != nil {
+					db.logger.Debug("ingest freeze: apply-drain interrupted; restarting without full drain",
+						zap.String("id", id), zap.Error(derr))
+				}
+			}
 			// The worker froze and the supervisor is about to restart it — mark it
 			// recovering (node-local) so the status endpoint stops reporting a live
 			// "streaming" phase for a worker that is actually wedged and retrying.
@@ -827,13 +858,17 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 						// pre-barrier bug was exactly a branch that chose to
 						// continue; the default must hold the line, and the
 						// supervisor's restart-from-durable-position is the
-						// one recovery that is always correct. Because
-						// position bumps are blocking (one in flight at a
-						// time, fully resolved before the next channel
-						// event), there are no outstanding bumps to drain —
-						// storage.Position is already definitive, so the
-						// supervisor's post-restart read is correct without
-						// any drain step.
+						// one recovery that is always correct — once the durable
+						// position it re-reads is CURRENT. It may lag here: the
+						// pipelined rows and this failed proposal can be
+						// committed-but-unapplied (acks fire at apply, which can
+						// lag commit under a busy Ready loop). The freeze-exit
+						// handler (spawnIngestWorkerLocked) drains apply to the
+						// commit index before the supervisor re-reads the
+						// position, so a committed batch is never re-emitted into
+						// the permanent event log — the effectively-once contract
+						// (docs/event-log-architecture.md). The drain is central
+						// there because every freeze path shares this hazard.
 						//
 						// ingress.stop (from the defer above) cancels the
 						// inner Ingest goroutine cleanly on return,

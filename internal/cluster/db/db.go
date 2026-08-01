@@ -267,6 +267,14 @@ type DB struct {
 	// production.
 	afterIngestSupervisorRestartForTest func(frozenCtxErr error)
 
+	// ingestDrainTimeoutForTest bounds the apply-drain the freeze-exit performs
+	// before a supervised restart (see spawnIngestWorkerLocked). Zero in
+	// production, where the drain waits unbounded on workerCtx — on a live node
+	// apply always catches up to the commit index, and a dead apply releases the
+	// wait via db.ctx. Tests whose in-memory storage stubs AppliedIndex to 0 set
+	// a small value so the drain gives up instead of blocking forever.
+	ingestDrainTimeoutForTest time.Duration
+
 	// syncCh / ingestCh are the config-notification channels the apply path
 	// (wal.Storage) sends on and listenForSyncables/Ingestables receive from.
 	// Close keeps a drain goroutine reading them while it stops raft, so a

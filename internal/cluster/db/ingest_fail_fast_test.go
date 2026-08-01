@@ -208,6 +208,12 @@ func newIngestFailFastDBWith(t *testing.T, extra ...db.Option) (*db.DB, *slowApp
 	opts = append(opts, extra...)
 
 	d := db.New(id, peers, s, p, nil, nil, opts...)
+	// This harness's MemoryStorage stubs AppliedIndex to 0, so the freeze-exit
+	// apply-drain (which waits for AppliedIndex to reach the commit index) can
+	// never complete here. Bound it so the drain gives up quickly and the freeze
+	// path behaves as these tests expect (restart from the still-stale position,
+	// no progress → frozen gauge stays set). Production leaves it unbounded.
+	d.SetIngestDrainTimeoutForTest(50 * time.Millisecond)
 	// Note: not deferring Close — the test drives Close explicitly as
 	// part of the assertion that the frozen worker exits cleanly.
 	return d, s

@@ -888,6 +888,22 @@ func (n *Raft) Leader() uint64 {
 	return n.node.Status().Lead
 }
 
+// CommitIndex returns this node's current raft commit index — the highest index
+// raft has committed, which may lead AppliedIndex when the apply path is behind.
+// Reads through etcd raft's Status() snapshot, whose request the raft run loop
+// services even while it is waiting for the application to Advance a Ready, so
+// this does NOT block on a slow apply/serveChannels iteration — exactly the
+// stall a caller draining apply-lag needs to measure over. Returns 0 before the
+// node is wired.
+func (n *Raft) CommitIndex() uint64 {
+	if n.node == nil {
+		return 0
+	}
+	// GetCommit is the nil-safe accessor (Status embeds *HardState, which is nil
+	// before the first persisted HardState); it returns 0 in that case.
+	return n.node.Status().GetCommit()
+}
+
 // setCompactionPressure records whether the node is under disk pressure. While
 // true, maybeCompact treats it as a trigger limb (compact every Ready
 // iteration, subject to the usual safety constraints) so the node frees

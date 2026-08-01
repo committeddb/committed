@@ -61,6 +61,12 @@ func (db *DB) InjectStaleWorkerBumpOnRebuildResetForTest(id string, staleIndex u
 // worker before abandoning it, so a wedged-worker test runs fast.
 func (db *DB) SetWorkerDrainTimeoutForTest(d time.Duration) { db.workerDrainTimeout = d }
 
+// SetIngestDrainTimeoutForTest bounds the apply-drain the freeze-exit performs
+// before a supervised restart. Production leaves it 0 (unbounded on workerCtx);
+// tests whose in-memory storage stubs AppliedIndex to 0 set a small value so the
+// drain gives up rather than blocking the restart forever.
+func (db *DB) SetIngestDrainTimeoutForTest(d time.Duration) { db.ingestDrainTimeoutForTest = d }
+
 // InjectWedgedSyncWorkerForTest registers a sync worker handle whose done
 // channel never closes — modelling a worker stuck in tx.Commit against an
 // unreachable destination that ignores its cancelled context. deleteSync/replace
