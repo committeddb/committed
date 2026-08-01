@@ -780,7 +780,18 @@ To recover:
 1. Raise `COMMITTED_MAX_PROPOSAL_BYTES` past the row/transaction size (it caps
    the marshaled proposal, so allow headroom over the raw row bytes), or reduce
    the source write so it fits.
-2. Restart the node (or re-POST the ingestable).
+2. Apply the fix — which action depends on the worker's state:
+   - **Restart the node** to pick up a raised `COMMITTED_MAX_PROPOSAL_BYTES` (an
+     env var, read only at startup). A worker still in the freeze→retry loop
+     resumes from the durable checkpoint on restart and clears the row.
+   - If the supervisor has already **given up** and the worker is **terminally
+     parked** (`committed.worker.parked` = 1) — not merely freeze-retrying — a node
+     restart does **not** revive it; it comes back parked. **Re-POST the
+     ingestable** (its stored config, unchanged) to clear the parked state and
+     resume from the durable checkpoint. A park persists until the operator
+     re-POSTs or deletes the resource (see [metrics](metrics.md)) — so a parked
+     worker whose cap you raised needs **both**: a restart to apply the new cap and
+     a re-POST to clear the park.
 
 Because the checkpoint never advanced past the frozen row, resume replays from
 exactly that position — the oversized row is applied on the next attempt and no

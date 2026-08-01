@@ -1521,6 +1521,23 @@ func (d *PostgreSQLDialect) snapshot(
 		completed[t] = true
 	}
 
+	// Announce whether this is a resume or a cold start, at absolute (table-level)
+	// granularity, so an operator can tell the two apart from the log alone — a
+	// per-run batch counter that resets each supervisor restart cannot. The keyset
+	// cursor itself is deliberately NOT logged: a natural PK is often source PII
+	// (see the per-batch flush log), so progress is reported by table counts only.
+	if len(completed) > 0 || len(progress.LastPkByTable) > 0 {
+		zap.L().Info("snapshot: resuming from checkpoint",
+			zap.Int("tables_complete", len(completed)),
+			zap.Int("tables_resuming", len(progress.LastPkByTable)),
+			zap.Int("tables_total", len(tables)),
+			zap.Uint64("refresh_epoch", epoch))
+	} else {
+		zap.L().Info("snapshot: starting fresh",
+			zap.Int("tables_total", len(tables)),
+			zap.Uint64("refresh_epoch", epoch))
+	}
+
 	for _, table := range tables {
 		if completed[table] {
 			zap.L().Info("snapshot: skipping already-completed table",
