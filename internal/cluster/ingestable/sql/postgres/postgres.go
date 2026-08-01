@@ -442,6 +442,30 @@ func decodePosition(pos cluster.Position) (pglogrepl.LSN, *dialectpb.SnapshotPro
 	return 0, nil, 0, fmt.Errorf("unrecognized position format (len=%d)", len(pos))
 }
 
+// needsColdSnapshot reports whether an ingestable has never durably run a
+// snapshot and must run a full one now — as opposed to a completed-but-idle
+// ingestable that should just resume streaming. It is keyed on committed's
+// DURABLE position, mirroring the MySQL dialect's `lastPos == nil` test — NOT on
+// the source-side slotIsNew. The replication slot outlives a committed-side
+// worker restart, so slotIsNew wrongly reads "already snapshotted" when a worker
+// froze during the initial snapshot before its first batch checkpointed (e.g.
+// propose contention during a mass-create), silently skipping the snapshot and
+// streaming an empty topic.
+//
+// The discriminator is refresh_epoch: a snapshot stamps epoch >= 1 before its
+// first batch, so epoch == 0 means zero batches have ever checkpointed — the
+// never-started (or froze-before-first-batch) signature. A COMPLETED snapshot
+// leaves epoch >= 1 even when its streaming LSN is still 0 (the closing marker
+// records lsn=0 until the first streaming checkpoint), so epoch keeps a
+// completed-idle table (epoch>=1) from redundantly re-snapshotting. lastLSN == 0
+// gates both: a legacy 8-byte streaming position (lsn>0, epoch=0) or any
+// streamed position (lsn>0) is never re-snapshotted. slotIsNew is retained so a
+// recreated slot with a surviving completed-idle position (lsn=0, epoch>=1) still
+// re-snapshots — the WAL window it needs is gone.
+func needsColdSnapshot(slotIsNew bool, lastLSN pglogrepl.LSN, epoch uint64) bool {
+	return lastLSN == 0 && (slotIsNew || epoch == 0)
+}
+
 // encodePosition writes a position using the new proto format with the
 // magic byte prefix. Passing progress=nil omits the snapshot section so
 // streaming-phase checkpoints stay compact. epoch is the reconciling-refresh
@@ -776,12 +800,15 @@ func (d *PostgreSQLDialect) stream(
 	case *intent != nil:
 		// A prior attempt's snapshot is unfinished — resume it below. The epoch
 		// and LSN base were already set when the intent was formed.
-	case (slotIsNew && *lastLSN == 0) || *resumeProgress != nil:
-		// (a) the slot was just created and we have no prior checkpoint (first
-		// run — StartReplication(0) below starts from the new slot's consistent
-		// point), or (b) a prior run was interrupted mid-snapshot: full snapshot
-		// of every configured table. The closing marker is a no-op on a fresh sink
-		// but makes a rebuild against a pre-populated sink reconcile.
+	case needsColdSnapshot(slotIsNew, *lastLSN, *epoch) || *resumeProgress != nil:
+		// (a) no snapshot has ever durably run — a first run OR a worker that
+		// froze during the initial snapshot before its first batch checkpointed
+		// (needsColdSnapshot keys on the durable position, not the source-side
+		// slot, so a pre-existing slot no longer masks this as "already done"),
+		// or (b) a prior run was interrupted mid-snapshot: full snapshot of every
+		// configured table. StartReplication(0) below starts from the slot's
+		// consistent point. The closing marker is a no-op on a fresh sink but
+		// makes a rebuild against a pre-populated sink reconcile.
 		if *resumeProgress != nil {
 			// Mid-snapshot resume: continue the in-progress epoch the checkpoint
 			// carries (its closing marker has not committed, so the topic highwater
