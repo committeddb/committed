@@ -324,3 +324,70 @@ func TestScrub_AsyncViaCommand(t *testing.T) {
 	require.ErrorIs(t, err, wal.ErrActualNotFound)
 	require.Equal(t, uint64(5), s.EventIndex(), "scrub command entry is the tail; EventIndex preserved")
 }
+
+// TestScrub_CatchesUpTailAppendedDuringRewrite proves the two-phase swap loses no
+// entry that lands on the live log WHILE the rewrite runs. A post-bulk hook injects
+// late commits after phase A has snapshotted the tail; the unlocked convergence
+// passes (phase A') and the locked catch-up (phase B) must fold them into the
+// rewritten log before the swap. The residue knob selects which path catches the
+// delta: the default (4096) leaves a 3-entry delta to phase B; shrinking it to 1
+// forces phase A'. Neutralizing the phase-B catch-up in runScrub fails the first
+// subtest (and not the second) — proving both paths are load-bearing.
+func TestScrub_CatchesUpTailAppendedDuringRewrite(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		shrinkResidue bool // true => convergence (phase A') catches the delta; false => phase B
+	}{
+		{"phase B catches a small delta under the lock", false},
+		{"convergence (phase A') catches the delta", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.shrinkResidue {
+				defer wal.SetScrubConvergeResidueForTest(1)()
+			}
+
+			s := NewStorage(t, nil)
+			defer s.Cleanup()
+
+			s.RegisterType(t, "u", 1, 1) // idx 1: type
+			saveEntity(t, userUpsert("u", "alice", `{"pii":1}`), s, 1, 2)
+			saveEntity(t, userUpsert("u", "bob", `{"ok":1}`), s, 1, 3)
+			saveEntity(t, userDelete("u", "alice"), s, 1, 4) // tombstone alice@4
+
+			// After phase A snapshots the tail at idx 4, inject three late commits
+			// (idx 5,6,7). runScrub calls the hook once; a guard makes injection
+			// idempotent regardless.
+			injected := false
+			s.SetScrubPostBulkHookForTest(func() {
+				if injected {
+					return
+				}
+				injected = true
+				saveEntity(t, userUpsert("u", "carol", `{"ok":2}`), s, 1, 5)
+				saveEntity(t, userUpsert("u", "dave", `{"ok":3}`), s, 1, 6)
+				saveEntity(t, userUpsert("u", "erin", `{"ok":4}`), s, 1, 7)
+			})
+
+			require.Nil(t, s.RunScrubForTest(4))
+			require.True(t, injected, "post-bulk hook must have fired")
+
+			// alice's PII original (idx 2) is physically gone; the tombstone stays.
+			_, err := s.ActualAt(2)
+			require.ErrorIs(t, err, wal.ErrActualNotFound)
+			del, err := s.ActualAt(4)
+			require.Nil(t, err)
+			require.True(t, del.Entities[0].IsDelete())
+
+			// Every commit that landed during the rewrite survives the swap.
+			for _, want := range []struct {
+				idx uint64
+				key string
+			}{{3, "bob"}, {5, "carol"}, {6, "dave"}, {7, "erin"}} {
+				a, err := s.ActualAt(want.idx)
+				require.Nilf(t, err, "idx %d (%s) must survive the scrub", want.idx, want.key)
+				require.Equal(t, []byte(want.key), a.Entities[0].Key)
+			}
+			require.Equal(t, uint64(7), s.EventIndex(), "EventIndex must include the injected tail")
+		})
+	}
+}

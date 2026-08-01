@@ -172,7 +172,15 @@ func (s *Storage) runScrub(bound uint64) error {
 	if err := os.RemoveAll(tmpDir); err != nil { // clear any stale partial attempt
 		return err
 	}
-	newLog, err := wal.Open(tmpDir, nil)
+	// NoSync: this is a throwaway temp log that becomes authoritative only at the
+	// atomic rename below, and any pre-swap crash discards it (recoverScrubDirs /
+	// the defer drop tmpDir), leaving the pre-scrub log untouched — so a per-entry
+	// fsync here buys no crash-safety, it only serializes the whole O(N) rewrite
+	// behind one fsync per surviving entry. On a large log that starves the raft
+	// propose path through the shared storage lock for hours. We fsync explicitly
+	// with newLog.Sync() before the rename instead; segment cycling still fsyncs
+	// each filled segment (cycle()), so only the tail is left for that final Sync.
+	newLog, err := wal.Open(tmpDir, &wal.Options{NoSync: true})
 	if err != nil {
 		return err
 	}
@@ -228,9 +236,10 @@ func (s *Storage) runScrub(bound uint64) error {
 		return nil
 	}
 
-	// Phase A (unlocked): bulk copy the log as it stood at the start. New
-	// commits keep appending to the old log meanwhile (all at indices > bound,
-	// so always survivors); they're caught up under the lock in phase B.
+	// Phase A (unlocked): bulk-copy the log as it stood at the start. New commits
+	// keep appending to the OLD log meanwhile (all at indices > bound, so always
+	// survivors); they are chased down in phase A' and caught up under the lock in
+	// phase B.
 	first, err := s.firstEventSeq()
 	if err != nil {
 		return err
@@ -239,15 +248,56 @@ func (s *Storage) runScrub(bound uint64) error {
 	if err != nil {
 		return err
 	}
+	// Sequence numbers and a tombstoned-key count only — no source keys/PII.
+	s.logger.Info("scrub: rewriting permanent event log",
+		zap.Uint64("bound", bound),
+		zap.Uint64("firstSeq", first),
+		zap.Uint64("lastSeq", startLast),
+		zap.Int("tombstonedKeys", len(sel)))
 	if first != 0 && startLast != 0 {
 		if err := copyRange(first, startLast, false); err != nil {
 			return err
 		}
 	}
 
-	// Phase B (locked): catch up the small delta appended during phase A, then
-	// swap. eventMu.Lock waits for in-flight reads/the appender to drain and
-	// blocks new ones for the brief swap.
+	if s.scrubPostBulkHookForTest != nil {
+		s.scrubPostBulkHookForTest()
+	}
+
+	// Phase A' (unlocked convergence): on a heavy-write system entries keep landing
+	// on the old log while phase A runs. Copying that whole delta under eventMu.Lock
+	// would stall the appender in proportion to the write rate, so chase it with
+	// repeated UNLOCKED passes first — a NoSync copy outruns fsync'd appends, so each
+	// pass leaves less than the last and the residue for the locked phase shrinks to
+	// a sliver. Bounded by scrubConvergeRounds so a writer we cannot outrun still
+	// terminates (phase B then just copies a larger delta); the reads are of
+	// already-durable seqs on the live log, safe without the lock.
+	copied := startLast
+	for range scrubConvergeRounds {
+		cur, lerr := s.lastEventSeq()
+		if lerr != nil {
+			return lerr
+		}
+		if cur <= copied || cur-copied <= scrubConvergeResidue {
+			break // caught up, or small enough to finish under the lock
+		}
+		if err := copyRange(copied+1, cur, false); err != nil {
+			return err
+		}
+		copied = cur
+	}
+
+	// Durability: fsync the survivors written so far BEFORE taking the lock. With
+	// NoSync only the current tail segment is unpersisted (cycle() fsynced the rest),
+	// so this flushes at most ~SegmentSize and does the bulk of the fsync work
+	// OUTSIDE the lock. The tiny locked delta is synced again below.
+	if err := newLog.Sync(); err != nil {
+		return err
+	}
+
+	// Phase B (locked): catch up the now-small delta, then swap. eventMu.Lock waits
+	// for in-flight reads/the appender to drain and blocks new ones for the brief
+	// swap.
 	s.eventMu.Lock()
 	defer s.eventMu.Unlock()
 
@@ -255,10 +305,15 @@ func (s *Storage) runScrub(bound uint64) error {
 	if err != nil {
 		return err
 	}
-	if endLast > startLast {
-		if err := copyRange(startLast+1, endLast, true); err != nil {
+	if endLast > copied {
+		if err := copyRange(copied+1, endLast, true); err != nil {
 			return err
 		}
+	}
+	// Sync the locked delta (bounded by the residue + current tail segment) so the
+	// whole rewritten log is durable before the rename makes it authoritative.
+	if err := newLog.Sync(); err != nil {
+		return err
 	}
 	if err := newLog.Close(); err != nil {
 		return err
@@ -266,8 +321,9 @@ func (s *Storage) runScrub(bound uint64) error {
 	// Durability: fsync the freshly-written swap dir so its segment entries survive
 	// power loss BEFORE it is renamed into place. The parent-dir fsync after the
 	// swap (below) makes the *rename* durable, but not the segment filenames inside
-	// the swapped-in dir. Best-effort, like the parent fsync; on a crash-consistent
-	// filesystem the segment writes' own fsyncs already committed these entries.
+	// the swapped-in dir. Best-effort, like the parent fsync; the newLog.Sync calls
+	// above already committed the entries' content (NoSync moved that fsync out of
+	// the per-entry path), so this only needs to persist their directory entries.
 	s.syncDirBestEffort(tmpDir, "event-log scrub swap dir")
 
 	// Swap: events -> events.retired, events.scrub.<B> -> events. Renames are
@@ -332,7 +388,9 @@ func (s *Storage) runScrub(bound uint64) error {
 	// released (see the swapped branch of the defer above), NOT here under the
 	// lock — so the O(files) removal can't stall the apply path.
 	s.logger.Info("scrubbed permanent event log",
-		zap.Uint64("bound", bound), zap.Int("tombstonedKeys", len(sel)))
+		zap.Uint64("bound", bound),
+		zap.Int("tombstonedKeys", len(sel)),
+		zap.Uint64("survivorEntries", nextSeq))
 	return nil
 }
 
@@ -743,6 +801,20 @@ var metadataBacklogThreshold int64 = 128
 // metadataEntryOverhead is the per-entry framing/protobuf overhead added to a
 // counted supersession's key+data size when estimating reclaimable bytes.
 const metadataEntryOverhead = 64
+
+// scrubConvergeRounds bounds the unlocked catch-up passes (phase A' in runScrub)
+// that chase the delta appended while the rewrite runs, before it takes
+// eventMu.Lock for the final swap. Each pass shrinks the delta (a NoSync copy
+// outruns fsync'd appends); the cap guarantees termination against a writer we
+// cannot outrun — the locked phase then just copies whatever remains. A latency
+// heuristic, not a correctness boundary — phase B catches up to the true tail
+// regardless.
+const scrubConvergeRounds = 8
+
+// scrubConvergeResidue is the delta (in entries) small enough to copy under the
+// lock, so a convergence pass stops chasing once within it. A var (not const) so
+// a test can shrink it to force the convergence path on a small delta.
+var scrubConvergeResidue uint64 = 4096
 
 // Volume gate for the metadata-only scrub. The rewrite's COST is O(total log
 // size) — read the whole log twice, rewrite every survivor — while its BENEFIT

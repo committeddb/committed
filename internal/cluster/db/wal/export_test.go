@@ -147,6 +147,21 @@ func (s *Storage) SetFailCompactionForTest(fn func() error) { s.failCompactionFo
 // assert the error branch removes the stray. Pass nil to restore the default.
 func (s *Storage) SetBoltTmpPathForTest(fn func(prefix string) string) { s.boltTmpPathForTest = fn }
 
+// SetScrubPostBulkHookForTest installs a callback fired inside runScrub after the
+// phase-A bulk copy and before the convergence/locked catch-up, so a test can
+// append late commits in that window and assert the swap still folds them in. Pass
+// nil to restore.
+func (s *Storage) SetScrubPostBulkHookForTest(fn func()) { s.scrubPostBulkHookForTest = fn }
+
+// SetScrubConvergeResidueForTest shrinks the convergence residue so a small
+// injected delta forces the unlocked convergence path (phase A') instead of the
+// locked catch-up. Returns a restore func.
+func SetScrubConvergeResidueForTest(n uint64) func() {
+	old := scrubConvergeResidue
+	scrubConvergeResidue = n
+	return func() { scrubConvergeResidue = old }
+}
+
 // IsCompactOwedForTest reports whether the durable compaction-owed marker is set
 // (a scrub pruned tombstones but hasn't finished compacting bbolt).
 func (s *Storage) IsCompactOwedForTest() bool {

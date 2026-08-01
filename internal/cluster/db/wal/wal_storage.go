@@ -252,6 +252,11 @@ type Storage struct {
 	// temp create/write to fail and assert the error branch removes the stray. Nil
 	// in production, where newBoltTmpPath returns a unique nanosecond-suffixed path.
 	boltTmpPathForTest func(prefix string) string
+	// scrubPostBulkHookForTest, when non-nil, is called in runScrub after the
+	// phase-A bulk copy and before the convergence/locked catch-up — the window a
+	// test uses to append late commits and prove the swap still folds them in. Nil
+	// in production.
+	scrubPostBulkHookForTest func()
 	// closeOnce makes Close idempotent: the owner (cmd/node) closes the Storage
 	// after db.Close returns, and some callers (and tests) may close it more than
 	// once, so a second Close must be a no-op rather than double-closing the
