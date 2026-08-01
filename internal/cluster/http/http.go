@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/rs/cors"
 	"go.uber.org/zap"
 
@@ -154,6 +155,15 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 	r.Group(func(r chi.Router) {
 		if h.bearerToken != "" {
 			r.Use(h.bearerAuth)
+		}
+
+		// Runtime profiling (/debug/pprof/*), off unless COMMITTED_PPROF enabled
+		// it (WithPprof). Mounted inside this group so it inherits bearer auth when
+		// a token is configured. middleware.Profiler serves /debug/pprof and the
+		// named profiles (heap, goroutine, allocs, profile, trace, ...).
+		if o.pprof {
+			r.Mount("/debug", middleware.Profiler())
+			zap.L().Warn("pprof profiling endpoints enabled at /debug/pprof (COMMITTED_PPROF); disable when not diagnosing")
 		}
 
 		// Every API endpoint lives under /v1 so a future breaking change

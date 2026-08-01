@@ -5,6 +5,27 @@ and retaining them is yours to configure. This page covers what those logs
 contain, why node-local logs deliberately hold customer data, and the retention
 responsibility that follows for right-to-be-forgotten.
 
+## Log level and live profiling
+
+Two node env vars control diagnostic verbosity; both take effect at process start
+(restart the node to change them):
+
+- **`COMMITTED_LOG_LEVEL`** — the minimum level written. Default `info`; accepts
+  `debug`, `info`, `warn`, `error` (and `dpanic`/`panic`/`fatal`). Set it to
+  `debug` to surface finer-grained diagnostics that are otherwise silent (e.g.
+  raft-log compaction cadence). An unrecognized value fails startup rather than
+  silently staying at `info`. Note that `debug` logs are more verbose and so more
+  likely to carry error-path detail — the retention guidance below applies to them
+  the same way, arguably more so, so prefer raising the level only while
+  diagnosing.
+- **`COMMITTED_PPROF`** — when truthy, mounts Go's runtime profiling endpoints at
+  `/debug/pprof/` (CPU, heap, goroutine, etc.) for pulling profiles from a live
+  node. **Off by default.** It sits inside the authenticated route group, so it
+  requires the bearer token whenever `COMMITTED_API_TOKEN` is set; on a token-less
+  (trusted-network) node it is open like the rest of the API. The endpoints expose
+  runtime internals and a profile briefly costs CPU, so enable it only while
+  diagnosing and only where that exposure is acceptable.
+
 ## Node logs hold customer data — by design
 
 committed draws its redaction boundary at the point data *leaves a node*.

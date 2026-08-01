@@ -323,6 +323,11 @@ image can be templated per-node by an orchestrator:
 		if m != nil {
 			httpOpts = append(httpOpts, http.WithMetrics(m))
 		}
+		// COMMITTED_PPROF mounts /debug/pprof/* for live CPU/heap profiling. Off by
+		// default; behind bearer auth when COMMITTED_API_TOKEN is set.
+		if boolEnv("COMMITTED_PPROF") {
+			httpOpts = append(httpOpts, http.WithPprof())
+		}
 		if n, ok := parseInt64Env("COMMITTED_MAX_PROPOSAL_BYTES"); ok {
 			// Keep the request-body cap above the (raised) proposal cap so a large
 			// but valid proposal isn't false-rejected at the HTTP body read; the

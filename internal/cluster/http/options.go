@@ -19,6 +19,7 @@ type options struct {
 	proxyClient      *httpgo.Client
 	maxBodyBytes     int64
 	metrics          *metrics.Metrics
+	pprof            bool
 }
 
 // WithBearerToken enables bearer-token authentication on every route
@@ -74,6 +75,17 @@ func WithReadIndexTimeout(d time.Duration) Option {
 			o.readIndexTimeout = d
 		}
 	}
+}
+
+// WithPprof mounts the Go runtime profiling endpoints under /debug/pprof/ so an
+// operator can pull CPU and heap profiles from a live node. It sits INSIDE the
+// authenticated route group, so it requires the bearer token whenever
+// COMMITTED_API_TOKEN is set; on a token-less (trusted-network) node it is open
+// like the rest of the API. Off by default — enabled only via COMMITTED_PPROF,
+// because the endpoints expose runtime internals and a profile briefly costs CPU.
+// Only enable it where that exposure is acceptable.
+func WithPprof() Option {
+	return func(o *options) { o.pprof = true }
 }
 
 // WithProxyClient overrides the HTTP client used to proxy leader-only reads
