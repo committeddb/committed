@@ -53,6 +53,21 @@ func (s *Storage) bumpTopicRefreshEpoch(topic string, gen uint64) error {
 	if topic == "" || gen == 0 {
 		return nil
 	}
+	// Fast path: a no-op raise must not open a write transaction. This helper
+	// runs for EVERY applied generation-stamped entity — every ingested row,
+	// snapshot and streaming alike — and the raise is a no-op for all but the
+	// first row of a new epoch. A bbolt write tx has no clean-commit shortcut:
+	// even with zero puts it writes a fresh freelist page plus the meta page and
+	// fdatasyncs BOTH (bbolt tx.go Commit/commitFreelist/writeMeta), ~ms per
+	// call, while this read snapshot costs ~µs — a measured ~65,000x difference.
+	// Without the guard the no-op commits put a two-fdatasync floor under every
+	// applied row, saturating the apply loop (the mass-create churn incident;
+	// the customer's day-one 30-50 rows/sec WAS this floor). Apply is
+	// single-goroutine, so read-then-write is not racy; the in-tx max check
+	// below remains as the backstop for any future concurrent caller.
+	if gen <= s.TopicRefreshEpoch(topic) {
+		return nil
+	}
 	return s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(topicRefreshEpochBucket)
 		if b == nil {
