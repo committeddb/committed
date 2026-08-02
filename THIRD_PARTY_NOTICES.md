@@ -3178,7 +3178,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ```
 
-## go.etcd.io/etcd/client/pkg/v3 v3.7.0
+## go.etcd.io/etcd/client/pkg/v3 v3.7.1
 
 ```
 
