@@ -2046,6 +2046,52 @@ func encodeProgress(pos mysql.Position, gtid string, progress *dialectpb.Snapsho
 	})
 }
 
+// handOffSnapshotWindow hands one read window's rows to pr — one single-row
+// proposal per row (a proposal is a TRANSACTION; the read window is read tuning,
+// never proposal composition) — bundling the inline resume checkpoint
+// (Proposal.Position) on every sql.SnapshotCheckpointStride-th row and on the
+// window's final row. Each checkpoint's cursor is THAT row's key, not the
+// window's last, so the durable resume cursor trails committed progress by at
+// most one stride: a worker frozen mid-window restarts from the last committed
+// checkpoint instead of re-reading and re-proposing the whole window (whose
+// SourceSeq-0 duplicates nothing would dedup out of the permanent log), and the
+// freeze/restart supervisor sees an advancing position instead of counting a
+// merely-slow worker toward give-up. A checkpoint-bearing row is an ordered
+// proposal (the ingest worker drains its pipeline before proposing it), so it
+// trails every row it covers; rows after it simply re-emit on resume.
+// progress is mutated in place per checkpoint, ending at the window's last key —
+// the same end state the caller's read cursor (lastPK) advances to. Mirrors the
+// Postgres dialect's handOffSnapshotWindow; only the checkpoint encoding differs.
+func handOffSnapshotWindow(
+	ctx context.Context,
+	rows []*cluster.Entity,
+	table string,
+	progress *dialectpb.SnapshotProgress,
+	pos mysql.Position,
+	gtid string,
+	epoch uint64,
+	pr chan<- *cluster.Proposal,
+) error {
+	stride := sql.SnapshotCheckpointStride
+	for ri, row := range rows {
+		p := &cluster.Proposal{Entities: []*cluster.Entity{row}}
+		if ri == len(rows)-1 || (ri+1)%stride == 0 {
+			progress.LastPkByTable[table] = string(row.Key)
+			posBytes, err := encodeProgress(pos, gtid, progress, epoch)
+			if err != nil {
+				return err
+			}
+			p.Position = posBytes
+		}
+		select {
+		case pr <- p:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
 // binlogStatus returns the current binlog filename and byte offset. It
 // tries SHOW BINARY LOG STATUS (MySQL 8.4+) first, falling back to
 // SHOW MASTER STATUS for older versions.
@@ -2158,37 +2204,16 @@ func snapshotTable(
 		// could not re-emit.
 		stampGeneration(rows, epoch)
 
-		// Advance the resume cursor to this batch, then carry the encoded
-		// checkpoint INLINE on the batch proposal (Proposal.Position) so the rows
-		// and their checkpoint commit in ONE raft entry. Atomic apply means a
-		// crash can never land between a committed batch and its checkpoint — the
-		// effectively-once gap a separate position proposal left open for snapshot
-		// rows (SourceSeq 0, so the streaming dedup can't cover them). No
-		// out-of-band emitProgress for a batch.
+		// Advance the read cursor to this window, then hand the rows off with
+		// inline checkpoints every sql.SnapshotCheckpointStride rows (and on the
+		// window's final row) — see handOffSnapshotWindow. Each checkpoint
+		// commits atomically with the row it rides (Proposal.Position), closing
+		// the effectively-once gap a separate position proposal left open for
+		// snapshot rows (SourceSeq 0, so the streaming dedup can't cover them).
 		lastPK = lastKey
 		haveLastPK = true
-		progress.LastPkByTable[table] = lastPK
-
-		posBytes, err := encodeProgress(*pos, gtid, progress, epoch)
-		if err != nil {
+		if err := handOffSnapshotWindow(ctx, rows, table, progress, *pos, gtid, epoch, pr); err != nil {
 			return err
-		}
-		// One proposal PER ROW: each row is an independent single-row
-		// TRANSACTION (see cluster.Proposal) — the read window is read tuning,
-		// never proposal composition. The window's FINAL row bundles the
-		// checkpoint so the position commits atomically with the last row it
-		// covers and trails every other row (the ingest worker drains its
-		// snapshot pipeline before proposing a position-bearing row).
-		for ri, row := range rows {
-			p := &cluster.Proposal{Entities: []*cluster.Entity{row}}
-			if ri == len(rows)-1 {
-				p.Position = posBytes
-			}
-			select {
-			case pr <- p:
-			case <-ctx.Done():
-				return ctx.Err()
-			}
 		}
 		totalRows += count
 

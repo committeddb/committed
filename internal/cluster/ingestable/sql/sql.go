@@ -31,6 +31,25 @@ type TopicEpochReader interface {
 // const, so tests can lower it to force multi-part flushes cheaply.
 var TxnSoftFlushBytes = 12 << 20
 
+// SnapshotCheckpointStride is how many snapshot rows may hand off between
+// inline resume checkpoints (Proposal.Position) within one read window. It
+// decouples the durability stride from the read window (batch_size, default
+// 10000): before it existed only the window's FINAL row carried the checkpoint,
+// making each window an all-or-nothing durability cliff — a worker frozen
+// mid-window (e.g. a propose-ack timeout under a mass-create burst) restarted
+// with its durable cursor untouched, re-read AND re-proposed the whole window
+// (snapshot rows carry SourceSeq 0, so nothing dedups the committed duplicates
+// out of the permanent log), and the supervisor counted every freeze at the
+// never-advancing cursor as consecutive, parking a merely-slow worker at its
+// give-up cap. With the stride, the durable cursor trails committed progress by
+// at most this many rows: a restart resumes mid-window and every attempt makes
+// net progress. Each checkpoint-bearing row is an ordered proposal (the ingest
+// worker drains its pipeline first), so the stride is also the
+// durability-vs-pipelining dial — strides well below ~500 spend too much time
+// synchronized, strides at the window size recreate the cliff. A var, not a
+// const, so tests can lower it to force mid-window checkpoints cheaply.
+var SnapshotCheckpointStride = 1000
+
 // MaxDecompressedTxnBytes bounds the uncompressed size of a single compressed
 // source transaction (a MySQL binlog TransactionPayloadEvent, emitted when the
 // source has binlog_transaction_compression=ON — default-on on some managed
