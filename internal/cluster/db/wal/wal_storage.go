@@ -222,6 +222,12 @@ type Storage struct {
 	// renaming it over this one, so it needs the path (tidwall/wal doesn't
 	// expose it). Set once in Open and never changed.
 	eventLogDir string
+	// eventWalOpts is the tidwall options the event log was opened with
+	// (segment-cache size — see WithEventCacheSegments). Stored so every
+	// event-log (re)open uses them: the scrub swap reopens the log in-process,
+	// and without this that reopen would silently revert the configured cache
+	// to the library default until the next restart. Set once in Open.
+	eventWalOpts *wal.Options
 	// eventMu guards the s.eventLog handle pointer and the on-disk events/
 	// directory identity against the scrubber's swap (close → rename → reopen),
 	// exactly mirroring how kvMu guards the bbolt handle against RestoreSnapshot.
@@ -495,13 +501,22 @@ type Storage struct {
 	lostCallback func([]uint64)
 }
 
+// DefaultEventCacheSegments is the default number of event-log segments held
+// parsed in memory (see WithEventCacheSegments). 16 ≈ up to ~340MB fully
+// resident — sized so the default is comfortable on a small (2GB) box, while
+// production deployments with many concurrent syncable readers raise it via
+// COMMITTED_EVENT_CACHE_SEGMENTS to fit their RAM.
+const DefaultEventCacheSegments = 16
+
 // openLog opens one of a node's tidwall logs, turning tidwall's opaque
 // ErrCorrupt ("log corrupt") into an actionable ErrCorruptEntry: it records the
 // corruption metric and points the operator at the offline repair CLI and the
 // rebuild runbook, so a torn tail or bit-flip fails startup with a message they
 // can act on instead of a bare "log corrupt". Other open errors pass through.
-func openLog(dir, logName string, m *metrics.Metrics) (*wal.Log, error) {
-	lg, err := wal.Open(dir, nil)
+// walOpts may be nil (the library defaults); the event log passes its
+// configured segment-cache size.
+func openLog(dir, logName string, m *metrics.Metrics, walOpts *wal.Options) (*wal.Log, error) {
+	lg, err := wal.Open(dir, walOpts)
 	if err == nil {
 		return lg, nil
 	}
@@ -556,15 +571,24 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		}
 	}
 
-	entryLog, err := openLog(entryLogDir, "entry_log", cfg.metrics)
+	entryLog, err := openLog(entryLogDir, "entry_log", cfg.metrics, nil)
 	if err != nil {
 		return nil, err
 	}
-	stateLog, err := openLog(stateLogDir, "state_log", cfg.metrics)
+	stateLog, err := openLog(stateLogDir, "state_log", cfg.metrics, nil)
 	if err != nil {
 		return nil, err
 	}
-	eventLog, err := openLog(eventLogDir, "event_log", cfg.metrics)
+	// The event log gets a configurable segment cache (its readers — syncables
+	// replaying history — are concurrent, one resident segment each; see
+	// WithEventCacheSegments). The entry/state logs keep the library default:
+	// their reader is the single sequential Ready loop.
+	cacheSegments := cfg.eventCacheSegments
+	if cacheSegments <= 0 {
+		cacheSegments = DefaultEventCacheSegments
+	}
+	eventWalOpts := &wal.Options{SegmentCacheSize: cacheSegments}
+	eventLog, err := openLog(eventLogDir, "event_log", cfg.metrics, eventWalOpts)
 	if err != nil {
 		return nil, err
 	}
@@ -622,6 +646,7 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		EntryLog:        entryLog,
 		eventLog:        eventLog,
 		eventLogDir:     eventLogDir,
+		eventWalOpts:    eventWalOpts,
 		StateLog:        stateLog,
 		keyValueStorage: keyValueStorage,
 		databases:       dbs,

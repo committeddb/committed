@@ -142,7 +142,7 @@ func TestOpenLog_WrapsTornTailWithActionableError(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
 
-	_, err = openLog(dir, "event_log", nil)
+	_, err = openLog(dir, "event_log", nil, nil)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrCorruptEntry, "a corrupt Open must surface as ErrCorruptEntry")
 	require.Contains(t, err.Error(), "committed wal repair", "must point at the repair CLI")

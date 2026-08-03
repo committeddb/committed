@@ -216,6 +216,17 @@ func syncDir(path string) error {
 	return closeErr
 }
 
+// SegmentCacheSize reports the resolved segment-cache capacity this log was
+// opened with. committeddb fork patch: added so the embedding storage can
+// assert its configured cache size survives every (re)open path — the scrub
+// swap reopens the event log in-process, and an option dropped there would
+// silently revert the cache until restart.
+func (l *Log) SegmentCacheSize() int {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.opts.SegmentCacheSize
+}
+
 func (l *Log) pushCache(segIdx int) {
 	_, _, _, v, evicted :=
 		l.scache.SetEvicted(segIdx, l.segments[segIdx])

@@ -197,6 +197,16 @@ image can be templated per-node by an orchestrator:
 		if m != nil {
 			walOpts = append(walOpts, wal.WithMetrics(m))
 		}
+		// COMMITTED_EVENT_CACHE_SEGMENTS sets how many event-log segments stay
+		// parsed in memory (default 16; each RESIDENT segment ≈ 21MB, unused
+		// capacity is free). Size it to your box: at least concurrent syncables
+		// + 2, raised freely on production RAM — syncables replaying history
+		// are concurrent readers, and a cache smaller than the reader count
+		// thrashes with ~20MB re-parses. Invalid values warn and keep the
+		// default (parseInt64Env), matching COMMITTED_MAX_PROPOSAL_BYTES.
+		if n, ok := parseInt64Env("COMMITTED_EVENT_CACHE_SEGMENTS"); ok {
+			walOpts = append(walOpts, wal.WithEventCacheSegments(int(n)))
+		}
 		s, err := wal.Open(dataDir, p, sync, ingest, walOpts...)
 		if err != nil {
 			log.Fatalf("cannot open storage: %v", err)

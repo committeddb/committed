@@ -418,7 +418,10 @@ func (s *Storage) closeEventLogBeforeSwapOrFatal(what string) {
 }
 
 func (s *Storage) reopenEventLogAfterSwapOrFatal(what string) {
-	reopened, err := wal.Open(s.eventLogDir, nil)
+	// s.eventWalOpts, not nil: the reopen must carry the configured
+	// segment-cache size (COMMITTED_EVENT_CACHE_SEGMENTS) or a scrub swap
+	// silently reverts the event log to the library default until restart.
+	reopened, err := wal.Open(s.eventLogDir, s.eventWalOpts)
 	if err != nil {
 		s.logger.Fatal("event-log swap could not reopen storage; the node cannot continue (restart to recover via recoverScrubDirs)",
 			zap.String("op", what), zap.Error(err))
