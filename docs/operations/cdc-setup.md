@@ -12,7 +12,7 @@ see the [quickstart](../quickstart.md); this guide is the reference for the
 ingest half. For the output half (projecting a topic to a SQL table), see the
 README § SQL projections.
 
-## How ingest works (both engines)
+## How ingest works (all SQL engines)
 
 An `ingestable` watches one or more source tables and turns every committed row
 change into a proposal on a topic. It runs in two phases:
@@ -417,71 +417,9 @@ A runnable, end-to-end Postgres example lives in
 [`examples/movies/`](../../examples/movies/) (`source.sql`, `ingest-*.toml`,
 `compose.yml`).
 
-### Multiple topics from one ingestable
-
-By default an ingestable feeds **one** topic: every table in `tables` merges into
-that single topic. To ingest a source database's tables as **distinct** topics —
-each with its own type, primary key, and column mapping — list them under
-`[[sql.topics]]` instead of the flat `topic`/`tables`/`primaryKey`/`mappings`
-fields:
-
-```toml
-[ingestable]
-name = "shop-ingest"
-type = "sql"
-
-[sql]
-dialect          = "postgres"
-connectionString = "postgres://committed:${PG_PASSWORD}@db:5432/shop?sslmode=disable"
-
-[sql.postgres]
-slot_name   = "committed_shop_slot"
-publication = "committed_shop_pub"
-
-[[sql.topics]]
-topic      = "orders"
-tables     = ["orders_us", "orders_eu"]   # several same-shape tables fan into one topic
-primaryKey = "id"
-
-[[sql.topics.mappings]]
-jsonName = "id"
-column   = "id"
-
-[[sql.topics]]
-topic      = "customers"
-tables     = ["customers"]
-primaryKey = "cust_id"
-
-[[sql.topics.mappings]]
-jsonName = "custId"
-column   = "cust_id"
-```
-
-`dialect`, `connectionString`, and the `[sql.<dialect>]` options stay top-level:
-every topic shares **one** source connection and **one** replication slot /
-publication (Postgres) or **one** binlog reader (MySQL). That is the point — a
-whole-database feed no longer needs one slot per table.
-
-Each `[[sql.topics]]` entry is self-contained and carries the same fields as the
-flat form (`topic`, `tables`, `primaryKey`, and `mappings` / `mapAllColumns` /
-`excludeColumns`). committed enforces at config time (HTTP `400`):
-
-- **The flat form and `[[sql.topics]]` are mutually exclusive** — don't set
-  `sql.topic`/`sql.tables`/`sql.primaryKey`/`sql.mappings` alongside `[[sql.topics]]`.
-- **Every table feeds exactly one topic** — a table listed under two topics is
-  rejected (each row has a single destination topic).
-- **Each topic id is claimed once**, and each topic must already exist as a type
-  (`POST /v1/type/{id}`) before the ingestable, exactly like the flat form.
-
-Because all the topics share one change stream, they share its **failure domain**:
-a fatal drift in one topic — a `primaryKey` column dropped at the source — parks the
-**whole** ingestable, so every topic stops together (the park message names which
-topic). This is deliberate: silently pausing one topic while the shared cursor kept
-advancing would drop that topic's changes. `GET /v1/ingestable/{id}/status` tags
-each table in `snapshotProgress` with the topic it feeds, so per-topic snapshot
-progress is readable at a glance. The [one-writer-per-topic](#one-writer-per-topic)
-rule is unchanged — a multi-topic ingestable is the single producer of *each* of its
-topics.
+To feed **several topics** from this one ingestable — one slot and publication for
+a whole database — see
+[Multiple topics from one ingestable](#multiple-topics-from-one-ingestable-all-sql-engines).
 
 ### Lag and the slot's disk cost
 
@@ -645,6 +583,10 @@ there is no `[sql.mysql]` subsection — MySQL has nothing analogous to a slot o
 publication to name. (`mapAllColumns = true` works here too, in place of the
 explicit `[[sql.mappings]]` blocks.)
 
+To feed **several topics** from this one ingestable — one binlog reader for a
+whole database — see
+[Multiple topics from one ingestable](#multiple-topics-from-one-ingestable-all-sql-engines).
+
 **TLS.** A MySQL connection takes the same libpq-style TLS parameters as
 PostgreSQL, so a MySQL source (or sink) is secured the same way. Use the
 `mysqls://` scheme (shorthand for full verification) or an explicit `?sslmode=`:
@@ -739,7 +681,81 @@ unaffected.
 
 ---
 
-## Restart behavior (both engines)
+## Multiple topics from one ingestable (all SQL engines)
+
+By default an ingestable feeds **one** topic: every table in `tables` merges into
+that single topic. To ingest a source database's tables as **distinct** topics —
+each with its own type, primary key, and column mapping — list them under
+`[[sql.topics]]` instead of the flat `topic`/`tables`/`primaryKey`/`mappings`
+fields. This works identically across committed's SQL engines; only the engine
+bits of the config differ, exactly as in the flat form:
+
+```toml
+[ingestable]
+name = "shop-ingest"
+type = "sql"
+
+[sql]
+dialect          = "postgres"
+connectionString = "postgres://committed:${PG_PASSWORD}@db:5432/shop?sslmode=disable"
+
+[sql.postgres]
+slot_name   = "committed_shop_slot"
+publication = "committed_shop_pub"
+
+[[sql.topics]]
+topic      = "orders"
+tables     = ["orders_us", "orders_eu"]   # several same-shape tables fan into one topic
+primaryKey = "id"
+
+[[sql.topics.mappings]]
+jsonName = "id"
+column   = "id"
+
+[[sql.topics]]
+topic      = "customers"
+tables     = ["customers"]
+primaryKey = "cust_id"
+
+[[sql.topics.mappings]]
+jsonName = "custId"
+column   = "cust_id"
+```
+
+For a MySQL source, only the top-level engine bits change — `dialect = "mysql"`,
+a `mysql://` connection string, and no `[sql.mysql]` subsection (nothing
+analogous to a slot or publication to name); the `[[sql.topics]]` entries are
+identical.
+
+`dialect`, `connectionString`, and the `[sql.<dialect>]` options stay top-level:
+every topic shares **one** source connection and **one** replication slot /
+publication (Postgres) or **one** binlog reader (MySQL). That is the point — a
+whole-database feed no longer needs one slot per table.
+
+Each `[[sql.topics]]` entry is self-contained and carries the same fields as the
+flat form (`topic`, `tables`, `primaryKey`, and `mappings` / `mapAllColumns` /
+`excludeColumns`). committed enforces at config time (HTTP `400`):
+
+- **The flat form and `[[sql.topics]]` are mutually exclusive** — don't set
+  `sql.topic`/`sql.tables`/`sql.primaryKey`/`sql.mappings` alongside `[[sql.topics]]`.
+- **Every table feeds exactly one topic** — a table listed under two topics is
+  rejected (each row has a single destination topic).
+- **Each topic id is claimed once**, and each topic must already exist as a type
+  (`POST /v1/type/{id}`) before the ingestable, exactly like the flat form.
+
+Because all the topics share one change stream, they share its **failure domain**:
+a fatal drift in one topic — a `primaryKey` column dropped at the source — parks the
+**whole** ingestable, so every topic stops together (the park message names which
+topic). This is deliberate: silently pausing one topic while the shared cursor kept
+advancing would drop that topic's changes. `GET /v1/ingestable/{id}/status` tags
+each table in `snapshotProgress` with the topic it feeds, so per-topic snapshot
+progress is readable at a glance. The [one-writer-per-topic](#one-writer-per-topic)
+rule is unchanged — a multi-topic ingestable is the single producer of *each* of its
+topics.
+
+---
+
+## Restart behavior (all SQL engines)
 
 When committed restarts, each ingestable reads back its checkpointed stream
 position and resumes from it — it does **not** re-snapshot. The requirement is
@@ -799,6 +815,6 @@ Because the checkpoint never advanced past the frozen row, resume replays from
 exactly that position — the oversized row is applied on the next attempt and no
 data between the last checkpoint and the freeze is lost or duplicated. An
 oversized *transaction* (not a single row) is instead split into ordered parts
-under the ~12MiB soft-flush budget (see [How ingest works](#how-ingest-works-both-engines)),
+under the ~12MiB soft-flush budget (see [How ingest works](#how-ingest-works-all-sql-engines)),
 so only a single row larger than the cap, or a transaction whose one part still
 exceeds it, reaches this freeze.
