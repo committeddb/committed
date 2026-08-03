@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 	"sync/atomic"
 	"testing"
 )
@@ -1461,5 +1462,88 @@ func TestMisTiledSegmentReadErrors(t *testing.T) {
 				t.Fatalf("Read(36) = %q, want %q", data, makeData(36))
 			}
 		})
+	}
+}
+
+// TestConcurrentReadEvictionRace is a committeddb fork regression test for the
+// concurrent-read data race that crashed a production node: Read runs under
+// mu.RLock (shared — many readers at once, as the docs advertise), but
+// loadSegment→pushCache MUTATES shared state on that path — lazily loading a
+// segment's entry table and, on cache eviction, nil-ing ANOTHER segment's
+// table — with no synchronization between readers. Reader A, between its
+// "table loaded?" check and its epos[index-s.index] use, loses its table to
+// reader B's eviction and panics with "index out of range [k] with length 0".
+// Eight readers pinned to distinct segments against a 1-slot cache make the
+// collision near-certain within milliseconds. Before the per-segment lock fix
+// this test fails under -race (and can panic outright); after, it is clean and
+// every read returns correct data — a reader that loses the eviction race must
+// reload, never error and never panic.
+func TestConcurrentReadEvictionRace(t *testing.T) {
+	makeData := func(index uint64) []byte {
+		return []byte(fmt.Sprintf("d%09d", index))
+	}
+	const entrySize = 11
+	const perSegment = 10
+
+	dir := t.TempDir()
+	opts := &Options{NoSync: true, SegmentSize: entrySize * perSegment, SegmentCacheSize: 1}
+	l, err := Open(dir, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 85 entries -> segments starting at 1,11,...,71 plus the tail at 81.
+	for i := uint64(1); i <= 85; i++ {
+		if err := l.Write(i, makeData(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Reopen so only the tail is resident: every non-tail read goes through
+	// the lazy-load + eviction machinery.
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	l, err = Open(dir, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	// Eight readers, each pinned to its own non-tail segment, reading in a
+	// loop: every load by one evicts another's segment from the 1-slot cache.
+	var wg sync.WaitGroup
+	errCh := make(chan error, 8)
+	stop := make(chan struct{})
+	for g := 0; g < 8; g++ {
+		base := uint64(1 + g*perSegment)
+		wg.Add(1)
+		go func(base uint64) {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				for i := base; i < base+perSegment; i++ {
+					data, err := l.Read(i)
+					if err != nil {
+						errCh <- fmt.Errorf("Read(%d): %w", i, err)
+						return
+					}
+					if string(data) != string(makeData(i)) {
+						errCh <- fmt.Errorf("Read(%d) returned wrong data", i)
+						return
+					}
+				}
+			}
+		}(base)
+	}
+	time.Sleep(500 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+	select {
+	case err := <-errCh:
+		t.Fatal(err)
+	default:
 	}
 }

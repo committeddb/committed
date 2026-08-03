@@ -130,8 +130,22 @@ type Log struct {
 type segment struct {
 	path  string // path of segment file
 	index uint64 // first index of segment
-	ebuf  []byte // cached entries buffer
-	epos  []bpos // cached entries positions in buffer
+	// committeddb fork patch: dmu guards ebuf/epos against the concurrent-read
+	// data race. Read runs under the LOG's shared lock (mu.RLock — many readers
+	// at once), but the read path itself MUTATES shared segment state: lazily
+	// loading a segment's table, and nil-ing an EVICTED segment's table to keep
+	// the cache bounded. Two concurrent readers therefore raced — one's eviction
+	// destroyed the table another was mid-indexing, panicking the process
+	// ("index out of range [k] with length 0"; crashed a production node under
+	// its first-ever concurrent readers). Every read-path touch of ebuf/epos now
+	// holds dmu: shared to check+use, exclusive to load or clear. Writer-side
+	// touches (writeBatch/cycle on the tail, truncations, clearCache) run under
+	// mu.Lock, which already excludes all readers, and so stay direct. Lock
+	// order is always mu BEFORE dmu, one segment's dmu at a time — no nesting,
+	// no deadlock. An eviction victim is never the segment being inserted.
+	dmu  sync.RWMutex
+	ebuf []byte // cached entries buffer
+	epos []bpos // cached entries positions in buffer
 }
 
 type bpos struct {
@@ -207,8 +221,15 @@ func (l *Log) pushCache(segIdx int) {
 		l.scache.SetEvicted(segIdx, l.segments[segIdx])
 	if evicted {
 		s := v.(*segment)
+		// committeddb fork patch: clearing an evicted segment's table requires
+		// its exclusive lock — this runs on the READ path (under the log's
+		// shared lock), so without it this write races other readers of s and
+		// destroys a table mid-use (see segment.dmu). Waits until no reader
+		// holds the table; a reader arriving after simply reloads.
+		s.dmu.Lock()
 		s.ebuf = nil
 		s.epos = nil
+		s.dmu.Unlock()
 	}
 }
 
@@ -597,7 +618,20 @@ func (l *Log) findSegment(index uint64) int {
 	return i - 1
 }
 
+// loadSegmentEntries parses s's file and installs its table, taking the
+// segment's exclusive lock for the caller. Exclusive-context callers (Open's
+// load, truncations — all under the log's write lock) use this wrapper; the
+// read path uses loadSegmentEntriesLocked under its own dmu handling
+// (committeddb fork patch, see segment.dmu).
 func (l *Log) loadSegmentEntries(s *segment) error {
+	s.dmu.Lock()
+	defer s.dmu.Unlock()
+	return l.loadSegmentEntriesLocked(s)
+}
+
+// loadSegmentEntriesLocked is loadSegmentEntries without the lock; the caller
+// must hold s.dmu exclusively.
+func (l *Log) loadSegmentEntriesLocked(s *segment) error {
 	data, err := ioutil.ReadFile(s.path)
 	if err != nil {
 		return err
@@ -651,32 +685,57 @@ func loadNextBinaryEntry(data []byte) (n int, err error) {
 }
 
 // loadSegment loads the segment entries into memory, pushes it to the front
-// of the lru cache, and returns it.
-func (l *Log) loadSegment(index uint64) (*segment, error) {
+// of the lru cache, and returns the segment plus an IMMUTABLE SNAPSHOT of its
+// table (ebuf/epos), captured inside the same lock hold that populated or
+// validated it.
+//
+// committeddb fork patch: callers must use the RETURNED ebuf/epos, never
+// s.ebuf/s.epos. Concurrent readers race the segment cache — another reader's
+// eviction can nil a segment's fields at any moment after this returns — and
+// reading the fields directly is both a data race and the production panic
+// ("index out of range [k] with length 0"). The snapshot closes the gap
+// completely: loads always publish freshly-built arrays and eviction only nils
+// the FIELDS, so the arrays behind the returned slices are immutable and kept
+// alive by the references — an eviction after capture is harmless, and a
+// reader can never lose its table mid-use. No retry needed, no spurious
+// failure possible. (An earlier revision returned only the segment and had
+// Read re-check-and-retry; under heavy eviction churn the retry bound
+// exhausted and misreported a HEALTHY log as corrupt.)
+func (l *Log) loadSegment(index uint64) (s *segment, ebuf []byte, epos []bpos, err error) {
 	// check the last segment first.
 	lseg := l.segments[len(l.segments)-1]
 	if index >= lseg.index {
-		return lseg, nil
+		lseg.dmu.RLock()
+		ebuf, epos = lseg.ebuf, lseg.epos
+		lseg.dmu.RUnlock()
+		return lseg, ebuf, epos, nil
 	}
 	// check the most recent cached segment
 	var rseg *segment
 	l.scache.Range(func(_, v interface{}) bool {
-		s := v.(*segment)
-		if index >= s.index && index < s.index+uint64(len(s.epos)) {
-			rseg = s
+		c := v.(*segment)
+		c.dmu.RLock()
+		if index >= c.index && index < c.index+uint64(len(c.epos)) {
+			rseg, ebuf, epos = c, c.ebuf, c.epos
 		}
+		c.dmu.RUnlock()
 		return false
 	})
 	if rseg != nil {
-		return rseg, nil
+		return rseg, ebuf, epos, nil
 	}
 	// find in the segment array
 	idx := l.findSegment(index)
-	s := l.segments[idx]
+	s = l.segments[idx]
+	// Double-checked load under the segment's exclusive lock — concurrent
+	// readers needing the same segment must not race the populate, and only
+	// one of them parses the file; the rest wait and find it loaded.
+	s.dmu.Lock()
 	if len(s.epos) == 0 {
 		// load the entries from cache
-		if err := l.loadSegmentEntries(s); err != nil {
-			return nil, err
+		if err := l.loadSegmentEntriesLocked(s); err != nil {
+			s.dmu.Unlock()
+			return nil, nil, nil, err
 		}
 		// committeddb fork patch: validate segment tiling. The binary format
 		// stores no per-entry index — an entry's identity is pure arithmetic
@@ -685,7 +744,7 @@ func (l *Log) loadSegment(index uint64) (*segment, error) {
 		// implies. Open validates only the tail (lastIndex comes from its
 		// parse); middle segments were trusted blind, so a file that is empty
 		// or truncated at an entry boundary parsed "successfully" short and
-		// the epos indexing below panicked the process on the first cold
+		// the epos indexing in Read panicked the process on the first cold
 		// historical read (the post-scrub crashloop). A file parsing LONG is
 		// equally corrupt — every later entry in it would be misindexed and
 		// reads would silently return the wrong entry. Error, never panic:
@@ -698,13 +757,16 @@ func (l *Log) loadSegment(index uint64) (*segment, error) {
 				// the next read take the already-loaded branch, skip this
 				// validation, and serve entries from a mis-tiled segment.
 				s.ebuf, s.epos = nil, nil
-				return nil, ErrCorrupt
+				s.dmu.Unlock()
+				return nil, nil, nil, ErrCorrupt
 			}
 		}
 	}
+	ebuf, epos = s.ebuf, s.epos
+	s.dmu.Unlock()
 	// push the segment to the front of the cache
 	l.pushCache(idx)
-	return s, nil
+	return s, ebuf, epos, nil
 }
 
 // Read an entry from the log. Returns a byte slice containing the data entry.
@@ -719,20 +781,22 @@ func (l *Log) Read(index uint64) (data []byte, err error) {
 	if index < l.firstIndex || index > l.lastIndex {
 		return nil, ErrNotFound
 	}
-	s, err := l.loadSegment(index)
+	s, ebuf, epos, err := l.loadSegment(index)
 	if err != nil {
 		return nil, err
 	}
-	// committeddb fork patch: last-line guard on the index arithmetic. The
-	// tiling check in loadSegment covers the lazily-loaded path, but the
-	// tail fast path and the cache path return segments without re-checking
-	// coverage — an in-memory desync between lastIndex and the returned
-	// segment's parsed entries must surface as ErrCorrupt, never a panic.
-	if index-s.index >= uint64(len(s.epos)) {
+	// committeddb fork patch: decode from the immutable snapshot loadSegment
+	// captured under the segment's lock — never from s.ebuf/s.epos, which a
+	// concurrent reader's cache eviction can nil at any moment (the production
+	// panic). The coverage guard is defensive: eviction cannot shorten the
+	// snapshot, so a miss here is a genuine in-memory desync (e.g. lastIndex
+	// disagreeing with the tail's table) and surfaces as ErrCorrupt, never a
+	// panic — file and memory content are untrusted input to the index math.
+	if index-s.index >= uint64(len(epos)) {
 		return nil, ErrCorrupt
 	}
-	epos := s.epos[index-s.index]
-	edata := s.ebuf[epos.pos:epos.end]
+	e := epos[index-s.index]
+	edata := ebuf[e.pos:e.end]
 	if l.opts.LogFormat == JSON {
 		return readJSON(edata)
 	}
@@ -864,12 +928,14 @@ func (l *Log) truncateFront(index uint64) (err error) {
 		ebuf = nil
 	} else {
 		segIdx = l.findSegment(index)
-		s, err = l.loadSegment(index)
+		var sebuf []byte
+		var sepos []bpos
+		s, sebuf, sepos, err = l.loadSegment(index)
 		if err != nil {
 			return err
 		}
-		epos := s.epos[index-s.index:]
-		ebuf = s.ebuf[epos[0].pos:]
+		epos := sepos[index-s.index:]
+		ebuf = sebuf[epos[0].pos:]
 	}
 	// Create a START file contains the truncated segment.
 	startName := filepath.Join(l.path, segmentName(index)+".START")
@@ -980,12 +1046,14 @@ func (l *Log) truncateBack(index uint64) (err error) {
 		ebuf = nil
 	} else {
 		segIdx = l.findSegment(index)
-		s, err = l.loadSegment(index)
+		var sebuf []byte
+		var sepos []bpos
+		s, sebuf, sepos, err = l.loadSegment(index)
 		if err != nil {
 			return err
 		}
-		epos := s.epos[:index-s.index+1]
-		ebuf = s.ebuf[:epos[len(epos)-1].end]
+		epos := sepos[:index-s.index+1]
+		ebuf = sebuf[:epos[len(epos)-1].end]
 	}
 	// Create an END file contains the truncated segment.
 	endName := filepath.Join(l.path, segmentName(s.index)+".END")
