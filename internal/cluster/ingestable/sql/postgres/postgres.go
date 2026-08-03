@@ -1782,9 +1782,22 @@ func readBatch(
 	// $2)` — Postgres infers each placeholder's type from its column, so the
 	// cursor values bind fine as strings. The cursor itself is the prior batch's
 	// last entity key (CompositeKey), decoded back to per-column values here.
+	//
+	// The pk references in ORDER BY (and WHERE, uniformly) are TABLE-QUALIFIED.
+	// This is load-bearing, not style: the SELECT list casts every column to
+	// text ALIASED BACK TO ITS OWN NAME (`pk::text AS pk`, for snapshot/CDC
+	// byte parity below), and SQL resolves a BARE identifier in ORDER BY to the
+	// output alias FIRST — so an unqualified `ORDER BY pk` silently ordered by
+	// the TEXT cast while the keyset cursor in WHERE compared in the column's
+	// real type. On a numeric pk with variable digit lengths the mixed
+	// semantics skip every short-digit key the numeric cursor has already
+	// passed and terminate early on a short batch — a partial snapshot
+	// reporting complete (the 2026-08 field incident: 18% of a table silently
+	// missing, green status). A qualified reference is never captured by alias
+	// resolution. Pinned by TestPostgresSnapshotIntegerPKKeysetOrder.
 	orderCols := make([]string, len(pkCols))
 	for i, c := range pkCols {
-		orderCols[i] = quoteIdent(c) + " ASC"
+		orderCols[i] = quotedTable + "." + quoteIdent(c) + " ASC"
 	}
 	orderBy := strings.Join(orderCols, ", ")
 
@@ -1816,12 +1829,13 @@ func readBatch(
 		placeholders := make([]string, len(pkCols))
 		args = make([]any, len(pkCols))
 		for i, c := range pkCols {
-			cols[i] = quoteIdent(c)
+			// Qualified like ORDER BY above. WHERE cannot bind an output alias
+			// (it evaluates before the SELECT list), but the qualification keeps
+			// both keyset references uniform and alias-proof by construction.
+			cols[i] = quotedTable + "." + quoteIdent(c)
 			placeholders[i] = fmt.Sprintf("$%d", i+1)
 			args[i] = cursor[i]
 		}
-		// WHERE/ORDER BY reference the real columns, so keyset ordering and the
-		// cursor comparison are unaffected by the text cast in the SELECT list.
 		query = fmt.Sprintf(
 			"SELECT %s FROM %s WHERE (%s) > (%s) ORDER BY %s LIMIT %d",
 			selectList, quotedTable, strings.Join(cols, ", "), strings.Join(placeholders, ", "), orderBy, batchSize,
