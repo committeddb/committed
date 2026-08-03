@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"math/rand"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1341,4 +1342,124 @@ func TestIssue33(t *testing.T) {
 		t.Fatal(err)
 	}
 	l.Close()
+}
+
+// TestMisTiledSegmentReadErrors is a committeddb fork regression test: a
+// non-tail segment file whose content does not tile exactly to the next
+// segment's start index must make reads into it return ErrCorrupt — never
+// panic — while reads of healthy segments and appends keep working. The
+// binary format stores no per-entry index (identity = filename start +
+// position), Open validates only the tail, and before the fork's tiling
+// check an empty or entry-boundary-truncated middle segment parsed
+// "successfully" short and Read's epos indexing panicked the process on the
+// first cold historical read (the post-scrub crashloop). Three shapes:
+// hollow (0 bytes), short (truncated at an entry boundary), and long
+// (trailing zero bytes parse as extra size-0 entries, which would misindex
+// every later entry in the segment).
+func TestMisTiledSegmentReadErrors(t *testing.T) {
+	// Fixed-size entries make segment geometry deterministic: data is 10
+	// bytes, so each binary entry is 1 (uvarint len) + 10 = 11 bytes, and
+	// SegmentSize 110 cycles after exactly 10 entries per segment.
+	makeData := func(index uint64) []byte {
+		return []byte(fmt.Sprintf("d%09d", index))
+	}
+	const entrySize = 11
+	const perSegment = 10
+
+	build := func(t *testing.T) (string, *Options) {
+		t.Helper()
+		dir := t.TempDir()
+		opts := &Options{NoSync: true, SegmentSize: entrySize * perSegment}
+		l, err := Open(dir, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// 35 entries -> segments starting at 1, 11, 21, 31 (tail).
+		for i := uint64(1); i <= 35; i++ {
+			if err := l.Write(i, makeData(i)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := l.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return dir, opts
+	}
+	segPath := func(dir string, start uint64) string {
+		return filepath.Join(dir, segmentName(start))
+	}
+
+	corruptions := []struct {
+		name    string
+		corrupt func(t *testing.T, path string)
+	}{
+		{"hollow (0 bytes)", func(t *testing.T, path string) {
+			t.Helper()
+			if err := os.Truncate(path, 0); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"short (truncated at an entry boundary)", func(t *testing.T, path string) {
+			t.Helper()
+			if err := os.Truncate(path, entrySize*5); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"long (trailing zero bytes)", func(t *testing.T, path string) {
+			t.Helper()
+			f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o644)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.Write(make([]byte, entrySize)); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.Close(); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+
+	for _, tc := range corruptions {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, opts := build(t)
+			tc.corrupt(t, segPath(dir, 21)) // middle segment: entries 21-30
+
+			// Open still succeeds: only the tail is parsed at load.
+			l, err := Open(dir, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer l.Close()
+
+			// Every read into the mis-tiled segment errors; none panic.
+			for i := uint64(21); i <= 30; i++ {
+				if _, err := l.Read(i); err != ErrCorrupt {
+					t.Fatalf("Read(%d) = %v, want ErrCorrupt", i, err)
+				}
+			}
+			// Healthy segments, before and after the hole, still read fine.
+			for _, i := range []uint64{1, 10, 11, 20, 31, 35} {
+				data, err := l.Read(i)
+				if err != nil {
+					t.Fatalf("Read(%d) healthy segment: %v", i, err)
+				}
+				if string(data) != string(makeData(i)) {
+					t.Fatalf("Read(%d) = %q, want %q", i, data, makeData(i))
+				}
+			}
+			// Appends keep working past the hole (a hole in history must not
+			// stop the tail of the log), and the new entry reads back.
+			if err := l.Write(36, makeData(36)); err != nil {
+				t.Fatal(err)
+			}
+			data, err := l.Read(36)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(data) != string(makeData(36)) {
+				t.Fatalf("Read(36) = %q, want %q", data, makeData(36))
+			}
+		})
+	}
 }

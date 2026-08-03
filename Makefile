@@ -75,10 +75,12 @@ docker/release:
 
 test:
 	go test -short ./... -cover
+	go test -C third_party/forked/tidwall-wal ./...
 
 test/ci:
 	go build -ldflags="$(LDFLAGS)"
 	go test -race ./... -cover
+	go test -C third_party/forked/tidwall-wal -race ./...
 
 test-all:
 	go build -ldflags="$(LDFLAGS)"

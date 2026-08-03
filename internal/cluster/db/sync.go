@@ -1019,6 +1019,19 @@ func (db *DB) syncBatchFallback(ctx context.Context, id string, s cluster.Syncab
 // no longer trustworthy. `committed wal repair` confirms whether it is instead a
 // truncatable torn tail. Non-corrupt (transient) read errors fall through to a
 // warn-and-retry.
+//
+// DELIBERATE SCOPE: this matches cluster.ErrCorruptEntry — a CRC mismatch
+// inside one entry's frame — ONLY. A structurally mis-tiled segment (a hollow
+// or truncated segment file; the forked wal's ErrCorrupt) must NOT fatal here:
+// fataling on the first cold historical read is a boot crashloop with no API
+// window for the operator to intervene (the post-scrub hollow-segment
+// incident), so those reads fall through to warn-and-retry — the reader holds
+// position (no data skipped), the node stays up for ingest and every other
+// syncable, and the operator repairs/rebuilds on their own schedule. Whether
+// the CRC case should also wedge instead of fatal (it shares the crashloop
+// shape when the corrupt entry is near a checkpoint) is an open policy
+// question tracked in the safe-mode boot ticket. Pinned by
+// TestFatalOnCorruptRead_MisTiledSegmentDoesNotFatal.
 func (db *DB) fatalOnCorruptRead(id string, readErr error) {
 	if errors.Is(readErr, cluster.ErrCorruptEntry) {
 		db.logger.Fatal("corrupt event-log entry on sync read; the on-disk log is untrustworthy — rebuild this node from a healthy replica, or run `committed wal repair` to check for a torn tail (see docs/operations/rebuild.md)",

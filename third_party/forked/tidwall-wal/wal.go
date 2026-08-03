@@ -678,6 +678,29 @@ func (l *Log) loadSegment(index uint64) (*segment, error) {
 		if err := l.loadSegmentEntries(s); err != nil {
 			return nil, err
 		}
+		// committeddb fork patch: validate segment tiling. The binary format
+		// stores no per-entry index — an entry's identity is pure arithmetic
+		// (filename start + position within the file) — so a non-tail segment
+		// file must parse to EXACTLY the entry count the next segment's start
+		// implies. Open validates only the tail (lastIndex comes from its
+		// parse); middle segments were trusted blind, so a file that is empty
+		// or truncated at an entry boundary parsed "successfully" short and
+		// the epos indexing below panicked the process on the first cold
+		// historical read (the post-scrub crashloop). A file parsing LONG is
+		// equally corrupt — every later entry in it would be misindexed and
+		// reads would silently return the wrong entry. Error, never panic:
+		// disk content is untrusted input. Deliberately not setting l.corrupt
+		// (the sticky flag would also poison appends and reads of healthy
+		// segments; a hole in history must not stop the tail of the log).
+		if idx+1 < len(l.segments) {
+			if want := l.segments[idx+1].index - s.index; uint64(len(s.epos)) != want {
+				// Discard the partial parse: leaving epos populated would let
+				// the next read take the already-loaded branch, skip this
+				// validation, and serve entries from a mis-tiled segment.
+				s.ebuf, s.epos = nil, nil
+				return nil, ErrCorrupt
+			}
+		}
 	}
 	// push the segment to the front of the cache
 	l.pushCache(idx)
@@ -699,6 +722,14 @@ func (l *Log) Read(index uint64) (data []byte, err error) {
 	s, err := l.loadSegment(index)
 	if err != nil {
 		return nil, err
+	}
+	// committeddb fork patch: last-line guard on the index arithmetic. The
+	// tiling check in loadSegment covers the lazily-loaded path, but the
+	// tail fast path and the cache path return segments without re-checking
+	// coverage — an in-memory desync between lastIndex and the returned
+	// segment's parsed entries must surface as ErrCorrupt, never a panic.
+	if index-s.index >= uint64(len(s.epos)) {
+		return nil, ErrCorrupt
 	}
 	epos := s.epos[index-s.index]
 	edata := s.ebuf[epos.pos:epos.end]
