@@ -391,3 +391,58 @@ func TestScrub_CatchesUpTailAppendedDuringRewrite(t *testing.T) {
 		})
 	}
 }
+
+// TestScrub_CaughtUpReaderResumesAfterScrub pins the checkpoint-stranding fix:
+// a reader that is CAUGHT UP (at the head, io.EOF) when a scrub completes must
+// resume delivering entries appended after the scrub. Before the fix,
+// the post-scrub re-resolution (scrubGen bump → resolveStartSeqLocked) found
+// no entry newer than the reader's position — true, it is at the head — and
+// returned the POISONED sentinel 0, which the caller cached as a successful
+// resolution: every subsequent Read hit `walSeq == 0 → io.EOF` forever while
+// appends grew the log. In the field every caught-up mirror froze at the
+// identical pre-scrub head checkpoint after the hourly scrub, silently — new
+// CDC rows committed to topics but never reached any sink — while a
+// from-zero mirror (the raftIndex==0 fast path) replayed the same scrubbed
+// log without issue. The resolver now returns last+1 — the reader's true next
+// seq — which reads as at-head EOF today and becomes readable the moment an
+// append lands.
+func TestScrub_CaughtUpReaderResumesAfterScrub(t *testing.T) {
+	s := NewStorage(t, nil)
+	defer s.Cleanup()
+
+	s.RegisterType(t, "u", 1, 1)
+	saveEntity(t, userUpsert("u", "alice", `{"pii":true}`), s, 1, 2)
+	saveEntity(t, userDelete("u", "alice"), s, 1, 3)
+	saveEntity(t, userUpsert("u", "bob", `{"ok":1}`), s, 1, 4)
+
+	// Catch the reader up to the head — the stranded mirrors' exact state.
+	r := s.Reader("mirror")
+	var got []uint64
+	for {
+		a, err := r.Read()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		require.Nil(t, err)
+		got = append(got, a.Index)
+	}
+	require.Equal(t, []uint64{2, 3, 4}, got, "pre-scrub catch-up: alice's row (2) still present until the scrub")
+
+	// Scrub while the reader sits caught-up-idle (the field condition). The
+	// reader's FIRST post-scrub Read happens while the log is still idle — no
+	// entry newer than its position exists yet. This is the poisoning moment:
+	// the re-resolution (scrubGen bump) found nothing newer and cached the
+	// broken 0 sentinel as a successful resolution.
+	require.Nil(t, s.RunScrubForTest(3))
+	_, eofErr := r.Read()
+	require.ErrorIs(t, eofErr, io.EOF, "still at the head right after the scrub — EOF is correct here")
+
+	// NOW the live tail arrives.
+	saveEntity(t, userUpsert("u", "carol", `{"live":1}`), s, 1, 5)
+
+	// The caught-up reader must deliver the new entry — not io.EOF forever.
+	a, err := r.Read()
+	require.Nil(t, err, "a caught-up reader must resume after a scrub, not strand at the pre-scrub head")
+	require.Equal(t, uint64(5), a.Index)
+	require.Equal(t, []byte("carol"), a.Entities[0].Key)
+}
