@@ -167,6 +167,19 @@ func (l *ingressLifecycle) stop() {
 // until either Replace (which cancels via the registry) or Close
 // (which cancels via cancelSyncs / the per-handle cancel).
 func (db *DB) Ingest(_ context.Context, id string, i cluster.Ingestable) error {
+	if db.safeMode {
+		// Safe mode (WithSafeMode): the config is stored and visible, but no
+		// worker starts. Release what the parse built (a source pool, a binlog
+		// syncer) so a held ingestable doesn't leak on every apply/reconcile.
+		db.logger.Warn("SAFE MODE: ingest worker held; delete or fix the config over the API, then restart without COMMITTED_SAFE_MODE to resume",
+			zap.String("id", id))
+		if i != nil {
+			if err := i.Close(); err != nil {
+				db.logger.Warn("held ingestable close failed", zap.String("id", id), zap.Error(err))
+			}
+		}
+		return nil
+	}
 	db.workersMu.Lock()
 	if db.closed {
 		db.workersMu.Unlock()
@@ -367,6 +380,13 @@ func (db *DB) reconcileIngestWorkers(list func() ([]*IngestableWithID, error)) {
 func (db *DB) deleteIngest(id string) {
 	handle := db.cancelIngestWorker(id)
 	if handle == nil {
+		// No worker built on this node. In safe mode that is EVERY delete,
+		// and on a single-node cluster nobody else will tear down either —
+		// warn loudly: an orphaned replication slot pins the source's WAL.
+		if db.safeMode {
+			db.logger.Warn("safe mode: ingestable deleted; source-side teardown skipped (no worker was built) — a replication slot/publication may remain at the source and pin its WAL; drop it manually (see docs/operations/cdc-setup.md)",
+				zap.String("id", id))
+		}
 		return
 	}
 

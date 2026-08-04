@@ -99,6 +99,10 @@ func (db *DB) StuckTrackerPublishedAfterGainForTest(id string, index uint64) boo
 // (keepData=false — the teardown-exercising shape the wedge tests need).
 func (db *DB) DeleteSyncForTest(id string) { db.deleteSync(id, false) }
 
+// DeleteIngestForTest drives the apply-path ingestable teardown directly
+// (worker cancel + owner-side source teardown), bypassing raft.
+func (db *DB) DeleteIngestForTest(id string) { db.deleteIngest(id) }
+
 // SetDeadLetterProposeHookForTest installs the dead-letter propose
 // failure-injection seam: a non-nil error from the hook stands in for an
 // orphaned propose (leader flap) without touching raft.

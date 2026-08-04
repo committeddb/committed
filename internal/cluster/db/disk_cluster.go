@@ -145,6 +145,12 @@ func (db *DB) DiskState() string {
 	return diskState(db.diskState.Load()).String()
 }
 
+// SafeMode reports whether this node booted with worker spawns held
+// (db.WithSafeMode / COMMITTED_SAFE_MODE). Per-boot, node-local.
+func (db *DB) SafeMode() bool {
+	return db.safeMode
+}
+
 // DiskAdmission returns the write-admission decision this node's propose
 // gate is applying right now — the fresh cluster verdict when one is held,
 // or the node-local fallback. Implements cluster.Cluster for GET /node/status.

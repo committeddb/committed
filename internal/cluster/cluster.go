@@ -224,4 +224,10 @@ type Cluster interface {
 	// Node-local diagnostics for GET /node/status, distinct from the
 	// cluster-wide verdict DiskAdmission reports.
 	DiskState() string
+	// SafeMode reports whether THIS node booted with COMMITTED_SAFE_MODE —
+	// sync/ingest/scrub workers held, everything else normal. Node-local
+	// and ephemeral (per-boot, never replicated); powers GET /node/status
+	// so an operator can confirm the escape hatch is active instead of
+	// wondering why workers aren't running.
+	SafeMode() bool
 }

@@ -104,6 +104,16 @@ image can be templated per-node by an orchestrator:
                        gate falls back to the node-local decision. "0"
                        disables cluster-aware admission entirely.
 
+  COMMITTED_SAFE_MODE  when truthy, boots the operator escape hatch: raft,
+                       apply, and the HTTP API run normally, but sync and
+                       ingest workers and the background scrub are held.
+                       Use it when a config's worker deterministically
+                       crashes the node at boot (a crashloop leaves no API
+                       window): boot safe, inspect and delete/fix the
+                       config over the API, then restart without the flag
+                       to resume. Not persisted; never auto-enabled. See
+                       docs/operations/safe-mode.md.
+
   COMMITTED_HTTP_CORS_ORIGINS
                        comma-separated browser-origin allowlist, e.g.
                        "https://app.example.com,https://admin.example.com",
@@ -207,6 +217,18 @@ image can be templated per-node by an orchestrator:
 		if n, ok := parseInt64Env("COMMITTED_EVENT_CACHE_SEGMENTS"); ok {
 			walOpts = append(walOpts, wal.WithEventCacheSegments(int(n)))
 		}
+		// COMMITTED_SAFE_MODE boots the operator escape hatch: raft, apply,
+		// and the API run normally, but sync/ingest workers and the scrub
+		// worker are held — the window to inspect and delete/fix a config
+		// whose worker would otherwise crashloop the node with no API up.
+		// Not persisted: the next boot without the flag resumes everything.
+		safeMode := boolEnv("COMMITTED_SAFE_MODE")
+		if safeMode {
+			walOpts = append(walOpts, wal.WithSafeMode())
+			zap.L().Warn("SAFE MODE (COMMITTED_SAFE_MODE): sync/ingest/scrub workers held; " +
+				"configs are inspectable and deletable over the API; " +
+				"restart without COMMITTED_SAFE_MODE to resume normal operation")
+		}
 		s, err := wal.Open(dataDir, p, sync, ingest, walOpts...)
 		if err != nil {
 			log.Fatalf("cannot open storage: %v", err)
@@ -215,6 +237,9 @@ image can be templated per-node by an orchestrator:
 		var dbOpts []db.Option
 		if m != nil {
 			dbOpts = append(dbOpts, db.WithMetrics(m))
+		}
+		if safeMode {
+			dbOpts = append(dbOpts, db.WithSafeMode())
 		}
 
 		// Self-announce this node's cluster feature level so the version-skew

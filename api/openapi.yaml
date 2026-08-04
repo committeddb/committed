@@ -1755,7 +1755,7 @@ components:
 
     NodeStatusResponse:
       type: object
-      required: [node, leader, appliedIndex, degradedConfigs, disk]
+      required: [node, leader, appliedIndex, degradedConfigs, disk, safeMode]
       description: |
         Per-node diagnostics for the node that served the request. The
         fields are node-local and ephemeral (not replicated), so two nodes
@@ -1791,6 +1791,15 @@ components:
             $ref: '#/components/schemas/DegradedConfig'
         disk:
           $ref: '#/components/schemas/DiskStatus'
+        safeMode:
+          type: boolean
+          description: |
+            True when this node booted with COMMITTED_SAFE_MODE: sync/ingest
+            workers and the background scrub are held while raft, apply, and
+            the API run normally — the operator escape hatch for a config
+            whose worker crashloops the node. Per-boot and node-local; a
+            restart without the flag resumes all workers. See
+            docs/operations/safe-mode.md.
 
     ClusterStatusResponse:
       type: object

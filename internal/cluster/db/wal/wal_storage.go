@@ -503,6 +503,11 @@ type Storage struct {
 	// it to skip their fsync legs so the test suite stays fast; production leaves
 	// it false so a rename is crash-durable.
 	fsyncDisabled bool
+	// safeMode mirrors the WithSafeMode option: Open holds the scrub worker
+	// (no pending-scrub resume, signals left queued) so an operator's
+	// diagnosis window has no background event-log rewrite running. See the
+	// option doc for the full posture.
+	safeMode bool
 	// metrics drives the committed.wal.corrupt_entries counter, bumped by
 	// recordCorrupt when a per-entry checksum verification fails on read.
 	// Nil when metrics are disabled (no OTel endpoint); every use is
@@ -674,6 +679,7 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		ingest:          ingest,
 		logger:          logger,
 		fsyncDisabled:   cfg.fsyncDisabled,
+		safeMode:        cfg.safeMode,
 		configErrors:    make(map[string]configErr),
 		metrics:         cfg.metrics,
 		lostCallback:    cfg.lostCallback,
@@ -904,7 +910,16 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		return nil, err
 	}
 	ws.lastScrubbedBound.Store(completed)
-	go ws.scrubWorker()
+	if ws.safeMode {
+		// Safe mode (see WithSafeMode): no background scrub — a pending bound
+		// stays durably recorded and resumes on the next normal open. Close
+		// waits on scrubDone, which the worker's defer normally closes; with
+		// no worker, close it here so Close returns.
+		ws.logger.Warn("SAFE MODE: scrub worker held; any pending scrub resumes on a normal restart")
+		close(ws.scrubDone)
+	} else {
+		go ws.scrubWorker()
+	}
 
 	// Complete any RTBF compaction a prior scrub pruned tombstones for but didn't
 	// finish (crash/ENOSPC after the prune committed). The already-advanced

@@ -291,6 +291,12 @@ type DB struct {
 	// closeDrainTimeout; tests override it to keep the wedged-worker cases fast.
 	workerDrainTimeout time.Duration
 
+	// safeMode mirrors db.WithSafeMode: Sync and Ingest release the built
+	// worker object and return without spawning, so a boot-time worker
+	// failure can't crashloop the node while the operator inspects and
+	// deletes configs over the API. See the option doc for the posture.
+	safeMode bool
+
 	logger  *zap.Logger
 	metrics *metrics.Metrics
 }
@@ -411,6 +417,7 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		syncStuckThreshold:             cfg.syncStuckThreshold,
 		scrubInterval:                  cfg.scrubInterval,
 		advertisedAPIURL:               cfg.advertisedAPIURL,
+		safeMode:                       cfg.safeMode,
 		announceInterval:               cfg.tickInterval,
 		ingestSupervisorStates:         make(map[string]*ingestSupervisorState),
 		ingestSupervisorInitialBackoff: cfg.ingestSupervisorInitialBackoff,

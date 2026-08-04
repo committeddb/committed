@@ -38,6 +38,9 @@ A map of the docs. Start with the quickstart; reach for the rest as you need the
   wedged or lagging, skip a bad record, and replay it after a fix.
 - [Rebuilding a node](operations/rebuild.md) — recover a node that fell too far
   behind or lost its disk by copying from a healthy peer.
+- [Safe mode](operations/safe-mode.md) — boot with workers held to break a
+  crashloop: inspect and delete/fix the offending config over the API, then
+  restart normally.
 - [Backup and restore](operations/backup.md) — archive a stopped node to a
   portable tarball for disaster recovery and total-loss rebuilds.
 - [Rolling upgrades](operations/upgrade.md) — upgrade node-by-node with no

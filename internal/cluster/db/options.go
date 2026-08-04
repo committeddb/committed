@@ -65,6 +65,8 @@ type options struct {
 	proposeTimeout time.Duration
 	logger         *zap.Logger
 	metrics        *metrics.Metrics
+	// safeMode mirrors WithSafeMode; see the option doc.
+	safeMode bool
 	// compactMaxSize is the on-disk raft log size in bytes that, once
 	// exceeded, triggers a CreateSnapshot + Compact at the end of the
 	// current Ready iteration. 0 disables the size limb of the
@@ -374,6 +376,24 @@ func WithScrubInterval(d time.Duration) Option {
 // raft-leader-read-proxy.md.
 func WithAdvertisedAPIURL(url string) Option {
 	return func(o *options) { o.advertisedAPIURL = url }
+}
+
+// WithSafeMode holds every sync and ingest worker spawn: configs still
+// apply, list, and delete through raft and the API as normal, but no
+// worker goroutine starts — db.Sync and db.Ingest release the built
+// syncable/ingestable and return without installing a handle. The operator
+// escape hatch for a deterministic boot-time worker failure (a crashloop
+// has no API window): boot with COMMITTED_SAFE_MODE=1, inspect and
+// delete/fix the offending config over the API, then restart normally —
+// worker spawning is not persisted state, so the next boot without the
+// flag resumes everything from the stored configs. Explicit opt-in only,
+// by design: auto-detection (safe-mode after N rapid restarts) is implicit
+// magic in a system of record, and a blanket per-worker recover() would
+// keep running on maybe-corrupt state. The storage tier holds the scrub
+// worker under the same flag (wal.WithSafeMode); raft, apply, and the API
+// run normally. cmd/node.go wires COMMITTED_SAFE_MODE to both.
+func WithSafeMode() Option {
+	return func(o *options) { o.safeMode = true }
 }
 
 // WithDiskWatcher enables the background disk-usage watcher. cfg.Path is the

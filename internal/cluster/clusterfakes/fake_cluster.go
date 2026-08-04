@@ -468,6 +468,16 @@ type FakeCluster struct {
 		result1 *cluster.Type
 		result2 error
 	}
+	SafeModeStub        func() bool
+	safeModeMutex       sync.RWMutex
+	safeModeArgsForCall []struct {
+	}
+	safeModeReturns struct {
+		result1 bool
+	}
+	safeModeReturnsOnCall map[int]struct {
+		result1 bool
+	}
 	ScrubStub        func(context.Context) error
 	scrubMutex       sync.RWMutex
 	scrubArgsForCall []struct {
@@ -2930,6 +2940,59 @@ func (fake *FakeCluster) ResolveTypeReturnsOnCall(i int, result1 *cluster.Type, 
 		result1 *cluster.Type
 		result2 error
 	}{result1, result2}
+}
+
+func (fake *FakeCluster) SafeMode() bool {
+	fake.safeModeMutex.Lock()
+	ret, specificReturn := fake.safeModeReturnsOnCall[len(fake.safeModeArgsForCall)]
+	fake.safeModeArgsForCall = append(fake.safeModeArgsForCall, struct {
+	}{})
+	stub := fake.SafeModeStub
+	fakeReturns := fake.safeModeReturns
+	fake.recordInvocation("SafeMode", []interface{}{})
+	fake.safeModeMutex.Unlock()
+	if stub != nil {
+		return stub()
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeCluster) SafeModeCallCount() int {
+	fake.safeModeMutex.RLock()
+	defer fake.safeModeMutex.RUnlock()
+	return len(fake.safeModeArgsForCall)
+}
+
+func (fake *FakeCluster) SafeModeCalls(stub func() bool) {
+	fake.safeModeMutex.Lock()
+	defer fake.safeModeMutex.Unlock()
+	fake.SafeModeStub = stub
+}
+
+func (fake *FakeCluster) SafeModeReturns(result1 bool) {
+	fake.safeModeMutex.Lock()
+	defer fake.safeModeMutex.Unlock()
+	fake.SafeModeStub = nil
+	fake.safeModeReturns = struct {
+		result1 bool
+	}{result1}
+}
+
+func (fake *FakeCluster) SafeModeReturnsOnCall(i int, result1 bool) {
+	fake.safeModeMutex.Lock()
+	defer fake.safeModeMutex.Unlock()
+	fake.SafeModeStub = nil
+	if fake.safeModeReturnsOnCall == nil {
+		fake.safeModeReturnsOnCall = make(map[int]struct {
+			result1 bool
+		})
+	}
+	fake.safeModeReturnsOnCall[i] = struct {
+		result1 bool
+	}{result1}
 }
 
 func (fake *FakeCluster) Scrub(arg1 context.Context) error {

@@ -20,6 +20,12 @@ type NodeStatusResponse struct {
 	AppliedIndex    uint64                   `json:"appliedIndex"`
 	DegradedConfigs []DegradedConfigResponse `json:"degradedConfigs"`
 	Disk            DiskStatusResponse       `json:"disk"`
+	// SafeMode reports whether this node booted with COMMITTED_SAFE_MODE:
+	// sync/ingest/scrub workers held, raft/apply/API normal. Per-boot and
+	// node-local — the operator's confirmation that the escape hatch is
+	// active (vs. workers being mysteriously absent). See
+	// docs/operations/safe-mode.md.
+	SafeMode bool `json:"safeMode"`
 }
 
 // DiskStatusResponse reports this node's disk pressure and the
@@ -77,6 +83,7 @@ func (h *HTTP) NodeStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 		Leader:          h.c.Leader(),
 		AppliedIndex:    h.c.AppliedIndex(),
 		DegradedConfigs: degraded,
+		SafeMode:        h.c.SafeMode(),
 		Disk: DiskStatusResponse{
 			State: h.c.DiskState(),
 			Admission: DiskAdmissionResponse{

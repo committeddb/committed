@@ -49,6 +49,22 @@ func TestNodeStatus_Healthy(t *testing.T) {
 	require.Equal(t, uint64(42), body.AppliedIndex)
 	require.NotNil(t, body.DegradedConfigs, "degradedConfigs must be [] not null")
 	require.Empty(t, body.DegradedConfigs)
+	require.False(t, body.SafeMode, "a normal boot must not report safe mode")
+}
+
+// TestNodeStatus_SafeMode verifies a node booted with COMMITTED_SAFE_MODE
+// reports it — the operator's confirmation that workers are deliberately
+// held, not mysteriously absent.
+func TestNodeStatus_SafeMode(t *testing.T) {
+	fake := &clusterfakes.FakeCluster{}
+	fake.IDReturns(2)
+	fake.SafeModeReturns(true)
+	h := http.New(fake)
+
+	status, body := doNodeStatus(t, h)
+
+	require.Equal(t, 200, status)
+	require.True(t, body.SafeMode)
 }
 
 // TestNodeStatus_Degraded verifies a node with a config it could not build

@@ -143,6 +143,23 @@ func checkpointPolicyOf(s cluster.Syncable) cluster.CheckpointPolicy {
 // syncable reaches this method — db.sync doesn't know or care which
 // mode a syncable is running under.
 func (db *DB) Sync(_ context.Context, id string, s cluster.Syncable) error {
+	if db.safeMode {
+		// Safe mode (WithSafeMode): the config is stored and visible, but no
+		// worker starts. Release what the parse built — a held syncable would
+		// otherwise leak its destination resources on every apply/reconcile.
+		// Bounded for the same reason closeDrainedSyncable is: Close writes to
+		// the destination and this runs on the config-listener path.
+		db.logger.Warn("SAFE MODE: sync worker held; delete or fix the config over the API, then restart without COMMITTED_SAFE_MODE to resume",
+			zap.String("id", id))
+		if s != nil {
+			if err, completed := runBounded(db.workerDrainTimeout, s.Close); !completed {
+				db.logger.Warn("held syncable close did not return in time", zap.String("id", id))
+			} else if err != nil {
+				db.logger.Warn("held syncable close failed", zap.String("id", id), zap.Error(err))
+			}
+		}
+		return nil
+	}
 	db.workersMu.Lock()
 	if db.closed {
 		db.workersMu.Unlock()
@@ -331,7 +348,14 @@ func (db *DB) deleteSync(id string, keepData bool) {
 	db.workersMu.Unlock()
 
 	if !ok || handle.syncable == nil {
-		return // no worker built on this node — nothing to tear down
+		// No worker built on this node — nothing to tear down. In safe mode
+		// that is EVERY delete, and on a single-node cluster nobody else will
+		// tear down either — say so rather than skipping silently.
+		if db.safeMode {
+			db.logger.Warn("safe mode: syncable deleted; owner-side destination teardown skipped (no worker was built) — the destination table, if any, remains",
+				zap.String("id", id))
+		}
+		return
 	}
 
 	// Release the deleted syncable's prepared statements. Node-local resource

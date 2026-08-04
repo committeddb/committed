@@ -17,6 +17,7 @@ type options struct {
 	metrics            *metrics.Metrics
 	lostCallback       func([]uint64)
 	eventCacheSegments int
+	safeMode           bool
 }
 
 // WithoutFsync disables fsync on the underlying key-value store, trading
@@ -68,4 +69,16 @@ func WithMetrics(m *metrics.Metrics) Option {
 // its reader is the single sequential Ready loop, which cannot thrash.
 func WithEventCacheSegments(n int) Option {
 	return func(o *options) { o.eventCacheSegments = n }
+}
+
+// WithSafeMode holds the background scrub worker: Open does not resume a
+// pending scrub and later Scrub signals are left queued (the durable bound
+// stays recorded in bbolt and resumes on the next normal open). Part of the
+// operator escape hatch wired from COMMITTED_SAFE_MODE by cmd/node — a
+// diagnosis window must not have the event log being rewritten and swapped
+// underneath it, and a scrub that itself crashes the node must not re-fire
+// on every boot. The DB layer holds sync/ingest workers under the same flag
+// (db.WithSafeMode); raft, apply, and the API run normally.
+func WithSafeMode() Option {
+	return func(o *options) { o.safeMode = true }
 }
