@@ -24,7 +24,7 @@ func (s *Storage) handleType(e *cluster.Entity, raftIndex uint64) error {
 }
 
 func (s *Storage) saveType(t *cluster.Type, raftIndex uint64) error {
-	return s.update(func(tx *bolt.Tx) error {
+	err := s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(typeBucket)
 		if b == nil {
 			return ErrBucketMissing
@@ -81,6 +81,15 @@ func (s *Storage) saveType(t *cluster.Type, raftIndex uint64) error {
 		_, err = putVersioned(b, []byte(t.ID), bs)
 		return err
 	})
+	if err != nil {
+		return err
+	}
+	// A save can overwrite the CURRENT version in place (the mutable-fields
+	// path above — e.g. an operator fixing a buggy migration), so versioned
+	// cache entries are not safe across it. Bumping unconditionally is
+	// simpler than detecting the overwrite path and type writes are rare.
+	s.typeCacheEpoch.Add(1)
+	return nil
 }
 
 // overwriteCurrentVersion replaces the data for the current version of
@@ -108,7 +117,7 @@ func overwriteCurrentVersion(resourceBucket *bolt.Bucket, id []byte, t *cluster.
 }
 
 func (s *Storage) deleteType(id []byte) error {
-	return s.update(func(tx *bolt.Tx) error {
+	err := s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(typeBucket)
 		if b == nil {
 			return ErrBucketMissing
@@ -121,14 +130,48 @@ func (s *Storage) deleteType(id []byte) error {
 		// clean. Same tx as the config delete → atomic.
 		return sweepTypeSiblingState(tx, id)
 	})
+	if err != nil {
+		return err
+	}
+	// The whole version history is gone; cached versioned resolutions must
+	// not resurrect it (a reader hitting a residual reference should see
+	// ErrTypeMissing — that error is the loud consistency signal).
+	s.typeCacheEpoch.Add(1)
+	return nil
+}
+
+// typeCacheEntry is a typeCache value: the resolved type plus the epoch
+// observed BEFORE the bolt read that produced it (see the typeCache field
+// doc for the invalidation argument).
+type typeCacheEntry struct {
+	epoch uint64
+	t     *cluster.Type
 }
 
 // ResolveType dispatches to the latest or specific-version lookup based
 // on ref.Version. Zero (constructed via cluster.LatestTypeRef) means
 // "whatever is current"; non-zero means the exact historical version.
+//
+// Explicit-version lookups are served from typeCache when the entry's
+// epoch is current — this is the syncable-reader hot path (one lookup per
+// decoded entity), and without the cache each lookup costs a bbolt read
+// transaction. The returned *cluster.Type is shared between callers and
+// must be treated as immutable — the same contract the built-in system
+// types (shared package vars) have always had.
 func (s *Storage) ResolveType(ref cluster.TypeRef) (*cluster.Type, error) {
 	if ref.Version > 0 {
-		return s.typeAtVersion(ref.ID, uint64(ref.Version))
+		epoch := s.typeCacheEpoch.Load()
+		if v, ok := s.typeCache.Load(ref); ok {
+			if e := v.(typeCacheEntry); e.epoch == epoch {
+				return e.t, nil
+			}
+		}
+		t, err := s.typeAtVersion(ref.ID, uint64(ref.Version))
+		if err != nil {
+			return nil, err
+		}
+		s.typeCache.Store(ref, typeCacheEntry{epoch: epoch, t: t})
+		return t, nil
 	}
 	return s.latestType(ref.ID)
 }

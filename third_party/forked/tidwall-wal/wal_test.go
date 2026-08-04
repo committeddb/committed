@@ -1547,3 +1547,87 @@ func TestConcurrentReadEvictionRace(t *testing.T) {
 	default:
 	}
 }
+
+// TestSegmentCacheEvictsByLoadOrder is a committeddb fork regression test
+// pinning two properties of the read path's cache discipline:
+//
+//  1. Reading an already-loaded segment takes the lock-free-ish fast path —
+//     no re-parse, and crucially NO cache push. The original flow pushed to
+//     the cache (an exclusive lock) on every read, which serialized N
+//     concurrent replaying readers down to ~1× single-reader throughput.
+//  2. Consequently cache recency is LRU-by-LOAD, not LRU-by-access: a
+//     segment read many times since load is still evicted before a segment
+//     loaded after it. This is the deliberate trade-off that removes the
+//     per-entry serialization; an innocent "fix" restoring push-on-read
+//     recency would reintroduce the serializer and must fail here.
+func TestSegmentCacheEvictsByLoadOrder(t *testing.T) {
+	makeData := func(index uint64) []byte {
+		return []byte(fmt.Sprintf("d%09d", index))
+	}
+	const entrySize = 11
+	const perSegment = 10
+
+	dir := t.TempDir()
+	opts := &Options{NoSync: true, SegmentSize: entrySize * perSegment, SegmentCacheSize: 2}
+	l, err := Open(dir, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 35 entries -> segments starting at 1, 11, 21, 31 (tail).
+	for i := uint64(1); i <= 35; i++ {
+		if err := l.Write(i, makeData(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Reopen so only the tail is parsed and the cache starts empty (cycle()
+	// pushes rotated-out segments during the writes above, which would make
+	// the eviction accounting depend on write history rather than reads).
+	l, err = Open(dir, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	mustRead := func(index uint64) {
+		t.Helper()
+		data, err := l.Read(index)
+		if err != nil {
+			t.Fatalf("Read(%d): %v", index, err)
+		}
+		if string(data) != string(makeData(index)) {
+			t.Fatalf("Read(%d) = %q, want %q", index, data, makeData(index))
+		}
+	}
+
+	base := l.SegmentLoads()
+	mustRead(1)  // populate segment 1        -> loads +1, cache [1]
+	mustRead(11) // populate segment 11       -> loads +2, cache [11, 1]
+	if got := l.SegmentLoads() - base; got != 2 {
+		t.Fatalf("after populating two segments: %d loads, want 2", got)
+	}
+
+	// Property 1: repeated reads of loaded segments re-parse nothing.
+	for i := 0; i < 50; i++ {
+		mustRead(1)
+		mustRead(2)
+	}
+	if got := l.SegmentLoads() - base; got != 2 {
+		t.Fatalf("loaded-segment reads re-parsed: %d loads, want 2", got)
+	}
+
+	// Property 2: loading segment 21 evicts segment 1 — the LEAST RECENTLY
+	// LOADED — even though it was read 100 times after segment 11 was.
+	// (Push-on-read recency would evict segment 11 instead.)
+	mustRead(21) // populate segment 21 -> loads +3, evicts segment 1
+	mustRead(11) // must still be cached under load-order recency
+	if got := l.SegmentLoads() - base; got != 3 {
+		t.Fatalf("segment 11 was evicted (access-order recency?): %d loads, want 3", got)
+	}
+	mustRead(1) // was evicted -> must re-parse
+	if got := l.SegmentLoads() - base; got != 4 {
+		t.Fatalf("segment 1 read after eviction: %d loads, want 4", got)
+	}
+}

@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unicode/utf8"
 	"unsafe"
 
@@ -124,6 +125,10 @@ type Log struct {
 	sfile      *os.File    // tail segment file handle
 	wbatch     Batch       // reusable write batch
 	scache     tinylru.LRU // segment entries cache
+	// committeddb fork patch: count of segment-file parses since Open.
+	// Test observability for the cache policy (see SegmentLoads); atomic
+	// because the read path parses under a segment dmu, not the log mu.
+	loads atomic.Int64
 }
 
 // segment represents a single segment file.
@@ -225,6 +230,14 @@ func (l *Log) SegmentCacheSize() int {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	return l.opts.SegmentCacheSize
+}
+
+// SegmentLoads reports how many segment-file parses have run since Open.
+// committeddb fork patch: test observability for the cache policy — the
+// loaded-segment read fast path must not parse, and recency is
+// LRU-by-load, so a re-parse is the observable signature of an eviction.
+func (l *Log) SegmentLoads() int64 {
+	return l.loads.Load()
 }
 
 func (l *Log) pushCache(segIdx int) {
@@ -666,6 +679,7 @@ func (l *Log) loadSegmentEntriesLocked(s *segment) error {
 	}
 	s.ebuf = ebuf
 	s.epos = epos
+	l.loads.Add(1)
 	return nil
 }
 
@@ -738,6 +752,31 @@ func (l *Log) loadSegment(index uint64) (s *segment, ebuf []byte, epos []bpos, e
 	// find in the segment array
 	idx := l.findSegment(index)
 	s = l.segments[idx]
+	// committeddb fork patch: already-loaded fast path under the segment's
+	// READ lock, mutating nothing. The original flow took the exclusive dmu
+	// AND pushed to the cache (tinylru's exclusive lock) on EVERY read —
+	// two global serialization points per entry that collapsed N concurrent
+	// replaying readers to ~1× single-reader throughput (measured: 17
+	// readers aggregated 1.1× one reader; with this fast path, 3.5×).
+	// Correctness matches the cached-segment path above: ebuf/epos are
+	// captured under dmu (eviction nils them under dmu.Lock, so no torn
+	// view), the arrays are immutable once published, and tiling validation
+	// ran when the segment was populated — loaded implies validated.
+	//
+	// Deliberate trade-off: pushCache now runs only on populate (below), so
+	// cache recency is LRU-by-load, not LRU-by-access. A straggler reader
+	// camped in one segment no longer refreshes it and can see it evicted
+	// after cache-size foreign loads, re-parsing it on the next read
+	// (~tens of ms, page-cache-backed) — a bounded, rare cost accepted to
+	// remove the per-entry serializers. TestSegmentCacheEvictsByLoadOrder
+	// pins the policy.
+	s.dmu.RLock()
+	if len(s.epos) != 0 {
+		ebuf, epos = s.ebuf, s.epos
+		s.dmu.RUnlock()
+		return s, ebuf, epos, nil
+	}
+	s.dmu.RUnlock()
 	// Double-checked load under the segment's exclusive lock — concurrent
 	// readers needing the same segment must not race the populate, and only
 	// one of them parses the file; the rest wait and find it loaded.

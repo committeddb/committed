@@ -170,6 +170,10 @@ func (s *Storage) RestoreSnapshot(snap *pb.Snapshot) error {
 		return err
 	}
 
+	// The swapped-in bbolt may hold entirely different type histories;
+	// versioned type-cache entries from the old file must not survive it.
+	s.typeCacheEpoch.Add(1)
+
 	// Reset the metadata-GC backlog accumulator. It is a non-durable, leader-local
 	// counter of EntityKindSnapshot entities applied since the last scrub (not in
 	// bbolt, so there is nothing to "reload" from the swapped-in file). The

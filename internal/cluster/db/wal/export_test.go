@@ -387,3 +387,17 @@ func (s *Storage) AppendEventsForTest(entries []*pb.Entry) error {
 func (s *Storage) DurableConfStateForTest() *pb.ConfState {
 	return s.durableConfState()
 }
+
+// DeleteTypeRecordBypassingCacheForTest removes a type's bbolt record
+// directly, WITHOUT the type-cache epoch bump every production write path
+// performs. A test deletes the record out-of-band and resolves again: success
+// proves the versioned lookup was served from typeCache with no bolt read.
+func (s *Storage) DeleteTypeRecordBypassingCacheForTest(id string) error {
+	return s.update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(typeBucket)
+		if b == nil {
+			return ErrBucketMissing
+		}
+		return deleteVersioned(b, []byte(id))
+	})
+}

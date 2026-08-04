@@ -239,6 +239,25 @@ type Storage struct {
 	// swap is exclusive. Lock order is eventMu → kvMu (the swap clears bbolt
 	// scrub state outside the eventMu section, so the two never nest).
 	eventMu sync.RWMutex
+	// typeCache memoizes ResolveType lookups for explicit-version refs
+	// (ref.Version > 0), keyed by cluster.TypeRef. Version-0 ("latest")
+	// lookups are never cached — "latest" is mutable and stays bolt-backed.
+	// Versioned entries are ALMOST immutable: saveType can overwrite the
+	// current version in place (migration/entity-kind/discriminator edits),
+	// deleteType removes whole histories, and RestoreSnapshot replaces the
+	// bbolt file — so every one of those bumps typeCacheEpoch and cache hits
+	// require an epoch match. ResolveType loads the epoch BEFORE its bolt
+	// read, so an entry stored around a concurrent type write always carries
+	// the pre-write epoch and can never serve stale data after the bump.
+	// Without this cache every entity decoded by every syncable reader costs
+	// a bbolt read transaction (an exclusive metalock acquisition inside
+	// bbolt) to look up one of a handful of type versions — measured as ~24%
+	// of all reader wait time with 17 concurrent replaying syncables.
+	// Bounded by distinct (id, version) pairs ever resolved: types are
+	// config, so dozens in practice. Stale-epoch entries are overwritten in
+	// place by the next lookup of the same ref.
+	typeCache      sync.Map
+	typeCacheEpoch atomic.Uint64
 	// scrubSignal pokes the background scrubWorker that a Scrub command has
 	// recorded a new pending bound (buffered cap 1: a poke that arrives while
 	// one is queued is coalesced — the worker re-reads the latest bound from
