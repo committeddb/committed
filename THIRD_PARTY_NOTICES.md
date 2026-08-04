@@ -1773,7 +1773,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ```
 
-## github.com/klauspost/compress v1.18.6
+## github.com/klauspost/compress v1.18.7
 
 ```
 Copyright (c) 2012 The Go Authors. All rights reserved.
