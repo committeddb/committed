@@ -651,11 +651,34 @@ obligations accordingly (the same shared-responsibility split as
 [backups](operations/backup.md) and [logs](operations/logging.md)).
 
 **Triggers.** A `Scrub` command is proposed two ways: automatically by the
-leader on a cadence (`COMMITTED_SCRUB_INTERVAL`, default 1h) whenever there
-is unscrubbed RTBF backlog, and manually via `POST /v1/scrub` for
-SLA-expedited erasure. Automatic scrubbing never *decides* to delete
-anything — it only ever physically completes deletions a delete proposal
-already requested.
+leader on a cadence (`COMMITTED_SCRUB_INTERVAL`, default 1h), and manually
+via `POST /v1/scrub` for SLA-expedited erasure. Automatic scrubbing never
+*decides* to delete anything — it only ever physically completes deletions
+a delete proposal already requested.
+
+The cadence tick proposes a scrub only when the rewrite has work to do,
+via either of two backlog terms:
+
+- **RTBF backlog**: a delete-tombstone records a delete committed beyond
+  the highest completed scrub bound — there is erasure the next pass would
+  physically perform.
+- **Metadata-GC backlog**: enough superseded metadata (checkpoint/status
+  records and other keep-latest-compacted entities) has accumulated to be
+  worth an O(log) rewrite — currently at least 128 superseded entities
+  and, on logs over 256 MB, reclaimable bytes of at least 1/16 of the log
+  size. A rewrite must pay for itself: steady checkpoint churn alone does
+  not trigger scrubs on a large log.
+
+An idle tick — no tombstones beyond the completed bound, not enough
+reclaimable metadata — proposes nothing, so a quiet cluster never rewrites
+its log on a timer. One consequence worth knowing when reading logs: a
+tick that lands while a pass is already running measures against the last
+*completed* bound, so it can propose a follow-up pass. When deletes
+committed after the running pass captured its bound, that follow-up is
+load-bearing (the running pass will not erase them); in a quiet window it
+can be redundant — a back-to-back pass that finds little to reclaim.
+Either way it is convergent and harmless, just an extra rewrite's worth of
+I/O.
 
 ### Bootstrap timing edge cases
 
