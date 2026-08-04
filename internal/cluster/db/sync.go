@@ -550,8 +550,7 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 					}
 				}
 			case readErr != nil:
-				db.fatalOnCorruptRead(id, readErr)
-				db.logger.Warn("sync read error", zap.String("id", id), zap.Error(readErr))
+				db.logSyncReadError(id, readErr)
 			default:
 				// A proposal already dead-lettered (a permanent skip, or an
 				// operator's manual skip) stays skipped across restarts:
@@ -938,8 +937,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 					progressed = true
 				}
 			case readErr != nil:
-				db.fatalOnCorruptRead(id, readErr)
-				db.logger.Warn("sync read error", zap.String("id", id), zap.Error(readErr))
+				db.logSyncReadError(id, readErr)
 			default:
 				i := a.Index
 				// Exclude a proposal already dead-lettered (a permanent skip
@@ -1092,36 +1090,45 @@ func (db *DB) syncBatchFallback(ctx context.Context, id string, s cluster.Syncab
 //
 // On a successful (durable) bump the round-trip latency is recorded to
 // committed_sync_bump_duration_seconds so the extra cost is observable.
-// fatalOnCorruptRead fatal-exits the node when a sync read returned a corrupt
-// (checksum-failed) committed event. Reader.Read does NOT advance past a corrupt
-// entry, so the syncable would otherwise re-read the same seq forever; and the
-// on-disk event log is untrustworthy. A mid-log corruption can't self-heal via
-// raft — the node's matchIndex already covers that index, so AppendEntries never
-// re-sends it, and an applied event sits downstream of the raft log entirely —
-// so the node must be restarted and rebuilt from a healthy replica (single-node:
-// restore/splice from a backup). This mirrors raft.go's fatal on a failed
-// apply-committed-entry: a committed record we cannot process means the log is
-// no longer trustworthy. `committed wal repair` confirms whether it is instead a
-// truncatable torn tail. Non-corrupt (transient) read errors fall through to a
-// warn-and-retry.
+// logSyncReadError reports a sync read failure without ever killing the
+// process — the corruption posture is LOUD, ALIVE, REPAIRABLE. The unit of
+// failure matches the unit of damage: one unreadable entry wedges the
+// syncables that need it (Reader.Read never advances past a corrupt entry, so
+// nothing is silently skipped and the checkpoint holds), while the node stays
+// up serving raft, ingest, the API, and every other syncable. That running
+// cluster is the operator's debugging instrument — status, metrics
+// (committed_wal_corrupt_entries counts every corrupt read), and these logs —
+// and the shutdown for the repair happens on the operator's schedule, not
+// mid-crashloop with no API window (the post-scrub hollow-segment incident).
+// Process-fatal remains reserved for continuing-compounds-damage cases
+// (raft.go's failed apply-committed-entry, where proceeding diverges state).
 //
-// DELIBERATE SCOPE: this matches cluster.ErrCorruptEntry — a CRC mismatch
-// inside one entry's frame — ONLY. A structurally mis-tiled segment (a hollow
-// or truncated segment file; the forked wal's ErrCorrupt) must NOT fatal here:
-// fataling on the first cold historical read is a boot crashloop with no API
-// window for the operator to intervene (the post-scrub hollow-segment
-// incident), so those reads fall through to warn-and-retry — the reader holds
-// position (no data skipped), the node stays up for ingest and every other
-// syncable, and the operator repairs/rebuilds on their own schedule. Whether
-// the CRC case should also wedge instead of fatal (it shares the crashloop
-// shape when the corrupt entry is near a checkpoint) is an open policy
-// question tracked in the safe-mode boot ticket. Pinned by
-// TestFatalOnCorruptRead_MisTiledSegmentDoesNotFatal.
-func (db *DB) fatalOnCorruptRead(id string, readErr error) {
+// Both corruption flavors take this wedge, with different log shapes:
+//
+//   - cluster.ErrCorruptEntry (a CRC mismatch inside one entry's frame): the
+//     entry's bytes are wrong, the log is damaged, and a mid-log corruption
+//     can't self-heal via raft — the node's matchIndex already covers that
+//     index so AppendEntries never re-sends it, and the event log sits
+//     downstream of the raft log entirely. Logged at Error with the repair
+//     guidance: rebuild from a healthy replica, or `committed wal repair` to
+//     check for a truncatable torn tail. (This branch fatal-exited before
+//     0.7.6; converted per the posture above — a CRC hit near a checkpoint
+//     had the same no-API-window crashloop shape as the mis-tiled incident.)
+//   - anything else, including the forked wal's structural ErrCorrupt (a
+//     hollow or mis-tiled segment file) and transient read errors: the
+//     generic warn, retried under the worker backoff.
+//
+// The retry cadence is bounded by syncBackoffMax, so a wedged syncable logs
+// at ~2/s, matching the mis-tiled flavor's shipped behavior. Pinned by
+// TestCorruptEntryReadWedgesInsteadOfFatal and
+// TestMisTiledSegmentReadDoesNotFatal.
+func (db *DB) logSyncReadError(id string, readErr error) {
 	if errors.Is(readErr, cluster.ErrCorruptEntry) {
-		db.logger.Fatal("corrupt event-log entry on sync read; the on-disk log is untrustworthy — rebuild this node from a healthy replica, or run `committed wal repair` to check for a torn tail (see docs/operations/rebuild.md)",
+		db.logger.Error("corrupt event-log entry on sync read; this syncable is wedged at the corrupt entry (nothing is skipped) and the node stays up — rebuild this node from a healthy replica, or run `committed wal repair` to check for a torn tail (see docs/operations/rebuild.md)",
 			zap.String("id", id), zap.Error(readErr))
+		return
 	}
+	db.logger.Warn("sync read error", zap.String("id", id), zap.Error(readErr))
 }
 
 func (db *DB) proposeSyncableIndex(ctx context.Context, i *cluster.SyncableIndex) error {

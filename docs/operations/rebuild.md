@@ -51,7 +51,11 @@ Rebuild is the right response when any of these hold:
 
   and increments the `committed_wal_corrupt_entries_total` metric (labelled
   by `log`). Hit during the startup recovery reads, this aborts `Open` and
-  the node fatal-exits.
+  the node fatal-exits. Hit on a syncable's read of the permanent event
+  log, it instead wedges that syncable: the reader holds position (nothing
+  is skipped), an error is logged on each retry, and the node stays up —
+  raft, ingest, the API, and every other syncable keep running while you
+  diagnose. The same repair flow below applies, on your schedule.
 
   **First, rule out a torn tail — it doesn't need a rebuild.** A power loss
   mid-append can leave a partial *trailing* record; that record was never
