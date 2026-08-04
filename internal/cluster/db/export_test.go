@@ -636,3 +636,12 @@ func (db *DB) SuperviseRestartIngestGiveupForTest(id string, i cluster.Ingestabl
 	db.superviseRestartIngest(id, i, h) // the (maxAttempts+1)th observation → give-up
 	return h.ctx.Err()
 }
+
+// SetSyncBatchCapForTest lowers the sink-transaction size cap so cadence tests
+// can exercise multi-batch checkpoint accumulation (Every > batch size) with a
+// handful of proposals instead of hundreds. Returns a restore func.
+func SetSyncBatchCapForTest(n int) func() {
+	old := syncBatchCap
+	syncBatchCap = n
+	return func() { syncBatchCap = old }
+}

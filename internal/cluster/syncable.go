@@ -366,7 +366,12 @@ type DependentsAware interface {
 // "everything through this index is durably committed downstream"), so it can
 // never advance the index past un-synced data, and it cannot checkpoint finer
 // than the syncable's own transaction granularity. For a BatchSyncable, Every
-// doubles as the batch size and MaxAge as the batch-age flush.
+// is the checkpoint cadence exactly as on the single path, and the sink
+// transaction (batch) size is derived separately as min(Every, an internal
+// cap of a few hundred): Every no longer inflates sink transactions, and
+// bumps fire on the first validated batch boundary at or past Every — so for
+// Every above the cap the re-delivery window rounds up to the enclosing
+// batch (at most Every + batchCap - 1). MaxAge is the batch-age flush.
 type CheckpointPolicy struct {
 	Every  int
 	MaxAge time.Duration

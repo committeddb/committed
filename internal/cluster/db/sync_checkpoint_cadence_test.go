@@ -9,6 +9,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/db"
+	"github.com/committeddb/committed/internal/cluster/db/wal"
 )
 
 // cadenceSyncable is a single-path (HTTP-shape) syncable for the cadence
@@ -237,4 +239,175 @@ func TestCheckpointCadence_MaxAgeFlushesUnderEvery(t *testing.T) {
 	require.GreaterOrEqual(t, len(got), 4)
 	require.Greater(t, got[len(got)-1], uint64(0),
 		"MaxAge should have flushed a checkpoint before the Every=1000 count was reached")
+}
+
+// cadenceBatchSyncable is the BATCH twin of cadenceSyncable: it records each
+// SyncBatch's size and the durably persisted checkpoint observed at the start
+// of that batch, and can veto (shouldSnapshot=false) the first vetoFirst
+// batches so tests can prove a vetoed boundary accumulates cadence but never
+// carries the bump.
+type cadenceBatchSyncable struct {
+	s      *wal.Storage
+	id     string
+	policy cluster.CheckpointPolicy
+	doneAt int
+	cancel func()
+
+	vetoFirst int
+
+	mu      sync.Mutex
+	batches []int    // user-entity count per SyncBatch call
+	cpAt    []uint64 // persisted checkpoint observed at each batch's start
+	users   int
+}
+
+func (c *cadenceBatchSyncable) CheckpointPolicy() cluster.CheckpointPolicy { return c.policy }
+func (c *cadenceBatchSyncable) Close() error                               { return nil }
+
+func (c *cadenceBatchSyncable) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldSnapshot, error) {
+	// The worker must take the batch path for a BatchSyncable.
+	panic("single-path Sync must not be called on a BatchSyncable")
+}
+
+func (c *cadenceBatchSyncable) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool, error) {
+	cp, _ := c.s.GetSyncableIndex(c.id)
+
+	users := 0
+	for _, a := range as {
+		if !allSystem(a) {
+			users++
+		}
+	}
+
+	c.mu.Lock()
+	c.batches = append(c.batches, users)
+	c.cpAt = append(c.cpAt, cp)
+	c.users += users
+	done := c.doneAt > 0 && c.users >= c.doneAt
+	veto := len(c.batches) <= c.vetoFirst
+	c.mu.Unlock()
+
+	if done && c.cancel != nil {
+		c.cancel()
+	}
+	return !veto, nil
+}
+
+func (c *cadenceBatchSyncable) observed() ([]int, []uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	b := make([]int, len(c.batches))
+	copy(b, c.batches)
+	p := make([]uint64, len(c.cpAt))
+	copy(p, c.cpAt)
+	return b, p
+}
+
+// TestCheckpointCadence_BatchPathDecouplesSizeFromEvery pins the batch-path
+// factoring: CheckpointPolicy.Every is the CHECKPOINT CADENCE (its documented
+// meaning, as the single path always implemented) and the sink-transaction
+// size is min(Every, syncBatchCap) — Every no longer inflates sink
+// transactions, and one bump fires per Every synced proposals instead of one
+// per batch. Before the fix, Every doubled as the batch size: a 17-sink replay
+// fired ~53 bumps/s, saturating the raft fsync pipeline (85% of each worker
+// cycle waiting on its bump). With cap=2 and Every=6 over 8 user proposals:
+// batches of 2, no bump through the first three batches (6 proposals reach the
+// stride only as batch 3 completes), one bump visible from batch 4 on, and the
+// EOF flush persists the sub-stride tail to the consumed head.
+func TestCheckpointCadence_BatchPathDecouplesSizeFromEvery(t *testing.T) {
+	defer db.SetSyncBatchCapForTest(2)()
+
+	d, s := newWalDB(t)
+	const id = "cadence-batch-stride"
+	seedSyncableConfig(t, d, id)
+
+	seedUserProposals(t, d, s, "evt", []string{"v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7"})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	probe := &cadenceBatchSyncable{
+		s: s, id: id,
+		policy: cluster.CheckpointPolicy{Every: 6},
+		doneAt: 8,
+		cancel: cancel,
+	}
+	require.NoError(t, d.Sync(context.Background(), id, probe))
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("batch syncable never consumed all proposals")
+	}
+
+	// EOF persists the tail: the checkpoint converges to the data head.
+	want := s.DataEventIndex()
+	require.NotZero(t, want)
+	require.Eventually(t, func() bool {
+		cp, err := s.GetSyncableIndex(id)
+		return err == nil && cp == want
+	}, 10*time.Second, 10*time.Millisecond, "EOF flush must persist the sub-stride tail")
+
+	batches, cpAt := probe.observed()
+
+	// Sink transactions are capped at min(Every=6, cap=2) = 2 — Every must
+	// not inflate them (pre-fix: batch size = Every = 6).
+	for i, n := range batches {
+		require.LessOrEqualf(t, n, 2, "batch %d exceeded the sink-transaction cap", i)
+	}
+
+	// The cadence: no bump may be visible before 6 proposals have synced —
+	// batches 1-3 must all observe checkpoint 0 (pre-fix: one bump per batch,
+	// so batch 2 already observes a non-zero checkpoint).
+	require.GreaterOrEqual(t, len(cpAt), 4, "need at least 4 batches to observe the stride")
+	require.Equal(t, uint64(0), cpAt[0])
+	require.Equal(t, uint64(0), cpAt[1])
+	require.Equal(t, uint64(0), cpAt[2], "a bump before the Every=6 stride violates the cadence")
+	require.NotEqual(t, uint64(0), cpAt[3], "the stride bump must be durable before batch 4 starts")
+}
+
+// TestCheckpointCadence_VetoedBoundaryDefersBump: a vetoed batch
+// (shouldSnapshot=false) accumulates cadence but can never carry the bump —
+// the checkpoint stays untouched past the stride until the next VALIDATED
+// boundary, then advances there ("cadence can only thin which valid boundaries
+// get persisted"). With cap=2, Every=4, and the first three batches vetoed:
+// six proposals pass the stride un-bumped; the first validated boundary
+// (batch 4) carries it.
+func TestCheckpointCadence_VetoedBoundaryDefersBump(t *testing.T) {
+	defer db.SetSyncBatchCapForTest(2)()
+
+	d, s := newWalDB(t)
+	const id = "cadence-batch-veto"
+	seedSyncableConfig(t, d, id)
+
+	seedUserProposals(t, d, s, "evt", []string{"v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7"})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	probe := &cadenceBatchSyncable{
+		s: s, id: id,
+		policy:    cluster.CheckpointPolicy{Every: 4},
+		doneAt:    8,
+		cancel:    cancel,
+		vetoFirst: 3,
+	}
+	require.NoError(t, d.Sync(context.Background(), id, probe))
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("batch syncable never consumed all proposals")
+	}
+
+	_, cpAt := probe.observed()
+	// Batches 1-4 all start with checkpoint 0: the stride (4) was reached at
+	// vetoed batch 2, but a vetoed boundary must not be persisted.
+	require.GreaterOrEqual(t, len(cpAt), 4)
+	for i := 0; i < 4; i++ {
+		require.Equalf(t, uint64(0), cpAt[i], "batch %d observed a bump carried by a vetoed boundary", i+1)
+	}
+	// The first validated boundary persists — the checkpoint converges.
+	require.Eventually(t, func() bool {
+		cp, err := s.GetSyncableIndex(id)
+		return err == nil && cp != 0
+	}, 10*time.Second, 10*time.Millisecond, "the first validated boundary after the stride must carry the bump")
 }

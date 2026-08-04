@@ -401,6 +401,23 @@ rebuild the dependents to fix the past." If you only need the correction for new
 data and accept the historical rows as-is, that is a valid choice — just make it
 knowingly, because nothing rebuilds them on your behalf.
 
+## Checkpoint cadence and replay throughput
+
+A syncable's `checkpointEvery` (TOML, `[syncable]` section) is its **checkpoint
+cadence**: how many synced records may accumulate before the resume checkpoint
+is durably persisted. It is also the crash re-delivery bound — a restart
+re-delivers at most that many already-synced records, which keyed sinks absorb
+idempotently. It does **not** control sink transaction size: batches are capped
+internally (a few hundred rows) regardless of cadence.
+
+The cadence matters most during **replays** (initial sink builds, rebuilds):
+every checkpoint persist is a consensus round trip, and many sinks replaying
+with a tight cadence can bottleneck on checkpoint traffic rather than data.
+The default (2500) keeps replays fast out of the box; raising it further
+(e.g. 5000) buys a little more replay throughput at a proportionally larger
+re-delivery window. Caught-up syncables persist on catch-up regardless of
+cadence, so steady-state checkpoint freshness does not depend on this value.
+
 ## See also
 
 - [Quickstart](quickstart.md) — a working four-topic `movie_card` read model

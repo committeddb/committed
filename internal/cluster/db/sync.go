@@ -94,15 +94,28 @@ const (
 	syncBackoffMax = 500 * time.Millisecond
 )
 
-// syncBatch{MaxSize,MaxAge} are the DEFAULT batch limits when the Syncable
-// implements BatchSyncable: proposals buffer until either MaxSize accumulate
-// or MaxAge elapses since the first proposal in the batch, whichever comes
-// first (a partial batch is also flushed on reader EOF). A syncable's
-// CheckpointPolicy overrides these per-syncable (Every→size, MaxAge→age).
+// Batch limits when the Syncable implements BatchSyncable: proposals buffer
+// until min(Every, syncBatchCap) accumulate or MaxAge elapses since the first
+// proposal in the batch, whichever comes first (a partial batch is also
+// flushed on reader EOF). CheckpointPolicy.Every is the checkpoint CADENCE —
+// it no longer inflates the sink-transaction size past syncBatchCap; see the
+// derivation in syncBatch.
 const (
-	syncBatchMaxSize = 100
-	syncBatchMaxAge  = 50 * time.Millisecond
+	// syncBatchDefaultEvery is the default checkpoint cadence (proposals per
+	// bump) when a batch syncable configures none. 2500 keeps out-of-box
+	// replays off the bump-saturation cliff at a 2500-proposal crash
+	// re-delivery window (the Syncable contract requires replay idempotency,
+	// so keyed sinks absorb it). Configured syncables get exactly their Every.
+	syncBatchDefaultEvery = 2500
+	syncBatchMaxAge       = 50 * time.Millisecond
 )
+
+// syncBatchCap caps the sink-transaction size independently of the checkpoint
+// cadence: batches amortize the sink's per-transaction fsync (~complete by a
+// few hundred rows) while staying bounded for lock hold and failure-isolation
+// granularity. A var, not a const, so tests can lower it to exercise
+// multi-batch cadence accumulation cheaply.
+var syncBatchCap = 500
 
 // checkpointPolicyOf returns the syncable's configured checkpoint cadence, or
 // the zero policy if it doesn't implement CheckpointConfigurable. The worker
@@ -690,15 +703,30 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 	var r ActualReader
 	backoff := syncBackoffMin
 
-	// Batch limits come from the syncable's CheckpointPolicy (Every→size,
-	// MaxAge→age), each falling back to the package default when unset. One
-	// bump per batch is already the cadence, so this is the whole of cadence
-	// for the batch path: a bigger batch checkpoints less often and
-	// re-delivers up to one batch on crash. See cluster.CheckpointPolicy.
+	// CheckpointPolicy.Every is the CHECKPOINT CADENCE (its documented
+	// meaning: persist once per Every successful syncs, crash re-delivers at
+	// most that many), and the sink-transaction size is derived SEPARATELY as
+	// min(Every, syncBatchCap). The two used to be conflated — Every doubled
+	// as the batch size, so one bump fired per batch — which made a 17-sink
+	// replay saturate the raft fsync pipeline with ~53 checkpoint proposals/s
+	// (85% of every worker cycle was waiting on its bump's round trip;
+	// aggregate throughput ~1.3K rows/s with the hardware idle). Field A/B:
+	// raising the cadence 500→5000 alone measured 5-8.5x. Decoupling keeps
+	// sink transactions at the sink-optimal cap while bumps thin to the
+	// configured cadence; the single-flush path always worked this way, so
+	// both paths now honor the same contract. For Every > syncBatchCap the
+	// bump lands on the first VALIDATED batch boundary at or past Every, so
+	// the re-delivery window is Every rounded up to the enclosing batch
+	// (<= Every + syncBatchCap - 1); for Every <= syncBatchCap behavior is
+	// bit-for-bit the old one (batch = Every, bump per batch).
 	policy := checkpointPolicyOf(s)
-	maxSize := policy.Every
-	if maxSize < 1 {
-		maxSize = syncBatchMaxSize
+	every := policy.Every
+	if every < 1 {
+		every = syncBatchDefaultEvery
+	}
+	maxSize := every
+	if maxSize > syncBatchCap {
+		maxSize = syncBatchCap
 	}
 	maxAge := policy.MaxAge
 	if maxAge <= 0 {
@@ -712,6 +740,16 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 	// retryBatch is set when a flush fails with a transient error. The
 	// next iteration retries the flush instead of reading more proposals.
 	retryBatch := false
+	// Checkpoint-cadence state (see the derivation comment above): the bump
+	// fires on the first VALIDATED batch boundary once at least `every`
+	// proposals have synced since the last persisted checkpoint.
+	// syncedSinceBump counts flushed proposals not yet covered by a bump;
+	// pendingBumpIndex is the latest shouldSnapshot=true boundary awaiting
+	// persistence (0 = none) — a vetoed batch accumulates count but cannot
+	// carry the bump ("cadence can only thin which VALID boundaries get
+	// persisted", cluster.CheckpointPolicy).
+	syncedSinceBump := 0
+	var pendingBumpIndex uint64
 	tracker := db.newStuckTracker(id)
 
 	flush := func() bool {
@@ -756,26 +794,59 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 			return false
 		}
 
-		lastIndex := batch[len(batch)-1].Index
+		// Cadence accounting: this batch's proposals count toward the stride,
+		// and a validated boundary refreshes the pending bump index. The bump
+		// itself fires only once `every` proposals have accumulated — the
+		// checkpoint cadence, decoupled from the batch size.
+		prospectiveCount := syncedSinceBump + len(batch)
+		prospectivePending := pendingBumpIndex
 		if shouldSnapshot {
-			if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: lastIndex}); err != nil {
+			prospectivePending = batch[len(batch)-1].Index
+		}
+		if prospectivePending != 0 && prospectiveCount >= every {
+			if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: prospectivePending}); err != nil {
 				// The bump did not durably apply (ctx canceled, or
 				// ErrProposalUnknown/ErrProposalLost after a leader change
 				// orphaned the bump). Keep the batch and retry the SyncBatch +
 				// bump on the next iteration rather than advancing past an
-				// unconfirmed index. Re-running the batch relies on the Syncable
-				// contract's replay-idempotency requirement (see cluster.Syncable);
-				// not advancing keeps recovery to at most one duplicate batch.
+				// unconfirmed index; the accumulators are deliberately NOT
+				// updated here, so the retried batch is counted exactly once.
+				// Re-running the batch relies on the Syncable contract's
+				// replay-idempotency requirement (see cluster.Syncable).
 				db.logger.Warn("proposeSyncableIndex error, will retry batch",
 					zap.String("id", id), zap.Error(err))
 				retryBatch = true
 				return false
 			}
+			syncedSinceBump = 0
+			pendingBumpIndex = 0
+		} else {
+			syncedSinceBump = prospectiveCount
+			pendingBumpIndex = prospectivePending
 		}
 
 		batch = batch[:0]
 		retryBatch = false
 		tracker.cleared(ctx)
+		return true
+	}
+
+	// bumpPending persists the latest validated boundary regardless of the
+	// cadence stride — the reader-EOF flush ("persist whenever it catches
+	// up"), so a low-traffic syncable's checkpoint never lags behind its
+	// consumed head for long. A failure is retried at the next EOF or stride
+	// boundary; the pending index stays armed.
+	bumpPending := func() bool {
+		if pendingBumpIndex == 0 {
+			return false
+		}
+		if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: pendingBumpIndex}); err != nil {
+			db.logger.Warn("proposeSyncableIndex error at EOF, will retry",
+				zap.String("id", id), zap.Error(err))
+			return false
+		}
+		syncedSinceBump = 0
+		pendingBumpIndex = 0
 		return true
 	}
 
@@ -801,6 +872,13 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 			isNode = false
 			batch = batch[:0]
 			retryBatch = false
+			// Drop the cadence accumulators without bumping: we must not
+			// propose while not the owner, and the new owner re-derives its
+			// position from the durable checkpoint — the un-persisted tail
+			// (< every) is simply re-delivered there, within the documented
+			// re-delivery window.
+			syncedSinceBump = 0
+			pendingBumpIndex = 0
 			// Do NOT clear the stuck record on leadership loss — it is cluster-wide;
 			// the new owner clears it on progress. See the single-flush worker.
 			progressed = true
@@ -846,11 +924,18 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 			a, readErr := r.Read()
 			switch {
 			case readErr == io.EOF:
-				// Caught up. Flush any partial batch immediately.
+				// Caught up. Flush any partial batch immediately, then persist
+				// any sub-stride pending boundary — the EOF flush of the
+				// CheckpointPolicy contract, which keeps a caught-up
+				// syncable's checkpoint at its consumed head no matter how
+				// coarse the cadence.
 				if len(batch) > 0 {
 					if flush() {
 						progressed = true
 					}
+				}
+				if !retryBatch && bumpPending() {
+					progressed = true
 				}
 			case readErr != nil:
 				db.fatalOnCorruptRead(id, readErr)
