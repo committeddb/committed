@@ -81,6 +81,12 @@ type Cluster interface {
 	// an exclusive raft-index cursor for paging; `limit` bounds the page.
 	// Backed by replicated state, so any node returns the same answer.
 	SyncableDeadLetters(id string, since uint64, limit int) ([]SyncableDeadLetter, error)
+	// SyncableDeadLetterStats returns how many proposals the syncable has
+	// dead-lettered (skipped) and the raft index of the most recent one (0
+	// when none). Surfaced on GET /syncable/{id}/status so a caught-up sink
+	// with skipped rows never reads as fully green — the honest completeness
+	// check is caughtUp && deadLetters == 0. Backed by replicated state.
+	SyncableDeadLetterStats(id string) (count, last uint64, err error)
 	// DeadLetterStuckSyncable skips the proposal a syncable is currently
 	// blocked retrying (a transient error retries forever, so the worker
 	// stalls visibly rather than losing data until an operator intervenes).

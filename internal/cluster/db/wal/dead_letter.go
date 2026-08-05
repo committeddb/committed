@@ -127,6 +127,38 @@ func (s *Storage) HasSyncableDeadLetter(id string, index uint64) (bool, error) {
 	return found, nil
 }
 
+// SyncableDeadLetterStats returns how many proposals syncable id has
+// dead-lettered (permanently or manually skipped) and the raft index of the
+// most recent one (0 when none). This is the status-surface summary: a sink
+// can be caught up AND have skipped rows, and without this count that state
+// reads as fully green — the honest "complete" check is caughtUp && count==0.
+// The full records stay on SyncableDeadLetters; a successful replay clears
+// its record and so leaves this count. An unknown id returns (0, 0).
+func (s *Storage) SyncableDeadLetterStats(id string) (count, last uint64, err error) {
+	err = s.view(func(tx *bolt.Tx) error {
+		top := tx.Bucket(syncableDeadLetterBucket)
+		if top == nil {
+			return ErrBucketMissing
+		}
+		sub := top.Bucket([]byte(id))
+		if sub == nil {
+			return nil
+		}
+		c := sub.Cursor()
+		for k, _ := c.First(); k != nil; k, _ = c.Next() {
+			count++
+		}
+		if k, _ := c.Last(); k != nil {
+			last = binary.BigEndian.Uint64(k)
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	return count, last, nil
+}
+
 // SyncableDeadLetters returns the dead-letter records for a syncable in
 // ascending raft-index order. `since` is an EXCLUSIVE cursor: only
 // records with raft index strictly greater than `since` are returned, so

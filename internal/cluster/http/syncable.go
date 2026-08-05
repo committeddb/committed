@@ -249,6 +249,18 @@ type SyncableStatusResponse struct {
 	HeadIndex       uint64 `json:"headIndex"`
 	Lag             uint64 `json:"lag"`
 	CaughtUp        bool   `json:"caughtUp"`
+
+	// DeadLetters is how many proposals this syncable has skipped
+	// (dead-lettered), permanently or manually; LastDeadLetterIndex is the
+	// raft index of the most recent skip (omitted when none). ALWAYS
+	// present: a sink can be caught up AND have skipped rows, so the honest
+	// completeness check is caughtUp && deadLetters == 0 — without this
+	// field that state reads as fully green. List the records via
+	// GET /syncable/{id}/deadletter; re-drive one after fixing the
+	// destination via POST /syncable/{id}/replay/{index} (which clears it
+	// from this count).
+	DeadLetters         uint64 `json:"deadLetters"`
+	LastDeadLetterIndex uint64 `json:"lastDeadLetterIndex,omitempty"`
 }
 
 // GetSyncableStatus reports a syncable worker's operational status
@@ -306,6 +318,14 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 		resp.Lag = head - checkpoint
 	}
 	resp.CaughtUp = resp.Lag == 0
+
+	dlCount, dlLast, err := h.c.SyncableDeadLetterStats(id)
+	if err != nil {
+		writeInternalError(w, "failed to retrieve dead-letter stats", err)
+		return
+	}
+	resp.DeadLetters = dlCount
+	resp.LastDeadLetterIndex = dlLast
 
 	bs, err := json.Marshal(resp)
 	if err != nil {

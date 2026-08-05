@@ -153,3 +153,29 @@ func indexesOf(dls []cluster.SyncableDeadLetter) []uint64 {
 	}
 	return out
 }
+
+// TestSyncableDeadLetterStats covers the status-surface summary: count and
+// most-recent index, regardless of apply order; (0, 0) for an id that never
+// failed; and the count following the record set as replay clears entries.
+func TestSyncableDeadLetterStats(t *testing.T) {
+	s := NewStorageWithParser(t, nil, parser.New())
+	defer s.Cleanup()
+
+	count, last, err := s.SyncableDeadLetterStats("never-failed")
+	require.NoError(t, err)
+	require.Zero(t, count)
+	require.Zero(t, last)
+
+	const id = "orders-sync"
+	seedSyncableConfig(t, s, id, 1)
+	// Applied out of index order: last must be the highest FAILED index (30),
+	// not the last applied.
+	applyDeadLetter(t, s, 2, &cluster.SyncableDeadLetter{ID: id, Index: 30, TimestampUnixNano: 300, Kind: "permanent", Message: "c"})
+	applyDeadLetter(t, s, 3, &cluster.SyncableDeadLetter{ID: id, Index: 10, TimestampUnixNano: 100, Kind: "permanent", Message: "a"})
+	applyDeadLetter(t, s, 4, &cluster.SyncableDeadLetter{ID: id, Index: 20, TimestampUnixNano: 200, Kind: "manual", Message: "b"})
+
+	count, last, err = s.SyncableDeadLetterStats(id)
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), count)
+	require.Equal(t, uint64(30), last)
+}

@@ -418,6 +418,42 @@ The default (2500) keeps replays fast out of the box; raising it further
 re-delivery window. Caught-up syncables persist on catch-up regardless of
 cadence, so steady-state checkpoint freshness does not depend on this value.
 
+## Destination limits: when a row cannot fit the sink
+
+Every SQL engine has physical limits on its tables, and a projection can hit
+them two ways — at **table-creation time** (loud, immediate, nothing synced
+yet) or at **apply time** (a specific row fails while its neighbors succeed).
+Survey your widest tables against these before creating mirrors:
+
+- **PostgreSQL**: a row must fit an 8 KB heap page after compression/TOAST —
+  very wide tables (many hundreds of columns of inline data) can produce
+  individual rows that exceed it at apply time ("row is too big").
+- **MySQL/InnoDB**: ~1,017 columns per table and index-key length limits
+  (a `TEXT`/long-`VARCHAR` primary key needs a prefix or a different key
+  column) — both fail at table creation, loudly. `TEXT` caps at 64 KB —
+  an over-long value fails at apply time ("data too long"); use `LONGTEXT`
+  for unbounded content columns.
+
+**The two engines respond differently to the apply-time case, and both are
+deliberate.** committed skips a row (recording a durable **dead letter**)
+only when the destination's error proves the failure is *entry-specific* —
+this row's own value, where every other row would apply. It wedges the
+worker (sticks-and-waits, resumes on fix) whenever the error could be
+schema- or config-shaped. MySQL reports an over-long value as a per-column
+data error, which proves entry-specificity → the row is dead-lettered and
+the sink keeps flowing. PostgreSQL reports its row-size wall as a program
+limit, which doesn't → the worker wedges visibly on it. Same principle,
+different engine error vocabularies.
+
+**Skipped is never silent, and never final.** `GET /syncable/{id}/status`
+reports `deadLetters` (and the latest skipped index) alongside `caughtUp` —
+the honest completeness check for a mirror is `caughtUp && deadLetters == 0`.
+List the skipped proposals with `GET /syncable/{id}/deadletter`; after fixing
+the destination (e.g. `ALTER ... LONGTEXT`), re-drive each with
+`POST /syncable/{id}/replay/{index}`, which applies the row and clears its
+record. A wedged worker needs no replay — it resumes by itself once the
+destination accepts the row.
+
 ## See also
 
 - [Quickstart](quickstart.md) — a working four-topic `movie_card` read model

@@ -118,6 +118,10 @@ type Storage interface {
 	// from the apply path, so they are consistent on every replica and
 	// queryable from any node. An unknown id returns an empty slice.
 	SyncableDeadLetters(id string, since uint64, limit int) ([]cluster.SyncableDeadLetter, error)
+	// SyncableDeadLetterStats returns the count of dead-lettered proposals
+	// for a syncable and the raft index of the most recent one (0 when
+	// none). The status-surface summary of SyncableDeadLetters.
+	SyncableDeadLetterStats(id string) (count, last uint64, err error)
 	// HasSyncableDeadLetter reports whether the proposal at raft index in
 	// syncable id has been dead-lettered (permanently skipped or manually
 	// skipped by an operator). The sync worker consults it before

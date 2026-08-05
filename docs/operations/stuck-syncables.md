@@ -113,6 +113,17 @@ syncable's traffic, so a perfectly caught-up syncable would show a permanent
 non-zero "backlog". `headIndex` counts only what a syncable actually consumes,
 which is what makes `0` mean `0`.
 
+**Caught up is not the same as complete.** "Nothing left to do" includes
+proposals the syncable *skipped* (dead-lettered — a permanent per-row failure,
+or an operator's manual skip). The status carries `deadLetters` (count, always
+present) and `lastDeadLetterIndex` alongside `caughtUp`, so the honest
+completeness check for a mirror is `caughtUp && deadLetters == 0`. When the
+count is non-zero: list the records via `GET /v1/syncable/{id}/deadletter`,
+fix the destination, and re-drive each with
+`POST /v1/syncable/{id}/replay/{index}` — a successful replay clears the
+record from the count. See "Destination limits" in
+[read-models.md](../read-models.md) for when each engine skips vs. wedges.
+
 The read is O(1) and answerable from **any node** without a leader hop, so it
 is safe to poll (e.g. every ~5s) for a dashboard "caught up / N behind"
 indicator. Pass `?consistency=stale` to skip the quorum round-trip on a

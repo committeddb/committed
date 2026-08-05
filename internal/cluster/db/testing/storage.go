@@ -284,6 +284,10 @@ func (StorageStubs) TypeVersion(id string, version uint64) (*cluster.Configurati
 	return nil, nil
 }
 
+func (StorageStubs) SyncableDeadLetterStats(id string) (count, last uint64, err error) {
+	return 0, 0, nil
+}
+
 func (StorageStubs) SyncableDeadLetters(id string, since uint64, limit int) ([]cluster.SyncableDeadLetter, error) {
 	return nil, nil
 }

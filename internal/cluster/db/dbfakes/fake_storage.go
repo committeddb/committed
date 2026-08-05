@@ -510,6 +510,21 @@ type FakeStorage struct {
 		result1 *raftpb.Snapshot
 		result2 error
 	}
+	SyncableDeadLetterStatsStub        func(string) (uint64, uint64, error)
+	syncableDeadLetterStatsMutex       sync.RWMutex
+	syncableDeadLetterStatsArgsForCall []struct {
+		arg1 string
+	}
+	syncableDeadLetterStatsReturns struct {
+		result1 uint64
+		result2 uint64
+		result3 error
+	}
+	syncableDeadLetterStatsReturnsOnCall map[int]struct {
+		result1 uint64
+		result2 uint64
+		result3 error
+	}
 	SyncableDeadLettersStub        func(string, uint64, int) ([]cluster.SyncableDeadLetter, error)
 	syncableDeadLettersMutex       sync.RWMutex
 	syncableDeadLettersArgsForCall []struct {
@@ -3192,6 +3207,73 @@ func (fake *FakeStorage) SnapshotReturnsOnCall(i int, result1 *raftpb.Snapshot, 
 		result1 *raftpb.Snapshot
 		result2 error
 	}{result1, result2}
+}
+
+func (fake *FakeStorage) SyncableDeadLetterStats(arg1 string) (uint64, uint64, error) {
+	fake.syncableDeadLetterStatsMutex.Lock()
+	ret, specificReturn := fake.syncableDeadLetterStatsReturnsOnCall[len(fake.syncableDeadLetterStatsArgsForCall)]
+	fake.syncableDeadLetterStatsArgsForCall = append(fake.syncableDeadLetterStatsArgsForCall, struct {
+		arg1 string
+	}{arg1})
+	stub := fake.SyncableDeadLetterStatsStub
+	fakeReturns := fake.syncableDeadLetterStatsReturns
+	fake.recordInvocation("SyncableDeadLetterStats", []interface{}{arg1})
+	fake.syncableDeadLetterStatsMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2, ret.result3
+	}
+	return fakeReturns.result1, fakeReturns.result2, fakeReturns.result3
+}
+
+func (fake *FakeStorage) SyncableDeadLetterStatsCallCount() int {
+	fake.syncableDeadLetterStatsMutex.RLock()
+	defer fake.syncableDeadLetterStatsMutex.RUnlock()
+	return len(fake.syncableDeadLetterStatsArgsForCall)
+}
+
+func (fake *FakeStorage) SyncableDeadLetterStatsCalls(stub func(string) (uint64, uint64, error)) {
+	fake.syncableDeadLetterStatsMutex.Lock()
+	defer fake.syncableDeadLetterStatsMutex.Unlock()
+	fake.SyncableDeadLetterStatsStub = stub
+}
+
+func (fake *FakeStorage) SyncableDeadLetterStatsArgsForCall(i int) string {
+	fake.syncableDeadLetterStatsMutex.RLock()
+	defer fake.syncableDeadLetterStatsMutex.RUnlock()
+	argsForCall := fake.syncableDeadLetterStatsArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeStorage) SyncableDeadLetterStatsReturns(result1 uint64, result2 uint64, result3 error) {
+	fake.syncableDeadLetterStatsMutex.Lock()
+	defer fake.syncableDeadLetterStatsMutex.Unlock()
+	fake.SyncableDeadLetterStatsStub = nil
+	fake.syncableDeadLetterStatsReturns = struct {
+		result1 uint64
+		result2 uint64
+		result3 error
+	}{result1, result2, result3}
+}
+
+func (fake *FakeStorage) SyncableDeadLetterStatsReturnsOnCall(i int, result1 uint64, result2 uint64, result3 error) {
+	fake.syncableDeadLetterStatsMutex.Lock()
+	defer fake.syncableDeadLetterStatsMutex.Unlock()
+	fake.SyncableDeadLetterStatsStub = nil
+	if fake.syncableDeadLetterStatsReturnsOnCall == nil {
+		fake.syncableDeadLetterStatsReturnsOnCall = make(map[int]struct {
+			result1 uint64
+			result2 uint64
+			result3 error
+		})
+	}
+	fake.syncableDeadLetterStatsReturnsOnCall[i] = struct {
+		result1 uint64
+		result2 uint64
+		result3 error
+	}{result1, result2, result3}
 }
 
 func (fake *FakeStorage) SyncableDeadLetters(arg1 string, arg2 uint64, arg3 int) ([]cluster.SyncableDeadLetter, error) {

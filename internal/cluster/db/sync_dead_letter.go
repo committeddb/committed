@@ -156,3 +156,10 @@ func truncateDeadLetterMessage(s string) string {
 func (db *DB) SyncableDeadLetters(id string, since uint64, limit int) ([]cluster.SyncableDeadLetter, error) {
 	return db.storage.SyncableDeadLetters(id, since, limit)
 }
+
+// SyncableDeadLetterStats returns the dead-letter count for a syncable and
+// the raft index of the most recent skip. Storage-backed replicated state;
+// powers the deadLetters fields on GET /syncable/{id}/status.
+func (db *DB) SyncableDeadLetterStats(id string) (count, last uint64, err error) {
+	return db.storage.SyncableDeadLetterStats(id)
+}

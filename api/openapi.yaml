@@ -2089,7 +2089,7 @@ components:
 
     SyncableStatusResponse:
       type: object
-      required: [stuck, workerState, checkpointIndex, headIndex, lag, caughtUp]
+      required: [stuck, workerState, checkpointIndex, headIndex, lag, caughtUp, deadLetters]
       description: A syncable worker's current operational status and progress.
       properties:
         stuck:
@@ -2150,6 +2150,24 @@ components:
         caughtUp:
           type: boolean
           description: True iff lag == 0 — the syncable has nothing left to process. Always present.
+        deadLetters:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            How many proposals this syncable has skipped (dead-lettered),
+            permanently or by an operator's manual skip. Always present. A
+            sink can be caught up AND have skipped rows, so the honest
+            completeness check is `caughtUp && deadLetters == 0`. List the
+            records via GET /syncable/{id}/deadletter; a successful
+            POST /syncable/{id}/replay/{index} clears one from this count.
+        lastDeadLetterIndex:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            Raft index of the most recent dead-lettered proposal. Omitted
+            when deadLetters is 0.
 
     IngestableStatusResponse:
       type: object
