@@ -1724,8 +1724,12 @@ func (d *PostgreSQLDialect) snapshotTable(
 // merely-slow worker toward give-up. A checkpoint-bearing row is an ordered
 // proposal (the ingest worker drains its pipeline before proposing it), so it
 // trails every row it covers; rows after it simply re-emit on resume.
-// progress is mutated in place per checkpoint, ending at the window's last key —
-// the same end state the caller's read cursor (lastPK) advances to.
+// progress is mutated in place per checkpoint, ending at the window's last
+// EMITTED key. The caller's read cursor can end further: it advances per
+// SCANNED row, so marshal-skipped tail rows sit past the durable cursor. That
+// gap is convergent — a crash re-scans only rows that skip again, and an
+// all-skipped window (no proposals, so no checkpoint) simply leaves the
+// durable cursor at the previous emission.
 func handOffSnapshotWindow(
 	ctx context.Context,
 	entities []*cluster.Entity,
@@ -1885,6 +1889,7 @@ func readBatch(
 
 	var entities []*cluster.Entity
 	var batchLastPK string
+	scanned := 0
 
 	for rows.Next() {
 		vals := make([]any, len(columns))
@@ -1925,6 +1930,19 @@ func readBatch(
 
 		toJSON := sql.BuildEntityJSON(spec.Mappings, raw, catByName)
 
+		// The cursor advances for every SCANNED row — BEFORE the marshal — and
+		// the returned count is the scanned count, not the emitted count. With
+		// the cursor keyed to emission, a batch whose rows all skipped
+		// returned count 0 and the caller's exhaustion check ended the table
+		// scan — silently truncating every row after the bad one. No known
+		// value path produces an unmarshalable payload today (this dialect
+		// reads every column ::text — even a float8 NaN arrives as the string
+		// "NaN" and marshals fine), so the skip branch is defensive; but a
+		// defensive branch must be SAFE when it fires, not end the scan.
+		key := sql.CompositeKey(m, pkCols)
+		batchLastPK = key
+		scanned++
+
 		jsonBytes, err := json.Marshal(toJSON)
 		if err != nil {
 			zap.L().Warn("readBatch: skipping row with unmarshalable data",
@@ -1933,9 +1951,6 @@ func readBatch(
 			)
 			continue
 		}
-
-		key := sql.CompositeKey(m, pkCols)
-		batchLastPK = key
 
 		entities = append(entities, &cluster.Entity{
 			Type: spec.Type,
@@ -1951,7 +1966,7 @@ func readBatch(
 		return nil, "", 0, err
 	}
 
-	return entities, batchLastPK, len(entities), nil
+	return entities, batchLastPK, scanned, nil
 }
 
 // parseBatchSize reads "batch_size" from Config.Options, falling back to
