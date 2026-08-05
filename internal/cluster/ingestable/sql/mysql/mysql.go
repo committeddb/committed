@@ -482,6 +482,24 @@ func mysqlTableColumns(ctx context.Context, db *gosql.DB, table string) (cols, g
 	return cols, generated, rows.Err()
 }
 
+// addedTables returns the configured tables absent from the durable
+// snapshotted-tables registry — the tables a re-POST added since the last
+// snapshot, whose history needs a backfill. Order follows config.Tables so the
+// backfill scan order is deterministic.
+func addedTables(configured, snapshotted []string) []string {
+	have := make(map[string]bool, len(snapshotted))
+	for _, t := range snapshotted {
+		have[t] = true
+	}
+	var added []string
+	for _, t := range configured {
+		if !have[t] {
+			added = append(added, t)
+		}
+	}
+	return added
+}
+
 func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos cluster.Position, epochFloor uint64, pr chan<- *cluster.Proposal, po chan<- cluster.Position) error {
 	// Populate Topics before any snapshot/stream goroutine spawns, so per-spec
 	// routing (SpecForTable, specFor, refSpecs) never has to lazily mutate the shared
@@ -497,6 +515,7 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 	var resumeProgress *dialectpb.SnapshotProgress
 	var currentEpoch uint64
 	var resumeChunkTag uint64
+	var snapshottedTables []string
 	// Snapshot the soft-flush budget once, before the streaming goroutine sends
 	// anything, so no per-row / per-checkpoint read of the mutable global races a
 	// test override (and the budget is stable across this session's reconnects).
@@ -511,6 +530,13 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 		resumeProgress = posProto.SnapshotProgress
 		currentEpoch = posProto.RefreshEpoch
 		resumeChunkTag = posProto.ChunkTag
+		snapshottedTables = posProto.SnapshottedTables
+		if len(snapshottedTables) == 0 {
+			// Pre-feature checkpoint: grandfather every currently-configured
+			// table as snapshotted. Adds made BEFORE this upgrade are not
+			// detected (matching the old behavior); adds made after are.
+			snapshottedTables = append([]string(nil), config.Tables...)
+		}
 	}
 
 	// charsetPlans is the source's collation catalog, read once and reused across
@@ -530,6 +556,43 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 		// snapshot to capture existing data and determine the binlog
 		// position to stream from. This replaces canal's built-in
 		// mysqldump phase, eliminating the external binary dependency.
+		// Added-table backfill detection: streaming resume (no in-flight
+		// snapshot) where the config names tables the durable registry has
+		// never snapshotted — a re-POST added them. Their ongoing binlog
+		// changes already stream (the filter is config-driven); their HISTORY
+		// must be backfilled or the sink is silently partial. Stage a PARTIAL
+		// snapshot: every already-snapshotted sibling is pre-seeded complete
+		// (only the added tables scan) and PartialBackfill suppresses the
+		// refresh-boundary marker — a topic sweep would delete the sibling
+		// rows this backfill does not re-emit. The dialect parity twin of the
+		// Postgres addedTables branch. Overlap with the stream is covered by
+		// the sink's keyed upsert, exactly as on Postgres.
+		if lastPos != nil && resumeProgress == nil {
+			if added := addedTables(config.Tables, snapshottedTables); len(added) > 0 {
+				zap.L().Info("config change added tables; backfilling their existing rows (a full-table scan per added table; sibling tables are not re-read)",
+					zap.Strings("added_tables", added),
+					zap.Int("tables_total", len(config.Tables)))
+				completed := make([]string, 0, len(config.Tables)-len(added))
+				addedSet := map[string]bool{}
+				for _, t := range added {
+					addedSet[t] = true
+				}
+				for _, t := range config.Tables {
+					if !addedSet[t] {
+						completed = append(completed, t)
+					}
+				}
+				resumeProgress = &dialectpb.SnapshotProgress{
+					CompletedTables: completed,
+					PartialBackfill: true,
+				}
+				// Stamp backfilled rows at the current epoch, floored so they
+				// never land below a generation already on the sink. No bump:
+				// this is not a refresh.
+				currentEpoch = max(currentEpoch, epochFloor)
+			}
+		}
+
 		if lastPos == nil || resumeProgress != nil {
 			// A mid-snapshot resume keeps the in-progress epoch the checkpoint
 			// carries (its closing marker has not committed, so the topic highwater
@@ -539,6 +602,7 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			// the checkpoint epoch to 0 while the sink still holds rows up to the
 			// highwater), else epoch 1. A purge re-snapshot arrives here with the
 			// epoch already bumped (see the isGtidPurged branch).
+			partialBackfill := resumeProgress != nil && resumeProgress.PartialBackfill
 			if resumeProgress != nil {
 				currentEpoch = max(currentEpoch, 1)
 			} else {
@@ -573,32 +637,40 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 				zap.Uint32("binlog_pos", lastPos.Pos),
 			)
 
-			// Close the full re-snapshot with a refresh-boundary marker PER TOPIC at
-			// this shared epoch so each keyed sink sweeps its rows left at an older one
-			// (a row deleted at the source in the purged window, never re-emitted).
-			// MySQL has no partial added-table backfill, so every snapshot is a full
-			// refresh and always emits the markers. One marker per proposal keeps each
-			// proposal homogeneous (one topic), matching the flush path; one spec for
-			// the flat form emits exactly one marker as before.
-			config.EnsureTopics()
-			for ti := range config.Topics {
-				spec := &config.Topics[ti]
-				if spec.Type == nil {
-					continue
-				}
-				marker := cluster.NewRefreshBoundaryEntity(spec.Type, currentEpoch)
-				select {
-				case pr <- &cluster.Proposal{Entities: []*cluster.Entity{marker}}:
-				case <-ctx.Done():
-					return nil
+			// Close a FULL (re-)snapshot with a refresh-boundary marker PER TOPIC
+			// at this shared epoch so each keyed sink sweeps its rows left at an
+			// older one (a row deleted at the source in the purged window, never
+			// re-emitted). A PARTIAL added-table backfill must NOT emit markers:
+			// a topic-scoped sweep would delete every sibling row the backfill
+			// deliberately did not re-emit. One marker per proposal keeps each
+			// proposal homogeneous (one topic), matching the flush path; one spec
+			// for the flat form emits exactly one marker as before.
+			if !partialBackfill {
+				config.EnsureTopics()
+				for ti := range config.Topics {
+					spec := &config.Topics[ti]
+					if spec.Type == nil {
+						continue
+					}
+					marker := cluster.NewRefreshBoundaryEntity(spec.Type, currentEpoch)
+					select {
+					case pr <- &cluster.Proposal{Entities: []*cluster.Entity{marker}}:
+					case <-ctx.Done():
+						return nil
+					}
 				}
 			}
+
+			// Any completed snapshot — full or backfill — leaves every
+			// configured table snapshotted (table removal is rejected at
+			// config-replace time, so config.Tables only ever grows).
+			snapshottedTables = append([]string(nil), config.Tables...)
 
 			// Checkpoint the final snapshot position (no
 			// snapshot_progress) so a restart after snapshot
 			// completion but before the first binlog commit
 			// starts streaming instead of re-running snapshot.
-			posProto := &dialectpb.MySQLBinLogPosition{Name: lastPos.Name, Pos: lastPos.Pos, GtidSet: snapshotGTID, RefreshEpoch: currentEpoch, ChunkTag: chunkTag(config, flushBudget)}
+			posProto := &dialectpb.MySQLBinLogPosition{Name: lastPos.Name, Pos: lastPos.Pos, GtidSet: snapshotGTID, RefreshEpoch: currentEpoch, ChunkTag: chunkTag(config, flushBudget), SnapshottedTables: snapshottedTables}
 			bs, err := proto.Marshal(posProto)
 			if err != nil {
 				return err
@@ -698,11 +770,12 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 		// handler means handleXID's checkpoints and the stamped entities agree.
 		currentEpoch = max(currentEpoch, epochFloor, 1)
 		handler := &MySQLEventHandler{
-			config:       config,
-			proposalChan: pr,
-			positionChan: po,
-			epoch:        currentEpoch,
-			charsetPlans: charsetPlans,
+			config:            config,
+			proposalChan:      pr,
+			positionChan:      po,
+			epoch:             currentEpoch,
+			charsetPlans:      charsetPlans,
+			snapshottedTables: snapshottedTables,
 			// Resolve each `tables` entry to a (schema, table) the binlog row filter
 			// matches against: a bare entry is scoped to the DSN database (so a
 			// same-named table in another database can't contaminate the topic — the
@@ -847,6 +920,12 @@ type MySQLEventHandler struct {
 	// passthrough (every column treated as already-UTF-8) — the pre-feature
 	// behavior, kept for tests that construct a handler directly.
 	charsetPlans map[uint64]charsetPlan
+
+	// snapshottedTables is the durable registry of tables whose history has
+	// been snapshotted, carried onto every streaming checkpoint so a later
+	// resume can detect config-added tables and backfill them (see
+	// addedTables / MySQLBinLogPosition.snapshotted_tables).
+	snapshottedTables []string
 
 	// epoch is the reconciling-refresh generation stamped on every streamed
 	// entity and written into every streaming checkpoint, so it survives a
@@ -1569,7 +1648,7 @@ func (h *MySQLEventHandler) handleXID(ctx context.Context, header *replication.E
 	h.consumedGTID = merged
 	h.curTxnGTID = nil
 
-	posProto := &dialectpb.MySQLBinLogPosition{Name: pos.Name, Pos: pos.Pos, RefreshEpoch: h.epoch, ChunkTag: chunkTag(h.config, h.flushBudget)}
+	posProto := &dialectpb.MySQLBinLogPosition{Name: pos.Name, Pos: pos.Pos, RefreshEpoch: h.epoch, ChunkTag: chunkTag(h.config, h.flushBudget), SnapshottedTables: h.snapshottedTables}
 	if h.consumedGTID != nil {
 		posProto.GtidSet = h.consumedGTID.String()
 	}
@@ -1925,6 +2004,12 @@ func snapshot(
 	if resumeProgress != nil {
 		maps.Copy(progress.LastPkByTable, resumeProgress.LastPkByTable)
 		progress.CompletedTables = append(progress.CompletedTables, resumeProgress.CompletedTables...)
+		// Carry the partial-backfill mark through to every persisted
+		// mid-snapshot checkpoint: dropping it would make a crash-resume
+		// treat the pre-seeded sibling completions as a nearly-done FULL
+		// snapshot and emit the refresh marker — whose topic sweep would
+		// delete every sibling row this backfill never re-emits.
+		progress.PartialBackfill = resumeProgress.PartialBackfill
 		for _, t := range resumeProgress.CompletedTables {
 			completed[t] = true
 		}

@@ -843,6 +843,9 @@ func (d *PostgreSQLDialect) stream(
 		// this backfill did not re-emit. Floor to the topic highwater so the
 		// backfilled rows never land below a generation already on the sink.
 		*epoch = max(*epoch, epochFloor, 1)
+		zap.L().Info("config change added tables; backfilling their existing rows (a full-table scan per added table; sibling tables are not re-read)",
+			zap.Strings("added_tables", addedTables),
+			zap.Int("tables_total", len(pgCfg.tables)))
 		*intent = &snapshotIntent{tables: addedTables, progress: newSnapshotProgress(nil), marker: false}
 	}
 

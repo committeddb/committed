@@ -32,6 +32,18 @@ message MySQLBinLogPosition {
     // worker freezes rather than risk silent loss. 0 means a pre-feature
     // checkpoint (no baseline → never trips). See mysql.go chunkTag.
     uint64 chunk_tag = 6;
+    // snapshotted_tables is the durable registry of tables whose existing rows
+    // have been snapshotted (initial snapshot, purge re-snapshot, or an
+    // added-table backfill). On resume, a configured table absent from this
+    // set was added by a re-POST after the last snapshot — its history must be
+    // backfilled (its ongoing binlog changes already stream, because the
+    // binlog filter is config-driven). This is the MySQL analog of Postgres
+    // publication membership, which is what its added-table detection diffs
+    // against. Empty on a pre-feature checkpoint: grandfathered as "all
+    // currently-configured tables are snapshotted" (adds made before the
+    // upgrade are not detected — matching the old behavior — adds made after
+    // are). Stamped on snapshot-completion and every streaming checkpoint.
+    repeated string snapshotted_tables = 7;
 }
 
 // PostgresPosition pairs the replication LSN with optional snapshot
@@ -58,4 +70,13 @@ message PostgresPosition {
 message SnapshotProgress {
     map<string, string> last_pk_by_table = 1;
     repeated string completed_tables = 2;
+    // partial_backfill marks this snapshot as an added-table BACKFILL rather
+    // than a full refresh: completed_tables was pre-seeded with every sibling
+    // table (so only the added tables scan) and NO refresh-boundary marker may
+    // be emitted at completion — a topic-scoped sweep would delete the sibling
+    // rows this snapshot never re-emitted. Persisted so a crash mid-backfill
+    // resumes as a backfill: without it, the generic resume path would treat
+    // the pre-seeded completions as a nearly-done FULL snapshot and emit the
+    // marker — partial emission + sweep = sibling data loss on the sink.
+    bool partial_backfill = 3;
 }
