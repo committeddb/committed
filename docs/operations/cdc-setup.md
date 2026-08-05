@@ -522,6 +522,15 @@ stream a replica reads).
    is visible rather than silent. Default MySQL ships `gtid_mode=OFF`, so set this
    explicitly for any production / failover-capable deployment.
 
+   One transitional case looks degraded but is not: a server whose GTID mode was
+   just enabled (online or at first boot) with **no transactions committed since**
+   has `gtid_mode=ON` but an empty `@@gtid_executed`. committed then positions by
+   file:offset for the initial snapshot — starting from an empty GTID set would
+   replay every retained binlog — and **upgrades to GTID positioning automatically
+   at the first streamed transaction** (visible in status as `lag` flipping from
+   `null` to a number). The snapshot logs which positioning it captured either
+   way, so neither case is silent.
+
 3. **A replication grant.** The ingest user needs to read rows (snapshot), briefly
    lock to capture a consistent position, and stream the binlog:
 

@@ -18,6 +18,7 @@ import (
 	"github.com/go-mysql-org/go-mysql/replication"
 	mysqldriver "github.com/go-sql-driver/mysql"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
@@ -1991,6 +1992,7 @@ func snapshot(
 		if err != nil {
 			return nil, "", err
 		}
+		logCapturedPositioning(ctx, db, gtid)
 	}
 
 	batchSize := parseBatchSize(config.Options)
@@ -2179,6 +2181,53 @@ func handOffSnapshotWindow(
 		}
 	}
 	return nil
+}
+
+// logCapturedPositioning makes the positioning decision VISIBLE at snapshot
+// capture — the one moment it is decided. The preflight advisory keys on
+// @@gtid_mode, but the capture keys on @@gtid_executed being non-empty, and
+// the two disagree on a server whose GTID mode was enabled online (or that
+// is brand new) with no transactions committed since: mode=ON, executed set
+// empty. That case silently fell back to file:pos with no log line anywhere
+// — found in the field as "lag: null and no GTID lines despite gtid_mode=ON".
+// The fallback itself is CORRECT (StartSyncGTID with an empty set would
+// replay every retained binlog from the beginning, re-delivering history the
+// snapshot already covered) and it self-heals: the stream handler merges
+// GTIDEvents regardless of how the sync started, so the first streamed
+// transaction upgrades the checkpoint — and reconnects/restarts — to GTID
+// positioning. This log line is the missing observability, not a behavior
+// change. The mode query is best-effort: on error the generic message logs.
+func logCapturedPositioning(ctx context.Context, db *gosql.DB, gtidSet string) {
+	if gtidSet != "" {
+		zap.L().Info("snapshot: captured GTID positioning (failover-safe resume, real lag/caughtUp)")
+		return
+	}
+	var mode string
+	if err := db.QueryRowContext(ctx, "SELECT @@GLOBAL.gtid_mode").Scan(&mode); err != nil {
+		mode = "unknown"
+	}
+	msg, level := gtidFallbackLog(mode)
+	if level == zap.WarnLevel {
+		zap.L().Warn(msg, zap.String("gtid_mode", mode))
+	} else {
+		zap.L().Info(msg, zap.String("gtid_mode", mode))
+	}
+}
+
+// gtidFallbackLog picks the message and level for an empty captured GTID set.
+// mode=ON is the benign self-healing case (Info); anything else is the
+// documented degraded mode (Warn, matching the preflight advisory's promise
+// that file:pos positioning is visible rather than silent).
+func gtidFallbackLog(gtidMode string) (string, zapcore.Level) {
+	if strings.EqualFold(gtidMode, "ON") {
+		return "snapshot: gtid_mode=ON but @@gtid_executed is empty (no transactions committed " +
+			"since GTID was enabled — a freshly-enabled or brand-new server); positioning by " +
+			"binlog file:pos for now, upgrading to GTID automatically at the first streamed " +
+			"transaction", zap.InfoLevel
+	}
+	return "snapshot: positioning by binlog file:pos (no GTID set at capture); resume is not " +
+		"failover-safe and lag/caughtUp stay null — set gtid_mode=ON and " +
+		"enforce_gtid_consistency=ON for failover-safe positioning", zap.WarnLevel
 }
 
 // binlogStatus returns the current binlog filename and byte offset. It
@@ -2618,7 +2667,7 @@ func readBatch(
 
 		jsonBytes, err := json.Marshal(toJSON)
 		if err != nil {
-			zap.L().Warn("readBatch: skipping row",
+			zap.L().Warn("readBatch: skipping row with unmarshalable data",
 				zap.String("table", table),
 				zap.Error(err),
 			)
