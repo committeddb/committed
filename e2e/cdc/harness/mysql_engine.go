@@ -261,3 +261,21 @@ func (q mysqlQuerier) Exec(ctx context.Context, query string, args ...any) error
 }
 
 func (mysqlQuerier) Placeholder(int) string { return "?" }
+
+// PurgeBinlogs implements the harness's binlogPurger capability: it rotates to
+// a fresh binary log and purges every earlier one, discarding all not-yet-
+// consumed change data — the source-side destruction the gap-recovery scenario
+// stages. Runs inside the container as root (PURGE BINARY LOGS needs an admin
+// privilege the test user deliberately lacks), reading MYSQL_ROOT_PASSWORD
+// from the container's own environment.
+func (e *mysqlEngine) PurgeBinlogs(ctx context.Context, t *testing.T) {
+	t.Helper()
+	script := `set -e
+mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -N -e 'FLUSH BINARY LOGS;'
+f=$(mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -N -e 'SHOW BINARY LOGS;' | tail -1 | cut -f1)
+mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -N -e "PURGE BINARY LOGS TO '$f';"`
+	code, rd, err := e.container.Exec(ctx, []string{"sh", "-c", script})
+	require.NoError(t, err, "exec purge script")
+	out, _ := io.ReadAll(rd)
+	require.Zero(t, code, "purge binlogs failed: %s", out)
+}

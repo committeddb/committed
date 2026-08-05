@@ -9,6 +9,9 @@ package harness
 
 import (
 	"context"
+	"encoding/json"
+	"io"
+	"net/http"
 	"testing"
 	"time"
 
@@ -16,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/committeddb/committed/e2e/cdc/dataset"
+	"github.com/committeddb/committed/e2e/cdc/mutation"
 )
 
 // Harness owns the per-test fixture lifecycle. One Harness per test;
@@ -386,4 +390,80 @@ func (h *Harness) RestartPostgres(ctx context.Context) error {
 		h.engine.WaitReadyCtx(ctx, table, 30*time.Second)
 	}
 	return nil
+}
+
+// SourceTxn runs fn inside one transaction on the SOURCE database, through the
+// engine's placeholder-aware Querier — the engine-agnostic way for a scenario
+// to hold a transaction open (assert mid-txn, e.g. that nothing leaked through
+// CDC before COMMIT) or to run raw engine-syntax SQL the mutation DSL doesn't
+// model. Returning nil commits; returning an error rolls back.
+func (h *Harness) SourceTxn(ctx context.Context, fn func(q mutation.Querier) error) error {
+	return h.engine.Txn(ctx, fn)
+}
+
+// RestartCommittedNoWait stops and restarts committed on the same data dir
+// WITHOUT gating on the ingestables returning to streaming. The gap-recovery
+// scenarios need exactly this: after the source purged past the consumed
+// position, streaming can never resume, and the ordinary RestartCommitted
+// would hang on its readiness gate.
+func (h *Harness) RestartCommittedNoWait(t *testing.T) {
+	t.Helper()
+	dataDir := h.committed.dataDir
+	h.committed.Stop()
+	h.committed = startCommittedAt(t, dataDir)
+}
+
+// StopCommitted stops the committed process (the data dir survives for a later
+// RestartCommittedNoWait). Used to open a window where the source moves on —
+// and possibly purges — while nothing is consuming.
+func (h *Harness) StopCommitted() {
+	h.committed.Stop()
+}
+
+// StartCommittedNoWait starts committed on the harness's data dir without any
+// readiness gate. Pair with StopCommitted.
+func (h *Harness) StartCommittedNoWait(t *testing.T) {
+	t.Helper()
+	h.committed = startCommittedAt(t, h.committed.dataDir)
+}
+
+// WaitForIngestableReSnapshotRequired polls GET /v1/ingestable/{id}/status
+// until reSnapshotRequired is true — the source has discarded change data the
+// ingestable never consumed (a purged binlog range, a recreated slot), a gap
+// streaming can never close. Fails the test on timeout.
+func (h *Harness) WaitForIngestableReSnapshotRequired(t *testing.T, table string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last string
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(committedURL("/v1/ingestable/" + table + "/status")) //nolint:gosec // G107: fixed in-process URL
+		if err == nil {
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			last = string(body)
+			var st struct {
+				ReSnapshotRequired bool `json:"reSnapshotRequired"`
+			}
+			if json.Unmarshal(body, &st) == nil && st.ReSnapshotRequired {
+				return
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("ingestable %q never reported reSnapshotRequired; last status: %s", table, last)
+}
+
+// binlogPurger is the optional engine capability behind PurgeSourceBinlogs.
+type binlogPurger interface {
+	PurgeBinlogs(ctx context.Context, t *testing.T)
+}
+
+// PurgeSourceBinlogs rotates and purges ALL binary logs on the MySQL source —
+// the source-side data-destruction half of the gap-recovery scenario. Fails
+// the test if the engine has no binlogs to purge (Postgres).
+func (h *Harness) PurgeSourceBinlogs(t *testing.T) {
+	t.Helper()
+	p, ok := h.engine.(binlogPurger)
+	require.True(t, ok, "engine %T cannot purge binlogs", h.engine)
+	p.PurgeBinlogs(h.ctx, t)
 }

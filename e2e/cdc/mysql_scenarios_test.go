@@ -5,7 +5,11 @@ package cdc_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/committeddb/committed/e2e/cdc/harness"
 	"github.com/committeddb/committed/e2e/cdc/mutation"
@@ -61,4 +65,101 @@ func TestMySQL_DecimalPrecision(t *testing.T) {
 	}
 
 	oracle.Assert(t, s.Expected(), h.Capture(t, s.ExpectedCounts()))
+}
+
+// TestMySQL_DeleteCapture is the MySQL counterpart of TestDeleteCapture: a
+// binlog DELETE arrives as a delete tombstone keyed by PK.
+func TestMySQL_DeleteCapture(t *testing.T) {
+	h := harness.NewWith(t, harness.MySQLEngine(), harness.Options{Tables: []string{"region"}})
+
+	preDelete := regionRow(42, "DELETED_ROW", "to-be-deleted")
+	s := mutation.NewScript()
+	s.Insert("region", preDelete)
+	s.Delete("region", preDelete) // only the PK is load-bearing for a delete
+
+	if err := h.RunScript(context.Background(), s); err != nil {
+		t.Fatalf("script run: %v", err)
+	}
+	oracle.Assert(t, s.Expected(), h.Capture(t, s.ExpectedCounts()))
+}
+
+// TestMySQL_PrimaryKeyUpdate is the MySQL counterpart of TestPrimaryKeyUpdate:
+// a PK-changing UPDATE must arrive as new-row + delete-tombstone-at-old-key in
+// ONE proposal (the binlog UpdateRows event carries both images).
+func TestMySQL_PrimaryKeyUpdate(t *testing.T) {
+	h := harness.NewWith(t, harness.MySQLEngine(), harness.Options{Tables: []string{"region"}})
+
+	s := mutation.NewScript()
+	s.Insert("region", regionRow(1, "ORIGINAL", "before-pk-change"))
+	s.Txn(func(t *mutation.Txn) {
+		t.Exec("UPDATE region SET r_regionkey=?, r_name=?, r_comment=? WHERE r_regionkey=?",
+			2, "RENAMED", "after-pk-change", 1)
+	})
+	expected := mutation.NewScript()
+	expected.Insert("region", regionRow(1, "ORIGINAL", "before-pk-change"))
+	expected.Txn(func(t *mutation.Txn) {
+		t.Update("region", regionRow(2, "RENAMED", "after-pk-change"))
+		t.Delete("region", regionRow(1, "ORIGINAL", "before-pk-change"))
+	})
+
+	if err := h.RunScript(context.Background(), s); err != nil {
+		t.Fatalf("script run: %v", err)
+	}
+	oracle.Assert(t, expected.Expected(), h.Capture(t, expected.ExpectedCounts()))
+}
+
+// TestMySQL_TransactionAtomicity is the MySQL counterpart of
+// TestTransactionAtomicity: rows written inside an open transaction must not
+// leak through CDC before COMMIT (the binlog only carries committed
+// transactions), then land together as one proposal. The mid-transaction
+// assertion runs inside the SourceTxn callback — the transaction is open for
+// its duration and commits when it returns.
+func TestMySQL_TransactionAtomicity(t *testing.T) {
+	h := harness.NewWith(t, harness.MySQLEngine(), harness.Options{Tables: []string{"region"}})
+	ctx := context.Background()
+
+	require.NoError(t, h.SourceTxn(ctx, func(q mutation.Querier) error {
+		if err := q.Exec(ctx, "INSERT INTO region (r_regionkey, r_name, r_comment) VALUES (1, 'A', 'a')"); err != nil {
+			return err
+		}
+		if err := q.Exec(ctx, "INSERT INTO region (r_regionkey, r_name, r_comment) VALUES (2, 'B', 'b')"); err != nil {
+			return err
+		}
+		// Hold the txn open; confirm nothing leaked through CDC.
+		time.Sleep(500 * time.Millisecond)
+		mid := h.Capture(t, map[string]int{"region": 0})
+		if len(mid["region"]) != 0 {
+			return fmt.Errorf("uncommitted transaction leaked %d proposals", len(mid["region"]))
+		}
+		return nil // commit
+	}), "source transaction")
+
+	// After commit, both rows arrive in one proposal.
+	expected := mutation.NewScript()
+	expected.Txn(func(t *mutation.Txn) {
+		t.Insert("region", regionRow(1, "A", "a"))
+		t.Insert("region", regionRow(2, "B", "b"))
+	})
+	oracle.Assert(t, expected.Expected(), h.Capture(t, expected.ExpectedCounts()))
+}
+
+// TestMySQL_RestartResume is the MySQL counterpart of TestRestartResume: a
+// committed restart resumes from the persisted GTID position — phase-1 rows
+// are NOT re-emitted (which a re-snapshot would do) and phase-2 rows arrive.
+func TestMySQL_RestartResume(t *testing.T) {
+	h := harness.NewWith(t, harness.MySQLEngine(), harness.Options{Tables: []string{"region"}})
+
+	pre := mutation.NewScript()
+	pre.Insert("region", regionRow(1, "BEFORE_A", "phase1-a"))
+	pre.Insert("region", regionRow(2, "BEFORE_B", "phase1-b"))
+	require.NoError(t, h.RunScript(context.Background(), pre), "phase 1 run")
+	oracle.Assert(t, pre.Expected(), h.Capture(t, pre.ExpectedCounts()))
+
+	h.RestartCommitted(t)
+
+	post := mutation.NewScript()
+	post.Insert("region", regionRow(3, "AFTER_A", "phase2-a"))
+	post.Insert("region", regionRow(4, "AFTER_B", "phase2-b"))
+	require.NoError(t, h.RunScript(context.Background(), post), "phase 2 run")
+	oracle.Assert(t, post.Expected(), h.Capture(t, post.ExpectedCounts()))
 }

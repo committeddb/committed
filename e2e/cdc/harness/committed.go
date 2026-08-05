@@ -4,6 +4,7 @@ package harness
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -17,11 +18,45 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// committedAddr is the HTTP address committed listens on. node.go uses
-// the standard flag package without calling flag.Parse, so the binary
-// always uses defaults — :8080 here. -p=1 on test/cdc ensures no two
-// tests bind it simultaneously.
-const committedAddr = "127.0.0.1:8080"
+// committedAddr is the HTTP address the harness's committed children listen
+// on: a FREE port allocated once per test-binary run and passed to every
+// child via COMMITTED_API_ADDR. It used to be the hardcoded default :8080,
+// which collided with any other committed on the machine — and worse than
+// colliding, it failed SILENTLY WRONG: the harness child died on the taken
+// port while the health gate got 200 from the foreign node, so the tests
+// posted their configs into somebody else's cluster. -p=1 on test/cdc still
+// ensures no two tests of this suite bind it simultaneously.
+var (
+	committedAddrOnce sync.Once
+	committedAddr     string // HTTP API
+	committedPeerURL  string // raft peer listener (default 9022 collides too)
+)
+
+func committedAddrs(t *testing.T) (api, peerURL string) {
+	t.Helper()
+	committedAddrOnce.Do(func() {
+		freePort := func() (string, bool) {
+			l, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				return "", false
+			}
+			defer func() { _ = l.Close() }()
+			return l.Addr().String(), true
+		}
+		a, ok := freePort()
+		if !ok {
+			return
+		}
+		p, ok := freePort()
+		if !ok {
+			return
+		}
+		committedAddr = a
+		committedPeerURL = "http://" + p
+	})
+	require.NotEmpty(t, committedAddr, "allocate free ports for committed's API and raft peer listeners")
+	return committedAddr, committedPeerURL
+}
 
 // committedBinary returns the path to a freshly-built committed binary.
 // Built once per test binary invocation and reused; binary lives in
@@ -93,6 +128,11 @@ type committedProcess struct {
 	cmd     *exec.Cmd
 	dataDir string
 	stopped bool
+	// exited closes when the child has been reaped. The reaper goroutine
+	// started alongside the process is the SINGLE cmd.Wait caller; the
+	// startup health gate and Stop both watch this channel instead of
+	// racing a second Wait.
+	exited chan struct{}
 }
 
 // startCommitted spawns the committed binary as a child process. Each
@@ -120,7 +160,15 @@ func startCommittedAt(t *testing.T, dataDir string) *committedProcess {
 	// ${TEST_DB_PASSWORD} rather than inlining it — committed rejects an inline
 	// connection-string password. The node resolves it from this environment at
 	// config-parse time. mysqlPass == pgPass, so one variable serves both dialects.
-	cmd.Env = append(os.Environ(), "TEST_DB_PASSWORD="+mysqlPass)
+	apiAddr, peerURL := committedAddrs(t)
+	cmd.Env = append(os.Environ(),
+		"TEST_DB_PASSWORD="+mysqlPass,
+		"COMMITTED_API_ADDR="+apiAddr,
+		// A single-node cluster on a harness-owned peer port: the default
+		// (9022) collides with any other committed on the machine exactly
+		// like the API port did.
+		"COMMITTED_PEERS=1="+peerURL,
+	)
 	cmd.Stdout = testWriter{t, "committed:stdout"}
 	cmd.Stderr = testWriter{t, "committed:stderr"}
 	// SysProcAttr lets us send SIGTERM to the whole process group on
@@ -130,14 +178,24 @@ func startCommittedAt(t *testing.T, dataDir string) *committedProcess {
 
 	require.NoError(t, cmd.Start(), "spawn committed")
 
-	p := &committedProcess{cmd: cmd, dataDir: dataDir}
+	p := &committedProcess{cmd: cmd, dataDir: dataDir, exited: make(chan struct{})}
+	go func() { _ = cmd.Wait(); close(p.exited) }()
 	t.Cleanup(p.Stop)
 
 	// Wait for /health to flip to 200. Polled rather than parsed from
 	// stdout because the "API Listening" log message races with the
 	// listener actually accepting connections.
+	// Also watch for the child DYING during startup: with a foreign process
+	// answering health on our port, a dead child plus a 200 would silently
+	// aim every test at the wrong cluster (the exact incident the dynamic
+	// port exists to prevent) — a dead child must fail loudly instead.
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
+		select {
+		case <-p.exited:
+			t.Fatalf("committed exited during startup (bind failure? see its log lines above)")
+		default:
+		}
 		resp, err := http.Get("http://" + committedAddr + "/health") //nolint:gosec // G107: fixed in-process URL
 		if err == nil {
 			_ = resp.Body.Close()
@@ -167,17 +225,14 @@ func (p *committedProcess) Stop() {
 		_ = p.cmd.Process.Signal(syscall.SIGTERM)
 	}
 
-	done := make(chan error, 1)
-	go func() { done <- p.cmd.Wait() }()
-
 	select {
-	case <-done:
+	case <-p.exited:
 	case <-time.After(35 * time.Second):
 		// 35s = COMMITTED_SHUTDOWN_TIMEOUT default (30s) + 5s slack.
 		// If we hit this, graceful shutdown is broken; kill hard so the
 		// test runner doesn't hang.
 		_ = p.cmd.Process.Kill()
-		<-done
+		<-p.exited
 	}
 
 	// Wait for the port to actually free up — kernel can hold it for
