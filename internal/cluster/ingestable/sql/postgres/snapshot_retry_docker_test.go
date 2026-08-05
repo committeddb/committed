@@ -11,8 +11,11 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"google.golang.org/protobuf/proto"
+
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/ingestable/sql"
+	"github.com/committeddb/committed/internal/cluster/ingestable/sql/dialectpb"
 	"github.com/committeddb/committed/internal/cluster/ingestable/sql/postgres"
 )
 
@@ -337,4 +340,220 @@ func TestPostgresAddedTableBackfillResumesAfterTransientError(t *testing.T) {
 		}
 	}
 	require.False(t, sawMarker, "a partial added-table backfill must not emit a refresh-boundary marker (it would sweep sibling tables' rows)")
+}
+
+// snapshotProgressOf decodes a checkpoint's snapshot progress (nil for
+// commit positions and undecodable bytes).
+func snapshotProgressOf(pos cluster.Position) *dialectpb.SnapshotProgress {
+	if len(pos) < 2 || pos[0] != 0xff {
+		return nil
+	}
+	pp := &dialectpb.PostgresPosition{}
+	if err := proto.Unmarshal(pos[1:], pp); err != nil {
+		return nil
+	}
+	return pp.SnapshotProgress
+}
+
+// TestPostgresAddedTableBackfillResumesAcrossRestart pins the CROSS-PROCESS
+// half of the added-table backfill (the in-process transient-error half is
+// the test above): a worker that dies mid-backfill leaves a checkpoint whose
+// progress carries PartialBackfill and the pre-seeded sibling completions.
+// The restarted worker must resume it as a PARTIAL backfill — scanning only
+// the rest of the added table, NOT re-snapshotting the sibling, and emitting
+// NO refresh-boundary marker (a topic sweep would delete the sibling rows the
+// backfill never re-emits). Before the flag existed, this crash degraded to a
+// full re-snapshot with a marker: convergent, but a config add of one small
+// table could re-scan every table in the config.
+func TestPostgresAddedTableBackfillResumesAcrossRestart(t *testing.T) {
+	tableA := "snapretry_r_a"
+	tableB := "snapretry_r_b"
+
+	db := createDB(t)
+	for _, tbl := range []string{tableA, tableB} {
+		_, err := db.Exec(fmt.Sprintf(`DROP TABLE IF EXISTS %s`, tbl))
+		require.NoError(t, err)
+		_, err = db.Exec(fmt.Sprintf(`CREATE TABLE %s (pk VARCHAR(32) NOT NULL PRIMARY KEY, val TEXT)`, tbl))
+		require.NoError(t, err)
+	}
+	db.Close()
+
+	cleanReplication(t, "slot_snapretry4", "pub_snapretry4")
+	defer cleanReplication(t, "slot_snapretry4", "pub_snapretry4")
+
+	mkConfig := func(tables []string) *sql.Config {
+		return &sql.Config{
+			Type:             &cluster.Type{ID: "snapretry4", Name: "snapretry4"},
+			Mappings:         []sql.Mapping{{JsonName: "pk", SQLColumn: "pk"}, {JsonName: "val", SQLColumn: "val"}},
+			PrimaryKey:       []string{"pk"},
+			ConnectionString: connString,
+			Tables:           tables,
+			// batch_size 1 so the backfill checkpoints after every row — the
+			// "crash" below needs a persisted MID-backfill position.
+			Options: map[string]string{"slot_name": "slot_snapretry4", "publication": "pub_snapretry4", "batch_size": "1"},
+		}
+	}
+
+	// Phase 1: ingest table A only, stream 'a1', capture a commit position.
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	pr1 := make(chan *cluster.Proposal, 10)
+	po1 := make(chan cluster.Position, 10)
+	go func() {
+		_ = (&postgres.PostgreSQLDialect{}).Ingest(ctx1, mkConfig([]string{tableA}), nil, 0, pr1, po1)
+	}()
+	waitForSlot(t, "slot_snapretry4")
+
+	db = createDB(t)
+	_, err := db.Exec(fmt.Sprintf(`INSERT INTO %s (pk, val) VALUES ('a1', 'v1')`, tableA))
+	require.NoError(t, err)
+	db.Close()
+
+	deadline := time.After(15 * time.Second)
+	seen := map[string]bool{}
+	var lastPos cluster.Position
+	for !seen["a1"] || lastPos == nil {
+		select {
+		case p := <-pr1:
+			for _, e := range p.Entities {
+				seen[string(e.Key)] = true
+			}
+		case pos := <-po1:
+			if isCommitPosition(t, pos) {
+				lastPos = pos
+			}
+		case <-deadline:
+			t.Fatal("phase 1: timed out waiting for 'a1' + a commit position")
+		}
+	}
+	cancel1()
+
+	// Rows only a backfill can deliver.
+	db = createDB(t)
+	_, err = db.Exec(fmt.Sprintf(`INSERT INTO %s (pk, val) VALUES ('b1', 'v1'), ('b2', 'v2'), ('b3', 'v3')`, tableB))
+	require.NoError(t, err)
+	db.Close()
+
+	// Phase 2: resume with B added, with the fault seam allowing exactly ONE
+	// tableB batch ever — the worker flushes b1 (persisting a genuinely
+	// MID-backfill checkpoint) and then fails every retry, holding the
+	// backfill open until the test "crashes" it. Without the wedge the whole
+	// 3-row backfill completes in milliseconds and the captured checkpoint is
+	// post-completion, which resumes as a no-op (this test's first draft).
+	var bBatches atomic.Int32
+	d2 := &postgres.PostgreSQLDialect{}
+	d2.SetSnapshotBatchHookForTest(func(table string, _ int) error {
+		if table == tableB && bBatches.Add(1) > 1 {
+			return fmt.Errorf("injected: hold the backfill open")
+		}
+		return nil
+	})
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	pr2 := make(chan *cluster.Proposal, 10)
+	po2 := make(chan cluster.Position, 10)
+	ingestDone2 := make(chan struct{})
+	go func() {
+		_ = d2.Ingest(ctx2, mkConfig([]string{tableA, tableB}), lastPos, 0, pr2, po2)
+		close(ingestDone2)
+	}()
+
+	// Snapshot checkpoints ride INLINE on the batch proposals
+	// (Proposal.Position; see handOffSnapshotWindow) — the po channel only
+	// carries streaming checkpoints. b1's single-row batch is the window end,
+	// so its proposal carries the mid-backfill cursor we crash on.
+	deadline = time.After(30 * time.Second)
+	var midPos cluster.Position
+	for midPos == nil {
+		select {
+		case p := <-pr2:
+			sawB1 := false
+			for _, e := range p.Entities {
+				if string(e.Key) == "b1" {
+					sawB1 = true
+				}
+			}
+			if sp := snapshotProgressOf(p.Position); sp != nil && sawB1 {
+				require.True(t, sp.PartialBackfill,
+					"a mid-backfill checkpoint must carry the partial-backfill mark")
+				midPos = p.Position
+			}
+		case <-po2:
+		case <-deadline:
+			t.Fatal("phase 2: never captured a mid-backfill checkpoint past b1")
+		}
+	}
+	cancel2()
+	// Wait for the phase-2 worker to actually EXIT (draining its channels so a
+	// blocked send can observe the cancel) before phase 3 starts: its
+	// replication connection holds the slot, and a still-active slot would
+	// stall phase 3 in connect-retry rather than exercising the resume.
+	for exited := false; !exited; {
+		select {
+		case <-pr2:
+		case <-po2:
+		case <-ingestDone2:
+			exited = true
+		case <-time.After(15 * time.Second):
+			t.Fatal("phase 2 worker never exited after cancel")
+		}
+	}
+
+	// Phase 3: the restarted worker resumes from the crashed backfill's
+	// checkpoint. It must finish the backfill (b2, b3), leave the sibling and
+	// the already-backfilled row alone, and emit no marker.
+	ctx3, cancel3 := context.WithCancel(context.Background())
+	defer cancel3()
+	pr3 := make(chan *cluster.Proposal, 10)
+	po3 := make(chan cluster.Position, 10)
+	go func() {
+		_ = (&postgres.PostgreSQLDialect{}).Ingest(ctx3, mkConfig([]string{tableA, tableB}), midPos, 0, pr3, po3)
+	}()
+
+	seen = map[string]bool{}
+	sawMarker := false
+	deadline = time.After(30 * time.Second)
+	for !seen["b2"] || !seen["b3"] {
+		select {
+		case p := <-pr3:
+			for _, e := range p.Entities {
+				if e.IsRefreshBoundary() {
+					sawMarker = true
+					continue
+				}
+				seen[string(e.Key)] = true
+			}
+		case <-po3:
+		case <-deadline:
+			t.Fatalf("phase 3 timed out: b2=%v b3=%v — the crashed backfill was not resumed", seen["b2"], seen["b3"])
+		}
+	}
+
+	// Fence: a live row through B proves streaming came up (any marker would
+	// have been emitted before streaming started).
+	db = createDB(t)
+	_, err = db.Exec(fmt.Sprintf(`INSERT INTO %s (pk, val) VALUES ('b-live', 'v4')`, tableB))
+	require.NoError(t, err)
+	db.Close()
+	deadline = time.After(15 * time.Second)
+	for !seen["b-live"] {
+		select {
+		case p := <-pr3:
+			for _, e := range p.Entities {
+				if e.IsRefreshBoundary() {
+					sawMarker = true
+					continue
+				}
+				seen[string(e.Key)] = true
+			}
+		case <-po3:
+		case <-deadline:
+			t.Fatal("phase 3: streaming never delivered the live row")
+		}
+	}
+
+	require.False(t, sawMarker,
+		"a resumed partial backfill must not emit a refresh-boundary marker")
+	require.False(t, seen["a1"],
+		"the sibling table must not be re-snapshotted on a backfill resume")
+	require.False(t, seen["b1"],
+		"the already-backfilled row must not re-emit (cursor resume)")
 }

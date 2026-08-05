@@ -72,6 +72,11 @@ func newSnapshotProgress(seed *dialectpb.SnapshotProgress) *dialectpb.SnapshotPr
 	if seed != nil {
 		maps.Copy(p.LastPkByTable, seed.LastPkByTable)
 		p.CompletedTables = append(p.CompletedTables, seed.CompletedTables...)
+		// Carry the partial-backfill mark: dropping it would let a crash
+		// mid-backfill resume as a FULL refresh whose marker sweeps the
+		// sibling rows the backfill never re-emits (see the added-tables
+		// branch; same propagation the MySQL dialect performs).
+		p.PartialBackfill = seed.PartialBackfill
 	}
 	return p
 }
@@ -829,7 +834,12 @@ func (d *PostgreSQLDialect) stream(
 			// the sink still holds rows up to the highwater), else epoch 1.
 			*epoch = sql.RefreshSnapshotEpoch(*epoch, epochFloor)
 		}
-		*intent = &snapshotIntent{tables: pgCfg.tables, progress: newSnapshotProgress(*resumeProgress), marker: true}
+		// A persisted PartialBackfill resumes as a PARTIAL backfill: the
+		// pre-seeded sibling completions skip their scan, and the marker stays
+		// off — emitting it over a partial re-emission would sweep the sibling
+		// rows off the sink.
+		partial := *resumeProgress != nil && (*resumeProgress).PartialBackfill
+		*intent = &snapshotIntent{tables: pgCfg.tables, progress: newSnapshotProgress(*resumeProgress), marker: !partial}
 		*resumeProgress = nil
 	case len(addedTables) > 0:
 		// Resuming an existing slot, but ensurePublication just (re-)added tables
@@ -846,7 +856,24 @@ func (d *PostgreSQLDialect) stream(
 		zap.L().Info("config change added tables; backfilling their existing rows (a full-table scan per added table; sibling tables are not re-read)",
 			zap.Strings("added_tables", addedTables),
 			zap.Int("tables_total", len(pgCfg.tables)))
-		*intent = &snapshotIntent{tables: addedTables, progress: newSnapshotProgress(nil), marker: false}
+		// Encode the backfill exactly as the MySQL dialect does: the FULL table
+		// list with every sibling pre-seeded complete and PartialBackfill set,
+		// so the persisted mid-backfill checkpoints are self-describing. A crash
+		// here used to degrade to a full re-snapshot (convergent but heavy, and
+		// it re-armed the marker); now the resume branch reconstructs the
+		// partial intent — only the added tables scan, and no marker fires.
+		backfill := newSnapshotProgress(nil)
+		backfill.PartialBackfill = true
+		addedSet := make(map[string]bool, len(addedTables))
+		for _, t := range addedTables {
+			addedSet[t] = true
+		}
+		for _, t := range pgCfg.tables {
+			if !addedSet[t] {
+				backfill.CompletedTables = append(backfill.CompletedTables, t)
+			}
+		}
+		*intent = &snapshotIntent{tables: pgCfg.tables, progress: backfill, marker: false}
 	}
 
 	if in := *intent; in != nil {
