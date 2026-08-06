@@ -157,8 +157,12 @@ not committed:
 
 - **At rest:** any backup taken before a subject was scrubbed still contains
   that subject's PII — including backups from long before the delete was ever
-  issued. The real "forgotten" window is therefore the **lifetime of every
-  backup**, not the scrub latency. Bound backup retention to your RTBF
+  issued. A backup taken shortly *after* a scrub can also still carry the
+  erased value: the raft consensus buffer's transient copy (see the
+  architecture doc) isn't clearing while the node is stopped, and rides along
+  in `raft/` segments — inert, never served or re-applied, but present. Either
+  way the rule is the same: the real "forgotten" window is the **lifetime of
+  every backup**, not the scrub latency. Bound backup retention to your RTBF
   obligations and expire/destroy old backups accordingly.
 - **On restore:** restoring a backup **resurrects** the PII of every subject
   deleted-and-scrubbed *after* that backup was taken — those deletes happened

@@ -550,8 +550,11 @@ and the system of record. Every committed entity is also written to the **raft
 consensus log** (the replication/replay tier), which the scrubber does not
 rewrite: it is trimmed by the normal compaction policy (size or age — see
 *Compaction policy*), so a deleted subject's payload persists there only until
-compaction passes its index — on the order of **an hour at most**, and usually
-far less on a busy node. This is the same category as an OS **page cache**, a
+compaction passes its index. The age limb is a **trigger, not an SLA**: it
+fires compaction on a cadence (default hourly), and the copy is gone when that
+compaction *completes* — typically about an hour after erasure on a healthy
+node, sooner under write volume (the size limb), but a stopped node is not
+compacting, and a compaction delayed by load or errors extends the window. This is the same category as an OS **page cache**, a
 database **WAL**, or a filesystem **journal**: a transient buffer that holds
 recently-written data for a bounded window and self-clears. It is never read by a
 syncable, never returned over the API, and never captured in a snapshot (the raft
@@ -559,11 +562,13 @@ snapshot serializes BoltDB, into which user topic entity *payloads* do not
 materialize — the one identifier that does, the RTBF delete-tombstone key, is
 pruned + compacted out of bbolt when its scrub runs, see *Phase 2* above).
 The expectation is therefore that erased personal data may linger in this
-consensus buffer for up to **~1 hour** after removal from the permanent log — a
-bounded, non-exposed window, well within GDPR's "without undue delay." (Backups
-are a separate concern: a backup that captures on-disk state can outlive this
-window, and erasure from backups is handled by the backup-retention process, not
-by the scrubber.)
+consensus buffer until the next completed compaction — typically around an
+hour — a non-exposed window comfortably within GDPR's "without undue delay."
+(Backups are a separate concern: a backup that captures on-disk state can
+outlive this window — including the consensus-buffer copy itself, since the
+node is stopped and not compacting while a backup is taken — and erasure from
+backups is handled by the backup-retention process, not by the scrubber. See
+docs/operations/backup.md, "Shared responsibility.")
 
 ### Scope boundaries
 
