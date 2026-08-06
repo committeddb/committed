@@ -144,11 +144,31 @@ sudo systemctl stop committed
 #    of a brand-new-node bootstrap.
 sudo rm -rf /var/lib/committed/*
 
-# 3. Rsync from a healthy peer. --inplace makes later rebuilds of
-#    the same node much faster (only the diff transfers). -a
-#    preserves permissions, times, and symlinks; -v gives you a
-#    running progress log you can capture for post-mortem.
-sudo rsync -av --inplace healthy-peer:/var/lib/committed/ /var/lib/committed/
+# 3. Rsync from a healthy peer — in TWO passes. A single rsync from a
+#    live peer fails PROBABILISTICALLY ("unexpected end of file"):
+#    segment files mutate underneath a multi-GB copy, and whether the
+#    copy tears depends on timing, so a pass that worked yesterday can
+#    fail today. The pattern that is reliable:
+#      (a) one or two BULK passes while the peer serves — they move
+#          ~all the bytes and may themselves fail near the tail; rerun
+#          until one completes;
+#      (b) one short QUIESCED delta: stop the healthy peer, run the
+#          same rsync again (--inplace makes it seconds — only the
+#          diff transfers), start the peer again.
+#    Quorum note for the quiesce: while you are rebuilding one member,
+#    stopping the source peer costs a voter too — in a THREE-node
+#    cluster that leaves one voter, which is no quorum, so commits
+#    pause CLUSTER-WIDE for the delta window. Keep it short; with five
+#    or more voters a single stopped peer costs nothing.
+sudo rsync -av --inplace healthy-peer:/var/lib/committed/ /var/lib/committed/  # bulk (repeatable)
+# ...then on the peer: stop committed; rerun the rsync; start committed.
+
+# ZERO-PAUSE ALTERNATIVE: on a snapshot-capable filesystem (ZFS, btrfs,
+# LVM), skip the quiesce entirely — take an atomic filesystem snapshot
+# of the healthy peer's data directory and rsync FROM THE SNAPSHOT at
+# leisure. The snapshot is the consistency fence, every voter keeps
+# serving, and the small gap that accrued since the snapshot fills via
+# normal raft replication after the rebuilt node boots.
 
 # 4. Restore ownership. rsync preserves numeric UIDs by default; if
 #    the committed user has a different UID on this host, fix it.
@@ -177,9 +197,12 @@ configuration change adding the new node's ID.
 # it has rsynced state but no peer has told it it's a cluster member
 # yet.
 
-# 6. From any existing cluster node, propose a conf change adding the
-#    new node ID. Use the cluster's normal admin API for this; the
-#    exact command depends on your deployment.
+# 6. Add the new node to the cluster with committed's own member CLI,
+#    targeting any existing node — as a learner first, promoted once
+#    caught up (the safe pattern; see membership.md for the full flow):
+committed member add --id 4 --url http://n4:9022 --learner --target http://n1:8080
+#    ...wait for matchIndex to close on commitIndex (member list), then:
+committed member promote --id 4 --target http://n1:8080
 ```
 
 After the conf change commits, the new node transitions to a voting
@@ -195,6 +218,12 @@ also the state every brand-new cluster member was in for a few
 seconds during its first startup.
 
 ## Verification
+
+Verify through the node's **own API** — `/ready`, `/health`, and its own
+`appliedIndex` advancing — never through the leader's `matchIndex` for it.
+matchIndex is leader-side memory of the highest index the member ever
+acknowledged: it is not a liveness signal, and it reads "healthy" for a node
+that is stopped, dead, or wiped, until live commits visibly outrun it.
 
 After the service is running, confirm the node is healthy:
 

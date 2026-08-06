@@ -122,12 +122,23 @@ this one is an ETL job, not a restore.
 > the original both claim the same node id in the same cluster. Two peers sharing
 > one identity is **split-brain**: conflicting raft state, and a cluster that can
 > commit divergent history. Restore is safe in exactly two shapes — **total-loss
-> recovery**, where the source node (ideally the whole cluster) is gone before you
-> start the restore; and **cloning**, where the restored cluster comes up
-> **network-isolated** from the original (its own peer addresses, unable to reach
-> the source's members). If unsure whether the source id is still live, check `GET
-> /v1/membership` on the running cluster before starting the restored node. See
-> also [membership.md](membership.md).
+> recovery**, where the **whole cluster** is being recreated from the archive
+> (nothing from the old cluster survives to disagree with it); and **cloning**,
+> where the restored cluster comes up **network-isolated** from the original
+> (its own peer addresses, unable to reach the source's members). If unsure
+> whether the source id is still live, check `GET /v1/membership` on the running
+> cluster before starting the restored node. See also
+> [membership.md](membership.md).
+
+> **Restore is NOT how you recover a member of a still-running cluster** — even
+> with that member cleanly stopped first. The restored log is REWOUND to the
+> backup point, but the surviving leader both remembers a higher matchIndex for
+> that node id and has usually compacted its raft log past the backup point; on
+> first contact the restored node fatals with a raft invariant panic
+> (`tocommit(...) out of range [lastIndex(...)]`). This is raft protecting the
+> cluster from a member whose log went backwards, not a recoverable hiccup.
+> Recovering one member of a live cluster is the **rebuild** flow — rsync
+> current state from a healthy peer ([rebuild.md](rebuild.md)) — not a restore.
 
 ### Version compatibility
 
