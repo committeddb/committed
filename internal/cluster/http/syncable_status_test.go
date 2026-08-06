@@ -3,8 +3,10 @@ package http_test
 import (
 	"encoding/json"
 	"io"
+	httpgo "net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -60,4 +62,175 @@ func TestSyncableStatus_NoDeadLetters(t *testing.T) {
 	require.Contains(t, raw, `"deadLetters":0`, "the zero count must still be present")
 	require.False(t, strings.Contains(raw, "lastDeadLetterIndex"),
 		"lastDeadLetterIndex must be omitted when nothing was skipped")
+}
+
+// doSyncableStatusRaw hits GET /v1/syncable/s1/status with an arbitrary query
+// string and headers, returning the status code and raw body — the readPosition
+// tests need non-200 outcomes and byte-level field presence checks.
+func doSyncableStatusRaw(t *testing.T, fake *clusterfakes.FakeCluster, query string, headers map[string]string) (int, string) {
+	t.Helper()
+	h := http.New(fake)
+	req := httptest.NewRequest("GET", "http://localhost/v1/syncable/s1/status"+query, nil)
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	resp := w.Result()
+	bs, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	return resp.StatusCode, string(bs)
+}
+
+// ownerNode is always present — it tells the operator whose worker (and logs)
+// to look at — while readPosition stays opt-in: the default call must remain
+// the documented local O(1) poll-safe read, so even a node that COULD answer
+// the position locally must not volunteer it unasked.
+func TestSyncableStatus_OwnerNodeAlwaysPresent_ReadPositionOptIn(t *testing.T) {
+	fake := &clusterfakes.FakeCluster{}
+	fake.IDReturns(1)
+	fake.SyncableOwnerReturns(1)
+	fake.SyncableReadPositionReturns(777, true)
+	fake.SyncableProgressReturns(50, 100, nil)
+
+	status, raw := doSyncableStatusRaw(t, fake, "", nil)
+	require.Equal(t, 200, status)
+	require.Contains(t, raw, `"ownerNode":1`)
+	require.NotContains(t, raw, "readPosition",
+		"the default call must not carry the position — opt-in only")
+}
+
+// The owner answers ?readPosition=true locally: no proxy hop, the live
+// position in the body.
+func TestSyncableStatus_ReadPositionOwnerLocal(t *testing.T) {
+	fake := &clusterfakes.FakeCluster{}
+	fake.IDReturns(1)
+	fake.SyncableOwnerReturns(1)
+	fake.SyncableReadPositionReturns(777, true)
+	fake.SyncableProgressReturns(50, 100, nil)
+
+	status, raw := doSyncableStatusRaw(t, fake, "?readPosition=true", nil)
+	require.Equal(t, 200, status)
+	require.Contains(t, raw, `"readPosition":777`)
+	require.Zero(t, fake.MemberAPIURLCallCount(), "the owner must not proxy to itself")
+}
+
+// A present-but-zero position is a real datum — "the worker has examined
+// nothing yet", the exact split the phantom-adoption incident needed — so the
+// pointer field must serialize 0 rather than omit it.
+func TestSyncableStatus_ReadPositionZeroIsPresent(t *testing.T) {
+	fake := &clusterfakes.FakeCluster{}
+	fake.IDReturns(1)
+	fake.SyncableOwnerReturns(1)
+	fake.SyncableReadPositionReturns(0, true)
+	fake.SyncableProgressReturns(0, 100, nil)
+
+	status, raw := doSyncableStatusRaw(t, fake, "?readPosition=true", nil)
+	require.Equal(t, 200, status)
+	require.Contains(t, raw, `"readPosition":0`,
+		"position 0 must be present-and-zero, not absent")
+}
+
+// A non-owner proxies ?readPosition=true to the owner's announced API URL and
+// returns the owner's response verbatim, with the loop-guard marker and the
+// query preserved — the load-balancer-pinned caller gets the owner's answer
+// no matter which node it reached.
+func TestSyncableStatus_ReadPositionProxiedToOwner(t *testing.T) {
+	const ownerBody = `{"stuck":false,"workerState":"running","checkpointIndex":50,"headIndex":100,"lag":50,"caughtUp":false,"deadLetters":0,"ownerNode":1,"readPosition":777}`
+
+	var (
+		mu       sync.Mutex
+		gotFwd   string
+		gotQuery string
+		gotPath  string
+		gotCalls int
+	)
+	owner := httptest.NewServer(httpgo.HandlerFunc(func(w httpgo.ResponseWriter, r *httpgo.Request) {
+		mu.Lock()
+		gotFwd = r.Header.Get("X-Committed-Forwarded")
+		gotQuery = r.URL.RawQuery
+		gotPath = r.URL.Path
+		gotCalls++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, ownerBody)
+	}))
+	defer owner.Close()
+
+	fake := &clusterfakes.FakeCluster{}
+	fake.IDReturns(2)
+	fake.SyncableOwnerReturns(1)
+	fake.MemberAPIURLReturns(owner.URL, true)
+
+	status, raw := doSyncableStatusRaw(t, fake, "?readPosition=true", nil)
+	require.Equal(t, 200, status)
+	require.JSONEq(t, ownerBody, raw)
+	require.Zero(t, fake.SyncableProgressCallCount(), "the non-owner must proxy, not answer locally")
+	require.Equal(t, uint64(1), fake.MemberAPIURLArgsForCall(0), "the proxy targets the OWNER, not the leader")
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, 1, gotCalls)
+	require.Equal(t, "/v1/syncable/s1/status", gotPath)
+	require.Equal(t, "readPosition=true", gotQuery, "the opt-in must survive the hop")
+	require.Equal(t, "1", gotFwd, "loop-guard marker must be set on the forwarded request")
+}
+
+// When the owner can't be reached, the response degrades SOFTLY: 200 with
+// every replicated field served and readPosition simply absent — ownerNode
+// says who to ask directly. Observability must not 503 the fields it does
+// have (unlike leaderRead, whose leader-only data has no local substitute).
+func TestSyncableStatus_ReadPositionDegradesWhenOwnerUnreachable(t *testing.T) {
+	dead := httptest.NewServer(httpgo.HandlerFunc(func(w httpgo.ResponseWriter, r *httpgo.Request) {}))
+	deadURL := dead.URL
+	dead.Close()
+
+	fake := &clusterfakes.FakeCluster{}
+	fake.IDReturns(2)
+	fake.SyncableOwnerReturns(1)
+	fake.MemberAPIURLReturns(deadURL, true)
+	fake.SyncableProgressReturns(50, 100, nil)
+
+	status, raw := doSyncableStatusRaw(t, fake, "?readPosition=true", nil)
+	require.Equal(t, 200, status)
+	require.Contains(t, raw, `"checkpointIndex":50`, "replicated fields must still serve")
+	require.Contains(t, raw, `"ownerNode":1`, "the degraded answer must say who has the position")
+	require.NotContains(t, raw, "readPosition")
+}
+
+// A forwarded request landing on a non-owner (stale ownership view mid-
+// election) must NOT forward again — it answers locally in the degraded
+// shape. One hop, ever.
+func TestSyncableStatus_ForwardedRequestNeverReforwarded(t *testing.T) {
+	var calls int
+	var mu sync.Mutex
+	upstream := httptest.NewServer(httpgo.HandlerFunc(func(w httpgo.ResponseWriter, r *httpgo.Request) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+	}))
+	defer upstream.Close()
+
+	fake := &clusterfakes.FakeCluster{}
+	fake.IDReturns(2)
+	fake.SyncableOwnerReturns(1)
+	fake.MemberAPIURLReturns(upstream.URL, true)
+	fake.SyncableProgressReturns(50, 100, nil)
+
+	status, raw := doSyncableStatusRaw(t, fake, "?readPosition=true",
+		map[string]string{"X-Committed-Forwarded": "1"})
+	require.Equal(t, 200, status)
+	require.Contains(t, raw, `"ownerNode":1`)
+	require.NotContains(t, raw, "readPosition")
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Zero(t, calls, "a forwarded request must never hop again")
+}
+
+func TestSyncableStatus_ReadPositionInvalidParam(t *testing.T) {
+	fake := &clusterfakes.FakeCluster{}
+	status, raw := doSyncableStatusRaw(t, fake, "?readPosition=sideways", nil)
+	require.Equal(t, 400, status)
+	require.Contains(t, raw, "invalid_parameter")
 }

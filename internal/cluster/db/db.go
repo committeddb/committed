@@ -308,8 +308,18 @@ type DB struct {
 // fully exited (released its Reader, finished any in-flight Propose,
 // returned from the user-supplied Sync/Ingest callback) before
 // proceeding.
+// readerRef boxes an ActualReader so workerHandle.activeReader (an
+// atomic.Pointer) can hold-and-clear it: the worker goroutine publishes its
+// reader on leadership gain and clears on loss, and the status path reads it
+// concurrently for the opt-in readPosition diagnostic.
+type readerRef struct{ r ActualReader }
+
 type workerHandle struct {
 	cancel context.CancelFunc
+	// activeReader is the sync worker's live log reader while it owns the
+	// syncable (nil while idle/non-owner). Status queries type-assert the
+	// optional Position() capability on it — see DB.SyncableReadPosition.
+	activeReader atomic.Pointer[readerRef]
 	// ctx is the worker goroutine's context (the one cancel cancels). Retained so
 	// a teardown path that must release the context node — notably the ingest
 	// supervisor's restart, which drops a frozen handle whose goroutine exited via

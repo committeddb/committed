@@ -129,6 +129,28 @@ is safe to poll (e.g. every ~5s) for a dashboard "caught up / N behind"
 indicator. Pass `?consistency=stale` to skip the quorum round-trip on a
 follower if you can tolerate slightly stale numbers.
 
+**Live scan position (`?readPosition=true`).** The checkpoint is durable,
+cadenced state — it can legitimately sit still for a while (a new mirror
+wading a large log full of other topics' entries checkpoints nothing until its
+first own-topic sync). To see whether the worker is actually *moving*, opt one
+call into `readPosition`: the raft index of the last log entry the worker's
+reader examined, advancing per entry scanned **including skips**. It lives
+only on the owning node (`ownerNode`, always in the response), so a non-owner
+transparently proxies the request there — one bounded hop, paid only when you
+ask; if the owner is unreachable the response serves everything else and just
+omits the field. Keep routine polling on the default form. Triage for a young
+mirror whose `checkpointIndex` is 0:
+
+- `readPosition` **advancing** — the worker is scanning; it just hasn't hit
+  (or finished) its first own-topic batch. Patience, not a bug.
+- `readPosition` **present but frozen at 0** with `lag > 0` — the worker
+  never examined anything: suspect the worker/reader start path on the owner
+  (read that node's `starting sync` log line, which carries the
+  checkpoint/head it started from).
+- `readPosition` **absent** on a `?readPosition=true` call — the owner didn't
+  answer (unreachable, or ownership is settling after an election). Ask
+  `ownerNode` directly.
+
 **One caveat for selective syncables.** A syncable that consumes only some
 topics advances its checkpoint past entries on *other* topics that it reads
 and cheaply skips (this keeps its restart cost low — it never re-scans a

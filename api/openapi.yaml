@@ -828,10 +828,29 @@ paths:
         load balancer, and the `index` to expect when you POST
         `.../deadletter`. The `committed_sync_stuck` gauge carries the same
         signal for Prometheus alarms.
+
+        The default read is O(1), local to whichever node answers, and safe
+        to poll (e.g. every ~5s per syncable). `?readPosition=true` opts one
+        call into the worker's live scan position (`readPosition`), which
+        lives only on the owning node (`ownerNode`) — a non-owner
+        transparently proxies the request there, one bounded hop paid only
+        by callers who asked. If the owner can't be reached the response
+        degrades softly: every other field still serves and `readPosition`
+        is absent. Keep routine polling on the default form.
       operationId: getSyncableStatus
       parameters:
         - $ref: '#/components/parameters/Consistency'
         - $ref: '#/components/parameters/ResourceId'
+        - name: readPosition
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: |
+            When true, include the owner-local `readPosition` field
+            (proxying to `ownerNode` if another node answers). Off by
+            default so routine status polls stay local and O(1).
       responses:
         '200':
           description: The syncable's current worker status.
@@ -2089,7 +2108,7 @@ components:
 
     SyncableStatusResponse:
       type: object
-      required: [stuck, workerState, checkpointIndex, headIndex, lag, caughtUp, deadLetters]
+      required: [stuck, workerState, checkpointIndex, headIndex, lag, caughtUp, deadLetters, ownerNode]
       description: A syncable worker's current operational status and progress.
       properties:
         stuck:
@@ -2168,6 +2187,30 @@ components:
           description: |
             Raft index of the most recent dead-lettered proposal. Omitted
             when deadLetters is 0.
+        ownerNode:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            Raft node ID whose worker does this syncable's work — the pinned
+            node when the config names one, otherwise the current leader
+            (0 when no leader is known). Always present: it tells you whose
+            logs to read, and which node to ask when a `readPosition`
+            request degraded.
+        readPosition:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            Raft index of the last log entry the worker's reader examined.
+            It advances per entry SCANNED — including entries skipped as
+            other topics' — so a worker wading a mostly-foreign log shows
+            motion here while `checkpointIndex` legitimately sits still.
+            Present only with `?readPosition=true` AND when the owner's live
+            worker answered (directly or via the proxy hop); absent
+            otherwise. `0` with the field present means the worker has
+            examined nothing yet — with `caughtUp` that splits "nothing to
+            examine" from "never started scanning".
 
     IngestableStatusResponse:
       type: object

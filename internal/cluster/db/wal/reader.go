@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 
 	pb "go.etcd.io/raft/v3/raftpb"
 	"go.uber.org/zap"
@@ -33,7 +34,19 @@ import (
 // syncable's raft-index position.
 type Reader struct {
 	sync.Mutex
-	raftIndex      uint64 // last raft index returned to caller
+	raftIndex uint64 // last raft index returned to caller
+	// pos mirrors the raft index of the last entry this reader EXAMINED —
+	// including internal/foreign-topic entries it skipped — as an atomic so a
+	// concurrent status query can observe scan progress without contending
+	// the read loop. A replay scanning millions of other-topic entries is ONE
+	// long Read call from the caller's perspective; only an in-loop cursor
+	// makes "scanning" distinguishable from "frozen" (the field finding that
+	// motivated it: a young mirror at checkpoint 0 is otherwise unreadable).
+	// Single writer (the owning worker's Read), rare readers, its own cache
+	// line — none of the shared-line contention the reader-scaling work
+	// removed. 0 means nothing examined yet (also true for a reader that
+	// resolved at head and went straight to EOF — pair with caughtUp).
+	pos            atomic.Uint64
 	walSeq         uint64 // wal seq to read next; 0 until resolved
 	walSeqResolved bool
 	// lastGen is the scrub generation walSeq was resolved against. When the
@@ -112,6 +125,7 @@ func (r *Reader) Read() (*cluster.Actual, error) {
 
 		if ent.GetType() != pb.EntryNormal || ent.Data == nil {
 			r.raftIndex = ent.GetIndex()
+			r.pos.Store(ent.GetIndex())
 			r.walSeq++
 			continue
 		}
@@ -125,6 +139,7 @@ func (r *Reader) Read() (*cluster.Actual, error) {
 			var ure *cluster.UnknownReservedTypeError
 			if errors.As(err, &ure) && ure.Skippable() {
 				r.raftIndex = ent.GetIndex()
+				r.pos.Store(ent.GetIndex())
 				r.walSeq++
 				continue
 			}
@@ -136,6 +151,7 @@ func (r *Reader) Read() (*cluster.Actual, error) {
 		}
 
 		r.raftIndex = ent.GetIndex()
+		r.pos.Store(ent.GetIndex())
 		r.walSeq++
 
 		// Internal metadata entities — committed's own config (type / database /
@@ -349,4 +365,11 @@ func (s *Storage) Reader(id string) db.ActualReader {
 	}
 
 	return &Reader{raftIndex: i, s: s}
+}
+
+// Position reports the raft index of the last entry this reader examined —
+// skipped entries included — safe to call from any goroutine while Read runs.
+// See the pos field doc for semantics (0 = nothing examined yet).
+func (r *Reader) Position() uint64 {
+	return r.pos.Load()
 }

@@ -219,7 +219,7 @@ func (db *DB) Sync(_ context.Context, id string, s cluster.Syncable) error {
 			close(handle.done)
 		}()
 		db.resetSyncBreaker(id) // fresh breaker state for this worker run (e.g. after a replace)
-		_ = db.sync(workerCtx, id, s)
+		_ = db.sync(workerCtx, id, s, handle)
 	}()
 
 	return nil
@@ -386,15 +386,15 @@ func (db *DB) deleteSync(id string, keepData bool) {
 	}
 }
 
-func (db *DB) sync(ctx context.Context, id string, s cluster.Syncable) error {
+func (db *DB) sync(ctx context.Context, id string, s cluster.Syncable, handle *workerHandle) error {
 	bs, isBatch := s.(cluster.BatchSyncable)
 	if isBatch {
-		return db.syncBatch(ctx, id, s, bs)
+		return db.syncBatch(ctx, id, s, bs, handle)
 	}
-	return db.syncSingle(ctx, id, s)
+	return db.syncSingle(ctx, id, s, handle)
 }
 
-func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) error {
+func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, handle *workerHandle) error {
 	isNode := false
 	var r ActualReader
 	backoff := syncBackoffMin
@@ -461,6 +461,7 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 		switch {
 		case isNode && !db.isNode(id):
 			db.logger.Info("stopping sync", zap.String("id", id))
+			handle.activeReader.Store(nil)
 			r = nil
 			isNode = false
 			retryActual = nil
@@ -473,8 +474,15 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 			// drop then re-raise the alert) on every leadership change.
 			progressed = true
 		case !isNode && db.isNode(id):
-			db.logger.Info("starting sync", zap.String("id", id))
 			r = db.storage.Reader(id)
+			handle.activeReader.Store(&readerRef{r: r})
+			// checkpoint/head on the start line turn every future "young mirror
+			// frozen at 0" question into a one-line answer: this worker begins a
+			// scan of head-checkpoint entries (the field incident this serves was
+			// undiagnosable precisely for lack of it).
+			cp, head, _ := db.SyncableProgress(id)
+			db.logger.Info("starting sync", zap.String("id", id),
+				zap.Uint64("checkpoint", cp), zap.Uint64("head", head))
 			isNode = true
 			retryActual = nil
 			lastSeen, lastBumped = 0, 0
@@ -721,7 +729,7 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable) err
 	}
 }
 
-func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs cluster.BatchSyncable) error {
+func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs cluster.BatchSyncable, handle *workerHandle) error {
 	isNode := false
 	var r ActualReader
 	backoff := syncBackoffMin
@@ -891,6 +899,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 		switch {
 		case isNode && !db.isNode(id):
 			db.logger.Info("stopping sync", zap.String("id", id))
+			handle.activeReader.Store(nil)
 			r = nil
 			isNode = false
 			batch = batch[:0]
@@ -906,8 +915,15 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 			// the new owner clears it on progress. See the single-flush worker.
 			progressed = true
 		case !isNode && db.isNode(id):
-			db.logger.Info("starting sync", zap.String("id", id))
 			r = db.storage.Reader(id)
+			handle.activeReader.Store(&readerRef{r: r})
+			// checkpoint/head on the start line turn every future "young mirror
+			// frozen at 0" question into a one-line answer: this worker begins a
+			// scan of head-checkpoint entries (the field incident this serves was
+			// undiagnosable precisely for lack of it).
+			cp, head, _ := db.SyncableProgress(id)
+			db.logger.Info("starting sync", zap.String("id", id),
+				zap.Uint64("checkpoint", cp), zap.Uint64("head", head))
 			isNode = true
 			batch = batch[:0]
 			retryBatch = false
@@ -1199,4 +1215,44 @@ func (db *DB) SyncableProgress(id string) (checkpoint, head uint64, err error) {
 		return 0, 0, err
 	}
 	return checkpoint, r.DataEventIndex(), nil
+}
+
+// SyncableOwner returns the raft node ID that owns syncable id's worker: the
+// pinned node when the config names one (storage.Node), otherwise the current
+// leader (0 when no leader is known). Derived from replicated state, so it
+// answers identically on any node — the HTTP status handler reports it
+// unconditionally as ownerNode and uses it to route the opt-in readPosition
+// proxy to the owner.
+func (db *DB) SyncableOwner(id string) uint64 {
+	if n := db.storage.Node(id); n != 0 {
+		return n
+	}
+	return db.Leader()
+}
+
+// SyncableReadPosition reports the live scan position of syncable id's worker
+// ON THIS NODE: the raft index of the last log entry the worker's reader
+// examined, advancing per entry scanned — including entries skipped as other
+// topics' — so a long foreign-topic wade is visible as motion, not a frozen
+// checkpoint. False means this node has no live position: no worker
+// registered, the worker idle as a non-owner (no reader published), or a
+// reader without the optional Position capability. Owner-local by
+// construction — non-owner workers hold no reader — so the HTTP layer
+// proxies the call to SyncableOwner's node for the any-node answer.
+func (db *DB) SyncableReadPosition(id string) (uint64, bool) {
+	db.workersMu.Lock()
+	handle, ok := db.syncWorkers[id]
+	db.workersMu.Unlock()
+	if !ok {
+		return 0, false
+	}
+	ref := handle.activeReader.Load()
+	if ref == nil {
+		return 0, false
+	}
+	p, ok := ref.r.(interface{ Position() uint64 })
+	if !ok {
+		return 0, false
+	}
+	return p.Position(), true
 }

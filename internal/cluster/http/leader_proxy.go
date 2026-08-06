@@ -1,6 +1,7 @@
 package http
 
 import (
+	"errors"
 	"io"
 	httpgo "net/http"
 	"net/url"
@@ -8,17 +9,19 @@ import (
 	"time"
 )
 
-// defaultProxyTimeout bounds a follower→leader proxy hop for a leader-only
-// read. Sized like defaultReadIndexTimeout — well under the server
-// WriteTimeout — so a wedged or unreachable leader yields a clean 503 rather
-// than hanging the caller's connection.
+// defaultProxyTimeout bounds a member→member proxy hop (follower→leader for a
+// leader-only read, or any-node→owner for an owner-local read). Sized like
+// defaultReadIndexTimeout — well under the server WriteTimeout — so a wedged
+// or unreachable target yields a clean local answer (or 503) rather than
+// hanging the caller's connection.
 const defaultProxyTimeout = 5 * time.Second
 
-// forwardedHeader marks a request a follower has already proxied to the
-// leader. If such a request lands on a node that still isn't the leader (the
-// forwarder's leader view was stale, or leadership is flapping), the receiver
-// returns 503 instead of forwarding again — a one-hop guard against proxy
-// loops. The caller retries; by then the leader view has usually settled.
+// forwardedHeader marks a request one node has already proxied to another. If
+// such a request lands on a node that still isn't the one that should answer
+// (the forwarder's leader/owner view was stale, or leadership is flapping),
+// the receiver answers as best it can locally instead of forwarding again — a
+// one-hop guard against proxy loops. The caller retries; by then the view has
+// usually settled.
 const forwardedHeader = "X-Committed-Forwarded"
 
 // leaderRead wraps a handler that only the raft leader can answer correctly
@@ -62,41 +65,51 @@ func (h *HTTP) leaderRead(next httpgo.HandlerFunc) httpgo.HandlerFunc {
 			return
 		}
 
-		h.proxyToLeader(w, r, leaderURL, leaderID)
+		if err := h.proxyToMember(w, r, leaderURL); err != nil {
+			// proxyToMember failed before writing anything, so the 503 is
+			// still ours to write. Leader-only state has no local fallback —
+			// this wrapper's hard-fail contract (vs. the syncable status
+			// handler's soft degrade, which serves replicated fields instead).
+			writeLeaderUnavailable(w, leaderID, "could not reach the leader: "+err.Error())
+		}
 	}
 }
 
-// proxyToLeader forwards r to the leader's API and copies the response back
-// verbatim (status, Content-Type, body).
-func (h *HTTP) proxyToLeader(w httpgo.ResponseWriter, r *httpgo.Request, leaderURL string, leaderID uint64) {
-	// The scheme and host are fixed by the leader's announced URL — trusted,
+// proxyToMember forwards r to the member API at baseURL and copies the
+// response back verbatim (status, Content-Type, body). A returned error means
+// NOTHING was written to w — the target URL didn't parse, the request
+// couldn't be built, or the member couldn't be reached — so the caller picks
+// the fallback its endpoint's contract requires: leaderRead hard-fails with
+// 503 (leader-only state has no substitute), the syncable status handler
+// soft-degrades to its local answer (replicated fields minus the owner-local
+// one). Once the member responds, the copy is committed and any error is the
+// caller's connection's problem.
+func (h *HTTP) proxyToMember(w httpgo.ResponseWriter, r *httpgo.Request, baseURL string) error {
+	// The scheme and host are fixed by the member's announced URL — trusted,
 	// replicated state, not request input. Only the path and query come from
 	// the request, joined onto the trusted base, so a crafted request can't
 	// redirect the hop to an arbitrary host (no SSRF).
-	base, err := url.Parse(leaderURL)
+	base, err := url.Parse(baseURL)
 	if err != nil || base.Scheme == "" || base.Host == "" {
-		writeLeaderUnavailable(w, leaderID, "the leader's announced API address is not a valid URL")
-		return
+		return errors.New("the member's announced API address is not a valid URL")
 	}
 	base.Path = path.Join(base.Path, r.URL.Path)
 	base.RawQuery = r.URL.RawQuery
 
-	//nolint:gosec // G704: target host/scheme are the leader's replicated API URL, not request input; only path+query are forwarded.
+	//nolint:gosec // G704: target host/scheme are the member's replicated API URL, not request input; only path+query are forwarded.
 	req, err := httpgo.NewRequestWithContext(r.Context(), r.Method, base.String(), r.Body)
 	if err != nil {
-		writeLeaderUnavailable(w, leaderID, "could not build a request to the leader")
-		return
+		return errors.New("could not build the proxy request")
 	}
 	// Forward the headers that matter for auth, content negotiation, and
-	// tracing; set the loop-guard marker so the leader (or a stale-view
-	// non-leader) can tell this is a forwarded request.
+	// tracing; set the loop-guard marker so the receiving member (or a
+	// stale-view wrong member) can tell this is a forwarded request.
 	copyHeader(req.Header, r.Header, "Authorization", "Content-Type", "Accept", "X-Request-ID")
 	req.Header.Set(forwardedHeader, "1")
 
-	resp, err := h.proxyClient.Do(req) //nolint:gosec // G704: target is the trusted leader URL (see above).
+	resp, err := h.proxyClient.Do(req) //nolint:gosec // G704: target is the trusted member URL (see above).
 	if err != nil {
-		writeLeaderUnavailable(w, leaderID, "could not reach the leader")
-		return
+		return errors.New("no response from the member's API")
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -105,6 +118,7 @@ func (h *HTTP) proxyToLeader(w httpgo.ResponseWriter, r *httpgo.Request, leaderU
 	}
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
+	return nil
 }
 
 // copyHeader copies the named headers from src to dst when present.

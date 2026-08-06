@@ -261,6 +261,26 @@ type SyncableStatusResponse struct {
 	// from this count).
 	DeadLetters         uint64 `json:"deadLetters"`
 	LastDeadLetterIndex uint64 `json:"lastDeadLetterIndex,omitempty"`
+
+	// OwnerNode is the raft node ID whose worker does this syncable's work:
+	// the pinned node when the config names one, otherwise the current leader
+	// (0 when no leader is known). ALWAYS present — it tells an operator
+	// whose logs to read, and which node a degraded readPosition answer is
+	// missing (see ReadPosition).
+	OwnerNode uint64 `json:"ownerNode"`
+	// ReadPosition is the raft index of the last log entry the worker's
+	// reader examined — it advances per entry SCANNED, including entries
+	// skipped as other topics', so a worker wading a mostly-foreign log
+	// shows motion here while CheckpointIndex legitimately sits still.
+	// Present only when the request opts in with ?readPosition=true AND the
+	// owner's live worker answered (directly, or via the transparent proxy
+	// hop this handler makes to OwnerNode); absent on the default call — the
+	// default stays a local O(1) read, safe to poll — and absent when the
+	// owner is unreachable (soft degrade: every other field still serves).
+	// 0 with the field present means the worker has examined nothing yet —
+	// with CaughtUp it distinguishes "nothing to examine" from "never
+	// started scanning", the split the phantom-adoption incident needed.
+	ReadPosition *uint64 `json:"readPosition,omitempty"`
 }
 
 // GetSyncableStatus reports a syncable worker's operational status
@@ -271,11 +291,44 @@ type SyncableStatusResponse struct {
 // hop — this is how an operator (or a dashboard) discovers a wedged syncable
 // behind a load balancer (and the index to expect when they POST
 // .../deadletter), and answers "is it caught up?" (lag == 0).
+//
+// ?readPosition=true opts into one owner-local extra: the worker's live scan
+// position (see SyncableStatusResponse.ReadPosition). That datum exists only
+// on the owning node, so a non-owner transparently proxies the request there
+// — one bounded hop, paid only by callers who asked. If the owner can't be
+// reached (or ownership is unknown/settling), the response degrades softly:
+// every replicated field still serves, readPosition is absent, and ownerNode
+// says who has it. The default call's no-hop poll-safety contract is
+// untouched.
 func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 	id := r.PathValue("id")
 	if id == "" {
 		writeError(w, httpgo.StatusBadRequest, "invalid_parameter", "id is empty")
 		return
+	}
+
+	wantPosition := false
+	if raw := r.URL.Query().Get("readPosition"); raw != "" {
+		v, err := strconv.ParseBool(raw)
+		if err != nil {
+			writeError(w, httpgo.StatusBadRequest, "invalid_parameter", "readPosition must be a boolean")
+			return
+		}
+		wantPosition = v
+	}
+
+	owner := h.c.SyncableOwner(id)
+	if wantPosition && owner != 0 && owner != h.c.ID() && r.Header.Get(forwardedHeader) == "" {
+		// The scan position lives in the owner's worker — proxy the whole
+		// request there (its response carries the same replicated fields plus
+		// the position). Any failure to hop falls through to the local
+		// answer: soft degrade, not leaderRead's 503, because everything
+		// except readPosition is still perfectly answerable here.
+		if ownerURL, ok := h.c.MemberAPIURL(owner); ok && ownerURL != "" {
+			if err := h.proxyToMember(w, r, ownerURL); err == nil {
+				return
+			}
+		}
 	}
 
 	if !h.linearize(w, r) {
@@ -326,6 +379,18 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 	}
 	resp.DeadLetters = dlCount
 	resp.LastDeadLetterIndex = dlLast
+
+	resp.OwnerNode = owner
+	if wantPosition {
+		// Populated when this node's worker holds a live reader — it is the
+		// owner, or a forwarded request landed here believing it is. A
+		// non-owner (stale forward, ownership settling) has no reader and
+		// simply leaves the field absent — the degraded shape, with
+		// OwnerNode pointing at who to ask.
+		if pos, ok := h.c.SyncableReadPosition(id); ok {
+			resp.ReadPosition = &pos
+		}
+	}
 
 	bs, err := json.Marshal(resp)
 	if err != nil {

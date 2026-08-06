@@ -222,6 +222,49 @@ func TestResumeReader(t *testing.T) {
 	}
 }
 
+// TestReaderPositionAdvancesPerExaminedEntry pins the Position contract the
+// readPosition diagnostic depends on: it starts at 0 (nothing examined), tracks
+// the raft index of a returned user entry, and — the load-bearing part — keeps
+// advancing through entries the reader examines and SKIPS (conf-changes,
+// internal syncable-index bumps) on a Read that ends in io.EOF. That skip
+// motion is what distinguishes "worker is wading a foreign log" from "worker is
+// frozen" while the checkpoint legitimately sits still.
+func TestReaderPositionAdvancesPerExaminedEntry(t *testing.T) {
+	id := "foo"
+	s := NewStorage(t, nil)
+	defer s.Cleanup()
+
+	pc := newProposalCreatorForString(t, s)
+
+	r := s.Reader(id)
+	// The same optional-capability assertion production's status path makes —
+	// pins that the wal reader actually exposes it.
+	pr, ok := r.(interface{ Position() uint64 })
+	require.True(t, ok, "wal reader must expose the optional Position capability")
+	require.Zero(t, pr.Position(), "nothing examined yet")
+
+	// One user proposal, then a trailing run of internal-only entries past it.
+	user := pc.createAndSaveProposals(t, [][]string{{"foo"}})
+	pc.saveProposals(t, []*cluster.Proposal{
+		createSyncableIndexProposal(t, id),
+		createSyncableIndexProposal(t, id),
+	})
+	tail := pc.currentIndex
+
+	got, err := r.Read()
+	require.NoError(t, err)
+	require.Equal(t, user[0].Entities, got.Entities)
+	require.Equal(t, got.Index, pr.Position(), "position tracks the entry just returned")
+
+	// Reading again returns nothing (only internal entries remain) but the
+	// reader examines them all on the way to EOF — the position must land on
+	// the last entry in the log, past the last returned index.
+	_, err = r.Read()
+	require.Equal(t, io.EOF, err)
+	require.Greater(t, tail, got.Index)
+	require.Equal(t, tail, pr.Position(), "position advances through examined-and-skipped entries")
+}
+
 type ProposalCreator struct {
 	currentIndex uint64
 	currentTerm  uint64

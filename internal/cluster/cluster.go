@@ -113,6 +113,20 @@ type Cluster interface {
 	// syncable reports checkpoint 0 (and lag == head). Powers the progress
 	// fields on GET /syncable/{id}/status.
 	SyncableProgress(id string) (checkpoint, head uint64, err error)
+	// SyncableOwner returns the raft node ID that owns the syncable's worker:
+	// the pinned node when the config names one, otherwise the current leader
+	// (0 when no leader is known). Derived from replicated state, so any node
+	// answers identically. Powers the ownerNode field on
+	// GET /syncable/{id}/status and routes the opt-in readPosition proxy.
+	SyncableOwner(id string) uint64
+	// SyncableReadPosition reports the live scan position of the syncable's
+	// worker ON THIS NODE — the raft index of the last log entry its reader
+	// examined, advancing per entry scanned including skips of other topics'
+	// entries. False when this node has no live position (no worker, idle
+	// non-owner, or a reader without the capability). Owner-local: only the
+	// owning node's worker holds a reader, so the HTTP layer proxies
+	// ?readPosition=true status calls to SyncableOwner's node.
+	SyncableReadPosition(id string) (position uint64, ok bool)
 	// ReplaySyncableDeadLetter re-drives a dead-lettered proposal: it
 	// re-runs the syncable's Sync for the proposal at index and, on success,
 	// clears the dead-letter record. Node-agnostic. Returns ErrNotDeadLettered

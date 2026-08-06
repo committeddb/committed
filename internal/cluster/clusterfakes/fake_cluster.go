@@ -532,6 +532,17 @@ type FakeCluster struct {
 		result1 []cluster.SyncableDeadLetter
 		result2 error
 	}
+	SyncableOwnerStub        func(string) uint64
+	syncableOwnerMutex       sync.RWMutex
+	syncableOwnerArgsForCall []struct {
+		arg1 string
+	}
+	syncableOwnerReturns struct {
+		result1 uint64
+	}
+	syncableOwnerReturnsOnCall map[int]struct {
+		result1 uint64
+	}
 	SyncableProgressStub        func(string) (uint64, uint64, error)
 	syncableProgressMutex       sync.RWMutex
 	syncableProgressArgsForCall []struct {
@@ -546,6 +557,19 @@ type FakeCluster struct {
 		result1 uint64
 		result2 uint64
 		result3 error
+	}
+	SyncableReadPositionStub        func(string) (uint64, bool)
+	syncableReadPositionMutex       sync.RWMutex
+	syncableReadPositionArgsForCall []struct {
+		arg1 string
+	}
+	syncableReadPositionReturns struct {
+		result1 uint64
+		result2 bool
+	}
+	syncableReadPositionReturnsOnCall map[int]struct {
+		result1 uint64
+		result2 bool
 	}
 	SyncableStuckStub        func(string) (cluster.SyncableStuck, bool, error)
 	syncableStuckMutex       sync.RWMutex
@@ -3267,6 +3291,67 @@ func (fake *FakeCluster) SyncableDeadLettersReturnsOnCall(i int, result1 []clust
 	}{result1, result2}
 }
 
+func (fake *FakeCluster) SyncableOwner(arg1 string) uint64 {
+	fake.syncableOwnerMutex.Lock()
+	ret, specificReturn := fake.syncableOwnerReturnsOnCall[len(fake.syncableOwnerArgsForCall)]
+	fake.syncableOwnerArgsForCall = append(fake.syncableOwnerArgsForCall, struct {
+		arg1 string
+	}{arg1})
+	stub := fake.SyncableOwnerStub
+	fakeReturns := fake.syncableOwnerReturns
+	fake.recordInvocation("SyncableOwner", []interface{}{arg1})
+	fake.syncableOwnerMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeCluster) SyncableOwnerCallCount() int {
+	fake.syncableOwnerMutex.RLock()
+	defer fake.syncableOwnerMutex.RUnlock()
+	return len(fake.syncableOwnerArgsForCall)
+}
+
+func (fake *FakeCluster) SyncableOwnerCalls(stub func(string) uint64) {
+	fake.syncableOwnerMutex.Lock()
+	defer fake.syncableOwnerMutex.Unlock()
+	fake.SyncableOwnerStub = stub
+}
+
+func (fake *FakeCluster) SyncableOwnerArgsForCall(i int) string {
+	fake.syncableOwnerMutex.RLock()
+	defer fake.syncableOwnerMutex.RUnlock()
+	argsForCall := fake.syncableOwnerArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeCluster) SyncableOwnerReturns(result1 uint64) {
+	fake.syncableOwnerMutex.Lock()
+	defer fake.syncableOwnerMutex.Unlock()
+	fake.SyncableOwnerStub = nil
+	fake.syncableOwnerReturns = struct {
+		result1 uint64
+	}{result1}
+}
+
+func (fake *FakeCluster) SyncableOwnerReturnsOnCall(i int, result1 uint64) {
+	fake.syncableOwnerMutex.Lock()
+	defer fake.syncableOwnerMutex.Unlock()
+	fake.SyncableOwnerStub = nil
+	if fake.syncableOwnerReturnsOnCall == nil {
+		fake.syncableOwnerReturnsOnCall = make(map[int]struct {
+			result1 uint64
+		})
+	}
+	fake.syncableOwnerReturnsOnCall[i] = struct {
+		result1 uint64
+	}{result1}
+}
+
 func (fake *FakeCluster) SyncableProgress(arg1 string) (uint64, uint64, error) {
 	fake.syncableProgressMutex.Lock()
 	ret, specificReturn := fake.syncableProgressReturnsOnCall[len(fake.syncableProgressArgsForCall)]
@@ -3332,6 +3417,70 @@ func (fake *FakeCluster) SyncableProgressReturnsOnCall(i int, result1 uint64, re
 		result2 uint64
 		result3 error
 	}{result1, result2, result3}
+}
+
+func (fake *FakeCluster) SyncableReadPosition(arg1 string) (uint64, bool) {
+	fake.syncableReadPositionMutex.Lock()
+	ret, specificReturn := fake.syncableReadPositionReturnsOnCall[len(fake.syncableReadPositionArgsForCall)]
+	fake.syncableReadPositionArgsForCall = append(fake.syncableReadPositionArgsForCall, struct {
+		arg1 string
+	}{arg1})
+	stub := fake.SyncableReadPositionStub
+	fakeReturns := fake.syncableReadPositionReturns
+	fake.recordInvocation("SyncableReadPosition", []interface{}{arg1})
+	fake.syncableReadPositionMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeCluster) SyncableReadPositionCallCount() int {
+	fake.syncableReadPositionMutex.RLock()
+	defer fake.syncableReadPositionMutex.RUnlock()
+	return len(fake.syncableReadPositionArgsForCall)
+}
+
+func (fake *FakeCluster) SyncableReadPositionCalls(stub func(string) (uint64, bool)) {
+	fake.syncableReadPositionMutex.Lock()
+	defer fake.syncableReadPositionMutex.Unlock()
+	fake.SyncableReadPositionStub = stub
+}
+
+func (fake *FakeCluster) SyncableReadPositionArgsForCall(i int) string {
+	fake.syncableReadPositionMutex.RLock()
+	defer fake.syncableReadPositionMutex.RUnlock()
+	argsForCall := fake.syncableReadPositionArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeCluster) SyncableReadPositionReturns(result1 uint64, result2 bool) {
+	fake.syncableReadPositionMutex.Lock()
+	defer fake.syncableReadPositionMutex.Unlock()
+	fake.SyncableReadPositionStub = nil
+	fake.syncableReadPositionReturns = struct {
+		result1 uint64
+		result2 bool
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) SyncableReadPositionReturnsOnCall(i int, result1 uint64, result2 bool) {
+	fake.syncableReadPositionMutex.Lock()
+	defer fake.syncableReadPositionMutex.Unlock()
+	fake.SyncableReadPositionStub = nil
+	if fake.syncableReadPositionReturnsOnCall == nil {
+		fake.syncableReadPositionReturnsOnCall = make(map[int]struct {
+			result1 uint64
+			result2 bool
+		})
+	}
+	fake.syncableReadPositionReturnsOnCall[i] = struct {
+		result1 uint64
+		result2 bool
+	}{result1, result2}
 }
 
 func (fake *FakeCluster) SyncableStuck(arg1 string) (cluster.SyncableStuck, bool, error) {
