@@ -225,6 +225,15 @@ matchIndex is leader-side memory of the highest index the member ever
 acknowledged: it is not a liveness signal, and it reads "healthy" for a node
 that is stopped, dead, or wiped, until live commits visibly outrun it.
 
+Behind a load balancer (no per-node addressing), use the `active` field on
+`GET /v1/membership` instead: it is raft's own recent-activity signal — the
+leader heard from the member within roughly the last election timeout — and
+it reads `false` for exactly the stopped/dead/wiped states `matchIndex`
+masks. `active: true` plus `matchIndex` closing on `commitIndex` is a
+complete remote verification; the node's own `/ready` remains the direct
+confirmation when you can reach it. (See membership.md for the one
+sampling caveat on `active`.)
+
 After the service is running, confirm the node is healthy:
 
 ```bash

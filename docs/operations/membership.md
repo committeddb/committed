@@ -172,20 +172,42 @@ request* is allowed — it finalizes the change and then leaves.
 
 ## Observing membership
 
-`GET /v1/membership` lists the cluster: each member's role and the
-leader-observed **matched index** (how far that member has replicated),
-alongside the snapshot's leader, term, commit, and applied indices.
+`GET /v1/membership` lists the cluster: each member's role, the
+leader-observed **matched index** (how far that member has replicated) and
+**active** flag (whether the leader has heard from it recently), alongside
+the snapshot's leader, term, commit, and applied indices.
 
 ```json
 {
   "nodeId": 1, "leaderId": 1, "term": 5,
   "commitIndex": 1234, "appliedIndex": 1234, "isLeader": true,
   "members": [
-    { "id": 1, "role": "voter", "matchIndex": 1234, "apiUrl": "http://n1:8080" },
-    { "id": 2, "role": "voter", "matchIndex": 1230, "apiUrl": "http://n2:8080" }
+    { "id": 1, "role": "voter", "matchIndex": 1234, "active": true, "apiUrl": "http://n1:8080" },
+    { "id": 2, "role": "voter", "matchIndex": 1230, "active": true, "apiUrl": "http://n2:8080" }
   ]
 }
 ```
+
+The two progress fields answer **different questions**:
+
+- `matchIndex` is replication **memory** — the highest index the member
+  ever acknowledged. It is the catch-up yardstick (compare against
+  `commitIndex`), but it is *not* liveness: a stopped, dead, or freshly
+  wiped node keeps its old `matchIndex` until live commits visibly outrun
+  it.
+- `active` is **liveness** — raft's own recent-activity signal (the same
+  bit the leader's quorum check reads): the leader heard from this member
+  within roughly the last election timeout. A dead or partitioned member
+  flips to `false` within one election timeout; the leader's own entry is
+  always `true`.
+
+Verify a rebuilt or restarted member by `active` (then confirm progress by
+`matchIndex` closing on `commitIndex`) — never by `matchIndex` alone. One
+sampling caveat: raft's activity sweep clears the bit each election timeout
+and the next heartbeat response restores it, so a healthy member can very
+occasionally sample `active: false` (millisecond window). Treat `false` as
+authoritative when it persists across two samples ~1 election timeout
+apart.
 
 The per-member `matchIndex` is **leader-only** state in raft, so the read
 is always answered by the leader: a request that lands on a follower is

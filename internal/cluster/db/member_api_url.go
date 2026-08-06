@@ -123,6 +123,8 @@ func (db *DB) Membership() cluster.Membership {
 		if v.hasMatch {
 			match := v.match
 			m.MatchIndex = &match
+			active := v.active
+			m.Active = &active
 		}
 		members = append(members, m)
 	}

@@ -485,9 +485,15 @@ func (n *Raft) memberStatus() (voters, learners map[uint64]struct{}, joint bool)
 // memberView is one member's role and (leader-only) replication progress as
 // observed by this node, for the GET /v1/membership read.
 type memberView struct {
-	id       uint64
-	learner  bool
-	match    uint64
+	id      uint64
+	learner bool
+	match   uint64
+	// active mirrors raft's Progress.RecentActive: the leader heard from this
+	// member within the last election timeout (the same bit CheckQuorum's
+	// step-down decision reads — consensus-relevant liveness, not transport
+	// stream health). Valid only when hasMatch (Progress exists only on the
+	// leader); always true for the leader's own entry.
+	active   bool
 	hasMatch bool
 }
 
@@ -510,6 +516,7 @@ func (n *Raft) membershipView() (leaderID, term, commit uint64, isLeader bool, m
 		mv := memberView{id: id, learner: learner}
 		if pr, ok := st.Progress[id]; ok {
 			mv.match = pr.Match
+			mv.active = pr.RecentActive
 			mv.hasMatch = true
 		}
 		members = append(members, mv)

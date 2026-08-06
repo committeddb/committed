@@ -26,13 +26,23 @@ type MembershipResponse struct {
 	Members      []MemberResponse `json:"members"`
 }
 
-// MemberResponse is one node's entry in MembershipResponse. MatchIndex is
-// omitted when unknown (a follower-built snapshot, before the leader-proxy
-// hop); APIURL is omitted when the member has not announced one.
+// MemberResponse is one node's entry in MembershipResponse. MatchIndex and
+// Active are omitted when unknown (a follower-built snapshot, before the
+// leader-proxy hop); APIURL is omitted when the member has not announced one.
+//
+// The two progress fields answer different questions: matchIndex is
+// replication MEMORY (highest index ever acknowledged — it reads "healthy"
+// for a stopped or wiped node until live commits outrun it) and active is
+// LIVENESS (the leader heard from the member within roughly the last
+// election timeout). Verify a rebuilt or restarted member by active, never
+// by matchIndex alone. A single active:false sample on a healthy member is
+// possible at the CheckQuorum sweep boundary (ms-scale window) — treat
+// false as authoritative when it persists across two samples.
 type MemberResponse struct {
 	ID         uint64  `json:"id"`
 	Role       string  `json:"role"`
 	MatchIndex *uint64 `json:"matchIndex,omitempty"`
+	Active     *bool   `json:"active,omitempty"`
 	APIURL     string  `json:"apiUrl,omitempty"`
 }
 
@@ -59,6 +69,7 @@ func (h *HTTP) GetMembership(w httpgo.ResponseWriter, r *httpgo.Request) {
 			ID:         mem.ID,
 			Role:       mem.Role,
 			MatchIndex: mem.MatchIndex,
+			Active:     mem.Active,
 			APIURL:     mem.APIURL,
 		})
 	}

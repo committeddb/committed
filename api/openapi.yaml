@@ -2451,8 +2451,8 @@ components:
         appliedIndex: 1234
         isLeader: true
         members:
-          - { id: 1, role: voter, matchIndex: 1234, apiUrl: "http://n1:8080" }
-          - { id: 4, role: learner, matchIndex: 1200, apiUrl: "http://n4:8080" }
+          - { id: 1, role: voter, matchIndex: 1234, active: true, apiUrl: "http://n1:8080" }
+          - { id: 4, role: learner, matchIndex: 1200, active: true, apiUrl: "http://n4:8080" }
 
     Member:
       type: object
@@ -2476,6 +2476,24 @@ components:
             Highest log index the leader has confirmed this member replicated.
             Present only on a leader-produced snapshot (the read is proxied to
             the leader, so it is normally populated).
+
+            matchIndex is replication MEMORY, not liveness: it holds the
+            highest index the member EVER acknowledged and reads "healthy"
+            for a stopped, dead, or wiped node until live commits visibly
+            outrun it. Use `active` for liveness.
+        active:
+          type: boolean
+          description: |
+            Whether the leader heard from this member within roughly the
+            last election timeout — raft's own recent-activity signal (the
+            same bit its quorum check reads). A dead or partitioned member
+            reads false within one election timeout; the leader's own entry
+            is always true. Present only on a leader-produced snapshot,
+            like `matchIndex`. Verify a rebuilt or restarted member by this
+            field, never by `matchIndex` alone. Rarely, a healthy member
+            can sample false at the activity-sweep boundary (millisecond
+            window) — treat false as authoritative when it persists across
+            two samples taken ~1 election timeout apart.
         apiUrl:
           type: string
           description: |

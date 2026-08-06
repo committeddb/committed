@@ -59,6 +59,11 @@ func TestAnnounceAPIURL_BootstrapNode(t *testing.T) {
 	require.Equal(t, cluster.MemberRoleVoter, m.Members[0].Role)
 	require.Equal(t, "http://n1:8080", m.Members[0].APIURL)
 	require.NotNil(t, m.Members[0].MatchIndex)
+	// The leader's own entry always reads active (raft pins its own
+	// RecentActive true) — and populated-on-leader is the same contract as
+	// MatchIndex.
+	require.NotNil(t, m.Members[0].Active)
+	require.True(t, *m.Members[0].Active)
 }
 
 // TestAnnounceAPIURL_SurvivesRestart verifies the announced URL persists across

@@ -2818,3 +2818,110 @@ func TestAdversarial_LearnerPromoteUnderPartition(t *testing.T) {
 	waitForVoter(t, node5, 5)
 	waitForUserEntry(t, node5, []byte("during-change"))
 }
+
+// -----------------------------------------------------------------------------
+// Scenario: membership active vs matchIndex fossil (the T5 field trap)
+//
+// Invariant protected: GET /v1/membership's `active` field is LIVENESS — a
+// partitioned member reads active:false on the leader within the election-
+// timeout sweep — while `matchIndex` is leader MEMORY that keeps its fossil
+// value for that same dead member as live commits advance past it. The field
+// incident: an operator verified a restored member by matchIndex, which read
+// "healthy" for a node that was long gone. This pins both halves: the fossil
+// (matchIndex frozen while commitIndex advances) AND the instrument that
+// exposes it (active flipping false), plus recovery on heal.
+// -----------------------------------------------------------------------------
+func TestAdversarial_MembershipActiveVsMatchIndexFossil(t *testing.T) {
+	const tick = 50 * time.Millisecond // 500ms election window; sweep cadence ~500ms
+	h, fc := newFaultyMultiDBHarness(t, 3, tick, time.Minute)
+	defer h.Close()
+
+	h.WaitForLeader(t)
+	leaderID := h.stableLeader()
+	if leaderID == 0 {
+		t.Fatal("no stable leader to start from")
+	}
+	leader := h.dbByID(leaderID)
+
+	var victimID uint64
+	survivorIDs := []uint64{leaderID}
+	for _, d := range h.dbs {
+		if d.ID() != leaderID {
+			if victimID == 0 {
+				victimID = d.ID()
+			} else {
+				survivorIDs = append(survivorIDs, d.ID())
+			}
+		}
+	}
+
+	memberOf := func(m cluster.Membership, id uint64) *cluster.Member {
+		for i := range m.Members {
+			if m.Members[i].ID == id {
+				return &m.Members[i]
+			}
+		}
+		return nil
+	}
+
+	// Baseline: the healthy victim reads active:true with a populated
+	// matchIndex that has caught up to the leader's commit.
+	var fossilMatch uint64
+	waitUntil(t, 10*time.Second, "victim never read active+caught-up on the leader", func() bool {
+		m := leader.Membership()
+		v := memberOf(m, victimID)
+		if v == nil || v.Active == nil || !*v.Active || v.MatchIndex == nil {
+			return false
+		}
+		if *v.MatchIndex != m.CommitIndex {
+			return false
+		}
+		fossilMatch = *v.MatchIndex
+		return true
+	})
+
+	// Tear the victim away. The leader keeps quorum (2/3) and keeps leading.
+	fc.Partition([]uint64{victimID}, survivorIDs)
+
+	// The CheckQuorum sweep marks the silent victim inactive within ~an
+	// election timeout. Deterministic once partitioned: nothing can restore it.
+	waitUntil(t, 10*time.Second, "partitioned victim never read active:false on the leader", func() bool {
+		m := leader.Membership()
+		v := memberOf(m, victimID)
+		return v != nil && v.Active != nil && !*v.Active
+	})
+
+	// Advance the log past the fossil so the trap is fully shaped: commits
+	// move, the dead member's matchIndex does not. A type registration is the
+	// simplest committed entry that applies cleanly on the WAL-backed harness
+	// (createProposals' "string" entities would commit but fail type
+	// resolution at apply — a node-fatal in this harness).
+	proposeTypeTOML(t, leader, "post-partition-type", "post-partition-type", "", "")
+
+	m := leader.Membership()
+	v := memberOf(m, victimID)
+	if v == nil || v.MatchIndex == nil {
+		t.Fatal("victim missing from the leader's membership view")
+	}
+	if *v.MatchIndex != fossilMatch {
+		t.Fatalf("dead member's matchIndex moved (%d -> %d); it must fossilize", fossilMatch, *v.MatchIndex)
+	}
+	if m.CommitIndex <= fossilMatch {
+		t.Fatalf("commit never advanced past the fossil (commit %d, fossil %d)", m.CommitIndex, fossilMatch)
+	}
+	if v.Active == nil || *v.Active {
+		t.Fatal("victim must still read active:false while partitioned")
+	}
+	if self := memberOf(m, leaderID); self == nil || self.Active == nil || !*self.Active {
+		t.Fatal("the leader's own entry must always read active:true")
+	}
+
+	// Heal: liveness recovers and replication closes the gap.
+	fc.Heal()
+	waitUntil(t, 10*time.Second, "healed victim never recovered active:true with matchIndex caught up", func() bool {
+		m := leader.Membership()
+		v := memberOf(m, victimID)
+		return v != nil && v.Active != nil && *v.Active &&
+			v.MatchIndex != nil && *v.MatchIndex >= m.CommitIndex
+	})
+}

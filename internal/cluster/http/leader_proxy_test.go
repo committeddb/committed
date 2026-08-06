@@ -15,6 +15,8 @@ import (
 	"github.com/committeddb/committed/internal/cluster/http"
 )
 
+func boolp(b bool) *bool { return &b }
+
 func u64p(v uint64) *uint64 { return &v }
 
 // doMembershipRequest issues GET /v1/membership against h with optional extra
@@ -41,8 +43,8 @@ func TestMembership_ServedLocallyOnLeader(t *testing.T) {
 	fake.MembershipReturns(cluster.Membership{
 		NodeID: 1, LeaderID: 1, Term: 3, CommitIndex: 42, AppliedIndex: 42, IsLeader: true,
 		Members: []cluster.Member{
-			{ID: 1, Role: cluster.MemberRoleVoter, MatchIndex: u64p(42), APIURL: "http://n1:8080"},
-			{ID: 2, Role: cluster.MemberRoleVoter, MatchIndex: u64p(40), APIURL: "http://n2:8080"},
+			{ID: 1, Role: cluster.MemberRoleVoter, MatchIndex: u64p(42), Active: boolp(true), APIURL: "http://n1:8080"},
+			{ID: 2, Role: cluster.MemberRoleVoter, MatchIndex: u64p(40), Active: boolp(false), APIURL: "http://n2:8080"},
 		},
 	})
 	h := http.New(fake)
@@ -61,6 +63,15 @@ func TestMembership_ServedLocallyOnLeader(t *testing.T) {
 	require.NotNil(t, resp.Members[0].MatchIndex)
 	require.Equal(t, uint64(42), *resp.Members[0].MatchIndex)
 	require.Equal(t, "http://n2:8080", resp.Members[1].APIURL)
+	// Liveness rides next to the fossil-prone matchIndex: present when the
+	// leader produced the snapshot, and false serializes as an explicit
+	// "active":false — never silently dropped by omitempty.
+	require.NotNil(t, resp.Members[0].Active)
+	require.True(t, *resp.Members[0].Active)
+	require.NotNil(t, resp.Members[1].Active)
+	require.False(t, *resp.Members[1].Active)
+	require.Contains(t, string(body), `"active":false`,
+		"an inactive member must be explicitly false in the JSON, not omitted")
 }
 
 // TestMembership_ReportsLearnerRole verifies GET /v1/membership distinguishes

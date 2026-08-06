@@ -48,7 +48,23 @@ type Member struct {
 	// snapshot was produced by the leader — which is why the HTTP read
 	// proxies to the leader. A caller computes "caught up" by comparing
 	// MatchIndex against CommitIndex with its own threshold.
+	//
+	// MatchIndex is MEMORY, not liveness: it holds the highest index the
+	// member EVER acknowledged and reads "healthy" for a node that is
+	// stopped, dead, or wiped, until live commits visibly outrun it. Use
+	// Active for liveness.
 	MatchIndex *uint64
+	// Active reports whether the leader heard from this member within
+	// roughly the last election timeout — raft's own Progress.RecentActive,
+	// the same signal CheckQuorum's step-down decision reads. Leader-only
+	// like MatchIndex (nil off-leader); the leader's own entry is always
+	// true. A dead or partitioned member reads false within one election
+	// timeout. One sampling caveat: the CheckQuorum sweep resets the bit
+	// each election timeout and the next heartbeat response restores it,
+	// so a single false sample on a healthy member is possible (ms-scale
+	// window) — treat false as authoritative only when it persists across
+	// two samples ~1 election timeout apart.
+	Active *bool
 	// APIURL is the member's advertised HTTP API base URL, as self-announced
 	// into the replicated address map. Empty when the member has not
 	// announced one (e.g. no COMMITTED_API_URL set).
