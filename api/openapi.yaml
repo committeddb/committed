@@ -2206,6 +2206,10 @@ components:
             It advances per entry SCANNED — including entries skipped as
             other topics' — so a worker wading a mostly-foreign log shows
             motion here while `checkpointIndex` legitimately sits still.
+            It also counts committed's internal entries, which `headIndex`
+            excludes, so under live traffic it routinely reads slightly
+            AHEAD of the same response's `headIndex` — that is motion, not
+            an anomaly.
             Present only with `?readPosition=true` AND when the owner's live
             worker answered (directly or via the proxy hop); absent
             otherwise. `0` with the field present means the worker has

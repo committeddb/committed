@@ -151,6 +151,12 @@ mirror whose `checkpointIndex` is 0:
   answer (unreachable, or ownership is settling after an election). Ask
   `ownerNode` directly.
 
+One scale note: `readPosition` counts committed's internal entries (index
+bumps, ingest positions, …), which `headIndex` deliberately excludes — so on
+a busy cluster a caught-up mirror routinely shows `readPosition` slightly
+**ahead of** `headIndex` in the same response. Ahead-of-head is motion, not
+an anomaly; only frozen is suspicious.
+
 **One caveat for selective syncables.** A syncable that consumes only some
 topics advances its checkpoint past entries on *other* topics that it reads
 and cheaply skips (this keeps its restart cost low — it never re-scans a

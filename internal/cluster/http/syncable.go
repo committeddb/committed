@@ -271,7 +271,11 @@ type SyncableStatusResponse struct {
 	// ReadPosition is the raft index of the last log entry the worker's
 	// reader examined — it advances per entry SCANNED, including entries
 	// skipped as other topics', so a worker wading a mostly-foreign log
-	// shows motion here while CheckpointIndex legitimately sits still.
+	// shows motion here while CheckpointIndex legitimately sits still. It
+	// counts committed's internal entries too, which HeadIndex excludes, so
+	// under live mixed traffic it routinely reads slightly AHEAD of the same
+	// response's HeadIndex — motion, not skew (observed on the first field
+	// validation: position 33 past head on a caught-up mirror).
 	// Present only when the request opts in with ?readPosition=true AND the
 	// owner's live worker answered (directly, or via the transparent proxy
 	// hop this handler makes to OwnerNode); absent on the default call — the
