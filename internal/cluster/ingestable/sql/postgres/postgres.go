@@ -673,6 +673,25 @@ func decodeLogicalMessage(walData []byte) (msg pglogrepl.Message, err error) {
 	return pglogrepl.Parse(walData)
 }
 
+// logResumePositioning states what the stream resumed FROM, once per
+// (re)connect — the postgres twin of the MySQL dialect's resume-time
+// positioning line, and the first datum a re-delivery incident needs (the
+// durable checkpoint is a protobuf in bbolt, invisible without decoding it
+// out of a backup). LSN 0 delegates the start point to the slot's confirmed
+// position (fresh slot, or a restart before the first checkpoint) — say so
+// rather than printing a misleading 0/0. Slot name and LSN are server
+// replication metadata — no row data, keys, or connection identity.
+func logResumePositioning(slot string, lsn pglogrepl.LSN) {
+	if lsn == 0 {
+		zap.L().Info("logical replication started at the slot's confirmed position (no local checkpoint)",
+			zap.String("slot", slot))
+		return
+	}
+	zap.L().Info("logical replication started from checkpointed position",
+		zap.String("slot", slot),
+		zap.String("resumeLSN", lsn.String()))
+}
+
 func (d *PostgreSQLDialect) stream(
 	ctx context.Context,
 	config *sql.Config,
@@ -912,6 +931,7 @@ func (d *PostgreSQLDialect) stream(
 	if err != nil {
 		return err
 	}
+	logResumePositioning(pgCfg.slotName, *lastLSN)
 
 	relations := make(map[uint32]*pglogrepl.RelationMessage)
 	var pending []*cluster.Entity

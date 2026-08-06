@@ -703,9 +703,10 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 		}
 		var syncer *replication.BinlogSyncer
 		var streamer *replication.BinlogStreamer
+		useGTID := gtidSet != nil && !gtidSet.IsEmpty()
 		for {
 			syncer = replication.NewBinlogSyncer(cfg)
-			if gtidSet != nil && !gtidSet.IsEmpty() {
+			if useGTID {
 				// Hand the syncer its OWN clone: BinlogSyncer mutates the GTID set it
 				// is given, in place, on its stream goroutine (handleEventAndACK →
 				// AddGTID). Passing our gtidSet directly would let that write race the
@@ -737,6 +738,7 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 				backoff = syncerBackoffMax
 			}
 		}
+		logResumePositioning(useGTID, gtidSet, lastPos)
 
 		// Read the source's collation catalog once (reused across reconnects) so
 		// the stream can transcode a non-utf8mb4 character column to UTF-8. Backs
@@ -1798,6 +1800,15 @@ func (h *MySQLEventHandler) dispatchEvent(ctx context.Context, header *replicati
 		if isSkippableFakeRotate(header.Timestamp, string(e.NextLogName), h.curFile) {
 			return nil
 		}
+		// Loud on purpose: rotation is rare (file fill, FLUSH LOGS, failover),
+		// and "from" is the datum that splits a routine roll-forward from a
+		// server starting the dump at an OLD file — at connect, a fake rotate
+		// naming a different file than the resume seed lands here, and
+		// from=checkpoint-file to=older-file is the rewind signature a
+		// re-delivery incident is diagnosed by.
+		zap.L().Info("binlog stream rotated",
+			zap.String("from", h.curFile),
+			zap.String("to", string(e.NextLogName)))
 		h.curFile = string(e.NextLogName)
 	case *replication.GTIDEvent:
 		// The GTID of the transaction about to stream; merged into the
@@ -2197,6 +2208,28 @@ func handOffSnapshotWindow(
 // transaction upgrades the checkpoint — and reconnects/restarts — to GTID
 // positioning. This log line is the missing observability, not a behavior
 // change. The mode query is best-effort: on error the generic message logs.
+// logResumePositioning is logCapturedPositioning's resume-time twin: capture
+// logs the positioning decision when it is MADE; this logs it when it is
+// USED — one line per binlog (re)connect stating how the stream positioned
+// and from exactly where. It is the first datum a re-delivery incident needs
+// ("what did the worker resume FROM?") and previously existed nowhere: the
+// durable checkpoint is a protobuf in bbolt, invisible without decoding it
+// out of a backup. Paired with the rotation log in dispatchEvent, a server
+// that starts the dump at an old binlog is visible on the next line instead
+// of surfacing as an unexplained replay. The coordinates are server
+// replication metadata (file names, offsets, transaction-id sets) — no row
+// data, keys, or connection identity.
+func logResumePositioning(useGTID bool, gtidSet mysql.GTIDSet, lastPos *mysql.Position) {
+	if useGTID {
+		zap.L().Info("binlog stream started by GTID positioning (failover-safe)",
+			zap.String("resumeGtidSet", gtidSet.String()))
+		return
+	}
+	zap.L().Info("binlog stream started by binlog file:pos positioning",
+		zap.String("resumeFile", lastPos.Name),
+		zap.Uint32("resumePos", lastPos.Pos))
+}
+
 func logCapturedPositioning(ctx context.Context, db *gosql.DB, gtidSet string) {
 	if gtidSet != "" {
 		zap.L().Info("snapshot: captured GTID positioning (failover-safe resume, real lag/caughtUp)")

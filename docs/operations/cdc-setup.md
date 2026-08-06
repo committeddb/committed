@@ -531,6 +531,14 @@ stream a replica reads).
    `null` to a number). The snapshot logs which positioning it captured either
    way, so neither case is silent.
 
+   Resume is equally visible: every binlog (re)connect logs which positioning
+   it **resumed by** and from exactly where (the GTID set, or the binlog
+   file:pos), and every file rotation logs `from` → `to`. A re-delivery
+   question — "what did the worker resume from, and where did the server
+   start the dump?" — is answered by two adjacent log lines instead of by
+   decoding the checkpoint out of bbolt. (Postgres logs the same on connect:
+   the slot and the LSN it resumed from.)
+
 3. **A replication grant.** The ingest user needs to read rows (snapshot), briefly
    lock to capture a consistent position, and stream the binlog:
 
