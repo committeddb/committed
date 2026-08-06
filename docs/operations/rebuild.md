@@ -30,6 +30,22 @@ Rebuild is the right response when any of these hold:
   leader shipped cannot fill in the event log. The node has already
   fatal-exited; continuing to run it is not safe.
 
+- The node logged a fatal error beginning:
+
+  ```
+  raft state rewound: the leader's heartbeat commits beyond this node's log.
+  ```
+
+  This node's data directory went *backward* — it previously acknowledged
+  (and possibly voted on) entries its log no longer contains. In practice:
+  a member was restored from a backup. This is not the same as being
+  behind (raft catches a lagging node up automatically); a rewound node
+  has broken its promises to the cluster, and running it endangers
+  cluster safety, so it exits immediately and on every restart until
+  rebuilt. **Members are rebuilt, never restored** — backup/restore is
+  for single-node deployments and whole-cluster recovery, where every
+  node rewinds together and no stale memory of the old state survives.
+
 - A brand-new node is joining a cluster that has been running long
   enough for its raft log to have compacted past `raft index 1`. In
   practice that's any multi-day-old cluster with non-trivial write

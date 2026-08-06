@@ -325,7 +325,7 @@ func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 		// that can never reach a peer.
 		panic("db: no transport factory configured — wire one with WithTransportFactory")
 	}
-	r := &httpTransportRaft{node: n.node}
+	r := &httpTransportRaft{node: n.node, lastIndex: n.storage, logger: n.logger}
 	t := n.transportFactory(id, ps, n.logger, r, n.tlsInfo, n.apiToken)
 	if n.transportWrapper != nil {
 		// Wrap once, before serveRaft starts driving the transport. The
@@ -1208,10 +1208,57 @@ func (n *Raft) processSnapshot(snap *raftpb.Snapshot) {
 
 type httpTransportRaft struct {
 	node raft.Node
+	// lastIndex exposes the raft log's last index for the rewound-member
+	// guard below — a narrow view of Storage so the guard is testable with a
+	// one-method stub.
+	lastIndex interface{ LastIndex() (uint64, error) }
+	logger    *zap.Logger
 }
 
 // The next four methods implement the Raft interface in the rafthttp package needed for rafthttp.Transport
+
+// Process feeds an incoming raft message into the node — after the
+// rewound-member guard.
+//
+// The guard: a heartbeat's commit index is capped by the leader at
+// min(Match, committed), and Match only ever advances on this node's own
+// post-fsync acknowledgments — so in every correct history a heartbeat's
+// commit is ≤ this node's durable log. A heartbeat commit BEYOND our last
+// index therefore proves this node's state has REWOUND: it previously
+// acknowledged (and possibly voted on) entries its log no longer contains —
+// in practice a member whose data directory was restored from a backup.
+// Running in that state endangers cluster safety (rewound vote/ack promises
+// are split-brain ingredients), and without this guard the raft library
+// panics in commitTo with "Was the raft log corrupted, truncated, or
+// lost?" — a crash-loop that misdiagnoses an operational mistake as disk
+// corruption. Exit once, with the real diagnosis and the runbook.
+//
+// Heartbeat-only is complete: MsgApp's commitTo is min-capped against the
+// appended tail and the snapshot path commits to an index the restored
+// snapshot contains — neither can trip the library panic. Accepted
+// residual: a rewind small enough that replication refills the log before
+// the first heartbeat lands evades both the library panic and this guard;
+// closing that needs member-incarnation identity (protocol-level), and the
+// true prevention is operational either way — members are rebuilt, never
+// restored (docs/operations/rebuild.md). A LastIndex read error skips the
+// guard rather than fatal-ing on a read; the library panic remains the
+// backstop.
 func (n *httpTransportRaft) Process(ctx context.Context, m *raftpb.Message) error {
+	if m.GetType() == raftpb.MsgHeartbeat {
+		if li, err := n.lastIndex.LastIndex(); err == nil && m.GetCommit() > li {
+			n.logger.Fatal(
+				"raft state rewound: the leader's heartbeat commits beyond this node's log. "+
+					"This node previously acknowledged (and possibly voted on) entries its log no longer "+
+					"contains — its data directory was rewound, typically a member restored from a backup. "+
+					"Running with rewound acknowledgments endangers cluster safety, so this node must not "+
+					"continue. Members are rebuilt, not restored: run the rebuild procedure at "+
+					"docs/operations/rebuild.md.",
+				zap.Uint64("heartbeatCommit", m.GetCommit()),
+				zap.Uint64("lastIndex", li),
+				zap.Uint64("from", m.GetFrom()),
+			)
+		}
+	}
 	return n.node.Step(ctx, m)
 }
 func (n *httpTransportRaft) IsIDRemoved(id uint64) bool  { return false }
