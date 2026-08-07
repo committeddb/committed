@@ -4,8 +4,8 @@ This guide is for operators standing up **change data capture** — ingesting a
 SQL database's inserts, updates, and deletes into a committed topic. It covers
 what the source database needs, what committed sets up for you, the
 snapshot→streaming lifecycle, what to watch, and how to fix the common failures.
-Both supported engines are here: PostgreSQL (logical replication) and MySQL
-(binlog).
+All supported engines are here: PostgreSQL (logical replication), MySQL
+(binlog), and SQL Server (Change Tracking).
 
 For the end-to-end walkthrough (source → ingest → topic → projection → query),
 see the [quickstart](../quickstart.md); this guide is the reference for the
@@ -22,9 +22,10 @@ change into a proposal on a topic. It runs in two phases:
    and proposes each row. It records a per-table cursor as it goes, so a restart
    mid-snapshot resumes where it left off rather than starting over.
 2. **Streaming.** Once the snapshot completes, the worker follows the database's
-   change stream (Postgres logical replication / MySQL binlog) from the position
-   it captured at the start of the snapshot, proposing each insert, update, and
-   delete as it commits at the source.
+   change stream (Postgres logical replication / MySQL binlog / SQL Server
+   Change Tracking polls) from the position it captured at the start of the
+   snapshot, proposing each insert, update, and delete as it commits at the
+   source.
 
 A source `DELETE` becomes a **keyed tombstone** (a delete entity with no
 payload), not an upsert of the old row — that is what makes right-to-be-forgotten
@@ -238,7 +239,8 @@ GET /v1/ingestable/{id}/status
   (`pg_current_wal_lsn − confirmed_flush_lsn`), **MySQL transactions** under GTID
   positioning (`@@gtid_executed − consumed`), **MySQL bytes** under file:pos
   positioning (computed from the source's binlog inventory — every file at or
-  after the consumed coordinate, minus the consumed offset). `null` during
+  after the consumed coordinate, minus the consumed offset), **SQL Server
+  transactions** (current Change Tracking version − consumed). `null` during
   snapshot, when the source is unreachable, or when a re-snapshot is required.
   Check `lagUnit` before alarming on a threshold — the same number is wildly
   different sizes in bytes vs transactions.
@@ -705,6 +707,89 @@ unaffected.
   re-applies idempotently — so you don't re-create the ingestable by hand. To avoid
   it, keep binlog retention longer than your worst-case downtime (see the retention
   caveat above). If it recurs, your retention is too short for your restart window.
+
+## SQL Server
+
+SQL Server ingest captures changes via **Change Tracking (CT)** — available on
+**every edition** (Web and Express included; there is no edition gate). CT
+reports, per row, that it changed and how (insert/update/delete) since a
+version; committed reads the row's current values through the same query path
+the snapshot uses, so snapshot and change payloads are byte-identical by
+construction. What CT does not carry is intermediate history: a row updated
+five times between polls yields one upsert at the final value — the same
+convergent last-write-wins contract as everywhere else in ingest. Do not use
+it as a change-event historian.
+
+### Prerequisites (operator)
+
+1. **A `sqlserver://` connection string** naming the database in the query
+   parameter (the URL path is the instance name):
+
+   ```
+   sqlserver://user:${SQLSERVER_PASSWORD}@host:1433?database=appdb
+   ```
+
+2. **Primary keys on every watched table.** Change Tracking requires one, and
+   committed keys delete tombstones by it. The configured `primaryKey` must be
+   columns of the table's real PRIMARY KEY (preflight verifies).
+
+3. **Change Tracking enabled — or the rights to enable it.** committed turns
+   CT on where it is off (database level with a 2-day auto-cleanup retention,
+   and per table), which needs ALTER on the database/table. On a locked-down
+   source, have a DBA pre-enable instead:
+
+   ```sql
+   ALTER DATABASE appdb SET CHANGE_TRACKING = ON (CHANGE_RETENTION = 2 DAYS, AUTO_CLEANUP = ON);
+   ALTER TABLE dbo.orders ENABLE CHANGE_TRACKING;
+   ```
+
+   **Ownership etiquette:** committed marks the tables whose CT it enabled
+   (an extended property) and, when the ingestable is deleted, disables ONLY
+   those. CT that pre-existed the ingestable is never touched, and
+   database-level CT is never disabled.
+
+### Configuration
+
+```toml
+[ingestable]
+type = "sql"
+
+[sql]
+dialect = "sqlserver"
+topic = "orders"
+connectionString = "sqlserver://committed:${SQLSERVER_PASSWORD}@db:1433?database=appdb"
+tables = ["orders"]           # bare names scope to dbo; "sales.orders" keeps its schema
+primaryKey = "id"
+
+[sql.options]
+poll_interval = "3s"          # CT poll cadence (default 3s) — read models trail by ~this
+batch_size = "1000"           # snapshot keyset batch
+```
+
+### Lag, retention, and the poll cadence
+
+- `lag` reports **transactions** (`lagUnit: "transactions"`): the source's
+  current CT version minus the consumed version — the version increments per
+  committed transaction.
+- Latency is the **poll cadence**: changes arrive within ~`poll_interval` of
+  committing at the source, comparable to the sync workers' own cadence.
+- **Retention** (`CHANGE_RETENTION`, default 2 days when committed enables
+  CT) is the binlog-expiry analog: if the cleanup purges changes past the
+  consumed version (downtime longer than retention), committed detects it
+  and **automatically re-snapshots** — loud, and the data re-applies
+  idempotently. Keep retention longer than your worst-case downtime.
+
+### SQL Server troubleshooting
+
+- **Preflight fails, "has no primary key."** Change Tracking (and delete
+  tombstones) require one; add a PK or exclude the table.
+- **Worker retries with "enable change tracking … ALTER" in the error.** The
+  ingest user lacks ALTER rights and CT is off — pre-enable per the
+  prerequisites, or grant the rights.
+- **`reSnapshotRequired: true`.** The retention cleanup purged past the
+  consumed version (or the consumed version predates CT's minimum valid
+  version after a re-enable). committed re-snapshots automatically; if it
+  recurs, raise `CHANGE_RETENTION`.
 
 ---
 

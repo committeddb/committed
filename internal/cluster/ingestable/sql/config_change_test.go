@@ -78,6 +78,27 @@ func TestIngestable_ValidateReplace_DatabaseChangeRejected(t *testing.T) {
 	require.Equal(t, []string{"connectionString"}, details.ChangedFields)
 }
 
+// sqlserver:// carries its database in the ?database= query parameter (the
+// URL path is the instance name), so identity comparison must read BOTH: a
+// database swap on the same host/instance is a re-point, and so is an
+// instance swap with the same database — while a rotated credential is not.
+func TestIngestable_ValidateReplace_SQLServerIdentity(t *testing.T) {
+	prior := ingestableSrc("t1", "sqlserver://host:1433?database=db-a", "id")
+	dbSwap := ingestableSrc("t1", "sqlserver://host:1433?database=db-b", "id")
+	var details *sql.SourceIdentityChangeError
+	require.ErrorAs(t, dbSwap.ValidateReplace(prior), &details,
+		"a database swap must be detected even though it lives in the query, not the path")
+	require.Equal(t, []string{"connectionString"}, details.ChangedFields)
+
+	instSwap := ingestableSrc("t1", "sqlserver://host:1433/other-instance?database=db-a", "id")
+	require.ErrorAs(t, instSwap.ValidateReplace(prior), &details,
+		"an instance swap addresses different data")
+
+	rotated := ingestableSrc("t1", "sqlserver://bob:pw2@host:1433?database=db-a", "id")
+	require.NoError(t, rotated.ValidateReplace(prior),
+		"a credential rotation is not a re-point")
+}
+
 // A credential-only change (same host + database, rotated user/password) is NOT
 // a re-point: the persisted position is still valid. Rejecting it would force a
 // needless full re-snapshot on every routine password rotation.

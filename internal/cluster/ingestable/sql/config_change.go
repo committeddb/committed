@@ -258,9 +258,18 @@ func serverIdentityChanged(oldCS, newCS string) bool {
 	return ou.Host != nu.Host || connDatabase(ou) != connDatabase(nu)
 }
 
-// connDatabase is the database name a connection-string URL addresses (the path
-// with its leading slash trimmed), e.g. "postgres://h/app" -> "app".
+// connDatabase is the database identity a connection-string URL addresses,
+// as compared by serverIdentityChanged (alongside Host). For postgres:// and
+// mysql:// it is the path with its leading slash trimmed
+// ("postgres://h/app" -> "app"). For sqlserver:// the path is the INSTANCE
+// name and the database rides the ?database= query parameter — so the
+// identity is BOTH, joined: reading only the path would miss a database
+// swap, and reading only the parameter would miss an instance swap; either
+// one addresses different data.
 func connDatabase(u *url.URL) string {
+	if u.Scheme == "sqlserver" {
+		return strings.TrimPrefix(u.Path, "/") + "/" + u.Query().Get("database")
+	}
 	return strings.TrimPrefix(u.Path, "/")
 }
 
