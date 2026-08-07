@@ -30,11 +30,14 @@ type IngestableStatusResponse struct {
 	// ("0/1A2B3C8") or a MySQL binlog coordinate ("binlog.000004:1547").
 	Position string `json:"position"`
 	// Lag is how far the source write head is ahead of what this ingest has
-	// durably consumed, in the dialect's natural unit: Postgres bytes, MySQL
-	// (GTID) transactions. null while snapshotting, when the source is
-	// unreachable, on a MySQL source without GTID positioning, or when a
-	// re-snapshot is required; a non-null 0 means fully caught up.
+	// durably consumed, in the unit lagUnit names: Postgres bytes, MySQL
+	// transactions under GTID positioning, MySQL bytes under file:pos
+	// positioning. null while snapshotting, when the source is unreachable,
+	// or when a re-snapshot is required; a non-null 0 means fully caught up.
 	Lag *uint64 `json:"lag"`
+	// LagUnit is "bytes" or "transactions" — which scale Lag is on. Omitted
+	// exactly when lag is null.
+	LagUnit string `json:"lagUnit,omitempty"`
 	// CaughtUp is true exactly when the snapshot is complete and lag is a known
 	// 0 — never true while lag is null.
 	CaughtUp bool `json:"caughtUp"`
@@ -213,6 +216,7 @@ func toIngestableStatusResponse(st cluster.IngestableStatus) IngestableStatusRes
 		SnapshotProgress:   make([]TableSnapshotProgress, 0, len(st.SnapshotProgress)),
 		Position:           st.Position,
 		Lag:                st.Lag,
+		LagUnit:            st.LagUnit,
 		CaughtUp:           st.CaughtUp,
 		ReSnapshotRequired: st.ReSnapshotRequired,
 	}

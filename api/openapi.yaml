@@ -2263,14 +2263,23 @@ components:
           minimum: 0
           description: |
             How far the source's write head is ahead of what this ingest has
-            durably consumed, in the dialect's natural unit: Postgres bytes
+            durably consumed, in the unit `lagUnit` names: Postgres bytes
             (pg_current_wal_lsn − the slot's confirmed_flush_lsn); MySQL under
             GTID positioning transactions (count of @@gtid_executed − the
-            consumed GTID set). `null` when it cannot be determined — during the
-            snapshot phase, when the source is unreachable, on a MySQL source
-            without GTID positioning (gtid_mode=OFF / a legacy file:pos
-            checkpoint), or when a re-snapshot is required. A non-null 0 means
-            fully caught up.
+            consumed GTID set); MySQL under file:pos positioning
+            (gtid_mode=OFF / a legacy checkpoint) bytes behind the binlog
+            write head, computed from the source's binlog inventory. `null`
+            when it cannot be determined — during the snapshot phase, when
+            the source is unreachable, or when a re-snapshot is required. A
+            non-null 0 means fully caught up.
+        lagUnit:
+          type: string
+          enum: [bytes, transactions]
+          description: |
+            Which scale `lag` is on — `bytes` (Postgres; MySQL file:pos) or
+            `transactions` (MySQL GTID). Omitted exactly when `lag` is null.
+            Read it before alarming on a threshold: the same number is wildly
+            different sizes in the two units.
         caughtUp:
           type: boolean
           description: |

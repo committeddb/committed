@@ -292,6 +292,131 @@ func binlogRetentionWarning(expireSeconds int64) string {
 	return ""
 }
 
+// binlogFile is one row of the source's binlog inventory (SHOW BINARY LOGS).
+type binlogFile struct {
+	name string
+	size uint64
+	// encrypted is the Encrypted column (8.0.14+), when present. An encrypted
+	// file's on-disk size includes the per-file encryption header, so it no
+	// longer equals the logical stream offsets checkpoints are in — byte
+	// arithmetic over it would be a known-wrong number (see binlogBytesBehind).
+	encrypted bool
+}
+
+// readSourceBinlogInventory lists the source's binlog files with sizes under
+// the status timeout. SHOW BINARY LOGS is used (not SHOW MASTER STATUS /
+// SHOW BINARY LOG STATUS) because it is stable across the 8.4 rename AND
+// carries per-file sizes, which the bytes-behind computation needs anyway —
+// the last file's size IS the write head. The result column count varies by
+// version (8.0.14 added Encrypted), so rows scan positionally on the first
+// two columns. Read-only; one short-lived connection.
+func readSourceBinlogInventory(ctx context.Context, config *sql.Config) ([]binlogFile, error) {
+	cctx, cancel := context.WithTimeout(ctx, statusLagTimeout)
+	defer cancel()
+
+	db, err := openMySQL(config.ConnectionString)
+	if err != nil {
+		return nil, fmt.Errorf("open connection: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	rows, err := db.QueryContext(cctx, "SHOW BINARY LOGS")
+	if err != nil {
+		return nil, fmt.Errorf("show binary logs: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, fmt.Errorf("binlog inventory columns: %w", err)
+	}
+	encryptedCol := -1
+	for i, c := range cols {
+		if strings.EqualFold(c, "Encrypted") {
+			encryptedCol = i
+		}
+	}
+	var files []binlogFile
+	for rows.Next() {
+		var name string
+		var size uint64
+		var encrypted gosql.NullString
+		dest := make([]any, len(cols))
+		dest[0], dest[1] = &name, &size
+		for i := 2; i < len(cols); i++ {
+			if i == encryptedCol {
+				dest[i] = &encrypted
+			} else {
+				dest[i] = new(gosql.RawBytes)
+			}
+		}
+		if err := rows.Scan(dest...); err != nil {
+			return nil, fmt.Errorf("scan binlog inventory: %w", err)
+		}
+		files = append(files, binlogFile{
+			name:      name,
+			size:      size,
+			encrypted: strings.EqualFold(encrypted.String, "Yes"),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("binlog inventory rows: %w", err)
+	}
+	return files, nil
+}
+
+// binlogBytesBehind computes how many binlog bytes lie between a consumed
+// file:pos coordinate and the source's write head, from the binlog
+// inventory: the consumed file's remaining bytes plus every later file in
+// full (the final file's size is the current write offset — the head). It is
+// pure so the arithmetic is unit-testable without a server.
+//
+// purged reports the consumed file missing from the inventory (with the
+// inventory non-empty and parsable): the source discarded binlogs past our
+// position, streaming can never close that gap, and the caller surfaces the
+// re-snapshot state. ok is false when the computation cannot be trusted —
+// an empty inventory or a file name without the numeric suffix ordering
+// relies on. The subtraction clamps at zero: the checkpoint can be
+// momentarily ahead of a stale inventory read (a commit between the two
+// queries), and a negative lag is noise, not information.
+func binlogBytesBehind(files []binlogFile, consumedFile string, consumedPos uint64) (bytesBehind uint64, purged, ok bool) {
+	consumedNum, numOK := binlogFileNum(consumedFile)
+	if !numOK || len(files) == 0 {
+		return 0, false, false
+	}
+	var total uint64
+	found := false
+	for _, f := range files {
+		n, fOK := binlogFileNum(f.name)
+		if !fOK {
+			return 0, false, false
+		}
+		if n < consumedNum {
+			continue
+		}
+		// An encrypted file in the measured range poisons the arithmetic: its
+		// on-disk size includes the encryption header, so it no longer equals
+		// the logical offsets the checkpoint is in — the sum would be a small
+		// constant lie that keeps caughtUp false forever. A nil lag is honest;
+		// a known-wrong number is not. (Encrypted files BELOW the consumed
+		// coordinate never enter the sum and don't matter.)
+		if f.encrypted {
+			return 0, false, false
+		}
+		if n == consumedNum {
+			found = true
+		}
+		total += f.size
+	}
+	if !found {
+		return 0, true, false
+	}
+	if total <= consumedPos {
+		return 0, false, true
+	}
+	return total - consumedPos, false, true
+}
+
 // statusLagTimeout bounds the source query Status makes for @@gtid_executed /
 // @@gtid_purged. Status is a read endpoint, so it must not hang on an
 // unreachable source — a failed/late query simply leaves Lag nil.
@@ -303,8 +428,10 @@ const statusLagTimeout = 5 * time.Second
 // diffs the consumed GTID set against the source's @@gtid_executed to report a
 // transaction-count Lag and CaughtUp, and against @@gtid_purged to flag the
 // re-snapshot hole. Without a consumed GTID set (gtid_mode=OFF / a legacy
-// file:pos checkpoint) there is no global head to diff against, so Lag stays nil
-// and CaughtUp stays false — an unknown lag is not a caught-up lag.
+// file:pos checkpoint) it falls back to a BYTES-behind Lag computed from the
+// source's binlog inventory — LagUnit says which scale a caller got. Only when
+// neither computation can run (source unreachable, unparsable inventory) does
+// Lag stay nil with CaughtUp false — an unknown lag is not a caught-up lag.
 func (m *MySQLDialect) Status(ctx context.Context, config *sql.Config, pos cluster.Position) (cluster.IngestableStatus, error) {
 	config.EnsureTopics()
 	// An EMPTY position means nothing has ever durably checkpointed — phase
@@ -317,6 +444,8 @@ func (m *MySQLDialect) Status(ctx context.Context, config *sql.Config, pos clust
 	}
 	var progress *dialectpb.SnapshotProgress
 	var position, consumedGTID string
+	var consumedFile string
+	var consumedPos uint64
 	if len(pos) > 0 {
 		posProto := &dialectpb.MySQLBinLogPosition{}
 		if err := proto.Unmarshal(pos, posProto); err != nil {
@@ -326,6 +455,7 @@ func (m *MySQLDialect) Status(ctx context.Context, config *sql.Config, pos clust
 		consumedGTID = posProto.GtidSet
 		if posProto.Name != "" {
 			position = fmt.Sprintf("%s:%d", posProto.Name, posProto.Pos)
+			consumedFile, consumedPos = posProto.Name, uint64(posProto.Pos)
 		}
 	}
 
@@ -339,9 +469,34 @@ func (m *MySQLDialect) Status(ctx context.Context, config *sql.Config, pos clust
 	}
 	status.Phase = "streaming"
 
-	// No consumed GTID set → no global head to diff against (the Phase-A
-	// behavior): leave Lag nil, CaughtUp false.
+	// No consumed GTID set → no transaction head to diff against. Fall back
+	// to BYTES behind the binlog write head, computed from the source's
+	// binlog inventory (SHOW BINARY LOGS — version-stable where SHOW MASTER
+	// STATUS was removed in 8.4): every file at-or-after the consumed one,
+	// minus the consumed offset. Same soft posture as the GTID query: any
+	// failure leaves Lag nil (logged at Debug), and a consumed file missing
+	// from the inventory means the source purged past our position — the
+	// file:pos analog of the gtid_purged hole, surfaced as the same distinct
+	// re-snapshot state rather than an understated lag.
 	if consumedGTID == "" {
+		if consumedFile == "" {
+			return status, nil
+		}
+		files, err := readSourceBinlogInventory(ctx, config)
+		if err != nil {
+			zap.L().Debug("[mysql.status] binlog inventory query failed", zap.Error(err))
+			return status, nil
+		}
+		bytesBehind, purged, ok := binlogBytesBehind(files, consumedFile, consumedPos)
+		if purged {
+			status.ReSnapshotRequired = true
+			return status, nil
+		}
+		if ok {
+			status.Lag = &bytesBehind
+			status.LagUnit = cluster.LagUnitBytes
+			status.CaughtUp = bytesBehind == 0
+		}
 		return status, nil
 	}
 	consumed, err := mysql.ParseMysqlGTIDSet(consumedGTID)
@@ -370,6 +525,7 @@ func (m *MySQLDialect) Status(ctx context.Context, config *sql.Config, pos clust
 
 	lag := gtidLag(executed, consumed)
 	status.Lag = &lag
+	status.LagUnit = cluster.LagUnitTransactions
 	status.CaughtUp = consumed.Contain(executed)
 	return status, nil
 }

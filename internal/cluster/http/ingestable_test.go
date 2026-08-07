@@ -3,9 +3,12 @@ package http_test
 import (
 	"encoding/json"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 // TestDeleteIngestable threads the id through to the cluster and returns 200. The
@@ -46,4 +49,36 @@ func TestDeleteIngestable_EmptyID(t *testing.T) {
 
 	require.NotEqual(t, 200, w.Code)
 	require.Equal(t, 0, fake.DeleteIngestableCallCount())
+}
+
+// lagUnit names the scale lag is on — load-bearing now that MySQL reports
+// transactions under GTID positioning but bytes under the file:pos fallback:
+// present next to a non-null lag, omitted with a null one.
+func TestGetIngestableStatus_LagUnit(t *testing.T) {
+	h, fake := setupTest()
+	lag := uint64(8192)
+	fake.IngestableStatusReturns(cluster.IngestableStatus{
+		WorkerState: cluster.WorkerStateRunning,
+		Phase:       "streaming",
+		Lag:         &lag,
+		LagUnit:     cluster.LagUnitBytes,
+	}, nil)
+
+	req := httptest.NewRequest("GET", "http://localhost/v1/ingestable/ing-1/status", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	require.Equal(t, 200, w.Code)
+	require.Contains(t, w.Body.String(), `"lagUnit":"bytes"`)
+
+	// Unknown lag: null lag, no unit — a unit without a number is noise.
+	fake.IngestableStatusReturns(cluster.IngestableStatus{
+		WorkerState: cluster.WorkerStateRunning,
+		Phase:       "streaming",
+	}, nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("GET", "http://localhost/v1/ingestable/ing-1/status", nil))
+	require.Equal(t, 200, w.Code)
+	require.Contains(t, w.Body.String(), `"lag":null`)
+	require.False(t, strings.Contains(w.Body.String(), "lagUnit"),
+		"lagUnit must be omitted when lag is null")
 }

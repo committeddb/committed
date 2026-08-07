@@ -537,6 +537,7 @@ func (d *PostgreSQLDialect) Status(ctx context.Context, config *sql.Config, pos 
 			zap.String("slot", config.Options["slot_name"]), zap.Error(lagErr))
 	} else if ok {
 		status.Lag = &lag
+		status.LagUnit = cluster.LagUnitBytes
 		status.CaughtUp = lag == 0
 	}
 

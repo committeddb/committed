@@ -234,11 +234,14 @@ GET /v1/ingestable/{id}/status
 - **`position`** — the engine-native cursor: a Postgres LSN (`0/1A2B3C8`) or a
   MySQL binlog coordinate (`binlog.000007:4096`).
 - **`lag`** — how far the source write head is ahead of what this ingest has
-  durably consumed, in the engine's natural unit: **Postgres bytes**
+  durably consumed, in the unit **`lagUnit`** names: **Postgres bytes**
   (`pg_current_wal_lsn − confirmed_flush_lsn`), **MySQL transactions** under GTID
-  positioning (`@@gtid_executed − consumed`). `null` during snapshot, when the
-  source is unreachable, on a MySQL source without GTID positioning, or when a
-  re-snapshot is required.
+  positioning (`@@gtid_executed − consumed`), **MySQL bytes** under file:pos
+  positioning (computed from the source's binlog inventory — every file at or
+  after the consumed coordinate, minus the consumed offset). `null` during
+  snapshot, when the source is unreachable, or when a re-snapshot is required.
+  Check `lagUnit` before alarming on a threshold — the same number is wildly
+  different sizes in bytes vs transactions.
 - **`caughtUp`** — `true` only when the snapshot is complete **and** lag is a
   known `0`. Never `true` while `lag` is `null`.
 - **`reSnapshotRequired`** — `true` when the source discarded change data this
@@ -517,8 +520,9 @@ stream a replica reads).
    ```
 
    It is **not required**: with `gtid_mode=OFF` committed falls back to file:offset
-   positioning (the pre-0.7 behavior — single-server only, `lag`/`caughtUp` stay
-   `null`). Preflight does not fail on this; it logs a warning so the degraded mode
+   positioning (the pre-0.7 behavior — single-server only; `lag` reports **bytes**
+   behind the binlog write head instead of transactions, with `lagUnit` saying
+   which). Preflight does not fail on this; it logs a warning so the degraded mode
    is visible rather than silent. Default MySQL ships `gtid_mode=OFF`, so set this
    explicitly for any production / failover-capable deployment.
 
@@ -639,11 +643,17 @@ DDL and TOML there are copy-pasteable.
 With `gtid_mode=ON`, committed reports a real `lag` and `caughtUp` for MySQL,
 computed by GTID-set arithmetic: it diffs the consumed GTID set against the
 source's `@@gtid_executed`. `lag` is the **number of transactions** the source is
-ahead (not bytes — the units differ by engine), and `caughtUp` is `true` once the
-consumed set covers `@@gtid_executed`. With `gtid_mode=OFF` there is no global
-head to diff against, so MySQL `lag` stays `null` and `caughtUp` stays `false`
-(use `phase == "streaming"` plus `snapshotProgress[*].complete` to know the
-snapshot is done) — another reason to enable GTID mode.
+ahead (`lagUnit: "transactions"`), and `caughtUp` is `true` once the consumed set
+covers `@@gtid_executed`. With `gtid_mode=OFF` there is no transaction head to
+diff against, so committed falls back to **bytes behind** the binlog write head
+(`lagUnit: "bytes"`), computed from the source's binlog inventory: every binlog
+file at or after the consumed coordinate, minus the consumed offset. `caughtUp`
+works in both modes. The GTID form is still the better signal — transaction
+counts are stable under batch size, and GTID positioning is what makes resume
+failover-safe — but file:pos deployments are no longer flying blind. If the
+consumed binlog file is missing from the source's inventory, the source purged
+past the consumed position and `reSnapshotRequired` is reported, exactly as the
+GTID path does via `@@gtid_purged`.
 
 **The retention caveat (the one property a slot gives that a binlog can't).** A
 Postgres slot *holds* the WAL until committed acknowledges it; a MySQL binlog

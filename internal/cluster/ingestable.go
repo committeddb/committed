@@ -114,6 +114,14 @@ type ParkedWorker struct {
 	ID   string
 }
 
+// Lag units reported by IngestableStatus.LagUnit. The unit follows the
+// positioning mode, not just the dialect: Postgres and MySQL-file:pos report
+// bytes behind the source's write head; MySQL-GTID reports transactions.
+const (
+	LagUnitBytes        = "bytes"
+	LagUnitTransactions = "transactions"
+)
+
 type IngestableStatus struct {
 	// WorkerState is the worker's lifecycle state: "running" or "parked" (the
 	// freeze/restart supervisor gave up; fix the config and re-POST it, or delete).
@@ -138,14 +146,21 @@ type IngestableStatus struct {
 	// dedup point, so there is no separate sequence to report.
 	Position string
 	// Lag is how far the source's write head is ahead of what this ingest has
-	// durably consumed. The unit is the dialect's natural one: Postgres reports
-	// bytes (pg_current_wal_lsn − confirmed_flush_lsn of the slot); MySQL under
-	// GTID positioning reports transactions (count of @@gtid_executed − the
-	// consumed GTID set). nil when it cannot be determined — during the snapshot
-	// phase, when the source is unreachable, on a MySQL source without GTID
-	// positioning (gtid_mode=OFF / legacy file:pos checkpoint), or when a
-	// re-snapshot is required. A non-nil 0 means fully caught up.
+	// durably consumed. The unit is mode-dependent — read LagUnit: Postgres
+	// reports bytes (pg_current_wal_lsn − confirmed_flush_lsn of the slot);
+	// MySQL under GTID positioning reports transactions (count of
+	// @@gtid_executed − the consumed GTID set); MySQL under file:pos
+	// positioning (gtid_mode=OFF / a legacy checkpoint) reports bytes behind
+	// the binlog write head, computed from the source's binlog inventory. nil
+	// when it cannot be determined — during the snapshot phase, when the
+	// source is unreachable, or when a re-snapshot is required. A non-nil 0
+	// means fully caught up.
 	Lag *uint64
+	// LagUnit names Lag's unit — LagUnitBytes or LagUnitTransactions — so a
+	// caller never has to guess which scale a number is on (a dashboard alarm
+	// at lag > 1000 means wildly different things in transactions vs bytes).
+	// Empty exactly when Lag is nil.
+	LagUnit string
 	// CaughtUp is true exactly when the snapshot is complete and Lag is a
 	// known 0 — the only state in which the read model is fully current. It is
 	// never true while Lag is nil (an unknown lag is not a caught-up lag).

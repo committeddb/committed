@@ -218,6 +218,7 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 						{Table: "region", Complete: true},
 					},
 					Lag:      &lag,
+					LagUnit:  cluster.LagUnitBytes,
 					CaughtUp: true,
 				}, nil)
 			},
@@ -239,6 +240,7 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 					Phase:       "streaming",
 					Position:    "0/1A2B3C8",
 					Lag:         &lag,
+					LagUnit:     cluster.LagUnitTransactions,
 					CaughtUp:    true,
 				}, nil)
 				fake.SyncablesReturns([]*cluster.Configuration{

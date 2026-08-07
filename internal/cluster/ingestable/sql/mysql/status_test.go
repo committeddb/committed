@@ -12,10 +12,12 @@ import (
 	"github.com/committeddb/committed/internal/cluster/ingestable/sql/dialectpb"
 )
 
-// TestMysqlStatus covers MySQL Status entirely offline (it makes no source
-// query — lag is a deliberate follow-on): phase from the snapshot-progress
-// presence, the binlog coordinate as "file:pos", and Lag always nil (so
-// CaughtUp is never true).
+// TestMysqlStatus covers MySQL Status entirely offline: phase from the
+// snapshot-progress presence and the binlog coordinate as "file:pos". The
+// streaming case has no GTID set, so Status attempts the file:pos
+// bytes-behind fallback — whose source query fails immediately on the empty
+// connection string — pinning the soft posture: an unreachable source leaves
+// Lag nil and CaughtUp false rather than erroring the status read.
 func TestMysqlStatus(t *testing.T) {
 	d := &MySQLDialect{}
 	cfg := &sql.Config{Tables: []string{"region", "nation"}}
@@ -27,7 +29,8 @@ func TestMysqlStatus(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "streaming", st.Phase)
 	require.Equal(t, "binlog.000004:1547", st.Position)
-	require.Nil(t, st.Lag, "MySQL lag is out of scope")
+	require.Nil(t, st.Lag, "unreachable source: the bytes-behind fallback must fail soft")
+	require.Empty(t, st.LagUnit, "LagUnit is empty exactly when Lag is nil")
 	require.False(t, st.CaughtUp, "no caught-up without a known lag")
 	require.Equal(t, []cluster.TableSnapshotStatus{
 		{Table: "region", Complete: true},
