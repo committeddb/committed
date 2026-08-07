@@ -23,6 +23,11 @@ var (
 	Postgres = Quoter{delim: '"'}
 	// MySQL quotes identifiers with `...` (doubling an embedded `).
 	MySQL = Quoter{delim: '`'}
+	// SQLServer quotes identifiers with "..." like Postgres: committed's
+	// sessions run with QUOTED_IDENTIFIER ON (the go-mssqldb default), so the
+	// ISO form is safe and the bracket form's asymmetric-delimiter refactor is
+	// avoided.
+	SQLServer = Quoter{delim: '"'}
 )
 
 // Ident quotes a single identifier, doubling any embedded delimiter. Promoted from

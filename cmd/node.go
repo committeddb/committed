@@ -25,6 +25,7 @@ import (
 	ingestablesql "github.com/committeddb/committed/internal/cluster/ingestable/sql"
 	ingestablemysql "github.com/committeddb/committed/internal/cluster/ingestable/sql/mysql"
 	ingestablepostgres "github.com/committeddb/committed/internal/cluster/ingestable/sql/postgres"
+	ingestablesqlserver "github.com/committeddb/committed/internal/cluster/ingestable/sql/sqlserver"
 	"github.com/committeddb/committed/internal/cluster/metrics"
 	synchttp "github.com/committeddb/committed/internal/cluster/syncable/http"
 	syncsql "github.com/committeddb/committed/internal/cluster/syncable/sql"
@@ -587,6 +588,7 @@ func ingestableParser(t ingestablesql.Typer, epoch ingestablesql.TopicEpochReade
 	p := ingestablesql.NewIngestableParser(t)
 	p.Dialects["mysql"] = &ingestablemysql.MySQLDialect{}
 	p.Dialects["postgres"] = &ingestablepostgres.PostgreSQLDialect{}
+	p.Dialects["sqlserver"] = &ingestablesqlserver.SQLServerDialect{}
 	// Wire the delete-surviving per-topic refresh-epoch floor so a same-topic
 	// recreate resumes its generation above the rows still on the sink.
 	p.EpochFloor = epoch

@@ -62,6 +62,22 @@ message PostgresPosition {
     uint64 refresh_epoch = 3;
 }
 
+// SQLServerPosition is the Change Tracking cursor: version is the consumed
+// CHANGE_TRACKING_CURRENT_VERSION() — a per-database monotonic bigint that
+// increments per committed transaction, so it doubles as the transaction-count
+// lag baseline. Snapshot progress, refresh epoch, and the snapshotted-tables
+// registry carry the same semantics as the MySQL position (added-table
+// backfill detection diffs configured tables against snapshotted_tables).
+// Enablement ownership is deliberately NOT here: committed marks the tables
+// whose CT it enabled with extended properties ON THE SOURCE, so
+// TeardownSource (which receives only the config) can scope its disables.
+message SQLServerPosition {
+    uint64 version = 1;
+    SnapshotProgress snapshot_progress = 2;
+    uint64 refresh_epoch = 3;
+    repeated string snapshotted_tables = 4;
+}
+
 // SnapshotProgress tracks where a chunked (keyset-paginated) snapshot
 // has gotten to. A table is either:
 //   - absent from both fields: not yet started
