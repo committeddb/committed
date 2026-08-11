@@ -1,0 +1,25 @@
+# SQL Server ingest example — Change Tracking capture (every edition,
+# Web and Express included). committed enables Change Tracking where it is
+# off (database level with 2-day auto-cleanup retention, and per table) and
+# on ingestable deletion disables only what it enabled; pre-existing Change
+# Tracking is never touched. See docs/operations/cdc-setup.md § SQL Server.
+
+[ingestable]
+name = "orders-ingest"
+type = "sql"
+
+[sql]
+dialect = "sqlserver"
+topic = "orders"
+# The database rides the ?database= query parameter (the URL path is the
+# instance name). Passwords are always ${VAR} references — a literal
+# password is rejected at propose time.
+connectionString = "sqlserver://committed:${SQLSERVER_PASSWORD}@db:1433?database=appdb"
+primaryKey = "order_id"
+# Bare table names scope to dbo; "sales.orders" keeps its schema.
+tables = ["orders"]
+mapAllColumns = true
+
+[sql.options]
+poll_interval = "3s"   # Change Tracking poll cadence (default 3s)
+batch_size = "1000"    # snapshot keyset batch size

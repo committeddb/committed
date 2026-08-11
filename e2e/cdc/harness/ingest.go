@@ -87,6 +87,7 @@ func postConfig(t *testing.T, path, body string) {
 	// through committed. mysqlPass == pgPass, so one replace covers both.
 	body = strings.ReplaceAll(body, ":"+mysqlPass+"@", ":${TEST_DB_PASSWORD}@")
 	body = strings.ReplaceAll(body, ":"+pgPass+"@", ":${TEST_DB_PASSWORD}@")
+	body = strings.ReplaceAll(body, ":"+mssqlSAPassword+"@", ":${TEST_MSSQL_PASSWORD}@")
 	req, err := http.NewRequest(http.MethodPost, committedURL(path), bytes.NewBufferString(body))
 	require.NoError(t, err, "build request")
 	req.Header.Set("Content-Type", "text/toml")

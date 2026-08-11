@@ -163,6 +163,9 @@ func startCommittedAt(t *testing.T, dataDir string) *committedProcess {
 	apiAddr, peerURL := committedAddrs(t)
 	cmd.Env = append(os.Environ(),
 		"TEST_DB_PASSWORD="+mysqlPass,
+		// SQL Server's SA password can't be "secret" (complexity policy), so
+		// it externalizes through its own variable.
+		"TEST_MSSQL_PASSWORD="+mssqlSAPassword,
 		"COMMITTED_API_ADDR="+apiAddr,
 		// A single-node cluster on a harness-owned peer port: the default
 		// (9022) collides with any other committed on the machine exactly
