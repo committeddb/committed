@@ -30,11 +30,13 @@ Committed is specifically NOT a databse designed for querying.
 - **Actual** — a committed fact: the Proposal that consensus ordered and
   wrote to the log at a fixed Index. You propose Proposals, you *sync*
   Actuals — a Syncable is handed Actuals (in Index order), never Proposals.
-- **Database** — connection config for an external SQL system (MySQL or
-  PostgreSQL).
+- **Database** — connection config for an external SQL sink that syncables
+  reference (MySQL or PostgreSQL; ingestables carry their own connection
+  string inline).
 - **Ingestable** — pulls data into the log from an external source.
   Today: PostgreSQL via logical replication (pgoutput), MySQL via
-  binlog.
+  binlog, SQL Server via Change Tracking (every edition — no CDC
+  licensing requirement).
 - **Syncable** — projects committed Actuals out to an external system.
   Today: SQL (MySQL/PostgreSQL) and HTTP.
 
@@ -420,7 +422,7 @@ round-trips on a fast destination. For a `BatchSyncable` (the SQL dialects)
 |---|---|
 | `make test` | Fast unit tests (`-short`) |
 | `make test/ci` | Full unit suite with `-race` and coverage |
-| `make test/integration` | `-tags integration` (HTTP server, MySQL/Postgres dialects) |
+| `make test/integration` | `-tags integration` (HTTP server, MySQL/Postgres/SQL Server dialects) |
 | `make test/cdc` | End-to-end CDC pressure-test harness (`e2e/cdc/`) |
 | `make test/adversarial` | Multi-node raft adversarial suite, `-race -count=20` |
 | `make test-all` | Everything (docker + integration tags) |
@@ -454,9 +456,9 @@ for the rationale.
 
 Operational guides live in [`docs/operations/`](docs/operations/):
 
-- [CDC setup](docs/operations/cdc-setup.md) — point ingest at your own Postgres
-  or MySQL: the source-side settings, what committed creates for you, and the
-  failures you're most likely to hit.
+- [CDC setup](docs/operations/cdc-setup.md) — point ingest at your own Postgres,
+  MySQL, or SQL Server: the source-side settings, what committed creates for
+  you, and the failures you're most likely to hit.
 - [Cluster membership](docs/operations/membership.md) — add, remove, and grow
   nodes safely (learner → catch up → promote), and read cluster state.
 - [Disk limits](docs/operations/disk-limits.md) — how the cluster protects

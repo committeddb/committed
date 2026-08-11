@@ -1,4 +1,4 @@
-# CDC setup: Postgres and MySQL
+# CDC setup: Postgres, MySQL, and SQL Server
 
 This guide is for operators standing up **change data capture** — ingesting a
 SQL database's inserts, updates, and deletes into a committed topic. It covers
