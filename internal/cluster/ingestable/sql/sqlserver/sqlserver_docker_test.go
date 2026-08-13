@@ -38,8 +38,16 @@ func TestMain(m *testing.M) {
 
 	ctx := context.Background()
 
+	// COMMITTED_TEST_MSSQL_IMAGE overrides the server image so the suite can
+	// run against a customer's exact major version (e.g.
+	// mcr.microsoft.com/mssql/server:2019-latest — the first pilot's
+	// production version). Default stays the newest supported.
+	image := os.Getenv("COMMITTED_TEST_MSSQL_IMAGE")
+	if image == "" {
+		image = "mcr.microsoft.com/mssql/server:2022-latest"
+	}
 	container, err := tcmssql.Run(ctx,
-		"mcr.microsoft.com/mssql/server:2022-latest",
+		image,
 		tcmssql.WithAcceptEULA(),
 		tcmssql.WithPassword(saPassword),
 	)
