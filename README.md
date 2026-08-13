@@ -207,6 +207,9 @@ topic = "movie"
 db = "bff"
 table = "movies"
 primaryKey = "movie_id"
+# Composite source keys: primaryKey = ["tenant_id", "project_id"] declares a
+# real multi-column PRIMARY KEY. The columns and their ORDER must match the
+# producing ingestable's primaryKey — delete tombstones decode positionally.
 
 [[sql.mappings]]
 jsonPath = "$.movie_id"

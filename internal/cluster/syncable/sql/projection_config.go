@@ -219,7 +219,9 @@ func (c *ProjectionConfig) ddlConfig() *Config {
 	for _, col := range c.Columns {
 		mappings = append(mappings, Mapping{Column: col.Name, SQLType: col.SQLType})
 	}
-	return &Config{Table: c.Table, Mappings: mappings, PrimaryKey: c.PrimaryKey}
+	// Projections keep a single-column key (their own model — composite
+	// projections are out of scope); wrap at the plain-Config boundary.
+	return &Config{Table: c.Table, Mappings: mappings, PrimaryKey: []string{c.PrimaryKey}}
 }
 
 // projectionShapeFingerprint is a canonical, order-independent description of the
@@ -271,7 +273,9 @@ func (c *ProjectionConfig) ruleConfig(r ProjectionRule) *Config {
 	for _, s := range r.Set {
 		mappings = append(mappings, Mapping{Column: s.Column})
 	}
-	return &Config{Table: c.Table, Mappings: mappings, PrimaryKey: c.PrimaryKey}
+	// Projections keep a single-column key (their own model — composite
+	// projections are out of scope); wrap at the plain-Config boundary.
+	return &Config{Table: c.Table, Mappings: mappings, PrimaryKey: []string{c.PrimaryKey}}
 }
 
 // validateProjectionConfig rejects every config that could otherwise
@@ -707,7 +711,7 @@ func (c *ProjectionConfig) lookupSpec(lk *ProjectionLookup) LookupSpec {
 func dimensionConfig(dimension string) *Config {
 	return &Config{
 		Table:      dimension,
-		PrimaryKey: LookupKey,
+		PrimaryKey: []string{LookupKey},
 		Mappings:   []Mapping{{Column: LookupKey}, {Column: LookupFields}},
 	}
 }
@@ -719,7 +723,7 @@ func dimensionConfig(dimension string) *Config {
 func sidecarConfig(sidecar string) *Config {
 	return &Config{
 		Table:      sidecar,
-		PrimaryKey: SidecarChildKey,
+		PrimaryKey: []string{SidecarChildKey},
 		Mappings: []Mapping{
 			{Column: SidecarChildKey},
 			{Column: SidecarParentKey},

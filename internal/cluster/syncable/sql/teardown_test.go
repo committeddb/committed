@@ -15,7 +15,7 @@ import (
 func teardownConfig() *sql.Config {
 	return &sql.Config{
 		Table:      "events",
-		PrimaryKey: "id",
+		PrimaryKey: []string{"id"},
 		Mappings:   []sql.Mapping{{Column: "id", SQLType: "VARCHAR(64)"}},
 	}
 }

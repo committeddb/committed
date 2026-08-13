@@ -8,24 +8,38 @@ import (
 	"github.com/committeddb/committed/internal/cluster/syncable/sql"
 )
 
-// createDeleteSQL builds `DELETE FROM <table> WHERE <keyCol> = <placeholder>`.
-// The placeholder is the only dialect-specific bit (? for MySQL, $1 for
-// PostgreSQL); the single bound argument is the entity Key. Shared by every
-// dialect so the delete shape stays identical across them. The table and key
-// column are config identifiers, so q quotes them for the dialect.
-func createDeleteSQL(config *sql.Config, placeholder string, q sqlident.Quoter) string {
-	return fmt.Sprintf("DELETE FROM %s WHERE %s = %s",
-		q.Table(config.Table), q.Ident(config.DeleteKeyColumn()), placeholder)
+// keyWhere builds `<k1> = <p1> AND <k2> = <p2> ...` over the delete key
+// columns — one clause for the single-key common case, ANDed equalities for a
+// composite. mkPlaceholder is the only dialect-specific bit (MySQL always
+// "?", PostgreSQL "$n" positional); the bound arguments are the entity Key's
+// decoded per-column values, in primaryKey column order (the encoding
+// contract — see cluster.DecodeCompositeKey).
+func keyWhere(cols []string, mkPlaceholder func(i int) string, q sqlident.Quoter) string {
+	var b strings.Builder
+	for i, c := range cols {
+		if i > 0 {
+			b.WriteString(" AND ")
+		}
+		fmt.Fprintf(&b, "%s = %s", q.Ident(c), mkPlaceholder(i))
+	}
+	return b.String()
 }
 
-// createClearSQL builds `UPDATE <table> SET <c1>=NULL,<c2>=NULL WHERE <keyCol>
-// = <placeholder>`. Like createDeleteSQL the placeholder is the only
-// dialect-specific bit and the single bound argument is the entity Key; the SET
-// columns are all literal NULLs (no placeholders). Shared so the clear shape
-// stays identical across dialects. An UPDATE, not an upsert, so clearing an
-// absent row is a no-op. Table and every SET/WHERE column are config
-// identifiers quoted by q.
-func createClearSQL(config *sql.Config, columns []string, placeholder string, q sqlident.Quoter) string {
+// createDeleteSQL builds `DELETE FROM <table> WHERE <keyWhere>`. Shared by
+// every dialect so the delete shape stays identical across them. The table
+// and key columns are config identifiers, so q quotes them for the dialect.
+func createDeleteSQL(config *sql.Config, mkPlaceholder func(i int) string, q sqlident.Quoter) string {
+	return fmt.Sprintf("DELETE FROM %s WHERE %s",
+		q.Table(config.Table), keyWhere(config.DeleteKeyColumns(), mkPlaceholder, q))
+}
+
+// createClearSQL builds `UPDATE <table> SET <c1>=NULL,<c2>=NULL WHERE
+// <keyWhere>`. The SET columns are all literal NULLs (no placeholders); the
+// WHERE binds the entity Key's decoded values like createDeleteSQL. Shared so
+// the clear shape stays identical across dialects. An UPDATE, not an upsert,
+// so clearing an absent row is a no-op. Table and every SET/WHERE column are
+// config identifiers quoted by q.
+func createClearSQL(config *sql.Config, columns []string, mkPlaceholder func(i int) string, q sqlident.Quoter) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "UPDATE %s SET ", q.Table(config.Table))
 	for i, c := range columns {
@@ -34,7 +48,7 @@ func createClearSQL(config *sql.Config, columns []string, placeholder string, q 
 		}
 		fmt.Fprintf(&b, "%s=NULL", q.Ident(c))
 	}
-	fmt.Fprintf(&b, " WHERE %s = %s", q.Ident(config.DeleteKeyColumn()), placeholder)
+	fmt.Fprintf(&b, " WHERE %s", keyWhere(config.DeleteKeyColumns(), mkPlaceholder, q))
 	return b.String()
 }
 
@@ -57,7 +71,7 @@ func dropDDL(config *sql.Config, q sqlident.Quoter) string {
 func aggregateSidecarConfig(spec sql.AggregateSpec, jsonType, keyType string) *sql.Config {
 	return &sql.Config{
 		Table:      spec.Sidecar,
-		PrimaryKey: sql.SidecarChildKey,
+		PrimaryKey: []string{sql.SidecarChildKey},
 		Mappings: []sql.Mapping{
 			{Column: sql.SidecarChildKey, SQLType: keyType},
 			{Column: sql.SidecarParentKey, SQLType: keyType},
@@ -95,12 +109,22 @@ func createAggregateAffectedParentsSQL(spec sql.AggregateSpec, extract, placehol
 func lookupDimensionConfig(spec sql.LookupSpec, jsonType, keyType string) *sql.Config {
 	return &sql.Config{
 		Table:      spec.Dimension,
-		PrimaryKey: sql.LookupKey,
+		PrimaryKey: []string{sql.LookupKey},
 		Mappings: []sql.Mapping{
 			{Column: sql.LookupKey, SQLType: keyType},
 			{Column: sql.LookupFields, SQLType: jsonType},
 		},
 	}
+}
+
+// joinIdents quotes each column and joins with commas — the composite
+// PRIMARY KEY (a, b, c) / ON CONFLICT (a, b, c) column-list form.
+func joinIdents(cols []string, q sqlident.Quoter) string {
+	quoted := make([]string, len(cols))
+	for i, c := range cols {
+		quoted[i] = q.Ident(c)
+	}
+	return strings.Join(quoted, ",")
 }
 
 // createDDL builds the MySQL `CREATE TABLE IF NOT EXISTS` (MySQL accepts inline
@@ -118,8 +142,8 @@ func createDDL(config *sql.Config, q sqlident.Quoter) string {
 			ddl.WriteString(",")
 		}
 	}
-	if config.PrimaryKey != "" {
-		fmt.Fprintf(&ddl, ",PRIMARY KEY (%s)", q.Ident(config.PrimaryKey))
+	if config.Keyed() {
+		fmt.Fprintf(&ddl, ",PRIMARY KEY (%s)", joinIdents(config.PrimaryKey, q))
 	}
 	for _, index := range config.Indexes {
 		fmt.Fprintf(&ddl, ",INDEX %s (%s)", q.Ident(index.IndexName), q.Columns(index.ColumnNames))

@@ -126,7 +126,7 @@ func TestMySQLIntegration_CreateDDLAndUpsert(t *testing.T) {
 			{Column: "id", SQLType: "VARCHAR(128)"},
 			{Column: "name", SQLType: "TEXT"},
 		},
-		PrimaryKey: "id",
+		PrimaryKey: []string{"id"},
 	}
 
 	_, err = db.DB.Exec(d.CreateDDL(cfg))
@@ -166,7 +166,7 @@ func TestMySQLIntegration_FullSyncableFlow(t *testing.T) {
 			{JsonPath: "$.pk", Column: "pk", SQLType: "VARCHAR(128)"},
 			{JsonPath: "$.value", Column: "value", SQLType: "TEXT"},
 		},
-		PrimaryKey: "pk",
+		PrimaryKey: []string{"pk"},
 	}
 	syncable := sql.New(db, cfg)
 	require.NoError(t, syncable.Init(), "quoted CreateDDL must be valid MySQL")
@@ -213,7 +213,7 @@ func TestMySQLIntegration_SpecialIdentifiersRoundTrip(t *testing.T) {
 			{JsonPath: "$.id", Column: "User Id", SQLType: "VARCHAR(64)"},
 			{JsonPath: "$.sel", Column: "select", SQLType: "TEXT"},
 		},
-		PrimaryKey: "User Id",
+		PrimaryKey: []string{"User Id"},
 		KeyColumn:  "User Id",
 	}
 	syncable := sql.New(db, cfg)

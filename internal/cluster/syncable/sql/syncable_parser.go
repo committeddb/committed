@@ -3,6 +3,7 @@ package sql
 import (
 	"fmt"
 	"reflect"
+	"strings"
 
 	"go.uber.org/zap"
 
@@ -79,7 +80,7 @@ func (p *SyncableParser) SchemaFromConfig(v *cluster.ParsedConfig, _ cluster.Dat
 		Table:      v.GetString("sql.table"),
 		Mappings:   mappings,
 		Indexes:    indexes,
-		PrimaryKey: v.GetString("sql.primaryKey"),
+		PrimaryKey: v.GetStringSlice("sql.primaryKey"),
 	}
 	return &schemaComparable{schema: schemaOf(config), identity: identityOf(config)}, nil
 }
@@ -103,7 +104,10 @@ func (p *SyncableParser) ParseConfig(v *cluster.ParsedConfig, storage cluster.Da
 		return nil, &cluster.FieldError{Field: "sql.topic", Issue: "required"}
 	}
 	table := v.GetString("sql.table")
-	primaryKey := v.GetString("sql.primaryKey")
+	// Scalar-or-list, like the ingest side: primaryKey = "id" and
+	// primaryKey = ["tenant_id", "project_id"] both parse; the list form
+	// declares a real composite PRIMARY KEY.
+	primaryKey := v.GetStringSlice("sql.primaryKey")
 	keyColumn := v.GetString("sql.keyColumn")
 
 	var mappings []Mapping
@@ -135,7 +139,36 @@ func (p *SyncableParser) ParseConfig(v *cluster.ParsedConfig, storage cluster.Da
 	// topics whose type isn't resolvable at parse time legitimately land without
 	// one, so we require it for snapshot only (best-effort, mirroring
 	// warnKindMisuse's resolution).
-	if primaryKey == "" && requiresPrimaryKey(storage, topic) {
+	// A composite primaryKey with a keyColumn override is rejected: KeyColumn
+	// is single-column by definition, and a one-column delete override of a
+	// multi-column identity would delete every row sharing that one value.
+	if len(primaryKey) > 1 && keyColumn != "" {
+		return nil, &cluster.FieldError{
+			Field: "sql.keyColumn",
+			Issue: "cannot combine keyColumn with a composite primaryKey: deletes for a composite key bind every key column",
+		}
+	}
+	// Every primaryKey column must be a mapped column: the upsert's key values
+	// come from the payload mappings, and the CREATE TABLE only has mapped
+	// columns. An unmapped key column always failed — but at Init, as a raw
+	// SQL error from the destination; fail at parse with the column named.
+	for _, pk := range primaryKey {
+		mapped := false
+		for _, m := range mappings {
+			if strings.EqualFold(m.Column, pk) {
+				mapped = true
+				break
+			}
+		}
+		if !mapped {
+			return nil, &cluster.FieldError{
+				Field: "sql.primaryKey",
+				Issue: fmt.Sprintf("column %q is not among the sql.mappings columns — every primary-key column must be mapped (its value comes from the payload)", pk),
+			}
+		}
+	}
+
+	if len(primaryKey) == 0 && requiresPrimaryKey(storage, topic) {
 		return nil, &cluster.FieldError{
 			Field: "sql.primaryKey",
 			Issue: "required for a snapshot-kind topic: this syncable upserts last-writer-wins per key, so without a primary key rows duplicate instead of overwriting and every delete is dropped",
@@ -147,7 +180,7 @@ func (p *SyncableParser) ParseConfig(v *cluster.ParsedConfig, storage cluster.Da
 	// name is long enough that the sidecar name exceeds the 63-char identifier
 	// limit, the database would silently truncate it and collide with the base
 	// table — reject up front with a field-scoped 400.
-	if primaryKey == "" {
+	if len(primaryKey) == 0 {
 		if name := AppliedSidecarName(table); len(name) > maxSidecarIdentifierLen {
 			return nil, &cluster.FieldError{
 				Field: "sql.table",

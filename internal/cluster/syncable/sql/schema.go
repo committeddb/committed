@@ -149,9 +149,12 @@ func schemaOf(c *Config) SyncableSchema {
 		idx = append(idx, SchemaIndex{Name: i.IndexName, Columns: i.ColumnNames})
 	}
 	return SyncableSchema{
-		Table:      c.Table,
-		Columns:    cols,
-		PrimaryKey: c.PrimaryKey,
+		Table:   c.Table,
+		Columns: cols,
+		// Canonical ORDER-SENSITIVE join: reordering a composite key re-keys
+		// every row (the encoding marshals in column order), so it must read
+		// as a primary-key change and trip RebuildRequired.
+		PrimaryKey: strings.Join(c.PrimaryKey, ","),
 		Indexes:    idx,
 	}
 }

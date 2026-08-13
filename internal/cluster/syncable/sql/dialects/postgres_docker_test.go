@@ -132,7 +132,7 @@ func TestPostgreSQLIntegration_CreateDDL_NoIndexes(t *testing.T) {
 			{Column: "id", SQLType: "VARCHAR(128)"},
 			{Column: "name", SQLType: "TEXT"},
 		},
-		PrimaryKey: "id",
+		PrimaryKey: []string{"id"},
 	}
 
 	ddl := d.CreateDDL(cfg)
@@ -171,7 +171,7 @@ func TestPostgreSQLIntegration_CreateDDL_WithIndex(t *testing.T) {
 			{Column: "id", SQLType: "VARCHAR(128)"},
 			{Column: "name", SQLType: "TEXT"},
 		},
-		PrimaryKey: "id",
+		PrimaryKey: []string{"id"},
 		Indexes: []sql.Index{
 			{IndexName: "idx_name", ColumnNames: "name"},
 		},
@@ -211,7 +211,7 @@ func TestPostgreSQLIntegration_CreateSQL_Insert(t *testing.T) {
 			{Column: "id"},
 			{Column: "name"},
 		},
-		PrimaryKey: "id",
+		PrimaryKey: []string{"id"},
 	}
 	insertSQL := d.CreateSQL(cfg)
 
@@ -246,7 +246,7 @@ func TestPostgreSQLIntegration_CreateSQL_Upsert(t *testing.T) {
 			{Column: "id"},
 			{Column: "name"},
 		},
-		PrimaryKey: "id",
+		PrimaryKey: []string{"id"},
 	}
 	insertSQL := d.CreateSQL(cfg)
 
@@ -321,7 +321,7 @@ func TestPostgreSQLIntegration_FullSyncableFlow(t *testing.T) {
 			{Column: "pk", SQLType: "VARCHAR(128)"},
 			{Column: "value", SQLType: "TEXT"},
 		},
-		PrimaryKey: "pk",
+		PrimaryKey: []string{"pk"},
 	}
 
 	ddl := d.CreateDDL(cfg)
@@ -457,7 +457,7 @@ func TestPostgreSQLIntegration_SpecialIdentifiersRoundTrip(t *testing.T) {
 			{JsonPath: "$.id", Column: "User Id", SQLType: "TEXT"},
 			{JsonPath: "$.sel", Column: "select", SQLType: "TEXT"},
 		},
-		PrimaryKey: "User Id",
+		PrimaryKey: []string{"User Id"},
 		KeyColumn:  "User Id",
 	}
 	syncable := sql.New(db, cfg)
@@ -510,7 +510,7 @@ func wholePayloadConfig(table, payloadType string) *sql.Config {
 			{JsonPath: "$.event_id", Column: "event_id", SQLType: "VARCHAR(64)"},
 			{JsonPath: "$", Column: "payload", SQLType: payloadType},
 		},
-		PrimaryKey: "event_id",
+		PrimaryKey: []string{"event_id"},
 	}
 }
 
@@ -626,7 +626,7 @@ func TestPostgreSQLIntegration_RefreshBoundarySweepsGapDeletedRows(t *testing.T)
 			{JsonPath: "$.k", Column: "k", SQLType: "TEXT"},
 			{JsonPath: "$.v", Column: "v", SQLType: "TEXT"},
 		},
-		PrimaryKey: "k",
+		PrimaryKey: []string{"k"},
 	}
 	syncable := sql.New(db, cfg)
 	require.Nil(t, syncable.Init())

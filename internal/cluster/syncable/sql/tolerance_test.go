@@ -44,7 +44,7 @@ Index = "pk"
 
 	require.Equal(t, "simple", config.Topic)
 	require.Equal(t, "foo", config.Table)
-	require.Equal(t, "pk", config.PrimaryKey)
+	require.Equal(t, []string{"pk"}, config.PrimaryKey)
 	require.Equal(t, "pk", config.KeyColumn)
 	require.Equal(t, []sql.Mapping{{JsonPath: "$.key", Column: "pk", SQLType: "TEXT"}}, config.Mappings)
 	require.Equal(t, []sql.Index{{IndexName: "firstIndex", ColumnNames: "pk"}}, config.Indexes)
@@ -71,7 +71,7 @@ func TestParseConfigJSONMimeType(t *testing.T) {
 
 	require.Equal(t, "simple", config.Topic)
 	require.Equal(t, "foo", config.Table)
-	require.Equal(t, "pk", config.PrimaryKey)
+	require.Equal(t, []string{"pk"}, config.PrimaryKey)
 	require.Equal(t, []sql.Mapping{{JsonPath: "$.key", Column: "pk", SQLType: "TEXT"}}, config.Mappings)
 }
 

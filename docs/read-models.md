@@ -60,6 +60,17 @@ append log is. If you want one row per logical entity instead, give the `sql`
 syncable a `primaryKey` (its upsert then converges on the key) or maintain a
 current-state table with `sql-projection`.
 
+`primaryKey` takes one column or a list: `primaryKey = ["tenant_id",
+"project_id"]` declares a real composite `PRIMARY KEY (tenant_id,
+project_id)` — upserts converge on the combination and a source delete
+removes the row matching every key column. **The columns and their order
+must match the producing ingestable's `primaryKey`**: a delete tombstone
+carries only the encoded key, and its values decode positionally in the
+producer's column order — a mismatched order mis-addresses rows, and nothing
+can detect it mechanically (topics decouple the two configs on purpose).
+Every key column must also appear in the mappings; the parser rejects a
+config where it doesn't.
+
 ## A single-source projection
 
 ```toml

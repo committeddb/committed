@@ -29,7 +29,7 @@ func wholePayloadConfig(payloadType string) *sql.Config {
 			{JsonPath: "$.key", Column: "pk", SQLType: "VARCHAR(64)"},
 			{JsonPath: "$", Column: "payload", SQLType: payloadType},
 		},
-		PrimaryKey: "pk",
+		PrimaryKey: []string{"pk"},
 	}
 }
 

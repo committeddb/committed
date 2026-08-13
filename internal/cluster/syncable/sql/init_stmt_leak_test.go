@@ -61,7 +61,7 @@ func ruleSQL(dialect sql.Dialect, cfg *sql.ProjectionConfig, r sql.ProjectionRul
 	for _, s := range r.Set {
 		mappings = append(mappings, sql.Mapping{Column: s.Column})
 	}
-	return dialect.CreateSQL(&sql.Config{Table: cfg.Table, Mappings: mappings, PrimaryKey: cfg.PrimaryKey})
+	return dialect.CreateSQL(&sql.Config{Table: cfg.Table, Mappings: mappings, PrimaryKey: []string{cfg.PrimaryKey}})
 }
 
 // TestProjectionInit_ClosesPreparedStmtsOnFailure is the projection twin of the
@@ -85,7 +85,7 @@ func TestProjectionInit_ClosesPreparedStmtsOnFailure(t *testing.T) {
 	for _, c := range cfg.Columns {
 		ddlMappings = append(ddlMappings, sql.Mapping{Column: c.Name, SQLType: c.SQLType})
 	}
-	mock.ExpectExec(dialect.CreateDDL(&sql.Config{Table: cfg.Table, Mappings: ddlMappings, PrimaryKey: cfg.PrimaryKey})).
+	mock.ExpectExec(dialect.CreateDDL(&sql.Config{Table: cfg.Table, Mappings: ddlMappings, PrimaryKey: []string{cfg.PrimaryKey}})).
 		WillReturnResult(driver.ResultNoRows)
 	// Rule 0 prepares successfully — and MUST be closed when rule 1 fails.
 	mock.ExpectPrepare(ruleSQL(dialect, cfg, cfg.Rules[0])).WillBeClosed()

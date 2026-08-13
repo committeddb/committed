@@ -21,7 +21,7 @@ func specialConfig() *sql.Config {
 			{Column: "select", SQLType: "INT"},
 		},
 		Indexes:    []sql.Index{{IndexName: "by-name", ColumnNames: "User Name, select"}},
-		PrimaryKey: "User Name",
+		PrimaryKey: []string{"User Name"},
 		KeyColumn:  "User Name",
 	}
 }
@@ -76,14 +76,14 @@ func TestQuoting_DoublesEmbeddedDelimiter(t *testing.T) {
 	pgCfg := &sql.Config{
 		Table:      `we"ird`,
 		Mappings:   []sql.Mapping{{Column: `c"ol`, SQLType: "TEXT"}},
-		PrimaryKey: `c"ol`,
+		PrimaryKey: []string{`c"ol`},
 	}
 	require.Contains(t, (&dialects.PostgreSQLDialect{}).CreateDDL(pgCfg), `CREATE TABLE IF NOT EXISTS "we""ird" ("c""ol" TEXT`)
 
 	myCfg := &sql.Config{
 		Table:      "we`ird",
 		Mappings:   []sql.Mapping{{Column: "c`ol", SQLType: "TEXT"}},
-		PrimaryKey: "c`ol",
+		PrimaryKey: []string{"c`ol"},
 	}
 	require.Contains(t, (&dialects.MySQLDialect{}).CreateDDL(myCfg), "CREATE TABLE IF NOT EXISTS `we``ird` (`c``ol` TEXT")
 }

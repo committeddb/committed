@@ -16,7 +16,7 @@ import (
 func TestDropDDL(t *testing.T) {
 	cfg := &sql.Config{
 		Table:      "mytable",
-		PrimaryKey: "id",
+		PrimaryKey: []string{"id"},
 		Mappings: []sql.Mapping{
 			{Column: "id", SQLType: "VARCHAR(128)"},
 			{Column: "name", SQLType: "TEXT"},

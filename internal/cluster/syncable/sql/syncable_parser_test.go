@@ -299,7 +299,7 @@ index = "user-name"
 	config, err := (&sql.SyncableParser{}).ParseConfig(v, &TestDatabaseStorage{dbs: dbs})
 	require.NoError(t, err)
 	require.Equal(t, "order", config.Table)
-	require.Equal(t, "user-name", config.PrimaryKey)
+	require.Equal(t, []string{"user-name"}, config.PrimaryKey)
 }
 
 func simpleConfig(db cluster.Database) *sql.Config {
@@ -309,7 +309,7 @@ func simpleConfig(db cluster.Database) *sql.Config {
 
 	i1 := sql.Index{IndexName: "firstIndex", ColumnNames: "one"}
 	i := []sql.Index{i1}
-	return &sql.Config{Database: db, DatabaseID: "testdb", Topic: "simple", Table: "foo", Mappings: m, Indexes: i, PrimaryKey: "pk"}
+	return &sql.Config{Database: db, DatabaseID: "testdb", Topic: "simple", Table: "foo", Mappings: m, Indexes: i, PrimaryKey: []string{"pk"}}
 }
 
 func readConfig(t *testing.T, configType string, r io.Reader) *cluster.ParsedConfig {
@@ -346,4 +346,81 @@ func (s *TestDatabaseStorage) Database(id string) (cluster.Database, error) {
 	}
 
 	return nil, fmt.Errorf("not found")
+}
+
+// Composite primaryKey: the list form parses into the real column list; a
+// keyColumn override of a composite is rejected (single-column deletes of a
+// multi-column identity would remove sibling rows); and every key column must
+// be mapped (its upsert value comes from the payload).
+func TestParseCompositePrimaryKey(t *testing.T) {
+	dbs := map[string]cluster.Database{"testdb": testDB}
+
+	t.Run("list form parses in order", func(t *testing.T) {
+		v := readConfig(t, "toml", strings.NewReader(`
+[sql]
+topic = "t"
+db = "testdb"
+table = "pca"
+primaryKey = ["tenant_id", "project_id"]
+
+[[sql.mappings]]
+jsonPath = "$.t"
+column   = "tenant_id"
+type     = "INT"
+
+[[sql.mappings]]
+jsonPath = "$.p"
+column   = "project_id"
+type     = "INT"
+`))
+		config, err := (&sql.SyncableParser{}).ParseConfig(v, &TestDatabaseStorage{dbs: dbs})
+		require.NoError(t, err)
+		require.Equal(t, []string{"tenant_id", "project_id"}, config.PrimaryKey,
+			"order preserved — it is the delete-decoding contract")
+	})
+
+	t.Run("keyColumn with composite rejected", func(t *testing.T) {
+		v := readConfig(t, "toml", strings.NewReader(`
+[sql]
+topic = "t"
+db = "testdb"
+table = "pca"
+primaryKey = ["a", "b"]
+keyColumn = "a"
+
+[[sql.mappings]]
+jsonPath = "$.a"
+column   = "a"
+type     = "INT"
+
+[[sql.mappings]]
+jsonPath = "$.b"
+column   = "b"
+type     = "INT"
+`))
+		_, err := (&sql.SyncableParser{}).ParseConfig(v, &TestDatabaseStorage{dbs: dbs})
+		var fe *cluster.FieldError
+		require.ErrorAs(t, err, &fe)
+		require.Equal(t, "sql.keyColumn", fe.Field)
+	})
+
+	t.Run("unmapped key column rejected with the column named", func(t *testing.T) {
+		v := readConfig(t, "toml", strings.NewReader(`
+[sql]
+topic = "t"
+db = "testdb"
+table = "pca"
+primaryKey = ["tenant_id", "project_id"]
+
+[[sql.mappings]]
+jsonPath = "$.t"
+column   = "tenant_id"
+type     = "INT"
+`))
+		_, err := (&sql.SyncableParser{}).ParseConfig(v, &TestDatabaseStorage{dbs: dbs})
+		var fe *cluster.FieldError
+		require.ErrorAs(t, err, &fe)
+		require.Equal(t, "sql.primaryKey", fe.Field)
+		require.Contains(t, fe.Issue, "project_id")
+	})
 }

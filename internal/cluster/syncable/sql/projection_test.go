@@ -94,7 +94,7 @@ func newMockProjection(t *testing.T, config *sql.ProjectionConfig, m *metrics.Me
 	for _, c := range config.Columns {
 		ddlMappings = append(ddlMappings, sql.Mapping{Column: c.Name, SQLType: c.SQLType})
 	}
-	ddlConfig := &sql.Config{Table: config.Table, Mappings: ddlMappings, PrimaryKey: config.PrimaryKey}
+	ddlConfig := &sql.Config{Table: config.Table, Mappings: ddlMappings, PrimaryKey: []string{config.PrimaryKey}}
 	mock.ExpectExec(dialect.CreateDDL(ddlConfig)).WillReturnResult(driver.ResultNoRows)
 
 	rulePrepares := make([]*sqlmock.ExpectedPrepare, 0, len(config.Rules))
@@ -104,7 +104,7 @@ func newMockProjection(t *testing.T, config *sql.ProjectionConfig, m *metrics.Me
 		for _, s := range r.Set {
 			mappings = append(mappings, sql.Mapping{Column: s.Column})
 		}
-		ruleConfig := &sql.Config{Table: config.Table, Mappings: mappings, PrimaryKey: config.PrimaryKey}
+		ruleConfig := &sql.Config{Table: config.Table, Mappings: mappings, PrimaryKey: []string{config.PrimaryKey}}
 		rulePrepares = append(rulePrepares, mock.ExpectPrepare(dialect.CreateSQL(ruleConfig)))
 	}
 	deletePrepare := mock.ExpectPrepare(dialect.CreateDeleteSQL(ddlConfig))

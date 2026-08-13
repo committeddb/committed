@@ -36,8 +36,8 @@ func (d *PostgreSQLDialect) CreateDDL(c *sql.Config) string {
 			ddl.WriteString(",")
 		}
 	}
-	if c.PrimaryKey != "" {
-		fmt.Fprintf(&ddl, ",PRIMARY KEY (%s)", pgIdent.Ident(c.PrimaryKey))
+	if c.Keyed() {
+		fmt.Fprintf(&ddl, ",PRIMARY KEY (%s)", joinIdents(c.PrimaryKey, pgIdent))
 	}
 	ddl.WriteString(");")
 
@@ -56,15 +56,19 @@ func (d *PostgreSQLDialect) DropDDL(c *sql.Config) string {
 	return dropDDL(c, pgIdent)
 }
 
+// pgPlaceholder renders PostgreSQL's positional placeholder for the i-th
+// bound key value ($1, $2, ...).
+func pgPlaceholder(i int) string { return fmt.Sprintf("$%d", i+1) }
+
 // CreateDeleteSQL implements Dialect. PostgreSQL binds the WHERE value with a
 // $1 positional placeholder.
 func (d *PostgreSQLDialect) CreateDeleteSQL(c *sql.Config) string {
-	return createDeleteSQL(c, "$1", pgIdent)
+	return createDeleteSQL(c, pgPlaceholder, pgIdent)
 }
 
 // CreateClearSQL implements Dialect; PostgreSQL binds the WHERE value with $1.
 func (d *PostgreSQLDialect) CreateClearSQL(c *sql.Config, columns []string) string {
-	return createClearSQL(c, columns, "$1", pgIdent)
+	return createClearSQL(c, columns, pgPlaceholder, pgIdent)
 }
 
 // pgAggSubquery is the scalar subquery that re-aggregates one parent's children
@@ -204,8 +208,8 @@ func pgUpsertSQL(config *sql.Config, withGeneration bool) string {
 	}
 	fmt.Fprint(&sqlb, ")")
 
-	if config.PrimaryKey != "" {
-		fmt.Fprintf(&sqlb, " ON CONFLICT (%s) DO UPDATE SET ", pgIdent.Ident(config.PrimaryKey))
+	if config.Keyed() {
+		fmt.Fprintf(&sqlb, " ON CONFLICT (%s) DO UPDATE SET ", joinIdents(config.PrimaryKey, pgIdent))
 		for i, item := range config.Mappings {
 			col := pgIdent.Ident(item.Column)
 			if i == 0 {

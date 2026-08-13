@@ -28,15 +28,18 @@ func (d *MySQLDialect) DropDDL(c *sql.Config) string {
 	return dropDDL(c, mysqlIdent)
 }
 
+// mysqlPlaceholder renders MySQL's placeholder (always ?, position-blind).
+func mysqlPlaceholder(int) string { return "?" }
+
 // CreateDeleteSQL implements Dialect. MySQL binds the WHERE value with a ?
 // placeholder.
 func (d *MySQLDialect) CreateDeleteSQL(c *sql.Config) string {
-	return createDeleteSQL(c, "?", mysqlIdent)
+	return createDeleteSQL(c, mysqlPlaceholder, mysqlIdent)
 }
 
 // CreateClearSQL implements Dialect; MySQL binds the WHERE value with ?.
 func (d *MySQLDialect) CreateClearSQL(c *sql.Config, columns []string) string {
-	return createClearSQL(c, columns, "?", mysqlIdent)
+	return createClearSQL(c, columns, mysqlPlaceholder, mysqlIdent)
 }
 
 // mysqlAggSubquery re-aggregates one parent's children into a JSON array.

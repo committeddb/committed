@@ -10,7 +10,7 @@ import (
 // to exercise SchemaChange, which compares config identity/schema and touches no
 // db handle.
 func comparableWith(topic, table string, cols ...[2]string) *schemaComparable {
-	c := &Config{Topic: topic, Table: table, PrimaryKey: "id"}
+	c := &Config{Topic: topic, Table: table, PrimaryKey: []string{"id"}}
 	for _, col := range cols {
 		c.Mappings = append(c.Mappings, Mapping{Column: col[0], SQLType: col[1]})
 	}
@@ -20,7 +20,7 @@ func comparableWith(topic, table string, cols ...[2]string) *schemaComparable {
 // comparableWithDB is comparableWith plus an explicit destination-database id, for
 // exercising the database-repoint identity guard.
 func comparableWithDB(dbID, topic, table string, cols ...[2]string) *schemaComparable {
-	c := &Config{DatabaseID: dbID, Topic: topic, Table: table, PrimaryKey: "id"}
+	c := &Config{DatabaseID: dbID, Topic: topic, Table: table, PrimaryKey: []string{"id"}}
 	for _, col := range cols {
 		c.Mappings = append(c.Mappings, Mapping{Column: col[0], SQLType: col[1]})
 	}

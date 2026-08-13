@@ -65,7 +65,7 @@ func newMockAggregateProjection(t *testing.T) (*sql.Projection, sqlmock.Sqlmock,
 
 	ddlConfig := &sql.Config{
 		Table:      "movie_card",
-		PrimaryKey: "tconst",
+		PrimaryKey: []string{"tconst"},
 		Mappings: []sql.Mapping{
 			{Column: "tconst", SQLType: "VARCHAR(16)"},
 			{Column: "top_cast", SQLType: "JSONB"},
@@ -80,7 +80,7 @@ func newMockAggregateProjection(t *testing.T) (*sql.Projection, sqlmock.Sqlmock,
 	}
 	scConfig := &sql.Config{
 		Table:      "movie_card__top_cast",
-		PrimaryKey: sql.SidecarChildKey,
+		PrimaryKey: []string{sql.SidecarChildKey},
 		Mappings: []sql.Mapping{
 			{Column: sql.SidecarChildKey},
 			{Column: sql.SidecarParentKey},
@@ -285,13 +285,13 @@ func newMockEnrichedProjection(t *testing.T) (*sql.Projection, sqlmock.Sqlmock, 
 
 	ddlConfig := &sql.Config{
 		Table:      "movie_card",
-		PrimaryKey: "tconst",
+		PrimaryKey: []string{"tconst"},
 		Mappings:   []sql.Mapping{{Column: "tconst", SQLType: "VARCHAR(16)"}, {Column: "top_cast", SQLType: "JSONB"}},
 	}
 	dimSpec := sql.LookupSpec{Dimension: "movie_card__lookup_names"}
 	dimConfig := &sql.Config{
 		Table:      "movie_card__lookup_names",
-		PrimaryKey: sql.LookupKey,
+		PrimaryKey: []string{sql.LookupKey},
 		Mappings:   []sql.Mapping{{Column: sql.LookupKey}, {Column: sql.LookupFields}},
 	}
 	aggSpec := sql.AggregateSpec{
@@ -303,7 +303,7 @@ func newMockEnrichedProjection(t *testing.T) (*sql.Projection, sqlmock.Sqlmock, 
 		}},
 	}
 	scConfig := &sql.Config{
-		Table: "movie_card__top_cast", PrimaryKey: sql.SidecarChildKey,
+		Table: "movie_card__top_cast", PrimaryKey: []string{sql.SidecarChildKey},
 		Mappings: []sql.Mapping{{Column: sql.SidecarChildKey}, {Column: sql.SidecarParentKey}, {Column: sql.SidecarElementKey}, {Column: sql.SidecarElement}},
 	}
 

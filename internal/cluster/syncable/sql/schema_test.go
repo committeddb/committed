@@ -67,11 +67,11 @@ func TestProjection_SchemaChange_FailsOpenAgainstUnknownPrior(t *testing.T) {
 // The plain table syncable compares the same way, including its indexes.
 func TestSyncable_SchemaChange_IndexChange(t *testing.T) {
 	base := &Config{
-		Table: "events", PrimaryKey: "id",
+		Table: "events", PrimaryKey: []string{"id"},
 		Mappings: []Mapping{{Column: "id", SQLType: "VARCHAR(64)"}},
 	}
 	withIdx := &Config{
-		Table: "events", PrimaryKey: "id",
+		Table: "events", PrimaryKey: []string{"id"},
 		Mappings: []Mapping{{Column: "id", SQLType: "VARCHAR(64)"}},
 		Indexes:  []Index{{IndexName: "idx_id", ColumnNames: "id"}},
 	}

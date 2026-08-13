@@ -32,7 +32,7 @@ func TestMySQLDialect_EnsureGenerationColumn_SchemaQualifiedIntrospection(t *tes
 
 	config := &sql.Config{
 		Table:      "otherdb.widget",
-		PrimaryKey: "wid",
+		PrimaryKey: []string{"wid"},
 		Mappings: []sql.Mapping{
 			{Column: "wid", SQLType: "VARCHAR(64)"},
 			{Column: "name", SQLType: "VARCHAR(255)"},
@@ -58,7 +58,7 @@ func TestMySQLDialect_EnsureGenerationColumn_SchemaQualifiedAddsColumn(t *testin
 	require.NoError(t, err)
 	defer db.Close()
 
-	config := &sql.Config{Table: "otherdb.widget", PrimaryKey: "wid"}
+	config := &sql.Config{Table: "otherdb.widget", PrimaryKey: []string{"wid"}}
 
 	mock.ExpectQuery("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = ? AND table_name = ? AND column_name = ?").
 		WithArgs("otherdb", "widget", sql.GenerationColumn).
@@ -80,7 +80,7 @@ func TestMySQLDialect_EnsureGenerationColumn_UnqualifiedIntrospection(t *testing
 	require.NoError(t, err)
 	defer db.Close()
 
-	config := &sql.Config{Table: "widget", PrimaryKey: "wid"}
+	config := &sql.Config{Table: "widget", PrimaryKey: []string{"wid"}}
 
 	mock.ExpectQuery("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?").
 		WithArgs("widget", sql.GenerationColumn).

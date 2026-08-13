@@ -218,12 +218,14 @@ func validateMappings(mappings []Mapping) error {
 // whole rather than rejected for the dot). Empty table / mappings are already
 // rejected upstream, and an empty primaryKey/keyColumn means "not set", so those
 // are validated only when present.
-func validateConfigIdentifiers(table, primaryKey, keyColumn string, mappings []Mapping, indexes []Index) error {
+func validateConfigIdentifiers(table string, primaryKey []string, keyColumn string, mappings []Mapping, indexes []Index) error {
 	if !sqlident.ValidIdent(table) {
 		return &cluster.FieldError{Field: "sql.table", Issue: fmt.Sprintf("not a valid SQL identifier: %q", table)}
 	}
-	if primaryKey != "" && !sqlident.ValidIdent(primaryKey) {
-		return &cluster.FieldError{Field: "sql.primaryKey", Issue: fmt.Sprintf("not a valid SQL identifier: %q", primaryKey)}
+	for _, pk := range primaryKey {
+		if !sqlident.ValidIdent(pk) {
+			return &cluster.FieldError{Field: "sql.primaryKey", Issue: fmt.Sprintf("not a valid SQL identifier: %q", pk)}
+		}
 	}
 	if keyColumn != "" && !sqlident.ValidIdent(keyColumn) {
 		return &cluster.FieldError{Field: "sql.keyColumn", Issue: fmt.Sprintf("not a valid SQL identifier: %q", keyColumn)}
@@ -262,12 +264,23 @@ type Config struct {
 	Table      string
 	Mappings   []Mapping
 	Indexes    []Index
-	PrimaryKey string
+	// PrimaryKey is the destination table's primary-key column(s). One column
+	// is the common case; multiple declare a real composite PRIMARY KEY
+	// (a, b, c) and upserts conflict on the combination. ORDER IS A CONTRACT
+	// shared with the topic's producer: a composite delete tombstone carries
+	// the key values encoded in the PRODUCER's primaryKey column order
+	// (cluster.CompositeKey), and this list decodes them positionally — the
+	// columns here must match the producer's key columns in the same order,
+	// or deletes mis-address rows. (Single-column configs have the same
+	// must-match-the-producer's-key contract today, minus the ordering.)
+	PrimaryKey []string
 	// KeyColumn names the column whose value equals the entity's Key, used
 	// to translate a delete Actual into `DELETE FROM <table> WHERE
 	// <KeyColumn> = ?`. When empty it falls back to PrimaryKey (the common
 	// case: the entity Key is the row's primary key), so a config that only
-	// sets primaryKey honors deletes for free. See DeleteKeyColumn.
+	// sets primaryKey honors deletes for free. Single-column only — combining
+	// it with a composite primaryKey is rejected at parse (a one-column
+	// override of a multi-column identity would delete multiple rows).
 	KeyColumn string
 	// Checkpoint is the per-syncable checkpoint cadence parsed from the
 	// common [syncable] section. Zero fields mean "use the default" (the
@@ -276,14 +289,18 @@ type Config struct {
 	Checkpoint cluster.CheckpointPolicy
 }
 
-// DeleteKeyColumn returns the column a delete binds the entity Key against:
-// KeyColumn if set, otherwise PrimaryKey. Empty means the syncable cannot
-// generate a delete (neither was configured) — Init leaves the delete
-// statement unprepared and Sync rejects deletes as a permanent
-// misconfiguration rather than silently dropping the erasure.
-func (c *Config) DeleteKeyColumn() string {
+// Keyed reports whether this syncable has a primary key — the keyed
+// last-writer-wins upsert model, vs the keyless append/history model.
+func (c *Config) Keyed() bool { return len(c.PrimaryKey) > 0 }
+
+// DeleteKeyColumns returns the columns a delete binds the (decoded) entity
+// Key against: KeyColumn if set (always single), otherwise PrimaryKey. Empty
+// means the syncable cannot generate a delete (neither was configured) —
+// Init leaves the delete statement unprepared and Sync rejects deletes as a
+// permanent misconfiguration rather than silently dropping the erasure.
+func (c *Config) DeleteKeyColumns() []string {
 	if c.KeyColumn != "" {
-		return c.KeyColumn
+		return []string{c.KeyColumn}
 	}
 	return c.PrimaryKey
 }

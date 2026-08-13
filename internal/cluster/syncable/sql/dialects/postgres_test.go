@@ -23,7 +23,7 @@ func testConfig() *sql.Config {
 		Indexes: []sql.Index{
 			{IndexName: "idx_name", ColumnNames: "name"},
 		},
-		PrimaryKey: "id",
+		PrimaryKey: []string{"id"},
 	}
 }
 
@@ -49,7 +49,7 @@ func TestPostgreSQLDialect_CreateDDL_NoIndexes(t *testing.T) {
 		Mappings: []sql.Mapping{
 			{Column: "col1", SQLType: "INT"},
 		},
-		PrimaryKey: "col1",
+		PrimaryKey: []string{"col1"},
 	}
 	ddl := d.CreateDDL(cfg)
 
@@ -66,7 +66,7 @@ func TestPostgreSQLDialect_CreateSQL(t *testing.T) {
 			{Column: "id"},
 			{Column: "name"},
 		},
-		PrimaryKey: "id",
+		PrimaryKey: []string{"id"},
 	}
 	result := d.CreateSQL(cfg)
 
@@ -88,7 +88,7 @@ func TestPostgreSQLDialect_CreateSQL_SingleColumn(t *testing.T) {
 	cfg := &sql.Config{
 		Table:      "t",
 		Mappings:   []sql.Mapping{{Column: "pk"}},
-		PrimaryKey: "pk",
+		PrimaryKey: []string{"pk"},
 	}
 	result := d.CreateSQL(cfg)
 
@@ -106,7 +106,7 @@ func TestDialect_PlaceholderDifference(t *testing.T) {
 			{Column: "a"},
 			{Column: "b"},
 		},
-		PrimaryKey: "a",
+		PrimaryKey: []string{"a"},
 	}
 
 	pgSQL := pg.CreateSQL(cfg)
@@ -133,7 +133,7 @@ func TestDialect_BindArgs_MatchesPlaceholders(t *testing.T) {
 	cfg := &sql.Config{
 		Table:      "t",
 		Mappings:   []sql.Mapping{{Column: "a"}, {Column: "b"}, {Column: "c"}},
-		PrimaryKey: "a",
+		PrimaryKey: []string{"a"},
 	}
 	values := []any{"1", "2", "3"}
 

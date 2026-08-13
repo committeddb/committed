@@ -77,7 +77,7 @@ func (c *Syncable) Teardown() error {
 	}
 	// Drop the keyless syncable's dedup sidecar too — DropDDL on its name. A
 	// keyed syncable has none, so this is skipped.
-	if c.config.PrimaryKey == "" {
+	if !c.config.Keyed() {
 		sidecarDrop := c.dialect.DropDDL(&Config{Table: AppliedSidecarName(c.config.Table)})
 		if _, err := c.db.ExecContext(ctx, sidecarDrop); err != nil {
 			return fmt.Errorf("teardown applied-sidecar [%s]: %w", sidecarDrop, err)
@@ -112,7 +112,7 @@ func (c *Syncable) Init() error {
 		return fmt.Errorf("ddl [%s]: %w", ddlString, err)
 	}
 
-	keyed := c.config.PrimaryKey != ""
+	keyed := c.config.Keyed()
 
 	// A keyed sink stamps the committed-managed generation column on every upsert
 	// so a refresh-boundary marker can sweep rows left at an older epoch. That
@@ -144,7 +144,7 @@ func (c *Syncable) Init() error {
 	// without a JSON unmarshal (the delete sentinel is not a payload). Only
 	// possible when a key column is known; otherwise leave it nil and let
 	// applyEntity surface the misconfiguration if a delete ever arrives.
-	if c.config.DeleteKeyColumn() != "" {
+	if len(c.config.DeleteKeyColumns()) > 0 {
 		deleteString := c.dialect.CreateDeleteSQL(c.config)
 		deleteStmt, err := c.db.Prepare(deleteString)
 		if err != nil {
@@ -171,7 +171,7 @@ func (c *Syncable) Init() error {
 	// guard each history insert with a mark (see applyEntity): a replay marks a
 	// no-op and skips the insert. Keyed syncables need none of this; their upsert
 	// is already idempotent, so they carry no sidecar and pay nothing.
-	if c.config.PrimaryKey == "" {
+	if !c.config.Keyed() {
 		sidecarDDL := c.dialect.CreateAppliedSidecarDDL(c.config)
 		if _, err := c.db.Exec(sidecarDDL); err != nil {
 			return fmt.Errorf("applied-sidecar ddl [%s]: %w", sidecarDDL, err)
@@ -323,7 +323,23 @@ func (c *Syncable) applyEntity(ctx context.Context, tx *sql.Tx, e *cluster.Entit
 				"[sql.apply] cannot honor delete: no keyColumn or primaryKey configured (topic %q)",
 				c.config.Topic))
 		}
-		_, err := tx.StmtContext(ctx, c.delete.Stmt).ExecContext(ctx, string(e.Key))
+		// Decode the entity Key into per-column values (bare value for a
+		// single key — byte-identical to the old direct bind; JSON-array or
+		// b64 form for a composite, unpacked in the PRODUCER's column order —
+		// the encoding contract). The decode error keeps the key value out of
+		// the message for the same RTBF reason as above: it becomes a
+		// replicated dead-letter record.
+		keyVals, derr := cluster.DecodeCompositeKey(string(e.Key), len(c.config.DeleteKeyColumns()))
+		if derr != nil {
+			return cluster.Permanent(fmt.Errorf(
+				"[sql.apply] cannot honor delete: entity key does not decode for %d key columns (topic %q): %w",
+				len(c.config.DeleteKeyColumns()), c.config.Topic, derr))
+		}
+		args := make([]any, len(keyVals))
+		for i, v := range keyVals {
+			args[i] = v
+		}
+		_, err := tx.StmtContext(ctx, c.delete.Stmt).ExecContext(ctx, args...)
 		if err != nil {
 			return execFailure(fmt.Sprintf("[sql.apply] exec [%s]", c.delete.SQL), err, c.dialect.IsPermanent(err))
 		}
@@ -387,7 +403,7 @@ func (c *Syncable) applyEntity(ctx context.Context, tx *sql.Tx, e *cluster.Entit
 	// the next refresh-boundary sweep removes it. Appended after the mapped
 	// values so it fills that last placeholder. Keyless syncables have no such
 	// column and append nothing.
-	if c.config.PrimaryKey != "" {
+	if c.config.Keyed() {
 		values = append(values, int64(e.Generation)) //nolint:gosec // G115: a refresh epoch is a small monotonic counter, far below 2^63
 	}
 
