@@ -68,6 +68,17 @@ const (
 // lower it to red-proof the deadline without a 30s wait.
 var ctLivenessTimeout = 30 * time.Second
 
+// ctEnableTimeout bounds ensureChangeTracking — the RETRY PREAMBLE's
+// half-open-socket guard, closing the gap the first liveness sweep missed
+// (field-found: a TDS-cancellation failure warned once, then ingestOnce's
+// retry blocked ~56 minutes inside ensureChangeTracking's first unbounded
+// query — silent, because the stall was INSIDE one attempt, before the next
+// per-attempt warn could print). Bounding the preamble restores both
+// liveness and the loop's visible retry cadence. Generous, because the
+// ALTERs here do real work (enabling DB-level CT touches every connection's
+// session state); a var so tests can red-proof without the wait.
+var ctEnableTimeout = 60 * time.Second
+
 // quoter is the identifier quoting for composed SQL. Sessions run with
 // QUOTED_IDENTIFIER ON (the driver default), so the ISO "..." form is safe.
 var quoter = sqlident.SQLServer
@@ -366,6 +377,11 @@ func ctVersion(v gosql.NullInt64, subject string) (uint64, error) {
 // the owning node only (never in Preflight, which every node runs at config
 // build). Idempotent.
 func ensureChangeTracking(ctx context.Context, db *gosql.DB, config *sql.Config) error {
+	// The retry-preamble deadline (see ctEnableTimeout): every query and ALTER
+	// below is bounded so a wedged connection surfaces as an error into the
+	// backoff loop within one minute — never a silent indefinite stall.
+	ctx, cancel := context.WithTimeout(ctx, ctEnableTimeout)
+	defer cancel()
 	var dbEnabled int
 	err := db.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM sys.change_tracking_databases WHERE database_id = DB_ID()").Scan(&dbEnabled)

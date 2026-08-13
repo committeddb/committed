@@ -213,10 +213,39 @@ func (h *HTTP) RebuildSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 
-	// 202: the checkpoint reset and destination teardown/re-init are done, but
-	// the replay that refills the destination runs in the worker afterward.
-	// Poll GET /syncable/{id}/status (lag → 0) to see the rebuild complete.
+	// 202 with a small ack body: the checkpoint reset and destination
+	// teardown/re-init are done, but the replay that refills the destination
+	// runs in the worker afterward. The body exists because an empty 202 next
+	// to legitimate 405s (wrong verbs on this route) field-read as a routing
+	// failure — an operator spent half an hour disbelieving a success. It
+	// names the poll target so the next step is in the response itself.
+	bs, err := json.Marshal(SyncableRebuildResponse{
+		ID:     id,
+		Status: "rebuilding",
+		Poll:   "/v1/syncable/" + id + "/status",
+	})
+	if err != nil {
+		writeInternalError(w, "failed to marshal response", err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	// Location is the idiomatic HTTP spelling of the async-accept pattern:
+	// 202 + where to watch. Same pointer as the body's poll field, visible to
+	// curl -i and REST tooling without parsing the body.
+	w.Header().Set("Location", "/v1/syncable/"+id+"/status")
 	w.WriteHeader(httpgo.StatusAccepted)
+	_, _ = w.Write(bs)
+}
+
+// SyncableRebuildResponse acknowledges an accepted rebuild: the destination
+// was reset and the replay is running in the worker. Poll the status
+// endpoint (lag → 0) to watch it converge. Re-POSTing rebuild is safe —
+// repeated triggers converge to the same reconciled state (field-observed:
+// a triple-fire ended at exact parity with one clean generation).
+type SyncableRebuildResponse struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+	Poll   string `json:"poll"`
 }
 
 // SyncableStatusResponse is the operational status of a syncable's worker:

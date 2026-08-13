@@ -81,6 +81,17 @@ func TestRebuildSyncable(t *testing.T) {
 	require.Equal(t, 1, fake.RebuildSyncableCallCount())
 	_, gotID := fake.RebuildSyncableArgsForCall(0)
 	require.Equal(t, "sync-1", gotID)
+
+	// The ack body: an empty 202 field-read as a routing failure (an operator
+	// spent half an hour disbelieving a success next to wrong-verb 405s). The
+	// body confirms the trigger and names the poll target.
+	var body http.SyncableRebuildResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	require.Equal(t, "sync-1", body.ID)
+	require.Equal(t, "rebuilding", body.Status)
+	require.Equal(t, "/v1/syncable/sync-1/status", body.Poll)
+	require.Equal(t, "/v1/syncable/sync-1/status", w.Header().Get("Location"),
+		"202 carries the idiomatic Location header pointing at the status resource")
 }
 
 // A wedged worker aborts the rebuild retryably: 503 with code worker_wedged

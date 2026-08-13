@@ -956,7 +956,21 @@ paths:
         - $ref: '#/components/parameters/ResourceId'
       responses:
         '202':
-          description: Rebuild accepted; the table is recreated and the replay is underway.
+          description: |
+            Rebuild accepted; the table is recreated and the replay is
+            underway. The body confirms the trigger and names the status
+            endpoint to poll (also carried as the `Location` header) —
+            repeated triggers are safe (field-observed: multiple fires
+            converged to exact parity with one clean generation).
+          headers:
+            Location:
+              schema:
+                type: string
+              description: The status endpoint to poll for convergence.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncableRebuildResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -2105,6 +2119,25 @@ components:
             Raft index of the proposal the syncable was blocked on and that
             the worker will dead-letter. Query `GET /v1/syncable/{id}/errors`
             to confirm the `manual` record once it lands.
+
+    SyncableRebuildResponse:
+      type: object
+      required: [id, status, poll]
+      description: |
+        Acknowledges an accepted rebuild: the destination was reset and the
+        replay is running in the worker. Poll the named status endpoint
+        (lag → 0) to watch it converge.
+      properties:
+        id:
+          type: string
+          description: The syncable being rebuilt.
+        status:
+          type: string
+          enum: [rebuilding]
+          description: Always `rebuilding` on a 202.
+        poll:
+          type: string
+          description: The status endpoint to poll for convergence.
 
     SyncableStatusResponse:
       type: object

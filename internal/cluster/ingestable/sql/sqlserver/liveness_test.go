@@ -64,3 +64,35 @@ func TestReadCTState_DeadConnectionBoundedByDeadline(t *testing.T) {
 		t.Fatal("readCTState hung on a dead connection — the liveness deadline is missing (the silent-freeze bug class)")
 	}
 }
+
+// TestEnsureChangeTracking_DeadConnectionBoundedByDeadline pins the RETRY
+// PREAMBLE's guard — the gap the first liveness sweep missed, found in the
+// field as a one-warn-then-56-minutes-of-silence stall: ingestOnce's first
+// act is ensureChangeTracking, and without its own deadline a wedged
+// connection blocked INSIDE one retry attempt, before the next per-attempt
+// warn could ever print. It must surface as an error within its bound on an
+// unbounded worker context.
+func TestEnsureChangeTracking_DeadConnectionBoundedByDeadline(t *testing.T) {
+	orig := ctEnableTimeout
+	ctEnableTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { ctEnableTimeout = orig })
+
+	db, err := gosql.Open("committed-test-hang", "ignored")
+	require.NoError(t, err)
+	defer db.Close()
+
+	cfg := &sql.Config{Tables: []string{"t"}}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- ensureChangeTracking(context.Background(), db, cfg)
+	}()
+
+	select {
+	case err := <-done:
+		require.Error(t, err, "a dead connection must surface into the retry loop, not hang it")
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+	case <-time.After(5 * time.Second):
+		t.Fatal("ensureChangeTracking hung on a dead connection — the retry preamble is unbounded (the silent 56-minute stall)")
+	}
+}
