@@ -700,6 +700,16 @@ unaffected.
   MySQL CDC can't run.
 - **"Access denied" on connect or on the binlog dump.** The user is missing
   `REPLICATION SLAVE`/`REPLICATION CLIENT` (binlog) or `RELOAD` (snapshot lock).
+- **Lag growing while status says `streaming` (any engine).** The
+  streaming/polling machinery believes it is connected but nothing arrives —
+  historically a half-open TCP connection: the source (or a NAT/firewall/LB
+  between) dropped the connection without a FIN reaching committed. As of
+  0.7.8 this self-heals — the MySQL binlog stream runs server heartbeats
+  under a rolling read deadline, and the SQL Server poll's per-cycle catalog
+  queries carry their own deadline — so a dead connection surfaces as a
+  reconnect (watch for the resume-positioning log line) within ~a minute or
+  two. Growing-lag-while-streaming is still the right dashboard alert: it
+  catches this whole class, including causes the deadlines can't see.
 - **`reSnapshotRequired: true` after a long outage.** The source purged the binlog
   past what committed had consumed (e.g. a short `binlog_expire_logs_seconds` and a
   downtime longer than it). committed detects this (binlog error 1236 /

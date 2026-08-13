@@ -48,3 +48,23 @@ func TestSyncerLogger_NeverLogsReplicationPassword(t *testing.T) {
 	require.Contains(t, out, "create BinlogSyncer", "the config log line must fire, else this guard is vacuous")
 	require.NotContains(t, out, secret, "the replication password must never reach the logs, even at Debug")
 }
+
+// TestBinlogSyncerConfig_HalfOpenSocketGuard pins the two-part liveness guard
+// against the reproducible field failure: a peer that dies without a FIN
+// (host suspend, NAT idle timeout) froze the pure server→client binlog
+// stream forever. Both halves must be present AND correctly ordered — a read
+// deadline without heartbeats reconnect-churns on quiet sources, heartbeats
+// without a deadline detect nothing.
+func TestBinlogSyncerConfig_HalfOpenSocketGuard(t *testing.T) {
+	cfg, err := binlogSyncerConfig(&sql.Config{
+		ConnectionString: "mysql://u:p@127.0.0.1:3306/db",
+	})
+	require.NoError(t, err)
+
+	require.Positive(t, cfg.HeartbeatPeriod,
+		"heartbeats must flow through idle periods or the read deadline false-fires")
+	require.Positive(t, cfg.ReadTimeout,
+		"without a read deadline a half-open socket blocks the stream forever")
+	require.Greater(t, cfg.ReadTimeout, 2*cfg.HeartbeatPeriod,
+		"the deadline needs comfortable headroom over the heartbeat cadence")
+}

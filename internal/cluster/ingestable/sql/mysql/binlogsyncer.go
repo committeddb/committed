@@ -30,6 +30,30 @@ import (
 // These are asserted by the e2e type matrix; getting them wrong silently corrupts
 // the payload. ServerID is a non-zero random id (the replica id this connection
 // registers under — NewBinlogSyncer panics on 0), as canal also randomized it.
+
+// binlogHeartbeatPeriod / binlogReadTimeout are the half-open-socket guard.
+// The binlog stream is committed's ONLY pure server→client connection: after
+// the dump request the client never writes, so a peer that dies without
+// delivering a FIN/RST (host suspend, NAT/LB idle timeout, firewall drop, VM
+// migration) leaves the reader blocked on a dead socket FOREVER — the field
+// finding: a ~2-day suspend reaped the connection server-side and the ingest
+// froze silently while status read "streaming", reproducibly. (Postgres is
+// bidirectional — standby updates eventually error; SQL Server polls.)
+//
+// The guard is the two halves together, and they only work together: the
+// server sends heartbeat events through idle periods (MASTER_HEARTBEAT_PERIOD)
+// so a healthy quiet stream always has traffic inside the read deadline; the
+// deadline turns a dead socket into a read error the syncer recovers from
+// (its internal retrySync redials at the held position — no checkpoint
+// interaction, dedup covers any re-delivery). A deadline WITHOUT heartbeats
+// would reconnect-churn on legitimately quiet sources; heartbeats without a
+// deadline detect nothing. 3x headroom between them absorbs scheduling jitter.
+// Heartbeat events reach dispatchEvent as an unmatched type and are ignored.
+const (
+	binlogHeartbeatPeriod = 30 * time.Second
+	binlogReadTimeout     = 90 * time.Second
+)
+
 func binlogSyncerConfig(config *sql.Config) (replication.BinlogSyncerConfig, error) {
 	// cluster.ParseMySQLConn, not url.Parse or a bare split: it is the SINGLE
 	// MySQL URL parse authority the DSN path also uses, so admission and this
@@ -50,15 +74,20 @@ func binlogSyncerConfig(config *sql.Config) (replication.BinlogSyncerConfig, err
 
 	return replication.BinlogSyncerConfig{
 		//nolint:gosec // G404: a MySQL replica id, not security-sensitive; weak rand is fine (canal randomizes it the same way).
-		ServerID:   1001 + rand.Uint32N(1<<31),
-		Flavor:     mysql.DEFAULT_FLAVOR,
-		Host:       conn.Host,
-		Port:       conn.Port,
-		User:       conn.User,
-		Password:   conn.Password,
-		TLSConfig:  tlsCfg,
-		Charset:    mysql.DEFAULT_CHARSET,
-		UseDecimal: false,
+		ServerID:  1001 + rand.Uint32N(1<<31),
+		Flavor:    mysql.DEFAULT_FLAVOR,
+		Host:      conn.Host,
+		Port:      conn.Port,
+		User:      conn.User,
+		Password:  conn.Password,
+		TLSConfig: tlsCfg,
+		// The half-open-socket guard (see the constants above): heartbeats keep
+		// a healthy idle stream inside the rolling read deadline; a dead socket
+		// times out and the syncer redials at its held position.
+		HeartbeatPeriod: binlogHeartbeatPeriod,
+		ReadTimeout:     binlogReadTimeout,
+		Charset:         mysql.DEFAULT_CHARSET,
+		UseDecimal:      false,
 		// Emit JSON-embedded DECIMAL leaves as exact unquoted numbers so a CDC
 		// payload is byte-identical to the initial-snapshot path (which renders
 		// the same decimal exact and unquoted — see readBatch's type-aware JSON

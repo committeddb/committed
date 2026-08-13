@@ -63,6 +63,11 @@ const (
 	ctOwnerProperty = "committed_ct_enabled"
 )
 
+// ctLivenessTimeout bounds readCTState's per-cycle catalog queries — the
+// poll loop's half-open-socket guard (see readCTState). A var so tests can
+// lower it to red-proof the deadline without a 30s wait.
+var ctLivenessTimeout = 30 * time.Second
+
 // quoter is the identifier quoting for composed SQL. Sessions run with
 // QUOTED_IDENTIFIER ON (the driver default), so the ISO "..." form is safe.
 var quoter = sqlident.SQLServer
@@ -302,6 +307,18 @@ func (d *SQLServerDialect) Status(ctx context.Context, config *sql.Config, pos c
 // that table's gap and the whole ingestable re-snapshots, the shared
 // failure-domain contract).
 func readCTState(ctx context.Context, db *gosql.DB, config *sql.Config) (current, minValid uint64, err error) {
+	// The half-open-socket guard, poll-loop edition. These tiny catalog
+	// queries run every poll cycle, so a bounded deadline here means the
+	// worker can NEVER silently freeze on a dead connection — the deadline
+	// fires, the error routes into the existing backoff/reconnect, and the
+	// next attempt draws a fresh pooled connection. The DATA query
+	// (pollTable's CHANGETABLE read) deliberately carries no fixed deadline:
+	// a large catch-up window must not livelock against one, and with this
+	// per-cycle guard a dead socket is caught within one cycle either way.
+	// (MySQL's analogue is the binlog heartbeat+read-deadline pair; Postgres
+	// is bidirectional and self-detects via standby-status writes.)
+	ctx, cancel := context.WithTimeout(ctx, ctLivenessTimeout)
+	defer cancel()
 	var cur gosql.NullInt64
 	if err := db.QueryRowContext(ctx, "SELECT CHANGE_TRACKING_CURRENT_VERSION()").Scan(&cur); err != nil {
 		return 0, 0, fmt.Errorf("current version: %w", err)
