@@ -1,6 +1,7 @@
 package dialects
 
 import (
+	"context"
 	gosql "database/sql"
 	"errors"
 	"fmt"
@@ -215,11 +216,11 @@ func (d *PostgreSQLDialect) CreateSpineFanOutSQL(config *sql.Config, column, onC
 
 // EnsureSpineIndex implements Dialect: CREATE INDEX IF NOT EXISTS on the on
 // column (deterministic name, so re-Init is a no-op).
-func (d *PostgreSQLDialect) EnsureSpineIndex(db *gosql.DB, config *sql.Config, onColumn string) error {
+func (d *PostgreSQLDialect) EnsureSpineIndex(ctx context.Context, db *gosql.DB, config *sql.Config, onColumn string) error {
 	ddl := fmt.Sprintf("CREATE INDEX IF NOT EXISTS %s ON %s (%s)",
 		pgIdent.Ident(spineIndexName(config.Table, onColumn)),
 		pgIdent.Table(config.Table), pgIdent.Ident(onColumn))
-	if _, err := db.Exec(ddl); err != nil {
+	if _, err := db.ExecContext(ctx, ddl); err != nil {
 		return fmt.Errorf("spine index [%s]: %w", ddl, err)
 	}
 	return nil
@@ -292,13 +293,13 @@ func pgUpsertSQL(config *sql.Config, withGeneration bool) string {
 // NOT EXISTS, so a single idempotent statement covers both a freshly-created
 // table (CreateDDL omits the column) and an upgraded pre-feature table. Existing
 // rows baseline to generation 1.
-func (d *PostgreSQLDialect) EnsureGenerationColumn(db *gosql.DB, config *sql.Config) error {
+func (d *PostgreSQLDialect) EnsureGenerationColumn(ctx context.Context, db *gosql.DB, config *sql.Config) error {
 	// Table is a config identifier quoted for PostgreSQL; GenerationColumn is a
 	// package constant. No user value is interpolated unquoted, so no gosec
 	// suppression.
 	stmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s BIGINT NOT NULL DEFAULT 1",
 		pgIdent.Table(config.Table), sql.GenerationColumn)
-	if _, err := db.Exec(stmt); err != nil {
+	if _, err := db.ExecContext(ctx, stmt); err != nil {
 		return fmt.Errorf("ensure generation column [%s]: %w", stmt, err)
 	}
 	return nil

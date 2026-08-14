@@ -106,8 +106,15 @@ func (c *Syncable) Init() error {
 		return err
 	}
 
+	// Every destination operation below runs under one bounded deadline —
+	// see initTimeout for the apply-loop wedge this guards against. A build
+	// that cannot finish inside the bound fails LOUDLY into the degraded-
+	// config path instead of stalling whoever called it.
+	ctx, cancel := context.WithTimeout(context.Background(), initTimeout)
+	defer cancel()
+
 	ddlString := c.dialect.CreateDDL(c.config)
-	_, err := c.db.Exec(ddlString)
+	_, err := c.db.ExecContext(ctx, ddlString)
 	if err != nil {
 		return fmt.Errorf("ddl [%s]: %w", ddlString, err)
 	}
@@ -122,13 +129,13 @@ func (c *Syncable) Init() error {
 	// keeps the plain insert and prepares no sweep.
 	sqlString := c.dialect.CreateSQL(c.config)
 	if keyed {
-		if err := c.dialect.EnsureGenerationColumn(c.db, c.config); err != nil {
+		if err := c.dialect.EnsureGenerationColumn(ctx, c.db, c.config); err != nil {
 			return err
 		}
 		sqlString = c.dialect.CreateGenerationUpsertSQL(c.config)
 	}
 
-	stmt, err := c.db.Prepare(sqlString)
+	stmt, err := c.db.PrepareContext(ctx, sqlString)
 	if err != nil {
 		return fmt.Errorf("prepare sql [%s]: %w", sqlString, err)
 	}
@@ -146,7 +153,7 @@ func (c *Syncable) Init() error {
 	// applyEntity surface the misconfiguration if a delete ever arrives.
 	if len(c.config.DeleteKeyColumns()) > 0 {
 		deleteString := c.dialect.CreateDeleteSQL(c.config)
-		deleteStmt, err := c.db.Prepare(deleteString)
+		deleteStmt, err := c.db.PrepareContext(ctx, deleteString)
 		if err != nil {
 			return fmt.Errorf("prepare delete sql [%s]: %w", deleteString, err)
 		}
@@ -157,7 +164,7 @@ func (c *Syncable) Init() error {
 	// sinks only — see the sweep field and applyRefreshBoundary).
 	if keyed {
 		sweepSQL := c.dialect.CreateGenerationSweepSQL(c.config)
-		sweepStmt, err := c.db.Prepare(sweepSQL)
+		sweepStmt, err := c.db.PrepareContext(ctx, sweepSQL)
 		if err != nil {
 			return fmt.Errorf("prepare sweep sql [%s]: %w", sweepSQL, err)
 		}
@@ -173,11 +180,11 @@ func (c *Syncable) Init() error {
 	// is already idempotent, so they carry no sidecar and pay nothing.
 	if !c.config.Keyed() {
 		sidecarDDL := c.dialect.CreateAppliedSidecarDDL(c.config)
-		if _, err := c.db.Exec(sidecarDDL); err != nil {
+		if _, err := c.db.ExecContext(ctx, sidecarDDL); err != nil {
 			return fmt.Errorf("applied-sidecar ddl [%s]: %w", sidecarDDL, err)
 		}
 		markSQL := c.dialect.CreateAppliedMarkSQL(c.config)
-		markStmt, err := c.db.Prepare(markSQL)
+		markStmt, err := c.db.PrepareContext(ctx, markSQL)
 		if err != nil {
 			return fmt.Errorf("prepare applied-mark sql [%s]: %w", markSQL, err)
 		}

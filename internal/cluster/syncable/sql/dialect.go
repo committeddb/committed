@@ -1,9 +1,11 @@
 package sql
 
 import (
+	"context"
 	gosql "database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/sqlident"
@@ -33,7 +35,7 @@ type Dialect interface {
 	// gap-recovery refresh — at a later epoch — still reconciles a pre-existing
 	// row that has since vanished at the source. Postgres uses ADD COLUMN IF NOT
 	// EXISTS; MySQL (no such clause) checks information_schema first.
-	EnsureGenerationColumn(db *gosql.DB, config *Config) error
+	EnsureGenerationColumn(ctx context.Context, db *gosql.DB, config *Config) error
 	// CreateEnrichedUpsertSQL is CreateSQL for a projection rule with spine
 	// lookup enrichments: enriched columns' VALUES entries are scalar
 	// subqueries against the lookup dimension table — `(SELECT
@@ -56,7 +58,7 @@ type Dialect interface {
 	// EnsureSpineIndex idempotently indexes an enrichment's on column — the
 	// fan-out's WHERE would otherwise seq-scan the projection per dimension
 	// event. Committed issues the fan-out, so committed owns its performance.
-	EnsureSpineIndex(db *gosql.DB, config *Config, onColumn string) error
+	EnsureSpineIndex(ctx context.Context, db *gosql.DB, config *Config, onColumn string) error
 	// CreateGenerationSweepSQL returns the reconciling sweep a keyed sink runs on
 	// a refresh-boundary marker: `DELETE FROM <table> WHERE <GenerationColumn>
 	// >= 1 AND <GenerationColumn> < <placeholder>`. Its single bound argument is
@@ -333,6 +335,17 @@ func (c *Config) DeleteKeyColumns() []string {
 // extract from its fields JSON, and the column's declared SQL type (for the
 // engines that need an explicit cast of the extracted text). Built by the
 // projection Init from the validated config.
+// initTimeout bounds EVERY destination operation a syncable/projection build
+// performs (DDL, column/index ensures, statement prepares). The field wedge
+// this guards: a runaway analyst query held a table lock, an undeadlined
+// ALTER waited on it forever, and the stall propagated all the way into the
+// raft apply loop — appliedIndex froze and every proposal cluster-wide timed
+// out while /ready stayed green. With the bound, a blocked destination
+// errors the BUILD instead: the config lands degraded (loud, queryable),
+// the analyst query wins, the cluster lives, and the operator re-POSTs
+// after the lock clears. A var so tests can red-proof without the wait.
+var initTimeout = 60 * time.Second
+
 type SpineEnrichment struct {
 	DimTable    string
 	SelectField string

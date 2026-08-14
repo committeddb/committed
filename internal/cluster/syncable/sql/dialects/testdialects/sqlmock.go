@@ -7,6 +7,7 @@
 package testdialects
 
 import (
+	"context"
 	gosql "database/sql"
 	"fmt"
 	"strings"
@@ -130,7 +131,7 @@ func (d *SQLMockDialect) CreateGenerationUpsertSQL(config *sql.Config) string {
 // EnsureGenerationColumn is a no-op for the mock: the real migration is covered
 // by the docker dialect tests, and keeping it side-effect-free means a keyed
 // syncable's Init needs no extra sqlmock expectation.
-func (d *SQLMockDialect) EnsureGenerationColumn(db *gosql.DB, config *sql.Config) error {
+func (d *SQLMockDialect) EnsureGenerationColumn(_ context.Context, db *gosql.DB, config *sql.Config) error {
 	return nil
 }
 
@@ -162,6 +163,6 @@ func (d *SQLMockDialect) CreateSpineFanOutSQL(c *sql.Config, column, onColumn st
 	return (&dialects.MySQLDialect{}).CreateSpineFanOutSQL(c, column, onColumn)
 }
 
-func (d *SQLMockDialect) EnsureSpineIndex(db *gosql.DB, c *sql.Config, onColumn string) error {
-	return (&dialects.MySQLDialect{}).EnsureSpineIndex(db, c, onColumn)
+func (d *SQLMockDialect) EnsureSpineIndex(ctx context.Context, db *gosql.DB, c *sql.Config, onColumn string) error {
+	return (&dialects.MySQLDialect{}).EnsureSpineIndex(ctx, db, c, onColumn)
 }

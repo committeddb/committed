@@ -10,20 +10,21 @@ import (
 	"github.com/committeddb/committed/internal/cluster/db/wal"
 )
 
-// TestRequestReconcile_EscapesOnCloseInsteadOfStranding pins the #1 fix: a
-// detached reconcile sender (RequestSyncReconcile / RequestIngestReconcile — run
-// from cmd/node startup and the async refreshAfterRestore goroutine) is NOT
-// synchronized with db.Close's channel drain, so once the db-layer listener has
-// stopped it can be left sending on the unbuffered sync/ingest channel with no
-// receiver. Without an escape that goroutine strands for the life of the process.
-//
-// The sends now select on Storage.closeC, so Close releases them. We reproduce
-// the "no receiver" state directly with an unbuffered channel nobody reads, fire
-// the reconcile senders, then Close — and require both return promptly. Pre-fix
-// (bare `s.sync <- ...`) the senders block forever and this times out.
-func TestRequestReconcile_EscapesOnCloseInsteadOfStranding(t *testing.T) {
+// TestRequestReconcile_NeverBlocksProducers pins the notify-pump contract,
+// which superseded the closeC-escape this test originally pinned. History:
+// v1 — bare sends could strand a detached reconcile goroutine forever once
+// the listener stopped; v2 — sends selected on closeC, so Close released
+// them (this test's original shape: blocked-until-Close). v3 (now) — ALL
+// notification producers go through the notify pump: a push returns
+// IMMEDIATELY regardless of receiver state, because the same send path is
+// shared with the raft APPLY LOOP, and the field proved a wedged listener
+// could freeze appliedIndex cluster-wide through it (a locked sink table →
+// stalled Init → full channel → blocked apply). The pump goroutine owns the
+// blocking and the shutdown drop.
+func TestRequestReconcile_NeverBlocksProducers(t *testing.T) {
 	dir := t.TempDir()
-	// Unbuffered, and we never receive from either: any send blocks until closeC.
+	// Unbuffered, and we never receive from either: the pump absorbs what the
+	// producers push; nothing may block the producers themselves.
 	syncCh := make(chan *db.SyncableWithID)
 	ingestCh := make(chan *db.IngestableWithID)
 
@@ -34,21 +35,17 @@ func TestRequestReconcile_EscapesOnCloseInsteadOfStranding(t *testing.T) {
 	go func() { s.RequestSyncReconcile(); done <- struct{}{} }()
 	go func() { s.RequestIngestReconcile(); done <- struct{}{} }()
 
-	// With no receiver on either channel, neither sender may return yet — they
-	// are blocked on the send. (Pre-fix they stay blocked forever; that is the bug.)
-	select {
-	case <-done:
-		t.Fatal("a reconcile sender returned before Close — with no receiver it must be blocked on the send")
-	case <-time.After(100 * time.Millisecond):
-	}
-
-	require.NoError(t, s.Close())
-
+	// Producers return promptly even with NO receiver — the invariant the
+	// apply loop depends on.
 	for i := 0; i < 2; i++ {
 		select {
 		case <-done:
 		case <-time.After(5 * time.Second):
-			t.Fatal("reconcile sender did not escape after Close — it stranded on the unbuffered channel")
+			t.Fatal("a notification producer blocked with no receiver — the pump must absorb pushes so the apply path can never stall on the listener")
 		}
 	}
+
+	// Close with items still queued in the pump: must not hang or panic (the
+	// pump drops on close; boot reconciliation re-emits from durable state).
+	require.NoError(t, s.Close())
 }

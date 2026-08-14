@@ -23,6 +23,9 @@ import (
 // by replaying from index 0, and amendments are a fresh table + fresh
 // syncable, not ALTER (DDL here is CREATE TABLE IF NOT EXISTS only).
 type Projection struct {
+	// initCtx is Init's bounded deadline, threaded to the nested
+	// aggregate/lookup inits (set at the top of Init, valid only during it).
+	initCtx context.Context
 	db      *gosql.DB
 	config  *ProjectionConfig
 	dialect Dialect
@@ -229,9 +232,17 @@ func (p *Projection) Init() error {
 		return err
 	}
 
+	// One bounded deadline over every destination operation this Init
+	// performs (DDL, dimension DDL, index ensures, dozens of prepares) —
+	// see initTimeout for the apply-loop wedge this guards. Threaded to the
+	// nested initAggregate/initLookup through the struct field below.
+	ctx, cancel := context.WithTimeout(context.Background(), initTimeout)
+	defer cancel()
+	p.initCtx = ctx
+
 	ddlConfig := p.config.ddlConfig()
 	ddlString := p.dialect.CreateDDL(ddlConfig)
-	if _, err := p.db.Exec(ddlString); err != nil {
+	if _, err := p.db.ExecContext(ctx, ddlString); err != nil {
 		return fmt.Errorf("ddl [%s]: %w", ddlString, err)
 	}
 
@@ -257,7 +268,7 @@ func (p *Projection) Init() error {
 			continue
 		}
 		dimDDL := p.dialect.CreateLookupDimensionDDL(p.config.lookupSpec(src.Lookup))
-		if _, err := p.db.Exec(dimDDL); err != nil {
+		if _, err := p.db.ExecContext(ctx, dimDDL); err != nil {
 			return fmt.Errorf("dimension ddl [%s]: %w", dimDDL, err)
 		}
 	}
@@ -271,7 +282,7 @@ func (p *Projection) Init() error {
 				if !s.IsEnrichment() || indexed[s.On] {
 					continue
 				}
-				if err := p.dialect.EnsureSpineIndex(p.db, ddlConfig, s.On); err != nil {
+				if err := p.dialect.EnsureSpineIndex(ctx, p.db, ddlConfig, s.On); err != nil {
 					return err
 				}
 				indexed[s.On] = true
@@ -325,7 +336,7 @@ func (p *Projection) Init() error {
 				if enrich := p.config.ruleEnrichments(r); len(enrich) > 0 {
 					sqlString = p.dialect.CreateEnrichedUpsertSQL(p.config.ruleConfig(r), enrich)
 				}
-				stmt, err := p.db.Prepare(sqlString)
+				stmt, err := p.db.PrepareContext(p.initCtx, sqlString)
 				if err != nil {
 					return fmt.Errorf("prepare source %d (topic %q) rule %d sql [%s]: %w", si+1, src.Topic, i+1, sqlString, err)
 				}
@@ -333,7 +344,7 @@ func (p *Projection) Init() error {
 			}
 			if src.OnDelete == onDeleteClear {
 				ps.clearSQL = p.dialect.CreateClearSQL(ddlConfig, src.ownedColumns())
-				clearStmt, err := p.db.Prepare(ps.clearSQL)
+				clearStmt, err := p.db.PrepareContext(p.initCtx, ps.clearSQL)
 				if err != nil {
 					return fmt.Errorf("prepare source %d (topic %q) clear sql [%s]: %w", si+1, src.Topic, ps.clearSQL, err)
 				}
@@ -348,7 +359,7 @@ func (p *Projection) Init() error {
 	for _, ps := range lookupSources {
 		for _, ref := range enrichRefs[ps.lkp.name] {
 			affSQL := p.dialect.CreateAggregateAffectedParentsSQL(ref.spec, ref.onField)
-			affStmt, err := p.db.Prepare(affSQL)
+			affStmt, err := p.db.PrepareContext(p.initCtx, affSQL)
 			if err != nil {
 				return fmt.Errorf("prepare lookup %q affected-parents sql [%s]: %w", ps.lkp.name, affSQL, err)
 			}
@@ -378,7 +389,7 @@ func (p *Projection) Init() error {
 					}
 					seen[k] = true
 					upSQL := p.dialect.CreateSpineFanOutSQL(ddlConfig, s.Column, s.On)
-					upStmt, err := p.db.Prepare(upSQL)
+					upStmt, err := p.db.PrepareContext(p.initCtx, upSQL)
 					if err != nil {
 						return fmt.Errorf("prepare lookup %q spine fan-out sql [%s]: %w", ps.lkp.name, upSQL, err)
 					}
@@ -397,7 +408,7 @@ func (p *Projection) Init() error {
 
 	// Shared row-delete (onDelete=delete-row, and any RTBF delete on such a topic).
 	deleteString := p.dialect.CreateDeleteSQL(ddlConfig)
-	deleteStmt, err := p.db.Prepare(deleteString)
+	deleteStmt, err := p.db.PrepareContext(p.initCtx, deleteString)
 	if err != nil {
 		return fmt.Errorf("prepare delete sql [%s]: %w", deleteString, err)
 	}
@@ -425,7 +436,7 @@ func (p *Projection) initLookup(si int, src ProjectionSource) (*lookupRuntime, e
 	where := fmt.Sprintf("source %d (topic %q) lookup %q", si+1, src.Topic, lk.Name)
 
 	ddl := p.dialect.CreateLookupDimensionDDL(spec)
-	if _, err := p.db.Exec(ddl); err != nil {
+	if _, err := p.db.ExecContext(p.initCtx, ddl); err != nil {
 		return nil, fmt.Errorf("%s dimension ddl [%s]: %w", where, ddl, err)
 	}
 
@@ -445,11 +456,11 @@ func (p *Projection) initLookup(si int, src ProjectionSource) (*lookupRuntime, e
 	dimConfig := dimensionConfig(spec.Dimension)
 	var err error
 	rt.upsertDimSQL = p.dialect.CreateSQL(dimConfig)
-	if rt.upsertDim, err = p.db.Prepare(rt.upsertDimSQL); err != nil {
+	if rt.upsertDim, err = p.db.PrepareContext(p.initCtx, rt.upsertDimSQL); err != nil {
 		return nil, fmt.Errorf("%s prepare dimension upsert [%s]: %w", where, rt.upsertDimSQL, err)
 	}
 	rt.deleteDimSQL = p.dialect.CreateDeleteSQL(dimConfig)
-	if rt.deleteDim, err = p.db.Prepare(rt.deleteDimSQL); err != nil {
+	if rt.deleteDim, err = p.db.PrepareContext(p.initCtx, rt.deleteDimSQL); err != nil {
 		return nil, fmt.Errorf("%s prepare dimension delete [%s]: %w", where, rt.deleteDimSQL, err)
 	}
 	success = true
@@ -467,7 +478,7 @@ func (p *Projection) initAggregate(si int, src ProjectionSource, spec AggregateS
 	where := fmt.Sprintf("source %d (topic %q) aggregate %q", si+1, src.Topic, ag.Column)
 
 	ddl := p.dialect.CreateAggregateSidecarDDL(spec)
-	if _, err := p.db.Exec(ddl); err != nil {
+	if _, err := p.db.ExecContext(p.initCtx, ddl); err != nil {
 		return nil, fmt.Errorf("%s sidecar ddl [%s]: %w", where, ddl, err)
 	}
 
@@ -487,7 +498,7 @@ func (p *Projection) initAggregate(si int, src ProjectionSource, spec AggregateS
 	}()
 	scConfig := sidecarConfig(spec.Sidecar)
 	prepare := func(label, sqlString string) (*gosql.Stmt, error) {
-		stmt, err := p.db.Prepare(sqlString)
+		stmt, err := p.db.PrepareContext(p.initCtx, sqlString)
 		if err != nil {
 			return nil, fmt.Errorf("%s prepare %s [%s]: %w", where, label, sqlString, err)
 		}

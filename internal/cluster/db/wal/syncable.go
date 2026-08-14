@@ -127,13 +127,12 @@ func (s *Storage) saveSyncable(t *cluster.Configuration, raftIndex uint64) error
 		s.metrics.SetWorkerParked("sync", t.ID, false)
 	}
 
-	if built && s.sync != nil {
-		s.logger.Debug("sending syncable to channel", zap.String("id", t.ID))
-		select {
-		case s.sync <- &db.SyncableWithID{ID: t.ID, Syncable: syncable}:
-		case <-s.closeC:
-			s.logger.Debug("storage closing; dropped syncable notification (reconcile re-emits on next start)", zap.String("id", t.ID))
-		}
+	if built && s.syncPump != nil {
+		// Push, never send: the apply path must not block on the listener
+		// (see notifyPump — the field wedge where a locked sink table froze
+		// appliedIndex cluster-wide through this exact send).
+		s.logger.Debug("queueing syncable notification", zap.String("id", t.ID))
+		s.syncPump.push(&db.SyncableWithID{ID: t.ID, Syncable: syncable})
 	}
 
 	return nil
@@ -171,13 +170,9 @@ func (s *Storage) deleteSyncable(id []byte, keepData bool) error {
 	// (nothing re-checks a deleted id, so the gauge would overcount forever).
 	s.clearConfigError("syncable", string(id), configErrBuild)
 
-	if s.sync != nil {
-		s.logger.Debug("sending syncable delete to channel", zap.String("id", string(id)))
-		select {
-		case s.sync <- &db.SyncableWithID{ID: string(id), Delete: true, KeepData: keepData}:
-		case <-s.closeC:
-			s.logger.Debug("storage closing; dropped syncable delete notification (reconcile re-emits on next start)", zap.String("id", string(id)))
-		}
+	if s.syncPump != nil {
+		s.logger.Debug("queueing syncable delete notification", zap.String("id", string(id)))
+		s.syncPump.push(&db.SyncableWithID{ID: string(id), Delete: true, KeepData: keepData})
 	}
 
 	return nil
@@ -208,18 +203,16 @@ func (s *Storage) deleteSyncable(id []byte, keepData bool) error {
 // drains s.sync) before calling this — the closure parses with whatever
 // sub-parsers exist when the LISTENER runs it.
 func (s *Storage) RequestSyncReconcile() {
-	if s.sync == nil {
+	if s.syncPump == nil {
 		return
 	}
-	// This runs on a detached goroutine (cmd/node startup, refreshAfterRestore)
-	// that is NOT synchronized with db.Close's channel drain, so a bare send can
-	// outlive the listener and strand forever. Escape on closeC — a reconcile
-	// dropped at shutdown is redundant (the next start reconciles from scratch).
-	select {
-	case s.sync <- &db.SyncableWithID{ReconcileList: s.reconcileSyncableList}:
-	case <-s.closeC:
-		s.logger.Debug("storage closing; skipped sync reconcile request")
-	}
+	// Through the pump like every other producer — not for liveness (this
+	// runs on a detached goroutine where blocking was harmless) but for
+	// ORDERING: a second direct writer to the channel would race the pump and
+	// break the FIFO the notifications rely on. The pump also owns the
+	// shutdown drop (a reconcile dropped at close is redundant — the next
+	// start reconciles from scratch).
+	s.syncPump.push(&db.SyncableWithID{ReconcileList: s.reconcileSyncableList})
 }
 
 // reconcileSyncableList is the reconcile closure body: list + parse the

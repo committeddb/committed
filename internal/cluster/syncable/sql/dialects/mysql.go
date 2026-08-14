@@ -1,6 +1,7 @@
 package dialects
 
 import (
+	"context"
 	gosql "database/sql"
 	"errors"
 	"fmt"
@@ -181,10 +182,10 @@ func (d *MySQLDialect) CreateSpineFanOutSQL(config *sql.Config, column, onColumn
 // EnsureSpineIndex implements Dialect: MySQL has no CREATE INDEX IF NOT
 // EXISTS, so check information_schema first (the EnsureGenerationColumn
 // pattern).
-func (d *MySQLDialect) EnsureSpineIndex(db *gosql.DB, config *sql.Config, onColumn string) error {
+func (d *MySQLDialect) EnsureSpineIndex(ctx context.Context, db *gosql.DB, config *sql.Config, onColumn string) error {
 	name := spineIndexName(config.Table, onColumn)
 	var n int
-	err := db.QueryRow(
+	err := db.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ?",
 		config.Table, name).Scan(&n)
 	if err != nil {
@@ -195,7 +196,7 @@ func (d *MySQLDialect) EnsureSpineIndex(db *gosql.DB, config *sql.Config, onColu
 	}
 	ddl := fmt.Sprintf("CREATE INDEX %s ON %s (%s)",
 		mysqlIdent.Ident(name), mysqlIdent.Table(config.Table), mysqlIdent.Ident(onColumn))
-	if _, err := db.Exec(ddl); err != nil {
+	if _, err := db.ExecContext(ctx, ddl); err != nil {
 		return fmt.Errorf("spine index [%s]: %w", ddl, err)
 	}
 	return nil
@@ -264,7 +265,7 @@ func mysqlUpsertSQL(config *sql.Config, withGeneration bool) string {
 // absent — idempotent across a freshly-created table (CreateDDL omits the
 // column) and an upgraded pre-feature table. Existing rows baseline to
 // generation 1.
-func (d *MySQLDialect) EnsureGenerationColumn(db *gosql.DB, config *sql.Config) error {
+func (d *MySQLDialect) EnsureGenerationColumn(ctx context.Context, db *gosql.DB, config *sql.Config) error {
 	// information_schema.table_name holds only the bare table, so a
 	// schema-qualified sink ("db.tbl") must bind the schema and table halves
 	// apart. Binding the whole "db.tbl" to table_name never matches, so the
@@ -276,11 +277,11 @@ func (d *MySQLDialect) EnsureGenerationColumn(db *gosql.DB, config *sql.Config) 
 	var n int
 	var err error
 	if dot := strings.IndexByte(config.Table, '.'); dot >= 0 {
-		err = db.QueryRow(
+		err = db.QueryRowContext(ctx,
 			"SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = ? AND table_name = ? AND column_name = ?",
 			config.Table[:dot], config.Table[dot+1:], sql.GenerationColumn).Scan(&n)
 	} else {
-		err = db.QueryRow(
+		err = db.QueryRowContext(ctx,
 			"SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?",
 			config.Table, sql.GenerationColumn).Scan(&n)
 	}
@@ -294,7 +295,7 @@ func (d *MySQLDialect) EnsureGenerationColumn(db *gosql.DB, config *sql.Config) 
 	// constant. No user value is interpolated unquoted, so no gosec suppression.
 	stmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s BIGINT NOT NULL DEFAULT 1",
 		mysqlIdent.Table(config.Table), sql.GenerationColumn)
-	if _, err := db.Exec(stmt); err != nil {
+	if _, err := db.ExecContext(ctx, stmt); err != nil {
 		return fmt.Errorf("ensure generation column [%s]: %w", stmt, err)
 	}
 	return nil

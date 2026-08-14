@@ -1,6 +1,7 @@
 package dialects_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -45,7 +46,7 @@ func TestMySQLDialect_EnsureGenerationColumn_SchemaQualifiedIntrospection(t *tes
 		WithArgs("otherdb", "widget", sql.GenerationColumn).
 		WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(1))
 
-	require.NoError(t, (&dialects.MySQLDialect{}).EnsureGenerationColumn(db, config))
+	require.NoError(t, (&dialects.MySQLDialect{}).EnsureGenerationColumn(context.Background(), db, config))
 	require.NoError(t, mock.ExpectationsWereMet(), "no ALTER should be issued when the column already exists")
 }
 
@@ -67,7 +68,7 @@ func TestMySQLDialect_EnsureGenerationColumn_SchemaQualifiedAddsColumn(t *testin
 	mock.ExpectExec("ALTER TABLE `otherdb`.`widget` ADD COLUMN " + sql.GenerationColumn + " BIGINT NOT NULL DEFAULT 1").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
-	require.NoError(t, (&dialects.MySQLDialect{}).EnsureGenerationColumn(db, config))
+	require.NoError(t, (&dialects.MySQLDialect{}).EnsureGenerationColumn(context.Background(), db, config))
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -86,6 +87,6 @@ func TestMySQLDialect_EnsureGenerationColumn_UnqualifiedIntrospection(t *testing
 		WithArgs("widget", sql.GenerationColumn).
 		WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(1))
 
-	require.NoError(t, (&dialects.MySQLDialect{}).EnsureGenerationColumn(db, config))
+	require.NoError(t, (&dialects.MySQLDialect{}).EnsureGenerationColumn(context.Background(), db, config))
 	require.NoError(t, mock.ExpectationsWereMet())
 }

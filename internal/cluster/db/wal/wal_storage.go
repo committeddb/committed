@@ -437,6 +437,11 @@ type Storage struct {
 	parser      db.Parser
 	sync        chan<- *db.SyncableWithID
 	ingest      chan<- *db.IngestableWithID
+	// syncPump/ingestPump sit between the APPLY PATH and the channels above:
+	// apply pushes (never blocks), the pump drains — the appliedIndex-never-
+	// stalls-on-destination-state invariant. Nil when the channel is nil.
+	syncPump   *notifyPump[*db.SyncableWithID]
+	ingestPump *notifyPump[*db.IngestableWithID]
 
 	// configErrMu guards configErrors. configErrors records, per
 	// "kind/id" (e.g. "database/orders"), the most recent failure to
@@ -696,6 +701,15 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		scrubStop:       make(chan struct{}),
 		scrubDone:       make(chan struct{}),
 		closeC:          make(chan struct{}),
+	}
+
+	// The apply→listener pumps (see notifyPump): created only when a channel
+	// was supplied, watching closeC for shutdown.
+	if sync != nil {
+		ws.syncPump = newNotifyPump(sync, ws.closeC)
+	}
+	if ingest != nil {
+		ws.ingestPump = newNotifyPump(ingest, ws.closeC)
 	}
 
 	fi, err := entryLog.FirstIndex()

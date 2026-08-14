@@ -1,6 +1,7 @@
 package testdialects
 
 import (
+	"context"
 	gosql "database/sql"
 	"fmt"
 
@@ -30,8 +31,8 @@ func (d *GoMySQLServerDialect) CreateGenerationUpsertSQL(config *sql.Config) str
 	return (&dialects.MySQLDialect{}).CreateGenerationUpsertSQL(config)
 }
 
-func (d *GoMySQLServerDialect) EnsureGenerationColumn(db *gosql.DB, config *sql.Config) error {
-	return (&dialects.MySQLDialect{}).EnsureGenerationColumn(db, config)
+func (d *GoMySQLServerDialect) EnsureGenerationColumn(ctx context.Context, db *gosql.DB, config *sql.Config) error {
+	return (&dialects.MySQLDialect{}).EnsureGenerationColumn(ctx, db, config)
 }
 
 func (d *GoMySQLServerDialect) CreateGenerationSweepSQL(config *sql.Config) string {
@@ -117,6 +118,6 @@ func (d *GoMySQLServerDialect) CreateSpineFanOutSQL(c *sql.Config, column, onCol
 	return (&dialects.MySQLDialect{}).CreateSpineFanOutSQL(c, column, onColumn)
 }
 
-func (d *GoMySQLServerDialect) EnsureSpineIndex(db *gosql.DB, c *sql.Config, onColumn string) error {
-	return (&dialects.MySQLDialect{}).EnsureSpineIndex(db, c, onColumn)
+func (d *GoMySQLServerDialect) EnsureSpineIndex(ctx context.Context, db *gosql.DB, c *sql.Config, onColumn string) error {
+	return (&dialects.MySQLDialect{}).EnsureSpineIndex(ctx, db, c, onColumn)
 }

@@ -104,12 +104,10 @@ func (s *Storage) saveIngestable(t *cluster.Configuration, raftIndex uint64) err
 		s.metrics.SetWorkerParked("ingest", t.ID, false)
 	}
 
-	if built && s.ingest != nil {
-		select {
-		case s.ingest <- &db.IngestableWithID{ID: t.ID, Ingestable: ingestable}:
-		case <-s.closeC:
-			s.logger.Debug("storage closing; dropped ingestable notification (reconcile re-emits on next start)", zap.String("id", t.ID))
-		}
+	if built && s.ingestPump != nil {
+		// Push, never send — the apply path must not block on the listener
+		// (see notifyPump).
+		s.ingestPump.push(&db.IngestableWithID{ID: t.ID, Ingestable: ingestable})
 	}
 
 	return nil
@@ -148,13 +146,9 @@ func (s *Storage) deleteIngestable(id []byte) error {
 	// an orphaned slot can't pin the source's WAL. Mirrors deleteSyncable; the DB
 	// layer reuses the worker's already-built ingestable handle for the teardown,
 	// so the signal carries only the ID.
-	if s.ingest != nil {
-		s.logger.Debug("sending ingestable delete to channel", zap.String("id", string(id)))
-		select {
-		case s.ingest <- &db.IngestableWithID{ID: string(id), Delete: true}:
-		case <-s.closeC:
-			s.logger.Debug("storage closing; dropped ingestable delete notification (reconcile re-emits on next start)", zap.String("id", string(id)))
-		}
+	if s.ingestPump != nil {
+		s.logger.Debug("queueing ingestable delete notification", zap.String("id", string(id)))
+		s.ingestPump.push(&db.IngestableWithID{ID: string(id), Delete: true})
 	}
 
 	return nil
@@ -166,16 +160,11 @@ func (s *Storage) deleteIngestable(id []byte) error {
 // staleness rationale and the ORDERING CONTRACT (sub-parsers registered and
 // db.New's listener draining s.ingest before this is called).
 func (s *Storage) RequestIngestReconcile() {
-	if s.ingest == nil {
+	if s.ingestPump == nil {
 		return
 	}
-	// Detached-goroutine sender; escape on closeC so it can't strand past
-	// shutdown. See RequestSyncReconcile.
-	select {
-	case s.ingest <- &db.IngestableWithID{ReconcileList: s.reconcileIngestableList}:
-	case <-s.closeC:
-		s.logger.Debug("storage closing; skipped ingest reconcile request")
-	}
+	// Through the pump for FIFO — see RequestSyncReconcile.
+	s.ingestPump.push(&db.IngestableWithID{ReconcileList: s.reconcileIngestableList})
 }
 
 // reconcileIngestableList: see reconcileSyncableList.
