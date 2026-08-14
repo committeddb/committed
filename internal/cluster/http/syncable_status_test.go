@@ -17,6 +17,7 @@ import (
 
 func doSyncableStatus(t *testing.T, fake *clusterfakes.FakeCluster) (http.SyncableStatusResponse, string) {
 	t.Helper()
+	fake.SyncableExistsReturns(true, nil)
 	h := http.New(fake)
 	req := httptest.NewRequest("GET", "http://localhost/v1/syncable/s1/status", nil)
 	w := httptest.NewRecorder()
@@ -38,6 +39,7 @@ func doSyncableStatus(t *testing.T, fake *clusterfakes.FakeCluster) (http.Syncab
 // scraping logs.
 func TestSyncableStatus_SurfacesDeadLetters(t *testing.T) {
 	fake := &clusterfakes.FakeCluster{}
+	fake.SyncableExistsReturns(true, nil)
 	fake.SyncableProgressReturns(100, 100, nil) // caught up
 	fake.SyncableDeadLetterStatsReturns(53, 4242, nil)
 
@@ -53,6 +55,7 @@ func TestSyncableStatus_SurfacesDeadLetters(t *testing.T) {
 // omitted entirely.
 func TestSyncableStatus_NoDeadLetters(t *testing.T) {
 	fake := &clusterfakes.FakeCluster{}
+	fake.SyncableExistsReturns(true, nil)
 	fake.SyncableProgressReturns(100, 100, nil)
 	// SyncableDeadLetterStats defaults to (0, 0, nil).
 
@@ -88,6 +91,7 @@ func doSyncableStatusRaw(t *testing.T, fake *clusterfakes.FakeCluster, query str
 // the position locally must not volunteer it unasked.
 func TestSyncableStatus_OwnerNodeAlwaysPresent_ReadPositionOptIn(t *testing.T) {
 	fake := &clusterfakes.FakeCluster{}
+	fake.SyncableExistsReturns(true, nil)
 	fake.IDReturns(1)
 	fake.SyncableOwnerReturns(1)
 	fake.SyncableReadPositionReturns(777, true)
@@ -104,6 +108,7 @@ func TestSyncableStatus_OwnerNodeAlwaysPresent_ReadPositionOptIn(t *testing.T) {
 // position in the body.
 func TestSyncableStatus_ReadPositionOwnerLocal(t *testing.T) {
 	fake := &clusterfakes.FakeCluster{}
+	fake.SyncableExistsReturns(true, nil)
 	fake.IDReturns(1)
 	fake.SyncableOwnerReturns(1)
 	fake.SyncableReadPositionReturns(777, true)
@@ -120,6 +125,7 @@ func TestSyncableStatus_ReadPositionOwnerLocal(t *testing.T) {
 // pointer field must serialize 0 rather than omit it.
 func TestSyncableStatus_ReadPositionZeroIsPresent(t *testing.T) {
 	fake := &clusterfakes.FakeCluster{}
+	fake.SyncableExistsReturns(true, nil)
 	fake.IDReturns(1)
 	fake.SyncableOwnerReturns(1)
 	fake.SyncableReadPositionReturns(0, true)
@@ -158,6 +164,7 @@ func TestSyncableStatus_ReadPositionProxiedToOwner(t *testing.T) {
 	defer owner.Close()
 
 	fake := &clusterfakes.FakeCluster{}
+	fake.SyncableExistsReturns(true, nil)
 	fake.IDReturns(2)
 	fake.SyncableOwnerReturns(1)
 	fake.MemberAPIURLReturns(owner.URL, true)
@@ -186,6 +193,7 @@ func TestSyncableStatus_ReadPositionDegradesWhenOwnerUnreachable(t *testing.T) {
 	dead.Close()
 
 	fake := &clusterfakes.FakeCluster{}
+	fake.SyncableExistsReturns(true, nil)
 	fake.IDReturns(2)
 	fake.SyncableOwnerReturns(1)
 	fake.MemberAPIURLReturns(deadURL, true)
@@ -212,6 +220,7 @@ func TestSyncableStatus_ForwardedRequestNeverReforwarded(t *testing.T) {
 	defer upstream.Close()
 
 	fake := &clusterfakes.FakeCluster{}
+	fake.SyncableExistsReturns(true, nil)
 	fake.IDReturns(2)
 	fake.SyncableOwnerReturns(1)
 	fake.MemberAPIURLReturns(upstream.URL, true)
@@ -230,7 +239,48 @@ func TestSyncableStatus_ForwardedRequestNeverReforwarded(t *testing.T) {
 
 func TestSyncableStatus_ReadPositionInvalidParam(t *testing.T) {
 	fake := &clusterfakes.FakeCluster{}
+	fake.SyncableExistsReturns(true, nil)
 	status, raw := doSyncableStatusRaw(t, fake, "?readPosition=sideways", nil)
 	require.Equal(t, 400, status)
 	require.Contains(t, raw, "invalid_parameter")
+}
+
+// The phantom fix, pinned: an id that never existed (or was deleted) must
+// 404 — not synthesize workerState running + real head/lag from
+// default-zero reads (the field finding: a typo'd id in monitoring watched
+// a healthy phantom forever). The gate fires BEFORE the readPosition proxy:
+// a phantom must not be shipped to the owner either.
+func TestSyncableStatus_UnknownID404s(t *testing.T) {
+	fake := &clusterfakes.FakeCluster{}
+	fake.SyncableExistsReturns(false, nil)
+	fake.SyncableProgressReturns(0, 12345678, nil) // the phantom ingredients
+
+	status, raw := doSyncableStatusRaw(t, fake, "", nil)
+	require.Equal(t, 404, status)
+	require.Contains(t, raw, "not_found")
+	require.NotContains(t, raw, "workerState", "no status fields may be synthesized for an absent id")
+}
+
+func TestSyncableStatus_UnknownID404sBeforeProxy(t *testing.T) {
+	fake := &clusterfakes.FakeCluster{}
+	fake.SyncableExistsReturns(false, nil)
+	fake.IDReturns(2)
+	fake.SyncableOwnerReturns(1) // a proxy would target node 1
+
+	status, _ := doSyncableStatusRaw(t, fake, "?readPosition=true", nil)
+	require.Equal(t, 404, status)
+	require.Zero(t, fake.MemberAPIURLCallCount(),
+		"the 404 gate must fire before the readPosition proxy — never ship a phantom to the owner")
+}
+
+func TestSyncableErrors_UnknownID404s(t *testing.T) {
+	h, fake := setupTest()
+	fake.SyncableExistsReturns(false, nil)
+
+	req := httptest.NewRequest("GET", "http://localhost/v1/syncable/never-existed/errors", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	require.Equal(t, 404, w.Code)
+	require.Zero(t, fake.SyncableDeadLettersCallCount(),
+		"an unknown id's empty dead-letter list is indistinguishable from healthy — gate first")
 }

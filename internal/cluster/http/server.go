@@ -13,8 +13,19 @@ import (
 const (
 	defaultReadHeaderTimeout = 10 * time.Second
 	defaultReadTimeout       = 30 * time.Second
-	defaultWriteTimeout      = 30 * time.Second
-	defaultIdleTimeout       = 120 * time.Second
+	// defaultWriteTimeout must EXCEED the largest bounded work a handler can
+	// legitimately perform before writing its response, or the server kills
+	// the connection while the handler is still (correctly) working and the
+	// client receives a dead socket instead of the error — the field finding:
+	// a config POST against a locked sink table was rejected loudly in the
+	// log at initTimeout (60s) while curl saw an empty connection close at
+	// the old 30s write deadline. Current inventory of bounded handler
+	// phases: destination build (sql.InitTimeout, 60s) + propose (30s) →
+	// worst case ~90s; 120s leaves margin. The relationship is pinned by
+	// TestWriteTimeoutExceedsHandlerWorkBudget — change either side and the
+	// test forces the arithmetic to be redone consciously.
+	defaultWriteTimeout = 120 * time.Second
+	defaultIdleTimeout  = 120 * time.Second
 )
 
 // ServerOption mutates the *http.Server built by NewServer. Used by

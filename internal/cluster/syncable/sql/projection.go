@@ -234,9 +234,9 @@ func (p *Projection) Init() error {
 
 	// One bounded deadline over every destination operation this Init
 	// performs (DDL, dimension DDL, index ensures, dozens of prepares) —
-	// see initTimeout for the apply-loop wedge this guards. Threaded to the
+	// see InitTimeout for the apply-loop wedge this guards. Threaded to the
 	// nested initAggregate/initLookup through the struct field below.
-	ctx, cancel := context.WithTimeout(context.Background(), initTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), InitTimeout)
 	defer cancel()
 	p.initCtx = ctx
 

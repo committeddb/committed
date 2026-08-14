@@ -767,6 +767,12 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: The syncable id does not exist (an unknown id's empty dead-letter list would read as healthy).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
@@ -860,6 +866,17 @@ paths:
                 $ref: '#/components/schemas/SyncableStatusResponse'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: |
+            The syncable id does not exist (never created, or deleted). The
+            status endpoint gates on existence FIRST — an absent id must
+            never synthesize a healthy-looking status from default-zero
+            reads (a typo'd id in monitoring would otherwise watch a
+            "running" phantom with plausible lag forever).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':

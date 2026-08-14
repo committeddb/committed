@@ -107,10 +107,10 @@ func (c *Syncable) Init() error {
 	}
 
 	// Every destination operation below runs under one bounded deadline —
-	// see initTimeout for the apply-loop wedge this guards against. A build
+	// see InitTimeout for the apply-loop wedge this guards against. A build
 	// that cannot finish inside the bound fails LOUDLY into the degraded-
 	// config path instead of stalling whoever called it.
-	ctx, cancel := context.WithTimeout(context.Background(), initTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), InitTimeout)
 	defer cancel()
 
 	ddlString := c.dialect.CreateDDL(c.config)

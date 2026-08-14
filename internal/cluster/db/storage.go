@@ -105,6 +105,11 @@ type Storage interface {
 	Databases() ([]*cluster.Configuration, error)
 	Ingestables() ([]*cluster.Configuration, error)
 	Syncables() ([]*cluster.Configuration, error)
+	// SyncableExists / IngestableExists are the cheap existence point-reads
+	// behind the HTTP 404 gates (an absent id must never read as a healthy
+	// phantom).
+	SyncableExists(id string) (bool, error)
+	IngestableExists(id string) (bool, error)
 	Types() ([]*cluster.Configuration, error)
 	DatabaseVersions(id string) ([]cluster.VersionInfo, error)
 	DatabaseVersion(id string, version uint64) (*cluster.Configuration, error)

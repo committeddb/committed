@@ -76,6 +76,18 @@ func (h *HTTP) GetIngestableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 
+	// Split the two absences: an id that does not EXIST 404s as not_found
+	// (a typo'd id must not read as "exists, but no worker here" — the
+	// syncable-status phantom's sibling), while a real config with no local
+	// worker keeps the ingestable_not_running 404 below.
+	if ok, err := h.c.IngestableExists(id); err != nil {
+		writeInternalError(w, "failed to check ingestable existence", err)
+		return
+	} else if !ok {
+		writeError(w, httpgo.StatusNotFound, "not_found", "ingestable not found")
+		return
+	}
+
 	st, err := h.c.IngestableStatus(r.Context(), id)
 	if errors.Is(err, cluster.ErrIngestableNotRunning) {
 		writeError(w, httpgo.StatusNotFound, "ingestable_not_running",

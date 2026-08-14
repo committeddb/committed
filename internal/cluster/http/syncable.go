@@ -44,6 +44,16 @@ func (h *HTTP) GetSyncableErrors(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 
+	// Same 404 gate as the status endpoint: an unknown id's empty dead-letter
+	// list is indistinguishable from a healthy syncable's.
+	if ok, err := h.c.SyncableExists(id); err != nil {
+		writeInternalError(w, "failed to check syncable existence", err)
+		return
+	} else if !ok {
+		writeError(w, httpgo.StatusNotFound, "not_found", "syncable not found")
+		return
+	}
+
 	var since uint64
 	if qs := r.URL.Query().Get("since"); qs != "" {
 		n, err := strconv.ParseUint(qs, 10, 64)
@@ -337,6 +347,21 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 	id := r.PathValue("id")
 	if id == "" {
 		writeError(w, httpgo.StatusBadRequest, "invalid_parameter", "id is empty")
+		return
+	}
+
+	// Existence gate FIRST — before any state is synthesized and before the
+	// readPosition proxy hop. An unknown id (typo'd, or deleted) must 404:
+	// the status fields all read plausibly for an absent id (checkpoint 0
+	// against the real head; workerState "running" is derived from the
+	// ABSENCE of a park record, which an absent id satisfies vacuously), so
+	// without this gate monitoring watches a healthy phantom forever — the
+	// field finding. Same oracle and wording as the rebuild endpoint's gate.
+	if ok, err := h.c.SyncableExists(id); err != nil {
+		writeInternalError(w, "failed to check syncable existence", err)
+		return
+	} else if !ok {
+		writeError(w, httpgo.StatusNotFound, "not_found", "syncable not found")
 		return
 	}
 

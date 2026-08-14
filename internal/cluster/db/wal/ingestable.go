@@ -154,6 +154,21 @@ func (s *Storage) deleteIngestable(id []byte) error {
 	return nil
 }
 
+// IngestableExists is SyncableExists's ingest twin — the existence oracle
+// for the ingestable status endpoint's 404 gate.
+func (s *Storage) IngestableExists(id string) (bool, error) {
+	var exists bool
+	err := s.view(func(tx *bolt.Tx) error {
+		b := tx.Bucket(ingestableBucket)
+		if b == nil {
+			return nil
+		}
+		exists = existsVersioned(b, []byte(id))
+		return nil
+	})
+	return exists, err
+}
+
 // RequestIngestReconcile is the ingest twin of RequestSyncReconcile: the
 // listener converges running ingest workers to the CURRENT config set via the
 // closure below, executed at dequeue time. See RequestSyncReconcile for the

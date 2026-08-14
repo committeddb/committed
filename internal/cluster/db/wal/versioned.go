@@ -99,6 +99,17 @@ func putVersioned(resourceBucket *bolt.Bucket, id []byte, data []byte) (uint64, 
 }
 
 // getVersioned retrieves the current version's data for a resource.
+// existsVersioned reports whether a versioned resource id currently exists
+// (has a live current version). The cheap point-read behind the HTTP layer's
+// existence gates: a status/errors endpoint for an id that never existed —
+// or was deleted — must 404, not synthesize a healthy-looking phantom from
+// default-zero reads (the field finding: a typo'd id in monitoring watched
+// a "running" phantom with real head/lag numbers forever).
+func existsVersioned(resourceBucket *bolt.Bucket, id []byte) bool {
+	idBucket := resourceBucket.Bucket(id)
+	return idBucket != nil && idBucket.Get(currentKey) != nil
+}
+
 func getVersioned(resourceBucket *bolt.Bucket, id []byte) ([]byte, error) {
 	idBucket := resourceBucket.Bucket(id)
 	if idBucket == nil {

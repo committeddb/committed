@@ -222,6 +222,15 @@ func (ms *MemoryStorage) Ingestables() ([]*cluster.Configuration, error) {
 	return nil, nil
 }
 
+// SyncableExists reports true for every id in the memory stub: existing
+// db-level tests exercise workers/status for ids they never registered as
+// configs, and the 404 gates live in the HTTP layer (tested there with the
+// counterfeiter fake).
+func (ms *MemoryStorage) SyncableExists(string) (bool, error) { return true, nil }
+
+// IngestableExists — see SyncableExists.
+func (ms *MemoryStorage) IngestableExists(string) (bool, error) { return true, nil }
+
 func (ms *MemoryStorage) Syncables() ([]*cluster.Configuration, error) {
 	return nil, nil
 }

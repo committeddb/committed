@@ -426,6 +426,8 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &clusterfakes.FakeCluster{}
+			fake.SyncableExistsReturns(true, nil)
+			fake.IngestableExistsReturns(true, nil)
 			if tc.setup != nil {
 				tc.setup(fake)
 			}
@@ -494,6 +496,8 @@ func TestOpenAPIContract_ErrorResponses(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &clusterfakes.FakeCluster{}
+			fake.SyncableExistsReturns(true, nil)
+			fake.IngestableExistsReturns(true, nil)
 			if tc.setup != nil {
 				tc.setup(fake)
 			}
@@ -524,6 +528,8 @@ func TestOpenAPIContract_UnauthorizedShape(t *testing.T) {
 	_, v := newValidator(t)
 
 	fake := &clusterfakes.FakeCluster{}
+	fake.SyncableExistsReturns(true, nil)
+	fake.IngestableExistsReturns(true, nil)
 	h := httppkg.New(fake, httppkg.WithBearerToken("secret"))
 
 	req := httptest.NewRequest(httpgo.MethodGet, "http://localhost/v1/database", nil)

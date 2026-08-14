@@ -1013,6 +1013,11 @@ func (ms *MemoryStorage) Ingestables() ([]*cluster.Configuration, error) {
 	return nil, nil
 }
 
+// SyncableExists/IngestableExists report true for any id — see the testing
+// package's MemoryStorage twin for the rationale.
+func (ms *MemoryStorage) SyncableExists(string) (bool, error)   { return true, nil }
+func (ms *MemoryStorage) IngestableExists(string) (bool, error) { return true, nil }
+
 func (ms *MemoryStorage) Syncables() ([]*cluster.Configuration, error) {
 	return nil, nil
 }

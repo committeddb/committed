@@ -18,6 +18,11 @@ import (
 
 func setupTest() (*http.HTTP, *clusterfakes.FakeCluster) {
 	fake := &clusterfakes.FakeCluster{}
+	// The status/errors endpoints 404 unknown ids via the existence oracle;
+	// default the fake to "exists" so every test not ABOUT the 404 gate keeps
+	// its focus (the gate's own tests stub false explicitly).
+	fake.SyncableExistsReturns(true, nil)
+	fake.IngestableExistsReturns(true, nil)
 	h := http.New(fake)
 	return h, fake
 }

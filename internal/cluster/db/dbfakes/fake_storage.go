@@ -256,6 +256,19 @@ type FakeStorage struct {
 	ingestSourceSeqHighwaterReturnsOnCall map[int]struct {
 		result1 uint64
 	}
+	IngestableExistsStub        func(string) (bool, error)
+	ingestableExistsMutex       sync.RWMutex
+	ingestableExistsArgsForCall []struct {
+		arg1 string
+	}
+	ingestableExistsReturns struct {
+		result1 bool
+		result2 error
+	}
+	ingestableExistsReturnsOnCall map[int]struct {
+		result1 bool
+		result2 error
+	}
 	IngestableStuckStub        func(string) (cluster.IngestableStuck, bool, error)
 	ingestableStuckMutex       sync.RWMutex
 	ingestableStuckArgsForCall []struct {
@@ -538,6 +551,19 @@ type FakeStorage struct {
 	}
 	syncableDeadLettersReturnsOnCall map[int]struct {
 		result1 []cluster.SyncableDeadLetter
+		result2 error
+	}
+	SyncableExistsStub        func(string) (bool, error)
+	syncableExistsMutex       sync.RWMutex
+	syncableExistsArgsForCall []struct {
+		arg1 string
+	}
+	syncableExistsReturns struct {
+		result1 bool
+		result2 error
+	}
+	syncableExistsReturnsOnCall map[int]struct {
+		result1 bool
 		result2 error
 	}
 	SyncableSkipRequestStub        func(string) (cluster.SyncableSkipRequest, bool, error)
@@ -1944,6 +1970,70 @@ func (fake *FakeStorage) IngestSourceSeqHighwaterReturnsOnCall(i int, result1 ui
 	}{result1}
 }
 
+func (fake *FakeStorage) IngestableExists(arg1 string) (bool, error) {
+	fake.ingestableExistsMutex.Lock()
+	ret, specificReturn := fake.ingestableExistsReturnsOnCall[len(fake.ingestableExistsArgsForCall)]
+	fake.ingestableExistsArgsForCall = append(fake.ingestableExistsArgsForCall, struct {
+		arg1 string
+	}{arg1})
+	stub := fake.IngestableExistsStub
+	fakeReturns := fake.ingestableExistsReturns
+	fake.recordInvocation("IngestableExists", []interface{}{arg1})
+	fake.ingestableExistsMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeStorage) IngestableExistsCallCount() int {
+	fake.ingestableExistsMutex.RLock()
+	defer fake.ingestableExistsMutex.RUnlock()
+	return len(fake.ingestableExistsArgsForCall)
+}
+
+func (fake *FakeStorage) IngestableExistsCalls(stub func(string) (bool, error)) {
+	fake.ingestableExistsMutex.Lock()
+	defer fake.ingestableExistsMutex.Unlock()
+	fake.IngestableExistsStub = stub
+}
+
+func (fake *FakeStorage) IngestableExistsArgsForCall(i int) string {
+	fake.ingestableExistsMutex.RLock()
+	defer fake.ingestableExistsMutex.RUnlock()
+	argsForCall := fake.ingestableExistsArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeStorage) IngestableExistsReturns(result1 bool, result2 error) {
+	fake.ingestableExistsMutex.Lock()
+	defer fake.ingestableExistsMutex.Unlock()
+	fake.IngestableExistsStub = nil
+	fake.ingestableExistsReturns = struct {
+		result1 bool
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeStorage) IngestableExistsReturnsOnCall(i int, result1 bool, result2 error) {
+	fake.ingestableExistsMutex.Lock()
+	defer fake.ingestableExistsMutex.Unlock()
+	fake.IngestableExistsStub = nil
+	if fake.ingestableExistsReturnsOnCall == nil {
+		fake.ingestableExistsReturnsOnCall = make(map[int]struct {
+			result1 bool
+			result2 error
+		})
+	}
+	fake.ingestableExistsReturnsOnCall[i] = struct {
+		result1 bool
+		result2 error
+	}{result1, result2}
+}
+
 func (fake *FakeStorage) IngestableStuck(arg1 string) (cluster.IngestableStuck, bool, error) {
 	fake.ingestableStuckMutex.Lock()
 	ret, specificReturn := fake.ingestableStuckReturnsOnCall[len(fake.ingestableStuckArgsForCall)]
@@ -3338,6 +3428,70 @@ func (fake *FakeStorage) SyncableDeadLettersReturnsOnCall(i int, result1 []clust
 	}
 	fake.syncableDeadLettersReturnsOnCall[i] = struct {
 		result1 []cluster.SyncableDeadLetter
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeStorage) SyncableExists(arg1 string) (bool, error) {
+	fake.syncableExistsMutex.Lock()
+	ret, specificReturn := fake.syncableExistsReturnsOnCall[len(fake.syncableExistsArgsForCall)]
+	fake.syncableExistsArgsForCall = append(fake.syncableExistsArgsForCall, struct {
+		arg1 string
+	}{arg1})
+	stub := fake.SyncableExistsStub
+	fakeReturns := fake.syncableExistsReturns
+	fake.recordInvocation("SyncableExists", []interface{}{arg1})
+	fake.syncableExistsMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeStorage) SyncableExistsCallCount() int {
+	fake.syncableExistsMutex.RLock()
+	defer fake.syncableExistsMutex.RUnlock()
+	return len(fake.syncableExistsArgsForCall)
+}
+
+func (fake *FakeStorage) SyncableExistsCalls(stub func(string) (bool, error)) {
+	fake.syncableExistsMutex.Lock()
+	defer fake.syncableExistsMutex.Unlock()
+	fake.SyncableExistsStub = stub
+}
+
+func (fake *FakeStorage) SyncableExistsArgsForCall(i int) string {
+	fake.syncableExistsMutex.RLock()
+	defer fake.syncableExistsMutex.RUnlock()
+	argsForCall := fake.syncableExistsArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeStorage) SyncableExistsReturns(result1 bool, result2 error) {
+	fake.syncableExistsMutex.Lock()
+	defer fake.syncableExistsMutex.Unlock()
+	fake.SyncableExistsStub = nil
+	fake.syncableExistsReturns = struct {
+		result1 bool
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeStorage) SyncableExistsReturnsOnCall(i int, result1 bool, result2 error) {
+	fake.syncableExistsMutex.Lock()
+	defer fake.syncableExistsMutex.Unlock()
+	fake.SyncableExistsStub = nil
+	if fake.syncableExistsReturnsOnCall == nil {
+		fake.syncableExistsReturnsOnCall = make(map[int]struct {
+			result1 bool
+			result2 error
+		})
+	}
+	fake.syncableExistsReturnsOnCall[i] = struct {
+		result1 bool
 		result2 error
 	}{result1, result2}
 }

@@ -138,6 +138,22 @@ func (s *Storage) saveSyncable(t *cluster.Configuration, raftIndex uint64) error
 	return nil
 }
 
+// SyncableExists reports whether a syncable config id currently exists (a
+// live current version — deleted ids read false). The existence oracle for
+// the HTTP status/errors 404 gates; see existsVersioned.
+func (s *Storage) SyncableExists(id string) (bool, error) {
+	var exists bool
+	err := s.view(func(tx *bolt.Tx) error {
+		b := tx.Bucket(syncableBucket)
+		if b == nil {
+			return nil
+		}
+		exists = existsVersioned(b, []byte(id))
+		return nil
+	})
+	return exists, err
+}
+
 // deleteSyncable removes a syncable's persisted config bytes and then notifies
 // the DB layer so it can cancel the worker and (on the owner) tear down the
 // destination table. The channel send happens AFTER the bbolt Update returns,

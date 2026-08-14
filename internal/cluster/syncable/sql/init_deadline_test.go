@@ -37,15 +37,15 @@ func init() { gosql.Register("committed-test-hang-sink", hangSinkDriver{}) }
 
 // TestInitBoundedOnHungDestination pins the build-path half of the
 // apply-liveness fix: a syncable Init whose destination never answers (a
-// locked table, a stalled server) must fail within initTimeout — loudly,
+// locked table, a stalled server) must fail within InitTimeout — loudly,
 // into the degraded-config path — never stall its caller indefinitely. The
 // field incident: an undeadlined EnsureGenerationColumn ALTER waited forever
 // on an analyst query's table lock and the stall propagated into the raft
 // apply loop, freezing appliedIndex cluster-wide.
 func TestInitBoundedOnHungDestination(t *testing.T) {
-	orig := initTimeout
-	initTimeout = 200 * time.Millisecond
-	t.Cleanup(func() { initTimeout = orig })
+	orig := InitTimeout
+	InitTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { InitTimeout = orig })
 
 	gdb, err := gosql.Open("committed-test-hang-sink", "ignored")
 	require.NoError(t, err)
@@ -67,7 +67,7 @@ func TestInitBoundedOnHungDestination(t *testing.T) {
 		require.Error(t, err, "a hung destination must fail the build, not hang it")
 		require.ErrorIs(t, err, context.DeadlineExceeded)
 	case <-time.After(5 * time.Second):
-		t.Fatal("Init hung on a dead destination — the initTimeout deadline is missing (the apply-freeze field incident)")
+		t.Fatal("Init hung on a dead destination — the InitTimeout deadline is missing (the apply-freeze field incident)")
 	}
 }
 

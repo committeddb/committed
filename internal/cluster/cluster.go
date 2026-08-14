@@ -61,6 +61,14 @@ type Cluster interface {
 	Databases() ([]*Configuration, error)
 	Ingestables() ([]*Configuration, error)
 	Syncables() ([]*Configuration, error)
+	// SyncableExists reports whether a syncable config id currently exists.
+	// The status/errors endpoints gate on it and 404 an unknown id — an
+	// absent id must never synthesize a healthy-looking status from
+	// default-zero reads (field finding: a typo'd id in monitoring watched a
+	// "running" phantom with real head/lag forever).
+	SyncableExists(id string) (bool, error)
+	// IngestableExists is SyncableExists's ingest twin.
+	IngestableExists(id string) (bool, error)
 	Types() ([]*Configuration, error)
 	DatabaseVersions(id string) ([]VersionInfo, error)
 	DatabaseVersion(id string, version uint64) (*Configuration, error)

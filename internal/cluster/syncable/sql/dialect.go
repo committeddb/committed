@@ -335,7 +335,7 @@ func (c *Config) DeleteKeyColumns() []string {
 // extract from its fields JSON, and the column's declared SQL type (for the
 // engines that need an explicit cast of the extracted text). Built by the
 // projection Init from the validated config.
-// initTimeout bounds EVERY destination operation a syncable/projection build
+// InitTimeout bounds EVERY destination operation a syncable/projection build
 // performs (DDL, column/index ensures, statement prepares). The field wedge
 // this guards: a runaway analyst query held a table lock, an undeadlined
 // ALTER waited on it forever, and the stall propagated all the way into the
@@ -344,7 +344,7 @@ func (c *Config) DeleteKeyColumns() []string {
 // errors the BUILD instead: the config lands degraded (loud, queryable),
 // the analyst query wins, the cluster lives, and the operator re-POSTs
 // after the lock clears. A var so tests can red-proof without the wait.
-var initTimeout = 60 * time.Second
+var InitTimeout = 60 * time.Second
 
 type SpineEnrichment struct {
 	DimTable    string

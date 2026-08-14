@@ -277,6 +277,18 @@ func (db *DB) Syncables() ([]*cluster.Configuration, error) {
 	return db.storage.Syncables()
 }
 
+// SyncableExists reports whether the syncable config id currently exists —
+// the HTTP status/errors endpoints' 404 gate (an absent id must never
+// synthesize a healthy-looking status from default-zero reads).
+func (db *DB) SyncableExists(id string) (bool, error) {
+	return db.storage.SyncableExists(id)
+}
+
+// IngestableExists is SyncableExists's ingest twin.
+func (db *DB) IngestableExists(id string) (bool, error) {
+	return db.storage.IngestableExists(id)
+}
+
 func (db *DB) SyncableVersions(id string) ([]cluster.VersionInfo, error) {
 	return db.storage.SyncableVersions(id)
 }
