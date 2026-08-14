@@ -2,6 +2,7 @@ package db_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -18,6 +19,41 @@ import (
 	"github.com/committeddb/committed/internal/cluster/metrics"
 )
 
+// proposeRetryingLost runs propose, re-proposing on db.ErrProposalLost —
+// the definitive "truncated before commit, gone from the log" signal whose
+// contract is that a retry can never duplicate (see the ErrProposalLost
+// doc). On a multi-node harness a spontaneous election (a starved CI
+// runner outlasting the 500ms election window) can truncate an
+// uncommitted seed entry mid-flight; the seeder consumes the signal
+// exactly as a real proposer would. ErrProposalUnknown stays fatal: it is
+// ambiguous — the entry may have committed — so a blind retry could
+// double-seed a row.
+func proposeRetryingLost(t *testing.T, propose func() error) {
+	t.Helper()
+	var err error
+	for range 5 {
+		if err = propose(); !errors.Is(err, db.ErrProposalLost) {
+			break
+		}
+	}
+	require.NoError(t, err)
+}
+
+// Pins the retry arm: a proposer whose first two attempts are truncated
+// (possibly surfaced wrapped) commits on the third and seeds cleanly.
+// Remove the retry and this fails on the first ErrProposalLost.
+func TestProposeRetryingLost_ReproposesOnTruncation(t *testing.T) {
+	attempts := 0
+	proposeRetryingLost(t, func() error {
+		attempts++
+		if attempts < 3 {
+			return fmt.Errorf("surfaced by a caller: %w", db.ErrProposalLost)
+		}
+		return nil
+	})
+	require.Equal(t, 3, attempts)
+}
+
 // seedUserProposals registers a schema-less type and proposes one user
 // entity per payload against a real wal-backed DB. A real wal.Storage
 // (unlike the in-memory test double, which stubs ResolveType) refuses to
@@ -26,16 +62,26 @@ import (
 // proposal, which the test syncables skip (see allSystem).
 func seedUserProposals(t *testing.T, d *db.DB, s *wal.Storage, typeID string, payloads []string) {
 	t.Helper()
-	proposeTypeTOML(t, d, typeID, typeID, "", "")
+	// Same TOML bytes as proposeTypeTOML's schema-less branch — some
+	// callers re-seed after a restart and rely on the re-registration
+	// being a byte-identical no-op.
+	cfg := &cluster.Configuration{
+		ID:       typeID,
+		MimeType: "text/toml",
+		Data:     fmt.Appendf(nil, "[type]\nname = \"%s\"", typeID),
+	}
+	proposeRetryingLost(t, func() error { return d.ProposeType(testCtx(t), cfg) })
 	typ, err := s.ResolveType(cluster.LatestTypeRef(typeID))
 	require.NoError(t, err)
 	for i, payload := range payloads {
-		p := &cluster.Proposal{Entities: []*cluster.Entity{{
-			Type: typ,
-			Key:  fmt.Appendf(nil, "k%d", i),
-			Data: []byte(payload),
-		}}}
-		require.NoError(t, d.Propose(testCtx(t), p))
+		proposeRetryingLost(t, func() error {
+			p := &cluster.Proposal{Entities: []*cluster.Entity{{
+				Type: typ,
+				Key:  fmt.Appendf(nil, "k%d", i),
+				Data: []byte(payload),
+			}}}
+			return d.Propose(testCtx(t), p)
+		})
 	}
 }
 

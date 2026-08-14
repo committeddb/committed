@@ -86,11 +86,13 @@ func TestAdversarial_CrashWindowSyncableAdoptedByNewLeader(t *testing.T) {
 	// (the crash window: the config is committed, the old leader's worker may
 	// have barely started).
 	const id = "crash-window-sync"
-	require.NoError(t, leader.ProposeSyncable(testCtx(t), &cluster.Configuration{
-		ID:       id,
-		MimeType: "text/toml",
-		Data:     []byte("[syncable]\ntype = \"adopt\"\nname = \"" + id + "\""),
-	}))
+	proposeRetryingLost(t, func() error {
+		return leader.ProposeSyncable(testCtx(t), &cluster.Configuration{
+			ID:       id,
+			MimeType: "text/toml",
+			Data:     []byte("[syncable]\ntype = \"adopt\"\nname = \"" + id + "\""),
+		})
+	})
 	// "Crash" the leader the only way an in-process harness safely can:
 	// PARTITION it away. From the survivors' perspective this is the field's
 	// SIGKILL — leadership moves while the young syncable's replay is
