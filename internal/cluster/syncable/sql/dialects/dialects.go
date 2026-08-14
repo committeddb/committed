@@ -8,6 +8,12 @@ import (
 	"github.com/committeddb/committed/internal/cluster/syncable/sql"
 )
 
+// spineIndexName is the deterministic name of an enrichment on-column's
+// auto-index — stable across restarts so ensure calls are idempotent.
+func spineIndexName(table, onColumn string) string {
+	return table + "__enrich_" + onColumn
+}
+
 // keyWhere builds `<k1> = <p1> AND <k2> = <p2> ...` over the delete key
 // columns — one clause for the single-key common case, ANDed equalities for a
 // composite. mkPlaceholder is the only dialect-specific bit (MySQL always

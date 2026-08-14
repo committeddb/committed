@@ -6,6 +6,7 @@ import (
 	gosql "database/sql"
 	"encoding/json"
 	"fmt"
+	"strconv"
 
 	"github.com/PaesslerAG/jsonpath"
 	"go.uber.org/zap"
@@ -102,6 +103,26 @@ type lookupRuntime struct {
 	deleteDimSQL string
 
 	dependents []*aggregateDependent
+
+	// spineDeps are the enriched SPINE columns fed from this dimension: on a
+	// dimension upsert/delete, each runs a direct UPDATE (value, key) — the
+	// fan-out half of the join-equivalence contract for scalar enrichment.
+	// Simpler than the aggregate dependents: no re-materialization, one
+	// indexed UPDATE per dependent.
+	spineDeps []*spineDependent
+}
+
+// spineDependent is one enriched spine column fed from a lookup dimension:
+// the prepared fan-out UPDATE, the dimension field it selects, and the two
+// declared column types the canonical-join-space contract coerces through
+// (the enriched column's, for the value; the on column's, for the key).
+type spineDependent struct {
+	column    string
+	selectFld string
+	colType   string
+	onColType string
+	update    *gosql.Stmt
+	updateSQL string
 }
 
 // aggregateDependent is one aggregate that enriches from a lookup: when a
@@ -214,6 +235,50 @@ func (p *Projection) Init() error {
 		return fmt.Errorf("ddl [%s]: %w", ddlString, err)
 	}
 
+	// Dimension-DDL pre-pass: enriched RULE statements subquery dimension
+	// tables at prepare time, and a rule source may precede its lookup source
+	// in manifest order — so every dimension table must exist before any rule
+	// prepares. initLookup's own DDL exec later is IF NOT EXISTS-idempotent.
+	// Conditional on enrichment so an enrichment-free config's SQL traffic
+	// stays byte-identical to before the feature (compat, and the sqlmock
+	// suites pin exact sequences).
+	hasEnrichment := false
+	for _, src := range p.config.Sources {
+		for _, r := range src.Rules {
+			for _, s := range r.Set {
+				if s.IsEnrichment() {
+					hasEnrichment = true
+				}
+			}
+		}
+	}
+	for _, src := range p.config.Sources {
+		if !hasEnrichment || src.Lookup == nil {
+			continue
+		}
+		dimDDL := p.dialect.CreateLookupDimensionDDL(p.config.lookupSpec(src.Lookup))
+		if _, err := p.db.Exec(dimDDL); err != nil {
+			return fmt.Errorf("dimension ddl [%s]: %w", dimDDL, err)
+		}
+	}
+
+	// Auto-index every enrichment on column (deduped): the dimension fan-out's
+	// WHERE would otherwise seq-scan the projection per dimension event.
+	indexed := map[string]bool{}
+	for _, src := range p.config.Sources {
+		for _, r := range src.Rules {
+			for _, s := range r.Set {
+				if !s.IsEnrichment() || indexed[s.On] {
+					continue
+				}
+				if err := p.dialect.EnsureSpineIndex(p.db, ddlConfig, s.On); err != nil {
+					return err
+				}
+				indexed[s.On] = true
+			}
+		}
+	}
+
 	// Prepare per-source statements. enrichRefs collects, per lookup name, the
 	// aggregates that enrich from it (their spec + on-field), so the second pass
 	// can wire each lookup's fan-out to its dependents' rebuilds.
@@ -257,6 +322,9 @@ func (p *Projection) Init() error {
 		default:
 			for i, r := range src.Rules {
 				sqlString := p.dialect.CreateSQL(p.config.ruleConfig(r))
+				if enrich := p.config.ruleEnrichments(r); len(enrich) > 0 {
+					sqlString = p.dialect.CreateEnrichedUpsertSQL(p.config.ruleConfig(r), enrich)
+				}
 				stmt, err := p.db.Prepare(sqlString)
 				if err != nil {
 					return fmt.Errorf("prepare source %d (topic %q) rule %d sql [%s]: %w", si+1, src.Topic, i+1, sqlString, err)
@@ -291,6 +359,39 @@ func (p *Projection) Init() error {
 				rebuild:     ref.agg.rebuild,
 				rebuildSQL:  ref.agg.rebuildSQL,
 			})
+		}
+	}
+
+	// Wire each lookup's SPINE fan-out: one prepared UPDATE per distinct
+	// enriched (column, on, select) referencing it, across every rule source.
+	for _, ps := range lookupSources {
+		seen := map[string]bool{}
+		for _, src := range p.config.Sources {
+			for _, r := range src.Rules {
+				for _, s := range r.Set {
+					if !s.IsEnrichment() || s.Lookup != ps.lkp.name {
+						continue
+					}
+					k := s.Column + "\x00" + s.On + "\x00" + s.Select
+					if seen[k] {
+						continue
+					}
+					seen[k] = true
+					upSQL := p.dialect.CreateSpineFanOutSQL(ddlConfig, s.Column, s.On)
+					upStmt, err := p.db.Prepare(upSQL)
+					if err != nil {
+						return fmt.Errorf("prepare lookup %q spine fan-out sql [%s]: %w", ps.lkp.name, upSQL, err)
+					}
+					ps.lkp.spineDeps = append(ps.lkp.spineDeps, &spineDependent{
+						column:    s.Column,
+						selectFld: s.Select,
+						colType:   p.columnType(s.Column),
+						onColType: p.columnType(s.On),
+						update:    upStmt,
+						updateSQL: upSQL,
+					})
+				}
+			}
 		}
 	}
 
@@ -616,11 +717,10 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 	}
 
 	for _, r := range matched {
-		values := make([]any, 0, len(r.rule.Set)+1)
-		// The key binds into the primaryKey column; coerce it to that column's
-		// declared type so a numeric key reaches the driver as a native scalar
-		// (or exact text), not a raw json.Number.
-		values = append(values, coerceForColumn(key, p.columnType(p.config.PrimaryKey)))
+		// Pass 1: compute the coerced value of every from/value/null entry —
+		// enrichment entries need their on column's COERCED value (pass 2), so
+		// the plain values must exist first regardless of Set order.
+		plain := make(map[string]any, len(r.rule.Set))
 		for _, s := range r.rule.Set {
 			switch {
 			case s.From != "":
@@ -628,12 +728,31 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 				if err != nil {
 					return cluster.Permanent(fmt.Errorf("[sql-projection.apply] jsonpath [%s]: %w", s.From, err))
 				}
-				values = append(values, coerceForColumn(v, p.columnType(s.Column)))
+				plain[s.Column] = coerceForColumn(v, p.columnType(s.Column))
 			case s.Null:
-				values = append(values, nil)
+				plain[s.Column] = nil
+			case s.IsEnrichment():
+				// resolved in pass 2
 			default:
-				values = append(values, s.Value)
+				plain[s.Column] = s.Value
 			}
+		}
+
+		// Pass 2: bind in Set order. An enrichment entry's placeholder sits
+		// INSIDE its dimension subquery and binds the canonical string
+		// rendering of the on column's coerced value — the canonical-join-
+		// space contract: the on column's declared type is the one space both
+		// this join and the dimension fan-out compare in, so the rendering
+		// comes from the TYPED value, never the raw payload text (which could
+		// spell one value several ways).
+		values := make([]any, 0, len(r.rule.Set)+1)
+		values = append(values, coerceForColumn(key, p.columnType(p.config.PrimaryKey)))
+		for _, s := range r.rule.Set {
+			if s.IsEnrichment() {
+				values = append(values, canonicalKeyString(plain[s.On]))
+				continue
+			}
+			values = append(values, plain[s.Column])
 		}
 		args := p.dialect.BindArgs(values)
 		if _, err := tx.StmtContext(ctx, r.Stmt).ExecContext(ctx, args...); err != nil {
@@ -817,7 +936,67 @@ func (p *Projection) applyLookup(ctx context.Context, tx *gosql.Tx, src *project
 	if err := p.aggExec(ctx, tx, lk.upsertDim, lk.upsertDimSQL, p.dialect.BindArgs(dimValues)...); err != nil {
 		return err
 	}
+	if err := p.spineFanOut(ctx, tx, lk, key, fields); err != nil {
+		return err
+	}
 	return p.fanOut(ctx, tx, lk, key)
+}
+
+// spineFanOut updates every enriched spine column fed from this dimension:
+// value from the dimension event's extracted fields (nil fields = a
+// dimension delete → NULL, matching what the join would now return), key
+// coerced to each on column's declared type — the canonical join space. A
+// dimension key that does not parse as the on column's type provably matches
+// no row (the column cannot hold it), so it skips rather than errors.
+func (p *Projection) spineFanOut(ctx context.Context, tx *gosql.Tx, lk *lookupRuntime, dimKey string, fields map[string]any) error {
+	for _, dep := range lk.spineDeps {
+		onKey, ok := coerceKeyForColumn(dimKey, dep.onColType)
+		if !ok {
+			zap.L().Debug("[sql-projection.lookup] dimension key does not fit the on column's type; no row can reference it — skipping spine fan-out",
+				zap.String("column", dep.column))
+			continue
+		}
+		var val any
+		if fields != nil {
+			val = coerceForColumn(fields[dep.selectFld], dep.colType)
+		}
+		if _, err := tx.StmtContext(ctx, dep.update).ExecContext(ctx, val, onKey); err != nil {
+			return execFailure(fmt.Sprintf("[sql-projection.lookup] exec [%s]", dep.updateSQL), err, p.dialect.IsPermanent(err))
+		}
+	}
+	return nil
+}
+
+// canonicalKeyString renders a coerced on-column value in the canonical join
+// space's string form for the dimension-side comparison (dimension keys are
+// text). Deterministic because the input is the TYPED value: int64 renders
+// one way, text is itself. nil binds NULL — the subquery matches nothing and
+// the enriched column lands NULL, the join-equivalence answer for a NULL FK.
+func canonicalKeyString(v any) any {
+	switch x := v.(type) {
+	case nil:
+		return nil
+	case int64:
+		return strconv.FormatInt(x, 10)
+	case string:
+		return x
+	default:
+		return fmt.Sprintf("%v", x)
+	}
+}
+
+// coerceKeyForColumn coerces a dimension entity key (text) into an on
+// column's declared type for the fan-out bind. ok=false means the key cannot
+// exist in that column (an int-family column and a non-numeric key).
+func coerceKeyForColumn(key, sqlType string) (any, bool) {
+	if columnIsNumericOrBool(sqlType) {
+		n, err := strconv.ParseInt(key, 10, 64)
+		if err != nil {
+			return nil, false
+		}
+		return n, true
+	}
+	return key, true
 }
 
 // removeFromDimension honors a dimension-entity delete: drop the dimension row,
@@ -827,6 +1006,9 @@ func (p *Projection) removeFromDimension(ctx context.Context, tx *gosql.Tx, src 
 	lk := src.lkp
 	key := string(e.Key)
 	if err := p.aggExec(ctx, tx, lk.deleteDim, lk.deleteDimSQL, key); err != nil {
+		return err
+	}
+	if err := p.spineFanOut(ctx, tx, lk, key, nil); err != nil {
 		return err
 	}
 	return p.fanOut(ctx, tx, lk, key)
@@ -897,6 +1079,9 @@ func (p *Projection) Close() error {
 				closeStmt(src.agg.rebuild)
 			}
 			if src.lkp != nil {
+				for _, dep := range src.lkp.spineDeps {
+					closeStmt(dep.update)
+				}
 				closeStmt(src.lkp.upsertDim)
 				closeStmt(src.lkp.deleteDim)
 				// dependents' rebuild stmts belong to the aggregate runtimes (closed

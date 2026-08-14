@@ -34,6 +34,29 @@ type Dialect interface {
 	// row that has since vanished at the source. Postgres uses ADD COLUMN IF NOT
 	// EXISTS; MySQL (no such clause) checks information_schema first.
 	EnsureGenerationColumn(db *gosql.DB, config *Config) error
+	// CreateEnrichedUpsertSQL is CreateSQL for a projection rule with spine
+	// lookup enrichments: enriched columns' VALUES entries are scalar
+	// subqueries against the lookup dimension table — `(SELECT
+	// <fields extract> FROM <dim> WHERE <dim key> = <placeholder>)`, cast to
+	// the column's declared type where the engine needs it — instead of plain
+	// placeholders. The subquery's placeholder binds the canonical string
+	// rendering of the on column's coerced value, so the apply-time join and
+	// the dimension fan-out compare in the same space (the on column's
+	// declared type — the canonical-join-space contract). Placeholder order is
+	// mappings order with enrichment key placeholders in place; each engine
+	// keeps its own binding convention (Postgres once via EXCLUDED, MySQL
+	// doubled via BindArgs).
+	CreateEnrichedUpsertSQL(config *Config, enrich map[string]SpineEnrichment) string
+	// CreateSpineFanOutSQL returns the dimension-change fan-out for one
+	// enriched column: `UPDATE <table> SET <column> = <ph> WHERE <on> = <ph>`.
+	// Bound Go-side with (coerced field value, dimension key coerced to the
+	// on column's type) — no SQL casts, so the plain index on the on column
+	// serves it.
+	CreateSpineFanOutSQL(config *Config, column, onColumn string) string
+	// EnsureSpineIndex idempotently indexes an enrichment's on column — the
+	// fan-out's WHERE would otherwise seq-scan the projection per dimension
+	// event. Committed issues the fan-out, so committed owns its performance.
+	EnsureSpineIndex(db *gosql.DB, config *Config, onColumn string) error
 	// CreateGenerationSweepSQL returns the reconciling sweep a keyed sink runs on
 	// a refresh-boundary marker: `DELETE FROM <table> WHERE <GenerationColumn>
 	// >= 1 AND <GenerationColumn> < <placeholder>`. Its single bound argument is
@@ -303,6 +326,17 @@ func (c *Config) DeleteKeyColumns() []string {
 		return []string{c.KeyColumn}
 	}
 	return c.PrimaryKey
+}
+
+// SpineEnrichment is the dialect-facing description of one enriched spine
+// column: the dimension table to subquery, the declared lookup field to
+// extract from its fields JSON, and the column's declared SQL type (for the
+// engines that need an explicit cast of the extracted text). Built by the
+// projection Init from the validated config.
+type SpineEnrichment struct {
+	DimTable    string
+	SelectField string
+	CastType    string
 }
 
 type Insert struct {

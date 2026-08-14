@@ -288,22 +288,22 @@ type = "TEXT"
 		{
 			"both from and value",
 			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\" } ]\nset = [ { column = \"v\", from = \"$.v\", value = \"y\" } ]",
-			"exactly one of from, value, or null",
+			"exactly one of from, value, null, or lookup",
 		},
 		{
 			"neither from nor value nor null",
 			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\" } ]\nset = [ { column = \"v\" } ]",
-			"exactly one of from, value, or null",
+			"exactly one of from, value, null, or lookup",
 		},
 		{
 			"both value and null",
 			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\" } ]\nset = [ { column = \"v\", value = \"y\", null = true } ]",
-			"exactly one of from, value, or null",
+			"exactly one of from, value, null, or lookup",
 		},
 		{
 			"both from and null",
 			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\" } ]\nset = [ { column = \"v\", from = \"$.v\", null = true } ]",
-			"exactly one of from, value, or null",
+			"exactly one of from, value, null, or lookup",
 		},
 		{
 			"unknown column",

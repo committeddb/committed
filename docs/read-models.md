@@ -14,6 +14,30 @@ enrichment, delete lifecycles, and dimension fan-out.
 > read model in one `docker compose up`. This guide explains the mechanics
 > behind it.
 
+## Choosing your read-model shape (read this first)
+
+committed gives you three ways to serve queries, and **the projection is the
+primary pattern** — reach for the others when their specific reason applies,
+not by default:
+
+| You want | Use | Why |
+|---|---|---|
+| A derived/denormalized table you query directly — a BFF row, a flat table replacing a complex join, current state per entity | **`sql-projection`** | It maintains the table *incrementally, per event*: continuously current (no refresh step), folds **multiple topics into one row**, aggregates children into array columns, enriches from other topics. This is committed's centerpiece use case. |
+| Raw per-table replicas — ad-hoc SQL, joins you own, feeding views/BI on your terms | plain **`sql`** syncable with a `primaryKey` (a mirror) | Faithful keyed copies of source tables. If you build a materialized view over mirrors, *you* own its refresh cost and staleness — committed keeps only the mirrors current. |
+| One row per **event** — an audit/history log | plain **`sql`** syncable with no `primaryKey` | Append-only, replay-safe history. |
+
+The trade to understand: a materialized view over mirrors is stale from the
+moment its (often expensive) refresh completes; a projection is current
+within seconds of the source commit, forever, with no refresh to schedule.
+If the table you're building is *the thing the application reads*, start
+from `sql-projection` and use mirrors only for the parts a projection
+cannot yet express.
+
+One projection scope line to know before you design: the destination is
+keyed by **one column** — composite-keyed topics pair with the plain
+syncable's composite `primaryKey` instead. Lookups enrich both aggregate
+elements and scalar spine columns (see "Enriching folded data").
+
 ## History tables vs. read models
 
 The plain `sql` syncable lands a *history* table: one row per event.
@@ -328,6 +352,37 @@ keyPath = "$.movie_id"
 The dimension is the source of truth (a `<table>__lookup_<name>` housekeeping
 table); the array column joins to it at materialize, so the resolved value is
 never copied and stays fresh.
+
+### Enriching a spine column (a parent display field)
+
+Lookups also enrich **scalar spine columns** — the canonical BFF ask, "the
+job row carries the customer's display name as a real column":
+
+```toml
+[[sql-projection.rules]]
+when = [ { path = "$.kind", equals = "job" } ]
+set = [
+  { column = "customer_id",   from = "$.CustomerId" },
+  { column = "customer_name", lookup = "customers", on = "customer_id", select = "display_name" },
+]
+```
+
+The semantics are **join-equivalence**: the column always equals what
+`LEFT JOIN <dimension> ON key = customer_id` would return right now. A
+customer rename fans out to every referencing row; a customer delete NULLs
+them; a job row applied before its customer row starts NULL and heals when
+the customer arrives. committed auto-indexes the `on` column (the fan-out's
+WHERE clause), so you don't pay a scan per dimension event.
+
+Three contracts to know:
+- `on` must name a column **the same rule sets** with `from`/`value` — the
+  FK and its resolved value are written atomically, so they can never
+  desync.
+- The `on` column's declared type must be **integer-family or text-family**
+  (it holds another topic's entity key; fractional types have ambiguous
+  renderings and are rejected with an explanation).
+- One column joins **one** dimension: enriching the same column from two
+  different `(lookup, on, select)` tuples is rejected.
 
 ## Deletes and partial deletes
 

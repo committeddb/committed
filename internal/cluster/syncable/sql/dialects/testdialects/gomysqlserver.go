@@ -108,3 +108,15 @@ func (d *GoMySQLServerDialect) IsPermanent(err error) bool {
 func (d *GoMySQLServerDialect) BindArgs(values []any) []any {
 	return (&dialects.MySQLDialect{}).BindArgs(values)
 }
+
+func (d *GoMySQLServerDialect) CreateEnrichedUpsertSQL(c *sql.Config, enrich map[string]sql.SpineEnrichment) string {
+	return (&dialects.MySQLDialect{}).CreateEnrichedUpsertSQL(c, enrich)
+}
+
+func (d *GoMySQLServerDialect) CreateSpineFanOutSQL(c *sql.Config, column, onColumn string) string {
+	return (&dialects.MySQLDialect{}).CreateSpineFanOutSQL(c, column, onColumn)
+}
+
+func (d *GoMySQLServerDialect) EnsureSpineIndex(db *gosql.DB, c *sql.Config, onColumn string) error {
+	return (&dialects.MySQLDialect{}).EnsureSpineIndex(db, c, onColumn)
+}

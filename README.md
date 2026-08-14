@@ -37,8 +37,13 @@ Committed is specifically NOT a databse designed for querying.
   Today: PostgreSQL via logical replication (pgoutput), MySQL via
   binlog, SQL Server via Change Tracking (every edition — no CDC
   licensing requirement).
-- **Syncable** — projects committed Actuals out to an external system.
-  Today: SQL (MySQL/PostgreSQL) and HTTP.
+- **Syncable** — projects committed Actuals out to an external system,
+  either as faithful per-table mirrors (`sql`) or by **transforming and
+  folding topics into the denormalized shape you query** —
+  multi-topic BFF rows, collection aggregates, cross-topic enrichment
+  (`sql-projection`, the primary read-model pattern; see
+  [docs/read-models.md](docs/read-models.md)). Destinations today:
+  SQL (MySQL/PostgreSQL) and HTTP.
 
 ### Running
 

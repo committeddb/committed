@@ -133,6 +133,74 @@ func (d *MySQLDialect) CreateAggregateAffectedParentsSQL(spec sql.AggregateSpec,
 }
 
 // CreateSQL implements Dialect
+// CreateEnrichedUpsertSQL implements Dialect: mysqlUpsertSQL with enriched
+// columns' entries as dimension subqueries (MySQL JSON path extract; no cast —
+// MySQL assignment-coerces). The subquery repeats in the ON DUPLICATE half, so
+// the doubled BindArgs convention holds uniformly: every placeholder — key
+// placeholders included — appears once per half.
+func (d *MySQLDialect) CreateEnrichedUpsertSQL(config *sql.Config, enrich map[string]sql.SpineEnrichment) string {
+	entry := func(item sql.Mapping) string {
+		if e, ok := enrich[item.Column]; ok {
+			return fmt.Sprintf("(SELECT %s->>'$.%s' FROM %s WHERE %s = ?)",
+				mysqlIdent.Ident(sql.LookupFields), sqlident.EscapeStringLiteral(e.SelectField),
+				mysqlIdent.Table(e.DimTable), mysqlIdent.Ident(sql.LookupKey))
+		}
+		return "?"
+	}
+	var sqlb strings.Builder
+	fmt.Fprintf(&sqlb, "INSERT INTO %s(", mysqlIdent.Table(config.Table))
+	for i, item := range config.Mappings {
+		if i > 0 {
+			sqlb.WriteString(",")
+		}
+		sqlb.WriteString(mysqlIdent.Ident(item.Column))
+	}
+	fmt.Fprint(&sqlb, ") VALUES (")
+	for i, item := range config.Mappings {
+		if i > 0 {
+			sqlb.WriteString(",")
+		}
+		sqlb.WriteString(entry(item))
+	}
+	fmt.Fprint(&sqlb, ") ON DUPLICATE KEY UPDATE ")
+	for i, item := range config.Mappings {
+		if i > 0 {
+			sqlb.WriteString(",")
+		}
+		fmt.Fprintf(&sqlb, "%s=%s", mysqlIdent.Ident(item.Column), entry(item))
+	}
+	return sqlb.String()
+}
+
+// CreateSpineFanOutSQL implements Dialect.
+func (d *MySQLDialect) CreateSpineFanOutSQL(config *sql.Config, column, onColumn string) string {
+	return fmt.Sprintf("UPDATE %s SET %s = ? WHERE %s = ?",
+		mysqlIdent.Table(config.Table), mysqlIdent.Ident(column), mysqlIdent.Ident(onColumn))
+}
+
+// EnsureSpineIndex implements Dialect: MySQL has no CREATE INDEX IF NOT
+// EXISTS, so check information_schema first (the EnsureGenerationColumn
+// pattern).
+func (d *MySQLDialect) EnsureSpineIndex(db *gosql.DB, config *sql.Config, onColumn string) error {
+	name := spineIndexName(config.Table, onColumn)
+	var n int
+	err := db.QueryRow(
+		"SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ?",
+		config.Table, name).Scan(&n)
+	if err != nil {
+		return fmt.Errorf("spine index check: %w", err)
+	}
+	if n > 0 {
+		return nil
+	}
+	ddl := fmt.Sprintf("CREATE INDEX %s ON %s (%s)",
+		mysqlIdent.Ident(name), mysqlIdent.Table(config.Table), mysqlIdent.Ident(onColumn))
+	if _, err := db.Exec(ddl); err != nil {
+		return fmt.Errorf("spine index [%s]: %w", ddl, err)
+	}
+	return nil
+}
+
 func (d *MySQLDialect) CreateSQL(config *sql.Config) string {
 	return mysqlUpsertSQL(config, false)
 }

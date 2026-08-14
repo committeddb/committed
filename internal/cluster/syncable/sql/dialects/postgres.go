@@ -163,6 +163,68 @@ func (d *PostgreSQLDialect) CreateAggregateAffectedParentsSQL(spec sql.Aggregate
 // not the MySQL ON DUPLICATE KEY UPDATE syntax. EXCLUDED references the row
 // that was proposed for insertion, so no extra placeholders are needed for
 // the update clause.
+// CreateEnrichedUpsertSQL implements Dialect: pgUpsertSQL with enriched
+// columns' VALUES entries as dimension subqueries. The extract is text, so it
+// carries an explicit cast to the column's declared type (Postgres does not
+// assignment-cast text into non-text columns); the subquery placeholder binds
+// the canonical key rendering. EXCLUDED picks the computed value on conflict,
+// so values still bind once.
+func (d *PostgreSQLDialect) CreateEnrichedUpsertSQL(config *sql.Config, enrich map[string]sql.SpineEnrichment) string {
+	var sqlb strings.Builder
+	fmt.Fprintf(&sqlb, "INSERT INTO %s(", pgIdent.Table(config.Table))
+	for i, item := range config.Mappings {
+		if i > 0 {
+			sqlb.WriteString(",")
+		}
+		sqlb.WriteString(pgIdent.Ident(item.Column))
+	}
+	fmt.Fprint(&sqlb, ") VALUES (")
+	ph := 0
+	for i, item := range config.Mappings {
+		if i > 0 {
+			sqlb.WriteString(",")
+		}
+		ph++
+		if e, ok := enrich[item.Column]; ok {
+			fmt.Fprintf(&sqlb, "(SELECT %s->>'%s' FROM %s WHERE %s = $%d)::%s",
+				pgIdent.Ident(sql.LookupFields), sqlident.EscapeStringLiteral(e.SelectField),
+				pgIdent.Table(e.DimTable), pgIdent.Ident(sql.LookupKey), ph, e.CastType)
+		} else {
+			fmt.Fprintf(&sqlb, "$%d", ph)
+		}
+	}
+	fmt.Fprint(&sqlb, ")")
+	if config.Keyed() {
+		fmt.Fprintf(&sqlb, " ON CONFLICT (%s) DO UPDATE SET ", joinIdents(config.PrimaryKey, pgIdent))
+		for i, item := range config.Mappings {
+			col := pgIdent.Ident(item.Column)
+			if i > 0 {
+				sqlb.WriteString(",")
+			}
+			fmt.Fprintf(&sqlb, "%s=EXCLUDED.%s", col, col)
+		}
+	}
+	return sqlb.String()
+}
+
+// CreateSpineFanOutSQL implements Dialect.
+func (d *PostgreSQLDialect) CreateSpineFanOutSQL(config *sql.Config, column, onColumn string) string {
+	return fmt.Sprintf("UPDATE %s SET %s = $1 WHERE %s = $2",
+		pgIdent.Table(config.Table), pgIdent.Ident(column), pgIdent.Ident(onColumn))
+}
+
+// EnsureSpineIndex implements Dialect: CREATE INDEX IF NOT EXISTS on the on
+// column (deterministic name, so re-Init is a no-op).
+func (d *PostgreSQLDialect) EnsureSpineIndex(db *gosql.DB, config *sql.Config, onColumn string) error {
+	ddl := fmt.Sprintf("CREATE INDEX IF NOT EXISTS %s ON %s (%s)",
+		pgIdent.Ident(spineIndexName(config.Table, onColumn)),
+		pgIdent.Table(config.Table), pgIdent.Ident(onColumn))
+	if _, err := db.Exec(ddl); err != nil {
+		return fmt.Errorf("spine index [%s]: %w", ddl, err)
+	}
+	return nil
+}
+
 func (d *PostgreSQLDialect) CreateSQL(config *sql.Config) string {
 	return pgUpsertSQL(config, false)
 }

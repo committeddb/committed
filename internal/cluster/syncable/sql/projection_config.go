@@ -53,7 +53,24 @@ type ProjectionSet struct {
 	From   string `mapstructure:"from"`
 	Value  any    `mapstructure:"value"`
 	Null   bool   `mapstructure:"null"`
+	// The fourth arm: scalar lookup enrichment — resolve this column from a
+	// declared lookup dimension, joining On (a column this SAME rule sets
+	// from the payload — the same-rule constraint is a correctness
+	// invariant: the FK and its resolved value always move atomically, so
+	// they can never desync through partial rule application) to the
+	// dimension's key, selecting one of its declared fields. Semantics are
+	// the join-equivalence invariant: the column always equals what
+	// `LEFT JOIN dim ON dim.key = on` would return right now — resolved at
+	// apply, kept fresh by dimension fan-out (a rename updates every
+	// referencing row; a dimension delete NULLs it; a spine row applied
+	// before its dimension row starts NULL and heals when it arrives).
+	Lookup string `mapstructure:"lookup"`
+	On     string `mapstructure:"on"`
+	Select string `mapstructure:"select"`
 }
+
+// IsEnrichment reports whether this set entry is the lookup-enrichment arm.
+func (s ProjectionSet) IsEnrichment() bool { return s.Lookup != "" }
 
 // ProjectionRule fires when all of its When clauses hold, upserting
 // its Set columns for the event's key. Rules execute in manifest
@@ -233,7 +250,7 @@ func (c *ProjectionConfig) ddlConfig() *Config {
 // Sorted so a benign source/field reorder is not flagged; empty when the config
 // has no aggregate or lookup source (so plain projections are unaffected).
 func (c *ProjectionConfig) projectionShapeFingerprint() string {
-	var aggs, lookups []string
+	var aggs, lookups, spines []string
 	for _, s := range c.Sources {
 		if a := s.Aggregate; a != nil {
 			aggs = append(aggs, fmt.Sprintf("agg(col=%s,key=%s,keyType=%s,elem=%s)",
@@ -243,10 +260,23 @@ func (c *ProjectionConfig) projectionShapeFingerprint() string {
 			lookups = append(lookups, fmt.Sprintf("lookup(name=%s,fields=%s)",
 				l.Name, fingerprintFields(l.Fields)))
 		}
+		// Spine enrichments are value-shape too: a changed (lookup, on,
+		// select) silently changes what the column MEANS, which CREATE TABLE
+		// IF NOT EXISTS would never surface — so it trips the same
+		// materialized-schema-change rebuild gate as aggregate/lookup shape.
+		for _, r := range s.Rules {
+			for _, e := range r.Set {
+				if e.IsEnrichment() {
+					spines = append(spines, fmt.Sprintf("spine(col=%s,lookup=%s,on=%s,select=%s)",
+						e.Column, e.Lookup, e.On, e.Select))
+				}
+			}
+		}
 	}
 	sort.Strings(aggs)
 	sort.Strings(lookups)
-	return strings.Join(aggs, ";") + "|" + strings.Join(lookups, ";")
+	sort.Strings(spines)
+	return strings.Join(aggs, ";") + "|" + strings.Join(lookups, ";") + "|" + strings.Join(spines, ";")
 }
 
 // fingerprintFields canonicalizes a set of element/dimension fields (order-
@@ -276,6 +306,71 @@ func (c *ProjectionConfig) ruleConfig(r ProjectionRule) *Config {
 	// Projections keep a single-column key (their own model — composite
 	// projections are out of scope); wrap at the plain-Config boundary.
 	return &Config{Table: c.Table, Mappings: mappings, PrimaryKey: []string{c.PrimaryKey}}
+}
+
+// validateSpineEnrichment checks one lookup-arm set entry: the lookup names a
+// declared dimension, select names one of its declared fields, and on names a
+// column set from the payload (from/value) BY THE SAME RULE — the same-rule
+// constraint that makes the FK and its resolved value atomic (see
+// ProjectionSet.Lookup).
+func validateSpineEnrichment(c *ProjectionConfig, s ProjectionSet, r ProjectionRule, lookups map[string]int, where string) error {
+	if s.On == "" || s.Select == "" {
+		return fmt.Errorf("%s: lookup requires both on (the FK column this rule sets) and select (the dimension field)", where)
+	}
+	li, ok := lookups[s.Lookup]
+	if !ok {
+		return fmt.Errorf("%s: lookup %q is not a declared lookup source", where, s.Lookup)
+	}
+	fieldOK := false
+	for _, f := range c.Sources[li].Lookup.Fields {
+		if f.Field == s.Select {
+			fieldOK = true
+			break
+		}
+	}
+	if !fieldOK {
+		return fmt.Errorf("%s: select %q is not a declared field of lookup %q", where, s.Select, s.Lookup)
+	}
+	onOK := false
+	for _, sib := range r.Set {
+		if sib.Column == s.On && (sib.From != "" || sib.Value != nil) {
+			onOK = true
+			break
+		}
+	}
+	if !onOK {
+		return fmt.Errorf("%s: on %q must be a column this same rule sets with from/value (the FK and its resolved value must move atomically)", where, s.On)
+	}
+	// The canonical-join-space contract: the on column's declared type IS the
+	// space both join sites (apply-time resolve, dimension fan-out) compare
+	// in, coerced Go-side. Integer and text families have one deterministic
+	// rendering per value; scale-typed numerics and floats have many
+	// ("42" / "42.00" / "42.0" are one value, several spellings), which is a
+	// silent-miss trap — and nobody keys entities by fractional numbers, so
+	// an on column typed that way is a schema mistake worth a loud no.
+	for _, col := range c.Columns {
+		if col.Name != s.On {
+			continue
+		}
+		if !onColumnTypeOK(col.SQLType) {
+			return fmt.Errorf("%s: on column %q has type %q — an enrichment join column holds another topic's entity key, so it must be an integer-family or text-family type (fractional/scale types have ambiguous renderings and would make dimension fan-out silently miss)", where, s.On, col.SQLType)
+		}
+	}
+	return nil
+}
+
+// onColumnTypeOK reports whether a declared type is a valid enrichment join
+// column: integer-family or text-family (one deterministic rendering per
+// value — the canonical-join-space requirement).
+func onColumnTypeOK(sqlType string) bool {
+	switch leadingTypeToken(sqlType) {
+	case "INT", "INTEGER", "INT2", "INT4", "INT8",
+		"SMALLINT", "BIGINT", "TINYINT", "MEDIUMINT",
+		"TEXT", "VARCHAR", "CHAR", "CHARACTER", "NVARCHAR", "NCHAR",
+		"TINYTEXT", "MEDIUMTEXT", "LONGTEXT":
+		return true
+	}
+	return false
 }
 
 // validateProjectionConfig rejects every config that could otherwise
@@ -391,6 +486,13 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 			return fmt.Errorf("%s: onDelete %q is invalid (want %q, %q, or %q)", where, src.OnDelete, onDeleteRow, onDeleteClear, onDeleteIgnore)
 		}
 		ownsColumn := false
+		// enrichedAs records each enriched column's (lookup, on, select) tuple:
+		// the same column enriched from two DIFFERENT tuples across rules would
+		// let one dimension's fan-out stomp the other's value regardless of
+		// which rule last wrote the row — the join-equivalence invariant cannot
+		// even be stated for that shape. Identical tuples are fine (they dedupe
+		// into one fan-out statement at Init).
+		enrichedAs := make(map[string]string)
 		for i, r := range src.Rules {
 			if err := validateWhenClauses(r.When, fmt.Sprintf("%s rule %d", where, i+1)); err != nil {
 				return err
@@ -409,17 +511,30 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 				if s.Column == c.PrimaryKey {
 					return fmt.Errorf("%s rule %d may not set the primary-key column %q (the key binds from keyPath)", where, i+1, s.Column)
 				}
+				if (s.On != "" || s.Select != "") && s.Lookup == "" {
+					return fmt.Errorf("%s rule %d column %q: on/select require lookup", where, i+1, s.Column)
+				}
 				forms := 0
-				for _, set := range []bool{s.From != "", s.Value != nil, s.Null} {
+				for _, set := range []bool{s.From != "", s.Value != nil, s.Null, s.Lookup != ""} {
 					if set {
 						forms++
 					}
 				}
 				if forms != 1 {
-					return fmt.Errorf("%s rule %d column %q: exactly one of from, value, or null is required", where, i+1, s.Column)
+					return fmt.Errorf("%s rule %d column %q: exactly one of from, value, null, or lookup is required", where, i+1, s.Column)
 				}
 				if s.Value != nil && !isScalar(s.Value) {
 					return fmt.Errorf("%s rule %d column %q: value must be a scalar literal, got %T", where, i+1, s.Column, s.Value)
+				}
+				if s.Lookup != "" {
+					if err := validateSpineEnrichment(c, s, r, lookups, fmt.Sprintf("%s rule %d column %q", where, i+1, s.Column)); err != nil {
+						return err
+					}
+					tuple := s.Lookup + "\x00" + s.On + "\x00" + s.Select
+					if prev, ok := enrichedAs[s.Column]; ok && prev != tuple {
+						return fmt.Errorf("%s rule %d column %q: enriched from a different (lookup, on, select) than an earlier rule — one column, one dimension join (fan-outs from two dimensions would stomp each other)", where, i+1, s.Column)
+					}
+					enrichedAs[s.Column] = tuple
 				}
 				if seen[s.Column] {
 					return fmt.Errorf("%s rule %d sets column %q twice (within a rule each column is set once; across rules the last matching rule wins)", where, i+1, s.Column)
@@ -663,6 +778,33 @@ func sidecarName(table, column string) string {
 }
 
 // dimensionName is the backing table for a lookup source: <table>__lookup_<name>.
+// ruleEnrichments maps a rule's enriched columns to their dialect-facing
+// specs: the dimension table (derived from the projection table + lookup
+// name), the selected field, and the column's declared type (the cast the
+// engines that need one apply to the extracted text). Empty map for a rule
+// with no enrichment entries — the caller keeps the plain CreateSQL path.
+func (c *ProjectionConfig) ruleEnrichments(r ProjectionRule) map[string]SpineEnrichment {
+	out := map[string]SpineEnrichment{}
+	for _, s := range r.Set {
+		if !s.IsEnrichment() {
+			continue
+		}
+		castType := ""
+		for _, col := range c.Columns {
+			if col.Name == s.Column {
+				castType = col.SQLType
+				break
+			}
+		}
+		out[s.Column] = SpineEnrichment{
+			DimTable:    dimensionName(c.Table, s.Lookup),
+			SelectField: s.Select,
+			CastType:    castType,
+		}
+	}
+	return out
+}
+
 func dimensionName(table, lookup string) string {
 	return table + "__lookup_" + lookup
 }

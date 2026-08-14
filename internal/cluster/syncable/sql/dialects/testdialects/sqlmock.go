@@ -153,3 +153,15 @@ func (d *SQLMockDialect) IsPermanent(err error) bool {
 func (d *SQLMockDialect) BindArgs(values []any) []any {
 	return append(values, values...)
 }
+
+func (d *SQLMockDialect) CreateEnrichedUpsertSQL(c *sql.Config, enrich map[string]sql.SpineEnrichment) string {
+	return (&dialects.MySQLDialect{}).CreateEnrichedUpsertSQL(c, enrich)
+}
+
+func (d *SQLMockDialect) CreateSpineFanOutSQL(c *sql.Config, column, onColumn string) string {
+	return (&dialects.MySQLDialect{}).CreateSpineFanOutSQL(c, column, onColumn)
+}
+
+func (d *SQLMockDialect) EnsureSpineIndex(db *gosql.DB, c *sql.Config, onColumn string) error {
+	return (&dialects.MySQLDialect{}).EnsureSpineIndex(db, c, onColumn)
+}
