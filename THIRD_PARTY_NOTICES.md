@@ -578,7 +578,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ```
 
-## github.com/go-logr/logr v1.4.3
+## github.com/go-logr/logr v1.4.4
 
 ```
                                  Apache License
@@ -2853,7 +2853,7 @@ THE SOFTWARE.
 
 ```
 
-## github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
+## github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 
 ```
 
@@ -4075,7 +4075,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ```
 
-## go.opentelemetry.io/otel v1.44.0
+## go.opentelemetry.io/otel v1.45.0
 
 ```
                                  Apache License
@@ -4311,7 +4311,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc v1.44.0
+## go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc v1.45.0
 
 ```
                                  Apache License
@@ -4547,7 +4547,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## go.opentelemetry.io/otel/metric v1.44.0
+## go.opentelemetry.io/otel/metric v1.45.0
 
 ```
                                  Apache License
@@ -4783,7 +4783,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## go.opentelemetry.io/otel/sdk v1.44.0
+## go.opentelemetry.io/otel/sdk v1.45.0
 
 ```
                                  Apache License
@@ -5019,7 +5019,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## go.opentelemetry.io/otel/sdk/metric v1.44.0
+## go.opentelemetry.io/otel/sdk/metric v1.45.0
 
 ```
                                  Apache License
@@ -5255,7 +5255,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## go.opentelemetry.io/otel/trace v1.44.0
+## go.opentelemetry.io/otel/trace v1.45.0
 
 ```
                                  Apache License
@@ -5491,7 +5491,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## go.opentelemetry.io/proto/otlp v1.10.0
+## go.opentelemetry.io/proto/otlp v1.11.0
 
 ```
                                  Apache License
@@ -5938,7 +5938,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ```
 
-## google.golang.org/genproto/googleapis/api v0.0.0-20260526163538-3dc84a4a5aaa
+## google.golang.org/genproto/googleapis/api v0.0.0-20260803160001-6ac0973c030d
 
 ```
 
@@ -6146,7 +6146,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ```
 
-## google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa
+## google.golang.org/genproto/googleapis/rpc v0.0.0-20260803160001-6ac0973c030d
 
 ```
 
@@ -6354,7 +6354,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ```
 
-## google.golang.org/grpc v1.82.1
+## google.golang.org/grpc v1.83.0
 
 ```
 
