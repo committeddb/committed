@@ -111,6 +111,15 @@ var (
 var (
 	appliedIndexBucket = []byte("appliedIndex")
 	appliedIndexKey    = []byte("idx")
+	// dataEventIndexKey persists the data head (DataEventIndex) in the same
+	// bucket and the same transaction as the applied index — it IS applied
+	// state, and deriving it at Open (the capped backscan below) proved
+	// defeatable in the field: an idle cluster's log tail accumulates
+	// internal entries (index bumps, positions) past any fixed cap, and the
+	// cap-exhausted backscan left the head at 0 — so a freshly created
+	// syncable saw an empty replay range, folded NOTHING, and reported
+	// caughtUp/lag 0 silently (lag is computed against the same broken head).
+	dataEventIndexKey = []byte("dataIdx")
 
 	// confStateBucket durably holds the raft membership ConfState that
 	// ApplyConfChange returns. It is written ATOMICALLY with appliedIndex (in
@@ -858,20 +867,33 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		}
 		ws.firstEventIndex.Store(first.GetIndex())
 
-		// Derive dataEventIndex (the head for per-syncable lag) by scanning
-		// the event log backward from the tail to the first user-topic-data
-		// entry, mirroring the reader's IsInternal filter. ApplyCommitted
-		// skips already-applied entries on restart, so this Open-time
-		// derivation — not replay — is what sets the head for the existing
-		// log (and it is the only source on an rsync-restored node, which
-		// never replays apply). The trailing internal run (index bumps,
-		// dead-letters, config, positions) is normally tiny; cap the scan so
-		// a pathological tail can't make Open O(log). On the cap, or any
-		// read / decode failure, leave the head at 0: under-reporting it only
-		// makes lag look smaller, never negative, and the next applied data
-		// entry corrects it.
+		// Restore the persisted data head (written in the same bbolt
+		// transaction as appliedIndex — see dataEventIndexKey). The backscan
+		// below is now only the FALLBACK for logs written before the head was
+		// persisted (and rsync-restored pre-feature dirs); a persisted value
+		// wins because the field proved the capped scan defeatable: an idle
+		// cluster's trailing internal run outgrows any fixed cap, and head 0
+		// makes a fresh syncable silently fold nothing while reporting
+		// caughtUp.
+		if persisted, perr := ws.loadDataEventIndex(); perr != nil {
+			return nil, fmt.Errorf("load data event index: %w", perr)
+		} else if persisted > 0 {
+			ws.dataEventIndex.Store(persisted)
+		}
+
+		// Fallback derivation for pre-feature logs: scan the event log
+		// backward from the tail to the first user-topic-data entry,
+		// mirroring the reader's IsInternal filter. The trailing internal run
+		// (index bumps, dead-letters, config, positions) is normally tiny;
+		// cap the scan so a pathological tail can't make Open O(log). On the
+		// cap or any read/decode failure, the head stays 0 — under-reporting
+		// only ever makes lag look smaller — but LOUDLY: the operator must
+		// know the lag/caughtUp instrument is blind until the next data entry
+		// applies (or a re-POST after one).
 		const dataHeadBackscanCap = 4096
-		for seq, scanned := evLast, 0; seq >= evFirst && scanned < dataHeadBackscanCap; seq, scanned = seq-1, scanned+1 {
+		scannedOut := 0
+		for seq, scanned := evLast, 0; ws.dataEventIndex.Load() == 0 && seq >= evFirst && scanned < dataHeadBackscanCap; seq, scanned = seq-1, scanned+1 {
+			scannedOut = scanned + 1
 			raw, rerr := ws.readEventAt(seq)
 			if rerr != nil {
 				ws.logger.Warn("dataEventIndex backscan: read failed; leaving head at 0",
@@ -897,6 +919,10 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 				ws.dataEventIndex.Store(e.GetIndex())
 				break
 			}
+		}
+		if ws.dataEventIndex.Load() == 0 && scannedOut >= dataHeadBackscanCap {
+			ws.logger.Warn("dataEventIndex backscan hit its cap without finding a data entry; the data head is 0 until the next data entry applies — syncable lag/caughtUp UNDER-REPORT until then (a fresh syncable may briefly read caughtUp over an empty replay range)",
+				zap.Int("scanned", scannedOut))
 		}
 	}
 

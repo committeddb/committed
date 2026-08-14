@@ -306,6 +306,14 @@ func (s *Storage) saveAppliedIndex(idx uint64) error {
 		if err := b.Put(appliedIndexKey, buf[:]); err != nil {
 			return err
 		}
+		// The data head rides the same transaction: it is applied state, and
+		// restart must restore it exactly (the Open-time backscan is a capped
+		// fallback the field defeated — see dataEventIndexKey).
+		var dbuf [8]byte
+		binary.BigEndian.PutUint64(dbuf[:], s.dataEventIndex.Load())
+		if err := b.Put(dataEventIndexKey, dbuf[:]); err != nil {
+			return err
+		}
 		if pendingData != nil {
 			cb := tx.Bucket(confStateBucket)
 			if cb == nil {
@@ -358,6 +366,28 @@ func (s *Storage) durableConfState() *pb.ConfState {
 func (s *Storage) SetAppliedIndexForTest(idx uint64) error {
 	s.appliedIndex.Store(idx)
 	return s.saveAppliedIndex(idx)
+}
+
+// loadDataEventIndex reads the persisted data head, or 0 for a pre-feature
+// directory (which then falls back to the capped backscan at Open).
+func (s *Storage) loadDataEventIndex() (uint64, error) {
+	var idx uint64
+	err := s.view(func(tx *bolt.Tx) error {
+		b := tx.Bucket(appliedIndexBucket)
+		if b == nil {
+			return ErrBucketMissing
+		}
+		v := b.Get(dataEventIndexKey)
+		if v == nil {
+			return nil
+		}
+		if len(v) != 8 {
+			return fmt.Errorf("dataEventIndex: expected 8 bytes, got %d", len(v))
+		}
+		idx = binary.BigEndian.Uint64(v)
+		return nil
+	})
+	return idx, err
 }
 
 // loadAppliedIndex reads the persisted applied index from bbolt, or returns
