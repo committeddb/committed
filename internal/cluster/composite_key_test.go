@@ -51,3 +51,19 @@ func TestCompositeKeyContract(t *testing.T) {
 		require.Equal(t, []string{string([]byte{0xff, 0xfe}), "x"}, vals)
 	})
 }
+
+// IsCompositeEncoded is the single-key consumer's loud-guard predicate: a
+// multi-column encoding (JSON string-array of 2+, or the binary form) must
+// read composite; bare values — including array-LOOKING but non-decoding
+// ones — must not, so legitimate single keys never false-positive into
+// dead letters.
+func TestIsCompositeEncoded(t *testing.T) {
+	require.True(t, cluster.IsCompositeEncoded(`["a","b"]`))
+	require.True(t, cluster.IsCompositeEncoded(cluster.CompositeKey(
+		map[string]any{"bin": string([]byte{0xff}), "id": "x"}, []string{"bin", "id"})))
+	require.False(t, cluster.IsCompositeEncoded("plain-key"))
+	require.False(t, cluster.IsCompositeEncoded("42"))
+	require.False(t, cluster.IsCompositeEncoded(`["one"]`), "a one-element array decodes at arity 1 — not a MULTI-column encoding")
+	require.False(t, cluster.IsCompositeEncoded(`[1,2]`), "a number array is not the string-array encoding")
+	require.False(t, cluster.IsCompositeEncoded("[not json"), "array-looking but undecodable stays a bare key")
+}

@@ -19,7 +19,7 @@ func (otherComparable) SchemaChange(cluster.SyncableSchemaComparable) error { re
 // destination shape (main columns + aggregate/lookup fingerprint) + identity, no
 // DB — exactly as ProjectionSyncableParser.SchemaFromConfig does.
 func projectionComparable(cols ...[2]string) *schemaComparable {
-	cfg := &ProjectionConfig{Table: "tenants", PrimaryKey: "id"}
+	cfg := &ProjectionConfig{Table: "tenants", PrimaryKey: []string{"id"}}
 	for _, c := range cols {
 		cfg.Columns = append(cfg.Columns, ProjectionColumn{Name: c[0], SQLType: c[1]})
 	}

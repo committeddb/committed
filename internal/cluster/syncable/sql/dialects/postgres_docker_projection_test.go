@@ -22,7 +22,7 @@ func projectionConfig(table string) *sql.ProjectionConfig {
 	return &sql.ProjectionConfig{
 		Topic:      "controlplane-event",
 		Table:      table,
-		PrimaryKey: "tenant_id",
+		PrimaryKey: []string{"tenant_id"},
 		Columns: []sql.ProjectionColumn{
 			{Name: "tenant_id", SQLType: "VARCHAR(64)"},
 			{Name: "tier", SQLType: "VARCHAR(32)"},
@@ -168,7 +168,7 @@ func sourceDelete(typ *cluster.Type, key string) *cluster.Actual {
 func movieCardConfig(table string) *sql.ProjectionConfig {
 	return &sql.ProjectionConfig{
 		Table:      table,
-		PrimaryKey: "tconst",
+		PrimaryKey: []string{"tconst"},
 		Columns: []sql.ProjectionColumn{
 			{Name: "tconst", SQLType: "VARCHAR(16)"},
 			{Name: "primary_title", SQLType: "VARCHAR(255)"},
@@ -291,7 +291,7 @@ func movieCardSplitConfig(table string) *sql.ProjectionConfig {
 	}
 	return &sql.ProjectionConfig{
 		Table:      table,
-		PrimaryKey: "tconst",
+		PrimaryKey: []string{"tconst"},
 		Columns: []sql.ProjectionColumn{
 			{Name: "tconst", SQLType: "VARCHAR(16)"},
 			{Name: "primary_title", SQLType: "VARCHAR(255)"},
@@ -456,14 +456,14 @@ var employeeType = &cluster.Type{ID: "employee", Name: "Employee"}
 func deptRosterConfig(table string) *sql.ProjectionConfig {
 	return &sql.ProjectionConfig{
 		Table:      table,
-		PrimaryKey: "dept",
+		PrimaryKey: []string{"dept"},
 		Columns: []sql.ProjectionColumn{
 			{Name: "dept", SQLType: "VARCHAR(16)"},
 			{Name: "members", SQLType: "JSONB"},
 		},
 		Sources: []sql.ProjectionSource{{
 			Topic:    "employee",
-			KeyPath:  "$.dept",
+			KeyPath:  []string{"$.dept"},
 			OnDelete: "remove-from-aggregate",
 			Aggregate: &sql.ProjectionAggregate{
 				Column:     "members",
@@ -537,7 +537,7 @@ var nameType = &cluster.Type{ID: "name", Name: "Name"}
 func movieCardEnrichedConfig(table string) *sql.ProjectionConfig {
 	return &sql.ProjectionConfig{
 		Table:      table,
-		PrimaryKey: "tconst",
+		PrimaryKey: []string{"tconst"},
 		Columns: []sql.ProjectionColumn{
 			{Name: "tconst", SQLType: "VARCHAR(16)"},
 			{Name: "primary_title", SQLType: "VARCHAR(255)"},

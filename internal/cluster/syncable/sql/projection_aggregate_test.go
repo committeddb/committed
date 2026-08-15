@@ -21,14 +21,14 @@ var principalType = &cluster.Type{ID: "principal", Name: "Principal"}
 func topCastConfig() *sql.ProjectionConfig {
 	return &sql.ProjectionConfig{
 		Table:      "movie_card",
-		PrimaryKey: "tconst",
+		PrimaryKey: []string{"tconst"},
 		Columns: []sql.ProjectionColumn{
 			{Name: "tconst", SQLType: "VARCHAR(16)"},
 			{Name: "top_cast", SQLType: "JSONB"},
 		},
 		Sources: []sql.ProjectionSource{{
 			Topic:    "principal",
-			KeyPath:  "$.tconst",
+			KeyPath:  []string{"$.tconst"},
 			OnDelete: "remove-from-aggregate",
 			Aggregate: &sql.ProjectionAggregate{
 				Column:         "top_cast",
@@ -237,7 +237,7 @@ var nameType = &cluster.Type{ID: "name", Name: "Name"}
 func enrichedConfig() *sql.ProjectionConfig {
 	return &sql.ProjectionConfig{
 		Table:      "movie_card",
-		PrimaryKey: "tconst",
+		PrimaryKey: []string{"tconst"},
 		Columns: []sql.ProjectionColumn{
 			{Name: "tconst", SQLType: "VARCHAR(16)"},
 			{Name: "top_cast", SQLType: "JSONB"},

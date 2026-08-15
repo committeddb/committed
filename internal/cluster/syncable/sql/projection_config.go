@@ -2,6 +2,7 @@ package sql
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -156,14 +157,16 @@ type ProjectionAggregate struct {
 // category=actor into top_cast, category=director into directors); an empty When
 // consumes every event of the topic.
 //
-// KeyPath is the jsonpath that locates the correlation key in this source's
-// event payload — for a rule source it binds the primary-key column of every
-// upsert; for an aggregate source it picks the parent row a child folds into.
-// Defaults to $.<primaryKey>. The projected key must equal the entity's log Key
-// for a rule source's delete Actuals to remove/clear the right row.
+// KeyPath is the jsonpath(s) that locate the correlation key in this source's
+// event payload, positionally aligned with the projection's PrimaryKey — for a
+// rule source they bind the primary-key columns of every upsert; for an
+// aggregate source the single path picks the parent row a child folds into.
+// Defaults to one $.<col> per primaryKey column. The projected key values must
+// equal the entity's log Key (for a composite key, its components in encoding
+// order) for a source's delete Actuals to remove/clear the right row.
 type ProjectionSource struct {
 	Topic     string
-	KeyPath   string
+	KeyPath   []string
 	OnDelete  string
 	When      []WhenClause
 	Rules     []ProjectionRule
@@ -183,7 +186,15 @@ type ProjectionConfig struct {
 	// comparison (see Config.DatabaseID). Empty for directly-constructed configs.
 	DatabaseID string
 	Table      string
-	PrimaryKey string
+	// PrimaryKey is the destination key, one or several columns (the config
+	// accepts primaryKey = "id" and primaryKey = ["tenant_id", "visit_id"]).
+	// For a composite key the LIST ORDER is part of the producer↔consumer
+	// contract: delete tombstones carry the composite entity-key encoding
+	// (cluster.CompositeKey), which decodes POSITIONALLY — the columns here
+	// must be in the same order as the producer's key components. Composite
+	// projections fold via set rules; aggregate/lookup sources and lookup
+	// enrichment keep the single-key model (validation rejects the mix).
+	PrimaryKey []string
 	Columns    []ProjectionColumn
 	Sources    []ProjectionSource
 
@@ -191,7 +202,7 @@ type ProjectionConfig struct {
 	// configs) set these top-level fields; applyDefaults folds them into one
 	// Source. A multi-source config sets Sources directly and leaves these empty.
 	Topic   string
-	KeyPath string
+	KeyPath []string
 	Rules   []ProjectionRule
 }
 
@@ -215,8 +226,13 @@ func (c *ProjectionConfig) applyDefaults() {
 					s.OnDelete = onDeleteRow // back-compat: a delete drops the row
 				}
 			}
-			if s.KeyPath == "" && c.PrimaryKey != "" {
-				s.KeyPath = "$." + c.PrimaryKey
+			// Default one $.<col> path per key column, positionally aligned
+			// with PrimaryKey.
+			if len(s.KeyPath) == 0 && len(c.PrimaryKey) > 0 {
+				s.KeyPath = make([]string, len(c.PrimaryKey))
+				for k, pk := range c.PrimaryKey {
+					s.KeyPath[k] = "$." + pk
+				}
 			}
 		}
 		if s.Aggregate != nil && s.Aggregate.ElementKeyType == "" {
@@ -236,9 +252,7 @@ func (c *ProjectionConfig) ddlConfig() *Config {
 	for _, col := range c.Columns {
 		mappings = append(mappings, Mapping{Column: col.Name, SQLType: col.SQLType})
 	}
-	// Projections keep a single-column key (their own model — composite
-	// projections are out of scope); wrap at the plain-Config boundary.
-	return &Config{Table: c.Table, Mappings: mappings, PrimaryKey: []string{c.PrimaryKey}}
+	return &Config{Table: c.Table, Mappings: mappings, PrimaryKey: c.PrimaryKey}
 }
 
 // projectionShapeFingerprint is a canonical, order-independent description of the
@@ -298,14 +312,14 @@ func fingerprintFields(fields []ProjectionElementField) string {
 // clause (pk = EXCLUDED.pk / pk = ?) is harmless: on conflict the
 // values are equal by definition.
 func (c *ProjectionConfig) ruleConfig(r ProjectionRule) *Config {
-	mappings := make([]Mapping, 0, len(r.Set)+1)
-	mappings = append(mappings, Mapping{Column: c.PrimaryKey})
+	mappings := make([]Mapping, 0, len(r.Set)+len(c.PrimaryKey))
+	for _, pk := range c.PrimaryKey {
+		mappings = append(mappings, Mapping{Column: pk})
+	}
 	for _, s := range r.Set {
 		mappings = append(mappings, Mapping{Column: s.Column})
 	}
-	// Projections keep a single-column key (their own model — composite
-	// projections are out of scope); wrap at the plain-Config boundary.
-	return &Config{Table: c.Table, Mappings: mappings, PrimaryKey: []string{c.PrimaryKey}}
+	return &Config{Table: c.Table, Mappings: mappings, PrimaryKey: c.PrimaryKey}
 }
 
 // validateSpineEnrichment checks one lookup-arm set entry: the lookup names a
@@ -388,8 +402,18 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 	if !sqlident.ValidIdent(c.Table) {
 		return fmt.Errorf("table is not a valid SQL identifier: %q", c.Table)
 	}
-	if c.PrimaryKey == "" {
+	if len(c.PrimaryKey) == 0 {
 		return fmt.Errorf("primaryKey is required")
+	}
+	pkSeen := make(map[string]bool, len(c.PrimaryKey))
+	for _, pk := range c.PrimaryKey {
+		if pk == "" {
+			return fmt.Errorf("primaryKey has an empty column name")
+		}
+		if pkSeen[pk] {
+			return fmt.Errorf("primaryKey column %q listed twice", pk)
+		}
+		pkSeen[pk] = true
 	}
 	if len(c.Columns) == 0 {
 		return fmt.Errorf("at least one column is required")
@@ -413,11 +437,33 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 		}
 		declared[col.Name] = true
 	}
-	if !declared[c.PrimaryKey] {
-		return fmt.Errorf("primaryKey %q is not a declared column", c.PrimaryKey)
+	for _, pk := range c.PrimaryKey {
+		if !declared[pk] {
+			return fmt.Errorf("primaryKey %q is not a declared column", pk)
+		}
 	}
 	if len(c.Sources) == 0 {
 		return fmt.Errorf("at least one source (a topic and its rules) is required")
+	}
+	// Composite keys fold via set rules only: aggregate sidecars and lookup
+	// dimensions carry their own single-key identity models (a sidecar's
+	// parent binding and a dimension's fan-out address rows by ONE key/on
+	// column), and silently mis-keying either would be the silent-divergence
+	// class. Reject the mix loudly until composite support is designed for
+	// them.
+	if len(c.PrimaryKey) > 1 {
+		for si, src := range c.Sources {
+			if src.Aggregate != nil || src.Lookup != nil {
+				return fmt.Errorf("source %d (topic %q): aggregate and lookup sources require a single-column primaryKey (composite-keyed projections fold via set rules only)", si+1, src.Topic)
+			}
+			for ri, r := range src.Rules {
+				for _, s := range r.Set {
+					if s.IsEnrichment() {
+						return fmt.Errorf("source %d (topic %q) rule %d column %q: lookup enrichment requires a single-column primaryKey", si+1, src.Topic, ri+1, s.Column)
+					}
+				}
+			}
+		}
 	}
 	// lookups maps each declared lookup source's name to its source index, so an
 	// aggregate's enrichment can be checked to reference a real dimension. Built
@@ -480,6 +526,13 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 			}
 			continue
 		}
+		// A rule source's keyPaths align positionally with the primaryKey
+		// columns (applyDefaults fills one $.<col> per column when absent), so
+		// an explicit list of the wrong arity is a loud config error, not a
+		// misaligned bind.
+		if len(src.KeyPath) != len(c.PrimaryKey) {
+			return fmt.Errorf("%s: keyPath has %d path(s) but primaryKey has %d column(s) — one path per key column, in the same order", where, len(src.KeyPath), len(c.PrimaryKey))
+		}
 		switch src.OnDelete {
 		case onDeleteRow, onDeleteClear, onDeleteIgnore:
 		default:
@@ -508,7 +561,7 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 				if !declared[s.Column] {
 					return fmt.Errorf("%s rule %d sets unknown column %q", where, i+1, s.Column)
 				}
-				if s.Column == c.PrimaryKey {
+				if slices.Contains(c.PrimaryKey, s.Column) {
 					return fmt.Errorf("%s rule %d may not set the primary-key column %q (the key binds from keyPath)", where, i+1, s.Column)
 				}
 				if (s.On != "" || s.Select != "") && s.Lookup == "" {
@@ -576,8 +629,8 @@ func validateJSONPath(path, where string) error {
 func validateProjectionJSONPaths(c *ProjectionConfig) error {
 	for si, src := range c.Sources {
 		where := fmt.Sprintf("source %d (topic %q)", si+1, src.Topic)
-		if src.KeyPath != "" {
-			if err := validateJSONPath(src.KeyPath, where+" keyPath"); err != nil {
+		for _, kp := range src.KeyPath {
+			if err := validateJSONPath(kp, where+" keyPath"); err != nil {
 				return err
 			}
 		}
@@ -682,7 +735,7 @@ func validateAggregate(c *ProjectionConfig, src ProjectionSource, where string, 
 	if !declared[ag.Column] {
 		return fmt.Errorf("%s: aggregate column %q is not a declared column", where, ag.Column)
 	}
-	if ag.Column == c.PrimaryKey {
+	if slices.Contains(c.PrimaryKey, ag.Column) {
 		return fmt.Errorf("%s: aggregate column %q may not be the primary-key column", where, ag.Column)
 	}
 	if err := claimColumn(owner, ag.Column, si, where); err != nil {
@@ -814,8 +867,11 @@ func dimensionName(table, lookup string) string {
 // (first-seen order, so the materialize SQL is stable).
 func (c *ProjectionConfig) aggregateSpec(ag *ProjectionAggregate) AggregateSpec {
 	spec := AggregateSpec{
-		Table:       c.Table,
-		PrimaryKey:  c.PrimaryKey,
+		Table: c.Table,
+		// Aggregates are single-key by validation (composite primaryKey +
+		// aggregate sources is rejected at parse), so the spec's scalar key
+		// is the one configured column.
+		PrimaryKey:  c.PrimaryKey[0],
 		Column:      ag.Column,
 		Sidecar:     sidecarName(c.Table, ag.Column),
 		NumericSort: ag.ElementKeyType == elementKeyTypeNumber,

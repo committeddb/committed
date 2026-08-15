@@ -55,7 +55,7 @@ func mysqlProjectionConfig(table string) *sql.ProjectionConfig {
 	return &sql.ProjectionConfig{
 		Topic:      "controlplane-event",
 		Table:      table,
-		PrimaryKey: "tenant_id",
+		PrimaryKey: []string{"tenant_id"},
 		Columns: []sql.ProjectionColumn{
 			{Name: "tenant_id", SQLType: "VARCHAR(64)"},
 			{Name: "tier", SQLType: "VARCHAR(32)"},
@@ -172,7 +172,7 @@ func TestMySQLIntegration_ProjectionLifecycle(t *testing.T) {
 func mysqlMovieCardConfig(table string) *sql.ProjectionConfig {
 	return &sql.ProjectionConfig{
 		Table:      table,
-		PrimaryKey: "tconst",
+		PrimaryKey: []string{"tconst"},
 		Columns: []sql.ProjectionColumn{
 			{Name: "tconst", SQLType: "VARCHAR(16)"},
 			{Name: "primary_title", SQLType: "VARCHAR(255)"},
@@ -289,7 +289,7 @@ func mysqlMovieCardSplitConfig(table string) *sql.ProjectionConfig {
 	}
 	return &sql.ProjectionConfig{
 		Table:      table,
-		PrimaryKey: "tconst",
+		PrimaryKey: []string{"tconst"},
 		Columns: []sql.ProjectionColumn{
 			{Name: "tconst", SQLType: "VARCHAR(16)"},
 			{Name: "primary_title", SQLType: "VARCHAR(255)"},
@@ -444,14 +444,14 @@ func TestMySQLIntegration_AggregateProjection(t *testing.T) {
 func mysqlDeptRosterConfig(table string) *sql.ProjectionConfig {
 	return &sql.ProjectionConfig{
 		Table:      table,
-		PrimaryKey: "dept",
+		PrimaryKey: []string{"dept"},
 		Columns: []sql.ProjectionColumn{
 			{Name: "dept", SQLType: "VARCHAR(16)"},
 			{Name: "members", SQLType: "JSON"},
 		},
 		Sources: []sql.ProjectionSource{{
 			Topic:    "employee",
-			KeyPath:  "$.dept",
+			KeyPath:  []string{"$.dept"},
 			OnDelete: "remove-from-aggregate",
 			Aggregate: &sql.ProjectionAggregate{
 				Column:     "members",
@@ -519,7 +519,7 @@ func TestMySQLIntegration_AggregateReparenting(t *testing.T) {
 func mysqlMovieCardEnrichedConfig(table string) *sql.ProjectionConfig {
 	return &sql.ProjectionConfig{
 		Table:      table,
-		PrimaryKey: "tconst",
+		PrimaryKey: []string{"tconst"},
 		Columns: []sql.ProjectionColumn{
 			{Name: "tconst", SQLType: "VARCHAR(16)"},
 			{Name: "primary_title", SQLType: "VARCHAR(255)"},

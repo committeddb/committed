@@ -27,7 +27,7 @@ func TestValidateMappings_RejectsInvalidJSONPath(t *testing.T) {
 func TestValidateProjectionJSONPaths(t *testing.T) {
 	valid := &ProjectionConfig{Sources: []ProjectionSource{{
 		Topic:   "e",
-		KeyPath: "$.id",
+		KeyPath: []string{"$.id"},
 		When:    []WhenClause{{Path: "$.type"}},
 		Rules: []ProjectionRule{{
 			When: []WhenClause{{Path: "$.sub"}},
@@ -40,7 +40,7 @@ func TestValidateProjectionJSONPaths(t *testing.T) {
 		name string
 		src  ProjectionSource
 	}{
-		{"keyPath", ProjectionSource{Topic: "e", KeyPath: "$.[bad"}},
+		{"keyPath", ProjectionSource{Topic: "e", KeyPath: []string{"$.[bad"}}},
 		{"source when", ProjectionSource{Topic: "e", When: []WhenClause{{Path: "$.[bad"}}}},
 		{"rule when", ProjectionSource{Topic: "e", Rules: []ProjectionRule{{When: []WhenClause{{Path: "$.[bad"}}}}}},
 		{"set from", ProjectionSource{Topic: "e", Rules: []ProjectionRule{{Set: []ProjectionSet{{Column: "v", From: "$.[bad"}}}}}},
@@ -71,7 +71,7 @@ func TestValidateProjectionConfig_WiresJSONPathCheck(t *testing.T) {
 	c := &ProjectionConfig{
 		Topic:      "e",
 		Table:      "t",
-		PrimaryKey: "id",
+		PrimaryKey: []string{"id"},
 		Columns:    []ProjectionColumn{{Name: "id", SQLType: "VARCHAR(64)"}, {Name: "v", SQLType: "VARCHAR(64)"}},
 		Rules: []ProjectionRule{{
 			When: []WhenClause{{Path: "$.[bad", Equals: "x"}},

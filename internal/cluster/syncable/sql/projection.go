@@ -51,8 +51,11 @@ type Projection struct {
 // projectionSource is the prepared runtime of one ProjectionSource. Exactly one
 // of rules (scalar fold), agg (collection fold), or lkp (dimension) is set.
 type projectionSource struct {
-	topic    string
-	keyPath  string
+	topic string
+	// keyPaths locate the key value(s) in the payload, positionally aligned
+	// with the projection's PrimaryKey columns (one path for a single key,
+	// several for a composite).
+	keyPaths []string
 	onDelete string
 	// when is the source-level filter (empty = consume every event of the
 	// topic), evaluated on upsert before the rules/aggregate apply.
@@ -297,7 +300,7 @@ func (p *Projection) Init() error {
 	var lookupSources []*projectionSource
 	enrichRefs := map[string][]enrichRef{}
 	for si, src := range p.config.Sources {
-		ps := &projectionSource{topic: src.Topic, keyPath: src.KeyPath, onDelete: src.OnDelete, when: src.When}
+		ps := &projectionSource{topic: src.Topic, keyPaths: src.KeyPath, onDelete: src.OnDelete, when: src.When}
 		// Register ps NOW, before preparing its statements, so a partway failure
 		// leaves the statements it did prepare reachable from p.sources for the
 		// error-cleanup defer's Close (a failed nested init self-cleans separately).
@@ -721,10 +724,15 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 	// Key resolution is deliberately lazy — after matching — so an
 	// unmatched foreign event missing the keyPath is a non-event, not
 	// a dead letter. A matched event without a key is a permanent
-	// misconfiguration.
-	key, err := jsonpath.Get(src.keyPath, jsonData)
-	if err != nil {
-		return cluster.Permanent(fmt.Errorf("[sql-projection.apply] keyPath [%s]: %w", src.keyPath, err))
+	// misconfiguration. One value per primaryKey column, positionally
+	// aligned, each coerced to its own column's declared type.
+	keys := make([]any, len(src.keyPaths))
+	for i, kp := range src.keyPaths {
+		v, err := jsonpath.Get(kp, jsonData)
+		if err != nil {
+			return cluster.Permanent(fmt.Errorf("[sql-projection.apply] keyPath [%s]: %w", kp, err))
+		}
+		keys[i] = coerceForColumn(v, p.columnType(p.config.PrimaryKey[i]))
 	}
 
 	for _, r := range matched {
@@ -756,8 +764,8 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 		// this join and the dimension fan-out compare in, so the rendering
 		// comes from the TYPED value, never the raw payload text (which could
 		// spell one value several ways).
-		values := make([]any, 0, len(r.rule.Set)+1)
-		values = append(values, coerceForColumn(key, p.columnType(p.config.PrimaryKey)))
+		values := make([]any, 0, len(r.rule.Set)+len(keys))
+		values = append(values, keys...)
 		for _, s := range r.rule.Set {
 			if s.IsEnrichment() {
 				values = append(values, canonicalKeyString(plain[s.On]))
@@ -775,8 +783,18 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 
 // applyDelete honors a delete entity per its source's onDelete: ignore drops it;
 // clear NULLs the source's owned columns for the keyed row (the folded row
-// survives); delete-row removes the row entirely. The single bound argument is
-// the entity Key, so the sentinel payload is never unmarshaled.
+// survives); delete-row removes the row entirely. The bound arguments come from
+// the entity Key alone — decoded to one value per primaryKey column for a
+// composite key — so the sentinel payload is never unmarshaled.
+//
+// Key-shape guards (both directions, both loud): a tombstone whose key doesn't
+// decode at this projection's arity — a composite encoding against a single-key
+// projection, or a bare key against a composite one — dead-letters instead of
+// executing a WHERE that matches nothing. The silent no-op is the worst outcome
+// here: deleted source rows would persist in the sink forever and an RTBF
+// erasure would quietly fail downstream. NO message below carries e.Key — it
+// lands in a permanent, Raft-replicated dead-letter record, and for an RTBF
+// delete the key IS the subject being erased.
 func (p *Projection) applyDelete(ctx context.Context, tx *gosql.Tx, src *projectionSource, e *cluster.Entity) error {
 	var stmt *gosql.Stmt
 	var sqlStr string
@@ -789,14 +807,30 @@ func (p *Projection) applyDelete(ctx context.Context, tx *gosql.Tx, src *project
 		stmt, sqlStr = p.delete.Stmt, p.delete.SQL
 	}
 	if stmt == nil {
-		// Do NOT put e.Key in this message — it lands in a permanent, Raft-replicated
-		// dead-letter record, and for an RTBF delete the key is the subject being
-		// erased. The dead-letter's syncable id + raft index identify the row.
 		return cluster.Permanent(fmt.Errorf(
 			"[sql-projection.apply] cannot honor delete: no statement prepared (topic %q)",
 			src.topic))
 	}
-	if _, err := tx.StmtContext(ctx, stmt).ExecContext(ctx, string(e.Key)); err != nil {
+
+	n := len(p.config.PrimaryKey)
+	if n == 1 && cluster.IsCompositeEncoded(string(e.Key)) {
+		return cluster.Permanent(fmt.Errorf(
+			"[sql-projection.apply] delete tombstone carries a composite entity key; this projection keys by the single column %q and cannot address the row (topic %q) — the producer keys this topic by several columns; match the producer's key columns in primaryKey, or set onDelete = \"ignore\" if this fold deliberately collapses the composite identity",
+			p.config.PrimaryKey[0], src.topic))
+	}
+	keyVals, derr := cluster.DecodeCompositeKey(string(e.Key), n)
+	if derr != nil {
+		// DecodeCompositeKey reports parse reason and arity numbers only,
+		// never the key value.
+		return cluster.Permanent(fmt.Errorf(
+			"[sql-projection.apply] delete tombstone key does not decode for this projection's %d-column primaryKey (topic %q) — producer and projection key shapes disagree: %w",
+			n, src.topic, derr))
+	}
+	args := make([]any, len(keyVals))
+	for i, v := range keyVals {
+		args[i] = v
+	}
+	if _, err := tx.StmtContext(ctx, stmt).ExecContext(ctx, args...); err != nil {
 		return execFailure(fmt.Sprintf("[sql-projection.apply] exec [%s]", sqlStr), err, p.dialect.IsPermanent(err))
 	}
 	return nil
@@ -811,9 +845,17 @@ func (p *Projection) applyDelete(ctx context.Context, tx *gosql.Tx, src *project
 func (p *Projection) applyAggregate(ctx context.Context, tx *gosql.Tx, src *projectionSource, jsonData any, e *cluster.Entity) error {
 	ag := src.agg
 
-	parentKey, err := jsonpath.Get(src.keyPath, jsonData)
+	// Aggregates are single-key by validation (composite primaryKey +
+	// aggregate sources is rejected at parse) — one parent-key path. The
+	// len guard keeps a directly-constructed config that skipped both
+	// validation and the applyDefaults fill on the old error path (a
+	// Permanent misconfiguration) instead of an index panic.
+	if len(src.keyPaths) == 0 {
+		return cluster.Permanent(fmt.Errorf("[sql-projection.aggregate] no keyPath configured (topic %q)", src.topic))
+	}
+	parentKey, err := jsonpath.Get(src.keyPaths[0], jsonData)
 	if err != nil {
-		return cluster.Permanent(fmt.Errorf("[sql-projection.aggregate] keyPath [%s]: %w", src.keyPath, err))
+		return cluster.Permanent(fmt.Errorf("[sql-projection.aggregate] keyPath [%s]: %w", src.keyPaths[0], err))
 	}
 
 	// Capture the child's prior parent before the sidecar upsert overwrites it. A

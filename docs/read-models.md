@@ -33,10 +33,19 @@ If the table you're building is *the thing the application reads*, start
 from `sql-projection` and use mirrors only for the parts a projection
 cannot yet express.
 
-One projection scope line to know before you design: the destination is
-keyed by **one column** — composite-keyed topics pair with the plain
-syncable's composite `primaryKey` instead. Lookups enrich both aggregate
-elements and scalar spine columns (see "Enriching folded data").
+One projection scope line to know before you design: a projection's
+`primaryKey` takes one column or a list (`primaryKey = ["visit_id",
+"workarea_id"]` — a latest-event-wins fold on a composite identity). A
+composite-keyed projection folds via **set rules only**: aggregate
+columns, lookup dimensions, and lookup enrichment keep the single-column
+key model (the config is rejected loudly if you combine them). As with
+the plain syncable, **the list order must match the producing side's key
+order** — delete tombstones carry the composite key encoding and decode
+positionally, and a key-shape mismatch in either direction (composite
+tombstone against a single-key projection, or the reverse) dead-letters
+loudly instead of silently deleting nothing. Lookups enrich both
+aggregate elements and scalar spine columns (see "Enriching folded
+data").
 
 ## History tables vs. read models
 
@@ -92,8 +101,11 @@ must match the producing ingestable's `primaryKey`**: a delete tombstone
 carries only the encoded key, and its values decode positionally in the
 producer's column order — a mismatched order mis-addresses rows, and nothing
 can detect it mechanically (topics decouple the two configs on purpose).
-Every key column must also appear in the mappings; the parser rejects a
-config where it doesn't.
+A mismatched column COUNT, by contrast, is caught at delete-apply time and
+dead-letters loudly — a composite tombstone hitting a single-key sink (or
+the reverse) would otherwise execute a WHERE that matches nothing and
+silently strand the deleted row. Every key column must also appear in the
+mappings; the parser rejects a config where it doesn't.
 
 ## A single-source projection
 
@@ -107,8 +119,8 @@ mode = "always-current"        # rules target the current type version
 topic      = "controlplane-event"
 db         = "hosted-projection"
 table      = "tenants"
-primaryKey = "tenant_id"
-# keyPath  = "$.tenant_id"     # optional; defaults to $.<primaryKey>
+primaryKey = "tenant_id"       # or a list: ["tenant_id", "region"] — composite folds via set rules only
+# keyPath  = "$.tenant_id"     # optional; defaults to one $.<col> per primaryKey column, in order
 
 [[sql-projection.columns]]
 name = "tenant_id"

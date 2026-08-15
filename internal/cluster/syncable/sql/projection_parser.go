@@ -54,7 +54,7 @@ type rawProjectionRule struct {
 // does.
 type rawProjectionSource struct {
 	Topic     string                  `mapstructure:"topic"`
-	KeyPath   string                  `mapstructure:"keyPath"`
+	KeyPath   any                     `mapstructure:"keyPath"`
 	OnDelete  string                  `mapstructure:"onDelete"`
 	When      any                     `mapstructure:"when"`
 	Rules     []rawProjectionRule     `mapstructure:"rules"`
@@ -142,7 +142,11 @@ func parseProjectionConfigFields(v *cluster.ParsedConfig, storage cluster.Databa
 	config := &ProjectionConfig{
 		DatabaseID: v.GetString("sql-projection.db"),
 		Table:      v.GetString("sql-projection.table"),
-		PrimaryKey: v.GetString("sql-projection.primaryKey"),
+		// Scalar-or-list, like the plain syncable: primaryKey = "id" and
+		// primaryKey = ["tenant_id", "visit_id"] both parse; for a composite
+		// key the list order is the tombstone-decode contract (see
+		// ProjectionConfig.PrimaryKey).
+		PrimaryKey: v.GetStringSlice("sql-projection.primaryKey"),
 		Columns:    columns,
 		Sources:    sources,
 	}
@@ -208,7 +212,7 @@ func parseProjectionSources(v *cluster.ParsedConfig, storage cluster.DatabaseSto
 			}
 			src := ProjectionSource{
 				Topic:    rs.Topic,
-				KeyPath:  rs.KeyPath,
+				KeyPath:  pathOrList(rs.KeyPath),
 				OnDelete: rs.OnDelete,
 				When:     when,
 			}
@@ -243,7 +247,7 @@ func parseProjectionSources(v *cluster.ParsedConfig, storage cluster.DatabaseSto
 
 	// Back-compat single-source: top-level topic/keyPath/rules.
 	topic := v.GetString("sql-projection.topic")
-	keyPath := v.GetString("sql-projection.keyPath")
+	keyPath := pathOrList(v.Get("sql-projection.keyPath"))
 	var rawRules []rawProjectionRule
 	if err := v.UnmarshalKey("sql-projection.rules", &rawRules); err != nil {
 		return nil, fmt.Errorf("parse sql-projection.rules: %w", err)
@@ -253,6 +257,30 @@ func parseProjectionSources(v *cluster.ParsedConfig, storage cluster.DatabaseSto
 		return nil, err
 	}
 	return []ProjectionSource{{Topic: topic, KeyPath: keyPath, Rules: rules}}, nil
+}
+
+// pathOrList coerces a config value that may be a scalar or a list into
+// []string — keyPath = "$.id" and keyPath = ["$.tenant_id", "$.visit_id"]
+// both parse. Unlike GetStringSlice's scalar arm (which whitespace-splits,
+// fine for column names), a scalar stays ONE value: a jsonpath may
+// legitimately contain a space inside a quoted segment.
+func pathOrList(v any) []string {
+	switch x := v.(type) {
+	case string:
+		if x == "" {
+			return nil
+		}
+		return []string{x}
+	case []string:
+		return x
+	case []any:
+		out := make([]string, 0, len(x))
+		for _, e := range x {
+			out = append(out, fmt.Sprintf("%v", e))
+		}
+		return out
+	}
+	return nil
 }
 
 // normalizeRules turns raw TOML rules into ProjectionRules, resolving each

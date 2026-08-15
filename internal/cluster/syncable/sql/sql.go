@@ -330,6 +330,18 @@ func (c *Syncable) applyEntity(ctx context.Context, tx *sql.Tx, e *cluster.Entit
 				"[sql.apply] cannot honor delete: no keyColumn or primaryKey configured (topic %q)",
 				c.config.Topic))
 		}
+		// A composite-encoded tombstone against a single-key sink cannot
+		// address its row: the n==1 decode below passes the ENCODING through
+		// as a bare value, the WHERE matches nothing, and the delete silently
+		// no-ops — deleted source rows persist forever and an RTBF erasure
+		// quietly fails downstream. Dead-letter loudly instead (a legitimate
+		// bare value that happens to be a JSON string-array is a rare,
+		// visible, replayable false positive — see IsCompositeEncoded).
+		if len(c.config.DeleteKeyColumns()) == 1 && cluster.IsCompositeEncoded(string(e.Key)) {
+			return cluster.Permanent(fmt.Errorf(
+				"[sql.apply] delete tombstone carries a composite entity key; this sink keys by the single column %q and cannot address the row (topic %q) — the producer keys this topic by several columns; match the producer with a composite primaryKey, or drop primaryKey for an append-only history table",
+				c.config.DeleteKeyColumns()[0], c.config.Topic))
+		}
 		// Decode the entity Key into per-column values (bare value for a
 		// single key — byte-identical to the old direct bind; JSON-array or
 		// b64 form for a composite, unpacked in the PRODUCER's column order —

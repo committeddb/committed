@@ -590,3 +590,27 @@ func TestSyncableCommitErrorRedacted(t *testing.T) {
 	require.NotContains(t, red.RedactedMessage(), key, "redacted message must not echo the bound key")
 	require.Contains(t, err.Error(), key)
 }
+
+// A composite-encoded tombstone against a single-key sink must dead-letter
+// loudly, not silently no-op: the n==1 decode passes the encoding through as
+// a bare value and the WHERE would match nothing — deleted source rows would
+// persist forever and an RTBF erasure would quietly fail. The message names
+// the shape mismatch and never the key (the key IS the erased subject).
+func TestSyncDeleteCompositeKeyAgainstSingleKeySinkIsLoud(t *testing.T) {
+	dialect, mock, err := testdialects.NewSQLMockDialect()
+	require.Nil(t, err)
+	db, err := sql.NewDB(dialect, "")
+	require.Nil(t, err)
+	defer db.Close()
+	syncable, _, _ := newSimpleSyncable(t, mock, dialect, db)
+
+	mock.ExpectBegin()
+	mock.ExpectRollback()
+	_, err = syncable.Sync(context.Background(), &cluster.Actual{Entities: []*cluster.Entity{
+		cluster.NewDeleteEntity(simpleType, []byte(`["k1","k2"]`)),
+	}})
+	require.True(t, errors.Is(err, cluster.ErrPermanent), "got: %v", err)
+	require.ErrorContains(t, err, "composite entity key")
+	require.NotContains(t, err.Error(), "k1", "the key value must never appear in the message")
+	require.Nil(t, mock.ExpectationsWereMet(), "the mismatched delete must not execute")
+}

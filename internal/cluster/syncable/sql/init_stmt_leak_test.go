@@ -56,12 +56,14 @@ func TestSyncableInit_ClosesPreparedStmtsOnFailure(t *testing.T) {
 // (PK column plus the rule's Set columns), so the test can register the matching
 // sqlmock prepare expectation.
 func ruleSQL(dialect sql.Dialect, cfg *sql.ProjectionConfig, r sql.ProjectionRule) string {
-	mappings := make([]sql.Mapping, 0, len(r.Set)+1)
-	mappings = append(mappings, sql.Mapping{Column: cfg.PrimaryKey})
+	mappings := make([]sql.Mapping, 0, len(r.Set)+len(cfg.PrimaryKey))
+	for _, pk := range cfg.PrimaryKey {
+		mappings = append(mappings, sql.Mapping{Column: pk})
+	}
 	for _, s := range r.Set {
 		mappings = append(mappings, sql.Mapping{Column: s.Column})
 	}
-	return dialect.CreateSQL(&sql.Config{Table: cfg.Table, Mappings: mappings, PrimaryKey: []string{cfg.PrimaryKey}})
+	return dialect.CreateSQL(&sql.Config{Table: cfg.Table, Mappings: mappings, PrimaryKey: cfg.PrimaryKey})
 }
 
 // TestProjectionInit_ClosesPreparedStmtsOnFailure is the projection twin of the
@@ -85,7 +87,7 @@ func TestProjectionInit_ClosesPreparedStmtsOnFailure(t *testing.T) {
 	for _, c := range cfg.Columns {
 		ddlMappings = append(ddlMappings, sql.Mapping{Column: c.Name, SQLType: c.SQLType})
 	}
-	mock.ExpectExec(dialect.CreateDDL(&sql.Config{Table: cfg.Table, Mappings: ddlMappings, PrimaryKey: []string{cfg.PrimaryKey}})).
+	mock.ExpectExec(dialect.CreateDDL(&sql.Config{Table: cfg.Table, Mappings: ddlMappings, PrimaryKey: cfg.PrimaryKey})).
 		WillReturnResult(driver.ResultNoRows)
 	// Rule 0 prepares successfully — and MUST be closed when rule 1 fails.
 	mock.ExpectPrepare(ruleSQL(dialect, cfg, cfg.Rules[0])).WillBeClosed()

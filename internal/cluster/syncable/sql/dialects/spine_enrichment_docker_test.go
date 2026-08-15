@@ -26,7 +26,7 @@ import (
 func spineEnrichmentFlow(t *testing.T, db *sql.DB, d sql.Dialect, table string, ph func(i int) string) {
 	config := &sql.ProjectionConfig{
 		Table:      table,
-		PrimaryKey: "job_id",
+		PrimaryKey: []string{"job_id"},
 		Columns: []sql.ProjectionColumn{
 			{Name: "job_id", SQLType: "VARCHAR(32)"},
 			{Name: "tenant_id", SQLType: "INT"},
@@ -35,7 +35,7 @@ func spineEnrichmentFlow(t *testing.T, db *sql.DB, d sql.Dialect, table string, 
 		Sources: []sql.ProjectionSource{
 			{
 				Topic:    "job",
-				KeyPath:  "$.id",
+				KeyPath:  []string{"$.id"},
 				OnDelete: "delete-row",
 				Rules: []sql.ProjectionRule{{
 					When: []sql.WhenClause{{Path: "$.kind", Equals: "job"}},
