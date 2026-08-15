@@ -1276,6 +1276,9 @@ func (db *DB) SyncableProgress(id string) (checkpoint, head uint64, err error) {
 // unconditionally as ownerNode and uses it to route the opt-in readPosition
 // proxy to the owner.
 func (db *DB) SyncableOwner(id string) uint64 {
+	if zone, active, owner := db.syncableZonePin(id); zone != "" && active {
+		return owner // 0 = strict pin unsatisfiable: nobody serves
+	}
 	if n := db.storage.Node(id); n != 0 {
 		return n
 	}

@@ -34,6 +34,8 @@ type Option func(*options)
 
 type options struct {
 	tickInterval time.Duration
+	// zone mirrors WithZone; see the option doc.
+	zone string
 	// announceVersion enables the startup feature-level self-announce
 	// (db.announceVersion), which proposes this node's version.FeatureLevel so
 	// the version-skew gate can compute the cluster-agreed minimum. Production
@@ -268,6 +270,15 @@ func WithTickInterval(d time.Duration) Option {
 // level 0, which only holds emission — never crashes or diverges.
 func WithVersionAnnounce() Option {
 	return func(o *options) { o.announceVersion = true }
+}
+
+// WithZone sets this node's placement identity (COMMITTED_ZONE) — the zone
+// that zone-pinned syncables resolve their owner against. Announced into the
+// replicated memberZones map at startup (under the WithVersionAnnounce
+// gate). Empty = unpinned node; announced only to clear a previously-stored
+// identity.
+func WithZone(zone string) Option {
+	return func(o *options) { o.zone = zone }
 }
 
 // WithJoin marks this node as joining an existing cluster. A joining node

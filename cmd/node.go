@@ -251,6 +251,15 @@ image can be templated per-node by an orchestrator:
 		// only unit tests (which assert exact entry counts) leave it off.
 		dbOpts = append(dbOpts, db.WithVersionAnnounce())
 
+		// COMMITTED_ZONE names this node's zone (vendor-neutral — an AZ, a
+		// rack, a site). Announced into the cluster at startup; a syncable
+		// config carrying `zone = "..."` is then served by a node in that
+		// zone instead of the leader, so same-zone sync egress never pays a
+		// redundant cross-zone crossing. Unset = unpinned node.
+		if zone := os.Getenv("COMMITTED_ZONE"); zone != "" {
+			dbOpts = append(dbOpts, db.WithZone(zone))
+		}
+
 		// Wire the global zap logger into db so internal supervisor /
 		// raft / leader-transition logs are visible. Without this, the
 		// DB defaults to zap.NewNop and operators have no visibility

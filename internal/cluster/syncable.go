@@ -78,6 +78,24 @@ func RedactedMessage(err error) (string, bool) {
 // from a healthy replica. See docs/operations/rebuild.md.
 var ErrCorruptEntry = errors.New("wal: entry checksum mismatch (data corruption); see docs/operations/rebuild.md")
 
+// ErrNotSyncableOwner is returned by RebuildSyncable / RematerializeSyncable
+// when this node does not serve the zone-pinned syncable: the verbs' worker
+// drain must run WHERE THE WORKER RUNS (the drain-before-reset ordering that
+// prevents a stale checkpoint bump from defeating the replay only holds when
+// the drain and the reset proposal originate on the worker's node). The HTTP
+// layer routes the request to the owner, so a caller normally never sees
+// this; it is the defense-in-depth guard for a stale routing view, mapped to
+// 503 (retry — the hop resolves on the next attempt).
+var ErrNotSyncableOwner = errors.New(
+	"cluster: this node does not serve the zone-pinned syncable; the request must run on the pinned owner")
+
+// ErrZonePinUnsatisfiable is returned by owner-local verbs on a pinned
+// syncable whose zone currently has no serving node: with no worker anywhere
+// there is nothing to drain or replay against. Restore a node in the zone
+// (or re-POST the config without `zone`) and retry. Mapped to 503.
+var ErrZonePinUnsatisfiable = errors.New(
+	"cluster: the zone pin has no serving node; restore a node in the pinned zone (or re-POST without `zone`) and retry")
+
 // ErrSyncNotStuck is returned by Cluster.DeadLetterStuckSyncable when the
 // syncable is not currently blocked retrying a transient error on this node
 // — it is healthy, its id is unknown, or the request reached a node other

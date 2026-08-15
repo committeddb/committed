@@ -632,6 +632,19 @@ paths:
         an infinite consensus loop) and a second producer for a derived
         topic (400, interleaved refresh-epoch spaces) are refused.
 
+        `syncable.zone` (optional) pins the syncable to a node in that zone
+        (nodes announce theirs via `COMMITTED_ZONE`), so sync egress to a
+        same-zone sink never pays a redundant cross-zone crossing. STRICT
+        pin: if no current member announces the zone, the syncable stalls
+        loudly (status `pinUnsatisfiable`) and never silently falls back to
+        the leader; it catches up completely when a node in the zone
+        returns. Admission refuses a zone no current member announces (400)
+        and refuses any pin until the whole cluster is upgraded to resolve
+        zones (503 `cluster_below_feature_level`). The rebuild and
+        rematerialize verbs route to the serving node automatically (one
+        bounded hop via each node's announced COMMITTED_API_URL); while a
+        pin is unsatisfiable they answer 503 `pin_unsatisfiable`.
+
         `syncable.mode` declares the consumer stance: `as-stored` (default —
         exact written bytes; version handling is the consumer's, whether
         pinned to one version or version-aware) or `always-current` (entities
@@ -2610,6 +2623,19 @@ components:
             The data head the in-progress re-materialization must reach before
             its completion sweep runs — compare `checkpointIndex` against it
             for progress. Omitted when no re-materialization is running.
+        pinnedZone:
+          type: string
+          description: |
+            The zone this syncable is pinned to (`syncable.zone`). Omitted
+            for unpinned syncables. `ownerNode` shows the serving node.
+        pinUnsatisfiable:
+          type: boolean
+          description: |
+            True when NO current member announces the pinned zone: the
+            strict pin stalls loudly (zero writes from any node — never a
+            silent leader fallback) until a node in the zone returns, then
+            catches up completely from the replicated checkpoint. Omitted
+            for unpinned syncables.
         derivedFrom:
           type: string
           description: |

@@ -37,6 +37,55 @@ const forwardedHeader = "X-Committed-Forwarded"
 // carries the loop-guard marker; or the leader can't be reached before the
 // deadline. The caller can retry, or use leaderId to target the leader
 // directly. See raft-leader-read-proxy.md.
+// syncableOwnerRoute routes an owner-local syncable verb (rebuild,
+// rematerialize) to the node whose worker serves the syncable. For an
+// unpinned syncable that is the leader — leaderRead exactly, byte-identical
+// to pre-zone behavior. For a zone-pinned syncable it is the pinned owner:
+// the verbs' worker drain must run WHERE THE WORKER RUNS (the
+// drain-before-reset ordering that keeps a stale checkpoint bump from
+// defeating the replay only holds when the drain and the reset proposal
+// originate on the worker's node — per-peer FIFO transport then preserves
+// their order through proposal forwarding). One bounded hop with the
+// standard loop guard; an unsatisfiable pin is refused up front (there is
+// no worker anywhere to drain or replay).
+func (h *HTTP) syncableOwnerRoute(next httpgo.HandlerFunc) httpgo.HandlerFunc {
+	return func(w httpgo.ResponseWriter, r *httpgo.Request) {
+		id := r.PathValue("id")
+		zone, unsatisfiable, pinned := h.c.SyncableZonePin(id)
+		if !pinned {
+			h.leaderRead(next)(w, r)
+			return
+		}
+		if unsatisfiable {
+			writeError(w, httpgo.StatusServiceUnavailable, "pin_unsatisfiable",
+				"the pin to zone \""+zone+"\" has no serving node; restore a node in the zone (or re-POST the config without `zone`) and retry")
+			return
+		}
+		owner := h.c.SyncableOwner(id)
+		if owner == h.c.ID() {
+			next(w, r)
+			return
+		}
+		if r.Header.Get(forwardedHeader) != "" {
+			// Already forwarded once and we're still not the owner: a stale
+			// routing view mid-ownership-change. Retryable, never a loop.
+			writeError(w, httpgo.StatusServiceUnavailable, "not_syncable_owner",
+				"ownership moved while routing; retry")
+			return
+		}
+		if ownerURL, ok := h.c.MemberAPIURL(owner); ok && ownerURL != "" {
+			if err := h.proxyToMember(w, r, ownerURL); err == nil {
+				return
+			}
+			writeError(w, httpgo.StatusServiceUnavailable, "owner_unreachable",
+				"the pinned owner's API did not answer; check the node and retry")
+			return
+		}
+		writeError(w, httpgo.StatusServiceUnavailable, "owner_unreachable",
+			"the pinned owner has not announced an API URL; set COMMITTED_API_URL on every node")
+	}
+}
+
 func (h *HTTP) leaderRead(next httpgo.HandlerFunc) httpgo.HandlerFunc {
 	return func(w httpgo.ResponseWriter, r *httpgo.Request) {
 		self := h.c.ID()

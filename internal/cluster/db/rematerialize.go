@@ -39,6 +39,17 @@ func (db *DB) RematerializeSyncable(ctx context.Context, id string) error {
 	if cfg == nil {
 		return cluster.ErrResourceNotFound
 	}
+	if zone, active, owner := db.syncableZonePin(id); zone != "" && active {
+		switch {
+		case owner == 0:
+			return cluster.ErrZonePinUnsatisfiable
+		case owner != db.ID():
+			// The HTTP layer routes this verb to the owner; landing here means
+			// a stale routing view — refuse rather than race the remote
+			// worker's in-flight checkpoint bump.
+			return cluster.ErrNotSyncableOwner
+		}
+	}
 
 	// 1. Admission probe: build (but never run) the syncable to ask its sink.
 	probe, err := db.buildSyncable(id)

@@ -197,6 +197,10 @@ type DB struct {
 	// (derived from tickInterval at New time). See raft-leader-read-proxy.md.
 	advertisedAPIURL string
 	announceInterval time.Duration
+	// zone is this node's configured placement identity (COMMITTED_ZONE; ""
+	// = unpinned). Announced into the replicated memberZones map at startup
+	// (announceZone) for zone-pinned syncable ownership resolution.
+	zone string
 
 	maxProposalBytes uint64
 
@@ -438,6 +442,7 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		advertisedAPIURL:               cfg.advertisedAPIURL,
 		safeMode:                       cfg.safeMode,
 		announceInterval:               cfg.tickInterval,
+		zone:                           cfg.zone,
 		ingestSupervisorStates:         make(map[string]*ingestSupervisorState),
 		ingestSupervisorInitialBackoff: cfg.ingestSupervisorInitialBackoff,
 		ingestSupervisorMaxBackoff:     cfg.ingestSupervisorMaxBackoff,
@@ -504,6 +509,10 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 	go db.announceAPIURL()
 	if cfg.announceVersion {
 		go db.announceVersion()
+		// The zone announce rides the same gate: it proposes only when the
+		// configured zone differs from the stored one, so zoneless fixtures
+		// and steady-state restarts stay proposal-free.
+		go db.announceZone()
 	}
 
 	// Start the disk-usage watcher last, once db.raft is wired, so its

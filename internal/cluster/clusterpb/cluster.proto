@@ -501,3 +501,16 @@ message LogNodeVersion {
     uint64 nodeID = 1;
     uint64 featureLevel = 2;
 }
+
+// LogNodeZone is a node's self-announcement of its zone (COMMITTED_ZONE) —
+// the placement identity zone-pinned syncables resolve their owner against.
+// Vendor-neutral "zone", never "az". Upsert keyed by node id (last writer
+// wins: a moved node re-announces; an empty zone clears the pin identity).
+// The apply path stores it in the memberZones bucket; ownership resolution
+// intersects it with CURRENT membership and is feature-gated so a mixed-
+// version cluster resolves leader-owns everywhere. See node_zone.go and
+// db/zone.go.
+message LogNodeZone {
+    uint64 nodeID = 1;
+    string zone = 2;
+}

@@ -21,6 +21,10 @@ type Parser interface {
 	// config alone, so the propose path and the apply-time build guard can
 	// walk the derivation graph. Returns nil for every non-deriving kind.
 	SyncableDerivedTopics(mimeType string, data []byte) ([]string, error)
+	// SyncableZone reports the syncable config's pinned zone ([syncable]
+	// envelope `zone` key; "" = unpinned), read from the config alone, so
+	// ownership resolution and admission run no build.
+	SyncableZone(mimeType string, data []byte) (string, error)
 	// SyncableMode reports the syncable config's consumer stance
 	// (as-stored / always-current), read from the config alone — no Init, no
 	// destination pool — so admission checks can classify every stored

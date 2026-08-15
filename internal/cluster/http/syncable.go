@@ -223,6 +223,16 @@ func (h *HTTP) RebuildSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
 			writeError(w, httpgo.StatusNotFound, "not_found", "syncable not found")
 			return
 		}
+		if errors.Is(err, cluster.ErrZonePinUnsatisfiable) {
+			writeError(w, httpgo.StatusServiceUnavailable, "pin_unsatisfiable", err.Error())
+			return
+		}
+		if errors.Is(err, cluster.ErrNotSyncableOwner) {
+			// Stale routing view (ownership just moved): retryable, the next
+			// attempt's hop lands on the current owner.
+			writeError(w, httpgo.StatusServiceUnavailable, "not_syncable_owner", err.Error())
+			return
+		}
 		// A wedged worker aborts the rebuild before anything changed — a
 		// retryable condition (wait out the destination, or re-POST the config
 		// to replace the worker), so 503 rather than a generic failure.
@@ -280,6 +290,16 @@ func (h *HTTP) RematerializeSyncable(w httpgo.ResponseWriter, r *httpgo.Request)
 			// 409: the config is fine, but this sink shape cannot converge a
 			// replay in place — the message names the alternatives.
 			writeError(w, httpgo.StatusConflict, "not_rematerializable", err.Error())
+			return
+		}
+		if errors.Is(err, cluster.ErrZonePinUnsatisfiable) {
+			writeError(w, httpgo.StatusServiceUnavailable, "pin_unsatisfiable", err.Error())
+			return
+		}
+		if errors.Is(err, cluster.ErrNotSyncableOwner) {
+			// Stale routing view (ownership just moved): retryable, the next
+			// attempt's hop lands on the current owner.
+			writeError(w, httpgo.StatusServiceUnavailable, "not_syncable_owner", err.Error())
 			return
 		}
 		if errors.Is(err, cluster.ErrWorkerWedged) {
@@ -355,6 +375,15 @@ type SyncableStatusResponse struct {
 	// against it). Omitted when no re-materialization is running.
 	Rematerializing         bool   `json:"rematerializing,omitempty"`
 	RematerializeTargetHead uint64 `json:"rematerializeTargetHead,omitempty"`
+
+	// PinnedZone is the zone this syncable is pinned to (`zone` in its
+	// config); omitted for unpinned syncables. PinUnsatisfiable is true when
+	// NO current member announces that zone — the strict pin's loud stall:
+	// nobody serves the syncable (never a silent leader fallback), and it
+	// catches up completely when a node in the zone returns. ownerNode shows
+	// who serves it (0 while unsatisfiable).
+	PinnedZone       string `json:"pinnedZone,omitempty"`
+	PinUnsatisfiable bool   `json:"pinUnsatisfiable,omitempty"`
 
 	// DerivedFrom / DerivesInto are the derivation provenance of a loopback
 	// syncable: the topic it consumes and the derived topic it produces.
@@ -553,6 +582,11 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 	if source, target, ok := h.c.SyncableDerivation(id); ok {
 		resp.DerivedFrom = source
 		resp.DerivesInto = target
+	}
+
+	if zone, unsatisfiable, ok := h.c.SyncableZonePin(id); ok {
+		resp.PinnedZone = zone
+		resp.PinUnsatisfiable = unsatisfiable
 	}
 
 	resp.OwnerNode = owner

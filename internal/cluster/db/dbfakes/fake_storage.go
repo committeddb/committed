@@ -193,6 +193,17 @@ type FakeStorage struct {
 	deleteMemberVersionReturnsOnCall map[int]struct {
 		result1 error
 	}
+	DeleteMemberZoneStub        func(uint64) error
+	deleteMemberZoneMutex       sync.RWMutex
+	deleteMemberZoneArgsForCall []struct {
+		arg1 uint64
+	}
+	deleteMemberZoneReturns struct {
+		result1 error
+	}
+	deleteMemberZoneReturnsOnCall map[int]struct {
+		result1 error
+	}
 	EntriesStub        func(uint64, uint64, uint64) ([]*raftpb.Entry, error)
 	entriesMutex       sync.RWMutex
 	entriesArgsForCall []struct {
@@ -468,6 +479,29 @@ type FakeStorage struct {
 	}
 	memberVersionsReturnsOnCall map[int]struct {
 		result1 map[uint64]uint64
+	}
+	MemberZoneStub        func(uint64) (string, bool)
+	memberZoneMutex       sync.RWMutex
+	memberZoneArgsForCall []struct {
+		arg1 uint64
+	}
+	memberZoneReturns struct {
+		result1 string
+		result2 bool
+	}
+	memberZoneReturnsOnCall map[int]struct {
+		result1 string
+		result2 bool
+	}
+	MemberZonesStub        func() map[uint64]string
+	memberZonesMutex       sync.RWMutex
+	memberZonesArgsForCall []struct {
+	}
+	memberZonesReturns struct {
+		result1 map[uint64]string
+	}
+	memberZonesReturnsOnCall map[int]struct {
+		result1 map[uint64]string
 	}
 	NodeStub        func(string) uint64
 	nodeMutex       sync.RWMutex
@@ -1764,6 +1798,67 @@ func (fake *FakeStorage) DeleteMemberVersionReturnsOnCall(i int, result1 error) 
 		})
 	}
 	fake.deleteMemberVersionReturnsOnCall[i] = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *FakeStorage) DeleteMemberZone(arg1 uint64) error {
+	fake.deleteMemberZoneMutex.Lock()
+	ret, specificReturn := fake.deleteMemberZoneReturnsOnCall[len(fake.deleteMemberZoneArgsForCall)]
+	fake.deleteMemberZoneArgsForCall = append(fake.deleteMemberZoneArgsForCall, struct {
+		arg1 uint64
+	}{arg1})
+	stub := fake.DeleteMemberZoneStub
+	fakeReturns := fake.deleteMemberZoneReturns
+	fake.recordInvocation("DeleteMemberZone", []interface{}{arg1})
+	fake.deleteMemberZoneMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeStorage) DeleteMemberZoneCallCount() int {
+	fake.deleteMemberZoneMutex.RLock()
+	defer fake.deleteMemberZoneMutex.RUnlock()
+	return len(fake.deleteMemberZoneArgsForCall)
+}
+
+func (fake *FakeStorage) DeleteMemberZoneCalls(stub func(uint64) error) {
+	fake.deleteMemberZoneMutex.Lock()
+	defer fake.deleteMemberZoneMutex.Unlock()
+	fake.DeleteMemberZoneStub = stub
+}
+
+func (fake *FakeStorage) DeleteMemberZoneArgsForCall(i int) uint64 {
+	fake.deleteMemberZoneMutex.RLock()
+	defer fake.deleteMemberZoneMutex.RUnlock()
+	argsForCall := fake.deleteMemberZoneArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeStorage) DeleteMemberZoneReturns(result1 error) {
+	fake.deleteMemberZoneMutex.Lock()
+	defer fake.deleteMemberZoneMutex.Unlock()
+	fake.DeleteMemberZoneStub = nil
+	fake.deleteMemberZoneReturns = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *FakeStorage) DeleteMemberZoneReturnsOnCall(i int, result1 error) {
+	fake.deleteMemberZoneMutex.Lock()
+	defer fake.deleteMemberZoneMutex.Unlock()
+	fake.DeleteMemberZoneStub = nil
+	if fake.deleteMemberZoneReturnsOnCall == nil {
+		fake.deleteMemberZoneReturnsOnCall = make(map[int]struct {
+			result1 error
+		})
+	}
+	fake.deleteMemberZoneReturnsOnCall[i] = struct {
 		result1 error
 	}{result1}
 }
@@ -3096,6 +3191,123 @@ func (fake *FakeStorage) MemberVersionsReturnsOnCall(i int, result1 map[uint64]u
 	}
 	fake.memberVersionsReturnsOnCall[i] = struct {
 		result1 map[uint64]uint64
+	}{result1}
+}
+
+func (fake *FakeStorage) MemberZone(arg1 uint64) (string, bool) {
+	fake.memberZoneMutex.Lock()
+	ret, specificReturn := fake.memberZoneReturnsOnCall[len(fake.memberZoneArgsForCall)]
+	fake.memberZoneArgsForCall = append(fake.memberZoneArgsForCall, struct {
+		arg1 uint64
+	}{arg1})
+	stub := fake.MemberZoneStub
+	fakeReturns := fake.memberZoneReturns
+	fake.recordInvocation("MemberZone", []interface{}{arg1})
+	fake.memberZoneMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeStorage) MemberZoneCallCount() int {
+	fake.memberZoneMutex.RLock()
+	defer fake.memberZoneMutex.RUnlock()
+	return len(fake.memberZoneArgsForCall)
+}
+
+func (fake *FakeStorage) MemberZoneCalls(stub func(uint64) (string, bool)) {
+	fake.memberZoneMutex.Lock()
+	defer fake.memberZoneMutex.Unlock()
+	fake.MemberZoneStub = stub
+}
+
+func (fake *FakeStorage) MemberZoneArgsForCall(i int) uint64 {
+	fake.memberZoneMutex.RLock()
+	defer fake.memberZoneMutex.RUnlock()
+	argsForCall := fake.memberZoneArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeStorage) MemberZoneReturns(result1 string, result2 bool) {
+	fake.memberZoneMutex.Lock()
+	defer fake.memberZoneMutex.Unlock()
+	fake.MemberZoneStub = nil
+	fake.memberZoneReturns = struct {
+		result1 string
+		result2 bool
+	}{result1, result2}
+}
+
+func (fake *FakeStorage) MemberZoneReturnsOnCall(i int, result1 string, result2 bool) {
+	fake.memberZoneMutex.Lock()
+	defer fake.memberZoneMutex.Unlock()
+	fake.MemberZoneStub = nil
+	if fake.memberZoneReturnsOnCall == nil {
+		fake.memberZoneReturnsOnCall = make(map[int]struct {
+			result1 string
+			result2 bool
+		})
+	}
+	fake.memberZoneReturnsOnCall[i] = struct {
+		result1 string
+		result2 bool
+	}{result1, result2}
+}
+
+func (fake *FakeStorage) MemberZones() map[uint64]string {
+	fake.memberZonesMutex.Lock()
+	ret, specificReturn := fake.memberZonesReturnsOnCall[len(fake.memberZonesArgsForCall)]
+	fake.memberZonesArgsForCall = append(fake.memberZonesArgsForCall, struct {
+	}{})
+	stub := fake.MemberZonesStub
+	fakeReturns := fake.memberZonesReturns
+	fake.recordInvocation("MemberZones", []interface{}{})
+	fake.memberZonesMutex.Unlock()
+	if stub != nil {
+		return stub()
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeStorage) MemberZonesCallCount() int {
+	fake.memberZonesMutex.RLock()
+	defer fake.memberZonesMutex.RUnlock()
+	return len(fake.memberZonesArgsForCall)
+}
+
+func (fake *FakeStorage) MemberZonesCalls(stub func() map[uint64]string) {
+	fake.memberZonesMutex.Lock()
+	defer fake.memberZonesMutex.Unlock()
+	fake.MemberZonesStub = stub
+}
+
+func (fake *FakeStorage) MemberZonesReturns(result1 map[uint64]string) {
+	fake.memberZonesMutex.Lock()
+	defer fake.memberZonesMutex.Unlock()
+	fake.MemberZonesStub = nil
+	fake.memberZonesReturns = struct {
+		result1 map[uint64]string
+	}{result1}
+}
+
+func (fake *FakeStorage) MemberZonesReturnsOnCall(i int, result1 map[uint64]string) {
+	fake.memberZonesMutex.Lock()
+	defer fake.memberZonesMutex.Unlock()
+	fake.MemberZonesStub = nil
+	if fake.memberZonesReturnsOnCall == nil {
+		fake.memberZonesReturnsOnCall = make(map[int]struct {
+			result1 map[uint64]string
+		})
+	}
+	fake.memberZonesReturnsOnCall[i] = struct {
+		result1 map[uint64]string
 	}{result1}
 }
 

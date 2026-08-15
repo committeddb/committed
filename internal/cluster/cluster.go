@@ -64,6 +64,11 @@ type Cluster interface {
 	// re-materialization (nil, false when none) — the status endpoint's
 	// progress source.
 	SyncableRematerialization(id string) (*SyncableRematerialization, bool)
+	// SyncableZonePin reports a stored syncable's zone pin: its configured
+	// zone (ok=false for unpinned) and whether the pin is currently
+	// unsatisfiable (no current member announces the zone — the strict
+	// stall). Part of GET /syncable/{id}/status.
+	SyncableZonePin(id string) (zone string, unsatisfiable bool, ok bool)
 	// SyncableDerivation reports a stored syncable's derivation provenance —
 	// the topic it consumes and the derived topic it produces. ok is false
 	// for every non-deriving kind; the status surface omits the fields then.

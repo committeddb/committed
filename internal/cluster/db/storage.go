@@ -230,6 +230,15 @@ type Storage interface {
 	MemberVersion(id uint64) (uint64, bool)
 	MemberVersions() map[uint64]uint64
 	DeleteMemberVersion(id uint64) error
+	// MemberZone / MemberZones / DeleteMemberZone persist each member's
+	// self-announced zone (COMMITTED_ZONE; entity-driven, applied via
+	// handleNodeZone). MemberZones feeds zone-pinned syncable ownership
+	// resolution — intersected with current membership and feature-gated so a
+	// mixed-version cluster resolves leader-owns everywhere. See node_zone.go
+	// and db/zone.go.
+	MemberZone(id uint64) (string, bool)
+	MemberZones() map[uint64]string
+	DeleteMemberZone(id uint64) error
 }
 
 // lostNotifierSetter is the optional Storage extension that accepts the

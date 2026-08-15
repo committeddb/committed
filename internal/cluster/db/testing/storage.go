@@ -355,7 +355,13 @@ func (StorageStubs) DeleteMemberPeerURL(id uint64) error             { return ni
 
 func (StorageStubs) MemberVersion(id uint64) (uint64, bool) { return 0, false }
 func (StorageStubs) MemberVersions() map[uint64]uint64      { return nil }
-func (StorageStubs) DeleteMemberVersion(id uint64) error    { return nil }
+
+// MemberZone stubs: no zones announced in unit fixtures — every syncable
+// resolves leader-owns, matching pre-zone behavior.
+func (StorageStubs) MemberZone(uint64) (string, bool)    { return "", false }
+func (StorageStubs) MemberZones() map[uint64]string      { return nil }
+func (StorageStubs) DeleteMemberZone(uint64) error       { return nil }
+func (StorageStubs) DeleteMemberVersion(id uint64) error { return nil }
 
 // TODO Pull this reader out and make it concrete instead of an interface
 type Reader struct {

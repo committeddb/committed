@@ -163,6 +163,15 @@ func (db *DB) ProposeSyncable(ctx context.Context, c *cluster.Configuration) err
 		return err
 	}
 
+	// Zone-pin admission: a `zone` config is only admitted when every member
+	// can resolve zones (else it would sit leader-served with its pin
+	// silently ignored — the admission-validation rule) and the zone has an
+	// announced current member (a pin that matches nobody stalls at first
+	// use; refuse it loudly here instead).
+	if err := db.refuseUnservableZonePin(c); err != nil {
+		return err
+	}
+
 	// Guard: a re-POST some destinations can't absorb in place (e.g. a SQL
 	// projection whose CREATE-only DDL never ALTERs the table) is rejected and
 	// steered to the rebuild verb, rather than silently no-op'd. The comparison
@@ -245,6 +254,17 @@ func (db *DB) RebuildSyncable(ctx context.Context, id string) error {
 	cfg := db.currentSyncableConfig(id)
 	if cfg == nil {
 		return cluster.ErrResourceNotFound
+	}
+	if zone, active, owner := db.syncableZonePin(id); zone != "" && active {
+		switch {
+		case owner == 0:
+			return cluster.ErrZonePinUnsatisfiable
+		case owner != db.ID():
+			// The HTTP layer routes this verb to the owner; landing here means
+			// a stale routing view — refuse rather than race the remote
+			// worker's in-flight checkpoint bump.
+			return cluster.ErrNotSyncableOwner
+		}
 	}
 
 	// 1. Stop the local worker first so it can't bump the checkpoint after the

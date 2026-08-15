@@ -72,6 +72,18 @@ func (p *Parser) SyncableMode(mimeType string, data []byte) (cluster.SyncableMod
 	return cluster.ParseSyncableMode(v.GetString("syncable.mode"))
 }
 
+// SyncableZone reports the syncable config's pinned zone (the [syncable]
+// envelope's `zone` key), read from the config alone — no Init, no build.
+// "" means unpinned (today's leader-owned behavior). Envelope-level like
+// SyncableMode, so every syncable kind can pin without per-kind support.
+func (p *Parser) SyncableZone(mimeType string, data []byte) (string, error) {
+	v, err := parseBytes(mimeType, data)
+	if err != nil {
+		return "", err
+	}
+	return v.GetString("syncable.zone"), nil
+}
+
 // SyncableDatabases reports which destination databases the syncable config
 // references, read from the config alone (no Init / no destination connection).
 // It mirrors SyncableTopics: reuse ParseSyncable's front half to pick the

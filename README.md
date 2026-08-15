@@ -104,6 +104,7 @@ same image can be templated per-node by an orchestrator:
 | `COMMITTED_DATA_DIR` | `./data` | Directory for the WAL, raft state, and metadata. |
 | `COMMITTED_PEER_URL` | `http://127.0.0.1:9022` | This node's advertised raft peer URL. Used when `COMMITTED_PEERS` is unset. |
 | `COMMITTED_PEERS` | _(unset)_ | Full static cluster membership as `id=url` pairs, e.g. `1=http://n1:9022,2=http://n2:9022,3=http://n3:9022`. Give the same value to every node; it must include this node's `COMMITTED_NODE_ID`. |
+| `COMMITTED_ZONE` | _(unset)_ | This node's zone (vendor-neutral: an AZ, rack, or site), announced into the cluster at startup. A syncable config with `zone = "..."` is served by a node in that zone instead of the leader — see [`docs/operations/zones.md`](docs/operations/zones.md). |
 | `COMMITTED_API_URL` | _(unset)_ | This node's advertised HTTP API base URL (e.g. `http://n1:8080`), self-announced into the cluster so followers can proxy leader-only reads. Set it on every node. |
 
 `COMMITTED_PEERS` is consumed only on a node's **first** boot

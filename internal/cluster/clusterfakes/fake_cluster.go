@@ -757,6 +757,21 @@ type FakeCluster struct {
 		result1 []cluster.VersionInfo
 		result2 error
 	}
+	SyncableZonePinStub        func(string) (string, bool, bool)
+	syncableZonePinMutex       sync.RWMutex
+	syncableZonePinArgsForCall []struct {
+		arg1 string
+	}
+	syncableZonePinReturns struct {
+		result1 string
+		result2 bool
+		result3 bool
+	}
+	syncableZonePinReturnsOnCall map[int]struct {
+		result1 string
+		result2 bool
+		result3 bool
+	}
 	SyncablesStub        func() ([]*cluster.Configuration, error)
 	syncablesMutex       sync.RWMutex
 	syncablesArgsForCall []struct {
@@ -4511,6 +4526,73 @@ func (fake *FakeCluster) SyncableVersionsReturnsOnCall(i int, result1 []cluster.
 		result1 []cluster.VersionInfo
 		result2 error
 	}{result1, result2}
+}
+
+func (fake *FakeCluster) SyncableZonePin(arg1 string) (string, bool, bool) {
+	fake.syncableZonePinMutex.Lock()
+	ret, specificReturn := fake.syncableZonePinReturnsOnCall[len(fake.syncableZonePinArgsForCall)]
+	fake.syncableZonePinArgsForCall = append(fake.syncableZonePinArgsForCall, struct {
+		arg1 string
+	}{arg1})
+	stub := fake.SyncableZonePinStub
+	fakeReturns := fake.syncableZonePinReturns
+	fake.recordInvocation("SyncableZonePin", []interface{}{arg1})
+	fake.syncableZonePinMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2, ret.result3
+	}
+	return fakeReturns.result1, fakeReturns.result2, fakeReturns.result3
+}
+
+func (fake *FakeCluster) SyncableZonePinCallCount() int {
+	fake.syncableZonePinMutex.RLock()
+	defer fake.syncableZonePinMutex.RUnlock()
+	return len(fake.syncableZonePinArgsForCall)
+}
+
+func (fake *FakeCluster) SyncableZonePinCalls(stub func(string) (string, bool, bool)) {
+	fake.syncableZonePinMutex.Lock()
+	defer fake.syncableZonePinMutex.Unlock()
+	fake.SyncableZonePinStub = stub
+}
+
+func (fake *FakeCluster) SyncableZonePinArgsForCall(i int) string {
+	fake.syncableZonePinMutex.RLock()
+	defer fake.syncableZonePinMutex.RUnlock()
+	argsForCall := fake.syncableZonePinArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeCluster) SyncableZonePinReturns(result1 string, result2 bool, result3 bool) {
+	fake.syncableZonePinMutex.Lock()
+	defer fake.syncableZonePinMutex.Unlock()
+	fake.SyncableZonePinStub = nil
+	fake.syncableZonePinReturns = struct {
+		result1 string
+		result2 bool
+		result3 bool
+	}{result1, result2, result3}
+}
+
+func (fake *FakeCluster) SyncableZonePinReturnsOnCall(i int, result1 string, result2 bool, result3 bool) {
+	fake.syncableZonePinMutex.Lock()
+	defer fake.syncableZonePinMutex.Unlock()
+	fake.SyncableZonePinStub = nil
+	if fake.syncableZonePinReturnsOnCall == nil {
+		fake.syncableZonePinReturnsOnCall = make(map[int]struct {
+			result1 string
+			result2 bool
+			result3 bool
+		})
+	}
+	fake.syncableZonePinReturnsOnCall[i] = struct {
+		result1 string
+		result2 bool
+		result3 bool
+	}{result1, result2, result3}
 }
 
 func (fake *FakeCluster) Syncables() ([]*cluster.Configuration, error) {

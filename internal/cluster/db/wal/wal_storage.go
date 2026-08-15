@@ -78,6 +78,10 @@ var (
 	// that gates semantically-skewed emission (a new system type, a
 	// refresh-boundary marker). See node_version.go and db.featureEnabled.
 	memberVersionBucket = []byte("memberVersions")
+	// memberZones maps node id -> announced zone (COMMITTED_ZONE) — the
+	// placement identities zone-pinned syncables resolve their owner
+	// against. See node_zone.go.
+	memberZoneBucket = []byte("memberZones")
 )
 
 var (
@@ -201,6 +205,7 @@ var internalEntities = []internalEntity{
 	{cluster.IsScrub, "handleScrub", pendingScrubBucket, (*Storage).handleScrub},
 	{cluster.IsNodeAPIURL, "handleNodeAPIURL", memberAPIURLBucket, (*Storage).handleNodeAPIURL},
 	{cluster.IsNodeVersion, "handleNodeVersion", memberVersionBucket, (*Storage).handleNodeVersion},
+	{cluster.IsNodeZone, "handleNodeZone", memberZoneBucket, (*Storage).handleNodeZone},
 }
 
 // buckets is every bbolt bucket Open must create: one per internal entity type
