@@ -12,6 +12,17 @@ import (
 type SyncableWithID struct {
 	ID       string
 	Syncable cluster.Syncable
+	// Build, when non-nil, defers the node-local build to the LISTENER: the
+	// apply path persists the config bytes and queues this closure instead
+	// of parsing, because the build reaches the destination (Init's DDL and
+	// prepares) and the apply-liveness invariant is absolute — appliedIndex
+	// never waits on destination-DB state. The listener executes it at
+	// dequeue time, FIFO with every other config event. A nil result is a
+	// degraded build (recorded loudly by the closure): no worker is
+	// (re)started, and an existing worker for the id keeps running its
+	// prior config. Mutually exclusive with Delete/ReconcileList; when
+	// Build is set, Syncable is ignored.
+	Build func() cluster.Syncable
 	// Delete signals that the syncable with ID was removed from the log
 	// (deleteSyncable on the apply path), rather than upserted. The DB-layer
 	// consumer (listenForSyncables) cancels the worker and, on the owner, tears

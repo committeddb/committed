@@ -79,13 +79,14 @@ func TestApplyNeverBlocksOnWedgedListener(t *testing.T) {
 	}
 	require.Equal(t, uint64(configs), s.AppliedIndex(),
 		"every config entry applied despite the wedged listener")
-	// Prove the notifications actually flowed (a degraded config would skip
-	// the notify step and make this test vacuous): the wedged channel holds
-	// the pump's first delivery.
+	// Prove the notifications actually flowed AND the deferred builds work
+	// (an unbuildable config would degrade to nil and make this test
+	// vacuous): the wedged channel holds the pump's first delivery.
 	select {
 	case n := <-syncCh:
-		require.NotNil(t, n.Syncable, "the queued notification carries the built syncable")
+		require.NotNil(t, n.Build, "the queued notification defers the build to the listener")
+		require.NotNil(t, n.Build(), "the queued build must produce the syncable — otherwise the configs never built and the test proved nothing")
 	case <-time.After(5 * time.Second):
-		t.Fatal("no notification ever reached the channel — the configs never built and the test proved nothing")
+		t.Fatal("no notification ever reached the channel — the configs never queued and the test proved nothing")
 	}
 }

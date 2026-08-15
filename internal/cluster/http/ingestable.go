@@ -118,8 +118,20 @@ func (h *HTTP) GetIngestableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 
 	st, err := h.c.IngestableStatus(r.Context(), id)
 	if errors.Is(err, cluster.ErrIngestableNotRunning) {
-		writeError(w, httpgo.StatusNotFound, "ingestable_not_running",
-			"no ingestable worker is running for this id on the node that answered")
+		// When the answering node's degraded-config record explains the
+		// absence (the config persisted but its node-local build failed —
+		// e.g. a missing ${VAR}), say so: the generic message would send
+		// the operator hunting through the node-status surface for a cause
+		// this handler already knows. The error is redacted at the record
+		// surface. Mirrors the syncable status's workerState "degraded".
+		msg := "no ingestable worker is running for this id on the node that answered"
+		for _, ce := range h.c.ConfigBuildErrors() {
+			if ce.Kind == "ingestable" && ce.ID == id {
+				msg = "the config failed to build on the node that answered (no worker started): " + ce.Error
+				break
+			}
+		}
+		writeError(w, httpgo.StatusNotFound, "ingestable_not_running", msg)
 		return
 	}
 	if err != nil {

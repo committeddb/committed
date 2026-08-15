@@ -32,16 +32,19 @@ func (h *HTTP) Health(w httpgo.ResponseWriter, r *httpgo.Request) {
 }
 
 // Ready is a readiness probe. It returns 200 once raft has elected a
-// leader and the local apply state has advanced past 0 (i.e., the node
-// has applied at least one entry). Until both conditions hold it
-// returns 503 with a body naming the failing check.
+// leader, the local apply state has advanced past 0 (i.e., the node has
+// applied at least one entry), and apply is not stalled. Until all three
+// conditions hold it returns 503.
 //
-// The two checks together cover the two failure modes a fresh node can
-// be in: (1) raft hasn't elected yet (no leader visible), or (2) raft
-// has elected but this node hasn't replayed/applied any entries from
-// its WAL yet. Either state means HTTP traffic that depends on bucket
-// reads (Type, Database, etc.) will see stale or empty results, so
-// orchestrators should keep traffic away.
+// The three checks cover the three ways a node can be unfit for traffic:
+// (1) raft hasn't elected yet (no leader visible), (2) raft has elected
+// but this node hasn't replayed/applied any entries from its WAL yet, or
+// (3) apply has WEDGED — committed entries are pending with zero apply
+// progress for a sustained threshold (see db.ApplyStallThreshold), so the
+// node can't confirm proposals and its reads go stale while everything
+// else looks healthy. That third state is the field incident where
+// appliedIndex froze one entry behind commitIndex and /ready stayed
+// green: orchestrators kept routing to a node that was effectively down.
 func (h *HTTP) Ready(w httpgo.ResponseWriter, r *httpgo.Request) {
 	leader := h.c.Leader()
 	applied := h.c.AppliedIndex()
@@ -52,6 +55,11 @@ func (h *HTTP) Ready(w httpgo.ResponseWriter, r *httpgo.Request) {
 	}
 
 	if applied == 0 {
+		writeJSONStatus(w, httpgo.StatusServiceUnavailable, ReadyResponse{Status: "not ready"})
+		return
+	}
+
+	if h.c.ApplyStalled() {
 		writeJSONStatus(w, httpgo.StatusServiceUnavailable, ReadyResponse{Status: "not ready"})
 		return
 	}

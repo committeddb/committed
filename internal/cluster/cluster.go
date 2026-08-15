@@ -251,6 +251,15 @@ type Cluster interface {
 	// applied to local application state. Used by the /ready HTTP probe to
 	// gate readiness on this node having caught up.
 	AppliedIndex() uint64
+	// ApplyStalled reports whether this node has committed-but-unapplied
+	// raft entries with ZERO apply progress for a sustained threshold — an
+	// apply wedge (hung disk write, apply-handler bug). Such a node cannot
+	// confirm proposals and serves stale reads, so the /ready probe uses
+	// this to take it out of rotation instead of reporting ready while the
+	// node is effectively down (the silent-while-green field incident). A
+	// slow-but-advancing apply (boot replay of a long backlog) is NOT a
+	// stall: progress resets the clock.
+	ApplyStalled() bool
 	// LinearizableRead blocks until the raft leader has confirmed (via the
 	// ReadIndex quorum round-trip) the index at which a linearizable read
 	// may be served AND this node's applied state has caught up to it. It

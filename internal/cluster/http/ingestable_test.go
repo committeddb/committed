@@ -52,6 +52,37 @@ func TestDeleteIngestable_EmptyID(t *testing.T) {
 	require.Equal(t, 0, fake.DeleteIngestableCallCount())
 }
 
+// The ingest twin of the syncable degraded-workerState fix: a config that
+// exists but failed to BUILD on this node has no worker, so status answers
+// ingestable_not_running — honest, but the generic message hides the cause.
+// When the answering node's config-error record explains the absence, the
+// 404 body must carry the (redacted) build error so the operator learns
+// what to fix without hunting the node-status surface.
+func TestGetIngestableStatus_NotRunningNamesDegradedCause(t *testing.T) {
+	h, fake := setupTest()
+	fake.IngestableStatusReturns(cluster.IngestableStatus{}, cluster.ErrIngestableNotRunning)
+	fake.ConfigBuildErrorsReturns([]cluster.ConfigBuildError{
+		{Kind: "syncable", ID: "ing-1", Error: "wrong kind — must not match"},
+		{Kind: "ingestable", ID: "ing-1", Error: "interpolate: variable SOURCE_DSN not set"},
+	})
+
+	req := httptest.NewRequest("GET", "http://localhost/v1/ingestable/ing-1/status", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	require.Equal(t, 404, w.Code)
+	require.Contains(t, w.Body.String(), "ingestable_not_running")
+	require.Contains(t, w.Body.String(), "interpolate: variable SOURCE_DSN not set",
+		"the not-running answer must name the degraded-build cause")
+
+	// Without a degraded record the generic message stands.
+	fake.ConfigBuildErrorsReturns(nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("GET", "http://localhost/v1/ingestable/ing-1/status", nil))
+	require.Equal(t, 404, w.Code)
+	require.Contains(t, w.Body.String(), "no ingestable worker is running")
+}
+
 // lagUnit names the scale lag is on — load-bearing now that MySQL reports
 // transactions under GTID positioning but bytes under the file:pos fallback:
 // present next to a non-null lag, omitted with a null one.

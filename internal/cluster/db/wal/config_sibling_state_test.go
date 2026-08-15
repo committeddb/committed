@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/db"
 	parser "github.com/committeddb/committed/internal/cluster/db/parser"
 )
 
@@ -247,16 +248,20 @@ func TestAdvanceIngestSourceSeq_GuardReapsPostDeleteApply(t *testing.T) {
 
 // TestDeleteSyncable_ClearsDegradedConfigRecord: a deleted config's
 // degraded-record must not outlive it. seedSyncableConfig's document names no
-// registered syncable.type, so the apply-path build fails and records the
-// config as degraded; the delete must drop that record — nothing ever
-// re-checks a deleted id, so a survivor would overcount the
-// committed_config_build_errors gauge forever.
+// registered syncable.type, so the deferred build (run here in the
+// listener's stead) fails and records the config as degraded; the delete
+// must drop that record — nothing ever re-checks a deleted id, so a
+// survivor would overcount the committed_config_build_errors gauge forever.
 func TestDeleteSyncable_ClearsDegradedConfigRecord(t *testing.T) {
-	s := NewStorageWithParser(t, nil, parser.New())
+	syncCh := make(chan *db.SyncableWithID, 2)
+	s := OpenStorage(t, t.TempDir(), parser.New(), syncCh, nil)
 	defer s.Cleanup()
 
 	const id = "degraded-then-deleted"
 	seedSyncableConfig(t, s, id, 1)
+	msg := <-syncCh
+	require.NotNil(t, msg.Build)
+	require.Nil(t, msg.Build(), "the unbuildable syncable's deferred build must degrade (nil)")
 	require.GreaterOrEqual(t, s.ConfigBuildErrorCount(), 1,
 		"the unbuildable syncable must be recorded as degraded while its config exists")
 

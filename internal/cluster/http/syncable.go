@@ -298,12 +298,17 @@ type SyncableRebuildResponse struct {
 type SyncableStatusResponse struct {
 	Stuck bool `json:"stuck"`
 	// WorkerState is the worker's lifecycle state: "running" (healthy, or
-	// transiently stuck retrying — see Stuck) or "parked" (the circuit breaker
+	// transiently stuck retrying — see Stuck), "parked" (the circuit breaker
 	// tripped on a systematic config fault and the worker STOPPED; fix the config
-	// and re-POST it, or delete the syncable). Replicated, so any node reports it.
+	// and re-POST it, or delete the syncable), or "degraded" (the config
+	// persisted but its build FAILED on this node — e.g. a missing ${VAR} — so
+	// no worker was started; Message carries the build error). running/parked
+	// are replicated, so any node reports them; degraded is the answering
+	// node's view (builds are node-local).
 	WorkerState string `json:"workerState"`
 	// Index, Since, and Message are present when stuck OR parked — what the worker
-	// last blocked or failed on.
+	// last blocked or failed on. For a degraded config, Message carries the
+	// (redacted) build error instead.
 	Index   uint64 `json:"index,omitempty"`
 	Since   string `json:"since,omitempty"`
 	Message string `json:"message,omitempty"`
@@ -474,6 +479,24 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 		resp.Index = stuck.Index
 		resp.Since = time.Unix(0, stuck.SinceUnixNano).UTC().Format(time.RFC3339Nano)
 		resp.Message = stuck.Message
+	}
+
+	// Build-degraded overrides both: "running" is derived from the ABSENCE of a
+	// park record, which a worker that never STARTED satisfies vacuously — the
+	// same absence-derived lie the existence gate above closes for absent ids,
+	// one door over (a missing ${VAR} config read "running" with growing lag).
+	// Degraded is the ANSWERING NODE's view (builds are node-local; the record
+	// is this node's config-error bookkeeping) and the error is already
+	// redacted at the record surface. It can't coexist with a park except as a
+	// transient race — a new config version clears the park record atomically
+	// with the version write, and degraded is that version's build verdict —
+	// so degraded, the more current fact, wins.
+	for _, ce := range h.c.ConfigBuildErrors() {
+		if ce.Kind == "syncable" && ce.ID == id {
+			resp.WorkerState = cluster.WorkerStateDegraded
+			resp.Message = ce.Error
+			break
+		}
 	}
 
 	// Both numbers are sourced behind the same linearize barrier above, so

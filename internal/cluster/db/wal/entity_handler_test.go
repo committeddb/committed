@@ -285,13 +285,17 @@ func TestSave_SyncableEntity_SignalsChannel(t *testing.T) {
 
 	received := <-syncCh
 	require.Equal(t, "sync-1", received.ID)
-	// The delivered syncable is the parsed one behind the interpretation
-	// wrapper (every syncable reads stamp ⊕ errata fold) — prove the wiring
-	// by syncing through it and observing the fake.
-	require.NotNil(t, received.Syncable)
-	_, err = received.Syncable.Sync(t.Context(), &cluster.Actual{Index: 1})
+	// Upsert messages defer the node-local build to the listener (the
+	// apply-liveness invariant); executing it here stands in for the
+	// listener. The built syncable is the parsed one behind the
+	// interpretation wrapper (every syncable reads stamp ⊕ errata fold) —
+	// prove the wiring by syncing through it and observing the fake.
+	require.NotNil(t, received.Build)
+	built := received.Build()
+	require.NotNil(t, built)
+	_, err = built.Sync(t.Context(), &cluster.Actual{Index: 1})
 	require.NoError(t, err)
-	require.Equal(t, 1, fakeSyncable.SyncCallCount(), "the channel's syncable forwards to the parsed one")
+	require.Equal(t, 1, fakeSyncable.SyncCallCount(), "the built syncable forwards to the parsed one")
 }
 
 // --- Ingestable Entity (requires parser + channel) ---
@@ -321,7 +325,9 @@ func TestSave_IngestableEntity_SignalsChannel(t *testing.T) {
 
 	received := <-ingestCh
 	require.Equal(t, "ingest-1", received.ID)
-	require.Equal(t, fakeIngestable, received.Ingestable)
+	// See the syncable twin above: the build is deferred to the listener.
+	require.NotNil(t, received.Build)
+	require.Equal(t, fakeIngestable, received.Build())
 }
 
 // Ensure the fakes satisfy the interfaces at compile time

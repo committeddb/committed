@@ -122,7 +122,10 @@ func TestApplyCommitted_RestartReplay(t *testing.T) {
 	require.Nil(t, s.Save(&defaultHardState, []*raftpb.Entry{entry}, &defaultSnap))
 	require.Nil(t, s.ApplyCommitted(entry))
 	require.Equal(t, uint64(1), s.AppliedIndex(), "appliedIndex bumped after first apply")
-	require.Equal(t, 1, fakeParser.ParseCallCount(), "parser invoked exactly once on first apply")
+	// The apply path never parses (the build is deferred to the listener,
+	// and with no channels wired here no build runs at all) — the parser
+	// staying silent on apply IS the apply-liveness contract.
+	require.Equal(t, 0, fakeParser.ParseCallCount(), "apply must not invoke the parser")
 
 	// Bucket should hold the configuration we just put.
 	cfgs, err := s.Ingestables()

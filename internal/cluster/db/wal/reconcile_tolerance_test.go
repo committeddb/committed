@@ -40,14 +40,22 @@ func TestReconcileSyncableList_DegradedConfigsArePresent(t *testing.T) {
 		t.Fatal("apply path did not send the good syncable")
 	}
 
-	// An unparseable config (unknown type) — saveSyncable degrades it (no worker
-	// send), and it lives in the bucket as a degraded config.
+	// An unparseable config (unknown type) — the apply path queues its build
+	// unconditionally (it no longer parses); the deferred build degrades at
+	// the listener (nil), and the config lives in the bucket as degraded.
 	badEnt, err := cluster.NewUpsertSyncableEntity(&cluster.Configuration{
 		ID: "bad", MimeType: "application/json",
 		Data: []byte(`{"syncable": {"name": "bad", "type": "nonexistent"}}`),
 	})
 	require.NoError(t, err)
 	saveEntity(t, badEnt, s, 1, 2)
+	select {
+	case badMsg := <-syncCh:
+		require.NotNil(t, badMsg.Build)
+		require.Nil(t, badMsg.Build(), "the unbuildable config's deferred build must degrade (nil)")
+	case <-time.After(2 * time.Second):
+		t.Fatal("apply path did not queue the bad syncable's build")
+	}
 
 	s.RequestSyncReconcile()
 	var req *db.SyncableWithID

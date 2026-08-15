@@ -25,11 +25,13 @@ func (s *Storage) handleIngestable(e *cluster.Entity, raftIndex uint64) error {
 }
 
 // saveIngestable persists an ingestable Configuration as a new version in
-// bbolt and then notifies the consumer channel. See saveSyncable for the
-// rationale on why the channel send happens outside the bbolt Update closure.
+// bbolt and then queues the node-local BUILD for the listener — see
+// saveSyncable: ParseIngestable reaches the SOURCE database (Preflight
+// connects), and the apply-liveness invariant is the same — appliedIndex
+// never waits on external-DB state, and no external I/O runs under the
+// bbolt writer lock.
 func (s *Storage) saveIngestable(t *cluster.Configuration, raftIndex uint64) error {
-	var ingestable cluster.Ingestable
-	var built bool
+	var replayed bool
 	var clearedWorkerState bool
 	err := s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(ingestableBucket)
@@ -43,6 +45,7 @@ func (s *Storage) saveIngestable(t *cluster.Configuration, raftIndex uint64) err
 		// allocator appends a phantom version, diverging history across replicas.
 		// The set below rides this same atomic tx, so a failure rolls both back.
 		if versionedLastIndex(b, []byte(t.ID)) >= raftIndex {
+			replayed = true
 			return nil
 		}
 		if err := setVersionedLastIndex(b, []byte(t.ID), raftIndex); err != nil {
@@ -65,34 +68,21 @@ func (s *Storage) saveIngestable(t *cluster.Configuration, raftIndex uint64) err
 		}
 
 		// Deterministic state-machine write FIRST: persist the raw config
-		// bytes so every replica converges, then attempt the node-local
-		// build (which can fail on a missing ${VAR} secret).
+		// bytes so every replica converges. The node-local build (which
+		// can fail on a missing ${VAR} secret) happens later, on the
+		// listener, off this path.
 		//
 		// Skip the version APPEND on a byte-identical replay: a crash-apply-window
 		// entry is re-delivered (entity fsynced, applied-index not), and appending
 		// again would duplicate the version on the replaying node — diverging its
 		// version history and rollback-by-number from nodes that didn't crash
-		// there. Mirrors saveType. The node-local build below still runs, so a
+		// there. Mirrors saveType. The build below is still queued, so a
 		// replay re-establishes the worker.
 		if existing, gerr := getVersioned(b, []byte(t.ID)); gerr != nil || !bytes.Equal(existing, bs) {
 			if _, err := putVersioned(b, []byte(t.ID), bs); err != nil {
 				return fmt.Errorf("[wal.ingestable] putVersioned: %w", err)
 			}
 		}
-
-		_, parsed, err := s.parser.ParseIngestable(t.MimeType, t.Data)
-		if err != nil {
-			// Degrade rather than fail the apply (which would crash the
-			// node). The config is persisted; no worker is started until
-			// the build succeeds.
-			s.recordConfigError("ingestable", t.ID, configErrBuild, err)
-			s.logger.Error("ingestable config persisted but could not be built on this node (degraded); fix the environment and the config will build on next restart",
-				zap.String("id", t.ID), zap.Error(err))
-			return nil
-		}
-		s.clearConfigError("ingestable", t.ID, configErrBuild)
-		ingestable = parsed
-		built = true
 
 		return nil
 	})
@@ -104,10 +94,14 @@ func (s *Storage) saveIngestable(t *cluster.Configuration, raftIndex uint64) err
 		s.metrics.SetWorkerParked("ingest", t.ID, false)
 	}
 
-	if built && s.ingestPump != nil {
+	// A replay-guard hit queues nothing — mirrors saveSyncable.
+	if !replayed && s.ingestPump != nil {
 		// Push, never send — the apply path must not block on the listener
 		// (see notifyPump).
-		s.ingestPump.push(&db.IngestableWithID{ID: t.ID, Ingestable: ingestable})
+		s.logger.Debug("queueing ingestable build", zap.String("id", t.ID))
+		s.ingestPump.push(&db.IngestableWithID{ID: t.ID, Build: func() cluster.Ingestable {
+			return s.buildIngestable(t)
+		}})
 	}
 
 	return nil
@@ -198,19 +192,28 @@ func (s *Storage) reconcileIngestableList() ([]*db.IngestableWithID, error) {
 			out = append(out, &db.IngestableWithID{ID: r.id})
 			continue
 		}
-		_, ingestable, perr := s.parser.ParseIngestable(r.cfg.MimeType, r.cfg.Data)
-		if perr != nil {
-			s.recordConfigError("ingestable", r.id, configErrBuild, perr)
-			s.logger.Warn("ingest reconcile: parse (degraded — kept)",
-				zap.String("id", r.id), zap.Error(perr))
-			out = append(out, &db.IngestableWithID{ID: r.id})
-			continue
-		}
-		s.clearConfigError("ingestable", r.id, configErrBuild)
-		out = append(out, &db.IngestableWithID{ID: r.id, Ingestable: ingestable})
+		// Same build body as the apply-queued path — see reconcileSyncableList.
+		out = append(out, &db.IngestableWithID{ID: r.id, Ingestable: s.buildIngestable(r.cfg)})
 	}
 	s.sweepConfigErrorsExcept("ingestable", present)
 	return out, nil
+}
+
+// buildIngestable is the node-local build body, executed by the db-layer
+// LISTENER at dequeue time — never on the apply path (mirrors
+// buildSyncable; ParseIngestable reaches the source database via
+// Preflight). Returns nil for a config that failed to build on this node,
+// recorded as the loud degraded evidence.
+func (s *Storage) buildIngestable(t *cluster.Configuration) cluster.Ingestable {
+	_, parsed, err := s.parser.ParseIngestable(t.MimeType, t.Data)
+	if err != nil {
+		s.recordConfigError("ingestable", t.ID, configErrBuild, err)
+		s.logger.Error("ingestable config persisted but could not be built on this node (degraded); fix the environment and the config will build on next restart",
+			zap.String("id", t.ID), zap.Error(err))
+		return nil
+	}
+	s.clearConfigError("ingestable", t.ID, configErrBuild)
+	return parsed
 }
 
 func (s *Storage) Ingestables() ([]*cluster.Configuration, error) {
