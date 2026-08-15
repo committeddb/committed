@@ -12,6 +12,7 @@ import (
 type Option func(*options)
 
 type options struct {
+	eventSegmentSize   int
 	fsyncDisabled      bool
 	logger             *zap.Logger
 	metrics            *metrics.Metrics
@@ -69,6 +70,14 @@ func WithMetrics(m *metrics.Metrics) Option {
 // its reader is the single sequential Ready loop, which cannot thrash.
 func WithEventCacheSegments(n int) Option {
 	return func(o *options) { o.eventCacheSegments = n }
+}
+
+// WithEventSegmentSize overrides the event log's segment size in bytes
+// (default: the library's 20 MB). A test knob: compression and cache tests
+// need logs that cycle after a few entries; production keeps the default,
+// which the memory-sizing and compression docs assume.
+func WithEventSegmentSize(bytes int) Option {
+	return func(o *options) { o.eventSegmentSize = bytes }
 }
 
 // WithSafeMode holds the background scrub worker: Open does not resume a

@@ -10,6 +10,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/klauspost/compress/zstd"
+	twal "github.com/tidwall/wal"
+
 	"github.com/committeddb/committed/internal/cluster/fsutil"
 )
 
@@ -87,9 +90,15 @@ func listSegments(dir string) ([]segFile, bool, error) {
 		if err != nil || idx == 0 {
 			continue
 		}
+		if strings.HasSuffix(name, ".zst.SEAL") {
+			// An interrupted compression temp: the plain segment is intact and
+			// Open heals the leftover. Not part of the log's readable set.
+			continue
+		}
 		isStart := len(name) == 26 && strings.HasSuffix(name, ".START")
 		isEnd := len(name) == 24 && strings.HasSuffix(name, ".END")
-		if len(name) != 20 && !isStart && !isEnd {
+		isZst := len(name) == 24 && strings.HasSuffix(name, ".zst")
+		if len(name) != 20 && !isStart && !isEnd && !isZst {
 			continue
 		}
 		if isStart || isEnd {
@@ -132,6 +141,21 @@ func DiagnoseLog(dir string) (*Diagnosis, error) {
 		if err != nil {
 			return nil, err
 		}
+		// A compressed sealed segment decodes before the framing scan. Its
+		// zstd frame checksum makes a torn or bit-flipped file fail HERE —
+		// and a compressed segment is never a torn tail (only complete
+		// segments compress; the appendable tail is always plain), so any
+		// failure inside one is mid-log corruption: rebuild, never truncate.
+		compressed := strings.HasSuffix(seg.name, ".zst")
+		if compressed {
+			data, err = decodeZstd(data)
+			if err != nil {
+				d.Status = LogCorrupt
+				d.Records = total
+				d.Detail = fmt.Sprintf("compressed segment %s fails its zstd frame checksum — data corruption, not a torn tail", seg.name)
+				return d, nil
+			}
+		}
 		off := 0
 		for off < len(data) {
 			size, n := binary.Uvarint(data[off:])
@@ -140,6 +164,14 @@ func DiagnoseLog(dir string) (*Diagnosis, error) {
 			remaining := len(data) - off - n
 			if n <= 0 || uint64(remaining) < size { //nolint:gosec // G115: remaining >= 0 when n > 0
 				// A structurally incomplete record — the write did not finish.
+				if compressed {
+					// Inside a decoded compressed segment: the seal captured a
+					// complete segment, so this predates compression — real
+					// corruption regardless of position.
+					d.Status = LogCorrupt
+					d.Detail = fmt.Sprintf("incomplete record at offset %d inside compressed segment %s", off, seg.name)
+					return d, nil
+				}
 				if si != len(segs)-1 {
 					// Incomplete record before the final segment is real
 					// corruption, not a tail. Refuse.
@@ -226,4 +258,33 @@ func RepairNode(baseDir string, commit bool) ([]*Diagnosis, error) {
 		out = append(out, d)
 	}
 	return out, nil
+}
+
+// DecompressNode rewrites every compressed sealed segment under a STOPPED
+// node's data dir back to the plain pre-0.8.0 format — the offline downgrade
+// door: older binaries do not recognize ".zst" segments and would silently
+// open a partial log. Returns the number of segments rewritten per log dir,
+// in walLogSubdirs order. Only the event log compresses today, but every log
+// dir is swept for robustness.
+func DecompressNode(baseDir string) (map[string]int, error) {
+	out := map[string]int{}
+	for _, parts := range walLogSubdirs {
+		dir := filepath.Join(append([]string{baseDir}, parts...)...)
+		n, err := twal.DecompressDir(dir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return out, fmt.Errorf("%s: %w", dir, err)
+		}
+		out[dir] = n
+	}
+	return out, nil
+}
+
+// zstdRepairDec decodes compressed sealed segments for the offline scan.
+var zstdRepairDec, _ = zstd.NewReader(nil)
+
+func decodeZstd(raw []byte) ([]byte, error) {
+	return zstdRepairDec.DecodeAll(raw, nil)
 }

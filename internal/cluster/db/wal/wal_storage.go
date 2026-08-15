@@ -273,6 +273,11 @@ type Storage struct {
 	// swap is exclusive. Lock order is eventMu → kvMu (the swap clears bbolt
 	// scrub state outside the eventMu section, so the two never nest).
 	eventMu sync.RWMutex
+	// sealerStop/sealerDone/sealerStopOnce are the background sealer's
+	// lifecycle (sealer.go), mirroring the scrub worker's.
+	sealerStop     chan struct{}
+	sealerDone     chan struct{}
+	sealerStopOnce sync.Once
 	// typeCache memoizes ResolveType lookups for explicit-version refs
 	// (ref.Version > 0), keyed by cluster.TypeRef. Version-0 ("latest")
 	// lookups are never cached — "latest" is mutable and stays bolt-backed.
@@ -656,7 +661,18 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	if cacheSegments <= 0 {
 		cacheSegments = DefaultEventCacheSegments
 	}
-	eventWalOpts := &wal.Options{SegmentCacheSize: cacheSegments}
+	// Sealed segments compress at rest (zstd L3, ~7-9x on JSON event
+	// payloads); the active tail stays plain and the write path never
+	// compresses — the background sealer (sealer.go) does, off the Ready
+	// loop. Reads decompress inside the segment-load path, so the cache
+	// still holds decompressed tables and its RAM sizing is unchanged.
+	// Downgrade door: `committed wal decompress` (offline) rewrites the
+	// plain format for pre-0.8.0 binaries.
+	eventWalOpts := &wal.Options{
+		SegmentCacheSize:         cacheSegments,
+		SegmentSize:              cfg.eventSegmentSize,
+		SealedSegmentCompression: wal.CompressionZstd,
+	}
 	eventLog, err := openLog(eventLogDir, "event_log", cfg.metrics, eventWalOpts)
 	if err != nil {
 		return nil, err
@@ -731,6 +747,8 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		scrubSignal:     make(chan struct{}, 1),
 		scrubStop:       make(chan struct{}),
 		scrubDone:       make(chan struct{}),
+		sealerStop:      make(chan struct{}),
+		sealerDone:      make(chan struct{}),
 		closeC:          make(chan struct{}),
 	}
 
@@ -993,10 +1011,14 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		// stays durably recorded and resumes on the next normal open. Close
 		// waits on scrubDone, which the worker's defer normally closes; with
 		// no worker, close it here so Close returns.
+		// The sealer is held too: a diagnosis window must not have segment
+		// files rewritten (compressed) underneath it either.
 		ws.logger.Warn("SAFE MODE: scrub worker held; any pending scrub resumes on a normal restart")
 		close(ws.scrubDone)
+		close(ws.sealerDone)
 	} else {
 		go ws.scrubWorker()
+		go ws.sealerWorker()
 	}
 
 	// Complete any RTBF compaction a prior scrub pruned tombstones for but didn't
@@ -1034,6 +1056,9 @@ func (s *Storage) Close() error {
 		// mid-flight when we close the handle below). Idempotent close of scrubStop
 		// is handled in stopScrubWorker.
 		s.stopScrubWorker()
+		// Likewise the sealer: it compresses sealed event-log segments and must
+		// not be mid-swap when the handle closes.
+		s.stopSealer()
 
 		finalErr = s.EntryLog.Close()
 

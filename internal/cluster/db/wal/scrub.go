@@ -180,7 +180,11 @@ func (s *Storage) runScrub(bound uint64) error {
 	// propose path through the shared storage lock for hours. We fsync explicitly
 	// with newLog.Sync() before the rename instead; segment cycling still fsyncs
 	// each filled segment (cycle()), so only the tail is left for that final Sync.
-	newLog, err := wal.Open(tmpDir, &wal.Options{NoSync: true})
+	// The rewritten log compresses like the live one; the drain below (before
+	// the swap lock) compresses everything this rewrite sealed, so the swap
+	// installs an already-compressed log instead of leaving the whole rewrite
+	// as backlog for the sealer.
+	newLog, err := wal.Open(tmpDir, &wal.Options{NoSync: true, SealedSegmentCompression: wal.CompressionZstd})
 	if err != nil {
 		return err
 	}
@@ -297,6 +301,20 @@ func (s *Storage) runScrub(bound uint64) error {
 
 	// Phase B (locked): catch up the now-small delta, then swap. eventMu.Lock waits
 	// for in-flight reads/the appender to drain and blocks new ones for the brief
+	// Compress the rewrite's sealed segments BEFORE taking the swap lock —
+	// this is O(surviving log) work that must not stall appendEvents. The
+	// locked delta below may seal a few more segments; those trickle through
+	// the background sealer after the swap.
+	for {
+		did, cerr := newLog.CompressNextSealed()
+		if cerr != nil {
+			return cerr
+		}
+		if !did {
+			break
+		}
+	}
+
 	// swap.
 	s.eventMu.Lock()
 	defer s.eventMu.Unlock()
