@@ -775,6 +775,9 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 		}
 		args := p.dialect.BindArgs(values)
 		if _, err := tx.StmtContext(ctx, r.Stmt).ExecContext(ctx, args...); err != nil {
+			// Same NUL hint as the plain sink's row apply: name the offending
+			// payload field(s) — names only, never values.
+			err = withNulFieldHint(err, p.dialect, jsonData)
 			return execFailure(fmt.Sprintf("[sql-projection.apply] exec [%s]", r.SQL), err, p.dialect.IsPermanent(err))
 		}
 	}

@@ -447,6 +447,10 @@ func (c *Syncable) applyEntity(ctx context.Context, tx *sql.Tx, e *cluster.Entit
 	}
 
 	if _, err := tx.StmtContext(ctx, c.insert.Stmt).ExecContext(ctx, allValues...); err != nil {
+		// The NUL hint names the offending payload field(s) when a PG sink
+		// rejects an embedded U+0000 — names only, never values (the message
+		// becomes a permanent replicated dead-letter record).
+		err = withNulFieldHint(err, c.dialect, jsonData)
 		return execFailure(fmt.Sprintf("[sql.apply] exec [%s]", c.insert.SQL), err, c.dialect.IsPermanent(err))
 	}
 	return nil

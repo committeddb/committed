@@ -505,7 +505,14 @@ Survey your widest tables against these before creating mirrors:
 
 - **PostgreSQL**: a row must fit an 8 KB heap page after compression/TOAST —
   very wide tables (many hundreds of columns of inline data) can produce
-  individual rows that exceed it at apply time ("row is too big").
+  individual rows that exceed it at apply time ("row is too big"). And a
+  text value with an **embedded U+0000** is rejected at apply time
+  (SQLSTATE 22021) even though MySQL and SQL Server store it — a row that
+  flowed through every other engine dead-letters only at a PG sink. The
+  dead-letter message names the offending payload field(s), so triage is
+  read-the-record, not hand-hunting the byte across every string column;
+  the remedy is fixing the value at the source (CDC delivers the
+  correction — then acknowledge the record) or excluding the column.
 - **MySQL/InnoDB**: ~1,017 columns per table and index-key length limits
   (a `TEXT`/long-`VARCHAR` primary key needs a prefix or a different key
   column) — both fail at table creation, loudly. `TEXT` caps at 64 KB —
