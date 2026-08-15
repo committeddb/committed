@@ -25,6 +25,12 @@ func (db *DB) AddIngestableParser(name string, p cluster.IngestableParser) {
 	db.parser.AddIngestableParser(name, p)
 }
 
+// IngestableCensus implements cluster.Cluster: the latest applied shape
+// census for the ingestable, from replicated storage (see census.go).
+func (db *DB) IngestableCensus(id string) (*cluster.IngestableCensus, bool) {
+	return db.storage.IngestableCensus(id)
+}
+
 func (db *DB) ProposeIngestable(ctx context.Context, c *cluster.Configuration) error {
 	name, ingestable, err := db.ParseIngestable(c.MimeType, c.Data)
 	if err != nil {

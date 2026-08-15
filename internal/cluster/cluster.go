@@ -82,6 +82,12 @@ type Cluster interface {
 	// query the source for lag. Returns ErrIngestableNotRunning if no worker is
 	// registered for id on this node. Powers GET /v1/ingestable/{id}/status.
 	IngestableStatus(ctx context.Context, id string) (IngestableStatus, error)
+	// IngestableCensus returns the latest JSON shape census the ingestable's
+	// worker published during its snapshot pass, or (nil, false) when none
+	// exists (census opted out, or no snapshot has run yet). Replicated
+	// state, identical on any node. Powers the census section of
+	// GET /v1/ingestable/{id}/status.
+	IngestableCensus(id string) (*IngestableCensus, bool)
 	SyncableVersions(id string) ([]VersionInfo, error)
 	SyncableVersion(id string, version uint64) (*Configuration, error)
 	// SyncableDeadLetters returns the proposals a syncable gave up on and

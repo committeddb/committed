@@ -83,6 +83,13 @@ func sweepIngestableSiblingState(tx *bolt.Tx, id []byte) error {
 			return fmt.Errorf("[wal.ingestable] sweep source-seq: %w", err)
 		}
 	}
+	// The shape census dies with the ingestable: a same-id recreate takes its
+	// own census (ingestable_census.go holds the matching write-guard).
+	if b := tx.Bucket(ingestableCensusBucket); b != nil {
+		if err := b.Delete(id); err != nil {
+			return fmt.Errorf("[wal.ingestable] sweep census: %w", err)
+		}
+	}
 	return nil
 }
 

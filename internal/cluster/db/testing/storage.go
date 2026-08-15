@@ -209,6 +209,13 @@ func (ms *MemoryStorage) HasContractFingerprint(typeID string, version int, fing
 	return false
 }
 
+// IngestableCensus is a stub: this in-memory test double has no apply path to
+// record a published census, so it always reports none. Census tests use the
+// real wal.Storage.
+func (ms *MemoryStorage) IngestableCensus(id string) (*cluster.IngestableCensus, bool) {
+	return nil, false
+}
+
 func (ms *MemoryStorage) Database(id string) (cluster.Database, error) {
 	return nil, nil
 }

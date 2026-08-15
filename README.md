@@ -188,6 +188,37 @@ carry or clobbers columns it didn't mean to write. The whole-payload
 `"$"` mapping shape below is the right way to land an event topic in
 SQL and is exempt from the warning.
 
+#### The shape census: drafting a contract from the data
+
+The hardest part of blessing a contract on an existing table is that nobody
+knows what's in it — JSON columns whose shape lives only in what developers
+happened to write, evolved over years, often with several shapes interleaved.
+Committed takes that census for free: the ingest snapshot pass already streams
+every historical row, and the worker folds each row's payload **shape** (paths
+and types — never values) into a per-topic census, published as replicated
+state and served on `GET /v1/ingestable/{id}/status`:
+
+- every path with its observed types, row count, and first/last-seen row —
+  including paths nested inside JSON columns;
+- each **distinct shape** with its count and row range — the interleaved-shapes
+  evidence;
+- a **draft JSON Schema** mirroring the observed structure
+  (`additionalProperties: false` at every level), ready to review and POST as
+  a type — with `validate = 2` it becomes the tripwire's contract. Inference
+  is bootstrap-only: the draft is never auto-blessed, and the runtime never
+  infers — after blessing, the tripwire reconciles reality against the
+  declared contract.
+
+The census is **on by default** (it only happens while a snapshot streams the
+table — getting one later costs a full re-snapshot) and adds roughly a
+microsecond per row; `census = false` in the `[ingestable]` section opts out.
+Value tracking is **opt-in**: `censusValues = true` keeps a bounded set of
+distinct values per string field (`censusValueLimit`, default 16), and the
+drafter then proposes `enum` for fields whose values repeat — so a brand-new
+enum value later fires the tripwire as an ordinary schema violation. Opt-in
+because it puts source values into replicated state; by default the census
+carries types and paths only.
+
 #### Schema validation: gate or tripwire
 
 A type with a schema chooses what happens when a payload doesn't match it,

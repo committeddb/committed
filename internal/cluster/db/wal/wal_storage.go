@@ -108,6 +108,10 @@ var (
 	// path (handleContractFingerprint), guarded/swept with the type config.
 	// See contract_fingerprint.go.
 	contractFingerprintBucket = []byte("contractFingerprints")
+	// ingestableCensusBucket holds the latest published JSON shape census per
+	// ingestable id (last-writer-wins), guarded/swept with the ingestable
+	// config. See ingestable_census.go.
+	ingestableCensusBucket = []byte("ingestableCensuses")
 )
 
 // appliedIndexBucket holds a single key ("idx") whose value is the
@@ -180,6 +184,7 @@ var internalEntities = []internalEntity{
 	{cluster.IsSyncableSkipRequest, "handleSyncableSkipRequest", syncableSkipRequestBucket, (*Storage).handleSyncableSkipRequest},
 	{cluster.IsIngestablePosition, "saveIngestablePosition", ingestablePositionBucket, (*Storage).saveIngestablePosition},
 	{cluster.IsContractFingerprint, "handleContractFingerprint", contractFingerprintBucket, (*Storage).handleContractFingerprint},
+	{cluster.IsIngestableCensus, "handleIngestableCensus", ingestableCensusBucket, (*Storage).handleIngestableCensus},
 	{cluster.IsScrub, "handleScrub", pendingScrubBucket, (*Storage).handleScrub},
 	{cluster.IsNodeAPIURL, "handleNodeAPIURL", memberAPIURLBucket, (*Storage).handleNodeAPIURL},
 	{cluster.IsNodeVersion, "handleNodeVersion", memberVersionBucket, (*Storage).handleNodeVersion},

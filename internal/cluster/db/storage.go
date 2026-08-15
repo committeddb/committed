@@ -101,6 +101,12 @@ type Storage interface {
 	// the tripwire so each distinct shape announces once; replicated state,
 	// so the dedupe survives restarts and leadership moves.
 	HasContractFingerprint(typeID string, version int, fingerprint string) bool
+	// IngestableCensus returns the latest applied JSON shape census for the
+	// ingestable (published by its worker during the snapshot pass), or
+	// (nil, false) when none exists. Replicated state, so any node's status
+	// endpoint can serve it; also read by a resuming worker to seed its
+	// accumulator at the same refresh epoch.
+	IngestableCensus(id string) (*cluster.IngestableCensus, bool)
 	// TopicRefreshEpoch returns the highest refresh generation ever committed
 	// for a topic (type id), or 0 if none. Keyed by topic and NOT cleared by
 	// DeleteIngestable, so a same-topic recreate reads the generation still on the

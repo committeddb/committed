@@ -258,6 +258,29 @@ message LogContractFingerprint {
     string fingerprint = 3;
 }
 
+// LogIngestableCensus is the JSON shape census an ingest worker takes during
+// its snapshot pass — the free census of every historical row the pass
+// already streams. One record per ingestable (Snapshot kind, upsert), carrying
+// the census content as JSON (see cluster.IngestableCensus): per topic, the
+// distinct payload shapes (fingerprint → count and first/last row ordinal),
+// and — only when the operator opts in — bounded distinct string values for
+// enum drafting. Types and paths only by default: the PII posture keeps
+// source VALUES out of replicated state unless censusValues is set. Published
+// with a throttle during the pass and at its end; replicated so ANY node's
+// status endpoint serves it. Ungated in the system-type namespace: an older
+// node skips it (stale census until upgrade — observability, not
+// correctness).
+message LogIngestableCensus {
+    string ID = 1;
+    // refreshEpoch is the ingest refresh epoch (entity Generation) the census
+    // observed. A fresh full snapshot bumps the epoch, so a worker seeing a
+    // HIGHER epoch resets rather than double-counting re-observed rows; a
+    // resume at the SAME epoch seeds from this record and continues.
+    uint64 refreshEpoch = 2;
+    // census is the JSON-encoded map[topicID]cluster.TopicCensus.
+    bytes census = 3;
+}
+
 // LogErratum is the errata interpretation-registry record: an append-only,
 // consensus-ordered statement that rebinds how already-committed actuals are
 // READ — never their bytes. A stamped TypeRef is a cache of the default

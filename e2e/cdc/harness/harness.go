@@ -358,6 +358,20 @@ func (h *Harness) PostConfig(t *testing.T, path, body string) {
 	postConfig(t, path, body)
 }
 
+// GetJSON GETs a committed API path and returns the response body, for
+// scenarios asserting on read endpoints (statuses) beyond the helpers the
+// harness wires itself. Fails the test on a non-200.
+func (h *Harness) GetJSON(t *testing.T, path string) []byte {
+	t.Helper()
+	resp, err := http.Get(committedURL(path)) //nolint:gosec // G107: fixed in-process URL
+	require.NoError(t, err, "GET %s", path)
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, 200, resp.StatusCode, "GET %s: %s", path, body)
+	return body
+}
+
 // SinkDatabaseID is the id of the sink database config the harness registers
 // when Options.Syncable is set — the `db = "..."` value a custom syncable's
 // TOML references.

@@ -996,6 +996,13 @@ func (ms *MemoryStorage) HasContractFingerprint(typeID string, version int, fing
 	return false
 }
 
+// IngestableCensus stubs the published shape census. This in-memory double
+// doesn't run the entity apply path that would record one, so it reports
+// none; census tests use the real wal.Storage.
+func (ms *MemoryStorage) IngestableCensus(id string) (*cluster.IngestableCensus, bool) {
+	return nil, false
+}
+
 func (ms *MemoryStorage) Node(id string) uint64 {
 	ms.nodeMu.RLock()
 	defer ms.nodeMu.RUnlock()

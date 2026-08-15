@@ -325,6 +325,12 @@ paths:
     post:
       tags: [ingestable]
       summary: Create or update an ingestable configuration
+      description: |
+        The `[ingestable]` envelope additionally carries the shape-census
+        knobs (see `GET /v1/ingestable/{id}/status`): the census is on by
+        default; `census = false` opts out, `censusValues = true` opts into
+        bounded distinct-value tracking for enum drafting (bounded by
+        `censusValueLimit`, default 16).
       operationId: addIngestable
       parameters:
         - $ref: '#/components/parameters/ResourceId'
@@ -452,6 +458,15 @@ paths:
         caught up. The ingest analogue of `GET /v1/syncable/{id}/status`. Read
         behind a linearize barrier so the persisted position is consistent on
         whichever node answers; the lag is a live query against the source slot.
+
+        The response also carries the JSON shape `census` the worker took
+        during its snapshot pass, per topic: every payload path with its
+        observed types, counts, and first/last-seen row (including paths
+        nested inside JSON columns); each distinct shape with its row range;
+        and a draft JSON Schema (`draftSchema`) ready to review and POST as a
+        type. Types and paths only — the draft carries `enum` values only when
+        the ingestable opted into `censusValues`. Omitted until a census has
+        been published (census opted out, or no snapshot yet).
       operationId: getIngestableStatus
       parameters:
         - $ref: '#/components/parameters/Consistency'

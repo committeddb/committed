@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	httpgo "net/http"
+	"sort"
 
 	"github.com/committeddb/committed/internal/cluster"
 )
@@ -46,6 +47,33 @@ type IngestableStatusResponse struct {
 	// a distinct state, not a lag number. Recovery is a fresh snapshot. Always
 	// false for Postgres.
 	ReSnapshotRequired bool `json:"reSnapshotRequired"`
+	// Census is the JSON shape census the worker took during its snapshot
+	// pass, per topic — the type-drafting bootstrap. Omitted until a census
+	// has been published (census opted out, or no snapshot yet). Types and
+	// paths only; the draft schema carries enum values only when the
+	// ingestable opted into censusValues.
+	Census map[string]*TopicCensusResponse `json:"census,omitempty"`
+}
+
+// TopicCensusResponse is one topic's shape census: the distinct payload
+// shapes with their row ranges (the interleaved-shapes evidence), the derived
+// per-path view, and a DRAFT JSON Schema for POST /type review — inference is
+// bootstrap-only, the draft is never auto-blessed.
+type TopicCensusResponse struct {
+	RefreshEpoch uint64                `json:"refreshEpoch"`
+	Rows         uint64                `json:"rows"`
+	Shapes       []ShapeCensusResponse `json:"shapes"`
+	Paths        []*cluster.PathCensus `json:"paths"`
+	DraftSchema  string                `json:"draftSchema,omitempty"`
+}
+
+// ShapeCensusResponse is one distinct payload shape observed on the topic.
+type ShapeCensusResponse struct {
+	Fingerprint string   `json:"fingerprint"`
+	Shape       []string `json:"shape"`
+	Count       uint64   `json:"count"`
+	FirstRow    uint64   `json:"firstRow"`
+	LastRow     uint64   `json:"lastRow"`
 }
 
 // TableSnapshotProgress is one watched table's place in the initial snapshot.
@@ -100,6 +128,9 @@ func (h *HTTP) GetIngestableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 	}
 
 	resp := toIngestableStatusResponse(st)
+	if census, ok := h.c.IngestableCensus(id); ok {
+		resp.Census = toCensusResponse(census)
+	}
 
 	bs, err := json.Marshal(resp)
 	if err != nil {
@@ -107,6 +138,33 @@ func (h *HTTP) GetIngestableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 	writeJson(w, bs)
+}
+
+// toCensusResponse renders the replicated census: per topic, the shapes in
+// first-seen order, the derived path view, and the draft schema (rendered at
+// read time so drafter improvements apply to already-taken censuses).
+func toCensusResponse(c *cluster.IngestableCensus) map[string]*TopicCensusResponse {
+	out := make(map[string]*TopicCensusResponse, len(c.Topics))
+	for topic, tc := range c.Topics {
+		r := &TopicCensusResponse{
+			RefreshEpoch: c.RefreshEpoch,
+			Rows:         tc.Rows,
+			Shapes:       make([]ShapeCensusResponse, 0, len(tc.Shapes)),
+			Paths:        tc.PathsView(),
+		}
+		for fp, s := range tc.Shapes {
+			r.Shapes = append(r.Shapes, ShapeCensusResponse{
+				Fingerprint: fp, Shape: s.Shape, Count: s.Count,
+				FirstRow: s.FirstRow, LastRow: s.LastRow,
+			})
+		}
+		sort.Slice(r.Shapes, func(i, j int) bool { return r.Shapes[i].FirstRow < r.Shapes[j].FirstRow })
+		if draft, err := tc.DraftTypeSchema(); err == nil {
+			r.DraftSchema = string(draft)
+		}
+		out[topic] = r
+	}
+	return out
 }
 
 // AddIngestable handles POST /ingestable/{id}: it is the shared config-create

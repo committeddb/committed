@@ -198,6 +198,19 @@ type FakeCluster struct {
 	ingestReturnsOnCall map[int]struct {
 		result1 error
 	}
+	IngestableCensusStub        func(string) (*cluster.IngestableCensus, bool)
+	ingestableCensusMutex       sync.RWMutex
+	ingestableCensusArgsForCall []struct {
+		arg1 string
+	}
+	ingestableCensusReturns struct {
+		result1 *cluster.IngestableCensus
+		result2 bool
+	}
+	ingestableCensusReturnsOnCall map[int]struct {
+		result1 *cluster.IngestableCensus
+		result2 bool
+	}
 	IngestableExistsStub        func(string) (bool, error)
 	ingestableExistsMutex       sync.RWMutex
 	ingestableExistsArgsForCall []struct {
@@ -1655,6 +1668,70 @@ func (fake *FakeCluster) IngestReturnsOnCall(i int, result1 error) {
 	fake.ingestReturnsOnCall[i] = struct {
 		result1 error
 	}{result1}
+}
+
+func (fake *FakeCluster) IngestableCensus(arg1 string) (*cluster.IngestableCensus, bool) {
+	fake.ingestableCensusMutex.Lock()
+	ret, specificReturn := fake.ingestableCensusReturnsOnCall[len(fake.ingestableCensusArgsForCall)]
+	fake.ingestableCensusArgsForCall = append(fake.ingestableCensusArgsForCall, struct {
+		arg1 string
+	}{arg1})
+	stub := fake.IngestableCensusStub
+	fakeReturns := fake.ingestableCensusReturns
+	fake.recordInvocation("IngestableCensus", []interface{}{arg1})
+	fake.ingestableCensusMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeCluster) IngestableCensusCallCount() int {
+	fake.ingestableCensusMutex.RLock()
+	defer fake.ingestableCensusMutex.RUnlock()
+	return len(fake.ingestableCensusArgsForCall)
+}
+
+func (fake *FakeCluster) IngestableCensusCalls(stub func(string) (*cluster.IngestableCensus, bool)) {
+	fake.ingestableCensusMutex.Lock()
+	defer fake.ingestableCensusMutex.Unlock()
+	fake.IngestableCensusStub = stub
+}
+
+func (fake *FakeCluster) IngestableCensusArgsForCall(i int) string {
+	fake.ingestableCensusMutex.RLock()
+	defer fake.ingestableCensusMutex.RUnlock()
+	argsForCall := fake.ingestableCensusArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeCluster) IngestableCensusReturns(result1 *cluster.IngestableCensus, result2 bool) {
+	fake.ingestableCensusMutex.Lock()
+	defer fake.ingestableCensusMutex.Unlock()
+	fake.IngestableCensusStub = nil
+	fake.ingestableCensusReturns = struct {
+		result1 *cluster.IngestableCensus
+		result2 bool
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) IngestableCensusReturnsOnCall(i int, result1 *cluster.IngestableCensus, result2 bool) {
+	fake.ingestableCensusMutex.Lock()
+	defer fake.ingestableCensusMutex.Unlock()
+	fake.IngestableCensusStub = nil
+	if fake.ingestableCensusReturnsOnCall == nil {
+		fake.ingestableCensusReturnsOnCall = make(map[int]struct {
+			result1 *cluster.IngestableCensus
+			result2 bool
+		})
+	}
+	fake.ingestableCensusReturnsOnCall[i] = struct {
+		result1 *cluster.IngestableCensus
+		result2 bool
+	}{result1, result2}
 }
 
 func (fake *FakeCluster) IngestableExists(arg1 string) (bool, error) {

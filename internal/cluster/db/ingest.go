@@ -622,6 +622,11 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 
 	backoff := ingestBackoffMin
 
+	// The JSON shape census (see census.go): folds snapshot-phase rows,
+	// publishes replicated census state. nil (all methods no-op) when the
+	// operator opted out or no config is stored.
+	census := db.newCensusRecorder(id)
+
 	// dataProposeFailed is the POSITION BARRIER: armed the moment any data
 	// proposal fails, before the error is even classified. A standalone
 	// position checkpoint summarizes "all data through here committed", so
@@ -829,6 +834,11 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 					backoff = ingestBackoffMin
 					continue
 				}
+
+				// Census: fold snapshot rows (a refresh-boundary marker forces
+				// the pass's census to publish before the boundary commits).
+				// Never gates — see census.go.
+				census.observe(ctx, proposal)
 
 				// Lane split. Bare snapshot rows pipeline; ordered
 				// proposals (CDC, bundled-position rows, markers) drain the
