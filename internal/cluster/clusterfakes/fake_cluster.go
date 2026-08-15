@@ -595,6 +595,21 @@ type FakeCluster struct {
 		result1 []cluster.SyncableDeadLetter
 		result2 error
 	}
+	SyncableDerivationStub        func(string) (string, string, bool)
+	syncableDerivationMutex       sync.RWMutex
+	syncableDerivationArgsForCall []struct {
+		arg1 string
+	}
+	syncableDerivationReturns struct {
+		result1 string
+		result2 string
+		result3 bool
+	}
+	syncableDerivationReturnsOnCall map[int]struct {
+		result1 string
+		result2 string
+		result3 bool
+	}
 	SyncableExistsStub        func(string) (bool, error)
 	syncableExistsMutex       sync.RWMutex
 	syncableExistsArgsForCall []struct {
@@ -3702,6 +3717,73 @@ func (fake *FakeCluster) SyncableDeadLettersReturnsOnCall(i int, result1 []clust
 		result1 []cluster.SyncableDeadLetter
 		result2 error
 	}{result1, result2}
+}
+
+func (fake *FakeCluster) SyncableDerivation(arg1 string) (string, string, bool) {
+	fake.syncableDerivationMutex.Lock()
+	ret, specificReturn := fake.syncableDerivationReturnsOnCall[len(fake.syncableDerivationArgsForCall)]
+	fake.syncableDerivationArgsForCall = append(fake.syncableDerivationArgsForCall, struct {
+		arg1 string
+	}{arg1})
+	stub := fake.SyncableDerivationStub
+	fakeReturns := fake.syncableDerivationReturns
+	fake.recordInvocation("SyncableDerivation", []interface{}{arg1})
+	fake.syncableDerivationMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2, ret.result3
+	}
+	return fakeReturns.result1, fakeReturns.result2, fakeReturns.result3
+}
+
+func (fake *FakeCluster) SyncableDerivationCallCount() int {
+	fake.syncableDerivationMutex.RLock()
+	defer fake.syncableDerivationMutex.RUnlock()
+	return len(fake.syncableDerivationArgsForCall)
+}
+
+func (fake *FakeCluster) SyncableDerivationCalls(stub func(string) (string, string, bool)) {
+	fake.syncableDerivationMutex.Lock()
+	defer fake.syncableDerivationMutex.Unlock()
+	fake.SyncableDerivationStub = stub
+}
+
+func (fake *FakeCluster) SyncableDerivationArgsForCall(i int) string {
+	fake.syncableDerivationMutex.RLock()
+	defer fake.syncableDerivationMutex.RUnlock()
+	argsForCall := fake.syncableDerivationArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeCluster) SyncableDerivationReturns(result1 string, result2 string, result3 bool) {
+	fake.syncableDerivationMutex.Lock()
+	defer fake.syncableDerivationMutex.Unlock()
+	fake.SyncableDerivationStub = nil
+	fake.syncableDerivationReturns = struct {
+		result1 string
+		result2 string
+		result3 bool
+	}{result1, result2, result3}
+}
+
+func (fake *FakeCluster) SyncableDerivationReturnsOnCall(i int, result1 string, result2 string, result3 bool) {
+	fake.syncableDerivationMutex.Lock()
+	defer fake.syncableDerivationMutex.Unlock()
+	fake.SyncableDerivationStub = nil
+	if fake.syncableDerivationReturnsOnCall == nil {
+		fake.syncableDerivationReturnsOnCall = make(map[int]struct {
+			result1 string
+			result2 string
+			result3 bool
+		})
+	}
+	fake.syncableDerivationReturnsOnCall[i] = struct {
+		result1 string
+		result2 string
+		result3 bool
+	}{result1, result2, result3}
 }
 
 func (fake *FakeCluster) SyncableExists(arg1 string) (bool, error) {

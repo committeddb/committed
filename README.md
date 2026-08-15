@@ -43,7 +43,10 @@ Committed is specifically NOT a databse designed for querying.
   multi-topic BFF rows, collection aggregates, cross-topic enrichment
   (`sql-projection`, the primary read-model pattern; see
   [docs/read-models.md](docs/read-models.md)). Destinations today:
-  SQL (MySQL/PostgreSQL) and HTTP.
+  SQL (MySQL/PostgreSQL), HTTP — and the cluster itself (`loopback`),
+  which derives a new topic from a source topic so one transform serves
+  N dumb consumers ([docs/read-models.md](docs/read-models.md)
+  § Derived topics).
 
 ### Running
 

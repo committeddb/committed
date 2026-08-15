@@ -340,6 +340,13 @@ type SyncableStatusResponse struct {
 	Rematerializing         bool   `json:"rematerializing,omitempty"`
 	RematerializeTargetHead uint64 `json:"rematerializeTargetHead,omitempty"`
 
+	// DerivedFrom / DerivesInto are the derivation provenance of a loopback
+	// syncable: the topic it consumes and the derived topic it produces.
+	// Omitted for every non-deriving kind. Pair with InterpretationStale to
+	// read "this derived topic was materialized under a superseded reading".
+	DerivedFrom string `json:"derivedFrom,omitempty"`
+	DerivesInto string `json:"derivesInto,omitempty"`
+
 	// DeadLetters is how many proposals this syncable has skipped
 	// (dead-lettered), permanently or manually; LastDeadLetterIndex is the
 	// raft index of the most recent skip (omitted when none). ALWAYS
@@ -500,6 +507,11 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 	if rec, ok := h.c.SyncableRematerialization(id); ok {
 		resp.Rematerializing = true
 		resp.RematerializeTargetHead = rec.TargetHead
+	}
+
+	if source, target, ok := h.c.SyncableDerivation(id); ok {
+		resp.DerivedFrom = source
+		resp.DerivesInto = target
 	}
 
 	resp.OwnerNode = owner

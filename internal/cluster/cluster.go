@@ -64,6 +64,10 @@ type Cluster interface {
 	// re-materialization (nil, false when none) — the status endpoint's
 	// progress source.
 	SyncableRematerialization(id string) (*SyncableRematerialization, bool)
+	// SyncableDerivation reports a stored syncable's derivation provenance —
+	// the topic it consumes and the derived topic it produces. ok is false
+	// for every non-deriving kind; the status surface omits the fields then.
+	SyncableDerivation(id string) (source, target string, ok bool)
 	ProposeDatabase(ctx context.Context, c *Configuration) error
 	// Scrub requests physical removal of already-delete-proposed (RTBF)
 	// entities from the permanent event log up to the current applied index.

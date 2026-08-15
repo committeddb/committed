@@ -305,6 +305,19 @@ type SyncableTopicExtractor interface {
 	TopicsFromConfig(v *ParsedConfig) []string
 }
 
+// SyncableDerivedTopicExtractor is the optional SyncableParser extension that
+// reports which topics a syncable config PRODUCES — the derivation edges a
+// loopback syncable writes back into the cluster — read straight from the
+// parsed config WITHOUT building the syncable. The propose path and the
+// apply-time build guard walk these edges to keep the derivation graph a DAG
+// (a cycle is an infinite consensus loop) and single-producer per topic (two
+// producers would interleave their refresh-epoch spaces on one topic, so one
+// source's reconciling sweep could erase the other's rows downstream). A
+// parser that does not implement it contributes no edges.
+type SyncableDerivedTopicExtractor interface {
+	DerivedTopicsFromConfig(v *ParsedConfig) []string
+}
+
 // SyncableDatabaseExtractor is the optional SyncableParser extension that reports
 // which database configs a syncable references for its destination pool, read
 // straight from the parsed config WITHOUT building the syncable (no Init, no

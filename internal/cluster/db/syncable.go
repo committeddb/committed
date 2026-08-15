@@ -68,6 +68,61 @@ func (db *DB) refuseAlwaysCurrentAcrossBreak(c *cluster.Configuration) error {
 	return nil
 }
 
+// refuseDerivationHazards refuses a syncable config whose derivation edges
+// (source topic → derived topic) would break the derivation graph: a cycle
+// (an infinite consensus loop) or a second producer for a derived topic (two
+// interleaved refresh-epoch spaces — one source's reconciling sweep could
+// erase the other's rows downstream). Non-deriving kinds contribute no edges
+// and pass for free. Fail-closed on storage errors: these invariants must
+// hold, so an unanswerable check refuses.
+func (db *DB) refuseDerivationHazards(c *cluster.Configuration) error {
+	targets, err := db.parser.SyncableDerivedTopics(c.MimeType, c.Data)
+	if err != nil || len(targets) == 0 {
+		return nil // not a deriving kind (an unparseable config was refused earlier)
+	}
+	sources, _ := db.parser.SyncableTopics(c.MimeType, c.Data)
+
+	cfgs, err := db.storage.Syncables()
+	if err != nil {
+		return fmt.Errorf("derivation guard: enumerate syncables: %w", err)
+	}
+	var existing []DerivationEdge
+	for _, cfg := range cfgs {
+		if cfg.ID == c.ID {
+			continue // a re-POST replaces this config's own edges
+		}
+		ts, terr := db.parser.SyncableDerivedTopics(cfg.MimeType, cfg.Data)
+		if terr != nil || len(ts) == 0 {
+			continue
+		}
+		ss, _ := db.parser.SyncableTopics(cfg.MimeType, cfg.Data)
+		existing = append(existing, DerivationEdge{ID: cfg.ID, Sources: ss, Targets: ts})
+	}
+	if err := CheckDerivation(existing, DerivationEdge{ID: c.ID, Sources: sources, Targets: targets}); err != nil {
+		return cluster.NewConfigError(err)
+	}
+	return nil
+}
+
+// SyncableDerivation reports the derivation provenance of a stored syncable:
+// the topic it consumes and the topic it derives into. ok is false for every
+// non-deriving kind — the status surface omits the fields entirely then.
+func (db *DB) SyncableDerivation(id string) (source, target string, ok bool) {
+	cfg := db.currentSyncableConfig(id)
+	if cfg == nil {
+		return "", "", false
+	}
+	targets, err := db.parser.SyncableDerivedTopics(cfg.MimeType, cfg.Data)
+	if err != nil || len(targets) == 0 {
+		return "", "", false
+	}
+	sources, _ := db.parser.SyncableTopics(cfg.MimeType, cfg.Data)
+	if len(sources) == 0 {
+		return "", targets[0], true
+	}
+	return sources[0], targets[0], true
+}
+
 func (db *DB) ProposeSyncable(ctx context.Context, c *cluster.Configuration) error {
 	name, _, mode, err := db.ParseSyncable(c.MimeType, c.Data, db.storage)
 	if err != nil {
@@ -87,6 +142,14 @@ func (db *DB) ProposeSyncable(ctx context.Context, c *cluster.Configuration) err
 		if err := db.refuseAlwaysCurrentAcrossBreak(c); err != nil {
 			return err
 		}
+	}
+
+	// Derivation-graph guard: a config that derives a topic (a loopback) must
+	// keep the graph a DAG and stay its target's only producer. Loud at POST;
+	// the apply path re-checks deterministically (see wal.saveSyncable) so a
+	// config racing past this admission check degrades instead of looping.
+	if err := db.refuseDerivationHazards(c); err != nil {
+		return err
 	}
 
 	// Guard: a re-POST some destinations can't absorb in place (e.g. a SQL

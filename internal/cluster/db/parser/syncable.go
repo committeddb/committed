@@ -35,6 +35,32 @@ func (p *Parser) SyncableTopics(mimeType string, data []byte) ([]string, error) 
 	return extractor.TopicsFromConfig(v), nil
 }
 
+// SyncableDerivedTopics reports which topics the syncable config PRODUCES
+// (its derivation targets), read from the config alone (no Init / no build).
+// It mirrors SyncableTopics: pick the type-specific parser, then delegate to
+// its cluster.SyncableDerivedTopicExtractor. Returns nil (not an error) when
+// the matched parser doesn't derive topics — every non-loopback kind — so the
+// derivation-graph guards are free for them. Errors only when the bytes don't
+// parse at all.
+func (p *Parser) SyncableDerivedTopics(mimeType string, data []byte) ([]string, error) {
+	v, err := parseBytes(mimeType, data)
+	if err != nil {
+		return nil, err
+	}
+
+	tipe := v.GetString("syncable.type")
+	parser, ok := p.syncableParsers[tipe]
+	if !ok {
+		return nil, fmt.Errorf("cannot parse syncable of type: %s", tipe)
+	}
+
+	extractor, ok := parser.(cluster.SyncableDerivedTopicExtractor)
+	if !ok {
+		return nil, nil // this syncable kind derives no topics — no edges
+	}
+	return extractor.DerivedTopicsFromConfig(v), nil
+}
+
 // SyncableMode reports the syncable config's consumer stance, read from the
 // config alone (no Init / no destination pool) — the side-effect-free read
 // admission checks use to classify every stored syncable.

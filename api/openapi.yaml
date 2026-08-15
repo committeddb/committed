@@ -598,6 +598,21 @@ paths:
         referencing an unknown lookup) fails here with 400. A rule or
         source with no `when` matches every event of its topic.
 
+        `loopback` derives a topic INSIDE the cluster: it consumes
+        `loopback.topic`, applies `[[loopback.mappings]]` (`jsonPath` →
+        `field`; none = whole-payload passthrough) once, and proposes the
+        result to `loopback.target` under the target's type — so N
+        downstream syncables consume the derived topic with dumb mappings.
+        Keys, generations, delete tombstones, and refresh-boundary markers
+        forward verbatim (RTBF deletes chase the derivation chain;
+        re-keying is refused). The target type must exist; a
+        non-snapshot-kind target additionally requires
+        `loopback.acknowledgeAppendSemantics = true` (replays append
+        instead of converging). The derivation graph is guarded at POST
+        and re-checked deterministically at apply: a cycle (400,
+        an infinite consensus loop) and a second producer for a derived
+        topic (400, interleaved refresh-epoch spaces) are refused.
+
         `syncable.mode` declares the consumer stance: `as-stored` (default —
         exact written bytes; version handling is the consumer's, whether
         pinned to one version or version-aware) or `always-current` (entities
@@ -2471,6 +2486,50 @@ components:
             otherwise. `0` with the field present means the worker has
             examined nothing yet — with `caughtUp` that splits "nothing to
             examine" from "never started scanning".
+        interpretationPin:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            The errata-registry index this syncable's current materialization
+            began under — the second half of the (data, interpretation)
+            determinism pair. 0 means pinned before any errata existed.
+            Always present.
+        interpretationStale:
+          type: boolean
+          description: |
+            True when an erratum affecting a consumed topic landed past
+            `interpretationPin`: rows already synced were derived under a
+            superseded reading and stay that way until the operator
+            re-derives (POST .../rematerialize, or a blue-green rebuild).
+            Staleness is loud and queryable, never auto-healed. Always present.
+        rematerializing:
+          type: boolean
+          description: |
+            True while a POST .../rematerialize replay is in progress.
+            Omitted when none is running.
+        rematerializeTargetHead:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            The data head the in-progress re-materialization must reach before
+            its completion sweep runs — compare `checkpointIndex` against it
+            for progress. Omitted when no re-materialization is running.
+        derivedFrom:
+          type: string
+          description: |
+            For a `loopback` syncable: the source topic it consumes. Together
+            with `derivesInto` this is the syncable's derivation provenance —
+            the edge it contributes to the cluster's derivation DAG. Omitted
+            for every non-deriving kind.
+        derivesInto:
+          type: string
+          description: |
+            For a `loopback` syncable: the derived topic it produces. Pair
+            with `interpretationStale` to read "this derived topic was
+            materialized under a superseded reading". Omitted for every
+            non-deriving kind.
 
     IngestableStatusResponse:
       type: object
