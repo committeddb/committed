@@ -372,6 +372,24 @@ func (h *Harness) GetJSON(t *testing.T, path string) []byte {
 	return body
 }
 
+// TryGetJSON GETs a committed API path, returning the HTTP status code and
+// body WITHOUT failing the test on a non-200 — for Eventually polls that must
+// tolerate a transient error answer. The one it exists for: config builds run
+// on the listener, off the raft apply path, so there is a brief window after
+// a config POST returns 200 in which the worker is not yet registered and its
+// status endpoint answers an explained 404 (ingestable_not_running). A poll
+// loop retries through that window; GetJSON's hard 200 requirement would fail
+// the whole test on the first early poll.
+func (h *Harness) TryGetJSON(t *testing.T, path string) (int, []byte) {
+	t.Helper()
+	resp, err := http.Get(committedURL(path)) //nolint:gosec // G107: fixed in-process URL
+	require.NoError(t, err, "GET %s", path)
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	return resp.StatusCode, body
+}
+
 // SinkDatabaseID is the id of the sink database config the harness registers
 // when Options.Syncable is set — the `db = "..."` value a custom syncable's
 // TOML references.

@@ -667,6 +667,42 @@ syncable projecting back into a MySQL sink table — is exercised end-to-end by 
 `e2e/cdc` MySQL tests (`e2e/cdc/harness/mysql.go`, `e2e/cdc/mysql_test.go`); the
 DDL and TOML there are copy-pasteable.
 
+### Snapshot scale: resume and parallel readers (MySQL)
+
+The snapshot is **restart-resumable at keyset granularity** out of the box: the
+per-table cursor rides each batch's proposal, so a deploy or failover
+mid-snapshot resumes from the last committed row — completed tables are never
+re-read. Nothing to configure.
+
+For very large tables, the snapshot can additionally read each table with
+**parallel range readers**:
+
+```toml
+[sql.options]
+batch_size       = "10000"   # rows per keyset batch (default 10000)
+snapshot_readers = "4"       # parallel PK-range readers per table (default 1)
+```
+
+- `snapshot_readers` defaults to **1** (the single stream) on purpose: the
+  snapshot target is usually a production replica, and every reader holds a
+  connection running a range scan. Raise it deliberately, watching the
+  source's load. Values are capped at 16.
+- A table splits when its primary key is a **single integer column** (the
+  auto-increment case) or a **BINARY/VARBINARY column** (UUID-as-BINARY(16)).
+  Composite keys and CHAR/VARCHAR keys read on the single stream — a text
+  key's ORDER BY follows its collation, which arithmetic range bounds cannot
+  safely reproduce. Small tables also stay single-stream (splitting them
+  gains nothing).
+- The chunk plan is **frozen in the checkpoint**: a restart resumes the same
+  ranges from their cursors even if `snapshot_readers` changed. Per-table
+  progress shows as `chunksTotal` / `chunksDone` on
+  `GET /v1/ingestable/{id}/status`.
+- Ordering: rows from different ranges of one table interleave in the log
+  (each range is still in key order). Keyed consumers are unaffected; a
+  keyless history table records the interleaved order.
+
+The CDC **stream** is unaffected — it stays a single ordered cursor.
+
 ### MySQL lag, caughtUp, and the binlog-retention caveat
 
 With `gtid_mode=ON`, committed reports a real `lag` and `caughtUp` for MySQL,

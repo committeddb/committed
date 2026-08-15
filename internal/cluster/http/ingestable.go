@@ -83,6 +83,11 @@ type TableSnapshotProgress struct {
 	Table    string `json:"table"`
 	Topic    string `json:"topic"`
 	Complete bool   `json:"complete"`
+	// ChunksTotal/ChunksDone report a chunked parallel snapshot's progress
+	// (snapshot_readers > 1 with a splittable PK). Omitted for a
+	// single-stream table.
+	ChunksTotal int `json:"chunksTotal,omitempty"`
+	ChunksDone  int `json:"chunksDone,omitempty"`
 }
 
 // GetIngestableStatus reports an ingestable worker's operational status
@@ -304,9 +309,11 @@ func toIngestableStatusResponse(st cluster.IngestableStatus) IngestableStatusRes
 	}
 	for _, t := range st.SnapshotProgress {
 		resp.SnapshotProgress = append(resp.SnapshotProgress, TableSnapshotProgress{
-			Table:    t.Table,
-			Topic:    t.Topic,
-			Complete: t.Complete,
+			Table:       t.Table,
+			Topic:       t.Topic,
+			Complete:    t.Complete,
+			ChunksTotal: t.ChunksTotal,
+			ChunksDone:  t.ChunksDone,
 		})
 	}
 	return resp

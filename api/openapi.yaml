@@ -2637,6 +2637,17 @@ components:
         complete:
           type: boolean
           description: Whether this table's snapshot finished.
+        chunksTotal:
+          type: integer
+          minimum: 0
+          description: |
+            For a chunked parallel snapshot (`snapshot_readers` > 1 with a
+            splittable primary key): how many PK-range chunks the table's
+            frozen plan holds. Omitted for a single-stream table.
+        chunksDone:
+          type: integer
+          minimum: 0
+          description: How many of the table's chunks have finished. Omitted for a single-stream table.
 
     PipelineStatusResponse:
       type: object

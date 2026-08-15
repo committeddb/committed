@@ -2224,10 +2224,14 @@ func snapshot(
 	progress := &dialectpb.SnapshotProgress{
 		LastPkByTable:   map[string]string{},
 		CompletedTables: nil,
+		ChunksByTable:   map[string]*dialectpb.TableChunkProgress{},
 	}
 	completed := map[string]bool{}
 	if resumeProgress != nil {
 		maps.Copy(progress.LastPkByTable, resumeProgress.LastPkByTable)
+		// A chunked table's FROZEN plan (with per-chunk cursors) resumes
+		// verbatim — never re-planned; see the proto contract.
+		maps.Copy(progress.ChunksByTable, resumeProgress.ChunksByTable)
 		progress.CompletedTables = append(progress.CompletedTables, resumeProgress.CompletedTables...)
 		// Carry the partial-backfill mark through to every persisted
 		// mid-snapshot checkpoint: dropping it would make a crash-resume
@@ -2257,6 +2261,8 @@ func snapshot(
 			zap.Uint64("refresh_epoch", epoch))
 	}
 
+	readers := parseSnapshotReaders(config.Options)
+
 	for _, table := range config.Tables {
 		if completed[table] {
 			zap.L().Info("snapshot: skipping already-completed table",
@@ -2264,12 +2270,42 @@ func snapshot(
 			)
 			continue
 		}
-		if err := snapshotTable(ctx, db, config, table, batchSize, progress, &pos, gtid, epoch, pr, po); err != nil {
+		// Chunked-parallel dispatch: a table with a persisted chunk plan
+		// ALWAYS resumes chunked (the frozen-plan contract — even if
+		// snapshot_readers has since changed, including to 1). A fresh table
+		// goes parallel only when the operator opted in (snapshot_readers > 1)
+		// AND the planner found a split strategy; everything else takes the
+		// single-stream path unchanged. A table mid-flight on the SINGLE
+		// stream (last_pk_by_table) similarly keeps its cursor — never
+		// converted to chunks mid-table.
+		plan := progress.ChunksByTable[table]
+		if plan == nil && readers > 1 {
+			if _, resuming := progress.LastPkByTable[table]; !resuming {
+				spec := config.SpecForTable(table)
+				if spec == nil {
+					return nil, "", fmt.Errorf("snapshot: no topic-spec routes table %q", table)
+				}
+				p, perr := planTableChunks(ctx, db, table, spec, readers, batchSize)
+				if perr != nil {
+					return nil, "", fmt.Errorf("snapshot: table %s: %w", table, perr)
+				}
+				if p != nil {
+					plan = p
+					progress.ChunksByTable[table] = p
+				}
+			}
+		}
+		if plan != nil {
+			if err := snapshotTableParallel(ctx, db, config, table, batchSize, readers, plan, progress, &pos, gtid, epoch, pr); err != nil {
+				return nil, "", fmt.Errorf("snapshot: table %s: %w", table, err)
+			}
+		} else if err := snapshotTable(ctx, db, config, table, batchSize, progress, &pos, gtid, epoch, pr, po); err != nil {
 			return nil, "", fmt.Errorf("snapshot: table %s: %w", table, err)
 		}
-		// Mark complete and drop any partial cursor.
+		// Mark complete and drop any partial cursor (single-stream or chunked).
 		progress.CompletedTables = append(progress.CompletedTables, table)
 		delete(progress.LastPkByTable, table)
+		delete(progress.ChunksByTable, table)
 		completed[table] = true
 
 		if err := emitProgress(ctx, po, pos, gtid, progress, epoch); err != nil {
@@ -2572,7 +2608,7 @@ func snapshotTable(
 		}
 		batchNum++
 
-		rows, lastKey, count, err := readBatch(ctx, db, table, spec, lastPK, haveLastPK, batchSize)
+		rows, lastKey, count, err := readBatch(ctx, db, table, spec, lastPK, haveLastPK, "", batchSize)
 		if err != nil {
 			return err
 		}
@@ -2631,6 +2667,7 @@ func readBatch(
 	spec *sql.TopicSpec,
 	lastPK string,
 	haveLastPK bool,
+	upper string,
 	batchSize int,
 ) ([]*cluster.Entity, string, int, error) {
 	pkCols := spec.PrimaryKey
@@ -2651,46 +2688,14 @@ func readBatch(
 		return nil, "", 0, fmt.Errorf("set session time_zone: %w", err)
 	}
 
-	// Keyset pagination ordered by the full PK. A single column is `c > ?`; a
-	// composite is the row-value comparison `(c1, c2) > (?, ?)` — MySQL coerces
-	// the bound string cursor values to each column's type. The cursor is the
-	// prior batch's last entity key (CompositeKey), decoded to per-column
-	// values here.
-	orderCols := make([]string, len(pkCols))
-	for i, c := range pkCols {
-		orderCols[i] = sqlident.MySQL.Ident(c) + " ASC"
-	}
-	orderBy := strings.Join(orderCols, ", ")
-
 	// The batch predicate (FROM … WHERE … ORDER BY … LIMIT) is shared verbatim by
 	// the row read below and the JSON type-resolution query in phase 2, so under
 	// this REPEATABLE READ tx both see the same rows in the same order and zip
 	// one-for-one. The type query prepends its own `?` JSON-path args ahead of
 	// these cursor args (SELECT placeholders bind before WHERE placeholders).
-	var fromWhere string
-	var args []any
-	if haveLastPK {
-		cursor, derr := sql.DecodeCompositeCursor(lastPK, len(pkCols))
-		if derr != nil {
-			return nil, "", 0, derr
-		}
-		cols := make([]string, len(pkCols))
-		placeholders := make([]string, len(pkCols))
-		args = make([]any, len(pkCols))
-		for i, c := range pkCols {
-			cols[i] = sqlident.MySQL.Ident(c)
-			placeholders[i] = "?"
-			args[i] = cursor[i]
-		}
-		fromWhere = fmt.Sprintf(
-			"FROM %s WHERE (%s) > (%s) ORDER BY %s LIMIT %d",
-			sqlident.MySQL.Table(table), strings.Join(cols, ", "), strings.Join(placeholders, ", "), orderBy, batchSize,
-		)
-	} else {
-		fromWhere = fmt.Sprintf(
-			"FROM %s ORDER BY %s LIMIT %d",
-			sqlident.MySQL.Table(table), orderBy, batchSize,
-		)
+	fromWhere, args, err := batchPredicate(table, pkCols, lastPK, haveLastPK, upper, batchSize)
+	if err != nil {
+		return nil, "", 0, err
 	}
 
 	rows, err := tx.QueryContext(ctx, fmt.Sprintf("SELECT * %s", fromWhere), args...)

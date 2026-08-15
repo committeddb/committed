@@ -84,7 +84,14 @@ column = "meta"
 		var resp struct {
 			Census map[string]topicCensus `json:"census"`
 		}
-		if err := json.Unmarshal(h.GetJSON(t, "/v1/ingestable/photos/status"), &resp); err != nil {
+		// TryGetJSON, not GetJSON: builds are deferred to the listener, so the
+		// first polls can land in the startup window where the worker is not
+		// yet registered and status answers an explained 404 — retry through it.
+		code, body := h.TryGetJSON(t, "/v1/ingestable/photos/status")
+		if code != 200 {
+			return false
+		}
+		if err := json.Unmarshal(body, &resp); err != nil {
 			return false
 		}
 		c, ok := resp.Census["photos"]
