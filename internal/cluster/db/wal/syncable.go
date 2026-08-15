@@ -26,19 +26,20 @@ func (s *Storage) handleSyncable(e *cluster.Entity, raftIndex uint64) error {
 }
 
 // saveSyncable persists a syncable Configuration as a new version in bbolt
-// and then notifies the consumer channel. The channel send happens AFTER the
-// bbolt Update returns successfully — it must not happen inside the closure,
-// because:
+// and then queues the node-local BUILD for the listener. The apply path
+// itself never parses or builds: ParseSyncable runs Init against the
+// destination (DDL, prepares — destination I/O that can hang on a table
+// lock), and the apply-liveness invariant is absolute — appliedIndex never
+// waits on destination-DB state, and no destination I/O ever runs under
+// the bbolt writer lock. The pushed Build closure executes on the
+// db-layer listener goroutine at dequeue time, exactly like the reconcile
+// closures, FIFO with every other config event.
 //
-//  1. The unbuffered channel send would block while holding the bbolt
-//     writer lock, blocking all other writes against any bucket.
-//  2. If the tx commit failed *after* the send, the consumer would have
-//     been notified about state that doesn't exist on disk.
-//  3. The consumer (db.listenForSyncables) calls db.Sync, which can re-enter
-//     the proposal path; that would deadlock under the writer lock.
+// The push happens AFTER the bbolt Update returns successfully — a failed
+// commit must not have queued a build for state that doesn't exist on
+// disk.
 func (s *Storage) saveSyncable(t *cluster.Configuration, raftIndex uint64) error {
-	var syncable cluster.Syncable
-	var built bool
+	var replayed bool
 	var clearedWorkerState bool
 	err := s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(syncableBucket)
@@ -48,10 +49,12 @@ func (s *Storage) saveSyncable(t *cluster.Configuration, raftIndex uint64) error
 
 		// Replay guard (config-version-replay): ApplyCommittedBatch can replay a
 		// whole Ready on a crash-window restart. A versioned apply whose entry
-		// index already produced a version is a replay — skip it, or the last+1
-		// allocator appends a phantom version, diverging history across replicas.
-		// The set below rides this same atomic tx, so a failure rolls both back.
+		// index already produced a version is a replay — skip it (no version
+		// append, no build queued), or the last+1 allocator appends a phantom
+		// version, diverging history across replicas. The set below rides this
+		// same atomic tx, so a failure rolls both back.
 		if versionedLastIndex(b, []byte(t.ID)) >= raftIndex {
+			replayed = true
 			return nil
 		}
 		if err := setVersionedLastIndex(b, []byte(t.ID), raftIndex); err != nil {
@@ -76,42 +79,21 @@ func (s *Storage) saveSyncable(t *cluster.Configuration, raftIndex uint64) error
 		}
 
 		// Deterministic state-machine write FIRST: persist the raw config
-		// bytes so every replica converges, then attempt the node-local
-		// build (which can fail on a missing ${VAR} secret).
+		// bytes so every replica converges. The node-local build (which
+		// can fail on a missing ${VAR} secret) happens later, on the
+		// listener, off this path.
 		//
 		// Skip the version APPEND on a byte-identical replay: a crash-apply-window
 		// entry is re-delivered (entity fsynced, applied-index not), and appending
 		// again would duplicate the version on the replaying node — diverging its
 		// version history and rollback-by-number from nodes that didn't crash
-		// there. Mirrors saveType. The node-local build below still runs, so a
+		// there. Mirrors saveType. The build below is still queued, so a
 		// replay re-establishes the worker.
 		if existing, gerr := getVersioned(b, []byte(t.ID)); gerr != nil || !bytes.Equal(existing, bs) {
 			if _, err := putVersioned(b, []byte(t.ID), bs); err != nil {
 				return fmt.Errorf("[wal.syncable] putVersioned: %w", err)
 			}
 		}
-
-		_, parsed, parsedMode, err := s.parser.ParseSyncable(t.MimeType, t.Data, s)
-		if err != nil {
-			// Degrade rather than fail the apply (which would crash the
-			// node). The config is persisted; no worker is started until
-			// the build succeeds.
-			s.recordConfigError("syncable", t.ID, configErrBuild, err)
-			s.logger.Error("syncable config persisted but could not be built on this node (degraded); fix the environment and the config will build on next restart",
-				zap.String("id", t.ID), zap.Error(err))
-			return nil
-		}
-		s.clearConfigError("syncable", t.ID, configErrBuild)
-		// ModeAlwaysCurrent decorates the user syncable with a
-		// migration wrapper so the worker loop stays oblivious to
-		// version-upgrade concerns. ModeAsStored hands the syncable
-		// through untouched. The wrapper lives in the migration
-		// package next to the chain it uses.
-		if parsedMode == cluster.ModeAlwaysCurrent {
-			parsed = migration.Wrap(parsed, s, s.metrics)
-		}
-		syncable = parsed
-		built = true
 
 		return nil
 	})
@@ -127,15 +109,49 @@ func (s *Storage) saveSyncable(t *cluster.Configuration, raftIndex uint64) error
 		s.metrics.SetWorkerParked("sync", t.ID, false)
 	}
 
-	if built && s.syncPump != nil {
+	// A replay-guard hit queues nothing: that entry's version already produced
+	// its build message (or its worker survives untouched); a duplicate would
+	// pointlessly restart the worker on a crash-window replay.
+	if !replayed && s.syncPump != nil {
 		// Push, never send: the apply path must not block on the listener
 		// (see notifyPump — the field wedge where a locked sink table froze
 		// appliedIndex cluster-wide through this exact send).
-		s.logger.Debug("queueing syncable notification", zap.String("id", t.ID))
-		s.syncPump.push(&db.SyncableWithID{ID: t.ID, Syncable: syncable})
+		s.logger.Debug("queueing syncable build", zap.String("id", t.ID))
+		s.syncPump.push(&db.SyncableWithID{ID: t.ID, Build: func() cluster.Syncable {
+			return s.buildSyncable(t)
+		}})
 	}
 
 	return nil
+}
+
+// buildSyncable is the node-local build body, executed by the db-layer
+// LISTENER at dequeue time — never on the apply path (the apply-liveness
+// invariant: appliedIndex never waits on destination-DB state). It parses
+// and Inits against the destination (bounded inside Init by the sql
+// layer's InitTimeout), records/clears the degraded-config evidence, and
+// decorates with the migration wrapper. Returns nil for a config that
+// failed to build on this node: the raw bytes are already persisted (the
+// deterministic state-machine write), no worker is (re)started, and the
+// degraded record is the loud, queryable evidence.
+func (s *Storage) buildSyncable(t *cluster.Configuration) cluster.Syncable {
+	_, parsed, parsedMode, err := s.parser.ParseSyncable(t.MimeType, t.Data, s)
+	if err != nil {
+		s.recordConfigError("syncable", t.ID, configErrBuild, err)
+		s.logger.Error("syncable config persisted but could not be built on this node (degraded); fix the environment and the config will build on next restart",
+			zap.String("id", t.ID), zap.Error(err))
+		return nil
+	}
+	s.clearConfigError("syncable", t.ID, configErrBuild)
+	// ModeAlwaysCurrent decorates the user syncable with a
+	// migration wrapper so the worker loop stays oblivious to
+	// version-upgrade concerns. ModeAsStored hands the syncable
+	// through untouched. The wrapper lives in the migration
+	// package next to the chain it uses.
+	if parsedMode == cluster.ModeAlwaysCurrent {
+		parsed = migration.Wrap(parsed, s, s.metrics)
+	}
+	return parsed
 }
 
 // SyncableExists reports whether a syncable config id currently exists (a
@@ -253,22 +269,11 @@ func (s *Storage) reconcileSyncableList() ([]*db.SyncableWithID, error) {
 			out = append(out, &db.SyncableWithID{ID: r.id})
 			continue
 		}
-		_, syncable, mode, perr := s.parser.ParseSyncable(r.cfg.MimeType, r.cfg.Data, s)
-		if perr != nil {
-			s.recordConfigError("syncable", r.id, configErrBuild, perr)
-			s.logger.Warn("sync reconcile: parse (degraded — kept)",
-				zap.String("id", r.id), zap.Error(perr))
-			out = append(out, &db.SyncableWithID{ID: r.id})
-			continue
-		}
-		s.clearConfigError("syncable", r.id, configErrBuild)
-		// Mirror saveSyncable: ModeAlwaysCurrent decorates the syncable
-		// with the migration wrapper so the worker loop stays oblivious
-		// to version-upgrade concerns.
-		if mode == cluster.ModeAlwaysCurrent {
-			syncable = migration.Wrap(syncable, s, s.metrics)
-		}
-		out = append(out, &db.SyncableWithID{ID: r.id, Syncable: syncable})
+		// Same build body as the apply-queued path (evidence recording and
+		// the migration wrapper live in one place). A nil result is a
+		// degraded build: the entry stays PRESENT so its worker is kept
+		// (not cancelled as a phantom delete), just not reconfigured.
+		out = append(out, &db.SyncableWithID{ID: r.id, Syncable: s.buildSyncable(r.cfg)})
 	}
 	s.sweepConfigErrorsExcept("syncable", present)
 	return out, nil

@@ -102,8 +102,12 @@ paths:
       summary: Readiness probe
       description: |
         Returns 200 once raft has elected a leader AND the node has
-        applied at least one entry. Returns 503 otherwise. Orchestrators
-        should keep traffic away until this endpoint reports ready.
+        applied at least one entry AND apply is making progress. Returns
+        503 otherwise — including when committed entries sit unapplied
+        with zero progress for a sustained threshold (an apply wedge:
+        such a node cannot confirm writes and serves stale reads even
+        though the process is alive). Orchestrators should keep traffic
+        away until this endpoint reports ready.
       operationId: getReady
       security: []
       responses:

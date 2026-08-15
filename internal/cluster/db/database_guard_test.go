@@ -66,9 +66,9 @@ func TestProposeDatabase_GuardsConnectionChangeWithDependents(t *testing.T) {
 	require.NoError(t, d.ProposeDatabase(ctx, dbCfg(connA))) // back to A
 
 	// A syncable now references the database. Proposed raw (not via ProposeSyncable)
-	// with an intentionally-incomplete config — it names sql.db but omits sql.topic —
-	// so the apply-path build degrades: saveSyncable persists the bytes first, then
-	// records a config error and starts NO worker (no sync-channel handoff). The
+	// with an intentionally-incomplete config — it names sql.db but omits sql.topic.
+	// saveSyncable persists the bytes and queues the node-local build for the
+	// listener (which this harness doesn't wire, so no worker ever starts). The
 	// config, and its database reference, is persisted for the guard to enumerate.
 	seed, err := cluster.NewUpsertSyncableEntity(&cluster.Configuration{
 		ID: "mysync", Name: "mysync", MimeType: "text/toml",

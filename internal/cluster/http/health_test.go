@@ -55,6 +55,7 @@ func TestReady_Unit(t *testing.T) {
 		name           string
 		leader         uint64
 		applied        uint64
+		applyStalled   bool
 		expectedStatus int
 		expectedBody   http.ReadyResponse
 	}{
@@ -79,6 +80,18 @@ func TestReady_Unit(t *testing.T) {
 			expectedStatus: 200,
 			expectedBody:   http.ReadyResponse{Status: "ok"},
 		},
+		{
+			// The silent-while-green field incident: leader elected,
+			// applied>0 — but apply has FROZEN with committed work
+			// pending. The node can't confirm proposals and serves
+			// stale reads; /ready must take it out of rotation.
+			name:           "apply stalled",
+			leader:         1,
+			applied:        7,
+			applyStalled:   true,
+			expectedStatus: 503,
+			expectedBody:   http.ReadyResponse{Status: "not ready"},
+		},
 	}
 
 	for _, tc := range tests {
@@ -86,6 +99,7 @@ func TestReady_Unit(t *testing.T) {
 			fake := &clusterfakes.FakeCluster{}
 			fake.LeaderReturns(tc.leader)
 			fake.AppliedIndexReturns(tc.applied)
+			fake.ApplyStalledReturns(tc.applyStalled)
 			h := http.New(fake)
 
 			req := httptest.NewRequest("GET", "http://localhost/ready", nil)

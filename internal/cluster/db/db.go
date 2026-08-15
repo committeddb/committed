@@ -221,6 +221,10 @@ type DB struct {
 	transferLeadershipFn func(transferee uint64)
 	pickTransferTargetFn func(now time.Time) uint64
 
+	// applyStall backs ApplyStalled (the /ready probe's apply-wedge
+	// signal). Probe-driven state, no goroutine — see applyStallDetector.
+	applyStall applyStallDetector
+
 	// Graceful-shutdown leadership transfer (see shutdown.go). Injected as
 	// fields, like the disk-pressure transfer collaborators above, so the
 	// target choice and the wait-for-handoff loop are unit-testable without a
@@ -437,6 +441,7 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		diskReports:                    make(map[uint64]diskReport),
 		diskNudgeC:                     make(chan struct{}, 1),
 		diskReportInterval:             cfg.diskReportInterval,
+		applyStall:                     applyStallDetector{threshold: ApplyStallThreshold},
 		diskTransferCooldown:           cfg.diskTransferCooldown,
 		diskReportSend:                 cfg.diskReportSender,
 		logger:                         cfg.logger,
@@ -571,6 +576,19 @@ func (db *DB) listenForSyncables(sync <-chan *SyncableWithID) {
 				db.deleteSync(syncable.ID, syncable.KeepData)
 				continue
 			}
+			if syncable.Build != nil {
+				// The node-local build, deferred off the apply path (the
+				// apply-liveness invariant). It reaches the destination and
+				// may stall up to the sql layer's InitTimeout — harmless
+				// here: later config events queue FIFO behind it in the
+				// pump while appliedIndex keeps advancing.
+				if syncable.Syncable = syncable.Build(); syncable.Syncable == nil {
+					// Degraded on this node — recorded loudly by the build
+					// closure. No worker (re)start; an existing worker for
+					// the id keeps running its prior config.
+					continue
+				}
+			}
 			if err := db.Sync(context.Background(), syncable.ID, syncable.Syncable); err != nil {
 				// Sync only returns ErrClosed, which means db.Close
 				// fired between our channel receive and the registry
@@ -602,6 +620,14 @@ func (db *DB) listenForIngestables(ingest <-chan *IngestableWithID) {
 			if ingestable.Delete {
 				db.deleteIngest(ingestable.ID)
 				continue
+			}
+			if ingestable.Build != nil {
+				// See the sync listener: the node-local build runs here,
+				// off the apply path; nil = degraded, recorded by the
+				// closure.
+				if ingestable.Ingestable = ingestable.Build(); ingestable.Ingestable == nil {
+					continue
+				}
 			}
 			if err := db.Ingest(context.Background(), ingestable.ID, ingestable.Ingestable); err != nil {
 				// Ingest only returns ErrClosed, which means db.Close

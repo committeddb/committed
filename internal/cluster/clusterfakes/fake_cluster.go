@@ -57,6 +57,16 @@ type FakeCluster struct {
 	appliedIndexReturnsOnCall map[int]struct {
 		result1 uint64
 	}
+	ApplyStalledStub        func() bool
+	applyStalledMutex       sync.RWMutex
+	applyStalledArgsForCall []struct {
+	}
+	applyStalledReturns struct {
+		result1 bool
+	}
+	applyStalledReturnsOnCall map[int]struct {
+		result1 bool
+	}
 	CloseStub        func() error
 	closeMutex       sync.RWMutex
 	closeArgsForCall []struct {
@@ -951,6 +961,59 @@ func (fake *FakeCluster) AppliedIndexReturnsOnCall(i int, result1 uint64) {
 	}
 	fake.appliedIndexReturnsOnCall[i] = struct {
 		result1 uint64
+	}{result1}
+}
+
+func (fake *FakeCluster) ApplyStalled() bool {
+	fake.applyStalledMutex.Lock()
+	ret, specificReturn := fake.applyStalledReturnsOnCall[len(fake.applyStalledArgsForCall)]
+	fake.applyStalledArgsForCall = append(fake.applyStalledArgsForCall, struct {
+	}{})
+	stub := fake.ApplyStalledStub
+	fakeReturns := fake.applyStalledReturns
+	fake.recordInvocation("ApplyStalled", []interface{}{})
+	fake.applyStalledMutex.Unlock()
+	if stub != nil {
+		return stub()
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeCluster) ApplyStalledCallCount() int {
+	fake.applyStalledMutex.RLock()
+	defer fake.applyStalledMutex.RUnlock()
+	return len(fake.applyStalledArgsForCall)
+}
+
+func (fake *FakeCluster) ApplyStalledCalls(stub func() bool) {
+	fake.applyStalledMutex.Lock()
+	defer fake.applyStalledMutex.Unlock()
+	fake.ApplyStalledStub = stub
+}
+
+func (fake *FakeCluster) ApplyStalledReturns(result1 bool) {
+	fake.applyStalledMutex.Lock()
+	defer fake.applyStalledMutex.Unlock()
+	fake.ApplyStalledStub = nil
+	fake.applyStalledReturns = struct {
+		result1 bool
+	}{result1}
+}
+
+func (fake *FakeCluster) ApplyStalledReturnsOnCall(i int, result1 bool) {
+	fake.applyStalledMutex.Lock()
+	defer fake.applyStalledMutex.Unlock()
+	fake.ApplyStalledStub = nil
+	if fake.applyStalledReturnsOnCall == nil {
+		fake.applyStalledReturnsOnCall = make(map[int]struct {
+			result1 bool
+		})
+	}
+	fake.applyStalledReturnsOnCall[i] = struct {
+		result1 bool
 	}{result1}
 }
 

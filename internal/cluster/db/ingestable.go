@@ -11,6 +11,11 @@ import (
 type IngestableWithID struct {
 	ID         string
 	Ingestable cluster.Ingestable
+	// Build: see SyncableWithID.Build — the ingest twin (the build reaches
+	// the SOURCE database via Preflight). Executed by the listener at
+	// dequeue; nil result = degraded, recorded by the closure; when Build
+	// is set, Ingestable is ignored.
+	Build func() cluster.Ingestable
 	// Delete signals that the ingestable with ID was removed from the log
 	// (deleteIngestable on the apply path), rather than upserted. The DB-layer
 	// consumer (listenForIngestables) cancels the worker and, on the owner, tears
