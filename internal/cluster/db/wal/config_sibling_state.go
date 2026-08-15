@@ -62,7 +62,10 @@ func sweepTypeSiblingState(tx *bolt.Tx, id []byte) error {
 			return fmt.Errorf("[wal.type] sweep migration dead-letters: %w", err)
 		}
 	}
-	return nil
+	// The validation tripwire's announced-shape marks die with the type, so a
+	// same-id recreate re-announces from a clean slate (contract_fingerprint.go
+	// holds the matching write-guard).
+	return sweepContractFingerprints(tx, id)
 }
 
 // sweepIngestableSiblingState removes the per-ingestable-id state kept outside the

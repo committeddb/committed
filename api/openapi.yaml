@@ -1071,6 +1071,18 @@ paths:
         (adoption) or changing the discriminator updates the current
         version in place — no version bump, no `[migration]` section
         needed.
+
+        `validate` selects the validation strategy: `0` (none, the
+        default), `1` (gate — a proposal whose payload violates the
+        schema is rejected with 400), or `2` (announce — the tripwire:
+        a divergent payload still commits, and the first occurrence of
+        each distinct divergent shape emits a ContractExtension event
+        to the topic named by `schemaChangeTopic`, which is required
+        with `validate = 2` and must name an existing, non-announce
+        type — declare the events topic first. Attach an ordinary
+        syncable to that topic to deliver divergence events to a
+        warehouse table or webhook). Re-pointing `schemaChangeTopic`
+        updates the current version in place, like the discriminator.
       operationId: addType
       parameters:
         - $ref: '#/components/parameters/ResourceId'

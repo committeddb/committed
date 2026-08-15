@@ -27,6 +27,27 @@ func (db *DB) ProposeType(ctx context.Context, c *cluster.Configuration) error {
 		}
 	}
 
+	// An announce-typed type's event destination must be usable the moment a
+	// divergence needs announcing — checked LOUDLY here at POST, not
+	// discovered as a silently unannounced divergence at first use (the
+	// admission-validation bug class). The destination must exist (so the
+	// operator declares the events topic first) and must not itself be
+	// announce-typed (an event whose own divergence announces somewhere is a
+	// cycle in the making; the emitter also guards at runtime).
+	if t.Validate == cluster.ValidateAnnounce {
+		dest, derr := db.storage.ResolveType(cluster.LatestTypeRef(t.SchemaChangeTopic))
+		if derr != nil || dest == nil {
+			return &cluster.ConfigError{
+				Err: fmt.Errorf("schemaChangeTopic %q does not name an existing type: declare the ContractExtension events topic first, then the announce-typed type", t.SchemaChangeTopic),
+			}
+		}
+		if dest.Validate == cluster.ValidateAnnounce {
+			return &cluster.ConfigError{
+				Err: fmt.Errorf("schemaChangeTopic %q is itself announce-typed: an events topic cannot announce its own divergences (chain events topics are not supported)", t.SchemaChangeTopic),
+			}
+		}
+	}
+
 	// Delta topics are hostile to the sync contract: at-least-once
 	// delivery redelivers, and a redelivered non-idempotent patch
 	// ("add 3") corrupts. Rejected at creation rather than carried as a
@@ -74,8 +95,12 @@ func (db *DB) ProposeType(ctx context.Context, c *cluster.Configuration) error {
 		// discriminator is mutable sugar.
 		entityKindChanged := existing.EntityKind != t.EntityKind
 		discriminatorChanged := existing.Discriminator != t.Discriminator
+		// The event destination is mutable routing, like the discriminator:
+		// re-pointing it changes where FUTURE divergences announce, not the
+		// shape data is written in.
+		schemaChangeTopicChanged := existing.SchemaChangeTopic != t.SchemaChangeTopic
 
-		if !schemaChanged && !migrationChanged && !entityKindChanged && !discriminatorChanged {
+		if !schemaChanged && !migrationChanged && !entityKindChanged && !discriminatorChanged && !schemaChangeTopicChanged {
 			return nil // byte-identical, no-op
 		}
 
@@ -151,14 +176,39 @@ func ParseType(c *cluster.Configuration, s cluster.DatabaseStorage) (string, *cl
 	if v.IsSet("type.validate") {
 		validate = cluster.ValidationStrategy(v.GetInt("type.validate"))
 	}
+	switch validate {
+	case cluster.NoValidation, cluster.ValidateSchema, cluster.ValidateAnnounce:
+	default:
+		return "", nil, fmt.Errorf("validate = %d is not a known validation strategy (0 = none, 1 = gate on schema, 2 = announce divergence)", validate)
+	}
 
-	if validate == cluster.ValidateSchema {
+	// Both validating strategies need a schema to check against; announce
+	// (the tripwire) additionally needs somewhere to announce to.
+	if validate == cluster.ValidateSchema || validate == cluster.ValidateAnnounce {
 		if schemaType == "" {
 			return "", nil, fmt.Errorf("validate is enabled but schemaType is not set")
 		}
 		if len(schema) == 0 {
 			return "", nil, fmt.Errorf("validate is enabled but schema is empty")
 		}
+	}
+
+	// schemaChangeTopic names the Type ID that receives ContractExtension
+	// events for this type's divergences. Required with announce (a tripwire
+	// with nowhere to announce is silent — the failure mode it exists to
+	// kill), meaningless without it, and never this type itself (an event
+	// about a divergence must not be validated by the very contract it
+	// reports on). Whether the destination type EXISTS is checked in
+	// ProposeType, which has storage.
+	schemaChangeTopic := v.GetString("type.schemaChangeTopic")
+	if validate == cluster.ValidateAnnounce && schemaChangeTopic == "" {
+		return "", nil, fmt.Errorf("validate = 2 (announce) requires schemaChangeTopic: the Type ID that receives ContractExtension events")
+	}
+	if validate != cluster.ValidateAnnounce && schemaChangeTopic != "" {
+		return "", nil, fmt.Errorf("schemaChangeTopic is only valid with validate = 2 (announce)")
+	}
+	if schemaChangeTopic == c.ID {
+		return "", nil, fmt.Errorf("schemaChangeTopic cannot be the type itself")
 	}
 
 	// entityKind declares what the entities written under this type
@@ -225,6 +275,7 @@ func ParseType(c *cluster.Configuration, s cluster.DatabaseStorage) (string, *cl
 		Migration:         migration,
 		EntityKind:        entityKind,
 		Discriminator:     discriminator,
+		SchemaChangeTopic: schemaChangeTopic,
 		MigrationExplicit: hasMigrationTransform || hasMigrationNone,
 	}
 
@@ -271,4 +322,12 @@ func (db *DB) TypeVersions(id string) ([]cluster.VersionInfo, error) {
 
 func (db *DB) TypeVersion(id string, version uint64) (*cluster.Configuration, error) {
 	return db.storage.TypeVersion(id, version)
+}
+
+// SetEntityValidator injects the entity-payload validator the validation
+// tripwire runs in Propose (see tripwire.go). Injected for the same reason as
+// SetTypeSchemaValidator: the schema compilers live in http, which db must
+// not import.
+func (db *DB) SetEntityValidator(v cluster.EntitySchemaValidator) {
+	db.entityValidator = v
 }

@@ -37,8 +37,10 @@ func postSinkDatabase(t *testing.T, connStr string) {
 
 // postSyncable registers a syncable that projects one topic into its
 // <table>_sink table via the sink database. Every column is mapped as TEXT
-// because pgoutput text-encodes CDC values, so the topic JSON carries strings
-// (e.g. r_regionkey arrives as "1", not 1).
+// for uniformity: the category-aware decode renders numeric columns as JSON
+// numbers (r_regionkey arrives as 1, not "1"), and a TEXT sink column takes
+// either scalar's string form, so one column type serves every dataset
+// column without a per-type mapping table.
 func postSyncable(t *testing.T, table string) {
 	t.Helper()
 	sink := SinkTable(table)

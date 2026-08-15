@@ -349,6 +349,20 @@ func (h *Harness) SlotName(table string) string {
 	return h.engine.SlotName(table)
 }
 
+// PostConfig POSTs a TOML configuration body to the given committed API path
+// (e.g. "/v1/type/schema-changes"), for scenarios that need configs beyond
+// the table-derived ones the harness wires itself (custom types, extra
+// syncables). Same secret-externalizing rewrite as every harness POST.
+func (h *Harness) PostConfig(t *testing.T, path, body string) {
+	t.Helper()
+	postConfig(t, path, body)
+}
+
+// SinkDatabaseID is the id of the sink database config the harness registers
+// when Options.Syncable is set — the `db = "..."` value a custom syncable's
+// TOML references.
+func (h *Harness) SinkDatabaseID() string { return sinkDatabaseID }
+
 // RestartCommitted stops the committed child process and starts a
 // fresh one against the same data dir. Postgres is untouched, so the
 // replication slot keeps its position. After restart, committed

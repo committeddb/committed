@@ -47,6 +47,11 @@ type ValidationStrategy int
 const (
 	NoValidation   ValidationStrategy = 0
 	ValidateSchema ValidationStrategy = 1
+	// ValidateAnnounce is the tripwire, never a gate: a divergent payload
+	// still commits (a non-conformant CDC row is a true fact about the
+	// source), and the first occurrence of each distinct divergent shape
+	// emits a ContractExtension event to the Type's SchemaChangeTopic.
+	ValidateAnnounce ValidationStrategy = 2
 )
 
 // EntityKind declares what the entities written under a type are,
@@ -160,6 +165,12 @@ type Type struct {
 	// EntityKindEvent; projection-style syncables can default their
 	// match rules to it.
 	Discriminator string
+	// SchemaChangeTopic is the Type ID of the topic that receives
+	// ContractExtension events when data claiming this type diverges from
+	// its schema under ValidateAnnounce. Type-level so both arrival paths
+	// (CDC ingest, direct proposals) announce through one knob. Empty for
+	// non-announce types.
+	SchemaChangeTopic string
 	// MigrationExplicit is transient (not persisted). Set by ParseType
 	// when the operator provided a [migration] section (either
 	// transform or none=true). Used by ProposeType to enforce the
@@ -263,17 +274,18 @@ func (t *Type) Marshal() ([]byte, error) {
 		Name: t.Name,
 		// Version, Validate, and EntityKind are bounded by the domain:
 		// Version is monotonically assigned starting at 1 (will never
-		// exceed int32), Validate has only two defined values
-		// (NoValidation=0, ValidateSchema=1), and EntityKind only the
-		// defined EntityKind constants (ParseEntityKind rejects anything
-		// else).
-		Version:       int32(t.Version), //nolint:gosec // G115: bounded by domain
-		SchemaType:    t.SchemaType,
-		Schema:        t.Schema,
-		Validate:      clusterpb.LogValidationStrategy(t.Validate), //nolint:gosec // G115: bounded by domain
-		Migration:     t.Migration,
-		EntityKind:    clusterpb.LogEntityKind(t.EntityKind), //nolint:gosec // G115: bounded by domain
-		Discriminator: t.Discriminator,
+		// exceed int32), Validate has only the defined ValidationStrategy
+		// constants (ParseType rejects anything else), and EntityKind only
+		// the defined EntityKind constants (ParseEntityKind rejects
+		// anything else).
+		Version:           int32(t.Version), //nolint:gosec // G115: bounded by domain
+		SchemaType:        t.SchemaType,
+		Schema:            t.Schema,
+		Validate:          clusterpb.LogValidationStrategy(t.Validate), //nolint:gosec // G115: bounded by domain
+		Migration:         t.Migration,
+		EntityKind:        clusterpb.LogEntityKind(t.EntityKind), //nolint:gosec // G115: bounded by domain
+		Discriminator:     t.Discriminator,
+		SchemaChangeTopic: t.SchemaChangeTopic,
 	}
 
 	return proto.Marshal(lt)
@@ -295,6 +307,7 @@ func (t *Type) Unmarshal(bs []byte) error {
 	t.Migration = lt.Migration
 	t.EntityKind = EntityKind(lt.EntityKind)
 	t.Discriminator = lt.Discriminator
+	t.SchemaChangeTopic = lt.SchemaChangeTopic
 
 	return nil
 }

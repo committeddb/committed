@@ -235,6 +235,12 @@ func (s *Storage) Types() ([]*cluster.Configuration, error) {
 			if tipe.Discriminator != "" {
 				toml += fmt.Sprintf("\ndiscriminator = \"%s\"", tipe.Discriminator)
 			}
+			// Announce-typed types list their strategy and destination — the
+			// operator-declared pair that makes the tripwire legible in a
+			// listing. Other strategies keep the pre-existing minimal output.
+			if tipe.Validate == cluster.ValidateAnnounce {
+				toml += fmt.Sprintf("\nvalidate = %d\nschemaChangeTopic = \"%s\"", cluster.ValidateAnnounce, tipe.SchemaChangeTopic)
+			}
 
 			cfg := &cluster.Configuration{
 				ID:       tipe.ID,

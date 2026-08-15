@@ -95,6 +95,12 @@ type Storage interface {
 	// re-emitted proposals (effectively-once ingest). 0 for an unknown id
 	// means "never ingested — dedup nothing".
 	IngestSourceSeqHighwater(id string) uint64
+	// HasContractFingerprint reports whether the validation tripwire has
+	// already announced the divergent shape (typeID, version, fingerprint) —
+	// i.e. an applied LogContractFingerprint mark exists. Read pre-propose by
+	// the tripwire so each distinct shape announces once; replicated state,
+	// so the dedupe survives restarts and leadership moves.
+	HasContractFingerprint(typeID string, version int, fingerprint string) bool
 	// TopicRefreshEpoch returns the highest refresh generation ever committed
 	// for a topic (type id), or 0 if none. Keyed by topic and NOT cleared by
 	// DeleteIngestable, so a same-topic recreate reads the generation still on the

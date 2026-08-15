@@ -217,6 +217,19 @@ type FakeStorage struct {
 		result1 uint64
 		result2 error
 	}
+	HasContractFingerprintStub        func(string, int, string) bool
+	hasContractFingerprintMutex       sync.RWMutex
+	hasContractFingerprintArgsForCall []struct {
+		arg1 string
+		arg2 int
+		arg3 string
+	}
+	hasContractFingerprintReturns struct {
+		result1 bool
+	}
+	hasContractFingerprintReturnsOnCall map[int]struct {
+		result1 bool
+	}
 	HasSyncableDeadLetterStub        func(string, uint64) (bool, error)
 	hasSyncableDeadLetterMutex       sync.RWMutex
 	hasSyncableDeadLetterArgsForCall []struct {
@@ -1777,6 +1790,69 @@ func (fake *FakeStorage) FirstIndexReturnsOnCall(i int, result1 uint64, result2 
 		result1 uint64
 		result2 error
 	}{result1, result2}
+}
+
+func (fake *FakeStorage) HasContractFingerprint(arg1 string, arg2 int, arg3 string) bool {
+	fake.hasContractFingerprintMutex.Lock()
+	ret, specificReturn := fake.hasContractFingerprintReturnsOnCall[len(fake.hasContractFingerprintArgsForCall)]
+	fake.hasContractFingerprintArgsForCall = append(fake.hasContractFingerprintArgsForCall, struct {
+		arg1 string
+		arg2 int
+		arg3 string
+	}{arg1, arg2, arg3})
+	stub := fake.HasContractFingerprintStub
+	fakeReturns := fake.hasContractFingerprintReturns
+	fake.recordInvocation("HasContractFingerprint", []interface{}{arg1, arg2, arg3})
+	fake.hasContractFingerprintMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2, arg3)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeStorage) HasContractFingerprintCallCount() int {
+	fake.hasContractFingerprintMutex.RLock()
+	defer fake.hasContractFingerprintMutex.RUnlock()
+	return len(fake.hasContractFingerprintArgsForCall)
+}
+
+func (fake *FakeStorage) HasContractFingerprintCalls(stub func(string, int, string) bool) {
+	fake.hasContractFingerprintMutex.Lock()
+	defer fake.hasContractFingerprintMutex.Unlock()
+	fake.HasContractFingerprintStub = stub
+}
+
+func (fake *FakeStorage) HasContractFingerprintArgsForCall(i int) (string, int, string) {
+	fake.hasContractFingerprintMutex.RLock()
+	defer fake.hasContractFingerprintMutex.RUnlock()
+	argsForCall := fake.hasContractFingerprintArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3
+}
+
+func (fake *FakeStorage) HasContractFingerprintReturns(result1 bool) {
+	fake.hasContractFingerprintMutex.Lock()
+	defer fake.hasContractFingerprintMutex.Unlock()
+	fake.HasContractFingerprintStub = nil
+	fake.hasContractFingerprintReturns = struct {
+		result1 bool
+	}{result1}
+}
+
+func (fake *FakeStorage) HasContractFingerprintReturnsOnCall(i int, result1 bool) {
+	fake.hasContractFingerprintMutex.Lock()
+	defer fake.hasContractFingerprintMutex.Unlock()
+	fake.HasContractFingerprintStub = nil
+	if fake.hasContractFingerprintReturnsOnCall == nil {
+		fake.hasContractFingerprintReturnsOnCall = make(map[int]struct {
+			result1 bool
+		})
+	}
+	fake.hasContractFingerprintReturnsOnCall[i] = struct {
+		result1 bool
+	}{result1}
 }
 
 func (fake *FakeStorage) HasSyncableDeadLetter(arg1 string, arg2 uint64) (bool, error) {

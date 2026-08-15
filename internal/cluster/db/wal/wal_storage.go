@@ -102,6 +102,12 @@ var (
 	// the apply path (handleTypeMigrationDeadLetter). See
 	// type_migration_dead_letter.go.
 	typeMigrationDeadLetterBucket = []byte("typeMigrationDeadLetters")
+	// contractFingerprintBucket holds the validation tripwire's replicated
+	// dedupe marks, keyed "typeID\x00version\x00fingerprint" (one per
+	// announced divergent shape). Written deterministically from the apply
+	// path (handleContractFingerprint), guarded/swept with the type config.
+	// See contract_fingerprint.go.
+	contractFingerprintBucket = []byte("contractFingerprints")
 )
 
 // appliedIndexBucket holds a single key ("idx") whose value is the
@@ -173,6 +179,7 @@ var internalEntities = []internalEntity{
 	{cluster.IsIngestableStuck, "handleIngestableStuck", ingestableStuckBucket, (*Storage).handleIngestableStuck},
 	{cluster.IsSyncableSkipRequest, "handleSyncableSkipRequest", syncableSkipRequestBucket, (*Storage).handleSyncableSkipRequest},
 	{cluster.IsIngestablePosition, "saveIngestablePosition", ingestablePositionBucket, (*Storage).saveIngestablePosition},
+	{cluster.IsContractFingerprint, "handleContractFingerprint", contractFingerprintBucket, (*Storage).handleContractFingerprint},
 	{cluster.IsScrub, "handleScrub", pendingScrubBucket, (*Storage).handleScrub},
 	{cluster.IsNodeAPIURL, "handleNodeAPIURL", memberAPIURLBucket, (*Storage).handleNodeAPIURL},
 	{cluster.IsNodeVersion, "handleNodeVersion", memberVersionBucket, (*Storage).handleNodeVersion},

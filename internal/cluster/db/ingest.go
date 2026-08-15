@@ -700,6 +700,10 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 	// proposeIngestData's disk-pressure pause, and applies backpressure by
 	// awaiting the oldest ack once the window is full.
 	submitPipelined := func(p *cluster.Proposal) error {
+		// The validation tripwire runs in db.Propose, which this pipelined
+		// lane bypasses (proposeAsync directly) — so run it here: divergent
+		// SNAPSHOT rows announce too. A signal, never a gate.
+		db.announceDivergences(ctx, p)
 		pauseBackoff := ingestBackoffMin
 		for {
 			rid, ack, err := db.proposeAsync(ctx, p)

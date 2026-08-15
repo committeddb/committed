@@ -85,6 +85,11 @@ type DB struct {
 	// rather than accepted then failing every proposal. Nil-safe: a DB without it
 	// (some tests) simply skips the admission schema check.
 	schemaValidator cluster.TypeSchemaValidator
+	// entityValidator, when injected (SetEntityValidator), checks announce-typed
+	// entities' payloads in Propose so the validation tripwire can emit
+	// ContractExtension events (see tripwire.go). Nil-safe: a DB without it
+	// simply never announces — it NEVER gates either way.
+	entityValidator cluster.EntitySchemaValidator
 	leaderState     *LeaderState
 
 	// waiters maps request IDs (set in db.Propose) to waiter records
@@ -632,6 +637,12 @@ func (db *DB) listenForIngestables(ingest <-chan *IngestableWithID) {
 // position bumps, which collect acks for later drain) use proposeAsync
 // directly and manage the ack lifecycle themselves.
 func (db *DB) Propose(ctx context.Context, p *cluster.Proposal) error {
+	// The validation tripwire: announce-typed entities' divergences are
+	// detected and announced BEFORE the data commits (see tripwire.go). A
+	// signal, never a gate — nothing in there can fail this proposal — and
+	// free for proposals with no announce-typed entities.
+	db.announceDivergences(ctx, p)
+
 	start := time.Now()
 	rid, ack, err := db.proposeAsync(ctx, p)
 	if err != nil {

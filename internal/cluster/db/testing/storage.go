@@ -202,6 +202,13 @@ func (ms *MemoryStorage) TopicRefreshEpoch(topic string) uint64 {
 	return 0
 }
 
+// HasContractFingerprint is a stub: this in-memory test double has no apply
+// path to record announced-shape marks, so it always reports false ("not yet
+// announced"). Tests that exercise tripwire dedupe use the real wal.Storage.
+func (ms *MemoryStorage) HasContractFingerprint(typeID string, version int, fingerprint string) bool {
+	return false
+}
+
 func (ms *MemoryStorage) Database(id string) (cluster.Database, error) {
 	return nil, nil
 }

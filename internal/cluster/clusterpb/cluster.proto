@@ -141,6 +141,15 @@ message LogProposal {
 enum LogValidationStrategy {
     NoValidation = 0;
     ValidateSchema = 1;
+    // ValidateAnnounce is the tripwire, never a gate: a payload that diverges
+    // from the Type's schema still COMMITS (a non-conformant CDC row is a true
+    // fact about the source; refusing to record it makes the log less true),
+    // and the first occurrence of each distinct divergent shape emits a
+    // ContractExtension event to the Type's schemaChangeTopic so the data team
+    // learns the day reality diverges from the contract. Wire add-only: an
+    // older binary reads the unknown enum value, compiles no validator, and
+    // simply neither gates nor announces.
+    ValidateAnnounce = 2;
 }
 
 // LogEntityKind declares what the entities written under a type are —
@@ -198,6 +207,13 @@ message LogType {
     // EntityKindEvent; recorded so projection-style syncables can
     // default their match rules to it.
     string Discriminator = 9;
+    // SchemaChangeTopic is the Type ID of the topic that receives
+    // ContractExtension events when data claiming THIS type diverges from its
+    // schema under ValidateAnnounce. Type-level (not ingestable-level) so both
+    // arrival paths — CDC ingest and direct proposals — announce through one
+    // knob; the destination follows the contract it polices, beside Validate.
+    // Empty for non-announce types. Add-only: pre-feature types unmarshal "".
+    string SchemaChangeTopic = 10;
 }
 
 message LogConfiguration {
@@ -221,6 +237,25 @@ message LogSyncableIndex {
     // checkpoint format never migrates mid-series). Wire add-only:
     // pre-feature checkpoints unmarshal as 0 and a 0 stamps no bytes.
     uint64 interpretationIndex = 3;
+}
+
+// LogContractFingerprint is the validation tripwire's replicated dedupe mark:
+// "the divergent shape with this fingerprint has been announced for this type
+// version." Written in the SAME proposal as its ContractExtension event (the
+// event entity leads, under the operator's schemaChangeTopic type), so the
+// announcement and its dedupe mark commit atomically — the tripwire emits one
+// event per distinct divergent shape, surviving worker restarts and
+// leadership moves because the mark is consensus-replicated state, not a
+// node-local note. Keyed by (typeID, version, fingerprint). Its type UUID is
+// UNGATED in the system-type namespace: an older node skips it, which at
+// worst re-announces a shape later (consumers key on the fingerprint and
+// converge — the documented at-least-once contract).
+message LogContractFingerprint {
+    // typeID + version identify the contract the payload diverged from.
+    string typeID = 1;
+    uint32 version = 2;
+    // fingerprint is the payload's shape signature (cluster.JSONShapeSignature).
+    string fingerprint = 3;
 }
 
 // LogErratum is the errata interpretation-registry record: an append-only,

@@ -188,6 +188,58 @@ carry or clobbers columns it didn't mean to write. The whole-payload
 `"$"` mapping shape below is the right way to land an event topic in
 SQL and is exempt from the warning.
 
+#### Schema validation: gate or tripwire
+
+A type with a schema chooses what happens when a payload doesn't match it,
+via `validate`:
+
+- `0` — none (the default). Payloads are never checked.
+- `1` — **gate**. A direct proposal whose payload violates the schema is
+  rejected with 400. Right for topics whose producers you control.
+- `2` — **announce** (the tripwire). The payload **still commits** — a
+  non-conformant CDC row is a true fact about the source, and refusing to
+  record it would make the log less true — and the first occurrence of each
+  *distinct divergent shape* emits a **ContractExtension** event to the topic
+  named by `schemaChangeTopic`. Right for CDC-fed topics, where the contract
+  polices reality instead of blocking it.
+
+```toml
+# 1. Declare the events topic first (any non-announce type works):
+#    POST /v1/type/schema-changes
+[type]
+name = "SchemaChanges"
+entityKind = "standalone"
+
+# 2. Declare the announce-typed topic pointing at it:
+#    POST /v1/type/photo-meta
+[type]
+name = "PhotoMeta"
+schemaType = "JSONSchema"
+schema = '{"type":"object","properties":{"caption":{"type":"string"}},"additionalProperties":false}'
+validate = 2
+schemaChangeTopic = "schema-changes"
+```
+
+Attach any ordinary syncable to `schema-changes` — a SQL projection into a
+warehouse table your dbt tests watch, or an `http` syncable posting to a
+webhook — and the data team learns *the day reality diverges from the
+contract*, with the diff in hand. The event carries the type id/name, the
+version validated against, the divergent shape's fingerprint, the observed
+shape, and the structured violations (paths and types only — never sample
+values), plus the source position when it arrived via CDC. Events are keyed
+`typeID:version:fingerprint` and delivery is at-least-once: one event per
+distinct shape (replicated dedupe, surviving restarts and failover), with the
+rare concurrent-detection duplicate converging in keyed sinks. The tripwire
+runs on every write path — CDC ingest (snapshot and streaming) and direct
+proposals — and it never pauses or fails a write; for a schema to catch
+*added* fields, declare `additionalProperties: false`.
+
+A running CDC worker validates against the contract that was current when the
+worker was built (the same point the type version it stamps is fixed). After
+blessing a new contract on an already-flowing topic, re-POST the ingestable —
+or restart the node — so its worker picks the contract up; direct proposals
+always validate against the current version.
+
 Configure a database to write into (sink):
 
 ```sh

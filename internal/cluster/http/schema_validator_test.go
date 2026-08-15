@@ -15,7 +15,7 @@ import (
 // known SchemaType with a broken schema errors; a valid schema, a non-validating
 // type, and an UNKNOWN SchemaType (fail-open for forward-compat) all pass.
 func TestSchemaValidator_ValidateTypeSchema(t *testing.T) {
-	sv := http.SchemaValidator{}
+	sv := &http.SchemaValidator{}
 	for _, tc := range []struct {
 		name    string
 		typ     *cluster.Type

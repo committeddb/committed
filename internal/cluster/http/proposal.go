@@ -79,7 +79,10 @@ func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
 				"type %q has an invalid schema that cannot be compiled (re-POST the type with a valid schema): %v", t.ID, err)
 			return
 		}
-		if v != nil {
+		// Only the strict strategy GATES here. An announce-typed entity commits
+		// regardless of conformance — the tripwire in db.Propose detects the
+		// divergence and announces it (signal, never reject).
+		if v != nil && t.Validate == cluster.ValidateSchema {
 			if err := v.validate(e.Data); err != nil {
 				var vErr *schemaValidationError
 				if errors.As(err, &vErr) {

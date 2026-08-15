@@ -989,6 +989,13 @@ func (ms *MemoryStorage) TopicRefreshEpoch(topic string) uint64 {
 	return 0
 }
 
+// HasContractFingerprint stubs the tripwire's announced-shape dedupe mark.
+// This in-memory double doesn't run the entity apply path that would record
+// one, so it reports false; tripwire dedupe tests use the real wal.Storage.
+func (ms *MemoryStorage) HasContractFingerprint(typeID string, version int, fingerprint string) bool {
+	return false
+}
+
 func (ms *MemoryStorage) Node(id string) uint64 {
 	ms.nodeMu.RLock()
 	defer ms.nodeMu.RUnlock()

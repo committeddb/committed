@@ -414,10 +414,15 @@ image can be templated per-node by an orchestrator:
 		d.AddSyncableParser("sql", &syncsql.SyncableParser{Metrics: m})
 		d.AddSyncableParser("sql-projection", &syncsql.ProjectionSyncableParser{Metrics: m})
 		d.AddSyncableParser("http", &synchttp.SyncableParser{})
-		// Inject the entity-schema compiler so ProposeType rejects a broken schema
-		// at POST /type (the compilers live in the http layer, which db can't
-		// import — see cluster.TypeSchemaValidator).
-		d.SetTypeSchemaValidator(http.SchemaValidator{})
+		// Inject the entity-schema compilers so ProposeType rejects a broken
+		// schema at POST /type and Propose's validation tripwire can check
+		// announce-typed payloads (the compilers live in the http layer, which
+		// db can't import — see cluster.TypeSchemaValidator /
+		// cluster.EntitySchemaValidator). One instance: it caches compiled
+		// schemas by (typeID, version).
+		schemaValidator := &http.SchemaValidator{}
+		d.SetTypeSchemaValidator(schemaValidator)
+		d.SetEntityValidator(schemaValidator)
 
 		// Restore ingestable and syncable workers for configs applied in a
 		// previous run. These MUST run after the sub-parsers above are
