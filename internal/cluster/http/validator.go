@@ -8,9 +8,12 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/bufbuild/protocompile"
 	"github.com/santhosh-tekuri/jsonschema/v6"
+	"golang.org/x/text/language"
+	"golang.org/x/text/message"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
@@ -41,30 +44,108 @@ type schemaValidationError struct {
 func (e *schemaValidationError) Error() string { return e.err.Error() }
 func (e *schemaValidationError) Unwrap() error { return e.err }
 
-// SchemaValidator implements cluster.TypeSchemaValidator by compiling a type's
-// entity schema with the SAME compilers the proposal path uses (compileValidator),
-// so the schema a POST /type accepts is exactly the one every proposal will run
-// against. It is injected into the db layer (DB.SetTypeSchemaValidator) in
-// cmd/node.go, which is why the compilers can live here in the http layer while
-// the admission check runs in db — db never imports http.
-type SchemaValidator struct{}
+// SchemaValidator implements cluster.TypeSchemaValidator and
+// cluster.EntitySchemaValidator by compiling a type's entity schema with the
+// SAME compilers the proposal path uses (compileValidator), so the schema a
+// POST /type accepts is exactly the one every proposal will run against. It
+// is injected into the db layer (DB.SetTypeSchemaValidator /
+// DB.SetEntityValidator) in cmd/node.go, which is why the compilers can live
+// here in the http layer while the admission check and the tripwire run in db
+// — db never imports http. Holds its own compiled-schema cache (keyed by
+// (typeID, Version), safe because Version bumps on any schema change), so use
+// one instance per process, by pointer.
+type SchemaValidator struct {
+	schemas sync.Map // schemaCacheKey -> entityValidator
+}
 
 // ValidateTypeSchema returns nil for a valid schema, a non-validating type, or an
 // unknown SchemaType (compileValidator fails open with (nil, nil)); it returns the
 // compile error only when a known SchemaType's schema will not compile.
-func (SchemaValidator) ValidateTypeSchema(t *cluster.Type) error {
+func (v *SchemaValidator) ValidateTypeSchema(t *cluster.Type) error {
 	_, err := compileValidator(t)
 	return err
 }
 
+// ValidateEntityData implements cluster.EntitySchemaValidator for the
+// validation tripwire: it reports a payload's schema violations structurally
+// instead of gating. (nil, nil) = conformant, non-validating type, or unknown
+// SchemaType (fail-open, matching ValidateTypeSchema); non-nil divergence =
+// well-formed payload violating the schema; error = schema or input
+// structurally unusable.
+func (v *SchemaValidator) ValidateEntityData(t *cluster.Type, data []byte) (*cluster.SchemaDivergence, error) {
+	key := schemaCacheKey{id: t.ID, version: t.Version}
+	var ev entityValidator
+	if cached, ok := v.schemas.Load(key); ok {
+		ev = cached.(entityValidator)
+	} else {
+		compiled, err := compileValidator(t)
+		if err != nil {
+			return nil, err
+		}
+		if compiled == nil {
+			return nil, nil
+		}
+		v.schemas.Store(key, compiled)
+		ev = compiled
+	}
+
+	err := ev.validate(data)
+	if err == nil {
+		return nil, nil
+	}
+	var vErr *schemaValidationError
+	if errors.As(err, &vErr) {
+		return divergenceFrom(vErr), nil
+	}
+	return nil, err
+}
+
+// divergenceFrom flattens a validation failure into structured causes. A
+// JSONSchema failure yields one cause per leaf validation error (instance
+// location as a JSON pointer, the tripped keyword, the human message); any
+// other failure (e.g. a Protobuf unknown-field error) yields a single cause
+// carrying the message.
+func divergenceFrom(vErr *schemaValidationError) *cluster.SchemaDivergence {
+	var je *jsonschema.ValidationError
+	if !errors.As(vErr.err, &je) {
+		return &cluster.SchemaDivergence{Causes: []cluster.SchemaDivergenceCause{{Message: vErr.Error()}}}
+	}
+	d := &cluster.SchemaDivergence{}
+	flattenValidationError(je, d)
+	return d
+}
+
+// englishPrinter renders jsonschema error kinds; the library's own Error()
+// uses the same locale.
+var englishPrinter = message.NewPrinter(language.English)
+
+func flattenValidationError(e *jsonschema.ValidationError, d *cluster.SchemaDivergence) {
+	if len(e.Causes) == 0 {
+		path := "/" + strings.Join(e.InstanceLocation, "/")
+		if len(e.InstanceLocation) == 0 {
+			path = "/"
+		}
+		d.Causes = append(d.Causes, cluster.SchemaDivergenceCause{
+			Path:    path,
+			Keyword: strings.Join(e.ErrorKind.KeywordPath(), "."),
+			Message: e.ErrorKind.LocalizedString(englishPrinter),
+		})
+		return
+	}
+	for _, c := range e.Causes {
+		flattenValidationError(c, d)
+	}
+}
+
 // compileValidator builds an entityValidator for the given type, or
-// returns (nil, nil) if this type shouldn't be validated. Unknown
-// SchemaType values with ValidateSchema fall through to (nil, nil) —
-// we fail-open for now per proposal-validation.md's "do not fail-closed
-// for unknown schema types" guidance, which becomes the place to
-// revisit once Thrift/Avro land.
+// returns (nil, nil) if this type shouldn't be validated. Both validating
+// strategies compile — ValidateSchema to gate, ValidateAnnounce for the
+// tripwire (callers scope gating to ValidateSchema themselves). Unknown
+// SchemaType values fall through to (nil, nil) — we fail-open for now per
+// proposal-validation.md's "do not fail-closed for unknown schema types"
+// guidance, which becomes the place to revisit once Thrift/Avro land.
 func compileValidator(t *cluster.Type) (entityValidator, error) {
-	if t.Validate != cluster.ValidateSchema {
+	if t.Validate != cluster.ValidateSchema && t.Validate != cluster.ValidateAnnounce {
 		return nil, nil
 	}
 	switch t.SchemaType {

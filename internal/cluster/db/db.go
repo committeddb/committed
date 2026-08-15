@@ -85,6 +85,11 @@ type DB struct {
 	// rather than accepted then failing every proposal. Nil-safe: a DB without it
 	// (some tests) simply skips the admission schema check.
 	schemaValidator cluster.TypeSchemaValidator
+	// entityValidator, when injected (SetEntityValidator), checks announce-typed
+	// entities' payloads in Propose so the validation tripwire can emit
+	// ContractExtension events (see tripwire.go). Nil-safe: a DB without it
+	// simply never announces — it NEVER gates either way.
+	entityValidator cluster.EntitySchemaValidator
 	leaderState     *LeaderState
 
 	// waiters maps request IDs (set in db.Propose) to waiter records
@@ -192,6 +197,10 @@ type DB struct {
 	// (derived from tickInterval at New time). See raft-leader-read-proxy.md.
 	advertisedAPIURL string
 	announceInterval time.Duration
+	// zone is this node's configured placement identity (COMMITTED_ZONE; ""
+	// = unpinned). Announced into the replicated memberZones map at startup
+	// (announceZone) for zone-pinned syncable ownership resolution.
+	zone string
 
 	maxProposalBytes uint64
 
@@ -433,6 +442,7 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		advertisedAPIURL:               cfg.advertisedAPIURL,
 		safeMode:                       cfg.safeMode,
 		announceInterval:               cfg.tickInterval,
+		zone:                           cfg.zone,
 		ingestSupervisorStates:         make(map[string]*ingestSupervisorState),
 		ingestSupervisorInitialBackoff: cfg.ingestSupervisorInitialBackoff,
 		ingestSupervisorMaxBackoff:     cfg.ingestSupervisorMaxBackoff,
@@ -499,6 +509,10 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 	go db.announceAPIURL()
 	if cfg.announceVersion {
 		go db.announceVersion()
+		// The zone announce rides the same gate: it proposes only when the
+		// configured zone differs from the stored one, so zoneless fixtures
+		// and steady-state restarts stay proposal-free.
+		go db.announceZone()
 	}
 
 	// Start the disk-usage watcher last, once db.raft is wired, so its
@@ -658,6 +672,12 @@ func (db *DB) listenForIngestables(ingest <-chan *IngestableWithID) {
 // position bumps, which collect acks for later drain) use proposeAsync
 // directly and manage the ack lifecycle themselves.
 func (db *DB) Propose(ctx context.Context, p *cluster.Proposal) error {
+	// The validation tripwire: announce-typed entities' divergences are
+	// detected and announced BEFORE the data commits (see tripwire.go). A
+	// signal, never a gate — nothing in there can fail this proposal — and
+	// free for proposals with no announce-typed entities.
+	db.announceDivergences(ctx, p)
+
 	start := time.Now()
 	rid, ack, err := db.proposeAsync(ctx, p)
 	if err != nil {

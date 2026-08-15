@@ -78,6 +78,24 @@ func RedactedMessage(err error) (string, bool) {
 // from a healthy replica. See docs/operations/rebuild.md.
 var ErrCorruptEntry = errors.New("wal: entry checksum mismatch (data corruption); see docs/operations/rebuild.md")
 
+// ErrNotSyncableOwner is returned by RebuildSyncable / RematerializeSyncable
+// when this node does not serve the zone-pinned syncable: the verbs' worker
+// drain must run WHERE THE WORKER RUNS (the drain-before-reset ordering that
+// prevents a stale checkpoint bump from defeating the replay only holds when
+// the drain and the reset proposal originate on the worker's node). The HTTP
+// layer routes the request to the owner, so a caller normally never sees
+// this; it is the defense-in-depth guard for a stale routing view, mapped to
+// 503 (retry — the hop resolves on the next attempt).
+var ErrNotSyncableOwner = errors.New(
+	"cluster: this node does not serve the zone-pinned syncable; the request must run on the pinned owner")
+
+// ErrZonePinUnsatisfiable is returned by owner-local verbs on a pinned
+// syncable whose zone currently has no serving node: with no worker anywhere
+// there is nothing to drain or replay against. Restore a node in the zone
+// (or re-POST the config without `zone`) and retry. Mapped to 503.
+var ErrZonePinUnsatisfiable = errors.New(
+	"cluster: the zone pin has no serving node; restore a node in the pinned zone (or re-POST without `zone`) and retry")
+
 // ErrSyncNotStuck is returned by Cluster.DeadLetterStuckSyncable when the
 // syncable is not currently blocked retrying a transient error on this node
 // — it is healthy, its id is unknown, or the request reached a node other
@@ -305,6 +323,19 @@ type SyncableTopicExtractor interface {
 	TopicsFromConfig(v *ParsedConfig) []string
 }
 
+// SyncableDerivedTopicExtractor is the optional SyncableParser extension that
+// reports which topics a syncable config PRODUCES — the derivation edges a
+// loopback syncable writes back into the cluster — read straight from the
+// parsed config WITHOUT building the syncable. The propose path and the
+// apply-time build guard walk these edges to keep the derivation graph a DAG
+// (a cycle is an infinite consensus loop) and single-producer per topic (two
+// producers would interleave their refresh-epoch spaces on one topic, so one
+// source's reconciling sweep could erase the other's rows downstream). A
+// parser that does not implement it contributes no edges.
+type SyncableDerivedTopicExtractor interface {
+	DerivedTopicsFromConfig(v *ParsedConfig) []string
+}
+
 // SyncableDatabaseExtractor is the optional SyncableParser extension that reports
 // which database configs a syncable references for its destination pool, read
 // straight from the parsed config WITHOUT building the syncable (no Init, no
@@ -454,10 +485,19 @@ var syncableIndexType = registerSystemType(&Type{
 type SyncableIndex struct {
 	ID    string
 	Index uint64
+	// InterpretationIndex is the second half of the determinism pair
+	// (data index, interpretation index) a derived checkpoint is pinned to:
+	// the raft index of the last interpretation-registry record (erratum)
+	// folded into the readings this syncable's outputs were derived under.
+	// Same pair ⇒ same output. 0 means "no registry records folded" — the
+	// only value until the errata registry lands later in the 0.8.x series;
+	// the field ships early so the checkpoint format never migrates
+	// mid-series. Pre-feature checkpoints unmarshal as 0.
+	InterpretationIndex uint64
 }
 
 func (i *SyncableIndex) Marshal() ([]byte, error) {
-	li := &clusterpb.LogSyncableIndex{ID: i.ID, Index: i.Index}
+	li := &clusterpb.LogSyncableIndex{ID: i.ID, Index: i.Index, InterpretationIndex: i.InterpretationIndex}
 	return proto.Marshal(li)
 }
 
@@ -470,6 +510,7 @@ func (i *SyncableIndex) Unmarshal(bs []byte) error {
 
 	i.ID = li.ID
 	i.Index = li.Index
+	i.InterpretationIndex = li.InterpretationIndex
 
 	return nil
 }

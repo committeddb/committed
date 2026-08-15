@@ -198,6 +198,18 @@ type FakeCluster struct {
 	diskStateReturnsOnCall map[int]struct {
 		result1 string
 	}
+	ErrataStub        func() ([]cluster.AppliedErratum, error)
+	errataMutex       sync.RWMutex
+	errataArgsForCall []struct {
+	}
+	errataReturns struct {
+		result1 []cluster.AppliedErratum
+		result2 error
+	}
+	errataReturnsOnCall map[int]struct {
+		result1 []cluster.AppliedErratum
+		result2 error
+	}
 	IDStub        func() uint64
 	iDMutex       sync.RWMutex
 	iDArgsForCall []struct {
@@ -220,6 +232,19 @@ type FakeCluster struct {
 	}
 	ingestReturnsOnCall map[int]struct {
 		result1 error
+	}
+	IngestableCensusStub        func(string) (*cluster.IngestableCensus, bool)
+	ingestableCensusMutex       sync.RWMutex
+	ingestableCensusArgsForCall []struct {
+		arg1 string
+	}
+	ingestableCensusReturns struct {
+		result1 *cluster.IngestableCensus
+		result2 bool
+	}
+	ingestableCensusReturnsOnCall map[int]struct {
+		result1 *cluster.IngestableCensus
+		result2 bool
 	}
 	IngestableExistsStub        func(string) (bool, error)
 	ingestableExistsMutex       sync.RWMutex
@@ -391,6 +416,18 @@ type FakeCluster struct {
 	proposeDeleteTypeReturnsOnCall map[int]struct {
 		result1 error
 	}
+	ProposeErratumStub        func(context.Context, *cluster.Configuration) error
+	proposeErratumMutex       sync.RWMutex
+	proposeErratumArgsForCall []struct {
+		arg1 context.Context
+		arg2 *cluster.Configuration
+	}
+	proposeErratumReturns struct {
+		result1 error
+	}
+	proposeErratumReturnsOnCall map[int]struct {
+		result1 error
+	}
 	ProposeIngestableStub        func(context.Context, *cluster.Configuration) error
 	proposeIngestableMutex       sync.RWMutex
 	proposeIngestableArgsForCall []struct {
@@ -415,11 +452,12 @@ type FakeCluster struct {
 	proposeSyncableReturnsOnCall map[int]struct {
 		result1 error
 	}
-	ProposeTypeStub        func(context.Context, *cluster.Configuration) error
+	ProposeTypeStub        func(context.Context, *cluster.Configuration, ...cluster.ProposeTypeOption) error
 	proposeTypeMutex       sync.RWMutex
 	proposeTypeArgsForCall []struct {
 		arg1 context.Context
 		arg2 *cluster.Configuration
+		arg3 []cluster.ProposeTypeOption
 	}
 	proposeTypeReturns struct {
 		result1 error
@@ -437,6 +475,18 @@ type FakeCluster struct {
 		result1 error
 	}
 	rebuildSyncableReturnsOnCall map[int]struct {
+		result1 error
+	}
+	RematerializeSyncableStub        func(context.Context, string) error
+	rematerializeSyncableMutex       sync.RWMutex
+	rematerializeSyncableArgsForCall []struct {
+		arg1 context.Context
+		arg2 string
+	}
+	rematerializeSyncableReturns struct {
+		result1 error
+	}
+	rematerializeSyncableReturnsOnCall map[int]struct {
 		result1 error
 	}
 	RemoveMemberStub        func(context.Context, uint64) error
@@ -570,6 +620,21 @@ type FakeCluster struct {
 		result1 []cluster.SyncableDeadLetter
 		result2 error
 	}
+	SyncableDerivationStub        func(string) (string, string, bool)
+	syncableDerivationMutex       sync.RWMutex
+	syncableDerivationArgsForCall []struct {
+		arg1 string
+	}
+	syncableDerivationReturns struct {
+		result1 string
+		result2 string
+		result3 bool
+	}
+	syncableDerivationReturnsOnCall map[int]struct {
+		result1 string
+		result2 string
+		result3 bool
+	}
 	SyncableExistsStub        func(string) (bool, error)
 	syncableExistsMutex       sync.RWMutex
 	syncableExistsArgsForCall []struct {
@@ -582,6 +647,21 @@ type FakeCluster struct {
 	syncableExistsReturnsOnCall map[int]struct {
 		result1 bool
 		result2 error
+	}
+	SyncableInterpretationStub        func(string) (uint64, bool, error)
+	syncableInterpretationMutex       sync.RWMutex
+	syncableInterpretationArgsForCall []struct {
+		arg1 string
+	}
+	syncableInterpretationReturns struct {
+		result1 uint64
+		result2 bool
+		result3 error
+	}
+	syncableInterpretationReturnsOnCall map[int]struct {
+		result1 uint64
+		result2 bool
+		result3 error
 	}
 	SyncableOwnerStub        func(string) uint64
 	syncableOwnerMutex       sync.RWMutex
@@ -620,6 +700,19 @@ type FakeCluster struct {
 	}
 	syncableReadPositionReturnsOnCall map[int]struct {
 		result1 uint64
+		result2 bool
+	}
+	SyncableRematerializationStub        func(string) (*cluster.SyncableRematerialization, bool)
+	syncableRematerializationMutex       sync.RWMutex
+	syncableRematerializationArgsForCall []struct {
+		arg1 string
+	}
+	syncableRematerializationReturns struct {
+		result1 *cluster.SyncableRematerialization
+		result2 bool
+	}
+	syncableRematerializationReturnsOnCall map[int]struct {
+		result1 *cluster.SyncableRematerialization
 		result2 bool
 	}
 	SyncableStuckStub        func(string) (cluster.SyncableStuck, bool, error)
@@ -663,6 +756,21 @@ type FakeCluster struct {
 	syncableVersionsReturnsOnCall map[int]struct {
 		result1 []cluster.VersionInfo
 		result2 error
+	}
+	SyncableZonePinStub        func(string) (string, bool, bool)
+	syncableZonePinMutex       sync.RWMutex
+	syncableZonePinArgsForCall []struct {
+		arg1 string
+	}
+	syncableZonePinReturns struct {
+		result1 string
+		result2 bool
+		result3 bool
+	}
+	syncableZonePinReturnsOnCall map[int]struct {
+		result1 string
+		result2 bool
+		result3 bool
 	}
 	SyncablesStub        func() ([]*cluster.Configuration, error)
 	syncablesMutex       sync.RWMutex
@@ -1682,6 +1790,62 @@ func (fake *FakeCluster) DiskStateReturnsOnCall(i int, result1 string) {
 	}{result1}
 }
 
+func (fake *FakeCluster) Errata() ([]cluster.AppliedErratum, error) {
+	fake.errataMutex.Lock()
+	ret, specificReturn := fake.errataReturnsOnCall[len(fake.errataArgsForCall)]
+	fake.errataArgsForCall = append(fake.errataArgsForCall, struct {
+	}{})
+	stub := fake.ErrataStub
+	fakeReturns := fake.errataReturns
+	fake.recordInvocation("Errata", []interface{}{})
+	fake.errataMutex.Unlock()
+	if stub != nil {
+		return stub()
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeCluster) ErrataCallCount() int {
+	fake.errataMutex.RLock()
+	defer fake.errataMutex.RUnlock()
+	return len(fake.errataArgsForCall)
+}
+
+func (fake *FakeCluster) ErrataCalls(stub func() ([]cluster.AppliedErratum, error)) {
+	fake.errataMutex.Lock()
+	defer fake.errataMutex.Unlock()
+	fake.ErrataStub = stub
+}
+
+func (fake *FakeCluster) ErrataReturns(result1 []cluster.AppliedErratum, result2 error) {
+	fake.errataMutex.Lock()
+	defer fake.errataMutex.Unlock()
+	fake.ErrataStub = nil
+	fake.errataReturns = struct {
+		result1 []cluster.AppliedErratum
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) ErrataReturnsOnCall(i int, result1 []cluster.AppliedErratum, result2 error) {
+	fake.errataMutex.Lock()
+	defer fake.errataMutex.Unlock()
+	fake.ErrataStub = nil
+	if fake.errataReturnsOnCall == nil {
+		fake.errataReturnsOnCall = make(map[int]struct {
+			result1 []cluster.AppliedErratum
+			result2 error
+		})
+	}
+	fake.errataReturnsOnCall[i] = struct {
+		result1 []cluster.AppliedErratum
+		result2 error
+	}{result1, result2}
+}
+
 func (fake *FakeCluster) ID() uint64 {
 	fake.iDMutex.Lock()
 	ret, specificReturn := fake.iDReturnsOnCall[len(fake.iDArgsForCall)]
@@ -1796,6 +1960,70 @@ func (fake *FakeCluster) IngestReturnsOnCall(i int, result1 error) {
 	fake.ingestReturnsOnCall[i] = struct {
 		result1 error
 	}{result1}
+}
+
+func (fake *FakeCluster) IngestableCensus(arg1 string) (*cluster.IngestableCensus, bool) {
+	fake.ingestableCensusMutex.Lock()
+	ret, specificReturn := fake.ingestableCensusReturnsOnCall[len(fake.ingestableCensusArgsForCall)]
+	fake.ingestableCensusArgsForCall = append(fake.ingestableCensusArgsForCall, struct {
+		arg1 string
+	}{arg1})
+	stub := fake.IngestableCensusStub
+	fakeReturns := fake.ingestableCensusReturns
+	fake.recordInvocation("IngestableCensus", []interface{}{arg1})
+	fake.ingestableCensusMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeCluster) IngestableCensusCallCount() int {
+	fake.ingestableCensusMutex.RLock()
+	defer fake.ingestableCensusMutex.RUnlock()
+	return len(fake.ingestableCensusArgsForCall)
+}
+
+func (fake *FakeCluster) IngestableCensusCalls(stub func(string) (*cluster.IngestableCensus, bool)) {
+	fake.ingestableCensusMutex.Lock()
+	defer fake.ingestableCensusMutex.Unlock()
+	fake.IngestableCensusStub = stub
+}
+
+func (fake *FakeCluster) IngestableCensusArgsForCall(i int) string {
+	fake.ingestableCensusMutex.RLock()
+	defer fake.ingestableCensusMutex.RUnlock()
+	argsForCall := fake.ingestableCensusArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeCluster) IngestableCensusReturns(result1 *cluster.IngestableCensus, result2 bool) {
+	fake.ingestableCensusMutex.Lock()
+	defer fake.ingestableCensusMutex.Unlock()
+	fake.IngestableCensusStub = nil
+	fake.ingestableCensusReturns = struct {
+		result1 *cluster.IngestableCensus
+		result2 bool
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) IngestableCensusReturnsOnCall(i int, result1 *cluster.IngestableCensus, result2 bool) {
+	fake.ingestableCensusMutex.Lock()
+	defer fake.ingestableCensusMutex.Unlock()
+	fake.IngestableCensusStub = nil
+	if fake.ingestableCensusReturnsOnCall == nil {
+		fake.ingestableCensusReturnsOnCall = make(map[int]struct {
+			result1 *cluster.IngestableCensus
+			result2 bool
+		})
+	}
+	fake.ingestableCensusReturnsOnCall[i] = struct {
+		result1 *cluster.IngestableCensus
+		result2 bool
+	}{result1, result2}
 }
 
 func (fake *FakeCluster) IngestableExists(arg1 string) (bool, error) {
@@ -2647,6 +2875,68 @@ func (fake *FakeCluster) ProposeDeleteTypeReturnsOnCall(i int, result1 error) {
 	}{result1}
 }
 
+func (fake *FakeCluster) ProposeErratum(arg1 context.Context, arg2 *cluster.Configuration) error {
+	fake.proposeErratumMutex.Lock()
+	ret, specificReturn := fake.proposeErratumReturnsOnCall[len(fake.proposeErratumArgsForCall)]
+	fake.proposeErratumArgsForCall = append(fake.proposeErratumArgsForCall, struct {
+		arg1 context.Context
+		arg2 *cluster.Configuration
+	}{arg1, arg2})
+	stub := fake.ProposeErratumStub
+	fakeReturns := fake.proposeErratumReturns
+	fake.recordInvocation("ProposeErratum", []interface{}{arg1, arg2})
+	fake.proposeErratumMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeCluster) ProposeErratumCallCount() int {
+	fake.proposeErratumMutex.RLock()
+	defer fake.proposeErratumMutex.RUnlock()
+	return len(fake.proposeErratumArgsForCall)
+}
+
+func (fake *FakeCluster) ProposeErratumCalls(stub func(context.Context, *cluster.Configuration) error) {
+	fake.proposeErratumMutex.Lock()
+	defer fake.proposeErratumMutex.Unlock()
+	fake.ProposeErratumStub = stub
+}
+
+func (fake *FakeCluster) ProposeErratumArgsForCall(i int) (context.Context, *cluster.Configuration) {
+	fake.proposeErratumMutex.RLock()
+	defer fake.proposeErratumMutex.RUnlock()
+	argsForCall := fake.proposeErratumArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2
+}
+
+func (fake *FakeCluster) ProposeErratumReturns(result1 error) {
+	fake.proposeErratumMutex.Lock()
+	defer fake.proposeErratumMutex.Unlock()
+	fake.ProposeErratumStub = nil
+	fake.proposeErratumReturns = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *FakeCluster) ProposeErratumReturnsOnCall(i int, result1 error) {
+	fake.proposeErratumMutex.Lock()
+	defer fake.proposeErratumMutex.Unlock()
+	fake.ProposeErratumStub = nil
+	if fake.proposeErratumReturnsOnCall == nil {
+		fake.proposeErratumReturnsOnCall = make(map[int]struct {
+			result1 error
+		})
+	}
+	fake.proposeErratumReturnsOnCall[i] = struct {
+		result1 error
+	}{result1}
+}
+
 func (fake *FakeCluster) ProposeIngestable(arg1 context.Context, arg2 *cluster.Configuration) error {
 	fake.proposeIngestableMutex.Lock()
 	ret, specificReturn := fake.proposeIngestableReturnsOnCall[len(fake.proposeIngestableArgsForCall)]
@@ -2771,19 +3061,20 @@ func (fake *FakeCluster) ProposeSyncableReturnsOnCall(i int, result1 error) {
 	}{result1}
 }
 
-func (fake *FakeCluster) ProposeType(arg1 context.Context, arg2 *cluster.Configuration) error {
+func (fake *FakeCluster) ProposeType(arg1 context.Context, arg2 *cluster.Configuration, arg3 ...cluster.ProposeTypeOption) error {
 	fake.proposeTypeMutex.Lock()
 	ret, specificReturn := fake.proposeTypeReturnsOnCall[len(fake.proposeTypeArgsForCall)]
 	fake.proposeTypeArgsForCall = append(fake.proposeTypeArgsForCall, struct {
 		arg1 context.Context
 		arg2 *cluster.Configuration
-	}{arg1, arg2})
+		arg3 []cluster.ProposeTypeOption
+	}{arg1, arg2, arg3})
 	stub := fake.ProposeTypeStub
 	fakeReturns := fake.proposeTypeReturns
-	fake.recordInvocation("ProposeType", []interface{}{arg1, arg2})
+	fake.recordInvocation("ProposeType", []interface{}{arg1, arg2, arg3})
 	fake.proposeTypeMutex.Unlock()
 	if stub != nil {
-		return stub(arg1, arg2)
+		return stub(arg1, arg2, arg3...)
 	}
 	if specificReturn {
 		return ret.result1
@@ -2797,17 +3088,17 @@ func (fake *FakeCluster) ProposeTypeCallCount() int {
 	return len(fake.proposeTypeArgsForCall)
 }
 
-func (fake *FakeCluster) ProposeTypeCalls(stub func(context.Context, *cluster.Configuration) error) {
+func (fake *FakeCluster) ProposeTypeCalls(stub func(context.Context, *cluster.Configuration, ...cluster.ProposeTypeOption) error) {
 	fake.proposeTypeMutex.Lock()
 	defer fake.proposeTypeMutex.Unlock()
 	fake.ProposeTypeStub = stub
 }
 
-func (fake *FakeCluster) ProposeTypeArgsForCall(i int) (context.Context, *cluster.Configuration) {
+func (fake *FakeCluster) ProposeTypeArgsForCall(i int) (context.Context, *cluster.Configuration, []cluster.ProposeTypeOption) {
 	fake.proposeTypeMutex.RLock()
 	defer fake.proposeTypeMutex.RUnlock()
 	argsForCall := fake.proposeTypeArgsForCall[i]
-	return argsForCall.arg1, argsForCall.arg2
+	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3
 }
 
 func (fake *FakeCluster) ProposeTypeReturns(result1 error) {
@@ -2891,6 +3182,68 @@ func (fake *FakeCluster) RebuildSyncableReturnsOnCall(i int, result1 error) {
 		})
 	}
 	fake.rebuildSyncableReturnsOnCall[i] = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *FakeCluster) RematerializeSyncable(arg1 context.Context, arg2 string) error {
+	fake.rematerializeSyncableMutex.Lock()
+	ret, specificReturn := fake.rematerializeSyncableReturnsOnCall[len(fake.rematerializeSyncableArgsForCall)]
+	fake.rematerializeSyncableArgsForCall = append(fake.rematerializeSyncableArgsForCall, struct {
+		arg1 context.Context
+		arg2 string
+	}{arg1, arg2})
+	stub := fake.RematerializeSyncableStub
+	fakeReturns := fake.rematerializeSyncableReturns
+	fake.recordInvocation("RematerializeSyncable", []interface{}{arg1, arg2})
+	fake.rematerializeSyncableMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeCluster) RematerializeSyncableCallCount() int {
+	fake.rematerializeSyncableMutex.RLock()
+	defer fake.rematerializeSyncableMutex.RUnlock()
+	return len(fake.rematerializeSyncableArgsForCall)
+}
+
+func (fake *FakeCluster) RematerializeSyncableCalls(stub func(context.Context, string) error) {
+	fake.rematerializeSyncableMutex.Lock()
+	defer fake.rematerializeSyncableMutex.Unlock()
+	fake.RematerializeSyncableStub = stub
+}
+
+func (fake *FakeCluster) RematerializeSyncableArgsForCall(i int) (context.Context, string) {
+	fake.rematerializeSyncableMutex.RLock()
+	defer fake.rematerializeSyncableMutex.RUnlock()
+	argsForCall := fake.rematerializeSyncableArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2
+}
+
+func (fake *FakeCluster) RematerializeSyncableReturns(result1 error) {
+	fake.rematerializeSyncableMutex.Lock()
+	defer fake.rematerializeSyncableMutex.Unlock()
+	fake.RematerializeSyncableStub = nil
+	fake.rematerializeSyncableReturns = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *FakeCluster) RematerializeSyncableReturnsOnCall(i int, result1 error) {
+	fake.rematerializeSyncableMutex.Lock()
+	defer fake.rematerializeSyncableMutex.Unlock()
+	fake.RematerializeSyncableStub = nil
+	if fake.rematerializeSyncableReturnsOnCall == nil {
+		fake.rematerializeSyncableReturnsOnCall = make(map[int]struct {
+			result1 error
+		})
+	}
+	fake.rematerializeSyncableReturnsOnCall[i] = struct {
 		result1 error
 	}{result1}
 }
@@ -3525,6 +3878,73 @@ func (fake *FakeCluster) SyncableDeadLettersReturnsOnCall(i int, result1 []clust
 	}{result1, result2}
 }
 
+func (fake *FakeCluster) SyncableDerivation(arg1 string) (string, string, bool) {
+	fake.syncableDerivationMutex.Lock()
+	ret, specificReturn := fake.syncableDerivationReturnsOnCall[len(fake.syncableDerivationArgsForCall)]
+	fake.syncableDerivationArgsForCall = append(fake.syncableDerivationArgsForCall, struct {
+		arg1 string
+	}{arg1})
+	stub := fake.SyncableDerivationStub
+	fakeReturns := fake.syncableDerivationReturns
+	fake.recordInvocation("SyncableDerivation", []interface{}{arg1})
+	fake.syncableDerivationMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2, ret.result3
+	}
+	return fakeReturns.result1, fakeReturns.result2, fakeReturns.result3
+}
+
+func (fake *FakeCluster) SyncableDerivationCallCount() int {
+	fake.syncableDerivationMutex.RLock()
+	defer fake.syncableDerivationMutex.RUnlock()
+	return len(fake.syncableDerivationArgsForCall)
+}
+
+func (fake *FakeCluster) SyncableDerivationCalls(stub func(string) (string, string, bool)) {
+	fake.syncableDerivationMutex.Lock()
+	defer fake.syncableDerivationMutex.Unlock()
+	fake.SyncableDerivationStub = stub
+}
+
+func (fake *FakeCluster) SyncableDerivationArgsForCall(i int) string {
+	fake.syncableDerivationMutex.RLock()
+	defer fake.syncableDerivationMutex.RUnlock()
+	argsForCall := fake.syncableDerivationArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeCluster) SyncableDerivationReturns(result1 string, result2 string, result3 bool) {
+	fake.syncableDerivationMutex.Lock()
+	defer fake.syncableDerivationMutex.Unlock()
+	fake.SyncableDerivationStub = nil
+	fake.syncableDerivationReturns = struct {
+		result1 string
+		result2 string
+		result3 bool
+	}{result1, result2, result3}
+}
+
+func (fake *FakeCluster) SyncableDerivationReturnsOnCall(i int, result1 string, result2 string, result3 bool) {
+	fake.syncableDerivationMutex.Lock()
+	defer fake.syncableDerivationMutex.Unlock()
+	fake.SyncableDerivationStub = nil
+	if fake.syncableDerivationReturnsOnCall == nil {
+		fake.syncableDerivationReturnsOnCall = make(map[int]struct {
+			result1 string
+			result2 string
+			result3 bool
+		})
+	}
+	fake.syncableDerivationReturnsOnCall[i] = struct {
+		result1 string
+		result2 string
+		result3 bool
+	}{result1, result2, result3}
+}
+
 func (fake *FakeCluster) SyncableExists(arg1 string) (bool, error) {
 	fake.syncableExistsMutex.Lock()
 	ret, specificReturn := fake.syncableExistsReturnsOnCall[len(fake.syncableExistsArgsForCall)]
@@ -3587,6 +4007,73 @@ func (fake *FakeCluster) SyncableExistsReturnsOnCall(i int, result1 bool, result
 		result1 bool
 		result2 error
 	}{result1, result2}
+}
+
+func (fake *FakeCluster) SyncableInterpretation(arg1 string) (uint64, bool, error) {
+	fake.syncableInterpretationMutex.Lock()
+	ret, specificReturn := fake.syncableInterpretationReturnsOnCall[len(fake.syncableInterpretationArgsForCall)]
+	fake.syncableInterpretationArgsForCall = append(fake.syncableInterpretationArgsForCall, struct {
+		arg1 string
+	}{arg1})
+	stub := fake.SyncableInterpretationStub
+	fakeReturns := fake.syncableInterpretationReturns
+	fake.recordInvocation("SyncableInterpretation", []interface{}{arg1})
+	fake.syncableInterpretationMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2, ret.result3
+	}
+	return fakeReturns.result1, fakeReturns.result2, fakeReturns.result3
+}
+
+func (fake *FakeCluster) SyncableInterpretationCallCount() int {
+	fake.syncableInterpretationMutex.RLock()
+	defer fake.syncableInterpretationMutex.RUnlock()
+	return len(fake.syncableInterpretationArgsForCall)
+}
+
+func (fake *FakeCluster) SyncableInterpretationCalls(stub func(string) (uint64, bool, error)) {
+	fake.syncableInterpretationMutex.Lock()
+	defer fake.syncableInterpretationMutex.Unlock()
+	fake.SyncableInterpretationStub = stub
+}
+
+func (fake *FakeCluster) SyncableInterpretationArgsForCall(i int) string {
+	fake.syncableInterpretationMutex.RLock()
+	defer fake.syncableInterpretationMutex.RUnlock()
+	argsForCall := fake.syncableInterpretationArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeCluster) SyncableInterpretationReturns(result1 uint64, result2 bool, result3 error) {
+	fake.syncableInterpretationMutex.Lock()
+	defer fake.syncableInterpretationMutex.Unlock()
+	fake.SyncableInterpretationStub = nil
+	fake.syncableInterpretationReturns = struct {
+		result1 uint64
+		result2 bool
+		result3 error
+	}{result1, result2, result3}
+}
+
+func (fake *FakeCluster) SyncableInterpretationReturnsOnCall(i int, result1 uint64, result2 bool, result3 error) {
+	fake.syncableInterpretationMutex.Lock()
+	defer fake.syncableInterpretationMutex.Unlock()
+	fake.SyncableInterpretationStub = nil
+	if fake.syncableInterpretationReturnsOnCall == nil {
+		fake.syncableInterpretationReturnsOnCall = make(map[int]struct {
+			result1 uint64
+			result2 bool
+			result3 error
+		})
+	}
+	fake.syncableInterpretationReturnsOnCall[i] = struct {
+		result1 uint64
+		result2 bool
+		result3 error
+	}{result1, result2, result3}
 }
 
 func (fake *FakeCluster) SyncableOwner(arg1 string) uint64 {
@@ -3777,6 +4264,70 @@ func (fake *FakeCluster) SyncableReadPositionReturnsOnCall(i int, result1 uint64
 	}
 	fake.syncableReadPositionReturnsOnCall[i] = struct {
 		result1 uint64
+		result2 bool
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) SyncableRematerialization(arg1 string) (*cluster.SyncableRematerialization, bool) {
+	fake.syncableRematerializationMutex.Lock()
+	ret, specificReturn := fake.syncableRematerializationReturnsOnCall[len(fake.syncableRematerializationArgsForCall)]
+	fake.syncableRematerializationArgsForCall = append(fake.syncableRematerializationArgsForCall, struct {
+		arg1 string
+	}{arg1})
+	stub := fake.SyncableRematerializationStub
+	fakeReturns := fake.syncableRematerializationReturns
+	fake.recordInvocation("SyncableRematerialization", []interface{}{arg1})
+	fake.syncableRematerializationMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeCluster) SyncableRematerializationCallCount() int {
+	fake.syncableRematerializationMutex.RLock()
+	defer fake.syncableRematerializationMutex.RUnlock()
+	return len(fake.syncableRematerializationArgsForCall)
+}
+
+func (fake *FakeCluster) SyncableRematerializationCalls(stub func(string) (*cluster.SyncableRematerialization, bool)) {
+	fake.syncableRematerializationMutex.Lock()
+	defer fake.syncableRematerializationMutex.Unlock()
+	fake.SyncableRematerializationStub = stub
+}
+
+func (fake *FakeCluster) SyncableRematerializationArgsForCall(i int) string {
+	fake.syncableRematerializationMutex.RLock()
+	defer fake.syncableRematerializationMutex.RUnlock()
+	argsForCall := fake.syncableRematerializationArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeCluster) SyncableRematerializationReturns(result1 *cluster.SyncableRematerialization, result2 bool) {
+	fake.syncableRematerializationMutex.Lock()
+	defer fake.syncableRematerializationMutex.Unlock()
+	fake.SyncableRematerializationStub = nil
+	fake.syncableRematerializationReturns = struct {
+		result1 *cluster.SyncableRematerialization
+		result2 bool
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) SyncableRematerializationReturnsOnCall(i int, result1 *cluster.SyncableRematerialization, result2 bool) {
+	fake.syncableRematerializationMutex.Lock()
+	defer fake.syncableRematerializationMutex.Unlock()
+	fake.SyncableRematerializationStub = nil
+	if fake.syncableRematerializationReturnsOnCall == nil {
+		fake.syncableRematerializationReturnsOnCall = make(map[int]struct {
+			result1 *cluster.SyncableRematerialization
+			result2 bool
+		})
+	}
+	fake.syncableRematerializationReturnsOnCall[i] = struct {
+		result1 *cluster.SyncableRematerialization
 		result2 bool
 	}{result1, result2}
 }
@@ -3975,6 +4526,73 @@ func (fake *FakeCluster) SyncableVersionsReturnsOnCall(i int, result1 []cluster.
 		result1 []cluster.VersionInfo
 		result2 error
 	}{result1, result2}
+}
+
+func (fake *FakeCluster) SyncableZonePin(arg1 string) (string, bool, bool) {
+	fake.syncableZonePinMutex.Lock()
+	ret, specificReturn := fake.syncableZonePinReturnsOnCall[len(fake.syncableZonePinArgsForCall)]
+	fake.syncableZonePinArgsForCall = append(fake.syncableZonePinArgsForCall, struct {
+		arg1 string
+	}{arg1})
+	stub := fake.SyncableZonePinStub
+	fakeReturns := fake.syncableZonePinReturns
+	fake.recordInvocation("SyncableZonePin", []interface{}{arg1})
+	fake.syncableZonePinMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2, ret.result3
+	}
+	return fakeReturns.result1, fakeReturns.result2, fakeReturns.result3
+}
+
+func (fake *FakeCluster) SyncableZonePinCallCount() int {
+	fake.syncableZonePinMutex.RLock()
+	defer fake.syncableZonePinMutex.RUnlock()
+	return len(fake.syncableZonePinArgsForCall)
+}
+
+func (fake *FakeCluster) SyncableZonePinCalls(stub func(string) (string, bool, bool)) {
+	fake.syncableZonePinMutex.Lock()
+	defer fake.syncableZonePinMutex.Unlock()
+	fake.SyncableZonePinStub = stub
+}
+
+func (fake *FakeCluster) SyncableZonePinArgsForCall(i int) string {
+	fake.syncableZonePinMutex.RLock()
+	defer fake.syncableZonePinMutex.RUnlock()
+	argsForCall := fake.syncableZonePinArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeCluster) SyncableZonePinReturns(result1 string, result2 bool, result3 bool) {
+	fake.syncableZonePinMutex.Lock()
+	defer fake.syncableZonePinMutex.Unlock()
+	fake.SyncableZonePinStub = nil
+	fake.syncableZonePinReturns = struct {
+		result1 string
+		result2 bool
+		result3 bool
+	}{result1, result2, result3}
+}
+
+func (fake *FakeCluster) SyncableZonePinReturnsOnCall(i int, result1 string, result2 bool, result3 bool) {
+	fake.syncableZonePinMutex.Lock()
+	defer fake.syncableZonePinMutex.Unlock()
+	fake.SyncableZonePinStub = nil
+	if fake.syncableZonePinReturnsOnCall == nil {
+		fake.syncableZonePinReturnsOnCall = make(map[int]struct {
+			result1 string
+			result2 bool
+			result3 bool
+		})
+	}
+	fake.syncableZonePinReturnsOnCall[i] = struct {
+		result1 string
+		result2 bool
+		result3 bool
+	}{result1, result2, result3}
 }
 
 func (fake *FakeCluster) Syncables() ([]*cluster.Configuration, error) {

@@ -12,7 +12,26 @@ import (
 //counterfeiter:generate . Cluster
 type Cluster interface {
 	Propose(ctx context.Context, p *Proposal) error
-	ProposeType(ctx context.Context, c *Configuration) error
+	// ProposeType admits a type configuration. Declaring a nonConvertible
+	// version bump while always-current syncables consume this type's topics
+	// is refused with a StrandedSyncablesError naming them, unless the caller
+	// passes AcknowledgeStrandedSyncables (the HTTP layer's ?force=true).
+	ProposeType(ctx context.Context, c *Configuration, opts ...ProposeTypeOption) error
+	// ProposeErratum admits one append-only interpretation-registry
+	// statement (see Erratum). Immutable per id: a re-POST with different
+	// content is refused; an identical re-POST is an idempotent no-op.
+	// Refused with ClusterBelowFeatureLevelError until every member can fold
+	// errata. Powers POST /v1/erratum/{id}.
+	ProposeErratum(ctx context.Context, c *Configuration) error
+	// Errata returns every applied erratum with its raft index, unordered.
+	// Powers GET /v1/erratum.
+	Errata() ([]AppliedErratum, error)
+	// SyncableInterpretation reports the syncable's interpretation pin — the
+	// registry index its current materialization began under — and whether
+	// errata affecting its consumed topics have landed past it (stale: some
+	// sink rows were derived under a superseded reading; re-derivation is
+	// operator-triggered, never automatic). Part of GET /syncable/{id}/status.
+	SyncableInterpretation(id string) (pin uint64, stale bool, err error)
 	ProposeDeleteType(ctx context.Context, id string) error
 	ProposeIngestable(ctx context.Context, c *Configuration) error
 	// DeleteIngestable removes an ingestable: its config and checkpoint position
@@ -33,6 +52,27 @@ type Cluster interface {
 	// drifted or corrupted projection. Returns ErrResourceNotFound if the
 	// syncable is unknown.
 	RebuildSyncable(ctx context.Context, id string) error
+	// RematerializeSyncable replays a syncable's topic from index 0 through
+	// the current projection + interpretation while its keyed sink keeps
+	// serving — the non-destructive sibling of RebuildSyncable. Keyed
+	// upserts converge rows in place; a completion sweep removes rows the
+	// replay never re-emitted; the checkpoint's interpretation pin
+	// refreshes. Returns ErrNotRematerializable for sinks that cannot
+	// converge in place. Powers POST /v1/syncable/{id}/rematerialize.
+	RematerializeSyncable(ctx context.Context, id string) error
+	// SyncableRematerialization reports the syncable's in-progress
+	// re-materialization (nil, false when none) — the status endpoint's
+	// progress source.
+	SyncableRematerialization(id string) (*SyncableRematerialization, bool)
+	// SyncableZonePin reports a stored syncable's zone pin: its configured
+	// zone (ok=false for unpinned) and whether the pin is currently
+	// unsatisfiable (no current member announces the zone — the strict
+	// stall). Part of GET /syncable/{id}/status.
+	SyncableZonePin(id string) (zone string, unsatisfiable bool, ok bool)
+	// SyncableDerivation reports a stored syncable's derivation provenance —
+	// the topic it consumes and the derived topic it produces. ok is false
+	// for every non-deriving kind; the status surface omits the fields then.
+	SyncableDerivation(id string) (source, target string, ok bool)
 	ProposeDatabase(ctx context.Context, c *Configuration) error
 	// Scrub requests physical removal of already-delete-proposed (RTBF)
 	// entities from the permanent event log up to the current applied index.
@@ -82,6 +122,12 @@ type Cluster interface {
 	// query the source for lag. Returns ErrIngestableNotRunning if no worker is
 	// registered for id on this node. Powers GET /v1/ingestable/{id}/status.
 	IngestableStatus(ctx context.Context, id string) (IngestableStatus, error)
+	// IngestableCensus returns the latest JSON shape census the ingestable's
+	// worker published during its snapshot pass, or (nil, false) when none
+	// exists (census opted out, or no snapshot has run yet). Replicated
+	// state, identical on any node. Powers the census section of
+	// GET /v1/ingestable/{id}/status.
+	IngestableCensus(id string) (*IngestableCensus, bool)
 	SyncableVersions(id string) ([]VersionInfo, error)
 	SyncableVersion(id string, version uint64) (*Configuration, error)
 	// SyncableDeadLetters returns the proposals a syncable gave up on and

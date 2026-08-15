@@ -62,6 +62,18 @@ func SnapshotTableStatus(config *Config, progress *dialectpb.SnapshotProgress) [
 		if progress == nil || slices.Contains(progress.CompletedTables, t) {
 			st.Complete = true
 		}
+		// A chunked table reports per-chunk progress (the cursor values stay
+		// private — a PK is often source PII; counts are safe).
+		if progress != nil {
+			if plan := progress.ChunksByTable[t]; plan != nil {
+				st.ChunksTotal = len(plan.Chunks)
+				for _, c := range plan.Chunks {
+					if c.Done {
+						st.ChunksDone++
+					}
+				}
+			}
+		}
 		out = append(out, st)
 	}
 	return out

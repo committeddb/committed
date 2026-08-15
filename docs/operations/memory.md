@@ -6,7 +6,10 @@ cache.
 
 ## The event-log segment cache — `COMMITTED_EVENT_CACHE_SEGMENTS`
 
-The permanent event log is stored in ~20MB segment files. Reading an entry
+The permanent event log is stored in ~20MB segment files (compressed to a
+few MB at rest once sealed — see disk-limits § Event-log compression; a
+resident cache slot always holds the DECOMPRESSED ~20MB, so compression
+changes nothing about memory sizing). Reading an entry
 requires its segment's parsed index in memory, and the node keeps a bounded
 number of segments resident at once:
 

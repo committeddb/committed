@@ -4,12 +4,48 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"sort"
+
+	"go.uber.org/zap"
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/migration"
 )
 
-func (db *DB) ProposeType(ctx context.Context, c *cluster.Configuration) error {
+// alwaysCurrentSyncablesOn enumerates the always-current syncables consuming
+// the given topic (type id), classified from their stored configs alone (mode
+// and topics are envelope/config reads — no Init, no destination pools).
+func (db *DB) alwaysCurrentSyncablesOn(topicID string) ([]string, error) {
+	cfgs, err := db.storage.Syncables()
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for _, cfg := range cfgs {
+		mode, err := db.parser.SyncableMode(cfg.MimeType, cfg.Data)
+		if err != nil {
+			return nil, fmt.Errorf("classify syncable %q: %w", cfg.ID, err)
+		}
+		if mode != cluster.ModeAlwaysCurrent {
+			continue
+		}
+		topics, err := db.parser.SyncableTopics(cfg.MimeType, cfg.Data)
+		if err != nil {
+			return nil, fmt.Errorf("enumerate topics of syncable %q: %w", cfg.ID, err)
+		}
+		for _, tp := range topics {
+			if tp == topicID {
+				ids = append(ids, cfg.ID)
+				break
+			}
+		}
+	}
+	sort.Strings(ids)
+	return ids, nil
+}
+
+func (db *DB) ProposeType(ctx context.Context, c *cluster.Configuration, opts ...cluster.ProposeTypeOption) error {
+	o := cluster.ResolveProposeTypeOptions(opts)
 	_, t, err := ParseType(c, db.storage)
 	if err != nil {
 		return cluster.NewConfigError(err)
@@ -24,6 +60,27 @@ func (db *DB) ProposeType(ctx context.Context, c *cluster.Configuration) error {
 	if db.schemaValidator != nil {
 		if err := db.schemaValidator.ValidateTypeSchema(t); err != nil {
 			return cluster.NewConfigError(err)
+		}
+	}
+
+	// An announce-typed type's event destination must be usable the moment a
+	// divergence needs announcing — checked LOUDLY here at POST, not
+	// discovered as a silently unannounced divergence at first use (the
+	// admission-validation bug class). The destination must exist (so the
+	// operator declares the events topic first) and must not itself be
+	// announce-typed (an event whose own divergence announces somewhere is a
+	// cycle in the making; the emitter also guards at runtime).
+	if t.Validate == cluster.ValidateAnnounce {
+		dest, derr := db.storage.ResolveType(cluster.LatestTypeRef(t.SchemaChangeTopic))
+		if derr != nil || dest == nil {
+			return &cluster.ConfigError{
+				Err: fmt.Errorf("schemaChangeTopic %q does not name an existing type: declare the ContractExtension events topic first, then the announce-typed type", t.SchemaChangeTopic),
+			}
+		}
+		if dest.Validate == cluster.ValidateAnnounce {
+			return &cluster.ConfigError{
+				Err: fmt.Errorf("schemaChangeTopic %q is itself announce-typed: an events topic cannot announce its own divergences (chain events topics are not supported)", t.SchemaChangeTopic),
+			}
 		}
 	}
 
@@ -72,10 +129,28 @@ func (db *DB) ProposeType(ctx context.Context, c *cluster.Configuration) error {
 		// The entity kind can only ever differ here as
 		// unspecified→declared (the adoption path above); the
 		// discriminator is mutable sugar.
+		// A declared break is immutable per version, like the entity kind: an
+		// in-place edit must restate it (silently un-declaring a break would
+		// re-admit always-current syncables over data that can't convert).
+		if existing.NonConvertible && !t.NonConvertible && !schemaChanged {
+			return &cluster.ConfigError{
+				Err: fmt.Errorf("type %q version %d is declared nonConvertible and the intent is immutable: restate nonConvertible = true (a new version declares its own intent)", c.ID, existing.Version),
+			}
+		}
+
 		entityKindChanged := existing.EntityKind != t.EntityKind
 		discriminatorChanged := existing.Discriminator != t.Discriminator
+		// The event destination is mutable routing, like the discriminator:
+		// re-pointing it changes where FUTURE divergences announce, not the
+		// shape data is written in.
+		schemaChangeTopicChanged := existing.SchemaChangeTopic != t.SchemaChangeTopic
+		// A nonConvertible flip on an unchanged schema is never a no-op: it
+		// must fall through to the intent-immutability checks below, which
+		// refuse it (retroactive declaration) rather than silently absorbing
+		// or applying it.
+		nonConvertibleChanged := existing.NonConvertible != t.NonConvertible
 
-		if !schemaChanged && !migrationChanged && !entityKindChanged && !discriminatorChanged {
+		if !schemaChanged && !migrationChanged && !entityKindChanged && !discriminatorChanged && !schemaChangeTopicChanged && !nonConvertibleChanged {
 			return nil // byte-identical, no-op
 		}
 
@@ -96,6 +171,44 @@ func (db *DB) ProposeType(ctx context.Context, c *cluster.Configuration) error {
 			// place, no version bump (the migration case is the "fix a
 			// forgotten or buggy migration" path).
 			t.Version = existing.Version
+		}
+	}
+
+	// The nonConvertible intent is only meaningful ON a version bump: it
+	// says "THIS version requires information the previous version's actuals
+	// never contained".
+	if t.NonConvertible {
+		if isNew {
+			return &cluster.ConfigError{
+				Err: fmt.Errorf("migration.nonConvertible declares a breaking version bump; a type's first version has no previous data to break from"),
+			}
+		}
+		if t.Version == existing.Version && !existing.NonConvertible {
+			return &cluster.ConfigError{
+				Err: fmt.Errorf("migration intent is fixed per version: declaring nonConvertible without a schema change would retroactively re-classify version %d — a break is declared WITH the schema bump that causes it", t.Version),
+			}
+		}
+	}
+
+	// A nonConvertible bump breaks the always-current promise for every
+	// consumer of this type's topic: their data below the break can never
+	// reach the current version. Refuse loudly at POST, naming each stranded
+	// syncable, unless the operator acknowledged the stranding (?force=true).
+	// The enumeration fails CLOSED — a strand check that silently failed open
+	// could silently strand.
+	if t.NonConvertible && !isNew && t.Version > existing.Version {
+		stranded, serr := db.alwaysCurrentSyncablesOn(c.ID)
+		if serr != nil {
+			return &cluster.ConfigError{
+				Err: fmt.Errorf("cannot verify which always-current syncables a nonConvertible bump of %q would strand: %w", c.ID, serr),
+			}
+		}
+		if len(stranded) > 0 {
+			if !o.AcknowledgeStranded {
+				return &cluster.StrandedSyncablesError{TypeID: c.ID, Version: t.Version, Syncables: stranded}
+			}
+			db.logger.Warn("nonConvertible bump admitted with force; these always-current syncables are STRANDED — their below-break data dead-letters at the migration chain until re-declared version-pinned/version-aware or healed by an erratum",
+				zap.String("type", c.ID), zap.Int("version", t.Version), zap.Strings("syncables", stranded))
 		}
 	}
 
@@ -151,14 +264,39 @@ func ParseType(c *cluster.Configuration, s cluster.DatabaseStorage) (string, *cl
 	if v.IsSet("type.validate") {
 		validate = cluster.ValidationStrategy(v.GetInt("type.validate"))
 	}
+	switch validate {
+	case cluster.NoValidation, cluster.ValidateSchema, cluster.ValidateAnnounce:
+	default:
+		return "", nil, fmt.Errorf("validate = %d is not a known validation strategy (0 = none, 1 = gate on schema, 2 = announce divergence)", validate)
+	}
 
-	if validate == cluster.ValidateSchema {
+	// Both validating strategies need a schema to check against; announce
+	// (the tripwire) additionally needs somewhere to announce to.
+	if validate == cluster.ValidateSchema || validate == cluster.ValidateAnnounce {
 		if schemaType == "" {
 			return "", nil, fmt.Errorf("validate is enabled but schemaType is not set")
 		}
 		if len(schema) == 0 {
 			return "", nil, fmt.Errorf("validate is enabled but schema is empty")
 		}
+	}
+
+	// schemaChangeTopic names the Type ID that receives ContractExtension
+	// events for this type's divergences. Required with announce (a tripwire
+	// with nowhere to announce is silent — the failure mode it exists to
+	// kill), meaningless without it, and never this type itself (an event
+	// about a divergence must not be validated by the very contract it
+	// reports on). Whether the destination type EXISTS is checked in
+	// ProposeType, which has storage.
+	schemaChangeTopic := v.GetString("type.schemaChangeTopic")
+	if validate == cluster.ValidateAnnounce && schemaChangeTopic == "" {
+		return "", nil, fmt.Errorf("validate = 2 (announce) requires schemaChangeTopic: the Type ID that receives ContractExtension events")
+	}
+	if validate != cluster.ValidateAnnounce && schemaChangeTopic != "" {
+		return "", nil, fmt.Errorf("schemaChangeTopic is only valid with validate = 2 (announce)")
+	}
+	if schemaChangeTopic == c.ID {
+		return "", nil, fmt.Errorf("schemaChangeTopic cannot be the type itself")
 	}
 
 	// entityKind declares what the entities written under this type
@@ -188,9 +326,18 @@ func ParseType(c *cluster.Configuration, s cluster.DatabaseStorage) (string, *cl
 	var migration []byte
 	hasMigrationTransform := v.IsSet("migration.transform")
 	hasMigrationNone := v.IsSet("migration.none") && v.GetBool("migration.none")
+	// The third intent: this version requires information the previous
+	// version's actuals never contained — no program can convert old data.
+	hasNonConvertible := v.IsSet("migration.nonConvertible") && v.GetBool("migration.nonConvertible")
 
-	if hasMigrationTransform && hasMigrationNone {
-		return "", nil, fmt.Errorf("[migration] cannot specify both transform and none")
+	declared := 0
+	for _, set := range []bool{hasMigrationTransform, hasMigrationNone, hasNonConvertible} {
+		if set {
+			declared++
+		}
+	}
+	if declared > 1 {
+		return "", nil, fmt.Errorf("[migration] must declare exactly one intent: transform = \"<jq>\" (migratable), none = true (additive), or nonConvertible = true (old data cannot be converted)")
 	}
 	if hasMigrationTransform {
 		migration = []byte(v.GetString("migration.transform"))
@@ -225,7 +372,9 @@ func ParseType(c *cluster.Configuration, s cluster.DatabaseStorage) (string, *cl
 		Migration:         migration,
 		EntityKind:        entityKind,
 		Discriminator:     discriminator,
-		MigrationExplicit: hasMigrationTransform || hasMigrationNone,
+		SchemaChangeTopic: schemaChangeTopic,
+		NonConvertible:    hasNonConvertible,
+		MigrationExplicit: hasMigrationTransform || hasMigrationNone || hasNonConvertible,
 	}
 
 	return name, t, nil
@@ -271,4 +420,12 @@ func (db *DB) TypeVersions(id string) ([]cluster.VersionInfo, error) {
 
 func (db *DB) TypeVersion(id string, version uint64) (*cluster.Configuration, error) {
 	return db.storage.TypeVersion(id, version)
+}
+
+// SetEntityValidator injects the entity-payload validator the validation
+// tripwire runs in Propose (see tripwire.go). Injected for the same reason as
+// SetTypeSchemaValidator: the schema compilers live in http, which db must
+// not import.
+func (db *DB) SetEntityValidator(v cluster.EntitySchemaValidator) {
+	db.entityValidator = v
 }

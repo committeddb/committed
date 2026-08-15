@@ -49,6 +49,57 @@ can transiently observe such a giant transaction partially applied, and
 converges as the parts complete. This exception exists because the only
 alternative is refusing to ingest oversized transactions.
 
+Every change-stream proposal carries **capture provenance**: the timestamp at
+which the source committed the change and an identity for the source
+transaction that produced it (rows changed together in one source transaction
+share the identity). Both are recorded into the log at ingest time because
+they exist only in the change stream — once the source's binlog/WAL retention
+expires they are unrecoverable. Fidelity varies by engine:
+
+- **PostgreSQL** — commit time and xid, exactly as logical replication reports
+  them per transaction.
+- **MySQL** — the binlog event-header timestamp (whole-second resolution) and
+  the transaction's GTID; a `gtid_mode=OFF` source falls back to a
+  binlog-coordinate identity. For a transaction large enough to be applied in
+  parts, the parts share one identity and non-final parts carry statement time
+  rather than commit time (the commit time isn't known until the commit event).
+- **SQL Server** — best-effort: Change Tracking is polled, so provenance is
+  present only when a polled batch spans exactly one source transaction (the
+  steady-state case; catch-up windows spanning transactions omit it). The
+  identity is the change version, and the commit time comes from
+  `sys.dm_tran_commit_table` when it is readable.
+
+Snapshot-phase proposals carry **no provenance** — a snapshot row is a
+re-observation, not a source transaction. Provenance is capture metadata in
+the log, not payload: it never appears in a projected row or webhook delivery.
+The source commit time is evidence for operators and interpretation tooling —
+committed never orders, dedups, or resolves conflicts by it; the log's index
+is the only ordering authority.
+
+### Capture fidelity: what the log preserves, byte for byte
+
+What lands in the log is a **canonical rendering** of the source row, and the
+same source data always produces the same bytes — whichever path it arrived
+by. The contract:
+
+- **Snapshot and CDC render identically.** A row captured by the snapshot
+  pass and the same row captured from the change stream produce
+  byte-identical payloads (numbers included: a DECIMAL is never conflated
+  with a DOUBLE, exact digits are preserved, and JSON-column leaf types are
+  resolved so both paths agree). This parity is pinned by per-engine oracle
+  tests.
+- **Deliberately erased**: JSON object key order (keys are sorted — two
+  writes differing only in key order capture identically) and duplicate keys
+  (last wins). If key order carries meaning in your source, it is not
+  preserved — encode it as data.
+- **Deliberately preserved**: exact numeric representation (digits, not
+  float round-trips), string bytes, null-vs-absent distinction, and the
+  row's primary-key identity (the entity key).
+- **Never transformed**: capture applies no semantic mapping — no renames,
+  no computed fields, no filtering. Capture is unrepeatable (the source
+  moves on); interpretation is revisable later, so anything lossy belongs
+  downstream, never at ingest.
+
 Snapshot rows are **convergent re-observations** rather than deduplicated
 events: each snapshot row is its own single-row proposal, and the resume
 checkpoint rides the final row of each read window — so a restart mid-window
@@ -661,6 +712,42 @@ A complete worked MySQL setup — source DDL, the grant, an ingestable, and a
 syncable projecting back into a MySQL sink table — is exercised end-to-end by the
 `e2e/cdc` MySQL tests (`e2e/cdc/harness/mysql.go`, `e2e/cdc/mysql_test.go`); the
 DDL and TOML there are copy-pasteable.
+
+### Snapshot scale: resume and parallel readers (MySQL)
+
+The snapshot is **restart-resumable at keyset granularity** out of the box: the
+per-table cursor rides each batch's proposal, so a deploy or failover
+mid-snapshot resumes from the last committed row — completed tables are never
+re-read. Nothing to configure.
+
+For very large tables, the snapshot can additionally read each table with
+**parallel range readers**:
+
+```toml
+[sql.options]
+batch_size       = "10000"   # rows per keyset batch (default 10000)
+snapshot_readers = "4"       # parallel PK-range readers per table (default 1)
+```
+
+- `snapshot_readers` defaults to **1** (the single stream) on purpose: the
+  snapshot target is usually a production replica, and every reader holds a
+  connection running a range scan. Raise it deliberately, watching the
+  source's load. Values are capped at 16.
+- A table splits when its primary key is a **single integer column** (the
+  auto-increment case) or a **BINARY/VARBINARY column** (UUID-as-BINARY(16)).
+  Composite keys and CHAR/VARCHAR keys read on the single stream — a text
+  key's ORDER BY follows its collation, which arithmetic range bounds cannot
+  safely reproduce. Small tables also stay single-stream (splitting them
+  gains nothing).
+- The chunk plan is **frozen in the checkpoint**: a restart resumes the same
+  ranges from their cursors even if `snapshot_readers` changed. Per-table
+  progress shows as `chunksTotal` / `chunksDone` on
+  `GET /v1/ingestable/{id}/status`.
+- Ordering: rows from different ranges of one table interleave in the log
+  (each range is still in key order). Keyed consumers are unaffected; a
+  keyless history table records the interleaved order.
+
+The CDC **stream** is unaffected — it stays a single ordered cursor.
 
 ### MySQL lag, caughtUp, and the binlog-retention caveat
 

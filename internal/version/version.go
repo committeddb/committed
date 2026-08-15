@@ -33,7 +33,20 @@ var (
 // includes the refresh-boundary marker (featureLevelRefreshBoundary). A binary
 // that predates the mechanism announces nothing and is treated as level 0, so
 // the gate holds any level-1 emission until every such node is upgraded.
-const FeatureLevel uint64 = 1
+//
+// Level 2: the errata interpretation registry (featureLevelErrata). The
+// Erratum record is a GATED system type — a node that cannot fold errata must
+// not skip them (its syncables would emit stale readings) — so an erratum is
+// only admitted once every member announces level 2.
+//
+// Level 3: zone-pinned syncable ownership (featureLevelZonePinning). The
+// NodeZone announcement itself is ungated (an old node skips it safely), but
+// ownership RESOLUTION must not activate until every member resolves zones:
+// otherwise an old leader (resolving "leader owns everything") and a new
+// pinned node would both stream to the same sink — two concurrent writers.
+// Every node resolves leader-owns until the cluster minimum reaches 3, and
+// a `zone` syncable config is only admitted from level 3.
+const FeatureLevel uint64 = 3
 
 // Info is the JSON shape returned by /version and printed by the
 // --version flag. GoVersion is derived from runtime rather than

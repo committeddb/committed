@@ -438,6 +438,99 @@ stays consistent at every checkpoint. One syncable fills one table — a
 dimension is its own internal housekeeping, so two syncables that need the same
 data each keep their own copy.
 
+## Derived topics: transform once, N dumb consumers (loopback)
+
+When several syncables need the same cleanup — a jsonPath projection to a
+canonical shape, version normalization via `mode = "always-current"` — the
+transform logic is repeated N times and drifts. A `loopback` syncable applies
+it ONCE, inside the cluster: it consumes a source topic, transforms each
+entity, and proposes the result to a **derived topic** under that topic's own
+type. Downstream syncables then consume the derived topic with dumb mappings.
+
+```toml
+[syncable]
+name = "canonical-photos"
+type = "loopback"
+mode = "always-current"        # normalize versions before deriving (optional)
+
+[loopback]
+topic  = "photos-raw"          # source topic
+target = "photos"              # derived topic (its type must exist)
+
+[[loopback.mappings]]
+jsonPath = "$.id"
+field    = "photo_id"
+
+[[loopback.mappings]]
+jsonPath = "$.meta.title"
+field    = "title"
+```
+
+No mappings means whole-payload passthrough — with `always-current`, that is
+the version-normalization shape: the derived topic carries every entity
+re-written at the current type version. Because the loopback sits behind the
+same interpretation machinery as every syncable, errata are folded in too —
+**the derived topic is the cache of the source's current interpretation**,
+and its status (`GET /v1/syncable/{id}/status`) shows `derivedFrom` /
+`derivesInto` plus `interpretationStale` when a later erratum supersedes the
+reading it was materialized under. Re-derivation is operator-triggered, never
+automatic: `POST /v1/syncable/{id}/rematerialize` replays the source from
+index 0 (a snapshot-kind derived topic converges by key).
+
+The rules that keep the chain safe:
+
+- **The derived topic is a materialization, never a source of truth.** The raw
+  topic stays sacred; the derived one is rebuildable from it forever.
+- **Keys are preserved** (re-keying is refused at POST): a delete proposed to
+  the source — including an RTBF delete — forwards as a tombstone with the
+  same key, so erasure chases the derivation chain. Generations and
+  refresh-boundary markers forward verbatim too, so an ingest full-refresh of
+  the source reconciles all the way through to the derived topic's sinks.
+- **The derivation graph is a DAG with one producer per derived topic** —
+  checked at POST and re-checked deterministically at apply (a config that
+  races past admission is persisted but loudly degraded, never run). A cycle
+  would re-derive its own output forever; a second producer would interleave
+  two refresh-epoch spaces on one topic.
+- **Declare the derived topic's type `entityKind = "snapshot"`** (recommended):
+  replays then converge by key. Any other kind appends on replay and requires
+  an explicit `acknowledgeAppendSemantics = true`.
+- **Transforms are stateless per-entity** — no cross-entity aggregation,
+  no filtering. Sequence-context analysis belongs offline; its output lands
+  as errata or as proposals to a topic of its own.
+
+Chains (`raw → canonical → per-team`) are fine — each hop is its own loopback.
+
+## Consumer stances: how a syncable meets a versioned topic
+
+The log is permanently heterogeneous: entities carry the type version that was
+current when they were written, and there is no ALTER TABLE — only new writes
+under new versions. Every syncable takes one of three stances toward that:
+
+- **Version-pinned** (`mode = "as-stored"`, handling one version): the syncable
+  sees the exact bytes written, and its mappings target one version's shape.
+  Immune to later type versions; blind to them too.
+- **Version-aware** (`mode = "as-stored"`, dispatching on version): the
+  syncable sees raw bytes plus each entity's stamped version and handles the
+  differences itself — the stance for consumers that genuinely want each era's
+  shape.
+- **Always-current** (`mode = "always-current"`): committed runs each entity
+  through the type's migration chain (older-version data upgraded step by step)
+  before the syncable sees it, so mappings only ever target the current shape.
+
+Always-current is a **promise, and it is checked at admission**: it is only
+admissible when the migration chain can actually carry every version's data to
+the current shape. A version declared `nonConvertible = true` in its
+`[migration]` section — meaning that version requires information older data
+never contained — breaks the chain: `POST /v1/syncable/{id}` refuses an
+always-current syncable over such a topic, naming the gap, and
+`POST /v1/type/{id}` refuses a nonConvertible bump that would strand *existing*
+always-current syncables, naming them (re-POST with `?force=true` to
+acknowledge the stranding deliberately). A force-stranded syncable does not
+silently receive unconverted data: entities below the break dead-letter at the
+migration chain, replayable later if the reading is repaired (an erratum
+rebinding the below-break range, then a dead-letter replay or a
+re-materialization).
+
 ## Changing the rules after a projection is live
 
 A projection is a **disposable view of an immutable log** — its fold rules, and
@@ -446,6 +539,15 @@ change that logic, committed applies the new logic to Actuals it processes *from
 that point on*; it does **not** retroactively re-render rows already written to
 the sink. Correcting history is a deliberate rebuild, and running it is your
 responsibility.
+
+**Re-materializing a plain keyed `sql` mirror — in place.** For a plain
+keyed `sql` syncable, `POST /v1/syncable/{id}/rematerialize` converges the
+live table without dropping it: the worker replays from index 0 through the
+current mappings + type migrations + errata, keyed upserts overwrite rows in
+place while the table keeps serving reads, and a completion sweep removes
+rows the replay never re-emitted. Restart-resumable, and it refreshes the
+syncable's `interpretationPin` (clearing `interpretationStale`). Projections
+and keyless sinks refuse the verb — for those, use the patterns below.
 
 **Changing one projection's own rules — blue-green.** Because a projection
 replays from index 0 and the log stays the source of truth, the clean way to fix

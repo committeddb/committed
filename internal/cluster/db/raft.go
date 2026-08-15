@@ -461,6 +461,10 @@ func (n *Raft) applyConfChange(cc raftpb.ConfChangeI, ccCtx []byte) {
 				n.logger.Error("conf change: delete member version",
 					zap.Uint64("peer", ch.GetNodeId()), zap.Error(err))
 			}
+			if err := n.storage.DeleteMemberZone(ch.GetNodeId()); err != nil {
+				n.logger.Error("conf change: delete member zone",
+					zap.Uint64("peer", ch.GetNodeId()), zap.Error(err))
+			}
 		}
 	}
 }

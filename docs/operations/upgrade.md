@@ -163,6 +163,11 @@ After the last node:
 
 ## Rolling back
 
+> **Rolling back below 0.8.0?** Event-log segments compress at rest from
+> 0.8.0 on, and older binaries cannot read compressed segments. Stop each
+> node and run `committed wal decompress --data <datadir>` before starting
+> the older binary. Rollbacks within 0.8.x need nothing.
+
 If the new binary misbehaves on a node — fails to start, fails `/ready`,
 or shows a regression — roll that node back the same way you upgraded it:
 `SIGTERM`, put the **previous** binary back, start over the same data

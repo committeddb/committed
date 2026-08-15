@@ -339,7 +339,7 @@ func TestGetSyncableStatus_NotStuck(t *testing.T) {
 	require.Equal(t, 200, resp.StatusCode)
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	require.JSONEq(t, `{"stuck":false,"workerState":"running","checkpointIndex":0,"headIndex":0,"lag":0,"caughtUp":true,"deadLetters":0,"ownerNode":0}`, string(body))
+	require.JSONEq(t, `{"stuck":false,"workerState":"running","checkpointIndex":0,"headIndex":0,"lag":0,"caughtUp":true,"deadLetters":0,"ownerNode":0,"interpretationPin":0,"interpretationStale":false}`, string(body))
 }
 
 // progressResponse decodes the full status response including the

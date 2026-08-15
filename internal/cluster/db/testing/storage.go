@@ -11,6 +11,7 @@ import (
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
+	"github.com/committeddb/committed/internal/cluster/interpretation"
 )
 
 type MemoryStorageSaveArgsForCall struct {
@@ -202,6 +203,20 @@ func (ms *MemoryStorage) TopicRefreshEpoch(topic string) uint64 {
 	return 0
 }
 
+// HasContractFingerprint is a stub: this in-memory test double has no apply
+// path to record announced-shape marks, so it always reports false ("not yet
+// announced"). Tests that exercise tripwire dedupe use the real wal.Storage.
+func (ms *MemoryStorage) HasContractFingerprint(typeID string, version int, fingerprint string) bool {
+	return false
+}
+
+// IngestableCensus is a stub: this in-memory test double has no apply path to
+// record a published census, so it always reports none. Census tests use the
+// real wal.Storage.
+func (ms *MemoryStorage) IngestableCensus(id string) (*cluster.IngestableCensus, bool) {
+	return nil, false
+}
+
 func (ms *MemoryStorage) Database(id string) (cluster.Database, error) {
 	return nil, nil
 }
@@ -340,7 +355,13 @@ func (StorageStubs) DeleteMemberPeerURL(id uint64) error             { return ni
 
 func (StorageStubs) MemberVersion(id uint64) (uint64, bool) { return 0, false }
 func (StorageStubs) MemberVersions() map[uint64]uint64      { return nil }
-func (StorageStubs) DeleteMemberVersion(id uint64) error    { return nil }
+
+// MemberZone stubs: no zones announced in unit fixtures — every syncable
+// resolves leader-owns, matching pre-zone behavior.
+func (StorageStubs) MemberZone(uint64) (string, bool)    { return "", false }
+func (StorageStubs) MemberZones() map[uint64]string      { return nil }
+func (StorageStubs) DeleteMemberZone(uint64) error       { return nil }
+func (StorageStubs) DeleteMemberVersion(id uint64) error { return nil }
 
 // TODO Pull this reader out and make it concrete instead of an interface
 type Reader struct {
@@ -387,4 +408,31 @@ func (r *Reader) Read() (*cluster.Actual, error) {
 			}
 		}
 	}
+}
+
+// InterpretationRegistry is a stub: this in-memory test double applies no
+// errata, so readers always see the empty registry (the errata-free path).
+func (ms *MemoryStorage) InterpretationRegistry() *interpretation.Registry {
+	return interpretation.EmptyRegistry
+}
+
+// ErratumByID is a stub: no errata are ever applied here.
+func (ms *MemoryStorage) ErratumByID(id string) (*cluster.Erratum, uint64, bool) {
+	return nil, 0, false
+}
+
+// AppliedErrata is a stub: no errata are ever applied here.
+func (ms *MemoryStorage) AppliedErrata() ([]cluster.AppliedErratum, error) {
+	return nil, nil
+}
+
+// SyncableCheckpoint is a stub: this double has no checkpoint records.
+func (ms *MemoryStorage) SyncableCheckpoint(id string) (*cluster.SyncableIndex, bool) {
+	return nil, false
+}
+
+// SyncableRematerialization is a stub: no re-materializations run against
+// this in-memory double.
+func (ms *MemoryStorage) SyncableRematerialization(id string) (*cluster.SyncableRematerialization, bool) {
+	return nil, false
 }

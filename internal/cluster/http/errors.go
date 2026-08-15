@@ -120,7 +120,21 @@ func writeErrorf(w httpgo.ResponseWriter, status int, code string, format string
 func writeProposeError(w httpgo.ResponseWriter, err error, resource, action string) {
 	var rebuildErr cluster.RebuildRequiredError
 	var configErr *cluster.ConfigError
+	var strandedErr *cluster.StrandedSyncablesError
+	var levelErr *cluster.ClusterBelowFeatureLevelError
 	switch {
+	case errors.As(err, &levelErr):
+		// 503 (retryable): the config is fine, the cluster isn't fully
+		// upgraded for the record it would commit — retry after the rolling
+		// upgrade completes.
+		writeError(w, httpgo.StatusServiceUnavailable, "cluster_below_feature_level", levelErr.Error())
+	case errors.As(err, &strandedErr):
+		// 409 Conflict: the nonConvertible bump conflicts with standing
+		// always-current consumers. Their ids ride as structured details so a
+		// deploy pipeline can act on them; re-POST with ?force=true to
+		// acknowledge the stranding deliberately.
+		writeErrorWithDetails(w, httpgo.StatusConflict, "stranded_always_current", strandedErr.Error(),
+			map[string]any{"type": strandedErr.TypeID, "version": strandedErr.Version, "syncables": strandedErr.Syncables})
 	case errors.As(err, &rebuildErr):
 		// 409 Conflict: this config change can't be applied in place and needs
 		// a rebuild. Code + details are destination-defined (e.g. table +

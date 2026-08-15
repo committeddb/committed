@@ -199,6 +199,12 @@ type TableSnapshotStatus struct {
 	Topic string
 	// Complete is whether this table's snapshot finished.
 	Complete bool
+	// ChunksTotal/ChunksDone report a chunked parallel snapshot's per-table
+	// progress (snapshot_readers > 1 with a splittable PK): how many PK-range
+	// chunks the frozen plan holds and how many have finished. Both zero for
+	// a single-stream table.
+	ChunksTotal int
+	ChunksDone  int
 }
 
 //counterfeiter:generate . IngestableParser

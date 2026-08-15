@@ -74,9 +74,47 @@ func runWalRepair() error {
 	return nil
 }
 
+var walDecompressData string
+
+var walDecompressCmd = &cobra.Command{
+	Use:   "decompress",
+	Short: "Rewrite compressed WAL segments to the plain format for a downgrade",
+	Long: `Rewrite a stopped node's compressed (.zst) event-log segments back to the
+plain pre-0.8.0 segment format.
+
+Run this only with the node STOPPED, and only when downgrading to a binary
+older than 0.8.0 — those binaries do not recognize compressed segments and
+would open a partial log. Upgrades need nothing: mixed logs read
+transparently, and the background sealer re-compresses after the next start
+on a 0.8.0+ binary.`,
+	SilenceUsage: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if walDecompressData == "" {
+			return fmt.Errorf("--data is required (the stopped node's data directory)")
+		}
+		counts, err := wal.DecompressNode(walDecompressData)
+		if err != nil {
+			return err
+		}
+		total := 0
+		for dir, n := range counts {
+			_, _ = fmt.Fprintf(os.Stdout, "%s: %d segment(s) rewritten\n", dir, n)
+			total += n
+		}
+		if total == 0 {
+			_, _ = fmt.Fprintln(os.Stdout, "no compressed segments found; the data dir is already downgrade-ready")
+		} else {
+			_, _ = fmt.Fprintln(os.Stdout, "done; the data dir is downgrade-ready")
+		}
+		return nil
+	},
+}
+
 func init() {
 	walRepairCmd.Flags().StringVar(&walRepairData, "data", "", "the stopped node's data directory; required")
 	walRepairCmd.Flags().BoolVar(&walRepairCommit, "commit", false, "truncate a torn tail (default: dry run, report only)")
+	walDecompressCmd.Flags().StringVar(&walDecompressData, "data", "", "the stopped node's data directory; required")
 	walCmd.AddCommand(walRepairCmd)
+	walCmd.AddCommand(walDecompressCmd)
 	rootCmd.AddCommand(walCmd)
 }

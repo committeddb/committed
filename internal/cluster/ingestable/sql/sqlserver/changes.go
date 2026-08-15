@@ -4,7 +4,9 @@ import (
 	"context"
 	gosql "database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -313,13 +315,53 @@ func (d *SQLServerDialect) pollWindow(
 ) error {
 	sub := 0
 	subOverflowed := false
-	flush := func(entities []*cluster.Entity) error {
+
+	// Capture provenance is BEST-EFFORT on this dialect: change tracking is a
+	// poll, so one flushed batch can span many source transactions — only a
+	// batch whose rows all share one SYS_CHANGE_VERSION (txnVer > 0; the
+	// steady-state small window) carries a transaction identity. Its commit
+	// time comes from sys.dm_tran_commit_table, cached per window; absent when
+	// the DMV row is already cleaned up or the query fails (permissions), in
+	// which case the version still stamps as SourceTxnID.
+	commitTimes := map[int64]int64{}
+	commitLookupWarned := false
+	commitTimeFor := func(ver int64) int64 {
+		if t, ok := commitTimes[ver]; ok {
+			return t
+		}
+		nanos := int64(0)
+		var t time.Time
+		err := db.QueryRowContext(ctx,
+			`SELECT commit_time FROM sys.dm_tran_commit_table WHERE commit_ts = @p1`, ver).Scan(&t)
+		switch {
+		case err == nil:
+			nanos = t.UnixNano()
+		case !errors.Is(err, gosql.ErrNoRows) && !commitLookupWarned:
+			commitLookupWarned = true
+			zap.L().Debug("source commit-time lookup unavailable; provenance carries the change version only",
+				zap.Error(err))
+		}
+		commitTimes[ver] = nanos
+		return nanos
+	}
+
+	flush := func(entities []*cluster.Entity, txnVer int64) error {
 		if len(entities) == 0 {
 			return nil
 		}
 		stampGeneration(entities, epoch)
+		var commitTS int64
+		var txnID string
+		if txnVer > 0 {
+			commitTS = commitTimeFor(txnVer)
+			txnID = strconv.FormatInt(txnVer, 10)
+		}
 		for _, group := range sql.PartitionByTopic(entities) {
-			p := &cluster.Proposal{Entities: group}
+			p := &cluster.Proposal{
+				Entities:             group,
+				SourceCommitUnixNano: commitTS,
+				SourceTxnID:          txnID,
+			}
 			seq, ok := encodeCTSeq(current, sub)
 			if !ok || subOverflowed {
 				// The freeze contract: a coordinate we cannot encode uniquely
@@ -360,7 +402,7 @@ func (d *SQLServerDialect) pollTable(
 	table string,
 	spec *sql.TopicSpec,
 	consumed, current uint64,
-	flush func([]*cluster.Entity) error,
+	flush func([]*cluster.Entity, int64) error,
 ) error {
 	ref := resolveTableRef(table)
 
@@ -373,7 +415,7 @@ func (d *SQLServerDialect) pollTable(
 
 	//nolint:gosec // G201: identifiers pass through quoter; values are bound parameters.
 	query := fmt.Sprintf(`
-		SELECT ct.SYS_CHANGE_OPERATION, %s, t.*
+		SELECT ct.SYS_CHANGE_OPERATION, ct.SYS_CHANGE_VERSION, %s, t.*
 		FROM CHANGETABLE(CHANGES %s, @p1) AS ct
 		LEFT JOIN %s AS t ON %s
 		WHERE ct.SYS_CHANGE_VERSION <= @p2
@@ -399,6 +441,19 @@ func (d *SQLServerDialect) pollTable(
 	var pending []*cluster.Entity
 	pendingBytes := 0
 	rowCount := 0
+	// pendingVer / pendingMixed track whether every buffered row shares one
+	// SYS_CHANGE_VERSION — i.e. whether this batch is exactly one source
+	// transaction's changes to this table. Homogeneous batches carry the
+	// version as their provenance identity; a mixed batch (a catch-up window
+	// spanning transactions) flushes with 0 = provenance omitted.
+	pendingVer := int64(0)
+	pendingMixed := false
+	batchVer := func() int64 {
+		if pendingMixed {
+			return 0
+		}
+		return pendingVer
+	}
 	for rows.Next() {
 		m, err := scanRowValues(rows, cols, uuidCols)
 		if err != nil {
@@ -428,10 +483,16 @@ func (d *SQLServerDialect) pollTable(
 				continue
 			}
 		}
+		ver, verOK := m["sys_change_version"].(int64)
+		if len(pending) == 0 {
+			pendingVer, pendingMixed = ver, !verOK
+		} else if !verOK || ver != pendingVer {
+			pendingMixed = true
+		}
 		pending = append(pending, e)
 		pendingBytes += sql.EntityFlushBytes(e)
 		if pendingBytes >= sql.TxnSoftFlushBytes {
-			if err := flush(pending); err != nil {
+			if err := flush(pending, batchVer()); err != nil {
 				return err
 			}
 			pending, pendingBytes = nil, 0
@@ -440,7 +501,7 @@ func (d *SQLServerDialect) pollTable(
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	if err := flush(pending); err != nil {
+	if err := flush(pending, batchVer()); err != nil {
 		return err
 	}
 	if rowCount > 0 {

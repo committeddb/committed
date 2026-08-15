@@ -956,6 +956,14 @@ func (d *PostgreSQLDialect) stream(
 	resumeFloor := *lastLSN
 	skippingTxn := false
 
+	// curTxnCommitTS / curTxnID are the in-flight transaction's capture
+	// provenance — pgoutput's Begin message announces the commit time and xid
+	// up front (logical decoding streams only committed transactions) — stamped
+	// onto every proposal flushed for the transaction and cleared at Commit.
+	// See cluster.Proposal.SourceCommitUnixNano/SourceTxnID.
+	var curTxnCommitTS int64
+	var curTxnID string
+
 	for {
 		rawMsg, err := conn.ReceiveMessage(ctx)
 		if err != nil {
@@ -1043,6 +1051,13 @@ func (d *PostgreSQLDialect) stream(
 				// txn was already processed in a previous session and
 				// should be silently dropped (see resumeFloor doc above).
 				skippingTxn = resumeFloor > 0 && m.FinalLSN <= resumeFloor
+				// Capture provenance: pgoutput announces the commit time and
+				// xid at Begin (only committed transactions are streamed).
+				curTxnCommitTS = 0
+				if !m.CommitTime.IsZero() {
+					curTxnCommitTS = m.CommitTime.UnixNano()
+				}
+				curTxnID = strconv.FormatUint(uint64(m.Xid), 10)
 
 			case *pglogrepl.InsertMessage:
 				if skippingTxn {
@@ -1053,7 +1068,7 @@ func (d *PostgreSQLDialect) stream(
 					pendingBytes += sql.EntityFlushBytes(e)
 				}
 				if pendingBytes >= sql.TxnSoftFlushBytes {
-					if err := flushPending(ctx, &pending, &pendingBytes, pr, curLSN, *epoch); err != nil {
+					if err := flushPending(ctx, &pending, &pendingBytes, pr, curLSN, *epoch, curTxnCommitTS, curTxnID); err != nil {
 						return err
 					}
 				}
@@ -1081,7 +1096,7 @@ func (d *PostgreSQLDialect) stream(
 					}
 				}
 				if pendingBytes >= sql.TxnSoftFlushBytes {
-					if err := flushPending(ctx, &pending, &pendingBytes, pr, curLSN, *epoch); err != nil {
+					if err := flushPending(ctx, &pending, &pendingBytes, pr, curLSN, *epoch, curTxnCommitTS, curTxnID); err != nil {
 						return err
 					}
 				}
@@ -1102,7 +1117,7 @@ func (d *PostgreSQLDialect) stream(
 					pendingBytes += sql.EntityFlushBytes(e)
 				}
 				if pendingBytes >= sql.TxnSoftFlushBytes {
-					if err := flushPending(ctx, &pending, &pendingBytes, pr, curLSN, *epoch); err != nil {
+					if err := flushPending(ctx, &pending, &pendingBytes, pr, curLSN, *epoch, curTxnCommitTS, curTxnID); err != nil {
 						return err
 					}
 				}
@@ -1117,9 +1132,13 @@ func (d *PostgreSQLDialect) stream(
 					// why we're skipping.
 					break
 				}
-				if err := flushPending(ctx, &pending, &pendingBytes, pr, curLSN, *epoch); err != nil {
+				if err := flushPending(ctx, &pending, &pendingBytes, pr, curLSN, *epoch, curTxnCommitTS, curTxnID); err != nil {
 					return err
 				}
+				// The transaction is flushed; its provenance must not bleed
+				// into anything outside a Begin..Commit (the next Begin
+				// re-captures its own).
+				curTxnCommitTS, curTxnID = 0, ""
 
 				// Use TransactionEndLSN (past the end of the
 				// transaction) so a resume from this position does
@@ -2039,7 +2058,7 @@ func quoteTable(table string) string {
 // proposals after a crash/flap (effectively-once). Monotonic because clientXLogPos
 // only advances, and deterministic because a resume re-reads the same messages in
 // the same order, producing the same flush LSNs.
-func flushPending(ctx context.Context, pending *[]*cluster.Entity, pendingBytes *int, pr chan<- *cluster.Proposal, lsn pglogrepl.LSN, epoch uint64) error {
+func flushPending(ctx context.Context, pending *[]*cluster.Entity, pendingBytes *int, pr chan<- *cluster.Proposal, lsn pglogrepl.LSN, epoch uint64, commitTS int64, txnID string) error {
 	if len(*pending) == 0 {
 		return nil
 	}
@@ -2065,7 +2084,14 @@ func flushPending(ctx context.Context, pending *[]*cluster.Entity, pendingBytes 
 
 	for sub, group := range groups {
 		//nolint:gosec // G115: sub is a small non-negative topic-group index (< number of topics in a transaction).
-		p := &cluster.Proposal{Entities: group, SourceSeq: uint64(lsn) + uint64(sub)}
+		p := &cluster.Proposal{
+			Entities:  group,
+			SourceSeq: uint64(lsn) + uint64(sub),
+			// Capture provenance from the transaction's Begin message (commit
+			// time + xid); every per-topic group of one transaction shares it.
+			SourceCommitUnixNano: commitTS,
+			SourceTxnID:          txnID,
+		}
 		select {
 		case pr <- p:
 		case <-ctx.Done():

@@ -5,6 +5,7 @@ import (
 	"go.etcd.io/raft/v3/raftpb"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/interpretation"
 )
 
 //counterfeiter:generate . Storage
@@ -95,6 +96,37 @@ type Storage interface {
 	// re-emitted proposals (effectively-once ingest). 0 for an unknown id
 	// means "never ingested — dedup nothing".
 	IngestSourceSeqHighwater(id string) uint64
+	// HasContractFingerprint reports whether the validation tripwire has
+	// already announced the divergent shape (typeID, version, fingerprint) —
+	// i.e. an applied LogContractFingerprint mark exists. Read pre-propose by
+	// the tripwire so each distinct shape announces once; replicated state,
+	// so the dedupe survives restarts and leadership moves.
+	HasContractFingerprint(typeID string, version int, fingerprint string) bool
+	// IngestableCensus returns the latest applied JSON shape census for the
+	// ingestable (published by its worker during the snapshot pass), or
+	// (nil, false) when none exists. Replicated state, so any node's status
+	// endpoint can serve it; also read by a resuming worker to seed its
+	// accumulator at the same refresh epoch.
+	IngestableCensus(id string) (*cluster.IngestableCensus, bool)
+	// InterpretationRegistry returns the current compiled errata snapshot —
+	// immutable, swapped whole on each erratum apply, never nil. The read
+	// path resolves effective versions (stamp ⊕ errata fold) through it.
+	InterpretationRegistry() *interpretation.Registry
+	// ErratumByID returns the applied erratum with the given id, its raft
+	// index, and whether it exists — the admission read behind the
+	// immutability rule (errata are append-only, never edited).
+	ErratumByID(id string) (*cluster.Erratum, uint64, bool)
+	// AppliedErrata returns every applied erratum with its raft index,
+	// unordered. Powers GET /v1/erratum.
+	AppliedErrata() ([]cluster.AppliedErratum, error)
+	// SyncableCheckpoint returns the syncable's full checkpoint record —
+	// including its interpretation pin — or (nil, false) when none exists.
+	SyncableCheckpoint(id string) (*cluster.SyncableIndex, bool)
+	// SyncableRematerialization returns the syncable's in-progress
+	// re-materialization record, or (nil, false) when none exists. The owner
+	// worker observes it (begin marking, sweep at the target head); the
+	// status endpoint reports the progress.
+	SyncableRematerialization(id string) (*cluster.SyncableRematerialization, bool)
 	// TopicRefreshEpoch returns the highest refresh generation ever committed
 	// for a topic (type id), or 0 if none. Keyed by topic and NOT cleared by
 	// DeleteIngestable, so a same-topic recreate reads the generation still on the
@@ -198,6 +230,15 @@ type Storage interface {
 	MemberVersion(id uint64) (uint64, bool)
 	MemberVersions() map[uint64]uint64
 	DeleteMemberVersion(id uint64) error
+	// MemberZone / MemberZones / DeleteMemberZone persist each member's
+	// self-announced zone (COMMITTED_ZONE; entity-driven, applied via
+	// handleNodeZone). MemberZones feeds zone-pinned syncable ownership
+	// resolution — intersected with current membership and feature-gated so a
+	// mixed-version cluster resolves leader-owns everywhere. See node_zone.go
+	// and db/zone.go.
+	MemberZone(id uint64) (string, bool)
+	MemberZones() map[uint64]string
+	DeleteMemberZone(id uint64) error
 }
 
 // lostNotifierSetter is the optional Storage extension that accepts the

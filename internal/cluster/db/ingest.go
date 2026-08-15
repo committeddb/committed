@@ -622,6 +622,11 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 
 	backoff := ingestBackoffMin
 
+	// The JSON shape census (see census.go): folds snapshot-phase rows,
+	// publishes replicated census state. nil (all methods no-op) when the
+	// operator opted out or no config is stored.
+	census := db.newCensusRecorder(id)
+
 	// dataProposeFailed is the POSITION BARRIER: armed the moment any data
 	// proposal fails, before the error is even classified. A standalone
 	// position checkpoint summarizes "all data through here committed", so
@@ -700,6 +705,10 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 	// proposeIngestData's disk-pressure pause, and applies backpressure by
 	// awaiting the oldest ack once the window is full.
 	submitPipelined := func(p *cluster.Proposal) error {
+		// The validation tripwire runs in db.Propose, which this pipelined
+		// lane bypasses (proposeAsync directly) — so run it here: divergent
+		// SNAPSHOT rows announce too. A signal, never a gate.
+		db.announceDivergences(ctx, p)
 		pauseBackoff := ingestBackoffMin
 		for {
 			rid, ack, err := db.proposeAsync(ctx, p)
@@ -825,6 +834,11 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 					backoff = ingestBackoffMin
 					continue
 				}
+
+				// Census: fold snapshot rows (a refresh-boundary marker forces
+				// the pass's census to publish before the boundary commits).
+				// Never gates — see census.go.
+				census.observe(ctx, proposal)
 
 				// Lane split. Bare snapshot rows pipeline; ordered
 				// proposals (CDC, bundled-position rows, markers) drain the

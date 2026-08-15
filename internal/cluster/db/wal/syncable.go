@@ -9,6 +9,7 @@ import (
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
+	"github.com/committeddb/committed/internal/cluster/interpretation"
 	"github.com/committeddb/committed/internal/cluster/migration"
 )
 
@@ -135,6 +136,22 @@ func (s *Storage) saveSyncable(t *cluster.Configuration, raftIndex uint64) error
 // deterministic state-machine write), no worker is (re)started, and the
 // degraded record is the loud, queryable evidence.
 func (s *Storage) buildSyncable(t *cluster.Configuration) cluster.Syncable {
+	// Deterministic derivation backstop: the leader's admission check can be
+	// raced (two proposes admitted against the same applied state, both
+	// committed). Replaying the stored configs' derivation edges in log-index
+	// order decides — identically on every node and every restart — which
+	// config a cycle or fan-in refuses: the one that landed later. A config's
+	// verdict depends only on earlier-indexed configs, so listener timing
+	// (later configs already persisted when this build dequeues) cannot
+	// change the answer. Refused = persisted but degraded (no worker), so a
+	// derivation cycle can never actually run.
+	if derr := s.syncableDerivationRefusals()[t.ID]; derr != nil {
+		s.recordConfigError("syncable", t.ID, configErrBuild, derr)
+		s.logger.Error("syncable config persisted but refused by the derivation guard (degraded); fix the graph and re-POST the config",
+			zap.String("id", t.ID), zap.Error(derr))
+		return nil
+	}
+
 	_, parsed, parsedMode, err := s.parser.ParseSyncable(t.MimeType, t.Data, s)
 	if err != nil {
 		s.recordConfigError("syncable", t.ID, configErrBuild, err)
@@ -151,7 +168,10 @@ func (s *Storage) buildSyncable(t *cluster.Configuration) cluster.Syncable {
 	if parsedMode == cluster.ModeAlwaysCurrent {
 		parsed = migration.Wrap(parsed, s, s.metrics)
 	}
-	return parsed
+	// EVERY syncable reads the authoritative interpretation: the outer
+	// wrapper rebinds each entity to stamp ⊕ errata fold before the
+	// migration chain (inside) or the consumer (either mode) sees it.
+	return interpretation.Wrap(parsed, s.InterpretationRegistry, s)
 }
 
 // SyncableExists reports whether a syncable config id currently exists (a
@@ -269,14 +289,58 @@ func (s *Storage) reconcileSyncableList() ([]*db.SyncableWithID, error) {
 			out = append(out, &db.SyncableWithID{ID: r.id})
 			continue
 		}
-		// Same build body as the apply-queued path (evidence recording and
-		// the migration wrapper live in one place). A nil result is a
-		// degraded build: the entry stays PRESENT so its worker is kept
+		// Same build body as the apply-queued path (evidence recording, the
+		// derivation guard, and the wrappers live in one place). A nil result
+		// is a degraded build: the entry stays PRESENT so its worker is kept
 		// (not cancelled as a phantom delete), just not reconfigured.
 		out = append(out, &db.SyncableWithID{ID: r.id, Syncable: s.buildSyncable(r.cfg)})
 	}
 	s.sweepConfigErrorsExcept("syncable", present)
 	return out, nil
+}
+
+// syncableDerivationRefusalsTx computes, from the stored current syncable
+// configs and the raft indexes their versions applied at, which configs the
+// derivation guard refuses (db.ReplayDerivation: cycles and duplicate
+// producers, replayed in log-index order). Pure function of the stored set —
+// every node computes the same map. buildSyncable consults it at build time
+// (off the apply path — the check is pure bbolt reads + config parsing, no
+// destination I/O), via the view wrapper below.
+func (s *Storage) syncableDerivationRefusalsTx(tx *bolt.Tx) map[string]error {
+	b := tx.Bucket(syncableBucket)
+	if b == nil {
+		return nil
+	}
+	var edges []db.DerivationEdge
+	_ = forEachCurrent(b, func(id, data []byte) error {
+		cfg := &cluster.Configuration{}
+		if err := cfg.Unmarshal(data); err != nil {
+			return nil // undecodable — degraded elsewhere, no edges
+		}
+		targets, err := s.parser.SyncableDerivedTopics(cfg.MimeType, cfg.Data)
+		if err != nil || len(targets) == 0 {
+			return nil // non-deriving kind (or unparseable — degraded elsewhere)
+		}
+		sources, _ := s.parser.SyncableTopics(cfg.MimeType, cfg.Data)
+		edges = append(edges, db.DerivationEdge{
+			ID:      string(id),
+			Index:   versionedLastIndex(b, id),
+			Sources: sources,
+			Targets: targets,
+		})
+		return nil
+	})
+	return db.ReplayDerivation(edges)
+}
+
+// syncableDerivationRefusals is the view-transaction wrapper for reconcile.
+func (s *Storage) syncableDerivationRefusals() map[string]error {
+	var refusals map[string]error
+	_ = s.view(func(tx *bolt.Tx) error {
+		refusals = s.syncableDerivationRefusalsTx(tx)
+		return nil
+	})
+	return refusals
 }
 
 func (s *Storage) Syncables() ([]*cluster.Configuration, error) {

@@ -16,6 +16,20 @@ type Parser interface {
 	// the syncables an ingestable primaryKey change affects. Returns nil for a
 	// syncable kind whose parser can't extract topics.
 	SyncableTopics(mimeType string, data []byte) ([]string, error)
+	// SyncableDerivedTopics reports which topics the syncable config PRODUCES
+	// (its derivation targets — a loopback's loopback.target), read from the
+	// config alone, so the propose path and the apply-time build guard can
+	// walk the derivation graph. Returns nil for every non-deriving kind.
+	SyncableDerivedTopics(mimeType string, data []byte) ([]string, error)
+	// SyncableZone reports the syncable config's pinned zone ([syncable]
+	// envelope `zone` key; "" = unpinned), read from the config alone, so
+	// ownership resolution and admission run no build.
+	SyncableZone(mimeType string, data []byte) (string, error)
+	// SyncableMode reports the syncable config's consumer stance
+	// (as-stored / always-current), read from the config alone — no Init, no
+	// destination pool — so admission checks can classify every stored
+	// syncable without side effects.
+	SyncableMode(mimeType string, data []byte) (cluster.SyncableMode, error)
 	// SyncableDatabases reports which destination databases the syncable config
 	// references, read from the config alone, so the propose path can enumerate
 	// the syncables a database connection change would break. Returns nil for a

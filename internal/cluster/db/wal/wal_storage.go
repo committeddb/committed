@@ -20,6 +20,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
 	"github.com/committeddb/committed/internal/cluster/db/datadir"
+	"github.com/committeddb/committed/internal/cluster/interpretation"
 	"github.com/committeddb/committed/internal/cluster/metrics"
 )
 
@@ -77,6 +78,10 @@ var (
 	// that gates semantically-skewed emission (a new system type, a
 	// refresh-boundary marker). See node_version.go and db.featureEnabled.
 	memberVersionBucket = []byte("memberVersions")
+	// memberZones maps node id -> announced zone (COMMITTED_ZONE) — the
+	// placement identities zone-pinned syncables resolve their owner
+	// against. See node_zone.go.
+	memberZoneBucket = []byte("memberZones")
 )
 
 var (
@@ -102,6 +107,26 @@ var (
 	// the apply path (handleTypeMigrationDeadLetter). See
 	// type_migration_dead_letter.go.
 	typeMigrationDeadLetterBucket = []byte("typeMigrationDeadLetters")
+	// contractFingerprintBucket holds the validation tripwire's replicated
+	// dedupe marks, keyed "typeID\x00version\x00fingerprint" (one per
+	// announced divergent shape). Written deterministically from the apply
+	// path (handleContractFingerprint), guarded/swept with the type config.
+	// See contract_fingerprint.go.
+	contractFingerprintBucket = []byte("contractFingerprints")
+	// ingestableCensusBucket holds the latest published JSON shape census per
+	// ingestable id (last-writer-wins), guarded/swept with the ingestable
+	// config. See ingestable_census.go.
+	ingestableCensusBucket = []byte("ingestableCensuses")
+	// syncableRematerializationBucket holds the in-progress re-materialization
+	// record per syncable id (upsert while replaying, deleted at sweep
+	// completion), guarded/swept with the syncable config. See
+	// syncable_rematerialization.go.
+	syncableRematerializationBucket = []byte("syncableRematerializations")
+	// errataBucket holds the APPEND-ONLY interpretation registry: one record
+	// per erratum id, value = 8-byte big-endian raft index || marshaled
+	// LogErratum. Never edited, never swept (replay determinism at historical
+	// interpretation indexes needs every erratum forever). See erratum.go.
+	errataBucket = []byte("errata")
 )
 
 // appliedIndexBucket holds a single key ("idx") whose value is the
@@ -173,9 +198,14 @@ var internalEntities = []internalEntity{
 	{cluster.IsIngestableStuck, "handleIngestableStuck", ingestableStuckBucket, (*Storage).handleIngestableStuck},
 	{cluster.IsSyncableSkipRequest, "handleSyncableSkipRequest", syncableSkipRequestBucket, (*Storage).handleSyncableSkipRequest},
 	{cluster.IsIngestablePosition, "saveIngestablePosition", ingestablePositionBucket, (*Storage).saveIngestablePosition},
+	{cluster.IsContractFingerprint, "handleContractFingerprint", contractFingerprintBucket, (*Storage).handleContractFingerprint},
+	{cluster.IsIngestableCensus, "handleIngestableCensus", ingestableCensusBucket, (*Storage).handleIngestableCensus},
+	{cluster.IsErratum, "handleErratum", errataBucket, (*Storage).handleErratum},
+	{cluster.IsSyncableRematerialization, "handleSyncableRematerialization", syncableRematerializationBucket, (*Storage).handleSyncableRematerialization},
 	{cluster.IsScrub, "handleScrub", pendingScrubBucket, (*Storage).handleScrub},
 	{cluster.IsNodeAPIURL, "handleNodeAPIURL", memberAPIURLBucket, (*Storage).handleNodeAPIURL},
 	{cluster.IsNodeVersion, "handleNodeVersion", memberVersionBucket, (*Storage).handleNodeVersion},
+	{cluster.IsNodeZone, "handleNodeZone", memberZoneBucket, (*Storage).handleNodeZone},
 }
 
 // buckets is every bbolt bucket Open must create: one per internal entity type
@@ -248,6 +278,11 @@ type Storage struct {
 	// swap is exclusive. Lock order is eventMu → kvMu (the swap clears bbolt
 	// scrub state outside the eventMu section, so the two never nest).
 	eventMu sync.RWMutex
+	// sealerStop/sealerDone/sealerStopOnce are the background sealer's
+	// lifecycle (sealer.go), mirroring the scrub worker's.
+	sealerStop     chan struct{}
+	sealerDone     chan struct{}
+	sealerStopOnce sync.Once
 	// typeCache memoizes ResolveType lookups for explicit-version refs
 	// (ref.Version > 0), keyed by cluster.TypeRef. Version-0 ("latest")
 	// lookups are never cached — "latest" is mutable and stays bolt-backed.
@@ -511,6 +546,12 @@ type Storage struct {
 	// HTTP status path on other goroutines, not CAS.
 	dataEventIndex atomic.Uint64
 
+	// interpretationRegistry is the compiled errata snapshot — immutable,
+	// swapped whole by handleErratum / Open (reloadInterpretationRegistry),
+	// read lock-free on every sync read (see erratum.go and the
+	// interpretation package).
+	interpretationRegistry atomic.Pointer[interpretation.Registry]
+
 	logger *zap.Logger
 	// fsyncDisabled mirrors the WithoutFsync option (also passed to bbolt as
 	// NoSync at Open). The file/directory swaps in snapshot.go and scrub.go read
@@ -625,7 +666,18 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	if cacheSegments <= 0 {
 		cacheSegments = DefaultEventCacheSegments
 	}
-	eventWalOpts := &wal.Options{SegmentCacheSize: cacheSegments}
+	// Sealed segments compress at rest (zstd L3, ~7-9x on JSON event
+	// payloads); the active tail stays plain and the write path never
+	// compresses — the background sealer (sealer.go) does, off the Ready
+	// loop. Reads decompress inside the segment-load path, so the cache
+	// still holds decompressed tables and its RAM sizing is unchanged.
+	// Downgrade door: `committed wal decompress` (offline) rewrites the
+	// plain format for pre-0.8.0 binaries.
+	eventWalOpts := &wal.Options{
+		SegmentCacheSize:         cacheSegments,
+		SegmentSize:              cfg.eventSegmentSize,
+		SealedSegmentCompression: wal.CompressionZstd,
+	}
 	eventLog, err := openLog(eventLogDir, "event_log", cfg.metrics, eventWalOpts)
 	if err != nil {
 		return nil, err
@@ -700,6 +752,8 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		scrubSignal:     make(chan struct{}, 1),
 		scrubStop:       make(chan struct{}),
 		scrubDone:       make(chan struct{}),
+		sealerStop:      make(chan struct{}),
+		sealerDone:      make(chan struct{}),
 		closeC:          make(chan struct{}),
 	}
 
@@ -940,6 +994,13 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		}
 	}
 
+	// Compile the interpretation registry from the applied errata so readers
+	// resolve effective versions from the first sync after restart (entries
+	// already applied before this restart won't re-run handleErratum).
+	if err := ws.reloadInterpretationRegistry(); err != nil {
+		return nil, err
+	}
+
 	// Load the highest completed scrub bound so the worker skips redundant
 	// rewrites and the scheduler can see progress. Then start the background
 	// scrubber: it immediately resumes any pending scrub (a Scrub command that
@@ -955,10 +1016,14 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		// stays durably recorded and resumes on the next normal open. Close
 		// waits on scrubDone, which the worker's defer normally closes; with
 		// no worker, close it here so Close returns.
+		// The sealer is held too: a diagnosis window must not have segment
+		// files rewritten (compressed) underneath it either.
 		ws.logger.Warn("SAFE MODE: scrub worker held; any pending scrub resumes on a normal restart")
 		close(ws.scrubDone)
+		close(ws.sealerDone)
 	} else {
 		go ws.scrubWorker()
+		go ws.sealerWorker()
 	}
 
 	// Complete any RTBF compaction a prior scrub pruned tombstones for but didn't
@@ -996,6 +1061,9 @@ func (s *Storage) Close() error {
 		// mid-flight when we close the handle below). Idempotent close of scrubStop
 		// is handled in stopScrubWorker.
 		s.stopScrubWorker()
+		// Likewise the sealer: it compresses sealed event-log segments and must
+		// not be mid-swap when the handle closes.
+		s.stopSealer()
 
 		finalErr = s.EntryLog.Close()
 

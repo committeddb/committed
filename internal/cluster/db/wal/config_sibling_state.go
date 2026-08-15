@@ -48,6 +48,13 @@ func sweepSyncableSiblingState(tx *bolt.Tx, id []byte) error {
 			return fmt.Errorf("[wal.syncable] sweep skip-request: %w", err)
 		}
 	}
+	// An in-progress re-materialization dies with the syncable: a same-id
+	// recreate must not resume a replay nobody asked for.
+	if b := tx.Bucket(syncableRematerializationBucket); b != nil {
+		if err := b.Delete(id); err != nil {
+			return fmt.Errorf("[wal.syncable] sweep rematerialization: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -62,7 +69,10 @@ func sweepTypeSiblingState(tx *bolt.Tx, id []byte) error {
 			return fmt.Errorf("[wal.type] sweep migration dead-letters: %w", err)
 		}
 	}
-	return nil
+	// The validation tripwire's announced-shape marks die with the type, so a
+	// same-id recreate re-announces from a clean slate (contract_fingerprint.go
+	// holds the matching write-guard).
+	return sweepContractFingerprints(tx, id)
 }
 
 // sweepIngestableSiblingState removes the per-ingestable-id state kept outside the
@@ -78,6 +88,13 @@ func sweepIngestableSiblingState(tx *bolt.Tx, id []byte) error {
 	if b := tx.Bucket(ingestSourceSeqBucket); b != nil {
 		if err := b.Delete(id); err != nil {
 			return fmt.Errorf("[wal.ingestable] sweep source-seq: %w", err)
+		}
+	}
+	// The shape census dies with the ingestable: a same-id recreate takes its
+	// own census (ingestable_census.go holds the matching write-guard).
+	if b := tx.Bucket(ingestableCensusBucket); b != nil {
+		if err := b.Delete(id); err != nil {
+			return fmt.Errorf("[wal.ingestable] sweep census: %w", err)
 		}
 	}
 	return nil

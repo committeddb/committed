@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/http"
 )
 
 // TestDeleteIngestable threads the id through to the cluster and returns 200. The
@@ -112,4 +113,45 @@ func TestGetIngestableStatus_LagUnit(t *testing.T) {
 	require.Contains(t, w.Body.String(), `"lag":null`)
 	require.False(t, strings.Contains(w.Body.String(), "lagUnit"),
 		"lagUnit must be omitted when lag is null")
+}
+
+// TestGetIngestableStatus_Census pins the census section of the status
+// payload: shapes in first-seen order, the derived path view, and a rendered
+// draft schema — and its absence when no census has been published.
+func TestGetIngestableStatus_Census(t *testing.T) {
+	h, fake := setupTest()
+	fake.IngestableStatusReturns(cluster.IngestableStatus{
+		WorkerState: cluster.WorkerStateRunning,
+		Phase:       "streaming",
+	}, nil)
+
+	tc := &cluster.TopicCensus{}
+	require.NoError(t, tc.Fold([]byte(`{"caption":"a","size":1}`), cluster.CensusOptions{}))
+	require.NoError(t, tc.Fold([]byte(`{"caption":"b","ai":{"m":"x"}}`), cluster.CensusOptions{}))
+	fake.IngestableCensusReturns(&cluster.IngestableCensus{
+		ID: "ing-1", RefreshEpoch: 1,
+		Topics: map[string]*cluster.TopicCensus{"photos": tc},
+	}, true)
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("GET", "http://localhost/v1/ingestable/ing-1/status", nil))
+	require.Equal(t, 200, w.Code)
+
+	var resp http.IngestableStatusResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	photos := resp.Census["photos"]
+	require.NotNil(t, photos)
+	require.Equal(t, uint64(2), photos.Rows)
+	require.Len(t, photos.Shapes, 2)
+	require.LessOrEqual(t, photos.Shapes[0].FirstRow, photos.Shapes[1].FirstRow, "shapes render in first-seen order")
+	require.NotEmpty(t, photos.Paths)
+	require.Contains(t, photos.DraftSchema, `"additionalProperties": false`)
+	require.Contains(t, photos.DraftSchema, `"ai"`)
+
+	// No census published → the field is omitted entirely.
+	fake.IngestableCensusReturns(nil, false)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("GET", "http://localhost/v1/ingestable/ing-1/status", nil))
+	require.Equal(t, 200, w.Code)
+	require.False(t, strings.Contains(w.Body.String(), "census"), "no census, no field")
 }

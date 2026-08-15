@@ -86,6 +86,17 @@ message SQLServerPosition {
 message SnapshotProgress {
     map<string, string> last_pk_by_table = 1;
     repeated string completed_tables = 2;
+    // chunks_by_table is the chunked-parallel snapshot state (0.8.0): a table
+    // being read by N parallel range readers appears here with its FROZEN
+    // chunk plan and per-chunk cursors, instead of in last_pk_by_table. The
+    // plan is persisted with the first inline checkpoint and never recomputed
+    // on resume (recomputing bounds against a changed table could re-cover a
+    // different key range than the flushed cursors describe); the reader
+    // COUNT is free to differ across restarts — it is only the pool size
+    // worked over these chunks. A pre-0.8.0 binary ignores this field and
+    // re-snapshots the in-flight table from scratch (at-least-once, keyed
+    // sinks converge) — wasteful but safe on downgrade.
+    map<string, TableChunkProgress> chunks_by_table = 4;
     // partial_backfill marks this snapshot as an added-table BACKFILL rather
     // than a full refresh: completed_tables was pre-seeded with every sibling
     // table (so only the added tables scan) and NO refresh-boundary marker may
@@ -95,4 +106,25 @@ message SnapshotProgress {
     // the pre-seeded completions as a nearly-done FULL snapshot and emit the
     // marker — partial emission + sweep = sibling data loss on the sink.
     bool partial_backfill = 3;
+}
+
+// TableChunkProgress is one table's frozen parallel-snapshot plan: the PK
+// ranges it was split into and each range's resume cursor. See
+// SnapshotProgress.chunks_by_table for the freeze/resume contract.
+message TableChunkProgress {
+    repeated ChunkCursor chunks = 1;
+}
+
+// ChunkCursor is one PK range of a chunked table snapshot. Bounds and cursor
+// use the same composite-key encoding as last_pk_by_table, so they bind into
+// the identical keyset predicates. The range is (lower, upper]: rows with
+// pk > lower and pk <= upper. An empty lower means "from the table start"
+// (no lower predicate); an empty upper means "to the table end".
+message ChunkCursor {
+    string lower = 1;
+    string upper = 2;
+    // last_pk is the highest pk this chunk has durably flushed (the resume
+    // cursor within the range); empty until the chunk's first checkpoint.
+    string last_pk = 3;
+    bool done = 4;
 }

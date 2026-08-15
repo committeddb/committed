@@ -223,6 +223,16 @@ func (h *HTTP) RebuildSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
 			writeError(w, httpgo.StatusNotFound, "not_found", "syncable not found")
 			return
 		}
+		if errors.Is(err, cluster.ErrZonePinUnsatisfiable) {
+			writeError(w, httpgo.StatusServiceUnavailable, "pin_unsatisfiable", err.Error())
+			return
+		}
+		if errors.Is(err, cluster.ErrNotSyncableOwner) {
+			// Stale routing view (ownership just moved): retryable, the next
+			// attempt's hop lands on the current owner.
+			writeError(w, httpgo.StatusServiceUnavailable, "not_syncable_owner", err.Error())
+			return
+		}
 		// A wedged worker aborts the rebuild before anything changed — a
 		// retryable condition (wait out the destination, or re-POST the config
 		// to replace the worker), so 503 rather than a generic failure.
@@ -256,6 +266,50 @@ func (h *HTTP) RebuildSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
 	w.Header().Set("Location", "/v1/syncable/"+id+"/status")
 	w.WriteHeader(httpgo.StatusAccepted)
 	_, _ = w.Write(bs)
+}
+
+// RematerializeSyncable handles POST /syncable/{id}/rematerialize: the
+// NON-destructive replay — the sink keeps serving while the worker replays
+// from index 0 through the current projection + interpretation, converging
+// keyed rows in place and sweeping never-re-emitted rows at the end. The
+// destructive sibling (drop + replay) is /rebuild. Leader-pinned like
+// rebuild: the drain/re-apply must run where the worker lives.
+func (h *HTTP) RematerializeSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, httpgo.StatusBadRequest, "invalid_parameter", "id is empty")
+		return
+	}
+
+	if err := h.c.RematerializeSyncable(r.Context(), id); err != nil {
+		if errors.Is(err, cluster.ErrResourceNotFound) {
+			writeError(w, httpgo.StatusNotFound, "not_found", "syncable not found")
+			return
+		}
+		if errors.Is(err, cluster.ErrNotRematerializable) {
+			// 409: the config is fine, but this sink shape cannot converge a
+			// replay in place — the message names the alternatives.
+			writeError(w, httpgo.StatusConflict, "not_rematerializable", err.Error())
+			return
+		}
+		if errors.Is(err, cluster.ErrZonePinUnsatisfiable) {
+			writeError(w, httpgo.StatusServiceUnavailable, "pin_unsatisfiable", err.Error())
+			return
+		}
+		if errors.Is(err, cluster.ErrNotSyncableOwner) {
+			// Stale routing view (ownership just moved): retryable, the next
+			// attempt's hop lands on the current owner.
+			writeError(w, httpgo.StatusServiceUnavailable, "not_syncable_owner", err.Error())
+			return
+		}
+		if errors.Is(err, cluster.ErrWorkerWedged) {
+			writeError(w, httpgo.StatusServiceUnavailable, "worker_wedged", err.Error())
+			return
+		}
+		writeProposeError(w, err, "syncable", "rematerialize syncable")
+		return
+	}
+	writeJson(w, []byte(`{"status":"rematerializing"}`))
 }
 
 // SyncableRebuildResponse acknowledges an accepted rebuild: the destination
@@ -304,6 +358,39 @@ type SyncableStatusResponse struct {
 	HeadIndex       uint64 `json:"headIndex"`
 	Lag             uint64 `json:"lag"`
 	CaughtUp        bool   `json:"caughtUp"`
+
+	// InterpretationPin is the errata-registry index this syncable's current
+	// materialization began under (the second half of the determinism pair —
+	// 0 = pinned before any errata existed). InterpretationStale is true when
+	// an erratum affecting a consumed topic landed past the pin: some
+	// already-synced rows were derived under a superseded reading and stay
+	// that way until the operator re-derives (staleness is loud and
+	// queryable, never auto-healed).
+	InterpretationPin   uint64 `json:"interpretationPin"`
+	InterpretationStale bool   `json:"interpretationStale"`
+
+	// Rematerializing is true while a POST /rematerialize replay is in
+	// progress; RematerializeTargetHead is the data head the replay must
+	// reach before its completion sweep runs (progress = checkpointIndex
+	// against it). Omitted when no re-materialization is running.
+	Rematerializing         bool   `json:"rematerializing,omitempty"`
+	RematerializeTargetHead uint64 `json:"rematerializeTargetHead,omitempty"`
+
+	// PinnedZone is the zone this syncable is pinned to (`zone` in its
+	// config); omitted for unpinned syncables. PinUnsatisfiable is true when
+	// NO current member announces that zone — the strict pin's loud stall:
+	// nobody serves the syncable (never a silent leader fallback), and it
+	// catches up completely when a node in the zone returns. ownerNode shows
+	// who serves it (0 while unsatisfiable).
+	PinnedZone       string `json:"pinnedZone,omitempty"`
+	PinUnsatisfiable bool   `json:"pinUnsatisfiable,omitempty"`
+
+	// DerivedFrom / DerivesInto are the derivation provenance of a loopback
+	// syncable: the topic it consumes and the derived topic it produces.
+	// Omitted for every non-deriving kind. Pair with InterpretationStale to
+	// read "this derived topic was materialized under a superseded reading".
+	DerivedFrom string `json:"derivedFrom,omitempty"`
+	DerivesInto string `json:"derivesInto,omitempty"`
 
 	// DeadLetters is how many proposals this syncable has skipped
 	// (dead-lettered), permanently or manually; LastDeadLetterIndex is the
@@ -478,6 +565,29 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 	resp.DeadLetters = dlCount
 	resp.AcknowledgedDeadLetters = dlAcked
 	resp.LastDeadLetterIndex = dlLast
+
+	pin, stale, err := h.c.SyncableInterpretation(id)
+	if err != nil {
+		writeInternalError(w, "failed to retrieve interpretation staleness", err)
+		return
+	}
+	resp.InterpretationPin = pin
+	resp.InterpretationStale = stale
+
+	if rec, ok := h.c.SyncableRematerialization(id); ok {
+		resp.Rematerializing = true
+		resp.RematerializeTargetHead = rec.TargetHead
+	}
+
+	if source, target, ok := h.c.SyncableDerivation(id); ok {
+		resp.DerivedFrom = source
+		resp.DerivesInto = target
+	}
+
+	if zone, unsatisfiable, ok := h.c.SyncableZonePin(id); ok {
+		resp.PinnedZone = zone
+		resp.PinUnsatisfiable = unsatisfiable
+	}
 
 	resp.OwnerNode = owner
 	if wantPosition {
