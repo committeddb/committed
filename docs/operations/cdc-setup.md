@@ -400,11 +400,33 @@ connectionString = "postgres://committed:${PG_PASSWORD}@db:5432/catalog?sslmode=
 primaryKey       = "movie_id"
 tables           = ["ingress.movie"]   # schema-qualified
 mapAllColumns    = true                # mirror every column 1:1
+# jsonColumns  = ["event_data"]        # string columns that HOLD JSON — see below
 
 [sql.postgres]
 slot_name   = "committed_movie_slot"   # optional; default "committed_slot"
 publication = "committed_movie_pub"    # optional; default "committed_pub"
 ```
+
+**`jsonColumns` — string columns that hold JSON.** A `JSON`/`JSONB` column
+decodes as real JSON automatically, but JSON riding in a **string** column
+(SQL Server `NVARCHAR`, MySQL `VARCHAR`/`TEXT` — the shape real CDC'd event
+tables have) is undetectable from type metadata and would arrive as one
+escaped string: projection jsonPaths can't traverse it, webhook consumers
+get a string, every downstream double-parses. Listing the column under
+`jsonColumns` (works with explicit mappings and `mapAllColumns` alike, and
+per-entry in the `[[sql.topics]]` form) decodes it as a real, canonicalized
+JSON value — the same sorted-keys/exact-numbers rendering as a native JSON
+column, identical bytes on the snapshot and CDC paths. A value that isn't
+valid JSON falls back to the plain string, so a malformed source row never
+produces an invalid payload; a `jsonColumns` entry naming an unmapped
+column is rejected at POST.
+
+Best applied **when the ingestable is created**: adding the hint to an
+existing ingestable changes that column's payload shape for NEW events only
+(string → object), so a projection folding the topic sees both shapes
+across history. Keyed sinks converge regardless (last write wins); to
+reshape history too, pair the change with a re-snapshot (delete + recreate
+the ingestable, or a slot recreate on Postgres).
 
 > **Why ingest configs carry `connectionString` inline** (while syncables
 > reference a shared `[database]` config by `sql.db`): a `[database]` config is

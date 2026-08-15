@@ -78,6 +78,14 @@ func (p *IngestableParser) Parse(v *cluster.ParsedConfig) (cluster.Ingestable, e
 		if err := validateMappingColumns(spec, colsByTable); err != nil {
 			return nil, fmt.Errorf("[ingestable.parser] %w", err)
 		}
+
+		// Resolve jsonColumns onto their mappings (after map-all expansion, so
+		// the hint works for inferred mappings too). A name matching no mapped
+		// column is a loud rejection — a typo'd hint would otherwise silently
+		// leave the column an escaped string.
+		if err := applyJSONColumnHints(spec); err != nil {
+			return nil, fmt.Errorf("[ingestable.parser] %w", err)
+		}
 	}
 
 	// The runtime still reads the singular Config.Mappings until per-spec entity
@@ -142,6 +150,10 @@ func (p *IngestableParser) parseFlatConfig(v *cluster.ParsedConfig, dialect Dial
 	if len(excludeColumns) > 0 && !mapAllColumns {
 		return nil, nil, fmt.Errorf("sql.excludeColumns requires sql.mapAllColumns = true")
 	}
+	// jsonColumns names string source columns holding JSON (see
+	// TopicSpec.JSONColumns); works with explicit mappings AND mapAllColumns
+	// (Parse resolves it onto the expanded mapping set).
+	jsonColumns := v.GetStringSlice("sql.jsonColumns")
 
 	tables := v.GetStringSlice("sql.tables")
 
@@ -184,6 +196,7 @@ func (p *IngestableParser) parseFlatConfig(v *cluster.ParsedConfig, dialect Dial
 		Mappings:         mappings,
 		MapAllColumns:    mapAllColumns,
 		ExcludeColumns:   excludeColumns,
+		JSONColumns:      jsonColumns,
 		PrimaryKey:       primaryKey,
 		Tables:           tables,
 		Options:          options,
@@ -196,6 +209,7 @@ func (p *IngestableParser) parseFlatConfig(v *cluster.ParsedConfig, dialect Dial
 		Mappings:       mappings,
 		MapAllColumns:  mapAllColumns,
 		ExcludeColumns: excludeColumns,
+		JSONColumns:    jsonColumns,
 		PrimaryKey:     primaryKey,
 	}}
 
@@ -215,6 +229,7 @@ type topicSpecTOML struct {
 	Mappings       []Mapping `mapstructure:"mappings"`
 	MapAllColumns  bool      `mapstructure:"mapAllColumns"`
 	ExcludeColumns []string  `mapstructure:"excludeColumns"`
+	JSONColumns    []string  `mapstructure:"jsonColumns"`
 }
 
 // parseTopicsConfig parses the [[sql.topics]] array — one self-contained topic-spec
@@ -330,6 +345,7 @@ func (p *IngestableParser) buildTopicSpec(raw *topicSpecTOML, idx int) (*TopicSp
 		Mappings:       raw.Mappings,
 		MapAllColumns:  raw.MapAllColumns,
 		ExcludeColumns: raw.ExcludeColumns,
+		JSONColumns:    raw.JSONColumns,
 		PrimaryKey:     primaryKey,
 	}, nil
 }
