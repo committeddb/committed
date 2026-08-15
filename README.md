@@ -225,6 +225,15 @@ enum value later fires the tripwire as an ordinary schema violation. Opt-in
 because it puts source values into replicated state; by default the census
 carries types and paths only.
 
+Two limits, stated plainly: the census describes **only what was written** —
+it is first-row detection over history, not pre-deploy contract enforcement
+(that would need the producer's write path, which committed does not have).
+And a discriminant the producer never recorded is unrecoverable by any
+system: if two shapes interleave with no field telling them apart, the
+census shows you the interleaving, but no tool — here or anywhere — can
+conjure the missing label. Fix that at the producer, or bind readings by row
+range with errata.
+
 #### Schema validation: gate or tripwire
 
 A type with a schema chooses what happens when a payload doesn't match it,

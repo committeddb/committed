@@ -76,6 +76,30 @@ The source commit time is evidence for operators and interpretation tooling —
 committed never orders, dedups, or resolves conflicts by it; the log's index
 is the only ordering authority.
 
+### Capture fidelity: what the log preserves, byte for byte
+
+What lands in the log is a **canonical rendering** of the source row, and the
+same source data always produces the same bytes — whichever path it arrived
+by. The contract:
+
+- **Snapshot and CDC render identically.** A row captured by the snapshot
+  pass and the same row captured from the change stream produce
+  byte-identical payloads (numbers included: a DECIMAL is never conflated
+  with a DOUBLE, exact digits are preserved, and JSON-column leaf types are
+  resolved so both paths agree). This parity is pinned by per-engine oracle
+  tests.
+- **Deliberately erased**: JSON object key order (keys are sorted — two
+  writes differing only in key order capture identically) and duplicate keys
+  (last wins). If key order carries meaning in your source, it is not
+  preserved — encode it as data.
+- **Deliberately preserved**: exact numeric representation (digits, not
+  float round-trips), string bytes, null-vs-absent distinction, and the
+  row's primary-key identity (the entity key).
+- **Never transformed**: capture applies no semantic mapping — no renames,
+  no computed fields, no filtering. Capture is unrepeatable (the source
+  moves on); interpretation is revisable later, so anything lossy belongs
+  downstream, never at ingest.
+
 Snapshot rows are **convergent re-observations** rather than deduplicated
 events: each snapshot row is its own single-row proposal, and the resume
 checkpoint rides the final row of each read window — so a restart mid-window
