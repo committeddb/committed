@@ -453,7 +453,9 @@ always-current syncable over such a topic, naming the gap, and
 always-current syncables, naming them (re-POST with `?force=true` to
 acknowledge the stranding deliberately). A force-stranded syncable does not
 silently receive unconverted data: entities below the break dead-letter at the
-migration chain, replayable later if the reading is repaired.
+migration chain, replayable later if the reading is repaired (an erratum
+rebinding the below-break range, then a dead-letter replay or a
+re-materialization).
 
 ## Changing the rules after a projection is live
 
@@ -463,6 +465,15 @@ change that logic, committed applies the new logic to Actuals it processes *from
 that point on*; it does **not** retroactively re-render rows already written to
 the sink. Correcting history is a deliberate rebuild, and running it is your
 responsibility.
+
+**Re-materializing a plain keyed `sql` mirror — in place.** For a plain
+keyed `sql` syncable, `POST /v1/syncable/{id}/rematerialize` converges the
+live table without dropping it: the worker replays from index 0 through the
+current mappings + type migrations + errata, keyed upserts overwrite rows in
+place while the table keeps serving reads, and a completion sweep removes
+rows the replay never re-emitted. Restart-resumable, and it refreshes the
+syncable's `interpretationPin` (clearing `interpretationStale`). Projections
+and keyless sinks refuse the verb — for those, use the patterns below.
 
 **Changing one projection's own rules — blue-green.** Because a projection
 replays from index 0 and the log stays the source of truth, the clean way to fix

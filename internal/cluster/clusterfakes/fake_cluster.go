@@ -454,6 +454,18 @@ type FakeCluster struct {
 	rebuildSyncableReturnsOnCall map[int]struct {
 		result1 error
 	}
+	RematerializeSyncableStub        func(context.Context, string) error
+	rematerializeSyncableMutex       sync.RWMutex
+	rematerializeSyncableArgsForCall []struct {
+		arg1 context.Context
+		arg2 string
+	}
+	rematerializeSyncableReturns struct {
+		result1 error
+	}
+	rematerializeSyncableReturnsOnCall map[int]struct {
+		result1 error
+	}
 	RemoveMemberStub        func(context.Context, uint64) error
 	removeMemberMutex       sync.RWMutex
 	removeMemberArgsForCall []struct {
@@ -648,6 +660,19 @@ type FakeCluster struct {
 	}
 	syncableReadPositionReturnsOnCall map[int]struct {
 		result1 uint64
+		result2 bool
+	}
+	SyncableRematerializationStub        func(string) (*cluster.SyncableRematerialization, bool)
+	syncableRematerializationMutex       sync.RWMutex
+	syncableRematerializationArgsForCall []struct {
+		arg1 string
+	}
+	syncableRematerializationReturns struct {
+		result1 *cluster.SyncableRematerialization
+		result2 bool
+	}
+	syncableRematerializationReturnsOnCall map[int]struct {
+		result1 *cluster.SyncableRematerialization
 		result2 bool
 	}
 	SyncableStuckStub        func(string) (cluster.SyncableStuck, bool, error)
@@ -2990,6 +3015,68 @@ func (fake *FakeCluster) RebuildSyncableReturnsOnCall(i int, result1 error) {
 	}{result1}
 }
 
+func (fake *FakeCluster) RematerializeSyncable(arg1 context.Context, arg2 string) error {
+	fake.rematerializeSyncableMutex.Lock()
+	ret, specificReturn := fake.rematerializeSyncableReturnsOnCall[len(fake.rematerializeSyncableArgsForCall)]
+	fake.rematerializeSyncableArgsForCall = append(fake.rematerializeSyncableArgsForCall, struct {
+		arg1 context.Context
+		arg2 string
+	}{arg1, arg2})
+	stub := fake.RematerializeSyncableStub
+	fakeReturns := fake.rematerializeSyncableReturns
+	fake.recordInvocation("RematerializeSyncable", []interface{}{arg1, arg2})
+	fake.rematerializeSyncableMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeCluster) RematerializeSyncableCallCount() int {
+	fake.rematerializeSyncableMutex.RLock()
+	defer fake.rematerializeSyncableMutex.RUnlock()
+	return len(fake.rematerializeSyncableArgsForCall)
+}
+
+func (fake *FakeCluster) RematerializeSyncableCalls(stub func(context.Context, string) error) {
+	fake.rematerializeSyncableMutex.Lock()
+	defer fake.rematerializeSyncableMutex.Unlock()
+	fake.RematerializeSyncableStub = stub
+}
+
+func (fake *FakeCluster) RematerializeSyncableArgsForCall(i int) (context.Context, string) {
+	fake.rematerializeSyncableMutex.RLock()
+	defer fake.rematerializeSyncableMutex.RUnlock()
+	argsForCall := fake.rematerializeSyncableArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2
+}
+
+func (fake *FakeCluster) RematerializeSyncableReturns(result1 error) {
+	fake.rematerializeSyncableMutex.Lock()
+	defer fake.rematerializeSyncableMutex.Unlock()
+	fake.RematerializeSyncableStub = nil
+	fake.rematerializeSyncableReturns = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *FakeCluster) RematerializeSyncableReturnsOnCall(i int, result1 error) {
+	fake.rematerializeSyncableMutex.Lock()
+	defer fake.rematerializeSyncableMutex.Unlock()
+	fake.RematerializeSyncableStub = nil
+	if fake.rematerializeSyncableReturnsOnCall == nil {
+		fake.rematerializeSyncableReturnsOnCall = make(map[int]struct {
+			result1 error
+		})
+	}
+	fake.rematerializeSyncableReturnsOnCall[i] = struct {
+		result1 error
+	}{result1}
+}
+
 func (fake *FakeCluster) RemoveMember(arg1 context.Context, arg2 uint64) error {
 	fake.removeMemberMutex.Lock()
 	ret, specificReturn := fake.removeMemberReturnsOnCall[len(fake.removeMemberArgsForCall)]
@@ -3936,6 +4023,70 @@ func (fake *FakeCluster) SyncableReadPositionReturnsOnCall(i int, result1 uint64
 	}
 	fake.syncableReadPositionReturnsOnCall[i] = struct {
 		result1 uint64
+		result2 bool
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) SyncableRematerialization(arg1 string) (*cluster.SyncableRematerialization, bool) {
+	fake.syncableRematerializationMutex.Lock()
+	ret, specificReturn := fake.syncableRematerializationReturnsOnCall[len(fake.syncableRematerializationArgsForCall)]
+	fake.syncableRematerializationArgsForCall = append(fake.syncableRematerializationArgsForCall, struct {
+		arg1 string
+	}{arg1})
+	stub := fake.SyncableRematerializationStub
+	fakeReturns := fake.syncableRematerializationReturns
+	fake.recordInvocation("SyncableRematerialization", []interface{}{arg1})
+	fake.syncableRematerializationMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeCluster) SyncableRematerializationCallCount() int {
+	fake.syncableRematerializationMutex.RLock()
+	defer fake.syncableRematerializationMutex.RUnlock()
+	return len(fake.syncableRematerializationArgsForCall)
+}
+
+func (fake *FakeCluster) SyncableRematerializationCalls(stub func(string) (*cluster.SyncableRematerialization, bool)) {
+	fake.syncableRematerializationMutex.Lock()
+	defer fake.syncableRematerializationMutex.Unlock()
+	fake.SyncableRematerializationStub = stub
+}
+
+func (fake *FakeCluster) SyncableRematerializationArgsForCall(i int) string {
+	fake.syncableRematerializationMutex.RLock()
+	defer fake.syncableRematerializationMutex.RUnlock()
+	argsForCall := fake.syncableRematerializationArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeCluster) SyncableRematerializationReturns(result1 *cluster.SyncableRematerialization, result2 bool) {
+	fake.syncableRematerializationMutex.Lock()
+	defer fake.syncableRematerializationMutex.Unlock()
+	fake.SyncableRematerializationStub = nil
+	fake.syncableRematerializationReturns = struct {
+		result1 *cluster.SyncableRematerialization
+		result2 bool
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) SyncableRematerializationReturnsOnCall(i int, result1 *cluster.SyncableRematerialization, result2 bool) {
+	fake.syncableRematerializationMutex.Lock()
+	defer fake.syncableRematerializationMutex.Unlock()
+	fake.SyncableRematerializationStub = nil
+	if fake.syncableRematerializationReturnsOnCall == nil {
+		fake.syncableRematerializationReturnsOnCall = make(map[int]struct {
+			result1 *cluster.SyncableRematerialization
+			result2 bool
+		})
+	}
+	fake.syncableRematerializationReturnsOnCall[i] = struct {
+		result1 *cluster.SyncableRematerialization
 		result2 bool
 	}{result1, result2}
 }

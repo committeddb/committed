@@ -304,9 +304,12 @@ index)` pair. Topics with no errata pay nothing on the read path.
 An erratum also marks dependent syncables **stale**
 (`GET /v1/syncable/{id}/status` → `interpretationStale`): rows synced before
 it landed were derived under the superseded reading. Staleness is loud and
-queryable, never auto-healed — re-derivation is yours to trigger
-(blue-green a replacement, or the re-materialization verb when it lands).
-`GET /v1/erratum` lists the registry.
+queryable, never auto-healed — re-derivation is yours to trigger:
+`POST /v1/syncable/{id}/rematerialize` replays the topic from index 0 through
+the current projection + interpretation while the keyed sink keeps serving
+(rows converge in place; a completion sweep removes rows the replay no longer
+produces), or blue-green a replacement for sink shapes that can't converge
+in place. `GET /v1/erratum` lists the registry.
 
 Configure a database to write into (sink):
 

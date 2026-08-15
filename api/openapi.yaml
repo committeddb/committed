@@ -984,6 +984,50 @@ paths:
         '507':
           $ref: '#/components/responses/InsufficientStorage'
 
+  /v1/syncable/{id}/rematerialize:
+    post:
+      tags: [syncable]
+      summary: Re-materialize a syncable's keyed sink in place, non-destructively
+      description: |
+        The non-destructive sibling of `/rebuild`: the sink keeps serving
+        reads while the worker replays the topic from index 0 through the
+        CURRENT projection + interpretation. Keyed upserts converge rows in
+        place; every re-emitted row is stamped with the replay's epoch (a
+        committed-managed `committed_rematerialized` column, added
+        idempotently); when the replay reaches the target head — the data
+        head at this call, with live writes simply following in log order —
+        a completion sweep deletes the rows the replay never positively
+        re-emitted (rows an old projection wrote that the current one no
+        longer produces) and the in-progress record clears. This is the cure
+        for projection rot (a mapping added, a migration fixed, an erratum
+        landed) and the re-derivation that refreshes the checkpoint's
+        `interpretationPin`. Restart-resumable: the in-progress record is
+        replicated, and a resumed replay keeps converging under the same
+        epoch.
+
+        Keyed sinks only: a keyless/append sink or a webhook refuses with
+        409 `not_rematerializable` (use `/rebuild` or a blue-green
+        replacement). Leader-pinned. Poll `GET /v1/syncable/{id}/status`:
+        `rematerializing` with `rematerializeTargetHead` shows progress
+        against `checkpointIndex`.
+      operationId: rematerializeSyncable
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      responses:
+        '200':
+          description: Re-materialization started; the replay is underway.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: This sink cannot converge a replay in place (keyless/append or webhook).
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/NotLinearizable'
   /v1/syncable/{id}/rebuild:
     post:
       tags: [syncable]

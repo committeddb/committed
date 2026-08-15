@@ -247,6 +247,40 @@ func (h *HTTP) RebuildSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
 	_, _ = w.Write(bs)
 }
 
+// RematerializeSyncable handles POST /syncable/{id}/rematerialize: the
+// NON-destructive replay — the sink keeps serving while the worker replays
+// from index 0 through the current projection + interpretation, converging
+// keyed rows in place and sweeping never-re-emitted rows at the end. The
+// destructive sibling (drop + replay) is /rebuild. Leader-pinned like
+// rebuild: the drain/re-apply must run where the worker lives.
+func (h *HTTP) RematerializeSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, httpgo.StatusBadRequest, "invalid_parameter", "id is empty")
+		return
+	}
+
+	if err := h.c.RematerializeSyncable(r.Context(), id); err != nil {
+		if errors.Is(err, cluster.ErrResourceNotFound) {
+			writeError(w, httpgo.StatusNotFound, "not_found", "syncable not found")
+			return
+		}
+		if errors.Is(err, cluster.ErrNotRematerializable) {
+			// 409: the config is fine, but this sink shape cannot converge a
+			// replay in place — the message names the alternatives.
+			writeError(w, httpgo.StatusConflict, "not_rematerializable", err.Error())
+			return
+		}
+		if errors.Is(err, cluster.ErrWorkerWedged) {
+			writeError(w, httpgo.StatusServiceUnavailable, "worker_wedged", err.Error())
+			return
+		}
+		writeProposeError(w, err, "syncable", "rematerialize syncable")
+		return
+	}
+	writeJson(w, []byte(`{"status":"rematerializing"}`))
+}
+
 // SyncableRebuildResponse acknowledges an accepted rebuild: the destination
 // was reset and the replay is running in the worker. Poll the status
 // endpoint (lag → 0) to watch it converge. Re-POSTing rebuild is safe —
@@ -298,6 +332,13 @@ type SyncableStatusResponse struct {
 	// queryable, never auto-healed).
 	InterpretationPin   uint64 `json:"interpretationPin"`
 	InterpretationStale bool   `json:"interpretationStale"`
+
+	// Rematerializing is true while a POST /rematerialize replay is in
+	// progress; RematerializeTargetHead is the data head the replay must
+	// reach before its completion sweep runs (progress = checkpointIndex
+	// against it). Omitted when no re-materialization is running.
+	Rematerializing         bool   `json:"rematerializing,omitempty"`
+	RematerializeTargetHead uint64 `json:"rematerializeTargetHead,omitempty"`
 
 	// DeadLetters is how many proposals this syncable has skipped
 	// (dead-lettered), permanently or manually; LastDeadLetterIndex is the
@@ -455,6 +496,11 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 	}
 	resp.InterpretationPin = pin
 	resp.InterpretationStale = stale
+
+	if rec, ok := h.c.SyncableRematerialization(id); ok {
+		resp.Rematerializing = true
+		resp.RematerializeTargetHead = rec.TargetHead
+	}
 
 	resp.OwnerNode = owner
 	if wantPosition {

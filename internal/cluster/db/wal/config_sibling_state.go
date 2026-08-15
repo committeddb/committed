@@ -48,6 +48,13 @@ func sweepSyncableSiblingState(tx *bolt.Tx, id []byte) error {
 			return fmt.Errorf("[wal.syncable] sweep skip-request: %w", err)
 		}
 	}
+	// An in-progress re-materialization dies with the syncable: a same-id
+	// recreate must not resume a replay nobody asked for.
+	if b := tx.Bucket(syncableRematerializationBucket); b != nil {
+		if err := b.Delete(id); err != nil {
+			return fmt.Errorf("[wal.syncable] sweep rematerialization: %w", err)
+		}
+	}
 	return nil
 }
 

@@ -293,6 +293,21 @@ message LogIngestableCensus {
     bytes census = 3;
 }
 
+// LogSyncableRematerialization records that a syncable is re-materializing:
+// its worker is replaying the topic from index 0 through the CURRENT
+// projection + interpretation, converging the keyed sink in place (the
+// non-destructive sibling of the rebuild verb). targetHead is the data head
+// at the moment the verb was accepted: when the replay's checkpoint reaches
+// it, the sink sweeps every row the replay never positively re-emitted and
+// this record is deleted. Upsert/delete keyed by syncable id; replicated so
+// a restart resumes the re-materialization from its checkpoint and any node
+// reports the progress. Ungated: an older node skips it (it just doesn't
+// show remat progress until upgraded — the worker actions are owner-local).
+message LogSyncableRematerialization {
+    string ID = 1;
+    uint64 targetHead = 2;
+}
+
 // LogErratum is the errata interpretation-registry record: an append-only,
 // consensus-ordered statement that rebinds how already-committed actuals are
 // READ — never their bytes. A stamped TypeRef is a cache of the default

@@ -39,6 +39,18 @@ func (d *GoMySQLServerDialect) CreateGenerationSweepSQL(config *sql.Config) stri
 	return (&dialects.MySQLDialect{}).CreateGenerationSweepSQL(config)
 }
 
+func (d *GoMySQLServerDialect) EnsureRematerializationColumn(ctx context.Context, db *gosql.DB, config *sql.Config) error {
+	return (&dialects.MySQLDialect{}).EnsureRematerializationColumn(ctx, db, config)
+}
+
+func (d *GoMySQLServerDialect) CreateRematerializationUpsertSQL(config *sql.Config) string {
+	return (&dialects.MySQLDialect{}).CreateRematerializationUpsertSQL(config)
+}
+
+func (d *GoMySQLServerDialect) CreateRematerializationSweepSQL(config *sql.Config) string {
+	return (&dialects.MySQLDialect{}).CreateRematerializationSweepSQL(config)
+}
+
 func (d *GoMySQLServerDialect) CreateDeleteSQL(config *sql.Config) string {
 	return (&dialects.MySQLDialect{}).CreateDeleteSQL(config)
 }

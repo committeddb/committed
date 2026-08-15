@@ -1137,6 +1137,69 @@ func (x *LogIngestableCensus) GetCensus() []byte {
 	return nil
 }
 
+// LogSyncableRematerialization records that a syncable is re-materializing:
+// its worker is replaying the topic from index 0 through the CURRENT
+// projection + interpretation, converging the keyed sink in place (the
+// non-destructive sibling of the rebuild verb). targetHead is the data head
+// at the moment the verb was accepted: when the replay's checkpoint reaches
+// it, the sink sweeps every row the replay never positively re-emitted and
+// this record is deleted. Upsert/delete keyed by syncable id; replicated so
+// a restart resumes the re-materialization from its checkpoint and any node
+// reports the progress. Ungated: an older node skips it (it just doesn't
+// show remat progress until upgraded — the worker actions are owner-local).
+type LogSyncableRematerialization struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	ID         string `protobuf:"bytes,1,opt,name=ID,proto3" json:"ID,omitempty"`
+	TargetHead uint64 `protobuf:"varint,2,opt,name=targetHead,proto3" json:"targetHead,omitempty"`
+}
+
+func (x *LogSyncableRematerialization) Reset() {
+	*x = LogSyncableRematerialization{}
+	mi := &file_clusterpb_cluster_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LogSyncableRematerialization) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LogSyncableRematerialization) ProtoMessage() {}
+
+func (x *LogSyncableRematerialization) ProtoReflect() protoreflect.Message {
+	mi := &file_clusterpb_cluster_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LogSyncableRematerialization.ProtoReflect.Descriptor instead.
+func (*LogSyncableRematerialization) Descriptor() ([]byte, []int) {
+	return file_clusterpb_cluster_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *LogSyncableRematerialization) GetID() string {
+	if x != nil {
+		return x.ID
+	}
+	return ""
+}
+
+func (x *LogSyncableRematerialization) GetTargetHead() uint64 {
+	if x != nil {
+		return x.TargetHead
+	}
+	return 0
+}
+
 // LogErratum is the errata interpretation-registry record: an append-only,
 // consensus-ordered statement that rebinds how already-committed actuals are
 // READ — never their bytes. A stamped TypeRef is a cache of the default
@@ -1184,7 +1247,7 @@ type LogErratum struct {
 
 func (x *LogErratum) Reset() {
 	*x = LogErratum{}
-	mi := &file_clusterpb_cluster_proto_msgTypes[11]
+	mi := &file_clusterpb_cluster_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1196,7 +1259,7 @@ func (x *LogErratum) String() string {
 func (*LogErratum) ProtoMessage() {}
 
 func (x *LogErratum) ProtoReflect() protoreflect.Message {
-	mi := &file_clusterpb_cluster_proto_msgTypes[11]
+	mi := &file_clusterpb_cluster_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1209,7 +1272,7 @@ func (x *LogErratum) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogErratum.ProtoReflect.Descriptor instead.
 func (*LogErratum) Descriptor() ([]byte, []int) {
-	return file_clusterpb_cluster_proto_rawDescGZIP(), []int{11}
+	return file_clusterpb_cluster_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *LogErratum) GetTypeID() string {
@@ -1265,7 +1328,7 @@ type LogIngestablePosition struct {
 
 func (x *LogIngestablePosition) Reset() {
 	*x = LogIngestablePosition{}
-	mi := &file_clusterpb_cluster_proto_msgTypes[12]
+	mi := &file_clusterpb_cluster_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1277,7 +1340,7 @@ func (x *LogIngestablePosition) String() string {
 func (*LogIngestablePosition) ProtoMessage() {}
 
 func (x *LogIngestablePosition) ProtoReflect() protoreflect.Message {
-	mi := &file_clusterpb_cluster_proto_msgTypes[12]
+	mi := &file_clusterpb_cluster_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1290,7 +1353,7 @@ func (x *LogIngestablePosition) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogIngestablePosition.ProtoReflect.Descriptor instead.
 func (*LogIngestablePosition) Descriptor() ([]byte, []int) {
-	return file_clusterpb_cluster_proto_rawDescGZIP(), []int{12}
+	return file_clusterpb_cluster_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *LogIngestablePosition) GetID() string {
@@ -1332,7 +1395,7 @@ type LogSyncableDeadLetter struct {
 
 func (x *LogSyncableDeadLetter) Reset() {
 	*x = LogSyncableDeadLetter{}
-	mi := &file_clusterpb_cluster_proto_msgTypes[13]
+	mi := &file_clusterpb_cluster_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1344,7 +1407,7 @@ func (x *LogSyncableDeadLetter) String() string {
 func (*LogSyncableDeadLetter) ProtoMessage() {}
 
 func (x *LogSyncableDeadLetter) ProtoReflect() protoreflect.Message {
-	mi := &file_clusterpb_cluster_proto_msgTypes[13]
+	mi := &file_clusterpb_cluster_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1357,7 +1420,7 @@ func (x *LogSyncableDeadLetter) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogSyncableDeadLetter.ProtoReflect.Descriptor instead.
 func (*LogSyncableDeadLetter) Descriptor() ([]byte, []int) {
-	return file_clusterpb_cluster_proto_rawDescGZIP(), []int{13}
+	return file_clusterpb_cluster_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *LogSyncableDeadLetter) GetID() string {
@@ -1427,7 +1490,7 @@ type LogSyncableStuck struct {
 
 func (x *LogSyncableStuck) Reset() {
 	*x = LogSyncableStuck{}
-	mi := &file_clusterpb_cluster_proto_msgTypes[14]
+	mi := &file_clusterpb_cluster_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1439,7 +1502,7 @@ func (x *LogSyncableStuck) String() string {
 func (*LogSyncableStuck) ProtoMessage() {}
 
 func (x *LogSyncableStuck) ProtoReflect() protoreflect.Message {
-	mi := &file_clusterpb_cluster_proto_msgTypes[14]
+	mi := &file_clusterpb_cluster_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1452,7 +1515,7 @@ func (x *LogSyncableStuck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogSyncableStuck.ProtoReflect.Descriptor instead.
 func (*LogSyncableStuck) Descriptor() ([]byte, []int) {
-	return file_clusterpb_cluster_proto_rawDescGZIP(), []int{14}
+	return file_clusterpb_cluster_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *LogSyncableStuck) GetID() string {
@@ -1511,7 +1574,7 @@ type LogIngestableStuck struct {
 
 func (x *LogIngestableStuck) Reset() {
 	*x = LogIngestableStuck{}
-	mi := &file_clusterpb_cluster_proto_msgTypes[15]
+	mi := &file_clusterpb_cluster_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1523,7 +1586,7 @@ func (x *LogIngestableStuck) String() string {
 func (*LogIngestableStuck) ProtoMessage() {}
 
 func (x *LogIngestableStuck) ProtoReflect() protoreflect.Message {
-	mi := &file_clusterpb_cluster_proto_msgTypes[15]
+	mi := &file_clusterpb_cluster_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1536,7 +1599,7 @@ func (x *LogIngestableStuck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogIngestableStuck.ProtoReflect.Descriptor instead.
 func (*LogIngestableStuck) Descriptor() ([]byte, []int) {
-	return file_clusterpb_cluster_proto_rawDescGZIP(), []int{15}
+	return file_clusterpb_cluster_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *LogIngestableStuck) GetID() string {
@@ -1580,7 +1643,7 @@ type LogSyncableSkipRequest struct {
 
 func (x *LogSyncableSkipRequest) Reset() {
 	*x = LogSyncableSkipRequest{}
-	mi := &file_clusterpb_cluster_proto_msgTypes[16]
+	mi := &file_clusterpb_cluster_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1592,7 +1655,7 @@ func (x *LogSyncableSkipRequest) String() string {
 func (*LogSyncableSkipRequest) ProtoMessage() {}
 
 func (x *LogSyncableSkipRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_clusterpb_cluster_proto_msgTypes[16]
+	mi := &file_clusterpb_cluster_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1605,7 +1668,7 @@ func (x *LogSyncableSkipRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogSyncableSkipRequest.ProtoReflect.Descriptor instead.
 func (*LogSyncableSkipRequest) Descriptor() ([]byte, []int) {
-	return file_clusterpb_cluster_proto_rawDescGZIP(), []int{16}
+	return file_clusterpb_cluster_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *LogSyncableSkipRequest) GetID() string {
@@ -1652,7 +1715,7 @@ type LogTypeMigrationDeadLetter struct {
 
 func (x *LogTypeMigrationDeadLetter) Reset() {
 	*x = LogTypeMigrationDeadLetter{}
-	mi := &file_clusterpb_cluster_proto_msgTypes[17]
+	mi := &file_clusterpb_cluster_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1664,7 +1727,7 @@ func (x *LogTypeMigrationDeadLetter) String() string {
 func (*LogTypeMigrationDeadLetter) ProtoMessage() {}
 
 func (x *LogTypeMigrationDeadLetter) ProtoReflect() protoreflect.Message {
-	mi := &file_clusterpb_cluster_proto_msgTypes[17]
+	mi := &file_clusterpb_cluster_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1677,7 +1740,7 @@ func (x *LogTypeMigrationDeadLetter) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogTypeMigrationDeadLetter.ProtoReflect.Descriptor instead.
 func (*LogTypeMigrationDeadLetter) Descriptor() ([]byte, []int) {
-	return file_clusterpb_cluster_proto_rawDescGZIP(), []int{17}
+	return file_clusterpb_cluster_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *LogTypeMigrationDeadLetter) GetTypeID() string {
@@ -1742,7 +1805,7 @@ type LogScrub struct {
 
 func (x *LogScrub) Reset() {
 	*x = LogScrub{}
-	mi := &file_clusterpb_cluster_proto_msgTypes[18]
+	mi := &file_clusterpb_cluster_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1754,7 +1817,7 @@ func (x *LogScrub) String() string {
 func (*LogScrub) ProtoMessage() {}
 
 func (x *LogScrub) ProtoReflect() protoreflect.Message {
-	mi := &file_clusterpb_cluster_proto_msgTypes[18]
+	mi := &file_clusterpb_cluster_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1767,7 +1830,7 @@ func (x *LogScrub) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogScrub.ProtoReflect.Descriptor instead.
 func (*LogScrub) Descriptor() ([]byte, []int) {
-	return file_clusterpb_cluster_proto_rawDescGZIP(), []int{18}
+	return file_clusterpb_cluster_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *LogScrub) GetUpperBound() uint64 {
@@ -1795,7 +1858,7 @@ type LogNodeAPIURL struct {
 
 func (x *LogNodeAPIURL) Reset() {
 	*x = LogNodeAPIURL{}
-	mi := &file_clusterpb_cluster_proto_msgTypes[19]
+	mi := &file_clusterpb_cluster_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1807,7 +1870,7 @@ func (x *LogNodeAPIURL) String() string {
 func (*LogNodeAPIURL) ProtoMessage() {}
 
 func (x *LogNodeAPIURL) ProtoReflect() protoreflect.Message {
-	mi := &file_clusterpb_cluster_proto_msgTypes[19]
+	mi := &file_clusterpb_cluster_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1820,7 +1883,7 @@ func (x *LogNodeAPIURL) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogNodeAPIURL.ProtoReflect.Descriptor instead.
 func (*LogNodeAPIURL) Descriptor() ([]byte, []int) {
-	return file_clusterpb_cluster_proto_rawDescGZIP(), []int{19}
+	return file_clusterpb_cluster_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *LogNodeAPIURL) GetNodeID() uint64 {
@@ -1856,7 +1919,7 @@ type LogNodeVersion struct {
 
 func (x *LogNodeVersion) Reset() {
 	*x = LogNodeVersion{}
-	mi := &file_clusterpb_cluster_proto_msgTypes[20]
+	mi := &file_clusterpb_cluster_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1868,7 +1931,7 @@ func (x *LogNodeVersion) String() string {
 func (*LogNodeVersion) ProtoMessage() {}
 
 func (x *LogNodeVersion) ProtoReflect() protoreflect.Message {
-	mi := &file_clusterpb_cluster_proto_msgTypes[20]
+	mi := &file_clusterpb_cluster_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1881,7 +1944,7 @@ func (x *LogNodeVersion) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogNodeVersion.ProtoReflect.Descriptor instead.
 func (*LogNodeVersion) Descriptor() ([]byte, []int) {
-	return file_clusterpb_cluster_proto_rawDescGZIP(), []int{20}
+	return file_clusterpb_cluster_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *LogNodeVersion) GetNodeID() uint64 {
@@ -2010,6 +2073,11 @@ var file_clusterpb_cluster_proto_rawDesc = []byte{
 	0x70, 0x6f, 0x63, 0x68, 0x18, 0x02, 0x20, 0x01, 0x28, 0x04, 0x52, 0x0c, 0x72, 0x65, 0x66, 0x72,
 	0x65, 0x73, 0x68, 0x45, 0x70, 0x6f, 0x63, 0x68, 0x12, 0x16, 0x0a, 0x06, 0x63, 0x65, 0x6e, 0x73,
 	0x75, 0x73, 0x18, 0x03, 0x20, 0x01, 0x28, 0x0c, 0x52, 0x06, 0x63, 0x65, 0x6e, 0x73, 0x75, 0x73,
+	0x22, 0x4e, 0x0a, 0x1c, 0x4c, 0x6f, 0x67, 0x53, 0x79, 0x6e, 0x63, 0x61, 0x62, 0x6c, 0x65, 0x52,
+	0x65, 0x6d, 0x61, 0x74, 0x65, 0x72, 0x69, 0x61, 0x6c, 0x69, 0x7a, 0x61, 0x74, 0x69, 0x6f, 0x6e,
+	0x12, 0x0e, 0x0a, 0x02, 0x49, 0x44, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x02, 0x49, 0x44,
+	0x12, 0x1e, 0x0a, 0x0a, 0x74, 0x61, 0x72, 0x67, 0x65, 0x74, 0x48, 0x65, 0x61, 0x64, 0x18, 0x02,
+	0x20, 0x01, 0x28, 0x04, 0x52, 0x0a, 0x74, 0x61, 0x72, 0x67, 0x65, 0x74, 0x48, 0x65, 0x61, 0x64,
 	0x22, 0xc6, 0x01, 0x0a, 0x0a, 0x4c, 0x6f, 0x67, 0x45, 0x72, 0x72, 0x61, 0x74, 0x75, 0x6d, 0x12,
 	0x16, 0x0a, 0x06, 0x74, 0x79, 0x70, 0x65, 0x49, 0x44, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52,
 	0x06, 0x74, 0x79, 0x70, 0x65, 0x49, 0x44, 0x12, 0x1c, 0x0a, 0x09, 0x66, 0x72, 0x6f, 0x6d, 0x49,
@@ -2118,31 +2186,32 @@ func file_clusterpb_cluster_proto_rawDescGZIP() []byte {
 }
 
 var file_clusterpb_cluster_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_clusterpb_cluster_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
+var file_clusterpb_cluster_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
 var file_clusterpb_cluster_proto_goTypes = []any{
-	(LogValidationStrategy)(0),         // 0: clusterpb.LogValidationStrategy
-	(LogEntityKind)(0),                 // 1: clusterpb.LogEntityKind
-	(*TypeRef)(nil),                    // 2: clusterpb.TypeRef
-	(*LogEntity)(nil),                  // 3: clusterpb.LogEntity
-	(*LogRow)(nil),                     // 4: clusterpb.LogRow
-	(*LogDelete)(nil),                  // 5: clusterpb.LogDelete
-	(*LogRefresh)(nil),                 // 6: clusterpb.LogRefresh
-	(*LogProposal)(nil),                // 7: clusterpb.LogProposal
-	(*LogType)(nil),                    // 8: clusterpb.LogType
-	(*LogConfiguration)(nil),           // 9: clusterpb.LogConfiguration
-	(*LogSyncableIndex)(nil),           // 10: clusterpb.LogSyncableIndex
-	(*LogContractFingerprint)(nil),     // 11: clusterpb.LogContractFingerprint
-	(*LogIngestableCensus)(nil),        // 12: clusterpb.LogIngestableCensus
-	(*LogErratum)(nil),                 // 13: clusterpb.LogErratum
-	(*LogIngestablePosition)(nil),      // 14: clusterpb.LogIngestablePosition
-	(*LogSyncableDeadLetter)(nil),      // 15: clusterpb.LogSyncableDeadLetter
-	(*LogSyncableStuck)(nil),           // 16: clusterpb.LogSyncableStuck
-	(*LogIngestableStuck)(nil),         // 17: clusterpb.LogIngestableStuck
-	(*LogSyncableSkipRequest)(nil),     // 18: clusterpb.LogSyncableSkipRequest
-	(*LogTypeMigrationDeadLetter)(nil), // 19: clusterpb.LogTypeMigrationDeadLetter
-	(*LogScrub)(nil),                   // 20: clusterpb.LogScrub
-	(*LogNodeAPIURL)(nil),              // 21: clusterpb.LogNodeAPIURL
-	(*LogNodeVersion)(nil),             // 22: clusterpb.LogNodeVersion
+	(LogValidationStrategy)(0),           // 0: clusterpb.LogValidationStrategy
+	(LogEntityKind)(0),                   // 1: clusterpb.LogEntityKind
+	(*TypeRef)(nil),                      // 2: clusterpb.TypeRef
+	(*LogEntity)(nil),                    // 3: clusterpb.LogEntity
+	(*LogRow)(nil),                       // 4: clusterpb.LogRow
+	(*LogDelete)(nil),                    // 5: clusterpb.LogDelete
+	(*LogRefresh)(nil),                   // 6: clusterpb.LogRefresh
+	(*LogProposal)(nil),                  // 7: clusterpb.LogProposal
+	(*LogType)(nil),                      // 8: clusterpb.LogType
+	(*LogConfiguration)(nil),             // 9: clusterpb.LogConfiguration
+	(*LogSyncableIndex)(nil),             // 10: clusterpb.LogSyncableIndex
+	(*LogContractFingerprint)(nil),       // 11: clusterpb.LogContractFingerprint
+	(*LogIngestableCensus)(nil),          // 12: clusterpb.LogIngestableCensus
+	(*LogSyncableRematerialization)(nil), // 13: clusterpb.LogSyncableRematerialization
+	(*LogErratum)(nil),                   // 14: clusterpb.LogErratum
+	(*LogIngestablePosition)(nil),        // 15: clusterpb.LogIngestablePosition
+	(*LogSyncableDeadLetter)(nil),        // 16: clusterpb.LogSyncableDeadLetter
+	(*LogSyncableStuck)(nil),             // 17: clusterpb.LogSyncableStuck
+	(*LogIngestableStuck)(nil),           // 18: clusterpb.LogIngestableStuck
+	(*LogSyncableSkipRequest)(nil),       // 19: clusterpb.LogSyncableSkipRequest
+	(*LogTypeMigrationDeadLetter)(nil),   // 20: clusterpb.LogTypeMigrationDeadLetter
+	(*LogScrub)(nil),                     // 21: clusterpb.LogScrub
+	(*LogNodeAPIURL)(nil),                // 22: clusterpb.LogNodeAPIURL
+	(*LogNodeVersion)(nil),               // 23: clusterpb.LogNodeVersion
 }
 var file_clusterpb_cluster_proto_depIdxs = []int32{
 	2, // 0: clusterpb.LogEntity.type:type_name -> clusterpb.TypeRef
@@ -2175,7 +2244,7 @@ func file_clusterpb_cluster_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: file_clusterpb_cluster_proto_rawDesc,
 			NumEnums:      2,
-			NumMessages:   21,
+			NumMessages:   22,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

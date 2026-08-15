@@ -420,3 +420,9 @@ func (ms *MemoryStorage) AppliedErrata() ([]cluster.AppliedErratum, error) {
 func (ms *MemoryStorage) SyncableCheckpoint(id string) (*cluster.SyncableIndex, bool) {
 	return nil, false
 }
+
+// SyncableRematerialization is a stub: no re-materializations run against
+// this in-memory double.
+func (ms *MemoryStorage) SyncableRematerialization(id string) (*cluster.SyncableRematerialization, bool) {
+	return nil, false
+}

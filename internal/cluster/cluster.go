@@ -52,6 +52,18 @@ type Cluster interface {
 	// drifted or corrupted projection. Returns ErrResourceNotFound if the
 	// syncable is unknown.
 	RebuildSyncable(ctx context.Context, id string) error
+	// RematerializeSyncable replays a syncable's topic from index 0 through
+	// the current projection + interpretation while its keyed sink keeps
+	// serving — the non-destructive sibling of RebuildSyncable. Keyed
+	// upserts converge rows in place; a completion sweep removes rows the
+	// replay never re-emitted; the checkpoint's interpretation pin
+	// refreshes. Returns ErrNotRematerializable for sinks that cannot
+	// converge in place. Powers POST /v1/syncable/{id}/rematerialize.
+	RematerializeSyncable(ctx context.Context, id string) error
+	// SyncableRematerialization reports the syncable's in-progress
+	// re-materialization (nil, false when none) — the status endpoint's
+	// progress source.
+	SyncableRematerialization(id string) (*SyncableRematerialization, bool)
 	ProposeDatabase(ctx context.Context, c *Configuration) error
 	// Scrub requests physical removal of already-delete-proposed (RTBF)
 	// entities from the permanent event log up to the current applied index.

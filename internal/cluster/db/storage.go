@@ -122,6 +122,11 @@ type Storage interface {
 	// SyncableCheckpoint returns the syncable's full checkpoint record —
 	// including its interpretation pin — or (nil, false) when none exists.
 	SyncableCheckpoint(id string) (*cluster.SyncableIndex, bool)
+	// SyncableRematerialization returns the syncable's in-progress
+	// re-materialization record, or (nil, false) when none exists. The owner
+	// worker observes it (begin marking, sweep at the target head); the
+	// status endpoint reports the progress.
+	SyncableRematerialization(id string) (*cluster.SyncableRematerialization, bool)
 	// TopicRefreshEpoch returns the highest refresh generation ever committed
 	// for a topic (type id), or 0 if none. Keyed by topic and NOT cleared by
 	// DeleteIngestable, so a same-topic recreate reads the generation still on the

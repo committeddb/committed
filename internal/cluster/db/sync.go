@@ -443,6 +443,11 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 	var pendingCount int
 	var pendingSince time.Time
 
+	// remat tracks an in-progress re-materialization (see rematerialize.go):
+	// loaded at leadership gain, swept + cleared when the consumed head
+	// reaches its target.
+	var remat rematState
+
 	// interpPin is the checkpoint's interpretation index — the errata
 	// registry index this syncable's CURRENT materialization began under (the
 	// second half of the determinism pair). Carried UNCHANGED across
@@ -502,6 +507,9 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 			cp, head, _ := db.SyncableProgress(id)
 			db.logger.Info("starting sync", zap.String("id", id),
 				zap.Uint64("checkpoint", cp), zap.Uint64("head", head))
+			// An in-progress re-materialization: begin epoch marking so the
+			// replay converges the sink (see rematerialize.go).
+			remat = db.beginRematerializationIfRequested(ctx, id, s)
 			isNode = true
 			retryActual = nil
 			lastSeen, lastBumped = 0, 0
@@ -600,6 +608,9 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 						progressed = true
 					}
 				}
+				// Caught up: if a re-materialization's replay has covered its
+				// target, sweep and clear.
+				db.completeRematerializationIfDone(ctx, id, s, &remat, lastSeen)
 			case readErr != nil:
 				db.logSyncReadError(id, readErr)
 			default:
@@ -803,6 +814,8 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 	// interpPin: the checkpoint's interpretation index — see the single-flush
 	// worker's declaration for the pinning contract.
 	var interpPin uint64
+	// remat: see the single-flush worker's declaration.
+	var remat rematState
 	tracker := db.newStuckTracker(id)
 
 	flush := func() bool {
@@ -955,6 +968,9 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 			cp, head, _ := db.SyncableProgress(id)
 			db.logger.Info("starting sync", zap.String("id", id),
 				zap.Uint64("checkpoint", cp), zap.Uint64("head", head))
+			// An in-progress re-materialization: begin epoch marking so the
+			// replay converges the sink (see rematerialize.go).
+			remat = db.beginRematerializationIfRequested(ctx, id, s)
 			isNode = true
 			batch = batch[:0]
 			retryBatch = false
@@ -1006,6 +1022,11 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 				}
 				if !retryBatch && bumpPending() {
 					progressed = true
+				}
+				// Caught up: if a re-materialization's replay has covered its
+				// target, sweep and clear.
+				if !retryBatch {
+					db.completeRematerializationIfDone(ctx, id, s, &remat, pendingBumpIndex)
 				}
 			case readErr != nil:
 				db.logSyncReadError(id, readErr)

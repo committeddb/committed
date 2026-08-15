@@ -78,6 +78,30 @@ func (s *single) Teardown() error {
 	return nil
 }
 
+// CanRematerialize / Begin / Complete forward the re-materialization
+// extension, preserving the innermost sink's answer (a sink that doesn't
+// implement it reports false, and the verbs refuse).
+func (s *single) CanRematerialize() bool {
+	if rm, ok := s.inner.(cluster.Rematerializable); ok {
+		return rm.CanRematerialize()
+	}
+	return false
+}
+
+func (s *single) BeginRematerialization(ctx context.Context, epoch uint64) error {
+	if rm, ok := s.inner.(cluster.Rematerializable); ok {
+		return rm.BeginRematerialization(ctx, epoch)
+	}
+	return cluster.ErrNotRematerializable
+}
+
+func (s *single) CompleteRematerialization(ctx context.Context) error {
+	if rm, ok := s.inner.(cluster.Rematerializable); ok {
+		return rm.CompleteRematerialization(ctx)
+	}
+	return cluster.ErrNotRematerializable
+}
+
 type batchSyncable struct {
 	single
 	batch cluster.BatchSyncable

@@ -113,6 +113,11 @@ var (
 	// ingestable id (last-writer-wins), guarded/swept with the ingestable
 	// config. See ingestable_census.go.
 	ingestableCensusBucket = []byte("ingestableCensuses")
+	// syncableRematerializationBucket holds the in-progress re-materialization
+	// record per syncable id (upsert while replaying, deleted at sweep
+	// completion), guarded/swept with the syncable config. See
+	// syncable_rematerialization.go.
+	syncableRematerializationBucket = []byte("syncableRematerializations")
 	// errataBucket holds the APPEND-ONLY interpretation registry: one record
 	// per erratum id, value = 8-byte big-endian raft index || marshaled
 	// LogErratum. Never edited, never swept (replay determinism at historical
@@ -192,6 +197,7 @@ var internalEntities = []internalEntity{
 	{cluster.IsContractFingerprint, "handleContractFingerprint", contractFingerprintBucket, (*Storage).handleContractFingerprint},
 	{cluster.IsIngestableCensus, "handleIngestableCensus", ingestableCensusBucket, (*Storage).handleIngestableCensus},
 	{cluster.IsErratum, "handleErratum", errataBucket, (*Storage).handleErratum},
+	{cluster.IsSyncableRematerialization, "handleSyncableRematerialization", syncableRematerializationBucket, (*Storage).handleSyncableRematerialization},
 	{cluster.IsScrub, "handleScrub", pendingScrubBucket, (*Storage).handleScrub},
 	{cluster.IsNodeAPIURL, "handleNodeAPIURL", memberAPIURLBucket, (*Storage).handleNodeAPIURL},
 	{cluster.IsNodeVersion, "handleNodeVersion", memberVersionBucket, (*Storage).handleNodeVersion},

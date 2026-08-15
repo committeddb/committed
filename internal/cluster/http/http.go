@@ -231,6 +231,7 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 			// Rebuild is leader-pinned for the same reason as DELETE: the
 			// owner-side destination teardown/re-init runs on the leader.
 			r.Post("/syncable/{id}/rebuild", h.leaderRead(h.RebuildSyncable))
+			r.Post("/syncable/{id}/rematerialize", h.leaderRead(h.RematerializeSyncable))
 
 			r.Get("/type", h.listConfig("type", h.c.Types))
 			r.Post("/type/{id}", h.addTypeConfig())

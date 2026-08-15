@@ -227,7 +227,7 @@ func (d *PostgreSQLDialect) EnsureSpineIndex(ctx context.Context, db *gosql.DB, 
 }
 
 func (d *PostgreSQLDialect) CreateSQL(config *sql.Config) string {
-	return pgUpsertSQL(config, false)
+	return pgUpsertSQL(config, false, false)
 }
 
 // CreateGenerationUpsertSQL implements Dialect: CreateSQL plus the
@@ -235,7 +235,31 @@ func (d *PostgreSQLDialect) CreateSQL(config *sql.Config) string {
 // assignment), used only by the keyed plain Syncable so a refresh sweep can find
 // stale rows. Projections and keyless syncables keep the plain CreateSQL.
 func (d *PostgreSQLDialect) CreateGenerationUpsertSQL(config *sql.Config) string {
-	return pgUpsertSQL(config, true)
+	return pgUpsertSQL(config, true, false)
+}
+
+// CreateRematerializationUpsertSQL implements Dialect: the generation upsert
+// with the remat-epoch column additionally appended.
+func (d *PostgreSQLDialect) CreateRematerializationUpsertSQL(config *sql.Config) string {
+	return pgUpsertSQL(config, true, true)
+}
+
+// EnsureRematerializationColumn implements Dialect, mirroring
+// EnsureGenerationColumn (DEFAULT 0 = never re-materialized).
+func (d *PostgreSQLDialect) EnsureRematerializationColumn(ctx context.Context, db *gosql.DB, config *sql.Config) error {
+	stmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s BIGINT NOT NULL DEFAULT 0",
+		pgIdent.Table(config.Table), sql.RematerializationColumn)
+	if _, err := db.ExecContext(ctx, stmt); err != nil {
+		return fmt.Errorf("ensure rematerialization column [%s]: %w", stmt, err)
+	}
+	return nil
+}
+
+// CreateRematerializationSweepSQL implements Dialect: delete rows this
+// replay never re-emitted (stamp below the epoch).
+func (d *PostgreSQLDialect) CreateRematerializationSweepSQL(config *sql.Config) string {
+	return fmt.Sprintf("DELETE FROM %s WHERE %s < $1",
+		pgIdent.Table(config.Table), sql.RematerializationColumn)
 }
 
 // pgUpsertSQL builds the INSERT ... ON CONFLICT upsert. withGeneration appends
@@ -243,7 +267,7 @@ func (d *PostgreSQLDialect) CreateGenerationUpsertSQL(config *sql.Config) string
 // assignment; it is only ever set for a keyed config (PrimaryKey != ""), so the
 // extra assignment always lands inside the ON CONFLICT clause. With
 // withGeneration=false the output is byte-identical to the pre-feature CreateSQL.
-func pgUpsertSQL(config *sql.Config, withGeneration bool) string {
+func pgUpsertSQL(config *sql.Config, withGeneration, withRemat bool) string {
 	var sqlb strings.Builder
 
 	fmt.Fprintf(&sqlb, "INSERT INTO %s(", pgIdent.Table(config.Table))
@@ -257,9 +281,15 @@ func pgUpsertSQL(config *sql.Config, withGeneration bool) string {
 	if withGeneration {
 		fmt.Fprintf(&sqlb, ",%s", sql.GenerationColumn)
 	}
+	if withRemat {
+		fmt.Fprintf(&sqlb, ",%s", sql.RematerializationColumn)
+	}
 	fmt.Fprint(&sqlb, ") VALUES (")
 	n := len(config.Mappings)
 	if withGeneration {
+		n++
+	}
+	if withRemat {
 		n++
 	}
 	for i := 0; i < n; i++ {
@@ -283,6 +313,9 @@ func pgUpsertSQL(config *sql.Config, withGeneration bool) string {
 		}
 		if withGeneration {
 			fmt.Fprintf(&sqlb, ",%s=EXCLUDED.%s", sql.GenerationColumn, sql.GenerationColumn)
+		}
+		if withRemat {
+			fmt.Fprintf(&sqlb, ",%s=EXCLUDED.%s", sql.RematerializationColumn, sql.RematerializationColumn)
 		}
 	}
 
