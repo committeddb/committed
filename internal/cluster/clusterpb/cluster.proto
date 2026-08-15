@@ -214,6 +214,18 @@ message LogType {
     // knob; the destination follows the contract it polices, beside Validate.
     // Empty for non-announce types. Add-only: pre-feature types unmarshal "".
     string SchemaChangeTopic = 10;
+    // NonConvertible declares the third migration intent (alongside
+    // transform / none): THIS version requires information the previous
+    // version's actuals never contained, so no program can upgrade old data
+    // — migration is view-side and PARTIAL by nature. Declared as
+    // `nonConvertible = true` in the [migration] section. Consequences:
+    // always-current syncables are refused at admission across the break
+    // (the stances that remain are version-pinned and version-aware), a
+    // ProposeType that strands existing always-current syncables requires
+    // force, and the runtime migration chain dead-letters old-stamped
+    // entities at the break instead of silently delivering unconverted
+    // data. Add-only: pre-feature versions unmarshal false.
+    bool NonConvertible = 11;
 }
 
 message LogConfiguration {

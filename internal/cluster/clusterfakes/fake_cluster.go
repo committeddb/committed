@@ -405,11 +405,12 @@ type FakeCluster struct {
 	proposeSyncableReturnsOnCall map[int]struct {
 		result1 error
 	}
-	ProposeTypeStub        func(context.Context, *cluster.Configuration) error
+	ProposeTypeStub        func(context.Context, *cluster.Configuration, ...cluster.ProposeTypeOption) error
 	proposeTypeMutex       sync.RWMutex
 	proposeTypeArgsForCall []struct {
 		arg1 context.Context
 		arg2 *cluster.Configuration
+		arg3 []cluster.ProposeTypeOption
 	}
 	proposeTypeReturns struct {
 		result1 error
@@ -2707,19 +2708,20 @@ func (fake *FakeCluster) ProposeSyncableReturnsOnCall(i int, result1 error) {
 	}{result1}
 }
 
-func (fake *FakeCluster) ProposeType(arg1 context.Context, arg2 *cluster.Configuration) error {
+func (fake *FakeCluster) ProposeType(arg1 context.Context, arg2 *cluster.Configuration, arg3 ...cluster.ProposeTypeOption) error {
 	fake.proposeTypeMutex.Lock()
 	ret, specificReturn := fake.proposeTypeReturnsOnCall[len(fake.proposeTypeArgsForCall)]
 	fake.proposeTypeArgsForCall = append(fake.proposeTypeArgsForCall, struct {
 		arg1 context.Context
 		arg2 *cluster.Configuration
-	}{arg1, arg2})
+		arg3 []cluster.ProposeTypeOption
+	}{arg1, arg2, arg3})
 	stub := fake.ProposeTypeStub
 	fakeReturns := fake.proposeTypeReturns
-	fake.recordInvocation("ProposeType", []interface{}{arg1, arg2})
+	fake.recordInvocation("ProposeType", []interface{}{arg1, arg2, arg3})
 	fake.proposeTypeMutex.Unlock()
 	if stub != nil {
-		return stub(arg1, arg2)
+		return stub(arg1, arg2, arg3...)
 	}
 	if specificReturn {
 		return ret.result1
@@ -2733,17 +2735,17 @@ func (fake *FakeCluster) ProposeTypeCallCount() int {
 	return len(fake.proposeTypeArgsForCall)
 }
 
-func (fake *FakeCluster) ProposeTypeCalls(stub func(context.Context, *cluster.Configuration) error) {
+func (fake *FakeCluster) ProposeTypeCalls(stub func(context.Context, *cluster.Configuration, ...cluster.ProposeTypeOption) error) {
 	fake.proposeTypeMutex.Lock()
 	defer fake.proposeTypeMutex.Unlock()
 	fake.ProposeTypeStub = stub
 }
 
-func (fake *FakeCluster) ProposeTypeArgsForCall(i int) (context.Context, *cluster.Configuration) {
+func (fake *FakeCluster) ProposeTypeArgsForCall(i int) (context.Context, *cluster.Configuration, []cluster.ProposeTypeOption) {
 	fake.proposeTypeMutex.RLock()
 	defer fake.proposeTypeMutex.RUnlock()
 	argsForCall := fake.proposeTypeArgsForCall[i]
-	return argsForCall.arg1, argsForCall.arg2
+	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3
 }
 
 func (fake *FakeCluster) ProposeTypeReturns(result1 error) {

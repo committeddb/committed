@@ -12,7 +12,11 @@ import (
 //counterfeiter:generate . Cluster
 type Cluster interface {
 	Propose(ctx context.Context, p *Proposal) error
-	ProposeType(ctx context.Context, c *Configuration) error
+	// ProposeType admits a type configuration. Declaring a nonConvertible
+	// version bump while always-current syncables consume this type's topics
+	// is refused with a StrandedSyncablesError naming them, unless the caller
+	// passes AcknowledgeStrandedSyncables (the HTTP layer's ?force=true).
+	ProposeType(ctx context.Context, c *Configuration, opts ...ProposeTypeOption) error
 	ProposeDeleteType(ctx context.Context, id string) error
 	ProposeIngestable(ctx context.Context, c *Configuration) error
 	// DeleteIngestable removes an ingestable: its config and checkpoint position

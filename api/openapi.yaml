@@ -592,6 +592,16 @@ paths:
         without a valid column/elementKey/element, an enrichment
         referencing an unknown lookup) fails here with 400. A rule or
         source with no `when` matches every event of its topic.
+
+        `syncable.mode` declares the consumer stance: `as-stored` (default —
+        exact written bytes; version handling is the consumer's, whether
+        pinned to one version or version-aware) or `always-current` (entities
+        arrive upgraded through the type's migration chain). Always-current is
+        admission-checked: a topic whose type declares a
+        `nonConvertible` version anywhere in its history refuses it with 400
+        naming the gap — data below the break can never reach the current
+        version, so the promise is unkeepable (see docs/read-models.md
+        § Consumer stances).
       operationId: addSyncable
       parameters:
         - $ref: '#/components/parameters/ResourceId'
@@ -1057,8 +1067,19 @@ paths:
       summary: Create or update a type configuration
       description: |
         Proposes a type configuration. A schema change requires an explicit
-        `[migration]` section: either `transform = "<jq>"` (a jq program
-        upgrading previous-version data to the new shape) or `none = true`.
+        `[migration]` section declaring exactly one intent:
+        `transform = "<jq>"` (a jq program upgrading previous-version data to
+        the new shape), `none = true` (additive — old data is already valid),
+        or `nonConvertible = true` (this version requires information the
+        previous version's actuals never contained, so no program can upgrade
+        old data). A `nonConvertible` bump that would strand existing
+        always-current syncables is refused with 409
+        `stranded_always_current` naming them; re-POST with `?force=true` to
+        acknowledge the stranding deliberately (stranded syncables then
+        dead-letter below-break data at the migration chain rather than
+        receiving it unconverted). The intent is immutable per version: an
+        in-place edit must restate `nonConvertible = true`, and a break can
+        only be declared WITH the schema bump that causes it.
         The transform is compiled at propose time, so syntax errors fail
         here — but a program can still break at runtime on real payloads.
         To catch that early, optionally set
@@ -1101,6 +1122,15 @@ paths:
       operationId: addType
       parameters:
         - $ref: '#/components/parameters/ResourceId'
+        - name: force
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: |
+            Set `true` to acknowledge that a `nonConvertible` version bump
+            strands the always-current syncables a plain POST is refused over
+            (409 `stranded_always_current` names them). No effect otherwise.
       requestBody:
         required: true
         description: Type configuration as TOML or JSON.

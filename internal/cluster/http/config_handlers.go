@@ -100,7 +100,14 @@ func (h *HTTP) addTypeConfig() httpgo.HandlerFunc {
 
 		before, _ := h.c.ResolveType(cluster.LatestTypeRef(c.ID))
 
-		if err := h.c.ProposeType(r.Context(), c); err != nil {
+		// ?force=true acknowledges that a nonConvertible bump strands the
+		// always-current syncables a plain POST would be refused over (409
+		// stranded_always_current names them).
+		var opts []cluster.ProposeTypeOption
+		if r.URL.Query().Get("force") == "true" {
+			opts = append(opts, cluster.AcknowledgeStrandedSyncables())
+		}
+		if err := h.c.ProposeType(r.Context(), c, opts...); err != nil {
 			writeProposeError(w, err, "type", "propose type")
 			return
 		}

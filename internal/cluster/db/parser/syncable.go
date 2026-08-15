@@ -35,6 +35,17 @@ func (p *Parser) SyncableTopics(mimeType string, data []byte) ([]string, error) 
 	return extractor.TopicsFromConfig(v), nil
 }
 
+// SyncableMode reports the syncable config's consumer stance, read from the
+// config alone (no Init / no destination pool) — the side-effect-free read
+// admission checks use to classify every stored syncable.
+func (p *Parser) SyncableMode(mimeType string, data []byte) (cluster.SyncableMode, error) {
+	v, err := parseBytes(mimeType, data)
+	if err != nil {
+		return 0, err
+	}
+	return cluster.ParseSyncableMode(v.GetString("syncable.mode"))
+}
+
 // SyncableDatabases reports which destination databases the syncable config
 // references, read from the config alone (no Init / no destination connection).
 // It mirrors SyncableTopics: reuse ParseSyncable's front half to pick the

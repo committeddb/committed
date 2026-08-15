@@ -426,6 +426,35 @@ stays consistent at every checkpoint. One syncable fills one table — a
 dimension is its own internal housekeeping, so two syncables that need the same
 data each keep their own copy.
 
+## Consumer stances: how a syncable meets a versioned topic
+
+The log is permanently heterogeneous: entities carry the type version that was
+current when they were written, and there is no ALTER TABLE — only new writes
+under new versions. Every syncable takes one of three stances toward that:
+
+- **Version-pinned** (`mode = "as-stored"`, handling one version): the syncable
+  sees the exact bytes written, and its mappings target one version's shape.
+  Immune to later type versions; blind to them too.
+- **Version-aware** (`mode = "as-stored"`, dispatching on version): the
+  syncable sees raw bytes plus each entity's stamped version and handles the
+  differences itself — the stance for consumers that genuinely want each era's
+  shape.
+- **Always-current** (`mode = "always-current"`): committed runs each entity
+  through the type's migration chain (older-version data upgraded step by step)
+  before the syncable sees it, so mappings only ever target the current shape.
+
+Always-current is a **promise, and it is checked at admission**: it is only
+admissible when the migration chain can actually carry every version's data to
+the current shape. A version declared `nonConvertible = true` in its
+`[migration]` section — meaning that version requires information older data
+never contained — breaks the chain: `POST /v1/syncable/{id}` refuses an
+always-current syncable over such a topic, naming the gap, and
+`POST /v1/type/{id}` refuses a nonConvertible bump that would strand *existing*
+always-current syncables, naming them (re-POST with `?force=true` to
+acknowledge the stranding deliberately). A force-stranded syncable does not
+silently receive unconverted data: entities below the break dead-letter at the
+migration chain, replayable later if the reading is repaired.
+
 ## Changing the rules after a projection is live
 
 A projection is a **disposable view of an immutable log** — its fold rules, and

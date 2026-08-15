@@ -37,12 +37,57 @@ func (db *DB) AddSyncableParser(name string, p cluster.SyncableParser) {
 	db.parser.AddSyncableParser(name, p)
 }
 
+// refuseAlwaysCurrentAcrossBreak refuses an always-current syncable whose
+// consumed topics carry a declared nonConvertible version anywhere in their
+// history. The check reads config-declared topics and walks each topic type's
+// version records; a topic whose type doesn't resolve is skipped (the type
+// may simply not exist yet — the existing fail-open posture for guards over
+// half-declared configs).
+func (db *DB) refuseAlwaysCurrentAcrossBreak(c *cluster.Configuration) error {
+	topics, err := db.parser.SyncableTopics(c.MimeType, c.Data)
+	if err != nil {
+		return cluster.NewConfigError(fmt.Errorf("enumerate consumed topics: %w", err))
+	}
+	for _, topic := range topics {
+		latest, err := db.storage.ResolveType(cluster.LatestTypeRef(topic))
+		if err != nil || latest == nil {
+			continue // topic's type not declared yet — nothing to check against
+		}
+		for v := 2; v <= latest.Version; v++ {
+			tv, err := db.storage.ResolveType(cluster.TypeRefAt(topic, v))
+			if err != nil || tv == nil {
+				continue
+			}
+			if tv.NonConvertible {
+				return &cluster.ConfigError{
+					Err: fmt.Errorf("always-current is not admissible over topic %q: version %d is declared nonConvertible (v%d data can never reach the current version). The stances that remain are as-stored with version-pinned handling, or version-aware consumption; an erratum rebinding the below-break reading can also lift this", topic, v, v-1),
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func (db *DB) ProposeSyncable(ctx context.Context, c *cluster.Configuration) error {
-	name, _, _, err := db.ParseSyncable(c.MimeType, c.Data, db.storage)
+	name, _, mode, err := db.ParseSyncable(c.MimeType, c.Data, db.storage)
 	if err != nil {
 		return cluster.NewConfigError(err)
 	}
 	c.Name = name
+
+	// An always-current syncable over a topic with a declared nonConvertible
+	// version is a promise committed cannot keep — data below the break can
+	// never reach the current version. Refuse loudly HERE, at POST, naming
+	// the gap and the stances that remain, instead of dead-lettering the
+	// first stranded entity at runtime (the admission-validation rule:
+	// silent/late failure is the dangerous kind). Conservative by design: any
+	// declared break in the type's history refuses, because data stamped
+	// below it may exist.
+	if mode == cluster.ModeAlwaysCurrent {
+		if err := db.refuseAlwaysCurrentAcrossBreak(c); err != nil {
+			return err
+		}
+	}
 
 	// Guard: a re-POST some destinations can't absorb in place (e.g. a SQL
 	// projection whose CREATE-only DDL never ALTERs the table) is rejected and

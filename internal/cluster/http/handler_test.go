@@ -63,7 +63,7 @@ func TestAddConfiguration_Success(t *testing.T) {
 			name: "type",
 			path: "/v1/type/type-1",
 			verifyFn: func(fake *clusterfakes.FakeCluster) (int, *cluster.Configuration) {
-				_, cfg := fake.ProposeTypeArgsForCall(0)
+				_, cfg, _ := fake.ProposeTypeArgsForCall(0)
 				return fake.ProposeTypeCallCount(), cfg
 			},
 		},

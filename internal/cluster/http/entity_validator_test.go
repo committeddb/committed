@@ -90,3 +90,35 @@ func TestAddProposal_AnnounceCommitsDivergentPayload(t *testing.T) {
 	require.Equal(t, 400, w.Result().StatusCode, "strict still gates")
 	require.Zero(t, fake.ProposeCallCount())
 }
+
+// TestAddType_StrandedSyncablesForceFlow pins the ?force=true contract: a
+// refused nonConvertible bump renders 409 stranded_always_current with the
+// stranded syncables as structured details, and the force re-POST passes the
+// acknowledgment through to ProposeType.
+func TestAddType_StrandedSyncablesForceFlow(t *testing.T) {
+	h, fake := setupTest()
+	fake.ProposeTypeReturns(&cluster.StrandedSyncablesError{
+		TypeID: "orders", Version: 2, Syncables: []string{"orders-mirror"},
+	})
+
+	body := "[type]\nname = \"orders\""
+	req := httptest.NewRequest("POST", "http://localhost/v1/type/orders", strings.NewReader(body))
+	req.Header.Set("Content-Type", "text/toml")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	require.Equal(t, 409, w.Result().StatusCode)
+	require.Contains(t, w.Body.String(), "stranded_always_current")
+	require.Contains(t, w.Body.String(), "orders-mirror", "the stranded syncables are named")
+
+	_, _, opts := fake.ProposeTypeArgsForCall(0)
+	require.Empty(t, opts, "a plain POST passes no acknowledgment")
+
+	fake.ProposeTypeReturns(nil)
+	req = httptest.NewRequest("POST", "http://localhost/v1/type/orders?force=true", strings.NewReader(body))
+	req.Header.Set("Content-Type", "text/toml")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	require.Equal(t, 200, w.Result().StatusCode)
+	_, _, opts = fake.ProposeTypeArgsForCall(1)
+	require.Len(t, opts, 1, "?force=true passes the acknowledgment option through")
+}
