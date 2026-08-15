@@ -33,7 +33,12 @@ var (
 // includes the refresh-boundary marker (featureLevelRefreshBoundary). A binary
 // that predates the mechanism announces nothing and is treated as level 0, so
 // the gate holds any level-1 emission until every such node is upgraded.
-const FeatureLevel uint64 = 1
+//
+// Level 2: the errata interpretation registry (featureLevelErrata). The
+// Erratum record is a GATED system type — a node that cannot fold errata must
+// not skip them (its syncables would emit stale readings) — so an erratum is
+// only admitted once every member announces level 2.
+const FeatureLevel uint64 = 2
 
 // Info is the JSON shape returned by /version and printed by the
 // --version flag. GoVersion is derived from runtime rather than

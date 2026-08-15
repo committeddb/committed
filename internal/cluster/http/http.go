@@ -207,6 +207,12 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 			// other write; the automatic scheduler does the same on a cadence.
 			r.Post("/scrub", h.Scrub)
 
+			// The errata interpretation registry: append-only statements
+			// rebinding how committed actuals are READ (never their bytes).
+			// Immutable per id — corrections are new errata, later wins.
+			r.Get("/erratum", h.GetErrata)
+			r.Post("/erratum/{id}", h.AddErratum)
+
 			r.Get("/syncable", h.listConfig("syncable", h.c.Syncables))
 			r.Post("/syncable/{id}", h.addConfig("syncable", h.c.ProposeSyncable, h.c.SyncableVersions))
 			// DELETE is leader-pinned (leaderRead reverse-proxies a follower's

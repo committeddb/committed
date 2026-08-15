@@ -19,6 +19,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
 	dbtesting "github.com/committeddb/committed/internal/cluster/db/testing"
+	"github.com/committeddb/committed/internal/cluster/interpretation"
 )
 
 // multiNodeTickInterval is the per-tick interval used by multi-node raft
@@ -1107,4 +1108,25 @@ func (r *Reader) Read() (*cluster.Actual, error) {
 			}
 		}
 	}
+}
+
+// InterpretationRegistry stubs the errata snapshot: this double applies no
+// errata, so readers see the empty registry (the errata-free path).
+func (ms *MemoryStorage) InterpretationRegistry() *interpretation.Registry {
+	return interpretation.EmptyRegistry
+}
+
+// ErratumByID stubs the admission read: no errata are ever applied here.
+func (ms *MemoryStorage) ErratumByID(id string) (*cluster.Erratum, uint64, bool) {
+	return nil, 0, false
+}
+
+// AppliedErrata stubs the registry listing: no errata are ever applied here.
+func (ms *MemoryStorage) AppliedErrata() ([]cluster.AppliedErratum, error) {
+	return nil, nil
+}
+
+// SyncableCheckpoint stubs the full-record checkpoint read.
+func (ms *MemoryStorage) SyncableCheckpoint(id string) (*cluster.SyncableIndex, bool) {
+	return nil, false
 }

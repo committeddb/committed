@@ -325,6 +325,13 @@ message LogErratum {
     // a deterministic subset — no now(), no env. Future erratum kinds
     // (disavowal, enumerative) extend this message add-only.
     string predicate = 5;
+    // fromVersion, when non-zero, narrows the erratum to entities STAMPED
+    // that version ("[n,m] under stamp v1 reads as v2" — the design's range
+    // binding); 0 applies to any stamp. Without it an erratum could not
+    // distinguish populations sharing a range once real version bumps exist,
+    // and rebinding DOWN ("wrongly stamped v2, read as v1") would be
+    // unexpressible safely.
+    uint32 fromVersion = 6;
 }
 
 message LogIngestablePosition {

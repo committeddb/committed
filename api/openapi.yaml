@@ -71,6 +71,11 @@ tags:
     description: Configurations for syncing data to external systems
   - name: type
     description: Schema and type definitions
+  - name: erratum
+    description: |
+      The errata interpretation registry: append-only, consensus-ordered
+      statements that rebind how already-committed actuals are READ (never
+      their bytes). Corrections are new errata — later in the log wins.
   - name: proposal
     description: Append proposals to the commit log (write-only)
   - name: node
@@ -1397,6 +1402,106 @@ paths:
           $ref: '#/components/responses/InsufficientStorage'
         '500':
           $ref: '#/components/responses/InternalError'
+
+  /v1/erratum:
+    get:
+      tags: [erratum]
+      summary: List the errata interpretation registry
+      description: |
+        Every applied erratum, in log order. An erratum is an append-only,
+        consensus-ordered statement that rebinds how already-committed actuals
+        are READ — never their bytes: entities of `type` committed in
+        `[fromIndex, toIndex]`, stamped `fromVersion` (0 = any stamp), and
+        matching `predicate` (empty = all) read as `rebindToVersion`. Among
+        matching errata, later in the log (`index`) wins; matching is always
+        against the stamped version. The authoritative reading every syncable
+        receives is stamp ⊕ this fold.
+      operationId: getErrata
+      parameters:
+        - $ref: '#/components/parameters/Consistency'
+      responses:
+        '200':
+          description: All applied errata, in log order.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+                    type: { type: string }
+                    fromIndex: { type: integer, format: int64 }
+                    toIndex: { type: integer, format: int64 }
+                    rebindToVersion: { type: integer }
+                    fromVersion: { type: integer }
+                    predicate: { type: string }
+                    index:
+                      type: integer
+                      format: int64
+                      description: The erratum's raft index — its interpretation coordinate.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/NotLinearizable'
+  /v1/erratum/{id}:
+    post:
+      tags: [erratum]
+      summary: Author an erratum (append-only; immutable per id)
+      description: |
+        Proposes one interpretation-registry statement as TOML:
+
+            [erratum]
+            type = "photo-meta"        # the type (topic) whose readings rebind
+            fromIndex = 100            # inclusive raft-index range of existing
+            toIndex = 250              #   actuals (never beyond the applied log)
+            rebindToVersion = 2        # the version matching actuals read as
+            # fromVersion = 1          # optional: only entities STAMPED v1
+            # predicate = '.license == "cc"'   # optional deterministic jq
+
+        Errata are IMMUTABLE: a re-POST under an existing id with different
+        content is refused with 400 — author a NEW erratum to correct one
+        (among matching errata, later in the log wins) — while an identical
+        re-POST is an idempotent 200 no-op. Admission is loud: an unknown
+        type, an undeclared version, a range beyond the applied log, or a
+        predicate outside the deterministic jq subset (no now(), no env) all
+        fail here. Refused with 503 `cluster_below_feature_level` until every
+        member of a mixed-version cluster can fold errata.
+
+        Errata mark dependent syncables STALE (see
+        `GET /v1/syncable/{id}/status` `interpretationStale`): rows synced
+        before the erratum landed were derived under the superseded reading.
+        Re-derivation is operator-triggered, never automatic.
+      operationId: addErratum
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      requestBody:
+        required: true
+        description: Erratum as TOML or JSON.
+        content:
+          text/toml:
+            schema:
+              type: string
+          application/json:
+            schema:
+              type: string
+      responses:
+        '200':
+          description: Erratum committed (or an identical re-POST no-op).
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/RequestEntityTooLarge'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/NotLinearizable'
+        '507':
+          $ref: '#/components/responses/InsufficientStorage'
 
   /v1/node/status:
     get:

@@ -285,7 +285,13 @@ func TestSave_SyncableEntity_SignalsChannel(t *testing.T) {
 
 	received := <-syncCh
 	require.Equal(t, "sync-1", received.ID)
-	require.Equal(t, fakeSyncable, received.Syncable)
+	// The delivered syncable is the parsed one behind the interpretation
+	// wrapper (every syncable reads stamp ⊕ errata fold) — prove the wiring
+	// by syncing through it and observing the fake.
+	require.NotNil(t, received.Syncable)
+	_, err = received.Syncable.Sync(t.Context(), &cluster.Actual{Index: 1})
+	require.NoError(t, err)
+	require.Equal(t, 1, fakeSyncable.SyncCallCount(), "the channel's syncable forwards to the parsed one")
 }
 
 // --- Ingestable Entity (requires parser + channel) ---

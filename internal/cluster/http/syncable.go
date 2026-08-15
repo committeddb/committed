@@ -289,6 +289,16 @@ type SyncableStatusResponse struct {
 	Lag             uint64 `json:"lag"`
 	CaughtUp        bool   `json:"caughtUp"`
 
+	// InterpretationPin is the errata-registry index this syncable's current
+	// materialization began under (the second half of the determinism pair —
+	// 0 = pinned before any errata existed). InterpretationStale is true when
+	// an erratum affecting a consumed topic landed past the pin: some
+	// already-synced rows were derived under a superseded reading and stay
+	// that way until the operator re-derives (staleness is loud and
+	// queryable, never auto-healed).
+	InterpretationPin   uint64 `json:"interpretationPin"`
+	InterpretationStale bool   `json:"interpretationStale"`
+
 	// DeadLetters is how many proposals this syncable has skipped
 	// (dead-lettered), permanently or manually; LastDeadLetterIndex is the
 	// raft index of the most recent skip (omitted when none). ALWAYS
@@ -437,6 +447,14 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 	}
 	resp.DeadLetters = dlCount
 	resp.LastDeadLetterIndex = dlLast
+
+	pin, stale, err := h.c.SyncableInterpretation(id)
+	if err != nil {
+		writeInternalError(w, "failed to retrieve interpretation staleness", err)
+		return
+	}
+	resp.InterpretationPin = pin
+	resp.InterpretationStale = stale
 
 	resp.OwnerNode = owner
 	if wantPosition {

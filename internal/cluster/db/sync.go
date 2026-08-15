@@ -443,6 +443,16 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 	var pendingCount int
 	var pendingSince time.Time
 
+	// interpPin is the checkpoint's interpretation index — the errata
+	// registry index this syncable's CURRENT materialization began under (the
+	// second half of the determinism pair). Carried UNCHANGED across
+	// checkpoint bumps and restarts: it only re-pins when derivation
+	// genuinely restarts from index 0 (a fresh syncable, or a future
+	// re-materialization). Errata landing past it mark the syncable stale
+	// (some already-synced rows used a superseded reading) — surfaced via
+	// status, healed only by an operator-triggered re-derivation.
+	var interpPin uint64
+
 	for {
 		// Cheap non-blocking ctx check at the top so a cancellation
 		// observed mid-iteration short-circuits the next round.
@@ -480,6 +490,15 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 			// frozen at 0" question into a one-line answer: this worker begins a
 			// scan of head-checkpoint entries (the field incident this serves was
 			// undiagnosable precisely for lack of it).
+			// The interpretation pin: adopt the checkpoint's (a resumed
+			// materialization keeps its epoch's pin, 0 for pre-errata
+			// checkpoints — honestly "derived under no errata"); a FRESH
+			// syncable starting from index 0 pins the current registry.
+			if ck, ok := db.storage.SyncableCheckpoint(id); ok {
+				interpPin = ck.InterpretationIndex
+			} else {
+				interpPin = db.storage.InterpretationRegistry().Highwater()
+			}
 			cp, head, _ := db.SyncableProgress(id)
 			db.logger.Info("starting sync", zap.String("id", id),
 				zap.Uint64("checkpoint", cp), zap.Uint64("head", head))
@@ -569,7 +588,7 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 				// yet, so a low-traffic syncable never lags its checkpoint
 				// forever (sync-checkpoint-cadence constraint 2).
 				if lastSeen > lastBumped {
-					if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: lastSeen}); err != nil {
+					if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: lastSeen, InterpretationIndex: interpPin}); err != nil {
 						// Bump orphaned (ctx canceled, or leader change). Leave
 						// lastBumped behind; the next EOF retries. Don't set
 						// progressed — back off rather than spin on a wedged bump.
@@ -684,7 +703,7 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 					pendingCount++
 				}
 				if pendingCount > 0 && (pendingCount >= every || (maxAge > 0 && time.Since(pendingSince) >= maxAge)) {
-					if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: lastSeen}); err != nil {
+					if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: lastSeen, InterpretationIndex: interpPin}); err != nil {
 						// The bump did not durably apply — ctx canceled by a
 						// replace/Close, or ErrProposalUnknown/ErrProposalLost
 						// after a leader change orphaned the bump. Do NOT advance:
@@ -781,6 +800,9 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 	// persisted", cluster.CheckpointPolicy).
 	syncedSinceBump := 0
 	var pendingBumpIndex uint64
+	// interpPin: the checkpoint's interpretation index — see the single-flush
+	// worker's declaration for the pinning contract.
+	var interpPin uint64
 	tracker := db.newStuckTracker(id)
 
 	flush := func() bool {
@@ -801,7 +823,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 				// this batch to isolate the offending proposal(s).
 				db.logger.Warn("permanent batch error, falling back to per-proposal sync",
 					zap.String("id", id), zap.Int("batch_size", len(batch)), zap.Error(syncErr))
-				ok := db.syncBatchFallback(ctx, id, s, batch, "")
+				ok := db.syncBatchFallback(ctx, id, s, batch, "", interpPin)
 				if ok {
 					batch = batch[:0]
 					retryBatch = false
@@ -835,7 +857,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 			prospectivePending = batch[len(batch)-1].Index
 		}
 		if prospectivePending != 0 && prospectiveCount >= every {
-			if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: prospectivePending}); err != nil {
+			if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: prospectivePending, InterpretationIndex: interpPin}); err != nil {
 				// The bump did not durably apply (ctx canceled, or
 				// ErrProposalUnknown/ErrProposalLost after a leader change
 				// orphaned the bump). Keep the batch and retry the SyncBatch +
@@ -871,7 +893,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 		if pendingBumpIndex == 0 {
 			return false
 		}
-		if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: pendingBumpIndex}); err != nil {
+		if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: pendingBumpIndex, InterpretationIndex: interpPin}); err != nil {
 			db.logger.Warn("proposeSyncableIndex error at EOF, will retry",
 				zap.String("id", id), zap.Error(err))
 			return false
@@ -921,6 +943,15 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 			// frozen at 0" question into a one-line answer: this worker begins a
 			// scan of head-checkpoint entries (the field incident this serves was
 			// undiagnosable precisely for lack of it).
+			// The interpretation pin: adopt the checkpoint's (a resumed
+			// materialization keeps its epoch's pin, 0 for pre-errata
+			// checkpoints — honestly "derived under no errata"); a FRESH
+			// syncable starting from index 0 pins the current registry.
+			if ck, ok := db.storage.SyncableCheckpoint(id); ok {
+				interpPin = ck.InterpretationIndex
+			} else {
+				interpPin = db.storage.InterpretationRegistry().Highwater()
+			}
 			cp, head, _ := db.SyncableProgress(id)
 			db.logger.Info("starting sync", zap.String("id", id),
 				zap.Uint64("checkpoint", cp), zap.Uint64("head", head))
@@ -946,7 +977,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 				if len(batch) > 0 && tracker.skipRequested(ctx, batch[0].Index) {
 					db.logger.Warn("operator dead-letter: isolating wedged batch",
 						zap.String("id", id), zap.Int("batch_size", len(batch)), zap.Uint64("head_index", batch[0].Index))
-					if db.syncBatchFallback(ctx, id, s, batch, "manual") {
+					if db.syncBatchFallback(ctx, id, s, batch, "manual", interpPin) {
 						batch = batch[:0]
 						retryBatch = false
 						tracker.honored(ctx)
@@ -1041,7 +1072,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 //     on what the syncable is stuck on, so dead-letter the still-failing
 //     proposal with that kind ("manual") and continue, isolating the bad
 //     proposal(s) while letting the healthy ones in the batch through.
-func (db *DB) syncBatchFallback(ctx context.Context, id string, s cluster.Syncable, entries []*cluster.Actual, transientSkipKind string) bool {
+func (db *DB) syncBatchFallback(ctx context.Context, id string, s cluster.Syncable, entries []*cluster.Actual, transientSkipKind string, interpPin uint64) bool {
 	for _, e := range entries {
 		syncStart := time.Now()
 		shouldSnapshot, syncErr := db.callSync(ctx, id, s, e)
@@ -1086,7 +1117,7 @@ func (db *DB) syncBatchFallback(ctx context.Context, id string, s cluster.Syncab
 			return false
 		}
 		if shouldSnapshot {
-			if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: e.Index}); err != nil {
+			if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: e.Index, InterpretationIndex: interpPin}); err != nil {
 				// The bump did not durably apply. Stop the fallback and
 				// leave the remaining batch for the caller to retry rather
 				// than advancing past an unconfirmed index. The successful

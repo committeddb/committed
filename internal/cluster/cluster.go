@@ -17,6 +17,21 @@ type Cluster interface {
 	// is refused with a StrandedSyncablesError naming them, unless the caller
 	// passes AcknowledgeStrandedSyncables (the HTTP layer's ?force=true).
 	ProposeType(ctx context.Context, c *Configuration, opts ...ProposeTypeOption) error
+	// ProposeErratum admits one append-only interpretation-registry
+	// statement (see Erratum). Immutable per id: a re-POST with different
+	// content is refused; an identical re-POST is an idempotent no-op.
+	// Refused with ClusterBelowFeatureLevelError until every member can fold
+	// errata. Powers POST /v1/erratum/{id}.
+	ProposeErratum(ctx context.Context, c *Configuration) error
+	// Errata returns every applied erratum with its raft index, unordered.
+	// Powers GET /v1/erratum.
+	Errata() ([]AppliedErratum, error)
+	// SyncableInterpretation reports the syncable's interpretation pin — the
+	// registry index its current materialization began under — and whether
+	// errata affecting its consumed topics have landed past it (stale: some
+	// sink rows were derived under a superseded reading; re-derivation is
+	// operator-triggered, never automatic). Part of GET /syncable/{id}/status.
+	SyncableInterpretation(id string) (pin uint64, stale bool, err error)
 	ProposeDeleteType(ctx context.Context, id string) error
 	ProposeIngestable(ctx context.Context, c *Configuration) error
 	// DeleteIngestable removes an ingestable: its config and checkpoint position

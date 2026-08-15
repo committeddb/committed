@@ -20,6 +20,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
 	"github.com/committeddb/committed/internal/cluster/db/datadir"
+	"github.com/committeddb/committed/internal/cluster/interpretation"
 	"github.com/committeddb/committed/internal/cluster/metrics"
 )
 
@@ -112,6 +113,11 @@ var (
 	// ingestable id (last-writer-wins), guarded/swept with the ingestable
 	// config. See ingestable_census.go.
 	ingestableCensusBucket = []byte("ingestableCensuses")
+	// errataBucket holds the APPEND-ONLY interpretation registry: one record
+	// per erratum id, value = 8-byte big-endian raft index || marshaled
+	// LogErratum. Never edited, never swept (replay determinism at historical
+	// interpretation indexes needs every erratum forever). See erratum.go.
+	errataBucket = []byte("errata")
 )
 
 // appliedIndexBucket holds a single key ("idx") whose value is the
@@ -185,6 +191,7 @@ var internalEntities = []internalEntity{
 	{cluster.IsIngestablePosition, "saveIngestablePosition", ingestablePositionBucket, (*Storage).saveIngestablePosition},
 	{cluster.IsContractFingerprint, "handleContractFingerprint", contractFingerprintBucket, (*Storage).handleContractFingerprint},
 	{cluster.IsIngestableCensus, "handleIngestableCensus", ingestableCensusBucket, (*Storage).handleIngestableCensus},
+	{cluster.IsErratum, "handleErratum", errataBucket, (*Storage).handleErratum},
 	{cluster.IsScrub, "handleScrub", pendingScrubBucket, (*Storage).handleScrub},
 	{cluster.IsNodeAPIURL, "handleNodeAPIURL", memberAPIURLBucket, (*Storage).handleNodeAPIURL},
 	{cluster.IsNodeVersion, "handleNodeVersion", memberVersionBucket, (*Storage).handleNodeVersion},
@@ -522,6 +529,12 @@ type Storage struct {
 	// (ApplyCommitted) and Open; the atomic is for race-free reads from the
 	// HTTP status path on other goroutines, not CAS.
 	dataEventIndex atomic.Uint64
+
+	// interpretationRegistry is the compiled errata snapshot — immutable,
+	// swapped whole by handleErratum / Open (reloadInterpretationRegistry),
+	// read lock-free on every sync read (see erratum.go and the
+	// interpretation package).
+	interpretationRegistry atomic.Pointer[interpretation.Registry]
 
 	logger *zap.Logger
 	// fsyncDisabled mirrors the WithoutFsync option (also passed to bbolt as
@@ -950,6 +963,13 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 			ws.logger.Warn("dataEventIndex backscan hit its cap without finding a data entry; the data head is 0 until the next data entry applies — syncable lag/caughtUp UNDER-REPORT until then (a fresh syncable may briefly read caughtUp over an empty replay range)",
 				zap.Int("scanned", scannedOut))
 		}
+	}
+
+	// Compile the interpretation registry from the applied errata so readers
+	// resolve effective versions from the first sync after restart (entries
+	// already applied before this restart won't re-run handleErratum).
+	if err := ws.reloadInterpretationRegistry(); err != nil {
+		return nil, err
 	}
 
 	// Load the highest completed scrub bound so the worker skips redundant

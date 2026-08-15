@@ -121,7 +121,13 @@ func writeProposeError(w httpgo.ResponseWriter, err error, resource, action stri
 	var rebuildErr cluster.RebuildRequiredError
 	var configErr *cluster.ConfigError
 	var strandedErr *cluster.StrandedSyncablesError
+	var levelErr *cluster.ClusterBelowFeatureLevelError
 	switch {
+	case errors.As(err, &levelErr):
+		// 503 (retryable): the config is fine, the cluster isn't fully
+		// upgraded for the record it would commit — retry after the rolling
+		// upgrade completes.
+		writeError(w, httpgo.StatusServiceUnavailable, "cluster_below_feature_level", levelErr.Error())
 	case errors.As(err, &strandedErr):
 		// 409 Conflict: the nonConvertible bump conflicts with standing
 		// always-current consumers. Their ids ride as structured details so a

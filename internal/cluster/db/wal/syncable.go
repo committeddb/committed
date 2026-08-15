@@ -9,6 +9,7 @@ import (
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
+	"github.com/committeddb/committed/internal/cluster/interpretation"
 	"github.com/committeddb/committed/internal/cluster/migration"
 )
 
@@ -110,6 +111,10 @@ func (s *Storage) saveSyncable(t *cluster.Configuration, raftIndex uint64) error
 		if parsedMode == cluster.ModeAlwaysCurrent {
 			parsed = migration.Wrap(parsed, s, s.metrics)
 		}
+		// EVERY syncable reads the authoritative interpretation: the outer
+		// wrapper rebinds each entity to stamp ⊕ errata fold before the
+		// migration chain (inside) or the consumer (either mode) sees it.
+		parsed = interpretation.Wrap(parsed, s.InterpretationRegistry, s)
 		syncable = parsed
 		built = true
 
@@ -264,10 +269,12 @@ func (s *Storage) reconcileSyncableList() ([]*db.SyncableWithID, error) {
 		s.clearConfigError("syncable", r.id, configErrBuild)
 		// Mirror saveSyncable: ModeAlwaysCurrent decorates the syncable
 		// with the migration wrapper so the worker loop stays oblivious
-		// to version-upgrade concerns.
+		// to version-upgrade concerns, and every syncable gets the outer
+		// interpretation wrapper (stamp ⊕ errata fold).
 		if mode == cluster.ModeAlwaysCurrent {
 			syncable = migration.Wrap(syncable, s, s.metrics)
 		}
+		syncable = interpretation.Wrap(syncable, s.InterpretationRegistry, s)
 		out = append(out, &db.SyncableWithID{ID: r.id, Syncable: syncable})
 	}
 	s.sweepConfigErrorsExcept("syncable", present)

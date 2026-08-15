@@ -11,6 +11,7 @@ import (
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
+	"github.com/committeddb/committed/internal/cluster/interpretation"
 )
 
 type MemoryStorageSaveArgsForCall struct {
@@ -397,4 +398,25 @@ func (r *Reader) Read() (*cluster.Actual, error) {
 			}
 		}
 	}
+}
+
+// InterpretationRegistry is a stub: this in-memory test double applies no
+// errata, so readers always see the empty registry (the errata-free path).
+func (ms *MemoryStorage) InterpretationRegistry() *interpretation.Registry {
+	return interpretation.EmptyRegistry
+}
+
+// ErratumByID is a stub: no errata are ever applied here.
+func (ms *MemoryStorage) ErratumByID(id string) (*cluster.Erratum, uint64, bool) {
+	return nil, 0, false
+}
+
+// AppliedErrata is a stub: no errata are ever applied here.
+func (ms *MemoryStorage) AppliedErrata() ([]cluster.AppliedErratum, error) {
+	return nil, nil
+}
+
+// SyncableCheckpoint is a stub: this double has no checkpoint records.
+func (ms *MemoryStorage) SyncableCheckpoint(id string) (*cluster.SyncableIndex, bool) {
+	return nil, false
 }

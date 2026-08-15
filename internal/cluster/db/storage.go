@@ -5,6 +5,7 @@ import (
 	"go.etcd.io/raft/v3/raftpb"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/interpretation"
 )
 
 //counterfeiter:generate . Storage
@@ -107,6 +108,20 @@ type Storage interface {
 	// endpoint can serve it; also read by a resuming worker to seed its
 	// accumulator at the same refresh epoch.
 	IngestableCensus(id string) (*cluster.IngestableCensus, bool)
+	// InterpretationRegistry returns the current compiled errata snapshot —
+	// immutable, swapped whole on each erratum apply, never nil. The read
+	// path resolves effective versions (stamp ⊕ errata fold) through it.
+	InterpretationRegistry() *interpretation.Registry
+	// ErratumByID returns the applied erratum with the given id, its raft
+	// index, and whether it exists — the admission read behind the
+	// immutability rule (errata are append-only, never edited).
+	ErratumByID(id string) (*cluster.Erratum, uint64, bool)
+	// AppliedErrata returns every applied erratum with its raft index,
+	// unordered. Powers GET /v1/erratum.
+	AppliedErrata() ([]cluster.AppliedErratum, error)
+	// SyncableCheckpoint returns the syncable's full checkpoint record —
+	// including its interpretation pin — or (nil, false) when none exists.
+	SyncableCheckpoint(id string) (*cluster.SyncableIndex, bool)
 	// TopicRefreshEpoch returns the highest refresh generation ever committed
 	// for a topic (type id), or 0 if none. Keyed by topic and NOT cleared by
 	// DeleteIngestable, so a same-topic recreate reads the generation still on the

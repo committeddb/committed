@@ -14,15 +14,14 @@ import (
 // that ship EARLY in the series — before their semantics — so on-disk formats
 // never migrate mid-series. See the three-layer track's design notes.
 
-// TestErratumTypeID_ReservedGatedUnregistered pins the erratum record's
-// reserved identity and, critically, its CURRENT behavior: the ID is minted
-// (stable forever), classified gated (must-understand), and deliberately NOT
-// registered — so a binary at this version that encounters an Erratum record
-// takes the fatal gated-unknown path, never a silent skip or a
-// half-understood apply.
-func TestErratumTypeID_ReservedGatedUnregistered(t *testing.T) {
-	// The exact UUID is load-bearing: it will be written into permanent logs.
-	// It may never drift.
+// TestErratumTypeID_ReservedGatedRegistered pins the erratum record's
+// identity and classification now that the registry is BUILT: the ID is
+// minted (stable forever, written into permanent logs), classified gated
+// (must-understand — an OLDER binary that cannot fold errata fatals rather
+// than skipping), registered with apply semantics on this binary, and
+// append-only (Standalone kind, never metadata-GC compacted).
+func TestErratumTypeID_ReservedGatedRegistered(t *testing.T) {
+	// The exact UUID is load-bearing: it may never drift.
 	require.Equal(t, "c01177ed-0000-0000-0000-000000000000", ErratumTypeID)
 
 	state, ok := reservedSystemClass(ErratumTypeID)
@@ -31,15 +30,12 @@ func TestErratumTypeID_ReservedGatedUnregistered(t *testing.T) {
 		"errata are correctness-bearing — a node that skipped them would serve stale readings")
 	require.True(t, IsReservedSystemID(ErratumTypeID))
 
-	// Not registered yet: no apply semantics exist in this version.
-	require.False(t, IsInternal(ErratumTypeID),
-		"registering the type before its fold/apply semantics exist would turn the fatal backstop into a silent misapply")
-
-	// And therefore resolution takes the typed gated-unknown path.
-	_, err := resolveType(TypeRef{ID: ErratumTypeID}, &stubResolver{})
-	var ure *UnknownReservedTypeError
-	require.ErrorAs(t, err, &ure)
-	require.False(t, ure.Skippable(), "gated: fatal if encountered, never skipped")
+	require.True(t, IsInternal(ErratumTypeID), "registered: this binary folds errata")
+	got, err := resolveType(TypeRef{ID: ErratumTypeID}, &stubResolver{})
+	require.NoError(t, err)
+	require.Equal(t, EntityKindStandalone, got.EntityKind, "append-only registry")
+	require.False(t, IsSystemTombstonable(ErratumTypeID),
+		"no erratum is ever compacted — every one is part of the fold history")
 }
 
 // TestSyncableIndexInterpretationPairRoundTrip proves the checkpoint's
