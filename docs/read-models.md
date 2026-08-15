@@ -529,11 +529,16 @@ the honest completeness check for a mirror is `caughtUp && deadLetters == 0 &&
 workerState == "running"` (a `parked` or `degraded` worker isn't syncing at
 all — see
 [operations/stuck-syncables.md](operations/stuck-syncables.md)).
-List the skipped proposals with `GET /syncable/{id}/deadletter`; after fixing
+List the skipped proposals with `GET /syncable/{id}/errors`; after fixing
 the destination (e.g. `ALTER ... LONGTEXT`), re-drive each with
 `POST /syncable/{id}/replay/{index}`, which applies the row and clears its
-record. A wedged worker needs no replay — it resumes by itself once the
-destination accepts the row.
+record. If instead the fix happened **at the source** and a later CDC event
+already corrected the sink row, replaying the stale proposal would regress
+it — acknowledge the record instead
+(`POST /syncable/{id}/deadletter/{index}/acknowledge`; see the triage flow
+in [operations/stuck-syncables.md](operations/stuck-syncables.md)). A
+wedged worker needs no replay — it resumes by itself once the destination
+accepts the row.
 
 ## See also
 

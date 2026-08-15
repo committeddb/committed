@@ -90,11 +90,26 @@ type Cluster interface {
 	// Backed by replicated state, so any node returns the same answer.
 	SyncableDeadLetters(id string, since uint64, limit int) ([]SyncableDeadLetter, error)
 	// SyncableDeadLetterStats returns how many proposals the syncable has
-	// dead-lettered (skipped) and the raft index of the most recent one (0
-	// when none). Surfaced on GET /syncable/{id}/status so a caught-up sink
-	// with skipped rows never reads as fully green — the honest completeness
-	// check is caughtUp && deadLetters == 0. Backed by replicated state.
-	SyncableDeadLetterStats(id string) (count, last uint64, err error)
+	// dead-lettered (skipped) and NOT yet acknowledged, how many an
+	// operator has acknowledged as resolved out-of-band, and the raft
+	// index of the most recent record of either state (0 when none).
+	// Surfaced on GET /syncable/{id}/status so a caught-up sink with
+	// skipped rows never reads as fully green — the honest completeness
+	// check is caughtUp && deadLetters == 0 && workerState == "running";
+	// acknowledging is how a superseded skip stops reading permanently
+	// red. Backed by replicated state.
+	SyncableDeadLetterStats(id string) (count, acknowledged, last uint64, err error)
+	// AcknowledgeSyncableDeadLetter marks the dead-letter record at raft
+	// index as resolved out-of-band (the operator attests a later event
+	// superseded the skipped proposal, or it was fixed at the source —
+	// replaying would REGRESS the sink row, and leaving it inflates the
+	// completeness count forever). The record leaves the deadLetters
+	// count but stays listable as an audit trail; a later replay is still
+	// allowed (success deletes the record entirely). Replicated —
+	// acknowledge once, every node agrees. Returns ErrNotDeadLettered
+	// when no record exists at that index; acknowledging an
+	// already-acknowledged record is an idempotent no-op.
+	AcknowledgeSyncableDeadLetter(ctx context.Context, id string, index uint64) error
 	// DeadLetterStuckSyncable skips the proposal a syncable is currently
 	// blocked retrying (a transient error retries forever, so the worker
 	// stalls visibly rather than losing data until an operator intervenes).

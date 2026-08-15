@@ -160,6 +160,30 @@ func (db *DB) SyncableDeadLetters(id string, since uint64, limit int) ([]cluster
 // SyncableDeadLetterStats returns the dead-letter count for a syncable and
 // the raft index of the most recent skip. Storage-backed replicated state;
 // powers the deadLetters fields on GET /syncable/{id}/status.
-func (db *DB) SyncableDeadLetterStats(id string) (count, last uint64, err error) {
+func (db *DB) SyncableDeadLetterStats(id string) (count, acknowledged, last uint64, err error) {
 	return db.storage.SyncableDeadLetterStats(id)
+}
+
+// AcknowledgeSyncableDeadLetter marks the record at index resolved
+// out-of-band: it re-proposes the record with Acknowledged set (and the
+// acknowledge time stamped here, at propose, so apply is content-
+// deterministic on every replica). The skip itself stands — the worker's
+// HasSyncableDeadLetter exclusion is unchanged — and a later replay is
+// still allowed; replay success deletes the record, acknowledged or not.
+// ErrNotDeadLettered when no record exists at index; an already-
+// acknowledged record is an idempotent no-op.
+func (db *DB) AcknowledgeSyncableDeadLetter(ctx context.Context, id string, index uint64) error {
+	d, ok, err := db.storage.SyncableDeadLetterAt(id, index)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return cluster.ErrNotDeadLettered
+	}
+	if d.Acknowledged {
+		return nil
+	}
+	d.Acknowledged = true
+	d.AcknowledgedAtUnixNano = time.Now().UnixNano()
+	return db.proposeSyncableDeadLetter(ctx, &d)
 }

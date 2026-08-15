@@ -220,6 +220,7 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 			r.Get("/syncable/{id}/errors", h.GetSyncableErrors)
 			r.Get("/syncable/{id}/status", h.GetSyncableStatus)
 			r.Post("/syncable/{id}/deadletter", h.DeadLetterStuckSyncable)
+			r.Post("/syncable/{id}/deadletter/{index}/acknowledge", h.AcknowledgeSyncableDeadLetter)
 			r.Post("/syncable/{id}/replay/{index}", h.ReplaySyncableDeadLetter)
 			r.Post("/syncable/{id}/rollback", h.rollback("syncable", h.c.SyncableVersion, h.c.ProposeSyncable, h.c.SyncableVersions))
 			// Rebuild is leader-pinned for the same reason as DELETE: the

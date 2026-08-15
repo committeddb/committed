@@ -127,14 +127,18 @@ func (s *Storage) HasSyncableDeadLetter(id string, index uint64) (bool, error) {
 	return found, nil
 }
 
-// SyncableDeadLetterStats returns how many proposals syncable id has
-// dead-lettered (permanently or manually skipped) and the raft index of the
-// most recent one (0 when none). This is the status-surface summary: a sink
-// can be caught up AND have skipped rows, and without this count that state
-// reads as fully green — the honest "complete" check is caughtUp && count==0.
-// The full records stay on SyncableDeadLetters; a successful replay clears
-// its record and so leaves this count. An unknown id returns (0, 0).
-func (s *Storage) SyncableDeadLetterStats(id string) (count, last uint64, err error) {
+// SyncableDeadLetterStats returns how many UNACKNOWLEDGED proposals syncable
+// id has dead-lettered (permanently or manually skipped), how many records an
+// operator has acknowledged as resolved out-of-band, and the raft index of
+// the most recent record of either state (0 when none). This is the
+// status-surface summary: a sink can be caught up AND have skipped rows, and
+// without the count that state reads as fully green — the honest "complete"
+// check is caughtUp && count==0 && workerState=="running". Acknowledged
+// records leave `count` (the whole point of the verb: a superseded skip must
+// not read permanently red) but stay listable on SyncableDeadLetters as the
+// audit trail. A successful replay deletes its record and so leaves both
+// numbers. An unknown id returns zeros.
+func (s *Storage) SyncableDeadLetterStats(id string) (count, acknowledged, last uint64, err error) {
 	err = s.view(func(tx *bolt.Tx) error {
 		top := tx.Bucket(syncableDeadLetterBucket)
 		if top == nil {
@@ -145,8 +149,16 @@ func (s *Storage) SyncableDeadLetterStats(id string) (count, last uint64, err er
 			return nil
 		}
 		c := sub.Cursor()
-		for k, _ := c.First(); k != nil; k, _ = c.Next() {
-			count++
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			d := cluster.SyncableDeadLetter{}
+			if err := d.Unmarshal(v); err != nil {
+				return fmt.Errorf("[wal.dead-letter] unmarshal id=%s index=%d: %w", id, binary.BigEndian.Uint64(k), err)
+			}
+			if d.Acknowledged {
+				acknowledged++
+			} else {
+				count++
+			}
 		}
 		if k, _ := c.Last(); k != nil {
 			last = binary.BigEndian.Uint64(k)
@@ -154,9 +166,38 @@ func (s *Storage) SyncableDeadLetterStats(id string) (count, last uint64, err er
 		return nil
 	})
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
-	return count, last, nil
+	return count, acknowledged, last, nil
+}
+
+// SyncableDeadLetterAt returns the record for one (id, index), with ok=false
+// when no dead letter exists there — the acknowledge verb's point read.
+func (s *Storage) SyncableDeadLetterAt(id string, index uint64) (cluster.SyncableDeadLetter, bool, error) {
+	var d cluster.SyncableDeadLetter
+	var ok bool
+	err := s.view(func(tx *bolt.Tx) error {
+		top := tx.Bucket(syncableDeadLetterBucket)
+		if top == nil {
+			return ErrBucketMissing
+		}
+		sub := top.Bucket([]byte(id))
+		if sub == nil {
+			return nil
+		}
+		var key [8]byte
+		binary.BigEndian.PutUint64(key[:], index)
+		v := sub.Get(key[:])
+		if v == nil {
+			return nil
+		}
+		if err := d.Unmarshal(v); err != nil {
+			return fmt.Errorf("[wal.dead-letter] unmarshal id=%s index=%d: %w", id, index, err)
+		}
+		ok = true
+		return nil
+	})
+	return d, ok, err
 }
 
 // SyncableDeadLetters returns the dead-letter records for a syncable in

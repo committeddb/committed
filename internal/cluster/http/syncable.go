@@ -29,7 +29,13 @@ type SyncableDeadLetterResponse struct {
 	Index     uint64 `json:"index"`
 	Timestamp string `json:"timestamp"`
 	Kind      string `json:"kind"`
-	Message   string `json:"message"`
+	// Acknowledged marks a record an operator resolved out-of-band; it no
+	// longer counts against completeness but remains listed as the audit
+	// trail. AcknowledgedAt is when (RFC 3339, UTC); both omitted while
+	// unacknowledged.
+	Acknowledged   bool   `json:"acknowledged,omitempty"`
+	AcknowledgedAt string `json:"acknowledgedAt,omitempty"`
+	Message        string `json:"message"`
 }
 
 // GetSyncableErrors returns the dead-letter records for a syncable —
@@ -86,12 +92,17 @@ func (h *HTTP) GetSyncableErrors(w httpgo.ResponseWriter, r *httpgo.Request) {
 
 	body := make([]SyncableDeadLetterResponse, 0, len(dls))
 	for _, d := range dls {
-		body = append(body, SyncableDeadLetterResponse{
-			Index:     d.Index,
-			Timestamp: time.Unix(0, d.TimestampUnixNano).UTC().Format(time.RFC3339Nano),
-			Kind:      d.Kind,
-			Message:   d.Message,
-		})
+		item := SyncableDeadLetterResponse{
+			Index:        d.Index,
+			Timestamp:    time.Unix(0, d.TimestampUnixNano).UTC().Format(time.RFC3339Nano),
+			Kind:         d.Kind,
+			Message:      d.Message,
+			Acknowledged: d.Acknowledged,
+		}
+		if d.Acknowledged {
+			item.AcknowledgedAt = time.Unix(0, d.AcknowledgedAtUnixNano).UTC().Format(time.RFC3339Nano)
+		}
+		body = append(body, item)
 	}
 
 	writeArrayBody(w, body)
@@ -300,11 +311,17 @@ type SyncableStatusResponse struct {
 	// present: a sink can be caught up AND have skipped rows, so the honest
 	// completeness check is caughtUp && deadLetters == 0 — without this
 	// field that state reads as fully green. List the records via
-	// GET /syncable/{id}/deadletter; re-drive one after fixing the
+	// GET /syncable/{id}/errors; re-drive one after fixing the
 	// destination via POST /syncable/{id}/replay/{index} (which clears it
 	// from this count).
-	DeadLetters         uint64 `json:"deadLetters"`
-	LastDeadLetterIndex uint64 `json:"lastDeadLetterIndex,omitempty"`
+	DeadLetters uint64 `json:"deadLetters"`
+	// AcknowledgedDeadLetters counts records an operator has acknowledged
+	// as resolved out-of-band (superseded by a later event, or fixed at
+	// the source). They no longer count against completeness but stay
+	// listable on GET /syncable/{id}/errors as the audit trail. Omitted
+	// when zero.
+	AcknowledgedDeadLetters uint64 `json:"acknowledgedDeadLetters,omitempty"`
+	LastDeadLetterIndex     uint64 `json:"lastDeadLetterIndex,omitempty"`
 
 	// OwnerNode is the raft node ID whose worker does this syncable's work:
 	// the pinned node when the config names one, otherwise the current leader
@@ -453,12 +470,13 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 	}
 	resp.CaughtUp = resp.Lag == 0
 
-	dlCount, dlLast, err := h.c.SyncableDeadLetterStats(id)
+	dlCount, dlAcked, dlLast, err := h.c.SyncableDeadLetterStats(id)
 	if err != nil {
 		writeInternalError(w, "failed to retrieve dead-letter stats", err)
 		return
 	}
 	resp.DeadLetters = dlCount
+	resp.AcknowledgedDeadLetters = dlAcked
 	resp.LastDeadLetterIndex = dlLast
 
 	resp.OwnerNode = owner
@@ -479,6 +497,40 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 	writeJson(w, bs)
+}
+
+// AcknowledgeSyncableDeadLetter marks a dead-letter record resolved
+// out-of-band (POST /syncable/{id}/deadletter/{index}/acknowledge). The third
+// verb the superseded case needs: REPLAY re-applies the stale proposal —
+// regressing a sink row a later event already corrected — and leaving the
+// record inflates deadLetters forever, so a resolved incident reads
+// permanently red. Acknowledge attests "resolved out-of-band": the record
+// leaves the completeness count, stays listable as an audit trail, and a
+// later replay is still allowed (its success deletes the record entirely).
+// Replicated — acknowledge once, every node agrees. Idempotent.
+func (h *HTTP) AcknowledgeSyncableDeadLetter(w httpgo.ResponseWriter, r *httpgo.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, httpgo.StatusBadRequest, "invalid_parameter", "id is empty")
+		return
+	}
+	index, err := strconv.ParseUint(r.PathValue("index"), 10, 64)
+	if err != nil {
+		writeErrorf(w, httpgo.StatusBadRequest, "invalid_parameter",
+			"index %q is not a valid raft index", r.PathValue("index"))
+		return
+	}
+
+	err = h.c.AcknowledgeSyncableDeadLetter(r.Context(), id, index)
+	switch {
+	case err == nil:
+		w.WriteHeader(httpgo.StatusOK)
+	case errors.Is(err, cluster.ErrNotDeadLettered):
+		writeError(w, httpgo.StatusNotFound, "not_dead_lettered",
+			"raft index is not a dead letter for this syncable")
+	default:
+		writeInternalError(w, "failed to acknowledge the dead letter", err)
+	}
 }
 
 // ReplaySyncableDeadLetter re-drives a dead-lettered proposal

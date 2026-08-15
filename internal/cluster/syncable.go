@@ -549,15 +549,24 @@ type SyncableDeadLetter struct {
 	// syncable wedged on a transient error).
 	Kind    string
 	Message string
+	// Acknowledged marks the record resolved out-of-band (superseded by a
+	// later event, or fixed at the source): it leaves the deadLetters
+	// completeness count but stays listable as an audit trail. Set by the
+	// acknowledge verb re-proposing the record with AcknowledgedAtUnixNano
+	// stamped at propose time (content-deterministic on every replica).
+	Acknowledged           bool
+	AcknowledgedAtUnixNano int64
 }
 
 func (d *SyncableDeadLetter) Marshal() ([]byte, error) {
 	ld := &clusterpb.LogSyncableDeadLetter{
-		ID:                d.ID,
-		Index:             d.Index,
-		TimestampUnixNano: d.TimestampUnixNano,
-		Kind:              d.Kind,
-		Message:           d.Message,
+		ID:                     d.ID,
+		Index:                  d.Index,
+		TimestampUnixNano:      d.TimestampUnixNano,
+		Kind:                   d.Kind,
+		Message:                d.Message,
+		Acknowledged:           d.Acknowledged,
+		AcknowledgedAtUnixNano: d.AcknowledgedAtUnixNano,
 	}
 	return proto.Marshal(ld)
 }
@@ -573,6 +582,8 @@ func (d *SyncableDeadLetter) Unmarshal(bs []byte) error {
 	d.TimestampUnixNano = ld.TimestampUnixNano
 	d.Kind = ld.Kind
 	d.Message = ld.Message
+	d.Acknowledged = ld.Acknowledged
+	d.AcknowledgedAtUnixNano = ld.AcknowledgedAtUnixNano
 
 	return nil
 }
