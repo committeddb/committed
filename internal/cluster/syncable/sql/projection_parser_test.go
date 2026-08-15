@@ -100,8 +100,8 @@ func TestParseProjectionConfig(t *testing.T) {
 
 	require.Equal(t, "controlplane-event", config.Sources[0].Topic)
 	require.Equal(t, "tenants", config.Table)
-	require.Equal(t, "tenant_id", config.PrimaryKey)
-	require.Equal(t, "$.tenant_id", config.Sources[0].KeyPath, "keyPath defaults to $.<primaryKey>")
+	require.Equal(t, []string{"tenant_id"}, config.PrimaryKey)
+	require.Equal(t, []string{"$.tenant_id"}, config.Sources[0].KeyPath, "keyPath defaults to $.<primaryKey>")
 	require.Equal(t, []sql.ProjectionColumn{
 		{Name: "tenant_id", SQLType: "VARCHAR(256)"},
 		{Name: "tier", SQLType: "VARCHAR(32)"},
@@ -230,7 +230,7 @@ func TestParseProjectionConfigKeyPathOverride(t *testing.T) {
 
 	config, err := (&sql.ProjectionSyncableParser{}).ParseConfig(v, projectionStorage())
 	require.NoError(t, err)
-	require.Equal(t, "$.meta.id", config.Sources[0].KeyPath)
+	require.Equal(t, []string{"$.meta.id"}, config.Sources[0].KeyPath)
 }
 
 // A null when clause ({ path, null = true }) parses to Null: true —
@@ -535,7 +535,7 @@ set = [ { column = "average_rating", from = "$.average_rating" } ]
 	require.Len(t, config.Sources, 2)
 	require.Equal(t, "title", config.Sources[0].Topic)
 	require.Equal(t, "delete-row", config.Sources[0].OnDelete)
-	require.Equal(t, "$.tconst", config.Sources[0].KeyPath, "keyPath defaults to $.<primaryKey> per source")
+	require.Equal(t, []string{"$.tconst"}, config.Sources[0].KeyPath, "keyPath defaults to $.<primaryKey> per source")
 	require.Empty(t, config.Sources[0].Rules[0].When, "a rule with no when matches every event of its source")
 	require.Equal(t, []sql.ProjectionSet{{Column: "primary_title", From: "$.primary_title"}}, config.Sources[0].Rules[0].Set)
 	require.Equal(t, "rating", config.Sources[1].Topic)
@@ -824,4 +824,110 @@ type = "JSONB"
 			require.Contains(t, err.Error(), tc.wantErr)
 		})
 	}
+}
+
+// Composite primaryKey: the list form parses, each source defaults one
+// $.<col> keyPath per key column (positionally aligned), and an explicit
+// keyPath list overrides them. The scalar form stays a one-element list
+// (single-key back-compat).
+func TestParseProjectionCompositePrimaryKey(t *testing.T) {
+	toml := `
+[sql-projection]
+db = "testdb"
+table = "visit_workarea_statuses"
+primaryKey = ["visit_id", "workarea_id"]
+topic = "visit-workarea-event"
+[[sql-projection.columns]]
+name = "visit_id"
+type = "VARCHAR(64)"
+[[sql-projection.columns]]
+name = "workarea_id"
+type = "VARCHAR(64)"
+[[sql-projection.columns]]
+name = "status"
+type = "VARCHAR(32)"
+[[sql-projection.rules]]
+set = [ { column = "status", from = "$.status" } ]
+`
+	v := readConfig(t, "toml", strings.NewReader(toml))
+	config, err := (&sql.ProjectionSyncableParser{}).ParseConfig(v, projectionStorage())
+	require.NoError(t, err)
+	require.Equal(t, []string{"visit_id", "workarea_id"}, config.PrimaryKey)
+	require.Equal(t, []string{"$.visit_id", "$.workarea_id"}, config.Sources[0].KeyPath,
+		"keyPath defaults to one $.<col> per key column, in primaryKey order")
+
+	explicit := strings.Replace(toml, `topic = "visit-workarea-event"`,
+		"topic = \"visit-workarea-event\"\nkeyPath = [\"$.visit.id\", \"$.workarea.id\"]", 1)
+	v = readConfig(t, "toml", strings.NewReader(explicit))
+	config, err = (&sql.ProjectionSyncableParser{}).ParseConfig(v, projectionStorage())
+	require.NoError(t, err)
+	require.Equal(t, []string{"$.visit.id", "$.workarea.id"}, config.Sources[0].KeyPath)
+}
+
+// The composite gates: keyPath arity must match the key columns, and the
+// single-key-only shapes (aggregate and lookup sources, lookup enrichment)
+// are rejected loudly — their sidecar/dimension identity models are
+// single-key, and silently mis-keying them is the silent-divergence class.
+func TestParseProjectionCompositeGates(t *testing.T) {
+	base := `
+[sql-projection]
+db = "testdb"
+table = "t"
+primaryKey = ["a", "b"]
+[[sql-projection.columns]]
+name = "a"
+type = "VARCHAR(64)"
+[[sql-projection.columns]]
+name = "b"
+type = "VARCHAR(64)"
+[[sql-projection.columns]]
+name = "v"
+type = "VARCHAR(64)"
+`
+	parse := func(t *testing.T, toml string) error {
+		t.Helper()
+		v := readConfig(t, "toml", strings.NewReader(toml))
+		_, err := (&sql.ProjectionSyncableParser{}).ParseConfig(v, projectionStorage())
+		return err
+	}
+
+	t.Run("keyPath arity mismatch", func(t *testing.T) {
+		err := parse(t, base+`
+[[sql-projection.source]]
+topic = "e"
+keyPath = "$.only_one"
+[[sql-projection.source.rules]]
+set = [ { column = "v", from = "$.v" } ]
+`)
+		require.ErrorContains(t, err, "keyPath has 1 path(s) but primaryKey has 2 column(s)")
+	})
+
+	t.Run("aggregate source rejected", func(t *testing.T) {
+		err := parse(t, base+`
+[[sql-projection.source]]
+topic = "e"
+keyPath = "$.a"
+[sql-projection.source.aggregate]
+column = "v"
+elementKey = "$.k"
+[[sql-projection.source.aggregate.element]]
+field = "f"
+from = "$.f"
+`)
+		require.ErrorContains(t, err, "require a single-column primaryKey")
+	})
+
+	t.Run("lookup source rejected", func(t *testing.T) {
+		err := parse(t, base+`
+[[sql-projection.source]]
+topic = "dim"
+keyPath = "$.id"
+[sql-projection.source.lookup]
+name = "dim"
+[[sql-projection.source.lookup.fields]]
+field = "name"
+from = "$.name"
+`)
+		require.ErrorContains(t, err, "require a single-column primaryKey")
+	})
 }

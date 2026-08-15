@@ -77,6 +77,25 @@ func CompositeKey(m map[string]any, cols []string) string {
 	return compositeBinaryTag + strings.Join(enc, ".")
 }
 
+// IsCompositeEncoded reports whether key is shaped like a MULTI-column
+// CompositeKey encoding (a JSON string-array of two or more values, or the
+// binary-tagged form) — the loud-guard predicate for a single-key consumer
+// receiving a composite producer's tombstone, where binding the encoding as
+// a bare key would silently DELETE nothing. A legitimate bare value that
+// happens to be a JSON string-array is indistinguishable by construction
+// (rare false positive); the guard trades that visible, replayable
+// dead-letter for never silently no-oping an erasure.
+func IsCompositeEncoded(key string) bool {
+	if strings.HasPrefix(key, compositeBinaryTag) {
+		return true
+	}
+	if !strings.HasPrefix(key, "[") {
+		return false
+	}
+	var vals []string
+	return json.Unmarshal([]byte(key), &vals) == nil && len(vals) > 1
+}
+
 // DecodeCompositeKey reverses CompositeKey, returning the per-column values in
 // the producer's column order. A single-column key (n == 1) is the bare value;
 // a multi-column key is either the JSON array or, when a value held non-UTF-8

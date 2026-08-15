@@ -33,10 +33,19 @@ If the table you're building is *the thing the application reads*, start
 from `sql-projection` and use mirrors only for the parts a projection
 cannot yet express.
 
-One projection scope line to know before you design: the destination is
-keyed by **one column** — composite-keyed topics pair with the plain
-syncable's composite `primaryKey` instead. Lookups enrich both aggregate
-elements and scalar spine columns (see "Enriching folded data").
+One projection scope line to know before you design: a projection's
+`primaryKey` takes one column or a list (`primaryKey = ["visit_id",
+"workarea_id"]` — a latest-event-wins fold on a composite identity). A
+composite-keyed projection folds via **set rules only**: aggregate
+columns, lookup dimensions, and lookup enrichment keep the single-column
+key model (the config is rejected loudly if you combine them). As with
+the plain syncable, **the list order must match the producing side's key
+order** — delete tombstones carry the composite key encoding and decode
+positionally, and a key-shape mismatch in either direction (composite
+tombstone against a single-key projection, or the reverse) dead-letters
+loudly instead of silently deleting nothing. Lookups enrich both
+aggregate elements and scalar spine columns (see "Enriching folded
+data").
 
 ## History tables vs. read models
 
@@ -92,8 +101,11 @@ must match the producing ingestable's `primaryKey`**: a delete tombstone
 carries only the encoded key, and its values decode positionally in the
 producer's column order — a mismatched order mis-addresses rows, and nothing
 can detect it mechanically (topics decouple the two configs on purpose).
-Every key column must also appear in the mappings; the parser rejects a
-config where it doesn't.
+A mismatched column COUNT, by contrast, is caught at delete-apply time and
+dead-letters loudly — a composite tombstone hitting a single-key sink (or
+the reverse) would otherwise execute a WHERE that matches nothing and
+silently strand the deleted row. Every key column must also appear in the
+mappings; the parser rejects a config where it doesn't.
 
 ## A single-source projection
 
@@ -107,8 +119,8 @@ mode = "always-current"        # rules target the current type version
 topic      = "controlplane-event"
 db         = "hosted-projection"
 table      = "tenants"
-primaryKey = "tenant_id"
-# keyPath  = "$.tenant_id"     # optional; defaults to $.<primaryKey>
+primaryKey = "tenant_id"       # or a list: ["tenant_id", "region"] — composite folds via set rules only
+# keyPath  = "$.tenant_id"     # optional; defaults to one $.<col> per primaryKey column, in order
 
 [[sql-projection.columns]]
 name = "tenant_id"
@@ -595,7 +607,14 @@ Survey your widest tables against these before creating mirrors:
 
 - **PostgreSQL**: a row must fit an 8 KB heap page after compression/TOAST —
   very wide tables (many hundreds of columns of inline data) can produce
-  individual rows that exceed it at apply time ("row is too big").
+  individual rows that exceed it at apply time ("row is too big"). And a
+  text value with an **embedded U+0000** is rejected at apply time
+  (SQLSTATE 22021) even though MySQL and SQL Server store it — a row that
+  flowed through every other engine dead-letters only at a PG sink. The
+  dead-letter message names the offending payload field(s), so triage is
+  read-the-record, not hand-hunting the byte across every string column;
+  the remedy is fixing the value at the source (CDC delivers the
+  correction — then acknowledge the record) or excluding the column.
 - **MySQL/InnoDB**: ~1,017 columns per table and index-key length limits
   (a `TEXT`/long-`VARCHAR` primary key needs a prefix or a different key
   column) — both fail at table creation, loudly. `TEXT` caps at 64 KB —
@@ -619,11 +638,16 @@ the honest completeness check for a mirror is `caughtUp && deadLetters == 0 &&
 workerState == "running"` (a `parked` or `degraded` worker isn't syncing at
 all — see
 [operations/stuck-syncables.md](operations/stuck-syncables.md)).
-List the skipped proposals with `GET /syncable/{id}/deadletter`; after fixing
+List the skipped proposals with `GET /syncable/{id}/errors`; after fixing
 the destination (e.g. `ALTER ... LONGTEXT`), re-drive each with
 `POST /syncable/{id}/replay/{index}`, which applies the row and clears its
-record. A wedged worker needs no replay — it resumes by itself once the
-destination accepts the row.
+record. If instead the fix happened **at the source** and a later CDC event
+already corrected the sink row, replaying the stale proposal would regress
+it — acknowledge the record instead
+(`POST /syncable/{id}/deadletter/{index}/acknowledge`; see the triage flow
+in [operations/stuck-syncables.md](operations/stuck-syncables.md)). A
+wedged worker needs no replay — it resumes by itself once the destination
+accepts the row.
 
 ## See also
 

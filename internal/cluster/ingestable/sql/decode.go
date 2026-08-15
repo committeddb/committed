@@ -320,7 +320,16 @@ func BuildEntityJSON(mappings []Mapping, values map[string]any, cats map[string]
 	out := make(map[string]any, len(mappings))
 	for _, m := range mappings {
 		col := strings.ToLower(m.SQLColumn)
-		out[m.JsonName] = JSONValue(values[col], cats[col])
+		cat := cats[col]
+		// The jsonColumns hint overrides the metadata-derived category: a
+		// string column holding JSON decodes as real JSON (canonicalized —
+		// the snapshot==CDC byte-parity contract), with CatJSON's own
+		// invalid-JSON fallback to string. Applied here, at the one shared
+		// decode point, so every dialect and both ingest paths agree.
+		if m.JSONHint {
+			cat = CatJSON
+		}
+		out[m.JsonName] = JSONValue(values[col], cat)
 	}
 	return out
 }

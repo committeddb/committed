@@ -871,6 +871,51 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '500':
           $ref: '#/components/responses/InternalError'
+  /v1/syncable/{id}/deadletter/{index}/acknowledge:
+    post:
+      tags: [syncable]
+      summary: Mark a dead-lettered proposal resolved out-of-band
+      description: |
+        The third dead-letter verb, for the superseded case: a later event
+        already corrected the sink row (e.g. the source was fixed and CDC
+        delivered the correction), so REPLAY would regress the row — and
+        leaving the record inflates `deadLetters` forever, making the honest
+        completeness check (`caughtUp && deadLetters == 0 && workerState ==
+        "running"`) read permanently red for a resolved incident.
+
+        Acknowledging moves the record from `deadLetters` to
+        `acknowledgedDeadLetters` on the status response. The record stays
+        listable on `GET /v1/syncable/{id}/errors` with `acknowledged: true`
+        — an audit trail, not an erasure — and the skip itself stands (the
+        proposal remains excluded from the worker). A later replay is still
+        allowed; its success deletes the record entirely. Replicated:
+        acknowledge once, every node agrees. Idempotent.
+      operationId: acknowledgeSyncableDeadLetter
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+        - name: index
+          in: path
+          required: true
+          description: Raft index of the dead-lettered proposal to acknowledge.
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+      responses:
+        '200':
+          description: Acknowledged (or already acknowledged — idempotent).
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: The raft index is not a dead letter for this syncable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
   /v1/syncable/{id}/status:
     get:
       tags: [syncable]
@@ -2312,6 +2357,17 @@ components:
             Why the proposal was skipped: `permanent` (non-retryable Sync
             error) or `manual` (an operator skipped a syncable wedged on a
             transient error).
+        acknowledged:
+          type: boolean
+          description: |
+            True once an operator has acknowledged the record as resolved
+            out-of-band (POST .../deadletter/{index}/acknowledge). The
+            record no longer counts against completeness but stays listed
+            here as the audit trail. Omitted while false.
+        acknowledgedAt:
+          type: string
+          format: date-time
+          description: When acknowledged (RFC 3339, UTC). Omitted while unacknowledged.
         message:
           type: string
           description: Truncated error string from the failing Sync.
@@ -2457,18 +2513,30 @@ components:
           minimum: 0
           description: |
             How many proposals this syncable has skipped (dead-lettered),
-            permanently or by an operator's manual skip. Always present. A
-            sink can be caught up AND have skipped rows, so the honest
-            completeness check is `caughtUp && deadLetters == 0`. List the
-            records via GET /syncable/{id}/deadletter; a successful
-            POST /syncable/{id}/replay/{index} clears one from this count.
+            permanently or by an operator's manual skip, and NOT yet
+            acknowledged. Always present. A sink can be caught up AND have
+            skipped rows, so the honest completeness check is `caughtUp &&
+            deadLetters == 0 && workerState == "running"`. List the records
+            via GET /syncable/{id}/errors; a successful
+            POST /syncable/{id}/replay/{index} clears one from this count,
+            and POST /syncable/{id}/deadletter/{index}/acknowledge moves a
+            resolved-out-of-band one to `acknowledgedDeadLetters`.
+        acknowledgedDeadLetters:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            How many dead-letter records an operator has acknowledged as
+            resolved out-of-band (superseded by a later event, or fixed at
+            the source). They no longer count against completeness but stay
+            listable as the audit trail. Omitted when zero.
         lastDeadLetterIndex:
           type: integer
           format: int64
           minimum: 0
           description: |
-            Raft index of the most recent dead-lettered proposal. Omitted
-            when deadLetters is 0.
+            Raft index of the most recent dead-lettered proposal
+            (acknowledged or not). Omitted when there are none.
         ownerNode:
           type: integer
           format: int64

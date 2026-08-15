@@ -28,7 +28,7 @@ func tenantProjectionConfig() *sql.ProjectionConfig {
 	return &sql.ProjectionConfig{
 		Topic:      "controlplane-event",
 		Table:      "tenants",
-		PrimaryKey: "tenant_id",
+		PrimaryKey: []string{"tenant_id"},
 		Columns: []sql.ProjectionColumn{
 			{Name: "tenant_id", SQLType: "VARCHAR(64)"},
 			{Name: "tier", SQLType: "VARCHAR(32)"},
@@ -94,17 +94,19 @@ func newMockProjection(t *testing.T, config *sql.ProjectionConfig, m *metrics.Me
 	for _, c := range config.Columns {
 		ddlMappings = append(ddlMappings, sql.Mapping{Column: c.Name, SQLType: c.SQLType})
 	}
-	ddlConfig := &sql.Config{Table: config.Table, Mappings: ddlMappings, PrimaryKey: []string{config.PrimaryKey}}
+	ddlConfig := &sql.Config{Table: config.Table, Mappings: ddlMappings, PrimaryKey: config.PrimaryKey}
 	mock.ExpectExec(dialect.CreateDDL(ddlConfig)).WillReturnResult(driver.ResultNoRows)
 
 	rulePrepares := make([]*sqlmock.ExpectedPrepare, 0, len(config.Rules))
 	for _, r := range config.Rules {
-		mappings := make([]sql.Mapping, 0, len(r.Set)+1)
-		mappings = append(mappings, sql.Mapping{Column: config.PrimaryKey})
+		mappings := make([]sql.Mapping, 0, len(r.Set)+len(config.PrimaryKey))
+		for _, pk := range config.PrimaryKey {
+			mappings = append(mappings, sql.Mapping{Column: pk})
+		}
 		for _, s := range r.Set {
 			mappings = append(mappings, sql.Mapping{Column: s.Column})
 		}
-		ruleConfig := &sql.Config{Table: config.Table, Mappings: mappings, PrimaryKey: []string{config.PrimaryKey}}
+		ruleConfig := &sql.Config{Table: config.Table, Mappings: mappings, PrimaryKey: config.PrimaryKey}
 		rulePrepares = append(rulePrepares, mock.ExpectPrepare(dialect.CreateSQL(ruleConfig)))
 	}
 	deletePrepare := mock.ExpectPrepare(dialect.CreateDeleteSQL(ddlConfig))
@@ -141,7 +143,7 @@ func TestProjectionPreservesNumericPrecision(t *testing.T) {
 	config := &sql.ProjectionConfig{
 		Topic:      "controlplane-event",
 		Table:      "ledger",
-		PrimaryKey: "id",
+		PrimaryKey: []string{"id"},
 		Columns: []sql.ProjectionColumn{
 			{Name: "id", SQLType: "BIGINT"},
 			{Name: "balance", SQLType: "DECIMAL(30,2)"},

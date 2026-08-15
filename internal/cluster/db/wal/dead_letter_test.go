@@ -161,7 +161,8 @@ func TestSyncableDeadLetterStats(t *testing.T) {
 	s := NewStorageWithParser(t, nil, parser.New())
 	defer s.Cleanup()
 
-	count, last, err := s.SyncableDeadLetterStats("never-failed")
+	count, acked, last, err := s.SyncableDeadLetterStats("never-failed")
+	require.Zero(t, acked)
 	require.NoError(t, err)
 	require.Zero(t, count)
 	require.Zero(t, last)
@@ -174,8 +175,36 @@ func TestSyncableDeadLetterStats(t *testing.T) {
 	applyDeadLetter(t, s, 3, &cluster.SyncableDeadLetter{ID: id, Index: 10, TimestampUnixNano: 100, Kind: "permanent", Message: "a"})
 	applyDeadLetter(t, s, 4, &cluster.SyncableDeadLetter{ID: id, Index: 20, TimestampUnixNano: 200, Kind: "manual", Message: "b"})
 
-	count, last, err = s.SyncableDeadLetterStats(id)
+	count, _, last, err = s.SyncableDeadLetterStats(id)
 	require.NoError(t, err)
 	require.Equal(t, uint64(3), count)
 	require.Equal(t, uint64(30), last)
+
+	// Acknowledging (the verb re-proposes the record with Acknowledged set;
+	// here applied directly, as any replica would) moves the record from the
+	// completeness count to the acknowledged count. It stays listable — an
+	// audit trail, not an erasure — and stays excluded from the worker's
+	// re-processing.
+	applyDeadLetter(t, s, 5, &cluster.SyncableDeadLetter{
+		ID: id, Index: 20, TimestampUnixNano: 200, Kind: "manual", Message: "b",
+		Acknowledged: true, AcknowledgedAtUnixNano: 400,
+	})
+	count, acked, last2, err := s.SyncableDeadLetterStats(id)
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), count, "an acknowledged record leaves the completeness count")
+	require.Equal(t, uint64(1), acked)
+	require.Equal(t, uint64(30), last2)
+
+	rec, ok, err := s.SyncableDeadLetterAt(id, 20)
+	require.NoError(t, err)
+	require.True(t, ok, "an acknowledged record stays listable")
+	require.True(t, rec.Acknowledged)
+	require.Equal(t, int64(400), rec.AcknowledgedAtUnixNano)
+	has, err := s.HasSyncableDeadLetter(id, 20)
+	require.NoError(t, err)
+	require.True(t, has, "the skip itself stands — acknowledge is bookkeeping, not un-skipping")
+
+	_, ok, err = s.SyncableDeadLetterAt(id, 999)
+	require.NoError(t, err)
+	require.False(t, ok)
 }

@@ -42,7 +42,7 @@ func TestSyncableStatus_SurfacesDeadLetters(t *testing.T) {
 	fake := &clusterfakes.FakeCluster{}
 	fake.SyncableExistsReturns(true, nil)
 	fake.SyncableProgressReturns(100, 100, nil) // caught up
-	fake.SyncableDeadLetterStatsReturns(53, 4242, nil)
+	fake.SyncableDeadLetterStatsReturns(53, 0, 4242, nil)
 
 	body, _ := doSyncableStatus(t, fake)
 
@@ -328,4 +328,45 @@ func TestSyncableErrors_UnknownID404s(t *testing.T) {
 	require.Equal(t, 404, w.Code)
 	require.Zero(t, fake.SyncableDeadLettersCallCount(),
 		"an unknown id's empty dead-letter list is indistinguishable from healthy — gate first")
+}
+
+// The acknowledge endpoint: 200 on success, 404 with not_dead_lettered for
+// an index that was never dead-lettered, 400 for a malformed index — and the
+// id/index thread through to the cluster.
+func TestAcknowledgeSyncableDeadLetterEndpoint(t *testing.T) {
+	fake := &clusterfakes.FakeCluster{}
+	h := http.New(fake)
+
+	do := func(path string) int {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest("POST", path, nil))
+		return w.Result().StatusCode
+	}
+
+	require.Equal(t, 200, do("http://localhost/v1/syncable/s1/deadletter/42/acknowledge"))
+	require.Equal(t, 1, fake.AcknowledgeSyncableDeadLetterCallCount())
+	_, gotID, gotIndex := fake.AcknowledgeSyncableDeadLetterArgsForCall(0)
+	require.Equal(t, "s1", gotID)
+	require.Equal(t, uint64(42), gotIndex)
+
+	fake.AcknowledgeSyncableDeadLetterReturns(cluster.ErrNotDeadLettered)
+	require.Equal(t, 404, do("http://localhost/v1/syncable/s1/deadletter/42/acknowledge"))
+
+	require.Equal(t, 400, do("http://localhost/v1/syncable/s1/deadletter/not-a-number/acknowledge"))
+}
+
+// acknowledgedDeadLetters rides the status response (omitted at zero), so
+// the operator sees resolved-out-of-band history without it polluting the
+// completeness count.
+func TestSyncableStatus_AcknowledgedDeadLettersSplit(t *testing.T) {
+	fake := &clusterfakes.FakeCluster{}
+	fake.SyncableExistsReturns(true, nil)
+	fake.SyncableProgressReturns(100, 100, nil)
+	fake.SyncableDeadLetterStatsReturns(0, 3, 4242, nil)
+
+	body, raw := doSyncableStatus(t, fake)
+
+	require.Zero(t, body.DeadLetters, "acknowledged records leave the completeness count")
+	require.Equal(t, uint64(3), body.AcknowledgedDeadLetters)
+	require.Contains(t, raw, `"acknowledgedDeadLetters":3`)
 }

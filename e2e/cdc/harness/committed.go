@@ -19,43 +19,78 @@ import (
 )
 
 // committedAddr is the HTTP address the harness's committed children listen
-// on: a FREE port allocated once per test-binary run and passed to every
-// child via COMMITTED_API_ADDR. It used to be the hardcoded default :8080,
-// which collided with any other committed on the machine — and worse than
+// on, allocated per test-binary run and passed to every child via
+// COMMITTED_API_ADDR. It used to be the hardcoded default :8080, which
+// collided with any other committed on the machine — and worse than
 // colliding, it failed SILENTLY WRONG: the harness child died on the taken
 // port while the health gate got 200 from the foreign node, so the tests
 // posted their configs into somebody else's cluster. -p=1 on test/cdc still
 // ensures no two tests of this suite bind it simultaneously.
+//
+// Ports come from a LOW fixed range (21000–29999), deliberately BELOW every
+// ephemeral floor (32768 on Linux, 49152 on macOS): the old scheme bound
+// 127.0.0.1:0, read the kernel-assigned port, and closed the listener — a
+// reserve-then-release from the same pool the kernel auto-assigns from and
+// docker-proxy publishes container ports from. On a CI run a postgres
+// container's host-mapped port landed exactly on the reserved raft peer
+// port, and because the pair is shared across the whole binary, EVERY
+// subsequent test's committed died with "bind: address already in use"
+// (each test creates its container before its committed, so the collision
+// looped for the rest of the run). A low-range port can only be taken by
+// another explicit user of that range, which the runner doesn't have — and
+// if it ever is, startCommittedAt reallocates a fresh pair and retries
+// instead of poisoning the rest of the run.
 var (
-	committedAddrOnce sync.Once
-	committedAddr     string // HTTP API
-	committedPeerURL  string // raft peer listener (default 9022 collides too)
+	committedPortMu  sync.Mutex
+	committedAddr    string // HTTP API
+	committedPeerURL string // raft peer listener (default 9022 collides too)
+	// nextProbePort cycles through the low range; the pid offset keeps
+	// concurrently-running test binaries (different packages) apart.
+	nextProbePort = 21000 + os.Getpid()%2000
 )
+
+// probeLowPort binds one candidate port from the low range to prove it free,
+// closes it, and returns the address. Caller holds committedPortMu.
+func probeLowPort() (string, bool) {
+	for range 500 {
+		candidate := nextProbePort
+		nextProbePort++
+		if nextProbePort >= 30000 {
+			nextProbePort = 21000
+		}
+		l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", candidate))
+		if err != nil {
+			continue
+		}
+		_ = l.Close()
+		return fmt.Sprintf("127.0.0.1:%d", candidate), true
+	}
+	return "", false
+}
 
 func committedAddrs(t *testing.T) (api, peerURL string) {
 	t.Helper()
-	committedAddrOnce.Do(func() {
-		freePort := func() (string, bool) {
-			l, err := net.Listen("tcp", "127.0.0.1:0")
-			if err != nil {
-				return "", false
+	committedPortMu.Lock()
+	defer committedPortMu.Unlock()
+	if committedAddr == "" {
+		if a, ok := probeLowPort(); ok {
+			if p, ok := probeLowPort(); ok {
+				committedAddr = a
+				committedPeerURL = "http://" + p
 			}
-			defer func() { _ = l.Close() }()
-			return l.Addr().String(), true
 		}
-		a, ok := freePort()
-		if !ok {
-			return
-		}
-		p, ok := freePort()
-		if !ok {
-			return
-		}
-		committedAddr = a
-		committedPeerURL = "http://" + p
-	})
+	}
 	require.NotEmpty(t, committedAddr, "allocate free ports for committed's API and raft peer listeners")
 	return committedAddr, committedPeerURL
+}
+
+// reallocCommittedAddrs discards the shared port pair so the next
+// committedAddrs picks fresh ones — the recovery path when a child dies on
+// a stolen port.
+func reallocCommittedAddrs() {
+	committedPortMu.Lock()
+	defer committedPortMu.Unlock()
+	committedAddr, committedPeerURL = "", ""
 }
 
 // committedBinary returns the path to a freshly-built committed binary.
@@ -149,7 +184,33 @@ func startCommitted(t *testing.T) *committedProcess {
 // against an existing data dir, used by RestartCommitted to bring a
 // fresh process up over the same WAL + bbolt state. Same lifecycle
 // guarantees as startCommitted.
+//
+// A child that DIES during startup (a bind failure on a stolen port) is
+// retried up to twice with a freshly allocated port pair before failing the
+// test — the shared pair means a stolen port would otherwise fail every
+// remaining test in the binary, not just this one.
 func startCommittedAt(t *testing.T, dataDir string) *committedProcess {
+	t.Helper()
+
+	const attempts = 3
+	for attempt := 1; ; attempt++ {
+		p, ok := spawnCommitted(t, dataDir)
+		if ok {
+			return p
+		}
+		if attempt >= attempts {
+			t.Fatalf("committed exited during startup %d times (bind failure? see its log lines above)", attempts)
+			return nil
+		}
+		t.Logf("committed exited during startup (stolen port?); reallocating the port pair and retrying (%d/%d)", attempt, attempts)
+		reallocCommittedAddrs()
+	}
+}
+
+// spawnCommitted runs one start attempt: spawn, then gate on /health. ok is
+// false when the child exited before turning healthy (the retryable case);
+// every other failure is fatal inline.
+func spawnCommitted(t *testing.T, dataDir string) (p *committedProcess, ok bool) {
 	t.Helper()
 
 	bin := committedBinary(t)
@@ -181,7 +242,7 @@ func startCommittedAt(t *testing.T, dataDir string) *committedProcess {
 
 	require.NoError(t, cmd.Start(), "spawn committed")
 
-	p := &committedProcess{cmd: cmd, dataDir: dataDir, exited: make(chan struct{})}
+	p = &committedProcess{cmd: cmd, dataDir: dataDir, exited: make(chan struct{})}
 	go func() { _ = cmd.Wait(); close(p.exited) }()
 	t.Cleanup(p.Stop)
 
@@ -191,25 +252,27 @@ func startCommittedAt(t *testing.T, dataDir string) *committedProcess {
 	// Also watch for the child DYING during startup: with a foreign process
 	// answering health on our port, a dead child plus a 200 would silently
 	// aim every test at the wrong cluster (the exact incident the dynamic
-	// port exists to prevent) — a dead child must fail loudly instead.
+	// port exists to prevent) — a dead child must be handled loudly instead
+	// (retried on fresh ports by startCommittedAt, then fatal).
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		select {
 		case <-p.exited:
-			t.Fatalf("committed exited during startup (bind failure? see its log lines above)")
+			p.stopped = true // already gone; keep Cleanup's Stop a no-op
+			return p, false
 		default:
 		}
-		resp, err := http.Get("http://" + committedAddr + "/health") //nolint:gosec // G107: fixed in-process URL
+		resp, err := http.Get("http://" + apiAddr + "/health") //nolint:gosec // G107: fixed in-process URL
 		if err == nil {
 			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
-				return p
+				return p, true
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatalf("committed did not become healthy within 30s")
-	return nil
+	return nil, false
 }
 
 // Stop sends SIGTERM and waits for the child to exit. Returns quickly

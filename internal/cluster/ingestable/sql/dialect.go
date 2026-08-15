@@ -63,7 +63,14 @@ type TopicSpec struct {
 	Mappings       []Mapping
 	MapAllColumns  bool
 	ExcludeColumns []string
-	PrimaryKey     []string
+	// JSONColumns names STRING source columns that hold JSON (SQL Server
+	// nvarchar, MySQL varchar), so their payloads decode as real JSON
+	// instead of escaped strings. The parser resolves each name onto its
+	// mapping (case-insensitively, after map-all expansion) as
+	// Mapping.JSONHint; an entry naming no mapped column is a loud
+	// FieldError at POST.
+	JSONColumns []string
+	PrimaryKey  []string
 }
 
 type Config struct {
@@ -97,6 +104,9 @@ type Config struct {
 	// (secrets, large blobs). Only meaningful with MapAllColumns. Column names
 	// are matched as the source reports them.
 	ExcludeColumns []string
+	// JSONColumns: see TopicSpec.JSONColumns (this mirrors Topics[0] like
+	// the other flat fields).
+	JSONColumns []string
 	// PrimaryKey is the source table's primary-key column(s). A single column
 	// keys each entity by its bare value; multiple columns (a composite PK, e.g.
 	// IMDb principals' (tconst, ordering)) key by all of them so rows sharing a
@@ -122,6 +132,7 @@ func (c *Config) EnsureTopics() {
 		Mappings:       c.Mappings,
 		MapAllColumns:  c.MapAllColumns,
 		ExcludeColumns: c.ExcludeColumns,
+		JSONColumns:    c.JSONColumns,
 		PrimaryKey:     c.PrimaryKey,
 	}}
 }
@@ -158,4 +169,11 @@ func (c *Config) SpecForTable(table string) *TopicSpec {
 type Mapping struct {
 	JsonName  string `mapstructure:"jsonName"`
 	SQLColumn string `mapstructure:"column"`
+	// JSONHint marks a STRING source column that holds JSON (SQL Server
+	// nvarchar, MySQL varchar — undetectable from type metadata), so the
+	// decode renders it as a real, canonicalized JSON value instead of one
+	// escaped string. Set by the parser from the spec's jsonColumns list —
+	// not a TOML key of its own (mapstructure:"-" keeps the config surface
+	// to jsonColumns). See BuildEntityJSON.
+	JSONHint bool `mapstructure:"-"`
 }

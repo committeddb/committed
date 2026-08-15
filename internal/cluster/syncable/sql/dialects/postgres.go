@@ -401,6 +401,21 @@ func (d *PostgreSQLDialect) Open(connectionString string) (*gosql.DB, error) {
 // GRANT (access/config), not data or schema — fixable without touching the
 // proposal and failing every row identically — so it stays transient (wedge
 // visibly) rather than dead-lettering the whole stream.
+// IsNulByteViolation reports whether err is PostgreSQL's rejection of an
+// embedded U+0000 in a text value (SQLSTATE 22021, character_not_in_
+// repertoire — "invalid byte sequence for encoding UTF8: 0x00"). The one
+// data exception whose message names the byte but not the COLUMN, so the
+// sql sink's dead-letter hint (withNulFieldHint) uses this to append the
+// offending payload field names. Sink payloads are valid JSON (valid
+// UTF-8), so within committed's flow 22021 is effectively the NUL class;
+// the hint additionally fires only when the payload scan actually finds a
+// NUL-bearing field, so a stray 22021 of another shape passes through
+// unhinted rather than mislabeled.
+func (d *PostgreSQLDialect) IsNulByteViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "22021"
+}
+
 func (d *PostgreSQLDialect) IsPermanent(err error) bool {
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) {

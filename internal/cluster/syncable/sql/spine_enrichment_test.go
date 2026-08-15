@@ -11,7 +11,7 @@ import (
 func spineCfg() *ProjectionConfig {
 	return &ProjectionConfig{
 		Table:      "job_card",
-		PrimaryKey: "job_id",
+		PrimaryKey: []string{"job_id"},
 		Columns: []ProjectionColumn{
 			{Name: "job_id", SQLType: "VARCHAR(32)"},
 			{Name: "tenant_id", SQLType: "INT"},
@@ -19,7 +19,7 @@ func spineCfg() *ProjectionConfig {
 		},
 		Sources: []ProjectionSource{
 			{
-				Topic: "job", KeyPath: "$.id", OnDelete: "delete-row",
+				Topic: "job", KeyPath: []string{"$.id"}, OnDelete: "delete-row",
 				Rules: []ProjectionRule{{
 					When: []WhenClause{{Path: "$.kind", Equals: "job"}},
 					Set: []ProjectionSet{

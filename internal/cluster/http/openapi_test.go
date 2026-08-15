@@ -325,7 +325,7 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 					ID: "sync-1", Index: 7, SinceUnixNano: 1_700_000_000_000_000_000, Message: "boom",
 				}, true, nil)
 				fake.SyncableProgressReturns(1234, 1240, nil)
-				fake.SyncableDeadLetterStatsReturns(2, 1236, nil)
+				fake.SyncableDeadLetterStatsReturns(2, 1, 1236, nil)
 			},
 		},
 		{

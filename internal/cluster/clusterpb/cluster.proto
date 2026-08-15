@@ -371,6 +371,17 @@ message LogSyncableDeadLetter {
     string kind = 4;
     // message is the (truncated) error string from the failing Sync.
     string message = 5;
+    // acknowledged marks the record resolved out-of-band (an operator
+    // attests a later event superseded the skipped proposal, or it was
+    // fixed at the source). The record stays listable — an audit trail,
+    // not an erasure — but leaves the deadLetters completeness count.
+    // Set by the acknowledge verb re-proposing the record; a replay's
+    // success still deletes the record entirely.
+    bool acknowledged = 6;
+    // acknowledgedAtUnixNano is when the operator acknowledged, stamped
+    // at propose time (content-deterministic on every replica). Zero
+    // when unacknowledged.
+    int64 acknowledgedAtUnixNano = 7;
 }
 
 // LogSyncableStuck is published by a syncable's worker when it has been
