@@ -2174,12 +2174,19 @@ components:
             `message` fields are present when stuck or parked.
         workerState:
           type: string
-          enum: [running, parked]
+          enum: [running, parked, degraded]
           description: |
             The worker's lifecycle state: `running` (healthy, or transiently stuck
-            retrying — see `stuck`) or `parked` (the circuit breaker tripped on a
+            retrying — see `stuck`), `parked` (the circuit breaker tripped on a
             systematic config fault and the worker STOPPED — fix the config and
-            re-POST it, or delete the syncable). Replicated, so any node reports it.
+            re-POST it, or delete the syncable), or `degraded` (the config is
+            persisted but failed to BUILD on the answering node — e.g. a missing
+            `${VAR}` — so no worker was started; `message` carries the build
+            error; fix the environment or config and re-POST). `running`/`parked`
+            are replicated, so any node reports them; `degraded` reflects the
+            answering node's own build state. The build runs shortly after the
+            config commits, so a just-POSTed config may briefly read `running`
+            before its build verdict lands.
         index:
           type: integer
           format: int64

@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/clusterfakes"
 	"github.com/committeddb/committed/internal/cluster/http"
 )
@@ -65,6 +66,50 @@ func TestSyncableStatus_NoDeadLetters(t *testing.T) {
 	require.Contains(t, raw, `"deadLetters":0`, "the zero count must still be present")
 	require.False(t, strings.Contains(raw, "lastDeadLetterIndex"),
 		"lastDeadLetterIndex must be omitted when nothing was skipped")
+}
+
+// A config that EXISTS but failed to BUILD on this node (degraded — e.g. a
+// missing ${VAR}) must not report workerState "running": "running" is
+// derived from the absence of a park record, which a never-started worker
+// satisfies vacuously — the same absence-derived lie the 404 gate closed
+// for absent ids, one door over. The status consults the answering node's
+// degraded-config record and reports "degraded" plus the (already
+// redacted) build error.
+func TestSyncableStatus_DegradedBuildIsNotRunning(t *testing.T) {
+	fake := &clusterfakes.FakeCluster{}
+	fake.SyncableExistsReturns(true, nil)
+	fake.SyncableProgressReturns(0, 87, nil) // checkpoint frozen at 0, head real — the lying shape
+	fake.ConfigBuildErrorsReturns([]cluster.ConfigBuildError{
+		{Kind: "ingestable", ID: "s1", Error: "not this one — kind must match"},
+		{Kind: "syncable", ID: "other", Error: "not this one — id must match"},
+		{Kind: "syncable", ID: "s1", Error: "interpolate: variable SINK_DSN not set"},
+	})
+
+	body, _ := doSyncableStatus(t, fake)
+
+	require.Equal(t, cluster.WorkerStateDegraded, body.WorkerState,
+		"a build-degraded config must not read as a running worker")
+	require.Equal(t, "interpolate: variable SINK_DSN not set", body.Message,
+		"the redacted build error tells the operator what to fix")
+	require.False(t, body.CaughtUp,
+		"a degraded config with pending head must not read caught up")
+}
+
+// The degraded check is scoped to this id and kind: other configs'
+// degraded records must not leak into a healthy syncable's status.
+func TestSyncableStatus_OtherDegradedRecordsDoNotLeak(t *testing.T) {
+	fake := &clusterfakes.FakeCluster{}
+	fake.SyncableExistsReturns(true, nil)
+	fake.SyncableProgressReturns(100, 100, nil)
+	fake.ConfigBuildErrorsReturns([]cluster.ConfigBuildError{
+		{Kind: "syncable", ID: "other", Error: "someone else's problem"},
+		{Kind: "ingestable", ID: "s1", Error: "same id, different kind"},
+	})
+
+	body, _ := doSyncableStatus(t, fake)
+
+	require.Equal(t, cluster.WorkerStateRunning, body.WorkerState)
+	require.Empty(t, body.Message)
 }
 
 // doSyncableStatusRaw hits GET /v1/syncable/s1/status with an arbitrary query

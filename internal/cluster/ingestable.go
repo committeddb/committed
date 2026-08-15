@@ -99,12 +99,17 @@ type IngestableConfigChangeValidator interface {
 // what GET /v1/ingestable/{id}/status answers — the ingest analogue of a
 // syncable's progress/lag.
 // Worker lifecycle states reported by the syncable/ingestable status and pipeline
-// endpoints, derived from the replicated stuck/parked records so any node reports
-// identically.
+// endpoints. running/recovering/parked derive from the replicated stuck/parked
+// records so any node reports them identically; degraded derives from the
+// ANSWERING NODE's config-error record (a build failure is node-local — a
+// missing ${VAR} on one node doesn't stop another node's build), so it reports
+// this node's view. The worker that matters runs on the owner node; a
+// ?readPosition=true call proxies there and carries the owner's view.
 const (
 	WorkerStateRunning    = "running"    // healthy (sync: or transiently stuck)
 	WorkerStateRecovering = "recovering" // ingest-only: frozen, the supervisor is restarting it
 	WorkerStateParked     = "parked"     // terminally parked — operator must fix the config
+	WorkerStateDegraded   = "degraded"   // config persisted but its node-local build FAILED — no worker was (re)started; fix the environment/config and re-POST
 )
 
 // ParkedWorker identifies a terminally-parked worker for the /node/status summary.

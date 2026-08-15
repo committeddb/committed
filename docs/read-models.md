@@ -513,7 +513,10 @@ different engine error vocabularies.
 
 **Skipped is never silent, and never final.** `GET /syncable/{id}/status`
 reports `deadLetters` (and the latest skipped index) alongside `caughtUp` —
-the honest completeness check for a mirror is `caughtUp && deadLetters == 0`.
+the honest completeness check for a mirror is `caughtUp && deadLetters == 0 &&
+workerState == "running"` (a `parked` or `degraded` worker isn't syncing at
+all — see
+[operations/stuck-syncables.md](operations/stuck-syncables.md)).
 List the skipped proposals with `GET /syncable/{id}/deadletter`; after fixing
 the destination (e.g. `ALTER ... LONGTEXT`), re-drive each with
 `POST /syncable/{id}/replay/{index}`, which applies the row and clears its

@@ -57,6 +57,34 @@ starts a fresh worker; deleting the syncable also clears it. A bare restart or
 leadership change does **not** clear a park — it stays visibly parked until you
 act.
 
+## Degraded: the config never built
+
+A third state sits before either of the above: the config was accepted and
+persisted, but its **build failed on a node** — most often a `${VAR}` secret
+missing from that node's environment — so no worker started there at all.
+The status endpoint reports `"workerState":"degraded"` with the build error
+in `message`.
+
+Two things distinguish it from a park:
+
+- **It is node-local.** Builds run per node against that node's environment,
+  so one node can be degraded while another runs fine.
+  `GET /v1/syncable/{id}/status` reports the answering node's view; the
+  node-scoped surfaces (`GET /v1/node/status` `configBuildErrors`, the
+  `committed_config_build_errors` gauge) enumerate everything degraded on a
+  given node.
+- **Timing.** The build runs shortly after the config commits (bounded at
+  ~60s even against a hung destination), so a just-POSTed config may briefly
+  read `running` before its verdict lands — poll rather than checking
+  exactly once.
+
+**Fixing.** Supply the missing environment variable (then restart that node,
+or re-POST the config) or correct the config and re-POST. A successful build
+clears the state.
+
+The honest convergence check is therefore: `caughtUp && deadLetters == 0 &&
+workerState == "running"`.
+
 ## Telling a syncable is stuck
 
 The signal is replicated, so **any node** answers — you don't need to find
@@ -117,7 +145,8 @@ which is what makes `0` mean `0`.
 proposals the syncable *skipped* (dead-lettered — a permanent per-row failure,
 or an operator's manual skip). The status carries `deadLetters` (count, always
 present) and `lastDeadLetterIndex` alongside `caughtUp`, so the honest
-completeness check for a mirror is `caughtUp && deadLetters == 0`. When the
+completeness check for a mirror is `caughtUp && deadLetters == 0 &&
+workerState == "running"` (see the degraded section above). When the
 count is non-zero: list the records via `GET /v1/syncable/{id}/deadletter`,
 fix the destination, and re-drive each with
 `POST /v1/syncable/{id}/replay/{index}` — a successful replay clears the
