@@ -1168,6 +1168,21 @@ type MySQLEventHandler struct {
 	consumedGTID mysql.GTIDSet
 	curTxnGTID   mysql.GTIDSet
 
+	// curTxnSourceTS and curTxnID are the in-flight transaction's capture
+	// provenance, stamped onto every proposal flushed for it (see
+	// cluster.Proposal.SourceCommitUnixNano/SourceTxnID) and cleared at
+	// commit. curTxnSourceTS is the latest binlog event-header timestamp
+	// (whole seconds — the header's resolution) observed for the
+	// transaction: at the commit flush that is the XID event's header, i.e.
+	// the source commit time; a mid-transaction soft flush carries its
+	// latest RowsEvent header (statement time, at most seconds earlier).
+	// curTxnID is the transaction's GTID when the source runs gtid_mode=ON,
+	// else the binlog coordinate of the transaction's first buffered row —
+	// captured ONCE so every part of a multi-part (soft-flushed)
+	// transaction shares one identity (the co-transaction evidence).
+	curTxnSourceTS uint32
+	curTxnID       string
+
 	// driftWarned dedups the DIVERGENCE-tier warning (a mapped non-key column
 	// dropped/renamed at the source): the check runs per RowsEvent — i.e. per
 	// transaction touching a watched table — so a bare warn would spam. Keyed by
@@ -1445,10 +1460,17 @@ func (h *MySQLEventHandler) handleRows(ctx context.Context, header *replication.
 
 	// Track the live offset (the row event's end position) so a mid-transaction
 	// soft-limit flush stamps a monotonic SourceSeq. It applies to every row of
-	// the event.
+	// the event. The header timestamp feeds the transaction's provenance stamp
+	// (a zero timestamp is a fake/heartbeat event — never one carrying rows,
+	// but guarded anyway so it can't blank a real observation).
 	if header != nil {
 		h.curPos = header.LogPos
+		if header.Timestamp != 0 {
+			h.curTxnSourceTS = header.Timestamp
+		}
 	}
+
+	h.captureTxnID()
 
 	// A RowsEvent carries EVERY row of its statement, not just one: a multi-row
 	// INSERT or a bulk DELETE has one image per row, and an UPDATE interleaves
@@ -1630,7 +1652,15 @@ func (h *MySQLEventHandler) flushPending(ctx context.Context, isSoftFlush bool) 
 		} else {
 			h.flushFile, h.flushPos, h.flushSub = h.curFile, h.curPos, 0
 		}
-		p := &cluster.Proposal{Entities: group, SourceSeq: encodeSourceSeq(h.curFile, h.curPos, h.flushSub)}
+		p := &cluster.Proposal{
+			Entities:  group,
+			SourceSeq: encodeSourceSeq(h.curFile, h.curPos, h.flushSub),
+			// Capture provenance: the source commit time (event-header seconds)
+			// and transaction identity tracked for the in-flight transaction.
+			// Every per-topic group of one transaction shares them.
+			SourceCommitUnixNano: int64(h.curTxnSourceTS) * int64(time.Second),
+			SourceTxnID:          h.curTxnID,
+		}
 		// Failover-lineage guard: if the live coordinate is at or below the resume
 		// baseline — a lower file number, OR the same file number at an equal/lower
 		// byte offset — this stream is a different binlog lineage (a promoted replica
@@ -1661,6 +1691,22 @@ func (h *MySQLEventHandler) flushPending(ctx context.Context, isSoftFlush bool) 
 		}
 	}
 	return nil
+}
+
+// captureTxnID records the in-flight transaction's provenance identity at its
+// first buffered row: the GTID when the source announces one (gtid_mode=ON —
+// the GTIDEvent precedes the transaction's row events), else the first row
+// event's binlog coordinate. Captured ONCE per transaction so every
+// soft-flushed part shares one identity; cleared on commit (handleXID).
+func (h *MySQLEventHandler) captureTxnID() {
+	if h.curTxnID != "" {
+		return
+	}
+	if h.curTxnGTID != nil {
+		h.curTxnID = h.curTxnGTID.String()
+		return
+	}
+	h.curTxnID = fmt.Sprintf("%s:%d", h.curFile, h.curPos)
 }
 
 // stampGeneration sets the reconciling-refresh epoch on every entity in a batch
@@ -1790,12 +1836,22 @@ func nonNeg(n int64) uint64 {
 func (h *MySQLEventHandler) handleXID(ctx context.Context, header *replication.EventHeader) error {
 	if header != nil {
 		h.curPos = header.LogPos
+		// The XID event's header timestamp is the source commit time — the
+		// authoritative provenance stamp for the commit flush below.
+		if header.Timestamp != 0 {
+			h.curTxnSourceTS = header.Timestamp
+		}
 	}
 	pos := mysql.Position{Name: h.curFile, Pos: h.curPos}
 
 	if err := h.flushPending(ctx, false); err != nil {
 		return err
 	}
+
+	// The transaction is flushed; its provenance must not bleed into the next
+	// one (whose own first row / GTID re-captures it).
+	h.curTxnSourceTS = 0
+	h.curTxnID = ""
 
 	// Merge the just-committed transaction's GTID into the consumed set so the
 	// checkpoint carries the GTID resume cursor alongside file:pos. Resume still

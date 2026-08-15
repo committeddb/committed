@@ -49,6 +49,33 @@ can transiently observe such a giant transaction partially applied, and
 converges as the parts complete. This exception exists because the only
 alternative is refusing to ingest oversized transactions.
 
+Every change-stream proposal carries **capture provenance**: the timestamp at
+which the source committed the change and an identity for the source
+transaction that produced it (rows changed together in one source transaction
+share the identity). Both are recorded into the log at ingest time because
+they exist only in the change stream — once the source's binlog/WAL retention
+expires they are unrecoverable. Fidelity varies by engine:
+
+- **PostgreSQL** — commit time and xid, exactly as logical replication reports
+  them per transaction.
+- **MySQL** — the binlog event-header timestamp (whole-second resolution) and
+  the transaction's GTID; a `gtid_mode=OFF` source falls back to a
+  binlog-coordinate identity. For a transaction large enough to be applied in
+  parts, the parts share one identity and non-final parts carry statement time
+  rather than commit time (the commit time isn't known until the commit event).
+- **SQL Server** — best-effort: Change Tracking is polled, so provenance is
+  present only when a polled batch spans exactly one source transaction (the
+  steady-state case; catch-up windows spanning transactions omit it). The
+  identity is the change version, and the commit time comes from
+  `sys.dm_tran_commit_table` when it is readable.
+
+Snapshot-phase proposals carry **no provenance** — a snapshot row is a
+re-observation, not a source transaction. Provenance is capture metadata in
+the log, not payload: it never appears in a projected row or webhook delivery.
+The source commit time is evidence for operators and interpretation tooling —
+committed never orders, dedups, or resolves conflicts by it; the log's index
+is the only ordering authority.
+
 Snapshot rows are **convergent re-observations** rather than deduplicated
 events: each snapshot row is its own single-row proposal, and the resume
 checkpoint rides the final row of each read window — so a restart mid-window

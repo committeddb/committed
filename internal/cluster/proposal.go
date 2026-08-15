@@ -152,6 +152,22 @@ type Proposal struct {
 	// streaming proposals, which checkpoint out-of-band.
 	Position Position
 
+	// SourceCommitUnixNano and SourceTxnID are capture provenance on a CDC
+	// proposal: when the SOURCE committed this change and which source
+	// transaction produced it — both sitting in the change stream as it is
+	// read and unrecoverable once the source's binlog/WAL retention expires.
+	// Proposal-level, not per-entity: all rows in one emitted proposal come
+	// from one source transaction context. Stamped by the dialect; fidelity
+	// varies by source (MySQL binlog event-header timestamp + GTID, with a
+	// file:pos-derived identity when gtid_mode=OFF; Postgres pgoutput Begin
+	// commit-time + xid; SQL Server change-tracking version +
+	// sys.dm_tran_commit_table, best-effort). Provenance only — nothing in
+	// apply or sync reads them. Zero/empty means "not captured": snapshot-
+	// phase proposals (a snapshot row has no source transaction), direct
+	// user proposals, and pre-feature log entries.
+	SourceCommitUnixNano int64
+	SourceTxnID          string
+
 	// DedupUnsafe is a TRANSIENT pre-raft hint, set by an ingest dialect and
 	// consumed only by the leader's ingest-worker dedup — it is deliberately NOT
 	// marshaled into the log (see Marshal), so it never reaches raft, replay, or a
@@ -323,11 +339,13 @@ func (p *Proposal) Marshal() ([]byte, error) {
 	}
 
 	lp := &clusterpb.LogProposal{
-		LogEntities:  es,
-		RequestID:    p.RequestID,
-		IngestableID: p.IngestableID,
-		SourceSeq:    p.SourceSeq,
-		Position:     p.Position,
+		LogEntities:          es,
+		RequestID:            p.RequestID,
+		IngestableID:         p.IngestableID,
+		SourceSeq:            p.SourceSeq,
+		Position:             p.Position,
+		SourceCommitUnixNano: p.SourceCommitUnixNano,
+		SourceTxnID:          p.SourceTxnID,
 	}
 
 	return proto.Marshal(lp)
@@ -389,6 +407,8 @@ func (p *Proposal) Unmarshal(bs []byte, r TypeResolver) error {
 	p.IngestableID = lp.IngestableID
 	p.SourceSeq = lp.SourceSeq
 	p.Position = lp.Position
+	p.SourceCommitUnixNano = lp.SourceCommitUnixNano
+	p.SourceTxnID = lp.SourceTxnID
 	for _, e := range lp.LogEntities {
 		ref := TypeRef{ID: e.Type.GetID(), Version: int(e.Type.GetVersion())}
 		t, err := resolveType(ref, r)
