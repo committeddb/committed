@@ -602,6 +602,21 @@ paths:
         referencing an unknown lookup) fails here with 400. A rule or
         source with no `when` matches every event of its topic.
 
+        `iceberg` lands the topic in an Apache Iceberg table (S3 Tables,
+        Athena, Redshift Spectrum — anything reading Iceberg through a REST
+        catalog) as a CURRENT-STATE table: copy-on-write merge keyed by the
+        entity key (source DELETEs remove rows, refresh boundaries sweep
+        stale generations), committed in batches (`iceberg.flushRows` /
+        `iceberg.flushInterval`; the worker checkpoint advances only on a
+        committed flush, and re-commits are deduplicated by a snapshot
+        property). v1 table shape is a fixed envelope (key, payload,
+        committed_index, generation); config takes `iceberg.catalog` (the
+        REST catalog URL — credentials in the URL are refused; auth comes
+        from the node's AWS credential chain / catalog token),
+        `iceberg.namespace`, `iceberg.table`, optional `iceberg.warehouse`
+        and `[iceberg.props]` FileIO properties (s3.endpoint …). See
+        docs/operations/iceberg-sink.md.
+
         `loopback` derives a topic INSIDE the cluster: it consumes
         `loopback.topic`, applies `[[loopback.mappings]]` (`jsonPath` →
         `field`; none = whole-payload passthrough) once, and proposes the

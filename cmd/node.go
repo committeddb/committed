@@ -28,6 +28,7 @@ import (
 	ingestablesqlserver "github.com/committeddb/committed/internal/cluster/ingestable/sql/sqlserver"
 	"github.com/committeddb/committed/internal/cluster/metrics"
 	synchttp "github.com/committeddb/committed/internal/cluster/syncable/http"
+	synciceberg "github.com/committeddb/committed/internal/cluster/syncable/iceberg"
 	"github.com/committeddb/committed/internal/cluster/syncable/loopback"
 	syncsql "github.com/committeddb/committed/internal/cluster/syncable/sql"
 	syncdialects "github.com/committeddb/committed/internal/cluster/syncable/sql/dialects"
@@ -416,6 +417,7 @@ image can be templated per-node by an orchestrator:
 		d.AddSyncableParser("sql-projection", &syncsql.ProjectionSyncableParser{Metrics: m})
 		d.AddSyncableParser("http", &synchttp.SyncableParser{})
 		d.AddSyncableParser("loopback", &loopback.SyncableParser{Proposer: d})
+		d.AddSyncableParser("iceberg", &synciceberg.SyncableParser{})
 		// Inject the entity-schema compilers so ProposeType rejects a broken
 		// schema at POST /type and Propose's validation tripwire can check
 		// announce-typed payloads (the compilers live in the http layer, which

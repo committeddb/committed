@@ -43,7 +43,10 @@ Committed is specifically NOT a databse designed for querying.
   multi-topic BFF rows, collection aggregates, cross-topic enrichment
   (`sql-projection`, the primary read-model pattern; see
   [docs/read-models.md](docs/read-models.md)). Destinations today:
-  SQL (MySQL/PostgreSQL), HTTP — and the cluster itself (`loopback`),
+  SQL (MySQL/PostgreSQL), HTTP, Apache Iceberg on S3 (`iceberg` — a
+  current-state warehouse landing zone for Athena/Spectrum/S3 Tables;
+  see [docs/operations/iceberg-sink.md](docs/operations/iceberg-sink.md))
+  — and the cluster itself (`loopback`),
   which derives a new topic from a source topic so one transform serves
   N dumb consumers ([docs/read-models.md](docs/read-models.md)
   § Derived topics).
