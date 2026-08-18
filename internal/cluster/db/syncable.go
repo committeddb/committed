@@ -225,7 +225,11 @@ func (db *DB) rebuildTeardownDestinationLocal(id string, handle *workerHandle) {
 	if handle == nil || handle.syncable == nil || !db.isNode(id) {
 		return
 	}
-	teardownable, ok := handle.syncable.(cluster.Teardownable)
+	// Unwrap-chain resolution — same rationale as deleteSync: the
+	// always-current wrapper masks a bare assertion, which silently made
+	// every wrapped projection's rebuild non-clean (replay over the stale
+	// table instead of drop-and-recreate).
+	teardownable, ok := cluster.SyncableAs[cluster.Teardownable](handle.syncable)
 	if !ok {
 		return
 	}

@@ -124,7 +124,11 @@ var syncBatchCap = 500
 // ModeAlwaysCurrent migration wrapper forwards this, so a wrapped syncable
 // keeps its TOML cadence.
 func checkpointPolicyOf(s cluster.Syncable) cluster.CheckpointPolicy {
-	if cc, ok := s.(cluster.CheckpointConfigurable); ok {
+	// Unwrap-chain resolution, outermost-first: the migration wrapper's own
+	// deliberate CheckpointPolicy forward still wins (SyncableAs finds the
+	// wrapper's implementation before the inner's), and any future wrapper
+	// WITHOUT that forward no longer silently loses the cadence.
+	if cc, ok := cluster.SyncableAs[cluster.CheckpointConfigurable](s); ok {
 		return cc.CheckpointPolicy()
 	}
 	return cluster.CheckpointPolicy{}
@@ -349,10 +353,16 @@ func (db *DB) deleteSync(id string, keepData bool) {
 
 	if !ok || handle.syncable == nil {
 		// No worker built on this node — nothing to tear down. In safe mode
-		// that is EVERY delete, and on a single-node cluster nobody else will
-		// tear down either — say so rather than skipping silently.
+		// that is EVERY delete; outside it this is a DEGRADED config's
+		// delete (its build failed, so no worker held a destination
+		// handle). Either way the destination table, if any, survives —
+		// say so rather than skipping silently (the same silent-skip
+		// shape that hid the wrapper-masking bug).
 		if db.safeMode {
 			db.logger.Warn("safe mode: syncable deleted; owner-side destination teardown skipped (no worker was built) — the destination table, if any, remains",
+				zap.String("id", id))
+		} else {
+			db.logger.Warn("syncable deleted but no worker was built on this node (degraded config?); owner-side destination teardown skipped — the destination table, if any, remains and a same-name re-POST will land on it",
 				zap.String("id", id))
 		}
 		return
@@ -367,7 +377,11 @@ func (db *DB) deleteSync(id string, keepData bool) {
 		return // operator opted to keep the data, or this node isn't the owner
 	}
 
-	teardownable, ok := handle.syncable.(cluster.Teardownable)
+	// Resolved through the Unwrap chain: an always-current syncable's
+	// Teardownable lives on the INNER syncable behind the migration
+	// wrapper (the field incident: deleted projections' tables survived
+	// because a bare assertion here silently failed on the wrapper).
+	teardownable, ok := cluster.SyncableAs[cluster.Teardownable](handle.syncable)
 	if !ok {
 		return // syncable owns no external destination state
 	}

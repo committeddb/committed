@@ -251,6 +251,45 @@ type Teardownable interface {
 	Teardown() error
 }
 
+// SyncableUnwrapper is implemented by decorating wrappers (the
+// always-current migration wrapper) to expose the syncable they wrap, so
+// capability interfaces survive wrapping WITHOUT each wrapper
+// hand-forwarding each interface. The class bug this kills: the wrapper
+// forwarded Sync/Close (and hand-forwarded CheckpointPolicy, with a
+// comment explaining the loss) but masked Teardownable — so every
+// always-current syncable silently lost destination teardown on DELETE
+// and rebuild, and each future wrapper × interface pair would re-open
+// the hole.
+type SyncableUnwrapper interface {
+	Unwrap() Syncable
+}
+
+// SyncableAs resolves capability interface T against s, walking the
+// Unwrap chain outermost-first (a wrapper's own implementation wins, so
+// deliberate decoration like the migration wrapper's CheckpointPolicy
+// forward keeps its semantics).
+//
+// Use it ONLY for lifecycle/capability interfaces (Teardownable,
+// CheckpointConfigurable) whose calls don't traverse the wrapper's data
+// path. DATA-PATH interfaces — BatchSyncable — must NEVER be resolved
+// through the chain: calling an inner SyncBatch directly would bypass
+// the wrapper's Sync semantics. The wrapper decides its own batchness
+// (see migration.Wrap's two-type split).
+func SyncableAs[T any](s Syncable) (T, bool) {
+	for s != nil {
+		if t, ok := any(s).(T); ok {
+			return t, true
+		}
+		u, ok := s.(SyncableUnwrapper)
+		if !ok {
+			break
+		}
+		s = u.Unwrap()
+	}
+	var zero T
+	return zero, false
+}
+
 // SyncableSchemaComparable is a config's materialized destination schema, produced
 // config-alone by SyncableSchemaExtractor.SchemaFromConfig (no database
 // resolution). The config-change guard compares the two configs of a re-POST with

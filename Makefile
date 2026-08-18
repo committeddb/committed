@@ -122,11 +122,15 @@ test/adversarial:
 # e2e/cdc/ and .claude/plans/wobbly-watching-lightning.md.
 #
 # -p=1 because each test boots its own Postgres container — parallel
-# container startup chokes Docker on most laptops. -timeout 600s
-# because the first test pays a one-off `go build .` of the committed
-# binary plus container pull on a fresh machine.
+# container startup chokes Docker on most laptops. -timeout 1200s: the
+# suite's full sequential pass measures ~7m40s on a fast dev machine
+# with warm image caches (2026-08-18), so CI runners legitimately need
+# 9-11 min — the old 600s was living on runner luck and timed out a
+# green run (every test passing, budget exhausted). The first test also
+# pays a one-off `go build .` of the committed binary plus container
+# pulls on a fresh machine.
 test/cdc:
-	go test -tags docker -p=1 -timeout 600s ./e2e/cdc/...
+	go test -tags docker -p=1 -timeout 1200s ./e2e/cdc/...
 
 # Rolling-upgrade per-node test: builds the real committed binary, boots a
 # node, writes state, SIGTERMs it, and restarts over the same data dir,
