@@ -566,7 +566,7 @@ func (p *Projection) Sync(ctx context.Context, a *cluster.Actual) (cluster.Shoul
 		// is) so the replicated stuck status and any permanent dead-letter carry
 		// only the classifier. Transient: a begin failure is a connection issue to
 		// retry and surface as stuck, never a permanent dead-letter.
-		return false, execFailure("[sql-projection.apply] begin", err, false)
+		return false, execFailure("[projection.apply] begin", err, false)
 	}
 
 	for _, e := range a.Entities {
@@ -587,7 +587,7 @@ func (p *Projection) Sync(ctx context.Context, a *cluster.Actual) (cluster.Shoul
 		// rollback: a failed Commit already finalized the tx and freed the
 		// connection, so a Rollback now only returns ErrTxDone and would mask
 		// this error.
-		return false, execFailure("[sql-projection.apply] commit", err, p.dialect.IsPermanent(err))
+		return false, execFailure("[projection.apply] commit", err, p.dialect.IsPermanent(err))
 	}
 
 	return true, nil
@@ -598,7 +598,7 @@ func (p *Projection) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool,
 	if err != nil {
 		// Redact the raw connect error (user=/database=/host:port); transient — see
 		// the matching note in Sync.
-		return false, execFailure("[sql-projection.apply] begin", err, false)
+		return false, execFailure("[projection.apply] begin", err, false)
 	}
 
 	for _, a := range as {
@@ -619,7 +619,7 @@ func (p *Projection) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool,
 		// rollback: a failed Commit already finalized the tx and freed the
 		// connection, so a Rollback now only returns ErrTxDone and would mask
 		// this error.
-		return false, execFailure("[sql-projection.apply] commit", err, p.dialect.IsPermanent(err))
+		return false, execFailure("[projection.apply] commit", err, p.dialect.IsPermanent(err))
 	}
 
 	return true, nil
@@ -687,7 +687,7 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 		// Future-proofing: a variant this binary does not implement
 		// dead-letters loudly instead of folding as a row.
 		return cluster.Permanent(fmt.Errorf(
-			"[sql-projection.apply] entity variant %q is not supported by this binary (topic %q); upgrade the node before syncing this topic",
+			"[projection.apply] entity variant %q is not supported by this binary (topic %q); upgrade the node before syncing this topic",
 			v, e.Type.ID))
 	}
 
@@ -699,7 +699,7 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 	dec.UseNumber()
 	var jsonData any
 	if err := dec.Decode(&jsonData); err != nil {
-		return cluster.Permanent(fmt.Errorf("[sql-projection.apply] unmarshal entity data: %w", err))
+		return cluster.Permanent(fmt.Errorf("[projection.apply] unmarshal entity data: %w", err))
 	}
 
 	// Source-level when prefilter: a source consumes only the events it matches,
@@ -725,7 +725,7 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 	if len(matched) == 0 {
 		// No ghost rows: zero matching rules → zero SQL. The tick is
 		// the signal that a new event variant shipped without a rule.
-		zap.L().Debug("[sql-projection] event matched no rules",
+		zap.L().Debug("[projection] event matched no rules",
 			zap.String("syncable", p.name), zap.String("topic", src.topic))
 		if p.metrics != nil {
 			p.metrics.SyncRulesUnmatched(p.name, src.topic)
@@ -738,7 +738,7 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 		// per run so the empty table has a named cause in the logs.
 		src.unmatchedRun++
 		if src.unmatchedRun == projectionUnmatchedWarnRun {
-			zap.L().Warn("[sql-projection] source has matched no rules for a long run of events — if this table should be filling, check the source's when clauses (a type-mismatched `equals` matches nothing silently: `equals = \"true\"` never equals JSON boolean true)",
+			zap.L().Warn("[projection] source has matched no rules for a long run of events — if this table should be filling, check the source's when clauses (a type-mismatched `equals` matches nothing silently: `equals = \"true\"` never equals JSON boolean true)",
 				zap.String("syncable", p.name), zap.String("topic", src.topic),
 				zap.Int("consecutive_unmatched", src.unmatchedRun))
 		}
@@ -755,7 +755,7 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 	for i, kp := range src.keyPaths {
 		v, err := jsonpath.Get(kp, jsonData)
 		if err != nil {
-			return cluster.Permanent(fmt.Errorf("[sql-projection.apply] keyPath [%s]: %w", kp, err))
+			return cluster.Permanent(fmt.Errorf("[projection.apply] keyPath [%s]: %w", kp, err))
 		}
 		keys[i] = coerceForColumn(v, p.columnType(p.config.PrimaryKey[i]))
 	}
@@ -770,7 +770,7 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 			case s.From != "":
 				v, err := jsonpath.Get(s.From, jsonData)
 				if err != nil {
-					return cluster.Permanent(fmt.Errorf("[sql-projection.apply] jsonpath [%s]: %w", s.From, err))
+					return cluster.Permanent(fmt.Errorf("[projection.apply] jsonpath [%s]: %w", s.From, err))
 				}
 				plain[s.Column] = coerceForColumn(v, p.columnType(s.Column))
 			case s.Null:
@@ -803,7 +803,7 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 			// Same NUL hint as the plain sink's row apply: name the offending
 			// payload field(s) — names only, never values.
 			err = withNulFieldHint(err, p.dialect, jsonData)
-			return execFailure(fmt.Sprintf("[sql-projection.apply] exec [%s]", r.SQL), err, p.dialect.IsPermanent(err))
+			return execFailure(fmt.Sprintf("[projection.apply] exec [%s]", r.SQL), err, p.dialect.IsPermanent(err))
 		}
 	}
 	return nil
@@ -836,14 +836,14 @@ func (p *Projection) applyDelete(ctx context.Context, tx *gosql.Tx, src *project
 	}
 	if stmt == nil {
 		return cluster.Permanent(fmt.Errorf(
-			"[sql-projection.apply] cannot honor delete: no statement prepared (topic %q)",
+			"[projection.apply] cannot honor delete: no statement prepared (topic %q)",
 			src.topic))
 	}
 
 	n := len(p.config.PrimaryKey)
 	if n == 1 && cluster.IsCompositeEncoded(string(e.Key)) {
 		return cluster.Permanent(fmt.Errorf(
-			"[sql-projection.apply] delete tombstone carries a composite entity key; this projection keys by the single column %q and cannot address the row (topic %q) — the producer keys this topic by several columns; match the producer's key columns in primaryKey, or set onDelete = \"ignore\" if this fold deliberately collapses the composite identity",
+			"[projection.apply] delete tombstone carries a composite entity key; this projection keys by the single column %q and cannot address the row (topic %q) — the producer keys this topic by several columns; match the producer's key columns in primaryKey, or set onDelete = \"ignore\" if this fold deliberately collapses the composite identity",
 			p.config.PrimaryKey[0], src.topic))
 	}
 	keyVals, derr := cluster.DecodeCompositeKey(string(e.Key), n)
@@ -851,7 +851,7 @@ func (p *Projection) applyDelete(ctx context.Context, tx *gosql.Tx, src *project
 		// DecodeCompositeKey reports parse reason and arity numbers only,
 		// never the key value.
 		return cluster.Permanent(fmt.Errorf(
-			"[sql-projection.apply] delete tombstone key does not decode for this projection's %d-column primaryKey (topic %q) — producer and projection key shapes disagree: %w",
+			"[projection.apply] delete tombstone key does not decode for this projection's %d-column primaryKey (topic %q) — producer and projection key shapes disagree: %w",
 			n, src.topic, derr))
 	}
 	args := make([]any, len(keyVals))
@@ -859,7 +859,7 @@ func (p *Projection) applyDelete(ctx context.Context, tx *gosql.Tx, src *project
 		args[i] = v
 	}
 	if _, err := tx.StmtContext(ctx, stmt).ExecContext(ctx, args...); err != nil {
-		return execFailure(fmt.Sprintf("[sql-projection.apply] exec [%s]", sqlStr), err, p.dialect.IsPermanent(err))
+		return execFailure(fmt.Sprintf("[projection.apply] exec [%s]", sqlStr), err, p.dialect.IsPermanent(err))
 	}
 	return nil
 }
@@ -879,11 +879,11 @@ func (p *Projection) applyAggregate(ctx context.Context, tx *gosql.Tx, src *proj
 	// validation and the applyDefaults fill on the old error path (a
 	// Permanent misconfiguration) instead of an index panic.
 	if len(src.keyPaths) == 0 {
-		return cluster.Permanent(fmt.Errorf("[sql-projection.aggregate] no keyPath configured (topic %q)", src.topic))
+		return cluster.Permanent(fmt.Errorf("[projection.aggregate] no keyPath configured (topic %q)", src.topic))
 	}
 	parentKey, err := jsonpath.Get(src.keyPaths[0], jsonData)
 	if err != nil {
-		return cluster.Permanent(fmt.Errorf("[sql-projection.aggregate] keyPath [%s]: %w", src.keyPaths[0], err))
+		return cluster.Permanent(fmt.Errorf("[projection.aggregate] keyPath [%s]: %w", src.keyPaths[0], err))
 	}
 
 	// Capture the child's prior parent before the sidecar upsert overwrites it. A
@@ -897,19 +897,19 @@ func (p *Projection) applyAggregate(ctx context.Context, tx *gosql.Tx, src *proj
 
 	elementKey, err := jsonpath.Get(ag.elementKey, jsonData)
 	if err != nil {
-		return cluster.Permanent(fmt.Errorf("[sql-projection.aggregate] elementKey [%s]: %w", ag.elementKey, err))
+		return cluster.Permanent(fmt.Errorf("[projection.aggregate] elementKey [%s]: %w", ag.elementKey, err))
 	}
 	element := make(map[string]any, len(ag.fields))
 	for _, f := range ag.fields {
 		v, err := jsonpath.Get(f.From, jsonData)
 		if err != nil {
-			return cluster.Permanent(fmt.Errorf("[sql-projection.aggregate] element field %q from [%s]: %w", f.Field, f.From, err))
+			return cluster.Permanent(fmt.Errorf("[projection.aggregate] element field %q from [%s]: %w", f.Field, f.From, err))
 		}
 		element[f.Field] = v
 	}
 	elementJSON, err := json.Marshal(element)
 	if err != nil {
-		return cluster.Permanent(fmt.Errorf("[sql-projection.aggregate] marshal element: %w", err))
+		return cluster.Permanent(fmt.Errorf("[projection.aggregate] marshal element: %w", err))
 	}
 
 	// Sidecar columns are text/JSON; bind the keys as strings (elementKey is
@@ -977,7 +977,7 @@ func (p *Projection) aggPriorParent(ctx context.Context, tx *gosql.Tx, ag *aggre
 		// the sibling exec sites — otherwise the raw text lands in the replicated
 		// dead-letter + stuck status.
 		return "", false, execFailure(
-			fmt.Sprintf("[sql-projection.aggregate] exec [%s]", ag.lookupSQL), err, p.dialect.IsPermanent(err))
+			fmt.Sprintf("[projection.aggregate] exec [%s]", ag.lookupSQL), err, p.dialect.IsPermanent(err))
 	}
 }
 
@@ -985,7 +985,7 @@ func (p *Projection) aggPriorParent(ctx context.Context, tx *gosql.Tx, ag *aggre
 // the same way the rule path does.
 func (p *Projection) aggExec(ctx context.Context, tx *gosql.Tx, stmt *gosql.Stmt, sqlStr string, args ...any) error {
 	if _, err := tx.StmtContext(ctx, stmt).ExecContext(ctx, args...); err != nil {
-		return execFailure(fmt.Sprintf("[sql-projection.aggregate] exec [%s]", sqlStr), err, p.dialect.IsPermanent(err))
+		return execFailure(fmt.Sprintf("[projection.aggregate] exec [%s]", sqlStr), err, p.dialect.IsPermanent(err))
 	}
 	return nil
 }
@@ -1001,13 +1001,13 @@ func (p *Projection) applyLookup(ctx context.Context, tx *gosql.Tx, src *project
 	for _, f := range lk.fields {
 		v, err := jsonpath.Get(f.From, jsonData)
 		if err != nil {
-			return cluster.Permanent(fmt.Errorf("[sql-projection.lookup] field %q from [%s]: %w", f.Field, f.From, err))
+			return cluster.Permanent(fmt.Errorf("[projection.lookup] field %q from [%s]: %w", f.Field, f.From, err))
 		}
 		fields[f.Field] = v
 	}
 	fieldsJSON, err := json.Marshal(fields)
 	if err != nil {
-		return cluster.Permanent(fmt.Errorf("[sql-projection.lookup] marshal fields: %w", err))
+		return cluster.Permanent(fmt.Errorf("[projection.lookup] marshal fields: %w", err))
 	}
 
 	// The dimension key is the entity's own Key — the value aggregate elements
@@ -1033,7 +1033,7 @@ func (p *Projection) spineFanOut(ctx context.Context, tx *gosql.Tx, lk *lookupRu
 	for _, dep := range lk.spineDeps {
 		onKey, ok := coerceKeyForColumn(dimKey, dep.onColType)
 		if !ok {
-			zap.L().Debug("[sql-projection.lookup] dimension key does not fit the on column's type; no row can reference it — skipping spine fan-out",
+			zap.L().Debug("[projection.lookup] dimension key does not fit the on column's type; no row can reference it — skipping spine fan-out",
 				zap.String("column", dep.column))
 			continue
 		}
@@ -1042,7 +1042,7 @@ func (p *Projection) spineFanOut(ctx context.Context, tx *gosql.Tx, lk *lookupRu
 			val = coerceForColumn(fields[dep.selectFld], dep.colType)
 		}
 		if _, err := tx.StmtContext(ctx, dep.update).ExecContext(ctx, val, onKey); err != nil {
-			return execFailure(fmt.Sprintf("[sql-projection.lookup] exec [%s]", dep.updateSQL), err, p.dialect.IsPermanent(err))
+			return execFailure(fmt.Sprintf("[projection.lookup] exec [%s]", dep.updateSQL), err, p.dialect.IsPermanent(err))
 		}
 	}
 	return nil
@@ -1109,20 +1109,20 @@ func (p *Projection) fanOut(ctx context.Context, tx *gosql.Tx, lk *lookupRuntime
 		rows, err := tx.StmtContext(ctx, dep.affected).QueryContext(ctx, dimKey)
 		if err != nil {
 			return execFailure(
-				fmt.Sprintf("[sql-projection.lookup] exec [%s]", dep.affectedSQL), err, p.dialect.IsPermanent(err))
+				fmt.Sprintf("[projection.lookup] exec [%s]", dep.affectedSQL), err, p.dialect.IsPermanent(err))
 		}
 		var parents []string
 		for rows.Next() {
 			var pk string
 			if err := rows.Scan(&pk); err != nil {
 				_ = rows.Close()
-				return execFailure("[sql-projection.lookup] scan affected parent", err, p.dialect.IsPermanent(err))
+				return execFailure("[projection.lookup] scan affected parent", err, p.dialect.IsPermanent(err))
 			}
 			parents = append(parents, pk)
 		}
 		if err := rows.Err(); err != nil {
 			_ = rows.Close()
-			return execFailure("[sql-projection.lookup] affected parents", err, p.dialect.IsPermanent(err))
+			return execFailure("[projection.lookup] affected parents", err, p.dialect.IsPermanent(err))
 		}
 		_ = rows.Close()
 

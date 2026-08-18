@@ -1041,3 +1041,57 @@ set = [ { column = "v", from = "$.v" } ]
 		require.Contains(t, err.Error(), "source")
 	})
 }
+
+// The canonical spelling — type = "projection" with a [projection] section —
+// must parse to the exact config the deprecated sql-projection spelling
+// produces: one language, two spellings, byte-equal semantics.
+func TestParseProjectionCanonicalSpellingParity(t *testing.T) {
+	canonical := strings.ReplaceAll(projectionTOML, "sql-projection", "projection")
+
+	oldCfg, err := (&sql.ProjectionSyncableParser{}).ParseConfig(
+		readConfig(t, "toml", strings.NewReader(projectionTOML)), projectionStorage())
+	require.NoError(t, err)
+	newCfg, err := (&sql.ProjectionSyncableParser{}).ParseConfig(
+		readConfig(t, "toml", strings.NewReader(canonical)), projectionStorage())
+	require.NoError(t, err)
+	require.Equal(t, oldCfg, newCfg, "the two spellings must produce identical configs")
+
+	// The config-only extractors resolve the section from the spelling too.
+	p := &sql.ProjectionSyncableParser{}
+	v := readConfig(t, "toml", strings.NewReader(canonical))
+	require.Equal(t, []string{"controlplane-event"}, p.TopicsFromConfig(v))
+	require.Equal(t, []string{"testdb"}, p.DatabasesFromConfig(v))
+}
+
+// Spelling guards: both sections at once, a half-renamed config, and the
+// unknown-key rejection naming the section the config actually used.
+func TestParseProjectionSpellingGuards(t *testing.T) {
+	parse := func(toml string) error {
+		_, err := (&sql.ProjectionSyncableParser{}).ParseConfig(
+			readConfig(t, "toml", strings.NewReader(toml)), projectionStorage())
+		return err
+	}
+
+	t.Run("both sections present", func(t *testing.T) {
+		both := projectionTOML + "\n[projection]\ndb = \"testdb\"\n"
+		err := parse(both)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "both [projection] and [sql-projection]")
+	})
+
+	t.Run("type projection with a sql-projection section", func(t *testing.T) {
+		half := strings.Replace(projectionTOML, `type = "sql-projection"`, `type = "projection"`, 1)
+		err := parse(half)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "rename the section to [projection]")
+	})
+
+	t.Run("unknown key names the canonical section", func(t *testing.T) {
+		canonical := strings.ReplaceAll(projectionTOML, "sql-projection", "projection")
+		canonical = strings.Replace(canonical, "[projection]\n", "[projection]\nemitTopic = \"x\"\n", 1)
+		err := parse(canonical)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "projection.emittopic")
+		require.NotContains(t, err.Error(), "sql-projection.emittopic")
+	})
+}

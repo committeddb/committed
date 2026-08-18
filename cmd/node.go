@@ -412,7 +412,12 @@ image can be templated per-node by an orchestrator:
 		// fine to register here alongside it.
 		d.AddIngestableParser("sql", ingestableParser(d, d))
 		d.AddSyncableParser("sql", &syncsql.SyncableParser{Metrics: m})
-		d.AddSyncableParser("sql-projection", &syncsql.ProjectionSyncableParser{Metrics: m})
+		// One projection parser, two type spellings: "projection" is canonical,
+		// "sql-projection" is a deprecation alias (POST answers with a
+		// deprecation warning; the config section follows the type spelling).
+		projectionParser := &syncsql.ProjectionSyncableParser{Metrics: m}
+		d.AddSyncableParser("projection", projectionParser)
+		d.AddSyncableParser("sql-projection", projectionParser)
 		d.AddSyncableParser("http", &synchttp.SyncableParser{})
 		// Inject the entity-schema compiler so ProposeType rejects a broken schema
 		// at POST /type (the compilers live in the http layer, which db can't

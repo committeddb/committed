@@ -39,6 +39,29 @@ type ConfigWriteResponse struct {
 	// (see cluster.MigrationEditAdvisory). The write itself succeeded; the
 	// advisory is informational.
 	Advisory string `json:"advisory,omitempty"`
+	// Warnings, when present, are non-fatal deprecation notices about the
+	// config document as posted — currently, the "sql-projection" syncable
+	// type spelling (canonical: "projection"). The write itself succeeded
+	// exactly as posted; each warning names what to rename before the
+	// deprecated form is removed.
+	Warnings []string `json:"warnings,omitempty"`
+}
+
+// deprecationWarnings reports the deprecated-spelling notices for an accepted
+// config write, or nil. Parse failures return nil — the propose already
+// validated the document; this is advisory-only and must never fail a write.
+func deprecationWarnings(name string, c *cluster.Configuration) []string {
+	if name != "syncable" {
+		return nil
+	}
+	v, err := cluster.ParseConfigBytes(c.MimeType, c.Data)
+	if err != nil {
+		return nil
+	}
+	if v.GetString("syncable.type") == "sql-projection" {
+		return []string{`syncable type "sql-projection" is deprecated: rename the type to "projection" and the [sql-projection] section to [projection] (the deprecated spelling still works for now, but will be removed in a future release)`}
+	}
+	return nil
 }
 
 // currentVersion reads the version currently marked current for id, or 0 if
@@ -77,7 +100,11 @@ func (h *HTTP) addConfig(
 			return
 		}
 
-		writeJSONStatus(w, httpgo.StatusOK, ConfigWriteResponse{ID: c.ID, Version: currentVersion(versions, c.ID)})
+		writeJSONStatus(w, httpgo.StatusOK, ConfigWriteResponse{
+			ID:       c.ID,
+			Version:  currentVersion(versions, c.ID),
+			Warnings: deprecationWarnings(name, c),
+		})
 	}
 }
 

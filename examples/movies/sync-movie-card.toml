@@ -7,97 +7,97 @@
 # See README § SQL projections for the full mechanics.
 [syncable]
 name = "movie-card"
-type = "sql-projection"
+type = "projection"
 
-[sql-projection]
+[projection]
 db = "bff"
 table = "movie_card"
 primaryKey = "movie_id"
 
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "movie_id"
 type = "VARCHAR(16)"
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "title"
 type = "VARCHAR(255)"
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "year"
 type = "INT"
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "genres"
 type = "VARCHAR(255)"
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "score"
 type = "NUMERIC"
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "votes"
 type = "INT"
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "top_cast"
 type = "JSONB"
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "directors"
 type = "JSONB"
 
-[[sql-projection.source]]
+[[projection.source]]
 topic = "movie"
 onDelete = "delete-row"
-[[sql-projection.source.rules]]
+[[projection.source.rules]]
 set = [
   { column = "title", from = "$.title" },
   { column = "year", from = "$.year" },
   { column = "genres", from = "$.genres" },
 ]
 
-[[sql-projection.source]]
+[[projection.source]]
 topic = "rating"
 onDelete = "clear"
-[[sql-projection.source.rules]]
+[[projection.source.rules]]
 set = [
   { column = "score", from = "$.score" },
   { column = "votes", from = "$.votes" },
 ]
 
-[[sql-projection.source]]
+[[projection.source]]
 topic = "person"
-[sql-projection.source.lookup]
+[projection.source.lookup]
 name = "people"
-[[sql-projection.source.lookup.field]]
+[[projection.source.lookup.field]]
 field = "name"
 from = "$.name"
 
-[[sql-projection.source]]
+[[projection.source]]
 topic = "credit"
 keyPath = "$.movie_id"
 when = [ { path = "$.role", equals = "actor" } ]
-[sql-projection.source.aggregate]
+[projection.source.aggregate]
 column = "top_cast"
 elementKey = "$.billing"
 elementKeyType = "number"
-[[sql-projection.source.aggregate.element]]
+[[projection.source.aggregate.element]]
 field = "billing"
 from = "$.billing"
-[[sql-projection.source.aggregate.element]]
+[[projection.source.aggregate.element]]
 field = "person_id"
 from = "$.person_id"
-[[sql-projection.source.aggregate.element]]
+[[projection.source.aggregate.element]]
 field = "name"
 lookup = "people"
 on = "person_id"
 select = "name"
 
-[[sql-projection.source]]
+[[projection.source]]
 topic = "credit"
 keyPath = "$.movie_id"
 when = [ { path = "$.role", equals = "director" } ]
-[sql-projection.source.aggregate]
+[projection.source.aggregate]
 column = "directors"
 elementKey = "$.billing"
 elementKeyType = "number"
-[[sql-projection.source.aggregate.element]]
+[[projection.source.aggregate.element]]
 field = "person_id"
 from = "$.person_id"
-[[sql-projection.source.aggregate.element]]
+[[projection.source.aggregate.element]]
 field = "name"
 lookup = "people"
 on = "person_id"

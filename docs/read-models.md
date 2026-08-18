@@ -1,7 +1,7 @@
 # Read models (SQL projections)
 
 A read model is a current-state table (one row per entity) that a
-`sql-projection` syncable maintains by folding an event topic in log order. The
+`projection` syncable maintains by folding an event topic in log order. The
 log stays the source of truth; the table is disposable and rebuildable from
 index 0.
 
@@ -22,7 +22,7 @@ not by default:
 
 | You want | Use | Why |
 |---|---|---|
-| A derived/denormalized table you query directly — a BFF row, a flat table replacing a complex join, current state per entity | **`sql-projection`** | It maintains the table *incrementally, per event*: continuously current (no refresh step), folds **multiple topics into one row**, aggregates children into array columns, enriches from other topics. This is committed's centerpiece use case. |
+| A derived/denormalized table you query directly — a BFF row, a flat table replacing a complex join, current state per entity | **`projection`** | It maintains the table *incrementally, per event*: continuously current (no refresh step), folds **multiple topics into one row**, aggregates children into array columns, enriches from other topics. This is committed's centerpiece use case. |
 | Raw per-table replicas — ad-hoc SQL, joins you own, feeding views/BI on your terms | plain **`sql`** syncable with a `primaryKey` (a mirror) | Faithful keyed copies of source tables. If you build a materialized view over mirrors, *you* own its refresh cost and staleness — committed keeps only the mirrors current. |
 | One row per **event** — an audit/history log | plain **`sql`** syncable with no `primaryKey` | Append-only, replay-safe history. |
 
@@ -30,7 +30,7 @@ The trade to understand: a materialized view over mirrors is stale from the
 moment its (often expensive) refresh completes; a projection is current
 within seconds of the source commit, forever, with no refresh to schedule.
 If the table you're building is *the thing the application reads*, start
-from `sql-projection` and use mirrors only for the parts a projection
+from `projection` and use mirrors only for the parts a projection
 cannot yet express.
 
 One projection scope line to know before you design: a projection's
@@ -52,14 +52,21 @@ data").
 The plain `sql` syncable lands a *history* table: one row per event.
 Applications usually query *current state*: one row per entity, which
 requires folding each entity's events in log order. A
-`type = "sql-projection"` syncable expresses that fold declaratively —
+`type = "projection"` syncable expresses that fold declaratively —
 in the one place that sees every event exactly in order — so the log
 stays the source of truth, the rules live in version-controlled TOML,
 reads are O(1), and the table is disposable: rebuild it by replaying
 from index 0. Use `sql` for event-log/history tables (and for
 `snapshot`-kind topics, which are total updates with nothing to fold);
-use `sql-projection` to maintain current-state tables from an
+use `projection` to maintain current-state tables from an
 `event`-kind topic. One topic typically feeds both.
+
+> **Renamed from `sql-projection`.** The projection language is not
+> SQL-specific in principle, so the type is now `projection` with a
+> `[projection]` section. The old spelling — `type = "sql-projection"`
+> with a `[sql-projection]` section, always renamed together — remains
+> accepted for a deprecation period; posting it succeeds and the
+> response carries a `warnings[]` entry naming the rename.
 
 A keyless history table (no `primaryKey`) is **replay-safe**: committed dedups
 each appended row on a hidden sidecar (`<table>__committed_applied`, keyed by the
@@ -91,7 +98,7 @@ committed as two separate events lands as two rows. That happens two ways:
 Either way the history table faithfully records each event — that is what an
 append log is. If you want one row per logical entity instead, give the `sql`
 syncable a `primaryKey` (its upsert then converges on the key) or maintain a
-current-state table with `sql-projection`.
+current-state table with `projection`.
 
 `primaryKey` takes one column or a list: `primaryKey = ["tenant_id",
 "project_id"]` declares a real composite `PRIMARY KEY (tenant_id,
@@ -112,40 +119,40 @@ mappings; the parser rejects a config where it doesn't.
 ```toml
 [syncable]
 name = "tenants"
-type = "sql-projection"
+type = "projection"
 mode = "always-current"        # rules target the current type version
 
-[sql-projection]
+[projection]
 topic      = "controlplane-event"
 db         = "hosted-projection"
 table      = "tenants"
 primaryKey = "tenant_id"       # or a list: ["tenant_id", "region"] — composite folds via set rules only
 # keyPath  = "$.tenant_id"     # optional; defaults to one $.<col> per primaryKey column, in order
 
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "tenant_id"
 type = "VARCHAR(256)"
 
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "tier"
 type = "VARCHAR(32)"
 
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "state"
 type = "VARCHAR(32)"
 
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "allocs"
 type = "JSONB"
 
-[[sql-projection.rules]]
+[[projection.rules]]
 when = [ { path = "$.event_type", equals = "tenant.created" } ]
 set  = [
   { column = "tier",  from  = "$.tier" },
   { column = "state", value = "pending" },
 ]
 
-[[sql-projection.rules]]
+[[projection.rules]]
 when = [
   { path = "$.event_type", equals = "tenant.provisioned" },
   { path = "$.tier",       equals = "prod" },
@@ -155,7 +162,7 @@ set  = [
   { column = "allocs", from  = "$.allocs" },
 ]
 
-[[sql-projection.rules]]
+[[projection.rules]]
 when = [ { path = "$.event_type", equals = "tenant.deprovisioned" } ]
 set  = [
   { column = "state",  value = "deprovisioning" },
@@ -225,7 +232,7 @@ error handling, deletes, and schema evolution:
 A projection can consume more than one topic and fold them into a single
 denormalized "BFF" row — e.g. a `movie_card` built from a normalized `movie`
 topic and a `rating` topic, one row per `movie_id`. Replace the single top-level
-`topic`/`rules` with a `[[sql-projection.source]]` block per topic. The
+`topic`/`rules` with a `[[projection.source]]` block per topic. The
 **topic is the discriminator** (an event only ever runs its own source's
 rules), and because each rule sets only its own columns, two sources fold
 into one row without clobbering. Each source also declares what its delete
@@ -234,23 +241,23 @@ drops the row), `clear` (a *contributor* — its delete NULLs only the
 columns it owns, the row survives), or `ignore`.
 
 ```toml
-[sql-projection]
+[projection]
 db = "bff"; table = "movie_card"; primaryKey = "movie_id"
 # … columns: movie_id, title, year, genres, score, votes …
 
-[[sql-projection.source]]
+[[projection.source]]
 topic    = "movie"          # this source's discriminator
 keyPath  = "$.movie_id"     # correlate by the shared aggregate key
 onDelete = "delete-row"     # movie is the spine: its delete drops the row
-  [[sql-projection.source.rules]]
+  [[projection.source.rules]]
   set = [ { column = "title",  from = "$.title" },
           { column = "year",   from = "$.year" },
           { column = "genres", from = "$.genres" } ]
 
-[[sql-projection.source]]
+[[projection.source]]
 topic    = "rating"
 onDelete = "clear"          # a contributor: its delete NULLs its columns, keeps the row
-  [[sql-projection.source.rules]]
+  [[projection.source.rules]]
   set = [ { column = "score", from = "$.score" },
           { column = "votes", from = "$.votes" } ]
 ```
@@ -287,29 +294,29 @@ different columns. Here the `credit` topic feeds `top_cast` (actors) and
 `directors` (directors):
 
 ```toml
-[[sql-projection.source]]
+[[projection.source]]
 topic   = "credit"
 keyPath = "$.movie_id"               # which movie row this child folds into
 when    = [ { path = "$.role", equals = "actor" } ]
-  [sql-projection.source.aggregate]
+  [projection.source.aggregate]
   column         = "top_cast"
   elementKey     = "$.billing"       # billing order: identity + numeric sort
   elementKeyType = "number"
-    [[sql-projection.source.aggregate.element]]
+    [[projection.source.aggregate.element]]
     field = "person_id"
     from  = "$.person_id"
-    [[sql-projection.source.aggregate.element]]
+    [[projection.source.aggregate.element]]
     field = "billing"
     from  = "$.billing"
 
-[[sql-projection.source]]
+[[projection.source]]
 topic   = "credit"
 keyPath = "$.movie_id"
 when    = [ { path = "$.role", equals = "director" } ]
-  [sql-projection.source.aggregate]
+  [projection.source.aggregate]
   column     = "directors"
   elementKey = "$.billing"
-    [[sql-projection.source.aggregate.element]]
+    [[projection.source.aggregate.element]]
     field = "person_id"
     from  = "$.person_id"
 ```
@@ -337,24 +344,24 @@ instead of `from` (`on` names the plain element field holding the foreign key).
 Several enriched fields sharing a dimension coalesce into one join:
 
 ```toml
-[[sql-projection.source]]
+[[projection.source]]
 topic = "person"                       # the dimension topic, keyed by person_id
-  [sql-projection.source.lookup]
+  [projection.source.lookup]
   name = "people"                      # referenced by element enrichments below
-    [[sql-projection.source.lookup.field]]
+    [[projection.source.lookup.field]]
     field = "name"
     from  = "$.name"
 
-[[sql-projection.source]]
+[[projection.source]]
 topic   = "credit"
 keyPath = "$.movie_id"
-  [sql-projection.source.aggregate]
+  [projection.source.aggregate]
   column     = "top_cast"
   elementKey = "$.billing"
-    [[sql-projection.source.aggregate.element]]
+    [[projection.source.aggregate.element]]
     field = "person_id"                # the foreign key, stored
     from  = "$.person_id"
-    [[sql-projection.source.aggregate.element]]
+    [[projection.source.aggregate.element]]
     field  = "name"                    # resolved from the people dimension
     lookup = "people"
     on     = "person_id"               # join the element's person_id …
@@ -371,7 +378,7 @@ Lookups also enrich **scalar spine columns** — the canonical BFF ask, "the
 job row carries the customer's display name as a real column":
 
 ```toml
-[[sql-projection.rules]]
+[[projection.rules]]
 when = [ { path = "$.kind", equals = "job" } ]
 set = [
   { column = "customer_id",   from = "$.CustomerId" },
@@ -452,7 +459,7 @@ replays from index 0 and the log stays the source of truth, the clean way to fix
 or evolve a syncable's rules is to stand a *second* projection up beside the
 first rather than mutate a live table:
 
-1. `POST` a new `sql-projection` with the corrected rules, pointed at a **new
+1. `POST` a new `projection` with the corrected rules, pointed at a **new
    table**. It replays the whole log from the start and materializes the fixed
    view — the old table keeps serving reads the entire time, so there is no
    downtime.

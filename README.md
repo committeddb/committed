@@ -41,7 +41,7 @@ Committed is specifically NOT a databse designed for querying.
   either as faithful per-table mirrors (`sql`) or by **transforming and
   folding topics into the denormalized shape you query** —
   multi-topic BFF rows, collection aggregates, cross-topic enrichment
-  (`sql-projection`, the primary read-model pattern; see
+  (`projection`, the primary read-model pattern; see
   [docs/read-models.md](docs/read-models.md)). Destinations today:
   SQL (MySQL/PostgreSQL) and HTTP.
 
@@ -260,52 +260,59 @@ bytes.
 The plain `sql` syncable lands a *history* table: one row per event.
 Applications usually query *current state*: one row per entity, which
 requires folding each entity's events in log order. A
-`type = "sql-projection"` syncable expresses that fold declaratively —
+`type = "projection"` syncable expresses that fold declaratively —
 in the one place that sees every event exactly in order — so the log
 stays the source of truth, the rules live in version-controlled TOML,
 reads are O(1), and the table is disposable: rebuild it by replaying
 from index 0. Use `sql` for event-log/history tables (and for
 `snapshot`-kind topics, which are total updates with nothing to fold);
-use `sql-projection` to maintain current-state tables from an
+use `projection` to maintain current-state tables from an
 `event`-kind topic. One topic typically feeds both.
+
+> **Renamed from `sql-projection`.** The projection language is not
+> SQL-specific in principle, so the type is now `projection` with a
+> `[projection]` section. The old spelling — `type = "sql-projection"`
+> with a `[sql-projection]` section, always renamed together — remains
+> accepted for a deprecation period; posting it succeeds and the
+> response carries a `warnings[]` entry naming the rename.
 
 ```toml
 [syncable]
 name = "tenants"
-type = "sql-projection"
+type = "projection"
 mode = "always-current"        # rules target the current type version
 
-[sql-projection]
+[projection]
 topic      = "controlplane-event"
 db         = "hosted-projection"
 table      = "tenants"
 primaryKey = "tenant_id"
 # keyPath  = "$.tenant_id"     # optional; defaults to $.<primaryKey>
 
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "tenant_id"
 type = "VARCHAR(256)"
 
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "tier"
 type = "VARCHAR(32)"
 
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "state"
 type = "VARCHAR(32)"
 
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "allocs"
 type = "JSONB"
 
-[[sql-projection.rules]]
+[[projection.rules]]
 when = [ { path = "$.event_type", equals = "tenant.created" } ]
 set  = [
   { column = "tier",  from  = "$.tier" },
   { column = "state", value = "pending" },
 ]
 
-[[sql-projection.rules]]
+[[projection.rules]]
 when = [
   { path = "$.event_type", equals = "tenant.provisioned" },
   { path = "$.tier",       equals = "prod" },
@@ -315,7 +322,7 @@ set  = [
   { column = "allocs", from  = "$.allocs" },
 ]
 
-[[sql-projection.rules]]
+[[projection.rules]]
 when = [ { path = "$.event_type", equals = "tenant.deprovisioned" } ]
 set  = [
   { column = "state",  value = "deprovisioning" },
@@ -419,7 +426,7 @@ checkpointMaxAge  = "1s"     # ...or once 1s elapses since the first pending one
 already-synced proposals. The default of `1` re-delivers at most one — keep it
 at `1` for **non-idempotent** sinks (an HTTP webhook, an event stream: every
 duplicate is externally visible). Raise it only for **idempotent** sinks (the
-`sql` / `sql-projection` dialects upsert, so a replay is a harmless no-op),
+`sql` / `projection` dialects upsert, so a replay is a harmless no-op),
 where it trades that bounded duplicate exposure for substantially fewer raft
 round-trips on a fast destination. For a `BatchSyncable` (the SQL dialects)
 `checkpointEvery` is the batch size and `checkpointMaxAge` the batch-age flush.
