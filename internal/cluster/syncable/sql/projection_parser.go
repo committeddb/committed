@@ -99,7 +99,7 @@ func (p *ProjectionSyncableParser) TopicsFromConfig(v *cluster.ParsedConfig) []s
 	}
 
 	var rawSources []rawProjectionSource
-	if err := v.UnmarshalKey("sql-projection.source", &rawSources); err == nil {
+	if err := v.UnmarshalKeyLenient("sql-projection.source", &rawSources); err == nil { // topic peek — admission strictness lives in parseProjectionSources
 		for _, rs := range rawSources {
 			add(rs.Topic)
 		}
@@ -128,7 +128,28 @@ func (p *ProjectionSyncableParser) DatabasesFromConfig(v *cluster.ParsedConfig) 
 // unresolvable on this node. storage is used only for type resolution (a `when`
 // discriminator shorthand), never for storage.Database. Database is left nil;
 // ParseConfig resolves and sets it.
+// projectionSectionKeys is the complete vocabulary of the flat
+// [sql-projection] table (lowercased; key matching is case-insensitive).
+// The struct-decoded subtrees (columns/rules/source) enforce their own
+// vocabularies via the strict UnmarshalKey; this set covers the keys the
+// parser reads flatly — a key outside it is rejected loudly rather than
+// silently ignored (the field incident: `where` and `emitTopic` returned
+// 200 and were inert). GROW THIS SET when adding a config key.
+var projectionSectionKeys = map[string]bool{
+	"db": true, "table": true, "primarykey": true, "topic": true,
+	"keypath": true, "rules": true, "columns": true, "source": true,
+}
+
 func parseProjectionConfigFields(v *cluster.ParsedConfig, storage cluster.DatabaseStorage) (*ProjectionConfig, error) {
+	for _, k := range v.SectionKeys("sql-projection") {
+		if !projectionSectionKeys[k] {
+			return nil, &cluster.FieldError{
+				Field: "sql-projection." + k,
+				Issue: "unknown key — not part of the sql-projection vocabulary (check the spelling against the docs; unknown keys are rejected rather than silently ignored)",
+			}
+		}
+	}
+
 	var columns []ProjectionColumn
 	if err := v.UnmarshalKey("sql-projection.columns", &columns); err != nil {
 		return nil, fmt.Errorf("[sql-projection.parser] parse sql-projection.columns: %w", err)
@@ -195,8 +216,10 @@ func (p *ProjectionSyncableParser) ParseConfig(v *cluster.ParsedConfig, storage 
 
 // parseProjectionSources reads either the multi-source
 // `[[sql-projection.source]]` blocks or — for back-compat — the single-source
-// top-level `topic` / `keyPath` / `rules`. Exactly one shape is used: source
-// blocks win when present.
+// top-level `topic` / `keyPath` / `rules`. Exactly one shape is allowed:
+// mixing them is a loud config error, not a silent precedence — the field
+// incident's three keyPath probes died with 99 dead letters each because a
+// top-level keyPath was silently ignored once source blocks were present.
 func parseProjectionSources(v *cluster.ParsedConfig, storage cluster.DatabaseStorage) ([]ProjectionSource, error) {
 	var rawSources []rawProjectionSource
 	if err := v.UnmarshalKey("sql-projection.source", &rawSources); err != nil {
@@ -204,6 +227,14 @@ func parseProjectionSources(v *cluster.ParsedConfig, storage cluster.DatabaseSto
 	}
 
 	if len(rawSources) > 0 {
+		for _, shorthand := range []string{"topic", "keyPath", "rules"} {
+			if v.Get("sql-projection."+shorthand) != nil {
+				return nil, &cluster.FieldError{
+					Field: "sql-projection." + shorthand,
+					Issue: "cannot be combined with [[sql-projection.source]] blocks — the single-source shorthand and the multi-source form are mutually exclusive; move this into a source block",
+				}
+			}
+		}
 		sources := make([]ProjectionSource, 0, len(rawSources))
 		for si, rs := range rawSources {
 			when, err := normalizeWhen(rs.When, storage, rs.Topic)

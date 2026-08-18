@@ -924,10 +924,120 @@ topic = "dim"
 keyPath = "$.id"
 [sql-projection.source.lookup]
 name = "dim"
-[[sql-projection.source.lookup.fields]]
+[[sql-projection.source.lookup.field]]
 field = "name"
 from = "$.name"
 `)
 		require.ErrorContains(t, err, "require a single-column primaryKey")
+	})
+}
+
+// The silent-acceptance fix, red-proofed with the pilot's exact probe keys:
+// every unknown or misplaced key must be a loud 400 naming the key — four
+// gap probes returned 200 and were inert (emitTopic proven not even
+// stored), which is how an operator (or a validating agent) is fooled into
+// believing a feature exists. "The parser accepted it" must mean something.
+func TestParseProjectionRejectsUnknownKeys(t *testing.T) {
+	base := `
+[sql-projection]
+db = "testdb"
+table = "t"
+primaryKey = "id"
+topic = "e"
+[[sql-projection.columns]]
+name = "id"
+type = "VARCHAR(64)"
+[[sql-projection.columns]]
+name = "v"
+type = "VARCHAR(64)"
+[[sql-projection.rules]]
+set = [ { column = "v", from = "$.v" } ]
+`
+	parse := func(t *testing.T, toml string) error {
+		t.Helper()
+		v := readConfig(t, "toml", strings.NewReader(toml))
+		_, err := (&sql.ProjectionSyncableParser{}).ParseConfig(v, projectionStorage())
+		return err
+	}
+
+	t.Run("baseline parses", func(t *testing.T) {
+		require.NoError(t, parse(t, base))
+	})
+
+	// The probes insert into the FLAT [sql-projection] table (appending
+	// after a [[rules]] block would land inside that block — which the
+	// strict struct decode also catches, but the flat-section check is
+	// what these two pin).
+	atSection := func(key string) string {
+		return strings.Replace(base, `db = "testdb"`, `db = "testdb"
+`+key, 1)
+	}
+
+	t.Run("unknown top-level key (the where probe)", func(t *testing.T) {
+		err := parse(t, atSection(`where = "$.active == true"`))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "where")
+		require.Contains(t, err.Error(), "unknown key")
+	})
+
+	t.Run("unknown top-level key (the emitTopic probe)", func(t *testing.T) {
+		err := parse(t, atSection(`emitTopic = "derived"`))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "emittopic")
+		require.Contains(t, err.Error(), "unknown key")
+	})
+
+	t.Run("unknown key inside a source block (the latestBy probe)", func(t *testing.T) {
+		toml := `
+[sql-projection]
+db = "testdb"
+table = "t"
+primaryKey = "id"
+[[sql-projection.columns]]
+name = "id"
+type = "VARCHAR(64)"
+[[sql-projection.columns]]
+name = "v"
+type = "VARCHAR(64)"
+[[sql-projection.source]]
+topic = "e"
+latestBy = "$.Timestamp"
+[[sql-projection.source.rules]]
+set = [ { column = "v", from = "$.v" } ]
+`
+		err := parse(t, toml)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "latestBy")
+	})
+
+	t.Run("unknown key inside a set entry (the expr probe, alongside a valid arm)", func(t *testing.T) {
+		err := parse(t, strings.Replace(base,
+			`set = [ { column = "v", from = "$.v" } ]`,
+			`set = [ { column = "v", from = "$.v", expr = "a + b" } ]`, 1))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "expr")
+	})
+
+	t.Run("single-source shorthand mixed with source blocks", func(t *testing.T) {
+		toml := `
+[sql-projection]
+db = "testdb"
+table = "t"
+primaryKey = "id"
+topic = "e"
+[[sql-projection.columns]]
+name = "id"
+type = "VARCHAR(64)"
+[[sql-projection.columns]]
+name = "v"
+type = "VARCHAR(64)"
+[[sql-projection.source]]
+topic = "e"
+[[sql-projection.source.rules]]
+set = [ { column = "v", from = "$.v" } ]
+`
+		err := parse(t, toml)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "source")
 	})
 }

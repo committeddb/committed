@@ -48,6 +48,14 @@ type Projection struct {
 	delete *Delete
 }
 
+// projectionUnmatchedWarnRun is how many CONSECUTIVE unmatched events a
+// rule source absorbs before warning that its when clauses probably match
+// nothing (exported-adjacent knob deliberately avoided: the number only
+// gates a log line). High enough that a topic's occasional foreign
+// variants never trip it; low enough to fire early in a misconfigured
+// backfill.
+const projectionUnmatchedWarnRun = 1000
+
 // projectionSource is the prepared runtime of one ProjectionSource. Exactly one
 // of rules (scalar fold), agg (collection fold), or lkp (dimension) is set.
 type projectionSource struct {
@@ -61,6 +69,10 @@ type projectionSource struct {
 	// topic), evaluated on upsert before the rules/aggregate apply.
 	when  []WhenClause
 	rules []*projectionStmt
+	// unmatchedRun counts CONSECUTIVE events that matched no rule (worker
+	// goroutine only — no lock). At projectionUnmatchedWarnRun it triggers
+	// the one-shot misconfiguration warning; any match resets it.
+	unmatchedRun int
 	// clear is the prepared "UPDATE … SET ownedCols = NULL WHERE pk = ?", set
 	// only when onDelete == "clear".
 	clear    *gosql.Stmt
@@ -718,8 +730,21 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 		if p.metrics != nil {
 			p.metrics.SyncRulesUnmatched(p.name, src.topic)
 		}
+		// A LONG RUN of consecutive misses is a different signal than the
+		// odd foreign variant: it usually means every `when` in the source
+		// is wrong — most treacherously a type-mismatched equals (the field
+		// case: `equals = "true"` against a JSON boolean matched 0 of
+		// 248,854 rows, silently — `equals = true` matched all). Warn once
+		// per run so the empty table has a named cause in the logs.
+		src.unmatchedRun++
+		if src.unmatchedRun == projectionUnmatchedWarnRun {
+			zap.L().Warn("[sql-projection] source has matched no rules for a long run of events — if this table should be filling, check the source's when clauses (a type-mismatched `equals` matches nothing silently: `equals = \"true\"` never equals JSON boolean true)",
+				zap.String("syncable", p.name), zap.String("topic", src.topic),
+				zap.Int("consecutive_unmatched", src.unmatchedRun))
+		}
 		return nil
 	}
+	src.unmatchedRun = 0
 
 	// Key resolution is deliberately lazy — after matching — so an
 	// unmatched foreign event missing the keyPath is a non-event, not

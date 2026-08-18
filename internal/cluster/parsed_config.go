@@ -211,16 +211,69 @@ func (c *ParsedConfig) GetStringMapString(path string) map[string]string {
 // field names case-insensitively while leaving the data itself —
 // values and any user-supplied map keys — untouched. An absent path
 // decodes nothing and returns nil.
+//
+// STRICT: a key in the document that no struct field consumes is an
+// error naming the key. "The parser accepted it" has to mean something —
+// the field incident this guards was probe keys (latestBy, expr, …)
+// returning 200 while silently inert, which manufactures belief in
+// features that don't exist. A deliberate partial decode (the pipeline
+// endpoint peeking topics out of a wide section) uses
+// UnmarshalKeyLenient instead — never a config-admission path.
 func (c *ParsedConfig) UnmarshalKey(path string, target any) error {
+	return c.unmarshalKey(path, target, true)
+}
+
+// UnmarshalKeyLenient is UnmarshalKey without the unknown-key check, for
+// callers that INTENTIONALLY decode a subset of a section (read-side
+// peeks). Config admission must use the strict UnmarshalKey.
+func (c *ParsedConfig) UnmarshalKeyLenient(path string, target any) error {
+	return c.unmarshalKey(path, target, false)
+}
+
+func (c *ParsedConfig) unmarshalKey(path string, target any, strict bool) error {
 	v, ok := c.lookup(path)
 	if !ok {
 		return nil
 	}
-	decoder, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{Result: target})
+	cfg := &mapstructure.DecoderConfig{Result: target}
+	var md mapstructure.Metadata
+	if strict {
+		cfg.Metadata = &md
+	}
+	decoder, err := mapstructure.NewDecoder(cfg)
 	if err != nil {
 		return err
 	}
-	return decoder.Decode(v)
+	if err := decoder.Decode(v); err != nil {
+		return err
+	}
+	if strict && len(md.Unused) > 0 {
+		sort.Strings(md.Unused)
+		quoted := make([]string, len(md.Unused))
+		for i, k := range md.Unused {
+			quoted[i] = strconv.Quote(k)
+		}
+		return fmt.Errorf("unknown key(s) %s under %q — not part of this config's vocabulary (check the spelling against the docs; unknown keys are rejected rather than silently ignored)",
+			strings.Join(quoted, ", "), path)
+	}
+	return nil
+}
+
+// SectionKeys returns the immediate child keys of the table at path
+// (lowercased — key matching is case-insensitive throughout), or nil when
+// the path is absent or not a table. The allowed-key checks for flat
+// (Get*-read) config sections diff against this.
+func (c *ParsedConfig) SectionKeys(path string) []string {
+	m, ok := c.Get(path).(map[string]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, strings.ToLower(k))
+	}
+	sort.Strings(out)
+	return out
 }
 
 func toString(v any) string {

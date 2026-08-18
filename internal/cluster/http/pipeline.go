@@ -236,7 +236,7 @@ func topicsOf(c *cluster.Configuration, kind string) []string {
 	var multiTopics []struct {
 		Topic string `mapstructure:"topic"`
 	}
-	_ = v.UnmarshalKey(typ+".topics", &multiTopics)
+	_ = v.UnmarshalKeyLenient(typ+".topics", &multiTopics) // deliberate partial decode: topic peek
 	for _, s := range multiTopics {
 		add(s.Topic)
 	}
@@ -244,7 +244,7 @@ func topicsOf(c *cluster.Configuration, kind string) []string {
 		var srcs []struct {
 			Topic string `mapstructure:"topic"`
 		}
-		_ = v.UnmarshalKey("sql-projection.source", &srcs)
+		_ = v.UnmarshalKeyLenient("sql-projection.source", &srcs) // deliberate partial decode: topic peek
 		for _, s := range srcs {
 			add(s.Topic)
 		}
