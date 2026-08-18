@@ -220,6 +220,13 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 			r.Get("/syncable/{id}/errors", h.GetSyncableErrors)
 			r.Get("/syncable/{id}/status", h.GetSyncableStatus)
 			r.Post("/syncable/{id}/deadletter", h.DeadLetterStuckSyncable)
+			// A natural wrong guess the field made: GETting the POST path.
+			// Not an alias (aliases breed drift) — a 405 that names where
+			// the listing actually lives.
+			r.Get("/syncable/{id}/deadletter", func(w http.ResponseWriter, _ *http.Request) {
+				writeError(w, http.StatusMethodNotAllowed, "method_not_allowed",
+					"dead-letter records are listed at GET /v1/syncable/{id}/errors; POST here skips the proposal a stuck syncable is currently blocked on")
+			})
 			r.Post("/syncable/{id}/deadletter/{index}/acknowledge", h.AcknowledgeSyncableDeadLetter)
 			r.Post("/syncable/{id}/replay/{index}", h.ReplaySyncableDeadLetter)
 			r.Post("/syncable/{id}/rollback", h.rollback("syncable", h.c.SyncableVersion, h.c.ProposeSyncable, h.c.SyncableVersions))
@@ -229,6 +236,15 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 
 			r.Get("/type", h.listConfig("type", h.c.Types))
 			r.Post("/type/{id}", h.addTypeConfig())
+			// Deliberate refusal, stated as a posture rather than a bare
+			// 405: committed log entries reference their type permanently,
+			// so deleting a type would break replay of every entry that
+			// carries it. Types are append/version-only; an experiment's
+			// leftover type is harmless residue.
+			r.Delete("/type/{id}", func(w http.ResponseWriter, _ *http.Request) {
+				writeError(w, http.StatusMethodNotAllowed, "types_are_version_only",
+					"types cannot be deleted — log entries reference their type permanently, so deletion would break replay; POST a new version to change one (an unused type is harmless residue)")
+			})
 			r.Get("/type/{id}/versions", h.getVersions("type", h.c.TypeVersions))
 			r.Get("/type/{id}/versions/{version}", h.getVersion("type", h.c.TypeVersion))
 			r.Get("/type/{id}/migration-errors", h.GetTypeMigrationErrors)

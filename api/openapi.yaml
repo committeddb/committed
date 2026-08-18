@@ -782,6 +782,26 @@ paths:
         '503':
           $ref: '#/components/responses/NotLinearizable'
   /v1/syncable/{id}/deadletter:
+    get:
+      tags: [syncable]
+      summary: "Not the listing (405) — dead letters are listed at GET .../errors"
+      description: |
+        Deliberately answered with a guiding 405 rather than an alias:
+        dead-letter records are listed at `GET /v1/syncable/{id}/errors`;
+        POST on this path skips the proposal a stuck syncable is blocked
+        on. Documented because GETting the POST path is a natural guess.
+      operationId: getSyncableDeadLetterHint
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      responses:
+        '405':
+          description: The guiding answer, naming the listing route.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
     post:
       tags: [syncable]
       summary: Skip the proposal a syncable is currently blocked on
@@ -1086,6 +1106,27 @@ paths:
     # Write-only: a type's configuration is created/updated here and read
     # back via the version endpoints below or the GET /v1/type list. There
     # is no GET /v1/type/{id} — committed data is not queried over HTTP.
+    delete:
+      tags: [type]
+      summary: "Refused (405) — types are version-only by design"
+      description: |
+        Types cannot be deleted: committed log entries reference their
+        type permanently, so deletion would break replay of every entry
+        that carries it. POST a new version to change one; an unused
+        type left over from an experiment is harmless residue. The 405
+        body states this posture (code `types_are_version_only`).
+      operationId: deleteTypeRefused
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      responses:
+        '405':
+          description: The posture, stated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
     post:
       tags: [type]
       summary: Create or update a type configuration
@@ -2225,9 +2266,13 @@ components:
           type: boolean
           description: |
             True if the worker has been blocked retrying a TRANSIENT error past
-            the stuck threshold (it is still running). False for a healthy worker
-            and for a terminal park (see `workerState`). The `index`, `since`, and
-            `message` fields are present when stuck or parked.
+            the stuck threshold (it is still running and will resume by itself).
+            DELIBERATELY false during a terminal park — stuck and parked are
+            mutually exclusive: stuck refines `workerState: running`, while a
+            park means the worker STOPPED and needs an operator. Read
+            `workerState` first; a parked worker with frozen lag and
+            `stuck: false` is one condition (the park), not two. The `index`,
+            `since`, and `message` fields are present when stuck or parked.
         workerState:
           type: string
           enum: [running, parked, degraded]

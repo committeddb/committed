@@ -626,11 +626,24 @@ func tryProposeAndVerify(r *Raft, payload []byte, deadline time.Duration, stopC 
 	poll := time.NewTimer(deadline)
 	defer poll.Stop()
 	for {
+		// ORDER IS LOAD-BEARING: read commit BEFORE entries. The reverse
+		// (entries, then commit) has a TOCTOU that manufactures a durability
+		// false positive: the entries snapshot shows the payload appended-
+		// but-uncommitted at index N; between the two reads a higher-term
+		// leader's conflict-append truncates N and advances commit past it;
+		// the stale snapshot's entry then satisfies index ≤ commit and the
+		// payload counts as acked — right as raft correctly discards it
+		// (CI 2026-08-18: "1 of 142 acked payloads never converged", with
+		// the term-conflict truncation in the log directly above). Reading
+		// commit first closes it: commit ≥ N implies the Save carrying any
+		// conflict-truncation below N already completed (commit and
+		// entries persist in the same Save), so an entries read taken
+		// AFTER cannot show a stale entry at ≤ commit.
+		commit := r.commitIndex()
 		es, err := r.ents()
 		if err != nil {
 			return false
 		}
-		commit := r.commitIndex()
 		for _, e := range es {
 			if bytes.Equal(e.Data, payload) {
 				if e.GetIndex() <= commit {

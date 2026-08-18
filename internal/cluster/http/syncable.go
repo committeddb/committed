@@ -273,6 +273,13 @@ type SyncableRebuildResponse struct {
 // whether it is blocked (and on what), plus its numeric progress (how far it
 // has synced vs. how far there is to sync).
 type SyncableStatusResponse struct {
+	// Stuck means TRANSIENTLY blocked and still retrying — deliberately
+	// false during a terminal park, which the field read as a
+	// contradiction ("stuck: false" beside a parked worker with frozen
+	// lag). The two are mutually exclusive by design: stuck = the worker
+	// is alive and will resume by itself; parked (see WorkerState) = it
+	// STOPPED and needs an operator. Read WorkerState first; Stuck
+	// refines "running".
 	Stuck bool `json:"stuck"`
 	// WorkerState is the worker's lifecycle state: "running" (healthy, or
 	// transiently stuck retrying — see Stuck), "parked" (the circuit breaker
