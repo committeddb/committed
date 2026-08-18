@@ -68,6 +68,15 @@ type ProjectionSet struct {
 	Lookup string `mapstructure:"lookup"`
 	On     string `mapstructure:"on"`
 	Select string `mapstructure:"select"`
+	// The fifth arm: a computed column — a closed-function expression over
+	// the event payload (see expr.go for the language and its exact-decimal
+	// semantics). Compiled at validation; a config that validates can only
+	// fail on data at apply time.
+	Expr string `mapstructure:"expr"`
+
+	// compiled is Expr's admission-checked AST, populated by
+	// validateProjectionConfig so the apply path never re-parses.
+	compiled exprNode
 }
 
 // IsEnrichment reports whether this set entry is the lookup-enrichment arm.
@@ -554,7 +563,7 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 				return fmt.Errorf("%s rule %d: set is required", where, i+1)
 			}
 			seen := make(map[string]bool, len(r.Set))
-			for _, s := range r.Set {
+			for k, s := range r.Set {
 				if s.Column == "" {
 					return fmt.Errorf("%s rule %d: set entry with empty column", where, i+1)
 				}
@@ -568,13 +577,20 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 					return fmt.Errorf("%s rule %d column %q: on/select require lookup", where, i+1, s.Column)
 				}
 				forms := 0
-				for _, set := range []bool{s.From != "", s.Value != nil, s.Null, s.Lookup != ""} {
+				for _, set := range []bool{s.From != "", s.Value != nil, s.Null, s.Lookup != "", s.Expr != ""} {
 					if set {
 						forms++
 					}
 				}
 				if forms != 1 {
-					return fmt.Errorf("%s rule %d column %q: exactly one of from, value, null, or lookup is required", where, i+1, s.Column)
+					return fmt.Errorf("%s rule %d column %q: exactly one of from, value, null, expr, or lookup is required", where, i+1, s.Column)
+				}
+				if s.Expr != "" {
+					compiled, err := compileExpr(s.Expr)
+					if err != nil {
+						return fmt.Errorf("%s rule %d column %q: expr: %w", where, i+1, s.Column, err)
+					}
+					r.Set[k].compiled = compiled // r.Set shares the config's backing array
 				}
 				if s.Value != nil && !isScalar(s.Value) {
 					return fmt.Errorf("%s rule %d column %q: value must be a scalar literal, got %T", where, i+1, s.Column, s.Value)

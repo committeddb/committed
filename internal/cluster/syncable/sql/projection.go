@@ -6,6 +6,7 @@ import (
 	gosql "database/sql"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"strconv"
 
 	"github.com/PaesslerAG/jsonpath"
@@ -771,6 +772,20 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 				v, err := jsonpath.Get(s.From, jsonData)
 				if err != nil {
 					return cluster.Permanent(fmt.Errorf("[projection.apply] jsonpath [%s]: %w", s.From, err))
+				}
+				plain[s.Column] = coerceForColumn(v, p.columnType(s.Column))
+			case s.Expr != "":
+				v, err := evalExpr(s.compiled, jsonData)
+				if err == nil {
+					if r, ok := v.(*big.Rat); ok {
+						var text string
+						if text, err = formatRat(r); err == nil {
+							v = json.Number(text)
+						}
+					}
+				}
+				if err != nil {
+					return cluster.Permanent(fmt.Errorf("[projection.apply] expr for column %q: %w", s.Column, err))
 				}
 				plain[s.Column] = coerceForColumn(v, p.columnType(s.Column))
 			case s.Null:

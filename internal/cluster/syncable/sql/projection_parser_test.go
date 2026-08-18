@@ -288,22 +288,22 @@ type = "TEXT"
 		{
 			"both from and value",
 			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\" } ]\nset = [ { column = \"v\", from = \"$.v\", value = \"y\" } ]",
-			"exactly one of from, value, null, or lookup",
+			"exactly one of from, value, null, expr, or lookup",
 		},
 		{
 			"neither from nor value nor null",
 			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\" } ]\nset = [ { column = \"v\" } ]",
-			"exactly one of from, value, null, or lookup",
+			"exactly one of from, value, null, expr, or lookup",
 		},
 		{
 			"both value and null",
 			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\" } ]\nset = [ { column = \"v\", value = \"y\", null = true } ]",
-			"exactly one of from, value, null, or lookup",
+			"exactly one of from, value, null, expr, or lookup",
 		},
 		{
 			"both from and null",
 			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\" } ]\nset = [ { column = \"v\", from = \"$.v\", null = true } ]",
-			"exactly one of from, value, null, or lookup",
+			"exactly one of from, value, null, expr, or lookup",
 		},
 		{
 			"unknown column",
@@ -1093,5 +1093,43 @@ func TestParseProjectionSpellingGuards(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "projection.emittopic")
 		require.NotContains(t, err.Error(), "sql-projection.emittopic")
+	})
+}
+
+// expr set entries: the TOML surface parses, admission rejects a bad
+// expression as a config error naming the column, and expr is mutually
+// exclusive with the other set arms.
+func TestParseProjectionExpr(t *testing.T) {
+	base := strings.ReplaceAll(projectionTOML, "sql-projection", "projection")
+
+	t.Run("parses and validates", func(t *testing.T) {
+		toml := strings.Replace(base,
+			`{ column = "tier",  from  = "$.tier" },`,
+			`{ column = "tier",  expr  = "coalesce(nullif($.tier, ''), 'dev')" },`, 1)
+		config, err := (&sql.ProjectionSyncableParser{}).ParseConfig(
+			readConfig(t, "toml", strings.NewReader(toml)), projectionStorage())
+		require.NoError(t, err)
+		require.Equal(t, "coalesce(nullif($.tier, ''), 'dev')", config.Sources[0].Rules[0].Set[0].Expr)
+	})
+
+	t.Run("bare division is a config error", func(t *testing.T) {
+		toml := strings.Replace(base,
+			`{ column = "tier",  from  = "$.tier" },`,
+			`{ column = "tier",  expr  = "$.a / $.b" },`, 1)
+		_, err := (&sql.ProjectionSyncableParser{}).ParseConfig(
+			readConfig(t, "toml", strings.NewReader(toml)), projectionStorage())
+		require.Error(t, err)
+		require.Contains(t, err.Error(), `column "tier"`)
+		require.Contains(t, err.Error(), "round(...) or trunc(...)")
+	})
+
+	t.Run("expr excludes the other arms", func(t *testing.T) {
+		toml := strings.Replace(base,
+			`{ column = "tier",  from  = "$.tier" },`,
+			`{ column = "tier",  from  = "$.tier", expr = "1 + 1" },`, 1)
+		_, err := (&sql.ProjectionSyncableParser{}).ParseConfig(
+			readConfig(t, "toml", strings.NewReader(toml)), projectionStorage())
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "exactly one of from, value, null, expr, or lookup")
 	})
 }
