@@ -117,6 +117,47 @@ const (
 // multi-batch cadence accumulation cheaply.
 var syncBatchCap = 500
 
+// recoverStageState closes the gap between a syncable's NODE-LOCAL stage
+// state and its replicated checkpoint before the worker consumes: after
+// an ownership move (this node has no store, or a stale one) or a crash
+// that lost the store's NoSync tail, folding forward from the checkpoint
+// alone would silently produce incomplete aggregates. The design's
+// checkpoint split: replay (frontier, checkpoint] folding WITHOUT sink
+// emission (everything ≤ checkpoint is already durably applied), then
+// consume normally. Lag, never loss — and loudly visible.
+func (db *DB) recoverStageState(id string, rec cluster.StageRecoverer, checkpoint uint64) error {
+	frontier, has, err := rec.StageFrontier()
+	if err != nil {
+		return err
+	}
+	if !has || frontier >= checkpoint {
+		return nil
+	}
+	db.logger.Warn("stage state is behind the checkpoint — re-deriving before consuming (an ownership move or a lost NoSync tail; outputs below the checkpoint are already applied, so this pass folds without emitting)",
+		zap.String("id", id), zap.Uint64("stage_frontier", frontier), zap.Uint64("checkpoint", checkpoint))
+	r := db.storage.Reader("") // from index 0; entries ≤ frontier are skipped below
+	folded := 0
+	for {
+		a, err := r.Read()
+		if err != nil {
+			break // EOF (or read error — the main loop surfaces persistent ones)
+		}
+		if a.Index <= frontier {
+			continue
+		}
+		if a.Index > checkpoint {
+			break
+		}
+		if err := rec.FoldStagesOnly(a); err != nil {
+			return err
+		}
+		folded++
+	}
+	db.logger.Info("stage state re-derived to the checkpoint", zap.String("id", id),
+		zap.Int("actuals_folded", folded), zap.Uint64("checkpoint", checkpoint))
+	return nil
+}
+
 // checkpointPolicyOf returns the syncable's configured checkpoint cadence, or
 // the zero policy if it doesn't implement CheckpointConfigurable. The worker
 // fills path-appropriate defaults (see syncSingle / syncBatch) for any zero
@@ -497,6 +538,12 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 			cp, head, _ := db.SyncableProgress(id)
 			db.logger.Info("starting sync", zap.String("id", id),
 				zap.Uint64("checkpoint", cp), zap.Uint64("head", head))
+			if rec, ok := cluster.SyncableAs[cluster.StageRecoverer](s); ok {
+				if err := db.recoverStageState(id, rec, cp); err != nil {
+					db.logger.Error("stage-state recovery failed; will retry on the next ownership tick rather than consume with incomplete state", zap.String("id", id), zap.Error(err))
+					continue
+				}
+			}
 			isNode = true
 			retryActual = nil
 			lastSeen, lastBumped = 0, 0
@@ -938,6 +985,12 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 			cp, head, _ := db.SyncableProgress(id)
 			db.logger.Info("starting sync", zap.String("id", id),
 				zap.Uint64("checkpoint", cp), zap.Uint64("head", head))
+			if rec, ok := cluster.SyncableAs[cluster.StageRecoverer](s); ok {
+				if err := db.recoverStageState(id, rec, cp); err != nil {
+					db.logger.Error("stage-state recovery failed; will retry on the next ownership tick rather than consume with incomplete state", zap.String("id", id), zap.Error(err))
+					continue
+				}
+			}
 			isNode = true
 			batch = batch[:0]
 			retryBatch = false

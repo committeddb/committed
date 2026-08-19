@@ -456,7 +456,29 @@ func ParseCheckpointPolicy(v *ParsedConfig) (CheckpointPolicy, error) {
 
 // SyncableParser parses a config document into a Syncable
 //
+// StageRecoverer is implemented by syncables carrying NODE-LOCAL stage
+// state (the stage store) that must be re-derived before consuming from
+// the replicated checkpoint. The store can be behind the checkpoint two
+// ways — an ownership move to a node without it (cold takeover), or a
+// crash losing the NoSync tail — and in both, folding forward from the
+// checkpoint alone would silently produce incomplete aggregates. The
+// worker closes the gap first: it replays (frontier, checkpoint] through
+// FoldStagesOnly — folds WITHOUT sink emission, the design's
+// "fold silently below C, emit after" — then consumes normally.
+// Resolved through the Unwrap chain (SyncableAs), so mode wrappers
+// forward it.
+//
 //counterfeiter:generate . SyncableParser
+type StageRecoverer interface {
+	// StageFrontier reports the highest log index folded into the local
+	// stage state, and whether this syncable carries stage state at all.
+	StageFrontier() (uint64, bool, error)
+	// FoldStagesOnly folds one Actual into stage state with sink emission
+	// suppressed (everything at or below the checkpoint is already
+	// durably applied).
+	FoldStagesOnly(a *Actual) error
+}
+
 type SyncableParser interface {
 	Parse(c *ParsedConfig, s DatabaseStorage) (Syncable, error)
 }

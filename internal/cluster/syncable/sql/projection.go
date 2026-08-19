@@ -1356,8 +1356,33 @@ func (p *Projection) foldStagesTx(ctx context.Context, tx *gosql.Tx, stx *stages
 		return nil
 	}
 	defer func() { p.stages.OnDelta = nil }()
-	{
+	return p.foldEntitiesTx(stx, a)
+}
 
+// StageFrontier implements cluster.StageRecoverer.
+func (p *Projection) StageFrontier() (uint64, bool, error) {
+	if p.stages == nil {
+		return 0, false, nil
+	}
+	f, err := p.stageStore.Frontier()
+	return f, true, err
+}
+
+// FoldStagesOnly implements cluster.StageRecoverer: fold one Actual into
+// stage state with sink emission suppressed (OnDelta stays nil) — the
+// recovery pass below the checkpoint, where every output is already
+// durably applied.
+func (p *Projection) FoldStagesOnly(a *cluster.Actual) error {
+	return p.stageStore.Update(func(stx *stagestore.Tx) error {
+		return p.foldEntitiesTx(stx, a)
+	})
+}
+
+// foldEntitiesTx folds one Actual's entities and advances the frontier —
+// shared by the emitting path (foldStagesTx, OnDelta set) and the
+// recovery path (FoldStagesOnly, OnDelta nil).
+func (p *Projection) foldEntitiesTx(stx *stagestore.Tx, a *cluster.Actual) error {
+	{
 		dirty := stages.Dirty{}
 		for _, e := range a.Entities {
 			if !p.stages.ConsumesTopic(e.Type.ID) {

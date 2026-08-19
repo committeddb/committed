@@ -5,6 +5,8 @@ package cdc_test
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -81,4 +83,22 @@ set = [ { column = "n", from = "$.n" } ]
 	require.NoError(t, h.RunScript(context.Background(), d))
 	h.WaitForRawSinkAbsent(t, "region_stats", "name", "AMERICA", 30*time.Second)
 	h.WaitForRawSinkValue(t, "region_stats", "name", "ASIA", "n", "2", 30*time.Second)
+
+	// COLD-TAKEOVER SIMULATION: restart with the stage store DELETED —
+	// exactly what a worker inherits after an ownership move. The design's
+	// checkpoint split must re-derive stage state below the checkpoint
+	// (folding without emitting) before consuming; a fresh store WITHOUT
+	// recovery would count only post-restart events and silently
+	// under-report every aggregate.
+	storePath := filepath.Join(h.NodeDataDir(), "projections", "region-stats.db")
+	h.RestartCommittedAfter(t, func() {
+		require.FileExists(t, storePath, "the stage store must exist before the simulated takeover")
+		require.NoError(t, os.Remove(storePath))
+	})
+
+	// A new ASIA region lands on RECOVERED state: 2 (re-derived) + 1 = 3.
+	ins := mutation.NewScript()
+	ins.Insert("region", regionRow(4, "ASIA", "c4"))
+	require.NoError(t, h.RunScript(context.Background(), ins))
+	h.WaitForRawSinkValue(t, "region_stats", "name", "ASIA", "n", "3", 30*time.Second)
 }

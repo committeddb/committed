@@ -151,8 +151,11 @@ func TestDeleteSyncable_RemovesConfigAndIndex_AndTearsDownOnOwner(t *testing.T) 
 
 	// And the worker teardown releases the syncable's prepared statements
 	// (Close) — node-local, so it runs on delete regardless of ownership.
-	require.Eventually(t, func() bool { return rec.closeCount() == 1 },
-		10*time.Second, 10*time.Millisecond, "delete must close the syncable exactly once")
+	// Two closes total: ProposeSyncable closes its VALIDATION-parse
+	// instance (that leak wedged staged projections — see the e2e find),
+	// and delete closes the worker's.
+	require.Eventually(t, func() bool { return rec.closeCount() == 2 },
+		10*time.Second, 10*time.Millisecond, "validation-parse close + worker close, exactly")
 }
 
 // keepData preserves the destination: the logical delete still happens, but
