@@ -36,6 +36,10 @@ type Projection struct {
 	// layer).
 	name    string
 	metrics *metrics.Metrics
+	// storeDir is the node's stage-store directory; set by the parser
+	// (never by tests constructing directly — those exercise stages via
+	// their own tempdir or not at all).
+	storeDir string
 	// sources is keyed by topic id to the sources that consume it. The topic is
 	// the discriminator; an entity routes to every source on its topic, and each
 	// source's When (and, for rule sources, per-rule when) decides whether it

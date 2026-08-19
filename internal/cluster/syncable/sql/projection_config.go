@@ -3,6 +3,7 @@ package sql
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"sort"
@@ -1145,6 +1146,23 @@ func validateProjectionStageShapes(c *ProjectionConfig) error {
 		}
 	}
 	return nil
+}
+
+// stageFingerprint identifies the stage definitions a store's state was
+// derived under: any change to them invalidates the store
+// (stagestore.Open resets on mismatch and the syncable re-derives from
+// the log). JSON over the exported stage fields is deterministic for a
+// given binary, and a marshal change across binaries just forces one
+// harmless rebuild.
+func stageFingerprint(c *ProjectionConfig) string {
+	bs, err := json.Marshal(c.Stages)
+	if err != nil {
+		// Stages are plain data; Marshal cannot fail on them. Guard anyway:
+		// a non-marshalable future field must not silently reuse stale state.
+		return fmt.Sprintf("unmarshalable:%v", err)
+	}
+	sum := sha256.Sum256(bs)
+	return hex.EncodeToString(sum[:])
 }
 
 // stageNamed returns the index of the stage with this name, or -1.

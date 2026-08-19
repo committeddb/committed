@@ -18,6 +18,11 @@ import (
 // and is handed to the Projection for unmatched-rule ticks at sync time.
 type ProjectionSyncableParser struct {
 	Metrics *metrics.Metrics
+	// StoreDir is the node's stage-store directory
+	// (<dataDir>/projections), threaded from cmd/node at registration. A
+	// projection with internal stages REQUIRES it — an empty StoreDir
+	// rejects stage configs at Init rather than folding without state.
+	StoreDir string
 }
 
 const (
@@ -60,6 +65,7 @@ func (p *ProjectionSyncableParser) Parse(v *cluster.ParsedConfig, storage cluste
 	}
 
 	projection := NewProjection(db, config, p.Metrics, v.GetString("syncable.name"))
+	projection.storeDir = p.StoreDir
 	if err := projection.Init(); err != nil {
 		return nil, fmt.Errorf("[projection.parser] init: %w", err)
 	}

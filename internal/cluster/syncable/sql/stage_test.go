@@ -150,3 +150,21 @@ set = [ { column = "id", from = "$.id" } ]
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "stage engine has not landed")
 }
+
+// The fingerprint pins store identity to the stage definitions: same
+// stages → same fingerprint; any definitional change → a different one
+// (and so a store reset + re-derive).
+func TestStageFingerprint(t *testing.T) {
+	a := stageConfig(ProjectionStage{
+		Name: "s", From: "t", KeyPath: []string{"$.id"},
+		Emit: []StageEmit{{Field: "f", From: "$.x"}},
+	})
+	b := stageConfig(ProjectionStage{
+		Name: "s", From: "t", KeyPath: []string{"$.id"},
+		Emit: []StageEmit{{Field: "f", From: "$.x"}},
+	})
+	require.Equal(t, stageFingerprint(a), stageFingerprint(b))
+
+	b.Stages[0].Emit[0].From = "$.y"
+	require.NotEqual(t, stageFingerprint(a), stageFingerprint(b))
+}

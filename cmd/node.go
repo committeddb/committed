@@ -9,6 +9,7 @@ import (
 	nethttp "net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -415,7 +416,12 @@ image can be templated per-node by an orchestrator:
 		// One projection parser, two type spellings: "projection" is canonical,
 		// "sql-projection" is a deprecation alias (POST answers with a
 		// deprecation warning; the config section follows the type spelling).
-		projectionParser := &syncsql.ProjectionSyncableParser{Metrics: m}
+		projectionParser := &syncsql.ProjectionSyncableParser{
+			Metrics: m,
+			// Stage stores (internal-stage state) live beside the node's
+			// data: derived, node-local, rebuildable from the log.
+			StoreDir: filepath.Join(dataDir, "projections"),
+		}
 		d.AddSyncableParser("projection", projectionParser)
 		d.AddSyncableParser("sql-projection", projectionParser)
 		d.AddSyncableParser("http", &synchttp.SyncableParser{})
