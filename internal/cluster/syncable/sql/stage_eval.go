@@ -41,6 +41,10 @@ type stageNode struct {
 type stageGraph struct {
 	byName  map[string]*stageNode
 	byTopic map[string][]*stageNode
+	// onDelta, when set, observes every stage's post-refold delta — the
+	// chaining terminal's feed (table sources consuming a stage). live=false
+	// is a retraction. Set per Sync call by the single worker goroutine.
+	onDelta func(stage string, outKey []byte, obj any, live bool) error
 }
 
 // buildStageGraph compiles the validated stage list into its runtime
@@ -158,6 +162,11 @@ func (g *stageGraph) refoldKey(tx *stagestore.Tx, n *stageNode, outKey []byte) e
 		if err := tx.DeleteOut(st.Name, outKey); err != nil {
 			return err
 		}
+		if g.onDelta != nil {
+			if err := g.onDelta(st.Name, outKey, nil, false); err != nil {
+				return err
+			}
+		}
 		for _, c := range n.consumers {
 			if err := g.foldDelete(tx, c, outKey); err != nil {
 				return err
@@ -171,6 +180,11 @@ func (g *stageGraph) refoldKey(tx *stagestore.Tx, n *stageNode, outKey []byte) e
 	obj, err := decodeStageObject(out)
 	if err != nil {
 		return fmt.Errorf("stage %q: decode own output: %w", st.Name, err)
+	}
+	if g.onDelta != nil {
+		if err := g.onDelta(st.Name, outKey, obj, true); err != nil {
+			return err
+		}
 	}
 	for _, c := range n.consumers {
 		if err := g.foldUpsert(tx, c, outKey, obj); err != nil {

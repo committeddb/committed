@@ -89,6 +89,7 @@ type rawProjectionRule struct {
 // does.
 type rawProjectionSource struct {
 	Topic     string                  `mapstructure:"topic"`
+	From      string                  `mapstructure:"from"`
 	KeyPath   any                     `mapstructure:"keyPath"`
 	OnDelete  string                  `mapstructure:"onDelete"`
 	When      any                     `mapstructure:"when"`
@@ -350,11 +351,12 @@ func parseProjectionSources(v *cluster.ParsedConfig, storage cluster.DatabaseSto
 				return nil, fmt.Errorf("source %d (topic %q): when: %w", si+1, rs.Topic, err)
 			}
 			src := ProjectionSource{
-				Topic:    rs.Topic,
-				KeyPath:  pathOrList(rs.KeyPath),
-				OnDelete: rs.OnDelete,
-				When:     when,
-				ForEach:  rs.ForEach,
+				Topic:     rs.Topic,
+				FromStage: rs.From,
+				KeyPath:   pathOrList(rs.KeyPath),
+				OnDelete:  rs.OnDelete,
+				When:      when,
+				ForEach:   rs.ForEach,
 			}
 			// Populate rules, aggregate, and lookup independently so a source that
 			// declares more than one is caught by validation (a source has exactly

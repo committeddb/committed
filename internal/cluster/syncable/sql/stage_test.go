@@ -13,27 +13,23 @@ func stageConfig(stages ...ProjectionStage) *ProjectionConfig {
 	return &ProjectionConfig{
 		Table:      "t",
 		PrimaryKey: []string{"id"},
-		Columns:    []ProjectionColumn{{Name: "id", SQLType: "VARCHAR(64)"}},
+		Columns:    []ProjectionColumn{{Name: "id", SQLType: "VARCHAR(64)"}, {Name: "v", SQLType: "VARCHAR(64)"}},
 		Sources: []ProjectionSource{{
 			Topic: "x", KeyPath: []string{"$.id"}, OnDelete: "delete-row",
-			Rules: []ProjectionRule{{Set: []ProjectionSet{{Column: "id", From: "$.id"}}}},
+			Rules: []ProjectionRule{{Set: []ProjectionSet{{Column: "v", From: "$.v"}}}},
 		}},
 		Stages: stages,
 	}
 }
 
-// Until the stage engine lands, ANY stage block is rejected loudly at
-// validation — accepted syntax, never accept-then-ignore (the forEach
-// staging pattern). This assertion flips when the evaluator ships.
-func TestStagesGatedUntilEngineLands(t *testing.T) {
+// The engine is wired: a valid stage config validates clean.
+func TestStagesValidate(t *testing.T) {
 	cfg := stageConfig(ProjectionStage{
 		Name: "sums", From: "timesheets", KeyPath: []string{"$.card"},
 		Reduce: "aggregate", Emit: []StageEmit{{Field: "n", Count: true}},
 	})
 	cfg.applyDefaults()
-	err := validateProjectionConfig(cfg)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "stage engine has not landed")
+	require.NoError(t, validateProjectionConfig(cfg))
 }
 
 // The shape rules behind the gate, exercised directly so the gate's
@@ -115,6 +111,10 @@ primaryKey = "id"
 name = "id"
 type = "VARCHAR(64)"
 
+[[projection.columns]]
+name = "v"
+type = "VARCHAR(64)"
+
 [[projection.stage]]
 name    = "live"
 from    = "txns"
@@ -132,7 +132,7 @@ emit    = [ { field = "n", count = true } ]
 topic   = "x"
 keyPath = "$.id"
 [[projection.source.rules]]
-set = [ { column = "id", from = "$.id" } ]
+set = [ { column = "v", from = "$.v" } ]
 `
 	v, err := cluster.ParseConfigBytes("toml", []byte(toml))
 	require.NoError(t, err)
@@ -145,11 +145,8 @@ set = [ { column = "id", from = "$.id" } ]
 	require.Equal(t, "aggregate", cfg.Stages[1].Reduce)
 	require.True(t, cfg.Stages[1].Emit[0].Count)
 
-	// The full validation path carries the not-wired gate.
 	cfg.applyDefaults()
-	err = validateProjectionConfig(cfg)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "stage engine has not landed")
+	require.NoError(t, validateProjectionConfig(cfg))
 }
 
 // The fingerprint pins store identity to the stage definitions: same

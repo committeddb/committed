@@ -693,3 +693,99 @@ func TestProjectionForEach(t *testing.T) {
 
 	require.NoError(t, mock.ExpectationsWereMet())
 }
+
+// Stages end to end through Sync: topic entities fold through a
+// reshape→aggregate chain in the stage store, and the table source
+// consuming the aggregate stage (from = "by-job") lands its deltas as
+// rows — including the retraction when a key's last input vanishes.
+func TestProjectionStagesToTable(t *testing.T) {
+	txnType := &cluster.Type{ID: "txns", Name: "Txn"}
+	config := &sql.ProjectionConfig{
+		Table:      "job_totals",
+		PrimaryKey: []string{"job_id"},
+		Columns: []sql.ProjectionColumn{
+			{Name: "job_id", SQLType: "VARCHAR(64)"},
+			{Name: "total", SQLType: "DECIMAL(12,2)"},
+			{Name: "n", SQLType: "INT"},
+		},
+		Stages: []sql.ProjectionStage{
+			{
+				Name: "live", From: "txns", KeyPath: []string{"$.id"},
+				Emit: []sql.StageEmit{{Field: "job", From: "$.jobId"}, {Field: "amt", From: "$.amount"}},
+			},
+			{
+				Name: "by-job", From: "live", KeyPath: []string{"$.job"},
+				Reduce: "aggregate", Emit: []sql.StageEmit{{Field: "total", Sum: "$.amt"}, {Field: "n", Count: true}},
+			},
+		},
+		Sources: []sql.ProjectionSource{{
+			FromStage: "by-job",
+			KeyPath:   []string{"$.job"},
+			Rules: []sql.ProjectionRule{{Set: []sql.ProjectionSet{
+				{Column: "total", From: "$.total"},
+				{Column: "n", From: "$.n"},
+			}}},
+		}},
+	}
+
+	dialect, mock, err := testdialects.NewSQLMockDialect()
+	require.NoError(t, err)
+	db, err := sql.NewDB(dialect, "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	ddlConfig := &sql.Config{
+		Table:      "job_totals",
+		PrimaryKey: []string{"job_id"},
+		Mappings: []sql.Mapping{
+			{Column: "job_id", SQLType: "VARCHAR(64)"},
+			{Column: "total", SQLType: "DECIMAL(12,2)"},
+			{Column: "n", SQLType: "INT"},
+		},
+	}
+	ruleConfig := &sql.Config{
+		Table:      "job_totals",
+		PrimaryKey: []string{"job_id"},
+		Mappings:   []sql.Mapping{{Column: "job_id"}, {Column: "total"}, {Column: "n"}},
+	}
+	mock.ExpectExec(dialect.CreateDDL(ddlConfig)).WillReturnResult(driver.ResultNoRows)
+	rulePrepare := mock.ExpectPrepare(dialect.CreateSQL(ruleConfig))
+	rowDelete := mock.ExpectPrepare(dialect.CreateDeleteSQL(ddlConfig))
+
+	p := sql.NewProjection(db, config, nil, "job_totals")
+	sql.SetStoreDirForTest(p, t.TempDir())
+	require.NoError(t, p.Init())
+	t.Cleanup(func() { _ = p.Close() })
+
+	sync := func(idx uint64, e *cluster.Entity) {
+		t.Helper()
+		_, err := p.Sync(context.Background(), &cluster.Actual{Index: idx, Entities: []*cluster.Entity{e}})
+		require.NoError(t, err)
+	}
+	rowArgs := func(vals ...driver.Value) []driver.Value { return append(vals, vals...) }
+
+	// First txn: j1 gains its first input → the by-job delta upserts a row.
+	mock.ExpectBegin()
+	rulePrepare.ExpectExec().WithArgs(rowArgs("j1", "2.5", int64(1))...).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	sync(10, cluster.NewUpsertEntity(txnType, []byte("t1"), []byte(`{"id":"t1","jobId":"j1","amount":2.5}`)))
+
+	// Second txn, same job: the aggregate refolds — exact sum, count 2.
+	mock.ExpectBegin()
+	rulePrepare.ExpectExec().WithArgs(rowArgs("j1", "3.75", int64(2))...).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	sync(11, cluster.NewUpsertEntity(txnType, []byte("t2"), []byte(`{"id":"t2","jobId":"j1","amount":1.25}`)))
+
+	// Deleting one txn refolds down; deleting the last RETRACTS the row.
+	mock.ExpectBegin()
+	rulePrepare.ExpectExec().WithArgs(rowArgs("j1", "2.5", int64(1))...).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	sync(12, cluster.NewDeleteEntity(txnType, []byte("t2")))
+
+	mock.ExpectBegin()
+	rowDelete.ExpectExec().WithArgs("j1").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	sync(13, cluster.NewDeleteEntity(txnType, []byte("t1")))
+
+	require.NoError(t, mock.ExpectationsWereMet())
+}

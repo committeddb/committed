@@ -229,6 +229,11 @@ type ProjectionSource struct {
 	Rules     []ProjectionRule
 	Aggregate *ProjectionAggregate
 	Lookup    *ProjectionLookup
+	// FromStage names the internal stage this source consumes instead of a
+	// topic (the chaining terminal): the stage's output deltas — keyed
+	// objects, upserts and retractions — drive this source's rules exactly
+	// as a topic's entities would. Exactly one of Topic or FromStage.
+	FromStage string
 	// ForEach turns a rules source into a fan-out: the (deliberately
 	// multi-valued) path selects N elements from each event, and the
 	// source's rules apply once PER ELEMENT — keyPath and every from/expr
@@ -606,8 +611,11 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 		// multi-source config; the original single-source error substrings are
 		// preserved inside (the parser tests match on substrings).
 		where := fmt.Sprintf("source %d (topic %q)", si+1, src.Topic)
-		if src.Topic == "" {
-			return fmt.Errorf("source %d: topic is required", si+1)
+		if src.FromStage != "" {
+			where = fmt.Sprintf("source %d (from %q)", si+1, src.FromStage)
+		}
+		if src.Topic == "" && src.FromStage == "" {
+			return fmt.Errorf("source %d: a source consumes a topic or a stage (topic or from is required)", si+1)
 		}
 		kinds := 0
 		for _, has := range []bool{len(src.Rules) > 0, src.Aggregate != nil, src.Lookup != nil} {
@@ -626,6 +634,25 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 		for _, kp := range src.KeyPath {
 			if err := rejectMultiValued(kp, where+": keyPath"); err != nil {
 				return err
+			}
+		}
+		if src.FromStage != "" {
+			if src.Topic != "" {
+				return fmt.Errorf("%s: exactly one of topic or from (a source consumes a topic or a stage, not both)", where)
+			}
+			if stageNamed(c, src.FromStage) < 0 {
+				return fmt.Errorf("%s: from %q names no declared stage", where, src.FromStage)
+			}
+			if src.Aggregate != nil || src.Lookup != nil || src.ForEach != "" {
+				return fmt.Errorf("%s: a stage-fed source folds via rules only", where)
+			}
+			if len(src.Rules) == 0 {
+				return fmt.Errorf("%s: a stage-fed source needs rules", where)
+			}
+			switch src.OnDelete {
+			case onDeleteRow, onDeleteIgnore:
+			default:
+				return fmt.Errorf("%s: onDelete %q is invalid for a stage-fed source (want %q or %q — a stage retraction removes or ignores)", where, src.OnDelete, onDeleteRow, onDeleteIgnore)
 			}
 		}
 		if src.ForEach != "" {
@@ -1052,10 +1079,7 @@ func validateProjectionStages(c *ProjectionConfig) error {
 	if len(c.Stages) == 0 {
 		return nil
 	}
-	// The stage engine is not wired yet — the config surface is staged
-	// ahead of the machinery (the forEach pattern). Reject loudly rather
-	// than accept-then-ignore. REMOVE when the stage evaluator lands.
-	return fmt.Errorf("[[projection.stage]] is accepted syntax but the stage engine has not landed yet — coming in this 0.7.x series")
+	return validateProjectionStageShapes(c)
 }
 
 // validateProjectionStageShapes holds the real shape rules, called by

@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/committeddb/committed/internal/cluster/syncable/stagestore"
+
 	"github.com/PaesslerAG/jsonpath"
 	"go.uber.org/zap"
 
@@ -40,6 +42,12 @@ type Projection struct {
 	// (never by tests constructing directly — those exercise stages via
 	// their own tempdir or not at all).
 	storeDir string
+	// stages/stageStore are the compiled stage graph and its state, set at
+	// Init when the config declares stages. stageSinks routes stage deltas
+	// to the table sources consuming each stage (from = "<stage>").
+	stages     *stageGraph
+	stageStore *stagestore.Store
+	stageSinks map[string][]*projectionSource
 	// sources is keyed by topic id to the sources that consume it. The topic is
 	// the discriminator; an entity routes to every source on its topic, and each
 	// source's When (and, for rule sources, per-rule when) decides whether it
@@ -340,17 +348,40 @@ func (p *Projection) Init() error {
 		}
 	}
 
+	if len(p.config.Stages) > 0 {
+		if p.storeDir == "" {
+			return fmt.Errorf("this projection declares stages but no stage-store directory is configured (storeDir is threaded from the node's data dir; direct constructions must set it)")
+		}
+		store, reset, err := stagestore.Open(p.storeDir, p.name, stageFingerprint(p.config))
+		if err != nil {
+			return err
+		}
+		p.stageStore = store
+		p.stages = buildStageGraph(p.config.Stages)
+		if reset {
+			zap.L().Warn("stage store reset — stage state re-derives as the log replays; pair stage-definition changes with a rebuild so replay starts from index 0",
+				zap.String("syncable", p.name), zap.String("path", store.Path()))
+		}
+	}
+
 	// Prepare per-source statements. enrichRefs collects, per lookup name, the
 	// aggregates that enrich from it (their spec + on-field), so the second pass
 	// can wire each lookup's fan-out to its dependents' rebuilds.
 	p.sources = make(map[string][]*projectionSource, len(p.config.Sources))
 	var lookupSources []*projectionSource
 	enrichRefs := map[string][]enrichRef{}
+	p.stageSinks = map[string][]*projectionSource{}
 	for si, src := range p.config.Sources {
 		ps := &projectionSource{topic: src.Topic, keyPaths: src.KeyPath, onDelete: src.OnDelete, when: src.When}
 		// Register ps NOW, before preparing its statements, so a partway failure
 		// leaves the statements it did prepare reachable from p.sources for the
 		// error-cleanup defer's Close (a failed nested init self-cleans separately).
+		// A stage-fed source registers under its stage in stageSinks instead —
+		// its input is stage deltas, not topic entities — but joins p.sources
+		// under the empty key too so Close reaches its statements.
+		if src.FromStage != "" {
+			p.stageSinks[src.FromStage] = append(p.stageSinks[src.FromStage], ps)
+		}
 		p.sources[src.Topic] = append(p.sources[src.Topic], ps)
 		switch {
 		case src.Aggregate != nil:
@@ -605,6 +636,10 @@ func (p *Projection) Sync(ctx context.Context, a *cluster.Actual) (cluster.Shoul
 			relevant = true
 			break
 		}
+		if p.stages != nil && len(p.stages.byTopic[e.Type.ID]) > 0 {
+			relevant = true
+			break
+		}
 	}
 	if !relevant {
 		return false, nil
@@ -618,6 +653,18 @@ func (p *Projection) Sync(ctx context.Context, a *cluster.Actual) (cluster.Shoul
 		// only the classifier. Transient: a begin failure is a connection issue to
 		// retry and surface as stuck, never a permanent dead-letter.
 		return false, execFailure("[projection.apply] begin", err, false)
+	}
+
+	// Stage folds run FIRST, in one store transaction per Actual: entities
+	// route through the stage graph, table sources consuming stages apply
+	// their deltas on this same SQL tx, and the frontier advances with the
+	// fold. Store commits before SQL: if the SQL commit then fails, the
+	// redelivered Actual re-folds idempotently (same inputs, same bytes).
+	if p.stages != nil {
+		if err := p.foldStages(ctx, tx, a); err != nil {
+			_ = tx.Rollback()
+			return false, err
+		}
 	}
 
 	for _, e := range a.Entities {
@@ -776,7 +823,7 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 		return p.applyForEach(ctx, tx, src, jsonData, e)
 	}
 
-	matchedAny, _, err := p.applyRowFold(ctx, tx, src, jsonData, nil)
+	matchedAny, _, err := p.applyRowFold(ctx, tx, src, jsonData, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -826,7 +873,10 @@ func resolveScopedPath(path string, data, parent any) (any, error) {
 // event payload rides in parent for `$parent.` paths). Returns whether any
 // rule matched, so the caller owns the unmatched bookkeeping and forEach
 // counts only matched elements in its reconciliation set.
-func (p *Projection) applyRowFold(ctx context.Context, tx *gosql.Tx, src *projectionSource, data, parent any) (bool, string, error) {
+// presetKeys, when non-nil, override key resolution entirely — a
+// stage-fed source's row key IS the stage's key (already resolved by the
+// fold; an aggregate stage's emit carries only folds, never the key).
+func (p *Projection) applyRowFold(ctx context.Context, tx *gosql.Tx, src *projectionSource, data, parent any, presetKeys []any) (bool, string, error) {
 	var matched []*projectionStmt
 	for _, r := range src.rules {
 		if matchWhen(r.rule.When, data) {
@@ -842,13 +892,16 @@ func (p *Projection) applyRowFold(ctx context.Context, tx *gosql.Tx, src *projec
 	// a dead letter. A matched event without a key is a permanent
 	// misconfiguration. One value per primaryKey column, positionally
 	// aligned, each coerced to its own column's declared type.
-	keys := make([]any, len(src.keyPaths))
-	for i, kp := range src.keyPaths {
-		v, err := resolveScopedPath(kp, data, parent)
-		if err != nil {
-			return true, "", cluster.Permanent(fmt.Errorf("[projection.apply] keyPath [%s]: %w", kp, err))
+	keys := presetKeys
+	if keys == nil {
+		keys = make([]any, len(src.keyPaths))
+		for i, kp := range src.keyPaths {
+			v, err := resolveScopedPath(kp, data, parent)
+			if err != nil {
+				return true, "", cluster.Permanent(fmt.Errorf("[projection.apply] keyPath [%s]: %w", kp, err))
+			}
+			keys[i] = coerceForColumn(v, p.columnType(p.config.PrimaryKey[i]))
 		}
-		keys[i] = coerceForColumn(v, p.columnType(p.config.PrimaryKey[i]))
 	}
 
 	for _, r := range matched {
@@ -1141,7 +1194,7 @@ func (p *Projection) applyForEach(ctx context.Context, tx *gosql.Tx, src *projec
 
 	current := make(map[string]bool, len(elems))
 	for i, el := range elems {
-		matched, key, err := p.applyRowFold(ctx, tx, src, el, jsonData)
+		matched, key, err := p.applyRowFold(ctx, tx, src, el, jsonData, nil)
 		if err != nil {
 			return fmt.Errorf("[projection.forEach] element %d: %w", i+1, err)
 		}
@@ -1217,6 +1270,70 @@ func (p *Projection) forEachDeleteRow(ctx context.Context, tx *gosql.Tx, childKe
 		return execFailure(fmt.Sprintf("[projection.forEach] exec [%s]", p.delete.SQL), err, p.dialect.IsPermanent(err))
 	}
 	return nil
+}
+
+// foldStages folds one Actual's entities through the stage graph in one
+// store transaction, routing each stage's deltas to the table sources
+// consuming it (applied on the surrounding SQL transaction). The frontier
+// advances atomically with the fold.
+func (p *Projection) foldStages(ctx context.Context, tx *gosql.Tx, a *cluster.Actual) error {
+	return p.stageStore.Update(func(stx *stagestore.Tx) error {
+		p.stages.onDelta = func(stage string, outKey []byte, obj any, live bool) error {
+			for _, src := range p.stageSinks[stage] {
+				if err := p.applyStageDelta(ctx, tx, src, outKey, obj, live); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		defer func() { p.stages.onDelta = nil }()
+
+		for _, e := range a.Entities {
+			if len(p.stages.byTopic[e.Type.ID]) == 0 {
+				continue
+			}
+			switch e.Variant() {
+			case cluster.EntityVariantDelete:
+				if err := p.stages.FoldTopicDelete(stx, e.Type.ID, e.Key); err != nil {
+					return err
+				}
+			case cluster.EntityVariantRow:
+				obj, err := decodeStageObject(e.Data)
+				if err != nil {
+					return cluster.Permanent(fmt.Errorf("[projection.stage] unmarshal entity data: %w", err))
+				}
+				if err := p.stages.FoldTopicUpsert(stx, e.Type.ID, e.Key, obj); err != nil {
+					return err
+				}
+			default:
+				// Refresh markers and future variants: epoch sweeps over stage
+				// state are a later step; skipping is the no-op the projection
+				// already applies to markers.
+			}
+		}
+		return stx.SetFrontier(a.Index)
+	})
+}
+
+// applyStageDelta lands one stage delta on a table source: an upsert folds
+// through the source's rules exactly as a topic entity would (the stage
+// object is the payload), a retraction removes or ignores per onDelete.
+func (p *Projection) applyStageDelta(ctx context.Context, tx *gosql.Tx, src *projectionSource, outKey []byte, obj any, live bool) error {
+	if !live {
+		if src.onDelete == onDeleteIgnore {
+			return nil
+		}
+		if _, err := tx.StmtContext(ctx, p.delete.Stmt).ExecContext(ctx, string(outKey)); err != nil {
+			return execFailure(fmt.Sprintf("[projection.stage] exec [%s]", p.delete.SQL), err, p.dialect.IsPermanent(err))
+		}
+		return nil
+	}
+	if !matchWhen(src.when, obj) {
+		return nil
+	}
+	key := coerceForColumn(string(outKey), p.columnType(p.config.PrimaryKey[0]))
+	_, _, err := p.applyRowFold(ctx, tx, src, obj, nil, []any{key})
+	return err
 }
 
 // aggPriorParent returns the parent key currently recorded for childKey in the
@@ -1415,6 +1532,11 @@ func (p *Projection) Close() error {
 			if cerr := s.Close(); err == nil {
 				err = cerr
 			}
+		}
+	}
+	if p.stageStore != nil {
+		if cerr := p.stageStore.Close(); err == nil {
+			err = cerr
 		}
 	}
 	for _, list := range p.sources {
