@@ -49,6 +49,11 @@ var (
 	metaFrontier    = []byte("frontier")
 )
 
+// FilePath is the store file for one syncable under a store dir — the
+// naming Open uses, exported so teardown paths can remove a store they
+// never opened.
+func FilePath(dir, name string) string { return filepath.Join(dir, name+".db") }
+
 // Store is one syncable's stage state. Not safe for concurrent use by
 // multiple goroutines beyond what bbolt provides; the syncable worker is
 // the single writer.
@@ -71,7 +76,7 @@ func Open(dir, name, fingerprint string) (_ *Store, reset bool, err error) {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, false, fmt.Errorf("create stage store dir: %w", err)
 	}
-	path := filepath.Join(dir, name+".db")
+	path := FilePath(dir, name)
 
 	open := func() (*bolt.DB, error) {
 		// NoSync: the fold's writes harden at checkpoint boundaries via

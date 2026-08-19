@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql/driver"
 	"errors"
+	"os"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -12,6 +13,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/syncable/sql"
 	"github.com/committeddb/committed/internal/cluster/syncable/sql/dialects/testdialects"
+	"github.com/committeddb/committed/internal/cluster/syncable/stagestore"
 )
 
 var principalType = &cluster.Type{ID: "principal", Name: "Principal"}
@@ -794,5 +796,83 @@ func TestProjectionStagesToTable(t *testing.T) {
 	mock.ExpectCommit()
 	sync(13, cluster.NewDeleteEntity(txnType, []byte("t1")))
 
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// Teardown erases the stage store with the destination — left behind, a
+// rebuild's replay-from-0 would refold onto identical bytes and SUPPRESS
+// every table delta (an empty rebuilt table, silently). After teardown, a
+// fresh Init opens a fresh store and the same event folds and LANDS again.
+func TestProjectionTeardownResetsStageStore(t *testing.T) {
+	txnType := &cluster.Type{ID: "txns", Name: "Txn"}
+	newConfig := func() *sql.ProjectionConfig {
+		return &sql.ProjectionConfig{
+			Table:      "job_totals",
+			PrimaryKey: []string{"job_id"},
+			Columns: []sql.ProjectionColumn{
+				{Name: "job_id", SQLType: "VARCHAR(64)"},
+				{Name: "n", SQLType: "INT"},
+			},
+			Stages: []sql.ProjectionStage{
+				{
+					Name: "by-job", From: "txns", KeyPath: []string{"$.job"},
+					Reduce: "aggregate", Emit: []sql.StageEmit{{Field: "n", Count: true}},
+				},
+			},
+			Sources: []sql.ProjectionSource{{
+				FromStage: "by-job",
+				KeyPath:   []string{"$.job"},
+				Rules:     []sql.ProjectionRule{{Set: []sql.ProjectionSet{{Column: "n", From: "$.n"}}}},
+			}},
+		}
+	}
+	ddlConfig := &sql.Config{
+		Table:      "job_totals",
+		PrimaryKey: []string{"job_id"},
+		Mappings:   []sql.Mapping{{Column: "job_id", SQLType: "VARCHAR(64)"}, {Column: "n", SQLType: "INT"}},
+	}
+	ruleConfig := &sql.Config{
+		Table:      "job_totals",
+		PrimaryKey: []string{"job_id"},
+		Mappings:   []sql.Mapping{{Column: "job_id"}, {Column: "n"}},
+	}
+	storeDir := t.TempDir()
+
+	dialect, mock, err := testdialects.NewSQLMockDialect()
+	require.NoError(t, err)
+	db, err := sql.NewDB(dialect, "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	boot := func() *sql.Projection {
+		mock.ExpectExec(dialect.CreateDDL(ddlConfig)).WillReturnResult(driver.ResultNoRows)
+		rulePrepare := mock.ExpectPrepare(dialect.CreateSQL(ruleConfig))
+		mock.ExpectPrepare(dialect.CreateDeleteSQL(ddlConfig))
+		p := sql.NewProjection(db, newConfig(), nil, "job_totals")
+		p.SetStoreDir(storeDir)
+		require.NoError(t, p.Init())
+		mock.ExpectBegin()
+		rulePrepare.ExpectExec().WithArgs("j1", int64(1), "j1", int64(1)).WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectCommit()
+		_, err := p.Sync(context.Background(), &cluster.Actual{Index: 10, Entities: []*cluster.Entity{
+			cluster.NewUpsertEntity(txnType, []byte("t1"), []byte(`{"job":"j1"}`)),
+		}})
+		require.NoError(t, err)
+		return p
+	}
+
+	p := boot()
+
+	// Teardown: sink drops AND the stage store file goes with them.
+	mock.ExpectExec(dialect.DropDDL(ddlConfig)).WillReturnResult(driver.ResultNoRows)
+	require.NoError(t, p.Teardown())
+	_, statErr := os.Stat(stagestore.FilePath(storeDir, "job_totals"))
+	require.True(t, os.IsNotExist(statErr), "teardown must remove the stage store")
+	require.NoError(t, p.Close())
+
+	// A fresh boot replays the SAME event: with the store reset it folds
+	// and LANDS again — no suppression from stale state.
+	p2 := boot()
+	require.NoError(t, p2.Close())
 	require.NoError(t, mock.ExpectationsWereMet())
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"os"
 	"strconv"
 
 	"github.com/PaesslerAG/jsonpath"
@@ -254,6 +255,11 @@ func (p *Projection) Teardown() error {
 			housekeeping = sidecarName(p.config.Table, src.Aggregate.Column)
 		case src.Lookup != nil:
 			housekeeping = dimensionName(p.config.Table, src.Lookup.Name)
+		case src.ForEach != "":
+			// The forEach reconciliation sidecar: left behind, a rebuilt
+			// projection would inherit stale parent→element mappings and
+			// mis-reconcile from its first event.
+			housekeeping = ForEachSidecarName(p.config.Table, src.Topic)
 		default:
 			continue
 		}
@@ -262,6 +268,22 @@ func (p *Projection) Teardown() error {
 			return fmt.Errorf("teardown [%s]: %w", drop, err)
 		}
 	}
+	// The stage store is part of the destination state a teardown erases:
+	// left behind, a rebuild's replay-from-0 would refold onto identical
+	// bytes and SUPPRESS every table delta — an empty rebuilt table,
+	// silently (the SyncBatch bug's sibling, via the rebuild door).
+	if len(p.config.Stages) > 0 {
+		if p.stageStore != nil {
+			_ = p.stageStore.Close()
+			p.stageStore = nil
+		}
+		if p.storeDir != "" {
+			if err := os.Remove(stagestore.FilePath(p.storeDir, p.name)); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("teardown stage store: %w", err)
+			}
+		}
+	}
+
 	dropString := p.dialect.DropDDL(p.config.ddlConfig())
 	if _, err := p.db.ExecContext(ctx, dropString); err != nil {
 		return fmt.Errorf("teardown [%s]: %w", dropString, err)
