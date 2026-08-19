@@ -196,6 +196,8 @@ type rawProjectionStage struct {
 	TieByType   string      `mapstructure:"tieByType"`
 	Join        []StageJoin `mapstructure:"join"`
 	Emit        []StageEmit `mapstructure:"emit"`
+	ForEach     string      `mapstructure:"forEach"`
+	ElementKey  string      `mapstructure:"elementKey"`
 }
 
 // parseProjectionStages decodes the [[{section}.stage]] blocks.
@@ -225,6 +227,8 @@ func parseProjectionStages(v *cluster.ParsedConfig, storage cluster.DatabaseStor
 			TieByType:   strings.ToLower(rs.TieByType),
 			Joins:       rs.Join,
 			Emit:        rs.Emit,
+			ForEach:     rs.ForEach,
+			ElementKey:  rs.ElementKey,
 		})
 	}
 	return stages, nil

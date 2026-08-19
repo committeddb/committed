@@ -8,6 +8,8 @@ import (
 	"math/big"
 	"sort"
 
+	"github.com/PaesslerAG/jsonpath"
+
 	"github.com/committeddb/committed/internal/cluster/syncable/stagestore"
 )
 
@@ -236,16 +238,82 @@ func (g *stageGraph) markDimDependents(tx *stagestore.Tx, d dimRef, dimKey []byt
 // affected key(s), cascade the delta. An input that stops matching the
 // stage's when RETRACTS (filtering is refold, not skip).
 func (g *stageGraph) foldUpsert(tx *stagestore.Tx, n *stageNode, inKey []byte, payload any, gen uint64, dirty dirtySet) error {
+	if n.def.ForEach != "" {
+		return g.foldFan(tx, n, inKey, payload, gen, dirty)
+	}
+	return g.foldOneInput(tx, n, inKey, payload, nil, gen, dirty)
+}
+
+// foldFan fans one input through a forEach stage: each element folds as
+// its own input — identity (parent key, element key) — and the fan
+// reverse-index reconciles: elements the re-emitted input no longer
+// carries retract, and the input's tombstone retracts them all.
+func (g *stageGraph) foldFan(tx *stagestore.Tx, n *stageNode, parentKey []byte, payload any, gen uint64, dirty dirtySet) error {
 	st := n.def
-	if !matchWhen(st.When, payload) {
-		return g.foldDelete(tx, n, inKey, dirty)
+	var elems []any
+	if v, err := jsonpath.Get(st.ForEach, payload); err == nil {
+		if list, ok := v.([]any); ok {
+			elems = list
+		}
 	}
 
-	kv, err := resolveScopedPath(st.KeyPath[0], payload, nil)
+	prior := map[string]bool{}
+	if err := tx.DependentsOf(st.Name, fanJoinName, parentKey, func(elemIn []byte) error {
+		prior[string(elemIn)] = true
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	identityPath := st.ElementKey
+	if identityPath == "" {
+		identityPath = st.KeyPath[0]
+	}
+	current := map[string]bool{}
+	for _, el := range elems {
+		kv, err := resolveScopedPath(identityPath, el, payload)
+		if err != nil || kv == nil {
+			continue // an unidentifiable element fans nothing (and reconciles away)
+		}
+		elemIn := fanInKey(parentKey, []byte(keyString(kv)))
+		if current[string(elemIn)] {
+			continue
+		}
+		current[string(elemIn)] = true
+		if err := g.foldOneInput(tx, n, elemIn, el, payload, gen, dirty); err != nil {
+			return err
+		}
+		if err := tx.PutRev(st.Name, fanJoinName, parentKey, elemIn); err != nil {
+			return err
+		}
+	}
+	for pk := range prior {
+		if current[pk] {
+			continue
+		}
+		if err := g.foldDeleteInput(tx, n, []byte(pk), dirty); err != nil {
+			return err
+		}
+		if err := tx.DeleteRev(st.Name, fanJoinName, parentKey, []byte(pk)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// foldOneInput lands one input (an entity, an upstream delta, or a
+// fanned element with its parent in scope) in a stage's retained set.
+func (g *stageGraph) foldOneInput(tx *stagestore.Tx, n *stageNode, inKey []byte, data, parent any, gen uint64, dirty dirtySet) error {
+	st := n.def
+	if !matchWhen(st.When, data) {
+		return g.foldDeleteInput(tx, n, inKey, dirty)
+	}
+
+	kv, err := resolveScopedPath(st.KeyPath[0], data, parent)
 	if err != nil || kv == nil {
 		// A matched input without a key cannot fold; treat as non-membership
 		// (and retract any prior membership) rather than erroring the topic.
-		return g.foldDelete(tx, n, inKey, dirty)
+		return g.foldDeleteInput(tx, n, inKey, dirty)
 	}
 	outKey := []byte(keyString(coerceKeyScalar(kv)))
 
@@ -262,8 +330,10 @@ func (g *stageGraph) foldUpsert(tx *stagestore.Tx, n *stageNode, inKey []byte, p
 		dirty.mark(n, prior)
 	}
 
-	// Retain the input as the stage sees it (the refold working set).
-	inputBytes, err := marshalStageObject(payload)
+	// Retain the input as the stage sees it (the refold working set) —
+	// forEach stages retain the element WITH its parent, so drain-time
+	// refolds can still reach `$parent.`.
+	inputBytes, err := packStageInput(st, data, parent)
 	if err != nil {
 		return fmt.Errorf("stage %q: retain input: %w", st.Name, err)
 	}
@@ -275,7 +345,7 @@ func (g *stageGraph) foldUpsert(tx *stagestore.Tx, n *stageNode, inKey []byte, p
 	}
 	for i := range st.Joins {
 		j := &st.Joins[i]
-		if onV, err := resolveScopedPath(j.On, payload, nil); err == nil && onV != nil {
+		if onV, err := resolveScopedPath(j.On, data, parent); err == nil && onV != nil {
 			if err := tx.PutRev(st.Name, j.Topic, []byte(keyString(onV)), outKey); err != nil {
 				return err
 			}
@@ -288,6 +358,31 @@ func (g *stageGraph) foldUpsert(tx *stagestore.Tx, n *stageNode, inKey []byte, p
 // foldDelete retracts one input from a stage: the key it fed refolds
 // without it (possibly to deletion), and the delta cascades.
 func (g *stageGraph) foldDelete(tx *stagestore.Tx, n *stageNode, inKey []byte, dirty dirtySet) error {
+	if n.def.ForEach != "" {
+		// The input's tombstone retracts every element it fanned.
+		st := n.def
+		var elems [][]byte
+		if err := tx.DependentsOf(st.Name, fanJoinName, inKey, func(elemIn []byte) error {
+			elems = append(elems, append([]byte(nil), elemIn...))
+			return nil
+		}); err != nil {
+			return err
+		}
+		for _, elemIn := range elems {
+			if err := g.foldDeleteInput(tx, n, elemIn, dirty); err != nil {
+				return err
+			}
+			if err := tx.DeleteRev(st.Name, fanJoinName, inKey, elemIn); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return g.foldDeleteInput(tx, n, inKey, dirty)
+}
+
+// foldDeleteInput retracts one retained input from a stage.
+func (g *stageGraph) foldDeleteInput(tx *stagestore.Tx, n *stageNode, inKey []byte, dirty dirtySet) error {
 	st := n.def
 	outKey, err := tx.GetSrc(st.Name, inKey)
 	if err != nil || outKey == nil {
@@ -399,23 +494,24 @@ func refoldOutput(tx *stagestore.Tx, st *ProjectionStage, outKey []byte) (out []
 	// object of the bytewise-LARGEST input identity (real reshape inputs
 	// are 1:1 with keys; the tiebreak only decides pathological
 	// collisions, deterministically).
-	var winner any
+	type scoped struct{ data, parent any }
+	var winner *scoped
 	scanErr := tx.InputsFor(st.Name, outKey, func(_, val []byte) error {
 		_, payload := decodeRetained(val)
-		obj, err := decodeStageObject(payload)
+		data, parent, err := unpackStageInput(st, payload)
 		if err != nil {
 			return err
 		}
-		if ok, err := inputQualifies(tx, st, obj); err != nil || !ok {
+		if ok, err := inputQualifies(tx, st, data, parent); err != nil || !ok {
 			return err
 		}
-		winner = obj
+		winner = &scoped{data, parent}
 		return nil
 	})
 	if scanErr != nil || winner == nil {
 		return nil, false, scanErr
 	}
-	return emitReshape(st, winner)
+	return emitReshape(st, winner.data, winner.parent)
 }
 
 // inputQualifies applies a stage's filtering joins to one input: it
@@ -423,10 +519,10 @@ func refoldOutput(tx *stagestore.Tx, st *ProjectionStage, outKey []byte) (out []
 // input's on value — exists and matches the join's where. A dimension
 // that has not arrived yet fails participation and heals when it lands
 // (the fan-out refolds dependents).
-func inputQualifies(tx *stagestore.Tx, st *ProjectionStage, obj any) (bool, error) {
+func inputQualifies(tx *stagestore.Tx, st *ProjectionStage, obj, parent any) (bool, error) {
 	for i := range st.Joins {
 		j := &st.Joins[i]
-		onV, err := resolveScopedPath(j.On, obj, nil)
+		onV, err := resolveScopedPath(j.On, obj, parent)
 		if err != nil || onV == nil {
 			return false, nil
 		}
@@ -451,18 +547,18 @@ func inputQualifies(tx *stagestore.Tx, st *ProjectionStage, obj any) (bool, erro
 
 // emitReshape renders a stage's emit fields from one input object — the
 // reshape path, and the winner path of reduce = "latest".
-func emitReshape(st *ProjectionStage, obj any) ([]byte, bool, error) {
+func emitReshape(st *ProjectionStage, obj, parent any) ([]byte, bool, error) {
 	emitted := make(map[string]any, len(st.Emit))
 	var err error
 	for i := range st.Emit {
 		e := &st.Emit[i]
 		var v any
 		if e.From != "" {
-			if v, err = resolveScopedPath(e.From, obj, nil); err != nil {
+			if v, err = resolveScopedPath(e.From, obj, parent); err != nil {
 				v = nil // a missing field is null, per the language
 			}
 		} else {
-			if v, err = evalExpr(e.compiled, obj, nil); err != nil {
+			if v, err = evalExpr(e.compiled, obj, parent); err != nil {
 				return nil, false, fmt.Errorf("stage %q emit %q: %w", st.Name, e.Field, err)
 			}
 		}
@@ -484,22 +580,22 @@ func emitReshape(st *ProjectionStage, obj any) ([]byte, bool, error) {
 // approved older one). The winner's object then emits like a reshape.
 func refoldLatest(tx *stagestore.Tx, st *ProjectionStage, outKey []byte) ([]byte, bool, error) {
 	type ranked struct {
-		order, tie any
-		obj        any
+		order, tie  any
+		obj, parent any
 	}
 	var winner *ranked
 	err := tx.InputsFor(st.Name, outKey, func(_, val []byte) error {
 		_, payload := decodeRetained(val)
-		obj, err := decodeStageObject(payload)
+		obj, parent, err := unpackStageInput(st, payload)
 		if err != nil {
 			return err
 		}
-		if ok, err := inputQualifies(tx, st, obj); err != nil || !ok {
+		if ok, err := inputQualifies(tx, st, obj, parent); err != nil || !ok {
 			return err
 		}
-		ov, _ := resolveScopedPath(st.OrderBy, obj, nil)
-		tv, _ := resolveScopedPath(st.TieBy, obj, nil)
-		cand := &ranked{order: ov, tie: tv, obj: obj}
+		ov, _ := resolveScopedPath(st.OrderBy, obj, parent)
+		tv, _ := resolveScopedPath(st.TieBy, obj, parent)
+		cand := &ranked{order: ov, tie: tv, obj: obj, parent: parent}
 		if winner == nil {
 			winner = cand
 			return nil
@@ -516,7 +612,7 @@ func refoldLatest(tx *stagestore.Tx, st *ProjectionStage, outKey []byte) ([]byte
 	if err != nil || winner == nil {
 		return nil, false, err
 	}
-	return emitReshape(st, winner.obj)
+	return emitReshape(st, winner.obj, winner.parent)
 }
 
 // compareStageValues orders two payload values for argmax: nulls sort
@@ -594,11 +690,11 @@ func refoldAggregate(tx *stagestore.Tx, st *ProjectionStage, outKey []byte) ([]b
 
 	err := tx.InputsFor(st.Name, outKey, func(_, val []byte) error {
 		_, payload := decodeRetained(val)
-		obj, err := decodeStageObject(payload)
+		obj, parent, err := unpackStageInput(st, payload)
 		if err != nil {
 			return err
 		}
-		if ok, err := inputQualifies(tx, st, obj); err != nil || !ok {
+		if ok, err := inputQualifies(tx, st, obj, parent); err != nil || !ok {
 			return err
 		}
 		count++
@@ -607,7 +703,7 @@ func refoldAggregate(tx *stagestore.Tx, st *ProjectionStage, outKey []byte) ([]b
 			if e.Count {
 				continue
 			}
-			v, err := evalExpr(e.compiled, obj, nil)
+			v, err := evalExpr(e.compiled, obj, parent)
 			if err != nil {
 				return fmt.Errorf("stage %q emit %q: %w", st.Name, e.Field, err)
 			}
@@ -681,6 +777,53 @@ func stageValue(v any) (any, error) {
 		return json.Number(text), nil
 	}
 	return v, nil
+}
+
+// fanJoinName is the reserved reverse-index name a forEach stage uses to
+// enumerate the element-inputs each parent currently fans (its
+// reconciliation set). The NUL prefix keeps it out of any real join's
+// topic namespace.
+const fanJoinName = "\x00fan"
+
+// fanInKey is a fanned element-input's identity: (parent input key,
+// element out-key rendering), length-framed so any parent key bytes scan
+// correctly.
+func fanInKey(parentKey, elemKey []byte) []byte {
+	var lead [binary.MaxVarintLen64]byte
+	n := binary.PutUvarint(lead[:], uint64(len(parentKey)))
+	out := make([]byte, 0, n+len(parentKey)+len(elemKey))
+	out = append(out, lead[:n]...)
+	out = append(out, parentKey...)
+	return append(out, elemKey...)
+}
+
+// packStageInput renders the retained object for one input of a stage.
+// forEach stages retain a WRAPPER per element — the element plus its
+// enclosing input under fixed keys "e"/"p" — because refolds happen at
+// drain time, after the enclosing event is gone, and emits/joins may
+// reach `$parent.`.
+func packStageInput(st *ProjectionStage, data, parent any) ([]byte, error) {
+	if st.ForEach == "" {
+		return marshalStageObject(data)
+	}
+	return marshalStageObject(map[string]any{"e": data, "p": parent})
+}
+
+// unpackStageInput decodes a retained payload back into (element scope,
+// parent scope) for refold-time path resolution.
+func unpackStageInput(st *ProjectionStage, payload []byte) (data, parent any, err error) {
+	obj, err := decodeStageObject(payload)
+	if err != nil {
+		return nil, nil, err
+	}
+	if st.ForEach == "" {
+		return obj, nil, nil
+	}
+	m, ok := obj.(map[string]any)
+	if !ok {
+		return nil, nil, fmt.Errorf("forEach retention is not a wrapper object")
+	}
+	return m["e"], m["p"], nil
 }
 
 // encodeRetained prefixes a retained value with its 8-byte BE

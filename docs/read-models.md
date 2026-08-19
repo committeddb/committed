@@ -435,6 +435,13 @@ set = [ { column = "total", from = "$.total" },
 - **Filtering is refold**: an input that stops matching a stage's `when`
   retracts from its key — predicate rows leave the read model when the
   predicate flips off, and re-enter when it flips back.
+- **Stages fan out too**: `forEach` on a stage fans each input's array
+  elements into element-inputs — `keyPath` is the reduce key,
+  `elementKey` the element's identity (required with a reduce, so two
+  same-key elements both count), `$parent.` reaches the enclosing
+  event — so fan-then-fold (elements → sums by workarea) is ONE stage.
+  Re-emitted inputs reconcile; the input's tombstone retracts all its
+  elements.
 - **Joins FILTER** (`[[projection.stage.join]]`): an input participates
   only while the joined topic's row — addressed by the input's `on`
   value against the joined entity's key — exists and matches every

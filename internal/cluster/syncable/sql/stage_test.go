@@ -517,3 +517,91 @@ func TestStageEpochSweep(t *testing.T) {
 	require.Equal(t, `{"n":1}`, get("j1"), "the un-reasserted input swept, key refolds")
 	require.Equal(t, `{"n":1}`, get("j2"), "gen-0 direct write survives the sweep (the >= 1 floor)")
 }
+
+// forEach as a STAGE: one event's elements fan into the stage's reduce —
+// fan-then-fold in a single stage (invoiced-by-workarea's shape). A
+// re-emitted parent reconciles (vanished elements retract, refolding
+// their aggregates), and the parent's tombstone retracts everything.
+func TestStageForEachFanThenFold(t *testing.T) {
+	stages := []ProjectionStage{
+		{
+			Name: "by-wa", From: "txns", ForEach: "$.data.elements[*]",
+			ElementKey: "$.id",
+			KeyPath:    []string{"$.workareaId"}, Reduce: "aggregate",
+			Emit: []StageEmit{{Field: "total", Sum: "$.amount"}, {Field: "n", Count: true}},
+		},
+	}
+	cfg := stageConfig(stages...)
+	require.NoError(t, validateProjectionStageShapes(cfg))
+	g := buildStageGraph(cfg.Stages)
+	store := stageStoreForTest(t)
+
+	fold := func(key, payload string) {
+		require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+			return g.FoldTopicUpsertNow(tx, "txns", []byte(key), decodePayload(t, payload))
+		}))
+	}
+	get := func(key string) string {
+		var got string
+		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
+			v, err := tx.GetOut("by-wa", []byte(key))
+			got = string(v)
+			return err
+		}))
+		return got
+	}
+
+	fold("t1", `{"data":{"elements":[
+		{"id":"e1","workareaId":"w1","amount":2.5},
+		{"id":"e2","workareaId":"w1","amount":1.25},
+		{"id":"e3","workareaId":"w2","amount":10}]}}`)
+	require.Equal(t, `{"n":2,"total":3.75}`, get("w1"), "fan then fold, exactly")
+	require.Equal(t, `{"n":1,"total":10}`, get("w2"))
+
+	// Re-emit: one w1 element (new amount), w2's element vanished.
+	fold("t1", `{"data":{"elements":[{"id":"e1","workareaId":"w1","amount":3}]}}`)
+	require.Equal(t, `{"n":1,"total":3}`, get("w1"), "reconciled and refolded")
+	require.Empty(t, get("w2"), "the vanished element's aggregate retracts")
+
+	// A second parent contributes to the same workarea independently.
+	fold("t2", `{"data":{"elements":[{"id":"e9","workareaId":"w1","amount":0.5}]}}`)
+	require.Equal(t, `{"n":2,"total":3.5}`, get("w1"))
+
+	// Parent tombstone retracts its elements only.
+	require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+		return g.FoldTopicDeleteNow(tx, "txns", []byte("t1"))
+	}))
+	require.Equal(t, `{"n":1,"total":0.5}`, get("w1"))
+}
+
+// A forEach reshape stage: each element becomes its own key, with
+// `$parent.` reaching the enclosing event at drain-time refold (the
+// wrapper retention).
+func TestStageForEachParentScope(t *testing.T) {
+	stages := []ProjectionStage{
+		{
+			Name: "elems", From: "txns", ForEach: "$.items[*]",
+			KeyPath: []string{"$.sku"},
+			Emit: []StageEmit{
+				{Field: "amt", From: "$.amount"},
+				{Field: "txn", From: "$parent.id"},
+			},
+		},
+	}
+	cfg := stageConfig(stages...)
+	require.NoError(t, validateProjectionStageShapes(cfg))
+	g := buildStageGraph(cfg.Stages)
+	store := stageStoreForTest(t)
+
+	require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+		return g.FoldTopicUpsertNow(tx, "txns", []byte("t1"),
+			decodePayload(t, `{"id":"t1","items":[{"sku":"a","amount":"2.50"}]}`))
+	}))
+	var got string
+	require.NoError(t, store.View(func(tx *stagestore.Tx) error {
+		v, err := tx.GetOut("elems", []byte("a"))
+		got = string(v)
+		return err
+	}))
+	require.Equal(t, `{"amt":"2.50","txn":"t1"}`, got)
+}

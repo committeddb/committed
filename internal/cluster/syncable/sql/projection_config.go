@@ -273,6 +273,21 @@ type ProjectionStage struct {
 	TieByType   string
 	Joins       []StageJoin
 	Emit        []StageEmit
+	// ForEach fans each input into N element-inputs (the deliberately
+	// multi-valued path selects them): keyPath and emit/join paths resolve
+	// against the ELEMENT, `$parent.` reaches the enclosing input, and a
+	// re-emitted input reconciles (vanished elements retract; the input's
+	// tombstone retracts them all). Elements feed the stage's reduce like
+	// any input, so forEach + aggregate is fan-then-fold in one stage.
+	ForEach string
+	// ElementKey is a fanned element's IDENTITY (element-scoped path) when
+	// it differs from keyPath — the aggregate sidecar's ElementKey
+	// precedent. keyPath is the REDUCE key (which output an element folds
+	// into); ElementKey is which retained input it IS (what a re-delivery
+	// replaces). Defaults to keyPath: fine for 1:1 fan (element id = row
+	// id), required when a reduce folds multiple same-key elements (two
+	// same-workarea amounts must both count).
+	ElementKey string
 }
 
 // StageJoin is one filtering join of a stage: the stage's inputs
@@ -1176,6 +1191,20 @@ func validateProjectionStageShapes(c *ProjectionConfig) error {
 			}
 		default:
 			return fmt.Errorf("%s: reduce %q is invalid (want \"latest\", \"aggregate\", or omit for a reshape stage)", where, st.Reduce)
+		}
+		if st.ForEach != "" && !multiValuedPath(st.ForEach) {
+			return fmt.Errorf("%s: forEach path [%s] is single-valued — forEach fans an array into element-inputs; drop it for one input per entity", where, st.ForEach)
+		}
+		if st.ElementKey != "" {
+			if st.ForEach == "" {
+				return fmt.Errorf("%s: elementKey is only for forEach stages (it names a fanned element's identity)", where)
+			}
+			if err := rejectMultiValued(st.ElementKey, where+": elementKey"); err != nil {
+				return err
+			}
+		}
+		if st.ForEach != "" && st.ElementKey == "" && st.Reduce != "" {
+			return fmt.Errorf("%s: a forEach stage with reduce = %q needs elementKey — the element's own identity — or two same-key elements would collapse into one retained input", where, st.Reduce)
 		}
 		for ji, j := range st.Joins {
 			jw := fmt.Sprintf("%s join %d (topic %q)", where, ji+1, j.Topic)
