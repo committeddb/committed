@@ -298,9 +298,23 @@ type ProjectionStage struct {
 // participation and heals when it lands. Joins FILTER (gap 6) — field
 // resolution from joins is a later arm.
 type StageJoin struct {
-	Topic string       `mapstructure:"topic"`
+	Topic string `mapstructure:"topic"`
+	// From joins against a PRIOR stage instead of a topic (exactly one of
+	// Topic or From): the dimension rows are that stage's outputs, keyed
+	// by its out key and maintained by the drain — so cross-stage
+	// correlation is a join, not a second input. Manifest order applies:
+	// the joined stage must be declared earlier.
+	From  string       `mapstructure:"from"`
 	On    string       `mapstructure:"on"`
 	Where []WhenClause `mapstructure:"where"`
+}
+
+// target returns the join's dimension source name (topic or stage).
+func (j *StageJoin) target() string {
+	if j.From != "" {
+		return j.From
+	}
+	return j.Topic
 }
 
 // StageEmit is one field of a stage's emitted object. A reshape stage's
@@ -1207,12 +1221,21 @@ func validateProjectionStageShapes(c *ProjectionConfig) error {
 			return fmt.Errorf("%s: a forEach stage with reduce = %q needs elementKey — the element's own identity — or two same-key elements would collapse into one retained input", where, st.Reduce)
 		}
 		for ji, j := range st.Joins {
-			jw := fmt.Sprintf("%s join %d (topic %q)", where, ji+1, j.Topic)
-			if j.Topic == "" {
-				return fmt.Errorf("%s: topic is required", jw)
+			jw := fmt.Sprintf("%s join %d (%q)", where, ji+1, j.target())
+			if (j.Topic == "") == (j.From == "") {
+				return fmt.Errorf("%s: exactly one of topic (a topic's rows by entity key) or from (a PRIOR stage's outputs by its key) is required", jw)
 			}
-			if stageNamed(c, j.Topic) >= 0 {
-				return fmt.Errorf("%s: joins address TOPICS (dimension rows by entity key); to consume a stage, chain from it", jw)
+			if j.Topic != "" && stageNamed(c, j.Topic) >= 0 {
+				return fmt.Errorf("%s: %q is a stage — join it with from = %q (topic joins address topics)", jw, j.Topic, j.Topic)
+			}
+			if j.From != "" {
+				fi := stageNamed(c, j.From)
+				if fi < 0 {
+					return fmt.Errorf("%s: from %q names no declared stage", jw, j.From)
+				}
+				if fi >= i {
+					return fmt.Errorf("%s: from %q references a stage at or after this one — stages join in manifest order (move the producer above its consumer)", jw, j.From)
+				}
 			}
 			if j.On == "" {
 				return fmt.Errorf("%s: on is required — the input field holding the joined entity's key", jw)

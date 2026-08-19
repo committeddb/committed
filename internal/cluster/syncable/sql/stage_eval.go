@@ -38,6 +38,10 @@ import (
 type stageNode struct {
 	def       *ProjectionStage
 	consumers []*stageNode
+	// dimConsumers are the joins (of LATER stages) that use THIS stage's
+	// outputs as their dimension rows — maintained by refoldKey as the
+	// outputs change, fan-out marking their dependents dirty.
+	dimConsumers []dimRef
 }
 
 // stageGraph is the compiled stage topology of one projection: manifest
@@ -82,6 +86,12 @@ func buildStageGraph(stages []ProjectionStage) *stageGraph {
 		}
 		for j := range stages[i].Joins {
 			jn := &stages[i].Joins[j]
+			if jn.From != "" {
+				if producer, ok := g.byName[jn.From]; ok {
+					producer.dimConsumers = append(producer.dimConsumers, dimRef{node: nodes[i], join: jn})
+				}
+				continue
+			}
 			g.dims[jn.Topic] = append(g.dims[jn.Topic], dimRef{node: nodes[i], join: jn})
 		}
 	}
@@ -194,7 +204,7 @@ func (g *stageGraph) FoldTopicUpsert(tx *stagestore.Tx, topic string, inKey []by
 		if err != nil {
 			return err
 		}
-		if err := tx.PutDim(d.node.def.Name, d.join.Topic, inKey, encodeRetained(gen, bs)); err != nil {
+		if err := tx.PutDim(d.node.def.Name, d.join.target(), inKey, encodeRetained(gen, bs)); err != nil {
 			return err
 		}
 		if err := g.markDimDependents(tx, d, inKey, dirty); err != nil {
@@ -212,7 +222,7 @@ func (g *stageGraph) FoldTopicDelete(tx *stagestore.Tx, topic string, inKey []by
 		}
 	}
 	for _, d := range g.dims[topic] {
-		if err := tx.DeleteDim(d.node.def.Name, d.join.Topic, inKey); err != nil {
+		if err := tx.DeleteDim(d.node.def.Name, d.join.target(), inKey); err != nil {
 			return err
 		}
 		if err := g.markDimDependents(tx, d, inKey, dirty); err != nil {
@@ -228,7 +238,7 @@ func (g *stageGraph) FoldTopicDelete(tx *stagestore.Tx, topic string, inKey []by
 // stale entry's refold is an idempotent no-op, never wrong output; a
 // rebuild clears them.
 func (g *stageGraph) markDimDependents(tx *stagestore.Tx, d dimRef, dimKey []byte, dirty dirtySet) error {
-	return tx.DependentsOf(d.node.def.Name, d.join.Topic, dimKey, func(outKey []byte) error {
+	return tx.DependentsOf(d.node.def.Name, d.join.target(), dimKey, func(outKey []byte) error {
 		dirty.mark(d.node, outKey)
 		return nil
 	})
@@ -346,7 +356,7 @@ func (g *stageGraph) foldOneInput(tx *stagestore.Tx, n *stageNode, inKey []byte,
 	for i := range st.Joins {
 		j := &st.Joins[i]
 		if onV, err := resolveScopedPath(j.On, data, parent); err == nil && onV != nil {
-			if err := tx.PutRev(st.Name, j.Topic, []byte(keyString(onV)), outKey); err != nil {
+			if err := tx.PutRev(st.Name, j.target(), []byte(keyString(onV)), outKey); err != nil {
 				return err
 			}
 		}
@@ -450,6 +460,14 @@ func (g *stageGraph) refoldKey(tx *stagestore.Tx, n *stageNode, outKey []byte, d
 				return err
 			}
 		}
+		for _, d := range n.dimConsumers {
+			if err := tx.DeleteDim(d.node.def.Name, d.join.target(), outKey); err != nil {
+				return err
+			}
+			if err := g.markDimDependents(tx, d, outKey, dirty); err != nil {
+				return err
+			}
+		}
 		for _, c := range n.consumers {
 			if err := g.foldDelete(tx, c, outKey, dirty); err != nil {
 				return err
@@ -469,6 +487,16 @@ func (g *stageGraph) refoldKey(tx *stagestore.Tx, n *stageNode, outKey []byte, d
 	}
 	if g.onDelta != nil {
 		if err := g.onDelta(st.Name, outKey, obj, true); err != nil {
+			return err
+		}
+	}
+	for _, d := range n.dimConsumers {
+		// This stage's output IS the consumer join's dimension row —
+		// stage dims carry generation 0 (absorption: never swept).
+		if err := tx.PutDim(d.node.def.Name, d.join.target(), outKey, encodeRetained(0, out)); err != nil {
+			return err
+		}
+		if err := g.markDimDependents(tx, d, outKey, dirty); err != nil {
 			return err
 		}
 	}
@@ -526,7 +554,7 @@ func inputQualifies(tx *stagestore.Tx, st *ProjectionStage, obj, parent any) (bo
 		if err != nil || onV == nil {
 			return false, nil
 		}
-		stored, err := tx.GetDim(st.Name, j.Topic, []byte(keyString(onV)))
+		stored, err := tx.GetDim(st.Name, j.target(), []byte(keyString(onV)))
 		if err != nil {
 			return false, err
 		}

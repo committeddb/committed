@@ -605,3 +605,75 @@ func TestStageForEachParentScope(t *testing.T) {
 	}))
 	require.Equal(t, `{"amt":"2.50","txn":"t1"}`, got)
 }
+
+// Joins on STAGES (cross-stage correlation, the S9/S10 shape): a later
+// stage joins a PRIOR stage's outputs as its dimension rows, maintained
+// by the drain — the producer's refolds heal, flip, and retract the
+// consumer's participation through the same fan-out machinery.
+func TestStageJoinOnStage(t *testing.T) {
+	stages := []ProjectionStage{
+		{
+			Name: "pay-counts", From: "payments", KeyPath: []string{"$.proposal"},
+			Reduce: "aggregate", Emit: []StageEmit{{Field: "n", Count: true}},
+		},
+		{
+			Name: "funded", From: "proposals", KeyPath: []string{"$.id"},
+			Joins: []StageJoin{{
+				From: "pay-counts", On: "$.id",
+				Where: []WhenClause{{Path: "$.n", Equals: 2}},
+			}},
+			Emit: []StageEmit{{Field: "id", From: "$.id"}},
+		},
+	}
+	cfg := stageConfig(stages...)
+	require.NoError(t, validateProjectionStageShapes(cfg))
+	g := buildStageGraph(cfg.Stages)
+	store := stageStoreForTest(t)
+
+	fold := func(topic, key, payload string) {
+		require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+			return g.FoldTopicUpsertNow(tx, topic, []byte(key), decodePayload(t, payload))
+		}))
+	}
+	del := func(topic, key string) {
+		require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+			return g.FoldTopicDeleteNow(tx, topic, []byte(key))
+		}))
+	}
+	get := func() string {
+		var got string
+		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
+			v, err := tx.GetOut("funded", []byte("p1"))
+			got = string(v)
+			return err
+		}))
+		return got
+	}
+
+	// The proposal arrives before any payments: no dimension row yet.
+	fold("proposals", "pr1", `{"id":"p1"}`)
+	require.Empty(t, get())
+
+	// One payment → pay-counts(p1) = {n:1} — where wants 2: still out.
+	fold("payments", "m1", `{"proposal":"p1"}`)
+	require.Empty(t, get())
+
+	// The second payment refolds the producer to {n:2}: the consumer
+	// HEALS through the stage-dimension fan-out.
+	fold("payments", "m2", `{"proposal":"p1"}`)
+	require.Equal(t, `{"id":"p1"}`, get())
+
+	// A third payment flips it back out (n:3 ≠ 2)…
+	fold("payments", "m3", `{"proposal":"p1"}`)
+	require.Empty(t, get())
+
+	// …and deleting it flips back in.
+	del("payments", "m3")
+	require.Equal(t, `{"id":"p1"}`, get())
+
+	// Retracting the producer's key entirely (no payments) removes the
+	// dimension row: the consumer retracts.
+	del("payments", "m1")
+	del("payments", "m2")
+	require.Empty(t, get())
+}

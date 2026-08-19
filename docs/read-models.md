@@ -448,6 +448,10 @@ set = [ { column = "total", from = "$.total" },
   `where` clause. Dimension changes refold dependents (reverse-index
   fan-out); a late dimension heals; a flipped predicate or a dimension
   delete retracts dependents.
+- **Joins can address a PRIOR stage** (`from = "<stage>"` on a join):
+  its outputs are the dimension rows, maintained live by the drain — so
+  cross-stage correlation is a join, not a second input; heal, flip,
+  and retraction all flow through the same fan-out.
 - **`reduce = "latest"` is argmax by a business field** (`orderBy` — never
   arrival order, so backfills converge with steady state), with `tieBy`
   a MANDATORY deterministic tiebreak (`orderByType`/`tieByType` choose
