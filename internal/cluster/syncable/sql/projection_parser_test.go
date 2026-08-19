@@ -1191,3 +1191,30 @@ of = "nope"`))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), `of "nope" is not a plain element field`)
 }
+
+// Multi-valued jsonpaths in value positions are rejected loudly at POST —
+// the field-verified parallel-arrays trap (a wildcard "looks like data,
+// unusable, silently wrong") stays unrepresentable until forEach exists.
+func TestParseProjectionRejectsMultiValuedPaths(t *testing.T) {
+	base := strings.ReplaceAll(projectionTOML, "sql-projection", "projection")
+	parse := func(toml string) error {
+		_, err := (&sql.ProjectionSyncableParser{}).ParseConfig(
+			readConfig(t, "toml", strings.NewReader(toml)), projectionStorage())
+		return err
+	}
+
+	wild := strings.Replace(base, `{ column = "tier",  from  = "$.tier" },`,
+		`{ column = "tier",  from  = "$.items[*].tier" },`, 1)
+	err := parse(wild)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "multi-valued")
+	require.Contains(t, err.Error(), "forEach")
+
+	recursive := strings.Replace(base, `{ column = "tier",  from  = "$.tier" },`,
+		`{ column = "tier",  from  = "$..tier" },`, 1)
+	require.ErrorContains(t, parse(recursive), "multi-valued")
+
+	inExpr := strings.Replace(base, `{ column = "tier",  from  = "$.tier" },`,
+		`{ column = "tier",  expr  = "coalesce($.items[*].price, 0)" },`, 1)
+	require.ErrorContains(t, parse(inExpr), "multi-valued")
+}

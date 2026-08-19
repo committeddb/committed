@@ -564,6 +564,11 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 		if err := validateWhenClauses(src.When, where); err != nil {
 			return err
 		}
+		for _, kp := range src.KeyPath {
+			if err := rejectMultiValued(kp, where+": keyPath"); err != nil {
+				return err
+			}
+		}
 		if src.Lookup != nil {
 			if err := validateLookup(src, where); err != nil {
 				return err
@@ -635,6 +640,11 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 				}
 				if s.Value != nil && !isScalar(s.Value) {
 					return fmt.Errorf("%s rule %d column %q: value must be a scalar literal, got %T", where, i+1, s.Column, s.Value)
+				}
+				if s.From != "" {
+					if err := rejectMultiValued(s.From, fmt.Sprintf("%s rule %d column %q", where, i+1, s.Column)); err != nil {
+						return err
+					}
 				}
 				if s.Lookup != "" {
 					if err := validateSpineEnrichment(c, s, r, lookups, fmt.Sprintf("%s rule %d column %q", where, i+1, s.Column)); err != nil {
@@ -764,6 +774,25 @@ func validateWhenClauses(clauses []WhenClause, where string) error {
 	return nil
 }
 
+// multiValuedPath reports whether a jsonpath can yield more than one value
+// (wildcards, recursive descent, filters, slices). In a VALUE position such
+// a path produces parallel arrays that look like data and are silently
+// wrong (field-verified) — rejected loudly until fan-out (forEach) exists.
+// A literal '*' inside a quoted bracket key is not distinguished; those
+// keys are not supported in value positions.
+func multiValuedPath(p string) bool {
+	return strings.ContainsAny(p, "*?") || strings.Contains(p, "..")
+}
+
+// rejectMultiValued returns a loud config error when a value-position
+// jsonpath is multi-valued.
+func rejectMultiValued(p, where string) error {
+	if multiValuedPath(p) {
+		return fmt.Errorf("%s: jsonpath [%s] is multi-valued (wildcard/recursive/filter) — in a value position that produces parallel arrays, not row values; use a single-valued path (row fan-out is a coming forEach capability, not a projection column)", where, p)
+	}
+	return nil
+}
+
 // claimColumn records that source si writes col, rejecting a second source that
 // writes the same column. The same source re-claiming a column (its rules set
 // it more than once, last-write-wins) is fine.
@@ -840,6 +869,9 @@ func validateAggregate(c *ProjectionConfig, src ProjectionSource, where string, 
 			}
 			if f.On != "" || f.Select != "" {
 				return fmt.Errorf("%s: aggregate element field %q: on/select are only for enriched (lookup) fields", where, f.Field)
+			}
+			if err := rejectMultiValued(f.From, fmt.Sprintf("%s: aggregate element field %q", where, f.Field)); err != nil {
+				return err
 			}
 			plain[f.Field] = true
 		}
@@ -933,6 +965,9 @@ func validateLookup(src ProjectionSource, where string) error {
 		}
 		if f.From == "" {
 			return fmt.Errorf("%s: lookup %q field %q needs a from jsonpath", where, lk.Name, f.Field)
+		}
+		if err := rejectMultiValued(f.From, fmt.Sprintf("%s: lookup %q field %q", where, lk.Name, f.Field)); err != nil {
+			return err
 		}
 		if seen[f.Field] {
 			return fmt.Errorf("%s: lookup %q field %q declared twice", where, lk.Name, f.Field)

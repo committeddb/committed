@@ -286,6 +286,9 @@ func (p *exprParser) parsePrimary() (exprNode, error) {
 		if _, err := jsonpath.New(t.text); err != nil {
 			return nil, fmt.Errorf("invalid jsonpath %q at position %d: %v", t.text, t.pos, err)
 		}
+		if multiValuedPath(t.text) {
+			return nil, fmt.Errorf("jsonpath %q at position %d is multi-valued (wildcard/recursive/filter) — expressions compute over scalars", t.text, t.pos)
+		}
 		return exprPath{t.text}, nil
 	case "ident":
 		fn := strings.ToLower(t.text)
