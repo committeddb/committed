@@ -202,6 +202,18 @@ func (e *postgresEngine) SinkValue(table, pk, col string) (string, bool) {
 	return v, true
 }
 
+// RawSinkValue reads one column of one row from ANY sink-side table by an
+// arbitrary key column — the staged-projection scenarios' reader (their
+// tables and keys aren't the canned <topic>_sink shape).
+func (e *postgresEngine) RawSinkValue(table, keyCol, key, col string) (string, bool) {
+	q := fmt.Sprintf("SELECT %s FROM %s WHERE %s = $1", col, table, keyCol)
+	var v string
+	if err := e.conn.QueryRow(e.ctx, q, key).Scan(&v); err != nil {
+		return "", false
+	}
+	return v, true
+}
+
 // SinkCount returns the row count of a topic's sink table, 0 if absent.
 // (Moved verbatim from syncable.go.)
 func (e *postgresEngine) SinkCount(t *testing.T, table string) int {

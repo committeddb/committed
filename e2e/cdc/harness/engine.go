@@ -51,6 +51,9 @@ type Engine interface {
 	SinkValue(table, pk, col string) (string, bool)
 	// SinkCount returns the number of rows in a topic's sink table.
 	SinkCount(t *testing.T, table string) int
+	// RawSinkValue reads one column of one row from ANY sink-side table by
+	// an arbitrary key column (staged-projection scenarios).
+	RawSinkValue(table, keyCol, key, col string) (string, bool)
 	// Load bulk-inserts the dataset into the source database.
 	Load(ctx context.Context, ds dataset.Dataset) error
 

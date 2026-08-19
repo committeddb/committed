@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	bolt "go.etcd.io/bbolt"
 	"go.uber.org/zap"
@@ -75,7 +76,10 @@ func Open(dir, name, fingerprint string) (_ *Store, reset bool, err error) {
 	open := func() (*bolt.DB, error) {
 		// NoSync: the fold's writes harden at checkpoint boundaries via
 		// Sync(), not per-transaction — see the package invariant.
-		return bolt.Open(path, 0o600, &bolt.Options{NoSync: true})
+		// Timeout: bolt's flock otherwise waits FOREVER — a second opener
+		// (a leaked validation parse, a misbehaving process) must fail
+		// loudly, never wedge a worker goroutine silently.
+		return bolt.Open(path, 0o600, &bolt.Options{NoSync: true, Timeout: 5 * time.Second})
 	}
 
 	db, err := open()

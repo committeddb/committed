@@ -222,6 +222,17 @@ func (e *mysqlEngine) SinkValue(table, pk, col string) (string, bool) {
 	return v.String, true
 }
 
+// RawSinkValue reads one column of one row from ANY sink-side table by an
+// arbitrary key column (staged-projection scenarios).
+func (e *mysqlEngine) RawSinkValue(table, keyCol, key, col string) (string, bool) {
+	q := fmt.Sprintf("SELECT %s FROM %s WHERE %s = ?", col, table, keyCol)
+	var v gosql.NullString
+	if err := e.db.QueryRowContext(e.ctx, q, key).Scan(&v); err != nil {
+		return "", false
+	}
+	return v.String, true
+}
+
 func (e *mysqlEngine) SinkCount(t *testing.T, table string) int {
 	t.Helper()
 	var n int

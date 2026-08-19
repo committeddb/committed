@@ -659,16 +659,40 @@ func (p *Projection) Sync(ctx context.Context, a *cluster.Actual) (cluster.Shoul
 		return false, execFailure("[projection.apply] begin", err, false)
 	}
 
-	// Stage folds run FIRST, in one store transaction per Actual: entities
-	// route through the stage graph, table sources consuming stages apply
-	// their deltas on this same SQL tx, and the frontier advances with the
-	// fold. Store commits before SQL: if the SQL commit then fails, the
-	// redelivered Actual re-folds idempotently (same inputs, same bytes).
+	// Staged path: the WHOLE apply — stage folds, their table deltas,
+	// direct-source applies, and the SQL COMMIT — runs inside one store
+	// transaction, with the store committing only after SQL succeeded.
+	// The ordering is load-bearing for delta suppression: a redelivery
+	// only sees "already folded" (and suppresses the delta) when the
+	// sink's transaction genuinely committed; a crash or commit failure
+	// between the two leaves the store BEHIND, so the refold re-fires
+	// every delta and the sink re-applies idempotently.
 	if p.stages != nil {
-		if err := p.foldStages(ctx, tx, a); err != nil {
-			_ = tx.Rollback()
+		committed := false
+		err := p.stageStore.Update(func(stx *stagestore.Tx) error {
+			if err := p.foldStagesTx(ctx, tx, stx, a); err != nil {
+				return err
+			}
+			for _, e := range a.Entities {
+				for _, src := range p.sources[e.Type.ID] {
+					if err := p.applyEntity(ctx, tx, src, e); err != nil {
+						return err
+					}
+				}
+			}
+			if err := tx.Commit(); err != nil {
+				return execFailure("[projection.apply] commit", err, p.dialect.IsPermanent(err))
+			}
+			committed = true
+			return nil
+		})
+		if err != nil {
+			if !committed {
+				_ = tx.Rollback()
+			}
 			return false, err
 		}
+		return true, nil
 	}
 
 	for _, e := range a.Entities {
@@ -701,6 +725,39 @@ func (p *Projection) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool,
 		// Redact the raw connect error (user=/database=/host:port); transient — see
 		// the matching note in Sync.
 		return false, execFailure("[projection.apply] begin", err, false)
+	}
+
+	// Staged path: same commit ordering as Sync — SQL inside the store tx —
+	// with one store transaction covering the whole batch.
+	if p.stages != nil {
+		committed := false
+		berr := p.stageStore.Update(func(stx *stagestore.Tx) error {
+			for _, a := range as {
+				if err := p.foldStagesTx(ctx, tx, stx, a); err != nil {
+					return err
+				}
+				for _, e := range a.Entities {
+					for _, src := range p.sources[e.Type.ID] {
+						if err := p.applyEntity(ctx, tx, src, e); err != nil {
+							return err
+						}
+					}
+				}
+			}
+			zap.L().Debug("sql projection batch committing", zap.Int("batch_size", len(as)))
+			if err := tx.Commit(); err != nil {
+				return execFailure("[projection.apply] commit", err, p.dialect.IsPermanent(err))
+			}
+			committed = true
+			return nil
+		})
+		if berr != nil {
+			if !committed {
+				_ = tx.Rollback()
+			}
+			return false, berr
+		}
+		return true, nil
 	}
 
 	for _, a := range as {
@@ -1262,21 +1319,22 @@ func (p *Projection) forEachDeleteRow(ctx context.Context, tx *gosql.Tx, childKe
 	return nil
 }
 
-// foldStages folds one Actual's entities through the stage graph in one
-// store transaction, routing each stage's deltas to the table sources
-// consuming it (applied on the surrounding SQL transaction). The frontier
-// advances atomically with the fold.
-func (p *Projection) foldStages(ctx context.Context, tx *gosql.Tx, a *cluster.Actual) error {
-	return p.stageStore.Update(func(stx *stagestore.Tx) error {
-		p.stages.OnDelta = func(stage string, outKey []byte, obj any, live bool) error {
-			for _, src := range p.stageSinks[stage] {
-				if err := p.applyStageDelta(ctx, tx, src, outKey, obj, live); err != nil {
-					return err
-				}
+// foldStagesTx folds one Actual's entities through the stage graph
+// inside the CALLER's store transaction, routing each stage's deltas to
+// the table sources consuming it (applied on the surrounding SQL
+// transaction). The frontier advances atomically with the fold; the
+// caller sequences the SQL commit BEFORE the store commit (see Sync).
+func (p *Projection) foldStagesTx(ctx context.Context, tx *gosql.Tx, stx *stagestore.Tx, a *cluster.Actual) error {
+	p.stages.OnDelta = func(stage string, outKey []byte, obj any, live bool) error {
+		for _, src := range p.stageSinks[stage] {
+			if err := p.applyStageDelta(ctx, tx, src, outKey, obj, live); err != nil {
+				return err
 			}
-			return nil
 		}
-		defer func() { p.stages.OnDelta = nil }()
+		return nil
+	}
+	defer func() { p.stages.OnDelta = nil }()
+	{
 
 		dirty := stages.Dirty{}
 		for _, e := range a.Entities {
@@ -1313,7 +1371,7 @@ func (p *Projection) foldStages(ctx context.Context, tx *gosql.Tx, a *cluster.Ac
 			return err
 		}
 		return stx.SetFrontier(a.Index)
-	})
+	}
 }
 
 // applyStageDelta lands one stage delta on a table source: an upsert folds
