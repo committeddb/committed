@@ -104,6 +104,17 @@ const (
 	onDeleteRemoveFromAggregate = "remove-from-aggregate"
 )
 
+// scalarFn values for an aggregate scalar's fn. Config casing is normalized
+// at parse (normalizeScalars lower-cases), so these are the canonical
+// internal spellings the validation and dialects match.
+const (
+	scalarFnCount         = "count"
+	scalarFnSum           = "sum"
+	scalarFnMin           = "min"
+	scalarFnMax           = "max"
+	scalarFnCountDistinct = "countdistinct"
+)
+
 // elementKeyType values for an aggregate's elementKey. The sidecar always
 // stores the key as text (so binding never mismatches a typed column); this
 // flag only chooses how the array orders: "number" sorts 1,2,…,10 (numeric
@@ -155,6 +166,36 @@ type ProjectionAggregate struct {
 	Element        []ProjectionElementField
 	ElementKey     string
 	ElementKeyType string
+	// Scalars are cross-row aggregate columns computed over the SAME child
+	// set the array column folds (count/sum/min/max/countDistinct) — the
+	// same sidecar with a different fold, recomputed absolutely at every
+	// child change (never incremented), so redelivery and rebuild converge
+	// identically to the array column. When Scalars are present the array
+	// Column is optional (a pure count needs no array).
+	Scalars []ProjectionScalar
+}
+
+// ProjectionScalar is one scalar aggregate column: Fn over the element
+// field Of (count needs no Of), optionally restricted to elements whose
+// fields match every Where clause (filtered count). Columns are declared
+// table columns, written by the same materialize/rebuild statements that
+// write the array column.
+type ProjectionScalar struct {
+	Column string `mapstructure:"column"`
+	Fn     string `mapstructure:"fn"`
+	Of     string `mapstructure:"of"`
+	// OfType ("text" or "number", default text) chooses how min/max order
+	// and countDistinct compare the Of field — the elementKeyType precedent.
+	// sum always folds numerically; count folds rows and takes neither.
+	OfType string        `mapstructure:"ofType"`
+	Where  []ScalarWhere `mapstructure:"where"`
+}
+
+// ScalarWhere is one equality clause over an element field, restricting
+// which children a filtered scalar counts.
+type ScalarWhere struct {
+	Field  string `mapstructure:"field"`
+	Equals any    `mapstructure:"equals"`
 }
 
 // ProjectionSource is one input of a projection. The topic is the discriminator
@@ -745,17 +786,19 @@ func validateAggregate(c *ProjectionConfig, src ProjectionSource, where string, 
 	default:
 		return fmt.Errorf("%s: onDelete %q is invalid for an aggregate source (want %q or %q)", where, src.OnDelete, onDeleteRemoveFromAggregate, onDeleteIgnore)
 	}
-	if ag.Column == "" {
-		return fmt.Errorf("%s: aggregate column is required", where)
+	if ag.Column == "" && len(ag.Scalars) == 0 {
+		return fmt.Errorf("%s: aggregate needs an array column, scalar entries, or both", where)
 	}
-	if !declared[ag.Column] {
-		return fmt.Errorf("%s: aggregate column %q is not a declared column", where, ag.Column)
-	}
-	if slices.Contains(c.PrimaryKey, ag.Column) {
-		return fmt.Errorf("%s: aggregate column %q may not be the primary-key column", where, ag.Column)
-	}
-	if err := claimColumn(owner, ag.Column, si, where); err != nil {
-		return err
+	if ag.Column != "" {
+		if !declared[ag.Column] {
+			return fmt.Errorf("%s: aggregate column %q is not a declared column", where, ag.Column)
+		}
+		if slices.Contains(c.PrimaryKey, ag.Column) {
+			return fmt.Errorf("%s: aggregate column %q may not be the primary-key column", where, ag.Column)
+		}
+		if err := claimColumn(owner, ag.Column, si, where); err != nil {
+			return err
+		}
 	}
 	if ag.ElementKey == "" {
 		return fmt.Errorf("%s: aggregate elementKey is required", where)
@@ -808,6 +851,65 @@ func validateAggregate(c *ProjectionConfig, src ProjectionSource, where string, 
 	for _, f := range ag.Element {
 		if f.enriched() && !plain[f.On] {
 			return fmt.Errorf("%s: aggregate element field %q: on %q is not a plain element field", where, f.Field, f.On)
+		}
+	}
+	// Scalars: each is a declared, non-key column this source solely owns;
+	// fn from the closed set; of/where reference PLAIN element fields (their
+	// values are stored in typed sidecar columns — an enriched field's value
+	// lives in the dimension, not the sidecar, so it cannot feed a fold).
+	scalarCols := make(map[string]bool, len(ag.Scalars))
+	for i, sc := range ag.Scalars {
+		swhere := fmt.Sprintf("%s scalar %d", where, i+1)
+		if sc.Column == "" {
+			return fmt.Errorf("%s: column is required", swhere)
+		}
+		if !declared[sc.Column] {
+			return fmt.Errorf("%s: column %q is not a declared column", swhere, sc.Column)
+		}
+		if slices.Contains(c.PrimaryKey, sc.Column) {
+			return fmt.Errorf("%s: column %q may not be the primary-key column", swhere, sc.Column)
+		}
+		if sc.Column == ag.Column {
+			return fmt.Errorf("%s: column %q is already the aggregate's array column", swhere, sc.Column)
+		}
+		if scalarCols[sc.Column] {
+			return fmt.Errorf("%s: column %q declared twice", swhere, sc.Column)
+		}
+		scalarCols[sc.Column] = true
+		if err := claimColumn(owner, sc.Column, si, where); err != nil {
+			return err
+		}
+		switch sc.OfType {
+		case "", elementKeyTypeText, elementKeyTypeNumber:
+		default:
+			return fmt.Errorf("%s: ofType %q is invalid (want %q or %q)", swhere, sc.OfType, elementKeyTypeText, elementKeyTypeNumber)
+		}
+		switch sc.Fn {
+		case scalarFnCount:
+			if sc.Of != "" {
+				return fmt.Errorf("%s: count folds rows, not a field — drop of %q (countDistinct folds a field)", swhere, sc.Of)
+			}
+			if sc.OfType != "" {
+				return fmt.Errorf("%s: ofType is only for of-folding fns (min, max, countDistinct)", swhere)
+			}
+		case scalarFnSum, scalarFnMin, scalarFnMax, scalarFnCountDistinct:
+			if sc.Of == "" {
+				return fmt.Errorf("%s: %s needs of naming a plain element field", swhere, sc.Fn)
+			}
+			if !plain[sc.Of] {
+				return fmt.Errorf("%s: of %q is not a plain element field", swhere, sc.Of)
+			}
+		default:
+			return fmt.Errorf("%s: fn %q is invalid (want %s, %s, %s, %s, or %s)", swhere, sc.Fn,
+				scalarFnCount, scalarFnSum, scalarFnMin, scalarFnMax, scalarFnCountDistinct)
+		}
+		for _, cl := range sc.Where {
+			if cl.Field == "" || !plain[cl.Field] {
+				return fmt.Errorf("%s: where field %q is not a plain element field", swhere, cl.Field)
+			}
+			if cl.Equals == nil || !isScalar(cl.Equals) {
+				return fmt.Errorf("%s: where for field %q needs a scalar equals literal", swhere, cl.Field)
+			}
 		}
 	}
 	return nil
@@ -882,6 +984,14 @@ func dimensionName(table, lookup string) string {
 // grouping its enriched element fields by (lookup, on) into one join apiece
 // (first-seen order, so the materialize SQL is stable).
 func (c *ProjectionConfig) aggregateSpec(ag *ProjectionAggregate) AggregateSpec {
+	// The sidecar's identity column: the array column, or — for a
+	// scalars-only aggregate — the first scalar column. Renaming that
+	// column re-homes the sidecar (rebuilt from the log like any
+	// projection state).
+	identity := ag.Column
+	if identity == "" {
+		identity = ag.Scalars[0].Column
+	}
 	spec := AggregateSpec{
 		Table: c.Table,
 		// Aggregates are single-key by validation (composite primaryKey +
@@ -889,8 +999,23 @@ func (c *ProjectionConfig) aggregateSpec(ag *ProjectionAggregate) AggregateSpec 
 		// is the one configured column.
 		PrimaryKey:  c.PrimaryKey[0],
 		Column:      ag.Column,
-		Sidecar:     sidecarName(c.Table, ag.Column),
+		Sidecar:     sidecarName(c.Table, identity),
 		NumericSort: ag.ElementKeyType == elementKeyTypeNumber,
+	}
+	for _, sc := range ag.Scalars {
+		as := AggregateScalar{
+			Column:    sc.Column,
+			Fn:        sc.Fn,
+			Of:        sc.Of,
+			OfNumeric: sc.OfType == elementKeyTypeNumber,
+		}
+		if len(sc.Where) > 0 {
+			as.Where = make([]AggregateScalarWhere, 0, len(sc.Where))
+			for _, w := range sc.Where {
+				as.Where = append(as.Where, AggregateScalarWhere(w))
+			}
+		}
+		spec.Scalars = append(spec.Scalars, as)
 	}
 	type joinKey struct{ lookup, on string }
 	at := map[joinKey]int{}

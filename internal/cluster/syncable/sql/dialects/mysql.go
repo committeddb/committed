@@ -94,21 +94,78 @@ func (d *MySQLDialect) CreateAggregateSidecarDDL(spec sql.AggregateSpec) string 
 	return createDDL(aggregateSidecarConfig(spec, "JSON", "VARCHAR(255)"), mysqlIdent)
 }
 
-// CreateAggregateMaterializeSQL implements Dialect; both ? placeholders bind
-// the parent key (the inserted row's key and the subquery filter). Table,
-// primary key and aggregate column are config identifiers quoted for MySQL.
-func (d *MySQLDialect) CreateAggregateMaterializeSQL(spec sql.AggregateSpec) string {
-	table, pk, col := mysqlIdent.Table(spec.Table), mysqlIdent.Ident(spec.PrimaryKey), mysqlIdent.Ident(spec.Column)
-	return fmt.Sprintf(
-		"INSERT INTO %s (%s,%s) VALUES (?,%s) ON DUPLICATE KEY UPDATE %s=VALUES(%s)",
-		table, pk, col, mysqlAggSubquery(spec, "?"), col, col)
+// mysqlScalarSubquery renders one scalar aggregate fold over the sidecar's
+// element JSON — the MySQL mirror of pgScalarSubquery (`->>'$.field'`
+// extraction, DECIMAL(65,10) casts where the fold or ofType requires,
+// where values compared as JSON text).
+func mysqlScalarSubquery(spec sql.AggregateSpec, sc sql.AggregateScalar, ph string) string {
+	extract := fmt.Sprintf("s.%s->>'$.%s'", sql.SidecarElement, sqlident.EscapeStringLiteralMySQL(sc.Of))
+	numeric := "CAST(" + extract + " AS DECIMAL(65,10))"
+	var fold string
+	switch sc.Fn {
+	case "count":
+		fold = "COUNT(*)"
+	case "sum":
+		fold = "SUM(" + numeric + ")"
+	case "countdistinct":
+		if sc.OfNumeric {
+			fold = "COUNT(DISTINCT " + numeric + ")"
+		} else {
+			fold = "COUNT(DISTINCT " + extract + ")"
+		}
+	case "min", "max":
+		op := strings.ToUpper(sc.Fn)
+		if sc.OfNumeric {
+			fold = op + "(" + numeric + ")"
+		} else {
+			fold = op + "(" + extract + ")"
+		}
+	}
+	var where strings.Builder
+	for _, w := range sc.Where {
+		fmt.Fprintf(&where, " AND s.%s->>'$.%s' = '%s'",
+			sql.SidecarElement, sqlident.EscapeStringLiteralMySQL(w.Field),
+			sqlident.EscapeStringLiteralMySQL(sql.ScalarWhereText(w.Equals)))
+	}
+	return fmt.Sprintf("(SELECT %s FROM %s s WHERE s.%s = %s%s)",
+		fold, mysqlIdent.Table(spec.Sidecar), sql.SidecarParentKey, ph, where.String())
 }
 
-// CreateAggregateRebuildSQL implements Dialect; both ? placeholders bind the
-// parent key (the subquery filter and the WHERE).
+// CreateAggregateMaterializeSQL implements Dialect; the first ? binds the
+// inserted parent key and every subquery ? binds it again — one per value
+// column (array column, then each scalar). Table, primary key and value
+// columns are config identifiers quoted for MySQL.
+func (d *MySQLDialect) CreateAggregateMaterializeSQL(spec sql.AggregateSpec) string {
+	table, pk := mysqlIdent.Table(spec.Table), mysqlIdent.Ident(spec.PrimaryKey)
+	cols, vals, updates := []string{pk}, []string{"?"}, []string{}
+	if spec.Column != "" {
+		col := mysqlIdent.Ident(spec.Column)
+		cols = append(cols, col)
+		vals = append(vals, mysqlAggSubquery(spec, "?"))
+		updates = append(updates, fmt.Sprintf("%s=VALUES(%s)", col, col))
+	}
+	for _, sc := range spec.Scalars {
+		col := mysqlIdent.Ident(sc.Column)
+		cols = append(cols, col)
+		vals = append(vals, mysqlScalarSubquery(spec, sc, "?"))
+		updates = append(updates, fmt.Sprintf("%s=VALUES(%s)", col, col))
+	}
+	return fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s) ON DUPLICATE KEY UPDATE %s",
+		table, strings.Join(cols, ","), strings.Join(vals, ","), strings.Join(updates, ","))
+}
+
+// CreateAggregateRebuildSQL implements Dialect; every subquery ? and the
+// final WHERE ? bind the parent key.
 func (d *MySQLDialect) CreateAggregateRebuildSQL(spec sql.AggregateSpec) string {
-	return fmt.Sprintf("UPDATE %s SET %s=%s WHERE %s=?",
-		mysqlIdent.Table(spec.Table), mysqlIdent.Ident(spec.Column), mysqlAggSubquery(spec, "?"), mysqlIdent.Ident(spec.PrimaryKey))
+	var sets []string
+	if spec.Column != "" {
+		sets = append(sets, fmt.Sprintf("%s=%s", mysqlIdent.Ident(spec.Column), mysqlAggSubquery(spec, "?")))
+	}
+	for _, sc := range spec.Scalars {
+		sets = append(sets, fmt.Sprintf("%s=%s", mysqlIdent.Ident(sc.Column), mysqlScalarSubquery(spec, sc, "?")))
+	}
+	return fmt.Sprintf("UPDATE %s SET %s WHERE %s=?",
+		mysqlIdent.Table(spec.Table), strings.Join(sets, ","), mysqlIdent.Ident(spec.PrimaryKey))
 }
 
 // CreateAggregateParentLookupSQL implements Dialect; MySQL binds the child key

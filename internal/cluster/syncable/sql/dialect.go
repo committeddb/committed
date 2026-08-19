@@ -446,10 +446,52 @@ type AggregateEnrichment struct {
 type AggregateSpec struct {
 	Table       string
 	PrimaryKey  string
-	Column      string
+	Column      string // the array column; "" for a scalars-only aggregate
 	Sidecar     string
 	NumericSort bool
 	Enrichments []AggregateEnrichment
+	Scalars     []AggregateScalar
+}
+
+// AggregateScalar is the dialect-facing description of one scalar aggregate
+// column: Fn (canonical lower-case — count, sum, min, max, countdistinct)
+// folded over the element field Of, extracted from the sidecar's element
+// JSON in the same materialize/rebuild subqueries that build the array
+// column. Sum always casts numeric; min/max/countdistinct cast numeric when
+// OfNumeric (lexical otherwise — ISO dates sort correctly as text). Where
+// clauses restrict which children fold (filtered count), rendered as
+// escaped literals — their values are operator-authored config, like the
+// identifiers around them.
+type AggregateScalar struct {
+	Column    string
+	Fn        string
+	Of        string
+	OfNumeric bool
+	Where     []AggregateScalarWhere
+}
+
+// AggregateScalarWhere is one equality restriction over an element field.
+type AggregateScalarWhere struct {
+	Field  string
+	Equals any
+}
+
+// ScalarWhereText renders a scalar where value in the JSON-text comparison
+// space the dialects' ->> extraction yields: booleans as true/false,
+// numbers as their digits, strings as themselves. Dialects quote and
+// escape the result into their SQL.
+func ScalarWhereText(v any) string {
+	switch t := v.(type) {
+	case string:
+		return t
+	case bool:
+		if t {
+			return "true"
+		}
+		return "false"
+	default:
+		return fmt.Sprintf("%v", t)
+	}
 }
 
 // LookupSpec is the dialect-facing description of one enrichment dimension: just

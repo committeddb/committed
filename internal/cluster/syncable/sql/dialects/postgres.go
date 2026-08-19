@@ -120,21 +120,84 @@ func (d *PostgreSQLDialect) CreateAggregateSidecarDDL(spec sql.AggregateSpec) st
 	return d.CreateDDL(aggregateSidecarConfig(spec, "JSONB", "TEXT"))
 }
 
-// CreateAggregateMaterializeSQL implements Dialect; both $1 (the inserted
-// parent key) and $2 (the subquery's parent_key filter) bind the same parent
-// key.
-func (d *PostgreSQLDialect) CreateAggregateMaterializeSQL(spec sql.AggregateSpec) string {
-	table, pk, col := pgIdent.Table(spec.Table), pgIdent.Ident(spec.PrimaryKey), pgIdent.Ident(spec.Column)
-	return fmt.Sprintf(
-		"INSERT INTO %s (%s,%s) VALUES ($1,%s) ON CONFLICT (%s) DO UPDATE SET %s=EXCLUDED.%s",
-		table, pk, col, pgAggSubquery(spec, "$2"), pk, col, col)
+// pgScalarSubquery renders one scalar aggregate fold over the sidecar's
+// element JSON: COUNT/SUM/MIN/MAX/COUNT(DISTINCT …) with ->> extraction
+// (numeric cast where the fold or ofType requires), restricted by the
+// scalar's where clauses. Where values compare in the ->> TEXT space, so
+// they render as the value's JSON text, quoted and escaped.
+func pgScalarSubquery(spec sql.AggregateSpec, sc sql.AggregateScalar, ph string) string {
+	extract := fmt.Sprintf("s.%s->>'%s'", sql.SidecarElement, sqlident.EscapeStringLiteral(sc.Of))
+	numeric := "(" + extract + ")::numeric"
+	var fold string
+	switch sc.Fn {
+	case "count":
+		fold = "COUNT(*)"
+	case "sum":
+		fold = "SUM(" + numeric + ")"
+	case "countdistinct":
+		if sc.OfNumeric {
+			fold = "COUNT(DISTINCT " + numeric + ")"
+		} else {
+			fold = "COUNT(DISTINCT " + extract + ")"
+		}
+	case "min", "max":
+		op := strings.ToUpper(sc.Fn)
+		if sc.OfNumeric {
+			fold = op + "(" + numeric + ")"
+		} else {
+			fold = op + "(" + extract + ")"
+		}
+	}
+	var where strings.Builder
+	for _, w := range sc.Where {
+		fmt.Fprintf(&where, " AND s.%s->>'%s' = '%s'",
+			sql.SidecarElement, sqlident.EscapeStringLiteral(w.Field),
+			sqlident.EscapeStringLiteral(sql.ScalarWhereText(w.Equals)))
+	}
+	return fmt.Sprintf("(SELECT %s FROM %s s WHERE s.%s = %s%s)",
+		fold, pgIdent.Table(spec.Sidecar), sql.SidecarParentKey, ph, where.String())
 }
 
-// CreateAggregateRebuildSQL implements Dialect; $1 (the subquery filter) and $2
-// (the WHERE) both bind the parent key.
+// CreateAggregateMaterializeSQL implements Dialect; $1 (the inserted parent
+// key) and every subquery placeholder ($2…) bind the same parent key — one
+// per value column (array column, then each scalar).
+func (d *PostgreSQLDialect) CreateAggregateMaterializeSQL(spec sql.AggregateSpec) string {
+	table, pk := pgIdent.Table(spec.Table), pgIdent.Ident(spec.PrimaryKey)
+	cols, vals, updates := []string{pk}, []string{"$1"}, []string{}
+	n := 2
+	if spec.Column != "" {
+		col := pgIdent.Ident(spec.Column)
+		cols = append(cols, col)
+		vals = append(vals, pgAggSubquery(spec, fmt.Sprintf("$%d", n)))
+		updates = append(updates, fmt.Sprintf("%s=EXCLUDED.%s", col, col))
+		n++
+	}
+	for _, sc := range spec.Scalars {
+		col := pgIdent.Ident(sc.Column)
+		cols = append(cols, col)
+		vals = append(vals, pgScalarSubquery(spec, sc, fmt.Sprintf("$%d", n)))
+		updates = append(updates, fmt.Sprintf("%s=EXCLUDED.%s", col, col))
+		n++
+	}
+	return fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s) ON CONFLICT (%s) DO UPDATE SET %s",
+		table, strings.Join(cols, ","), strings.Join(vals, ","), pk, strings.Join(updates, ","))
+}
+
+// CreateAggregateRebuildSQL implements Dialect; every subquery placeholder
+// ($1…) and the final WHERE placeholder bind the parent key.
 func (d *PostgreSQLDialect) CreateAggregateRebuildSQL(spec sql.AggregateSpec) string {
-	return fmt.Sprintf("UPDATE %s SET %s=%s WHERE %s=$2",
-		pgIdent.Table(spec.Table), pgIdent.Ident(spec.Column), pgAggSubquery(spec, "$1"), pgIdent.Ident(spec.PrimaryKey))
+	var sets []string
+	n := 1
+	if spec.Column != "" {
+		sets = append(sets, fmt.Sprintf("%s=%s", pgIdent.Ident(spec.Column), pgAggSubquery(spec, fmt.Sprintf("$%d", n))))
+		n++
+	}
+	for _, sc := range spec.Scalars {
+		sets = append(sets, fmt.Sprintf("%s=%s", pgIdent.Ident(sc.Column), pgScalarSubquery(spec, sc, fmt.Sprintf("$%d", n))))
+		n++
+	}
+	return fmt.Sprintf("UPDATE %s SET %s WHERE %s=$%d",
+		pgIdent.Table(spec.Table), strings.Join(sets, ","), pgIdent.Ident(spec.PrimaryKey), n)
 }
 
 // CreateAggregateParentLookupSQL implements Dialect; PostgreSQL binds the child

@@ -1133,3 +1133,61 @@ func TestParseProjectionExpr(t *testing.T) {
 		require.Contains(t, err.Error(), "exactly one of from, value, null, expr, or lookup")
 	})
 }
+
+// Aggregate scalar entries: parse, validate, and reject misuse loudly.
+func TestParseAggregateScalars(t *testing.T) {
+	config := func(scalarToml string) string {
+		return `
+[projection]
+db         = "testdb"
+table      = "jobs"
+primaryKey = "job_id"
+
+[[projection.columns]]
+name = "job_id"
+type = "VARCHAR(64)"
+
+[[projection.columns]]
+name = "visit_count"
+type = "INT"
+
+[[projection.source]]
+topic = "visits"
+keyPath = "$.job_id"
+onDelete = "remove-from-aggregate"
+[projection.source.aggregate]
+elementKey = "$.id"
+[[projection.source.aggregate.element]]
+field = "hours"
+from = "$.hours"
+` + scalarToml
+	}
+	parse := func(toml string) error {
+		_, err := (&sql.ProjectionSyncableParser{}).ParseConfig(
+			readConfig(t, "toml", strings.NewReader(toml)), projectionStorage())
+		return err
+	}
+
+	require.NoError(t, parse(config(`[[projection.source.aggregate.scalar]]
+column = "visit_count"
+fn = "count"`)))
+
+	err := parse(config(`[[projection.source.aggregate.scalar]]
+column = "visit_count"
+fn = "median"`))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `fn "median" is invalid`)
+
+	err = parse(config(`[[projection.source.aggregate.scalar]]
+column = "visit_count"
+fn = "sum"`))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "sum needs of")
+
+	err = parse(config(`[[projection.source.aggregate.scalar]]
+column = "visit_count"
+fn = "sum"
+of = "nope"`))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `of "nope" is not a plain element field`)
+}

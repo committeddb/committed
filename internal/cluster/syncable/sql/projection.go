@@ -106,6 +106,7 @@ type aggregateRuntime struct {
 	rebuildSQL       string
 	lookup           *gosql.Stmt
 	lookupSQL        string
+	parentBinds      int
 }
 
 // lookupRuntime is the prepared runtime of one ProjectionLookup: the dimension
@@ -154,6 +155,7 @@ type aggregateDependent struct {
 	affectedSQL string
 	rebuild     *gosql.Stmt
 	rebuildSQL  string
+	parentBinds int
 }
 
 // projectionStmt pairs one rule with its prepared upsert.
@@ -385,6 +387,7 @@ func (p *Projection) Init() error {
 				affectedSQL: affSQL,
 				rebuild:     ref.agg.rebuild,
 				rebuildSQL:  ref.agg.rebuildSQL,
+				parentBinds: ref.agg.parentBinds,
 			})
 		}
 	}
@@ -503,6 +506,13 @@ func (p *Projection) initAggregate(si int, src ProjectionSource, spec AggregateS
 		elementKey: ag.ElementKey,
 		fields:     plainElementFields(ag.Element), // enriched fields are joined in, not stored
 		sidecar:    spec.Sidecar,
+		// materialize and rebuild carry one parent-key placeholder per value
+		// column plus one (the inserted key / the WHERE) — bind the parent
+		// key that many times, whichever dialect rendered the statement.
+		parentBinds: 1 + len(spec.Scalars),
+	}
+	if spec.Column != "" {
+		rt.parentBinds++
 	}
 	// A partway failure below leaves rt unreturned (never stored on its source),
 	// so Projection.Close can't reach its statements — close them here.
@@ -938,14 +948,14 @@ func (p *Projection) applyAggregate(ctx context.Context, tx *gosql.Tx, src *proj
 	// Materialize the (new) parent's array from the sidecar. Both materialize
 	// placeholders bind the parent key (insert value + subquery filter); the
 	// dialect repeats the placeholder so the arg shape is uniform.
-	if err := p.aggExec(ctx, tx, ag.materialize, ag.materializeSQL, pk, pk); err != nil {
+	if err := p.aggExec(ctx, tx, ag.materialize, ag.materializeSQL, repeatArg(pk, ag.parentBinds)...); err != nil {
 		return err
 	}
 	// Re-parented: rebuild the old parent so its array drops the moved element.
 	// Mirrors removeFromAggregate — an UPDATE that no-ops if the old parent has no
 	// row, never a ghost. Skipped when the child is new or its parent is unchanged.
 	if hadOldParent && oldParent != keyString(parentKey) {
-		return p.aggExec(ctx, tx, ag.rebuild, ag.rebuildSQL, oldParent, oldParent)
+		return p.aggExec(ctx, tx, ag.rebuild, ag.rebuildSQL, repeatArg(oldParent, ag.parentBinds)...)
 	}
 	return nil
 }
@@ -970,7 +980,7 @@ func (p *Projection) removeFromAggregate(ctx context.Context, tx *gosql.Tx, src 
 	if err := p.aggExec(ctx, tx, ag.deleteSidecar, ag.deleteSidecarSQL, childKey); err != nil {
 		return err
 	}
-	return p.aggExec(ctx, tx, ag.rebuild, ag.rebuildSQL, parentKey, parentKey)
+	return p.aggExec(ctx, tx, ag.rebuild, ag.rebuildSQL, repeatArg(parentKey, ag.parentBinds)...)
 }
 
 // aggPriorParent returns the parent key currently recorded for childKey in the
@@ -994,6 +1004,16 @@ func (p *Projection) aggPriorParent(ctx context.Context, tx *gosql.Tx, ag *aggre
 		return "", false, execFailure(
 			fmt.Sprintf("[projection.aggregate] exec [%s]", ag.lookupSQL), err, p.dialect.IsPermanent(err))
 	}
+}
+
+// repeatArg binds one value to n placeholders — the aggregate materialize
+// and rebuild statements repeat the parent key once per value column.
+func repeatArg(v any, n int) []any {
+	out := make([]any, n)
+	for i := range out {
+		out[i] = v
+	}
+	return out
 }
 
 // aggExec runs one prepared aggregate statement, classifying a permanent error
@@ -1142,7 +1162,7 @@ func (p *Projection) fanOut(ctx context.Context, tx *gosql.Tx, lk *lookupRuntime
 		_ = rows.Close()
 
 		for _, pk := range parents {
-			if err := p.aggExec(ctx, tx, dep.rebuild, dep.rebuildSQL, pk, pk); err != nil {
+			if err := p.aggExec(ctx, tx, dep.rebuild, dep.rebuildSQL, repeatArg(pk, dep.parentBinds)...); err != nil {
 				return err
 			}
 		}

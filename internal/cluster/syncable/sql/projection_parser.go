@@ -101,6 +101,7 @@ type rawProjectionAggregate struct {
 	ElementKey     string                   `mapstructure:"elementKey"`
 	ElementKeyType string                   `mapstructure:"elementKeyType"`
 	Element        []ProjectionElementField `mapstructure:"element"`
+	Scalar         []ProjectionScalar       `mapstructure:"scalar"`
 }
 
 // rawProjectionLookup is the TOML decode shape of a source's
@@ -318,6 +319,7 @@ func parseProjectionSources(v *cluster.ParsedConfig, storage cluster.DatabaseSto
 					Element:        rs.Aggregate.Element,
 					ElementKey:     rs.Aggregate.ElementKey,
 					ElementKeyType: strings.ToLower(rs.Aggregate.ElementKeyType),
+					Scalars:        normalizeScalars(rs.Aggregate.Scalar),
 				}
 			}
 			if rs.Lookup != nil {
@@ -343,6 +345,20 @@ func parseProjectionSources(v *cluster.ParsedConfig, storage cluster.DatabaseSto
 		return nil, err
 	}
 	return []ProjectionSource{{Topic: topic, KeyPath: keyPath, Rules: rules}}, nil
+}
+
+// normalizeScalars lower-cases each scalar's fn so config casing never
+// matters downstream (validation and the dialects match exact strings).
+func normalizeScalars(scalars []ProjectionScalar) []ProjectionScalar {
+	out := make([]ProjectionScalar, len(scalars))
+	for i, sc := range scalars {
+		sc.Fn = strings.ToLower(sc.Fn)
+		out[i] = sc
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // pathOrList coerces a config value that may be a scalar or a list into
