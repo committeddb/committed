@@ -200,6 +200,13 @@ func (d *PostgreSQLDialect) CreateAggregateRebuildSQL(spec sql.AggregateSpec) st
 		pgIdent.Table(spec.Table), strings.Join(sets, ","), pgIdent.Ident(spec.PrimaryKey), n)
 }
 
+// CreateForEachChildrenSQL implements Dialect; PostgreSQL binds the parent
+// key with $1.
+func (d *PostgreSQLDialect) CreateForEachChildrenSQL(sidecar string) string {
+	return fmt.Sprintf("SELECT %s FROM %s WHERE %s = $1",
+		sql.SidecarChildKey, pgIdent.Table(sidecar), sql.SidecarParentKey)
+}
+
 // CreateAggregateParentLookupSQL implements Dialect; PostgreSQL binds the child
 // key with $1.
 func (d *PostgreSQLDialect) CreateAggregateParentLookupSQL(spec sql.AggregateSpec) string {

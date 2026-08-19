@@ -572,3 +572,124 @@ func TestProjectionAggregateScalars(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
+
+// The forEach engine end to end against sqlmock: one event fans N rows (one
+// per element, keyed by the element, with $parent reaching the event), a
+// re-emitted parent reconciles (the vanished element's row deletes), and a
+// parent tombstone cascades to every fanned row via the sidecar.
+func TestProjectionForEach(t *testing.T) {
+	txnType := &cluster.Type{ID: "txn", Name: "Txn"}
+	config := &sql.ProjectionConfig{
+		Table:      "txn_elements",
+		PrimaryKey: []string{"element_id"},
+		Columns: []sql.ProjectionColumn{
+			{Name: "element_id", SQLType: "VARCHAR(64)"},
+			{Name: "amount", SQLType: "DECIMAL(12,2)"},
+			{Name: "txn_id", SQLType: "VARCHAR(64)"},
+		},
+		Sources: []sql.ProjectionSource{{
+			Topic:   "txn",
+			KeyPath: []string{"$.sku"},
+			ForEach: "$.items[*]",
+			Rules: []sql.ProjectionRule{{
+				Set: []sql.ProjectionSet{
+					{Column: "amount", From: "$.amount"},
+					{Column: "txn_id", From: "$parent.id"},
+				},
+			}},
+		}},
+	}
+
+	dialect, mock, err := testdialects.NewSQLMockDialect()
+	require.NoError(t, err)
+	db, err := sql.NewDB(dialect, "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	ddlConfig := &sql.Config{
+		Table:      "txn_elements",
+		PrimaryKey: []string{"element_id"},
+		Mappings: []sql.Mapping{
+			{Column: "element_id", SQLType: "VARCHAR(64)"},
+			{Column: "amount", SQLType: "DECIMAL(12,2)"},
+			{Column: "txn_id", SQLType: "VARCHAR(64)"},
+		},
+	}
+	ruleConfig := &sql.Config{
+		Table:      "txn_elements",
+		PrimaryKey: []string{"element_id"},
+		Mappings: []sql.Mapping{
+			{Column: "element_id"}, {Column: "amount"}, {Column: "txn_id"},
+		},
+	}
+	sidecar := sql.ForEachSidecarName("txn_elements", "txn")
+	scConfig := &sql.Config{
+		Table:      sidecar,
+		PrimaryKey: []string{sql.SidecarChildKey},
+		Mappings: []sql.Mapping{
+			{Column: sql.SidecarChildKey},
+			{Column: sql.SidecarParentKey},
+			{Column: sql.SidecarElementKey},
+			{Column: sql.SidecarElement},
+		},
+	}
+	spec := sql.AggregateSpec{Table: "txn_elements", PrimaryKey: "element_id", Sidecar: sidecar}
+
+	mock.ExpectExec(dialect.CreateDDL(ddlConfig)).WillReturnResult(driver.ResultNoRows)
+	rulePrepare := mock.ExpectPrepare(dialect.CreateSQL(ruleConfig))
+	mock.ExpectExec(dialect.CreateAggregateSidecarDDL(spec)).WillReturnResult(driver.ResultNoRows)
+	scUpsert := mock.ExpectPrepare(dialect.CreateSQL(scConfig))
+	scDelete := mock.ExpectPrepare(dialect.CreateDeleteSQL(scConfig))
+	children := mock.ExpectPrepare(dialect.CreateForEachChildrenSQL(sidecar))
+	rowDelete := mock.ExpectPrepare(dialect.CreateDeleteSQL(ddlConfig))
+
+	p := sql.NewProjection(db, config, nil, "txn_elements")
+	require.NoError(t, p.Init())
+
+	sync := func(a *cluster.Actual) {
+		t.Helper()
+		_, err := p.Sync(context.Background(), a)
+		require.NoError(t, err)
+	}
+	scArgs := func(child, parent string) []driver.Value {
+		args := []driver.Value{child, parent, "", "{}"}
+		return append(args, args...) // mock dialect doubles like MySQL
+	}
+	rowArgs := func(vals ...driver.Value) []driver.Value { return append(vals, vals...) }
+
+	// Fan-out: two elements → children query (no prior), two row upserts
+	// (element-scoped amount, $parent-scoped txn id), two sidecar upserts.
+	mock.ExpectBegin()
+	children.ExpectQuery().WithArgs("p1").WillReturnRows(sqlmock.NewRows([]string{"child_key"}))
+	rulePrepare.ExpectExec().WithArgs(rowArgs("a", "2.50", "p1")...).WillReturnResult(sqlmock.NewResult(0, 1))
+	scUpsert.ExpectExec().WithArgs(scArgs("a", "p1")...).WillReturnResult(sqlmock.NewResult(0, 1))
+	rulePrepare.ExpectExec().WithArgs(rowArgs("b", "1.25", "p1")...).WillReturnResult(sqlmock.NewResult(0, 1))
+	scUpsert.ExpectExec().WithArgs(scArgs("b", "p1")...).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	sync(&cluster.Actual{Entities: []*cluster.Entity{cluster.NewUpsertEntity(txnType, []byte("p1"),
+		[]byte(`{"id":"p1","items":[{"sku":"a","amount":"2.50"},{"sku":"b","amount":"1.25"}]}`))}})
+
+	// Reconcile: the re-emitted parent lost element b → its row and sidecar
+	// entry delete; element a upserts as usual.
+	mock.ExpectBegin()
+	children.ExpectQuery().WithArgs("p1").
+		WillReturnRows(sqlmock.NewRows([]string{"child_key"}).AddRow("a").AddRow("b"))
+	rulePrepare.ExpectExec().WithArgs(rowArgs("a", "3.00", "p1")...).WillReturnResult(sqlmock.NewResult(0, 1))
+	scUpsert.ExpectExec().WithArgs(scArgs("a", "p1")...).WillReturnResult(sqlmock.NewResult(0, 1))
+	rowDelete.ExpectExec().WithArgs("b").WillReturnResult(sqlmock.NewResult(0, 1))
+	scDelete.ExpectExec().WithArgs("b").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	sync(&cluster.Actual{Entities: []*cluster.Entity{cluster.NewUpsertEntity(txnType, []byte("p1"),
+		[]byte(`{"id":"p1","items":[{"sku":"a","amount":"3.00"}]}`))}})
+
+	// Cascade: the parent tombstone deletes every fanned row via the sidecar.
+	mock.ExpectBegin()
+	children.ExpectQuery().WithArgs("p1").
+		WillReturnRows(sqlmock.NewRows([]string{"child_key"}).AddRow("a"))
+	rowDelete.ExpectExec().WithArgs("a").WillReturnResult(sqlmock.NewResult(0, 1))
+	scDelete.ExpectExec().WithArgs("a").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	sync(&cluster.Actual{Entities: []*cluster.Entity{cluster.NewDeleteEntity(txnType, []byte("p1"))}})
+
+	require.NoError(t, mock.ExpectationsWereMet())
+}

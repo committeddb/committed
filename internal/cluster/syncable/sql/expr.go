@@ -441,14 +441,14 @@ func compileExpr(src string) (exprNode, error) {
 // coalesce/nullif (string, bool). Errors are data errors (a non-numeric
 // operand where arithmetic needs one, the bit cap) — the caller dead-letters
 // them as permanent.
-func evalExpr(n exprNode, payload any) (any, error) {
+func evalExpr(n exprNode, payload, parent any) (any, error) {
 	switch x := n.(type) {
 	case exprNum:
 		return x.val, nil
 	case exprStr:
 		return x.val, nil
 	case exprPath:
-		v, err := jsonpath.Get(x.path, payload)
+		v, err := resolveScopedPath(x.path, payload, parent)
 		if err != nil {
 			// A missing field is null (the spec's null semantics) — payload
 			// shapes legitimately vary across a topic's event types.
@@ -456,7 +456,7 @@ func evalExpr(n exprNode, payload any) (any, error) {
 		}
 		return normalizeExprValue(v, x.path)
 	case exprNeg:
-		v, err := evalExpr(x.operand, payload)
+		v, err := evalExpr(x.operand, payload, parent)
 		if err != nil || v == nil {
 			return nil, err
 		}
@@ -466,19 +466,19 @@ func evalExpr(n exprNode, payload any) (any, error) {
 		}
 		return new(big.Rat).Neg(r), nil
 	case exprBin:
-		return evalBin(x, payload)
+		return evalBin(x, payload, parent)
 	case exprCall:
-		return evalCall(x, payload)
+		return evalCall(x, payload, parent)
 	}
 	return nil, fmt.Errorf("unhandled expression node %T", n)
 }
 
-func evalBin(x exprBin, payload any) (any, error) {
-	l, err := evalExpr(x.l, payload)
+func evalBin(x exprBin, payload, parent any) (any, error) {
+	l, err := evalExpr(x.l, payload, parent)
 	if err != nil {
 		return nil, err
 	}
-	r, err := evalExpr(x.r, payload)
+	r, err := evalExpr(x.r, payload, parent)
 	if err != nil {
 		return nil, err
 	}
@@ -528,11 +528,11 @@ func evalBin(x exprBin, payload any) (any, error) {
 	return nil, fmt.Errorf("unhandled operator %q", x.op)
 }
 
-func evalCall(x exprCall, payload any) (any, error) {
+func evalCall(x exprCall, payload, parent any) (any, error) {
 	switch x.fn {
 	case "coalesce":
 		for _, a := range x.args {
-			v, err := evalExpr(a, payload)
+			v, err := evalExpr(a, payload, parent)
 			if err != nil {
 				return nil, err
 			}
@@ -542,11 +542,11 @@ func evalCall(x exprCall, payload any) (any, error) {
 		}
 		return nil, nil
 	case "nullif":
-		a, err := evalExpr(x.args[0], payload)
+		a, err := evalExpr(x.args[0], payload, parent)
 		if err != nil {
 			return nil, err
 		}
-		b, err := evalExpr(x.args[1], payload)
+		b, err := evalExpr(x.args[1], payload, parent)
 		if err != nil {
 			return nil, err
 		}
@@ -564,7 +564,7 @@ func evalCall(x exprCall, payload any) (any, error) {
 		}
 		return a, nil
 	case "round", "trunc":
-		v, err := evalExpr(x.args[0], payload)
+		v, err := evalExpr(x.args[0], payload, parent)
 		if err != nil || v == nil {
 			return nil, err
 		}

@@ -168,6 +168,13 @@ func (d *MySQLDialect) CreateAggregateRebuildSQL(spec sql.AggregateSpec) string 
 		mysqlIdent.Table(spec.Table), strings.Join(sets, ","), mysqlIdent.Ident(spec.PrimaryKey))
 }
 
+// CreateForEachChildrenSQL implements Dialect; MySQL binds the parent key
+// with ?.
+func (d *MySQLDialect) CreateForEachChildrenSQL(sidecar string) string {
+	return fmt.Sprintf("SELECT %s FROM %s WHERE %s = ?",
+		sql.SidecarChildKey, mysqlIdent.Table(sidecar), sql.SidecarParentKey)
+}
+
 // CreateAggregateParentLookupSQL implements Dialect; MySQL binds the child key
 // with ?.
 func (d *MySQLDialect) CreateAggregateParentLookupSQL(spec sql.AggregateSpec) string {

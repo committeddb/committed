@@ -395,6 +395,37 @@ child change (never incremented, so redelivery and rebuild converge):
 SQL semantics apply at the empty set: `count` is 0, `sum`/`min`/`max` are
 NULL when no children qualify.
 
+## Fanning one event into N rows (forEach)
+
+Some events *contain* the rows you want: a transaction event whose
+`items[]` array holds the billable elements. A `forEach` source fans each
+element into its own row:
+
+```toml
+[[projection.source]]
+topic    = "txn"
+forEach  = "$.items[*]"            # deliberately multi-valued
+keyPath  = "$.sku"                 # resolves against EACH ELEMENT
+onDelete = "delete-rows"           # the default: parent delete cascades
+  [[projection.source.rules]]
+  set = [
+    { column = "amount",  from = "$.amount" },     # element scope
+    { column = "txn_id",  from = "$parent.id" },   # the enclosing event
+  ]
+```
+
+- The source's rules apply once **per element**; `keyPath` and every
+  `from`/`expr` path resolve against the element, and a `$parent.` prefix
+  reaches the enclosing event payload. Row identity is the element's key.
+- **Reconciliation is absolute**: a re-emitted parent's rows converge on
+  its current elements — a vanished element's row is deleted (tracked via
+  a per-source reconciliation sidecar, `ForEachSidecarName`), so replay
+  and redelivery are safe like every other projection write.
+- A parent tombstone **cascades** to every row it fanned
+  (`onDelete = "delete-rows"`), or is dropped with `ignore`.
+- One forEach source per topic per projection; elements that match no
+  rule fan no row (and reconcile away if they previously did).
+
 ## Enriching folded data from another topic (lookup)
 
 A folded element often carries a foreign key — `top_cast` holds each cast

@@ -65,6 +65,10 @@ func (d *SQLMockDialect) CreateAggregateRebuildSQL(spec sql.AggregateSpec) strin
 	return (&dialects.MySQLDialect{}).CreateAggregateRebuildSQL(spec)
 }
 
+func (d *SQLMockDialect) CreateForEachChildrenSQL(sidecar string) string {
+	return (&dialects.MySQLDialect{}).CreateForEachChildrenSQL(sidecar)
+}
+
 func (d *SQLMockDialect) CreateAggregateParentLookupSQL(spec sql.AggregateSpec) string {
 	return (&dialects.MySQLDialect{}).CreateAggregateParentLookupSQL(spec)
 }

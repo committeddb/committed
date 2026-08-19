@@ -1,6 +1,8 @@
 package sql
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"slices"
 	"sort"
@@ -531,6 +533,7 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 			}
 		}
 	}
+	forEachTopics := map[string]bool{}
 	// lookups maps each declared lookup source's name to its source index, so an
 	// aggregate's enrichment can be checked to reference a real dimension. Built
 	// in a pre-pass because enrichments may reference a lookup declared later.
@@ -603,11 +606,13 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 			default:
 				return fmt.Errorf("%s: onDelete %q is invalid for a forEach source (want %q — cascade to the fanned rows — or %q)", where, src.OnDelete, onDeleteRows, onDeleteIgnore)
 			}
-			// The apply engine does not fan out yet — the config surface is
-			// staged ahead of the machinery. Reject loudly rather than fold
-			// wrongly (the admission-validation incident class). REMOVE when
-			// the fan-out apply path lands.
-			return fmt.Errorf("%s: forEach is accepted syntax but the fan-out engine has not landed yet — coming in this 0.7.x series", where)
+			// The reconciliation sidecar is named by topic, so two forEach
+			// sources sharing one topic would collide on it (and their
+			// reconciliation sets would stomp each other).
+			if forEachTopics[src.Topic] {
+				return fmt.Errorf("%s: a second forEach source on topic %q — one forEach source per topic (split elements with rule whens instead)", where, src.Topic)
+			}
+			forEachTopics[src.Topic] = true
 		}
 		if src.Lookup != nil {
 			if err := validateLookup(src, where); err != nil {
@@ -723,7 +728,14 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 // path internally on every call; jsonpath.New is the same compile without the
 // evaluation. The path is config, not secret, so it may appear in the error.
 func validateJSONPath(path, where string) error {
-	if _, err := jsonpath.New(path); err != nil {
+	// A `$parent.` prefix is the forEach element scope's way of reaching the
+	// enclosing event payload; validate the remainder as a rooted path (the
+	// apply layer resolves the scope — see resolveScopedPath).
+	checkPath := path
+	if rest, ok := strings.CutPrefix(checkPath, "$parent"); ok {
+		checkPath = "$" + rest
+	}
+	if _, err := jsonpath.New(checkPath); err != nil {
 		return fmt.Errorf("%s: invalid jsonpath %q: %w", where, path, err)
 	}
 	return nil
@@ -1021,6 +1033,37 @@ func validateLookup(src ProjectionSource, where string) error {
 
 // sidecarName is the backing table for an aggregate column: <table>__<column>.
 // One per aggregate source; teardown drops them alongside the projection table.
+// ForEachSidecarName names a forEach source's reconciliation sidecar from
+// its topic, sanitized to identifier characters — stable across config
+// edits that reorder sources (unlike a source index). Exported so
+// operators (and tests) can locate the sidecar a forEach source maintains.
+func ForEachSidecarName(table, topic string) string {
+	san := make([]byte, 0, len(topic))
+	for i := 0; i < len(topic); i++ {
+		c := topic[i]
+		switch {
+		case c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_':
+			san = append(san, c)
+		case c >= 'A' && c <= 'Z':
+			san = append(san, c+'a'-'A')
+		default:
+			san = append(san, '_')
+		}
+	}
+	name := sidecarName(table, "foreach_"+string(san))
+	// MySQL caps identifiers at 64 bytes (PostgreSQL silently truncates at
+	// 63, which is worse — two long names can collide), and the sidecar
+	// DDL derives further identifiers from this name (its parent-key
+	// index), so the cap leaves suffix room. A long table+topic pair gets
+	// a deterministic hash suffix instead: stable across restarts, unique
+	// per full name.
+	if len(name) > 50 {
+		sum := sha256.Sum256([]byte(name))
+		name = name[:40] + "_" + hex.EncodeToString(sum[:])[:9]
+	}
+	return name
+}
+
 func sidecarName(table, column string) string {
 	return table + "__" + column
 }

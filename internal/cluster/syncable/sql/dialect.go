@@ -104,6 +104,11 @@ type Dialect interface {
 	// UPDATE (never an upsert) so removing the last child of an absent parent is
 	// a no-op, never a ghost row. Both placeholders bind the parent key.
 	CreateAggregateRebuildSQL(spec AggregateSpec) string
+	// CreateForEachChildrenSQL returns the SELECT that lists a forEach
+	// source's fanned child keys for one parent (the reconciliation read:
+	// prior children minus current children = rows to delete). One
+	// placeholder binds the parent entity key.
+	CreateForEachChildrenSQL(sidecar string) string
 	// CreateAggregateParentLookupSQL returns the SELECT that recovers a removed
 	// child's parent key from the sidecar by its child key. A delete Actual
 	// carries no payload, so the parent correlation is read back from the

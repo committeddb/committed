@@ -1219,10 +1219,8 @@ func TestParseProjectionRejectsMultiValuedPaths(t *testing.T) {
 	require.ErrorContains(t, parse(inExpr), "multi-valued")
 }
 
-// forEach config surface: the vocabulary parses and its shape rules are
-// enforced, and — until the fan-out engine lands — a valid forEach config
-// is rejected loudly rather than folded wrongly (never validate-then-
-// misbehave). The final assertion flips when the machinery ships.
+// forEach config surface: a valid forEach source parses (the engine is
+// wired), and the shape rules reject misuse loudly.
 func TestParseProjectionForEachSurface(t *testing.T) {
 	config := func(extra string) string {
 		return `
@@ -1253,11 +1251,9 @@ set = [ { column = "amount", from = "$.amount" } ]
 		return err
 	}
 
-	err := parse(config(`forEach = "$.data.elements[*]"`))
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "fan-out engine has not landed")
+	require.NoError(t, parse(config(`forEach = "$.data.elements[*]"`)))
 
-	err = parse(config(`forEach = "$.data.elements"`))
+	err := parse(config(`forEach = "$.data.elements"`))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "single-valued")
 

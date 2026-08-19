@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math/big"
 	"strconv"
+	"strings"
 
 	"github.com/PaesslerAG/jsonpath"
 	"go.uber.org/zap"
@@ -78,6 +79,10 @@ type projectionSource struct {
 	// only when onDelete == "clear".
 	clear    *gosql.Stmt
 	clearSQL string
+	// forEach is the source's fan-out path ("" for a plain source); fe is
+	// its prepared reconciliation runtime.
+	forEach string
+	fe      *forEachRuntime
 	// agg is the prepared aggregate runtime, set only for a collection-fold
 	// source (nil otherwise).
 	agg *aggregateRuntime
@@ -107,6 +112,29 @@ type aggregateRuntime struct {
 	lookup           *gosql.Stmt
 	lookupSQL        string
 	parentBinds      int
+}
+
+// forEachRuntime is the prepared runtime of one forEach source: the
+// reconciliation sidecar (parent entity key → fanned row keys, reusing the
+// aggregate sidecar shape with its element columns unused) and the three
+// statements that maintain it. The fanned rows themselves go through the
+// source's ordinary rule statements and the projection's shared delete.
+type forEachRuntime struct {
+	sidecar          string
+	upsertSidecar    *gosql.Stmt
+	upsertSidecarSQL string
+	deleteSidecar    *gosql.Stmt
+	deleteSidecarSQL string
+	children         *gosql.Stmt
+	childrenSQL      string
+}
+
+func (rt *forEachRuntime) closeStmts() {
+	for _, st := range []*gosql.Stmt{rt.upsertSidecar, rt.deleteSidecar, rt.children} {
+		if st != nil {
+			_ = st.Close()
+		}
+	}
 }
 
 // lookupRuntime is the prepared runtime of one ProjectionLookup: the dimension
@@ -367,6 +395,14 @@ func (p *Projection) Init() error {
 					return fmt.Errorf("prepare source %d (topic %q) clear sql [%s]: %w", si+1, src.Topic, ps.clearSQL, err)
 				}
 				ps.clear = clearStmt
+			}
+			if src.ForEach != "" {
+				fe, err := p.initForEach(si, src)
+				if err != nil {
+					return err
+				}
+				ps.forEach = src.ForEach
+				ps.fe = fe
 			}
 		}
 	}
@@ -691,6 +727,12 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 			}
 			return p.removeFromAggregate(ctx, tx, src, e)
 		}
+		if src.forEach != "" {
+			if src.onDelete == onDeleteIgnore {
+				return nil
+			}
+			return p.cascadeForEachDelete(ctx, tx, src, e)
+		}
 		return p.applyDelete(ctx, tx, src, e)
 	case cluster.EntityVariantRow:
 		// Fall through to the row fold below.
@@ -726,14 +768,15 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 	if src.agg != nil {
 		return p.applyAggregate(ctx, tx, src, jsonData, e)
 	}
-
-	var matched []*projectionStmt
-	for _, r := range src.rules {
-		if matchWhen(r.rule.When, jsonData) {
-			matched = append(matched, r)
-		}
+	if src.forEach != "" {
+		return p.applyForEach(ctx, tx, src, jsonData, e)
 	}
-	if len(matched) == 0 {
+
+	matchedAny, _, err := p.applyRowFold(ctx, tx, src, jsonData, nil)
+	if err != nil {
+		return err
+	}
+	if !matchedAny {
 		// No ghost rows: zero matching rules → zero SQL. The tick is
 		// the signal that a new event variant shipped without a rule.
 		zap.L().Debug("[projection] event matched no rules",
@@ -756,6 +799,39 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 		return nil
 	}
 	src.unmatchedRun = 0
+	return nil
+}
+
+// resolveScopedPath resolves a value-position jsonpath in the rule scope: a
+// `$parent.` prefix reaches the enclosing event payload (the forEach element
+// scope); everything else resolves against data. Outside forEach, parent is
+// nil and a $parent path is a loud misconfiguration.
+func resolveScopedPath(path string, data, parent any) (any, error) {
+	if rest, ok := strings.CutPrefix(path, "$parent"); ok {
+		if parent == nil {
+			return nil, fmt.Errorf("path [%s]: $parent is only meaningful inside a forEach source", path)
+		}
+		return jsonpath.Get("$"+rest, parent)
+	}
+	return jsonpath.Get(path, data)
+}
+
+// applyRowFold matches src's rules against data and applies the matched
+// sets as one row upsert. data is the rule scope — the event payload for a
+// plain source, one array element for a forEach source (whose enclosing
+// event payload rides in parent for `$parent.` paths). Returns whether any
+// rule matched, so the caller owns the unmatched bookkeeping and forEach
+// counts only matched elements in its reconciliation set.
+func (p *Projection) applyRowFold(ctx context.Context, tx *gosql.Tx, src *projectionSource, data, parent any) (bool, string, error) {
+	var matched []*projectionStmt
+	for _, r := range src.rules {
+		if matchWhen(r.rule.When, data) {
+			matched = append(matched, r)
+		}
+	}
+	if len(matched) == 0 {
+		return false, "", nil
+	}
 
 	// Key resolution is deliberately lazy — after matching — so an
 	// unmatched foreign event missing the keyPath is a non-event, not
@@ -764,9 +840,9 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 	// aligned, each coerced to its own column's declared type.
 	keys := make([]any, len(src.keyPaths))
 	for i, kp := range src.keyPaths {
-		v, err := jsonpath.Get(kp, jsonData)
+		v, err := resolveScopedPath(kp, data, parent)
 		if err != nil {
-			return cluster.Permanent(fmt.Errorf("[projection.apply] keyPath [%s]: %w", kp, err))
+			return true, "", cluster.Permanent(fmt.Errorf("[projection.apply] keyPath [%s]: %w", kp, err))
 		}
 		keys[i] = coerceForColumn(v, p.columnType(p.config.PrimaryKey[i]))
 	}
@@ -779,13 +855,13 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 		for _, s := range r.rule.Set {
 			switch {
 			case s.From != "":
-				v, err := jsonpath.Get(s.From, jsonData)
+				v, err := resolveScopedPath(s.From, data, parent)
 				if err != nil {
-					return cluster.Permanent(fmt.Errorf("[projection.apply] jsonpath [%s]: %w", s.From, err))
+					return true, "", cluster.Permanent(fmt.Errorf("[projection.apply] jsonpath [%s]: %w", s.From, err))
 				}
 				plain[s.Column] = coerceForColumn(v, p.columnType(s.Column))
 			case s.Expr != "":
-				v, err := evalExpr(s.compiled, jsonData)
+				v, err := evalExpr(s.compiled, data, parent)
 				if err == nil {
 					if r, ok := v.(*big.Rat); ok {
 						var text string
@@ -795,7 +871,7 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 					}
 				}
 				if err != nil {
-					return cluster.Permanent(fmt.Errorf("[projection.apply] expr for column %q: %w", s.Column, err))
+					return true, "", cluster.Permanent(fmt.Errorf("[projection.apply] expr for column %q: %w", s.Column, err))
 				}
 				plain[s.Column] = coerceForColumn(v, p.columnType(s.Column))
 			case s.Null:
@@ -827,11 +903,17 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 		if _, err := tx.StmtContext(ctx, r.Stmt).ExecContext(ctx, args...); err != nil {
 			// Same NUL hint as the plain sink's row apply: name the offending
 			// payload field(s) — names only, never values.
-			err = withNulFieldHint(err, p.dialect, jsonData)
-			return execFailure(fmt.Sprintf("[projection.apply] exec [%s]", r.SQL), err, p.dialect.IsPermanent(err))
+			err = withNulFieldHint(err, p.dialect, data)
+			return true, "", execFailure(fmt.Sprintf("[projection.apply] exec [%s]", r.SQL), err, p.dialect.IsPermanent(err))
 		}
 	}
-	return nil
+	// The canonical single-column key rendering, for forEach's
+	// reconciliation set (composite-keyed folds return "" — no forEach).
+	rowKey := ""
+	if len(keys) == 1 {
+		rowKey = keyString(keys[0])
+	}
+	return true, rowKey, nil
 }
 
 // applyDelete honors a delete entity per its source's onDelete: ignore drops it;
@@ -981,6 +1063,156 @@ func (p *Projection) removeFromAggregate(ctx context.Context, tx *gosql.Tx, src 
 		return err
 	}
 	return p.aggExec(ctx, tx, ag.rebuild, ag.rebuildSQL, repeatArg(parentKey, ag.parentBinds)...)
+}
+
+// initForEach creates one forEach source's reconciliation sidecar and
+// prepares its three statements. The sidecar reuses the aggregate sidecar
+// shape (child_key PK, parent_key indexed; element columns unused) so it
+// adds zero DDL surface; its name derives from the source topic, stable
+// across config edits that reorder sources.
+func (p *Projection) initForEach(si int, src ProjectionSource) (*forEachRuntime, error) {
+	where := fmt.Sprintf("source %d (topic %q) forEach", si+1, src.Topic)
+	sidecar := ForEachSidecarName(p.config.Table, src.Topic)
+
+	ddl := p.dialect.CreateAggregateSidecarDDL(AggregateSpec{
+		Table: p.config.Table, PrimaryKey: p.config.PrimaryKey[0], Sidecar: sidecar,
+	})
+	if _, err := p.db.ExecContext(p.initCtx, ddl); err != nil {
+		return nil, fmt.Errorf("%s sidecar ddl [%s]: %w", where, ddl, err)
+	}
+
+	rt := &forEachRuntime{sidecar: sidecar}
+	success := false
+	defer func() {
+		if !success {
+			rt.closeStmts()
+		}
+	}()
+	scConfig := sidecarConfig(sidecar)
+	prepare := func(label, sqlString string) (*gosql.Stmt, error) {
+		stmt, err := p.db.PrepareContext(p.initCtx, sqlString)
+		if err != nil {
+			return nil, fmt.Errorf("%s prepare %s [%s]: %w", where, label, sqlString, err)
+		}
+		return stmt, nil
+	}
+	var err error
+	rt.upsertSidecarSQL = p.dialect.CreateSQL(scConfig)
+	if rt.upsertSidecar, err = prepare("sidecar upsert", rt.upsertSidecarSQL); err != nil {
+		return nil, err
+	}
+	rt.deleteSidecarSQL = p.dialect.CreateDeleteSQL(scConfig)
+	if rt.deleteSidecar, err = prepare("sidecar delete", rt.deleteSidecarSQL); err != nil {
+		return nil, err
+	}
+	rt.childrenSQL = p.dialect.CreateForEachChildrenSQL(sidecar)
+	if rt.children, err = prepare("children", rt.childrenSQL); err != nil {
+		return nil, err
+	}
+	success = true
+	return rt, nil
+}
+
+// applyForEach folds one event through a forEach source: each element of
+// the (deliberately multi-valued) forEach path folds as its own row via the
+// source's rules, and the reconciliation sidecar records which rows this
+// parent currently fans — rows for vanished elements are deleted, so a
+// re-emitted parent converges absolutely (replay-safe, like every other
+// projection write). An event whose forEach path is absent or not an array
+// fans zero elements, which reconciles all of the parent's prior rows away.
+func (p *Projection) applyForEach(ctx context.Context, tx *gosql.Tx, src *projectionSource, jsonData any, e *cluster.Entity) error {
+	parentKey := string(e.Key)
+
+	prior, err := p.forEachChildren(ctx, tx, src.fe, parentKey)
+	if err != nil {
+		return err
+	}
+
+	var elems []any
+	if v, err := jsonpath.Get(src.forEach, jsonData); err == nil {
+		if list, ok := v.([]any); ok {
+			elems = list
+		}
+	}
+
+	current := make(map[string]bool, len(elems))
+	for i, el := range elems {
+		matched, key, err := p.applyRowFold(ctx, tx, src, el, jsonData)
+		if err != nil {
+			return fmt.Errorf("[projection.forEach] element %d: %w", i+1, err)
+		}
+		if !matched || key == "" || current[key] {
+			continue
+		}
+		current[key] = true
+		// The sidecar row: fanned row key, parent entity key; the aggregate
+		// shape's element columns ride along unused ("" sort key, {} object).
+		scValues := []any{key, parentKey, "", "{}"}
+		if err := p.aggExec(ctx, tx, src.fe.upsertSidecar, src.fe.upsertSidecarSQL, p.dialect.BindArgs(scValues)...); err != nil {
+			return err
+		}
+	}
+
+	for _, child := range prior {
+		if current[child] {
+			continue
+		}
+		if err := p.forEachDeleteRow(ctx, tx, child); err != nil {
+			return err
+		}
+		if err := p.aggExec(ctx, tx, src.fe.deleteSidecar, src.fe.deleteSidecarSQL, child); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// cascadeForEachDelete honors a parent tombstone for a forEach source
+// (onDelete = "delete-rows"): every row the parent fanned out is deleted,
+// found via the reconciliation sidecar (the tombstone carries only the
+// parent entity key).
+func (p *Projection) cascadeForEachDelete(ctx context.Context, tx *gosql.Tx, src *projectionSource, e *cluster.Entity) error {
+	children, err := p.forEachChildren(ctx, tx, src.fe, string(e.Key))
+	if err != nil {
+		return err
+	}
+	for _, child := range children {
+		if err := p.forEachDeleteRow(ctx, tx, child); err != nil {
+			return err
+		}
+		if err := p.aggExec(ctx, tx, src.fe.deleteSidecar, src.fe.deleteSidecarSQL, child); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// forEachChildren lists the fanned row keys currently recorded for one
+// parent in the reconciliation sidecar.
+func (p *Projection) forEachChildren(ctx context.Context, tx *gosql.Tx, fe *forEachRuntime, parentKey string) ([]string, error) {
+	rows, err := tx.StmtContext(ctx, fe.children).QueryContext(ctx, parentKey)
+	if err != nil {
+		return nil, execFailure(fmt.Sprintf("[projection.forEach] exec [%s]", fe.childrenSQL), err, p.dialect.IsPermanent(err))
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			return nil, execFailure(fmt.Sprintf("[projection.forEach] scan [%s]", fe.childrenSQL), err, p.dialect.IsPermanent(err))
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
+// forEachDeleteRow removes one fanned row by its key through the
+// projection's shared delete statement.
+func (p *Projection) forEachDeleteRow(ctx context.Context, tx *gosql.Tx, childKey string) error {
+	if _, err := tx.StmtContext(ctx, p.delete.Stmt).ExecContext(ctx, childKey); err != nil {
+		return execFailure(fmt.Sprintf("[projection.forEach] exec [%s]", p.delete.SQL), err, p.dialect.IsPermanent(err))
+	}
+	return nil
 }
 
 // aggPriorParent returns the parent key currently recorded for childKey in the
@@ -1187,6 +1419,11 @@ func (p *Projection) Close() error {
 				closeStmt(r.Stmt)
 			}
 			closeStmt(src.clear)
+			if src.fe != nil {
+				closeStmt(src.fe.upsertSidecar)
+				closeStmt(src.fe.deleteSidecar)
+				closeStmt(src.fe.children)
+			}
 			if src.agg != nil {
 				closeStmt(src.agg.upsertSidecar)
 				closeStmt(src.agg.deleteSidecar)

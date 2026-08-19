@@ -59,6 +59,10 @@ func (d *GoMySQLServerDialect) CreateAggregateRebuildSQL(spec sql.AggregateSpec)
 	return (&dialects.MySQLDialect{}).CreateAggregateRebuildSQL(spec)
 }
 
+func (d *GoMySQLServerDialect) CreateForEachChildrenSQL(sidecar string) string {
+	return (&dialects.MySQLDialect{}).CreateForEachChildrenSQL(sidecar)
+}
+
 func (d *GoMySQLServerDialect) CreateAggregateParentLookupSQL(spec sql.AggregateSpec) string {
 	return (&dialects.MySQLDialect{}).CreateAggregateParentLookupSQL(spec)
 }

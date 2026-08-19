@@ -25,7 +25,7 @@ func evalToString(t *testing.T, src, payload string) any {
 	t.Helper()
 	n, err := compileExpr(src)
 	require.NoError(t, err, "compile %q", src)
-	v, err := evalExpr(n, exprPayload(t, payload))
+	v, err := evalExpr(n, exprPayload(t, payload), nil)
 	require.NoError(t, err, "eval %q", src)
 	if r, ok := v.(*big.Rat); ok {
 		s, err := formatRat(r)
@@ -151,12 +151,12 @@ func TestExprAdmissionRejections(t *testing.T) {
 func TestExprRuntimeErrors(t *testing.T) {
 	n, err := compileExpr("round(1 / $.z, 2)")
 	require.NoError(t, err)
-	_, err = evalExpr(n, exprPayload(t, `{"z": 0}`))
+	_, err = evalExpr(n, exprPayload(t, `{"z": 0}`), nil)
 	require.ErrorContains(t, err, "division by zero")
 
 	n, err = compileExpr("$.s + 1")
 	require.NoError(t, err)
-	_, err = evalExpr(n, exprPayload(t, `{"s": "not a number"}`))
+	_, err = evalExpr(n, exprPayload(t, `{"s": "not a number"}`), nil)
 	require.ErrorContains(t, err, "needs a number")
 }
 

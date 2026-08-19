@@ -575,7 +575,11 @@ paths:
         under `round`/`trunc`, checked here with 400), one collection
         column and/or scalar aggregate columns
         (count/sum/min/max/countDistinct, optionally filtered by
-        `where`) via an `aggregate` block, or a dimension table
+        `where`) via an `aggregate` block, fans one event's array into N
+        rows via `forEach` (rules apply per element, `$parent.` paths
+        reach the enclosing event, re-emitted parents reconcile
+        absolutely, and `onDelete = "delete-rows"` cascades a parent
+        tombstone), or a dimension table
         via a `lookup` block (whose fields aggregate elements resolve by
         an `on`/`select` join — enrichment), and several sources may
         share a topic, split by a per-source `when`; see README § SQL
