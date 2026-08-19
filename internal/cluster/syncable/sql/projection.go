@@ -1308,13 +1308,20 @@ func (p *Projection) foldStages(ctx context.Context, tx *gosql.Tx, a *cluster.Ac
 				if err != nil {
 					return cluster.Permanent(fmt.Errorf("[projection.stage] unmarshal entity data: %w", err))
 				}
-				if err := p.stages.FoldTopicUpsert(stx, e.Type.ID, e.Key, obj, dirty); err != nil {
+				if err := p.stages.FoldTopicUpsert(stx, e.Type.ID, e.Key, obj, e.Generation, dirty); err != nil {
+					return err
+				}
+			case cluster.EntityVariantRefresh:
+				// The epoch sweep: inputs and dimension rows this re-snapshot
+				// did not re-assert retract, refolding their keys as explicit
+				// deltas — downstream (including stage-fed table sources)
+				// never needs sweep semantics of its own.
+				if err := p.stages.SweepEpochs(stx, e.Type.ID, e.Generation, dirty); err != nil {
 					return err
 				}
 			default:
-				// Refresh markers and future variants: epoch sweeps over stage
-				// state are a later step; skipping is the no-op the projection
-				// already applies to markers.
+				// Future variants fold nothing here; the source-side apply
+				// dead-letters them loudly.
 			}
 		}
 		if err := p.stages.Drain(stx, dirty); err != nil {

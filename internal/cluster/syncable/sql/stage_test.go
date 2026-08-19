@@ -456,3 +456,64 @@ func TestStageFilteringJoin(t *testing.T) {
 	require.Empty(t, get("w1"))
 	require.Equal(t, `{"id":"w9","price":5}`, get("w9"))
 }
+
+// The epoch sweep: a re-snapshot's boundary marker retracts retained
+// inputs the re-snapshot did NOT re-assert (source-deleted in the lost
+// window), refolding their keys as explicit deltas. Generation 0 is
+// never swept (direct writes / stage-fed retention — the >= 1 floor).
+func TestStageEpochSweep(t *testing.T) {
+	stages := []ProjectionStage{
+		{
+			Name: "by-job", From: "txns", KeyPath: []string{"$.job"},
+			Reduce: "aggregate", Emit: []StageEmit{{Field: "n", Count: true}},
+		},
+	}
+	cfg := stageConfig(stages...)
+	require.NoError(t, validateProjectionStageShapes(cfg))
+	g := buildStageGraph(cfg.Stages)
+	store := stageStoreForTest(t)
+
+	fold := func(key, payload string, gen uint64) {
+		require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+			dirty := dirtySet{}
+			if err := g.FoldTopicUpsert(tx, "txns", []byte(key), decodePayload(t, payload), gen, dirty); err != nil {
+				return err
+			}
+			return g.Drain(tx, dirty)
+		}))
+	}
+	sweep := func(marker uint64) {
+		require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+			dirty := dirtySet{}
+			if err := g.SweepEpochs(tx, "txns", marker, dirty); err != nil {
+				return err
+			}
+			return g.Drain(tx, dirty)
+		}))
+	}
+	get := func(key string) string {
+		var got string
+		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
+			v, err := tx.GetOut("by-job", []byte(key))
+			got = string(v)
+			return err
+		}))
+		return got
+	}
+
+	// Epoch 1 snapshot: three txns, two jobs; plus one DIRECT write (gen 0).
+	fold("t1", `{"job":"j1"}`, 1)
+	fold("t2", `{"job":"j1"}`, 1)
+	fold("t3", `{"job":"j2"}`, 1)
+	fold("d1", `{"job":"j2"}`, 0)
+	require.Equal(t, `{"n":2}`, get("j1"))
+	require.Equal(t, `{"n":2}`, get("j2"))
+
+	// The re-snapshot (epoch 2) re-asserts t1 only — t2 and t3 were
+	// deleted at the source in the lost window.
+	fold("t1", `{"job":"j1"}`, 2)
+	sweep(2)
+
+	require.Equal(t, `{"n":1}`, get("j1"), "the un-reasserted input swept, key refolds")
+	require.Equal(t, `{"n":1}`, get("j2"), "gen-0 direct write survives the sweep (the >= 1 floor)")
+}

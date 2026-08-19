@@ -387,6 +387,56 @@ func (tx *Tx) DependentsOf(stage, join string, dimKey []byte, fn func(outKey []b
 	return nil
 }
 
+// InputsAll iterates EVERY retained input of a stage — the epoch sweep's
+// set-at-a-time scan (rare: once per refresh marker).
+func (tx *Tx) InputsAll(stage string, fn func(outKey, inKey, val []byte) error) error {
+	b, err := tx.bucket(inBucket(stage))
+	if err != nil || b == nil {
+		return err
+	}
+	c := b.Cursor()
+	for k, v := c.First(); k != nil; k, v = c.Next() {
+		outKey, inKey, ok := splitFrame(k)
+		if !ok {
+			continue
+		}
+		if err := fn(outKey, inKey, v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// DimsAll iterates every dimension row of one stage join — the epoch
+// sweep's dimension scan.
+func (tx *Tx) DimsAll(stage, join string, fn func(dimKey, val []byte) error) error {
+	b, err := tx.bucket(dimBucket(stage, join))
+	if err != nil || b == nil {
+		return err
+	}
+	c := b.Cursor()
+	for k, v := c.First(); k != nil; k, v = c.Next() {
+		if err := fn(k, v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// splitFrame undoes frameKey: varint length, first key, second key.
+func splitFrame(k []byte) (first, second []byte, ok bool) {
+	n64, sz := binary.Uvarint(k)
+	if sz <= 0 {
+		return nil, nil, false
+	}
+	rest := k[sz:]
+	n := int(n64) //nolint:gosec // G115: bounds-checked against len(rest) next line; a forged length fails there
+	if n < 0 || n > len(rest) {
+		return nil, nil, false
+	}
+	return rest[:n], rest[n:], true
+}
+
 // frameKey length-frames the first key so composite keys scan correctly
 // whatever bytes the keys contain (an output key may legitimately contain
 // any byte; a separator could be forged, a varint length cannot).

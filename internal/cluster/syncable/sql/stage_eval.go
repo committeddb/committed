@@ -2,6 +2,7 @@ package sql
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -91,6 +92,58 @@ func (g *stageGraph) ConsumesTopic(topic string) bool {
 	return len(g.byTopic[topic]) > 0 || len(g.dims[topic]) > 0
 }
 
+// SweepEpochs applies a refresh-boundary marker for one topic: retained
+// inputs and dimension rows captured under an OLDER refresh epoch
+// (1 <= gen < marker) were not re-asserted by the re-snapshot — the
+// source deleted them in the lost window — so they retract, and every
+// affected key refolds through the drain as EXPLICIT deltas. Generation
+// 0 (direct writes, stage-fed retention) is never swept: the >= 1 floor,
+// and the absorption rule — downstream stages see deltas, never sweeps.
+func (g *stageGraph) SweepEpochs(tx *stagestore.Tx, topic string, marker uint64, dirty dirtySet) error {
+	for _, n := range g.byTopic[topic] {
+		st := n.def
+		type stale struct{ outKey, inKey []byte }
+		var stales []stale
+		if err := tx.InputsAll(st.Name, func(outKey, inKey, val []byte) error {
+			if gen, _ := decodeRetained(val); gen >= 1 && gen < marker {
+				stales = append(stales, stale{append([]byte(nil), outKey...), append([]byte(nil), inKey...)})
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		for _, sl := range stales {
+			if err := tx.DeleteIn(st.Name, sl.outKey, sl.inKey); err != nil {
+				return err
+			}
+			if err := tx.DeleteSrc(st.Name, sl.inKey); err != nil {
+				return err
+			}
+			dirty.mark(n, sl.outKey)
+		}
+	}
+	for _, d := range g.dims[topic] {
+		var staleDims [][]byte
+		if err := tx.DimsAll(d.node.def.Name, d.join.Topic, func(dimKey, val []byte) error {
+			if gen, _ := decodeRetained(val); gen >= 1 && gen < marker {
+				staleDims = append(staleDims, append([]byte(nil), dimKey...))
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		for _, dk := range staleDims {
+			if err := tx.DeleteDim(d.node.def.Name, d.join.Topic, dk); err != nil {
+				return err
+			}
+			if err := g.markDimDependents(tx, d, dk, dirty); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // dirtySet collects the keys each stage must refold — the set-at-a-time
 // half of the two execution modes: retention updates mark keys dirty,
 // and Drain refolds each dirty key ONCE per batch (the 87-minutes-vs-
@@ -111,7 +164,7 @@ func (d dirtySet) mark(n *stageNode, outKey []byte) {
 // single-event convenience (tests; the projection batches per Actual).
 func (g *stageGraph) FoldTopicUpsertNow(tx *stagestore.Tx, topic string, inKey []byte, payload any) error {
 	dirty := dirtySet{}
-	if err := g.FoldTopicUpsert(tx, topic, inKey, payload, dirty); err != nil {
+	if err := g.FoldTopicUpsert(tx, topic, inKey, payload, 0, dirty); err != nil {
 		return err
 	}
 	return g.Drain(tx, dirty)
@@ -128,9 +181,9 @@ func (g *stageGraph) FoldTopicDeleteNow(tx *stagestore.Tx, topic string, inKey [
 
 // FoldTopicUpsert routes one topic entity's upsert through every stage
 // consuming that topic (and their downstream chains).
-func (g *stageGraph) FoldTopicUpsert(tx *stagestore.Tx, topic string, inKey []byte, payload any, dirty dirtySet) error {
+func (g *stageGraph) FoldTopicUpsert(tx *stagestore.Tx, topic string, inKey []byte, payload any, gen uint64, dirty dirtySet) error {
 	for _, n := range g.byTopic[topic] {
-		if err := g.foldUpsert(tx, n, inKey, payload, dirty); err != nil {
+		if err := g.foldUpsert(tx, n, inKey, payload, gen, dirty); err != nil {
 			return err
 		}
 	}
@@ -139,7 +192,7 @@ func (g *stageGraph) FoldTopicUpsert(tx *stagestore.Tx, topic string, inKey []by
 		if err != nil {
 			return err
 		}
-		if err := tx.PutDim(d.node.def.Name, d.join.Topic, inKey, bs); err != nil {
+		if err := tx.PutDim(d.node.def.Name, d.join.Topic, inKey, encodeRetained(gen, bs)); err != nil {
 			return err
 		}
 		if err := g.markDimDependents(tx, d, inKey, dirty); err != nil {
@@ -182,7 +235,7 @@ func (g *stageGraph) markDimDependents(tx *stagestore.Tx, d dimRef, dimKey []byt
 // foldUpsert lands one input in a stage: filter, key, retain, refold the
 // affected key(s), cascade the delta. An input that stops matching the
 // stage's when RETRACTS (filtering is refold, not skip).
-func (g *stageGraph) foldUpsert(tx *stagestore.Tx, n *stageNode, inKey []byte, payload any, dirty dirtySet) error {
+func (g *stageGraph) foldUpsert(tx *stagestore.Tx, n *stageNode, inKey []byte, payload any, gen uint64, dirty dirtySet) error {
 	st := n.def
 	if !matchWhen(st.When, payload) {
 		return g.foldDelete(tx, n, inKey, dirty)
@@ -214,7 +267,7 @@ func (g *stageGraph) foldUpsert(tx *stagestore.Tx, n *stageNode, inKey []byte, p
 	if err != nil {
 		return fmt.Errorf("stage %q: retain input: %w", st.Name, err)
 	}
-	if err := tx.PutIn(st.Name, outKey, inKey, inputBytes); err != nil {
+	if err := tx.PutIn(st.Name, outKey, inKey, encodeRetained(gen, inputBytes)); err != nil {
 		return err
 	}
 	if err := tx.PutSrc(st.Name, inKey, outKey); err != nil {
@@ -325,7 +378,7 @@ func (g *stageGraph) refoldKey(tx *stagestore.Tx, n *stageNode, outKey []byte, d
 		}
 	}
 	for _, c := range n.consumers {
-		if err := g.foldUpsert(tx, c, outKey, obj, dirty); err != nil {
+		if err := g.foldUpsert(tx, c, outKey, obj, 0, dirty); err != nil {
 			return err
 		}
 	}
@@ -348,7 +401,8 @@ func refoldOutput(tx *stagestore.Tx, st *ProjectionStage, outKey []byte) (out []
 	// collisions, deterministically).
 	var winner any
 	scanErr := tx.InputsFor(st.Name, outKey, func(_, val []byte) error {
-		obj, err := decodeStageObject(val)
+		_, payload := decodeRetained(val)
+		obj, err := decodeStageObject(payload)
 		if err != nil {
 			return err
 		}
@@ -376,13 +430,14 @@ func inputQualifies(tx *stagestore.Tx, st *ProjectionStage, obj any) (bool, erro
 		if err != nil || onV == nil {
 			return false, nil
 		}
-		payload, err := tx.GetDim(st.Name, j.Topic, []byte(keyString(onV)))
+		stored, err := tx.GetDim(st.Name, j.Topic, []byte(keyString(onV)))
 		if err != nil {
 			return false, err
 		}
-		if payload == nil {
+		if stored == nil {
 			return false, nil
 		}
+		_, payload := decodeRetained(stored)
 		dimObj, err := decodeStageObject(payload)
 		if err != nil {
 			return false, err
@@ -434,7 +489,8 @@ func refoldLatest(tx *stagestore.Tx, st *ProjectionStage, outKey []byte) ([]byte
 	}
 	var winner *ranked
 	err := tx.InputsFor(st.Name, outKey, func(_, val []byte) error {
-		obj, err := decodeStageObject(val)
+		_, payload := decodeRetained(val)
+		obj, err := decodeStageObject(payload)
 		if err != nil {
 			return err
 		}
@@ -537,7 +593,8 @@ func refoldAggregate(tx *stagestore.Tx, st *ProjectionStage, outKey []byte) ([]b
 	count := 0
 
 	err := tx.InputsFor(st.Name, outKey, func(_, val []byte) error {
-		obj, err := decodeStageObject(val)
+		_, payload := decodeRetained(val)
+		obj, err := decodeStageObject(payload)
 		if err != nil {
 			return err
 		}
@@ -624,6 +681,26 @@ func stageValue(v any) (any, error) {
 		return json.Number(text), nil
 	}
 	return v, nil
+}
+
+// encodeRetained prefixes a retained value with its 8-byte BE
+// generation — the refresh epoch the input was captured under. Stage-fed
+// retention and direct user writes carry generation 0, which no sweep
+// ever removes (the sink sweep's >= 1 floor, mirrored: upstream
+// refreshes reach stage-fed retention as EXPLICIT deltas, never sweeps —
+// no epoch transits a stateful stage).
+func encodeRetained(gen uint64, payload []byte) []byte {
+	out := make([]byte, 8, 8+len(payload))
+	binary.BigEndian.PutUint64(out, gen)
+	return append(out, payload...)
+}
+
+// decodeRetained splits a retained value into generation and payload.
+func decodeRetained(val []byte) (uint64, []byte) {
+	if len(val) < 8 {
+		return 0, val // pre-encoding store state: rebuilt anyway (format/fingerprint)
+	}
+	return binary.BigEndian.Uint64(val[:8]), val[8:]
 }
 
 // marshalStageObject renders a stage object deterministically: Go maps
