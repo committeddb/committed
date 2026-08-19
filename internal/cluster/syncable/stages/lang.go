@@ -1,4 +1,4 @@
-package sql
+package stages
 
 import (
 	"encoding/json"
@@ -43,7 +43,7 @@ import (
 // rule bounds unrounded division depth); pure pathology insurance.
 const exprMaxBits = 4096
 
-type exprNode interface{ exprNode() }
+type Node interface{ node() }
 
 type exprNum struct{ val *big.Rat }
 
@@ -51,24 +51,24 @@ type exprStr struct{ val string }
 
 type exprPath struct{ path string }
 
-type exprNeg struct{ operand exprNode }
+type exprNeg struct{ operand Node }
 
 type exprBin struct {
 	op   string
-	l, r exprNode
+	l, r Node
 }
 
 type exprCall struct {
 	fn   string // canonical lower-case name from the closed set
-	args []exprNode
+	args []Node
 }
 
-func (exprNum) exprNode()  {}
-func (exprStr) exprNode()  {}
-func (exprPath) exprNode() {}
-func (exprNeg) exprNode()  {}
-func (exprBin) exprNode()  {}
-func (exprCall) exprNode() {}
+func (exprNum) node()  {}
+func (exprStr) node()  {}
+func (exprPath) node() {}
+func (exprNeg) node()  {}
+func (exprBin) node()  {}
+func (exprCall) node() {}
 
 // ── lexing ──────────────────────────────────────────────────────────────
 
@@ -205,7 +205,7 @@ var exprFunctions = map[string]struct{ minArgs, maxArgs int }{
 	"trunc":    {1, 2},
 }
 
-func (p *exprParser) parseExpr() (exprNode, error) {
+func (p *exprParser) parseExpr() (Node, error) {
 	l, err := p.parseAdditive()
 	if err != nil {
 		return nil, err
@@ -221,7 +221,7 @@ func (p *exprParser) parseExpr() (exprNode, error) {
 	return l, nil
 }
 
-func (p *exprParser) parseAdditive() (exprNode, error) {
+func (p *exprParser) parseAdditive() (Node, error) {
 	l, err := p.parseMultiplicative()
 	if err != nil {
 		return nil, err
@@ -240,7 +240,7 @@ func (p *exprParser) parseAdditive() (exprNode, error) {
 	}
 }
 
-func (p *exprParser) parseMultiplicative() (exprNode, error) {
+func (p *exprParser) parseMultiplicative() (Node, error) {
 	l, err := p.parseUnary()
 	if err != nil {
 		return nil, err
@@ -259,7 +259,7 @@ func (p *exprParser) parseMultiplicative() (exprNode, error) {
 	}
 }
 
-func (p *exprParser) parseUnary() (exprNode, error) {
+func (p *exprParser) parseUnary() (Node, error) {
 	if t := p.peek(); t.kind == "op" && t.text == "-" {
 		p.next()
 		operand, err := p.parseUnary()
@@ -271,7 +271,7 @@ func (p *exprParser) parseUnary() (exprNode, error) {
 	return p.parsePrimary()
 }
 
-func (p *exprParser) parsePrimary() (exprNode, error) {
+func (p *exprParser) parsePrimary() (Node, error) {
 	t := p.next()
 	switch t.kind {
 	case "num":
@@ -293,7 +293,7 @@ func (p *exprParser) parsePrimary() (exprNode, error) {
 		if _, err := jsonpath.New(checkPath); err != nil {
 			return nil, fmt.Errorf("invalid jsonpath %q at position %d: %v", t.text, t.pos, err)
 		}
-		if multiValuedPath(checkPath) {
+		if MultiValuedPath(checkPath) {
 			return nil, fmt.Errorf("jsonpath %q at position %d is multi-valued (wildcard/recursive/filter) — expressions compute over scalars", t.text, t.pos)
 		}
 		return exprPath{t.text}, nil
@@ -306,7 +306,7 @@ func (p *exprParser) parsePrimary() (exprNode, error) {
 		if err := p.expectOp("("); err != nil {
 			return nil, err
 		}
-		var args []exprNode
+		var args []Node
 		for {
 			a, err := p.parseExpr()
 			if err != nil {
@@ -354,7 +354,7 @@ func (p *exprParser) parsePrimary() (exprNode, error) {
 // literal integer ≥ 0 (bounded to keep 10^s sane), never an expression. A
 // negative literal parses as unary minus over a number, so unwrap it to
 // give the range message rather than the shape message.
-func scaleLiteral(n exprNode, fn string) (int64, error) {
+func scaleLiteral(n Node, fn string) (int64, error) {
 	val := new(big.Rat)
 	switch x := n.(type) {
 	case exprNum:
@@ -379,7 +379,7 @@ func scaleLiteral(n exprNode, fn string) (int64, error) {
 // decimal) so no non-terminating value can reach a column. dominated
 // propagates down whole subtrees: round(a/b + c) is fine because the
 // rounding materializes everything beneath it.
-func checkMaterializable(n exprNode, dominated bool) error {
+func checkMaterializable(n Node, dominated bool) error {
 	switch x := n.(type) {
 	case exprNum, exprStr, exprPath:
 		return nil
@@ -411,10 +411,10 @@ func checkMaterializable(n exprNode, dominated bool) error {
 	return fmt.Errorf("unhandled expression node %T", n)
 }
 
-// compileExpr lexes, parses, and admission-checks one expression. Every
+// Compile lexes, parses, and admission-checks one expression. Every
 // error it returns is a config error — expressions that compile can only
 // fail at apply time on data (a non-numeric operand, the bit cap).
-func compileExpr(src string) (exprNode, error) {
+func Compile(src string) (Node, error) {
 	toks, err := lexExpr(src)
 	if err != nil {
 		return nil, err
@@ -435,20 +435,20 @@ func compileExpr(src string) (exprNode, error) {
 
 // ── evaluation ──────────────────────────────────────────────────────────
 
-// evalExpr evaluates a compiled expression against the decoded event
+// Eval evaluates a compiled expression against the decoded event
 // payload. Results are nil (SQL NULL), *big.Rat (an exact decimal —
-// formatRat renders it), bool (comparisons), or a passthrough scalar from
+// FormatRat renders it), bool (comparisons), or a passthrough scalar from
 // coalesce/nullif (string, bool). Errors are data errors (a non-numeric
 // operand where arithmetic needs one, the bit cap) — the caller dead-letters
 // them as permanent.
-func evalExpr(n exprNode, payload, parent any) (any, error) {
+func Eval(n Node, payload, parent any) (any, error) {
 	switch x := n.(type) {
 	case exprNum:
 		return x.val, nil
 	case exprStr:
 		return x.val, nil
 	case exprPath:
-		v, err := resolveScopedPath(x.path, payload, parent)
+		v, err := ResolvePath(x.path, payload, parent)
 		if err != nil {
 			// A missing field is null (the spec's null semantics) — payload
 			// shapes legitimately vary across a topic's event types.
@@ -456,7 +456,7 @@ func evalExpr(n exprNode, payload, parent any) (any, error) {
 		}
 		return normalizeExprValue(v, x.path)
 	case exprNeg:
-		v, err := evalExpr(x.operand, payload, parent)
+		v, err := Eval(x.operand, payload, parent)
 		if err != nil || v == nil {
 			return nil, err
 		}
@@ -474,11 +474,11 @@ func evalExpr(n exprNode, payload, parent any) (any, error) {
 }
 
 func evalBin(x exprBin, payload, parent any) (any, error) {
-	l, err := evalExpr(x.l, payload, parent)
+	l, err := Eval(x.l, payload, parent)
 	if err != nil {
 		return nil, err
 	}
-	r, err := evalExpr(x.r, payload, parent)
+	r, err := Eval(x.r, payload, parent)
 	if err != nil {
 		return nil, err
 	}
@@ -532,7 +532,7 @@ func evalCall(x exprCall, payload, parent any) (any, error) {
 	switch x.fn {
 	case "coalesce":
 		for _, a := range x.args {
-			v, err := evalExpr(a, payload, parent)
+			v, err := Eval(a, payload, parent)
 			if err != nil {
 				return nil, err
 			}
@@ -542,11 +542,11 @@ func evalCall(x exprCall, payload, parent any) (any, error) {
 		}
 		return nil, nil
 	case "nullif":
-		a, err := evalExpr(x.args[0], payload, parent)
+		a, err := Eval(x.args[0], payload, parent)
 		if err != nil {
 			return nil, err
 		}
-		b, err := evalExpr(x.args[1], payload, parent)
+		b, err := Eval(x.args[1], payload, parent)
 		if err != nil {
 			return nil, err
 		}
@@ -564,7 +564,7 @@ func evalCall(x exprCall, payload, parent any) (any, error) {
 		}
 		return a, nil
 	case "round", "trunc":
-		v, err := evalExpr(x.args[0], payload, parent)
+		v, err := Eval(x.args[0], payload, parent)
 		if err != nil || v == nil {
 			return nil, err
 		}
@@ -660,12 +660,12 @@ func capBits(r *big.Rat) (*big.Rat, error) {
 	return r, nil
 }
 
-// formatRat renders an exact rational in minimal decimal form: no exponent,
+// FormatRat renders an exact rational in minimal decimal form: no exponent,
 // no trailing zeros, integral values without a point. The denominator must
 // be of the form 2^a·5^b (a terminating decimal) — guaranteed for every
 // materialized value by the admission-time domination rule; anything else
 // is an internal invariant violation, reported loudly.
-func formatRat(r *big.Rat) (string, error) {
+func FormatRat(r *big.Rat) (string, error) {
 	den := new(big.Int).Set(r.Denom())
 	two, five, ten := big.NewInt(2), big.NewInt(5), big.NewInt(10)
 	var a, b int64

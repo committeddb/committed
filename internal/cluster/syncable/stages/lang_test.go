@@ -1,4 +1,4 @@
-package sql
+package stages
 
 import (
 	"encoding/json"
@@ -20,15 +20,15 @@ func exprPayload(t *testing.T, src string) any {
 
 // evalToString compiles and evaluates src against the JSON payload and
 // renders the result the way the apply path would: rationals through
-// formatRat, everything else via fmt-free direct returns.
+// FormatRat, everything else via fmt-free direct returns.
 func evalToString(t *testing.T, src, payload string) any {
 	t.Helper()
-	n, err := compileExpr(src)
+	n, err := Compile(src)
 	require.NoError(t, err, "compile %q", src)
-	v, err := evalExpr(n, exprPayload(t, payload), nil)
+	v, err := Eval(n, exprPayload(t, payload), nil)
 	require.NoError(t, err, "eval %q", src)
 	if r, ok := v.(*big.Rat); ok {
-		s, err := formatRat(r)
+		s, err := FormatRat(r)
 		require.NoError(t, err)
 		return s
 	}
@@ -142,21 +142,21 @@ func TestExprAdmissionRejections(t *testing.T) {
 		"round(1 / nullif($.a, 0)": `expected ","`,
 	}
 	for src, want := range cases {
-		_, err := compileExpr(src)
+		_, err := Compile(src)
 		require.Error(t, err, "compile %q must fail", src)
 		require.Contains(t, err.Error(), want, "compile %q", src)
 	}
 }
 
 func TestExprRuntimeErrors(t *testing.T) {
-	n, err := compileExpr("round(1 / $.z, 2)")
+	n, err := Compile("round(1 / $.z, 2)")
 	require.NoError(t, err)
-	_, err = evalExpr(n, exprPayload(t, `{"z": 0}`), nil)
+	_, err = Eval(n, exprPayload(t, `{"z": 0}`), nil)
 	require.ErrorContains(t, err, "division by zero")
 
-	n, err = compileExpr("$.s + 1")
+	n, err = Compile("$.s + 1")
 	require.NoError(t, err)
-	_, err = evalExpr(n, exprPayload(t, `{"s": "not a number"}`), nil)
+	_, err = Eval(n, exprPayload(t, `{"s": "not a number"}`), nil)
 	require.ErrorContains(t, err, "needs a number")
 }
 
@@ -168,6 +168,6 @@ func TestExprBitCap(t *testing.T) {
 }
 
 func TestFormatRatNonTerminatingIsInternalError(t *testing.T) {
-	_, err := formatRat(big.NewRat(1, 3))
+	_, err := FormatRat(big.NewRat(1, 3))
 	require.ErrorContains(t, err, "non-terminating")
 }

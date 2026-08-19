@@ -8,15 +8,14 @@ import (
 	"fmt"
 	"math/big"
 	"strconv"
-	"strings"
-
-	"github.com/committeddb/committed/internal/cluster/syncable/stagestore"
 
 	"github.com/PaesslerAG/jsonpath"
 	"go.uber.org/zap"
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/metrics"
+	"github.com/committeddb/committed/internal/cluster/syncable/stages"
+	"github.com/committeddb/committed/internal/cluster/syncable/stagestore"
 )
 
 // Projection is the stateful half of the SQL story: where the plain
@@ -45,7 +44,7 @@ type Projection struct {
 	// stages/stageStore are the compiled stage graph and its state, set at
 	// Init when the config declares stages. stageSinks routes stage deltas
 	// to the table sources consuming each stage (from = "<stage>").
-	stages     *stageGraph
+	stages     *stages.Graph
 	stageStore *stagestore.Store
 	stageSinks map[string][]*projectionSource
 	// sources is keyed by topic id to the sources that consume it. The topic is
@@ -362,7 +361,7 @@ func (p *Projection) Init() error {
 			return err
 		}
 		p.stageStore = store
-		p.stages = buildStageGraph(p.config.Stages)
+		p.stages = stages.BuildGraph(p.config.Stages)
 		if reset {
 			zap.L().Warn("stage store reset — stage state re-derives as the log replays; pair stage-definition changes with a rebuild so replay starts from index 0",
 				zap.String("syncable", p.name), zap.String("path", store.Path()))
@@ -858,20 +857,6 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 	return nil
 }
 
-// resolveScopedPath resolves a value-position jsonpath in the rule scope: a
-// `$parent.` prefix reaches the enclosing event payload (the forEach element
-// scope); everything else resolves against data. Outside forEach, parent is
-// nil and a $parent path is a loud misconfiguration.
-func resolveScopedPath(path string, data, parent any) (any, error) {
-	if rest, ok := strings.CutPrefix(path, "$parent"); ok {
-		if parent == nil {
-			return nil, fmt.Errorf("path [%s]: $parent is only meaningful inside a forEach source", path)
-		}
-		return jsonpath.Get("$"+rest, parent)
-	}
-	return jsonpath.Get(path, data)
-}
-
 // applyRowFold matches src's rules against data and applies the matched
 // sets as one row upsert. data is the rule scope — the event payload for a
 // plain source, one array element for a forEach source (whose enclosing
@@ -1283,7 +1268,7 @@ func (p *Projection) forEachDeleteRow(ctx context.Context, tx *gosql.Tx, childKe
 // advances atomically with the fold.
 func (p *Projection) foldStages(ctx context.Context, tx *gosql.Tx, a *cluster.Actual) error {
 	return p.stageStore.Update(func(stx *stagestore.Tx) error {
-		p.stages.onDelta = func(stage string, outKey []byte, obj any, live bool) error {
+		p.stages.OnDelta = func(stage string, outKey []byte, obj any, live bool) error {
 			for _, src := range p.stageSinks[stage] {
 				if err := p.applyStageDelta(ctx, tx, src, outKey, obj, live); err != nil {
 					return err
@@ -1291,9 +1276,9 @@ func (p *Projection) foldStages(ctx context.Context, tx *gosql.Tx, a *cluster.Ac
 			}
 			return nil
 		}
-		defer func() { p.stages.onDelta = nil }()
+		defer func() { p.stages.OnDelta = nil }()
 
-		dirty := dirtySet{}
+		dirty := stages.Dirty{}
 		for _, e := range a.Entities {
 			if !p.stages.ConsumesTopic(e.Type.ID) {
 				continue
