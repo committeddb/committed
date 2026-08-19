@@ -138,7 +138,7 @@ func (s *Storage) buildSyncable(t *cluster.Configuration) cluster.Syncable {
 	_, parsed, parsedMode, err := s.parser.ParseSyncable(t.MimeType, t.Data, s)
 	if err != nil {
 		s.recordConfigError("syncable", t.ID, configErrBuild, err)
-		s.logger.Error("syncable config persisted but could not be built on this node (degraded); fix the environment and the config will build on next restart",
+		s.logger.Error("syncable config persisted but could not be built on this node (degraded); fix the environment — the node retries the build every minute (and on restart)",
 			zap.String("id", t.ID), zap.Error(err))
 		return nil
 	}

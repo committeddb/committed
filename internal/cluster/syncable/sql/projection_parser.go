@@ -97,6 +97,7 @@ type rawProjectionSource struct {
 	Aggregate *rawProjectionAggregate `mapstructure:"aggregate"`
 	Lookup    *rawProjectionLookup    `mapstructure:"lookup"`
 	ForEach   string                  `mapstructure:"forEach"`
+	RowOwner  bool                    `mapstructure:"rowOwner"`
 }
 
 // rawProjectionAggregate is the TOML decode shape of a source's
@@ -377,6 +378,7 @@ func parseProjectionSources(v *cluster.ParsedConfig, storage cluster.DatabaseSto
 				OnDelete:  rs.OnDelete,
 				When:      when,
 				ForEach:   rs.ForEach,
+				RowOwner:  rs.RowOwner,
 			}
 			// Populate rules, aggregate, and lookup independently so a source that
 			// declares more than one is caught by validation (a source has exactly

@@ -469,14 +469,54 @@ set = [ { column = "total", from = "$.total" },
   numeric vs lexical; text default). `when` filters before the argmax,
   and a retracted winner promotes the runner-up from the retained set.
 - **Stage-fed sources key rows by the stage's key** (no keyPath
-  resolution — an aggregate's emit carries folds, never its key); a
-  stage retraction deletes the row (`onDelete = "delete-row"`, default)
-  or is dropped (`ignore`).
+  resolution — an aggregate's emit carries folds, never its key). A
+  retraction — the stage's key going away, or a live output that stops
+  matching the source's `when` — retracts the source's contribution:
+  the row (`onDelete = "delete-row"`), its own columns (`"clear"`), or
+  nothing (`"ignore"`).
 - Stage state lives in one bbolt file per syncable under
   `<dataDir>/projections/` — derived, node-local, rebuildable from the
   log. **Editing stage definitions requires a rebuild** (the
   config-change guard enforces it): changed stages must re-derive from
   index 0, exactly like a changed table schema.
+
+### Row ownership (`rowOwner`)
+
+When several sources fold one row and any of them is stage-fed, the
+table must declare which source owns row existence:
+
+```toml
+[[projection.source]]              # the row owner: admits and removes rows
+topic    = "jobs"
+keyPath  = "$.id"
+rowOwner = true
+[[projection.source.rules]]
+set = [ { column = "name", from = "$.name" } ]
+
+[[projection.source]]              # a decorator: fills its own columns
+from = "latest-proposal"           # decorators must be stage-fed
+[[projection.source.rules]]
+set = [ { column = "latest_proposal_id", from = "$.pid" } ]
+```
+
+- **The owner's writes create and delete rows.** Every other row-writing
+  source is a *decorator*: update-only (it never creates a row the owner
+  has not admitted), retracting by clearing its own columns
+  (`onDelete = "clear"`, its default) — never by removing the row.
+- **An owner write pulls each decorator's retained stage output** for
+  its key, so a decoration lands no matter which side arrived first —
+  and survives an owner delete/re-admit cycle. The stage store is the
+  retention; without the pull, delta suppression would leave a
+  re-admitted row undecorated forever.
+- Decorators must be stage-fed: a topic source has no retention, so a
+  value arriving before the owner admits its row would be silently
+  lost — feed it through a stage. Lookup and aggregate sources are
+  orthogonal machinery and coexist unchanged.
+- Moving the `rowOwner` declaration changes which writes create and delete
+  rows — the config-change guard demands a rebuild, like any other
+  shape change.
+- A single row-writing source needs no declaration (it trivially owns
+  its rows).
 
 ## Fanning one event into N rows (forEach)
 

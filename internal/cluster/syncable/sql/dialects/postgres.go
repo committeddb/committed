@@ -67,6 +67,12 @@ func (d *PostgreSQLDialect) CreateDeleteSQL(c *sql.Config) string {
 	return createDeleteSQL(c, pgPlaceholder, pgIdent)
 }
 
+// CreateUpdateSQL implements Dialect: the decorator's update-only apply,
+// SET placeholders first, key placeholders last.
+func (d *PostgreSQLDialect) CreateUpdateSQL(c *sql.Config) string {
+	return createUpdateSQL(c, pgPlaceholder, pgIdent)
+}
+
 // CreateClearSQL implements Dialect; PostgreSQL binds the WHERE value with $1.
 func (d *PostgreSQLDialect) CreateClearSQL(c *sql.Config, columns []string) string {
 	return createClearSQL(c, columns, pgPlaceholder, pgIdent)

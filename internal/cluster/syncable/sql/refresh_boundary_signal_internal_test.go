@@ -51,11 +51,11 @@ func TestProjectionApplyEntity_RefreshBoundarySignalsOnlyOnResnapshot(t *testing
 
 	p := &Projection{name: "proj-1"}
 
-	require.NoError(t, p.applyEntity(context.Background(), nil, nil, refreshMarker(1)))
+	require.NoError(t, p.applyEntity(context.Background(), nil, nil, nil, refreshMarker(1)))
 	require.Zero(t, logs.FilterMessageSnippet("refresh boundary on a").Len(),
 		"the initial snapshot boundary (generation 1) must not warn")
 
-	require.NoError(t, p.applyEntity(context.Background(), nil, nil, refreshMarker(2)))
+	require.NoError(t, p.applyEntity(context.Background(), nil, nil, nil, refreshMarker(2)))
 	require.Equal(t, 1, logs.FilterMessageSnippet("refresh boundary on a").Len(),
 		"a re-snapshot boundary (generation > 1) must warn the projection was not reconciled")
 }

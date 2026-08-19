@@ -49,6 +49,17 @@ type Dialect interface {
 	// keeps its own binding convention (Postgres once via EXCLUDED, MySQL
 	// doubled via BindArgs).
 	CreateEnrichedUpsertSQL(config *Config, enrich map[string]SpineEnrichment) string
+	// CreateUpdateSQL returns the update-only apply for a DECORATING
+	// (non-owner) projection rule: `UPDATE <table> SET <set cols> WHERE
+	// <pk>`. The config comes from ruleConfig, whose leading mappings are
+	// the key columns — they form the WHERE; the rest form the SET. Bind
+	// order is SET values first, key values last (the reverse of the
+	// upsert, and bound ONCE — never through BindArgs). No INSERT arm by
+	// design: a decorator must not create a row the owner has not
+	// admitted; against an absent key this is a 0-row no-op, and the row
+	// owner's own write pulls the decorator's retained stage output when
+	// it admits the key.
+	CreateUpdateSQL(config *Config) string
 	// CreateSpineFanOutSQL returns the dimension-change fan-out for one
 	// enriched column: `UPDATE <table> SET <column> = <ph> WHERE <on> = <ph>`.
 	// Bound Go-side with (coerced field value, dimension key coerced to the

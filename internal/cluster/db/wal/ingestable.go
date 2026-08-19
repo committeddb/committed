@@ -208,7 +208,7 @@ func (s *Storage) buildIngestable(t *cluster.Configuration) cluster.Ingestable {
 	_, parsed, err := s.parser.ParseIngestable(t.MimeType, t.Data)
 	if err != nil {
 		s.recordConfigError("ingestable", t.ID, configErrBuild, err)
-		s.logger.Error("ingestable config persisted but could not be built on this node (degraded); fix the environment and the config will build on next restart",
+		s.logger.Error("ingestable config persisted but could not be built on this node (degraded); fix the environment — the node retries the build every minute (and on restart)",
 			zap.String("id", t.ID), zap.Error(err))
 		return nil
 	}

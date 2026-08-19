@@ -43,6 +43,10 @@ func (d *GoMySQLServerDialect) CreateDeleteSQL(config *sql.Config) string {
 	return (&dialects.MySQLDialect{}).CreateDeleteSQL(config)
 }
 
+func (d *GoMySQLServerDialect) CreateUpdateSQL(config *sql.Config) string {
+	return (&dialects.MySQLDialect{}).CreateUpdateSQL(config)
+}
+
 func (d *GoMySQLServerDialect) CreateClearSQL(config *sql.Config, columns []string) string {
 	return (&dialects.MySQLDialect{}).CreateClearSQL(config, columns)
 }

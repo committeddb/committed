@@ -45,6 +45,11 @@ func (d *SQLMockDialect) CreateDeleteSQL(c *sql.Config) string {
 	return (&dialects.MySQLDialect{}).CreateDeleteSQL(c)
 }
 
+// CreateUpdateSQL implements Dialect, mirroring MySQL's ? placeholder.
+func (d *SQLMockDialect) CreateUpdateSQL(c *sql.Config) string {
+	return (&dialects.MySQLDialect{}).CreateUpdateSQL(c)
+}
+
 // CreateClearSQL implements Dialect, mirroring MySQL's ? placeholder.
 func (d *SQLMockDialect) CreateClearSQL(c *sql.Config, columns []string) string {
 	return (&dialects.MySQLDialect{}).CreateClearSQL(c, columns)

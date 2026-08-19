@@ -582,7 +582,11 @@ paths:
         tombstone), chains internal stages via `[[projection.stage]]`
         (private keyed refolds — reshape or aggregate — consumed by a
         stage-fed source's `from`; editing stage definitions requires a
-        rebuild, enforced by the config-change guard), or a dimension
+        rebuild, enforced by the config-change guard; when several
+        sources fold one row and any is stage-fed, exactly the
+        row-owning source declares `rowOwner = true` — its writes
+        create and delete rows, every other source is a stage-fed
+        update-only decorator whose retraction clears its own columns), or a dimension
         table
         via a `lookup` block (whose fields aggregate elements resolve by
         an `on`/`select` join — enrichment), and several sources may

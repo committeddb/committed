@@ -75,7 +75,7 @@ type ProjectionRule struct {
 }
 
 // onDelete behaviors for a projection source. The first three are for rule
-// (scalar-fold) sources: delete-row drops the folded row (the spine source);
+// (scalar-fold) sources: delete-row drops the folded row (the row-owning source);
 // clear NULLs the columns this source owns but keeps the row (a contributor);
 // ignore drops the delete entirely. remove-from-aggregate is for an aggregate
 // (collection-fold) source: it removes the deleted child's element from the
@@ -226,6 +226,17 @@ type ProjectionSource struct {
 	// vanished elements delete) via the fan-out sidecar, and a parent
 	// tombstone cascades per onDelete = "delete-rows".
 	ForEach string
+	// RowOwner marks this source as the table's row owner: its writes
+	// admit rows (create), and its deletes and retractions remove them.
+	// Once any source declares ownership, every other row-writing source
+	// becomes a DECORATOR — stage-fed, update-only (it never creates a row
+	// the owner has not admitted), retracting by clearing its own columns —
+	// and every owner write pulls each decorator's retained stage output,
+	// so a decoration lands no matter which side arrived first. Without an
+	// ownership declaration a table keeps the classic behavior (every
+	// source's upsert creates), which is only unambiguous for a single
+	// row-writing source — admission enforces the declaration beyond that.
+	RowOwner bool
 }
 
 // ProjectionConfig declares a stateful fold from one or more source topics into
@@ -268,6 +279,12 @@ func (c *ProjectionConfig) applyDefaults() {
 	if len(c.Sources) == 0 && (c.Topic != "" || len(c.Rules) > 0) {
 		c.Sources = []ProjectionSource{{Topic: c.Topic, KeyPath: c.KeyPath, Rules: c.Rules}}
 	}
+	ownerDeclared := false
+	for i := range c.Sources {
+		if c.Sources[i].RowOwner {
+			ownerDeclared = true
+		}
+	}
 	for i := range c.Sources {
 		s := &c.Sources[i]
 		// A lookup source writes a dimension table, not the BFF row, so the row
@@ -280,6 +297,8 @@ func (c *ProjectionConfig) applyDefaults() {
 					s.OnDelete = onDeleteRemoveFromAggregate // a child delete leaves the row
 				case s.ForEach != "":
 					s.OnDelete = onDeleteRows // a parent delete cascades to its fanned rows
+				case s.FromStage != "" && ownerDeclared && !s.RowOwner:
+					s.OnDelete = onDeleteClear // a decorator's retraction clears its columns
 				default:
 					s.OnDelete = onDeleteRow // back-compat: a delete drops the row
 				}
@@ -357,6 +376,21 @@ func (c *ProjectionConfig) projectionShapeFingerprint() string {
 	// reset with a replay from index 0.
 	if len(c.Stages) > 0 {
 		shape += "|stages:" + stageFingerprint(c)
+	}
+	// Row ownership is value-shape too: flipping the ownership declaration
+	// changes which writes create and delete rows, and rows materialized
+	// under the old regime are not reconciled by the new one — so an
+	// ownership edit demands the same rebuild. Owner-free configs keep a
+	// byte-identical shape.
+	var owners []string
+	for _, s := range c.Sources {
+		if s.RowOwner {
+			owners = append(owners, fmt.Sprintf("rowOwner(topic=%s,from=%s)", s.Topic, s.FromStage))
+		}
+	}
+	if len(owners) > 0 {
+		sort.Strings(owners)
+		shape += "|owners:" + strings.Join(owners, ";")
 	}
 	return shape
 }
@@ -558,6 +592,30 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 		}
 		lookups[src.Lookup.Name] = si
 	}
+	// Ownership pre-pass: whether any source declares row ownership, and
+	// the table's row-writing shape (plain rules sources; stage-fed among
+	// them) — the inputs to the ownership admission rules in the loop below.
+	ownerDeclared := false
+	rowRulesSources, stageFedRules := 0, 0
+	for _, src := range c.Sources {
+		if src.RowOwner {
+			ownerDeclared = true
+		}
+		if len(src.Rules) > 0 && src.ForEach == "" && src.Aggregate == nil && src.Lookup == nil {
+			rowRulesSources++
+			if src.FromStage != "" {
+				stageFedRules++
+			}
+		}
+	}
+	// Several sources folding one row need a declared owner once a stage
+	// feeds any of them: a stage-fed source's deltas are byte-suppressed
+	// against its store, so a whole-row delete by ANOTHER source silently
+	// strips its columns forever — ownership is what makes the interplay
+	// sound, and leaving it implicit is the trap, so admission demands it.
+	if !ownerDeclared && rowRulesSources >= 2 && stageFedRules >= 1 {
+		return fmt.Errorf("this table has %d row-writing sources and at least one is stage-fed, but none declares rowOwner = true — several sources folding one row need an owner: the owner's writes create and delete rows, every other source decorates columns on rows the owner admits (set rowOwner = true on the row-owning source)", rowRulesSources)
+	}
 	// owner records which source writes each column. A column is owned by one
 	// source (so two sources never clobber each other); the same source claiming
 	// a column across its rules is fine. This — not topic uniqueness — is the
@@ -589,6 +647,13 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 		if err := validateWhenClauses(src.When, where); err != nil {
 			return err
 		}
+		if src.RowOwner && (src.Aggregate != nil || src.Lookup != nil || src.ForEach != "") {
+			return fmt.Errorf("%s: rowOwner = true declares row admission; only a plain rules source (topic or stage-fed) can own rows", where)
+		}
+		if ownerDeclared && !src.RowOwner && src.FromStage == "" &&
+			len(src.Rules) > 0 && src.ForEach == "" && src.Aggregate == nil && src.Lookup == nil {
+			return fmt.Errorf("%s: with a row owner declared, every other row-writing source must be stage-fed (from = %q) — a topic source's decoration has no retention, so a value arriving before the owner admits its row would be silently lost; feed it through a stage", where, "<stage>")
+		}
 		for _, kp := range src.KeyPath {
 			if err := rejectMultiValued(kp, where+": keyPath"); err != nil {
 				return err
@@ -611,10 +676,23 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 			if len(src.Rules) == 0 {
 				return fmt.Errorf("%s: a stage-fed source needs rules", where)
 			}
-			switch src.OnDelete {
-			case onDeleteRow, onDeleteIgnore:
-			default:
-				return fmt.Errorf("%s: onDelete %q is invalid for a stage-fed source (want %q or %q — a stage retraction removes or ignores)", where, src.OnDelete, onDeleteRow, onDeleteIgnore)
+			if ownerDeclared && !src.RowOwner {
+				switch src.OnDelete {
+				case onDeleteClear, onDeleteIgnore:
+				default:
+					return fmt.Errorf("%s: onDelete %q is invalid for a decorating (non-owner) stage-fed source (want %q — null this source's columns — or %q; only the row owner removes rows)", where, src.OnDelete, onDeleteClear, onDeleteIgnore)
+				}
+				for ri, r := range src.Rules {
+					if len(c.ruleEnrichments(r)) > 0 {
+						return fmt.Errorf("%s rule %d: a decorating source cannot use lookup enrichment — enrich from the row-owning source's rules instead", where, ri+1)
+					}
+				}
+			} else {
+				switch src.OnDelete {
+				case onDeleteRow, onDeleteIgnore:
+				default:
+					return fmt.Errorf("%s: onDelete %q is invalid for a stage-fed source (want %q or %q — a stage retraction removes or ignores)", where, src.OnDelete, onDeleteRow, onDeleteIgnore)
+				}
 			}
 		}
 		if src.ForEach != "" {

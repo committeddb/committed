@@ -38,6 +38,13 @@ func (d *MySQLDialect) CreateDeleteSQL(c *sql.Config) string {
 	return createDeleteSQL(c, mysqlPlaceholder, mysqlIdent)
 }
 
+// CreateUpdateSQL implements Dialect: the decorator's update-only apply,
+// SET placeholders first, key placeholders last (bound once — a plain
+// UPDATE has none of the upsert's value doubling).
+func (d *MySQLDialect) CreateUpdateSQL(c *sql.Config) string {
+	return createUpdateSQL(c, mysqlPlaceholder, mysqlIdent)
+}
+
 // CreateClearSQL implements Dialect; MySQL binds the WHERE value with ?.
 func (d *MySQLDialect) CreateClearSQL(c *sql.Config, columns []string) string {
 	return createClearSQL(c, columns, mysqlPlaceholder, mysqlIdent)

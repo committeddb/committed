@@ -48,6 +48,10 @@ type Projection struct {
 	stages     *stages.Graph
 	stageStore *stagestore.Store
 	stageSinks map[string][]*projectionSource
+	// decorators are the non-owner stage-fed sources, in declaration order —
+	// the sources whose retained stage output a row-owner write pulls (see
+	// pullDecorations).
+	decorators []*projectionSource
 	// sources is keyed by topic id to the sources that consume it. The topic is
 	// the discriminator; an entity routes to every source on its topic, and each
 	// source's When (and, for rule sources, per-rule when) decides whether it
@@ -80,9 +84,18 @@ type projectionSource struct {
 	keyPaths []string
 	onDelete string
 	// when is the source-level filter (empty = consume every event of the
-	// topic), evaluated on upsert before the rules/aggregate apply.
+	// topic), evaluated on upsert before the rules/aggregate apply. For a
+	// stage-fed source a live delta that FAILS it is a retraction, not a
+	// skip — the key stopped participating.
 	when  []WhenClause
 	rules []*projectionStmt
+	// fromStage names the stage a stage-fed source consumes ("" for a topic
+	// source); rowOwner marks the row owner; updateOnly marks a decorator
+	// (non-owner source on an owned table): its rule statements are bare
+	// UPDATEs bound values-then-keys, once (no BindArgs doubling).
+	fromStage  string
+	rowOwner   bool
+	updateOnly bool
 	// unmatchedRun counts CONSECUTIVE events that matched no rule (worker
 	// goroutine only — no lock). At projectionUnmatchedWarnRun it triggers
 	// the one-shot misconfiguration warning; any match resets it.
@@ -397,8 +410,18 @@ func (p *Projection) Init() error {
 	var lookupSources []*projectionSource
 	enrichRefs := map[string][]enrichRef{}
 	p.stageSinks = map[string][]*projectionSource{}
+	ownerDeclared := false
+	for _, src := range p.config.Sources {
+		if src.RowOwner {
+			ownerDeclared = true
+		}
+	}
 	for si, src := range p.config.Sources {
-		ps := &projectionSource{topic: src.Topic, keyPaths: src.KeyPath, onDelete: src.OnDelete, when: src.When}
+		ps := &projectionSource{
+			topic: src.Topic, keyPaths: src.KeyPath, onDelete: src.OnDelete, when: src.When,
+			fromStage: src.FromStage, rowOwner: src.RowOwner,
+			updateOnly: ownerDeclared && !src.RowOwner && src.FromStage != "",
+		}
 		// Register ps NOW, before preparing its statements, so a partway failure
 		// leaves the statements it did prepare reachable from p.sources for the
 		// error-cleanup defer's Close (a failed nested init self-cleans separately).
@@ -407,6 +430,9 @@ func (p *Projection) Init() error {
 		// under the empty key too so Close reaches its statements.
 		if src.FromStage != "" {
 			p.stageSinks[src.FromStage] = append(p.stageSinks[src.FromStage], ps)
+		}
+		if ps.updateOnly {
+			p.decorators = append(p.decorators, ps)
 		}
 		p.sources[src.Topic] = append(p.sources[src.Topic], ps)
 		switch {
@@ -440,6 +466,9 @@ func (p *Projection) Init() error {
 		default:
 			for i, r := range src.Rules {
 				sqlString := p.dialect.CreateSQL(p.config.ruleConfig(r))
+				if ps.updateOnly {
+					sqlString = p.dialect.CreateUpdateSQL(p.config.ruleConfig(r))
+				}
 				if enrich := p.config.ruleEnrichments(r); len(enrich) > 0 {
 					sqlString = p.dialect.CreateEnrichedUpsertSQL(p.config.ruleConfig(r), enrich)
 				}
@@ -697,7 +726,7 @@ func (p *Projection) Sync(ctx context.Context, a *cluster.Actual) (cluster.Shoul
 			}
 			for _, e := range a.Entities {
 				for _, src := range p.sources[e.Type.ID] {
-					if err := p.applyEntity(ctx, tx, src, e); err != nil {
+					if err := p.applyEntity(ctx, tx, stx, src, e); err != nil {
 						return err
 					}
 				}
@@ -719,7 +748,7 @@ func (p *Projection) Sync(ctx context.Context, a *cluster.Actual) (cluster.Shoul
 
 	for _, e := range a.Entities {
 		for _, src := range p.sources[e.Type.ID] {
-			if err := p.applyEntity(ctx, tx, src, e); err != nil {
+			if err := p.applyEntity(ctx, tx, nil, src, e); err != nil {
 				_ = tx.Rollback()
 				return false, err
 			}
@@ -760,7 +789,7 @@ func (p *Projection) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool,
 				}
 				for _, e := range a.Entities {
 					for _, src := range p.sources[e.Type.ID] {
-						if err := p.applyEntity(ctx, tx, src, e); err != nil {
+						if err := p.applyEntity(ctx, tx, stx, src, e); err != nil {
 							return err
 						}
 					}
@@ -785,7 +814,7 @@ func (p *Projection) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool,
 	for _, a := range as {
 		for _, e := range a.Entities {
 			for _, src := range p.sources[e.Type.ID] {
-				if err := p.applyEntity(ctx, tx, src, e); err != nil {
+				if err := p.applyEntity(ctx, tx, nil, src, e); err != nil {
 					_ = tx.Rollback()
 					return false, err
 				}
@@ -828,7 +857,7 @@ func (p *Projection) columnType(name string) string {
 // Zero matching rules → zero SQL (no ghost rows) plus an unmatched metric tick.
 // Returns cluster.Permanent for non-retryable failures so the worker skips
 // rather than retries. The caller owns the transaction.
-func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *projectionSource, e *cluster.Entity) error {
+func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, stx *stagestore.Tx, src *projectionSource, e *cluster.Entity) error {
 	// A refresh-boundary marker (reconciling full-refresh) is a no-op for a
 	// projection: one source entity fans out to many/aggregated sink rows, so a
 	// topic-level generation sweep does not map onto the projection's shape.
@@ -910,6 +939,17 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 	if err != nil {
 		return err
 	}
+	if matchedAny && src.rowOwner {
+		// A topic row owner's write admits (or re-admits) the row — pull
+		// the decorators' retained stage outputs for it.
+		keys, kerr := p.resolveRowKeys(src, jsonData, nil)
+		if kerr != nil {
+			return kerr
+		}
+		if perr := p.pullDecorations(ctx, tx, stx, keys); perr != nil {
+			return perr
+		}
+	}
 	if !matchedAny {
 		// No ghost rows: zero matching rules → zero SQL. The tick is
 		// the signal that a new event variant shipped without a rule.
@@ -934,6 +974,21 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 	}
 	src.unmatchedRun = 0
 	return nil
+}
+
+// resolveRowKeys resolves a source's key path(s) against the rule scope,
+// each value coerced to its primary-key column's declared type — shared by
+// applyRowFold and the row owner's decoration pull.
+func (p *Projection) resolveRowKeys(src *projectionSource, data, parent any) ([]any, error) {
+	keys := make([]any, len(src.keyPaths))
+	for i, kp := range src.keyPaths {
+		v, err := resolveScopedPath(kp, data, parent)
+		if err != nil {
+			return nil, cluster.Permanent(fmt.Errorf("[projection.apply] keyPath [%s]: %w", kp, err))
+		}
+		keys[i] = coerceForColumn(v, p.columnType(p.config.PrimaryKey[i]))
+	}
+	return keys, nil
 }
 
 // applyRowFold matches src's rules against data and applies the matched
@@ -963,13 +1018,9 @@ func (p *Projection) applyRowFold(ctx context.Context, tx *gosql.Tx, src *projec
 	// aligned, each coerced to its own column's declared type.
 	keys := presetKeys
 	if keys == nil {
-		keys = make([]any, len(src.keyPaths))
-		for i, kp := range src.keyPaths {
-			v, err := resolveScopedPath(kp, data, parent)
-			if err != nil {
-				return true, "", cluster.Permanent(fmt.Errorf("[projection.apply] keyPath [%s]: %w", kp, err))
-			}
-			keys[i] = coerceForColumn(v, p.columnType(p.config.PrimaryKey[i]))
+		var err error
+		if keys, err = p.resolveRowKeys(src, data, parent); err != nil {
+			return true, "", err
 		}
 	}
 
@@ -1017,7 +1068,9 @@ func (p *Projection) applyRowFold(ctx context.Context, tx *gosql.Tx, src *projec
 		// comes from the TYPED value, never the raw payload text (which could
 		// spell one value several ways).
 		values := make([]any, 0, len(r.rule.Set)+len(keys))
-		values = append(values, keys...)
+		if !src.updateOnly {
+			values = append(values, keys...)
+		}
 		for _, s := range r.rule.Set {
 			if s.IsEnrichment() {
 				values = append(values, canonicalKeyString(plain[s.On]))
@@ -1025,7 +1078,15 @@ func (p *Projection) applyRowFold(ctx context.Context, tx *gosql.Tx, src *projec
 			}
 			values = append(values, plain[s.Column])
 		}
-		args := p.dialect.BindArgs(values)
+		// A decorator's UPDATE binds values-then-keys, each once —
+		// BindArgs is the upsert convention (MySQL doubles for its
+		// INSERT … ON DUPLICATE KEY form) and does not apply here.
+		args := values
+		if src.updateOnly {
+			args = append(args, keys...)
+		} else {
+			args = p.dialect.BindArgs(values)
+		}
 		if _, err := tx.StmtContext(ctx, r.Stmt).ExecContext(ctx, args...); err != nil {
 			// Same NUL hint as the plain sink's row apply: name the offending
 			// payload field(s) — names only, never values.
@@ -1349,7 +1410,7 @@ func (p *Projection) forEachDeleteRow(ctx context.Context, tx *gosql.Tx, childKe
 func (p *Projection) foldStagesTx(ctx context.Context, tx *gosql.Tx, stx *stagestore.Tx, a *cluster.Actual) error {
 	p.stages.OnDelta = func(stage string, outKey []byte, obj any, live bool) error {
 		for _, src := range p.stageSinks[stage] {
-			if err := p.applyStageDelta(ctx, tx, src, outKey, obj, live); err != nil {
+			if err := p.applyStageDelta(ctx, tx, stx, src, outKey, obj, live); err != nil {
 				return err
 			}
 		}
@@ -1423,8 +1484,12 @@ func (p *Projection) foldEntitiesTx(stx *stagestore.Tx, a *cluster.Actual) error
 
 // applyStageDelta lands one stage delta on a table source: an upsert folds
 // through the source's rules exactly as a topic entity would (the stage
-// object is the payload), a retraction removes or ignores per onDelete.
-func (p *Projection) applyStageDelta(ctx context.Context, tx *gosql.Tx, src *projectionSource, outKey []byte, obj any, live bool) error {
+// object is the payload); a retraction — the stage's key going away OR a
+// live delta that stops matching the source's when — retracts this
+// source's contribution per onDelete (row, clear, or ignore). A
+// row-owning source's upsert additionally pulls every decorator's
+// retained stage output for the key (see pullDecorations).
+func (p *Projection) applyStageDelta(ctx context.Context, tx *gosql.Tx, stx *stagestore.Tx, src *projectionSource, outKey []byte, obj any, live bool) error {
 	// The stage's key IS the row key: one part verbatim, several through
 	// the composite encoding (arity validated at admission).
 	nKeys := len(p.config.PrimaryKey)
@@ -1436,8 +1501,24 @@ func (p *Projection) applyStageDelta(ctx context.Context, tx *gosql.Tx, src *pro
 		}
 		keyVals = decoded
 	}
+	// A live delta failing the when is a retraction, not a skip: the key
+	// no longer participates, and admit-without-retract leaves permanently
+	// stale rows once a predicate flips off.
+	if live && !matchWhen(src.when, obj) {
+		live = false
+	}
 	if !live {
-		if src.onDelete == onDeleteIgnore {
+		switch src.onDelete {
+		case onDeleteIgnore:
+			return nil
+		case onDeleteClear:
+			args := make([]any, len(keyVals))
+			for i, v := range keyVals {
+				args[i] = v
+			}
+			if _, err := tx.StmtContext(ctx, src.clear).ExecContext(ctx, args...); err != nil {
+				return execFailure(fmt.Sprintf("[projection.stage] exec [%s]", src.clearSQL), err, p.dialect.IsPermanent(err))
+			}
 			return nil
 		}
 		args := make([]any, len(keyVals))
@@ -1449,15 +1530,55 @@ func (p *Projection) applyStageDelta(ctx context.Context, tx *gosql.Tx, src *pro
 		}
 		return nil
 	}
-	if !matchWhen(src.when, obj) {
-		return nil
-	}
 	keys := make([]any, nKeys)
 	for i, v := range keyVals {
 		keys[i] = coerceForColumn(v, p.columnType(p.config.PrimaryKey[i]))
 	}
-	_, _, err := p.applyRowFold(ctx, tx, src, obj, nil, keys)
-	return err
+	if _, _, err := p.applyRowFold(ctx, tx, src, obj, nil, keys); err != nil {
+		return err
+	}
+	if src.rowOwner {
+		return p.pullDecorations(ctx, tx, stx, keys)
+	}
+	return nil
+}
+
+// pullDecorations lands every decorator's retained stage output on a row
+// the row owner just wrote. The stage store is a decoration's retention:
+// its deltas are byte-suppressed against the store, so after the owner
+// deletes and re-admits a row (or admits it for the first time AFTER the
+// decoration fired) the decorator stays silent — the owner's write must
+// pull the current outputs itself. Idempotent: decorators are update-only
+// and re-applying the same object converges.
+func (p *Projection) pullDecorations(ctx context.Context, tx *gosql.Tx, stx *stagestore.Tx, keys []any) error {
+	if stx == nil || len(p.decorators) == 0 {
+		return nil
+	}
+	parts := make([]string, len(keys))
+	for i, k := range keys {
+		parts[i] = keyString(k)
+	}
+	outKey := []byte(stages.OutKey(parts))
+	for _, d := range p.decorators {
+		out, err := stx.GetOut(d.fromStage, outKey)
+		if err != nil {
+			return err
+		}
+		if out == nil {
+			continue
+		}
+		obj, err := stages.DecodeObject(out)
+		if err != nil {
+			return cluster.Permanent(fmt.Errorf("[projection.stage] decode retained output of stage %q: %w", d.fromStage, err))
+		}
+		if !matchWhen(d.when, obj) {
+			continue
+		}
+		if _, _, err := p.applyRowFold(ctx, tx, d, obj, nil, keys); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // aggPriorParent returns the parent key currently recorded for childKey in the

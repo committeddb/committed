@@ -711,6 +711,9 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	if ingest != nil {
 		ws.ingestPump = newNotifyPump(ingest, ws.closeC)
 	}
+	if ws.syncPump != nil || ws.ingestPump != nil {
+		go ws.retryDegradedBuildsLoop()
+	}
 
 	fi, err := entryLog.FirstIndex()
 	if err != nil {

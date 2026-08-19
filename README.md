@@ -340,8 +340,9 @@ floats anywhere), and enrich folded elements from a dimension topic
 (**lookup**), fan one event's array into N rows (**forEach**, with
 absolute reconciliation and cascading parent deletes), and chain internal
 **stages** — private keyed refolds (filter → aggregate → aggregate) a
-table source consumes by name, with retraction built in — each with its
-own delete lifecycle, plus dimension fan-out for out-of-order dimensions. The full reference, with rule semantics and worked
+table source consumes by name, with retraction and row ownership built
+in (one source declares `rowOwner = true` and owns row existence; the
+others decorate) — each with its own delete lifecycle, plus dimension fan-out for out-of-order dimensions. The full reference, with rule semantics and worked
 examples, is in **[docs/read-models.md](docs/read-models.md)**.
 
 Configure an ingestable that pulls from an external source into the log (a
