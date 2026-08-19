@@ -688,3 +688,73 @@ func TestStageCompositeKey(t *testing.T) {
 	fold("t2", `{"card":"c1"}`)
 	require.Equal(t, `{"n":1}`, get("c1", "w1"))
 }
+
+// The anti-join (absent = true): S11's shape — a job participates only
+// while NO matching invoice exists. Arrival retracts (the fan-out's hard
+// half, free by construction), departure and where-mismatch heal back in,
+// and a missing On reference is vacuously absent.
+func TestStageAntiJoin(t *testing.T) {
+	stages := []Stage{
+		{
+			Name: "uninvoiced", From: "jobs", KeyPath: []string{"$.id"},
+			Joins: []Join{{
+				Topic: "invoices", On: "$.id", Absent: true,
+				Where: []WhenClause{{Path: "$.status", Equals: "posted"}},
+			}},
+			Emit: []Emit{{Field: "id", From: "$.id"}},
+		},
+	}
+	require.NoError(t, ValidateShapes(stages))
+	g := BuildGraph(stages)
+	store := stageStoreForTest(t)
+
+	fold := func(topic, key, payload string) {
+		require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+			return g.FoldTopicUpsertNow(tx, topic, []byte(key), decodePayload(t, payload))
+		}))
+	}
+	del := func(topic, key string) {
+		require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+			return g.FoldTopicDeleteNow(tx, topic, []byte(key))
+		}))
+	}
+	get := func(key string) string {
+		var got string
+		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
+			v, err := tx.GetOut("uninvoiced", []byte(key))
+			got = string(v)
+			return err
+		}))
+		return got
+	}
+
+	// No invoice anywhere: the job participates (vacuous absence).
+	fold("jobs", "j1", `{"id":"j1"}`)
+	require.Equal(t, `{"id":"j1"}`, get("j1"))
+
+	// A DRAFT invoice arrives — it fails the where, so still absent.
+	fold("invoices", "j1", `{"status":"draft"}`)
+	require.Equal(t, `{"id":"j1"}`, get("j1"), "a non-matching row is still absence")
+
+	// The invoice POSTS: presence — the job's row RETRACTS on arrival.
+	fold("invoices", "j1", `{"status":"posted"}`)
+	require.Empty(t, get("j1"), "arrival retracts — the anti-join's hard half")
+
+	// Back to draft: absence again — the job heals back in.
+	fold("invoices", "j1", `{"status":"draft"}`)
+	require.Equal(t, `{"id":"j1"}`, get("j1"))
+
+	// Posted again, then the invoice is DELETED: heals back in.
+	fold("invoices", "j1", `{"status":"posted"}`)
+	require.Empty(t, get("j1"))
+	del("invoices", "j1")
+	require.Equal(t, `{"id":"j1"}`, get("j1"))
+
+	// An unrelated job with its own posted invoice stays out; one
+	// without stays in.
+	fold("invoices", "j2", `{"status":"posted"}`)
+	fold("jobs", "j2", `{"id":"j2"}`)
+	fold("jobs", "j3", `{"id":"j3"}`)
+	require.Empty(t, get("j2"))
+	require.Equal(t, `{"id":"j3"}`, get("j3"))
+}

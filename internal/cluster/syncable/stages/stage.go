@@ -97,9 +97,16 @@ type Join struct {
 	// by its out key and maintained by the drain — so cross-stage
 	// correlation is a join, not a second input. Manifest order applies:
 	// the joined stage must be declared earlier.
-	From  string       `mapstructure:"from"`
-	On    string       `mapstructure:"on"`
-	Where []WhenClause `mapstructure:"where"`
+	From string `mapstructure:"from"`
+	On   string `mapstructure:"on"`
+	// Absent inverts the join into an ANTI-join: the input participates
+	// only while NO dimension row matches (none exists, or none passes
+	// Where). The fan-out gives the hard half for free: when a matching
+	// row ARRIVES, dependents refold and retract — and when it leaves or
+	// stops matching, they heal back in. A missing On value is vacuously
+	// absent (nothing to reference), so it participates.
+	Absent bool         `mapstructure:"absent"`
+	Where  []WhenClause `mapstructure:"where"`
 }
 
 // target returns the join's dimension source name (topic or stage).

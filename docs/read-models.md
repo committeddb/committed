@@ -454,6 +454,11 @@ set = [ { column = "total", from = "$.total" },
   regardless of arrival position (it is retained as negative evidence
   even past the `when` filter), and retracting the delete event itself
   un-deletes the key.
+- **`absent = true` inverts a join into an ANTI-join**: the input
+  participates only while NO dimension row matches (none exists, or
+  none passes `where`) — "jobs with no posted invoice." Arrival
+  retracts, departure or a `where` mismatch heals back in, and a
+  missing `on` reference is vacuously absent.
 - **Joins can address a PRIOR stage** (`from = "<stage>"` on a join):
   its outputs are the dimension rows, maintained live by the drain — so
   cross-stage correlation is a join, not a second input; heal, flip,

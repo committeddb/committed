@@ -80,13 +80,14 @@ func BuildGraph(stages []Stage) *Graph {
 	}
 	g.order = nodes
 	for i := range stages {
-		if up, ok := g.byName[stages[i].From]; ok {
+		st := &stages[i]
+		if up, ok := g.byName[st.From]; ok {
 			up.consumers = append(up.consumers, nodes[i])
 		} else {
-			g.byTopic[stages[i].From] = append(g.byTopic[stages[i].From], nodes[i])
+			g.byTopic[st.From] = append(g.byTopic[st.From], nodes[i])
 		}
-		for j := range stages[i].Joins {
-			jn := &stages[i].Joins[j]
+		for j := range st.Joins {
+			jn := &st.Joins[j]
 			if jn.From != "" {
 				if producer, ok := g.byName[jn.From]; ok {
 					producer.dimConsumers = append(producer.dimConsumers, dimRef{node: nodes[i], join: jn})
@@ -560,23 +561,25 @@ func refoldOutput(tx *stagestore.Tx, st *Stage, outKey []byte) (out []byte, live
 func inputQualifies(tx *stagestore.Tx, st *Stage, obj, parent any) (bool, error) {
 	for i := range st.Joins {
 		j := &st.Joins[i]
-		onV, err := ResolvePath(j.On, obj, parent)
-		if err != nil || onV == nil {
-			return false, nil
+		// present: a dimension row exists at the input's On value AND
+		// matches the join's Where. A normal join requires it; an Absent
+		// (anti-)join forbids it — one rule: fail when present == Absent.
+		present := false
+		if onV, err := ResolvePath(j.On, obj, parent); err == nil && onV != nil {
+			stored, err := tx.GetDim(st.Name, j.target(), []byte(KeyString(onV)))
+			if err != nil {
+				return false, err
+			}
+			if stored != nil {
+				_, payload := decodeRetained(stored)
+				dimObj, err := DecodeObject(payload)
+				if err != nil {
+					return false, err
+				}
+				present = Match(j.Where, dimObj)
+			}
 		}
-		stored, err := tx.GetDim(st.Name, j.target(), []byte(KeyString(onV)))
-		if err != nil {
-			return false, err
-		}
-		if stored == nil {
-			return false, nil
-		}
-		_, payload := decodeRetained(stored)
-		dimObj, err := DecodeObject(payload)
-		if err != nil {
-			return false, err
-		}
-		if !Match(j.Where, dimObj) {
+		if present == j.Absent {
 			return false, nil
 		}
 	}
