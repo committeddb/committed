@@ -81,10 +81,6 @@ func TestStageShapeRules(t *testing.T) {
 			st[1].Emit[0] = StageEmit{Field: "total", Sum: "$.a / $.b"}
 			return st
 		}, "round(...) or trunc(...)"},
-		"two keyPaths": {func(st []ProjectionStage) []ProjectionStage {
-			st[0].KeyPath = []string{"$.a", "$.b"}
-			return st
-		}, "exactly one keyPath"},
 		"wildcard keyPath": {func(st []ProjectionStage) []ProjectionStage {
 			st[0].KeyPath = []string{"$.items[*].id"}
 			return st
@@ -741,4 +737,46 @@ func TestStageLiveSet(t *testing.T) {
 	// An unrelated txn is untouched throughout.
 	fold("e9", `{"txn":"t2","type":"created","job":"j2"}`)
 	require.Equal(t, `{"job":"j2"}`, get("t2"))
+}
+
+// Composite stage keys (S5's (TimecardId, ProjectWorkareaId) grain):
+// several keyPath parts form one key through the producers' composite
+// encoding — same-pair inputs fold together, different pairs apart, and
+// a partial key is non-membership.
+func TestStageCompositeKey(t *testing.T) {
+	stages := []ProjectionStage{
+		{
+			Name: "sums", From: "timesheets", KeyPath: []string{"$.card", "$.wa"},
+			Reduce: "aggregate", Emit: []StageEmit{{Field: "n", Count: true}},
+		},
+	}
+	cfg := stageConfig(stages...)
+	require.NoError(t, validateProjectionStageShapes(cfg))
+	g := buildStageGraph(cfg.Stages)
+	store := stageStoreForTest(t)
+
+	fold := func(key, payload string) {
+		require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+			return g.FoldTopicUpsertNow(tx, "timesheets", []byte(key), decodePayload(t, payload))
+		}))
+	}
+	get := func(card, wa string) string {
+		var got string
+		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
+			v, err := tx.GetOut("sums", []byte(stageOutKey([]string{card, wa})))
+			got = string(v)
+			return err
+		}))
+		return got
+	}
+
+	fold("t1", `{"card":"c1","wa":"w1"}`)
+	fold("t2", `{"card":"c1","wa":"w1"}`)
+	fold("t3", `{"card":"c1","wa":"w2"}`)
+	require.Equal(t, `{"n":2}`, get("c1", "w1"), "same pair folds together")
+	require.Equal(t, `{"n":1}`, get("c1", "w2"), "the pair keys, not either column")
+
+	// A partial key (missing wa) is non-membership: t2 retracts from its pair.
+	fold("t2", `{"card":"c1"}`)
+	require.Equal(t, `{"n":1}`, get("c1", "w1"))
 }

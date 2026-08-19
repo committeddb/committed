@@ -475,10 +475,13 @@ type AggregateScalar struct {
 	Where     []AggregateScalarWhere
 }
 
-// AggregateScalarWhere is one equality restriction over an element field.
+// AggregateScalarWhere is one restriction over an element field: Equals
+// compares in the JSON-text space; Null matches SQL IS NULL (JSON null
+// or absent).
 type AggregateScalarWhere struct {
 	Field  string
 	Equals any
+	Null   bool
 }
 
 // ScalarWhereText renders a scalar where value in the JSON-text comparison

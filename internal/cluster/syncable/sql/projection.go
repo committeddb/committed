@@ -1335,11 +1335,26 @@ func (p *Projection) foldStages(ctx context.Context, tx *gosql.Tx, a *cluster.Ac
 // through the source's rules exactly as a topic entity would (the stage
 // object is the payload), a retraction removes or ignores per onDelete.
 func (p *Projection) applyStageDelta(ctx context.Context, tx *gosql.Tx, src *projectionSource, outKey []byte, obj any, live bool) error {
+	// The stage's key IS the row key: one part verbatim, several through
+	// the composite encoding (arity validated at admission).
+	nKeys := len(p.config.PrimaryKey)
+	keyVals := []string{string(outKey)}
+	if nKeys > 1 {
+		decoded, err := cluster.DecodeCompositeKey(string(outKey), nKeys)
+		if err != nil {
+			return cluster.Permanent(fmt.Errorf("[projection.stage] stage key does not decode for this table's %d-column primaryKey: %w", nKeys, err))
+		}
+		keyVals = decoded
+	}
 	if !live {
 		if src.onDelete == onDeleteIgnore {
 			return nil
 		}
-		if _, err := tx.StmtContext(ctx, p.delete.Stmt).ExecContext(ctx, string(outKey)); err != nil {
+		args := make([]any, len(keyVals))
+		for i, v := range keyVals {
+			args[i] = v
+		}
+		if _, err := tx.StmtContext(ctx, p.delete.Stmt).ExecContext(ctx, args...); err != nil {
 			return execFailure(fmt.Sprintf("[projection.stage] exec [%s]", p.delete.SQL), err, p.dialect.IsPermanent(err))
 		}
 		return nil
@@ -1347,8 +1362,11 @@ func (p *Projection) applyStageDelta(ctx context.Context, tx *gosql.Tx, src *pro
 	if !matchWhen(src.when, obj) {
 		return nil
 	}
-	key := coerceForColumn(string(outKey), p.columnType(p.config.PrimaryKey[0]))
-	_, _, err := p.applyRowFold(ctx, tx, src, obj, nil, []any{key})
+	keys := make([]any, nKeys)
+	for i, v := range keyVals {
+		keys[i] = coerceForColumn(v, p.columnType(p.config.PrimaryKey[i]))
+	}
+	_, _, err := p.applyRowFold(ctx, tx, src, obj, nil, keys)
 	return err
 }
 

@@ -30,6 +30,7 @@ func projectionScalarAggregatesFlow(t *testing.T, db *sql.DB, table, quoteL, quo
 			{Name: "hours_sum", SQLType: "DECIMAL(12,2)"},
 			{Name: "done_count", SQLType: "INT"},
 			{Name: "last_date", SQLType: "VARCHAR(32)"},
+			{Name: "live_count", SQLType: "INT"},
 		},
 		Sources: []sql.ProjectionSource{{
 			Topic:    visitType.ID,
@@ -41,12 +42,14 @@ func projectionScalarAggregatesFlow(t *testing.T, db *sql.DB, table, quoteL, quo
 					{Field: "hours", From: "$.hours"},
 					{Field: "status", From: "$.status"},
 					{Field: "date", From: "$.date"},
+					{Field: "deleted_at", From: "$.deletedAt"},
 				},
 				Scalars: []sql.ProjectionScalar{
 					{Column: "n", Fn: "count"},
 					{Column: "hours_sum", Fn: "sum", Of: "hours"},
 					{Column: "done_count", Fn: "count", Where: []sql.ScalarWhere{{Field: "status", Equals: "done"}}},
 					{Column: "last_date", Fn: "max", Of: "date"},
+					{Column: "live_count", Fn: "count", Where: []sql.ScalarWhere{{Field: "deleted_at", Null: true}}},
 				},
 			},
 		}},
@@ -56,7 +59,14 @@ func projectionScalarAggregatesFlow(t *testing.T, db *sql.DB, table, quoteL, quo
 	defer func() { _ = p.Close() }()
 
 	upsert := func(id, hours, status, date string) {
-		payload := fmt.Sprintf(`{"job_id":"j1","id":"%s","hours":%s,"status":"%s","date":"%s"}`, id, hours, status, date)
+		// v1 and v2 carry explicit JSON nulls (mirrored source rows are
+		// canonicalized with every column present); v3 carries a value —
+		// the null-where filter counts the nulls and excludes the value.
+		field := `,"deletedAt":null`
+		if id == "v3" {
+			field = `,"deletedAt":"2026-08-10"`
+		}
+		payload := fmt.Sprintf(`{"job_id":"j1","id":"%s","hours":%s,"status":"%s","date":"%s"%s}`, id, hours, status, date, field)
 		a := &cluster.Actual{Entities: []*cluster.Entity{
 			cluster.NewUpsertEntity(visitType, []byte(id), []byte(payload)),
 		}}
@@ -68,15 +78,16 @@ func projectionScalarAggregatesFlow(t *testing.T, db *sql.DB, table, quoteL, quo
 	upsert("v3", "0.25", "done", "2026-08-03")
 
 	qt := quoteL + table + quoteR
-	read := func() (count, done int, sum, last string) {
+	read := func() (count, done, live int, sum, last string) {
 		require.NoError(t, db.DB.QueryRow(fmt.Sprintf(
-			"SELECT n, done_count, hours_sum, last_date FROM %s WHERE job_id = %s",
-			qt, placeholder(0)), "j1").Scan(&count, &done, &sum, &last))
+			"SELECT n, done_count, live_count, hours_sum, last_date FROM %s WHERE job_id = %s",
+			qt, placeholder(0)), "j1").Scan(&count, &done, &live, &sum, &last))
 		return
 	}
-	count, done, sum, last := read()
+	count, done, live, sum, last := read()
 	require.Equal(t, 3, count)
 	require.Equal(t, 2, done, "filtered count folds only matching children")
+	require.Equal(t, 2, live, "null-where counts JSON nulls, excludes values")
 	require.Equal(t, "4.00", sum, "decimal sum is cent-exact at the column's scale")
 	require.Equal(t, "2026-08-15", last, "lexical max orders ISO dates correctly")
 
@@ -87,9 +98,10 @@ func projectionScalarAggregatesFlow(t *testing.T, db *sql.DB, table, quoteL, quo
 	_, err := p.Sync(context.Background(), del)
 	require.NoError(t, err)
 
-	count, done, sum, last = read()
+	count, done, live, sum, last = read()
 	require.Equal(t, 2, count)
 	require.Equal(t, 2, done)
+	require.Equal(t, 1, live, "one null-deletedAt child survived the delete")
 	require.Equal(t, "2.75", sum)
 	require.Equal(t, "2026-08-03", last)
 }

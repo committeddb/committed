@@ -150,6 +150,13 @@ func pgScalarSubquery(spec sql.AggregateSpec, sc sql.AggregateScalar, ph string)
 	}
 	var where strings.Builder
 	for _, w := range sc.Where {
+		if w.Null {
+			// ->> yields SQL NULL for both a JSON null and an absent field —
+			// the IS NULL reading of a mirrored source's nullable column.
+			fmt.Fprintf(&where, " AND s.%s->>'%s' IS NULL",
+				sql.SidecarElement, sqlident.EscapeStringLiteral(w.Field))
+			continue
+		}
 		fmt.Fprintf(&where, " AND s.%s->>'%s' = '%s'",
 			sql.SidecarElement, sqlident.EscapeStringLiteral(w.Field),
 			sqlident.EscapeStringLiteral(sql.ScalarWhereText(w.Equals)))

@@ -123,6 +123,15 @@ func mysqlScalarSubquery(spec sql.AggregateSpec, sc sql.AggregateScalar, ph stri
 	}
 	var where strings.Builder
 	for _, w := range sc.Where {
+		if w.Null {
+			// Absent → JSON_EXTRACT is SQL NULL; a stored JSON null →
+			// JSON_TYPE 'NULL'. Both are the IS NULL reading of a mirrored
+			// source's nullable column.
+			f := sqlident.EscapeStringLiteralMySQL(w.Field)
+			fmt.Fprintf(&where, " AND (JSON_EXTRACT(s.%s,'$.%s') IS NULL OR JSON_TYPE(JSON_EXTRACT(s.%s,'$.%s')) = 'NULL')",
+				sql.SidecarElement, f, sql.SidecarElement, f)
+			continue
+		}
 		fmt.Fprintf(&where, " AND s.%s->>'$.%s' = '%s'",
 			sql.SidecarElement, sqlident.EscapeStringLiteralMySQL(w.Field),
 			sqlident.EscapeStringLiteralMySQL(sql.ScalarWhereText(w.Equals)))

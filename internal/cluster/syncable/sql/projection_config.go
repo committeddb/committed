@@ -198,11 +198,14 @@ type ProjectionScalar struct {
 	Where  []ScalarWhere `mapstructure:"where"`
 }
 
-// ScalarWhere is one equality clause over an element field, restricting
-// which children a filtered scalar counts.
+// ScalarWhere is one clause over an element field, restricting which
+// children a filtered scalar counts: exactly one of Equals or Null
+// (Null matches SQL IS NULL — a JSON null OR an absent field, the
+// mirrored-source reading of DeletedAtUtc IS NULL).
 type ScalarWhere struct {
 	Field  string `mapstructure:"field"`
 	Equals any    `mapstructure:"equals"`
+	Null   bool   `mapstructure:"null"`
 }
 
 // ProjectionSource is one input of a projection. The topic is the discriminator
@@ -715,8 +718,12 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 			if src.Topic != "" {
 				return fmt.Errorf("%s: exactly one of topic or from (a source consumes a topic or a stage, not both)", where)
 			}
-			if stageNamed(c, src.FromStage) < 0 {
+			fi := stageNamed(c, src.FromStage)
+			if fi < 0 {
 				return fmt.Errorf("%s: from %q names no declared stage", where, src.FromStage)
+			}
+			if len(c.PrimaryKey) != len(c.Stages[fi].KeyPath) {
+				return fmt.Errorf("%s: this table's primaryKey has %d column(s) but stage %q keys by %d path(s) — a stage-fed source's rows are keyed BY the stage's key, so the arities must match", where, len(c.PrimaryKey), src.FromStage, len(c.Stages[fi].KeyPath))
 			}
 			if src.Aggregate != nil || src.Lookup != nil || src.ForEach != "" {
 				return fmt.Errorf("%s: a stage-fed source folds via rules only", where)
@@ -1135,7 +1142,10 @@ func validateAggregate(c *ProjectionConfig, src ProjectionSource, where string, 
 			if cl.Field == "" || !plain[cl.Field] {
 				return fmt.Errorf("%s: where field %q is not a plain element field", swhere, cl.Field)
 			}
-			if cl.Equals == nil || !isScalar(cl.Equals) {
+			if (cl.Equals != nil) == cl.Null {
+				return fmt.Errorf("%s: where for field %q needs exactly one of equals or null", swhere, cl.Field)
+			}
+			if cl.Equals != nil && !isScalar(cl.Equals) {
 				return fmt.Errorf("%s: where for field %q needs a scalar equals literal", swhere, cl.Field)
 			}
 		}
@@ -1178,11 +1188,16 @@ func validateProjectionStageShapes(c *ProjectionConfig) error {
 			return fmt.Errorf("%s: from %q references a stage at or after this one — stages chain in manifest order (move the producer above its consumer)", where, st.From)
 		}
 		names[st.Name] = true
-		if len(st.KeyPath) != 1 {
-			return fmt.Errorf("%s: exactly one keyPath (stages are single-key refolds)", where)
+		if len(st.KeyPath) == 0 {
+			return fmt.Errorf("%s: keyPath is required (one path per key part; several = a composite key)", where)
 		}
-		if err := rejectMultiValued(st.KeyPath[0], where+": keyPath"); err != nil {
-			return err
+		for _, kp := range st.KeyPath {
+			if err := rejectMultiValued(kp, where+": keyPath"); err != nil {
+				return err
+			}
+		}
+		if st.ForEach != "" && len(st.KeyPath) > 1 && st.ElementKey == "" {
+			return fmt.Errorf("%s: a forEach stage with a composite keyPath needs elementKey (the element's own identity)", where)
 		}
 		if err := validateWhenClauses(st.When, where); err != nil {
 			return err

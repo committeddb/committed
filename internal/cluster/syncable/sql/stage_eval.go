@@ -10,6 +10,7 @@ import (
 
 	"github.com/PaesslerAG/jsonpath"
 
+	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/syncable/stagestore"
 )
 
@@ -320,13 +321,18 @@ func (g *stageGraph) foldOneInput(tx *stagestore.Tx, n *stageNode, inKey []byte,
 		return g.foldDeleteInput(tx, n, inKey, dirty)
 	}
 
-	kv, err := resolveScopedPath(st.KeyPath[0], data, parent)
-	if err != nil || kv == nil {
-		// A matched input without a key cannot fold; treat as non-membership
-		// (and retract any prior membership) rather than erroring the topic.
-		return g.foldDeleteInput(tx, n, inKey, dirty)
+	parts := make([]string, len(st.KeyPath))
+	for i, kp := range st.KeyPath {
+		kv, err := resolveScopedPath(kp, data, parent)
+		if err != nil || kv == nil {
+			// A matched input without a (complete) key cannot fold; treat as
+			// non-membership (and retract any prior membership) rather than
+			// erroring the topic.
+			return g.foldDeleteInput(tx, n, inKey, dirty)
+		}
+		parts[i] = keyString(coerceKeyScalar(kv))
 	}
-	outKey := []byte(keyString(coerceKeyScalar(kv)))
+	outKey := []byte(stageOutKey(parts))
 
 	// Rekey: if this input previously fed a DIFFERENT key, retract it
 	// there first — its old key refolds without it.
@@ -928,6 +934,24 @@ func decodeStageObject(bs []byte) (any, error) {
 		return nil, err
 	}
 	return v, nil
+}
+
+// stageOutKey renders a stage key: a single part verbatim, several parts
+// through the producers' composite encoding (cluster.CompositeKey with
+// synthetic column names), so a stage-fed table's composite tombstone
+// machinery decodes it unchanged.
+func stageOutKey(parts []string) string {
+	if len(parts) == 1 {
+		return parts[0]
+	}
+	m := make(map[string]any, len(parts))
+	cols := make([]string, len(parts))
+	for i, part := range parts {
+		c := fmt.Sprintf("k%d", i)
+		cols[i] = c
+		m[c] = part
+	}
+	return cluster.CompositeKey(m, cols)
 }
 
 // coerceKeyScalar renders a key path value into the canonical key space
