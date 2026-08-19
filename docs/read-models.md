@@ -227,6 +227,30 @@ error handling, deletes, and schema evolution:
   `POST /v1/syncable/{id}/rebuild` does the drop + replay-from-0 in place
   under the same name. The log is permanent, so replay is cheap.
 
+### Computed columns (`expr`)
+
+A set entry's fifth arm computes its column from the event payload with a
+closed function set — no user code, no SQL fragments:
+
+```toml
+set = [
+  { column = "remaining", expr = "$.quoted_total - coalesce($.invoiced_total, 0)" },
+  { column = "unit_price", expr = "round(($.Cost + $.Overhead) / nullif(1 - $.Margin, 0), 2)" },
+]
+```
+
+The language: `+ - * /`, comparisons (`= <> < <= > >=`), `coalesce`,
+`nullif`, `round(x, scale)` (half away from zero), `trunc(x[, scale])`
+(toward zero), decimal and `'string'` literals, and `$.…` paths into the
+payload. Arithmetic is **exact** — values are arbitrary-precision decimals
+built from the payload's source digits, never floats, and nothing rounds
+except your explicit `round`/`trunc`. Because only division can produce a
+non-terminating value, **every `/` must sit under a `round` or `trunc`**
+(comparisons excepted — they consume exact quotients); a bare quotient is
+rejected at POST, not at apply. A missing field is null; null propagates
+through arithmetic and comparison; `coalesce`/`nullif` are the null-aware
+escape hatches (`nullif(x, 0)` is the division-by-zero guard).
+
 ## Folding several topics into one row (multi-source)
 
 A projection can consume more than one topic and fold them into a single
@@ -329,6 +353,47 @@ finds and removes the right element without the payload. The `read` column
 stays a clean array. Deterministic ordering is a PostgreSQL guarantee;
 MySQL aggregate ordering is best-effort (`JSON_ARRAYAGG` ignores `ORDER
 BY`).
+
+### Scalar aggregates over the child set
+
+The same child set can also fold into **scalar** columns — count, sum,
+min, max, countDistinct — recomputed absolutely from the sidecar at every
+child change (never incremented, so redelivery and rebuild converge):
+
+```toml
+  [projection.source.aggregate]
+  elementKey = "$.id"
+    [[projection.source.aggregate.element]]
+    field = "hours"
+    from  = "$.hours"
+    [[projection.source.aggregate.element]]
+    field = "status"
+    from  = "$.status"
+    [[projection.source.aggregate.scalar]]
+    column = "visit_count"
+    fn     = "count"
+    [[projection.source.aggregate.scalar]]
+    column = "hours_sum"
+    fn     = "sum"
+    of     = "hours"
+    [[projection.source.aggregate.scalar]]
+    column = "done_count"
+    fn     = "count"
+    where  = [ { field = "status", equals = "done" } ]
+```
+
+- **`fn`** — `count`, `sum`, `min`, `max`, or `countDistinct`. `count`
+  folds rows (no `of`); the others fold the element field named by `of`.
+- **`ofType`** — `text` (default) or `number`: how `min`/`max` order and
+  `countDistinct` compare. ISO dates order correctly as text; numeric
+  fields want `number`. `sum` always folds numerically.
+- **`where`** — equality clauses over element fields, restricting which
+  children fold (filtered counts).
+- The array `column` becomes **optional** when scalars are present — a
+  pure `visit_count` needs no array.
+
+SQL semantics apply at the empty set: `count` is 0, `sum`/`min`/`max` are
+NULL when no children qualify.
 
 ## Enriching folded data from another topic (lookup)
 

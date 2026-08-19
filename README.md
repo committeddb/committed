@@ -333,7 +333,10 @@ set  = [
 That single-source fold is the simplest shape. A projection can also fold
 several topics into one denormalized "BFF" row (a **spine** plus
 **contributors**), fold a collection of child rows into one JSON column
-(**aggregate**), and enrich folded elements from a dimension topic
+(**aggregate**) or into scalar aggregate columns (count/sum/min/max/
+countDistinct over the child set), compute columns with exact-decimal
+expressions (**expr** — coalesce/nullif/round/trunc and arithmetic, no
+floats anywhere), and enrich folded elements from a dimension topic
 (**lookup**) — each with its own delete lifecycle, plus dimension fan-out for
 out-of-order dimensions. The full reference, with rule semantics and worked
 examples, is in **[docs/read-models.md](docs/read-models.md)**.

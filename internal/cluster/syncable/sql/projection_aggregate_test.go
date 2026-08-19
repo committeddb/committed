@@ -463,3 +463,112 @@ func TestProjectionCommitErrorRedacted(t *testing.T) {
 	require.NotContains(t, red.RedactedMessage(), childKey, "redacted message must not echo the bound key")
 	require.Contains(t, err.Error(), childKey)
 }
+
+// Scalar aggregate columns ride the same materialize/rebuild statements as
+// the array column, with one extra parent-key bind per scalar. This pins the
+// spec-driven bind plumbing end to end: a child upsert re-materializes with
+// parentBinds repeats, and a child delete rebuilds with the same count.
+func TestProjectionAggregateScalars(t *testing.T) {
+	config := &sql.ProjectionConfig{
+		Table:      "jobs",
+		PrimaryKey: []string{"job_id"},
+		Columns: []sql.ProjectionColumn{
+			{Name: "job_id", SQLType: "VARCHAR(16)"},
+			{Name: "visits", SQLType: "JSONB"},
+			{Name: "visit_count", SQLType: "INT"},
+			{Name: "hours_sum", SQLType: "DECIMAL(12,2)"},
+		},
+		Sources: []sql.ProjectionSource{{
+			Topic:    "visit",
+			KeyPath:  []string{"$.job_id"},
+			OnDelete: "remove-from-aggregate",
+			Aggregate: &sql.ProjectionAggregate{
+				Column:     "visits",
+				ElementKey: "$.id",
+				Element:    []sql.ProjectionElementField{{Field: "hours", From: "$.hours"}},
+				Scalars: []sql.ProjectionScalar{
+					{Column: "visit_count", Fn: "count"},
+					{Column: "hours_sum", Fn: "sum", Of: "hours"},
+				},
+			},
+		}},
+	}
+
+	dialect, mock, err := testdialects.NewSQLMockDialect()
+	require.NoError(t, err)
+	db, err := sql.NewDB(dialect, "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	ddlConfig := &sql.Config{
+		Table:      "jobs",
+		PrimaryKey: []string{"job_id"},
+		Mappings: []sql.Mapping{
+			{Column: "job_id", SQLType: "VARCHAR(16)"},
+			{Column: "visits", SQLType: "JSONB"},
+			{Column: "visit_count", SQLType: "INT"},
+			{Column: "hours_sum", SQLType: "DECIMAL(12,2)"},
+		},
+	}
+	spec := sql.AggregateSpec{
+		Table: "jobs", PrimaryKey: "job_id", Column: "visits", Sidecar: "jobs__visits",
+		Scalars: []sql.AggregateScalar{
+			{Column: "visit_count", Fn: "count"},
+			{Column: "hours_sum", Fn: "sum", Of: "hours"},
+		},
+	}
+	scConfig := &sql.Config{
+		Table:      "jobs__visits",
+		PrimaryKey: []string{sql.SidecarChildKey},
+		Mappings: []sql.Mapping{
+			{Column: sql.SidecarChildKey},
+			{Column: sql.SidecarParentKey},
+			{Column: sql.SidecarElementKey},
+			{Column: sql.SidecarElement},
+		},
+	}
+
+	mock.ExpectExec(dialect.CreateDDL(ddlConfig)).WillReturnResult(driver.ResultNoRows)
+	mock.ExpectExec(dialect.CreateAggregateSidecarDDL(spec)).WillReturnResult(driver.ResultNoRows)
+	p := aggregatePrepares{
+		upsertSidecar: mock.ExpectPrepare(dialect.CreateSQL(scConfig)),
+		deleteSidecar: mock.ExpectPrepare(dialect.CreateDeleteSQL(scConfig)),
+		lookup:        mock.ExpectPrepare(dialect.CreateAggregateParentLookupSQL(spec)),
+		materialize:   mock.ExpectPrepare(dialect.CreateAggregateMaterializeSQL(spec)),
+		rebuild:       mock.ExpectPrepare(dialect.CreateAggregateRebuildSQL(spec)),
+	}
+	mock.ExpectPrepare(dialect.CreateDeleteSQL(ddlConfig))
+
+	projection := sql.NewProjection(db, config, nil, "jobs")
+	require.NoError(t, projection.Init())
+
+	// Upsert: array + 2 scalars + inserted key = 4 parent-key binds.
+	sidecarArgs := []driver.Value{"v1", "j1", "v1", `{"hours":2.5}`}
+	sidecarArgs = append(sidecarArgs, sidecarArgs...)
+	mock.ExpectBegin()
+	p.lookup.ExpectQuery().WithArgs("v1").
+		WillReturnRows(sqlmock.NewRows([]string{"parent_key"}))
+	p.upsertSidecar.ExpectExec().WithArgs(sidecarArgs...).WillReturnResult(sqlmock.NewResult(0, 1))
+	p.materialize.ExpectExec().WithArgs("j1", "j1", "j1", "j1").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	visitType := &cluster.Type{ID: "visit", Name: "Visit"}
+	_, err = projection.Sync(context.Background(), &cluster.Actual{Entities: []*cluster.Entity{
+		cluster.NewUpsertEntity(visitType, []byte("v1"), []byte(`{"job_id":"j1","id":"v1","hours":2.5}`)),
+	}})
+	require.NoError(t, err)
+
+	// Delete: rebuild carries the same 4 parent-key binds.
+	mock.ExpectBegin()
+	p.lookup.ExpectQuery().WithArgs("v1").
+		WillReturnRows(sqlmock.NewRows([]string{"parent_key"}).AddRow("j1"))
+	p.deleteSidecar.ExpectExec().WithArgs("v1").WillReturnResult(sqlmock.NewResult(0, 1))
+	p.rebuild.ExpectExec().WithArgs("j1", "j1", "j1", "j1").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	_, err = projection.Sync(context.Background(), &cluster.Actual{Entities: []*cluster.Entity{
+		cluster.NewDeleteEntity(visitType, []byte("v1")),
+	}})
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
