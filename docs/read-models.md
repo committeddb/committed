@@ -448,6 +448,12 @@ set = [ { column = "total", from = "$.total" },
   `where` clause. Dimension changes refold dependents (reverse-index
   fan-out); a late dimension heals; a flipped predicate or a dimension
   delete retracts dependents.
+- **`reduce = "liveSet"` is created-minus-deleted**: a key is live while
+  it has qualifying inputs and ZERO inputs matching `deleteWhen` — a set
+  difference, no ordering involved, so a delete-shaped event retracts
+  regardless of arrival position (it is retained as negative evidence
+  even past the `when` filter), and retracting the delete event itself
+  un-deletes the key.
 - **Joins can address a PRIOR stage** (`from = "<stage>"` on a join):
   its outputs are the dimension rows, maintained live by the drain — so
   cross-stage correlation is a join, not a second input; heal, flip,

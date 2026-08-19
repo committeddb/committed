@@ -677,3 +677,68 @@ func TestStageJoinOnStage(t *testing.T) {
 	del("payments", "m2")
 	require.Empty(t, get())
 }
+
+// reduce = "liveSet": created-minus-deleted as a set difference (S3's
+// txn-live shape). A delete-shaped event retracts its key — even though
+// the stage's when would exclude it, it is retained as NEGATIVE evidence
+// — and retracting the delete event itself un-deletes the key.
+func TestStageLiveSet(t *testing.T) {
+	stages := []ProjectionStage{
+		{
+			Name: "txn-live", From: "txn-events", KeyPath: []string{"$.txn"},
+			When:       []WhenClause{{Path: "$.type", Equals: "created"}},
+			Reduce:     "liveSet",
+			DeleteWhen: []WhenClause{{Path: "$.type", Equals: "deleted"}},
+			Emit:       []StageEmit{{Field: "job", From: "$.job"}},
+		},
+	}
+	cfg := stageConfig(stages...)
+	require.NoError(t, validateProjectionStageShapes(cfg))
+	g := buildStageGraph(cfg.Stages)
+	store := stageStoreForTest(t)
+
+	fold := func(key, payload string) {
+		require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+			return g.FoldTopicUpsertNow(tx, "txn-events", []byte(key), decodePayload(t, payload))
+		}))
+	}
+	get := func(key string) string {
+		var got string
+		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
+			v, err := tx.GetOut("txn-live", []byte(key))
+			got = string(v)
+			return err
+		}))
+		return got
+	}
+
+	// Created → live, emitting from the create event.
+	fold("e1", `{"txn":"t1","type":"created","job":"j1"}`)
+	require.Equal(t, `{"job":"j1"}`, get("t1"))
+
+	// A foreign-shaped event (matches neither when nor deleteWhen) is
+	// simply not membership — the key stays as it was.
+	fold("e2", `{"txn":"t1","type":"annotated"}`)
+	require.Equal(t, `{"job":"j1"}`, get("t1"))
+
+	// The delete-shaped event retracts the key — set difference, not
+	// ordering: it wins regardless of arrival position.
+	fold("e3", `{"txn":"t1","type":"deleted"}`)
+	require.Empty(t, get("t1"))
+
+	// A re-created event does NOT resurrect while the delete evidence
+	// stands (created minus deleted is empty).
+	fold("e4", `{"txn":"t1","type":"created","job":"j1"}`)
+	require.Empty(t, get("t1"))
+
+	// Retracting the delete event itself (e.g. an RTBF or correction on
+	// the events topic) un-deletes: the surviving creates win again.
+	require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+		return g.FoldTopicDeleteNow(tx, "txn-events", []byte("e3"))
+	}))
+	require.Equal(t, `{"job":"j1"}`, get("t1"))
+
+	// An unrelated txn is untouched throughout.
+	fold("e9", `{"txn":"t2","type":"created","job":"j2"}`)
+	require.Equal(t, `{"job":"j2"}`, get("t2"))
+}

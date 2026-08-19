@@ -315,7 +315,8 @@ func (g *stageGraph) foldFan(tx *stagestore.Tx, n *stageNode, parentKey []byte, 
 // fanned element with its parent in scope) in a stage's retained set.
 func (g *stageGraph) foldOneInput(tx *stagestore.Tx, n *stageNode, inKey []byte, data, parent any, gen uint64, dirty dirtySet) error {
 	st := n.def
-	if !matchWhen(st.When, data) {
+	deleteShaped := st.Reduce == "liveSet" && matchWhen(st.DeleteWhen, data)
+	if !deleteShaped && !matchWhen(st.When, data) {
 		return g.foldDeleteInput(tx, n, inKey, dirty)
 	}
 
@@ -518,6 +519,9 @@ func refoldOutput(tx *stagestore.Tx, st *ProjectionStage, outKey []byte) (out []
 	if st.Reduce == "latest" {
 		return refoldLatest(tx, st, outKey)
 	}
+	if st.Reduce == "liveSet" {
+		return refoldLiveSet(tx, st, outKey)
+	}
 	// Reshape: one output object per key — deterministically the emitted
 	// object of the bytewise-LARGEST input identity (real reshape inputs
 	// are 1:1 with keys; the tiebreak only decides pathological
@@ -597,6 +601,41 @@ func emitReshape(st *ProjectionStage, obj, parent any) ([]byte, bool, error) {
 	}
 	bs, err := marshalStageObject(emitted)
 	return bs, true, err
+}
+
+// refoldLiveSet recomputes a created-minus-deleted key: LIVE iff at
+// least one qualifying non-delete input and ZERO delete-shaped inputs —
+// a set difference, so no ordering is needed and retracting the delete
+// event itself un-deletes the key. The live key emits from its
+// bytewise-largest non-delete input, like a reshape.
+func refoldLiveSet(tx *stagestore.Tx, st *ProjectionStage, outKey []byte) ([]byte, bool, error) {
+	type scoped struct{ data, parent any }
+	var winner *scoped
+	dead := false
+	err := tx.InputsFor(st.Name, outKey, func(_, val []byte) error {
+		if dead {
+			return nil
+		}
+		_, payload := decodeRetained(val)
+		data, parent, err := unpackStageInput(st, payload)
+		if err != nil {
+			return err
+		}
+		if matchWhen(st.DeleteWhen, data) {
+			dead = true
+			winner = nil
+			return nil
+		}
+		if ok, err := inputQualifies(tx, st, data, parent); err != nil || !ok {
+			return err
+		}
+		winner = &scoped{data, parent}
+		return nil
+	})
+	if err != nil || dead || winner == nil {
+		return nil, false, err
+	}
+	return emitReshape(st, winner.data, winner.parent)
 }
 
 // refoldLatest recomputes an argmax key: the winner is the retained input

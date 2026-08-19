@@ -189,6 +189,7 @@ type rawProjectionStage struct {
 	From        string      `mapstructure:"from"`
 	KeyPath     any         `mapstructure:"keyPath"`
 	When        any         `mapstructure:"when"`
+	DeleteWhen  any         `mapstructure:"deleteWhen"`
 	Reduce      string      `mapstructure:"reduce"`
 	OrderBy     string      `mapstructure:"orderBy"`
 	OrderByType string      `mapstructure:"orderByType"`
@@ -215,11 +216,16 @@ func parseProjectionStages(v *cluster.ParsedConfig, storage cluster.DatabaseStor
 		if err != nil {
 			return nil, fmt.Errorf("stage %d (%q): when: %w", i+1, rs.Name, err)
 		}
+		deleteWhen, err := normalizeWhen(rs.DeleteWhen, storage, rs.From)
+		if err != nil {
+			return nil, fmt.Errorf("stage %d (%q): deleteWhen: %w", i+1, rs.Name, err)
+		}
 		stages = append(stages, ProjectionStage{
 			Name:        rs.Name,
 			From:        rs.From,
 			KeyPath:     pathOrList(rs.KeyPath),
 			When:        when,
+			DeleteWhen:  deleteWhen,
 			Reduce:      strings.ToLower(rs.Reduce),
 			OrderBy:     rs.OrderBy,
 			OrderByType: strings.ToLower(rs.OrderByType),

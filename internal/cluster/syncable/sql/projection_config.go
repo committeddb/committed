@@ -280,6 +280,14 @@ type ProjectionStage struct {
 	// tombstone retracts them all). Elements feed the stage's reduce like
 	// any input, so forEach + aggregate is fan-then-fold in one stage.
 	ForEach string
+	// DeleteWhen (reduce = "liveSet" only) classifies delete-shaped
+	// events: a key is LIVE while it has qualifying inputs and ZERO
+	// inputs matching DeleteWhen — created-minus-deleted as a set
+	// difference, no ordering needed. A delete-shaped event is retained
+	// as NEGATIVE evidence (it skips the when filter), so its own
+	// retraction un-deletes the key. The live key emits from its
+	// bytewise-largest non-delete input, like a reshape.
+	DeleteWhen []WhenClause
 	// ElementKey is a fanned element's IDENTITY (element-scoped path) when
 	// it differs from keyPath — the aggregate sidecar's ElementKey
 	// precedent. keyPath is the REDUCE key (which output an element folds
@@ -1179,8 +1187,23 @@ func validateProjectionStageShapes(c *ProjectionConfig) error {
 		if err := validateWhenClauses(st.When, where); err != nil {
 			return err
 		}
+		if len(st.DeleteWhen) > 0 {
+			if st.Reduce != "liveSet" {
+				return fmt.Errorf("%s: deleteWhen is only for reduce = \"liveSet\"", where)
+			}
+			if err := validateWhenClauses(st.DeleteWhen, where+" deleteWhen"); err != nil {
+				return err
+			}
+		}
 		switch st.Reduce {
 		case "", "aggregate":
+			if st.OrderBy != "" || st.TieBy != "" {
+				return fmt.Errorf("%s: orderBy/tieBy are only for reduce = \"latest\"", where)
+			}
+		case "liveSet":
+			if len(st.DeleteWhen) == 0 {
+				return fmt.Errorf("%s: reduce = \"liveSet\" needs deleteWhen — the clauses that mark an event delete-shaped", where)
+			}
 			if st.OrderBy != "" || st.TieBy != "" {
 				return fmt.Errorf("%s: orderBy/tieBy are only for reduce = \"latest\"", where)
 			}
@@ -1273,7 +1296,7 @@ func validateProjectionStageShapes(c *ProjectionConfig) error {
 					plain++
 				}
 			}
-			if st.Reduce == "aggregate" {
+			if st.Reduce == "aggregate" { //nolint:gocritic // if-else reads clearer than switch here
 				if folds != 1 || plain != 0 {
 					return fmt.Errorf("%s: an aggregate stage's emit carries exactly one of sum, min, max, or count", ew)
 				}
