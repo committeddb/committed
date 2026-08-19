@@ -435,6 +435,11 @@ set = [ { column = "total", from = "$.total" },
 - **Filtering is refold**: an input that stops matching a stage's `when`
   retracts from its key — predicate rows leave the read model when the
   predicate flips off, and re-enter when it flips back.
+- **`reduce = "latest"` is argmax by a business field** (`orderBy` — never
+  arrival order, so backfills converge with steady state), with `tieBy`
+  a MANDATORY deterministic tiebreak (`orderByType`/`tieByType` choose
+  numeric vs lexical; text default). `when` filters before the argmax,
+  and a retracted winner promotes the runner-up from the retained set.
 - **Stage-fed sources key rows by the stage's key** (no keyPath
   resolution — an aggregate's emit carries folds, never its key); a
   stage retraction deletes the row (`onDelete = "delete-row"`, default)

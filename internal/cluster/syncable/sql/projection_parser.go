@@ -185,12 +185,16 @@ var projectionSectionKeys = map[string]bool{
 // block. keyPath and when decode as any for the same scalar-or-list /
 // shorthand-or-clauses reasons the source shapes do.
 type rawProjectionStage struct {
-	Name    string      `mapstructure:"name"`
-	From    string      `mapstructure:"from"`
-	KeyPath any         `mapstructure:"keyPath"`
-	When    any         `mapstructure:"when"`
-	Reduce  string      `mapstructure:"reduce"`
-	Emit    []StageEmit `mapstructure:"emit"`
+	Name        string      `mapstructure:"name"`
+	From        string      `mapstructure:"from"`
+	KeyPath     any         `mapstructure:"keyPath"`
+	When        any         `mapstructure:"when"`
+	Reduce      string      `mapstructure:"reduce"`
+	OrderBy     string      `mapstructure:"orderBy"`
+	OrderByType string      `mapstructure:"orderByType"`
+	TieBy       string      `mapstructure:"tieBy"`
+	TieByType   string      `mapstructure:"tieByType"`
+	Emit        []StageEmit `mapstructure:"emit"`
 }
 
 // parseProjectionStages decodes the [[{section}.stage]] blocks.
@@ -209,12 +213,16 @@ func parseProjectionStages(v *cluster.ParsedConfig, storage cluster.DatabaseStor
 			return nil, fmt.Errorf("stage %d (%q): when: %w", i+1, rs.Name, err)
 		}
 		stages = append(stages, ProjectionStage{
-			Name:    rs.Name,
-			From:    rs.From,
-			KeyPath: pathOrList(rs.KeyPath),
-			When:    when,
-			Reduce:  strings.ToLower(rs.Reduce),
-			Emit:    rs.Emit,
+			Name:        rs.Name,
+			From:        rs.From,
+			KeyPath:     pathOrList(rs.KeyPath),
+			When:        when,
+			Reduce:      strings.ToLower(rs.Reduce),
+			OrderBy:     rs.OrderBy,
+			OrderByType: strings.ToLower(rs.OrderByType),
+			TieBy:       rs.TieBy,
+			TieByType:   strings.ToLower(rs.TieByType),
+			Emit:        rs.Emit,
 		})
 	}
 	return stages, nil

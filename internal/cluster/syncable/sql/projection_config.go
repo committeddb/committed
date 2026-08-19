@@ -256,8 +256,22 @@ type ProjectionStage struct {
 	From    string
 	KeyPath []string
 	When    []WhenClause
-	Reduce  string // "" (reshape: one input object → one output object) or "aggregate"
-	Emit    []StageEmit
+	// Reduce: "" (reshape: one input object → one output object),
+	// "aggregate" (fold arms over the key's retained inputs), or "latest"
+	// (argmax: the key's output is the emit of the WINNING input by
+	// OrderBy — a business field, never arrival order — with TieBy the
+	// MANDATORY deterministic tiebreak; the field measured ties diverging
+	// 37/276,286 without one). OrderByType/TieByType choose numeric vs
+	// lexical comparison (text default — ISO dates order correctly as
+	// text). The stage's `when` filters BEFORE the argmax by
+	// construction (an unmatched input retracts from the retained set),
+	// so an unapproved newer input never shadows an approved older one.
+	Reduce      string
+	OrderBy     string
+	OrderByType string
+	TieBy       string
+	TieByType   string
+	Emit        []StageEmit
 }
 
 // StageEmit is one field of a stage's emitted object. A reshape stage's
@@ -1124,8 +1138,30 @@ func validateProjectionStageShapes(c *ProjectionConfig) error {
 		}
 		switch st.Reduce {
 		case "", "aggregate":
+			if st.OrderBy != "" || st.TieBy != "" {
+				return fmt.Errorf("%s: orderBy/tieBy are only for reduce = \"latest\"", where)
+			}
+		case "latest":
+			if st.OrderBy == "" {
+				return fmt.Errorf("%s: reduce = \"latest\" needs orderBy — a BUSINESS field; arrival order diverges under backfill", where)
+			}
+			if st.TieBy == "" {
+				return fmt.Errorf("%s: reduce = \"latest\" needs tieBy — ties are real in the field (37 of 276,286 measured) and an unbroken tie folds nondeterministically; an id column is the usual choice", where)
+			}
+			for _, p := range []string{st.OrderBy, st.TieBy} {
+				if err := rejectMultiValued(p, where); err != nil {
+					return err
+				}
+			}
+			for _, ot := range []string{st.OrderByType, st.TieByType} {
+				switch ot {
+				case "", elementKeyTypeText, elementKeyTypeNumber:
+				default:
+					return fmt.Errorf("%s: orderByType/tieByType %q is invalid (want %q or %q)", where, ot, elementKeyTypeText, elementKeyTypeNumber)
+				}
+			}
 		default:
-			return fmt.Errorf("%s: reduce %q is invalid (want \"aggregate\" or omit for a reshape stage)", where, st.Reduce)
+			return fmt.Errorf("%s: reduce %q is invalid (want \"latest\", \"aggregate\", or omit for a reshape stage)", where, st.Reduce)
 		}
 		if len(st.Emit) == 0 {
 			return fmt.Errorf("%s: emit needs at least one field", where)

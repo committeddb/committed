@@ -201,6 +201,9 @@ func refoldOutput(tx *stagestore.Tx, st *ProjectionStage, outKey []byte) (out []
 	if st.Reduce == "aggregate" {
 		return refoldAggregate(tx, st, outKey)
 	}
+	if st.Reduce == "latest" {
+		return refoldLatest(tx, st, outKey)
+	}
 	// Reshape: one output object per key — deterministically the emitted
 	// object of the bytewise-LARGEST input identity (real reshape inputs
 	// are 1:1 with keys; the tiebreak only decides pathological
@@ -217,7 +220,14 @@ func refoldOutput(tx *stagestore.Tx, st *ProjectionStage, outKey []byte) (out []
 	if err != nil {
 		return nil, false, err
 	}
+	return emitReshape(st, obj)
+}
+
+// emitReshape renders a stage's emit fields from one input object — the
+// reshape path, and the winner path of reduce = "latest".
+func emitReshape(st *ProjectionStage, obj any) ([]byte, bool, error) {
 	emitted := make(map[string]any, len(st.Emit))
+	var err error
 	for i := range st.Emit {
 		e := &st.Emit[i]
 		var v any
@@ -237,6 +247,108 @@ func refoldOutput(tx *stagestore.Tx, st *ProjectionStage, outKey []byte) (out []
 	}
 	bs, err := marshalStageObject(emitted)
 	return bs, true, err
+}
+
+// refoldLatest recomputes an argmax key: the winner is the retained input
+// with the greatest OrderBy value — a BUSINESS field, never arrival order,
+// so backfills in keyset order and steady-state in log order converge —
+// with TieBy the mandatory deterministic tiebreak. The stage's `when`
+// filtered inputs before they were retained, so the argmax runs over the
+// qualifying set only (an unapproved newer input never shadows an
+// approved older one). The winner's object then emits like a reshape.
+func refoldLatest(tx *stagestore.Tx, st *ProjectionStage, outKey []byte) ([]byte, bool, error) {
+	type ranked struct {
+		order, tie any
+		obj        any
+	}
+	var winner *ranked
+	err := tx.InputsFor(st.Name, outKey, func(_, val []byte) error {
+		obj, err := decodeStageObject(val)
+		if err != nil {
+			return err
+		}
+		ov, _ := resolveScopedPath(st.OrderBy, obj, nil)
+		tv, _ := resolveScopedPath(st.TieBy, obj, nil)
+		cand := &ranked{order: ov, tie: tv, obj: obj}
+		if winner == nil {
+			winner = cand
+			return nil
+		}
+		if c := compareStageValues(cand.order, winner.order, st.OrderByType == elementKeyTypeNumber); c > 0 {
+			winner = cand
+		} else if c == 0 {
+			if compareStageValues(cand.tie, winner.tie, st.TieByType == elementKeyTypeNumber) > 0 {
+				winner = cand
+			}
+		}
+		return nil
+	})
+	if err != nil || winner == nil {
+		return nil, false, err
+	}
+	return emitReshape(st, winner.obj)
+}
+
+// compareStageValues orders two payload values for argmax: nulls sort
+// lowest (a missing business timestamp never wins), then numeric or
+// lexical per the declared type. In the numeric mode an unparsable value
+// ranks with the nulls — below every real number, deterministically.
+func compareStageValues(a, b any, numeric bool) int {
+	ar, aOK := stageComparable(a, numeric)
+	br, bOK := stageComparable(b, numeric)
+	if !aOK || !bOK {
+		switch {
+		case aOK:
+			return 1
+		case bOK:
+			return -1
+		default:
+			return 0
+		}
+	}
+	if numeric {
+		return ar.(*big.Rat).Cmp(br.(*big.Rat))
+	}
+	as, bs := ar.(string), br.(string)
+	switch {
+	case as < bs:
+		return -1
+	case as > bs:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func stageComparable(v any, numeric bool) (any, bool) {
+	if v == nil {
+		return nil, false
+	}
+	if numeric {
+		switch t := v.(type) {
+		case json.Number:
+			if r, ok := new(big.Rat).SetString(string(t)); ok {
+				return r, true
+			}
+		case string:
+			if r, ok := new(big.Rat).SetString(t); ok {
+				return r, true
+			}
+		}
+		return nil, false
+	}
+	switch t := v.(type) {
+	case string:
+		return t, true
+	case json.Number:
+		return string(t), true
+	case bool:
+		if t {
+			return "true", true
+		}
+		return "false", true
+	}
+	return nil, false
 }
 
 // refoldAggregate recomputes an aggregate key: every fold arm evaluates

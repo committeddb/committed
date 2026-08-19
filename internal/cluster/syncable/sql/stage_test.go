@@ -299,3 +299,94 @@ func TestStageEditTripsShapeFingerprint(t *testing.T) {
 }
 
 func projectionShape(c *ProjectionConfig) string { return c.projectionShapeFingerprint() }
+
+// reduce = "latest": argmax by BUSINESS field, not arrival order — the
+// field-measured divergence class (37/276,286 under keyset backfill).
+// Ties break deterministically by tieBy; the winner's retraction promotes
+// the runner-up (the payoff of retaining inputs — no O(1) winner mode);
+// `when` filters BEFORE the argmax.
+func TestStageLatestArgmax(t *testing.T) {
+	stages := []ProjectionStage{
+		{
+			Name: "vws", From: "statuses", KeyPath: []string{"$.visit"},
+			When:   []WhenClause{{Path: "$.approved", Equals: true}},
+			Reduce: "latest", OrderBy: "$.ts", TieBy: "$.id", TieByType: "number",
+			Emit: []StageEmit{{Field: "status", From: "$.status"}},
+		},
+	}
+	cfg := stageConfig(stages...)
+	require.NoError(t, validateProjectionStageShapes(cfg))
+	g := buildStageGraph(cfg.Stages)
+	store := stageStoreForTest(t)
+
+	up := func(id, payload string) {
+		require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+			return g.FoldTopicUpsert(tx, "statuses", []byte(id), decodePayload(t, payload))
+		}))
+	}
+	del := func(id string) {
+		require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+			return g.FoldTopicDelete(tx, "statuses", []byte(id))
+		}))
+	}
+	get := func() string {
+		var got string
+		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
+			v, err := tx.GetOut("vws", []byte("v1"))
+			got = string(v)
+			return err
+		}))
+		return got
+	}
+
+	// Arrival order is newest-first; the argmax still picks by $.ts.
+	up("e2", `{"visit":"v1","ts":"2026-08-10","id":2,"status":"done","approved":true}`)
+	up("e1", `{"visit":"v1","ts":"2026-08-03","id":1,"status":"scheduled","approved":true}`)
+	require.Equal(t, `{"status":"done"}`, get(), "business field wins, not arrival order")
+
+	// An UNAPPROVED newer event must not shadow the approved older one.
+	up("e3", `{"visit":"v1","ts":"2026-08-15","id":3,"status":"cancelled","approved":false}`)
+	require.Equal(t, `{"status":"done"}`, get(), "when filters BEFORE the argmax")
+
+	// A tie on ts breaks by numeric id — 10 beats 2 numerically (and the
+	// entity key "z10" scans AFTER "e2", so first-scanned-wins would keep
+	// e2: the tiebreak is load-bearing here, not iteration order).
+	up("z10", `{"visit":"v1","ts":"2026-08-10","id":10,"status":"revised","approved":true}`)
+	require.Equal(t, `{"status":"revised"}`, get(), "ties break by tieBy, numerically")
+
+	// Winner retraction promotes the runner-up from the retained set.
+	del("z10")
+	require.Equal(t, `{"status":"done"}`, get())
+	del("e2")
+	require.Equal(t, `{"status":"scheduled"}`, get(), "the runner-up's runner-up")
+	del("e1")
+	require.Empty(t, get(), "no qualifying inputs — the key retracts")
+}
+
+// latest shape rules: orderBy and tieBy are mandatory, and reserved to
+// the latest reduce.
+func TestStageLatestValidation(t *testing.T) {
+	base := func() ProjectionStage {
+		return ProjectionStage{
+			Name: "s", From: "t", KeyPath: []string{"$.k"},
+			Reduce: "latest", OrderBy: "$.ts", TieBy: "$.id",
+			Emit: []StageEmit{{Field: "f", From: "$.x"}},
+		}
+	}
+	ok := base()
+	require.NoError(t, validateProjectionStageShapes(stageConfig(ok)))
+
+	noTie := base()
+	noTie.TieBy = ""
+	err := validateProjectionStageShapes(stageConfig(noTie))
+	require.ErrorContains(t, err, "tieBy")
+	require.ErrorContains(t, err, "37 of 276,286")
+
+	noOrder := base()
+	noOrder.OrderBy = ""
+	require.ErrorContains(t, validateProjectionStageShapes(stageConfig(noOrder)), "orderBy")
+
+	strayOrder := base()
+	strayOrder.Reduce = ""
+	require.ErrorContains(t, validateProjectionStageShapes(stageConfig(strayOrder)), `only for reduce = "latest"`)
+}
