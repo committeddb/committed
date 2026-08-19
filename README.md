@@ -337,9 +337,11 @@ several topics into one denormalized "BFF" row (a **spine** plus
 countDistinct over the child set), compute columns with exact-decimal
 expressions (**expr** — coalesce/nullif/round/trunc and arithmetic, no
 floats anywhere), and enrich folded elements from a dimension topic
-(**lookup**), and fan one event's array into N rows (**forEach**, with
-absolute reconciliation and cascading parent deletes) — each with its own
-delete lifecycle, plus dimension fan-out for out-of-order dimensions. The full reference, with rule semantics and worked
+(**lookup**), fan one event's array into N rows (**forEach**, with
+absolute reconciliation and cascading parent deletes), and chain internal
+**stages** — private keyed refolds (filter → aggregate → aggregate) a
+table source consumes by name, with retraction built in — each with its
+own delete lifecycle, plus dimension fan-out for out-of-order dimensions. The full reference, with rule semantics and worked
 examples, is in **[docs/read-models.md](docs/read-models.md)**.
 
 Configure an ingestable that pulls from an external source into the log (a

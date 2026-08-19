@@ -395,6 +395,56 @@ child change (never incremented, so redelivery and rebuild converge):
 SQL semantics apply at the empty set: `count` is 0, `sum`/`min`/`max` are
 NULL when no children qualify.
 
+## Staged computation (internal stages)
+
+Some read models are a *pipeline*: filter, then aggregate, then aggregate
+again. `[[projection.stage]]` blocks declare internal stages — private
+keyed refolds held in a node-local stage store, never topics, never sink
+writes (only the table is outward-facing) — and a table source consumes a
+stage with `from = "<stage name>"`:
+
+```toml
+[[projection.stage]]
+name    = "live"                    # private label; stages chain by name
+from    = "txns"                    # a topic — or a PRIOR stage's name
+keyPath = "$.id"
+emit    = [ { field = "job", from = "$.jobId" },
+            { field = "amt", from = "$.amount" } ]
+
+[[projection.stage]]
+name    = "by-job"
+from    = "live"                    # chained: consumes the stage above
+keyPath = "$.job"
+reduce  = "aggregate"
+emit    = [ { field = "total", sum = "$.amt" },
+            { field = "n",     count = true } ]
+
+[[projection.source]]
+from    = "by-job"                  # a stage-fed table source
+[[projection.source.rules]]
+set = [ { column = "total", from = "$.total" },
+        { column = "n",     from = "$.n" } ]
+```
+
+- **Every stage is a keyed refold**: an input lands in its key's retained
+  set and the key recomputes from that set — never delta arithmetic — so
+  redelivery, rekeying, and replay converge to identical bytes.
+  Aggregate folds (`sum`/`min`/`max` are closed-language expressions,
+  plus `count`) recompute over exact decimals with SQL semantics (null
+  operands skip; an emptied key retracts entirely, cascading).
+- **Filtering is refold**: an input that stops matching a stage's `when`
+  retracts from its key — predicate rows leave the read model when the
+  predicate flips off, and re-enter when it flips back.
+- **Stage-fed sources key rows by the stage's key** (no keyPath
+  resolution — an aggregate's emit carries folds, never its key); a
+  stage retraction deletes the row (`onDelete = "delete-row"`, default)
+  or is dropped (`ignore`).
+- Stage state lives in one bbolt file per syncable under
+  `<dataDir>/projections/` — derived, node-local, rebuildable from the
+  log. **Editing stage definitions requires a rebuild** (the
+  config-change guard enforces it): changed stages must re-derive from
+  index 0, exactly like a changed table schema.
+
 ## Fanning one event into N rows (forEach)
 
 Some events *contain* the rows you want: a transaction event whose

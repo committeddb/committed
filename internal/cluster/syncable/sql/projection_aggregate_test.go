@@ -753,7 +753,7 @@ func TestProjectionStagesToTable(t *testing.T) {
 	rowDelete := mock.ExpectPrepare(dialect.CreateDeleteSQL(ddlConfig))
 
 	p := sql.NewProjection(db, config, nil, "job_totals")
-	sql.SetStoreDirForTest(p, t.TempDir())
+	p.SetStoreDir(t.TempDir())
 	require.NoError(t, p.Init())
 	t.Cleanup(func() { _ = p.Close() })
 

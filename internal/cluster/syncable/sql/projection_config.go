@@ -400,7 +400,17 @@ func (c *ProjectionConfig) projectionShapeFingerprint() string {
 	sort.Strings(aggs)
 	sort.Strings(lookups)
 	sort.Strings(spines)
-	return strings.Join(aggs, ";") + "|" + strings.Join(lookups, ";") + "|" + strings.Join(spines, ";")
+	shape := strings.Join(aggs, ";") + "|" + strings.Join(lookups, ";") + "|" + strings.Join(spines, ";")
+	// Stage definitions are value-shape too — and more: editing them RESETS
+	// the stage store (the fingerprint mismatch), and a reset store folding
+	// forward from a head checkpoint would silently serve partial state for
+	// every quiet key. Folding the stage fingerprint into the shape makes a
+	// stage edit trip the same rebuild-required gate, pairing every store
+	// reset with a replay from index 0.
+	if len(c.Stages) > 0 {
+		shape += "|stages:" + stageFingerprint(c)
+	}
+	return shape
 }
 
 // fingerprintFields canonicalizes a set of element/dimension fields (order-

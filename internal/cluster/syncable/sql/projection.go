@@ -211,6 +211,11 @@ func NewProjection(d *DB, config *ProjectionConfig, m *metrics.Metrics, name str
 	return &Projection{db: d.DB, config: config, dialect: d.dialect, metrics: m, name: name}
 }
 
+// SetStoreDir sets the node's stage-store directory — threaded by the
+// parser in production; direct constructors (tests, embedders) set it
+// before Init when their config declares stages.
+func (p *Projection) SetStoreDir(dir string) { p.storeDir = dir }
+
 // projectionIdentity is the SyncableIdentity of a projection config — its source
 // topics, database, and table. It makes the projection's checkpoint meaningful; a
 // re-POST that changes it re-points to a destination whose inherited checkpoint is

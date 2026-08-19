@@ -276,3 +276,26 @@ func TestStageWhenRetraction(t *testing.T) {
 	up(`{"id":"p1","status":"sold"}`)
 	require.Equal(t, `{"id":"p1"}`, get(), "and re-enters when it flips back")
 }
+
+// A stage-definition edit changes the projection's shape fingerprint, so
+// the config-change guard demands a rebuild — pairing the store reset the
+// edit causes with a replay from index 0 (a reset store folding forward
+// from a head checkpoint would silently serve partial state).
+func TestStageEditTripsShapeFingerprint(t *testing.T) {
+	a := stageConfig(ProjectionStage{
+		Name: "s", From: "t", KeyPath: []string{"$.id"},
+		Emit: []StageEmit{{Field: "f", From: "$.x"}},
+	})
+	b := stageConfig(ProjectionStage{
+		Name: "s", From: "t", KeyPath: []string{"$.id"},
+		Emit: []StageEmit{{Field: "f", From: "$.y"}},
+	})
+	require.NotEqual(t, projectionShape(a), projectionShape(b))
+
+	// And a stage-free config's shape is byte-identical to before the
+	// feature (no spurious rebuilds for existing projections).
+	c := stageConfig()
+	require.NotContains(t, projectionShape(c), "stages:")
+}
+
+func projectionShape(c *ProjectionConfig) string { return c.projectionShapeFingerprint() }

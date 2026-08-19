@@ -65,7 +65,7 @@ func (p *ProjectionSyncableParser) Parse(v *cluster.ParsedConfig, storage cluste
 	}
 
 	projection := NewProjection(db, config, p.Metrics, v.GetString("syncable.name"))
-	projection.storeDir = p.StoreDir
+	projection.SetStoreDir(p.StoreDir)
 	if err := projection.Init(); err != nil {
 		return nil, fmt.Errorf("[projection.parser] init: %w", err)
 	}

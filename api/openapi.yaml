@@ -579,7 +579,11 @@ paths:
         rows via `forEach` (rules apply per element, `$parent.` paths
         reach the enclosing event, re-emitted parents reconcile
         absolutely, and `onDelete = "delete-rows"` cascades a parent
-        tombstone), or a dimension table
+        tombstone), chains internal stages via `[[projection.stage]]`
+        (private keyed refolds — reshape or aggregate — consumed by a
+        stage-fed source's `from`; editing stage definitions requires a
+        rebuild, enforced by the config-change guard), or a dimension
+        table
         via a `lookup` block (whose fields aggregate elements resolve by
         an `on`/`select` join — enrichment), and several sources may
         share a topic, split by a per-source `when`; see README § SQL
