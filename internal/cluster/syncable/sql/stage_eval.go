@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"sort"
 
 	"github.com/committeddb/committed/internal/cluster/syncable/stagestore"
 )
@@ -48,6 +49,9 @@ type dimRef struct {
 type stageGraph struct {
 	byName  map[string]*stageNode
 	byTopic map[string][]*stageNode
+	// order is manifest order — the validated topology, and Drain's
+	// processing order: a stage's consumers always drain after it.
+	order []*stageNode
 	// dims routes topics consumed as JOIN DIMENSIONS: rows stored by
 	// entity key, dependents refolded on change (reverse-index fan-out).
 	dims map[string][]dimRef
@@ -66,6 +70,7 @@ func buildStageGraph(stages []ProjectionStage) *stageGraph {
 		nodes[i] = &stageNode{def: &stages[i]}
 		g.byName[stages[i].Name] = nodes[i]
 	}
+	g.order = nodes
 	for i := range stages {
 		if up, ok := g.byName[stages[i].From]; ok {
 			up.consumers = append(up.consumers, nodes[i])
@@ -86,11 +91,46 @@ func (g *stageGraph) ConsumesTopic(topic string) bool {
 	return len(g.byTopic[topic]) > 0 || len(g.dims[topic]) > 0
 }
 
+// dirtySet collects the keys each stage must refold — the set-at-a-time
+// half of the two execution modes: retention updates mark keys dirty,
+// and Drain refolds each dirty key ONCE per batch (the 87-minutes-vs-
+// 5-seconds field lesson), suppressing cascades whose output bytes did
+// not change (sound because folds are deterministic).
+type dirtySet map[*stageNode]map[string]bool
+
+func (d dirtySet) mark(n *stageNode, outKey []byte) {
+	m, ok := d[n]
+	if !ok {
+		m = map[string]bool{}
+		d[n] = m
+	}
+	m[string(outKey)] = true
+}
+
+// FoldTopicUpsertNow folds one entity and drains immediately — the
+// single-event convenience (tests; the projection batches per Actual).
+func (g *stageGraph) FoldTopicUpsertNow(tx *stagestore.Tx, topic string, inKey []byte, payload any) error {
+	dirty := dirtySet{}
+	if err := g.FoldTopicUpsert(tx, topic, inKey, payload, dirty); err != nil {
+		return err
+	}
+	return g.Drain(tx, dirty)
+}
+
+// FoldTopicDeleteNow is FoldTopicUpsertNow's tombstone twin.
+func (g *stageGraph) FoldTopicDeleteNow(tx *stagestore.Tx, topic string, inKey []byte) error {
+	dirty := dirtySet{}
+	if err := g.FoldTopicDelete(tx, topic, inKey, dirty); err != nil {
+		return err
+	}
+	return g.Drain(tx, dirty)
+}
+
 // FoldTopicUpsert routes one topic entity's upsert through every stage
 // consuming that topic (and their downstream chains).
-func (g *stageGraph) FoldTopicUpsert(tx *stagestore.Tx, topic string, inKey []byte, payload any) error {
+func (g *stageGraph) FoldTopicUpsert(tx *stagestore.Tx, topic string, inKey []byte, payload any, dirty dirtySet) error {
 	for _, n := range g.byTopic[topic] {
-		if err := g.foldUpsert(tx, n, inKey, payload); err != nil {
+		if err := g.foldUpsert(tx, n, inKey, payload, dirty); err != nil {
 			return err
 		}
 	}
@@ -102,7 +142,7 @@ func (g *stageGraph) FoldTopicUpsert(tx *stagestore.Tx, topic string, inKey []by
 		if err := tx.PutDim(d.node.def.Name, d.join.Topic, inKey, bs); err != nil {
 			return err
 		}
-		if err := g.refoldDimDependents(tx, d, inKey); err != nil {
+		if err := g.markDimDependents(tx, d, inKey, dirty); err != nil {
 			return err
 		}
 	}
@@ -110,9 +150,9 @@ func (g *stageGraph) FoldTopicUpsert(tx *stagestore.Tx, topic string, inKey []by
 }
 
 // FoldTopicDelete routes one topic tombstone (key only, no payload).
-func (g *stageGraph) FoldTopicDelete(tx *stagestore.Tx, topic string, inKey []byte) error {
+func (g *stageGraph) FoldTopicDelete(tx *stagestore.Tx, topic string, inKey []byte, dirty dirtySet) error {
 	for _, n := range g.byTopic[topic] {
-		if err := g.foldDelete(tx, n, inKey); err != nil {
+		if err := g.foldDelete(tx, n, inKey, dirty); err != nil {
 			return err
 		}
 	}
@@ -120,47 +160,39 @@ func (g *stageGraph) FoldTopicDelete(tx *stagestore.Tx, topic string, inKey []by
 		if err := tx.DeleteDim(d.node.def.Name, d.join.Topic, inKey); err != nil {
 			return err
 		}
-		if err := g.refoldDimDependents(tx, d, inKey); err != nil {
+		if err := g.markDimDependents(tx, d, inKey, dirty); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// refoldDimDependents refolds every key whose inputs reference this
-// dimension row (the fan-out). Reverse-index entries can be stale (an
-// input rekeyed or retracted since registering) — a stale entry's refold
-// is an idempotent no-op, never wrong output; a rebuild clears them.
-func (g *stageGraph) refoldDimDependents(tx *stagestore.Tx, d dimRef, dimKey []byte) error {
-	var outKeys [][]byte
-	if err := tx.DependentsOf(d.node.def.Name, d.join.Topic, dimKey, func(outKey []byte) error {
-		outKeys = append(outKeys, append([]byte(nil), outKey...))
+// markDimDependents marks every key whose inputs reference this
+// dimension row (the fan-out) for refold at Drain. Reverse-index entries
+// can be stale (an input rekeyed or retracted since registering) — a
+// stale entry's refold is an idempotent no-op, never wrong output; a
+// rebuild clears them.
+func (g *stageGraph) markDimDependents(tx *stagestore.Tx, d dimRef, dimKey []byte, dirty dirtySet) error {
+	return tx.DependentsOf(d.node.def.Name, d.join.Topic, dimKey, func(outKey []byte) error {
+		dirty.mark(d.node, outKey)
 		return nil
-	}); err != nil {
-		return err
-	}
-	for _, ok := range outKeys {
-		if err := g.refoldKey(tx, d.node, ok); err != nil {
-			return err
-		}
-	}
-	return nil
+	})
 }
 
 // foldUpsert lands one input in a stage: filter, key, retain, refold the
 // affected key(s), cascade the delta. An input that stops matching the
 // stage's when RETRACTS (filtering is refold, not skip).
-func (g *stageGraph) foldUpsert(tx *stagestore.Tx, n *stageNode, inKey []byte, payload any) error {
+func (g *stageGraph) foldUpsert(tx *stagestore.Tx, n *stageNode, inKey []byte, payload any, dirty dirtySet) error {
 	st := n.def
 	if !matchWhen(st.When, payload) {
-		return g.foldDelete(tx, n, inKey)
+		return g.foldDelete(tx, n, inKey, dirty)
 	}
 
 	kv, err := resolveScopedPath(st.KeyPath[0], payload, nil)
 	if err != nil || kv == nil {
 		// A matched input without a key cannot fold; treat as non-membership
 		// (and retract any prior membership) rather than erroring the topic.
-		return g.foldDelete(tx, n, inKey)
+		return g.foldDelete(tx, n, inKey, dirty)
 	}
 	outKey := []byte(keyString(coerceKeyScalar(kv)))
 
@@ -174,9 +206,7 @@ func (g *stageGraph) foldUpsert(tx *stagestore.Tx, n *stageNode, inKey []byte, p
 		if err := tx.DeleteIn(st.Name, prior, inKey); err != nil {
 			return err
 		}
-		if err := g.refoldKey(tx, n, prior); err != nil {
-			return err
-		}
+		dirty.mark(n, prior)
 	}
 
 	// Retain the input as the stage sees it (the refold working set).
@@ -198,12 +228,13 @@ func (g *stageGraph) foldUpsert(tx *stagestore.Tx, n *stageNode, inKey []byte, p
 			}
 		}
 	}
-	return g.refoldKey(tx, n, outKey)
+	dirty.mark(n, outKey)
+	return nil
 }
 
 // foldDelete retracts one input from a stage: the key it fed refolds
 // without it (possibly to deletion), and the delta cascades.
-func (g *stageGraph) foldDelete(tx *stagestore.Tx, n *stageNode, inKey []byte) error {
+func (g *stageGraph) foldDelete(tx *stagestore.Tx, n *stageNode, inKey []byte, dirty dirtySet) error {
 	st := n.def
 	outKey, err := tx.GetSrc(st.Name, inKey)
 	if err != nil || outKey == nil {
@@ -215,18 +246,54 @@ func (g *stageGraph) foldDelete(tx *stagestore.Tx, n *stageNode, inKey []byte) e
 	if err := tx.DeleteSrc(st.Name, inKey); err != nil {
 		return err
 	}
-	return g.refoldKey(tx, n, outKey)
+	dirty.mark(n, outKey)
+	return nil
+}
+
+// Drain refolds every dirty key exactly once, in stage topology order
+// (a stage's consumers drain after it — retention marks they receive
+// here are processed later in the same pass), in sorted key order for
+// determinism. A refold whose output bytes did not change is SUPPRESSED
+// — no store write, no delta, no cascade — which determinism makes
+// sound and which turns a batch touching one key N times into one
+// refold and at most one downstream write.
+func (g *stageGraph) Drain(tx *stagestore.Tx, dirty dirtySet) error {
+	for _, n := range g.order {
+		keys := dirty[n]
+		if len(keys) == 0 {
+			continue
+		}
+		sorted := make([]string, 0, len(keys))
+		for k := range keys {
+			sorted = append(sorted, k)
+		}
+		sort.Strings(sorted)
+		for _, k := range sorted {
+			if err := g.refoldKey(tx, n, []byte(k), dirty); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // refoldKey recomputes one key's output from its retained input set,
-// stores it, and cascades the delta (upsert or delete) to consumers.
-func (g *stageGraph) refoldKey(tx *stagestore.Tx, n *stageNode, outKey []byte) error {
+// stores it, and — when the bytes changed — cascades the delta (upsert
+// or retraction) to sinks and consumer retention.
+func (g *stageGraph) refoldKey(tx *stagestore.Tx, n *stageNode, outKey []byte, dirty dirtySet) error {
 	st := n.def
+	prior, err := tx.GetOut(st.Name, outKey)
+	if err != nil {
+		return err
+	}
 	out, live, err := refoldOutput(tx, st, outKey)
 	if err != nil {
 		return err
 	}
 	if !live {
+		if prior == nil {
+			return nil // was absent, still absent — nothing to say
+		}
 		if err := tx.DeleteOut(st.Name, outKey); err != nil {
 			return err
 		}
@@ -236,11 +303,14 @@ func (g *stageGraph) refoldKey(tx *stagestore.Tx, n *stageNode, outKey []byte) e
 			}
 		}
 		for _, c := range n.consumers {
-			if err := g.foldDelete(tx, c, outKey); err != nil {
+			if err := g.foldDelete(tx, c, outKey, dirty); err != nil {
 				return err
 			}
 		}
 		return nil
+	}
+	if prior != nil && bytes.Equal(prior, out) {
+		return nil // unchanged — suppressed (deterministic bytes make this sound)
 	}
 	if err := tx.PutOut(st.Name, outKey, out); err != nil {
 		return err
@@ -255,7 +325,7 @@ func (g *stageGraph) refoldKey(tx *stagestore.Tx, n *stageNode, outKey []byte) e
 		}
 	}
 	for _, c := range n.consumers {
-		if err := g.foldUpsert(tx, c, outKey, obj); err != nil {
+		if err := g.foldUpsert(tx, c, outKey, obj, dirty); err != nil {
 			return err
 		}
 	}

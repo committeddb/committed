@@ -1293,13 +1293,14 @@ func (p *Projection) foldStages(ctx context.Context, tx *gosql.Tx, a *cluster.Ac
 		}
 		defer func() { p.stages.onDelta = nil }()
 
+		dirty := dirtySet{}
 		for _, e := range a.Entities {
 			if !p.stages.ConsumesTopic(e.Type.ID) {
 				continue
 			}
 			switch e.Variant() {
 			case cluster.EntityVariantDelete:
-				if err := p.stages.FoldTopicDelete(stx, e.Type.ID, e.Key); err != nil {
+				if err := p.stages.FoldTopicDelete(stx, e.Type.ID, e.Key, dirty); err != nil {
 					return err
 				}
 			case cluster.EntityVariantRow:
@@ -1307,7 +1308,7 @@ func (p *Projection) foldStages(ctx context.Context, tx *gosql.Tx, a *cluster.Ac
 				if err != nil {
 					return cluster.Permanent(fmt.Errorf("[projection.stage] unmarshal entity data: %w", err))
 				}
-				if err := p.stages.FoldTopicUpsert(stx, e.Type.ID, e.Key, obj); err != nil {
+				if err := p.stages.FoldTopicUpsert(stx, e.Type.ID, e.Key, obj, dirty); err != nil {
 					return err
 				}
 			default:
@@ -1315,6 +1316,9 @@ func (p *Projection) foldStages(ctx context.Context, tx *gosql.Tx, a *cluster.Ac
 				// state are a later step; skipping is the no-op the projection
 				// already applies to markers.
 			}
+		}
+		if err := p.stages.Drain(stx, dirty); err != nil {
+			return err
 		}
 		return stx.SetFrontier(a.Index)
 	})

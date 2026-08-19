@@ -770,6 +770,13 @@ func TestProjectionStagesToTable(t *testing.T) {
 	mock.ExpectCommit()
 	sync(10, cluster.NewUpsertEntity(txnType, []byte("t1"), []byte(`{"id":"t1","jobId":"j1","amount":2.5}`)))
 
+	// The SAME entity redelivered: every refold lands on identical bytes,
+	// so the cascade suppresses — one Begin/Commit, ZERO table writes
+	// (determinism making redelivery free, not just safe).
+	mock.ExpectBegin()
+	mock.ExpectCommit()
+	sync(10, cluster.NewUpsertEntity(txnType, []byte("t1"), []byte(`{"id":"t1","jobId":"j1","amount":2.5}`)))
+
 	// Second txn, same job: the aggregate refolds — exact sum, count 2.
 	mock.ExpectBegin()
 	rulePrepare.ExpectExec().WithArgs(rowArgs("j1", "3.75", int64(2))...).WillReturnResult(sqlmock.NewResult(0, 1))

@@ -213,7 +213,7 @@ func TestStageEvaluatorChain(t *testing.T) {
 	}
 	upsert := func(key, payload string) {
 		require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
-			return g.FoldTopicUpsert(tx, "txns", []byte(key), decodePayload(t, payload))
+			return g.FoldTopicUpsertNow(tx, "txns", []byte(key), decodePayload(t, payload))
 		}))
 	}
 
@@ -232,7 +232,7 @@ func TestStageEvaluatorChain(t *testing.T) {
 
 	// Retraction: deleting t1 empties j1 → the aggregate key retracts.
 	require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
-		return g.FoldTopicDelete(tx, "txns", []byte("t1"))
+		return g.FoldTopicDeleteNow(tx, "txns", []byte("t1"))
 	}))
 	require.Empty(t, out("live", "t1"))
 	require.Empty(t, out("by-job", "j1"), "no inputs → the key retracts entirely")
@@ -256,7 +256,7 @@ func TestStageWhenRetraction(t *testing.T) {
 
 	up := func(payload string) {
 		require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
-			return g.FoldTopicUpsert(tx, "projects", []byte("p1"), decodePayload(t, payload))
+			return g.FoldTopicUpsertNow(tx, "projects", []byte("p1"), decodePayload(t, payload))
 		}))
 	}
 	get := func() string {
@@ -321,12 +321,12 @@ func TestStageLatestArgmax(t *testing.T) {
 
 	up := func(id, payload string) {
 		require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
-			return g.FoldTopicUpsert(tx, "statuses", []byte(id), decodePayload(t, payload))
+			return g.FoldTopicUpsertNow(tx, "statuses", []byte(id), decodePayload(t, payload))
 		}))
 	}
 	del := func(id string) {
 		require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
-			return g.FoldTopicDelete(tx, "statuses", []byte(id))
+			return g.FoldTopicDeleteNow(tx, "statuses", []byte(id))
 		}))
 	}
 	get := func() string {
@@ -413,12 +413,12 @@ func TestStageFilteringJoin(t *testing.T) {
 
 	fold := func(topic, key, payload string) {
 		require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
-			return g.FoldTopicUpsert(tx, topic, []byte(key), decodePayload(t, payload))
+			return g.FoldTopicUpsertNow(tx, topic, []byte(key), decodePayload(t, payload))
 		}))
 	}
 	del := func(topic, key string) {
 		require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
-			return g.FoldTopicDelete(tx, topic, []byte(key))
+			return g.FoldTopicDeleteNow(tx, topic, []byte(key))
 		}))
 	}
 	get := func(key string) string {
