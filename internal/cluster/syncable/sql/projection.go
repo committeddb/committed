@@ -641,7 +641,7 @@ func (p *Projection) Sync(ctx context.Context, a *cluster.Actual) (cluster.Shoul
 			relevant = true
 			break
 		}
-		if p.stages != nil && len(p.stages.byTopic[e.Type.ID]) > 0 {
+		if p.stages != nil && p.stages.ConsumesTopic(e.Type.ID) {
 			relevant = true
 			break
 		}
@@ -1294,7 +1294,7 @@ func (p *Projection) foldStages(ctx context.Context, tx *gosql.Tx, a *cluster.Ac
 		defer func() { p.stages.onDelta = nil }()
 
 		for _, e := range a.Entities {
-			if len(p.stages.byTopic[e.Type.ID]) == 0 {
+			if !p.stages.ConsumesTopic(e.Type.ID) {
 				continue
 			}
 			switch e.Variant() {

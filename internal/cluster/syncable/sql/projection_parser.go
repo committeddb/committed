@@ -194,6 +194,7 @@ type rawProjectionStage struct {
 	OrderByType string      `mapstructure:"orderByType"`
 	TieBy       string      `mapstructure:"tieBy"`
 	TieByType   string      `mapstructure:"tieByType"`
+	Join        []StageJoin `mapstructure:"join"`
 	Emit        []StageEmit `mapstructure:"emit"`
 }
 
@@ -222,6 +223,7 @@ func parseProjectionStages(v *cluster.ParsedConfig, storage cluster.DatabaseStor
 			OrderByType: strings.ToLower(rs.OrderByType),
 			TieBy:       rs.TieBy,
 			TieByType:   strings.ToLower(rs.TieByType),
+			Joins:       rs.Join,
 			Emit:        rs.Emit,
 		})
 	}

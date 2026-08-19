@@ -390,3 +390,69 @@ func TestStageLatestValidation(t *testing.T) {
 	strayOrder.Reduce = ""
 	require.ErrorContains(t, validateProjectionStageShapes(stageConfig(strayOrder)), `only for reduce = "latest"`)
 }
+
+// Filtering joins (gap 6): a stage's input participates only while the
+// joined dimension row exists and matches the join's where — S1's shape.
+// The dimension arriving late heals; flipping its predicate off retracts
+// dependents (the field probe); deleting it retracts them too.
+func TestStageFilteringJoin(t *testing.T) {
+	stages := []ProjectionStage{
+		{
+			Name: "alive", From: "workareas", KeyPath: []string{"$.id"},
+			Joins: []StageJoin{{
+				Topic: "projects", On: "$.projectId",
+				Where: []WhenClause{{Path: "$.status", Equals: "sold"}},
+			}},
+			Emit: []StageEmit{{Field: "id", From: "$.id"}, {Field: "price", From: "$.price"}},
+		},
+	}
+	cfg := stageConfig(stages...)
+	require.NoError(t, validateProjectionStageShapes(cfg))
+	g := buildStageGraph(cfg.Stages)
+	store := stageStoreForTest(t)
+
+	fold := func(topic, key, payload string) {
+		require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+			return g.FoldTopicUpsert(tx, topic, []byte(key), decodePayload(t, payload))
+		}))
+	}
+	del := func(topic, key string) {
+		require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+			return g.FoldTopicDelete(tx, topic, []byte(key))
+		}))
+	}
+	get := func(key string) string {
+		var got string
+		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
+			v, err := tx.GetOut("alive", []byte(key))
+			got = string(v)
+			return err
+		}))
+		return got
+	}
+
+	// The spine arrives before its dimension: no participation yet.
+	fold("workareas", "w1", `{"id":"w1","projectId":"p1","price":100}`)
+	require.Empty(t, get("w1"), "no dimension row yet — participation fails closed")
+
+	// The dimension lands, qualifying: the dependent HEALS via fan-out.
+	fold("projects", "p1", `{"status":"sold"}`)
+	require.Equal(t, `{"id":"w1","price":100}`, get("w1"))
+
+	// The predicate flips off: dependents retract (the S1 field probe).
+	fold("projects", "p1", `{"status":"pending"}`)
+	require.Empty(t, get("w1"))
+
+	// And back on: they re-enter.
+	fold("projects", "p1", `{"status":"sold"}`)
+	require.Equal(t, `{"id":"w1","price":100}`, get("w1"))
+
+	// A second workarea on an unrelated project is untouched throughout.
+	fold("projects", "p9", `{"status":"sold"}`)
+	fold("workareas", "w9", `{"id":"w9","projectId":"p9","price":5}`)
+
+	// Dimension delete retracts its dependents only.
+	del("projects", "p1")
+	require.Empty(t, get("w1"))
+	require.Equal(t, `{"id":"w9","price":5}`, get("w9"))
+}

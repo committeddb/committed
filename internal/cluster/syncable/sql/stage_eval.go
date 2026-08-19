@@ -38,9 +38,19 @@ type stageNode struct {
 
 // stageGraph is the compiled stage topology of one projection: manifest
 // order is the DAG (validated), so cascades simply recurse downstream.
+// dimRef addresses one join of one stage — a topic's entities feed it as
+// dimension rows.
+type dimRef struct {
+	node *stageNode
+	join *StageJoin
+}
+
 type stageGraph struct {
 	byName  map[string]*stageNode
 	byTopic map[string][]*stageNode
+	// dims routes topics consumed as JOIN DIMENSIONS: rows stored by
+	// entity key, dependents refolded on change (reverse-index fan-out).
+	dims map[string][]dimRef
 	// onDelta, when set, observes every stage's post-refold delta — the
 	// chaining terminal's feed (table sources consuming a stage). live=false
 	// is a retraction. Set per Sync call by the single worker goroutine.
@@ -50,7 +60,7 @@ type stageGraph struct {
 // buildStageGraph compiles the validated stage list into its runtime
 // topology.
 func buildStageGraph(stages []ProjectionStage) *stageGraph {
-	g := &stageGraph{byName: map[string]*stageNode{}, byTopic: map[string][]*stageNode{}}
+	g := &stageGraph{byName: map[string]*stageNode{}, byTopic: map[string][]*stageNode{}, dims: map[string][]dimRef{}}
 	nodes := make([]*stageNode, len(stages))
 	for i := range stages {
 		nodes[i] = &stageNode{def: &stages[i]}
@@ -62,8 +72,18 @@ func buildStageGraph(stages []ProjectionStage) *stageGraph {
 		} else {
 			g.byTopic[stages[i].From] = append(g.byTopic[stages[i].From], nodes[i])
 		}
+		for j := range stages[i].Joins {
+			jn := &stages[i].Joins[j]
+			g.dims[jn.Topic] = append(g.dims[jn.Topic], dimRef{node: nodes[i], join: jn})
+		}
 	}
 	return g
+}
+
+// ConsumesTopic reports whether any stage reads this topic — as its
+// input or as a join dimension.
+func (g *stageGraph) ConsumesTopic(topic string) bool {
+	return len(g.byTopic[topic]) > 0 || len(g.dims[topic]) > 0
 }
 
 // FoldTopicUpsert routes one topic entity's upsert through every stage
@@ -74,6 +94,18 @@ func (g *stageGraph) FoldTopicUpsert(tx *stagestore.Tx, topic string, inKey []by
 			return err
 		}
 	}
+	for _, d := range g.dims[topic] {
+		bs, err := marshalStageObject(payload)
+		if err != nil {
+			return err
+		}
+		if err := tx.PutDim(d.node.def.Name, d.join.Topic, inKey, bs); err != nil {
+			return err
+		}
+		if err := g.refoldDimDependents(tx, d, inKey); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -81,6 +113,34 @@ func (g *stageGraph) FoldTopicUpsert(tx *stagestore.Tx, topic string, inKey []by
 func (g *stageGraph) FoldTopicDelete(tx *stagestore.Tx, topic string, inKey []byte) error {
 	for _, n := range g.byTopic[topic] {
 		if err := g.foldDelete(tx, n, inKey); err != nil {
+			return err
+		}
+	}
+	for _, d := range g.dims[topic] {
+		if err := tx.DeleteDim(d.node.def.Name, d.join.Topic, inKey); err != nil {
+			return err
+		}
+		if err := g.refoldDimDependents(tx, d, inKey); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// refoldDimDependents refolds every key whose inputs reference this
+// dimension row (the fan-out). Reverse-index entries can be stale (an
+// input rekeyed or retracted since registering) — a stale entry's refold
+// is an idempotent no-op, never wrong output; a rebuild clears them.
+func (g *stageGraph) refoldDimDependents(tx *stagestore.Tx, d dimRef, dimKey []byte) error {
+	var outKeys [][]byte
+	if err := tx.DependentsOf(d.node.def.Name, d.join.Topic, dimKey, func(outKey []byte) error {
+		outKeys = append(outKeys, append([]byte(nil), outKey...))
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, ok := range outKeys {
+		if err := g.refoldKey(tx, d.node, ok); err != nil {
 			return err
 		}
 	}
@@ -129,6 +189,14 @@ func (g *stageGraph) foldUpsert(tx *stagestore.Tx, n *stageNode, inKey []byte, p
 	}
 	if err := tx.PutSrc(st.Name, inKey, outKey); err != nil {
 		return err
+	}
+	for i := range st.Joins {
+		j := &st.Joins[i]
+		if onV, err := resolveScopedPath(j.On, payload, nil); err == nil && onV != nil {
+			if err := tx.PutRev(st.Name, j.Topic, []byte(keyString(onV)), outKey); err != nil {
+				return err
+			}
+		}
 	}
 	return g.refoldKey(tx, n, outKey)
 }
@@ -208,19 +276,52 @@ func refoldOutput(tx *stagestore.Tx, st *ProjectionStage, outKey []byte) (out []
 	// object of the bytewise-LARGEST input identity (real reshape inputs
 	// are 1:1 with keys; the tiebreak only decides pathological
 	// collisions, deterministically).
-	var winner []byte
+	var winner any
 	scanErr := tx.InputsFor(st.Name, outKey, func(_, val []byte) error {
-		winner = append(winner[:0], val...)
+		obj, err := decodeStageObject(val)
+		if err != nil {
+			return err
+		}
+		if ok, err := inputQualifies(tx, st, obj); err != nil || !ok {
+			return err
+		}
+		winner = obj
 		return nil
 	})
 	if scanErr != nil || winner == nil {
 		return nil, false, scanErr
 	}
-	obj, err := decodeStageObject(winner)
-	if err != nil {
-		return nil, false, err
+	return emitReshape(st, winner)
+}
+
+// inputQualifies applies a stage's filtering joins to one input: it
+// participates only while EVERY join's dimension row — addressed by the
+// input's on value — exists and matches the join's where. A dimension
+// that has not arrived yet fails participation and heals when it lands
+// (the fan-out refolds dependents).
+func inputQualifies(tx *stagestore.Tx, st *ProjectionStage, obj any) (bool, error) {
+	for i := range st.Joins {
+		j := &st.Joins[i]
+		onV, err := resolveScopedPath(j.On, obj, nil)
+		if err != nil || onV == nil {
+			return false, nil
+		}
+		payload, err := tx.GetDim(st.Name, j.Topic, []byte(keyString(onV)))
+		if err != nil {
+			return false, err
+		}
+		if payload == nil {
+			return false, nil
+		}
+		dimObj, err := decodeStageObject(payload)
+		if err != nil {
+			return false, err
+		}
+		if !matchWhen(j.Where, dimObj) {
+			return false, nil
+		}
 	}
-	return emitReshape(st, obj)
+	return true, nil
 }
 
 // emitReshape renders a stage's emit fields from one input object — the
@@ -265,6 +366,9 @@ func refoldLatest(tx *stagestore.Tx, st *ProjectionStage, outKey []byte) ([]byte
 	err := tx.InputsFor(st.Name, outKey, func(_, val []byte) error {
 		obj, err := decodeStageObject(val)
 		if err != nil {
+			return err
+		}
+		if ok, err := inputQualifies(tx, st, obj); err != nil || !ok {
 			return err
 		}
 		ov, _ := resolveScopedPath(st.OrderBy, obj, nil)
@@ -365,6 +469,9 @@ func refoldAggregate(tx *stagestore.Tx, st *ProjectionStage, outKey []byte) ([]b
 	err := tx.InputsFor(st.Name, outKey, func(_, val []byte) error {
 		obj, err := decodeStageObject(val)
 		if err != nil {
+			return err
+		}
+		if ok, err := inputQualifies(tx, st, obj); err != nil || !ok {
 			return err
 		}
 		count++

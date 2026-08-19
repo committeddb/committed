@@ -271,7 +271,21 @@ type ProjectionStage struct {
 	OrderByType string
 	TieBy       string
 	TieByType   string
+	Joins       []StageJoin
 	Emit        []StageEmit
+}
+
+// StageJoin is one filtering join of a stage: the stage's inputs
+// participate only while the joined topic's row — addressed by the
+// input's On value against the joined entity's KEY — exists and matches
+// every Where clause. A dimension change refolds every dependent key
+// (reverse-index fan-out); a dimension that has not arrived yet fails
+// participation and heals when it lands. Joins FILTER (gap 6) — field
+// resolution from joins is a later arm.
+type StageJoin struct {
+	Topic string       `mapstructure:"topic"`
+	On    string       `mapstructure:"on"`
+	Where []WhenClause `mapstructure:"where"`
 }
 
 // StageEmit is one field of a stage's emitted object. A reshape stage's
@@ -1162,6 +1176,24 @@ func validateProjectionStageShapes(c *ProjectionConfig) error {
 			}
 		default:
 			return fmt.Errorf("%s: reduce %q is invalid (want \"latest\", \"aggregate\", or omit for a reshape stage)", where, st.Reduce)
+		}
+		for ji, j := range st.Joins {
+			jw := fmt.Sprintf("%s join %d (topic %q)", where, ji+1, j.Topic)
+			if j.Topic == "" {
+				return fmt.Errorf("%s: topic is required", jw)
+			}
+			if stageNamed(c, j.Topic) >= 0 {
+				return fmt.Errorf("%s: joins address TOPICS (dimension rows by entity key); to consume a stage, chain from it", jw)
+			}
+			if j.On == "" {
+				return fmt.Errorf("%s: on is required — the input field holding the joined entity's key", jw)
+			}
+			if err := rejectMultiValued(j.On, jw+": on"); err != nil {
+				return err
+			}
+			if err := validateWhenClauses(j.Where, jw); err != nil {
+				return err
+			}
 		}
 		if len(st.Emit) == 0 {
 			return fmt.Errorf("%s: emit needs at least one field", where)

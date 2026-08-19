@@ -211,7 +211,11 @@ func (tx *Tx) SetFrontier(index uint64) error {
 func outBucket(stage string) []byte { return []byte("stage:" + stage + ":out") }
 
 func srcBucket(stage string) []byte { return []byte("stage:" + stage + ":src") }
-func inBucket(stage string) []byte  { return []byte("stage:" + stage + ":in") }
+
+func dimBucket(stage, join string) []byte {
+	return []byte("stage:" + stage + ":dim:" + join)
+}
+func inBucket(stage string) []byte { return []byte("stage:" + stage + ":in") }
 func revBucket(stage, join string) []byte {
 	return []byte("stage:" + stage + ":rev:" + join)
 }
@@ -279,6 +283,36 @@ func (tx *Tx) DeleteSrc(stage string, inKey []byte) error {
 		return err
 	}
 	return b.Delete(inKey)
+}
+
+// PutDim stores one dimension row for a stage's join — the joined topic's
+// current payload by its entity key, read back at refold to decide
+// participation.
+func (tx *Tx) PutDim(stage, join string, dimKey, payload []byte) error {
+	b, err := tx.bucket(dimBucket(stage, join))
+	if err != nil {
+		return err
+	}
+	return b.Put(dimKey, payload)
+}
+
+// GetDim reads a join's dimension row (nil if the dimension has not
+// arrived — participation fails until it does, and heals when it does).
+func (tx *Tx) GetDim(stage, join string, dimKey []byte) ([]byte, error) {
+	b, err := tx.bucket(dimBucket(stage, join))
+	if err != nil || b == nil {
+		return nil, err
+	}
+	return b.Get(dimKey), nil
+}
+
+// DeleteDim removes a dimension row (its dependents stop participating).
+func (tx *Tx) DeleteDim(stage, join string, dimKey []byte) error {
+	b, err := tx.bucket(dimBucket(stage, join))
+	if err != nil || b == nil {
+		return err
+	}
+	return b.Delete(dimKey)
 }
 
 // PutIn retains one input for a stage's output key (the refold working
