@@ -239,6 +239,41 @@ type ProjectionSource struct {
 	ForEach string
 }
 
+// ProjectionStage is one internal stage of a staged computation: a keyed
+// refold from ONE input (a topic, or a PRIOR stage by name) into a private
+// keyed object held in the syncable's stage store — never a topic, never a
+// sink write (the terminal rule: only the table is outward-facing). Stages
+// chain by name in manifest order; a table source consumes a stage's
+// output via `from = "<stage name>"`.
+type ProjectionStage struct {
+	Name    string
+	From    string
+	KeyPath []string
+	When    []WhenClause
+	Reduce  string // "" (reshape: one input object → one output object) or "aggregate"
+	Emit    []StageEmit
+}
+
+// StageEmit is one field of a stage's emitted object. A reshape stage's
+// fields carry exactly one of From (a jsonpath into the input) or Expr
+// (the closed expression language); an aggregate stage's fields carry
+// exactly one fold arm — Sum/Min/Max (an expression folded over the key's
+// retained inputs) or Count (rows). Array-of-tables so field names
+// survive byte-exact.
+type StageEmit struct {
+	Field string `mapstructure:"field"`
+	From  string `mapstructure:"from"`
+	Expr  string `mapstructure:"expr"`
+	Sum   string `mapstructure:"sum"`
+	Min   string `mapstructure:"min"`
+	Max   string `mapstructure:"max"`
+	Count bool   `mapstructure:"count"`
+
+	// compiled holds the admission-checked AST of whichever expression arm
+	// is set (Expr/Sum/Min/Max), populated by validateProjectionConfig.
+	compiled exprNode
+}
+
 // ProjectionConfig declares a stateful fold from one or more source topics into
 // one current-state table: one row per aggregate key, maintained by per-source
 // rules that fire per event. A single-source config is the common case; multiple
@@ -262,6 +297,7 @@ type ProjectionConfig struct {
 	PrimaryKey []string
 	Columns    []ProjectionColumn
 	Sources    []ProjectionSource
+	Stages     []ProjectionStage
 
 	// Single-source shorthand. The README single-topic form (and existing
 	// configs) set these top-level fields; applyDefaults folds them into one
@@ -532,6 +568,9 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 				}
 			}
 		}
+	}
+	if err := validateProjectionStages(c); err != nil {
+		return err
 	}
 	forEachTopics := map[string]bool{}
 	// lookups maps each declared lookup source's name to its source index, so an
@@ -999,6 +1038,123 @@ func validateAggregate(c *ProjectionConfig, src ProjectionSource, where string, 
 		}
 	}
 	return nil
+}
+
+// validateProjectionStages checks the internal-stage declarations: unique
+// private names, one input each (a topic id, or a PRIOR stage's name —
+// manifest order IS the intra-config DAG, so self/forward references are
+// rejected), a single single-valued keyPath, and emit fields whose arms
+// match the stage's reduce (reshape: from/expr; aggregate: sum/min/max/
+// count). Expression arms compile here (the closed language, division
+// domination included).
+func validateProjectionStages(c *ProjectionConfig) error {
+	if len(c.Stages) == 0 {
+		return nil
+	}
+	// The stage engine is not wired yet — the config surface is staged
+	// ahead of the machinery (the forEach pattern). Reject loudly rather
+	// than accept-then-ignore. REMOVE when the stage evaluator lands.
+	return fmt.Errorf("[[projection.stage]] is accepted syntax but the stage engine has not landed yet — coming in this 0.7.x series")
+}
+
+// validateProjectionStageShapes holds the real shape rules, called by
+// validateProjectionStages once the engine lands (already exercised by
+// tests so the gate's removal cannot regress them).
+func validateProjectionStageShapes(c *ProjectionConfig) error {
+	names := make(map[string]bool, len(c.Stages))
+	for i := range c.Stages {
+		st := &c.Stages[i]
+		where := fmt.Sprintf("stage %d (%q)", i+1, st.Name)
+		if st.Name == "" {
+			return fmt.Errorf("stage %d: name is required (stages chain by name)", i+1)
+		}
+		if names[st.Name] {
+			return fmt.Errorf("%s: a second stage named %q", where, st.Name)
+		}
+		if st.From == "" {
+			return fmt.Errorf("%s: from is required — a topic id, or a prior stage's name", where)
+		}
+		if st.From == st.Name || (!names[st.From] && stageNamed(c, st.From) >= 0) {
+			return fmt.Errorf("%s: from %q references a stage at or after this one — stages chain in manifest order (move the producer above its consumer)", where, st.From)
+		}
+		names[st.Name] = true
+		if len(st.KeyPath) != 1 {
+			return fmt.Errorf("%s: exactly one keyPath (stages are single-key refolds)", where)
+		}
+		if err := rejectMultiValued(st.KeyPath[0], where+": keyPath"); err != nil {
+			return err
+		}
+		if err := validateWhenClauses(st.When, where); err != nil {
+			return err
+		}
+		switch st.Reduce {
+		case "", "aggregate":
+		default:
+			return fmt.Errorf("%s: reduce %q is invalid (want \"aggregate\" or omit for a reshape stage)", where, st.Reduce)
+		}
+		if len(st.Emit) == 0 {
+			return fmt.Errorf("%s: emit needs at least one field", where)
+		}
+		emitted := make(map[string]bool, len(st.Emit))
+		for k := range st.Emit {
+			e := &st.Emit[k]
+			ew := fmt.Sprintf("%s emit %q", where, e.Field)
+			if e.Field == "" {
+				return fmt.Errorf("%s: emit entry with empty field", where)
+			}
+			if emitted[e.Field] {
+				return fmt.Errorf("%s: declared twice", ew)
+			}
+			emitted[e.Field] = true
+			folds := 0
+			for _, set := range []bool{e.Sum != "", e.Min != "", e.Max != "", e.Count} {
+				if set {
+					folds++
+				}
+			}
+			plain := 0
+			for _, set := range []bool{e.From != "", e.Expr != ""} {
+				if set {
+					plain++
+				}
+			}
+			if st.Reduce == "aggregate" {
+				if folds != 1 || plain != 0 {
+					return fmt.Errorf("%s: an aggregate stage's emit carries exactly one of sum, min, max, or count", ew)
+				}
+			} else {
+				if plain != 1 || folds != 0 {
+					return fmt.Errorf("%s: a reshape stage's emit carries exactly one of from or expr", ew)
+				}
+			}
+			if e.From != "" {
+				if err := rejectMultiValued(e.From, ew); err != nil {
+					return err
+				}
+			}
+			for _, src := range []string{e.Expr, e.Sum, e.Min, e.Max} {
+				if src == "" {
+					continue
+				}
+				compiled, err := compileExpr(src)
+				if err != nil {
+					return fmt.Errorf("%s: %w", ew, err)
+				}
+				e.compiled = compiled
+			}
+		}
+	}
+	return nil
+}
+
+// stageNamed returns the index of the stage with this name, or -1.
+func stageNamed(c *ProjectionConfig, name string) int {
+	for i := range c.Stages {
+		if c.Stages[i].Name == name {
+			return i
+		}
+	}
+	return -1
 }
 
 // validateLookup checks one lookup (dimension) source: at least one stored

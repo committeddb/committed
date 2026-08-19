@@ -171,6 +171,46 @@ func (p *ProjectionSyncableParser) DatabasesFromConfig(v *cluster.ParsedConfig) 
 var projectionSectionKeys = map[string]bool{
 	"db": true, "table": true, "primarykey": true, "topic": true,
 	"keypath": true, "rules": true, "columns": true, "source": true,
+	"stage": true,
+}
+
+// rawProjectionStage is the TOML decode shape of one [[projection.stage]]
+// block. keyPath and when decode as any for the same scalar-or-list /
+// shorthand-or-clauses reasons the source shapes do.
+type rawProjectionStage struct {
+	Name    string      `mapstructure:"name"`
+	From    string      `mapstructure:"from"`
+	KeyPath any         `mapstructure:"keyPath"`
+	When    any         `mapstructure:"when"`
+	Reduce  string      `mapstructure:"reduce"`
+	Emit    []StageEmit `mapstructure:"emit"`
+}
+
+// parseProjectionStages decodes the [[{section}.stage]] blocks.
+func parseProjectionStages(v *cluster.ParsedConfig, storage cluster.DatabaseStorage, section string) ([]ProjectionStage, error) {
+	var raw []rawProjectionStage
+	if err := v.UnmarshalKey(section+".stage", &raw); err != nil {
+		return nil, fmt.Errorf("parse %s.stage: %w", section, err)
+	}
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	stages := make([]ProjectionStage, 0, len(raw))
+	for i, rs := range raw {
+		when, err := normalizeWhen(rs.When, storage, rs.From)
+		if err != nil {
+			return nil, fmt.Errorf("stage %d (%q): when: %w", i+1, rs.Name, err)
+		}
+		stages = append(stages, ProjectionStage{
+			Name:    rs.Name,
+			From:    rs.From,
+			KeyPath: pathOrList(rs.KeyPath),
+			When:    when,
+			Reduce:  strings.ToLower(rs.Reduce),
+			Emit:    rs.Emit,
+		})
+	}
+	return stages, nil
 }
 
 func parseProjectionConfigFields(v *cluster.ParsedConfig, storage cluster.DatabaseStorage) (*ProjectionConfig, error) {
@@ -216,6 +256,10 @@ func parseProjectionConfigFields(v *cluster.ParsedConfig, storage cluster.Databa
 	if err != nil {
 		return nil, fmt.Errorf("[projection.parser] %w", err)
 	}
+	stages, err := parseProjectionStages(v, storage, section)
+	if err != nil {
+		return nil, fmt.Errorf("[projection.parser] %w", err)
+	}
 
 	config := &ProjectionConfig{
 		DatabaseID: v.GetString(section + ".db"),
@@ -227,6 +271,7 @@ func parseProjectionConfigFields(v *cluster.ParsedConfig, storage cluster.Databa
 		PrimaryKey: v.GetStringSlice(section + ".primaryKey"),
 		Columns:    columns,
 		Sources:    sources,
+		Stages:     stages,
 	}
 	config.applyDefaults()
 	return config, nil
