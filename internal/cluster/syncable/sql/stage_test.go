@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/syncable/stagestore"
 )
 
 func stageConfig(stages ...ProjectionStage) *ProjectionConfig {
@@ -167,4 +168,114 @@ func TestStageFingerprint(t *testing.T) {
 
 	b.Stages[0].Emit[0].From = "$.y"
 	require.NotEqual(t, stageFingerprint(a), stageFingerprint(b))
+}
+
+func stageStoreForTest(t *testing.T) *stagestore.Store {
+	t.Helper()
+	s, _, err := stagestore.Open(t.TempDir(), "p", "fp")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+	return s
+}
+
+func decodePayload(t *testing.T, src string) any {
+	t.Helper()
+	v, err := decodeStageObject([]byte(src))
+	require.NoError(t, err)
+	return v
+}
+
+// The evaluator end to end over a two-stage chain: a reshape stage feeds
+// an aggregate stage; upserts fold through, a rekey retracts from the old
+// key, a retraction refolds the aggregate, and the last input's removal
+// retracts the aggregate key entirely.
+func TestStageEvaluatorChain(t *testing.T) {
+	stages := []ProjectionStage{
+		{
+			Name: "live", From: "txns", KeyPath: []string{"$.id"},
+			Emit: []StageEmit{{Field: "job", From: "$.jobId"}, {Field: "amt", From: "$.amount"}},
+		},
+		{
+			Name: "by-job", From: "live", KeyPath: []string{"$.job"},
+			Reduce: "aggregate", Emit: []StageEmit{{Field: "total", Sum: "$.amt"}, {Field: "n", Count: true}},
+		},
+	}
+	cfg := stageConfig(stages...)
+	require.NoError(t, validateProjectionStageShapes(cfg)) // compiles the emit exprs
+	g := buildStageGraph(cfg.Stages)
+	store := stageStoreForTest(t)
+
+	out := func(stage, key string) string {
+		var got string
+		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
+			v, err := tx.GetOut(stage, []byte(key))
+			got = string(v)
+			return err
+		}))
+		return got
+	}
+	upsert := func(key, payload string) {
+		require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+			return g.FoldTopicUpsert(tx, "txns", []byte(key), decodePayload(t, payload))
+		}))
+	}
+
+	upsert("t1", `{"id":"t1","jobId":"j1","amount":2.5}`)
+	upsert("t2", `{"id":"t2","jobId":"j1","amount":1.25}`)
+	upsert("t3", `{"id":"t3","jobId":"j2","amount":10}`)
+
+	require.Equal(t, `{"amt":2.5,"job":"j1"}`, out("live", "t1"))
+	require.Equal(t, `{"n":2,"total":3.75}`, out("by-job", "j1"), "exact decimal sum, recomputed")
+	require.Equal(t, `{"n":1,"total":10}`, out("by-job", "j2"))
+
+	// Rekey: t2 moves to job j2 — j1 refolds without it, j2 gains it.
+	upsert("t2", `{"id":"t2","jobId":"j2","amount":1.25}`)
+	require.Equal(t, `{"n":1,"total":2.5}`, out("by-job", "j1"))
+	require.Equal(t, `{"n":2,"total":11.25}`, out("by-job", "j2"))
+
+	// Retraction: deleting t1 empties j1 → the aggregate key retracts.
+	require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+		return g.FoldTopicDelete(tx, "txns", []byte("t1"))
+	}))
+	require.Empty(t, out("live", "t1"))
+	require.Empty(t, out("by-job", "j1"), "no inputs → the key retracts entirely")
+	require.Equal(t, `{"n":2,"total":11.25}`, out("by-job", "j2"), "unrelated keys untouched")
+}
+
+// Filtering is refold: an input that stops matching the stage's when
+// RETRACTS from its key — the field-verified gap-5 semantics.
+func TestStageWhenRetraction(t *testing.T) {
+	stages := []ProjectionStage{
+		{
+			Name: "sold", From: "projects", KeyPath: []string{"$.id"},
+			When: []WhenClause{{Path: "$.status", Equals: "sold"}},
+			Emit: []StageEmit{{Field: "id", From: "$.id"}},
+		},
+	}
+	cfg := stageConfig(stages...)
+	require.NoError(t, validateProjectionStageShapes(cfg))
+	g := buildStageGraph(cfg.Stages)
+	store := stageStoreForTest(t)
+
+	up := func(payload string) {
+		require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+			return g.FoldTopicUpsert(tx, "projects", []byte("p1"), decodePayload(t, payload))
+		}))
+	}
+	get := func() string {
+		var got string
+		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
+			v, err := tx.GetOut("sold", []byte("p1"))
+			got = string(v)
+			return err
+		}))
+		return got
+	}
+
+	up(`{"id":"p1","status":"sold"}`)
+	require.Equal(t, `{"id":"p1"}`, get())
+	up(`{"id":"p1","status":"pending"}`)
+	require.Empty(t, get(), "the predicate flipped off — the row leaves (gap 5)")
+	up(`{"id":"p1","status":"sold"}`)
+	require.Equal(t, `{"id":"p1"}`, get(), "and re-enters when it flips back")
 }

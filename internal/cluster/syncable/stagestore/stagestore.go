@@ -209,6 +209,8 @@ func (tx *Tx) SetFrontier(index uint64) error {
 }
 
 func outBucket(stage string) []byte { return []byte("stage:" + stage + ":out") }
+
+func srcBucket(stage string) []byte { return []byte("stage:" + stage + ":src") }
 func inBucket(stage string) []byte  { return []byte("stage:" + stage + ":in") }
 func revBucket(stage, join string) []byte {
 	return []byte("stage:" + stage + ":rev:" + join)
@@ -247,6 +249,36 @@ func (tx *Tx) DeleteOut(stage string, key []byte) error {
 		return err
 	}
 	return b.Delete(key)
+}
+
+// PutSrc records which output key an input identity currently feeds — the
+// reverse question deletes and rekeys need: a topic delete carries only
+// the input's key, and a re-emitted input may move to a NEW output key
+// (the old one must refold without it).
+func (tx *Tx) PutSrc(stage string, inKey, outKey []byte) error {
+	b, err := tx.bucket(srcBucket(stage))
+	if err != nil {
+		return err
+	}
+	return b.Put(inKey, outKey)
+}
+
+// GetSrc reads the output key an input identity feeds (nil if unknown).
+func (tx *Tx) GetSrc(stage string, inKey []byte) ([]byte, error) {
+	b, err := tx.bucket(srcBucket(stage))
+	if err != nil || b == nil {
+		return nil, err
+	}
+	return b.Get(inKey), nil
+}
+
+// DeleteSrc removes an input identity's mapping.
+func (tx *Tx) DeleteSrc(stage string, inKey []byte) error {
+	b, err := tx.bucket(srcBucket(stage))
+	if err != nil || b == nil {
+		return err
+	}
+	return b.Delete(inKey)
 }
 
 // PutIn retains one input for a stage's output key (the refold working
