@@ -102,6 +102,10 @@ const (
 	onDeleteClear               = "clear"
 	onDeleteIgnore              = "ignore"
 	onDeleteRemoveFromAggregate = "remove-from-aggregate"
+	// onDeleteRows is the forEach analog of delete-row: a parent tombstone
+	// (which carries only the parent entity key) cascades to every row the
+	// parent fanned out, found via the fan-out sidecar.
+	onDeleteRows = "delete-rows"
 )
 
 // scalarFn values for an aggregate scalar's fn. Config casing is normalized
@@ -222,6 +226,15 @@ type ProjectionSource struct {
 	Rules     []ProjectionRule
 	Aggregate *ProjectionAggregate
 	Lookup    *ProjectionLookup
+	// ForEach turns a rules source into a fan-out: the (deliberately
+	// multi-valued) path selects N elements from each event, and the
+	// source's rules apply once PER ELEMENT — keyPath and every from/expr
+	// path resolve against the element, with a `$parent.` prefix reaching
+	// the enclosing event payload. Row identity is the element's key, so
+	// one event maintains N rows; a re-emitted event reconciles (rows for
+	// vanished elements delete) via the fan-out sidecar, and a parent
+	// tombstone cascades per onDelete = "delete-rows".
+	ForEach string
 }
 
 // ProjectionConfig declares a stateful fold from one or more source topics into
@@ -270,9 +283,12 @@ func (c *ProjectionConfig) applyDefaults() {
 		// its keyPath is the dimension key and must be explicit.
 		if s.Lookup == nil {
 			if s.OnDelete == "" {
-				if s.Aggregate != nil {
+				switch {
+				case s.Aggregate != nil:
 					s.OnDelete = onDeleteRemoveFromAggregate // a child delete leaves the row
-				} else {
+				case s.ForEach != "":
+					s.OnDelete = onDeleteRows // a parent delete cascades to its fanned rows
+				default:
 					s.OnDelete = onDeleteRow // back-compat: a delete drops the row
 				}
 			}
@@ -569,6 +585,30 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 				return err
 			}
 		}
+		if src.ForEach != "" {
+			if src.Aggregate != nil || src.Lookup != nil {
+				return fmt.Errorf("%s: forEach applies to a rules source (drop the aggregate/lookup block)", where)
+			}
+			if len(src.Rules) == 0 {
+				return fmt.Errorf("%s: a forEach source needs rules — they apply once per element", where)
+			}
+			if len(c.PrimaryKey) > 1 {
+				return fmt.Errorf("%s: forEach requires a single-column primaryKey (fanned rows key by the element)", where)
+			}
+			if !multiValuedPath(src.ForEach) {
+				return fmt.Errorf("%s: forEach path [%s] is single-valued — forEach fans an array into rows; a plain rules source already gives one row per event", where, src.ForEach)
+			}
+			switch src.OnDelete {
+			case onDeleteRows, onDeleteIgnore:
+			default:
+				return fmt.Errorf("%s: onDelete %q is invalid for a forEach source (want %q — cascade to the fanned rows — or %q)", where, src.OnDelete, onDeleteRows, onDeleteIgnore)
+			}
+			// The apply engine does not fan out yet — the config surface is
+			// staged ahead of the machinery. Reject loudly rather than fold
+			// wrongly (the admission-validation incident class). REMOVE when
+			// the fan-out apply path lands.
+			return fmt.Errorf("%s: forEach is accepted syntax but the fan-out engine has not landed yet — coming in this 0.7.x series", where)
+		}
 		if src.Lookup != nil {
 			if err := validateLookup(src, where); err != nil {
 				return err
@@ -588,10 +628,12 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 		if len(src.KeyPath) != len(c.PrimaryKey) {
 			return fmt.Errorf("%s: keyPath has %d path(s) but primaryKey has %d column(s) — one path per key column, in the same order", where, len(src.KeyPath), len(c.PrimaryKey))
 		}
-		switch src.OnDelete {
-		case onDeleteRow, onDeleteClear, onDeleteIgnore:
-		default:
-			return fmt.Errorf("%s: onDelete %q is invalid (want %q, %q, or %q)", where, src.OnDelete, onDeleteRow, onDeleteClear, onDeleteIgnore)
+		if src.ForEach == "" { // a forEach source's onDelete is validated above
+			switch src.OnDelete {
+			case onDeleteRow, onDeleteClear, onDeleteIgnore:
+			default:
+				return fmt.Errorf("%s: onDelete %q is invalid (want %q, %q, or %q)", where, src.OnDelete, onDeleteRow, onDeleteClear, onDeleteIgnore)
+			}
 		}
 		ownsColumn := false
 		// enrichedAs records each enriched column's (lookup, on, select) tuple:

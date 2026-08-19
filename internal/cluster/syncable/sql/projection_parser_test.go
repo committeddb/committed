@@ -1218,3 +1218,50 @@ func TestParseProjectionRejectsMultiValuedPaths(t *testing.T) {
 		`{ column = "tier",  expr  = "coalesce($.items[*].price, 0)" },`, 1)
 	require.ErrorContains(t, parse(inExpr), "multi-valued")
 }
+
+// forEach config surface: the vocabulary parses and its shape rules are
+// enforced, and — until the fan-out engine lands — a valid forEach config
+// is rejected loudly rather than folded wrongly (never validate-then-
+// misbehave). The final assertion flips when the machinery ships.
+func TestParseProjectionForEachSurface(t *testing.T) {
+	config := func(extra string) string {
+		return `
+[projection]
+db         = "testdb"
+table      = "txn_elements"
+primaryKey = "element_id"
+
+[[projection.columns]]
+name = "element_id"
+type = "VARCHAR(64)"
+
+[[projection.columns]]
+name = "amount"
+type = "DECIMAL(12,2)"
+
+[[projection.source]]
+topic = "txn"
+keyPath = "$.id"
+` + extra + `
+[[projection.source.rules]]
+set = [ { column = "amount", from = "$.amount" } ]
+`
+	}
+	parse := func(toml string) error {
+		_, err := (&sql.ProjectionSyncableParser{}).ParseConfig(
+			readConfig(t, "toml", strings.NewReader(toml)), projectionStorage())
+		return err
+	}
+
+	err := parse(config(`forEach = "$.data.elements[*]"`))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "fan-out engine has not landed")
+
+	err = parse(config(`forEach = "$.data.elements"`))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "single-valued")
+
+	err = parse(config("forEach = \"$.data.elements[*]\"\nonDelete = \"clear\""))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `invalid for a forEach source`)
+}

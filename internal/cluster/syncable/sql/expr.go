@@ -283,10 +283,17 @@ func (p *exprParser) parsePrimary() (exprNode, error) {
 	case "str":
 		return exprStr{t.text}, nil
 	case "path":
-		if _, err := jsonpath.New(t.text); err != nil {
+		// A `$parent.` prefix is the forEach element scope's way of reaching
+		// the enclosing event payload; validate the remainder as a rooted
+		// path (the apply layer resolves the scope).
+		checkPath := t.text
+		if rest, ok := strings.CutPrefix(checkPath, "$parent"); ok {
+			checkPath = "$" + rest
+		}
+		if _, err := jsonpath.New(checkPath); err != nil {
 			return nil, fmt.Errorf("invalid jsonpath %q at position %d: %v", t.text, t.pos, err)
 		}
-		if multiValuedPath(t.text) {
+		if multiValuedPath(checkPath) {
 			return nil, fmt.Errorf("jsonpath %q at position %d is multi-valued (wildcard/recursive/filter) — expressions compute over scalars", t.text, t.pos)
 		}
 		return exprPath{t.text}, nil
