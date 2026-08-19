@@ -26,7 +26,7 @@ import (
 var (
 	ErrOutOfBounds     = errors.New("requested index is greater than last index")
 	ErrTypeMissing     = errors.New("type not found")
-	ErrDatabaseMissing = errors.New("database not found")
+	ErrDatabaseMissing = cluster.ErrDatabaseMissing
 	ErrBucketMissing   = errors.New("key value bucket missing")
 )
 

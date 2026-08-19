@@ -1261,3 +1261,21 @@ set = [ { column = "amount", from = "$.amount" } ]
 	require.Error(t, err)
 	require.Contains(t, err.Error(), `invalid for a forEach source`)
 }
+
+// A config referencing an unregistered database names the id and the
+// remedy — the bare "database not found" read like a destination-
+// connectivity failure and sent operators toward grants/networking
+// instead of the missing [database] config (the 0.7.9 clean-room
+// finding). Both the plain syncable and the projection wrap it.
+func TestUnregisteredDatabaseNamesIdAndRemedy(t *testing.T) {
+	noDB := &TestDatabaseStorage{dbs: map[string]cluster.Database{}}
+
+	base := strings.ReplaceAll(projectionTOML, "sql-projection", "projection")
+	withDB := strings.Replace(base, `db         = "testdb"`, `db         = "analytics-teamup"`, 1)
+	_, err := (&sql.ProjectionSyncableParser{}).ParseConfig(
+		readConfig(t, "toml", strings.NewReader(withDB)), noDB)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `"analytics-teamup"`, "the id the config referenced")
+	require.Contains(t, err.Error(), "POST its [database] config first")
+	require.Contains(t, err.Error(), "databases → types → ingestables/syncables")
+}

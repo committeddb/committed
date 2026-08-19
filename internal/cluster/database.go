@@ -6,6 +6,13 @@ import (
 	"strings"
 )
 
+// ErrDatabaseMissing is the sentinel a DatabaseStorage returns when a
+// referenced [database] config has never been registered on this
+// cluster. Parsers wrap it with the id and the remedy — the bare text
+// ("database not found") reads like a destination-connectivity failure
+// and sends operators the wrong way.
+var ErrDatabaseMissing = errors.New("database not found")
+
 // Database represents a query database
 //
 //counterfeiter:generate . Database

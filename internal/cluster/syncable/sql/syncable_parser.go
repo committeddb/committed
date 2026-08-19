@@ -1,6 +1,7 @@
 package sql
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -91,6 +92,9 @@ func (p *SyncableParser) ParseConfig(v *cluster.ParsedConfig, storage cluster.Da
 		return nil, &cluster.FieldError{Field: "sql.db", Issue: "required (name a [database] config)"}
 	}
 	db, err := storage.Database(sqlDB)
+	if err != nil {
+		err = describeDatabaseErr(err, sqlDB)
+	}
 	if err != nil {
 		return nil, &cluster.FieldError{
 			Field: "sql.db",
@@ -284,4 +288,18 @@ func requiresPrimaryKey(storage cluster.DatabaseStorage, topic string) bool {
 		return false
 	}
 	return t.EntityKind == cluster.EntityKindSnapshot
+}
+
+// describeDatabaseErr names the referenced database and — for the
+// not-registered sentinel — the remedy, because the bare "database not
+// found" reads like a destination-connectivity failure and sends the
+// operator to check grants instead of POSTing the missing [database]
+// config (the fresh-node create order: databases → types →
+// ingestables/syncables). The id is operator-authored config, safe to
+// echo.
+func describeDatabaseErr(err error, id string) error {
+	if errors.Is(err, cluster.ErrDatabaseMissing) {
+		return fmt.Errorf("db references database %q, which is not registered on this cluster — POST its [database] config first (create order on a fresh node: databases → types → ingestables/syncables): %w", id, err)
+	}
+	return fmt.Errorf("resolve database %q: %w", id, err)
 }

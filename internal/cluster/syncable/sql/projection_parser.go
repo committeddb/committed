@@ -325,7 +325,7 @@ func (p *ProjectionSyncableParser) ParseConfig(v *cluster.ParsedConfig, storage 
 
 	db, err := storage.Database(config.DatabaseID)
 	if err != nil {
-		return nil, err
+		return nil, describeDatabaseErr(err, config.DatabaseID)
 	}
 	config.Database = db
 
