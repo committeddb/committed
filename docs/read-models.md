@@ -497,6 +497,10 @@ set = [ { column = "total", from = "$.total" },
   matching the source's `when` — retracts the source's contribution:
   the row (`onDelete = "delete-row"`), its own columns (`"clear"`), or
   nothing (`"ignore"`).
+- **Introspection**: `GET /syncable/{id}/status?stages=true` reports
+  each stage's current output key count from the owner's store — an
+  empty stage reads 0, which is the one number that splits "the fan
+  produced nothing" from "the join never matched."
 - Stage state lives in one bbolt file per syncable under
   `<dataDir>/projections/` — derived, node-local, rebuildable from the
   log. **Editing stage definitions requires a rebuild** (the

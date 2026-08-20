@@ -262,6 +262,11 @@ func projectionNormalizeFlow(t *testing.T, db *sql.DB, table, quoteL, quoteR str
 		return n
 	}
 
+	// Stage introspection: the store answers key counts (0 before any fold).
+	counts, err := p.StageKeyCounts()
+	require.NoError(t, err)
+	require.Equal(t, 0, counts["latest-prop"], "an unfolded stage reads 0, not absent")
+
 	// The owner's CDC event: UPPERCASE GUID in both entity key and payload.
 	// The decorator's proposal: lowercase.
 	sync(cluster.NewUpsertEntity(jobType, []byte("GUID-77"), []byte(`{"id":"GUID-77","name":"A"}`)))
@@ -274,6 +279,10 @@ func projectionNormalizeFlow(t *testing.T, db *sql.DB, table, quoteL, quoteR str
 	require.Equal(t, "A", name.String, "the owner's UPPERCASE rendering keys the lowercase row")
 	require.Equal(t, "p1", latest.String, "the decoration lands across the case seam")
 	require.Equal(t, 1, count(), "one row, not an upper/lower pair")
+
+	counts, err = p.StageKeyCounts()
+	require.NoError(t, err)
+	require.Equal(t, 1, counts["latest-prop"], "the folded stage's key count is visible")
 
 	// The producer's delete tombstone carries the UPPERCASE key — it must
 	// still address the lowercased row (the RTBF-critical binding).

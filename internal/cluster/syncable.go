@@ -456,6 +456,17 @@ func ParseCheckpointPolicy(v *ParsedConfig) (CheckpointPolicy, error) {
 
 // SyncableParser parses a config document into a Syncable
 //
+// StageIntrospector is the optional Syncable extension that reports the
+// node-local stage store's shape: each declared stage's current output
+// key count. The observability half of the silent-empty-stage class —
+// "how many keys does billed-pairs hold?" is the one question that
+// instantly splits fan-produced-nothing from join-never-matched, and
+// the field triage had no way to ask it. Owner-local by construction
+// (the store lives with the worker); the HTTP status endpoint proxies.
+type StageIntrospector interface {
+	StageKeyCounts() (map[string]int, error)
+}
+
 // StageRecoverer is implemented by syncables carrying NODE-LOCAL stage
 // state (the stage store) that must be re-derived before consuming from
 // the replicated checkpoint. The store can be behind the checkpoint two

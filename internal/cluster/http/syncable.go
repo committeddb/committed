@@ -353,6 +353,14 @@ type SyncableStatusResponse struct {
 	// with CaughtUp it distinguishes "nothing to examine" from "never
 	// started scanning", the split the phantom-adoption incident needed.
 	ReadPosition *uint64 `json:"readPosition,omitempty"`
+	// Stages is each declared stage's current output key count — the
+	// silent-empty-stage triage read ("how many keys does billed-pairs
+	// hold?" splits fan-produced-nothing from join-never-matched).
+	// Present only when the request opts in with ?stages=true AND the
+	// owner's live worker answered (directly or via the same transparent
+	// proxy hop readPosition uses); absent for stage-free syncables and
+	// on soft degrade.
+	Stages map[string]int `json:"stages,omitempty"`
 }
 
 // GetSyncableStatus reports a syncable worker's operational status
@@ -403,9 +411,18 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 		}
 		wantPosition = v
 	}
+	wantStages := false
+	if raw := r.URL.Query().Get("stages"); raw != "" {
+		v, err := strconv.ParseBool(raw)
+		if err != nil {
+			writeError(w, httpgo.StatusBadRequest, "invalid_parameter", "stages must be a boolean")
+			return
+		}
+		wantStages = v
+	}
 
 	owner := h.c.SyncableOwner(id)
-	if wantPosition && owner != 0 && owner != h.c.ID() && r.Header.Get(forwardedHeader) == "" {
+	if (wantPosition || wantStages) && owner != 0 && owner != h.c.ID() && r.Header.Get(forwardedHeader) == "" {
 		// The scan position lives in the owner's worker — proxy the whole
 		// request there (its response carries the same replicated fields plus
 		// the position). Any failure to hop falls through to the local
@@ -495,6 +512,13 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 		// OwnerNode pointing at who to ask.
 		if pos, ok := h.c.SyncableReadPosition(id); ok {
 			resp.ReadPosition = &pos
+		}
+	}
+	if wantStages {
+		// Same owner-local contract as readPosition: absent on a non-owner
+		// or a stage-free syncable, never an error.
+		if counts, ok := h.c.SyncableStageKeyCounts(id); ok {
+			resp.Stages = counts
 		}
 	}
 

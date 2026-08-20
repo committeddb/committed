@@ -62,9 +62,8 @@ type FakeCluster struct {
 	}
 	AppliedIndexStub        func() uint64
 	appliedIndexMutex       sync.RWMutex
-	appliedIndexArgsForCall []struct {
-	}
-	appliedIndexReturns struct {
+	appliedIndexArgsForCall []struct{}
+	appliedIndexReturns     struct {
 		result1 uint64
 	}
 	appliedIndexReturnsOnCall map[int]struct {
@@ -72,9 +71,8 @@ type FakeCluster struct {
 	}
 	ApplyStalledStub        func() bool
 	applyStalledMutex       sync.RWMutex
-	applyStalledArgsForCall []struct {
-	}
-	applyStalledReturns struct {
+	applyStalledArgsForCall []struct{}
+	applyStalledReturns     struct {
 		result1 bool
 	}
 	applyStalledReturnsOnCall map[int]struct {
@@ -82,9 +80,8 @@ type FakeCluster struct {
 	}
 	CloseStub        func() error
 	closeMutex       sync.RWMutex
-	closeArgsForCall []struct {
-	}
-	closeReturns struct {
+	closeArgsForCall []struct{}
+	closeReturns     struct {
 		result1 error
 	}
 	closeReturnsOnCall map[int]struct {
@@ -92,9 +89,8 @@ type FakeCluster struct {
 	}
 	ConfigBuildErrorsStub        func() []cluster.ConfigBuildError
 	configBuildErrorsMutex       sync.RWMutex
-	configBuildErrorsArgsForCall []struct {
-	}
-	configBuildErrorsReturns struct {
+	configBuildErrorsArgsForCall []struct{}
+	configBuildErrorsReturns     struct {
 		result1 []cluster.ConfigBuildError
 	}
 	configBuildErrorsReturnsOnCall map[int]struct {
@@ -129,9 +125,8 @@ type FakeCluster struct {
 	}
 	DatabasesStub        func() ([]*cluster.Configuration, error)
 	databasesMutex       sync.RWMutex
-	databasesArgsForCall []struct {
-	}
-	databasesReturns struct {
+	databasesArgsForCall []struct{}
+	databasesReturns     struct {
 		result1 []*cluster.Configuration
 		result2 error
 	}
@@ -180,9 +175,8 @@ type FakeCluster struct {
 	}
 	DiskAdmissionStub        func() cluster.DiskAdmissionStatus
 	diskAdmissionMutex       sync.RWMutex
-	diskAdmissionArgsForCall []struct {
-	}
-	diskAdmissionReturns struct {
+	diskAdmissionArgsForCall []struct{}
+	diskAdmissionReturns     struct {
 		result1 cluster.DiskAdmissionStatus
 	}
 	diskAdmissionReturnsOnCall map[int]struct {
@@ -190,9 +184,8 @@ type FakeCluster struct {
 	}
 	DiskStateStub        func() string
 	diskStateMutex       sync.RWMutex
-	diskStateArgsForCall []struct {
-	}
-	diskStateReturns struct {
+	diskStateArgsForCall []struct{}
+	diskStateReturns     struct {
 		result1 string
 	}
 	diskStateReturnsOnCall map[int]struct {
@@ -200,9 +193,8 @@ type FakeCluster struct {
 	}
 	IDStub        func() uint64
 	iDMutex       sync.RWMutex
-	iDArgsForCall []struct {
-	}
-	iDReturns struct {
+	iDArgsForCall []struct{}
+	iDReturns     struct {
 		result1 uint64
 	}
 	iDReturnsOnCall map[int]struct {
@@ -277,9 +269,8 @@ type FakeCluster struct {
 	}
 	IngestablesStub        func() ([]*cluster.Configuration, error)
 	ingestablesMutex       sync.RWMutex
-	ingestablesArgsForCall []struct {
-	}
-	ingestablesReturns struct {
+	ingestablesArgsForCall []struct{}
+	ingestablesReturns     struct {
 		result1 []*cluster.Configuration
 		result2 error
 	}
@@ -289,9 +280,8 @@ type FakeCluster struct {
 	}
 	LeaderStub        func() uint64
 	leaderMutex       sync.RWMutex
-	leaderArgsForCall []struct {
-	}
-	leaderReturns struct {
+	leaderArgsForCall []struct{}
+	leaderReturns     struct {
 		result1 uint64
 	}
 	leaderReturnsOnCall map[int]struct {
@@ -323,9 +313,8 @@ type FakeCluster struct {
 	}
 	MembershipStub        func() cluster.Membership
 	membershipMutex       sync.RWMutex
-	membershipArgsForCall []struct {
-	}
-	membershipReturns struct {
+	membershipArgsForCall []struct{}
+	membershipReturns     struct {
 		result1 cluster.Membership
 	}
 	membershipReturnsOnCall map[int]struct {
@@ -333,9 +322,8 @@ type FakeCluster struct {
 	}
 	ParkedWorkersStub        func() ([]cluster.ParkedWorker, error)
 	parkedWorkersMutex       sync.RWMutex
-	parkedWorkersArgsForCall []struct {
-	}
-	parkedWorkersReturns struct {
+	parkedWorkersArgsForCall []struct{}
+	parkedWorkersReturns     struct {
 		result1 []cluster.ParkedWorker
 		result2 error
 	}
@@ -506,9 +494,8 @@ type FakeCluster struct {
 	}
 	SafeModeStub        func() bool
 	safeModeMutex       sync.RWMutex
-	safeModeArgsForCall []struct {
-	}
-	safeModeReturns struct {
+	safeModeArgsForCall []struct{}
+	safeModeReturns     struct {
 		result1 bool
 	}
 	safeModeReturnsOnCall map[int]struct {
@@ -622,6 +609,19 @@ type FakeCluster struct {
 		result1 uint64
 		result2 bool
 	}
+	SyncableStageKeyCountsStub        func(string) (map[string]int, bool)
+	syncableStageKeyCountsMutex       sync.RWMutex
+	syncableStageKeyCountsArgsForCall []struct {
+		arg1 string
+	}
+	syncableStageKeyCountsReturns struct {
+		result1 map[string]int
+		result2 bool
+	}
+	syncableStageKeyCountsReturnsOnCall map[int]struct {
+		result1 map[string]int
+		result2 bool
+	}
 	SyncableStuckStub        func(string) (cluster.SyncableStuck, bool, error)
 	syncableStuckMutex       sync.RWMutex
 	syncableStuckArgsForCall []struct {
@@ -666,9 +666,8 @@ type FakeCluster struct {
 	}
 	SyncablesStub        func() ([]*cluster.Configuration, error)
 	syncablesMutex       sync.RWMutex
-	syncablesArgsForCall []struct {
-	}
-	syncablesReturns struct {
+	syncablesArgsForCall []struct{}
+	syncablesReturns     struct {
 		result1 []*cluster.Configuration
 		result2 error
 	}
@@ -720,9 +719,8 @@ type FakeCluster struct {
 	}
 	TypesStub        func() ([]*cluster.Configuration, error)
 	typesMutex       sync.RWMutex
-	typesArgsForCall []struct {
-	}
-	typesReturns struct {
+	typesArgsForCall []struct{}
+	typesReturns     struct {
 		result1 []*cluster.Configuration
 		result2 error
 	}
@@ -992,8 +990,7 @@ func (fake *FakeCluster) AddSyncableParserArgsForCall(i int) (string, cluster.Sy
 func (fake *FakeCluster) AppliedIndex() uint64 {
 	fake.appliedIndexMutex.Lock()
 	ret, specificReturn := fake.appliedIndexReturnsOnCall[len(fake.appliedIndexArgsForCall)]
-	fake.appliedIndexArgsForCall = append(fake.appliedIndexArgsForCall, struct {
-	}{})
+	fake.appliedIndexArgsForCall = append(fake.appliedIndexArgsForCall, struct{}{})
 	stub := fake.AppliedIndexStub
 	fakeReturns := fake.appliedIndexReturns
 	fake.recordInvocation("AppliedIndex", []interface{}{})
@@ -1045,8 +1042,7 @@ func (fake *FakeCluster) AppliedIndexReturnsOnCall(i int, result1 uint64) {
 func (fake *FakeCluster) ApplyStalled() bool {
 	fake.applyStalledMutex.Lock()
 	ret, specificReturn := fake.applyStalledReturnsOnCall[len(fake.applyStalledArgsForCall)]
-	fake.applyStalledArgsForCall = append(fake.applyStalledArgsForCall, struct {
-	}{})
+	fake.applyStalledArgsForCall = append(fake.applyStalledArgsForCall, struct{}{})
 	stub := fake.ApplyStalledStub
 	fakeReturns := fake.applyStalledReturns
 	fake.recordInvocation("ApplyStalled", []interface{}{})
@@ -1098,8 +1094,7 @@ func (fake *FakeCluster) ApplyStalledReturnsOnCall(i int, result1 bool) {
 func (fake *FakeCluster) Close() error {
 	fake.closeMutex.Lock()
 	ret, specificReturn := fake.closeReturnsOnCall[len(fake.closeArgsForCall)]
-	fake.closeArgsForCall = append(fake.closeArgsForCall, struct {
-	}{})
+	fake.closeArgsForCall = append(fake.closeArgsForCall, struct{}{})
 	stub := fake.CloseStub
 	fakeReturns := fake.closeReturns
 	fake.recordInvocation("Close", []interface{}{})
@@ -1151,8 +1146,7 @@ func (fake *FakeCluster) CloseReturnsOnCall(i int, result1 error) {
 func (fake *FakeCluster) ConfigBuildErrors() []cluster.ConfigBuildError {
 	fake.configBuildErrorsMutex.Lock()
 	ret, specificReturn := fake.configBuildErrorsReturnsOnCall[len(fake.configBuildErrorsArgsForCall)]
-	fake.configBuildErrorsArgsForCall = append(fake.configBuildErrorsArgsForCall, struct {
-	}{})
+	fake.configBuildErrorsArgsForCall = append(fake.configBuildErrorsArgsForCall, struct{}{})
 	stub := fake.ConfigBuildErrorsStub
 	fakeReturns := fake.configBuildErrorsReturns
 	fake.recordInvocation("ConfigBuildErrors", []interface{}{})
@@ -1333,8 +1327,7 @@ func (fake *FakeCluster) DatabaseVersionsReturnsOnCall(i int, result1 []cluster.
 func (fake *FakeCluster) Databases() ([]*cluster.Configuration, error) {
 	fake.databasesMutex.Lock()
 	ret, specificReturn := fake.databasesReturnsOnCall[len(fake.databasesArgsForCall)]
-	fake.databasesArgsForCall = append(fake.databasesArgsForCall, struct {
-	}{})
+	fake.databasesArgsForCall = append(fake.databasesArgsForCall, struct{}{})
 	stub := fake.DatabasesStub
 	fakeReturns := fake.databasesReturns
 	fake.recordInvocation("Databases", []interface{}{})
@@ -1579,8 +1572,7 @@ func (fake *FakeCluster) DeleteSyncableReturnsOnCall(i int, result1 error) {
 func (fake *FakeCluster) DiskAdmission() cluster.DiskAdmissionStatus {
 	fake.diskAdmissionMutex.Lock()
 	ret, specificReturn := fake.diskAdmissionReturnsOnCall[len(fake.diskAdmissionArgsForCall)]
-	fake.diskAdmissionArgsForCall = append(fake.diskAdmissionArgsForCall, struct {
-	}{})
+	fake.diskAdmissionArgsForCall = append(fake.diskAdmissionArgsForCall, struct{}{})
 	stub := fake.DiskAdmissionStub
 	fakeReturns := fake.diskAdmissionReturns
 	fake.recordInvocation("DiskAdmission", []interface{}{})
@@ -1632,8 +1624,7 @@ func (fake *FakeCluster) DiskAdmissionReturnsOnCall(i int, result1 cluster.DiskA
 func (fake *FakeCluster) DiskState() string {
 	fake.diskStateMutex.Lock()
 	ret, specificReturn := fake.diskStateReturnsOnCall[len(fake.diskStateArgsForCall)]
-	fake.diskStateArgsForCall = append(fake.diskStateArgsForCall, struct {
-	}{})
+	fake.diskStateArgsForCall = append(fake.diskStateArgsForCall, struct{}{})
 	stub := fake.DiskStateStub
 	fakeReturns := fake.diskStateReturns
 	fake.recordInvocation("DiskState", []interface{}{})
@@ -1685,8 +1676,7 @@ func (fake *FakeCluster) DiskStateReturnsOnCall(i int, result1 string) {
 func (fake *FakeCluster) ID() uint64 {
 	fake.iDMutex.Lock()
 	ret, specificReturn := fake.iDReturnsOnCall[len(fake.iDArgsForCall)]
-	fake.iDArgsForCall = append(fake.iDArgsForCall, struct {
-	}{})
+	fake.iDArgsForCall = append(fake.iDArgsForCall, struct{}{})
 	stub := fake.IDStub
 	fakeReturns := fake.iDReturns
 	fake.recordInvocation("ID", []interface{}{})
@@ -2059,8 +2049,7 @@ func (fake *FakeCluster) IngestableVersionsReturnsOnCall(i int, result1 []cluste
 func (fake *FakeCluster) Ingestables() ([]*cluster.Configuration, error) {
 	fake.ingestablesMutex.Lock()
 	ret, specificReturn := fake.ingestablesReturnsOnCall[len(fake.ingestablesArgsForCall)]
-	fake.ingestablesArgsForCall = append(fake.ingestablesArgsForCall, struct {
-	}{})
+	fake.ingestablesArgsForCall = append(fake.ingestablesArgsForCall, struct{}{})
 	stub := fake.IngestablesStub
 	fakeReturns := fake.ingestablesReturns
 	fake.recordInvocation("Ingestables", []interface{}{})
@@ -2115,8 +2104,7 @@ func (fake *FakeCluster) IngestablesReturnsOnCall(i int, result1 []*cluster.Conf
 func (fake *FakeCluster) Leader() uint64 {
 	fake.leaderMutex.Lock()
 	ret, specificReturn := fake.leaderReturnsOnCall[len(fake.leaderArgsForCall)]
-	fake.leaderArgsForCall = append(fake.leaderArgsForCall, struct {
-	}{})
+	fake.leaderArgsForCall = append(fake.leaderArgsForCall, struct{}{})
 	stub := fake.LeaderStub
 	fakeReturns := fake.leaderReturns
 	fake.recordInvocation("Leader", []interface{}{})
@@ -2293,8 +2281,7 @@ func (fake *FakeCluster) MemberAPIURLReturnsOnCall(i int, result1 string, result
 func (fake *FakeCluster) Membership() cluster.Membership {
 	fake.membershipMutex.Lock()
 	ret, specificReturn := fake.membershipReturnsOnCall[len(fake.membershipArgsForCall)]
-	fake.membershipArgsForCall = append(fake.membershipArgsForCall, struct {
-	}{})
+	fake.membershipArgsForCall = append(fake.membershipArgsForCall, struct{}{})
 	stub := fake.MembershipStub
 	fakeReturns := fake.membershipReturns
 	fake.recordInvocation("Membership", []interface{}{})
@@ -2346,8 +2333,7 @@ func (fake *FakeCluster) MembershipReturnsOnCall(i int, result1 cluster.Membersh
 func (fake *FakeCluster) ParkedWorkers() ([]cluster.ParkedWorker, error) {
 	fake.parkedWorkersMutex.Lock()
 	ret, specificReturn := fake.parkedWorkersReturnsOnCall[len(fake.parkedWorkersArgsForCall)]
-	fake.parkedWorkersArgsForCall = append(fake.parkedWorkersArgsForCall, struct {
-	}{})
+	fake.parkedWorkersArgsForCall = append(fake.parkedWorkersArgsForCall, struct{}{})
 	stub := fake.ParkedWorkersStub
 	fakeReturns := fake.parkedWorkersReturns
 	fake.recordInvocation("ParkedWorkers", []interface{}{})
@@ -3215,8 +3201,7 @@ func (fake *FakeCluster) ResolveTypeReturnsOnCall(i int, result1 *cluster.Type, 
 func (fake *FakeCluster) SafeMode() bool {
 	fake.safeModeMutex.Lock()
 	ret, specificReturn := fake.safeModeReturnsOnCall[len(fake.safeModeArgsForCall)]
-	fake.safeModeArgsForCall = append(fake.safeModeArgsForCall, struct {
-	}{})
+	fake.safeModeArgsForCall = append(fake.safeModeArgsForCall, struct{}{})
 	stub := fake.SafeModeStub
 	fakeReturns := fake.safeModeReturns
 	fake.recordInvocation("SafeMode", []interface{}{})
@@ -3781,6 +3766,70 @@ func (fake *FakeCluster) SyncableReadPositionReturnsOnCall(i int, result1 uint64
 	}{result1, result2}
 }
 
+func (fake *FakeCluster) SyncableStageKeyCounts(arg1 string) (map[string]int, bool) {
+	fake.syncableStageKeyCountsMutex.Lock()
+	ret, specificReturn := fake.syncableStageKeyCountsReturnsOnCall[len(fake.syncableStageKeyCountsArgsForCall)]
+	fake.syncableStageKeyCountsArgsForCall = append(fake.syncableStageKeyCountsArgsForCall, struct {
+		arg1 string
+	}{arg1})
+	stub := fake.SyncableStageKeyCountsStub
+	fakeReturns := fake.syncableStageKeyCountsReturns
+	fake.recordInvocation("SyncableStageKeyCounts", []interface{}{arg1})
+	fake.syncableStageKeyCountsMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeCluster) SyncableStageKeyCountsCallCount() int {
+	fake.syncableStageKeyCountsMutex.RLock()
+	defer fake.syncableStageKeyCountsMutex.RUnlock()
+	return len(fake.syncableStageKeyCountsArgsForCall)
+}
+
+func (fake *FakeCluster) SyncableStageKeyCountsCalls(stub func(string) (map[string]int, bool)) {
+	fake.syncableStageKeyCountsMutex.Lock()
+	defer fake.syncableStageKeyCountsMutex.Unlock()
+	fake.SyncableStageKeyCountsStub = stub
+}
+
+func (fake *FakeCluster) SyncableStageKeyCountsArgsForCall(i int) string {
+	fake.syncableStageKeyCountsMutex.RLock()
+	defer fake.syncableStageKeyCountsMutex.RUnlock()
+	argsForCall := fake.syncableStageKeyCountsArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeCluster) SyncableStageKeyCountsReturns(result1 map[string]int, result2 bool) {
+	fake.syncableStageKeyCountsMutex.Lock()
+	defer fake.syncableStageKeyCountsMutex.Unlock()
+	fake.SyncableStageKeyCountsStub = nil
+	fake.syncableStageKeyCountsReturns = struct {
+		result1 map[string]int
+		result2 bool
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) SyncableStageKeyCountsReturnsOnCall(i int, result1 map[string]int, result2 bool) {
+	fake.syncableStageKeyCountsMutex.Lock()
+	defer fake.syncableStageKeyCountsMutex.Unlock()
+	fake.SyncableStageKeyCountsStub = nil
+	if fake.syncableStageKeyCountsReturnsOnCall == nil {
+		fake.syncableStageKeyCountsReturnsOnCall = make(map[int]struct {
+			result1 map[string]int
+			result2 bool
+		})
+	}
+	fake.syncableStageKeyCountsReturnsOnCall[i] = struct {
+		result1 map[string]int
+		result2 bool
+	}{result1, result2}
+}
+
 func (fake *FakeCluster) SyncableStuck(arg1 string) (cluster.SyncableStuck, bool, error) {
 	fake.syncableStuckMutex.Lock()
 	ret, specificReturn := fake.syncableStuckReturnsOnCall[len(fake.syncableStuckArgsForCall)]
@@ -3980,8 +4029,7 @@ func (fake *FakeCluster) SyncableVersionsReturnsOnCall(i int, result1 []cluster.
 func (fake *FakeCluster) Syncables() ([]*cluster.Configuration, error) {
 	fake.syncablesMutex.Lock()
 	ret, specificReturn := fake.syncablesReturnsOnCall[len(fake.syncablesArgsForCall)]
-	fake.syncablesArgsForCall = append(fake.syncablesArgsForCall, struct {
-	}{})
+	fake.syncablesArgsForCall = append(fake.syncablesArgsForCall, struct{}{})
 	stub := fake.SyncablesStub
 	fakeReturns := fake.syncablesReturns
 	fake.recordInvocation("Syncables", []interface{}{})
@@ -4231,8 +4279,7 @@ func (fake *FakeCluster) TypeVersionsReturnsOnCall(i int, result1 []cluster.Vers
 func (fake *FakeCluster) Types() ([]*cluster.Configuration, error) {
 	fake.typesMutex.Lock()
 	ret, specificReturn := fake.typesReturnsOnCall[len(fake.typesArgsForCall)]
-	fake.typesArgsForCall = append(fake.typesArgsForCall, struct {
-	}{})
+	fake.typesArgsForCall = append(fake.typesArgsForCall, struct{}{})
 	stub := fake.TypesStub
 	fakeReturns := fake.typesReturns
 	fake.recordInvocation("Types", []interface{}{})

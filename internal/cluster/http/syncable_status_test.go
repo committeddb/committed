@@ -370,3 +370,32 @@ func TestSyncableStatus_AcknowledgedDeadLettersSplit(t *testing.T) {
 	require.Equal(t, uint64(3), body.AcknowledgedDeadLetters)
 	require.Contains(t, raw, `"acknowledgedDeadLetters":3`)
 }
+
+// ?stages=true surfaces the owner-local per-stage output key counts — the
+// silent-empty-stage triage read ("how many keys does billed-pairs
+// hold?"). Absent without the opt-in, absent for stage-free syncables,
+// same soft-degrade contract as readPosition.
+func TestSyncableStatus_StageKeyCounts(t *testing.T) {
+	fake := &clusterfakes.FakeCluster{}
+	fake.SyncableExistsReturns(true, nil)
+	fake.IDReturns(1)
+	fake.SyncableOwnerReturns(1)
+	fake.SyncableProgressReturns(50, 100, nil)
+	fake.SyncableStageKeyCountsReturns(map[string]int{"billed-pairs": 0, "completed": 22023}, true)
+
+	// Opted in: the counts render.
+	status, raw := doSyncableStatusRaw(t, fake, "?stages=true", nil)
+	require.Equal(t, 200, status)
+	require.Contains(t, raw, `"billed-pairs":0`, "an EMPTY stage is visible as 0, not absent")
+	require.Contains(t, raw, `"completed":22023`)
+
+	// Default call: no counts (poll-safe O(1) contract untouched).
+	_, raw = doSyncableStatusRaw(t, fake, "", nil)
+	require.NotContains(t, raw, "billed-pairs")
+
+	// Stage-free syncable (or non-owner): field absent, not an error.
+	fake.SyncableStageKeyCountsReturns(nil, false)
+	status, raw = doSyncableStatusRaw(t, fake, "?stages=true", nil)
+	require.Equal(t, 200, status)
+	require.NotContains(t, raw, `"stages"`)
+}

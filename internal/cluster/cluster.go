@@ -150,6 +150,10 @@ type Cluster interface {
 	// owning node's worker holds a reader, so the HTTP layer proxies
 	// ?readPosition=true status calls to SyncableOwner's node.
 	SyncableReadPosition(id string) (position uint64, ok bool)
+	// SyncableStageKeyCounts reports the per-stage output key counts of the
+	// syncable's worker on THIS node (ok=false: no worker here, or no
+	// stages). Owner-local; see StageIntrospector.
+	SyncableStageKeyCounts(id string) (counts map[string]int, ok bool)
 	// ReplaySyncableDeadLetter re-drives a dead-lettered proposal: it
 	// re-runs the syncable's Sync for the proposal at index and, on success,
 	// clears the dead-letter record. Node-agnostic. Returns ErrNotDeadLettered

@@ -217,6 +217,18 @@ func (tx *Tx) SetFrontier(index uint64) error {
 	return tx.btx.Bucket(metaBucket).Put(metaFrontier, v[:])
 }
 
+// OutKeyCount reports how many output keys a stage currently holds —
+// the introspection read that distinguishes "the fan produced nothing"
+// from "the join never matched" (the field triage that had no way to
+// ask). 0 for a stage that has never folded.
+func (tx *Tx) OutKeyCount(stage string) (int, error) {
+	b, err := tx.bucket(outBucket(stage))
+	if err != nil || b == nil {
+		return 0, err
+	}
+	return b.Stats().KeyN, nil
+}
+
 func outBucket(stage string) []byte { return []byte("stage:" + stage + ":out") }
 
 func srcBucket(stage string) []byte { return []byte("stage:" + stage + ":src") }

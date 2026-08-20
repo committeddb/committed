@@ -170,3 +170,96 @@ func TestStageForEachNonArrayWarns(t *testing.T) {
 	require.Equal(t, "fan", warns[0].ContextMap()["stage"])
 	require.Equal(t, "unresolved", warns[0].ContextMap()["value_type"])
 }
+
+// The jti-b4 field defect, pinned: a fan-then-fold stage with normalized
+// keys, anti-joined by a stage-fed consumer whose referencing values
+// carry the OTHER rendering (UPPERCASE CDC GUIDs) and whose join —
+// correctly — declares nothing. The join must inherit the producer's
+// normalize, or the reference silently never matches and the anti-join
+// suppresses nothing (three full 36M replays' worth of superset rows).
+func TestStageJoinInheritsProducerNormalize(t *testing.T) {
+	stages := []Stage{
+		{
+			Name: "billed-pairs", From: "txn-events",
+			ForEach: "$.EventData.elements[*]", ElementKey: "$.Id",
+			KeyPath:   []string{"$parent.JobId", "$.WorkAreaId"},
+			Normalize: NormalizeLower,
+			Reduce:    "aggregate", Emit: []Emit{{Field: "n", Count: true}},
+		},
+		{
+			Name: "completed", From: "visits", KeyPath: []string{"$.jobId", "$.waId"},
+			Normalize: NormalizeLower,
+			Emit:      []Emit{{Field: "jobId", From: "$.jobId"}, {Field: "waId", From: "$.waId"}},
+		},
+		{
+			Name: "unbilled", From: "completed", KeyPath: []string{"$.jobId", "$.waId"},
+			Normalize: NormalizeLower,
+			Joins:     []Join{{From: "billed-pairs", On: []string{"$.jobId", "$.waId"}, Absent: true}},
+			Emit:      []Emit{{Field: "j", From: "$.jobId"}},
+		},
+	}
+	require.NoError(t, ValidateShapes(stages))
+	g := BuildGraph(stages)
+	store := stageStoreForTest(t)
+
+	fold := func(topic, key, payload string) {
+		require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+			return g.FoldTopicUpsertNow(tx, topic, []byte(key), decodePayload(t, payload))
+		}))
+	}
+	get := func(stage, key string) string {
+		var got string
+		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
+			v, err := tx.GetOut(stage, []byte(key))
+			got = string(v)
+			return err
+		}))
+		return got
+	}
+	pair := OutKey([]string{"j-1", "w-1"})
+
+	// The completed pair arrives with UPPERCASE values; nothing billed —
+	// participates.
+	fold("visits", "v1", `{"jobId":"J-1","waId":"W-1"}`)
+	require.NotEmpty(t, get("unbilled", pair))
+
+	// The billing element arrives (also UPPERCASE payload, lowered by the
+	// producer's normalize): the anti-join must suppress — the inherited
+	// normalize renders the UPPERCASE reference into the producer's key
+	// space.
+	fold("txn-events", "t1", `{"JobId":"J-1","EventData":{"elements":[{"Id":"e1","WorkAreaId":"W-1","perVisitCharge":25}]}}`)
+	require.NotEmpty(t, get("billed-pairs", pair), "the fan-then-fold produces the pair")
+	require.Empty(t, get("unbilled", pair), "billed-pair arrival suppresses across the case seam")
+
+	// The transaction deletes: billing retracts, the pair heals back in —
+	// phase 4's centerpiece trigger, both directions.
+	require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+		return g.FoldTopicDeleteNow(tx, "txn-events", []byte("t1"))
+	}))
+	require.NotEmpty(t, get("unbilled", pair), "billing retraction un-suppresses")
+
+	// And the graph never wrote its resolution back into the caller's
+	// config (the store fingerprint reads it).
+	require.Empty(t, stages[2].Joins[0].Normalize, "inheritance resolves on the graph's copy, not the config")
+}
+
+// Declaring normalize on a stage join is an admission error naming the
+// right place.
+func TestStageJoinNormalizeDeclarationRejected(t *testing.T) {
+	stages := []Stage{
+		{
+			Name: "pairs", From: "billing", KeyPath: []string{"$.job"},
+			Normalize: NormalizeLower,
+			Emit:      []Emit{{Field: "job", From: "$.job"}},
+		},
+		{
+			Name: "consumer", From: "jobs", KeyPath: []string{"$.id"},
+			Joins: []Join{{From: "pairs", On: []string{"$.jobId"}, Normalize: NormalizeLower}},
+			Emit:  []Emit{{Field: "id", From: "$.id"}},
+		},
+	}
+	err := ValidateShapes(stages)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "normalize is not declarable on a stage join")
+	require.Contains(t, err.Error(), `inherits stage "pairs"`)
+}

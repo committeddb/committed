@@ -142,9 +142,13 @@ type Join struct {
 	// Normalize folds BOTH sides of this join's key comparison — the
 	// input's on rendering AND (for a topic join) the topic's entity-key
 	// rendering as it lands in this join's dimension rows — so a
-	// lowercase reference matches an UPPERCASE-keyed CDC dimension. A
-	// stage join's dimension keys are the joined stage's outputs; declare
-	// normalize on that stage instead (its keys are its own contract).
+	// lowercase reference matches an UPPERCASE-keyed CDC dimension.
+	// Declarable on TOPIC joins only: a stage join INHERITS the joined
+	// stage's normalize (BuildGraph resolves it), because its dimension
+	// keys are that stage's outputs and the references must render in
+	// that key space — declaring it separately could only agree or be a
+	// silent mismatch (the field defect: an UPPERCASE reference against
+	// lowered stage keys, an anti-join that suppressed nothing).
 	Normalize string `mapstructure:"normalize"`
 }
 
@@ -288,6 +292,9 @@ func ValidateShapes(stages []Stage) error {
 				}
 				if fi >= i {
 					return fmt.Errorf("%s: from %q references a stage at or after this one — stages join in manifest order (move the producer above its consumer)", jw, j.From)
+				}
+				if j.Normalize != "" {
+					return fmt.Errorf("%s: normalize is not declarable on a stage join — references render in the joined stage's key space, so the join inherits stage %q's normalize automatically; declare it on that stage", jw, j.From)
 				}
 			}
 			if len(j.On) == 0 {

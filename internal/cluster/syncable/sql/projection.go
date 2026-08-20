@@ -1447,6 +1447,29 @@ func (p *Projection) foldStagesTx(ctx context.Context, tx *gosql.Tx, stx *stages
 	return p.foldEntitiesTx(stx, a)
 }
 
+// StageKeyCounts implements cluster.StageIntrospector: each declared
+// stage's current out-key count from the node-local store.
+func (p *Projection) StageKeyCounts() (map[string]int, error) {
+	if p.stages == nil {
+		return nil, nil
+	}
+	out := make(map[string]int, len(p.config.Stages))
+	err := p.stageStore.View(func(tx *stagestore.Tx) error {
+		for i := range p.config.Stages {
+			n, err := tx.OutKeyCount(p.config.Stages[i].Name)
+			if err != nil {
+				return err
+			}
+			out[p.config.Stages[i].Name] = n
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // StageFrontier implements cluster.StageRecoverer.
 func (p *Projection) StageFrontier() (uint64, bool, error) {
 	if p.stages == nil {

@@ -81,13 +81,20 @@ type Graph struct {
 func BuildGraph(stages []Stage) *Graph {
 	g := &Graph{byName: map[string]*graphNode{}, byTopic: map[string][]*graphNode{}, dims: map[string][]dimRef{}}
 	nodes := make([]*graphNode, len(stages))
-	for i := range stages {
-		nodes[i] = &graphNode{def: &stages[i]}
-		g.byName[stages[i].Name] = nodes[i]
+	// The graph owns a copy of the stage definitions (joins deep-copied):
+	// stage-join normalize is RESOLVED below by inheritance, and that
+	// resolution must never write into the caller's config (which feeds
+	// the store fingerprint).
+	owned := make([]Stage, len(stages))
+	copy(owned, stages)
+	for i := range owned {
+		owned[i].Joins = append([]Join(nil), owned[i].Joins...)
+		nodes[i] = &graphNode{def: &owned[i]}
+		g.byName[owned[i].Name] = nodes[i]
 	}
 	g.order = nodes
-	for i := range stages {
-		st := &stages[i]
+	for i := range owned {
+		st := &owned[i]
 		if up, ok := g.byName[st.From]; ok {
 			up.consumers = append(up.consumers, nodes[i])
 		} else {
@@ -97,6 +104,15 @@ func BuildGraph(stages []Stage) *Graph {
 			jn := &st.Joins[j]
 			if jn.From != "" {
 				if producer, ok := g.byName[jn.From]; ok {
+					// A stage join INHERITS the joined stage's normalize:
+					// the dimension keys are the producer's outputs, so the
+					// join's references must render in that key space — the
+					// field defect was an UPPERCASE CDC reference against a
+					// lowered stage key, silently never matching (an
+					// anti-join that suppressed nothing). Admission rejects
+					// a normalize declared on the join itself, so this
+					// resolution is the single source of the rendering.
+					jn.Normalize = producer.def.Normalize
 					producer.dimConsumers = append(producer.dimConsumers, dimRef{node: nodes[i], join: jn})
 				}
 				continue
