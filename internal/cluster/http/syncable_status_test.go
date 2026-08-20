@@ -2,6 +2,7 @@ package http_test
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	httpgo "net/http"
 	"net/http/httptest"
@@ -398,4 +399,37 @@ func TestSyncableStatus_StageKeyCounts(t *testing.T) {
 	status, raw = doSyncableStatusRaw(t, fake, "?stages=true", nil)
 	require.Equal(t, 200, status)
 	require.NotContains(t, raw, `"stages"`)
+}
+
+// ?probeStage/?probeKey answers a single-key existence probe — the other
+// half of stage introspection ("is THIS pair in billed-pairs?"). A
+// typo'd stage name is a loud 400, never "key absent".
+func TestSyncableStatus_StageKeyProbe(t *testing.T) {
+	fake := &clusterfakes.FakeCluster{}
+	fake.SyncableExistsReturns(true, nil)
+	fake.IDReturns(1)
+	fake.SyncableOwnerReturns(1)
+	fake.SyncableProgressReturns(50, 100, nil)
+
+	fake.SyncableStageKeyExistsReturns(true, true, nil)
+	status, raw := doSyncableStatusRaw(t, fake, "?probeStage=billed-pairs&probeKey=%5B%22j-1%22%2C%225%22%5D", nil)
+	require.Equal(t, 200, status)
+	require.Contains(t, raw, `"stageKeyExists":true`)
+	_, stage, key := fake.SyncableStageKeyExistsArgsForCall(0)
+	require.Equal(t, "billed-pairs", stage)
+	require.Equal(t, `["j-1","5"]`, key, "the composite encoding decodes through the query param")
+
+	fake.SyncableStageKeyExistsReturns(false, true, nil)
+	_, raw = doSyncableStatusRaw(t, fake, "?probeStage=billed-pairs&probeKey=nope", nil)
+	require.Contains(t, raw, `"stageKeyExists":false`)
+
+	// Unknown stage: loud 400.
+	fake.SyncableStageKeyExistsReturns(false, true, errors.New(`stage "billed-pear" is not declared by this projection`))
+	status, raw = doSyncableStatusRaw(t, fake, "?probeStage=billed-pear&probeKey=x", nil)
+	require.Equal(t, 400, status)
+	require.Contains(t, raw, "billed-pear")
+
+	// Half a probe is a parameter error.
+	status, _ = doSyncableStatusRaw(t, fake, "?probeStage=only", nil)
+	require.Equal(t, 400, status)
 }

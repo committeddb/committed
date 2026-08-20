@@ -1,6 +1,7 @@
 package stages
 
 import (
+	"encoding/json"
 	"fmt"
 	"testing"
 
@@ -262,4 +263,90 @@ func TestStageJoinNormalizeDeclarationRejected(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "normalize is not declarable on a stage join")
 	require.Contains(t, err.Error(), `inherits stage "pairs"`)
+}
+
+// The number-rendering sibling of the GUID-case bug (jti-b5): the same
+// logical pair key arrives as CDC-rendered `5.0000` on one side and
+// jsonColumns-decoded `5` on the other. Key identity must canonicalize
+// numeric renderings — source digits are exactness for VALUES, but for
+// KEYS they are just bytes, and byte-exact comparison silently never
+// matches (an anti-join that suppresses nothing, in either direction).
+func TestNumericKeyPartsCanonicalize(t *testing.T) {
+	stages := []Stage{
+		{
+			Name: "billed-pairs", From: "billing",
+			KeyPath:   []string{"$.job", "$.wa"},
+			Normalize: NormalizeLower,
+			Reduce:    "aggregate", Emit: []Emit{{Field: "n", Count: true}},
+		},
+		{
+			Name: "unbilled", From: "pairs", KeyPath: []string{"$.jobId", "$.waId"},
+			Normalize: NormalizeLower,
+			Joins:     []Join{{From: "billed-pairs", On: []string{"$.jobId", "$.waId"}, Absent: true}},
+			Emit:      []Emit{{Field: "j", From: "$.jobId"}},
+		},
+	}
+	require.NoError(t, ValidateShapes(stages))
+	g := BuildGraph(stages)
+	store := stageStoreForTest(t)
+
+	fold := func(topic, key, payload string) {
+		require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+			return g.FoldTopicUpsertNow(tx, topic, []byte(key), decodePayload(t, payload))
+		}))
+	}
+	get := func(stage, key string) string {
+		var got string
+		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
+			v, err := tx.GetOut(stage, []byte(key))
+			got = string(v)
+			return err
+		}))
+		return got
+	}
+	pair := OutKey([]string{"guid-a", "5"})
+
+	// The pair references workarea 5 with the app's rendering.
+	fold("pairs", "p1", `{"jobId":"GUID-A","waId":5}`)
+	require.NotEmpty(t, get("unbilled", pair), "unbilled before any billing (canonical numeric key)")
+
+	// The billing row arrives with the CDC rendering: 5.0000 — the SAME
+	// logical pair. It must land on the same canonical key and suppress.
+	fold("billing", "b1", `{"job":"GUID-A","wa":5.0000}`)
+	require.NotEmpty(t, get("billed-pairs", pair), "5.0000 folds onto the canonical key 5")
+	require.Empty(t, get("unbilled", pair), "the CDC-rendered pair suppresses the app-rendered reference")
+
+	// And a fractional value keeps its significant digits (identity, not
+	// truncation): 5.25 is NOT 5.
+	fold("billing", "b2", `{"job":"GUID-B","wa":5.25}`)
+	require.NotEmpty(t, get("billed-pairs", OutKey([]string{"guid-b", "5.25"})))
+	require.Empty(t, get("billed-pairs", OutKey([]string{"guid-b", "5"})), "5.25 must not collapse onto 5")
+}
+
+// The canonical digit renderer, exhaustively at its edges: exponents,
+// leading/trailing zeros, signed zero, and non-numeric pass-through.
+func TestCanonicalKeyPart(t *testing.T) {
+	cases := map[string]string{
+		"5":                       "5",
+		"5.0000":                  "5",
+		"05":                      "5",
+		"0.500":                   "0.5",
+		"5.25":                    "5.25",
+		"-5.0":                    "-5",
+		"-0.000":                  "0",
+		"0":                       "0",
+		"5e2":                     "500",
+		"5E+2":                    "500",
+		"1e-3":                    "0.001",
+		"5.25e1":                  "52.5",
+		"441744":                  "441744",
+		"12345678901234567890.10": "12345678901234567890.1",
+	}
+	for in, want := range cases {
+		require.Equal(t, want, CanonicalKeyPart(json.Number(in)), "json.Number(%s)", in)
+	}
+	require.Equal(t, "5", CanonicalKeyPart(float64(5)))
+	require.Equal(t, "5.25", CanonicalKeyPart(float64(5.25)))
+	require.Equal(t, "007", CanonicalKeyPart("007"), "a STRING key is text, never re-parsed as a number")
+	require.Equal(t, "GUID-A", CanonicalKeyPart("GUID-A"))
 }

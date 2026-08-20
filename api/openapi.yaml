@@ -949,6 +949,13 @@ paths:
         hold?" splits fan-produced-nothing from join-never-matched. Same
         owner-proxy and soft-degrade contract as `readPosition`; absent
         for stage-free syncables.
+
+        `?probeStage=<stage>&probeKey=<key>` answers a single-key
+        existence probe (`stageKeyExists`) against the stage's STORED
+        key form — canonical digits, normalized case; composite keys in
+        their JSON-array encoding, URL-escaped. A typo'd stage name is
+        a 400, never "absent". Together the pair collapses the
+        fan-vs-join triage to two curls.
       operationId: getSyncableStatus
       parameters:
         - $ref: '#/components/parameters/Consistency'
@@ -958,6 +965,16 @@ paths:
           required: false
           schema: { type: boolean }
           description: Opt into owner-local per-stage output key counts.
+        - name: probeStage
+          in: query
+          required: false
+          schema: { type: string }
+          description: Stage name for a single-key existence probe (with probeKey).
+        - name: probeKey
+          in: query
+          required: false
+          schema: { type: string }
+          description: Stored-form key to probe (canonical digits, normalized case).
         - name: readPosition
           in: query
           required: false

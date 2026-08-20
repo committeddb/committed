@@ -361,6 +361,13 @@ type SyncableStatusResponse struct {
 	// proxy hop readPosition uses); absent for stage-free syncables and
 	// on soft degrade.
 	Stages map[string]int `json:"stages,omitempty"`
+	// StageKeyExists answers a single-key probe
+	// (?probeStage=<stage>&probeKey=<key>): does that stage currently
+	// hold an output at that key (stored form: canonical digits,
+	// normalized case)? The second half of the stage-introspection pair —
+	// counts say "is it empty?", the probe says "is THIS pair in it?".
+	// Present only when probed and the owner's worker answered.
+	StageKeyExists *bool `json:"stageKeyExists,omitempty"`
 }
 
 // GetSyncableStatus reports a syncable worker's operational status
@@ -420,9 +427,15 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 		}
 		wantStages = v
 	}
+	probeStage := r.URL.Query().Get("probeStage")
+	probeKey := r.URL.Query().Get("probeKey")
+	if (probeStage == "") != (probeKey == "") {
+		writeError(w, httpgo.StatusBadRequest, "invalid_parameter", "probeStage and probeKey go together")
+		return
+	}
 
 	owner := h.c.SyncableOwner(id)
-	if (wantPosition || wantStages) && owner != 0 && owner != h.c.ID() && r.Header.Get(forwardedHeader) == "" {
+	if (wantPosition || wantStages || probeStage != "") && owner != 0 && owner != h.c.ID() && r.Header.Get(forwardedHeader) == "" {
 		// The scan position lives in the owner's worker — proxy the whole
 		// request there (its response carries the same replicated fields plus
 		// the position). Any failure to hop falls through to the local
@@ -519,6 +532,17 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 		// or a stage-free syncable, never an error.
 		if counts, ok := h.c.SyncableStageKeyCounts(id); ok {
 			resp.Stages = counts
+		}
+	}
+	if probeStage != "" {
+		exists, ok, err := h.c.SyncableStageKeyExists(id, probeStage, probeKey)
+		if err != nil {
+			// A typo'd stage name must not read as "key absent".
+			writeError(w, httpgo.StatusBadRequest, "invalid_parameter", err.Error())
+			return
+		}
+		if ok {
+			resp.StageKeyExists = &exists
 		}
 	}
 

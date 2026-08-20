@@ -284,6 +284,18 @@ func projectionNormalizeFlow(t *testing.T, db *sql.DB, table, quoteL, quoteR str
 	require.NoError(t, err)
 	require.Equal(t, 1, counts["latest-prop"], "the folded stage's key count is visible")
 
+	// The single-key probe: stored form (lowered), so the canonical key
+	// answers true, the raw producer rendering answers false, and a
+	// typo'd stage name is an error, never "absent".
+	exists, err := p.StageKeyExists("latest-prop", "guid-77")
+	require.NoError(t, err)
+	require.True(t, exists)
+	exists, err = p.StageKeyExists("latest-prop", "GUID-77")
+	require.NoError(t, err)
+	require.False(t, exists, "the probe answers about STORED bytes — callers probe the canonical form")
+	_, err = p.StageKeyExists("latest-prpo", "guid-77")
+	require.Error(t, err)
+
 	// The producer's delete tombstone carries the UPPERCASE key — it must
 	// still address the lowercased row (the RTBF-critical binding).
 	sync(cluster.NewDeleteEntity(jobType, []byte("GUID-77")))

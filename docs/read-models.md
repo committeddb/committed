@@ -500,7 +500,14 @@ set = [ { column = "total", from = "$.total" },
 - **Introspection**: `GET /syncable/{id}/status?stages=true` reports
   each stage's current output key count from the owner's store — an
   empty stage reads 0, which is the one number that splits "the fan
-  produced nothing" from "the join never matched."
+  produced nothing" from "the join never matched" — and
+  `?probeStage=<stage>&probeKey=<key>` answers whether one specific key
+  is currently held (stored form: canonical digits, normalized case;
+  composite keys in their JSON-array encoding).
+- **Key identity is canonical**: numeric key parts render canonically —
+  `5`, `5.0000`, and `5e0` are ONE key (`5.25` keeps its digits), and
+  strings are never re-parsed (`"007"` stays text). Source digit
+  strings are preserved in VALUES; keys are identity.
 - Stage state lives in one bbolt file per syncable under
   `<dataDir>/projections/` — derived, node-local, rebuildable from the
   log. **Editing stage definitions requires a rebuild** (the

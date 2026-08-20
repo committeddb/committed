@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 
 	"github.com/PaesslerAG/jsonpath"
@@ -178,6 +179,102 @@ func toFloat(v any) (float64, bool) {
 		return f, err == nil
 	}
 	return 0, false
+}
+
+// CanonicalKeyPart renders one key part for the store's byte-exact key
+// space. Strings pass through UNTOUCHED — an entity key "007" is text,
+// not a number; only genuinely numeric JSON values canonicalize — and
+// numbers render in canonical minimal-decimal form: "5", 5.0000, and
+// 5e0 are ONE key, while 5.25 keeps its digits. Source digits are
+// exactness for VALUES (bindings keep them); for KEYS they are just
+// bytes, and the field defect was a CDC-rendered 5.0000 against a
+// jsonColumns-decoded 5 silently never matching (an anti-join that
+// suppressed nothing, in either direction).
+func CanonicalKeyPart(v any) string {
+	switch n := v.(type) {
+	case json.Number:
+		return canonicalNumericDigits(n.String())
+	case float64:
+		return canonicalNumericDigits(strconv.FormatFloat(n, 'f', -1, 64))
+	case float32:
+		return canonicalNumericDigits(strconv.FormatFloat(float64(n), 'f', -1, 32))
+	case int, int32, int64, uint, uint32, uint64:
+		return fmt.Sprintf("%d", n)
+	default:
+		return KeyString(v)
+	}
+}
+
+// canonicalNumericDigits normalizes a JSON numeric literal's digit
+// string exactly (no floating point): exponent applied, leading integer
+// zeros and trailing fractional zeros stripped, "-0" folded to "0". A
+// string that fails to parse as a JSON number passes through verbatim.
+func canonicalNumericDigits(s string) string {
+	neg := false
+	rest := s
+	switch {
+	case strings.HasPrefix(rest, "-"):
+		neg, rest = true, rest[1:]
+	case strings.HasPrefix(rest, "+"):
+		rest = rest[1:]
+	}
+	mant := rest
+	exp := 0
+	if i := strings.IndexAny(rest, "eE"); i >= 0 {
+		e, err := strconv.Atoi(rest[i+1:])
+		if err != nil {
+			return s
+		}
+		mant, exp = rest[:i], e
+	}
+	intPart, fracPart := mant, ""
+	if i := strings.IndexByte(mant, '.'); i >= 0 {
+		intPart, fracPart = mant[:i], mant[i+1:]
+	}
+	digits := intPart + fracPart
+	if digits == "" || strings.IndexFunc(digits, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
+		return s
+	}
+	// point = number of digits left of the decimal point after applying
+	// the exponent.
+	point := len(intPart) + exp
+	// Strip leading zeros (tracking the point) and trailing zeros.
+	start := 0
+	for start < len(digits)-1 && digits[start] == '0' {
+		start++
+	}
+	point -= start
+	digits = digits[start:]
+	end := len(digits)
+	for end > 1 && digits[end-1] == '0' && end > point {
+		end--
+	}
+	digits = digits[:end]
+	if digits == "0" {
+		return "0"
+	}
+	var b strings.Builder
+	if neg {
+		b.WriteByte('-')
+	}
+	switch {
+	case point <= 0:
+		b.WriteString("0.")
+		for i := 0; i < -point; i++ {
+			b.WriteByte('0')
+		}
+		b.WriteString(digits)
+	case point >= len(digits):
+		b.WriteString(digits)
+		for i := 0; i < point-len(digits); i++ {
+			b.WriteByte('0')
+		}
+	default:
+		b.WriteString(digits[:point])
+		b.WriteByte('.')
+		b.WriteString(digits[point:])
+	}
+	return b.String()
 }
 
 // NormalizeLower is the one supported key normalization. Cross-source

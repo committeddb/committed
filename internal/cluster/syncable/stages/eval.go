@@ -414,7 +414,7 @@ func (g *Graph) foldOneInput(tx *stagestore.Tx, n *graphNode, inKey []byte, data
 			// erroring the topic.
 			return g.foldDeleteInput(tx, n, inKey, dirty)
 		}
-		parts[i] = NormalizeKeyPart(st.Normalize, KeyString(coerceKeyScalar(kv)))
+		parts[i] = NormalizeKeyPart(st.Normalize, CanonicalKeyPart(coerceKeyScalar(kv)))
 	}
 	outKey := []byte(OutKey(parts))
 
@@ -649,7 +649,7 @@ func joinOnKey(j *Join, obj, parent any) []byte {
 		if err != nil || v == nil {
 			return nil
 		}
-		parts[i] = NormalizeKeyPart(j.Normalize, KeyString(v))
+		parts[i] = NormalizeKeyPart(j.Normalize, CanonicalKeyPart(v))
 	}
 	return []byte(OutKey(parts))
 }

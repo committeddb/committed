@@ -1470,6 +1470,30 @@ func (p *Projection) StageKeyCounts() (map[string]int, error) {
 	return out, nil
 }
 
+// StageKeyExists implements cluster.StageIntrospector.
+func (p *Projection) StageKeyExists(stage, key string) (bool, error) {
+	if p.stages == nil {
+		return false, nil
+	}
+	known := false
+	for i := range p.config.Stages {
+		if p.config.Stages[i].Name == stage {
+			known = true
+			break
+		}
+	}
+	if !known {
+		return false, fmt.Errorf("stage %q is not declared by this projection", stage)
+	}
+	var exists bool
+	err := p.stageStore.View(func(tx *stagestore.Tx) error {
+		v, err := tx.GetOut(stage, []byte(key))
+		exists = v != nil
+		return err
+	})
+	return exists, err
+}
+
 // StageFrontier implements cluster.StageRecoverer.
 func (p *Projection) StageFrontier() (uint64, bool, error) {
 	if p.stages == nil {
@@ -1606,7 +1630,7 @@ func (p *Projection) pullDecorations(ctx context.Context, tx *gosql.Tx, stx *sta
 	}
 	parts := make([]string, len(keys))
 	for i, k := range keys {
-		parts[i] = keyString(k)
+		parts[i] = stages.CanonicalKeyPart(k)
 	}
 	outKey := []byte(stages.OutKey(parts))
 	for _, d := range p.decorators {

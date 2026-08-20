@@ -1356,6 +1356,28 @@ func (db *DB) SyncableStageKeyCounts(id string) (map[string]int, bool) {
 	return counts, true
 }
 
+// SyncableStageKeyExists probes one stage output key of syncable id's
+// worker ON THIS NODE (ok=false: no worker registered here, or no
+// stages; err: the stage name is not declared). Owner-local like the
+// counts — the HTTP layer proxies to the owner.
+func (db *DB) SyncableStageKeyExists(id, stage, key string) (bool, bool, error) {
+	db.workersMu.Lock()
+	handle, ok := db.syncWorkers[id]
+	db.workersMu.Unlock()
+	if !ok || handle.syncable == nil {
+		return false, false, nil
+	}
+	in, ok := cluster.SyncableAs[cluster.StageIntrospector](handle.syncable)
+	if !ok {
+		return false, false, nil
+	}
+	exists, err := in.StageKeyExists(stage, key)
+	if err != nil {
+		return false, true, err
+	}
+	return exists, true, nil
+}
+
 // SyncableReadPosition reports the live scan position of syncable id's worker
 // ON THIS NODE: the raft index of the last log entry the worker's reader
 // examined, advancing per entry scanned — including entries skipped as other

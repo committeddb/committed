@@ -40,7 +40,7 @@ import (
 
 // formatVersion is bumped when the layout changes incompatibly; an old
 // store is then reset and rebuilt from the log rather than migrated.
-const formatVersion uint64 = 1
+const formatVersion uint64 = 2 // 2: numeric key parts render canonically (5.0000 ≡ 5)
 
 var (
 	metaBucket      = []byte("meta")

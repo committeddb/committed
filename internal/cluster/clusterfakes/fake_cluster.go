@@ -622,6 +622,23 @@ type FakeCluster struct {
 		result1 map[string]int
 		result2 bool
 	}
+	SyncableStageKeyExistsStub        func(string, string, string) (bool, bool, error)
+	syncableStageKeyExistsMutex       sync.RWMutex
+	syncableStageKeyExistsArgsForCall []struct {
+		arg1 string
+		arg2 string
+		arg3 string
+	}
+	syncableStageKeyExistsReturns struct {
+		result1 bool
+		result2 bool
+		result3 error
+	}
+	syncableStageKeyExistsReturnsOnCall map[int]struct {
+		result1 bool
+		result2 bool
+		result3 error
+	}
 	SyncableStuckStub        func(string) (cluster.SyncableStuck, bool, error)
 	syncableStuckMutex       sync.RWMutex
 	syncableStuckArgsForCall []struct {
@@ -3828,6 +3845,75 @@ func (fake *FakeCluster) SyncableStageKeyCountsReturnsOnCall(i int, result1 map[
 		result1 map[string]int
 		result2 bool
 	}{result1, result2}
+}
+
+func (fake *FakeCluster) SyncableStageKeyExists(arg1 string, arg2 string, arg3 string) (bool, bool, error) {
+	fake.syncableStageKeyExistsMutex.Lock()
+	ret, specificReturn := fake.syncableStageKeyExistsReturnsOnCall[len(fake.syncableStageKeyExistsArgsForCall)]
+	fake.syncableStageKeyExistsArgsForCall = append(fake.syncableStageKeyExistsArgsForCall, struct {
+		arg1 string
+		arg2 string
+		arg3 string
+	}{arg1, arg2, arg3})
+	stub := fake.SyncableStageKeyExistsStub
+	fakeReturns := fake.syncableStageKeyExistsReturns
+	fake.recordInvocation("SyncableStageKeyExists", []interface{}{arg1, arg2, arg3})
+	fake.syncableStageKeyExistsMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2, arg3)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2, ret.result3
+	}
+	return fakeReturns.result1, fakeReturns.result2, fakeReturns.result3
+}
+
+func (fake *FakeCluster) SyncableStageKeyExistsCallCount() int {
+	fake.syncableStageKeyExistsMutex.RLock()
+	defer fake.syncableStageKeyExistsMutex.RUnlock()
+	return len(fake.syncableStageKeyExistsArgsForCall)
+}
+
+func (fake *FakeCluster) SyncableStageKeyExistsCalls(stub func(string, string, string) (bool, bool, error)) {
+	fake.syncableStageKeyExistsMutex.Lock()
+	defer fake.syncableStageKeyExistsMutex.Unlock()
+	fake.SyncableStageKeyExistsStub = stub
+}
+
+func (fake *FakeCluster) SyncableStageKeyExistsArgsForCall(i int) (string, string, string) {
+	fake.syncableStageKeyExistsMutex.RLock()
+	defer fake.syncableStageKeyExistsMutex.RUnlock()
+	argsForCall := fake.syncableStageKeyExistsArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3
+}
+
+func (fake *FakeCluster) SyncableStageKeyExistsReturns(result1 bool, result2 bool, result3 error) {
+	fake.syncableStageKeyExistsMutex.Lock()
+	defer fake.syncableStageKeyExistsMutex.Unlock()
+	fake.SyncableStageKeyExistsStub = nil
+	fake.syncableStageKeyExistsReturns = struct {
+		result1 bool
+		result2 bool
+		result3 error
+	}{result1, result2, result3}
+}
+
+func (fake *FakeCluster) SyncableStageKeyExistsReturnsOnCall(i int, result1 bool, result2 bool, result3 error) {
+	fake.syncableStageKeyExistsMutex.Lock()
+	defer fake.syncableStageKeyExistsMutex.Unlock()
+	fake.SyncableStageKeyExistsStub = nil
+	if fake.syncableStageKeyExistsReturnsOnCall == nil {
+		fake.syncableStageKeyExistsReturnsOnCall = make(map[int]struct {
+			result1 bool
+			result2 bool
+			result3 error
+		})
+	}
+	fake.syncableStageKeyExistsReturnsOnCall[i] = struct {
+		result1 bool
+		result2 bool
+		result3 error
+	}{result1, result2, result3}
 }
 
 func (fake *FakeCluster) SyncableStuck(arg1 string) (cluster.SyncableStuck, bool, error) {

@@ -465,6 +465,12 @@ func ParseCheckpointPolicy(v *ParsedConfig) (CheckpointPolicy, error) {
 // (the store lives with the worker); the HTTP status endpoint proxies.
 type StageIntrospector interface {
 	StageKeyCounts() (map[string]int, error)
+	// StageKeyExists reports whether the named stage currently holds an
+	// output at key — the caller supplies the key (canonical, normalized
+	// form: the stored bytes), so the boolean answer reveals nothing the
+	// caller didn't already have. An undeclared stage name is an error
+	// (a typo'd probe must not read as "key absent").
+	StageKeyExists(stage, key string) (bool, error)
 }
 
 // StageRecoverer is implemented by syncables carrying NODE-LOCAL stage

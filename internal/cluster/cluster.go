@@ -154,6 +154,10 @@ type Cluster interface {
 	// syncable's worker on THIS node (ok=false: no worker here, or no
 	// stages). Owner-local; see StageIntrospector.
 	SyncableStageKeyCounts(id string) (counts map[string]int, ok bool)
+	// SyncableStageKeyExists probes one stage output key on THIS node's
+	// worker (ok=false: no worker here, or no stages). err: undeclared
+	// stage name. Owner-local; see StageIntrospector.
+	SyncableStageKeyExists(id, stage, key string) (exists bool, ok bool, err error)
 	// ReplaySyncableDeadLetter re-drives a dead-lettered proposal: it
 	// re-runs the syncable's Sync for the proposal at index and, on success,
 	// clears the dead-letter record. Node-agnostic. Returns ErrNotDeadLettered
