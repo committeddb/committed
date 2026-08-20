@@ -5,6 +5,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/syncable/stagestore"
 )
 
@@ -304,7 +305,7 @@ func TestStageFilteringJoin(t *testing.T) {
 		{
 			Name: "alive", From: "workareas", KeyPath: []string{"$.id"},
 			Joins: []Join{{
-				Topic: "projects", On: "$.projectId",
+				Topic: "projects", On: []string{"$.projectId"},
 				Where: []WhenClause{{Path: "$.status", Equals: "sold"}},
 			}},
 			Emit: []Emit{{Field: "id", From: "$.id"}, {Field: "price", From: "$.price"}},
@@ -523,7 +524,7 @@ func TestJoinOnStage(t *testing.T) {
 		{
 			Name: "funded", From: "proposals", KeyPath: []string{"$.id"},
 			Joins: []Join{{
-				From: "pay-counts", On: "$.id",
+				From: "pay-counts", On: []string{"$.id"},
 				Where: []WhenClause{{Path: "$.n", Equals: 2}},
 			}},
 			Emit: []Emit{{Field: "id", From: "$.id"}},
@@ -698,7 +699,7 @@ func TestStageAntiJoin(t *testing.T) {
 		{
 			Name: "uninvoiced", From: "jobs", KeyPath: []string{"$.id"},
 			Joins: []Join{{
-				Topic: "invoices", On: "$.id", Absent: true,
+				Topic: "invoices", On: []string{"$.id"}, Absent: true,
 				Where: []WhenClause{{Path: "$.status", Equals: "posted"}},
 			}},
 			Emit: []Emit{{Field: "id", From: "$.id"}},
@@ -757,4 +758,138 @@ func TestStageAntiJoin(t *testing.T) {
 	fold("jobs", "j3", `{"id":"j3"}`)
 	require.Empty(t, get("j2"))
 	require.Equal(t, `{"id":"j3"}`, get("j3"))
+}
+
+// Composite join-on: the pilot's S11 shape — an anti-join addressing a
+// PAIR-KEYED dimension stage from a pair of input fields. The on list
+// renders through the same positional composite encoding the joined
+// stage's out keys use, so the pair addresses exactly.
+func TestStageCompositeJoinOnStage(t *testing.T) {
+	stages := []Stage{
+		{
+			Name: "billed-pairs", From: "billing", KeyPath: []string{"$.job", "$.wa"},
+			Emit: []Emit{{Field: "job", From: "$.job"}, {Field: "wa", From: "$.wa"}},
+		},
+		{
+			Name: "unbilled", From: "pairs", KeyPath: []string{"$.jobId", "$.waId"},
+			Joins: []Join{{From: "billed-pairs", On: []string{"$.billJob", "$.billWa"}, Absent: true}},
+			Emit:  []Emit{{Field: "j", From: "$.jobId"}},
+		},
+	}
+	require.NoError(t, ValidateShapes(stages))
+	g := BuildGraph(stages)
+	store := stageStoreForTest(t)
+
+	fold := func(topic, key, payload string) {
+		require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+			return g.FoldTopicUpsertNow(tx, topic, []byte(key), decodePayload(t, payload))
+		}))
+	}
+	del := func(topic, key string) {
+		require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+			return g.FoldTopicDeleteNow(tx, topic, []byte(key))
+		}))
+	}
+	get := func(stage, key string) string {
+		var got string
+		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
+			v, err := tx.GetOut(stage, []byte(key))
+			got = string(v)
+			return err
+		}))
+		return got
+	}
+	pairKey := OutKey([]string{"j1", "w1"})
+
+	// No billed pair: the (j1,w1) pair participates (vacuous absence).
+	fold("pairs", "p1", `{"jobId":"j1","waId":"w1","billJob":"j1","billWa":"w1"}`)
+	require.NotEmpty(t, get("unbilled", pairKey))
+
+	// A billed pair for a DIFFERENT wa is not presence for (j1,w1) —
+	// the composite discriminates, no partial-key aliasing.
+	fold("billing", "b2", `{"job":"j1","wa":"w2"}`)
+	require.NotEmpty(t, get("unbilled", pairKey), "a (j1,w2) billing row must not alias (j1,w1)")
+
+	// The (j1,w1) billed pair arrives: presence — the pair retracts.
+	fold("billing", "b1", `{"job":"j1","wa":"w1"}`)
+	require.Empty(t, get("unbilled", pairKey), "arrival of the exact pair retracts")
+
+	// The billing row is deleted: the pair heals back in.
+	del("billing", "b1")
+	require.NotEmpty(t, get("unbilled", pairKey))
+
+	// A missing on part (billWa) is vacuously absent — nothing to
+	// reference — so the input participates (its own key is complete).
+	fold("pairs", "p2", `{"jobId":"j9","waId":"w9","billJob":"j9"}`)
+	require.NotEmpty(t, get("unbilled", OutKey([]string{"j9", "w9"})), "a partial join reference is vacuous absence")
+}
+
+// Composite join-on against a TOPIC: the dimension's entity keys are the
+// producer's cluster.CompositeKey encoding — positional values only, no
+// column names — so an on list addresses them symmetrically. Pins the
+// producer↔join encoding contract.
+func TestStageCompositeJoinOnTopic(t *testing.T) {
+	stages := []Stage{{
+		Name: "sold-jobs", From: "jobs", KeyPath: []string{"$.id"},
+		Joins: []Join{{
+			Topic: "wgs", On: []string{"$.region", "$.grp"},
+			Where: []WhenClause{{Path: "$.state", Equals: "alive"}},
+		}},
+		Emit: []Emit{{Field: "id", From: "$.id"}},
+	}}
+	require.NoError(t, ValidateShapes(stages))
+	g := BuildGraph(stages)
+	store := stageStoreForTest(t)
+
+	fold := func(topic, key, payload string) {
+		require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+			return g.FoldTopicUpsertNow(tx, topic, []byte(key), decodePayload(t, payload))
+		}))
+	}
+	get := func(key string) string {
+		var got string
+		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
+			v, err := tx.GetOut("sold-jobs", []byte(key))
+			got = string(v)
+			return err
+		}))
+		return got
+	}
+
+	// The job references pair (east, g1); its dimension row hasn't arrived.
+	fold("jobs", "j1", `{"id":"j1","region":"east","grp":"g1"}`)
+	require.Empty(t, get("j1"), "no dimension row yet — no participation")
+
+	// The dimension lands under the PRODUCER's composite entity key.
+	wgsKey := cluster.CompositeKey(map[string]any{"region": "east", "grp": "g1"}, []string{"region", "grp"})
+	fold("wgs", wgsKey, `{"state":"alive"}`)
+	require.NotEmpty(t, get("j1"), "the producer's composite entity key and the join's on list must agree")
+
+	// The dimension stops matching where: dependents retract.
+	fold("wgs", wgsKey, `{"state":"dead"}`)
+	require.Empty(t, get("j1"))
+
+	// Aliasing probe: values ("a","bc") vs ("ab","c") must not collide.
+	fold("jobs", "j2", `{"id":"j2","region":"a","grp":"bc"}`)
+	abcKey := cluster.CompositeKey(map[string]any{"region": "ab", "grp": "c"}, []string{"region", "grp"})
+	fold("wgs", abcKey, `{"state":"alive"}`)
+	require.Empty(t, get("j2"), `("ab","c") must not satisfy a reference to ("a","bc")`)
+}
+
+// A stage join's on arity must match the joined stage's key arity.
+func TestStageCompositeJoinOnArityValidated(t *testing.T) {
+	stages := []Stage{
+		{
+			Name: "pairs", From: "billing", KeyPath: []string{"$.job", "$.wa"},
+			Emit: []Emit{{Field: "job", From: "$.job"}},
+		},
+		{
+			Name: "consumer", From: "jobs", KeyPath: []string{"$.id"},
+			Joins: []Join{{From: "pairs", On: []string{"$.jobId"}}},
+			Emit:  []Emit{{Field: "id", From: "$.id"}},
+		},
+	}
+	err := ValidateShapes(stages)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "on has 1 path(s) but stage \"pairs\" keys by 2 path(s)")
 }

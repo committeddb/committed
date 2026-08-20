@@ -41,3 +41,26 @@ func TestCreateUpdateSQLCompositeKey(t *testing.T) {
 		`UPDATE "t" SET "x"=$1 WHERE "a" = $2 AND "b" = $3`,
 		(&dialects.PostgreSQLDialect{}).CreateUpdateSQL(cfg))
 }
+
+// The enriched update: a decorator rule carrying a lookup arm — the FK
+// column binds a plain placeholder, the enriched column resolves through
+// the dimension subquery binding the FK's canonical rendering, keys last,
+// everything bound once.
+func TestCreateEnrichedUpdateSQL(t *testing.T) {
+	cfg := &sql.Config{
+		Table:      "t",
+		PrimaryKey: []string{"job_id"},
+		Mappings: []sql.Mapping{
+			{Column: "job_id"}, {Column: "cust"}, {Column: "cust_name"},
+		},
+	}
+	enrich := map[string]sql.SpineEnrichment{
+		"cust_name": {DimTable: "t__lookup_dim", SelectField: "name", CastType: "TEXT"},
+	}
+	require.Equal(t,
+		`UPDATE "t" SET "cust"=$1,"cust_name"=(SELECT "lookup_fields"->>'name' FROM "t__lookup_dim" WHERE "lookup_key" = $2)::TEXT WHERE "job_id" = $3`,
+		(&dialects.PostgreSQLDialect{}).CreateEnrichedUpdateSQL(cfg, enrich))
+	require.Equal(t,
+		"UPDATE `t` SET `cust`=?,`cust_name`=(SELECT `lookup_fields`->>'$.name' FROM `t__lookup_dim` WHERE `lookup_key` = ?) WHERE `job_id` = ?",
+		(&dialects.MySQLDialect{}).CreateEnrichedUpdateSQL(cfg, enrich))
+}

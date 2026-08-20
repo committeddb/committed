@@ -45,6 +45,11 @@ func (d *SQLMockDialect) CreateDeleteSQL(c *sql.Config) string {
 	return (&dialects.MySQLDialect{}).CreateDeleteSQL(c)
 }
 
+// CreateEnrichedUpdateSQL implements Dialect, mirroring MySQL.
+func (d *SQLMockDialect) CreateEnrichedUpdateSQL(c *sql.Config, enrich map[string]sql.SpineEnrichment) string {
+	return (&dialects.MySQLDialect{}).CreateEnrichedUpdateSQL(c, enrich)
+}
+
 // CreateUpdateSQL implements Dialect, mirroring MySQL's ? placeholder.
 func (d *SQLMockDialect) CreateUpdateSQL(c *sql.Config) string {
 	return (&dialects.MySQLDialect{}).CreateUpdateSQL(c)

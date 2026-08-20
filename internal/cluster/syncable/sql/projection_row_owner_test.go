@@ -100,17 +100,25 @@ func TestRowOwnerOnAggregateRejected(t *testing.T) {
 	require.Contains(t, err.Error(), "only a plain rules source")
 }
 
-// A decorator cannot use lookup enrichment — its statements are bare
-// UPDATEs; enrich from the row-owning source's rules.
-func TestRowOwnerDecoratorRejectsEnrichment(t *testing.T) {
+// A decorator's rules may enrich from a lookup dimension — the pilot's
+// customer_display_name shape, where the FK arrives ON the decorator: the
+// enrichment rides the decorator's own (update-only) statement, and the
+// same-rule FK constraint holds there like anywhere else.
+func TestRowOwnerDecoratorLookupEnrichmentValidates(t *testing.T) {
 	c := rowOwnerConfig()
+	c.Columns = append(c.Columns,
+		ProjectionColumn{Name: "cust", SQLType: "VARCHAR(64)"},
+		ProjectionColumn{Name: "cust_name", SQLType: "VARCHAR(64)"},
+	)
 	c.Sources[1].Rules = []ProjectionRule{{Set: []ProjectionSet{
-		{Column: "w", From: "$.f"},
-		{Column: "v", Lookup: "dim", On: "w", Select: "name"},
+		{Column: "cust", From: "$.custId"},
+		{Column: "cust_name", Lookup: "dim", On: "cust", Select: "name"},
 	}}}
-	err := validated(t, c)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "cannot use lookup enrichment")
+	c.Sources = append(c.Sources, ProjectionSource{
+		Topic: "dims", KeyPath: []string{"$.id"},
+		Lookup: &ProjectionLookup{Name: "dim", Fields: []ProjectionElementField{{Field: "name", From: "$.name"}}},
+	})
+	require.NoError(t, validated(t, c))
 }
 
 // rowOwner = true decodes through the TOML surface.

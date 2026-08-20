@@ -445,7 +445,10 @@ set = [ { column = "total", from = "$.total" },
 - **Joins FILTER** (`[[projection.stage.join]]`): an input participates
   only while the joined topic's row — addressed by the input's `on`
   value against the joined entity's key — exists and matches every
-  `where` clause. Dimension changes refold dependents (reverse-index
+  `where` clause. `on` takes one path, or a list addressing a
+  composite-keyed dimension (positional values, the producer's own
+  encoding; a stage join's arity must match the joined stage's
+  `keyPath`). Dimension changes refold dependents (reverse-index
   fan-out); a late dimension heals; a flipped predicate or a dimension
   delete retracts dependents.
 - **`reduce = "liveSet"` is created-minus-deleted**: a key is live while
@@ -512,6 +515,10 @@ set = [ { column = "latest_proposal_id", from = "$.pid" } ]
   value arriving before the owner admits its row would be silently
   lost — feed it through a stage. Lookup and aggregate sources are
   orthogonal machinery and coexist unchanged.
+- A decorator's rules may **enrich** (the `lookup` set arm): the FK and
+  its display field ride the decorator's own update, and dimension
+  fan-out heals referencing rows regardless of which source wrote the
+  FK.
 - Moving the `rowOwner` declaration changes which writes create and delete
   rows — the config-change guard demands a rebuild, like any other
   shape change.

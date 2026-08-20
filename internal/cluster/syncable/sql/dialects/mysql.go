@@ -45,6 +45,30 @@ func (d *MySQLDialect) CreateUpdateSQL(c *sql.Config) string {
 	return createUpdateSQL(c, mysqlPlaceholder, mysqlIdent)
 }
 
+// CreateEnrichedUpdateSQL implements Dialect: CreateUpdateSQL with enriched
+// columns' SET entries as dimension subqueries, each binding one ? in SET
+// position (bound once — no upsert value doubling).
+func (d *MySQLDialect) CreateEnrichedUpdateSQL(config *sql.Config, enrich map[string]sql.SpineEnrichment) string {
+	sets := config.Mappings[len(config.PrimaryKey):]
+	var b strings.Builder
+	fmt.Fprintf(&b, "UPDATE %s SET ", mysqlIdent.Table(config.Table))
+	for i, m := range sets {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		if e, ok := enrich[m.Column]; ok {
+			fmt.Fprintf(&b, "%s=(SELECT %s->>'$.%s' FROM %s WHERE %s = ?)",
+				mysqlIdent.Ident(m.Column), mysqlIdent.Ident(sql.LookupFields),
+				sqlident.EscapeStringLiteral(e.SelectField), mysqlIdent.Table(e.DimTable),
+				mysqlIdent.Ident(sql.LookupKey))
+		} else {
+			fmt.Fprintf(&b, "%s=?", mysqlIdent.Ident(m.Column))
+		}
+	}
+	fmt.Fprintf(&b, " WHERE %s", keyWhere(config.PrimaryKey, mysqlPlaceholder, mysqlIdent))
+	return b.String()
+}
+
 // CreateClearSQL implements Dialect; MySQL binds the WHERE value with ?.
 func (d *MySQLDialect) CreateClearSQL(c *sql.Config, columns []string) string {
 	return createClearSQL(c, columns, mysqlPlaceholder, mysqlIdent)

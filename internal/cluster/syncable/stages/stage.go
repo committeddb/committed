@@ -98,7 +98,16 @@ type Join struct {
 	// correlation is a join, not a second input. Manifest order applies:
 	// the joined stage must be declared earlier.
 	From string `mapstructure:"from"`
-	On   string `mapstructure:"on"`
+	// On locates the joined row's key in the input: one path for a
+	// single-part key, several for a composite — rendered through the
+	// same positional composite encoding stage keys and composite topic
+	// entity keys use (values only; column names are never part of the
+	// encoding), so a pair-keyed dimension is addressed symmetrically
+	// whether it is a stage or a topic. For a stage join the arity must
+	// match the joined stage's keyPath; a topic's key shape is the
+	// producer's (decoupled by design), so arity there is the config
+	// author's contract.
+	On []string `mapstructure:"on"`
 	// Absent inverts the join into an ANTI-join: the input participates
 	// only while NO dimension row matches (none exists, or none passes
 	// Where). The fan-out gives the hard half for free: when a matching
@@ -245,11 +254,18 @@ func ValidateShapes(stages []Stage) error {
 					return fmt.Errorf("%s: from %q references a stage at or after this one — stages join in manifest order (move the producer above its consumer)", jw, j.From)
 				}
 			}
-			if j.On == "" {
-				return fmt.Errorf("%s: on is required — the input field holding the joined entity's key", jw)
+			if len(j.On) == 0 {
+				return fmt.Errorf("%s: on is required — the input field(s) holding the joined entity's key", jw)
 			}
-			if err := RejectMultiValued(j.On, jw+": on"); err != nil {
-				return err
+			for _, onPath := range j.On {
+				if err := RejectMultiValued(onPath, jw+": on"); err != nil {
+					return err
+				}
+			}
+			if j.From != "" {
+				if fi := IndexOf(stages, j.From); fi >= 0 && len(j.On) != len(stages[fi].KeyPath) {
+					return fmt.Errorf("%s: on has %d path(s) but stage %q keys by %d path(s) — a stage join's on addresses the joined stage's key, so the arities must match, in the same order", jw, len(j.On), j.From, len(stages[fi].KeyPath))
+				}
 			}
 			if err := ValidateWhen(j.Where, jw); err != nil {
 				return err

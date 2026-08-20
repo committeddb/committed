@@ -49,6 +49,17 @@ type Dialect interface {
 	// keeps its own binding convention (Postgres once via EXCLUDED, MySQL
 	// doubled via BindArgs).
 	CreateEnrichedUpsertSQL(config *Config, enrich map[string]SpineEnrichment) string
+	// CreateEnrichedUpdateSQL is CreateUpdateSQL for a decorator rule with
+	// lookup enrichments: enriched columns' SET entries are the same scalar
+	// subqueries CreateEnrichedUpsertSQL uses, with the subquery's
+	// placeholder binding the canonical string rendering of the on column's
+	// coerced value. Placeholder order is SET entries in mapping order
+	// (enrichment key placeholders in place), key columns last — bound
+	// ONCE, never through BindArgs (a plain UPDATE has no value doubling
+	// on either engine). This is what lets a decorated FK carry its
+	// display field: the FK arrives on the decorator, so the enrichment
+	// must ride the decorator's own statement.
+	CreateEnrichedUpdateSQL(config *Config, enrich map[string]SpineEnrichment) string
 	// CreateUpdateSQL returns the update-only apply for a DECORATING
 	// (non-owner) projection rule: `UPDATE <table> SET <set cols> WHERE
 	// <pk>`. The config comes from ruleConfig, whose leading mappings are

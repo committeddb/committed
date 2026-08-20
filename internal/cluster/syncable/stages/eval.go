@@ -363,8 +363,8 @@ func (g *Graph) foldOneInput(tx *stagestore.Tx, n *graphNode, inKey []byte, data
 	}
 	for i := range st.Joins {
 		j := &st.Joins[i]
-		if onV, err := ResolvePath(j.On, data, parent); err == nil && onV != nil {
-			if err := tx.PutRev(st.Name, j.target(), []byte(KeyString(onV)), outKey); err != nil {
+		if onKey := joinOnKey(j, data, parent); onKey != nil {
+			if err := tx.PutRev(st.Name, j.target(), onKey, outKey); err != nil {
 				return err
 			}
 		}
@@ -553,6 +553,24 @@ func refoldOutput(tx *stagestore.Tx, st *Stage, outKey []byte) (out []byte, live
 	return emitReshape(st, winner.data, winner.parent)
 }
 
+// joinOnKey renders an input's reference to a join's dimension row: every
+// on path must resolve non-nil (a missing part = nothing to reference —
+// non-participation for a normal join, vacuous absence for an anti-join),
+// a single part verbatim, several through OutKey — the positional
+// composite encoding both a composite-keyed stage's out keys and a
+// composite topic producer's entity keys already use.
+func joinOnKey(j *Join, obj, parent any) []byte {
+	parts := make([]string, len(j.On))
+	for i, p := range j.On {
+		v, err := ResolvePath(p, obj, parent)
+		if err != nil || v == nil {
+			return nil
+		}
+		parts[i] = KeyString(v)
+	}
+	return []byte(OutKey(parts))
+}
+
 // inputQualifies applies a stage's filtering joins to one input: it
 // participates only while EVERY join's dimension row — addressed by the
 // input's on value — exists and matches the join's where. A dimension
@@ -565,8 +583,8 @@ func inputQualifies(tx *stagestore.Tx, st *Stage, obj, parent any) (bool, error)
 		// matches the join's Where. A normal join requires it; an Absent
 		// (anti-)join forbids it — one rule: fail when present == Absent.
 		present := false
-		if onV, err := ResolvePath(j.On, obj, parent); err == nil && onV != nil {
-			stored, err := tx.GetDim(st.Name, j.target(), []byte(KeyString(onV)))
+		if onKey := joinOnKey(j, obj, parent); onKey != nil {
+			stored, err := tx.GetDim(st.Name, j.target(), onKey)
 			if err != nil {
 				return false, err
 			}

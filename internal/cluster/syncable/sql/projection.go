@@ -470,7 +470,11 @@ func (p *Projection) Init() error {
 					sqlString = p.dialect.CreateUpdateSQL(p.config.ruleConfig(r))
 				}
 				if enrich := p.config.ruleEnrichments(r); len(enrich) > 0 {
-					sqlString = p.dialect.CreateEnrichedUpsertSQL(p.config.ruleConfig(r), enrich)
+					if ps.updateOnly {
+						sqlString = p.dialect.CreateEnrichedUpdateSQL(p.config.ruleConfig(r), enrich)
+					} else {
+						sqlString = p.dialect.CreateEnrichedUpsertSQL(p.config.ruleConfig(r), enrich)
+					}
 				}
 				stmt, err := p.db.PrepareContext(p.initCtx, sqlString)
 				if err != nil {

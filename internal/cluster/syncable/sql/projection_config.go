@@ -682,11 +682,6 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 				default:
 					return fmt.Errorf("%s: onDelete %q is invalid for a decorating (non-owner) stage-fed source (want %q — null this source's columns — or %q; only the row owner removes rows)", where, src.OnDelete, onDeleteClear, onDeleteIgnore)
 				}
-				for ri, r := range src.Rules {
-					if len(c.ruleEnrichments(r)) > 0 {
-						return fmt.Errorf("%s rule %d: a decorating source cannot use lookup enrichment — enrich from the row-owning source's rules instead", where, ri+1)
-					}
-				}
 			} else {
 				switch src.OnDelete {
 				case onDeleteRow, onDeleteIgnore:
@@ -1137,22 +1132,26 @@ func ForEachSidecarName(table, topic string) string {
 			san = append(san, '_')
 		}
 	}
-	name := sidecarName(table, "foreach_"+string(san))
-	// MySQL caps identifiers at 64 bytes (PostgreSQL silently truncates at
-	// 63, which is worse — two long names can collide), and the sidecar
-	// DDL derives further identifiers from this name (its parent-key
-	// index), so the cap leaves suffix room. A long table+topic pair gets
-	// a deterministic hash suffix instead: stable across restarts, unique
-	// per full name.
-	if len(name) > 50 {
-		sum := sha256.Sum256([]byte(name))
-		name = name[:40] + "_" + hex.EncodeToString(sum[:])[:9]
+	return sidecarName(table, "foreach_"+string(san))
+}
+
+// capIdentifier bounds every derived backing-table identifier: MySQL caps
+// identifiers at 64 bytes (PostgreSQL silently truncates at 63, which is
+// worse — two long names can collide), and sidecar/dimension DDL derives
+// further identifiers from these names (indexes), so the cap leaves suffix
+// room. A long name gets a deterministic hash suffix instead: stable
+// across restarts, unique per full name, byte-identical to the uncapped
+// form for anything already short enough.
+func capIdentifier(name string) string {
+	if len(name) <= 50 {
+		return name
 	}
-	return name
+	sum := sha256.Sum256([]byte(name))
+	return name[:40] + "_" + hex.EncodeToString(sum[:])[:9]
 }
 
 func sidecarName(table, column string) string {
-	return table + "__" + column
+	return capIdentifier(table + "__" + column)
 }
 
 // dimensionName is the backing table for a lookup source: <table>__lookup_<name>.
@@ -1184,7 +1183,7 @@ func (c *ProjectionConfig) ruleEnrichments(r ProjectionRule) map[string]SpineEnr
 }
 
 func dimensionName(table, lookup string) string {
-	return table + "__lookup_" + lookup
+	return capIdentifier(table + "__lookup_" + lookup)
 }
 
 // aggregateSpec builds the dialect-facing spec for one aggregate source,

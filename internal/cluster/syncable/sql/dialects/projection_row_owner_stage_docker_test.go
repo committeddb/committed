@@ -24,6 +24,7 @@ import (
 func projectionRowOwnerStageFlow(t *testing.T, db *sql.DB, table, quoteL, quoteR string, placeholder func(i int) string) {
 	jobType := &cluster.Type{ID: "jobs", Name: "Job"}
 	propType := &cluster.Type{ID: "proposals", Name: "Proposal"}
+	custType := &cluster.Type{ID: "customers", Name: "Customer"}
 	cfg := &sql.ProjectionConfig{
 		Table:      table,
 		PrimaryKey: []string{"job_id"},
@@ -31,6 +32,8 @@ func projectionRowOwnerStageFlow(t *testing.T, db *sql.DB, table, quoteL, quoteR
 			{Name: "job_id", SQLType: "VARCHAR(64)"},
 			{Name: "name", SQLType: "VARCHAR(64)"},
 			{Name: "latest", SQLType: "VARCHAR(64)"},
+			{Name: "cust", SQLType: "VARCHAR(64)"},
+			{Name: "cust_name", SQLType: "VARCHAR(64)"},
 		},
 		Stages: []sql.ProjectionStage{{
 			Name: "latest-prop", From: "proposals", KeyPath: []string{"$.jobId"},
@@ -38,6 +41,7 @@ func projectionRowOwnerStageFlow(t *testing.T, db *sql.DB, table, quoteL, quoteR
 				{Field: "job", From: "$.jobId"},
 				{Field: "pid", From: "$.id"},
 				{Field: "status", From: "$.status"},
+				{Field: "custId", From: "$.custId"},
 			},
 		}},
 		Sources: []sql.ProjectionSource{
@@ -50,7 +54,18 @@ func projectionRowOwnerStageFlow(t *testing.T, db *sql.DB, table, quoteL, quoteR
 			{
 				FromStage: "latest-prop",
 				When:      []sql.WhenClause{{Path: "$.status", Equals: "active"}},
-				Rules:     []sql.ProjectionRule{{Set: []sql.ProjectionSet{{Column: "latest", From: "$.pid"}}}},
+				Rules: []sql.ProjectionRule{{Set: []sql.ProjectionSet{
+					{Column: "latest", From: "$.pid"},
+					{Column: "cust", From: "$.custId"},
+					{Column: "cust_name", Lookup: "cust_dim", On: "cust", Select: "name"},
+				}}},
+			},
+			{
+				Topic: "customers", KeyPath: []string{"$.id"},
+				Lookup: &sql.ProjectionLookup{
+					Name:   "cust_dim",
+					Fields: []sql.ProjectionElementField{{Field: "name", From: "$.name"}},
+				},
 			},
 		},
 	}
@@ -126,6 +141,45 @@ func projectionRowOwnerStageFlow(t *testing.T, db *sql.DB, table, quoteL, quoteR
 	name, latest = row("j2")
 	require.Equal(t, "B", name.String)
 	require.Equal(t, "p2", latest.String, "owner admission pulls the retained decoration")
+
+	// Decorated-FK enrichment (the pilot's customer_display_name shape):
+	// the FK arrives ON the decorator, riding its enriched update.
+	cust := func(job string) (fk, disp gosql.NullString) {
+		t.Helper()
+		err := db.DB.QueryRow(
+			fmt.Sprintf("SELECT cust, cust_name FROM %s WHERE job_id = %s", qt, placeholder(0)), job).
+			Scan(&fk, &disp)
+		require.NoError(t, err)
+		return fk, disp
+	}
+	// A fresh proposal for j1 carries the customer FK; the dimension row
+	// has not arrived — the FK lands, the display is NULL.
+	sync(cluster.NewUpsertEntity(propType, []byte("p4"), []byte(`{"id":"p4","jobId":"j1","status":"active","custId":"c1"}`)))
+	fk, disp := cust("j1")
+	require.Equal(t, "c1", fk.String, "the decorated FK lands")
+	require.False(t, disp.Valid, "no dimension row yet — display starts NULL")
+
+	// The dimension arrives: the fan-out heals the display regardless of
+	// which source wrote the FK.
+	sync(cluster.NewUpsertEntity(custType, []byte("c1"), []byte(`{"id":"c1","name":"Acme"}`)))
+	_, disp = cust("j1")
+	require.Equal(t, "Acme", disp.String, "dimension arrival heals a decorator-written FK")
+
+	// A dimension rename fans out.
+	sync(cluster.NewUpsertEntity(custType, []byte("c1"), []byte(`{"id":"c1","name":"Acme Corp"}`)))
+	_, disp = cust("j1")
+	require.Equal(t, "Acme Corp", disp.String)
+
+	// Owner delete / re-admit: the pull re-lands the decoration INCLUDING
+	// the enrichment (the enriched update resolves the dimension live).
+	sync(cluster.NewDeleteEntity(jobType, []byte("j1")))
+	sync(cluster.NewUpsertEntity(jobType, []byte("j1"), []byte(`{"id":"j1","name":"A3"}`)))
+	name, latest = row("j1")
+	require.Equal(t, "A3", name.String)
+	require.Equal(t, "p4", latest.String, "re-admitted row recovers the retained decoration")
+	fk, disp = cust("j1")
+	require.Equal(t, "c1", fk.String)
+	require.Equal(t, "Acme Corp", disp.String, "the pull re-resolves the enrichment from the dimension")
 
 	require.Equal(t, 2, count(), "no rows the owner never admitted")
 }

@@ -43,6 +43,10 @@ func (d *GoMySQLServerDialect) CreateDeleteSQL(config *sql.Config) string {
 	return (&dialects.MySQLDialect{}).CreateDeleteSQL(config)
 }
 
+func (d *GoMySQLServerDialect) CreateEnrichedUpdateSQL(config *sql.Config, enrich map[string]sql.SpineEnrichment) string {
+	return (&dialects.MySQLDialect{}).CreateEnrichedUpdateSQL(config, enrich)
+}
+
 func (d *GoMySQLServerDialect) CreateUpdateSQL(config *sql.Config) string {
 	return (&dialects.MySQLDialect{}).CreateUpdateSQL(config)
 }

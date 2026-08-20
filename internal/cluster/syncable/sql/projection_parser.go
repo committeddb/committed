@@ -186,20 +186,31 @@ var projectionSectionKeys = map[string]bool{
 // block. keyPath and when decode as any for the same scalar-or-list /
 // shorthand-or-clauses reasons the source shapes do.
 type rawProjectionStage struct {
-	Name        string      `mapstructure:"name"`
-	From        string      `mapstructure:"from"`
-	KeyPath     any         `mapstructure:"keyPath"`
-	When        any         `mapstructure:"when"`
-	DeleteWhen  any         `mapstructure:"deleteWhen"`
-	Reduce      string      `mapstructure:"reduce"`
-	OrderBy     string      `mapstructure:"orderBy"`
-	OrderByType string      `mapstructure:"orderByType"`
-	TieBy       string      `mapstructure:"tieBy"`
-	TieByType   string      `mapstructure:"tieByType"`
-	Join        []StageJoin `mapstructure:"join"`
-	Emit        []StageEmit `mapstructure:"emit"`
-	ForEach     string      `mapstructure:"forEach"`
-	ElementKey  string      `mapstructure:"elementKey"`
+	Name        string         `mapstructure:"name"`
+	From        string         `mapstructure:"from"`
+	KeyPath     any            `mapstructure:"keyPath"`
+	When        any            `mapstructure:"when"`
+	DeleteWhen  any            `mapstructure:"deleteWhen"`
+	Reduce      string         `mapstructure:"reduce"`
+	OrderBy     string         `mapstructure:"orderBy"`
+	OrderByType string         `mapstructure:"orderByType"`
+	TieBy       string         `mapstructure:"tieBy"`
+	TieByType   string         `mapstructure:"tieByType"`
+	Join        []rawStageJoin `mapstructure:"join"`
+	Emit        []StageEmit    `mapstructure:"emit"`
+	ForEach     string         `mapstructure:"forEach"`
+	ElementKey  string         `mapstructure:"elementKey"`
+}
+
+// rawStageJoin is the TOML decode shape of one [[{section}.stage.join]]
+// block: on decodes as any so a single path stays a scalar and a
+// composite key is a list — the keyPath idiom.
+type rawStageJoin struct {
+	Topic  string       `mapstructure:"topic"`
+	From   string       `mapstructure:"from"`
+	On     any          `mapstructure:"on"`
+	Absent bool         `mapstructure:"absent"`
+	Where  []WhenClause `mapstructure:"where"`
 }
 
 // parseProjectionStages decodes the [[{section}.stage]] blocks.
@@ -232,7 +243,7 @@ func parseProjectionStages(v *cluster.ParsedConfig, storage cluster.DatabaseStor
 			OrderByType: strings.ToLower(rs.OrderByType),
 			TieBy:       rs.TieBy,
 			TieByType:   strings.ToLower(rs.TieByType),
-			Joins:       rs.Join,
+			Joins:       stageJoins(rs.Join),
 			Emit:        rs.Emit,
 			ForEach:     rs.ForEach,
 			ElementKey:  rs.ElementKey,
@@ -434,6 +445,18 @@ func normalizeScalars(scalars []ProjectionScalar) []ProjectionScalar {
 	}
 	if len(out) == 0 {
 		return nil
+	}
+	return out
+}
+
+// stageJoins maps the raw join blocks onto the engine shape.
+func stageJoins(raw []rawStageJoin) []StageJoin {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make([]StageJoin, len(raw))
+	for i, rj := range raw {
+		out[i] = StageJoin{Topic: rj.Topic, From: rj.From, On: pathOrList(rj.On), Absent: rj.Absent, Where: rj.Where}
 	}
 	return out
 }

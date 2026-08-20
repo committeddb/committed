@@ -73,6 +73,30 @@ func (d *PostgreSQLDialect) CreateUpdateSQL(c *sql.Config) string {
 	return createUpdateSQL(c, pgPlaceholder, pgIdent)
 }
 
+// CreateEnrichedUpdateSQL implements Dialect: CreateUpdateSQL with enriched
+// columns' SET entries as dimension subqueries (see the enriched upsert for
+// the subquery form), each binding one placeholder in SET position.
+func (d *PostgreSQLDialect) CreateEnrichedUpdateSQL(config *sql.Config, enrich map[string]sql.SpineEnrichment) string {
+	sets := config.Mappings[len(config.PrimaryKey):]
+	var b strings.Builder
+	fmt.Fprintf(&b, "UPDATE %s SET ", pgIdent.Table(config.Table))
+	for i, m := range sets {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		if e, ok := enrich[m.Column]; ok {
+			fmt.Fprintf(&b, "%s=(SELECT %s->>'%s' FROM %s WHERE %s = %s)::%s",
+				pgIdent.Ident(m.Column), pgIdent.Ident(sql.LookupFields),
+				sqlident.EscapeStringLiteral(e.SelectField), pgIdent.Table(e.DimTable),
+				pgIdent.Ident(sql.LookupKey), pgPlaceholder(i), e.CastType)
+		} else {
+			fmt.Fprintf(&b, "%s=%s", pgIdent.Ident(m.Column), pgPlaceholder(i))
+		}
+	}
+	fmt.Fprintf(&b, " WHERE %s", keyWhere(config.PrimaryKey, func(i int) string { return pgPlaceholder(len(sets) + i) }, pgIdent))
+	return b.String()
+}
+
 // CreateClearSQL implements Dialect; PostgreSQL binds the WHERE value with $1.
 func (d *PostgreSQLDialect) CreateClearSQL(c *sql.Config, columns []string) string {
 	return createClearSQL(c, columns, pgPlaceholder, pgIdent)
