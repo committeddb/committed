@@ -120,6 +120,7 @@ func BuildGraph(stages []Stage) *Graph {
 					// a normalize declared on the join itself, so this
 					// resolution is the single source of the rendering.
 					jn.Normalize = producer.def.Normalize
+					jn.OnType = producer.def.KeyType
 					producer.dimConsumers = append(producer.dimConsumers, dimRef{node: nodes[i], join: jn})
 				}
 				continue
@@ -441,7 +442,14 @@ func (g *Graph) foldOneInput(tx *stagestore.Tx, n *graphNode, inKey []byte, data
 			// erroring the topic.
 			return g.foldDeleteInput(tx, n, inKey, dirty)
 		}
-		parts[i] = NormalizeKeyPart(st.Normalize, CanonicalKeyPart(coerceKeyScalar(kv)))
+		part, ok := TypedKeyPart(KeyTypeAt(st.KeyType, i), coerceKeyScalar(kv))
+		if !ok {
+			// The value cannot render into its declared comparison space
+			// (a non-numeric string under keyType "number") — same
+			// non-membership as a missing key part.
+			return g.foldDeleteInput(tx, n, inKey, dirty)
+		}
+		parts[i] = NormalizeKeyPart(st.Normalize, part)
 	}
 	outKey := []byte(OutKey(parts))
 
@@ -676,7 +684,11 @@ func joinOnKey(j *Join, obj, parent any) []byte {
 		if err != nil || v == nil {
 			return nil
 		}
-		parts[i] = NormalizeKeyPart(j.Normalize, CanonicalKeyPart(v))
+		part, ok := TypedKeyPart(KeyTypeAt(j.OnType, i), v)
+		if !ok {
+			return nil // unrenderable reference = nothing to reference
+		}
+		parts[i] = NormalizeKeyPart(j.Normalize, part)
 	}
 	return []byte(OutKey(parts))
 }

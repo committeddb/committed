@@ -1497,7 +1497,15 @@ func (p *Projection) StageKeyExists(stage string, keyParts []string) (bool, erro
 	}
 	parts := make([]string, len(keyParts))
 	for i, kp := range keyParts {
-		parts[i] = stages.NormalizeKeyPart(def.Normalize, kp)
+		part, ok := stages.TypedKeyPart(stages.KeyTypeAt(def.KeyType, i), kp)
+		if !ok {
+			// The probe value cannot render into the key's declared space
+			// (non-numeric text against keyType "number") — genuinely
+			// absent, and with the declaration the last caller obligation
+			// (canonical digits) disappears: "5.0000" probes as 5.
+			return false, nil
+		}
+		parts[i] = stages.NormalizeKeyPart(def.Normalize, part)
 	}
 	key := stages.OutKey(parts)
 	var exists bool

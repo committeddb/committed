@@ -104,6 +104,18 @@ type Stage struct {
 	// normalized keys; declare the same normalize on any sibling source
 	// sharing the key space.
 	Normalize string `mapstructure:"normalize"`
+	// KeyType declares each key part's comparison space, SQL's
+	// declared-column-type model in this vocabulary: "text" (the
+	// default — strings verbatim, typed numbers in canonical digits;
+	// exactly the undeclared behavior) or "number", which additionally
+	// COERCES string renderings — a producer that serializes 5 as
+	// "5.0000" folds onto the same key as one that sends the number 5,
+	// the cross-source hazard byte rendering alone cannot close. A
+	// value that cannot render into its declared space (a non-numeric
+	// string under "number") is non-membership, like a missing key
+	// part. One entry per keyPath position; a single value broadcasts.
+	// Joins addressing this stage inherit these types (like Normalize).
+	KeyType []string `mapstructure:"keyType"`
 }
 
 // Join is one filtering join of a stage: the stage's inputs
@@ -150,6 +162,12 @@ type Join struct {
 	// silent mismatch (the field defect: an UPPERCASE reference against
 	// lowered stage keys, an anti-join that suppressed nothing).
 	Normalize string `mapstructure:"normalize"`
+	// OnType declares the reference parts' comparison spaces (see
+	// Stage.KeyType) for a TOPIC join — the topic's entity keys are the
+	// producer's canonical renderings, so only the reference side needs
+	// coercion. A stage join INHERITS the joined stage's KeyType
+	// (BuildGraph resolves it) and rejects a declaration here.
+	OnType []string `mapstructure:"onType"`
 }
 
 // target returns the join's dimension source name (topic or stage).
@@ -282,6 +300,9 @@ func ValidateShapes(stages []Stage) error {
 		if !ValidNormalize(st.Normalize) {
 			return fmt.Errorf("%s: normalize %q is not supported (want %q)", where, st.Normalize, NormalizeLower)
 		}
+		if err := validateKeyTypes(st.KeyType, len(st.KeyPath), where+" keyType"); err != nil {
+			return err
+		}
 		for ji, j := range st.Joins {
 			jw := fmt.Sprintf("%s join %d (%q)", where, ji+1, j.target())
 			if !ValidNormalize(j.Normalize) {
@@ -322,6 +343,12 @@ func ValidateShapes(stages []Stage) error {
 				return err
 			}
 			if err := RejectParentPaths(j.Where, jw+" where"); err != nil {
+				return err
+			}
+			if j.From != "" && len(j.OnType) > 0 {
+				return fmt.Errorf("%s: onType is not declarable on a stage join — references render in the joined stage's key space, so the join inherits stage %q's keyType automatically; declare it on that stage", jw, j.From)
+			}
+			if err := validateKeyTypes(j.OnType, len(j.On), jw+" onType"); err != nil {
 				return err
 			}
 		}
@@ -378,6 +405,36 @@ func ValidateShapes(stages []Stage) error {
 		}
 	}
 	return nil
+}
+
+// validateKeyTypes checks a keyType/onType declaration: values from the
+// text/number space, arity one (broadcast) or exactly the key's arity.
+func validateKeyTypes(kts []string, arity int, where string) error {
+	for _, kt := range kts {
+		switch kt {
+		case KeyTypeText, KeyTypeNumber:
+		default:
+			return fmt.Errorf("%s: %q is invalid (want %q or %q)", where, kt, KeyTypeText, KeyTypeNumber)
+		}
+	}
+	if len(kts) > 1 && len(kts) != arity {
+		return fmt.Errorf("%s: %d type(s) for %d key part(s) — declare one per position (or a single type to apply to all)", where, len(kts), arity)
+	}
+	return nil
+}
+
+// KeyTypeAt resolves the declared comparison space for one key position:
+// positional when a full list is declared, broadcast when a single value
+// is, text when nothing is.
+func KeyTypeAt(kts []string, i int) string {
+	switch {
+	case len(kts) == 0:
+		return KeyTypeText
+	case len(kts) == 1:
+		return kts[0]
+	default:
+		return kts[i]
+	}
 }
 
 // Fingerprint identifies the stage definitions a store's state was

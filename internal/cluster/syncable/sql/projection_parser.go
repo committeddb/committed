@@ -199,6 +199,7 @@ type rawProjectionStage struct {
 	TieByType   string         `mapstructure:"tieByType"`
 	Join        []rawStageJoin `mapstructure:"join"`
 	Normalize   string         `mapstructure:"normalize"`
+	KeyType     any            `mapstructure:"keyType"`
 	Emit        []StageEmit    `mapstructure:"emit"`
 	ForEach     string         `mapstructure:"forEach"`
 	ElementKey  string         `mapstructure:"elementKey"`
@@ -214,6 +215,7 @@ type rawStageJoin struct {
 	Absent    bool         `mapstructure:"absent"`
 	Where     []WhenClause `mapstructure:"where"`
 	Normalize string       `mapstructure:"normalize"`
+	OnType    any          `mapstructure:"onType"`
 }
 
 // parseProjectionStages decodes the [[{section}.stage]] blocks.
@@ -251,6 +253,7 @@ func parseProjectionStages(v *cluster.ParsedConfig, storage cluster.DatabaseStor
 			ForEach:     rs.ForEach,
 			ElementKey:  rs.ElementKey,
 			Normalize:   strings.ToLower(rs.Normalize),
+			KeyType:     lowerList(pathOrList(rs.KeyType)),
 		})
 	}
 	return stages, nil
@@ -476,9 +479,18 @@ func stageJoins(raw []rawStageJoin) []StageJoin {
 	}
 	out := make([]StageJoin, len(raw))
 	for i, rj := range raw {
-		out[i] = StageJoin{Topic: rj.Topic, From: rj.From, On: pathOrList(rj.On), Absent: rj.Absent, Where: rj.Where, Normalize: strings.ToLower(rj.Normalize)}
+		out[i] = StageJoin{Topic: rj.Topic, From: rj.From, On: pathOrList(rj.On), Absent: rj.Absent, Where: rj.Where, Normalize: strings.ToLower(rj.Normalize), OnType: lowerList(pathOrList(rj.OnType))}
 	}
 	return out
+}
+
+// lowerList lower-cases each entry (type spellings are case-tolerant
+// like every other config vocabulary word).
+func lowerList(in []string) []string {
+	for i := range in {
+		in[i] = strings.ToLower(in[i])
+	}
+	return in
 }
 
 // pathOrList coerces a config value that may be a scalar or a list into

@@ -585,7 +585,10 @@ paths:
         or a list addressing a composite-keyed dimension; key-bearing
         declarations (stage keyPath, join on, source keyPath) accept
         `normalize = "lower"` to fold cross-source key renderings
-        (UPPERCASE CDC GUIDs vs lowercase serializers); editing stage definitions requires a
+        (UPPERCASE CDC GUIDs vs lowercase serializers), and stages
+        accept `keyType = ["text","number"]` (topic joins: `onType`;
+        stage joins inherit) — the declared-column-type model, where
+        "number" coerces string renderings into the numeric key space; editing stage definitions requires a
         rebuild, enforced by the config-change guard; when several
         sources fold one row and any is stage-fed, exactly the
         row-owning source declares `rowOwner = true` — its writes

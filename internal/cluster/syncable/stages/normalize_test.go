@@ -458,3 +458,121 @@ func TestParentPathsRejectedOutsideFans(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "$parent is only meaningful")
 }
+
+// Typed keys: SQL's declared-column-type model — keyType = "number"
+// coerces STRING renderings into the numeric comparison space, so a
+// producer serializing 5 as "5.0000" folds onto the same key as one
+// sending the number 5; text keys never re-parse ("007" stays "007");
+// an unrenderable value is non-membership.
+func TestTypedKeys(t *testing.T) {
+	stages := []Stage{
+		{
+			Name: "by-wa", From: "billing", KeyPath: []string{"$.job", "$.wa"},
+			KeyType: []string{"text", "number"},
+			Reduce:  "aggregate", Emit: []Emit{{Field: "n", Count: true}},
+		},
+		{
+			Name: "gate", From: "pairs", KeyPath: []string{"$.id"},
+			Joins: []Join{{
+				Topic: "was", On: []string{"$.waRef"},
+				OnType: []string{"number"},
+			}},
+			Emit: []Emit{{Field: "id", From: "$.id"}},
+		},
+	}
+	require.NoError(t, ValidateShapes(stages))
+	g := BuildGraph(stages)
+	store := stageStoreForTest(t)
+
+	fold := func(topic, key, payload string) {
+		require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+			return g.FoldTopicUpsertNow(tx, topic, []byte(key), decodePayload(t, payload))
+		}))
+	}
+	get := func(stage, key string) string {
+		var got string
+		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
+			v, err := tx.GetOut(stage, []byte(key))
+			got = string(v)
+			return err
+		}))
+		return got
+	}
+
+	// One producer sends the number 5, the other the STRING "5.0000":
+	// one key under keyType number.
+	fold("billing", "b1", `{"job":"J","wa":5}`)
+	fold("billing", "b2", `{"job":"J","wa":"5.0000"}`)
+	require.Equal(t, `{"n":2}`, get("by-wa", OutKey([]string{"J", "5"})), "number-typed parts coerce string renderings")
+
+	// A non-numeric wa under keyType number: non-membership — and it
+	// RETRACTS b2's prior membership when b2 re-emits malformed.
+	fold("billing", "b2", `{"job":"J","wa":"pending"}`)
+	require.Equal(t, `{"n":1}`, get("by-wa", OutKey([]string{"J", "5"})), "unrenderable re-emit retracts")
+
+	// Topic join with onType number: a string reference "7.0" matches an
+	// entity keyed "7" (the ingest's canonical rendering).
+	fold("was", "7", `{"active":true}`)
+	fold("pairs", "p1", `{"id":"p1","waRef":"7.0"}`)
+	require.NotEmpty(t, get("gate", "p1"), "onType number coerces the reference into the entity-key space")
+}
+
+// keyType admission: value set, arity, and stage-join inheritance.
+func TestTypedKeysValidated(t *testing.T) {
+	bad := []Stage{{
+		Name: "s", From: "t", KeyPath: []string{"$.a"}, KeyType: []string{"decimal"},
+		Emit: []Emit{{Field: "a", From: "$.a"}},
+	}}
+	err := ValidateShapes(bad)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `"decimal" is invalid`)
+
+	arity := []Stage{{
+		Name: "s", From: "t", KeyPath: []string{"$.a", "$.b", "$.c"}, KeyType: []string{"text", "number"},
+		Emit: []Emit{{Field: "a", From: "$.a"}},
+	}}
+	err = ValidateShapes(arity)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "2 type(s) for 3 key part(s)")
+
+	inherit := []Stage{
+		{
+			Name: "pairs", From: "b", KeyPath: []string{"$.wa"}, KeyType: []string{"number"},
+			Emit: []Emit{{Field: "wa", From: "$.wa"}},
+		},
+		{
+			Name: "c", From: "t", KeyPath: []string{"$.id"},
+			Joins: []Join{{From: "pairs", On: []string{"$.waRef"}, OnType: []string{"number"}}},
+			Emit:  []Emit{{Field: "id", From: "$.id"}},
+		},
+	}
+	err = ValidateShapes(inherit)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "onType is not declarable on a stage join")
+
+	// And the inheritance itself: a string reference matches the
+	// producer's number-typed keys with NO declaration on the join.
+	inherit[1].Joins[0].OnType = nil
+	require.NoError(t, ValidateShapes(inherit))
+	g := BuildGraph(inherit)
+	store := stageStoreForTest(t)
+	fold := func(topic, key, payload string) {
+		require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+			return g.FoldTopicUpsertNow(tx, topic, []byte(key), decodePayload(t, payload))
+		}))
+	}
+	fold("b", "x", `{"wa":"12.50"}`)
+	fold("t", "p1", `{"id":"p1","waRef":12.5}`)
+	var got string
+	require.NoError(t, store.View(func(tx *stagestore.Tx) error {
+		v, err := tx.GetOut("c", []byte("p1"))
+		got = string(v)
+		return err
+	}))
+	require.NotEmpty(t, got, "a stage join inherits the producer's keyType")
+
+	// Declaring a keyType changes the store fingerprint (rebuild gate).
+	a := []Stage{{Name: "s", From: "t", KeyPath: []string{"$.a"}, Emit: []Emit{{Field: "a", From: "$.a"}}}}
+	b := []Stage{{Name: "s", From: "t", KeyPath: []string{"$.a"}, KeyType: []string{"number"}, Emit: []Emit{{Field: "a", From: "$.a"}}}}
+	require.NotEqual(t, Fingerprint(a), Fingerprint(b))
+}

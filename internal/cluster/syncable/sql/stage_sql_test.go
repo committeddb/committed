@@ -301,3 +301,52 @@ set = [ { column = "v", from = "$.v" } ]
 	require.Error(t, err)
 	require.Contains(t, err.Error(), `"liveSet"`)
 }
+
+// keyType / onType decode scalar-or-list, case-tolerant, and validate.
+func TestKeyTypeTOMLDecodes(t *testing.T) {
+	toml := `
+[projection]
+db         = "testdb"
+table      = "t"
+primaryKey = "id"
+
+[[projection.columns]]
+name = "id"
+type = "VARCHAR(64)"
+
+[[projection.columns]]
+name = "v"
+type = "VARCHAR(64)"
+
+[[projection.stage]]
+name    = "by-wa"
+from    = "billing"
+keyPath = [ "$.job", "$.wa" ]
+keyType = [ "text", "NUMBER" ]
+emit    = [ { field = "job", from = "$.job" } ]
+
+[[projection.stage]]
+name    = "gate"
+from    = "pairs"
+keyPath = "$.id"
+emit    = [ { field = "id", from = "$.id" } ]
+[[projection.stage.join]]
+topic  = "was"
+on     = "$.waRef"
+onType = "number"
+
+[[projection.source]]
+topic   = "x"
+keyPath = "$.id"
+[[projection.source.rules]]
+set = [ { column = "v", from = "$.v" } ]
+`
+	v, err := cluster.ParseConfigBytes("toml", []byte(toml))
+	require.NoError(t, err)
+	cfg, err := parseProjectionConfigFields(v, nil)
+	require.NoError(t, err)
+	require.Equal(t, []string{"text", "number"}, cfg.Stages[0].KeyType, "case-tolerant, positional")
+	require.Equal(t, []string{"number"}, cfg.Stages[1].Joins[0].OnType, "scalar decodes as one entry")
+	cfg.applyDefaults()
+	require.NoError(t, validateProjectionConfig(cfg))
+}

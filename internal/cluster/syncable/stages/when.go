@@ -215,11 +215,44 @@ func CanonicalKeyPart(v any) string {
 	}
 }
 
+// TypedKeyPart renders one key part in its DECLARED comparison space
+// (see Stage.KeyType). "text" (or empty) is CanonicalKeyPart — strings
+// verbatim, typed numbers canonical. "number" additionally coerces
+// STRING renderings through the same canonicalization, closing the
+// cross-source hazard where one producer serializes 5 as "5.0000";
+// ok=false means the value cannot render into the declared space (a
+// non-numeric string under "number") — non-membership, like a missing
+// key part.
+func TypedKeyPart(keyType string, v any) (string, bool) {
+	if keyType != KeyTypeNumber {
+		return CanonicalKeyPart(v), true
+	}
+	switch n := v.(type) {
+	case string:
+		out, ok := numericDigits(n)
+		return out, ok
+	case json.Number, float64, float32, int, int32, int64, uint, uint32, uint64:
+		return CanonicalKeyPart(v), true
+	default:
+		return "", false
+	}
+}
+
 // canonicalNumericDigits normalizes a JSON numeric literal's digit
 // string exactly (no floating point): exponent applied, leading integer
 // zeros and trailing fractional zeros stripped, "-0" folded to "0". A
 // string that fails to parse as a JSON number passes through verbatim.
 func canonicalNumericDigits(s string) string {
+	out, ok := numericDigits(s)
+	if !ok {
+		return s
+	}
+	return out
+}
+
+// numericDigits is canonicalNumericDigits with an explicit validity
+// verdict (ok=false: not a numeric literal).
+func numericDigits(s string) (string, bool) {
 	neg := false
 	rest := s
 	switch {
@@ -233,7 +266,7 @@ func canonicalNumericDigits(s string) string {
 	if i := strings.IndexAny(rest, "eE"); i >= 0 {
 		e, err := strconv.Atoi(rest[i+1:])
 		if err != nil {
-			return s
+			return "", false
 		}
 		mant, exp = rest[:i], e
 	}
@@ -243,7 +276,7 @@ func canonicalNumericDigits(s string) string {
 	}
 	digits := intPart + fracPart
 	if digits == "" || strings.IndexFunc(digits, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
-		return s
+		return "", false
 	}
 	// point = number of digits left of the decimal point after applying
 	// the exponent.
@@ -261,7 +294,7 @@ func canonicalNumericDigits(s string) string {
 	}
 	digits = digits[:end]
 	if digits == "0" {
-		return "0"
+		return "0", true
 	}
 	var b strings.Builder
 	if neg {
@@ -284,7 +317,7 @@ func canonicalNumericDigits(s string) string {
 		b.WriteByte('.')
 		b.WriteString(digits[point:])
 	}
-	return b.String()
+	return b.String(), true
 }
 
 // NormalizeLower is the one supported key normalization. Cross-source
