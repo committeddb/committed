@@ -56,7 +56,7 @@ func projectionSection(v *cluster.ParsedConfig) string {
 func (p *ProjectionSyncableParser) Parse(v *cluster.ParsedConfig, storage cluster.DatabaseStorage) (cluster.Syncable, error) {
 	config, err := p.ParseConfig(v, storage)
 	if err != nil {
-		return nil, err
+		return nil, classifyConfigErr(err)
 	}
 
 	db, ok := config.Database.(*DB)

@@ -20,6 +20,23 @@ import (
 // not to quiet down).
 const degradedBuildRetryInterval = time.Minute
 
+// reportNotAdmissible logs the boot/reconcile aggregate the field asked
+// for: how many persisted configs of kind are no longer admissible under
+// this binary — surfaced the moment the node cycles instead of as
+// background log noise discovered during a health check.
+func (s *Storage) reportNotAdmissible(kind string) {
+	n := 0
+	for _, e := range s.ConfigBuildErrors() {
+		if e.Kind == kind && e.NotAdmissible {
+			n++
+		}
+	}
+	if n > 0 {
+		s.logger.Error("persisted configs are no longer admissible under this binary — each needs a fixed re-POST or deletion (see /node/status for the list)",
+			zap.String("kind", kind), zap.Int("count", n))
+	}
+}
+
 // retryDegradedBuildsLoop runs on its own goroutine from Open until
 // close, ticking retryDegradedBuilds. Started only when a pump exists
 // (a Storage opened without listener channels has nowhere to push).
@@ -48,6 +65,13 @@ func (s *Storage) retryDegradedBuildsLoop() {
 func (s *Storage) retryDegradedBuilds() {
 	degraded := map[string]map[string]bool{}
 	for _, e := range s.ConfigBuildErrors() {
+		if e.NotAdmissible {
+			// A deterministic admission rejection can never self-heal —
+			// the config was invalidated by this binary's rules (the field
+			// zombie retried one every 60s forever). It stays loudly
+			// degraded in /status until an operator re-POSTs or deletes.
+			continue
+		}
 		if degraded[e.Kind] == nil {
 			degraded[e.Kind] = map[string]bool{}
 		}

@@ -18,4 +18,12 @@ type ConfigBuildError struct {
 	Kind  string
 	ID    string
 	Error string
+	// NotAdmissible marks a DETERMINISTIC rejection: the persisted bytes
+	// cannot build under this binary's admission rules (typically a
+	// config stored under an older binary, invalidated by tightened
+	// rules). The degraded-build retry loop skips these — a config-rules
+	// failure can never self-heal; the remedy is a fixed re-POST or a
+	// delete. Environmental failures (unset ${VAR}, unreachable
+	// destination, missing database) retry as before.
+	NotAdmissible bool
 }

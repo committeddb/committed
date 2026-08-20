@@ -196,6 +196,7 @@ func (s *Storage) reconcileIngestableList() ([]*db.IngestableWithID, error) {
 		out = append(out, &db.IngestableWithID{ID: r.id, Ingestable: s.buildIngestable(r.cfg)})
 	}
 	s.sweepConfigErrorsExcept("ingestable", present)
+	s.reportNotAdmissible("ingestable")
 	return out, nil
 }
 
@@ -208,8 +209,13 @@ func (s *Storage) buildIngestable(t *cluster.Configuration) cluster.Ingestable {
 	_, parsed, err := s.parser.ParseIngestable(t.MimeType, t.Data)
 	if err != nil {
 		s.recordConfigError("ingestable", t.ID, configErrBuild, err)
-		s.logger.Error("ingestable config persisted but could not be built on this node (degraded); fix the environment — the node retries the build every minute (and on restart)",
-			zap.String("id", t.ID), zap.Error(err))
+		if cluster.IsNotAdmissible(err) {
+			s.logger.Error("persisted ingestable config is not admissible under this binary (admission rules have tightened since it was stored); automatic retries cannot help — fix and re-POST the config, or delete it",
+				zap.String("id", t.ID), zap.Error(err))
+		} else {
+			s.logger.Error("ingestable config persisted but could not be built on this node (degraded); fix the environment — the node retries the build every minute (and on restart)",
+				zap.String("id", t.ID), zap.Error(err))
+		}
 		return nil
 	}
 	s.clearConfigError("ingestable", t.ID, configErrBuild)

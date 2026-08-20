@@ -88,11 +88,14 @@ const (
 	configErrBuild
 )
 
-// configErr is one degraded-config record: the failure and the strongest
-// evidence class that observed it.
+// configErr is one degraded-config record: the failure, the strongest
+// evidence class that observed it, and whether the failure is a
+// deterministic admission rejection (cluster.IsNotAdmissible) — the
+// class the retry loop must NOT retry.
 type configErr struct {
-	err      error
-	evidence configErrEvidence
+	err           error
+	evidence      configErrEvidence
+	notAdmissible bool
 }
 
 // recordConfigError marks a config as failed-to-build on this node — a
@@ -109,7 +112,7 @@ func (s *Storage) recordConfigError(kind, id string, evidence configErrEvidence,
 	if prev, ok := s.configErrors[key]; ok && prev.evidence > evidence {
 		evidence = prev.evidence
 	}
-	s.configErrors[key] = configErr{err: err, evidence: evidence}
+	s.configErrors[key] = configErr{err: err, evidence: evidence, notAdmissible: cluster.IsNotAdmissible(err)}
 }
 
 // clearConfigError removes a config's recorded build error after a success
@@ -180,7 +183,7 @@ func (s *Storage) ConfigBuildErrors() []cluster.ConfigBuildError {
 		// first separator splits them unambiguously.
 		kind, id, _ := strings.Cut(key, "/")
 		msg, _ := cluster.RedactedMessage(rec.err)
-		out = append(out, cluster.ConfigBuildError{Kind: kind, ID: id, Error: msg})
+		out = append(out, cluster.ConfigBuildError{Kind: kind, ID: id, Error: msg, NotAdmissible: rec.notAdmissible})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Kind != out[j].Kind {

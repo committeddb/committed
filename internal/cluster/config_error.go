@@ -7,6 +7,37 @@ import (
 	"strings"
 )
 
+// notAdmissibleError marks a DETERMINISTIC config rejection: the
+// persisted bytes cannot build under this binary's admission rules, so
+// retrying the build can never succeed — the degraded-build self-heal
+// loop must park such a config loudly instead of retrying forever (the
+// field zombie: a config stored legally under an older binary, made
+// invalid by a later build's tightened admission, retried every 60s
+// eternally). Applied ONLY where determinism is certain — decode
+// failures, unknown types, field/validation rejections — and never to
+// anything that can heal (database resolution, destination I/O): the
+// classification fails OPEN to retry.
+type notAdmissibleError struct{ err error }
+
+func (e *notAdmissibleError) Error() string { return e.err.Error() }
+func (e *notAdmissibleError) Unwrap() error { return e.err }
+
+// NotAdmissible marks err as a deterministic config rejection (nil in,
+// nil out).
+func NotAdmissible(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &notAdmissibleError{err: err}
+}
+
+// IsNotAdmissible reports whether err (anywhere in its chain) is a
+// deterministic config rejection.
+func IsNotAdmissible(err error) bool {
+	var t *notAdmissibleError
+	return errors.As(err, &t)
+}
+
 // ConfigError wraps a configuration parsing/validation error. HTTP handlers use
 // errors.As to detect this type and return 400 instead of 500. When the
 // underlying error identifies a specific config field, Field/Issue carry it so

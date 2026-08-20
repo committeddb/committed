@@ -22,7 +22,7 @@ type SyncableParser struct {
 func (p *SyncableParser) Parse(v *cluster.ParsedConfig, storage cluster.DatabaseStorage) (cluster.Syncable, error) {
 	config, err := p.ParseConfig(v, storage)
 	if err != nil {
-		return nil, err
+		return nil, classifyConfigErr(err)
 	}
 
 	db, ok := config.Database.(*DB)
@@ -299,7 +299,30 @@ func requiresPrimaryKey(storage cluster.DatabaseStorage, topic string) bool {
 // echo.
 func describeDatabaseErr(err error, id string) error {
 	if errors.Is(err, cluster.ErrDatabaseMissing) {
-		return fmt.Errorf("db references database %q, which is not registered on this cluster — POST its [database] config first (create order on a fresh node: databases → types → ingestables/syncables): %w", id, err)
+		return &databaseUnavailableError{err: fmt.Errorf("db references database %q, which is not registered on this cluster — POST its [database] config first (create order on a fresh node: databases → types → ingestables/syncables): %w", id, err)}
 	}
-	return fmt.Errorf("resolve database %q: %w", id, err)
+	return &databaseUnavailableError{err: fmt.Errorf("resolve database %q: %w", id, err)}
+}
+
+// databaseUnavailableError tags a database-RESOLUTION failure: the
+// referenced [database] config is missing or failed to build. These
+// HEAL — the database config arrives or gets fixed by a re-POST — so
+// classifyConfigErr keeps them retryable while every other config
+// failure from the parse phase is deterministic.
+type databaseUnavailableError struct{ err error }
+
+func (e *databaseUnavailableError) Error() string { return e.err.Error() }
+func (e *databaseUnavailableError) Unwrap() error { return e.err }
+
+// classifyConfigErr marks a ParseConfig failure as NotAdmissible (the
+// deterministic park-don't-retry class) unless it is a database
+// resolution failure — the one config-phase error that heals without a
+// config change. Init/IO failures never pass through here (they return
+// from Init, unwrapped), so the classification fails open to retry.
+func classifyConfigErr(err error) error {
+	var d *databaseUnavailableError
+	if errors.As(err, &d) {
+		return err
+	}
+	return cluster.NotAdmissible(err)
 }

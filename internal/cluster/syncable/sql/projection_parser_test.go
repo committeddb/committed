@@ -1320,3 +1320,38 @@ set  = [ { column = "state", value = "billable" } ]
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "greaterThan takes a numeric literal")
 }
+
+// The determinism boundary for the degraded-build retry loop: a
+// validation rejection is NotAdmissible (parks — retrying a config-rules
+// failure can never help), while a database-resolution failure is NOT
+// (it heals when the [database] config arrives or is fixed).
+func TestParseClassifiesAdmissionVsDatabaseErrors(t *testing.T) {
+	toml := `
+[projection]
+topic      = "t"
+db         = "testdb"
+table      = "rows"
+primaryKey = "id"
+
+[[projection.columns]]
+name = "id"
+type = "TEXT"
+
+[[projection.rules]]
+when = [ { path = "$.x", equals = "y", null = true } ]
+set  = [ { column = "id", from = "$.id" } ]
+`
+	v := readConfig(t, "toml", strings.NewReader(toml))
+	_, err := (&sql.ProjectionSyncableParser{}).Parse(v, projectionStorage())
+	require.Error(t, err)
+	require.True(t, cluster.IsNotAdmissible(err), "a validation rejection is deterministic — park, don't retry")
+
+	// Same config, valid rules, but the database is missing: retryable.
+	fixed := strings.Replace(toml, `when = [ { path = "$.x", equals = "y", null = true } ]`, ``, 1)
+	fixed = strings.Replace(fixed, `db         = "testdb"`, `db         = "nowhere"`, 1)
+	v = readConfig(t, "toml", strings.NewReader(fixed))
+	_, err = (&sql.ProjectionSyncableParser{}).Parse(v, projectionStorage())
+	require.Error(t, err)
+	require.False(t, cluster.IsNotAdmissible(err), "a missing database HEALS when its config arrives — must stay retryable")
+	require.ErrorIs(t, err, cluster.ErrDatabaseMissing)
+}
