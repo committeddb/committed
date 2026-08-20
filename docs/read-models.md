@@ -498,12 +498,16 @@ set = [ { column = "total", from = "$.total" },
   the row (`onDelete = "delete-row"`), its own columns (`"clear"`), or
   nothing (`"ignore"`).
 - **Introspection**: `GET /syncable/{id}/status?stages=true` reports
-  each stage's current output key count from the owner's store — an
-  empty stage reads 0, which is the one number that splits "the fan
-  produced nothing" from "the join never matched" — and
-  `?probeStage=<stage>&probeKey=<key>` answers whether one specific key
-  is currently held (stored form: canonical digits, normalized case;
-  composite keys in their JSON-array encoding).
+  each stage's row — `keys` (the store's current output count) plus
+  `inputs`/`fanned` flow counters since the worker started. The three
+  numbers split every silent-empty state: `inputs` 0 = that topic's log
+  region not reached (mid-replay zeros are healthy); `inputs` > 0 with
+  `fanned` 0 = the forEach fan finds no array; flow > 0 with `keys` 0 =
+  the when/joins rejected everything (a per-element `when` referencing
+  parent fields needs `$parent.`). `?probeStage=<stage>&probeKey=<key>`
+  answers whether one specific key is currently held (stored form:
+  canonical digits, normalized case; composite keys in their JSON-array
+  encoding).
 - **Key identity is canonical**: numeric key parts render canonically —
   `5`, `5.0000`, and `5e0` are ONE key (`5.25` keeps its digits), and
   strings are never re-parsed (`"007"` stays text). Source digit

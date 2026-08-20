@@ -382,20 +382,25 @@ func TestSyncableStatus_StageKeyCounts(t *testing.T) {
 	fake.IDReturns(1)
 	fake.SyncableOwnerReturns(1)
 	fake.SyncableProgressReturns(50, 100, nil)
-	fake.SyncableStageKeyCountsReturns(map[string]int{"billed-pairs": 0, "completed": 22023}, true)
+	fake.SyncableStageStatsReturns(map[string]cluster.StageStat{
+		"billed-pairs": {Keys: 0, Inputs: 496000, Fanned: 91737},
+		"completed":    {Keys: 22023, Inputs: 700000},
+	}, true)
 
-	// Opted in: the counts render.
+	// Opted in: the stats render — keys plus the flow counters that split
+	// region-not-reached / fan-empty / filtered-to-zero.
 	status, raw := doSyncableStatusRaw(t, fake, "?stages=true", nil)
 	require.Equal(t, 200, status)
-	require.Contains(t, raw, `"billed-pairs":0`, "an EMPTY stage is visible as 0, not absent")
-	require.Contains(t, raw, `"completed":22023`)
+	require.Contains(t, raw, `"billed-pairs":{"keys":0,"inputs":496000,"fanned":91737}`,
+		"an EMPTY stage is visible as keys 0 WITH its flow context")
+	require.Contains(t, raw, `"completed":{"keys":22023,"inputs":700000}`)
 
 	// Default call: no counts (poll-safe O(1) contract untouched).
 	_, raw = doSyncableStatusRaw(t, fake, "", nil)
 	require.NotContains(t, raw, "billed-pairs")
 
 	// Stage-free syncable (or non-owner): field absent, not an error.
-	fake.SyncableStageKeyCountsReturns(nil, false)
+	fake.SyncableStageStatsReturns(nil, false)
 	status, raw = doSyncableStatusRaw(t, fake, "?stages=true", nil)
 	require.Equal(t, 200, status)
 	require.NotContains(t, raw, `"stages"`)

@@ -353,14 +353,16 @@ type SyncableStatusResponse struct {
 	// with CaughtUp it distinguishes "nothing to examine" from "never
 	// started scanning", the split the phantom-adoption incident needed.
 	ReadPosition *uint64 `json:"readPosition,omitempty"`
-	// Stages is each declared stage's current output key count — the
-	// silent-empty-stage triage read ("how many keys does billed-pairs
-	// hold?" splits fan-produced-nothing from join-never-matched).
-	// Present only when the request opts in with ?stages=true AND the
-	// owner's live worker answered (directly or via the same transparent
-	// proxy hop readPosition uses); absent for stage-free syncables and
-	// on soft degrade.
-	Stages map[string]int `json:"stages,omitempty"`
+	// Stages is each declared stage's introspection row: keys (the
+	// store's current output count) plus inputs/fanned flow counters
+	// since the worker started. The three numbers split every
+	// silent-empty state: inputs 0 = log region not reached; inputs > 0,
+	// fanned 0 = the forEach fan finds no array; flow > 0 with keys 0 =
+	// the when/joins rejected everything. Present only when the request
+	// opts in with ?stages=true AND the owner's live worker answered
+	// (directly or via the same transparent proxy hop readPosition
+	// uses); absent for stage-free syncables and on soft degrade.
+	Stages map[string]cluster.StageStat `json:"stages,omitempty"`
 	// StageKeyExists answers a single-key probe
 	// (?probeStage=<stage>&probeKey=<key>): does that stage currently
 	// hold an output at that key (stored form: canonical digits,
@@ -530,8 +532,8 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 	if wantStages {
 		// Same owner-local contract as readPosition: absent on a non-owner
 		// or a stage-free syncable, never an error.
-		if counts, ok := h.c.SyncableStageKeyCounts(id); ok {
-			resp.Stages = counts
+		if stats, ok := h.c.SyncableStageStats(id); ok {
+			resp.Stages = stats
 		}
 	}
 	if probeStage != "" {

@@ -1447,20 +1447,23 @@ func (p *Projection) foldStagesTx(ctx context.Context, tx *gosql.Tx, stx *stages
 	return p.foldEntitiesTx(stx, a)
 }
 
-// StageKeyCounts implements cluster.StageIntrospector: each declared
-// stage's current out-key count from the node-local store.
-func (p *Projection) StageKeyCounts() (map[string]int, error) {
+// StageStats implements cluster.StageIntrospector: each declared stage's
+// current out-key count (store truth) plus its in-memory flow counters.
+func (p *Projection) StageStats() (map[string]cluster.StageStat, error) {
 	if p.stages == nil {
 		return nil, nil
 	}
-	out := make(map[string]int, len(p.config.Stages))
+	flows := p.stages.FlowCounts()
+	out := make(map[string]cluster.StageStat, len(p.config.Stages))
 	err := p.stageStore.View(func(tx *stagestore.Tx) error {
 		for i := range p.config.Stages {
-			n, err := tx.OutKeyCount(p.config.Stages[i].Name)
+			name := p.config.Stages[i].Name
+			n, err := tx.OutKeyCount(name)
 			if err != nil {
 				return err
 			}
-			out[p.config.Stages[i].Name] = n
+			fc := flows[name]
+			out[name] = cluster.StageStat{Keys: n, Inputs: fc.Inputs, Fanned: fc.Fanned}
 		}
 		return nil
 	})

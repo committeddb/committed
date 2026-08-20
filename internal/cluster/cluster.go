@@ -150,10 +150,10 @@ type Cluster interface {
 	// owning node's worker holds a reader, so the HTTP layer proxies
 	// ?readPosition=true status calls to SyncableOwner's node.
 	SyncableReadPosition(id string) (position uint64, ok bool)
-	// SyncableStageKeyCounts reports the per-stage output key counts of the
-	// syncable's worker on THIS node (ok=false: no worker here, or no
-	// stages). Owner-local; see StageIntrospector.
-	SyncableStageKeyCounts(id string) (counts map[string]int, ok bool)
+	// SyncableStageStats reports the per-stage introspection rows (keys /
+	// inputs / fanned) of the syncable's worker on THIS node (ok=false: no
+	// worker here, or no stages). Owner-local; see StageIntrospector.
+	SyncableStageStats(id string) (stats map[string]StageStat, ok bool)
 	// SyncableStageKeyExists probes one stage output key on THIS node's
 	// worker (ok=false: no worker here, or no stages). err: undeclared
 	// stage name. Owner-local; see StageIntrospector.

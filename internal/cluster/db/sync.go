@@ -1333,12 +1333,12 @@ func (db *DB) SyncableOwner(id string) uint64 {
 	return db.Leader()
 }
 
-// SyncableStageKeyCounts reports the per-stage output key counts of
+// SyncableStageStats reports the per-stage introspection rows of
 // syncable id's worker ON THIS NODE (nil, false when no worker is
 // registered here or the syncable declares no stages). Owner-local like
 // SyncableReadPosition — the stage store lives with the worker — so the
 // HTTP layer proxies to the owner for the any-node answer.
-func (db *DB) SyncableStageKeyCounts(id string) (map[string]int, bool) {
+func (db *DB) SyncableStageStats(id string) (map[string]cluster.StageStat, bool) {
 	db.workersMu.Lock()
 	handle, ok := db.syncWorkers[id]
 	db.workersMu.Unlock()
@@ -1349,11 +1349,11 @@ func (db *DB) SyncableStageKeyCounts(id string) (map[string]int, bool) {
 	if !ok {
 		return nil, false
 	}
-	counts, err := in.StageKeyCounts()
-	if err != nil || counts == nil {
+	stats, err := in.StageStats()
+	if err != nil || stats == nil {
 		return nil, false
 	}
-	return counts, true
+	return stats, true
 }
 
 // SyncableStageKeyExists probes one stage output key of syncable id's

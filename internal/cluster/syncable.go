@@ -464,13 +464,31 @@ func ParseCheckpointPolicy(v *ParsedConfig) (CheckpointPolicy, error) {
 // the field triage had no way to ask it. Owner-local by construction
 // (the store lives with the worker); the HTTP status endpoint proxies.
 type StageIntrospector interface {
-	StageKeyCounts() (map[string]int, error)
+	StageStats() (map[string]StageStat, error)
 	// StageKeyExists reports whether the named stage currently holds an
 	// output at key — the caller supplies the key (canonical, normalized
 	// form: the stored bytes), so the boolean answer reveals nothing the
 	// caller didn't already have. An undeclared stage name is an error
 	// (a typo'd probe must not read as "key absent").
 	StageKeyExists(stage, key string) (bool, error)
+}
+
+// StageStat is one stage's introspection row. Keys is the store truth
+// (current output keys). Inputs and Fanned are in-memory flow counters
+// since this worker started — not replicated, reset on restart — and
+// together the three numbers split every silent-empty state at a
+// glance: Inputs 0 = the stage's log region hasn't been reached;
+// Inputs > 0 with Fanned 0 (forEach stages) = the fan finds no array
+// (the serialized-JSON trap); Fanned > 0 (or Inputs > 0, for plain
+// stages) with Keys 0 = the when/joins rejected everything — the
+// field's b6-vs-b7 discriminator, where a per-ELEMENT when referencing
+// parent fields without $parent held a stage at zero silently.
+type StageStat struct {
+	Keys   int   `json:"keys"`
+	Inputs int64 `json:"inputs"`
+	// Fanned counts elements produced by a forEach stage's fan (omitted
+	// for plain stages).
+	Fanned int64 `json:"fanned,omitempty"`
 }
 
 // StageRecoverer is implemented by syncables carrying NODE-LOCAL stage

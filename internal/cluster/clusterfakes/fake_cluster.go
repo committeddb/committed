@@ -609,19 +609,6 @@ type FakeCluster struct {
 		result1 uint64
 		result2 bool
 	}
-	SyncableStageKeyCountsStub        func(string) (map[string]int, bool)
-	syncableStageKeyCountsMutex       sync.RWMutex
-	syncableStageKeyCountsArgsForCall []struct {
-		arg1 string
-	}
-	syncableStageKeyCountsReturns struct {
-		result1 map[string]int
-		result2 bool
-	}
-	syncableStageKeyCountsReturnsOnCall map[int]struct {
-		result1 map[string]int
-		result2 bool
-	}
 	SyncableStageKeyExistsStub        func(string, string, string) (bool, bool, error)
 	syncableStageKeyExistsMutex       sync.RWMutex
 	syncableStageKeyExistsArgsForCall []struct {
@@ -638,6 +625,19 @@ type FakeCluster struct {
 		result1 bool
 		result2 bool
 		result3 error
+	}
+	SyncableStageStatsStub        func(string) (map[string]cluster.StageStat, bool)
+	syncableStageStatsMutex       sync.RWMutex
+	syncableStageStatsArgsForCall []struct {
+		arg1 string
+	}
+	syncableStageStatsReturns struct {
+		result1 map[string]cluster.StageStat
+		result2 bool
+	}
+	syncableStageStatsReturnsOnCall map[int]struct {
+		result1 map[string]cluster.StageStat
+		result2 bool
 	}
 	SyncableStuckStub        func(string) (cluster.SyncableStuck, bool, error)
 	syncableStuckMutex       sync.RWMutex
@@ -3783,70 +3783,6 @@ func (fake *FakeCluster) SyncableReadPositionReturnsOnCall(i int, result1 uint64
 	}{result1, result2}
 }
 
-func (fake *FakeCluster) SyncableStageKeyCounts(arg1 string) (map[string]int, bool) {
-	fake.syncableStageKeyCountsMutex.Lock()
-	ret, specificReturn := fake.syncableStageKeyCountsReturnsOnCall[len(fake.syncableStageKeyCountsArgsForCall)]
-	fake.syncableStageKeyCountsArgsForCall = append(fake.syncableStageKeyCountsArgsForCall, struct {
-		arg1 string
-	}{arg1})
-	stub := fake.SyncableStageKeyCountsStub
-	fakeReturns := fake.syncableStageKeyCountsReturns
-	fake.recordInvocation("SyncableStageKeyCounts", []interface{}{arg1})
-	fake.syncableStageKeyCountsMutex.Unlock()
-	if stub != nil {
-		return stub(arg1)
-	}
-	if specificReturn {
-		return ret.result1, ret.result2
-	}
-	return fakeReturns.result1, fakeReturns.result2
-}
-
-func (fake *FakeCluster) SyncableStageKeyCountsCallCount() int {
-	fake.syncableStageKeyCountsMutex.RLock()
-	defer fake.syncableStageKeyCountsMutex.RUnlock()
-	return len(fake.syncableStageKeyCountsArgsForCall)
-}
-
-func (fake *FakeCluster) SyncableStageKeyCountsCalls(stub func(string) (map[string]int, bool)) {
-	fake.syncableStageKeyCountsMutex.Lock()
-	defer fake.syncableStageKeyCountsMutex.Unlock()
-	fake.SyncableStageKeyCountsStub = stub
-}
-
-func (fake *FakeCluster) SyncableStageKeyCountsArgsForCall(i int) string {
-	fake.syncableStageKeyCountsMutex.RLock()
-	defer fake.syncableStageKeyCountsMutex.RUnlock()
-	argsForCall := fake.syncableStageKeyCountsArgsForCall[i]
-	return argsForCall.arg1
-}
-
-func (fake *FakeCluster) SyncableStageKeyCountsReturns(result1 map[string]int, result2 bool) {
-	fake.syncableStageKeyCountsMutex.Lock()
-	defer fake.syncableStageKeyCountsMutex.Unlock()
-	fake.SyncableStageKeyCountsStub = nil
-	fake.syncableStageKeyCountsReturns = struct {
-		result1 map[string]int
-		result2 bool
-	}{result1, result2}
-}
-
-func (fake *FakeCluster) SyncableStageKeyCountsReturnsOnCall(i int, result1 map[string]int, result2 bool) {
-	fake.syncableStageKeyCountsMutex.Lock()
-	defer fake.syncableStageKeyCountsMutex.Unlock()
-	fake.SyncableStageKeyCountsStub = nil
-	if fake.syncableStageKeyCountsReturnsOnCall == nil {
-		fake.syncableStageKeyCountsReturnsOnCall = make(map[int]struct {
-			result1 map[string]int
-			result2 bool
-		})
-	}
-	fake.syncableStageKeyCountsReturnsOnCall[i] = struct {
-		result1 map[string]int
-		result2 bool
-	}{result1, result2}
-}
-
 func (fake *FakeCluster) SyncableStageKeyExists(arg1 string, arg2 string, arg3 string) (bool, bool, error) {
 	fake.syncableStageKeyExistsMutex.Lock()
 	ret, specificReturn := fake.syncableStageKeyExistsReturnsOnCall[len(fake.syncableStageKeyExistsArgsForCall)]
@@ -3914,6 +3850,70 @@ func (fake *FakeCluster) SyncableStageKeyExistsReturnsOnCall(i int, result1 bool
 		result2 bool
 		result3 error
 	}{result1, result2, result3}
+}
+
+func (fake *FakeCluster) SyncableStageStats(arg1 string) (map[string]cluster.StageStat, bool) {
+	fake.syncableStageStatsMutex.Lock()
+	ret, specificReturn := fake.syncableStageStatsReturnsOnCall[len(fake.syncableStageStatsArgsForCall)]
+	fake.syncableStageStatsArgsForCall = append(fake.syncableStageStatsArgsForCall, struct {
+		arg1 string
+	}{arg1})
+	stub := fake.SyncableStageStatsStub
+	fakeReturns := fake.syncableStageStatsReturns
+	fake.recordInvocation("SyncableStageStats", []interface{}{arg1})
+	fake.syncableStageStatsMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeCluster) SyncableStageStatsCallCount() int {
+	fake.syncableStageStatsMutex.RLock()
+	defer fake.syncableStageStatsMutex.RUnlock()
+	return len(fake.syncableStageStatsArgsForCall)
+}
+
+func (fake *FakeCluster) SyncableStageStatsCalls(stub func(string) (map[string]cluster.StageStat, bool)) {
+	fake.syncableStageStatsMutex.Lock()
+	defer fake.syncableStageStatsMutex.Unlock()
+	fake.SyncableStageStatsStub = stub
+}
+
+func (fake *FakeCluster) SyncableStageStatsArgsForCall(i int) string {
+	fake.syncableStageStatsMutex.RLock()
+	defer fake.syncableStageStatsMutex.RUnlock()
+	argsForCall := fake.syncableStageStatsArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeCluster) SyncableStageStatsReturns(result1 map[string]cluster.StageStat, result2 bool) {
+	fake.syncableStageStatsMutex.Lock()
+	defer fake.syncableStageStatsMutex.Unlock()
+	fake.SyncableStageStatsStub = nil
+	fake.syncableStageStatsReturns = struct {
+		result1 map[string]cluster.StageStat
+		result2 bool
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) SyncableStageStatsReturnsOnCall(i int, result1 map[string]cluster.StageStat, result2 bool) {
+	fake.syncableStageStatsMutex.Lock()
+	defer fake.syncableStageStatsMutex.Unlock()
+	fake.SyncableStageStatsStub = nil
+	if fake.syncableStageStatsReturnsOnCall == nil {
+		fake.syncableStageStatsReturnsOnCall = make(map[int]struct {
+			result1 map[string]cluster.StageStat
+			result2 bool
+		})
+	}
+	fake.syncableStageStatsReturnsOnCall[i] = struct {
+		result1 map[string]cluster.StageStat
+		result2 bool
+	}{result1, result2}
 }
 
 func (fake *FakeCluster) SyncableStuck(arg1 string) (cluster.SyncableStuck, bool, error) {

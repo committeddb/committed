@@ -262,10 +262,12 @@ func projectionNormalizeFlow(t *testing.T, db *sql.DB, table, quoteL, quoteR str
 		return n
 	}
 
-	// Stage introspection: the store answers key counts (0 before any fold).
-	counts, err := p.StageKeyCounts()
+	// Stage introspection: the store answers stats (0 before any fold —
+	// keys AND inputs, the "region not reached" signature).
+	counts, err := p.StageStats()
 	require.NoError(t, err)
-	require.Equal(t, 0, counts["latest-prop"], "an unfolded stage reads 0, not absent")
+	require.Equal(t, 0, counts["latest-prop"].Keys, "an unfolded stage reads 0, not absent")
+	require.Zero(t, counts["latest-prop"].Inputs, "no inputs delivered yet")
 
 	// The owner's CDC event: UPPERCASE GUID in both entity key and payload.
 	// The decorator's proposal: lowercase.
@@ -280,9 +282,10 @@ func projectionNormalizeFlow(t *testing.T, db *sql.DB, table, quoteL, quoteR str
 	require.Equal(t, "p1", latest.String, "the decoration lands across the case seam")
 	require.Equal(t, 1, count(), "one row, not an upper/lower pair")
 
-	counts, err = p.StageKeyCounts()
+	counts, err = p.StageStats()
 	require.NoError(t, err)
-	require.Equal(t, 1, counts["latest-prop"], "the folded stage's key count is visible")
+	require.Equal(t, 1, counts["latest-prop"].Keys, "the folded stage's key count is visible")
+	require.Positive(t, counts["latest-prop"].Inputs, "flow counters move with the folds")
 
 	// The single-key probe: stored form (lowered), so the canonical key
 	// answers true, the raw producer rendering answers false, and a

@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	"github.com/PaesslerAG/jsonpath"
 	"go.uber.org/zap"
@@ -46,6 +47,12 @@ type graphNode struct {
 	// At stageForEachNonArrayWarnRun it triggers the one-shot
 	// misconfiguration warning; any array-shaped input resets it.
 	fanNonArrayRun int
+	// inputs/fanned are flow counters for introspection (StageStat):
+	// upsert deliveries to this stage, and elements its fan produced.
+	// Atomic — folds run on the worker goroutine, the status endpoint
+	// reads from an HTTP goroutine.
+	inputs atomic.Int64
+	fanned atomic.Int64
 	// dimConsumers are the joins (of LATER stages) that use THIS stage's
 	// outputs as their dimension rows — maintained by refoldKey as the
 	// outputs change, fan-out marking their dependents dirty.
@@ -278,6 +285,7 @@ func (g *Graph) markDimDependents(tx *stagestore.Tx, d dimRef, dimKey []byte, di
 // affected key(s), cascade the delta. An input that stops matching the
 // stage's when RETRACTS (filtering is refold, not skip).
 func (g *Graph) foldUpsert(tx *stagestore.Tx, n *graphNode, inKey []byte, payload any, gen uint64, dirty Dirty) error {
+	n.inputs.Add(1)
 	if n.def.ForEach != "" {
 		return g.foldFan(tx, n, inKey, payload, gen, dirty)
 	}
@@ -315,6 +323,24 @@ func FanMiss(path string, payload any, elems *[]any) string {
 		}
 	}
 	return miss
+}
+
+// FlowCounts reports each stage's in-memory flow counters (upsert
+// deliveries; fanned elements for forEach stages) since this graph was
+// built — the introspection halves that, with the store's key counts,
+// split "region not reached" from "fan empty" from "filtered to zero".
+func (g *Graph) FlowCounts() map[string]FlowCount {
+	out := make(map[string]FlowCount, len(g.order))
+	for _, n := range g.order {
+		out[n.def.Name] = FlowCount{Inputs: n.inputs.Load(), Fanned: n.fanned.Load()}
+	}
+	return out
+}
+
+// FlowCount is one stage's flow counters (see Graph.FlowCounts).
+type FlowCount struct {
+	Inputs int64
+	Fanned int64
 }
 
 // stageForEachNonArrayWarnRun is how many CONSECUTIVE non-array forEach
@@ -366,6 +392,7 @@ func (g *Graph) foldFan(tx *stagestore.Tx, n *graphNode, parentKey []byte, paylo
 	}
 	current := map[string]bool{}
 	for _, el := range elems {
+		n.fanned.Add(1)
 		kv, err := ResolvePath(identityPath, el, payload)
 		if err != nil || kv == nil {
 			continue // an unidentifiable element fans nothing (and reconciles away)

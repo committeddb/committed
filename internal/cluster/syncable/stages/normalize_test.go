@@ -350,3 +350,43 @@ func TestCanonicalKeyPart(t *testing.T) {
 	require.Equal(t, "007", CanonicalKeyPart("007"), "a STRING key is text, never re-parsed as a number")
 	require.Equal(t, "GUID-A", CanonicalKeyPart("GUID-A"))
 }
+
+// The flow counters split every silent-empty state — including the
+// field's b6 signature: a forEach stage whose per-element when
+// references a PARENT field without $parent fans everything and keys
+// nothing (inputs > 0, fanned > 0, keys 0).
+func TestFlowCountsSplitSilentEmptyStates(t *testing.T) {
+	stages := []Stage{
+		{
+			Name: "untouched", From: "quiet-topic", KeyPath: []string{"$.id"},
+			Emit: []Emit{{Field: "id", From: "$.id"}},
+		},
+		{
+			Name: "b6", From: "txn-events",
+			ForEach: "$.EventData.elements[*]", ElementKey: "$.Id",
+			KeyPath: []string{"$parent.JobId", "$.WorkAreaId"},
+			When:    []WhenClause{{Path: "$.EventType", NotEquals: "delete"}},
+			Reduce:  "aggregate", Emit: []Emit{{Field: "n", Count: true}},
+		},
+	}
+	require.NoError(t, ValidateShapes(stages))
+	g := BuildGraph(stages)
+	store := stageStoreForTest(t)
+
+	require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+		return g.FoldTopicUpsertNow(tx, "txn-events", []byte("t1"),
+			decodePayload(t, `{"JobId":"J1","EventType":"update","EventData":{"elements":[{"Id":"e1","WorkAreaId":1},{"Id":"e2","WorkAreaId":2}]}}`))
+	}))
+
+	flows := g.FlowCounts()
+	require.Zero(t, flows["untouched"].Inputs, "region not reached: inputs 0")
+	require.Equal(t, int64(1), flows["b6"].Inputs)
+	require.Equal(t, int64(2), flows["b6"].Fanned, "the fan produced elements")
+	var keys int
+	require.NoError(t, store.View(func(tx *stagestore.Tx) error {
+		var err error
+		keys, err = tx.OutKeyCount("b6")
+		return err
+	}))
+	require.Zero(t, keys, "inputs>0, fanned>0, keys=0 — the filtered-to-zero signature (a parent-field when without $parent)")
+}

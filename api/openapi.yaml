@@ -943,12 +943,16 @@ paths:
         degrades softly: every other field still serves and `readPosition`
         is absent. Keep routine polling on the default form.
 
-        `?stages=true` opts one call into the owner-local per-stage output
-        key counts (`stages`, name → count) for staged projections — the
-        silent-empty-stage triage read: "how many keys does billed-pairs
-        hold?" splits fan-produced-nothing from join-never-matched. Same
-        owner-proxy and soft-degrade contract as `readPosition`; absent
-        for stage-free syncables.
+        `?stages=true` opts one call into the owner-local per-stage
+        introspection rows (`stages`, name → {keys, inputs, fanned}):
+        keys is the store's current output count, inputs/fanned are flow
+        counters since the worker started. The three numbers split every
+        silent-empty state at a glance — inputs 0 = that topic's log
+        region not reached yet (the mid-replay all-zeros read); inputs >
+        0 with fanned 0 = the forEach fan finds no array; flow > 0 with
+        keys 0 = the when/joins rejected everything. Same owner-proxy
+        and soft-degrade contract as `readPosition`; absent for
+        stage-free syncables.
 
         `?probeStage=<stage>&probeKey=<key>` answers a single-key
         existence probe (`stageKeyExists`) against the stage's STORED
