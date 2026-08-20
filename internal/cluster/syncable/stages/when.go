@@ -16,15 +16,31 @@ import (
 )
 
 // WhenClause is one match condition: exactly one of Equals (the value
-// at Path must equal it) or Null (the value at Path must be JSON null)
-// must be set. A rule matches when every one of its clauses holds
-// (AND); a missing Path is "no match", never an error — and that
-// invariant is why a Null clause matches only a PRESENT null. There is
-// no negation; the when language is equality-only.
+// at Path must equal it), Null (the value must be JSON null), NotEquals
+// (present, same scalar family, and different), or GreaterThan/LessThan
+// (numeric, strictly ordered against a numeric literal) must be set. A
+// rule matches when every one of its clauses holds (AND); a missing
+// Path is "no match", never an error — and that invariant is why a Null
+// clause matches only a PRESENT null.
+//
+// Comparison semantics are SQL's, deliberately: the engine's folds
+// already follow SQL (aggregates skip nulls, the argmax orders nulls
+// lowest) and acceptance is measured against SQL oracles, so a missing
+// or null value matches NO comparison — including NotEquals (SQL's
+// NULL <> x is not true). Cross-family values (a string where the
+// literal is a number) match neither Equals nor NotEquals, the same
+// typed-equality rule that keeps `equals = "true"` from matching a JSON
+// boolean. That is the whole language: single-field, compare-to-literal
+// (the field-measured predicate set) — boolean expressions stay out.
 type WhenClause struct {
-	Path   string `mapstructure:"path"`
-	Equals any    `mapstructure:"equals"`
-	Null   bool   `mapstructure:"null"`
+	Path      string `mapstructure:"path"`
+	Equals    any    `mapstructure:"equals"`
+	Null      bool   `mapstructure:"null"`
+	NotEquals any    `mapstructure:"notEquals"`
+	// GreaterThan/LessThan take numeric literals only (validated at
+	// admission); values compare numerically, non-numbers never match.
+	GreaterThan any `mapstructure:"greaterThan"`
+	LessThan    any `mapstructure:"lessThan"`
 }
 
 // IsScalar reports whether a TOML-decoded literal is a scalar (string,
@@ -64,17 +80,69 @@ func Match(clauses []WhenClause, jsonData any) bool {
 		if err != nil {
 			return false
 		}
-		if c.Null {
+		switch {
+		case c.Null:
 			if v != nil {
 				return false
 			}
-			continue
-		}
-		if !literalEquals(c.Equals, v) {
-			return false
+		case c.NotEquals != nil:
+			// SQL semantics: null never satisfies <>, and a cross-family
+			// value (string vs number literal) is no match either way.
+			if v == nil || !sameScalarFamily(c.NotEquals, v) || literalEquals(c.NotEquals, v) {
+				return false
+			}
+		case c.GreaterThan != nil:
+			if !numericallyOrdered(v, c.GreaterThan, false) {
+				return false
+			}
+		case c.LessThan != nil:
+			if !numericallyOrdered(v, c.LessThan, true) {
+				return false
+			}
+		default:
+			if !literalEquals(c.Equals, v) {
+				return false
+			}
 		}
 	}
 	return true
+}
+
+// sameScalarFamily reports whether a decoded value is comparable to a
+// TOML literal: both numeric, or the same non-numeric scalar type.
+func sameScalarFamily(lit, v any) bool {
+	if _, ok := toFloat(lit); ok {
+		_, ok2 := toFloat(v)
+		return ok2
+	}
+	switch lit.(type) {
+	case string:
+		_, ok := v.(string)
+		return ok
+	case bool:
+		_, ok := v.(bool)
+		return ok
+	}
+	return false
+}
+
+// numericallyOrdered reports v < lit (less=true) or v > lit (less=false),
+// SQL-style: a null, missing, or non-numeric value matches neither.
+// float64 comparison for the same reason toFloat documents: when filters
+// small post-fold values; value BINDING is what keeps exact digits.
+func numericallyOrdered(v, lit any, less bool) bool {
+	lf, ok := toFloat(lit)
+	if !ok {
+		return false // rejected at admission; unreachable via a validated config
+	}
+	vf, ok := toFloat(v)
+	if !ok {
+		return false
+	}
+	if less {
+		return vf < lf
+	}
+	return vf > lf
 }
 
 // literalEquals compares a TOML literal against a decoded JSON value.

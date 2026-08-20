@@ -20,11 +20,27 @@ func ValidateWhen(clauses []WhenClause, where string) error {
 		if cl.Path == "" {
 			return fmt.Errorf("%s: when entry with empty path", where)
 		}
-		if (cl.Equals != nil) == cl.Null {
-			return fmt.Errorf("%s: when entry for %q: exactly one of equals or null is required", where, cl.Path)
+		arms := 0
+		for _, set := range []bool{cl.Equals != nil, cl.Null, cl.NotEquals != nil, cl.GreaterThan != nil, cl.LessThan != nil} {
+			if set {
+				arms++
+			}
 		}
-		if cl.Equals != nil && !IsScalar(cl.Equals) {
-			return fmt.Errorf("%s: when entry for %q: equals must be a scalar literal, got %T", where, cl.Path, cl.Equals)
+		if arms != 1 {
+			return fmt.Errorf("%s: when entry for %q: exactly one of equals, null, notEquals, greaterThan, or lessThan is required", where, cl.Path)
+		}
+		for arm, lit := range map[string]any{"equals": cl.Equals, "notEquals": cl.NotEquals} {
+			if lit != nil && !IsScalar(lit) {
+				return fmt.Errorf("%s: when entry for %q: %s must be a scalar literal, got %T", where, cl.Path, arm, lit)
+			}
+		}
+		for arm, lit := range map[string]any{"greaterThan": cl.GreaterThan, "lessThan": cl.LessThan} {
+			if lit == nil {
+				continue
+			}
+			if _, ok := toFloat(lit); !ok {
+				return fmt.Errorf("%s: when entry for %q: %s takes a numeric literal (values compare numerically, SQL-style), got %T", where, cl.Path, arm, lit)
+			}
 		}
 	}
 	return nil

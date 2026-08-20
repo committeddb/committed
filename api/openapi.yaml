@@ -592,7 +592,9 @@ paths:
         table
         via a `lookup` block (whose fields aggregate elements resolve by
         an `on`/`select` join — enrichment), and several sources may
-        share a topic, split by a per-source `when`; see README § SQL
+        share a topic, split by a per-source `when` (clauses take one of
+        equals, null, notEquals, or greaterThan/lessThan — SQL
+        comparison semantics: null matches no comparison); see README § SQL
         projections and docs/read-models.md), or `http` (webhook). The former projection
         spelling `sql-projection` (type and `[sql-projection]` section
         together — the section name always follows the type spelling)

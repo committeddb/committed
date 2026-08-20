@@ -333,12 +333,12 @@ type = "TEXT"
 		{
 			"when missing equals and null",
 			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\" } ]\nset = [ { column = \"v\", value = \"y\" } ]",
-			"exactly one of equals or null",
+			"exactly one of equals, null, notEquals, greaterThan, or lessThan",
 		},
 		{
 			"when with both equals and null",
 			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\", null = true } ]\nset = [ { column = \"v\", value = \"y\" } ]",
-			"exactly one of equals or null",
+			"exactly one of equals, null, notEquals, greaterThan, or lessThan",
 		},
 		{
 			"when null false",
@@ -1278,4 +1278,45 @@ func TestUnregisteredDatabaseNamesIdAndRemedy(t *testing.T) {
 	require.Contains(t, err.Error(), `"analytics-teamup"`, "the id the config referenced")
 	require.Contains(t, err.Error(), "POST its [database] config first")
 	require.Contains(t, err.Error(), "databases → types → ingestables/syncables")
+}
+
+// The comparison arms decode through the TOML surface: notEquals,
+// greaterThan, lessThan (the field-measured predicate set — single
+// field, compare-to-literal).
+func TestParseProjectionWhenComparisons(t *testing.T) {
+	toml := `
+[projection]
+topic      = "t"
+db         = "testdb"
+table      = "rows"
+primaryKey = "id"
+
+[[projection.columns]]
+name = "id"
+type = "TEXT"
+
+[[projection.columns]]
+name = "state"
+type = "TEXT"
+
+[[projection.rules]]
+when = [ { path = "$.EventType", notEquals = "delete" },
+         { path = "$.visit_price", greaterThan = 0 },
+         { path = "$.n", lessThan = 10 } ]
+set  = [ { column = "state", value = "billable" } ]
+`
+	v := readConfig(t, "toml", strings.NewReader(toml))
+	config, err := (&sql.ProjectionSyncableParser{}).ParseConfig(v, projectionStorage())
+	require.NoError(t, err)
+	when := config.Sources[0].Rules[0].When
+	require.Equal(t, "delete", when[0].NotEquals)
+	require.NotNil(t, when[1].GreaterThan)
+	require.NotNil(t, when[2].LessThan)
+
+	// A non-numeric ordering literal is rejected at admission.
+	bad := strings.Replace(toml, `greaterThan = 0`, `greaterThan = "high"`, 1)
+	v = readConfig(t, "toml", strings.NewReader(bad))
+	_, err = (&sql.ProjectionSyncableParser{}).ParseConfig(v, projectionStorage())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "greaterThan takes a numeric literal")
 }

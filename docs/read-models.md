@@ -176,12 +176,18 @@ A rule is an optional `when` (match clauses) plus a `set` (the columns to write)
 Six properties govern its behavior — matching, application order, write shape,
 error handling, deletes, and schema evolution:
 
-- **`when` is data, not an expression**: an array of
-  `{ path, equals }` clauses, all of which must hold (AND); express OR
-  as another rule. `{ path, null = true }` matches a *present* JSON
-  null (the flag form again, since TOML cannot write `equals = null`);
-  there is no negation. A missing path is "no match", never an error —
-  including for `null` clauses, so an absent field never matches. If
+- **`when` is data, not an expression**: an array of clauses, all of
+  which must hold (AND); express OR as another rule. Each clause is one
+  `path` plus exactly one predicate: `equals`, `null = true` (matches a
+  *present* JSON null — the flag form, since TOML cannot write
+  `equals = null`), `notEquals`, or `greaterThan`/`lessThan` (numeric
+  literals, strict). Comparisons follow SQL: a missing or null value
+  matches NO comparison — including `notEquals` — and a value of a
+  different scalar family (a string where the literal is a number)
+  matches neither `equals` nor `notEquals`. That is the whole language —
+  single field, compare-to-literal; boolean expressions stay out.
+  A missing path is "no match", never an error — including for `null`
+  clauses, so an absent field never matches. If
   the topic's type declares a `discriminator`, a rule can use the
   shorthand `when = "tenant.created"` — sugar for equality on the
   discriminator path.
