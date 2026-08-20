@@ -134,6 +134,45 @@ func waitForVoter(t *testing.T, r *Raft, id uint64) {
 	}
 }
 
+// confChangeRetryInterval paces removeNodeAndWait's re-submission — long
+// enough that a normally-progressing joint transition (two entries) never
+// sees a duplicate, short enough that a dropped proposal costs a fraction
+// of the settle budget.
+const confChangeRetryInterval = 5 * time.Second
+
+// removeNodeAndWait submits a remove conf change on submit's channel and
+// blocks until observer's settled (non-joint) configuration matches want,
+// RE-SUBMITTING on a bounded cadence. The retry is load-bearing: raft
+// silently drops a conf-change proposal that arrives while a prior conf
+// entry is committed but not yet applied on the leader ("ignoring conf
+// change … possible unapplied conf change at index N" — the one-in-flight
+// window; the CI-observed shape was a remove submitted the instant the
+// preceding add's auto-leave switched the config, before the applied index
+// caught up). Production RemoveMember surfaces the same drop as a ctx
+// timeout the operator retries; this helper mirrors that retry. Re-submitting
+// is safe: a dropped proposal left no entry, a proposal during the joint
+// transition is refused by the same guard, and a duplicate remove of an
+// already-absent id applies as a no-op.
+func removeNodeAndWait(t *testing.T, submit, observer *Raft, id uint64, want map[uint64]bool) {
+	t.Helper()
+	deadline := time.Now().Add(membershipSettleTimeout)
+	for {
+		submit.submitConfChange(removeNodeCC(id))
+		slice := time.Now().Add(confChangeRetryInterval)
+		for time.Now().Before(slice) {
+			members, joint := observer.members()
+			if !joint && membershipMatches(members, want) {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("membership did not settle to %v within %s after removing node %d (have members=%v joint=%v)",
+					want, membershipSettleTimeout, id, memberKeys(members), joint)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+}
+
 // waitForMembership blocks until r's observed configuration matches want
 // (id → should-be-present) AND the joint transition has completed, or the
 // deadline fires. A settled, non-joint configuration is what an operator (and

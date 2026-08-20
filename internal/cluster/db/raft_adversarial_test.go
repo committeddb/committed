@@ -2645,8 +2645,7 @@ func TestAdversarial_MembershipChangeUnderPartition(t *testing.T) {
 	// Remove node 4 (in the minority) from the majority leader. The joint
 	// configuration is satisfiable by {1,2,3} alone, so this must complete to
 	// the final non-joint config {1,2,3,5} despite node 4 being unreachable.
-	leader.submitConfChange(removeNodeCC(4))
-	waitForMembership(t, leader, map[uint64]bool{1: true, 2: true, 3: true, 4: false})
+	removeNodeAndWait(t, leader, leader, 4, map[uint64]bool{1: true, 2: true, 3: true, 4: false})
 
 	// Liveness on the majority: a fresh entry commits across {1,2,3} under the
 	// new configuration.
@@ -2774,8 +2773,7 @@ func TestAdversarial_LearnerPromoteUnderPartition(t *testing.T) {
 	voters4 := raftsByIDs(rafts, []uint64{1, 2, 3, 4})
 
 	rafts.WaitForLeader(t)
-	rafts.LeaderRaft().submitConfChange(removeNodeCC(5))
-	waitForMembership(t, survivor, map[uint64]bool{5: false})
+	removeNodeAndWait(t, rafts.LeaderRaft(), survivor, 5, map[uint64]bool{5: false})
 
 	voters4.WaitForLeader(t)
 	voters4.LeaderRaft().submitConfChange(addLearnerCC(5, node5URL))
