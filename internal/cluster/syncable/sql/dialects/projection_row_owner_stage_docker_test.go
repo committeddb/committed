@@ -209,3 +209,100 @@ func TestMySQLIntegration_ProjRowOwnerStage(t *testing.T) {
 	projectionRowOwnerStageFlow(t, db, table, "`", "`",
 		func(int) string { return "?" })
 }
+
+// projectionNormalizeFlow pins the cross-source key-case seam end to
+// end: the owner's events carry UPPERCASE GUIDs (the SQL Server CDC
+// rendering) while the decorator's stage sees lowercase (the app's
+// serializer) — normalize = "lower" on both key declarations folds them
+// onto one row, the pull agrees, and the producer's UPPERCASE delete
+// tombstone still addresses the lowercased row.
+func projectionNormalizeFlow(t *testing.T, db *sql.DB, table, quoteL, quoteR string, placeholder func(i int) string) {
+	jobType := &cluster.Type{ID: "njobs", Name: "Job"}
+	propType := &cluster.Type{ID: "nprops", Name: "Proposal"}
+	cfg := &sql.ProjectionConfig{
+		Table:      table,
+		PrimaryKey: []string{"job_id"},
+		Columns: []sql.ProjectionColumn{
+			{Name: "job_id", SQLType: "VARCHAR(64)"},
+			{Name: "name", SQLType: "VARCHAR(64)"},
+			{Name: "latest", SQLType: "VARCHAR(64)"},
+		},
+		Stages: []sql.ProjectionStage{{
+			Name: "latest-prop", From: "nprops", KeyPath: []string{"$.jobId"},
+			Normalize: "lower",
+			Emit:      []sql.StageEmit{{Field: "pid", From: "$.id"}},
+		}},
+		Sources: []sql.ProjectionSource{
+			{
+				Topic: "njobs", KeyPath: []string{"$.id"}, RowOwner: true,
+				Normalize: "lower",
+				Rules:     []sql.ProjectionRule{{Set: []sql.ProjectionSet{{Column: "name", From: "$.name"}}}},
+			},
+			{
+				FromStage: "latest-prop",
+				Rules:     []sql.ProjectionRule{{Set: []sql.ProjectionSet{{Column: "latest", From: "$.pid"}}}},
+			},
+		},
+	}
+	p := sql.NewProjection(db, cfg, nil, table)
+	p.SetStoreDir(t.TempDir())
+	require.NoError(t, p.Init())
+	defer func() { _ = p.Close() }()
+
+	var idx uint64
+	sync := func(e *cluster.Entity) {
+		t.Helper()
+		idx++
+		_, err := p.Sync(context.Background(), &cluster.Actual{Index: idx, Entities: []*cluster.Entity{e}})
+		require.NoError(t, err)
+	}
+	qt := quoteL + table + quoteR
+	count := func() (n int) {
+		require.NoError(t, db.DB.QueryRow("SELECT COUNT(*) FROM "+qt).Scan(&n))
+		return n
+	}
+
+	// The owner's CDC event: UPPERCASE GUID in both entity key and payload.
+	// The decorator's proposal: lowercase.
+	sync(cluster.NewUpsertEntity(jobType, []byte("GUID-77"), []byte(`{"id":"GUID-77","name":"A"}`)))
+	sync(cluster.NewUpsertEntity(propType, []byte("p1"), []byte(`{"id":"p1","jobId":"guid-77"}`)))
+
+	var name, latest gosql.NullString
+	require.NoError(t, db.DB.QueryRow(
+		fmt.Sprintf("SELECT name, latest FROM %s WHERE job_id = %s", qt, placeholder(0)), "guid-77").
+		Scan(&name, &latest))
+	require.Equal(t, "A", name.String, "the owner's UPPERCASE rendering keys the lowercase row")
+	require.Equal(t, "p1", latest.String, "the decoration lands across the case seam")
+	require.Equal(t, 1, count(), "one row, not an upper/lower pair")
+
+	// The producer's delete tombstone carries the UPPERCASE key — it must
+	// still address the lowercased row (the RTBF-critical binding).
+	sync(cluster.NewDeleteEntity(jobType, []byte("GUID-77")))
+	require.Equal(t, 0, count(), "an UPPERCASE tombstone deletes the lowercased row")
+}
+
+func TestPostgreSQLIntegration_ProjNormalize(t *testing.T) {
+	d := &dialects.PostgreSQLDialect{}
+	db, err := sql.NewDB(d, pgConnString)
+	require.NoError(t, err)
+	defer db.Close()
+
+	table := uniqueTable(t)
+	defer dropTable(t, table)
+
+	projectionNormalizeFlow(t, db, table, `"`, `"`,
+		func(i int) string { return fmt.Sprintf("$%d", i+1) })
+}
+
+func TestMySQLIntegration_ProjNormalize(t *testing.T) {
+	d := &dialects.MySQLDialect{}
+	db, err := sql.NewDB(d, mysqlConn(t))
+	require.NoError(t, err)
+	defer db.Close()
+
+	table := uniqueTable(t)
+	defer dropTableMySQL(t, db, table)
+
+	projectionNormalizeFlow(t, db, table, "`", "`",
+		func(int) string { return "?" })
+}

@@ -226,6 +226,14 @@ type ProjectionSource struct {
 	// vanished elements delete) via the fan-out sidecar, and a parent
 	// tombstone cascades per onDelete = "delete-rows".
 	ForEach string
+	// Normalize folds this source's keyPath rendering into a canonical
+	// form ("lower" — the cross-source GUID-case seam). It also applies
+	// to this source's delete-tombstone key binding, so a producer's
+	// UPPERCASE entity key still addresses the lowercased row. Keys
+	// only, never column values. A table whose rows are keyed by a
+	// normalized stage (stage-fed sources) needs the same normalize on
+	// its sibling topic sources — the row key space is shared.
+	Normalize string
 	// RowOwner marks this source as the table's row owner: its writes
 	// admit rows (create), and its deletes and retractions remove them.
 	// Once any source declares ownership, every other row-writing source
@@ -646,6 +654,9 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 		// topic); its clauses are validated like a rule's.
 		if err := validateWhenClauses(src.When, where); err != nil {
 			return err
+		}
+		if !stages.ValidNormalize(src.Normalize) {
+			return fmt.Errorf("%s: normalize %q is not supported (want %q)", where, src.Normalize, stages.NormalizeLower)
 		}
 		if src.RowOwner && (src.Aggregate != nil || src.Lookup != nil || src.ForEach != "") {
 			return fmt.Errorf("%s: rowOwner = true declares row admission; only a plain rules source (topic or stage-fed) can own rows", where)

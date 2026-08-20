@@ -206,10 +206,14 @@ func (g *Graph) FoldTopicUpsert(tx *stagestore.Tx, topic string, inKey []byte, p
 		if err != nil {
 			return err
 		}
-		if err := tx.PutDim(d.node.def.Name, d.join.target(), inKey, encodeRetained(gen, bs)); err != nil {
+		// The join's normalize covers the DIMENSION side too: the topic's
+		// entity-key rendering is the producer's (an UPPERCASE CDC GUID),
+		// and only this join knows both sides must agree.
+		dimKey := []byte(NormalizeKeyPart(d.join.Normalize, string(inKey)))
+		if err := tx.PutDim(d.node.def.Name, d.join.target(), dimKey, encodeRetained(gen, bs)); err != nil {
 			return err
 		}
-		if err := g.markDimDependents(tx, d, inKey, dirty); err != nil {
+		if err := g.markDimDependents(tx, d, dimKey, dirty); err != nil {
 			return err
 		}
 	}
@@ -224,10 +228,11 @@ func (g *Graph) FoldTopicDelete(tx *stagestore.Tx, topic string, inKey []byte, d
 		}
 	}
 	for _, d := range g.dims[topic] {
-		if err := tx.DeleteDim(d.node.def.Name, d.join.target(), inKey); err != nil {
+		dimKey := []byte(NormalizeKeyPart(d.join.Normalize, string(inKey)))
+		if err := tx.DeleteDim(d.node.def.Name, d.join.target(), dimKey); err != nil {
 			return err
 		}
-		if err := g.markDimDependents(tx, d, inKey, dirty); err != nil {
+		if err := g.markDimDependents(tx, d, dimKey, dirty); err != nil {
 			return err
 		}
 	}
@@ -331,7 +336,7 @@ func (g *Graph) foldOneInput(tx *stagestore.Tx, n *graphNode, inKey []byte, data
 			// erroring the topic.
 			return g.foldDeleteInput(tx, n, inKey, dirty)
 		}
-		parts[i] = KeyString(coerceKeyScalar(kv))
+		parts[i] = NormalizeKeyPart(st.Normalize, KeyString(coerceKeyScalar(kv)))
 	}
 	outKey := []byte(OutKey(parts))
 
@@ -566,7 +571,7 @@ func joinOnKey(j *Join, obj, parent any) []byte {
 		if err != nil || v == nil {
 			return nil
 		}
-		parts[i] = KeyString(v)
+		parts[i] = NormalizeKeyPart(j.Normalize, KeyString(v))
 	}
 	return []byte(OutKey(parts))
 }

@@ -96,6 +96,9 @@ type projectionSource struct {
 	fromStage  string
 	rowOwner   bool
 	updateOnly bool
+	// normalize folds key renderings ("lower" or ""): applied to
+	// resolved keyPath values and to delete-tombstone key bindings.
+	normalize string
 	// unmatchedRun counts CONSECUTIVE events that matched no rule (worker
 	// goroutine only — no lock). At projectionUnmatchedWarnRun it triggers
 	// the one-shot misconfiguration warning; any match resets it.
@@ -419,7 +422,7 @@ func (p *Projection) Init() error {
 	for si, src := range p.config.Sources {
 		ps := &projectionSource{
 			topic: src.Topic, keyPaths: src.KeyPath, onDelete: src.OnDelete, when: src.When,
-			fromStage: src.FromStage, rowOwner: src.RowOwner,
+			fromStage: src.FromStage, rowOwner: src.RowOwner, normalize: src.Normalize,
 			updateOnly: ownerDeclared && !src.RowOwner && src.FromStage != "",
 		}
 		// Register ps NOW, before preparing its statements, so a partway failure
@@ -990,7 +993,7 @@ func (p *Projection) resolveRowKeys(src *projectionSource, data, parent any) ([]
 		if err != nil {
 			return nil, cluster.Permanent(fmt.Errorf("[projection.apply] keyPath [%s]: %w", kp, err))
 		}
-		keys[i] = coerceForColumn(v, p.columnType(p.config.PrimaryKey[i]))
+		keys[i] = stages.NormalizeKeyValue(src.normalize, coerceForColumn(v, p.columnType(p.config.PrimaryKey[i])))
 	}
 	return keys, nil
 }
@@ -1154,7 +1157,11 @@ func (p *Projection) applyDelete(ctx context.Context, tx *gosql.Tx, src *project
 	}
 	args := make([]any, len(keyVals))
 	for i, v := range keyVals {
-		args[i] = v
+		// The tombstone carries the PRODUCER's key rendering; the rows
+		// were keyed through the source's normalize — bind through the
+		// same fold or an UPPERCASE tombstone silently misses the
+		// lowercased row (the worst outcome for an RTBF delete).
+		args[i] = stages.NormalizeKeyValue(src.normalize, v)
 	}
 	if _, err := tx.StmtContext(ctx, stmt).ExecContext(ctx, args...); err != nil {
 		return execFailure(fmt.Sprintf("[projection.apply] exec [%s]", sqlStr), err, p.dialect.IsPermanent(err))

@@ -98,6 +98,7 @@ type rawProjectionSource struct {
 	Lookup    *rawProjectionLookup    `mapstructure:"lookup"`
 	ForEach   string                  `mapstructure:"forEach"`
 	RowOwner  bool                    `mapstructure:"rowOwner"`
+	Normalize string                  `mapstructure:"normalize"`
 }
 
 // rawProjectionAggregate is the TOML decode shape of a source's
@@ -197,6 +198,7 @@ type rawProjectionStage struct {
 	TieBy       string         `mapstructure:"tieBy"`
 	TieByType   string         `mapstructure:"tieByType"`
 	Join        []rawStageJoin `mapstructure:"join"`
+	Normalize   string         `mapstructure:"normalize"`
 	Emit        []StageEmit    `mapstructure:"emit"`
 	ForEach     string         `mapstructure:"forEach"`
 	ElementKey  string         `mapstructure:"elementKey"`
@@ -206,11 +208,12 @@ type rawProjectionStage struct {
 // block: on decodes as any so a single path stays a scalar and a
 // composite key is a list — the keyPath idiom.
 type rawStageJoin struct {
-	Topic  string       `mapstructure:"topic"`
-	From   string       `mapstructure:"from"`
-	On     any          `mapstructure:"on"`
-	Absent bool         `mapstructure:"absent"`
-	Where  []WhenClause `mapstructure:"where"`
+	Topic     string       `mapstructure:"topic"`
+	From      string       `mapstructure:"from"`
+	On        any          `mapstructure:"on"`
+	Absent    bool         `mapstructure:"absent"`
+	Where     []WhenClause `mapstructure:"where"`
+	Normalize string       `mapstructure:"normalize"`
 }
 
 // parseProjectionStages decodes the [[{section}.stage]] blocks.
@@ -247,6 +250,7 @@ func parseProjectionStages(v *cluster.ParsedConfig, storage cluster.DatabaseStor
 			Emit:        rs.Emit,
 			ForEach:     rs.ForEach,
 			ElementKey:  rs.ElementKey,
+			Normalize:   strings.ToLower(rs.Normalize),
 		})
 	}
 	return stages, nil
@@ -390,6 +394,7 @@ func parseProjectionSources(v *cluster.ParsedConfig, storage cluster.DatabaseSto
 				When:      when,
 				ForEach:   rs.ForEach,
 				RowOwner:  rs.RowOwner,
+				Normalize: strings.ToLower(rs.Normalize),
 			}
 			// Populate rules, aggregate, and lookup independently so a source that
 			// declares more than one is caught by validation (a source has exactly
@@ -456,7 +461,7 @@ func stageJoins(raw []rawStageJoin) []StageJoin {
 	}
 	out := make([]StageJoin, len(raw))
 	for i, rj := range raw {
-		out[i] = StageJoin{Topic: rj.Topic, From: rj.From, On: pathOrList(rj.On), Absent: rj.Absent, Where: rj.Where}
+		out[i] = StageJoin{Topic: rj.Topic, From: rj.From, On: pathOrList(rj.On), Absent: rj.Absent, Where: rj.Where, Normalize: strings.ToLower(rj.Normalize)}
 	}
 	return out
 }

@@ -582,7 +582,10 @@ paths:
         tombstone), chains internal stages via `[[projection.stage]]`
         (private keyed refolds — reshape or aggregate — consumed by a
         stage-fed source's `from`; a stage join's `on` takes one path
-        or a list addressing a composite-keyed dimension; editing stage definitions requires a
+        or a list addressing a composite-keyed dimension; key-bearing
+        declarations (stage keyPath, join on, source keyPath) accept
+        `normalize = "lower"` to fold cross-source key renderings
+        (UPPERCASE CDC GUIDs vs lowercase serializers); editing stage definitions requires a
         rebuild, enforced by the config-change guard; when several
         sources fold one row and any is stage-fed, exactly the
         row-owning source declares `rowOwner = true` — its writes

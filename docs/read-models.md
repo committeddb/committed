@@ -434,7 +434,17 @@ set = [ { column = "total", from = "$.total" },
 
 - **Every stage is a keyed refold**: an input lands in its key's retained
   set and the key recomputes from that set — never delta arithmetic — so
-  redelivery, rekeying, and replay converge to identical bytes.
+  redelivery, rekeying, and replay converge to identical bytes. Key
+  comparisons are byte-exact; when two producers render the same logical
+  key differently (SQL Server CDC writes GUIDs UPPERCASE, most JSON
+  serializers lowercase), declare `normalize = "lower"` on the
+  key-bearing declaration — a stage's `keyPath`, a join (which folds
+  BOTH the `on` rendering and, for a topic join, the topic's entity-key
+  rendering), or a table source's `keyPath` (which also folds its
+  delete-tombstone binding, so a producer's UPPERCASE tombstone still
+  addresses the lowercased row). Keys only — payload values are never
+  normalized. Sources sharing a normalized key space (a topic owner
+  beside stage-fed decorators) must declare the same normalize.
   Aggregate folds (`sum`/`min`/`max` are closed-language expressions,
   plus `count`) recompute over exact decimals with SQL semantics (null
   operands skip; an emptied key retracts entirely, cascading).

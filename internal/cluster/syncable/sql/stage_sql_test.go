@@ -174,3 +174,66 @@ set = [ { column = "v", from = "$.v" } ]
 	cfg.applyDefaults()
 	require.NoError(t, validateProjectionConfig(cfg))
 }
+
+// normalize = "lower" decodes on all three key-bearing declarations
+// (source keyPath, stage keyPath, join on) and rejects unsupported modes.
+func TestNormalizeTOMLDecodes(t *testing.T) {
+	toml := `
+[projection]
+db         = "testdb"
+table      = "t"
+primaryKey = "id"
+
+[[projection.columns]]
+name = "id"
+type = "VARCHAR(64)"
+
+[[projection.columns]]
+name = "v"
+type = "VARCHAR(64)"
+
+[[projection.columns]]
+name = "w"
+type = "VARCHAR(64)"
+
+[[projection.stage]]
+name      = "st"
+from      = "tp"
+keyPath   = "$.guid"
+normalize = "lower"
+emit      = [ { field = "v", from = "$.v" } ]
+[[projection.stage.join]]
+topic     = "billed"
+on        = "$.pairId"
+absent    = true
+normalize = "lower"
+
+[[projection.source]]
+topic     = "x"
+keyPath   = "$.id"
+normalize = "lower"
+rowOwner  = true
+[[projection.source.rules]]
+set = [ { column = "v", from = "$.v" } ]
+
+[[projection.source]]
+from = "st"
+[[projection.source.rules]]
+set = [ { column = "w", from = "$.v" } ]
+`
+	v, err := cluster.ParseConfigBytes("toml", []byte(toml))
+	require.NoError(t, err)
+	cfg, err := parseProjectionConfigFields(v, nil)
+	require.NoError(t, err)
+	require.Equal(t, "lower", cfg.Stages[0].Normalize)
+	require.Equal(t, "lower", cfg.Stages[0].Joins[0].Normalize)
+	require.Equal(t, "lower", cfg.Sources[0].Normalize)
+	cfg.applyDefaults()
+	require.NoError(t, validateProjectionConfig(cfg))
+
+	// An unsupported mode is rejected at admission, naming the one value.
+	cfg.Sources[0].Normalize = "upper"
+	err = validateProjectionConfig(cfg)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `normalize "upper" is not supported (want "lower")`)
+}

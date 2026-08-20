@@ -180,6 +180,45 @@ func toFloat(v any) (float64, bool) {
 	return 0, false
 }
 
+// NormalizeLower is the one supported key normalization. Cross-source
+// keys can render the same logical value differently (the field case:
+// SQL Server CDC renders uniqueidentifier GUIDs UPPERCASE while
+// application JSON serializers write them lowercase — RFC 4122's
+// canonical form), and every key comparison here is deliberately
+// byte-exact, so the mismatch is silent non-participation. normalize =
+// "lower" on a key-bearing declaration folds the rendering once, at the
+// key seam — never on payload values.
+const NormalizeLower = "lower"
+
+// NormalizeKeyPart renders one key part into its declared canonical
+// form. Only letters change (digits are caseless), so it is safe to
+// apply to any rendered part. Every key-rendering seam routes through
+// here so both sides of a comparison agree by construction.
+func NormalizeKeyPart(mode, part string) string {
+	if mode == NormalizeLower {
+		return strings.ToLower(part)
+	}
+	return part
+}
+
+// NormalizeKeyValue is NormalizeKeyPart for a typed key value (the sql
+// side binds coerced values, not rendered parts): strings lower,
+// everything else passes through untouched.
+func NormalizeKeyValue(mode string, v any) any {
+	if mode == NormalizeLower {
+		if s, ok := v.(string); ok {
+			return strings.ToLower(s)
+		}
+	}
+	return v
+}
+
+// ValidNormalize reports whether a normalize declaration is supported
+// ("" = none).
+func ValidNormalize(mode string) bool {
+	return mode == "" || mode == NormalizeLower
+}
+
 // MultiValuedPath reports whether a jsonpath can yield more than one
 // value (wildcards, recursive descent, filters, slices). In a VALUE
 // position such a path produces parallel arrays that look like data and

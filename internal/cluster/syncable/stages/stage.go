@@ -97,6 +97,13 @@ type Stage struct {
 	// id), required when a reduce folds multiple same-key elements (two
 	// same-workarea amounts must both count).
 	ElementKey string
+	// Normalize folds this stage's keyPath rendering into a canonical
+	// form ("lower" — the cross-source GUID-case seam; see
+	// NormalizeLower). Keys only, never emitted values. A consumer
+	// addressing this stage (a stage-fed source, a stage join) sees the
+	// normalized keys; declare the same normalize on any sibling source
+	// sharing the key space.
+	Normalize string `mapstructure:"normalize"`
 }
 
 // Join is one filtering join of a stage: the stage's inputs
@@ -132,6 +139,13 @@ type Join struct {
 	// absent (nothing to reference), so it participates.
 	Absent bool         `mapstructure:"absent"`
 	Where  []WhenClause `mapstructure:"where"`
+	// Normalize folds BOTH sides of this join's key comparison — the
+	// input's on rendering AND (for a topic join) the topic's entity-key
+	// rendering as it lands in this join's dimension rows — so a
+	// lowercase reference matches an UPPERCASE-keyed CDC dimension. A
+	// stage join's dimension keys are the joined stage's outputs; declare
+	// normalize on that stage instead (its keys are its own contract).
+	Normalize string `mapstructure:"normalize"`
 }
 
 // target returns the join's dimension source name (topic or stage).
@@ -253,8 +267,14 @@ func ValidateShapes(stages []Stage) error {
 		if st.ForEach != "" && st.ElementKey == "" && st.Reduce != "" {
 			return fmt.Errorf("%s: a forEach stage with reduce = %q needs elementKey — the element's own identity — or two same-key elements would collapse into one retained input", where, st.Reduce)
 		}
+		if !ValidNormalize(st.Normalize) {
+			return fmt.Errorf("%s: normalize %q is not supported (want %q)", where, st.Normalize, NormalizeLower)
+		}
 		for ji, j := range st.Joins {
 			jw := fmt.Sprintf("%s join %d (%q)", where, ji+1, j.target())
+			if !ValidNormalize(j.Normalize) {
+				return fmt.Errorf("%s: normalize %q is not supported (want %q)", jw, j.Normalize, NormalizeLower)
+			}
 			if (j.Topic == "") == (j.From == "") {
 				return fmt.Errorf("%s: exactly one of topic (a topic's rows by entity key) or from (a PRIOR stage's outputs by its key) is required", jw)
 			}
