@@ -457,7 +457,11 @@ set = [ { column = "total", from = "$.total" },
   same-key elements both count), `$parent.` reaches the enclosing
   event — so fan-then-fold (elements → sums by workarea) is ONE stage.
   Re-emitted inputs reconcile; the input's tombstone retracts all its
-  elements.
+  elements. A long run of inputs whose forEach path yields no array
+  warns once (a serialized-JSON string column reads as one string and
+  fans ZERO elements, silently — decode it at ingest with
+  `jsonColumns`); a legitimately empty array is healthy and never
+  warns.
 - **Joins FILTER** (`[[projection.stage.join]]`): an input participates
   only while the joined topic's row — addressed by the input's `on`
   value against the joined entity's key — exists and matches every
@@ -570,7 +574,9 @@ onDelete = "delete-rows"           # the default: parent delete cascades
 - A parent tombstone **cascades** to every row it fanned
   (`onDelete = "delete-rows"`), or is dropped with `ignore`.
 - One forEach source per topic per projection; elements that match no
-  rule fan no row (and reconcile away if they previously did).
+  rule fan no row (and reconcile away if they previously did). A long
+  run of events whose forEach path yields no array warns once — the
+  serialized-JSON-column trap; see the staged-computation note.
 
 ## Enriching folded data from another topic (lookup)
 

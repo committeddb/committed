@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"math/big"
 	"sort"
+	"strings"
 
 	"github.com/PaesslerAG/jsonpath"
+	"go.uber.org/zap"
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/syncable/stagestore"
@@ -39,6 +41,11 @@ import (
 type graphNode struct {
 	def       *Stage
 	consumers []*graphNode
+	// fanNonArrayRun counts CONSECUTIVE inputs whose forEach path
+	// resolved to a PRESENT non-array (worker goroutine only — no lock).
+	// At stageForEachNonArrayWarnRun it triggers the one-shot
+	// misconfiguration warning; any array-shaped input resets it.
+	fanNonArrayRun int
 	// dimConsumers are the joins (of LATER stages) that use THIS stage's
 	// outputs as their dimension rows — maintained by refoldKey as the
 	// outputs change, fan-out marking their dependents dirty.
@@ -261,6 +268,44 @@ func (g *Graph) foldUpsert(tx *stagestore.Tx, n *graphNode, inKey []byte, payloa
 	return g.foldOneInput(tx, n, inKey, payload, nil, gen, dirty)
 }
 
+// FanMiss resolves a forEach path and reports why the fan is empty ("" =
+// healthy). The subtlety making this a function: the jsonpath library's
+// wildcard returns an EMPTY match set — no error — when the path
+// traverses into a non-container (the field case: a serialized-JSON
+// string column), which is indistinguishable at the type level from a
+// legitimately empty array. When the fan comes up empty, the CONTAINER
+// (the path minus its trailing [*]) is probed: an array there is a
+// healthy empty list; a string, other scalar, or unresolvable path is a
+// miss. Multi-valued forms without a trailing [*] skip the probe (no
+// false warns; the [*] suffix is both field cases and the documented
+// shape).
+func FanMiss(path string, payload any, elems *[]any) string {
+	miss := "unresolved"
+	if v, err := jsonpath.Get(path, payload); err == nil {
+		if list, ok := v.([]any); ok {
+			*elems = list
+			miss = ""
+		} else {
+			miss = fmt.Sprintf("%T", v)
+		}
+	}
+	if miss == "" && len(*elems) == 0 {
+		if container, ok := strings.CutSuffix(path, "[*]"); ok {
+			if cv, err := jsonpath.Get(container, payload); err != nil {
+				miss = "unresolved"
+			} else if _, isList := cv.([]any); !isList {
+				miss = fmt.Sprintf("%T", cv)
+			}
+		}
+	}
+	return miss
+}
+
+// stageForEachNonArrayWarnRun is how many CONSECUTIVE non-array forEach
+// resolutions a stage absorbs before warning that its fan is empty —
+// the same threshold rationale as the sink's rules-unmatched run.
+const stageForEachNonArrayWarnRun = 1000
+
 // foldFan fans one input through a forEach stage: each element folds as
 // its own input — identity (parent key, element key) — and the fan
 // reverse-index reconciles: elements the re-emitted input no longer
@@ -268,10 +313,27 @@ func (g *Graph) foldUpsert(tx *stagestore.Tx, n *graphNode, inKey []byte, payloa
 func (g *Graph) foldFan(tx *stagestore.Tx, n *graphNode, parentKey []byte, payload any, gen uint64, dirty Dirty) error {
 	st := n.def
 	var elems []any
-	if v, err := jsonpath.Get(st.ForEach, payload); err == nil {
-		if list, ok := v.([]any); ok {
-			elems = list
+	miss := FanMiss(st.ForEach, payload, &elems)
+	if miss != "" {
+		// A forEach path yielding no array fans ZERO elements — correct
+		// for the odd foreign event, catastrophic as a steady state: the
+		// field case was a serialized-JSON string column, where the path
+		// traverses INTO the string and errors on every input, producing
+		// two full 36M-entry replays of structurally plausible, silently
+		// empty stage output that only an oracle diff caught. Same
+		// antidote as the sink's rules-unmatched run: count consecutive
+		// misses, warn once with the probable cause and the remedy. An
+		// empty array is a healthy resolution and resets the run.
+		n.fanNonArrayRun++
+		if n.fanNonArrayRun == stageForEachNonArrayWarnRun {
+			zap.L().Warn("[stage] forEach path has not resolved to an array for a long run of inputs — this stage is fanning ZERO elements and its output is silently empty; if the field is a serialized-JSON column at the source, decode it at ingest (jsonColumns) so the path reaches a real array",
+				zap.String("stage", st.Name),
+				zap.String("forEach", st.ForEach),
+				zap.String("value_type", miss),
+				zap.Int("consecutive_misses", n.fanNonArrayRun))
 		}
+	} else {
+		n.fanNonArrayRun = 0
 	}
 
 	prior := map[string]bool{}

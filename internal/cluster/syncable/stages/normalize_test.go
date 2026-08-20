@@ -1,9 +1,12 @@
 package stages
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/committeddb/committed/internal/cluster/syncable/stagestore"
 )
@@ -115,4 +118,55 @@ func TestNormalizeValidated(t *testing.T) {
 	err = ValidateShapes(badJoin)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), `normalize "fold" is not supported`)
+}
+
+// A forEach path resolving to a PRESENT non-array fans zero elements —
+// silently correct for one foreign event, catastrophically silent as a
+// steady state (the field case: a serialized-JSON string column, two
+// full 36M replays of plausible empty output). A long consecutive run
+// warns exactly once, naming the stage, the path, and the remedy; an
+// array-shaped input resets the run.
+func TestStageForEachNonArrayWarns(t *testing.T) {
+	core, logs := observer.New(zap.WarnLevel)
+	prev := zap.L()
+	zap.ReplaceGlobals(zap.New(core))
+	defer zap.ReplaceGlobals(prev)
+
+	stages := []Stage{{
+		Name: "fan", From: "txns", ForEach: "$.EventData.elements[*]",
+		KeyPath: []string{"$.wa"}, ElementKey: "$.id",
+		Reduce: "aggregate", Emit: []Emit{{Field: "n", Count: true}},
+	}}
+	require.NoError(t, ValidateShapes(stages))
+	g := BuildGraph(stages)
+	store := stageStoreForTest(t)
+
+	fold := func(key, payload string) {
+		require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+			return g.FoldTopicUpsertNow(tx, "txns", []byte(key), decodePayload(t, payload))
+		}))
+	}
+
+	// 999 string-valued EventData payloads: under the threshold, silent.
+	for i := 0; i < 999; i++ {
+		fold(fmt.Sprintf("t%d", i), `{"EventData":"{\"elements\":[{\"id\":\"e1\",\"wa\":\"w1\"}]}"}`)
+	}
+	require.Zero(t, logs.FilterMessageSnippet("non-array").Len())
+
+	// One array-shaped input resets the run — an EMPTY array is healthy
+	// too (the container probe tells it apart from a string traversal)...
+	fold("ok0", `{"EventData":{"elements":[]}}`)
+	fold("ok1", `{"EventData":{"elements":[{"id":"e9","wa":"w9"}]}}`)
+	// ...so 999 more misses stay under the threshold again.
+	for i := 0; i < 999; i++ {
+		fold(fmt.Sprintf("u%d", i), `{"EventData":"{}"}`)
+	}
+	require.Zero(t, logs.FilterMessageSnippet("non-array").Len(), "a healthy input mid-run resets the counter")
+
+	// The 1000th consecutive miss fires the warning exactly once.
+	fold("u999", `{"EventData":"{}"}`)
+	warns := logs.FilterMessageSnippet("forEach path has not resolved to an array").All()
+	require.Len(t, warns, 1)
+	require.Equal(t, "fan", warns[0].ContextMap()["stage"])
+	require.Equal(t, "unresolved", warns[0].ContextMap()["value_type"])
 }

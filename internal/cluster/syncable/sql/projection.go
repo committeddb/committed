@@ -102,7 +102,10 @@ type projectionSource struct {
 	// unmatchedRun counts CONSECUTIVE events that matched no rule (worker
 	// goroutine only — no lock). At projectionUnmatchedWarnRun it triggers
 	// the one-shot misconfiguration warning; any match resets it.
-	unmatchedRun int
+	// fanNonArrayRun is its forEach sibling: consecutive events whose
+	// forEach path resolved to a present non-array (zero rows fanned).
+	unmatchedRun   int
+	fanNonArrayRun int
 	// clear is the prepared "UPDATE … SET ownedCols = NULL WHERE pk = ?", set
 	// only when onDelete == "clear".
 	clear    *gosql.Stmt
@@ -1327,10 +1330,23 @@ func (p *Projection) applyForEach(ctx context.Context, tx *gosql.Tx, src *projec
 	}
 
 	var elems []any
-	if v, err := jsonpath.Get(src.forEach, jsonData); err == nil {
-		if list, ok := v.([]any); ok {
-			elems = list
+	miss := stages.FanMiss(src.forEach, jsonData, &elems)
+	if miss != "" {
+		// The stage engine's foldFan has the same guard — see its comment
+		// for the field case (a serialized-JSON string column fanning zero
+		// elements, silently, for a whole replay). An empty array is a
+		// healthy resolution and resets the run.
+		src.fanNonArrayRun++
+		if src.fanNonArrayRun == projectionUnmatchedWarnRun {
+			zap.L().Warn("[projection.forEach] path has not resolved to an array for a long run of events — this source is fanning ZERO rows; if the field is a serialized-JSON column at the source, decode it at ingest (jsonColumns) so the path reaches a real array",
+				zap.String("syncable", p.name),
+				zap.String("topic", src.topic),
+				zap.String("forEach", src.forEach),
+				zap.String("value_type", miss),
+				zap.Int("consecutive_misses", src.fanNonArrayRun))
 		}
+	} else {
+		src.fanNonArrayRun = 0
 	}
 
 	current := make(map[string]bool, len(elems))
