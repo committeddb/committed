@@ -509,10 +509,12 @@ set = [ { column = "total", from = "$.total" },
   region not reached (mid-replay zeros are healthy); `inputs` > 0 with
   `fanned` 0 = the forEach fan finds no array; flow > 0 with `keys` 0 =
   the when/joins rejected everything (a per-element `when` referencing
-  parent fields needs `$parent.`). `?probeStage=<stage>&probeKey=<key>`
-  answers whether one specific key is currently held (stored form:
-  canonical digits, normalized case; composite keys in their JSON-array
-  encoding).
+  parent fields needs `$parent.`). `?probeStage=<stage>&probeKey=<part>`
+  answers whether one specific key is currently held — one probeKey per
+  keyPath position, in order; the stage renders and composes the parts
+  (its normalize applies server-side), so probe values in your own
+  vocabulary. Numbers go in canonical digits (`5`, not `5.0000`); text
+  is never re-parsed.
 - **Key identity is canonical**: numeric key parts render canonically —
   `5`, `5.0000`, and `5e0` are ONE key (`5.25` keeps its digits), and
   strings are never re-parsed (`"007"` stays text). Source digit

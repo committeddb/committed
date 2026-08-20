@@ -417,12 +417,13 @@ func TestSyncableStatus_StageKeyProbe(t *testing.T) {
 	fake.SyncableProgressReturns(50, 100, nil)
 
 	fake.SyncableStageKeyExistsReturns(true, true, nil)
-	status, raw := doSyncableStatusRaw(t, fake, "?probeStage=billed-pairs&probeKey=%5B%22j-1%22%2C%225%22%5D", nil)
+	status, raw := doSyncableStatusRaw(t, fake, "?probeStage=billed-pairs&probeKey=J-1&probeKey=5", nil)
 	require.Equal(t, 200, status)
 	require.Contains(t, raw, `"stageKeyExists":true`)
-	_, stage, key := fake.SyncableStageKeyExistsArgsForCall(0)
+	_, stage, parts := fake.SyncableStageKeyExistsArgsForCall(0)
 	require.Equal(t, "billed-pairs", stage)
-	require.Equal(t, `["j-1","5"]`, key, "the composite encoding decodes through the query param")
+	require.Equal(t, []string{"J-1", "5"}, parts,
+		"parts pass through VERBATIM — the key-space owner renders and composes; this layer knows no encodings")
 
 	fake.SyncableStageKeyExistsReturns(false, true, nil)
 	_, raw = doSyncableStatusRaw(t, fake, "?probeStage=billed-pairs&probeKey=nope", nil)

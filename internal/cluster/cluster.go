@@ -155,9 +155,11 @@ type Cluster interface {
 	// worker here, or no stages). Owner-local; see StageIntrospector.
 	SyncableStageStats(id string) (stats map[string]StageStat, ok bool)
 	// SyncableStageKeyExists probes one stage output key on THIS node's
-	// worker (ok=false: no worker here, or no stages). err: undeclared
-	// stage name. Owner-local; see StageIntrospector.
-	SyncableStageKeyExists(id, stage, key string) (exists bool, ok bool, err error)
+	// worker (ok=false: no worker here, or no stages). keyParts are the
+	// key's parts in keyPath order — the owner renders and composes
+	// them. err: undeclared stage name or part-count mismatch.
+	// Owner-local; see StageIntrospector.
+	SyncableStageKeyExists(id, stage string, keyParts []string) (exists bool, ok bool, err error)
 	// ReplaySyncableDeadLetter re-drives a dead-lettered proposal: it
 	// re-runs the syncable's Sync for the proposal at index and, on success,
 	// clears the dead-letter record. Node-agnostic. Returns ErrNotDeadLettered

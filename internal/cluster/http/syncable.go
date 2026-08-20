@@ -430,8 +430,14 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 		wantStages = v
 	}
 	probeStage := r.URL.Query().Get("probeStage")
-	probeKey := r.URL.Query().Get("probeKey")
-	if (probeStage == "") != (probeKey == "") {
+	// probeKey repeats for a composite key — ?probeKey=a&probeKey=b, one
+	// per keyPath position. The parts pass through verbatim: the
+	// KEY-SPACE OWNER (the introspector) renders and composes them, so
+	// this layer knows nothing about key encodings and the caller cannot
+	// misreproduce the stored bytes into a false absence (the field's
+	// first probe guessed comma-joined and read exactly that).
+	probeKeyParts := r.URL.Query()["probeKey"]
+	if (probeStage == "") != (len(probeKeyParts) == 0) {
 		writeError(w, httpgo.StatusBadRequest, "invalid_parameter", "probeStage and probeKey go together")
 		return
 	}
@@ -537,7 +543,7 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 		}
 	}
 	if probeStage != "" {
-		exists, ok, err := h.c.SyncableStageKeyExists(id, probeStage, probeKey)
+		exists, ok, err := h.c.SyncableStageKeyExists(id, probeStage, probeKeyParts)
 		if err != nil {
 			// A typo'd stage name must not read as "key absent".
 			writeError(w, httpgo.StatusBadRequest, "invalid_parameter", err.Error())

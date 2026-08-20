@@ -954,12 +954,17 @@ paths:
         and soft-degrade contract as `readPosition`; absent for
         stage-free syncables.
 
-        `?probeStage=<stage>&probeKey=<key>` answers a single-key
-        existence probe (`stageKeyExists`) against the stage's STORED
-        key form — canonical digits, normalized case; composite keys in
-        their JSON-array encoding, URL-escaped. A typo'd stage name is
-        a 400, never "absent". Together the pair collapses the
-        fan-vs-join triage to two curls.
+        `?probeStage=<stage>&probeKey=<part>` answers a single-key
+        existence probe (`stageKeyExists`). Pass one probeKey per
+        keyPath position, in order — the KEY-SPACE OWNER renders and
+        composes them (the stage's normalize applies server-side, and
+        the composite encoding is never hand-written), so a probe can
+        only miss when the key is genuinely absent. The one caller
+        obligation: numbers in canonical digits (5, not 5.0000) — a
+        text part is never re-parsed, so "007" probes text keys
+        exactly. A typo'd stage name or part-count mismatch is a 400,
+        never "absent". Together the pair collapses the fan-vs-join
+        triage to two curls.
       operationId: getSyncableStatus
       parameters:
         - $ref: '#/components/parameters/Consistency'

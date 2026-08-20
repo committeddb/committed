@@ -1358,9 +1358,9 @@ func (db *DB) SyncableStageStats(id string) (map[string]cluster.StageStat, bool)
 
 // SyncableStageKeyExists probes one stage output key of syncable id's
 // worker ON THIS NODE (ok=false: no worker registered here, or no
-// stages; err: the stage name is not declared). Owner-local like the
-// counts — the HTTP layer proxies to the owner.
-func (db *DB) SyncableStageKeyExists(id, stage, key string) (bool, bool, error) {
+// stages; err: undeclared stage name or part-count mismatch).
+// Owner-local like the counts — the HTTP layer proxies to the owner.
+func (db *DB) SyncableStageKeyExists(id, stage string, keyParts []string) (bool, bool, error) {
 	db.workersMu.Lock()
 	handle, ok := db.syncWorkers[id]
 	db.workersMu.Unlock()
@@ -1371,7 +1371,7 @@ func (db *DB) SyncableStageKeyExists(id, stage, key string) (bool, bool, error) 
 	if !ok {
 		return false, false, nil
 	}
-	exists, err := in.StageKeyExists(stage, key)
+	exists, err := in.StageKeyExists(stage, keyParts)
 	if err != nil {
 		return false, true, err
 	}

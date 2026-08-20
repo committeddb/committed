@@ -287,17 +287,20 @@ func projectionNormalizeFlow(t *testing.T, db *sql.DB, table, quoteL, quoteR str
 	require.Equal(t, 1, counts["latest-prop"].Keys, "the folded stage's key count is visible")
 	require.Positive(t, counts["latest-prop"].Inputs, "flow counters move with the folds")
 
-	// The single-key probe: stored form (lowered), so the canonical key
-	// answers true, the raw producer rendering answers false, and a
-	// typo'd stage name is an error, never "absent".
-	exists, err := p.StageKeyExists("latest-prop", "guid-77")
+	// The single-key probe: the OWNER renders the caller's part — the
+	// stage's normalize applies server-side, so the raw producer
+	// rendering (UPPERCASE) answers true; a typo'd stage name and a
+	// part-count mismatch are errors, never "absent".
+	exists, err := p.StageKeyExists("latest-prop", []string{"guid-77"})
 	require.NoError(t, err)
 	require.True(t, exists)
-	exists, err = p.StageKeyExists("latest-prop", "GUID-77")
+	exists, err = p.StageKeyExists("latest-prop", []string{"GUID-77"})
 	require.NoError(t, err)
-	require.False(t, exists, "the probe answers about STORED bytes — callers probe the canonical form")
-	_, err = p.StageKeyExists("latest-prpo", "guid-77")
+	require.True(t, exists, "the owner applies the stage's normalize — callers probe in their own vocabulary")
+	_, err = p.StageKeyExists("latest-prpo", []string{"guid-77"})
 	require.Error(t, err)
+	_, err = p.StageKeyExists("latest-prop", []string{"guid-77", "extra"})
+	require.Error(t, err, "part-count mismatch is loud, never a false absence")
 
 	// The producer's delete tombstone carries the UPPERCASE key — it must
 	// still address the lowercased row (the RTBF-critical binding).

@@ -609,12 +609,12 @@ type FakeCluster struct {
 		result1 uint64
 		result2 bool
 	}
-	SyncableStageKeyExistsStub        func(string, string, string) (bool, bool, error)
+	SyncableStageKeyExistsStub        func(string, string, []string) (bool, bool, error)
 	syncableStageKeyExistsMutex       sync.RWMutex
 	syncableStageKeyExistsArgsForCall []struct {
 		arg1 string
 		arg2 string
-		arg3 string
+		arg3 []string
 	}
 	syncableStageKeyExistsReturns struct {
 		result1 bool
@@ -3783,17 +3783,22 @@ func (fake *FakeCluster) SyncableReadPositionReturnsOnCall(i int, result1 uint64
 	}{result1, result2}
 }
 
-func (fake *FakeCluster) SyncableStageKeyExists(arg1 string, arg2 string, arg3 string) (bool, bool, error) {
+func (fake *FakeCluster) SyncableStageKeyExists(arg1 string, arg2 string, arg3 []string) (bool, bool, error) {
+	var arg3Copy []string
+	if arg3 != nil {
+		arg3Copy = make([]string, len(arg3))
+		copy(arg3Copy, arg3)
+	}
 	fake.syncableStageKeyExistsMutex.Lock()
 	ret, specificReturn := fake.syncableStageKeyExistsReturnsOnCall[len(fake.syncableStageKeyExistsArgsForCall)]
 	fake.syncableStageKeyExistsArgsForCall = append(fake.syncableStageKeyExistsArgsForCall, struct {
 		arg1 string
 		arg2 string
-		arg3 string
-	}{arg1, arg2, arg3})
+		arg3 []string
+	}{arg1, arg2, arg3Copy})
 	stub := fake.SyncableStageKeyExistsStub
 	fakeReturns := fake.syncableStageKeyExistsReturns
-	fake.recordInvocation("SyncableStageKeyExists", []interface{}{arg1, arg2, arg3})
+	fake.recordInvocation("SyncableStageKeyExists", []interface{}{arg1, arg2, arg3Copy})
 	fake.syncableStageKeyExistsMutex.Unlock()
 	if stub != nil {
 		return stub(arg1, arg2, arg3)
@@ -3810,13 +3815,13 @@ func (fake *FakeCluster) SyncableStageKeyExistsCallCount() int {
 	return len(fake.syncableStageKeyExistsArgsForCall)
 }
 
-func (fake *FakeCluster) SyncableStageKeyExistsCalls(stub func(string, string, string) (bool, bool, error)) {
+func (fake *FakeCluster) SyncableStageKeyExistsCalls(stub func(string, string, []string) (bool, bool, error)) {
 	fake.syncableStageKeyExistsMutex.Lock()
 	defer fake.syncableStageKeyExistsMutex.Unlock()
 	fake.SyncableStageKeyExistsStub = stub
 }
 
-func (fake *FakeCluster) SyncableStageKeyExistsArgsForCall(i int) (string, string, string) {
+func (fake *FakeCluster) SyncableStageKeyExistsArgsForCall(i int) (string, string, []string) {
 	fake.syncableStageKeyExistsMutex.RLock()
 	defer fake.syncableStageKeyExistsMutex.RUnlock()
 	argsForCall := fake.syncableStageKeyExistsArgsForCall[i]

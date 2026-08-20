@@ -466,11 +466,17 @@ func ParseCheckpointPolicy(v *ParsedConfig) (CheckpointPolicy, error) {
 type StageIntrospector interface {
 	StageStats() (map[string]StageStat, error)
 	// StageKeyExists reports whether the named stage currently holds an
-	// output at key — the caller supplies the key (canonical, normalized
-	// form: the stored bytes), so the boolean answer reveals nothing the
-	// caller didn't already have. An undeclared stage name is an error
-	// (a typo'd probe must not read as "key absent").
-	StageKeyExists(stage, key string) (bool, error)
+	// output at the key whose PARTS are given in keyPath order. The
+	// key-space owner renders them: it applies the stage's declared
+	// normalize (case folding is safe on text and can only fix a read,
+	// never corrupt one) and composes the composite encoding itself —
+	// the caller supplies values in their own vocabulary and can no
+	// longer misreproduce the stored bytes into a FALSE ABSENCE. Digits
+	// stay a caller obligation (canonical form: 5, not 5.0000) — a text
+	// part is never re-parsed as a number, so "007" probes text-keyed
+	// stages exactly. An undeclared stage name or a part-count mismatch
+	// is an error, never "absent".
+	StageKeyExists(stage string, keyParts []string) (bool, error)
 }
 
 // StageStat is one stage's introspection row. Keys is the store truth

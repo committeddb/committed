@@ -1473,21 +1473,33 @@ func (p *Projection) StageStats() (map[string]cluster.StageStat, error) {
 	return out, nil
 }
 
-// StageKeyExists implements cluster.StageIntrospector.
-func (p *Projection) StageKeyExists(stage, key string) (bool, error) {
+// StageKeyExists implements cluster.StageIntrospector: the key-space
+// owner renders the caller's parts — per-part normalize (the stage's
+// declaration), then the composite encoding — so a probe can only miss
+// when the key is genuinely absent, never because the caller
+// misreproduced the stored bytes.
+func (p *Projection) StageKeyExists(stage string, keyParts []string) (bool, error) {
 	if p.stages == nil {
 		return false, nil
 	}
-	known := false
+	var def *ProjectionStage
 	for i := range p.config.Stages {
 		if p.config.Stages[i].Name == stage {
-			known = true
+			def = &p.config.Stages[i]
 			break
 		}
 	}
-	if !known {
+	if def == nil {
 		return false, fmt.Errorf("stage %q is not declared by this projection", stage)
 	}
+	if len(keyParts) != len(def.KeyPath) {
+		return false, fmt.Errorf("stage %q keys by %d part(s) but the probe carries %d — pass one probeKey per keyPath position, in order", stage, len(def.KeyPath), len(keyParts))
+	}
+	parts := make([]string, len(keyParts))
+	for i, kp := range keyParts {
+		parts[i] = stages.NormalizeKeyPart(def.Normalize, kp)
+	}
+	key := stages.OutKey(parts)
 	var exists bool
 	err := p.stageStore.View(func(tx *stagestore.Tx) error {
 		v, err := tx.GetOut(stage, []byte(key))
