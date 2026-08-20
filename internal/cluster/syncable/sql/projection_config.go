@@ -655,6 +655,11 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 		if err := validateWhenClauses(src.When, where); err != nil {
 			return err
 		}
+		// A source-level when evaluates on the whole event (or stage
+		// object) — there is no enclosing scope to reach.
+		if err := stages.RejectParentPaths(src.When, where+" when"); err != nil {
+			return err
+		}
 		if !stages.ValidNormalize(src.Normalize) {
 			return fmt.Errorf("%s: normalize %q is not supported (want %q)", where, src.Normalize, stages.NormalizeLower)
 		}
@@ -762,6 +767,14 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 		// into one fan-out statement at Init).
 		enrichedAs := make(map[string]string)
 		for i, r := range src.Rules {
+			// Rule whens on a forEach source evaluate per element with the
+			// event as $parent; anywhere else $parent would silently never
+			// match.
+			if src.ForEach == "" {
+				if perr := stages.RejectParentPaths(r.When, fmt.Sprintf("%s rule %d when", where, i+1)); perr != nil {
+					return perr
+				}
+			}
 			if err := validateWhenClauses(r.When, fmt.Sprintf("%s rule %d", where, i+1)); err != nil {
 				return err
 			}

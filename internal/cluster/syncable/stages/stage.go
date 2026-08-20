@@ -215,6 +215,14 @@ func ValidateShapes(stages []Stage) error {
 		if err := ValidateWhen(st.When, where); err != nil {
 			return err
 		}
+		if st.ForEach == "" {
+			if err := RejectParentPaths(st.When, where+" when"); err != nil {
+				return err
+			}
+			if err := RejectParentPaths(st.DeleteWhen, where+" deleteWhen"); err != nil {
+				return err
+			}
+		}
 		if len(st.DeleteWhen) > 0 {
 			if st.Reduce != "liveSet" {
 				return fmt.Errorf("%s: deleteWhen is only for reduce = \"liveSet\"", where)
@@ -255,7 +263,7 @@ func ValidateShapes(stages []Stage) error {
 				}
 			}
 		default:
-			return fmt.Errorf("%s: reduce %q is invalid (want \"latest\", \"aggregate\", or omit for a reshape stage)", where, st.Reduce)
+			return fmt.Errorf("%s: reduce %q is invalid (want \"latest\", \"aggregate\", \"liveSet\", or omit for a reshape stage)", where, st.Reduce)
 		}
 		if st.ForEach != "" && !MultiValuedPath(st.ForEach) {
 			return fmt.Errorf("%s: forEach path [%s] is single-valued — forEach fans an array into element-inputs; drop it for one input per entity", where, st.ForEach)
@@ -311,6 +319,9 @@ func ValidateShapes(stages []Stage) error {
 				}
 			}
 			if err := ValidateWhen(j.Where, jw); err != nil {
+				return err
+			}
+			if err := RejectParentPaths(j.Where, jw+" where"); err != nil {
 				return err
 			}
 		}

@@ -390,3 +390,71 @@ func TestFlowCountsSplitSilentEmptyStates(t *testing.T) {
 	}))
 	require.Zero(t, keys, "inputs>0, fanned>0, keys=0 — the filtered-to-zero signature (a parent-field when without $parent)")
 }
+
+// $parent in a fan stage's when: the b6 predicate written the natural
+// way — a per-element when testing the PARENT's event type — now
+// filters correctly instead of silently rejecting everything.
+func TestForEachWhenParentPath(t *testing.T) {
+	stages := []Stage{{
+		Name: "billed-pairs", From: "txn-events",
+		ForEach: "$.EventData.elements[*]", ElementKey: "$.Id",
+		KeyPath: []string{"$parent.JobId", "$.WorkAreaId"},
+		When:    []WhenClause{{Path: "$parent.EventType", NotEquals: "delete"}},
+		Reduce:  "aggregate", Emit: []Emit{{Field: "n", Count: true}},
+	}}
+	require.NoError(t, ValidateShapes(stages))
+	g := BuildGraph(stages)
+	store := stageStoreForTest(t)
+
+	fold := func(key, payload string) {
+		require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+			return g.FoldTopicUpsertNow(tx, "txn-events", []byte(key), decodePayload(t, payload))
+		}))
+	}
+	get := func(key string) string {
+		var got string
+		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
+			v, err := tx.GetOut("billed-pairs", []byte(OutKey([]string{"J1", "W1"})))
+			got = string(v)
+			_ = key
+			return err
+		}))
+		return got
+	}
+
+	// An update event's elements fold.
+	fold("t1", `{"JobId":"J1","EventType":"update","EventData":{"elements":[{"Id":"e1","WorkAreaId":"W1"}]}}`)
+	require.Equal(t, `{"n":1}`, get("J1|W1"), "a parent-field when with $parent admits elements")
+
+	// The parent flips to delete: every element retracts (filtering is
+	// refold).
+	fold("t1", `{"JobId":"J1","EventType":"delete","EventData":{"elements":[{"Id":"e1","WorkAreaId":"W1"}]}}`)
+	require.Empty(t, get("J1|W1"), "a delete-typed parent retracts its elements")
+}
+
+// $parent is rejected loudly where no enclosing scope exists.
+func TestParentPathsRejectedOutsideFans(t *testing.T) {
+	nonFan := []Stage{{
+		Name: "s", From: "t", KeyPath: []string{"$.id"},
+		When: []WhenClause{{Path: "$parent.EventType", Equals: "x"}},
+		Emit: []Emit{{Field: "id", From: "$.id"}},
+	}}
+	err := ValidateShapes(nonFan)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "$parent is only meaningful")
+
+	joinWhere := []Stage{
+		{
+			Name: "dim", From: "d", KeyPath: []string{"$.id"},
+			Emit: []Emit{{Field: "id", From: "$.id"}},
+		},
+		{
+			Name: "s", From: "t", KeyPath: []string{"$.id"},
+			Joins: []Join{{From: "dim", On: []string{"$.id"}, Where: []WhenClause{{Path: "$parent.x", Equals: "y"}}}},
+			Emit:  []Emit{{Field: "id", From: "$.id"}},
+		},
+	}
+	err = ValidateShapes(joinWhere)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "$parent is only meaningful")
+}

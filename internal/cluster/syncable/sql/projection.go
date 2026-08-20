@@ -1013,7 +1013,7 @@ func (p *Projection) resolveRowKeys(src *projectionSource, data, parent any) ([]
 func (p *Projection) applyRowFold(ctx context.Context, tx *gosql.Tx, src *projectionSource, data, parent any, presetKeys []any) (bool, string, error) {
 	var matched []*projectionStmt
 	for _, r := range src.rules {
-		if matchWhen(r.rule.When, data) {
+		if stages.MatchScoped(r.rule.When, data, parent) {
 			matched = append(matched, r)
 		}
 	}

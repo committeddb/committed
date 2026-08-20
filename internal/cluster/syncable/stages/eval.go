@@ -427,8 +427,8 @@ func (g *Graph) foldFan(tx *stagestore.Tx, n *graphNode, parentKey []byte, paylo
 // fanned element with its parent in scope) in a stage's retained set.
 func (g *Graph) foldOneInput(tx *stagestore.Tx, n *graphNode, inKey []byte, data, parent any, gen uint64, dirty Dirty) error {
 	st := n.def
-	deleteShaped := st.Reduce == "liveSet" && Match(st.DeleteWhen, data)
-	if !deleteShaped && !Match(st.When, data) {
+	deleteShaped := st.Reduce == "liveSet" && MatchScoped(st.DeleteWhen, data, parent)
+	if !deleteShaped && !MatchScoped(st.When, data, parent) {
 		return g.foldDeleteInput(tx, n, inKey, dirty)
 	}
 

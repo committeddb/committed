@@ -1,6 +1,7 @@
 package sql
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -236,4 +237,67 @@ set = [ { column = "w", from = "$.v" } ]
 	err = validateProjectionConfig(cfg)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), `normalize "upper" is not supported (want "lower")`)
+}
+
+// The pilot's lsprobe: reduce = "liveSet" was unreachable from TOML —
+// the parser lowercased it to "liveset", the engine compares camelCase,
+// and the deleteWhen guard fired a self-contradictory error quoting the
+// exact spelling the user wrote. The documented spelling must admit (in
+// any case), and a genuinely unknown reduce must name liveSet among the
+// valid values.
+func TestLiveSetTOMLAdmits(t *testing.T) {
+	toml := `
+[projection]
+db         = "testdb"
+table      = "t"
+primaryKey = "id"
+
+[[projection.columns]]
+name = "id"
+type = "VARCHAR(64)"
+
+[[projection.columns]]
+name = "v"
+type = "VARCHAR(64)"
+
+[[projection.stage]]
+name       = "txn-live"
+from       = "txn-events"
+keyPath    = "$.TransactionId"
+reduce     = "liveSet"
+deleteWhen = [ { path = "$.EventType", equals = "delete" } ]
+emit       = [ { field = "id", from = "$.TransactionId" } ]
+
+[[projection.source]]
+topic   = "x"
+keyPath = "$.id"
+[[projection.source.rules]]
+set = [ { column = "v", from = "$.v" } ]
+`
+	v, err := cluster.ParseConfigBytes("toml", []byte(toml))
+	require.NoError(t, err)
+	cfg, err := parseProjectionConfigFields(v, nil)
+	require.NoError(t, err)
+	require.Equal(t, "liveSet", cfg.Stages[0].Reduce, "the documented spelling reaches the engine's canonical form")
+	cfg.applyDefaults()
+	require.NoError(t, validateProjectionConfig(cfg), "liveSet must be admissible from config")
+
+	// Case-tolerant like every other config spelling.
+	loud := strings.Replace(toml, `reduce     = "liveSet"`, `reduce     = "LIVESET"`, 1)
+	v, err = cluster.ParseConfigBytes("toml", []byte(loud))
+	require.NoError(t, err)
+	cfg, err = parseProjectionConfigFields(v, nil)
+	require.NoError(t, err)
+	require.Equal(t, "liveSet", cfg.Stages[0].Reduce)
+
+	// A genuinely unknown reduce names ALL the valid values.
+	bad := strings.Replace(toml, `reduce     = "liveSet"`, `reduce     = "liveliest"`, 1)
+	v, err = cluster.ParseConfigBytes("toml", []byte(bad))
+	require.NoError(t, err)
+	cfg, err = parseProjectionConfigFields(v, nil)
+	require.NoError(t, err)
+	cfg.applyDefaults()
+	err = validateProjectionConfig(cfg)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `"liveSet"`)
 }

@@ -187,7 +187,12 @@ error handling, deletes, and schema evolution:
   matches neither `equals` nor `notEquals`. That is the whole language —
   single field, compare-to-literal; boolean expressions stay out.
   A missing path is "no match", never an error — including for `null`
-  clauses, so an absent field never matches. If
+  clauses, so an absent field never matches. Inside a fan (a forEach
+  stage's `when`/`deleteWhen`, a forEach source's rule `when`) clauses
+  evaluate PER ELEMENT, and a `$parent.` path reaches the enclosing
+  event — the natural spelling for a parent-level predicate like
+  `$parent.EventType`; anywhere without an enclosing scope, `$parent`
+  is rejected at admission. If
   the topic's type declares a `discriminator`, a rule can use the
   shorthand `when = "tenant.created"` — sugar for equality on the
   discriminator path.

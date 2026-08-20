@@ -76,8 +76,18 @@ func KeyString(v any) string {
 // for null clauses too — jsonpath distinguishes a present null (nil,
 // no error) from an absent field (error), and only the former matches.
 func Match(clauses []WhenClause, jsonData any) bool {
+	return MatchScoped(clauses, jsonData, nil)
+}
+
+// MatchScoped is Match with the enclosing scope in reach: inside a
+// forEach fan, data is the ELEMENT and parent the enclosing event, so a
+// `$parent.` path lets a per-element when test a parent field (the
+// field's b6 shape — an event-type filter on a fan stage — written the
+// natural way). Outside a fan, parent is nil and a `$parent.` path
+// matches nothing (admission rejects it where no parent can exist).
+func MatchScoped(clauses []WhenClause, jsonData, parent any) bool {
 	for _, c := range clauses {
-		v, err := jsonpath.Get(c.Path, jsonData)
+		v, err := ResolvePath(c.Path, jsonData, parent)
 		if err != nil {
 			return false
 		}
@@ -314,6 +324,18 @@ func NormalizeKeyValue(mode string, v any) any {
 // ("" = none).
 func ValidNormalize(mode string) bool {
 	return mode == "" || mode == NormalizeLower
+}
+
+// RejectParentPaths is the admission guard for `$parent.` in when
+// clauses: only a forEach fan has an enclosing scope, so anywhere else
+// the path would silently never match — reject it loudly instead.
+func RejectParentPaths(clauses []WhenClause, where string) error {
+	for _, c := range clauses {
+		if strings.HasPrefix(c.Path, "$parent") {
+			return fmt.Errorf("%s: path [%s] — $parent is only meaningful where a fan provides an enclosing scope (a forEach stage's when/deleteWhen, a forEach source's rule when); here it would silently never match", where, c.Path)
+		}
+	}
+	return nil
 }
 
 // MultiValuedPath reports whether a jsonpath can yield more than one

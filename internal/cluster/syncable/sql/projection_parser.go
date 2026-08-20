@@ -241,7 +241,7 @@ func parseProjectionStages(v *cluster.ParsedConfig, storage cluster.DatabaseStor
 			KeyPath:     pathOrList(rs.KeyPath),
 			When:        when,
 			DeleteWhen:  deleteWhen,
-			Reduce:      strings.ToLower(rs.Reduce),
+			Reduce:      canonicalReduce(rs.Reduce),
 			OrderBy:     rs.OrderBy,
 			OrderByType: strings.ToLower(rs.OrderByType),
 			TieBy:       rs.TieBy,
@@ -452,6 +452,21 @@ func normalizeScalars(scalars []ProjectionScalar) []ProjectionScalar {
 		return nil
 	}
 	return out
+}
+
+// canonicalReduce maps a case-insensitive reduce spelling onto the
+// engine's canonical form. The blind ToLower it replaces turned the
+// documented "liveSet" into "liveset", which no engine comparison
+// recognizes — liveSet was UNREACHABLE from config from the day it
+// shipped (the field's lsprobe bisect), and the deleteWhen guard then
+// quoted the very spelling the user wrote. Unknown spellings pass
+// through lowered for the validator to reject by name.
+func canonicalReduce(raw string) string {
+	lowered := strings.ToLower(raw)
+	if lowered == "liveset" {
+		return "liveSet"
+	}
+	return lowered
 }
 
 // stageJoins maps the raw join blocks onto the engine shape.
