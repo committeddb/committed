@@ -1463,7 +1463,7 @@ func (p *Projection) StageStats() (map[string]cluster.StageStat, error) {
 				return err
 			}
 			fc := flows[name]
-			out[name] = cluster.StageStat{Keys: n, Inputs: fc.Inputs, Fanned: fc.Fanned}
+			out[name] = cluster.StageStat{Keys: n, Inputs: fc.Inputs, Fanned: fc.Fanned, UnkeyedDeletes: fc.UnkeyedDeletes}
 		}
 		return nil
 	})
@@ -1482,34 +1482,25 @@ func (p *Projection) StageKeyExists(stage string, keyParts []string) (bool, erro
 	if p.stages == nil {
 		return false, nil
 	}
-	var def *ProjectionStage
+	idx := -1
 	for i := range p.config.Stages {
 		if p.config.Stages[i].Name == stage {
-			def = &p.config.Stages[i]
+			idx = i
 			break
 		}
 	}
-	if def == nil {
+	if idx < 0 {
 		return false, fmt.Errorf("stage %q is not declared by this projection", stage)
 	}
-	if len(keyParts) != len(def.KeyPath) {
-		return false, fmt.Errorf("stage %q keys by %d part(s) but the probe carries %d — pass one probeKey per keyPath position, in order", stage, len(def.KeyPath), len(keyParts))
+	// The key-space owner renders through ProbeKey — the RESOLVED space,
+	// so probing a merge stage renders in its inherited arity/keyType/
+	// normalize rather than the merge's own empty declarations.
+	key, ok, err := stages.ProbeKey(p.config.Stages, idx, keyParts)
+	if err != nil || !ok {
+		return false, err
 	}
-	parts := make([]string, len(keyParts))
-	for i, kp := range keyParts {
-		part, ok := stages.TypedKeyPart(stages.KeyTypeAt(def.KeyType, i), kp)
-		if !ok {
-			// The probe value cannot render into the key's declared space
-			// (non-numeric text against keyType "number") — genuinely
-			// absent, and with the declaration the last caller obligation
-			// (canonical digits) disappears: "5.0000" probes as 5.
-			return false, nil
-		}
-		parts[i] = stages.NormalizeKeyPart(def.Normalize, part)
-	}
-	key := stages.OutKey(parts)
 	var exists bool
-	err := p.stageStore.View(func(tx *stagestore.Tx) error {
+	err = p.stageStore.View(func(tx *stagestore.Tx) error {
 		v, err := tx.GetOut(stage, []byte(key))
 		exists = v != nil
 		return err

@@ -543,6 +543,33 @@ func ResolvedKeySpace(stages []Stage, i int) (arity int, keyType []string, norma
 	return len(st.KeyPath), st.KeyType, st.Normalize
 }
 
+// ProbeKey renders a caller's key parts in stage i's RESOLVED key
+// space — typed per position, normalized, composed through the
+// composite encoding — so an introspection probe can only miss when the
+// key is genuinely absent, never because the caller misreproduced the
+// stored bytes. Resolution goes through ResolvedKeySpace, so probing a
+// MERGE stage renders in its inherited arity/keyType/normalize rather
+// than the merge's own empty declarations. With a keyType declared, the
+// last caller obligation (canonical digits) disappears: "5.0000" probes
+// as 5. Returns ok=false (no error) when a part cannot render into its
+// declared comparison space — genuine non-membership; an arity mismatch
+// errors loudly.
+func ProbeKey(sts []Stage, i int, keyParts []string) (string, bool, error) {
+	arity, kts, norm := ResolvedKeySpace(sts, i)
+	if len(keyParts) != arity {
+		return "", false, fmt.Errorf("stage %q keys by %d part(s) but the probe carries %d — pass one probeKey per keyPath position, in order", sts[i].Name, arity, len(keyParts))
+	}
+	parts := make([]string, len(keyParts))
+	for j, kp := range keyParts {
+		part, ok := TypedKeyPart(KeyTypeAt(kts, j), kp)
+		if !ok {
+			return "", false, nil
+		}
+		parts[j] = NormalizeKeyPart(norm, part)
+	}
+	return OutKey(parts), true, nil
+}
+
 // equalKeyTypes compares two keyType declarations position-by-position
 // (broadcast and default resolve per KeyTypeAt).
 func equalKeyTypes(a, b []string, arity int) bool {

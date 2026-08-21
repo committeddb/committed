@@ -495,6 +495,11 @@ type StageStat struct {
 	// Fanned counts elements produced by a forEach stage's fan (omitted
 	// for plain stages).
 	Fanned int64 `json:"fanned,omitempty"`
+	// UnkeyedDeletes counts delete-shaped inputs whose key could not
+	// resolve or render — LOST RETRACTIONS: the key each meant to kill
+	// stays live. Nonzero answers "the delete event arrived but the key
+	// is still live" in one read. Omitted while zero.
+	UnkeyedDeletes int64 `json:"unkeyedDeletes,omitempty"`
 }
 
 // StageRecoverer is implemented by syncables carrying NODE-LOCAL stage

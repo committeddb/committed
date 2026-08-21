@@ -53,6 +53,15 @@ type graphNode struct {
 	// reads from an HTTP goroutine.
 	inputs atomic.Int64
 	fanned atomic.Int64
+	// unkeyedDeletes counts delete-shaped inputs (matched deleteWhen)
+	// whose key could not resolve or render — LOST RETRACTIONS: the key
+	// each meant to kill stays live, silently, with zero dead letters.
+	// Nonzero here splits "deletion never captured" from "deletion
+	// captured but could not key" in one StageStats read. Same
+	// atomicity contract as inputs/fanned.
+	unkeyedDeletes atomic.Int64
+	// unkeyedDeleteWarned one-shots the warn log (worker goroutine only).
+	unkeyedDeleteWarned bool
 	// dimConsumers are the joins (of LATER stages) that use THIS stage's
 	// outputs as their dimension rows — maintained by refoldKey as the
 	// outputs change, fan-out marking their dependents dirty.
@@ -135,16 +144,22 @@ func BuildGraph(stages []Stage) *Graph {
 			jn := &st.Joins[j]
 			if jn.From != "" {
 				if producer, ok := g.byName[jn.From]; ok {
-					// A stage join INHERITS the joined stage's normalize:
+					// A stage join INHERITS the joined stage's key space:
 					// the dimension keys are the producer's outputs, so the
-					// join's references must render in that key space — the
+					// join's references must render in that space — the
 					// field defect was an UPPERCASE CDC reference against a
 					// lowered stage key, silently never matching (an
 					// anti-join that suppressed nothing). Admission rejects
 					// a normalize declared on the join itself, so this
-					// resolution is the single source of the rendering.
-					jn.Normalize = producer.def.Normalize
-					jn.OnType = producer.def.KeyType
+					// resolution is the single source of the rendering —
+					// and it resolves through ResolvedKeySpace, because a
+					// MERGE producer declares no space of its own: reading
+					// its fields directly was that defect's merge-fronted
+					// twin (an inherited "" against the merge's lowered
+					// adopted keys).
+					_, kt, norm := ResolvedKeySpace(owned, IndexOf(owned, jn.From))
+					jn.Normalize = norm
+					jn.OnType = kt
 					producer.dimConsumers = append(producer.dimConsumers, dimRef{node: nodes[i], join: jn})
 				}
 				continue
@@ -357,7 +372,7 @@ func FanMiss(path string, payload any, elems *[]any) string {
 func (g *Graph) FlowCounts() map[string]FlowCount {
 	out := make(map[string]FlowCount, len(g.order))
 	for _, n := range g.order {
-		out[n.def.Name] = FlowCount{Inputs: n.inputs.Load(), Fanned: n.fanned.Load()}
+		out[n.def.Name] = FlowCount{Inputs: n.inputs.Load(), Fanned: n.fanned.Load(), UnkeyedDeletes: n.unkeyedDeletes.Load()}
 	}
 	return out
 }
@@ -366,6 +381,8 @@ func (g *Graph) FlowCounts() map[string]FlowCount {
 type FlowCount struct {
 	Inputs int64
 	Fanned int64
+	// UnkeyedDeletes counts lost retractions — see graphNode.
+	UnkeyedDeletes int64
 }
 
 // stageForEachNonArrayWarnRun is how many CONSECUTIVE non-array forEach
@@ -463,14 +480,23 @@ func (g *Graph) foldOneInput(tx *stagestore.Tx, n *graphNode, inKey []byte, data
 		if err != nil || kv == nil {
 			// A matched input without a (complete) key cannot fold; treat as
 			// non-membership (and retract any prior membership) rather than
-			// erroring the topic.
+			// erroring the topic. Delete evidence dropped here is a LOST
+			// retraction — made loud, since the key it meant to kill stays
+			// live.
+			if deleteShaped {
+				g.noteUnkeyedDelete(n, kp)
+			}
 			return g.foldDeleteInput(tx, n, inKey, dirty)
 		}
 		part, ok := TypedKeyPart(KeyTypeAt(st.KeyType, i), coerceKeyScalar(kv))
 		if !ok {
 			// The value cannot render into its declared comparison space
 			// (a non-numeric string under keyType "number") — same
-			// non-membership as a missing key part.
+			// non-membership as a missing key part, and the same lost
+			// retraction when the input was delete-shaped.
+			if deleteShaped {
+				g.noteUnkeyedDelete(n, kp)
+			}
 			return g.foldDeleteInput(tx, n, inKey, dirty)
 		}
 		parts[i] = NormalizeKeyPart(st.Normalize, part)
@@ -513,6 +539,24 @@ func (g *Graph) foldOneInput(tx *stagestore.Tx, n *graphNode, inKey []byte, data
 	}
 	dirty.Mark(n, outKey)
 	return nil
+}
+
+// noteUnkeyedDelete makes a lost retraction loud: delete evidence that
+// cannot key drops as non-membership like any input (payload shapes
+// legitimately vary across a topic), but unlike ordinary variance it
+// means a key that SHOULD die stays live — the field probe's signature:
+// a deletion event captured on the topic, the liveSet key still live
+// minutes later, zero dead letters. Counted for StageStat; warned once
+// per stage per worker (fold path — worker goroutine only).
+func (g *Graph) noteUnkeyedDelete(n *graphNode, keyPath string) {
+	n.unkeyedDeletes.Add(1)
+	if n.unkeyedDeleteWarned {
+		return
+	}
+	n.unkeyedDeleteWarned = true
+	zap.L().Warn("[stage] delete-shaped input could not key — its retraction is LOST (the key it meant to kill stays live)",
+		zap.String("stage", n.def.Name),
+		zap.String("key_path", keyPath))
 }
 
 // foldDelete retracts one input from a stage: the key it fed refolds
