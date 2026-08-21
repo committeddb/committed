@@ -350,3 +350,59 @@ set = [ { column = "v", from = "$.v" } ]
 	cfg.applyDefaults()
 	require.NoError(t, validateProjectionConfig(cfg))
 }
+
+// merge decodes as bare stage names or { stage, as } tables; notNull
+// decodes as a when arm.
+func TestMergeTOMLDecodes(t *testing.T) {
+	toml := `
+[projection]
+db         = "testdb"
+table      = "t"
+primaryKey = "id"
+
+[[projection.columns]]
+name = "id"
+type = "VARCHAR(64)"
+
+[[projection.columns]]
+name = "v"
+type = "VARCHAR(64)"
+
+[[projection.stage]]
+name    = "quoted"
+from    = "quotes"
+keyPath = "$.jobId"
+reduce  = "aggregate"
+emit    = [ { field = "total", sum = "$.amount" } ]
+
+[[projection.stage]]
+name    = "invoiced-sums"
+from    = "invoices"
+keyPath = "$.jobId"
+reduce  = "aggregate"
+emit    = [ { field = "total", sum = "$.amount" } ]
+
+[[projection.stage]]
+name  = "open"
+merge = [ "quoted", { stage = "invoiced-sums", as = "invoiced" } ]
+when  = [ { path = "$.quoted", notNull = true } ]
+emit  = [ { field = "open", expr = "coalesce($.quoted.total, 0) - coalesce($.invoiced.total, 0)" } ]
+
+[[projection.source]]
+from = "open"
+[[projection.source.rules]]
+set = [ { column = "v", from = "$.open" } ]
+`
+	v, err := cluster.ParseConfigBytes("toml", []byte(toml))
+	require.NoError(t, err)
+	cfg, err := parseProjectionConfigFields(v, nil)
+	require.NoError(t, err)
+	m := cfg.Stages[2].Merge
+	require.Equal(t, "quoted", m[0].Stage)
+	require.Empty(t, m[0].As, "bare name: alias defaults later")
+	require.Equal(t, "invoiced-sums", m[1].Stage)
+	require.Equal(t, "invoiced", m[1].As)
+	require.True(t, cfg.Stages[2].When[0].NotNull)
+	cfg.applyDefaults()
+	require.NoError(t, validateProjectionConfig(cfg), "a merge-fed table source admits (arity resolves through the merge)")
+}

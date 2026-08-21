@@ -34,10 +34,15 @@ import (
 // boolean. That is the whole language: single-field, compare-to-literal
 // (the field-measured predicate set) — boolean expressions stay out.
 type WhenClause struct {
-	Path      string `mapstructure:"path"`
-	Equals    any    `mapstructure:"equals"`
-	Null      bool   `mapstructure:"null"`
-	NotEquals any    `mapstructure:"notEquals"`
+	Path   string `mapstructure:"path"`
+	Equals any    `mapstructure:"equals"`
+	Null   bool   `mapstructure:"null"`
+	// NotNull matches a PRESENT, non-null value (SQL's IS NOT NULL) —
+	// the complement of Null, and the merge's left/inner gate: a merged
+	// side's alias path resolves null when that upstream holds no output
+	// for the key.
+	NotNull   bool `mapstructure:"notNull"`
+	NotEquals any  `mapstructure:"notEquals"`
 	// GreaterThan/LessThan take numeric literals only (validated at
 	// admission); values compare numerically, non-numbers never match.
 	GreaterThan any `mapstructure:"greaterThan"`
@@ -94,6 +99,10 @@ func MatchScoped(clauses []WhenClause, jsonData, parent any) bool {
 		switch {
 		case c.Null:
 			if v != nil {
+				return false
+			}
+		case c.NotNull:
+			if v == nil {
 				return false
 			}
 		case c.NotEquals != nil:

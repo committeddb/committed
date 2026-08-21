@@ -180,8 +180,9 @@ error handling, deletes, and schema evolution:
   which must hold (AND); express OR as another rule. Each clause is one
   `path` plus exactly one predicate: `equals`, `null = true` (matches a
   *present* JSON null — the flag form, since TOML cannot write
-  `equals = null`), `notEquals`, or `greaterThan`/`lessThan` (numeric
-  literals, strict). Comparisons follow SQL: a missing or null value
+  `equals = null`), `notEquals`, `notNull` (present and
+  non-null — SQL's IS NOT NULL, the merge's left/inner gate), or
+  `greaterThan`/`lessThan` (numeric literals, strict). Comparisons follow SQL: a missing or null value
   matches NO comparison — including `notEquals` — and a value of a
   different scalar family (a string where the literal is a number)
   matches neither `equals` nor `notEquals`. That is the whole language —
@@ -487,6 +488,23 @@ set = [ { column = "total", from = "$.total" },
   none passes `where`) — "jobs with no posted invoice." Arrival
   retracts, departure or a `where` mismatch heals back in, and a
   missing `on` reference is vacuously absent.
+- **`merge` combines PRIOR stages BY KEY** — SQL's outer join, aliased:
+  `merge = [ "quoted", { stage = "invoiced-sums", as = "invoiced" } ]`
+  makes each key ANY side holds a tuple scoping every side's current
+  output under its alias (`$.quoted.total`; absent sides are explicit
+  nulls, exactly as an outer join produces NULL columns). Gate to
+  left/inner with `when` `notNull`/`null` on an alias path — the when
+  unit rule: `when` always filters the stage's FOLD UNIT (an input, a
+  fanned element, or a merged tuple). A merge declares NO
+  keyPath/keyType/normalize: its key space is inherited from the merged
+  stages, which admission requires to agree. Value resolution lives
+  here — `expr` with `coalesce` subtracts, sums, and unions across
+  sides — and merged values are ordinary emitted data, so a downstream
+  stage can key by them (attribution re-keys through the existing
+  machinery). Decision rule: SAME-KEY correlation → merge; FOREIGN-KEY
+  reference → join. A merge feeding a single table source is the
+  primary multi-stage-table pattern (one source, whole-row writes);
+  rowOwner remains the form for mixed topic/stage tables.
 - **Joins can address a PRIOR stage** (`from = "<stage>"` on a join):
   its outputs are the dimension rows, maintained live by the drain — so
   cross-stage correlation is a join, not a second input; heal, flip,

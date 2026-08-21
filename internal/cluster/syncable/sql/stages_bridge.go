@@ -15,6 +15,7 @@ import (
 type (
 	WhenClause      = stages.WhenClause
 	ProjectionStage = stages.Stage
+	StageMergeEntry = stages.MergeEntry
 	StageEmit       = stages.Emit
 	StageJoin       = stages.Join
 )

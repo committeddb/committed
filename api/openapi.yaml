@@ -582,7 +582,12 @@ paths:
         tombstone), chains internal stages via `[[projection.stage]]`
         (private keyed refolds — reshape or aggregate — consumed by a
         stage-fed source's `from`; a stage join's `on` takes one path
-        or a list addressing a composite-keyed dimension; key-bearing
+        or a list addressing a composite-keyed dimension; `merge`
+        combines prior stages BY KEY into an aliased tuple (outer-join
+        semantics, absent sides null; gate left/inner with when
+        notNull/null; key space inherited from the merged stages, which
+        must agree) — same-key correlation belongs to merge,
+        foreign-key reference to joins; key-bearing
         declarations (stage keyPath, join on, source keyPath) accept
         `normalize = "lower"` to fold cross-source key renderings
         (UPPERCASE CDC GUIDs vs lowercase serializers), and stages

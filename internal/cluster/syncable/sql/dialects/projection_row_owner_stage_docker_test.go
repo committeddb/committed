@@ -333,3 +333,114 @@ func TestMySQLIntegration_ProjNormalize(t *testing.T) {
 	projectionNormalizeFlow(t, db, table, "`", "`",
 		func(int) string { return "?" })
 }
+
+// projectionMergeFlow drives the merge stage end-to-end into a real
+// table: candidate C's shape — quoted minus invoiced per job, full
+// outer with left gating, landing as a single-source merge-fed table
+// (the pattern that subsumes owner/decorator coordination: one source,
+// whole-row writes, no pull needed).
+func projectionMergeFlow(t *testing.T, db *sql.DB, table, quoteL, quoteR string, placeholder func(i int) string) {
+	quoteType := &cluster.Type{ID: "mquotes", Name: "Quote"}
+	invType := &cluster.Type{ID: "minvoices", Name: "Invoice"}
+	cfg := &sql.ProjectionConfig{
+		Table:      table,
+		PrimaryKey: []string{"job_id"},
+		Columns: []sql.ProjectionColumn{
+			{Name: "job_id", SQLType: "VARCHAR(64)"},
+			{Name: "open_amount", SQLType: "DECIMAL(12,2)"},
+		},
+		Stages: []sql.ProjectionStage{
+			{
+				Name: "quoted", From: "mquotes", KeyPath: []string{"$.jobId"},
+				Reduce: "aggregate", Emit: []sql.StageEmit{{Field: "total", Sum: "$.amount"}},
+			},
+			{
+				Name: "invoiced", From: "minvoices", KeyPath: []string{"$.jobId"},
+				Reduce: "aggregate", Emit: []sql.StageEmit{{Field: "total", Sum: "$.amount"}},
+			},
+			{
+				Name:  "open",
+				Merge: []sql.StageMergeEntry{{Stage: "quoted"}, {Stage: "invoiced"}},
+				When:  []sql.WhenClause{{Path: "$.quoted", NotNull: true}},
+				Emit: []sql.StageEmit{
+					{Field: "open", Expr: "coalesce($.quoted.total, 0) - coalesce($.invoiced.total, 0)"},
+				},
+			},
+		},
+		Sources: []sql.ProjectionSource{{
+			FromStage: "open",
+			Rules:     []sql.ProjectionRule{{Set: []sql.ProjectionSet{{Column: "open_amount", From: "$.open"}}}},
+		}},
+	}
+	p := sql.NewProjection(db, cfg, nil, table)
+	p.SetStoreDir(t.TempDir())
+	require.NoError(t, p.Init())
+	defer func() { _ = p.Close() }()
+
+	var idx uint64
+	sync := func(e *cluster.Entity) {
+		t.Helper()
+		idx++
+		_, err := p.Sync(context.Background(), &cluster.Actual{Index: idx, Entities: []*cluster.Entity{e}})
+		require.NoError(t, err)
+	}
+	qt := quoteL + table + quoteR
+	open := func(job string) (amt gosql.NullString, count int) {
+		t.Helper()
+		require.NoError(t, db.DB.QueryRow("SELECT COUNT(*) FROM "+qt).Scan(&count))
+		err := db.DB.QueryRow(
+			fmt.Sprintf("SELECT open_amount FROM %s WHERE job_id = %s", qt, placeholder(0)), job).
+			Scan(&amt)
+		if err != nil {
+			return gosql.NullString{}, count
+		}
+		return amt, count
+	}
+
+	// Quote only: row appears with the full amount (invoiced side null).
+	sync(cluster.NewUpsertEntity(quoteType, []byte("q1"), []byte(`{"jobId":"j1","amount":100.50}`)))
+	amt, count := open("j1")
+	require.Equal(t, "100.50", amt.String)
+	require.Equal(t, 1, count)
+
+	// Invoices arrive: exact decimal difference.
+	sync(cluster.NewUpsertEntity(invType, []byte("i1"), []byte(`{"jobId":"j1","amount":40.25}`)))
+	amt, _ = open("j1")
+	require.Equal(t, "60.25", amt.String)
+
+	// Invoiced-only job: gated out (left join) — no row.
+	sync(cluster.NewUpsertEntity(invType, []byte("i2"), []byte(`{"jobId":"j2","amount":10}`)))
+	_, count = open("j2")
+	require.Equal(t, 1, count, "the notNull gate keeps invoiced-only jobs out of the table")
+
+	// The quote retracts: the merged key retracts, the ROW deletes.
+	sync(cluster.NewDeleteEntity(quoteType, []byte("q1")))
+	_, count = open("j1")
+	require.Equal(t, 0, count, "owner-side retraction removes the row — single source, no pull machinery")
+}
+
+func TestPostgreSQLIntegration_ProjMerge(t *testing.T) {
+	d := &dialects.PostgreSQLDialect{}
+	db, err := sql.NewDB(d, pgConnString)
+	require.NoError(t, err)
+	defer db.Close()
+
+	table := uniqueTable(t)
+	defer dropTable(t, table)
+
+	projectionMergeFlow(t, db, table, `"`, `"`,
+		func(i int) string { return fmt.Sprintf("$%d", i+1) })
+}
+
+func TestMySQLIntegration_ProjMerge(t *testing.T) {
+	d := &dialects.MySQLDialect{}
+	db, err := sql.NewDB(d, mysqlConn(t))
+	require.NoError(t, err)
+	defer db.Close()
+
+	table := uniqueTable(t)
+	defer dropTableMySQL(t, db, table)
+
+	projectionMergeFlow(t, db, table, "`", "`",
+		func(int) string { return "?" })
+}

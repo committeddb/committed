@@ -200,6 +200,7 @@ type rawProjectionStage struct {
 	Join        []rawStageJoin `mapstructure:"join"`
 	Normalize   string         `mapstructure:"normalize"`
 	KeyType     any            `mapstructure:"keyType"`
+	Merge       any            `mapstructure:"merge"`
 	Emit        []StageEmit    `mapstructure:"emit"`
 	ForEach     string         `mapstructure:"forEach"`
 	ElementKey  string         `mapstructure:"elementKey"`
@@ -237,6 +238,10 @@ func parseProjectionStages(v *cluster.ParsedConfig, storage cluster.DatabaseStor
 		if err != nil {
 			return nil, fmt.Errorf("stage %d (%q): deleteWhen: %w", i+1, rs.Name, err)
 		}
+		mergeEntries, err := parseMergeEntries(rs.Merge)
+		if err != nil {
+			return nil, fmt.Errorf("stage %d (%q): merge: %w", i+1, rs.Name, err)
+		}
 		stages = append(stages, ProjectionStage{
 			Name:        rs.Name,
 			From:        rs.From,
@@ -254,6 +259,7 @@ func parseProjectionStages(v *cluster.ParsedConfig, storage cluster.DatabaseStor
 			ElementKey:  rs.ElementKey,
 			Normalize:   strings.ToLower(rs.Normalize),
 			KeyType:     lowerList(pathOrList(rs.KeyType)),
+			Merge:       mergeEntries,
 		})
 	}
 	return stages, nil
@@ -472,6 +478,43 @@ func canonicalReduce(raw string) string {
 	return lowered
 }
 
+// parseMergeEntries decodes the merge list: each entry a bare stage
+// name, or { stage, as } when the alias must differ (dashed stage names
+// are not jsonpath dot segments).
+func parseMergeEntries(raw any) ([]StageMergeEntry, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	list, ok := raw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("merge must be a list of stage names or { stage, as } tables; got %T", raw)
+	}
+	out := make([]StageMergeEntry, 0, len(list))
+	for i, item := range list {
+		switch v := item.(type) {
+		case string:
+			out = append(out, StageMergeEntry{Stage: v})
+		case map[string]any:
+			var e StageMergeEntry
+			for k, val := range v {
+				s, sok := val.(string)
+				switch {
+				case strings.EqualFold(k, "stage") && sok:
+					e.Stage = s
+				case strings.EqualFold(k, "as") && sok:
+					e.As = s
+				default:
+					return nil, fmt.Errorf("entry %d: unknown or non-string key %q (want stage and optional as)", i+1, k)
+				}
+			}
+			out = append(out, e)
+		default:
+			return nil, fmt.Errorf("entry %d: want a stage name or { stage, as }; got %T", i+1, item)
+		}
+	}
+	return out, nil
+}
+
 // stageJoins maps the raw join blocks onto the engine shape.
 func stageJoins(raw []rawStageJoin) []StageJoin {
 	if len(raw) == 0 {
@@ -575,6 +618,15 @@ func normalizeWhen(raw any, storage cluster.DatabaseStorage, topic string) ([]Wh
 					clause.Equals = val
 				case strings.EqualFold(k, "notEquals"):
 					clause.NotEquals = val
+				case strings.EqualFold(k, "notNull"):
+					b, ok := val.(bool)
+					if !ok {
+						return nil, fmt.Errorf("when notNull must be a boolean; got %T", val)
+					}
+					if !b {
+						return nil, fmt.Errorf("when notNull = false is not a predicate; omit the clause or use null = true")
+					}
+					clause.NotNull = true
 				case strings.EqualFold(k, "greaterThan"):
 					clause.GreaterThan = val
 				case strings.EqualFold(k, "lessThan"):

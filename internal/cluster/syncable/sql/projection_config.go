@@ -683,8 +683,8 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 			if fi < 0 {
 				return fmt.Errorf("%s: from %q names no declared stage", where, src.FromStage)
 			}
-			if len(c.PrimaryKey) != len(c.Stages[fi].KeyPath) {
-				return fmt.Errorf("%s: this table's primaryKey has %d column(s) but stage %q keys by %d path(s) — a stage-fed source's rows are keyed BY the stage's key, so the arities must match", where, len(c.PrimaryKey), src.FromStage, len(c.Stages[fi].KeyPath))
+			if arity, _, _ := stages.ResolvedKeySpace(c.Stages, fi); len(c.PrimaryKey) != arity {
+				return fmt.Errorf("%s: this table's primaryKey has %d column(s) but stage %q keys by %d path(s) — a stage-fed source's rows are keyed BY the stage's key, so the arities must match", where, len(c.PrimaryKey), src.FromStage, arity)
 			}
 			if src.Aggregate != nil || src.Lookup != nil || src.ForEach != "" {
 				return fmt.Errorf("%s: a stage-fed source folds via rules only", where)
@@ -841,6 +841,38 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 		}
 		if src.OnDelete == onDeleteClear && !ownsColumn {
 			return fmt.Errorf("%s: onDelete = %q needs at least one column set by its rules to clear", where, onDeleteClear)
+		}
+	}
+	// The table-seam half of the key-space invariant (derived where owned,
+	// validated where peered): every stage feeding this table's rows, and
+	// any row-writing topic source beside them, shares ONE key space — a
+	// normalize disagreement would key the owner's rows and the
+	// decorators' rows under different bytes, silently (the class the
+	// merge check closes engine-side).
+	var rowNormalize *string
+	var rowNormalizeFrom string
+	for _, src := range c.Sources {
+		if len(src.Rules) == 0 || src.ForEach != "" || src.Aggregate != nil || src.Lookup != nil {
+			continue
+		}
+		norm, from := "", ""
+		if src.FromStage != "" {
+			fi := stageNamed(c, src.FromStage)
+			if fi < 0 {
+				continue // named-stage existence errors below, with context
+			}
+			_, _, norm = stages.ResolvedKeySpace(c.Stages, fi)
+			from = fmt.Sprintf("stage %q", src.FromStage)
+		} else {
+			norm = src.Normalize
+			from = fmt.Sprintf("topic source %q", src.Topic)
+		}
+		if rowNormalize == nil {
+			rowNormalize, rowNormalizeFrom = &norm, from
+			continue
+		}
+		if *rowNormalize != norm {
+			return fmt.Errorf("row-writing sources disagree on key normalize (%s renders %q, %s renders %q) — they share this table's row key space, so a disagreement keys their rows under DIFFERENT bytes, silently; declare the same normalize on both sides", rowNormalizeFrom, *rowNormalize, from, norm)
 		}
 	}
 	return validateProjectionJSONPaths(c)

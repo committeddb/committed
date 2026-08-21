@@ -57,12 +57,22 @@ type graphNode struct {
 	// outputs as their dimension rows — maintained by refoldKey as the
 	// outputs change, fan-out marking their dependents dirty.
 	dimConsumers []dimRef
+	// mergeConsumers are the merge stages combining THIS stage's outputs
+	// as one aliased side of their tuples.
+	mergeConsumers []mergeRef
 }
 
 // Graph is the compiled stage topology of one projection: manifest
 // order is the DAG (validated), so cascades simply recurse downstream.
 // dimRef addresses one join of one stage — a topic's entities feed it as
 // dimension rows.
+// mergeRef is one merge stage consuming a producer's outputs under an
+// alias.
+type mergeRef struct {
+	node  *graphNode
+	alias string
+}
+
 type dimRef struct {
 	node *graphNode
 	join *Join
@@ -102,6 +112,20 @@ func BuildGraph(stages []Stage) *Graph {
 	g.order = nodes
 	for i := range owned {
 		st := &owned[i]
+		if len(st.Merge) > 0 {
+			// Aliases resolve here on the graph-owned copy (defaults =
+			// stage names, validated path-safe at admission); the merge
+			// declares no From and no joins.
+			for e := range st.Merge {
+				if st.Merge[e].As == "" {
+					st.Merge[e].As = st.Merge[e].Stage
+				}
+				if producer, ok := g.byName[st.Merge[e].Stage]; ok {
+					producer.mergeConsumers = append(producer.mergeConsumers, mergeRef{node: nodes[i], alias: st.Merge[e].As})
+				}
+			}
+			continue
+		}
 		if up, ok := g.byName[st.From]; ok {
 			up.consumers = append(up.consumers, nodes[i])
 		} else {
@@ -599,6 +623,11 @@ func (g *Graph) refoldKey(tx *stagestore.Tx, n *graphNode, outKey []byte, dirty 
 				return err
 			}
 		}
+		for _, m := range n.mergeConsumers {
+			if err := g.foldMergeSide(tx, m.node, m.alias, outKey, nil, dirty); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
 	if prior != nil && bytes.Equal(prior, out) {
@@ -631,13 +660,56 @@ func (g *Graph) refoldKey(tx *stagestore.Tx, n *graphNode, outKey []byte, dirty 
 			return err
 		}
 	}
+	for _, m := range n.mergeConsumers {
+		if err := g.foldMergeSide(tx, m.node, m.alias, outKey, obj, dirty); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// foldMergeSide lands (or retracts, obj nil) one upstream's output for
+// key K as that side of a merge's tuple. No when, no keyPath, no rekey:
+// the merge adopts the producer's key byte-verbatim, retains the side
+// under an alias-namespaced input key, and its `when` — per the unit
+// rule — evaluates over the ASSEMBLED tuple at refold.
+func (g *Graph) foldMergeSide(tx *stagestore.Tx, n *graphNode, alias string, key []byte, obj any, dirty Dirty) error {
+	inKey := mergeInKey(alias, key)
+	if obj == nil {
+		if err := tx.DeleteIn(n.def.Name, key, inKey); err != nil {
+			return err
+		}
+	} else {
+		n.inputs.Add(1)
+		bs, err := marshalStageObject(obj)
+		if err != nil {
+			return err
+		}
+		if err := tx.PutIn(n.def.Name, key, inKey, encodeRetained(0, bs)); err != nil {
+			return err
+		}
+	}
+	dirty.Mark(n, key)
+	return nil
+}
+
+// mergeInKey namespaces a merge side's retention under its alias (the
+// fan's parent/element composition trick — aliases are path-safe
+// idents, so NUL cannot occur in them).
+func mergeInKey(alias string, key []byte) []byte {
+	out := make([]byte, 0, len(alias)+1+len(key))
+	out = append(out, alias...)
+	out = append(out, 0)
+	return append(out, key...)
 }
 
 // refoldOutput computes a key's output object from its retained inputs.
 // live=false means the key has no qualifying inputs and its output (and
 // downstream memberships) retract.
 func refoldOutput(tx *stagestore.Tx, st *Stage, outKey []byte) (out []byte, live bool, err error) {
+	if len(st.Merge) > 0 {
+		return refoldMerge(tx, st, outKey)
+	}
 	if st.Reduce == "aggregate" {
 		return refoldAggregate(tx, st, outKey)
 	}
@@ -724,6 +796,46 @@ func inputQualifies(tx *stagestore.Tx, st *Stage, obj, parent any) (bool, error)
 		}
 	}
 	return true, nil
+}
+
+// refoldMerge assembles a merge key's tuple — each retained side's
+// object under its alias — gates it through the stage's when (the unit
+// rule: the tuple IS the fold unit, which is what lets notNull test
+// sibling presence), and emits. No sides retained = the key retracts.
+func refoldMerge(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byte, bool, error) {
+	// The tuple carries EVERY declared side — absent ones as explicit
+	// nulls, exactly as an outer join produces NULL columns — so the
+	// null/notNull arms address absence naturally (a missing map entry
+	// would never match `null = true`, which requires a PRESENT null).
+	scope := make(map[string]any, len(st.Merge))
+	for _, e := range st.Merge {
+		scope[e.As] = nil
+	}
+	present := 0
+	err := tx.InputsFor(st.Name, outKey, func(inKey, val []byte) error {
+		i := bytes.IndexByte(inKey, 0)
+		if i < 0 {
+			return nil
+		}
+		_, payload := decodeRetained(val)
+		obj, derr := DecodeObject(payload)
+		if derr != nil {
+			return fmt.Errorf("merge %q: decode side %q: %w", st.Name, string(inKey[:i]), derr)
+		}
+		scope[string(inKey[:i])] = obj
+		present++
+		return nil
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	if present == 0 {
+		return nil, false, nil
+	}
+	if !Match(st.When, scope) {
+		return nil, false, nil
+	}
+	return emitReshape(st, scope, nil)
 }
 
 // emitReshape renders a stage's emit fields from one input object — the

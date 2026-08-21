@@ -333,12 +333,12 @@ type = "TEXT"
 		{
 			"when missing equals and null",
 			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\" } ]\nset = [ { column = \"v\", value = \"y\" } ]",
-			"exactly one of equals, null, notEquals, greaterThan, or lessThan",
+			"exactly one of equals, null, notNull, notEquals, greaterThan, or lessThan",
 		},
 		{
 			"when with both equals and null",
 			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\", null = true } ]\nset = [ { column = \"v\", value = \"y\" } ]",
-			"exactly one of equals, null, notEquals, greaterThan, or lessThan",
+			"exactly one of equals, null, notNull, notEquals, greaterThan, or lessThan",
 		},
 		{
 			"when null false",

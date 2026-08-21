@@ -21,13 +21,13 @@ func ValidateWhen(clauses []WhenClause, where string) error {
 			return fmt.Errorf("%s: when entry with empty path", where)
 		}
 		arms := 0
-		for _, set := range []bool{cl.Equals != nil, cl.Null, cl.NotEquals != nil, cl.GreaterThan != nil, cl.LessThan != nil} {
+		for _, set := range []bool{cl.Equals != nil, cl.Null, cl.NotNull, cl.NotEquals != nil, cl.GreaterThan != nil, cl.LessThan != nil} {
 			if set {
 				arms++
 			}
 		}
 		if arms != 1 {
-			return fmt.Errorf("%s: when entry for %q: exactly one of equals, null, notEquals, greaterThan, or lessThan is required", where, cl.Path)
+			return fmt.Errorf("%s: when entry for %q: exactly one of equals, null, notNull, notEquals, greaterThan, or lessThan is required", where, cl.Path)
 		}
 		for arm, lit := range map[string]any{"equals": cl.Equals, "notEquals": cl.NotEquals} {
 			if lit != nil && !IsScalar(lit) {
@@ -104,6 +104,18 @@ type Stage struct {
 	// normalized keys; declare the same normalize on any sibling source
 	// sharing the key space.
 	Normalize string `mapstructure:"normalize"`
+	// Merge combines PRIOR stages BY KEY (SQL's FULL OUTER JOIN
+	// USING(key), aliased): for each key any listed upstream holds, the
+	// fold unit is a tuple scoping each upstream's current output under
+	// its alias ($.quoted.total). The key is live while any side is —
+	// gate to left/inner with when notNull/null on an alias path (the
+	// when unit rule: when filters the stage's fold unit). A merge
+	// declares NO keyPath/keyType/normalize: its key space is inherited
+	// from the merged stages, which admission requires to agree — the
+	// merge sits entirely downstream of key rendering and adopts
+	// upstream keys byte-verbatim. Same-key correlation belongs here;
+	// foreign-key reference belongs to joins.
+	Merge []MergeEntry `mapstructure:"merge"`
 	// KeyType declares each key part's comparison space, SQL's
 	// declared-column-type model in this vocabulary: "text" (the
 	// default — strings verbatim, typed numbers in canonical digits;
@@ -116,6 +128,15 @@ type Stage struct {
 	// part. One entry per keyPath position; a single value broadcasts.
 	// Joins addressing this stage inherit these types (like Normalize).
 	KeyType []string `mapstructure:"keyType"`
+}
+
+// MergeEntry names one merged upstream and its alias in the tuple
+// scope. As defaults to the stage name; admission requires the
+// effective alias to be a path-safe identifier (add `as` for names
+// jsonpath's dot syntax cannot address, e.g. dashed stage names).
+type MergeEntry struct {
+	Stage string `mapstructure:"stage"`
+	As    string `mapstructure:"as"`
 }
 
 // Join is one filtering join of a stage: the stage's inputs
@@ -212,14 +233,22 @@ func ValidateShapes(stages []Stage) error {
 		if names[st.Name] {
 			return fmt.Errorf("%s: a second stage named %q", where, st.Name)
 		}
-		if st.From == "" {
-			return fmt.Errorf("%s: from is required — a topic id, or a prior stage's name", where)
+		if st.From == "" && len(st.Merge) == 0 {
+			return fmt.Errorf("%s: from is required — a topic id, or a prior stage's name (or merge, to combine prior stages by key)", where)
 		}
-		if st.From == st.Name || (!names[st.From] && IndexOf(stages, st.From) >= 0) {
+		if st.From != "" && len(st.Merge) > 0 {
+			return fmt.Errorf("%s: exactly one of from or merge (a stage consumes one input stream, or combines prior stages by key)", where)
+		}
+		if st.From != "" && (st.From == st.Name || (!names[st.From] && IndexOf(stages, st.From) >= 0)) {
 			return fmt.Errorf("%s: from %q references a stage at or after this one — stages chain in manifest order (move the producer above its consumer)", where, st.From)
 		}
 		names[st.Name] = true
-		if len(st.KeyPath) == 0 {
+		if len(st.Merge) > 0 {
+			if err := validateMergeStage(stages, st, names, where); err != nil {
+				return err
+			}
+		}
+		if len(st.KeyPath) == 0 && len(st.Merge) == 0 {
 			return fmt.Errorf("%s: keyPath is required (one path per key part; several = a composite key)", where)
 		}
 		for _, kp := range st.KeyPath {
@@ -335,8 +364,10 @@ func ValidateShapes(stages []Stage) error {
 				}
 			}
 			if j.From != "" {
-				if fi := IndexOf(stages, j.From); fi >= 0 && len(j.On) != len(stages[fi].KeyPath) {
-					return fmt.Errorf("%s: on has %d path(s) but stage %q keys by %d path(s) — a stage join's on addresses the joined stage's key, so the arities must match, in the same order", jw, len(j.On), j.From, len(stages[fi].KeyPath))
+				if fi := IndexOf(stages, j.From); fi >= 0 {
+					if arity, _, _ := ResolvedKeySpace(stages, fi); len(j.On) != arity {
+						return fmt.Errorf("%s: on has %d path(s) but stage %q keys by %d path(s) — a stage join's on addresses the joined stage's key, so the arities must match, in the same order", jw, len(j.On), j.From, arity)
+					}
 				}
 			}
 			if err := ValidateWhen(j.Where, jw); err != nil {
@@ -405,6 +436,122 @@ func ValidateShapes(stages []Stage) error {
 		}
 	}
 	return nil
+}
+
+// validateMergeStage checks the merge form: at least two prior stages,
+// unique path-safe aliases, unanimous key spaces, and none of the
+// fields a merge cannot carry — its key space is inherited (never
+// declared) and its fold unit is the tuple (reduce/fan/join arms are
+// meaningless and rejected rather than ignored).
+func validateMergeStage(stages []Stage, st *Stage, names map[string]bool, where string) error {
+	switch {
+	case len(st.KeyPath) > 0:
+		return fmt.Errorf("%s: keyPath is not declarable on a merge — its key space is inherited from the merged stages", where)
+	case len(st.KeyType) > 0:
+		return fmt.Errorf("%s: keyType is not declarable on a merge — its key space is inherited from the merged stages", where)
+	case st.Normalize != "":
+		return fmt.Errorf("%s: normalize is not declarable on a merge — its key space is inherited from the merged stages", where)
+	case st.Reduce != "":
+		return fmt.Errorf("%s: reduce is not applicable to a merge (its retained set is the per-upstream tuple by construction); fold before or after it", where)
+	case st.ForEach != "" || st.ElementKey != "":
+		return fmt.Errorf("%s: forEach is not applicable to a merge; fan in a prior stage", where)
+	case len(st.DeleteWhen) > 0:
+		return fmt.Errorf("%s: deleteWhen is only for reduce = %q", where, "liveSet")
+	case st.OrderBy != "" || st.TieBy != "":
+		return fmt.Errorf("%s: orderBy/tieBy are only for reduce = %q", where, "latest")
+	case len(st.Joins) > 0:
+		return fmt.Errorf("%s: joins are not applicable to a merge stage; join in a prior stage, or merge the join's producer (same-key correlation belongs to merge, foreign-key reference to joins)", where)
+	case len(st.Merge) < 2:
+		return fmt.Errorf("%s: merge combines at least two prior stages", where)
+	}
+	seenStage := map[string]bool{}
+	seenAlias := map[string]bool{}
+	for ei, e := range st.Merge {
+		ew := fmt.Sprintf("%s merge entry %d", where, ei+1)
+		if e.Stage == "" {
+			return fmt.Errorf("%s: stage is required", ew)
+		}
+		if !names[e.Stage] {
+			if IndexOf(stages, e.Stage) >= 0 {
+				return fmt.Errorf("%s: %q references a stage at or after this one — stages merge in manifest order (move the producer above its consumer)", ew, e.Stage)
+			}
+			return fmt.Errorf("%s: %q names no declared stage (merge combines STAGES; fold a topic through a stage first)", ew, e.Stage)
+		}
+		if seenStage[e.Stage] {
+			return fmt.Errorf("%s: stage %q merged twice", ew, e.Stage)
+		}
+		seenStage[e.Stage] = true
+		alias := e.As
+		if alias == "" {
+			alias = e.Stage
+		}
+		if !pathSafeIdent(alias) {
+			return fmt.Errorf("%s: alias %q is not addressable by a jsonpath dot segment — add as = %q (letters, digits, underscore)", ew, alias, "<identifier>")
+		}
+		if seenAlias[alias] {
+			return fmt.Errorf("%s: a second merged side aliased %q", ew, alias)
+		}
+		seenAlias[alias] = true
+	}
+	// Unanimous key spaces: merged sides pair by RENDERED BYTES, so a
+	// rendering disagreement (arity, keyType, normalize) would pair
+	// nothing — silently, since an unpaired side is legal full-outer
+	// absence. Loud here instead.
+	baseArity, baseKT, baseNorm := ResolvedKeySpace(stages, IndexOf(stages, st.Merge[0].Stage))
+	for _, e := range st.Merge[1:] {
+		arity, kt, norm := ResolvedKeySpace(stages, IndexOf(stages, e.Stage))
+		if arity != baseArity {
+			return fmt.Errorf("%s: merged stages disagree on key arity (%q keys by %d part(s), %q by %d) — merged sides pair by key, so their key spaces must agree", where, st.Merge[0].Stage, baseArity, e.Stage, arity)
+		}
+		if !equalKeyTypes(baseKT, kt, baseArity) {
+			return fmt.Errorf("%s: merged stages disagree on keyType (%q vs %q) — a rendering disagreement pairs NOTHING, silently; declare matching keyType on both", where, st.Merge[0].Stage, e.Stage)
+		}
+		if norm != baseNorm {
+			return fmt.Errorf("%s: merged stages disagree on normalize (%q declares %q, %q declares %q) — a rendering disagreement pairs NOTHING, silently; declare matching normalize on both", where, st.Merge[0].Stage, baseNorm, e.Stage, norm)
+		}
+	}
+	return nil
+}
+
+// pathSafeIdent reports whether s is addressable as a jsonpath dot
+// segment ([A-Za-z_][A-Za-z0-9_]*).
+func pathSafeIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		switch {
+		case r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z'):
+		case i > 0 && r >= '0' && r <= '9':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// ResolvedKeySpace reports a stage's effective key space — arity,
+// keyType, normalize — resolving THROUGH merges (a merge inherits its
+// entries' unanimous space; recursion is well-founded by manifest
+// order). Every consumer of a stage's keys (stage-fed table arity
+// checks, join inheritance, merge agreement) resolves through here.
+func ResolvedKeySpace(stages []Stage, i int) (arity int, keyType []string, normalize string) {
+	st := &stages[i]
+	if len(st.Merge) > 0 {
+		return ResolvedKeySpace(stages, IndexOf(stages, st.Merge[0].Stage))
+	}
+	return len(st.KeyPath), st.KeyType, st.Normalize
+}
+
+// equalKeyTypes compares two keyType declarations position-by-position
+// (broadcast and default resolve per KeyTypeAt).
+func equalKeyTypes(a, b []string, arity int) bool {
+	for i := 0; i < arity; i++ {
+		if KeyTypeAt(a, i) != KeyTypeAt(b, i) {
+			return false
+		}
+	}
+	return true
 }
 
 // validateKeyTypes checks a keyType/onType declaration: values from the
