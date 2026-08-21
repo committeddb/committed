@@ -49,6 +49,30 @@ type WhenClause struct {
 	LessThan    any `mapstructure:"lessThan"`
 }
 
+// MarshalJSON renders a clause's DECLARED content for the store
+// fingerprint: the path plus exactly the arm that is set. Explicit —
+// not omitempty — because the comparison arms are any-typed and a legal
+// zero-valued literal (equals = false, equals = 0) would vanish under
+// omitempty, colliding fingerprints of semantically different configs.
+func (c WhenClause) MarshalJSON() ([]byte, error) {
+	m := map[string]any{"path": c.Path}
+	switch {
+	case c.Null:
+		m["null"] = true
+	case c.NotNull:
+		m["notNull"] = true
+	case c.NotEquals != nil:
+		m["notEquals"] = c.NotEquals
+	case c.GreaterThan != nil:
+		m["greaterThan"] = c.GreaterThan
+	case c.LessThan != nil:
+		m["lessThan"] = c.LessThan
+	case c.Equals != nil:
+		m["equals"] = c.Equals
+	}
+	return json.Marshal(m)
+}
+
 // IsScalar reports whether a TOML-decoded literal is a scalar (string,
 // number, bool). Tables and arrays are rejected at config time: they
 // would compare structurally against decoded JSON, silently

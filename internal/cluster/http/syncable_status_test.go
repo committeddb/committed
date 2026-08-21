@@ -439,3 +439,27 @@ func TestSyncableStatus_StageKeyProbe(t *testing.T) {
 	status, _ = doSyncableStatusRaw(t, fake, "?probeStage=only", nil)
 	require.Equal(t, 400, status)
 }
+
+// A worker mid-re-derivation must not read as plain "running" with
+// silently climbing lag (the field finding: ~30 minutes of invisible
+// re-derive after a store reset). The answering node reports
+// workerState "re-deriving" with progress, on the DEFAULT call.
+func TestSyncableStatus_Rederiving(t *testing.T) {
+	fake := &clusterfakes.FakeCluster{}
+	fake.SyncableExistsReturns(true, nil)
+	fake.IDReturns(1)
+	fake.SyncableOwnerReturns(1)
+	fake.SyncableProgressReturns(36700000, 36760000, nil)
+	fake.SyncableStageRecoveryReturns(12400000, 36700000, true)
+
+	status, raw := doSyncableStatusRaw(t, fake, "", nil)
+	require.Equal(t, 200, status)
+	require.Contains(t, raw, `"workerState":"re-deriving"`)
+	require.Contains(t, raw, `"stageRecovery":{"folded":12400000,"target":36700000}`)
+
+	// No active re-derivation: plain running, field absent.
+	fake.SyncableStageRecoveryReturns(0, 0, false)
+	_, raw = doSyncableStatusRaw(t, fake, "", nil)
+	require.Contains(t, raw, `"workerState":"running"`)
+	require.NotContains(t, raw, "stageRecovery")
+}

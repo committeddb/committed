@@ -951,6 +951,12 @@ paths:
         degrades softly: every other field still serves and `readPosition`
         is absent. Keep routine polling on the default form.
 
+        While the answering node's worker is re-deriving stage state
+        (after a genuine store reset), `workerState` reads
+        `"re-deriving"` with `stageRecovery {folded, target}` progress —
+        on the default call. Lag climbs by design until the fold-only
+        pass reaches the checkpoint; it is progress, not a stall.
+
         `?stages=true` opts one call into the owner-local per-stage
         introspection rows (`stages`, name → {keys, inputs, fanned}):
         keys is the store's current output count, inputs/fanned are flow

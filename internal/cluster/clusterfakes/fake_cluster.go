@@ -626,6 +626,21 @@ type FakeCluster struct {
 		result2 bool
 		result3 error
 	}
+	SyncableStageRecoveryStub        func(string) (uint64, uint64, bool)
+	syncableStageRecoveryMutex       sync.RWMutex
+	syncableStageRecoveryArgsForCall []struct {
+		arg1 string
+	}
+	syncableStageRecoveryReturns struct {
+		result1 uint64
+		result2 uint64
+		result3 bool
+	}
+	syncableStageRecoveryReturnsOnCall map[int]struct {
+		result1 uint64
+		result2 uint64
+		result3 bool
+	}
 	SyncableStageStatsStub        func(string) (map[string]cluster.StageStat, bool)
 	syncableStageStatsMutex       sync.RWMutex
 	syncableStageStatsArgsForCall []struct {
@@ -3854,6 +3869,73 @@ func (fake *FakeCluster) SyncableStageKeyExistsReturnsOnCall(i int, result1 bool
 		result1 bool
 		result2 bool
 		result3 error
+	}{result1, result2, result3}
+}
+
+func (fake *FakeCluster) SyncableStageRecovery(arg1 string) (uint64, uint64, bool) {
+	fake.syncableStageRecoveryMutex.Lock()
+	ret, specificReturn := fake.syncableStageRecoveryReturnsOnCall[len(fake.syncableStageRecoveryArgsForCall)]
+	fake.syncableStageRecoveryArgsForCall = append(fake.syncableStageRecoveryArgsForCall, struct {
+		arg1 string
+	}{arg1})
+	stub := fake.SyncableStageRecoveryStub
+	fakeReturns := fake.syncableStageRecoveryReturns
+	fake.recordInvocation("SyncableStageRecovery", []interface{}{arg1})
+	fake.syncableStageRecoveryMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2, ret.result3
+	}
+	return fakeReturns.result1, fakeReturns.result2, fakeReturns.result3
+}
+
+func (fake *FakeCluster) SyncableStageRecoveryCallCount() int {
+	fake.syncableStageRecoveryMutex.RLock()
+	defer fake.syncableStageRecoveryMutex.RUnlock()
+	return len(fake.syncableStageRecoveryArgsForCall)
+}
+
+func (fake *FakeCluster) SyncableStageRecoveryCalls(stub func(string) (uint64, uint64, bool)) {
+	fake.syncableStageRecoveryMutex.Lock()
+	defer fake.syncableStageRecoveryMutex.Unlock()
+	fake.SyncableStageRecoveryStub = stub
+}
+
+func (fake *FakeCluster) SyncableStageRecoveryArgsForCall(i int) string {
+	fake.syncableStageRecoveryMutex.RLock()
+	defer fake.syncableStageRecoveryMutex.RUnlock()
+	argsForCall := fake.syncableStageRecoveryArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeCluster) SyncableStageRecoveryReturns(result1 uint64, result2 uint64, result3 bool) {
+	fake.syncableStageRecoveryMutex.Lock()
+	defer fake.syncableStageRecoveryMutex.Unlock()
+	fake.SyncableStageRecoveryStub = nil
+	fake.syncableStageRecoveryReturns = struct {
+		result1 uint64
+		result2 uint64
+		result3 bool
+	}{result1, result2, result3}
+}
+
+func (fake *FakeCluster) SyncableStageRecoveryReturnsOnCall(i int, result1 uint64, result2 uint64, result3 bool) {
+	fake.syncableStageRecoveryMutex.Lock()
+	defer fake.syncableStageRecoveryMutex.Unlock()
+	fake.SyncableStageRecoveryStub = nil
+	if fake.syncableStageRecoveryReturnsOnCall == nil {
+		fake.syncableStageRecoveryReturnsOnCall = make(map[int]struct {
+			result1 uint64
+			result2 uint64
+			result3 bool
+		})
+	}
+	fake.syncableStageRecoveryReturnsOnCall[i] = struct {
+		result1 uint64
+		result2 uint64
+		result3 bool
 	}{result1, result2, result3}
 }
 

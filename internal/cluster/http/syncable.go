@@ -363,6 +363,13 @@ type SyncableStatusResponse struct {
 	// (directly or via the same transparent proxy hop readPosition
 	// uses); absent for stage-free syncables and on soft degrade.
 	Stages map[string]cluster.StageStat `json:"stages,omitempty"`
+	// StageRecovery is present while the ANSWERING node's worker is
+	// re-deriving stage state before consuming (workerState reads
+	// "re-deriving"): Folded is the log index re-derived so far, Target
+	// the checkpoint it must reach. Owner-local; served on the default
+	// call — the field finding was a re-deriving worker invisible as
+	// plain "running" with climbing lag for the full re-derivation.
+	StageRecovery *StageRecoveryStatus `json:"stageRecovery,omitempty"`
 	// StageKeyExists answers a single-key probe
 	// (?probeStage=<stage>&probeKey=<key>): does that stage currently
 	// hold an output at that key (stored form: canonical digits,
@@ -370,6 +377,12 @@ type SyncableStatusResponse struct {
 	// counts say "is it empty?", the probe says "is THIS pair in it?".
 	// Present only when probed and the owner's worker answered.
 	StageKeyExists *bool `json:"stageKeyExists,omitempty"`
+}
+
+// StageRecoveryStatus is a running stage-state re-derivation's progress.
+type StageRecoveryStatus struct {
+	Folded uint64 `json:"folded"`
+	Target uint64 `json:"target"`
 }
 
 // GetSyncableStatus reports a syncable worker's operational status
@@ -501,6 +514,16 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 			resp.Message = ce.Error
 			break
 		}
+	}
+
+	// A running re-derivation overrides "running" on the node doing it
+	// (owner-local, like degraded): the worker is alive but NOT consuming
+	// — new entries apply only after the fold-only pass reaches the
+	// checkpoint, so lag climbs by design and reads as a stall without
+	// this state.
+	if folded, target, ok := h.c.SyncableStageRecovery(id); ok {
+		resp.WorkerState = cluster.WorkerStateRederiving
+		resp.StageRecovery = &StageRecoveryStatus{Folded: folded, Target: target}
 	}
 
 	// Both numbers are sourced behind the same linearize barrier above, so

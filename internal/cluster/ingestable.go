@@ -106,10 +106,11 @@ type IngestableConfigChangeValidator interface {
 // this node's view. The worker that matters runs on the owner node; a
 // ?readPosition=true call proxies there and carries the owner's view.
 const (
-	WorkerStateRunning    = "running"    // healthy (sync: or transiently stuck)
-	WorkerStateRecovering = "recovering" // ingest-only: frozen, the supervisor is restarting it
-	WorkerStateParked     = "parked"     // terminally parked — operator must fix the config
-	WorkerStateDegraded   = "degraded"   // config persisted but its node-local build FAILED — no worker was (re)started; fix the environment/config and re-POST
+	WorkerStateRunning    = "running"     // healthy (sync: or transiently stuck)
+	WorkerStateRecovering = "recovering"  // ingest-only: frozen, the supervisor is restarting it
+	WorkerStateParked     = "parked"      // terminally parked — operator must fix the config
+	WorkerStateRederiving = "re-deriving" // sync only: the worker is re-deriving node-local stage state before consuming (a reset store, an ownership move, or a lost NoSync tail); progress in stageRecovery
+	WorkerStateDegraded   = "degraded"    // config persisted but its node-local build FAILED — no worker was (re)started; fix the environment/config and re-POST
 )
 
 // ParkedWorker identifies a terminally-parked worker for the /node/status summary.

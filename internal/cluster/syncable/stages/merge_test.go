@@ -246,3 +246,38 @@ func TestMergeValidated(t *testing.T) {
 	})
 	require.NoError(t, ValidateShapes(chain), "merge-of-merge inherits through the chain")
 }
+
+// GOLDEN CONTRACT — fingerprint stability across binary upgrades. This
+// pins the fingerprint of a representative stage set that uses NONE of
+// the newer vocabulary. If this test fails, the binary you are building
+// will spuriously RESET the stage store of every unchanged config on
+// upgrade — a silent multi-minute (hours at scale) re-derivation with
+// live-tail latency degraded throughout (field-measured). Vocabulary
+// ADDITIONS must keep this stable (declared-content marshal: omitempty
+// + WhenClause's explicit arms). Only a DELIBERATE semantic change may
+// re-pin it, and that change ships with an upgrade-notes callout.
+func TestFingerprintGoldenContract(t *testing.T) {
+	sts := []Stage{
+		{
+			Name: "live", From: "txns", KeyPath: []string{"$.id"},
+			When: []WhenClause{{Path: "$.status", Equals: "active"}},
+			Emit: []Emit{{Field: "job", From: "$.jobId"}, {Field: "amt", From: "$.amount"}},
+		},
+		{
+			Name: "by-job", From: "live", KeyPath: []string{"$.job"},
+			Reduce: "aggregate",
+			Joins:  []Join{{Topic: "projects", On: []string{"$.job"}, Absent: true}},
+			Emit:   []Emit{{Field: "total", Sum: "$.amt"}, {Field: "n", Count: true}},
+		},
+	}
+	const golden = "4b5151015db670971db43e9e9acbafa46ddacd98e1f74805a99c68930666914c"
+	require.Equal(t, golden, Fingerprint(sts),
+		"fingerprint of an unchanged config drifted — unchanged configs would reset their stores on upgrade (see comment)")
+
+	// And the stability mechanism itself: declaring a NEW vocabulary
+	// field changes the fingerprint; leaving it undeclared does not.
+	withNew := make([]Stage, len(sts))
+	copy(withNew, sts)
+	withNew[1].KeyType = []string{"number"}
+	require.NotEqual(t, golden, Fingerprint(withNew), "declared new vocabulary must change the fingerprint")
+}

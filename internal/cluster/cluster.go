@@ -150,6 +150,10 @@ type Cluster interface {
 	// owning node's worker holds a reader, so the HTTP layer proxies
 	// ?readPosition=true status calls to SyncableOwner's node.
 	SyncableReadPosition(id string) (position uint64, ok bool)
+	// SyncableStageRecovery reports a running stage-state re-derivation on
+	// THIS node's worker (folded index, checkpoint target; ok=false none).
+	// Owner-local, O(1) — served on the default status call.
+	SyncableStageRecovery(id string) (folded, target uint64, ok bool)
 	// SyncableStageStats reports the per-stage introspection rows (keys /
 	// inputs / fanned) of the syncable's worker on THIS node (ok=false: no
 	// worker here, or no stages). Owner-local; see StageIntrospector.

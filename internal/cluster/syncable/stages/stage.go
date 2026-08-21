@@ -53,10 +53,10 @@ func ValidateWhen(clauses []WhenClause, where string) error {
 // chain by name in manifest order; a table source consumes a stage's
 // output via `from = "<stage name>"`.
 type Stage struct {
-	Name    string
-	From    string
-	KeyPath []string
-	When    []WhenClause
+	Name    string       `json:"name,omitempty"`
+	From    string       `json:"from,omitempty"`
+	KeyPath []string     `json:"keyPath,omitempty"`
+	When    []WhenClause `json:"when,omitempty"`
 	// Reduce: "" (reshape: one input object → one output object),
 	// "aggregate" (fold arms over the key's retained inputs), or "latest"
 	// (argmax: the key's output is the emit of the WINNING input by
@@ -67,20 +67,20 @@ type Stage struct {
 	// text). The stage's `when` filters BEFORE the argmax by
 	// construction (an unmatched input retracts from the retained set),
 	// so an unapproved newer input never shadows an approved older one.
-	Reduce      string
-	OrderBy     string
-	OrderByType string
-	TieBy       string
-	TieByType   string
-	Joins       []Join
-	Emit        []Emit
+	Reduce      string `json:"reduce,omitempty"`
+	OrderBy     string `json:"orderBy,omitempty"`
+	OrderByType string `json:"orderByType,omitempty"`
+	TieBy       string `json:"tieBy,omitempty"`
+	TieByType   string `json:"tieByType,omitempty"`
+	Joins       []Join `json:"joins,omitempty"`
+	Emit        []Emit `json:"emit,omitempty"`
 	// ForEach fans each input into N element-inputs (the deliberately
 	// multi-valued path selects them): keyPath and emit/join paths resolve
 	// against the ELEMENT, `$parent.` reaches the enclosing input, and a
 	// re-emitted input reconciles (vanished elements retract; the input's
 	// tombstone retracts them all). Elements feed the stage's reduce like
 	// any input, so forEach + aggregate is fan-then-fold in one stage.
-	ForEach string
+	ForEach string `json:"forEach,omitempty"`
 	// DeleteWhen (reduce = "liveSet" only) classifies delete-shaped
 	// events: a key is LIVE while it has qualifying inputs and ZERO
 	// inputs matching DeleteWhen — created-minus-deleted as a set
@@ -88,7 +88,7 @@ type Stage struct {
 	// as NEGATIVE evidence (it skips the when filter), so its own
 	// retraction un-deletes the key. The live key emits from its
 	// bytewise-largest non-delete input, like a reshape.
-	DeleteWhen []WhenClause
+	DeleteWhen []WhenClause `json:"deleteWhen,omitempty"`
 	// ElementKey is a fanned element's IDENTITY (element-scoped path) when
 	// it differs from keyPath — the aggregate sidecar's ElementKey
 	// precedent. keyPath is the REDUCE key (which output an element folds
@@ -96,14 +96,14 @@ type Stage struct {
 	// replaces). Defaults to keyPath: fine for 1:1 fan (element id = row
 	// id), required when a reduce folds multiple same-key elements (two
 	// same-workarea amounts must both count).
-	ElementKey string
+	ElementKey string `json:"elementKey,omitempty"`
 	// Normalize folds this stage's keyPath rendering into a canonical
 	// form ("lower" — the cross-source GUID-case seam; see
 	// NormalizeLower). Keys only, never emitted values. A consumer
 	// addressing this stage (a stage-fed source, a stage join) sees the
 	// normalized keys; declare the same normalize on any sibling source
 	// sharing the key space.
-	Normalize string `mapstructure:"normalize"`
+	Normalize string `mapstructure:"normalize" json:"normalize,omitempty"`
 	// Merge combines PRIOR stages BY KEY (SQL's FULL OUTER JOIN
 	// USING(key), aliased): for each key any listed upstream holds, the
 	// fold unit is a tuple scoping each upstream's current output under
@@ -115,7 +115,7 @@ type Stage struct {
 	// merge sits entirely downstream of key rendering and adopts
 	// upstream keys byte-verbatim. Same-key correlation belongs here;
 	// foreign-key reference belongs to joins.
-	Merge []MergeEntry `mapstructure:"merge"`
+	Merge []MergeEntry `mapstructure:"merge" json:"merge,omitempty"`
 	// KeyType declares each key part's comparison space, SQL's
 	// declared-column-type model in this vocabulary: "text" (the
 	// default — strings verbatim, typed numbers in canonical digits;
@@ -127,7 +127,7 @@ type Stage struct {
 	// string under "number") is non-membership, like a missing key
 	// part. One entry per keyPath position; a single value broadcasts.
 	// Joins addressing this stage inherit these types (like Normalize).
-	KeyType []string `mapstructure:"keyType"`
+	KeyType []string `mapstructure:"keyType" json:"keyType,omitempty"`
 }
 
 // MergeEntry names one merged upstream and its alias in the tuple
@@ -135,8 +135,8 @@ type Stage struct {
 // effective alias to be a path-safe identifier (add `as` for names
 // jsonpath's dot syntax cannot address, e.g. dashed stage names).
 type MergeEntry struct {
-	Stage string `mapstructure:"stage"`
-	As    string `mapstructure:"as"`
+	Stage string `mapstructure:"stage" json:"stage,omitempty"`
+	As    string `mapstructure:"as" json:"as,omitempty"`
 }
 
 // Join is one filtering join of a stage: the stage's inputs
@@ -147,13 +147,13 @@ type MergeEntry struct {
 // participation and heals when it lands. Joins FILTER (gap 6) — field
 // resolution from joins is a later arm.
 type Join struct {
-	Topic string `mapstructure:"topic"`
+	Topic string `mapstructure:"topic" json:"topic,omitempty"`
 	// From joins against a PRIOR stage instead of a topic (exactly one of
 	// Topic or From): the dimension rows are that stage's outputs, keyed
 	// by its out key and maintained by the drain — so cross-stage
 	// correlation is a join, not a second input. Manifest order applies:
 	// the joined stage must be declared earlier.
-	From string `mapstructure:"from"`
+	From string `mapstructure:"from" json:"from,omitempty"`
 	// On locates the joined row's key in the input: one path for a
 	// single-part key, several for a composite — rendered through the
 	// same positional composite encoding stage keys and composite topic
@@ -163,15 +163,15 @@ type Join struct {
 	// match the joined stage's keyPath; a topic's key shape is the
 	// producer's (decoupled by design), so arity there is the config
 	// author's contract.
-	On []string `mapstructure:"on"`
+	On []string `mapstructure:"on" json:"on,omitempty"`
 	// Absent inverts the join into an ANTI-join: the input participates
 	// only while NO dimension row matches (none exists, or none passes
 	// Where). The fan-out gives the hard half for free: when a matching
 	// row ARRIVES, dependents refold and retract — and when it leaves or
 	// stops matching, they heal back in. A missing On value is vacuously
 	// absent (nothing to reference), so it participates.
-	Absent bool         `mapstructure:"absent"`
-	Where  []WhenClause `mapstructure:"where"`
+	Absent bool         `mapstructure:"absent" json:"absent,omitempty"`
+	Where  []WhenClause `mapstructure:"where" json:"where,omitempty"`
 	// Normalize folds BOTH sides of this join's key comparison — the
 	// input's on rendering AND (for a topic join) the topic's entity-key
 	// rendering as it lands in this join's dimension rows — so a
@@ -182,13 +182,13 @@ type Join struct {
 	// that key space — declaring it separately could only agree or be a
 	// silent mismatch (the field defect: an UPPERCASE reference against
 	// lowered stage keys, an anti-join that suppressed nothing).
-	Normalize string `mapstructure:"normalize"`
+	Normalize string `mapstructure:"normalize" json:"normalize,omitempty"`
 	// OnType declares the reference parts' comparison spaces (see
 	// Stage.KeyType) for a TOPIC join — the topic's entity keys are the
 	// producer's canonical renderings, so only the reference side needs
 	// coercion. A stage join INHERITS the joined stage's KeyType
 	// (BuildGraph resolves it) and rejects a declaration here.
-	OnType []string `mapstructure:"onType"`
+	OnType []string `mapstructure:"onType" json:"onType,omitempty"`
 }
 
 // target returns the join's dimension source name (topic or stage).
@@ -587,9 +587,15 @@ func KeyTypeAt(kts []string, i int) string {
 // Fingerprint identifies the stage definitions a store's state was
 // derived under: any change to them invalidates the store
 // (stagestore.Open resets on mismatch and the syncable re-derives from
-// the log). JSON over the exported stage fields is deterministic for a
-// given binary, and a marshal change across binaries just forces one
-// harmless rebuild.
+// the log). The marshal is DECLARED CONTENT ONLY (omitempty everywhere;
+// WhenClause marshals its set arms explicitly), so adding vocabulary
+// fields in a new binary does NOT alter the fingerprints of configs
+// that don't use them — the field lesson: a spurious reset is not "one
+// harmless rebuild", it is a silent ~30-minute (hours at scale)
+// re-derivation with live-tail latency degraded the whole way. The
+// golden contract test pins this stability; a DELIBERATE semantic
+// change that must reset unchanged configs gets an upgrade-notes
+// callout, never an accident.
 func Fingerprint(stages []Stage) string {
 	bs, err := json.Marshal(stages)
 	if err != nil {

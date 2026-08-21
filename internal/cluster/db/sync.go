@@ -125,7 +125,7 @@ var syncBatchCap = 500
 // checkpoint split: replay (frontier, checkpoint] folding WITHOUT sink
 // emission (everything ≤ checkpoint is already durably applied), then
 // consume normally. Lag, never loss — and loudly visible.
-func (db *DB) recoverStageState(ctx context.Context, id string, rec cluster.StageRecoverer, checkpoint uint64) error {
+func (db *DB) recoverStageState(ctx context.Context, id string, rec cluster.StageRecoverer, checkpoint uint64, handle *workerHandle) error {
 	frontier, has, err := rec.StageFrontier()
 	if err != nil {
 		return err
@@ -133,8 +133,16 @@ func (db *DB) recoverStageState(ctx context.Context, id string, rec cluster.Stag
 	if !has || frontier >= checkpoint {
 		return nil
 	}
-	db.logger.Warn("stage state is behind the checkpoint — re-deriving before consuming (an ownership move or a lost NoSync tail; outputs below the checkpoint are already applied, so this pass folds without emitting)",
+	db.logger.Warn("stage state is behind the checkpoint — re-deriving before consuming (an ownership move, a reset store, or a lost NoSync tail; outputs below the checkpoint are already applied, so this pass folds without emitting)",
 		zap.String("id", id), zap.Uint64("stage_frontier", frontier), zap.Uint64("checkpoint", checkpoint))
+	if handle != nil {
+		handle.stageRecoveryTarget.Store(checkpoint)
+		handle.stageRecoveryFolded.Store(0)
+		defer func() {
+			handle.stageRecoveryTarget.Store(0)
+			handle.stageRecoveryFolded.Store(0)
+		}()
+	}
 	r := db.storage.Reader("") // from index 0; entries ≤ frontier are skipped below
 	folded := 0
 	for {
@@ -161,6 +169,9 @@ func (db *DB) recoverStageState(ctx context.Context, id string, rec cluster.Stag
 			return err
 		}
 		folded++
+		if handle != nil {
+			handle.stageRecoveryFolded.Store(a.Index)
+		}
 	}
 	db.logger.Info("stage state re-derived to the checkpoint", zap.String("id", id),
 		zap.Int("actuals_folded", folded), zap.Uint64("checkpoint", checkpoint))
@@ -571,7 +582,7 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 			db.logger.Info("starting sync", zap.String("id", id),
 				zap.Uint64("checkpoint", cp), zap.Uint64("head", head))
 			if rec, ok := cluster.SyncableAs[cluster.StageRecoverer](s); ok {
-				if err := db.recoverStageState(ctx, id, rec, cp); err != nil {
+				if err := db.recoverStageState(ctx, id, rec, cp, handle); err != nil {
 					if exit := db.stageRecoveryFailed(ctx, id, err); exit {
 						return nil
 					}
@@ -1020,7 +1031,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 			db.logger.Info("starting sync", zap.String("id", id),
 				zap.Uint64("checkpoint", cp), zap.Uint64("head", head))
 			if rec, ok := cluster.SyncableAs[cluster.StageRecoverer](s); ok {
-				if err := db.recoverStageState(ctx, id, rec, cp); err != nil {
+				if err := db.recoverStageState(ctx, id, rec, cp, handle); err != nil {
 					if exit := db.stageRecoveryFailed(ctx, id, err); exit {
 						return nil
 					}
@@ -1331,6 +1342,26 @@ func (db *DB) SyncableOwner(id string) uint64 {
 		return n
 	}
 	return db.Leader()
+}
+
+// SyncableStageRecovery reports a running stage-state re-derivation on
+// THIS node's worker: the log index folded so far and the checkpoint
+// target (ok=false: none active). Owner-local, O(1) atomics — safe on
+// the default status call, which is where the field needed it (a
+// re-deriving worker previously read as plain "running" with silently
+// climbing lag).
+func (db *DB) SyncableStageRecovery(id string) (folded, target uint64, ok bool) {
+	db.workersMu.Lock()
+	handle, found := db.syncWorkers[id]
+	db.workersMu.Unlock()
+	if !found {
+		return 0, 0, false
+	}
+	t := handle.stageRecoveryTarget.Load()
+	if t == 0 {
+		return 0, 0, false
+	}
+	return handle.stageRecoveryFolded.Load(), t, true
 }
 
 // SyncableStageStats reports the per-stage introspection rows of

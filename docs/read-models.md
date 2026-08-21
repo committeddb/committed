@@ -546,6 +546,14 @@ set = [ { column = "total", from = "$.total" },
   types also render `?probeKey` parts, removing the canonical-digits
   probe obligation. Source digit strings are always preserved in
   VALUES; keys are identity.
+- **Upgrades never reset unchanged configs**: the store fingerprint
+  covers DECLARED content only, so new vocabulary in a new binary
+  leaves untouched configs' stores intact (pinned by a golden contract
+  test). When a store genuinely resets (a stage edit, an ownership
+  move), the worker re-derives before consuming and the status endpoint
+  says so: `workerState: "re-deriving"` with `stageRecovery {folded,
+  target}` progress on the default call — lag climbs by design until
+  the fold-only pass reaches the checkpoint.
 - Stage state lives in one bbolt file per syncable under
   `<dataDir>/projections/` — derived, node-local, rebuildable from the
   log. **Editing stage definitions requires a rebuild** (the
