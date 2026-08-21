@@ -86,3 +86,84 @@ func TestSQLServerJSONColumnHint(t *testing.T) {
 	require.JSONEq(t, fmt.Sprintf(`{"pk":3,"eventData":%q}`, "{not json"), string(byKey["3"].Data),
 		"invalid JSON in a hinted column falls back to the string — never an invalid payload")
 }
+
+// typerStub resolves any topic ref to a bare Type (the parser needs one).
+type typerStub struct{}
+
+func (typerStub) ResolveType(ref cluster.TypeRef) (*cluster.Type, error) {
+	return &cluster.Type{ID: ref.ID, Name: ref.ID}, nil
+}
+
+// The pilot's rig-shaped reproduction attempt: hints resolved by the REAL
+// parser (TOML jsonColumns + mapAllColumns — not hand-built mappings) and
+// the CT change consumed by a RESUMED worker (restart from a streaming
+// checkpoint — the pilot's re-registered ingest resumed, it did not run
+// fresh). The field claim: stream-captured events store the hinted column
+// as a STRING permanently. If this test is green, the asymmetry needs an
+// ingredient the rig has and this shape lacks.
+func TestSQLServerJSONColumnHintParserResume(t *testing.T) {
+	db := createDB(t)
+	defer db.Close()
+	_, err := db.Exec(`DROP TABLE IF EXISTS dbo.json_hint_parser`)
+	require.NoError(t, err)
+	_, err = db.Exec(`CREATE TABLE dbo.json_hint_parser (pk INT NOT NULL PRIMARY KEY, EventData NVARCHAR(MAX))`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO dbo.json_hint_parser (pk, EventData) VALUES (1, '{"z":1,"elements":[{"Id":"e1","amount":2.50}]}')`)
+	require.NoError(t, err)
+
+	toml := fmt.Sprintf(`
+[ingestable]
+name = "json-hint-parser"
+type = "sql"
+
+[sql]
+dialect          = "sqlserver"
+connectionString = %q
+topic            = "json-hint-parser"
+tables           = ["json_hint_parser"]
+primaryKey       = "pk"
+mapAllColumns    = true
+jsonColumns      = ["EventData"]
+poll_interval    = "300ms"
+`, ingestURL)
+	v, err := cluster.ParseConfigBytes("toml", []byte(toml))
+	require.NoError(t, err)
+	p := sql.NewIngestableParser(typerStub{})
+	p.Dialects["sqlserver"] = &sqlserver.SQLServerDialect{}
+	ing, err := p.Parse(v)
+	require.NoError(t, err, "the parser path must admit (hints resolve onto map-all mappings)")
+
+	// Run 1 (fresh): snapshot decodes the hinted column.
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	pr1 := make(chan *cluster.Proposal, 64)
+	po1 := make(chan cluster.Position, 64)
+	go func() { _ = ing.Ingest(ctx1, nil, pr1, po1) }()
+	run1, checkpoint := drainUntilPosition(t, pr1, po1, 1, 2*time.Minute)
+	require.Len(t, run1, 1)
+	cancel1()
+	var snapPayload map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(run1[0].Data, &snapPayload))
+	require.True(t, len(snapPayload["EventData"]) > 0 && snapPayload["EventData"][0] == '{',
+		"snapshot: hinted column decodes to an object; got %s", snapPayload["EventData"])
+
+	// Downtime change, then RESUME from the streaming checkpoint — the CT
+	// path of a restarted worker, the rig's actual shape.
+	_, err = db.Exec(`INSERT INTO dbo.json_hint_parser (pk, EventData) VALUES (2, '{"z":1,"elements":[{"Id":"e1","amount":2.50}]}')`)
+	require.NoError(t, err)
+
+	ing2, err := p.Parse(v)
+	require.NoError(t, err)
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	pr2 := make(chan *cluster.Proposal, 64)
+	po2 := make(chan cluster.Position, 64)
+	go func() { _ = ing2.Ingest(ctx2, checkpoint, pr2, po2) }()
+	live := drainEntities(t, pr2, po2, 1, 2*time.Minute)
+
+	var ctPayload map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(live[0].Data, &ctPayload))
+	require.True(t, len(ctPayload["EventData"]) > 0 && ctPayload["EventData"][0] == '{',
+		"CT-streamed on a RESUMED worker: hinted column must decode to an object, not a string; got %s", ctPayload["EventData"])
+	require.Equal(t, string(snapPayload["EventData"]), string(ctPayload["EventData"]),
+		"snapshot and resumed-CT renderings must be byte-identical")
+}
