@@ -222,6 +222,18 @@ func (p *IngestableParser) parseFlatConfig(v *cluster.ParsedConfig, dialect Dial
 // GetStringSlice. Field names match case-insensitively (mapstructure), the same
 // tolerance the flat form has; the nested [[sql.topics.mappings]] decodes into
 // []Mapping via its mapstructure tags exactly like the flat sql.mappings.
+// flatPerTopicFields is the mutual-exclusivity guard's list: every
+// per-topic field the flat form reads at [sql] level, each of which the
+// [[sql.topics]] form must REJECT there rather than silently ignore.
+// CONTRACT (pinned by TestFlatPerTopicGuardCoversEveryField): this list
+// and topicSpecTOML's mapstructure tags are the same set — the
+// jsonColumns saga was a field added to the struct but not this list,
+// and a config in the mixed spelling silently hinted nothing for weeks.
+var flatPerTopicFields = []string{
+	"sql.topic", "sql.tables", "sql.primaryKey", "sql.mappings",
+	"sql.mapAllColumns", "sql.excludeColumns", "sql.jsonColumns",
+}
+
 type topicSpecTOML struct {
 	Topic          string    `mapstructure:"topic"`
 	Tables         []string  `mapstructure:"tables"`
@@ -243,7 +255,7 @@ func (p *IngestableParser) parseTopicsConfig(v *cluster.ParsedConfig, dialect Di
 	// flat-level one is ambiguous (which shape wins?), so reject it loudly rather
 	// than silently ignore it. dialect / connectionString / sql.<dialect> options
 	// stay top-level (shared) and are not per-topic.
-	for _, f := range []string{"sql.topic", "sql.tables", "sql.primaryKey", "sql.mappings", "sql.mapAllColumns", "sql.excludeColumns", "sql.jsonColumns"} {
+	for _, f := range flatPerTopicFields {
 		if v.IsSet(f) {
 			return nil, nil, &cluster.FieldError{
 				Field: f,
