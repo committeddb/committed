@@ -217,6 +217,8 @@ type rawStageJoin struct {
 	Where     []WhenClause `mapstructure:"where"`
 	Normalize string       `mapstructure:"normalize"`
 	OnType    any          `mapstructure:"onType"`
+	As        string       `mapstructure:"as"`
+	Optional  bool         `mapstructure:"optional"`
 }
 
 // parseProjectionStages decodes the [[{section}.stage]] blocks.
@@ -522,7 +524,7 @@ func stageJoins(raw []rawStageJoin) []StageJoin {
 	}
 	out := make([]StageJoin, len(raw))
 	for i, rj := range raw {
-		out[i] = StageJoin{Topic: rj.Topic, From: rj.From, On: pathOrList(rj.On), Absent: rj.Absent, Where: rj.Where, Normalize: strings.ToLower(rj.Normalize), OnType: lowerList(pathOrList(rj.OnType))}
+		out[i] = StageJoin{Topic: rj.Topic, From: rj.From, On: pathOrList(rj.On), Absent: rj.Absent, Where: rj.Where, Normalize: strings.ToLower(rj.Normalize), OnType: lowerList(pathOrList(rj.OnType)), As: rj.As, Optional: rj.Optional}
 	}
 	return out
 }
@@ -614,6 +616,12 @@ func normalizeWhen(raw any, storage cluster.DatabaseStorage, topic string) ([]Wh
 						return nil, fmt.Errorf("when path must be a string; got %T", val)
 					}
 					clause.Path = s
+				case strings.EqualFold(k, "expr"):
+					s, ok := val.(string)
+					if !ok {
+						return nil, fmt.Errorf("when expr must be a string (the expression language); got %T", val)
+					}
+					clause.Expr = s
 				case strings.EqualFold(k, "equals"):
 					clause.Equals = val
 				case strings.EqualFold(k, "notEquals"):
@@ -644,7 +652,7 @@ func normalizeWhen(raw any, storage cluster.DatabaseStorage, topic string) ([]Wh
 					}
 					clause.Null = true
 				default:
-					return nil, fmt.Errorf("when entry has unknown key %q (expected path and one of equals, null, notEquals, greaterThan, or lessThan)", k)
+					return nil, fmt.Errorf("when entry has unknown key %q (expected path and one of equals, null, notNull, notEquals, greaterThan, or lessThan — or a standalone expr)", k)
 				}
 			}
 			clauses = append(clauses, clause)

@@ -17,7 +17,12 @@ import (
 // exact rational division; rounding happens ONLY at an explicit round
 // (half away from zero) or trunc (toward zero); a missing payload field is
 // null and null propagates through arithmetic and comparison, with coalesce
-// and nullif the only null-aware functions. Because only division can
+// and nullif the only null-aware functions. The boolean connectives are the
+// deliberate EXCEPTION to blanket propagation: or/and/not follow SQL's
+// three-valued logic (null is UNKNOWN, so null or true = true and null and
+// false = false), `x in (...)` is its expansion into equalities, and
+// `x is [not] null` is the one predicate that never returns null. Keywords
+// match case-insensitively, like the function names. Because only division can
 // produce a value with no finite decimal representation, every `/` must be
 // dominated by a round/trunc (or comparison — booleans never materialize a
 // decimal) ancestor in its tree, checked at admission: a bare quotient that
@@ -25,7 +30,13 @@ import (
 //
 // Grammar (recursive descent, no precedence surprises):
 //
-//	expr       := additive (compareOp additive)?
+//	expr       := orExpr
+//	orExpr     := andExpr ('or' andExpr)*
+//	andExpr    := notExpr ('and' notExpr)*
+//	notExpr    := 'not' notExpr | comparison
+//	comparison := additive (compareOp additive
+//	              | 'in' '(' additive (',' additive)* ')'
+//	              | 'is' 'not'? 'null')?
 //	additive   := multiplicative (('+'|'-') multiplicative)*
 //	multiplicative := unary (('*'|'/') unary)*
 //	unary      := '-' unary | primary
@@ -63,12 +74,27 @@ type exprCall struct {
 	args []Node
 }
 
-func (exprNum) node()  {}
-func (exprStr) node()  {}
-func (exprPath) node() {}
-func (exprNeg) node()  {}
-func (exprBin) node()  {}
-func (exprCall) node() {}
+type exprNot struct{ operand Node }
+
+type exprIn struct {
+	operand Node
+	list    []Node
+}
+
+type exprIsNull struct {
+	operand Node
+	negate  bool
+}
+
+func (exprNum) node()    {}
+func (exprStr) node()    {}
+func (exprPath) node()   {}
+func (exprNeg) node()    {}
+func (exprBin) node()    {}
+func (exprCall) node()   {}
+func (exprNot) node()    {}
+func (exprIn) node()     {}
+func (exprIsNull) node() {}
 
 // ── lexing ──────────────────────────────────────────────────────────────
 
@@ -205,7 +231,59 @@ var exprFunctions = map[string]struct{ minArgs, maxArgs int }{
 	"trunc":    {1, 2},
 }
 
+// atKeyword reports whether the next token is the given SQL keyword
+// (identifiers double as keywords, matched case-insensitively; a `$`
+// path can never collide since paths are their own token kind).
+func (p *exprParser) atKeyword(kw string) bool {
+	t := p.peek()
+	return t.kind == "ident" && strings.EqualFold(t.text, kw)
+}
+
 func (p *exprParser) parseExpr() (Node, error) {
+	l, err := p.parseAnd()
+	if err != nil {
+		return nil, err
+	}
+	for p.atKeyword("or") {
+		p.next()
+		r, err := p.parseAnd()
+		if err != nil {
+			return nil, err
+		}
+		l = exprBin{"or", l, r}
+	}
+	return l, nil
+}
+
+func (p *exprParser) parseAnd() (Node, error) {
+	l, err := p.parseNot()
+	if err != nil {
+		return nil, err
+	}
+	for p.atKeyword("and") {
+		p.next()
+		r, err := p.parseNot()
+		if err != nil {
+			return nil, err
+		}
+		l = exprBin{"and", l, r}
+	}
+	return l, nil
+}
+
+func (p *exprParser) parseNot() (Node, error) {
+	if p.atKeyword("not") {
+		p.next()
+		operand, err := p.parseNot()
+		if err != nil {
+			return nil, err
+		}
+		return exprNot{operand}, nil
+	}
+	return p.parseComparison()
+}
+
+func (p *exprParser) parseComparison() (Node, error) {
 	l, err := p.parseAdditive()
 	if err != nil {
 		return nil, err
@@ -217,6 +295,43 @@ func (p *exprParser) parseExpr() (Node, error) {
 			return nil, err
 		}
 		return exprBin{t.text, l, r}, nil
+	}
+	if p.atKeyword("in") {
+		p.next()
+		if err := p.expectOp("("); err != nil {
+			return nil, err
+		}
+		var list []Node
+		for {
+			m, err := p.parseAdditive()
+			if err != nil {
+				return nil, err
+			}
+			list = append(list, m)
+			nt := p.next()
+			if nt.kind == "op" && nt.text == "," {
+				continue
+			}
+			if nt.kind == "op" && nt.text == ")" {
+				break
+			}
+			return nil, fmt.Errorf("expected \",\" or \")\" at position %d, got %q", nt.pos, nt.text)
+		}
+		return exprIn{l, list}, nil
+	}
+	if p.atKeyword("is") {
+		p.next()
+		negate := false
+		if p.atKeyword("not") {
+			p.next()
+			negate = true
+		}
+		if !p.atKeyword("null") {
+			t := p.peek()
+			return nil, fmt.Errorf("expected null after is at position %d, got %q", t.pos, t.text)
+		}
+		p.next()
+		return exprIsNull{l, negate}, nil
 	}
 	return l, nil
 }
@@ -388,7 +503,7 @@ func checkMaterializable(n Node, dominated bool) error {
 	case exprBin:
 		childDominated := dominated
 		switch x.op {
-		case "=", "<>", "<", "<=", ">", ">=":
+		case "=", "<>", "<", "<=", ">", ">=", "or", "and":
 			childDominated = true
 		case "/":
 			if !dominated {
@@ -407,6 +522,20 @@ func checkMaterializable(n Node, dominated bool) error {
 			}
 		}
 		return nil
+	case exprNot:
+		return checkMaterializable(x.operand, true)
+	case exprIn:
+		if err := checkMaterializable(x.operand, true); err != nil {
+			return err
+		}
+		for _, m := range x.list {
+			if err := checkMaterializable(m, true); err != nil {
+				return err
+			}
+		}
+		return nil
+	case exprIsNull:
+		return checkMaterializable(x.operand, true)
 	}
 	return fmt.Errorf("unhandled expression node %T", n)
 }
@@ -469,11 +598,43 @@ func Eval(n Node, payload, parent any) (any, error) {
 		return evalBin(x, payload, parent)
 	case exprCall:
 		return evalCall(x, payload, parent)
+	case exprNot:
+		v, err := Eval(x.operand, payload, parent)
+		if err != nil || v == nil {
+			return nil, err // not null = null (three-valued)
+		}
+		b, ok := v.(bool)
+		if !ok {
+			return nil, fmt.Errorf("not needs a boolean operand (a comparison/predicate), got %T", v)
+		}
+		return !b, nil
+	case exprIn:
+		return evalIn(x, payload, parent)
+	case exprIsNull:
+		// A PATH operand tests presence directly, skipping scalar
+		// normalization: `$.cust is not null` legitimately asks about a
+		// looked-up row or a merge side — SQL's row-valued IS NULL — and
+		// an object in a value position stays an error everywhere else.
+		if p, ok := x.operand.(exprPath); ok {
+			v, err := ResolvePath(p.path, payload, parent)
+			if err != nil {
+				v = nil // missing = null, per the language
+			}
+			return (v == nil) != x.negate, nil
+		}
+		v, err := Eval(x.operand, payload, parent)
+		if err != nil {
+			return nil, err
+		}
+		return (v == nil) != x.negate, nil
 	}
 	return nil, fmt.Errorf("unhandled expression node %T", n)
 }
 
 func evalBin(x exprBin, payload, parent any) (any, error) {
+	if x.op == "or" || x.op == "and" {
+		return evalConnective(x, payload, parent)
+	}
 	l, err := Eval(x.l, payload, parent)
 	if err != nil {
 		return nil, err
@@ -579,6 +740,95 @@ func evalCall(x exprCall, payload, parent any) (any, error) {
 		return scaleRat(r, scale, x.fn == "round"), nil
 	}
 	return nil, fmt.Errorf("unhandled function %q", x.fn)
+}
+
+// evalConnective applies SQL's three-valued logic — null is UNKNOWN, so
+// (null or true) is true and (null and false) is false; the blanket
+// null-propagation rule deliberately does NOT apply here. Both sides
+// always evaluate (no short-circuit), so a data error surfaces
+// regardless of the other side's value — error behavior never depends
+// on operand order.
+func evalConnective(x exprBin, payload, parent any) (any, error) {
+	l, err := Eval(x.l, payload, parent)
+	if err != nil {
+		return nil, err
+	}
+	r, err := Eval(x.r, payload, parent)
+	if err != nil {
+		return nil, err
+	}
+	lb, lNull, err := boolOperand(l, x.op)
+	if err != nil {
+		return nil, err
+	}
+	rb, rNull, err := boolOperand(r, x.op)
+	if err != nil {
+		return nil, err
+	}
+	if x.op == "or" {
+		switch {
+		case (!lNull && lb) || (!rNull && rb):
+			return true, nil
+		case lNull || rNull:
+			return nil, nil
+		default:
+			return false, nil
+		}
+	}
+	switch {
+	case (!lNull && !lb) || (!rNull && !rb):
+		return false, nil
+	case lNull || rNull:
+		return nil, nil
+	default:
+		return true, nil
+	}
+}
+
+func boolOperand(v any, op string) (val, isNull bool, err error) {
+	switch t := v.(type) {
+	case nil:
+		return false, true, nil
+	case bool:
+		return t, false, nil
+	default:
+		return false, false, fmt.Errorf("%s needs boolean operands (comparisons/predicates), got %T", op, v)
+	}
+}
+
+// evalIn is x = m1 or x = m2 ... with SQL's semantics folded in: a null
+// operand is null; a match is true; a null MEMBER with no match makes
+// the answer UNKNOWN (null), never false.
+func evalIn(x exprIn, payload, parent any) (any, error) {
+	v, err := Eval(x.operand, payload, parent)
+	if err != nil {
+		return nil, err
+	}
+	if v == nil {
+		return nil, nil
+	}
+	sawNull := false
+	for _, m := range x.list {
+		mv, err := Eval(m, payload, parent)
+		if err != nil {
+			return nil, err
+		}
+		if mv == nil {
+			sawNull = true
+			continue
+		}
+		eq, err := exprEqual(v, mv)
+		if err != nil {
+			return nil, err
+		}
+		if eq {
+			return true, nil
+		}
+	}
+	if sawNull {
+		return nil, nil
+	}
+	return false, nil
 }
 
 // scaleRat materializes r at the given decimal scale: half away from zero

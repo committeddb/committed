@@ -47,6 +47,18 @@ type WhenClause struct {
 	// admission); values compare numerically, non-numbers never match.
 	GreaterThan any `mapstructure:"greaterThan"`
 	LessThan    any `mapstructure:"lessThan"`
+	// Expr is the expression arm: the closed expression language as a
+	// predicate. The clause matches only when the expression evaluates
+	// to TRUE — false, null, a non-boolean result, and data errors all
+	// match nothing (SQL's WHERE). It stands alone (no Path; the
+	// expression addresses its own paths), so compute-then-filter
+	// collapses into one stage — while the two-stage gate idiom stays
+	// legal where introspectable intermediates matter.
+	Expr string `mapstructure:"expr"`
+	// compiled is Expr's admission-checked AST (ValidateWhen populates
+	// it; Match falls back to compiling on the fly for hand-built
+	// clauses that never passed admission, e.g. in tests).
+	compiled Node
 }
 
 // MarshalJSON renders a clause's DECLARED content for the store
@@ -55,6 +67,9 @@ type WhenClause struct {
 // zero-valued literal (equals = false, equals = 0) would vanish under
 // omitempty, colliding fingerprints of semantically different configs.
 func (c WhenClause) MarshalJSON() ([]byte, error) {
+	if c.Expr != "" {
+		return json.Marshal(map[string]any{"expr": c.Expr})
+	}
 	m := map[string]any{"path": c.Path}
 	switch {
 	case c.Null:
@@ -116,6 +131,20 @@ func Match(clauses []WhenClause, jsonData any) bool {
 // matches nothing (admission rejects it where no parent can exist).
 func MatchScoped(clauses []WhenClause, jsonData, parent any) bool {
 	for _, c := range clauses {
+		if c.Expr != "" {
+			n := c.compiled
+			if n == nil {
+				var err error
+				if n, err = Compile(c.Expr); err != nil {
+					return false // admission rejects this; unreachable via a validated config
+				}
+			}
+			v, err := Eval(n, jsonData, parent)
+			if err != nil || v != true {
+				return false
+			}
+			continue
+		}
 		v, err := ResolvePath(c.Path, jsonData, parent)
 		if err != nil {
 			return false
@@ -400,8 +429,54 @@ func RejectParentPaths(clauses []WhenClause, where string) error {
 		if strings.HasPrefix(c.Path, "$parent") {
 			return fmt.Errorf("%s: path [%s] — $parent is only meaningful where a fan provides an enclosing scope (a forEach stage's when/deleteWhen, a forEach source's rule when); here it would silently never match", where, c.Path)
 		}
+		if c.Expr != "" {
+			n := c.compiled
+			if n == nil {
+				var err error
+				if n, err = Compile(c.Expr); err != nil {
+					continue // ValidateWhen reports the compile error
+				}
+			}
+			if exprReferencesParent(n) {
+				return fmt.Errorf("%s: expr [%s] — $parent is only meaningful where a fan provides an enclosing scope (a forEach stage's when/deleteWhen, a forEach source's rule when); here it would silently never match", where, c.Expr)
+			}
+		}
 	}
 	return nil
+}
+
+// exprReferencesParent walks a compiled expression for `$parent.` paths.
+func exprReferencesParent(n Node) bool {
+	switch x := n.(type) {
+	case exprPath:
+		return strings.HasPrefix(x.path, "$parent")
+	case exprNeg:
+		return exprReferencesParent(x.operand)
+	case exprNot:
+		return exprReferencesParent(x.operand)
+	case exprIsNull:
+		return exprReferencesParent(x.operand)
+	case exprBin:
+		return exprReferencesParent(x.l) || exprReferencesParent(x.r)
+	case exprIn:
+		if exprReferencesParent(x.operand) {
+			return true
+		}
+		for _, m := range x.list {
+			if exprReferencesParent(m) {
+				return true
+			}
+		}
+		return false
+	case exprCall:
+		for _, a := range x.args {
+			if exprReferencesParent(a) {
+				return true
+			}
+		}
+		return false
+	}
+	return false
 }
 
 // MultiValuedPath reports whether a jsonpath can yield more than one

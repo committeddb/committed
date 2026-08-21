@@ -251,10 +251,16 @@ set = [
 ]
 ```
 
-The language: `+ - * /`, comparisons (`= <> < <= > >=`), `coalesce`,
-`nullif`, `round(x, scale)` (half away from zero), `trunc(x[, scale])`
-(toward zero), decimal and `'string'` literals, and `$.…` paths into the
-payload. Arithmetic is **exact** — values are arbitrary-precision decimals
+The language: `+ - * /`, comparisons (`= <> < <= > >=`), the boolean
+predicates — `or`/`and`/`not` (SQL keywords, case-insensitive),
+`x in (…)`, `x is [not] null` — plus `coalesce`, `nullif`,
+`round(x, scale)` (half away from zero), `trunc(x[, scale])` (toward
+zero), decimal and `'string'` literals, and `$.…` paths into the
+payload. Connectives follow SQL's three-valued logic — `null or true`
+is TRUE, `null and false` is FALSE — the one deliberate exception to
+blanket null propagation; `is [not] null` never returns null, and it
+accepts a row-valued path (`$.cust is not null` asks whether the
+looked-up row exists). Arithmetic is **exact** — values are arbitrary-precision decimals
 built from the payload's source digits, never floats, and nothing rounds
 except your explicit `round`/`trunc`. Because only division can produce a
 non-terminating value, **every `/` must sit under a `round` or `trunc`**
@@ -452,11 +458,27 @@ set = [ { column = "total", from = "$.total" },
   normalized. Sources sharing a normalized key space (a topic owner
   beside stage-fed decorators) must declare the same normalize.
   Aggregate folds (`sum`/`min`/`max` are closed-language expressions,
-  plus `count`) recompute over exact decimals with SQL semantics (null
-  operands skip; an emptied key retracts entirely, cascading).
+  plus `count` and `collect`) recompute over exact decimals with SQL
+  semantics (null operands skip; an emptied key retracts entirely,
+  cascading). `collect` is `array_agg` with determinism SQL doesn't
+  promise: values fold into an ALWAYS-SORTED array (numbers
+  numerically, then strings, then bools), `distinct = true` dedupes,
+  and the array lands in the sink as JSON. Any fold arm takes a
+  per-emit `where` — SQL's `FILTER (WHERE …)`: `{ field = "reviewed",
+  count = true, where = [ { path = "$.billed", equals = "true" } ] }`
+  folds only matching inputs for THAT field, while row membership stays
+  the key's.
 - **Filtering is refold**: an input that stops matching a stage's `when`
   retracts from its key — predicate rows leave the read model when the
   predicate flips off, and re-enter when it flips back.
+- **`when` takes an `expr` arm**: `when = [ { expr = "coalesce($.n, 0)
+  > 0 and $.pricing in (0, 2)" } ]` — the expression language as a
+  predicate, so compute-then-filter is ONE stage instead of an
+  emit-a-gate-field stage plus a filter stage. Only TRUE matches;
+  false, null, and data errors match nothing (SQL's WHERE). The scalar
+  arms (`equals`, `null`, `notNull`, `notEquals`, `greaterThan`,
+  `lessThan`) remain for the common cases, and the two-stage gate idiom
+  stays legal where you want the intermediate value probeable.
 - **Stages fan out too**: `forEach` on a stage fans each input's array
   elements into element-inputs — `keyPath` is the reduce key,
   `elementKey` the element's identity (required with a reduce, so two
@@ -477,6 +499,20 @@ set = [ { column = "total", from = "$.total" },
   `keyPath`). Dimension changes refold dependents (reverse-index
   fan-out); a late dimension heals; a flipped predicate or a dimension
   delete retracts dependents.
+- **A join that NAMES its row can READ it** (`as`): `{ topic =
+  "projects", on = "$.projectId", as = "project", where = [ … ] }`
+  scopes the matched row under the alias for the stage's emits, fold
+  arms, and per-emit `where` — `$.project.tenantId` — so filter-and-pull
+  is one join on one stage (SQL: the joined table's columns), not
+  lift-and-rekey scaffolding. Lookups are refold-time state, never
+  retained copies: when the referenced row changes, dependents refold
+  and pulled values track it. `optional = true` (requires `as`) is the
+  LEFT JOIN — a missing row, or one failing `where`, scopes the alias
+  as null instead of gating membership (`$.cust is not null` makes the
+  flag column). The stage's `when` and `keyPath` see only the input;
+  filter on the joined row with the join's `where`. Decision rule
+  refined: SAME-KEY correlation of stages → `merge`; REFERENCE lookup
+  (foreign key, or a key part) → a named join.
 - **`reduce = "liveSet"` is created-minus-deleted**: a key is live while
   it has qualifying inputs and ZERO inputs matching `deleteWhen` — a set
   difference, no ordering involved, so a delete-shaped event retracts
@@ -522,7 +558,11 @@ set = [ { column = "total", from = "$.total" },
   nothing (`"ignore"`).
 - **Introspection**: `GET /syncable/{id}/status?stages=true` reports
   each stage's row — `keys` (the store's current output count) plus
-  `inputs`/`fanned` flow counters since the worker started. The three
+  `inputs`/`fanned` flow counters since the worker started, and
+  `unkeyedDeletes` (delete-shaped inputs whose key would not resolve or
+  render — LOST retractions: nonzero here answers "the delete event
+  arrived but the key is still live" in one read; each also warns once
+  in the log). The three
   numbers split every silent-empty state: `inputs` 0 = that topic's log
   region not reached (mid-replay zeros are healthy); `inputs` > 0 with
   `fanned` 0 = the forEach fan finds no array; flow > 0 with `keys` 0 =

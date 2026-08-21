@@ -13,10 +13,27 @@ const (
 	KeyTypeNumber = "number"
 )
 
-// ValidateWhen checks when-clause shapes: exactly one of equals or null
-// per clause, scalar literals only, no empty paths.
+// ValidateWhen checks when-clause shapes: exactly one arm per clause
+// (a scalar arm against a path, or a standalone expr), scalar literals
+// only, no empty paths — and it compiles expr arms in place so matching
+// never re-parses.
 func ValidateWhen(clauses []WhenClause, where string) error {
-	for _, cl := range clauses {
+	for k := range clauses {
+		cl := &clauses[k]
+		if cl.Expr != "" {
+			if cl.Path != "" {
+				return fmt.Errorf("%s: when entry: expr stands alone — the expression addresses its own paths; drop path", where)
+			}
+			if cl.Equals != nil || cl.Null || cl.NotNull || cl.NotEquals != nil || cl.GreaterThan != nil || cl.LessThan != nil {
+				return fmt.Errorf("%s: when entry: exactly one arm — expr excludes the scalar arms (put the comparison inside the expression)", where)
+			}
+			compiled, err := Compile(cl.Expr)
+			if err != nil {
+				return fmt.Errorf("%s: when expr: %w", where, err)
+			}
+			cl.compiled = compiled
+			continue
+		}
 		if cl.Path == "" {
 			return fmt.Errorf("%s: when entry with empty path", where)
 		}
@@ -27,7 +44,7 @@ func ValidateWhen(clauses []WhenClause, where string) error {
 			}
 		}
 		if arms != 1 {
-			return fmt.Errorf("%s: when entry for %q: exactly one of equals, null, notNull, notEquals, greaterThan, or lessThan is required", where, cl.Path)
+			return fmt.Errorf("%s: when entry for %q: exactly one of equals, null, notNull, notEquals, greaterThan, lessThan, or expr is required", where, cl.Path)
 		}
 		for arm, lit := range map[string]any{"equals": cl.Equals, "notEquals": cl.NotEquals} {
 			if lit != nil && !IsScalar(lit) {
@@ -172,6 +189,21 @@ type Join struct {
 	// absent (nothing to reference), so it participates.
 	Absent bool         `mapstructure:"absent" json:"absent,omitempty"`
 	Where  []WhenClause `mapstructure:"where" json:"where,omitempty"`
+	// As names the matched dimension row in the stage's REFOLD scope —
+	// the reference-lookup half of joins (SQL: a joined table's columns;
+	// a join that names its row can read it). Emit from/expr, aggregate
+	// fold arms, and per-emit where address it as $.<as>.<field>; the
+	// stage's when and keyPath see only the input (filter on the joined
+	// row with the join's where). Lookups are refold-time state, never
+	// retained copies: a dimension change refolds dependents, so pulled
+	// values track their source. An alias shadows a same-named input
+	// field (jsonpath has no ambiguity errors; the alias wins).
+	As string `mapstructure:"as" json:"as,omitempty"`
+	// Optional makes a NAMED join SQL's LEFT JOIN: a missing dimension
+	// row (or one failing the join's where) scopes the alias as null
+	// instead of gating membership. Requires As — an unnamed join only
+	// filters, and an optional filter is no filter.
+	Optional bool `mapstructure:"optional" json:"optional,omitempty"`
 	// Normalize folds BOTH sides of this join's key comparison — the
 	// input's on rendering AND (for a topic join) the topic's entity-key
 	// rendering as it lands in this join's dimension rows — so a
@@ -203,8 +235,8 @@ func (j *Join) target() string {
 // fields carry exactly one of From (a jsonpath into the input) or Expr
 // (the closed expression language); an aggregate stage's fields carry
 // exactly one fold arm — Sum/Min/Max (an expression folded over the key's
-// retained inputs) or Count (rows). Array-of-tables so field names
-// survive byte-exact.
+// retained inputs), Count (rows), or Collect (the values as a sorted
+// array). Array-of-tables so field names survive byte-exact.
 type Emit struct {
 	Field string `mapstructure:"field"`
 	From  string `mapstructure:"from"`
@@ -213,9 +245,24 @@ type Emit struct {
 	Min   string `mapstructure:"min"`
 	Max   string `mapstructure:"max"`
 	Count bool   `mapstructure:"count"`
+	// Collect folds an expression's values into an ARRAY — SQL's
+	// array_agg, with the determinism SQL doesn't promise: values
+	// always sort (numbers numerically, then strings lexically, then
+	// bools), so equal folds are byte-equal. Nulls skip like every
+	// fold arm; a member key whose values all skip emits an empty
+	// array (membership belongs to the key, not the field).
+	Collect string `mapstructure:"collect" json:"collect,omitempty"`
+	// Distinct dedupes Collect's values (array_agg(DISTINCT ...)).
+	Distinct bool `mapstructure:"distinct" json:"distinct,omitempty"`
+	// Where filters THIS fold arm's inputs — SQL's FILTER (WHERE ...):
+	// the emit folds only inputs matching its clauses, while key
+	// membership stays the stage's (a filtered-to-empty field renders
+	// zero/empty, the row remains). Fold arms only; a reshape emit's
+	// condition is the stage's when.
+	Where []WhenClause `mapstructure:"where" json:"where,omitempty"`
 
 	// compiled holds the admission-checked AST of whichever expression arm
-	// is set (Expr/Sum/Min/Max), populated by validateProjectionConfig.
+	// is set (Expr/Sum/Min/Max/Collect), populated by validateProjectionConfig.
 	compiled Node
 }
 
@@ -332,6 +379,7 @@ func ValidateShapes(stages []Stage) error {
 		if err := validateKeyTypes(st.KeyType, len(st.KeyPath), where+" keyType"); err != nil {
 			return err
 		}
+		joinAliases := make(map[string]bool, len(st.Joins))
 		for ji, j := range st.Joins {
 			jw := fmt.Sprintf("%s join %d (%q)", where, ji+1, j.target())
 			if !ValidNormalize(j.Normalize) {
@@ -376,6 +424,24 @@ func ValidateShapes(stages []Stage) error {
 			if err := RejectParentPaths(j.Where, jw+" where"); err != nil {
 				return err
 			}
+			if j.As != "" {
+				if j.Absent {
+					return fmt.Errorf("%s: as names the joined row — an absent (anti-)join has no row to name", jw)
+				}
+				if !pathSafeIdent(j.As) {
+					return fmt.Errorf("%s: as %q is not addressable by a jsonpath dot segment (letters, digits, underscore)", jw, j.As)
+				}
+				if j.As == "parent" {
+					return fmt.Errorf("%s: as \"parent\" confusingly shadows the $parent scope — pick another alias", jw)
+				}
+				if joinAliases[j.As] {
+					return fmt.Errorf("%s: a second join aliased %q — aliases are unique per stage", jw, j.As)
+				}
+				joinAliases[j.As] = true
+			}
+			if j.Optional && j.As == "" {
+				return fmt.Errorf("%s: optional is only meaningful with as — an unnamed join only filters, and an optional filter is no filter", jw)
+			}
 			if j.From != "" && len(j.OnType) > 0 {
 				return fmt.Errorf("%s: onType is not declarable on a stage join — references render in the joined stage's key space, so the join inherits stage %q's keyType automatically; declare it on that stage", jw, j.From)
 			}
@@ -398,7 +464,7 @@ func ValidateShapes(stages []Stage) error {
 			}
 			emitted[e.Field] = true
 			folds := 0
-			for _, set := range []bool{e.Sum != "", e.Min != "", e.Max != "", e.Count} {
+			for _, set := range []bool{e.Sum != "", e.Min != "", e.Max != "", e.Count, e.Collect != ""} {
 				if set {
 					folds++
 				}
@@ -411,11 +477,27 @@ func ValidateShapes(stages []Stage) error {
 			}
 			if st.Reduce == "aggregate" { //nolint:gocritic // if-else reads clearer than switch here
 				if folds != 1 || plain != 0 {
-					return fmt.Errorf("%s: an aggregate stage's emit carries exactly one of sum, min, max, or count", ew)
+					return fmt.Errorf("%s: an aggregate stage's emit carries exactly one of sum, min, max, count, or collect", ew)
 				}
 			} else {
 				if plain != 1 || folds != 0 {
 					return fmt.Errorf("%s: a reshape stage's emit carries exactly one of from or expr", ew)
+				}
+			}
+			if e.Distinct && e.Collect == "" {
+				return fmt.Errorf("%s: distinct applies to collect (the other fold arms are already per-value)", ew)
+			}
+			if len(e.Where) > 0 {
+				if st.Reduce != "aggregate" {
+					return fmt.Errorf("%s: where filters a fold arm's inputs (SQL's FILTER) — on a reshape emit, the condition is the stage's when", ew)
+				}
+				if err := ValidateWhen(e.Where, ew+" where"); err != nil {
+					return err
+				}
+				if st.ForEach == "" {
+					if err := RejectParentPaths(e.Where, ew+" where"); err != nil {
+						return err
+					}
 				}
 			}
 			if e.From != "" {
@@ -423,7 +505,7 @@ func ValidateShapes(stages []Stage) error {
 					return err
 				}
 			}
-			for _, src := range []string{e.Expr, e.Sum, e.Min, e.Max} {
+			for _, src := range []string{e.Expr, e.Sum, e.Min, e.Max, e.Collect} {
 				if src == "" {
 					continue
 				}

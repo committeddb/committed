@@ -62,7 +62,7 @@ func TestStageShapeRules(t *testing.T) {
 		"aggregate emit with from": {func(st []Stage) []Stage {
 			st[1].Emit[0] = Emit{Field: "total", From: "$.amt"}
 			return st
-		}, "exactly one of sum, min, max, or count"},
+		}, "exactly one of sum, min, max, count, or collect"},
 		"reshape emit with sum": {func(st []Stage) []Stage {
 			st[0].Emit[0] = Emit{Field: "job", Sum: "$.x"}
 			return st

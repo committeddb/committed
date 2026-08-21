@@ -69,7 +69,7 @@ func TestValidateWhenComparisons(t *testing.T) {
 
 	err := ValidateWhen([]WhenClause{{Path: "$.a", Equals: "x", NotEquals: "y"}}, "w")
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "exactly one of equals, null, notNull, notEquals, greaterThan, or lessThan")
+	require.Contains(t, err.Error(), "exactly one of equals, null, notNull, notEquals, greaterThan, lessThan, or expr")
 
 	err = ValidateWhen([]WhenClause{{Path: "$.a", GreaterThan: "high"}}, "w")
 	require.Error(t, err)

@@ -784,7 +784,7 @@ func refoldOutput(tx *stagestore.Tx, st *Stage, outKey []byte) (out []byte, live
 	if scanErr != nil || winner == nil {
 		return nil, false, scanErr
 	}
-	return emitReshape(st, winner.data, winner.parent)
+	return emitReshape(tx, st, winner.data, winner.parent)
 }
 
 // joinOnKey renders an input's reference to a join's dimension row: every
@@ -814,9 +814,69 @@ func joinOnKey(j *Join, obj, parent any) []byte {
 // input's on value — exists and matches the join's where. A dimension
 // that has not arrived yet fails participation and heals when it lands
 // (the fan-out refolds dependents).
+// joinLookupScope overlays the input object with each NAMED join's
+// current dimension row under its alias — the reference-lookup half of
+// joins. The scope exists at REFOLD (emits, fold arms, per-emit where):
+// dimension changes mark dependents dirty, so a pulled value re-resolves
+// exactly when it can change and is never a stale retained copy. A row
+// absent, or failing the join's where, scopes as nil — the LEFT JOIN's
+// null side (reachable only through optional joins; a required join
+// already gated membership). A non-object input passes through: it has
+// no reference fields to look up with.
+func joinLookupScope(tx *stagestore.Tx, st *Stage, obj, parent any) (any, error) {
+	named := false
+	for i := range st.Joins {
+		if st.Joins[i].As != "" {
+			named = true
+			break
+		}
+	}
+	if !named {
+		return obj, nil
+	}
+	m, ok := obj.(map[string]any)
+	if !ok {
+		return obj, nil
+	}
+	scope := make(map[string]any, len(m)+2)
+	for k, v := range m {
+		scope[k] = v
+	}
+	for i := range st.Joins {
+		j := &st.Joins[i]
+		if j.As == "" {
+			continue
+		}
+		scope[j.As] = nil
+		onKey := joinOnKey(j, obj, parent)
+		if onKey == nil {
+			continue
+		}
+		stored, err := tx.GetDim(st.Name, j.target(), onKey)
+		if err != nil {
+			return nil, err
+		}
+		if stored == nil {
+			continue
+		}
+		_, payload := decodeRetained(stored)
+		dimObj, err := DecodeObject(payload)
+		if err != nil {
+			return nil, err
+		}
+		if Match(j.Where, dimObj) {
+			scope[j.As] = dimObj
+		}
+	}
+	return scope, nil
+}
+
 func inputQualifies(tx *stagestore.Tx, st *Stage, obj, parent any) (bool, error) {
 	for i := range st.Joins {
 		j := &st.Joins[i]
+		if j.Optional {
+			continue // a LEFT lookup never gates membership; absence scopes as null
+		}
 		// present: a dimension row exists at the input's On value AND
 		// matches the join's Where. A normal join requires it; an Absent
 		// (anti-)join forbids it — one rule: fail when present == Absent.
@@ -879,14 +939,18 @@ func refoldMerge(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byte, bool, err
 	if !Match(st.When, scope) {
 		return nil, false, nil
 	}
-	return emitReshape(st, scope, nil)
+	return emitReshape(tx, st, scope, nil)
 }
 
 // emitReshape renders a stage's emit fields from one input object — the
-// reshape path, and the winner path of reduce = "latest".
-func emitReshape(st *Stage, obj, parent any) ([]byte, bool, error) {
+// reshape path, and the winner path of reduce = "latest" — over the
+// join-lookup scope (named joins' rows under their aliases).
+func emitReshape(tx *stagestore.Tx, st *Stage, obj, parent any) ([]byte, bool, error) {
+	obj, err := joinLookupScope(tx, st, obj, parent)
+	if err != nil {
+		return nil, false, err
+	}
 	emitted := make(map[string]any, len(st.Emit))
-	var err error
 	for i := range st.Emit {
 		e := &st.Emit[i]
 		var v any
@@ -940,7 +1004,7 @@ func refoldLiveSet(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byte, bool, e
 	if err != nil || dead || winner == nil {
 		return nil, false, err
 	}
-	return emitReshape(st, winner.data, winner.parent)
+	return emitReshape(tx, st, winner.data, winner.parent)
 }
 
 // refoldLatest recomputes an argmax key: the winner is the retained input
@@ -984,7 +1048,7 @@ func refoldLatest(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byte, bool, er
 	if err != nil || winner == nil {
 		return nil, false, err
 	}
-	return emitReshape(st, winner.obj, winner.parent)
+	return emitReshape(tx, st, winner.obj, winner.parent)
 }
 
 // compareStageValues orders two payload values for argmax: nulls sort
@@ -1058,6 +1122,8 @@ func refoldAggregate(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byte, bool,
 	sums := make([]*big.Rat, len(st.Emit))
 	mins := make([]*big.Rat, len(st.Emit))
 	maxs := make([]*big.Rat, len(st.Emit))
+	counts := make([]int, len(st.Emit))
+	collects := make([][]any, len(st.Emit))
 	count := 0
 
 	err := tx.InputsFor(st.Name, outKey, func(_, val []byte) error {
@@ -1070,14 +1136,33 @@ func refoldAggregate(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byte, bool,
 			return err
 		}
 		count++
+		// Fold arms and per-emit wheres see the join-lookup scope: an
+		// aggregate can sum a looked-up row's field (SQL: aggregating a
+		// joined column).
+		obj, err = joinLookupScope(tx, st, obj, parent)
+		if err != nil {
+			return err
+		}
 		for i := range st.Emit {
 			e := &st.Emit[i]
+			// Per-emit where (SQL's FILTER): this input skips THIS
+			// field's fold only — membership already counted above.
+			if len(e.Where) > 0 && !MatchScoped(e.Where, obj, parent) {
+				continue
+			}
 			if e.Count {
+				counts[i]++
 				continue
 			}
 			v, err := Eval(e.compiled, obj, parent)
 			if err != nil {
 				return fmt.Errorf("stage %q emit %q: %w", st.Name, e.Field, err)
+			}
+			if e.Collect != "" {
+				if v != nil {
+					collects[i] = append(collects[i], v)
+				}
+				continue
 			}
 			r, ok := v.(*big.Rat)
 			if !ok {
@@ -1114,7 +1199,20 @@ func refoldAggregate(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byte, bool,
 		var v any
 		switch {
 		case e.Count:
-			v = json.Number(fmt.Sprintf("%d", count))
+			v = json.Number(fmt.Sprintf("%d", counts[i]))
+		case e.Collect != "":
+			vals := collects[i]
+			if e.Distinct {
+				vals = distinctCollectValues(vals)
+			}
+			sortCollectValues(vals)
+			arr := make([]any, len(vals))
+			for k, cv := range vals {
+				if arr[k], err = stageValue(cv); err != nil {
+					return nil, false, fmt.Errorf("stage %q emit %q: %w", st.Name, e.Field, err)
+				}
+			}
+			v = arr
 		case e.Sum != "":
 			if sums[i] != nil {
 				v = sums[i]
@@ -1149,6 +1247,66 @@ func stageValue(v any) (any, error) {
 		return json.Number(text), nil
 	}
 	return v, nil
+}
+
+// sortCollectValues orders evaluator scalars deterministically: numbers
+// (numerically) before strings (lexically) before bools (false, true) —
+// a total order, so equal folds are byte-equal. The deliberate
+// divergence from SQL: array_agg without ORDER BY is nondeterministic,
+// and the store's self-healing arguments lean on byte-equal refolds.
+func sortCollectValues(vals []any) {
+	sort.SliceStable(vals, func(a, b int) bool { return collectLess(vals[a], vals[b]) })
+}
+
+func collectLess(a, b any) bool {
+	fa, fb := collectFamily(a), collectFamily(b)
+	if fa != fb {
+		return fa < fb
+	}
+	switch fa {
+	case 0:
+		return a.(*big.Rat).Cmp(b.(*big.Rat)) < 0
+	case 1:
+		return a.(string) < b.(string)
+	default:
+		return !a.(bool) && b.(bool)
+	}
+}
+
+func collectFamily(v any) int {
+	switch v.(type) {
+	case *big.Rat:
+		return 0
+	case string:
+		return 1
+	default:
+		return 2
+	}
+}
+
+// distinctCollectValues dedupes by typed value (the family tag keeps
+// the number 5 and the string "5" distinct), preserving first
+// appearance — order is irrelevant, the sort follows.
+func distinctCollectValues(vals []any) []any {
+	seen := make(map[string]bool, len(vals))
+	out := vals[:0]
+	for _, v := range vals {
+		var key string
+		switch t := v.(type) {
+		case *big.Rat:
+			key = "n|" + t.RatString()
+		case string:
+			key = "s|" + t
+		case bool:
+			key = fmt.Sprintf("b|%t", t)
+		}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, v)
+	}
+	return out
 }
 
 // fanJoinName is the reserved reverse-index name a forEach stage uses to
