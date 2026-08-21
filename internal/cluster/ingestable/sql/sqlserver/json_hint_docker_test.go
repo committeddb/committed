@@ -167,3 +167,99 @@ poll_interval    = "300ms"
 	require.Equal(t, string(snapPayload["EventData"]), string(ctPayload["EventData"]),
 		"snapshot and resumed-CT renderings must be byte-identical")
 }
+
+// The two spellings the flat-form tests never exercised: (a) the
+// [[sql.topics]] form with jsonColumns declared per entry — must hint;
+// (b) the MIXED spelling — [[sql.topics]] entries with jsonColumns left
+// at the flat position — which must be either honored or loudly
+// rejected, never silently ignored (the admission-validation class: a
+// silently dropped hint is exactly the field's string-payload shape).
+func TestSQLServerJSONColumnHintTopicsFormSpellings(t *testing.T) {
+	db := createDB(t)
+	defer db.Close()
+	_, err := db.Exec(`DROP TABLE IF EXISTS dbo.json_hint_topics`)
+	require.NoError(t, err)
+	_, err = db.Exec(`CREATE TABLE dbo.json_hint_topics (pk INT NOT NULL PRIMARY KEY, EventData NVARCHAR(MAX))`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO dbo.json_hint_topics (pk, EventData) VALUES (1, '{"z":1,"a":2.50}')`)
+	require.NoError(t, err)
+
+	run := func(t *testing.T, toml string) map[string]json.RawMessage {
+		t.Helper()
+		v, err := cluster.ParseConfigBytes("toml", []byte(toml))
+		require.NoError(t, err)
+		p := sql.NewIngestableParser(typerStub{})
+		p.Dialects["sqlserver"] = &sqlserver.SQLServerDialect{}
+		ing, err := p.Parse(v)
+		require.NoError(t, err)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		pr := make(chan *cluster.Proposal, 64)
+		po := make(chan cluster.Position, 64)
+		go func() { _ = ing.Ingest(ctx, nil, pr, po) }()
+		got := drainEntities(t, pr, po, 1, 2*time.Minute)
+		var payload map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(got[0].Data, &payload))
+		return payload
+	}
+
+	t.Run("topics form, per-entry jsonColumns", func(t *testing.T) {
+		payload := run(t, fmt.Sprintf(`
+[ingestable]
+name = "jh-topics"
+type = "sql"
+
+[sql]
+dialect          = "sqlserver"
+connectionString = %q
+
+[[sql.topics]]
+topic         = "jh-topics"
+tables        = ["json_hint_topics"]
+primaryKey    = "pk"
+mapAllColumns = true
+jsonColumns   = ["EventData"]
+`, ingestURL))
+		require.True(t, len(payload["EventData"]) > 0 && payload["EventData"][0] == '{',
+			"per-entry jsonColumns in the topics form must hint; got %s", payload["EventData"])
+	})
+
+	t.Run("MIXED spelling: topics form, flat-position jsonColumns", func(t *testing.T) {
+		toml := fmt.Sprintf(`
+[ingestable]
+name = "jh-mixed"
+type = "sql"
+
+[sql]
+dialect          = "sqlserver"
+connectionString = %q
+jsonColumns      = ["EventData"]
+
+[[sql.topics]]
+topic         = "jh-mixed"
+tables        = ["json_hint_topics"]
+primaryKey    = "pk"
+mapAllColumns = true
+`, ingestURL)
+		v, err := cluster.ParseConfigBytes("toml", []byte(toml))
+		require.NoError(t, err)
+		p := sql.NewIngestableParser(typerStub{})
+		p.Dialects["sqlserver"] = &sqlserver.SQLServerDialect{}
+		ing, err := p.Parse(v)
+		if err != nil {
+			// Loud rejection is an acceptable contract.
+			require.Contains(t, err.Error(), "jsonColumns")
+			return
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		pr := make(chan *cluster.Proposal, 64)
+		po := make(chan cluster.Position, 64)
+		go func() { _ = ing.Ingest(ctx, nil, pr, po) }()
+		got := drainEntities(t, pr, po, 1, 2*time.Minute)
+		var payload map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(got[0].Data, &payload))
+		require.True(t, len(payload["EventData"]) > 0 && payload["EventData"][0] == '{',
+			"a flat-position jsonColumns with the topics form was ACCEPTED, so it must hint — silently ignoring it is the string-payload trap; got %s", payload["EventData"])
+	})
+}

@@ -243,7 +243,7 @@ func (p *IngestableParser) parseTopicsConfig(v *cluster.ParsedConfig, dialect Di
 	// flat-level one is ambiguous (which shape wins?), so reject it loudly rather
 	// than silently ignore it. dialect / connectionString / sql.<dialect> options
 	// stay top-level (shared) and are not per-topic.
-	for _, f := range []string{"sql.topic", "sql.tables", "sql.primaryKey", "sql.mappings", "sql.mapAllColumns", "sql.excludeColumns"} {
+	for _, f := range []string{"sql.topic", "sql.tables", "sql.primaryKey", "sql.mappings", "sql.mapAllColumns", "sql.excludeColumns", "sql.jsonColumns"} {
 		if v.IsSet(f) {
 			return nil, nil, &cluster.FieldError{
 				Field: f,
