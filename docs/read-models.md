@@ -458,9 +458,11 @@ set = [ { column = "total", from = "$.total" },
   normalized. Sources sharing a normalized key space (a topic owner
   beside stage-fed decorators) must declare the same normalize.
   Aggregate folds (`sum`/`min`/`max` are closed-language expressions,
-  plus `count` and `collect`) recompute over exact decimals with SQL
-  semantics (null operands skip; an emptied key retracts entirely,
-  cascading). `collect` is `array_agg` with determinism SQL doesn't
+  plus `count` and `collect`) follow SQL semantics: `sum` is exact
+  decimal arithmetic; `min`/`max` order ANY scalar — numbers
+  numerically, text lexically (`max` of ISO date strings is SQL's
+  latest-date), bools false<true; null operands skip; an emptied key
+  retracts entirely, cascading. `collect` is `array_agg` with determinism SQL doesn't
   promise: values fold into an ALWAYS-SORTED array (numbers
   numerically, then strings, then bools), `distinct = true` dedupes,
   and the array lands in the sink as JSON. Any fold arm takes a

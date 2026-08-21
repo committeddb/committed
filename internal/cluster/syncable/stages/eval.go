@@ -1120,8 +1120,8 @@ func stageComparable(v any, numeric bool) (any, bool) {
 // count counts rows).
 func refoldAggregate(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byte, bool, error) {
 	sums := make([]*big.Rat, len(st.Emit))
-	mins := make([]*big.Rat, len(st.Emit))
-	maxs := make([]*big.Rat, len(st.Emit))
+	mins := make([]any, len(st.Emit))
+	maxs := make([]any, len(st.Emit))
 	counts := make([]int, len(st.Emit))
 	collects := make([][]any, len(st.Emit))
 	count := 0
@@ -1164,24 +1164,32 @@ func refoldAggregate(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byte, bool,
 				}
 				continue
 			}
+			// Min/max order ANY scalar — numbers numerically, text
+			// lexically (SQL's MIN/MAX over dates-as-strings, the field
+			// case a numeric-only gate silently nulled), bools false<true
+			// — by collect's total order. Sum stays numeric (SQL agrees);
+			// nulls skip everywhere.
+			switch {
+			case e.Min != "":
+				if v != nil && (mins[i] == nil || collectLess(v, mins[i])) {
+					mins[i] = v
+				}
+				continue
+			case e.Max != "":
+				if v != nil && (maxs[i] == nil || collectLess(maxs[i], v)) {
+					maxs[i] = v
+				}
+				continue
+			}
 			r, ok := v.(*big.Rat)
 			if !ok {
-				continue // null (or non-numeric passthrough) skips, like SQL
+				continue // null (or non-numeric passthrough) skips a sum, like SQL
 			}
-			switch {
-			case e.Sum != "":
+			if e.Sum != "" {
 				if sums[i] == nil {
 					sums[i] = new(big.Rat)
 				}
 				sums[i].Add(sums[i], r)
-			case e.Min != "":
-				if mins[i] == nil || r.Cmp(mins[i]) < 0 {
-					mins[i] = r
-				}
-			case e.Max != "":
-				if maxs[i] == nil || r.Cmp(maxs[i]) > 0 {
-					maxs[i] = r
-				}
 			}
 		}
 		return nil

@@ -235,8 +235,10 @@ func (j *Join) target() string {
 // fields carry exactly one of From (a jsonpath into the input) or Expr
 // (the closed expression language); an aggregate stage's fields carry
 // exactly one fold arm — Sum/Min/Max (an expression folded over the key's
-// retained inputs), Count (rows), or Collect (the values as a sorted
-// array). Array-of-tables so field names survive byte-exact.
+// retained inputs; Sum is numeric, Min/Max order ANY scalar — text
+// lexically, SQL's MIN/MAX over date strings), Count (rows), or Collect
+// (the values as a sorted array). Array-of-tables so field names
+// survive byte-exact.
 type Emit struct {
 	Field string `mapstructure:"field"`
 	From  string `mapstructure:"from"`
