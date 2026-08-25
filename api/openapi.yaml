@@ -614,6 +614,10 @@ paths:
                   readMs: { type: integer, format: int64 }
                   truncated: { type: string }
                   deadLetters: { type: integer }
+                  coverage: { type: string, enum: [complete, partial] }
+                  topicsUnseen:
+                    type: array
+                    items: { type: string }
                   windows:
                     type: array
                     items:
@@ -622,6 +626,7 @@ paths:
                         fromIndex: { type: integer, format: int64 }
                         entries: { type: integer }
                         ms: { type: integer, format: int64 }
+                        stop: { type: string, enum: [budget, eof, boundary, deadline, error] }
                   stages:
                     type: object
                     additionalProperties:

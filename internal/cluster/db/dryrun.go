@@ -58,13 +58,16 @@ func (db *DB) DryRunSyncable(ctx context.Context, mimeType string, data []byte, 
 			r := db.storage.ReaderAt(start)
 			n := 0
 			winStart := time.Now()
+			stop := "budget"
+			finish := func() {
+				windows = append(windows, cluster.DryRunWindow{FromIndex: start, Entries: n, Ms: time.Since(winStart).Milliseconds(), Stop: stop})
+			}
 			for n < budget {
 				if ctx.Err() != nil {
 					// Deadline mid-window: report what we have — the
 					// window row + phase timings say where time went.
-					// (readMs already accumulated per Read; the window's
-					// Ms includes fold time by design.)
-					windows = append(windows, cluster.DryRunWindow{FromIndex: start, Entries: n, Ms: time.Since(winStart).Milliseconds()})
+					stop = "deadline"
+					finish()
 					return cluster.ErrDryRunTruncated
 				}
 				readStart := time.Now()
@@ -74,21 +77,29 @@ func (db *DB) DryRunSyncable(ctx context.Context, mimeType string, data []byte, 
 					if !errors.Is(err, io.EOF) {
 						// A real read failure must not masquerade as
 						// end-of-log: report partial, carrying the words.
-						windows = append(windows, cluster.DryRunWindow{FromIndex: start, Entries: n, Ms: time.Since(winStart).Milliseconds()})
+						stop = "error"
+						finish()
 						return fmt.Errorf("%w: log read failed in window %d (fromIndex %d): %v", cluster.ErrDryRunTruncated, wi+1, start, err)
 					}
-					break // EOF — end of log
+					stop = "eof"
+					break
 				}
 				if wi+1 < len(starts) && a.Index >= starts[wi+1] {
-					break // the next window covers from here
+					stop = "boundary"
+					break
 				}
 				n++
 				if err := yield(a); err != nil {
+					stop = "error"
+					if ctx.Err() != nil {
+						stop = "deadline"
+					}
+					finish()
 					return err
 				}
 			}
 			remaining -= n
-			windows = append(windows, cluster.DryRunWindow{FromIndex: start, Entries: n, Ms: time.Since(winStart).Milliseconds()})
+			finish()
 		}
 		return nil
 	}
@@ -99,5 +110,34 @@ func (db *DB) DryRunSyncable(ctx context.Context, mimeType string, data []byte, 
 	rep.Windows = windows
 	rep.ParseMs = parseMs
 	rep.ReadMs = readMs
+	// Belt and braces: whatever path the deadline took, an expired
+	// context NEVER yields a report that looks complete (the field
+	// discovered a silent time-bound only by comparing entries against
+	// maxEntries).
+	if rep.Truncated == "" && ctx.Err() != nil {
+		rep.Truncated = "deadline reached during the run — entry counts are partial; raise ?timeoutSeconds or lower ?maxEntries"
+	}
+	// An EOF stop is GOOD news worth saying out loud: the window read to
+	// the end of the log, so an under-filled entry count means complete
+	// coverage of the requested region, not a bound (the field inferred
+	// a silent time-limit from exactly this shape).
+	complete := len(rep.Windows) > 0 && rep.Windows[0].FromIndex == 0 && rep.Truncated == ""
+	for wi := range rep.Windows {
+		if rep.Windows[wi].Stop == "eof" {
+			rep.Findings = append(rep.Findings, fmt.Sprintf("note: window %d (fromIndex %d) read to END OF LOG — its %d entries are complete coverage from that index", wi+1, rep.Windows[wi].FromIndex, rep.Windows[wi].Entries))
+		}
+		if rep.Windows[wi].Stop != "eof" && rep.Windows[wi].Stop != "boundary" {
+			complete = false
+		}
+	}
+	if complete {
+		rep.Coverage = "complete"
+	} else if rep.Coverage == "" {
+		rep.Coverage = "partial"
+	}
+	// The unseen-topic interpretation lives HERE because only this layer
+	// knows whether coverage was complete: under complete coverage a
+	// never-seen topic is a config fault (a mistyped id), not a note.
+	rep.Findings = append(rep.Findings, cluster.CoverageFindings(rep.TopicsUnseen, complete)...)
 	return rep, nil
 }

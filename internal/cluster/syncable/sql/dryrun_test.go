@@ -186,6 +186,7 @@ set = [ { column = "v", from = "$.v" } ]
 	), cluster.DryRunOptions{})
 	require.NoError(t, err)
 	require.Equal(t, int64(0), rep.Stages["live"].Inputs)
+	require.Equal(t, []string{"txns"}, rep.TopicsUnseen, "the structured fact the node interprets against coverage")
 	requireFinding(t, rep.Findings, "folded zero inputs")
 	requireFinding(t, rep.Findings, "fromIndex")
 	requireFinding(t, rep.Findings, "coverage:")
@@ -230,6 +231,58 @@ set = [ { column = "v", from = "$.v" } ]
 	require.Equal(t, 1, rep.DeadLetters)
 	require.Equal(t, 2, rep.Stages["live"].Keys, "the healthy entries still folded")
 	requireFinding(t, rep.Findings, "dead-lettered")
+}
+
+// A merge whose SIDE was never sampled must read as coverage, not as
+// "when/joins rejected everything" — a targeted window feeding one
+// side is the normal fromIndex workflow (the field case: c-open-wa).
+func TestDryRunStarvedMergeReadsAsCoverage(t *testing.T) {
+	p := dryRunFixture(t, `
+[projection]
+db         = "testdb"
+table      = "t"
+primaryKey = "id"
+
+[[projection.columns]]
+name = "id"
+type = "VARCHAR(64)"
+
+[[projection.columns]]
+name = "v"
+type = "VARCHAR(64)"
+
+[[projection.stage]]
+name    = "a"
+from    = "topic-a"
+keyPath = "$.k"
+emit    = [ { field = "x", from = "$.x" } ]
+
+[[projection.stage]]
+name    = "b"
+from    = "topic-b"
+keyPath = "$.k"
+emit    = [ { field = "y", from = "$.y" } ]
+
+[[projection.stage]]
+name  = "m"
+merge = [ "a", "b" ]
+when  = [ { path = "$.b.y", notNull = true } ]
+emit  = [ { field = "v", expr = "coalesce($.a.x, 0)" } ]
+
+[[projection.source]]
+from = "m"
+[[projection.source.rules]]
+set = [ { column = "v", from = "$.v" } ]
+`)
+	rep, err := p.DryRun(context.Background(), feedOf(
+		rowActual(1, "topic-a", "k1", `{"k":"k1","x":1}`),
+	), cluster.DryRunOptions{})
+	require.NoError(t, err)
+	require.Equal(t, 0, rep.Stages["m"].Keys, "the notNull gate fails while side b is unsampled")
+	requireFinding(t, rep.Findings, "under-sampling, not a config fault")
+	for _, f := range rep.Findings {
+		require.NotContains(t, f, `"m" received`, "the rejection wording must not fire for a starved merge")
+	}
 }
 
 func requireFinding(t *testing.T, findings []string, substr string) {

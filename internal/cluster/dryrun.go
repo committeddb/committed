@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -65,6 +67,15 @@ type DryRunReport struct {
 	// (deadline, or a log read failure) — the counters and findings
 	// cover what WAS folded.
 	Truncated string `json:"truncated,omitempty"`
+	// Coverage is "complete" when the sampled windows collectively read
+	// the whole log (first window from 0, every window ending at eof or
+	// a boundary, no truncation) — the fact that turns "topic never
+	// appeared" from a sampling note into a config fault.
+	Coverage string `json:"coverage,omitempty"`
+	// TopicsUnseen are CONSUMED topics with zero sampled entities — the
+	// structured fact; the node writes the interpretation, because only
+	// it knows whether coverage was complete.
+	TopicsUnseen []string `json:"topicsUnseen,omitempty"`
 	// DeadLetters counts entries whose fold failed PERMANENTLY (an
 	// undecodable entity) — the live worker dead-letters these and
 	// continues, and the dry-run mirrors it: one bad entity must not
@@ -81,12 +92,33 @@ type DryRunReport struct {
 	Findings []string `json:"findings"`
 }
 
+// CoverageFindings writes the interpretation of unseen consumed
+// topics. With COMPLETE coverage, "never appeared" means the topic has
+// no entries anywhere in the log — almost always a mistyped topic id,
+// a config fault that partial-coverage wording ("raise maxEntries")
+// would misdiagnose as eternal under-sampling.
+func CoverageFindings(unseen []string, complete bool) []string {
+	if len(unseen) == 0 {
+		return nil
+	}
+	list := strings.Join(unseen, ", ")
+	if complete {
+		return []string{fmt.Sprintf("consumed topic(s) have NO entries anywhere in the log: %s — check the topic id(s); with complete coverage this is a config fault, not a sampling gap", list)}
+	}
+	return []string{fmt.Sprintf("coverage: consumed topic(s) never appeared in the sampled windows: %s — their log regions were missed; raise ?maxEntries or target ?fromIndex", list)}
+}
+
 // DryRunWindow is one sampled region of the log.
 type DryRunWindow struct {
 	FromIndex uint64 `json:"fromIndex"`
 	Entries   int    `json:"entries"`
 	// Ms is wall-clock spent reading this window (resolution + reads).
 	Ms int64 `json:"ms"`
+	// Stop says why this window ended — "budget", "eof", "boundary",
+	// "deadline", or "error" — so an under-filled window is
+	// self-describing (the field compared entries against maxEntries to
+	// DISCOVER a silent time-bound; every exit path now names itself).
+	Stop string `json:"stop,omitempty"`
 }
 
 // DryRunStage is one stage's dry-run row: the flow counters, the store

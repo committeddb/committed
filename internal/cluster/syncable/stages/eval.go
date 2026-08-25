@@ -230,7 +230,7 @@ func expandSynthetic(sts []Stage) []Stage {
 				if me.Topic == "" {
 					continue
 				}
-				name := me.Topic + "[" + strings.Join(me.KeyPath, ",") + "]"
+				name := SyntheticLiftName(me.Topic, me.KeyPath)
 				if !seen[name] {
 					seen[name] = true
 					pre = append(pre, Stage{
@@ -254,6 +254,14 @@ func expandSynthetic(sts []Stage) []Stage {
 		out = append(out, st)
 	}
 	return out
+}
+
+// SyntheticLiftName is the reserved bracket name of the identity
+// reshape synthesized for a topic merge side — ONE definition, shared
+// by the expansion and by report layers that must find the synthetic
+// stage's counters (a starved topic side is only visible through it).
+func SyntheticLiftName(topic string, keyPath []string) string {
+	return topic + "[" + strings.Join(keyPath, ",") + "]"
 }
 
 // ConsumesTopic reports whether any stage reads this topic — as its

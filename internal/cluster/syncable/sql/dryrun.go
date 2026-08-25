@@ -410,6 +410,34 @@ func (o *dryRunObserver) report(cfg *ProjectionConfig, rep *cluster.DryRunReport
 		case (def.ForEach != "" || len(def.Fan) > 0) && st.Fanned == 0:
 			findings = append(findings, fmt.Sprintf("stage %q received %d inputs but its forEach fanned ZERO elements — if the fan path crosses a serialized-JSON string column, decode it at ingest (jsonColumns)", name, st.Inputs))
 		case st.Keys == 0 && st.Inputs > 0:
+			// A MERGE with an under-sampled SIDE is a coverage fact, not
+			// a config fault: its when (the tuple gate) can only fail
+			// while the missing side's deltas live outside the sampled
+			// windows (the field case: a targeted window feeding one
+			// side of c-open-wa, flagged as "rejected everything").
+			if len(def.Merge) > 0 {
+				var starved []string
+				for ei := range def.Merge {
+					side := def.Merge[ei].Stage
+					label := side
+					if side == "" {
+						// A topic side's deltas flow through its
+						// synthesized lift stage — look THERE (the field
+						// class this fixes: a starved topic side read as
+						// a rejection because the raw entry has no stage
+						// name to find).
+						side = stages.SyntheticLiftName(def.Merge[ei].Topic, def.Merge[ei].KeyPath)
+						label = def.Merge[ei].Topic
+					}
+					if sideStage, ok := rep.Stages[side]; ok && sideStage.LiveDeltas == 0 {
+						starved = append(starved, label)
+					}
+				}
+				if len(starved) > 0 {
+					findings = append(findings, fmt.Sprintf("coverage: merge %q holds zero keys, but side(s) %s produced no deltas in the sampled windows — likely under-sampling, not a config fault; widen the sample before reading this as a rejection", name, strings.Join(starved, ", ")))
+					continue
+				}
+			}
 			findings = append(findings, fmt.Sprintf("stage %q received %d inputs but holds ZERO keys — its when/joins rejected everything", name, st.Inputs))
 		}
 		for _, j := range st.Joins {
@@ -444,16 +472,12 @@ func (o *dryRunObserver) report(cfg *ProjectionConfig, rep *cluster.DryRunReport
 	// Coverage is one aggregate note, LAST — it is a sampling fact, not
 	// a config signature, and 35 copies of it drowned the field's one
 	// real finding.
-	var unseenTopics []string
 	for topic, seen := range o.topicsSeen {
 		if seen == 0 {
-			unseenTopics = append(unseenTopics, topic)
+			rep.TopicsUnseen = append(rep.TopicsUnseen, topic)
 		}
 	}
-	if len(unseenTopics) > 0 {
-		sort.Strings(unseenTopics)
-		findings = append(findings, fmt.Sprintf("coverage: consumed topic(s) never appeared in the sampled windows: %s — their log regions were missed; raise ?maxEntries or target ?fromIndex", strings.Join(unseenTopics, ", ")))
-	}
+	sort.Strings(rep.TopicsUnseen)
 	if len(zeroInput) > 0 {
 		listed := zeroInput
 		more := ""
