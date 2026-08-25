@@ -3,6 +3,7 @@ package sql
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"os"
@@ -61,16 +62,53 @@ func (p *Projection) DryRun(ctx context.Context, feed cluster.DryRunFeed, opts c
 
 	obs := newDryRunObserver(cfg)
 	entries := 0
+	deadLetters := 0
+	var deadLetterSamples []string
 	err = feed(func(a *cluster.Actual) error {
-		if err := ctx.Err(); err != nil {
-			return err
+		if ctx.Err() != nil {
+			return cluster.ErrDryRunTruncated
 		}
 		entries++
-		obs.observe(a)
-		return store.Update(func(stx *stagestore.Tx) error {
+		// Coverage counts at FEED time (sampling reach is a fact about
+		// the windows, not about fold success)…
+		obs.observeTopics(a)
+		foldErr := store.Update(func(stx *stagestore.Tx) error {
 			return g.FoldActual(stx, a)
 		})
+		switch {
+		case foldErr == nil:
+			// …while when/rule observation counts only entries that
+			// FOLDED, mirroring the live worker (a dead-lettered Actual
+			// never reaches rule evaluation there either).
+			obs.observe(a)
+			return nil
+		case errors.Is(foldErr, cluster.ErrPermanent):
+			// The live worker dead-letters this entry and continues; the
+			// rehearsal mirrors it — one undecodable entity must not
+			// abort a bounded sample (aborting here surfaced as the
+			// field's generic mid-size-run failures).
+			deadLetters++
+			if len(deadLetterSamples) < 3 {
+				deadLetterSamples = append(deadLetterSamples, foldErr.Error())
+			}
+			return nil
+		default:
+			// A NON-permanent fold failure is what would wedge the live
+			// worker (retried forever, loudly stuck). "This config
+			// wedges at entry N with error E" is a rehearsal RESULT, not
+			// a request failure — report it, don't 400.
+			return fmt.Errorf("%w: fold failed (a live worker would be STUCK retrying here): %v", cluster.ErrDryRunTruncated, foldErr)
+		}
 	})
+	truncated := ""
+	if errors.Is(err, cluster.ErrDryRunTruncated) {
+		reason := "deadline reached"
+		if err.Error() != cluster.ErrDryRunTruncated.Error() {
+			reason = err.Error() // e.g. a log read failure — carry its words
+		}
+		truncated = fmt.Sprintf("%s — after %s and %d entries; the report covers what was folded (raise ?timeoutSeconds or lower ?maxEntries)", reason, time.Since(start).Round(time.Millisecond), entries)
+		err = nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +141,13 @@ func (p *Projection) DryRun(ctx context.Context, feed cluster.DryRunFeed, opts c
 	if err != nil {
 		return nil, err
 	}
+	rep.Truncated = truncated
+	rep.DeadLetters = deadLetters
 	rep.Sources, rep.Findings = obs.report(cfg, rep)
+	if deadLetters > 0 {
+		f := fmt.Sprintf("%d entr(ies) dead-lettered during the rehearsal (the live worker would skip them identically) — first: %s", deadLetters, strings.Join(deadLetterSamples, " | "))
+		rep.Findings = append([]string{f}, rep.Findings...)
+	}
 	return rep, nil
 }
 
@@ -240,6 +284,11 @@ type dryRunObserver struct {
 	// stageWhens carry hints for topic-fed stages' whens, attached to
 	// findings (stage-fed stages' whens are visible through counters).
 	stageWhens []*whenObs
+	// topicsSeen counts sampled entities per CONSUMED topic (any
+	// variant) — the precise coverage statement: which topics' log
+	// regions the windows never reached, named directly instead of
+	// inferred from downstream zero-input stages.
+	topicsSeen map[string]int64
 }
 
 type sourceObs struct {
@@ -250,10 +299,31 @@ type sourceObs struct {
 }
 
 func newDryRunObserver(cfg *ProjectionConfig) *dryRunObserver {
-	o := &dryRunObserver{byTopic: map[string][]func(data any){}}
+	o := &dryRunObserver{byTopic: map[string][]func(data any){}, topicsSeen: map[string]int64{}}
 	names := map[string]bool{}
 	for i := range cfg.Stages {
 		names[cfg.Stages[i].Name] = true
+	}
+	for i := range cfg.Stages {
+		st := &cfg.Stages[i]
+		if st.From != "" && !names[st.From] {
+			o.topicsSeen[st.From] = 0
+		}
+		for j := range st.Joins {
+			if st.Joins[j].Topic != "" {
+				o.topicsSeen[st.Joins[j].Topic] = 0
+			}
+		}
+		for e := range st.Merge {
+			if st.Merge[e].Topic != "" {
+				o.topicsSeen[st.Merge[e].Topic] = 0
+			}
+		}
+	}
+	for i := range cfg.Sources {
+		if cfg.Sources[i].Topic != "" {
+			o.topicsSeen[cfg.Sources[i].Topic] = 0
+		}
 	}
 	for i := range cfg.Stages {
 		st := &cfg.Stages[i]
@@ -287,6 +357,16 @@ func newDryRunObserver(cfg *ProjectionConfig) *dryRunObserver {
 	return o
 }
 
+// observeTopics counts sampling reach per consumed topic — every fed
+// entity, folded or not.
+func (o *dryRunObserver) observeTopics(a *cluster.Actual) {
+	for _, e := range a.Entities {
+		if _, consumed := o.topicsSeen[e.Type.ID]; consumed {
+			o.topicsSeen[e.Type.ID]++
+		}
+	}
+}
+
 func (o *dryRunObserver) observe(a *cluster.Actual) {
 	for _, e := range a.Entities {
 		obs := o.byTopic[e.Type.ID]
@@ -308,6 +388,7 @@ func (o *dryRunObserver) observe(a *cluster.Actual) {
 // learned to read by hand becomes a sentence with the next move in it.
 func (o *dryRunObserver) report(cfg *ProjectionConfig, rep *cluster.DryRunReport) ([]cluster.DryRunSource, []string) {
 	var findings []string
+	var zeroInput []string
 	names := make([]string, 0, len(rep.Stages))
 	for name := range rep.Stages {
 		names = append(names, name)
@@ -322,11 +403,10 @@ func (o *dryRunObserver) report(cfg *ProjectionConfig, rep *cluster.DryRunReport
 		def := &cfg.Stages[di]
 		switch {
 		case st.Inputs == 0:
-			from := def.From
 			if len(def.Merge) > 0 {
 				continue // merges have no direct inputs; their sides report
 			}
-			findings = append(findings, fmt.Sprintf("stage %q folded ZERO inputs — the sampled windows may not cover its input's log region (from %q); target it with ?fromIndex", name, from))
+			zeroInput = append(zeroInput, name)
 		case (def.ForEach != "" || len(def.Fan) > 0) && st.Fanned == 0:
 			findings = append(findings, fmt.Sprintf("stage %q received %d inputs but its forEach fanned ZERO elements — if the fan path crosses a serialized-JSON string column, decode it at ingest (jsonColumns)", name, st.Inputs))
 		case st.Keys == 0 && st.Inputs > 0:
@@ -360,6 +440,28 @@ func (o *dryRunObserver) report(cfg *ProjectionConfig, rep *cluster.DryRunReport
 			findings = append(findings, fmt.Sprintf("source (topic %q) matched ZERO of %d events — see its hints for the value families actually seen", so.topic, so.when.seen))
 		}
 		srcRows = append(srcRows, row)
+	}
+	// Coverage is one aggregate note, LAST — it is a sampling fact, not
+	// a config signature, and 35 copies of it drowned the field's one
+	// real finding.
+	var unseenTopics []string
+	for topic, seen := range o.topicsSeen {
+		if seen == 0 {
+			unseenTopics = append(unseenTopics, topic)
+		}
+	}
+	if len(unseenTopics) > 0 {
+		sort.Strings(unseenTopics)
+		findings = append(findings, fmt.Sprintf("coverage: consumed topic(s) never appeared in the sampled windows: %s — their log regions were missed; raise ?maxEntries or target ?fromIndex", strings.Join(unseenTopics, ", ")))
+	}
+	if len(zeroInput) > 0 {
+		listed := zeroInput
+		more := ""
+		if len(listed) > 10 {
+			more = fmt.Sprintf(" (and %d more)", len(listed)-10)
+			listed = listed[:10]
+		}
+		findings = append(findings, fmt.Sprintf("coverage: %d stage(s) folded zero inputs — the sampled windows likely miss their log regions; raise ?maxEntries or target ?fromIndex: %s%s", len(zeroInput), strings.Join(listed, ", "), more))
 	}
 	if len(findings) == 0 {
 		findings = []string{"no silent-empty signatures detected in the sampled windows"}

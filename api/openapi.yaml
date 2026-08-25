@@ -579,13 +579,20 @@ paths:
         - name: maxEntries
           in: query
           required: false
-          schema: { type: integer, minimum: 1, maximum: 1000000, default: 100000 }
+          schema: { type: integer, minimum: 1, maximum: 10000000, default: 100000 }
           description: Sampling budget in committed entries across all windows.
         - name: fromIndex
           in: query
           required: false
           schema: { type: integer, format: int64 }
           description: Sample a single window starting at this raft index.
+        - name: timeoutSeconds
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 600, default: 120 }
+          description: |
+            Wall-clock bound. The deadline yields a PARTIAL report (the
+            `truncated` field says so), never an error.
       requestBody:
         required: true
         content:
@@ -603,6 +610,10 @@ paths:
                 properties:
                   entries: { type: integer }
                   durationMs: { type: integer, format: int64 }
+                  parseMs: { type: integer, format: int64 }
+                  readMs: { type: integer, format: int64 }
+                  truncated: { type: string }
+                  deadLetters: { type: integer }
                   windows:
                     type: array
                     items:
@@ -610,6 +621,7 @@ paths:
                       properties:
                         fromIndex: { type: integer, format: int64 }
                         entries: { type: integer }
+                        ms: { type: integer, format: int64 }
                   stages:
                     type: object
                     additionalProperties:

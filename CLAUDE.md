@@ -71,6 +71,7 @@ All served via Chi router in `internal/cluster/http/`:
 - `GET/POST /database/{id}` - Database configurations
 - `POST /proposal` - Append proposals (write-only; the log is not queried over HTTP — sync it out and query there)
 - `GET/POST /syncable/{id}` - Syncable configurations
+- `POST /syncable/dryrun` - Rehearse a syncable config against a log sample (diagnostic report; nothing admitted)
 - `GET/POST /ingestable/{id}` - Ingestable configurations
 - `POST /type/{id}` - Type configurations (read back via `GET /type` and the version endpoints)
 

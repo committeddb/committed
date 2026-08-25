@@ -2,7 +2,10 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"time"
 
 	"github.com/committeddb/committed/internal/cluster"
 )
@@ -11,7 +14,7 @@ import (
 // by default. One window from index 0 would fold zero events for topics
 // whose activity clusters late in the log (the field shape) and report
 // misleading zeros; spreading the budget samples every region.
-const dryRunWindows = 4
+const dryRunWindows = 8
 
 // dryRunDefaultEntries is the sampling budget when the caller names none.
 const dryRunDefaultEntries = 100_000
@@ -21,10 +24,12 @@ const dryRunDefaultEntries = 100_000
 // then the kind's DryRun over windows of committed Actuals. Never
 // proposes, never writes — a node-local diagnostic read.
 func (db *DB) DryRunSyncable(ctx context.Context, mimeType string, data []byte, opts cluster.DryRunOptions) (*cluster.DryRunReport, error) {
+	parseStart := time.Now()
 	_, s, _, err := db.parser.ParseSyncable(mimeType, data, db.storage)
 	if err != nil {
 		return nil, err
 	}
+	parseMs := time.Since(parseStart).Milliseconds()
 	dr, ok := s.(cluster.DryRunner)
 	if !ok {
 		return nil, fmt.Errorf("this syncable kind does not support dry-run")
@@ -42,6 +47,7 @@ func (db *DB) DryRunSyncable(ctx context.Context, mimeType string, data []byte, 
 		}
 	}
 	var windows []cluster.DryRunWindow
+	var readMs int64
 	feed := func(yield func(*cluster.Actual) error) error {
 		remaining := opts.MaxEntries
 		for wi, start := range starts {
@@ -51,9 +57,26 @@ func (db *DB) DryRunSyncable(ctx context.Context, mimeType string, data []byte, 
 			budget := remaining / (len(starts) - wi)
 			r := db.storage.ReaderAt(start)
 			n := 0
+			winStart := time.Now()
 			for n < budget {
+				if ctx.Err() != nil {
+					// Deadline mid-window: report what we have — the
+					// window row + phase timings say where time went.
+					// (readMs already accumulated per Read; the window's
+					// Ms includes fold time by design.)
+					windows = append(windows, cluster.DryRunWindow{FromIndex: start, Entries: n, Ms: time.Since(winStart).Milliseconds()})
+					return cluster.ErrDryRunTruncated
+				}
+				readStart := time.Now()
 				a, err := r.Read()
+				readMs += time.Since(readStart).Milliseconds()
 				if err != nil {
+					if !errors.Is(err, io.EOF) {
+						// A real read failure must not masquerade as
+						// end-of-log: report partial, carrying the words.
+						windows = append(windows, cluster.DryRunWindow{FromIndex: start, Entries: n, Ms: time.Since(winStart).Milliseconds()})
+						return fmt.Errorf("%w: log read failed in window %d (fromIndex %d): %v", cluster.ErrDryRunTruncated, wi+1, start, err)
+					}
 					break // EOF — end of log
 				}
 				if wi+1 < len(starts) && a.Index >= starts[wi+1] {
@@ -65,7 +88,7 @@ func (db *DB) DryRunSyncable(ctx context.Context, mimeType string, data []byte, 
 				}
 			}
 			remaining -= n
-			windows = append(windows, cluster.DryRunWindow{FromIndex: start, Entries: n})
+			windows = append(windows, cluster.DryRunWindow{FromIndex: start, Entries: n, Ms: time.Since(winStart).Milliseconds()})
 		}
 		return nil
 	}
@@ -74,5 +97,7 @@ func (db *DB) DryRunSyncable(ctx context.Context, mimeType string, data []byte, 
 		return nil, err
 	}
 	rep.Windows = windows
+	rep.ParseMs = parseMs
+	rep.ReadMs = readMs
 	return rep, nil
 }

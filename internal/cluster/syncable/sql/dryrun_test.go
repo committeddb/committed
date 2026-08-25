@@ -186,8 +186,50 @@ set = [ { column = "v", from = "$.v" } ]
 	), cluster.DryRunOptions{})
 	require.NoError(t, err)
 	require.Equal(t, int64(0), rep.Stages["live"].Inputs)
-	requireFinding(t, rep.Findings, "folded ZERO inputs")
+	requireFinding(t, rep.Findings, "folded zero inputs")
 	requireFinding(t, rep.Findings, "fromIndex")
+	requireFinding(t, rep.Findings, "coverage:")
+}
+
+// One undecodable entity dead-letters and the rehearsal CONTINUES —
+// mirroring the live worker (aborting on entry N of a bounded sample
+// surfaced in the field as generic mid-size-run failures).
+func TestDryRunDeadLettersAndContinues(t *testing.T) {
+	p := dryRunFixture(t, `
+[projection]
+db         = "testdb"
+table      = "t"
+primaryKey = "id"
+
+[[projection.columns]]
+name = "id"
+type = "VARCHAR(64)"
+
+[[projection.columns]]
+name = "v"
+type = "VARCHAR(64)"
+
+[[projection.stage]]
+name    = "live"
+from    = "txns"
+keyPath = "$.id"
+emit    = [ { field = "v", from = "$.id" } ]
+
+[[projection.source]]
+from = "live"
+[[projection.source.rules]]
+set = [ { column = "v", from = "$.v" } ]
+`)
+	rep, err := p.DryRun(context.Background(), feedOf(
+		rowActual(1, "txns", "a", `{"id":"a"}`),
+		rowActual(2, "txns", "bad", `{not json`),
+		rowActual(3, "txns", "c", `{"id":"c"}`),
+	), cluster.DryRunOptions{})
+	require.NoError(t, err, "a permanent per-entry failure must not abort the rehearsal")
+	require.Equal(t, 3, rep.Entries)
+	require.Equal(t, 1, rep.DeadLetters)
+	require.Equal(t, 2, rep.Stages["live"].Keys, "the healthy entries still folded")
+	requireFinding(t, rep.Findings, "dead-lettered")
 }
 
 func requireFinding(t *testing.T, findings []string, substr string) {

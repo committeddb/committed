@@ -3,6 +3,8 @@ package stages
 import (
 	"testing"
 
+	"github.com/committeddb/committed/internal/cluster"
+
 	"github.com/stretchr/testify/require"
 
 	"github.com/committeddb/committed/internal/cluster/syncable/stagestore"
@@ -165,4 +167,29 @@ func TestUnkeyedDeleteShapedInputCountedOnTypeMiss(t *testing.T) {
 	fold("e2", `{"txn":"not-a-number","type":"deleted"}`)
 	require.Equal(t, int64(1), g.FlowCounts()["txn-live"].UnkeyedDeletes,
 		"a delete whose key cannot render into the declared space is the same lost retraction")
+}
+
+// A DATA error in an emit (string arithmetic — deterministic for its
+// input) classifies Permanent, so the worker dead-letters the Actual
+// and continues — the expression language's documented contract, now
+// true on the stage-fold path too (the source-side apply already
+// wrapped; the fold path returned unwrapped and would have WEDGED the
+// worker in an eternal retry of a deterministic failure).
+func TestEmitDataErrorIsPermanent(t *testing.T) {
+	sts := []Stage{
+		{
+			Name: "r", From: "t", KeyPath: []string{"$.id"},
+			Emit: []Emit{{Field: "v", Expr: "$.a + 1"}},
+		},
+	}
+	require.NoError(t, ValidateShapes(sts))
+	g := BuildGraph(sts)
+	store := stageStoreForTest(t)
+
+	err := store.Update(func(tx *stagestore.Tx) error {
+		return g.FoldTopicUpsertNow(tx, "t", []byte("e1"), decodePayload(t, `{"id":"k","a":"not a number"}`))
+	})
+	require.ErrorIs(t, err, cluster.ErrPermanent,
+		"a deterministic data error dead-letters; unwrapped it would wedge the worker")
+	require.ErrorContains(t, err, `emit "v"`)
 }

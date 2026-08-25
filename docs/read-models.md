@@ -488,7 +488,7 @@ set = [ { column = "total", from = "$.total" },
   applies to, every matching arm fans its path, and element identity
   is namespaced by arm, so created-elements and added-elements fold
   through ONE stage instead of parallel fans merged back together.
-  Continuing: forEach fans each input's array
+  Either form fans each input's array
   elements into element-inputs — `keyPath` is the reduce key,
   `elementKey` the element's identity (required with a reduce, so two
   same-key elements both count), `$parent.` reaches the enclosing
@@ -831,10 +831,21 @@ auto-generated **findings** that name the silent-empty signatures: a
 seen at its path ("`equals = 'true'` (string) never matched; values
 seen: boolean×142"), a join that never resolved says so, a fan that
 never fanned points at serialized-JSON columns. The sampling budget
-(`?maxEntries`, default 100k) spreads across evenly-spaced windows of
-the log so late-clustering topics are covered; `?fromIndex` drills
-into one region. The config still passes full admission validation
-(400 on rejection), so a dry run also answers "would this admit?".
+(`?maxEntries`, default 100k, cap 10M) spreads across evenly-spaced
+windows of the log so late-clustering topics are covered; `?fromIndex`
+drills into one region, and `?timeoutSeconds` (default 120, max 600)
+buys a coverage-hungry run its time. The deadline — or a log read
+failure — yields a PARTIAL report (`truncated` says why), never an
+error, and every report carries phase timings (`parseMs`, `readMs`,
+per-window `ms`) so a slow run names its slow phase. Data mirrors the
+live worker: an undecodable entity or an emit data error DEAD-LETTERS
+and the rehearsal continues (`deadLetters` in the report — the same
+health number replay verdicts lead with); a fold failure that would
+STICK the live worker is reported as the truncation reason. Coverage
+is stated precisely — consumed topics the windows never reached are
+named in one aggregate finding, listed after any real signatures. The
+config still passes full admission validation (400 with the parser's
+actual words), so a dry run also answers "would this admit?".
 Authoring loop: dry-run until the findings list is empty, then POST
 for real — "valid config, wrong result, no error" costs minutes
 instead of a full replay against an oracle.

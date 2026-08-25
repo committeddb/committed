@@ -18,7 +18,10 @@ const dryRunTimeout = 2 * time.Minute
 
 // dryRunMaxEntriesCap keeps a caller from turning the diagnostic into a
 // full replay.
-const dryRunMaxEntriesCap = 1_000_000
+const dryRunMaxEntriesCap = 10_000_000
+
+// dryRunTimeoutCap bounds caller-requested timeouts.
+const dryRunTimeoutCap = 10 * time.Minute
 
 // DryRunSyncable (POST /syncable/dryrun) rehearses a syncable config
 // against a bounded sample of the committed log and returns the
@@ -55,11 +58,24 @@ func (h *HTTP) DryRunSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
 		}
 		opts.FromIndex = n
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), dryRunTimeout)
+	timeout := dryRunTimeout
+	if q := r.URL.Query().Get("timeoutSeconds"); q != "" {
+		n, err := strconv.Atoi(q)
+		if err != nil || n <= 0 || time.Duration(n)*time.Second > dryRunTimeoutCap {
+			h.writeReadError(w, r, fmt.Errorf("timeoutSeconds must be 1..%d", int(dryRunTimeoutCap/time.Second)), "invalid_config", "invalid timeoutSeconds")
+			return
+		}
+		timeout = time.Duration(n) * time.Second
+	}
+	opts.Timeout = timeout
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
 	rep, err := h.c.DryRunSyncable(ctx, mimeType, body, opts)
 	if err != nil {
-		h.writeReadError(w, r, err, "invalid_config", "dry-run syncable")
+		// The dry-run IS the authoring loop: a rejection must carry the
+		// parser's actual words, not a generic label (field-reported —
+		// authors had to POST to the real endpoint to learn the error).
+		writeErrorf(w, httpgo.StatusBadRequest, "invalid_config", "dry-run: %s", err)
 		return
 	}
 	writeJSONStatus(w, httpgo.StatusOK, rep)

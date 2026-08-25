@@ -1168,6 +1168,15 @@ func (g *Graph) refoldMerge(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byte
 // emitReshape renders a stage's emit fields from one input object — the
 // reshape path, and the winner path of reduce = "latest" — over the
 // join-lookup scope (named joins' rows under their aliases).
+//
+// Emit-evaluation failures are DATA errors — deterministic for their
+// input (the same entity fails identically on every replay) — so they
+// wrap cluster.Permanent and the worker DEAD-LETTERS the triggering
+// Actual, exactly as the expression language documents. The rollback
+// makes this replay-consistent: the offending input is never retained,
+// so later refolds of the key succeed without it (the same argument
+// entity-decode failures already rely on). Store/retention integrity
+// errors stay UNWRAPPED: those must wedge loudly, not skip.
 func (g *Graph) emitReshape(tx *stagestore.Tx, st *Stage, obj, parent any) ([]byte, bool, error) {
 	obj, err := g.joinLookupScope(tx, st, obj, parent)
 	if err != nil {
@@ -1189,12 +1198,12 @@ func (g *Graph) emitReshape(tx *stagestore.Tx, st *Stage, obj, parent any) ([]by
 			}
 		} else {
 			if v, err = Eval(e.compiled, obj, parent); err != nil {
-				return nil, false, fmt.Errorf("stage %q emit %q: %w", st.Name, e.Field, err)
+				return nil, false, cluster.Permanent(fmt.Errorf("stage %q emit %q: %w", st.Name, e.Field, err))
 			}
 		}
 		emitted[e.Field], err = stageValue(v)
 		if err != nil {
-			return nil, false, fmt.Errorf("stage %q emit %q: %w", st.Name, e.Field, err)
+			return nil, false, cluster.Permanent(fmt.Errorf("stage %q emit %q: %w", st.Name, e.Field, err))
 		}
 	}
 	bs, err := marshalStageObject(emitted)
@@ -1385,7 +1394,7 @@ func (g *Graph) refoldAggregate(tx *stagestore.Tx, st *Stage, outKey []byte) ([]
 			}
 			v, err := Eval(e.compiled, obj, parent)
 			if err != nil {
-				return fmt.Errorf("stage %q emit %q: %w", st.Name, e.Field, err)
+				return cluster.Permanent(fmt.Errorf("stage %q emit %q: %w", st.Name, e.Field, err))
 			}
 			if e.Collect != "" {
 				if v != nil {
@@ -1450,7 +1459,7 @@ func (g *Graph) refoldAggregate(tx *stagestore.Tx, st *Stage, outKey []byte) ([]
 			arr := make([]any, len(vals))
 			for k, cv := range vals {
 				if arr[k], err = stageValue(cv); err != nil {
-					return nil, false, fmt.Errorf("stage %q emit %q: %w", st.Name, e.Field, err)
+					return nil, false, cluster.Permanent(fmt.Errorf("stage %q emit %q: %w", st.Name, e.Field, err))
 				}
 			}
 			v = arr
@@ -1469,7 +1478,7 @@ func (g *Graph) refoldAggregate(tx *stagestore.Tx, st *Stage, outKey []byte) ([]
 		}
 		emitted[e.Field], err = stageValue(v)
 		if err != nil {
-			return nil, false, fmt.Errorf("stage %q emit %q: %w", st.Name, e.Field, err)
+			return nil, false, cluster.Permanent(fmt.Errorf("stage %q emit %q: %w", st.Name, e.Field, err))
 		}
 	}
 	bs, err := marshalStageObject(emitted)

@@ -480,10 +480,9 @@ type StageIntrospector interface {
 }
 
 // StageStat is one stage's introspection row. Keys is the store truth
-// (current output keys). Inputs and Fanned are in-memory flow counters
-// since this worker started — not replicated, reset on restart — and
-// together the three numbers split every silent-empty state at a
-// glance: Inputs 0 = the stage's log region hasn't been reached;
+// (current output keys). The counters are in-memory since this worker
+// started — not replicated, reset on restart — and together they split
+// every silent-empty state at a glance: Inputs 0 = the stage's log region hasn't been reached;
 // Inputs > 0 with Fanned 0 (forEach stages) = the fan finds no array
 // (the serialized-JSON trap); Fanned > 0 (or Inputs > 0, for plain
 // stages) with Keys 0 = the when/joins rejected everything — the

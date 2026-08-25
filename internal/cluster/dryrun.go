@@ -3,6 +3,8 @@ package cluster
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"time"
 )
 
 // The dry-run instrument: rehearse a syncable config against a bounded
@@ -22,6 +24,9 @@ type DryRunOptions struct {
 	// MaxEntries caps how many committed Actuals the feed yields across
 	// all sampling windows.
 	MaxEntries int
+	// Timeout bounds the whole run; the deadline produces a TRUNCATED
+	// report, never an error (zero = the server default).
+	Timeout time.Duration
 	// FromIndex, when nonzero, targets ONE window starting at that raft
 	// index instead of the default evenly-spaced multi-window sampling
 	// — for drilling into a specific log region.
@@ -39,12 +44,34 @@ type DryRunner interface {
 	DryRun(ctx context.Context, feed DryRunFeed, opts DryRunOptions) (*DryRunReport, error)
 }
 
+// ErrDryRunTruncated is the graceful-stop sentinel: the sampling
+// deadline arrived mid-feed. Both layers treat it as "stop and report
+// what we have" — a partial report beats a timeout error, because the
+// partial report carries the phase timings that SAY where the time
+// went.
+var ErrDryRunTruncated = errors.New("dry-run deadline reached")
+
 // DryRunReport is what the sample revealed.
 type DryRunReport struct {
 	// Entries is how many committed Actuals were folded.
-	Entries    int            `json:"entries"`
-	DurationMs int64          `json:"durationMs"`
-	Windows    []DryRunWindow `json:"windows,omitempty"`
+	Entries    int   `json:"entries"`
+	DurationMs int64 `json:"durationMs"`
+	// ParseMs is admission-level parsing; ReadMs is log reading and
+	// decoding across all windows — with DurationMs, the three split
+	// "where did the time go" (the remainder is fold work).
+	ParseMs int64 `json:"parseMs"`
+	ReadMs  int64 `json:"readMs"`
+	// Truncated, when set, says the run stopped mid-sample and why
+	// (deadline, or a log read failure) — the counters and findings
+	// cover what WAS folded.
+	Truncated string `json:"truncated,omitempty"`
+	// DeadLetters counts entries whose fold failed PERMANENTLY (an
+	// undecodable entity) — the live worker dead-letters these and
+	// continues, and the dry-run mirrors it: one bad entity must not
+	// abort the rehearsal. Zero here is the same health claim the
+	// pilot's replay verdicts lead with.
+	DeadLetters int            `json:"deadLetters"`
+	Windows     []DryRunWindow `json:"windows,omitempty"`
 	// Stages maps stage name → what it did with the sample.
 	Stages  map[string]DryRunStage `json:"stages,omitempty"`
 	Sources []DryRunSource         `json:"sources,omitempty"`
@@ -58,6 +85,8 @@ type DryRunReport struct {
 type DryRunWindow struct {
 	FromIndex uint64 `json:"fromIndex"`
 	Entries   int    `json:"entries"`
+	// Ms is wall-clock spent reading this window (resolution + reads).
+	Ms int64 `json:"ms"`
 }
 
 // DryRunStage is one stage's dry-run row: the flow counters, the store
