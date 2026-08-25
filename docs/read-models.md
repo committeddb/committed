@@ -482,6 +482,13 @@ set = [ { column = "total", from = "$.total" },
   `lessThan`) remain for the common cases, and the two-stage gate idiom
   stays legal where you want the intermediate value probeable.
 - **Stages fan out too**: `forEach` on a stage fans each input's array
+  elements into element-inputs — and `fan` is its multi-arm form
+  (SQL's UNION ALL of lateral fans): `fan = [ { forEach = "$.a[*]",
+  when = [ … ] }, … ]` — each arm's `when` selects which INPUTS it
+  applies to, every matching arm fans its path, and element identity
+  is namespaced by arm, so created-elements and added-elements fold
+  through ONE stage instead of parallel fans merged back together.
+  Continuing: forEach fans each input's array
   elements into element-inputs — `keyPath` is the reduce key,
   `elementKey` the element's identity (required with a reduce, so two
   same-key elements both count), `$parent.` reaches the enclosing
@@ -547,11 +554,23 @@ set = [ { column = "total", from = "$.total" },
   machinery). Decision rule: SAME-KEY correlation → merge; FOREIGN-KEY
   reference → join. A merge feeding a single table source is the
   primary multi-stage-table pattern (one source, whole-row writes);
-  rowOwner remains the form for mixed topic/stage tables.
+  rowOwner remains the form for mixed topic/stage tables. A side may
+  also be a TOPIC — `{ topic = "workareas", keyPath = "$.Id", as =
+  "wa" }`, with its own declared key space (keyType/normalize as
+  needed) — the lift stage, synthesized: the engine folds the topic
+  through a hidden identity reshape (`<topic>[<keyPath>]` in stats)
+  feeding the merge as a normal side.
 - **Joins can address a PRIOR stage** (`from = "<stage>"` on a join):
   its outputs are the dimension rows, maintained live by the drain — so
   cross-stage correlation is a join, not a second input; heal, flip,
-  and retraction all flow through the same fan-out.
+  and retraction all flow through the same fan-out. And with `field`,
+  a stage join addresses an EMITTED FIELD instead of the stage's key —
+  SQL's join-on-any-column: the engine synthesizes the re-key stage
+  you used to write by hand (visible in stats as `<stage>[<field>]`,
+  same cost, later fusable). Non-unique field values resolve to the
+  bytewise-largest producer key's row, deterministically; with `field`,
+  `normalize`/`onType` are declarable (a non-key field is not governed
+  by the producer's key space).
 - **`reduce = "latest"` is argmax by a business field** (`orderBy` — never
   arrival order, so backfills converge with steady state), with `tieBy`
   a MANDATORY deterministic tiebreak (`orderByType`/`tieByType` choose

@@ -203,6 +203,7 @@ type rawProjectionStage struct {
 	Merge       any            `mapstructure:"merge"`
 	Emit        []StageEmit    `mapstructure:"emit"`
 	ForEach     string         `mapstructure:"forEach"`
+	Fan         []StageFanArm  `mapstructure:"fan"`
 	ElementKey  string         `mapstructure:"elementKey"`
 }
 
@@ -219,6 +220,7 @@ type rawStageJoin struct {
 	OnType    any          `mapstructure:"onType"`
 	As        string       `mapstructure:"as"`
 	Optional  bool         `mapstructure:"optional"`
+	Field     string       `mapstructure:"field"`
 }
 
 // parseProjectionStages decodes the [[{section}.stage]] blocks.
@@ -258,6 +260,7 @@ func parseProjectionStages(v *cluster.ParsedConfig, storage cluster.DatabaseStor
 			Joins:       stageJoins(rs.Join),
 			Emit:        rs.Emit,
 			ForEach:     rs.ForEach,
+			Fan:         rs.Fan,
 			ElementKey:  rs.ElementKey,
 			Normalize:   strings.ToLower(rs.Normalize),
 			KeyType:     lowerList(pathOrList(rs.KeyType)),
@@ -489,7 +492,7 @@ func parseMergeEntries(raw any) ([]StageMergeEntry, error) {
 	}
 	list, ok := raw.([]any)
 	if !ok {
-		return nil, fmt.Errorf("merge must be a list of stage names or { stage, as } tables; got %T", raw)
+		return nil, fmt.Errorf("merge must be a list of stage names, { stage, as } tables, or { topic, keyPath, as } topic sides; got %T", raw)
 	}
 	out := make([]StageMergeEntry, 0, len(list))
 	for i, item := range list {
@@ -505,8 +508,16 @@ func parseMergeEntries(raw any) ([]StageMergeEntry, error) {
 					e.Stage = s
 				case strings.EqualFold(k, "as") && sok:
 					e.As = s
+				case strings.EqualFold(k, "topic") && sok:
+					e.Topic = s
+				case strings.EqualFold(k, "normalize") && sok:
+					e.Normalize = strings.ToLower(s)
+				case strings.EqualFold(k, "keyPath"):
+					e.KeyPath = pathOrList(val)
+				case strings.EqualFold(k, "keyType"):
+					e.KeyType = lowerList(pathOrList(val))
 				default:
-					return nil, fmt.Errorf("entry %d: unknown or non-string key %q (want stage and optional as)", i+1, k)
+					return nil, fmt.Errorf("entry %d: unknown key %q (want stage+as, or topic+keyPath with optional keyType/normalize/as)", i+1, k)
 				}
 			}
 			out = append(out, e)
@@ -524,7 +535,7 @@ func stageJoins(raw []rawStageJoin) []StageJoin {
 	}
 	out := make([]StageJoin, len(raw))
 	for i, rj := range raw {
-		out[i] = StageJoin{Topic: rj.Topic, From: rj.From, On: pathOrList(rj.On), Absent: rj.Absent, Where: rj.Where, Normalize: strings.ToLower(rj.Normalize), OnType: lowerList(pathOrList(rj.OnType)), As: rj.As, Optional: rj.Optional}
+		out[i] = StageJoin{Topic: rj.Topic, From: rj.From, On: pathOrList(rj.On), Absent: rj.Absent, Where: rj.Where, Normalize: strings.ToLower(rj.Normalize), OnType: lowerList(pathOrList(rj.OnType)), As: rj.As, Optional: rj.Optional, Field: rj.Field}
 	}
 	return out
 }

@@ -114,6 +114,7 @@ type Graph struct {
 // BuildGraph compiles the validated stage list into its runtime
 // topology.
 func BuildGraph(stages []Stage) *Graph {
+	stages = expandSynthetic(stages)
 	g := &Graph{byName: map[string]*graphNode{}, byTopic: map[string][]*graphNode{}, dims: map[string][]dimRef{}}
 	nodes := make([]*graphNode, len(stages))
 	// The graph owns a copy of the stage definitions (joins deep-copied):
@@ -177,6 +178,82 @@ func BuildGraph(stages []Stage) *Graph {
 		}
 	}
 	return g
+}
+
+// expandSynthetic rewrites field-addressed joins and topic merge sides
+// into the hidden identity re-key/lift stages authors used to write by
+// hand — one mechanism, machine-written: each synthetic stage is an
+// identity reshape (emits its input verbatim) keyed by the addressed
+// field or the declared topic key, inserted in manifest order just
+// before its consumer. All existing machinery — retention, dims,
+// cascades, retraction, counters — applies unchanged, so the runtime
+// cost equals the manual stage's (and future fusion makes both free).
+// Synthetic names use the reserved bracket form ("<from>[<path>]");
+// stats and dry-run reports show them transparently.
+func expandSynthetic(sts []Stage) []Stage {
+	out := make([]Stage, 0, len(sts))
+	seen := map[string]bool{}
+	for i := range sts {
+		st := sts[i]
+		var pre []Stage
+		if len(st.Joins) > 0 {
+			st.Joins = append([]Join(nil), st.Joins...)
+			for j := range st.Joins {
+				jn := &st.Joins[j]
+				if jn.Field == "" {
+					continue
+				}
+				name := jn.From + "[" + jn.Field + "]"
+				if !seen[name] {
+					seen[name] = true
+					pre = append(pre, Stage{
+						Name:         name,
+						From:         jn.From,
+						KeyPath:      []string{jn.Field},
+						KeyType:      jn.OnType,
+						Normalize:    jn.Normalize,
+						identityEmit: true,
+					})
+				}
+				jn.From = name
+				jn.Field = ""
+				// The rewritten join inherits the synthetic stage's
+				// space through the normal resolution below.
+				jn.Normalize = ""
+				jn.OnType = nil
+			}
+		}
+		if len(st.Merge) > 0 {
+			st.Merge = append([]MergeEntry(nil), st.Merge...)
+			for e := range st.Merge {
+				me := &st.Merge[e]
+				if me.Topic == "" {
+					continue
+				}
+				name := me.Topic + "[" + strings.Join(me.KeyPath, ",") + "]"
+				if !seen[name] {
+					seen[name] = true
+					pre = append(pre, Stage{
+						Name:         name,
+						From:         me.Topic,
+						KeyPath:      me.KeyPath,
+						KeyType:      me.KeyType,
+						Normalize:    me.Normalize,
+						identityEmit: true,
+					})
+				}
+				if me.As == "" {
+					me.As = me.Topic
+				}
+				me.Stage = name
+				me.Topic = ""
+				me.KeyPath, me.KeyType, me.Normalize = nil, nil, ""
+			}
+		}
+		out = append(out, pre...)
+		out = append(out, st)
+	}
+	return out
 }
 
 // ConsumesTopic reports whether any stage reads this topic — as its
@@ -335,7 +412,7 @@ func (g *Graph) markDimDependents(tx *stagestore.Tx, d dimRef, dimKey []byte, di
 // stage's when RETRACTS (filtering is refold, not skip).
 func (g *Graph) foldUpsert(tx *stagestore.Tx, n *graphNode, inKey []byte, payload any, gen uint64, dirty Dirty) error {
 	n.inputs.Add(1)
-	if n.def.ForEach != "" {
+	if n.def.hasFan() {
 		return g.foldFan(tx, n, inKey, payload, gen, dirty)
 	}
 	return g.foldOneInput(tx, n, inKey, payload, nil, gen, dirty)
@@ -380,6 +457,19 @@ func (g *Graph) FoldActual(tx *stagestore.Tx, a *cluster.Actual) error {
 		}
 	}
 	return g.Drain(tx, dirty)
+}
+
+// fanPathDesc names the fan declaration for logs: the single forEach
+// path, or the arm paths joined.
+func fanPathDesc(st *Stage) string {
+	if st.ForEach != "" {
+		return st.ForEach
+	}
+	parts := make([]string, len(st.Fan))
+	for i := range st.Fan {
+		parts[i] = st.Fan[i].ForEach
+	}
+	return strings.Join(parts, " | ")
 }
 
 // FanMiss resolves a forEach path and reports why the fan is empty ("" =
@@ -469,8 +559,44 @@ const stageForEachNonArrayWarnRun = 1000
 // carries retract, and the input's tombstone retracts them all.
 func (g *Graph) foldFan(tx *stagestore.Tx, n *graphNode, parentKey []byte, payload any, gen uint64, dirty Dirty) error {
 	st := n.def
-	var elems []any
-	miss := FanMiss(st.ForEach, payload, &elems)
+	type armFan struct {
+		ordinal int // -1 = single-path forEach (legacy identity bytes)
+		elems   []any
+	}
+	var fans []armFan
+	miss := ""
+	if len(st.Fan) > 0 {
+		// Multi-arm: every arm whose when matches this INPUT fans its
+		// path (UNION ALL). An input matching no arm is healthy
+		// foreignness; a matching arm resolving no array counts toward
+		// the non-array warn run like a single-path miss.
+		anyMatched, anyHealthy := false, false
+		lastMiss := ""
+		for ai := range st.Fan {
+			arm := &st.Fan[ai]
+			if !MatchScoped(arm.When, payload, nil) {
+				continue
+			}
+			anyMatched = true
+			var elems []any
+			if m := FanMiss(arm.ForEach, payload, &elems); m == "" {
+				anyHealthy = true
+			} else {
+				lastMiss = m
+			}
+			fans = append(fans, armFan{ai, elems})
+		}
+		if anyMatched && !anyHealthy {
+			miss = lastMiss
+		}
+		if !anyMatched {
+			return nil
+		}
+	} else {
+		var elems []any
+		miss = FanMiss(st.ForEach, payload, &elems)
+		fans = append(fans, armFan{-1, elems})
+	}
 	if miss != "" {
 		// A forEach path yielding no array fans ZERO elements — correct
 		// for the odd foreign event, catastrophic as a steady state: the
@@ -485,7 +611,7 @@ func (g *Graph) foldFan(tx *stagestore.Tx, n *graphNode, parentKey []byte, paylo
 		if n.fanNonArrayRun == stageForEachNonArrayWarnRun {
 			zap.L().Warn("[stage] forEach path has not resolved to an array for a long run of inputs — this stage is fanning ZERO elements and its output is silently empty; if the field is a serialized-JSON column at the source, decode it at ingest (jsonColumns) so the path reaches a real array",
 				zap.String("stage", st.Name),
-				zap.String("forEach", st.ForEach),
+				zap.String("forEach", fanPathDesc(st)),
 				zap.String("value_type", miss),
 				zap.Int("consecutive_misses", n.fanNonArrayRun))
 		}
@@ -506,22 +632,28 @@ func (g *Graph) foldFan(tx *stagestore.Tx, n *graphNode, parentKey []byte, paylo
 		identityPath = st.KeyPath[0]
 	}
 	current := map[string]bool{}
-	for _, el := range elems {
-		n.fanned.Add(1)
-		kv, err := ResolvePath(identityPath, el, payload)
-		if err != nil || kv == nil {
-			continue // an unidentifiable element fans nothing (and reconciles away)
-		}
-		elemIn := fanInKey(parentKey, []byte(KeyString(kv)))
-		if current[string(elemIn)] {
-			continue
-		}
-		current[string(elemIn)] = true
-		if err := g.foldOneInput(tx, n, elemIn, el, payload, gen, dirty); err != nil {
-			return err
-		}
-		if err := tx.PutRev(st.Name, fanJoinName, parentKey, elemIn); err != nil {
-			return err
+	for _, f := range fans {
+		for _, el := range f.elems {
+			n.fanned.Add(1)
+			kv, err := ResolvePath(identityPath, el, payload)
+			if err != nil || kv == nil {
+				continue // an unidentifiable element fans nothing (and reconciles away)
+			}
+			ek := []byte(KeyString(kv))
+			if f.ordinal >= 0 {
+				ek = fanArmElemKey(f.ordinal, ek)
+			}
+			elemIn := fanInKey(parentKey, ek)
+			if current[string(elemIn)] {
+				continue
+			}
+			current[string(elemIn)] = true
+			if err := g.foldOneInput(tx, n, elemIn, el, payload, gen, dirty); err != nil {
+				return err
+			}
+			if err := tx.PutRev(st.Name, fanJoinName, parentKey, elemIn); err != nil {
+				return err
+			}
 		}
 	}
 	for pk := range prior {
@@ -635,7 +767,7 @@ func (g *Graph) noteUnkeyedDelete(n *graphNode, keyPath string) {
 // foldDelete retracts one input from a stage: the key it fed refolds
 // without it (possibly to deletion), and the delta cascades.
 func (g *Graph) foldDelete(tx *stagestore.Tx, n *graphNode, inKey []byte, dirty Dirty) error {
-	if n.def.ForEach != "" {
+	if n.def.hasFan() {
 		// The input's tombstone retracts every element it fanned.
 		st := n.def
 		var elems [][]byte
@@ -1041,6 +1173,12 @@ func (g *Graph) emitReshape(tx *stagestore.Tx, st *Stage, obj, parent any) ([]by
 	if err != nil {
 		return nil, false, err
 	}
+	if st.identityEmit {
+		// A synthesized identity stage re-emits its input verbatim
+		// (re-marshaled, so keys sort canonically like every output).
+		bs, err := marshalStageObject(obj)
+		return bs, true, err
+	}
 	emitted := make(map[string]any, len(st.Emit))
 	for i := range st.Emit {
 		e := &st.Emit[i]
@@ -1421,6 +1559,20 @@ const fanJoinName = "\x00fan"
 // fanInKey is a fanned element-input's identity: (parent input key,
 // element out-key rendering), length-framed so any parent key bytes scan
 // correctly.
+// fanArmElemKey namespaces an element identity by its fan arm — a NUL
+// lead (the reserved-namespace convention, see fanJoinName) keeps
+// arm-scoped identities disjoint from single-path forEach's raw element
+// keys, and the uvarint ordinal keeps arms disjoint from each other, so
+// equal element keys via different arms are distinct inputs (UNION ALL).
+func fanArmElemKey(ordinal int, elemKey []byte) []byte {
+	var lead [binary.MaxVarintLen64]byte
+	n := binary.PutUvarint(lead[:], uint64(max(ordinal, 0))) // ordinal is an arm index, never negative
+	out := make([]byte, 0, 1+n+len(elemKey))
+	out = append(out, 0x00)
+	out = append(out, lead[:n]...)
+	return append(out, elemKey...)
+}
+
 func fanInKey(parentKey, elemKey []byte) []byte {
 	var lead [binary.MaxVarintLen64]byte
 	n := binary.PutUvarint(lead[:], uint64(len(parentKey)))
@@ -1436,7 +1588,7 @@ func fanInKey(parentKey, elemKey []byte) []byte {
 // drain time, after the enclosing event is gone, and emits/joins may
 // reach `$parent.`.
 func packStageInput(st *Stage, data, parent any) ([]byte, error) {
-	if st.ForEach == "" {
+	if !st.hasFan() {
 		return marshalStageObject(data)
 	}
 	return marshalStageObject(map[string]any{"e": data, "p": parent})
@@ -1449,7 +1601,7 @@ func unpackStageInput(st *Stage, payload []byte) (data, parent any, err error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	if st.ForEach == "" {
+	if !st.hasFan() {
 		return obj, nil, nil
 	}
 	m, ok := obj.(map[string]any)

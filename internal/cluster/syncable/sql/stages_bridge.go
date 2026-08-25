@@ -17,6 +17,7 @@ type (
 	ProjectionStage = stages.Stage
 	StageMergeEntry = stages.MergeEntry
 	StageEmit       = stages.Emit
+	StageFanArm     = stages.FanArm
 	StageJoin       = stages.Join
 )
 

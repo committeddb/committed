@@ -315,7 +315,11 @@ func (o *dryRunObserver) report(cfg *ProjectionConfig, rep *cluster.DryRunReport
 	sort.Strings(names)
 	for _, name := range names {
 		st := rep.Stages[name]
-		def := &cfg.Stages[stageNamed(cfg, name)]
+		di := stageNamed(cfg, name)
+		if di < 0 {
+			continue // a synthesized re-key/lift stage — its producer reports
+		}
+		def := &cfg.Stages[di]
 		switch {
 		case st.Inputs == 0:
 			from := def.From
@@ -323,7 +327,7 @@ func (o *dryRunObserver) report(cfg *ProjectionConfig, rep *cluster.DryRunReport
 				continue // merges have no direct inputs; their sides report
 			}
 			findings = append(findings, fmt.Sprintf("stage %q folded ZERO inputs — the sampled windows may not cover its input's log region (from %q); target it with ?fromIndex", name, from))
-		case def.ForEach != "" && st.Fanned == 0:
+		case (def.ForEach != "" || len(def.Fan) > 0) && st.Fanned == 0:
 			findings = append(findings, fmt.Sprintf("stage %q received %d inputs but its forEach fanned ZERO elements — if the fan path crosses a serialized-JSON string column, decode it at ingest (jsonColumns)", name, st.Inputs))
 		case st.Keys == 0 && st.Inputs > 0:
 			findings = append(findings, fmt.Sprintf("stage %q received %d inputs but holds ZERO keys — its when/joins rejected everything", name, st.Inputs))

@@ -122,6 +122,21 @@ type Stage struct {
 	// normalized keys; declare the same normalize on any sibling source
 	// sharing the key space.
 	Normalize string `mapstructure:"normalize" json:"normalize,omitempty"`
+	// Fan is the multi-arm forEach — SQL's UNION ALL of lateral fans:
+	// each arm's when selects which INPUTS it applies to (the input is
+	// the unit here, not the element), and every matching arm fans its
+	// forEach path's elements. Element identity is namespaced by arm,
+	// so equal element keys via different arms stay distinct inputs.
+	// Exactly one of forEach or fan; two or more arms (one arm IS
+	// forEach). The doubled-fan killer: created-elements and
+	// added-elements fold through ONE stage instead of parallel fan
+	// stages, parallel aggregates, and a union merge.
+	Fan []FanArm `mapstructure:"fan" json:"fan,omitempty"`
+	// identityEmit marks an engine-SYNTHESIZED identity reshape (see
+	// expandSynthetic): it emits its input object verbatim. Never
+	// declarable; unexported, so it is invisible to config decode and
+	// the fingerprint.
+	identityEmit bool
 	// Merge combines PRIOR stages BY KEY (SQL's FULL OUTER JOIN
 	// USING(key), aliased): for each key any listed upstream holds, the
 	// fold unit is a tuple scoping each upstream's current output under
@@ -148,6 +163,18 @@ type Stage struct {
 	KeyType []string `mapstructure:"keyType" json:"keyType,omitempty"`
 }
 
+// FanArm is one arm of a multi-arm fan (see Stage.Fan).
+type FanArm struct {
+	ForEach string       `mapstructure:"forEach" json:"forEach,omitempty"`
+	When    []WhenClause `mapstructure:"when" json:"when,omitempty"`
+}
+
+// hasFan reports whether the stage fans (single-path forEach or
+// multi-arm fan) — the guards that care about "fanned" care about both.
+func (st *Stage) hasFan() bool {
+	return st.ForEach != "" || len(st.Fan) > 0
+}
+
 // MergeEntry names one merged upstream and its alias in the tuple
 // scope. As defaults to the stage name; admission requires the
 // effective alias to be a path-safe identifier (add `as` for names
@@ -155,6 +182,15 @@ type Stage struct {
 type MergeEntry struct {
 	Stage string `mapstructure:"stage" json:"stage,omitempty"`
 	As    string `mapstructure:"as" json:"as,omitempty"`
+	// Topic makes this side a TOPIC (exactly one of stage or topic)
+	// with its own DECLARED key space — the lift stage, synthesized:
+	// the engine folds the topic through a hidden identity reshape
+	// ("<topic>[<keyPath>]" in stats) feeding the merge as a normal
+	// side, so pw-quoted-class scaffolding is written by the machine.
+	Topic     string   `mapstructure:"topic" json:"topic,omitempty"`
+	KeyPath   []string `mapstructure:"keyPath" json:"keyPath,omitempty"`
+	KeyType   []string `mapstructure:"keyType" json:"keyType,omitempty"`
+	Normalize string   `mapstructure:"normalize" json:"normalize,omitempty"`
 }
 
 // Join is one filtering join of a stage: the stage's inputs
@@ -190,6 +226,16 @@ type Join struct {
 	// absent (nothing to reference), so it participates.
 	Absent bool         `mapstructure:"absent" json:"absent,omitempty"`
 	Where  []WhenClause `mapstructure:"where" json:"where,omitempty"`
+	// Field addresses a STAGE dimension by an EMITTED FIELD instead of
+	// its key — SQL's join-on-any-column, the lp-bypid killer. The
+	// engine synthesizes the re-key stage authors used to write by hand
+	// (visible in stats as "<stage>[<field>]"; same runtime cost as the
+	// manual stage). Non-unique field values resolve to the
+	// bytewise-largest producer key's row — the reshape collision rule,
+	// deterministic. Stage joins only; with field set, on takes exactly
+	// one path, and normalize/onType ARE declarable (a non-key field is
+	// not governed by the producer's key space).
+	Field string `mapstructure:"field" json:"field,omitempty"`
 	// As names the matched dimension row in the stage's REFOLD scope —
 	// the reference-lookup half of joins (SQL: a joined table's columns;
 	// a join that names its row can read it). Emit from/expr, aggregate
@@ -283,6 +329,9 @@ func ValidateShapes(stages []Stage) error {
 		if names[st.Name] {
 			return fmt.Errorf("%s: a second stage named %q", where, st.Name)
 		}
+		if strings.ContainsAny(st.Name, "[]") {
+			return fmt.Errorf("%s: brackets in stage names are reserved for the engine's synthesized re-key stages (\"<stage>[<field>]\")", where)
+		}
 		if st.From == "" && len(st.Merge) == 0 {
 			return fmt.Errorf("%s: from is required — a topic id, or a prior stage's name (or merge, to combine prior stages by key)", where)
 		}
@@ -306,13 +355,36 @@ func ValidateShapes(stages []Stage) error {
 				return err
 			}
 		}
-		if st.ForEach != "" && len(st.KeyPath) > 1 && st.ElementKey == "" {
+		if st.ForEach != "" && len(st.Fan) > 0 {
+			return fmt.Errorf("%s: exactly one of forEach or fan (fan IS the multi-path forEach)", where)
+		}
+		if len(st.Fan) == 1 {
+			return fmt.Errorf("%s: fan takes two or more arms — a single path is just forEach", where)
+		}
+		for ai := range st.Fan {
+			arm := &st.Fan[ai]
+			aw := fmt.Sprintf("%s fan arm %d", where, ai+1)
+			if arm.ForEach == "" {
+				return fmt.Errorf("%s: forEach is required (the arm's element path)", aw)
+			}
+			if !MultiValuedPath(arm.ForEach) {
+				return fmt.Errorf("%s: forEach [%s] is single-valued — a fan arm fans an array into element-inputs", aw, arm.ForEach)
+			}
+			if err := ValidateWhen(arm.When, aw+" when"); err != nil {
+				return err
+			}
+			// The arm's when selects INPUTS — there is no enclosing scope.
+			if err := RejectParentPaths(arm.When, aw+" when"); err != nil {
+				return err
+			}
+		}
+		if st.hasFan() && len(st.KeyPath) > 1 && st.ElementKey == "" {
 			return fmt.Errorf("%s: a forEach stage with a composite keyPath needs elementKey (the element's own identity)", where)
 		}
 		if err := ValidateWhen(st.When, where); err != nil {
 			return err
 		}
-		if st.ForEach == "" {
+		if !st.hasFan() {
 			if err := RejectParentPaths(st.When, where+" when"); err != nil {
 				return err
 			}
@@ -320,7 +392,7 @@ func ValidateShapes(stages []Stage) error {
 				return err
 			}
 		}
-		if st.Reduce == "liveSet" && st.ForEach != "" {
+		if st.Reduce == "liveSet" && st.hasFan() {
 			return fmt.Errorf("%s: forEach with reduce = \"liveSet\": a fanned liveSet's delete evidence is per-element, and a delete-shaped event carrying no elements would be silently lost — fan in a prior stage and liveSet its outputs downstream", where)
 		}
 		if len(st.DeleteWhen) > 0 {
@@ -369,7 +441,7 @@ func ValidateShapes(stages []Stage) error {
 			return fmt.Errorf("%s: forEach path [%s] is single-valued — forEach fans an array into element-inputs; drop it for one input per entity", where, st.ForEach)
 		}
 		if st.ElementKey != "" {
-			if st.ForEach == "" {
+			if !st.hasFan() {
 				return fmt.Errorf("%s: elementKey is only for forEach stages (it names a fanned element's identity)", where)
 			}
 			if err := RejectMultiValued(st.ElementKey, where+": elementKey"); err != nil {
@@ -386,6 +458,7 @@ func ValidateShapes(stages []Stage) error {
 			return err
 		}
 		joinAliases := make(map[string]bool, len(st.Joins))
+		fieldJoinSpaces := map[string]string{}
 		for ji, j := range st.Joins {
 			jw := fmt.Sprintf("%s join %d (%q)", where, ji+1, j.target())
 			if !ValidNormalize(j.Normalize) {
@@ -397,6 +470,22 @@ func ValidateShapes(stages []Stage) error {
 			if j.Topic != "" && IndexOf(stages, j.Topic) >= 0 {
 				return fmt.Errorf("%s: %q is a stage — join it with from = %q (topic joins address topics)", jw, j.Topic, j.Topic)
 			}
+			if j.Field != "" {
+				if j.From == "" {
+					return fmt.Errorf("%s: field addresses a STAGE's emitted field — a topic join addresses the entity key; drop field, or fold the topic through a stage first", jw)
+				}
+				if len(j.On) != 1 {
+					return fmt.Errorf("%s: with field, on takes exactly one path (the reference to that one emitted field)", jw)
+				}
+				if err := RejectMultiValued(j.Field, jw+": field"); err != nil {
+					return err
+				}
+				space := j.Normalize + "\x00" + strings.Join(j.OnType, ",")
+				if prior, ok := fieldJoinSpaces[j.From+"\x00"+j.Field]; ok && prior != space {
+					return fmt.Errorf("%s: two field joins address %s[%s] with different normalize/onType — the synthesized re-key stage has ONE key space; declare them identically", jw, j.From, j.Field)
+				}
+				fieldJoinSpaces[j.From+"\x00"+j.Field] = space
+			}
 			if j.From != "" {
 				fi := IndexOf(stages, j.From)
 				if fi < 0 {
@@ -405,7 +494,7 @@ func ValidateShapes(stages []Stage) error {
 				if fi >= i {
 					return fmt.Errorf("%s: from %q references a stage at or after this one — stages join in manifest order (move the producer above its consumer)", jw, j.From)
 				}
-				if j.Normalize != "" {
+				if j.Field == "" && j.Normalize != "" {
 					return fmt.Errorf("%s: normalize is not declarable on a stage join — references render in the joined stage's key space, so the join inherits stage %q's normalize automatically; declare it on that stage", jw, j.From)
 				}
 			}
@@ -417,7 +506,7 @@ func ValidateShapes(stages []Stage) error {
 					return err
 				}
 			}
-			if j.From != "" {
+			if j.From != "" && j.Field == "" {
 				if fi := IndexOf(stages, j.From); fi >= 0 {
 					if arity, _, _ := ResolvedKeySpace(stages, fi); len(j.On) != arity {
 						return fmt.Errorf("%s: on has %d path(s) but stage %q keys by %d path(s) — a stage join's on addresses the joined stage's key, so the arities must match, in the same order", jw, len(j.On), j.From, arity)
@@ -448,7 +537,7 @@ func ValidateShapes(stages []Stage) error {
 			if j.Optional && j.As == "" {
 				return fmt.Errorf("%s: optional is only meaningful with as — an unnamed join only filters, and an optional filter is no filter", jw)
 			}
-			if j.From != "" && len(j.OnType) > 0 {
+			if j.From != "" && j.Field == "" && len(j.OnType) > 0 {
 				return fmt.Errorf("%s: onType is not declarable on a stage join — references render in the joined stage's key space, so the join inherits stage %q's keyType automatically; declare it on that stage", jw, j.From)
 			}
 			if err := validateKeyTypes(j.OnType, len(j.On), jw+" onType"); err != nil {
@@ -505,7 +594,7 @@ func ValidateShapes(stages []Stage) error {
 				if err := ValidateWhen(e.Where, ew+" where"); err != nil {
 					return err
 				}
-				if st.ForEach == "" {
+				if !st.hasFan() {
 					if err := RejectParentPaths(e.Where, ew+" where"); err != nil {
 						return err
 					}
@@ -561,22 +650,44 @@ func validateMergeStage(stages []Stage, st *Stage, names map[string]bool, where 
 	seenAlias := map[string]bool{}
 	for ei, e := range st.Merge {
 		ew := fmt.Sprintf("%s merge entry %d", where, ei+1)
-		if e.Stage == "" {
-			return fmt.Errorf("%s: stage is required", ew)
+		if (e.Stage == "") == (e.Topic == "") {
+			return fmt.Errorf("%s: exactly one of stage or topic is required", ew)
 		}
-		if !names[e.Stage] {
-			if IndexOf(stages, e.Stage) >= 0 {
-				return fmt.Errorf("%s: %q references a stage at or after this one — stages merge in manifest order (move the producer above its consumer)", ew, e.Stage)
+		if e.Topic != "" {
+			if len(e.KeyPath) == 0 {
+				return fmt.Errorf("%s: a topic merge side declares its own keyPath (a topic has no stage key space to inherit)", ew)
 			}
-			return fmt.Errorf("%s: %q names no declared stage (merge combines STAGES; fold a topic through a stage first)", ew, e.Stage)
+			if !ValidNormalize(e.Normalize) {
+				return fmt.Errorf("%s: normalize %q is not supported (want %q)", ew, e.Normalize, NormalizeLower)
+			}
+			if err := validateKeyTypes(e.KeyType, len(e.KeyPath), ew+" keyType"); err != nil {
+				return err
+			}
+		} else {
+			if len(e.KeyPath) > 0 || len(e.KeyType) > 0 || e.Normalize != "" {
+				return fmt.Errorf("%s: keyPath/keyType/normalize are only for TOPIC sides — a stage side's key space is the stage's own", ew)
+			}
+			if !names[e.Stage] {
+				if IndexOf(stages, e.Stage) >= 0 {
+					return fmt.Errorf("%s: %q references a stage at or after this one — stages merge in manifest order (move the producer above its consumer)", ew, e.Stage)
+				}
+				return fmt.Errorf("%s: %q names no declared stage (merge combines STAGES; or declare a topic side: { topic, keyPath, as })", ew, e.Stage)
+			}
 		}
-		if seenStage[e.Stage] {
-			return fmt.Errorf("%s: stage %q merged twice", ew, e.Stage)
+		side := e.Stage
+		if side == "" {
+			side = e.Topic + "[" + strings.Join(e.KeyPath, ",") + "]"
 		}
-		seenStage[e.Stage] = true
+		if seenStage[side] {
+			return fmt.Errorf("%s: side %q merged twice", ew, side)
+		}
+		seenStage[side] = true
 		alias := e.As
 		if alias == "" {
 			alias = e.Stage
+			if alias == "" {
+				alias = e.Topic
+			}
 		}
 		if !pathSafeIdent(alias) {
 			return fmt.Errorf("%s: alias %q is not addressable by a jsonpath dot segment — add as = %q (letters, digits, underscore)", ew, alias, "<identifier>")
@@ -590,20 +701,38 @@ func validateMergeStage(stages []Stage, st *Stage, names map[string]bool, where 
 	// rendering disagreement (arity, keyType, normalize) would pair
 	// nothing — silently, since an unpaired side is legal full-outer
 	// absence. Loud here instead.
-	baseArity, baseKT, baseNorm := ResolvedKeySpace(stages, IndexOf(stages, st.Merge[0].Stage))
-	for _, e := range st.Merge[1:] {
-		arity, kt, norm := ResolvedKeySpace(stages, IndexOf(stages, e.Stage))
+	baseArity, baseKT, baseNorm := mergeSideSpace(stages, &st.Merge[0])
+	baseName := mergeSideName(&st.Merge[0])
+	for ei := range st.Merge[1:] {
+		e := &st.Merge[ei+1]
+		arity, kt, norm := mergeSideSpace(stages, e)
 		if arity != baseArity {
-			return fmt.Errorf("%s: merged stages disagree on key arity (%q keys by %d part(s), %q by %d) — merged sides pair by key, so their key spaces must agree", where, st.Merge[0].Stage, baseArity, e.Stage, arity)
+			return fmt.Errorf("%s: merged sides disagree on key arity (%q keys by %d part(s), %q by %d) — merged sides pair by key, so their key spaces must agree", where, baseName, baseArity, mergeSideName(e), arity)
 		}
 		if !equalKeyTypes(baseKT, kt, baseArity) {
-			return fmt.Errorf("%s: merged stages disagree on keyType (%q vs %q) — a rendering disagreement pairs NOTHING, silently; declare matching keyType on both", where, st.Merge[0].Stage, e.Stage)
+			return fmt.Errorf("%s: merged sides disagree on keyType (%q vs %q) — a rendering disagreement pairs NOTHING, silently; declare matching keyType on both", where, baseName, mergeSideName(e))
 		}
 		if norm != baseNorm {
-			return fmt.Errorf("%s: merged stages disagree on normalize (%q declares %q, %q declares %q) — a rendering disagreement pairs NOTHING, silently; declare matching normalize on both", where, st.Merge[0].Stage, baseNorm, e.Stage, norm)
+			return fmt.Errorf("%s: merged sides disagree on normalize (%q declares %q, %q declares %q) — a rendering disagreement pairs NOTHING, silently; declare matching normalize on both", where, baseName, baseNorm, mergeSideName(e), norm)
 		}
 	}
 	return nil
+}
+
+// mergeSideSpace resolves one merge side's key space: a stage side
+// through ResolvedKeySpace, a topic side from its declaration.
+func mergeSideSpace(stages []Stage, e *MergeEntry) (int, []string, string) {
+	if e.Topic != "" {
+		return len(e.KeyPath), e.KeyType, e.Normalize
+	}
+	return ResolvedKeySpace(stages, IndexOf(stages, e.Stage))
+}
+
+func mergeSideName(e *MergeEntry) string {
+	if e.Topic != "" {
+		return e.Topic
+	}
+	return e.Stage
 }
 
 // rejectFoldTimeAliasRefs guards the grammar's newest seam: the
@@ -657,6 +786,14 @@ func rejectFoldTimeAliasRefs(st *Stage, aliases map[string]bool, where string) e
 	}
 	if st.ForEach != "" {
 		if err := checkPath(st.ForEach, "forEach"); err != nil {
+			return err
+		}
+	}
+	for ai := range st.Fan {
+		if err := checkPath(st.Fan[ai].ForEach, "fan forEach"); err != nil {
+			return err
+		}
+		if err := checkWhens(st.Fan[ai].When, "fan when path"); err != nil {
 			return err
 		}
 	}
@@ -714,7 +851,7 @@ func pathSafeIdent(s string) bool {
 func ResolvedKeySpace(stages []Stage, i int) (arity int, keyType []string, normalize string) {
 	st := &stages[i]
 	if len(st.Merge) > 0 {
-		return ResolvedKeySpace(stages, IndexOf(stages, st.Merge[0].Stage))
+		return mergeSideSpace(stages, &st.Merge[0])
 	}
 	return len(st.KeyPath), st.KeyType, st.Normalize
 }

@@ -215,7 +215,7 @@ func TestMergeValidated(t *testing.T) {
 			s[2].Joins = []Join{{Topic: "d", On: []string{"$.x"}}}
 		}, "joins are not applicable to a merge stage"},
 		{"one entry", func(s []Stage) { s[2].Merge = s[2].Merge[:1] }, "at least two prior stages"},
-		{"duplicate", func(s []Stage) { s[2].Merge[1].Stage = "a" }, `stage "a" merged twice`},
+		{"duplicate", func(s []Stage) { s[2].Merge[1].Stage = "a" }, `side "a" merged twice`},
 		{"unknown", func(s []Stage) { s[2].Merge[1].Stage = "nope" }, "names no declared stage"},
 		{"from and merge", func(s []Stage) { s[2].From = "a" }, "exactly one of from or merge"},
 		{"alias unsafe", func(s []Stage) { s[2].Merge[1].As = "has-dash" }, "not addressable by a jsonpath dot segment"},
