@@ -2,6 +2,7 @@ package sql
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -30,6 +31,16 @@ func feedOf(actuals ...*cluster.Actual) cluster.DryRunFeed {
 		}
 		return nil
 	}
+}
+
+// nRowActuals builds n same-payload actuals (the finding floor means
+// signature assertions need realistic sample sizes).
+func nRowActuals(topic, payload string, n int) []*cluster.Actual {
+	out := make([]*cluster.Actual, n)
+	for i := range out {
+		out[i] = rowActual(uint64(i+1), topic, fmt.Sprintf("k%d", i), payload)
+	}
+	return out
 }
 
 func rowActual(index uint64, topic, key, payload string) *cluster.Actual {
@@ -87,12 +98,21 @@ set = [ { column = "v", from = "$.job" } ]
 	rep, err := p.DryRun(context.Background(), feedOf(
 		rowActual(1, "txns", "t1", `{"id":"t1","jobId":"j1"}`),
 		rowActual(2, "txns", "t2", `{"id":"t2","jobId":"j2"}`),
-		// visits reference a workarea dimension that never arrives.
-		rowActual(3, "visits", "v1", `{"id":"v1","waId":"w9"}`),
 	), cluster.DryRunOptions{})
 	require.NoError(t, err)
+	// visits reference a workarea dimension that never arrives — at a
+	// sample size the finding floor treats as evidence.
+	rep2, err := p.DryRun(context.Background(), func(yield func(*cluster.Actual) error) error {
+		for _, a := range nRowActuals("visits", `{"id":"v1","waId":"w9"}`, 60) {
+			if err := yield(a); err != nil {
+				return err
+			}
+		}
+		return nil
+	}, cluster.DryRunOptions{})
+	require.NoError(t, err)
 
-	require.Equal(t, 3, rep.Entries)
+	require.Equal(t, 2, rep.Entries)
 
 	// The healthy stage: counted, keyed, sampled.
 	live := rep.Stages["live"]
@@ -102,11 +122,14 @@ set = [ { column = "v", from = "$.job" } ]
 	require.Contains(t, string(live.Samples[0]), `"job"`)
 
 	// The join that never resolved: counted per join and named in findings.
-	joined := rep.Stages["joined"]
+	joined := rep2.Stages["joined"]
 	require.Len(t, joined.Joins, 1)
 	require.Equal(t, int64(0), joined.Joins[0].Hits)
-	require.Equal(t, int64(1), joined.Joins[0].Misses)
-	requireFinding(t, rep.Findings, "never resolved a dimension row")
+	// Attempts count at REFOLD time, so same-key re-emissions compound;
+	// what matters for the finding is zero hits over a floor-clearing
+	// miss count.
+	require.GreaterOrEqual(t, joined.Joins[0].Misses, int64(60))
+	requireFinding(t, rep2.Findings, "never resolved a dimension row")
 }
 
 // The typed-when class: a rule whose string literal faces boolean
@@ -136,19 +159,18 @@ when = [ { path = "$.billed", equals = "true" } ]
 set  = [ { column = "amount", from = "$.amount" } ]
 `)
 	rep, err := p.DryRun(context.Background(), feedOf(
-		rowActual(1, "billing", "b1", `{"id":"b1","billed":true,"amount":5}`),
-		rowActual(2, "billing", "b2", `{"id":"b2","billed":false,"amount":7}`),
+		nRowActuals("billing", `{"id":"b","billed":true,"amount":5}`, 60)...,
 	), cluster.DryRunOptions{})
 	require.NoError(t, err)
 
 	require.Len(t, rep.Sources, 1)
 	billing := rep.Sources[0]
-	require.Equal(t, int64(2), billing.Seen)
-	require.Equal(t, int64(2), billing.Matched, "the source-level when is empty — rules carry the filter")
+	require.Equal(t, int64(60), billing.Seen)
+	require.Equal(t, int64(60), billing.Matched, "the source-level when is empty — rules carry the filter")
 	require.Len(t, billing.RuleMatches, 1)
 	require.Equal(t, int64(0), billing.RuleMatches[0])
 	require.NotEmpty(t, billing.Hints)
-	require.Contains(t, strings.Join(billing.Hints, "\n"), "boolean×2",
+	require.Contains(t, strings.Join(billing.Hints, "\n"), "boolean×60",
 		"the hint must say the values were boolean while the literal was a string")
 	requireFinding(t, rep.Findings, "matched ZERO")
 }
@@ -274,9 +296,13 @@ from = "m"
 [[projection.source.rules]]
 set = [ { column = "v", from = "$.v" } ]
 `)
-	rep, err := p.DryRun(context.Background(), feedOf(
-		rowActual(1, "topic-a", "k1", `{"k":"k1","x":1}`),
-	), cluster.DryRunOptions{})
+	// Varied payloads so each fold emits a delta (identical re-emissions
+	// suppress, and merge INPUTS are side deltas).
+	var seed []*cluster.Actual
+	for i := 0; i < 60; i++ {
+		seed = append(seed, rowActual(uint64(i+1), "topic-a", fmt.Sprintf("k%d", i), fmt.Sprintf(`{"k":"k%d","x":%d}`, i, i)))
+	}
+	rep, err := p.DryRun(context.Background(), feedOf(seed...), cluster.DryRunOptions{})
 	require.NoError(t, err)
 	require.Equal(t, 0, rep.Stages["m"].Keys, "the notNull gate fails while side b is unsampled")
 	requireFinding(t, rep.Findings, "under-sampling, not a config fault")

@@ -16,6 +16,23 @@ import (
 // misleading zeros; spreading the budget samples every region.
 const dryRunWindows = 8
 
+// windowCeiling reports the raft index at which window wi must stop —
+// the smallest OTHER start above wi's start (windows may run in any
+// order; newest-first is the default).
+func windowCeiling(starts []uint64, wi int) (uint64, bool) {
+	var best uint64
+	found := false
+	for i, s := range starts {
+		if i == wi || s <= starts[wi] {
+			continue
+		}
+		if !found || s < best {
+			best, found = s, true
+		}
+	}
+	return best, found
+}
+
 // dryRunDefaultEntries is the sampling budget when the caller names none.
 const dryRunDefaultEntries = 100_000
 
@@ -42,7 +59,14 @@ func (db *DB) DryRunSyncable(ctx context.Context, mimeType string, data []byte, 
 	if opts.FromIndex > 0 || applied == 0 {
 		starts = []uint64{opts.FromIndex}
 	} else {
-		for i := 0; i < dryRunWindows; i++ {
+		// NEWEST-FIRST: the tail region is both the most diagnostic
+		// (activity clusters late in a CDC log) and the slowest to read
+		// (the active segment contends with the writer) — sampling it
+		// while the budget and deadline are fresh means a timeout eats
+		// cheap sealed-region coverage instead of the region that
+		// matters (field-measured: a whole-log pass would otherwise
+		// spend its deadline inside the tail window).
+		for i := dryRunWindows - 1; i >= 0; i-- {
 			starts = append(starts, applied*uint64(i)/dryRunWindows)
 		}
 	}
@@ -84,7 +108,7 @@ func (db *DB) DryRunSyncable(ctx context.Context, mimeType string, data []byte, 
 					stop = "eof"
 					break
 				}
-				if wi+1 < len(starts) && a.Index >= starts[wi+1] {
+				if next, ok := windowCeiling(starts, wi); ok && a.Index >= next {
 					stop = "boundary"
 					break
 				}
@@ -121,7 +145,14 @@ func (db *DB) DryRunSyncable(ctx context.Context, mimeType string, data []byte, 
 	// the end of the log, so an under-filled entry count means complete
 	// coverage of the requested region, not a bound (the field inferred
 	// a silent time-limit from exactly this shape).
-	complete := len(rep.Windows) > 0 && rep.Windows[0].FromIndex == 0 && rep.Truncated == ""
+	complete := len(rep.Windows) > 0 && rep.Truncated == ""
+	sawZero := false
+	for wi := range rep.Windows {
+		if rep.Windows[wi].FromIndex == 0 {
+			sawZero = true
+		}
+	}
+	complete = complete && sawZero
 	for wi := range rep.Windows {
 		if rep.Windows[wi].Stop == "eof" {
 			rep.Findings = append(rep.Findings, fmt.Sprintf("note: window %d (fromIndex %d) read to END OF LOG — its %d entries are complete coverage from that index", wi+1, rep.Windows[wi].FromIndex, rep.Windows[wi].Entries))

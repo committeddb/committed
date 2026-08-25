@@ -21,6 +21,14 @@ import (
 // small enough to read.
 const dryRunSampleLimit = 3
 
+// dryRunFindingFloor is the minimum sample a SIGNATURE finding needs:
+// a join at 0 hits in 22,846 attempts is evidence, at 0-in-2 it is
+// noise wearing the same words (field-reported: both looked alike at a
+// glance). Below the floor the counters stay in the stage/source rows
+// — visible, just not alleged. Coverage, dead-letter, and
+// lost-retraction findings are exempt: those are facts at any count.
+const dryRunFindingFloor = 50
+
 // DryRun implements cluster.DryRunner: fold the fed sample through this
 // projection's REAL stage graph into a throwaway store, evaluate every
 // source's and rule's matching observationally, and report counters,
@@ -409,7 +417,7 @@ func (o *dryRunObserver) report(cfg *ProjectionConfig, rep *cluster.DryRunReport
 			zeroInput = append(zeroInput, name)
 		case (def.ForEach != "" || len(def.Fan) > 0) && st.Fanned == 0:
 			findings = append(findings, fmt.Sprintf("stage %q received %d inputs but its forEach fanned ZERO elements — if the fan path crosses a serialized-JSON string column, decode it at ingest (jsonColumns)", name, st.Inputs))
-		case st.Keys == 0 && st.Inputs > 0:
+		case st.Keys == 0 && st.Inputs >= dryRunFindingFloor:
 			// A MERGE with an under-sampled SIDE is a coverage fact, not
 			// a config fault: its when (the tuple gate) can only fail
 			// while the missing side's deltas live outside the sampled
@@ -441,7 +449,7 @@ func (o *dryRunObserver) report(cfg *ProjectionConfig, rep *cluster.DryRunReport
 			findings = append(findings, fmt.Sprintf("stage %q received %d inputs but holds ZERO keys — its when/joins rejected everything", name, st.Inputs))
 		}
 		for _, j := range st.Joins {
-			if !j.Absent && j.Hits == 0 && j.Misses > 0 {
+			if !j.Absent && j.Hits == 0 && j.Misses >= dryRunFindingFloor {
 				findings = append(findings, fmt.Sprintf("stage %q join on %q never resolved a dimension row (0 hits / %d attempts) — check the on path, the key space (normalize/keyType), and whether the dimension's region was sampled", name, j.Target, j.Misses))
 			}
 		}
@@ -459,12 +467,12 @@ func (o *dryRunObserver) report(cfg *ProjectionConfig, rep *cluster.DryRunReport
 		for ri, r := range so.rules {
 			row.RuleMatches = append(row.RuleMatches, r.matched)
 			row.Hints = append(row.Hints, r.hints()...)
-			if r.seen > 0 && r.matched == 0 {
+			if r.seen >= dryRunFindingFloor && r.matched == 0 {
 				findings = append(findings, fmt.Sprintf("source (topic %q) rule %d matched ZERO of %d events — see its hints for the value families actually seen", so.topic, ri+1, r.seen))
 			}
 		}
 		row.Hints = append(row.Hints, so.when.hints()...)
-		if so.topic != "" && so.when.seen > 0 && so.when.matched == 0 {
+		if so.topic != "" && so.when.seen >= dryRunFindingFloor && so.when.matched == 0 {
 			findings = append(findings, fmt.Sprintf("source (topic %q) matched ZERO of %d events — see its hints for the value families actually seen", so.topic, so.when.seen))
 		}
 		srcRows = append(srcRows, row)
