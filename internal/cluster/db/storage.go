@@ -86,7 +86,10 @@ type Storage interface {
 	// ErrVersionNotFound if the ID exists but the pinned version
 	// doesn't.
 	ResolveType(ref cluster.TypeRef) (*cluster.Type, error)
-	Reader(id string) ActualReader       // Gets current index by id cache. If id is not known, index is 0
+	Reader(id string) ActualReader
+	// ReaderAt reads committed Actuals from an arbitrary raft index —
+	// the dry-run's window sampler (checkpoint-tracked reads use Reader).
+	ReaderAt(index uint64) ActualReader  // Gets current index by id cache. If id is not known, index is 0
 	Position(id string) cluster.Position // Gets current index by id cache. If id is not known position is 0
 	// IngestSourceSeqHighwater returns the highest source sequence
 	// (cluster.Proposal.SourceSeq) applied for the given ingestable id,

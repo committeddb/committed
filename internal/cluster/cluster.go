@@ -22,6 +22,11 @@ type Cluster interface {
 	// disk. A later same-id create starts fresh from a full snapshot.
 	DeleteIngestable(ctx context.Context, id string) error
 	ProposeSyncable(ctx context.Context, c *Configuration) error
+	// DryRunSyncable rehearses a syncable configuration against a
+	// bounded sample of the committed log — full admission-level
+	// parsing, a real fold into a throwaway store, and a diagnostic
+	// report — without proposing, storing, or touching a destination.
+	DryRunSyncable(ctx context.Context, mimeType string, data []byte, opts DryRunOptions) (*DryRunReport, error)
 	// DeleteSyncable removes a syncable: its config and checkpoint are deleted
 	// atomically and, unless keepData is set, the owner tears down the
 	// syncable's destination state (best-effort — for a SQL syncable, dropping

@@ -132,54 +132,67 @@ func Match(clauses []WhenClause, jsonData any) bool {
 // matches nothing (admission rejects it where no parent can exist).
 func MatchScoped(clauses []WhenClause, jsonData, parent any) bool {
 	for _, c := range clauses {
-		if c.Expr != "" {
-			n := c.compiled
-			if n == nil {
-				var err error
-				if n, err = Compile(c.Expr); err != nil {
-					return false // admission rejects this; unreachable via a validated config
-				}
-			}
-			v, err := Eval(n, jsonData, parent)
-			if err != nil || v != true {
-				return false
-			}
-			continue
-		}
-		v, err := ResolvePath(c.Path, jsonData, parent)
-		if err != nil {
+		if ok, _ := ClauseEval(c, jsonData, parent); !ok {
 			return false
-		}
-		switch {
-		case c.Null:
-			if v != nil {
-				return false
-			}
-		case c.NotNull:
-			if v == nil {
-				return false
-			}
-		case c.NotEquals != nil:
-			// SQL semantics: null never satisfies <>, and a cross-family
-			// value (string vs number literal) is no match either way.
-			if v == nil || !sameScalarFamily(c.NotEquals, v) || literalEquals(c.NotEquals, v) {
-				return false
-			}
-		case c.GreaterThan != nil:
-			if !numericallyOrdered(v, c.GreaterThan, false) {
-				return false
-			}
-		case c.LessThan != nil:
-			if !numericallyOrdered(v, c.LessThan, true) {
-				return false
-			}
-		default:
-			if !literalEquals(c.Equals, v) {
-				return false
-			}
 		}
 	}
 	return true
+}
+
+// ClauseEval evaluates ONE when clause and reports the value it judged
+// — the expression's result for an expr arm, the resolved path value
+// otherwise (nil when missing or unresolvable). Introspection (the
+// dry-run's value-family hints) leans on the second return; MatchScoped
+// composes clauses through here, so matching and observation can never
+// diverge.
+func ClauseEval(c WhenClause, jsonData, parent any) (bool, any) {
+	if c.Expr != "" {
+		n := c.compiled
+		if n == nil {
+			var err error
+			if n, err = Compile(c.Expr); err != nil {
+				return false, nil // admission rejects this; unreachable via a validated config
+			}
+		}
+		v, err := Eval(n, jsonData, parent)
+		if err != nil {
+			return false, nil
+		}
+		return v == true, v
+	}
+	v, err := ResolvePath(c.Path, jsonData, parent)
+	if err != nil {
+		return false, nil
+	}
+	switch {
+	case c.Null:
+		if v != nil {
+			return false, v
+		}
+	case c.NotNull:
+		if v == nil {
+			return false, v
+		}
+	case c.NotEquals != nil:
+		// SQL semantics: null never satisfies <>, and a cross-family
+		// value (string vs number literal) is no match either way.
+		if v == nil || !sameScalarFamily(c.NotEquals, v) || literalEquals(c.NotEquals, v) {
+			return false, v
+		}
+	case c.GreaterThan != nil:
+		if !numericallyOrdered(v, c.GreaterThan, false) {
+			return false, v
+		}
+	case c.LessThan != nil:
+		if !numericallyOrdered(v, c.LessThan, true) {
+			return false, v
+		}
+	default:
+		if !literalEquals(c.Equals, v) {
+			return false, v
+		}
+	}
+	return true, v
 }
 
 // sameScalarFamily reports whether a decoded value is comparable to a

@@ -62,6 +62,13 @@ type graphNode struct {
 	unkeyedDeletes atomic.Int64
 	// unkeyedDeleteWarned one-shots the warn log (worker goroutine only).
 	unkeyedDeleteWarned bool
+	// joinFlows counts each join's dimension-resolution outcomes since
+	// this worker started — hit = a row matched (passing the join's
+	// where) — indexed parallel to def.Joins. With inputs/fanned these
+	// split "a join never resolved" out of "the when rejected
+	// everything". Required joins count during qualification, optional
+	// ones during lookup. Same atomicity contract as inputs/fanned.
+	joinFlows []joinFlowCount
 	// dimConsumers are the joins (of LATER stages) that use THIS stage's
 	// outputs as their dimension rows — maintained by refoldKey as the
 	// outputs change, fan-out marking their dependents dirty.
@@ -81,6 +88,8 @@ type mergeRef struct {
 	node  *graphNode
 	alias string
 }
+
+type joinFlowCount struct{ hits, misses atomic.Int64 }
 
 type dimRef struct {
 	node *graphNode
@@ -115,7 +124,7 @@ func BuildGraph(stages []Stage) *Graph {
 	copy(owned, stages)
 	for i := range owned {
 		owned[i].Joins = append([]Join(nil), owned[i].Joins...)
-		nodes[i] = &graphNode{def: &owned[i]}
+		nodes[i] = &graphNode{def: &owned[i], joinFlows: make([]joinFlowCount, len(owned[i].Joins))}
 		g.byName[owned[i].Name] = nodes[i]
 	}
 	g.order = nodes
@@ -332,6 +341,47 @@ func (g *Graph) foldUpsert(tx *stagestore.Tx, n *graphNode, inKey []byte, payloa
 	return g.foldOneInput(tx, n, inKey, payload, nil, gen, dirty)
 }
 
+// FoldActual folds one committed Actual's entities into the graph —
+// the shared ingress of the live worker, the recovery pass, and the
+// dry-run (one loop, so the three can never diverge): upserts and
+// tombstones route to consuming stages, refresh markers sweep epochs,
+// and the drain refolds every dirtied key. The caller owns frontier
+// bookkeeping.
+func (g *Graph) FoldActual(tx *stagestore.Tx, a *cluster.Actual) error {
+	dirty := Dirty{}
+	for _, e := range a.Entities {
+		if !g.ConsumesTopic(e.Type.ID) {
+			continue
+		}
+		switch e.Variant() {
+		case cluster.EntityVariantDelete:
+			if err := g.FoldTopicDelete(tx, e.Type.ID, e.Key, dirty); err != nil {
+				return err
+			}
+		case cluster.EntityVariantRow:
+			obj, err := DecodeObject(e.Data)
+			if err != nil {
+				return cluster.Permanent(fmt.Errorf("[projection.stage] unmarshal entity data: %w", err))
+			}
+			if err := g.FoldTopicUpsert(tx, e.Type.ID, e.Key, obj, e.Generation, dirty); err != nil {
+				return err
+			}
+		case cluster.EntityVariantRefresh:
+			// The epoch sweep: inputs and dimension rows this re-snapshot
+			// did not re-assert retract, refolding their keys as explicit
+			// deltas — downstream (including stage-fed table sources)
+			// never needs sweep semantics of its own.
+			if err := g.SweepEpochs(tx, e.Type.ID, e.Generation, dirty); err != nil {
+				return err
+			}
+		default:
+			// Future variants fold nothing here; the source-side apply
+			// dead-letters them loudly.
+		}
+	}
+	return g.Drain(tx, dirty)
+}
+
 // FanMiss resolves a forEach path and reports why the fan is empty ("" =
 // healthy). The subtlety making this a function: the jsonpath library's
 // wildcard returns an EMPTY match set — no error — when the path
@@ -372,7 +422,16 @@ func FanMiss(path string, payload any, elems *[]any) string {
 func (g *Graph) FlowCounts() map[string]FlowCount {
 	out := make(map[string]FlowCount, len(g.order))
 	for _, n := range g.order {
-		out[n.def.Name] = FlowCount{Inputs: n.inputs.Load(), Fanned: n.fanned.Load(), UnkeyedDeletes: n.unkeyedDeletes.Load()}
+		fc := FlowCount{Inputs: n.inputs.Load(), Fanned: n.fanned.Load(), UnkeyedDeletes: n.unkeyedDeletes.Load()}
+		for ji := range n.def.Joins {
+			j := &n.def.Joins[ji]
+			target := j.Topic
+			if target == "" {
+				target = j.From
+			}
+			fc.Joins = append(fc.Joins, JoinFlow{Target: target, Alias: j.As, Absent: j.Absent, Optional: j.Optional, Hits: n.joinFlows[ji].hits.Load(), Misses: n.joinFlows[ji].misses.Load()})
+		}
+		out[n.def.Name] = fc
 	}
 	return out
 }
@@ -383,6 +442,20 @@ type FlowCount struct {
 	Fanned int64
 	// UnkeyedDeletes counts lost retractions — see graphNode.
 	UnkeyedDeletes int64
+	// Joins are the per-join resolution counters — see graphNode.
+	Joins []JoinFlow
+}
+
+// JoinFlow is one join's resolution counters plus enough declaration to
+// interpret them (a high miss count on an ABSENT join is healthy
+// suppression evidence; on a required join it is rejection).
+type JoinFlow struct {
+	Target   string
+	Alias    string
+	Absent   bool
+	Optional bool
+	Hits     int64
+	Misses   int64
 }
 
 // stageForEachNonArrayWarnRun is how many CONSECUTIVE non-array forEach
@@ -638,7 +711,7 @@ func (g *Graph) refoldKey(tx *stagestore.Tx, n *graphNode, outKey []byte, dirty 
 	if err != nil {
 		return err
 	}
-	out, live, err := refoldOutput(tx, st, outKey)
+	out, live, err := g.refoldOutput(tx, st, outKey)
 	if err != nil {
 		return err
 	}
@@ -750,18 +823,18 @@ func mergeInKey(alias string, key []byte) []byte {
 // refoldOutput computes a key's output object from its retained inputs.
 // live=false means the key has no qualifying inputs and its output (and
 // downstream memberships) retract.
-func refoldOutput(tx *stagestore.Tx, st *Stage, outKey []byte) (out []byte, live bool, err error) {
+func (g *Graph) refoldOutput(tx *stagestore.Tx, st *Stage, outKey []byte) (out []byte, live bool, err error) {
 	if len(st.Merge) > 0 {
-		return refoldMerge(tx, st, outKey)
+		return g.refoldMerge(tx, st, outKey)
 	}
 	if st.Reduce == "aggregate" {
-		return refoldAggregate(tx, st, outKey)
+		return g.refoldAggregate(tx, st, outKey)
 	}
 	if st.Reduce == "latest" {
-		return refoldLatest(tx, st, outKey)
+		return g.refoldLatest(tx, st, outKey)
 	}
 	if st.Reduce == "liveSet" {
-		return refoldLiveSet(tx, st, outKey)
+		return g.refoldLiveSet(tx, st, outKey)
 	}
 	// Reshape: one output object per key — deterministically the emitted
 	// object of the bytewise-LARGEST input identity (real reshape inputs
@@ -775,7 +848,7 @@ func refoldOutput(tx *stagestore.Tx, st *Stage, outKey []byte) (out []byte, live
 		if err != nil {
 			return err
 		}
-		if ok, err := inputQualifies(tx, st, data, parent); err != nil || !ok {
+		if ok, err := g.inputQualifies(tx, st, data, parent); err != nil || !ok {
 			return err
 		}
 		winner = &scoped{data, parent}
@@ -784,7 +857,7 @@ func refoldOutput(tx *stagestore.Tx, st *Stage, outKey []byte) (out []byte, live
 	if scanErr != nil || winner == nil {
 		return nil, false, scanErr
 	}
-	return emitReshape(tx, st, winner.data, winner.parent)
+	return g.emitReshape(tx, st, winner.data, winner.parent)
 }
 
 // joinOnKey renders an input's reference to a join's dimension row: every
@@ -823,7 +896,7 @@ func joinOnKey(j *Join, obj, parent any) []byte {
 // null side (reachable only through optional joins; a required join
 // already gated membership). A non-object input passes through: it has
 // no reference fields to look up with.
-func joinLookupScope(tx *stagestore.Tx, st *Stage, obj, parent any) (any, error) {
+func (g *Graph) joinLookupScope(tx *stagestore.Tx, st *Stage, obj, parent any) (any, error) {
 	named := false
 	for i := range st.Joins {
 		if st.Joins[i].As != "" {
@@ -838,6 +911,7 @@ func joinLookupScope(tx *stagestore.Tx, st *Stage, obj, parent any) (any, error)
 	if !ok {
 		return obj, nil
 	}
+	n := g.byName[st.Name]
 	scope := make(map[string]any, len(m)+2)
 	for k, v := range m {
 		scope[k] = v
@@ -868,14 +942,26 @@ func joinLookupScope(tx *stagestore.Tx, st *Stage, obj, parent any) (any, error)
 			scope[j.As] = dimObj
 		}
 	}
+	for i := range st.Joins {
+		j := &st.Joins[i]
+		if !j.Optional {
+			continue
+		}
+		if scope[j.As] != nil {
+			n.joinFlows[i].hits.Add(1)
+		} else {
+			n.joinFlows[i].misses.Add(1)
+		}
+	}
 	return scope, nil
 }
 
-func inputQualifies(tx *stagestore.Tx, st *Stage, obj, parent any) (bool, error) {
+func (g *Graph) inputQualifies(tx *stagestore.Tx, st *Stage, obj, parent any) (bool, error) {
+	n := g.byName[st.Name]
 	for i := range st.Joins {
 		j := &st.Joins[i]
 		if j.Optional {
-			continue // a LEFT lookup never gates membership; absence scopes as null
+			continue // a LEFT lookup never gates membership; absence scopes as null (counted at lookup)
 		}
 		// present: a dimension row exists at the input's On value AND
 		// matches the join's Where. A normal join requires it; an Absent
@@ -895,6 +981,11 @@ func inputQualifies(tx *stagestore.Tx, st *Stage, obj, parent any) (bool, error)
 				present = Match(j.Where, dimObj)
 			}
 		}
+		if present {
+			n.joinFlows[i].hits.Add(1)
+		} else {
+			n.joinFlows[i].misses.Add(1)
+		}
 		if present == j.Absent {
 			return false, nil
 		}
@@ -906,7 +997,7 @@ func inputQualifies(tx *stagestore.Tx, st *Stage, obj, parent any) (bool, error)
 // object under its alias — gates it through the stage's when (the unit
 // rule: the tuple IS the fold unit, which is what lets notNull test
 // sibling presence), and emits. No sides retained = the key retracts.
-func refoldMerge(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byte, bool, error) {
+func (g *Graph) refoldMerge(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byte, bool, error) {
 	// The tuple carries EVERY declared side — absent ones as explicit
 	// nulls, exactly as an outer join produces NULL columns — so the
 	// null/notNull arms address absence naturally (a missing map entry
@@ -939,14 +1030,14 @@ func refoldMerge(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byte, bool, err
 	if !Match(st.When, scope) {
 		return nil, false, nil
 	}
-	return emitReshape(tx, st, scope, nil)
+	return g.emitReshape(tx, st, scope, nil)
 }
 
 // emitReshape renders a stage's emit fields from one input object — the
 // reshape path, and the winner path of reduce = "latest" — over the
 // join-lookup scope (named joins' rows under their aliases).
-func emitReshape(tx *stagestore.Tx, st *Stage, obj, parent any) ([]byte, bool, error) {
-	obj, err := joinLookupScope(tx, st, obj, parent)
+func (g *Graph) emitReshape(tx *stagestore.Tx, st *Stage, obj, parent any) ([]byte, bool, error) {
+	obj, err := g.joinLookupScope(tx, st, obj, parent)
 	if err != nil {
 		return nil, false, err
 	}
@@ -977,7 +1068,7 @@ func emitReshape(tx *stagestore.Tx, st *Stage, obj, parent any) ([]byte, bool, e
 // a set difference, so no ordering is needed and retracting the delete
 // event itself un-deletes the key. The live key emits from its
 // bytewise-largest non-delete input, like a reshape.
-func refoldLiveSet(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byte, bool, error) {
+func (g *Graph) refoldLiveSet(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byte, bool, error) {
 	type scoped struct{ data, parent any }
 	var winner *scoped
 	dead := false
@@ -995,7 +1086,7 @@ func refoldLiveSet(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byte, bool, e
 			winner = nil
 			return nil
 		}
-		if ok, err := inputQualifies(tx, st, data, parent); err != nil || !ok {
+		if ok, err := g.inputQualifies(tx, st, data, parent); err != nil || !ok {
 			return err
 		}
 		winner = &scoped{data, parent}
@@ -1004,7 +1095,7 @@ func refoldLiveSet(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byte, bool, e
 	if err != nil || dead || winner == nil {
 		return nil, false, err
 	}
-	return emitReshape(tx, st, winner.data, winner.parent)
+	return g.emitReshape(tx, st, winner.data, winner.parent)
 }
 
 // refoldLatest recomputes an argmax key: the winner is the retained input
@@ -1014,7 +1105,7 @@ func refoldLiveSet(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byte, bool, e
 // filtered inputs before they were retained, so the argmax runs over the
 // qualifying set only (an unapproved newer input never shadows an
 // approved older one). The winner's object then emits like a reshape.
-func refoldLatest(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byte, bool, error) {
+func (g *Graph) refoldLatest(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byte, bool, error) {
 	type ranked struct {
 		order, tie  any
 		obj, parent any
@@ -1026,7 +1117,7 @@ func refoldLatest(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byte, bool, er
 		if err != nil {
 			return err
 		}
-		if ok, err := inputQualifies(tx, st, obj, parent); err != nil || !ok {
+		if ok, err := g.inputQualifies(tx, st, obj, parent); err != nil || !ok {
 			return err
 		}
 		ov, _ := ResolvePath(st.OrderBy, obj, parent)
@@ -1048,7 +1139,7 @@ func refoldLatest(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byte, bool, er
 	if err != nil || winner == nil {
 		return nil, false, err
 	}
-	return emitReshape(tx, st, winner.obj, winner.parent)
+	return g.emitReshape(tx, st, winner.obj, winner.parent)
 }
 
 // compareStageValues orders two payload values for argmax: nulls sort
@@ -1118,7 +1209,7 @@ func stageComparable(v any, numeric bool) (any, bool) {
 // empty-set semantics: no inputs → the key retracts entirely; a null arm
 // operand skips that input for that arm (sum/min/max of nothing is null,
 // count counts rows).
-func refoldAggregate(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byte, bool, error) {
+func (g *Graph) refoldAggregate(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byte, bool, error) {
 	sums := make([]*big.Rat, len(st.Emit))
 	mins := make([]any, len(st.Emit))
 	maxs := make([]any, len(st.Emit))
@@ -1132,14 +1223,14 @@ func refoldAggregate(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byte, bool,
 		if err != nil {
 			return err
 		}
-		if ok, err := inputQualifies(tx, st, obj, parent); err != nil || !ok {
+		if ok, err := g.inputQualifies(tx, st, obj, parent); err != nil || !ok {
 			return err
 		}
 		count++
 		// Fold arms and per-emit wheres see the join-lookup scope: an
 		// aggregate can sum a looked-up row's field (SQL: aggregating a
 		// joined column).
-		obj, err = joinLookupScope(tx, st, obj, parent)
+		obj, err = g.joinLookupScope(tx, st, obj, parent)
 		if err != nil {
 			return err
 		}

@@ -474,6 +474,17 @@ type FakeStorage struct {
 	readerReturnsOnCall map[int]struct {
 		result1 db.ActualReader
 	}
+	ReaderAtStub        func(uint64) db.ActualReader
+	readerAtMutex       sync.RWMutex
+	readerAtArgsForCall []struct {
+		arg1 uint64
+	}
+	readerAtReturns struct {
+		result1 db.ActualReader
+	}
+	readerAtReturnsOnCall map[int]struct {
+		result1 db.ActualReader
+	}
 	ResolveTypeStub        func(cluster.TypeRef) (*cluster.Type, error)
 	resolveTypeMutex       sync.RWMutex
 	resolveTypeArgsForCall []struct {
@@ -3064,6 +3075,67 @@ func (fake *FakeStorage) ReaderReturnsOnCall(i int, result1 db.ActualReader) {
 		})
 	}
 	fake.readerReturnsOnCall[i] = struct {
+		result1 db.ActualReader
+	}{result1}
+}
+
+func (fake *FakeStorage) ReaderAt(arg1 uint64) db.ActualReader {
+	fake.readerAtMutex.Lock()
+	ret, specificReturn := fake.readerAtReturnsOnCall[len(fake.readerAtArgsForCall)]
+	fake.readerAtArgsForCall = append(fake.readerAtArgsForCall, struct {
+		arg1 uint64
+	}{arg1})
+	stub := fake.ReaderAtStub
+	fakeReturns := fake.readerAtReturns
+	fake.recordInvocation("ReaderAt", []interface{}{arg1})
+	fake.readerAtMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeStorage) ReaderAtCallCount() int {
+	fake.readerAtMutex.RLock()
+	defer fake.readerAtMutex.RUnlock()
+	return len(fake.readerAtArgsForCall)
+}
+
+func (fake *FakeStorage) ReaderAtCalls(stub func(uint64) db.ActualReader) {
+	fake.readerAtMutex.Lock()
+	defer fake.readerAtMutex.Unlock()
+	fake.ReaderAtStub = stub
+}
+
+func (fake *FakeStorage) ReaderAtArgsForCall(i int) uint64 {
+	fake.readerAtMutex.RLock()
+	defer fake.readerAtMutex.RUnlock()
+	argsForCall := fake.readerAtArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeStorage) ReaderAtReturns(result1 db.ActualReader) {
+	fake.readerAtMutex.Lock()
+	defer fake.readerAtMutex.Unlock()
+	fake.ReaderAtStub = nil
+	fake.readerAtReturns = struct {
+		result1 db.ActualReader
+	}{result1}
+}
+
+func (fake *FakeStorage) ReaderAtReturnsOnCall(i int, result1 db.ActualReader) {
+	fake.readerAtMutex.Lock()
+	defer fake.readerAtMutex.Unlock()
+	fake.ReaderAtStub = nil
+	if fake.readerAtReturnsOnCall == nil {
+		fake.readerAtReturnsOnCall = make(map[int]struct {
+			result1 db.ActualReader
+		})
+	}
+	fake.readerAtReturnsOnCall[i] = struct {
 		result1 db.ActualReader
 	}{result1}
 }

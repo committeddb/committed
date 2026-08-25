@@ -208,6 +208,7 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 			r.Post("/scrub", h.Scrub)
 
 			r.Get("/syncable", h.listConfig("syncable", h.c.Syncables))
+			r.Post("/syncable/dryrun", h.DryRunSyncable)
 			r.Post("/syncable/{id}", h.addConfig("syncable", h.c.ProposeSyncable, h.c.SyncableVersions))
 			// DELETE is leader-pinned (leaderRead reverse-proxies a follower's
 			// request to the leader): the owner-gated destination teardown runs on

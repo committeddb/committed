@@ -500,6 +500,10 @@ type StageStat struct {
 	// stays live. Nonzero answers "the delete event arrived but the key
 	// is still live" in one read. Omitted while zero.
 	UnkeyedDeletes int64 `json:"unkeyedDeletes,omitempty"`
+	// Joins are per-join resolution counters (hits/misses since the
+	// worker started) — "the join never resolved" as a number instead
+	// of a replay-diff hunt. Omitted for stages without joins.
+	Joins []JoinStat `json:"joins,omitempty"`
 }
 
 // StageRecoverer is implemented by syncables carrying NODE-LOCAL stage

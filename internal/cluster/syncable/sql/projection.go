@@ -1463,7 +1463,7 @@ func (p *Projection) StageStats() (map[string]cluster.StageStat, error) {
 				return err
 			}
 			fc := flows[name]
-			out[name] = cluster.StageStat{Keys: n, Inputs: fc.Inputs, Fanned: fc.Fanned, UnkeyedDeletes: fc.UnkeyedDeletes}
+			out[name] = cluster.StageStat{Keys: n, Inputs: fc.Inputs, Fanned: fc.Fanned, UnkeyedDeletes: fc.UnkeyedDeletes, Joins: joinStats(fc.Joins)}
 		}
 		return nil
 	})
@@ -1531,43 +1531,10 @@ func (p *Projection) FoldStagesOnly(a *cluster.Actual) error {
 // shared by the emitting path (foldStagesTx, OnDelta set) and the
 // recovery path (FoldStagesOnly, OnDelta nil).
 func (p *Projection) foldEntitiesTx(stx *stagestore.Tx, a *cluster.Actual) error {
-	{
-		dirty := stages.Dirty{}
-		for _, e := range a.Entities {
-			if !p.stages.ConsumesTopic(e.Type.ID) {
-				continue
-			}
-			switch e.Variant() {
-			case cluster.EntityVariantDelete:
-				if err := p.stages.FoldTopicDelete(stx, e.Type.ID, e.Key, dirty); err != nil {
-					return err
-				}
-			case cluster.EntityVariantRow:
-				obj, err := decodeStageObject(e.Data)
-				if err != nil {
-					return cluster.Permanent(fmt.Errorf("[projection.stage] unmarshal entity data: %w", err))
-				}
-				if err := p.stages.FoldTopicUpsert(stx, e.Type.ID, e.Key, obj, e.Generation, dirty); err != nil {
-					return err
-				}
-			case cluster.EntityVariantRefresh:
-				// The epoch sweep: inputs and dimension rows this re-snapshot
-				// did not re-assert retract, refolding their keys as explicit
-				// deltas — downstream (including stage-fed table sources)
-				// never needs sweep semantics of its own.
-				if err := p.stages.SweepEpochs(stx, e.Type.ID, e.Generation, dirty); err != nil {
-					return err
-				}
-			default:
-				// Future variants fold nothing here; the source-side apply
-				// dead-letters them loudly.
-			}
-		}
-		if err := p.stages.Drain(stx, dirty); err != nil {
-			return err
-		}
-		return stx.SetFrontier(a.Index)
+	if err := p.stages.FoldActual(stx, a); err != nil {
+		return err
 	}
+	return stx.SetFrontier(a.Index)
 }
 
 // applyStageDelta lands one stage delta on a table source: an upsert folds

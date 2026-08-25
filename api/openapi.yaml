@@ -557,6 +557,108 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/NotLinearizable'
+  /v1/syncable/dryrun:
+    post:
+      tags: [syncable]
+      summary: Dry-run a syncable configuration against a log sample
+      operationId: dryRunSyncable
+      description: |
+        Rehearses a syncable configuration against a bounded sample of the
+        committed log and returns a diagnostic report — per-stage flow
+        counters (inputs/fanned/keys/unkeyedDeletes), per-join resolution
+        hits/misses, a few sample output objects per stage, per-source and
+        per-rule match counts, and auto-generated findings that name the
+        silent-empty signatures (a when clause that never matched reports
+        the value families actually seen at its path). Nothing is admitted
+        or stored, no destination database is touched, and the config
+        still passes full admission validation (400 on rejection). By
+        default the sampling budget spreads across several evenly-spaced
+        windows of the log so late-clustering topics are covered; use
+        fromIndex to drill into one region.
+      parameters:
+        - name: maxEntries
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 1000000, default: 100000 }
+          description: Sampling budget in committed entries across all windows.
+        - name: fromIndex
+          in: query
+          required: false
+          schema: { type: integer, format: int64 }
+          description: Sample a single window starting at this raft index.
+      requestBody:
+        required: true
+        content:
+          text/toml:
+            schema: { type: string }
+          application/json:
+            schema: { type: object }
+      responses:
+        '200':
+          description: The dry-run report
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  entries: { type: integer }
+                  durationMs: { type: integer, format: int64 }
+                  windows:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        fromIndex: { type: integer, format: int64 }
+                        entries: { type: integer }
+                  stages:
+                    type: object
+                    additionalProperties:
+                      type: object
+                      properties:
+                        inputs: { type: integer, format: int64 }
+                        fanned: { type: integer, format: int64 }
+                        keys: { type: integer }
+                        unkeyedDeletes: { type: integer, format: int64 }
+                        liveDeltas: { type: integer, format: int64 }
+                        retractions: { type: integer, format: int64 }
+                        joins:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              target: { type: string }
+                              alias: { type: string }
+                              absent: { type: boolean }
+                              optional: { type: boolean }
+                              hits: { type: integer, format: int64 }
+                              misses: { type: integer, format: int64 }
+                        samples:
+                          type: array
+                          items: { type: object }
+                  sources:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        topic: { type: string }
+                        from: { type: string }
+                        seen: { type: integer, format: int64 }
+                        matched: { type: integer, format: int64 }
+                        ruleMatches:
+                          type: array
+                          items: { type: integer, format: int64 }
+                        hints:
+                          type: array
+                          items: { type: string }
+                  findings:
+                    type: array
+                    items: { type: string }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
   /v1/syncable/{id}:
     post:
       tags: [syncable]

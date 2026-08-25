@@ -567,7 +567,7 @@ set = [ { column = "total", from = "$.total" },
   each stage's row — `keys` (the store's current output count) plus
   `inputs`/`fanned` flow counters since the worker started, and
   `unkeyedDeletes` (delete-shaped inputs whose key would not resolve or
-  render — LOST retractions: nonzero here answers "the delete event
+  render), and per-join resolution counters (`joins`: hits/misses — LOST retractions: nonzero here answers "the delete event
   arrived but the key is still live" in one read; each also warns once
   in the log). The three
   numbers split every silent-empty state: `inputs` 0 = that topic's log
@@ -796,6 +796,29 @@ re-materializes its dependents inside the same transaction, so the read model
 stays consistent at every checkpoint. One syncable fills one table — a
 dimension is its own internal housekeeping, so two syncables that need the same
 data each keep their own copy.
+
+## Rehearsing a config before it exists (dry-run)
+
+`POST /v1/syncable/dryrun` takes the same document a syncable POST
+takes, folds a bounded sample of the real log through the config's
+REAL stage graph into a throwaway store — nothing admitted, nothing
+written, the destination database never touched — and returns a
+diagnostic report in seconds: per-stage `inputs`/`fanned`/`keys`/
+`unkeyedDeletes`, per-join resolution hits/misses, a few sample output
+objects per stage (value-shaped bugs — null columns, wrong paths — are
+invisible in counts), per-source and per-rule match counts, and
+auto-generated **findings** that name the silent-empty signatures: a
+`when` clause that never matched reports the value FAMILIES actually
+seen at its path ("`equals = 'true'` (string) never matched; values
+seen: boolean×142"), a join that never resolved says so, a fan that
+never fanned points at serialized-JSON columns. The sampling budget
+(`?maxEntries`, default 100k) spreads across evenly-spaced windows of
+the log so late-clustering topics are covered; `?fromIndex` drills
+into one region. The config still passes full admission validation
+(400 on rejection), so a dry run also answers "would this admit?".
+Authoring loop: dry-run until the findings list is empty, then POST
+for real — "valid config, wrong result, no error" costs minutes
+instead of a full replay against an oracle.
 
 ## Changing the rules after a projection is live
 
