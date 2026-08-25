@@ -69,6 +69,17 @@ func (db *DB) DryRunSyncable(ctx context.Context, mimeType string, data []byte, 
 		for i := dryRunWindows - 1; i >= 0; i-- {
 			starts = append(starts, applied*uint64(i)/dryRunWindows)
 		}
+		// Anchor the NEWEST window to END at the head rather than start
+		// at the last spacing mark: with an even budget share, a window
+		// starting at applied*7/8 can never reach the true tail (the
+		// field's invoicing region sat past every default window). If
+		// entities outnumber indexes (batching), the window hits the
+		// head early, stops "eof", and donates its leftover budget
+		// onward — the newest data is sampled either way.
+		share := uint64(max(opts.MaxEntries, 0) / dryRunWindows) // MaxEntries is defaulted positive above
+		if newest := starts[0]; applied > share && applied-share > newest {
+			starts[0] = applied - share
+		}
 	}
 	var windows []cluster.DryRunWindow
 	var readMs int64
