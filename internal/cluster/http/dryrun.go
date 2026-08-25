@@ -68,6 +68,14 @@ func (h *HTTP) DryRunSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
 		timeout = time.Duration(n) * time.Second
 	}
 	opts.Timeout = timeout
+	// The server's global WriteTimeout (default 120s) starts counting at
+	// the request read — equal to the default compute budget, so a
+	// rehearsal using its whole budget built its (partial) report only
+	// to find the connection already dead: the field's "empty reply
+	// after exactly 120s". Extend THIS response's write deadline past
+	// the compute deadline; best-effort (an unsupported wrapper keeps
+	// the old behavior).
+	_ = httpgo.NewResponseController(w).SetWriteDeadline(time.Now().Add(timeout + 30*time.Second))
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
 	rep, err := h.c.DryRunSyncable(ctx, mimeType, body, opts)

@@ -845,7 +845,12 @@ STICK the live worker is reported as the truncation reason. Coverage
 is stated precisely — consumed topics the windows never reached are
 named in one aggregate finding, listed after any real signatures. The
 config still passes full admission validation (400 with the parser's
-actual words), so a dry run also answers "would this admit?".
+actual words), so a dry run also answers "would this admit?". Note:
+findings and dead-letter samples can quote SOURCE DATA VALUES verbatim
+(an expression error names the string it choked on) — that precision
+is the diagnostic point and stays within the trusted-appliance model,
+but treat pasted dry-run output like any other data-bearing log
+excerpt.
 Authoring loop: dry-run until the findings list is empty, then POST
 for real — "valid config, wrong result, no error" costs minutes
 instead of a full replay against an oracle.
