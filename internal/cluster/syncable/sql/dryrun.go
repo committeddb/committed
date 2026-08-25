@@ -215,7 +215,11 @@ func (o *whenObs) observe(data any) bool {
 
 // hints reports the never-matched clauses' family evidence.
 func (o *whenObs) hints() []string {
-	if o.seen == 0 || o.matched > 0 {
+	// The evidence floor applies here too: "never matched" on 2
+	// observations is a sampling artifact wearing an allegation's words
+	// (field round 6: two null-visit items, both correctly held by the
+	// sibling branch). The counts stay visible in seen/matched.
+	if o.seen < dryRunFindingFloor || o.matched > 0 {
 		return nil
 	}
 	var out []string

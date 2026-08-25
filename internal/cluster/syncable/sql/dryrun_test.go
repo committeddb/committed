@@ -311,6 +311,38 @@ set = [ { column = "v", from = "$.v" } ]
 	}
 }
 
+// Below the floor, when-clause hints stay silent too — the counts
+// remain in the source row, but two observations are not an allegation.
+func TestDryRunWhenHintFloor(t *testing.T) {
+	p := dryRunFixture(t, `
+[projection]
+db         = "testdb"
+table      = "t"
+primaryKey = "id"
+
+[[projection.columns]]
+name = "id"
+type = "VARCHAR(64)"
+
+[[projection.columns]]
+name = "amount"
+type = "VARCHAR(64)"
+
+[[projection.source]]
+topic   = "billing"
+keyPath = "$.id"
+[[projection.source.rules]]
+when = [ { path = "$.billed", equals = "true" } ]
+set  = [ { column = "amount", from = "$.amount" } ]
+`)
+	rep, err := p.DryRun(context.Background(), feedOf(
+		nRowActuals("billing", `{"id":"b","billed":true,"amount":5}`, 2)...,
+	), cluster.DryRunOptions{})
+	require.NoError(t, err)
+	require.Equal(t, int64(2), rep.Sources[0].Seen)
+	require.Empty(t, rep.Sources[0].Hints, "two observations are visible counts, not an allegation")
+}
+
 func requireFinding(t *testing.T, findings []string, substr string) {
 	t.Helper()
 	for _, f := range findings {
