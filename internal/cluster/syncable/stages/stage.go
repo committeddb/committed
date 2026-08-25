@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // Stage key/order comparison types (numeric vs lexical).
@@ -55,7 +56,7 @@ func ValidateWhen(clauses []WhenClause, where string) error {
 			if lit == nil {
 				continue
 			}
-			if _, ok := toFloat(lit); !ok {
+			if _, ok := ratFromScalar(lit); !ok {
 				return fmt.Errorf("%s: when entry for %q: %s takes a numeric literal (values compare numerically, SQL-style), got %T", where, cl.Path, arm, lit)
 			}
 		}
@@ -319,6 +320,9 @@ func ValidateShapes(stages []Stage) error {
 				return err
 			}
 		}
+		if st.Reduce == "liveSet" && st.ForEach != "" {
+			return fmt.Errorf("%s: forEach with reduce = \"liveSet\": a fanned liveSet's delete evidence is per-element, and a delete-shaped event carrying no elements would be silently lost — fan in a prior stage and liveSet its outputs downstream", where)
+		}
 		if len(st.DeleteWhen) > 0 {
 			if st.Reduce != "liveSet" {
 				return fmt.Errorf("%s: deleteWhen is only for reduce = \"liveSet\"", where)
@@ -448,6 +452,11 @@ func ValidateShapes(stages []Stage) error {
 				return fmt.Errorf("%s: onType is not declarable on a stage join — references render in the joined stage's key space, so the join inherits stage %q's keyType automatically; declare it on that stage", jw, j.From)
 			}
 			if err := validateKeyTypes(j.OnType, len(j.On), jw+" onType"); err != nil {
+				return err
+			}
+		}
+		if len(joinAliases) > 0 {
+			if err := rejectFoldTimeAliasRefs(st, joinAliases, where); err != nil {
 				return err
 			}
 		}
@@ -595,6 +604,89 @@ func validateMergeStage(stages []Stage, st *Stage, names map[string]bool, where 
 		}
 	}
 	return nil
+}
+
+// rejectFoldTimeAliasRefs guards the grammar's newest seam: the
+// join-lookup scope exists at REFOLD (emits, fold arms, per-emit
+// where), so a FOLD-TIME position — when, deleteWhen, keyPath, forEach,
+// any join's on — addressing a declared alias would resolve nothing and
+// silently never match. Loud here instead.
+func rejectFoldTimeAliasRefs(st *Stage, aliases map[string]bool, where string) error {
+	checkPath := func(p, pos string) error {
+		if a := aliasPrefix(p, aliases); a != "" {
+			return fmt.Errorf("%s: %s [%s] addresses join alias %q — the lookup scope exists at REFOLD (emits, fold arms, per-emit where); at fold time this path resolves nothing and would silently never match. Filter the joined row with the join's where; to key or fan by a looked-up value, emit it here and use the next stage", where, pos, p, a)
+		}
+		return nil
+	}
+	checkWhens := func(cls []WhenClause, pos string) error {
+		for _, c := range cls {
+			if c.Expr != "" {
+				n := c.compiled
+				if n == nil {
+					if n2, err := Compile(c.Expr); err == nil {
+						n = n2
+					}
+				}
+				var aerr error
+				walkExprPaths(n, func(p string) {
+					if aerr == nil {
+						aerr = checkPath(p, pos)
+					}
+				})
+				if aerr != nil {
+					return aerr
+				}
+				continue
+			}
+			if err := checkPath(c.Path, pos); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := checkWhens(st.When, "when path"); err != nil {
+		return err
+	}
+	if err := checkWhens(st.DeleteWhen, "deleteWhen path"); err != nil {
+		return err
+	}
+	for _, kp := range st.KeyPath {
+		if err := checkPath(kp, "keyPath"); err != nil {
+			return err
+		}
+	}
+	if st.ForEach != "" {
+		if err := checkPath(st.ForEach, "forEach"); err != nil {
+			return err
+		}
+	}
+	for ji := range st.Joins {
+		for _, on := range st.Joins[ji].On {
+			if err := checkPath(on, "join on"); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// aliasPrefix reports which declared alias (if any) a jsonpath
+// addresses: $.<alias> followed by '.', '[', or end of path.
+func aliasPrefix(path string, aliases map[string]bool) string {
+	rest, ok := strings.CutPrefix(path, "$.")
+	if !ok {
+		return ""
+	}
+	for i := 0; i < len(rest); i++ {
+		if rest[i] == '.' || rest[i] == '[' {
+			rest = rest[:i]
+			break
+		}
+	}
+	if aliases[rest] {
+		return rest
+	}
+	return ""
 }
 
 // pathSafeIdent reports whether s is addressable as a jsonpath dot

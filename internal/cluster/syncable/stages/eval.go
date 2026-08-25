@@ -1183,7 +1183,11 @@ func refoldAggregate(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byte, bool,
 			}
 			r, ok := v.(*big.Rat)
 			if !ok {
-				continue // null (or non-numeric passthrough) skips a sum, like SQL
+				// A null skips a sum (SQL); a non-numeric passthrough also
+				// skips — OUR filter posture, where SQL would error the
+				// query (sum over text has no better answer here than
+				// null-like absence).
+				continue
 			}
 			if e.Sum != "" {
 				if sums[i] == nil {

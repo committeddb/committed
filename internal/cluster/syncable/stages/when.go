@@ -9,6 +9,7 @@ package stages
 import (
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"reflect"
 	"strconv"
 	"strings"
@@ -184,8 +185,8 @@ func MatchScoped(clauses []WhenClause, jsonData, parent any) bool {
 // sameScalarFamily reports whether a decoded value is comparable to a
 // TOML literal: both numeric, or the same non-numeric scalar type.
 func sameScalarFamily(lit, v any) bool {
-	if _, ok := toFloat(lit); ok {
-		_, ok2 := toFloat(v)
+	if _, ok := ratFromScalar(lit); ok {
+		_, ok2 := ratFromScalar(v)
 		return ok2
 	}
 	switch lit.(type) {
@@ -201,21 +202,20 @@ func sameScalarFamily(lit, v any) bool {
 
 // numericallyOrdered reports v < lit (less=true) or v > lit (less=false),
 // SQL-style: a null, missing, or non-numeric value matches neither.
-// float64 comparison for the same reason toFloat documents: when filters
-// small post-fold values; value BINDING is what keeps exact digits.
+// Exact comparison, like every other comparison in the system.
 func numericallyOrdered(v, lit any, less bool) bool {
-	lf, ok := toFloat(lit)
+	lr, ok := ratFromScalar(lit)
 	if !ok {
 		return false // rejected at admission; unreachable via a validated config
 	}
-	vf, ok := toFloat(v)
+	vr, ok := ratFromScalar(v)
 	if !ok {
 		return false
 	}
 	if less {
-		return vf < lf
+		return vr.Cmp(lr) < 0
 	}
-	return vf > lf
+	return vr.Cmp(lr) > 0
 }
 
 // literalEquals compares a TOML literal against a decoded JSON value.
@@ -223,34 +223,39 @@ func numericallyOrdered(v, lit any, less bool) bool {
 // numbers decode as float64/json.Number, and == across those types is
 // always false.
 func literalEquals(want, got any) bool {
-	if wf, ok := toFloat(want); ok {
-		gf, ok2 := toFloat(got)
-		return ok2 && wf == gf
+	if wr, ok := ratFromScalar(want); ok {
+		gr, ok2 := ratFromScalar(got)
+		return ok2 && wr.Cmp(gr) == 0
 	}
 	return reflect.DeepEqual(want, got)
 }
 
-func toFloat(v any) (float64, bool) {
+// ratFromScalar converts a comparable numeric — a TOML literal (int or
+// float from the decode) or a payload number (json.Number) — into an
+// exact rational. Float literals convert through their SHORTEST decimal
+// representation, so `equals = 0.1` means the decimal 0.1, never the
+// float64 approximation. This was the system's last float64 comparison
+// path: integer IDs beyond 2^53 silently collided as equal — every
+// comparison now matches the expression language, latest, and min/max.
+func ratFromScalar(v any) (*big.Rat, bool) {
 	switch n := v.(type) {
 	case int:
-		return float64(n), true
+		return new(big.Rat).SetInt64(int64(n)), true
 	case int32:
-		return float64(n), true
+		return new(big.Rat).SetInt64(int64(n)), true
 	case int64:
-		return float64(n), true
+		return new(big.Rat).SetInt64(n), true
 	case float32:
-		return float64(n), true
+		r, ok := new(big.Rat).SetString(strconv.FormatFloat(float64(n), 'g', -1, 32))
+		return r, ok
 	case float64:
-		return n, true
+		r, ok := new(big.Rat).SetString(strconv.FormatFloat(n, 'g', -1, 64))
+		return r, ok
 	case json.Number:
-		// Payloads decode with UseNumber; float64 comparison preserves the
-		// prior when-clause matching exactly. A when clause filters small
-		// discriminator values, so the float64 range is not a concern here
-		// (unlike value binding, which keeps exact digits).
-		f, err := n.Float64()
-		return f, err == nil
+		r, ok := new(big.Rat).SetString(string(n))
+		return r, ok
 	}
-	return 0, false
+	return nil, false
 }
 
 // CanonicalKeyPart renders one key part for the store's byte-exact key
@@ -445,38 +450,41 @@ func RejectParentPaths(clauses []WhenClause, where string) error {
 	return nil
 }
 
-// exprReferencesParent walks a compiled expression for `$parent.` paths.
-func exprReferencesParent(n Node) bool {
+// walkExprPaths visits every jsonpath in a compiled expression.
+func walkExprPaths(n Node, visit func(string)) {
 	switch x := n.(type) {
 	case exprPath:
-		return strings.HasPrefix(x.path, "$parent")
+		visit(x.path)
 	case exprNeg:
-		return exprReferencesParent(x.operand)
+		walkExprPaths(x.operand, visit)
 	case exprNot:
-		return exprReferencesParent(x.operand)
+		walkExprPaths(x.operand, visit)
 	case exprIsNull:
-		return exprReferencesParent(x.operand)
+		walkExprPaths(x.operand, visit)
 	case exprBin:
-		return exprReferencesParent(x.l) || exprReferencesParent(x.r)
+		walkExprPaths(x.l, visit)
+		walkExprPaths(x.r, visit)
 	case exprIn:
-		if exprReferencesParent(x.operand) {
-			return true
-		}
+		walkExprPaths(x.operand, visit)
 		for _, m := range x.list {
-			if exprReferencesParent(m) {
-				return true
-			}
+			walkExprPaths(m, visit)
 		}
-		return false
 	case exprCall:
 		for _, a := range x.args {
-			if exprReferencesParent(a) {
-				return true
-			}
+			walkExprPaths(a, visit)
 		}
-		return false
 	}
-	return false
+}
+
+// exprReferencesParent walks a compiled expression for `$parent.` paths.
+func exprReferencesParent(n Node) bool {
+	found := false
+	walkExprPaths(n, func(p string) {
+		if strings.HasPrefix(p, "$parent") {
+			found = true
+		}
+	})
+	return found
 }
 
 // MultiValuedPath reports whether a jsonpath can yield more than one

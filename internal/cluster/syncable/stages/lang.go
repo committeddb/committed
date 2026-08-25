@@ -40,7 +40,8 @@ import (
 //	additive   := multiplicative (('+'|'-') multiplicative)*
 //	multiplicative := unary (('*'|'/') unary)*
 //	unary      := '-' unary | primary
-//	primary    := NUMBER | PATH | IDENT '(' expr (',' expr)* ')' | '(' expr ')'
+//	primary    := NUMBER | STRING | TRUE | FALSE | PATH
+//	              | IDENT '(' expr (',' expr)* ')' | '(' expr ')'
 //	compareOp  := '=' | '<>' | '<' | '<=' | '>' | '>='
 //
 // NUMBER is a plain decimal literal (no exponent form); STRING is a
@@ -86,6 +87,8 @@ type exprIsNull struct {
 	negate  bool
 }
 
+type exprBool struct{ val bool }
+
 func (exprNum) node()    {}
 func (exprStr) node()    {}
 func (exprPath) node()   {}
@@ -95,6 +98,7 @@ func (exprCall) node()   {}
 func (exprNot) node()    {}
 func (exprIn) node()     {}
 func (exprIsNull) node() {}
+func (exprBool) node()   {}
 
 // ── lexing ──────────────────────────────────────────────────────────────
 
@@ -414,6 +418,10 @@ func (p *exprParser) parsePrimary() (Node, error) {
 		return exprPath{t.text}, nil
 	case "ident":
 		fn := strings.ToLower(t.text)
+		// SQL's boolean literals, case-insensitive like every keyword.
+		if fn == "true" || fn == "false" {
+			return exprBool{fn == "true"}, nil
+		}
 		spec, ok := exprFunctions[fn]
 		if !ok {
 			return nil, fmt.Errorf("unknown function %q at position %d (the closed set is coalesce, nullif, round, trunc)", t.text, t.pos)
@@ -496,7 +504,7 @@ func scaleLiteral(n Node, fn string) (int64, error) {
 // rounding materializes everything beneath it.
 func checkMaterializable(n Node, dominated bool) error {
 	switch x := n.(type) {
-	case exprNum, exprStr, exprPath:
+	case exprNum, exprStr, exprPath, exprBool:
 		return nil
 	case exprNeg:
 		return checkMaterializable(x.operand, dominated)
@@ -575,6 +583,8 @@ func Eval(n Node, payload, parent any) (any, error) {
 	case exprNum:
 		return x.val, nil
 	case exprStr:
+		return x.val, nil
+	case exprBool:
 		return x.val, nil
 	case exprPath:
 		v, err := ResolvePath(x.path, payload, parent)

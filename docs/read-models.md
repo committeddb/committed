@@ -253,7 +253,7 @@ set = [
 
 The language: `+ - * /`, comparisons (`= <> < <= > >=`), the boolean
 predicates — `or`/`and`/`not` (SQL keywords, case-insensitive),
-`x in (…)`, `x is [not] null` — plus `coalesce`, `nullif`,
+`x in (…)`, `x is [not] null`, `true`/`false` literals — plus `coalesce`, `nullif`,
 `round(x, scale)` (half away from zero), `trunc(x[, scale])` (toward
 zero), decimal and `'string'` literals, and `$.…` paths into the
 payload. Connectives follow SQL's three-valued logic — `null or true`
@@ -512,7 +512,9 @@ set = [ { column = "total", from = "$.total" },
   LEFT JOIN — a missing row, or one failing `where`, scopes the alias
   as null instead of gating membership (`$.cust is not null` makes the
   flag column). The stage's `when` and `keyPath` see only the input;
-  filter on the joined row with the join's `where`. Decision rule
+  filter on the joined row with the join's `where` (enforced at
+  admission — a fold-time path addressing an alias is rejected loudly,
+  never silently null). Decision rule
   refined: SAME-KEY correlation of stages → `merge`; REFERENCE lookup
   (foreign key, or a key part) → a named join.
 - **`reduce = "liveSet"` is created-minus-deleted**: a key is live while
@@ -520,7 +522,10 @@ set = [ { column = "total", from = "$.total" },
   difference, no ordering involved, so a delete-shaped event retracts
   regardless of arrival position (it is retained as negative evidence
   even past the `when` filter), and retracting the delete event itself
-  un-deletes the key.
+  un-deletes the key. A liveSet never fans (`forEach` is rejected
+  with it): delete evidence on a fanned stage would be per-element,
+  and an elementless delete-shaped event would be silently lost — fan
+  in a prior stage and liveSet its outputs.
 - **`absent = true` inverts a join into an ANTI-join**: the input
   participates only while NO dimension row matches (none exists, or
   none passes `where`) — "jobs with no posted invoice." Arrival
