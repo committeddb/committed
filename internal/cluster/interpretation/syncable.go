@@ -57,6 +57,22 @@ func (s *single) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldSna
 
 func (s *single) Close() error { return s.inner.Close() }
 
+// Unwrap exposes the wrapped syncable (cluster.SyncableUnwrapper), so
+// capability interfaces this wrapper doesn't deliberately re-implement
+// resolve through cluster.SyncableAs instead of each needing a hand-written
+// forward — the migration wrapper's lesson (a masked Teardownable), re-learned
+// here when the stage recoverer was silently masked for EVERY syncable: this
+// wrapper is unconditional, so a staged projection's reset store resumed from
+// the checkpoint without re-deriving (the 0.7.10-merge e2e failure: an
+// aggregate of 1 where 3 rows were folded). Unwrapping is semantically safe
+// for stage recovery because this wrapper rebinds version STAMPS, never
+// payload bytes — a recovery fold through the inner projection sees identical
+// data. The explicit forwards above (Teardown, Rematerializable,
+// CheckpointPolicy) stay for call sites that assert directly on the delivered
+// syncable rather than through SyncableAs. batchSyncable embeds single, so it
+// inherits this.
+func (s *single) Unwrap() cluster.Syncable { return s.inner }
+
 // CheckpointPolicy forwards the wrapped syncable's checkpoint cadence (see
 // the migration wrapper's identical forward).
 func (s *single) CheckpointPolicy() cluster.CheckpointPolicy {
