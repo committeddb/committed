@@ -327,6 +327,13 @@ type SyncableRebuildResponse struct {
 // whether it is blocked (and on what), plus its numeric progress (how far it
 // has synced vs. how far there is to sync).
 type SyncableStatusResponse struct {
+	// Stuck means TRANSIENTLY blocked and still retrying — deliberately
+	// false during a terminal park, which the field read as a
+	// contradiction ("stuck: false" beside a parked worker with frozen
+	// lag). The two are mutually exclusive by design: stuck = the worker
+	// is alive and will resume by itself; parked (see WorkerState) = it
+	// STOPPED and needs an operator. Read WorkerState first; Stuck
+	// refines "running".
 	Stuck bool `json:"stuck"`
 	// WorkerState is the worker's lifecycle state: "running" (healthy, or
 	// transiently stuck retrying — see Stuck), "parked" (the circuit breaker
@@ -433,6 +440,36 @@ type SyncableStatusResponse struct {
 	// with CaughtUp it distinguishes "nothing to examine" from "never
 	// started scanning", the split the phantom-adoption incident needed.
 	ReadPosition *uint64 `json:"readPosition,omitempty"`
+	// Stages is each declared stage's introspection row: keys (the
+	// store's current output count) plus inputs/fanned flow counters
+	// since the worker started. The three numbers split every
+	// silent-empty state: inputs 0 = log region not reached; inputs > 0,
+	// fanned 0 = the forEach fan finds no array; flow > 0 with keys 0 =
+	// the when/joins rejected everything. Present only when the request
+	// opts in with ?stages=true AND the owner's live worker answered
+	// (directly or via the same transparent proxy hop readPosition
+	// uses); absent for stage-free syncables and on soft degrade.
+	Stages map[string]cluster.StageStat `json:"stages,omitempty"`
+	// StageRecovery is present while the ANSWERING node's worker is
+	// re-deriving stage state before consuming (workerState reads
+	// "re-deriving"): Folded is the log index re-derived so far, Target
+	// the checkpoint it must reach. Owner-local; served on the default
+	// call — the field finding was a re-deriving worker invisible as
+	// plain "running" with climbing lag for the full re-derivation.
+	StageRecovery *StageRecoveryStatus `json:"stageRecovery,omitempty"`
+	// StageKeyExists answers a single-key probe
+	// (?probeStage=<stage>&probeKey=<key>): does that stage currently
+	// hold an output at that key (stored form: canonical digits,
+	// normalized case)? The second half of the stage-introspection pair —
+	// counts say "is it empty?", the probe says "is THIS pair in it?".
+	// Present only when probed and the owner's worker answered.
+	StageKeyExists *bool `json:"stageKeyExists,omitempty"`
+}
+
+// StageRecoveryStatus is a running stage-state re-derivation's progress.
+type StageRecoveryStatus struct {
+	Folded uint64 `json:"folded"`
+	Target uint64 `json:"target"`
 }
 
 // GetSyncableStatus reports a syncable worker's operational status
@@ -483,9 +520,30 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 		}
 		wantPosition = v
 	}
+	wantStages := false
+	if raw := r.URL.Query().Get("stages"); raw != "" {
+		v, err := strconv.ParseBool(raw)
+		if err != nil {
+			writeError(w, httpgo.StatusBadRequest, "invalid_parameter", "stages must be a boolean")
+			return
+		}
+		wantStages = v
+	}
+	probeStage := r.URL.Query().Get("probeStage")
+	// probeKey repeats for a composite key — ?probeKey=a&probeKey=b, one
+	// per keyPath position. The parts pass through verbatim: the
+	// KEY-SPACE OWNER (the introspector) renders and composes them, so
+	// this layer knows nothing about key encodings and the caller cannot
+	// misreproduce the stored bytes into a false absence (the field's
+	// first probe guessed comma-joined and read exactly that).
+	probeKeyParts := r.URL.Query()["probeKey"]
+	if (probeStage == "") != (len(probeKeyParts) == 0) {
+		writeError(w, httpgo.StatusBadRequest, "invalid_parameter", "probeStage and probeKey go together")
+		return
+	}
 
 	owner := h.c.SyncableOwner(id)
-	if wantPosition && owner != 0 && owner != h.c.ID() && r.Header.Get(forwardedHeader) == "" {
+	if (wantPosition || wantStages || probeStage != "") && owner != 0 && owner != h.c.ID() && r.Header.Get(forwardedHeader) == "" {
 		// The scan position lives in the owner's worker — proxy the whole
 		// request there (its response carries the same replicated fields plus
 		// the position). Any failure to hop falls through to the local
@@ -545,6 +603,16 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 		}
 	}
 
+	// A running re-derivation overrides "running" on the node doing it
+	// (owner-local, like degraded): the worker is alive but NOT consuming
+	// — new entries apply only after the fold-only pass reaches the
+	// checkpoint, so lag climbs by design and reads as a stall without
+	// this state.
+	if folded, target, ok := h.c.SyncableStageRecovery(id); ok {
+		resp.WorkerState = cluster.WorkerStateRederiving
+		resp.StageRecovery = &StageRecoveryStatus{Folded: folded, Target: target}
+	}
+
 	// Both numbers are sourced behind the same linearize barrier above, so
 	// checkpoint (replicated apply state) and head (local apply state) are
 	// mutually consistent and head ≥ checkpoint on the default path. Clamp
@@ -598,6 +666,24 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 		// OwnerNode pointing at who to ask.
 		if pos, ok := h.c.SyncableReadPosition(id); ok {
 			resp.ReadPosition = &pos
+		}
+	}
+	if wantStages {
+		// Same owner-local contract as readPosition: absent on a non-owner
+		// or a stage-free syncable, never an error.
+		if stats, ok := h.c.SyncableStageStats(id); ok {
+			resp.Stages = stats
+		}
+	}
+	if probeStage != "" {
+		exists, ok, err := h.c.SyncableStageKeyExists(id, probeStage, probeKeyParts)
+		if err != nil {
+			// A typo'd stage name must not read as "key absent".
+			writeError(w, httpgo.StatusBadRequest, "invalid_parameter", err.Error())
+			return
+		}
+		if ok {
+			resp.StageKeyExists = &exists
 		}
 	}
 

@@ -233,3 +233,37 @@ topics = []
 	require.ErrorAs(t, err, &fe)
 	require.Equal(t, "sql.topics", fe.Field)
 }
+
+// jsonColumns at the flat position alongside [[sql.topics]] was ACCEPTED
+// AND SILENTLY IGNORED — the field's permanent-string-payload defect:
+// the overlay's snapshot decoded under an earlier flat-form generation,
+// then a topics-form edit left the hint at top level and every
+// CT-streamed event since stored the column as a string, forever, with
+// zero errors. The guard's own contract ("reject loudly rather than
+// silently ignore") now covers it.
+func TestTopicsFormRejectsFlatJSONColumns(t *testing.T) {
+	toml := `
+[ingestable]
+name = "mixed"
+type = "sql"
+
+[sql]
+dialect          = "postgres"
+connectionString = "${TEST_DB_URL}"
+jsonColumns      = ["EventData"]
+
+[[sql.topics]]
+topic         = "txn-json"
+tables        = ["transaction_events"]
+primaryKey    = "pk"
+mapAllColumns = true
+`
+	t.Setenv("TEST_DB_URL", "postgres://ignored")
+	v, err := cluster.ParseConfigBytes("toml", []byte(toml))
+	require.NoError(t, err)
+	p := topicsParser()
+	_, _, err = p.ParseConfig(v)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "sql.jsonColumns")
+	require.Contains(t, err.Error(), "cannot be set alongside [[sql.topics]]")
+}

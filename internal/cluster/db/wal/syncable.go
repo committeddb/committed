@@ -155,8 +155,13 @@ func (s *Storage) buildSyncable(t *cluster.Configuration) cluster.Syncable {
 	_, parsed, parsedMode, err := s.parser.ParseSyncable(t.MimeType, t.Data, s)
 	if err != nil {
 		s.recordConfigError("syncable", t.ID, configErrBuild, err)
-		s.logger.Error("syncable config persisted but could not be built on this node (degraded); fix the environment and the config will build on next restart",
-			zap.String("id", t.ID), zap.Error(err))
+		if cluster.IsNotAdmissible(err) {
+			s.logger.Error("persisted syncable config is not admissible under this binary (admission rules have tightened since it was stored); automatic retries cannot help — fix and re-POST the config, or delete it",
+				zap.String("id", t.ID), zap.Error(err))
+		} else {
+			s.logger.Error("syncable config persisted but could not be built on this node (degraded); fix the environment — the node retries the build every minute (and on restart)",
+				zap.String("id", t.ID), zap.Error(err))
+		}
 		return nil
 	}
 	s.clearConfigError("syncable", t.ID, configErrBuild)
@@ -296,6 +301,7 @@ func (s *Storage) reconcileSyncableList() ([]*db.SyncableWithID, error) {
 		out = append(out, &db.SyncableWithID{ID: r.id, Syncable: s.buildSyncable(r.cfg)})
 	}
 	s.sweepConfigErrorsExcept("syncable", present)
+	s.reportNotAdmissible("syncable")
 	return out, nil
 }
 

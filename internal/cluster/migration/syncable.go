@@ -69,6 +69,15 @@ func (s *single) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldSna
 
 func (s *single) Close() error { return s.inner.Close() }
 
+// Unwrap exposes the wrapped syncable (cluster.SyncableUnwrapper), so
+// capability interfaces the wrapper doesn't deliberately re-implement —
+// Teardownable and its future siblings — resolve through
+// cluster.SyncableAs instead of each needing a hand-written forward
+// (Teardownable was silently masked here for every always-current
+// syncable until the field found deleted projections' tables surviving).
+// batchSyncable embeds single, so it inherits this.
+func (s *single) Unwrap() cluster.Syncable { return s.inner }
+
 // CheckpointPolicy forwards the wrapped syncable's checkpoint cadence so a
 // ModeAlwaysCurrent syncable keeps the cadence parsed from its TOML — the
 // worker only sees this wrapper, so without the forward the policy would be

@@ -1,0 +1,975 @@
+package stages
+
+import (
+	"encoding/json"
+	"fmt"
+	"math/big"
+	"strings"
+
+	"github.com/PaesslerAG/jsonpath"
+)
+
+// The projection expression language (`expr` set entries): a closed function
+// set over exact decimal arithmetic, specified in the pipeline design's
+// decimal-arithmetic section. The semantics in one paragraph: every numeric
+// value is an exact rational built from its JSON source digits (json.Number
+// end-to-end — float64 never participates); `+ - *` are exact and `/` is
+// exact rational division; rounding happens ONLY at an explicit round
+// (half away from zero) or trunc (toward zero); a missing payload field is
+// null and null propagates through arithmetic and comparison, with coalesce
+// and nullif the only null-aware functions. The boolean connectives are the
+// deliberate EXCEPTION to blanket propagation: or/and/not follow SQL's
+// three-valued logic (null is UNKNOWN, so null or true = true and null and
+// false = false), `x in (...)` is its expansion into equalities, and
+// `x is [not] null` is the one predicate that never returns null. Keywords
+// match case-insensitively, like the function names. Because only division can
+// produce a value with no finite decimal representation, every `/` must be
+// dominated by a round/trunc (or comparison — booleans never materialize a
+// decimal) ancestor in its tree, checked at admission: a bare quotient that
+// could reach a column is a config error, never a runtime surprise.
+//
+// Grammar (recursive descent, no precedence surprises):
+//
+//	expr       := orExpr
+//	orExpr     := andExpr ('or' andExpr)*
+//	andExpr    := notExpr ('and' notExpr)*
+//	notExpr    := 'not' notExpr | comparison
+//	comparison := additive (compareOp additive
+//	              | 'in' '(' additive (',' additive)* ')'
+//	              | 'is' 'not'? 'null')?
+//	additive   := multiplicative (('+'|'-') multiplicative)*
+//	multiplicative := unary (('*'|'/') unary)*
+//	unary      := '-' unary | primary
+//	primary    := NUMBER | STRING | TRUE | FALSE | PATH
+//	              | IDENT '(' expr (',' expr)* ')' | '(' expr ')'
+//	compareOp  := '=' | '<>' | '<' | '<=' | '>' | '>='
+//
+// NUMBER is a plain decimal literal (no exponent form); STRING is a
+// SQL-style single-quoted literal with '' as the escaped quote (needed by
+// real formulas like nullif($.GroupName, '')); PATH is a `$…` jsonpath
+// into the event payload; IDENT names one of the closed function set:
+// coalesce, nullif, round, trunc (matched case-insensitively).
+
+// exprMaxBits caps the combined numerator+denominator size of any
+// intermediate value — unreachable for admissible formulas (the domination
+// rule bounds unrounded division depth); pure pathology insurance.
+const exprMaxBits = 4096
+
+type Node interface{ node() }
+
+type exprNum struct{ val *big.Rat }
+
+type exprStr struct{ val string }
+
+type exprPath struct{ path string }
+
+type exprNeg struct{ operand Node }
+
+type exprBin struct {
+	op   string
+	l, r Node
+}
+
+type exprCall struct {
+	fn   string // canonical lower-case name from the closed set
+	args []Node
+}
+
+type exprNot struct{ operand Node }
+
+type exprIn struct {
+	operand Node
+	list    []Node
+}
+
+type exprIsNull struct {
+	operand Node
+	negate  bool
+}
+
+type exprBool struct{ val bool }
+
+func (exprNum) node()    {}
+func (exprStr) node()    {}
+func (exprPath) node()   {}
+func (exprNeg) node()    {}
+func (exprBin) node()    {}
+func (exprCall) node()   {}
+func (exprNot) node()    {}
+func (exprIn) node()     {}
+func (exprIsNull) node() {}
+func (exprBool) node()   {}
+
+// ── lexing ──────────────────────────────────────────────────────────────
+
+type exprToken struct {
+	kind string // "num", "path", "ident", "op", "eof"
+	text string
+	pos  int
+}
+
+func lexExpr(src string) ([]exprToken, error) {
+	var toks []exprToken
+	i := 0
+	for i < len(src) {
+		c := src[i]
+		switch {
+		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
+			i++
+		case c >= '0' && c <= '9':
+			start := i
+			seenDot := false
+			for i < len(src) && (src[i] >= '0' && src[i] <= '9' || src[i] == '.' && !seenDot) {
+				if src[i] == '.' {
+					seenDot = true
+				}
+				i++
+			}
+			toks = append(toks, exprToken{"num", src[start:i], start})
+		case c == '$':
+			// A jsonpath runs to the next delimiter; bracket segments may
+			// contain anything (quoted keys with spaces), so they are consumed
+			// to their closing bracket.
+			start := i
+			i++
+			for i < len(src) {
+				if src[i] == '[' {
+					depth := 1
+					i++
+					for i < len(src) && depth > 0 {
+						if src[i] == '[' {
+							depth++
+						}
+						if src[i] == ']' {
+							depth--
+						}
+						i++
+					}
+					continue
+				}
+				if strings.ContainsRune(" \t\n\r+-*/(),=<>", rune(src[i])) {
+					break
+				}
+				i++
+			}
+			toks = append(toks, exprToken{"path", src[start:i], start})
+		case c == '\'':
+			// SQL-style string literal; '' is the escaped quote.
+			i++
+			var sb strings.Builder
+			closed := false
+			for i < len(src) {
+				if src[i] == '\'' {
+					if i+1 < len(src) && src[i+1] == '\'' {
+						sb.WriteByte('\'')
+						i += 2
+						continue
+					}
+					i++
+					closed = true
+					break
+				}
+				sb.WriteByte(src[i])
+				i++
+			}
+			if !closed {
+				return nil, fmt.Errorf("unterminated string literal starting at position %d", i)
+			}
+			toks = append(toks, exprToken{"str", sb.String(), i})
+		case c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '_':
+			start := i
+			for i < len(src) && (src[i] >= 'a' && src[i] <= 'z' || src[i] >= 'A' && src[i] <= 'Z' || src[i] >= '0' && src[i] <= '9' || src[i] == '_') {
+				i++
+			}
+			toks = append(toks, exprToken{"ident", src[start:i], start})
+		case c == '<':
+			if i+1 < len(src) && (src[i+1] == '=' || src[i+1] == '>') {
+				toks = append(toks, exprToken{"op", src[i : i+2], i})
+				i += 2
+			} else {
+				toks = append(toks, exprToken{"op", "<", i})
+				i++
+			}
+		case c == '>':
+			if i+1 < len(src) && src[i+1] == '=' {
+				toks = append(toks, exprToken{"op", ">=", i})
+				i += 2
+			} else {
+				toks = append(toks, exprToken{"op", ">", i})
+				i++
+			}
+		case strings.ContainsRune("+-*/(),=", rune(c)):
+			toks = append(toks, exprToken{"op", string(c), i})
+			i++
+		default:
+			return nil, fmt.Errorf("unexpected character %q at position %d", string(c), i)
+		}
+	}
+	toks = append(toks, exprToken{"eof", "", len(src)})
+	return toks, nil
+}
+
+// ── parsing ─────────────────────────────────────────────────────────────
+
+type exprParser struct {
+	toks []exprToken
+	i    int
+}
+
+func (p *exprParser) peek() exprToken { return p.toks[p.i] }
+
+func (p *exprParser) next() exprToken { t := p.toks[p.i]; p.i++; return t }
+
+func (p *exprParser) expectOp(op string) error {
+	t := p.next()
+	if t.kind != "op" || t.text != op {
+		return fmt.Errorf("expected %q at position %d, got %q", op, t.pos, t.text)
+	}
+	return nil
+}
+
+var exprFunctions = map[string]struct{ minArgs, maxArgs int }{
+	"coalesce": {2, 16},
+	"nullif":   {2, 2},
+	"round":    {2, 2},
+	"trunc":    {1, 2},
+}
+
+// atKeyword reports whether the next token is the given SQL keyword
+// (identifiers double as keywords, matched case-insensitively; a `$`
+// path can never collide since paths are their own token kind).
+func (p *exprParser) atKeyword(kw string) bool {
+	t := p.peek()
+	return t.kind == "ident" && strings.EqualFold(t.text, kw)
+}
+
+func (p *exprParser) parseExpr() (Node, error) {
+	l, err := p.parseAnd()
+	if err != nil {
+		return nil, err
+	}
+	for p.atKeyword("or") {
+		p.next()
+		r, err := p.parseAnd()
+		if err != nil {
+			return nil, err
+		}
+		l = exprBin{"or", l, r}
+	}
+	return l, nil
+}
+
+func (p *exprParser) parseAnd() (Node, error) {
+	l, err := p.parseNot()
+	if err != nil {
+		return nil, err
+	}
+	for p.atKeyword("and") {
+		p.next()
+		r, err := p.parseNot()
+		if err != nil {
+			return nil, err
+		}
+		l = exprBin{"and", l, r}
+	}
+	return l, nil
+}
+
+func (p *exprParser) parseNot() (Node, error) {
+	if p.atKeyword("not") {
+		p.next()
+		operand, err := p.parseNot()
+		if err != nil {
+			return nil, err
+		}
+		return exprNot{operand}, nil
+	}
+	return p.parseComparison()
+}
+
+func (p *exprParser) parseComparison() (Node, error) {
+	l, err := p.parseAdditive()
+	if err != nil {
+		return nil, err
+	}
+	if t := p.peek(); t.kind == "op" && (t.text == "=" || t.text == "<>" || t.text == "<" || t.text == "<=" || t.text == ">" || t.text == ">=") {
+		p.next()
+		r, err := p.parseAdditive()
+		if err != nil {
+			return nil, err
+		}
+		return exprBin{t.text, l, r}, nil
+	}
+	if p.atKeyword("in") {
+		p.next()
+		if err := p.expectOp("("); err != nil {
+			return nil, err
+		}
+		var list []Node
+		for {
+			m, err := p.parseAdditive()
+			if err != nil {
+				return nil, err
+			}
+			list = append(list, m)
+			nt := p.next()
+			if nt.kind == "op" && nt.text == "," {
+				continue
+			}
+			if nt.kind == "op" && nt.text == ")" {
+				break
+			}
+			return nil, fmt.Errorf("expected \",\" or \")\" at position %d, got %q", nt.pos, nt.text)
+		}
+		return exprIn{l, list}, nil
+	}
+	if p.atKeyword("is") {
+		p.next()
+		negate := false
+		if p.atKeyword("not") {
+			p.next()
+			negate = true
+		}
+		if !p.atKeyword("null") {
+			t := p.peek()
+			return nil, fmt.Errorf("expected null after is at position %d, got %q", t.pos, t.text)
+		}
+		p.next()
+		return exprIsNull{l, negate}, nil
+	}
+	return l, nil
+}
+
+func (p *exprParser) parseAdditive() (Node, error) {
+	l, err := p.parseMultiplicative()
+	if err != nil {
+		return nil, err
+	}
+	for {
+		t := p.peek()
+		if t.kind != "op" || (t.text != "+" && t.text != "-") {
+			return l, nil
+		}
+		p.next()
+		r, err := p.parseMultiplicative()
+		if err != nil {
+			return nil, err
+		}
+		l = exprBin{t.text, l, r}
+	}
+}
+
+func (p *exprParser) parseMultiplicative() (Node, error) {
+	l, err := p.parseUnary()
+	if err != nil {
+		return nil, err
+	}
+	for {
+		t := p.peek()
+		if t.kind != "op" || (t.text != "*" && t.text != "/") {
+			return l, nil
+		}
+		p.next()
+		r, err := p.parseUnary()
+		if err != nil {
+			return nil, err
+		}
+		l = exprBin{t.text, l, r}
+	}
+}
+
+func (p *exprParser) parseUnary() (Node, error) {
+	if t := p.peek(); t.kind == "op" && t.text == "-" {
+		p.next()
+		operand, err := p.parseUnary()
+		if err != nil {
+			return nil, err
+		}
+		return exprNeg{operand}, nil
+	}
+	return p.parsePrimary()
+}
+
+func (p *exprParser) parsePrimary() (Node, error) {
+	t := p.next()
+	switch t.kind {
+	case "num":
+		r, ok := new(big.Rat).SetString(t.text)
+		if !ok {
+			return nil, fmt.Errorf("invalid number %q at position %d", t.text, t.pos)
+		}
+		return exprNum{r}, nil
+	case "str":
+		return exprStr{t.text}, nil
+	case "path":
+		// A `$parent.` prefix is the forEach element scope's way of reaching
+		// the enclosing event payload; validate the remainder as a rooted
+		// path (the apply layer resolves the scope).
+		checkPath := t.text
+		if rest, ok := strings.CutPrefix(checkPath, "$parent"); ok {
+			checkPath = "$" + rest
+		}
+		if _, err := jsonpath.New(checkPath); err != nil {
+			return nil, fmt.Errorf("invalid jsonpath %q at position %d: %v", t.text, t.pos, err)
+		}
+		if MultiValuedPath(checkPath) {
+			return nil, fmt.Errorf("jsonpath %q at position %d is multi-valued (wildcard/recursive/filter) — expressions compute over scalars", t.text, t.pos)
+		}
+		return exprPath{t.text}, nil
+	case "ident":
+		fn := strings.ToLower(t.text)
+		// SQL's boolean literals, case-insensitive like every keyword.
+		if fn == "true" || fn == "false" {
+			return exprBool{fn == "true"}, nil
+		}
+		spec, ok := exprFunctions[fn]
+		if !ok {
+			return nil, fmt.Errorf("unknown function %q at position %d (the closed set is coalesce, nullif, round, trunc)", t.text, t.pos)
+		}
+		if err := p.expectOp("("); err != nil {
+			return nil, err
+		}
+		var args []Node
+		for {
+			a, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			args = append(args, a)
+			nt := p.next()
+			if nt.kind == "op" && nt.text == "," {
+				continue
+			}
+			if nt.kind == "op" && nt.text == ")" {
+				break
+			}
+			return nil, fmt.Errorf("expected \",\" or \")\" at position %d, got %q", nt.pos, nt.text)
+		}
+		if len(args) < spec.minArgs || len(args) > spec.maxArgs {
+			return nil, fmt.Errorf("%s takes %d–%d arguments, got %d", fn, spec.minArgs, spec.maxArgs, len(args))
+		}
+		if (fn == "round" || fn == "trunc") && len(args) == 2 {
+			s, err := scaleLiteral(args[1], fn)
+			if err != nil {
+				return nil, err
+			}
+			// Normalize (e.g. a `-0` parses as neg(0)) so eval can rely on a
+			// plain literal node.
+			args[1] = exprNum{new(big.Rat).SetInt64(s)}
+		}
+		return exprCall{fn, args}, nil
+	case "op":
+		if t.text == "(" {
+			inner, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			if err := p.expectOp(")"); err != nil {
+				return nil, err
+			}
+			return inner, nil
+		}
+	}
+	return nil, fmt.Errorf("unexpected %q at position %d", t.text, t.pos)
+}
+
+// scaleLiteral enforces the spec's scale rule: round/trunc scale is a
+// literal integer ≥ 0 (bounded to keep 10^s sane), never an expression. A
+// negative literal parses as unary minus over a number, so unwrap it to
+// give the range message rather than the shape message.
+func scaleLiteral(n Node, fn string) (int64, error) {
+	val := new(big.Rat)
+	switch x := n.(type) {
+	case exprNum:
+		val.Set(x.val)
+	case exprNeg:
+		num, ok := x.operand.(exprNum)
+		if !ok {
+			return 0, fmt.Errorf("%s scale must be a literal integer (not an expression or path)", fn)
+		}
+		val.Neg(num.val)
+	default:
+		return 0, fmt.Errorf("%s scale must be a literal integer (not an expression or path)", fn)
+	}
+	if !val.IsInt() || val.Sign() < 0 || val.Num().Cmp(big.NewInt(12)) > 0 {
+		return 0, fmt.Errorf("%s scale must be a literal integer between 0 and 12", fn)
+	}
+	return val.Num().Int64(), nil
+}
+
+// checkMaterializable enforces the finite-materialization rule: every `/`
+// needs a dominating round/trunc (or comparison — booleans never carry a
+// decimal) so no non-terminating value can reach a column. dominated
+// propagates down whole subtrees: round(a/b + c) is fine because the
+// rounding materializes everything beneath it.
+func checkMaterializable(n Node, dominated bool) error {
+	switch x := n.(type) {
+	case exprNum, exprStr, exprPath, exprBool:
+		return nil
+	case exprNeg:
+		return checkMaterializable(x.operand, dominated)
+	case exprBin:
+		childDominated := dominated
+		switch x.op {
+		case "=", "<>", "<", "<=", ">", ">=", "or", "and":
+			childDominated = true
+		case "/":
+			if !dominated {
+				return fmt.Errorf("a division must be wrapped in round(...) or trunc(...) — an unrounded quotient (think 1/3) has no exact decimal form to store")
+			}
+		}
+		if err := checkMaterializable(x.l, childDominated); err != nil {
+			return err
+		}
+		return checkMaterializable(x.r, childDominated)
+	case exprCall:
+		childDominated := dominated || x.fn == "round" || x.fn == "trunc"
+		for _, a := range x.args {
+			if err := checkMaterializable(a, childDominated); err != nil {
+				return err
+			}
+		}
+		return nil
+	case exprNot:
+		return checkMaterializable(x.operand, true)
+	case exprIn:
+		if err := checkMaterializable(x.operand, true); err != nil {
+			return err
+		}
+		for _, m := range x.list {
+			if err := checkMaterializable(m, true); err != nil {
+				return err
+			}
+		}
+		return nil
+	case exprIsNull:
+		return checkMaterializable(x.operand, true)
+	}
+	return fmt.Errorf("unhandled expression node %T", n)
+}
+
+// Compile lexes, parses, and admission-checks one expression. Every
+// error it returns is a config error — expressions that compile can only
+// fail at apply time on data (a non-numeric operand, the bit cap).
+func Compile(src string) (Node, error) {
+	toks, err := lexExpr(src)
+	if err != nil {
+		return nil, err
+	}
+	p := &exprParser{toks: toks}
+	n, err := p.parseExpr()
+	if err != nil {
+		return nil, err
+	}
+	if t := p.peek(); t.kind != "eof" {
+		return nil, fmt.Errorf("unexpected trailing %q at position %d", t.text, t.pos)
+	}
+	if err := checkMaterializable(n, false); err != nil {
+		return nil, err
+	}
+	return n, nil
+}
+
+// ── evaluation ──────────────────────────────────────────────────────────
+
+// Eval evaluates a compiled expression against the decoded event
+// payload. Results are nil (SQL NULL), *big.Rat (an exact decimal —
+// FormatRat renders it), bool (comparisons), or a passthrough scalar from
+// coalesce/nullif (string, bool). Errors are data errors (a non-numeric
+// operand where arithmetic needs one, the bit cap) — the caller dead-letters
+// them as permanent.
+func Eval(n Node, payload, parent any) (any, error) {
+	switch x := n.(type) {
+	case exprNum:
+		return x.val, nil
+	case exprStr:
+		return x.val, nil
+	case exprBool:
+		return x.val, nil
+	case exprPath:
+		v, err := ResolvePath(x.path, payload, parent)
+		if err != nil {
+			// A missing field is null (the spec's null semantics) — payload
+			// shapes legitimately vary across a topic's event types.
+			return nil, nil
+		}
+		return normalizeExprValue(v, x.path)
+	case exprNeg:
+		v, err := Eval(x.operand, payload, parent)
+		if err != nil || v == nil {
+			return nil, err
+		}
+		r, err := ratOperand(v)
+		if err != nil {
+			return nil, err
+		}
+		return new(big.Rat).Neg(r), nil
+	case exprBin:
+		return evalBin(x, payload, parent)
+	case exprCall:
+		return evalCall(x, payload, parent)
+	case exprNot:
+		v, err := Eval(x.operand, payload, parent)
+		if err != nil || v == nil {
+			return nil, err // not null = null (three-valued)
+		}
+		b, ok := v.(bool)
+		if !ok {
+			return nil, fmt.Errorf("not needs a boolean operand (a comparison/predicate), got %T", v)
+		}
+		return !b, nil
+	case exprIn:
+		return evalIn(x, payload, parent)
+	case exprIsNull:
+		// A PATH operand tests presence directly, skipping scalar
+		// normalization: `$.cust is not null` legitimately asks about a
+		// looked-up row or a merge side — SQL's row-valued IS NULL — and
+		// an object in a value position stays an error everywhere else.
+		if p, ok := x.operand.(exprPath); ok {
+			v, err := ResolvePath(p.path, payload, parent)
+			if err != nil {
+				v = nil // missing = null, per the language
+			}
+			return (v == nil) != x.negate, nil
+		}
+		v, err := Eval(x.operand, payload, parent)
+		if err != nil {
+			return nil, err
+		}
+		return (v == nil) != x.negate, nil
+	}
+	return nil, fmt.Errorf("unhandled expression node %T", n)
+}
+
+func evalBin(x exprBin, payload, parent any) (any, error) {
+	if x.op == "or" || x.op == "and" {
+		return evalConnective(x, payload, parent)
+	}
+	l, err := Eval(x.l, payload, parent)
+	if err != nil {
+		return nil, err
+	}
+	r, err := Eval(x.r, payload, parent)
+	if err != nil {
+		return nil, err
+	}
+	if l == nil || r == nil {
+		return nil, nil // null propagates through arithmetic AND comparison
+	}
+	switch x.op {
+	case "=", "<>":
+		eq, err := exprEqual(l, r)
+		if err != nil {
+			return nil, err
+		}
+		if x.op == "<>" {
+			return !eq, nil
+		}
+		return eq, nil
+	}
+	lr, err := ratOperand(l)
+	if err != nil {
+		return nil, err
+	}
+	rr, err := ratOperand(r)
+	if err != nil {
+		return nil, err
+	}
+	switch x.op {
+	case "+":
+		return capBits(new(big.Rat).Add(lr, rr))
+	case "-":
+		return capBits(new(big.Rat).Sub(lr, rr))
+	case "*":
+		return capBits(new(big.Rat).Mul(lr, rr))
+	case "/":
+		if rr.Sign() == 0 {
+			return nil, fmt.Errorf("division by zero (guard the divisor with nullif(x, 0))")
+		}
+		return capBits(new(big.Rat).Quo(lr, rr))
+	case "<":
+		return lr.Cmp(rr) < 0, nil
+	case "<=":
+		return lr.Cmp(rr) <= 0, nil
+	case ">":
+		return lr.Cmp(rr) > 0, nil
+	case ">=":
+		return lr.Cmp(rr) >= 0, nil
+	}
+	return nil, fmt.Errorf("unhandled operator %q", x.op)
+}
+
+func evalCall(x exprCall, payload, parent any) (any, error) {
+	switch x.fn {
+	case "coalesce":
+		for _, a := range x.args {
+			v, err := Eval(a, payload, parent)
+			if err != nil {
+				return nil, err
+			}
+			if v != nil {
+				return v, nil
+			}
+		}
+		return nil, nil
+	case "nullif":
+		a, err := Eval(x.args[0], payload, parent)
+		if err != nil {
+			return nil, err
+		}
+		b, err := Eval(x.args[1], payload, parent)
+		if err != nil {
+			return nil, err
+		}
+		// SQL semantics: nullif returns null only when the operands are
+		// EQUAL; a null operand compares unknown, so a flows through.
+		if a == nil || b == nil {
+			return a, nil
+		}
+		eq, err := exprEqual(a, b)
+		if err != nil {
+			return nil, err
+		}
+		if eq {
+			return nil, nil
+		}
+		return a, nil
+	case "round", "trunc":
+		v, err := Eval(x.args[0], payload, parent)
+		if err != nil || v == nil {
+			return nil, err
+		}
+		r, err := ratOperand(v)
+		if err != nil {
+			return nil, err
+		}
+		scale := int64(0)
+		if len(x.args) == 2 {
+			scale = x.args[1].(exprNum).val.Num().Int64() // literal, checked at parse
+		}
+		return scaleRat(r, scale, x.fn == "round"), nil
+	}
+	return nil, fmt.Errorf("unhandled function %q", x.fn)
+}
+
+// evalConnective applies SQL's three-valued logic — null is UNKNOWN, so
+// (null or true) is true and (null and false) is false; the blanket
+// null-propagation rule deliberately does NOT apply here. Both sides
+// always evaluate (no short-circuit), so a data error surfaces
+// regardless of the other side's value — error behavior never depends
+// on operand order.
+func evalConnective(x exprBin, payload, parent any) (any, error) {
+	l, err := Eval(x.l, payload, parent)
+	if err != nil {
+		return nil, err
+	}
+	r, err := Eval(x.r, payload, parent)
+	if err != nil {
+		return nil, err
+	}
+	lb, lNull, err := boolOperand(l, x.op)
+	if err != nil {
+		return nil, err
+	}
+	rb, rNull, err := boolOperand(r, x.op)
+	if err != nil {
+		return nil, err
+	}
+	if x.op == "or" {
+		switch {
+		case (!lNull && lb) || (!rNull && rb):
+			return true, nil
+		case lNull || rNull:
+			return nil, nil
+		default:
+			return false, nil
+		}
+	}
+	switch {
+	case (!lNull && !lb) || (!rNull && !rb):
+		return false, nil
+	case lNull || rNull:
+		return nil, nil
+	default:
+		return true, nil
+	}
+}
+
+func boolOperand(v any, op string) (val, isNull bool, err error) {
+	switch t := v.(type) {
+	case nil:
+		return false, true, nil
+	case bool:
+		return t, false, nil
+	default:
+		return false, false, fmt.Errorf("%s needs boolean operands (comparisons/predicates), got %T", op, v)
+	}
+}
+
+// evalIn is x = m1 or x = m2 ... with SQL's semantics folded in: a null
+// operand is null; a match is true; a null MEMBER with no match makes
+// the answer UNKNOWN (null), never false.
+func evalIn(x exprIn, payload, parent any) (any, error) {
+	v, err := Eval(x.operand, payload, parent)
+	if err != nil {
+		return nil, err
+	}
+	if v == nil {
+		return nil, nil
+	}
+	sawNull := false
+	for _, m := range x.list {
+		mv, err := Eval(m, payload, parent)
+		if err != nil {
+			return nil, err
+		}
+		if mv == nil {
+			sawNull = true
+			continue
+		}
+		eq, err := exprEqual(v, mv)
+		if err != nil {
+			return nil, err
+		}
+		if eq {
+			return true, nil
+		}
+	}
+	if sawNull {
+		return nil, nil
+	}
+	return false, nil
+}
+
+// scaleRat materializes r at the given decimal scale: half away from zero
+// when rounding (PG round(numeric) / T-SQL ROUND), toward zero when
+// truncating (PG trunc / T-SQL ROUND(x, s, 1)).
+func scaleRat(r *big.Rat, scale int64, round bool) *big.Rat {
+	pow := new(big.Int).Exp(big.NewInt(10), big.NewInt(scale), nil)
+	scaled := new(big.Rat).Mul(r, new(big.Rat).SetInt(pow))
+	q, rem := new(big.Int).QuoRem(scaled.Num(), scaled.Denom(), new(big.Int))
+	if round && rem.Sign() != 0 {
+		twice := new(big.Int).Abs(rem)
+		twice.Lsh(twice, 1)
+		if twice.Cmp(scaled.Denom()) >= 0 {
+			if rem.Sign() > 0 {
+				q.Add(q, big.NewInt(1))
+			} else {
+				q.Sub(q, big.NewInt(1))
+			}
+		}
+	}
+	return new(big.Rat).SetFrac(q, pow)
+}
+
+// normalizeExprValue turns a payload leaf into an expression value: numbers
+// become exact rationals from their source digits, strings and bools pass
+// through (for coalesce/nullif), null stays null. Non-scalar leaves are data
+// errors — expressions compute over scalars.
+func normalizeExprValue(v any, path string) (any, error) {
+	switch t := v.(type) {
+	case nil:
+		return nil, nil
+	case json.Number:
+		r, ok := new(big.Rat).SetString(string(t))
+		if !ok {
+			return nil, fmt.Errorf("path [%s]: number %q does not parse", path, string(t))
+		}
+		return r, nil
+	case string, bool:
+		return t, nil
+	case float64:
+		// Payloads decode with UseNumber, so a float64 here means a caller
+		// handed in non-UseNumber data — refuse rather than silently lose
+		// precision.
+		return nil, fmt.Errorf("path [%s]: payload decoded without UseNumber (float64 leaf)", path)
+	default:
+		return nil, fmt.Errorf("path [%s]: expressions compute over scalars, got %T", path, v)
+	}
+}
+
+func ratOperand(v any) (*big.Rat, error) {
+	switch t := v.(type) {
+	case *big.Rat:
+		return t, nil
+	case string:
+		return nil, fmt.Errorf("arithmetic needs a number, got the string %q", t)
+	case bool:
+		return nil, fmt.Errorf("arithmetic needs a number, got a boolean")
+	default:
+		return nil, fmt.Errorf("arithmetic needs a number, got %T", v)
+	}
+}
+
+func exprEqual(a, b any) (bool, error) {
+	ar, aNum := a.(*big.Rat)
+	br, bNum := b.(*big.Rat)
+	if aNum && bNum {
+		return ar.Cmp(br) == 0, nil
+	}
+	if aNum != bNum {
+		return false, nil // mixed types are simply not equal
+	}
+	return a == b, nil // strings/bools compare directly
+}
+
+func capBits(r *big.Rat) (*big.Rat, error) {
+	if r.Num().BitLen()+r.Denom().BitLen() > exprMaxBits {
+		return nil, fmt.Errorf("expression value exceeded %d bits (pathological input; check the source data)", exprMaxBits)
+	}
+	return r, nil
+}
+
+// FormatRat renders an exact rational in minimal decimal form: no exponent,
+// no trailing zeros, integral values without a point. The denominator must
+// be of the form 2^a·5^b (a terminating decimal) — guaranteed for every
+// materialized value by the admission-time domination rule; anything else
+// is an internal invariant violation, reported loudly.
+func FormatRat(r *big.Rat) (string, error) {
+	den := new(big.Int).Set(r.Denom())
+	two, five, ten := big.NewInt(2), big.NewInt(5), big.NewInt(10)
+	var a, b int64
+	m := new(big.Int)
+	for {
+		q, rem := new(big.Int).QuoRem(den, two, m)
+		if rem.Sign() != 0 {
+			break
+		}
+		den, a = q, a+1
+	}
+	for {
+		q, rem := new(big.Int).QuoRem(den, five, m)
+		if rem.Sign() != 0 {
+			break
+		}
+		den, b = q, b+1
+	}
+	if den.Cmp(big.NewInt(1)) != 0 {
+		return "", fmt.Errorf("internal: non-terminating decimal reached materialization (denominator retains factor %s)", den)
+	}
+	scale := a
+	if b > scale {
+		scale = b
+	}
+	pow := new(big.Int).Exp(ten, big.NewInt(scale), nil)
+	digits := new(big.Int).Mul(r.Num(), pow)
+	digits.Quo(digits, r.Denom())
+	neg := digits.Sign() < 0
+	s := new(big.Int).Abs(digits).String()
+	if scale > 0 {
+		for int64(len(s)) <= scale {
+			s = "0" + s
+		}
+		intPart, fracPart := s[:int64(len(s))-scale], s[int64(len(s))-scale:]
+		fracPart = strings.TrimRight(fracPart, "0")
+		if fracPart == "" {
+			s = intPart
+		} else {
+			s = intPart + "." + fracPart
+		}
+	}
+	if neg {
+		s = "-" + s
+	}
+	return s, nil
+}

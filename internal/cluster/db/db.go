@@ -356,6 +356,13 @@ type workerHandle struct {
 	// does not promise concurrency safety — a binlog syncer is not safe to Close
 	// twice — so the drain-then-close helpers route the actual Close through it.
 	closeResources sync.Once
+	// stageRecoveryFolded/-Target publish a running stage-state
+	// re-derivation's progress (target = the checkpoint being re-derived
+	// to; 0 = no re-derivation active). Owner-local observability for
+	// the status endpoint — the field finding: a re-deriving worker read
+	// as plain "running" with silently climbing lag for ~30 minutes.
+	stageRecoveryFolded atomic.Uint64
+	stageRecoveryTarget atomic.Uint64
 	// syncable is the parsed Syncable this worker runs, retained so the delete
 	// path can reuse it as a teardown handle (e.g. DROP TABLE for a SQL
 	// syncable) without re-parsing the config — which would re-run Init. It is

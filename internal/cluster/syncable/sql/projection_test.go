@@ -553,3 +553,60 @@ func TestProjectionLifecycleGoMySQLServer(t *testing.T) {
 	}
 	require.Equal(t, map[string]tenantRow{"t2": want["t2"]}, readTenants(t, db))
 }
+
+// An expr set entry computes its column from the event payload with exact
+// decimal arithmetic: the rational result binds through coerceForColumn as
+// its minimal decimal text (DECIMAL columns take source digits, never
+// float64), booleans bind as booleans, and a null result binds SQL NULL.
+func TestProjectionExprComputesColumn(t *testing.T) {
+	config := &sql.ProjectionConfig{
+		Topic:      "controlplane-event",
+		Table:      "items",
+		PrimaryKey: []string{"id"},
+		Columns: []sql.ProjectionColumn{
+			{Name: "id", SQLType: "BIGINT"},
+			{Name: "price", SQLType: "DECIMAL(12,2)"},
+			{Name: "in_bulk", SQLType: "BOOLEAN"},
+		},
+		Rules: []sql.ProjectionRule{{
+			When: []sql.WhenClause{{Path: "$.event_type", Equals: "posted"}},
+			Set: []sql.ProjectionSet{
+				{Column: "price", Expr: "round($.Quantity * coalesce($.CustomUnitPrice, 10), 2)"},
+				{Column: "in_bulk", Expr: "$.Quantity >= 3"},
+			},
+		}},
+	}
+	projection, mock, rules, _ := newMockProjection(t, config, nil)
+
+	// 3 × 12.5 = 37.5 exactly (minimal decimal form, no float ghost).
+	mock.ExpectBegin()
+	first := []driver.Value{int64(1), "37.5", true}
+	rules[0].ExpectExec().WithArgs(append(first, first...)...).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+	_, err := projection.Sync(context.Background(), eventActual(t, "1", map[string]any{
+		"id": 1, "event_type": "posted", "Quantity": 3, "CustomUnitPrice": 12.5,
+	}))
+	require.NoError(t, err)
+
+	// Missing CustomUnitPrice → coalesce falls back to 10; a null operand in
+	// the comparison would bind NULL, but Quantity is present here.
+	mock.ExpectBegin()
+	second := []driver.Value{int64(2), int64(20), false}
+	rules[0].ExpectExec().WithArgs(append(second, second...)...).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+	_, err = projection.Sync(context.Background(), eventActual(t, "2", map[string]any{
+		"id": 2, "event_type": "posted", "Quantity": 2,
+	}))
+	require.NoError(t, err)
+
+	// Null propagation end to end: no Quantity → both exprs null → SQL NULL.
+	mock.ExpectBegin()
+	third := []driver.Value{int64(3), nil, nil}
+	rules[0].ExpectExec().WithArgs(append(third, third...)...).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+	_, err = projection.Sync(context.Background(), eventActual(t, "3", map[string]any{
+		"id": 3, "event_type": "posted",
+	}))
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}

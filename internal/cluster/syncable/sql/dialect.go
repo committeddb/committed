@@ -63,6 +63,28 @@ type Dialect interface {
 	// keeps its own binding convention (Postgres once via EXCLUDED, MySQL
 	// doubled via BindArgs).
 	CreateEnrichedUpsertSQL(config *Config, enrich map[string]SpineEnrichment) string
+	// CreateEnrichedUpdateSQL is CreateUpdateSQL for a decorator rule with
+	// lookup enrichments: enriched columns' SET entries are the same scalar
+	// subqueries CreateEnrichedUpsertSQL uses, with the subquery's
+	// placeholder binding the canonical string rendering of the on column's
+	// coerced value. Placeholder order is SET entries in mapping order
+	// (enrichment key placeholders in place), key columns last — bound
+	// ONCE, never through BindArgs (a plain UPDATE has no value doubling
+	// on either engine). This is what lets a decorated FK carry its
+	// display field: the FK arrives on the decorator, so the enrichment
+	// must ride the decorator's own statement.
+	CreateEnrichedUpdateSQL(config *Config, enrich map[string]SpineEnrichment) string
+	// CreateUpdateSQL returns the update-only apply for a DECORATING
+	// (non-owner) projection rule: `UPDATE <table> SET <set cols> WHERE
+	// <pk>`. The config comes from ruleConfig, whose leading mappings are
+	// the key columns — they form the WHERE; the rest form the SET. Bind
+	// order is SET values first, key values last (the reverse of the
+	// upsert, and bound ONCE — never through BindArgs). No INSERT arm by
+	// design: a decorator must not create a row the owner has not
+	// admitted; against an absent key this is a 0-row no-op, and the row
+	// owner's own write pulls the decorator's retained stage output when
+	// it admits the key.
+	CreateUpdateSQL(config *Config) string
 	// CreateSpineFanOutSQL returns the dimension-change fan-out for one
 	// enriched column: `UPDATE <table> SET <column> = <ph> WHERE <on> = <ph>`.
 	// Bound Go-side with (coerced field value, dimension key coerced to the
@@ -118,6 +140,11 @@ type Dialect interface {
 	// UPDATE (never an upsert) so removing the last child of an absent parent is
 	// a no-op, never a ghost row. Both placeholders bind the parent key.
 	CreateAggregateRebuildSQL(spec AggregateSpec) string
+	// CreateForEachChildrenSQL returns the SELECT that lists a forEach
+	// source's fanned child keys for one parent (the reconciliation read:
+	// prior children minus current children = rows to delete). One
+	// placeholder binds the parent entity key.
+	CreateForEachChildrenSQL(sidecar string) string
 	// CreateAggregateParentLookupSQL returns the SELECT that recovers a removed
 	// child's parent key from the sidecar by its child key. A delete Actual
 	// carries no payload, so the parent correlation is read back from the
@@ -467,10 +494,55 @@ type AggregateEnrichment struct {
 type AggregateSpec struct {
 	Table       string
 	PrimaryKey  string
-	Column      string
+	Column      string // the array column; "" for a scalars-only aggregate
 	Sidecar     string
 	NumericSort bool
 	Enrichments []AggregateEnrichment
+	Scalars     []AggregateScalar
+}
+
+// AggregateScalar is the dialect-facing description of one scalar aggregate
+// column: Fn (canonical lower-case — count, sum, min, max, countdistinct)
+// folded over the element field Of, extracted from the sidecar's element
+// JSON in the same materialize/rebuild subqueries that build the array
+// column. Sum always casts numeric; min/max/countdistinct cast numeric when
+// OfNumeric (lexical otherwise — ISO dates sort correctly as text). Where
+// clauses restrict which children fold (filtered count), rendered as
+// escaped literals — their values are operator-authored config, like the
+// identifiers around them.
+type AggregateScalar struct {
+	Column    string
+	Fn        string
+	Of        string
+	OfNumeric bool
+	Where     []AggregateScalarWhere
+}
+
+// AggregateScalarWhere is one restriction over an element field: Equals
+// compares in the JSON-text space; Null matches SQL IS NULL (JSON null
+// or absent).
+type AggregateScalarWhere struct {
+	Field  string
+	Equals any
+	Null   bool
+}
+
+// ScalarWhereText renders a scalar where value in the JSON-text comparison
+// space the dialects' ->> extraction yields: booleans as true/false,
+// numbers as their digits, strings as themselves. Dialects quote and
+// escape the result into their SQL.
+func ScalarWhereText(v any) string {
+	switch t := v.(type) {
+	case string:
+		return t
+	case bool:
+		if t {
+			return "true"
+		}
+		return "false"
+	default:
+		return fmt.Sprintf("%v", t)
+	}
 }
 
 // LookupSpec is the dialect-facing description of one enrichment dimension: just

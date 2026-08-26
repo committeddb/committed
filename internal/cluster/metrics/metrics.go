@@ -168,7 +168,7 @@ func New(meter metric.Meter) *Metrics {
 		metric.WithUnit("s"))
 
 	m.syncRulesUnmatched, _ = meter.Int64Counter("committed.sync.rules_unmatched",
-		metric.WithDescription("Events a sql-projection syncable consumed from its topic that matched none of its rules. The event leaves no row behind; a steady tick is the signal that a new event variant shipped without a projection rule."))
+		metric.WithDescription("Events a projection syncable consumed from its topic that matched none of its rules. The event leaves no row behind; a steady tick is the signal that a new event variant shipped without a projection rule."))
 
 	m.entityKindMisuse, _ = meter.Int64Counter("committed.entity_kind.misuse",
 		metric.WithDescription("Syncable configs parsed against a topic whose declared entity kind they mismatch (e.g. a leaf-mapped sql syncable on an event-kind topic). Advisory: the config still runs, but the combination is a known bug class — see README § Entity kinds."))
@@ -292,7 +292,7 @@ func (m *Metrics) MigrationCompleted(typeID string, d time.Duration) {
 		metric.WithAttributes(attribute.String("type_id", typeID)))
 }
 
-// SyncRulesUnmatched counts one event a sql-projection syncable saw on
+// SyncRulesUnmatched counts one event a projection syncable saw on
 // its topic that matched none of its rules (the event leaves no row
 // behind). Attributed by the syncable's TOML name — the config ID
 // never reaches the syncable layer — plus the topic.

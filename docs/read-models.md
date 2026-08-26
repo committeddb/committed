@@ -1,7 +1,7 @@
 # Read models (SQL projections)
 
 A read model is a current-state table (one row per entity) that a
-`sql-projection` syncable maintains by folding an event topic in log order. The
+`projection` syncable maintains by folding an event topic in log order. The
 log stays the source of truth; the table is disposable and rebuildable from
 index 0.
 
@@ -22,7 +22,7 @@ not by default:
 
 | You want | Use | Why |
 |---|---|---|
-| A derived/denormalized table you query directly — a BFF row, a flat table replacing a complex join, current state per entity | **`sql-projection`** | It maintains the table *incrementally, per event*: continuously current (no refresh step), folds **multiple topics into one row**, aggregates children into array columns, enriches from other topics. This is committed's centerpiece use case. |
+| A derived/denormalized table you query directly — a BFF row, a flat table replacing a complex join, current state per entity | **`projection`** | It maintains the table *incrementally, per event*: continuously current (no refresh step), folds **multiple topics into one row**, aggregates children into array columns, enriches from other topics. This is committed's centerpiece use case. |
 | Raw per-table replicas — ad-hoc SQL, joins you own, feeding views/BI on your terms | plain **`sql`** syncable with a `primaryKey` (a mirror) | Faithful keyed copies of source tables. If you build a materialized view over mirrors, *you* own its refresh cost and staleness — committed keeps only the mirrors current. |
 | One row per **event** — an audit/history log | plain **`sql`** syncable with no `primaryKey` | Append-only, replay-safe history. |
 
@@ -30,7 +30,7 @@ The trade to understand: a materialized view over mirrors is stale from the
 moment its (often expensive) refresh completes; a projection is current
 within seconds of the source commit, forever, with no refresh to schedule.
 If the table you're building is *the thing the application reads*, start
-from `sql-projection` and use mirrors only for the parts a projection
+from `projection` and use mirrors only for the parts a projection
 cannot yet express.
 
 One projection scope line to know before you design: a projection's
@@ -52,14 +52,21 @@ data").
 The plain `sql` syncable lands a *history* table: one row per event.
 Applications usually query *current state*: one row per entity, which
 requires folding each entity's events in log order. A
-`type = "sql-projection"` syncable expresses that fold declaratively —
+`type = "projection"` syncable expresses that fold declaratively —
 in the one place that sees every event exactly in order — so the log
 stays the source of truth, the rules live in version-controlled TOML,
 reads are O(1), and the table is disposable: rebuild it by replaying
 from index 0. Use `sql` for event-log/history tables (and for
 `snapshot`-kind topics, which are total updates with nothing to fold);
-use `sql-projection` to maintain current-state tables from an
+use `projection` to maintain current-state tables from an
 `event`-kind topic. One topic typically feeds both.
+
+> **Renamed from `sql-projection`.** The projection language is not
+> SQL-specific in principle, so the type is now `projection` with a
+> `[projection]` section. The old spelling — `type = "sql-projection"`
+> with a `[sql-projection]` section, always renamed together — remains
+> accepted for a deprecation period; posting it succeeds and the
+> response carries a `warnings[]` entry naming the rename.
 
 A keyless history table (no `primaryKey`) is **replay-safe**: committed dedups
 each appended row on a hidden sidecar (`<table>__committed_applied`, keyed by the
@@ -91,7 +98,7 @@ committed as two separate events lands as two rows. That happens two ways:
 Either way the history table faithfully records each event — that is what an
 append log is. If you want one row per logical entity instead, give the `sql`
 syncable a `primaryKey` (its upsert then converges on the key) or maintain a
-current-state table with `sql-projection`.
+current-state table with `projection`.
 
 `primaryKey` takes one column or a list: `primaryKey = ["tenant_id",
 "project_id"]` declares a real composite `PRIMARY KEY (tenant_id,
@@ -112,40 +119,40 @@ mappings; the parser rejects a config where it doesn't.
 ```toml
 [syncable]
 name = "tenants"
-type = "sql-projection"
+type = "projection"
 mode = "always-current"        # rules target the current type version
 
-[sql-projection]
+[projection]
 topic      = "controlplane-event"
 db         = "hosted-projection"
 table      = "tenants"
 primaryKey = "tenant_id"       # or a list: ["tenant_id", "region"] — composite folds via set rules only
 # keyPath  = "$.tenant_id"     # optional; defaults to one $.<col> per primaryKey column, in order
 
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "tenant_id"
 type = "VARCHAR(256)"
 
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "tier"
 type = "VARCHAR(32)"
 
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "state"
 type = "VARCHAR(32)"
 
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "allocs"
 type = "JSONB"
 
-[[sql-projection.rules]]
+[[projection.rules]]
 when = [ { path = "$.event_type", equals = "tenant.created" } ]
 set  = [
   { column = "tier",  from  = "$.tier" },
   { column = "state", value = "pending" },
 ]
 
-[[sql-projection.rules]]
+[[projection.rules]]
 when = [
   { path = "$.event_type", equals = "tenant.provisioned" },
   { path = "$.tier",       equals = "prod" },
@@ -155,7 +162,7 @@ set  = [
   { column = "allocs", from  = "$.allocs" },
 ]
 
-[[sql-projection.rules]]
+[[projection.rules]]
 when = [ { path = "$.event_type", equals = "tenant.deprovisioned" } ]
 set  = [
   { column = "state",  value = "deprovisioning" },
@@ -169,12 +176,24 @@ A rule is an optional `when` (match clauses) plus a `set` (the columns to write)
 Six properties govern its behavior — matching, application order, write shape,
 error handling, deletes, and schema evolution:
 
-- **`when` is data, not an expression**: an array of
-  `{ path, equals }` clauses, all of which must hold (AND); express OR
-  as another rule. `{ path, null = true }` matches a *present* JSON
-  null (the flag form again, since TOML cannot write `equals = null`);
-  there is no negation. A missing path is "no match", never an error —
-  including for `null` clauses, so an absent field never matches. If
+- **`when` is data, not an expression**: an array of clauses, all of
+  which must hold (AND); express OR as another rule. Each clause is one
+  `path` plus exactly one predicate: `equals`, `null = true` (matches a
+  *present* JSON null — the flag form, since TOML cannot write
+  `equals = null`), `notEquals`, `notNull` (present and
+  non-null — SQL's IS NOT NULL, the merge's left/inner gate), or
+  `greaterThan`/`lessThan` (numeric literals, strict). Comparisons follow SQL: a missing or null value
+  matches NO comparison — including `notEquals` — and a value of a
+  different scalar family (a string where the literal is a number)
+  matches neither `equals` nor `notEquals`. That is the whole language —
+  single field, compare-to-literal; boolean expressions stay out.
+  A missing path is "no match", never an error — including for `null`
+  clauses, so an absent field never matches. Inside a fan (a forEach
+  stage's `when`/`deleteWhen`, a forEach source's rule `when`) clauses
+  evaluate PER ELEMENT, and a `$parent.` path reaches the enclosing
+  event — the natural spelling for a parent-level predicate like
+  `$parent.EventType`; anywhere without an enclosing scope, `$parent`
+  is rejected at admission. If
   the topic's type declares a `discriminator`, a rule can use the
   shorthand `when = "tenant.created"` — sugar for equality on the
   discriminator path.
@@ -220,12 +239,42 @@ error handling, deletes, and schema evolution:
   `POST /v1/syncable/{id}/rebuild` does the drop + replay-from-0 in place
   under the same name. The log is permanent, so replay is cheap.
 
+### Computed columns (`expr`)
+
+A set entry's fifth arm computes its column from the event payload with a
+closed function set — no user code, no SQL fragments:
+
+```toml
+set = [
+  { column = "remaining", expr = "$.quoted_total - coalesce($.invoiced_total, 0)" },
+  { column = "unit_price", expr = "round(($.Cost + $.Overhead) / nullif(1 - $.Margin, 0), 2)" },
+]
+```
+
+The language: `+ - * /`, comparisons (`= <> < <= > >=`), the boolean
+predicates — `or`/`and`/`not` (SQL keywords, case-insensitive),
+`x in (…)`, `x is [not] null`, `true`/`false` literals — plus `coalesce`, `nullif`,
+`round(x, scale)` (half away from zero), `trunc(x[, scale])` (toward
+zero), decimal and `'string'` literals, and `$.…` paths into the
+payload. Connectives follow SQL's three-valued logic — `null or true`
+is TRUE, `null and false` is FALSE — the one deliberate exception to
+blanket null propagation; `is [not] null` never returns null, and it
+accepts a row-valued path (`$.cust is not null` asks whether the
+looked-up row exists). Arithmetic is **exact** — values are arbitrary-precision decimals
+built from the payload's source digits, never floats, and nothing rounds
+except your explicit `round`/`trunc`. Because only division can produce a
+non-terminating value, **every `/` must sit under a `round` or `trunc`**
+(comparisons excepted — they consume exact quotients); a bare quotient is
+rejected at POST, not at apply. A missing field is null; null propagates
+through arithmetic and comparison; `coalesce`/`nullif` are the null-aware
+escape hatches (`nullif(x, 0)` is the division-by-zero guard).
+
 ## Folding several topics into one row (multi-source)
 
 A projection can consume more than one topic and fold them into a single
 denormalized "BFF" row — e.g. a `movie_card` built from a normalized `movie`
 topic and a `rating` topic, one row per `movie_id`. Replace the single top-level
-`topic`/`rules` with a `[[sql-projection.source]]` block per topic. The
+`topic`/`rules` with a `[[projection.source]]` block per topic. The
 **topic is the discriminator** (an event only ever runs its own source's
 rules), and because each rule sets only its own columns, two sources fold
 into one row without clobbering. Each source also declares what its delete
@@ -234,23 +283,23 @@ drops the row), `clear` (a *contributor* — its delete NULLs only the
 columns it owns, the row survives), or `ignore`.
 
 ```toml
-[sql-projection]
+[projection]
 db = "bff"; table = "movie_card"; primaryKey = "movie_id"
 # … columns: movie_id, title, year, genres, score, votes …
 
-[[sql-projection.source]]
+[[projection.source]]
 topic    = "movie"          # this source's discriminator
 keyPath  = "$.movie_id"     # correlate by the shared aggregate key
 onDelete = "delete-row"     # movie is the spine: its delete drops the row
-  [[sql-projection.source.rules]]
+  [[projection.source.rules]]
   set = [ { column = "title",  from = "$.title" },
           { column = "year",   from = "$.year" },
           { column = "genres", from = "$.genres" } ]
 
-[[sql-projection.source]]
+[[projection.source]]
 topic    = "rating"
 onDelete = "clear"          # a contributor: its delete NULLs its columns, keeps the row
-  [[sql-projection.source.rules]]
+  [[projection.source.rules]]
   set = [ { column = "score", from = "$.score" },
           { column = "votes", from = "$.votes" } ]
 ```
@@ -287,29 +336,29 @@ different columns. Here the `credit` topic feeds `top_cast` (actors) and
 `directors` (directors):
 
 ```toml
-[[sql-projection.source]]
+[[projection.source]]
 topic   = "credit"
 keyPath = "$.movie_id"               # which movie row this child folds into
 when    = [ { path = "$.role", equals = "actor" } ]
-  [sql-projection.source.aggregate]
+  [projection.source.aggregate]
   column         = "top_cast"
   elementKey     = "$.billing"       # billing order: identity + numeric sort
   elementKeyType = "number"
-    [[sql-projection.source.aggregate.element]]
+    [[projection.source.aggregate.element]]
     field = "person_id"
     from  = "$.person_id"
-    [[sql-projection.source.aggregate.element]]
+    [[projection.source.aggregate.element]]
     field = "billing"
     from  = "$.billing"
 
-[[sql-projection.source]]
+[[projection.source]]
 topic   = "credit"
 keyPath = "$.movie_id"
 when    = [ { path = "$.role", equals = "director" } ]
-  [sql-projection.source.aggregate]
+  [projection.source.aggregate]
   column     = "directors"
   elementKey = "$.billing"
-    [[sql-projection.source.aggregate.element]]
+    [[projection.source.aggregate.element]]
     field = "person_id"
     from  = "$.person_id"
 ```
@@ -322,6 +371,335 @@ finds and removes the right element without the payload. The `read` column
 stays a clean array. Deterministic ordering is a PostgreSQL guarantee;
 MySQL aggregate ordering is best-effort (`JSON_ARRAYAGG` ignores `ORDER
 BY`).
+
+### Scalar aggregates over the child set
+
+The same child set can also fold into **scalar** columns — count, sum,
+min, max, countDistinct — recomputed absolutely from the sidecar at every
+child change (never incremented, so redelivery and rebuild converge):
+
+```toml
+  [projection.source.aggregate]
+  elementKey = "$.id"
+    [[projection.source.aggregate.element]]
+    field = "hours"
+    from  = "$.hours"
+    [[projection.source.aggregate.element]]
+    field = "status"
+    from  = "$.status"
+    [[projection.source.aggregate.scalar]]
+    column = "visit_count"
+    fn     = "count"
+    [[projection.source.aggregate.scalar]]
+    column = "hours_sum"
+    fn     = "sum"
+    of     = "hours"
+    [[projection.source.aggregate.scalar]]
+    column = "done_count"
+    fn     = "count"
+    where  = [ { field = "status", equals = "done" } ]
+```
+
+- **`fn`** — `count`, `sum`, `min`, `max`, or `countDistinct`. `count`
+  folds rows (no `of`); the others fold the element field named by `of`.
+- **`ofType`** — `text` (default) or `number`: how `min`/`max` order and
+  `countDistinct` compare. ISO dates order correctly as text; numeric
+  fields want `number`. `sum` always folds numerically.
+- **`where`** — equality clauses over element fields, restricting which
+  children fold (filtered counts).
+- The array `column` becomes **optional** when scalars are present — a
+  pure `visit_count` needs no array.
+
+SQL semantics apply at the empty set: `count` is 0, `sum`/`min`/`max` are
+NULL when no children qualify.
+
+## Staged computation (internal stages)
+
+Some read models are a *pipeline*: filter, then aggregate, then aggregate
+again. `[[projection.stage]]` blocks declare internal stages — private
+keyed refolds held in a node-local stage store, never topics, never sink
+writes (only the table is outward-facing) — and a table source consumes a
+stage with `from = "<stage name>"`:
+
+```toml
+[[projection.stage]]
+name    = "live"                    # private label; stages chain by name
+from    = "txns"                    # a topic — or a PRIOR stage's name
+keyPath = "$.id"
+emit    = [ { field = "job", from = "$.jobId" },
+            { field = "amt", from = "$.amount" } ]
+
+[[projection.stage]]
+name    = "by-job"
+from    = "live"                    # chained: consumes the stage above
+keyPath = "$.job"
+reduce  = "aggregate"
+emit    = [ { field = "total", sum = "$.amt" },
+            { field = "n",     count = true } ]
+
+[[projection.source]]
+from    = "by-job"                  # a stage-fed table source
+[[projection.source.rules]]
+set = [ { column = "total", from = "$.total" },
+        { column = "n",     from = "$.n" } ]
+```
+
+- **Every stage is a keyed refold**: an input lands in its key's retained
+  set and the key recomputes from that set — never delta arithmetic — so
+  redelivery, rekeying, and replay converge to identical bytes. Key
+  comparisons are byte-exact; when two producers render the same logical
+  key differently (SQL Server CDC writes GUIDs UPPERCASE, most JSON
+  serializers lowercase), declare `normalize = "lower"` on the
+  key-bearing declaration — a stage's `keyPath`, a join (which folds
+  BOTH the `on` rendering and, for a topic join, the topic's entity-key
+  rendering), or a table source's `keyPath` (which also folds its
+  delete-tombstone binding, so a producer's UPPERCASE tombstone still
+  addresses the lowercased row). Keys only — payload values are never
+  normalized. Sources sharing a normalized key space (a topic owner
+  beside stage-fed decorators) must declare the same normalize.
+  Aggregate folds (`sum`/`min`/`max` are closed-language expressions,
+  plus `count` and `collect`) follow SQL semantics: `sum` is exact
+  decimal arithmetic; `min`/`max` order ANY scalar — numbers
+  numerically, text lexically (`max` of ISO date strings is SQL's
+  latest-date), bools false<true; null operands skip; an emptied key
+  retracts entirely, cascading. `collect` is `array_agg` with determinism SQL doesn't
+  promise: values fold into an ALWAYS-SORTED array (numbers
+  numerically, then strings, then bools), `distinct = true` dedupes,
+  and the array lands in the sink as JSON. Any fold arm takes a
+  per-emit `where` — SQL's `FILTER (WHERE …)`: `{ field = "reviewed",
+  count = true, where = [ { path = "$.billed", equals = "true" } ] }`
+  folds only matching inputs for THAT field, while row membership stays
+  the key's.
+- **Filtering is refold**: an input that stops matching a stage's `when`
+  retracts from its key — predicate rows leave the read model when the
+  predicate flips off, and re-enter when it flips back.
+- **`when` takes an `expr` arm**: `when = [ { expr = "coalesce($.n, 0)
+  > 0 and $.pricing in (0, 2)" } ]` — the expression language as a
+  predicate, so compute-then-filter is ONE stage instead of an
+  emit-a-gate-field stage plus a filter stage. Only TRUE matches;
+  false, null, and data errors match nothing (SQL's WHERE). The scalar
+  arms (`equals`, `null`, `notNull`, `notEquals`, `greaterThan`,
+  `lessThan`) remain for the common cases, and the two-stage gate idiom
+  stays legal where you want the intermediate value probeable.
+- **Stages fan out too**: `forEach` on a stage fans each input's array
+  elements into element-inputs — and `fan` is its multi-arm form
+  (SQL's UNION ALL of lateral fans): `fan = [ { forEach = "$.a[*]",
+  when = [ … ] }, … ]` — each arm's `when` selects which INPUTS it
+  applies to, every matching arm fans its path, and element identity
+  is namespaced by arm, so created-elements and added-elements fold
+  through ONE stage instead of parallel fans merged back together.
+  Either form fans each input's array
+  elements into element-inputs — `keyPath` is the reduce key,
+  `elementKey` the element's identity (required with a reduce, so two
+  same-key elements both count), `$parent.` reaches the enclosing
+  event — so fan-then-fold (elements → sums by workarea) is ONE stage.
+  Re-emitted inputs reconcile; the input's tombstone retracts all its
+  elements. A long run of inputs whose forEach path yields no array
+  warns once (a serialized-JSON string column reads as one string and
+  fans ZERO elements, silently — decode it at ingest with
+  `jsonColumns`); a legitimately empty array is healthy and never
+  warns.
+- **Joins FILTER** (`[[projection.stage.join]]`): an input participates
+  only while the joined topic's row — addressed by the input's `on`
+  value against the joined entity's key — exists and matches every
+  `where` clause. `on` takes one path, or a list addressing a
+  composite-keyed dimension (positional values, the producer's own
+  encoding; a stage join's arity must match the joined stage's
+  `keyPath`). Dimension changes refold dependents (reverse-index
+  fan-out); a late dimension heals; a flipped predicate or a dimension
+  delete retracts dependents.
+- **A join that NAMES its row can READ it** (`as`): `{ topic =
+  "projects", on = "$.projectId", as = "project", where = [ … ] }`
+  scopes the matched row under the alias for the stage's emits, fold
+  arms, and per-emit `where` — `$.project.tenantId` — so filter-and-pull
+  is one join on one stage (SQL: the joined table's columns), not
+  lift-and-rekey scaffolding. Lookups are refold-time state, never
+  retained copies: when the referenced row changes, dependents refold
+  and pulled values track it. `optional = true` (requires `as`) is the
+  LEFT JOIN — a missing row, or one failing `where`, scopes the alias
+  as null instead of gating membership (`$.cust is not null` makes the
+  flag column). The stage's `when` and `keyPath` see only the input;
+  filter on the joined row with the join's `where` (enforced at
+  admission — a fold-time path addressing an alias is rejected loudly,
+  never silently null). Decision rule
+  refined: SAME-KEY correlation of stages → `merge`; REFERENCE lookup
+  (foreign key, or a key part) → a named join.
+- **`reduce = "liveSet"` is created-minus-deleted**: a key is live while
+  it has qualifying inputs and ZERO inputs matching `deleteWhen` — a set
+  difference, no ordering involved, so a delete-shaped event retracts
+  regardless of arrival position (it is retained as negative evidence
+  even past the `when` filter), and retracting the delete event itself
+  un-deletes the key. A liveSet never fans (`forEach` is rejected
+  with it): delete evidence on a fanned stage would be per-element,
+  and an elementless delete-shaped event would be silently lost — fan
+  in a prior stage and liveSet its outputs.
+- **`absent = true` inverts a join into an ANTI-join**: the input
+  participates only while NO dimension row matches (none exists, or
+  none passes `where`) — "jobs with no posted invoice." Arrival
+  retracts, departure or a `where` mismatch heals back in, and a
+  missing `on` reference is vacuously absent.
+- **`merge` combines PRIOR stages BY KEY** — SQL's outer join, aliased:
+  `merge = [ "quoted", { stage = "invoiced-sums", as = "invoiced" } ]`
+  makes each key ANY side holds a tuple scoping every side's current
+  output under its alias (`$.quoted.total`; absent sides are explicit
+  nulls, exactly as an outer join produces NULL columns). Gate to
+  left/inner with `when` `notNull`/`null` on an alias path — the when
+  unit rule: `when` always filters the stage's FOLD UNIT (an input, a
+  fanned element, or a merged tuple). A merge declares NO
+  keyPath/keyType/normalize: its key space is inherited from the merged
+  stages, which admission requires to agree. Value resolution lives
+  here — `expr` with `coalesce` subtracts, sums, and unions across
+  sides — and merged values are ordinary emitted data, so a downstream
+  stage can key by them (attribution re-keys through the existing
+  machinery). Decision rule: SAME-KEY correlation → merge; FOREIGN-KEY
+  reference → join. A merge feeding a single table source is the
+  primary multi-stage-table pattern (one source, whole-row writes);
+  rowOwner remains the form for mixed topic/stage tables. A side may
+  also be a TOPIC — `{ topic = "workareas", keyPath = "$.Id", as =
+  "wa" }`, with its own declared key space (keyType/normalize as
+  needed) — the lift stage, synthesized: the engine folds the topic
+  through a hidden identity reshape (`<topic>[<keyPath>]` in stats)
+  feeding the merge as a normal side.
+- **Joins can address a PRIOR stage** (`from = "<stage>"` on a join):
+  its outputs are the dimension rows, maintained live by the drain — so
+  cross-stage correlation is a join, not a second input; heal, flip,
+  and retraction all flow through the same fan-out. And with `field`,
+  a stage join addresses an EMITTED FIELD instead of the stage's key —
+  SQL's join-on-any-column: the engine synthesizes the re-key stage
+  you used to write by hand (visible in stats as `<stage>[<field>]`,
+  same cost, later fusable). Non-unique field values resolve to the
+  bytewise-largest producer key's row, deterministically; with `field`,
+  `normalize`/`onType` are declarable (a non-key field is not governed
+  by the producer's key space).
+- **`reduce = "latest"` is argmax by a business field** (`orderBy` — never
+  arrival order, so backfills converge with steady state), with `tieBy`
+  a MANDATORY deterministic tiebreak (`orderByType`/`tieByType` choose
+  numeric vs lexical; text default). `when` filters before the argmax,
+  and a retracted winner promotes the runner-up from the retained set.
+- **Stage-fed sources key rows by the stage's key** (no keyPath
+  resolution — an aggregate's emit carries folds, never its key). A
+  retraction — the stage's key going away, or a live output that stops
+  matching the source's `when` — retracts the source's contribution:
+  the row (`onDelete = "delete-row"`), its own columns (`"clear"`), or
+  nothing (`"ignore"`).
+- **Introspection**: `GET /syncable/{id}/status?stages=true` reports
+  each stage's row — `keys` (the store's current output count) plus
+  `inputs`/`fanned` flow counters since the worker started, and
+  `unkeyedDeletes` (delete-shaped inputs whose key would not resolve or
+  render), and per-join resolution counters (`joins`: hits/misses — LOST retractions: nonzero here answers "the delete event
+  arrived but the key is still live" in one read; each also warns once
+  in the log). The three
+  numbers split every silent-empty state: `inputs` 0 = that topic's log
+  region not reached (mid-replay zeros are healthy); `inputs` > 0 with
+  `fanned` 0 = the forEach fan finds no array; flow > 0 with `keys` 0 =
+  the when/joins rejected everything (a per-element `when` referencing
+  parent fields needs `$parent.`). `?probeStage=<stage>&probeKey=<part>`
+  answers whether one specific key is currently held — one probeKey per
+  keyPath position, in order; the stage renders and composes the parts
+  (its normalize applies server-side), so probe values in your own
+  vocabulary. Numbers go in canonical digits (`5`, not `5.0000`); text
+  is never re-parsed.
+- **Key identity is canonical — and declarable**: numeric key parts
+  render canonically (`5`, `5.0000`, and `5e0` are ONE key; `5.25`
+  keeps its digits), and strings are never re-parsed by default
+  (`"007"` stays text). `keyType = ["text","number"]` (per keyPath
+  position; one value broadcasts) is SQL's declared-column-type model:
+  under `"number"` a STRING rendering coerces too — a producer that
+  serializes `5` as `"5.0000"` folds onto the same key — and an
+  unrenderable value is non-membership, like a missing key part. Topic
+  joins declare `onType` for their reference side; a stage join
+  inherits the joined stage's `keyType` (like `normalize`). Declared
+  types also render `?probeKey` parts, removing the canonical-digits
+  probe obligation. Source digit strings are always preserved in
+  VALUES; keys are identity.
+- **Upgrades never reset unchanged configs**: the store fingerprint
+  covers DECLARED content only, so new vocabulary in a new binary
+  leaves untouched configs' stores intact (pinned by a golden contract
+  test). When a store genuinely resets (a stage edit, an ownership
+  move), the worker re-derives before consuming and the status endpoint
+  says so: `workerState: "re-deriving"` with `stageRecovery {folded,
+  target}` progress on the default call — lag climbs by design until
+  the fold-only pass reaches the checkpoint.
+- Stage state lives in one bbolt file per syncable under
+  `<dataDir>/projections/` — derived, node-local, rebuildable from the
+  log. **Editing stage definitions requires a rebuild** (the
+  config-change guard enforces it): changed stages must re-derive from
+  index 0, exactly like a changed table schema.
+
+### Row ownership (`rowOwner`)
+
+When several sources fold one row and any of them is stage-fed, the
+table must declare which source owns row existence:
+
+```toml
+[[projection.source]]              # the row owner: admits and removes rows
+topic    = "jobs"
+keyPath  = "$.id"
+rowOwner = true
+[[projection.source.rules]]
+set = [ { column = "name", from = "$.name" } ]
+
+[[projection.source]]              # a decorator: fills its own columns
+from = "latest-proposal"           # decorators must be stage-fed
+[[projection.source.rules]]
+set = [ { column = "latest_proposal_id", from = "$.pid" } ]
+```
+
+- **The owner's writes create and delete rows.** Every other row-writing
+  source is a *decorator*: update-only (it never creates a row the owner
+  has not admitted), retracting by clearing its own columns
+  (`onDelete = "clear"`, its default) — never by removing the row.
+- **An owner write pulls each decorator's retained stage output** for
+  its key, so a decoration lands no matter which side arrived first —
+  and survives an owner delete/re-admit cycle. The stage store is the
+  retention; without the pull, delta suppression would leave a
+  re-admitted row undecorated forever.
+- Decorators must be stage-fed: a topic source has no retention, so a
+  value arriving before the owner admits its row would be silently
+  lost — feed it through a stage. Lookup and aggregate sources are
+  orthogonal machinery and coexist unchanged.
+- A decorator's rules may **enrich** (the `lookup` set arm): the FK and
+  its display field ride the decorator's own update, and dimension
+  fan-out heals referencing rows regardless of which source wrote the
+  FK.
+- Moving the `rowOwner` declaration changes which writes create and delete
+  rows — the config-change guard demands a rebuild, like any other
+  shape change.
+- A single row-writing source needs no declaration (it trivially owns
+  its rows).
+
+## Fanning one event into N rows (forEach)
+
+Some events *contain* the rows you want: a transaction event whose
+`items[]` array holds the billable elements. A `forEach` source fans each
+element into its own row:
+
+```toml
+[[projection.source]]
+topic    = "txn"
+forEach  = "$.items[*]"            # deliberately multi-valued
+keyPath  = "$.sku"                 # resolves against EACH ELEMENT
+onDelete = "delete-rows"           # the default: parent delete cascades
+  [[projection.source.rules]]
+  set = [
+    { column = "amount",  from = "$.amount" },     # element scope
+    { column = "txn_id",  from = "$parent.id" },   # the enclosing event
+  ]
+```
+
+- The source's rules apply once **per element**; `keyPath` and every
+  `from`/`expr` path resolve against the element, and a `$parent.` prefix
+  reaches the enclosing event payload. Row identity is the element's key.
+- **Reconciliation is absolute**: a re-emitted parent's rows converge on
+  its current elements — a vanished element's row is deleted (tracked via
+  a per-source reconciliation sidecar, `ForEachSidecarName`), so replay
+  and redelivery are safe like every other projection write.
+- A parent tombstone **cascades** to every row it fanned
+  (`onDelete = "delete-rows"`), or is dropped with `ignore`.
+- One forEach source per topic per projection; elements that match no
+  rule fan no row (and reconcile away if they previously did). A long
+  run of events whose forEach path yields no array warns once — the
+  serialized-JSON-column trap; see the staged-computation note.
 
 ## Enriching folded data from another topic (lookup)
 
@@ -337,24 +715,24 @@ instead of `from` (`on` names the plain element field holding the foreign key).
 Several enriched fields sharing a dimension coalesce into one join:
 
 ```toml
-[[sql-projection.source]]
+[[projection.source]]
 topic = "person"                       # the dimension topic, keyed by person_id
-  [sql-projection.source.lookup]
+  [projection.source.lookup]
   name = "people"                      # referenced by element enrichments below
-    [[sql-projection.source.lookup.field]]
+    [[projection.source.lookup.field]]
     field = "name"
     from  = "$.name"
 
-[[sql-projection.source]]
+[[projection.source]]
 topic   = "credit"
 keyPath = "$.movie_id"
-  [sql-projection.source.aggregate]
+  [projection.source.aggregate]
   column     = "top_cast"
   elementKey = "$.billing"
-    [[sql-projection.source.aggregate.element]]
+    [[projection.source.aggregate.element]]
     field = "person_id"                # the foreign key, stored
     from  = "$.person_id"
-    [[sql-projection.source.aggregate.element]]
+    [[projection.source.aggregate.element]]
     field  = "name"                    # resolved from the people dimension
     lookup = "people"
     on     = "person_id"               # join the element's person_id …
@@ -371,7 +749,7 @@ Lookups also enrich **scalar spine columns** — the canonical BFF ask, "the
 job row carries the customer's display name as a real column":
 
 ```toml
-[[sql-projection.rules]]
+[[projection.rules]]
 when = [ { path = "$.kind", equals = "job" } ]
 set = [
   { column = "customer_id",   from = "$.CustomerId" },
@@ -530,6 +908,44 @@ silently receive unconverted data: entities below the break dead-letter at the
 migration chain, replayable later if the reading is repaired (an erratum
 rebinding the below-break range, then a dead-letter replay or a
 re-materialization).
+## Rehearsing a config before it exists (dry-run)
+
+`POST /v1/syncable/dryrun` takes the same document a syncable POST
+takes, folds a bounded sample of the real log through the config's
+REAL stage graph into a throwaway store — nothing admitted, nothing
+written, the destination database never touched — and returns a
+diagnostic report in seconds: per-stage `inputs`/`fanned`/`keys`/
+`unkeyedDeletes`, per-join resolution hits/misses, a few sample output
+objects per stage (value-shaped bugs — null columns, wrong paths — are
+invisible in counts), per-source and per-rule match counts, and
+auto-generated **findings** that name the silent-empty signatures: a
+`when` clause that never matched reports the value FAMILIES actually
+seen at its path ("`equals = 'true'` (string) never matched; values
+seen: boolean×142"), a join that never resolved says so, a fan that
+never fanned points at serialized-JSON columns. The sampling budget
+(`?maxEntries`, default 100k, cap 10M) spreads across evenly-spaced
+windows of the log so late-clustering topics are covered; `?fromIndex`
+drills into one region, and `?timeoutSeconds` (default 120, max 600)
+buys a coverage-hungry run its time. The deadline — or a log read
+failure — yields a PARTIAL report (`truncated` says why), never an
+error, and every report carries phase timings (`parseMs`, `readMs`,
+per-window `ms`) so a slow run names its slow phase. Data mirrors the
+live worker: an undecodable entity or an emit data error DEAD-LETTERS
+and the rehearsal continues (`deadLetters` in the report — the same
+health number replay verdicts lead with); a fold failure that would
+STICK the live worker is reported as the truncation reason. Coverage
+is stated precisely — consumed topics the windows never reached are
+named in one aggregate finding, listed after any real signatures. The
+config still passes full admission validation (400 with the parser's
+actual words), so a dry run also answers "would this admit?". Note:
+findings and dead-letter samples can quote SOURCE DATA VALUES verbatim
+(an expression error names the string it choked on) — that precision
+is the diagnostic point and stays within the trusted-appliance model,
+but treat pasted dry-run output like any other data-bearing log
+excerpt.
+Authoring loop: dry-run until the findings list is empty, then POST
+for real — "valid config, wrong result, no error" costs minutes
+instead of a full replay against an oracle.
 
 ## Changing the rules after a projection is live
 
@@ -554,7 +970,7 @@ replays from index 0 and the log stays the source of truth, the clean way to fix
 or evolve a syncable's rules is to stand a *second* projection up beside the
 first rather than mutate a live table:
 
-1. `POST` a new `sql-projection` with the corrected rules, pointed at a **new
+1. `POST` a new `projection` with the corrected rules, pointed at a **new
    table**. It replays the whole log from the start and materializes the fixed
    view — the old table keeps serving reads the entire time, so there is no
    downtime.

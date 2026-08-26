@@ -288,22 +288,22 @@ type = "TEXT"
 		{
 			"both from and value",
 			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\" } ]\nset = [ { column = \"v\", from = \"$.v\", value = \"y\" } ]",
-			"exactly one of from, value, null, or lookup",
+			"exactly one of from, value, null, expr, or lookup",
 		},
 		{
 			"neither from nor value nor null",
 			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\" } ]\nset = [ { column = \"v\" } ]",
-			"exactly one of from, value, null, or lookup",
+			"exactly one of from, value, null, expr, or lookup",
 		},
 		{
 			"both value and null",
 			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\" } ]\nset = [ { column = \"v\", value = \"y\", null = true } ]",
-			"exactly one of from, value, null, or lookup",
+			"exactly one of from, value, null, expr, or lookup",
 		},
 		{
 			"both from and null",
 			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\" } ]\nset = [ { column = \"v\", from = \"$.v\", null = true } ]",
-			"exactly one of from, value, null, or lookup",
+			"exactly one of from, value, null, expr, or lookup",
 		},
 		{
 			"unknown column",
@@ -333,12 +333,12 @@ type = "TEXT"
 		{
 			"when missing equals and null",
 			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\" } ]\nset = [ { column = \"v\", value = \"y\" } ]",
-			"exactly one of equals or null",
+			"exactly one of equals, null, notNull, notEquals, greaterThan, lessThan, or expr",
 		},
 		{
 			"when with both equals and null",
 			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\", null = true } ]\nset = [ { column = \"v\", value = \"y\" } ]",
-			"exactly one of equals or null",
+			"exactly one of equals, null, notNull, notEquals, greaterThan, lessThan, or expr",
 		},
 		{
 			"when null false",
@@ -924,10 +924,434 @@ topic = "dim"
 keyPath = "$.id"
 [sql-projection.source.lookup]
 name = "dim"
-[[sql-projection.source.lookup.fields]]
+[[sql-projection.source.lookup.field]]
 field = "name"
 from = "$.name"
 `)
 		require.ErrorContains(t, err, "require a single-column primaryKey")
 	})
+}
+
+// The silent-acceptance fix, red-proofed with the pilot's exact probe keys:
+// every unknown or misplaced key must be a loud 400 naming the key — four
+// gap probes returned 200 and were inert (emitTopic proven not even
+// stored), which is how an operator (or a validating agent) is fooled into
+// believing a feature exists. "The parser accepted it" must mean something.
+func TestParseProjectionRejectsUnknownKeys(t *testing.T) {
+	base := `
+[sql-projection]
+db = "testdb"
+table = "t"
+primaryKey = "id"
+topic = "e"
+[[sql-projection.columns]]
+name = "id"
+type = "VARCHAR(64)"
+[[sql-projection.columns]]
+name = "v"
+type = "VARCHAR(64)"
+[[sql-projection.rules]]
+set = [ { column = "v", from = "$.v" } ]
+`
+	parse := func(t *testing.T, toml string) error {
+		t.Helper()
+		v := readConfig(t, "toml", strings.NewReader(toml))
+		_, err := (&sql.ProjectionSyncableParser{}).ParseConfig(v, projectionStorage())
+		return err
+	}
+
+	t.Run("baseline parses", func(t *testing.T) {
+		require.NoError(t, parse(t, base))
+	})
+
+	// The probes insert into the FLAT [sql-projection] table (appending
+	// after a [[rules]] block would land inside that block — which the
+	// strict struct decode also catches, but the flat-section check is
+	// what these two pin).
+	atSection := func(key string) string {
+		return strings.Replace(base, `db = "testdb"`, `db = "testdb"
+`+key, 1)
+	}
+
+	t.Run("unknown top-level key (the where probe)", func(t *testing.T) {
+		err := parse(t, atSection(`where = "$.active == true"`))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "where")
+		require.Contains(t, err.Error(), "unknown key")
+	})
+
+	t.Run("unknown top-level key (the emitTopic probe)", func(t *testing.T) {
+		err := parse(t, atSection(`emitTopic = "derived"`))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "emittopic")
+		require.Contains(t, err.Error(), "unknown key")
+	})
+
+	t.Run("unknown key inside a source block (the latestBy probe)", func(t *testing.T) {
+		toml := `
+[sql-projection]
+db = "testdb"
+table = "t"
+primaryKey = "id"
+[[sql-projection.columns]]
+name = "id"
+type = "VARCHAR(64)"
+[[sql-projection.columns]]
+name = "v"
+type = "VARCHAR(64)"
+[[sql-projection.source]]
+topic = "e"
+latestBy = "$.Timestamp"
+[[sql-projection.source.rules]]
+set = [ { column = "v", from = "$.v" } ]
+`
+		err := parse(t, toml)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "latestBy")
+	})
+
+	t.Run("unknown key inside a set entry (the expr probe, alongside a valid arm)", func(t *testing.T) {
+		err := parse(t, strings.Replace(base,
+			`set = [ { column = "v", from = "$.v" } ]`,
+			`set = [ { column = "v", from = "$.v", expr = "a + b" } ]`, 1))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "expr")
+	})
+
+	t.Run("single-source shorthand mixed with source blocks", func(t *testing.T) {
+		toml := `
+[sql-projection]
+db = "testdb"
+table = "t"
+primaryKey = "id"
+topic = "e"
+[[sql-projection.columns]]
+name = "id"
+type = "VARCHAR(64)"
+[[sql-projection.columns]]
+name = "v"
+type = "VARCHAR(64)"
+[[sql-projection.source]]
+topic = "e"
+[[sql-projection.source.rules]]
+set = [ { column = "v", from = "$.v" } ]
+`
+		err := parse(t, toml)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "source")
+	})
+}
+
+// The canonical spelling — type = "projection" with a [projection] section —
+// must parse to the exact config the deprecated sql-projection spelling
+// produces: one language, two spellings, byte-equal semantics.
+func TestParseProjectionCanonicalSpellingParity(t *testing.T) {
+	canonical := strings.ReplaceAll(projectionTOML, "sql-projection", "projection")
+
+	oldCfg, err := (&sql.ProjectionSyncableParser{}).ParseConfig(
+		readConfig(t, "toml", strings.NewReader(projectionTOML)), projectionStorage())
+	require.NoError(t, err)
+	newCfg, err := (&sql.ProjectionSyncableParser{}).ParseConfig(
+		readConfig(t, "toml", strings.NewReader(canonical)), projectionStorage())
+	require.NoError(t, err)
+	require.Equal(t, oldCfg, newCfg, "the two spellings must produce identical configs")
+
+	// The config-only extractors resolve the section from the spelling too.
+	p := &sql.ProjectionSyncableParser{}
+	v := readConfig(t, "toml", strings.NewReader(canonical))
+	require.Equal(t, []string{"controlplane-event"}, p.TopicsFromConfig(v))
+	require.Equal(t, []string{"testdb"}, p.DatabasesFromConfig(v))
+}
+
+// Spelling guards: both sections at once, a half-renamed config, and the
+// unknown-key rejection naming the section the config actually used.
+func TestParseProjectionSpellingGuards(t *testing.T) {
+	parse := func(toml string) error {
+		_, err := (&sql.ProjectionSyncableParser{}).ParseConfig(
+			readConfig(t, "toml", strings.NewReader(toml)), projectionStorage())
+		return err
+	}
+
+	t.Run("both sections present", func(t *testing.T) {
+		both := projectionTOML + "\n[projection]\ndb = \"testdb\"\n"
+		err := parse(both)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "both [projection] and [sql-projection]")
+	})
+
+	t.Run("type projection with a sql-projection section", func(t *testing.T) {
+		half := strings.Replace(projectionTOML, `type = "sql-projection"`, `type = "projection"`, 1)
+		err := parse(half)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "rename the section to [projection]")
+	})
+
+	t.Run("unknown key names the canonical section", func(t *testing.T) {
+		canonical := strings.ReplaceAll(projectionTOML, "sql-projection", "projection")
+		canonical = strings.Replace(canonical, "[projection]\n", "[projection]\nemitTopic = \"x\"\n", 1)
+		err := parse(canonical)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "projection.emittopic")
+		require.NotContains(t, err.Error(), "sql-projection.emittopic")
+	})
+}
+
+// expr set entries: the TOML surface parses, admission rejects a bad
+// expression as a config error naming the column, and expr is mutually
+// exclusive with the other set arms.
+func TestParseProjectionExpr(t *testing.T) {
+	base := strings.ReplaceAll(projectionTOML, "sql-projection", "projection")
+
+	t.Run("parses and validates", func(t *testing.T) {
+		toml := strings.Replace(base,
+			`{ column = "tier",  from  = "$.tier" },`,
+			`{ column = "tier",  expr  = "coalesce(nullif($.tier, ''), 'dev')" },`, 1)
+		config, err := (&sql.ProjectionSyncableParser{}).ParseConfig(
+			readConfig(t, "toml", strings.NewReader(toml)), projectionStorage())
+		require.NoError(t, err)
+		require.Equal(t, "coalesce(nullif($.tier, ''), 'dev')", config.Sources[0].Rules[0].Set[0].Expr)
+	})
+
+	t.Run("bare division is a config error", func(t *testing.T) {
+		toml := strings.Replace(base,
+			`{ column = "tier",  from  = "$.tier" },`,
+			`{ column = "tier",  expr  = "$.a / $.b" },`, 1)
+		_, err := (&sql.ProjectionSyncableParser{}).ParseConfig(
+			readConfig(t, "toml", strings.NewReader(toml)), projectionStorage())
+		require.Error(t, err)
+		require.Contains(t, err.Error(), `column "tier"`)
+		require.Contains(t, err.Error(), "round(...) or trunc(...)")
+	})
+
+	t.Run("expr excludes the other arms", func(t *testing.T) {
+		toml := strings.Replace(base,
+			`{ column = "tier",  from  = "$.tier" },`,
+			`{ column = "tier",  from  = "$.tier", expr = "1 + 1" },`, 1)
+		_, err := (&sql.ProjectionSyncableParser{}).ParseConfig(
+			readConfig(t, "toml", strings.NewReader(toml)), projectionStorage())
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "exactly one of from, value, null, expr, or lookup")
+	})
+}
+
+// Aggregate scalar entries: parse, validate, and reject misuse loudly.
+func TestParseAggregateScalars(t *testing.T) {
+	config := func(scalarToml string) string {
+		return `
+[projection]
+db         = "testdb"
+table      = "jobs"
+primaryKey = "job_id"
+
+[[projection.columns]]
+name = "job_id"
+type = "VARCHAR(64)"
+
+[[projection.columns]]
+name = "visit_count"
+type = "INT"
+
+[[projection.source]]
+topic = "visits"
+keyPath = "$.job_id"
+onDelete = "remove-from-aggregate"
+[projection.source.aggregate]
+elementKey = "$.id"
+[[projection.source.aggregate.element]]
+field = "hours"
+from = "$.hours"
+` + scalarToml
+	}
+	parse := func(toml string) error {
+		_, err := (&sql.ProjectionSyncableParser{}).ParseConfig(
+			readConfig(t, "toml", strings.NewReader(toml)), projectionStorage())
+		return err
+	}
+
+	require.NoError(t, parse(config(`[[projection.source.aggregate.scalar]]
+column = "visit_count"
+fn = "count"`)))
+
+	err := parse(config(`[[projection.source.aggregate.scalar]]
+column = "visit_count"
+fn = "median"`))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `fn "median" is invalid`)
+
+	err = parse(config(`[[projection.source.aggregate.scalar]]
+column = "visit_count"
+fn = "sum"`))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "sum needs of")
+
+	err = parse(config(`[[projection.source.aggregate.scalar]]
+column = "visit_count"
+fn = "sum"
+of = "nope"`))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `of "nope" is not a plain element field`)
+}
+
+// Multi-valued jsonpaths in value positions are rejected loudly at POST —
+// the field-verified parallel-arrays trap (a wildcard "looks like data,
+// unusable, silently wrong") stays unrepresentable until forEach exists.
+func TestParseProjectionRejectsMultiValuedPaths(t *testing.T) {
+	base := strings.ReplaceAll(projectionTOML, "sql-projection", "projection")
+	parse := func(toml string) error {
+		_, err := (&sql.ProjectionSyncableParser{}).ParseConfig(
+			readConfig(t, "toml", strings.NewReader(toml)), projectionStorage())
+		return err
+	}
+
+	wild := strings.Replace(base, `{ column = "tier",  from  = "$.tier" },`,
+		`{ column = "tier",  from  = "$.items[*].tier" },`, 1)
+	err := parse(wild)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "multi-valued")
+	require.Contains(t, err.Error(), "forEach")
+
+	recursive := strings.Replace(base, `{ column = "tier",  from  = "$.tier" },`,
+		`{ column = "tier",  from  = "$..tier" },`, 1)
+	require.ErrorContains(t, parse(recursive), "multi-valued")
+
+	inExpr := strings.Replace(base, `{ column = "tier",  from  = "$.tier" },`,
+		`{ column = "tier",  expr  = "coalesce($.items[*].price, 0)" },`, 1)
+	require.ErrorContains(t, parse(inExpr), "multi-valued")
+}
+
+// forEach config surface: a valid forEach source parses (the engine is
+// wired), and the shape rules reject misuse loudly.
+func TestParseProjectionForEachSurface(t *testing.T) {
+	config := func(extra string) string {
+		return `
+[projection]
+db         = "testdb"
+table      = "txn_elements"
+primaryKey = "element_id"
+
+[[projection.columns]]
+name = "element_id"
+type = "VARCHAR(64)"
+
+[[projection.columns]]
+name = "amount"
+type = "DECIMAL(12,2)"
+
+[[projection.source]]
+topic = "txn"
+keyPath = "$.id"
+` + extra + `
+[[projection.source.rules]]
+set = [ { column = "amount", from = "$.amount" } ]
+`
+	}
+	parse := func(toml string) error {
+		_, err := (&sql.ProjectionSyncableParser{}).ParseConfig(
+			readConfig(t, "toml", strings.NewReader(toml)), projectionStorage())
+		return err
+	}
+
+	require.NoError(t, parse(config(`forEach = "$.data.elements[*]"`)))
+
+	err := parse(config(`forEach = "$.data.elements"`))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "single-valued")
+
+	err = parse(config("forEach = \"$.data.elements[*]\"\nonDelete = \"clear\""))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `invalid for a forEach source`)
+}
+
+// A config referencing an unregistered database names the id and the
+// remedy — the bare "database not found" read like a destination-
+// connectivity failure and sent operators toward grants/networking
+// instead of the missing [database] config (the 0.7.9 clean-room
+// finding). Both the plain syncable and the projection wrap it.
+func TestUnregisteredDatabaseNamesIdAndRemedy(t *testing.T) {
+	noDB := &TestDatabaseStorage{dbs: map[string]cluster.Database{}}
+
+	base := strings.ReplaceAll(projectionTOML, "sql-projection", "projection")
+	withDB := strings.Replace(base, `db         = "testdb"`, `db         = "analytics-teamup"`, 1)
+	_, err := (&sql.ProjectionSyncableParser{}).ParseConfig(
+		readConfig(t, "toml", strings.NewReader(withDB)), noDB)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `"analytics-teamup"`, "the id the config referenced")
+	require.Contains(t, err.Error(), "POST its [database] config first")
+	require.Contains(t, err.Error(), "databases → types → ingestables/syncables")
+}
+
+// The comparison arms decode through the TOML surface: notEquals,
+// greaterThan, lessThan (the field-measured predicate set — single
+// field, compare-to-literal).
+func TestParseProjectionWhenComparisons(t *testing.T) {
+	toml := `
+[projection]
+topic      = "t"
+db         = "testdb"
+table      = "rows"
+primaryKey = "id"
+
+[[projection.columns]]
+name = "id"
+type = "TEXT"
+
+[[projection.columns]]
+name = "state"
+type = "TEXT"
+
+[[projection.rules]]
+when = [ { path = "$.EventType", notEquals = "delete" },
+         { path = "$.visit_price", greaterThan = 0 },
+         { path = "$.n", lessThan = 10 } ]
+set  = [ { column = "state", value = "billable" } ]
+`
+	v := readConfig(t, "toml", strings.NewReader(toml))
+	config, err := (&sql.ProjectionSyncableParser{}).ParseConfig(v, projectionStorage())
+	require.NoError(t, err)
+	when := config.Sources[0].Rules[0].When
+	require.Equal(t, "delete", when[0].NotEquals)
+	require.NotNil(t, when[1].GreaterThan)
+	require.NotNil(t, when[2].LessThan)
+
+	// A non-numeric ordering literal is rejected at admission.
+	bad := strings.Replace(toml, `greaterThan = 0`, `greaterThan = "high"`, 1)
+	v = readConfig(t, "toml", strings.NewReader(bad))
+	_, err = (&sql.ProjectionSyncableParser{}).ParseConfig(v, projectionStorage())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "greaterThan takes a numeric literal")
+}
+
+// The determinism boundary for the degraded-build retry loop: a
+// validation rejection is NotAdmissible (parks — retrying a config-rules
+// failure can never help), while a database-resolution failure is NOT
+// (it heals when the [database] config arrives or is fixed).
+func TestParseClassifiesAdmissionVsDatabaseErrors(t *testing.T) {
+	toml := `
+[projection]
+topic      = "t"
+db         = "testdb"
+table      = "rows"
+primaryKey = "id"
+
+[[projection.columns]]
+name = "id"
+type = "TEXT"
+
+[[projection.rules]]
+when = [ { path = "$.x", equals = "y", null = true } ]
+set  = [ { column = "id", from = "$.id" } ]
+`
+	v := readConfig(t, "toml", strings.NewReader(toml))
+	_, err := (&sql.ProjectionSyncableParser{}).Parse(v, projectionStorage())
+	require.Error(t, err)
+	require.True(t, cluster.IsNotAdmissible(err), "a validation rejection is deterministic — park, don't retry")
+
+	// Same config, valid rules, but the database is missing: retryable.
+	fixed := strings.Replace(toml, `when = [ { path = "$.x", equals = "y", null = true } ]`, ``, 1)
+	fixed = strings.Replace(fixed, `db         = "testdb"`, `db         = "nowhere"`, 1)
+	v = readConfig(t, "toml", strings.NewReader(fixed))
+	_, err = (&sql.ProjectionSyncableParser{}).Parse(v, projectionStorage())
+	require.Error(t, err)
+	require.False(t, cluster.IsNotAdmissible(err), "a missing database HEALS when its config arrives — must stay retryable")
+	require.ErrorIs(t, err, cluster.ErrDatabaseMissing)
 }

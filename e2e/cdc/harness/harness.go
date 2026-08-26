@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -406,6 +407,28 @@ func (h *Harness) SinkDatabaseID() string { return sinkDatabaseID }
 // in this PR — it exercises Storage.Position end-to-end without
 // needing a Postgres restart (which testcontainers can't do cleanly
 // because Stop+Start reassigns the host port).
+// NodeDataDir is the running node's COMMITTED_DATA_DIR (the default
+// ./data under the process dir) — where node-local state like stage
+// stores lives.
+func (h *Harness) NodeDataDir() string { return filepath.Join(h.committed.dataDir, "data") }
+
+// RestartCommittedAfter stops committed, runs fn against the stopped
+// node's on-disk state, and restarts — the cold-takeover simulator
+// (delete a node-local stage store while down and the restarted worker
+// must re-derive it below the checkpoint).
+func (h *Harness) RestartCommittedAfter(t *testing.T, fn func()) {
+	t.Helper()
+	dataDir := h.committed.dataDir
+	h.committed.Stop()
+	if fn != nil {
+		fn()
+	}
+	h.committed = startCommittedAt(t, dataDir)
+	for _, table := range h.topics {
+		h.engine.WaitReady(t, table)
+	}
+}
+
 func (h *Harness) RestartCommitted(t *testing.T) {
 	t.Helper()
 	dataDir := h.committed.dataDir

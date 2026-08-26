@@ -367,6 +367,12 @@ func (s *Storage) Reader(id string) db.ActualReader {
 	return &Reader{raftIndex: i, s: s}
 }
 
+// ReaderAt reads from an arbitrary raft index — the dry-run's window
+// sampler. No checkpoint is consulted or advanced.
+func (s *Storage) ReaderAt(index uint64) db.ActualReader {
+	return &Reader{raftIndex: index, s: s}
+}
+
 // Position reports the raft index of the last entry this reader examined —
 // skipped entries included — safe to call from any goroutine while Read runs.
 // See the pos field doc for semantics (0 = nothing examined yet).

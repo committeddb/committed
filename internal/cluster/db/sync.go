@@ -117,6 +117,90 @@ const (
 // multi-batch cadence accumulation cheaply.
 var syncBatchCap = 500
 
+// recoverStageState closes the gap between a syncable's NODE-LOCAL stage
+// state and its replicated checkpoint before the worker consumes: after
+// an ownership move (this node has no store, or a stale one) or a crash
+// that lost the store's NoSync tail, folding forward from the checkpoint
+// alone would silently produce incomplete aggregates. The design's
+// checkpoint split: replay (frontier, checkpoint] folding WITHOUT sink
+// emission (everything ≤ checkpoint is already durably applied), then
+// consume normally. Lag, never loss — and loudly visible.
+func (db *DB) recoverStageState(ctx context.Context, id string, rec cluster.StageRecoverer, checkpoint uint64, handle *workerHandle) error {
+	frontier, has, err := rec.StageFrontier()
+	if err != nil {
+		return err
+	}
+	if !has || frontier >= checkpoint {
+		return nil
+	}
+	db.logger.Warn("stage state is behind the checkpoint — re-deriving before consuming (an ownership move, a reset store, or a lost NoSync tail; outputs below the checkpoint are already applied, so this pass folds without emitting)",
+		zap.String("id", id), zap.Uint64("stage_frontier", frontier), zap.Uint64("checkpoint", checkpoint))
+	if handle != nil {
+		handle.stageRecoveryTarget.Store(checkpoint)
+		handle.stageRecoveryFolded.Store(0)
+		defer func() {
+			handle.stageRecoveryTarget.Store(0)
+			handle.stageRecoveryFolded.Store(0)
+		}()
+	}
+	r := db.storage.Reader("") // from index 0; entries ≤ frontier are skipped below
+	folded := 0
+	for {
+		// The scan can cover the whole log; without this check a
+		// delete/replace's cancel cannot interrupt it, the drain times
+		// out, and the worker gets ABANDONED mid-recovery (the field
+		// zombie: the store then closes under the scan).
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		a, err := r.Read()
+		if err != nil {
+			break // EOF (or read error — the main loop surfaces persistent ones)
+		}
+		if a.Index <= frontier {
+			continue
+		}
+		if a.Index > checkpoint {
+			break
+		}
+		if err := rec.FoldStagesOnly(a); err != nil {
+			return err
+		}
+		folded++
+		if handle != nil {
+			handle.stageRecoveryFolded.Store(a.Index)
+		}
+	}
+	db.logger.Info("stage state re-derived to the checkpoint", zap.String("id", id),
+		zap.Int("actuals_folded", folded), zap.Uint64("checkpoint", checkpoint))
+	return nil
+}
+
+// stageRecoveryFailed triages a recovery failure and reports whether the
+// worker should EXIT (true) or back off and retry (false). Exit on
+// cancellation (a delete/replace/Close interrupted the scan) and on a
+// DELETED syncable — the field zombie was a deleted syncable's worker
+// hot-looping "database not open" recovery attempts forever against a
+// store its own teardown had closed; deletion must end the loop no
+// matter how the worker got here.
+func (db *DB) stageRecoveryFailed(ctx context.Context, id string, err error) bool {
+	if ctx.Err() != nil {
+		db.logger.Info("stage-state recovery interrupted by shutdown/replace; worker exiting",
+			zap.String("id", id))
+		return true
+	}
+	if exists, eerr := db.storage.SyncableExists(id); eerr == nil && !exists {
+		db.logger.Info("stage-state recovery aborted: syncable deleted; worker exiting",
+			zap.String("id", id), zap.Error(err))
+		return true
+	}
+	db.logger.Error("stage-state recovery failed; backing off before retrying rather than consuming with incomplete state",
+		zap.String("id", id), zap.Error(err))
+	return false
+}
+
 // checkpointPolicyOf returns the syncable's configured checkpoint cadence, or
 // the zero policy if it doesn't implement CheckpointConfigurable. The worker
 // fills path-appropriate defaults (see syncSingle / syncBatch) for any zero
@@ -124,7 +208,11 @@ var syncBatchCap = 500
 // ModeAlwaysCurrent migration wrapper forwards this, so a wrapped syncable
 // keeps its TOML cadence.
 func checkpointPolicyOf(s cluster.Syncable) cluster.CheckpointPolicy {
-	if cc, ok := s.(cluster.CheckpointConfigurable); ok {
+	// Unwrap-chain resolution, outermost-first: the migration wrapper's own
+	// deliberate CheckpointPolicy forward still wins (SyncableAs finds the
+	// wrapper's implementation before the inner's), and any future wrapper
+	// WITHOUT that forward no longer silently loses the cadence.
+	if cc, ok := cluster.SyncableAs[cluster.CheckpointConfigurable](s); ok {
 		return cc.CheckpointPolicy()
 	}
 	return cluster.CheckpointPolicy{}
@@ -349,10 +437,16 @@ func (db *DB) deleteSync(id string, keepData bool) {
 
 	if !ok || handle.syncable == nil {
 		// No worker built on this node — nothing to tear down. In safe mode
-		// that is EVERY delete, and on a single-node cluster nobody else will
-		// tear down either — say so rather than skipping silently.
+		// that is EVERY delete; outside it this is a DEGRADED config's
+		// delete (its build failed, so no worker held a destination
+		// handle). Either way the destination table, if any, survives —
+		// say so rather than skipping silently (the same silent-skip
+		// shape that hid the wrapper-masking bug).
 		if db.safeMode {
 			db.logger.Warn("safe mode: syncable deleted; owner-side destination teardown skipped (no worker was built) — the destination table, if any, remains",
+				zap.String("id", id))
+		} else {
+			db.logger.Warn("syncable deleted but no worker was built on this node (degraded config?); owner-side destination teardown skipped — the destination table, if any, remains and a same-name re-POST will land on it",
 				zap.String("id", id))
 		}
 		return
@@ -367,7 +461,11 @@ func (db *DB) deleteSync(id string, keepData bool) {
 		return // operator opted to keep the data, or this node isn't the owner
 	}
 
-	teardownable, ok := handle.syncable.(cluster.Teardownable)
+	// Resolved through the Unwrap chain: an always-current syncable's
+	// Teardownable lives on the INNER syncable behind the migration
+	// wrapper (the field incident: deleted projections' tables survived
+	// because a bare assertion here silently failed on the wrapper).
+	teardownable, ok := cluster.SyncableAs[cluster.Teardownable](handle.syncable)
 	if !ok {
 		return // syncable owns no external destination state
 	}
@@ -507,8 +605,20 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 			cp, head, _ := db.SyncableProgress(id)
 			db.logger.Info("starting sync", zap.String("id", id),
 				zap.Uint64("checkpoint", cp), zap.Uint64("head", head))
+			// Stage-state recovery gates serving: a stage-carrying syncable
+			// must re-derive its node-local store before consuming (a reset
+			// store, an ownership move, a lost NoSync tail).
+			if rec, ok := cluster.SyncableAs[cluster.StageRecoverer](s); ok {
+				if err := db.recoverStageState(ctx, id, rec, cp, handle); err != nil {
+					if exit := db.stageRecoveryFailed(ctx, id, err); exit {
+						return nil
+					}
+					break // idle backoff, then retry — never a hot loop
+				}
+			}
 			// An in-progress re-materialization: begin epoch marking so the
-			// replay converges the sink (see rematerialize.go).
+			// replay converges the sink (see rematerialize.go). After stage
+			// recovery, so a recovery retry never double-begins.
 			remat = db.beginRematerializationIfRequested(ctx, id, s)
 			isNode = true
 			retryActual = nil
@@ -968,8 +1078,20 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 			cp, head, _ := db.SyncableProgress(id)
 			db.logger.Info("starting sync", zap.String("id", id),
 				zap.Uint64("checkpoint", cp), zap.Uint64("head", head))
+			// Stage-state recovery gates serving: a stage-carrying syncable
+			// must re-derive its node-local store before consuming (a reset
+			// store, an ownership move, a lost NoSync tail).
+			if rec, ok := cluster.SyncableAs[cluster.StageRecoverer](s); ok {
+				if err := db.recoverStageState(ctx, id, rec, cp, handle); err != nil {
+					if exit := db.stageRecoveryFailed(ctx, id, err); exit {
+						return nil
+					}
+					break // idle backoff, then retry — never a hot loop
+				}
+			}
 			// An in-progress re-materialization: begin epoch marking so the
-			// replay converges the sink (see rematerialize.go).
+			// replay converges the sink (see rematerialize.go). After stage
+			// recovery, so a recovery retry never double-begins.
 			remat = db.beginRematerializationIfRequested(ctx, id, s)
 			isNode = true
 			batch = batch[:0]
@@ -1283,6 +1405,71 @@ func (db *DB) SyncableOwner(id string) uint64 {
 		return n
 	}
 	return db.Leader()
+}
+
+// SyncableStageRecovery reports a running stage-state re-derivation on
+// THIS node's worker: the log index folded so far and the checkpoint
+// target (ok=false: none active). Owner-local, O(1) atomics — safe on
+// the default status call, which is where the field needed it (a
+// re-deriving worker previously read as plain "running" with silently
+// climbing lag).
+func (db *DB) SyncableStageRecovery(id string) (folded, target uint64, ok bool) {
+	db.workersMu.Lock()
+	handle, found := db.syncWorkers[id]
+	db.workersMu.Unlock()
+	if !found {
+		return 0, 0, false
+	}
+	t := handle.stageRecoveryTarget.Load()
+	if t == 0 {
+		return 0, 0, false
+	}
+	return handle.stageRecoveryFolded.Load(), t, true
+}
+
+// SyncableStageStats reports the per-stage introspection rows of
+// syncable id's worker ON THIS NODE (nil, false when no worker is
+// registered here or the syncable declares no stages). Owner-local like
+// SyncableReadPosition — the stage store lives with the worker — so the
+// HTTP layer proxies to the owner for the any-node answer.
+func (db *DB) SyncableStageStats(id string) (map[string]cluster.StageStat, bool) {
+	db.workersMu.Lock()
+	handle, ok := db.syncWorkers[id]
+	db.workersMu.Unlock()
+	if !ok || handle.syncable == nil {
+		return nil, false
+	}
+	in, ok := cluster.SyncableAs[cluster.StageIntrospector](handle.syncable)
+	if !ok {
+		return nil, false
+	}
+	stats, err := in.StageStats()
+	if err != nil || stats == nil {
+		return nil, false
+	}
+	return stats, true
+}
+
+// SyncableStageKeyExists probes one stage output key of syncable id's
+// worker ON THIS NODE (ok=false: no worker registered here, or no
+// stages; err: undeclared stage name or part-count mismatch).
+// Owner-local like the counts — the HTTP layer proxies to the owner.
+func (db *DB) SyncableStageKeyExists(id, stage string, keyParts []string) (bool, bool, error) {
+	db.workersMu.Lock()
+	handle, ok := db.syncWorkers[id]
+	db.workersMu.Unlock()
+	if !ok || handle.syncable == nil {
+		return false, false, nil
+	}
+	in, ok := cluster.SyncableAs[cluster.StageIntrospector](handle.syncable)
+	if !ok {
+		return false, false, nil
+	}
+	exists, err := in.StageKeyExists(stage, keyParts)
+	if err != nil {
+		return false, true, err
+	}
+	return exists, true, nil
 }
 
 // SyncableReadPosition reports the live scan position of syncable id's worker

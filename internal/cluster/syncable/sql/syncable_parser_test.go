@@ -2,7 +2,6 @@ package sql_test
 
 import (
 	"bytes"
-	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -345,7 +344,9 @@ func (s *TestDatabaseStorage) Database(id string) (cluster.Database, error) {
 		return db, nil
 	}
 
-	return nil, fmt.Errorf("not found")
+	// The real storage returns the sentinel; tests exercising the
+	// remedy-naming wrap need the same identity.
+	return nil, cluster.ErrDatabaseMissing
 }
 
 // Composite primaryKey: the list form parses into the real column list; a

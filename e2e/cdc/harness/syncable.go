@@ -57,6 +57,54 @@ func postSyncable(t *testing.T, table string) {
 	postConfig(t, "/v1/syncable/"+table, b.String())
 }
 
+// WaitForRawSinkValue polls an ARBITRARY sink-side table (the staged-
+// projection scenarios' shape) until keyCol=key has col == want.
+func (h *Harness) WaitForRawSinkValue(t *testing.T, table, keyCol, key, col, want string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last string
+	var seen bool
+	for time.Now().Before(deadline) {
+		if v, ok := h.engine.RawSinkValue(table, keyCol, key, col); ok {
+			last, seen = v, true
+			if v == want {
+				return
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !seen {
+		t.Fatalf("sink %s: no row with %s=%q within %s", table, keyCol, key, timeout)
+	}
+	t.Fatalf("sink %s: %s=%q has %s=%q, want %q after %s", table, keyCol, key, col, last, want, timeout)
+}
+
+// WaitForRawSinkAbsent polls until the keyed row no longer exists — the
+// retraction assertion.
+func (h *Harness) WaitForRawSinkAbsent(t *testing.T, table, keyCol, key string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, ok := h.engine.RawSinkValue(table, keyCol, key, keyCol); !ok {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("sink %s: row with %s=%q still present after %s (retraction never landed)", table, keyCol, key, timeout)
+}
+
+// PostSyncableTOML posts an arbitrary syncable config — the staged-
+// projection scenarios author their own TOML rather than the canned
+// per-table shape. SinkDatabaseID names the harness's registered sink
+// database for their `db =` line.
+func PostSyncableTOML(t *testing.T, name, toml string) {
+	t.Helper()
+	postConfig(t, "/v1/syncable/"+name, toml)
+}
+
+// SinkDatabaseID is the id of the harness's sink [database] config.
+func SinkDatabaseID() string { return sinkDatabaseID }
+
 // SinkValue returns the value of column `col` for the row whose primary key
 // equals `pk` in a topic's sink table, and whether such a row exists. A
 // missing table or row (the syncable creates the table lazily and writes

@@ -401,3 +401,9 @@ func (s *Storage) DeleteTypeRecordBypassingCacheForTest(id string) error {
 		return deleteVersioned(b, []byte(id))
 	})
 }
+
+// RetryDegradedBuildsForTest runs one pass of the degraded-build retry
+// loop (the loop itself is clock-driven).
+func (s *Storage) RetryDegradedBuildsForTest() {
+	s.retryDegradedBuilds()
+}

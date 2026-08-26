@@ -158,7 +158,10 @@ func (p *Parser) syncableSchema(mimeType string, data []byte, s cluster.Database
 func (p *Parser) ParseSyncable(mimeType string, data []byte, s cluster.DatabaseStorage) (string, cluster.Syncable, cluster.SyncableMode, error) {
 	v, err := parseBytes(mimeType, data)
 	if err != nil {
-		return "", nil, 0, err
+		// Decode, inline-password, and missing-${VAR} failures are all
+		// deterministic within this process — retrying cannot help (env
+		// is immutable in-process; a restart re-builds regardless).
+		return "", nil, 0, cluster.NotAdmissible(err)
 	}
 
 	name := v.GetString("syncable.name")
@@ -166,12 +169,12 @@ func (p *Parser) ParseSyncable(mimeType string, data []byte, s cluster.DatabaseS
 	parser, ok := p.syncableParsers[tipe]
 
 	if !ok {
-		return "", nil, 0, fmt.Errorf("cannot parse syncable of type: %s", tipe)
+		return "", nil, 0, cluster.NotAdmissible(fmt.Errorf("cannot parse syncable of type: %s", tipe))
 	}
 
 	mode, err := cluster.ParseSyncableMode(v.GetString("syncable.mode"))
 	if err != nil {
-		return "", nil, 0, err
+		return "", nil, 0, cluster.NotAdmissible(err)
 	}
 
 	syncable, err := parser.Parse(v, s)

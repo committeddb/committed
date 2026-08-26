@@ -2,6 +2,7 @@ package http_test
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	httpgo "net/http"
 	"net/http/httptest"
@@ -369,4 +370,96 @@ func TestSyncableStatus_AcknowledgedDeadLettersSplit(t *testing.T) {
 	require.Zero(t, body.DeadLetters, "acknowledged records leave the completeness count")
 	require.Equal(t, uint64(3), body.AcknowledgedDeadLetters)
 	require.Contains(t, raw, `"acknowledgedDeadLetters":3`)
+}
+
+// ?stages=true surfaces the owner-local per-stage output key counts — the
+// silent-empty-stage triage read ("how many keys does billed-pairs
+// hold?"). Absent without the opt-in, absent for stage-free syncables,
+// same soft-degrade contract as readPosition.
+func TestSyncableStatus_StageKeyCounts(t *testing.T) {
+	fake := &clusterfakes.FakeCluster{}
+	fake.SyncableExistsReturns(true, nil)
+	fake.IDReturns(1)
+	fake.SyncableOwnerReturns(1)
+	fake.SyncableProgressReturns(50, 100, nil)
+	fake.SyncableStageStatsReturns(map[string]cluster.StageStat{
+		"billed-pairs": {Keys: 0, Inputs: 496000, Fanned: 91737},
+		"completed":    {Keys: 22023, Inputs: 700000},
+	}, true)
+
+	// Opted in: the stats render — keys plus the flow counters that split
+	// region-not-reached / fan-empty / filtered-to-zero.
+	status, raw := doSyncableStatusRaw(t, fake, "?stages=true", nil)
+	require.Equal(t, 200, status)
+	require.Contains(t, raw, `"billed-pairs":{"keys":0,"inputs":496000,"fanned":91737}`,
+		"an EMPTY stage is visible as keys 0 WITH its flow context")
+	require.Contains(t, raw, `"completed":{"keys":22023,"inputs":700000}`)
+
+	// Default call: no counts (poll-safe O(1) contract untouched).
+	_, raw = doSyncableStatusRaw(t, fake, "", nil)
+	require.NotContains(t, raw, "billed-pairs")
+
+	// Stage-free syncable (or non-owner): field absent, not an error.
+	fake.SyncableStageStatsReturns(nil, false)
+	status, raw = doSyncableStatusRaw(t, fake, "?stages=true", nil)
+	require.Equal(t, 200, status)
+	require.NotContains(t, raw, `"stages"`)
+}
+
+// ?probeStage/?probeKey answers a single-key existence probe — the other
+// half of stage introspection ("is THIS pair in billed-pairs?"). A
+// typo'd stage name is a loud 400, never "key absent".
+func TestSyncableStatus_StageKeyProbe(t *testing.T) {
+	fake := &clusterfakes.FakeCluster{}
+	fake.SyncableExistsReturns(true, nil)
+	fake.IDReturns(1)
+	fake.SyncableOwnerReturns(1)
+	fake.SyncableProgressReturns(50, 100, nil)
+
+	fake.SyncableStageKeyExistsReturns(true, true, nil)
+	status, raw := doSyncableStatusRaw(t, fake, "?probeStage=billed-pairs&probeKey=J-1&probeKey=5", nil)
+	require.Equal(t, 200, status)
+	require.Contains(t, raw, `"stageKeyExists":true`)
+	_, stage, parts := fake.SyncableStageKeyExistsArgsForCall(0)
+	require.Equal(t, "billed-pairs", stage)
+	require.Equal(t, []string{"J-1", "5"}, parts,
+		"parts pass through VERBATIM — the key-space owner renders and composes; this layer knows no encodings")
+
+	fake.SyncableStageKeyExistsReturns(false, true, nil)
+	_, raw = doSyncableStatusRaw(t, fake, "?probeStage=billed-pairs&probeKey=nope", nil)
+	require.Contains(t, raw, `"stageKeyExists":false`)
+
+	// Unknown stage: loud 400.
+	fake.SyncableStageKeyExistsReturns(false, true, errors.New(`stage "billed-pear" is not declared by this projection`))
+	status, raw = doSyncableStatusRaw(t, fake, "?probeStage=billed-pear&probeKey=x", nil)
+	require.Equal(t, 400, status)
+	require.Contains(t, raw, "billed-pear")
+
+	// Half a probe is a parameter error.
+	status, _ = doSyncableStatusRaw(t, fake, "?probeStage=only", nil)
+	require.Equal(t, 400, status)
+}
+
+// A worker mid-re-derivation must not read as plain "running" with
+// silently climbing lag (the field finding: ~30 minutes of invisible
+// re-derive after a store reset). The answering node reports
+// workerState "re-deriving" with progress, on the DEFAULT call.
+func TestSyncableStatus_Rederiving(t *testing.T) {
+	fake := &clusterfakes.FakeCluster{}
+	fake.SyncableExistsReturns(true, nil)
+	fake.IDReturns(1)
+	fake.SyncableOwnerReturns(1)
+	fake.SyncableProgressReturns(36700000, 36760000, nil)
+	fake.SyncableStageRecoveryReturns(12400000, 36700000, true)
+
+	status, raw := doSyncableStatusRaw(t, fake, "", nil)
+	require.Equal(t, 200, status)
+	require.Contains(t, raw, `"workerState":"re-deriving"`)
+	require.Contains(t, raw, `"stageRecovery":{"folded":12400000,"target":36700000}`)
+
+	// No active re-derivation: plain running, field absent.
+	fake.SyncableStageRecoveryReturns(0, 0, false)
+	_, raw = doSyncableStatusRaw(t, fake, "", nil)
+	require.Contains(t, raw, `"workerState":"running"`)
+	require.NotContains(t, raw, "stageRecovery")
 }

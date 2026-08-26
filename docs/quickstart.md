@@ -83,6 +83,10 @@ for t in movie rating credit person; do post "type-$t.toml"   "/v1/type/$t"; don
 for i in movie rating credit person; do post "ingest-$i.toml" "/v1/ingestable/$i-ingest"; done
 ```
 
+The order matters on any fresh node: **databases → types →
+ingestables/syncables**. A config that references a database (or type)
+not yet registered is rejected at POST naming what to register first.
+
 Each ingestable snapshots its `ingress` table into a topic, then streams live
 changes. Ask any ingestable how it's doing — snapshot vs. streaming, and whether
 it has caught up to the source:

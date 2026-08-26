@@ -577,6 +577,125 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/NotLinearizable'
+  /v1/syncable/dryrun:
+    post:
+      tags: [syncable]
+      summary: Dry-run a syncable configuration against a log sample
+      operationId: dryRunSyncable
+      description: |
+        Rehearses a syncable configuration against a bounded sample of the
+        committed log and returns a diagnostic report — per-stage flow
+        counters (inputs/fanned/keys/unkeyedDeletes), per-join resolution
+        hits/misses, a few sample output objects per stage, per-source and
+        per-rule match counts, and auto-generated findings that name the
+        silent-empty signatures (a when clause that never matched reports
+        the value families actually seen at its path). Nothing is admitted
+        or stored, no destination database is touched, and the config
+        still passes full admission validation (400 on rejection). By
+        default the sampling budget spreads across several evenly-spaced
+        windows of the log so late-clustering topics are covered; use
+        fromIndex to drill into one region.
+      parameters:
+        - name: maxEntries
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 10000000, default: 100000 }
+          description: Sampling budget in committed entries across all windows.
+        - name: fromIndex
+          in: query
+          required: false
+          schema: { type: integer, format: int64 }
+          description: Sample a single window starting at this raft index.
+        - name: timeoutSeconds
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 600, default: 120 }
+          description: |
+            Wall-clock bound. The deadline yields a PARTIAL report (the
+            `truncated` field says so), never an error.
+      requestBody:
+        required: true
+        content:
+          text/toml:
+            schema: { type: string }
+          application/json:
+            schema: { type: object }
+      responses:
+        '200':
+          description: The dry-run report
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  entries: { type: integer }
+                  durationMs: { type: integer, format: int64 }
+                  parseMs: { type: integer, format: int64 }
+                  readMs: { type: integer, format: int64 }
+                  truncated: { type: string }
+                  deadLetters: { type: integer }
+                  coverage: { type: string, enum: [complete, partial] }
+                  topicsUnseen:
+                    type: array
+                    items: { type: string }
+                  windows:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        fromIndex: { type: integer, format: int64 }
+                        entries: { type: integer }
+                        ms: { type: integer, format: int64 }
+                        stop: { type: string, enum: [budget, eof, boundary, deadline, error] }
+                  stages:
+                    type: object
+                    additionalProperties:
+                      type: object
+                      properties:
+                        inputs: { type: integer, format: int64 }
+                        fanned: { type: integer, format: int64 }
+                        keys: { type: integer }
+                        unkeyedDeletes: { type: integer, format: int64 }
+                        liveDeltas: { type: integer, format: int64 }
+                        retractions: { type: integer, format: int64 }
+                        joins:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              target: { type: string }
+                              alias: { type: string }
+                              absent: { type: boolean }
+                              optional: { type: boolean }
+                              hits: { type: integer, format: int64 }
+                              misses: { type: integer, format: int64 }
+                        samples:
+                          type: array
+                          items: { type: object }
+                  sources:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        topic: { type: string }
+                        from: { type: string }
+                        seen: { type: integer, format: int64 }
+                        matched: { type: integer, format: int64 }
+                        ruleMatches:
+                          type: array
+                          items: { type: integer, format: int64 }
+                        hints:
+                          type: array
+                          items: { type: string }
+                  findings:
+                    type: array
+                    items: { type: string }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
   /v1/syncable/{id}:
     post:
       tags: [syncable]
@@ -584,16 +703,54 @@ paths:
       description: |
         Proposes a syncable configuration. `syncable.type` selects the
         implementation: `sql` (one row per event — history tables and
-        the whole-payload `"$"` event-log shape), `sql-projection`
+        the whole-payload `"$"` event-log shape), `projection`
         (a fold into one row per entity — current-state tables,
         optionally folding several source topics into one denormalized
-        row via `[[sql-projection.source]]` blocks with a per-source
-        `onDelete`; a source folds scalar columns via `rules`, one
-        collection column via an `aggregate` block, or a dimension table
+        row via `[[projection.source]]` blocks with a per-source
+        `onDelete`; a source folds scalar columns via `rules` (each set
+        entry copies with `from`, fixes with `value`, clears with
+        `null`, enriches with `lookup`, or computes with `expr` — a
+        closed exact-decimal function set where every division must sit
+        under `round`/`trunc`, checked here with 400), one collection
+        column and/or scalar aggregate columns
+        (count/sum/min/max/countDistinct, optionally filtered by
+        `where`) via an `aggregate` block, fans one event's array into N
+        rows via `forEach` (rules apply per element, `$parent.` paths
+        reach the enclosing event, re-emitted parents reconcile
+        absolutely, and `onDelete = "delete-rows"` cascades a parent
+        tombstone), chains internal stages via `[[projection.stage]]`
+        (private keyed refolds — reshape or aggregate — consumed by a
+        stage-fed source's `from`; a stage join's `on` takes one path
+        or a list addressing a composite-keyed dimension; `merge`
+        combines prior stages BY KEY into an aliased tuple (outer-join
+        semantics, absent sides null; gate left/inner with when
+        notNull/null; key space inherited from the merged stages, which
+        must agree) — same-key correlation belongs to merge,
+        foreign-key reference to joins; key-bearing
+        declarations (stage keyPath, join on, source keyPath) accept
+        `normalize = "lower"` to fold cross-source key renderings
+        (UPPERCASE CDC GUIDs vs lowercase serializers), and stages
+        accept `keyType = ["text","number"]` (topic joins: `onType`;
+        stage joins inherit) — the declared-column-type model, where
+        "number" coerces string renderings into the numeric key space; editing stage definitions requires a
+        rebuild, enforced by the config-change guard; when several
+        sources fold one row and any is stage-fed, exactly the
+        row-owning source declares `rowOwner = true` — its writes
+        create and delete rows, every other source is a stage-fed
+        update-only decorator whose retraction clears its own columns;
+        decorator rules may carry lookup enrichment), or a dimension
+        table
         via a `lookup` block (whose fields aggregate elements resolve by
         an `on`/`select` join — enrichment), and several sources may
-        share a topic, split by a per-source `when`; see README § SQL
-        projections), or `http` (webhook). For `sql-projection`, config
+        share a topic, split by a per-source `when` (clauses take one of
+        equals, null, notEquals, or greaterThan/lessThan — SQL
+        comparison semantics: null matches no comparison); see README § SQL
+        projections and docs/read-models.md), or `http` (webhook). The former projection
+        spelling `sql-projection` (type and `[sql-projection]` section
+        together — the section name always follows the type spelling)
+        remains accepted for a deprecation period; posting it succeeds
+        and the response carries a `warnings[]` entry naming the rename.
+        For `projection`, config
         misuse (a `set` entry without exactly one of `from`/`value`/`null`,
         a `when` entry without exactly one of `equals`/`null`, an unknown
         column, a rule setting the primary-key column, an invalid
@@ -855,6 +1012,26 @@ paths:
         '503':
           $ref: '#/components/responses/NotLinearizable'
   /v1/syncable/{id}/deadletter:
+    get:
+      tags: [syncable]
+      summary: "Not the listing (405) — dead letters are listed at GET .../errors"
+      description: |
+        Deliberately answered with a guiding 405 rather than an alias:
+        dead-letter records are listed at `GET /v1/syncable/{id}/errors`;
+        POST on this path skips the proposal a stuck syncable is blocked
+        on. Documented because GETting the POST path is a natural guess.
+      operationId: getSyncableDeadLetterHint
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      responses:
+        '405':
+          description: The guiding answer, naming the listing route.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
     post:
       tags: [syncable]
       summary: Skip the proposal a syncable is currently blocked on
@@ -965,10 +1142,54 @@ paths:
         by callers who asked. If the owner can't be reached the response
         degrades softly: every other field still serves and `readPosition`
         is absent. Keep routine polling on the default form.
+
+        While the answering node's worker is re-deriving stage state
+        (after a genuine store reset), `workerState` reads
+        `"re-deriving"` with `stageRecovery {folded, target}` progress —
+        on the default call. Lag climbs by design until the fold-only
+        pass reaches the checkpoint; it is progress, not a stall.
+
+        `?stages=true` opts one call into the owner-local per-stage
+        introspection rows (`stages`, name → {keys, inputs, fanned}):
+        keys is the store's current output count, inputs/fanned are flow
+        counters since the worker started. The three numbers split every
+        silent-empty state at a glance — inputs 0 = that topic's log
+        region not reached yet (the mid-replay all-zeros read); inputs >
+        0 with fanned 0 = the forEach fan finds no array; flow > 0 with
+        keys 0 = the when/joins rejected everything. Same owner-proxy
+        and soft-degrade contract as `readPosition`; absent for
+        stage-free syncables.
+
+        `?probeStage=<stage>&probeKey=<part>` answers a single-key
+        existence probe (`stageKeyExists`). Pass one probeKey per
+        keyPath position, in order — the KEY-SPACE OWNER renders and
+        composes them (the stage's normalize applies server-side, and
+        the composite encoding is never hand-written), so a probe can
+        only miss when the key is genuinely absent. The one caller
+        obligation: numbers in canonical digits (5, not 5.0000) — a
+        text part is never re-parsed, so "007" probes text keys
+        exactly. A typo'd stage name or part-count mismatch is a 400,
+        never "absent". Together the pair collapses the fan-vs-join
+        triage to two curls.
       operationId: getSyncableStatus
       parameters:
         - $ref: '#/components/parameters/Consistency'
         - $ref: '#/components/parameters/ResourceId'
+        - name: stages
+          in: query
+          required: false
+          schema: { type: boolean }
+          description: Opt into owner-local per-stage output key counts.
+        - name: probeStage
+          in: query
+          required: false
+          schema: { type: string }
+          description: Stage name for a single-key existence probe (with probeKey).
+        - name: probeKey
+          in: query
+          required: false
+          schema: { type: string }
+          description: Stored-form key to probe (canonical digits, normalized case).
         - name: readPosition
           in: query
           required: false
@@ -1203,6 +1424,27 @@ paths:
     # Write-only: a type's configuration is created/updated here and read
     # back via the version endpoints below or the GET /v1/type list. There
     # is no GET /v1/type/{id} — committed data is not queried over HTTP.
+    delete:
+      tags: [type]
+      summary: "Refused (405) — types are version-only by design"
+      description: |
+        Types cannot be deleted: committed log entries reference their
+        type permanently, so deletion would break replay of every entry
+        that carries it. POST a new version to change one; an unused
+        type left over from an experiment is harmless residue. The 405
+        body states this posture (code `types_are_version_only`).
+      operationId: deleteTypeRefused
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      responses:
+        '405':
+          description: The posture, stated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
     post:
       tags: [type]
       summary: Create or update a type configuration
@@ -2326,6 +2568,15 @@ components:
             only on a `POST /type/{id}` that changed just the `[migration]`
             transform in place (schema and version unchanged). The write
             succeeded; the advisory is informational.
+        warnings:
+          type: array
+          items:
+            type: string
+          description: |
+            Non-fatal deprecation notices about the config document as posted —
+            currently, the `sql-projection` syncable type spelling (canonical:
+            `projection`). The write succeeded exactly as posted; each warning
+            names what to rename before the deprecated form is removed.
 
     ConfigurationResponse:
       type: object
@@ -2474,9 +2725,13 @@ components:
           type: boolean
           description: |
             True if the worker has been blocked retrying a TRANSIENT error past
-            the stuck threshold (it is still running). False for a healthy worker
-            and for a terminal park (see `workerState`). The `index`, `since`, and
-            `message` fields are present when stuck or parked.
+            the stuck threshold (it is still running and will resume by itself).
+            DELIBERATELY false during a terminal park — stuck and parked are
+            mutually exclusive: stuck refines `workerState: running`, while a
+            park means the worker STOPPED and needs an operator. Read
+            `workerState` first; a parked worker with frozen lag and
+            `stuck: false` is one condition (the park), not two. The `index`,
+            `since`, and `message` fields are present when stuck or parked.
         workerState:
           type: string
           enum: [running, parked, degraded]

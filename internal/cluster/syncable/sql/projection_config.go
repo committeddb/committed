@@ -1,6 +1,8 @@
 package sql
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"slices"
 	"sort"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/sqlident"
+	"github.com/committeddb/committed/internal/cluster/syncable/stages"
 )
 
 // ProjectionColumn declares one column of the projection table. Unlike
@@ -18,26 +21,6 @@ import (
 type ProjectionColumn struct {
 	Name    string `mapstructure:"name"`
 	SQLType string `mapstructure:"type"`
-}
-
-// WhenClause is one match condition: exactly one of Equals (the value
-// at Path must equal it) or Null (the value at Path must be JSON null)
-// must be set. Null is a flag for the same reason as
-// ProjectionSet.Null: TOML has no null literal, so `equals = null`
-// cannot be written. A rule matches when every one of its clauses
-// holds (AND); express OR as another rule. A missing Path is "no
-// match", never an error — events of other shapes simply don't match —
-// and that invariant is why a Null clause matches only a *present*
-// null: {"allocs": null} matches, an absent field does not. There is
-// no negation ("is not null"); the when language is equality-only.
-//
-// The jsonpath deliberately lives in a value, not a TOML key: viper
-// lowercases map keys at read time, which would silently corrupt
-// camelCase paths like $.eventType.
-type WhenClause struct {
-	Path   string `mapstructure:"path"`
-	Equals any    `mapstructure:"equals"`
-	Null   bool   `mapstructure:"null"`
 }
 
 // ProjectionSet is one column write of a matched rule. Exactly one of
@@ -68,6 +51,15 @@ type ProjectionSet struct {
 	Lookup string `mapstructure:"lookup"`
 	On     string `mapstructure:"on"`
 	Select string `mapstructure:"select"`
+	// The fifth arm: a computed column — a closed-function expression over
+	// the event payload (see expr.go for the language and its exact-decimal
+	// semantics). Compiled at validation; a config that validates can only
+	// fail on data at apply time.
+	Expr string `mapstructure:"expr"`
+
+	// compiled is Expr's admission-checked AST, populated by
+	// validateProjectionConfig so the apply path never re-parses.
+	compiled stages.Node
 }
 
 // IsEnrichment reports whether this set entry is the lookup-enrichment arm.
@@ -83,7 +75,7 @@ type ProjectionRule struct {
 }
 
 // onDelete behaviors for a projection source. The first three are for rule
-// (scalar-fold) sources: delete-row drops the folded row (the spine source);
+// (scalar-fold) sources: delete-row drops the folded row (the row-owning source);
 // clear NULLs the columns this source owns but keeps the row (a contributor);
 // ignore drops the delete entirely. remove-from-aggregate is for an aggregate
 // (collection-fold) source: it removes the deleted child's element from the
@@ -93,6 +85,21 @@ const (
 	onDeleteClear               = "clear"
 	onDeleteIgnore              = "ignore"
 	onDeleteRemoveFromAggregate = "remove-from-aggregate"
+	// onDeleteRows is the forEach analog of delete-row: a parent tombstone
+	// (which carries only the parent entity key) cascades to every row the
+	// parent fanned out, found via the fan-out sidecar.
+	onDeleteRows = "delete-rows"
+)
+
+// scalarFn values for an aggregate scalar's fn. Config casing is normalized
+// at parse (normalizeScalars lower-cases), so these are the canonical
+// internal spellings the validation and dialects match.
+const (
+	scalarFnCount         = "count"
+	scalarFnSum           = "sum"
+	scalarFnMin           = "min"
+	scalarFnMax           = "max"
+	scalarFnCountDistinct = "countdistinct"
 )
 
 // elementKeyType values for an aggregate's elementKey. The sidecar always
@@ -146,6 +153,39 @@ type ProjectionAggregate struct {
 	Element        []ProjectionElementField
 	ElementKey     string
 	ElementKeyType string
+	// Scalars are cross-row aggregate columns computed over the SAME child
+	// set the array column folds (count/sum/min/max/countDistinct) — the
+	// same sidecar with a different fold, recomputed absolutely at every
+	// child change (never incremented), so redelivery and rebuild converge
+	// identically to the array column. When Scalars are present the array
+	// Column is optional (a pure count needs no array).
+	Scalars []ProjectionScalar
+}
+
+// ProjectionScalar is one scalar aggregate column: Fn over the element
+// field Of (count needs no Of), optionally restricted to elements whose
+// fields match every Where clause (filtered count). Columns are declared
+// table columns, written by the same materialize/rebuild statements that
+// write the array column.
+type ProjectionScalar struct {
+	Column string `mapstructure:"column"`
+	Fn     string `mapstructure:"fn"`
+	Of     string `mapstructure:"of"`
+	// OfType ("text" or "number", default text) chooses how min/max order
+	// and countDistinct compare the Of field — the elementKeyType precedent.
+	// sum always folds numerically; count folds rows and takes neither.
+	OfType string        `mapstructure:"ofType"`
+	Where  []ScalarWhere `mapstructure:"where"`
+}
+
+// ScalarWhere is one clause over an element field, restricting which
+// children a filtered scalar counts: exactly one of Equals or Null
+// (Null matches SQL IS NULL — a JSON null OR an absent field, the
+// mirrored-source reading of DeletedAtUtc IS NULL).
+type ScalarWhere struct {
+	Field  string `mapstructure:"field"`
+	Equals any    `mapstructure:"equals"`
+	Null   bool   `mapstructure:"null"`
 }
 
 // ProjectionSource is one input of a projection. The topic is the discriminator
@@ -172,6 +212,39 @@ type ProjectionSource struct {
 	Rules     []ProjectionRule
 	Aggregate *ProjectionAggregate
 	Lookup    *ProjectionLookup
+	// FromStage names the internal stage this source consumes instead of a
+	// topic (the chaining terminal): the stage's output deltas — keyed
+	// objects, upserts and retractions — drive this source's rules exactly
+	// as a topic's entities would. Exactly one of Topic or FromStage.
+	FromStage string
+	// ForEach turns a rules source into a fan-out: the (deliberately
+	// multi-valued) path selects N elements from each event, and the
+	// source's rules apply once PER ELEMENT — keyPath and every from/expr
+	// path resolve against the element, with a `$parent.` prefix reaching
+	// the enclosing event payload. Row identity is the element's key, so
+	// one event maintains N rows; a re-emitted event reconciles (rows for
+	// vanished elements delete) via the fan-out sidecar, and a parent
+	// tombstone cascades per onDelete = "delete-rows".
+	ForEach string
+	// Normalize folds this source's keyPath rendering into a canonical
+	// form ("lower" — the cross-source GUID-case seam). It also applies
+	// to this source's delete-tombstone key binding, so a producer's
+	// UPPERCASE entity key still addresses the lowercased row. Keys
+	// only, never column values. A table whose rows are keyed by a
+	// normalized stage (stage-fed sources) needs the same normalize on
+	// its sibling topic sources — the row key space is shared.
+	Normalize string
+	// RowOwner marks this source as the table's row owner: its writes
+	// admit rows (create), and its deletes and retractions remove them.
+	// Once any source declares ownership, every other row-writing source
+	// becomes a DECORATOR — stage-fed, update-only (it never creates a row
+	// the owner has not admitted), retracting by clearing its own columns —
+	// and every owner write pulls each decorator's retained stage output,
+	// so a decoration lands no matter which side arrived first. Without an
+	// ownership declaration a table keeps the classic behavior (every
+	// source's upsert creates), which is only unambiguous for a single
+	// row-writing source — admission enforces the declaration beyond that.
+	RowOwner bool
 }
 
 // ProjectionConfig declares a stateful fold from one or more source topics into
@@ -182,7 +255,7 @@ type ProjectionSource struct {
 type ProjectionConfig struct {
 	Database cluster.Database
 	// DatabaseID is the id of the [database] config Database was resolved from
-	// (the sql-projection.db value), threaded by the parser for identity
+	// (the {section}.db value), threaded by the parser for identity
 	// comparison (see Config.DatabaseID). Empty for directly-constructed configs.
 	DatabaseID string
 	Table      string
@@ -197,6 +270,7 @@ type ProjectionConfig struct {
 	PrimaryKey []string
 	Columns    []ProjectionColumn
 	Sources    []ProjectionSource
+	Stages     []ProjectionStage
 
 	// Single-source shorthand. The README single-topic form (and existing
 	// configs) set these top-level fields; applyDefaults folds them into one
@@ -213,6 +287,12 @@ func (c *ProjectionConfig) applyDefaults() {
 	if len(c.Sources) == 0 && (c.Topic != "" || len(c.Rules) > 0) {
 		c.Sources = []ProjectionSource{{Topic: c.Topic, KeyPath: c.KeyPath, Rules: c.Rules}}
 	}
+	ownerDeclared := false
+	for i := range c.Sources {
+		if c.Sources[i].RowOwner {
+			ownerDeclared = true
+		}
+	}
 	for i := range c.Sources {
 		s := &c.Sources[i]
 		// A lookup source writes a dimension table, not the BFF row, so the row
@@ -220,9 +300,14 @@ func (c *ProjectionConfig) applyDefaults() {
 		// its keyPath is the dimension key and must be explicit.
 		if s.Lookup == nil {
 			if s.OnDelete == "" {
-				if s.Aggregate != nil {
+				switch {
+				case s.Aggregate != nil:
 					s.OnDelete = onDeleteRemoveFromAggregate // a child delete leaves the row
-				} else {
+				case s.ForEach != "":
+					s.OnDelete = onDeleteRows // a parent delete cascades to its fanned rows
+				case s.FromStage != "" && ownerDeclared && !s.RowOwner:
+					s.OnDelete = onDeleteClear // a decorator's retraction clears its columns
+				default:
 					s.OnDelete = onDeleteRow // back-compat: a delete drops the row
 				}
 			}
@@ -290,7 +375,32 @@ func (c *ProjectionConfig) projectionShapeFingerprint() string {
 	sort.Strings(aggs)
 	sort.Strings(lookups)
 	sort.Strings(spines)
-	return strings.Join(aggs, ";") + "|" + strings.Join(lookups, ";") + "|" + strings.Join(spines, ";")
+	shape := strings.Join(aggs, ";") + "|" + strings.Join(lookups, ";") + "|" + strings.Join(spines, ";")
+	// Stage definitions are value-shape too — and more: editing them RESETS
+	// the stage store (the fingerprint mismatch), and a reset store folding
+	// forward from a head checkpoint would silently serve partial state for
+	// every quiet key. Folding the stage fingerprint into the shape makes a
+	// stage edit trip the same rebuild-required gate, pairing every store
+	// reset with a replay from index 0.
+	if len(c.Stages) > 0 {
+		shape += "|stages:" + stageFingerprint(c)
+	}
+	// Row ownership is value-shape too: flipping the ownership declaration
+	// changes which writes create and delete rows, and rows materialized
+	// under the old regime are not reconciled by the new one — so an
+	// ownership edit demands the same rebuild. Owner-free configs keep a
+	// byte-identical shape.
+	var owners []string
+	for _, s := range c.Sources {
+		if s.RowOwner {
+			owners = append(owners, fmt.Sprintf("rowOwner(topic=%s,from=%s)", s.Topic, s.FromStage))
+		}
+	}
+	if len(owners) > 0 {
+		sort.Strings(owners)
+		shape += "|owners:" + strings.Join(owners, ";")
+	}
+	return shape
 }
 
 // fingerprintFields canonicalizes a set of element/dimension fields (order-
@@ -465,6 +575,10 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 			}
 		}
 	}
+	if err := validateProjectionStages(c); err != nil {
+		return err
+	}
+	forEachTopics := map[string]bool{}
 	// lookups maps each declared lookup source's name to its source index, so an
 	// aggregate's enrichment can be checked to reference a real dimension. Built
 	// in a pre-pass because enrichments may reference a lookup declared later.
@@ -486,6 +600,30 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 		}
 		lookups[src.Lookup.Name] = si
 	}
+	// Ownership pre-pass: whether any source declares row ownership, and
+	// the table's row-writing shape (plain rules sources; stage-fed among
+	// them) — the inputs to the ownership admission rules in the loop below.
+	ownerDeclared := false
+	rowRulesSources, stageFedRules := 0, 0
+	for _, src := range c.Sources {
+		if src.RowOwner {
+			ownerDeclared = true
+		}
+		if len(src.Rules) > 0 && src.ForEach == "" && src.Aggregate == nil && src.Lookup == nil {
+			rowRulesSources++
+			if src.FromStage != "" {
+				stageFedRules++
+			}
+		}
+	}
+	// Several sources folding one row need a declared owner once a stage
+	// feeds any of them: a stage-fed source's deltas are byte-suppressed
+	// against its store, so a whole-row delete by ANOTHER source silently
+	// strips its columns forever — ownership is what makes the interplay
+	// sound, and leaving it implicit is the trap, so admission demands it.
+	if !ownerDeclared && rowRulesSources >= 2 && stageFedRules >= 1 {
+		return fmt.Errorf("this table has %d row-writing sources and at least one is stage-fed, but none declares rowOwner = true — several sources folding one row need an owner: the owner's writes create and delete rows, every other source decorates columns on rows the owner admits (set rowOwner = true on the row-owning source)", rowRulesSources)
+	}
 	// owner records which source writes each column. A column is owned by one
 	// source (so two sources never clobber each other); the same source claiming
 	// a column across its rules is fine. This — not topic uniqueness — is the
@@ -497,8 +635,11 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 		// multi-source config; the original single-source error substrings are
 		// preserved inside (the parser tests match on substrings).
 		where := fmt.Sprintf("source %d (topic %q)", si+1, src.Topic)
-		if src.Topic == "" {
-			return fmt.Errorf("source %d: topic is required", si+1)
+		if src.FromStage != "" {
+			where = fmt.Sprintf("source %d (from %q)", si+1, src.FromStage)
+		}
+		if src.Topic == "" && src.FromStage == "" {
+			return fmt.Errorf("source %d: a source consumes a topic or a stage (topic or from is required)", si+1)
 		}
 		kinds := 0
 		for _, has := range []bool{len(src.Rules) > 0, src.Aggregate != nil, src.Lookup != nil} {
@@ -513,6 +654,83 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 		// topic); its clauses are validated like a rule's.
 		if err := validateWhenClauses(src.When, where); err != nil {
 			return err
+		}
+		// A source-level when evaluates on the whole event (or stage
+		// object) — there is no enclosing scope to reach.
+		if err := stages.RejectParentPaths(src.When, where+" when"); err != nil {
+			return err
+		}
+		if !stages.ValidNormalize(src.Normalize) {
+			return fmt.Errorf("%s: normalize %q is not supported (want %q)", where, src.Normalize, stages.NormalizeLower)
+		}
+		if src.RowOwner && (src.Aggregate != nil || src.Lookup != nil || src.ForEach != "") {
+			return fmt.Errorf("%s: rowOwner = true declares row admission; only a plain rules source (topic or stage-fed) can own rows", where)
+		}
+		if ownerDeclared && !src.RowOwner && src.FromStage == "" &&
+			len(src.Rules) > 0 && src.ForEach == "" && src.Aggregate == nil && src.Lookup == nil {
+			return fmt.Errorf("%s: with a row owner declared, every other row-writing source must be stage-fed (from = %q) — a topic source's decoration has no retention, so a value arriving before the owner admits its row would be silently lost; feed it through a stage", where, "<stage>")
+		}
+		for _, kp := range src.KeyPath {
+			if err := rejectMultiValued(kp, where+": keyPath"); err != nil {
+				return err
+			}
+		}
+		if src.FromStage != "" {
+			if src.Topic != "" {
+				return fmt.Errorf("%s: exactly one of topic or from (a source consumes a topic or a stage, not both)", where)
+			}
+			fi := stageNamed(c, src.FromStage)
+			if fi < 0 {
+				return fmt.Errorf("%s: from %q names no declared stage", where, src.FromStage)
+			}
+			if arity, _, _ := stages.ResolvedKeySpace(c.Stages, fi); len(c.PrimaryKey) != arity {
+				return fmt.Errorf("%s: this table's primaryKey has %d column(s) but stage %q keys by %d path(s) — a stage-fed source's rows are keyed BY the stage's key, so the arities must match", where, len(c.PrimaryKey), src.FromStage, arity)
+			}
+			if src.Aggregate != nil || src.Lookup != nil || src.ForEach != "" {
+				return fmt.Errorf("%s: a stage-fed source folds via rules only", where)
+			}
+			if len(src.Rules) == 0 {
+				return fmt.Errorf("%s: a stage-fed source needs rules", where)
+			}
+			if ownerDeclared && !src.RowOwner {
+				switch src.OnDelete {
+				case onDeleteClear, onDeleteIgnore:
+				default:
+					return fmt.Errorf("%s: onDelete %q is invalid for a decorating (non-owner) stage-fed source (want %q — null this source's columns — or %q; only the row owner removes rows)", where, src.OnDelete, onDeleteClear, onDeleteIgnore)
+				}
+			} else {
+				switch src.OnDelete {
+				case onDeleteRow, onDeleteIgnore:
+				default:
+					return fmt.Errorf("%s: onDelete %q is invalid for a stage-fed source (want %q or %q — a stage retraction removes or ignores)", where, src.OnDelete, onDeleteRow, onDeleteIgnore)
+				}
+			}
+		}
+		if src.ForEach != "" {
+			if src.Aggregate != nil || src.Lookup != nil {
+				return fmt.Errorf("%s: forEach applies to a rules source (drop the aggregate/lookup block)", where)
+			}
+			if len(src.Rules) == 0 {
+				return fmt.Errorf("%s: a forEach source needs rules — they apply once per element", where)
+			}
+			if len(c.PrimaryKey) > 1 {
+				return fmt.Errorf("%s: forEach requires a single-column primaryKey (fanned rows key by the element)", where)
+			}
+			if !multiValuedPath(src.ForEach) {
+				return fmt.Errorf("%s: forEach path [%s] is single-valued — forEach fans an array into rows; a plain rules source already gives one row per event", where, src.ForEach)
+			}
+			switch src.OnDelete {
+			case onDeleteRows, onDeleteIgnore:
+			default:
+				return fmt.Errorf("%s: onDelete %q is invalid for a forEach source (want %q — cascade to the fanned rows — or %q)", where, src.OnDelete, onDeleteRows, onDeleteIgnore)
+			}
+			// The reconciliation sidecar is named by topic, so two forEach
+			// sources sharing one topic would collide on it (and their
+			// reconciliation sets would stomp each other).
+			if forEachTopics[src.Topic] {
+				return fmt.Errorf("%s: a second forEach source on topic %q — one forEach source per topic (split elements with rule whens instead)", where, src.Topic)
+			}
+			forEachTopics[src.Topic] = true
 		}
 		if src.Lookup != nil {
 			if err := validateLookup(src, where); err != nil {
@@ -533,10 +751,12 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 		if len(src.KeyPath) != len(c.PrimaryKey) {
 			return fmt.Errorf("%s: keyPath has %d path(s) but primaryKey has %d column(s) — one path per key column, in the same order", where, len(src.KeyPath), len(c.PrimaryKey))
 		}
-		switch src.OnDelete {
-		case onDeleteRow, onDeleteClear, onDeleteIgnore:
-		default:
-			return fmt.Errorf("%s: onDelete %q is invalid (want %q, %q, or %q)", where, src.OnDelete, onDeleteRow, onDeleteClear, onDeleteIgnore)
+		if src.ForEach == "" { // a forEach source's onDelete is validated above
+			switch src.OnDelete {
+			case onDeleteRow, onDeleteClear, onDeleteIgnore:
+			default:
+				return fmt.Errorf("%s: onDelete %q is invalid (want %q, %q, or %q)", where, src.OnDelete, onDeleteRow, onDeleteClear, onDeleteIgnore)
+			}
 		}
 		ownsColumn := false
 		// enrichedAs records each enriched column's (lookup, on, select) tuple:
@@ -547,6 +767,14 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 		// into one fan-out statement at Init).
 		enrichedAs := make(map[string]string)
 		for i, r := range src.Rules {
+			// Rule whens on a forEach source evaluate per element with the
+			// event as $parent; anywhere else $parent would silently never
+			// match.
+			if src.ForEach == "" {
+				if perr := stages.RejectParentPaths(r.When, fmt.Sprintf("%s rule %d when", where, i+1)); perr != nil {
+					return perr
+				}
+			}
 			if err := validateWhenClauses(r.When, fmt.Sprintf("%s rule %d", where, i+1)); err != nil {
 				return err
 			}
@@ -554,7 +782,7 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 				return fmt.Errorf("%s rule %d: set is required", where, i+1)
 			}
 			seen := make(map[string]bool, len(r.Set))
-			for _, s := range r.Set {
+			for k, s := range r.Set {
 				if s.Column == "" {
 					return fmt.Errorf("%s rule %d: set entry with empty column", where, i+1)
 				}
@@ -568,16 +796,28 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 					return fmt.Errorf("%s rule %d column %q: on/select require lookup", where, i+1, s.Column)
 				}
 				forms := 0
-				for _, set := range []bool{s.From != "", s.Value != nil, s.Null, s.Lookup != ""} {
+				for _, set := range []bool{s.From != "", s.Value != nil, s.Null, s.Lookup != "", s.Expr != ""} {
 					if set {
 						forms++
 					}
 				}
 				if forms != 1 {
-					return fmt.Errorf("%s rule %d column %q: exactly one of from, value, null, or lookup is required", where, i+1, s.Column)
+					return fmt.Errorf("%s rule %d column %q: exactly one of from, value, null, expr, or lookup is required", where, i+1, s.Column)
+				}
+				if s.Expr != "" {
+					compiled, err := compileExpr(s.Expr)
+					if err != nil {
+						return fmt.Errorf("%s rule %d column %q: expr: %w", where, i+1, s.Column, err)
+					}
+					r.Set[k].compiled = compiled // r.Set shares the config's backing array
 				}
 				if s.Value != nil && !isScalar(s.Value) {
 					return fmt.Errorf("%s rule %d column %q: value must be a scalar literal, got %T", where, i+1, s.Column, s.Value)
+				}
+				if s.From != "" {
+					if err := rejectMultiValued(s.From, fmt.Sprintf("%s rule %d column %q", where, i+1, s.Column)); err != nil {
+						return err
+					}
 				}
 				if s.Lookup != "" {
 					if err := validateSpineEnrichment(c, s, r, lookups, fmt.Sprintf("%s rule %d column %q", where, i+1, s.Column)); err != nil {
@@ -603,6 +843,38 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 			return fmt.Errorf("%s: onDelete = %q needs at least one column set by its rules to clear", where, onDeleteClear)
 		}
 	}
+	// The table-seam half of the key-space invariant (derived where owned,
+	// validated where peered): every stage feeding this table's rows, and
+	// any row-writing topic source beside them, shares ONE key space — a
+	// normalize disagreement would key the owner's rows and the
+	// decorators' rows under different bytes, silently (the class the
+	// merge check closes engine-side).
+	var rowNormalize *string
+	var rowNormalizeFrom string
+	for _, src := range c.Sources {
+		if len(src.Rules) == 0 || src.ForEach != "" || src.Aggregate != nil || src.Lookup != nil {
+			continue
+		}
+		norm, from := "", ""
+		if src.FromStage != "" {
+			fi := stageNamed(c, src.FromStage)
+			if fi < 0 {
+				continue // named-stage existence errors below, with context
+			}
+			_, _, norm = stages.ResolvedKeySpace(c.Stages, fi)
+			from = fmt.Sprintf("stage %q", src.FromStage)
+		} else {
+			norm = src.Normalize
+			from = fmt.Sprintf("topic source %q", src.Topic)
+		}
+		if rowNormalize == nil {
+			rowNormalize, rowNormalizeFrom = &norm, from
+			continue
+		}
+		if *rowNormalize != norm {
+			return fmt.Errorf("row-writing sources disagree on key normalize (%s renders %q, %s renders %q) — they share this table's row key space, so a disagreement keys their rows under DIFFERENT bytes, silently; declare the same normalize on both sides", rowNormalizeFrom, *rowNormalize, from, norm)
+		}
+	}
 	return validateProjectionJSONPaths(c)
 }
 
@@ -614,7 +886,14 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 // path internally on every call; jsonpath.New is the same compile without the
 // evaluation. The path is config, not secret, so it may appear in the error.
 func validateJSONPath(path, where string) error {
-	if _, err := jsonpath.New(path); err != nil {
+	// A `$parent.` prefix is the forEach element scope's way of reaching the
+	// enclosing event payload; validate the remainder as a rooted path (the
+	// apply layer resolves the scope — see resolveScopedPath).
+	checkPath := path
+	if rest, ok := strings.CutPrefix(checkPath, "$parent"); ok {
+		checkPath = "$" + rest
+	}
+	if _, err := jsonpath.New(checkPath); err != nil {
 		return fmt.Errorf("%s: invalid jsonpath %q: %w", where, path, err)
 	}
 	return nil
@@ -689,24 +968,6 @@ func validateElementFieldPaths(fields []ProjectionElementField, where string) er
 	return nil
 }
 
-// validateWhenClauses checks a set of match clauses (a rule's or a source's).
-// An empty set is allowed — it matches every event of the source's topic (the
-// topic is the discriminator). where prefixes each error to its location.
-func validateWhenClauses(clauses []WhenClause, where string) error {
-	for _, cl := range clauses {
-		if cl.Path == "" {
-			return fmt.Errorf("%s: when entry needs a path", where)
-		}
-		if (cl.Equals != nil) == cl.Null {
-			return fmt.Errorf("%s: when entry for %q: exactly one of equals or null is required", where, cl.Path)
-		}
-		if cl.Equals != nil && !isScalar(cl.Equals) {
-			return fmt.Errorf("%s: when entry for %q: equals must be a scalar literal, got %T", where, cl.Path, cl.Equals)
-		}
-	}
-	return nil
-}
-
 // claimColumn records that source si writes col, rejecting a second source that
 // writes the same column. The same source re-claiming a column (its rules set
 // it more than once, last-write-wins) is fine.
@@ -729,17 +990,19 @@ func validateAggregate(c *ProjectionConfig, src ProjectionSource, where string, 
 	default:
 		return fmt.Errorf("%s: onDelete %q is invalid for an aggregate source (want %q or %q)", where, src.OnDelete, onDeleteRemoveFromAggregate, onDeleteIgnore)
 	}
-	if ag.Column == "" {
-		return fmt.Errorf("%s: aggregate column is required", where)
+	if ag.Column == "" && len(ag.Scalars) == 0 {
+		return fmt.Errorf("%s: aggregate needs an array column, scalar entries, or both", where)
 	}
-	if !declared[ag.Column] {
-		return fmt.Errorf("%s: aggregate column %q is not a declared column", where, ag.Column)
-	}
-	if slices.Contains(c.PrimaryKey, ag.Column) {
-		return fmt.Errorf("%s: aggregate column %q may not be the primary-key column", where, ag.Column)
-	}
-	if err := claimColumn(owner, ag.Column, si, where); err != nil {
-		return err
+	if ag.Column != "" {
+		if !declared[ag.Column] {
+			return fmt.Errorf("%s: aggregate column %q is not a declared column", where, ag.Column)
+		}
+		if slices.Contains(c.PrimaryKey, ag.Column) {
+			return fmt.Errorf("%s: aggregate column %q may not be the primary-key column", where, ag.Column)
+		}
+		if err := claimColumn(owner, ag.Column, si, where); err != nil {
+			return err
+		}
 	}
 	if ag.ElementKey == "" {
 		return fmt.Errorf("%s: aggregate elementKey is required", where)
@@ -782,6 +1045,9 @@ func validateAggregate(c *ProjectionConfig, src ProjectionSource, where string, 
 			if f.On != "" || f.Select != "" {
 				return fmt.Errorf("%s: aggregate element field %q: on/select are only for enriched (lookup) fields", where, f.Field)
 			}
+			if err := rejectMultiValued(f.From, fmt.Sprintf("%s: aggregate element field %q", where, f.Field)); err != nil {
+				return err
+			}
 			plain[f.Field] = true
 		}
 	}
@@ -794,7 +1060,83 @@ func validateAggregate(c *ProjectionConfig, src ProjectionSource, where string, 
 			return fmt.Errorf("%s: aggregate element field %q: on %q is not a plain element field", where, f.Field, f.On)
 		}
 	}
+	// Scalars: each is a declared, non-key column this source solely owns;
+	// fn from the closed set; of/where reference PLAIN element fields (their
+	// values are stored in typed sidecar columns — an enriched field's value
+	// lives in the dimension, not the sidecar, so it cannot feed a fold).
+	scalarCols := make(map[string]bool, len(ag.Scalars))
+	for i, sc := range ag.Scalars {
+		swhere := fmt.Sprintf("%s scalar %d", where, i+1)
+		if sc.Column == "" {
+			return fmt.Errorf("%s: column is required", swhere)
+		}
+		if !declared[sc.Column] {
+			return fmt.Errorf("%s: column %q is not a declared column", swhere, sc.Column)
+		}
+		if slices.Contains(c.PrimaryKey, sc.Column) {
+			return fmt.Errorf("%s: column %q may not be the primary-key column", swhere, sc.Column)
+		}
+		if sc.Column == ag.Column {
+			return fmt.Errorf("%s: column %q is already the aggregate's array column", swhere, sc.Column)
+		}
+		if scalarCols[sc.Column] {
+			return fmt.Errorf("%s: column %q declared twice", swhere, sc.Column)
+		}
+		scalarCols[sc.Column] = true
+		if err := claimColumn(owner, sc.Column, si, where); err != nil {
+			return err
+		}
+		switch sc.OfType {
+		case "", elementKeyTypeText, elementKeyTypeNumber:
+		default:
+			return fmt.Errorf("%s: ofType %q is invalid (want %q or %q)", swhere, sc.OfType, elementKeyTypeText, elementKeyTypeNumber)
+		}
+		switch sc.Fn {
+		case scalarFnCount:
+			if sc.Of != "" {
+				return fmt.Errorf("%s: count folds rows, not a field — drop of %q (countDistinct folds a field)", swhere, sc.Of)
+			}
+			if sc.OfType != "" {
+				return fmt.Errorf("%s: ofType is only for of-folding fns (min, max, countDistinct)", swhere)
+			}
+		case scalarFnSum, scalarFnMin, scalarFnMax, scalarFnCountDistinct:
+			if sc.Of == "" {
+				return fmt.Errorf("%s: %s needs of naming a plain element field", swhere, sc.Fn)
+			}
+			if !plain[sc.Of] {
+				return fmt.Errorf("%s: of %q is not a plain element field", swhere, sc.Of)
+			}
+		default:
+			return fmt.Errorf("%s: fn %q is invalid (want %s, %s, %s, %s, or %s)", swhere, sc.Fn,
+				scalarFnCount, scalarFnSum, scalarFnMin, scalarFnMax, scalarFnCountDistinct)
+		}
+		for _, cl := range sc.Where {
+			if cl.Field == "" || !plain[cl.Field] {
+				return fmt.Errorf("%s: where field %q is not a plain element field", swhere, cl.Field)
+			}
+			if (cl.Equals != nil) == cl.Null {
+				return fmt.Errorf("%s: where for field %q needs exactly one of equals or null", swhere, cl.Field)
+			}
+			if cl.Equals != nil && !isScalar(cl.Equals) {
+				return fmt.Errorf("%s: where for field %q needs a scalar equals literal", swhere, cl.Field)
+			}
+		}
+	}
 	return nil
+}
+
+// validateProjectionStages checks the internal-stage declarations: unique
+// private names, one input each (a topic id, or a PRIOR stage's name —
+// manifest order IS the intra-config DAG, so self/forward references are
+// rejected), a single single-valued keyPath, and emit fields whose arms
+// match the stage's reduce (reshape: from/expr; aggregate: sum/min/max/
+// count). Expression arms compile here (the closed language, division
+// domination included).
+func validateProjectionStages(c *ProjectionConfig) error {
+	if len(c.Stages) == 0 {
+		return nil
+	}
+	return stages.ValidateShapes(c.Stages)
 }
 
 // validateLookup checks one lookup (dimension) source: at least one stored
@@ -816,6 +1158,9 @@ func validateLookup(src ProjectionSource, where string) error {
 		if f.From == "" {
 			return fmt.Errorf("%s: lookup %q field %q needs a from jsonpath", where, lk.Name, f.Field)
 		}
+		if err := rejectMultiValued(f.From, fmt.Sprintf("%s: lookup %q field %q", where, lk.Name, f.Field)); err != nil {
+			return err
+		}
 		if seen[f.Field] {
 			return fmt.Errorf("%s: lookup %q field %q declared twice", where, lk.Name, f.Field)
 		}
@@ -826,8 +1171,43 @@ func validateLookup(src ProjectionSource, where string) error {
 
 // sidecarName is the backing table for an aggregate column: <table>__<column>.
 // One per aggregate source; teardown drops them alongside the projection table.
+// ForEachSidecarName names a forEach source's reconciliation sidecar from
+// its topic, sanitized to identifier characters — stable across config
+// edits that reorder sources (unlike a source index). Exported so
+// operators (and tests) can locate the sidecar a forEach source maintains.
+func ForEachSidecarName(table, topic string) string {
+	san := make([]byte, 0, len(topic))
+	for i := 0; i < len(topic); i++ {
+		c := topic[i]
+		switch {
+		case c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_':
+			san = append(san, c)
+		case c >= 'A' && c <= 'Z':
+			san = append(san, c+'a'-'A')
+		default:
+			san = append(san, '_')
+		}
+	}
+	return sidecarName(table, "foreach_"+string(san))
+}
+
+// capIdentifier bounds every derived backing-table identifier: MySQL caps
+// identifiers at 64 bytes (PostgreSQL silently truncates at 63, which is
+// worse — two long names can collide), and sidecar/dimension DDL derives
+// further identifiers from these names (indexes), so the cap leaves suffix
+// room. A long name gets a deterministic hash suffix instead: stable
+// across restarts, unique per full name, byte-identical to the uncapped
+// form for anything already short enough.
+func capIdentifier(name string) string {
+	if len(name) <= 50 {
+		return name
+	}
+	sum := sha256.Sum256([]byte(name))
+	return name[:40] + "_" + hex.EncodeToString(sum[:])[:9]
+}
+
 func sidecarName(table, column string) string {
-	return table + "__" + column
+	return capIdentifier(table + "__" + column)
 }
 
 // dimensionName is the backing table for a lookup source: <table>__lookup_<name>.
@@ -859,13 +1239,21 @@ func (c *ProjectionConfig) ruleEnrichments(r ProjectionRule) map[string]SpineEnr
 }
 
 func dimensionName(table, lookup string) string {
-	return table + "__lookup_" + lookup
+	return capIdentifier(table + "__lookup_" + lookup)
 }
 
 // aggregateSpec builds the dialect-facing spec for one aggregate source,
 // grouping its enriched element fields by (lookup, on) into one join apiece
 // (first-seen order, so the materialize SQL is stable).
 func (c *ProjectionConfig) aggregateSpec(ag *ProjectionAggregate) AggregateSpec {
+	// The sidecar's identity column: the array column, or — for a
+	// scalars-only aggregate — the first scalar column. Renaming that
+	// column re-homes the sidecar (rebuilt from the log like any
+	// projection state).
+	identity := ag.Column
+	if identity == "" {
+		identity = ag.Scalars[0].Column
+	}
 	spec := AggregateSpec{
 		Table: c.Table,
 		// Aggregates are single-key by validation (composite primaryKey +
@@ -873,8 +1261,23 @@ func (c *ProjectionConfig) aggregateSpec(ag *ProjectionAggregate) AggregateSpec 
 		// is the one configured column.
 		PrimaryKey:  c.PrimaryKey[0],
 		Column:      ag.Column,
-		Sidecar:     sidecarName(c.Table, ag.Column),
+		Sidecar:     sidecarName(c.Table, identity),
 		NumericSort: ag.ElementKeyType == elementKeyTypeNumber,
+	}
+	for _, sc := range ag.Scalars {
+		as := AggregateScalar{
+			Column:    sc.Column,
+			Fn:        sc.Fn,
+			Of:        sc.Of,
+			OfNumeric: sc.OfType == elementKeyTypeNumber,
+		}
+		if len(sc.Where) > 0 {
+			as.Where = make([]AggregateScalarWhere, 0, len(sc.Where))
+			for _, w := range sc.Where {
+				as.Where = append(as.Where, AggregateScalarWhere(w))
+			}
+		}
+		spec.Scalars = append(spec.Scalars, as)
 	}
 	type joinKey struct{ lookup, on string }
 	at := map[joinKey]int{}

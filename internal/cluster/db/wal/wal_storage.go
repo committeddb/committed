@@ -27,7 +27,7 @@ import (
 var (
 	ErrOutOfBounds     = errors.New("requested index is greater than last index")
 	ErrTypeMissing     = errors.New("type not found")
-	ErrDatabaseMissing = errors.New("database not found")
+	ErrDatabaseMissing = cluster.ErrDatabaseMissing
 	ErrBucketMissing   = errors.New("key value bucket missing")
 )
 
@@ -764,6 +764,9 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	}
 	if ingest != nil {
 		ws.ingestPump = newNotifyPump(ingest, ws.closeC)
+	}
+	if ws.syncPump != nil || ws.ingestPump != nil {
+		go ws.retryDegradedBuildsLoop()
 	}
 
 	fi, err := entryLog.FirstIndex()

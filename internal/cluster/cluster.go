@@ -41,6 +41,11 @@ type Cluster interface {
 	// disk. A later same-id create starts fresh from a full snapshot.
 	DeleteIngestable(ctx context.Context, id string) error
 	ProposeSyncable(ctx context.Context, c *Configuration) error
+	// DryRunSyncable rehearses a syncable configuration against a
+	// bounded sample of the committed log — full admission-level
+	// parsing, a real fold into a throwaway store, and a diagnostic
+	// report — without proposing, storing, or touching a destination.
+	DryRunSyncable(ctx context.Context, mimeType string, data []byte, opts DryRunOptions) (*DryRunReport, error)
 	// DeleteSyncable removes a syncable: its config and checkpoint are deleted
 	// atomically and, unless keepData is set, the owner tears down the
 	// syncable's destination state (best-effort — for a SQL syncable, dropping
@@ -196,6 +201,20 @@ type Cluster interface {
 	// owning node's worker holds a reader, so the HTTP layer proxies
 	// ?readPosition=true status calls to SyncableOwner's node.
 	SyncableReadPosition(id string) (position uint64, ok bool)
+	// SyncableStageRecovery reports a running stage-state re-derivation on
+	// THIS node's worker (folded index, checkpoint target; ok=false none).
+	// Owner-local, O(1) — served on the default status call.
+	SyncableStageRecovery(id string) (folded, target uint64, ok bool)
+	// SyncableStageStats reports the per-stage introspection rows (keys /
+	// inputs / fanned) of the syncable's worker on THIS node (ok=false: no
+	// worker here, or no stages). Owner-local; see StageIntrospector.
+	SyncableStageStats(id string) (stats map[string]StageStat, ok bool)
+	// SyncableStageKeyExists probes one stage output key on THIS node's
+	// worker (ok=false: no worker here, or no stages). keyParts are the
+	// key's parts in keyPath order — the owner renders and composes
+	// them. err: undeclared stage name or part-count mismatch.
+	// Owner-local; see StageIntrospector.
+	SyncableStageKeyExists(id, stage string, keyParts []string) (exists bool, ok bool, err error)
 	// ReplaySyncableDeadLetter re-drives a dead-lettered proposal: it
 	// re-runs the syncable's Sync for the proposal at index and, on success,
 	// clears the dead-letter record. Node-agnostic. Returns ErrNotDeadLettered

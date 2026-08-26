@@ -6,6 +6,8 @@ import (
 	gosql "database/sql"
 	"encoding/json"
 	"fmt"
+	"math/big"
+	"os"
 	"strconv"
 
 	"github.com/PaesslerAG/jsonpath"
@@ -13,6 +15,8 @@ import (
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/metrics"
+	"github.com/committeddb/committed/internal/cluster/syncable/stages"
+	"github.com/committeddb/committed/internal/cluster/syncable/stagestore"
 )
 
 // Projection is the stateful half of the SQL story: where the plain
@@ -34,6 +38,20 @@ type Projection struct {
 	// layer).
 	name    string
 	metrics *metrics.Metrics
+	// storeDir is the node's stage-store directory; set by the parser
+	// (never by tests constructing directly — those exercise stages via
+	// their own tempdir or not at all).
+	storeDir string
+	// stages/stageStore are the compiled stage graph and its state, set at
+	// Init when the config declares stages. stageSinks routes stage deltas
+	// to the table sources consuming each stage (from = "<stage>").
+	stages     *stages.Graph
+	stageStore *stagestore.Store
+	stageSinks map[string][]*projectionSource
+	// decorators are the non-owner stage-fed sources, in declaration order —
+	// the sources whose retained stage output a row-owner write pulls (see
+	// pullDecorations).
+	decorators []*projectionSource
 	// sources is keyed by topic id to the sources that consume it. The topic is
 	// the discriminator; an entity routes to every source on its topic, and each
 	// source's When (and, for rule sources, per-rule when) decides whether it
@@ -48,6 +66,14 @@ type Projection struct {
 	delete *Delete
 }
 
+// projectionUnmatchedWarnRun is how many CONSECUTIVE unmatched events a
+// rule source absorbs before warning that its when clauses probably match
+// nothing (exported-adjacent knob deliberately avoided: the number only
+// gates a log line). High enough that a topic's occasional foreign
+// variants never trip it; low enough to fire early in a misconfigured
+// backfill.
+const projectionUnmatchedWarnRun = 1000
+
 // projectionSource is the prepared runtime of one ProjectionSource. Exactly one
 // of rules (scalar fold), agg (collection fold), or lkp (dimension) is set.
 type projectionSource struct {
@@ -58,13 +84,36 @@ type projectionSource struct {
 	keyPaths []string
 	onDelete string
 	// when is the source-level filter (empty = consume every event of the
-	// topic), evaluated on upsert before the rules/aggregate apply.
+	// topic), evaluated on upsert before the rules/aggregate apply. For a
+	// stage-fed source a live delta that FAILS it is a retraction, not a
+	// skip — the key stopped participating.
 	when  []WhenClause
 	rules []*projectionStmt
+	// fromStage names the stage a stage-fed source consumes ("" for a topic
+	// source); rowOwner marks the row owner; updateOnly marks a decorator
+	// (non-owner source on an owned table): its rule statements are bare
+	// UPDATEs bound values-then-keys, once (no BindArgs doubling).
+	fromStage  string
+	rowOwner   bool
+	updateOnly bool
+	// normalize folds key renderings ("lower" or ""): applied to
+	// resolved keyPath values and to delete-tombstone key bindings.
+	normalize string
+	// unmatchedRun counts CONSECUTIVE events that matched no rule (worker
+	// goroutine only — no lock). At projectionUnmatchedWarnRun it triggers
+	// the one-shot misconfiguration warning; any match resets it.
+	// fanNonArrayRun is its forEach sibling: consecutive events whose
+	// forEach path resolved to a present non-array (zero rows fanned).
+	unmatchedRun   int
+	fanNonArrayRun int
 	// clear is the prepared "UPDATE … SET ownedCols = NULL WHERE pk = ?", set
 	// only when onDelete == "clear".
 	clear    *gosql.Stmt
 	clearSQL string
+	// forEach is the source's fan-out path ("" for a plain source); fe is
+	// its prepared reconciliation runtime.
+	forEach string
+	fe      *forEachRuntime
 	// agg is the prepared aggregate runtime, set only for a collection-fold
 	// source (nil otherwise).
 	agg *aggregateRuntime
@@ -93,6 +142,30 @@ type aggregateRuntime struct {
 	rebuildSQL       string
 	lookup           *gosql.Stmt
 	lookupSQL        string
+	parentBinds      int
+}
+
+// forEachRuntime is the prepared runtime of one forEach source: the
+// reconciliation sidecar (parent entity key → fanned row keys, reusing the
+// aggregate sidecar shape with its element columns unused) and the three
+// statements that maintain it. The fanned rows themselves go through the
+// source's ordinary rule statements and the projection's shared delete.
+type forEachRuntime struct {
+	sidecar          string
+	upsertSidecar    *gosql.Stmt
+	upsertSidecarSQL string
+	deleteSidecar    *gosql.Stmt
+	deleteSidecarSQL string
+	children         *gosql.Stmt
+	childrenSQL      string
+}
+
+func (rt *forEachRuntime) closeStmts() {
+	for _, st := range []*gosql.Stmt{rt.upsertSidecar, rt.deleteSidecar, rt.children} {
+		if st != nil {
+			_ = st.Close()
+		}
+	}
 }
 
 // lookupRuntime is the prepared runtime of one ProjectionLookup: the dimension
@@ -141,6 +214,7 @@ type aggregateDependent struct {
 	affectedSQL string
 	rebuild     *gosql.Stmt
 	rebuildSQL  string
+	parentBinds int
 }
 
 // projectionStmt pairs one rule with its prepared upsert.
@@ -155,6 +229,11 @@ type projectionStmt struct {
 func NewProjection(d *DB, config *ProjectionConfig, m *metrics.Metrics, name string) *Projection {
 	return &Projection{db: d.DB, config: config, dialect: d.dialect, metrics: m, name: name}
 }
+
+// SetStoreDir sets the node's stage-store directory — threaded by the
+// parser in production; direct constructors (tests, embedders) set it
+// before Init when their config declares stages.
+func (p *Projection) SetStoreDir(dir string) { p.storeDir = dir }
 
 // projectionIdentity is the SyncableIdentity of a projection config — its source
 // topics, database, and table. It makes the projection's checkpoint meaningful; a
@@ -195,6 +274,11 @@ func (p *Projection) Teardown() error {
 			housekeeping = sidecarName(p.config.Table, src.Aggregate.Column)
 		case src.Lookup != nil:
 			housekeeping = dimensionName(p.config.Table, src.Lookup.Name)
+		case src.ForEach != "":
+			// The forEach reconciliation sidecar: left behind, a rebuilt
+			// projection would inherit stale parent→element mappings and
+			// mis-reconcile from its first event.
+			housekeeping = ForEachSidecarName(p.config.Table, src.Topic)
 		default:
 			continue
 		}
@@ -203,6 +287,22 @@ func (p *Projection) Teardown() error {
 			return fmt.Errorf("teardown [%s]: %w", drop, err)
 		}
 	}
+	// The stage store is part of the destination state a teardown erases:
+	// left behind, a rebuild's replay-from-0 would refold onto identical
+	// bytes and SUPPRESS every table delta — an empty rebuilt table,
+	// silently (the SyncBatch bug's sibling, via the rebuild door).
+	if len(p.config.Stages) > 0 {
+		if p.stageStore != nil {
+			_ = p.stageStore.Close()
+			p.stageStore = nil
+		}
+		if p.storeDir != "" {
+			if err := os.Remove(stagestore.FilePath(p.storeDir, p.name)); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("teardown stage store: %w", err)
+			}
+		}
+	}
+
 	dropString := p.dialect.DropDDL(p.config.ddlConfig())
 	if _, err := p.db.ExecContext(ctx, dropString); err != nil {
 		return fmt.Errorf("teardown [%s]: %w", dropString, err)
@@ -293,17 +393,53 @@ func (p *Projection) Init() error {
 		}
 	}
 
+	if len(p.config.Stages) > 0 {
+		if p.storeDir == "" {
+			return fmt.Errorf("this projection declares stages but no stage-store directory is configured (storeDir is threaded from the node's data dir; direct constructions must set it)")
+		}
+		store, reset, err := stagestore.Open(p.storeDir, p.name, stageFingerprint(p.config))
+		if err != nil {
+			return err
+		}
+		p.stageStore = store
+		p.stages = stages.BuildGraph(p.config.Stages)
+		if reset {
+			zap.L().Warn("stage store reset — stage state re-derives as the log replays; pair stage-definition changes with a rebuild so replay starts from index 0",
+				zap.String("syncable", p.name), zap.String("path", store.Path()))
+		}
+	}
+
 	// Prepare per-source statements. enrichRefs collects, per lookup name, the
 	// aggregates that enrich from it (their spec + on-field), so the second pass
 	// can wire each lookup's fan-out to its dependents' rebuilds.
 	p.sources = make(map[string][]*projectionSource, len(p.config.Sources))
 	var lookupSources []*projectionSource
 	enrichRefs := map[string][]enrichRef{}
+	p.stageSinks = map[string][]*projectionSource{}
+	ownerDeclared := false
+	for _, src := range p.config.Sources {
+		if src.RowOwner {
+			ownerDeclared = true
+		}
+	}
 	for si, src := range p.config.Sources {
-		ps := &projectionSource{topic: src.Topic, keyPaths: src.KeyPath, onDelete: src.OnDelete, when: src.When}
+		ps := &projectionSource{
+			topic: src.Topic, keyPaths: src.KeyPath, onDelete: src.OnDelete, when: src.When,
+			fromStage: src.FromStage, rowOwner: src.RowOwner, normalize: src.Normalize,
+			updateOnly: ownerDeclared && !src.RowOwner && src.FromStage != "",
+		}
 		// Register ps NOW, before preparing its statements, so a partway failure
 		// leaves the statements it did prepare reachable from p.sources for the
 		// error-cleanup defer's Close (a failed nested init self-cleans separately).
+		// A stage-fed source registers under its stage in stageSinks instead —
+		// its input is stage deltas, not topic entities — but joins p.sources
+		// under the empty key too so Close reaches its statements.
+		if src.FromStage != "" {
+			p.stageSinks[src.FromStage] = append(p.stageSinks[src.FromStage], ps)
+		}
+		if ps.updateOnly {
+			p.decorators = append(p.decorators, ps)
+		}
 		p.sources[src.Topic] = append(p.sources[src.Topic], ps)
 		switch {
 		case src.Aggregate != nil:
@@ -336,8 +472,15 @@ func (p *Projection) Init() error {
 		default:
 			for i, r := range src.Rules {
 				sqlString := p.dialect.CreateSQL(p.config.ruleConfig(r))
+				if ps.updateOnly {
+					sqlString = p.dialect.CreateUpdateSQL(p.config.ruleConfig(r))
+				}
 				if enrich := p.config.ruleEnrichments(r); len(enrich) > 0 {
-					sqlString = p.dialect.CreateEnrichedUpsertSQL(p.config.ruleConfig(r), enrich)
+					if ps.updateOnly {
+						sqlString = p.dialect.CreateEnrichedUpdateSQL(p.config.ruleConfig(r), enrich)
+					} else {
+						sqlString = p.dialect.CreateEnrichedUpsertSQL(p.config.ruleConfig(r), enrich)
+					}
 				}
 				stmt, err := p.db.PrepareContext(p.initCtx, sqlString)
 				if err != nil {
@@ -352,6 +495,14 @@ func (p *Projection) Init() error {
 					return fmt.Errorf("prepare source %d (topic %q) clear sql [%s]: %w", si+1, src.Topic, ps.clearSQL, err)
 				}
 				ps.clear = clearStmt
+			}
+			if src.ForEach != "" {
+				fe, err := p.initForEach(si, src)
+				if err != nil {
+					return err
+				}
+				ps.forEach = src.ForEach
+				ps.fe = fe
 			}
 		}
 	}
@@ -372,6 +523,7 @@ func (p *Projection) Init() error {
 				affectedSQL: affSQL,
 				rebuild:     ref.agg.rebuild,
 				rebuildSQL:  ref.agg.rebuildSQL,
+				parentBinds: ref.agg.parentBinds,
 			})
 		}
 	}
@@ -490,6 +642,13 @@ func (p *Projection) initAggregate(si int, src ProjectionSource, spec AggregateS
 		elementKey: ag.ElementKey,
 		fields:     plainElementFields(ag.Element), // enriched fields are joined in, not stored
 		sidecar:    spec.Sidecar,
+		// materialize and rebuild carry one parent-key placeholder per value
+		// column plus one (the inserted key / the WHERE) — bind the parent
+		// key that many times, whichever dialect rendered the statement.
+		parentBinds: 1 + len(spec.Scalars),
+	}
+	if spec.Column != "" {
+		rt.parentBinds++
 	}
 	// A partway failure below leaves rt unreturned (never stored on its source),
 	// so Projection.Close can't reach its statements — close them here.
@@ -542,6 +701,10 @@ func (p *Projection) Sync(ctx context.Context, a *cluster.Actual) (cluster.Shoul
 			relevant = true
 			break
 		}
+		if p.stages != nil && p.stages.ConsumesTopic(e.Type.ID) {
+			relevant = true
+			break
+		}
 	}
 	if !relevant {
 		return false, nil
@@ -554,12 +717,48 @@ func (p *Projection) Sync(ctx context.Context, a *cluster.Actual) (cluster.Shoul
 		// is) so the replicated stuck status and any permanent dead-letter carry
 		// only the classifier. Transient: a begin failure is a connection issue to
 		// retry and surface as stuck, never a permanent dead-letter.
-		return false, execFailure("[sql-projection.apply] begin", err, false)
+		return false, execFailure("[projection.apply] begin", err, false)
+	}
+
+	// Staged path: the WHOLE apply — stage folds, their table deltas,
+	// direct-source applies, and the SQL COMMIT — runs inside one store
+	// transaction, with the store committing only after SQL succeeded.
+	// The ordering is load-bearing for delta suppression: a redelivery
+	// only sees "already folded" (and suppresses the delta) when the
+	// sink's transaction genuinely committed; a crash or commit failure
+	// between the two leaves the store BEHIND, so the refold re-fires
+	// every delta and the sink re-applies idempotently.
+	if p.stages != nil {
+		committed := false
+		err := p.stageStore.Update(func(stx *stagestore.Tx) error {
+			if err := p.foldStagesTx(ctx, tx, stx, a); err != nil {
+				return err
+			}
+			for _, e := range a.Entities {
+				for _, src := range p.sources[e.Type.ID] {
+					if err := p.applyEntity(ctx, tx, stx, src, e); err != nil {
+						return err
+					}
+				}
+			}
+			if err := tx.Commit(); err != nil {
+				return execFailure("[projection.apply] commit", err, p.dialect.IsPermanent(err))
+			}
+			committed = true
+			return nil
+		})
+		if err != nil {
+			if !committed {
+				_ = tx.Rollback()
+			}
+			return false, err
+		}
+		return true, nil
 	}
 
 	for _, e := range a.Entities {
 		for _, src := range p.sources[e.Type.ID] {
-			if err := p.applyEntity(ctx, tx, src, e); err != nil {
+			if err := p.applyEntity(ctx, tx, nil, src, e); err != nil {
 				_ = tx.Rollback()
 				return false, err
 			}
@@ -575,7 +774,7 @@ func (p *Projection) Sync(ctx context.Context, a *cluster.Actual) (cluster.Shoul
 		// rollback: a failed Commit already finalized the tx and freed the
 		// connection, so a Rollback now only returns ErrTxDone and would mask
 		// this error.
-		return false, execFailure("[sql-projection.apply] commit", err, p.dialect.IsPermanent(err))
+		return false, execFailure("[projection.apply] commit", err, p.dialect.IsPermanent(err))
 	}
 
 	return true, nil
@@ -586,13 +785,46 @@ func (p *Projection) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool,
 	if err != nil {
 		// Redact the raw connect error (user=/database=/host:port); transient — see
 		// the matching note in Sync.
-		return false, execFailure("[sql-projection.apply] begin", err, false)
+		return false, execFailure("[projection.apply] begin", err, false)
+	}
+
+	// Staged path: same commit ordering as Sync — SQL inside the store tx —
+	// with one store transaction covering the whole batch.
+	if p.stages != nil {
+		committed := false
+		berr := p.stageStore.Update(func(stx *stagestore.Tx) error {
+			for _, a := range as {
+				if err := p.foldStagesTx(ctx, tx, stx, a); err != nil {
+					return err
+				}
+				for _, e := range a.Entities {
+					for _, src := range p.sources[e.Type.ID] {
+						if err := p.applyEntity(ctx, tx, stx, src, e); err != nil {
+							return err
+						}
+					}
+				}
+			}
+			zap.L().Debug("sql projection batch committing", zap.Int("batch_size", len(as)))
+			if err := tx.Commit(); err != nil {
+				return execFailure("[projection.apply] commit", err, p.dialect.IsPermanent(err))
+			}
+			committed = true
+			return nil
+		})
+		if berr != nil {
+			if !committed {
+				_ = tx.Rollback()
+			}
+			return false, berr
+		}
+		return true, nil
 	}
 
 	for _, a := range as {
 		for _, e := range a.Entities {
 			for _, src := range p.sources[e.Type.ID] {
-				if err := p.applyEntity(ctx, tx, src, e); err != nil {
+				if err := p.applyEntity(ctx, tx, nil, src, e); err != nil {
 					_ = tx.Rollback()
 					return false, err
 				}
@@ -607,7 +839,7 @@ func (p *Projection) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool,
 		// rollback: a failed Commit already finalized the tx and freed the
 		// connection, so a Rollback now only returns ErrTxDone and would mask
 		// this error.
-		return false, execFailure("[sql-projection.apply] commit", err, p.dialect.IsPermanent(err))
+		return false, execFailure("[projection.apply] commit", err, p.dialect.IsPermanent(err))
 	}
 
 	return true, nil
@@ -635,7 +867,7 @@ func (p *Projection) columnType(name string) string {
 // Zero matching rules → zero SQL (no ghost rows) plus an unmatched metric tick.
 // Returns cluster.Permanent for non-retryable failures so the worker skips
 // rather than retries. The caller owns the transaction.
-func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *projectionSource, e *cluster.Entity) error {
+func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, stx *stagestore.Tx, src *projectionSource, e *cluster.Entity) error {
 	// A refresh-boundary marker (reconciling full-refresh) is a no-op for a
 	// projection: one source entity fans out to many/aggregated sink rows, so a
 	// topic-level generation sweep does not map onto the projection's shape.
@@ -668,6 +900,12 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 			}
 			return p.removeFromAggregate(ctx, tx, src, e)
 		}
+		if src.forEach != "" {
+			if src.onDelete == onDeleteIgnore {
+				return nil
+			}
+			return p.cascadeForEachDelete(ctx, tx, src, e)
+		}
 		return p.applyDelete(ctx, tx, src, e)
 	case cluster.EntityVariantRow:
 		// Fall through to the row fold below.
@@ -675,7 +913,7 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 		// Future-proofing: a variant this binary does not implement
 		// dead-letters loudly instead of folding as a row.
 		return cluster.Permanent(fmt.Errorf(
-			"[sql-projection.apply] entity variant %q is not supported by this binary (topic %q); upgrade the node before syncing this topic",
+			"[projection.apply] entity variant %q is not supported by this binary (topic %q); upgrade the node before syncing this topic",
 			v, e.Type.ID))
 	}
 
@@ -687,7 +925,7 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 	dec.UseNumber()
 	var jsonData any
 	if err := dec.Decode(&jsonData); err != nil {
-		return cluster.Permanent(fmt.Errorf("[sql-projection.apply] unmarshal entity data: %w", err))
+		return cluster.Permanent(fmt.Errorf("[projection.apply] unmarshal entity data: %w", err))
 	}
 
 	// Source-level when prefilter: a source consumes only the events it matches,
@@ -703,22 +941,84 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 	if src.agg != nil {
 		return p.applyAggregate(ctx, tx, src, jsonData, e)
 	}
+	if src.forEach != "" {
+		return p.applyForEach(ctx, tx, src, jsonData, e)
+	}
 
-	var matched []*projectionStmt
-	for _, r := range src.rules {
-		if matchWhen(r.rule.When, jsonData) {
-			matched = append(matched, r)
+	matchedAny, _, err := p.applyRowFold(ctx, tx, src, jsonData, nil, nil)
+	if err != nil {
+		return err
+	}
+	if matchedAny && src.rowOwner {
+		// A topic row owner's write admits (or re-admits) the row — pull
+		// the decorators' retained stage outputs for it.
+		keys, kerr := p.resolveRowKeys(src, jsonData, nil)
+		if kerr != nil {
+			return kerr
+		}
+		if perr := p.pullDecorations(ctx, tx, stx, keys); perr != nil {
+			return perr
 		}
 	}
-	if len(matched) == 0 {
+	if !matchedAny {
 		// No ghost rows: zero matching rules → zero SQL. The tick is
 		// the signal that a new event variant shipped without a rule.
-		zap.L().Debug("[sql-projection] event matched no rules",
+		zap.L().Debug("[projection] event matched no rules",
 			zap.String("syncable", p.name), zap.String("topic", src.topic))
 		if p.metrics != nil {
 			p.metrics.SyncRulesUnmatched(p.name, src.topic)
 		}
+		// A LONG RUN of consecutive misses is a different signal than the
+		// odd foreign variant: it usually means every `when` in the source
+		// is wrong — most treacherously a type-mismatched equals (the field
+		// case: `equals = "true"` against a JSON boolean matched 0 of
+		// 248,854 rows, silently — `equals = true` matched all). Warn once
+		// per run so the empty table has a named cause in the logs.
+		src.unmatchedRun++
+		if src.unmatchedRun == projectionUnmatchedWarnRun {
+			zap.L().Warn("[projection] source has matched no rules for a long run of events — if this table should be filling, check the source's when clauses (a type-mismatched `equals` matches nothing silently: `equals = \"true\"` never equals JSON boolean true)",
+				zap.String("syncable", p.name), zap.String("topic", src.topic),
+				zap.Int("consecutive_unmatched", src.unmatchedRun))
+		}
 		return nil
+	}
+	src.unmatchedRun = 0
+	return nil
+}
+
+// resolveRowKeys resolves a source's key path(s) against the rule scope,
+// each value coerced to its primary-key column's declared type — shared by
+// applyRowFold and the row owner's decoration pull.
+func (p *Projection) resolveRowKeys(src *projectionSource, data, parent any) ([]any, error) {
+	keys := make([]any, len(src.keyPaths))
+	for i, kp := range src.keyPaths {
+		v, err := resolveScopedPath(kp, data, parent)
+		if err != nil {
+			return nil, cluster.Permanent(fmt.Errorf("[projection.apply] keyPath [%s]: %w", kp, err))
+		}
+		keys[i] = stages.NormalizeKeyValue(src.normalize, coerceForColumn(v, p.columnType(p.config.PrimaryKey[i])))
+	}
+	return keys, nil
+}
+
+// applyRowFold matches src's rules against data and applies the matched
+// sets as one row upsert. data is the rule scope — the event payload for a
+// plain source, one array element for a forEach source (whose enclosing
+// event payload rides in parent for `$parent.` paths). Returns whether any
+// rule matched, so the caller owns the unmatched bookkeeping and forEach
+// counts only matched elements in its reconciliation set.
+// presetKeys, when non-nil, override key resolution entirely — a
+// stage-fed source's row key IS the stage's key (already resolved by the
+// fold; an aggregate stage's emit carries only folds, never the key).
+func (p *Projection) applyRowFold(ctx context.Context, tx *gosql.Tx, src *projectionSource, data, parent any, presetKeys []any) (bool, string, error) {
+	var matched []*projectionStmt
+	for _, r := range src.rules {
+		if stages.MatchScoped(r.rule.When, data, parent) {
+			matched = append(matched, r)
+		}
+	}
+	if len(matched) == 0 {
+		return false, "", nil
 	}
 
 	// Key resolution is deliberately lazy — after matching — so an
@@ -726,13 +1026,12 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 	// a dead letter. A matched event without a key is a permanent
 	// misconfiguration. One value per primaryKey column, positionally
 	// aligned, each coerced to its own column's declared type.
-	keys := make([]any, len(src.keyPaths))
-	for i, kp := range src.keyPaths {
-		v, err := jsonpath.Get(kp, jsonData)
-		if err != nil {
-			return cluster.Permanent(fmt.Errorf("[sql-projection.apply] keyPath [%s]: %w", kp, err))
+	keys := presetKeys
+	if keys == nil {
+		var err error
+		if keys, err = p.resolveRowKeys(src, data, parent); err != nil {
+			return true, "", err
 		}
-		keys[i] = coerceForColumn(v, p.columnType(p.config.PrimaryKey[i]))
 	}
 
 	for _, r := range matched {
@@ -743,9 +1042,23 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 		for _, s := range r.rule.Set {
 			switch {
 			case s.From != "":
-				v, err := jsonpath.Get(s.From, jsonData)
+				v, err := resolveScopedPath(s.From, data, parent)
 				if err != nil {
-					return cluster.Permanent(fmt.Errorf("[sql-projection.apply] jsonpath [%s]: %w", s.From, err))
+					return true, "", cluster.Permanent(fmt.Errorf("[projection.apply] jsonpath [%s]: %w", s.From, err))
+				}
+				plain[s.Column] = coerceForColumn(v, p.columnType(s.Column))
+			case s.Expr != "":
+				v, err := evalExpr(s.compiled, data, parent)
+				if err == nil {
+					if r, ok := v.(*big.Rat); ok {
+						var text string
+						if text, err = formatRat(r); err == nil {
+							v = json.Number(text)
+						}
+					}
+				}
+				if err != nil {
+					return true, "", cluster.Permanent(fmt.Errorf("[projection.apply] expr for column %q: %w", s.Column, err))
 				}
 				plain[s.Column] = coerceForColumn(v, p.columnType(s.Column))
 			case s.Null:
@@ -765,7 +1078,9 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 		// comes from the TYPED value, never the raw payload text (which could
 		// spell one value several ways).
 		values := make([]any, 0, len(r.rule.Set)+len(keys))
-		values = append(values, keys...)
+		if !src.updateOnly {
+			values = append(values, keys...)
+		}
 		for _, s := range r.rule.Set {
 			if s.IsEnrichment() {
 				values = append(values, canonicalKeyString(plain[s.On]))
@@ -773,15 +1088,29 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, src *project
 			}
 			values = append(values, plain[s.Column])
 		}
-		args := p.dialect.BindArgs(values)
+		// A decorator's UPDATE binds values-then-keys, each once —
+		// BindArgs is the upsert convention (MySQL doubles for its
+		// INSERT … ON DUPLICATE KEY form) and does not apply here.
+		args := values
+		if src.updateOnly {
+			args = append(args, keys...)
+		} else {
+			args = p.dialect.BindArgs(values)
+		}
 		if _, err := tx.StmtContext(ctx, r.Stmt).ExecContext(ctx, args...); err != nil {
 			// Same NUL hint as the plain sink's row apply: name the offending
 			// payload field(s) — names only, never values.
-			err = withNulFieldHint(err, p.dialect, jsonData)
-			return execFailure(fmt.Sprintf("[sql-projection.apply] exec [%s]", r.SQL), err, p.dialect.IsPermanent(err))
+			err = withNulFieldHint(err, p.dialect, data)
+			return true, "", execFailure(fmt.Sprintf("[projection.apply] exec [%s]", r.SQL), err, p.dialect.IsPermanent(err))
 		}
 	}
-	return nil
+	// The canonical single-column key rendering, for forEach's
+	// reconciliation set (composite-keyed folds return "" — no forEach).
+	rowKey := ""
+	if len(keys) == 1 {
+		rowKey = keyString(keys[0])
+	}
+	return true, rowKey, nil
 }
 
 // applyDelete honors a delete entity per its source's onDelete: ignore drops it;
@@ -811,14 +1140,14 @@ func (p *Projection) applyDelete(ctx context.Context, tx *gosql.Tx, src *project
 	}
 	if stmt == nil {
 		return cluster.Permanent(fmt.Errorf(
-			"[sql-projection.apply] cannot honor delete: no statement prepared (topic %q)",
+			"[projection.apply] cannot honor delete: no statement prepared (topic %q)",
 			src.topic))
 	}
 
 	n := len(p.config.PrimaryKey)
 	if n == 1 && cluster.IsCompositeEncoded(string(e.Key)) {
 		return cluster.Permanent(fmt.Errorf(
-			"[sql-projection.apply] delete tombstone carries a composite entity key; this projection keys by the single column %q and cannot address the row (topic %q) — the producer keys this topic by several columns; match the producer's key columns in primaryKey, or set onDelete = \"ignore\" if this fold deliberately collapses the composite identity",
+			"[projection.apply] delete tombstone carries a composite entity key; this projection keys by the single column %q and cannot address the row (topic %q) — the producer keys this topic by several columns; match the producer's key columns in primaryKey, or set onDelete = \"ignore\" if this fold deliberately collapses the composite identity",
 			p.config.PrimaryKey[0], src.topic))
 	}
 	keyVals, derr := cluster.DecodeCompositeKey(string(e.Key), n)
@@ -826,15 +1155,19 @@ func (p *Projection) applyDelete(ctx context.Context, tx *gosql.Tx, src *project
 		// DecodeCompositeKey reports parse reason and arity numbers only,
 		// never the key value.
 		return cluster.Permanent(fmt.Errorf(
-			"[sql-projection.apply] delete tombstone key does not decode for this projection's %d-column primaryKey (topic %q) — producer and projection key shapes disagree: %w",
+			"[projection.apply] delete tombstone key does not decode for this projection's %d-column primaryKey (topic %q) — producer and projection key shapes disagree: %w",
 			n, src.topic, derr))
 	}
 	args := make([]any, len(keyVals))
 	for i, v := range keyVals {
-		args[i] = v
+		// The tombstone carries the PRODUCER's key rendering; the rows
+		// were keyed through the source's normalize — bind through the
+		// same fold or an UPPERCASE tombstone silently misses the
+		// lowercased row (the worst outcome for an RTBF delete).
+		args[i] = stages.NormalizeKeyValue(src.normalize, v)
 	}
 	if _, err := tx.StmtContext(ctx, stmt).ExecContext(ctx, args...); err != nil {
-		return execFailure(fmt.Sprintf("[sql-projection.apply] exec [%s]", sqlStr), err, p.dialect.IsPermanent(err))
+		return execFailure(fmt.Sprintf("[projection.apply] exec [%s]", sqlStr), err, p.dialect.IsPermanent(err))
 	}
 	return nil
 }
@@ -854,11 +1187,11 @@ func (p *Projection) applyAggregate(ctx context.Context, tx *gosql.Tx, src *proj
 	// validation and the applyDefaults fill on the old error path (a
 	// Permanent misconfiguration) instead of an index panic.
 	if len(src.keyPaths) == 0 {
-		return cluster.Permanent(fmt.Errorf("[sql-projection.aggregate] no keyPath configured (topic %q)", src.topic))
+		return cluster.Permanent(fmt.Errorf("[projection.aggregate] no keyPath configured (topic %q)", src.topic))
 	}
 	parentKey, err := jsonpath.Get(src.keyPaths[0], jsonData)
 	if err != nil {
-		return cluster.Permanent(fmt.Errorf("[sql-projection.aggregate] keyPath [%s]: %w", src.keyPaths[0], err))
+		return cluster.Permanent(fmt.Errorf("[projection.aggregate] keyPath [%s]: %w", src.keyPaths[0], err))
 	}
 
 	// Capture the child's prior parent before the sidecar upsert overwrites it. A
@@ -872,19 +1205,19 @@ func (p *Projection) applyAggregate(ctx context.Context, tx *gosql.Tx, src *proj
 
 	elementKey, err := jsonpath.Get(ag.elementKey, jsonData)
 	if err != nil {
-		return cluster.Permanent(fmt.Errorf("[sql-projection.aggregate] elementKey [%s]: %w", ag.elementKey, err))
+		return cluster.Permanent(fmt.Errorf("[projection.aggregate] elementKey [%s]: %w", ag.elementKey, err))
 	}
 	element := make(map[string]any, len(ag.fields))
 	for _, f := range ag.fields {
 		v, err := jsonpath.Get(f.From, jsonData)
 		if err != nil {
-			return cluster.Permanent(fmt.Errorf("[sql-projection.aggregate] element field %q from [%s]: %w", f.Field, f.From, err))
+			return cluster.Permanent(fmt.Errorf("[projection.aggregate] element field %q from [%s]: %w", f.Field, f.From, err))
 		}
 		element[f.Field] = v
 	}
 	elementJSON, err := json.Marshal(element)
 	if err != nil {
-		return cluster.Permanent(fmt.Errorf("[sql-projection.aggregate] marshal element: %w", err))
+		return cluster.Permanent(fmt.Errorf("[projection.aggregate] marshal element: %w", err))
 	}
 
 	// Sidecar columns are text/JSON; bind the keys as strings (elementKey is
@@ -898,14 +1231,14 @@ func (p *Projection) applyAggregate(ctx context.Context, tx *gosql.Tx, src *proj
 	// Materialize the (new) parent's array from the sidecar. Both materialize
 	// placeholders bind the parent key (insert value + subquery filter); the
 	// dialect repeats the placeholder so the arg shape is uniform.
-	if err := p.aggExec(ctx, tx, ag.materialize, ag.materializeSQL, pk, pk); err != nil {
+	if err := p.aggExec(ctx, tx, ag.materialize, ag.materializeSQL, repeatArg(pk, ag.parentBinds)...); err != nil {
 		return err
 	}
 	// Re-parented: rebuild the old parent so its array drops the moved element.
 	// Mirrors removeFromAggregate — an UPDATE that no-ops if the old parent has no
 	// row, never a ghost. Skipped when the child is new or its parent is unchanged.
 	if hadOldParent && oldParent != keyString(parentKey) {
-		return p.aggExec(ctx, tx, ag.rebuild, ag.rebuildSQL, oldParent, oldParent)
+		return p.aggExec(ctx, tx, ag.rebuild, ag.rebuildSQL, repeatArg(oldParent, ag.parentBinds)...)
 	}
 	return nil
 }
@@ -930,7 +1263,377 @@ func (p *Projection) removeFromAggregate(ctx context.Context, tx *gosql.Tx, src 
 	if err := p.aggExec(ctx, tx, ag.deleteSidecar, ag.deleteSidecarSQL, childKey); err != nil {
 		return err
 	}
-	return p.aggExec(ctx, tx, ag.rebuild, ag.rebuildSQL, parentKey, parentKey)
+	return p.aggExec(ctx, tx, ag.rebuild, ag.rebuildSQL, repeatArg(parentKey, ag.parentBinds)...)
+}
+
+// initForEach creates one forEach source's reconciliation sidecar and
+// prepares its three statements. The sidecar reuses the aggregate sidecar
+// shape (child_key PK, parent_key indexed; element columns unused) so it
+// adds zero DDL surface; its name derives from the source topic, stable
+// across config edits that reorder sources.
+func (p *Projection) initForEach(si int, src ProjectionSource) (*forEachRuntime, error) {
+	where := fmt.Sprintf("source %d (topic %q) forEach", si+1, src.Topic)
+	sidecar := ForEachSidecarName(p.config.Table, src.Topic)
+
+	ddl := p.dialect.CreateAggregateSidecarDDL(AggregateSpec{
+		Table: p.config.Table, PrimaryKey: p.config.PrimaryKey[0], Sidecar: sidecar,
+	})
+	if _, err := p.db.ExecContext(p.initCtx, ddl); err != nil {
+		return nil, fmt.Errorf("%s sidecar ddl [%s]: %w", where, ddl, err)
+	}
+
+	rt := &forEachRuntime{sidecar: sidecar}
+	success := false
+	defer func() {
+		if !success {
+			rt.closeStmts()
+		}
+	}()
+	scConfig := sidecarConfig(sidecar)
+	prepare := func(label, sqlString string) (*gosql.Stmt, error) {
+		stmt, err := p.db.PrepareContext(p.initCtx, sqlString)
+		if err != nil {
+			return nil, fmt.Errorf("%s prepare %s [%s]: %w", where, label, sqlString, err)
+		}
+		return stmt, nil
+	}
+	var err error
+	rt.upsertSidecarSQL = p.dialect.CreateSQL(scConfig)
+	if rt.upsertSidecar, err = prepare("sidecar upsert", rt.upsertSidecarSQL); err != nil {
+		return nil, err
+	}
+	rt.deleteSidecarSQL = p.dialect.CreateDeleteSQL(scConfig)
+	if rt.deleteSidecar, err = prepare("sidecar delete", rt.deleteSidecarSQL); err != nil {
+		return nil, err
+	}
+	rt.childrenSQL = p.dialect.CreateForEachChildrenSQL(sidecar)
+	if rt.children, err = prepare("children", rt.childrenSQL); err != nil {
+		return nil, err
+	}
+	success = true
+	return rt, nil
+}
+
+// applyForEach folds one event through a forEach source: each element of
+// the (deliberately multi-valued) forEach path folds as its own row via the
+// source's rules, and the reconciliation sidecar records which rows this
+// parent currently fans — rows for vanished elements are deleted, so a
+// re-emitted parent converges absolutely (replay-safe, like every other
+// projection write). An event whose forEach path is absent or not an array
+// fans zero elements, which reconciles all of the parent's prior rows away.
+func (p *Projection) applyForEach(ctx context.Context, tx *gosql.Tx, src *projectionSource, jsonData any, e *cluster.Entity) error {
+	parentKey := string(e.Key)
+
+	prior, err := p.forEachChildren(ctx, tx, src.fe, parentKey)
+	if err != nil {
+		return err
+	}
+
+	var elems []any
+	miss := stages.FanMiss(src.forEach, jsonData, &elems)
+	if miss != "" {
+		// The stage engine's foldFan has the same guard — see its comment
+		// for the field case (a serialized-JSON string column fanning zero
+		// elements, silently, for a whole replay). An empty array is a
+		// healthy resolution and resets the run.
+		src.fanNonArrayRun++
+		if src.fanNonArrayRun == projectionUnmatchedWarnRun {
+			zap.L().Warn("[projection.forEach] path has not resolved to an array for a long run of events — this source is fanning ZERO rows; if the field is a serialized-JSON column at the source, decode it at ingest (jsonColumns) so the path reaches a real array",
+				zap.String("syncable", p.name),
+				zap.String("topic", src.topic),
+				zap.String("forEach", src.forEach),
+				zap.String("value_type", miss),
+				zap.Int("consecutive_misses", src.fanNonArrayRun))
+		}
+	} else {
+		src.fanNonArrayRun = 0
+	}
+
+	current := make(map[string]bool, len(elems))
+	for i, el := range elems {
+		matched, key, err := p.applyRowFold(ctx, tx, src, el, jsonData, nil)
+		if err != nil {
+			return fmt.Errorf("[projection.forEach] element %d: %w", i+1, err)
+		}
+		if !matched || key == "" || current[key] {
+			continue
+		}
+		current[key] = true
+		// The sidecar row: fanned row key, parent entity key; the aggregate
+		// shape's element columns ride along unused ("" sort key, {} object).
+		scValues := []any{key, parentKey, "", "{}"}
+		if err := p.aggExec(ctx, tx, src.fe.upsertSidecar, src.fe.upsertSidecarSQL, p.dialect.BindArgs(scValues)...); err != nil {
+			return err
+		}
+	}
+
+	for _, child := range prior {
+		if current[child] {
+			continue
+		}
+		if err := p.forEachDeleteRow(ctx, tx, child); err != nil {
+			return err
+		}
+		if err := p.aggExec(ctx, tx, src.fe.deleteSidecar, src.fe.deleteSidecarSQL, child); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// cascadeForEachDelete honors a parent tombstone for a forEach source
+// (onDelete = "delete-rows"): every row the parent fanned out is deleted,
+// found via the reconciliation sidecar (the tombstone carries only the
+// parent entity key).
+func (p *Projection) cascadeForEachDelete(ctx context.Context, tx *gosql.Tx, src *projectionSource, e *cluster.Entity) error {
+	children, err := p.forEachChildren(ctx, tx, src.fe, string(e.Key))
+	if err != nil {
+		return err
+	}
+	for _, child := range children {
+		if err := p.forEachDeleteRow(ctx, tx, child); err != nil {
+			return err
+		}
+		if err := p.aggExec(ctx, tx, src.fe.deleteSidecar, src.fe.deleteSidecarSQL, child); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// forEachChildren lists the fanned row keys currently recorded for one
+// parent in the reconciliation sidecar.
+func (p *Projection) forEachChildren(ctx context.Context, tx *gosql.Tx, fe *forEachRuntime, parentKey string) ([]string, error) {
+	rows, err := tx.StmtContext(ctx, fe.children).QueryContext(ctx, parentKey)
+	if err != nil {
+		return nil, execFailure(fmt.Sprintf("[projection.forEach] exec [%s]", fe.childrenSQL), err, p.dialect.IsPermanent(err))
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			return nil, execFailure(fmt.Sprintf("[projection.forEach] scan [%s]", fe.childrenSQL), err, p.dialect.IsPermanent(err))
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
+// forEachDeleteRow removes one fanned row by its key through the
+// projection's shared delete statement.
+func (p *Projection) forEachDeleteRow(ctx context.Context, tx *gosql.Tx, childKey string) error {
+	if _, err := tx.StmtContext(ctx, p.delete.Stmt).ExecContext(ctx, childKey); err != nil {
+		return execFailure(fmt.Sprintf("[projection.forEach] exec [%s]", p.delete.SQL), err, p.dialect.IsPermanent(err))
+	}
+	return nil
+}
+
+// foldStagesTx folds one Actual's entities through the stage graph
+// inside the CALLER's store transaction, routing each stage's deltas to
+// the table sources consuming it (applied on the surrounding SQL
+// transaction). The frontier advances atomically with the fold; the
+// caller sequences the SQL commit BEFORE the store commit (see Sync).
+func (p *Projection) foldStagesTx(ctx context.Context, tx *gosql.Tx, stx *stagestore.Tx, a *cluster.Actual) error {
+	p.stages.OnDelta = func(stage string, outKey []byte, obj any, live bool) error {
+		for _, src := range p.stageSinks[stage] {
+			if err := p.applyStageDelta(ctx, tx, stx, src, outKey, obj, live); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	defer func() { p.stages.OnDelta = nil }()
+	return p.foldEntitiesTx(stx, a)
+}
+
+// StageStats implements cluster.StageIntrospector: each declared stage's
+// current out-key count (store truth) plus its in-memory flow counters.
+func (p *Projection) StageStats() (map[string]cluster.StageStat, error) {
+	if p.stages == nil {
+		return nil, nil
+	}
+	flows := p.stages.FlowCounts()
+	out := make(map[string]cluster.StageStat, len(p.config.Stages))
+	err := p.stageStore.View(func(tx *stagestore.Tx) error {
+		for i := range p.config.Stages {
+			name := p.config.Stages[i].Name
+			n, err := tx.OutKeyCount(name)
+			if err != nil {
+				return err
+			}
+			fc := flows[name]
+			out[name] = cluster.StageStat{Keys: n, Inputs: fc.Inputs, Fanned: fc.Fanned, UnkeyedDeletes: fc.UnkeyedDeletes, Joins: joinStats(fc.Joins)}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// StageKeyExists implements cluster.StageIntrospector: the key-space
+// owner renders the caller's parts — per-part normalize (the stage's
+// declaration), then the composite encoding — so a probe can only miss
+// when the key is genuinely absent, never because the caller
+// misreproduced the stored bytes.
+func (p *Projection) StageKeyExists(stage string, keyParts []string) (bool, error) {
+	if p.stages == nil {
+		return false, nil
+	}
+	idx := -1
+	for i := range p.config.Stages {
+		if p.config.Stages[i].Name == stage {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return false, fmt.Errorf("stage %q is not declared by this projection", stage)
+	}
+	// The key-space owner renders through ProbeKey — the RESOLVED space,
+	// so probing a merge stage renders in its inherited arity/keyType/
+	// normalize rather than the merge's own empty declarations.
+	key, ok, err := stages.ProbeKey(p.config.Stages, idx, keyParts)
+	if err != nil || !ok {
+		return false, err
+	}
+	var exists bool
+	err = p.stageStore.View(func(tx *stagestore.Tx) error {
+		v, err := tx.GetOut(stage, []byte(key))
+		exists = v != nil
+		return err
+	})
+	return exists, err
+}
+
+// StageFrontier implements cluster.StageRecoverer.
+func (p *Projection) StageFrontier() (uint64, bool, error) {
+	if p.stages == nil {
+		return 0, false, nil
+	}
+	f, err := p.stageStore.Frontier()
+	return f, true, err
+}
+
+// FoldStagesOnly implements cluster.StageRecoverer: fold one Actual into
+// stage state with sink emission suppressed (OnDelta stays nil) — the
+// recovery pass below the checkpoint, where every output is already
+// durably applied.
+func (p *Projection) FoldStagesOnly(a *cluster.Actual) error {
+	return p.stageStore.Update(func(stx *stagestore.Tx) error {
+		return p.foldEntitiesTx(stx, a)
+	})
+}
+
+// foldEntitiesTx folds one Actual's entities and advances the frontier —
+// shared by the emitting path (foldStagesTx, OnDelta set) and the
+// recovery path (FoldStagesOnly, OnDelta nil).
+func (p *Projection) foldEntitiesTx(stx *stagestore.Tx, a *cluster.Actual) error {
+	if err := p.stages.FoldActual(stx, a); err != nil {
+		return err
+	}
+	return stx.SetFrontier(a.Index)
+}
+
+// applyStageDelta lands one stage delta on a table source: an upsert folds
+// through the source's rules exactly as a topic entity would (the stage
+// object is the payload); a retraction — the stage's key going away OR a
+// live delta that stops matching the source's when — retracts this
+// source's contribution per onDelete (row, clear, or ignore). A
+// row-owning source's upsert additionally pulls every decorator's
+// retained stage output for the key (see pullDecorations).
+func (p *Projection) applyStageDelta(ctx context.Context, tx *gosql.Tx, stx *stagestore.Tx, src *projectionSource, outKey []byte, obj any, live bool) error {
+	// The stage's key IS the row key: one part verbatim, several through
+	// the composite encoding (arity validated at admission).
+	nKeys := len(p.config.PrimaryKey)
+	keyVals := []string{string(outKey)}
+	if nKeys > 1 {
+		decoded, err := cluster.DecodeCompositeKey(string(outKey), nKeys)
+		if err != nil {
+			return cluster.Permanent(fmt.Errorf("[projection.stage] stage key does not decode for this table's %d-column primaryKey: %w", nKeys, err))
+		}
+		keyVals = decoded
+	}
+	// A live delta failing the when is a retraction, not a skip: the key
+	// no longer participates, and admit-without-retract leaves permanently
+	// stale rows once a predicate flips off.
+	if live && !matchWhen(src.when, obj) {
+		live = false
+	}
+	if !live {
+		switch src.onDelete {
+		case onDeleteIgnore:
+			return nil
+		case onDeleteClear:
+			args := make([]any, len(keyVals))
+			for i, v := range keyVals {
+				args[i] = v
+			}
+			if _, err := tx.StmtContext(ctx, src.clear).ExecContext(ctx, args...); err != nil {
+				return execFailure(fmt.Sprintf("[projection.stage] exec [%s]", src.clearSQL), err, p.dialect.IsPermanent(err))
+			}
+			return nil
+		}
+		args := make([]any, len(keyVals))
+		for i, v := range keyVals {
+			args[i] = v
+		}
+		if _, err := tx.StmtContext(ctx, p.delete.Stmt).ExecContext(ctx, args...); err != nil {
+			return execFailure(fmt.Sprintf("[projection.stage] exec [%s]", p.delete.SQL), err, p.dialect.IsPermanent(err))
+		}
+		return nil
+	}
+	keys := make([]any, nKeys)
+	for i, v := range keyVals {
+		keys[i] = coerceForColumn(v, p.columnType(p.config.PrimaryKey[i]))
+	}
+	if _, _, err := p.applyRowFold(ctx, tx, src, obj, nil, keys); err != nil {
+		return err
+	}
+	if src.rowOwner {
+		return p.pullDecorations(ctx, tx, stx, keys)
+	}
+	return nil
+}
+
+// pullDecorations lands every decorator's retained stage output on a row
+// the row owner just wrote. The stage store is a decoration's retention:
+// its deltas are byte-suppressed against the store, so after the owner
+// deletes and re-admits a row (or admits it for the first time AFTER the
+// decoration fired) the decorator stays silent — the owner's write must
+// pull the current outputs itself. Idempotent: decorators are update-only
+// and re-applying the same object converges.
+func (p *Projection) pullDecorations(ctx context.Context, tx *gosql.Tx, stx *stagestore.Tx, keys []any) error {
+	if stx == nil || len(p.decorators) == 0 {
+		return nil
+	}
+	parts := make([]string, len(keys))
+	for i, k := range keys {
+		parts[i] = stages.CanonicalKeyPart(k)
+	}
+	outKey := []byte(stages.OutKey(parts))
+	for _, d := range p.decorators {
+		out, err := stx.GetOut(d.fromStage, outKey)
+		if err != nil {
+			return err
+		}
+		if out == nil {
+			continue
+		}
+		obj, err := stages.DecodeObject(out)
+		if err != nil {
+			return cluster.Permanent(fmt.Errorf("[projection.stage] decode retained output of stage %q: %w", d.fromStage, err))
+		}
+		if !matchWhen(d.when, obj) {
+			continue
+		}
+		if _, _, err := p.applyRowFold(ctx, tx, d, obj, nil, keys); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // aggPriorParent returns the parent key currently recorded for childKey in the
@@ -952,15 +1655,25 @@ func (p *Projection) aggPriorParent(ctx context.Context, tx *gosql.Tx, ag *aggre
 		// the sibling exec sites — otherwise the raw text lands in the replicated
 		// dead-letter + stuck status.
 		return "", false, execFailure(
-			fmt.Sprintf("[sql-projection.aggregate] exec [%s]", ag.lookupSQL), err, p.dialect.IsPermanent(err))
+			fmt.Sprintf("[projection.aggregate] exec [%s]", ag.lookupSQL), err, p.dialect.IsPermanent(err))
 	}
+}
+
+// repeatArg binds one value to n placeholders — the aggregate materialize
+// and rebuild statements repeat the parent key once per value column.
+func repeatArg(v any, n int) []any {
+	out := make([]any, n)
+	for i := range out {
+		out[i] = v
+	}
+	return out
 }
 
 // aggExec runs one prepared aggregate statement, classifying a permanent error
 // the same way the rule path does.
 func (p *Projection) aggExec(ctx context.Context, tx *gosql.Tx, stmt *gosql.Stmt, sqlStr string, args ...any) error {
 	if _, err := tx.StmtContext(ctx, stmt).ExecContext(ctx, args...); err != nil {
-		return execFailure(fmt.Sprintf("[sql-projection.aggregate] exec [%s]", sqlStr), err, p.dialect.IsPermanent(err))
+		return execFailure(fmt.Sprintf("[projection.aggregate] exec [%s]", sqlStr), err, p.dialect.IsPermanent(err))
 	}
 	return nil
 }
@@ -976,13 +1689,13 @@ func (p *Projection) applyLookup(ctx context.Context, tx *gosql.Tx, src *project
 	for _, f := range lk.fields {
 		v, err := jsonpath.Get(f.From, jsonData)
 		if err != nil {
-			return cluster.Permanent(fmt.Errorf("[sql-projection.lookup] field %q from [%s]: %w", f.Field, f.From, err))
+			return cluster.Permanent(fmt.Errorf("[projection.lookup] field %q from [%s]: %w", f.Field, f.From, err))
 		}
 		fields[f.Field] = v
 	}
 	fieldsJSON, err := json.Marshal(fields)
 	if err != nil {
-		return cluster.Permanent(fmt.Errorf("[sql-projection.lookup] marshal fields: %w", err))
+		return cluster.Permanent(fmt.Errorf("[projection.lookup] marshal fields: %w", err))
 	}
 
 	// The dimension key is the entity's own Key — the value aggregate elements
@@ -1008,7 +1721,7 @@ func (p *Projection) spineFanOut(ctx context.Context, tx *gosql.Tx, lk *lookupRu
 	for _, dep := range lk.spineDeps {
 		onKey, ok := coerceKeyForColumn(dimKey, dep.onColType)
 		if !ok {
-			zap.L().Debug("[sql-projection.lookup] dimension key does not fit the on column's type; no row can reference it — skipping spine fan-out",
+			zap.L().Debug("[projection.lookup] dimension key does not fit the on column's type; no row can reference it — skipping spine fan-out",
 				zap.String("column", dep.column))
 			continue
 		}
@@ -1017,7 +1730,7 @@ func (p *Projection) spineFanOut(ctx context.Context, tx *gosql.Tx, lk *lookupRu
 			val = coerceForColumn(fields[dep.selectFld], dep.colType)
 		}
 		if _, err := tx.StmtContext(ctx, dep.update).ExecContext(ctx, val, onKey); err != nil {
-			return execFailure(fmt.Sprintf("[sql-projection.lookup] exec [%s]", dep.updateSQL), err, p.dialect.IsPermanent(err))
+			return execFailure(fmt.Sprintf("[projection.lookup] exec [%s]", dep.updateSQL), err, p.dialect.IsPermanent(err))
 		}
 	}
 	return nil
@@ -1084,25 +1797,25 @@ func (p *Projection) fanOut(ctx context.Context, tx *gosql.Tx, lk *lookupRuntime
 		rows, err := tx.StmtContext(ctx, dep.affected).QueryContext(ctx, dimKey)
 		if err != nil {
 			return execFailure(
-				fmt.Sprintf("[sql-projection.lookup] exec [%s]", dep.affectedSQL), err, p.dialect.IsPermanent(err))
+				fmt.Sprintf("[projection.lookup] exec [%s]", dep.affectedSQL), err, p.dialect.IsPermanent(err))
 		}
 		var parents []string
 		for rows.Next() {
 			var pk string
 			if err := rows.Scan(&pk); err != nil {
 				_ = rows.Close()
-				return execFailure("[sql-projection.lookup] scan affected parent", err, p.dialect.IsPermanent(err))
+				return execFailure("[projection.lookup] scan affected parent", err, p.dialect.IsPermanent(err))
 			}
 			parents = append(parents, pk)
 		}
 		if err := rows.Err(); err != nil {
 			_ = rows.Close()
-			return execFailure("[sql-projection.lookup] affected parents", err, p.dialect.IsPermanent(err))
+			return execFailure("[projection.lookup] affected parents", err, p.dialect.IsPermanent(err))
 		}
 		_ = rows.Close()
 
 		for _, pk := range parents {
-			if err := p.aggExec(ctx, tx, dep.rebuild, dep.rebuildSQL, pk, pk); err != nil {
+			if err := p.aggExec(ctx, tx, dep.rebuild, dep.rebuildSQL, repeatArg(pk, dep.parentBinds)...); err != nil {
 				return err
 			}
 		}
@@ -1121,12 +1834,22 @@ func (p *Projection) Close() error {
 			}
 		}
 	}
+	if p.stageStore != nil {
+		if cerr := p.stageStore.Close(); err == nil {
+			err = cerr
+		}
+	}
 	for _, list := range p.sources {
 		for _, src := range list {
 			for _, r := range src.rules {
 				closeStmt(r.Stmt)
 			}
 			closeStmt(src.clear)
+			if src.fe != nil {
+				closeStmt(src.fe.upsertSidecar)
+				closeStmt(src.fe.deleteSidecar)
+				closeStmt(src.fe.children)
+			}
 			if src.agg != nil {
 				closeStmt(src.agg.upsertSidecar)
 				closeStmt(src.agg.deleteSidecar)

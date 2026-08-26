@@ -205,11 +205,12 @@ func (h *HTTP) GetPipelineStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 
 // topicsOf extracts the topic(s) a stored config references. kind is the config
 // kind ("ingestable" or "syncable"); the config's type lives at {kind}.type and
-// its topic at {type}.topic (sql → sql.topic, http → http.topic, sql-projection
-// → sql-projection.topic). A multi-source sql-projection lists its topics in
-// [[sql-projection.source]] blocks, so those are included too. Returns nil if
-// the config can't be parsed — a degraded config drops out of the linkage rather
-// than erroring the whole view.
+// its topic at {type}.topic (sql → sql.topic, http → http.topic, projection
+// → projection.topic — the section always follows the type spelling, so the
+// deprecated "sql-projection" reads [sql-projection]). A multi-source
+// projection lists its topics in [[{type}.source]] blocks, so those are
+// included too. Returns nil if the config can't be parsed — a degraded config
+// drops out of the linkage rather than erroring the whole view.
 func topicsOf(c *cluster.Configuration, kind string) []string {
 	v, err := cluster.ParseConfigBytes(c.MimeType, c.Data)
 	if err != nil {
@@ -236,15 +237,15 @@ func topicsOf(c *cluster.Configuration, kind string) []string {
 	var multiTopics []struct {
 		Topic string `mapstructure:"topic"`
 	}
-	_ = v.UnmarshalKey(typ+".topics", &multiTopics)
+	_ = v.UnmarshalKeyLenient(typ+".topics", &multiTopics) // deliberate partial decode: topic peek
 	for _, s := range multiTopics {
 		add(s.Topic)
 	}
-	if typ == "sql-projection" {
+	if typ == "projection" || typ == "sql-projection" {
 		var srcs []struct {
 			Topic string `mapstructure:"topic"`
 		}
-		_ = v.UnmarshalKey("sql-projection.source", &srcs)
+		_ = v.UnmarshalKeyLenient(typ+".source", &srcs) // deliberate partial decode: topic peek
 		for _, s := range srcs {
 			add(s.Topic)
 		}

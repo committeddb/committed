@@ -69,11 +69,9 @@ func TestMembership_RemoveNode(t *testing.T) {
 	victim := rafts.FollowerRaft()
 	victimID := victim.id
 
-	leader.submitConfChange(removeNodeCC(victimID))
-
 	// The leader (and the other survivor) settle on a config without the
 	// victim, with the joint transition complete.
-	waitForMembership(t, leader, map[uint64]bool{victimID: false})
+	removeNodeAndWait(t, leader, leader, victimID, map[uint64]bool{victimID: false})
 
 	// The surviving two-node cluster still reaches quorum and commits.
 	proposeAndCheck(t, leader, "after-removal")
@@ -174,8 +172,11 @@ func TestMembership_AddNodePersistsPeerURL(t *testing.T) {
 
 	// Removing node 4 deletes its durable URL everywhere, so a later restart's
 	// reconcile can't re-add a member that is gone.
-	leader.submitConfChange(removeNodeCC(4))
-	waitForMembership(t, leader, map[uint64]bool{1: true, 2: true, 3: true})
+	// `4: false` is load-bearing: a present-only want matches the PRE-remove
+	// config {1,2,3,4} vacuously, so a dropped remove would sail through
+	// here and surface 30 seconds later as the URL check's timeout (the
+	// CI-observed failure shape).
+	removeNodeAndWait(t, leader, leader, 4, map[uint64]bool{1: true, 2: true, 3: true, 4: false})
 
 	for _, r := range rafts {
 		if r.id == 4 {

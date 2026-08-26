@@ -269,6 +269,45 @@ type Teardownable interface {
 	Teardown() error
 }
 
+// SyncableUnwrapper is implemented by decorating wrappers (the
+// always-current migration wrapper) to expose the syncable they wrap, so
+// capability interfaces survive wrapping WITHOUT each wrapper
+// hand-forwarding each interface. The class bug this kills: the wrapper
+// forwarded Sync/Close (and hand-forwarded CheckpointPolicy, with a
+// comment explaining the loss) but masked Teardownable — so every
+// always-current syncable silently lost destination teardown on DELETE
+// and rebuild, and each future wrapper × interface pair would re-open
+// the hole.
+type SyncableUnwrapper interface {
+	Unwrap() Syncable
+}
+
+// SyncableAs resolves capability interface T against s, walking the
+// Unwrap chain outermost-first (a wrapper's own implementation wins, so
+// deliberate decoration like the migration wrapper's CheckpointPolicy
+// forward keeps its semantics).
+//
+// Use it ONLY for lifecycle/capability interfaces (Teardownable,
+// CheckpointConfigurable) whose calls don't traverse the wrapper's data
+// path. DATA-PATH interfaces — BatchSyncable — must NEVER be resolved
+// through the chain: calling an inner SyncBatch directly would bypass
+// the wrapper's Sync semantics. The wrapper decides its own batchness
+// (see migration.Wrap's two-type split).
+func SyncableAs[T any](s Syncable) (T, bool) {
+	for s != nil {
+		if t, ok := any(s).(T); ok {
+			return t, true
+		}
+		u, ok := s.(SyncableUnwrapper)
+		if !ok {
+			break
+		}
+		s = u.Unwrap()
+	}
+	var zero T
+	return zero, false
+}
+
 // SyncableSchemaComparable is a config's materialized destination schema, produced
 // config-alone by SyncableSchemaExtractor.SchemaFromConfig (no database
 // resolution). The config-change guard compares the two configs of a re-POST with
@@ -448,7 +487,78 @@ func ParseCheckpointPolicy(v *ParsedConfig) (CheckpointPolicy, error) {
 
 // SyncableParser parses a config document into a Syncable
 //
+// StageIntrospector is the optional Syncable extension that reports the
+// node-local stage store's shape: each declared stage's current output
+// key count. The observability half of the silent-empty-stage class —
+// "how many keys does billed-pairs hold?" is the one question that
+// instantly splits fan-produced-nothing from join-never-matched, and
+// the field triage had no way to ask it. Owner-local by construction
+// (the store lives with the worker); the HTTP status endpoint proxies.
+type StageIntrospector interface {
+	StageStats() (map[string]StageStat, error)
+	// StageKeyExists reports whether the named stage currently holds an
+	// output at the key whose PARTS are given in keyPath order. The
+	// key-space owner renders them: it applies the stage's declared
+	// normalize (case folding is safe on text and can only fix a read,
+	// never corrupt one) and composes the composite encoding itself —
+	// the caller supplies values in their own vocabulary and can no
+	// longer misreproduce the stored bytes into a FALSE ABSENCE. Digits
+	// stay a caller obligation (canonical form: 5, not 5.0000) — a text
+	// part is never re-parsed as a number, so "007" probes text-keyed
+	// stages exactly. An undeclared stage name or a part-count mismatch
+	// is an error, never "absent".
+	StageKeyExists(stage string, keyParts []string) (bool, error)
+}
+
+// StageStat is one stage's introspection row. Keys is the store truth
+// (current output keys). The counters are in-memory since this worker
+// started — not replicated, reset on restart — and together they split
+// every silent-empty state at a glance: Inputs 0 = the stage's log region hasn't been reached;
+// Inputs > 0 with Fanned 0 (forEach stages) = the fan finds no array
+// (the serialized-JSON trap); Fanned > 0 (or Inputs > 0, for plain
+// stages) with Keys 0 = the when/joins rejected everything — the
+// field's b6-vs-b7 discriminator, where a per-ELEMENT when referencing
+// parent fields without $parent held a stage at zero silently.
+type StageStat struct {
+	Keys   int   `json:"keys"`
+	Inputs int64 `json:"inputs"`
+	// Fanned counts elements produced by a forEach stage's fan (omitted
+	// for plain stages).
+	Fanned int64 `json:"fanned,omitempty"`
+	// UnkeyedDeletes counts delete-shaped inputs whose key could not
+	// resolve or render — LOST RETRACTIONS: the key each meant to kill
+	// stays live. Nonzero answers "the delete event arrived but the key
+	// is still live" in one read. Omitted while zero.
+	UnkeyedDeletes int64 `json:"unkeyedDeletes,omitempty"`
+	// Joins are per-join resolution counters (hits/misses since the
+	// worker started) — "the join never resolved" as a number instead
+	// of a replay-diff hunt. Omitted for stages without joins.
+	Joins []JoinStat `json:"joins,omitempty"`
+}
+
+// StageRecoverer is implemented by syncables carrying NODE-LOCAL stage
+// state (the stage store) that must be re-derived before consuming from
+// the replicated checkpoint. The store can be behind the checkpoint two
+// ways — an ownership move to a node without it (cold takeover), or a
+// crash losing the NoSync tail — and in both, folding forward from the
+// checkpoint alone would silently produce incomplete aggregates. The
+// worker closes the gap first: it replays (frontier, checkpoint] through
+// FoldStagesOnly — folds WITHOUT sink emission, the design's
+// "fold silently below C, emit after" — then consumes normally.
+// Resolved through the Unwrap chain (SyncableAs), so mode wrappers
+// forward it.
+//
 //counterfeiter:generate . SyncableParser
+type StageRecoverer interface {
+	// StageFrontier reports the highest log index folded into the local
+	// stage state, and whether this syncable carries stage state at all.
+	StageFrontier() (uint64, bool, error)
+	// FoldStagesOnly folds one Actual into stage state with sink emission
+	// suppressed (everything at or below the checkpoint is already
+	// durably applied).
+	FoldStagesOnly(a *Actual) error
+}
+
 type SyncableParser interface {
 	Parse(c *ParsedConfig, s DatabaseStorage) (Syncable, error)
 }

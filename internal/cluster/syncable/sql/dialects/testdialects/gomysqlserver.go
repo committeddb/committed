@@ -55,6 +55,14 @@ func (d *GoMySQLServerDialect) CreateDeleteSQL(config *sql.Config) string {
 	return (&dialects.MySQLDialect{}).CreateDeleteSQL(config)
 }
 
+func (d *GoMySQLServerDialect) CreateEnrichedUpdateSQL(config *sql.Config, enrich map[string]sql.SpineEnrichment) string {
+	return (&dialects.MySQLDialect{}).CreateEnrichedUpdateSQL(config, enrich)
+}
+
+func (d *GoMySQLServerDialect) CreateUpdateSQL(config *sql.Config) string {
+	return (&dialects.MySQLDialect{}).CreateUpdateSQL(config)
+}
+
 func (d *GoMySQLServerDialect) CreateClearSQL(config *sql.Config, columns []string) string {
 	return (&dialects.MySQLDialect{}).CreateClearSQL(config, columns)
 }
@@ -69,6 +77,10 @@ func (d *GoMySQLServerDialect) CreateAggregateMaterializeSQL(spec sql.AggregateS
 
 func (d *GoMySQLServerDialect) CreateAggregateRebuildSQL(spec sql.AggregateSpec) string {
 	return (&dialects.MySQLDialect{}).CreateAggregateRebuildSQL(spec)
+}
+
+func (d *GoMySQLServerDialect) CreateForEachChildrenSQL(sidecar string) string {
+	return (&dialects.MySQLDialect{}).CreateForEachChildrenSQL(sidecar)
 }
 
 func (d *GoMySQLServerDialect) CreateAggregateParentLookupSQL(spec sql.AggregateSpec) string {

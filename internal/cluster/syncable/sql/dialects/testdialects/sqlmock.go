@@ -45,6 +45,16 @@ func (d *SQLMockDialect) CreateDeleteSQL(c *sql.Config) string {
 	return (&dialects.MySQLDialect{}).CreateDeleteSQL(c)
 }
 
+// CreateEnrichedUpdateSQL implements Dialect, mirroring MySQL.
+func (d *SQLMockDialect) CreateEnrichedUpdateSQL(c *sql.Config, enrich map[string]sql.SpineEnrichment) string {
+	return (&dialects.MySQLDialect{}).CreateEnrichedUpdateSQL(c, enrich)
+}
+
+// CreateUpdateSQL implements Dialect, mirroring MySQL's ? placeholder.
+func (d *SQLMockDialect) CreateUpdateSQL(c *sql.Config) string {
+	return (&dialects.MySQLDialect{}).CreateUpdateSQL(c)
+}
+
 // CreateClearSQL implements Dialect, mirroring MySQL's ? placeholder.
 func (d *SQLMockDialect) CreateClearSQL(c *sql.Config, columns []string) string {
 	return (&dialects.MySQLDialect{}).CreateClearSQL(c, columns)
@@ -63,6 +73,10 @@ func (d *SQLMockDialect) CreateAggregateMaterializeSQL(spec sql.AggregateSpec) s
 
 func (d *SQLMockDialect) CreateAggregateRebuildSQL(spec sql.AggregateSpec) string {
 	return (&dialects.MySQLDialect{}).CreateAggregateRebuildSQL(spec)
+}
+
+func (d *SQLMockDialect) CreateForEachChildrenSQL(sidecar string) string {
+	return (&dialects.MySQLDialect{}).CreateForEachChildrenSQL(sidecar)
 }
 
 func (d *SQLMockDialect) CreateAggregateParentLookupSQL(spec sql.AggregateSpec) string {

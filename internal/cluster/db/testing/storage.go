@@ -183,6 +183,11 @@ func (ms *MemoryStorage) Reader(id string) db.ActualReader {
 	return &Reader{index: i, s: ms}
 }
 
+// ReaderAt reads from an arbitrary index — the dry-run window sampler.
+func (ms *MemoryStorage) ReaderAt(index uint64) db.ActualReader {
+	return &Reader{index: index, s: ms}
+}
+
 func (ms *MemoryStorage) Position(id string) cluster.Position {
 	return nil
 }

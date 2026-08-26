@@ -45,6 +45,24 @@ func createDeleteSQL(config *sql.Config, mkPlaceholder func(i int) string, q sql
 // the clear shape stays identical across dialects. An UPDATE, not an upsert,
 // so clearing an absent row is a no-op. Table and every SET/WHERE column are
 // config identifiers quoted by q.
+// createUpdateSQL builds a decorator rule's update-only apply (see
+// Dialect.CreateUpdateSQL): the config is a ruleConfig, so its leading
+// len(PrimaryKey) mappings ARE the key columns — skipped positionally, not
+// by name, so the placeholder count always matches the rule's set values.
+func createUpdateSQL(config *sql.Config, mkPlaceholder func(i int) string, q sqlident.Quoter) string {
+	sets := config.Mappings[len(config.PrimaryKey):]
+	var b strings.Builder
+	fmt.Fprintf(&b, "UPDATE %s SET ", q.Table(config.Table))
+	for i, m := range sets {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		fmt.Fprintf(&b, "%s=%s", q.Ident(m.Column), mkPlaceholder(i))
+	}
+	fmt.Fprintf(&b, " WHERE %s", keyWhere(config.PrimaryKey, func(i int) string { return mkPlaceholder(len(sets) + i) }, q))
+	return b.String()
+}
+
 func createClearSQL(config *sql.Config, columns []string, mkPlaceholder func(i int) string, q sqlident.Quoter) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "UPDATE %s SET ", q.Table(config.Table))
