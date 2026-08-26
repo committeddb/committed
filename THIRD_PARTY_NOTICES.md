@@ -6562,7 +6562,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ```
 
-## google.golang.org/protobuf v1.36.11
+## google.golang.org/protobuf v1.36.12
 
 ```
 Copyright (c) 2018 The Go Authors. All rights reserved.
