@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -320,6 +321,7 @@ type Emit struct {
 // behind wiring.
 func ValidateShapes(stages []Stage) error {
 	names := make(map[string]bool, len(stages))
+	emitSets := map[string]map[string]bool{}
 	for i := range stages {
 		st := &stages[i]
 		where := fmt.Sprintf("stage %d (%q)", i+1, st.Name)
@@ -549,6 +551,14 @@ func ValidateShapes(stages []Stage) error {
 				return err
 			}
 		}
+		if err := rejectUnemittedFieldPaths(stages, st, emitSets, where); err != nil {
+			return err
+		}
+		fields := make(map[string]bool, len(st.Emit))
+		for k := range st.Emit {
+			fields[st.Emit[k].Field] = true
+		}
+		emitSets[st.Name] = fields
 		if len(st.Emit) == 0 {
 			return fmt.Errorf("%s: emit needs at least one field", where)
 		}
@@ -733,6 +743,199 @@ func mergeSideName(e *MergeEntry) string {
 		return e.Topic
 	}
 	return e.Stage
+}
+
+// rejectUnemittedFieldPaths is the declared-shape guard: the language
+// has TWO object kinds — dynamic-shape topic payloads, where
+// missing-field-is-null is correct SQL semantics, and DECLARED-shape
+// stage emits, where consistency is provable at admission. A consumer
+// path into a stage-produced object whose first field segment the
+// producer never emits can never resolve; it must reject loudly here,
+// not scope null silently (the field bug: $.s10w.cdate against a
+// producer emitting only {job} — null on 5,983 rows, found by replay
+// diff instead of this message). Only the FIRST segment is checkable
+// (emitted values may be copied subtrees); bare alias paths (presence
+// tests) claim no field; topic sides/joins and topic lifts stay
+// dynamic; $parent is scope, not shape.
+func rejectUnemittedFieldPaths(stages []Stage, st *Stage, emitSets map[string]map[string]bool, where string) error {
+	// aliasSets: refold-scope aliases → the producing stage's emit set
+	// (nil = dynamic/unknown, unchecked). Field-addressed joins resolve
+	// through their synthetic to the SOURCE stage's set.
+	type aliasSrc struct {
+		set      map[string]bool
+		producer string
+	}
+	aliasSets := map[string]aliasSrc{}
+	for ei := range st.Merge {
+		e := &st.Merge[ei]
+		alias := e.As
+		if alias == "" {
+			alias = e.Stage
+			if alias == "" {
+				alias = e.Topic
+			}
+		}
+		if e.Stage != "" {
+			aliasSets[alias] = aliasSrc{emitSets[e.Stage], e.Stage}
+		} else {
+			aliasSets[alias] = aliasSrc{nil, ""} // topic side: dynamic payload
+		}
+	}
+	for ji := range st.Joins {
+		j := &st.Joins[ji]
+		if j.As == "" {
+			continue
+		}
+		if j.From != "" {
+			aliasSets[j.As] = aliasSrc{emitSets[j.From], j.From}
+		} else {
+			aliasSets[j.As] = aliasSrc{nil, ""} // topic join: dynamic payload
+		}
+	}
+	// inputSet: for a stage-fed, unfanned stage, input-scope paths
+	// address the upstream's emit set. Fanned stages' input paths are
+	// element-scope (dynamic); merges' input is the tuple (aliases).
+	var inputSet map[string]bool
+	inputFrom := ""
+	if st.From != "" && !st.hasFan() && len(st.Merge) == 0 {
+		if s, ok := emitSets[st.From]; ok {
+			inputSet = s
+			inputFrom = st.From
+		}
+	}
+	check := func(path, pos string) error {
+		first, rest := pathFirstSegment(path)
+		if first == "" {
+			return nil
+		}
+		if src, isAlias := aliasSets[first]; isAlias {
+			if src.set == nil || rest == "" {
+				return nil // dynamic side, or a bare-alias presence test
+			}
+			field, _ := segmentHead(rest)
+			if field != "" && !src.set[field] {
+				return unemittedErr(where, pos, path, src.producer, field, src.set)
+			}
+			return nil
+		}
+		if inputSet != nil && !inputSet[first] {
+			return unemittedErr(where, pos, path, inputFrom, first, inputSet)
+		}
+		return nil
+	}
+	checkWhens := func(cls []WhenClause, pos string) error {
+		for k := range cls {
+			c := &cls[k]
+			if c.Expr != "" {
+				n := c.compiled
+				if n == nil {
+					if n2, err := Compile(c.Expr); err == nil {
+						n = n2
+					}
+				}
+				var werr error
+				walkExprPaths(n, func(p string) {
+					if werr == nil {
+						werr = check(p, pos)
+					}
+				})
+				if werr != nil {
+					return werr
+				}
+				continue
+			}
+			if err := check(c.Path, pos); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for _, kp := range st.KeyPath {
+		if err := check(kp, "keyPath"); err != nil {
+			return err
+		}
+	}
+	if err := checkWhens(st.When, "when"); err != nil {
+		return err
+	}
+	if err := checkWhens(st.DeleteWhen, "deleteWhen"); err != nil {
+		return err
+	}
+	for ji := range st.Joins {
+		j := &st.Joins[ji]
+		for _, on := range j.On {
+			if err := check(on, "join on"); err != nil {
+				return err
+			}
+		}
+		// A join's where filters the DIMENSION ROW: stage dims have a
+		// declared shape (their emit set), topic dims are dynamic.
+		if j.From != "" && j.Field == "" {
+			if dimSet, ok := emitSets[j.From]; ok && dimSet != nil {
+				for k := range j.Where {
+					first, _ := pathFirstSegment(j.Where[k].Path)
+					if first != "" && !dimSet[first] {
+						return unemittedErr(where, "join where", j.Where[k].Path, j.From, first, dimSet)
+					}
+				}
+			}
+		}
+	}
+	for k := range st.Emit {
+		e := &st.Emit[k]
+		pos := "emit " + e.Field
+		if e.From != "" {
+			if err := check(e.From, pos); err != nil {
+				return err
+			}
+		}
+		if e.compiled != nil {
+			var werr error
+			walkExprPaths(e.compiled, func(p string) {
+				if werr == nil {
+					werr = check(p, pos)
+				}
+			})
+			if werr != nil {
+				return werr
+			}
+		}
+		if err := checkWhens(e.Where, pos+" where"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func unemittedErr(where, pos, path, producer, field string, set map[string]bool) error {
+	names := make([]string, 0, len(set))
+	for f := range set {
+		names = append(names, f)
+	}
+	sort.Strings(names)
+	return fmt.Errorf("%s: %s path [%s] reads field %q which stage %q never emits — a stage's emitted fields {%s} are the whole surface a consumer can address (a missing field here is a config inconsistency, not a null)", where, pos, path, field, producer, strings.Join(names, ", "))
+}
+
+// pathFirstSegment splits "$.a.b[0].c" into ("a", "b[0].c"); non-$.
+// and $parent paths return "" (dynamic scope, unchecked).
+func pathFirstSegment(path string) (string, string) {
+	rest, ok := strings.CutPrefix(path, "$.")
+	if !ok {
+		return "", ""
+	}
+	return segmentHead(rest)
+}
+
+func segmentHead(s string) (string, string) {
+	for i := 0; i < len(s); i++ {
+		if s[i] == '.' {
+			return s[:i], s[i+1:]
+		}
+		if s[i] == '[' {
+			return s[:i], s[i:]
+		}
+	}
+	return s, ""
 }
 
 // rejectFoldTimeAliasRefs guards the grammar's newest seam: the
