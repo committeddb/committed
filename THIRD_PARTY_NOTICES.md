@@ -552,7 +552,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ```
 
-## github.com/go-chi/chi/v5 v5.3.1
+## github.com/go-chi/chi/v5 v5.3.2
 
 ```
 Copyright (c) 2015-present Peter Kieltyka (https://github.com/pkieltyka), Google Inc.
