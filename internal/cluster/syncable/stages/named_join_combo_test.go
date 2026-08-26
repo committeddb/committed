@@ -16,6 +16,7 @@ func TestNamedTopicJoinPullFullCombination(t *testing.T) {
 	sts := []Stage{
 		{
 			Name: "base", From: "raw", KeyPath: []string{"$.visit", "$.wa"}, Normalize: "lower", KeyType: []string{"text", "number"},
+			Reduce: "latest", OrderBy: "$.ts", TieBy: "$.fid",
 			Emit: []Emit{
 				{Field: "visit", From: "$.visit"},
 				{Field: "wa", From: "$.wa"},
@@ -44,7 +45,7 @@ func TestNamedTopicJoinPullFullCombination(t *testing.T) {
 
 	fold("flt-topic", "f1", `{"visit":"V-9","wa":7,"ok":true}`)
 	fold("timecards", "V-9", `{"DateUtc":"2026-03-01T00:00:00Z","DeletedAtUtc":null}`)
-	fold("raw", "r1", `{"visit":"V-9","wa":7,"fid":"f1"}`)
+	fold("raw", "r1", `{"visit":"V-9","wa":7,"fid":"f1","ts":"2026-01-01"}`)
 
 	out := get(OutKey([]string{"v-9", "7"}))
 	require.Contains(t, out, `"2026-03-01T00:00:00Z"`,
