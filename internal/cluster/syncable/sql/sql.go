@@ -153,7 +153,7 @@ func (c *Syncable) Init() error {
 		jsonPaths = append(jsonPaths, mapping.JsonPath)
 	}
 
-	c.insert = &Insert{sqlString, stmt, jsonPaths}
+	c.insert = NewInsert(sqlString, stmt, jsonPaths)
 
 	// Prepare the DELETE-by-key statement so delete Actuals can be honored
 	// without a JSON unmarshal (the delete sentinel is not a payload). Only
@@ -401,21 +401,23 @@ func (c *Syncable) applyEntity(ctx context.Context, tx *sql.Tx, e *cluster.Entit
 			values = append(values, string(e.Data))
 			continue
 		}
+		tr := c.insert.Trackers.At(i)
 		res, err := jsonpath.Get(path, jsonData)
 		if err != nil {
-			// NARROWED LIMITATION (ambiguous classification): a SYNTACTICALLY invalid
-			// path can no longer reach here — validateMappings compiles every mapping
-			// jsonpath at ParseSyncable, so a broken path is a 400 at config time. What
-			// remains is a syntactically-VALID path that is nonetheless wrong: either
-			// entry-specific (the field is genuinely absent in THIS row → permanent is
-			// right) or an operator typo wrong for the whole topic (fails every row →
-			// should be transient). Those two are indistinguishable per-row, so it
-			// stays Permanent (the same accepted asymmetry as Postgres 23502; the
-			// projection sink's jsonpath.Get sites share it). The remaining fix — flip
-			// to transient on a run of consecutive-DISTINCT-row misses — is the 0.8
-			// ticket classify-config-shaped-syncable-errors.
-			return cluster.Permanent(fmt.Errorf("jsonpath [%v]: %w", path, err))
+			// A syntactically invalid path cannot reach here (validateMappings
+			// compiles every mapping jsonpath at ParseSyncable — a broken path
+			// is a 400 at config time). What remains is a syntactically-VALID
+			// path that is nonetheless wrong: either entry-specific (the field
+			// is genuinely absent in THIS row → permanent is right) or an
+			// operator typo wrong for the whole topic (fails every row →
+			// transient is right). Indistinguishable per-row — the path's own
+			// tracker classifies from its history: isolated misses dead-letter,
+			// a consecutive-distinct-row run of misses with no success wedges
+			// loudly instead (see cluster.AmbiguityTracker). The projection
+			// sink's extraction sites classify the same way.
+			return tr.Classify(index, fmt.Errorf("jsonpath [%v]: %w", path, err))
 		}
+		tr.Succeeded()
 		// A typed payload carries JSON-native scalars; coerce each to the form
 		// its declared sink column expects (e.g. a numeric source value mapped
 		// into a TEXT column must bind as text). JsonPath and Mappings are built

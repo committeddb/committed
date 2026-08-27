@@ -35,11 +35,22 @@ type compiled struct {
 	order uint64
 	// query is the parsed predicate; nil for a pure range binding.
 	query *gojq.Query
+	// tracker classifies this predicate's evaluation failures — entry-specific
+	// (one payload the program can't evaluate) vs config-shaped (a predicate
+	// wrong for every row it gates); see cluster.AmbiguityTracker. Allocated
+	// only alongside query. It is the one mutable, internally-synchronized
+	// field in the otherwise immutable snapshot; because the snapshot is
+	// shared, consumers of the same topic pool evidence (which only
+	// accelerates the loud, recoverable outcome), and every registry
+	// recompile starts fresh — correct, since the registry just changed.
+	tracker *cluster.AmbiguityTracker
 }
 
-// Registry is a compiled, immutable snapshot of the errata registry: build it
-// from the applied records (in raft-index order), swap it atomically on
-// change. Reads are lock-free.
+// Registry is a compiled snapshot of the errata registry: build it from the
+// applied records (in raft-index order), swap it atomically on change. Its
+// semantic content — errata, ranges, predicates — is immutable and read
+// lock-free; the only mutable state is each predicate candidate's ambiguity
+// tracker (internally synchronized).
 type Registry struct {
 	// byType holds each type's errata in log order. A type with no errata is
 	// simply absent — the fast path.
@@ -66,6 +77,7 @@ func NewRegistry(applied []cluster.AppliedErratum) (*Registry, error) {
 				return nil, fmt.Errorf("erratum %q: predicate does not parse: %w", a.Erratum.ID, err)
 			}
 			c.query = q
+			c.tracker = cluster.NewAmbiguityTracker()
 		}
 		r.byType[a.Erratum.TypeID] = append(r.byType[a.Erratum.TypeID], c)
 		if a.Index > r.highwater {
@@ -111,9 +123,15 @@ func (r *Registry) TypeHighwater(typeID string) uint64 {
 // dataIndex: the stamped version unless a matching erratum rebinds it — among
 // matching errata, later in the log wins. The payload is unmarshaled at most
 // once, and only when a matching candidate carries a predicate. Errors only
-// when a predicate cannot evaluate (a non-JSON payload under a predicate
-// erratum) — the caller treats that as the read-side failure it is, never a
-// silent fall-through to a possibly-wrong reading.
+// when a predicate cannot evaluate (a non-JSON payload, or a program the
+// payload's shape breaks) — never a silent fall-through to a possibly-wrong
+// reading — and the error comes back classified for egress by the erratum's
+// own tracker: cluster.Permanent while the failure may be entry-specific,
+// cluster.ErrConfigShaped (transient — the worker wedges) once a run of
+// consecutive distinct rows with no clean evaluation establishes the
+// predicate config-shaped. Rows an erratum's range never gates don't touch
+// its tracker, so unrelated successes can't mask a predicate that fails
+// every row it actually evaluates.
 func (r *Registry) EffectiveVersion(ctx context.Context, typeID string, dataIndex uint64, stampedVersion int, payload []byte) (int, error) {
 	if r == nil || r.byType == nil {
 		return stampedVersion, nil
@@ -136,14 +154,20 @@ func (r *Registry) EffectiveVersion(ctx context.Context, typeID string, dataInde
 				dec := json.NewDecoder(bytes.NewReader(payload))
 				dec.UseNumber()
 				if err := dec.Decode(&doc); err != nil {
-					return 0, fmt.Errorf("erratum %q predicate: payload is not valid JSON: %w", c.ID, err)
+					// Classified through the forcing candidate's tracker: one
+					// malformed row is entry-specific; a predicate erratum
+					// admitted against a non-JSON topic fails every gated row.
+					return 0, c.tracker.Classify(dataIndex, fmt.Errorf("erratum %q predicate: payload is not valid JSON: %w", c.ID, err))
 				}
 				docReady = true
 			}
 			match, err := evalPredicate(ctx, c.query, doc)
 			if err != nil {
-				return 0, fmt.Errorf("erratum %q predicate: %w", c.ID, err)
+				return 0, c.tracker.Classify(dataIndex, fmt.Errorf("erratum %q predicate: %w", c.ID, err))
 			}
+			// A clean evaluation — match or not — proves the predicate can
+			// read this data; reset its evidence.
+			c.tracker.Succeeded()
 			if !match {
 				continue
 			}

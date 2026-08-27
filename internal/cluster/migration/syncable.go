@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/committeddb/committed/internal/cluster"
@@ -27,42 +28,63 @@ var errTypeUnavailable = errors.New("migration: latest type unavailable")
 // about migration) sees a plain Syncable with the usual contract.
 // Migration failures are classified per the egress rule: a type-unavailable
 // failure (schema/timing-shaped, every entity of the topic alike) stays
-// TRANSIENT so the worker wedges until the type resolves; a migration-program
-// failure on an entity is reported cluster.Permanent so the worker dead-letters
-// that proposal and moves on.
+// TRANSIENT so the worker wedges until the type resolves; a Chain failure on
+// an entity is classified by that chain's ambiguity tracker — Permanent
+// (dead-letter this proposal, move on) while it may be entry-specific,
+// transient (wedge) once a run of consecutive distinct rows establishes the
+// program config-shaped (see cluster.AmbiguityTracker).
 //
 // m drives the committed.type.migration.duration histogram (recorded per
 // migrated entity, on success). Nil when metrics are disabled.
 func Wrap(inner cluster.Syncable, r Resolver, m *metrics.Metrics) cluster.Syncable {
 	if bs, ok := inner.(cluster.BatchSyncable); ok {
-		return &batchSyncable{single: single{inner: inner, resolver: r, metrics: m}, batch: bs}
+		return &batchSyncable{single: single{inner: inner, resolver: r, metrics: m, trackers: map[string]*cluster.AmbiguityTracker{}}, batch: bs}
 	}
-	return &single{inner: inner, resolver: r, metrics: m}
+	return &single{inner: inner, resolver: r, metrics: m, trackers: map[string]*cluster.AmbiguityTracker{}}
 }
 
 type single struct {
 	inner    cluster.Syncable
 	resolver Resolver
 	metrics  *metrics.Metrics
+	// trackers classify Chain failures per (topic, fromVersion→toVersion)
+	// site (see cluster.AmbiguityTracker): a program broken for one
+	// version-range accumulates evidence only from the rows that actually
+	// run that chain. trackerMu guards the map (Sync and SyncBatch share
+	// it through the embedded single).
+	trackerMu sync.Mutex
+	trackers  map[string]*cluster.AmbiguityTracker
+}
+
+// chainTracker returns (allocating on first use) the ambiguity tracker for
+// the chain migrating topic id from version `from` to `to`. The site is the
+// whole stamped path, not the individual failing step: per-step pooling would
+// converge faster on mixed-stamp topics, but resetting a step's evidence
+// requires knowing which steps a SUCCESSFUL chain walked — which Chain does
+// not report — and resetting on any success would let one stamp's healthy
+// path mask another stamp's broken step (the when-gated gap all over again).
+// Per-path keying already isolates interleaved stamps correctly; each broken
+// stamp class wedges on its own run.
+func (s *single) chainTracker(id string, from, to int) *cluster.AmbiguityTracker {
+	s.trackerMu.Lock()
+	defer s.trackerMu.Unlock()
+	key := fmt.Sprintf("%s@%d>%d", id, from, to)
+	t := s.trackers[key]
+	if t == nil {
+		t = cluster.NewAmbiguityTracker()
+		s.trackers[key] = t
+	}
+	return t
 }
 
 func (s *single) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldSnapshot, error) {
-	entities, err := migrateEntities(ctx, s.resolver, s.metrics, a.Entities)
+	entities, err := s.migrateEntities(ctx, a)
 	if err != nil {
-		if ctx.Err() != nil {
-			// The worker ctx was cancelled mid-migration (shutdown / replace) — a
-			// transient interruption, not a bad program. Return it unwrapped so the
-			// worker retries this entity on restart rather than dead-lettering
-			// (permanently skipping) a valid proposal. A per-run TIMEOUT leaves the
-			// parent ctx live, so it still falls through to Permanent below.
-			return false, ctx.Err()
-		}
-		if errors.Is(err, errTypeUnavailable) {
-			// The topic's latest type isn't resolvable → every entity fails alike →
-			// TRANSIENT (wedge until it's available), not a per-entity dead-letter.
-			return false, err
-		}
-		return false, cluster.Permanent(err)
+		// Fully classified at the failure site (see migrateEntities): a ctx
+		// interruption and a type-unavailable failure pass through TRANSIENT;
+		// a Chain failure arrives Permanent — or, once its chain's tracker
+		// establishes a config-shaped run, transient (wedge).
+		return false, err
 	}
 	return s.inner.Sync(ctx, &cluster.Actual{Index: a.Index, Entities: entities})
 }
@@ -124,27 +146,24 @@ type batchSyncable struct {
 func (b *batchSyncable) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool, error) {
 	migrated := make([]*cluster.Actual, len(as))
 	for i, a := range as {
-		entities, err := migrateEntities(ctx, b.resolver, b.metrics, a.Entities)
+		entities, err := b.migrateEntities(ctx, a)
 		if err != nil {
-			if ctx.Err() != nil {
-				return false, ctx.Err() // shutdown/replace mid-migration — retry, don't dead-letter
-			}
-			if errors.Is(err, errTypeUnavailable) {
-				return false, err // topic's latest type unavailable → transient, wedge
-			}
-			return false, cluster.Permanent(err)
+			return false, err // classified at the failure site — see migrateEntities
 		}
 		migrated[i] = &cluster.Actual{Index: a.Index, Entities: entities}
 	}
 	return b.batch.SyncBatch(ctx, migrated)
 }
 
-// migrateEntities returns a copy of es with every user-data entity's Data
-// run through the migration chain up to the current latest type version.
-// System entities (config entries) pass through untouched. The input
-// entities are not modified — retry paths see consistent input across
-// attempts.
-func migrateEntities(ctx context.Context, r Resolver, m *metrics.Metrics, es []*cluster.Entity) ([]*cluster.Entity, error) {
+// migrateEntities returns a copy of a's entities with every user-data
+// entity's Data run through the migration chain up to the current latest
+// type version. System entities (config entries) pass through untouched.
+// The input entities are not modified — retry paths see consistent input
+// across attempts. Every error it returns is FULLY classified for the
+// worker: ctx interruptions unwrapped (retry), type-unavailable transient
+// (wedge), Chain failures through the chain's ambiguity tracker.
+func (s *single) migrateEntities(ctx context.Context, a *cluster.Actual) ([]*cluster.Entity, error) {
+	r, m, es := s.resolver, s.metrics, a.Entities
 	out := make([]*cluster.Entity, 0, len(es))
 	for _, e := range es {
 		// Only row data migrates. System entities (config) and every non-row
@@ -176,17 +195,26 @@ func migrateEntities(ctx context.Context, r Resolver, m *metrics.Metrics, es []*
 		start := time.Now()
 		data, err := Chain(ctx, r, e.ID, e.Version, latest.Version, e.Data)
 		if err != nil {
-			// KNOWN LIMITATION (ambiguous classification): unlike ResolveType above,
-			// Chain takes e.Data, so a failure here can be EITHER entry-specific (a
-			// malformed row this program can't transform → permanent is right) OR
-			// config-shaped (a broken/incompatible migration program that fails every
-			// row of that version-range → should be transient). They are
-			// indistinguishable at the failure point, so it stays Permanent (the same
-			// accepted asymmetry as Postgres 23502). The clean fix is config-time
-			// migration-program validation — see the 0.8 ticket
-			// classify-config-shaped-syncable-errors.
-			return nil, err
+			if ctx.Err() != nil {
+				// The worker ctx was cancelled mid-chain (shutdown / replace) —
+				// a transient interruption, not a bad program and not evidence.
+				// Return it unwrapped so the worker retries after restart. A
+				// per-run TIMEOUT leaves the parent ctx live, so it still
+				// classifies below.
+				return nil, ctx.Err()
+			}
+			// Chain takes e.Data, so a failure here is EITHER entry-specific
+			// (a malformed row this program can't transform → permanent is
+			// right) OR config-shaped (a program that fails every row of a
+			// version-range → transient is right). Indistinguishable from ONE
+			// failure — this chain's tracker classifies from its own history:
+			// isolated failures dead-letter; a consecutive-distinct-row run
+			// with no success wedges loudly (see cluster.AmbiguityTracker).
+			// Program syntax and determinism are already validated at type
+			// registration (compileMigration).
+			return nil, s.chainTracker(e.ID, e.Version, latest.Version).Classify(a.Index, err)
 		}
+		s.chainTracker(e.ID, e.Version, latest.Version).Succeeded()
 		if m != nil {
 			m.MigrationCompleted(e.ID, time.Since(start))
 		}

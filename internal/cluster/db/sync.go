@@ -759,6 +759,10 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 					db.metrics.SyncCompleted(id, time.Since(syncStart))
 				}
 				if syncErr != nil {
+					// A site-established config-shaped failure
+					// (cluster.ErrConfigShaped) is deliberately NOT
+					// ErrPermanent, so it takes the transient branch below —
+					// wedge loudly, stop dead-lettering the topic's rows.
 					if errors.Is(syncErr, cluster.ErrPermanent) {
 						if c, tripped := db.recordSyncPermanent(id, i); tripped {
 							db.tripSyncBreaker(id, c, syncErr)
@@ -1223,6 +1227,9 @@ func (db *DB) syncBatchFallback(ctx context.Context, id string, s cluster.Syncab
 			db.metrics.SyncCompleted(id, time.Since(syncStart))
 		}
 		if syncErr != nil {
+			// Config-shaped failures (cluster.ErrConfigShaped, not
+			// ErrPermanent) fall to the transient path below (stop the
+			// fallback; the batch loop wedges) — the single-flush worker's twin.
 			if errors.Is(syncErr, cluster.ErrPermanent) {
 				if c, tripped := db.recordSyncPermanent(id, e.Index); tripped {
 					db.tripSyncBreaker(id, c, syncErr)

@@ -404,6 +404,15 @@ type Insert struct {
 	SQL      string
 	Stmt     *gosql.Stmt
 	JsonPath []string
+	// Trackers classify each mapping path's extraction failures
+	// (entry-specific vs config-shaped), positionally aligned with JsonPath.
+	// See cluster.AmbiguityTracker.
+	Trackers cluster.AmbiguityTrackers
+}
+
+// NewInsert builds an Insert with one ambiguity tracker per mapping path.
+func NewInsert(sqlString string, stmt *gosql.Stmt, jsonPaths []string) *Insert {
+	return &Insert{SQL: sqlString, Stmt: stmt, JsonPath: jsonPaths, Trackers: cluster.NewAmbiguityTrackers(len(jsonPaths))}
 }
 
 // Delete is the prepared `DELETE FROM <table> WHERE <keyCol> = ?` statement.

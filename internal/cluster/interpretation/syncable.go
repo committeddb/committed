@@ -42,12 +42,13 @@ func (s *single) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldSna
 		if ctx.Err() != nil {
 			return false, ctx.Err() // shutdown mid-rebind — retry, don't dead-letter
 		}
-		if errors.Is(err, errTypeUnavailable) {
-			return false, err // schema/timing-shaped → transient, wedge
-		}
-		// Entry-specific (a payload a predicate cannot evaluate) → dead-letter
-		// that proposal rather than silently choosing a reading.
-		return false, cluster.Permanent(err)
+		// Fully classified at the failure site: errTypeUnavailable passes
+		// through transient (schema/timing-shaped → wedge), and a predicate
+		// failure arrives from the erratum's own ambiguity tracker —
+		// Permanent (dead-letter that proposal rather than silently choosing
+		// a reading) until a run of distinct rows establishes it
+		// config-shaped, transient (wedge) after.
+		return false, err
 	}
 	if entities == nil {
 		return s.inner.Sync(ctx, a) // nothing rebound — hand through untouched
@@ -133,10 +134,7 @@ func (b *batchSyncable) SyncBatch(ctx context.Context, as []*cluster.Actual) (bo
 			if ctx.Err() != nil {
 				return false, ctx.Err()
 			}
-			if errors.Is(err, errTypeUnavailable) {
-				return false, err
-			}
-			return false, cluster.Permanent(err)
+			return false, err // classified at the failure site — see Sync
 		}
 		if entities == nil {
 			continue
