@@ -107,6 +107,31 @@ func (db *DB) refuseDerivationHazards(c *cluster.Configuration) error {
 	return nil
 }
 
+// refuseDerivedTopicEpochRegression is the admission half (the fast 400) of
+// the epoch-continuity guard for producer HANDOVER — the predicate itself,
+// with the full rationale, is DerivedTopicEpochRegression, which the
+// node-local build backstop (wal.buildSyncable) shares so the two cannot
+// skew. Two tiers, like the producer guard: this refusal is best-effort
+// (admission reads this node's applied view, which can lag or be raced);
+// the build backstop catches what slips through, degrading loudly and
+// retrying every minute — so a lagging-source handover self-heals the
+// moment the source's epoch space climbs past the target's old highwater.
+// The ingestable direction needs no guard at all: the ingest epoch floor
+// (Storage.TopicRefreshEpoch, bumped at apply by EVERY committed
+// generation, forwarded ones included) already makes a replacement
+// ingestable stamp above any prior producer's epochs.
+func (db *DB) refuseDerivedTopicEpochRegression(c *cluster.Configuration) error {
+	targets, err := db.parser.SyncableDerivedTopics(c.MimeType, c.Data)
+	if err != nil || len(targets) == 0 {
+		return nil // not a deriving kind
+	}
+	sources, _ := db.parser.SyncableTopics(c.MimeType, c.Data)
+	if err := DerivedTopicEpochRegression(sources, targets, db.storage.TopicRefreshEpoch); err != nil {
+		return cluster.NewConfigError(err)
+	}
+	return nil
+}
+
 // SyncableDerivation reports the derivation provenance of a stored syncable:
 // the topic it consumes and the topic it derives into. ok is false for every
 // non-deriving kind — the status surface omits the fields entirely then.
@@ -164,6 +189,14 @@ func (db *DB) ProposeSyncable(ctx context.Context, c *cluster.Configuration) err
 	// the apply path re-checks deterministically (see wal.saveSyncable) so a
 	// config racing past this admission check degrades instead of looping.
 	if err := db.refuseDerivationHazards(c); err != nil {
+		return err
+	}
+
+	// Epoch-continuity guard for producer HANDOVER: a derived topic whose
+	// sink history carries refresh epochs above the new source's cannot be
+	// reconciled by forwarded sweeps — refuse at POST, with the build-time
+	// backstop catching raced/stale-view admits (see the guard's doc).
+	if err := db.refuseDerivedTopicEpochRegression(c); err != nil {
 		return err
 	}
 

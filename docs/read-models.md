@@ -869,6 +869,15 @@ The rules that keep the chain safe:
   races past admission is persisted but loudly degraded, never run). A cycle
   would re-derive its own output forever; a second producer would interleave
   two refresh-epoch spaces on one topic.
+- **Producer handover must not regress the epoch space.** A loopback targeting
+  a topic whose committed refresh epochs exceed its source's is refused at
+  POST: forwarded sweeps could never reconcile the previous producer's
+  higher-stamped rows, which would linger stale on downstream keyed sinks.
+  Derive into a fresh topic instead — the old topic's log carries its history
+  permanently. A source at or *above* the target's highwater is fine (its
+  first refresh reconciles the handover), and replacing any producer with an
+  **ingestable** is always safe: the ingest epoch floor is topic-keyed and
+  sees every committed generation, forwarded ones included.
 - **Declare the derived topic's type `entityKind = "snapshot"`** (recommended):
   replays then converge by key. Any other kind appends on replay and requires
   an explicit `acknowledgeAppendSemantics = true`.

@@ -9,6 +9,7 @@ import (
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
+	"github.com/committeddb/committed/internal/cluster/db/wal"
 )
 
 // topicIngestParser is a test ingestable kind that reports the topic it
@@ -245,4 +246,115 @@ func TestProducerGuard_WinnerRepostBlockedWhileLoserLingers(t *testing.T) {
 	// Cleanup unblocks: delete the loser, and the winner re-configures freely.
 	require.NoError(t, d.DeleteIngestable(testCtx(t), "lose"))
 	require.NoError(t, proposeFakeIngest(t, d, "win", "t1"))
+}
+
+// proposeGenRow commits one generation-stamped row on topic — the residue an
+// earlier producer era leaves in the log (and on downstream sinks). The apply
+// path bumps the topic's refresh-epoch highwater from ANY committed
+// generation, which is exactly what the epoch-regression guard reads.
+func proposeGenRow(t *testing.T, d *db.DB, s *wal.Storage, topic string, gen uint64) {
+	t.Helper()
+	tp, err := s.ResolveType(cluster.LatestTypeRef(topic))
+	require.NoError(t, err)
+	e := cluster.NewUpsertEntity(tp, []byte("k1"), []byte(`{"v":1}`))
+	e.Generation = gen
+	require.NoError(t, d.Propose(testCtx(t), &cluster.Proposal{Entities: []*cluster.Entity{e}}))
+}
+
+// TestProducerGuard_EpochRegressionRefused pins the producer-HANDOVER
+// continuity guard: a loopback may not derive into a topic whose committed
+// refresh-epoch highwater exceeds its source's. The loopback forwards source
+// epochs verbatim, so a lagging source's sweeps could never reconcile the
+// previous producer's higher-stamped rows — they would linger stale on every
+// downstream keyed sink. A source at or above the target's highwater is
+// admitted (its first refresh reconciles the handover completely).
+func TestProducerGuard_EpochRegressionRefused(t *testing.T) {
+	sink := &recorderSink{}
+	d, s := newWalDBLoopback(t, sink)
+	proposeKindedType(t, d, "src", "snapshot")
+	proposeKindedType(t, d, "tgt", "snapshot")
+
+	// The old producer era: tgt carries committed epochs up to 7; the
+	// candidate source has only reached 3.
+	proposeGenRow(t, d, s, "tgt", 7)
+	proposeGenRow(t, d, s, "src", 3)
+
+	err := proposeLoopback(t, d, "st", "src", "tgt", "")
+	require.ErrorContains(t, err, "refresh epochs up to 7", "the refusal names the target's highwater")
+	require.ErrorContains(t, err, `source topic "src"`, "the refusal names the lagging source")
+	require.ErrorContains(t, err, "fresh topic", "the refusal steers to the safe remedy")
+
+	// The source catching up (or being ahead) is the safe direction: the
+	// first forwarded refresh re-emits everything live and its sweep
+	// reconciles the handover.
+	proposeGenRow(t, d, s, "src", 7)
+	require.NoError(t, proposeLoopback(t, d, "st", "src", "tgt", ""),
+		"a source at the target's highwater is admitted")
+}
+
+// TestProducerGuard_RacedEpochRegressionDegradesThenHeals covers the
+// build-time half of the epoch-continuity guard: a lagging-source loopback
+// that raced past admission (raw-committed) degrades loudly instead of
+// silently stranding the old producer's rows — and self-heals on the
+// degraded-build retry once the source's epoch space catches up (the
+// handover has become reconcilable).
+func TestProducerGuard_RacedEpochRegressionDegradesThenHeals(t *testing.T) {
+	sink := &recorderSink{}
+	d, s := newWalDBLoopback(t, sink)
+	proposeKindedType(t, d, "src", "snapshot")
+	proposeKindedType(t, d, "tgt", "snapshot")
+	proposeGenRow(t, d, s, "tgt", 7)
+	proposeGenRow(t, d, s, "src", 3)
+
+	// Bypass admission: commit the lagging-source loopback as a raw entity.
+	cfg := &cluster.Configuration{
+		ID: "st", MimeType: "text/toml",
+		Data: []byte("[syncable]\nname = \"st\"\ntype = \"loopback\"\n[loopback]\ntopic = \"src\"\ntarget = \"tgt\"\n"),
+	}
+	e, err := cluster.NewUpsertSyncableEntity(cfg)
+	require.NoError(t, err)
+	require.NoError(t, d.Propose(testCtx(t), &cluster.Proposal{Entities: []*cluster.Entity{e}}))
+
+	require.Eventually(t, func() bool {
+		for _, ce := range d.ConfigBuildErrors() {
+			if ce.Kind == "syncable" && ce.ID == "st" {
+				return true
+			}
+		}
+		return false
+	}, 10*time.Second, 10*time.Millisecond, "the raced-in lagging-source loopback never degraded")
+	require.False(t, d.HasSyncWorkerForTest("st"), "a degraded handover must not forward")
+
+	// The source catches up past the old highwater; the next rebuild pass
+	// (here the reconcile path — the same build body the minute retry runs)
+	// admits.
+	proposeGenRow(t, d, s, "src", 8)
+	s.RequestSyncReconcile()
+	require.Eventually(t, func() bool {
+		if !d.HasSyncWorkerForTest("st") {
+			return false
+		}
+		for _, ce := range d.ConfigBuildErrors() {
+			if ce.Kind == "syncable" && ce.ID == "st" {
+				return false // stale evidence must clear on the healed build
+			}
+		}
+		return true
+	}, 10*time.Second, 10*time.Millisecond, "the handover must self-heal once the source epoch space catches up")
+}
+
+// TestDerivedTopicEpochRegression_MinOverSources pins the conservative
+// multi-source semantics: one lagging source among several is enough to
+// strand rows, so the guard compares against the MINIMUM source highwater.
+func TestDerivedTopicEpochRegression_MinOverSources(t *testing.T) {
+	epochs := map[string]uint64{"s-ahead": 9, "s-lagging": 3, "tgt": 7}
+	epochOf := func(topic string) uint64 { return epochs[topic] }
+
+	err := db.DerivedTopicEpochRegression([]string{"s-ahead", "s-lagging"}, []string{"tgt"}, epochOf)
+	require.Error(t, err, "one lagging source among several must refuse")
+	require.ErrorContains(t, err, "refresh epochs up to 7")
+
+	require.NoError(t, db.DerivedTopicEpochRegression([]string{"s-ahead"}, []string{"tgt"}, epochOf))
+	require.NoError(t, db.DerivedTopicEpochRegression([]string{"s-lagging"}, []string{"fresh"}, epochOf),
+		"a target with no epoch history is free")
 }

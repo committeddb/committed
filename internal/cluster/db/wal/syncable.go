@@ -152,6 +152,31 @@ func (s *Storage) buildSyncable(t *cluster.Configuration) cluster.Syncable {
 		return nil
 	}
 
+	// Epoch-continuity backstop for configs that raced past (or were
+	// admitted on a stale applied view by) the admission check — the same
+	// predicate admission runs (db.DerivedTopicEpochRegression), so the two
+	// cannot skew. Deliberately NOT part of the deterministic replay above:
+	// the replay must stay a pure function of the stored config set, and
+	// this predicate reads point-in-time replicated state
+	// (TopicRefreshEpoch). Build is the right home — it is already
+	// node-local and environment-dependent (Init reaches destination
+	// databases), degrades loudly, and retries every minute, so a
+	// lagging-source handover wedges visibly instead of silently stranding
+	// stale rows, and self-heals the moment the source's epoch space climbs
+	// past the target's old highwater (the handover has become
+	// reconcilable). A healthy loopback can never trip it: the target's
+	// epochs are bumped only by this loopback's own forwards of the
+	// source's, so target ≤ source holds in steady state.
+	if targets, terr := s.parser.SyncableDerivedTopics(t.MimeType, t.Data); terr == nil && len(targets) > 0 {
+		sources, _ := s.parser.SyncableTopics(t.MimeType, t.Data)
+		if derr := db.DerivedTopicEpochRegression(sources, targets, s.TopicRefreshEpoch); derr != nil {
+			s.recordConfigError("syncable", t.ID, configErrBuild, derr)
+			s.logger.Error("syncable config persisted but refused by the epoch-continuity guard (degraded); the build retries every minute and admits once the source's epoch space catches up — or derive into a fresh topic",
+				zap.String("id", t.ID), zap.Error(derr))
+			return nil
+		}
+	}
+
 	_, parsed, parsedMode, err := s.parser.ParseSyncable(t.MimeType, t.Data, s)
 	if err != nil {
 		s.recordConfigError("syncable", t.ID, configErrBuild, err)

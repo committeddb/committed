@@ -158,6 +158,38 @@ func ReplayWithCandidate(stored []DerivationEdge, candidate DerivationEdge) erro
 	return ReplayDerivation(edges)[EdgeRef{Kind: candidate.Kind, ID: candidate.ID}]
 }
 
+// DerivedTopicEpochRegression reports why a deriving config's producer
+// HANDOVER would break the target topics' refresh-epoch monotonicity, or
+// nil. The loopback forwards its source's generations and refresh
+// boundaries VERBATIM, so a source whose epoch highwater lags a target's
+// committed highwater could never sweep the rows a previous producer
+// stamped higher — stale rows would linger on every downstream keyed sink
+// (and epoch monotonicity is also what lets a FUTURE consumer's full replay
+// converge: the first in-log boundary above the old era's highwater sweeps
+// it). A source at or above the target is safe — its first refresh
+// re-emits everything live and the sweep reconciles the handover.
+//
+// Both admission (the fast 400) and the node-local build backstop call THIS
+// function, so the two cannot skew. Multiple sources take the MINIMUM
+// highwater — the conservative direction for a hypothetical multi-source
+// deriving kind, where one lagging source is enough to strand rows.
+func DerivedTopicEpochRegression(sources, targets []string, epochOf func(topic string) uint64) error {
+	var srcHw uint64
+	for i, s := range sources {
+		if hw := epochOf(s); i == 0 || hw < srcHw {
+			srcHw = hw
+		}
+	}
+	for _, t := range targets {
+		if thw := epochOf(t); thw > srcHw {
+			return fmt.Errorf(
+				"derived topic %q carries committed refresh epochs up to %d, above source topic %q's %d: the loopback forwards the source's epochs verbatim, so its reconciling sweeps could never reach rows a previous producer stamped at higher epochs — they would linger stale on every downstream keyed sink. Derive into a fresh topic instead; the old topic's log carries its history permanently, so it cannot be safely re-targeted from a lower-epoch source",
+				t, thw, strings.Join(sources, ", "), srcHw)
+		}
+	}
+	return nil
+}
+
 // findPath returns the topic path from `from` to `to` (inclusive of both), or
 // nil when unreachable. Plain DFS with parent tracking — derivation graphs
 // are operator-config-sized.
