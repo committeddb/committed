@@ -297,6 +297,7 @@ func (ms *MemoryStorage) Proposals() []*cluster.Proposal {
 type StorageStubs struct{}
 
 func (StorageStubs) DatabaseVersions(id string) ([]cluster.VersionInfo, error) { return nil, nil }
+func (StorageStubs) ProducerEdges() ([]db.DerivationEdge, error)               { return nil, nil }
 func (StorageStubs) DatabaseVersion(id string, version uint64) (*cluster.Configuration, error) {
 	return nil, nil
 }

@@ -10,6 +10,32 @@ func (p *Parser) AddIngestableParser(name string, sp cluster.IngestableParser) {
 	p.ingestableParsers[name] = sp
 }
 
+// IngestableTopics reports which topics the ingestable config PRODUCES, read
+// from the config alone (no Preflight / no source connection). It mirrors
+// SyncableTopics: pick the type-specific parser, then delegate to its
+// cluster.IngestableTopicExtractor. Returns nil (not an error) when the
+// matched parser doesn't extract topics, so an unknown ingestable kind
+// simply contributes no producer edges. Errors only when the bytes don't
+// parse at all.
+func (p *Parser) IngestableTopics(mimeType string, data []byte) ([]string, error) {
+	v, err := parseBytes(mimeType, data)
+	if err != nil {
+		return nil, err
+	}
+
+	tipe := v.GetString("ingestable.type")
+	parser, ok := p.ingestableParsers[tipe]
+	if !ok {
+		return nil, fmt.Errorf("cannot parse ingestable of type: %s", tipe)
+	}
+
+	extractor, ok := parser.(cluster.IngestableTopicExtractor)
+	if !ok {
+		return nil, nil // this ingestable kind can't report its topics — no edges
+	}
+	return extractor.TopicsFromConfig(v), nil
+}
+
 func (p *Parser) ParseIngestable(mimeType string, data []byte) (string, cluster.Ingestable, error) {
 	v, err := parseBytes(mimeType, data)
 	if err != nil {

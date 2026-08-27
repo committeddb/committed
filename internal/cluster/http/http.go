@@ -184,7 +184,7 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 			r.Post("/database/{id}/rollback", h.rollback("database", h.c.DatabaseVersion, h.c.ProposeDatabase, h.c.DatabaseVersions))
 
 			r.Get("/ingestable", h.listConfig("ingestable", h.c.Ingestables))
-			r.Post("/ingestable/{id}", h.AddIngestable)
+			r.Post("/ingestable/{id}", h.addConfig("ingestable", h.c.ProposeIngestable, h.c.IngestableVersions))
 			r.Get("/ingestable/{id}/versions", h.getVersions("ingestable", h.c.IngestableVersions))
 			r.Get("/ingestable/{id}/versions/{version}", h.getVersion("ingestable", h.c.IngestableVersion))
 			r.Get("/ingestable/{id}/status", h.GetIngestableStatus)

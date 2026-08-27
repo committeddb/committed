@@ -213,6 +213,20 @@ type IngestableParser interface {
 	Parse(c *ParsedConfig) (Ingestable, error)
 }
 
+// IngestableTopicExtractor is the optional IngestableParser extension that
+// reports which topics an ingestable config PRODUCES, read straight from the
+// parsed config WITHOUT building the ingestable (no source connection, no
+// Preflight). An ingestable mints its topics' refresh-epoch space, so these
+// are producer edges in the derivation graph: the admission checks and the
+// deterministic apply-time replay use them to keep every produced topic
+// single-producer (two epoch-stamping producers on one topic interleave
+// epoch spaces, and one's reconciling sweep could erase the other's rows on
+// every keyed sink downstream). A parser that does not implement it
+// contributes no edges.
+type IngestableTopicExtractor interface {
+	TopicsFromConfig(v *ParsedConfig) []string
+}
+
 // EntityKindRevision (version-stored config with rollback, retained — see
 // typeType).
 var ingestableType = registerSystemType(&Type{

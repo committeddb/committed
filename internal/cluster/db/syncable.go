@@ -80,12 +80,13 @@ func (db *DB) refuseAlwaysCurrentAcrossBreak(c *cluster.Configuration) error {
 }
 
 // refuseDerivationHazards refuses a syncable config whose derivation edges
-// (source topic → derived topic) would break the derivation graph: a cycle
-// (an infinite consensus loop) or a second producer for a derived topic (two
-// interleaved refresh-epoch spaces — one source's reconciling sweep could
-// erase the other's rows downstream). Non-deriving kinds contribute no edges
-// and pass for free. Fail-closed on storage errors: these invariants must
-// hold, so an unanswerable check refuses.
+// (source topic → derived topic) would break the producer graph: a cycle
+// (an infinite consensus loop) or a second epoch-stamping producer for a
+// topic — including an INGESTABLE already producing the loopback's target
+// (two interleaved refresh-epoch spaces — one producer's reconciling sweep
+// could erase the other's rows downstream). Non-deriving kinds contribute no
+// edges and pass for free. Fail-closed on storage errors: these invariants
+// must hold, so an unanswerable check refuses.
 func (db *DB) refuseDerivationHazards(c *cluster.Configuration) error {
 	targets, err := db.parser.SyncableDerivedTopics(c.MimeType, c.Data)
 	if err != nil || len(targets) == 0 {
@@ -93,23 +94,14 @@ func (db *DB) refuseDerivationHazards(c *cluster.Configuration) error {
 	}
 	sources, _ := db.parser.SyncableTopics(c.MimeType, c.Data)
 
-	cfgs, err := db.storage.Syncables()
+	stored, err := db.storage.ProducerEdges()
 	if err != nil {
-		return fmt.Errorf("derivation guard: enumerate syncables: %w", err)
+		// Fail-closed: the invariant must hold, so an unanswerable
+		// enumeration refuses instead of passing.
+		return fmt.Errorf("producer guard: enumerate producer edges: %w", err)
 	}
-	var existing []DerivationEdge
-	for _, cfg := range cfgs {
-		if cfg.ID == c.ID {
-			continue // a re-POST replaces this config's own edges
-		}
-		ts, terr := db.parser.SyncableDerivedTopics(cfg.MimeType, cfg.Data)
-		if terr != nil || len(ts) == 0 {
-			continue
-		}
-		ss, _ := db.parser.SyncableTopics(cfg.MimeType, cfg.Data)
-		existing = append(existing, DerivationEdge{ID: cfg.ID, Sources: ss, Targets: ts})
-	}
-	if err := CheckDerivation(existing, DerivationEdge{ID: c.ID, Sources: sources, Targets: targets}); err != nil {
+	candidate := DerivationEdge{Kind: "syncable", ID: c.ID, Sources: sources, Targets: targets}
+	if err := ReplayWithCandidate(stored, candidate); err != nil {
 		return cluster.NewConfigError(err)
 	}
 	return nil

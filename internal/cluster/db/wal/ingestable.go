@@ -206,6 +206,23 @@ func (s *Storage) reconcileIngestableList() ([]*db.IngestableWithID, error) {
 // Preflight). Returns nil for a config that failed to build on this node,
 // recorded as the loud degraded evidence.
 func (s *Storage) buildIngestable(t *cluster.Configuration) cluster.Ingestable {
+	// Deterministic producer backstop, the twin of buildSyncable's: the
+	// leader's admission check can be raced (two proposes admitted against
+	// the same applied state, both committed). Replaying the stored producer
+	// edges — both kinds jointly — in log-index order decides, identically
+	// on every node and every restart, which config a topic collision
+	// refuses: the one that landed later. Refused = persisted but degraded
+	// (no worker), so two epoch-stamping producers can never actually run on
+	// one topic. Deleting the winner un-refuses the loser at its next build
+	// (the topic's refresh epoch is topic-keyed and survives, so a promoted
+	// producer continues the same epoch space).
+	if derr := s.derivationRefusals()[db.EdgeRef{Kind: "ingestable", ID: t.ID}]; derr != nil {
+		s.recordConfigError("ingestable", t.ID, configErrBuild, derr)
+		s.logger.Error("ingestable config persisted but refused by the producer guard (degraded); use a separate topic or delete the colliding config, then re-POST",
+			zap.String("id", t.ID), zap.Error(derr))
+		return nil
+	}
+
 	_, parsed, err := s.parser.ParseIngestable(t.MimeType, t.Data)
 	if err != nil {
 		s.recordConfigError("ingestable", t.ID, configErrBuild, err)

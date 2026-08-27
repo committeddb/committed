@@ -10,6 +10,11 @@ type Parser interface {
 	AddDatabaseParser(name string, p cluster.DatabaseParser)
 	ParseDatabase(mimeType string, data []byte) (string, cluster.Database, error)
 	ParseIngestable(mimeType string, data []byte) (string, cluster.Ingestable, error)
+	// IngestableTopics reports which topics the ingestable config PRODUCES,
+	// read from the config alone (no Preflight / no source connection), so
+	// the propose path and the apply-time build guard can walk the producer
+	// graph. Returns nil for a kind whose parser can't extract topics.
+	IngestableTopics(mimeType string, data []byte) ([]string, error)
 	ParseSyncable(mimeType string, data []byte, s cluster.DatabaseStorage) (string, cluster.Syncable, cluster.SyncableMode, error)
 	// SyncableTopics reports which topics the syncable config consumes, read
 	// from the config alone (no Init / no DDL) so the propose path can enumerate

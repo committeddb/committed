@@ -106,6 +106,32 @@ func (p *IngestableParser) Parse(v *cluster.ParsedConfig) (cluster.Ingestable, e
 	return ingestable, nil
 }
 
+// TopicsFromConfig implements cluster.IngestableTopicExtractor: the topics
+// this config produces, read from the document alone — no dialect lookup, no
+// source connection. It covers both config shapes (the flat sql.topic and
+// the [[sql.topics]] array) with lenient peeks, so even a config that would
+// fail full validation still reports the topics it CLAIMS: the producer
+// guard must see a claim before deciding, not after a successful build.
+func (p *IngestableParser) TopicsFromConfig(v *cluster.ParsedConfig) []string {
+	seen := map[string]bool{}
+	var topics []string
+	add := func(t string) {
+		if t != "" && !seen[t] {
+			seen[t] = true
+			topics = append(topics, t)
+		}
+	}
+	add(v.GetString("sql.topic"))
+	var multi []struct {
+		Topic string `mapstructure:"topic"`
+	}
+	_ = v.UnmarshalKeyLenient("sql.topics", &multi) // deliberate partial decode: topic peek
+	for _, s := range multi {
+		add(s.Topic)
+	}
+	return topics
+}
+
 func (p *IngestableParser) ParseConfig(v *cluster.ParsedConfig) (*Config, Dialect, error) {
 	dialectName := v.GetString("sql.dialect")
 	dialect, ok := p.Dialects[dialectName]

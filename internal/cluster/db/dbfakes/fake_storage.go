@@ -537,6 +537,18 @@ type FakeStorage struct {
 	positionReturnsOnCall map[int]struct {
 		result1 cluster.Position
 	}
+	ProducerEdgesStub        func() ([]db.DerivationEdge, error)
+	producerEdgesMutex       sync.RWMutex
+	producerEdgesArgsForCall []struct {
+	}
+	producerEdgesReturns struct {
+		result1 []db.DerivationEdge
+		result2 error
+	}
+	producerEdgesReturnsOnCall map[int]struct {
+		result1 []db.DerivationEdge
+		result2 error
+	}
 	PutMemberPeerURLStub        func(uint64, []byte) error
 	putMemberPeerURLMutex       sync.RWMutex
 	putMemberPeerURLArgsForCall []struct {
@@ -3509,6 +3521,62 @@ func (fake *FakeStorage) PositionReturnsOnCall(i int, result1 cluster.Position) 
 	fake.positionReturnsOnCall[i] = struct {
 		result1 cluster.Position
 	}{result1}
+}
+
+func (fake *FakeStorage) ProducerEdges() ([]db.DerivationEdge, error) {
+	fake.producerEdgesMutex.Lock()
+	ret, specificReturn := fake.producerEdgesReturnsOnCall[len(fake.producerEdgesArgsForCall)]
+	fake.producerEdgesArgsForCall = append(fake.producerEdgesArgsForCall, struct {
+	}{})
+	stub := fake.ProducerEdgesStub
+	fakeReturns := fake.producerEdgesReturns
+	fake.recordInvocation("ProducerEdges", []interface{}{})
+	fake.producerEdgesMutex.Unlock()
+	if stub != nil {
+		return stub()
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeStorage) ProducerEdgesCallCount() int {
+	fake.producerEdgesMutex.RLock()
+	defer fake.producerEdgesMutex.RUnlock()
+	return len(fake.producerEdgesArgsForCall)
+}
+
+func (fake *FakeStorage) ProducerEdgesCalls(stub func() ([]db.DerivationEdge, error)) {
+	fake.producerEdgesMutex.Lock()
+	defer fake.producerEdgesMutex.Unlock()
+	fake.ProducerEdgesStub = stub
+}
+
+func (fake *FakeStorage) ProducerEdgesReturns(result1 []db.DerivationEdge, result2 error) {
+	fake.producerEdgesMutex.Lock()
+	defer fake.producerEdgesMutex.Unlock()
+	fake.ProducerEdgesStub = nil
+	fake.producerEdgesReturns = struct {
+		result1 []db.DerivationEdge
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeStorage) ProducerEdgesReturnsOnCall(i int, result1 []db.DerivationEdge, result2 error) {
+	fake.producerEdgesMutex.Lock()
+	defer fake.producerEdgesMutex.Unlock()
+	fake.ProducerEdgesStub = nil
+	if fake.producerEdgesReturnsOnCall == nil {
+		fake.producerEdgesReturnsOnCall = make(map[int]struct {
+			result1 []db.DerivationEdge
+			result2 error
+		})
+	}
+	fake.producerEdgesReturnsOnCall[i] = struct {
+		result1 []db.DerivationEdge
+		result2 error
+	}{result1, result2}
 }
 
 func (fake *FakeStorage) PutMemberPeerURL(arg1 uint64, arg2 []byte) error {

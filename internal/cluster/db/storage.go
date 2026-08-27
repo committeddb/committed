@@ -140,6 +140,12 @@ type Storage interface {
 	Databases() ([]*cluster.Configuration, error)
 	Ingestables() ([]*cluster.Configuration, error)
 	Syncables() ([]*cluster.Configuration, error)
+	// ProducerEdges enumerates the stored producer graph — deriving
+	// syncables and topic-producing ingestables, each with the raft index
+	// its current version applied at: the single edge source both admission
+	// (ReplayWithCandidate) and the build-time replay consume, so the two
+	// predicates cannot skew.
+	ProducerEdges() ([]DerivationEdge, error)
 	// SyncableExists / IngestableExists are the cheap existence point-reads
 	// behind the HTTP 404 gates (an absent id must never read as a healthy
 	// phantom).
