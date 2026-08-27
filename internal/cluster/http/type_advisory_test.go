@@ -25,6 +25,7 @@ func TestAddType_MigrationEditAdvisoryInResponseBody(t *testing.T) {
 	fake.ProposeTypeReturns(nil)
 	fake.TypeVersionsReturns([]cluster.VersionInfo{{Version: 1, Current: true}}, nil)
 	fake.ResolveTypeReturnsOnCall(1, &cluster.Type{ID: "t1", Version: 1, Schema: []byte("s"), Migration: []byte("new jq")}, nil)
+	fake.MigrationEditDependentsReturns([]cluster.DependentSyncable{{ID: "mirror", Name: "mirror"}})
 
 	body := decodeConfigWrite(t, postType(t, h, "t1"))
 	require.Equal(t, "t1", body.ID)
@@ -32,6 +33,11 @@ func TestAddType_MigrationEditAdvisoryInResponseBody(t *testing.T) {
 		"a migration-only in-place edit must carry the rebuild advisory")
 	require.Contains(t, body.Advisory, "read-models.md",
 		"the advisory must point the operator at the how-to")
+	require.Contains(t, body.Advisory, "rematerialize",
+		"the advisory names the one-verb fix")
+	require.Len(t, body.MigrationEditDependents, 1,
+		"the advisory carries the structured dependents to re-materialize")
+	require.Equal(t, "mirror", body.MigrationEditDependents[0].ID)
 }
 
 // A schema change forces a new version with its own migration — not the

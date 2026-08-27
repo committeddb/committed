@@ -274,10 +274,12 @@ func MigrationEditAdvisory(before, after *Type) string {
 		return ""
 	}
 	return "the [migration] transform was updated in place at the same version, so it " +
-		"applies only to Actuals synced from now on; rows already synced through the " +
-		"previous migration are unchanged on every projection that consumes this type's " +
-		"topic. Rebuild those projections to re-materialize already-synced history — see " +
-		"docs/read-models.md, \"Changing the rules after a projection is live\"."
+		"applies only to Actuals synced from now on; already-synced rows keep the " +
+		"previous migration's output on every always-current consumer of this " +
+		"type's topic (migrationEditDependents names them). Re-materialize each " +
+		"(POST /v1/syncable/{id}/rematerialize — keyed sinks converge in place) or " +
+		"rebuild blue-green — see docs/read-models.md, \"Changing the rules after a " +
+		"projection is live\"."
 }
 
 type TimePoint struct {

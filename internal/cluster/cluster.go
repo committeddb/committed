@@ -17,6 +17,10 @@ type Cluster interface {
 	// is refused with a StrandedSyncablesError naming them, unless the caller
 	// passes AcknowledgeStrandedSyncables (the HTTP layer's ?force=true).
 	ProposeType(ctx context.Context, c *Configuration, opts ...ProposeTypeOption) error
+	// MigrationEditDependents enumerates the always-current syncables
+	// consuming typeID's topic — the consumers an in-place migration edit
+	// leaves stale until re-materialized. Powers the POST /type advisory.
+	MigrationEditDependents(typeID string) []DependentSyncable
 	// ProposeErratum admits one append-only interpretation-registry
 	// statement (see Erratum). Immutable per id: a re-POST with different
 	// content is refused; an identical re-POST is an idempotent no-op.

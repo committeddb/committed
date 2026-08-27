@@ -44,6 +44,38 @@ func (db *DB) alwaysCurrentSyncablesOn(topicID string) ([]string, error) {
 	return ids, nil
 }
 
+// MigrationEditDependents enumerates the syncables an in-place migration
+// edit on typeID leaves stale: the ALWAYS-CURRENT consumers of the type's
+// topic (they read every Actual through the current migration chain, so an
+// edit changes their future output while rows already synced keep the old
+// transform). As-stored consumers deliver written bytes and are unaffected.
+// The POST /type handler returns these alongside the migration-edit advisory
+// so the operator knows exactly what to re-materialize.
+func (db *DB) MigrationEditDependents(typeID string) []cluster.DependentSyncable {
+	cfgs, err := db.storage.Syncables()
+	if err != nil {
+		return nil
+	}
+	var out []cluster.DependentSyncable
+	for _, cfg := range cfgs {
+		mode, merr := db.parser.SyncableMode(cfg.MimeType, cfg.Data)
+		if merr != nil || mode != cluster.ModeAlwaysCurrent {
+			continue
+		}
+		topics, terr := db.parser.SyncableTopics(cfg.MimeType, cfg.Data)
+		if terr != nil {
+			continue
+		}
+		for _, topic := range topics {
+			if topic == typeID {
+				out = append(out, cluster.DependentSyncable{ID: cfg.ID, Name: cfg.Name})
+				break
+			}
+		}
+	}
+	return out
+}
+
 func (db *DB) ProposeType(ctx context.Context, c *cluster.Configuration, opts ...cluster.ProposeTypeOption) error {
 	o := cluster.ResolveProposeTypeOptions(opts)
 	_, t, err := ParseType(c, db.storage)

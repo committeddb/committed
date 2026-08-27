@@ -242,6 +242,13 @@ type Storage interface {
 	MemberZone(id uint64) (string, bool)
 	MemberZones() map[uint64]string
 	DeleteMemberZone(id uint64) error
+	// TypeMigrationEditedAt returns the raft index of the type's latest
+	// IN-PLACE migration edit (0 = never edited in place) — the
+	// interpretation coordinate such an edit moves. SyncableInterpretation
+	// compares it against always-current consumers' pins, and the fresh-pin
+	// capture folds it in, so a migration fix flips interpretationStale
+	// exactly like an erratum does. See wal/type_migration_edit.go.
+	TypeMigrationEditedAt(typeID string) uint64
 }
 
 // lostNotifierSetter is the optional Storage extension that accepts the

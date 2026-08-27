@@ -82,6 +82,12 @@ var (
 	// placement identities zone-pinned syncables resolve their owner
 	// against. See node_zone.go.
 	memberZoneBucket = []byte("memberZones")
+	// typeMigrationEdits maps type id -> the raft index of its latest
+	// IN-PLACE migration edit (same version, migration bytes changed) — the
+	// interpretation coordinate a migration fix moves, so always-current
+	// consumers' interpretationStale can flag rows synced under the previous
+	// transform. See saveType and db.SyncableInterpretation.
+	typeMigrationEditBucket = []byte("typeMigrationEdits")
 )
 
 var (
@@ -216,7 +222,7 @@ var buckets = func() [][]byte {
 	for _, ie := range internalEntities {
 		bs = append(bs, ie.bucket)
 	}
-	return append(bs, ingestSourceSeqBucket, appliedIndexBucket, confStateBucket, eventTombstoneBucket, topicRefreshEpochBucket, memberPeerURLBucket)
+	return append(bs, ingestSourceSeqBucket, appliedIndexBucket, confStateBucket, eventTombstoneBucket, topicRefreshEpochBucket, memberPeerURLBucket, typeMigrationEditBucket)
 }()
 
 type StateType int

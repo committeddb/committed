@@ -69,6 +69,13 @@ func sweepTypeSiblingState(tx *bolt.Tx, id []byte) error {
 			return fmt.Errorf("[wal.type] sweep migration dead-letters: %w", err)
 		}
 	}
+	// The migration-edit coordinate dies with the type: a same-id recreate is
+	// a fresh interpretation lineage, not a stale one.
+	if me := tx.Bucket(typeMigrationEditBucket); me != nil {
+		if err := me.Delete(id); err != nil {
+			return fmt.Errorf("[wal.type] sweep migration-edit coordinate: %w", err)
+		}
+	}
 	// The validation tripwire's announced-shape marks die with the type, so a
 	// same-id recreate re-announces from a clean slate (contract_fingerprint.go
 	// holds the matching write-guard).

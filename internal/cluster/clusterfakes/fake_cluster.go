@@ -372,6 +372,17 @@ type FakeCluster struct {
 	membershipReturnsOnCall map[int]struct {
 		result1 cluster.Membership
 	}
+	MigrationEditDependentsStub        func(string) []cluster.DependentSyncable
+	migrationEditDependentsMutex       sync.RWMutex
+	migrationEditDependentsArgsForCall []struct {
+		arg1 string
+	}
+	migrationEditDependentsReturns struct {
+		result1 []cluster.DependentSyncable
+	}
+	migrationEditDependentsReturnsOnCall map[int]struct {
+		result1 []cluster.DependentSyncable
+	}
 	ParkedWorkersStub        func() ([]cluster.ParkedWorker, error)
 	parkedWorkersMutex       sync.RWMutex
 	parkedWorkersArgsForCall []struct {
@@ -2701,6 +2712,67 @@ func (fake *FakeCluster) MembershipReturnsOnCall(i int, result1 cluster.Membersh
 	}
 	fake.membershipReturnsOnCall[i] = struct {
 		result1 cluster.Membership
+	}{result1}
+}
+
+func (fake *FakeCluster) MigrationEditDependents(arg1 string) []cluster.DependentSyncable {
+	fake.migrationEditDependentsMutex.Lock()
+	ret, specificReturn := fake.migrationEditDependentsReturnsOnCall[len(fake.migrationEditDependentsArgsForCall)]
+	fake.migrationEditDependentsArgsForCall = append(fake.migrationEditDependentsArgsForCall, struct {
+		arg1 string
+	}{arg1})
+	stub := fake.MigrationEditDependentsStub
+	fakeReturns := fake.migrationEditDependentsReturns
+	fake.recordInvocation("MigrationEditDependents", []interface{}{arg1})
+	fake.migrationEditDependentsMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeCluster) MigrationEditDependentsCallCount() int {
+	fake.migrationEditDependentsMutex.RLock()
+	defer fake.migrationEditDependentsMutex.RUnlock()
+	return len(fake.migrationEditDependentsArgsForCall)
+}
+
+func (fake *FakeCluster) MigrationEditDependentsCalls(stub func(string) []cluster.DependentSyncable) {
+	fake.migrationEditDependentsMutex.Lock()
+	defer fake.migrationEditDependentsMutex.Unlock()
+	fake.MigrationEditDependentsStub = stub
+}
+
+func (fake *FakeCluster) MigrationEditDependentsArgsForCall(i int) string {
+	fake.migrationEditDependentsMutex.RLock()
+	defer fake.migrationEditDependentsMutex.RUnlock()
+	argsForCall := fake.migrationEditDependentsArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeCluster) MigrationEditDependentsReturns(result1 []cluster.DependentSyncable) {
+	fake.migrationEditDependentsMutex.Lock()
+	defer fake.migrationEditDependentsMutex.Unlock()
+	fake.MigrationEditDependentsStub = nil
+	fake.migrationEditDependentsReturns = struct {
+		result1 []cluster.DependentSyncable
+	}{result1}
+}
+
+func (fake *FakeCluster) MigrationEditDependentsReturnsOnCall(i int, result1 []cluster.DependentSyncable) {
+	fake.migrationEditDependentsMutex.Lock()
+	defer fake.migrationEditDependentsMutex.Unlock()
+	fake.MigrationEditDependentsStub = nil
+	if fake.migrationEditDependentsReturnsOnCall == nil {
+		fake.migrationEditDependentsReturnsOnCall = make(map[int]struct {
+			result1 []cluster.DependentSyncable
+		})
+	}
+	fake.migrationEditDependentsReturnsOnCall[i] = struct {
+		result1 []cluster.DependentSyncable
 	}{result1}
 }
 

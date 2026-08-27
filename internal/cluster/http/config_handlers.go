@@ -39,6 +39,11 @@ type ConfigWriteResponse struct {
 	// (see cluster.MigrationEditAdvisory). The write itself succeeded; the
 	// advisory is informational.
 	Advisory string `json:"advisory,omitempty"`
+	// MigrationEditDependents accompanies the migration-edit advisory: the
+	// always-current syncables consuming the edited type's topic, each of
+	// which must be re-materialized (POST /v1/syncable/{id}/rematerialize)
+	// or rebuilt for the migration fix to reach already-synced rows.
+	MigrationEditDependents []cluster.DependentSyncable `json:"migrationEditDependents,omitempty"`
 	// Warnings, when present, are non-fatal deprecation notices about the
 	// config document as posted — currently, the "sql-projection" syncable
 	// type spelling (canonical: "projection"). The write itself succeeded
@@ -143,8 +148,10 @@ func (h *HTTP) addTypeConfig() httpgo.HandlerFunc {
 		after, _ := h.c.ResolveType(cluster.LatestTypeRef(c.ID))
 		if adv := cluster.MigrationEditAdvisory(before, after); adv != "" {
 			resp.Advisory = adv
-			zap.L().Warn("in-place type migration edit accepted: applies to new Actuals only — rebuild dependent projections to re-materialize already-synced history",
-				zap.String("type", c.ID))
+			resp.MigrationEditDependents = h.c.MigrationEditDependents(c.ID)
+			zap.L().Warn("in-place type migration edit accepted: applies to new Actuals only — re-materialize the dependent always-current syncables for the fix to reach already-synced history",
+				zap.String("type", c.ID),
+				zap.Int("dependents", len(resp.MigrationEditDependents)))
 		}
 
 		writeJSONStatus(w, httpgo.StatusOK, resp)

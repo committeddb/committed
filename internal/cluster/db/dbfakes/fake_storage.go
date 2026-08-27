@@ -827,6 +827,17 @@ type FakeStorage struct {
 		result1 []cluster.TypeMigrationDeadLetter
 		result2 error
 	}
+	TypeMigrationEditedAtStub        func(string) uint64
+	typeMigrationEditedAtMutex       sync.RWMutex
+	typeMigrationEditedAtArgsForCall []struct {
+		arg1 string
+	}
+	typeMigrationEditedAtReturns struct {
+		result1 uint64
+	}
+	typeMigrationEditedAtReturnsOnCall map[int]struct {
+		result1 uint64
+	}
 	TypeVersionStub        func(string, uint64) (*cluster.Configuration, error)
 	typeVersionMutex       sync.RWMutex
 	typeVersionArgsForCall []struct {
@@ -4898,6 +4909,67 @@ func (fake *FakeStorage) TypeMigrationDeadLettersReturnsOnCall(i int, result1 []
 		result1 []cluster.TypeMigrationDeadLetter
 		result2 error
 	}{result1, result2}
+}
+
+func (fake *FakeStorage) TypeMigrationEditedAt(arg1 string) uint64 {
+	fake.typeMigrationEditedAtMutex.Lock()
+	ret, specificReturn := fake.typeMigrationEditedAtReturnsOnCall[len(fake.typeMigrationEditedAtArgsForCall)]
+	fake.typeMigrationEditedAtArgsForCall = append(fake.typeMigrationEditedAtArgsForCall, struct {
+		arg1 string
+	}{arg1})
+	stub := fake.TypeMigrationEditedAtStub
+	fakeReturns := fake.typeMigrationEditedAtReturns
+	fake.recordInvocation("TypeMigrationEditedAt", []interface{}{arg1})
+	fake.typeMigrationEditedAtMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeStorage) TypeMigrationEditedAtCallCount() int {
+	fake.typeMigrationEditedAtMutex.RLock()
+	defer fake.typeMigrationEditedAtMutex.RUnlock()
+	return len(fake.typeMigrationEditedAtArgsForCall)
+}
+
+func (fake *FakeStorage) TypeMigrationEditedAtCalls(stub func(string) uint64) {
+	fake.typeMigrationEditedAtMutex.Lock()
+	defer fake.typeMigrationEditedAtMutex.Unlock()
+	fake.TypeMigrationEditedAtStub = stub
+}
+
+func (fake *FakeStorage) TypeMigrationEditedAtArgsForCall(i int) string {
+	fake.typeMigrationEditedAtMutex.RLock()
+	defer fake.typeMigrationEditedAtMutex.RUnlock()
+	argsForCall := fake.typeMigrationEditedAtArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeStorage) TypeMigrationEditedAtReturns(result1 uint64) {
+	fake.typeMigrationEditedAtMutex.Lock()
+	defer fake.typeMigrationEditedAtMutex.Unlock()
+	fake.TypeMigrationEditedAtStub = nil
+	fake.typeMigrationEditedAtReturns = struct {
+		result1 uint64
+	}{result1}
+}
+
+func (fake *FakeStorage) TypeMigrationEditedAtReturnsOnCall(i int, result1 uint64) {
+	fake.typeMigrationEditedAtMutex.Lock()
+	defer fake.typeMigrationEditedAtMutex.Unlock()
+	fake.TypeMigrationEditedAtStub = nil
+	if fake.typeMigrationEditedAtReturnsOnCall == nil {
+		fake.typeMigrationEditedAtReturnsOnCall = make(map[int]struct {
+			result1 uint64
+		})
+	}
+	fake.typeMigrationEditedAtReturnsOnCall[i] = struct {
+		result1 uint64
+	}{result1}
 }
 
 func (fake *FakeStorage) TypeVersion(arg1 string, arg2 uint64) (*cluster.Configuration, error) {

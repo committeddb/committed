@@ -148,5 +148,45 @@ func (db *DB) SyncableInterpretation(id string) (uint64, bool, error) {
 			return pin, true, nil
 		}
 	}
+	// An in-place MIGRATION edit is the other way the current reading of a
+	// topic's history changes (errata rebind stamps; a migration edit
+	// rewrites the always-current transform). It moves the same coordinate:
+	// an always-current consumer pinned below the edit has rows synced under
+	// the previous transform — stale until re-materialized. As-stored
+	// consumers deliver written bytes and never apply migrations, so the
+	// edit cannot stale them.
+	if mode, merr := db.parser.SyncableMode(cfg.MimeType, cfg.Data); merr == nil && mode == cluster.ModeAlwaysCurrent {
+		for _, topic := range topics {
+			if db.storage.TypeMigrationEditedAt(topic) > pin {
+				return pin, true, nil
+			}
+		}
+	}
 	return pin, false, nil
+}
+
+// freshInterpretationPin is the interpretation coordinate a syncable
+// materialization STARTING NOW is derived under: the errata registry
+// highwater joined with the latest in-place migration-edit index of each
+// consumed topic. A fresh worker (no checkpoint — replaying from index 0)
+// pins here: its replay reads everything through the CURRENT readings, so
+// neither an already-applied erratum nor an already-applied migration edit
+// may flag it stale. The mode does not matter for the pin — a higher pin
+// never creates false staleness, it only records what "current" meant.
+func (db *DB) freshInterpretationPin(id string) uint64 {
+	pin := db.storage.InterpretationRegistry().Highwater()
+	cfg := db.currentSyncableConfig(id)
+	if cfg == nil {
+		return pin
+	}
+	topics, err := db.parser.SyncableTopics(cfg.MimeType, cfg.Data)
+	if err != nil {
+		return pin
+	}
+	for _, topic := range topics {
+		if e := db.storage.TypeMigrationEditedAt(topic); e > pin {
+			pin = e
+		}
+	}
+	return pin
 }

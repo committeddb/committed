@@ -600,7 +600,7 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 			if ck, ok := db.storage.SyncableCheckpoint(id); ok {
 				interpPin = ck.InterpretationIndex
 			} else {
-				interpPin = db.storage.InterpretationRegistry().Highwater()
+				interpPin = db.freshInterpretationPin(id)
 			}
 			cp, head, _ := db.SyncableProgress(id)
 			db.logger.Info("starting sync", zap.String("id", id),
@@ -1073,7 +1073,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 			if ck, ok := db.storage.SyncableCheckpoint(id); ok {
 				interpPin = ck.InterpretationIndex
 			} else {
-				interpPin = db.storage.InterpretationRegistry().Highwater()
+				interpPin = db.freshInterpretationPin(id)
 			}
 			cp, head, _ := db.SyncableProgress(id)
 			db.logger.Info("starting sync", zap.String("id", id),

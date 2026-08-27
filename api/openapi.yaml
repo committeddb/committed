@@ -2568,6 +2568,23 @@ components:
             only on a `POST /type/{id}` that changed just the `[migration]`
             transform in place (schema and version unchanged). The write
             succeeded; the advisory is informational.
+        migrationEditDependents:
+          type: array
+          description: |
+            Accompanies the migration-edit advisory: the always-current
+            syncables consuming the edited type's topic. Each must be
+            re-materialized (`POST /v1/syncable/{id}/rematerialize` — keyed
+            sinks converge in place) or rebuilt for the migration fix to
+            reach rows already synced through the previous transform.
+            As-stored consumers deliver written bytes and are unaffected.
+          items:
+            type: object
+            required: [id, name]
+            properties:
+              id:
+                type: string
+              name:
+                type: string
         warnings:
           type: array
           items:
@@ -2860,11 +2877,13 @@ components:
         interpretationStale:
           type: boolean
           description: |
-            True when an erratum affecting a consumed topic landed past
-            `interpretationPin`: rows already synced were derived under a
-            superseded reading and stay that way until the operator
-            re-derives (POST .../rematerialize, or a blue-green rebuild).
-            Staleness is loud and queryable, never auto-healed. Always present.
+            True when the reading of a consumed topic changed past
+            `interpretationPin` — an erratum landed, or a type's [migration]
+            was edited in place (always-current consumers only): rows
+            already synced were derived under a superseded reading and stay
+            that way until the operator re-derives (POST .../rematerialize,
+            or a blue-green rebuild). Staleness is loud and queryable, never
+            auto-healed. Always present.
         rematerializing:
           type: boolean
           description: |

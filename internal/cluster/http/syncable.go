@@ -366,10 +366,12 @@ type SyncableStatusResponse struct {
 	Lag             uint64 `json:"lag"`
 	CaughtUp        bool   `json:"caughtUp"`
 
-	// InterpretationPin is the errata-registry index this syncable's current
-	// materialization began under (the second half of the determinism pair —
-	// 0 = pinned before any errata existed). InterpretationStale is true when
-	// an erratum affecting a consumed topic landed past the pin: some
+	// InterpretationPin is the interpretation coordinate this syncable's
+	// current materialization began under (the second half of the
+	// determinism pair — 0 = pinned before any interpretation revisions
+	// existed). InterpretationStale is true when the reading of a consumed
+	// topic changed past the pin — an erratum landed, or a type's
+	// [migration] was edited in place (always-current consumers only): some
 	// already-synced rows were derived under a superseded reading and stay
 	// that way until the operator re-derives (staleness is loud and
 	// queryable, never auto-healed).
