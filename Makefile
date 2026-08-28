@@ -146,8 +146,23 @@ test/upgrade:
 # majority, restarts the follower over its data dir, and asserts WAL replay +
 # catch-up; plus the restart-after-grow wedge (grow 3->4, restart every node
 # without updating COMMITTED_PEERS). No Docker. See e2e/multinode.
+# Hot-path micro-benchmarks with REAL fsyncs — the numbers behind
+# docs/operations/performance.md. Run before/after a write/apply/read-path
+# change and compare with benchstat; CI runs this on every push/PR so each
+# commit's log carries its numbers.
+bench:
+	go test -bench=. -benchtime=1s -run='^$$' ./internal/cluster/db/wal/ ./internal/cluster/db/ ./internal/cluster/ ./internal/cluster/interpretation/
+
 test/multinode:
 	go test -tags multinode -p=1 -timeout 600s ./e2e/multinode/...
+
+# The 3-node HTTP throughput report by itself, with the THROUGHPUT REPORT
+# line surfaced (t.Logf is invisible without -v, and -v drowns the line in
+# per-node logs — so capture and grep). Falls back to the full log when the
+# line is absent (build failure etc.).
+bench/multinode:
+	@log=$$(mktemp); go test -tags multinode -run TestMultiNodeThroughput_Report -p=1 -timeout 300s -v ./e2e/multinode/ >$$log 2>&1; \
+	status=$$?; grep -E "THROUGHPUT REPORT|--- PASS|--- FAIL" $$log || cat $$log; rm -f $$log; exit $$status
 
 # Backup/restore round-trip: builds the real binary, boots a node, writes
 # state, asserts backup refuses a live node, stops it, backs it up, restores

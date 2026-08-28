@@ -34,7 +34,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -162,6 +164,77 @@ func TestMultiNodeRestartAfterGrow_ReformsWithoutPeersUpdate(t *testing.T) {
 	for _, n := range all {
 		requireTypeListed(t, n.base(), "post-grow-restart")
 	}
+}
+
+// TestMultiNodeThroughput_Report is a MEASUREMENT, not a gate: it bursts
+// data-plane proposals through a real 3-node cluster (round-robin across
+// nodes, so ~2/3 exercise follower→leader forwarding) and reports wall-clock
+// throughput and per-request latency percentiles for the published envelope
+// (docs/operations/performance.md). The only assertion is an
+// order-of-magnitude sanity floor — shared CI runners make percent-level
+// thresholds flake (the lesson of the mysql-speedup incident), so
+// release-to-release comparison happens on the reported numbers, not in an
+// assert.
+func TestMultiNodeThroughput_Report(t *testing.T) {
+	const workers, perWorker = 8, 25
+
+	buildBinary(t)
+	nodes := startCluster(t, 3)
+	postType(t, nodes[0].base(), "bench")
+	for _, n := range nodes {
+		requireTypeListed(t, n.base(), "bench")
+	}
+
+	var mu sync.Mutex
+	latencies := make([]time.Duration, 0, workers*perWorker)
+	start := time.Now()
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		w := w
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < perWorker; i++ {
+				base := nodes[(w+i)%len(nodes)].base()
+				t0 := time.Now()
+				postProposal(t, base, "bench", fmt.Sprintf("k-%d-%d", w, i))
+				d := time.Since(t0)
+				mu.Lock()
+				latencies = append(latencies, d)
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	wall := time.Since(start)
+
+	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+	total := len(latencies)
+	p50, p99 := latencies[total/2], latencies[total*99/100]
+	perSec := float64(total) / wall.Seconds()
+	t.Logf("THROUGHPUT REPORT: %d proposals, %d workers, wall=%s, %.0f proposals/sec, p50=%s, p99=%s",
+		total, workers, wall.Round(time.Millisecond), perSec, p50.Round(time.Millisecond), p99.Round(time.Millisecond))
+
+	require.Greater(t, perSec, 5.0,
+		"order-of-magnitude floor only: a real regression to single-digit throughput means the write path lost its fsync coalescing")
+}
+
+// postProposal writes one 256-byte data-plane proposal to topic via base.
+func postProposal(t *testing.T, base, topic, key string) {
+	t.Helper()
+	body := fmt.Sprintf(`{"entities":[{"typeId":%q,"key":%q,"data":{"pad":%q}}]}`,
+		topic, key, strings.Repeat("x", 256))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/v1/proposal", strings.NewReader(body))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	require.GreaterOrEqualf(t, resp.StatusCode, 200, "POST proposal: %d %s", resp.StatusCode, out)
+	require.Lessf(t, resp.StatusCode, 300, "POST proposal: %d %s", resp.StatusCode, out)
 }
 
 // --- harness ---

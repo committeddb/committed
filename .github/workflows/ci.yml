@@ -101,6 +101,23 @@ jobs:
   # doesn't cancel the others (we want every shard's evidence). Limit to main
   # pushes and manual dispatch to keep PR feedback fast; rely on lint + test
   # for the PR gate.
+  # Hot-path benchmarks (real fsyncs): propose→apply round-trip, apply
+  # per-entry vs batched, reader catch-up, ingest shape. No thresholds — the
+  # log IS the artifact (see docs/operations/performance.md for why
+  # percent-level gates flake on shared runners); compare two runs' logs
+  # with benchstat.
+  bench:
+    name: bench
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      - run: make bench
+
   # Multi-node crash-recovery e2e: real binaries, real WAL on disk, real
   # process crashes. Guards WAL-replay-then-catch-up (SIGKILL a follower,
   # advance the majority, restart over the data dir) and restart-after-grow
@@ -120,6 +137,10 @@ jobs:
           go-version: "1.26.x"
           check-latest: true
       - run: make test/multinode
+      # Re-run just the throughput report with its log line surfaced, so
+      # every commit's CI log carries the 3-node number (the suite run above
+      # hides t.Logf on pass).
+      - run: make bench/multinode
 
   # The adversarial suite guards the raft safety invariants (partition,
   # leader flap, concurrent config changes, read-index safety). PRs run a
