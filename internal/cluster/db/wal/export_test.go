@@ -407,3 +407,9 @@ func (s *Storage) DeleteTypeRecordBypassingCacheForTest(id string) error {
 func (s *Storage) RetryDegradedBuildsForTest() {
 	s.retryDegradedBuilds()
 }
+
+// SetEntryReadRaceHookForTest installs (or, with nil, clears) the injection
+// hook that fires inside Term/Entries between their bounds checks and the
+// entry reads — the seam the racing-mutation fallback tests use to land a
+// concurrent Compact or full-wipe conflicting append mid-read.
+func SetEntryReadRaceHookForTest(f func()) { entryReadRaceTestHook = f }

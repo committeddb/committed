@@ -1267,12 +1267,22 @@ func (s *Storage) InitialState() (*pb.HardState, *pb.ConfState, error) {
 // the compacted-dummy per existing wal.Storage semantics. On a
 // post-compact storage, compactedUpTo dominates and the boundary
 // moves with each Compact without disturbing the seq mapping.
+// entryReadRaceTestHook, when set (tests only), runs after Term/Entries pass
+// their initial bounds checks and before the entry reads — the injection
+// point for the racing-mutation fallback tests: a concurrent Compact or
+// full-wipe conflicting append landing mid-read must surface as a bare raft
+// sentinel, never a wrapped error, which etcd raft would panic on.
+var entryReadRaceTestHook func()
+
 func (s *Storage) Entries(lo, hi, maxSize uint64) ([]*pb.Entry, error) {
 	var totalSize uint64
 
 	firstIndex := s.firstIndex.Load()
 	if lo <= s.boundary() {
 		return nil, raft.ErrCompacted
+	}
+	if entryReadRaceTestHook != nil {
+		entryReadRaceTestHook()
 	}
 
 	var es []*pb.Entry
@@ -1289,6 +1299,15 @@ func (s *Storage) Entries(lo, hi, maxSize uint64) ([]*pb.Entry, error) {
 			// the sentinel if the range's head is now compacted. A failure with
 			// the boundary UNMOVED is genuine corruption and still propagates.
 			if lo <= s.boundary() {
+				return nil, raft.ErrCompacted
+			}
+			if s.lastIndex.Load() < hi-1 {
+				// A racing full-wipe conflicting append (appendEntries'
+				// resetEntryLogToEmpty arm) SHRANK the log between the
+				// bounds check and this read. ErrCompacted, not
+				// ErrUnavailable: raftLog.slice tolerates Compacted from
+				// Entries but panics on Unavailable — either way the caller
+				// re-probes against the new bounds on its next call.
 				return nil, raft.ErrCompacted
 			}
 			return nil, err
@@ -1421,6 +1440,9 @@ func (s *Storage) Term(i uint64) (uint64, error) {
 	if i == 0 {
 		return 0, nil
 	}
+	if entryReadRaceTestHook != nil {
+		entryReadRaceTestHook()
+	}
 
 	logIndex := i - firstIndex + 1
 	e, _, err := s.entry(logIndex)
@@ -1430,6 +1452,13 @@ func (s *Storage) Term(i uint64) (uint64, error) {
 		// raft compares it directly, so it must not be wrapped.
 		if i < s.boundary() {
 			return 0, raft.ErrCompacted
+		}
+		if i > s.lastIndex.Load() {
+			// A racing full-wipe conflicting append (appendEntries'
+			// resetEntryLogToEmpty arm) shrank the log between the bounds
+			// check and this read; raftLog.term handles Unavailable
+			// gracefully.
+			return 0, raft.ErrUnavailable
 		}
 		return 0, fmt.Errorf("wal index %d: %w", logIndex, err)
 	}

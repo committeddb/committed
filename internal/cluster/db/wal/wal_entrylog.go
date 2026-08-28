@@ -503,9 +503,26 @@ func (s *Storage) appendEntries(ents []*pb.Entry) error {
 			lostIDs = s.collectTruncatedRequestIDs(offset+1, l)
 		}
 
-		err := s.EntryLog.TruncateBack(offset)
-		if err != nil {
-			return err
+		if offset == 0 {
+			// The conflict overwrites EVERY retained entry — a higher-term
+			// leader replacing a fully-uncommitted log, the contested-first-
+			// election shape. tidwall's TruncateBack cannot express an empty
+			// log (index 0 is out of range), so swap in a fresh one (the
+			// same crash-safe dir swap the recovery paths use; a crash
+			// before the batch write below leaves an empty log + durable
+			// HardState, which reopen tolerates and the leader re-fills)
+			// and let the fresh-log branch below re-establish the seq
+			// mapping from the new entries. Found by the storage
+			// differential's conflict op: before this, the Save failed
+			// ErrOutOfRange and wedged the node mid-election.
+			if err := s.resetEntryLogToEmpty(); err != nil {
+				return err
+			}
+			firstIndex, lastIndex = 0, 0
+		} else {
+			if err := s.EntryLog.TruncateBack(offset); err != nil {
+				return err
+			}
 		}
 
 		// Signal only after the truncation actually executed, so a waiter
