@@ -101,9 +101,35 @@ jobs:
   # doesn't cancel the others (we want every shard's evidence). Limit to main
   # pushes and manual dispatch to keep PR feedback fast; rely on lint + test
   # for the PR gate.
+  # Multi-node crash-recovery e2e: real binaries, real WAL on disk, real
+  # process crashes. Guards WAL-replay-then-catch-up (SIGKILL a follower,
+  # advance the majority, restart over the data dir) and restart-after-grow
+  # (grow 3->4, restart every node without updating COMMITTED_PEERS) — the
+  # durability paths the in-process suites cannot reach (their "restarts"
+  # reuse in-RAM raft storage). No Docker; gates every push/PR. This harness
+  # caught the never-compacted-log grow panic ("need non-empty snapshot") the day it
+  # was written.
+  test-multinode:
+    name: test (multinode)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      - run: make test/multinode
+
+  # The adversarial suite guards the raft safety invariants (partition,
+  # leader flap, concurrent config changes, read-index safety). PRs run a
+  # REDUCED pass — count=1 per shard, 4 parallel shards ≈ 4 iterations —
+  # so a consensus-safety regression or an obvious new flake surfaces
+  # before merge instead of after landing on main (there is no branch
+  # protection; CI is the visibility layer). Pushes keep the full flake
+  # gate: count=5 x 4 shards = 20 iterations.
   test-adversarial:
     name: test (adversarial ${{ matrix.shard }}/4)
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -116,7 +142,7 @@ jobs:
         with:
           go-version: "1.26.x"
           check-latest: true
-      - run: make test/adversarial ADVERSARIAL_COUNT=5
+      - run: make test/adversarial ADVERSARIAL_COUNT=${{ github.event_name == 'pull_request' && '1' || '5' }}
 
   # Scan the runtime image for known-vulnerable OS packages and Go
   # modules. Trivy reads the GitHub Advisory DB + NVD — the same advisory

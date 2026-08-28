@@ -798,7 +798,18 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 			return nil, err
 		}
 		ws.firstIndex.Store(fe.GetIndex() - fi + 1)
-		ws.compactedUpTo.Store(fe.GetIndex())
+		// The first retained entry is the compaction/install dummy ONLY when
+		// the log no longer starts at raft index 1: Compact retains the
+		// boundary entry and a snapshot install writes one, both above 1 in
+		// any history that needed them. A log still holding index 1 was
+		// never meaningfully compacted (a Compact at exactly 1 removes
+		// nothing), so its boundary is the virtual genesis dummy at 0 and
+		// entry 1 stays servable to a from-scratch joiner — see boundary().
+		if fe.GetIndex() > 1 {
+			ws.compactedUpTo.Store(fe.GetIndex())
+		} else {
+			ws.compactedUpTo.Store(0)
+		}
 	}
 
 	li, err := entryLog.LastIndex()
@@ -1301,13 +1312,40 @@ func (s *Storage) Entries(lo, hi, maxSize uint64) ([]*pb.Entry, error) {
 // seq mapping, compactedUpTo moves with each Compact. max() collapses
 // them to a single boundary for callers that only care about the
 // compaction view.
+// boundary returns the compaction dummy's raft index — the index just below
+// the first servable entry, whose term Term() can still answer. That pairing
+// is the etcd Storage contract: Term(FirstIndex()-1) must succeed so a
+// leader can build the prevLog header for its very first sendable entry.
+//
+// Three regimes:
+//   - compacted or snapshot-installed (compactedUpTo > 0): the dummy is the
+//     RETAINED entry at compactedUpTo (Compact keeps the entry at the
+//     boundary; a snapshot install writes one).
+//   - never compacted, entries present: the dummy is VIRTUAL — raft index 0
+//     with term 0, the base every raft log grows from. Reporting firstIndex
+//     itself here (the old behavior) declared the first real entry
+//     unservable and Term(0) compacted, so a leader on a young,
+//     never-compacted cluster PANICKED ("need non-empty snapshot") the
+//     moment a joining member needed the log from index 1 — real-binary
+//     cluster grow was broken until the first compaction produced a
+//     snapshot to fall back on.
+//   - empty log: 0, same as the virtual dummy.
+//
+// compactedUpTo == 0 implies firstIndex <= 1: an empty follower rejects any
+// append whose prevIndex it lacks, so a first append always starts at raft
+// index 1, and every path that starts a log higher — snapshot install,
+// Compact — sets compactedUpTo. The fi > 1 arm is a defensive belt for a
+// state that should not exist: fall back to the old conservative answer
+// (treat the first entry as the dummy) rather than claim servability.
 func (s *Storage) boundary() uint64 {
-	fi := s.firstIndex.Load()
 	cu := s.compactedUpTo.Load()
-	if cu > fi {
+	if cu > 0 {
 		return cu
 	}
-	return fi
+	if fi := s.firstIndex.Load(); fi > 1 {
+		return fi
+	}
+	return 0
 }
 
 // Returns the entry, the size of the entry (in bytes) before being unmarshalled, and an error
@@ -1375,6 +1413,15 @@ func (s *Storage) Term(i uint64) (uint64, error) {
 		return 0, raft.ErrUnavailable
 	}
 
+	// The virtual index-0 dummy: on a never-compacted log the boundary is
+	// raft index 0, whose term is 0 by axiom — there is no wal entry to
+	// read. This is what lets a leader answer Term(0) and serve the log
+	// from index 1 to a joining member instead of panicking for a snapshot
+	// it does not have.
+	if i == 0 {
+		return 0, nil
+	}
+
 	logIndex := i - firstIndex + 1
 	e, _, err := s.entry(logIndex)
 	if err != nil {
@@ -1394,11 +1441,12 @@ func (s *Storage) LastIndex() (uint64, error) {
 	return s.lastIndex.Load(), nil
 }
 
-// FirstIndex returns the first raft index that Entries can return.
-// The entry at index boundary() is retained for Term() match checks
-// (the compacted-dummy semantic etcd raft expects) but is not
-// returnable via Entries — so the first readable index is
-// boundary()+1.
+// FirstIndex returns the first raft index that Entries can return:
+// boundary()+1. The dummy at boundary() answers Term() but is not
+// returnable via Entries — a retained entry after a Compact or install,
+// or the VIRTUAL index-0/term-0 base on a never-compacted log (which is
+// what lets a leader serve such a log from index 1 to a joining member;
+// see boundary()).
 func (s *Storage) FirstIndex() (uint64, error) {
 	return s.boundary() + 1, nil
 }

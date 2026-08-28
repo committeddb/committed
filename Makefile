@@ -141,6 +141,14 @@ test/cdc:
 test/upgrade:
 	go test -tags upgrade -p=1 -timeout 300s ./e2e/upgrade/...
 
+# Multi-node crash-recovery e2e: builds the real binary, boots a real 3-node
+# cluster over COMMITTED_PEERS, SIGKILLs a follower, advances the log on the
+# majority, restarts the follower over its data dir, and asserts WAL replay +
+# catch-up; plus the restart-after-grow wedge (grow 3->4, restart every node
+# without updating COMMITTED_PEERS). No Docker. See e2e/multinode.
+test/multinode:
+	go test -tags multinode -p=1 -timeout 600s ./e2e/multinode/...
+
 # Backup/restore round-trip: builds the real binary, boots a node, writes
 # state, asserts backup refuses a live node, stops it, backs it up, restores
 # into a fresh dir, boots a node on it, and confirms the state survived (see
