@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/ingestable/ingesttest"
 	"github.com/committeddb/committed/internal/cluster/ingestable/sql"
 	"github.com/committeddb/committed/internal/cluster/ingestable/sql/dialectpb"
 	"github.com/committeddb/committed/internal/cluster/ingestable/sql/mysql"
@@ -96,6 +97,28 @@ func TestMain(m *testing.M) {
 
 	// Ryuk (the testcontainers reaper) handles cleanup automatically.
 	os.Exit(code)
+}
+
+// awaitStreaming drives ingesttest.Await with the MySQL streaming-checkpoint
+// predicate: a binlog coordinate (Name set) that is not snapshot progress —
+// the shape a commit flush checkpoints. Per the cluster.Ingestable contract
+// the commit checkpoint rides the transaction's final proposal, with the
+// position channel carrying only checkpoints with no proposal to ride.
+func awaitStreaming(t *testing.T, pr <-chan *cluster.Proposal, po <-chan cluster.Position,
+	timeout time.Duration, keys ...string,
+) ingesttest.Result {
+	t.Helper()
+	return ingesttest.Await(t, pr, po, timeout, isStreamingPosition, keys...)
+}
+
+// isStreamingPosition reports whether pos decodes as a pure streaming binlog
+// checkpoint (a binlog coordinate that is not snapshot progress).
+func isStreamingPosition(pos cluster.Position) bool {
+	pp := &dialectpb.MySQLBinLogPosition{}
+	if err := proto.Unmarshal(pos, pp); err != nil {
+		return false
+	}
+	return pp.Name != "" && pp.SnapshotProgress == nil
 }
 
 func TestMysqlDialect(t *testing.T) {
@@ -695,21 +718,7 @@ func TestMysqlTransactionGrouping(t *testing.T) {
 
 	// Wait for the sentinel row to arrive — this means the snapshot
 	// phase is complete and canal is tailing the binlog.
-	deadline := time.After(15 * time.Second)
-	sentinelSeen := false
-	for !sentinelSeen {
-		select {
-		case p := <-proposalChan:
-			for _, e := range p.Entities {
-				if string(e.Key) == "sentinel" {
-					sentinelSeen = true
-				}
-			}
-		case <-positionChan:
-		case <-deadline:
-			t.Fatal("timed out waiting for sentinel row from snapshot")
-		}
-	}
+	ingesttest.Await(t, proposalChan, positionChan, 15*time.Second, nil, "sentinel")
 
 	// Insert 10 rows in a single transaction.
 	db = createDB(t)
@@ -723,44 +732,35 @@ func TestMysqlTransactionGrouping(t *testing.T) {
 	require.NoError(t, err)
 	db.Close()
 
-	// Collect the transaction proposal. Because all 10 rows are in one
-	// MySQL transaction, they must arrive as a single proposal.
-	deadline = time.After(15 * time.Second)
-	var txProposal *cluster.Proposal
-	for txProposal == nil {
-		select {
-		case p := <-proposalChan:
-			// The snapshot's refresh-boundary marker (its own single-entity
-			// proposal) is still buffered after the sentinel loop — skip it so
-			// txProposal is the 10-row transaction, not the marker.
-			if isRefreshMarkerProposal(p) {
-				continue
-			}
-			txProposal = p
-		case <-positionChan:
-		case <-deadline:
-			t.Fatal("timed out waiting for transaction proposal")
-		}
+	// Collect the transaction proposal and its commit checkpoint. Because all
+	// 10 rows are in one MySQL transaction, they must arrive as a single
+	// proposal, and the checkpoint rides it (positionChan is the fallback only
+	// for an empty-flush commit). The snapshot's refresh-boundary marker (its
+	// own single-entity proposal) may still be buffered after the sentinel
+	// wait — collected here, skipped below.
+	txKeys := make([]string, 10)
+	for i := range txKeys {
+		txKeys[i] = fmt.Sprintf("tx%d", i)
 	}
+	res := awaitStreaming(t, proposalChan, positionChan, 15*time.Second, txKeys...)
+	var txProposal *cluster.Proposal
+	for _, p := range res.Proposals {
+		if isRefreshMarkerProposal(p) {
+			continue
+		}
+		require.Nil(t, txProposal, "expected all 10 rows from one transaction in a single proposal")
+		txProposal = p
+	}
+	require.NotNil(t, txProposal)
 
 	require.Len(t, txProposal.Entities, 10,
 		"expected all 10 rows from one transaction in a single proposal")
 
-	keys := make(map[string]bool)
-	for _, e := range txProposal.Entities {
-		keys[string(e.Key)] = true
-	}
 	for i := 0; i < 10; i++ {
-		require.True(t, keys[fmt.Sprintf("tx%d", i)], "missing key tx%d", i)
+		require.True(t, res.Seen[fmt.Sprintf("tx%d", i)], "missing key tx%d", i)
 	}
 
-	// A position must have been checkpointed for the committed transaction.
-	select {
-	case pos := <-positionChan:
-		require.NotEmpty(t, pos, "expected a non-empty post-commit position")
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for post-commit position")
-	}
+	require.NotEmpty(t, res.Position, "expected a checkpointed post-commit position")
 }
 
 // TestMysqlStreamingDelete verifies a source DELETE on the binlog stream is
@@ -1308,39 +1308,12 @@ func TestMysqlDDLDrift_OldImageDecodesAgainstWriteTimeSchema(t *testing.T) {
 	po1 := make(chan cluster.Position, 10)
 	go func() { _ = (&mysql.MySQLDialect{}).Ingest(ctx1, config, nil, 0, pr1, po1) }()
 
-	seen := map[string]bool{}
-	deadline := time.After(15 * time.Second)
-	for !seen["seed"] {
-		select {
-		case p := <-pr1:
-			for _, e := range p.Entities {
-				seen[string(e.Key)] = true
-			}
-		case <-po1:
-		case <-deadline:
-			t.Fatal("timed out waiting for the seed snapshot")
-		}
-	}
+	ingesttest.Await(t, pr1, po1, 15*time.Second, nil, "seed")
 	db = createDB(t)
 	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (a, b) VALUES ('marker', 'm');", table))
 	require.NoError(t, err)
 	db.Close()
-	var pos cluster.Position
-	deadline = time.After(15 * time.Second)
-	for !seen["marker"] || pos == nil {
-		select {
-		case p := <-pr1:
-			for _, e := range p.Entities {
-				seen[string(e.Key)] = true
-			}
-		case pp := <-po1:
-			if seen["marker"] {
-				pos = pp
-			}
-		case <-deadline:
-			t.Fatal("timed out waiting for the marker + a streaming position")
-		}
-	}
+	pos := awaitStreaming(t, pr1, po1, 15*time.Second, "marker").Position
 	cancel1()
 
 	// While ingest is stopped: write old-schema (a,b) rows, THEN change column
@@ -1365,7 +1338,7 @@ func TestMysqlDDLDrift_OldImageDecodesAgainstWriteTimeSchema(t *testing.T) {
 
 	got := map[string]string{}
 	sawSeed := false
-	deadline = time.After(20 * time.Second)
+	deadline := time.After(20 * time.Second)
 	for len(got) < 5 {
 		select {
 		case p := <-pr2:
@@ -1439,39 +1412,12 @@ func TestMysqlPrimaryKeyDrift_ParksInsteadOfCollapsing(t *testing.T) {
 	po1 := make(chan cluster.Position, 10)
 	go func() { _ = (&mysql.MySQLDialect{}).Ingest(ctx1, config, nil, 0, pr1, po1) }()
 
-	seen := map[string]bool{}
-	deadline := time.After(15 * time.Second)
-	for !seen["seed"] {
-		select {
-		case p := <-pr1:
-			for _, e := range p.Entities {
-				seen[string(e.Key)] = true
-			}
-		case <-po1:
-		case <-deadline:
-			t.Fatal("timed out waiting for the seed snapshot")
-		}
-	}
+	ingesttest.Await(t, pr1, po1, 15*time.Second, nil, "seed")
 	db = createDB(t)
 	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (id, val) VALUES ('marker', 'm');", table))
 	require.NoError(t, err)
 	db.Close()
-	var pos cluster.Position
-	deadline = time.After(15 * time.Second)
-	for !seen["marker"] || pos == nil {
-		select {
-		case p := <-pr1:
-			for _, e := range p.Entities {
-				seen[string(e.Key)] = true
-			}
-		case pp := <-po1:
-			if seen["marker"] {
-				pos = pp
-			}
-		case <-deadline:
-			t.Fatal("timed out waiting for the marker + a streaming position")
-		}
-	}
+	pos := awaitStreaming(t, pr1, po1, 15*time.Second, "marker").Position
 	cancel1()
 
 	// While ingest is stopped: RENAME the primary-key column, then insert a row
@@ -1544,39 +1490,12 @@ func TestMysqlMappedColumnDrift_DivergesButKeepsGoing(t *testing.T) {
 	po1 := make(chan cluster.Position, 10)
 	go func() { _ = (&mysql.MySQLDialect{}).Ingest(ctx1, config, nil, 0, pr1, po1) }()
 
-	seen := map[string]bool{}
-	deadline := time.After(15 * time.Second)
-	for !seen["seed"] {
-		select {
-		case p := <-pr1:
-			for _, e := range p.Entities {
-				seen[string(e.Key)] = true
-			}
-		case <-po1:
-		case <-deadline:
-			t.Fatal("timed out waiting for the seed snapshot")
-		}
-	}
+	ingesttest.Await(t, pr1, po1, 15*time.Second, nil, "seed")
 	db = createDB(t)
 	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (id, val, extra) VALUES ('marker', 'm', 'e');", table))
 	require.NoError(t, err)
 	db.Close()
-	var pos cluster.Position
-	deadline = time.After(15 * time.Second)
-	for !seen["marker"] || pos == nil {
-		select {
-		case p := <-pr1:
-			for _, e := range p.Entities {
-				seen[string(e.Key)] = true
-			}
-		case pp := <-po1:
-			if seen["marker"] {
-				pos = pp
-			}
-		case <-deadline:
-			t.Fatal("timed out waiting for the marker + a streaming position")
-		}
-	}
+	pos := awaitStreaming(t, pr1, po1, 15*time.Second, "marker").Position
 	cancel1()
 
 	// While ingest is stopped: DROP the mapped non-key column, then insert a row
@@ -1602,7 +1521,7 @@ func TestMysqlMappedColumnDrift_DivergesButKeepsGoing(t *testing.T) {
 	go func() { errCh <- (&mysql.MySQLDialect{}).Ingest(ctx2, config, pos, 0, pr2, po2) }()
 
 	var drifted map[string]any
-	deadline = time.After(20 * time.Second)
+	deadline := time.After(20 * time.Second)
 	for drifted == nil {
 		select {
 		case p := <-pr2:
@@ -1676,31 +1595,14 @@ func TestMysqlPositionResume(t *testing.T) {
 		_ = dialect1.Ingest(ctx1, config, nil, 0, proposalChan1, positionChan1)
 	}()
 
-	deadline := time.After(15 * time.Second)
-	seen := make(map[string]bool)
-	var lastPos cluster.Position
-	for !seen["before"] || lastPos == nil {
-		select {
-		case p := <-proposalChan1:
-			for _, e := range p.Entities {
-				seen[string(e.Key)] = true
-			}
-		case pos := <-positionChan1:
-			lastPos = pos
-		case <-deadline:
-			t.Fatal("timed out waiting for initial proposal and position")
-		}
-	}
+	// Wait for the snapshot to deliver "before" so the rows written next are
+	// unambiguously streamed, not snapshotted.
+	ingesttest.Await(t, proposalChan1, positionChan1, 15*time.Second, nil, "before")
 
-	// Insert "during" while phase 1 is running so the binlog advances past
-	// "before", then a "sync" row right after it. handleXID sends a transaction's
-	// proposal and THEN its position, in commit order on one goroutine — so once
-	// "sync"'s proposal arrives, "during"'s position is already buffered on
-	// positionChan1. Draining to the LATEST buffered position then yields a
-	// checkpoint whose GTID set includes "during" deterministically: an earlier
-	// stale position (from the snapshot phase) can no longer be mistaken for it.
-	// (Without the sync sentinel + drain this raced: a faster decode path lets a
-	// stale position arrive right after "during"'s proposal.)
+	// Insert "during", then a "sync" sentinel right after it. Streaming commits
+	// bundle their checkpoint on the transaction's final proposal, so the
+	// sentinel's proposal — which arrives after "during"'s in commit order —
+	// carries a position whose GTID set deterministically covers "during".
 	db = createDB(t)
 	_, err = db.Exec(fmt.Sprintf("INSERT INTO `%s` (pk, val) VALUES ('during', 'phase1');", table))
 	require.NoError(t, err)
@@ -1708,30 +1610,7 @@ func TestMysqlPositionResume(t *testing.T) {
 	require.NoError(t, err)
 	db.Close()
 
-	deadline = time.After(15 * time.Second)
-	for !seen["sync"] {
-		select {
-		case p := <-proposalChan1:
-			for _, e := range p.Entities {
-				seen[string(e.Key)] = true
-			}
-		case pos := <-positionChan1:
-			lastPos = pos
-		case <-deadline:
-			t.Fatal("timed out waiting for 'during' and 'sync' proposals")
-		}
-	}
-	require.True(t, seen["during"], "'during' commits before 'sync', so it must arrive first")
-	// Drain every already-buffered position; the latest is at least "during"'s.
-	draining := true
-	for draining {
-		select {
-		case pos := <-positionChan1:
-			lastPos = pos
-		default:
-			draining = false
-		}
-	}
+	lastPos := ingesttest.Await(t, proposalChan1, positionChan1, 15*time.Second, nil, "during", "sync").Position
 
 	// Stop the first dialect.
 	cancel1()
@@ -1766,19 +1645,7 @@ func TestMysqlPositionResume(t *testing.T) {
 
 	// Collect: "after" should appear. "before" and "during" should NOT
 	// re-appear since they were committed before the checkpointed position.
-	deadline = time.After(15 * time.Second)
-	seen2 := make(map[string]bool)
-	for !seen2["after"] {
-		select {
-		case p := <-proposalChan2:
-			for _, e := range p.Entities {
-				seen2[string(e.Key)] = true
-			}
-		case <-positionChan2:
-		case <-deadline:
-			t.Fatal("timed out waiting for post-resume proposal")
-		}
-	}
+	seen2 := ingesttest.Await(t, proposalChan2, positionChan2, 15*time.Second, nil, "after").Seen
 
 	require.False(t, seen2["before"],
 		"'before' should not re-appear when resuming from checkpointed position")

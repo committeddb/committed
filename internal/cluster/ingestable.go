@@ -33,8 +33,18 @@ var ErrIngestableNotRunning = errors.New("cluster: no ingestable worker is runni
 //     in every projection forever — a right-to-be-forgotten zombie. The
 //     delete's Key MUST equal the key an upsert of that same row uses, so the
 //     downstream delete targets the right record.
-//   - During ingestion, write Proposals to pr and position checkpoints to po;
-//     how often to checkpoint the position is up to the Ingestable.
+//   - During ingestion, write Proposals to pr. A position checkpoint travels
+//     WITH the data it covers: a transaction's final proposal carries the
+//     post-transaction resume position (Proposal.Position), so position and
+//     entities commit atomically in one raft entry — the contract that earns
+//     a dialect the TxnScopedDedup opt-in. po carries only checkpoints with
+//     no proposal to ride: an empty-flush commit (a transaction touching no
+//     watched table) and snapshot progress. Consumers of an Ingestable —
+//     including dialect-level tests — must therefore accept the per-commit
+//     checkpoint from EITHER source; tests do this through ingesttest.Await
+//     rather than hand-rolling the two-channel wait, so an evolution of this
+//     contract is a one-site change. How often to checkpoint beyond the
+//     per-transaction bundle is up to the Ingestable.
 //   - Check ctx for done after every proposal and stop promptly when it fires.
 //   - Ingest MUST support being called multiple times (resume from pos).
 //

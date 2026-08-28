@@ -64,25 +64,7 @@ func TestPostgresStatusStreamingLag(t *testing.T) {
 
 	// Wait for the insert to stream and a commit position (Lsn>0) to land, so
 	// we know we are in the streaming phase with a real LSN to pass to Status.
-	deadline := time.After(20 * time.Second)
-	var lastPos cluster.Position
-	seen := false
-	for !seen || lastPos == nil {
-		select {
-		case p := <-proposalChan:
-			for _, e := range p.Entities {
-				if string(e.Key) == "a" {
-					seen = true
-				}
-			}
-		case pos := <-positionChan:
-			if isCommitPosition(t, pos) {
-				lastPos = pos
-			}
-		case <-deadline:
-			t.Fatal("timed out waiting for the streamed insert + commit position")
-		}
-	}
+	lastPos := awaitCommit(t, proposalChan, positionChan, 20*time.Second, "a").Position
 
 	// Keep draining so the dialect's loop runs and sends standby status
 	// updates (which advance the slot's confirmed_flush_lsn). The capture loop

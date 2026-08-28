@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/ingestable/ingesttest"
 	"github.com/committeddb/committed/internal/cluster/ingestable/sql"
 	"github.com/committeddb/committed/internal/cluster/ingestable/sql/postgres"
 )
@@ -67,23 +68,7 @@ func TestPostgresPublicationReconciledOnAddedTable(t *testing.T) {
 	require.NoError(t, err)
 	db.Close()
 
-	deadline := time.After(20 * time.Second)
-	seen := map[string]bool{}
-	var lastPos cluster.Position
-	for !seen["a1"] || lastPos == nil {
-		select {
-		case p := <-pr1:
-			for _, e := range p.Entities {
-				seen[string(e.Key)] = true
-			}
-		case pos := <-po1:
-			if isCommitPosition(t, pos) {
-				lastPos = pos
-			}
-		case <-deadline:
-			t.Fatal("phase 1: timed out waiting for tableA proposal + commit position")
-		}
-	}
+	lastPos := awaitCommit(t, pr1, po1, 20*time.Second, "a1").Position
 	cancel1()
 	require.NotEmpty(t, lastPos)
 
@@ -97,17 +82,7 @@ func TestPostgresPublicationReconciledOnAddedTable(t *testing.T) {
 		_ = (&postgres.PostgreSQLDialect{}).Ingest(ctx2, newConfig([]string{tableA, tableB}), lastPos, 0, pr2, po2)
 	}()
 
-	deadline = time.After(20 * time.Second)
-	seen2 := map[string]bool{}
-	for !seen2["b_existing"] {
-		select {
-		case p := <-pr2:
-			for _, e := range p.Entities {
-				seen2[string(e.Key)] = true
-			}
-		case <-po2:
-		case <-deadline:
-			t.Fatal("phase 2: tableB's pre-existing row was never backfilled — publication not reconciled")
-		}
-	}
+	// tableB's pre-existing row must be backfilled; a timeout with
+	// "b_existing" missing means the publication was never reconciled.
+	ingesttest.Await(t, pr2, po2, 20*time.Second, nil, "b_existing")
 }

@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/ingestable/ingesttest"
 	"github.com/committeddb/committed/internal/cluster/ingestable/sql"
 	"github.com/committeddb/committed/internal/cluster/ingestable/sql/dialectpb"
 	"github.com/committeddb/committed/internal/cluster/ingestable/sql/postgres"
@@ -104,6 +105,17 @@ func positionLSN(pos cluster.Position) uint64 {
 		return 0
 	}
 	return pp.Lsn
+}
+
+// awaitCommit drives an Ingestable's output channels via ingesttest.Await
+// with this dialect's commit-checkpoint predicate: the wait ends when every
+// key has been seen on a proposal AND a per-commit checkpoint has arrived —
+// bundled on a proposal or on the position channel, per the
+// cluster.Ingestable contract.
+func awaitCommit(t *testing.T, pr <-chan *cluster.Proposal, po <-chan cluster.Position, timeout time.Duration, keys ...string) ingesttest.Result {
+	t.Helper()
+	return ingesttest.Await(t, pr, po, timeout,
+		func(pos cluster.Position) bool { return isCommitPosition(t, pos) }, keys...)
 }
 
 // cleanReplication drops the named replication slot and publication if
@@ -1375,23 +1387,7 @@ func TestPostgresPositionResume(t *testing.T) {
 	// from the slot's restart_lsn (the entire failure mode this test
 	// is supposed to guard against). Filter explicitly: a usable
 	// resume position is one whose decoded Lsn > 0.
-	deadline := time.After(15 * time.Second)
-	seen := make(map[string]bool)
-	var lastPos cluster.Position
-	for !seen["before"] || lastPos == nil {
-		select {
-		case p := <-proposalChan1:
-			for _, e := range p.Entities {
-				seen[string(e.Key)] = true
-			}
-		case pos := <-positionChan1:
-			if isCommitPosition(t, pos) {
-				lastPos = pos
-			}
-		case <-deadline:
-			t.Fatal("timed out waiting for initial proposal and commit position")
-		}
-	}
+	lastPos := awaitCommit(t, proposalChan1, positionChan1, 15*time.Second, "before").Position
 
 	// Stop the first dialect.
 	cancel1()
@@ -1418,7 +1414,7 @@ func TestPostgresPositionResume(t *testing.T) {
 	db.Close()
 
 	// Collect: "after" should appear, "before" should NOT re-appear.
-	deadline = time.After(15 * time.Second)
+	deadline := time.After(15 * time.Second)
 	seen2 := make(map[string]bool)
 	for !seen2["after"] {
 		select {
@@ -1528,31 +1524,16 @@ func TestPostgresTransactionGrouping(t *testing.T) {
 	db.Close()
 
 	// All 10 rows must arrive as a single proposal, and the commit must
-	// checkpoint a position past preCommitLSN. One loop waits for both:
-	// select picks randomly among ready channels, so the earlier shape —
-	// drain-and-discard positions while waiting for the proposal, then
-	// wait for the position afterward — could discard the commit's
-	// checkpoint (the last position the dialect ever emits here) in the
-	// drain and time out on a channel nothing would ever send to again.
-	deadline = time.After(15 * time.Second)
-	var txProposal *cluster.Proposal
-	postCommitSeen := false
-	for txProposal == nil || !postCommitSeen {
-		select {
-		case p := <-proposalChan:
-			txProposal = p
-		case pos := <-positionChan:
-			if positionLSN(pos) > uint64(preCommitLSN) {
-				postCommitSeen = true
-			}
-		case <-deadline:
-			if txProposal == nil {
-				t.Fatal("timed out waiting for transaction proposal")
-			}
-			t.Fatal("timed out waiting for post-commit position")
-		}
+	// checkpoint a position past preCommitLSN.
+	txKeys := make([]string, 10)
+	for i := range txKeys {
+		txKeys[i] = fmt.Sprintf("tx%d", i)
 	}
-
+	res := ingesttest.Await(t, proposalChan, positionChan, 15*time.Second,
+		func(pos cluster.Position) bool { return positionLSN(pos) > uint64(preCommitLSN) }, txKeys...)
+	require.Len(t, res.Proposals, 1,
+		"expected all 10 rows from one transaction in a single proposal")
+	txProposal := res.Proposals[0]
 	require.Len(t, txProposal.Entities, 10,
 		"expected all 10 rows from one transaction in a single proposal")
 
@@ -1904,23 +1885,7 @@ func TestPostgresSlotRecreatedResnapshots(t *testing.T) {
 	require.NoError(t, err)
 	db.Close()
 
-	deadline := time.After(15 * time.Second)
-	seen := map[string]bool{}
-	var lastPos cluster.Position
-	for !seen["before"] || lastPos == nil {
-		select {
-		case p := <-proposalChan1:
-			for _, e := range p.Entities {
-				seen[string(e.Key)] = true
-			}
-		case pos := <-positionChan1:
-			if isCommitPosition(t, pos) {
-				lastPos = pos
-			}
-		case <-deadline:
-			t.Fatal("phase 1: timed out waiting for 'before' + a commit position")
-		}
-	}
+	lastPos := awaitCommit(t, proposalChan1, positionChan1, 15*time.Second, "before").Position
 	cancel1()
 	require.NotEmpty(t, lastPos, "should have a checkpointed commit position")
 
@@ -1945,7 +1910,7 @@ func TestPostgresSlotRecreatedResnapshots(t *testing.T) {
 	}()
 	waitForSlot(t, "slot_recreate")
 
-	deadline = time.After(20 * time.Second)
+	deadline := time.After(20 * time.Second)
 	genByKey := map[string]uint64{}
 	var sawMarker bool
 	var markerEpoch uint64
