@@ -5,6 +5,7 @@ package iceberg_test
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +23,15 @@ import (
 const (
 	minioUser = "minioadmin"
 	minioPass = "minioadmin"
+
+	// Deliberately unpinned (:latest), per project preference: pins rot
+	// silently. If a registry push ever breaks the suite, the autopsy
+	// capture below names the image's own output rather than leaving a bare
+	// failure.
+	minioImage  = "minio/minio:latest"
+	restImage   = "tabulario/iceberg-rest:latest"
+	duckdbImage = "duckdb/duckdb:latest"
+	minioStarts = 2 // bounded retry — ALSO an experiment: CI has seen the first minio die pre-exec while an identical later start succeeds
 )
 
 // icebergStack is the dockerized landing zone: minio (S3) + an Iceberg REST
@@ -42,22 +52,64 @@ func startIcebergStack(t *testing.T) *icebergStack {
 	require.NoError(t, err)
 	testcontainers.CleanupNetwork(t, net)
 
-	minioC, err := tcminio.Run(ctx, "minio/minio:latest",
-		tcminio.WithUsername(minioUser), tcminio.WithPassword(minioPass),
-		network.WithNetwork([]string{"minio"}, net))
-	testcontainers.CleanupContainer(t, minioC)
-	require.NoError(t, err)
-	s3Host, err := minioC.ConnectionString(ctx)
-	require.NoError(t, err)
-
-	// Create the warehouse bucket.
-	_, _, err = minioC.Exec(ctx, []string{"mc", "alias", "set", "local", "http://localhost:9000", minioUser, minioPass})
-	require.NoError(t, err)
-	_, _, err = minioC.Exec(ctx, []string{"mc", "mb", "local/warehouse"})
-	require.NoError(t, err)
+	// minio start + bucket bootstrap, with a bounded retry. CI fails here
+	// repeatedly (the container is not running by the first exec, seconds
+	// after passing /minio/health/live) while the SECOND test's identical
+	// minio in the same job survives — cause unknown, and unknowable from a
+	// bare "not running": the evidence lives in the container's own logs and
+	// its final docker state (exit code, OOMKilled, daemon error), both
+	// captured below on every failed attempt BEFORE retrying. If attempt 2
+	// passes — the same thing the second test's start does — the run goes
+	// green while carrying attempt 1's autopsy in its log; if it fails too,
+	// the failure is loud WITH the evidence. Do not "fix" this by guessing
+	// (pins were tried and reverted): read the autopsy from a failing run.
+	var minioC *tcminio.MinioContainer
+	var s3Host string
+	for attempt := 1; ; attempt++ {
+		var err error
+		minioC, err = tcminio.Run(ctx, minioImage,
+			tcminio.WithUsername(minioUser), tcminio.WithPassword(minioPass),
+			network.WithNetwork([]string{"minio"}, net))
+		if err == nil {
+			s3Host, err = minioC.ConnectionString(ctx)
+		}
+		if err == nil {
+			// Create the warehouse bucket.
+			_, _, err = minioC.Exec(ctx, []string{"mc", "alias", "set", "local", "http://localhost:9000", minioUser, minioPass})
+		}
+		if err == nil {
+			_, _, err = minioC.Exec(ctx, []string{"mc", "mb", "local/warehouse"})
+		}
+		if err == nil {
+			testcontainers.CleanupContainer(t, minioC)
+			break
+		}
+		if minioC != nil {
+			// The autopsy: docker's view of how the container ended, then its
+			// own output. Between them, every known way a container dies
+			// leaves a fingerprint (OOMKilled, a nonzero exit code with
+			// stderr, a daemon-level error, an external rm).
+			if st, serr := minioC.State(ctx); serr == nil {
+				t.Logf("minio attempt %d failed (%v); state: status=%s exitCode=%d oomKilled=%v startedAt=%s finishedAt=%s dockerErr=%q",
+					attempt, err, st.Status, st.ExitCode, st.OOMKilled, st.StartedAt, st.FinishedAt, st.Error)
+			} else {
+				t.Logf("minio attempt %d failed (%v); container state unavailable: %v", attempt, err, serr)
+			}
+			if lr, lerr := minioC.Logs(ctx); lerr == nil {
+				logs := new(strings.Builder)
+				_, _ = io.Copy(logs, lr)
+				_ = lr.Close()
+				t.Logf("minio attempt %d container logs:\n%s", attempt, logs.String())
+			} else {
+				t.Logf("minio attempt %d container logs unavailable: %v", attempt, lerr)
+			}
+			_ = minioC.Terminate(ctx)
+		}
+		require.Less(t, attempt, minioStarts, "minio bootstrap failed on every attempt: %v", err)
+	}
 
 	restReq := testcontainers.ContainerRequest{
-		Image:        "tabulario/iceberg-rest:latest",
+		Image:        restImage,
 		ExposedPorts: []string{"8181/tcp"},
 		Env: map[string]string{
 			"CATALOG_WAREHOUSE":              "s3://warehouse/",
@@ -209,7 +261,7 @@ func TestIcebergSinkDuckDBOracle(t *testing.T) {
 	}, "; ") + ";"
 
 	req := testcontainers.ContainerRequest{
-		Image:      "duckdb/duckdb:latest",
+		Image:      duckdbImage,
 		Networks:   []string{st.networkName},
 		Cmd:        []string{"duckdb", "-csv", "-c", sql},
 		WaitingFor: wait.ForExit().WithExitTimeout(180 * time.Second),
