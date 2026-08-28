@@ -297,16 +297,18 @@ type FakeStorage struct {
 		result1 bool
 		result2 error
 	}
-	IngestSourceSeqHighwaterStub        func(string) uint64
-	ingestSourceSeqHighwaterMutex       sync.RWMutex
-	ingestSourceSeqHighwaterArgsForCall []struct {
+	IngestSourceDedupStub        func(string) (string, uint64)
+	ingestSourceDedupMutex       sync.RWMutex
+	ingestSourceDedupArgsForCall []struct {
 		arg1 string
 	}
-	ingestSourceSeqHighwaterReturns struct {
-		result1 uint64
+	ingestSourceDedupReturns struct {
+		result1 string
+		result2 uint64
 	}
-	ingestSourceSeqHighwaterReturnsOnCall map[int]struct {
-		result1 uint64
+	ingestSourceDedupReturnsOnCall map[int]struct {
+		result1 string
+		result2 uint64
 	}
 	IngestableCensusStub        func(string) (*cluster.IngestableCensus, bool)
 	ingestableCensusMutex       sync.RWMutex
@@ -2332,65 +2334,68 @@ func (fake *FakeStorage) HasTypeMigrationDeadLetterReturnsOnCall(i int, result1 
 	}{result1, result2}
 }
 
-func (fake *FakeStorage) IngestSourceSeqHighwater(arg1 string) uint64 {
-	fake.ingestSourceSeqHighwaterMutex.Lock()
-	ret, specificReturn := fake.ingestSourceSeqHighwaterReturnsOnCall[len(fake.ingestSourceSeqHighwaterArgsForCall)]
-	fake.ingestSourceSeqHighwaterArgsForCall = append(fake.ingestSourceSeqHighwaterArgsForCall, struct {
+func (fake *FakeStorage) IngestSourceDedup(arg1 string) (string, uint64) {
+	fake.ingestSourceDedupMutex.Lock()
+	ret, specificReturn := fake.ingestSourceDedupReturnsOnCall[len(fake.ingestSourceDedupArgsForCall)]
+	fake.ingestSourceDedupArgsForCall = append(fake.ingestSourceDedupArgsForCall, struct {
 		arg1 string
 	}{arg1})
-	stub := fake.IngestSourceSeqHighwaterStub
-	fakeReturns := fake.ingestSourceSeqHighwaterReturns
-	fake.recordInvocation("IngestSourceSeqHighwater", []interface{}{arg1})
-	fake.ingestSourceSeqHighwaterMutex.Unlock()
+	stub := fake.IngestSourceDedupStub
+	fakeReturns := fake.ingestSourceDedupReturns
+	fake.recordInvocation("IngestSourceDedup", []interface{}{arg1})
+	fake.ingestSourceDedupMutex.Unlock()
 	if stub != nil {
 		return stub(arg1)
 	}
 	if specificReturn {
-		return ret.result1
+		return ret.result1, ret.result2
 	}
-	return fakeReturns.result1
+	return fakeReturns.result1, fakeReturns.result2
 }
 
-func (fake *FakeStorage) IngestSourceSeqHighwaterCallCount() int {
-	fake.ingestSourceSeqHighwaterMutex.RLock()
-	defer fake.ingestSourceSeqHighwaterMutex.RUnlock()
-	return len(fake.ingestSourceSeqHighwaterArgsForCall)
+func (fake *FakeStorage) IngestSourceDedupCallCount() int {
+	fake.ingestSourceDedupMutex.RLock()
+	defer fake.ingestSourceDedupMutex.RUnlock()
+	return len(fake.ingestSourceDedupArgsForCall)
 }
 
-func (fake *FakeStorage) IngestSourceSeqHighwaterCalls(stub func(string) uint64) {
-	fake.ingestSourceSeqHighwaterMutex.Lock()
-	defer fake.ingestSourceSeqHighwaterMutex.Unlock()
-	fake.IngestSourceSeqHighwaterStub = stub
+func (fake *FakeStorage) IngestSourceDedupCalls(stub func(string) (string, uint64)) {
+	fake.ingestSourceDedupMutex.Lock()
+	defer fake.ingestSourceDedupMutex.Unlock()
+	fake.IngestSourceDedupStub = stub
 }
 
-func (fake *FakeStorage) IngestSourceSeqHighwaterArgsForCall(i int) string {
-	fake.ingestSourceSeqHighwaterMutex.RLock()
-	defer fake.ingestSourceSeqHighwaterMutex.RUnlock()
-	argsForCall := fake.ingestSourceSeqHighwaterArgsForCall[i]
+func (fake *FakeStorage) IngestSourceDedupArgsForCall(i int) string {
+	fake.ingestSourceDedupMutex.RLock()
+	defer fake.ingestSourceDedupMutex.RUnlock()
+	argsForCall := fake.ingestSourceDedupArgsForCall[i]
 	return argsForCall.arg1
 }
 
-func (fake *FakeStorage) IngestSourceSeqHighwaterReturns(result1 uint64) {
-	fake.ingestSourceSeqHighwaterMutex.Lock()
-	defer fake.ingestSourceSeqHighwaterMutex.Unlock()
-	fake.IngestSourceSeqHighwaterStub = nil
-	fake.ingestSourceSeqHighwaterReturns = struct {
-		result1 uint64
-	}{result1}
+func (fake *FakeStorage) IngestSourceDedupReturns(result1 string, result2 uint64) {
+	fake.ingestSourceDedupMutex.Lock()
+	defer fake.ingestSourceDedupMutex.Unlock()
+	fake.IngestSourceDedupStub = nil
+	fake.ingestSourceDedupReturns = struct {
+		result1 string
+		result2 uint64
+	}{result1, result2}
 }
 
-func (fake *FakeStorage) IngestSourceSeqHighwaterReturnsOnCall(i int, result1 uint64) {
-	fake.ingestSourceSeqHighwaterMutex.Lock()
-	defer fake.ingestSourceSeqHighwaterMutex.Unlock()
-	fake.IngestSourceSeqHighwaterStub = nil
-	if fake.ingestSourceSeqHighwaterReturnsOnCall == nil {
-		fake.ingestSourceSeqHighwaterReturnsOnCall = make(map[int]struct {
-			result1 uint64
+func (fake *FakeStorage) IngestSourceDedupReturnsOnCall(i int, result1 string, result2 uint64) {
+	fake.ingestSourceDedupMutex.Lock()
+	defer fake.ingestSourceDedupMutex.Unlock()
+	fake.IngestSourceDedupStub = nil
+	if fake.ingestSourceDedupReturnsOnCall == nil {
+		fake.ingestSourceDedupReturnsOnCall = make(map[int]struct {
+			result1 string
+			result2 uint64
 		})
 	}
-	fake.ingestSourceSeqHighwaterReturnsOnCall[i] = struct {
-		result1 uint64
-	}{result1}
+	fake.ingestSourceDedupReturnsOnCall[i] = struct {
+		result1 string
+		result2 uint64
+	}{result1, result2}
 }
 
 func (fake *FakeStorage) IngestableCensus(arg1 string) (*cluster.IngestableCensus, bool) {

@@ -135,10 +135,17 @@ type Proposal struct {
 	// position (Postgres LSN, MySQL binlog file+offset) set on the
 	// proposal by the Ingestable; IngestableID is stamped by the ingest
 	// worker (which knows the registry id) before propose. They drive
-	// effectively-once ingest: the apply path advances a per-ingestable
-	// highwater to max(highwater, SourceSeq), and the leader's worker
-	// skips re-emitted proposals (SourceSeq <= highwater) before they
-	// enter raft. Zero/"" means "not an ingest proposal" — never deduped.
+	// effectively-once ingest: for dialects that opt in (TxnScopedDedup
+	// below), the apply path folds (SourceSeq, SourceTxnID) into a
+	// TRANSACTION-scoped dedup record — the seq highwater within the last
+	// applied source transaction — and the leader's worker skips a
+	// re-emitted proposal only when it belongs to that same transaction with
+	// seq at or below the highwater; a different transaction resets the
+	// record. Scoping dedup to one transaction is what makes post-failover
+	// coordinates (a new binlog lineage encoding low) and
+	// coordinate-inflation across transactions harmless. Without the opt-in
+	// the record keeps the legacy global-scalar semantics. Zero/"" means
+	// "not an ingest proposal" — never deduped.
 	IngestableID string
 	SourceSeq    uint64
 
@@ -148,8 +155,14 @@ type Proposal struct {
 	// entity, keyed by IngestableID — ATOMICALLY with this proposal's entities,
 	// in one raft entry. Snapshot batches set it so a crash can never fall
 	// between a committed batch and its checkpoint (the gap SourceSeq dedup can't
-	// cover, since snapshot rows carry SourceSeq 0). Empty for non-ingest and
-	// streaming proposals, which checkpoint out-of-band.
+	// cover, since snapshot rows carry SourceSeq 0). Streaming commit flushes
+	// set it too — the final proposal of each source transaction carries the
+	// post-transaction resume position (the GTID-set watermark for a
+	// gtid_mode=ON MySQL source), which is what makes the durable watermark
+	// advance ATOMICALLY with the applied index and shrinks the resume
+	// re-emission window to the single in-flight transaction. Empty for
+	// non-ingest proposals and mid-transaction soft flushes (a position must
+	// never advance past an uncommitted transaction).
 	Position Position
 
 	// SourceCommitUnixNano and SourceTxnID are capture provenance on a CDC
@@ -161,12 +174,24 @@ type Proposal struct {
 	// varies by source (MySQL binlog event-header timestamp + GTID, with a
 	// file:pos-derived identity when gtid_mode=OFF; Postgres pgoutput Begin
 	// commit-time + xid; SQL Server change-tracking version +
-	// sys.dm_tran_commit_table, best-effort). Provenance only — nothing in
-	// apply or sync reads them. Zero/empty means "not captured": snapshot-
-	// phase proposals (a snapshot row has no source transaction), direct
-	// user proposals, and pre-feature log entries.
+	// sys.dm_tran_commit_table, best-effort). SourceCommitUnixNano is
+	// provenance only; SourceTxnID additionally scopes the ingest dedup
+	// record when — and only when — the dialect opts in via TxnScopedDedup
+	// below, so stamping provenance never changes dedup behavior by itself.
+	// Sync never reads either. Zero/empty means "not captured":
+	// snapshot-phase proposals (a snapshot row has no source transaction),
+	// direct user proposals, and pre-feature log entries.
 	SourceCommitUnixNano int64
 	SourceTxnID          string
+
+	// TxnScopedDedup is the dialect's opt-in to transaction-scoped dedup
+	// (marshaled — the apply fold reads it): set it ONLY when the dialect's
+	// commit flush bundles the post-transaction position, so a resume
+	// re-emits at most the in-flight transaction. Without it, SourceTxnID is
+	// provenance only and dedup keeps the legacy global-scalar semantics —
+	// which is what keeps a dialect whose checkpoint is coarser than its
+	// transaction stamps (SQL Server's per-poll-window checkpoint) correct.
+	TxnScopedDedup bool
 
 	// DedupUnsafe is a TRANSIENT pre-raft hint, set by an ingest dialect and
 	// consumed only by the leader's ingest-worker dedup — it is deliberately NOT
@@ -180,9 +205,28 @@ type Proposal struct {
 	// old highwater) or a same-coordinate multi-part transaction is being replayed
 	// under changed chunking inputs (config re-POST / binary upgrade), where the
 	// seq->content mapping may have shifted. The freeze converts an otherwise
-	// silent data-loss drop into an operator-visible halt. See db.ingest's dedup
-	// branch and the mysql dialect's flush path.
+	// silent data-loss drop into an operator-visible halt. With
+	// transaction-scoped dedup the lineage-regression case moved to
+	// LineageRegressed below; DedupUnsafe remains for the re-chunk case
+	// (and for lineage regression on sources without a transaction
+	// identity), where the risk is WITHIN one transaction and
+	// transaction scoping cannot help. See db.ingest's dedup branch and
+	// the mysql dialect's flush path.
 	DedupUnsafe bool
+
+	// LineageRegressed is a TRANSIENT pre-raft hint like DedupUnsafe (never
+	// marshaled): the dialect resumed by a lineage-stable transaction
+	// watermark (e.g. StartSyncGTID) and observed the source's COORDINATE
+	// lineage regress — a failover to a replica whose binlog numbering
+	// restarts low. Under the transaction-scoped dedup record this is
+	// harmless (a new transaction resets the record, so its low coordinates
+	// are never compared against the old lineage's high ones) and the worker
+	// rides through. The one exception is the upgrade window: while the
+	// stored record is still the LEGACY scalar regime (no transaction
+	// identity), scalar comparison could silently drop the new lineage's
+	// data, so the worker preserves the pre-upgrade FREEZE until the first
+	// transaction-stamped proposal applies and flips the regime.
+	LineageRegressed bool
 }
 
 type Entity struct {
@@ -346,6 +390,7 @@ func (p *Proposal) Marshal() ([]byte, error) {
 		Position:             p.Position,
 		SourceCommitUnixNano: p.SourceCommitUnixNano,
 		SourceTxnID:          p.SourceTxnID,
+		TxnScopedDedup:       p.TxnScopedDedup,
 	}
 
 	return proto.Marshal(lp)
@@ -409,6 +454,7 @@ func (p *Proposal) Unmarshal(bs []byte, r TypeResolver) error {
 	p.Position = lp.Position
 	p.SourceCommitUnixNano = lp.SourceCommitUnixNano
 	p.SourceTxnID = lp.SourceTxnID
+	p.TxnScopedDedup = lp.TxnScopedDedup
 	for _, e := range lp.LogEntities {
 		ref := TypeRef{ID: e.Type.GetID(), Version: int(e.Type.GetVersion())}
 		t, err := resolveType(ref, r)

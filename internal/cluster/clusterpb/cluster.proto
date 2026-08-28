@@ -104,10 +104,15 @@ message LogProposal {
     // ingestableID + sourceSeq tag a proposal emitted by an ingest worker
     // for a given source event. sourceSeq is a per-ingestable monotonic
     // position (Postgres LSN, MySQL binlog file+offset) the dialect stamps
-    // on every emitted proposal. The apply path advances a per-ingestable
-    // highwater to max(highwater, sourceSeq), and the leader's worker
-    // skips re-emitted proposals (sourceSeq <= highwater) BEFORE they
-    // enter raft — giving effectively-once ingest. Empty ID / zero seq
+    // on every emitted proposal. For dialects that opt in (txnScopedDedup
+    // below), the apply path folds (sourceSeq, sourceTxnID) into a
+    // TRANSACTION-scoped dedup record — the seq highwater within the last
+    // applied source transaction — and the leader's worker skips a
+    // re-emitted proposal BEFORE raft only when it belongs to that same
+    // transaction at or below the highwater (effectively-once ingest); a
+    // different transaction resets the record. Without the opt-in (and for
+    // every pre-feature entry) the record keeps the legacy global-max
+    // semantics, so an old log replays bit-for-bit. Empty ID / zero seq
     // means "not an ingest proposal" and is never deduped. Backward
     // compatible: pre-feature entries unmarshal as "" / 0.
     string ingestableID = 3;
@@ -136,6 +141,17 @@ message LogProposal {
     // all unmarshal compatibly as absent.
     int64 sourceCommitUnixNano = 6;
     string sourceTxnID = 7;
+    // txnScopedDedup is the emitting dialect's opt-in to TRANSACTION-scoped
+    // dedup: it declares that the dialect's resume granularity is
+    // per-source-transaction (its commit flush bundles the post-transaction
+    // position, so a resume can re-emit at most the single in-flight
+    // transaction). Only then does the apply fold scope the dedup record by
+    // sourceTxnID; unset (every pre-feature entry, and dialects whose
+    // checkpoint is coarser than their transaction stamps — SQL Server's
+    // per-poll-window checkpoint) keeps the legacy global-scalar semantics.
+    // Provenance (sourceTxnID) is thus decoupled from dedup scope: stamping
+    // an identity never changes dedup behavior without this flag.
+    bool txnScopedDedup = 8;
 }
 
 enum LogValidationStrategy {

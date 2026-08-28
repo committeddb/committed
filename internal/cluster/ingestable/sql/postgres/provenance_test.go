@@ -25,17 +25,24 @@ func TestFlushPendingStampsProvenance(t *testing.T) {
 	pendingBytes := 42
 
 	const commitTS = int64(1_755_000_000_123_456_789)
-	require.NoError(t, flushPending(
+	watermark := []byte("encoded-post-txn-position")
+	emitted, err := flushPending(
 		context.Background(), &pending, &pendingBytes, ch,
-		pglogrepl.LSN(1000), 1, commitTS, "770123"))
+		pglogrepl.LSN(1000), 1, commitTS, "770123", watermark)
+	require.NoError(t, err)
+	require.True(t, emitted)
 
 	pa, pb := <-ch, <-ch
 	for _, p := range []*cluster.Proposal{pa, pb} {
 		require.Equal(t, commitTS, p.SourceCommitUnixNano)
 		require.Equal(t, "770123", p.SourceTxnID, "per-topic groups of one transaction share its xid")
+		require.True(t, p.TxnScopedDedup, "the bundling dialect opts every transaction proposal into txn-scoped dedup")
 	}
 	require.Equal(t, uint64(1000), pa.SourceSeq)
 	require.Equal(t, uint64(1001), pb.SourceSeq)
+	require.Empty(t, pa.Position, "only the transaction's final group carries the watermark")
+	require.Equal(t, cluster.Position(watermark), pb.Position,
+		"the final group bundles the post-transaction position — the watermark commits atomically with the entities")
 
 	require.Empty(t, pending, "flush resets the buffer")
 	require.Zero(t, pendingBytes)

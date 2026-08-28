@@ -192,12 +192,10 @@ func (ms *MemoryStorage) Position(id string) cluster.Position {
 	return nil
 }
 
-// IngestSourceSeqHighwater is a stub: this in-memory test double has no
-// apply path to advance a highwater (ApplyCommitted only records the
-// applied index), so it always reports 0 ("dedup nothing"). Tests that
-// exercise effectively-once ingest dedup use the real wal.Storage.
-func (ms *MemoryStorage) IngestSourceSeqHighwater(id string) uint64 {
-	return 0
+// IngestSourceDedup is a stub: no apply path, so always the empty record
+// ("dedup nothing").
+func (ms *MemoryStorage) IngestSourceDedup(id string) (string, uint64) {
+	return "", 0
 }
 
 // TopicRefreshEpoch is a stub: this in-memory test double has no apply path to
@@ -298,6 +296,7 @@ type StorageStubs struct{}
 
 func (StorageStubs) DatabaseVersions(id string) ([]cluster.VersionInfo, error) { return nil, nil }
 func (StorageStubs) ProducerEdges() ([]db.DerivationEdge, error)               { return nil, nil }
+func (StorageStubs) IngestSourceDedup(id string) (string, uint64)              { return "", 0 }
 func (StorageStubs) DatabaseVersion(id string, version uint64) (*cluster.Configuration, error) {
 	return nil, nil
 }

@@ -37,8 +37,9 @@ silently dropping deletes.
 
 Ingest is **effectively-once** for the change stream: committed checkpoints its
 stream position into its own log, and on restart it resumes from that
-checkpoint and de-duplicates any re-delivered changes by source sequence. You
-do not get duplicate stream changes in the topic across a restart.
+checkpoint and de-duplicates any re-delivered changes by source transaction
+and sequence. You do not get duplicate stream changes in the topic across a
+restart.
 
 A change-stream transaction lands in the topic as **one atomic unit**: sinks
 apply all of its rows in a single destination transaction, so consumers never
@@ -1002,16 +1003,19 @@ that the source still has the data after that position:
 - **MySQL** retains it only as long as the binlog isn't purged past the
   checkpoint; size your binlog retention accordingly. With `gtid_mode=ON` resume
   is by GTID set, so it follows the stream across a **source failover** (a
-  promoted replica — where the binlog file:offset would be meaningless). One
-  caveat in this release: a promoted replica's binlog file numbering can restart
-  *below* the old primary's, and committed's effectively-once dedup is keyed on
-  file:offset — so if the new coordinates would fall below the last-consumed
-  position, committed **freezes the ingestable** as a fail-safe (it never
-  silently drops the post-failover writes). Recover by re-POSTing the ingestable,
-  which re-snapshots from the new source state. A future release removes this
-  freeze by keying dedup on the GTID set directly. If the binlog was purged past
-  the consumed point, committed re-snapshots rather than resuming (see
-  `reSnapshotRequired` above).
+  promoted replica — where the binlog file:offset would be meaningless), and the
+  failover **rides through with no operator action**: the resume watermark
+  commits atomically with each transaction's own entities, and the
+  effectively-once dedup is scoped per source transaction, so a promoted
+  replica's binlog numbering restarting *below* the old primary's is harmless —
+  committed logs an informational "riding through" line and keeps streaming.
+  (One transitional exception: on the first resume after upgrading from a
+  release whose dedup was coordinate-keyed, a coincident failover still
+  **freezes** as a fail-safe until one transaction has committed under the new
+  watermark — recover by re-POSTing the ingestable. With `gtid_mode=OFF` the
+  freeze remains the permanent behavior: coordinates are that mode's only
+  identity.) If the binlog was purged past the consumed point, committed
+  re-snapshots rather than resuming (see `reSnapshotRequired` above).
 
 The status endpoint goes back to `phase: "streaming"` once the resumed worker is
 following the change stream again.

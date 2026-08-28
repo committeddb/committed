@@ -932,6 +932,7 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			config:            config,
 			proposalChan:      pr,
 			positionChan:      po,
+			gtidResume:        useGTID,
 			epoch:             currentEpoch,
 			charsetPlans:      charsetPlans,
 			snapshottedTables: snapshottedTables,
@@ -1133,6 +1134,14 @@ type MySQLEventHandler struct {
 	// never trips falsely).
 	resumeFileNum uint64
 	resumePos     uint32
+
+	// gtidResume records that this session resumed by the GTID-set watermark
+	// (StartSyncGTID). It gates HOW a lineage regression is reported: under
+	// GTID resume the regression is stamped LineageRegressed (the
+	// transaction-scoped dedup rides through; only a legacy stored record
+	// freezes), while a file:pos-only session keeps the DedupUnsafe freeze —
+	// coordinates are its ONLY identity, so a regression is undecidable.
+	gtidResume bool
 
 	// chunkingChanged is set at construction when the current chunkTag differs
 	// from the one recorded in the resume checkpoint — the flush budget, config
@@ -1508,7 +1517,7 @@ func (h *MySQLEventHandler) handleRows(ctx context.Context, header *replication.
 		// is applied as ordered parts (the documented bounded exception — see
 		// sql.TxnSoftFlushBytes).
 		if h.pendingBytes >= h.flushBudget {
-			if err := h.flushPending(ctx, true); err != nil {
+			if _, err := h.flushPending(ctx, true, nil); err != nil {
 				return err
 			}
 		}
@@ -1624,9 +1633,16 @@ func (h *MySQLEventHandler) rowEntity(ts *tableSchema, spec *sql.TopicSpec, tabl
 // every group after the first. isSoftFlush is true for a mid-transaction byte-budget
 // flush (a same-coordinate multi-part piece) and false for the commit flush — it
 // drives the re-chunk DedupUnsafe guard.
-func (h *MySQLEventHandler) flushPending(ctx context.Context, isSoftFlush bool) error {
+// bundlePos, when non-nil, is the encoded post-transaction resume position
+// (the GTID-set watermark): it is attached to the LAST emitted group so the
+// durable watermark commits atomically with the transaction's final part —
+// only the commit flush passes it (a position must never advance past an
+// uncommitted transaction). Returns whether any proposal was emitted, so
+// handleXID can fall back to the out-of-band position checkpoint for
+// commits that flushed nothing (an unwatched-table transaction's XID).
+func (h *MySQLEventHandler) flushPending(ctx context.Context, isSoftFlush bool, bundlePos []byte) (bool, error) {
 	if len(h.pending) == 0 {
-		return nil
+		return false, nil
 	}
 	// Stamp streamed rows with the current refresh epoch so a later
 	// refresh-boundary marker can sweep rows a re-snapshot left behind (a
@@ -1640,7 +1656,7 @@ func (h *MySQLEventHandler) flushPending(ctx context.Context, isSoftFlush bool) 
 	h.pending = nil
 	h.pendingBytes = 0
 
-	for _, group := range groups {
+	for i, group := range groups {
 		// Disambiguate repeated proposals at one coordinate: a RowsEvent bigger than
 		// maxPendingEntities flushes several times at the same (file, pos), and a
 		// mixed-table flush emits several per-topic proposals at one (file, pos).
@@ -1660,20 +1676,32 @@ func (h *MySQLEventHandler) flushPending(ctx context.Context, isSoftFlush bool) 
 			// Every per-topic group of one transaction shares them.
 			SourceCommitUnixNano: int64(h.curTxnSourceTS) * int64(time.Second),
 			SourceTxnID:          h.curTxnID,
+			// This dialect checkpoints per transaction (handleXID bundles the
+			// post-transaction position), so its resume re-emits at most the
+			// in-flight transaction — the contract that earns txn-scoped dedup.
+			TxnScopedDedup: h.curTxnID != "",
 		}
 		// Failover-lineage guard: if the live coordinate is at or below the resume
 		// baseline — a lower file number, OR the same file number at an equal/lower
 		// byte offset — this stream is a different binlog lineage (a promoted replica
-		// / RESET MASTER) whose coordinate encodes at or below the durable highwater
-		// (SourceSeq = fileNum<<32 | pos). Flag the proposal so the ingest worker
-		// freezes instead of silently dedup-dropping it — this data would otherwise be
-		// lost. A normal same-lineage resume only ever streams ABOVE the baseline, so
-		// this never trips falsely. Comparing the file number alone missed the
-		// equal-ordinal/lower-offset case (silent loss). See cluster.Proposal.DedupUnsafe.
+		// / RESET MASTER) whose coordinate encodes at or below coordinates the old
+		// lineage already used. Under a GTID resume this is EXPECTED after a
+		// promotion and harmless to the transaction-scoped dedup — stamp
+		// LineageRegressed so the worker rides through (freezing only while the
+		// stored dedup record is still the legacy scalar regime). A file:pos-only
+		// session has no transaction watermark, so the regression stays a
+		// DedupUnsafe freeze — coordinates are its only identity. A normal
+		// same-lineage resume only ever streams ABOVE the baseline, so neither
+		// trips falsely. Comparing the file number alone missed the
+		// equal-ordinal/lower-offset case (silent loss).
 		if h.resumeFileNum > 0 {
 			if n, ok := binlogFileNum(h.curFile); ok &&
 				(n < h.resumeFileNum || (n == h.resumeFileNum && h.curPos <= h.resumePos)) {
-				p.DedupUnsafe = true
+				if h.gtidResume {
+					p.LineageRegressed = true
+				} else {
+					p.DedupUnsafe = true
+				}
 			}
 		}
 		// Re-chunk guard (F1): the chunking inputs changed since this coordinate's
@@ -1684,13 +1712,17 @@ func (h *MySQLEventHandler) flushPending(ctx context.Context, isSoftFlush bool) 
 			p.DedupUnsafe = true
 		}
 
+		if bundlePos != nil && i == len(groups)-1 {
+			p.Position = bundlePos
+		}
+
 		select {
 		case h.proposalChan <- p:
 		case <-ctx.Done():
-			return ctx.Err()
+			return false, ctx.Err()
 		}
 	}
-	return nil
+	return true, nil
 }
 
 // captureTxnID records the in-flight transaction's provenance identity at its
@@ -1844,18 +1876,10 @@ func (h *MySQLEventHandler) handleXID(ctx context.Context, header *replication.E
 	}
 	pos := mysql.Position{Name: h.curFile, Pos: h.curPos}
 
-	if err := h.flushPending(ctx, false); err != nil {
-		return err
-	}
-
-	// The transaction is flushed; its provenance must not bleed into the next
-	// one (whose own first row / GTID re-captures it).
-	h.curTxnSourceTS = 0
-	h.curTxnID = ""
-
-	// Merge the just-committed transaction's GTID into the consumed set so the
-	// checkpoint carries the GTID resume cursor alongside file:pos. Resume still
-	// uses file:pos until the cutover slice — the GTID is written, not yet read.
+	// Merge the just-committed transaction's GTID into the consumed set FIRST,
+	// so the position built below — the post-transaction watermark — already
+	// covers this transaction. Resume reads this set (StartSyncGTID), so a
+	// restart streams strictly after it.
 	merged, err := mergeGTID(h.consumedGTID, h.curTxnGTID)
 	if err != nil {
 		return fmt.Errorf("merge committed GTID: %w", err)
@@ -1872,10 +1896,30 @@ func (h *MySQLEventHandler) handleXID(ctx context.Context, header *replication.E
 		return err
 	}
 
-	select {
-	case h.positionChan <- bs:
-	case <-ctx.Done():
-		return ctx.Err()
+	// Bundle the watermark onto the transaction's final proposal: position and
+	// entities commit in ONE raft entry, so the durable watermark advances
+	// atomically with the applied index — a crash can never leave a committed
+	// transaction outside the resume set, which is what shrinks the resume
+	// re-emission window to the single in-flight transaction and lets the
+	// dedup be transaction-scoped.
+	emitted, err := h.flushPending(ctx, false, bs)
+	if err != nil {
+		return err
+	}
+
+	// The transaction is flushed; its provenance must not bleed into the next
+	// one (whose own first row / GTID re-captures it).
+	h.curTxnSourceTS = 0
+	h.curTxnID = ""
+
+	// A commit that emitted nothing (an unwatched-table transaction's XID)
+	// still advances the resume position — out-of-band, as before.
+	if !emitted {
+		select {
+		case h.positionChan <- bs:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 
 	h.lastPos = &mysql.Position{Name: pos.Name, Pos: pos.Pos}

@@ -92,13 +92,12 @@ type Storage interface {
 	// the dry-run's window sampler (checkpoint-tracked reads use Reader).
 	ReaderAt(index uint64) ActualReader  // Gets current index by id cache. If id is not known, index is 0
 	Position(id string) cluster.Position // Gets current index by id cache. If id is not known position is 0
-	// IngestSourceSeqHighwater returns the highest source sequence
-	// (cluster.Proposal.SourceSeq) applied for the given ingestable id,
-	// or 0 if none. Advanced deterministically in ApplyCommitted from
-	// committed state; the ingest worker reads it before propose to skip
-	// re-emitted proposals (effectively-once ingest). 0 for an unknown id
-	// means "never ingested — dedup nothing".
-	IngestSourceSeqHighwater(id string) uint64
+	// IngestSourceDedup returns the transaction-scoped ingest dedup record
+	// for id: the last applied source-transaction identity ("" = legacy
+	// scalar regime) and the SourceSeq highwater within it. The worker's
+	// pre-raft skip decision consults this, never the bare highwater —
+	// dedup comparisons are only meaningful within one source transaction.
+	IngestSourceDedup(id string) (txnID string, seq uint64)
 	// HasContractFingerprint reports whether the validation tripwire has
 	// already announced the divergent shape (typeID, version, fingerprint) —
 	// i.e. an applied LogContractFingerprint mark exists. Read pre-propose by

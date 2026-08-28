@@ -981,13 +981,6 @@ func (ms *MemoryStorage) ReaderAt(index uint64) db.ActualReader {
 	return &Reader{index: index, s: ms}
 }
 
-// IngestSourceSeqHighwater stubs the effectively-once dedup highwater.
-// This in-memory double doesn't run the entity apply path that would
-// advance it, so it reports 0; dedup tests use the real wal.Storage.
-func (ms *MemoryStorage) IngestSourceSeqHighwater(id string) uint64 {
-	return 0
-}
-
 // TopicRefreshEpoch stubs the delete-surviving per-topic refresh-epoch
 // highwater. This in-memory double doesn't run the entity apply path that would
 // advance it, so it reports 0; recreate-epoch tests use the real wal.Storage.

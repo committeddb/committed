@@ -604,6 +604,10 @@ func proposalTopic(p *cluster.Proposal) string {
 
 func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) ingestExitReason {
 	isNode := false
+	// lineageRideNoted dedups the once-per-run failover ride-through Info in
+	// the dedup branch (the dialect stamps LineageRegressed on every proposal
+	// of the regressed lineage; the note only needs saying once).
+	lineageRideNoted := false
 
 	// The ingressLifecycle owns the inner Ingest goroutine and the
 	// channels it writes to. Holding it as a struct (not as loose
@@ -785,40 +789,71 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 				// applies.
 				proposal.IngestableID = id
 
-				// Effectively-once dedup. After a crash/flap the dialect
-				// resumes from a checkpoint that may trail the last
-				// committed proposal and re-emits proposals already in the
-				// log. We drop those here — BEFORE raft — by comparing the
-				// dialect's monotonic SourceSeq against the durable
-				// highwater. Dropping pre-raft keeps the duplicate out of
-				// the committed event log entirely, so syncables never see
-				// it. SourceSeq==0 (snapshot rows / non-CDC / legacy) is
-				// never deduped.
-				if proposal.SourceSeq > 0 && proposal.SourceSeq <= db.storage.IngestSourceSeqHighwater(id) {
-					// A dialect that can no longer trust SourceSeq as a
-					// content-identity against the highwater (source lineage
-					// regressed on failover, or a same-coordinate multi-part
-					// replay under changed chunking) flags the proposal
-					// DedupUnsafe. Dropping it could silently lose real data, so
-					// FREEZE loudly instead — the fail-safe the system-of-record
-					// contract requires. See cluster.Proposal.DedupUnsafe.
-					if proposal.DedupUnsafe {
-						db.logger.Error("ingest dedup: proposal below the source-seq highwater is flagged unsafe to drop (source lineage regression or re-chunk under changed config/binary); freezing to avoid silent data loss — operator intervention required",
+				// Effectively-once dedup, TRANSACTION-scoped. After a
+				// crash/flap the dialect resumes from its durable watermark
+				// and can re-emit only the single in-flight transaction (the
+				// commit flush bundles the position, so anything older is in
+				// the resume set). A re-emitted part is a duplicate only if
+				// it belongs to the SAME source transaction as the dedup
+				// record with a seq at or below its highwater; a proposal
+				// from a different transaction is never compared against
+				// another transaction's coordinates — post-failover
+				// low-numbered lineages and cross-transaction coordinate
+				// inflation are harmless by construction. The legacy scalar
+				// regime (stored record has no transaction identity —
+				// pre-upgrade state, or a dialect that stamps none) keeps
+				// the old global comparison. Dropping pre-raft keeps the
+				// duplicate out of the committed event log entirely, so
+				// syncables never see it. SourceSeq==0 (snapshot rows /
+				// non-CDC / legacy) is never deduped.
+				if proposal.SourceSeq > 0 {
+					storedTxn, storedSeq := db.storage.IngestSourceDedup(id)
+					scalarRegime := storedTxn == ""
+					dedupTxn := ""
+					if proposal.TxnScopedDedup {
+						dedupTxn = proposal.SourceTxnID
+					}
+					dup := proposal.SourceSeq <= storedSeq &&
+						(scalarRegime || dedupTxn == storedTxn)
+					switch {
+					case dup && (proposal.DedupUnsafe || (proposal.LineageRegressed && scalarRegime)):
+						// The dialect cannot vouch for this drop: a
+						// same-coordinate multi-part replay under changed
+						// chunking (DedupUnsafe — a WITHIN-transaction risk
+						// scoping can't help), or a lineage regression while
+						// the stored record is still the legacy scalar
+						// regime, where a scalar comparison could silently
+						// drop the new lineage's data (the upgrade window:
+						// the first transaction-stamped apply flips the
+						// regime and retires this freeze). FREEZE loudly —
+						// the fail-safe the system-of-record contract
+						// requires.
+						db.logger.Error("ingest dedup: proposal at or below the dedup highwater is flagged unsafe to drop (re-chunk under changed config/binary, or lineage regression against a legacy scalar record); freezing to avoid silent data loss — operator intervention required",
 							zap.String("id", id),
 							zap.Uint64("sourceSeq", proposal.SourceSeq),
-							zap.Uint64("highwater", db.storage.IngestSourceSeqHighwater(id)))
+							zap.Uint64("highwater", storedSeq),
+							zap.String("storedTxn", storedTxn))
 						if db.metrics != nil {
 							db.metrics.IngestFrozen(id, true)
 						}
 						return ingestExitFreeze
+					case dup:
+						db.logger.Debug("ingest dedup skip",
+							zap.String("id", id), zap.Uint64("sourceSeq", proposal.SourceSeq))
+						if db.metrics != nil {
+							db.metrics.IngestDedupSkipped(id)
+						}
+						backoff = ingestBackoffMin
+						continue
+					case proposal.LineageRegressed && !lineageRideNoted:
+						// Transaction-scoped record + regressed coordinates =
+						// the failover ride-through working as designed; note
+						// it once per worker run so the operator can see the
+						// promotion was absorbed without a freeze.
+						lineageRideNoted = true
+						db.logger.Info("ingest: source coordinate lineage regressed (failover/promotion) — riding through under the transaction-scoped watermark, no operator action needed",
+							zap.String("id", id))
 					}
-					db.logger.Debug("ingest dedup skip",
-						zap.String("id", id), zap.Uint64("sourceSeq", proposal.SourceSeq))
-					if db.metrics != nil {
-						db.metrics.IngestDedupSkipped(id)
-					}
-					backoff = ingestBackoffMin
-					continue
 				}
 
 				// Hold a refresh-boundary marker until every member can apply

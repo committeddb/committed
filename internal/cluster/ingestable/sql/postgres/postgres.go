@@ -1068,7 +1068,7 @@ func (d *PostgreSQLDialect) stream(
 					pendingBytes += sql.EntityFlushBytes(e)
 				}
 				if pendingBytes >= sql.TxnSoftFlushBytes {
-					if err := flushPending(ctx, &pending, &pendingBytes, pr, curLSN, *epoch, curTxnCommitTS, curTxnID); err != nil {
+					if _, err := flushPending(ctx, &pending, &pendingBytes, pr, curLSN, *epoch, curTxnCommitTS, curTxnID, nil); err != nil {
 						return err
 					}
 				}
@@ -1096,7 +1096,7 @@ func (d *PostgreSQLDialect) stream(
 					}
 				}
 				if pendingBytes >= sql.TxnSoftFlushBytes {
-					if err := flushPending(ctx, &pending, &pendingBytes, pr, curLSN, *epoch, curTxnCommitTS, curTxnID); err != nil {
+					if _, err := flushPending(ctx, &pending, &pendingBytes, pr, curLSN, *epoch, curTxnCommitTS, curTxnID, nil); err != nil {
 						return err
 					}
 				}
@@ -1117,7 +1117,7 @@ func (d *PostgreSQLDialect) stream(
 					pendingBytes += sql.EntityFlushBytes(e)
 				}
 				if pendingBytes >= sql.TxnSoftFlushBytes {
-					if err := flushPending(ctx, &pending, &pendingBytes, pr, curLSN, *epoch, curTxnCommitTS, curTxnID); err != nil {
+					if _, err := flushPending(ctx, &pending, &pendingBytes, pr, curLSN, *epoch, curTxnCommitTS, curTxnID, nil); err != nil {
 						return err
 					}
 				}
@@ -1132,7 +1132,22 @@ func (d *PostgreSQLDialect) stream(
 					// why we're skipping.
 					break
 				}
-				if err := flushPending(ctx, &pending, &pendingBytes, pr, curLSN, *epoch, curTxnCommitTS, curTxnID); err != nil {
+				// Use TransactionEndLSN (past the end of the transaction) so a
+				// resume from this position does not replay the
+				// already-processed transaction. Built BEFORE the commit flush
+				// so it can ride the transaction's final proposal — position
+				// and entities commit in ONE raft entry (the watermark
+				// advances atomically with the applied index, which is what
+				// shrinks the resume window to the in-flight transaction and
+				// earns the txn-scoped dedup the flush opts into).
+				endLSN := m.TransactionEndLSN
+				posBytes, err := encodePosition(endLSN, nil, *epoch)
+				if err != nil {
+					return err
+				}
+
+				emitted, err := flushPending(ctx, &pending, &pendingBytes, pr, curLSN, *epoch, curTxnCommitTS, curTxnID, posBytes)
+				if err != nil {
 					return err
 				}
 				// The transaction is flushed; its provenance must not bleed
@@ -1140,19 +1155,14 @@ func (d *PostgreSQLDialect) stream(
 				// re-captures its own).
 				curTxnCommitTS, curTxnID = 0, ""
 
-				// Use TransactionEndLSN (past the end of the
-				// transaction) so a resume from this position does
-				// not replay the already-processed transaction.
-				endLSN := m.TransactionEndLSN
-				posBytes, err := encodePosition(endLSN, nil, *epoch)
-				if err != nil {
-					return err
-				}
-
-				select {
-				case po <- posBytes:
-				case <-ctx.Done():
-					return nil
+				// A commit that emitted nothing (every row filtered/untracked)
+				// still advances the resume position — out-of-band, as before.
+				if !emitted {
+					select {
+					case po <- posBytes:
+					case <-ctx.Done():
+						return nil
+					}
 				}
 
 				clientXLogPos = endLSN
@@ -2058,9 +2068,14 @@ func quoteTable(table string) string {
 // proposals after a crash/flap (effectively-once). Monotonic because clientXLogPos
 // only advances, and deterministic because a resume re-reads the same messages in
 // the same order, producing the same flush LSNs.
-func flushPending(ctx context.Context, pending *[]*cluster.Entity, pendingBytes *int, pr chan<- *cluster.Proposal, lsn pglogrepl.LSN, epoch uint64, commitTS int64, txnID string) error {
+// bundlePos, when non-nil, is the encoded post-transaction resume position,
+// attached to the LAST emitted group so the watermark commits atomically with
+// the transaction's final part — only the commit flush passes it. Returns
+// whether any proposal was emitted, so the commit path can fall back to the
+// out-of-band position checkpoint for transactions that flushed nothing.
+func flushPending(ctx context.Context, pending *[]*cluster.Entity, pendingBytes *int, pr chan<- *cluster.Proposal, lsn pglogrepl.LSN, epoch uint64, commitTS int64, txnID string, bundlePos []byte) (bool, error) {
 	if len(*pending) == 0 {
-		return nil
+		return false, nil
 	}
 	// Stamp every entity with the current refresh epoch so a later
 	// refresh-boundary marker can sweep rows a re-snapshot left behind. All
@@ -2091,14 +2106,22 @@ func flushPending(ctx context.Context, pending *[]*cluster.Entity, pendingBytes 
 			// time + xid); every per-topic group of one transaction shares it.
 			SourceCommitUnixNano: commitTS,
 			SourceTxnID:          txnID,
+			// This dialect checkpoints per transaction (the Commit message's
+			// flush bundles the post-transaction position), so its resume
+			// re-emits at most the in-flight transaction — the contract that
+			// earns txn-scoped dedup.
+			TxnScopedDedup: txnID != "",
+		}
+		if bundlePos != nil && sub == len(groups)-1 {
+			p.Position = bundlePos
 		}
 		select {
 		case pr <- p:
 		case <-ctx.Done():
-			return ctx.Err()
+			return false, ctx.Err()
 		}
 	}
-	return nil
+	return true, nil
 }
 
 // stampGeneration sets the reconciling-refresh epoch on every entity in a batch
