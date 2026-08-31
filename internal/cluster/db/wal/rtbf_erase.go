@@ -430,6 +430,18 @@ func (s *Storage) waitFromZeroReads() error {
 	}
 }
 
+// ScrubProgress reports this node's scrub coordinates: the highest requested
+// (committed) bound and the highest bound this node's background rewrite has
+// completed. Serves the GET /node/status scrub block — the runbook's
+// erasure-verification loop polls it per node.
+func (s *Storage) ScrubProgress() (pending, completed uint64) {
+	p, err := s.loadPendingScrubBound()
+	if err != nil {
+		p = 0
+	}
+	return p, s.lastScrubbedBound.Load()
+}
+
 // WaitScrubCurrent blocks until this node's local event log reflects every
 // Scrub command committed so far (lastScrubbedBound has caught up to the
 // durable pending bound), kicking the scrub worker along. A sync worker about

@@ -26,6 +26,13 @@ type NodeStatusResponse struct {
 	// active (vs. workers being mysteriously absent). See
 	// docs/operations/safe-mode.md.
 	SafeMode bool `json:"safeMode"`
+	// Scrub is this node's right-to-be-forgotten scrub progress; erasure
+	// through PendingBound is physically complete on THIS node once
+	// completedBound catches up to pendingBound (each node rewrites its own
+	// log — poll every node). deleteKeyEraseBacklog true means a retained
+	// delete tombstone still carries its raw subject key and the scheduler
+	// has more passes to run.
+	Scrub ScrubStatusResponse `json:"scrub"`
 }
 
 // DiskStatusResponse reports this node's disk pressure and the
@@ -64,6 +71,13 @@ type DegradedConfigResponse struct {
 	Error string `json:"error"`
 }
 
+// ScrubStatusResponse is the node-local scrub block of /node/status.
+type ScrubStatusResponse struct {
+	PendingBound          uint64 `json:"pendingBound"`
+	CompletedBound        uint64 `json:"completedBound"`
+	DeleteKeyEraseBacklog bool   `json:"deleteKeyEraseBacklog"`
+}
+
 // NodeStatus serves GET /node/status: this node's degraded configs plus a
 // little raft identity. It is authenticated (same group as the config
 // endpoints) and answers for the node that received the request — the
@@ -84,6 +98,14 @@ func (h *HTTP) NodeStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 		AppliedIndex:    h.c.AppliedIndex(),
 		DegradedConfigs: degraded,
 		SafeMode:        h.c.SafeMode(),
+		Scrub: func() ScrubStatusResponse {
+			s := h.c.ScrubStatus()
+			return ScrubStatusResponse{
+				PendingBound:          s.PendingBound,
+				CompletedBound:        s.CompletedBound,
+				DeleteKeyEraseBacklog: s.DeleteKeyEraseBacklog,
+			}
+		}(),
 		Disk: DiskStatusResponse{
 			State: h.c.DiskState(),
 			Admission: DiskAdmissionResponse{

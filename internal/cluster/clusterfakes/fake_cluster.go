@@ -618,6 +618,16 @@ type FakeCluster struct {
 	scrubReturnsOnCall map[int]struct {
 		result1 error
 	}
+	ScrubStatusStub        func() cluster.ScrubStatus
+	scrubStatusMutex       sync.RWMutex
+	scrubStatusArgsForCall []struct {
+	}
+	scrubStatusReturns struct {
+		result1 cluster.ScrubStatus
+	}
+	scrubStatusReturnsOnCall map[int]struct {
+		result1 cluster.ScrubStatus
+	}
 	SyncStub        func(context.Context, string, cluster.Syncable) error
 	syncMutex       sync.RWMutex
 	syncArgsForCall []struct {
@@ -3969,6 +3979,59 @@ func (fake *FakeCluster) ScrubReturnsOnCall(i int, result1 error) {
 	}
 	fake.scrubReturnsOnCall[i] = struct {
 		result1 error
+	}{result1}
+}
+
+func (fake *FakeCluster) ScrubStatus() cluster.ScrubStatus {
+	fake.scrubStatusMutex.Lock()
+	ret, specificReturn := fake.scrubStatusReturnsOnCall[len(fake.scrubStatusArgsForCall)]
+	fake.scrubStatusArgsForCall = append(fake.scrubStatusArgsForCall, struct {
+	}{})
+	stub := fake.ScrubStatusStub
+	fakeReturns := fake.scrubStatusReturns
+	fake.recordInvocation("ScrubStatus", []interface{}{})
+	fake.scrubStatusMutex.Unlock()
+	if stub != nil {
+		return stub()
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *FakeCluster) ScrubStatusCallCount() int {
+	fake.scrubStatusMutex.RLock()
+	defer fake.scrubStatusMutex.RUnlock()
+	return len(fake.scrubStatusArgsForCall)
+}
+
+func (fake *FakeCluster) ScrubStatusCalls(stub func() cluster.ScrubStatus) {
+	fake.scrubStatusMutex.Lock()
+	defer fake.scrubStatusMutex.Unlock()
+	fake.ScrubStatusStub = stub
+}
+
+func (fake *FakeCluster) ScrubStatusReturns(result1 cluster.ScrubStatus) {
+	fake.scrubStatusMutex.Lock()
+	defer fake.scrubStatusMutex.Unlock()
+	fake.ScrubStatusStub = nil
+	fake.scrubStatusReturns = struct {
+		result1 cluster.ScrubStatus
+	}{result1}
+}
+
+func (fake *FakeCluster) ScrubStatusReturnsOnCall(i int, result1 cluster.ScrubStatus) {
+	fake.scrubStatusMutex.Lock()
+	defer fake.scrubStatusMutex.Unlock()
+	fake.ScrubStatusStub = nil
+	if fake.scrubStatusReturnsOnCall == nil {
+		fake.scrubStatusReturnsOnCall = make(map[int]struct {
+			result1 cluster.ScrubStatus
+		})
+	}
+	fake.scrubStatusReturnsOnCall[i] = struct {
+		result1 cluster.ScrubStatus
 	}{result1}
 }
 

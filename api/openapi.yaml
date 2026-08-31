@@ -2450,7 +2450,7 @@ components:
 
     NodeStatusResponse:
       type: object
-      required: [node, leader, appliedIndex, degradedConfigs, disk, safeMode]
+      required: [node, leader, appliedIndex, degradedConfigs, disk, safeMode, scrub]
       description: |
         Per-node diagnostics for the node that served the request. The
         fields are node-local and ephemeral (not replicated), so two nodes
@@ -2495,6 +2495,30 @@ components:
             whose worker crashloops the node. Per-boot and node-local; a
             restart without the flag resumes all workers. See
             docs/operations/safe-mode.md.
+        scrub:
+          type: object
+          required: [pendingBound, completedBound, deleteKeyEraseBacklog]
+          description: |
+            This node's right-to-be-forgotten scrub progress. Each node
+            rewrites its own permanent event log, so erasure through
+            `pendingBound` is physically complete on THIS node once
+            `completedBound` catches up — the erasure runbook's verification
+            loop polls this block on every node. `deleteKeyEraseBacklog`
+            true means a retained delete tombstone still carries its raw
+            subject key and the automatic scheduler has more passes to run.
+          properties:
+            pendingBound:
+              type: integer
+              format: int64
+              minimum: 0
+              description: Highest committed Scrub command bound.
+            completedBound:
+              type: integer
+              format: int64
+              minimum: 0
+              description: Highest bound this node's rewrite has completed.
+            deleteKeyEraseBacklog:
+              type: boolean
 
     ClusterStatusResponse:
       type: object

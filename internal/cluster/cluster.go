@@ -320,6 +320,12 @@ type Cluster interface {
 	// silently fallen behind. Reads that explicitly opt out
 	// (?consistency=stale) skip it.
 	LinearizableRead(ctx context.Context) error
+	// ScrubStatus reports this node's right-to-be-forgotten scrub progress:
+	// the highest requested bound, the highest bound this node has finished
+	// rewriting to, and whether an eligible un-erased delete key remains.
+	// Node-local (each node rewrites its own log) — the runbook's
+	// verification loop polls it on every node. Part of GET /node/status.
+	ScrubStatus() ScrubStatus
 	// ConfigBuildErrors returns the configs this node persisted but could
 	// not build into live objects (degraded — a node-local condition,
 	// usually a missing ${VAR} secret). The raw config bytes are valid and

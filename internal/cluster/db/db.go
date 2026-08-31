@@ -913,6 +913,27 @@ func (db *DB) Scrub(ctx context.Context) error {
 	return db.Propose(ctx, &cluster.Proposal{Entities: []*cluster.Entity{e}})
 }
 
+// scrubProgressReporter is the optional Storage extension reporting the
+// node-local scrub coordinates (wal.Storage implements it; the in-memory
+// test double does not, in which case /node/status reports zeros).
+type scrubProgressReporter interface {
+	ScrubProgress() (pending, completed uint64)
+}
+
+// ScrubStatus implements cluster.Cluster: this node's scrub progress plus the
+// delete-key erase backlog — the poll target for the RTBF runbook's
+// verification loop.
+func (db *DB) ScrubStatus() cluster.ScrubStatus {
+	st := cluster.ScrubStatus{}
+	if r, ok := db.storage.(scrubProgressReporter); ok {
+		st.PendingBound, st.CompletedBound = r.ScrubProgress()
+	}
+	if er, ok := db.storage.(deleteKeyEraseBacklogReporter); ok {
+		st.DeleteKeyEraseBacklog = er.HasDeleteKeyEraseBacklog()
+	}
+	return st
+}
+
 // scrubBacklogReporter is the optional Storage extension that reports whether
 // any delete-proposed (RTBF) entities remain unscrubbed in the permanent event
 // log. wal.Storage implements it; the in-memory test double does not, in which
