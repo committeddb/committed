@@ -956,16 +956,19 @@ Authoring loop: dry-run until the findings list is empty, then POST
 for real — "valid config, wrong result, no error" costs minutes
 instead of a full replay against an oracle.
 
-## Restatements: correcting how history is read — rehearse first
+## Restatements: changing how history is read — rehearse first
 
-A **restatement** is an append-only, consensus-ordered statement that rebinds how
-already-committed entities are *read* — never their bytes: entities of a type
-committed in an index range (optionally narrowed to one stamped version and a
-deterministic jq predicate) read as a different declared version from the
-moment the restatement commits. It is the repair tool for stamp mistakes — an
-unannounced writer that produced v2-shaped data under v1 stamps, a
-nonConvertible break whose below-range data turns out readable after all — and
-it feeds the same interpretation fold every syncable reads through.
+A **restatement** is an append-only, consensus-ordered statement that rebinds
+how already-committed entities are *read* — never their bytes: entities of a
+type committed in an index range (optionally narrowed to one stamped version
+and a deterministic jq predicate) read as a different declared version from
+the moment the restatement commits. The facts never change; the reading does
+— same facts, stated a different way. That covers repairs (an unannounced
+writer that produced v2-shaped data under v1 stamps, a nonConvertible break
+whose below-range data turns out readable after all) and equally
+understanding that simply evolved — no error anywhere, just a better reading
+of the same range. Either way it feeds the same interpretation fold every
+syncable reads through.
 
 ```toml
 [restatement]
