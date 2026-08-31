@@ -29,9 +29,9 @@ type NodeStatusResponse struct {
 	// Scrub is this node's right-to-be-forgotten scrub progress; erasure
 	// through PendingBound is physically complete on THIS node once
 	// completedBound catches up to pendingBound (each node rewrites its own
-	// log — poll every node). deleteKeyEraseBacklog true means a retained
-	// delete tombstone still carries its raw subject key and the scheduler
-	// has more passes to run.
+	// log — poll every node). pendingDeleteKeyErasures counts retained
+	// delete tombstones whose raw subject key is not yet erased — zero is
+	// the identifier-erasure end condition.
 	Scrub ScrubStatusResponse `json:"scrub"`
 }
 
@@ -73,9 +73,9 @@ type DegradedConfigResponse struct {
 
 // ScrubStatusResponse is the node-local scrub block of /node/status.
 type ScrubStatusResponse struct {
-	PendingBound          uint64 `json:"pendingBound"`
-	CompletedBound        uint64 `json:"completedBound"`
-	DeleteKeyEraseBacklog bool   `json:"deleteKeyEraseBacklog"`
+	PendingBound             uint64 `json:"pendingBound"`
+	CompletedBound           uint64 `json:"completedBound"`
+	PendingDeleteKeyErasures int    `json:"pendingDeleteKeyErasures"`
 }
 
 // NodeStatus serves GET /node/status: this node's degraded configs plus a
@@ -101,9 +101,9 @@ func (h *HTTP) NodeStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 		Scrub: func() ScrubStatusResponse {
 			s := h.c.ScrubStatus()
 			return ScrubStatusResponse{
-				PendingBound:          s.PendingBound,
-				CompletedBound:        s.CompletedBound,
-				DeleteKeyEraseBacklog: s.DeleteKeyEraseBacklog,
+				PendingBound:             s.PendingBound,
+				CompletedBound:           s.CompletedBound,
+				PendingDeleteKeyErasures: s.PendingDeleteKeyErasures,
 			}
 		}(),
 		Disk: DiskStatusResponse{

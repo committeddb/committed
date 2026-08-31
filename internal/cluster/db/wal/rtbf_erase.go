@@ -430,6 +430,27 @@ func (s *Storage) waitFromZeroReads() error {
 	}
 }
 
+// PendingDeleteKeyErasures counts the retained user-delete tombstones whose
+// raw subject key has not yet been erased — REGARDLESS of whether the erasure
+// gate has opened for them. This is the operator-facing completion number
+// (GET /node/status): zero means no erased-subject identifier remains
+// recorded as pending in this node's log; nonzero-and-not-shrinking means a
+// consumer is holding the gate (see the RTBF runbook's delay section). It is
+// deliberately NOT HasDeleteKeyEraseBacklog, which answers the scheduler's
+// question ("is there erasure work a scrub could do right now") and reads
+// false while a lagging consumer still blocks raw keys on disk.
+func (s *Storage) PendingDeleteKeyErasures() int {
+	n := 0
+	_ = s.view(func(tx *bolt.Tx) error {
+		b := tx.Bucket(unhashedDeleteBucket)
+		if b == nil {
+			return nil
+		}
+		return b.ForEach(func(_, _ []byte) error { n++; return nil })
+	})
+	return n
+}
+
 // ScrubProgress reports this node's scrub coordinates: the highest requested
 // (committed) bound and the highest bound this node's background rewrite has
 // completed. Serves the GET /node/status scrub block — the runbook's

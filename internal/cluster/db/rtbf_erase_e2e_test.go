@@ -58,6 +58,13 @@ func TestRTBFErase_EndToEnd(t *testing.T) {
 	// The bystander and the erased marker both survive.
 	up, _, _ := eraseKeyState(t, s, "bob")
 	require.True(t, up, "unrelated data must survive")
+
+	// The runbook's end condition through the status surface: the completion
+	// count reaches zero once the identifier is erased.
+	require.Eventually(t, func() bool {
+		st := d.ScrubStatus()
+		return st.PendingDeleteKeyErasures == 0 && st.CompletedBound >= st.PendingBound
+	}, 10*time.Second, 20*time.Millisecond, "ScrubStatus must report identifier-erasure completion")
 }
 
 // eraseKeyState scans the permanent event log and reports whether an upsert

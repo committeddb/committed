@@ -2497,15 +2497,17 @@ components:
             docs/operations/safe-mode.md.
         scrub:
           type: object
-          required: [pendingBound, completedBound, deleteKeyEraseBacklog]
+          required: [pendingBound, completedBound, pendingDeleteKeyErasures]
           description: |
             This node's right-to-be-forgotten scrub progress. Each node
             rewrites its own permanent event log, so erasure through
             `pendingBound` is physically complete on THIS node once
             `completedBound` catches up — the erasure runbook's verification
-            loop polls this block on every node. `deleteKeyEraseBacklog`
-            true means a retained delete tombstone still carries its raw
-            subject key and the automatic scheduler has more passes to run.
+            loop polls this block on every node. `pendingDeleteKeyErasures`
+            counts retained delete tombstones whose raw subject key has not
+            yet been erased: ZERO is the identifier-erasure end condition; a
+            count that is nonzero and not shrinking means a consumer is
+            holding the erasure gate (see the runbook's delay section).
           properties:
             pendingBound:
               type: integer
@@ -2517,8 +2519,9 @@ components:
               format: int64
               minimum: 0
               description: Highest bound this node's rewrite has completed.
-            deleteKeyEraseBacklog:
-              type: boolean
+            pendingDeleteKeyErasures:
+              type: integer
+              minimum: 0
 
     ClusterStatusResponse:
       type: object

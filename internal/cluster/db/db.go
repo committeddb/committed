@@ -918,18 +918,20 @@ func (db *DB) Scrub(ctx context.Context) error {
 // test double does not, in which case /node/status reports zeros).
 type scrubProgressReporter interface {
 	ScrubProgress() (pending, completed uint64)
+	// PendingDeleteKeyErasures counts un-erased delete keys — the operator's
+	// completion number, deliberately not the scheduler's eligibility
+	// heuristic (which reads false while a lagging consumer blocks raw keys).
+	PendingDeleteKeyErasures() int
 }
 
 // ScrubStatus implements cluster.Cluster: this node's scrub progress plus the
-// delete-key erase backlog — the poll target for the RTBF runbook's
+// un-erased delete-key count — the poll target for the RTBF runbook's
 // verification loop.
 func (db *DB) ScrubStatus() cluster.ScrubStatus {
 	st := cluster.ScrubStatus{}
 	if r, ok := db.storage.(scrubProgressReporter); ok {
 		st.PendingBound, st.CompletedBound = r.ScrubProgress()
-	}
-	if er, ok := db.storage.(deleteKeyEraseBacklogReporter); ok {
-		st.DeleteKeyEraseBacklog = er.HasDeleteKeyEraseBacklog()
+		st.PendingDeleteKeyErasures = r.PendingDeleteKeyErasures()
 	}
 	return st
 }

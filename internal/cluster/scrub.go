@@ -102,14 +102,17 @@ func IsErasedKey(key []byte) bool {
 // ScrubStatus is one node's scrub progress. PendingBound is the highest
 // committed Scrub command bound; CompletedBound is the highest bound THIS
 // node's background rewrite has finished (erasure through that raft index is
-// physically done on this node's log once they match). DeleteKeyEraseBacklog
-// reports whether a retained delete tombstone still carries its raw subject
-// key while plausibly eligible for erasure — the scheduler keeps proposing
-// scrubs until it clears (see rtbf_erase.go).
+// physically done on this node's log once they match).
+// PendingDeleteKeyErasures counts retained delete tombstones whose raw
+// subject key has not yet been erased — the operator's completion number:
+// zero means no erased-subject identifier remains recorded as pending,
+// whatever the erasure gate's current eligibility says (a count that is
+// nonzero and not shrinking means a consumer is holding the gate — see the
+// RTBF runbook).
 type ScrubStatus struct {
-	PendingBound          uint64
-	CompletedBound        uint64
-	DeleteKeyEraseBacklog bool
+	PendingBound             uint64
+	CompletedBound           uint64
+	PendingDeleteKeyErasures int
 }
 
 // FilterProposalEntities removes from a marshaled proposal every entity for

@@ -62,31 +62,31 @@ Each node rewrites its own log, so verification is **per node**. Poll
 `GET /v1/node/status` on every node and read the `scrub` block:
 
 ```json
-"scrub": { "pendingBound": 8123, "completedBound": 8123, "deleteKeyEraseBacklog": false }
+"scrub": { "pendingBound": 8123, "completedBound": 8123, "pendingDeleteKeyErasures": 0 }
 ```
 
 - **Subject data erased on this node** once `completedBound >=` your erasure
   watermark (the `appliedIndex` you noted after the deletes committed). At
   that point no upsert of the subject survives in this node's log.
-- **Subject identifier fully erased** once, additionally,
-  `deleteKeyEraseBacklog` is `false` and `completedBound` has caught up to
-  `pendingBound` — the retained tombstones' raw keys have been rewritten to
-  the sentinel, and the identifier has no on-disk copy in the permanent log
-  at all.
+- **Erased-subject identifiers fully erased** once, additionally,
+  `pendingDeleteKeyErasures` is `0` — every retained tombstone's raw key has
+  been rewritten to the PII-free sentinel. (The count covers all pending
+  erasures on the node, not one subject; it is the number that must reach
+  zero for identifier erasure to be complete for anyone.)
 
-The identifier half deliberately lags the data half: the raw key stays
+The identifier half deliberately lags the data half: each raw key stays
 exactly as long as some registered syncable still needs it to delete its
-downstream row, and not a scrub longer. `deleteKeyEraseBacklog: true` means
-the scheduler still has passes to run — normal for a while after an erasure;
-investigate only if it persists (next section).
+downstream row, and not a scrub longer. A nonzero count shortly after an
+erasure is normal — watch it shrink across scrub passes; a count that stops
+shrinking means a consumer is holding the gate (next section).
 
 ## What can delay erasure — and what to do
 
 - **A lagging syncable** holds the delete-key erasure gate until its
   checkpoint passes the delete. Catch-up is fast (see
   [performance.md](performance.md)); this self-resolves.
-- **A stuck syncable** holds the gate indefinitely — erasure of every
-  subject's identifier waits on it. Stuck syncables are already loud
+- **A stuck syncable** holds the gate indefinitely — `pendingDeleteKeyErasures`
+  stops shrinking, and erasure of every subject's identifier waits on it. Stuck syncables are already loud
   ([stuck-syncables.md](stuck-syncables.md)); fix it, or delete and recreate
   it — a syncable created after the covering scrub cannot have seen the
   erased data, so a recreate releases the gate immediately.

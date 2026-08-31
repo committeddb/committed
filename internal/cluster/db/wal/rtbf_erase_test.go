@@ -327,6 +327,11 @@ func TestDeleteKeyErase_PartialThresholdKeepsLaterDeleteRaw(t *testing.T) {
 	require.False(t, logContainsBytes(t, s, "alice"))
 	require.False(t, s.HasDeleteKeyEraseBacklog(),
 		"the still-raw delete is not yet eligible (checkpoint below it) — no backlog")
+	// The OPERATOR number disagrees with the scheduler flag here, on purpose:
+	// a raw key remains on disk, so completion must not be reported. This
+	// split is exactly why /node/status exposes the count, not the flag.
+	require.Equal(t, 1, s.PendingDeleteKeyErasures(),
+		"the operator-facing count reports the still-raw delete even while the scheduler sees no eligible work")
 
 	// The raw delete was retained for the next pass: once the checkpoint
 	// passes it, it re-becomes backlog and the next scrub erases it.
@@ -337,6 +342,7 @@ func TestDeleteKeyErase_PartialThresholdKeepsLaterDeleteRaw(t *testing.T) {
 	require.True(t, cluster.IsErasedKey(deleteEntryFor(t, s, 6).Key))
 	require.False(t, logContainsBytes(t, s, "carol"))
 	require.False(t, s.HasDeleteKeyEraseBacklog())
+	require.Zero(t, s.PendingDeleteKeyErasures(), "all keys erased — the completion count reaches zero")
 }
 
 // TestDeleteKeyErase_FromZeroReadPinBlocksSwap pins the reader-side invariant:
