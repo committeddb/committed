@@ -884,13 +884,21 @@ func (db *DB) ProposeDeleteType(ctx context.Context, id string) error {
 	return db.Propose(ctx, p)
 }
 
+// featureLevelRTBFErase gates the Scrub command's delete-key erasure pass
+// (Scrub.HashDeleteKeys): the pass changes the deterministic event-log rewrite
+// every replica performs, so it must not be authorized until every member runs
+// a binary that computes it — an older scrubber would produce a diverging
+// (un-erased) rewrite of the same command. See version.FeatureLevel level 4.
+const featureLevelRTBFErase uint64 = 4
+
 // Scrub proposes a Scrub command at the current applied index (the freeze line)
 // and returns once it has been applied — each node then runs the physical
 // rewrite in the background. See the cluster.Cluster.Scrub contract. The bound
 // is read at propose time but carried in the committed command, so every replica
-// rewrites against the same frozen prefix.
+// rewrites against the same frozen prefix — as is the delete-key erasure
+// authorization, granted only once the whole cluster can compute that pass.
 func (db *DB) Scrub(ctx context.Context) error {
-	e, err := cluster.NewScrubEntity(db.storage.AppliedIndex())
+	e, err := cluster.NewScrubEntity(db.storage.AppliedIndex(), db.featureEnabled(featureLevelRTBFErase))
 	if err != nil {
 		return err
 	}
@@ -928,15 +936,34 @@ func (db *DB) scrubScheduler() {
 	}
 }
 
+// deleteKeyEraseBacklogReporter is the optional Storage extension reporting
+// whether an un-erased RTBF delete key has plausibly become eligible for
+// erasure (wal.Storage implements it; see HasDeleteKeyEraseBacklog). Checked
+// only once the cluster feature level authorizes the erasure pass.
+type deleteKeyEraseBacklogReporter interface {
+	HasDeleteKeyEraseBacklog() bool
+}
+
 // maybeProposeScrub proposes a Scrub when this node is the leader and storage
-// reports RTBF backlog. Best-effort: a transient propose failure (no quorum,
-// leader change) is logged and retried on the next tick.
+// reports backlog: RTBF upserts to remove, metadata to GC, or — once the
+// cluster can compute the erasure pass — an eligible un-erased delete key.
+// Best-effort: a transient propose failure (no quorum, leader change) is
+// logged and retried on the next tick.
 func (db *DB) maybeProposeScrub() {
 	if db.raft.Leader() != db.ID() {
 		return
 	}
 	reporter, ok := db.storage.(scrubBacklogReporter)
-	if !ok || !reporter.HasScrubBacklog() {
+	if !ok {
+		return
+	}
+	backlog := reporter.HasScrubBacklog()
+	if !backlog && db.featureEnabled(featureLevelRTBFErase) {
+		if er, ok := db.storage.(deleteKeyEraseBacklogReporter); ok {
+			backlog = er.HasDeleteKeyEraseBacklog()
+		}
+	}
+	if !backlog {
 		return
 	}
 	// Bound the propose so a wedged raft layer can't pin this goroutine past

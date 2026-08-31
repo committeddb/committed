@@ -34,10 +34,9 @@ var ErrInsufficientStorage = errors.New("insufficient disk space to accept the p
 
 var delete []byte = []byte("7ec589c2-3318-4a3c-839b-a9af9c9443be")
 
-// logEntityWireView is the encoding-agnostic read of a wire LogEntity: the
-// same logical fields whether the entity was written as a typed body variant
-// (the control envelope, >= 0.7.3-beta) or as the legacy flat fields
-// (<= 0.7.2-beta). It is the single decode chokepoint — Proposal.Unmarshal and
+// logEntityWireView is the logical read of a wire LogEntity's body variant
+// (the control envelope, the only supported encoding since the floor rose to
+// 0.7.3-beta). It is the single decode chokepoint — Proposal.Unmarshal and
 // the scrub traversals (FilterProposalEntities, ForEachProposalEntity) all
 // read the wire through it — so a new body variant is handled here once.
 type logEntityWireView struct {
@@ -55,24 +54,25 @@ func (v logEntityWireView) isDelete() bool {
 	return string(v.data) == string(delete)
 }
 
-// logEntityView maps a wire LogEntity to its logical view. A set body variant
-// wins; an unset body means the entity was written by a pre-envelope binary
-// (<= 0.7.2-beta) and the legacy flat fields carry the payload.
+// logEntityView maps a wire LogEntity to its logical view: exactly one body
+// variant per entity.
 //
 // An entity carrying LogEntity-level wire tags this binary does not know is an
-// ERROR, not a legacy entity: proto3 would otherwise drop the unknown tags
-// into the legacy path and the entity would silently apply as empty. Two
-// populations can trip it: a body variant from a NEWER release (the cluster
-// feature level keeps one from being committed while an older member is
-// present — this guard is the defense-in-depth behind that gate), and bytes
-// from a data dir OLDER than the supported floor (0.7.2-beta; pre-v0.5 logs
-// carry the long-removed Timestamp field 4 — see docs/api-compatibility.md).
-// Unknown tags INSIDE a known variant's message are still fine (adding a
-// field to LogRow stays add-only); only LogEntity-level unknowns trip this.
+// ERROR: proto3 would otherwise silently drop them and the entity could apply
+// with less than its written meaning. Two populations trip it: a body variant
+// from a NEWER release (the cluster feature level keeps one from being
+// committed while an older member is present — this guard is the
+// defense-in-depth behind that gate), and bytes from a data dir OLDER than the
+// supported floor of 0.7.3-beta — the pre-envelope FLAT fields (<= 0.7.2-beta,
+// tags 2/3/5/6, an era no deployment ever ran) and the long-removed Timestamp
+// (pre-v0.5, tag 4) are reserved, so their bytes land here as unknowns — see
+// docs/api-compatibility.md. Unknown tags INSIDE a known variant's message are
+// still fine (adding a field to LogRow stays add-only); only LogEntity-level
+// unknowns trip this.
 func logEntityView(le *clusterpb.LogEntity) (logEntityWireView, error) {
 	if u := le.ProtoReflect().GetUnknown(); len(u) > 0 {
 		return logEntityWireView{}, fmt.Errorf(
-			"log entity of type %s carries wire fields this binary does not recognize: either a newer release wrote it (upgrade this node) or the data dir predates the supported floor of 0.7.2-beta (recreate it; see docs/api-compatibility.md)",
+			"log entity of type %s carries wire fields this binary does not recognize: either a newer release wrote it (upgrade this node) or the data dir predates the supported floor of 0.7.3-beta (recreate it; see docs/api-compatibility.md)",
 			le.Type.GetID())
 	}
 	switch b := le.GetBody().(type) {
@@ -88,13 +88,15 @@ func logEntityView(le *clusterpb.LogEntity) (logEntityWireView, error) {
 	case *clusterpb.LogEntity_Refresh:
 		return logEntityWireView{generation: b.Refresh.GetGeneration(), refreshBoundary: true}, nil
 	default:
-		return logEntityWireView{
-			key:             le.GetKey(),
-			data:            le.GetData(),
-			generation:      le.GetGeneration(),
-			refreshBoundary: le.GetRefreshBoundary(),
-			// keepData has no legacy flat field — it shipped with the envelope.
-		}, nil
+		// No body variant and no unknown tags: an empty entity. Every supported
+		// writer (>= 0.7.3-beta, the envelope era) sets exactly one variant, so
+		// this is not a legal wire state — fail loudly rather than apply an
+		// empty entity. (Pre-envelope FLAT entities never reach this arm: their
+		// field tags were removed from the schema when the floor rose to
+		// 0.7.3-beta, so their bytes trip the unknown-wire-fields guard above.)
+		return logEntityWireView{}, fmt.Errorf(
+			"log entity of type %s carries no body variant: not a legal encoding for any supported era (floor 0.7.3-beta; see docs/api-compatibility.md)",
+			le.Type.GetID())
 	}
 }
 

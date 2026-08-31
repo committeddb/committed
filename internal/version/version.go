@@ -46,7 +46,15 @@ var (
 // pinned node would both stream to the same sink — two concurrent writers.
 // Every node resolves leader-owns until the cluster minimum reaches 3, and
 // a `zone` syncable config is only admitted from level 3.
-const FeatureLevel uint64 = 3
+//
+// Level 4: RTBF delete-key erasure (featureLevelRTBFErase). The event-log
+// rewrite every replica performs for a Scrub command must be byte-identical
+// across nodes; a Scrub carrying HashDeleteKeys additionally rewrites gated
+// delete-tombstone keys to the erased sentinel, which an older binary's
+// scrubber would not do — diverging the rewritten logs. The proposer sets the
+// flag only once the cluster minimum reaches 4, so every member computes the
+// same rewrite.
+const FeatureLevel uint64 = 4
 
 // Info is the JSON shape returned by /version and printed by the
 // --version flag. GoVersion is derived from runtime rather than

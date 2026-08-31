@@ -648,11 +648,37 @@ to drop its row, and a fresh syncable replaying a scrubbed log sees only the
 delete → a `DELETE` of a row that was never inserted → harmless no-op. That
 retained identifier lives only in each node's **local event log** — it is *not* in
 the bbolt snapshot (the snapshot's copy is pruned + compacted, above), so it is
-never fanned out cluster-wide via `InstallSnapshot`. committed does **not** erase the delete key — the replay correctness above requires
-it — so the erased subject's identifier in a retained tombstone persists for the life
-of the event log on each node, and in any backup taken of it. Treat it as personal
-data that outlives the payload scrub, and bound backup retention to your RTBF
-obligations accordingly (the same shared-responsibility split as
+never fanned out cluster-wide via `InstallSnapshot`.
+
+**Delete-key erasure closes that residual.** The raw key is load-bearing only
+while some syncable could still hold the raw-keyed downstream row without
+having processed the delete. Once that is provably over, a later scrub
+rewrites the tombstone's key to a fixed **erased sentinel**
+(`cluster.ErasedKey`) — the entry survives as PII-free evidence that an
+erasure happened at that index, and a future replay's `DELETE WHERE key =
+<sentinel>` is a harmless no-op because the scrubbed log contains no upsert
+that could have created such a row. The gate is deterministic, replicated
+state (so every node rewrites identically): a delete at index `D` becomes
+erasable once every registered syncable has either **consumed it** (its
+committed checkpoint, harvested from the log prefix at the authorizing Scrub
+command's index, has passed `D`) or was **created after a scrub whose bound
+covers `D`** (it replays an already-scrubbed log and can never have seen the
+removed upsert — a node-local ordering the sync worker enforces by starting
+any from-0 replay against a scrub-current log and pinning the local rewrite
+swap while the replay runs). A checkpoint reset (rebuild, re-materialization)
+revokes the consumed evidence and blocks erasure until the replay
+re-consumes. A sentinel was chosen over a hash deliberately: any hash —
+keyed or not — remains a stable function of the subject identifier (a
+brute-forceable membership oracle for low-entropy keys, and a linkage handle
+across topics), while the sentinel leaves nothing derived from the subject.
+The pass is authorized per-command (`Scrub.HashDeleteKeys`), which the
+proposer sets only at cluster feature level ≥ 4 so mixed-version clusters
+keep computing byte-identical rewrites.
+
+After the erase, the subject's identifier has no on-disk copy in the
+permanent event log at all. Backups taken **before** the erase still contain
+it — erasure from backups remains the backup-retention process's
+responsibility (the same shared-responsibility split as
 [backups](operations/backup.md) and [logs](operations/logging.md)).
 
 **Triggers.** A `Scrub` command is proposed two ways: automatically by the
@@ -667,6 +693,11 @@ via either of two backlog terms:
 - **RTBF backlog**: a delete-tombstone records a delete committed beyond
   the highest completed scrub bound — there is erasure the next pass would
   physically perform.
+- **Delete-key erase backlog** (feature level ≥ 4): a retained tombstone
+  still carries its raw subject key and the live checkpoint evidence says
+  its consumption gate has plausibly opened — the next authorized pass
+  would rewrite it to the erased sentinel. A delete whose gate is still
+  closed (a lagging syncable) proposes nothing until the evidence lands.
 - **Metadata-GC backlog**: enough superseded metadata (checkpoint/status
   records and other keep-latest-compacted entities) has accumulated to be
   worth an O(log) rewrite — currently at least 128 superseded entities

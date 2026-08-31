@@ -169,7 +169,13 @@ var (
 var (
 	pendingScrubBucket   = []byte("pendingScrub")
 	pendingScrubBoundKey = []byte("bound")
-	scrubCompletedKey    = []byte("completed")
+	// pendingScrubHashKey and pendingScrubCmdIndexKey ride alongside "bound":
+	// whether the command that raised it authorizes the delete-key erasure
+	// pass (Scrub.HashDeleteKeys), and that command's own raft index — the
+	// deterministic cap for the erasure gate's harvest (deleteKeyEraseGate).
+	pendingScrubHashKey     = []byte("hashDeleteKeys")
+	pendingScrubCmdIndexKey = []byte("cmdIndex")
+	scrubCompletedKey       = []byte("completed")
 	// scrubCompactOwedKey marks that a scrub PRUNED RTBF tombstones but has not
 	// yet physically compacted bbolt. It is written in the SAME tx as the prune
 	// and cleared only after compaction succeeds, so a compaction that ENOSPCs or
@@ -222,7 +228,8 @@ var buckets = func() [][]byte {
 	for _, ie := range internalEntities {
 		bs = append(bs, ie.bucket)
 	}
-	return append(bs, ingestSourceSeqBucket, appliedIndexBucket, confStateBucket, eventTombstoneBucket, topicRefreshEpochBucket, memberPeerURLBucket, typeMigrationEditBucket)
+	return append(bs, ingestSourceSeqBucket, appliedIndexBucket, confStateBucket, eventTombstoneBucket, topicRefreshEpochBucket, memberPeerURLBucket, typeMigrationEditBucket,
+		scrubHistoryBucket, unhashedDeleteBucket, syncableCreateIndexBucket)
 }()
 
 type StateType int
@@ -317,6 +324,13 @@ type Storage struct {
 	scrubStop     chan struct{}
 	scrubDone     chan struct{}
 	scrubStopOnce sync.Once
+	// fromZeroReads counts in-flight from-0 log reads (a fresh syncable's
+	// replay, a rebuild, stage-state recovery). The scrub swap waits for it to
+	// reach zero so no from-0 read ever spans a rewrite swap — the invariant
+	// the delete-key erasure gate's soundness rests on (see rtbf_erase.go and
+	// BeginFromZeroRead). Guarded by fromZeroMu.
+	fromZeroMu    sync.Mutex
+	fromZeroReads int
 	// failCompactionForTest, when non-nil, forces compactLocked to fail — used to
 	// reproduce an ENOSPC/crashed compaction so a test can assert the erased key
 	// is re-driven out of bbolt on the next Open. Nil in production.

@@ -121,10 +121,28 @@ func (s *Storage) TombstoneSelections(bound uint64) (map[string]uint64, error) {
 // RunScrubForTest runs the scrub rewrite synchronously and marks it complete,
 // bypassing the background worker so tests are deterministic. Tests that use it
 // must not also drive a Scrub command through apply (which would race the
-// worker); they call this directly instead.
+// worker); they call this directly instead. The delete-key erasure pass is
+// disabled; RunScrubWithEraseForTest authorizes it.
 func (s *Storage) RunScrubForTest(bound uint64) error {
-	if err := s.runScrub(bound); err != nil {
+	if _, err := s.runScrub(bound, false, 0); err != nil {
 		return err
+	}
+	return s.markScrubComplete(bound)
+}
+
+// RunScrubWithEraseForTest runs one authorized rewrite (Scrub.HashDeleteKeys)
+// synchronously: the erasure gate harvests up to cmdIndex, the rewrite runs at
+// bound, completion reconciles the cadence bucket — the exact sequence the
+// worker performs for a hash-authorized pending record.
+func (s *Storage) RunScrubWithEraseForTest(bound, cmdIndex uint64) error {
+	erase, err := s.runScrub(bound, true, cmdIndex)
+	if err != nil {
+		return err
+	}
+	if erase != nil {
+		if err := s.reconcileUnhashedDeletes(bound, erase.eligibleMax, erase.raws, erase.msel); err != nil {
+			return err
+		}
 	}
 	return s.markScrubComplete(bound)
 }
@@ -191,7 +209,7 @@ func (s *Storage) FirstEventIndex() uint64 {
 // through a committed Scrub command, so crash-recovery tests can stage a
 // "pending scrub" that the next Open's worker must resume.
 func (s *Storage) SetPendingScrubBoundForTest(b uint64) error {
-	return s.setPendingScrubBound(b)
+	return s.setPendingScrubBound(b, false, 0)
 }
 
 // ScrubCompletedBound exposes the highest completed scrub bound, for polling the

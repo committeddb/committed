@@ -66,14 +66,20 @@ jobs:
 
   # Rolling-upgrade per-node test: builds the real binary and exercises the
   # graceful-stop → restart-over-same-data-dir → /ready → /version cycle plus
-  # state survival (docs/operations/upgrade.md). No Docker, runs in seconds, so
-  # it gates every push/PR like the unit suites — it guards the binary-level
-  # shutdown/restart/readiness path the in-process tests can't reach.
+  # state survival (docs/operations/upgrade.md), and the old-binary data-dir
+  # read contract (old_datadir_test.go): fixtures are captured on demand from
+  # the pinned release tags — real old-binary bytes, never committed — so the
+  # checkout needs the full history + tags, and the CDC-seeded era uses the
+  # runner's docker at capture time. A few minutes cold; it still gates every
+  # push/PR — it guards the binary-level shutdown/restart/readiness path and
+  # the cross-version read contract the in-process tests can't reach.
   test-upgrade:
     name: test (upgrade)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # the fixture capture builds released tags in git worktrees
       - uses: actions/setup-go@v6
         with:
           go-version: "1.26.x"

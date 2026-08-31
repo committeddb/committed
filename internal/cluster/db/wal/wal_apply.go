@@ -179,6 +179,13 @@ func (s *Storage) applyCommitted(entry *pb.Entry) (bool, error) {
 				if err := s.recordEventTombstone(entity.Type.ID, entity.Key, entry.GetIndex()); err != nil {
 					return false, fmt.Errorf("[wal.storage] recordEventTombstone: %w", err)
 				}
+				// Track the retained delete's index (no subject data) for the
+				// delete-key erasure cadence — reconciled at scrub completion.
+				if !cluster.IsErasedKey(entity.Key) {
+					if err := s.recordUnhashedDelete(entry.GetIndex()); err != nil {
+						return false, fmt.Errorf("[wal.storage] recordUnhashedDelete: %w", err)
+					}
+				}
 			}
 
 			// Count an applied EntityKindSnapshot entity as metadata-GC backlog so

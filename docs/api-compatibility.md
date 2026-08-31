@@ -177,11 +177,12 @@ message on the permanent event log (`internal/cluster/clusterpb`):
 `oneof body` — exactly one of `LogRow` (an upsert), `LogDelete` (a keyed
 tombstone, carrying `keep_data`), or `LogRefresh` (a reconciling-refresh
 boundary marker) — so an entity's role is explicit on the wire and impossible
-states (a refresh with a key, a row with `keep_data`) are unrepresentable. The
-flat `Key`/`Data`/`generation`/`refresh_boundary` fields on `LogEntity` are
-**legacy, decode-only**: logs written by ≤ 0.7.2-beta carry them, and readers
-map both encodings into one view at a single chokepoint
-(`cluster.logEntityView`) — writers never emit them again. The delete sentinel
+states (a refresh with a key, a row with `keep_data`) are unrepresentable.
+The pre-envelope flat `Key`/`Data`/`generation`/`refresh_boundary` fields
+were written only by ≤ 0.7.2-beta — an era no deployment ever ran — and
+**0.8.0 removed their decode path**: the field tags are reserved in the
+schema, so flat bytes trip the unknown-wire-fields guard at the decode
+chokepoint (`cluster.logEntityView`) and fail loudly. The delete sentinel
 value exists only in memory; on the wire a delete is the explicit variant.
 
 Extending the envelope with a **new variant** is a fixed recipe:
@@ -197,10 +198,13 @@ Extending the envelope with a **new variant** is a fixed recipe:
    tags the binary does not know fails decode loudly — so a feature-gate
    bypass surfaces as an apply failure, never a silent empty-entity misapply.
    Unknown tags *inside* a known variant's message stay ordinary add-only
-   evolution. The same guard defines the **data-dir support floor**: 0.7.3+
-   reads data dirs written by **0.7.2-beta and later**. Dirs older than that
-   are unsupported — pre-v0.5-beta logs carry the long-removed `Timestamp`
-   field 4, which trips the guard — and must be recreated, not upgraded.
+   evolution. The same guard defines the **data-dir support floor**: 0.8.0
+   reads data dirs written by **0.7.3-beta and later** (the envelope era).
+   Dirs older than that are unsupported — the pre-envelope flat fields
+   (≤ 0.7.2-beta) and the long-removed `Timestamp` field (pre-v0.5-beta) are
+   reserved tags that trip the guard — and must be recreated, not upgraded.
+   The floor is pinned end to end by the captured old-binary fixtures in
+   `e2e/upgrade/testdata/` (see its README).
 4. Give it a `cluster.EntityVariant` constant and handle it in every consumer
    switch. Consumers apply an entity by switching on `Entity.Variant()`
    (sinks; the wal apply dispatch admits only row/delete to internal

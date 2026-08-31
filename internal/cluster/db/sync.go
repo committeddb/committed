@@ -143,6 +143,15 @@ func (db *DB) recoverStageState(ctx context.Context, id string, rec cluster.Stag
 			handle.stageRecoveryFolded.Store(0)
 		}()
 	}
+	// The fold below is a from-0 read: start it against a scrub-current log
+	// and pin the swap while it runs, or a mid-fold rewrite could erase a
+	// delete key whose upsert this fold already retained (delete-key erasure
+	// pair-consistency; see wal.Storage.BeginFromZeroRead).
+	if !db.awaitScrubCurrent(ctx) {
+		return ctx.Err()
+	}
+	releaseFromZero := db.beginFromZeroRead()
+	defer releaseFromZero()
 	r := db.storage.Reader("") // from index 0; entries ≤ frontier are skipped below
 	folded := 0
 	for {
@@ -484,6 +493,70 @@ func (db *DB) deleteSync(id string, keepData bool) {
 	}
 }
 
+// fromZeroReadPinner and scrubCurrentWaiter are the optional Storage
+// extensions the delete-key erasure design relies on (wal.Storage implements
+// both; test doubles usually don't, in which case the pins and waits are
+// no-ops — the same optional-interface shape as scrubBacklogReporter).
+type fromZeroReadPinner interface {
+	BeginFromZeroRead() func()
+}
+
+type scrubCurrentWaiter interface {
+	WaitScrubCurrent(done <-chan struct{}) error
+}
+
+// beginFromZeroRead pins the local scrub swap for the duration of a from-0
+// log read (see wal.Storage.BeginFromZeroRead). No-op release when the
+// storage doesn't participate.
+func (db *DB) beginFromZeroRead() func() {
+	if p, ok := db.storage.(fromZeroReadPinner); ok {
+		return p.BeginFromZeroRead()
+	}
+	return func() {}
+}
+
+// awaitScrubCurrent blocks until the local event log reflects every committed
+// Scrub command (see wal.Storage.WaitScrubCurrent); false means the context
+// ended first. Called before a from-0 read begins: together with the read pin
+// it guarantees such a read observes one, current log state — the invariant
+// the delete-key erasure gate's exemptions rest on.
+func (db *DB) awaitScrubCurrent(ctx context.Context) bool {
+	w, ok := db.storage.(scrubCurrentWaiter)
+	if !ok {
+		return true
+	}
+	return w.WaitScrubCurrent(ctx.Done()) == nil
+}
+
+// fromZeroPin tracks one worker's from-0 read pin: acquired at a from-0
+// leadership gain, released once the read has passed the head captured at
+// acquisition (everything below it was read from one log state), on
+// leadership loss, or on worker exit.
+type fromZeroPin struct {
+	releaseFn func()
+	until     uint64
+}
+
+func (p *fromZeroPin) acquire(db *DB, until uint64) {
+	p.release()
+	p.releaseFn = db.beginFromZeroRead()
+	p.until = until
+}
+
+func (p *fromZeroPin) release() {
+	if p.releaseFn != nil {
+		p.releaseFn()
+		p.releaseFn = nil
+	}
+}
+
+// maybeRelease drops the pin once a read lands past the acquisition head.
+func (p *fromZeroPin) maybeRelease(readIndex uint64) {
+	if p.releaseFn != nil && readIndex > p.until {
+		p.release()
+	}
+}
+
 func (db *DB) sync(ctx context.Context, id string, s cluster.Syncable, handle *workerHandle) error {
 	bs, isBatch := s.(cluster.BatchSyncable)
 	if isBatch {
@@ -546,6 +619,12 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 	// reaches its target.
 	var remat rematState
 
+	// fzPin is this worker's from-0 read pin (delete-key erasure; see
+	// fromZeroPin). Held only while a from-0 replay is below the head it
+	// started against.
+	var fzPin fromZeroPin
+	defer fzPin.release()
+
 	// interpPin is the checkpoint's interpretation index — the errata
 	// registry index this syncable's CURRENT materialization began under (the
 	// second half of the determinism pair). Carried UNCHANGED across
@@ -580,6 +659,7 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 			retryActual = nil
 			lastSeen, lastBumped = 0, 0
 			pendingCount = 0
+			fzPin.release()
 			// Do NOT clear the stuck record on leadership loss. The record is
 			// cluster-wide replicated state — losing leadership does not unstick
 			// the syncable; the new owner adopts it (or re-wedges) and clears it on
@@ -587,6 +667,17 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 			// drop then re-raise the alert) on every leadership change.
 			progressed = true
 		case !isNode && db.isNode(id):
+			// A FROM-0 replay (no committed checkpoint) starts against a
+			// scrub-current local log and pins the swap until it passes the
+			// head it started at — the delete-key erasure invariants (see
+			// awaitScrubCurrent / fromZeroPin). Resumed reads need neither.
+			if _, resumed := db.storage.SyncableCheckpoint(id); !resumed {
+				if !db.awaitScrubCurrent(ctx) {
+					return nil
+				}
+				_, h, _ := db.SyncableProgress(id)
+				fzPin.acquire(db, h)
+			}
 			r = db.storage.Reader(id)
 			handle.activeReader.Store(&readerRef{r: r})
 			// checkpoint/head on the start line turn every future "young mirror
@@ -675,11 +766,13 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 				a, readErr = r.Read()
 				if readErr == nil {
 					i = a.Index
+					fzPin.maybeRelease(i)
 				}
 			}
 
 			switch {
 			case readErr == io.EOF:
+				fzPin.release() // caught up: any from-0 pass is complete
 				// Caught up. If the consumed head (lastSeen) is past the last
 				// index durably checkpointed (lastBumped), advance the
 				// checkpoint to it with one bump. For a selective single
@@ -925,6 +1018,10 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 	// persisted", cluster.CheckpointPolicy).
 	syncedSinceBump := 0
 	var pendingBumpIndex uint64
+	// fzPin: this worker's from-0 read pin — see the single-flush worker.
+	var fzPin fromZeroPin
+	defer fzPin.release()
+
 	// interpPin: the checkpoint's interpretation index — see the single-flush
 	// worker's declaration for the pinning contract.
 	var interpPin uint64
@@ -1053,6 +1150,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 			isNode = false
 			batch = batch[:0]
 			retryBatch = false
+			fzPin.release()
 			// Drop the cadence accumulators without bumping: we must not
 			// propose while not the owner, and the new owner re-derives its
 			// position from the durable checkpoint — the un-persisted tail
@@ -1064,6 +1162,17 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 			// the new owner clears it on progress. See the single-flush worker.
 			progressed = true
 		case !isNode && db.isNode(id):
+			// A FROM-0 replay (no committed checkpoint) starts against a
+			// scrub-current local log and pins the swap until it passes the
+			// head it started at — the delete-key erasure invariants (see
+			// awaitScrubCurrent / fromZeroPin). Resumed reads need neither.
+			if _, resumed := db.storage.SyncableCheckpoint(id); !resumed {
+				if !db.awaitScrubCurrent(ctx) {
+					return nil
+				}
+				_, h, _ := db.SyncableProgress(id)
+				fzPin.acquire(db, h)
+			}
 			r = db.storage.Reader(id)
 			handle.activeReader.Store(&readerRef{r: r})
 			// checkpoint/head on the start line turn every future "young mirror
@@ -1136,6 +1245,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 			a, readErr := r.Read()
 			switch {
 			case readErr == io.EOF:
+				fzPin.release() // caught up: any from-0 pass is complete
 				// Caught up. Flush any partial batch immediately, then persist
 				// any sub-stride pending boundary — the EOF flush of the
 				// CheckpointPolicy contract, which keeps a caught-up
@@ -1158,6 +1268,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 				db.logSyncReadError(id, readErr)
 			default:
 				i := a.Index
+				fzPin.maybeRelease(i)
 				// Exclude a proposal already dead-lettered (a permanent skip
 				// or an operator's manual skip) from the batch, so the skip
 				// survives restart and a manually-isolated poison proposal

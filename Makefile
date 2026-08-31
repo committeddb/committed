@@ -137,9 +137,12 @@ test/cdc:
 # asserting graceful shutdown + /ready + /version + state survival (see
 # docs/operations/upgrade.md and e2e/upgrade/). Tagged `upgrade` so it's
 # out of `make test`; -p=1 because the node binds a fixed-per-run port.
-# -timeout 300s covers the one-off `go build .` on a fresh machine.
+# -timeout 900s covers the one-off `go build .` PLUS the first-run fixture
+# captures (old_datadir_test.go builds two released tags and, for the
+# CDC-seeded era, pulls a MySQL image; captures are cached under the
+# gitignored e2e/upgrade/testdata/*/datadir, so later runs take seconds).
 test/upgrade:
-	go test -tags upgrade -p=1 -timeout 300s ./e2e/upgrade/...
+	go test -tags upgrade -p=1 -timeout 900s ./e2e/upgrade/...
 
 # Multi-node crash-recovery e2e: builds the real binary, boots a real 3-node
 # cluster over COMMITTED_PEERS, SIGKILLs a follower, advances the log on the

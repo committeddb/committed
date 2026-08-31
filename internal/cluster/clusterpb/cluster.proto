@@ -16,46 +16,40 @@ message TypeRef {
 
 message LogEntity {
     TypeRef type = 1;
-	bytes Key = 2;
-	bytes Data = 3;
-	// Field 4 was Timestamp (server-stamped wall-clock at propose time). A
-	// clock value in a consensus log is an anti-pattern — the raft index is
-	// the ordering authority and the timestamp was just one node's possibly-
-	// skewed clock — so it was removed. Reserved so the number is never
-	// reused with an incompatible meaning against any on-disk data.
-	reserved 4;
-	reserved "Timestamp";
-	// generation is the ingest refresh epoch that stamped this entity — a
-	// per-ingestable monotonic counter (starting at 1) the worker carries in
-	// its position and applies to EVERY emitted entity, snapshot and streaming
-	// alike. It drives reconciling ("full-refresh") snapshots: on a full
-	// re-snapshot the worker bumps the epoch, re-emits every live source row at
-	// the new epoch, and closes with a refresh-boundary marker; a keyed sink
-	// then sweeps any row still carrying an older generation (a row deleted at
-	// the source in a lost change-data window, which a positive re-enumeration
-	// can never signal). 0 means "not stamped by a refresh-managed ingest"
-	// (direct user writes, config records, pre-feature log entries) and is
-	// never swept. Backward compatible: old entries unmarshal as 0.
-	uint64 generation = 5;
-	// refresh_boundary marks this entity as a refresh-boundary MARKER rather
-	// than row data: it carries no Key/Data, and `generation` is the epoch G at
-	// which its topic was fully refreshed. A keyed sink reacts by sweeping every
-	// row of that topic whose generation is < G (>= 1). Emitted once per topic
-	// at the end of an all-tables full refresh — NEVER after a partial
-	// added-table backfill (that would delete the topic's sibling tables). A
-	// consumer that does not implement reconciliation treats it as a no-op.
-	bool refresh_boundary = 6;
+	// Fields 2/3/5/6 were the pre-envelope flat encoding (Key, Data,
+	// generation, refresh_boundary), written only by <= 0.7.2-beta binaries.
+	// The 0.8.0 data-dir support floor is 0.7.3-beta (the envelope era; no
+	// deployment ever ran the flat era), so the decode-only legacy path was
+	// removed with them: flat bytes now trip the unknown-wire-fields guard in
+	// cluster.logEntityView and fail decode loudly. Reserved so the numbers
+	// are never reused with an incompatible meaning against on-disk data.
+	// Field 4 was Timestamp (server-stamped wall-clock at propose time) — a
+	// clock value in a consensus log is an anti-pattern; the raft index is
+	// the ordering authority — removed long before the flat era ended.
+	reserved 2, 3, 4, 5, 6;
+	reserved "Key", "Data", "Timestamp", "generation", "refresh_boundary";
 
 	// body is the typed control envelope: exactly one variant per entity, so an
 	// entity's role — row datum, delete tombstone, refresh marker — is explicit
 	// on the wire, and impossible states (a refresh carrying a key, a row
 	// carrying keep_data) are unrepresentable. Writers encode EVERY entity as a
-	// body variant; the flat Key/Data/generation/refresh_boundary fields above
-	// are LEGACY (logs written by <= 0.7.2-beta), mapped into the same view at
-	// decode and never written again. Do not add new flat fields — add a new
-	// body variant instead: wire-level add-only (an old reader sees body unset),
-	// with its EMISSION feature-gated (db.featureEnabled) so the variant is only
-	// committed once every member can apply it. See docs/api-compatibility.md.
+	// body variant. Do not add flat fields — add a new body variant instead:
+	// wire-level add-only (an old reader sees body unset), with its EMISSION
+	// feature-gated (db.featureEnabled) so the variant is only committed once
+	// every member can apply it. See docs/api-compatibility.md.
+	//
+	// generation semantics (LogRow.generation / LogRefresh.generation): the
+	// ingest reconciling-refresh epoch — a per-ingestable monotonic counter
+	// (starting at 1) the worker carries in its position and stamps on every
+	// emitted entity, snapshot and streaming alike. On a full re-snapshot the
+	// worker bumps the epoch, re-emits every live source row at it, and closes
+	// with a refresh-boundary marker carrying the epoch G; a keyed sink then
+	// sweeps any row of that topic still below G (a row deleted at the source
+	// in a lost change-data window, which a positive re-enumeration can never
+	// signal). 0 means "not stamped by a refresh-managed ingest" and is never
+	// swept. Markers are emitted once per topic at the end of an all-tables
+	// full refresh — NEVER after a partial added-table backfill (that would
+	// delete the topic's sibling tables).
 	oneof body {
 		LogRow row = 7;
 		LogDelete delete = 8;
@@ -491,6 +485,14 @@ message LogTypeMigrationDeadLetter {
 // § "Right-to-be-forgotten / deletes".
 message LogScrub {
     uint64 upperBound = 1;
+    // hashDeleteKeys authorizes the delete-key erasure pass for this rewrite:
+    // retained user-delete entries whose consumption gate has opened get their
+    // raw subject key rewritten to the erased-key sentinel. Set by the proposer
+    // only once the cluster minimum feature level supports it, so every replica
+    // (all running a binary that understands the pass) computes the identical
+    // rewrite. Old binaries ignore the field and never see it set to true (the
+    // feature gate holds it until they are gone).
+    bool hashDeleteKeys = 2;
 }
 
 // LogNodeAPIURL is a node's self-announcement of its advertised HTTP API

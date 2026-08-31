@@ -90,10 +90,20 @@ func (s *Storage) saveSyncable(t *cluster.Configuration, raftIndex uint64) error
 		// version history and rollback-by-number from nodes that didn't crash
 		// there. Mirrors saveType. The build below is still queued, so a
 		// replay re-establishes the worker.
-		if existing, gerr := getVersioned(b, []byte(t.ID)); gerr != nil || !bytes.Equal(existing, bs) {
+		existing, gerr := getVersioned(b, []byte(t.ID))
+		if gerr != nil || !bytes.Equal(existing, bs) {
 			if _, err := putVersioned(b, []byte(t.ID), bs); err != nil {
 				return fmt.Errorf("[wal.syncable] putVersioned: %w", err)
 			}
+		}
+
+		// Maintain the live create-index record (absent→present transition
+		// only) for the delete-key erasure cadence, atomic with the config
+		// write. The erasure GATE never reads this — it harvests creation
+		// indices from the log prefix (see deleteKeyEraseGate).
+		existedBefore := gerr == nil && len(existing) > 0
+		if err := recordSyncableCreateIndex(tx, []byte(t.ID), raftIndex, existedBefore, false); err != nil {
+			return fmt.Errorf("[wal.syncable] recordSyncableCreateIndex: %w", err)
 		}
 
 		return nil
@@ -238,6 +248,11 @@ func (s *Storage) deleteSyncable(id []byte, keepData bool) error {
 			return ErrBucketMissing
 		}
 		if err := deleteVersioned(b, id); err != nil {
+			return err
+		}
+		// Clear the erasure-cadence create-index record with the config, so a
+		// deleted syncable stops contributing to the live gate approximation.
+		if err := recordSyncableCreateIndex(tx, id, 0, false, true); err != nil {
 			return err
 		}
 		// Sweep the per-syncable-id state kept outside the config sub-bucket and not

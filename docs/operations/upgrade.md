@@ -22,8 +22,8 @@ Two properties make a rolling upgrade safe:
   permanent event log, and the BoltDB metadata are forward-compatible
   across a release within the same major line — a node upgraded in place
   reads everything its predecessor wrote, for data dirs created on
-  **0.7.2-beta or later** (the supported floor; an older dir must be
-  recreated, not upgraded — see
+  **0.7.3-beta or later** (the supported floor as of 0.8.0; an older dir must
+  be recreated, not upgraded — see
   [api-compatibility.md](../api-compatibility.md#log-entities-protobuf)). This is a contract, documented
   in [api-compatibility.md → On-disk and wire compatibility](../api-compatibility.md#on-disk-and-wire-compatibility);
   read it before upgrading, especially the **one-way transitions** list.
@@ -166,7 +166,10 @@ After the last node:
 > **Rolling back below 0.8.0?** Event-log segments compress at rest from
 > 0.8.0 on, and older binaries cannot read compressed segments. Stop each
 > node and run `committed wal decompress --data <datadir>` before starting
-> the older binary. Rollbacks within 0.8.x need nothing.
+> the older binary. Rollbacks within 0.8.x need nothing. Also note: 0.8.0's
+> RTBF delete-key erasure (feature level 4) pauses on an older binary —
+> already-erased tombstones stay erased, but new erasures resume only when
+> you upgrade again.
 
 If the new binary misbehaves on a node — fails to start, fails `/ready`,
 or shows a regression — roll that node back the same way you upgraded it:

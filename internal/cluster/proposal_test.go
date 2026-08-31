@@ -345,12 +345,10 @@ func TestRefreshGenerationRoundTrip(t *testing.T) {
 }
 
 // TestZeroGenerationWireBackCompatible proves an unused generation costs
-// nothing on the wire and that a legacy flat log entry (written by
-// <= 0.7.2-beta, before the control envelope) decodes cleanly. proto3 omits
-// zero-valued scalars, so an ordinary upsert must marshal byte-identically to
-// an envelope Row built without ever touching Generation — and legacy flat
-// bytes still round-trip to gen 0 / non-marker through the logEntityView
-// chokepoint.
+// nothing on the wire: proto3 omits zero-valued scalars, so an ordinary
+// upsert must marshal byte-identically to an envelope Row built without ever
+// touching Generation. (Pre-envelope flat bytes no longer decode at all —
+// see TestLegacyFlatEntitiesFailLoudly.)
 func TestZeroGenerationWireBackCompatible(t *testing.T) {
 	tp := &Type{ID: "topic-id", Name: "Topic", Version: 1}
 
@@ -378,30 +376,5 @@ func TestZeroGenerationWireBackCompatible(t *testing.T) {
 	}
 	if !bytes.Equal(got, want) {
 		t.Errorf("zero-generation upsert is not wire-identical to a zero-generation Row:\n got  %x\n want %x", got, want)
-	}
-
-	// A legacy flat entry (no body variant) decodes to gen 0 / non-marker via
-	// our Unmarshal.
-	want, err = proto.Marshal(&clusterpb.LogProposal{
-		LogEntities: []*clusterpb.LogEntity{{
-			Type: &clusterpb.TypeRef{ID: tp.ID, Version: uint32(tp.Version)},
-			Key:  []byte("k"),
-			Data: []byte("d"),
-		}},
-	})
-	if err != nil {
-		t.Fatalf("proto.Marshal legacy: %v", err)
-	}
-	resolver := &stubResolver{
-		types:    map[string]*Type{tp.ID: tp},
-		versions: map[string]*Type{fmt.Sprintf("%s@%d", tp.ID, tp.Version): tp},
-	}
-	dec := &Proposal{}
-	if err := dec.Unmarshal(want, resolver); err != nil {
-		t.Fatalf("Unmarshal pre-feature bytes: %v", err)
-	}
-	e := dec.Entities[0]
-	if e.Generation != 0 || e.IsRefreshBoundary() {
-		t.Errorf("pre-feature entry decoded to Generation=%d RefreshBoundary=%v, want 0/false", e.Generation, e.IsRefreshBoundary())
 	}
 }
