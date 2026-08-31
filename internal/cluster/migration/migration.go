@@ -100,12 +100,12 @@ func Chain(ctx context.Context, r Resolver, typeID string, stampedVersion, lates
 		// old data as if current, the exact promise-break the intent exists
 		// to name. Admission refuses always-current syncables across a
 		// declared break, so this fires only for a syncable force-stranded
-		// after admission; an erratum that later rebinds the old range heals
+		// after admission; a restatement that later rebinds the old range heals
 		// it, and the dead letters replay.
 		if t.NonConvertible {
 			return nil, &Error{
 				TypeID: typeID, FromVersion: v - 1, ToVersion: v,
-				Err: fmt.Errorf("version %d is declared nonConvertible: v%d data cannot be upgraded (remaining stances: version-pinned or version-aware; or rebind the reading with an erratum and replay the dead letters)", v, v-1),
+				Err: fmt.Errorf("version %d is declared nonConvertible: v%d data cannot be upgraded (remaining stances: version-pinned or version-aware; or rebind the reading with a restatement and replay the dead letters)", v, v-1),
 			}
 		}
 		if len(t.Migration) == 0 {

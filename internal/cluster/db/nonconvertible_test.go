@@ -180,6 +180,6 @@ func TestNonConvertible_ForceStrandingIsNotSilent(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorContains(t, err, "nonConvertible")
 	var merr *migration.Error
-	require.ErrorAs(t, err, &merr, "the break reports as a migration step error → dead-letter machinery, replayable after an erratum heals the reading")
+	require.ErrorAs(t, err, &merr, "the break reports as a migration step error → dead-letter machinery, replayable after a restatement heals the reading")
 	require.Equal(t, 2, merr.ToVersion)
 }

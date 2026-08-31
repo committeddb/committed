@@ -1108,19 +1108,19 @@ func (r *Reader) Read() (*cluster.Actual, error) {
 	}
 }
 
-// InterpretationRegistry stubs the errata snapshot: this double applies no
-// errata, so readers see the empty registry (the errata-free path).
+// InterpretationRegistry stubs the restatement-registry snapshot: this double applies no
+// restatements, so readers see the empty registry (the restatement-free path).
 func (ms *MemoryStorage) InterpretationRegistry() *interpretation.Registry {
 	return interpretation.EmptyRegistry
 }
 
-// ErratumByID stubs the admission read: no errata are ever applied here.
-func (ms *MemoryStorage) ErratumByID(id string) (*cluster.Erratum, uint64, bool) {
+// RestatementByID stubs the admission read: no restatements are ever applied here.
+func (ms *MemoryStorage) RestatementByID(id string) (*cluster.Restatement, uint64, bool) {
 	return nil, 0, false
 }
 
-// AppliedErrata stubs the registry listing: no errata are ever applied here.
-func (ms *MemoryStorage) AppliedErrata() ([]cluster.AppliedErratum, error) {
+// AppliedRestatements stubs the registry listing: no restatements are ever applied here.
+func (ms *MemoryStorage) AppliedRestatements() ([]cluster.AppliedRestatement, error) {
 	return nil, nil
 }
 

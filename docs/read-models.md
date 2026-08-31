@@ -847,10 +847,10 @@ field    = "title"
 No mappings means whole-payload passthrough — with `always-current`, that is
 the version-normalization shape: the derived topic carries every entity
 re-written at the current type version. Because the loopback sits behind the
-same interpretation machinery as every syncable, errata are folded in too —
+same interpretation machinery as every syncable, restatements are folded in too —
 **the derived topic is the cache of the source's current interpretation**,
 and its status (`GET /v1/syncable/{id}/status`) shows `derivedFrom` /
-`derivesInto` plus `interpretationStale` when a later erratum supersedes the
+`derivesInto` plus `interpretationStale` when a later restatement supersedes the
 reading it was materialized under. Re-derivation is operator-triggered, never
 automatic: `POST /v1/syncable/{id}/rematerialize` replays the source from
 index 0 (a snapshot-kind derived topic converges by key).
@@ -883,7 +883,7 @@ The rules that keep the chain safe:
   an explicit `acknowledgeAppendSemantics = true`.
 - **Transforms are stateless per-entity** — no cross-entity aggregation,
   no filtering. Sequence-context analysis belongs offline; its output lands
-  as errata or as proposals to a topic of its own.
+  as restatements or as proposals to a topic of its own.
 
 Chains (`raw → canonical → per-team`) are fine — each hop is its own loopback.
 
@@ -914,7 +914,7 @@ always-current syncable over such a topic, naming the gap, and
 always-current syncables, naming them (re-POST with `?force=true` to
 acknowledge the stranding deliberately). A force-stranded syncable does not
 silently receive unconverted data: entities below the break dead-letter at the
-migration chain, replayable later if the reading is repaired (an erratum
+migration chain, replayable later if the reading is repaired (a restatement
 rebinding the below-break range, then a dead-letter replay or a
 re-materialization).
 ## Rehearsing a config before it exists (dry-run)
@@ -956,44 +956,44 @@ Authoring loop: dry-run until the findings list is empty, then POST
 for real — "valid config, wrong result, no error" costs minutes
 instead of a full replay against an oracle.
 
-## Errata: correcting how history is read — rehearse first
+## Restatements: correcting how history is read — rehearse first
 
-An **erratum** is an append-only, consensus-ordered statement that rebinds how
+A **restatement** is an append-only, consensus-ordered statement that rebinds how
 already-committed entities are *read* — never their bytes: entities of a type
 committed in an index range (optionally narrowed to one stamped version and a
 deterministic jq predicate) read as a different declared version from the
-moment the erratum commits. It is the repair tool for stamp mistakes — an
+moment the restatement commits. It is the repair tool for stamp mistakes — an
 unannounced writer that produced v2-shaped data under v1 stamps, a
 nonConvertible break whose below-range data turns out readable after all — and
 it feeds the same interpretation fold every syncable reads through.
 
 ```toml
-[erratum]
+[restatement]
 type = "photos"           # the type (topic) whose readings rebind
 fromIndex = 100           # inclusive raft-index range of EXISTING actuals
 toIndex = 250
-rebindToVersion = 2       # the version matching entities read as
+readAsVersion = 2       # the version matching entities read as
 # fromVersion = 1         # optional: only entities STAMPED v1
 # predicate = '.license == "cc"'   # optional deterministic jq narrowing
 ```
 
-Errata are the highest-blast-radius config in committed: they are
+Restatements are the highest-blast-radius config in committed: they are
 **append-only** (a wrong one cannot be edited, only corrected by another —
 later in the log wins), and admitting one instantly marks every consumer of
 the topic `interpretationStale` — rows materialized before it keep the
 superseded reading until you re-materialize each sink. So the workflow is
 **rehearse, then author**:
 
-1. `POST /v1/erratum/dryrun` with the exact body you intend to admit. Nothing
-   is admitted or stored; the rehearsal runs the erratum's own index range
+1. `POST /v1/restatement/dryrun` with the exact body you intend to admit. Nothing
+   is admitted or stored; the rehearsal runs the restatement's own index range
    through the *real* interpretation fold and reports what the selectors
    actually catch (`stampEligible`, `matched`, broken down `byStampedVersion`),
-   what the erratum really *changes* (`rebound`, with before/after reading
+   what the restatement really *changes* (`rebound`, with before/after reading
    `samples`), rows its predicate cannot evaluate (`predicateErrors` — each of
-   these would dead-letter or wedge a live consumer), already-applied errata it
+   these would dead-letter or wedge a live consumer), already-applied restatements it
    composes with (`overlaps`), and the re-materialization bill
    (`affectedSyncables`, with each consumer's current interpretation pin).
-   Auto-generated `findings` name the authoring signatures: an erratum that
+   Auto-generated `findings` name the authoring signatures: a restatement that
    matches nothing, one that changes no readings, a predicate that filtered
    nothing. Admission-level validation runs in full, with the same words the
    real POST would refuse with — and a rehearsal works even mid-rolling-upgrade,
@@ -1001,7 +1001,7 @@ superseded reading until you re-materialize each sink. So the workflow is
    says so).
 2. Iterate until the findings list is empty and `matched`/`rebound` are the
    numbers you expected.
-3. `POST /v1/erratum/{id}` with the same body — then re-materialize the
+3. `POST /v1/restatement/{id}` with the same body — then re-materialize the
    affected syncables (`POST /v1/syncable/{id}/rematerialize`) when you want
    the corrected reading to reach their already-synced rows.
 
@@ -1024,7 +1024,7 @@ responsibility.
 **Re-materializing a plain keyed `sql` mirror — in place.** For a plain
 keyed `sql` syncable, `POST /v1/syncable/{id}/rematerialize` converges the
 live table without dropping it: the worker replays from index 0 through the
-current mappings + type migrations + errata, keyed upserts overwrite rows in
+current mappings + type migrations + restatements, keyed upserts overwrite rows in
 place while the table keeps serving reads, and a completion sweep removes
 rows the replay never re-emitted. Restart-resumable, and it refreshes the
 syncable's `interpretationPin` (clearing `interpretationStale`). Projections

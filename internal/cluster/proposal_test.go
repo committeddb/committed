@@ -254,15 +254,15 @@ func TestSystemTypesDeclareKindAndTombstonability(t *testing.T) {
 		t.Fatal("systemTypes registry is empty; the package init wiring is broken")
 	}
 	// The built-ins the metadata-GC scrubber must NOT compact: the retained
-	// version-stored configs (EntityKindRevision) and the append-only errata
-	// registry (EntityKindStandalone — every erratum is part of the fold
+	// version-stored configs (EntityKindRevision) and the append-only restatements
+	// registry (EntityKindStandalone — every restatement is part of the fold
 	// history forever).
 	notTombstonable := map[string]bool{
-		typeType.ID:       true,
-		databaseType.ID:   true,
-		syncableType.ID:   true,
-		ingestableType.ID: true,
-		erratumType.ID:    true,
+		typeType.ID:        true,
+		databaseType.ID:    true,
+		syncableType.ID:    true,
+		ingestableType.ID:  true,
+		restatementType.ID: true,
 	}
 	for id, tp := range systemTypes {
 		if tp.EntityKind == EntityKindUnspecified {

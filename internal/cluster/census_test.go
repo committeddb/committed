@@ -10,7 +10,7 @@ import (
 
 // TestCensusFoldShapesAndOrdinals pins the census's durable state: distinct
 // shapes with counts and first/last row ordinals — the interleaved-shapes
-// evidence the errata workflow later needs.
+// evidence the restatement workflow later needs.
 func TestCensusFoldShapesAndOrdinals(t *testing.T) {
 	tc := &TopicCensus{}
 	opts := CensusOptions{}

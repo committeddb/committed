@@ -1,13 +1,13 @@
 // Package interpretation resolves the AUTHORITATIVE reading of a committed
-// entity: its stamped type version ⊕ the errata fold. The stamp is a cache of
-// the default reading in force at write time; errata are append-only,
+// entity: its stamped type version ⊕ the restatement fold. The stamp is a cache of
+// the default reading in force at write time; restatements are append-only,
 // consensus-ordered statements that rebind readings for index ranges (see
-// cluster.Erratum). The fold is deterministic — among matching errata, later
+// cluster.Restatement). The fold is deterministic — among matching restatements, later
 // in the log wins, and matching is always against the stamped version — so
-// replaying data + errata history yields identical readings at every
+// replaying data + restatements history yields identical readings at every
 // (data index, interpretation index) pair.
 //
-// The errata-free fast path costs one nil-map lookup: a topic with no errata
+// The restatement-free fast path costs one nil-map lookup: a topic with no restatements
 // sees no read-path overhead (bench-guarded).
 package interpretation
 
@@ -27,10 +27,10 @@ import (
 // runner's posture: an operator-supplied program must not hang a sync worker.
 const predicateTimeout = 30 * time.Second
 
-// compiled is one erratum with its predicate parsed once.
+// compiled is one restatement with its predicate parsed once.
 type compiled struct {
-	cluster.Erratum
-	// order is the erratum's raft index — the interpretation coordinate that
+	cluster.Restatement
+	// order is the restatement's raft index — the interpretation coordinate that
 	// makes later-in-log-wins deterministic.
 	order uint64
 	// query is the parsed predicate; nil for a pure range binding.
@@ -46,16 +46,16 @@ type compiled struct {
 	tracker *cluster.AmbiguityTracker
 }
 
-// Registry is a compiled snapshot of the errata registry: build it from the
+// Registry is a compiled snapshot of the restatement registry: build it from the
 // applied records (in raft-index order), swap it atomically on change. Its
-// semantic content — errata, ranges, predicates — is immutable and read
+// semantic content — restatements, ranges, predicates — is immutable and read
 // lock-free; the only mutable state is each predicate candidate's ambiguity
 // tracker (internally synchronized).
 type Registry struct {
-	// byType holds each type's errata in log order. A type with no errata is
+	// byType holds each type's restatements in log order. A type with no restatements is
 	// simply absent — the fast path.
 	byType map[string][]compiled
-	// highwater is the highest erratum raft index in the snapshot: the
+	// highwater is the highest restatement raft index in the snapshot: the
 	// registry's interpretation index.
 	highwater uint64
 }
@@ -63,23 +63,23 @@ type Registry struct {
 // EmptyRegistry is the zero registry every reader starts from.
 var EmptyRegistry = &Registry{}
 
-// NewRegistry compiles applied errata (any order; sorted internally by raft
+// NewRegistry compiles applied restatements (any order; sorted internally by raft
 // index) into an immutable snapshot. A predicate that fails to parse — which
 // admission prevents — fails the build rather than silently dropping the
-// erratum: a half-folded registry would read differently on different nodes.
-func NewRegistry(applied []cluster.AppliedErratum) (*Registry, error) {
+// restatement: a half-folded registry would read differently on different nodes.
+func NewRegistry(applied []cluster.AppliedRestatement) (*Registry, error) {
 	r := &Registry{byType: make(map[string][]compiled, 8)}
 	for _, a := range applied {
-		c := compiled{Erratum: a.Erratum, order: a.Index}
-		if a.Erratum.Predicate != "" {
-			q, err := gojq.Parse(a.Erratum.Predicate)
+		c := compiled{Restatement: a.Restatement, order: a.Index}
+		if a.Restatement.Predicate != "" {
+			q, err := gojq.Parse(a.Restatement.Predicate)
 			if err != nil {
-				return nil, fmt.Errorf("erratum %q: predicate does not parse: %w", a.Erratum.ID, err)
+				return nil, fmt.Errorf("restatement %q: predicate does not parse: %w", a.Restatement.ID, err)
 			}
 			c.query = q
 			c.tracker = cluster.NewAmbiguityTracker()
 		}
-		r.byType[a.Erratum.TypeID] = append(r.byType[a.Erratum.TypeID], c)
+		r.byType[a.Restatement.TypeID] = append(r.byType[a.Restatement.TypeID], c)
 		if a.Index > r.highwater {
 			r.highwater = a.Index
 		}
@@ -95,7 +95,7 @@ func NewRegistry(applied []cluster.AppliedErratum) (*Registry, error) {
 	return r, nil
 }
 
-// Highwater is the highest erratum raft index folded into this snapshot — the
+// Highwater is the highest restatement raft index folded into this snapshot — the
 // registry's interpretation index (0 for an empty registry).
 func (r *Registry) Highwater() uint64 {
 	if r == nil {
@@ -104,8 +104,8 @@ func (r *Registry) Highwater() uint64 {
 	return r.highwater
 }
 
-// TypeHighwater is the highest erratum raft index affecting the given type
-// (0 when the type has no errata) — the per-topic staleness comparator.
+// TypeHighwater is the highest restatement raft index affecting the given type
+// (0 when the type has no restatements) — the per-topic staleness comparator.
 func (r *Registry) TypeHighwater(typeID string) uint64 {
 	if r == nil {
 		return 0
@@ -120,16 +120,16 @@ func (r *Registry) TypeHighwater(typeID string) uint64 {
 }
 
 // EffectiveVersion resolves the authoritative reading of the entity at
-// dataIndex: the stamped version unless a matching erratum rebinds it — among
-// matching errata, later in the log wins. The payload is unmarshaled at most
+// dataIndex: the stamped version unless a matching restatement rebinds it — among
+// matching restatements, later in the log wins. The payload is unmarshaled at most
 // once, and only when a matching candidate carries a predicate. Errors only
 // when a predicate cannot evaluate (a non-JSON payload, or a program the
 // payload's shape breaks) — never a silent fall-through to a possibly-wrong
-// reading — and the error comes back classified for egress by the erratum's
+// reading — and the error comes back classified for egress by the restatement's
 // own tracker: cluster.Permanent while the failure may be entry-specific,
 // cluster.ErrConfigShaped (transient — the worker wedges) once a run of
 // consecutive distinct rows with no clean evaluation establishes the
-// predicate config-shaped. Rows an erratum's range never gates don't touch
+// predicate config-shaped. Rows a restatement's range never gates don't touch
 // its tracker, so unrelated successes can't mask a predicate that fails
 // every row it actually evaluates.
 func (r *Registry) EffectiveVersion(ctx context.Context, typeID string, dataIndex uint64, stampedVersion int, payload []byte) (int, error) {
@@ -138,7 +138,7 @@ func (r *Registry) EffectiveVersion(ctx context.Context, typeID string, dataInde
 	}
 	cs := r.byType[typeID]
 	if cs == nil {
-		return stampedVersion, nil // the errata-free fast path
+		return stampedVersion, nil // the restatement-free fast path
 	}
 
 	effective := stampedVersion
@@ -155,15 +155,15 @@ func (r *Registry) EffectiveVersion(ctx context.Context, typeID string, dataInde
 				dec.UseNumber()
 				if err := dec.Decode(&doc); err != nil {
 					// Classified through the forcing candidate's tracker: one
-					// malformed row is entry-specific; a predicate erratum
+					// malformed row is entry-specific; a predicate restatement
 					// admitted against a non-JSON topic fails every gated row.
-					return 0, c.tracker.Classify(dataIndex, fmt.Errorf("erratum %q predicate: payload is not valid JSON: %w", c.ID, err))
+					return 0, c.tracker.Classify(dataIndex, fmt.Errorf("restatement %q predicate: payload is not valid JSON: %w", c.ID, err))
 				}
 				docReady = true
 			}
 			match, err := evalPredicate(ctx, c.query, doc)
 			if err != nil {
-				return 0, c.tracker.Classify(dataIndex, fmt.Errorf("erratum %q predicate: %w", c.ID, err))
+				return 0, c.tracker.Classify(dataIndex, fmt.Errorf("restatement %q predicate: %w", c.ID, err))
 			}
 			// A clean evaluation — match or not — proves the predicate can
 			// read this data; reset its evidence.
@@ -172,7 +172,7 @@ func (r *Registry) EffectiveVersion(ctx context.Context, typeID string, dataInde
 				continue
 			}
 		}
-		effective = c.RebindToVersion // later in the log wins: keep overwriting
+		effective = c.ReadAsVersion // later in the log wins: keep overwriting
 	}
 	return effective, nil
 }

@@ -44,7 +44,7 @@ type ShapeCensus struct {
 	Count uint64 `json:"count"`
 	// FirstRow/LastRow are 1-based row ordinals (within the snapshot pass at
 	// this epoch) of the shape's first and latest sighting — the input the
-	// errata authoring workflow needs to see interleaved shapes' ranges.
+	// restatements authoring workflow needs to see interleaved shapes' ranges.
 	FirstRow uint64 `json:"firstRow"`
 	LastRow  uint64 `json:"lastRow"`
 }

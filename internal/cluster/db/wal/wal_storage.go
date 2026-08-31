@@ -128,11 +128,11 @@ var (
 	// completion), guarded/swept with the syncable config. See
 	// syncable_rematerialization.go.
 	syncableRematerializationBucket = []byte("syncableRematerializations")
-	// errataBucket holds the APPEND-ONLY interpretation registry: one record
-	// per erratum id, value = 8-byte big-endian raft index || marshaled
-	// LogErratum. Never edited, never swept (replay determinism at historical
-	// interpretation indexes needs every erratum forever). See erratum.go.
-	errataBucket = []byte("errata")
+	// restatementsBucket holds the APPEND-ONLY interpretation registry: one record
+	// per restatement id, value = 8-byte big-endian raft index || marshaled
+	// LogRestatement. Never edited, never swept (replay determinism at historical
+	// interpretation indexes needs every restatement forever). See restatement.go.
+	restatementsBucket = []byte("restatements")
 )
 
 // appliedIndexBucket holds a single key ("idx") whose value is the
@@ -212,7 +212,7 @@ var internalEntities = []internalEntity{
 	{cluster.IsIngestablePosition, "saveIngestablePosition", ingestablePositionBucket, (*Storage).saveIngestablePosition},
 	{cluster.IsContractFingerprint, "handleContractFingerprint", contractFingerprintBucket, (*Storage).handleContractFingerprint},
 	{cluster.IsIngestableCensus, "handleIngestableCensus", ingestableCensusBucket, (*Storage).handleIngestableCensus},
-	{cluster.IsErratum, "handleErratum", errataBucket, (*Storage).handleErratum},
+	{cluster.IsRestatement, "handleRestatement", restatementsBucket, (*Storage).handleRestatement},
 	{cluster.IsSyncableRematerialization, "handleSyncableRematerialization", syncableRematerializationBucket, (*Storage).handleSyncableRematerialization},
 	{cluster.IsScrub, "handleScrub", pendingScrubBucket, (*Storage).handleScrub},
 	{cluster.IsNodeAPIURL, "handleNodeAPIURL", memberAPIURLBucket, (*Storage).handleNodeAPIURL},
@@ -566,9 +566,9 @@ type Storage struct {
 	// HTTP status path on other goroutines, not CAS.
 	dataEventIndex atomic.Uint64
 
-	// interpretationRegistry is the compiled errata snapshot — immutable,
-	// swapped whole by handleErratum / Open (reloadInterpretationRegistry),
-	// read lock-free on every sync read (see erratum.go and the
+	// interpretationRegistry is the compiled restatements snapshot — immutable,
+	// swapped whole by handleRestatement / Open (reloadInterpretationRegistry),
+	// read lock-free on every sync read (see restatement.go and the
 	// interpretation package).
 	interpretationRegistry atomic.Pointer[interpretation.Registry]
 
@@ -1028,9 +1028,9 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		}
 	}
 
-	// Compile the interpretation registry from the applied errata so readers
+	// Compile the interpretation registry from the applied restatements so readers
 	// resolve effective versions from the first sync after restart (entries
-	// already applied before this restart won't re-run handleErratum).
+	// already applied before this restart won't re-run handleRestatement).
 	if err := ws.reloadInterpretationRegistry(); err != nil {
 		return nil, err
 	}

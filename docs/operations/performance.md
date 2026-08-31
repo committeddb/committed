@@ -109,5 +109,5 @@ The posture instead:
 - **Rebuilds are cheap on the log side.** At catch-up rates the log replays
   millions of entries per minute; budget rebuild time against the
   destination database's ingest rate instead.
-- **Interpretation adds nothing measurable** on the errata-free path
+- **Interpretation adds nothing measurable** on the restatement-free path
   (~3 ns/entity), so leaving the interpretation layer on costs nothing.

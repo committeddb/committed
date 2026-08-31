@@ -16,7 +16,7 @@ import (
 // stamped with the replay's epoch; when the replay reaches the target head
 // (the data head at this call) the sink sweeps the rows the replay never
 // positively re-emitted and the in-progress record clears. It is the cure
-// for projection rot (a mapping added, a migration fixed, an erratum landed:
+// for projection rot (a mapping added, a migration fixed, a restatement landed:
 // everything already in the sink was derived under the old logic) — and the
 // re-derivation that refreshes the checkpoint's interpretation pin.
 //

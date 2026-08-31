@@ -251,10 +251,10 @@ message LogSyncableIndex {
     // interpretationIndex is the second half of the determinism pair
     // (data index, interpretation index) every derived checkpoint is pinned
     // to: the raft index of the last interpretation-registry record (see
-    // LogErratum) folded into the readings this syncable's outputs were
+    // LogRestatement) folded into the readings this syncable's outputs were
     // derived under. Same pair ⇒ same output — the replay-determinism
     // statement the 0.8.x three-layer track hangs on. 0 means "no registry
-    // records folded", which is the only value until the errata registry
+    // records folded", which is the only value until the restatement registry
     // lands later in the 0.8.x series (the field ships early so the
     // checkpoint format never migrates mid-series). Wire add-only:
     // pre-feature checkpoints unmarshal as 0 and a 0 stamps no bytes.
@@ -318,41 +318,41 @@ message LogSyncableRematerialization {
     uint64 targetHead = 2;
 }
 
-// LogErratum is the errata interpretation-registry record: an append-only,
+// LogRestatement is the restatement interpretation-registry record: an append-only,
 // consensus-ordered statement that rebinds how already-committed actuals are
 // READ — never their bytes. A stamped TypeRef is a cache of the default
 // reading in force at write time; the authoritative reading is the stamp ⊕
-// the errata fold, where later-in-log wins (a wrong erratum is corrected by
-// another erratum, never edited).
+// the restatement fold, where later-in-log wins (a wrong restatement is corrected by
+// another restatement, never edited).
 //
 // RESERVED SHAPE (0.8.x format groundwork): this release defines the record
 // and its type identity so the on-disk shape never migrates mid-series —
 // nothing emits or applies it yet; the registry semantics (fold, read-path
 // resolution, admission validation) land later in the 0.8.x series. The type
-// UUID (cluster.ErratumTypeID) is minted in the system-type namespace as
-// GATED (must-understand): a node that cannot fold errata must not skip
+// UUID (cluster.RestatementTypeID) is minted in the system-type namespace as
+// GATED (must-understand): a node that cannot fold restatements must not skip
 // them, or its syncables would emit stale readings — and emission will
 // additionally be FeatureLevel-gated so the record is never committed while
 // a member that can't apply it is present.
-message LogErratum {
+message LogRestatement {
     // typeID names the Type whose stamped readings are rebound.
     string typeID = 1;
     // fromIndex..toIndex is the INCLUSIVE raft-index range of actuals the
-    // erratum covers.
+    // restatement covers.
     uint64 fromIndex = 2;
     uint64 toIndex = 3;
-    // rebindToVersion is the Type version matching actuals read as (the
+    // readAsVersion is the Type version matching actuals read as (the
     // uint32 mirrors TypeRef.Version).
-    uint32 rebindToVersion = 4;
+    uint32 readAsVersion = 4;
     // predicate, when non-empty, narrows the range to payloads matching a
     // deterministic program (the interleaved-writers case); empty means the
     // whole range rebinds (a range binding). The rule language is pinned to
-    // a deterministic subset — no now(), no env. Future erratum kinds
+    // a deterministic subset — no now(), no env. Future restatement kinds
     // (disavowal, enumerative) extend this message add-only.
     string predicate = 5;
-    // fromVersion, when non-zero, narrows the erratum to entities STAMPED
+    // fromVersion, when non-zero, narrows the restatement to entities STAMPED
     // that version ("[n,m] under stamp v1 reads as v2" — the design's range
-    // binding); 0 applies to any stamp. Without it an erratum could not
+    // binding); 0 applies to any stamp. Without it a restatement could not
     // distinguish populations sharing a range once real version bumps exist,
     // and rebinding DOWN ("wrongly stamped v2, read as v1") would be
     // unexpressible safely.

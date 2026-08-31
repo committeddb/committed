@@ -16,12 +16,12 @@ import (
 var errTypeUnavailable = errors.New("interpretation: effective version's type unavailable")
 
 // Wrap returns a cluster.Syncable that rebinds each user-data entity to its
-// AUTHORITATIVE reading — stamp ⊕ errata fold — before inner sees it. Applied
+// AUTHORITATIVE reading — stamp ⊕ restatement fold — before inner sees it. Applied
 // to EVERY syncable (both modes): version-pinned and version-aware consumers
 // dispatch on the effective version, and the always-current migration chain
 // (wrapped INSIDE this) starts from it. registry returns the live compiled
-// snapshot so errata applied mid-run take effect on subsequent reads; the
-// errata-free path is one nil-map lookup per entity. If inner implements
+// snapshot so restatements applied mid-run take effect on subsequent reads; the
+// restatement-free path is one nil-map lookup per entity. If inner implements
 // cluster.BatchSyncable, the wrapper does too.
 func Wrap(inner cluster.Syncable, registry func() *Registry, r cluster.TypeResolver) cluster.Syncable {
 	if bs, ok := inner.(cluster.BatchSyncable); ok {
@@ -44,7 +44,7 @@ func (s *single) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldSna
 		}
 		// Fully classified at the failure site: errTypeUnavailable passes
 		// through transient (schema/timing-shaped → wedge), and a predicate
-		// failure arrives from the erratum's own ambiguity tracker —
+		// failure arrives from the restatement's own ambiguity tracker —
 		// Permanent (dead-letter that proposal rather than silently choosing
 		// a reading) until a run of distinct rows establishes it
 		// config-shaped, transient (wedge) after.

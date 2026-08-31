@@ -110,17 +110,17 @@ type Storage interface {
 	// endpoint can serve it; also read by a resuming worker to seed its
 	// accumulator at the same refresh epoch.
 	IngestableCensus(id string) (*cluster.IngestableCensus, bool)
-	// InterpretationRegistry returns the current compiled errata snapshot —
-	// immutable, swapped whole on each erratum apply, never nil. The read
-	// path resolves effective versions (stamp ⊕ errata fold) through it.
+	// InterpretationRegistry returns the current compiled restatements snapshot —
+	// immutable, swapped whole on each restatement apply, never nil. The read
+	// path resolves effective versions (stamp ⊕ restatement fold) through it.
 	InterpretationRegistry() *interpretation.Registry
-	// ErratumByID returns the applied erratum with the given id, its raft
+	// RestatementByID returns the applied restatement with the given id, its raft
 	// index, and whether it exists — the admission read behind the
-	// immutability rule (errata are append-only, never edited).
-	ErratumByID(id string) (*cluster.Erratum, uint64, bool)
-	// AppliedErrata returns every applied erratum with its raft index,
-	// unordered. Powers GET /v1/erratum.
-	AppliedErrata() ([]cluster.AppliedErratum, error)
+	// immutability rule (restatements are append-only, never edited).
+	RestatementByID(id string) (*cluster.Restatement, uint64, bool)
+	// AppliedRestatements returns every applied restatement with its raft index,
+	// unordered. Powers GET /v1/restatement.
+	AppliedRestatements() ([]cluster.AppliedRestatement, error)
 	// SyncableCheckpoint returns the syncable's full checkpoint record —
 	// including its interpretation pin — or (nil, false) when none exists.
 	SyncableCheckpoint(id string) (*cluster.SyncableIndex, bool)
@@ -252,7 +252,7 @@ type Storage interface {
 	// interpretation coordinate such an edit moves. SyncableInterpretation
 	// compares it against always-current consumers' pins, and the fresh-pin
 	// capture folds it in, so a migration fix flips interpretationStale
-	// exactly like an erratum does. See wal/type_migration_edit.go.
+	// exactly like a restatement does. See wal/type_migration_edit.go.
 	TypeMigrationEditedAt(typeID string) uint64
 }
 

@@ -71,7 +71,7 @@ func (db *DB) refuseAlwaysCurrentAcrossBreak(c *cluster.Configuration) error {
 			}
 			if tv.NonConvertible {
 				return &cluster.ConfigError{
-					Err: fmt.Errorf("always-current is not admissible over topic %q: version %d is declared nonConvertible (v%d data can never reach the current version). The stances that remain are as-stored with version-pinned handling, or version-aware consumption; an erratum rebinding the below-break reading can also lift this", topic, v, v-1),
+					Err: fmt.Errorf("always-current is not admissible over topic %q: version %d is declared nonConvertible (v%d data can never reach the current version). The stances that remain are as-stored with version-pinned handling, or version-aware consumption; a restatement rebinding the below-break reading can also lift this", topic, v, v-1),
 				}
 			}
 		}

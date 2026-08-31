@@ -14,28 +14,28 @@ import (
 // that ship EARLY in the series — before their semantics — so on-disk formats
 // never migrate mid-series. See the three-layer track's design notes.
 
-// TestErratumTypeID_ReservedGatedRegistered pins the erratum record's
+// TestRestatementTypeID_ReservedGatedRegistered pins the restatement record's
 // identity and classification now that the registry is BUILT: the ID is
 // minted (stable forever, written into permanent logs), classified gated
-// (must-understand — an OLDER binary that cannot fold errata fatals rather
+// (must-understand — an OLDER binary that cannot fold restatements fatals rather
 // than skipping), registered with apply semantics on this binary, and
 // append-only (Standalone kind, never metadata-GC compacted).
-func TestErratumTypeID_ReservedGatedRegistered(t *testing.T) {
+func TestRestatementTypeID_ReservedGatedRegistered(t *testing.T) {
 	// The exact UUID is load-bearing: it may never drift.
-	require.Equal(t, "c01177ed-0000-0000-0000-000000000000", ErratumTypeID)
+	require.Equal(t, "c01177ed-0000-0000-0000-000000000000", RestatementTypeID)
 
-	state, ok := reservedSystemClass(ErratumTypeID)
-	require.True(t, ok, "ErratumTypeID must be in the reserved system-type namespace")
+	state, ok := reservedSystemClass(RestatementTypeID)
+	require.True(t, ok, "RestatementTypeID must be in the reserved system-type namespace")
 	require.Equal(t, compatGated, state,
-		"errata are correctness-bearing — a node that skipped them would serve stale readings")
-	require.True(t, IsReservedSystemID(ErratumTypeID))
+		"restatements are correctness-bearing — a node that skipped them would serve stale readings")
+	require.True(t, IsReservedSystemID(RestatementTypeID))
 
-	require.True(t, IsInternal(ErratumTypeID), "registered: this binary folds errata")
-	got, err := resolveType(TypeRef{ID: ErratumTypeID}, &stubResolver{})
+	require.True(t, IsInternal(RestatementTypeID), "registered: this binary folds restatements")
+	got, err := resolveType(TypeRef{ID: RestatementTypeID}, &stubResolver{})
 	require.NoError(t, err)
 	require.Equal(t, EntityKindStandalone, got.EntityKind, "append-only registry")
-	require.False(t, IsSystemTombstonable(ErratumTypeID),
-		"no erratum is ever compacted — every one is part of the fold history")
+	require.False(t, IsSystemTombstonable(RestatementTypeID),
+		"no restatement is ever compacted — every one is part of the fold history")
 }
 
 // TestSyncableIndexInterpretationPairRoundTrip proves the checkpoint's
@@ -53,7 +53,7 @@ func TestSyncableIndexInterpretationPairRoundTrip(t *testing.T) {
 
 // TestSyncableIndexZeroInterpretationWireBackCompatible pins the add-only
 // contract: a checkpoint with no interpretation records folded (the only
-// possible state until the errata registry lands) marshals byte-identically
+// possible state until the restatement registry lands) marshals byte-identically
 // to a pre-feature checkpoint, and pre-feature bytes unmarshal to 0.
 func TestSyncableIndexZeroInterpretationWireBackCompatible(t *testing.T) {
 	got, err := (&SyncableIndex{ID: "sync-1", Index: 9001}).Marshal()

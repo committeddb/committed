@@ -9,106 +9,106 @@ import (
 	"github.com/committeddb/committed/internal/cluster/migration"
 )
 
-// featureLevelErrata gates erratum emission: the Erratum record is GATED
+// featureLevelRestatements gates restatement emission: the Restatement record is GATED
 // (must-understand) in the system-type namespace — a member that cannot fold
-// errata would fatal on apply — so an erratum is only admitted once every
+// restatements would fatal on apply — so a restatement is only admitted once every
 // member announces version.FeatureLevel >= 2.
-const featureLevelErrata uint64 = 2
+const featureLevelRestatements uint64 = 2
 
-// ParseErratum reads the [erratum] TOML/JSON envelope into the record. The
-// storage-dependent admission checks live in ProposeErratum.
-func ParseErratum(c *cluster.Configuration) (*cluster.Erratum, error) {
+// ParseRestatement reads the [restatement] TOML/JSON envelope into the record. The
+// storage-dependent admission checks live in ProposeRestatement.
+func ParseRestatement(c *cluster.Configuration) (*cluster.Restatement, error) {
 	v, err := cluster.ParseConfigBytes(c.MimeType, c.Data)
 	if err != nil {
 		return nil, err
 	}
-	e := &cluster.Erratum{
-		ID:              c.ID,
-		TypeID:          v.GetString("erratum.type"),
-		FromIndex:       uint64(max(v.GetInt("erratum.fromIndex"), 0)), //nolint:gosec // G115: negatives clamped, admission validates
-		ToIndex:         uint64(max(v.GetInt("erratum.toIndex"), 0)),   //nolint:gosec // G115: negatives clamped, admission validates
-		RebindToVersion: v.GetInt("erratum.rebindToVersion"),
-		FromVersion:     v.GetInt("erratum.fromVersion"),
-		Predicate:       v.GetString("erratum.predicate"),
+	e := &cluster.Restatement{
+		ID:            c.ID,
+		TypeID:        v.GetString("restatement.type"),
+		FromIndex:     uint64(max(v.GetInt("restatement.fromIndex"), 0)), //nolint:gosec // G115: negatives clamped, admission validates
+		ToIndex:       uint64(max(v.GetInt("restatement.toIndex"), 0)),   //nolint:gosec // G115: negatives clamped, admission validates
+		ReadAsVersion: v.GetInt("restatement.readAsVersion"),
+		FromVersion:   v.GetInt("restatement.fromVersion"),
+		Predicate:     v.GetString("restatement.predicate"),
 	}
 	if e.TypeID == "" {
-		return nil, fmt.Errorf("erratum.type is required: the type (topic) whose readings this erratum rebinds")
+		return nil, fmt.Errorf("restatement.type is required: the type (topic) whose readings this restatement rebinds")
 	}
 	if e.FromIndex == 0 || e.ToIndex == 0 {
-		return nil, fmt.Errorf("erratum.fromIndex and erratum.toIndex are required (1-based raft indexes; an erratum binds an existing range)")
+		return nil, fmt.Errorf("restatement.fromIndex and restatement.toIndex are required (1-based raft indexes; a restatement binds an existing range)")
 	}
 	if e.FromIndex > e.ToIndex {
-		return nil, fmt.Errorf("erratum.fromIndex (%d) must not exceed erratum.toIndex (%d)", e.FromIndex, e.ToIndex)
+		return nil, fmt.Errorf("restatement.fromIndex (%d) must not exceed restatement.toIndex (%d)", e.FromIndex, e.ToIndex)
 	}
-	if e.RebindToVersion <= 0 {
-		return nil, fmt.Errorf("erratum.rebindToVersion is required: the version matching actuals read as")
+	if e.ReadAsVersion <= 0 {
+		return nil, fmt.Errorf("restatement.readAsVersion is required: the version matching actuals read as")
 	}
 	if e.Predicate != "" {
 		// The predicate is part of the trust base: it re-evaluates on every
 		// read, so it is pinned to the same deterministic subset as
 		// migrations (no now(), no env, no external input).
 		if err := migration.Compile([]byte(e.Predicate)); err != nil {
-			return nil, fmt.Errorf("erratum.predicate is not a valid deterministic jq program: %w", err)
+			return nil, fmt.Errorf("restatement.predicate is not a valid deterministic jq program: %w", err)
 		}
 	}
 	return e, nil
 }
 
-// admitErratumChecks runs the storage-backed admission checks SHARED by
-// ProposeErratum and DryRunErratum — one home, so the rehearsal can never
+// admitRestatementChecks runs the storage-backed admission checks SHARED by
+// ProposeRestatement and DryRunRestatement — one home, so the rehearsal can never
 // drift from the real refusals ("same checks, same words" is the dry-run's
-// contract). The propose-only checks stay with ProposeErratum: the feature
+// contract). The propose-only checks stay with ProposeRestatement: the feature
 // gate (a rehearsal admits nothing and works mid-upgrade) and append-only id
 // immutability (a rehearsal has no id).
-func (db *DB) admitErratumChecks(e *cluster.Erratum) error {
+func (db *DB) admitRestatementChecks(e *cluster.Restatement) error {
 	// The rebind target — and, when narrowed, the stamp selector — must be
 	// declared versions of a USER type.
 	if cluster.IsInternal(e.TypeID) || cluster.IsReservedSystemID(e.TypeID) {
-		return cluster.NewConfigError(fmt.Errorf("erratum.type %q is a committed system type; errata rebind user topics only", e.TypeID))
+		return cluster.NewConfigError(fmt.Errorf("restatement.type %q is a committed system type; restatements rebind user topics only", e.TypeID))
 	}
-	if _, err := db.storage.ResolveType(cluster.TypeRefAt(e.TypeID, e.RebindToVersion)); err != nil {
-		return cluster.NewConfigError(fmt.Errorf("erratum.rebindToVersion %d is not a declared version of type %q: %w", e.RebindToVersion, e.TypeID, err))
+	if _, err := db.storage.ResolveType(cluster.TypeRefAt(e.TypeID, e.ReadAsVersion)); err != nil {
+		return cluster.NewConfigError(fmt.Errorf("restatement.readAsVersion %d is not a declared version of type %q: %w", e.ReadAsVersion, e.TypeID, err))
 	}
 	if e.FromVersion != 0 {
 		if _, err := db.storage.ResolveType(cluster.TypeRefAt(e.TypeID, e.FromVersion)); err != nil {
-			return cluster.NewConfigError(fmt.Errorf("erratum.fromVersion %d is not a declared version of type %q: %w", e.FromVersion, e.TypeID, err))
+			return cluster.NewConfigError(fmt.Errorf("restatement.fromVersion %d is not a declared version of type %q: %w", e.FromVersion, e.TypeID, err))
 		}
 	}
-	// An erratum binds the PAST: a range beyond the applied log would be a
+	// A restatement binds the PAST: a range beyond the applied log would be a
 	// statement about data that doesn't exist.
 	if applied := db.storage.AppliedIndex(); e.ToIndex > applied {
-		return cluster.NewConfigError(fmt.Errorf("erratum.toIndex %d is beyond the applied log (%d): an erratum rebinds existing actuals", e.ToIndex, applied))
+		return cluster.NewConfigError(fmt.Errorf("restatement.toIndex %d is beyond the applied log (%d): a restatement rebinds existing actuals", e.ToIndex, applied))
 	}
 	return nil
 }
 
-// ProposeErratum admits one interpretation-registry statement. Errata are
+// ProposeRestatement admits one interpretation-registry statement. Restatements are
 // APPEND-ONLY: an id that already exists with different content is refused
-// ("author a new erratum to correct this one"); an identical re-POST is an
+// ("author a new restatement to correct this one"); an identical re-POST is an
 // idempotent no-op. Admission is loud at POST — unknown type, unknown target
 // version, a range beyond the applied log, a non-deterministic predicate all
 // refuse here, never at first read.
-func (db *DB) ProposeErratum(ctx context.Context, c *cluster.Configuration) error {
-	e, err := ParseErratum(c)
+func (db *DB) ProposeRestatement(ctx context.Context, c *cluster.Configuration) error {
+	e, err := ParseRestatement(c)
 	if err != nil {
 		return cluster.NewConfigError(err)
 	}
 
 	// Mixed-version safety: the record is gated (an old member would fatal
-	// applying it), so refuse until every member can fold errata.
-	if !db.featureEnabled(featureLevelErrata) {
+	// applying it), so refuse until every member can fold restatements.
+	if !db.featureEnabled(featureLevelRestatements) {
 		return &cluster.ClusterBelowFeatureLevelError{
-			Feature: "errata", Required: featureLevelErrata, ClusterMin: db.clusterMinFeatureLevel(),
+			Feature: "restatements", Required: featureLevelRestatements, ClusterMin: db.clusterMinFeatureLevel(),
 		}
 	}
 
-	if err := db.admitErratumChecks(e); err != nil {
+	if err := db.admitRestatementChecks(e); err != nil {
 		return err
 	}
 
 	// Immutability: same id + same content = idempotent retry; same id +
 	// different content = an edit, which append-only forbids.
-	if existing, _, ok := db.storage.ErratumByID(e.ID); ok {
+	if existing, _, ok := db.storage.RestatementByID(e.ID); ok {
 		newBytes, err := e.Marshal()
 		if err != nil {
 			return err
@@ -120,25 +120,25 @@ func (db *DB) ProposeErratum(ctx context.Context, c *cluster.Configuration) erro
 		if bytes.Equal(newBytes, oldBytes) {
 			return nil // idempotent re-POST
 		}
-		return cluster.NewConfigError(fmt.Errorf("erratum %q already exists with different content: errata are append-only — author a NEW erratum to correct it (later in the log wins)", e.ID))
+		return cluster.NewConfigError(fmt.Errorf("restatement %q already exists with different content: restatements are append-only — author a NEW restatement to correct it (later in the log wins)", e.ID))
 	}
 
-	entity, err := cluster.NewErratumEntity(e)
+	entity, err := cluster.NewRestatementEntity(e)
 	if err != nil {
 		return err
 	}
 	return db.Propose(ctx, &cluster.Proposal{Entities: []*cluster.Entity{entity}})
 }
 
-// Errata implements cluster.Cluster: every applied erratum with its raft
+// Restatements implements cluster.Cluster: every applied restatement with its raft
 // index (unordered).
-func (db *DB) Errata() ([]cluster.AppliedErratum, error) {
-	return db.storage.AppliedErrata()
+func (db *DB) Restatements() ([]cluster.AppliedRestatement, error) {
+	return db.storage.AppliedRestatements()
 }
 
 // SyncableInterpretation implements cluster.Cluster: the syncable's
-// interpretation pin (from its checkpoint; 0 = pinned before any errata) and
-// whether an erratum affecting a consumed topic landed past it — meaning some
+// interpretation pin (from its checkpoint; 0 = pinned before any restatements) and
+// whether a restatement affecting a consumed topic landed past it — meaning some
 // already-synced rows were derived under a superseded reading and stay that
 // way until the operator re-derives.
 func (db *DB) SyncableInterpretation(id string) (uint64, bool, error) {
@@ -161,7 +161,7 @@ func (db *DB) SyncableInterpretation(id string) (uint64, bool, error) {
 		}
 	}
 	// An in-place MIGRATION edit is the other way the current reading of a
-	// topic's history changes (errata rebind stamps; a migration edit
+	// topic's history changes (restatements rebind stamps; a migration edit
 	// rewrites the always-current transform). It moves the same coordinate:
 	// an always-current consumer pinned below the edit has rows synced under
 	// the previous transform — stale until re-materialized. As-stored
@@ -178,11 +178,11 @@ func (db *DB) SyncableInterpretation(id string) (uint64, bool, error) {
 }
 
 // freshInterpretationPin is the interpretation coordinate a syncable
-// materialization STARTING NOW is derived under: the errata registry
+// materialization STARTING NOW is derived under: the restatement registry
 // highwater joined with the latest in-place migration-edit index of each
 // consumed topic. A fresh worker (no checkpoint — replaying from index 0)
 // pins here: its replay reads everything through the CURRENT readings, so
-// neither an already-applied erratum nor an already-applied migration edit
+// neither an already-applied restatement nor an already-applied migration edit
 // may flag it stale. The mode does not matter for the pin — a higher pin
 // never creates false staleness, it only records what "current" meant.
 func (db *DB) freshInterpretationPin(id string) uint64 {

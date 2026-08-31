@@ -10,21 +10,21 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 )
 
-// brokenPredicateReg builds a registry with one predicate erratum whose
+// brokenPredicateReg builds a registry with one predicate restatement whose
 // program compiles (admission accepts it) but errors at runtime on any
 // payload whose contact is not a string — the compiles-but-fails-every-row
-// shape the per-erratum tracker exists to classify.
+// shape the per-restatement tracker exists to classify.
 func brokenPredicateReg(t *testing.T, fromVersion int) *Registry {
 	t.Helper()
-	return reg(t, cluster.AppliedErratum{Index: 5, Erratum: cluster.Erratum{
+	return reg(t, cluster.AppliedRestatement{Index: 5, Restatement: cluster.Restatement{
 		ID: "e1", TypeID: "person", FromIndex: 1, ToIndex: 1 << 40,
-		FromVersion: fromVersion, RebindToVersion: 2,
+		FromVersion: fromVersion, ReadAsVersion: 2,
 		Predicate: `(.contact | ascii_downcase) == "alice"`,
 	}})
 }
 
 // TestPredicateRun_FlipsToConfigShaped pins the interpretation member of the
-// ambiguity class: an erratum predicate erroring across consecutive distinct
+// ambiguity class: a restatement predicate erroring across consecutive distinct
 // rows with no clean evaluation is config-shaped — the classification flips
 // from Permanent (dead-letter) to transient (the worker wedges) at the
 // evidence threshold, and a retry of the same row stays wedged.
@@ -70,7 +70,7 @@ func TestPredicateCleanEvalResetsEvidence(t *testing.T) {
 }
 
 // TestRangeGatedPredicate_StillFlips pins the gap the per-site design
-// closes here too: an erratum gated to one stamped version errors on every
+// closes here too: a restatement gated to one stamped version errors on every
 // row it actually evaluates, while rows of other versions pass through
 // cleanly without touching it. Those unrelated successes must not mask the
 // broken predicate — the 10th gated row flips.
@@ -102,7 +102,7 @@ func TestRangeGatedPredicate_StillFlips(t *testing.T) {
 
 // TestWrapPassesClassifiedPredicateErrors: the Sync wrapper no longer
 // blanket-wraps rebind failures Permanent — the classification travels from
-// the erratum's tracker through Sync untouched, so an established
+// the restatement's tracker through Sync untouched, so an established
 // config-shaped predicate wedges the worker.
 func TestWrapPassesClassifiedPredicateErrors(t *testing.T) {
 	r := brokenPredicateReg(t, 0)

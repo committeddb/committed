@@ -233,7 +233,7 @@ And a discriminant the producer never recorded is unrecoverable by any
 system: if two shapes interleave with no field telling them apart, the
 census shows you the interleaving, but no tool — here or anywhere — can
 conjure the missing label. Fix that at the producer, or bind readings by row
-range with errata.
+range with restatements.
 
 #### Schema validation: gate or tripwire
 
@@ -287,37 +287,37 @@ blessing a new contract on an already-flowing topic, re-POST the ingestable —
 or restart the node — so its worker picks the contract up; direct proposals
 always validate against the current version.
 
-#### Repairing the reading: errata
+#### Repairing the reading: restatements
 
 An entity's stamped version is a *cache of the default reading in force at
 write time* — for CDC data, committed classified it; nobody asserted anything.
 When the census or the tripwire reveals that months of actuals are stamped v1
 but were really v2-shaped (the unannounced writer), the log's bytes are still
 true; the *reading* is wrong. There is no ALTER TABLE and no rewrite:
-**errata** are append-only, consensus-ordered statements that rebind readings:
+**restatements** are append-only, consensus-ordered statements that rebind readings:
 
 ```toml
-# POST /v1/erratum/photos-backfill-v2
-[erratum]
+# POST /v1/restatement/photos-backfill-v2
+[restatement]
 type = "photo-meta"        # the type (topic) whose readings rebind
 fromIndex = 1200           # inclusive raft-index range of existing actuals
 toIndex = 8400
-rebindToVersion = 2        # read these as v2
+readAsVersion = 2        # read these as v2
 fromVersion = 1            # optional: only entities STAMPED v1
 # predicate = '.writer == "app-b"'   # optional: the interleaved-writers case,
                                      # a deterministic jq program (no now(), no env)
 ```
 
 Every syncable — both modes — receives the authoritative reading: stamp ⊕
-errata fold. A rebound entity dispatches, and enters the always-current
+restatement fold. A rebound entity dispatches, and enters the always-current
 migration chain, at its *effective* version, so a v2-shaped row wrongly
-stamped v1 is never mangled by the v1→v2 transform. Errata are **immutable**:
-a wrong erratum is corrected by appending another — among matching errata,
+stamped v1 is never mangled by the v1→v2 transform. Restatements are **immutable**:
+a wrong restatement is corrected by appending another — among matching restatements,
 later in the log wins, matching always against the stamp — and replaying data
-plus errata history is deterministic at every `(data index, interpretation
-index)` pair. Topics with no errata pay nothing on the read path.
+plus restatements history is deterministic at every `(data index, interpretation
+index)` pair. Topics with no restatements pay nothing on the read path.
 
-An erratum also marks dependent syncables **stale**
+A restatement also marks dependent syncables **stale**
 (`GET /v1/syncable/{id}/status` → `interpretationStale`): rows synced before
 it landed were derived under the superseded reading. Staleness is loud and
 queryable, never auto-healed — re-derivation is yours to trigger:
@@ -325,7 +325,7 @@ queryable, never auto-healed — re-derivation is yours to trigger:
 the current projection + interpretation while the keyed sink keeps serving
 (rows converge in place; a completion sweep removes rows the replay no longer
 produces), or blue-green a replacement for sink shapes that can't converge
-in place. `GET /v1/erratum` lists the registry.
+in place. `GET /v1/restatement` lists the registry.
 
 Configure a database to write into (sink):
 

@@ -21,10 +21,10 @@ import (
 	synchttp "github.com/committeddb/committed/internal/cluster/syncable/http"
 )
 
-// newWalDBErrata builds the errata test fixture: version-announced (the
-// erratum gate requires the cluster minimum feature level) with the webhook
+// newWalDBRestatements builds the restatements test fixture: version-announced (the
+// restatement gate requires the cluster minimum feature level) with the webhook
 // syncable parser registered (the observable sink).
-func newWalDBErrata(t *testing.T) (*db.DB, *wal.Storage) {
+func newWalDBRestatements(t *testing.T) (*db.DB, *wal.Storage) {
 	t.Helper()
 	dir := t.TempDir()
 	p := parser.New()
@@ -41,9 +41,9 @@ func newWalDBErrata(t *testing.T) (*db.DB, *wal.Storage) {
 	return d, s
 }
 
-func proposeErratumTOML(t *testing.T, d *db.DB, id, body string) error {
+func proposeRestatementTOML(t *testing.T, d *db.DB, id, body string) error {
 	t.Helper()
-	return d.ProposeErratum(testCtx(t), &cluster.Configuration{
+	return d.ProposeRestatement(testCtx(t), &cluster.Configuration{
 		ID: id, MimeType: "text/toml", Data: []byte(body),
 	})
 }
@@ -51,19 +51,19 @@ func proposeErratumTOML(t *testing.T, d *db.DB, id, body string) error {
 func awaitFeatureLevel(t *testing.T, d *db.DB) {
 	t.Helper()
 	require.Eventually(t, func() bool {
-		// The self-announce is async; probe via an erratum that fails LATER
+		// The self-announce is async; probe via a restatement that fails LATER
 		// admission (unknown type) once the gate opens.
-		err := proposeErratumTOML(t, d, "probe",
-			"[erratum]\ntype = \"no-such-type\"\nfromIndex = 1\ntoIndex = 1\nrebindToVersion = 1\n")
+		err := proposeRestatementTOML(t, d, "probe",
+			"[restatement]\ntype = \"no-such-type\"\nfromIndex = 1\ntoIndex = 1\nreadAsVersion = 1\n")
 		var lvl *cluster.ClusterBelowFeatureLevelError
 		return !errors.As(err, &lvl)
 	}, 10*time.Second, 10*time.Millisecond, "feature level never announced")
 }
 
-// TestErratum_AdmissionMatrix pins the loud-at-POST rules and the append-only
+// TestRestatement_AdmissionMatrix pins the loud-at-POST rules and the append-only
 // immutability contract.
-func TestErratum_AdmissionMatrix(t *testing.T) {
-	d, s := newWalDBErrata(t)
+func TestRestatement_AdmissionMatrix(t *testing.T) {
+	d, s := newWalDBRestatements(t)
 	proposeTypeTOML(t, d, "photos", "photos", "", "")
 	proposeTypeTOML(t, d, "photos", "photos", `{"type":"object"}`, "\n[migration]\nnone = true\n")
 	v2, err := s.ResolveType(cluster.LatestTypeRef("photos"))
@@ -73,52 +73,52 @@ func TestErratum_AdmissionMatrix(t *testing.T) {
 	applied := s.AppliedIndex()
 
 	// Unknown type.
-	err = proposeErratumTOML(t, d, "e-a", "[erratum]\ntype = \"nope\"\nfromIndex = 1\ntoIndex = 2\nrebindToVersion = 1\n")
+	err = proposeRestatementTOML(t, d, "e-a", "[restatement]\ntype = \"nope\"\nfromIndex = 1\ntoIndex = 2\nreadAsVersion = 1\n")
 	require.ErrorContains(t, err, "not a declared version")
 
 	// Undeclared rebind target / stamp selector.
-	err = proposeErratumTOML(t, d, "e-b", "[erratum]\ntype = \"photos\"\nfromIndex = 1\ntoIndex = 2\nrebindToVersion = 9\n")
-	require.ErrorContains(t, err, "rebindToVersion 9")
-	err = proposeErratumTOML(t, d, "e-c", "[erratum]\ntype = \"photos\"\nfromIndex = 1\ntoIndex = 2\nrebindToVersion = 2\nfromVersion = 9\n")
+	err = proposeRestatementTOML(t, d, "e-b", "[restatement]\ntype = \"photos\"\nfromIndex = 1\ntoIndex = 2\nreadAsVersion = 9\n")
+	require.ErrorContains(t, err, "readAsVersion 9")
+	err = proposeRestatementTOML(t, d, "e-c", "[restatement]\ntype = \"photos\"\nfromIndex = 1\ntoIndex = 2\nreadAsVersion = 2\nfromVersion = 9\n")
 	require.ErrorContains(t, err, "fromVersion 9")
 
-	// A range beyond the applied log (errata bind the past).
-	err = proposeErratumTOML(t, d, "e-d",
-		fmt.Sprintf("[erratum]\ntype = \"photos\"\nfromIndex = 1\ntoIndex = %d\nrebindToVersion = 2\n", applied+1000))
+	// A range beyond the applied log (restatements bind the past).
+	err = proposeRestatementTOML(t, d, "e-d",
+		fmt.Sprintf("[restatement]\ntype = \"photos\"\nfromIndex = 1\ntoIndex = %d\nreadAsVersion = 2\n", applied+1000))
 	require.ErrorContains(t, err, "beyond the applied log")
 
 	// An inverted range, and a non-deterministic predicate.
-	err = proposeErratumTOML(t, d, "e-e", "[erratum]\ntype = \"photos\"\nfromIndex = 5\ntoIndex = 2\nrebindToVersion = 2\n")
+	err = proposeRestatementTOML(t, d, "e-e", "[restatement]\ntype = \"photos\"\nfromIndex = 5\ntoIndex = 2\nreadAsVersion = 2\n")
 	require.ErrorContains(t, err, "must not exceed")
-	err = proposeErratumTOML(t, d, "e-f", "[erratum]\ntype = \"photos\"\nfromIndex = 1\ntoIndex = 2\nrebindToVersion = 2\npredicate = \"now\"\n")
+	err = proposeRestatementTOML(t, d, "e-f", "[restatement]\ntype = \"photos\"\nfromIndex = 1\ntoIndex = 2\nreadAsVersion = 2\npredicate = \"now\"\n")
 	require.ErrorContains(t, err, "deterministic")
 
-	// A valid erratum admits; an identical re-POST is an idempotent no-op; a
+	// A valid restatement admits; an identical re-POST is an idempotent no-op; a
 	// DIFFERENT re-POST under the same id is refused (append-only).
-	good := "[erratum]\ntype = \"photos\"\nfromIndex = 1\ntoIndex = 2\nrebindToVersion = 2\n"
-	require.NoError(t, proposeErratumTOML(t, d, "e-good", good))
-	require.NoError(t, proposeErratumTOML(t, d, "e-good", good))
-	err = proposeErratumTOML(t, d, "e-good", "[erratum]\ntype = \"photos\"\nfromIndex = 1\ntoIndex = 3\nrebindToVersion = 2\n")
+	good := "[restatement]\ntype = \"photos\"\nfromIndex = 1\ntoIndex = 2\nreadAsVersion = 2\n"
+	require.NoError(t, proposeRestatementTOML(t, d, "e-good", good))
+	require.NoError(t, proposeRestatementTOML(t, d, "e-good", good))
+	err = proposeRestatementTOML(t, d, "e-good", "[restatement]\ntype = \"photos\"\nfromIndex = 1\ntoIndex = 3\nreadAsVersion = 2\n")
 	require.ErrorContains(t, err, "append-only")
 
 	// The listing carries it with its interpretation coordinate.
-	applied2, err := d.Errata()
+	applied2, err := d.Restatements()
 	require.NoError(t, err)
 	require.Len(t, applied2, 1)
-	require.Equal(t, "e-good", applied2[0].Erratum.ID)
+	require.Equal(t, "e-good", applied2[0].Restatement.ID)
 	require.NotZero(t, applied2[0].Index)
 	require.Equal(t, applied2[0].Index, s.InterpretationRegistry().Highwater())
 }
 
-// TestErratum_FeatureGateRefusesUntilAnnounced pins the mixed-version rule:
-// a cluster whose minimum feature level predates errata refuses the POST with
+// TestRestatement_FeatureGateRefusesUntilAnnounced pins the mixed-version rule:
+// a cluster whose minimum feature level predates restatements refuses the POST with
 // the retryable typed error (the record is gated — an old member would fatal
 // applying it).
-func TestErratum_FeatureGateRefusesUntilAnnounced(t *testing.T) {
+func TestRestatement_FeatureGateRefusesUntilAnnounced(t *testing.T) {
 	d, _ := newWalDB(t) // no WithVersionAnnounce: cluster min stays 0
 	proposeTypeTOML(t, d, "photos", "photos", "", "")
 
-	err := proposeErratumTOML(t, d, "e-1", "[erratum]\ntype = \"photos\"\nfromIndex = 1\ntoIndex = 1\nrebindToVersion = 1\n")
+	err := proposeRestatementTOML(t, d, "e-1", "[restatement]\ntype = \"photos\"\nfromIndex = 1\ntoIndex = 1\nreadAsVersion = 1\n")
 	var lvl *cluster.ClusterBelowFeatureLevelError
 	require.ErrorAs(t, err, &lvl)
 	require.Equal(t, uint64(2), lvl.Required)
@@ -180,17 +180,17 @@ func (wr *webhookRecorder) deliveries(t *testing.T) map[string]struct {
 	return out
 }
 
-// TestErratum_RebindsReadingsEndToEnd is the spine's e2e at the db layer —
+// TestRestatement_RebindsReadingsEndToEnd is the spine's e2e at the db layer —
 // the SmugMug repair: v2-shaped rows were committed under v1 stamps (nobody
 // announced the change); the operator declares v2 with a migration transform
-// and an erratum rebinding the known-v2-shaped range. An always-current
+// and a restatement rebinding the known-v2-shaped range. An always-current
 // webhook sink then receives: rebound rows AS v2 (the wrong transform never
 // runs on them — that is the repair) and genuine v1 rows migrated through the
 // chain — with the log bytes untouched throughout. A second, identical
 // consumer replaying from scratch at the same (data, interpretation) pair
 // sees identical readings (replay determinism).
-func TestErratum_RebindsReadingsEndToEnd(t *testing.T) {
-	d, s := newWalDBErrata(t)
+func TestRestatement_RebindsReadingsEndToEnd(t *testing.T) {
+	d, s := newWalDBRestatements(t)
 	recorder := &webhookRecorder{}
 	server := httptest.NewServer(recorder.handler())
 	t.Cleanup(server.Close)
@@ -211,9 +211,9 @@ func TestErratum_RebindsReadingsEndToEnd(t *testing.T) {
 			&cluster.Proposal{Entities: []*cluster.Entity{cluster.NewUpsertEntity(tp1, []byte(row.k), []byte(row.data))}}))
 	}
 
-	// Locate each row's raft index (the erratum range coordinates).
+	// Locate each row's raft index (the restatement range coordinates).
 	indexByKey := map[string]uint64{}
-	r := s.Reader("erratum-verify")
+	r := s.Reader("restatement-verify")
 	for {
 		a, err := r.Read()
 		if err != nil {
@@ -234,9 +234,9 @@ func TestErratum_RebindsReadingsEndToEnd(t *testing.T) {
 
 	awaitFeatureLevel(t, d)
 
-	// The erratum: k2..k3 were v2 all along.
-	require.NoError(t, proposeErratumTOML(t, d, "backfill-v2", fmt.Sprintf(
-		"[erratum]\ntype = \"photos\"\nfromIndex = %d\ntoIndex = %d\nrebindToVersion = 2\nfromVersion = 1\n",
+	// The restatement: k2..k3 were v2 all along.
+	require.NoError(t, proposeRestatementTOML(t, d, "backfill-v2", fmt.Sprintf(
+		"[restatement]\ntype = \"photos\"\nfromIndex = %d\ntoIndex = %d\nreadAsVersion = 2\nfromVersion = 1\n",
 		indexByKey["k2"], indexByKey["k3"])))
 
 	// An always-current webhook sink over the topic.
@@ -256,7 +256,7 @@ func TestErratum_RebindsReadingsEndToEnd(t *testing.T) {
 
 	// Rebound rows arrive AS v2, untransformed — their real license survives.
 	require.Equal(t, 2, got["k2"].Version)
-	require.Equal(t, "cc", got["k2"].Data["license"], "the erratum kept the wrong transform OFF already-v2 data")
+	require.Equal(t, "cc", got["k2"].Data["license"], "the restatement kept the wrong transform OFF already-v2 data")
 	require.Equal(t, "arr", got["k3"].Data["license"])
 	// Genuine v1 rows migrate through the chain to v2.
 	require.Equal(t, 2, got["k1"].Version)
@@ -281,18 +281,18 @@ func TestErratum_RebindsReadingsEndToEnd(t *testing.T) {
 		require.Equal(t, got[k], got2[k], "replay from scratch diverged for %s", k)
 	}
 
-	// Not stale: this materialization began under the erratum. A LATER
-	// erratum flips it stale — loud and queryable, never auto-healed — while
+	// Not stale: this materialization began under the restatement. A LATER
+	// restatement flips it stale — loud and queryable, never auto-healed — while
 	// the pin stays put.
 	pin, stale, err := d.SyncableInterpretation("photos-hook")
 	require.NoError(t, err)
 	require.False(t, stale)
 	require.NotZero(t, pin)
-	require.NoError(t, proposeErratumTOML(t, d, "later", fmt.Sprintf(
-		"[erratum]\ntype = \"photos\"\nfromIndex = %d\ntoIndex = %d\nrebindToVersion = 2\n",
+	require.NoError(t, proposeRestatementTOML(t, d, "later", fmt.Sprintf(
+		"[restatement]\ntype = \"photos\"\nfromIndex = %d\ntoIndex = %d\nreadAsVersion = 2\n",
 		indexByKey["k1"], indexByKey["k1"])))
 	require.Eventually(t, func() bool {
 		pin2, stale2, err := d.SyncableInterpretation("photos-hook")
 		return err == nil && stale2 && pin2 == pin
-	}, 10*time.Second, 10*time.Millisecond, "a later erratum must mark the syncable stale without moving its pin")
+	}, 10*time.Second, 10*time.Millisecond, "a later restatement must mark the syncable stale without moving its pin")
 }

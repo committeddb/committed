@@ -239,7 +239,7 @@ func (db *DB) ProposeType(ctx context.Context, c *cluster.Configuration, opts ..
 			if !o.AcknowledgeStranded {
 				return &cluster.StrandedSyncablesError{TypeID: c.ID, Version: t.Version, Syncables: stranded}
 			}
-			db.logger.Warn("nonConvertible bump admitted with force; these always-current syncables are STRANDED — their below-break data dead-letters at the migration chain until re-declared version-pinned/version-aware or healed by an erratum",
+			db.logger.Warn("nonConvertible bump admitted with force; these always-current syncables are STRANDED — their below-break data dead-letters at the migration chain until re-declared version-pinned/version-aware or healed by a restatement",
 				zap.String("type", c.ID), zap.Int("version", t.Version), zap.Strings("syncables", stranded))
 		}
 	}

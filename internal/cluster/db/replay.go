@@ -87,7 +87,7 @@ func (db *DB) buildSyncable(id string) (cluster.Syncable, error) {
 		syncable = migration.Wrap(syncable, db.storage, db.metrics)
 	}
 	// Mirror the build sites: every syncable — a replay included — reads the
-	// authoritative interpretation (stamp ⊕ errata fold) before consuming.
+	// authoritative interpretation (stamp ⊕ restatement fold) before consuming.
 	syncable = interpretation.Wrap(syncable, db.storage.InterpretationRegistry, db.storage)
 	return syncable, nil
 }

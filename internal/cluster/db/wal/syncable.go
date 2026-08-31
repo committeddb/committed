@@ -209,7 +209,7 @@ func (s *Storage) buildSyncable(t *cluster.Configuration) cluster.Syncable {
 		parsed = migration.Wrap(parsed, s, s.metrics)
 	}
 	// EVERY syncable reads the authoritative interpretation: the outer
-	// wrapper rebinds each entity to stamp ⊕ errata fold before the
+	// wrapper rebinds each entity to stamp ⊕ restatement fold before the
 	// migration chain (inside) or the consumer (either mode) sees it.
 	return interpretation.Wrap(parsed, s.InterpretationRegistry, s)
 }

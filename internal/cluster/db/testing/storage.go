@@ -419,18 +419,18 @@ func (r *Reader) Read() (*cluster.Actual, error) {
 }
 
 // InterpretationRegistry is a stub: this in-memory test double applies no
-// errata, so readers always see the empty registry (the errata-free path).
+// restatements, so readers always see the empty registry (the restatement-free path).
 func (ms *MemoryStorage) InterpretationRegistry() *interpretation.Registry {
 	return interpretation.EmptyRegistry
 }
 
-// ErratumByID is a stub: no errata are ever applied here.
-func (ms *MemoryStorage) ErratumByID(id string) (*cluster.Erratum, uint64, bool) {
+// RestatementByID is a stub: no restatements are ever applied here.
+func (ms *MemoryStorage) RestatementByID(id string) (*cluster.Restatement, uint64, bool) {
 	return nil, 0, false
 }
 
-// AppliedErrata is a stub: no errata are ever applied here.
-func (ms *MemoryStorage) AppliedErrata() ([]cluster.AppliedErratum, error) {
+// AppliedRestatements is a stub: no restatements are ever applied here.
+func (ms *MemoryStorage) AppliedRestatements() ([]cluster.AppliedRestatement, error) {
 	return nil, nil
 }
 

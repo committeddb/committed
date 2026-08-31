@@ -288,7 +288,7 @@ func TestSave_SyncableEntity_SignalsChannel(t *testing.T) {
 	// Upsert messages defer the node-local build to the listener (the
 	// apply-liveness invariant); executing it here stands in for the
 	// listener. The built syncable is the parsed one behind the
-	// interpretation wrapper (every syncable reads stamp ⊕ errata fold) —
+	// interpretation wrapper (every syncable reads stamp ⊕ restatement fold) —
 	// prove the wiring by syncing through it and observing the fake.
 	require.NotNil(t, received.Build)
 	built := received.Build()

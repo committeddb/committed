@@ -207,12 +207,12 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 			// other write; the automatic scheduler does the same on a cadence.
 			r.Post("/scrub", h.Scrub)
 
-			// The errata interpretation registry: append-only statements
+			// The restatement interpretation registry: append-only statements
 			// rebinding how committed actuals are READ (never their bytes).
-			// Immutable per id — corrections are new errata, later wins.
-			r.Get("/erratum", h.GetErrata)
-			r.Post("/erratum/{id}", h.AddErratum)
-			r.Post("/erratum/dryrun", h.DryRunErratum)
+			// Immutable per id — corrections are new restatements, later wins.
+			r.Get("/restatement", h.GetRestatements)
+			r.Post("/restatement/{id}", h.AddRestatement)
+			r.Post("/restatement/dryrun", h.DryRunRestatement)
 
 			r.Get("/syncable", h.listConfig("syncable", h.c.Syncables))
 			r.Post("/syncable/dryrun", h.DryRunSyncable)

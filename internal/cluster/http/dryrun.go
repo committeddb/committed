@@ -32,7 +32,7 @@ const dryRunTimeoutCap = 10 * time.Minute
 // find the connection already dead: the field's "empty reply after exactly
 // 120s". Best-effort; an unsupported wrapper keeps the old behavior.) On a
 // bad parameter the error is already written and ok is false. Used by every
-// dry-run handler (syncable, erratum) so their budget/deadline semantics
+// dry-run handler (syncable, restatement) so their budget/deadline semantics
 // cannot drift.
 func (h *HTTP) dryRunRequest(w httpgo.ResponseWriter, r *httpgo.Request) (mimeType string, body []byte, opts cluster.DryRunOptions, ctx context.Context, cancel context.CancelFunc, ok bool) {
 	mimeType = "text/toml"

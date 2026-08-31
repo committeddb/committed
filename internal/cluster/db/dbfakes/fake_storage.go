@@ -24,18 +24,6 @@ type FakeStorage struct {
 		result1 *cluster.Actual
 		result2 error
 	}
-	AppliedErrataStub        func() ([]cluster.AppliedErratum, error)
-	appliedErrataMutex       sync.RWMutex
-	appliedErrataArgsForCall []struct {
-	}
-	appliedErrataReturns struct {
-		result1 []cluster.AppliedErratum
-		result2 error
-	}
-	appliedErrataReturnsOnCall map[int]struct {
-		result1 []cluster.AppliedErratum
-		result2 error
-	}
 	AppliedIndexStub        func() uint64
 	appliedIndexMutex       sync.RWMutex
 	appliedIndexArgsForCall []struct {
@@ -45,6 +33,18 @@ type FakeStorage struct {
 	}
 	appliedIndexReturnsOnCall map[int]struct {
 		result1 uint64
+	}
+	AppliedRestatementsStub        func() ([]cluster.AppliedRestatement, error)
+	appliedRestatementsMutex       sync.RWMutex
+	appliedRestatementsArgsForCall []struct {
+	}
+	appliedRestatementsReturns struct {
+		result1 []cluster.AppliedRestatement
+		result2 error
+	}
+	appliedRestatementsReturnsOnCall map[int]struct {
+		result1 []cluster.AppliedRestatement
+		result2 error
 	}
 	ApplyCommittedStub        func(*raftpb.Entry) error
 	applyCommittedMutex       sync.RWMutex
@@ -218,21 +218,6 @@ type FakeStorage struct {
 	entriesReturnsOnCall map[int]struct {
 		result1 []*raftpb.Entry
 		result2 error
-	}
-	ErratumByIDStub        func(string) (*cluster.Erratum, uint64, bool)
-	erratumByIDMutex       sync.RWMutex
-	erratumByIDArgsForCall []struct {
-		arg1 string
-	}
-	erratumByIDReturns struct {
-		result1 *cluster.Erratum
-		result2 uint64
-		result3 bool
-	}
-	erratumByIDReturnsOnCall map[int]struct {
-		result1 *cluster.Erratum
-		result2 uint64
-		result3 bool
 	}
 	EventIndexStub        func() uint64
 	eventIndexMutex       sync.RWMutex
@@ -610,6 +595,21 @@ type FakeStorage struct {
 		result1 *cluster.Type
 		result2 error
 	}
+	RestatementByIDStub        func(string) (*cluster.Restatement, uint64, bool)
+	restatementByIDMutex       sync.RWMutex
+	restatementByIDArgsForCall []struct {
+		arg1 string
+	}
+	restatementByIDReturns struct {
+		result1 *cluster.Restatement
+		result2 uint64
+		result3 bool
+	}
+	restatementByIDReturnsOnCall map[int]struct {
+		result1 *cluster.Restatement
+		result2 uint64
+		result3 bool
+	}
 	RestoreSnapshotStub        func(*raftpb.Snapshot) error
 	restoreSnapshotMutex       sync.RWMutex
 	restoreSnapshotArgsForCall []struct {
@@ -959,62 +959,6 @@ func (fake *FakeStorage) ActualAtReturnsOnCall(i int, result1 *cluster.Actual, r
 	}{result1, result2}
 }
 
-func (fake *FakeStorage) AppliedErrata() ([]cluster.AppliedErratum, error) {
-	fake.appliedErrataMutex.Lock()
-	ret, specificReturn := fake.appliedErrataReturnsOnCall[len(fake.appliedErrataArgsForCall)]
-	fake.appliedErrataArgsForCall = append(fake.appliedErrataArgsForCall, struct {
-	}{})
-	stub := fake.AppliedErrataStub
-	fakeReturns := fake.appliedErrataReturns
-	fake.recordInvocation("AppliedErrata", []interface{}{})
-	fake.appliedErrataMutex.Unlock()
-	if stub != nil {
-		return stub()
-	}
-	if specificReturn {
-		return ret.result1, ret.result2
-	}
-	return fakeReturns.result1, fakeReturns.result2
-}
-
-func (fake *FakeStorage) AppliedErrataCallCount() int {
-	fake.appliedErrataMutex.RLock()
-	defer fake.appliedErrataMutex.RUnlock()
-	return len(fake.appliedErrataArgsForCall)
-}
-
-func (fake *FakeStorage) AppliedErrataCalls(stub func() ([]cluster.AppliedErratum, error)) {
-	fake.appliedErrataMutex.Lock()
-	defer fake.appliedErrataMutex.Unlock()
-	fake.AppliedErrataStub = stub
-}
-
-func (fake *FakeStorage) AppliedErrataReturns(result1 []cluster.AppliedErratum, result2 error) {
-	fake.appliedErrataMutex.Lock()
-	defer fake.appliedErrataMutex.Unlock()
-	fake.AppliedErrataStub = nil
-	fake.appliedErrataReturns = struct {
-		result1 []cluster.AppliedErratum
-		result2 error
-	}{result1, result2}
-}
-
-func (fake *FakeStorage) AppliedErrataReturnsOnCall(i int, result1 []cluster.AppliedErratum, result2 error) {
-	fake.appliedErrataMutex.Lock()
-	defer fake.appliedErrataMutex.Unlock()
-	fake.AppliedErrataStub = nil
-	if fake.appliedErrataReturnsOnCall == nil {
-		fake.appliedErrataReturnsOnCall = make(map[int]struct {
-			result1 []cluster.AppliedErratum
-			result2 error
-		})
-	}
-	fake.appliedErrataReturnsOnCall[i] = struct {
-		result1 []cluster.AppliedErratum
-		result2 error
-	}{result1, result2}
-}
-
 func (fake *FakeStorage) AppliedIndex() uint64 {
 	fake.appliedIndexMutex.Lock()
 	ret, specificReturn := fake.appliedIndexReturnsOnCall[len(fake.appliedIndexArgsForCall)]
@@ -1066,6 +1010,62 @@ func (fake *FakeStorage) AppliedIndexReturnsOnCall(i int, result1 uint64) {
 	fake.appliedIndexReturnsOnCall[i] = struct {
 		result1 uint64
 	}{result1}
+}
+
+func (fake *FakeStorage) AppliedRestatements() ([]cluster.AppliedRestatement, error) {
+	fake.appliedRestatementsMutex.Lock()
+	ret, specificReturn := fake.appliedRestatementsReturnsOnCall[len(fake.appliedRestatementsArgsForCall)]
+	fake.appliedRestatementsArgsForCall = append(fake.appliedRestatementsArgsForCall, struct {
+	}{})
+	stub := fake.AppliedRestatementsStub
+	fakeReturns := fake.appliedRestatementsReturns
+	fake.recordInvocation("AppliedRestatements", []interface{}{})
+	fake.appliedRestatementsMutex.Unlock()
+	if stub != nil {
+		return stub()
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeStorage) AppliedRestatementsCallCount() int {
+	fake.appliedRestatementsMutex.RLock()
+	defer fake.appliedRestatementsMutex.RUnlock()
+	return len(fake.appliedRestatementsArgsForCall)
+}
+
+func (fake *FakeStorage) AppliedRestatementsCalls(stub func() ([]cluster.AppliedRestatement, error)) {
+	fake.appliedRestatementsMutex.Lock()
+	defer fake.appliedRestatementsMutex.Unlock()
+	fake.AppliedRestatementsStub = stub
+}
+
+func (fake *FakeStorage) AppliedRestatementsReturns(result1 []cluster.AppliedRestatement, result2 error) {
+	fake.appliedRestatementsMutex.Lock()
+	defer fake.appliedRestatementsMutex.Unlock()
+	fake.AppliedRestatementsStub = nil
+	fake.appliedRestatementsReturns = struct {
+		result1 []cluster.AppliedRestatement
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeStorage) AppliedRestatementsReturnsOnCall(i int, result1 []cluster.AppliedRestatement, result2 error) {
+	fake.appliedRestatementsMutex.Lock()
+	defer fake.appliedRestatementsMutex.Unlock()
+	fake.AppliedRestatementsStub = nil
+	if fake.appliedRestatementsReturnsOnCall == nil {
+		fake.appliedRestatementsReturnsOnCall = make(map[int]struct {
+			result1 []cluster.AppliedRestatement
+			result2 error
+		})
+	}
+	fake.appliedRestatementsReturnsOnCall[i] = struct {
+		result1 []cluster.AppliedRestatement
+		result2 error
+	}{result1, result2}
 }
 
 func (fake *FakeStorage) ApplyCommitted(arg1 *raftpb.Entry) error {
@@ -1963,73 +1963,6 @@ func (fake *FakeStorage) EntriesReturnsOnCall(i int, result1 []*raftpb.Entry, re
 		result1 []*raftpb.Entry
 		result2 error
 	}{result1, result2}
-}
-
-func (fake *FakeStorage) ErratumByID(arg1 string) (*cluster.Erratum, uint64, bool) {
-	fake.erratumByIDMutex.Lock()
-	ret, specificReturn := fake.erratumByIDReturnsOnCall[len(fake.erratumByIDArgsForCall)]
-	fake.erratumByIDArgsForCall = append(fake.erratumByIDArgsForCall, struct {
-		arg1 string
-	}{arg1})
-	stub := fake.ErratumByIDStub
-	fakeReturns := fake.erratumByIDReturns
-	fake.recordInvocation("ErratumByID", []interface{}{arg1})
-	fake.erratumByIDMutex.Unlock()
-	if stub != nil {
-		return stub(arg1)
-	}
-	if specificReturn {
-		return ret.result1, ret.result2, ret.result3
-	}
-	return fakeReturns.result1, fakeReturns.result2, fakeReturns.result3
-}
-
-func (fake *FakeStorage) ErratumByIDCallCount() int {
-	fake.erratumByIDMutex.RLock()
-	defer fake.erratumByIDMutex.RUnlock()
-	return len(fake.erratumByIDArgsForCall)
-}
-
-func (fake *FakeStorage) ErratumByIDCalls(stub func(string) (*cluster.Erratum, uint64, bool)) {
-	fake.erratumByIDMutex.Lock()
-	defer fake.erratumByIDMutex.Unlock()
-	fake.ErratumByIDStub = stub
-}
-
-func (fake *FakeStorage) ErratumByIDArgsForCall(i int) string {
-	fake.erratumByIDMutex.RLock()
-	defer fake.erratumByIDMutex.RUnlock()
-	argsForCall := fake.erratumByIDArgsForCall[i]
-	return argsForCall.arg1
-}
-
-func (fake *FakeStorage) ErratumByIDReturns(result1 *cluster.Erratum, result2 uint64, result3 bool) {
-	fake.erratumByIDMutex.Lock()
-	defer fake.erratumByIDMutex.Unlock()
-	fake.ErratumByIDStub = nil
-	fake.erratumByIDReturns = struct {
-		result1 *cluster.Erratum
-		result2 uint64
-		result3 bool
-	}{result1, result2, result3}
-}
-
-func (fake *FakeStorage) ErratumByIDReturnsOnCall(i int, result1 *cluster.Erratum, result2 uint64, result3 bool) {
-	fake.erratumByIDMutex.Lock()
-	defer fake.erratumByIDMutex.Unlock()
-	fake.ErratumByIDStub = nil
-	if fake.erratumByIDReturnsOnCall == nil {
-		fake.erratumByIDReturnsOnCall = make(map[int]struct {
-			result1 *cluster.Erratum
-			result2 uint64
-			result3 bool
-		})
-	}
-	fake.erratumByIDReturnsOnCall[i] = struct {
-		result1 *cluster.Erratum
-		result2 uint64
-		result3 bool
-	}{result1, result2, result3}
 }
 
 func (fake *FakeStorage) EventIndex() uint64 {
@@ -3891,6 +3824,73 @@ func (fake *FakeStorage) ResolveTypeReturnsOnCall(i int, result1 *cluster.Type, 
 		result1 *cluster.Type
 		result2 error
 	}{result1, result2}
+}
+
+func (fake *FakeStorage) RestatementByID(arg1 string) (*cluster.Restatement, uint64, bool) {
+	fake.restatementByIDMutex.Lock()
+	ret, specificReturn := fake.restatementByIDReturnsOnCall[len(fake.restatementByIDArgsForCall)]
+	fake.restatementByIDArgsForCall = append(fake.restatementByIDArgsForCall, struct {
+		arg1 string
+	}{arg1})
+	stub := fake.RestatementByIDStub
+	fakeReturns := fake.restatementByIDReturns
+	fake.recordInvocation("RestatementByID", []interface{}{arg1})
+	fake.restatementByIDMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2, ret.result3
+	}
+	return fakeReturns.result1, fakeReturns.result2, fakeReturns.result3
+}
+
+func (fake *FakeStorage) RestatementByIDCallCount() int {
+	fake.restatementByIDMutex.RLock()
+	defer fake.restatementByIDMutex.RUnlock()
+	return len(fake.restatementByIDArgsForCall)
+}
+
+func (fake *FakeStorage) RestatementByIDCalls(stub func(string) (*cluster.Restatement, uint64, bool)) {
+	fake.restatementByIDMutex.Lock()
+	defer fake.restatementByIDMutex.Unlock()
+	fake.RestatementByIDStub = stub
+}
+
+func (fake *FakeStorage) RestatementByIDArgsForCall(i int) string {
+	fake.restatementByIDMutex.RLock()
+	defer fake.restatementByIDMutex.RUnlock()
+	argsForCall := fake.restatementByIDArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *FakeStorage) RestatementByIDReturns(result1 *cluster.Restatement, result2 uint64, result3 bool) {
+	fake.restatementByIDMutex.Lock()
+	defer fake.restatementByIDMutex.Unlock()
+	fake.RestatementByIDStub = nil
+	fake.restatementByIDReturns = struct {
+		result1 *cluster.Restatement
+		result2 uint64
+		result3 bool
+	}{result1, result2, result3}
+}
+
+func (fake *FakeStorage) RestatementByIDReturnsOnCall(i int, result1 *cluster.Restatement, result2 uint64, result3 bool) {
+	fake.restatementByIDMutex.Lock()
+	defer fake.restatementByIDMutex.Unlock()
+	fake.RestatementByIDStub = nil
+	if fake.restatementByIDReturnsOnCall == nil {
+		fake.restatementByIDReturnsOnCall = make(map[int]struct {
+			result1 *cluster.Restatement
+			result2 uint64
+			result3 bool
+		})
+	}
+	fake.restatementByIDReturnsOnCall[i] = struct {
+		result1 *cluster.Restatement
+		result2 uint64
+		result3 bool
+	}{result1, result2, result3}
 }
 
 func (fake *FakeStorage) RestoreSnapshot(arg1 *raftpb.Snapshot) error {

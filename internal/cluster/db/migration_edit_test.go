@@ -206,7 +206,7 @@ func TestMigrationEditThenRematerializeFixesHistory(t *testing.T) {
 		sink.latest("k1"), sink.latest("k4"))
 
 	// Healing: the remat refreshed the pin to the current coordinate — the
-	// staleness light turns off through the SAME verb errata heal with.
+	// staleness light turns off through the SAME verb restatements heal with.
 	require.Eventually(t, func() bool {
 		_, stale, serr := d.SyncableInterpretation("mirror")
 		return serr == nil && !stale

@@ -370,7 +370,7 @@ type SyncableStatusResponse struct {
 	// current materialization began under (the second half of the
 	// determinism pair — 0 = pinned before any interpretation revisions
 	// existed). InterpretationStale is true when the reading of a consumed
-	// topic changed past the pin — an erratum landed, or a type's
+	// topic changed past the pin — a restatement landed, or a type's
 	// [migration] was edited in place (always-current consumers only): some
 	// already-synced rows were derived under a superseded reading and stay
 	// that way until the operator re-derives (staleness is loud and

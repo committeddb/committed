@@ -908,10 +908,10 @@ type LogSyncableIndex struct {
 	// interpretationIndex is the second half of the determinism pair
 	// (data index, interpretation index) every derived checkpoint is pinned
 	// to: the raft index of the last interpretation-registry record (see
-	// LogErratum) folded into the readings this syncable's outputs were
+	// LogRestatement) folded into the readings this syncable's outputs were
 	// derived under. Same pair ⇒ same output — the replay-determinism
 	// statement the 0.8.x three-layer track hangs on. 0 means "no registry
-	// records folded", which is the only value until the errata registry
+	// records folded", which is the only value until the restatement registry
 	// lands later in the 0.8.x series (the field ships early so the
 	// checkpoint format never migrates mid-series). Wire add-only:
 	// pre-feature checkpoints unmarshal as 0 and a 0 stamps no bytes.
@@ -1184,23 +1184,23 @@ func (x *LogSyncableRematerialization) GetTargetHead() uint64 {
 	return 0
 }
 
-// LogErratum is the errata interpretation-registry record: an append-only,
+// LogRestatement is the restatement interpretation-registry record: an append-only,
 // consensus-ordered statement that rebinds how already-committed actuals are
 // READ — never their bytes. A stamped TypeRef is a cache of the default
 // reading in force at write time; the authoritative reading is the stamp ⊕
-// the errata fold, where later-in-log wins (a wrong erratum is corrected by
-// another erratum, never edited).
+// the restatement fold, where later-in-log wins (a wrong restatement is corrected by
+// another restatement, never edited).
 //
 // RESERVED SHAPE (0.8.x format groundwork): this release defines the record
 // and its type identity so the on-disk shape never migrates mid-series —
 // nothing emits or applies it yet; the registry semantics (fold, read-path
 // resolution, admission validation) land later in the 0.8.x series. The type
-// UUID (cluster.ErratumTypeID) is minted in the system-type namespace as
-// GATED (must-understand): a node that cannot fold errata must not skip
+// UUID (cluster.RestatementTypeID) is minted in the system-type namespace as
+// GATED (must-understand): a node that cannot fold restatements must not skip
 // them, or its syncables would emit stale readings — and emission will
 // additionally be FeatureLevel-gated so the record is never committed while
 // a member that can't apply it is present.
-type LogErratum struct {
+type LogRestatement struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
@@ -1208,41 +1208,41 @@ type LogErratum struct {
 	// typeID names the Type whose stamped readings are rebound.
 	TypeID string `protobuf:"bytes,1,opt,name=typeID,proto3" json:"typeID,omitempty"`
 	// fromIndex..toIndex is the INCLUSIVE raft-index range of actuals the
-	// erratum covers.
+	// restatement covers.
 	FromIndex uint64 `protobuf:"varint,2,opt,name=fromIndex,proto3" json:"fromIndex,omitempty"`
 	ToIndex   uint64 `protobuf:"varint,3,opt,name=toIndex,proto3" json:"toIndex,omitempty"`
-	// rebindToVersion is the Type version matching actuals read as (the
+	// readAsVersion is the Type version matching actuals read as (the
 	// uint32 mirrors TypeRef.Version).
-	RebindToVersion uint32 `protobuf:"varint,4,opt,name=rebindToVersion,proto3" json:"rebindToVersion,omitempty"`
+	ReadAsVersion uint32 `protobuf:"varint,4,opt,name=readAsVersion,proto3" json:"readAsVersion,omitempty"`
 	// predicate, when non-empty, narrows the range to payloads matching a
 	// deterministic program (the interleaved-writers case); empty means the
 	// whole range rebinds (a range binding). The rule language is pinned to
-	// a deterministic subset — no now(), no env. Future erratum kinds
+	// a deterministic subset — no now(), no env. Future restatement kinds
 	// (disavowal, enumerative) extend this message add-only.
 	Predicate string `protobuf:"bytes,5,opt,name=predicate,proto3" json:"predicate,omitempty"`
-	// fromVersion, when non-zero, narrows the erratum to entities STAMPED
+	// fromVersion, when non-zero, narrows the restatement to entities STAMPED
 	// that version ("[n,m] under stamp v1 reads as v2" — the design's range
-	// binding); 0 applies to any stamp. Without it an erratum could not
+	// binding); 0 applies to any stamp. Without it a restatement could not
 	// distinguish populations sharing a range once real version bumps exist,
 	// and rebinding DOWN ("wrongly stamped v2, read as v1") would be
 	// unexpressible safely.
 	FromVersion uint32 `protobuf:"varint,6,opt,name=fromVersion,proto3" json:"fromVersion,omitempty"`
 }
 
-func (x *LogErratum) Reset() {
-	*x = LogErratum{}
+func (x *LogRestatement) Reset() {
+	*x = LogRestatement{}
 	mi := &file_clusterpb_cluster_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *LogErratum) String() string {
+func (x *LogRestatement) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*LogErratum) ProtoMessage() {}
+func (*LogRestatement) ProtoMessage() {}
 
-func (x *LogErratum) ProtoReflect() protoreflect.Message {
+func (x *LogRestatement) ProtoReflect() protoreflect.Message {
 	mi := &file_clusterpb_cluster_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -1254,47 +1254,47 @@ func (x *LogErratum) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use LogErratum.ProtoReflect.Descriptor instead.
-func (*LogErratum) Descriptor() ([]byte, []int) {
+// Deprecated: Use LogRestatement.ProtoReflect.Descriptor instead.
+func (*LogRestatement) Descriptor() ([]byte, []int) {
 	return file_clusterpb_cluster_proto_rawDescGZIP(), []int{12}
 }
 
-func (x *LogErratum) GetTypeID() string {
+func (x *LogRestatement) GetTypeID() string {
 	if x != nil {
 		return x.TypeID
 	}
 	return ""
 }
 
-func (x *LogErratum) GetFromIndex() uint64 {
+func (x *LogRestatement) GetFromIndex() uint64 {
 	if x != nil {
 		return x.FromIndex
 	}
 	return 0
 }
 
-func (x *LogErratum) GetToIndex() uint64 {
+func (x *LogRestatement) GetToIndex() uint64 {
 	if x != nil {
 		return x.ToIndex
 	}
 	return 0
 }
 
-func (x *LogErratum) GetRebindToVersion() uint32 {
+func (x *LogRestatement) GetReadAsVersion() uint32 {
 	if x != nil {
-		return x.RebindToVersion
+		return x.ReadAsVersion
 	}
 	return 0
 }
 
-func (x *LogErratum) GetPredicate() string {
+func (x *LogRestatement) GetPredicate() string {
 	if x != nil {
 		return x.Predicate
 	}
 	return ""
 }
 
-func (x *LogErratum) GetFromVersion() uint32 {
+func (x *LogRestatement) GetFromVersion() uint32 {
 	if x != nil {
 		return x.FromVersion
 	}
@@ -2162,15 +2162,15 @@ var file_clusterpb_cluster_proto_rawDesc = []byte{
 	0x6c, 0x69, 0x7a, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x12, 0x0e, 0x0a, 0x02, 0x49, 0x44, 0x18, 0x01,
 	0x20, 0x01, 0x28, 0x09, 0x52, 0x02, 0x49, 0x44, 0x12, 0x1e, 0x0a, 0x0a, 0x74, 0x61, 0x72, 0x67,
 	0x65, 0x74, 0x48, 0x65, 0x61, 0x64, 0x18, 0x02, 0x20, 0x01, 0x28, 0x04, 0x52, 0x0a, 0x74, 0x61,
-	0x72, 0x67, 0x65, 0x74, 0x48, 0x65, 0x61, 0x64, 0x22, 0xc6, 0x01, 0x0a, 0x0a, 0x4c, 0x6f, 0x67,
-	0x45, 0x72, 0x72, 0x61, 0x74, 0x75, 0x6d, 0x12, 0x16, 0x0a, 0x06, 0x74, 0x79, 0x70, 0x65, 0x49,
-	0x44, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x06, 0x74, 0x79, 0x70, 0x65, 0x49, 0x44, 0x12,
-	0x1c, 0x0a, 0x09, 0x66, 0x72, 0x6f, 0x6d, 0x49, 0x6e, 0x64, 0x65, 0x78, 0x18, 0x02, 0x20, 0x01,
-	0x28, 0x04, 0x52, 0x09, 0x66, 0x72, 0x6f, 0x6d, 0x49, 0x6e, 0x64, 0x65, 0x78, 0x12, 0x18, 0x0a,
-	0x07, 0x74, 0x6f, 0x49, 0x6e, 0x64, 0x65, 0x78, 0x18, 0x03, 0x20, 0x01, 0x28, 0x04, 0x52, 0x07,
-	0x74, 0x6f, 0x49, 0x6e, 0x64, 0x65, 0x78, 0x12, 0x28, 0x0a, 0x0f, 0x72, 0x65, 0x62, 0x69, 0x6e,
-	0x64, 0x54, 0x6f, 0x56, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x18, 0x04, 0x20, 0x01, 0x28, 0x0d,
-	0x52, 0x0f, 0x72, 0x65, 0x62, 0x69, 0x6e, 0x64, 0x54, 0x6f, 0x56, 0x65, 0x72, 0x73, 0x69, 0x6f,
+	0x72, 0x67, 0x65, 0x74, 0x48, 0x65, 0x61, 0x64, 0x22, 0xc6, 0x01, 0x0a, 0x0e, 0x4c, 0x6f, 0x67,
+	0x52, 0x65, 0x73, 0x74, 0x61, 0x74, 0x65, 0x6d, 0x65, 0x6e, 0x74, 0x12, 0x16, 0x0a, 0x06, 0x74,
+	0x79, 0x70, 0x65, 0x49, 0x44, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x06, 0x74, 0x79, 0x70,
+	0x65, 0x49, 0x44, 0x12, 0x1c, 0x0a, 0x09, 0x66, 0x72, 0x6f, 0x6d, 0x49, 0x6e, 0x64, 0x65, 0x78,
+	0x18, 0x02, 0x20, 0x01, 0x28, 0x04, 0x52, 0x09, 0x66, 0x72, 0x6f, 0x6d, 0x49, 0x6e, 0x64, 0x65,
+	0x78, 0x12, 0x18, 0x0a, 0x07, 0x74, 0x6f, 0x49, 0x6e, 0x64, 0x65, 0x78, 0x18, 0x03, 0x20, 0x01,
+	0x28, 0x04, 0x52, 0x07, 0x74, 0x6f, 0x49, 0x6e, 0x64, 0x65, 0x78, 0x12, 0x24, 0x0a, 0x0d, 0x72,
+	0x65, 0x61, 0x64, 0x41, 0x73, 0x56, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x18, 0x04, 0x20, 0x01,
+	0x28, 0x0d, 0x52, 0x0d, 0x72, 0x65, 0x61, 0x64, 0x41, 0x73, 0x56, 0x65, 0x72, 0x73, 0x69, 0x6f,
 	0x6e, 0x12, 0x1c, 0x0a, 0x09, 0x70, 0x72, 0x65, 0x64, 0x69, 0x63, 0x61, 0x74, 0x65, 0x18, 0x05,
 	0x20, 0x01, 0x28, 0x09, 0x52, 0x09, 0x70, 0x72, 0x65, 0x64, 0x69, 0x63, 0x61, 0x74, 0x65, 0x12,
 	0x20, 0x0a, 0x0b, 0x66, 0x72, 0x6f, 0x6d, 0x56, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x18, 0x06,
@@ -2298,7 +2298,7 @@ var file_clusterpb_cluster_proto_goTypes = []any{
 	(*LogContractFingerprint)(nil),       // 11: clusterpb.LogContractFingerprint
 	(*LogIngestableCensus)(nil),          // 12: clusterpb.LogIngestableCensus
 	(*LogSyncableRematerialization)(nil), // 13: clusterpb.LogSyncableRematerialization
-	(*LogErratum)(nil),                   // 14: clusterpb.LogErratum
+	(*LogRestatement)(nil),               // 14: clusterpb.LogRestatement
 	(*LogIngestablePosition)(nil),        // 15: clusterpb.LogIngestablePosition
 	(*LogSyncableDeadLetter)(nil),        // 16: clusterpb.LogSyncableDeadLetter
 	(*LogSyncableStuck)(nil),             // 17: clusterpb.LogSyncableStuck

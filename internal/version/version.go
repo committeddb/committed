@@ -34,9 +34,9 @@ var (
 // that predates the mechanism announces nothing and is treated as level 0, so
 // the gate holds any level-1 emission until every such node is upgraded.
 //
-// Level 2: the errata interpretation registry (featureLevelErrata). The
-// Erratum record is a GATED system type — a node that cannot fold errata must
-// not skip them (its syncables would emit stale readings) — so an erratum is
+// Level 2: the restatement interpretation registry (featureLevelRestatements). The
+// Restatement record is a GATED system type — a node that cannot fold restatements must
+// not skip them (its syncables would emit stale readings) — so a restatement is
 // only admitted once every member announces level 2.
 //
 // Level 3: zone-pinned syncable ownership (featureLevelZonePinning). The

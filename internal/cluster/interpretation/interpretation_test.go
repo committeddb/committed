@@ -10,7 +10,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 )
 
-func reg(t *testing.T, applied ...cluster.AppliedErratum) *Registry {
+func reg(t *testing.T, applied ...cluster.AppliedRestatement) *Registry {
 	t.Helper()
 	r, err := NewRegistry(applied)
 	require.NoError(t, err)
@@ -26,14 +26,14 @@ func eff(t *testing.T, r *Registry, typeID string, idx uint64, stamped int, payl
 
 // TestEffectiveVersion_RangeAndStampSelectors pins the fold's selectors: the
 // inclusive index range, the fromVersion stamp narrowing (0 = any), rebinding
-// down as well as up, and the errata-free / other-type fast paths.
+// down as well as up, and the restatement-free / other-type fast paths.
 func TestEffectiveVersion_RangeAndStampSelectors(t *testing.T) {
 	r := reg(t,
-		cluster.AppliedErratum{Index: 50, Erratum: cluster.Erratum{
-			ID: "e1", TypeID: "photos", FromIndex: 10, ToIndex: 20, RebindToVersion: 2, FromVersion: 1,
+		cluster.AppliedRestatement{Index: 50, Restatement: cluster.Restatement{
+			ID: "e1", TypeID: "photos", FromIndex: 10, ToIndex: 20, ReadAsVersion: 2, FromVersion: 1,
 		}},
-		cluster.AppliedErratum{Index: 60, Erratum: cluster.Erratum{
-			ID: "e2", TypeID: "photos", FromIndex: 30, ToIndex: 30, RebindToVersion: 1, FromVersion: 2,
+		cluster.AppliedRestatement{Index: 60, Restatement: cluster.Restatement{
+			ID: "e2", TypeID: "photos", FromIndex: 30, ToIndex: 30, ReadAsVersion: 1, FromVersion: 2,
 		}},
 	)
 
@@ -54,15 +54,15 @@ func TestEffectiveVersion_RangeAndStampSelectors(t *testing.T) {
 }
 
 // TestEffectiveVersion_LaterInLogWins pins the correction semantics: a wrong
-// erratum is corrected by APPENDING another; among matching errata the higher
+// restatement is corrected by APPENDING another; among matching restatements the higher
 // raft index wins, regardless of build input order, and matching stays
 // against the STAMPED version (never an intermediate rebound reading).
 func TestEffectiveVersion_LaterInLogWins(t *testing.T) {
-	wrong := cluster.AppliedErratum{Index: 50, Erratum: cluster.Erratum{
-		ID: "wrong", TypeID: "photos", FromIndex: 10, ToIndex: 20, RebindToVersion: 2, FromVersion: 1,
+	wrong := cluster.AppliedRestatement{Index: 50, Restatement: cluster.Restatement{
+		ID: "wrong", TypeID: "photos", FromIndex: 10, ToIndex: 20, ReadAsVersion: 2, FromVersion: 1,
 	}}
-	fix := cluster.AppliedErratum{Index: 70, Erratum: cluster.Erratum{
-		ID: "fix", TypeID: "photos", FromIndex: 10, ToIndex: 20, RebindToVersion: 3, FromVersion: 1,
+	fix := cluster.AppliedRestatement{Index: 70, Restatement: cluster.Restatement{
+		ID: "fix", TypeID: "photos", FromIndex: 10, ToIndex: 20, ReadAsVersion: 3, FromVersion: 1,
 	}}
 
 	// Same answer whichever order the applied records arrive in.
@@ -78,16 +78,16 @@ func TestEffectiveVersion_LaterInLogWins(t *testing.T) {
 // within one range, only payloads the predicate maps to LITERAL true rebind —
 // jq truthiness is deliberately not enough.
 func TestEffectiveVersion_PredicateBinding(t *testing.T) {
-	r := reg(t, cluster.AppliedErratum{Index: 50, Erratum: cluster.Erratum{
-		ID: "e", TypeID: "photos", FromIndex: 10, ToIndex: 20, RebindToVersion: 2,
+	r := reg(t, cluster.AppliedRestatement{Index: 50, Restatement: cluster.Restatement{
+		ID: "e", TypeID: "photos", FromIndex: 10, ToIndex: 20, ReadAsVersion: 2,
 		Predicate: `.writer == "app-b"`,
 	}})
 
 	require.Equal(t, 2, eff(t, r, "photos", 15, 1, `{"writer":"app-b"}`))
 	require.Equal(t, 1, eff(t, r, "photos", 15, 1, `{"writer":"app-a"}`))
 	// A non-boolean truthy result is NOT a match (accidental match-alls).
-	r2 := reg(t, cluster.AppliedErratum{Index: 50, Erratum: cluster.Erratum{
-		ID: "e", TypeID: "photos", FromIndex: 10, ToIndex: 20, RebindToVersion: 2,
+	r2 := reg(t, cluster.AppliedRestatement{Index: 50, Restatement: cluster.Restatement{
+		ID: "e", TypeID: "photos", FromIndex: 10, ToIndex: 20, ReadAsVersion: 2,
 		Predicate: `.writer`,
 	}})
 	require.Equal(t, 1, eff(t, r2, "photos", 15, 1, `{"writer":"app-b"}`))
@@ -124,8 +124,8 @@ func TestWrap_RebindsOnlyMatchingRows(t *testing.T) {
 	v1 := &cluster.Type{ID: "photos", Version: 1}
 	v2 := &cluster.Type{ID: "photos", Version: 2}
 	res := &stubResolver{types: map[string]*cluster.Type{"photos@2": v2}}
-	r := reg(t, cluster.AppliedErratum{Index: 50, Erratum: cluster.Erratum{
-		ID: "e", TypeID: "photos", FromIndex: 10, ToIndex: 20, RebindToVersion: 2, FromVersion: 1,
+	r := reg(t, cluster.AppliedRestatement{Index: 50, Restatement: cluster.Restatement{
+		ID: "e", TypeID: "photos", FromIndex: 10, ToIndex: 20, ReadAsVersion: 2, FromVersion: 1,
 	}})
 
 	inner := &fakeInner{}
@@ -149,10 +149,10 @@ func TestWrap_RebindsOnlyMatchingRows(t *testing.T) {
 	require.Same(t, outOfRange, inner.got[1], "an untouched actual passes through without copying")
 }
 
-// BenchmarkEffectiveVersion_ErrataFree pins the zero-cost claim: a topic with
-// no errata resolves in one nil-map lookup — no allocation, low single-digit
-// nanoseconds — so the read path is free until the first erratum exists.
-func BenchmarkEffectiveVersion_ErrataFree(b *testing.B) {
+// BenchmarkEffectiveVersion_RestatementsFree pins the zero-cost claim: a topic with
+// no restatements resolves in one nil-map lookup — no allocation, low single-digit
+// nanoseconds — so the read path is free until the first restatement exists.
+func BenchmarkEffectiveVersion_RestatementsFree(b *testing.B) {
 	r, err := NewRegistry(nil)
 	if err != nil {
 		b.Fatal(err)
@@ -169,11 +169,11 @@ func BenchmarkEffectiveVersion_ErrataFree(b *testing.B) {
 	}
 }
 
-// BenchmarkEffectiveVersion_OtherTypeUntouched: errata exist, but for another
+// BenchmarkEffectiveVersion_OtherTypeUntouched: restatements exist, but for another
 // type — the per-type map keeps unaffected topics on the fast path.
 func BenchmarkEffectiveVersion_OtherTypeUntouched(b *testing.B) {
-	r, err := NewRegistry([]cluster.AppliedErratum{{Index: 50, Erratum: cluster.Erratum{
-		ID: "e", TypeID: "orders", FromIndex: 1, ToIndex: 1000, RebindToVersion: 2,
+	r, err := NewRegistry([]cluster.AppliedRestatement{{Index: 50, Restatement: cluster.Restatement{
+		ID: "e", TypeID: "orders", FromIndex: 1, ToIndex: 1000, ReadAsVersion: 2,
 	}}})
 	if err != nil {
 		b.Fatal(err)

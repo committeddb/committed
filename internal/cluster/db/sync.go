@@ -625,12 +625,12 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 	var fzPin fromZeroPin
 	defer fzPin.release()
 
-	// interpPin is the checkpoint's interpretation index — the errata
+	// interpPin is the checkpoint's interpretation index — the restatements
 	// registry index this syncable's CURRENT materialization began under (the
 	// second half of the determinism pair). Carried UNCHANGED across
 	// checkpoint bumps and restarts: it only re-pins when derivation
 	// genuinely restarts from index 0 (a fresh syncable, or a future
-	// re-materialization). Errata landing past it mark the syncable stale
+	// re-materialization). Restatements landing past it mark the syncable stale
 	// (some already-synced rows used a superseded reading) — surfaced via
 	// status, healed only by an operator-triggered re-derivation.
 	var interpPin uint64
@@ -685,8 +685,8 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 			// scan of head-checkpoint entries (the field incident this serves was
 			// undiagnosable precisely for lack of it).
 			// The interpretation pin: adopt the checkpoint's (a resumed
-			// materialization keeps its epoch's pin, 0 for pre-errata
-			// checkpoints — honestly "derived under no errata"); a FRESH
+			// materialization keeps its epoch's pin, 0 for pre-restatements
+			// checkpoints — honestly "derived under no restatements"); a FRESH
 			// syncable starting from index 0 pins the current registry.
 			if ck, ok := db.storage.SyncableCheckpoint(id); ok {
 				interpPin = ck.InterpretationIndex
@@ -1180,8 +1180,8 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 			// scan of head-checkpoint entries (the field incident this serves was
 			// undiagnosable precisely for lack of it).
 			// The interpretation pin: adopt the checkpoint's (a resumed
-			// materialization keeps its epoch's pin, 0 for pre-errata
-			// checkpoints — honestly "derived under no errata"); a FRESH
+			// materialization keeps its epoch's pin, 0 for pre-restatements
+			// checkpoints — honestly "derived under no restatements"); a FRESH
 			// syncable starting from index 0 pins the current registry.
 			if ck, ok := db.storage.SyncableCheckpoint(id); ok {
 				interpPin = ck.InterpretationIndex

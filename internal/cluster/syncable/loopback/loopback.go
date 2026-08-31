@@ -8,8 +8,8 @@
 // The derived topic is a MATERIALIZATION, never a source of truth: it is
 // rebuildable from the source forever (raw stays sacred), and its rows are
 // exactly the cache of the source's current interpretation — the loopback
-// sits behind the same interpretation (stamp ⊕ errata) and migration
-// (always-current) wrappers as every other syncable, so errata and version
+// sits behind the same interpretation (stamp ⊕ restatements) and migration
+// (always-current) wrappers as every other syncable, so restatements and version
 // migrations on the source are baked into what lands on the target.
 //
 // Faithful forwarding is the load-bearing property. For each source entity:

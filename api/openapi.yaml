@@ -71,11 +71,11 @@ tags:
     description: Configurations for syncing data to external systems
   - name: type
     description: Schema and type definitions
-  - name: erratum
+  - name: restatement
     description: |
-      The errata interpretation registry: append-only, consensus-ordered
+      The restatement interpretation registry: append-only, consensus-ordered
       statements that rebind how already-committed actuals are READ (never
-      their bytes). Corrections are new errata — later in the log wins.
+      their bytes). Corrections are new restatements — later in the log wins.
   - name: proposal
     description: Append proposals to the commit log (write-only)
   - name: node
@@ -1312,7 +1312,7 @@ paths:
         a completion sweep deletes the rows the replay never positively
         re-emitted (rows an old projection wrote that the current one no
         longer produces) and the in-progress record clears. This is the cure
-        for projection rot (a mapping added, a migration fixed, an erratum
+        for projection rot (a mapping added, a migration fixed, a restatement
         landed) and the re-derivation that refreshes the checkpoint's
         `interpretationPin`. Restart-resumable: the in-progress record is
         replicated, and a resumed replay keeps converging under the same
@@ -1781,25 +1781,25 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /v1/erratum:
+  /v1/restatement:
     get:
-      tags: [erratum]
-      summary: List the errata interpretation registry
+      tags: [restatement]
+      summary: List the restatement interpretation registry
       description: |
-        Every applied erratum, in log order. An erratum is an append-only,
+        Every applied restatement, in log order. A restatement is an append-only,
         consensus-ordered statement that rebinds how already-committed actuals
         are READ — never their bytes: entities of `type` committed in
         `[fromIndex, toIndex]`, stamped `fromVersion` (0 = any stamp), and
-        matching `predicate` (empty = all) read as `rebindToVersion`. Among
-        matching errata, later in the log (`index`) wins; matching is always
+        matching `predicate` (empty = all) read as `readAsVersion`. Among
+        matching restatements, later in the log (`index`) wins; matching is always
         against the stamped version. The authoritative reading every syncable
         receives is stamp ⊕ this fold.
-      operationId: getErrata
+      operationId: getRestatements
       parameters:
         - $ref: '#/components/parameters/Consistency'
       responses:
         '200':
-          description: All applied errata, in log order.
+          description: All applied restatements, in log order.
           content:
             application/json:
               schema:
@@ -1811,41 +1811,41 @@ paths:
                     type: { type: string }
                     fromIndex: { type: integer, format: int64 }
                     toIndex: { type: integer, format: int64 }
-                    rebindToVersion: { type: integer }
+                    readAsVersion: { type: integer }
                     fromVersion: { type: integer }
                     predicate: { type: string }
                     index:
                       type: integer
                       format: int64
-                      description: The erratum's raft index — its interpretation coordinate.
+                      description: The restatement's raft index — its interpretation coordinate.
         '401':
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/NotLinearizable'
-  /v1/erratum/dryrun:
+  /v1/restatement/dryrun:
     post:
-      tags: [erratum]
-      summary: Dry-run an erratum against the committed log
-      operationId: dryRunErratum
+      tags: [restatement]
+      summary: Dry-run a restatement against the committed log
+      operationId: dryRunRestatement
       description: |
-        Rehearses an erratum before authoring it: the same admission-level
-        validation as `POST /v1/erratum/{id}` (400 on rejection, with the
-        admission path's actual words), then a scan of the erratum's own
+        Rehearses a restatement before authoring it: the same admission-level
+        validation as `POST /v1/restatement/{id}` (400 on rejection, with the
+        admission path's actual words), then a scan of the restatement's own
         `[fromIndex, toIndex]` range through the REAL interpretation fold.
         The report says what the selectors actually catch (`stampEligible`,
-        `matched`, broken down `byStampedVersion`), what the erratum really
+        `matched`, broken down `byStampedVersion`), what the restatement really
         changes (`rebound`, with before/after reading `samples`), which rows
         its predicate cannot evaluate (`predicateErrors` — each of these
-        dead-letters or wedges a live consumer), which already-applied errata
+        dead-letters or wedges a live consumer), which already-applied restatements
         it composes with (`overlaps`), and the re-materialization bill:
         every syncable consuming the topic (`affectedSyncables`) goes stale
-        the moment the erratum commits. Auto-generated `findings` name the
-        authoring signatures — an erratum that matches nothing, one that
+        the moment the restatement commits. Auto-generated `findings` name the
+        authoring signatures — a restatement that matches nothing, one that
         changes no readings, a predicate that filtered nothing. Nothing is
         admitted or stored. Rehearse, then author the same body under
-        `POST /v1/erratum/{id}`.
+        `POST /v1/restatement/{id}`.
       parameters:
         - name: maxEntries
           in: query
@@ -1861,7 +1861,7 @@ paths:
             `truncated` field says so), never an error.
       requestBody:
         required: true
-        description: The erratum as TOML or JSON — the same body the real POST takes.
+        description: The restatement as TOML or JSON — the same body the real POST takes.
         content:
           text/toml:
             schema: { type: string }
@@ -1923,46 +1923,46 @@ paths:
           $ref: '#/components/responses/RequestEntityTooLarge'
         '500':
           $ref: '#/components/responses/InternalError'
-  /v1/erratum/{id}:
+  /v1/restatement/{id}:
     post:
-      tags: [erratum]
-      summary: Author an erratum (append-only; immutable per id)
+      tags: [restatement]
+      summary: Author a restatement (append-only; immutable per id)
       description: |
         Proposes one interpretation-registry statement as TOML:
 
-            [erratum]
+            [restatement]
             type = "photo-meta"        # the type (topic) whose readings rebind
             fromIndex = 100            # inclusive raft-index range of existing
             toIndex = 250              #   actuals (never beyond the applied log)
-            rebindToVersion = 2        # the version matching actuals read as
+            readAsVersion = 2        # the version matching actuals read as
             # fromVersion = 1          # optional: only entities STAMPED v1
             # predicate = '.license == "cc"'   # optional deterministic jq
 
-        Errata are IMMUTABLE: a re-POST under an existing id with different
-        content is refused with 400 — author a NEW erratum to correct one
-        (among matching errata, later in the log wins) — while an identical
+        Restatements are IMMUTABLE: a re-POST under an existing id with different
+        content is refused with 400 — author a NEW restatement to correct one
+        (among matching restatements, later in the log wins) — while an identical
         re-POST is an idempotent 200 no-op. Admission is loud: an unknown
         type, an undeclared version, a range beyond the applied log, or a
         predicate outside the deterministic jq subset (no now(), no env) all
         fail here. Refused with 503 `cluster_below_feature_level` until every
-        member of a mixed-version cluster can fold errata.
+        member of a mixed-version cluster can fold restatements.
 
-        Errata mark dependent syncables STALE (see
+        Restatements mark dependent syncables STALE (see
         `GET /v1/syncable/{id}/status` `interpretationStale`): rows synced
-        before the erratum landed were derived under the superseded reading.
+        before the restatement landed were derived under the superseded reading.
         Re-derivation is operator-triggered, never automatic.
 
-        REHEARSE FIRST: `POST /v1/erratum/dryrun` takes this same body and
+        REHEARSE FIRST: `POST /v1/restatement/dryrun` takes this same body and
         reports what the selectors catch, what actually changes, and which
-        syncables would go stale — before anything is admitted. Errata are
+        syncables would go stale — before anything is admitted. Restatements are
         append-only, so the dry-run is the only place a selector mistake is
         free.
-      operationId: addErratum
+      operationId: addRestatement
       parameters:
         - $ref: '#/components/parameters/ResourceId'
       requestBody:
         required: true
-        description: Erratum as TOML or JSON.
+        description: Restatement as TOML or JSON.
         content:
           text/toml:
             schema:
@@ -1972,7 +1972,7 @@ paths:
               type: string
       responses:
         '200':
-          description: Erratum committed (or an identical re-POST no-op).
+          description: Restatement committed (or an identical re-POST no-op).
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -2975,15 +2975,15 @@ components:
           format: int64
           minimum: 0
           description: |
-            The errata-registry index this syncable's current materialization
+            The restatements-registry index this syncable's current materialization
             began under — the second half of the (data, interpretation)
-            determinism pair. 0 means pinned before any errata existed.
+            determinism pair. 0 means pinned before any restatements existed.
             Always present.
         interpretationStale:
           type: boolean
           description: |
             True when the reading of a consumed topic changed past
-            `interpretationPin` — an erratum landed, or a type's [migration]
+            `interpretationPin` — a restatement landed, or a type's [migration]
             was edited in place (always-current consumers only): rows
             already synced were derived under a superseded reading and stay
             that way until the operator re-derives (POST .../rematerialize,

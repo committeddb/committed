@@ -12,63 +12,63 @@ import (
 	"github.com/committeddb/committed/internal/cluster/interpretation"
 )
 
-// erratumProbeVersion is a sentinel rebind target used only inside the
+// restatementProbeVersion is a sentinel rebind target used only inside the
 // dry-run's match probe: a registry holding just the candidate (rebound to
-// this impossible version) answers "did the erratum select this entity"
+// this impossible version) answers "did the restatement select this entity"
 // exactly — range, stamp, AND predicate — through the same fold the read
 // path runs. Never resolved against the type registry, never admitted.
-const erratumProbeVersion = -1 << 30
+const restatementProbeVersion = -1 << 30
 
-// erratumDryRunMaxSamples caps the before/after sample list.
-const erratumDryRunMaxSamples = 10
+// restatementDryRunMaxSamples caps the before/after sample list.
+const restatementDryRunMaxSamples = 10
 
-// DryRunErratum rehearses an erratum against the committed log: full
-// admission-level validation (same checks, same words as ProposeErratum —
+// DryRunRestatement rehearses a restatement against the committed log: full
+// admission-level validation (same checks, same words as ProposeRestatement —
 // minus the append-only id check, since nothing is being admitted), then a
-// scan of the erratum's own [fromIndex, toIndex] range reporting what it
+// scan of the restatement's own [fromIndex, toIndex] range reporting what it
 // selects and what it changes. Never proposes, never writes — a node-local
-// diagnostic read. See cluster.ErratumDryRunReport.
-func (db *DB) DryRunErratum(ctx context.Context, mimeType string, data []byte, opts cluster.DryRunOptions) (*cluster.ErratumDryRunReport, error) {
+// diagnostic read. See cluster.RestatementDryRunReport.
+func (db *DB) DryRunRestatement(ctx context.Context, mimeType string, data []byte, opts cluster.DryRunOptions) (*cluster.RestatementDryRunReport, error) {
 	start := time.Now()
-	e, err := ParseErratum(&cluster.Configuration{ID: "dryrun", MimeType: mimeType, Data: data})
+	e, err := ParseRestatement(&cluster.Configuration{ID: "dryrun", MimeType: mimeType, Data: data})
 	if err != nil {
 		return nil, cluster.NewConfigError(err)
 	}
 
 	// The SAME storage-backed admission checks the real POST runs — shared
 	// code, not a mirror, so the rehearsal cannot drift from the refusals.
-	if err := db.admitErratumChecks(e); err != nil {
+	if err := db.admitRestatementChecks(e); err != nil {
 		return nil, err
 	}
 	parseMs := time.Since(start).Milliseconds()
 
 	// Three PRIVATE registries, compiled fresh from the applied records: the
-	// current fold, the candidate fold (current + this erratum at a
+	// current fold, the candidate fold (current + this restatement at a
 	// past-everything coordinate), and the match probe (the candidate alone,
 	// rebound to a sentinel so "selected" is directly observable). Never the
 	// live shared snapshot: its predicate ambiguity trackers pool evidence
 	// for the real workers, and a rehearsal must not feed or reset them.
-	appliedErrata, err := db.storage.AppliedErrata()
+	appliedRestatements, err := db.storage.AppliedRestatements()
 	if err != nil {
 		return nil, err
 	}
-	current, err := interpretation.NewRegistry(appliedErrata)
+	current, err := interpretation.NewRegistry(appliedRestatements)
 	if err != nil {
 		return nil, err
 	}
 	coord := db.storage.AppliedIndex() + 1
-	candidate, err := interpretation.NewRegistry(append(slices.Clone(appliedErrata), cluster.AppliedErratum{Erratum: *e, Index: coord}))
+	candidate, err := interpretation.NewRegistry(append(slices.Clone(appliedRestatements), cluster.AppliedRestatement{Restatement: *e, Index: coord}))
 	if err != nil {
 		return nil, err
 	}
 	pe := *e
-	pe.RebindToVersion = erratumProbeVersion
-	probe, err := interpretation.NewRegistry([]cluster.AppliedErratum{{Erratum: pe, Index: coord}})
+	pe.ReadAsVersion = restatementProbeVersion
+	probe, err := interpretation.NewRegistry([]cluster.AppliedRestatement{{Restatement: pe, Index: coord}})
 	if err != nil {
 		return nil, err
 	}
 
-	rep := &cluster.ErratumDryRunReport{
+	rep := &cluster.RestatementDryRunReport{
 		ScanFrom:         e.FromIndex,
 		ScanTo:           e.ToIndex,
 		ByStampedVersion: map[int]int{},
@@ -84,8 +84,8 @@ func (db *DB) DryRunErratum(ctx context.Context, mimeType string, data []byte, o
 	var firstPredicateErr string
 	coverageComplete := false
 	// ReaderAt uses checkpoint semantics (the index is already-consumed, the
-	// first Read returns the entry AFTER it); the erratum's range is
-	// inclusive, so start one below. ParseErratum guarantees FromIndex >= 1.
+	// first Read returns the entry AFTER it); the restatement's range is
+	// inclusive, so start one below. ParseRestatement guarantees FromIndex >= 1.
 	r := db.storage.ReaderAt(e.FromIndex - 1)
 scan:
 	for rep.EntriesScanned < budget {
@@ -124,7 +124,7 @@ scan:
 			rep.StampEligible++
 			rep.ByStampedVersion[ent.Version]++
 
-			// Did the erratum SELECT this entity (predicate included)?
+			// Did the restatement SELECT this entity (predicate included)?
 			probeEff, perr := probe.EffectiveVersion(ctx, ent.ID, a.Index, ent.Version, ent.Data)
 			if perr != nil {
 				rep.PredicateErrors++
@@ -133,16 +133,16 @@ scan:
 				}
 				continue
 			}
-			if probeEff != erratumProbeVersion {
+			if probeEff != restatementProbeVersion {
 				continue // predicate filtered it out
 			}
 			rep.Matched++
 
-			// Does its READING change — the erratum's real effect?
+			// Does its READING change — the restatement's real effect?
 			curEff, cerr := current.EffectiveVersion(ctx, ent.ID, a.Index, ent.Version, ent.Data)
 			candEff, derr := candidate.EffectiveVersion(ctx, ent.ID, a.Index, ent.Version, ent.Data)
 			if cerr != nil || derr != nil {
-				// An already-applied erratum's predicate failed on this row —
+				// An already-applied restatement's predicate failed on this row —
 				// the live path would dead-letter it; count, don't abort.
 				rep.PredicateErrors++
 				if firstPredicateErr == "" {
@@ -157,8 +157,8 @@ scan:
 				continue // a no-op: the target is already this entity's reading
 			}
 			rep.Rebound++
-			if len(rep.Samples) < erratumDryRunMaxSamples {
-				rep.Samples = append(rep.Samples, cluster.ErratumDryRunSample{
+			if len(rep.Samples) < restatementDryRunMaxSamples {
+				rep.Samples = append(rep.Samples, cluster.RestatementDryRunSample{
 					Index:            a.Index,
 					Key:              string(ent.Key),
 					StampedVersion:   ent.Version,
@@ -184,14 +184,14 @@ scan:
 	rep.ReadMs = readMs
 	rep.ParseMs = parseMs
 
-	db.erratumDryRunAdvisories(e, rep, firstPredicateErr)
+	db.restatementDryRunAdvisories(e, rep, firstPredicateErr)
 	rep.DurationMs = time.Since(start).Milliseconds()
 	return rep, nil
 }
 
-// erratumDryRunAdvisories writes the staleness preview, the overlap notes,
+// restatementDryRunAdvisories writes the staleness preview, the overlap notes,
 // and the auto-flagged authoring signatures.
-func (db *DB) erratumDryRunAdvisories(e *cluster.Erratum, rep *cluster.ErratumDryRunReport, firstPredicateErr string) {
+func (db *DB) restatementDryRunAdvisories(e *cluster.Restatement, rep *cluster.RestatementDryRunReport, firstPredicateErr string) {
 	// Which syncables consume this topic — the re-materialization bill.
 	if configs, err := db.storage.Syncables(); err == nil {
 		for _, cfg := range configs {
@@ -203,17 +203,17 @@ func (db *DB) erratumDryRunAdvisories(e *cluster.Erratum, rep *cluster.ErratumDr
 			if serr != nil {
 				continue
 			}
-			rep.AffectedSyncables = append(rep.AffectedSyncables, cluster.ErratumDryRunSyncable{
+			rep.AffectedSyncables = append(rep.AffectedSyncables, cluster.RestatementDryRunSyncable{
 				ID: cfg.ID, InterpretationPin: pin, AlreadyStale: stale,
 			})
 		}
 	}
 
-	// Already-applied errata this one composes with (later in the log wins).
-	if applied, err := db.storage.AppliedErrata(); err == nil {
+	// Already-applied restatements this one composes with (later in the log wins).
+	if applied, err := db.storage.AppliedRestatements(); err == nil {
 		for _, a := range applied {
-			if a.Erratum.TypeID == e.TypeID && a.Erratum.FromIndex <= e.ToIndex && e.FromIndex <= a.Erratum.ToIndex {
-				rep.Overlaps = append(rep.Overlaps, a.Erratum.ID)
+			if a.Restatement.TypeID == e.TypeID && a.Restatement.FromIndex <= e.ToIndex && e.FromIndex <= a.Restatement.ToIndex {
+				rep.Overlaps = append(rep.Overlaps, a.Restatement.ID)
 			}
 		}
 	}
@@ -221,11 +221,11 @@ func (db *DB) erratumDryRunAdvisories(e *cluster.Erratum, rep *cluster.ErratumDr
 	partial := rep.Coverage != "complete"
 	switch {
 	case rep.Matched == 0 && !partial:
-		rep.Findings = append(rep.Findings, "the erratum matches NOTHING in its range: no entity passes the range + stamp + predicate selectors — check the index range, fromVersion, and predicate")
+		rep.Findings = append(rep.Findings, "the restatement matches NOTHING in its range: no entity passes the range + stamp + predicate selectors — check the index range, fromVersion, and predicate")
 	case rep.Matched == 0 && partial:
 		rep.Findings = append(rep.Findings, "no match in the scanned part of the range (coverage partial) — raise ?maxEntries before concluding the selectors are wrong")
 	case rep.Rebound == 0:
-		rep.Findings = append(rep.Findings, fmt.Sprintf("the erratum matches %d entities but changes NO readings: every match already reads as version %d — admitting it would only stale consumers for a no-op", rep.Matched, e.RebindToVersion))
+		rep.Findings = append(rep.Findings, fmt.Sprintf("the restatement matches %d entities but changes NO readings: every match already reads as version %d — admitting it would only stale consumers for a no-op", rep.Matched, e.ReadAsVersion))
 	}
 	if e.Predicate != "" && rep.StampEligible > 0 && rep.Matched == rep.StampEligible {
 		rep.Findings = append(rep.Findings, "the predicate matched every stamp-eligible entity in the scan — verify it is actually narrowing (a jq program that maps everything to true selects the whole range)")
@@ -234,9 +234,9 @@ func (db *DB) erratumDryRunAdvisories(e *cluster.Erratum, rep *cluster.ErratumDr
 		rep.Findings = append(rep.Findings, fmt.Sprintf("%d entities failed predicate evaluation (first: %s) — on the live path each of these dead-letters or wedges a consumer", rep.PredicateErrors, firstPredicateErr))
 	}
 	if n := len(rep.AffectedSyncables); n > 0 {
-		rep.Findings = append(rep.Findings, fmt.Sprintf("admitting this erratum marks %d syncable(s) stale: their materialized rows keep the superseded reading until re-materialized (POST /v1/syncable/{id}/rematerialize)", n))
+		rep.Findings = append(rep.Findings, fmt.Sprintf("admitting this restatement marks %d syncable(s) stale: their materialized rows keep the superseded reading until re-materialized (POST /v1/syncable/{id}/rematerialize)", n))
 	}
-	if !db.featureEnabled(featureLevelErrata) {
-		rep.Findings = append(rep.Findings, fmt.Sprintf("the real POST would currently be refused: the cluster minimum feature level is %d, errata require %d — finish the rolling upgrade first", db.clusterMinFeatureLevel(), featureLevelErrata))
+	if !db.featureEnabled(featureLevelRestatements) {
+		rep.Findings = append(rep.Findings, fmt.Sprintf("the real POST would currently be refused: the cluster minimum feature level is %d, restatements require %d — finish the rolling upgrade first", db.clusterMinFeatureLevel(), featureLevelRestatements))
 	}
 }
