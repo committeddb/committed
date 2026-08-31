@@ -7,6 +7,8 @@ import (
 )
 
 func (p *Parser) AddIngestableParser(name string, sp cluster.IngestableParser) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.ingestableParsers[name] = sp
 }
 
@@ -24,7 +26,9 @@ func (p *Parser) IngestableTopics(mimeType string, data []byte) ([]string, error
 	}
 
 	tipe := v.GetString("ingestable.type")
+	p.mu.RLock()
 	parser, ok := p.ingestableParsers[tipe]
+	p.mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("cannot parse ingestable of type: %s", tipe)
 	}
@@ -44,7 +48,9 @@ func (p *Parser) ParseIngestable(mimeType string, data []byte) (string, cluster.
 
 	name := v.GetString("ingestable.name")
 	tipe := v.GetString("ingestable.type")
+	p.mu.RLock()
 	parser, ok := p.ingestableParsers[tipe]
+	p.mu.RUnlock()
 
 	if !ok {
 		return "", nil, fmt.Errorf("cannot parse ingestable of type: %s", tipe)

@@ -32,9 +32,13 @@ import (
 // entities, validates each, and announces new divergent shapes. Failures are
 // logged, never returned — the caller proposes the data regardless.
 func (db *DB) announceDivergences(ctx context.Context, p *cluster.Proposal) {
-	if db.entityValidator == nil {
+	// One atomic load for the whole scan: the validator is injected after New
+	// (see the field doc in db.go) and must be read race-free here.
+	box := db.entityValidator.Load()
+	if box == nil {
 		return
 	}
+	validator := box.v
 	// The emitter's own proposals carry a contract-fingerprint entity; never
 	// re-inspect them (belt and braces — admission also refuses an
 	// announce-typed destination, so an event entity can't be announce-typed).
@@ -55,7 +59,7 @@ func (db *DB) announceDivergences(ctx context.Context, p *cluster.Proposal) {
 			continue // deletes and markers carry no payload to validate
 		}
 
-		div, err := db.entityValidator.ValidateEntityData(t, e.Data)
+		div, err := validator.ValidateEntityData(t, e.Data)
 		if err != nil {
 			// Structurally unusable schema or payload — not a divergence, and
 			// never a reason to hold data. Loud so a broken announce setup is

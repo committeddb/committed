@@ -89,8 +89,8 @@ func (db *DB) ProposeType(ctx context.Context, c *cluster.Configuration, opts ..
 	// Nil-safe (some tests inject no validator); the schema is self-contained, so
 	// this admission check need not re-run on apply. Fail-open for unknown
 	// SchemaTypeS is preserved by the validator (returns nil).
-	if db.schemaValidator != nil {
-		if err := db.schemaValidator.ValidateTypeSchema(t); err != nil {
+	if b := db.schemaValidator.Load(); b != nil {
+		if err := b.v.ValidateTypeSchema(t); err != nil {
 			return cluster.NewConfigError(err)
 		}
 	}
@@ -435,8 +435,16 @@ func runMigrationSample(program, sample []byte) error {
 // implementation, which db must not import directly (see
 // cluster.TypeSchemaValidator). Call once after db.New, before serving.
 func (db *DB) SetTypeSchemaValidator(v cluster.TypeSchemaValidator) {
-	db.schemaValidator = v
+	db.schemaValidator.Store(&typeSchemaValidatorBox{v: v})
 }
+
+// typeSchemaValidatorBox / entitySchemaValidatorBox wrap the injected
+// validator interfaces so they can live in atomic pointers (an interface
+// value itself cannot be stored/loaded atomically). See the field docs in
+// db.go for why the injection seam must be atomic.
+type typeSchemaValidatorBox struct{ v cluster.TypeSchemaValidator }
+
+type entitySchemaValidatorBox struct{ v cluster.EntitySchemaValidator }
 
 func (db *DB) Types() ([]*cluster.Configuration, error) {
 	return db.storage.Types()
@@ -459,5 +467,5 @@ func (db *DB) TypeVersion(id string, version uint64) (*cluster.Configuration, er
 // SetTypeSchemaValidator: the schema compilers live in http, which db must
 // not import.
 func (db *DB) SetEntityValidator(v cluster.EntitySchemaValidator) {
-	db.entityValidator = v
+	db.entityValidator.Store(&entitySchemaValidatorBox{v: v})
 }

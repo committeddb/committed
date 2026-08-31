@@ -7,6 +7,8 @@ import (
 )
 
 func (p *Parser) AddSyncableParser(name string, sp cluster.SyncableParser) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.syncableParsers[name] = sp
 }
 
@@ -23,7 +25,9 @@ func (p *Parser) SyncableTopics(mimeType string, data []byte) ([]string, error) 
 	}
 
 	tipe := v.GetString("syncable.type")
+	p.mu.RLock()
 	parser, ok := p.syncableParsers[tipe]
+	p.mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("cannot parse syncable of type: %s", tipe)
 	}
@@ -49,7 +53,9 @@ func (p *Parser) SyncableDerivedTopics(mimeType string, data []byte) ([]string, 
 	}
 
 	tipe := v.GetString("syncable.type")
+	p.mu.RLock()
 	parser, ok := p.syncableParsers[tipe]
+	p.mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("cannot parse syncable of type: %s", tipe)
 	}
@@ -98,7 +104,9 @@ func (p *Parser) SyncableDatabases(mimeType string, data []byte) ([]string, erro
 	}
 
 	tipe := v.GetString("syncable.type")
+	p.mu.RLock()
 	parser, ok := p.syncableParsers[tipe]
+	p.mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("cannot parse syncable of type: %s", tipe)
 	}
@@ -143,7 +151,9 @@ func (p *Parser) syncableSchema(mimeType string, data []byte, s cluster.Database
 	}
 
 	tipe := v.GetString("syncable.type")
+	p.mu.RLock()
 	parser, ok := p.syncableParsers[tipe]
+	p.mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("cannot parse syncable of type: %s", tipe)
 	}
@@ -166,7 +176,9 @@ func (p *Parser) ParseSyncable(mimeType string, data []byte, s cluster.DatabaseS
 
 	name := v.GetString("syncable.name")
 	tipe := v.GetString("syncable.type")
+	p.mu.RLock()
 	parser, ok := p.syncableParsers[tipe]
+	p.mu.RUnlock()
 
 	if !ok {
 		return "", nil, 0, cluster.NotAdmissible(fmt.Errorf("cannot parse syncable of type: %s", tipe))

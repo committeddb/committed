@@ -84,12 +84,20 @@ type DB struct {
 	// entity schema at ProposeType so a broken schema is rejected at POST /type
 	// rather than accepted then failing every proposal. Nil-safe: a DB without it
 	// (some tests) simply skips the admission schema check.
-	schemaValidator cluster.TypeSchemaValidator
+	//
+	// Both validators are ATOMIC on purpose: injection happens after New
+	// returns (the compilers live in the http layer, wired in cmd/node.go),
+	// but New has already started background proposers — the version
+	// announce, the scrub scheduler — whose Propose/ProposeType paths read
+	// these fields. A plain interface field was a data race (CI-caught in
+	// the census tripwire test), and a torn interface write is
+	// memory-unsafe, not merely stale.
+	schemaValidator atomic.Pointer[typeSchemaValidatorBox]
 	// entityValidator, when injected (SetEntityValidator), checks announce-typed
 	// entities' payloads in Propose so the validation tripwire can emit
 	// ContractExtension events (see tripwire.go). Nil-safe: a DB without it
 	// simply never announces — it NEVER gates either way.
-	entityValidator cluster.EntitySchemaValidator
+	entityValidator atomic.Pointer[entitySchemaValidatorBox]
 	leaderState     *LeaderState
 
 	// waiters maps request IDs (set in db.Propose) to waiter records
