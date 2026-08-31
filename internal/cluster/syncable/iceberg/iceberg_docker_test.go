@@ -74,11 +74,33 @@ func startIcebergStack(t *testing.T) *icebergStack {
 			s3Host, err = minioC.ConnectionString(ctx)
 		}
 		if err == nil {
-			// Create the warehouse bucket.
-			_, _, err = minioC.Exec(ctx, []string{"mc", "alias", "set", "local", "http://localhost:9000", minioUser, minioPass})
-		}
-		if err == nil {
-			_, _, err = minioC.Exec(ctx, []string{"mc", "mb", "local/warehouse"})
+			// Create the warehouse bucket. Exec's error covers only the exec
+			// PLUMBING — the command's own failure is its exit code, and
+			// discarding it shipped a silent path: an `mc` that runs but
+			// fails (the S3 API can refuse briefly after /minio/health/live
+			// passes) left NO bucket and NO autopsy, surfacing minutes later
+			// as the catalog's NoSuchBucketException at create-table (the
+			// second CI failure shape). execChecked folds a nonzero exit —
+			// with the command's own output — into err, so a failed
+			// bootstrap hits the same retry + autopsy as a dead container.
+			execChecked := func(cmd ...string) error {
+				code, rd, xerr := minioC.Exec(ctx, cmd)
+				if xerr != nil {
+					return fmt.Errorf("exec %v: %w", cmd, xerr)
+				}
+				out := new(strings.Builder)
+				if rd != nil {
+					_, _ = io.Copy(out, rd)
+				}
+				if code != 0 {
+					return fmt.Errorf("%v: exit %d: %s", cmd, code, out.String())
+				}
+				return nil
+			}
+			err = execChecked("mc", "alias", "set", "local", "http://localhost:9000", minioUser, minioPass)
+			if err == nil {
+				err = execChecked("mc", "mb", "local/warehouse")
+			}
 		}
 		if err == nil {
 			testcontainers.CleanupContainer(t, minioC)
