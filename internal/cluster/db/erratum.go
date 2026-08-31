@@ -54,6 +54,34 @@ func ParseErratum(c *cluster.Configuration) (*cluster.Erratum, error) {
 	return e, nil
 }
 
+// admitErratumChecks runs the storage-backed admission checks SHARED by
+// ProposeErratum and DryRunErratum — one home, so the rehearsal can never
+// drift from the real refusals ("same checks, same words" is the dry-run's
+// contract). The propose-only checks stay with ProposeErratum: the feature
+// gate (a rehearsal admits nothing and works mid-upgrade) and append-only id
+// immutability (a rehearsal has no id).
+func (db *DB) admitErratumChecks(e *cluster.Erratum) error {
+	// The rebind target — and, when narrowed, the stamp selector — must be
+	// declared versions of a USER type.
+	if cluster.IsInternal(e.TypeID) || cluster.IsReservedSystemID(e.TypeID) {
+		return cluster.NewConfigError(fmt.Errorf("erratum.type %q is a committed system type; errata rebind user topics only", e.TypeID))
+	}
+	if _, err := db.storage.ResolveType(cluster.TypeRefAt(e.TypeID, e.RebindToVersion)); err != nil {
+		return cluster.NewConfigError(fmt.Errorf("erratum.rebindToVersion %d is not a declared version of type %q: %w", e.RebindToVersion, e.TypeID, err))
+	}
+	if e.FromVersion != 0 {
+		if _, err := db.storage.ResolveType(cluster.TypeRefAt(e.TypeID, e.FromVersion)); err != nil {
+			return cluster.NewConfigError(fmt.Errorf("erratum.fromVersion %d is not a declared version of type %q: %w", e.FromVersion, e.TypeID, err))
+		}
+	}
+	// An erratum binds the PAST: a range beyond the applied log would be a
+	// statement about data that doesn't exist.
+	if applied := db.storage.AppliedIndex(); e.ToIndex > applied {
+		return cluster.NewConfigError(fmt.Errorf("erratum.toIndex %d is beyond the applied log (%d): an erratum rebinds existing actuals", e.ToIndex, applied))
+	}
+	return nil
+}
+
 // ProposeErratum admits one interpretation-registry statement. Errata are
 // APPEND-ONLY: an id that already exists with different content is refused
 // ("author a new erratum to correct this one"); an identical re-POST is an
@@ -74,24 +102,8 @@ func (db *DB) ProposeErratum(ctx context.Context, c *cluster.Configuration) erro
 		}
 	}
 
-	// The rebind target — and, when narrowed, the stamp selector — must be
-	// declared versions of a USER type.
-	if cluster.IsInternal(e.TypeID) || cluster.IsReservedSystemID(e.TypeID) {
-		return cluster.NewConfigError(fmt.Errorf("erratum.type %q is a committed system type; errata rebind user topics only", e.TypeID))
-	}
-	if _, err := db.storage.ResolveType(cluster.TypeRefAt(e.TypeID, e.RebindToVersion)); err != nil {
-		return cluster.NewConfigError(fmt.Errorf("erratum.rebindToVersion %d is not a declared version of type %q: %w", e.RebindToVersion, e.TypeID, err))
-	}
-	if e.FromVersion != 0 {
-		if _, err := db.storage.ResolveType(cluster.TypeRefAt(e.TypeID, e.FromVersion)); err != nil {
-			return cluster.NewConfigError(fmt.Errorf("erratum.fromVersion %d is not a declared version of type %q: %w", e.FromVersion, e.TypeID, err))
-		}
-	}
-
-	// An erratum binds the PAST: a range beyond the applied log would be a
-	// statement about data that doesn't exist.
-	if applied := db.storage.AppliedIndex(); e.ToIndex > applied {
-		return cluster.NewConfigError(fmt.Errorf("erratum.toIndex %d is beyond the applied log (%d): an erratum rebinds existing actuals", e.ToIndex, applied))
+	if err := db.admitErratumChecks(e); err != nil {
+		return err
 	}
 
 	// Immutability: same id + same content = idempotent retry; same id +

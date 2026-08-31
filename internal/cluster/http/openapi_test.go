@@ -131,6 +131,31 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 			path:   "/docs",
 		},
 
+		// --- erratum ---
+		{
+			name:        "POST /erratum/dryrun",
+			method:      httpgo.MethodPost,
+			path:        "/v1/erratum/dryrun",
+			body:        "[erratum]\ntype = \"photos\"\nfromIndex = 10\ntoIndex = 20\nrebindToVersion = 2\n",
+			contentType: "text/toml",
+			setup: func(fake *clusterfakes.FakeCluster) {
+				fake.DryRunErratumReturns(&cluster.ErratumDryRunReport{
+					ScanFrom: 10, ScanTo: 20, EntriesScanned: 11, EntitiesOfType: 4,
+					StampEligible: 3, Matched: 2, Rebound: 1,
+					ByStampedVersion: map[int]int{1: 3},
+					Samples: []cluster.ErratumDryRunSample{{
+						Index: 12, Key: "k2", StampedVersion: 1, CurrentReading: 1, CandidateReading: 2,
+					}},
+					AffectedSyncables: []cluster.ErratumDryRunSyncable{{
+						ID: "photos-hook", InterpretationPin: 5, AlreadyStale: false,
+					}},
+					Overlaps: []string{"backfill-v2"},
+					Coverage: "complete",
+					Findings: []string{"a finding"},
+				}, nil)
+			},
+		},
+
 		// --- database ---
 		{
 			name:   "GET /database",

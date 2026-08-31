@@ -29,6 +29,30 @@ func (h *HTTP) AddErratum(w httpgo.ResponseWriter, r *httpgo.Request) {
 	writeJson(w, bs)
 }
 
+// DryRunErratum handles POST /v1/erratum/dryrun: rehearse an erratum against
+// the committed log — the same admission validation as the real POST, then a
+// scan of the erratum's own index range through the real interpretation fold
+// — and return the diagnostic report. Nothing is admitted or stored: the
+// instrument exists because an erratum is append-only and rebinds how every
+// consumer reads a slice of history, so "valid config, wrong selectors" must
+// cost minutes here, not a correction erratum plus re-materializations.
+// Query: maxEntries (default 100000), timeoutSeconds (default 120).
+func (h *HTTP) DryRunErratum(w httpgo.ResponseWriter, r *httpgo.Request) {
+	mimeType, body, opts, ctx, cancel, ok := h.dryRunRequest(w, r)
+	if !ok {
+		return
+	}
+	defer cancel()
+	rep, err := h.c.DryRunErratum(ctx, mimeType, body, opts)
+	if err != nil {
+		// The dry-run IS the authoring loop: a rejection carries the
+		// admission path's actual words.
+		writeErrorf(w, httpgo.StatusBadRequest, "invalid_config", "dry-run: %s", err)
+		return
+	}
+	writeJSONStatus(w, httpgo.StatusOK, rep)
+}
+
 // ErratumResponse is one applied erratum in the GET /v1/erratum listing.
 type ErratumResponse struct {
 	ID              string `json:"id"`

@@ -1824,6 +1824,105 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/NotLinearizable'
+  /v1/erratum/dryrun:
+    post:
+      tags: [erratum]
+      summary: Dry-run an erratum against the committed log
+      operationId: dryRunErratum
+      description: |
+        Rehearses an erratum before authoring it: the same admission-level
+        validation as `POST /v1/erratum/{id}` (400 on rejection, with the
+        admission path's actual words), then a scan of the erratum's own
+        `[fromIndex, toIndex]` range through the REAL interpretation fold.
+        The report says what the selectors actually catch (`stampEligible`,
+        `matched`, broken down `byStampedVersion`), what the erratum really
+        changes (`rebound`, with before/after reading `samples`), which rows
+        its predicate cannot evaluate (`predicateErrors` — each of these
+        dead-letters or wedges a live consumer), which already-applied errata
+        it composes with (`overlaps`), and the re-materialization bill:
+        every syncable consuming the topic (`affectedSyncables`) goes stale
+        the moment the erratum commits. Auto-generated `findings` name the
+        authoring signatures — an erratum that matches nothing, one that
+        changes no readings, a predicate that filtered nothing. Nothing is
+        admitted or stored. Rehearse, then author the same body under
+        `POST /v1/erratum/{id}`.
+      parameters:
+        - name: maxEntries
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 10000000, default: 100000 }
+          description: Scan budget in committed entries.
+        - name: timeoutSeconds
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 600, default: 120 }
+          description: |
+            Wall-clock bound. The deadline yields a PARTIAL report (the
+            `truncated` field says so), never an error.
+      requestBody:
+        required: true
+        description: The erratum as TOML or JSON — the same body the real POST takes.
+        content:
+          text/toml:
+            schema: { type: string }
+          application/json:
+            schema: { type: object }
+      responses:
+        '200':
+          description: The dry-run report
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  scanFrom: { type: integer, format: int64 }
+                  scanTo: { type: integer, format: int64 }
+                  entriesScanned: { type: integer }
+                  entitiesOfType: { type: integer }
+                  stampEligible: { type: integer }
+                  matched: { type: integer }
+                  rebound: { type: integer }
+                  predicateErrors: { type: integer }
+                  byStampedVersion:
+                    type: object
+                    additionalProperties: { type: integer }
+                  samples:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        index: { type: integer, format: int64 }
+                        key: { type: string }
+                        stampedVersion: { type: integer }
+                        currentReading: { type: integer }
+                        candidateReading: { type: integer }
+                  affectedSyncables:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        interpretationPin: { type: integer, format: int64 }
+                        alreadyStale: { type: boolean }
+                  overlaps:
+                    type: array
+                    items: { type: string }
+                  coverage: { type: string, enum: [complete, partial] }
+                  truncated: { type: string }
+                  findings:
+                    type: array
+                    items: { type: string }
+                  parseMs: { type: integer, format: int64 }
+                  readMs: { type: integer, format: int64 }
+                  durationMs: { type: integer, format: int64 }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/RequestEntityTooLarge'
+        '500':
+          $ref: '#/components/responses/InternalError'
   /v1/erratum/{id}:
     post:
       tags: [erratum]
@@ -1852,6 +1951,12 @@ paths:
         `GET /v1/syncable/{id}/status` `interpretationStale`): rows synced
         before the erratum landed were derived under the superseded reading.
         Re-derivation is operator-triggered, never automatic.
+
+        REHEARSE FIRST: `POST /v1/erratum/dryrun` takes this same body and
+        reports what the selectors catch, what actually changes, and which
+        syncables would go stale — before anything is admitted. Errata are
+        append-only, so the dry-run is the only place a selector mistake is
+        free.
       operationId: addErratum
       parameters:
         - $ref: '#/components/parameters/ResourceId'

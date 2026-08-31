@@ -212,6 +212,7 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 			// Immutable per id — corrections are new errata, later wins.
 			r.Get("/erratum", h.GetErrata)
 			r.Post("/erratum/{id}", h.AddErratum)
+			r.Post("/erratum/dryrun", h.DryRunErratum)
 
 			r.Get("/syncable", h.listConfig("syncable", h.c.Syncables))
 			r.Post("/syncable/dryrun", h.DryRunSyncable)

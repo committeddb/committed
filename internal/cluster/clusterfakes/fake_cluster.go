@@ -198,6 +198,22 @@ type FakeCluster struct {
 	diskStateReturnsOnCall map[int]struct {
 		result1 string
 	}
+	DryRunErratumStub        func(context.Context, string, []byte, cluster.DryRunOptions) (*cluster.ErratumDryRunReport, error)
+	dryRunErratumMutex       sync.RWMutex
+	dryRunErratumArgsForCall []struct {
+		arg1 context.Context
+		arg2 string
+		arg3 []byte
+		arg4 cluster.DryRunOptions
+	}
+	dryRunErratumReturns struct {
+		result1 *cluster.ErratumDryRunReport
+		result2 error
+	}
+	dryRunErratumReturnsOnCall map[int]struct {
+		result1 *cluster.ErratumDryRunReport
+		result2 error
+	}
 	DryRunSyncableStub        func(context.Context, string, []byte, cluster.DryRunOptions) (*cluster.DryRunReport, error)
 	dryRunSyncableMutex       sync.RWMutex
 	dryRunSyncableArgsForCall []struct {
@@ -1860,6 +1876,78 @@ func (fake *FakeCluster) DiskStateReturnsOnCall(i int, result1 string) {
 	fake.diskStateReturnsOnCall[i] = struct {
 		result1 string
 	}{result1}
+}
+
+func (fake *FakeCluster) DryRunErratum(arg1 context.Context, arg2 string, arg3 []byte, arg4 cluster.DryRunOptions) (*cluster.ErratumDryRunReport, error) {
+	var arg3Copy []byte
+	if arg3 != nil {
+		arg3Copy = make([]byte, len(arg3))
+		copy(arg3Copy, arg3)
+	}
+	fake.dryRunErratumMutex.Lock()
+	ret, specificReturn := fake.dryRunErratumReturnsOnCall[len(fake.dryRunErratumArgsForCall)]
+	fake.dryRunErratumArgsForCall = append(fake.dryRunErratumArgsForCall, struct {
+		arg1 context.Context
+		arg2 string
+		arg3 []byte
+		arg4 cluster.DryRunOptions
+	}{arg1, arg2, arg3Copy, arg4})
+	stub := fake.DryRunErratumStub
+	fakeReturns := fake.dryRunErratumReturns
+	fake.recordInvocation("DryRunErratum", []interface{}{arg1, arg2, arg3Copy, arg4})
+	fake.dryRunErratumMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2, arg3, arg4)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeCluster) DryRunErratumCallCount() int {
+	fake.dryRunErratumMutex.RLock()
+	defer fake.dryRunErratumMutex.RUnlock()
+	return len(fake.dryRunErratumArgsForCall)
+}
+
+func (fake *FakeCluster) DryRunErratumCalls(stub func(context.Context, string, []byte, cluster.DryRunOptions) (*cluster.ErratumDryRunReport, error)) {
+	fake.dryRunErratumMutex.Lock()
+	defer fake.dryRunErratumMutex.Unlock()
+	fake.DryRunErratumStub = stub
+}
+
+func (fake *FakeCluster) DryRunErratumArgsForCall(i int) (context.Context, string, []byte, cluster.DryRunOptions) {
+	fake.dryRunErratumMutex.RLock()
+	defer fake.dryRunErratumMutex.RUnlock()
+	argsForCall := fake.dryRunErratumArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3, argsForCall.arg4
+}
+
+func (fake *FakeCluster) DryRunErratumReturns(result1 *cluster.ErratumDryRunReport, result2 error) {
+	fake.dryRunErratumMutex.Lock()
+	defer fake.dryRunErratumMutex.Unlock()
+	fake.DryRunErratumStub = nil
+	fake.dryRunErratumReturns = struct {
+		result1 *cluster.ErratumDryRunReport
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeCluster) DryRunErratumReturnsOnCall(i int, result1 *cluster.ErratumDryRunReport, result2 error) {
+	fake.dryRunErratumMutex.Lock()
+	defer fake.dryRunErratumMutex.Unlock()
+	fake.DryRunErratumStub = nil
+	if fake.dryRunErratumReturnsOnCall == nil {
+		fake.dryRunErratumReturnsOnCall = make(map[int]struct {
+			result1 *cluster.ErratumDryRunReport
+			result2 error
+		})
+	}
+	fake.dryRunErratumReturnsOnCall[i] = struct {
+		result1 *cluster.ErratumDryRunReport
+		result2 error
+	}{result1, result2}
 }
 
 func (fake *FakeCluster) DryRunSyncable(arg1 context.Context, arg2 string, arg3 []byte, arg4 cluster.DryRunOptions) (*cluster.DryRunReport, error) {

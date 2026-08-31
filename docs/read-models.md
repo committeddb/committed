@@ -956,6 +956,62 @@ Authoring loop: dry-run until the findings list is empty, then POST
 for real — "valid config, wrong result, no error" costs minutes
 instead of a full replay against an oracle.
 
+## Errata: correcting how history is read — rehearse first
+
+An **erratum** is an append-only, consensus-ordered statement that rebinds how
+already-committed entities are *read* — never their bytes: entities of a type
+committed in an index range (optionally narrowed to one stamped version and a
+deterministic jq predicate) read as a different declared version from the
+moment the erratum commits. It is the repair tool for stamp mistakes — an
+unannounced writer that produced v2-shaped data under v1 stamps, a
+nonConvertible break whose below-range data turns out readable after all — and
+it feeds the same interpretation fold every syncable reads through.
+
+```toml
+[erratum]
+type = "photos"           # the type (topic) whose readings rebind
+fromIndex = 100           # inclusive raft-index range of EXISTING actuals
+toIndex = 250
+rebindToVersion = 2       # the version matching entities read as
+# fromVersion = 1         # optional: only entities STAMPED v1
+# predicate = '.license == "cc"'   # optional deterministic jq narrowing
+```
+
+Errata are the highest-blast-radius config in committed: they are
+**append-only** (a wrong one cannot be edited, only corrected by another —
+later in the log wins), and admitting one instantly marks every consumer of
+the topic `interpretationStale` — rows materialized before it keep the
+superseded reading until you re-materialize each sink. So the workflow is
+**rehearse, then author**:
+
+1. `POST /v1/erratum/dryrun` with the exact body you intend to admit. Nothing
+   is admitted or stored; the rehearsal runs the erratum's own index range
+   through the *real* interpretation fold and reports what the selectors
+   actually catch (`stampEligible`, `matched`, broken down `byStampedVersion`),
+   what the erratum really *changes* (`rebound`, with before/after reading
+   `samples`), rows its predicate cannot evaluate (`predicateErrors` — each of
+   these would dead-letter or wedge a live consumer), already-applied errata it
+   composes with (`overlaps`), and the re-materialization bill
+   (`affectedSyncables`, with each consumer's current interpretation pin).
+   Auto-generated `findings` name the authoring signatures: an erratum that
+   matches nothing, one that changes no readings, a predicate that filtered
+   nothing. Admission-level validation runs in full, with the same words the
+   real POST would refuse with — and a rehearsal works even mid-rolling-upgrade,
+   when the real POST would still be refused by the feature gate (the report
+   says so).
+2. Iterate until the findings list is empty and `matched`/`rebound` are the
+   numbers you expected.
+3. `POST /v1/erratum/{id}` with the same body — then re-materialize the
+   affected syncables (`POST /v1/syncable/{id}/rematerialize`) when you want
+   the corrected reading to reach their already-synced rows.
+
+Like the syncable dry-run, the scan is budgeted (`?maxEntries`, default 100k)
+and time-bounded (`?timeoutSeconds`); an exhausted budget yields a **partial**
+report that says so (`coverage`, `truncated`) — never a silently-complete-
+looking one. Sample rows quote entity keys verbatim (that precision is the
+diagnostic point; the trusted-appliance caveat from the syncable dry-run
+applies).
+
 ## Changing the rules after a projection is live
 
 A projection is a **disposable view of an immutable log** — its fold rules, and

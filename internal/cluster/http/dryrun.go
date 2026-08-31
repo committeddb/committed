@@ -23,6 +23,50 @@ const dryRunMaxEntriesCap = 10_000_000
 // dryRunTimeoutCap bounds caller-requested timeouts.
 const dryRunTimeoutCap = 10 * time.Minute
 
+// dryRunRequest reads the shared dry-run request surface — the body, its
+// media type, the ?maxEntries and ?timeoutSeconds budget knobs — builds the
+// compute context, and extends THIS response's write deadline past the
+// compute deadline. (The server's global WriteTimeout, default 120s, starts
+// counting at the request read — equal to the default compute budget — so a
+// rehearsal using its whole budget would otherwise build its report only to
+// find the connection already dead: the field's "empty reply after exactly
+// 120s". Best-effort; an unsupported wrapper keeps the old behavior.) On a
+// bad parameter the error is already written and ok is false. Used by every
+// dry-run handler (syncable, erratum) so their budget/deadline semantics
+// cannot drift.
+func (h *HTTP) dryRunRequest(w httpgo.ResponseWriter, r *httpgo.Request) (mimeType string, body []byte, opts cluster.DryRunOptions, ctx context.Context, cancel context.CancelFunc, ok bool) {
+	mimeType = "text/toml"
+	if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err == nil && mt != "" {
+		mimeType = mt
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		h.writeReadError(w, r, err, "invalid_config", "read dry-run body")
+		return "", nil, opts, nil, nil, false
+	}
+	if q := r.URL.Query().Get("maxEntries"); q != "" {
+		n, err := strconv.Atoi(q)
+		if err != nil || n <= 0 || n > dryRunMaxEntriesCap {
+			h.writeReadError(w, r, fmt.Errorf("maxEntries must be 1..%d", dryRunMaxEntriesCap), "invalid_config", "invalid maxEntries")
+			return "", nil, opts, nil, nil, false
+		}
+		opts.MaxEntries = n
+	}
+	timeout := dryRunTimeout
+	if q := r.URL.Query().Get("timeoutSeconds"); q != "" {
+		n, err := strconv.Atoi(q)
+		if err != nil || n <= 0 || time.Duration(n)*time.Second > dryRunTimeoutCap {
+			h.writeReadError(w, r, fmt.Errorf("timeoutSeconds must be 1..%d", int(dryRunTimeoutCap/time.Second)), "invalid_config", "invalid timeoutSeconds")
+			return "", nil, opts, nil, nil, false
+		}
+		timeout = time.Duration(n) * time.Second
+	}
+	opts.Timeout = timeout
+	_ = httpgo.NewResponseController(w).SetWriteDeadline(time.Now().Add(timeout + 30*time.Second))
+	ctx, cancel = context.WithTimeout(r.Context(), timeout)
+	return mimeType, body, opts, ctx, cancel, true
+}
+
 // DryRunSyncable (POST /syncable/dryrun) rehearses a syncable config
 // against a bounded sample of the committed log and returns the
 // diagnostic report — counters, per-join resolution, sample outputs,
@@ -32,24 +76,11 @@ const dryRunTimeoutCap = 10 * time.Minute
 // Query: maxEntries (default 100000), fromIndex (default: evenly-spaced
 // multi-window sampling across the whole log).
 func (h *HTTP) DryRunSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
-	mimeType := "text/toml"
-	if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err == nil && mt != "" {
-		mimeType = mt
-	}
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		h.writeReadError(w, r, err, "invalid_config", "read dry-run body")
+	mimeType, body, opts, ctx, cancel, ok := h.dryRunRequest(w, r)
+	if !ok {
 		return
 	}
-	opts := cluster.DryRunOptions{}
-	if q := r.URL.Query().Get("maxEntries"); q != "" {
-		n, err := strconv.Atoi(q)
-		if err != nil || n <= 0 || n > dryRunMaxEntriesCap {
-			h.writeReadError(w, r, fmt.Errorf("maxEntries must be 1..%d", dryRunMaxEntriesCap), "invalid_config", "invalid maxEntries")
-			return
-		}
-		opts.MaxEntries = n
-	}
+	defer cancel()
 	if q := r.URL.Query().Get("fromIndex"); q != "" {
 		n, err := strconv.ParseUint(q, 10, 64)
 		if err != nil {
@@ -58,26 +89,6 @@ func (h *HTTP) DryRunSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
 		}
 		opts.FromIndex = n
 	}
-	timeout := dryRunTimeout
-	if q := r.URL.Query().Get("timeoutSeconds"); q != "" {
-		n, err := strconv.Atoi(q)
-		if err != nil || n <= 0 || time.Duration(n)*time.Second > dryRunTimeoutCap {
-			h.writeReadError(w, r, fmt.Errorf("timeoutSeconds must be 1..%d", int(dryRunTimeoutCap/time.Second)), "invalid_config", "invalid timeoutSeconds")
-			return
-		}
-		timeout = time.Duration(n) * time.Second
-	}
-	opts.Timeout = timeout
-	// The server's global WriteTimeout (default 120s) starts counting at
-	// the request read — equal to the default compute budget, so a
-	// rehearsal using its whole budget built its (partial) report only
-	// to find the connection already dead: the field's "empty reply
-	// after exactly 120s". Extend THIS response's write deadline past
-	// the compute deadline; best-effort (an unsupported wrapper keeps
-	// the old behavior).
-	_ = httpgo.NewResponseController(w).SetWriteDeadline(time.Now().Add(timeout + 30*time.Second))
-	ctx, cancel := context.WithTimeout(r.Context(), timeout)
-	defer cancel()
 	rep, err := h.c.DryRunSyncable(ctx, mimeType, body, opts)
 	if err != nil {
 		// The dry-run IS the authoring loop: a rejection must carry the

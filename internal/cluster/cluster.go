@@ -27,6 +27,13 @@ type Cluster interface {
 	// Refused with ClusterBelowFeatureLevelError until every member can fold
 	// errata. Powers POST /v1/erratum/{id}.
 	ProposeErratum(ctx context.Context, c *Configuration) error
+	// DryRunErratum rehearses an erratum against the committed log — the
+	// same admission-level validation as ProposeErratum, then a scan of the
+	// erratum's own index range through the real interpretation fold,
+	// reporting what it selects, what it changes, and which consumers it
+	// would stale — without admitting anything. Powers POST
+	// /v1/erratum/dryrun.
+	DryRunErratum(ctx context.Context, mimeType string, data []byte, opts DryRunOptions) (*ErratumDryRunReport, error)
 	// Errata returns every applied erratum with its raft index, unordered.
 	// Powers GET /v1/erratum.
 	Errata() ([]AppliedErratum, error)
