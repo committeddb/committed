@@ -212,41 +212,22 @@ type DB struct {
 
 	maxProposalBytes uint64
 
-	// diskState is the current disk-pressure level (a diskState value),
-	// published by the disk-usage watcher goroutine and read by the propose
-	// gate (checkDiskWritable). Stored as an int32 so it can be updated
-	// atomically without a lock on the hot propose path. Stays diskOK when
-	// no watcher is configured, so the gate is a no-op.
-	diskState atomic.Int32
-
-	// Cluster-aware admission (see disk_cluster.go). diskVerdict is the
-	// cached cluster write-admission verdict the propose gate enforces
-	// (atomic pointer: the gate reads it lock-free on the hot path; nil or
-	// stale falls back to the node-local diskState). diskReports is the
-	// leader-side map of member disk reports, guarded by diskReportsMu.
-	// diskNudgeC wakes the coordinator loop early on a local disk-state
-	// change. lastDiskTransfer rate-limits disk-pressure leadership
-	// transfers; it is touched only from coordinator cycles.
-	diskVerdict          atomic.Pointer[diskVerdictState]
-	diskReportsMu        sync.Mutex
-	diskReports          map[uint64]diskReport
-	diskNudgeC           chan struct{}
-	diskReportInterval   time.Duration
-	diskTransferCooldown time.Duration
-	lastDiskTransfer     time.Time
-	diskReportSend       diskReportSender
-	transferLeadershipFn func(transferee uint64)
-	pickTransferTargetFn func(now time.Time) uint64
+	// disk is the write-admission subsystem (disk_cluster.go): the
+	// node-local disk-pressure gate plus the cluster-aware verdict
+	// machinery. Always non-nil after New; the propose gate consults it
+	// (checkWritable) and onDiskState feeds it watcher transitions.
+	disk *diskAdmission
 
 	// applyStall backs ApplyStalled (the /ready probe's apply-wedge
 	// signal). Probe-driven state, no goroutine — see applyStallDetector.
 	applyStall applyStallDetector
 
 	// Graceful-shutdown leadership transfer (see shutdown.go). Injected as
-	// fields, like the disk-pressure transfer collaborators above, so the
-	// target choice and the wait-for-handoff loop are unit-testable without a
-	// live cluster.
+	// fields — the disk-admission subsystem carries its own transfer seam —
+	// so the target choice and the wait-for-handoff loop are unit-testable
+	// without a live cluster.
 	shutdownTransferTargetFn func() uint64
+	transferLeadershipFn     func(transferee uint64)
 	isLeaderFn               func() bool
 	shutdownTransferTimeout  time.Duration
 
@@ -463,12 +444,7 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		ingestSupervisorMaxBackoff:     cfg.ingestSupervisorMaxBackoff,
 		ingestSupervisorMaxAttempts:    cfg.ingestSupervisorMaxAttempts,
 		maxProposalBytes:               cfg.maxProposalBytes,
-		diskReports:                    make(map[uint64]diskReport),
-		diskNudgeC:                     make(chan struct{}, 1),
-		diskReportInterval:             cfg.diskReportInterval,
 		applyStall:                     applyStallDetector{threshold: ApplyStallThreshold},
-		diskTransferCooldown:           cfg.diskTransferCooldown,
-		diskReportSend:                 cfg.diskReportSender,
 		logger:                         cfg.logger,
 		metrics:                        cfg.metrics,
 	}
@@ -481,16 +457,6 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 	db.syncCh = sync
 	db.ingestCh = ingest
 	db.workerDrainTimeout = closeDrainTimeout
-
-	if db.diskReportInterval == 0 {
-		db.diskReportInterval = DefaultDiskReportInterval
-	}
-	if db.diskTransferCooldown == 0 {
-		db.diskTransferCooldown = defaultDiskTransferCooldown
-	}
-	if db.diskReportSend == nil {
-		db.diskReportSend = newHTTPDiskReportSender(cfg.diskReportClient, cfg.diskReportToken)
-	}
 
 	// Three hooks are wired into the raft layer. The per-entry applied
 	// notifier (db.notifyApplied) receives each committed entry's bytes so
@@ -509,6 +475,29 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 	db.ErrorC = errorC
 	db.raft = raft
 	db.leaderState = raft.leaderState
+
+	// The disk-admission subsystem (disk_cluster.go) is built once raft is
+	// wired — its engine views (leader identity, voter set, leadership
+	// transfer) read through the closures below — and before any goroutine
+	// that can feed it: the disk watcher's onDiskState callback lands in
+	// setLocalState.
+	db.disk = newDiskAdmission(diskAdmissionDeps{
+		selfID:             db.ID,
+		leaderID:           db.Leader,
+		isLeader:           func() bool { return db.leaderState != nil && db.leaderState.IsLeader() },
+		memberAPIURL:       db.MemberAPIURL,
+		voters:             db.diskVoters,
+		replicationMatch:   db.diskReplicationMatch,
+		transferLeadership: db.raft.transferLeadership,
+		reportInterval:     cfg.diskReportInterval,
+		transferCooldown:   cfg.diskTransferCooldown,
+		send:               cfg.diskReportSender,
+		reportClient:       cfg.diskReportClient,
+		reportToken:        cfg.diskReportToken,
+		ctx:                ctx,
+		logger:             cfg.logger,
+		metrics:            cfg.metrics,
+	})
 
 	// The watcher subscribes to leader-ID transitions from LeaderState
 	// BEFORE the first Ready iteration could land — subscribe() just
@@ -539,41 +528,59 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		go w.run(db.ctx)
 	}
 
-	// Cluster-aware disk admission (disk_cluster.go). The coordinator runs
-	// even with no local watcher: this node's own state stays pinned at ok,
-	// but its propose gate still needs the leader's verdict so it won't
-	// forward writes into a cluster that can't safely take them. A negative
-	// interval (WithDiskReportInterval(<=0)) disables it.
+	// Graceful-shutdown leadership-transfer collaborators (shutdown.go).
 	db.transferLeadershipFn = db.raft.transferLeadership
-	db.pickTransferTargetFn = db.pickTransferTarget
 	db.shutdownTransferTargetFn = db.shutdownTransferTarget
 	db.isLeaderFn = db.isLeader
 	db.shutdownTransferTimeout = defaultShutdownTransferTimeout
-	if db.diskReportInterval > 0 {
-		go db.diskCoordinator()
+
+	// The disk-admission coordinator runs even with no local watcher: this
+	// node's own state stays pinned at ok, but its propose gate still needs
+	// the leader's verdict so it won't forward writes into a cluster that
+	// can't safely take them. A negative interval
+	// (WithDiskReportInterval(<=0)) disables it.
+	if db.disk.reportInterval > 0 {
+		go db.disk.run()
 	}
 
 	return db
 }
 
-// onDiskState is the disk-usage watcher's callback, invoked on every change in
-// disk-pressure level. It publishes the new state for the propose gate to read
-// and nudges the raft compaction-pressure hint so the node frees raft-log disk
-// sooner while space is critical/full. On the leader it then synchronously
-// recomputes the cluster admission verdict (so the gate never enforces a
-// verdict older than the state just published); on a follower it nudges the
-// disk coordinator to report the transition to the leader right away. Called
-// from the watcher goroutine (and tests via SetDiskStateForTest).
+// onDiskState is the disk-usage watcher's callback, invoked on every change
+// in disk-pressure level. It fans the event out to the two subsystems that
+// care: the raft compaction-pressure hint (so the node frees raft-log disk
+// sooner while space is critical/full) and the disk-admission subsystem,
+// which publishes the state for the propose gate and reconciles the cluster
+// verdict. Called from the watcher goroutine (and tests via
+// SetDiskStateForTest).
 func (db *DB) onDiskState(s diskState) {
-	db.diskState.Store(int32(s))
 	if db.raft != nil {
 		db.raft.setCompactionPressure(s >= diskCritical)
 	}
-	if db.leaderState != nil && db.leaderState.IsLeader() {
-		db.recomputeDiskVerdict(time.Now())
-		return
+	db.disk.setLocalState(s)
+}
+
+// diskVoters and diskReplicationMatch are the raft-side views db.New wires
+// into the disk-admission subsystem: the current voter set, and each
+// member's replication match index (transfer-target ranking).
+func (db *DB) diskVoters() map[uint64]struct{} {
+	voters, _, _ := db.raft.memberStatus()
+	return voters
+}
+
+func (db *DB) diskReplicationMatch() map[uint64]uint64 {
+	_, _, _, _, views := db.raft.membershipView()
+	match := make(map[uint64]uint64, len(views))
+	for _, mv := range views {
+		match[mv.id] = mv.match
 	}
-	db.nudgeDiskCoordinator()
+	return match
+}
+
+// SafeMode reports whether this node booted with worker spawns held
+// (db.WithSafeMode / COMMITTED_SAFE_MODE). Per-boot, node-local.
+func (db *DB) SafeMode() bool {
+	return db.safeMode
 }
 
 // listenForSyncables forwards syncable registrations from the input
@@ -794,7 +801,7 @@ func (db *DB) proposeAsync(ctx context.Context, p *cluster.Proposal) (uint64, <-
 	// waiter so a rejected proposal consumes nothing. At critical only
 	// user-data proposals are rejected; at full everything is. Returns the
 	// typed cluster.ErrInsufficientStorage the HTTP layer maps to 507.
-	if err := db.checkDiskWritable(kind); err != nil {
+	if err := db.disk.checkWritable(kind); err != nil {
 		return 0, nil, err
 	}
 

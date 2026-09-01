@@ -928,8 +928,9 @@ func (n *Raft) setCompactionPressure(on bool) {
 // the log, then sends it MsgTimeoutNow to start an immediate election; the
 // attempt silently expires after an election timeout if the target can't
 // catch up or is unreachable. Fire-and-forget by design — the caller
-// (db.maybeTransferLeadership, moving leadership off a disk-constrained
-// node) observes the outcome through the normal leader-change machinery and
+// (diskAdmission.maybeTransferLeadership, moving leadership off a
+// disk-constrained node) observes the outcome through the normal
+// leader-change machinery and
 // retries on a later cycle if leadership didn't move.
 func (n *Raft) transferLeadership(transferee uint64) {
 	if n.node == nil {

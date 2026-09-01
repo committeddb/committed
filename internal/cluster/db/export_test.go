@@ -460,7 +460,7 @@ func (db *DB) SetLocalDiskStateForTest(level string) {
 	if !ok {
 		panic("unknown disk state " + level)
 	}
-	db.diskState.Store(int32(s))
+	db.disk.local.Store(int32(s))
 }
 
 // SetClusterVerdictForTest injects a cached cluster write-admission verdict
@@ -472,7 +472,7 @@ func (db *DB) SetClusterVerdictForTest(state, reason string, leaderID uint64, ag
 	if !ok {
 		panic("unknown disk state " + state)
 	}
-	db.diskVerdict.Store(&diskVerdictState{
+	db.disk.verdict.Store(&diskVerdictState{
 		state:    s,
 		reason:   reason,
 		leaderID: leaderID,
@@ -488,16 +488,16 @@ func (db *DB) RecordDiskReportForTest(nodeID uint64, state string, age time.Dura
 	if !ok {
 		panic("unknown disk state " + state)
 	}
-	db.diskReportsMu.Lock()
-	db.diskReports[nodeID] = diskReport{state: s, at: time.Now().Add(-age)}
-	db.diskReportsMu.Unlock()
+	db.disk.reportsMu.Lock()
+	db.disk.reports[nodeID] = diskReport{state: s, at: time.Now().Add(-age)}
+	db.disk.reportsMu.Unlock()
 }
 
 // DiskCoordinateForTest runs one disk-coordinator cycle synchronously (the
 // same body the background loop runs on each tick), so tests can drive the
 // leader recompute / follower report-and-cache paths deterministically.
 func (db *DB) DiskCoordinateForTest() {
-	db.diskCoordinate(time.Now())
+	db.disk.coordinate(time.Now())
 }
 
 // SetDiskTransferHooksForTest overrides the transfer-trigger collaborators:
@@ -505,16 +505,16 @@ func (db *DB) DiskCoordinateForTest() {
 // transfer call. cooldown rate-limits successive transfers. Returns nothing;
 // drive the decision via MaybeTransferLeadershipForTest.
 func (db *DB) SetDiskTransferHooksForTest(pick func() uint64, transfer func(uint64), cooldown time.Duration) {
-	db.pickTransferTargetFn = func(time.Time) uint64 { return pick() }
-	db.transferLeadershipFn = transfer
-	db.diskTransferCooldown = cooldown
+	db.disk.pickTransferTargetFn = func(time.Time) uint64 { return pick() }
+	db.disk.transferLeadership = transfer
+	db.disk.transferCooldown = cooldown
 }
 
 // MaybeTransferLeadershipForTest runs one disk-pressure transfer decision at
 // the given instant, against the current local disk state and the hooks set
 // via SetDiskTransferHooksForTest.
 func (db *DB) MaybeTransferLeadershipForTest(now time.Time) {
-	db.maybeTransferLeadership(now, db.diskVerdict.Load())
+	db.disk.maybeTransferLeadership(now, db.disk.verdict.Load())
 }
 
 // SetShutdownTransferHooksForTest overrides the graceful-shutdown leadership
