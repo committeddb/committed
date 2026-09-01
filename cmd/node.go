@@ -19,10 +19,10 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/committeddb/committed/internal/cluster/db"
+	"github.com/committeddb/committed/internal/cluster/db/http"
 	"github.com/committeddb/committed/internal/cluster/db/httptransport"
 	parser "github.com/committeddb/committed/internal/cluster/db/parser"
 	"github.com/committeddb/committed/internal/cluster/db/wal"
-	"github.com/committeddb/committed/internal/cluster/http"
 	ingestablesql "github.com/committeddb/committed/internal/cluster/ingestable/sql"
 	ingestablemysql "github.com/committeddb/committed/internal/cluster/ingestable/sql/mysql"
 	ingestablepostgres "github.com/committeddb/committed/internal/cluster/ingestable/sql/postgres"

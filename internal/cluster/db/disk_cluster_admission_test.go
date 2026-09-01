@@ -9,8 +9,8 @@ import (
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
+	clusterhttp "github.com/committeddb/committed/internal/cluster/db/http"
 	parser "github.com/committeddb/committed/internal/cluster/db/parser"
-	clusterhttp "github.com/committeddb/committed/internal/cluster/http"
 )
 
 // createDiskTestDB is createDB plus extra options, with the disk coordinator

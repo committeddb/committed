@@ -14,7 +14,7 @@ Core domain package. All key interfaces are defined in `cluster.go`.
 
 - **db/**: Raft consensus, WAL storage, sync/ingest processing. `db.go` is the main Cluster implementation. `raft.go` handles Raft node lifecycle. `sync.go` handles syncable processing. `ingest.go` handles ingestable processing.
 - **db/wal/**: Write-ahead log storage layer (tidwall/wal wrapper)
-- **http/**: REST API handlers (Chi router). `handler.go` defines all routes and handlers. `versions.go` handles config version history endpoints.
+- **db/http/**: REST API handlers (Chi router) — the engine's transport subpackage; `http.go` assembles the router and the route table, `versions.go` handles config version history endpoints. Lives under `db/` so handlers can hold the engine directly instead of widening the `cluster.Cluster` interface.
 - **syncable/sql/**: SQL sync implementations — `mysql/` and `postgres/` subdirectories
 - **ingestable/sql/**: SQL ingest implementations — `mysql/` and `postgres/` subdirectories
 - **clusterpb/**: Protobuf definitions (generated — do not edit, regenerate with `go generate ./...`)

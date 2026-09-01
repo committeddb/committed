@@ -139,7 +139,7 @@ func memberDo(method, path string, body []byte) error {
 	}
 
 	// Surface the server's structured error body — it carries a code and a
-	// human-readable message (see internal/cluster/http/errors.go).
+	// human-readable message (see internal/cluster/db/http/errors.go).
 	msg, _ := io.ReadAll(resp.Body)
 	return fmt.Errorf("member: %s %s returned %d: %s", method, url, resp.StatusCode, strings.TrimSpace(string(msg)))
 }

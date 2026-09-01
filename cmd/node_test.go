@@ -19,10 +19,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/committeddb/committed/internal/cluster/db"
+	clusterhttp "github.com/committeddb/committed/internal/cluster/db/http"
 	"github.com/committeddb/committed/internal/cluster/db/httptransport"
 	"github.com/committeddb/committed/internal/cluster/db/parser"
 	dbtest "github.com/committeddb/committed/internal/cluster/db/testing"
-	clusterhttp "github.com/committeddb/committed/internal/cluster/http"
 )
 
 // newTestDB builds a single-node db.DB backed by MemoryStorage. Mirrors
@@ -326,7 +326,7 @@ func TestLoadAPITLSConfig(t *testing.T) {
 }
 
 // apiTLSTestPKI is a throwaway CA for loadAPITLSConfig tests. We can't
-// reuse the one in internal/cluster/http/tls_test.go (different
+// reuse the one in internal/cluster/db/http/tls_test.go (different
 // package, test-only) so we inline a small copy here.
 type apiTLSTestPKI struct {
 	caFile string

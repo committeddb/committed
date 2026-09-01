@@ -11,9 +11,9 @@ import (
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
+	"github.com/committeddb/committed/internal/cluster/db/http"
 	parser "github.com/committeddb/committed/internal/cluster/db/parser"
 	"github.com/committeddb/committed/internal/cluster/db/wal"
-	"github.com/committeddb/committed/internal/cluster/http"
 )
 
 const tripwireSchema = `{"type":"object","properties":{"caption":{"type":"string"},"size":{"type":"number"}},"additionalProperties":false}`

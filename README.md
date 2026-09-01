@@ -121,7 +121,7 @@ under [`docs/operations/`](docs/operations/).
 
 ### API tour
 
-Routes are served by Chi from `internal/cluster/http/`. The full
+Routes are served by Chi from `internal/cluster/db/http/`. The full
 OpenAPI spec is available at `/openapi.yaml` with a Swagger UI at
 `/docs`. Every API endpoint lives under a `/v1` prefix (see
 [`docs/api-compatibility.md`](docs/api-compatibility.md)); bearer-token

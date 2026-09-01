@@ -528,7 +528,9 @@ func newHTTPDiskReportSender(client *nethttp.Client, token string) diskReportSen
 // diskReportWire is the JSON body of POST /v1/node/disk-report, and
 // diskVerdictWire its response — mirrored by the HTTP layer's handler types.
 // Kept in sync by TestDiskReportSender_RoundTrip, which posts through a real
-// handler. (db can't import internal/cluster/http: layering, not a cycle.)
+// handler. (db can't import its own transport subpackage,
+// internal/cluster/db/http: that would be an import cycle once the handlers
+// hold *db.DB.)
 type diskReportWire struct {
 	Node  uint64 `json:"node"`
 	State string `json:"state"`
