@@ -9,7 +9,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/committeddb/committed/internal/cluster/clusterfakes"
 	"github.com/committeddb/committed/internal/cluster/db/http"
 	test "github.com/committeddb/committed/internal/cluster/db/testing"
 )
@@ -19,105 +18,13 @@ import (
 // probe — orchestrators use it to decide whether to restart the
 // process — so it must succeed even when leader=0 and applied=0.
 func TestHealth(t *testing.T) {
-	fake := &clusterfakes.FakeCluster{}
-	// Leave Leader/AppliedIndex at their zero defaults to confirm
-	// /health doesn't gate on raft state.
-	h := http.New(fake)
-
-	req := httptest.NewRequest("GET", "http://localhost/health", nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	resp := w.Result()
-	require.Equal(t, 200, resp.StatusCode)
-	require.Equal(t, "application/json", resp.Header.Get("Content-Type"))
-
-	body, err := io.ReadAll(resp.Body)
-	require.Nil(t, err)
-
+	e := newEngine(t)
+	w := e.doEmpty(t, "GET", "/health")
+	require.Equal(t, 200, w.Code)
+	require.Equal(t, "application/json", w.Result().Header.Get("Content-Type"))
 	var got http.HealthResponse
-	require.Nil(t, json.Unmarshal(body, &got))
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
 	require.Equal(t, "ok", got.Status)
-
-	// /health must not consult cluster state — verify the handler
-	// never asked for leader or applied index.
-	require.Equal(t, 0, fake.LeaderCallCount())
-	require.Equal(t, 0, fake.AppliedIndexCallCount())
-}
-
-// TestReady_Unit covers the four handler outcomes against a fake
-// cluster: 503 with no leader, 503 with leader but applied=0, 200
-// when both checks pass, and the body fields each case writes. This
-// is the unit-level half of the readiness coverage; TestReady_RealRaft
-// below exercises the same handler against an actual db.DB.
-func TestReady_Unit(t *testing.T) {
-	tests := []struct {
-		name           string
-		leader         uint64
-		applied        uint64
-		applyStalled   bool
-		expectedStatus int
-		expectedBody   http.ReadyResponse
-	}{
-		{
-			name:           "no leader yet",
-			leader:         0,
-			applied:        0,
-			expectedStatus: 503,
-			expectedBody:   http.ReadyResponse{Status: "not ready"},
-		},
-		{
-			name:           "leader elected but nothing applied",
-			leader:         1,
-			applied:        0,
-			expectedStatus: 503,
-			expectedBody:   http.ReadyResponse{Status: "not ready"},
-		},
-		{
-			name:           "leader elected and applied advanced",
-			leader:         1,
-			applied:        7,
-			expectedStatus: 200,
-			expectedBody:   http.ReadyResponse{Status: "ok"},
-		},
-		{
-			// The silent-while-green field incident: leader elected,
-			// applied>0 — but apply has FROZEN with committed work
-			// pending. The node can't confirm proposals and serves
-			// stale reads; /ready must take it out of rotation.
-			name:           "apply stalled",
-			leader:         1,
-			applied:        7,
-			applyStalled:   true,
-			expectedStatus: 503,
-			expectedBody:   http.ReadyResponse{Status: "not ready"},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			fake := &clusterfakes.FakeCluster{}
-			fake.LeaderReturns(tc.leader)
-			fake.AppliedIndexReturns(tc.applied)
-			fake.ApplyStalledReturns(tc.applyStalled)
-			h := http.New(fake)
-
-			req := httptest.NewRequest("GET", "http://localhost/ready", nil)
-			w := httptest.NewRecorder()
-			h.ServeHTTP(w, req)
-
-			resp := w.Result()
-			require.Equal(t, tc.expectedStatus, resp.StatusCode)
-			require.Equal(t, "application/json", resp.Header.Get("Content-Type"))
-
-			body, err := io.ReadAll(resp.Body)
-			require.Nil(t, err)
-
-			var got http.ReadyResponse
-			require.Nil(t, json.Unmarshal(body, &got))
-			require.Equal(t, tc.expectedBody, got)
-		})
-	}
 }
 
 // TestReady_RealRaft drives the readiness probe against a freshly
@@ -136,7 +43,7 @@ func TestReady_RealRaft(t *testing.T) {
 	d := test.CreateDB()
 	defer d.Close()
 
-	h := http.New(d)
+	h := http.New(d.DB)
 
 	// Immediately after construction the node hasn't ticked yet, so
 	// raft has no leader and applied is 0. We require the very first

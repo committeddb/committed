@@ -46,8 +46,8 @@ func (h *HTTP) Health(w httpgo.ResponseWriter, r *httpgo.Request) {
 // appliedIndex froze one entry behind commitIndex and /ready stayed
 // green: orchestrators kept routing to a node that was effectively down.
 func (h *HTTP) Ready(w httpgo.ResponseWriter, r *httpgo.Request) {
-	leader := h.c.Leader()
-	applied := h.c.AppliedIndex()
+	leader := h.view.Leader()
+	applied := h.view.AppliedIndex()
 
 	if leader == 0 {
 		writeJSONStatus(w, httpgo.StatusServiceUnavailable, ReadyResponse{Status: "not ready"})
@@ -59,7 +59,7 @@ func (h *HTTP) Ready(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 
-	if h.c.ApplyStalled() {
+	if h.view.ApplyStalled() {
 		writeJSONStatus(w, httpgo.StatusServiceUnavailable, ReadyResponse{Status: "not ready"})
 		return
 	}

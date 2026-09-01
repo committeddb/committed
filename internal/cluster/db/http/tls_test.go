@@ -18,7 +18,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/committeddb/committed/internal/cluster/clusterfakes"
 	"github.com/committeddb/committed/internal/cluster/db/http"
 )
 
@@ -35,8 +34,7 @@ func TestTLS_HTTPS_RoundTrip(t *testing.T) {
 	pki := newTLSTestPKI(t)
 	serverCert, serverKey := pki.issueCert(t, "server", extServer)
 
-	fake := &clusterfakes.FakeCluster{}
-	h := http.New(fake)
+	h := newEngineHTTP(t).h
 
 	pair, err := tls.LoadX509KeyPair(serverCert, serverKey)
 	require.NoError(t, err)
@@ -74,8 +72,7 @@ func TestTLS_MinVersion_TLS12(t *testing.T) {
 	pki := newTLSTestPKI(t)
 	serverCert, serverKey := pki.issueCert(t, "server", extServer)
 
-	fake := &clusterfakes.FakeCluster{}
-	h := http.New(fake)
+	h := newEngineHTTP(t).h
 
 	pair, err := tls.LoadX509KeyPair(serverCert, serverKey)
 	require.NoError(t, err)
@@ -130,8 +127,7 @@ func TestTLS_MTLS_RequiresClientCert(t *testing.T) {
 		ClientAuth:   tls.RequireAndVerifyClientCert,
 	}
 
-	fake := &clusterfakes.FakeCluster{}
-	h := http.New(fake)
+	h := newEngineHTTP(t).h
 	addr := pickFreeLoopbackAddr(t)
 	srv := h.NewServer(addr, http.WithTLSConfig(serverTLS))
 	doneC := make(chan error, 1)
@@ -165,8 +161,7 @@ func TestTLS_MTLS_RequiresClientCert(t *testing.T) {
 // network I/O — so it runs fast and would fail closed if someone
 // refactored NewServer and dropped the option.
 func TestTLS_WithTLSConfig_SetsOnServer(t *testing.T) {
-	fake := &clusterfakes.FakeCluster{}
-	h := http.New(fake)
+	h := newEngineHTTP(t).h
 
 	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
 	s := h.NewServer(":0", http.WithTLSConfig(cfg))

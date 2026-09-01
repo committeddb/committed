@@ -5,9 +5,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-
-	"github.com/committeddb/committed/internal/cluster/clusterfakes"
-	"github.com/committeddb/committed/internal/cluster/db/http"
 )
 
 // Two 405s the field tripped over get route-specific guidance instead of
@@ -16,7 +13,7 @@ import (
 // is refused BY DESIGN — log entries reference types permanently — but
 // the bare 405 read as an oversight rather than a posture).
 func TestMethodHints(t *testing.T) {
-	h := http.New(&clusterfakes.FakeCluster{})
+	h := newEngineHTTP(t).h
 	do := func(method, path string) (int, string) {
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, httptest.NewRequest(method, path, nil))

@@ -44,7 +44,7 @@ func (h *HTTP) linearize(w httpgo.ResponseWriter, r *httpgo.Request) bool {
 	case "", consistencyLinearizable:
 		ctx, cancel := context.WithTimeout(r.Context(), h.readIndexTimeout)
 		defer cancel()
-		if err := h.c.LinearizableRead(ctx); err != nil {
+		if err := h.view.LinearizableRead(ctx); err != nil {
 			writeError(w, httpgo.StatusServiceUnavailable, "not_linearizable",
 				"could not confirm a linearizable read (no quorum or leader unreachable); retry, or pass ?consistency=stale to accept a possibly-stale read")
 			return false

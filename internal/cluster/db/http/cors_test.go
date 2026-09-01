@@ -6,7 +6,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/committeddb/committed/internal/cluster/clusterfakes"
 	"github.com/committeddb/committed/internal/cluster/db/http"
 )
 
@@ -29,7 +28,7 @@ func corsAllowOrigin(t *testing.T, h *http.HTTP, origin string) string {
 // Origin — the correct default for a server binary with no in-tree
 // browser client.
 func TestCORS_DisabledByDefault(t *testing.T) {
-	h := http.New(&clusterfakes.FakeCluster{})
+	h := newEngineHTTP(t).h
 	require.Empty(t, corsAllowOrigin(t, h, "https://app.example.com"))
 }
 
@@ -37,8 +36,7 @@ func TestCORS_DisabledByDefault(t *testing.T) {
 // back while any other origin gets no allow header (and is therefore
 // blocked by the browser).
 func TestCORS_AllowlistedOrigin(t *testing.T) {
-	h := http.New(&clusterfakes.FakeCluster{},
-		http.WithCORS([]string{"https://app.example.com"}, nil, nil))
+	h := newEngineHTTP(t, http.WithCORS([]string{"https://app.example.com"}, nil, nil)).h
 
 	require.Equal(t, "https://app.example.com",
 		corsAllowOrigin(t, h, "https://app.example.com"))
@@ -47,8 +45,7 @@ func TestCORS_AllowlistedOrigin(t *testing.T) {
 
 // TestCORS_Wildcard asserts the literal "*" allows any origin.
 func TestCORS_Wildcard(t *testing.T) {
-	h := http.New(&clusterfakes.FakeCluster{},
-		http.WithCORS([]string{"*"}, nil, nil))
+	h := newEngineHTTP(t, http.WithCORS([]string{"*"}, nil, nil)).h
 
 	require.Equal(t, "*", corsAllowOrigin(t, h, "https://anything.example.com"))
 }
@@ -67,8 +64,7 @@ func TestCORS_Preflight(t *testing.T) {
 	}
 
 	t.Run("defaults", func(t *testing.T) {
-		h := http.New(&clusterfakes.FakeCluster{},
-			http.WithCORS([]string{"https://app.example.com"}, nil, nil))
+		h := newEngineHTTP(t, http.WithCORS([]string{"https://app.example.com"}, nil, nil)).h
 		w := preflight(h, "POST")
 		require.Equal(t, "https://app.example.com",
 			w.Result().Header.Get("Access-Control-Allow-Origin"))
@@ -77,9 +73,8 @@ func TestCORS_Preflight(t *testing.T) {
 	})
 
 	t.Run("custom methods exclude others", func(t *testing.T) {
-		h := http.New(&clusterfakes.FakeCluster{},
-			http.WithCORS([]string{"https://app.example.com"},
-				[]string{"GET"}, []string{"Content-Type"}))
+		h := newEngineHTTP(t, http.WithCORS([]string{"https://app.example.com"},
+			[]string{"GET"}, []string{"Content-Type"})).h
 		w := preflight(h, "DELETE")
 		// DELETE is not in the custom allowlist, so the preflight must
 		// not advertise it.

@@ -7,7 +7,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/committeddb/committed/internal/cluster/clusterfakes"
 	"github.com/committeddb/committed/internal/cluster/db/http"
 )
 
@@ -16,8 +15,7 @@ import (
 // convenient unauthenticated API route that returns 200 without any
 // cluster state, so it's a clean signal that the middleware ran.
 func TestSecurityHeaders_APIRoute(t *testing.T) {
-	fake := &clusterfakes.FakeCluster{}
-	h := http.New(fake)
+	h := newEngineHTTP(t).h
 
 	req := httptest.NewRequest("GET", "http://localhost/health", nil)
 	w := httptest.NewRecorder()
@@ -43,8 +41,7 @@ func TestSecurityHeaders_APIRoute(t *testing.T) {
 // (nosniff, frame-ancestors, etc.) must still be present — the per-
 // route override targets CSP only.
 func TestSecurityHeaders_DocsRouteOverridesCSP(t *testing.T) {
-	fake := &clusterfakes.FakeCluster{}
-	h := http.New(fake)
+	h := newEngineHTTP(t).h
 
 	req := httptest.NewRequest("GET", "http://localhost/docs", nil)
 	w := httptest.NewRecorder()
@@ -75,8 +72,7 @@ func TestSecurityHeaders_HSTSOnlyOverTLS(t *testing.T) {
 	pki := newTLSTestPKI(t)
 	serverCert, serverKey := pki.issueCert(t, "server", extServer)
 
-	fake := &clusterfakes.FakeCluster{}
-	h := http.New(fake)
+	h := newEngineHTTP(t).h
 
 	pair, err := tls.LoadX509KeyPair(serverCert, serverKey)
 	require.NoError(t, err)
@@ -112,8 +108,7 @@ func TestSecurityHeaders_HSTSOnlyOverTLS(t *testing.T) {
 // endpoint (static YAML) retains the default strict API CSP. Only
 // /docs should relax the policy.
 func TestSecurityHeaders_OpenAPISpecKeepsStrictCSP(t *testing.T) {
-	fake := &clusterfakes.FakeCluster{}
-	h := http.New(fake)
+	h := newEngineHTTP(t).h
 
 	req := httptest.NewRequest("GET", "http://localhost/openapi.yaml", nil)
 	w := httptest.NewRecorder()

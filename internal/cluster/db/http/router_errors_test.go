@@ -7,14 +7,13 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/committeddb/committed/internal/cluster/clusterfakes"
 	"github.com/committeddb/committed/internal/cluster/db/http"
 )
 
 // R3-HTTP-1: the router's own 404/405 paths must honor the JSON error-envelope
 // contract, not chi's raw text/plain 404 / empty-body 405.
 func TestRouterErrorEnvelope(t *testing.T) {
-	h := http.New(&clusterfakes.FakeCluster{})
+	h := newEngineHTTP(t).h
 
 	// Unmatched route → 404 JSON envelope.
 	req := httptest.NewRequest("GET", "http://localhost/does-not-exist", nil)
@@ -37,7 +36,7 @@ func TestRouterErrorEnvelope(t *testing.T) {
 // probe without a token gets 401 (don't leak route existence unauthenticated),
 // and with a token gets the 404 JSON envelope.
 func TestUnmatchedV1RequiresAuth(t *testing.T) {
-	h := http.New(&clusterfakes.FakeCluster{}, http.WithBearerToken("secret"))
+	h := newEngineHTTP(t, http.WithBearerToken("secret")).h
 
 	// No token → 401 even though the path doesn't exist.
 	req := httptest.NewRequest("GET", "http://localhost/v1/nonexistent", nil)
@@ -70,8 +69,7 @@ func TestUnmatchedV1RequiresAuth(t *testing.T) {
 // R3-HTTP-6: an empty-entities proposal is a client error, not a committed no-op
 // raft entry — reject it with 400 rather than proposing nothing.
 func TestAddProposal_EmptyRejected(t *testing.T) {
-	fake := &clusterfakes.FakeCluster{}
-	h := http.New(fake)
+	h := newEngineHTTP(t).h
 
 	// The 400 fires before any engine access — an entity-less proposal is a
 	// client error and never becomes a raft entry.

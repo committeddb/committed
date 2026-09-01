@@ -19,7 +19,6 @@ import (
 
 	openapiapi "github.com/committeddb/committed/api"
 	"github.com/committeddb/committed/internal/cluster"
-	"github.com/committeddb/committed/internal/cluster/clusterfakes"
 	httppkg "github.com/committeddb/committed/internal/cluster/db/http"
 )
 
@@ -68,7 +67,6 @@ type contractCase struct {
 	path        string
 	body        string
 	contentType string
-	setup       func(fake *clusterfakes.FakeCluster)
 }
 
 func TestOpenAPISpec_IsValid(t *testing.T) {
@@ -85,13 +83,11 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 			path:   "/health",
 		},
 		{
+			// The real engine is elected and applied by fixture time, so
+			// /ready answers 200 with no arrangement.
 			name:   "GET /ready",
 			method: httpgo.MethodGet,
 			path:   "/ready",
-			setup: func(fake *clusterfakes.FakeCluster) {
-				fake.LeaderReturns(1)
-				fake.AppliedIndexReturns(1)
-			},
 		},
 		{
 			name:   "GET /openapi.yaml",
@@ -109,11 +105,7 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			fake := &clusterfakes.FakeCluster{}
-			if tc.setup != nil {
-				tc.setup(fake)
-			}
-			h := httppkg.New(fake)
+			h := newEngineHTTP(t).h
 
 			var body io.Reader
 			if tc.body != "" {
@@ -297,7 +289,6 @@ func TestOpenAPIContract_ErrorResponses(t *testing.T) {
 		method     string
 		path       string
 		body       string
-		setup      func(*clusterfakes.FakeCluster)
 		wantStatus int
 	}{
 		{
@@ -317,11 +308,7 @@ func TestOpenAPIContract_ErrorResponses(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			fake := &clusterfakes.FakeCluster{}
-			if tc.setup != nil {
-				tc.setup(fake)
-			}
-			h := httppkg.New(fake)
+			h := newEngineHTTP(t).h
 
 			var body io.Reader
 			if tc.body != "" {
@@ -347,8 +334,7 @@ func TestOpenAPIContract_ErrorResponses(t *testing.T) {
 func TestOpenAPIContract_UnauthorizedShape(t *testing.T) {
 	_, v := newValidator(t)
 
-	fake := &clusterfakes.FakeCluster{}
-	h := httppkg.New(fake, httppkg.WithBearerToken("secret"))
+	h := newEngineHTTP(t, httppkg.WithBearerToken("secret")).h
 
 	req := httptest.NewRequest(httpgo.MethodGet, "http://localhost/v1/type", nil)
 	rr := httptest.NewRecorder()
@@ -391,7 +377,7 @@ func TestOpenAPIContract_SpecCoversAllRoutes(t *testing.T) {
 	// router: route -> set of served methods. chi reports each (method, pattern);
 	// the pattern uses {param}, matching OpenAPI templating, so patterns map
 	// straight to spec paths.
-	h := httppkg.New(&clusterfakes.FakeCluster{})
+	h := newEngineHTTP(t).h
 	routerOps := map[string]map[string]bool{}
 	err := chi.Walk(h.RouterForTest(), func(method, route string, _ httpgo.Handler, _ ...func(httpgo.Handler) httpgo.Handler) error {
 		if route != "/" {

@@ -11,7 +11,6 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
-	"github.com/committeddb/committed/internal/cluster/clusterfakes"
 	"github.com/committeddb/committed/internal/cluster/db/http"
 	cmetrics "github.com/committeddb/committed/internal/cluster/metrics"
 )
@@ -26,7 +25,7 @@ func TestMaxBodyBytes(t *testing.T) {
 	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	m := cmetrics.New(provider.Meter("test"))
 
-	h := http.New(&clusterfakes.FakeCluster{}, http.WithMaxBodyBytes(64), http.WithMetrics(m))
+	h := newEngineHTTP(t, http.WithMaxBodyBytes(64), http.WithMetrics(m)).h
 
 	// Over the cap → 413 request_too_large, with the route in the message.
 	req := httptest.NewRequest(nethttp.MethodPost, "http://localhost/v1/proposal",

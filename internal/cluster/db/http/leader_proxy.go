@@ -88,8 +88,8 @@ func (h *HTTP) syncableOwnerRoute(next httpgo.HandlerFunc) httpgo.HandlerFunc {
 
 func (h *HTTP) leaderRead(next httpgo.HandlerFunc) httpgo.HandlerFunc {
 	return func(w httpgo.ResponseWriter, r *httpgo.Request) {
-		self := h.c.ID()
-		leaderID := h.c.Leader()
+		self := h.view.ID()
+		leaderID := h.view.Leader()
 
 		if leaderID != 0 && leaderID == self {
 			next(w, r)
@@ -107,7 +107,7 @@ func (h *HTTP) leaderRead(next httpgo.HandlerFunc) httpgo.HandlerFunc {
 			return
 		}
 
-		leaderURL, ok := h.c.MemberAPIURL(leaderID)
+		leaderURL, ok := h.view.MemberAPIURL(leaderID)
 		if !ok || leaderURL == "" {
 			writeLeaderUnavailable(w, leaderID,
 				"the leader has not announced an API address (set COMMITTED_API_URL); target the leader directly")

@@ -9,8 +9,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/committeddb/committed/internal/cluster/clusterfakes"
-	"github.com/committeddb/committed/internal/cluster/db/http"
 	"github.com/committeddb/committed/internal/version"
 )
 
@@ -19,8 +17,7 @@ import (
 // deliberately unauthenticated and state-free so it works during
 // rolling upgrades before leader election, same contract as /health.
 func TestVersion(t *testing.T) {
-	fake := &clusterfakes.FakeCluster{}
-	h := http.New(fake)
+	h := newEngineHTTP(t).h
 
 	req := httptest.NewRequest("GET", "http://localhost/version", nil)
 	w := httptest.NewRecorder()
@@ -40,7 +37,4 @@ func TestVersion(t *testing.T) {
 	require.Equal(t, version.Commit, got.Commit)
 	require.Equal(t, version.BuildDate, got.BuildDate)
 	require.Equal(t, runtime.Version(), got.GoVersion)
-
-	require.Equal(t, 0, fake.LeaderCallCount())
-	require.Equal(t, 0, fake.AppliedIndexCallCount())
 }

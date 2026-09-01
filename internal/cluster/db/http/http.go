@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"net/http"
 	"sync"
 	"time"
@@ -10,7 +11,6 @@ import (
 	"github.com/rs/cors"
 	"go.uber.org/zap"
 
-	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
 	"github.com/committeddb/committed/internal/cluster/metrics"
 )
@@ -58,17 +58,33 @@ func routePattern(r *http.Request) string {
 	return r.URL.Path
 }
 
+// clusterView is the narrow slice of the engine the transport MIDDLEWARE
+// consults — leadership and identity for the leaderRead proxy hop, the
+// read-index for the consistency barrier, and the readiness signals. It is
+// owned by this package and sized to the middleware (the eudaimonia
+// drip.Repository shape): *db.DB satisfies it implicitly, and the in-package
+// middleware units stub it for the legs a live single-node engine cannot
+// produce (a follower's proxy hop, a failed read-index, an unready node).
+// Feature handlers never see it — they hold the engine itself.
+type clusterView interface {
+	ID() uint64
+	Leader() uint64
+	AppliedIndex() uint64
+	ApplyStalled() bool
+	LinearizableRead(ctx context.Context) error
+	MemberAPIURL(id uint64) (string, bool)
+}
+
 type HTTP struct {
 	r *chi.Mux
-	// c is the aggregated legacy dependency; handler groups are migrating
-	// off it onto db (the engine itself) group by group, deleting their
-	// methods from cluster.Cluster as they go. New handlers use db, never c.
-	c cluster.Cluster
 	// db is the engine. Transport lives as a subpackage of the engine
 	// precisely so handlers can hold it concretely — no aggregate interface,
-	// no fakes; tests exercise a real single-node engine. nil only in legacy
-	// fake-backed tests, which must not touch migrated (db-consuming) routes.
-	db               *db.DB
+	// no engine fakes; tests exercise a real single-node engine through the
+	// plugin seams.
+	db *db.DB
+	// view is the middleware's slice of the engine (see clusterView). In
+	// production it IS db; middleware unit tests substitute a stub.
+	view             clusterView
 	schemas          sync.Map // schemaCacheKey → *jsonschema.Schema
 	bearerToken      string   // empty = no auth (dev mode)
 	readIndexTimeout time.Duration
@@ -81,7 +97,7 @@ type HTTP struct {
 	metrics *metrics.Metrics
 }
 
-func New(c cluster.Cluster, opts ...Option) *HTTP {
+func New(d *db.DB, opts ...Option) *HTTP {
 	var o options
 	for _, fn := range opts {
 		fn(&o)
@@ -135,13 +151,7 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 		proxyClient = &http.Client{Timeout: defaultProxyTimeout}
 	}
 
-	h := &HTTP{r: r, c: c, bearerToken: o.bearerToken, readIndexTimeout: readIndexTimeout, proxyClient: proxyClient, metrics: o.metrics}
-	// Transitional scaffolding for the group-by-group migration off the
-	// aggregated interface: production always passes the engine itself
-	// (cmd/node.go hands db.New's result straight here), so the assert
-	// always succeeds there. Once the last group migrates, New's parameter
-	// becomes *db.DB and this assert — with the c field — disappears.
-	h.db, _ = c.(*db.DB)
+	h := &HTTP{r: r, db: d, view: d, bearerToken: o.bearerToken, readIndexTimeout: readIndexTimeout, proxyClient: proxyClient, metrics: o.metrics}
 
 	if o.bearerToken != "" {
 		zap.L().Info("API bearer-token authentication enabled")

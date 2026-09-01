@@ -2,13 +2,10 @@ package http_test
 
 import (
 	"encoding/json"
-	"io"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/committeddb/committed/internal/cluster/clusterfakes"
 	"github.com/committeddb/committed/internal/cluster/db"
 	"github.com/committeddb/committed/internal/cluster/db/http"
 )
@@ -62,27 +59,16 @@ func TestNodeStatus_SafeMode(t *testing.T) {
 // availability hit config-apply-decouple removed by degrading instead of
 // crashing. /ready gates only on leader + applied index, never on the
 // degraded set, so the diagnosis lives on the authenticated /node/status.
-// (health.go is not yet engine-backed, so this drives the fake directly.)
 func TestReady_StaysReadyWhenConfigDegraded(t *testing.T) {
-	fake := &clusterfakes.FakeCluster{}
-	fake.LeaderReturns(1)
-	fake.AppliedIndexReturns(7)
-	h := http.New(fake)
-
-	req := httptest.NewRequest("GET", "http://localhost/ready", nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	resp := w.Result()
-	require.Equal(t, 200, resp.StatusCode, "a degraded config must not make the node unready")
-
-	bs, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
+	e := newEngine(t)
+	w := e.doEmpty(t, "GET", "/ready")
+	require.Equal(t, 200, w.Code, "a degraded config must not make the node unready")
 	var body http.ReadyResponse
-	require.NoError(t, json.Unmarshal(bs, &body))
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
 	require.Equal(t, "ok", body.Status)
 
-	// /ready cannot consult the degraded set at all any more: the aggregated
-	// interface no longer carries ConfigBuildErrors — the invariant is now
-	// structural, enforced by the compiler rather than a call count.
+	// The stronger half of the invariant is structural now: the readiness
+	// probe consults only the middleware's clusterView (leader, applied,
+	// stalled), which cannot express the degraded-config set at all — the
+	// compiler enforces what a call-count assertion used to sample.
 }
