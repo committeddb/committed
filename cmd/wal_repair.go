@@ -25,7 +25,8 @@ var walRepairCmd = &cobra.Command{
 	Long: `Scan a stopped node's write-ahead logs and, with --commit, truncate a torn
 trailing record so the log opens again.
 
-Run this only with the node STOPPED. A torn tail is a partial final record left
+Run this only with the node STOPPED (enforced: a data directory whose node is
+running is refused via its lock). A torn tail is a partial final record left
 by a power loss mid-append; it was never acknowledged (raft never treated it as
 committed), so dropping it is safe. A mid-log checksum failure is NOT a torn
 tail — the tool refuses it and you should rebuild the node from a healthy
@@ -82,7 +83,8 @@ var walDecompressCmd = &cobra.Command{
 	Long: `Rewrite a stopped node's compressed (.zst) event-log segments back to the
 plain pre-0.8.0 segment format.
 
-Run this only with the node STOPPED, and only when downgrading to a binary
+Run this only with the node STOPPED (enforced: a data directory whose node is
+running is refused via its lock), and only when downgrading to a binary
 older than 0.8.0 — those binaries do not recognize compressed segments and
 would open a partial log. Upgrades need nothing: mixed logs read
 transparently, and the background sealer re-compresses after the next start

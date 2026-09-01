@@ -987,6 +987,20 @@ func (d *PostgreSQLDialect) stream(
 			if err != nil {
 				return err
 			}
+			// Advance over data-free WAL. A logical walsender's keepalive
+			// carries the position it has SENT THROUGH: every record below
+			// ServerWALEnd that this slot's publication would deliver has
+			// already arrived as XLogData (the stream is ordered), so the gap
+			// up to ServerWALEnd holds nothing for us — checkpoint records,
+			// other databases' traffic — and confirming it acks no data we
+			// haven't handled (no more than the existing per-commit ack
+			// does). Without this, a QUIET source pins confirmed_flush_lsn at
+			// the last commit forever while the write head keeps moving on
+			// background WAL: the slot retains WAL indefinitely on idle
+			// databases, and /status lag never drains to CaughtUp.
+			if pkm.ServerWALEnd > clientXLogPos {
+				clientXLogPos = pkm.ServerWALEnd
+			}
 			if pkm.ReplyRequested || time.Now().After(nextStandby) {
 				err = pglogrepl.SendStandbyStatusUpdate(ctx, conn, pglogrepl.StandbyStatusUpdate{
 					WALWritePosition: clientXLogPos,

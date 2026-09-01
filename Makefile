@@ -92,8 +92,13 @@ test-all:
 # one `go test` invocation makes parallel container startup choke
 # Docker on most CI runners). -race because the integration tests
 # exercise the full goroutine fan-out across HTTP / ingest / sync.
+# -timeout is the per-package hang backstop, not a performance budget:
+# the wal package under -race legitimately passed 5m on a loaded shared
+# runner (the alarm fired 1s into a fresh test after ~299s of earlier
+# ones), so it sits at 2x the loaded envelope. A real hang still dies
+# well inside the job limit.
 test/integration:
-	go test -race -tags integration -timeout 300s ./... -cover
+	go test -race -tags integration -timeout 600s ./... -cover
 
 # Runs the adversarial raft suite (phase 1: partition, leader flap,
 # concurrent config changes; phase 2: asymmetric partition, slow

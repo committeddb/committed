@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -129,26 +130,56 @@ func TestMysqlParallelSnapshotResumeParity(t *testing.T) {
 
 	run1Keys := map[string]string{}
 	var lastPos []byte
+	consume1 := func(p *cluster.Proposal) {
+		if isRefreshMarkerProposal(p) {
+			return
+		}
+		for _, e := range p.Entities {
+			require.Equal(t, uint64(1), e.Generation, "initial snapshot stamps epoch 1")
+			run1Keys[string(e.Key)] = string(e.Data)
+		}
+		if p.Position != nil {
+			lastPos = append([]byte(nil), p.Position...)
+		}
+	}
+	// drainProposals1 empties pr1's buffer. It MUST run before a position
+	// read from po1 is trusted: emission order guarantees every proposal a
+	// checkpoint covers was sent to the proposal channel first, but this
+	// loop's select picks ready cases at random, so the checkpoint can be
+	// read while its proposals still sit buffered — and cancel would discard
+	// them, making the captured position claim rows run1Keys never saw (the
+	// "row N lost across the resume" false alarm). The production consumer
+	// encodes the same discipline as drainPipeline-before-checkpoint
+	// (db/ingest.go).
+	drainProposals1 := func() {
+		for {
+			select {
+			case p := <-pr1:
+				consume1(p)
+			default:
+				return
+			}
+		}
+	}
 	deadline := time.After(60 * time.Second)
 	for len(run1Keys) < psRows/2 || lastPos == nil {
 		select {
 		case p := <-pr1:
-			if isRefreshMarkerProposal(p) {
-				continue
-			}
-			for _, e := range p.Entities {
-				require.Equal(t, uint64(1), e.Generation, "initial snapshot stamps epoch 1")
-				run1Keys[string(e.Key)] = string(e.Data)
-			}
-			if p.Position != nil {
-				lastPos = append([]byte(nil), p.Position...)
-			}
+			consume1(p)
 		case pos := <-po1:
+			// Assign before draining: proposals emitted after this
+			// checkpoint may carry newer inline positions, and the drain
+			// reads them in order — lastPos only ever moves forward.
 			lastPos = append([]byte(nil), pos...)
+			drainProposals1()
 		case <-deadline:
 			t.Fatalf("run 1 never reached the cancel point: %d keys", len(run1Keys))
 		}
 	}
+	// The loop can also end on an inline (Proposal.Position) checkpoint;
+	// drain once more so run1Keys covers everything lastPos claims before
+	// cancel discards the buffer.
+	drainProposals1()
 	cancel1()
 	<-done1
 
@@ -172,24 +203,44 @@ func TestMysqlParallelSnapshotResumeParity(t *testing.T) {
 
 	run2Keys := map[string]string{}
 	snapshotDone := false
+	consume2 := func(p *cluster.Proposal) (refresh bool) {
+		if isRefreshMarkerProposal(p) {
+			return true
+		}
+		for _, e := range p.Entities {
+			run2Keys[string(e.Key)] = string(e.Data)
+		}
+		return false
+	}
 	deadline = time.After(120 * time.Second)
 	for !snapshotDone {
 		select {
 		case p := <-pr2:
-			if isRefreshMarkerProposal(p) {
+			if consume2(p) {
 				// The refresh-boundary marker rides the end of the initial
-				// snapshot — completion.
+				// snapshot — completion. It travels in order on the proposal
+				// channel, AFTER every snapshot row, so nothing is left
+				// buffered behind it.
 				snapshotDone = true
-				continue
-			}
-			for _, e := range p.Entities {
-				run2Keys[string(e.Key)] = string(e.Data)
 			}
 		case pos := <-po2:
 			decoded := &dialectpb.MySQLBinLogPosition{}
 			require.NoError(t, proto.Unmarshal(pos, decoded))
 			if decoded.SnapshotProgress == nil {
-				snapshotDone = true // streaming-phase checkpoint: snapshot over
+				// Streaming-phase checkpoint: snapshot over. Same discipline
+				// as run 1: this signal came on the POSITION channel, so
+				// snapshot rows can still sit buffered on the proposal
+				// channel — drain it before concluding, or they are lost to
+				// the union check below.
+				for done := false; !done; {
+					select {
+					case p := <-pr2:
+						consume2(p)
+					default:
+						done = true
+					}
+				}
+				snapshotDone = true
 			}
 		case <-deadline:
 			t.Fatalf("run 2 never completed: %d keys", len(run2Keys))
@@ -225,20 +276,26 @@ func TestMysqlParallelSnapshotResumeParity(t *testing.T) {
 //
 // Measured envelope: 2.8–2.9x on quiet 16-core dev hardware, 1.9–2.0x on
 // the same machine under load, ~1.5x on a 4-vCPU shared CI runner (mysqld,
-// the four readers, and the test drain all contend for the same cores).
-// The variance spans any fixed threshold near the true value, so this test
-// asserts only the REGRESSION floor: a broken/serialized parallel path
-// measures ~1.0x and fails everywhere, while the ticket's ≥2x scaling
-// criterion is demonstrated on quiet hardware and recorded in the ticket —
-// per-run enforcement of a wall-clock benchmark belongs to a dedicated
-// benchmark environment (see perf-benchmarks-and-slo-envelope), not a
-// shared-runner test gate. The measured ratio is always logged.
+// the four readers, and the test drain all contend for the same cores) —
+// and 1.2x observed on a loaded runner, BELOW any floor that still clears
+// the ~1.0x noise band around a serialized path. No wall-clock threshold
+// separates "healthy but starved" from "broken" on a shared runner, so the
+// gate is structural instead: concurrent chunk readers interleave their PK
+// ranges on the shared proposal channel, while a serialized pool drains the
+// frozen chunk plan in order and emits a globally ascending key stream. At
+// least one key descent proves the readers overlapped in time; zero descents
+// across 100k rows means they ran one-after-another, whatever the clock
+// says. The ticket's ≥2x scaling criterion is demonstrated on quiet hardware
+// and recorded in the ticket — per-run enforcement of a wall-clock benchmark
+// belongs to a dedicated benchmark environment (see
+// perf-benchmarks-and-slo-envelope), not a shared-runner test gate. The
+// measured ratio is still logged on every run.
 func TestMysqlParallelSnapshotSpeedup(t *testing.T) {
 	const table = "ps_speed"
 	const rows = 100000
 	psSeedTable(t, table, rows)
 
-	run := func(readers int) time.Duration {
+	run := func(readers int) (time.Duration, int) {
 		cfg := psConfig(table, readers)
 		cfg.Options["batch_size"] = "1000"
 		ctx, cancel := context.WithCancel(context.Background())
@@ -248,7 +305,7 @@ func TestMysqlParallelSnapshotSpeedup(t *testing.T) {
 		done := make(chan error, 1)
 		start := time.Now()
 		go func() { done <- (&mysql.MySQLDialect{}).Ingest(ctx, cfg, nil, 0, pr, po) }()
-		seen := 0
+		seen, descents, prev := 0, 0, 0
 		deadline := time.After(180 * time.Second)
 		for seen < rows {
 			select {
@@ -257,6 +314,14 @@ func TestMysqlParallelSnapshotSpeedup(t *testing.T) {
 					continue
 				}
 				seen += len(p.Entities)
+				for _, e := range p.Entities {
+					k, kerr := strconv.Atoi(string(e.Key))
+					require.NoError(t, kerr, "row keys are the integer PK rendered decimal")
+					if k < prev {
+						descents++
+					}
+					prev = k
+				}
 			case <-po:
 			case <-deadline:
 				t.Fatalf("snapshot with %d readers never delivered all rows: %d", readers, seen)
@@ -265,12 +330,14 @@ func TestMysqlParallelSnapshotSpeedup(t *testing.T) {
 		elapsed := time.Since(start)
 		cancel()
 		<-done
-		return elapsed
+		return elapsed, descents
 	}
 
-	single := run(1)
-	parallel := run(4)
+	single, _ := run(1)
+	parallel, descents := run(4)
 	ratio := float64(single) / float64(parallel)
-	t.Logf("snapshot wall clock: single=%v parallel(4)=%v speedup=%.2fx (cpus=%d)", single, parallel, ratio, runtime.NumCPU())
-	require.GreaterOrEqual(t, ratio, 1.25, "parallel reading must beat the single stream — ~1.0x means the readers serialized")
+	t.Logf("snapshot wall clock: single=%v parallel(4)=%v speedup=%.2fx descents=%d (cpus=%d)",
+		single, parallel, ratio, descents, runtime.NumCPU())
+	require.Positive(t, descents,
+		"a globally ascending 100k-row stream means the 4 chunk readers ran serially, not concurrently")
 }

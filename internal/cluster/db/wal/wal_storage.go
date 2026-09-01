@@ -292,10 +292,13 @@ type Storage struct {
 	// scrub state outside the eventMu section, so the two never nest).
 	eventMu sync.RWMutex
 	// sealerStop/sealerDone/sealerStopOnce are the background sealer's
-	// lifecycle (sealer.go), mirroring the scrub worker's.
+	// lifecycle (sealer.go), mirroring the scrub worker's. sealerIdle is its
+	// re-check cadence when everything is compressed (WithSealerIdleInterval;
+	// defaults to sealerIdleInterval).
 	sealerStop     chan struct{}
 	sealerDone     chan struct{}
 	sealerStopOnce sync.Once
+	sealerIdle     time.Duration
 	// typeCache memoizes ResolveType lookups for explicit-version refs
 	// (ref.Version > 0), keyed by cluster.TypeRef. Version-0 ("latest")
 	// lookups are never cached — "latest" is mutable and stays bolt-backed.
@@ -642,6 +645,37 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	eventLogDir := datadir.EventsDir(dir)
 	keyValueStorageDir := datadir.MetadataDir(dir)
 
+	// Take the node's exclusive bbolt lock FIRST, before any recovery
+	// mutation below (the scrub-dir rollback, the discard sweep, the log
+	// opens' own healing of .SEAL/compression leftovers). Offline
+	// maintenance — backup, wal repair, wal decompress — holds this same
+	// lock via datadir.LockStoppedNode*, so acquiring it before touching
+	// anything means a node racing a held maintenance lock fails HERE,
+	// loudly, having mutated nothing: without this ordering the node would
+	// rewrite dirs the tool is mid-walk on and only then die at the lock.
+	// Creating the (empty) metadata dir first mutates no maintained state.
+	//
+	// bbolt is excluded from the per-entry WAL checksums below: it is a
+	// B+tree with built-in page-level checksums (meta-page CRC64 + per-page
+	// validation), so torn or bitflipped pages are already detected on read.
+	if err := os.MkdirAll(keyValueStorageDir, 0o700); err != nil {
+		return nil, err
+	}
+	boltOpts := &bolt.Options{Timeout: 1 * time.Second, NoSync: cfg.fsyncDisabled}
+	keyValueStorage, err := bolt.Open(datadir.BoltPath(keyValueStorageDir), 0o600, boltOpts)
+	if err != nil {
+		return nil, err
+	}
+	// Release the lock on any failed Open: flock treats a second open in the
+	// SAME process as an independent contender, so a leaked handle would
+	// wedge an in-process retry (open → repair → reopen) on its own lock.
+	opened := false
+	defer func() {
+		if !opened {
+			_ = keyValueStorage.Close()
+		}
+	}()
+
 	// Recover from a scrub that crashed mid-rewrite or mid-swap BEFORE the
 	// MkdirAll below — otherwise, if a swap had renamed events/ out of the way,
 	// MkdirAll would recreate an empty events/ and we'd open an empty event log
@@ -708,18 +742,10 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	// compactLocked). Nothing else references these, so without this they linger
 	// indefinitely — a disk leak, and for the restore form an RTBF residual (a
 	// leader snapshot payload that may hold an erased key). Mirrors the scrub-dir
-	// and entry-log-discard recovery above.
+	// and entry-log-discard recovery above. (Runs after the bolt.Open above —
+	// the temps are separate files the open never touches.)
 	if err := datadir.SweepBoltTempFiles(keyValueStorageDir); err != nil {
 		return nil, fmt.Errorf("sweep orphaned bbolt temp files: %w", err)
-	}
-
-	// bbolt is excluded from the per-entry WAL checksums below: it is a
-	// B+tree with built-in page-level checksums (meta-page CRC64 + per-page
-	// validation), so torn or bitflipped pages are already detected on read.
-	boltOpts := &bolt.Options{Timeout: 1 * time.Second, NoSync: cfg.fsyncDisabled}
-	keyValueStorage, err := bolt.Open(datadir.BoltPath(keyValueStorageDir), 0o600, boltOpts)
-	if err != nil {
-		return nil, err
 	}
 
 	err = keyValueStorage.Update(func(tx *bolt.Tx) error {
@@ -774,7 +800,11 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		scrubDone:       make(chan struct{}),
 		sealerStop:      make(chan struct{}),
 		sealerDone:      make(chan struct{}),
+		sealerIdle:      cfg.sealerIdleInterval,
 		closeC:          make(chan struct{}),
+	}
+	if ws.sealerIdle <= 0 {
+		ws.sealerIdle = sealerIdleInterval
 	}
 
 	// The apply→listener pumps (see notifyPump): created only when a channel
@@ -1076,6 +1106,7 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	// next makes progress. See refreshSyncStuckGauges.
 	ws.refreshWorkerStateGauges()
 
+	opened = true // ws owns keyValueStorage now; Close releases the lock
 	return ws, nil
 }
 

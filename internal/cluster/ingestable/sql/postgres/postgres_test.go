@@ -56,6 +56,13 @@ func TestMain(m *testing.M) {
 					"-c", "wal_level=logical",
 					"-c", "max_replication_slots=16",
 					"-c", "max_wal_senders=16",
+					// Idle keepalives every ~timeout/2. The default (60s →
+					// ~30s) outlasts test windows that wait for the quiet-
+					// source keepalive path (confirmed_flush advancing over
+					// data-free WAL — the CaughtUp signal). A busy stream
+					// never trips the timeout, so this only speeds idle
+					// cadence.
+					"-c", "wal_sender_timeout=5s",
 				},
 			},
 		}),

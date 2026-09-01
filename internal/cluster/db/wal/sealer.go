@@ -22,10 +22,11 @@ import (
 // saturating disk I/O next to live traffic.
 
 const (
-	// sealerIdleInterval is how often the sealer re-checks when everything
-	// is compressed. A 20 MB segment seals every ~20 MB of writes, so a
-	// fresh segment waits at most this long for compression — bytes at
-	// rest, no correctness stake.
+	// sealerIdleInterval is the default for how often the sealer re-checks
+	// when everything is compressed (Storage.sealerIdle; tests shorten it
+	// via WithSealerIdleInterval). A 20 MB segment seals every ~20 MB of
+	// writes, so a fresh segment waits at most this long for compression —
+	// bytes at rest, no correctness stake.
 	sealerIdleInterval = 30 * time.Second
 	// sealerPace separates consecutive segment compressions (each ~20 MB
 	// read + ~40 ms encode + ~2-3 MB write) so a multi-thousand-segment
@@ -92,7 +93,7 @@ func (s *Storage) sealerWorker() {
 					zap.Int("compressed_since_start", compressed))
 				logged = true
 			}
-			if !wait(sealerIdleInterval) {
+			if !wait(s.sealerIdle) {
 				return
 			}
 		}

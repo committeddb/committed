@@ -11,9 +11,6 @@ import (
 	"strings"
 	"time"
 
-	bolt "go.etcd.io/bbolt"
-	bolterrors "go.etcd.io/bbolt/errors"
-
 	"github.com/spf13/cobra"
 
 	"github.com/committeddb/committed/internal/cluster/backup"
@@ -70,12 +67,15 @@ func runBackup() error {
 		}
 	}
 
-	// Hold a shared lock on the node's BoltDB for the whole archive: a running
-	// node holds it exclusively (so this refuses one that is up), and keeping the
-	// shared lock across the walk blocks the node from starting and writing into
-	// the data dir mid-copy.
-	lockDB, err := lockStoppedNode(dataDir)
+	// Hold the shared stopped-node lock for the whole archive: a running node
+	// is refused, and a node starting mid-copy fails its own bbolt open (its
+	// FIRST act — wal.Open locks before any recovery mutation) instead of
+	// writing into the data dir under the walk. See datadir.LockStoppedNode.
+	lockDB, err := datadir.LockStoppedNode(dataDir)
 	if err != nil {
+		if errors.Is(err, datadir.ErrNodeRunning) {
+			return fmt.Errorf("%w; see docs/operations/backup.md", err)
+		}
 		return err
 	}
 	if lockDB != nil {
@@ -146,39 +146,6 @@ func runBackup() error {
 
 	_, _ = fmt.Fprintf(os.Stdout, "backed up %d files from %s to %s\n", len(m.Files), dataDir, backupTo)
 	return nil
-}
-
-// lockStoppedNode opens the node's BoltDB with a SHARED lock and returns the open
-// handle. The caller must HOLD it — Close it only AFTER the archive is fully
-// written. A running node holds BoltDB's EXCLUSIVE lock, so acquiring the shared
-// lock both proves the node is stopped (contention -> ErrTimeout -> refuse) and,
-// held for the whole walk, keeps it stopped: the node's own exclusive Open (its
-// 1s lock timeout) then fails, so it cannot start and mutate the data dir
-// mid-backup — the race the old "probe then release immediately" left open. A
-// missing BoltDB file returns a nil handle (a fresh node with no committed data
-// yet, where Create surfaces the clearer "empty data dir" error).
-//
-// Note: the lock guards only BoltDB. A node that races to start during the walk
-// fails at its bbolt Open, but not before running the earlier WAL-recovery steps
-// of Open — a small residual window a filesystem-level snapshot would close (see
-// docs/operations/backup.md). This holds against the dominant race.
-func lockStoppedNode(dataDir string) (*bolt.DB, error) {
-	boltPath := datadir.BoltPath(datadir.MetadataDir(dataDir))
-	if _, err := os.Stat(boltPath); err != nil {
-		return nil, nil //nolint:nilnil // absent bbolt: no lock to take; Create surfaces the empty-dir error.
-	}
-	db, err := bolt.Open(boltPath, 0o600, &bolt.Options{ReadOnly: true, Timeout: 2 * time.Second})
-	if errors.Is(err, bolterrors.ErrTimeout) {
-		// Lock contention specifically means another process (the node) holds
-		// the DB open.
-		return nil, fmt.Errorf("data directory %q appears to be in use by a running node "+
-			"(could not lock %s). Stop the node — or one follower of a live cluster — "+
-			"before backing up; see docs/operations/backup.md", dataDir, boltPath)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("open metadata db %s: %w", boltPath, err)
-	}
-	return db, nil
 }
 
 func init() {

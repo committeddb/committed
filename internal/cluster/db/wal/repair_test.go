@@ -158,6 +158,30 @@ func TestDiagnoseLog_Clean(t *testing.T) {
 	require.Equal(t, 2, d.Records)
 }
 
+// TestOfflineMaintenance_RefusesRunningNode: RepairNode and DecompressNode
+// document a STOPPED-node precondition; ensureNodeStopped enforces it via the
+// running node's exclusive bbolt lock. Against a live node both must refuse
+// loudly (a --commit repair could truncate a mid-append tail; DiagnoseLog
+// races the sealer) — and the moment the node stops, the same dir is
+// accepted.
+func TestOfflineMaintenance_RefusesRunningNode(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir, nil, nil, nil, WithoutFsync())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	_, err = RepairNode(dir, false)
+	require.ErrorContains(t, err, "in use by a running node", "repair must refuse a live node")
+	_, err = DecompressNode(dir)
+	require.ErrorContains(t, err, "in use by a running node", "decompress must refuse a live node")
+
+	require.NoError(t, s.Close())
+	_, err = RepairNode(dir, false)
+	require.NoError(t, err, "a stopped node's dir must be accepted")
+	_, err = DecompressNode(dir)
+	require.NoError(t, err, "a stopped node's dir must be accepted")
+}
+
 // TestOpenLog_WrapsTornTailWithActionableError: a torn tail makes tidwall's Open
 // fail with an opaque "log corrupt"; openLog turns that into an ErrCorruptEntry
 // that points the operator at `committed wal repair`, instead of a bare error

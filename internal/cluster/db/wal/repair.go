@@ -13,6 +13,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 	twal "github.com/tidwall/wal"
 
+	"github.com/committeddb/committed/internal/cluster/db/datadir"
 	"github.com/committeddb/committed/internal/cluster/fsutil"
 )
 
@@ -247,7 +248,20 @@ func RepairLog(dir string, commit bool) (*Diagnosis, error) {
 // RepairNode scans (and, when commit, repairs a torn tail in) each of a node's
 // three WAL logs under baseDir, returning one Diagnosis per log in fixed order:
 // entry log, state log, event log.
+//
+// It refuses a baseDir whose node is running, holding the exclusive
+// stopped-node lock (see datadir.LockStoppedNodeExclusive) for the whole
+// scan: against a live node, DiagnoseLog races the sealer's segment swaps
+// (misreporting a healthy log), and a --commit repair can truncate a file
+// the running process is mid-append on — silent corruption, not maintenance.
 func RepairNode(baseDir string, commit bool) ([]*Diagnosis, error) {
+	lock, err := datadir.LockStoppedNodeExclusive(baseDir)
+	if err != nil {
+		return nil, err
+	}
+	if lock != nil {
+		defer func() { _ = lock.Close() }()
+	}
 	out := make([]*Diagnosis, 0, len(walLogSubdirs))
 	for _, parts := range walLogSubdirs {
 		dir := filepath.Join(append([]string{baseDir}, parts...)...)
@@ -265,8 +279,18 @@ func RepairNode(baseDir string, commit bool) ([]*Diagnosis, error) {
 // door: older binaries do not recognize ".zst" segments and would silently
 // open a partial log. Returns the number of segments rewritten per log dir,
 // in walLogSubdirs order. Only the event log compresses today, but every log
-// dir is swept for robustness.
+// dir is swept for robustness. Refuses a baseDir whose node is running,
+// holding the exclusive stopped-node lock for the whole rewrite — the same
+// contract as RepairNode, with the same stake: decompressing files a live
+// process is appending to corrupts them.
 func DecompressNode(baseDir string) (map[string]int, error) {
+	lock, err := datadir.LockStoppedNodeExclusive(baseDir)
+	if err != nil {
+		return nil, err
+	}
+	if lock != nil {
+		defer func() { _ = lock.Close() }()
+	}
 	out := map[string]int{}
 	for _, parts := range walLogSubdirs {
 		dir := filepath.Join(append([]string{baseDir}, parts...)...)

@@ -14,6 +14,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster/db"
 	parser "github.com/committeddb/committed/internal/cluster/db/parser"
 	"github.com/committeddb/committed/internal/cluster/db/wal"
+	"github.com/committeddb/committed/internal/version"
 )
 
 // zoneRecorderSink records synced keys — the observer for whether a pinned
@@ -43,6 +44,12 @@ func (r *zoneRecorderSink) count() int {
 
 // newWalDBZone wires an announce-enabled single-node fixture whose node has
 // the given zone, with a "recorder" syncable kind and real pump channels.
+// With announce, it returns only after BOTH startup announcements (zone and
+// feature level) have APPLIED: the fixture's callers assert against the
+// feature-gated admission and serving paths, and a fixture handed out before
+// the async announcements land gives every point-in-time assertion a startup
+// race — the rolling-upgrade refusal where a zone error is pinned, or a
+// leader-served write from a pin the gate would stall.
 func newWalDBZone(t *testing.T, nodeZone string, sink *zoneRecorderSink, announce bool) (*db.DB, *wal.Storage) {
 	t.Helper()
 	dir := t.TempDir()
@@ -60,6 +67,13 @@ func newWalDBZone(t *testing.T, nodeZone string, sink *zoneRecorderSink, announc
 	}
 	d := db.New(uint64(1), db.Peers{1: ""}, s, p, syncCh, ingestCh, opts...)
 	t.Cleanup(func() { _ = d.Close(); _ = s.Close() })
+	if announce {
+		require.Eventually(t, func() bool {
+			zone, ok := s.MemberZone(1)
+			return ok && zone == nodeZone
+		}, 10*time.Second, 10*time.Millisecond, "zone never announced")
+		waitForMemberVersion(t, d, 1, version.FeatureLevel)
+	}
 	return d, s
 }
 
@@ -80,20 +94,13 @@ func TestZonePin_AdmissionAndServing(t *testing.T) {
 	sink := &zoneRecorderSink{}
 	d, s := newWalDBZone(t, "z-east", sink, true)
 
-	// Wait for both startup announcements (feature level + zone).
-	require.Eventually(t, func() bool {
-		zone, ok := s.MemberZone(1)
-		return ok && zone == "z-east"
-	}, 10*time.Second, 10*time.Millisecond, "zone never announced")
-
-	// Admission: unserved zone refused loudly; served zone admitted.
+	// Admission: unserved zone refused loudly; served zone admitted. (The
+	// fixture has already waited for both startup announcements to apply.)
 	err := proposePinnedRecorder(t, d, "pinned", "z-ghost")
 	require.Error(t, err, "a pin to an unserved zone must be refused at POST")
 	require.Contains(t, err.Error(), "z-ghost")
 
-	require.Eventually(t, func() bool {
-		return proposePinnedRecorder(t, d, "pinned", "z-east") == nil
-	}, 10*time.Second, 50*time.Millisecond, "feature level never opened for admission")
+	require.NoError(t, proposePinnedRecorder(t, d, "pinned", "z-east"))
 
 	// The pinned syncable is served (by this node, resolved via the pin).
 	proposeTypeTOML(t, d, "photos", "photos", "", "")
@@ -145,11 +152,6 @@ func TestZonePin_FeatureGateRefusesOnColdCluster(t *testing.T) {
 func TestZonePin_UnsatisfiableStrictStallAndCatchUp(t *testing.T) {
 	sink := &zoneRecorderSink{}
 	d, s := newWalDBZone(t, "z-east", sink, true)
-	require.Eventually(t, func() bool {
-		zone, ok := s.MemberZone(1)
-		return ok && zone == "z-east"
-	}, 10*time.Second, 10*time.Millisecond)
-
 	// Plant a pin to a zone nobody serves (admission bypassed — this models
 	// the only node in a zone being removed after admission).
 	cfg := &cluster.Configuration{

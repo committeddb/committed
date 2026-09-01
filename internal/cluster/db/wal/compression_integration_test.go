@@ -55,7 +55,7 @@ func countZst(t *testing.T, dir string) int {
 // log.
 func TestEventLogCompression_SealerAndReadBack(t *testing.T) {
 	dir := t.TempDir()
-	s, err := Open(dir, nil, nil, nil, WithoutFsync(), WithEventSegmentSize(2048))
+	s, err := Open(dir, nil, nil, nil, WithoutFsync(), WithEventSegmentSize(2048), WithSealerIdleInterval(25*time.Millisecond))
 	require.NoError(t, err)
 
 	const n = 200
@@ -83,10 +83,15 @@ func TestEventLogCompression_SealerAndReadBack(t *testing.T) {
 
 	// Restart over the mixed log (some segments compressed, tail plain):
 	// everything reads, and the sealer keeps working.
-	s2, err := Open(dir, nil, nil, nil, WithoutFsync(), WithEventSegmentSize(2048))
+	s2, err := Open(dir, nil, nil, nil, WithoutFsync(), WithEventSegmentSize(2048), WithSealerIdleInterval(25*time.Millisecond))
 	require.NoError(t, err)
-	defer func() { _ = s2.Close() }()
+	t.Cleanup(func() { _ = s2.Close() }) // safety net; Close is closeOnce-guarded
 	verify(s2)
+	// DiagnoseLog's contract is an offline scan (node stopped) — s2's sealer
+	// is still compressing segments, and a swap between DiagnoseLog's dir
+	// listing and its file open reads as a vanished segment. Close (which
+	// drains the sealer) before diagnosing.
+	require.NoError(t, s2.Close())
 
 	// DiagnoseLog is format-aware: the mixed log is clean with every record
 	// counted through the compressed segments.
@@ -100,7 +105,7 @@ func TestEventLogCompression_SealerAndReadBack(t *testing.T) {
 // compressed data dir rewrites to the plain format and reads identically.
 func TestEventLogCompression_DecompressNodeRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	s, err := Open(dir, nil, nil, nil, WithoutFsync(), WithEventSegmentSize(2048))
+	s, err := Open(dir, nil, nil, nil, WithoutFsync(), WithEventSegmentSize(2048), WithSealerIdleInterval(25*time.Millisecond))
 	require.NoError(t, err)
 
 	const n = 150
@@ -117,7 +122,7 @@ func TestEventLogCompression_DecompressNodeRoundTrip(t *testing.T) {
 	require.Zero(t, countZst(t, eventsDir), "no .zst may remain")
 
 	// The plain log reads identically (a pre-compression binary's view).
-	s2, err := Open(dir, nil, nil, nil, WithoutFsync(), WithEventSegmentSize(2048))
+	s2, err := Open(dir, nil, nil, nil, WithoutFsync(), WithEventSegmentSize(2048), WithSealerIdleInterval(25*time.Millisecond))
 	require.NoError(t, err)
 	defer func() { _ = s2.Close() }()
 	for i := 1; i <= n; i++ {
@@ -132,7 +137,7 @@ func TestEventLogCompression_DecompressNodeRoundTrip(t *testing.T) {
 // it as corruption (rebuild), never a torn tail.
 func TestEventLogCompression_CorruptCompressedSegmentIsLoud(t *testing.T) {
 	dir := t.TempDir()
-	s, err := Open(dir, nil, nil, nil, WithoutFsync(), WithEventSegmentSize(2048))
+	s, err := Open(dir, nil, nil, nil, WithoutFsync(), WithEventSegmentSize(2048), WithSealerIdleInterval(25*time.Millisecond))
 	require.NoError(t, err)
 	seedEventLog(t, s, 1, 150)
 	eventsDir := filepath.Join(dir, "events")
