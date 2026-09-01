@@ -315,7 +315,7 @@ func (db *DB) Sync(_ context.Context, id string, s cluster.Syncable) error {
 			}
 			close(handle.done)
 		}()
-		db.resetSyncBreaker(id) // fresh breaker state for this worker run (e.g. after a replace)
+		db.syncBreaker.reset(id) // fresh breaker state for this worker run (e.g. after a replace)
 		_ = db.sync(workerCtx, id, s, handle)
 	}()
 
@@ -857,7 +857,7 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 					// ErrPermanent, so it takes the transient branch below —
 					// wedge loudly, stop dead-lettering the topic's rows.
 					if errors.Is(syncErr, cluster.ErrPermanent) {
-						if c, tripped := db.recordSyncPermanent(id, i); tripped {
+						if c, tripped := db.syncBreaker.recordPermanent(id, i); tripped {
 							db.tripSyncBreaker(id, c, syncErr)
 							db.publishSyncableParked(ctx, id, i, syncErr)
 							return nil // park: hold the checkpoint, stop dead-lettering the topic
@@ -1132,7 +1132,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 		// breaker; park the worker (checkpoint held) rather than spin on the
 		// systematically-failing batch. The reset is per worker launch, so a
 		// replacement after a config fix starts fresh.
-		if db.syncBreakerTripped(id) {
+		if db.syncBreaker.tripped(id) {
 			return nil
 		}
 		select {
@@ -1342,10 +1342,10 @@ func (db *DB) syncBatchFallback(ctx context.Context, id string, s cluster.Syncab
 			// ErrPermanent) fall to the transient path below (stop the
 			// fallback; the batch loop wedges) — the single-flush worker's twin.
 			if errors.Is(syncErr, cluster.ErrPermanent) {
-				if c, tripped := db.recordSyncPermanent(id, e.Index); tripped {
+				if c, tripped := db.syncBreaker.recordPermanent(id, e.Index); tripped {
 					db.tripSyncBreaker(id, c, syncErr)
 					db.publishSyncableParked(ctx, id, e.Index, syncErr)
-					return false // stop the batch; syncBatch parks (checks syncBreakerTripped)
+					return false // stop the batch; syncBatch parks (checks syncBreaker.tripped)
 				}
 				db.logger.Error("permanent sync error, skipping proposal",
 					zap.String("id", id), zap.Uint64("index", e.Index), zap.Error(syncErr))

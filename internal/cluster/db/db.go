@@ -165,12 +165,13 @@ type DB struct {
 	// worker registry, storage, and propose paths this state advises.
 	ingestSupervisor *ingestSupervisor
 
-	// syncBreakerMu guards syncBreakerStates, the per-syncable run of
-	// consecutive permanent sync errors (within a healthy window) driving the
-	// sync circuit breaker (see sync_breaker.go). Separate from workersMu to
-	// stay off the hot worker-registry path.
-	syncBreakerMu     sync.Mutex
-	syncBreakerStates map[string]*syncBreakerState
+	// syncBreaker is the sync circuit-breaker state machine
+	// (sync_breaker.go): the per-syncable run of consecutive permanent sync
+	// errors within a healthy window, with its own lock so the bookkeeping
+	// stays off the hot worker-registry path. Always non-nil after New. The
+	// trip's loud signals and the replicated parked record stay DB methods,
+	// composing logging, metrics, and the propose path.
+	syncBreaker *syncBreaker
 
 	// syncStuckThreshold is how long a worker must be continuously blocked
 	// retrying a transient error before it publishes a replicated
@@ -417,6 +418,7 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		announceInterval:   cfg.tickInterval,
 		zone:               cfg.zone,
 		ingestSupervisor:   newIngestSupervisor(cfg.ingestSupervisorInitialBackoff, cfg.ingestSupervisorMaxBackoff, cfg.ingestSupervisorMaxAttempts),
+		syncBreaker:        newSyncBreaker(),
 		maxProposalBytes:   cfg.maxProposalBytes,
 		applyStall:         applyStallDetector{threshold: ApplyStallThreshold},
 		logger:             cfg.logger,
