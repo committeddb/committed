@@ -36,7 +36,12 @@ import (
 type recorderSink struct {
 	mu   sync.Mutex
 	keys []string
-	err  error
+	data map[string]string // upsert key -> raw payload bytes
+	// typeVersions records each upsert's resolved Type.Version — the wire
+	// stamp the proposal boundary attaches.
+	typeVersions map[string]int
+	deletes      []string
+	err          error
 }
 
 func (r *recorderSink) Sync(_ context.Context, a *cluster.Actual) (cluster.ShouldSnapshot, error) {
@@ -48,14 +53,49 @@ func (r *recorderSink) Sync(_ context.Context, a *cluster.Actual) (cluster.Shoul
 			should = false
 			continue
 		}
+		if e.IsDelete() {
+			if r.err != nil {
+				return false, r.err
+			}
+			r.deletes = append(r.deletes, string(e.Key))
+			continue
+		}
 		if e.Variant() == cluster.EntityVariantRow {
 			if r.err != nil {
 				return false, r.err
 			}
+			if r.data == nil {
+				r.data = map[string]string{}
+				r.typeVersions = map[string]int{}
+			}
 			r.keys = append(r.keys, string(e.Key))
+			r.data[string(e.Key)] = string(e.Data)
+			r.typeVersions[string(e.Key)] = e.Type.Version
 		}
 	}
 	return should, nil
+}
+
+// row returns the payload synced for key (ok=false when unseen).
+func (r *recorderSink) row(key string) (string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	d, ok := r.data[key]
+	return d, ok
+}
+
+// typeVersion returns the resolved Type.Version stamped on key's upsert.
+func (r *recorderSink) typeVersion(key string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.typeVersions[key]
+}
+
+// deleted returns the delete tombstone keys synced so far.
+func (r *recorderSink) deleted() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.deletes...)
 }
 
 func (r *recorderSink) Close() error { return nil }
@@ -244,4 +284,23 @@ func (e *engine) syncableIDs(t *testing.T) []string {
 		ids = append(ids, c.ID)
 	}
 	return ids
+}
+
+// addTypeWithSchema POSTs a type with a JSON schema and a validation
+// strategy (0 = none, 1 = gate on schema, 2 = announce divergence).
+func (e *engine) addTypeWithSchema(t *testing.T, id, name, schema string, validate int) {
+	t.Helper()
+	e.addTypeWithSchemaType(t, id, name, "JSONSchema", schema, validate, "")
+}
+
+// addTypeWithSchemaType is addTypeWithSchema with the schema language and
+// any extra TOML lines (e.g. schemaChangeTopic, required by validate = 2)
+// spelled out.
+func (e *engine) addTypeWithSchemaType(t *testing.T, id, name, schemaType, schema string, validate int, extraTOML string) {
+	t.Helper()
+	// TOML multi-line literal quoting so a .proto source with newlines
+	// survives; no schema in these tests carries a ''' sequence.
+	body := fmt.Sprintf("[type]\nname = %q\nschemaType = %q\nschema = '''%s'''\nvalidate = %d\n%s", name, schemaType, schema, validate, extraTOML)
+	w := e.doTOML(t, "POST", "/v1/type/"+id, body)
+	require.Equal(t, 200, w.Code, w.Body.String())
 }

@@ -1,8 +1,6 @@
 package http_test
 
 import (
-	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -38,24 +36,4 @@ func TestSchemaValidator_ValidateTypeSchema(t *testing.T) {
 			}
 		})
 	}
-}
-
-// TestAddProposal_BrokenTypeSchemaIs422: a proposal to a type whose schema won't
-// compile — a state only reachable for a type created before the admission check
-// shipped — fails with a permanent 422, not a retryable 500 that would loop a
-// retrying client forever.
-func TestAddProposal_BrokenTypeSchemaIs422(t *testing.T) {
-	h, fake := setupTest()
-	fake.ResolveTypeReturns(&cluster.Type{
-		ID: "t1", Name: "Bad", Validate: cluster.ValidateSchema,
-		SchemaType: "JSONSchema", Schema: []byte(`{ not valid json`),
-	}, nil)
-
-	body := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"foo": "bar"}}]}`
-	req := httptest.NewRequest("POST", "http://localhost/v1/proposal", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	require.Equal(t, 422, w.Result().StatusCode, "a broken type schema is permanent config-shaped, not a 500")
-	require.Zero(t, fake.ProposeCallCount(), "nothing is proposed when the type's schema can't compile")
 }

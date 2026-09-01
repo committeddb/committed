@@ -323,18 +323,6 @@ type FakeCluster struct {
 	promoteMemberReturnsOnCall map[int]struct {
 		result1 error
 	}
-	ProposeStub        func(context.Context, *cluster.Proposal) error
-	proposeMutex       sync.RWMutex
-	proposeArgsForCall []struct {
-		arg1 context.Context
-		arg2 *cluster.Proposal
-	}
-	proposeReturns struct {
-		result1 error
-	}
-	proposeReturnsOnCall map[int]struct {
-		result1 error
-	}
 	ProposeDatabaseStub        func(context.Context, *cluster.Configuration) error
 	proposeDatabaseMutex       sync.RWMutex
 	proposeDatabaseArgsForCall []struct {
@@ -2126,68 +2114,6 @@ func (fake *FakeCluster) PromoteMemberReturnsOnCall(i int, result1 error) {
 		})
 	}
 	fake.promoteMemberReturnsOnCall[i] = struct {
-		result1 error
-	}{result1}
-}
-
-func (fake *FakeCluster) Propose(arg1 context.Context, arg2 *cluster.Proposal) error {
-	fake.proposeMutex.Lock()
-	ret, specificReturn := fake.proposeReturnsOnCall[len(fake.proposeArgsForCall)]
-	fake.proposeArgsForCall = append(fake.proposeArgsForCall, struct {
-		arg1 context.Context
-		arg2 *cluster.Proposal
-	}{arg1, arg2})
-	stub := fake.ProposeStub
-	fakeReturns := fake.proposeReturns
-	fake.recordInvocation("Propose", []interface{}{arg1, arg2})
-	fake.proposeMutex.Unlock()
-	if stub != nil {
-		return stub(arg1, arg2)
-	}
-	if specificReturn {
-		return ret.result1
-	}
-	return fakeReturns.result1
-}
-
-func (fake *FakeCluster) ProposeCallCount() int {
-	fake.proposeMutex.RLock()
-	defer fake.proposeMutex.RUnlock()
-	return len(fake.proposeArgsForCall)
-}
-
-func (fake *FakeCluster) ProposeCalls(stub func(context.Context, *cluster.Proposal) error) {
-	fake.proposeMutex.Lock()
-	defer fake.proposeMutex.Unlock()
-	fake.ProposeStub = stub
-}
-
-func (fake *FakeCluster) ProposeArgsForCall(i int) (context.Context, *cluster.Proposal) {
-	fake.proposeMutex.RLock()
-	defer fake.proposeMutex.RUnlock()
-	argsForCall := fake.proposeArgsForCall[i]
-	return argsForCall.arg1, argsForCall.arg2
-}
-
-func (fake *FakeCluster) ProposeReturns(result1 error) {
-	fake.proposeMutex.Lock()
-	defer fake.proposeMutex.Unlock()
-	fake.ProposeStub = nil
-	fake.proposeReturns = struct {
-		result1 error
-	}{result1}
-}
-
-func (fake *FakeCluster) ProposeReturnsOnCall(i int, result1 error) {
-	fake.proposeMutex.Lock()
-	defer fake.proposeMutex.Unlock()
-	fake.ProposeStub = nil
-	if fake.proposeReturnsOnCall == nil {
-		fake.proposeReturnsOnCall = make(map[int]struct {
-			result1 error
-		})
-	}
-	fake.proposeReturnsOnCall[i] = struct {
 		result1 error
 	}{result1}
 }

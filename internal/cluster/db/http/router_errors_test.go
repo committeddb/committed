@@ -86,13 +86,14 @@ func TestAddProposal_EmptyRejected(t *testing.T) {
 	fake := &clusterfakes.FakeCluster{}
 	h := http.New(fake)
 
+	// The 400 fires before any engine access — an entity-less proposal is a
+	// client error and never becomes a raft entry.
 	req := httptest.NewRequest("POST", "http://localhost/v1/proposal", strings.NewReader(`{"entities":[]}`))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
 	require.Equal(t, 400, w.Code)
 	require.Contains(t, w.Body.String(), `"code":"empty_proposal"`)
-	require.Equal(t, 0, fake.ProposeCallCount(), "an empty proposal must not reach the cluster")
 }
 
 // R3-HTTP-5: a config POST's Content-Type is parsed to its base media type, so a

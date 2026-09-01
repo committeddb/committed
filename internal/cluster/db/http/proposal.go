@@ -56,7 +56,7 @@ func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
 				"type %q is a committed system-type id and cannot be used in a proposal", e.TypeID)
 			return
 		}
-		t, err := h.c.ResolveType(cluster.LatestTypeRef(e.TypeID))
+		t, err := h.db.ResolveType(cluster.LatestTypeRef(e.TypeID))
 		if err != nil {
 			writeErrorf(w, httpgo.StatusBadRequest, "type_not_found", "type %q not found", e.TypeID)
 			return
@@ -71,12 +71,7 @@ func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
 
 		v, err := h.compiledValidator(t)
 		if err != nil {
-			// The referenced type's schema won't compile — a permanent, config-shaped
-			// condition, not a server fault, so 422 (don't retry) rather than 500. A
-			// newly POSTed type can't reach here (ProposeType rejects a broken schema
-			// at admission); this covers a type created before that check shipped.
-			writeErrorf(w, httpgo.StatusUnprocessableEntity, "type_schema_invalid",
-				"type %q has an invalid schema that cannot be compiled (re-POST the type with a valid schema): %v", t.ID, err)
+			writeSchemaCompileError(w, t.ID, err)
 			return
 		}
 		// Only the strict strategy GATES here. An announce-typed entity commits
@@ -114,7 +109,7 @@ func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
 		Entities: es,
 	}
 
-	err = h.c.Propose(r.Context(), p)
+	err = h.db.Propose(r.Context(), p)
 	if err != nil {
 		// Shared choke point: 413 too-large, 507 disk-full, 503 on a deadline
 		// (never 500 — the proposal may still commit), else 500. The config/rebuild
@@ -147,4 +142,16 @@ func (h *HTTP) compiledValidator(t *cluster.Type) (entityValidator, error) {
 
 	h.schemas.Store(key, v)
 	return v, nil
+}
+
+// writeSchemaCompileError answers a proposal whose referenced type's schema
+// won't compile — a permanent, config-shaped condition, not a server fault,
+// so 422 (don't retry) rather than 500. A newly POSTed type can't reach
+// here (ProposeType rejects a broken schema at admission); this covers a
+// type created before that check shipped. A free function so the mapping is
+// testable directly — a broken-schema type cannot be admitted through the
+// real engine precisely because of that admission check.
+func writeSchemaCompileError(w httpgo.ResponseWriter, typeID string, err error) {
+	writeErrorf(w, httpgo.StatusUnprocessableEntity, "type_schema_invalid",
+		"type %q has an invalid schema that cannot be compiled (re-POST the type with a valid schema): %v", typeID, err)
 }

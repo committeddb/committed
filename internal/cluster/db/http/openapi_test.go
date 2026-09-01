@@ -76,17 +76,6 @@ func sampleVersions() []cluster.VersionInfo {
 	}
 }
 
-// sampleType returns a Type record with schema validation disabled so
-// the proposal handler won't try to parse its Schema field.
-func sampleType() *cluster.Type {
-	return &cluster.Type{
-		ID:       "t-1",
-		Name:     "TestType",
-		Version:  1,
-		Validate: cluster.NoValidation,
-	}
-}
-
 // contractCase is one row of the table. `setup` configures the fake so
 // the handler can return a valid response. `body` is the request body
 // (only meaningful for POST). `contentType` defaults to application/json
@@ -319,16 +308,6 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 		},
 
 		// --- proposal --- (write-only: no GET, the log is not a query interface)
-		{
-			name:        "POST /proposal",
-			method:      httpgo.MethodPost,
-			path:        "/v1/proposal",
-			contentType: "application/json",
-			body:        `{"entities":[{"typeId":"t-1","key":"k","data":{"hello":"world"}}]}`,
-			setup: func(fake *clusterfakes.FakeCluster) {
-				fake.ResolveTypeReturns(sampleType(), nil)
-			},
-		},
 	}
 
 	for _, tc := range cases {
@@ -396,6 +375,11 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 		}{
 			{name: "GET /syncable", method: httpgo.MethodGet, path: "/v1/syncable"},
 			{name: "GET /node/status", method: httpgo.MethodGet, path: "/v1/node/status"},
+			{
+				name: "POST /proposal", method: httpgo.MethodPost,
+				path: "/v1/proposal", contentType: "application/json",
+				body: `{"entities":[{"typeId":"photos","key":"k","data":{"hello":"world"}}]}`,
+			},
 			{name: "GET /cluster/status", method: httpgo.MethodGet, path: "/v1/cluster/status"},
 			{name: "POST /scrub", method: httpgo.MethodPost, path: "/v1/scrub"},
 			{

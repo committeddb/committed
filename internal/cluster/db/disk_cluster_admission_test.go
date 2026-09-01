@@ -159,7 +159,10 @@ func TestReportDisk_LeaderRecordsAndAnswers(t *testing.T) {
 func TestDiskReportSender_RoundTrip(t *testing.T) {
 	d := createDiskTestDB()
 	defer d.Close()
-	h := clusterhttp.New(d, clusterhttp.WithBearerToken("cluster-secret"))
+	// Hand the http server the engine itself, not the test wrapper: migrated
+	// handler groups hold *db.DB concretely (the transitional assert in
+	// http.New unwraps only the exact type).
+	h := clusterhttp.New(d.DB, clusterhttp.WithBearerToken("cluster-secret"))
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 

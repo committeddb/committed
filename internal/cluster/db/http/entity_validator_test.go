@@ -58,39 +58,6 @@ func TestValidateEntityData(t *testing.T) {
 	require.NotNil(t, div)
 }
 
-// TestAddProposal_AnnounceCommitsDivergentPayload pins the signal-not-reject
-// rule on the direct-proposal path: a divergent payload under an
-// announce-typed topic is PROPOSED (the tripwire in db handles announcing),
-// while the same payload under a strict type stays a 400.
-func TestAddProposal_AnnounceCommitsDivergentPayload(t *testing.T) {
-	schema := `{"type":"object","properties":{"caption":{"type":"string"}},"additionalProperties":false}`
-	divergent := `{"entities": [{"typeId": "t1", "key": "k1", "data": {"caption": 7}}]}`
-
-	// Announce: divergence flows through to Propose.
-	h, fake := setupTest()
-	fake.ResolveTypeReturns(&cluster.Type{
-		ID: "t1", Name: "T", Validate: cluster.ValidateAnnounce,
-		SchemaType: "JSONSchema", Schema: []byte(schema),
-	}, nil)
-	req := httptest.NewRequest("POST", "http://localhost/v1/proposal", strings.NewReader(divergent))
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-	require.Equal(t, 200, w.Result().StatusCode, "announce never gates: %s", w.Body.String())
-	require.Equal(t, 1, fake.ProposeCallCount(), "the divergent payload must still be proposed")
-
-	// Strict: the same divergence is still rejected at the gate.
-	h, fake = setupTest()
-	fake.ResolveTypeReturns(&cluster.Type{
-		ID: "t1", Name: "T", Validate: cluster.ValidateSchema,
-		SchemaType: "JSONSchema", Schema: []byte(schema),
-	}, nil)
-	req = httptest.NewRequest("POST", "http://localhost/v1/proposal", strings.NewReader(divergent))
-	w = httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-	require.Equal(t, 400, w.Result().StatusCode, "strict still gates")
-	require.Zero(t, fake.ProposeCallCount())
-}
-
 // TestAddType_StrandedSyncablesForceFlow pins the ?force=true contract: a
 // refused nonConvertible bump renders 409 stranded_always_current with the
 // stranded syncables as structured details, and the force re-POST passes the

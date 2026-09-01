@@ -11,7 +11,6 @@ import (
 //
 //counterfeiter:generate . Cluster
 type Cluster interface {
-	Propose(ctx context.Context, p *Proposal) error
 	// ProposeType admits a type configuration. Declaring a nonConvertible
 	// version bump while always-current syncables consume this type's topics
 	// is refused with a StrandedSyncablesError naming them, unless the caller

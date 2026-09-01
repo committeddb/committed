@@ -38,21 +38,6 @@ func TestPropose_ReturnsTooLarge_MapsTo413(t *testing.T) {
 		setupFn func(*clusterfakes.FakeCluster)
 	}{
 		{
-			name:   "proposal",
-			method: "POST",
-			path:   "/v1/proposal",
-			ct:     "application/json",
-			body:   `{"entities":[{"typeId":"t","key":"k","data":{}}]}`,
-			setupFn: func(fake *clusterfakes.FakeCluster) {
-				// AddProposal resolves the type before proposing, so
-				// the fake has to satisfy ResolveType first. A minimal
-				// Type with no schema validator lets us reach the
-				// Propose call.
-				fake.ResolveTypeReturns(&cluster.Type{ID: "t", Version: 1}, nil)
-				fake.ProposeReturns(fmt.Errorf("wrap: %w", cluster.ErrProposalTooLarge))
-			},
-		},
-		{
 			name:   "database",
 			method: "POST",
 			path:   "/v1/database/db-1",
@@ -124,17 +109,6 @@ func TestPropose_ReturnsInsufficientStorage_MapsTo507(t *testing.T) {
 		body    string
 		setupFn func(*clusterfakes.FakeCluster)
 	}{
-		{
-			name:   "proposal",
-			method: "POST",
-			path:   "/v1/proposal",
-			ct:     "application/json",
-			body:   `{"entities":[{"typeId":"t","key":"k","data":{}}]}`,
-			setupFn: func(fake *clusterfakes.FakeCluster) {
-				fake.ResolveTypeReturns(&cluster.Type{ID: "t", Version: 1}, nil)
-				fake.ProposeReturns(fmt.Errorf("wrap: %w", cluster.ErrInsufficientStorage))
-			},
-		},
 		{
 			name:   "database",
 			method: "POST",

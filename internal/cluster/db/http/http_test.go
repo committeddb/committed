@@ -76,7 +76,7 @@ func TestEndToEnd(t *testing.T) {
 	sync := make(chan *db.SyncableWithID)
 	ingest := make(chan *db.IngestableWithID)
 	storage, db := createDB(t, parser, dir, sync, ingest)
-	h := http.New(db)
+	h := http.New(db.DB) // the engine itself: migrated handlers hold *db.DB concretely
 
 	typeID := addType(t, h, "foo")
 	addParsers(t, db, typeID)
@@ -128,7 +128,7 @@ func TestEndToEnd_HonorsDelete(t *testing.T) {
 	sync := make(chan *db.SyncableWithID)
 	ingest := make(chan *db.IngestableWithID)
 	storage, db := createDB(t, parser, dir, sync, ingest)
-	h := http.New(db)
+	h := http.New(db.DB) // the engine itself: migrated handlers hold *db.DB concretely
 
 	typeID := addType(t, h, "foo")
 	addParsers(t, db, typeID)
