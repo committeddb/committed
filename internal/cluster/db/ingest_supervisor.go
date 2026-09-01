@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -13,11 +14,12 @@ import (
 )
 
 // The ingest supervisor auto-restarts an ingest worker that parks in the
-// ErrProposalUnknown freeze branch (see ingest.go's worker loop). It lives
-// here, next to the worker it supervises, rather than in db.go: the
-// freeze→restart lifecycle is one cohesive subsystem. The supervisor's *state*
-// (the per-id map and tuning knobs) is on the DB struct in db.go because Go
-// keeps a struct's fields in one place; only the behaviour lives here.
+// ErrProposalUnknown freeze branch (see ingest.go's worker loop). Its state
+// — the per-id give-up state machine and the node-local frozen/recovering
+// flag set — lives on the ingestSupervisor struct below, a pure bookkeeping
+// subsystem with no engine views. The restart ORCHESTRATION
+// (superviseRestartIngest) stays a DB method: it coordinates the worker
+// registry, storage, and propose paths that this state machine advises.
 
 // ingestSupervisor* constants govern the auto-restart behavior applied
 // when an ingest worker parks in the ErrProposalUnknown freeze branch.
@@ -49,6 +51,54 @@ type ingestSupervisorState struct {
 	backoff            time.Duration
 }
 
+// ingestSupervisor is the freeze/restart bookkeeping subsystem: the per-id
+// give-up state machine (consecutive-freeze runs keyed on resume position,
+// exponential backoff, the give-up cap) and the node-local
+// frozen/recovering flag set the status endpoint reports. Pure state — no
+// engine views, no I/O — so it is unit-testable directly.
+type ingestSupervisor struct {
+	// mu guards states. Deliberately separate from workersMu so the
+	// supervisor's bookkeeping doesn't contend with the hot
+	// worker-registry path.
+	mu     sync.Mutex
+	states map[string]*ingestSupervisorState
+
+	initialBackoff time.Duration
+	maxBackoff     time.Duration
+	maxAttempts    int
+
+	// frozenMu guards frozen, the node-local set of ingestables whose
+	// worker is currently FROZEN and being restarted (the "recovering"
+	// state). It drives the workerState the status endpoint reports for a
+	// live worker on this node, so it must be tracked independently of the
+	// committed.ingest.frozen gauge (which is a no-op when no metrics
+	// endpoint is wired — the common beta case). Set at freeze-exit,
+	// cleared on durable progress or worker teardown.
+	frozenMu sync.Mutex
+	frozen   map[string]bool
+}
+
+// newIngestSupervisor builds the subsystem with production defaults applied
+// to any zero-valued tuning knob.
+func newIngestSupervisor(initialBackoff, maxBackoff time.Duration, maxAttempts int) *ingestSupervisor {
+	if initialBackoff == 0 {
+		initialBackoff = defaultIngestSupervisorInitialBackoff
+	}
+	if maxBackoff == 0 {
+		maxBackoff = defaultIngestSupervisorMaxBackoff
+	}
+	if maxAttempts == 0 {
+		maxAttempts = defaultIngestSupervisorMaxAttempts
+	}
+	return &ingestSupervisor{
+		states:         make(map[string]*ingestSupervisorState),
+		frozen:         make(map[string]bool),
+		initialBackoff: initialBackoff,
+		maxBackoff:     maxBackoff,
+		maxAttempts:    maxAttempts,
+	}
+}
+
 // superviseRestartIngest re-registers an ingestable whose worker
 // parked in the ErrProposalUnknown freeze branch. It runs as a
 // detached goroutine spawned from the freeze-exit branch of the
@@ -61,10 +111,10 @@ type ingestSupervisorState struct {
 //     position has advanced since the last freeze (real progress — this
 //     flap is "new", not the same poison proposal re-read).
 //   - Gives up + emits IngestSupervisorGiveup once the consecutive
-//     count exceeds ingestSupervisorMaxAttempts. The worker stays
+//     count exceeds the supervisor's maxAttempts. The worker stays
 //     parked; operator intervention is required.
-//   - Otherwise waits a jittered backoff (exponential, capped at
-//     ingestSupervisorMaxBackoff) before re-registering.
+//   - Otherwise waits a jittered backoff (exponential, capped at the
+//     supervisor's maxBackoff) before re-registering.
 //   - Preflight AND install under a single workersMu hold so a
 //     concurrent user replace can't slip in between (see the race
 //     analysis in spawnIngestWorkerLocked's doc comment): if the
@@ -84,7 +134,7 @@ func (db *DB) superviseRestartIngest(id string, i cluster.Ingestable, frozen *wo
 	// the wedge for an operator. The frozen worker never advanced past it, so it
 	// is the same across re-reads of a poison proposal.
 	pos := db.storage.Position(id)
-	backoff, consecutive, giveup := db.recordFreezeAndNextBackoff(id, pos)
+	backoff, consecutive, giveup := db.ingestSupervisor.recordFreezeAndNextBackoff(id, pos)
 	if giveup {
 		db.logger.Error("ingest supervisor giving up after repeated freezes at the same resume position — the worker is wedged on a proposal it cannot commit (most often a single row or transaction over COMMITTED_MAX_PROPOSAL_BYTES; see the freeze warnings above for its SourceSeq/coordinate). It stays parked until an operator intervenes: raise the cap and restart, or fix the source",
 			zap.String("id", id),
@@ -184,20 +234,44 @@ func (db *DB) superviseRestartIngest(id string, i cluster.Ingestable, frozen *wo
 	}
 }
 
-// pruneIngestSupervisorState drops the give-up bookkeeping for id. It is called
-// whenever the worker is torn down for an operator recovery — a re-POST (via
-// db.Ingest's replace loop) or a delete (via cancelIngestWorker) — because the
-// restart budget's lifetime is tied to the worker GENERATION: a fresh worker
-// (any re-POST, even a byte-identical one that does not bump the config version)
-// must start with a full budget, not inherit a prior give-up. It also bounds the
-// state map (a deleted/recreated id can't accumulate). Idempotent.
-func (db *DB) pruneIngestSupervisorState(id string) {
-	db.ingestSupervisorMu.Lock()
-	delete(db.ingestSupervisorStates, id)
-	db.ingestSupervisorMu.Unlock()
+// prune drops the give-up bookkeeping for id. It is called whenever the
+// worker is torn down for an operator recovery — a re-POST (via db.Ingest's
+// replace loop) or a delete (via cancelIngestWorker) — because the restart
+// budget's lifetime is tied to the worker GENERATION: a fresh worker (any
+// re-POST, even a byte-identical one that does not bump the config version)
+// must start with a full budget, not inherit a prior give-up. It also bounds
+// the state map (a deleted/recreated id can't accumulate). Idempotent.
+func (s *ingestSupervisor) prune(id string) {
+	s.mu.Lock()
+	delete(s.states, id)
+	s.mu.Unlock()
 	// A worker teardown (re-POST or delete) ends any recovering state, so a fresh
 	// worker starts reported as running rather than inheriting a stale frozen flag.
-	db.setIngestFrozen(id, false)
+	s.setFrozen(id, false)
+}
+
+// setFrozen sets or clears id's node-local frozen flag — the "recovering"
+// state the status endpoint reports for a live worker on this node.
+// Node-local by design: recovering is a LIVE state tied to the owner running
+// the worker (a follower has no worker to recover), so it rides ingest's
+// node-local live-status model rather than the replicated terminal parked
+// record.
+func (s *ingestSupervisor) setFrozen(id string, frozen bool) {
+	s.frozenMu.Lock()
+	defer s.frozenMu.Unlock()
+	if frozen {
+		s.frozen[id] = true
+		return
+	}
+	delete(s.frozen, id)
+}
+
+// isFrozen reports whether id's worker is currently frozen/recovering on
+// this node (the supervisor is restarting it).
+func (s *ingestSupervisor) isFrozen(id string) bool {
+	s.frozenMu.Lock()
+	defer s.frozenMu.Unlock()
+	return s.frozen[id]
 }
 
 // recordFreezeAndNextBackoff bumps the consecutive-freeze counter for id and
@@ -206,40 +280,39 @@ func (db *DB) pruneIngestSupervisorState(id string) {
 // SAME position as the previous is the same poison proposal re-read and grows
 // the run; a freeze at a DIFFERENT (advanced) position means the worker made
 // real progress and resets the run to a fresh episode. Returns giveup = true
-// when the (post-increment) counter exceeds ingestSupervisorMaxAttempts;
-// callers surface the giveup metric and skip the restart.
-func (db *DB) recordFreezeAndNextBackoff(id string, pos cluster.Position) (backoff time.Duration, consecutive int, giveup bool) {
-	db.ingestSupervisorMu.Lock()
-	defer db.ingestSupervisorMu.Unlock()
+// when the (post-increment) counter exceeds maxAttempts; callers surface the
+// giveup metric and skip the restart.
+func (s *ingestSupervisor) recordFreezeAndNextBackoff(id string, pos cluster.Position) (backoff time.Duration, consecutive int, giveup bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	st, ok := db.ingestSupervisorStates[id]
+	st, ok := s.states[id]
 	if !ok {
-		st = &ingestSupervisorState{backoff: db.ingestSupervisorInitialBackoff}
-		db.ingestSupervisorStates[id] = st
+		st = &ingestSupervisorState{backoff: s.initialBackoff}
+		s.states[id] = st
 	}
 	// Reset the run only on genuine progress — an advanced resume position. A
 	// slow re-read to the SAME poison position is NOT progress (resetting on
 	// wall-clock let the run churn forever). An operator recovery (re-POST or
 	// delete) resets the run a different way: it tears down the worker, and the
 	// budget's lifetime is tied to the worker generation — the teardown paths
-	// prune this state, so the fresh worker starts clean. See
-	// pruneIngestSupervisorState (called from db.Ingest's replace loop and
-	// cancelIngestWorker).
+	// prune this state, so the fresh worker starts clean. See prune (called
+	// from db.Ingest's replace loop and cancelIngestWorker).
 	if st.consecutiveFreezes > 0 && !bytes.Equal(pos, st.lastFreezePosition) {
 		st.consecutiveFreezes = 0
-		st.backoff = db.ingestSupervisorInitialBackoff
+		st.backoff = s.initialBackoff
 	}
 	st.consecutiveFreezes++
 	st.lastFreezePosition = pos
 
-	if st.consecutiveFreezes > db.ingestSupervisorMaxAttempts {
+	if st.consecutiveFreezes > s.maxAttempts {
 		return 0, st.consecutiveFreezes, true
 	}
 
 	backoff = st.backoff
 	st.backoff *= 2
-	if st.backoff > db.ingestSupervisorMaxBackoff {
-		st.backoff = db.ingestSupervisorMaxBackoff
+	if st.backoff > s.maxBackoff {
+		st.backoff = s.maxBackoff
 	}
 	return backoff, st.consecutiveFreezes, false
 }

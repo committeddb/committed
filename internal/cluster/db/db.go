@@ -156,21 +156,14 @@ type DB struct {
 	ingestWorkers map[string]*workerHandle
 	closed        bool
 
-	// ingestSupervisorMu guards ingestSupervisorStates. Deliberately
-	// separate from workersMu so the supervisor's bookkeeping doesn't
-	// contend with the hot worker-registry path.
-	ingestSupervisorMu     sync.Mutex
-	ingestSupervisorStates map[string]*ingestSupervisorState
-
-	// ingestFrozenMu guards ingestFrozen, the node-local set of ingestables whose
-	// worker is currently FROZEN and being restarted by the supervisor (the
-	// "recovering" state). It drives the workerState the status endpoint reports
-	// for a live worker on this node, so it must be tracked independently of the
-	// committed.ingest.frozen gauge (which is a no-op when no metrics endpoint is
-	// wired — the common beta case). Set at freeze-exit, cleared on durable
-	// progress or worker teardown.
-	ingestFrozenMu sync.Mutex
-	ingestFrozen   map[string]bool
+	// ingestSupervisor is the freeze/restart bookkeeping subsystem
+	// (ingest_supervisor.go): the per-id give-up state machine and the
+	// node-local frozen/recovering flag set, with their own locks so the
+	// bookkeeping doesn't contend with the hot worker-registry path.
+	// Always non-nil after New. The restart ORCHESTRATION
+	// (superviseRestartIngest) stays a DB method — it coordinates the
+	// worker registry, storage, and propose paths this state advises.
+	ingestSupervisor *ingestSupervisor
 
 	// syncBreakerMu guards syncBreakerStates, the per-syncable run of
 	// consecutive permanent sync errors (within a healthy window) driving the
@@ -178,13 +171,6 @@ type DB struct {
 	// stay off the hot worker-registry path.
 	syncBreakerMu     sync.Mutex
 	syncBreakerStates map[string]*syncBreakerState
-
-	// Cached supervisor tuning; resolved in New from options/defaults so
-	// the freeze-restart hot path reads a struct field rather than
-	// dereferencing the options config on each call.
-	ingestSupervisorInitialBackoff time.Duration
-	ingestSupervisorMaxBackoff     time.Duration
-	ingestSupervisorMaxAttempts    int
 
 	// syncStuckThreshold is how long a worker must be continuously blocked
 	// retrying a transient error before it publishes a replicated
@@ -394,15 +380,6 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		cfg.proposeTimeout = defaultProposeTimeout
 	}
 
-	if cfg.ingestSupervisorInitialBackoff == 0 {
-		cfg.ingestSupervisorInitialBackoff = defaultIngestSupervisorInitialBackoff
-	}
-	if cfg.ingestSupervisorMaxBackoff == 0 {
-		cfg.ingestSupervisorMaxBackoff = defaultIngestSupervisorMaxBackoff
-	}
-	if cfg.ingestSupervisorMaxAttempts == 0 {
-		cfg.ingestSupervisorMaxAttempts = defaultIngestSupervisorMaxAttempts
-	}
 	if cfg.maxProposalBytes == 0 {
 		cfg.maxProposalBytes = DefaultMaxProposalBytes
 	}
@@ -421,32 +398,29 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 	ctx, cancelSyncs := context.WithCancel(context.Background())
 
 	db := &DB{
-		proposeC:                       proposeC,
-		confChangeC:                    confChangeC,
-		storage:                        s,
-		ctx:                            ctx,
-		cancelSyncs:                    cancelSyncs,
-		parser:                         p,
-		waiters:                        make(map[uint64]*waiter),
-		appliedNotifyCh:                make(chan struct{}),
-		leaderChangeGrace:              cfg.leaderChangeGrace,
-		proposeTimeout:                 cfg.proposeTimeout,
-		syncWorkers:                    make(map[string]*workerHandle),
-		ingestWorkers:                  make(map[string]*workerHandle),
-		syncStuckThreshold:             cfg.syncStuckThreshold,
-		scrubInterval:                  cfg.scrubInterval,
-		advertisedAPIURL:               cfg.advertisedAPIURL,
-		safeMode:                       cfg.safeMode,
-		announceInterval:               cfg.tickInterval,
-		zone:                           cfg.zone,
-		ingestSupervisorStates:         make(map[string]*ingestSupervisorState),
-		ingestSupervisorInitialBackoff: cfg.ingestSupervisorInitialBackoff,
-		ingestSupervisorMaxBackoff:     cfg.ingestSupervisorMaxBackoff,
-		ingestSupervisorMaxAttempts:    cfg.ingestSupervisorMaxAttempts,
-		maxProposalBytes:               cfg.maxProposalBytes,
-		applyStall:                     applyStallDetector{threshold: ApplyStallThreshold},
-		logger:                         cfg.logger,
-		metrics:                        cfg.metrics,
+		proposeC:           proposeC,
+		confChangeC:        confChangeC,
+		storage:            s,
+		ctx:                ctx,
+		cancelSyncs:        cancelSyncs,
+		parser:             p,
+		waiters:            make(map[uint64]*waiter),
+		appliedNotifyCh:    make(chan struct{}),
+		leaderChangeGrace:  cfg.leaderChangeGrace,
+		proposeTimeout:     cfg.proposeTimeout,
+		syncWorkers:        make(map[string]*workerHandle),
+		ingestWorkers:      make(map[string]*workerHandle),
+		syncStuckThreshold: cfg.syncStuckThreshold,
+		scrubInterval:      cfg.scrubInterval,
+		advertisedAPIURL:   cfg.advertisedAPIURL,
+		safeMode:           cfg.safeMode,
+		announceInterval:   cfg.tickInterval,
+		zone:               cfg.zone,
+		ingestSupervisor:   newIngestSupervisor(cfg.ingestSupervisorInitialBackoff, cfg.ingestSupervisorMaxBackoff, cfg.ingestSupervisorMaxAttempts),
+		maxProposalBytes:   cfg.maxProposalBytes,
+		applyStall:         applyStallDetector{threshold: ApplyStallThreshold},
+		logger:             cfg.logger,
+		metrics:            cfg.metrics,
 	}
 	// Seed the RequestID counter at a random point in the top half of the uint64
 	// space so each process lifetime's contiguous block of ids is disjoint from

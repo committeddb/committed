@@ -242,7 +242,7 @@ func (db *DB) Ingest(_ context.Context, id string, i cluster.Ingestable) error {
 		// budget instead of inheriting a prior give-up (this is the "raise the cap
 		// and re-POST" recovery). Works for a byte-identical re-POST too, which
 		// does not bump the config version but still replaces the worker here.
-		db.pruneIngestSupervisorState(id)
+		db.ingestSupervisor.prune(id)
 		if db.metrics != nil {
 			db.metrics.WorkerReplaced("ingest", id)
 		}
@@ -312,7 +312,7 @@ func (db *DB) cancelIngestWorker(id string) *workerHandle {
 	// absent-cancel — both mean this id's config is GONE. Drop its supervisor
 	// give-up state so a later recreate of the same id starts with a fresh
 	// restart budget (and the state map stays bounded).
-	db.pruneIngestSupervisorState(id)
+	db.ingestSupervisor.prune(id)
 
 	if !ok || handle.ingestable == nil {
 		return nil // no worker built on this node — nothing to clean up
@@ -456,7 +456,7 @@ func (db *DB) IngestableStatus(ctx context.Context, id string) (cluster.Ingestab
 	// replicated terminal parked state above). The phase/position still reflect
 	// where it wedged; workerState is the health headline.
 	st.WorkerState = cluster.WorkerStateRunning
-	if db.isIngestFrozen(id) {
+	if db.ingestSupervisor.isFrozen(id) {
 		st.WorkerState = cluster.WorkerStateRecovering
 	}
 	return st, nil
@@ -542,7 +542,7 @@ func (db *DB) spawnIngestWorkerLocked(id string, i cluster.Ingestable) *workerHa
 			// The worker froze and the supervisor is about to restart it — mark it
 			// recovering (node-local) so the status endpoint stops reporting a live
 			// "streaming" phase for a worker that is actually wedged and retrying.
-			db.setIngestFrozen(id, true)
+			db.ingestSupervisor.setFrozen(id, true)
 			go db.superviseRestartIngest(id, i, handle)
 		}
 	}()
@@ -551,44 +551,17 @@ func (db *DB) spawnIngestWorkerLocked(id string, i cluster.Ingestable) *workerHa
 }
 
 // clearIngestFrozen marks id un-frozen after the worker makes durable progress
-// (a checkpoint advanced past a freeze). Idempotent and nil-safe. The supervisor
-// no longer clears the gauge on restart — a restart is not recovery — so this
-// progress signal is what un-sets it. It fires only on a committed checkpoint,
-// which a poison proposal blocks, so it never flaps against the freeze that set
-// the gauge.
+// (a checkpoint advanced past a freeze), and clears the matching gauge — the
+// flag/gauge pairing is the one composition the supervisor's setFrozen doesn't
+// own. The supervisor no longer clears the gauge on restart — a restart is not
+// recovery — so this progress signal is what un-sets it. It fires only on a
+// committed checkpoint, which a poison proposal blocks, so it never flaps
+// against the freeze that set the gauge.
 func (db *DB) clearIngestFrozen(id string) {
-	db.setIngestFrozen(id, false)
+	db.ingestSupervisor.setFrozen(id, false)
 	if db.metrics != nil {
 		db.metrics.IngestFrozen(id, false)
 	}
-}
-
-// setIngestFrozen sets or clears id's node-local frozen flag — the "recovering"
-// state the status endpoint reports for a live worker on this node. Node-local by
-// design: recovering is a LIVE state tied to the owner running the worker (a
-// follower has no worker to recover), so it rides ingest's node-local live-status
-// model rather than the replicated terminal parked record. Tracked independently of
-// the committed.ingest.frozen gauge (a no-op when no metrics endpoint is wired — the
-// common beta case), so the status endpoint works regardless.
-func (db *DB) setIngestFrozen(id string, frozen bool) {
-	db.ingestFrozenMu.Lock()
-	defer db.ingestFrozenMu.Unlock()
-	if frozen {
-		if db.ingestFrozen == nil {
-			db.ingestFrozen = make(map[string]bool)
-		}
-		db.ingestFrozen[id] = true
-		return
-	}
-	delete(db.ingestFrozen, id)
-}
-
-// isIngestFrozen reports whether id's worker is currently frozen/recovering on this
-// node (the supervisor is restarting it).
-func (db *DB) isIngestFrozen(id string) bool {
-	db.ingestFrozenMu.Lock()
-	defer db.ingestFrozenMu.Unlock()
-	return db.ingestFrozen[id]
 }
 
 // proposalTopic returns the topic/type id of a proposal's first entity for

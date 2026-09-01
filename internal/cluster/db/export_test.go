@@ -418,16 +418,16 @@ func (db *DB) WaitForAnyWaiterForTest(timeout time.Duration) uint64 {
 // is the post-increment freeze count for this id; giveup is true once
 // the count exceeds the configured max-attempts cap.
 func (db *DB) RecordFreezeAndNextBackoffForTest(id string, pos cluster.Position) (backoff time.Duration, consecutive int, giveup bool) {
-	return db.recordFreezeAndNextBackoff(id, pos)
+	return db.ingestSupervisor.recordFreezeAndNextBackoff(id, pos)
 }
 
 // SupervisorStateExistsForTest reports whether the supervisor still holds
 // give-up bookkeeping for id — used to pin that a config delete prunes it
 // (bounding the map and granting a recreated id a fresh budget).
 func (db *DB) SupervisorStateExistsForTest(id string) bool {
-	db.ingestSupervisorMu.Lock()
-	defer db.ingestSupervisorMu.Unlock()
-	_, ok := db.ingestSupervisorStates[id]
+	db.ingestSupervisor.mu.Lock()
+	defer db.ingestSupervisor.mu.Unlock()
+	_, ok := db.ingestSupervisor.states[id]
 	return ok
 }
 
@@ -627,8 +627,8 @@ func (db *DB) SetAfterIngestSupervisorRestartForTest(fn func(frozenCtxErr error)
 // decision + terminal cleanup directly, mirroring TestIngestSupervisor_BackoffAndGiveup.
 func (db *DB) SuperviseRestartIngestGiveupForTest(id string, i cluster.Ingestable) error {
 	pos := db.storage.Position(id)
-	for k := 0; k < db.ingestSupervisorMaxAttempts; k++ {
-		db.recordFreezeAndNextBackoff(id, pos)
+	for k := 0; k < db.ingestSupervisor.maxAttempts; k++ {
+		db.ingestSupervisor.recordFreezeAndNextBackoff(id, pos)
 	}
 	ctx, cancel := context.WithCancel(db.ctx)
 	done := make(chan struct{})
