@@ -16,7 +16,7 @@ func (h *HTTP) Scrub(w httpgo.ResponseWriter, r *httpgo.Request) {
 	// 507 (scrub is admission-config-class, rejected at disk-full) and a deadline is
 	// a 503 — not the opaque 500 a hand-rolled switch produced. rebuild/config cases
 	// are inert for a scrub.
-	if err := h.c.Scrub(r.Context()); err != nil {
+	if err := h.db.Scrub(r.Context()); err != nil {
 		writeProposeError(w, err, "scrub", "request scrub")
 		return
 	}

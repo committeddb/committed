@@ -3,6 +3,8 @@ package http
 import (
 	"encoding/json"
 	httpgo "net/http"
+
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 // NodeStatusResponse is the body of GET /node/status — per-node
@@ -85,37 +87,24 @@ type ScrubStatusResponse struct {
 // gauge, which can alert "node N has a degraded config" but can't say which
 // or why. A healthy node returns an empty degradedConfigs array.
 func (h *HTTP) NodeStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
-	errs := h.c.ConfigBuildErrors()
-	degraded := make([]DegradedConfigResponse, 0, len(errs))
-	for _, e := range errs {
-		degraded = append(degraded, DegradedConfigResponse{Kind: e.Kind, ID: e.ID, Error: e.Error})
-	}
+	degraded := degradedConfigsResponse(h.db.ConfigBuildErrors())
 
-	admission := h.c.DiskAdmission()
+	admission := h.db.DiskAdmission()
 	resp := NodeStatusResponse{
-		Node:            h.c.ID(),
-		Leader:          h.c.Leader(),
-		AppliedIndex:    h.c.AppliedIndex(),
+		Node:            h.db.ID(),
+		Leader:          h.db.Leader(),
+		AppliedIndex:    h.db.AppliedIndex(),
 		DegradedConfigs: degraded,
-		SafeMode:        h.c.SafeMode(),
+		SafeMode:        h.db.SafeMode(),
 		Scrub: func() ScrubStatusResponse {
-			s := h.c.ScrubStatus()
+			s := h.db.ScrubStatus()
 			return ScrubStatusResponse{
 				PendingBound:             s.PendingBound,
 				CompletedBound:           s.CompletedBound,
 				PendingDeleteKeyErasures: s.PendingDeleteKeyErasures,
 			}
 		}(),
-		Disk: DiskStatusResponse{
-			State: h.c.DiskState(),
-			Admission: DiskAdmissionResponse{
-				Admitted: admission.Admitted,
-				State:    admission.State,
-				Reason:   admission.Reason,
-				Source:   admission.Source,
-				Leader:   admission.LeaderID,
-			},
-		},
+		Disk: diskStatusResponse(h.db.DiskState(), admission),
 	}
 
 	bs, err := json.Marshal(resp)
@@ -124,4 +113,37 @@ func (h *HTTP) NodeStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 	writeJson(w, bs)
+}
+
+// degradedConfigsResponse renders the node-local build failures. The empty
+// slice (never nil) is load-bearing: a JSON null would force every client to
+// special-case it. A free function so the rendering is testable directly —
+// inducing a real build failure needs an engine restart with a ${VAR}
+// removed, which the status tests do not pay for.
+func degradedConfigsResponse(errs []cluster.ConfigBuildError) []DegradedConfigResponse {
+	degraded := make([]DegradedConfigResponse, 0, len(errs))
+	for _, e := range errs {
+		degraded = append(degraded, DegradedConfigResponse{Kind: e.Kind, ID: e.ID, Error: e.Error})
+	}
+	return degraded
+}
+
+// diskStatusResponse renders the node's disk block: the LOCAL disk level
+// next to the admission decision the gate is applying (which can
+// legitimately diverge — a cluster verdict can admit while the local disk
+// reads full, and vice versa). A free function so both shapes are testable
+// directly — driving the real disk watcher through its levels means
+// manipulating real disk-usage thresholds, which the status tests do not
+// pay for.
+func diskStatusResponse(state string, admission cluster.DiskAdmissionStatus) DiskStatusResponse {
+	return DiskStatusResponse{
+		State: state,
+		Admission: DiskAdmissionResponse{
+			Admitted: admission.Admitted,
+			State:    admission.State,
+			Reason:   admission.Reason,
+			Source:   admission.Source,
+			Leader:   admission.LeaderID,
+		},
+	}
 }

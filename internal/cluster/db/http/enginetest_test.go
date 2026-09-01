@@ -86,6 +86,13 @@ const engineTestTick = 1 * time.Millisecond
 // milliseconds so wedge-detection tests don't wait the production debounce.
 func newEngine(t *testing.T) *engine {
 	t.Helper()
+	return newEngineOpts(t)
+}
+
+// newEngineOpts is newEngine with extra engine options appended (e.g.
+// db.WithSafeMode for the safe-mode status surface).
+func newEngineOpts(t *testing.T, extra ...db.Option) *engine {
+	t.Helper()
 	p := parser.New()
 	sink := &recorderSink{}
 	recParser := &clusterfakes.FakeSyncableParser{}
@@ -102,10 +109,12 @@ func newEngine(t *testing.T) *engine {
 	require.NoError(t, err)
 
 	peers := db.Peers{1: ""} // no listener: single node, nothing to receive
-	d := db.New(1, peers, s, p, syncCh, ingestCh,
+	opts := append([]db.Option{
 		db.WithTickInterval(engineTestTick),
 		db.WithTransportFactory(httptransport.Factory()),
-		db.WithSyncStuckThreshold(50*time.Millisecond))
+		db.WithSyncStuckThreshold(50 * time.Millisecond),
+	}, extra...)
+	d := db.New(1, peers, s, p, syncCh, ingestCh, opts...)
 	t.Cleanup(func() { _ = d.Close(); _ = s.Close() })
 
 	// Wait out the single-node election: leader-pinned routes (rebuild,

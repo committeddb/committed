@@ -3,6 +3,8 @@ package http
 import (
 	"encoding/json"
 	httpgo "net/http"
+
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 // ClusterStatusResponse is the body of GET /cluster/status — cluster-wide state
@@ -35,21 +37,30 @@ func (h *HTTP) ClusterStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 
-	parked, err := h.c.ParkedWorkers()
+	parked, err := h.db.ParkedWorkers()
 	if err != nil {
 		writeInternalError(w, "failed to retrieve parked workers", err)
 		return
 	}
-	parkedResp := make([]ParkedWorkerResponse, 0, len(parked))
-	for _, p := range parked {
-		parkedResp = append(parkedResp, ParkedWorkerResponse{Kind: p.Kind, ID: p.ID})
-	}
 
-	resp := ClusterStatusResponse{ParkedWorkers: parkedResp}
+	resp := ClusterStatusResponse{ParkedWorkers: parkedWorkersResponse(parked)}
 	bs, err := json.Marshal(resp)
 	if err != nil {
 		writeInternalError(w, "failed to marshal response", err)
 		return
 	}
 	writeJson(w, bs)
+}
+
+// parkedWorkersResponse renders the replicated parked-worker records; the
+// empty slice (never nil) lets clients iterate without a nil check. A free
+// function so the rendering is testable directly — parking a worker for
+// real means tripping the circuit breaker, which the status tests do not
+// pay for.
+func parkedWorkersResponse(parked []cluster.ParkedWorker) []ParkedWorkerResponse {
+	out := make([]ParkedWorkerResponse, 0, len(parked))
+	for _, p := range parked {
+		out = append(out, ParkedWorkerResponse{Kind: p.Kind, ID: p.ID})
+	}
+	return out
 }

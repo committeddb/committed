@@ -50,14 +50,9 @@ func (h *HTTP) DiskReport(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 
-	verdict, err := h.c.ReportDisk(req.Node, req.State)
+	verdict, err := h.db.ReportDisk(req.Node, req.State)
 	if err != nil {
-		if errors.Is(err, cluster.ErrNotLeader) {
-			writeLeaderUnavailable(w, verdict.LeaderID,
-				"disk reports are aggregated on the leader; re-resolve the leader and retry")
-			return
-		}
-		writeError(w, httpgo.StatusBadRequest, "invalid_disk_report", err.Error())
+		writeDiskReportError(w, verdict, err)
 		return
 	}
 
@@ -71,4 +66,17 @@ func (h *HTTP) DiskReport(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 	writeJson(w, bs)
+}
+
+// writeDiskReportError maps a ReportDisk failure. A free function so the
+// not-leader row is testable directly — a single-node engine is always the
+// leader, so the 503 leg cannot be induced for real here (the reporter's
+// re-resolve behavior is covered on the db side).
+func writeDiskReportError(w httpgo.ResponseWriter, verdict cluster.DiskVerdict, err error) {
+	if errors.Is(err, cluster.ErrNotLeader) {
+		writeLeaderUnavailable(w, verdict.LeaderID,
+			"disk reports are aggregated on the leader; re-resolve the leader and retry")
+		return
+	}
+	writeError(w, httpgo.StatusBadRequest, "invalid_disk_report", err.Error())
 }

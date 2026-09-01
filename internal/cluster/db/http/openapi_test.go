@@ -329,46 +329,6 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 				fake.ResolveTypeReturns(sampleType(), nil)
 			},
 		},
-
-		// --- node ---
-		{
-			name:   "GET /node/status",
-			method: httpgo.MethodGet,
-			path:   "/v1/node/status",
-			setup: func(fake *clusterfakes.FakeCluster) {
-				fake.IDReturns(2)
-				fake.LeaderReturns(1)
-				fake.AppliedIndexReturns(42)
-				fake.ConfigBuildErrorsReturns([]cluster.ConfigBuildError{
-					{Kind: "database", ID: "orders-warehouse", Error: "missing environment variable ${WAREHOUSE_PW}"},
-				})
-				fake.DiskStateReturns("ok")
-				fake.DiskAdmissionReturns(cluster.DiskAdmissionStatus{
-					Admitted: true, State: "ok", Source: "cluster", LeaderID: 1,
-				})
-			},
-		},
-		{
-			name:   "GET /cluster/status",
-			method: httpgo.MethodGet,
-			path:   "/v1/cluster/status",
-			setup: func(fake *clusterfakes.FakeCluster) {
-				fake.ParkedWorkersReturns([]cluster.ParkedWorker{
-					{Kind: "sync", ID: "orders-sync"},
-					{Kind: "ingest", ID: "catalog-ingest"},
-				}, nil)
-			},
-		},
-		{
-			name:        "POST /node/disk-report",
-			method:      httpgo.MethodPost,
-			path:        "/v1/node/disk-report",
-			contentType: "application/json",
-			body:        `{"node":2,"state":"warn"}`,
-			setup: func(fake *clusterfakes.FakeCluster) {
-				fake.ReportDiskReturns(cluster.DiskVerdict{State: "ok", Reason: "", LeaderID: 1}, nil)
-			},
-		},
 	}
 
 	for _, tc := range cases {
@@ -399,12 +359,12 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 		})
 	}
 
-	// --- syncable (real engine) ---
-	// The syncable handler group holds the engine concretely (no fake seam),
-	// so its rows validate against a real single-node engine seeded through
+	// --- engine-backed groups (real engine) ---
+	// Migrated handler groups hold the engine concretely (no fake seam), so
+	// their rows validate against a real single-node engine seeded through
 	// the plugin seam; dynamic values (the replayable dead-letter index) come
 	// from the seeding itself.
-	t.Run("syncable (real engine)", func(t *testing.T) {
+	t.Run("engine-backed groups (real engine)", func(t *testing.T) {
 		e := newEngine(t)
 		e.addType(t, "photos", "photos")
 		e.addRecorderSyncable(t, "rec-1", "photos")
@@ -435,6 +395,14 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 			pre                                   func(t *testing.T)
 		}{
 			{name: "GET /syncable", method: httpgo.MethodGet, path: "/v1/syncable"},
+			{name: "GET /node/status", method: httpgo.MethodGet, path: "/v1/node/status"},
+			{name: "GET /cluster/status", method: httpgo.MethodGet, path: "/v1/cluster/status"},
+			{name: "POST /scrub", method: httpgo.MethodPost, path: "/v1/scrub"},
+			{
+				name: "POST /node/disk-report", method: httpgo.MethodPost,
+				path: "/v1/node/disk-report", contentType: "application/json",
+				body: `{"node":1,"state":"warn"}`,
+			},
 			{
 				name: "POST /syncable/{id}", method: httpgo.MethodPost, path: "/v1/syncable/rec-2",
 				contentType: "text/toml",

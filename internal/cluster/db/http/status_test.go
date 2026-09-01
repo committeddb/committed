@@ -10,88 +10,50 @@ import (
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/clusterfakes"
+	"github.com/committeddb/committed/internal/cluster/db"
 	"github.com/committeddb/committed/internal/cluster/db/http"
 )
 
-func doNodeStatus(t *testing.T, h *http.HTTP) (int, http.NodeStatusResponse) {
+func doNodeStatus(t *testing.T, e *engine) (int, http.NodeStatusResponse) {
 	t.Helper()
-	req := httptest.NewRequest("GET", "http://localhost/v1/node/status", nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	resp := w.Result()
-	require.Equal(t, "application/json", resp.Header.Get("Content-Type"))
-	bs, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-
+	w := e.doEmpty(t, "GET", "/v1/node/status")
+	require.Equal(t, "application/json", w.Result().Header.Get("Content-Type"))
 	var body http.NodeStatusResponse
-	require.NoError(t, json.Unmarshal(bs, &body))
-	return resp.StatusCode, body
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	return w.Code, body
 }
 
-// TestNodeStatus_Healthy verifies a node with no degraded configs reports
-// its raft identity and an empty (non-null) degradedConfigs array. The
-// empty-array guarantee matters: a JSON null would force every client to
-// special-case it.
+// TestNodeStatus_Healthy: a real, healthy single-node engine reports its
+// raft identity, an empty (non-null) degradedConfigs array, a resting scrub
+// block, and a disk block. The empty-array guarantee matters: a JSON null
+// would force every client to special-case it.
 func TestNodeStatus_Healthy(t *testing.T) {
-	fake := &clusterfakes.FakeCluster{}
-	fake.IDReturns(2)
-	fake.LeaderReturns(1)
-	fake.AppliedIndexReturns(42)
-	// ConfigBuildErrors defaults to returning nil — a healthy node.
-	h := http.New(fake)
+	e := newEngine(t)
+	e.addType(t, "photos", "photos") // advance the applied index past boot
 
-	status, body := doNodeStatus(t, h)
+	status, body := doNodeStatus(t, e)
 
 	require.Equal(t, 200, status)
-	require.Equal(t, uint64(2), body.Node)
+	require.Equal(t, uint64(1), body.Node)
 	require.Equal(t, uint64(1), body.Leader)
-	require.Equal(t, uint64(42), body.AppliedIndex)
+	require.NotZero(t, body.AppliedIndex)
 	require.NotNil(t, body.DegradedConfigs, "degradedConfigs must be [] not null")
 	require.Empty(t, body.DegradedConfigs)
 	require.False(t, body.SafeMode, "a normal boot must not report safe mode")
+	require.Zero(t, body.Scrub.PendingDeleteKeyErasures, "nothing pending on a fresh log")
+	require.NotEmpty(t, body.Disk.Admission.State, "the disk admission block is always present")
 }
 
-// TestNodeStatus_SafeMode verifies a node booted with COMMITTED_SAFE_MODE
-// reports it — the operator's confirmation that workers are deliberately
-// held, not mysteriously absent.
+// TestNodeStatus_SafeMode: a node booted with safe mode reports it — the
+// operator's confirmation that workers are deliberately held, not
+// mysteriously absent.
 func TestNodeStatus_SafeMode(t *testing.T) {
-	fake := &clusterfakes.FakeCluster{}
-	fake.IDReturns(2)
-	fake.SafeModeReturns(true)
-	h := http.New(fake)
+	e := newEngineOpts(t, db.WithSafeMode())
 
-	status, body := doNodeStatus(t, h)
+	status, body := doNodeStatus(t, e)
 
 	require.Equal(t, 200, status)
 	require.True(t, body.SafeMode)
-}
-
-// TestNodeStatus_Degraded verifies a node with a config it could not build
-// lists it (kind, id, error) and that the error names the missing ${VAR}.
-// node identifies the answering node so an operator behind a load balancer
-// knows which node is degraded.
-func TestNodeStatus_Degraded(t *testing.T) {
-	fake := &clusterfakes.FakeCluster{}
-	fake.IDReturns(3)
-	fake.LeaderReturns(1)
-	fake.AppliedIndexReturns(99)
-	fake.ConfigBuildErrorsReturns([]cluster.ConfigBuildError{
-		{Kind: "database", ID: "orders-warehouse", Error: "missing environment variable ${WAREHOUSE_PW}"},
-	})
-	h := http.New(fake)
-
-	status, body := doNodeStatus(t, h)
-
-	require.Equal(t, 200, status)
-	require.Equal(t, uint64(3), body.Node)
-	require.Len(t, body.DegradedConfigs, 1)
-	require.Equal(t, http.DegradedConfigResponse{
-		Kind:  "database",
-		ID:    "orders-warehouse",
-		Error: "missing environment variable ${WAREHOUSE_PW}",
-	}, body.DegradedConfigs[0])
-	require.Contains(t, body.DegradedConfigs[0].Error, "${WAREHOUSE_PW}")
 }
 
 // TestReady_StaysReadyWhenConfigDegraded locks in the invariant from the
@@ -101,6 +63,7 @@ func TestNodeStatus_Degraded(t *testing.T) {
 // availability hit config-apply-decouple removed by degrading instead of
 // crashing. /ready gates only on leader + applied index, never on the
 // degraded set, so the diagnosis lives on the authenticated /node/status.
+// (health.go is not yet engine-backed, so this drives the fake directly.)
 func TestReady_StaysReadyWhenConfigDegraded(t *testing.T) {
 	fake := &clusterfakes.FakeCluster{}
 	fake.LeaderReturns(1)

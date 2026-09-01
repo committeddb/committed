@@ -46,16 +46,6 @@ type Cluster interface {
 	// disk. A later same-id create starts fresh from a full snapshot.
 	DeleteIngestable(ctx context.Context, id string) error
 	ProposeDatabase(ctx context.Context, c *Configuration) error
-	// Scrub requests physical removal of already-delete-proposed (RTBF)
-	// entities from the permanent event log up to the current applied index.
-	// It proposes a Scrub command through Raft and returns once the command has
-	// been applied (the rewrite then runs in the background on every node).
-	// Idempotent and safe to call repeatedly: it only ever removes entities a
-	// delete proposal already requested be forgotten. The automatic scheduler
-	// calls this on a cadence; the manual lever (POST /v1/scrub) calls it on
-	// demand for SLA-expedited erasure. See docs/event-log-architecture.md
-	// § "Right-to-be-forgotten / deletes".
-	Scrub(ctx context.Context) error
 	// ResolveType returns the Type identified by ref. A TypeRef with
 	// Version 0 (constructed via LatestTypeRef) resolves to whatever is
 	// current; a TypeRef pinned to a specific version (TypeRefAt)
@@ -198,12 +188,6 @@ type Cluster interface {
 	// silently fallen behind. Reads that explicitly opt out
 	// (?consistency=stale) skip it.
 	LinearizableRead(ctx context.Context) error
-	// ScrubStatus reports this node's right-to-be-forgotten scrub progress:
-	// the highest requested bound, the highest bound this node has finished
-	// rewriting to, and whether an eligible un-erased delete key remains.
-	// Node-local (each node rewrites its own log) — the runbook's
-	// verification loop polls it on every node. Part of GET /node/status.
-	ScrubStatus() ScrubStatus
 	// ConfigBuildErrors returns the configs this node persisted but could
 	// not build into live objects (degraded — a node-local condition,
 	// usually a missing ${VAR} secret). The raw config bytes are valid and
@@ -212,34 +196,4 @@ type Cluster interface {
 	// /node/status, the queryable counterpart of the
 	// committed_config_build_errors gauge.
 	ConfigBuildErrors() []ConfigBuildError
-	// ParkedWorkers lists every worker (sync or ingest) that has TERMINALLY parked
-	// and needs operator intervention, from replicated state — so any node answers
-	// identically (unlike ConfigBuildErrors, which is node-local). Powers the GET
-	// /node/status worker summary, the queryable counterpart of the
-	// committed_worker_parked gauge; a healthy cluster returns none.
-	ParkedWorkers() ([]ParkedWorker, error)
-	// ReportDisk records member nodeID's node-local disk-pressure level
-	// ("ok", "warn", "critical", or "full") on this node and returns the
-	// cluster write-admission verdict computed from all the collected
-	// states. Only the leader aggregates reports; on any other node it
-	// returns ErrNotLeader and the reporter should re-resolve the leader.
-	// Powers POST /v1/node/disk-report — the push half of cluster-aware
-	// disk admission (the verdict in the response is the pull half).
-	ReportDisk(nodeID uint64, state string) (DiskVerdict, error)
-	// DiskAdmission returns this node's current view of write admission:
-	// the decision its propose gate is applying right now, whether sourced
-	// from a fresh leader-computed cluster verdict or from the node-local
-	// fallback. Powers GET /node/status.
-	DiskAdmission() DiskAdmissionStatus
-	// DiskState returns this node's own disk-pressure level ("ok", "warn",
-	// "critical", or "full") as last sampled by the local disk watcher.
-	// Node-local diagnostics for GET /node/status, distinct from the
-	// cluster-wide verdict DiskAdmission reports.
-	DiskState() string
-	// SafeMode reports whether THIS node booted with COMMITTED_SAFE_MODE —
-	// sync/ingest/scrub workers held, everything else normal. Node-local
-	// and ephemeral (per-boot, never replicated); powers GET /node/status
-	// so an operator can confirm the escape hatch is active instead of
-	// wondering why workers aren't running.
-	SafeMode() bool
 }
