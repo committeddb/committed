@@ -115,6 +115,39 @@ func TestRepairLog_RefusesMidLogCorruption(t *testing.T) {
 	require.Equal(t, before, after, "a corrupt (non-torn) log must never be modified")
 }
 
+// TestRepairLog_MagicCorruptionIsCorruptionNotValid pins the classification
+// strict framing changed FOR repair: a structurally-complete record whose
+// frame MAGIC is corrupted used to slip through the legacy passthrough as a
+// "valid" record — the repair tool itself missing real corruption. With
+// unframed bytes rejected, it is what it always was: data corruption on a
+// complete record — refuse to touch it, point at a rebuild — never a torn
+// tail, never valid.
+func TestRepairLog_MagicCorruptionIsCorruptionNotValid(t *testing.T) {
+	dir := t.TempDir()
+	payloads := [][]byte{[]byte("alpha"), []byte("bravo"), []byte("charlie")}
+	segPath := writeSegment(t, dir, 1, payloads)
+
+	raw, err := os.ReadFile(segPath)
+	require.NoError(t, err)
+	// Destroy the frame magic of record 1: the record stays structurally
+	// complete (length prefix intact) but carries no valid frame.
+	magicPos := len(encodeRecord(payloads[0])) + (len(encodeRecord(payloads[1])) - len(frame(payloads[1])))
+	raw[magicPos] ^= 0xFF
+	require.NoError(t, os.WriteFile(segPath, raw, 0o600))
+
+	before, err := os.ReadFile(segPath)
+	require.NoError(t, err)
+
+	d, err := RepairLog(dir, true)
+	require.NoError(t, err)
+	require.Equal(t, LogCorrupt, d.Status)
+	require.False(t, d.Repaired)
+
+	after, err := os.ReadFile(segPath)
+	require.NoError(t, err)
+	require.Equal(t, before, after, "magic corruption is data corruption — never modified, never counted valid")
+}
+
 // TestDiagnoseLog_Clean: a fully valid log reports clean with the record count.
 func TestDiagnoseLog_Clean(t *testing.T) {
 	dir := t.TempDir()

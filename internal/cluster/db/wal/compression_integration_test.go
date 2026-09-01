@@ -69,10 +69,12 @@ func TestEventLogCompression_SealerAndReadBack(t *testing.T) {
 	verify := func(st *Storage) {
 		t.Helper()
 		for i := 1; i <= n; i++ {
-			raw, rerr := st.readEventAt(uint64(i))
+			// readEventAt verifies and strips the checksum frame itself; a
+			// second unframe here would reject the bare payload now that
+			// unframed bytes fail loudly (the removed legacy passthrough
+			// silently tolerated the old double-unframe).
+			entry, rerr := st.readEventAt(uint64(i))
 			require.NoError(t, rerr, "event %d", i)
-			entry, uerr := unframe(raw)
-			require.NoError(t, uerr, "event %d", i)
 			require.Contains(t, string(entry), fmt.Sprintf(`{"entity_id":%d,`, i))
 		}
 	}
@@ -119,10 +121,8 @@ func TestEventLogCompression_DecompressNodeRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = s2.Close() }()
 	for i := 1; i <= n; i++ {
-		raw, rerr := s2.readEventAt(uint64(i))
+		entry, rerr := s2.readEventAt(uint64(i)) // unframes internally — see verify above
 		require.NoError(t, rerr)
-		entry, uerr := unframe(raw)
-		require.NoError(t, uerr)
 		require.Contains(t, string(entry), fmt.Sprintf(`{"entity_id":%d,`, i))
 	}
 }

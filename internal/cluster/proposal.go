@@ -362,9 +362,9 @@ func (p *Proposal) Marshal() ([]byte, error) {
 			},
 		}
 		// Every entity is encoded as exactly one body variant — the typed
-		// control envelope. The legacy flat fields are decode-only (see
-		// unmarshal); the delete sentinel exists only in memory, never on the
-		// wire (the Delete variant is explicit).
+		// control envelope (the pre-envelope flat fields are reserved tags
+		// now; see logEntityView); the delete sentinel exists only in
+		// memory, never on the wire (the Delete variant is explicit).
 		switch e.Variant() {
 		case EntityVariantRefresh:
 			le.Body = &clusterpb.LogEntity_Refresh{Refresh: &clusterpb.LogRefresh{Generation: e.Generation}}

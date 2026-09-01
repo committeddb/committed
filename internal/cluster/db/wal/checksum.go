@@ -19,14 +19,13 @@ var ErrCorruptEntry = cluster.ErrCorruptEntry
 //
 //	[magic 0xC0 'C' 'L'][version 0x01][crc32c BE, 4 bytes][payload...]
 //
-// The magic's first byte (0xC0) is the forward-compat discriminator. No
-// payload we have ever written can begin with it: a marshaled raftpb.Entry
-// (entry + event logs) always starts with 0x08, and a gob-encoded State
-// (state log) always starts with 0x24. So unframe can tell a new v1 frame
-// from a legacy un-checksummed entry by the leading byte alone, with no
-// persisted format flag — which means the scheme also survives snapshot
-// restore and compaction untouched. Legacy entries are read unverified
-// ("trust on first read") and age out as the log compacts.
+// Framing shipped in v0.5-beta and every write path frames, so every log a
+// supported deployment can hold (data-dir floor: 0.7.3-beta) is fully
+// framed. The un-checksummed "trust on first read" passthrough that once
+// admitted pre-framing bytes is REMOVED: absent or torn magic is corruption
+// and fails loudly (ErrCorruptEntry) — which also closes the old scheme's
+// documented limitation, where corruption landing in the magic bytes
+// silently downgraded an entry to "legacy" and skipped verification.
 var (
 	frameMagic   = [3]byte{0xC0, 'C', 'L'}
 	frameVersion = byte(0x01)
@@ -49,21 +48,18 @@ func frame(payload []byte) []byte {
 	return out
 }
 
-// unframe inverts frame. When raw carries the v1 magic it verifies the
-// CRC32C and returns the payload, or ErrCorruptEntry on mismatch / unknown
-// version / a header too short to be valid. When the magic is absent the
-// bytes are a legacy un-checksummed entry and are returned unchanged with a
-// nil error (trust on first read).
+// unframe inverts frame: it verifies the v1 magic, version, and CRC32C and
+// returns the payload, or ErrCorruptEntry for anything else — a mismatched
+// checksum, an unknown version, a torn header, or bytes with no frame at
+// all. Unframed bytes can only be corruption or a pre-v0.5-beta log, which
+// sits far below the supported data-dir floor (0.7.3-beta; see
+// docs/api-compatibility.md) — never trusted content.
 //
 // The returned payload aliases raw (no copy); callers that retain it past
 // the next Read on a NoCopy log must copy. Today every caller unmarshals
 // immediately, matching the prior `log.Read` behaviour.
 func unframe(raw []byte) ([]byte, error) {
-	if len(raw) < 3 || raw[0] != frameMagic[0] || raw[1] != frameMagic[1] || raw[2] != frameMagic[2] {
-		// No magic: legacy entry written before checksums existed.
-		return raw, nil
-	}
-	if len(raw) < frameHeaderSize || raw[3] != frameVersion {
+	if len(raw) < frameHeaderSize || raw[0] != frameMagic[0] || raw[1] != frameMagic[1] || raw[2] != frameMagic[2] || raw[3] != frameVersion {
 		return nil, ErrCorruptEntry
 	}
 	payload := raw[frameHeaderSize:]
