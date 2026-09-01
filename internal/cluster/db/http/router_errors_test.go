@@ -7,7 +7,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/clusterfakes"
 	"github.com/committeddb/committed/internal/cluster/db/http"
 )
@@ -62,23 +61,11 @@ func TestUnmatchedV1RequiresAuth(t *testing.T) {
 	require.Contains(t, w.Body.String(), `"code":"not_found"`)
 }
 
-// R3-HTTP-3: rollback reads the target version through the same linearizable-read
-// barrier getVersion uses, so a lagging follower doesn't spuriously 404 a version
-// it simply hasn't applied yet. Assert the read-index confirmation runs before
-// the target-version read.
-func TestRollback_RunsLinearizableRead(t *testing.T) {
-	cfg := &cluster.Configuration{ID: "res-1", MimeType: "text/toml", Data: []byte("old")}
-	h, fake := setupTest()
-	fake.DatabaseVersionReturns(cfg, nil)
-
-	req := httptest.NewRequest("POST", "http://localhost/v1/database/res-1/rollback?to=1", nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	require.Equal(t, 200, w.Code)
-	require.Equal(t, 1, fake.LinearizableReadCallCount(),
-		"rollback must confirm a linearizable read before reading the target version")
-}
+// R3-HTTP-3 (rollback linearizes before reading the target version) is now
+// exercised against the real engine: every migrated rollback route
+// (database/ingestable/syncable) goes through the shared rollback() ->
+// linearize barrier, and the consistency contract itself is pinned in
+// consistency_test.go on the type surface.
 
 // R3-HTTP-6: an empty-entities proposal is a client error, not a committed no-op
 // raft entry — reject it with 400 rather than proposing nothing.
@@ -103,13 +90,13 @@ func TestCreateConfig_ContentTypeParamsStripped(t *testing.T) {
 	fake := &clusterfakes.FakeCluster{}
 	h := http.New(fake)
 
-	req := httptest.NewRequest("POST", "http://localhost/v1/database/db-1", strings.NewReader(`name = "x"`))
+	req := httptest.NewRequest("POST", "http://localhost/v1/type/type-1", strings.NewReader(`name = "x"`))
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
 	require.Equal(t, 200, w.Code)
-	require.Equal(t, 1, fake.ProposeDatabaseCallCount())
-	_, cfg := fake.ProposeDatabaseArgsForCall(0)
+	require.Equal(t, 1, fake.ProposeTypeCallCount())
+	_, cfg, _ := fake.ProposeTypeArgsForCall(0)
 	require.Equal(t, "application/json", cfg.MimeType, "the charset parameter must be stripped")
 }

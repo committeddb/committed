@@ -8,7 +8,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/clusterfakes"
 	"github.com/committeddb/committed/internal/cluster/db"
 	"github.com/committeddb/committed/internal/cluster/db/http"
@@ -68,9 +67,6 @@ func TestReady_StaysReadyWhenConfigDegraded(t *testing.T) {
 	fake := &clusterfakes.FakeCluster{}
 	fake.LeaderReturns(1)
 	fake.AppliedIndexReturns(7)
-	fake.ConfigBuildErrorsReturns([]cluster.ConfigBuildError{
-		{Kind: "database", ID: "orders-warehouse", Error: "missing environment variable ${WAREHOUSE_PW}"},
-	})
 	h := http.New(fake)
 
 	req := httptest.NewRequest("GET", "http://localhost/ready", nil)
@@ -86,6 +82,7 @@ func TestReady_StaysReadyWhenConfigDegraded(t *testing.T) {
 	require.NoError(t, json.Unmarshal(bs, &body))
 	require.Equal(t, "ok", body.Status)
 
-	// /ready must not consult the degraded set at all.
-	require.Equal(t, 0, fake.ConfigBuildErrorsCallCount())
+	// /ready cannot consult the degraded set at all any more: the aggregated
+	// interface no longer carries ConfigBuildErrors — the invariant is now
+	// structural, enforced by the compiler rather than a call count.
 }

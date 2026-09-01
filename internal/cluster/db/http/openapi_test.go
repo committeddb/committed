@@ -147,98 +147,6 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 			},
 		},
 
-		// --- database ---
-		{
-			name:   "GET /database",
-			method: httpgo.MethodGet,
-			path:   "/v1/database",
-			setup: func(fake *clusterfakes.FakeCluster) {
-				fake.DatabasesReturns([]*cluster.Configuration{sampleConfig("db-1")}, nil)
-			},
-		},
-		{
-			name:        "POST /database/{id}",
-			method:      httpgo.MethodPost,
-			path:        "/v1/database/db-1",
-			body:        "[config]\nvalue = \"x\"",
-			contentType: "text/toml",
-		},
-		{
-			name:   "GET /database/{id}/versions",
-			method: httpgo.MethodGet,
-			path:   "/v1/database/db-1/versions",
-			setup: func(fake *clusterfakes.FakeCluster) {
-				fake.DatabaseVersionsReturns(sampleVersions(), nil)
-			},
-		},
-		{
-			name:   "GET /database/{id}/versions/{version}",
-			method: httpgo.MethodGet,
-			path:   "/v1/database/db-1/versions/1",
-			setup: func(fake *clusterfakes.FakeCluster) {
-				fake.DatabaseVersionReturns(sampleConfig("db-1"), nil)
-			},
-		},
-		{
-			name:   "POST /database/{id}/rollback",
-			method: httpgo.MethodPost,
-			path:   "/v1/database/db-1/rollback?to=1",
-			setup: func(fake *clusterfakes.FakeCluster) {
-				fake.DatabaseVersionReturns(sampleConfig("db-1"), nil)
-			},
-		},
-
-		// --- ingestable ---
-		{
-			name:   "GET /ingestable",
-			method: httpgo.MethodGet,
-			path:   "/v1/ingestable",
-			setup: func(fake *clusterfakes.FakeCluster) {
-				fake.IngestablesReturns([]*cluster.Configuration{sampleConfig("ing-1")}, nil)
-			},
-		},
-		{
-			name:        "POST /ingestable/{id}",
-			method:      httpgo.MethodPost,
-			path:        "/v1/ingestable/ing-1",
-			body:        "[config]\nvalue = \"x\"",
-			contentType: "text/toml",
-		},
-		{
-			name:   "GET /ingestable/{id}/versions",
-			method: httpgo.MethodGet,
-			path:   "/v1/ingestable/ing-1/versions",
-			setup: func(fake *clusterfakes.FakeCluster) {
-				fake.IngestableVersionsReturns(sampleVersions(), nil)
-			},
-		},
-		{
-			name:   "GET /ingestable/{id}/versions/{version}",
-			method: httpgo.MethodGet,
-			path:   "/v1/ingestable/ing-1/versions/1",
-			setup: func(fake *clusterfakes.FakeCluster) {
-				fake.IngestableVersionReturns(sampleConfig("ing-1"), nil)
-			},
-		},
-		{
-			name:   "GET /ingestable/{id}/status",
-			method: httpgo.MethodGet,
-			path:   "/v1/ingestable/ing-1/status",
-			setup: func(fake *clusterfakes.FakeCluster) {
-				lag := uint64(0)
-				fake.IngestableStatusReturns(cluster.IngestableStatus{
-					WorkerState: cluster.WorkerStateRunning,
-					Phase:       "streaming",
-					Position:    "0/1A2B3C8",
-					SnapshotProgress: []cluster.TableSnapshotStatus{
-						{Table: "region", Complete: true},
-					},
-					Lag:      &lag,
-					LagUnit:  cluster.LagUnitBytes,
-					CaughtUp: true,
-				}, nil)
-			},
-		},
 		{
 			name:   "GET /type/{id}/pipeline",
 			method: httpgo.MethodGet,
@@ -265,15 +173,6 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 				fake.SyncableProgressReturns(100, 100, nil)
 			},
 		},
-		{
-			name:   "POST /ingestable/{id}/rollback",
-			method: httpgo.MethodPost,
-			path:   "/v1/ingestable/ing-1/rollback?to=1",
-			setup: func(fake *clusterfakes.FakeCluster) {
-				fake.IngestableVersionReturns(sampleConfig("ing-1"), nil)
-			},
-		},
-
 		// --- type ---
 		{
 			name:   "GET /type",
@@ -313,7 +212,6 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &clusterfakes.FakeCluster{}
-			fake.IngestableExistsReturns(true, nil)
 			if tc.setup != nil {
 				tc.setup(fake)
 			}
@@ -347,6 +245,20 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 		e := newEngine(t)
 		e.addType(t, "photos", "photos")
 		e.addRecorderSyncable(t, "rec-1", "photos")
+		e.addRecorderDatabase(t, "db-1")
+		lag := uint64(0)
+		e.ingest.StatusReturns(cluster.IngestableStatus{
+			WorkerState: cluster.WorkerStateRunning,
+			Phase:       "streaming",
+			Position:    "0/1A2B3C8",
+			SnapshotProgress: []cluster.TableSnapshotStatus{
+				{Table: "region", Complete: true},
+			},
+			Lag:      &lag,
+			LagUnit:  cluster.LagUnitBytes,
+			CaughtUp: true,
+		}, nil)
+		e.addRecorderIngestable(t, "ing-1", "photos")
 
 		// Seed a manual dead letter: wedge k1, skip it, heal the sink — the
 		// listing has content, the index is replayable, status has history.
@@ -375,6 +287,24 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 		}{
 			{name: "GET /syncable", method: httpgo.MethodGet, path: "/v1/syncable"},
 			{name: "GET /node/status", method: httpgo.MethodGet, path: "/v1/node/status"},
+			{name: "GET /database", method: httpgo.MethodGet, path: "/v1/database"},
+			{
+				name: "POST /database/{id}", method: httpgo.MethodPost, path: "/v1/database/db-2",
+				contentType: "text/toml", body: "[database]\nname = \"db-2\"\ntype = \"recorder\"\n",
+			},
+			{name: "GET /database/{id}/versions", method: httpgo.MethodGet, path: "/v1/database/db-1/versions"},
+			{name: "GET /database/{id}/versions/{version}", method: httpgo.MethodGet, path: "/v1/database/db-1/versions/1"},
+			{name: "POST /database/{id}/rollback", method: httpgo.MethodPost, path: "/v1/database/db-1/rollback?to=1"},
+			{name: "GET /ingestable", method: httpgo.MethodGet, path: "/v1/ingestable"},
+			{
+				name: "POST /ingestable/{id}", method: httpgo.MethodPost, path: "/v1/ingestable/ing-2",
+				contentType: "text/toml", body: "[ingestable]\nname = \"ing-2\"\ntype = \"recorder\"\n[recorder]\ntopic = \"photos\"\n",
+			},
+			{name: "GET /ingestable/{id}/versions", method: httpgo.MethodGet, path: "/v1/ingestable/ing-1/versions"},
+			{name: "GET /ingestable/{id}/versions/{version}", method: httpgo.MethodGet, path: "/v1/ingestable/ing-1/versions/1"},
+			{name: "GET /ingestable/{id}/status", method: httpgo.MethodGet, path: "/v1/ingestable/ing-1/status"},
+			{name: "POST /ingestable/{id}/rollback", method: httpgo.MethodPost, path: "/v1/ingestable/ing-1/rollback?to=1"},
+			{name: "DELETE /ingestable/{id}", method: httpgo.MethodDelete, path: "/v1/ingestable/ing-1"},
 			{
 				name: "POST /proposal", method: httpgo.MethodPost,
 				path: "/v1/proposal", contentType: "application/json",
@@ -471,11 +401,11 @@ func TestOpenAPIContract_ErrorResponses(t *testing.T) {
 			wantStatus: 400,
 		},
 		{
-			name:   "GET /database/{id}/versions with resource missing → 404",
+			name:   "GET /type/{id}/versions with resource missing → 404",
 			method: httpgo.MethodGet,
-			path:   "/v1/database/missing/versions",
+			path:   "/v1/type/missing/versions",
 			setup: func(f *clusterfakes.FakeCluster) {
-				f.DatabaseVersionsReturns(nil, cluster.ErrResourceNotFound)
+				f.TypeVersionsReturns(nil, cluster.ErrResourceNotFound)
 			},
 			wantStatus: 404,
 		},
@@ -484,7 +414,6 @@ func TestOpenAPIContract_ErrorResponses(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &clusterfakes.FakeCluster{}
-			fake.IngestableExistsReturns(true, nil)
 			if tc.setup != nil {
 				tc.setup(fake)
 			}
@@ -515,10 +444,9 @@ func TestOpenAPIContract_UnauthorizedShape(t *testing.T) {
 	_, v := newValidator(t)
 
 	fake := &clusterfakes.FakeCluster{}
-	fake.IngestableExistsReturns(true, nil)
 	h := httppkg.New(fake, httppkg.WithBearerToken("secret"))
 
-	req := httptest.NewRequest(httpgo.MethodGet, "http://localhost/v1/database", nil)
+	req := httptest.NewRequest(httpgo.MethodGet, "http://localhost/v1/type", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 

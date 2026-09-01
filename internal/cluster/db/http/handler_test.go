@@ -18,10 +18,6 @@ import (
 
 func setupTest() (*http.HTTP, *clusterfakes.FakeCluster) {
 	fake := &clusterfakes.FakeCluster{}
-	// The status/errors endpoints 404 unknown ids via the existence oracle;
-	// default the fake to "exists" so every test not ABOUT the 404 gate keeps
-	// its focus (the gate's own tests stub false explicitly).
-	fake.IngestableExistsReturns(true, nil)
 	h := http.New(fake)
 	return h, fake
 }
@@ -34,22 +30,6 @@ func TestAddConfiguration_Success(t *testing.T) {
 		path     string
 		verifyFn func(fake *clusterfakes.FakeCluster) (int, *cluster.Configuration)
 	}{
-		{
-			name: "database",
-			path: "/v1/database/db-1",
-			verifyFn: func(fake *clusterfakes.FakeCluster) (int, *cluster.Configuration) {
-				_, cfg := fake.ProposeDatabaseArgsForCall(0)
-				return fake.ProposeDatabaseCallCount(), cfg
-			},
-		},
-		{
-			name: "ingestable",
-			path: "/v1/ingestable/ingest-1",
-			verifyFn: func(fake *clusterfakes.FakeCluster) (int, *cluster.Configuration) {
-				_, cfg := fake.ProposeIngestableArgsForCall(0)
-				return fake.ProposeIngestableCallCount(), cfg
-			},
-		},
 		{
 			name: "type",
 			path: "/v1/type/type-1",
@@ -101,16 +81,6 @@ func TestAddConfiguration_ClusterError(t *testing.T) {
 		setupFn func(fake *clusterfakes.FakeCluster)
 	}{
 		{
-			name:    "database",
-			path:    "/v1/database/db-1",
-			setupFn: func(fake *clusterfakes.FakeCluster) { fake.ProposeDatabaseReturns(fmt.Errorf("fail")) },
-		},
-		{
-			name:    "ingestable",
-			path:    "/v1/ingestable/ingest-1",
-			setupFn: func(fake *clusterfakes.FakeCluster) { fake.ProposeIngestableReturns(fmt.Errorf("fail")) },
-		},
-		{
 			name:    "type",
 			path:    "/v1/type/type-1",
 			setupFn: func(fake *clusterfakes.FakeCluster) { fake.ProposeTypeReturns(fmt.Errorf("fail")) },
@@ -144,18 +114,6 @@ func TestAddConfiguration_ConfigError(t *testing.T) {
 		expectedCode string
 	}{
 		{
-			name:         "database",
-			path:         "/v1/database/db-1",
-			setupFn:      func(fake *clusterfakes.FakeCluster) { fake.ProposeDatabaseReturns(configErr) },
-			expectedCode: "invalid_database_config",
-		},
-		{
-			name:         "ingestable",
-			path:         "/v1/ingestable/ingest-1",
-			setupFn:      func(fake *clusterfakes.FakeCluster) { fake.ProposeIngestableReturns(configErr) },
-			expectedCode: "invalid_ingestable_config",
-		},
-		{
 			name:         "type",
 			path:         "/v1/type/type-1",
 			setupFn:      func(fake *clusterfakes.FakeCluster) { fake.ProposeTypeReturns(configErr) },
@@ -184,7 +142,7 @@ func TestAddConfiguration_ConfigError(t *testing.T) {
 func TestAddConfiguration_EmptyBody(t *testing.T) {
 	h, _ := setupTest()
 
-	req := httptest.NewRequest("POST", "http://localhost/v1/database/db-1", strings.NewReader(""))
+	req := httptest.NewRequest("POST", "http://localhost/v1/type/type-1", strings.NewReader(""))
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
@@ -196,28 +154,28 @@ func TestAddConfiguration_ContentTypeHandling(t *testing.T) {
 	t.Run("default mime type is text/toml", func(t *testing.T) {
 		h, fake := setupTest()
 
-		req := httptest.NewRequest("POST", "http://localhost/v1/database/db-1", strings.NewReader("data"))
+		req := httptest.NewRequest("POST", "http://localhost/v1/type/type-1", strings.NewReader("data"))
 		// No Content-Type header set
 		w := httptest.NewRecorder()
 
 		h.ServeHTTP(w, req)
 
 		require.Equal(t, 200, w.Result().StatusCode)
-		_, cfg := fake.ProposeDatabaseArgsForCall(0)
+		_, cfg, _ := fake.ProposeTypeArgsForCall(0)
 		require.Equal(t, "text/toml", cfg.MimeType)
 	})
 
 	t.Run("explicit application/json", func(t *testing.T) {
 		h, fake := setupTest()
 
-		req := httptest.NewRequest("POST", "http://localhost/v1/database/db-1", strings.NewReader("{}"))
+		req := httptest.NewRequest("POST", "http://localhost/v1/type/type-1", strings.NewReader("{}"))
 		req.Header["Content-Type"] = []string{"application/json"}
 		w := httptest.NewRecorder()
 
 		h.ServeHTTP(w, req)
 
 		require.Equal(t, 200, w.Result().StatusCode)
-		_, cfg := fake.ProposeDatabaseArgsForCall(0)
+		_, cfg, _ := fake.ProposeTypeArgsForCall(0)
 		require.Equal(t, "application/json", cfg.MimeType)
 	})
 }
@@ -235,16 +193,6 @@ func TestGetConfigurations_Success(t *testing.T) {
 		path    string
 		setupFn func(fake *clusterfakes.FakeCluster)
 	}{
-		{
-			name:    "database",
-			path:    "/v1/database",
-			setupFn: func(fake *clusterfakes.FakeCluster) { fake.DatabasesReturns(cfgs, nil) },
-		},
-		{
-			name:    "ingestable",
-			path:    "/v1/ingestable",
-			setupFn: func(fake *clusterfakes.FakeCluster) { fake.IngestablesReturns(cfgs, nil) },
-		},
 		{
 			name:    "type",
 			path:    "/v1/type",
@@ -284,9 +232,9 @@ func TestGetConfigurations_Success(t *testing.T) {
 
 func TestGetConfigurations_Empty(t *testing.T) {
 	h, fake := setupTest()
-	fake.DatabasesReturns(nil, nil)
+	fake.TypesReturns(nil, nil)
 
-	req := httptest.NewRequest("GET", "http://localhost/v1/database", nil)
+	req := httptest.NewRequest("GET", "http://localhost/v1/type", nil)
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
@@ -306,14 +254,9 @@ func TestGetConfigurations_Error(t *testing.T) {
 		setupFn func(fake *clusterfakes.FakeCluster)
 	}{
 		{
-			name:    "database",
-			path:    "/v1/database",
-			setupFn: func(fake *clusterfakes.FakeCluster) { fake.DatabasesReturns(nil, fmt.Errorf("fail")) },
-		},
-		{
-			name:    "syncable",
-			path:    "/v1/syncable",
-			setupFn: func(fake *clusterfakes.FakeCluster) { fake.SyncablesReturns(nil, fmt.Errorf("fail")) },
+			name:    "type",
+			path:    "/v1/type",
+			setupFn: func(fake *clusterfakes.FakeCluster) { fake.TypesReturns(nil, fmt.Errorf("fail")) },
 		},
 		{
 			name:    "ingestable",
@@ -366,9 +309,9 @@ func requireErrorResponse(t *testing.T, resp *httpgo.Response, expectedCode stri
 
 func TestErrorResponse_JSONShape(t *testing.T) {
 	h, fake := setupTest()
-	fake.DatabaseVersionsReturns(nil, cluster.ErrResourceNotFound)
+	fake.TypeVersionsReturns(nil, cluster.ErrResourceNotFound)
 
-	req := httptest.NewRequest("GET", "http://localhost/v1/database/missing/versions", nil)
+	req := httptest.NewRequest("GET", "http://localhost/v1/type/missing/versions", nil)
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
@@ -387,7 +330,7 @@ func TestErrorResponse_JSONShape(t *testing.T) {
 
 	require.Contains(t, raw, "code")
 	require.Contains(t, raw, "message")
-	require.Equal(t, "database_not_found", raw["code"])
+	require.Equal(t, "type_not_found", raw["code"])
 	require.IsType(t, "", raw["message"])
 	require.NotEmpty(t, raw["message"])
 }

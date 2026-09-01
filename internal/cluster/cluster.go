@@ -37,14 +37,6 @@ type Cluster interface {
 	// Powers GET /v1/restatement.
 	Restatements() ([]AppliedRestatement, error)
 	ProposeDeleteType(ctx context.Context, id string) error
-	ProposeIngestable(ctx context.Context, c *Configuration) error
-	// DeleteIngestable removes an ingestable: its config and checkpoint position
-	// are deleted atomically and, on apply, the owner cancels the worker and tears
-	// down the source-side replication resources (drops the Postgres slot +
-	// publication) so an orphaned slot can't pin the source's WAL and fill its
-	// disk. A later same-id create starts fresh from a full snapshot.
-	DeleteIngestable(ctx context.Context, id string) error
-	ProposeDatabase(ctx context.Context, c *Configuration) error
 	// ResolveType returns the Type identified by ref. A TypeRef with
 	// Version 0 (constructed via LatestTypeRef) resolves to whatever is
 	// current; a TypeRef pinned to a specific version (TypeRefAt)
@@ -59,30 +51,15 @@ type Cluster interface {
 	Sync(ctx context.Context, id string, s Syncable) error
 	AddSyncableParser(name string, p SyncableParser)
 	AddDatabaseParser(name string, p DatabaseParser)
-	Databases() ([]*Configuration, error)
-	Ingestables() ([]*Configuration, error)
 	Syncables() ([]*Configuration, error)
-	// IngestableExists is SyncableExists's ingest twin.
-	IngestableExists(id string) (bool, error)
-	Types() ([]*Configuration, error)
-	DatabaseVersions(id string) ([]VersionInfo, error)
-	DatabaseVersion(id string, version uint64) (*Configuration, error)
-	IngestableVersions(id string) ([]VersionInfo, error)
-	IngestableVersion(id string, version uint64) (*Configuration, error)
-	// IngestableStatus reports an ingestable worker's operational status —
-	// snapshot vs. streaming phase, per-table snapshot progress, the CDC
-	// position, source lag, and whether it is caught up. It reads the worker's
-	// persisted checkpoint (replicated, so consistent on any node behind a
-	// linearize barrier) and asks the dialect to decode it and, where supported,
-	// query the source for lag. Returns ErrIngestableNotRunning if no worker is
-	// registered for id on this node. Powers GET /v1/ingestable/{id}/status.
+	// Ingestables and IngestableStatus are HOLDOVERS for the type group's
+	// pipeline endpoint (GET /type/{id}/pipeline), like Syncables /
+	// SyncableProgress / SyncableStuck — deleted when that group migrates
+	// off the aggregated interface (see the cluster-interface-retirement
+	// ticket).
+	Ingestables() ([]*Configuration, error)
 	IngestableStatus(ctx context.Context, id string) (IngestableStatus, error)
-	// IngestableCensus returns the latest JSON shape census the ingestable's
-	// worker published during its snapshot pass, or (nil, false) when none
-	// exists (census opted out, or no snapshot has run yet). Replicated
-	// state, identical on any node. Powers the census section of
-	// GET /v1/ingestable/{id}/status.
-	IngestableCensus(id string) (*IngestableCensus, bool)
+	Types() ([]*Configuration, error)
 	// SyncableStuck reports whether a syncable's worker is currently blocked
 	// and, if so, on which raft index (with when and the last error). Backed
 	// by replicated state, so any node answers identically — powers
@@ -187,12 +164,4 @@ type Cluster interface {
 	// silently fallen behind. Reads that explicitly opt out
 	// (?consistency=stale) skip it.
 	LinearizableRead(ctx context.Context) error
-	// ConfigBuildErrors returns the configs this node persisted but could
-	// not build into live objects (degraded — a node-local condition,
-	// usually a missing ${VAR} secret). The raw config bytes are valid and
-	// replicated cluster-wide; only this node's local construction failed,
-	// so the answer is per-node and a healthy node returns none. Powers GET
-	// /node/status, the queryable counterpart of the
-	// committed_config_build_errors gauge.
-	ConfigBuildErrors() []ConfigBuildError
 }

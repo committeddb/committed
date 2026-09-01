@@ -38,26 +38,6 @@ func TestPropose_ReturnsTooLarge_MapsTo413(t *testing.T) {
 		setupFn func(*clusterfakes.FakeCluster)
 	}{
 		{
-			name:   "database",
-			method: "POST",
-			path:   "/v1/database/db-1",
-			ct:     "text/toml",
-			body:   "[config]\nname = \"x\"",
-			setupFn: func(fake *clusterfakes.FakeCluster) {
-				fake.ProposeDatabaseReturns(fmt.Errorf("wrap: %w", cluster.ErrProposalTooLarge))
-			},
-		},
-		{
-			name:   "ingestable",
-			method: "POST",
-			path:   "/v1/ingestable/i-1",
-			ct:     "text/toml",
-			body:   "[config]\nname = \"x\"",
-			setupFn: func(fake *clusterfakes.FakeCluster) {
-				fake.ProposeIngestableReturns(fmt.Errorf("wrap: %w", cluster.ErrProposalTooLarge))
-			},
-		},
-		{
 			name:   "type",
 			method: "POST",
 			path:   "/v1/type/t-1",
@@ -109,26 +89,6 @@ func TestPropose_ReturnsInsufficientStorage_MapsTo507(t *testing.T) {
 		body    string
 		setupFn func(*clusterfakes.FakeCluster)
 	}{
-		{
-			name:   "database",
-			method: "POST",
-			path:   "/v1/database/db-1",
-			ct:     "text/toml",
-			body:   "[config]\nname = \"x\"",
-			setupFn: func(fake *clusterfakes.FakeCluster) {
-				fake.ProposeDatabaseReturns(fmt.Errorf("wrap: %w", cluster.ErrInsufficientStorage))
-			},
-		},
-		{
-			name:   "ingestable",
-			method: "POST",
-			path:   "/v1/ingestable/i-1",
-			ct:     "text/toml",
-			body:   "[config]\nname = \"x\"",
-			setupFn: func(fake *clusterfakes.FakeCluster) {
-				fake.ProposeIngestableReturns(fmt.Errorf("wrap: %w", cluster.ErrInsufficientStorage))
-			},
-		},
 		{
 			name:   "type",
 			method: "POST",

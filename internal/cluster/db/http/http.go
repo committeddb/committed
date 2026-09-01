@@ -192,18 +192,18 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 		// errors/status/deadletter/replay — remain visible rather than
 		// hidden inside a registrar.
 		r.Route("/v1", func(r chi.Router) {
-			r.Get("/database", h.listConfig("database", h.c.Databases))
-			r.Post("/database/{id}", h.addConfig("database", h.c.ProposeDatabase, h.c.DatabaseVersions))
-			r.Get("/database/{id}/versions", h.getVersions("database", h.c.DatabaseVersions))
-			r.Get("/database/{id}/versions/{version}", h.getVersion("database", h.c.DatabaseVersion))
-			r.Post("/database/{id}/rollback", h.rollback("database", h.c.DatabaseVersion, h.c.ProposeDatabase, h.c.DatabaseVersions))
+			r.Get("/database", h.listConfig("database", h.db.Databases))
+			r.Post("/database/{id}", h.addConfig("database", h.db.ProposeDatabase, h.db.DatabaseVersions))
+			r.Get("/database/{id}/versions", h.getVersions("database", h.db.DatabaseVersions))
+			r.Get("/database/{id}/versions/{version}", h.getVersion("database", h.db.DatabaseVersion))
+			r.Post("/database/{id}/rollback", h.rollback("database", h.db.DatabaseVersion, h.db.ProposeDatabase, h.db.DatabaseVersions))
 
-			r.Get("/ingestable", h.listConfig("ingestable", h.c.Ingestables))
-			r.Post("/ingestable/{id}", h.addConfig("ingestable", h.c.ProposeIngestable, h.c.IngestableVersions))
-			r.Get("/ingestable/{id}/versions", h.getVersions("ingestable", h.c.IngestableVersions))
-			r.Get("/ingestable/{id}/versions/{version}", h.getVersion("ingestable", h.c.IngestableVersion))
+			r.Get("/ingestable", h.listConfig("ingestable", h.db.Ingestables))
+			r.Post("/ingestable/{id}", h.addConfig("ingestable", h.db.ProposeIngestable, h.db.IngestableVersions))
+			r.Get("/ingestable/{id}/versions", h.getVersions("ingestable", h.db.IngestableVersions))
+			r.Get("/ingestable/{id}/versions/{version}", h.getVersion("ingestable", h.db.IngestableVersion))
 			r.Get("/ingestable/{id}/status", h.GetIngestableStatus)
-			r.Post("/ingestable/{id}/rollback", h.rollback("ingestable", h.c.IngestableVersion, h.c.ProposeIngestable, h.c.IngestableVersions))
+			r.Post("/ingestable/{id}/rollback", h.rollback("ingestable", h.db.IngestableVersion, h.db.ProposeIngestable, h.db.IngestableVersions))
 			// DELETE is leader-pinned (leaderRead reverse-proxies a follower's
 			// request to the leader): the owner-gated source teardown — dropping the
 			// Postgres replication slot + publication — runs on the leader, so the

@@ -27,16 +27,6 @@ func TestGetVersions_Success(t *testing.T) {
 		setupFn func(fake *clusterfakes.FakeCluster)
 	}{
 		{
-			name:    "database",
-			path:    "/v1/database/db-1/versions",
-			setupFn: func(fake *clusterfakes.FakeCluster) { fake.DatabaseVersionsReturns(versions, nil) },
-		},
-		{
-			name:    "ingestable",
-			path:    "/v1/ingestable/ingest-1/versions",
-			setupFn: func(fake *clusterfakes.FakeCluster) { fake.IngestableVersionsReturns(versions, nil) },
-		},
-		{
 			name:    "type",
 			path:    "/v1/type/type-1/versions",
 			setupFn: func(fake *clusterfakes.FakeCluster) { fake.TypeVersionsReturns(versions, nil) },
@@ -80,18 +70,6 @@ func TestGetVersions_ResourceNotFound(t *testing.T) {
 		expectedCode string
 	}{
 		{
-			name:         "database",
-			path:         "/v1/database/missing/versions",
-			setupFn:      func(fake *clusterfakes.FakeCluster) { fake.DatabaseVersionsReturns(nil, cluster.ErrResourceNotFound) },
-			expectedCode: "database_not_found",
-		},
-		{
-			name:         "ingestable",
-			path:         "/v1/ingestable/missing/versions",
-			setupFn:      func(fake *clusterfakes.FakeCluster) { fake.IngestableVersionsReturns(nil, cluster.ErrResourceNotFound) },
-			expectedCode: "ingestable_not_found",
-		},
-		{
 			name:         "type",
 			path:         "/v1/type/missing/versions",
 			setupFn:      func(fake *clusterfakes.FakeCluster) { fake.TypeVersionsReturns(nil, cluster.ErrResourceNotFound) },
@@ -118,9 +96,9 @@ func TestGetVersions_ResourceNotFound(t *testing.T) {
 
 func TestGetVersions_InternalError(t *testing.T) {
 	h, fake := setupTest()
-	fake.DatabaseVersionsReturns(nil, fmt.Errorf("disk failure"))
+	fake.TypeVersionsReturns(nil, fmt.Errorf("disk failure"))
 
-	req := httptest.NewRequest("GET", "http://localhost/v1/database/db-1/versions", nil)
+	req := httptest.NewRequest("GET", "http://localhost/v1/type/type-1/versions", nil)
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)
@@ -140,16 +118,6 @@ func TestGetVersion_Success(t *testing.T) {
 		path    string
 		setupFn func(fake *clusterfakes.FakeCluster)
 	}{
-		{
-			name:    "database",
-			path:    "/v1/database/res-1/versions/1",
-			setupFn: func(fake *clusterfakes.FakeCluster) { fake.DatabaseVersionReturns(cfg, nil) },
-		},
-		{
-			name:    "ingestable",
-			path:    "/v1/ingestable/res-1/versions/1",
-			setupFn: func(fake *clusterfakes.FakeCluster) { fake.IngestableVersionReturns(cfg, nil) },
-		},
 		{
 			name:    "type",
 			path:    "/v1/type/res-1/versions/1",
@@ -182,18 +150,13 @@ func TestGetVersion_Success(t *testing.T) {
 	}
 }
 
+// TestGetVersion_VersionNotFound: a real ingestable has one version; asking
+// for 99 is the version-level 404, distinct from the resource-level one.
 func TestGetVersion_VersionNotFound(t *testing.T) {
-	h, fake := setupTest()
-	fake.IngestableVersionReturns(nil, cluster.ErrVersionNotFound)
-
-	req := httptest.NewRequest("GET", "http://localhost/v1/ingestable/ingest-1/versions/99", nil)
-	w := httptest.NewRecorder()
-
-	h.ServeHTTP(w, req)
-
-	resp := w.Result()
-	require.Equal(t, 404, resp.StatusCode)
-	requireErrorResponse(t, resp, "version_not_found")
+	e := newEngine(t)
+	e.addType(t, "photos", "photos")
+	e.addRecorderIngestable(t, "ing-1", "photos")
+	requireEnvelope(t, e.doEmpty(t, "GET", "/v1/ingestable/ing-1/versions/99"), 404, "version_not_found")
 }
 
 func TestGetVersion_InvalidVersionParam(t *testing.T) {
@@ -206,128 +169,23 @@ func TestGetVersion_InvalidVersionParam(t *testing.T) {
 		{name: "negative", path: "/v1/ingestable/ingest-1/versions/-1"},
 	}
 
+	e := newEngine(t)
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			h, _ := setupTest()
-
-			req := httptest.NewRequest("GET", "http://localhost"+tc.path, nil)
-			w := httptest.NewRecorder()
-
-			h.ServeHTTP(w, req)
-
-			resp := w.Result()
-			require.Equal(t, 400, resp.StatusCode)
-			requireErrorResponse(t, resp, "invalid_version")
+			requireEnvelope(t, e.doEmpty(t, "GET", tc.path), 400, "invalid_version")
 		})
 	}
 }
 
 // --- Rollback ---
 
-func TestRollback_Success(t *testing.T) {
-	cfg := &cluster.Configuration{ID: "res-1", MimeType: "text/toml", Data: []byte("old-config")}
-
-	tests := []struct {
-		name     string
-		path     string
-		setupFn  func(fake *clusterfakes.FakeCluster)
-		verifyFn func(fake *clusterfakes.FakeCluster)
-	}{
-		{
-			name: "database",
-			path: "/v1/database/res-1/rollback?to=1",
-			setupFn: func(fake *clusterfakes.FakeCluster) {
-				fake.DatabaseVersionReturns(cfg, nil)
-			},
-			verifyFn: func(fake *clusterfakes.FakeCluster) {
-				require.Equal(t, 1, fake.ProposeDatabaseCallCount())
-				_, proposed := fake.ProposeDatabaseArgsForCall(0)
-				require.Equal(t, cfg, proposed)
-			},
-		},
-		{
-			name: "ingestable",
-			path: "/v1/ingestable/res-1/rollback?to=1",
-			setupFn: func(fake *clusterfakes.FakeCluster) {
-				fake.IngestableVersionReturns(cfg, nil)
-			},
-			verifyFn: func(fake *clusterfakes.FakeCluster) {
-				require.Equal(t, 1, fake.ProposeIngestableCallCount())
-				_, proposed := fake.ProposeIngestableArgsForCall(0)
-				require.Equal(t, cfg, proposed)
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			h, fake := setupTest()
-			tc.setupFn(fake)
-
-			req := httptest.NewRequest("POST", "http://localhost"+tc.path, nil)
-			w := httptest.NewRecorder()
-
-			h.ServeHTTP(w, req)
-
-			resp := w.Result()
-			require.Equal(t, 200, resp.StatusCode)
-
-			body, err := io.ReadAll(resp.Body)
-			require.Nil(t, err)
-			require.JSONEq(t, `{"id":"res-1"}`, string(body))
-
-			tc.verifyFn(fake)
-		})
-	}
-}
-
+// TestRollback_VersionNotFound: rolling a real ingestable back to a version
+// that never existed is the version-level 404 through the real read.
 func TestRollback_VersionNotFound(t *testing.T) {
-	h, fake := setupTest()
-	fake.IngestableVersionReturns(nil, cluster.ErrVersionNotFound)
-
-	req := httptest.NewRequest("POST", "http://localhost/v1/ingestable/ingest-1/rollback?to=99", nil)
-	w := httptest.NewRecorder()
-
-	h.ServeHTTP(w, req)
-
-	resp := w.Result()
-	require.Equal(t, 404, resp.StatusCode)
-	requireErrorResponse(t, resp, "version_not_found")
-}
-
-func TestRollback_ProposeError(t *testing.T) {
-	cfg := &cluster.Configuration{ID: "ing-1", MimeType: "text/toml", Data: []byte("config")}
-
-	h, fake := setupTest()
-	fake.IngestableVersionReturns(cfg, nil)
-	fake.ProposeIngestableReturns(fmt.Errorf("raft unavailable"))
-
-	req := httptest.NewRequest("POST", "http://localhost/v1/ingestable/ing-1/rollback?to=1", nil)
-	w := httptest.NewRecorder()
-
-	h.ServeHTTP(w, req)
-
-	resp := w.Result()
-	require.Equal(t, 500, resp.StatusCode)
-	requireErrorResponse(t, resp, "internal_error")
-}
-
-func TestRollback_ProposeConfigError(t *testing.T) {
-	cfg := &cluster.Configuration{ID: "db-1", MimeType: "text/toml", Data: []byte("config")}
-	configErr := &cluster.ConfigError{Err: fmt.Errorf("bad config")}
-
-	h, fake := setupTest()
-	fake.DatabaseVersionReturns(cfg, nil)
-	fake.ProposeDatabaseReturns(configErr)
-
-	req := httptest.NewRequest("POST", "http://localhost/v1/database/db-1/rollback?to=1", nil)
-	w := httptest.NewRecorder()
-
-	h.ServeHTTP(w, req)
-
-	resp := w.Result()
-	require.Equal(t, 400, resp.StatusCode)
-	requireErrorResponse(t, resp, "invalid_database_config")
+	e := newEngine(t)
+	e.addType(t, "photos", "photos")
+	e.addRecorderIngestable(t, "ing-1", "photos")
+	requireEnvelope(t, e.doEmpty(t, "POST", "/v1/ingestable/ing-1/rollback?to=99"), 404, "version_not_found")
 }
 
 func TestRollback_MissingToParam(t *testing.T) {

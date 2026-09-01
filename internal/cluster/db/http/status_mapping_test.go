@@ -123,3 +123,59 @@ func TestWriteProposeError_Mapping(t *testing.T) {
 		})
 	}
 }
+
+// rebuildRequired models a destination-defined RebuildRequiredError — code
+// and details are opaque to this layer and pass through structurally.
+type rebuildRequired struct {
+	code    string
+	message string
+	details any
+}
+
+func (e *rebuildRequired) Error() string { return e.message }
+func (e *rebuildRequired) Code() string  { return e.code }
+func (e *rebuildRequired) Details() any  { return e.details }
+
+// TestWriteProposeError_StructuredDetails pins the two structured-details
+// rows of the propose-error choke point: a RebuildRequiredError renders 409
+// with its own machine-readable code and details verbatim, and a
+// field-scoped ConfigError renders 400 with {field, issue} details — both so
+// a deploy pipeline can branch without scraping messages.
+func TestWriteProposeError_StructuredDetails(t *testing.T) {
+	w := httptest.NewRecorder()
+	writeProposeError(w, &rebuildRequired{
+		code:    "schema_change_requires_rebuild",
+		message: "schema changed; rebuild the table",
+		details: map[string]any{"table": "tenants", "addedColumns": []string{"tier"}},
+	}, "syncable", "propose syncable")
+	require.Equal(t, 409, w.Code)
+	var body struct {
+		Code    string `json:"code"`
+		Details struct {
+			Table        string   `json:"table"`
+			AddedColumns []string `json:"addedColumns"`
+		} `json:"details"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	require.Equal(t, "schema_change_requires_rebuild", body.Code)
+	require.Equal(t, "tenants", body.Details.Table)
+	require.Equal(t, []string{"tier"}, body.Details.AddedColumns)
+
+	w = httptest.NewRecorder()
+	writeProposeError(w, cluster.NewConfigError(&cluster.FieldError{
+		Field: "sql.dialect",
+		Issue: "unknown dialect \"oracle\"; valid: mysql, postgres",
+	}), "syncable", "propose syncable")
+	require.Equal(t, 400, w.Code)
+	var fieldBody struct {
+		Code    string `json:"code"`
+		Details struct {
+			Field string `json:"field"`
+			Issue string `json:"issue"`
+		} `json:"details"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &fieldBody))
+	require.Equal(t, "invalid_syncable_config", fieldBody.Code)
+	require.Equal(t, "sql.dialect", fieldBody.Details.Field)
+	require.Contains(t, fieldBody.Details.Issue, "oracle")
+}

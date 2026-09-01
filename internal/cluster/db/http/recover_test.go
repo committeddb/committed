@@ -26,12 +26,12 @@ func TestRecoverPanic_PanickingHandlerReturns500(t *testing.T) {
 	defer restore()
 
 	fake := &clusterfakes.FakeCluster{}
-	fake.DatabasesStub = func() ([]*cluster.Configuration, error) {
+	fake.TypesStub = func() ([]*cluster.Configuration, error) {
 		panic("boom: handler invariant broken")
 	}
 	h := http.New(fake)
 
-	r := httptest.NewRequest(httpgo.MethodGet, "/v1/database", nil)
+	r := httptest.NewRequest(httpgo.MethodGet, "/v1/type", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 
@@ -53,7 +53,7 @@ func TestRecoverPanic_PanickingHandlerReturns500(t *testing.T) {
 	require.NotEmpty(t, fields["request_id"])
 	require.Equal(t, w.Header().Get("X-Request-ID"), fields["request_id"])
 	require.Equal(t, httpgo.MethodGet, fields["method"])
-	require.Equal(t, "/v1/database", fields["path"])
+	require.Equal(t, "/v1/type", fields["path"])
 	require.Contains(t, fmt.Sprint(fields["panic"]), "boom")
 	stack, ok := fields["stack"].(string)
 	require.True(t, ok)
@@ -93,12 +93,12 @@ func TestRecoverPanic_ErrAbortHandlerStillAborts(t *testing.T) {
 	defer restore()
 
 	fake := &clusterfakes.FakeCluster{}
-	fake.DatabasesStub = func() ([]*cluster.Configuration, error) {
+	fake.TypesStub = func() ([]*cluster.Configuration, error) {
 		panic(httpgo.ErrAbortHandler)
 	}
 	h := http.New(fake)
 
-	r := httptest.NewRequest(httpgo.MethodGet, "/v1/database", nil)
+	r := httptest.NewRequest(httpgo.MethodGet, "/v1/type", nil)
 	w := httptest.NewRecorder()
 	require.PanicsWithValue(t, httpgo.ErrAbortHandler, func() { h.ServeHTTP(w, r) })
 	require.Empty(t, logs.FilterMessage("http handler panic").All())

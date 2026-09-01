@@ -118,6 +118,10 @@ type engine struct {
 	d    *db.DB
 	s    *wal.Storage
 	sink *recorderSink
+	// ingest is the controllable fake ingestable every "recorder"-kind
+	// ingestable config builds into: StatusReturns feeds the real
+	// GET /ingestable/{id}/status path, IngestStub can emit real proposals.
+	ingest *clusterfakes.FakeIngestable
 }
 
 const engineTestTick = 1 * time.Millisecond
@@ -143,6 +147,25 @@ func newEngineOpts(t *testing.T, extra ...db.Option) *engine {
 	p.AddSyncableParser("projection", recParser)
 	p.AddSyncableParser("sql-projection", recParser)
 
+	// Database and ingestable plugin seams, same pattern: a "recorder" kind
+	// whose parser admits real configs and hands the engine controllable
+	// fakes (the ingestable's Status feeds the real status path).
+	fakeDB := &clusterfakes.FakeDatabase{}
+	fakeDB.GetTypeReturns("recorder")
+	dbParser := &clusterfakes.FakeDatabaseParser{}
+	dbParser.ParseReturns(fakeDB, nil)
+	p.AddDatabaseParser("recorder", dbParser)
+	ingest := &clusterfakes.FakeIngestable{}
+	// Block until canceled so a built worker stays ALIVE — status routes ask
+	// the running worker; a stub returning instantly would exit it.
+	ingest.IngestStub = func(ctx context.Context, _ cluster.Position, _ chan<- *cluster.Proposal, _ chan<- cluster.Position) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	ingestParser := &clusterfakes.FakeIngestableParser{}
+	ingestParser.ParseReturns(ingest, nil)
+	p.AddIngestableParser("recorder", ingestParser)
+
 	syncCh := make(chan *db.SyncableWithID, 32)
 	ingestCh := make(chan *db.IngestableWithID, 32)
 	s, err := wal.Open(t.TempDir(), p, syncCh, ingestCh, wal.WithoutFsync())
@@ -164,7 +187,7 @@ func newEngineOpts(t *testing.T, extra ...db.Option) *engine {
 	require.Eventually(t, func() bool { return d.Leader() == 1 },
 		10*time.Second, time.Millisecond, "the single node never elected itself")
 
-	return &engine{h: http.New(d), d: d, s: s, sink: sink}
+	return &engine{h: http.New(d), d: d, s: s, sink: sink, ingest: ingest}
 }
 
 // do runs one request through the server and returns the recorder.
@@ -302,5 +325,21 @@ func (e *engine) addTypeWithSchemaType(t *testing.T, id, name, schemaType, schem
 	// survives; no schema in these tests carries a ''' sequence.
 	body := fmt.Sprintf("[type]\nname = %q\nschemaType = %q\nschema = '''%s'''\nvalidate = %d\n%s", name, schemaType, schema, validate, extraTOML)
 	w := e.doTOML(t, "POST", "/v1/type/"+id, body)
+	require.Equal(t, 200, w.Code, w.Body.String())
+}
+
+// addRecorderDatabase POSTs a "recorder" database config.
+func (e *engine) addRecorderDatabase(t *testing.T, id string) {
+	t.Helper()
+	body := fmt.Sprintf("[database]\nname = %q\ntype = \"recorder\"\n", id)
+	w := e.doTOML(t, "POST", "/v1/database/"+id, body)
+	require.Equal(t, 200, w.Code, w.Body.String())
+}
+
+// addRecorderIngestable POSTs a "recorder" ingestable config.
+func (e *engine) addRecorderIngestable(t *testing.T, id, topic string) {
+	t.Helper()
+	body := fmt.Sprintf("[ingestable]\nname = %q\ntype = \"recorder\"\n[recorder]\ntopic = %q\n", id, topic)
+	w := e.doTOML(t, "POST", "/v1/ingestable/"+id, body)
 	require.Equal(t, 200, w.Code, w.Body.String())
 }

@@ -2,156 +2,142 @@ package http_test
 
 import (
 	"encoding/json"
-	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/committeddb/committed/internal/cluster"
-	"github.com/committeddb/committed/internal/cluster/db/http"
 )
 
-// TestDeleteIngestable threads the id through to the cluster and returns 200. The
-// route is leader-pinned (leaderRead), so the fake reports itself as the leader
-// to serve the delete locally (where the source teardown runs).
+// The database + ingestable config groups run against the real engine
+// (enginetest_test.go): "recorder"-kind parsers admit real configs and the
+// controllable fake ingestable feeds the real status path. Rendering
+// details a route test would restate (lag-unit omission, census shapes,
+// the degraded-cause 404 message) are pinned in-package against the free
+// renderer functions in ingestable_render_test.go; the census PIPELINE
+// (worker → replicated census → this route) is covered end to end by
+// db/census_test.go against this same server.
+
+// TestDatabaseLifecycle: propose, list, versions, version read, rollback —
+// the config CRUD surface for databases, real end to end.
+func TestDatabaseLifecycle(t *testing.T) {
+	e := newEngine(t)
+
+	e.addRecorderDatabase(t, "db-1")
+	mustStatus(t, e.doTOML(t, "POST", "/v1/database/db-1",
+		"[database]\nname = \"db-1\"\ntype = \"recorder\"\nnote = \"v2\"\n"), 200)
+
+	var listing []struct {
+		ID string `json:"id"`
+	}
+	e.getJSON(t, "/v1/database", &listing)
+	require.Len(t, listing, 1)
+	require.Equal(t, "db-1", listing[0].ID)
+
+	var versions []struct {
+		Version int `json:"version"`
+	}
+	e.getJSON(t, "/v1/database/db-1/versions", &versions)
+	require.Len(t, versions, 2)
+
+	var got struct {
+		Data string `json:"data"`
+	}
+	e.getJSON(t, "/v1/database/db-1/versions/1", &got)
+	require.Contains(t, got.Data, "type = \"recorder\"")
+
+	mustStatus(t, e.doEmpty(t, "POST", "/v1/database/db-1/rollback?to=1"), 200)
+	e.getJSON(t, "/v1/database/db-1/versions/3", &got)
+	require.NotContains(t, got.Data, "v2", "rollback restores version 1's content")
+
+	// The resource-specific 404 code on an unknown id's history.
+	requireEnvelope(t, e.doEmpty(t, "GET", "/v1/database/missing/versions"), 404, "database_not_found")
+}
+
+// TestIngestableLifecycle: the same CRUD surface for ingestables, plus the
+// resource-specific 404 code.
+func TestIngestableLifecycle(t *testing.T) {
+	e := newEngine(t)
+	e.addType(t, "photos", "photos")
+
+	e.addRecorderIngestable(t, "ing-1", "photos")
+
+	var listing []struct {
+		ID string `json:"id"`
+	}
+	e.getJSON(t, "/v1/ingestable", &listing)
+	require.Len(t, listing, 1)
+	require.Equal(t, "ing-1", listing[0].ID)
+
+	var versions []struct {
+		Version int `json:"version"`
+	}
+	e.getJSON(t, "/v1/ingestable/ing-1/versions", &versions)
+	require.Len(t, versions, 1)
+
+	requireEnvelope(t, e.doEmpty(t, "GET", "/v1/ingestable/missing/versions"), 404, "ingestable_not_found")
+}
+
+// TestDeleteIngestable: a real delete — the config and its checkpoint go,
+// and the listing no longer carries the id. The route is leader-pinned; the
+// single node is the leader, so it serves locally (where the source-side
+// teardown runs).
 func TestDeleteIngestable(t *testing.T) {
-	h, fake := setupTest()
-	fake.IDReturns(1)
-	fake.LeaderReturns(1)
+	e := newEngine(t)
+	e.addType(t, "photos", "photos")
+	e.addRecorderIngestable(t, "ing-1", "photos")
 
-	req := httptest.NewRequest("DELETE", "http://localhost/v1/ingestable/ing-1", nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	require.Equal(t, 200, w.Code)
-	require.Equal(t, 1, fake.DeleteIngestableCallCount())
-	_, gotID := fake.DeleteIngestableArgsForCall(0)
-	require.Equal(t, "ing-1", gotID)
-
+	w := e.doEmpty(t, "DELETE", "/v1/ingestable/ing-1")
+	mustStatus(t, w, 200)
 	var body struct {
 		ID string `json:"id"`
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
 	require.Equal(t, "ing-1", body.ID)
+
+	var listing []struct {
+		ID string `json:"id"`
+	}
+	e.getJSON(t, "/v1/ingestable", &listing)
+	require.Empty(t, listing)
 }
 
-// An empty id is a 400 and never reaches the cluster. (Chi won't route a bare
-// /v1/ingestable/ with no id to this handler, but the guard is defensive.)
+// An id-less DELETE never matches the route — the defensive guard in the
+// handler stays unreachable through the router, and the router answers with
+// its own envelope.
 func TestDeleteIngestable_EmptyID(t *testing.T) {
-	h, fake := setupTest()
-	fake.IDReturns(1)
-	fake.LeaderReturns(1)
-
-	// A trailing-slash id is empty at the handler.
-	req := httptest.NewRequest("DELETE", "http://localhost/v1/ingestable/", nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
+	e := newEngine(t)
+	w := e.doEmpty(t, "DELETE", "/v1/ingestable/")
 	require.NotEqual(t, 200, w.Code)
-	require.Equal(t, 0, fake.DeleteIngestableCallCount())
 }
 
-// The ingest twin of the syncable degraded-workerState fix: a config that
-// exists but failed to BUILD on this node has no worker, so status answers
-// ingestable_not_running — honest, but the generic message hides the cause.
-// When the answering node's config-error record explains the absence, the
-// 404 body must carry the (redacted) build error so the operator learns
-// what to fix without hunting the node-status surface.
-func TestGetIngestableStatus_NotRunningNamesDegradedCause(t *testing.T) {
-	h, fake := setupTest()
-	fake.IngestableStatusReturns(cluster.IngestableStatus{}, cluster.ErrIngestableNotRunning)
-	fake.ConfigBuildErrorsReturns([]cluster.ConfigBuildError{
-		{Kind: "syncable", ID: "ing-1", Error: "wrong kind — must not match"},
-		{Kind: "ingestable", ID: "ing-1", Error: "interpolate: variable SOURCE_DSN not set"},
-	})
-
-	req := httptest.NewRequest("GET", "http://localhost/v1/ingestable/ing-1/status", nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	require.Equal(t, 404, w.Code)
-	require.Contains(t, w.Body.String(), "ingestable_not_running")
-	require.Contains(t, w.Body.String(), "interpolate: variable SOURCE_DSN not set",
-		"the not-running answer must name the degraded-build cause")
-
-	// Without a degraded record the generic message stands.
-	fake.ConfigBuildErrorsReturns(nil)
-	w = httptest.NewRecorder()
-	h.ServeHTTP(w, httptest.NewRequest("GET", "http://localhost/v1/ingestable/ing-1/status", nil))
-	require.Equal(t, 404, w.Code)
-	require.Contains(t, w.Body.String(), "no ingestable worker is running")
-}
-
-// lagUnit names the scale lag is on — load-bearing now that MySQL reports
-// transactions under GTID positioning but bytes under the file:pos fallback:
-// present next to a non-null lag, omitted with a null one.
-func TestGetIngestableStatus_LagUnit(t *testing.T) {
-	h, fake := setupTest()
+// TestGetIngestableStatus: the real status path — the worker (held alive by
+// the fixture's blocking Ingest stub) answers through the engine with the
+// dialect's own view, and the lag unit rides next to a non-null lag.
+func TestGetIngestableStatus(t *testing.T) {
+	e := newEngine(t)
+	e.addType(t, "photos", "photos")
 	lag := uint64(8192)
-	fake.IngestableStatusReturns(cluster.IngestableStatus{
+	e.ingest.StatusReturns(cluster.IngestableStatus{
 		WorkerState: cluster.WorkerStateRunning,
 		Phase:       "streaming",
+		Position:    "binlog.000004:1547",
 		Lag:         &lag,
 		LagUnit:     cluster.LagUnitBytes,
+		CaughtUp:    true,
 	}, nil)
+	e.addRecorderIngestable(t, "ing-1", "photos")
 
-	req := httptest.NewRequest("GET", "http://localhost/v1/ingestable/ing-1/status", nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-	require.Equal(t, 200, w.Code)
+	w := e.doEmpty(t, "GET", "/v1/ingestable/ing-1/status")
+	mustStatus(t, w, 200)
 	require.Contains(t, w.Body.String(), `"lagUnit":"bytes"`)
-
-	// Unknown lag: null lag, no unit — a unit without a number is noise.
-	fake.IngestableStatusReturns(cluster.IngestableStatus{
-		WorkerState: cluster.WorkerStateRunning,
-		Phase:       "streaming",
-	}, nil)
-	w = httptest.NewRecorder()
-	h.ServeHTTP(w, httptest.NewRequest("GET", "http://localhost/v1/ingestable/ing-1/status", nil))
-	require.Equal(t, 200, w.Code)
-	require.Contains(t, w.Body.String(), `"lag":null`)
-	require.False(t, strings.Contains(w.Body.String(), "lagUnit"),
-		"lagUnit must be omitted when lag is null")
+	require.Contains(t, w.Body.String(), `"position":"binlog.000004:1547"`)
+	require.Contains(t, w.Body.String(), `"caughtUp":true`)
 }
 
-// TestGetIngestableStatus_Census pins the census section of the status
-// payload: shapes in first-seen order, the derived path view, and a rendered
-// draft schema — and its absence when no census has been published.
-func TestGetIngestableStatus_Census(t *testing.T) {
-	h, fake := setupTest()
-	fake.IngestableStatusReturns(cluster.IngestableStatus{
-		WorkerState: cluster.WorkerStateRunning,
-		Phase:       "streaming",
-	}, nil)
-
-	tc := &cluster.TopicCensus{}
-	require.NoError(t, tc.Fold([]byte(`{"caption":"a","size":1}`), cluster.CensusOptions{}))
-	require.NoError(t, tc.Fold([]byte(`{"caption":"b","ai":{"m":"x"}}`), cluster.CensusOptions{}))
-	fake.IngestableCensusReturns(&cluster.IngestableCensus{
-		ID: "ing-1", RefreshEpoch: 1,
-		Topics: map[string]*cluster.TopicCensus{"photos": tc},
-	}, true)
-
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, httptest.NewRequest("GET", "http://localhost/v1/ingestable/ing-1/status", nil))
-	require.Equal(t, 200, w.Code)
-
-	var resp http.IngestableStatusResponse
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-	photos := resp.Census["photos"]
-	require.NotNil(t, photos)
-	require.Equal(t, uint64(2), photos.Rows)
-	require.Len(t, photos.Shapes, 2)
-	require.LessOrEqual(t, photos.Shapes[0].FirstRow, photos.Shapes[1].FirstRow, "shapes render in first-seen order")
-	require.NotEmpty(t, photos.Paths)
-	require.Contains(t, photos.DraftSchema, `"additionalProperties": false`)
-	require.Contains(t, photos.DraftSchema, `"ai"`)
-
-	// No census published → the field is omitted entirely.
-	fake.IngestableCensusReturns(nil, false)
-	w = httptest.NewRecorder()
-	h.ServeHTTP(w, httptest.NewRequest("GET", "http://localhost/v1/ingestable/ing-1/status", nil))
-	require.Equal(t, 200, w.Code)
-	require.False(t, strings.Contains(w.Body.String(), "census"), "no census, no field")
+// TestGetIngestableStatus_UnknownIs404: the existence gate — a typo'd id
+// must not read as "exists, but no worker here".
+func TestGetIngestableStatus_UnknownIs404(t *testing.T) {
+	e := newEngine(t)
+	requireEnvelope(t, e.doEmpty(t, "GET", "/v1/ingestable/nope/status"), 404, "not_found")
 }
