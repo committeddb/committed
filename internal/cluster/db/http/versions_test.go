@@ -37,11 +37,6 @@ func TestGetVersions_Success(t *testing.T) {
 			setupFn: func(fake *clusterfakes.FakeCluster) { fake.IngestableVersionsReturns(versions, nil) },
 		},
 		{
-			name:    "syncable",
-			path:    "/v1/syncable/sync-1/versions",
-			setupFn: func(fake *clusterfakes.FakeCluster) { fake.SyncableVersionsReturns(versions, nil) },
-		},
-		{
 			name:    "type",
 			path:    "/v1/type/type-1/versions",
 			setupFn: func(fake *clusterfakes.FakeCluster) { fake.TypeVersionsReturns(versions, nil) },
@@ -95,12 +90,6 @@ func TestGetVersions_ResourceNotFound(t *testing.T) {
 			path:         "/v1/ingestable/missing/versions",
 			setupFn:      func(fake *clusterfakes.FakeCluster) { fake.IngestableVersionsReturns(nil, cluster.ErrResourceNotFound) },
 			expectedCode: "ingestable_not_found",
-		},
-		{
-			name:         "syncable",
-			path:         "/v1/syncable/missing/versions",
-			setupFn:      func(fake *clusterfakes.FakeCluster) { fake.SyncableVersionsReturns(nil, cluster.ErrResourceNotFound) },
-			expectedCode: "syncable_not_found",
 		},
 		{
 			name:         "type",
@@ -160,11 +149,6 @@ func TestGetVersion_Success(t *testing.T) {
 			name:    "ingestable",
 			path:    "/v1/ingestable/res-1/versions/1",
 			setupFn: func(fake *clusterfakes.FakeCluster) { fake.IngestableVersionReturns(cfg, nil) },
-		},
-		{
-			name:    "syncable",
-			path:    "/v1/syncable/res-1/versions/1",
-			setupFn: func(fake *clusterfakes.FakeCluster) { fake.SyncableVersionReturns(cfg, nil) },
 		},
 		{
 			name:    "type",
@@ -273,18 +257,6 @@ func TestRollback_Success(t *testing.T) {
 				require.Equal(t, cfg, proposed)
 			},
 		},
-		{
-			name: "syncable",
-			path: "/v1/syncable/res-1/rollback?to=1",
-			setupFn: func(fake *clusterfakes.FakeCluster) {
-				fake.SyncableVersionReturns(cfg, nil)
-			},
-			verifyFn: func(fake *clusterfakes.FakeCluster) {
-				require.Equal(t, 1, fake.ProposeSyncableCallCount())
-				_, proposed := fake.ProposeSyncableArgsForCall(0)
-				require.Equal(t, cfg, proposed)
-			},
-		},
 	}
 
 	for _, tc := range tests {
@@ -324,13 +296,13 @@ func TestRollback_VersionNotFound(t *testing.T) {
 }
 
 func TestRollback_ProposeError(t *testing.T) {
-	cfg := &cluster.Configuration{ID: "sync-1", MimeType: "text/toml", Data: []byte("config")}
+	cfg := &cluster.Configuration{ID: "ing-1", MimeType: "text/toml", Data: []byte("config")}
 
 	h, fake := setupTest()
-	fake.SyncableVersionReturns(cfg, nil)
-	fake.ProposeSyncableReturns(fmt.Errorf("raft unavailable"))
+	fake.IngestableVersionReturns(cfg, nil)
+	fake.ProposeIngestableReturns(fmt.Errorf("raft unavailable"))
 
-	req := httptest.NewRequest("POST", "http://localhost/v1/syncable/sync-1/rollback?to=1", nil)
+	req := httptest.NewRequest("POST", "http://localhost/v1/ingestable/ing-1/rollback?to=1", nil)
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, req)

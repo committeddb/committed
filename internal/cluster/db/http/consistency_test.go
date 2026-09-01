@@ -88,17 +88,19 @@ func TestLinearize_BadConsistencyValueReturns400(t *testing.T) {
 	require.Equal(t, 0, fake.DatabasesCallCount())
 }
 
-// TestLinearize_AppliesToVersionAndSyncableReads: the gate isn't database-
-// specific — version history and syncable status reads honour it too.
-func TestLinearize_AppliesToVersionAndSyncableReads(t *testing.T) {
+// TestLinearize_AppliesToVersionAndStatusReads: the gate isn't database-
+// specific — version history and ingestable status reads honour it too.
+// (The syncable status route honours the same barrier; it is engine-backed
+// now and exercised by the real-engine syncable tests.)
+func TestLinearize_AppliesToVersionAndStatusReads(t *testing.T) {
 	t.Run("versions default runs read-index", func(t *testing.T) {
 		w, fake := doGET(t, "/v1/database/db-1/versions", nil)
 		require.Equal(t, 200, w.Result().StatusCode)
 		require.Equal(t, 1, fake.LinearizableReadCallCount())
 	})
 
-	t.Run("syncable status stale skips read-index", func(t *testing.T) {
-		w, fake := doGET(t, "/v1/syncable/s1/status?consistency=stale", nil)
+	t.Run("ingestable status stale skips read-index", func(t *testing.T) {
+		w, fake := doGET(t, "/v1/ingestable/i1/status?consistency=stale", nil)
 		require.Equal(t, 200, w.Result().StatusCode)
 		require.Equal(t, 0, fake.LinearizableReadCallCount())
 	})

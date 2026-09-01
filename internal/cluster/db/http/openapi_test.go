@@ -1,6 +1,7 @@
 package http_test
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	httpgo "net/http"
@@ -8,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/pb33f/libopenapi"
@@ -283,85 +285,6 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 			},
 		},
 
-		// --- syncable ---
-		{
-			name:   "GET /syncable",
-			method: httpgo.MethodGet,
-			path:   "/v1/syncable",
-			setup: func(fake *clusterfakes.FakeCluster) {
-				fake.SyncablesReturns([]*cluster.Configuration{sampleConfig("sync-1")}, nil)
-			},
-		},
-		{
-			name:        "POST /syncable/{id}",
-			method:      httpgo.MethodPost,
-			path:        "/v1/syncable/sync-1",
-			body:        "[config]\nvalue = \"x\"",
-			contentType: "text/toml",
-		},
-		{
-			name:   "GET /syncable/{id}/versions",
-			method: httpgo.MethodGet,
-			path:   "/v1/syncable/sync-1/versions",
-			setup: func(fake *clusterfakes.FakeCluster) {
-				fake.SyncableVersionsReturns(sampleVersions(), nil)
-			},
-		},
-		{
-			name:   "GET /syncable/{id}/versions/{version}",
-			method: httpgo.MethodGet,
-			path:   "/v1/syncable/sync-1/versions/1",
-			setup: func(fake *clusterfakes.FakeCluster) {
-				fake.SyncableVersionReturns(sampleConfig("sync-1"), nil)
-			},
-		},
-		{
-			name:   "GET /syncable/{id}/errors",
-			method: httpgo.MethodGet,
-			path:   "/v1/syncable/sync-1/errors?since=5&limit=10",
-			setup: func(fake *clusterfakes.FakeCluster) {
-				fake.SyncableDeadLettersReturns([]cluster.SyncableDeadLetter{
-					{ID: "sync-1", Index: 7, TimestampUnixNano: 1_700_000_000_000_000_000, Kind: "permanent", Message: "constraint violation"},
-				}, nil)
-			},
-		},
-		{
-			name:   "POST /syncable/{id}/rollback",
-			method: httpgo.MethodPost,
-			path:   "/v1/syncable/sync-1/rollback?to=1",
-			setup: func(fake *clusterfakes.FakeCluster) {
-				fake.SyncableVersionReturns(sampleConfig("sync-1"), nil)
-			},
-		},
-		{
-			name:   "POST /syncable/{id}/deadletter",
-			method: httpgo.MethodPost,
-			path:   "/v1/syncable/sync-1/deadletter",
-			setup: func(fake *clusterfakes.FakeCluster) {
-				fake.DeadLetterStuckSyncableReturns(7, nil)
-			},
-		},
-		{
-			name:   "GET /syncable/{id}/status",
-			method: httpgo.MethodGet,
-			path:   "/v1/syncable/sync-1/status",
-			setup: func(fake *clusterfakes.FakeCluster) {
-				fake.SyncableStuckReturns(cluster.SyncableStuck{
-					ID: "sync-1", Index: 7, SinceUnixNano: 1_700_000_000_000_000_000, Message: "boom",
-				}, true, nil)
-				fake.SyncableProgressReturns(1234, 1240, nil)
-				fake.SyncableDeadLetterStatsReturns(2, 1, 1236, nil)
-			},
-		},
-		{
-			name:   "POST /syncable/{id}/replay/{index}",
-			method: httpgo.MethodPost,
-			path:   "/v1/syncable/sync-1/replay/7",
-			setup: func(fake *clusterfakes.FakeCluster) {
-				fake.ReplaySyncableDeadLetterReturns(nil)
-			},
-		},
-
 		// --- type ---
 		{
 			name:   "GET /type",
@@ -451,7 +374,6 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &clusterfakes.FakeCluster{}
-			fake.SyncableExistsReturns(true, nil)
 			fake.IngestableExistsReturns(true, nil)
 			if tc.setup != nil {
 				tc.setup(fake)
@@ -476,6 +398,95 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 			require.True(t, valid, "response did not match spec for %s: %s", tc.name, formatValidationErrors(errs))
 		})
 	}
+
+	// --- syncable (real engine) ---
+	// The syncable handler group holds the engine concretely (no fake seam),
+	// so its rows validate against a real single-node engine seeded through
+	// the plugin seam; dynamic values (the replayable dead-letter index) come
+	// from the seeding itself.
+	t.Run("syncable (real engine)", func(t *testing.T) {
+		e := newEngine(t)
+		e.addType(t, "photos", "photos")
+		e.addRecorderSyncable(t, "rec-1", "photos")
+
+		// Seed a manual dead letter: wedge k1, skip it, heal the sink — the
+		// listing has content, the index is replayable, status has history.
+		e.sink.setErr(fmt.Errorf("constraint violation"))
+		e.proposeRow(t, "photos", "k1")
+		e.awaitStatus(t, "rec-1", func(m map[string]any) bool {
+			b, _ := m["stuck"].(bool)
+			return b
+		}, "wedged for seeding")
+		w := e.doEmpty(t, "POST", "/v1/syncable/rec-1/deadletter")
+		require.Equal(t, 202, w.Code, w.Body.String())
+		var seeded struct {
+			Index uint64 `json:"index"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &seeded))
+		require.Eventually(t, func() bool {
+			var listed []struct{ Index uint64 }
+			e.getJSON(t, "/v1/syncable/rec-1/errors", &listed)
+			return len(listed) == 1
+		}, 15*time.Second, 10*time.Millisecond, "seeded dead letter never listed")
+		e.sink.setErr(nil)
+
+		realCases := []struct {
+			name, method, path, contentType, body string
+			pre                                   func(t *testing.T)
+		}{
+			{name: "GET /syncable", method: httpgo.MethodGet, path: "/v1/syncable"},
+			{
+				name: "POST /syncable/{id}", method: httpgo.MethodPost, path: "/v1/syncable/rec-2",
+				contentType: "text/toml",
+				body:        "[syncable]\nname = \"rec-2\"\ntype = \"recorder\"\n[recorder]\ntopic = \"photos\"\n",
+			},
+			{name: "GET /syncable/{id}/versions", method: httpgo.MethodGet, path: "/v1/syncable/rec-1/versions"},
+			{name: "GET /syncable/{id}/versions/{version}", method: httpgo.MethodGet, path: "/v1/syncable/rec-1/versions/1"},
+			{name: "GET /syncable/{id}/errors", method: httpgo.MethodGet, path: "/v1/syncable/rec-1/errors?since=0&limit=10"},
+			{name: "POST /syncable/{id}/rollback", method: httpgo.MethodPost, path: "/v1/syncable/rec-1/rollback?to=1"},
+			{name: "GET /syncable/{id}/status", method: httpgo.MethodGet, path: "/v1/syncable/rec-1/status"},
+			{
+				name: "POST /syncable/{id}/replay/{index}", method: httpgo.MethodPost,
+				path: fmt.Sprintf("/v1/syncable/rec-1/replay/%d", seeded.Index),
+			},
+			{
+				name: "POST /syncable/{id}/deadletter", method: httpgo.MethodPost,
+				path: "/v1/syncable/rec-1/deadletter",
+				pre: func(t *testing.T) {
+					// The lever 409s unless something is blocked: re-wedge.
+					e.sink.setErr(fmt.Errorf("still broken"))
+					e.proposeRow(t, "photos", "k2")
+					e.awaitStatus(t, "rec-1", func(m map[string]any) bool {
+						b, _ := m["stuck"].(bool)
+						return b
+					}, "re-wedged for the deadletter row")
+				},
+			},
+		}
+		for _, tc := range realCases {
+			t.Run(tc.name, func(t *testing.T) {
+				if tc.pre != nil {
+					tc.pre(t)
+				}
+				var body io.Reader
+				if tc.body != "" {
+					body = strings.NewReader(tc.body)
+				}
+				req := httptest.NewRequest(tc.method, "http://localhost"+tc.path, body)
+				if tc.contentType != "" {
+					req.Header.Set("Content-Type", tc.contentType)
+				}
+				rr := httptest.NewRecorder()
+				e.h.ServeHTTP(rr, req)
+
+				require.GreaterOrEqual(t, rr.Code, 200, "handler returned an error status unexpectedly")
+				require.Less(t, rr.Code, 300, "handler returned %d; body=%s", rr.Code, rr.Body.String())
+
+				valid, errs := v.ValidateHttpResponse(req, rr.Result())
+				require.True(t, valid, "response did not match spec for %s: %s", tc.name, formatValidationErrors(errs))
+			})
+		}
+	})
 }
 
 // TestOpenAPIContract_ErrorResponses validates that the ErrorResponse
@@ -521,7 +532,6 @@ func TestOpenAPIContract_ErrorResponses(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &clusterfakes.FakeCluster{}
-			fake.SyncableExistsReturns(true, nil)
 			fake.IngestableExistsReturns(true, nil)
 			if tc.setup != nil {
 				tc.setup(fake)
@@ -553,7 +563,6 @@ func TestOpenAPIContract_UnauthorizedShape(t *testing.T) {
 	_, v := newValidator(t)
 
 	fake := &clusterfakes.FakeCluster{}
-	fake.SyncableExistsReturns(true, nil)
 	fake.IngestableExistsReturns(true, nil)
 	h := httppkg.New(fake, httppkg.WithBearerToken("secret"))
 

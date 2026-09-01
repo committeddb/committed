@@ -51,7 +51,7 @@ const forwardedHeader = "X-Committed-Forwarded"
 func (h *HTTP) syncableOwnerRoute(next httpgo.HandlerFunc) httpgo.HandlerFunc {
 	return func(w httpgo.ResponseWriter, r *httpgo.Request) {
 		id := r.PathValue("id")
-		zone, unsatisfiable, pinned := h.c.SyncableZonePin(id)
+		zone, unsatisfiable, pinned := h.db.SyncableZonePin(id)
 		if !pinned {
 			h.leaderRead(next)(w, r)
 			return
@@ -61,8 +61,8 @@ func (h *HTTP) syncableOwnerRoute(next httpgo.HandlerFunc) httpgo.HandlerFunc {
 				"the pin to zone \""+zone+"\" has no serving node; restore a node in the zone (or re-POST the config without `zone`) and retry")
 			return
 		}
-		owner := h.c.SyncableOwner(id)
-		if owner == h.c.ID() {
+		owner := h.db.SyncableOwner(id)
+		if owner == h.db.ID() {
 			next(w, r)
 			return
 		}
@@ -73,7 +73,7 @@ func (h *HTTP) syncableOwnerRoute(next httpgo.HandlerFunc) httpgo.HandlerFunc {
 				"ownership moved while routing; retry")
 			return
 		}
-		if ownerURL, ok := h.c.MemberAPIURL(owner); ok && ownerURL != "" {
+		if ownerURL, ok := h.db.MemberAPIURL(owner); ok && ownerURL != "" {
 			if err := h.proxyToMember(w, r, ownerURL); err == nil {
 				return
 			}

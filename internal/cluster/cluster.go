@@ -37,12 +37,6 @@ type Cluster interface {
 	// Restatements returns every applied restatement with its raft index, unordered.
 	// Powers GET /v1/restatement.
 	Restatements() ([]AppliedRestatement, error)
-	// SyncableInterpretation reports the syncable's interpretation pin — the
-	// registry index its current materialization began under — and whether
-	// restatements affecting its consumed topics have landed past it (stale: some
-	// sink rows were derived under a superseded reading; re-derivation is
-	// operator-triggered, never automatic). Part of GET /syncable/{id}/status.
-	SyncableInterpretation(id string) (pin uint64, stale bool, err error)
 	ProposeDeleteType(ctx context.Context, id string) error
 	ProposeIngestable(ctx context.Context, c *Configuration) error
 	// DeleteIngestable removes an ingestable: its config and checkpoint position
@@ -51,44 +45,6 @@ type Cluster interface {
 	// publication) so an orphaned slot can't pin the source's WAL and fill its
 	// disk. A later same-id create starts fresh from a full snapshot.
 	DeleteIngestable(ctx context.Context, id string) error
-	ProposeSyncable(ctx context.Context, c *Configuration) error
-	// DryRunSyncable rehearses a syncable configuration against a
-	// bounded sample of the committed log — full admission-level
-	// parsing, a real fold into a throwaway store, and a diagnostic
-	// report — without proposing, storing, or touching a destination.
-	DryRunSyncable(ctx context.Context, mimeType string, data []byte, opts DryRunOptions) (*DryRunReport, error)
-	// DeleteSyncable removes a syncable: its config and checkpoint are deleted
-	// atomically and, unless keepData is set, the owner tears down the
-	// syncable's destination state (best-effort — for a SQL syncable, dropping
-	// its table). A later same-name create then starts fresh from index 0.
-	DeleteSyncable(ctx context.Context, id string, keepData bool) error
-	// RebuildSyncable re-materializes a syncable's destination from index 0
-	// using the same config: it resets the checkpoint, tears the destination
-	// down and back up (clean slate), and replays. The recovery primitive for a
-	// drifted or corrupted projection. Returns ErrResourceNotFound if the
-	// syncable is unknown.
-	RebuildSyncable(ctx context.Context, id string) error
-	// RematerializeSyncable replays a syncable's topic from index 0 through
-	// the current projection + interpretation while its keyed sink keeps
-	// serving — the non-destructive sibling of RebuildSyncable. Keyed
-	// upserts converge rows in place; a completion sweep removes rows the
-	// replay never re-emitted; the checkpoint's interpretation pin
-	// refreshes. Returns ErrNotRematerializable for sinks that cannot
-	// converge in place. Powers POST /v1/syncable/{id}/rematerialize.
-	RematerializeSyncable(ctx context.Context, id string) error
-	// SyncableRematerialization reports the syncable's in-progress
-	// re-materialization (nil, false when none) — the status endpoint's
-	// progress source.
-	SyncableRematerialization(id string) (*SyncableRematerialization, bool)
-	// SyncableZonePin reports a stored syncable's zone pin: its configured
-	// zone (ok=false for unpinned) and whether the pin is currently
-	// unsatisfiable (no current member announces the zone — the strict
-	// stall). Part of GET /syncable/{id}/status.
-	SyncableZonePin(id string) (zone string, unsatisfiable bool, ok bool)
-	// SyncableDerivation reports a stored syncable's derivation provenance —
-	// the topic it consumes and the derived topic it produces. ok is false
-	// for every non-deriving kind; the status surface omits the fields then.
-	SyncableDerivation(id string) (source, target string, ok bool)
 	ProposeDatabase(ctx context.Context, c *Configuration) error
 	// Scrub requests physical removal of already-delete-proposed (RTBF)
 	// entities from the permanent event log up to the current applied index.
@@ -117,12 +73,6 @@ type Cluster interface {
 	Databases() ([]*Configuration, error)
 	Ingestables() ([]*Configuration, error)
 	Syncables() ([]*Configuration, error)
-	// SyncableExists reports whether a syncable config id currently exists.
-	// The status/errors endpoints gate on it and 404 an unknown id — an
-	// absent id must never synthesize a healthy-looking status from
-	// default-zero reads (field finding: a typo'd id in monitoring watched a
-	// "running" phantom with real head/lag forever).
-	SyncableExists(id string) (bool, error)
 	// IngestableExists is SyncableExists's ingest twin.
 	IngestableExists(id string) (bool, error)
 	Types() ([]*Configuration, error)
@@ -144,43 +94,6 @@ type Cluster interface {
 	// state, identical on any node. Powers the census section of
 	// GET /v1/ingestable/{id}/status.
 	IngestableCensus(id string) (*IngestableCensus, bool)
-	SyncableVersions(id string) ([]VersionInfo, error)
-	SyncableVersion(id string, version uint64) (*Configuration, error)
-	// SyncableDeadLetters returns the proposals a syncable gave up on and
-	// skipped (dead-lettered), in ascending raft-index order. `since` is
-	// an exclusive raft-index cursor for paging; `limit` bounds the page.
-	// Backed by replicated state, so any node returns the same answer.
-	SyncableDeadLetters(id string, since uint64, limit int) ([]SyncableDeadLetter, error)
-	// SyncableDeadLetterStats returns how many proposals the syncable has
-	// dead-lettered (skipped) and NOT yet acknowledged, how many an
-	// operator has acknowledged as resolved out-of-band, and the raft
-	// index of the most recent record of either state (0 when none).
-	// Surfaced on GET /syncable/{id}/status so a caught-up sink with
-	// skipped rows never reads as fully green — the honest completeness
-	// check is caughtUp && deadLetters == 0 && workerState == "running";
-	// acknowledging is how a superseded skip stops reading permanently
-	// red. Backed by replicated state.
-	SyncableDeadLetterStats(id string) (count, acknowledged, last uint64, err error)
-	// AcknowledgeSyncableDeadLetter marks the dead-letter record at raft
-	// index as resolved out-of-band (the operator attests a later event
-	// superseded the skipped proposal, or it was fixed at the source —
-	// replaying would REGRESS the sink row, and leaving it inflates the
-	// completeness count forever). The record leaves the deadLetters
-	// count but stays listable as an audit trail; a later replay is still
-	// allowed (success deletes the record entirely). Replicated —
-	// acknowledge once, every node agrees. Returns ErrNotDeadLettered
-	// when no record exists at that index; acknowledging an
-	// already-acknowledged record is an idempotent no-op.
-	AcknowledgeSyncableDeadLetter(ctx context.Context, id string, index uint64) error
-	// DeadLetterStuckSyncable skips the proposal a syncable is currently
-	// blocked retrying (a transient error retries forever, so the worker
-	// stalls visibly rather than losing data until an operator intervenes).
-	// It reads the replicated SyncableStuck record to find the blocked index
-	// and proposes a skip request through Raft; the worker records a "manual"
-	// dead letter and advances. Works from any node (the stuck state is
-	// replicated). Returns the targeted raft index, or ErrSyncNotStuck if the
-	// syncable isn't currently blocked. See ErrSyncNotStuck.
-	DeadLetterStuckSyncable(ctx context.Context, id string) (uint64, error)
 	// SyncableStuck reports whether a syncable's worker is currently blocked
 	// and, if so, on which raft index (with when and the last error). Backed
 	// by replicated state, so any node answers identically — powers
@@ -198,41 +111,6 @@ type Cluster interface {
 	// syncable reports checkpoint 0 (and lag == head). Powers the progress
 	// fields on GET /syncable/{id}/status.
 	SyncableProgress(id string) (checkpoint, head uint64, err error)
-	// SyncableOwner returns the raft node ID that owns the syncable's worker:
-	// the pinned node when the config names one, otherwise the current leader
-	// (0 when no leader is known). Derived from replicated state, so any node
-	// answers identically. Powers the ownerNode field on
-	// GET /syncable/{id}/status and routes the opt-in readPosition proxy.
-	SyncableOwner(id string) uint64
-	// SyncableReadPosition reports the live scan position of the syncable's
-	// worker ON THIS NODE — the raft index of the last log entry its reader
-	// examined, advancing per entry scanned including skips of other topics'
-	// entries. False when this node has no live position (no worker, idle
-	// non-owner, or a reader without the capability). Owner-local: only the
-	// owning node's worker holds a reader, so the HTTP layer proxies
-	// ?readPosition=true status calls to SyncableOwner's node.
-	SyncableReadPosition(id string) (position uint64, ok bool)
-	// SyncableStageRecovery reports a running stage-state re-derivation on
-	// THIS node's worker (folded index, checkpoint target; ok=false none).
-	// Owner-local, O(1) — served on the default status call.
-	SyncableStageRecovery(id string) (folded, target uint64, ok bool)
-	// SyncableStageStats reports the per-stage introspection rows (keys /
-	// inputs / fanned) of the syncable's worker on THIS node (ok=false: no
-	// worker here, or no stages). Owner-local; see StageIntrospector.
-	SyncableStageStats(id string) (stats map[string]StageStat, ok bool)
-	// SyncableStageKeyExists probes one stage output key on THIS node's
-	// worker (ok=false: no worker here, or no stages). keyParts are the
-	// key's parts in keyPath order — the owner renders and composes
-	// them. err: undeclared stage name or part-count mismatch.
-	// Owner-local; see StageIntrospector.
-	SyncableStageKeyExists(id, stage string, keyParts []string) (exists bool, ok bool, err error)
-	// ReplaySyncableDeadLetter re-drives a dead-lettered proposal: it
-	// re-runs the syncable's Sync for the proposal at index and, on success,
-	// clears the dead-letter record. Node-agnostic. Returns ErrNotDeadLettered
-	// if index isn't a dead letter for the syncable, or an error wrapping
-	// ErrReplaySyncFailed if the re-sync failed again (the record is left in
-	// place). See those errors.
-	ReplaySyncableDeadLetter(ctx context.Context, id string, index uint64) error
 	TypeVersions(id string) ([]VersionInfo, error)
 	TypeVersion(id string, version uint64) (*Configuration, error)
 	// TypeMigrationDeadLetters returns the proposals whose entities failed

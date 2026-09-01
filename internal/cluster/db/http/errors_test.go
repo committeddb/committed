@@ -84,16 +84,16 @@ func (e *rebuildRequired) Details() any  { return e.details }
 // machine-readable code + structured details, so a deploy pipeline can branch
 // to the rebuild verb without scraping the message. The HTTP layer is agnostic
 // to what the details contain.
-func TestProposeSyncable_RebuildRequired_Returns409WithStructuredDetails(t *testing.T) {
+func TestPropose_RebuildRequired_Returns409WithStructuredDetails(t *testing.T) {
 	fake := &clusterfakes.FakeCluster{}
-	fake.ProposeSyncableReturns(&rebuildRequired{
+	fake.ProposeDatabaseReturns(&rebuildRequired{
 		code:    "schema_change_requires_rebuild",
 		message: "schema changed; rebuild the table",
 		details: map[string]any{"table": "tenants", "addedColumns": []string{"tier"}},
 	})
 	h := http.New(fake)
 
-	r := httptest.NewRequest(httpgo.MethodPost, "/v1/syncable/s-1", strings.NewReader("x = 1"))
+	r := httptest.NewRequest(httpgo.MethodPost, "/v1/database/db-1", strings.NewReader("x = 1"))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 
@@ -117,15 +117,15 @@ func TestProposeSyncable_RebuildRequired_Returns409WithStructuredDetails(t *test
 // A field-scoped ConfigError from propose is rendered as 400 with the config
 // field path in structured details, so a deploy pipeline can point at the
 // offending TOML key without scraping the message.
-func TestProposeSyncable_ConfigError_FieldDetails(t *testing.T) {
+func TestPropose_ConfigError_FieldDetails(t *testing.T) {
 	fake := &clusterfakes.FakeCluster{}
-	fake.ProposeSyncableReturns(cluster.NewConfigError(&cluster.FieldError{
+	fake.ProposeDatabaseReturns(cluster.NewConfigError(&cluster.FieldError{
 		Field: "sql.dialect",
 		Issue: `unknown dialect "oracle"; valid: mysql, postgres`,
 	}))
 	h := http.New(fake)
 
-	r := httptest.NewRequest(httpgo.MethodPost, "/v1/syncable/s-1", strings.NewReader("x = 1"))
+	r := httptest.NewRequest(httpgo.MethodPost, "/v1/database/db-1", strings.NewReader("x = 1"))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 
@@ -140,7 +140,7 @@ func TestProposeSyncable_ConfigError_FieldDetails(t *testing.T) {
 		} `json:"details"`
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
-	require.Equal(t, "invalid_syncable_config", body.Code)
+	require.Equal(t, "invalid_database_config", body.Code)
 	require.Contains(t, body.Message, "unknown dialect")
 	require.Equal(t, "sql.dialect", body.Details.Field)
 	require.Contains(t, body.Details.Issue, "valid: mysql, postgres")

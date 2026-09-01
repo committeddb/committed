@@ -52,7 +52,7 @@ func (h *HTTP) GetSyncableErrors(w httpgo.ResponseWriter, r *httpgo.Request) {
 
 	// Same 404 gate as the status endpoint: an unknown id's empty dead-letter
 	// list is indistinguishable from a healthy syncable's.
-	if ok, err := h.c.SyncableExists(id); err != nil {
+	if ok, err := h.db.SyncableExists(id); err != nil {
 		writeInternalError(w, "failed to check syncable existence", err)
 		return
 	} else if !ok {
@@ -84,7 +84,7 @@ func (h *HTTP) GetSyncableErrors(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 
-	dls, err := h.c.SyncableDeadLetters(id, since, limit)
+	dls, err := h.db.SyncableDeadLetters(id, since, limit)
 	if err != nil {
 		writeInternalError(w, "failed to retrieve syncable errors", err)
 		return
@@ -132,7 +132,7 @@ func (h *HTTP) DeadLetterStuckSyncable(w httpgo.ResponseWriter, r *httpgo.Reques
 		return
 	}
 
-	index, err := h.c.DeadLetterStuckSyncable(r.Context(), id)
+	index, err := h.db.DeadLetterStuckSyncable(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, cluster.ErrSyncNotStuck) {
 			writeError(w, httpgo.StatusConflict, "not_stuck",
@@ -190,7 +190,7 @@ func (h *HTTP) DeleteSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
 		keepData = v
 	}
 
-	if err := h.c.DeleteSyncable(r.Context(), id, keepData); err != nil {
+	if err := h.db.DeleteSyncable(r.Context(), id, keepData); err != nil {
 		writeProposeError(w, err, "syncable", "delete syncable")
 		return
 	}
@@ -218,29 +218,8 @@ func (h *HTTP) RebuildSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 
-	if err := h.c.RebuildSyncable(r.Context(), id); err != nil {
-		if errors.Is(err, cluster.ErrResourceNotFound) {
-			writeError(w, httpgo.StatusNotFound, "not_found", "syncable not found")
-			return
-		}
-		if errors.Is(err, cluster.ErrZonePinUnsatisfiable) {
-			writeError(w, httpgo.StatusServiceUnavailable, "pin_unsatisfiable", err.Error())
-			return
-		}
-		if errors.Is(err, cluster.ErrNotSyncableOwner) {
-			// Stale routing view (ownership just moved): retryable, the next
-			// attempt's hop lands on the current owner.
-			writeError(w, httpgo.StatusServiceUnavailable, "not_syncable_owner", err.Error())
-			return
-		}
-		// A wedged worker aborts the rebuild before anything changed — a
-		// retryable condition (wait out the destination, or re-POST the config
-		// to replace the worker), so 503 rather than a generic failure.
-		if errors.Is(err, cluster.ErrWorkerWedged) {
-			writeError(w, httpgo.StatusServiceUnavailable, "worker_wedged", err.Error())
-			return
-		}
-		writeProposeError(w, err, "syncable", "rebuild syncable")
+	if err := h.db.RebuildSyncable(r.Context(), id); err != nil {
+		writeRebuildError(w, err)
 		return
 	}
 
@@ -281,32 +260,8 @@ func (h *HTTP) RematerializeSyncable(w httpgo.ResponseWriter, r *httpgo.Request)
 		return
 	}
 
-	if err := h.c.RematerializeSyncable(r.Context(), id); err != nil {
-		if errors.Is(err, cluster.ErrResourceNotFound) {
-			writeError(w, httpgo.StatusNotFound, "not_found", "syncable not found")
-			return
-		}
-		if errors.Is(err, cluster.ErrNotRematerializable) {
-			// 409: the config is fine, but this sink shape cannot converge a
-			// replay in place — the message names the alternatives.
-			writeError(w, httpgo.StatusConflict, "not_rematerializable", err.Error())
-			return
-		}
-		if errors.Is(err, cluster.ErrZonePinUnsatisfiable) {
-			writeError(w, httpgo.StatusServiceUnavailable, "pin_unsatisfiable", err.Error())
-			return
-		}
-		if errors.Is(err, cluster.ErrNotSyncableOwner) {
-			// Stale routing view (ownership just moved): retryable, the next
-			// attempt's hop lands on the current owner.
-			writeError(w, httpgo.StatusServiceUnavailable, "not_syncable_owner", err.Error())
-			return
-		}
-		if errors.Is(err, cluster.ErrWorkerWedged) {
-			writeError(w, httpgo.StatusServiceUnavailable, "worker_wedged", err.Error())
-			return
-		}
-		writeProposeError(w, err, "syncable", "rematerialize syncable")
+	if err := h.db.RematerializeSyncable(r.Context(), id); err != nil {
+		writeRematerializeError(w, err)
 		return
 	}
 	writeJson(w, []byte(`{"status":"rematerializing"}`))
@@ -505,7 +460,7 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 	// ABSENCE of a park record, which an absent id satisfies vacuously), so
 	// without this gate monitoring watches a healthy phantom forever — the
 	// field finding. Same oracle and wording as the rebuild endpoint's gate.
-	if ok, err := h.c.SyncableExists(id); err != nil {
+	if ok, err := h.db.SyncableExists(id); err != nil {
 		writeInternalError(w, "failed to check syncable existence", err)
 		return
 	} else if !ok {
@@ -544,14 +499,14 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 
-	owner := h.c.SyncableOwner(id)
-	if (wantPosition || wantStages || probeStage != "") && owner != 0 && owner != h.c.ID() && r.Header.Get(forwardedHeader) == "" {
+	owner := h.db.SyncableOwner(id)
+	if (wantPosition || wantStages || probeStage != "") && owner != 0 && owner != h.db.ID() && r.Header.Get(forwardedHeader) == "" {
 		// The scan position lives in the owner's worker — proxy the whole
 		// request there (its response carries the same replicated fields plus
 		// the position). Any failure to hop falls through to the local
 		// answer: soft degrade, not leaderRead's 503, because everything
 		// except readPosition is still perfectly answerable here.
-		if ownerURL, ok := h.c.MemberAPIURL(owner); ok && ownerURL != "" {
+		if ownerURL, ok := h.db.MemberAPIURL(owner); ok && ownerURL != "" {
 			if err := h.proxyToMember(w, r, ownerURL); err == nil {
 				return
 			}
@@ -562,13 +517,13 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 
-	stuck, ok, err := h.c.SyncableStuck(id)
+	stuck, ok, err := h.db.SyncableStuck(id)
 	if err != nil {
 		writeInternalError(w, "failed to retrieve syncable status", err)
 		return
 	}
 
-	checkpoint, head, err := h.c.SyncableProgress(id)
+	checkpoint, head, err := h.db.SyncableProgress(id)
 	if err != nil {
 		writeInternalError(w, "failed to retrieve syncable progress", err)
 		return
@@ -587,47 +542,23 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 		resp.Message = stuck.Message
 	}
 
-	// Build-degraded overrides both: "running" is derived from the ABSENCE of a
-	// park record, which a worker that never STARTED satisfies vacuously — the
-	// same absence-derived lie the existence gate above closes for absent ids,
-	// one door over (a missing ${VAR} config read "running" with growing lag).
-	// Degraded is the ANSWERING NODE's view (builds are node-local; the record
-	// is this node's config-error bookkeeping) and the error is already
-	// redacted at the record surface. It can't coexist with a park except as a
-	// transient race — a new config version clears the park record atomically
-	// with the version write, and degraded is that version's build verdict —
-	// so degraded, the more current fact, wins.
-	for _, ce := range h.c.ConfigBuildErrors() {
-		if ce.Kind == "syncable" && ce.ID == id {
-			resp.WorkerState = cluster.WorkerStateDegraded
-			resp.Message = ce.Error
-			break
-		}
-	}
+	applyBuildDegraded(&resp, id, h.db.ConfigBuildErrors())
 
 	// A running re-derivation overrides "running" on the node doing it
 	// (owner-local, like degraded): the worker is alive but NOT consuming
 	// — new entries apply only after the fold-only pass reaches the
 	// checkpoint, so lag climbs by design and reads as a stall without
 	// this state.
-	if folded, target, ok := h.c.SyncableStageRecovery(id); ok {
+	if folded, target, ok := h.db.SyncableStageRecovery(id); ok {
 		resp.WorkerState = cluster.WorkerStateRederiving
 		resp.StageRecovery = &StageRecoveryStatus{Folded: folded, Target: target}
 	}
 
-	// Both numbers are sourced behind the same linearize barrier above, so
-	// checkpoint (replicated apply state) and head (local apply state) are
-	// mutually consistent and head ≥ checkpoint on the default path. Clamp
-	// anyway as belt-and-suspenders, and for ?consistency=stale reads on a
-	// lagging follower where the two could momentarily cross.
 	resp.CheckpointIndex = checkpoint
 	resp.HeadIndex = head
-	if head > checkpoint {
-		resp.Lag = head - checkpoint
-	}
-	resp.CaughtUp = resp.Lag == 0
+	resp.Lag, resp.CaughtUp = progressFields(checkpoint, head)
 
-	dlCount, dlAcked, dlLast, err := h.c.SyncableDeadLetterStats(id)
+	dlCount, dlAcked, dlLast, err := h.db.SyncableDeadLetterStats(id)
 	if err != nil {
 		writeInternalError(w, "failed to retrieve dead-letter stats", err)
 		return
@@ -636,7 +567,7 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 	resp.AcknowledgedDeadLetters = dlAcked
 	resp.LastDeadLetterIndex = dlLast
 
-	pin, stale, err := h.c.SyncableInterpretation(id)
+	pin, stale, err := h.db.SyncableInterpretation(id)
 	if err != nil {
 		writeInternalError(w, "failed to retrieve interpretation staleness", err)
 		return
@@ -644,17 +575,17 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 	resp.InterpretationPin = pin
 	resp.InterpretationStale = stale
 
-	if rec, ok := h.c.SyncableRematerialization(id); ok {
+	if rec, ok := h.db.SyncableRematerialization(id); ok {
 		resp.Rematerializing = true
 		resp.RematerializeTargetHead = rec.TargetHead
 	}
 
-	if source, target, ok := h.c.SyncableDerivation(id); ok {
+	if source, target, ok := h.db.SyncableDerivation(id); ok {
 		resp.DerivedFrom = source
 		resp.DerivesInto = target
 	}
 
-	if zone, unsatisfiable, ok := h.c.SyncableZonePin(id); ok {
+	if zone, unsatisfiable, ok := h.db.SyncableZonePin(id); ok {
 		resp.PinnedZone = zone
 		resp.PinUnsatisfiable = unsatisfiable
 	}
@@ -666,19 +597,19 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 		// non-owner (stale forward, ownership settling) has no reader and
 		// simply leaves the field absent — the degraded shape, with
 		// OwnerNode pointing at who to ask.
-		if pos, ok := h.c.SyncableReadPosition(id); ok {
+		if pos, ok := h.db.SyncableReadPosition(id); ok {
 			resp.ReadPosition = &pos
 		}
 	}
 	if wantStages {
 		// Same owner-local contract as readPosition: absent on a non-owner
 		// or a stage-free syncable, never an error.
-		if stats, ok := h.c.SyncableStageStats(id); ok {
+		if stats, ok := h.db.SyncableStageStats(id); ok {
 			resp.Stages = stats
 		}
 	}
 	if probeStage != "" {
-		exists, ok, err := h.c.SyncableStageKeyExists(id, probeStage, probeKeyParts)
+		exists, ok, err := h.db.SyncableStageKeyExists(id, probeStage, probeKeyParts)
 		if err != nil {
 			// A typo'd stage name must not read as "key absent".
 			writeError(w, httpgo.StatusBadRequest, "invalid_parameter", err.Error())
@@ -719,7 +650,7 @@ func (h *HTTP) AcknowledgeSyncableDeadLetter(w httpgo.ResponseWriter, r *httpgo.
 		return
 	}
 
-	err = h.c.AcknowledgeSyncableDeadLetter(r.Context(), id, index)
+	err = h.db.AcknowledgeSyncableDeadLetter(r.Context(), id, index)
 	switch {
 	case err == nil:
 		w.WriteHeader(httpgo.StatusOK)
@@ -748,7 +679,99 @@ func (h *HTTP) ReplaySyncableDeadLetter(w httpgo.ResponseWriter, r *httpgo.Reque
 		return
 	}
 
-	err = h.c.ReplaySyncableDeadLetter(r.Context(), id, index)
+	writeReplayDeadLetterResult(w, h.db.ReplaySyncableDeadLetter(r.Context(), id, index))
+}
+
+// applyBuildDegraded overrides the worker state when THIS syncable's config
+// failed its build on the answering node. "Running" is derived from the
+// ABSENCE of a park record, which a worker that never STARTED satisfies
+// vacuously — the same absence-derived lie the status handler's existence
+// gate closes for absent ids, one door over (a missing ${VAR} config read
+// "running" with growing lag). Degraded is the ANSWERING NODE's view (builds
+// are node-local; the record is this node's config-error bookkeeping) and
+// the error is already redacted at the record surface. It can't coexist with
+// a park except as a transient race — a new config version clears the park
+// record atomically with the version write, and degraded is that version's
+// build verdict — so degraded, the more current fact, wins. Records for
+// OTHER ids or kinds must never leak into this response. A free function so
+// the override table is testable directly.
+func applyBuildDegraded(resp *SyncableStatusResponse, id string, errs []cluster.ConfigBuildError) {
+	for _, ce := range errs {
+		if ce.Kind == "syncable" && ce.ID == id {
+			resp.WorkerState = cluster.WorkerStateDegraded
+			resp.Message = ce.Error
+			break
+		}
+	}
+}
+
+// progressFields derives the status response's lag arithmetic. Both inputs
+// are sourced behind the handler's linearize barrier, so checkpoint
+// (replicated apply state) and head (local apply state) are mutually
+// consistent and head ≥ checkpoint on the default path. Clamp anyway as
+// belt-and-suspenders, and for ?consistency=stale reads on a lagging
+// follower where the two could momentarily cross — an unsigned underflow
+// here would report an astronomical lag.
+func progressFields(checkpoint, head uint64) (lag uint64, caughtUp bool) {
+	if head > checkpoint {
+		lag = head - checkpoint
+	}
+	return lag, lag == 0
+}
+
+// The error→response mappings below are free functions so their tables are
+// testable directly (drive each error, assert the envelope) — the handlers
+// hold the engine concretely, so there is no seam to inject these errors
+// through, and most of them (a wedged worker, a mid-flap ownership move)
+// cannot be induced deterministically in a real single-node engine.
+
+// writeRebuildError maps a RebuildSyncable failure.
+func writeRebuildError(w httpgo.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, cluster.ErrResourceNotFound):
+		writeError(w, httpgo.StatusNotFound, "not_found", "syncable not found")
+	case errors.Is(err, cluster.ErrZonePinUnsatisfiable):
+		writeError(w, httpgo.StatusServiceUnavailable, "pin_unsatisfiable", err.Error())
+	case errors.Is(err, cluster.ErrNotSyncableOwner):
+		// Stale routing view (ownership just moved): retryable, the next
+		// attempt's hop lands on the current owner.
+		writeError(w, httpgo.StatusServiceUnavailable, "not_syncable_owner", err.Error())
+	case errors.Is(err, cluster.ErrWorkerWedged):
+		// A wedged worker aborts the rebuild before anything changed — a
+		// retryable condition (wait out the destination, or re-POST the config
+		// to replace the worker), so 503 rather than a generic failure.
+		writeError(w, httpgo.StatusServiceUnavailable, "worker_wedged", err.Error())
+	default:
+		writeProposeError(w, err, "syncable", "rebuild syncable")
+	}
+}
+
+// writeRematerializeError maps a RematerializeSyncable failure — rebuild's
+// table plus the in-place-convergence refusal.
+func writeRematerializeError(w httpgo.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, cluster.ErrResourceNotFound):
+		writeError(w, httpgo.StatusNotFound, "not_found", "syncable not found")
+	case errors.Is(err, cluster.ErrNotRematerializable):
+		// 409: the config is fine, but this sink shape cannot converge a
+		// replay in place — the message names the alternatives.
+		writeError(w, httpgo.StatusConflict, "not_rematerializable", err.Error())
+	case errors.Is(err, cluster.ErrZonePinUnsatisfiable):
+		writeError(w, httpgo.StatusServiceUnavailable, "pin_unsatisfiable", err.Error())
+	case errors.Is(err, cluster.ErrNotSyncableOwner):
+		// Stale routing view (ownership just moved): retryable, the next
+		// attempt's hop lands on the current owner.
+		writeError(w, httpgo.StatusServiceUnavailable, "not_syncable_owner", err.Error())
+	case errors.Is(err, cluster.ErrWorkerWedged):
+		writeError(w, httpgo.StatusServiceUnavailable, "worker_wedged", err.Error())
+	default:
+		writeProposeError(w, err, "syncable", "rematerialize syncable")
+	}
+}
+
+// writeReplayDeadLetterResult maps a ReplaySyncableDeadLetter outcome,
+// including the nil (200) case.
+func writeReplayDeadLetterResult(w httpgo.ResponseWriter, err error) {
 	switch {
 	case err == nil:
 		w.WriteHeader(httpgo.StatusOK)

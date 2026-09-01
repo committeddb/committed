@@ -63,16 +63,6 @@ func TestPropose_ReturnsTooLarge_MapsTo413(t *testing.T) {
 			},
 		},
 		{
-			name:   "syncable",
-			method: "POST",
-			path:   "/v1/syncable/s-1",
-			ct:     "text/toml",
-			body:   "[config]\nname = \"x\"",
-			setupFn: func(fake *clusterfakes.FakeCluster) {
-				fake.ProposeSyncableReturns(fmt.Errorf("wrap: %w", cluster.ErrProposalTooLarge))
-			},
-		},
-		{
 			name:   "ingestable",
 			method: "POST",
 			path:   "/v1/ingestable/i-1",
@@ -153,16 +143,6 @@ func TestPropose_ReturnsInsufficientStorage_MapsTo507(t *testing.T) {
 			body:   "[config]\nname = \"x\"",
 			setupFn: func(fake *clusterfakes.FakeCluster) {
 				fake.ProposeDatabaseReturns(fmt.Errorf("wrap: %w", cluster.ErrInsufficientStorage))
-			},
-		},
-		{
-			name:   "syncable",
-			method: "POST",
-			path:   "/v1/syncable/s-1",
-			ct:     "text/toml",
-			body:   "[config]\nname = \"x\"",
-			setupFn: func(fake *clusterfakes.FakeCluster) {
-				fake.ProposeSyncableReturns(fmt.Errorf("wrap: %w", cluster.ErrInsufficientStorage))
 			},
 		},
 		{

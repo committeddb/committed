@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/db"
 	"github.com/committeddb/committed/internal/cluster/metrics"
 )
 
@@ -58,8 +59,16 @@ func routePattern(r *http.Request) string {
 }
 
 type HTTP struct {
-	r                *chi.Mux
-	c                cluster.Cluster
+	r *chi.Mux
+	// c is the aggregated legacy dependency; handler groups are migrating
+	// off it onto db (the engine itself) group by group, deleting their
+	// methods from cluster.Cluster as they go. New handlers use db, never c.
+	c cluster.Cluster
+	// db is the engine. Transport lives as a subpackage of the engine
+	// precisely so handlers can hold it concretely — no aggregate interface,
+	// no fakes; tests exercise a real single-node engine. nil only in legacy
+	// fake-backed tests, which must not touch migrated (db-consuming) routes.
+	db               *db.DB
 	schemas          sync.Map // schemaCacheKey → *jsonschema.Schema
 	bearerToken      string   // empty = no auth (dev mode)
 	readIndexTimeout time.Duration
@@ -127,6 +136,12 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 	}
 
 	h := &HTTP{r: r, c: c, bearerToken: o.bearerToken, readIndexTimeout: readIndexTimeout, proxyClient: proxyClient, metrics: o.metrics}
+	// Transitional scaffolding for the group-by-group migration off the
+	// aggregated interface: production always passes the engine itself
+	// (cmd/node.go hands db.New's result straight here), so the assert
+	// always succeeds there. Once the last group migrates, New's parameter
+	// becomes *db.DB and this assert — with the c field — disappears.
+	h.db, _ = c.(*db.DB)
 
 	if o.bearerToken != "" {
 		zap.L().Info("API bearer-token authentication enabled")
@@ -214,17 +229,17 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 			r.Post("/restatement/{id}", h.AddRestatement)
 			r.Post("/restatement/dryrun", h.DryRunRestatement)
 
-			r.Get("/syncable", h.listConfig("syncable", h.c.Syncables))
+			r.Get("/syncable", h.listConfig("syncable", h.db.Syncables))
 			r.Post("/syncable/dryrun", h.DryRunSyncable)
-			r.Post("/syncable/{id}", h.addConfig("syncable", h.c.ProposeSyncable, h.c.SyncableVersions))
+			r.Post("/syncable/{id}", h.addConfig("syncable", h.db.ProposeSyncable, h.db.SyncableVersions))
 			// DELETE is leader-pinned (leaderRead reverse-proxies a follower's
 			// request to the leader): the owner-gated destination teardown runs on
 			// the leader and honors the keepData flag recorded there, so the
 			// request that carries keepData must land on the same node that tears
 			// down.
 			r.Delete("/syncable/{id}", h.leaderRead(h.DeleteSyncable))
-			r.Get("/syncable/{id}/versions", h.getVersions("syncable", h.c.SyncableVersions))
-			r.Get("/syncable/{id}/versions/{version}", h.getVersion("syncable", h.c.SyncableVersion))
+			r.Get("/syncable/{id}/versions", h.getVersions("syncable", h.db.SyncableVersions))
+			r.Get("/syncable/{id}/versions/{version}", h.getVersion("syncable", h.db.SyncableVersion))
 			r.Get("/syncable/{id}/errors", h.GetSyncableErrors)
 			r.Get("/syncable/{id}/status", h.GetSyncableStatus)
 			r.Post("/syncable/{id}/deadletter", h.DeadLetterStuckSyncable)
@@ -237,7 +252,7 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 			})
 			r.Post("/syncable/{id}/deadletter/{index}/acknowledge", h.AcknowledgeSyncableDeadLetter)
 			r.Post("/syncable/{id}/replay/{index}", h.ReplaySyncableDeadLetter)
-			r.Post("/syncable/{id}/rollback", h.rollback("syncable", h.c.SyncableVersion, h.c.ProposeSyncable, h.c.SyncableVersions))
+			r.Post("/syncable/{id}/rollback", h.rollback("syncable", h.db.SyncableVersion, h.db.ProposeSyncable, h.db.SyncableVersions))
 			// Rebuild is leader-pinned for the same reason as DELETE: the
 			// owner-side destination teardown/re-init runs on the leader.
 			r.Post("/syncable/{id}/rebuild", h.syncableOwnerRoute(h.RebuildSyncable))

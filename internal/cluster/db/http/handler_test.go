@@ -21,7 +21,6 @@ func setupTest() (*http.HTTP, *clusterfakes.FakeCluster) {
 	// The status/errors endpoints 404 unknown ids via the existence oracle;
 	// default the fake to "exists" so every test not ABOUT the 404 gate keeps
 	// its focus (the gate's own tests stub false explicitly).
-	fake.SyncableExistsReturns(true, nil)
 	fake.IngestableExistsReturns(true, nil)
 	h := http.New(fake)
 	return h, fake
@@ -41,14 +40,6 @@ func TestAddConfiguration_Success(t *testing.T) {
 			verifyFn: func(fake *clusterfakes.FakeCluster) (int, *cluster.Configuration) {
 				_, cfg := fake.ProposeDatabaseArgsForCall(0)
 				return fake.ProposeDatabaseCallCount(), cfg
-			},
-		},
-		{
-			name: "syncable",
-			path: "/v1/syncable/sync-1",
-			verifyFn: func(fake *clusterfakes.FakeCluster) (int, *cluster.Configuration) {
-				_, cfg := fake.ProposeSyncableArgsForCall(0)
-				return fake.ProposeSyncableCallCount(), cfg
 			},
 		},
 		{
@@ -115,11 +106,6 @@ func TestAddConfiguration_ClusterError(t *testing.T) {
 			setupFn: func(fake *clusterfakes.FakeCluster) { fake.ProposeDatabaseReturns(fmt.Errorf("fail")) },
 		},
 		{
-			name:    "syncable",
-			path:    "/v1/syncable/sync-1",
-			setupFn: func(fake *clusterfakes.FakeCluster) { fake.ProposeSyncableReturns(fmt.Errorf("fail")) },
-		},
-		{
 			name:    "ingestable",
 			path:    "/v1/ingestable/ingest-1",
 			setupFn: func(fake *clusterfakes.FakeCluster) { fake.ProposeIngestableReturns(fmt.Errorf("fail")) },
@@ -162,12 +148,6 @@ func TestAddConfiguration_ConfigError(t *testing.T) {
 			path:         "/v1/database/db-1",
 			setupFn:      func(fake *clusterfakes.FakeCluster) { fake.ProposeDatabaseReturns(configErr) },
 			expectedCode: "invalid_database_config",
-		},
-		{
-			name:         "syncable",
-			path:         "/v1/syncable/sync-1",
-			setupFn:      func(fake *clusterfakes.FakeCluster) { fake.ProposeSyncableReturns(configErr) },
-			expectedCode: "invalid_syncable_config",
 		},
 		{
 			name:         "ingestable",
@@ -259,11 +239,6 @@ func TestGetConfigurations_Success(t *testing.T) {
 			name:    "database",
 			path:    "/v1/database",
 			setupFn: func(fake *clusterfakes.FakeCluster) { fake.DatabasesReturns(cfgs, nil) },
-		},
-		{
-			name:    "syncable",
-			path:    "/v1/syncable",
-			setupFn: func(fake *clusterfakes.FakeCluster) { fake.SyncablesReturns(cfgs, nil) },
 		},
 		{
 			name:    "ingestable",

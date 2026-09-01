@@ -3,19 +3,67 @@ package http_test
 import (
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db/http"
 )
 
-// TestDeleteSyncable threads the id and the keepData query param through to
-// the cluster and returns 200. The route is leader-pinned (leaderRead), so the
-// fake reports itself as the leader to serve locally.
+// The syncable handler group holds the engine (*db.DB) concretely, so these
+// tests run against a real single-node engine (see enginetest_test.go) and
+// induce states through the plugin seam — a recorder sink that fails on
+// command — instead of stubbing engine answers. Error mappings that cannot
+// be induced deterministically (a wedged worker, a mid-flap ownership move)
+// are covered by the mapping-table tests in syncable_mapping_test.go.
+
+// TestSyncableLifecycle_ProposeListVersionsRollback drives the config CRUD
+// surface end to end: two versions, the listing, version reads, and a
+// rollback that creates version 3 with version 1's content.
+func TestSyncableLifecycle_ProposeListVersionsRollback(t *testing.T) {
+	e := newEngine(t)
+	e.addType(t, "photos", "photos")
+
+	v1 := "[syncable]\nname = \"rec-1\"\ntype = \"recorder\"\n[recorder]\ntopic = \"photos\"\n"
+	v2 := "[syncable]\nname = \"rec-1\"\ntype = \"recorder\"\n[recorder]\ntopic = \"photos\"\nnote = \"v2\"\n"
+
+	w := e.doTOML(t, "POST", "/v1/syncable/rec-1", v1)
+	mustStatus(t, w, 200)
+	var wr struct {
+		ID      string `json:"id"`
+		Version int    `json:"version"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &wr))
+	require.Equal(t, "rec-1", wr.ID)
+	require.Equal(t, 1, wr.Version)
+
+	mustStatus(t, e.doTOML(t, "POST", "/v1/syncable/rec-1", v2), 200)
+
+	// The listing carries the id.
+	require.Contains(t, e.syncableIDs(t), "rec-1")
+
+	// Two versions, newest known to the version reads.
+	var versions []struct {
+		Version int `json:"version"`
+	}
+	e.getJSON(t, "/v1/syncable/rec-1/versions", &versions)
+	require.Len(t, versions, 2)
+
+	var got struct {
+		Data string `json:"data"`
+	}
+	e.getJSON(t, "/v1/syncable/rec-1/versions/1", &got)
+	require.Equal(t, v1, got.Data)
+
+	// Rollback to v1 creates v3 with v1's content.
+	mustStatus(t, e.doEmpty(t, "POST", "/v1/syncable/rec-1/rollback?to=1"), 200)
+	e.getJSON(t, "/v1/syncable/rec-1/versions/3", &got)
+	require.Equal(t, v1, got.Data)
+}
+
+// TestDeleteSyncable deletes a real syncable and confirms the keepData flag
+// round-trips in the response; afterwards the listing no longer carries it.
 func TestDeleteSyncable(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -27,451 +75,223 @@ func TestDeleteSyncable(t *testing.T) {
 		{"keepData=false", "?keepData=false", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h, fake := setupTest()
-			fake.IDReturns(1)
-			fake.LeaderReturns(1)
+			e := newEngine(t)
+			e.addType(t, "photos", "photos")
+			e.addRecorderSyncable(t, "rec-1", "photos")
 
-			req := httptest.NewRequest("DELETE", "http://localhost/v1/syncable/sync-1"+tc.query, nil)
-			w := httptest.NewRecorder()
-			h.ServeHTTP(w, req)
-
-			require.Equal(t, 200, w.Code)
-			require.Equal(t, 1, fake.DeleteSyncableCallCount())
-			_, gotID, gotKeep := fake.DeleteSyncableArgsForCall(0)
-			require.Equal(t, "sync-1", gotID)
-			require.Equal(t, tc.keepData, gotKeep)
-
+			w := e.doEmpty(t, "DELETE", "/v1/syncable/rec-1"+tc.query)
+			mustStatus(t, w, 200)
 			var body struct {
 				ID       string `json:"id"`
 				KeepData bool   `json:"keepData"`
 			}
 			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
-			require.Equal(t, "sync-1", body.ID)
+			require.Equal(t, "rec-1", body.ID)
 			require.Equal(t, tc.keepData, body.KeepData)
+
+			require.NotContains(t, e.syncableIDs(t), "rec-1")
 		})
 	}
 }
 
-// A non-boolean keepData is a 400 and never reaches the cluster.
+// A non-boolean keepData is a 400 and deletes nothing — the syncable
+// remains listed.
 func TestDeleteSyncable_InvalidKeepData(t *testing.T) {
-	h, fake := setupTest()
-	fake.IDReturns(1)
-	fake.LeaderReturns(1)
+	e := newEngine(t)
+	e.addType(t, "photos", "photos")
+	e.addRecorderSyncable(t, "rec-1", "photos")
 
-	req := httptest.NewRequest("DELETE", "http://localhost/v1/syncable/sync-1?keepData=maybe", nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
+	w := e.doEmpty(t, "DELETE", "/v1/syncable/rec-1?keepData=maybe")
+	requireEnvelope(t, w, 400, "invalid_parameter")
 
-	require.Equal(t, 400, w.Code)
-	require.Equal(t, 0, fake.DeleteSyncableCallCount())
+	require.Contains(t, e.syncableIDs(t), "rec-1", "a rejected delete must not delete")
 }
 
-// TestRebuildSyncable returns 202 and threads the id to the cluster. The route
-// is leader-pinned, so the fake reports itself as the leader.
+// TestRebuildSyncable triggers a real rebuild: 202, the ack body, and the
+// Location header pointing at the status resource.
 func TestRebuildSyncable(t *testing.T) {
-	h, fake := setupTest()
-	fake.IDReturns(1)
-	fake.LeaderReturns(1)
+	e := newEngine(t)
+	e.addType(t, "photos", "photos")
+	e.addRecorderSyncable(t, "rec-1", "photos")
 
-	req := httptest.NewRequest("POST", "http://localhost/v1/syncable/sync-1/rebuild", nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	require.Equal(t, 202, w.Code)
-	require.Equal(t, 1, fake.RebuildSyncableCallCount())
-	_, gotID := fake.RebuildSyncableArgsForCall(0)
-	require.Equal(t, "sync-1", gotID)
+	w := e.doEmpty(t, "POST", "/v1/syncable/rec-1/rebuild")
+	mustStatus(t, w, 202)
 
 	// The ack body: an empty 202 field-read as a routing failure (an operator
 	// spent half an hour disbelieving a success next to wrong-verb 405s). The
 	// body confirms the trigger and names the poll target.
 	var body http.SyncableRebuildResponse
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
-	require.Equal(t, "sync-1", body.ID)
+	require.Equal(t, "rec-1", body.ID)
 	require.Equal(t, "rebuilding", body.Status)
-	require.Equal(t, "/v1/syncable/sync-1/status", body.Poll)
-	require.Equal(t, "/v1/syncable/sync-1/status", w.Header().Get("Location"),
+	require.Equal(t, "/v1/syncable/rec-1/status", body.Poll)
+	require.Equal(t, "/v1/syncable/rec-1/status", w.Header().Get("Location"),
 		"202 carries the idiomatic Location header pointing at the status resource")
 }
 
-// A wedged worker aborts the rebuild retryably: 503 with code worker_wedged
-// (the rebuild changed nothing; the caller waits out the destination and
-// retries, or re-POSTs the config to replace the worker).
-func TestRebuildSyncable_WedgedWorkerIs503(t *testing.T) {
-	h, fake := setupTest()
-	fake.IDReturns(1)
-	fake.LeaderReturns(1)
-	fake.RebuildSyncableReturns(fmt.Errorf("%w: rebuild aborted", cluster.ErrWorkerWedged))
-
-	req := httptest.NewRequest("POST", "http://localhost/v1/syncable/sync-1/rebuild", nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	require.Equal(t, 503, w.Code)
-	requireErrorResponse(t, w.Result(), "worker_wedged")
-}
-
-// An unknown syncable rebuilds to 404.
+// An unknown syncable rebuilds to 404 — a real engine's own refusal.
 func TestRebuildSyncable_NotFound(t *testing.T) {
-	h, fake := setupTest()
-	fake.IDReturns(1)
-	fake.LeaderReturns(1)
-	fake.RebuildSyncableReturns(cluster.ErrResourceNotFound)
-
-	req := httptest.NewRequest("POST", "http://localhost/v1/syncable/nope/rebuild", nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	require.Equal(t, 404, w.Code)
+	e := newEngine(t)
+	w := e.doEmpty(t, "POST", "/v1/syncable/nope/rebuild")
+	mustStatus(t, w, 404)
 }
 
-// TestGetSyncableErrors_Success asserts the handler renders dead-letter
-// records as JSON and threads the since/limit cursor params through to
-// the cluster.
-func TestGetSyncableErrors_Success(t *testing.T) {
-	h, fake := setupTest()
-	fake.SyncableDeadLettersReturns([]cluster.SyncableDeadLetter{
-		{ID: "sync-1", Index: 7, TimestampUnixNano: 1_700_000_000_000_000_000, Kind: "permanent", Message: "constraint violation"},
-		{ID: "sync-1", Index: 12, TimestampUnixNano: 1_700_000_001_000_000_000, Kind: "permanent", Message: "bad row"},
-	}, nil)
+// TestRematerializeSyncable_NotRematerializable: the recorder sink cannot
+// converge a replay in place, so the real engine refuses with 409 — the
+// real path for the not_rematerializable mapping.
+func TestRematerializeSyncable_NotRematerializable(t *testing.T) {
+	e := newEngine(t)
+	e.addType(t, "photos", "photos")
+	e.addRecorderSyncable(t, "rec-1", "photos")
 
-	req := httptest.NewRequest("GET", "http://localhost/v1/syncable/sync-1/errors?since=5&limit=10", nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
+	w := e.doEmpty(t, "POST", "/v1/syncable/rec-1/rematerialize")
+	requireEnvelope(t, w, 409, "not_rematerializable")
+}
 
-	resp := w.Result()
-	require.Equal(t, 200, resp.StatusCode)
-	require.Equal(t, "application/json", resp.Header.Get("Content-Type"))
+// TestSyncableDeadLetterJourney is the operator's whole incident, end to end
+// through the real pipeline: a sink that rejects a row wedges the worker
+// (stuck surfaces on status), the manual dead-letter lever skips it (202 with
+// the blocked index), the record lists with its kind and RFC3339 timestamp,
+// a replay against the still-broken sink fails 502 with the cause and leaves
+// the record, acknowledge marks it resolved-but-listable, and a replay after
+// the sink recovers clears it entirely.
+func TestSyncableDeadLetterJourney(t *testing.T) {
+	e := newEngine(t)
+	e.addType(t, "photos", "photos")
+	e.addRecorderSyncable(t, "rec-1", "photos")
 
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
+	// Wedge: the sink rejects the row; the worker retries and flags itself
+	// stuck past the (test-shortened) threshold.
+	e.sink.setErr(fmt.Errorf("downstream rejected the row"))
+	e.proposeRow(t, "photos", "k1")
+	st := e.awaitStatus(t, "rec-1", func(m map[string]any) bool {
+		stuck, _ := m["stuck"].(bool)
+		return stuck
+	}, "stuck=true after the sink wedged")
+	require.Equal(t, "running", st["workerState"], "a transiently-stuck worker is still running")
+	require.Contains(t, st["message"], "downstream rejected the row")
 
-	var got []struct {
-		Index     uint64 `json:"index"`
-		Timestamp string `json:"timestamp"`
-		Kind      string `json:"kind"`
-		Message   string `json:"message"`
+	// The manual lever targets the blocked index.
+	w := e.doEmpty(t, "POST", "/v1/syncable/rec-1/deadletter")
+	mustStatus(t, w, 202)
+	var dl struct {
+		Index uint64 `json:"index"`
 	}
-	require.NoError(t, json.Unmarshal(body, &got))
-	require.Len(t, got, 2)
-	require.Equal(t, uint64(7), got[0].Index)
-	require.Equal(t, "permanent", got[0].Kind)
-	require.Equal(t, "constraint violation", got[0].Message)
-	require.Equal(t, "2023-11-14T22:13:20Z", got[0].Timestamp, "nanos must render as RFC3339 UTC")
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &dl))
+	require.NotZero(t, dl.Index)
 
-	// The cursor params reach the cluster verbatim.
-	id, since, limit := fake.SyncableDeadLettersArgsForCall(0)
-	require.Equal(t, "sync-1", id)
-	require.Equal(t, uint64(5), since)
-	require.Equal(t, 10, limit)
+	// The record lands once the worker honors the skip; the listing renders
+	// kind and an RFC3339 timestamp, and status counts it while un-wedging.
+	var errsList []struct {
+		Index        uint64 `json:"index"`
+		Timestamp    string `json:"timestamp"`
+		Kind         string `json:"kind"`
+		Acknowledged bool   `json:"acknowledged"`
+	}
+	require.Eventually(t, func() bool {
+		e.getJSON(t, "/v1/syncable/rec-1/errors", &errsList)
+		return len(errsList) == 1
+	}, 15*time.Second, 10*time.Millisecond, "the manual dead letter never listed")
+	require.Equal(t, dl.Index, errsList[0].Index)
+	require.Equal(t, "manual", errsList[0].Kind)
+	require.NotEmpty(t, errsList[0].Timestamp)
+	require.False(t, errsList[0].Acknowledged)
+	e.awaitStatus(t, "rec-1", func(m map[string]any) bool {
+		stuck, _ := m["stuck"].(bool)
+		n, _ := m["deadLetters"].(float64)
+		return !stuck && n == 1
+	}, "un-wedged with one dead letter counted")
+
+	// Replay against the still-broken sink: 502, cause surfaced, record kept.
+	w = e.doEmpty(t, "POST", fmt.Sprintf("/v1/syncable/rec-1/replay/%d", dl.Index))
+	requireEnvelope(t, w, 502, "replay_failed")
+	require.Contains(t, w.Body.String(), "downstream rejected the row",
+		"the failure cause should be surfaced in details")
+
+	// Acknowledge: resolved out-of-band, still listable as an audit trail —
+	// and the status counts split (acknowledged records leave the
+	// completeness count).
+	mustStatus(t, e.doEmpty(t, "POST", fmt.Sprintf("/v1/syncable/rec-1/deadletter/%d/acknowledge", dl.Index)), 200)
+	e.getJSON(t, "/v1/syncable/rec-1/errors", &errsList)
+	require.Len(t, errsList, 1)
+	require.True(t, errsList[0].Acknowledged)
+	e.awaitStatus(t, "rec-1", func(m map[string]any) bool {
+		n, _ := m["deadLetters"].(float64)
+		acked, _ := m["acknowledgedDeadLetters"].(float64)
+		return n == 0 && acked == 1
+	}, "acknowledged record leaves the completeness count")
+
+	// Fix the sink; a successful replay clears the record entirely.
+	e.sink.setErr(nil)
+	mustStatus(t, e.doEmpty(t, "POST", fmt.Sprintf("/v1/syncable/rec-1/replay/%d", dl.Index)), 200)
+	e.getJSON(t, "/v1/syncable/rec-1/errors", &errsList)
+	require.Empty(t, errsList)
+	require.Equal(t, 1, e.sink.count(), "the replay delivered the row")
 }
 
-// TestGetSyncableErrors_Defaults asserts that with no query params the
-// handler uses since=0 and the default page size, and an empty result
+// TestDeadLetterStuckSyncable_NotStuck: the lever 409s when nothing is
+// blocked — a healthy syncable through the real engine.
+func TestDeadLetterStuckSyncable_NotStuck(t *testing.T) {
+	e := newEngine(t)
+	e.addType(t, "photos", "photos")
+	e.addRecorderSyncable(t, "rec-1", "photos")
+
+	w := e.doEmpty(t, "POST", "/v1/syncable/rec-1/deadletter")
+	requireEnvelope(t, w, 409, "not_stuck")
+}
+
+// TestGetSyncableErrors_Defaults: an existing syncable with no dead letters
 // serializes as [] (not null).
 func TestGetSyncableErrors_Defaults(t *testing.T) {
-	h, fake := setupTest()
-	fake.SyncableDeadLettersReturns(nil, nil)
+	e := newEngine(t)
+	e.addType(t, "photos", "photos")
+	e.addRecorderSyncable(t, "rec-1", "photos")
 
-	req := httptest.NewRequest("GET", "http://localhost/v1/syncable/sync-1/errors", nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	resp := w.Result()
-	require.Equal(t, 200, resp.StatusCode)
-
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	require.Equal(t, "[]", string(body))
-
-	id, since, limit := fake.SyncableDeadLettersArgsForCall(0)
-	require.Equal(t, "sync-1", id)
-	require.Equal(t, uint64(0), since)
-	require.Equal(t, 100, limit)
+	w := e.doEmpty(t, "GET", "/v1/syncable/rec-1/errors")
+	mustStatus(t, w, 200)
+	require.Equal(t, "[]", w.Body.String())
 }
 
-// TestGetSyncableErrors_BadParams asserts invalid cursor params are
-// rejected with 400 before the cluster is consulted.
+// TestGetSyncableErrors_UnknownIs404: the existence gate — an unknown id's
+// empty list must not read as a healthy syncable.
+func TestGetSyncableErrors_UnknownIs404(t *testing.T) {
+	e := newEngine(t)
+	w := e.doEmpty(t, "GET", "/v1/syncable/nope/errors")
+	requireEnvelope(t, w, 404, "not_found")
+}
+
+// TestGetSyncableErrors_BadParams: invalid cursor params are rejected with
+// 400 (the syncable exists, so the 404 gate does not mask them).
 func TestGetSyncableErrors_BadParams(t *testing.T) {
+	e := newEngine(t)
+	e.addType(t, "photos", "photos")
+	e.addRecorderSyncable(t, "rec-1", "photos")
 	for _, path := range []string{
-		"/v1/syncable/sync-1/errors?since=notanumber",
-		"/v1/syncable/sync-1/errors?limit=0",
-		"/v1/syncable/sync-1/errors?limit=-3",
-		"/v1/syncable/sync-1/errors?limit=abc",
+		"/v1/syncable/rec-1/errors?since=notanumber",
+		"/v1/syncable/rec-1/errors?limit=0",
+		"/v1/syncable/rec-1/errors?limit=-3",
+		"/v1/syncable/rec-1/errors?limit=abc",
 	} {
 		t.Run(path, func(t *testing.T) {
-			h, fake := setupTest()
-			req := httptest.NewRequest("GET", "http://localhost"+path, nil)
-			w := httptest.NewRecorder()
-			h.ServeHTTP(w, req)
-
-			require.Equal(t, 400, w.Result().StatusCode)
-			require.Zero(t, fake.SyncableDeadLettersCallCount(), "must not query the cluster on a bad request")
+			requireEnvelope(t, e.doEmpty(t, "GET", path), 400, "invalid_parameter")
 		})
 	}
 }
 
-// TestGetSyncableErrors_InternalError maps a storage error to 500.
-func TestGetSyncableErrors_InternalError(t *testing.T) {
-	h, fake := setupTest()
-	fake.SyncableDeadLettersReturns(nil, io.ErrUnexpectedEOF)
+// TestReplaySyncableDeadLetter_NotDeadLettered: replaying an index that is
+// not a dead letter 404s through the real engine.
+func TestReplaySyncableDeadLetter_NotDeadLettered(t *testing.T) {
+	e := newEngine(t)
+	e.addType(t, "photos", "photos")
+	e.addRecorderSyncable(t, "rec-1", "photos")
 
-	req := httptest.NewRequest("GET", "http://localhost/v1/syncable/sync-1/errors", nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	require.Equal(t, 500, w.Result().StatusCode)
+	w := e.doEmpty(t, "POST", "/v1/syncable/rec-1/replay/7")
+	requireEnvelope(t, w, 404, "not_dead_lettered")
 }
 
-// TestDeadLetterStuckSyncableHandler_Accepted asserts the handler returns 202
-// with the targeted index and threads the id through to the cluster.
-func TestDeadLetterStuckSyncableHandler_Accepted(t *testing.T) {
-	h, fake := setupTest()
-	fake.DeadLetterStuckSyncableReturns(42, nil)
-
-	req := httptest.NewRequest("POST", "http://localhost/v1/syncable/sync-1/deadletter", nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	resp := w.Result()
-	require.Equal(t, 202, resp.StatusCode)
-	require.Equal(t, "application/json", resp.Header.Get("Content-Type"))
-
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	var got struct {
-		Index uint64 `json:"index"`
-	}
-	require.NoError(t, json.Unmarshal(body, &got))
-	require.Equal(t, uint64(42), got.Index)
-
-	require.Equal(t, 1, fake.DeadLetterStuckSyncableCallCount())
-	_, gotID := fake.DeadLetterStuckSyncableArgsForCall(0)
-	require.Equal(t, "sync-1", gotID)
-}
-
-// TestDeadLetterStuckSyncableHandler_NotStuck maps ErrSyncNotStuck to 409.
-func TestDeadLetterStuckSyncableHandler_NotStuck(t *testing.T) {
-	h, fake := setupTest()
-	fake.DeadLetterStuckSyncableReturns(0, cluster.ErrSyncNotStuck)
-
-	req := httptest.NewRequest("POST", "http://localhost/v1/syncable/sync-1/deadletter", nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	require.Equal(t, 409, w.Result().StatusCode)
-}
-
-// TestGetSyncableStatus_Stuck renders a blocked syncable's status.
-func TestGetSyncableStatus_Stuck(t *testing.T) {
-	h, fake := setupTest()
-	fake.SyncableStuckReturns(cluster.SyncableStuck{
-		ID: "sync-1", Index: 9, SinceUnixNano: 1_700_000_000_000_000_000, Message: "downstream rejected the row",
-	}, true, nil)
-
-	req := httptest.NewRequest("GET", "http://localhost/v1/syncable/sync-1/status", nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	resp := w.Result()
-	require.Equal(t, 200, resp.StatusCode)
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	var got struct {
-		Stuck       bool   `json:"stuck"`
-		WorkerState string `json:"workerState"`
-		Index       uint64 `json:"index"`
-		Since       string `json:"since"`
-		Message     string `json:"message"`
-	}
-	require.NoError(t, json.Unmarshal(body, &got))
-	require.True(t, got.Stuck)
-	require.Equal(t, "running", got.WorkerState, "a transiently-stuck worker is still running")
-	require.Equal(t, uint64(9), got.Index)
-	require.Equal(t, "2023-11-14T22:13:20Z", got.Since)
-	require.Equal(t, "downstream rejected the row", got.Message)
-}
-
-// TestGetSyncableStatus_Parked reports a syncable whose worker TERMINALLY parked
-// (the circuit breaker tripped). workerState is "parked" and — unlike a transient
-// stall — stuck is false: the operator's remedy is to fix the config and re-POST
-// it, not to skip a proposal.
-func TestGetSyncableStatus_Parked(t *testing.T) {
-	h, fake := setupTest()
-	fake.SyncableStuckReturns(cluster.SyncableStuck{
-		ID: "sync-1", Index: 9, SinceUnixNano: 1_700_000_000_000_000_000, Message: "every row violates the config", Parked: true,
-	}, true, nil)
-	fake.SyncableProgressReturns(0, 100, nil)
-
-	req := httptest.NewRequest("GET", "http://localhost/v1/syncable/sync-1/status", nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	resp := w.Result()
-	require.Equal(t, 200, resp.StatusCode)
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	var got struct {
-		Stuck       bool   `json:"stuck"`
-		WorkerState string `json:"workerState"`
-		Index       uint64 `json:"index"`
-		Message     string `json:"message"`
-	}
-	require.NoError(t, json.Unmarshal(body, &got))
-	require.Equal(t, "parked", got.WorkerState)
-	require.False(t, got.Stuck, "parked is a terminal state, not a transient stall")
-	require.Equal(t, uint64(9), got.Index)
-	require.Equal(t, "every row violates the config", got.Message)
-}
-
-// TestGetSyncableStatus_NotStuck reports a healthy syncable as not stuck. The
-// stuck-only fields are omitted, but the progress fields are always present.
-func TestGetSyncableStatus_NotStuck(t *testing.T) {
-	h, fake := setupTest()
-	fake.SyncableStuckReturns(cluster.SyncableStuck{}, false, nil)
-	fake.SyncableProgressReturns(0, 0, nil)
-
-	req := httptest.NewRequest("GET", "http://localhost/v1/syncable/sync-1/status", nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	resp := w.Result()
-	require.Equal(t, 200, resp.StatusCode)
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	require.JSONEq(t, `{"stuck":false,"workerState":"running","checkpointIndex":0,"headIndex":0,"lag":0,"caughtUp":true,"deadLetters":0,"ownerNode":0,"interpretationPin":0,"interpretationStale":false}`, string(body))
-}
-
-// progressResponse decodes the full status response including the
-// always-present progress fields.
-type progressResponse struct {
-	Stuck           bool   `json:"stuck"`
-	CheckpointIndex uint64 `json:"checkpointIndex"`
-	HeadIndex       uint64 `json:"headIndex"`
-	Lag             uint64 `json:"lag"`
-	CaughtUp        bool   `json:"caughtUp"`
-}
-
-func getStatus(t *testing.T, h *http.HTTP) progressResponse {
-	t.Helper()
-	req := httptest.NewRequest("GET", "http://localhost/v1/syncable/sync-1/status", nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-	resp := w.Result()
-	require.Equal(t, 200, resp.StatusCode)
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	var got progressResponse
-	require.NoError(t, json.Unmarshal(body, &got))
-	return got
-}
-
-// TestGetSyncableStatus_Behind renders the "X of Y, N behind" case: a healthy
-// (not stuck) syncable whose checkpoint trails the data head reports a
-// positive lag and caughtUp=false. The progress fields are present even
-// though the syncable is not stuck.
-func TestGetSyncableStatus_Behind(t *testing.T) {
-	h, fake := setupTest()
-	fake.SyncableStuckReturns(cluster.SyncableStuck{}, false, nil)
-	fake.SyncableProgressReturns(1234, 1240, nil)
-
-	got := getStatus(t, h)
-	require.False(t, got.Stuck)
-	require.Equal(t, uint64(1234), got.CheckpointIndex)
-	require.Equal(t, uint64(1240), got.HeadIndex)
-	require.Equal(t, uint64(6), got.Lag)
-	require.False(t, got.CaughtUp)
-}
-
-// TestGetSyncableStatus_CaughtUp reports lag 0 / caughtUp true when the
-// checkpoint has reached the head.
-func TestGetSyncableStatus_CaughtUp(t *testing.T) {
-	h, fake := setupTest()
-	fake.SyncableProgressReturns(900, 900, nil)
-
-	got := getStatus(t, h)
-	require.Equal(t, uint64(0), got.Lag)
-	require.True(t, got.CaughtUp)
-}
-
-// TestGetSyncableStatus_LagClampedNonNegative guards the clamp: on a stale
-// follower the checkpoint (replicated) can momentarily exceed the local head,
-// which would underflow an unsigned subtraction. lag must clamp to 0.
-func TestGetSyncableStatus_LagClampedNonNegative(t *testing.T) {
-	h, fake := setupTest()
-	fake.SyncableProgressReturns(60, 50, nil) // checkpoint > head
-
-	got := getStatus(t, h)
-	require.Equal(t, uint64(0), got.Lag, "lag must clamp to 0, never underflow")
-	require.True(t, got.CaughtUp)
-}
-
-// TestGetSyncableStatus_NoLeaderHop confirms the progress read is answerable
-// locally: the handler must not consult leadership/membership to serve it.
-func TestGetSyncableStatus_NoLeaderHop(t *testing.T) {
-	h, fake := setupTest()
-	fake.SyncableProgressReturns(10, 20, nil)
-
-	_ = getStatus(t, h)
-	require.Zero(t, fake.MembershipCallCount(), "status read must not make a leader/membership hop")
-}
-
-// TestReplaySyncableDeadLetterHandler_Success maps a nil error to 200 and
-// threads id + index through to the cluster.
-func TestReplaySyncableDeadLetterHandler_Success(t *testing.T) {
-	h, fake := setupTest()
-	fake.ReplaySyncableDeadLetterReturns(nil)
-
-	req := httptest.NewRequest("POST", "http://localhost/v1/syncable/sync-1/replay/7", nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	require.Equal(t, 200, w.Result().StatusCode)
-	require.Equal(t, 1, fake.ReplaySyncableDeadLetterCallCount())
-	_, gotID, gotIndex := fake.ReplaySyncableDeadLetterArgsForCall(0)
-	require.Equal(t, "sync-1", gotID)
-	require.Equal(t, uint64(7), gotIndex)
-}
-
-// TestReplaySyncableDeadLetterHandler_NotDeadLettered maps ErrNotDeadLettered
-// to 404.
-func TestReplaySyncableDeadLetterHandler_NotDeadLettered(t *testing.T) {
-	h, fake := setupTest()
-	fake.ReplaySyncableDeadLetterReturns(cluster.ErrNotDeadLettered)
-
-	req := httptest.NewRequest("POST", "http://localhost/v1/syncable/sync-1/replay/7", nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	require.Equal(t, 404, w.Result().StatusCode)
-}
-
-// TestReplaySyncableDeadLetterHandler_SyncFailed maps a wrapped
-// ErrReplaySyncFailed to 502 with the cause in details.
-func TestReplaySyncableDeadLetterHandler_SyncFailed(t *testing.T) {
-	h, fake := setupTest()
-	fake.ReplaySyncableDeadLetterReturns(fmt.Errorf("%w: ERROR: value too long", cluster.ErrReplaySyncFailed))
-
-	req := httptest.NewRequest("POST", "http://localhost/v1/syncable/sync-1/replay/7", nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	resp := w.Result()
-	require.Equal(t, 502, resp.StatusCode)
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	require.Contains(t, string(body), "value too long", "the failure cause should be surfaced in details")
-}
-
-// TestReplaySyncableDeadLetterHandler_BadIndex rejects a non-numeric index
-// with 400 before consulting the cluster.
-func TestReplaySyncableDeadLetterHandler_BadIndex(t *testing.T) {
-	h, fake := setupTest()
-
-	req := httptest.NewRequest("POST", "http://localhost/v1/syncable/sync-1/replay/notanumber", nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	require.Equal(t, 400, w.Result().StatusCode)
-	require.Zero(t, fake.ReplaySyncableDeadLetterCallCount())
+// TestReplaySyncableDeadLetter_BadIndex rejects a non-numeric index with 400.
+func TestReplaySyncableDeadLetter_BadIndex(t *testing.T) {
+	e := newEngine(t)
+	w := e.doEmpty(t, "POST", "/v1/syncable/rec-1/replay/notanumber")
+	requireEnvelope(t, w, 400, "invalid_parameter")
 }

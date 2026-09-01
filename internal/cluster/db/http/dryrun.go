@@ -89,7 +89,7 @@ func (h *HTTP) DryRunSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
 		}
 		opts.FromIndex = n
 	}
-	rep, err := h.c.DryRunSyncable(ctx, mimeType, body, opts)
+	rep, err := h.db.DryRunSyncable(ctx, mimeType, body, opts)
 	if err != nil {
 		// The dry-run IS the authoring loop: a rejection must carry the
 		// parser's actual words, not a generic label (field-reported —
