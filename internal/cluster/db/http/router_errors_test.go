@@ -82,21 +82,3 @@ func TestAddProposal_EmptyRejected(t *testing.T) {
 	require.Equal(t, 400, w.Code)
 	require.Contains(t, w.Body.String(), `"code":"empty_proposal"`)
 }
-
-// R3-HTTP-5: a config POST's Content-Type is parsed to its base media type, so a
-// charset parameter (or header-case quirk) doesn't leak into the stored MimeType
-// and trip downstream exact-match parsing.
-func TestCreateConfig_ContentTypeParamsStripped(t *testing.T) {
-	fake := &clusterfakes.FakeCluster{}
-	h := http.New(fake)
-
-	req := httptest.NewRequest("POST", "http://localhost/v1/type/type-1", strings.NewReader(`name = "x"`))
-	req.Header.Set("Content-Type", "application/json; charset=utf-8")
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	require.Equal(t, 200, w.Code)
-	require.Equal(t, 1, fake.ProposeTypeCallCount())
-	_, cfg, _ := fake.ProposeTypeArgsForCall(0)
-	require.Equal(t, "application/json", cfg.MimeType, "the charset parameter must be stripped")
-}

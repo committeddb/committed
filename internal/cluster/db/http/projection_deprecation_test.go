@@ -1,10 +1,13 @@
 package http_test
 
 import (
+	"encoding/json"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/committeddb/committed/internal/cluster/db/http"
 )
 
 // POSTing a syncable under the deprecated "sql-projection" spelling succeeds
@@ -27,6 +30,14 @@ func TestAddSyncable_CanonicalProjectionSpellingNoWarnings(t *testing.T) {
 	body := decodeConfigWrite(t, postSyncable(t, e, "s1",
 		"[syncable]\nname = \"s1\"\ntype = \"projection\"\n"))
 	require.Empty(t, body.Warnings)
+}
+
+// decodeConfigWrite unmarshals a config-write response body.
+func decodeConfigWrite(t *testing.T, w *httptest.ResponseRecorder) http.ConfigWriteResponse {
+	t.Helper()
+	var body http.ConfigWriteResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	return body
 }
 
 func postSyncable(t *testing.T, e *engine, id, toml string) *httptest.ResponseRecorder {

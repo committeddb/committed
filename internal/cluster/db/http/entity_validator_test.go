@@ -1,8 +1,6 @@
 package http_test
 
 import (
-	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -58,34 +56,20 @@ func TestValidateEntityData(t *testing.T) {
 	require.NotNil(t, div)
 }
 
-// TestAddType_StrandedSyncablesForceFlow pins the ?force=true contract: a
-// refused nonConvertible bump renders 409 stranded_always_current with the
-// stranded syncables as structured details, and the force re-POST passes the
-// acknowledgment through to ProposeType.
+// TestAddType_StrandedSyncablesForceFlow pins the ?force=true contract, real
+// end to end: a nonConvertible version bump with an always-current consumer
+// standing is refused 409 stranded_always_current naming the consumer, and
+// the ?force=true re-POST acknowledges the stranding and commits.
 func TestAddType_StrandedSyncablesForceFlow(t *testing.T) {
-	h, fake := setupTest()
-	fake.ProposeTypeReturns(&cluster.StrandedSyncablesError{
-		TypeID: "orders", Version: 2, Syncables: []string{"orders-mirror"},
-	})
+	e := newEngine(t)
+	e.addType(t, "photos", "photos")
+	e.addAlwaysCurrentRecorder(t, "rec-1", "photos")
 
-	body := "[type]\nname = \"orders\""
-	req := httptest.NewRequest("POST", "http://localhost/v1/type/orders", strings.NewReader(body))
-	req.Header.Set("Content-Type", "text/toml")
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-	require.Equal(t, 409, w.Result().StatusCode)
-	require.Contains(t, w.Body.String(), "stranded_always_current")
-	require.Contains(t, w.Body.String(), "orders-mirror", "the stranded syncables are named")
+	bump := "[type]\nname = \"photos\"\nschemaType = \"JSONSchema\"\nschema = '{\"type\":\"object\"}'\n[migration]\nnonConvertible = true\n"
+	w := e.doTOML(t, "POST", "/v1/type/photos", bump)
+	requireEnvelope(t, w, 409, "stranded_always_current")
+	require.Contains(t, w.Body.String(), "rec-1", "the refusal names the stranded consumer")
 
-	_, _, opts := fake.ProposeTypeArgsForCall(0)
-	require.Empty(t, opts, "a plain POST passes no acknowledgment")
-
-	fake.ProposeTypeReturns(nil)
-	req = httptest.NewRequest("POST", "http://localhost/v1/type/orders?force=true", strings.NewReader(body))
-	req.Header.Set("Content-Type", "text/toml")
-	w = httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-	require.Equal(t, 200, w.Result().StatusCode)
-	_, _, opts = fake.ProposeTypeArgsForCall(1)
-	require.Len(t, opts, 1, "?force=true passes the acknowledgment option through")
+	w = e.doTOML(t, "POST", "/v1/type/photos?force=true", bump)
+	require.Equal(t, 200, w.Code, w.Body.String())
 }

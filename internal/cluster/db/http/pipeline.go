@@ -77,7 +77,7 @@ func (h *HTTP) GetPipelineStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 	topic := id
 
 	// 1. The topic must be a registered type — this is /type/{id}/pipeline.
-	types, err := h.c.Types()
+	types, err := h.db.Types()
 	if err != nil {
 		writeInternalError(w, "failed to list types", err)
 		return
@@ -97,7 +97,7 @@ func (h *HTTP) GetPipelineStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 
 	// 2. The producing ingestable (optional) and its ingest status. A topic fed
 	// by direct proposals has no ingestable.
-	ings, err := h.c.Ingestables()
+	ings, err := h.db.Ingestables()
 	if err != nil {
 		writeInternalError(w, "failed to list ingestables", err)
 		return
@@ -114,25 +114,16 @@ func (h *HTTP) GetPipelineStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 	var ingestErr string
 	caughtUp := true
 	if producerID != "" {
-		st, err := h.c.IngestableStatus(r.Context(), producerID)
-		switch {
-		case errors.Is(err, cluster.ErrIngestableNotRunning):
-			// Fail loud: a producer exists but its status is unknown on the node
-			// that answered, so the pipeline can't be considered at rest.
-			ingestErr = "no ingestable worker is running for this id on the node that answered"
-			caughtUp = false
-		case err != nil:
+		st, err := h.db.IngestableStatus(r.Context(), producerID)
+		if err != nil && !errors.Is(err, cluster.ErrIngestableNotRunning) {
 			writeInternalError(w, "failed to retrieve ingestable status", err)
 			return
-		default:
-			resp := toIngestableStatusResponse(st)
-			ingest = &resp
-			caughtUp = st.CaughtUp
 		}
+		ingest, ingestErr, caughtUp = composePipelineProducer(st, err)
 	}
 
 	// 3. Every syncable consuming the topic, measured against the data head.
-	syncs, err := h.c.Syncables()
+	syncs, err := h.db.Syncables()
 	if err != nil {
 		writeInternalError(w, "failed to list syncables", err)
 		return
@@ -141,7 +132,7 @@ func (h *HTTP) GetPipelineStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 	// The data head (DataEventIndex) is id-independent, so read it once up front
 	// and measure every consumer against the same snapshot — this also surfaces
 	// the head even when no consumer reports (none configured, or all error).
-	_, head, _ := h.c.SyncableProgress(id)
+	_, head, _ := h.db.SyncableProgress(id)
 
 	consumers := make([]PipelineSyncableStatus, 0)
 	for _, c := range syncs {
@@ -150,40 +141,13 @@ func (h *HTTP) GetPipelineStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 		}
 		// Worker state (replicated) is read separately from progress, so a consumer
 		// whose progress read fails still reports whether its worker parked.
-		st, stOK, _ := h.c.SyncableStuck(c.ID)
-		workerState := cluster.WorkerStateRunning
-		if stOK && st.Parked {
-			workerState = cluster.WorkerStateParked
-		}
-		stuck := stOK && !st.Parked
-
-		checkpoint, _, err := h.c.SyncableProgress(c.ID)
-		if err != nil {
-			// Fail loud: list the consumer with its error rather than dropping
-			// it, and force the pipeline's caughtUp false — we can't claim the
-			// pipeline is at rest with a consumer whose progress is unknown.
-			// redactedDetail, not err.Error(): a progress-read error may wrap a
-			// driver error that echoes connection identity or a bound value.
-			consumers = append(consumers, PipelineSyncableStatus{ID: c.ID, WorkerState: workerState, Stuck: stuck, Error: redactedDetail(err)})
-			caughtUp = false
-			continue
-		}
-		lag := uint64(0)
-		if head > checkpoint {
-			lag = head - checkpoint
-		}
-		cu := lag == 0
+		st, stOK, _ := h.db.SyncableStuck(c.ID)
+		checkpoint, _, err := h.db.SyncableProgress(c.ID)
+		row, cu := composePipelineConsumer(c.ID, st, stOK, checkpoint, head, err)
 		if !cu {
 			caughtUp = false
 		}
-		consumers = append(consumers, PipelineSyncableStatus{
-			ID:              c.ID,
-			WorkerState:     workerState,
-			Stuck:           stuck,
-			CheckpointIndex: checkpoint,
-			Lag:             lag,
-			CaughtUp:        cu,
-		})
+		consumers = append(consumers, row)
 	}
 
 	resp := PipelineStatusResponse{
@@ -251,4 +215,50 @@ func topicsOf(c *cluster.Configuration, kind string) []string {
 		}
 	}
 	return topics
+}
+
+// composePipelineProducer folds the producer's status read into the
+// response legs: a not-running producer is named with its error (fail loud)
+// and forces the pipeline out of rest; a readable one contributes its own
+// caughtUp. A free function so the not-running leg is table-testable — the
+// fixture's workers block alive, so it cannot be induced through a real
+// route here.
+func composePipelineProducer(st cluster.IngestableStatus, err error) (*IngestableStatusResponse, string, bool) {
+	if err != nil {
+		// Fail loud: a producer exists but its status is unknown on the node
+		// that answered, so the pipeline can't be considered at rest.
+		return nil, "no ingestable worker is running for this id on the node that answered", false
+	}
+	resp := toIngestableStatusResponse(st)
+	return &resp, "", st.CaughtUp
+}
+
+// composePipelineConsumer folds one consumer's replicated worker state and
+// progress read into its pipeline row plus its contribution to the overall
+// caughtUp. A failed progress read lists the consumer WITH its (redacted)
+// error rather than dropping it — an unknown consumer can't be at rest, and
+// a progress-read error may wrap a driver error that echoes connection
+// identity or a bound value, so redactedDetail, never err.Error(). A free
+// function so the fail-loud and redaction legs are table-testable.
+func composePipelineConsumer(id string, st cluster.SyncableStuck, stOK bool, checkpoint, head uint64, err error) (PipelineSyncableStatus, bool) {
+	workerState := cluster.WorkerStateRunning
+	if stOK && st.Parked {
+		workerState = cluster.WorkerStateParked
+	}
+	stuck := stOK && !st.Parked
+	if err != nil {
+		return PipelineSyncableStatus{ID: id, WorkerState: workerState, Stuck: stuck, Error: redactedDetail(err)}, false
+	}
+	lag := uint64(0)
+	if head > checkpoint {
+		lag = head - checkpoint
+	}
+	return PipelineSyncableStatus{
+		ID:              id,
+		WorkerState:     workerState,
+		Stuck:           stuck,
+		CheckpointIndex: checkpoint,
+		Lag:             lag,
+		CaughtUp:        lag == 0,
+	}, lag == 0
 }

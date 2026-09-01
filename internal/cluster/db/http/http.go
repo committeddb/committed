@@ -258,7 +258,7 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 			r.Post("/syncable/{id}/rebuild", h.syncableOwnerRoute(h.RebuildSyncable))
 			r.Post("/syncable/{id}/rematerialize", h.syncableOwnerRoute(h.RematerializeSyncable))
 
-			r.Get("/type", h.listConfig("type", h.c.Types))
+			r.Get("/type", h.listConfig("type", h.db.Types))
 			r.Post("/type/{id}", h.addTypeConfig())
 			// Deliberate refusal, stated as a posture rather than a bare
 			// 405: committed log entries reference their type permanently,
@@ -269,8 +269,8 @@ func New(c cluster.Cluster, opts ...Option) *HTTP {
 				writeError(w, http.StatusMethodNotAllowed, "types_are_version_only",
 					"types cannot be deleted — log entries reference their type permanently, so deletion would break replay; POST a new version to change one (an unused type is harmless residue)")
 			})
-			r.Get("/type/{id}/versions", h.getVersions("type", h.c.TypeVersions))
-			r.Get("/type/{id}/versions/{version}", h.getVersion("type", h.c.TypeVersion))
+			r.Get("/type/{id}/versions", h.getVersions("type", h.db.TypeVersions))
+			r.Get("/type/{id}/versions/{version}", h.getVersion("type", h.db.TypeVersion))
 			r.Get("/type/{id}/migration-errors", h.GetTypeMigrationErrors)
 			r.Post("/type/{id}/migration-retry/{index}", h.ReplayTypeMigrationDeadLetter)
 			r.Get("/type/{id}/pipeline", h.GetPipelineStatus)

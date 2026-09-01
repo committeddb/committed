@@ -130,7 +130,7 @@ func (h *HTTP) addTypeConfig() httpgo.HandlerFunc {
 			return
 		}
 
-		before, _ := h.c.ResolveType(cluster.LatestTypeRef(c.ID))
+		before, _ := h.db.ResolveType(cluster.LatestTypeRef(c.ID))
 
 		// ?force=true acknowledges that a nonConvertible bump strands the
 		// always-current syncables a plain POST would be refused over (409
@@ -139,16 +139,16 @@ func (h *HTTP) addTypeConfig() httpgo.HandlerFunc {
 		if r.URL.Query().Get("force") == "true" {
 			opts = append(opts, cluster.AcknowledgeStrandedSyncables())
 		}
-		if err := h.c.ProposeType(r.Context(), c, opts...); err != nil {
+		if err := h.db.ProposeType(r.Context(), c, opts...); err != nil {
 			writeProposeError(w, err, "type", "propose type")
 			return
 		}
 
-		resp := ConfigWriteResponse{ID: c.ID, Version: currentVersion(h.c.TypeVersions, c.ID)}
-		after, _ := h.c.ResolveType(cluster.LatestTypeRef(c.ID))
+		resp := ConfigWriteResponse{ID: c.ID, Version: currentVersion(h.db.TypeVersions, c.ID)}
+		after, _ := h.db.ResolveType(cluster.LatestTypeRef(c.ID))
 		if adv := cluster.MigrationEditAdvisory(before, after); adv != "" {
 			resp.Advisory = adv
-			resp.MigrationEditDependents = h.c.MigrationEditDependents(c.ID)
+			resp.MigrationEditDependents = h.db.MigrationEditDependents(c.ID)
 			zap.L().Warn("in-place type migration edit accepted: applies to new Actuals only — re-materialize the dependent always-current syncables for the fix to reach already-synced history",
 				zap.String("type", c.ID),
 				zap.Int("dependents", len(resp.MigrationEditDependents)))

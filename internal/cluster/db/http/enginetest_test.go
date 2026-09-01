@@ -122,6 +122,9 @@ type engine struct {
 	// ingestable config builds into: StatusReturns feeds the real
 	// GET /ingestable/{id}/status path, IngestStub can emit real proposals.
 	ingest *clusterfakes.FakeIngestable
+	// syncParser is the recorder syncable parser — its ParseStub doubles as
+	// the panic-injection seam for the recovery-net tests.
+	syncParser recorderSyncableParser
 }
 
 const engineTestTick = 1 * time.Millisecond
@@ -137,9 +140,20 @@ func newEngine(t *testing.T) *engine {
 // db.WithSafeMode for the safe-mode status surface).
 func newEngineOpts(t *testing.T, extra ...db.Option) *engine {
 	t.Helper()
+	return newEngineFull(t, extra, nil)
+}
+
+// newEngineHTTP is newEngine with http-server options (e.g. a bearer token).
+func newEngineHTTP(t *testing.T, httpOpts ...http.Option) *engine {
+	t.Helper()
+	return newEngineFull(t, nil, httpOpts)
+}
+
+func newEngineFull(t *testing.T, dbOpts []db.Option, httpOpts []http.Option) *engine {
+	t.Helper()
 	p := parser.New()
 	sink := &recorderSink{}
-	recParser := &clusterfakes.FakeSyncableParser{}
+	recParser := recorderSyncableParser{&clusterfakes.FakeSyncableParser{}}
 	recParser.ParseReturns(sink, nil)
 	p.AddSyncableParser("recorder", recParser)
 	// The projection spellings admit through the same recorder sink so the
@@ -176,7 +190,7 @@ func newEngineOpts(t *testing.T, extra ...db.Option) *engine {
 		db.WithTickInterval(engineTestTick),
 		db.WithTransportFactory(httptransport.Factory()),
 		db.WithSyncStuckThreshold(50 * time.Millisecond),
-	}, extra...)
+	}, dbOpts...)
 	d := db.New(1, peers, s, p, syncCh, ingestCh, opts...)
 	t.Cleanup(func() { _ = d.Close(); _ = s.Close() })
 
@@ -187,7 +201,7 @@ func newEngineOpts(t *testing.T, extra ...db.Option) *engine {
 	require.Eventually(t, func() bool { return d.Leader() == 1 },
 		10*time.Second, time.Millisecond, "the single node never elected itself")
 
-	return &engine{h: http.New(d), d: d, s: s, sink: sink, ingest: ingest}
+	return &engine{h: http.New(d, httpOpts...), d: d, s: s, sink: sink, ingest: ingest, syncParser: recParser}
 }
 
 // do runs one request through the server and returns the recorder.
@@ -234,6 +248,16 @@ func (e *engine) addType(t *testing.T, id, name string) string {
 func (e *engine) addRecorderSyncable(t *testing.T, id, topic string) {
 	t.Helper()
 	body := fmt.Sprintf("[syncable]\nname = %q\ntype = \"recorder\"\n[recorder]\ntopic = %q\n", id, topic)
+	w := e.doTOML(t, "POST", "/v1/syncable/"+id, body)
+	require.Equal(t, 200, w.Code, w.Body.String())
+}
+
+// addAlwaysCurrentRecorder is addRecorderSyncable in always-current mode —
+// the consumer stance the migration-edit advisory and stranded-consumer
+// flows key on (mode is config TOML, parsed by the shared Parser).
+func (e *engine) addAlwaysCurrentRecorder(t *testing.T, id, topic string) {
+	t.Helper()
+	body := fmt.Sprintf("[syncable]\nname = %q\ntype = \"recorder\"\nmode = \"always-current\"\n[recorder]\ntopic = %q\n", id, topic)
 	w := e.doTOML(t, "POST", "/v1/syncable/"+id, body)
 	require.Equal(t, 200, w.Code, w.Body.String())
 }
@@ -342,4 +366,19 @@ func (e *engine) addRecorderIngestable(t *testing.T, id, topic string) {
 	body := fmt.Sprintf("[ingestable]\nname = %q\ntype = \"recorder\"\n[recorder]\ntopic = %q\n", id, topic)
 	w := e.doTOML(t, "POST", "/v1/ingestable/"+id, body)
 	require.Equal(t, 200, w.Code, w.Body.String())
+}
+
+// recorderSyncableParser is the fixture's syncable plugin parser: the fake
+// plus the SyncableTopicExtractor extension the dependents lookup and the
+// pipeline linkage key on — it reads the topic straight from the recorder
+// config section, like a real kind's parser would.
+type recorderSyncableParser struct {
+	*clusterfakes.FakeSyncableParser
+}
+
+func (p recorderSyncableParser) TopicsFromConfig(v *cluster.ParsedConfig) []string {
+	if t := v.GetString("recorder.topic"); t != "" {
+		return []string{t}
+	}
+	return nil
 }

@@ -58,24 +58,6 @@ func formatValidationErrors(errs []*valerrors.ValidationError) string {
 	return b.String()
 }
 
-// sampleConfig returns a non-empty Configuration suitable as a fake
-// return value for version/list handlers.
-func sampleConfig(id string) *cluster.Configuration {
-	return &cluster.Configuration{
-		ID:       id,
-		MimeType: "text/toml",
-		Data:     []byte("[config]\nvalue = \"x\""),
-	}
-}
-
-// sampleVersions returns a non-empty VersionInfo slice.
-func sampleVersions() []cluster.VersionInfo {
-	return []cluster.VersionInfo{
-		{Version: 2, Current: true},
-		{Version: 1, Current: false},
-	}
-}
-
 // contractCase is one row of the table. `setup` configures the fake so
 // the handler can return a valid response. `body` is the request body
 // (only meaningful for POST). `contentType` defaults to application/json
@@ -144,65 +126,6 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 					Coverage: "complete",
 					Findings: []string{"a finding"},
 				}, nil)
-			},
-		},
-
-		{
-			name:   "GET /type/{id}/pipeline",
-			method: httpgo.MethodGet,
-			path:   "/v1/type/t/pipeline",
-			setup: func(fake *clusterfakes.FakeCluster) {
-				fake.TypesReturns([]*cluster.Configuration{
-					{ID: "t", MimeType: "text/toml", Data: []byte("[type]\n")},
-				}, nil)
-				fake.IngestablesReturns([]*cluster.Configuration{
-					{ID: "ing-1", MimeType: "text/toml", Data: []byte("[ingestable]\ntype = \"sql\"\n\n[sql]\ntopic = \"t\"\n")},
-				}, nil)
-				lag := uint64(0)
-				fake.IngestableStatusReturns(cluster.IngestableStatus{
-					WorkerState: cluster.WorkerStateRunning,
-					Phase:       "streaming",
-					Position:    "0/1A2B3C8",
-					Lag:         &lag,
-					LagUnit:     cluster.LagUnitTransactions,
-					CaughtUp:    true,
-				}, nil)
-				fake.SyncablesReturns([]*cluster.Configuration{
-					{ID: "s-1", MimeType: "text/toml", Data: []byte("[syncable]\ntype = \"sql\"\n\n[sql]\ntopic = \"t\"\n")},
-				}, nil)
-				fake.SyncableProgressReturns(100, 100, nil)
-			},
-		},
-		// --- type ---
-		{
-			name:   "GET /type",
-			method: httpgo.MethodGet,
-			path:   "/v1/type",
-			setup: func(fake *clusterfakes.FakeCluster) {
-				fake.TypesReturns([]*cluster.Configuration{sampleConfig("t-1")}, nil)
-			},
-		},
-		{
-			name:        "POST /type/{id}",
-			method:      httpgo.MethodPost,
-			path:        "/v1/type/t-1",
-			body:        "[config]\nvalue = \"x\"",
-			contentType: "text/toml",
-		},
-		{
-			name:   "GET /type/{id}/versions",
-			method: httpgo.MethodGet,
-			path:   "/v1/type/t-1/versions",
-			setup: func(fake *clusterfakes.FakeCluster) {
-				fake.TypeVersionsReturns(sampleVersions(), nil)
-			},
-		},
-		{
-			name:   "GET /type/{id}/versions/{version}",
-			method: httpgo.MethodGet,
-			path:   "/v1/type/t-1/versions/1",
-			setup: func(fake *clusterfakes.FakeCluster) {
-				fake.TypeVersionReturns(sampleConfig("t-1"), nil)
 			},
 		},
 
@@ -287,6 +210,15 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 		}{
 			{name: "GET /syncable", method: httpgo.MethodGet, path: "/v1/syncable"},
 			{name: "GET /node/status", method: httpgo.MethodGet, path: "/v1/node/status"},
+			{name: "GET /type", method: httpgo.MethodGet, path: "/v1/type"},
+			{
+				name: "POST /type/{id}", method: httpgo.MethodPost, path: "/v1/type/albums",
+				contentType: "text/toml", body: "[type]\nname = \"albums\"\n",
+			},
+			{name: "GET /type/{id}/versions", method: httpgo.MethodGet, path: "/v1/type/photos/versions"},
+			{name: "GET /type/{id}/versions/{version}", method: httpgo.MethodGet, path: "/v1/type/photos/versions/1"},
+			{name: "GET /type/{id}/pipeline", method: httpgo.MethodGet, path: "/v1/type/photos/pipeline"},
+			{name: "GET /type/{id}/migration-errors", method: httpgo.MethodGet, path: "/v1/type/photos/migration-errors"},
 			{name: "GET /database", method: httpgo.MethodGet, path: "/v1/database"},
 			{
 				name: "POST /database/{id}", method: httpgo.MethodPost, path: "/v1/database/db-2",
@@ -399,15 +331,6 @@ func TestOpenAPIContract_ErrorResponses(t *testing.T) {
 			method:     httpgo.MethodGet,
 			path:       "/v1/database/db-1/versions/abc",
 			wantStatus: 400,
-		},
-		{
-			name:   "GET /type/{id}/versions with resource missing → 404",
-			method: httpgo.MethodGet,
-			path:   "/v1/type/missing/versions",
-			setup: func(f *clusterfakes.FakeCluster) {
-				f.TypeVersionsReturns(nil, cluster.ErrResourceNotFound)
-			},
-			wantStatus: 404,
 		},
 	}
 

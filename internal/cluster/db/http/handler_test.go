@@ -2,294 +2,14 @@ package http_test
 
 import (
 	"encoding/json"
-	"fmt"
 	"io"
 	httpgo "net/http"
-	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/committeddb/committed/internal/cluster"
-	"github.com/committeddb/committed/internal/cluster/clusterfakes"
 	"github.com/committeddb/committed/internal/cluster/db/http"
 )
-
-func setupTest() (*http.HTTP, *clusterfakes.FakeCluster) {
-	fake := &clusterfakes.FakeCluster{}
-	h := http.New(fake)
-	return h, fake
-}
-
-// --- Add Configuration (table-driven for Database, Syncable, Ingestable, Type) ---
-
-func TestAddConfiguration_Success(t *testing.T) {
-	tests := []struct {
-		name     string
-		path     string
-		verifyFn func(fake *clusterfakes.FakeCluster) (int, *cluster.Configuration)
-	}{
-		{
-			name: "type",
-			path: "/v1/type/type-1",
-			verifyFn: func(fake *clusterfakes.FakeCluster) (int, *cluster.Configuration) {
-				_, cfg, _ := fake.ProposeTypeArgsForCall(0)
-				return fake.ProposeTypeCallCount(), cfg
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			h, fake := setupTest()
-
-			body := `[config]
-name = "test"
-type = "sql"`
-
-			req := httptest.NewRequest("POST", "http://localhost"+tc.path, strings.NewReader(body))
-			req.Header["Content-Type"] = []string{"text/toml"}
-			w := httptest.NewRecorder()
-
-			h.ServeHTTP(w, req)
-
-			resp := w.Result()
-			require.Equal(t, 200, resp.StatusCode)
-
-			respBody, err := io.ReadAll(resp.Body)
-			require.Nil(t, err)
-
-			// ID is the last segment of the path
-			parts := strings.Split(tc.path, "/")
-			expectedID := parts[len(parts)-1]
-			require.JSONEq(t, `{"id":"`+expectedID+`"}`, string(respBody))
-
-			callCount, cfg := tc.verifyFn(fake)
-			require.Equal(t, 1, callCount)
-			require.Equal(t, expectedID, cfg.ID)
-			require.Equal(t, "text/toml", cfg.MimeType)
-			require.Equal(t, body, string(cfg.Data))
-		})
-	}
-}
-
-func TestAddConfiguration_ClusterError(t *testing.T) {
-	tests := []struct {
-		name    string
-		path    string
-		setupFn func(fake *clusterfakes.FakeCluster)
-	}{
-		{
-			name:    "type",
-			path:    "/v1/type/type-1",
-			setupFn: func(fake *clusterfakes.FakeCluster) { fake.ProposeTypeReturns(fmt.Errorf("fail")) },
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			h, fake := setupTest()
-			tc.setupFn(fake)
-
-			req := httptest.NewRequest("POST", "http://localhost"+tc.path, strings.NewReader("body"))
-			w := httptest.NewRecorder()
-
-			h.ServeHTTP(w, req)
-
-			resp := w.Result()
-			require.Equal(t, 500, resp.StatusCode)
-			requireErrorResponse(t, resp, "internal_error")
-		})
-	}
-}
-
-func TestAddConfiguration_ConfigError(t *testing.T) {
-	configErr := &cluster.ConfigError{Err: fmt.Errorf("bad toml")}
-
-	tests := []struct {
-		name         string
-		path         string
-		setupFn      func(fake *clusterfakes.FakeCluster)
-		expectedCode string
-	}{
-		{
-			name:         "type",
-			path:         "/v1/type/type-1",
-			setupFn:      func(fake *clusterfakes.FakeCluster) { fake.ProposeTypeReturns(configErr) },
-			expectedCode: "invalid_type_config",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			h, fake := setupTest()
-			tc.setupFn(fake)
-
-			req := httptest.NewRequest("POST", "http://localhost"+tc.path, strings.NewReader("body"))
-			w := httptest.NewRecorder()
-
-			h.ServeHTTP(w, req)
-
-			resp := w.Result()
-			require.Equal(t, 400, resp.StatusCode)
-			errResp := requireErrorResponse(t, resp, tc.expectedCode)
-			require.Contains(t, errResp.Message, "bad toml", "response should include the underlying parse error")
-		})
-	}
-}
-
-func TestAddConfiguration_EmptyBody(t *testing.T) {
-	h, _ := setupTest()
-
-	req := httptest.NewRequest("POST", "http://localhost/v1/type/type-1", strings.NewReader(""))
-	w := httptest.NewRecorder()
-
-	h.ServeHTTP(w, req)
-
-	require.Equal(t, 200, w.Result().StatusCode)
-}
-
-func TestAddConfiguration_ContentTypeHandling(t *testing.T) {
-	t.Run("default mime type is text/toml", func(t *testing.T) {
-		h, fake := setupTest()
-
-		req := httptest.NewRequest("POST", "http://localhost/v1/type/type-1", strings.NewReader("data"))
-		// No Content-Type header set
-		w := httptest.NewRecorder()
-
-		h.ServeHTTP(w, req)
-
-		require.Equal(t, 200, w.Result().StatusCode)
-		_, cfg, _ := fake.ProposeTypeArgsForCall(0)
-		require.Equal(t, "text/toml", cfg.MimeType)
-	})
-
-	t.Run("explicit application/json", func(t *testing.T) {
-		h, fake := setupTest()
-
-		req := httptest.NewRequest("POST", "http://localhost/v1/type/type-1", strings.NewReader("{}"))
-		req.Header["Content-Type"] = []string{"application/json"}
-		w := httptest.NewRecorder()
-
-		h.ServeHTTP(w, req)
-
-		require.Equal(t, 200, w.Result().StatusCode)
-		_, cfg, _ := fake.ProposeTypeArgsForCall(0)
-		require.Equal(t, "application/json", cfg.MimeType)
-	})
-}
-
-// --- Get Configurations (table-driven) ---
-
-func TestGetConfigurations_Success(t *testing.T) {
-	cfgs := []*cluster.Configuration{
-		{ID: "id-1", Name: "name-1", MimeType: "text/toml", Data: []byte("data1")},
-		{ID: "id-2", Name: "name-2", MimeType: "application/json", Data: []byte("data2")},
-	}
-
-	tests := []struct {
-		name    string
-		path    string
-		setupFn func(fake *clusterfakes.FakeCluster)
-	}{
-		{
-			name:    "type",
-			path:    "/v1/type",
-			setupFn: func(fake *clusterfakes.FakeCluster) { fake.TypesReturns(cfgs, nil) },
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			h, fake := setupTest()
-			tc.setupFn(fake)
-
-			req := httptest.NewRequest("GET", "http://localhost"+tc.path, nil)
-			w := httptest.NewRecorder()
-
-			h.ServeHTTP(w, req)
-
-			resp := w.Result()
-			require.Equal(t, 200, resp.StatusCode)
-			require.Equal(t, "application/json", resp.Header.Get("Content-Type"))
-
-			body, err := io.ReadAll(resp.Body)
-			require.Nil(t, err)
-
-			var result []http.ConfigurationResponse
-			err = json.Unmarshal(body, &result)
-			require.Nil(t, err)
-			require.Equal(t, 2, len(result))
-			require.Equal(t, "id-1", result[0].ID)
-			require.Equal(t, "name-1", result[0].Name)
-			require.Equal(t, "data1", result[0].Data)
-			require.Equal(t, "id-2", result[1].ID)
-			require.Equal(t, "name-2", result[1].Name)
-		})
-	}
-}
-
-func TestGetConfigurations_Empty(t *testing.T) {
-	h, fake := setupTest()
-	fake.TypesReturns(nil, nil)
-
-	req := httptest.NewRequest("GET", "http://localhost/v1/type", nil)
-	w := httptest.NewRecorder()
-
-	h.ServeHTTP(w, req)
-
-	resp := w.Result()
-	require.Equal(t, 200, resp.StatusCode)
-
-	body, err := io.ReadAll(resp.Body)
-	require.Nil(t, err)
-	require.Equal(t, "[]", string(body))
-}
-
-func TestGetConfigurations_Error(t *testing.T) {
-	tests := []struct {
-		name    string
-		path    string
-		setupFn func(fake *clusterfakes.FakeCluster)
-	}{
-		{
-			name:    "type",
-			path:    "/v1/type",
-			setupFn: func(fake *clusterfakes.FakeCluster) { fake.TypesReturns(nil, fmt.Errorf("fail")) },
-		},
-		{
-			name:    "ingestable",
-			path:    "/v1/ingestable",
-			setupFn: func(fake *clusterfakes.FakeCluster) { fake.IngestablesReturns(nil, fmt.Errorf("fail")) },
-		},
-		{
-			name:    "type",
-			path:    "/v1/type",
-			setupFn: func(fake *clusterfakes.FakeCluster) { fake.TypesReturns(nil, fmt.Errorf("fail")) },
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			h, fake := setupTest()
-			tc.setupFn(fake)
-
-			req := httptest.NewRequest("GET", "http://localhost"+tc.path, nil)
-			w := httptest.NewRecorder()
-
-			h.ServeHTTP(w, req)
-
-			resp := w.Result()
-			require.Equal(t, 500, resp.StatusCode)
-			requireErrorResponse(t, resp, "internal_error")
-		})
-	}
-}
-
-// --- AddProposal ---
-
-// --- Error response helpers & shape test ---
 
 // requireErrorResponse reads the response body, unmarshals it as an
 // ErrorResponse, and asserts the code field matches expectedCode.
@@ -307,30 +27,52 @@ func requireErrorResponse(t *testing.T, resp *httpgo.Response, expectedCode stri
 	return errResp
 }
 
+// TestErrorResponse_JSONShape: the error envelope's wire shape, through a
+// real engine's own 404.
 func TestErrorResponse_JSONShape(t *testing.T) {
-	h, fake := setupTest()
-	fake.TypeVersionsReturns(nil, cluster.ErrResourceNotFound)
+	e := newEngine(t)
+	w := e.doEmpty(t, "GET", "/v1/type/missing/versions")
+	require.Equal(t, 404, w.Code)
+	requireErrorResponse(t, w.Result(), "type_not_found")
+}
 
-	req := httptest.NewRequest("GET", "http://localhost/v1/type/missing/versions", nil)
-	w := httptest.NewRecorder()
+// TestAddConfiguration_ContentTypeHandling: the stored MimeType tracks the
+// request — text/toml by default, an explicit content type verbatim, and a
+// charset parameter stripped to the base media type — proven by reading the
+// stored version back from the real engine.
+func TestAddConfiguration_ContentTypeHandling(t *testing.T) {
+	storedMime := func(t *testing.T, e *engine, id string) string {
+		t.Helper()
+		var got struct {
+			MimeType string `json:"mimeType"`
+		}
+		e.getJSON(t, "/v1/type/"+id+"/versions/1", &got)
+		return got.MimeType
+	}
 
-	h.ServeHTTP(w, req)
+	t.Run("default mime type is text/toml", func(t *testing.T) {
+		e := newEngine(t)
+		w := e.do(t, "POST", "/v1/type/t1", "", "[type]\nname = \"t1\"\n")
+		mustStatus(t, w, 200)
+		require.Equal(t, "text/toml", storedMime(t, e, "t1"))
+	})
 
-	resp := w.Result()
-	require.Equal(t, 404, resp.StatusCode)
-	require.Equal(t, "application/json", resp.Header.Get("Content-Type"))
+	t.Run("charset parameter is stripped to the base media type", func(t *testing.T) {
+		e := newEngine(t)
+		w := e.do(t, "POST", "/v1/type/t1", "text/toml; charset=utf-8", "[type]\nname = \"t1\"\n")
+		mustStatus(t, w, 200)
+		require.Equal(t, "text/toml", storedMime(t, e, "t1"),
+			"the charset parameter must not leak into the stored MimeType")
+	})
+}
 
-	respBody, err := io.ReadAll(resp.Body)
-	require.Nil(t, err)
-
-	// Verify the JSON shape has exactly the expected fields
-	var raw map[string]any
-	err = json.Unmarshal(respBody, &raw)
-	require.Nil(t, err)
-
-	require.Contains(t, raw, "code")
-	require.Contains(t, raw, "message")
-	require.Equal(t, "type_not_found", raw["code"])
-	require.IsType(t, "", raw["message"])
-	require.NotEmpty(t, raw["message"])
+// TestAddConfiguration_EmptyBody: an empty body reaches admission intact —
+// the http layer neither buffers it away nor 500s — and type admission
+// accepts it (an empty TOML type parses; naming is optional), so the write
+// lands as version 1.
+func TestAddConfiguration_EmptyBody(t *testing.T) {
+	e := newEngine(t)
+	w := e.doTOML(t, "POST", "/v1/type/t1", "")
+	mustStatus(t, w, 200)
+	require.Contains(t, w.Body.String(), `"version":1`)
 }

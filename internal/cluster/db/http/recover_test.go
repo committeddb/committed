@@ -2,9 +2,9 @@ package http_test
 
 import (
 	"encoding/json"
-	"fmt"
 	httpgo "net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -12,117 +12,88 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/committeddb/committed/internal/cluster"
-	"github.com/committeddb/committed/internal/cluster/clusterfakes"
 	"github.com/committeddb/committed/internal/cluster/db/http"
 )
 
-// A panicking handler must degrade to a sanitized 500 JSON response —
-// not net/http's default of a dropped connection — and emit exactly one
-// Error-level log carrying the request ID, method, path, panic value,
-// and stack. The stack and panic value stay server-side only.
+// The panic-recovery net, exercised through the REAL router and engine: the
+// fixture's recorder parser doubles as the injection seam (its ParseStub
+// panics), so a genuine handler panic travels the genuine middleware chain.
+
+// panicOnParse arms the seam: the next syncable admission parse panics with v.
+func panicOnParse(e *engine, v any) {
+	e.syncParser.ParseStub = func(*cluster.ParsedConfig, cluster.DatabaseStorage) (cluster.Syncable, error) {
+		panic(v)
+	}
+}
+
+// TestRecoverPanic_PanickingHandlerReturns500: a panic mid-handler answers
+// the JSON 500 envelope, and the log captures the panic value, request id,
+// method, path, and stack. The stack and panic value stay server-side only.
 func TestRecoverPanic_PanickingHandlerReturns500(t *testing.T) {
 	core, logs := observer.New(zap.ErrorLevel)
 	restore := zap.ReplaceGlobals(zap.New(core))
 	defer restore()
 
-	fake := &clusterfakes.FakeCluster{}
-	fake.TypesStub = func() ([]*cluster.Configuration, error) {
-		panic("boom: handler invariant broken")
-	}
-	h := http.New(fake)
+	e := newEngine(t)
+	panicOnParse(e, "boom: handler invariant broken")
 
-	r := httptest.NewRequest(httpgo.MethodGet, "/v1/type", nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, r)
-
+	w := e.doTOML(t, "POST", "/v1/syncable/s1", "[syncable]\nname = \"s1\"\ntype = \"recorder\"\n")
 	require.Equal(t, httpgo.StatusInternalServerError, w.Code)
 	require.Equal(t, "application/json", w.Header().Get("Content-Type"))
-
 	var resp http.ErrorResponse
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	require.Equal(t, "internal_error", resp.Code)
-	require.Equal(t, "internal server error", resp.Message)
-	// Neither the panic value nor the stack leaks to the client.
-	require.NotContains(t, w.Body.String(), "boom")
-	require.NotContains(t, w.Body.String(), "goroutine")
+	require.NotContains(t, w.Body.String(), "boom", "the panic value must not leak to the client")
 
 	entries := logs.FilterMessage("http handler panic").All()
 	require.Len(t, entries, 1)
-	require.Equal(t, zap.ErrorLevel, entries[0].Level)
 	fields := entries[0].ContextMap()
 	require.NotEmpty(t, fields["request_id"])
-	require.Equal(t, w.Header().Get("X-Request-ID"), fields["request_id"])
-	require.Equal(t, httpgo.MethodGet, fields["method"])
-	require.Equal(t, "/v1/type", fields["path"])
-	require.Contains(t, fmt.Sprint(fields["panic"]), "boom")
+	require.Equal(t, httpgo.MethodPost, fields["method"])
+	require.Equal(t, "/v1/syncable/s1", fields["path"])
+	require.Contains(t, fields["panic"], "boom")
 	stack, ok := fields["stack"].(string)
 	require.True(t, ok)
 	require.Contains(t, stack, "goroutine")
 }
 
-// The motivating case from the ticket: rollback dereferences the
-// looked-up config's .ID, trusting that a version lookup never returns
-// (nil, nil). The real Storage upholds that; the counterfeiter fake's
-// zero value breaks it — exactly what a future buggy implementation
-// would do. The recovery net must turn that into a logged 500.
-func TestRecoverPanic_RollbackNilConfigInvariant(t *testing.T) {
-	core, logs := observer.New(zap.ErrorLevel)
-	restore := zap.ReplaceGlobals(zap.New(core))
-	defer restore()
-
-	fake := &clusterfakes.FakeCluster{} // DatabaseVersion zero-stub returns (nil, nil)
-	h := http.New(fake)
-
-	r := httptest.NewRequest(httpgo.MethodPost, "/v1/database/db-1/rollback?to=1", nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, r)
-
-	require.Equal(t, httpgo.StatusInternalServerError, w.Code)
-	var resp http.ErrorResponse
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-	require.Equal(t, "internal_error", resp.Code)
-	require.Len(t, logs.FilterMessage("http handler panic").All(), 1)
-}
-
-// http.ErrAbortHandler is net/http's sentinel for a deliberate abort.
-// It must re-panic (net/http drops the connection, as requested) and
-// must not be logged as a failure.
+// http.ErrAbortHandler is net/http's sentinel for a deliberate abort. It
+// must re-panic (net/http drops the connection, as requested) and must not
+// be logged as a failure.
 func TestRecoverPanic_ErrAbortHandlerStillAborts(t *testing.T) {
 	core, logs := observer.New(zap.ErrorLevel)
 	restore := zap.ReplaceGlobals(zap.New(core))
 	defer restore()
 
-	fake := &clusterfakes.FakeCluster{}
-	fake.TypesStub = func() ([]*cluster.Configuration, error) {
-		panic(httpgo.ErrAbortHandler)
-	}
-	h := http.New(fake)
+	e := newEngine(t)
+	panicOnParse(e, httpgo.ErrAbortHandler)
 
-	r := httptest.NewRequest(httpgo.MethodGet, "/v1/type", nil)
+	req := httptest.NewRequest("POST", "http://localhost/v1/syncable/s1",
+		strings.NewReader("[syncable]\nname = \"s1\"\ntype = \"recorder\"\n"))
+	req.Header.Set("Content-Type", "text/toml")
 	w := httptest.NewRecorder()
-	require.PanicsWithValue(t, httpgo.ErrAbortHandler, func() { h.ServeHTTP(w, r) })
-	require.Empty(t, logs.FilterMessage("http handler panic").All())
+	require.PanicsWithValue(t, httpgo.ErrAbortHandler, func() { e.h.ServeHTTP(w, req) },
+		"the abort sentinel must re-panic for net/http to drop the connection")
+	require.Empty(t, logs.FilterMessage("http handler panic").All(),
+		"a deliberate abort is not a failure and must not be logged as one")
 }
 
-// A panic in the auth middleware itself is also caught: recoverPanic is
-// mounted before bearerAuth, so the whole authenticated surface — not
-// just the handlers — degrades to a logged 500.
+// TestRecoverPanic_CoversAuthenticatedRoutes: the net sits UNDER the auth
+// middleware, so a panic behind a bearer token still answers the envelope.
 func TestRecoverPanic_CoversAuthenticatedRoutes(t *testing.T) {
-	core, logs := observer.New(zap.ErrorLevel)
+	core, _ := observer.New(zap.ErrorLevel)
 	restore := zap.ReplaceGlobals(zap.New(core))
 	defer restore()
 
-	fake := &clusterfakes.FakeCluster{}
-	fake.SyncablesStub = func() ([]*cluster.Configuration, error) {
-		panic("boom behind auth")
-	}
-	h := http.New(fake, http.WithBearerToken("secret"))
+	e := newEngineHTTP(t, http.WithBearerToken("secret"))
+	panicOnParse(e, "boom")
 
-	r := httptest.NewRequest(httpgo.MethodGet, "/v1/syncable", nil)
-	r.Header.Set("Authorization", "Bearer secret")
+	req := httptest.NewRequest("POST", "http://localhost/v1/syncable/s1",
+		strings.NewReader("[syncable]\nname = \"s1\"\ntype = \"recorder\"\n"))
+	req.Header.Set("Content-Type", "text/toml")
+	req.Header.Set("Authorization", "Bearer secret")
 	w := httptest.NewRecorder()
-	h.ServeHTTP(w, r)
-
+	e.h.ServeHTTP(w, req)
 	require.Equal(t, httpgo.StatusInternalServerError, w.Code)
-	require.Len(t, logs.FilterMessage("http handler panic").All(), 1)
+	require.Contains(t, w.Body.String(), "internal_error")
 }

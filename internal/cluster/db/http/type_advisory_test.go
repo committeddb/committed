@@ -2,83 +2,63 @@ package http_test
 
 import (
 	"encoding/json"
-	"io"
-	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
-
-	"github.com/committeddb/committed/internal/cluster"
-	"github.com/committeddb/committed/internal/cluster/db/http"
 )
 
-// A migration-only in-place type edit (schema + version unchanged, only the
-// [migration] transform changed) must return a body advisory: the fix reaches
-// only new Actuals, so already-synced history needs a projection rebuild. The
-// handler detects it from before/after ResolveType snapshots bracketing the
-// propose.
+// The migration-edit advisory, real end to end: an in-place [migration]
+// transform edit (same version, same schema, different migration bytes)
+// must warn the operator and name the always-current consumers whose
+// already-synced rows keep the OLD migration's output; a schema bump (its
+// own version + migration) and a brand-new type warrant no advisory.
+
+type typeWriteResponse struct {
+	ID                      string `json:"id"`
+	Version                 int    `json:"version"`
+	Advisory                string `json:"advisory,omitempty"`
+	MigrationEditDependents []struct {
+		ID string `json:"id"`
+	} `json:"migrationEditDependents,omitempty"`
+}
+
+func postType(t *testing.T, e *engine, id, body string) typeWriteResponse {
+	t.Helper()
+	w := e.doTOML(t, "POST", "/v1/type/"+id, body)
+	require.Equal(t, 200, w.Code, w.Body.String())
+	var resp typeWriteResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	return resp
+}
+
 func TestAddType_MigrationEditAdvisoryInResponseBody(t *testing.T) {
-	h, fake := setupTest()
+	e := newEngine(t)
 
-	fake.ResolveTypeReturnsOnCall(0, &cluster.Type{ID: "t1", Version: 1, Schema: []byte("s"), Migration: []byte("old jq")}, nil)
-	fake.ProposeTypeReturns(nil)
-	fake.TypeVersionsReturns([]cluster.VersionInfo{{Version: 1, Current: true}}, nil)
-	fake.ResolveTypeReturnsOnCall(1, &cluster.Type{ID: "t1", Version: 1, Schema: []byte("s"), Migration: []byte("new jq")}, nil)
-	fake.MigrationEditDependentsReturns([]cluster.DependentSyncable{{ID: "mirror", Name: "mirror"}})
+	// v1 plain, v2 with a schema (declaring the identity migration), then an
+	// in-place edit that changes ONLY the [migration] transform — same
+	// version, same schema.
+	postType(t, e, "photos", "[type]\nname = \"photos\"\n")
+	v2 := "[type]\nname = \"photos\"\nschemaType = \"JSONSchema\"\nschema = '{\"type\":\"object\"}'\n[migration]\nnone = true\n"
+	resp := postType(t, e, "photos", v2)
+	require.Equal(t, 2, resp.Version)
+	require.Empty(t, resp.Advisory, "a schema bump carries its own migration — no advisory")
 
-	body := decodeConfigWrite(t, postType(t, h, "t1"))
-	require.Equal(t, "t1", body.ID)
-	require.Contains(t, body.Advisory, "already-synced",
-		"a migration-only in-place edit must carry the rebuild advisory")
-	require.Contains(t, body.Advisory, "read-models.md",
-		"the advisory must point the operator at the how-to")
-	require.Contains(t, body.Advisory, "rematerialize",
-		"the advisory names the one-verb fix")
-	require.Len(t, body.MigrationEditDependents, 1,
-		"the advisory carries the structured dependents to re-materialize")
-	require.Equal(t, "mirror", body.MigrationEditDependents[0].ID)
+	// The always-current consumer the advisory must name.
+	e.addAlwaysCurrentRecorder(t, "rec-1", "photos")
+
+	edited := "[type]\nname = \"photos\"\nschemaType = \"JSONSchema\"\nschema = '{\"type\":\"object\"}'\n[migration]\ntransform = '.x'\n"
+	resp = postType(t, e, "photos", edited)
+	require.Equal(t, 2, resp.Version, "a migration-only edit stays in place at the same version")
+	require.NotEmpty(t, resp.Advisory, "an in-place transform edit must carry the advisory")
+	require.Contains(t, resp.Advisory, "/rematerialize", "the advisory names the remedy")
+	require.Len(t, resp.MigrationEditDependents, 1)
+	require.Equal(t, "rec-1", resp.MigrationEditDependents[0].ID)
 }
 
-// A schema change forces a new version with its own migration — not the
-// silent-history case — so no advisory.
-func TestAddType_NoAdvisoryOnSchemaBump(t *testing.T) {
-	h, fake := setupTest()
-
-	fake.ResolveTypeReturnsOnCall(0, &cluster.Type{ID: "t1", Version: 1, Schema: []byte("s1"), Migration: []byte("m")}, nil)
-	fake.ProposeTypeReturns(nil)
-	fake.TypeVersionsReturns([]cluster.VersionInfo{{Version: 2, Current: true}}, nil)
-	fake.ResolveTypeReturnsOnCall(1, &cluster.Type{ID: "t1", Version: 2, Schema: []byte("s2"), Migration: []byte("m2")}, nil)
-
-	require.Empty(t, decodeConfigWrite(t, postType(t, h, "t1")).Advisory)
-}
-
-// A brand-new type (no prior version) carries no advisory.
 func TestAddType_NoAdvisoryOnNewType(t *testing.T) {
-	h, fake := setupTest()
-
-	fake.ResolveTypeReturnsOnCall(0, nil, nil) // before: no existing type
-	fake.ProposeTypeReturns(nil)
-	fake.TypeVersionsReturns([]cluster.VersionInfo{{Version: 1, Current: true}}, nil)
-	fake.ResolveTypeReturnsOnCall(1, &cluster.Type{ID: "t1", Version: 1, Schema: []byte("s")}, nil)
-
-	require.Empty(t, decodeConfigWrite(t, postType(t, h, "t1")).Advisory)
-}
-
-func postType(t *testing.T, h *http.HTTP, id string) *httptest.ResponseRecorder {
-	t.Helper()
-	req := httptest.NewRequest("POST", "http://localhost/v1/type/"+id, strings.NewReader("[type]\nname = \"x\"\n"))
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-	require.Equal(t, 200, w.Code)
-	return w
-}
-
-func decodeConfigWrite(t *testing.T, w *httptest.ResponseRecorder) http.ConfigWriteResponse {
-	t.Helper()
-	b, err := io.ReadAll(w.Body)
-	require.NoError(t, err)
-	var out http.ConfigWriteResponse
-	require.NoError(t, json.Unmarshal(b, &out), "body: %s", string(b))
-	return out
+	e := newEngine(t)
+	resp := postType(t, e, "photos", "[type]\nname = \"photos\"\n")
+	require.Equal(t, 1, resp.Version)
+	require.Empty(t, resp.Advisory)
+	require.Empty(t, resp.MigrationEditDependents)
 }

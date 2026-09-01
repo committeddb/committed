@@ -65,24 +65,13 @@ func (h *HTTP) GetTypeMigrationErrors(w httpgo.ResponseWriter, r *httpgo.Request
 		return
 	}
 
-	dls, err := h.c.TypeMigrationDeadLetters(id, since, limit)
+	dls, err := h.db.TypeMigrationDeadLetters(id, since, limit)
 	if err != nil {
 		writeInternalError(w, "failed to retrieve type migration errors", err)
 		return
 	}
 
-	body := make([]TypeMigrationErrorResponse, 0, len(dls))
-	for _, d := range dls {
-		body = append(body, TypeMigrationErrorResponse{
-			Index:       d.Index,
-			FromVersion: d.FromVersion,
-			ToVersion:   d.ToVersion,
-			Timestamp:   time.Unix(0, d.TimestampUnixNano).UTC().Format(time.RFC3339Nano),
-			Message:     d.Message,
-		})
-	}
-
-	writeArrayBody(w, body)
+	writeArrayBody(w, typeMigrationErrorsResponse(dls))
 }
 
 // ReplayTypeMigrationDeadLetter re-runs the type's (presumably fixed)
@@ -107,7 +96,32 @@ func (h *HTTP) ReplayTypeMigrationDeadLetter(w httpgo.ResponseWriter, r *httpgo.
 		return
 	}
 
-	err = h.c.ReplayTypeMigrationDeadLetter(r.Context(), id, index)
+	writeTypeMigrationReplayResult(w, h.db.ReplayTypeMigrationDeadLetter(r.Context(), id, index))
+}
+
+// typeMigrationErrorsResponse renders the replicated migration dead
+// letters; the empty slice (never nil) lets clients iterate without a nil
+// check. A free function so the rendering is table-testable — a real
+// migration dead letter means a jq chain failing mid-sync, which the
+// listing tests do not pay for.
+func typeMigrationErrorsResponse(dls []cluster.TypeMigrationDeadLetter) []TypeMigrationErrorResponse {
+	body := make([]TypeMigrationErrorResponse, 0, len(dls))
+	for _, d := range dls {
+		body = append(body, TypeMigrationErrorResponse{
+			Index:       d.Index,
+			FromVersion: d.FromVersion,
+			ToVersion:   d.ToVersion,
+			Timestamp:   time.Unix(0, d.TimestampUnixNano).UTC().Format(time.RFC3339Nano),
+			Message:     d.Message,
+		})
+	}
+	return body
+}
+
+// writeTypeMigrationReplayResult maps a ReplayTypeMigrationDeadLetter
+// outcome, including the nil (200) case — the type-keyed twin of
+// writeReplayDeadLetterResult.
+func writeTypeMigrationReplayResult(w httpgo.ResponseWriter, err error) {
 	switch {
 	case err == nil:
 		w.WriteHeader(httpgo.StatusOK)

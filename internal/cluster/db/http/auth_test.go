@@ -8,7 +8,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/committeddb/committed/internal/cluster/clusterfakes"
 	"github.com/committeddb/committed/internal/cluster/db/http"
 )
 
@@ -88,25 +87,24 @@ func TestBearerAuth(t *testing.T) {
 			token:          "secret",
 			authHeader:     "",
 			path:           "/ready",
-			expectedStatus: 503, // 503 not 401 — ready is exempt from auth
+			expectedStatus: 200, // 200 not 401 — ready is exempt from auth (the real node is ready)
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			fake := &clusterfakes.FakeCluster{}
 			var opts []http.Option
 			if tc.token != "" {
 				opts = append(opts, http.WithBearerToken(tc.token))
 			}
-			h := http.New(fake, opts...)
+			e := newEngineHTTP(t, opts...)
 
 			req := httptest.NewRequest("GET", "http://localhost"+tc.path, nil)
 			if tc.authHeader != "" {
 				req.Header.Set("Authorization", tc.authHeader)
 			}
 			w := httptest.NewRecorder()
-			h.ServeHTTP(w, req)
+			e.h.ServeHTTP(w, req)
 
 			resp := w.Result()
 			require.Equal(t, tc.expectedStatus, resp.StatusCode)
@@ -115,12 +113,11 @@ func TestBearerAuth(t *testing.T) {
 }
 
 func TestBearerAuth_ErrorBody(t *testing.T) {
-	fake := &clusterfakes.FakeCluster{}
-	h := http.New(fake, http.WithBearerToken("secret"))
+	e := newEngineHTTP(t, http.WithBearerToken("secret"))
 
 	req := httptest.NewRequest("GET", "http://localhost/v1/database", nil)
 	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
+	e.h.ServeHTTP(w, req)
 
 	resp := w.Result()
 	require.Equal(t, 401, resp.StatusCode)
