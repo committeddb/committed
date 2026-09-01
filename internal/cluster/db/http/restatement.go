@@ -17,7 +17,7 @@ func (h *HTTP) AddRestatement(w httpgo.ResponseWriter, r *httpgo.Request) {
 		h.writeReadError(w, r, err, "invalid_config", "invalid restatement configuration")
 		return
 	}
-	if err := h.c.ProposeRestatement(r.Context(), c); err != nil {
+	if err := h.db.ProposeRestatement(r.Context(), c); err != nil {
 		writeProposeError(w, err, "restatement", "propose restatement")
 		return
 	}
@@ -43,7 +43,7 @@ func (h *HTTP) DryRunRestatement(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 	defer cancel()
-	rep, err := h.c.DryRunRestatement(ctx, mimeType, body, opts)
+	rep, err := h.db.DryRunRestatement(ctx, mimeType, body, opts)
 	if err != nil {
 		// The dry-run IS the authoring loop: a rejection carries the
 		// admission path's actual words.
@@ -72,7 +72,7 @@ func (h *HTTP) GetRestatements(w httpgo.ResponseWriter, r *httpgo.Request) {
 	if !h.linearize(w, r) {
 		return
 	}
-	applied, err := h.c.Restatements()
+	applied, err := h.db.Restatements()
 	if err != nil {
 		writeInternalError(w, "failed to list restatements", err)
 		return

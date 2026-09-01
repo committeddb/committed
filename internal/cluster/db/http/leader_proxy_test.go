@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -15,91 +16,57 @@ import (
 	"github.com/committeddb/committed/internal/cluster/db/http"
 )
 
-func boolp(b bool) *bool { return &b }
-
-func u64p(v uint64) *uint64 { return &v }
-
-// doMembershipRequest issues GET /v1/membership against h with optional extra
-// headers and returns the status, parsed error body (if any), and raw body.
+// doMembershipRequest performs GET /v1/membership against h with optional
+// extra headers, returning the status and body.
 func doMembershipRequest(t *testing.T, h *http.HTTP, headers map[string]string) (int, []byte) {
 	t.Helper()
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(httpgo.MethodGet, "http://lb.example/v1/membership", nil)
+	req := httptest.NewRequest(httpgo.MethodGet, "http://localhost/v1/membership", nil)
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	h.ServeHTTP(rec, req)
-	res := rec.Result()
-	body, _ := io.ReadAll(res.Body)
-	return res.StatusCode, body
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	return w.Code, w.Body.Bytes()
 }
 
-// TestMembership_ServedLocallyOnLeader: when this node is the leader, the GET
-// is answered from its own Membership() — no proxying.
+// TestMembership_ServedLocallyOnLeader: when this node is the leader, the
+// GET is answered from its own live Membership() — no proxying — and the
+// liveness field serializes honestly: the ghost learner (added but never
+// started) must read an EXPLICIT "active":false, never be silently dropped
+// by omitempty. matchIndex (replication memory) rides next to it.
 func TestMembership_ServedLocallyOnLeader(t *testing.T) {
-	fake := &clusterfakes.FakeCluster{}
-	fake.IDReturns(1)
-	fake.LeaderReturns(1)
-	fake.MembershipReturns(cluster.Membership{
-		NodeID: 1, LeaderID: 1, Term: 3, CommitIndex: 42, AppliedIndex: 42, IsLeader: true,
-		Members: []cluster.Member{
-			{ID: 1, Role: cluster.MemberRoleVoter, MatchIndex: u64p(42), Active: boolp(true), APIURL: "http://n1:8080"},
-			{ID: 2, Role: cluster.MemberRoleVoter, MatchIndex: u64p(40), Active: boolp(false), APIURL: "http://n2:8080"},
-		},
-	})
-	h := http.New(fake)
+	e := newEngine(t)
+	mustStatus(t, e.doJSON(t, "POST", "/v1/membership", `{"id":2,"url":"http://127.0.0.1:9999","learner":true}`), 204)
 
-	status, body := doMembershipRequest(t, h, nil)
-	require.Equal(t, httpgo.StatusOK, status)
-
-	var resp http.MembershipResponse
-	require.NoError(t, json.Unmarshal(body, &resp))
-	require.Equal(t, uint64(1), resp.NodeID)
-	require.True(t, resp.IsLeader)
-	require.Equal(t, uint64(42), resp.CommitIndex)
-	require.Len(t, resp.Members, 2)
-	require.Equal(t, uint64(1), resp.Members[0].ID)
-	require.Equal(t, cluster.MemberRoleVoter, resp.Members[0].Role)
-	require.NotNil(t, resp.Members[0].MatchIndex)
-	require.Equal(t, uint64(42), *resp.Members[0].MatchIndex)
-	require.Equal(t, "http://n2:8080", resp.Members[1].APIURL)
-	// Liveness rides next to the fossil-prone matchIndex: present when the
-	// leader produced the snapshot, and false serializes as an explicit
-	// "active":false — never silently dropped by omitempty.
-	require.NotNil(t, resp.Members[0].Active)
-	require.True(t, *resp.Members[0].Active)
-	require.NotNil(t, resp.Members[1].Active)
-	require.False(t, *resp.Members[1].Active)
-	require.Contains(t, string(body), `"active":false`,
-		"an inactive member must be explicitly false in the JSON, not omitted")
-}
-
-// TestMembership_ReportsLearnerRole verifies GET /v1/membership distinguishes
-// voters from learners in its response (each carrying its match index).
-func TestMembership_ReportsLearnerRole(t *testing.T) {
-	fake := &clusterfakes.FakeCluster{}
-	fake.IDReturns(1)
-	fake.LeaderReturns(1)
-	fake.MembershipReturns(cluster.Membership{
-		NodeID: 1, LeaderID: 1, IsLeader: true, CommitIndex: 100,
-		Members: []cluster.Member{
-			{ID: 1, Role: cluster.MemberRoleVoter, MatchIndex: u64p(100)},
-			{ID: 4, Role: cluster.MemberRoleLearner, MatchIndex: u64p(80)},
-		},
-	})
-	h := http.New(fake)
-
-	status, body := doMembershipRequest(t, h, nil)
-	require.Equal(t, httpgo.StatusOK, status)
-
-	var resp http.MembershipResponse
-	require.NoError(t, json.Unmarshal(body, &resp))
-	roles := map[uint64]string{}
-	for _, m := range resp.Members {
-		roles[m.ID] = m.Role
-	}
-	require.Equal(t, cluster.MemberRoleVoter, roles[1])
-	require.Equal(t, cluster.MemberRoleLearner, roles[4])
+	require.Eventually(t, func() bool {
+		w := e.doEmpty(t, "GET", "/v1/membership")
+		if w.Code != httpgo.StatusOK {
+			return false
+		}
+		var resp http.MembershipResponse
+		if json.Unmarshal(w.Body.Bytes(), &resp) != nil {
+			return false
+		}
+		if !resp.IsLeader || len(resp.Members) != 2 {
+			return false
+		}
+		var ghost *http.MemberResponse
+		for i := range resp.Members {
+			if resp.Members[i].ID == 2 {
+				ghost = &resp.Members[i]
+			}
+		}
+		// The leader's liveness sweep needs an election timeout to mark the
+		// never-started learner inactive.
+		if ghost == nil || ghost.Active == nil || *ghost.Active {
+			return false
+		}
+		require.Equal(t, cluster.MemberRoleLearner, ghost.Role)
+		require.Contains(t, w.Body.String(), `"active":false`,
+			"an inactive member must be explicitly false in the JSON, not omitted")
+		require.NotZero(t, resp.CommitIndex)
+		return true
+	}, 15*time.Second, 10*time.Millisecond, "the ghost learner never read active:false on the live listing")
 }
 
 // TestMembership_ProxiedFromFollower: a follower forwards the request to the
@@ -137,8 +104,9 @@ func TestMembership_ProxiedFromFollower(t *testing.T) {
 	require.Equal(t, httpgo.StatusOK, status)
 	require.JSONEq(t, leaderBody, string(body))
 
-	// The follower proxied rather than answering locally.
-	require.Equal(t, 0, fake.MembershipCallCount())
+	// The follower proxied rather than answering locally: the fake has no
+	// engine behind it, so a local answer would have been a 500, and the
+	// verbatim leader body above proves the hop.
 	id := fake.MemberAPIURLArgsForCall(0)
 	require.Equal(t, uint64(1), id)
 

@@ -104,31 +104,6 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 			path:   "/docs",
 		},
 
-		// --- restatement ---
-		{
-			name:        "POST /restatement/dryrun",
-			method:      httpgo.MethodPost,
-			path:        "/v1/restatement/dryrun",
-			body:        "[restatement]\ntype = \"photos\"\nfromIndex = 10\ntoIndex = 20\nreadAsVersion = 2\n",
-			contentType: "text/toml",
-			setup: func(fake *clusterfakes.FakeCluster) {
-				fake.DryRunRestatementReturns(&cluster.RestatementDryRunReport{
-					ScanFrom: 10, ScanTo: 20, EntriesScanned: 11, EntitiesOfType: 4,
-					StampEligible: 3, Matched: 2, Rebound: 1,
-					ByStampedVersion: map[int]int{1: 3},
-					Samples: []cluster.RestatementDryRunSample{{
-						Index: 12, Key: "k2", StampedVersion: 1, CurrentReading: 1, CandidateReading: 2,
-					}},
-					AffectedSyncables: []cluster.RestatementDryRunSyncable{{
-						ID: "photos-hook", InterpretationPin: 5, AlreadyStale: false,
-					}},
-					Overlaps: []string{"backfill-v2"},
-					Coverage: "complete",
-					Findings: []string{"a finding"},
-				}, nil)
-			},
-		},
-
 		// --- proposal --- (write-only: no GET, the log is not a query interface)
 	}
 
@@ -210,6 +185,12 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 		}{
 			{name: "GET /syncable", method: httpgo.MethodGet, path: "/v1/syncable"},
 			{name: "GET /node/status", method: httpgo.MethodGet, path: "/v1/node/status"},
+			{name: "GET /restatement", method: httpgo.MethodGet, path: "/v1/restatement"},
+			{
+				name: "POST /restatement/dryrun", method: httpgo.MethodPost,
+				path: "/v1/restatement/dryrun", contentType: "text/toml",
+				body: "[restatement]\ntype = \"photos\"\nfromIndex = 1\ntoIndex = 1\nreadAsVersion = 1\n",
+			},
 			{name: "GET /type", method: httpgo.MethodGet, path: "/v1/type"},
 			{
 				name: "POST /type/{id}", method: httpgo.MethodPost, path: "/v1/type/albums",

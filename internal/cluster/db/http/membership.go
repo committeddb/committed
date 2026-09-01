@@ -53,7 +53,7 @@ type MemberResponse struct {
 // caller (behind a load balancer) reaches a follower. See
 // docs/operations/membership.md and raft-leader-read-proxy.md.
 func (h *HTTP) GetMembership(w httpgo.ResponseWriter, r *httpgo.Request) {
-	m := h.c.Membership()
+	m := h.db.Membership()
 
 	resp := MembershipResponse{
 		NodeID:       m.NodeID,
@@ -120,9 +120,9 @@ func (h *HTTP) AddMember(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 
-	add := h.c.AddMember
+	add := h.db.AddMember
 	if req.Learner {
-		add = h.c.AddLearner
+		add = h.db.AddLearner
 	}
 	if err := add(r.Context(), req.ID, req.URL); err != nil {
 		writeMembershipError(w, err, "add")
@@ -149,7 +149,7 @@ func (h *HTTP) PromoteMember(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 
-	if err := h.c.PromoteMember(r.Context(), id); err != nil {
+	if err := h.db.PromoteMember(r.Context(), id); err != nil {
 		writeMembershipError(w, err, "promote")
 		return
 	}
@@ -171,7 +171,7 @@ func (h *HTTP) RemoveMember(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 
-	if err := h.c.RemoveMember(r.Context(), id); err != nil {
+	if err := h.db.RemoveMember(r.Context(), id); err != nil {
 		writeMembershipError(w, err, "remove")
 		return
 	}
