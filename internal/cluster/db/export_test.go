@@ -230,9 +230,10 @@ func WithTransportWrapperForTest(w func(Transport) Transport) Option {
 // raft.Node, no transport, no serve loops) — the tests that use it
 // only exercise the compaction decision logic, which reads
 // storage.AppliedIndex / EventIndex / RaftLogApproxSize and calls
-// storage.CreateSnapshot / Compact. Production callers must continue
-// to use NewRaft.
-func NewRaftForCompactionTest(s Storage, maxSize uint64, maxAge time.Duration, logger *zap.Logger) *Raft {
+// storage.CreateSnapshot / Compact. Takes the Raft's own caller-site slice
+// of Storage, so a test double need only satisfy what the Raft holds.
+// Production callers must continue to use NewRaft.
+func NewRaftForCompactionTest(s raftStorage, maxSize uint64, maxAge time.Duration, logger *zap.Logger) *Raft {
 	return &Raft{
 		storage:         s,
 		compactMaxSize:  maxSize,

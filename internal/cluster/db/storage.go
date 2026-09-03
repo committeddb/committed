@@ -9,16 +9,16 @@ import (
 )
 
 // Storage is the engine's durable-state contract, implemented by wal.Storage
-// in production and by real in-memory doubles in tests (dbfakes.FakeStorage,
-// raft_test's MemoryStorage, the faulty wrappers). It is deliberately a
-// composition of role interfaces, one per consuming subsystem, so the seams
-// stay legible: the raft Ready loop drives ConsensusStorage, workers read
-// EventLogStorage plus their own state role, admission and the status
-// surface read ConfigStorage, and so on. Implementations satisfy the union
-// structurally — the roles exist to name the seams, and to let a future
-// consumer hold one role instead of the whole contract.
-//
-//counterfeiter:generate . Storage
+// in production and by hand-written in-memory doubles in tests (raft_test's
+// MemoryStorage over db/testing.StorageStubs, the faulty wrappers). It is
+// deliberately a composition of role interfaces, one per consuming
+// subsystem, so the seams stay legible: the raft Ready loop drives
+// ConsensusStorage, workers read EventLogStorage plus their own state role,
+// admission and the status surface read ConfigStorage, and so on.
+// Implementations satisfy the union structurally — the roles exist to name
+// the seams, and to let a consumer hold one role instead of the whole
+// contract (Raft holds raftStorage). There is deliberately no generated
+// fake: a double that needs only a role implements that role.
 type Storage interface {
 	ConsensusStorage
 	EventLogStorage
