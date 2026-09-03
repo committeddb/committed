@@ -1794,7 +1794,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ```
 
-## github.com/Azure/azure-sdk-for-go/sdk/azcore v1.21.1
+## github.com/Azure/azure-sdk-for-go/sdk/azcore v1.23.0
 
 ```
 MIT License
@@ -1821,7 +1821,7 @@ SOFTWARE
 
 ```
 
-## github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.13.1
+## github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.14.0
 
 ```
 MIT License
@@ -2098,7 +2098,7 @@ SOFTWARE
 
 ```
 
-## github.com/AzureAD/microsoft-authentication-library-for-go v1.6.0
+## github.com/AzureAD/microsoft-authentication-library-for-go v1.7.2
 
 ```
     MIT License
@@ -11481,7 +11481,7 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-## github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0
+## github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0
 
 ```
 Copyright (c) 2015, Gengo, Inc.
@@ -12706,7 +12706,7 @@ SOFTWARE.
 
 ```
 
-## github.com/microsoft/go-mssqldb v1.10.0
+## github.com/microsoft/go-mssqldb v1.11.0
 
 ```
 Copyright (c) 2012 The Go Authors. All rights reserved.
@@ -15758,7 +15758,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.67.0
+## go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.70.0
 
 ```
                                  Apache License
@@ -15994,7 +15994,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.69.0
+## go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.70.0
 
 ```
                                  Apache License
@@ -16230,7 +16230,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## go.opentelemetry.io/otel v1.45.0
+## go.opentelemetry.io/otel v1.46.0
 
 ```
                                  Apache License
@@ -16466,7 +16466,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc v1.45.0
+## go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc v1.46.0
 
 ```
                                  Apache License
@@ -16702,7 +16702,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## go.opentelemetry.io/otel/metric v1.45.0
+## go.opentelemetry.io/otel/metric v1.46.0
 
 ```
                                  Apache License
@@ -16938,7 +16938,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## go.opentelemetry.io/otel/sdk v1.45.0
+## go.opentelemetry.io/otel/sdk v1.46.0
 
 ```
                                  Apache License
@@ -17174,7 +17174,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## go.opentelemetry.io/otel/sdk/metric v1.45.0
+## go.opentelemetry.io/otel/sdk/metric v1.46.0
 
 ```
                                  Apache License
@@ -17410,7 +17410,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## go.opentelemetry.io/otel/trace v1.45.0
+## go.opentelemetry.io/otel/trace v1.46.0
 
 ```
                                  Apache License
@@ -18258,7 +18258,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ```
 
-## golang.org/x/net v0.57.0
+## golang.org/x/net v0.58.0
 
 ```
 Copyright 2009 The Go Authors.
@@ -18763,7 +18763,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ```
 
-## google.golang.org/genproto/googleapis/api v0.0.0-20260803160001-6ac0973c030d
+## google.golang.org/genproto/googleapis/api v0.0.0-20260819154853-08b0e4226688
 
 ```
 
@@ -18971,7 +18971,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ```
 
-## google.golang.org/genproto/googleapis/rpc v0.0.0-20260803160001-6ac0973c030d
+## google.golang.org/genproto/googleapis/rpc v0.0.0-20260819154853-08b0e4226688
 
 ```
 
