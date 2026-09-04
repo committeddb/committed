@@ -45,9 +45,9 @@ func (db *DB) InjectStaleWorkerBumpOnRebuildResetForTest(id string, staleIndex u
 	var once sync.Once
 	db.afterRebuildCheckpointReset = func() {
 		once.Do(func() {
-			db.workersMu.Lock()
-			_, live := db.syncWorkers[id]
-			db.workersMu.Unlock()
+			db.workers.mu.Lock()
+			_, live := db.workers.sync[id]
+			db.workers.mu.Unlock()
 			if !live {
 				return // worker already stopped — a real worker could not bump here
 			}
@@ -59,7 +59,7 @@ func (db *DB) InjectStaleWorkerBumpOnRebuildResetForTest(id string, staleIndex u
 // SetWorkerDrainTimeoutForTest overrides the bound the listener-path worker
 // handoffs (Sync/Ingest replace, deleteSync/deleteIngest) wait for a cancelled
 // worker before abandoning it, so a wedged-worker test runs fast.
-func (db *DB) SetWorkerDrainTimeoutForTest(d time.Duration) { db.workerDrainTimeout = d }
+func (db *DB) SetWorkerDrainTimeoutForTest(d time.Duration) { db.workers.drainTimeout = d }
 
 // SetIngestDrainTimeoutForTest bounds the apply-drain the freeze-exit performs
 // before a supervised restart. Production leaves it 0 (unbounded on workerCtx);
@@ -70,12 +70,12 @@ func (db *DB) SetIngestDrainTimeoutForTest(d time.Duration) { db.ingestDrainTime
 // InjectWedgedSyncWorkerForTest registers a sync worker handle whose done
 // channel never closes — modelling a worker stuck in tx.Commit against an
 // unreachable destination that ignores its cancelled context. deleteSync/replace
-// must abandon it within workerDrainTimeout rather than block the listener (and
+// must abandon it within workers.drainTimeout rather than block the listener (and
 // thus the raft apply loop) forever.
 func (db *DB) InjectWedgedSyncWorkerForTest(id string) {
-	db.workersMu.Lock()
-	db.syncWorkers[id] = &workerHandle{cancel: func() {}, done: make(chan struct{})}
-	db.workersMu.Unlock()
+	db.workers.mu.Lock()
+	db.workers.sync[id] = &workerHandle{cancel: func() {}, done: make(chan struct{})}
+	db.workers.mu.Unlock()
 }
 
 // StuckTrackerPublishedAfterGainForTest models the sync worker's leadership-GAIN
@@ -121,9 +121,9 @@ func (db *DB) SetAfterRebuildCheckpointResetForTest(f func()) { db.afterRebuildC
 func (db *DB) InjectDrainedSyncWorkerForTest(id string, s cluster.Syncable) {
 	done := make(chan struct{})
 	close(done)
-	db.workersMu.Lock()
-	db.syncWorkers[id] = &workerHandle{cancel: func() {}, done: done, syncable: s}
-	db.workersMu.Unlock()
+	db.workers.mu.Lock()
+	db.workers.sync[id] = &workerHandle{cancel: func() {}, done: done, syncable: s}
+	db.workers.mu.Unlock()
 }
 
 // IsLeaderForTest reports whether this node currently believes it is leader —
@@ -442,10 +442,10 @@ func (db *DB) SupervisorStateExistsForTest(id string) bool {
 // deletion paths; returns a copy so the caller can sort / inspect
 // without holding the lock.
 func (db *DB) IngestWorkerIDsForTest() []string {
-	db.workersMu.Lock()
-	defer db.workersMu.Unlock()
-	ids := make([]string, 0, len(db.ingestWorkers))
-	for id := range db.ingestWorkers {
+	db.workers.mu.Lock()
+	defer db.workers.mu.Unlock()
+	ids := make([]string, 0, len(db.workers.ingest))
+	for id := range db.workers.ingest {
 		ids = append(ids, id)
 	}
 	return ids
@@ -571,17 +571,17 @@ func (db *DB) WaiterIDsForTest() []uint64 {
 
 // HasSyncWorkerForTest reports whether a sync worker is registered for id.
 func (db *DB) HasSyncWorkerForTest(id string) bool {
-	db.workersMu.Lock()
-	defer db.workersMu.Unlock()
-	_, ok := db.syncWorkers[id]
+	db.workers.mu.Lock()
+	defer db.workers.mu.Unlock()
+	_, ok := db.workers.sync[id]
 	return ok
 }
 
 // HasIngestWorkerForTest reports whether an ingest worker is registered for id.
 func (db *DB) HasIngestWorkerForTest(id string) bool {
-	db.workersMu.Lock()
-	defer db.workersMu.Unlock()
-	_, ok := db.ingestWorkers[id]
+	db.workers.mu.Lock()
+	defer db.workers.mu.Unlock()
+	_, ok := db.workers.ingest[id]
 	return ok
 }
 
@@ -593,7 +593,7 @@ func (db *DB) CancelIngestWorkerForTest(id string) {
 }
 
 // SetBeforeCancelIngestRelockForTest installs the drain-window seam
-// cancelIngestWorker calls after it drops workersMu and drains, before it
+// cancelIngestWorker calls after it drops workers.mu and drains, before it
 // relocks to delete the map entry — the window a racing supervisor restart
 // must not resurrect a condemned handle in.
 func (db *DB) SetBeforeCancelIngestRelockForTest(fn func()) {
@@ -603,7 +603,7 @@ func (db *DB) SetBeforeCancelIngestRelockForTest(fn func()) {
 // SetIngestSupervisorRaceSeamsForTest installs the two superviseRestartIngest
 // seams that make the cancel-vs-supervisor resurrection race deterministic:
 // beforePreflight fires after the backoff, just before the supervisor
-// reacquires workersMu (a poise point); afterAttempt fires when the
+// reacquires workers.mu (a poise point); afterAttempt fires when the
 // supervisor's restart goroutine exits, on every path.
 func (db *DB) SetIngestSupervisorRaceSeamsForTest(beforePreflight, afterAttempt func()) {
 	db.beforeIngestSupervisorRelockForTest = beforePreflight
@@ -635,9 +635,9 @@ func (db *DB) SuperviseRestartIngestGiveupForTest(id string, i cluster.Ingestabl
 	done := make(chan struct{})
 	close(done) // the frozen worker's goroutine already exited (ingestExitFreeze)
 	h := &workerHandle{cancel: cancel, ctx: ctx, done: done, ingestable: i}
-	db.workersMu.Lock()
-	db.ingestWorkers[id] = h
-	db.workersMu.Unlock()
+	db.workers.mu.Lock()
+	db.workers.ingest[id] = h
+	db.workers.mu.Unlock()
 	db.superviseRestartIngest(id, i, h) // the (maxAttempts+1)th observation → give-up
 	return h.ctx.Err()
 }

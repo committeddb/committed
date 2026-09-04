@@ -180,9 +180,9 @@ func (db *DB) Ingest(_ context.Context, id string, i cluster.Ingestable) error {
 		}
 		return nil
 	}
-	db.workersMu.Lock()
-	if db.closed {
-		db.workersMu.Unlock()
+	db.workers.mu.Lock()
+	if db.workers.closed {
+		db.workers.mu.Unlock()
 		return ErrClosed
 	}
 	// Loop until the slot is empty before installing. The naive
@@ -200,12 +200,12 @@ func (db *DB) Ingest(_ context.Context, id string, i cluster.Ingestable) error {
 	// and the lock is dropped only during the wait, so the exiting
 	// worker is never blocked by us.
 	//
-	// Re-check db.closed after each wait too: a concurrent db.Close
+	// Re-check db.workers.closed after each wait too: a concurrent db.Close
 	// may have flipped the flag while we were dropped. Without the
 	// re-check, we'd install a worker that escapes the Close drain.
 	replaced := false
 	for {
-		existing, ok := db.ingestWorkers[id]
+		existing, ok := db.workers.ingest[id]
 		if !ok {
 			break
 		}
@@ -218,21 +218,21 @@ func (db *DB) Ingest(_ context.Context, id string, i cluster.Ingestable) error {
 		// from racing a resurrected worker. See workerHandle.condemned.
 		existing.condemned = true
 		existing.cancel()
-		db.workersMu.Unlock()
-		if !waitDone(existing.done, db.workerDrainTimeout) {
+		db.workers.mu.Unlock()
+		if !waitDone(existing.done, db.workers.drainTimeout) {
 			db.logger.Warn("ingest replace: prior worker did not exit in time; abandoning it (wedged on its source?) and proceeding",
-				zap.String("id", id), zap.Duration("timeout", db.workerDrainTimeout))
+				zap.String("id", id), zap.Duration("timeout", db.workers.drainTimeout))
 		}
 		// Release the superseded ingestable's source resources (only if it drained,
 		// so we don't race a wedged worker) — otherwise every re-POST leaks them.
 		db.closeDrainedIngestable(existing, id)
-		db.workersMu.Lock()
-		if db.closed {
-			db.workersMu.Unlock()
+		db.workers.mu.Lock()
+		if db.workers.closed {
+			db.workers.mu.Unlock()
 			return ErrClosed
 		}
-		if db.ingestWorkers[id] == existing {
-			delete(db.ingestWorkers, id)
+		if db.workers.ingest[id] == existing {
+			delete(db.workers.ingest, id)
 		}
 	}
 
@@ -249,7 +249,7 @@ func (db *DB) Ingest(_ context.Context, id string, i cluster.Ingestable) error {
 	}
 
 	db.spawnIngestWorkerLocked(id, i)
-	db.workersMu.Unlock()
+	db.workers.mu.Unlock()
 
 	if db.metrics != nil {
 		db.metrics.SetWorkerRunning("ingest", id, true)
@@ -282,31 +282,31 @@ func (db *DB) Ingest(_ context.Context, id string, i cluster.Ingestable) error {
 // teardown: reconcile never touches sources). Returns the drained handle (nil
 // if no worker was built here).
 func (db *DB) cancelIngestWorker(id string) *workerHandle {
-	db.workersMu.Lock()
-	handle, ok := db.ingestWorkers[id]
+	db.workers.mu.Lock()
+	handle, ok := db.workers.ingest[id]
 	if ok {
 		// Condemn under this first lock hold, before dropping it to drain. A
-		// frozen worker's supervisor may reacquire workersMu inside the drain
+		// frozen worker's supervisor may reacquire workers.mu inside the drain
 		// window below and, seeing the (not-yet-deleted) map entry still equal to
 		// its frozen handle, resurrect it on the same Ingestable instance we are
 		// about to Close. The condemned flag makes that preflight bail. See
 		// workerHandle.condemned and superviseRestartIngest.
 		handle.condemned = true
 		handle.cancel()
-		db.workersMu.Unlock()
-		if !waitDone(handle.done, db.workerDrainTimeout) {
+		db.workers.mu.Unlock()
+		if !waitDone(handle.done, db.workers.drainTimeout) {
 			db.logger.Warn("delete ingest: worker did not exit in time; abandoning it (wedged on its source?) and proceeding",
-				zap.String("id", id), zap.Duration("timeout", db.workerDrainTimeout))
+				zap.String("id", id), zap.Duration("timeout", db.workers.drainTimeout))
 		}
 		if db.beforeCancelIngestRelockForTest != nil {
 			db.beforeCancelIngestRelockForTest()
 		}
-		db.workersMu.Lock()
-		if db.ingestWorkers[id] == handle {
-			delete(db.ingestWorkers, id)
+		db.workers.mu.Lock()
+		if db.workers.ingest[id] == handle {
+			delete(db.workers.ingest, id)
 		}
 	}
-	db.workersMu.Unlock()
+	db.workers.mu.Unlock()
 
 	// cancelIngestWorker's only callers are delete and the reconcile
 	// absent-cancel — both mean this id's config is GONE. Drop its supervisor
@@ -358,12 +358,12 @@ func (db *DB) reconcileIngestWorkers(list func() ([]*IngestableWithID, error)) {
 		}
 		installed++
 	}
-	db.workersMu.Lock()
-	ids := make([]string, 0, len(db.ingestWorkers))
-	for id := range db.ingestWorkers {
+	db.workers.mu.Lock()
+	ids := make([]string, 0, len(db.workers.ingest))
+	for id := range db.workers.ingest {
 		ids = append(ids, id)
 	}
-	db.workersMu.Unlock()
+	db.workers.mu.Unlock()
 	cancelled := 0
 	for _, id := range ids {
 		if _, ok := present[id]; !ok {
@@ -401,9 +401,9 @@ func (db *DB) deleteIngest(id string) {
 	// Bounded (runBounded): this runs on the single-threaded config listener.
 	// The SQL implementation ctx-bounds itself (TeardownSource), but the guard
 	// must hold for any implementation.
-	if err, completed := runBounded(db.workerDrainTimeout, teardownable.Teardown); !completed {
+	if err, completed := runBounded(db.workers.drainTimeout, teardownable.Teardown); !completed {
 		db.logger.Error("ingestable deleted but source teardown did not return in time (unreachable source?); abandoning it (an orphaned replication slot may pin the source's WAL; drop it manually)",
-			zap.String("id", id), zap.Duration("timeout", db.workerDrainTimeout))
+			zap.String("id", id), zap.Duration("timeout", db.workers.drainTimeout))
 	} else if err != nil {
 		// Best-effort: the logical delete already committed. Log loudly and move
 		// on — the worst case is an orphaned slot pinning the source's WAL.
@@ -423,7 +423,7 @@ func (db *DB) deleteIngest(id string) {
 // (isNode only gates which node actually streams), so the local handle is
 // present on any node that has the config; a missing handle means no ingestable
 // of that id is configured here, surfaced as ErrIngestableNotRunning (404).
-// The Ingestable's Status is called without holding workersMu — it makes a
+// The Ingestable's Status is called without holding workers.mu — it makes a
 // source query and must not block the worker registry.
 func (db *DB) IngestableStatus(ctx context.Context, id string) (cluster.IngestableStatus, error) {
 	// Parked is a REPLICATED terminal state — report it from ANY node, even one
@@ -435,13 +435,13 @@ func (db *DB) IngestableStatus(ctx context.Context, id string) (cluster.Ingestab
 		return cluster.IngestableStatus{WorkerState: cluster.WorkerStateParked}, nil
 	}
 
-	db.workersMu.Lock()
-	handle, ok := db.ingestWorkers[id]
+	db.workers.mu.Lock()
+	handle, ok := db.workers.ingest[id]
 	var ing cluster.Ingestable
 	if ok {
 		ing = handle.ingestable
 	}
-	db.workersMu.Unlock()
+	db.workers.mu.Unlock()
 
 	if ing == nil {
 		return cluster.IngestableStatus{}, cluster.ErrIngestableNotRunning
@@ -473,8 +473,8 @@ func (db *DB) TopicRefreshEpoch(topic string) uint64 {
 
 // spawnIngestWorkerLocked installs a fresh ingest worker handle for id
 // in the registry and starts the worker goroutine. Caller MUST hold
-// db.workersMu and MUST have already ensured the registry slot for id
-// is empty and db.closed is false. Shared between db.Ingest (which
+// db.workers.mu and MUST have already ensured the registry slot for id
+// is empty and db.workers.closed is false. Shared between db.Ingest (which
 // drains any prior entry via the replace loop first) and
 // superviseRestartIngest (which drops the frozen handle directly
 // under the same lock, then calls this to install the replacement).
@@ -495,7 +495,7 @@ func (db *DB) spawnIngestWorkerLocked(id string, i cluster.Ingestable) *workerHa
 	// see through the handle indirection.
 	workerCtx, cancel := context.WithCancel(db.ctx) //nolint:gosec // G118: cancel owned by workerHandle
 	handle := &workerHandle{cancel: cancel, ctx: workerCtx, done: make(chan struct{}), ingestable: i}
-	db.ingestWorkers[id] = handle
+	db.workers.ingest[id] = handle
 
 	go func() {
 		reason := db.ingest(workerCtx, id, i)

@@ -249,7 +249,7 @@ func (db *DB) Sync(_ context.Context, id string, s cluster.Syncable) error {
 		db.logger.Warn("SAFE MODE: sync worker held; delete or fix the config over the API, then restart without COMMITTED_SAFE_MODE to resume",
 			zap.String("id", id))
 		if s != nil {
-			if err, completed := runBounded(db.workerDrainTimeout, s.Close); !completed {
+			if err, completed := runBounded(db.workers.drainTimeout, s.Close); !completed {
 				db.logger.Warn("held syncable close did not return in time", zap.String("id", id))
 			} else if err != nil {
 				db.logger.Warn("held syncable close failed", zap.String("id", id), zap.Error(err))
@@ -257,37 +257,37 @@ func (db *DB) Sync(_ context.Context, id string, s cluster.Syncable) error {
 		}
 		return nil
 	}
-	db.workersMu.Lock()
-	if db.closed {
-		db.workersMu.Unlock()
+	db.workers.mu.Lock()
+	if db.workers.closed {
+		db.workers.mu.Unlock()
 		return ErrClosed
 	}
 	// See db.Ingest for the rationale behind the loop and the
-	// re-check of db.closed after each wait.
+	// re-check of db.workers.closed after each wait.
 	replaced := false
 	for {
-		existing, ok := db.syncWorkers[id]
+		existing, ok := db.workers.sync[id]
 		if !ok {
 			break
 		}
 		replaced = true
 		existing.cancel()
-		db.workersMu.Unlock()
-		if !waitDone(existing.done, db.workerDrainTimeout) {
+		db.workers.mu.Unlock()
+		if !waitDone(existing.done, db.workers.drainTimeout) {
 			db.logger.Warn("sync replace: prior worker did not exit in time; abandoning it (wedged on its destination?) and proceeding",
-				zap.String("id", id), zap.Duration("timeout", db.workerDrainTimeout))
+				zap.String("id", id), zap.Duration("timeout", db.workers.drainTimeout))
 		}
 		// Release the superseded syncable's prepared statements (only if it
 		// drained, so we don't race a wedged worker) — otherwise every re-POST
 		// leaks a statement set on the shared pool.
 		db.closeDrainedSyncable(existing, id)
-		db.workersMu.Lock()
-		if db.closed {
-			db.workersMu.Unlock()
+		db.workers.mu.Lock()
+		if db.workers.closed {
+			db.workers.mu.Unlock()
 			return ErrClosed
 		}
-		if db.syncWorkers[id] == existing {
-			delete(db.syncWorkers, id)
+		if db.workers.sync[id] == existing {
+			delete(db.workers.sync, id)
 		}
 	}
 
@@ -301,8 +301,8 @@ func (db *DB) Sync(_ context.Context, id string, s cluster.Syncable) error {
 	// not leaked. gosec can't see through the handle indirection.
 	workerCtx, cancel := context.WithCancel(db.ctx) //nolint:gosec // G118: cancel owned by workerHandle
 	handle := &workerHandle{cancel: cancel, done: make(chan struct{}), syncable: s}
-	db.syncWorkers[id] = handle
-	db.workersMu.Unlock()
+	db.workers.sync[id] = handle
+	db.workers.mu.Unlock()
 
 	if db.metrics != nil {
 		db.metrics.SetWorkerRunning("sync", id, true)
@@ -418,31 +418,31 @@ func (db *DB) reconcileSyncWorkers(list func() ([]*SyncableWithID, error)) {
 
 // syncWorkerIDs snapshots the registered sync worker ids.
 func (db *DB) syncWorkerIDs() []string {
-	db.workersMu.Lock()
-	defer db.workersMu.Unlock()
-	ids := make([]string, 0, len(db.syncWorkers))
-	for id := range db.syncWorkers {
+	db.workers.mu.Lock()
+	defer db.workers.mu.Unlock()
+	ids := make([]string, 0, len(db.workers.sync))
+	for id := range db.workers.sync {
 		ids = append(ids, id)
 	}
 	return ids
 }
 
 func (db *DB) deleteSync(id string, keepData bool) {
-	db.workersMu.Lock()
-	handle, ok := db.syncWorkers[id]
+	db.workers.mu.Lock()
+	handle, ok := db.workers.sync[id]
 	if ok {
 		handle.cancel()
-		db.workersMu.Unlock()
-		if !waitDone(handle.done, db.workerDrainTimeout) {
+		db.workers.mu.Unlock()
+		if !waitDone(handle.done, db.workers.drainTimeout) {
 			db.logger.Warn("delete sync: worker did not exit in time; abandoning it (wedged on its destination?) and proceeding",
-				zap.String("id", id), zap.Duration("timeout", db.workerDrainTimeout))
+				zap.String("id", id), zap.Duration("timeout", db.workers.drainTimeout))
 		}
-		db.workersMu.Lock()
-		if db.syncWorkers[id] == handle {
-			delete(db.syncWorkers, id)
+		db.workers.mu.Lock()
+		if db.workers.sync[id] == handle {
+			delete(db.workers.sync, id)
 		}
 	}
-	db.workersMu.Unlock()
+	db.workers.mu.Unlock()
 
 	if !ok || handle.syncable == nil {
 		// No worker built on this node — nothing to tear down. In safe mode
@@ -482,9 +482,9 @@ func (db *DB) deleteSync(id string, keepData bool) {
 	// and the destination that wedged the worker above is the same one Teardown
 	// is about to talk to — an unbounded DROP there would park the listener and
 	// stall the raft apply loop on its next config send.
-	if err, completed := runBounded(db.workerDrainTimeout, teardownable.Teardown); !completed {
+	if err, completed := runBounded(db.workers.drainTimeout, teardownable.Teardown); !completed {
 		db.logger.Error("syncable deleted but destination teardown did not return in time (unreachable destination?); abandoning it (orphaned destination state; remove it manually)",
-			zap.String("id", id), zap.Duration("timeout", db.workerDrainTimeout))
+			zap.String("id", id), zap.Duration("timeout", db.workers.drainTimeout))
 	} else if err != nil {
 		// Best-effort: the logical delete already committed. Log loudly and
 		// move on — the worst case is orphaned destination state.
@@ -1532,9 +1532,9 @@ func (db *DB) SyncableOwner(id string) uint64 {
 // re-deriving worker previously read as plain "running" with silently
 // climbing lag).
 func (db *DB) SyncableStageRecovery(id string) (folded, target uint64, ok bool) {
-	db.workersMu.Lock()
-	handle, found := db.syncWorkers[id]
-	db.workersMu.Unlock()
+	db.workers.mu.Lock()
+	handle, found := db.workers.sync[id]
+	db.workers.mu.Unlock()
 	if !found {
 		return 0, 0, false
 	}
@@ -1551,9 +1551,9 @@ func (db *DB) SyncableStageRecovery(id string) (folded, target uint64, ok bool) 
 // SyncableReadPosition — the stage store lives with the worker — so the
 // HTTP layer proxies to the owner for the any-node answer.
 func (db *DB) SyncableStageStats(id string) (map[string]cluster.StageStat, bool) {
-	db.workersMu.Lock()
-	handle, ok := db.syncWorkers[id]
-	db.workersMu.Unlock()
+	db.workers.mu.Lock()
+	handle, ok := db.workers.sync[id]
+	db.workers.mu.Unlock()
 	if !ok || handle.syncable == nil {
 		return nil, false
 	}
@@ -1573,9 +1573,9 @@ func (db *DB) SyncableStageStats(id string) (map[string]cluster.StageStat, bool)
 // stages; err: undeclared stage name or part-count mismatch).
 // Owner-local like the counts — the HTTP layer proxies to the owner.
 func (db *DB) SyncableStageKeyExists(id, stage string, keyParts []string) (bool, bool, error) {
-	db.workersMu.Lock()
-	handle, ok := db.syncWorkers[id]
-	db.workersMu.Unlock()
+	db.workers.mu.Lock()
+	handle, ok := db.workers.sync[id]
+	db.workers.mu.Unlock()
 	if !ok || handle.syncable == nil {
 		return false, false, nil
 	}
@@ -1600,9 +1600,9 @@ func (db *DB) SyncableStageKeyExists(id, stage string, keyParts []string) (bool,
 // construction — non-owner workers hold no reader — so the HTTP layer
 // proxies the call to SyncableOwner's node for the any-node answer.
 func (db *DB) SyncableReadPosition(id string) (uint64, bool) {
-	db.workersMu.Lock()
-	handle, ok := db.syncWorkers[id]
-	db.workersMu.Unlock()
+	db.workers.mu.Lock()
+	handle, ok := db.workers.sync[id]
+	db.workers.mu.Unlock()
 	if !ok {
 		return 0, false
 	}

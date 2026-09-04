@@ -46,7 +46,7 @@ type syncBreakerState struct {
 // below: they compose logging, metrics, and the propose path this state
 // machine advises.
 type syncBreaker struct {
-	// mu guards states. Deliberately separate from workersMu so the
+	// mu guards states. Deliberately separate from workers.mu so the
 	// breaker's bookkeeping stays off the hot worker-registry path.
 	mu     sync.Mutex
 	states map[string]*syncBreakerState

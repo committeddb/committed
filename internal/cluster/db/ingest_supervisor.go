@@ -57,7 +57,7 @@ type ingestSupervisorState struct {
 // frozen/recovering flag set the status endpoint reports. Pure state — no
 // engine views, no I/O — so it is unit-testable directly.
 type ingestSupervisor struct {
-	// mu guards states. Deliberately separate from workersMu so the
+	// mu guards states. Deliberately separate from workers.mu so the
 	// supervisor's bookkeeping doesn't contend with the hot
 	// worker-registry path.
 	mu     sync.Mutex
@@ -115,7 +115,7 @@ func newIngestSupervisor(initialBackoff, maxBackoff time.Duration, maxAttempts i
 //     parked; operator intervention is required.
 //   - Otherwise waits a jittered backoff (exponential, capped at the
 //     supervisor's maxBackoff) before re-registering.
-//   - Preflight AND install under a single workersMu hold so a
+//   - Preflight AND install under a single workers.mu hold so a
 //     concurrent user replace can't slip in between (see the race
 //     analysis in spawnIngestWorkerLocked's doc comment): if the
 //     frozen handle is no longer the registered one when we acquire
@@ -183,21 +183,21 @@ func (db *DB) superviseRestartIngest(id string, i cluster.Ingestable, frozen *wo
 		db.beforeIngestSupervisorRelockForTest()
 	}
 
-	db.workersMu.Lock()
-	if db.closed {
-		db.workersMu.Unlock()
+	db.workers.mu.Lock()
+	if db.workers.closed {
+		db.workers.mu.Unlock()
 		return
 	}
-	if db.ingestWorkers[id] != frozen || frozen.condemned {
+	if db.workers.ingest[id] != frozen || frozen.condemned {
 		// Either a user-initiated replace already installed a fresh handle while
 		// we were waiting (!= frozen), or a delete/reconcile has condemned this
-		// handle and is mid-teardown — it set condemned under workersMu before
+		// handle and is mid-teardown — it set condemned under workers.mu before
 		// dropping the lock to drain, and we reacquired the lock inside that
 		// window (the map entry is deleted only after its relock). Resurrecting a
 		// condemned handle would build a fresh worker on the same Ingestable
 		// instance the teardown is about to Close. Bail in both cases; a user
 		// replace that arrives later still wins via db.Ingest's own loop.
-		db.workersMu.Unlock()
+		db.workers.mu.Unlock()
 		db.logger.Debug("ingest supervisor skipping restart; handle replaced or condemned",
 			zap.String("id", id))
 		return
@@ -214,9 +214,9 @@ func (db *DB) superviseRestartIngest(id string, i cluster.Ingestable, frozen *wo
 	// pins the handle) until db.Close. Cancelling an already-exited worker is a
 	// harmless no-op that just releases the node.
 	frozen.cancel()
-	delete(db.ingestWorkers, id)
+	delete(db.workers.ingest, id)
 	db.spawnIngestWorkerLocked(id, i)
-	db.workersMu.Unlock()
+	db.workers.mu.Unlock()
 
 	if db.afterIngestSupervisorRestartForTest != nil {
 		db.afterIngestSupervisorRestartForTest(frozen.ctx.Err())

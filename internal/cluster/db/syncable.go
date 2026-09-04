@@ -306,7 +306,7 @@ func (db *DB) RebuildSyncable(ctx context.Context, id string) error {
 
 	// 1. Stop the local worker first so it can't bump the checkpoint after the
 	//    reset below. Returns its handle so step 3 can tear the destination down.
-	//    The drain is BOUNDED (workerDrainTimeout, like every sibling handoff) —
+	//    The drain is BOUNDED (workers.drainTimeout, like every sibling handoff) —
 	//    but unlike delete/replace, rebuild must NOT proceed past a failed
 	//    drain: a still-live worker's in-flight checkpoint bump could land after
 	//    the reset and silently defeat the replay (the exact stale-bump hazard
@@ -351,14 +351,14 @@ func (db *DB) RebuildSyncable(ctx context.Context, id string) error {
 // subsequent reset — see RebuildSyncable. Returns (nil, true) if no worker was
 // registered, and (handle, false) on a wedged worker the caller must abort on.
 func (db *DB) rebuildStopWorkerLocal(id string) (*workerHandle, bool) {
-	db.workersMu.Lock()
-	handle, ok := db.syncWorkers[id]
+	db.workers.mu.Lock()
+	handle, ok := db.workers.sync[id]
 	if !ok {
-		db.workersMu.Unlock()
+		db.workers.mu.Unlock()
 		return nil, true // no local worker — nothing to drain
 	}
 	handle.cancel()
-	db.workersMu.Unlock()
+	db.workers.mu.Unlock()
 	// Bounded, on the HTTP handler goroutine: a worker wedged in an
 	// uninterruptible tx.Commit never closes done, and an unbounded wait here
 	// hung the request past its write timeout and leaked the goroutine (each
@@ -366,16 +366,16 @@ func (db *DB) rebuildStopWorkerLocal(id string) (*workerHandle, bool) {
 	// unlike the delete/replace abandons — because the caller aborts and a
 	// retry must find (and re-check) the still-live worker rather than run a
 	// reset it could still defeat.
-	if !waitDone(handle.done, db.workerDrainTimeout) {
+	if !waitDone(handle.done, db.workers.drainTimeout) {
 		db.logger.Warn("rebuild: worker did not exit in time (wedged on its destination?); aborting the rebuild",
-			zap.String("id", id), zap.Duration("timeout", db.workerDrainTimeout))
+			zap.String("id", id), zap.Duration("timeout", db.workers.drainTimeout))
 		return handle, false
 	}
-	db.workersMu.Lock()
-	if db.syncWorkers[id] == handle {
-		delete(db.syncWorkers, id)
+	db.workers.mu.Lock()
+	if db.workers.sync[id] == handle {
+		delete(db.workers.sync, id)
 	}
-	db.workersMu.Unlock()
+	db.workers.mu.Unlock()
 	return handle, true
 }
 
@@ -401,9 +401,9 @@ func (db *DB) rebuildTeardownDestinationLocal(id string, handle *workerHandle) {
 	// Bounded (runBounded): rebuild runs on an HTTP handler goroutine, and a
 	// destination that wedged the worker would otherwise hang the request (and
 	// leak the goroutine) until the kernel TCP timeout.
-	if err, completed := runBounded(db.workerDrainTimeout, teardownable.Teardown); !completed {
+	if err, completed := runBounded(db.workers.drainTimeout, teardownable.Teardown); !completed {
 		db.logger.Error("rebuild: destination teardown did not return in time (unreachable destination?); replay will write over the existing destination (rebuild not clean)",
-			zap.String("id", id), zap.Duration("timeout", db.workerDrainTimeout))
+			zap.String("id", id), zap.Duration("timeout", db.workers.drainTimeout))
 	} else if err != nil {
 		db.logger.Error("rebuild: destination teardown failed; replay will write over the existing destination (rebuild not clean)",
 			zap.String("id", id), zap.Error(err))
