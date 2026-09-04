@@ -432,101 +432,79 @@ const statusLagTimeout = 5 * time.Second
 // neither computation can run (source unreachable, unparsable inventory) does
 // Lag stay nil with CaughtUp false — an unknown lag is not a caught-up lag.
 func (m *MySQLDialect) Status(ctx context.Context, config *sql.Config, pos cluster.Position) (cluster.IngestableStatus, error) {
-	config.EnsureTopics()
-	// An EMPTY position means nothing has ever durably checkpointed — phase
-	// "pending", every table incomplete. It must not fall through to the
-	// progress==nil arm below, which renders the completed-streaming state
-	// (see sql.PendingStatus for the false-green incident this prevents). No
-	// source query: the binlog reader may not have run yet.
-	if len(pos) == 0 {
-		return sql.PendingStatus(config), nil
-	}
-	var progress *dialectpb.SnapshotProgress
-	var position, consumedGTID string
-	var consumedFile string
+	var consumedGTID, consumedFile string
 	var consumedPos uint64
-	if len(pos) > 0 {
+	decode := func(pos cluster.Position) (sql.StatusInputs, error) {
 		posProto := &dialectpb.MySQLBinLogPosition{}
 		if err := proto.Unmarshal(pos, posProto); err != nil {
-			return cluster.IngestableStatus{}, fmt.Errorf("[mysql.status] decode position: %w", err)
+			return sql.StatusInputs{}, fmt.Errorf("[mysql.status] decode position: %w", err)
 		}
-		progress = posProto.SnapshotProgress
+		in := sql.StatusInputs{Progress: posProto.SnapshotProgress}
 		consumedGTID = posProto.GtidSet
 		if posProto.Name != "" {
-			position = fmt.Sprintf("%s:%d", posProto.Name, posProto.Pos)
+			in.Position = fmt.Sprintf("%s:%d", posProto.Name, posProto.Pos)
 			consumedFile, consumedPos = posProto.Name, uint64(posProto.Pos)
 		}
+		return in, nil
 	}
-
-	status := cluster.IngestableStatus{
-		Position:         position,
-		SnapshotProgress: sql.SnapshotTableStatus(config, progress),
-	}
-	if progress != nil {
-		status.Phase = "snapshot"
-		return status, nil
-	}
-	status.Phase = "streaming"
-
-	// No consumed GTID set → no transaction head to diff against. Fall back
-	// to BYTES behind the binlog write head, computed from the source's
-	// binlog inventory (SHOW BINARY LOGS — version-stable where SHOW MASTER
-	// STATUS was removed in 8.4): every file at-or-after the consumed one,
-	// minus the consumed offset. Same soft posture as the GTID query: any
-	// failure leaves Lag nil (logged at Debug), and a consumed file missing
-	// from the inventory means the source purged past our position — the
-	// file:pos analog of the gtid_purged hole, surfaced as the same distinct
-	// re-snapshot state rather than an understated lag.
-	if consumedGTID == "" {
-		if consumedFile == "" {
-			return status, nil
+	probe := func(ctx context.Context, status *cluster.IngestableStatus) {
+		// No consumed GTID set → no transaction head to diff against. Fall back
+		// to BYTES behind the binlog write head, computed from the source's
+		// binlog inventory (SHOW BINARY LOGS — version-stable where SHOW MASTER
+		// STATUS was removed in 8.4): every file at-or-after the consumed one,
+		// minus the consumed offset. Same soft posture as the GTID query: any
+		// failure leaves Lag nil (logged at Debug), and a consumed file missing
+		// from the inventory means the source purged past our position — the
+		// file:pos analog of the gtid_purged hole, surfaced as the same distinct
+		// re-snapshot state rather than an understated lag.
+		if consumedGTID == "" {
+			if consumedFile == "" {
+				return
+			}
+			files, err := readSourceBinlogInventory(ctx, config)
+			if err != nil {
+				zap.L().Debug("[mysql.status] binlog inventory query failed", zap.Error(err))
+				return
+			}
+			bytesBehind, purged, ok := binlogBytesBehind(files, consumedFile, consumedPos)
+			if purged {
+				status.ReSnapshotRequired = true
+				return
+			}
+			if ok {
+				status.Lag = &bytesBehind
+				status.LagUnit = cluster.LagUnitBytes
+				status.CaughtUp = bytesBehind == 0
+			}
+			return
 		}
-		files, err := readSourceBinlogInventory(ctx, config)
+		consumed, err := mysql.ParseMysqlGTIDSet(consumedGTID)
 		if err != nil {
-			zap.L().Debug("[mysql.status] binlog inventory query failed", zap.Error(err))
-			return status, nil
+			zap.L().Debug("[mysql.status] parse consumed GTID failed",
+				zap.String("gtid_set", consumedGTID), zap.Error(err))
+			return
 		}
-		bytesBehind, purged, ok := binlogBytesBehind(files, consumedFile, consumedPos)
-		if purged {
+		// Streaming with GTID positioning: read the source's executed/purged sets. A
+		// failure (source unreachable, permissions) leaves Lag nil — the rest of the
+		// status is still useful — so it is logged, not returned.
+		executed, purged, err := readSourceGTIDState(ctx, config)
+		if err != nil {
+			zap.L().Debug("[mysql.status] gtid source query failed", zap.Error(err))
+			return
+		}
+		if needsResnapshot(consumed, purged) {
+			// The source purged change data we never consumed: an unrecoverable hole.
+			// Surface the distinct re-snapshot state rather than a lag number that
+			// would understate a gap streaming can never close.
 			status.ReSnapshotRequired = true
-			return status, nil
+			return
 		}
-		if ok {
-			status.Lag = &bytesBehind
-			status.LagUnit = cluster.LagUnitBytes
-			status.CaughtUp = bytesBehind == 0
-		}
-		return status, nil
+		lag := gtidLag(executed, consumed)
+		status.Lag = &lag
+		status.LagUnit = cluster.LagUnitTransactions
+		status.CaughtUp = consumed.Contain(executed)
 	}
-	consumed, err := mysql.ParseMysqlGTIDSet(consumedGTID)
-	if err != nil {
-		zap.L().Debug("[mysql.status] parse consumed GTID failed",
-			zap.String("gtid_set", consumedGTID), zap.Error(err))
-		return status, nil
-	}
-
-	// Streaming with GTID positioning: read the source's executed/purged sets. A
-	// failure (source unreachable, permissions) leaves Lag nil — the rest of the
-	// status is still useful — so it is logged, not returned.
-	executed, purged, err := readSourceGTIDState(ctx, config)
-	if err != nil {
-		zap.L().Debug("[mysql.status] gtid source query failed", zap.Error(err))
-		return status, nil
-	}
-
-	if needsResnapshot(consumed, purged) {
-		// The source purged change data we never consumed: an unrecoverable hole.
-		// Surface the distinct re-snapshot state rather than a lag number that
-		// would understate a gap streaming can never close.
-		status.ReSnapshotRequired = true
-		return status, nil
-	}
-
-	lag := gtidLag(executed, consumed)
-	status.Lag = &lag
-	status.LagUnit = cluster.LagUnitTransactions
-	status.CaughtUp = consumed.Contain(executed)
-	return status, nil
+	return sql.RenderStatus(ctx, config, pos, decode, probe)
 }
 
 // readSourceGTIDState reads the source's @@gtid_executed (the global write head)

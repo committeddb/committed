@@ -485,45 +485,28 @@ const statusLagTimeout = 5 * time.Second
 // LSN); once snapshot progress is gone the worker is streaming and lag is the
 // slot's distance behind the source write head.
 func (d *PostgreSQLDialect) Status(ctx context.Context, config *sql.Config, pos cluster.Position) (cluster.IngestableStatus, error) {
-	config.EnsureTopics()
-	// An EMPTY position means nothing has ever durably checkpointed — phase
-	// "pending", every table incomplete. It must not fall through to the
-	// progress==nil arm below, which renders the completed-streaming state
-	// (see sql.PendingStatus for the false-green incident this prevents). No
-	// lag query: the slot may not exist yet.
-	if len(pos) == 0 {
-		return sql.PendingStatus(config), nil
+	decode := func(pos cluster.Position) (sql.StatusInputs, error) {
+		lsn, progress, _, err := decodePosition(pos)
+		if err != nil {
+			return sql.StatusInputs{}, fmt.Errorf("[postgres.status] decode position: %w", err)
+		}
+		return sql.StatusInputs{Position: lsn.String(), Progress: progress}, nil
 	}
-	lsn, progress, _, err := decodePosition(pos)
-	if err != nil {
-		return cluster.IngestableStatus{}, fmt.Errorf("[postgres.status] decode position: %w", err)
-	}
-
-	status := cluster.IngestableStatus{
-		Position:         lsn.String(),
-		SnapshotProgress: sql.SnapshotTableStatus(config, progress),
-	}
-
-	if progress != nil {
-		status.Phase = "snapshot"
-		return status, nil
-	}
-	status.Phase = "streaming"
-
 	// Streaming: read the slot's lag. A failure (source unreachable, slot not
 	// yet created) leaves Lag nil — the rest of the status is still useful — so
 	// it is logged, not returned.
-	lag, ok, lagErr := d.replicationLag(ctx, config)
-	if lagErr != nil {
-		zap.L().Debug("[postgres.status] replication lag query failed",
-			zap.String("slot", config.Options["slot_name"]), zap.Error(lagErr))
-	} else if ok {
-		status.Lag = &lag
-		status.LagUnit = cluster.LagUnitBytes
-		status.CaughtUp = lag == 0
+	probe := func(ctx context.Context, status *cluster.IngestableStatus) {
+		lag, ok, lagErr := d.replicationLag(ctx, config)
+		if lagErr != nil {
+			zap.L().Debug("[postgres.status] replication lag query failed",
+				zap.String("slot", config.Options["slot_name"]), zap.Error(lagErr))
+		} else if ok {
+			status.Lag = &lag
+			status.LagUnit = cluster.LagUnitBytes
+			status.CaughtUp = lag == 0
+		}
 	}
-
-	return status, nil
+	return sql.RenderStatus(ctx, config, pos, decode, probe)
 }
 
 // replicationLag returns how many bytes the source's write head is ahead of the

@@ -265,51 +265,42 @@ func (d *SQLServerDialect) SourceColumns(config *sql.Config) (columns, generated
 // rather than an understated lag. Source-query failures leave Lag nil (soft,
 // logged at Debug), same posture as the other dialects.
 func (d *SQLServerDialect) Status(ctx context.Context, config *sql.Config, pos cluster.Position) (cluster.IngestableStatus, error) {
-	config.EnsureTopics()
-	if len(pos) == 0 {
-		return sql.PendingStatus(config), nil
+	var version uint64
+	decode := func(pos cluster.Position) (sql.StatusInputs, error) {
+		posProto := &dialectpb.SQLServerPosition{}
+		if err := proto.Unmarshal(pos, posProto); err != nil {
+			return sql.StatusInputs{}, fmt.Errorf("[sqlserver.status] decode position: %w", err)
+		}
+		version = posProto.Version
+		return sql.StatusInputs{Position: fmt.Sprintf("ct:%d", posProto.Version), Progress: posProto.SnapshotProgress}, nil
 	}
-	posProto := &dialectpb.SQLServerPosition{}
-	if err := proto.Unmarshal(pos, posProto); err != nil {
-		return cluster.IngestableStatus{}, fmt.Errorf("[sqlserver.status] decode position: %w", err)
+	probe := func(ctx context.Context, status *cluster.IngestableStatus) {
+		cctx, cancel := context.WithTimeout(ctx, statusQueryTimeout)
+		defer cancel()
+		db, err := openSQLServer(config.ConnectionString)
+		if err != nil {
+			zap.L().Debug("[sqlserver.status] open failed", zap.Error(err))
+			return
+		}
+		defer func() { _ = db.Close() }()
+		current, minValid, err := readCTState(cctx, db, config)
+		if err != nil {
+			zap.L().Debug("[sqlserver.status] ct state query failed", zap.Error(err))
+			return
+		}
+		if minValid > version {
+			status.ReSnapshotRequired = true
+			return
+		}
+		var lag uint64
+		if current > version {
+			lag = current - version
+		}
+		status.Lag = &lag
+		status.LagUnit = cluster.LagUnitTransactions
+		status.CaughtUp = lag == 0
 	}
-
-	status := cluster.IngestableStatus{
-		Position:         fmt.Sprintf("ct:%d", posProto.Version),
-		SnapshotProgress: sql.SnapshotTableStatus(config, posProto.SnapshotProgress),
-	}
-	if posProto.SnapshotProgress != nil {
-		status.Phase = "snapshot"
-		return status, nil
-	}
-	status.Phase = "streaming"
-
-	cctx, cancel := context.WithTimeout(ctx, statusQueryTimeout)
-	defer cancel()
-	db, err := openSQLServer(config.ConnectionString)
-	if err != nil {
-		zap.L().Debug("[sqlserver.status] open failed", zap.Error(err))
-		return status, nil
-	}
-	defer func() { _ = db.Close() }()
-
-	current, minValid, err := readCTState(cctx, db, config)
-	if err != nil {
-		zap.L().Debug("[sqlserver.status] ct state query failed", zap.Error(err))
-		return status, nil
-	}
-	if minValid > posProto.Version {
-		status.ReSnapshotRequired = true
-		return status, nil
-	}
-	var lag uint64
-	if current > posProto.Version {
-		lag = current - posProto.Version
-	}
-	status.Lag = &lag
-	status.LagUnit = cluster.LagUnitTransactions
-	status.CaughtUp = lag == 0
-	return status, nil
+	return sql.RenderStatus(ctx, config, pos, decode, probe)
 }
 
 // readCTState reads the source's current CT version and the MAXIMUM of the

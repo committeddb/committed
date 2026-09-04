@@ -1,6 +1,7 @@
 package sql
 
 import (
+	"context"
 	"slices"
 
 	"github.com/committeddb/committed/internal/cluster"
@@ -77,4 +78,46 @@ func SnapshotTableStatus(config *Config, progress *dialectpb.SnapshotProgress) [
 		out = append(out, st)
 	}
 	return out
+}
+
+// StatusInputs is what a dialect decodes from a persisted position for the
+// status surface: its coordinate rendered for operators, and the in-flight
+// snapshot progress (nil once the snapshot completed).
+type StatusInputs struct {
+	Position string
+	Progress *dialectpb.SnapshotProgress
+}
+
+// RenderStatus is the status skeleton every dialect shares. An EMPTY
+// position means nothing has ever durably checkpointed — phase "pending",
+// every table incomplete; it must not fall through to the progress==nil
+// arm, which renders the completed-streaming state (the false-green
+// incident PendingStatus prevents), and it runs no source query: the
+// stream may not have started. A position with in-flight progress is the
+// "snapshot" phase, rendered from replicated state alone. Otherwise the
+// phase is "streaming" and probe fills in the source-side view — lag and
+// caught-up, or the re-snapshot-required state when the source purged
+// past the consumed position. probe is fail-soft: a source-query failure
+// leaves Lag nil rather than failing the whole status, and the dialect logs
+// it at Debug. decode wraps its own errors with the dialect's prefix.
+func RenderStatus(ctx context.Context, config *Config, pos cluster.Position, decode func(cluster.Position) (StatusInputs, error), probe func(context.Context, *cluster.IngestableStatus)) (cluster.IngestableStatus, error) {
+	config.EnsureTopics()
+	if len(pos) == 0 {
+		return PendingStatus(config), nil
+	}
+	in, err := decode(pos)
+	if err != nil {
+		return cluster.IngestableStatus{}, err
+	}
+	status := cluster.IngestableStatus{
+		Position:         in.Position,
+		SnapshotProgress: SnapshotTableStatus(config, in.Progress),
+	}
+	if in.Progress != nil {
+		status.Phase = "snapshot"
+		return status, nil
+	}
+	status.Phase = "streaming"
+	probe(ctx, &status)
+	return status, nil
 }
