@@ -64,9 +64,9 @@ func (d *SQLServerDialect) Ingest(ctx context.Context, config *sql.Config, pos c
 		epoch = posProto.RefreshEpoch
 		snapshotted = posProto.SnapshottedTables
 	}
-	// Never stamp below a generation already on the sink; a genuine first
-	// snapshot starts at epoch 1 (the shared floor contract).
-	epoch = max(epoch, epochFloor, 1)
+	// epoch stays the RAW checkpoint epoch here (0 when none): the snapshot
+	// decisions (sql.PlanSnapshot) choose the generation from it and the
+	// sink's highwater, and the poll loop floors it before streaming.
 
 	db, err := openSQLServer(config.ConnectionString)
 	if err != nil {
@@ -80,7 +80,7 @@ func (d *SQLServerDialect) Ingest(ctx context.Context, config *sql.Config, pos c
 			return nil
 		}
 
-		err := d.ingestOnce(ctx, db, config, &version, &resumeProgress, &epoch, &snapshotted, pr, po)
+		err := d.ingestOnce(ctx, db, config, &version, &resumeProgress, &epoch, epochFloor, &snapshotted, pr, po)
 		if err == nil || ctx.Err() != nil {
 			return nil
 		}
@@ -104,6 +104,7 @@ func (d *SQLServerDialect) ingestOnce(
 	version *uint64,
 	resumeProgress **dialectpb.SnapshotProgress,
 	epoch *uint64,
+	epochFloor uint64,
 	snapshotted *[]string,
 	pr chan<- *cluster.Proposal,
 	po chan<- cluster.Position,
@@ -119,11 +120,22 @@ func (d *SQLServerDialect) ingestOnce(
 	// at version 0 WITH a populated registry, and must stream, not re-run.
 	needFull := *version == 0 && len(*snapshotted) == 0 && *resumeProgress == nil
 	added := addedTables(config.Tables, *snapshotted)
-	if needFull || *resumeProgress != nil || len(added) > 0 {
-		if err := d.runSnapshot(ctx, db, config, version, resumeProgress, epoch, snapshotted, needFull, added, pr, po); err != nil {
+	switch {
+	case *resumeProgress != nil:
+		if err := d.runSnapshot(ctx, db, config, sql.SnapshotResume, version, resumeProgress, epoch, epochFloor, snapshotted, nil, pr, po); err != nil {
+			return err
+		}
+	case needFull:
+		if err := d.runSnapshot(ctx, db, config, sql.SnapshotCold, version, resumeProgress, epoch, epochFloor, snapshotted, nil, pr, po); err != nil {
+			return err
+		}
+	case len(added) > 0:
+		if err := d.runSnapshot(ctx, db, config, sql.SnapshotBackfill, version, resumeProgress, epoch, epochFloor, snapshotted, added, pr, po); err != nil {
 			return err
 		}
 	}
+	// The stream floor: never stamp below the sink's highwater, never below 1.
+	*epoch = sql.FloorEpoch(*epoch, epochFloor)
 
 	// The resume-time positioning line (the shared per-dialect contract): what
 	// the poll resumes FROM is the first datum a re-delivery question needs.
@@ -150,10 +162,9 @@ func (d *SQLServerDialect) ingestOnce(
 			zap.L().Error("change tracking retention purged past the consumed version — re-snapshotting",
 				zap.Uint64("consumedVersion", *version),
 				zap.Uint64("minValidVersion", minValid))
-			*epoch = max(*epoch, 1) + 1
 			*resumeProgress = nil
 			*snapshotted = nil
-			if err := d.runSnapshot(ctx, db, config, version, resumeProgress, epoch, snapshotted, true, nil, pr, po); err != nil {
+			if err := d.runSnapshot(ctx, db, config, sql.SnapshotGap, version, resumeProgress, epoch, epochFloor, snapshotted, nil, pr, po); err != nil {
 				return err
 			}
 			continue
@@ -194,50 +205,30 @@ func addedTables(configured, snapshotted []string) []string {
 	return sql.AddedTables(configured, snapshotted)
 }
 
-// runSnapshot performs a full snapshot, a mid-snapshot resume, or an
-// added-table backfill, then (full/resumed-full only) closes with one
-// refresh-boundary marker per topic and checkpoints the completed state.
+// runSnapshot performs one snapshot pass of the given kind — a full
+// snapshot, a mid-snapshot resume, an added-table backfill, or a gap
+// re-snapshot — then closes it: the per-topic refresh-boundary markers when
+// the plan carries them, and the completion checkpoint.
 func (d *SQLServerDialect) runSnapshot(
 	ctx context.Context,
 	db *gosql.DB,
 	config *sql.Config,
+	kind sql.SnapshotKind,
 	version *uint64,
 	resumeProgress **dialectpb.SnapshotProgress,
 	epoch *uint64,
+	epochFloor uint64,
 	snapshotted *[]string,
-	full bool,
 	added []string,
 	pr chan<- *cluster.Proposal,
 	po chan<- cluster.Position,
 ) error {
-	progress := sql.NewSnapshotProgress(*resumeProgress)
-	tables := config.Tables
-
-	switch {
-	case *resumeProgress != nil:
-		// Mid-snapshot resume: keep the recorded shape (full or backfill).
-	case full:
-		progress.PartialBackfill = false
-	case len(added) > 0:
-		// Backfill: pre-seed every sibling as complete so only the added
-		// tables scan, and mark partial so NO markers are emitted — a
-		// topic-scoped sweep would delete the sibling rows this snapshot never
-		// re-emits (the shared partial-backfill contract).
+	if kind == sql.SnapshotBackfill {
 		zap.L().Info("config change added tables; backfilling their existing rows (a partial backfill — no refresh sweep)",
 			zap.Strings("added", added))
-		progress.PartialBackfill = true
-		for _, t := range tables {
-			isAdded := false
-			for _, a := range added {
-				if a == t {
-					isAdded = true
-				}
-			}
-			if !isAdded {
-				progress.CompletedTables = append(progress.CompletedTables, t)
-			}
-		}
 	}
+	plan := sql.PlanSnapshot(kind, *resumeProgress, *epoch, epochFloor, config.Tables, added)
+	*epoch = plan.Epoch
 
 	// The convergent boundary: capture the poll's resume version BEFORE the
 	// first snapshot read. A mid-snapshot resume keeps the version its
@@ -250,23 +241,8 @@ func (d *SQLServerDialect) runSnapshot(
 		*version = v
 	}
 
-	if err := d.snapshot(ctx, db, config, tables, progress, *version, *epoch, config.Tables, pr, po); err != nil {
+	if err := d.snapshot(ctx, db, config, config.Tables, plan.Progress, *version, *epoch, config.Tables, pr, po); err != nil {
 		return err
-	}
-
-	if !progress.PartialBackfill {
-		for ti := range config.Topics {
-			spec := &config.Topics[ti]
-			if spec.Type == nil {
-				continue
-			}
-			marker := cluster.NewRefreshBoundaryEntity(spec.Type, *epoch)
-			select {
-			case pr <- &cluster.Proposal{Entities: []*cluster.Entity{marker}}:
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
 	}
 
 	// Completed: clear progress, record every configured table snapshotted,
@@ -277,10 +253,8 @@ func (d *SQLServerDialect) runSnapshot(
 	if err != nil {
 		return err
 	}
-	select {
-	case po <- posBytes:
-	case <-ctx.Done():
-		return ctx.Err()
+	if err := sql.CompleteSnapshot(ctx, config, plan.Marker, *epoch, posBytes, pr, po); err != nil {
+		return err
 	}
 	zap.L().Info("snapshot complete",
 		zap.Uint64("version", *version), zap.Uint64("refresh_epoch", *epoch))

@@ -710,24 +710,9 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 				zap.L().Info("config change added tables; backfilling their existing rows (a full-table scan per added table; sibling tables are not re-read)",
 					zap.Strings("added_tables", added),
 					zap.Int("tables_total", len(config.Tables)))
-				completed := make([]string, 0, len(config.Tables)-len(added))
-				addedSet := map[string]bool{}
-				for _, t := range added {
-					addedSet[t] = true
-				}
-				for _, t := range config.Tables {
-					if !addedSet[t] {
-						completed = append(completed, t)
-					}
-				}
-				resumeProgress = &dialectpb.SnapshotProgress{
-					CompletedTables: completed,
-					PartialBackfill: true,
-				}
-				// Stamp backfilled rows at the current epoch, floored so they
-				// never land below a generation already on the sink. No bump:
-				// this is not a refresh.
-				currentEpoch = max(currentEpoch, epochFloor)
+				plan := sql.PlanSnapshot(sql.SnapshotBackfill, nil, currentEpoch, epochFloor, config.Tables, added)
+				resumeProgress = plan.Progress
+				currentEpoch = plan.Epoch
 			}
 		}
 
@@ -740,13 +725,13 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			// the checkpoint epoch to 0 while the sink still holds rows up to the
 			// highwater), else epoch 1. A purge re-snapshot arrives here with the
 			// epoch already bumped (see the isGtidPurged branch).
-			partialBackfill := resumeProgress != nil && resumeProgress.PartialBackfill
+			kind := sql.SnapshotCold
 			if resumeProgress != nil {
-				currentEpoch = max(currentEpoch, 1)
-			} else {
-				currentEpoch = sql.RefreshSnapshotEpoch(currentEpoch, epochFloor)
+				kind = sql.SnapshotResume
 			}
-			snapshotPos, snapshotGTID, err := snapshot(ctx, config, pr, po, lastPos, lastGTID, resumeProgress, currentEpoch)
+			plan := sql.PlanSnapshot(kind, resumeProgress, currentEpoch, epochFloor, config.Tables, nil)
+			currentEpoch = plan.Epoch
+			snapshotPos, snapshotGTID, err := snapshot(ctx, config, pr, po, lastPos, lastGTID, plan.Progress, currentEpoch)
 			if err != nil {
 				if ctx.Err() != nil {
 					return nil
@@ -783,25 +768,6 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			// deliberately did not re-emit. One marker per proposal keeps each
 			// proposal homogeneous (one topic), matching the flush path; one spec
 			// for the flat form emits exactly one marker as before.
-			if !partialBackfill {
-				config.EnsureTopics()
-				for ti := range config.Topics {
-					spec := &config.Topics[ti]
-					if spec.Type == nil {
-						continue
-					}
-					marker := cluster.NewRefreshBoundaryEntity(spec.Type, currentEpoch)
-					select {
-					case pr <- &cluster.Proposal{Entities: []*cluster.Entity{marker}}:
-					case <-ctx.Done():
-						return nil
-					}
-				}
-			}
-
-			// Any completed snapshot — full or backfill — leaves every
-			// configured table snapshotted (table removal is rejected at
-			// config-replace time, so config.Tables only ever grows).
 			snapshottedTables = append([]string(nil), config.Tables...)
 
 			// Checkpoint the final snapshot position (no
@@ -813,10 +779,8 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			if err != nil {
 				return err
 			}
-			select {
-			case po <- bs:
-			case <-ctx.Done():
-				return nil
+			if err := sql.CompleteSnapshot(ctx, config, plan.Marker, currentEpoch, bs, pr, po); err != nil {
+				return nil // a cancelled worker: the normal shutdown path
 			}
 		}
 
@@ -908,7 +872,7 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 		// already on the sink, and cover a pre-feature checkpoint that resumed
 		// straight to streaming (snapshot already floors it). Keeping it on the
 		// handler means handleXID's checkpoints and the stamped entities agree.
-		currentEpoch = max(currentEpoch, epochFloor, 1)
+		currentEpoch = sql.FloorEpoch(currentEpoch, epochFloor)
 		handler := &MySQLEventHandler{
 			config:            config,
 			proposalChan:      pr,
@@ -995,7 +959,11 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			// (they keep their older generation and are never re-emitted). The gap
 			// is reconciled in-band, not just re-loaded. Floor to the topic highwater
 			// so the bump lands strictly above every generation already on the sink.
-			currentEpoch = max(currentEpoch, epochFloor, 1) + 1
+			// The gap plan's epoch — strictly above everything seen. The position
+			// reset below routes the next iteration through the cold plan, which
+			// re-derives from this bumped value (a second bump, harmless and
+			// long-standing: the sweep only needs "above").
+			currentEpoch = sql.PlanSnapshot(sql.SnapshotGap, nil, currentEpoch, epochFloor, config.Tables, nil).Epoch
 			lastPos = nil
 			lastGTID = ""
 			resumeProgress = nil

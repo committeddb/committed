@@ -800,7 +800,8 @@ func (d *PostgreSQLDialect) stream(
 		// cannot signal. Floor to max(checkpoint, topic highwater, 1) first so the
 		// bump lands strictly above every generation already on the sink (the
 		// highwater survives a DeleteIngestable that cleared the checkpoint epoch).
-		*epoch = max(*epoch, epochFloor, 1) + 1
+		gap := sql.PlanSnapshot(sql.SnapshotGap, nil, *epoch, epochFloor, pgCfg.tables, nil)
+		*epoch = gap.Epoch
 		zap.L().Warn("replication slot was recreated while a checkpoint survived; re-snapshotting from the new slot's consistent point. "+
 			"Rows deleted at the source in the lost WAL window (RTBF-erased subjects among them) are reconciled on KEYED sinks by the "+
 			"refresh-boundary sweep that closes this re-snapshot; keyless/append and projection sinks are NOT reconciled and require "+
@@ -811,71 +812,26 @@ func (d *PostgreSQLDialect) stream(
 			zap.Uint64("refreshEpoch", *epoch))
 		*lastLSN = cp
 		*resumeProgress = nil
-		*intent = &snapshotIntent{tables: pgCfg.tables, progress: sql.NewSnapshotProgress(nil), marker: true}
+		*intent = &snapshotIntent{tables: pgCfg.tables, progress: gap.Progress, marker: gap.Marker}
 	case *intent != nil:
 		// A prior attempt's snapshot is unfinished — resume it below. The epoch
 		// and LSN base were already set when the intent was formed.
 	case needsColdSnapshot(slotIsNew, *lastLSN, *epoch) || *resumeProgress != nil:
-		// (a) no snapshot has ever durably run — a first run OR a worker that
-		// froze during the initial snapshot before its first batch checkpointed
-		// (needsColdSnapshot keys on the durable position, not the source-side
-		// slot, so a pre-existing slot no longer masks this as "already done"),
-		// or (b) a prior run was interrupted mid-snapshot: full snapshot of every
-		// configured table. StartReplication(0) below starts from the slot's
-		// consistent point. The closing marker is a no-op on a fresh sink but
-		// makes a rebuild against a pre-populated sink reconcile.
+		kind := sql.SnapshotCold
 		if *resumeProgress != nil {
-			// Mid-snapshot resume: continue the in-progress epoch the checkpoint
-			// carries (its closing marker has not committed, so the topic highwater
-			// does not yet reflect this refresh) — do NOT bump.
-			*epoch = max(*epoch, 1)
-		} else {
-			// Fresh full snapshot, no prior checkpoint. refreshSnapshotEpoch stamps
-			// strictly above the delete-surviving topic highwater on a same-topic
-			// recreate (whose cleared position reset the checkpoint epoch to 0 while
-			// the sink still holds rows up to the highwater), else epoch 1.
-			*epoch = sql.RefreshSnapshotEpoch(*epoch, epochFloor)
+			kind = sql.SnapshotResume
 		}
-		// A persisted PartialBackfill resumes as a PARTIAL backfill: the
-		// pre-seeded sibling completions skip their scan, and the marker stays
-		// off — emitting it over a partial re-emission would sweep the sibling
-		// rows off the sink.
-		partial := *resumeProgress != nil && (*resumeProgress).PartialBackfill
-		*intent = &snapshotIntent{tables: pgCfg.tables, progress: sql.NewSnapshotProgress(*resumeProgress), marker: !partial}
+		plan := sql.PlanSnapshot(kind, *resumeProgress, *epoch, epochFloor, pgCfg.tables, nil)
+		*epoch = plan.Epoch
+		*intent = &snapshotIntent{tables: pgCfg.tables, progress: plan.Progress, marker: plan.Marker}
 		*resumeProgress = nil
 	case len(addedTables) > 0:
-		// Resuming an existing slot, but ensurePublication just (re-)added tables
-		// to the publication (a re-POST added one, or a dropped-then-recreated
-		// source table was re-added). Backfill ONLY those — the rest are already
-		// streaming — then StartReplication below picks up their ongoing changes
-		// from *lastLSN. Add-to-publication-happened-first, so the overlap window
-		// is covered by the sink's keyed upsert, not lost. Stamp the backfilled
-		// rows with the current epoch but emit NO marker: this is a PARTIAL
-		// refresh, and a topic-level sweep would delete the sibling tables' rows
-		// this backfill did not re-emit. Floor to the topic highwater so the
-		// backfilled rows never land below a generation already on the sink.
-		*epoch = max(*epoch, epochFloor, 1)
 		zap.L().Info("config change added tables; backfilling their existing rows (a full-table scan per added table; sibling tables are not re-read)",
 			zap.Strings("added_tables", addedTables),
 			zap.Int("tables_total", len(pgCfg.tables)))
-		// Encode the backfill exactly as the MySQL dialect does: the FULL table
-		// list with every sibling pre-seeded complete and PartialBackfill set,
-		// so the persisted mid-backfill checkpoints are self-describing. A crash
-		// here used to degrade to a full re-snapshot (convergent but heavy, and
-		// it re-armed the marker); now the resume branch reconstructs the
-		// partial intent — only the added tables scan, and no marker fires.
-		backfill := sql.NewSnapshotProgress(nil)
-		backfill.PartialBackfill = true
-		addedSet := make(map[string]bool, len(addedTables))
-		for _, t := range addedTables {
-			addedSet[t] = true
-		}
-		for _, t := range pgCfg.tables {
-			if !addedSet[t] {
-				backfill.CompletedTables = append(backfill.CompletedTables, t)
-			}
-		}
-		*intent = &snapshotIntent{tables: pgCfg.tables, progress: backfill, marker: false}
+		plan := sql.PlanSnapshot(sql.SnapshotBackfill, nil, *epoch, epochFloor, pgCfg.tables, addedTables)
+		*epoch = plan.Epoch
+		*intent = &snapshotIntent{tables: pgCfg.tables, progress: plan.Progress, marker: plan.Marker}
 	}
 
 	if in := *intent; in != nil {
@@ -889,10 +845,12 @@ func (d *PostgreSQLDialect) stream(
 		if err := d.snapshot(ctx, config, pgCfg, in.tables, in.progress, *lastLSN, *epoch, pr, po); err != nil {
 			return err
 		}
-		if in.marker {
-			if err := emitRefreshBoundary(ctx, config, pr, po, *lastLSN, *epoch); err != nil {
-				return err
-			}
+		checkpoint, err := encodePosition(*lastLSN, nil, *epoch)
+		if err != nil {
+			return err
+		}
+		if err := sql.CompleteSnapshot(ctx, config, in.marker, *epoch, checkpoint, pr, po); err != nil {
+			return err
 		}
 		*intent = nil
 	}
@@ -900,9 +858,7 @@ func (d *PostgreSQLDialect) stream(
 	// Any streaming path that did not snapshot still stamps entities, so ensure
 	// the epoch is at least max(highwater, 1): never stamp a streamed row below a
 	// generation already on the sink (a pre-feature checkpoint resumes at 0).
-	if lo := max(epochFloor, 1); *epoch < lo {
-		*epoch = lo
-	}
+	*epoch = sql.FloorEpoch(*epoch, epochFloor)
 
 	err = pglogrepl.StartReplication(ctx, conn, pgCfg.slotName, *lastLSN,
 		pglogrepl.StartReplicationOptions{
@@ -1897,47 +1853,4 @@ func flushPending(ctx context.Context, pending *[]*cluster.Entity, pendingBytes 
 	prov := sql.Provenance{CommitUnixNano: commitTS, TxnID: txnID, TxnScopedDedup: txnID != ""}
 	emitted, err := sql.Flush(ctx, buf, epoch, prov, seq, bundlePos, pr)
 	return emitted > 0, err
-}
-
-// emitRefreshBoundary emits the refresh-boundary marker that closes a full
-// re-snapshot: one control entity PER TOPIC carrying the topic type and the shared
-// epoch the refresh reached, so each keyed sink sweeps every row still at an older
-// epoch (a row deleted at the source in the lost window, never re-emitted). Each
-// marker rides its own proposal (homogeneous, one topic, matching the flush path).
-// It then checkpoints the position once, with no snapshot progress at this epoch,
-// transitioning the worker to streaming; a restart after the markers resumes
-// streaming rather than re-running the refresh. Emitted ONLY after an all-tables
-// refresh — never a partial added-table backfill, which would sweep a topic's
-// sibling tables. One spec (the flat form) emits exactly one marker as before.
-func emitRefreshBoundary(
-	ctx context.Context,
-	config *sql.Config,
-	pr chan<- *cluster.Proposal,
-	po chan<- cluster.Position,
-	lsn pglogrepl.LSN,
-	epoch uint64,
-) error {
-	config.EnsureTopics()
-	for i := range config.Topics {
-		spec := &config.Topics[i]
-		if spec.Type == nil {
-			continue
-		}
-		marker := cluster.NewRefreshBoundaryEntity(spec.Type, epoch)
-		select {
-		case pr <- &cluster.Proposal{Entities: []*cluster.Entity{marker}}:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	bs, err := encodePosition(lsn, nil, epoch)
-	if err != nil {
-		return err
-	}
-	select {
-	case po <- bs:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
 }
