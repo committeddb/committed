@@ -186,3 +186,87 @@ func (r *workerRegistry) replace(kind workerKind, id string, spawn func(replaced
 	r.mu.Unlock()
 	return nil
 }
+
+// wedgePolicy is what remove does with a worker that did not exit within
+// the drain timeout.
+type wedgePolicy int
+
+const (
+	// abandonOnWedge deregisters the wedged worker and moves on — the
+	// delete and reconcile-cancel paths. Its goroutine dies on process exit
+	// and the sync re-applies idempotently on the next start.
+	abandonOnWedge wedgePolicy = iota
+	// keepOnWedge leaves the wedged worker REGISTERED — the rebuild and
+	// re-materialize stops, which abort on a failed drain: a retry must
+	// find (and re-check) the still-live worker rather than run a
+	// checkpoint reset it could still defeat.
+	keepOnWedge
+)
+
+// remove cancels and drains id's worker, if one is registered, and
+// deregisters it. Returns the handle (nil when none was registered) and
+// whether the drain completed within the timeout; on a wedge, policy
+// decides whether the handle is deregistered anyway.
+//
+// The handle is condemned under the same hold that cancels it, before the
+// lock is dropped to drain: a frozen ingest worker's supervisor may
+// reacquire the lock inside the drain window and, seeing the not-yet-
+// deleted entry still equal to its frozen handle, resurrect it on the same
+// instance the caller is about to Close — the condemned flag makes that
+// preflight bail. The drain runs outside the lock and bounded, and the
+// entry is deleted only if the slot still points at this handle (never a
+// successor's). beforeRelock, if non-nil, runs inside the drain window
+// just before the lock is reacquired — the test-only poise point the
+// resurrection tests use.
+func (r *workerRegistry) remove(kind workerKind, id string, policy wedgePolicy, beforeRelock func()) (handle *workerHandle, drained bool) {
+	r.mu.Lock()
+	table := r.table(kind)
+	handle, ok := table[id]
+	if !ok {
+		r.mu.Unlock()
+		return nil, true
+	}
+	handle.condemned = true
+	handle.cancel()
+	r.mu.Unlock()
+	drained = waitDone(handle.done, r.drainTimeout)
+	if !drained && policy == keepOnWedge {
+		return handle, false
+	}
+	if beforeRelock != nil {
+		beforeRelock()
+	}
+	r.mu.Lock()
+	if table[id] == handle {
+		delete(table, id)
+	}
+	r.mu.Unlock()
+	return handle, drained
+}
+
+// swapIfCurrent replaces expect with a fresh worker in ONE lock hold, or
+// does nothing: the registry must be open, expect must still be the handle
+// registered for id, and expect must not be condemned. Returns whether the
+// swap happened. This is the supervisor's restart — preflight and install
+// without releasing the lock, so a concurrent user replace cannot slip a
+// handle in between; the registry moves from {expect} to {spawned}
+// atomically, and a replace that arrives after the unlock still wins the
+// final state via replace's loop.
+//
+// expect's context is cancelled before it is dropped: a frozen worker
+// returned normally (ingestExitFreeze, not a ctx cancel), so its context is
+// still an un-cancelled child of the engine's; without this each restart
+// leaks one context node until db.Close. Cancelling an already-exited
+// worker is a harmless no-op that just releases the node. No drain: the
+// caller is downstream of the worker's exit and its done is closed.
+func (r *workerRegistry) swapIfCurrent(kind workerKind, id string, expect *workerHandle, spawn func() *workerHandle) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	table := r.table(kind)
+	if r.closed || table[id] != expect || expect.condemned {
+		return false
+	}
+	expect.cancel()
+	table[id] = spawn()
+	return true
+}

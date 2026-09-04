@@ -351,31 +351,19 @@ func (db *DB) RebuildSyncable(ctx context.Context, id string) error {
 // subsequent reset — see RebuildSyncable. Returns (nil, true) if no worker was
 // registered, and (handle, false) on a wedged worker the caller must abort on.
 func (db *DB) rebuildStopWorkerLocal(id string) (*workerHandle, bool) {
-	db.workers.mu.Lock()
-	handle, ok := db.workers.sync[id]
-	if !ok {
-		db.workers.mu.Unlock()
-		return nil, true // no local worker — nothing to drain
-	}
-	handle.cancel()
-	db.workers.mu.Unlock()
-	// Bounded, on the HTTP handler goroutine: a worker wedged in an
-	// uninterruptible tx.Commit never closes done, and an unbounded wait here
-	// hung the request past its write timeout and leaked the goroutine (each
-	// retry parking another one). On timeout the handle stays REGISTERED —
-	// unlike the delete/replace abandons — because the caller aborts and a
-	// retry must find (and re-check) the still-live worker rather than run a
-	// reset it could still defeat.
-	if !waitDone(handle.done, db.workers.drainTimeout) {
+	// keepOnWedge: unlike the delete/replace abandons, a worker that did not
+	// exit in time stays REGISTERED — the caller aborts, and a retry must find
+	// (and re-check) the still-live worker rather than run a reset it could
+	// still defeat. Bounded, on the HTTP handler goroutine: a worker wedged in
+	// an uninterruptible tx.Commit never closes done, and an unbounded wait
+	// here hung the request past its write timeout and leaked the goroutine
+	// (each retry parking another one).
+	handle, drained := db.workers.remove(workerKindSync, id, keepOnWedge, nil)
+	if handle != nil && !drained {
 		db.logger.Warn("rebuild: worker did not exit in time (wedged on its destination?); aborting the rebuild",
 			zap.String("id", id), zap.Duration("timeout", db.workers.drainTimeout))
 		return handle, false
 	}
-	db.workers.mu.Lock()
-	if db.workers.sync[id] == handle {
-		delete(db.workers.sync, id)
-	}
-	db.workers.mu.Unlock()
 	return handle, true
 }
 

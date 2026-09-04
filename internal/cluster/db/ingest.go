@@ -237,31 +237,15 @@ func (db *DB) Ingest(_ context.Context, id string, i cluster.Ingestable) error {
 // teardown: reconcile never touches sources). Returns the drained handle (nil
 // if no worker was built here).
 func (db *DB) cancelIngestWorker(id string) *workerHandle {
-	db.workers.mu.Lock()
-	handle, ok := db.workers.ingest[id]
-	if ok {
-		// Condemn under this first lock hold, before dropping it to drain. A
-		// frozen worker's supervisor may reacquire workers.mu inside the drain
-		// window below and, seeing the (not-yet-deleted) map entry still equal to
-		// its frozen handle, resurrect it on the same Ingestable instance we are
-		// about to Close. The condemned flag makes that preflight bail. See
-		// workerHandle.condemned and superviseRestartIngest.
-		handle.condemned = true
-		handle.cancel()
-		db.workers.mu.Unlock()
-		if !waitDone(handle.done, db.workers.drainTimeout) {
-			db.logger.Warn("delete ingest: worker did not exit in time; abandoning it (wedged on its source?) and proceeding",
-				zap.String("id", id), zap.Duration("timeout", db.workers.drainTimeout))
-		}
-		if db.beforeCancelIngestRelockForTest != nil {
-			db.beforeCancelIngestRelockForTest()
-		}
-		db.workers.mu.Lock()
-		if db.workers.ingest[id] == handle {
-			delete(db.workers.ingest, id)
-		}
+	// Condemned + cancelled under one hold, drained outside it, deregistered
+	// on relock — the registry's remove. beforeCancelIngestRelockForTest is
+	// the test-only poise point inside that drain window. See
+	// workerHandle.condemned and superviseRestartIngest.
+	handle, drained := db.workers.remove(workerKindIngest, id, abandonOnWedge, db.beforeCancelIngestRelockForTest)
+	if handle != nil && !drained {
+		db.logger.Warn("delete ingest: worker did not exit in time; abandoning it (wedged on its source?) and proceeding",
+			zap.String("id", id), zap.Duration("timeout", db.workers.drainTimeout))
 	}
-	db.workers.mu.Unlock()
 
 	// cancelIngestWorker's only callers are delete and the reconcile
 	// absent-cancel — both mean this id's config is GONE. Drop its supervisor
@@ -269,7 +253,7 @@ func (db *DB) cancelIngestWorker(id string) *workerHandle {
 	// restart budget (and the state map stays bounded).
 	db.ingestSupervisor.prune(id)
 
-	if !ok || handle.ingestable == nil {
+	if handle == nil || handle.ingestable == nil {
 		return nil // no worker built on this node — nothing to clean up
 	}
 

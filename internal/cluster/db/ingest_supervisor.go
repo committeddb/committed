@@ -183,40 +183,22 @@ func (db *DB) superviseRestartIngest(id string, i cluster.Ingestable, frozen *wo
 		db.beforeIngestSupervisorRelockForTest()
 	}
 
-	db.workers.mu.Lock()
-	if db.workers.closed {
-		db.workers.mu.Unlock()
-		return
-	}
-	if db.workers.ingest[id] != frozen || frozen.condemned {
-		// Either a user-initiated replace already installed a fresh handle while
-		// we were waiting (!= frozen), or a delete/reconcile has condemned this
-		// handle and is mid-teardown — it set condemned under workers.mu before
-		// dropping the lock to drain, and we reacquired the lock inside that
-		// window (the map entry is deleted only after its relock). Resurrecting a
-		// condemned handle would build a fresh worker on the same Ingestable
-		// instance the teardown is about to Close. Bail in both cases; a user
-		// replace that arrives later still wins via db.Ingest's own loop.
-		db.workers.mu.Unlock()
-		db.logger.Debug("ingest supervisor skipping restart; handle replaced or condemned",
+	// Preflight and install in ONE lock hold — the registry's swapIfCurrent:
+	// if the frozen handle is no longer the registered one (a user replace
+	// installed a fresh handle while we waited) or it was condemned (a
+	// delete/reconcile set the flag under the lock before dropping it to
+	// drain, and we relocked inside that window), resurrecting it would build
+	// a fresh worker on the same Ingestable instance the teardown is about to
+	// Close — so bail. A user replace that arrives later still wins via
+	// db.Ingest's own loop. The frozen entry is dropped directly: its
+	// goroutine exited already (we're downstream of that exit) and its
+	// handle.done is closed, so no drain step is needed — unlike db.Ingest's
+	// replace loop, which must assume the existing worker is still running.
+	if !db.workers.swapIfCurrent(workerKindIngest, id, frozen, func() *workerHandle { return db.newIngestWorker(id, i) }) {
+		db.logger.Debug("ingest supervisor skipping restart; handle replaced or condemned, or the registry closed",
 			zap.String("id", id))
 		return
 	}
-	// Drop the frozen entry directly. Its goroutine exited already
-	// (we're downstream of that exit) and its handle.done is closed,
-	// so no drain step is needed — unlike db.Ingest's public replace
-	// loop, which must assume the existing worker is still running.
-	//
-	// Cancel the frozen worker's context before dropping the handle. The
-	// goroutine returned via ingestExitFreeze — a normal return, NOT a ctx
-	// cancel — so workerCtx is still an un-cancelled child of db.ctx; without
-	// this, each restart leaks one context node on the long-lived db.ctx (and
-	// pins the handle) until db.Close. Cancelling an already-exited worker is a
-	// harmless no-op that just releases the node.
-	frozen.cancel()
-	delete(db.workers.ingest, id)
-	db.workers.ingest[id] = db.newIngestWorker(id, i)
-	db.workers.mu.Unlock()
 
 	if db.afterIngestSupervisorRestartForTest != nil {
 		db.afterIngestSupervisorRestartForTest(frozen.ctx.Err())

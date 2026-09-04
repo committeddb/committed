@@ -411,23 +411,13 @@ func (db *DB) syncWorkerIDs() []string {
 }
 
 func (db *DB) deleteSync(id string, keepData bool) {
-	db.workers.mu.Lock()
-	handle, ok := db.workers.sync[id]
-	if ok {
-		handle.cancel()
-		db.workers.mu.Unlock()
-		if !waitDone(handle.done, db.workers.drainTimeout) {
-			db.logger.Warn("delete sync: worker did not exit in time; abandoning it (wedged on its destination?) and proceeding",
-				zap.String("id", id), zap.Duration("timeout", db.workers.drainTimeout))
-		}
-		db.workers.mu.Lock()
-		if db.workers.sync[id] == handle {
-			delete(db.workers.sync, id)
-		}
+	handle, drained := db.workers.remove(workerKindSync, id, abandonOnWedge, nil)
+	if handle != nil && !drained {
+		db.logger.Warn("delete sync: worker did not exit in time; abandoning it (wedged on its destination?) and proceeding",
+			zap.String("id", id), zap.Duration("timeout", db.workers.drainTimeout))
 	}
-	db.workers.mu.Unlock()
 
-	if !ok || handle.syncable == nil {
+	if handle == nil || handle.syncable == nil {
 		// No worker built on this node — nothing to tear down. In safe mode
 		// that is EVERY delete; outside it this is a DEGRADED config's
 		// delete (its build failed, so no worker held a destination
