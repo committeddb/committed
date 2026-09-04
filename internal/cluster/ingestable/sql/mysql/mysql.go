@@ -1622,22 +1622,10 @@ func (h *MySQLEventHandler) rowEntity(ts *tableSchema, spec *sql.TopicSpec, tabl
 // handleXID can fall back to the out-of-band position checkpoint for
 // commits that flushed nothing (an unwatched-table transaction's XID).
 func (h *MySQLEventHandler) flushPending(ctx context.Context, isSoftFlush bool, bundlePos []byte) (bool, error) {
-	if len(h.pending) == 0 {
-		return false, nil
-	}
-	// Stamp streamed rows with the current refresh epoch so a later
-	// refresh-boundary marker can sweep rows a re-snapshot left behind (a
-	// streamed-then-gap-deleted row still carries this epoch until the sweep).
-	sql.StampGeneration(h.pending, h.epoch)
-
-	// One proposal per topic, in first-appearance order (deterministic for replay).
-	// A single-topic flush yields one group == the original buffer, so its proposal
-	// is byte-identical to the pre-routing single-proposal flush.
-	groups := sql.PartitionByTopic(h.pending)
+	buf := h.pending
 	h.pending = nil
 	h.pendingBytes = 0
-
-	for i, group := range groups {
+	seq := func(p *cluster.Proposal) {
 		// Disambiguate repeated proposals at one coordinate: a RowsEvent bigger than
 		// maxPendingEntities flushes several times at the same (file, pos), and a
 		// mixed-table flush emits several per-topic proposals at one (file, pos).
@@ -1649,19 +1637,7 @@ func (h *MySQLEventHandler) flushPending(ctx context.Context, isSoftFlush bool, 
 		} else {
 			h.flushFile, h.flushPos, h.flushSub = h.curFile, h.curPos, 0
 		}
-		p := &cluster.Proposal{
-			Entities:  group,
-			SourceSeq: encodeSourceSeq(h.curFile, h.curPos, h.flushSub),
-			// Capture provenance: the source commit time (event-header seconds)
-			// and transaction identity tracked for the in-flight transaction.
-			// Every per-topic group of one transaction shares them.
-			SourceCommitUnixNano: int64(h.curTxnSourceTS) * int64(time.Second),
-			SourceTxnID:          h.curTxnID,
-			// This dialect checkpoints per transaction (handleXID bundles the
-			// post-transaction position), so its resume re-emits at most the
-			// in-flight transaction — the contract that earns txn-scoped dedup.
-			TxnScopedDedup: h.curTxnID != "",
-		}
+		p.SourceSeq = encodeSourceSeq(h.curFile, h.curPos, h.flushSub)
 		// Failover-lineage guard: if the live coordinate is at or below the resume
 		// baseline — a lower file number, OR the same file number at an equal/lower
 		// byte offset — this stream is a different binlog lineage (a promoted replica
@@ -1692,18 +1668,19 @@ func (h *MySQLEventHandler) flushPending(ctx context.Context, isSoftFlush bool, 
 		if h.chunkingChanged && isSoftFlush {
 			p.DedupUnsafe = true
 		}
-
-		if bundlePos != nil && i == len(groups)-1 {
-			p.Position = bundlePos
-		}
-
-		select {
-		case h.proposalChan <- p:
-		case <-ctx.Done():
-			return false, ctx.Err()
-		}
 	}
-	return true, nil
+	// Provenance: the source commit time (event-header seconds) and transaction
+	// identity tracked for the in-flight transaction. This dialect checkpoints
+	// per transaction (handleXID bundles the post-transaction position), so its
+	// resume re-emits at most the in-flight transaction — the contract that
+	// earns txn-scoped dedup.
+	prov := sql.Provenance{
+		CommitUnixNano: int64(h.curTxnSourceTS) * int64(time.Second),
+		TxnID:          h.curTxnID,
+		TxnScopedDedup: h.curTxnID != "",
+	}
+	emitted, err := sql.Flush(ctx, buf, h.epoch, prov, seq, bundlePos, h.proposalChan)
+	return emitted > 0, err
 }
 
 // captureTxnID records the in-flight transaction's provenance identity at its

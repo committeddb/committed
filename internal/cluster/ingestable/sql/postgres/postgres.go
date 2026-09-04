@@ -1872,16 +1872,9 @@ func quoteTable(table string) string {
 // whether any proposal was emitted, so the commit path can fall back to the
 // out-of-band position checkpoint for transactions that flushed nothing.
 func flushPending(ctx context.Context, pending *[]*cluster.Entity, pendingBytes *int, pr chan<- *cluster.Proposal, lsn pglogrepl.LSN, epoch uint64, commitTS int64, txnID string, bundlePos []byte) (bool, error) {
-	if len(*pending) == 0 {
-		return false, nil
-	}
-	// Stamp every entity with the current refresh epoch so a later
-	// refresh-boundary marker can sweep rows a re-snapshot left behind. All
-	// entities in a flush share the epoch (it only changes on a reconnect that
-	// triggers a gap-recovery re-snapshot).
-	sql.StampGeneration(*pending, epoch)
-
-	// One proposal per topic, in first-appearance order (deterministic for replay).
+	buf := *pending
+	*pending = nil
+	*pendingBytes = 0
 	// Per-topic proposals share this flush's LSN, so they need strictly-increasing
 	// SourceSeqs or the per-ingestable dedup drops all but the first: add an additive
 	// sub-index to the LSN, mirroring the MySQL flush's flushSub. A flush never
@@ -1891,35 +1884,19 @@ func flushPending(ctx context.Context, pending *[]*cluster.Entity, pendingBytes 
 	// lsn+sub never reaches the next flush's base (the coordinate-gap safety the
 	// MySQL SourceSeq relies on too). Single-topic -> sub 0 -> SourceSeq ==
 	// uint64(lsn), byte-identical to the pre-routing single-proposal flush.
-	groups := sql.PartitionByTopic(*pending)
-	*pending = nil
-	*pendingBytes = 0
-
-	for sub, group := range groups {
+	sub := 0
+	seq := func(p *cluster.Proposal) {
 		//nolint:gosec // G115: sub is a small non-negative topic-group index (< number of topics in a transaction).
-		p := &cluster.Proposal{
-			Entities:  group,
-			SourceSeq: uint64(lsn) + uint64(sub),
-			// Capture provenance from the transaction's Begin message (commit
-			// time + xid); every per-topic group of one transaction shares it.
-			SourceCommitUnixNano: commitTS,
-			SourceTxnID:          txnID,
-			// This dialect checkpoints per transaction (the Commit message's
-			// flush bundles the post-transaction position), so its resume
-			// re-emits at most the in-flight transaction — the contract that
-			// earns txn-scoped dedup.
-			TxnScopedDedup: txnID != "",
-		}
-		if bundlePos != nil && sub == len(groups)-1 {
-			p.Position = bundlePos
-		}
-		select {
-		case pr <- p:
-		case <-ctx.Done():
-			return false, ctx.Err()
-		}
+		p.SourceSeq = uint64(lsn) + uint64(sub)
+		sub++
 	}
-	return true, nil
+	// Provenance from the transaction's Begin message (commit time + xid). This
+	// dialect checkpoints per transaction (the Commit message's flush bundles
+	// the post-transaction position), so its resume re-emits at most the
+	// in-flight transaction — the contract that earns txn-scoped dedup.
+	prov := sql.Provenance{CommitUnixNano: commitTS, TxnID: txnID, TxnScopedDedup: txnID != ""}
+	emitted, err := sql.Flush(ctx, buf, epoch, prov, seq, bundlePos, pr)
+	return emitted > 0, err
 }
 
 // emitRefreshBoundary emits the refresh-boundary marker that closes a full

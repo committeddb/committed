@@ -335,40 +335,34 @@ func (d *SQLServerDialect) pollWindow(
 		return nanos
 	}
 
+	// The window's sub-index runs across every flush in it: each proposal
+	// needs a distinct, strictly-increasing SourceSeq under one change-tracking
+	// version. Once the sub-index overflows the packed encoding, every later
+	// proposal in the window is DedupUnsafe (sticky) — the worker freezes
+	// rather than risk a dedup drop.
+	seq := func(p *cluster.Proposal) {
+		s, ok := encodeCTSeq(current, sub)
+		if !ok || subOverflowed {
+			subOverflowed = true
+			p.DedupUnsafe = true
+		} else {
+			p.SourceSeq = s
+		}
+		sub++
+	}
 	flush := func(entities []*cluster.Entity, txnVer int64) error {
 		if len(entities) == 0 {
 			return nil
 		}
-		sql.StampGeneration(entities, epoch)
-		var commitTS int64
-		var txnID string
+		var prov sql.Provenance
 		if txnVer > 0 {
-			commitTS = commitTimeFor(txnVer)
-			txnID = strconv.FormatInt(txnVer, 10)
+			prov.CommitUnixNano = commitTimeFor(txnVer)
+			prov.TxnID = strconv.FormatInt(txnVer, 10)
 		}
-		for _, group := range sql.PartitionByTopic(entities) {
-			p := &cluster.Proposal{
-				Entities:             group,
-				SourceCommitUnixNano: commitTS,
-				SourceTxnID:          txnID,
-			}
-			seq, ok := encodeCTSeq(current, sub)
-			if !ok || subOverflowed {
-				// The freeze contract: a coordinate we cannot encode uniquely
-				// must not be silently dedup-dropped.
-				subOverflowed = true
-				p.DedupUnsafe = true
-			} else {
-				p.SourceSeq = seq
-			}
-			sub++
-			select {
-			case pr <- p:
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
-		return nil
+		// No bundled checkpoint: this dialect checkpoints per polling window
+		// (after pollWindow), not per transaction, so no txn-scoped dedup either.
+		_, err := sql.Flush(ctx, entities, epoch, prov, seq, nil, pr)
+		return err
 	}
 
 	for _, table := range config.Tables {
