@@ -45,9 +45,7 @@ func (db *DB) InjectStaleWorkerBumpOnRebuildResetForTest(id string, staleIndex u
 	var once sync.Once
 	db.afterRebuildCheckpointReset = func() {
 		once.Do(func() {
-			db.workers.mu.Lock()
-			_, live := db.workers.sync[id]
-			db.workers.mu.Unlock()
+			live := db.workers.lookup(workerKindSync, id) != nil
 			if !live {
 				return // worker already stopped — a real worker could not bump here
 			}
@@ -73,9 +71,7 @@ func (db *DB) SetIngestDrainTimeoutForTest(d time.Duration) { db.ingestDrainTime
 // must abandon it within workers.drainTimeout rather than block the listener (and
 // thus the raft apply loop) forever.
 func (db *DB) InjectWedgedSyncWorkerForTest(id string) {
-	db.workers.mu.Lock()
-	db.workers.sync[id] = &workerHandle{cancel: func() {}, done: make(chan struct{})}
-	db.workers.mu.Unlock()
+	db.workers.put(workerKindSync, id, &workerHandle{cancel: func() {}, done: make(chan struct{})})
 }
 
 // StuckTrackerPublishedAfterGainForTest models the sync worker's leadership-GAIN
@@ -121,9 +117,7 @@ func (db *DB) SetAfterRebuildCheckpointResetForTest(f func()) { db.afterRebuildC
 func (db *DB) InjectDrainedSyncWorkerForTest(id string, s cluster.Syncable) {
 	done := make(chan struct{})
 	close(done)
-	db.workers.mu.Lock()
-	db.workers.sync[id] = &workerHandle{cancel: func() {}, done: done, syncable: s}
-	db.workers.mu.Unlock()
+	db.workers.put(workerKindSync, id, &workerHandle{cancel: func() {}, done: done, syncable: s})
 }
 
 // IsLeaderForTest reports whether this node currently believes it is leader —
@@ -442,13 +436,7 @@ func (db *DB) SupervisorStateExistsForTest(id string) bool {
 // deletion paths; returns a copy so the caller can sort / inspect
 // without holding the lock.
 func (db *DB) IngestWorkerIDsForTest() []string {
-	db.workers.mu.Lock()
-	defer db.workers.mu.Unlock()
-	ids := make([]string, 0, len(db.workers.ingest))
-	for id := range db.workers.ingest {
-		ids = append(ids, id)
-	}
-	return ids
+	return db.workers.ids(workerKindIngest)
 }
 
 // SetLocalDiskStateForTest stores the node-local disk-pressure level WITHOUT
@@ -571,18 +559,12 @@ func (db *DB) WaiterIDsForTest() []uint64 {
 
 // HasSyncWorkerForTest reports whether a sync worker is registered for id.
 func (db *DB) HasSyncWorkerForTest(id string) bool {
-	db.workers.mu.Lock()
-	defer db.workers.mu.Unlock()
-	_, ok := db.workers.sync[id]
-	return ok
+	return db.workers.lookup(workerKindSync, id) != nil
 }
 
 // HasIngestWorkerForTest reports whether an ingest worker is registered for id.
 func (db *DB) HasIngestWorkerForTest(id string) bool {
-	db.workers.mu.Lock()
-	defer db.workers.mu.Unlock()
-	_, ok := db.workers.ingest[id]
-	return ok
+	return db.workers.lookup(workerKindIngest, id) != nil
 }
 
 // CancelIngestWorkerForTest drives the unexported cancelIngestWorker (the
@@ -635,9 +617,7 @@ func (db *DB) SuperviseRestartIngestGiveupForTest(id string, i cluster.Ingestabl
 	done := make(chan struct{})
 	close(done) // the frozen worker's goroutine already exited (ingestExitFreeze)
 	h := &workerHandle{cancel: cancel, ctx: ctx, done: done, ingestable: i}
-	db.workers.mu.Lock()
-	db.workers.ingest[id] = h
-	db.workers.mu.Unlock()
+	db.workers.put(workerKindIngest, id, h)
 	db.superviseRestartIngest(id, i, h) // the (maxAttempts+1)th observation → give-up
 	return h.ctx.Err()
 }
@@ -649,4 +629,13 @@ func SetSyncBatchCapForTest(n int) func() {
 	old := syncBatchCap
 	syncBatchCap = n
 	return func() { syncBatchCap = old }
+}
+
+// put registers h under id without draining whatever was there — test-only,
+// for seams that inject a hand-built handle. The one registry lock holder
+// outside worker_registry.go.
+func (r *workerRegistry) put(kind workerKind, id string, h *workerHandle) {
+	r.mu.Lock()
+	r.table(kind)[id] = h
+	r.mu.Unlock()
 }

@@ -995,22 +995,8 @@ func (db *DB) closeUntil(deadline time.Time) error {
 		<-drainDone
 	}()
 
-	db.workers.mu.Lock()
-	db.workers.closed = true
-	handles := make([]*workerHandle, 0, len(db.workers.ingest)+len(db.workers.sync))
-	for id, h := range db.workers.ingest {
-		handles = append(handles, h)
-		h.cancel()
-		delete(db.workers.ingest, id)
-	}
-	for id, h := range db.workers.sync {
-		handles = append(handles, h)
-		h.cancel()
-		delete(db.workers.sync, id)
-	}
-	db.workers.mu.Unlock()
-
-	if abandoned := drainWorkers(handles, clampToDeadline(closeDrainTimeout, deadline)); abandoned > 0 {
+	handles, abandoned := db.workers.closeAll(clampToDeadline(closeDrainTimeout, deadline))
+	if abandoned > 0 {
 		db.logger.Warn("close: worker drain timed out; abandoned wedged worker(s) and proceeded with shutdown "+
 			"(a syncable stuck in tx.Commit against an unreachable destination is the usual cause)",
 			zap.Int("abandoned", abandoned), zap.Duration("timeout", closeDrainTimeout))

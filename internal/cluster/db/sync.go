@@ -387,7 +387,7 @@ func (db *DB) reconcileSyncWorkers(list func() ([]*SyncableWithID, error)) {
 		installed++
 	}
 	cancelled := 0
-	for _, id := range db.syncWorkerIDs() {
+	for _, id := range db.workers.ids(workerKindSync) {
 		if _, ok := present[id]; !ok {
 			db.logger.Warn("sync reconcile: cancelling worker for a config that no longer exists (deleted, incl. via snapshot)",
 				zap.String("id", id))
@@ -397,17 +397,6 @@ func (db *DB) reconcileSyncWorkers(list func() ([]*SyncableWithID, error)) {
 	}
 	db.logger.Info("sync reconcile complete",
 		zap.Int("installed", installed), zap.Int("degraded", degraded), zap.Int("cancelled", cancelled))
-}
-
-// syncWorkerIDs snapshots the registered sync worker ids.
-func (db *DB) syncWorkerIDs() []string {
-	db.workers.mu.Lock()
-	defer db.workers.mu.Unlock()
-	ids := make([]string, 0, len(db.workers.sync))
-	for id := range db.workers.sync {
-		ids = append(ids, id)
-	}
-	return ids
 }
 
 func (db *DB) deleteSync(id string, keepData bool) {
@@ -1505,10 +1494,8 @@ func (db *DB) SyncableOwner(id string) uint64 {
 // re-deriving worker previously read as plain "running" with silently
 // climbing lag).
 func (db *DB) SyncableStageRecovery(id string) (folded, target uint64, ok bool) {
-	db.workers.mu.Lock()
-	handle, found := db.workers.sync[id]
-	db.workers.mu.Unlock()
-	if !found {
+	handle := db.workers.lookup(workerKindSync, id)
+	if handle == nil {
 		return 0, 0, false
 	}
 	t := handle.stageRecoveryTarget.Load()
@@ -1524,10 +1511,8 @@ func (db *DB) SyncableStageRecovery(id string) (folded, target uint64, ok bool) 
 // SyncableReadPosition — the stage store lives with the worker — so the
 // HTTP layer proxies to the owner for the any-node answer.
 func (db *DB) SyncableStageStats(id string) (map[string]cluster.StageStat, bool) {
-	db.workers.mu.Lock()
-	handle, ok := db.workers.sync[id]
-	db.workers.mu.Unlock()
-	if !ok || handle.syncable == nil {
+	handle := db.workers.lookup(workerKindSync, id)
+	if handle == nil || handle.syncable == nil {
 		return nil, false
 	}
 	in, ok := cluster.SyncableAs[cluster.StageIntrospector](handle.syncable)
@@ -1546,10 +1531,8 @@ func (db *DB) SyncableStageStats(id string) (map[string]cluster.StageStat, bool)
 // stages; err: undeclared stage name or part-count mismatch).
 // Owner-local like the counts — the HTTP layer proxies to the owner.
 func (db *DB) SyncableStageKeyExists(id, stage string, keyParts []string) (bool, bool, error) {
-	db.workers.mu.Lock()
-	handle, ok := db.workers.sync[id]
-	db.workers.mu.Unlock()
-	if !ok || handle.syncable == nil {
+	handle := db.workers.lookup(workerKindSync, id)
+	if handle == nil || handle.syncable == nil {
 		return false, false, nil
 	}
 	in, ok := cluster.SyncableAs[cluster.StageIntrospector](handle.syncable)
@@ -1573,10 +1556,8 @@ func (db *DB) SyncableStageKeyExists(id, stage string, keyParts []string) (bool,
 // construction — non-owner workers hold no reader — so the HTTP layer
 // proxies the call to SyncableOwner's node for the any-node answer.
 func (db *DB) SyncableReadPosition(id string) (uint64, bool) {
-	db.workers.mu.Lock()
-	handle, ok := db.workers.sync[id]
-	db.workers.mu.Unlock()
-	if !ok {
+	handle := db.workers.lookup(workerKindSync, id)
+	if handle == nil {
 		return 0, false
 	}
 	ref := handle.activeReader.Load()

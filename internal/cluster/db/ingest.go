@@ -297,12 +297,7 @@ func (db *DB) reconcileIngestWorkers(list func() ([]*IngestableWithID, error)) {
 		}
 		installed++
 	}
-	db.workers.mu.Lock()
-	ids := make([]string, 0, len(db.workers.ingest))
-	for id := range db.workers.ingest {
-		ids = append(ids, id)
-	}
-	db.workers.mu.Unlock()
+	ids := db.workers.ids(workerKindIngest)
 	cancelled := 0
 	for _, id := range ids {
 		if _, ok := present[id]; !ok {
@@ -374,13 +369,12 @@ func (db *DB) IngestableStatus(ctx context.Context, id string) (cluster.Ingestab
 		return cluster.IngestableStatus{WorkerState: cluster.WorkerStateParked}, nil
 	}
 
-	db.workers.mu.Lock()
-	handle, ok := db.workers.ingest[id]
+	handle := db.workers.lookup(workerKindIngest, id)
+	ok := handle != nil
 	var ing cluster.Ingestable
 	if ok {
 		ing = handle.ingestable
 	}
-	db.workers.mu.Unlock()
 
 	if ing == nil {
 		return cluster.IngestableStatus{}, cluster.ErrIngestableNotRunning

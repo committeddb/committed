@@ -19,6 +19,11 @@ const (
 
 // workerRegistry is the sync/ingest worker registry: the per-ID worker
 // handles for both kinds, the closed flag, and the one lock guarding them.
+//
+// The lock is private to this file: every install, eviction, lookup, and
+// the shutdown drain goes through the methods below, which state the
+// lifecycle discipline once (the test-only put in export_test.go is the
+// sole other holder). Nothing else may take it.
 // The tables stay separate (never one map keyed by kind) so a reconcile of
 // one kind can never cancel the other's workers.
 //
@@ -269,4 +274,51 @@ func (r *workerRegistry) swapIfCurrent(kind workerKind, id string, expect *worke
 	expect.cancel()
 	table[id] = spawn()
 	return true
+}
+
+// lookup returns the handle registered for id, or nil. A read-only
+// snapshot for the status paths: by the time the caller uses it the worker
+// may be draining or replaced, which is fine — they read atomics on it or
+// ask its Syncable/Ingestable a question, never the tables.
+func (r *workerRegistry) lookup(kind workerKind, id string) *workerHandle {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.table(kind)[id]
+}
+
+// ids snapshots the registered ids for kind. Reconcile takes the snapshot
+// under the lock and cancels the absent ids outside it.
+func (r *workerRegistry) ids(kind workerKind) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	table := r.table(kind)
+	ids := make([]string, 0, len(table))
+	for id := range table {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// closeAll is the shutdown drain: flip closed, cancel and deregister every
+// worker of both kinds under ONE hold (so no late install can slip in),
+// then drain them outside the lock, bounded by timeout. Returns the
+// handles for the caller's kind-specific resource release and how many
+// were abandoned still running. After this every install returns
+// ErrClosed.
+func (r *workerRegistry) closeAll(timeout time.Duration) (handles []*workerHandle, abandoned int) {
+	r.mu.Lock()
+	r.closed = true
+	handles = make([]*workerHandle, 0, len(r.ingest)+len(r.sync))
+	for id, h := range r.ingest {
+		handles = append(handles, h)
+		h.cancel()
+		delete(r.ingest, id)
+	}
+	for id, h := range r.sync {
+		handles = append(handles, h)
+		h.cancel()
+		delete(r.sync, id)
+	}
+	r.mu.Unlock()
+	return handles, drainWorkers(handles, timeout)
 }
