@@ -18192,7 +18192,7 @@ limitations under the License.
 
 ```
 
-## golang.org/x/crypto v0.55.0
+## golang.org/x/crypto v0.56.0
 
 ```
 Copyright 2009 The Go Authors.
