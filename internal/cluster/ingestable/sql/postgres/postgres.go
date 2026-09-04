@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"strconv"
 	"strings"
 	"time"
@@ -62,23 +61,6 @@ type snapshotIntent struct {
 	// completes (full refreshes reconcile; a partial added-table backfill must
 	// NOT sweep, so it carries no marker).
 	marker bool
-}
-
-// newSnapshotProgress returns a fresh, caller-owned SnapshotProgress seeded
-// from a durable resume cursor (nil for a from-scratch snapshot). The clone
-// keeps the intent's live cursor independent of the decoded checkpoint value.
-func newSnapshotProgress(seed *dialectpb.SnapshotProgress) *dialectpb.SnapshotProgress {
-	p := &dialectpb.SnapshotProgress{LastPkByTable: map[string]string{}}
-	if seed != nil {
-		maps.Copy(p.LastPkByTable, seed.LastPkByTable)
-		p.CompletedTables = append(p.CompletedTables, seed.CompletedTables...)
-		// Carry the partial-backfill mark: dropping it would let a crash
-		// mid-backfill resume as a FULL refresh whose marker sweeps the
-		// sibling rows the backfill never re-emits (see the added-tables
-		// branch; same propagation the MySQL dialect performs).
-		p.PartialBackfill = seed.PartialBackfill
-	}
-	return p
 }
 
 const (
@@ -829,7 +811,7 @@ func (d *PostgreSQLDialect) stream(
 			zap.Uint64("refreshEpoch", *epoch))
 		*lastLSN = cp
 		*resumeProgress = nil
-		*intent = &snapshotIntent{tables: pgCfg.tables, progress: newSnapshotProgress(nil), marker: true}
+		*intent = &snapshotIntent{tables: pgCfg.tables, progress: sql.NewSnapshotProgress(nil), marker: true}
 	case *intent != nil:
 		// A prior attempt's snapshot is unfinished — resume it below. The epoch
 		// and LSN base were already set when the intent was formed.
@@ -859,7 +841,7 @@ func (d *PostgreSQLDialect) stream(
 		// off — emitting it over a partial re-emission would sweep the sibling
 		// rows off the sink.
 		partial := *resumeProgress != nil && (*resumeProgress).PartialBackfill
-		*intent = &snapshotIntent{tables: pgCfg.tables, progress: newSnapshotProgress(*resumeProgress), marker: !partial}
+		*intent = &snapshotIntent{tables: pgCfg.tables, progress: sql.NewSnapshotProgress(*resumeProgress), marker: !partial}
 		*resumeProgress = nil
 	case len(addedTables) > 0:
 		// Resuming an existing slot, but ensurePublication just (re-)added tables
@@ -882,7 +864,7 @@ func (d *PostgreSQLDialect) stream(
 		// here used to degrade to a full re-snapshot (convergent but heavy, and
 		// it re-armed the marker); now the resume branch reconstructs the
 		// partial intent — only the added tables scan, and no marker fires.
-		backfill := newSnapshotProgress(nil)
+		backfill := sql.NewSnapshotProgress(nil)
 		backfill.PartialBackfill = true
 		addedSet := make(map[string]bool, len(addedTables))
 		for _, t := range addedTables {
@@ -1611,17 +1593,12 @@ func tupleToEntity(
 	}
 }
 
-// snapshot dumps all existing rows from watched tables using keyset
-// pagination with one short REPEATABLE READ transaction per batch.
-// Each batch becomes a single cluster.Proposal followed by a position
-// checkpoint that records per-table progress so a restart mid-snapshot
-// resumes without re-scanning completed rows.
-//
-// Per-batch transactions trade point-in-time consistency for bounded
-// MVCC/xmin pressure on the source. The replication slot's WAL stream
-// (started from the slot creation LSN, well before any snapshot read)
-// will replay all concurrent changes once streaming begins, converging
-// consumers to the correct end state.
+// snapshot enumerates tables into the log at the slot's consistent point:
+// the shared snapshot pass (sql.RunSnapshot) drives the resume/complete
+// bookkeeping and the inline checkpoints; this dialect supplies the keyset
+// batch SQL and the checkpoint encoding at lsn. progress is caller-owned
+// (the snapshotIntent's live cursor) and mutated IN PLACE as batches hand
+// off, so a failed attempt resumes from exactly the last handed-off batch.
 func (d *PostgreSQLDialect) snapshot(
 	ctx context.Context,
 	config *sql.Config,
@@ -1638,189 +1615,29 @@ func (d *PostgreSQLDialect) snapshot(
 		return fmt.Errorf("snapshot: open connection: %w", err)
 	}
 	defer func() { _ = db.Close() }()
-
-	batchSize := parseBatchSize(config.Options)
-
-	// progress is caller-owned (the snapshotIntent's live cursor) and mutated
-	// IN PLACE as batches hand off, so a failed attempt resumes from exactly
-	// the last handed-off batch instead of restarting the enumeration. It was
-	// seeded from the durable resume cursor by newSnapshotProgress.
-	completed := make(map[string]bool, len(progress.CompletedTables))
-	for _, t := range progress.CompletedTables {
-		completed[t] = true
-	}
-
-	// Announce whether this is a resume or a cold start, at absolute (table-level)
-	// granularity, so an operator can tell the two apart from the log alone — a
-	// per-run batch counter that resets each supervisor restart cannot. The keyset
-	// cursor itself is deliberately NOT logged: a natural PK is often source PII
-	// (see the per-batch flush log), so progress is reported by table counts only.
-	if len(completed) > 0 || len(progress.LastPkByTable) > 0 {
-		zap.L().Info("snapshot: resuming from checkpoint",
-			zap.Int("tables_complete", len(completed)),
-			zap.Int("tables_resuming", len(progress.LastPkByTable)),
-			zap.Int("tables_total", len(tables)),
-			zap.Uint64("refresh_epoch", epoch))
-	} else {
-		zap.L().Info("snapshot: starting fresh",
-			zap.Int("tables_total", len(tables)),
-			zap.Uint64("refresh_epoch", epoch))
-	}
-
-	for _, table := range tables {
-		if completed[table] {
-			zap.L().Info("snapshot: skipping already-completed table",
-				zap.String("table", table),
-			)
-			continue
-		}
-		if err := d.snapshotTable(ctx, db, config, table, batchSize, progress, lsn, epoch, pr, po); err != nil {
-			return fmt.Errorf("snapshot: table %s: %w", table, err)
-		}
-		progress.CompletedTables = append(progress.CompletedTables, table)
-		delete(progress.LastPkByTable, table)
-		completed[table] = true
-
-		if err := emitSnapshotProgress(ctx, po, lsn, progress, epoch); err != nil {
-			return err
-		}
-		zap.L().Info("snapshot: table complete", zap.String("table", table))
-	}
-
-	return nil
+	return sql.RunSnapshot(ctx, sql.SnapshotRun{
+		Config:    config,
+		Reader:    pgSnapshotReader{db: db},
+		Tables:    tables,
+		Progress:  progress,
+		Epoch:     epoch,
+		BatchSize: sql.ParseBatchSize(config.Options, defaultSnapshotBatchSize),
+		Readers:   1,
+		Encode: func(p *dialectpb.SnapshotProgress) ([]byte, error) {
+			return encodePosition(lsn, p, epoch)
+		},
+		BatchHook: d.snapshotBatchHook,
+		Proposals: pr,
+		Positions: po,
+	})
 }
 
-// snapshotTable reads one table in batches using keyset pagination.
-// Each batch runs inside its own short transaction and produces one
-// proposal + one progress checkpoint.
-func (d *PostgreSQLDialect) snapshotTable(
-	ctx context.Context,
-	db *gosql.DB,
-	config *sql.Config,
-	table string,
-	batchSize int,
-	progress *dialectpb.SnapshotProgress,
-	lsn pglogrepl.LSN,
-	epoch uint64,
-	pr chan<- *cluster.Proposal,
-	po chan<- cluster.Position,
-) error {
-	// Resolve this table's topic-spec (snapshot iterates config entries, so table is
-	// one SpecForTable keys on directly). One spec for the flat form.
-	spec := config.SpecForTable(table)
-	if spec == nil {
-		return fmt.Errorf("snapshot: no topic-spec routes table %q", table)
-	}
-	lastPK, haveLastPK := progress.LastPkByTable[table]
+// pgSnapshotReader is the dialect's snapshot adapter: one keyset batch per
+// call over a short REPEATABLE READ transaction (readBatch).
+type pgSnapshotReader struct{ db *gosql.DB }
 
-	batchNum := 0
-	totalRows := 0
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		batchNum++
-
-		// Test-only failure injection: lets the resume-after-transient-error
-		// tests abort a snapshot mid-enumeration exactly as a dropped source
-		// connection would. Nil in production.
-		if d.snapshotBatchHook != nil {
-			if err := d.snapshotBatchHook(table, batchNum); err != nil {
-				return err
-			}
-		}
-
-		entities, batchLastPK, count, err := readBatch(ctx, db, table, spec, lastPK, haveLastPK, batchSize)
-		if err != nil {
-			return err
-		}
-		if count == 0 {
-			break
-		}
-
-		// Stamp the snapshot rows with the refresh epoch (a re-snapshot bumps it;
-		// the initial snapshot is epoch 1) so a closing refresh-boundary marker
-		// can sweep the rows this positive enumeration could not re-emit.
-		stampGeneration(entities, epoch)
-
-		// Advance the read cursor to this window, then hand the rows off with
-		// inline checkpoints every sql.SnapshotCheckpointStride rows (and on the
-		// window's final row) — see handOffSnapshotWindow. Each checkpoint
-		// commits atomically with the row it rides (Proposal.Position), closing
-		// the effectively-once gap a separate position proposal left open for
-		// snapshot rows (SourceSeq 0, so the streaming dedup can't cover them).
-		lastPK = batchLastPK
-		haveLastPK = true
-		if err := handOffSnapshotWindow(ctx, entities, table, progress, lsn, epoch, pr); err != nil {
-			return err
-		}
-		totalRows += count
-
-		// Deliberately no last_pk: a natural primary key is often source PII
-		// (email, national id, account no), and this line is Info-level and
-		// shipped to log aggregation. The batch/row counts give progress; the
-		// resume cursor lives in progress.LastPkByTable, not the logs.
-		zap.L().Info("snapshot: batch flushed",
-			zap.String("table", table),
-			zap.Int("batch", batchNum),
-			zap.Int("rows_in_batch", count),
-			zap.Int("rows_total", totalRows),
-		)
-
-		if count < batchSize {
-			break
-		}
-	}
-
-	return nil
-}
-
-// handOffSnapshotWindow hands one read window's rows to pr — one single-row
-// proposal per row (a proposal is a TRANSACTION; the read window is read tuning,
-// never proposal composition) — bundling the inline resume checkpoint
-// (Proposal.Position) on every sql.SnapshotCheckpointStride-th row and on the
-// window's final row. Each checkpoint's cursor is THAT row's key, not the
-// window's last, so the durable resume cursor trails committed progress by at
-// most one stride: a worker frozen mid-window restarts from the last committed
-// checkpoint instead of re-reading and re-proposing the whole window (whose
-// SourceSeq-0 duplicates nothing would dedup out of the permanent log), and the
-// freeze/restart supervisor sees an advancing position instead of counting a
-// merely-slow worker toward give-up. A checkpoint-bearing row is an ordered
-// proposal (the ingest worker drains its pipeline before proposing it), so it
-// trails every row it covers; rows after it simply re-emit on resume.
-// progress is mutated in place per checkpoint, ending at the window's last
-// EMITTED key. The caller's read cursor can end further: it advances per
-// SCANNED row, so marshal-skipped tail rows sit past the durable cursor. That
-// gap is convergent — a crash re-scans only rows that skip again, and an
-// all-skipped window (no proposals, so no checkpoint) simply leaves the
-// durable cursor at the previous emission.
-func handOffSnapshotWindow(
-	ctx context.Context,
-	entities []*cluster.Entity,
-	table string,
-	progress *dialectpb.SnapshotProgress,
-	lsn pglogrepl.LSN,
-	epoch uint64,
-	pr chan<- *cluster.Proposal,
-) error {
-	stride := sql.SnapshotCheckpointStride
-	for ri, row := range entities {
-		p := &cluster.Proposal{Entities: []*cluster.Entity{row}}
-		if ri == len(entities)-1 || (ri+1)%stride == 0 {
-			progress.LastPkByTable[table] = string(row.Key)
-			posBytes, err := encodePosition(lsn, progress, epoch)
-			if err != nil {
-				return err
-			}
-			p.Position = posBytes
-		}
-		select {
-		case pr <- p:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	return nil
+func (r pgSnapshotReader) ReadBatch(ctx context.Context, table string, spec *sql.TopicSpec, lastPK string, haveLastPK bool, batchSize int) ([]*cluster.Entity, string, int, error) {
+	return readBatch(ctx, r.db, table, spec, lastPK, haveLastPK, batchSize)
 }
 
 // snapshotColumnMeta returns a table's column names (in order) and each column's
@@ -2033,39 +1850,6 @@ func readBatch(
 	return entities, batchLastPK, scanned, nil
 }
 
-// parseBatchSize reads "batch_size" from Config.Options, falling back to
-// defaultSnapshotBatchSize on missing/invalid values.
-func parseBatchSize(options map[string]string) int {
-	if v, ok := options["batch_size"]; ok {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return n
-		}
-	}
-	return defaultSnapshotBatchSize
-}
-
-// emitSnapshotProgress sends a position checkpoint that captures the
-// pre-snapshot LSN plus in-progress snapshot state. Streaming-phase
-// checkpoints omit the progress field so they stay compact.
-func emitSnapshotProgress(
-	ctx context.Context,
-	po chan<- cluster.Position,
-	lsn pglogrepl.LSN,
-	progress *dialectpb.SnapshotProgress,
-	epoch uint64,
-) error {
-	bs, err := encodePosition(lsn, progress, epoch)
-	if err != nil {
-		return err
-	}
-	select {
-	case po <- bs:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
 // quoteTable quotes a potentially schema-qualified table name for use
 // in SQL queries. "public.orders" becomes "public"."orders". Delegates to the
 // shared sqlident seam (the syncable side quotes tables the same way).
@@ -2095,7 +1879,7 @@ func flushPending(ctx context.Context, pending *[]*cluster.Entity, pendingBytes 
 	// refresh-boundary marker can sweep rows a re-snapshot left behind. All
 	// entities in a flush share the epoch (it only changes on a reconnect that
 	// triggers a gap-recovery re-snapshot).
-	stampGeneration(*pending, epoch)
+	sql.StampGeneration(*pending, epoch)
 
 	// One proposal per topic, in first-appearance order (deterministic for replay).
 	// Per-topic proposals share this flush's LSN, so they need strictly-increasing
@@ -2136,16 +1920,6 @@ func flushPending(ctx context.Context, pending *[]*cluster.Entity, pendingBytes 
 		}
 	}
 	return true, nil
-}
-
-// stampGeneration sets the reconciling-refresh epoch on every entity in a batch
-// (see cluster.Entity.Generation). The whole batch shares one epoch: the worker
-// holds a single "current epoch" that only changes on a gap-recovery
-// re-snapshot, so stamping at flush time is enough.
-func stampGeneration(entities []*cluster.Entity, epoch uint64) {
-	for _, e := range entities {
-		e.Generation = epoch
-	}
 }
 
 // emitRefreshBoundary emits the refresh-boundary marker that closes a full

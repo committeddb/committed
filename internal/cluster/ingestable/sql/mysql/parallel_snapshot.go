@@ -5,14 +5,10 @@ import (
 	gosql "database/sql"
 	"fmt"
 	"math/big"
-	"strconv"
 	"strings"
-	"sync"
 
-	"github.com/go-mysql-org/go-mysql/mysql"
 	"go.uber.org/zap"
 
-	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/ingestable/sql"
 	"github.com/committeddb/committed/internal/cluster/ingestable/sql/dialectpb"
 	"github.com/committeddb/committed/internal/cluster/sqlident"
@@ -41,26 +37,6 @@ import (
 // pre-0.8.0 behavior): the snapshot target is usually someone's production
 // replica, so parallelism is an explicit operator opt-in via the ingestable's
 // options: snapshot_readers = "4".
-
-// maxSnapshotReaders caps the per-table reader pool. The ceiling protects the
-// SOURCE (each reader holds a connection and streams a range scan), not
-// committed.
-const maxSnapshotReaders = 16
-
-// parseSnapshotReaders reads "snapshot_readers" from Config.Options.
-// Missing/invalid values fall back to 1 (single stream); values above the
-// cap clamp to it.
-func parseSnapshotReaders(options map[string]string) int {
-	v, ok := options["snapshot_readers"]
-	if !ok {
-		return 1
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n < 1 {
-		return 1
-	}
-	return min(n, maxSnapshotReaders)
-}
 
 // batchPredicate builds the keyset-pagination clause shared by the batch row
 // read and the phase-2 JSON type query: FROM … [WHERE …] ORDER BY pk LIMIT n.
@@ -254,7 +230,7 @@ func binarySplitPoints(ctx context.Context, db *gosql.DB, table, pkCol string, c
 	}
 	const prefixLen = 8
 	loU, hiU := binaryPrefixUint(minB, prefixLen), binaryPrefixUint(maxB, prefixLen)
-	nChunks := uint64(chunks) //nolint:gosec // G115: chunks is in [2, maxSnapshotReaders]
+	nChunks := uint64(chunks) //nolint:gosec // G115: chunks is in [2, sql.MaxSnapshotReaders]
 	if hiU-loU < nChunks {
 		return nil, nil
 	}
@@ -264,7 +240,7 @@ func binarySplitPoints(ctx context.Context, db *gosql.DB, table, pkCol string, c
 	}
 	bounds := make([]string, 0, chunks-1)
 	for i := 1; i < chunks; i++ {
-		v := loU + (hiU-loU)/nChunks*uint64(i) //nolint:gosec // G115: i is in [1, maxSnapshotReaders)
+		v := loU + (hiU-loU)/nChunks*uint64(i) //nolint:gosec // G115: i is in [1, sql.MaxSnapshotReaders)
 		b := make([]byte, width)
 		for j := 0; j < prefixLen && j < width; j++ {
 			b[j] = byte(v >> (8 * (prefixLen - 1 - j))) //nolint:gosec // G115: deliberate byte extraction
@@ -285,245 +261,4 @@ func binaryPrefixUint(b []byte, n int) uint64 {
 		}
 	}
 	return v
-}
-
-// chunkWindow is one read window a chunk reader hands to the emitter: the
-// rows (already entity-built and canonicalized by readBatch), or a final
-// marker (rows nil) declaring the chunk exhausted.
-type chunkWindow struct {
-	chunk int
-	rows  []*cluster.Entity
-	final bool
-}
-
-// snapshotTableParallel drives one table's chunked snapshot: a reader pool
-// over the plan's unfinished chunks, one emitter serializing their windows
-// onto pr with inline checkpoints. plan is already installed in
-// progress.ChunksByTable[table]; the caller removes it and marks the table
-// complete when this returns nil.
-func snapshotTableParallel(
-	ctx context.Context,
-	db *gosql.DB,
-	config *sql.Config,
-	table string,
-	batchSize int,
-	readers int,
-	plan *dialectpb.TableChunkProgress,
-	progress *dialectpb.SnapshotProgress,
-	pos *mysql.Position,
-	gtid string,
-	epoch uint64,
-	pr chan<- *cluster.Proposal,
-) error {
-	spec := config.SpecForTable(table)
-	if spec == nil {
-		return fmt.Errorf("snapshot: no topic-spec routes table %q", table)
-	}
-
-	// Work list: unfinished chunks only (a resume skips done ones).
-	var work []int
-	for i, c := range plan.Chunks {
-		if !c.Done {
-			work = append(work, i)
-		}
-	}
-	if len(work) == 0 {
-		return nil
-	}
-	pool := min(readers, len(work))
-	zap.L().Info("snapshot: table snapshot starting (chunked)",
-		zap.String("table", table),
-		zap.Int("chunks_total", len(plan.Chunks)),
-		zap.Int("chunks_remaining", len(work)),
-		zap.Int("readers", pool),
-		zap.Uint64("refresh_epoch", epoch))
-
-	rctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	workCh := make(chan int)
-	emitCh := make(chan chunkWindow, pool)
-
-	var wg sync.WaitGroup
-	var readerErrMu sync.Mutex
-	var readerErr error
-	fail := func(err error) {
-		readerErrMu.Lock()
-		if readerErr == nil {
-			readerErr = err
-		}
-		readerErrMu.Unlock()
-		cancel()
-	}
-
-	for w := 0; w < pool; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for {
-				var idx int
-				select {
-				case i, ok := <-workCh:
-					if !ok {
-						return
-					}
-					idx = i
-				case <-rctx.Done():
-					return
-				}
-				if err := readChunk(rctx, db, table, spec, plan.Chunks[idx], idx, batchSize, emitCh); err != nil {
-					if rctx.Err() == nil {
-						fail(fmt.Errorf("chunk %d: %w", idx, err))
-					}
-					return
-				}
-			}
-		}()
-	}
-	go func() {
-		defer close(emitCh)
-		defer wg.Wait()
-		for _, idx := range work {
-			select {
-			case workCh <- idx:
-			case <-rctx.Done():
-				close(workCh)
-				return
-			}
-		}
-		close(workCh)
-	}()
-
-	// The emitter: the ONLY goroutine that mutates the chunk cursors, in
-	// hand-off order — so every encoded inline checkpoint describes exactly
-	// the rows already sent ahead of it.
-	remaining := len(work)
-	for win := range emitCh {
-		if win.final {
-			plan.Chunks[win.chunk].Done = true
-			remaining--
-			zap.L().Info("snapshot: chunk complete",
-				zap.String("table", table),
-				zap.Int("chunk", win.chunk),
-				zap.Int("chunks_remaining", remaining))
-			continue
-		}
-		stampGeneration(win.rows, epoch)
-		if err := handOffChunkWindow(rctx, win.rows, win.chunk, plan, progress, *pos, gtid, epoch, pr); err != nil {
-			fail(err)
-			// Drain so the reader pool can exit; fail() already canceled rctx.
-			for range emitCh { //nolint:revive // draining to unblock senders
-			}
-			break
-		}
-	}
-
-	readerErrMu.Lock()
-	defer readerErrMu.Unlock()
-	if readerErr != nil {
-		return readerErr
-	}
-	return ctx.Err()
-}
-
-// readChunk reads one chunk to exhaustion, sending each window (and a final
-// marker) to the emitter. It keeps a LOCAL cursor — the durable cursor is the
-// emitter's, advanced per hand-off; on a crash the chunk resumes from the
-// last inline checkpoint and re-reads at most its tail window.
-func readChunk(
-	ctx context.Context,
-	db *gosql.DB,
-	table string,
-	spec *sql.TopicSpec,
-	c *dialectpb.ChunkCursor,
-	idx int,
-	batchSize int,
-	emitCh chan<- chunkWindow,
-) error {
-	lastPK, haveLastPK := chunkStartCursor(c)
-	windows := 0
-	totalRows := 0
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		rows, lastKey, count, err := readBatch(ctx, db, table, spec, lastPK, haveLastPK, c.Upper, batchSize)
-		if err != nil {
-			return err
-		}
-		if count > 0 {
-			windows++
-			totalRows += count
-			lastPK, haveLastPK = lastKey, true
-			select {
-			case emitCh <- chunkWindow{chunk: idx, rows: rows}:
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-			// No last_pk in the log: a natural PK is often source PII.
-			zap.L().Info("snapshot: chunk window read",
-				zap.String("table", table),
-				zap.Int("chunk", idx),
-				zap.Int("window", windows),
-				zap.Int("rows_in_window", count),
-				zap.Int("rows_total", totalRows))
-		}
-		if count < batchSize {
-			select {
-			case emitCh <- chunkWindow{chunk: idx, final: true}:
-				return nil
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
-	}
-}
-
-// chunkStartCursor picks where a chunk's read begins: its durable cursor
-// when one was checkpointed (resume), else its exclusive lower bound, else
-// unbounded (the table-start chunk).
-func chunkStartCursor(c *dialectpb.ChunkCursor) (lastPK string, have bool) {
-	if c.LastPk != "" {
-		return c.LastPk, true
-	}
-	if c.Lower != "" {
-		return c.Lower, true
-	}
-	return "", false
-}
-
-// handOffChunkWindow is handOffSnapshotWindow's chunked twin: one single-row
-// proposal per row, with an inline resume checkpoint riding every stride-th
-// row and the window's final row. The cursor written is THIS chunk's, inside
-// the full frozen plan, so the persisted blob always carries every chunk's
-// durable position.
-func handOffChunkWindow(
-	ctx context.Context,
-	rows []*cluster.Entity,
-	chunk int,
-	plan *dialectpb.TableChunkProgress,
-	progress *dialectpb.SnapshotProgress,
-	pos mysql.Position,
-	gtid string,
-	epoch uint64,
-	pr chan<- *cluster.Proposal,
-) error {
-	stride := sql.SnapshotCheckpointStride
-	for ri, row := range rows {
-		p := &cluster.Proposal{Entities: []*cluster.Entity{row}}
-		if ri == len(rows)-1 || (ri+1)%stride == 0 {
-			plan.Chunks[chunk].LastPk = string(row.Key)
-			posBytes, err := encodeProgress(pos, gtid, progress, epoch)
-			if err != nil {
-				return err
-			}
-			p.Position = posBytes
-		}
-		select {
-		case pr <- p:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	return nil
 }

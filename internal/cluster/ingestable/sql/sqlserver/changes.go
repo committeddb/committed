@@ -183,25 +183,15 @@ func (d *SQLServerDialect) ingestOnce(
 	}
 }
 
-// addedTables returns configured tables missing from the snapshotted
-// registry — tables a config re-POST added after the last snapshot, whose
-// history must be backfilled (their ongoing changes already flow: the poll
-// reads every configured table).
+// addedTables diffs configured tables against the snapshotted registry — the
+// added-table backfill trigger — with the empty registry grandfathered as
+// all-snapshotted (the pre-registry compat contract: a checkpoint written
+// before the registry existed must not read as "nothing snapshotted").
 func addedTables(configured, snapshotted []string) []string {
 	if len(snapshotted) == 0 {
-		return nil // pre-registry state: grandfathered as all-snapshotted
+		return nil
 	}
-	have := make(map[string]bool, len(snapshotted))
-	for _, t := range snapshotted {
-		have[t] = true
-	}
-	var added []string
-	for _, t := range configured {
-		if !have[t] {
-			added = append(added, t)
-		}
-	}
-	return added
+	return sql.AddedTables(configured, snapshotted)
 }
 
 // runSnapshot performs a full snapshot, a mid-snapshot resume, or an
@@ -220,7 +210,7 @@ func (d *SQLServerDialect) runSnapshot(
 	pr chan<- *cluster.Proposal,
 	po chan<- cluster.Position,
 ) error {
-	progress := newSnapshotProgress(*resumeProgress)
+	progress := sql.NewSnapshotProgress(*resumeProgress)
 	tables := config.Tables
 
 	switch {
@@ -349,7 +339,7 @@ func (d *SQLServerDialect) pollWindow(
 		if len(entities) == 0 {
 			return nil
 		}
-		stampGeneration(entities, epoch)
+		sql.StampGeneration(entities, epoch)
 		var commitTS int64
 		var txnID string
 		if txnVer > 0 {

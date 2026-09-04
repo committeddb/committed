@@ -172,27 +172,6 @@ func TestQuoteTable(t *testing.T) {
 	}
 }
 
-func TestParseBatchSize(t *testing.T) {
-	tests := []struct {
-		name string
-		opts map[string]string
-		want int
-	}{
-		{"nil_options", nil, defaultSnapshotBatchSize},
-		{"missing_key", map[string]string{"slot_name": "s"}, defaultSnapshotBatchSize},
-		{"valid_override", map[string]string{"batch_size": "500"}, 500},
-		{"invalid_non_numeric", map[string]string{"batch_size": "abc"}, defaultSnapshotBatchSize},
-		{"zero_falls_back", map[string]string{"batch_size": "0"}, defaultSnapshotBatchSize},
-		{"negative_falls_back", map[string]string{"batch_size": "-1"}, defaultSnapshotBatchSize},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, parseBatchSize(tt.opts))
-		})
-	}
-}
-
 func TestDecodePositionLegacyLSN(t *testing.T) {
 	// Legacy format: raw 8-byte big-endian LSN, no snapshot progress.
 	legacy := make([]byte, 8)
