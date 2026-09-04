@@ -102,7 +102,7 @@ func newIngestSupervisor(initialBackoff, maxBackoff time.Duration, maxAttempts i
 // superviseRestartIngest re-registers an ingestable whose worker
 // parked in the ErrProposalUnknown freeze branch. It runs as a
 // detached goroutine spawned from the freeze-exit branch of the
-// worker-launch goroutine in spawnIngestWorkerLocked.
+// worker-launch goroutine in newIngestWorker.
 //
 // Behavior:
 //
@@ -117,7 +117,7 @@ func newIngestSupervisor(initialBackoff, maxBackoff time.Duration, maxAttempts i
 //     supervisor's maxBackoff) before re-registering.
 //   - Preflight AND install under a single workers.mu hold so a
 //     concurrent user replace can't slip in between (see the race
-//     analysis in spawnIngestWorkerLocked's doc comment): if the
+//     analysis in newIngestWorker's doc comment): if the
 //     frozen handle is no longer the registered one when we acquire
 //     the lock, we bail; otherwise we delete it and install the
 //     supervisor's replacement without releasing the lock. A user
@@ -215,7 +215,7 @@ func (db *DB) superviseRestartIngest(id string, i cluster.Ingestable, frozen *wo
 	// harmless no-op that just releases the node.
 	frozen.cancel()
 	delete(db.workers.ingest, id)
-	db.spawnIngestWorkerLocked(id, i)
+	db.workers.ingest[id] = db.newIngestWorker(id, i)
 	db.workers.mu.Unlock()
 
 	if db.afterIngestSupervisorRestartForTest != nil {

@@ -9,6 +9,14 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 )
 
+// workerKind selects one of the registry's two tables.
+type workerKind string
+
+const (
+	workerKindSync   workerKind = "sync"
+	workerKindIngest workerKind = "ingest"
+)
+
 // workerRegistry is the sync/ingest worker registry: the per-ID worker
 // handles for both kinds, the closed flag, and the one lock guarding them.
 // The tables stay separate (never one map keyed by kind) so a reconcile of
@@ -110,4 +118,71 @@ type workerHandle struct {
 	// status path can ask it to decode its persisted position and query source
 	// lag (IngestableStatus) without re-parsing. It is nil for syncable workers.
 	ingestable cluster.Ingestable
+}
+
+// table returns the handle table for kind. Callers hold mu.
+func (r *workerRegistry) table(kind workerKind) map[string]*workerHandle {
+	if kind == workerKindIngest {
+		return r.ingest
+	}
+	return r.sync
+}
+
+// replace installs a fresh worker for id, first cancelling and draining any
+// worker already registered there. spawn runs under the lock once the slot
+// is empty (replaced reports whether it evicted anything) and returns the
+// handle to register; onDrained runs OUTSIDE the lock for each evicted
+// handle, after its bounded drain, with whether the drain completed — the
+// caller's hook for kind-specific resource release. Returns ErrClosed if
+// the registry is closed at entry or becomes closed during a drain.
+//
+// The loop is the concurrent-replace fix: the naive "if existing { cancel;
+// wait; install }" races when two callers replace the same id — both
+// observe the original entry, both wait on it, both install, and the
+// loser's worker is orphaned (running but unreferenced, so no future
+// replace can find it). Re-checking the slot after every wait converges:
+// the entry we drained is deleted only if the slot still points at it
+// (never a successor's), and an entry a concurrent caller slipped in is
+// drained too. The lock is dropped only during the wait, so the exiting
+// worker is never blocked by us; closed is re-checked after every
+// reacquisition so a concurrent db.Close cannot be escaped by a late
+// install.
+//
+// Condemn before dropping the lock to drain: an evicted handle with a
+// pending supervisor (a frozen ingest worker) would otherwise be
+// resurrected by a supervisor that reacquires the lock inside the drain
+// window and still sees its handle registered — on the very instance
+// onDrained is about to Close. The flag is what stops that; the map
+// re-check alone cannot. See workerHandle.condemned.
+func (r *workerRegistry) replace(kind workerKind, id string, spawn func(replaced bool) *workerHandle, onDrained func(prev *workerHandle, drained bool)) error {
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return ErrClosed
+	}
+	table := r.table(kind)
+	replaced := false
+	for {
+		existing, ok := table[id]
+		if !ok {
+			break
+		}
+		replaced = true
+		existing.condemned = true
+		existing.cancel()
+		r.mu.Unlock()
+		drained := waitDone(existing.done, r.drainTimeout)
+		onDrained(existing, drained)
+		r.mu.Lock()
+		if r.closed {
+			r.mu.Unlock()
+			return ErrClosed
+		}
+		if table[id] == existing {
+			delete(table, id)
+		}
+	}
+	table[id] = spawn(replaced)
+	r.mu.Unlock()
+	return nil
 }

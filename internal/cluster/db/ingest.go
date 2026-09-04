@@ -180,81 +180,36 @@ func (db *DB) Ingest(_ context.Context, id string, i cluster.Ingestable) error {
 		}
 		return nil
 	}
-	db.workers.mu.Lock()
-	if db.workers.closed {
-		db.workers.mu.Unlock()
-		return ErrClosed
+	err := db.workers.replace(workerKindIngest, id,
+		func(replaced bool) *workerHandle {
+			if replaced {
+				// A re-POST replaced the worker — a new worker generation. Drop the
+				// supervisor give-up state so the fresh worker starts with a full restart
+				// budget instead of inheriting a prior give-up (this is the "raise the cap
+				// and re-POST" recovery). Works for a byte-identical re-POST too, which
+				// does not bump the config version but still replaces the worker here.
+				db.ingestSupervisor.prune(id)
+				if db.metrics != nil {
+					db.metrics.WorkerReplaced("ingest", id)
+				}
+			}
+			return db.newIngestWorker(id, i)
+		},
+		func(prev *workerHandle, drained bool) {
+			if !drained {
+				db.logger.Warn("ingest replace: prior worker did not exit in time; abandoning it (wedged on its source?) and proceeding",
+					zap.String("id", id), zap.Duration("timeout", db.workers.drainTimeout))
+			}
+			// Release the superseded ingestable's source resources (only if it drained,
+			// so we don't race a wedged worker) — otherwise every re-POST leaks them.
+			db.closeDrainedIngestable(prev, id)
+		})
+	if err != nil {
+		return err
 	}
-	// Loop until the slot is empty before installing. The naive
-	// "if existing { cancel; wait; install }" shape races when two
-	// callers replace the same id concurrently: both observe the
-	// original entry, both wait on it, then both install — and the
-	// loser's worker is orphaned (running but unreferenced from the
-	// map, so no future replace can find it).
-	//
-	// The loop fixes this by re-checking the slot after each wait.
-	// If the slot still points to the entry we just waited on, we
-	// clear it and break out. If a concurrent caller slipped a new
-	// entry in while we waited, we cancel+wait that one too. This
-	// converges in normal use (one extra cycle per pre-empting caller)
-	// and the lock is dropped only during the wait, so the exiting
-	// worker is never blocked by us.
-	//
-	// Re-check db.workers.closed after each wait too: a concurrent db.Close
-	// may have flipped the flag while we were dropped. Without the
-	// re-check, we'd install a worker that escapes the Close drain.
-	replaced := false
-	for {
-		existing, ok := db.workers.ingest[id]
-		if !ok {
-			break
-		}
-		replaced = true
-		// Condemn before dropping the lock to drain: if existing is a frozen
-		// handle with a pending supervisor, the supervisor could otherwise
-		// reacquire the lock in the drain window and resurrect existing on its
-		// Ingestable instance — which closeDrainedIngestable below then Closes.
-		// The loop re-check converges the MAP, but only the flag stops the Close
-		// from racing a resurrected worker. See workerHandle.condemned.
-		existing.condemned = true
-		existing.cancel()
-		db.workers.mu.Unlock()
-		if !waitDone(existing.done, db.workers.drainTimeout) {
-			db.logger.Warn("ingest replace: prior worker did not exit in time; abandoning it (wedged on its source?) and proceeding",
-				zap.String("id", id), zap.Duration("timeout", db.workers.drainTimeout))
-		}
-		// Release the superseded ingestable's source resources (only if it drained,
-		// so we don't race a wedged worker) — otherwise every re-POST leaks them.
-		db.closeDrainedIngestable(existing, id)
-		db.workers.mu.Lock()
-		if db.workers.closed {
-			db.workers.mu.Unlock()
-			return ErrClosed
-		}
-		if db.workers.ingest[id] == existing {
-			delete(db.workers.ingest, id)
-		}
-	}
-
-	if replaced {
-		// A re-POST replaced the worker — a new worker generation. Drop the
-		// supervisor give-up state so the fresh worker starts with a full restart
-		// budget instead of inheriting a prior give-up (this is the "raise the cap
-		// and re-POST" recovery). Works for a byte-identical re-POST too, which
-		// does not bump the config version but still replaces the worker here.
-		db.ingestSupervisor.prune(id)
-		if db.metrics != nil {
-			db.metrics.WorkerReplaced("ingest", id)
-		}
-	}
-
-	db.spawnIngestWorkerLocked(id, i)
-	db.workers.mu.Unlock()
-
 	if db.metrics != nil {
 		db.metrics.SetWorkerRunning("ingest", id, true)
 	}
-
 	return nil
 }
 
@@ -471,13 +426,13 @@ func (db *DB) TopicRefreshEpoch(topic string) uint64 {
 	return db.storage.TopicRefreshEpoch(topic)
 }
 
-// spawnIngestWorkerLocked installs a fresh ingest worker handle for id
-// in the registry and starts the worker goroutine. Caller MUST hold
-// db.workers.mu and MUST have already ensured the registry slot for id
-// is empty and db.workers.closed is false. Shared between db.Ingest (which
-// drains any prior entry via the replace loop first) and
-// superviseRestartIngest (which drops the frozen handle directly
-// under the same lock, then calls this to install the replacement).
+// newIngestWorker builds a fresh ingest worker handle for id and starts
+// the worker goroutine; the CALLER registers the returned handle, holding
+// db.workers.mu with the slot for id already empty and the registry not
+// closed. Shared between the registry's replace (on behalf of db.Ingest,
+// which drains any prior entry first) and superviseRestartIngest (which
+// drops the frozen handle directly under the same lock, then registers the
+// replacement).
 //
 // Centralizing the handle/goroutine/supervisor-wiring here is load-
 // bearing for the supervisor-vs-user-replace race: holding the lock
@@ -488,14 +443,13 @@ func (db *DB) TopicRefreshEpoch(topic string) uint64 {
 // atomically. A user replace that arrives after the unlock still wins
 // the final state (its db.Ingest replaces the supervisor-installed
 // handle via the normal replacement loop).
-func (db *DB) spawnIngestWorkerLocked(id string, i cluster.Ingestable) *workerHandle {
+func (db *DB) newIngestWorker(id string, i cluster.Ingestable) *workerHandle {
 	// cancel ownership passes to the workerHandle. It is invoked by
 	// db.Close and by the replace loop in db.Ingest when a duplicate
 	// supersedes this worker, so the cancel is not leaked. gosec can't
 	// see through the handle indirection.
 	workerCtx, cancel := context.WithCancel(db.ctx) //nolint:gosec // G118: cancel owned by workerHandle
 	handle := &workerHandle{cancel: cancel, ctx: workerCtx, done: make(chan struct{}), ingestable: i}
-	db.workers.ingest[id] = handle
 
 	go func() {
 		reason := db.ingest(workerCtx, id, i)
@@ -905,7 +859,7 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 						// pipelined rows and this failed proposal can be
 						// committed-but-unapplied (acks fire at apply, which can
 						// lag commit under a busy Ready loop). The freeze-exit
-						// handler (spawnIngestWorkerLocked) drains apply to the
+						// handler (newIngestWorker) drains apply to the
 						// commit index before the supervisor re-reads the
 						// position, so a committed batch is never re-emitted into
 						// the permanent event log — the effectively-once contract

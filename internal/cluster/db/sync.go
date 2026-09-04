@@ -257,57 +257,41 @@ func (db *DB) Sync(_ context.Context, id string, s cluster.Syncable) error {
 		}
 		return nil
 	}
-	db.workers.mu.Lock()
-	if db.workers.closed {
-		db.workers.mu.Unlock()
-		return ErrClosed
-	}
-	// See db.Ingest for the rationale behind the loop and the
-	// re-check of db.workers.closed after each wait.
-	replaced := false
-	for {
-		existing, ok := db.workers.sync[id]
-		if !ok {
-			break
-		}
-		replaced = true
-		existing.cancel()
-		db.workers.mu.Unlock()
-		if !waitDone(existing.done, db.workers.drainTimeout) {
-			db.logger.Warn("sync replace: prior worker did not exit in time; abandoning it (wedged on its destination?) and proceeding",
-				zap.String("id", id), zap.Duration("timeout", db.workers.drainTimeout))
-		}
-		// Release the superseded syncable's prepared statements (only if it
-		// drained, so we don't race a wedged worker) — otherwise every re-POST
-		// leaks a statement set on the shared pool.
-		db.closeDrainedSyncable(existing, id)
-		db.workers.mu.Lock()
-		if db.workers.closed {
-			db.workers.mu.Unlock()
-			return ErrClosed
-		}
-		if db.workers.sync[id] == existing {
-			delete(db.workers.sync, id)
-		}
-	}
+	err := db.workers.replace(workerKindSync, id,
+		func(replaced bool) *workerHandle {
+			if replaced && db.metrics != nil {
+				db.metrics.WorkerReplaced("sync", id)
+			}
+			return db.newSyncWorker(id, s)
+		},
+		func(prev *workerHandle, drained bool) {
+			if !drained {
+				db.logger.Warn("sync replace: prior worker did not exit in time; abandoning it (wedged on its destination?) and proceeding",
+					zap.String("id", id), zap.Duration("timeout", db.workers.drainTimeout))
+			}
+			// Release the superseded syncable's prepared statements (only if it
+			// drained, so we don't race a wedged worker) — otherwise every re-POST
+			// leaks a statement set on the shared pool.
+			db.closeDrainedSyncable(prev, id)
+		})
+	return err
+}
 
-	if replaced && db.metrics != nil {
-		db.metrics.WorkerReplaced("sync", id)
-	}
-
-	// cancel ownership passes to the workerHandle. It is invoked by
-	// db.Close (see db.go:~390) and by the replace path above when a
-	// duplicate Sync call supersedes this worker, so the cancel is
-	// not leaked. gosec can't see through the handle indirection.
+// newSyncWorker builds the handle for a sync worker on s and starts its
+// goroutine. The caller — the registry's replace, holding its lock —
+// registers the returned handle. The running gauge flips true before the
+// goroutine starts, as it always has, so an instant exit cannot leave it
+// stuck true.
+func (db *DB) newSyncWorker(id string, s cluster.Syncable) *workerHandle {
+	// cancel ownership passes to the workerHandle. It is invoked by db.Close
+	// and by the registry's replace when a duplicate Sync call supersedes
+	// this worker, so the cancel is not leaked. gosec can't see through the
+	// handle indirection.
 	workerCtx, cancel := context.WithCancel(db.ctx) //nolint:gosec // G118: cancel owned by workerHandle
 	handle := &workerHandle{cancel: cancel, done: make(chan struct{}), syncable: s}
-	db.workers.sync[id] = handle
-	db.workers.mu.Unlock()
-
 	if db.metrics != nil {
 		db.metrics.SetWorkerRunning("sync", id, true)
 	}
-
 	go func() {
 		defer func() {
 			if db.metrics != nil {
@@ -318,8 +302,7 @@ func (db *DB) Sync(_ context.Context, id string, s cluster.Syncable) error {
 		db.syncBreaker.reset(id) // fresh breaker state for this worker run (e.g. after a replace)
 		_ = db.sync(workerCtx, id, s, handle)
 	}()
-
-	return nil
+	return handle
 }
 
 // deleteSync tears down a syncable that was removed from the log: it cancels

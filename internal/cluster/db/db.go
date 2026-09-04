@@ -241,7 +241,7 @@ type DB struct {
 	afterIngestSupervisorRestartForTest func(frozenCtxErr error)
 
 	// ingestDrainTimeoutForTest bounds the apply-drain the freeze-exit performs
-	// before a supervised restart (see spawnIngestWorkerLocked). Zero in
+	// before a supervised restart (see newIngestWorker). Zero in
 	// production, where the drain waits unbounded on workerCtx — on a live node
 	// apply always catches up to the commit index, and a dead apply releases the
 	// wait via db.ctx. Tests whose in-memory storage stubs AppliedIndex to 0 set
