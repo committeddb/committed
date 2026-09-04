@@ -374,7 +374,7 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 	db.disk = newDiskAdmission(diskAdmissionDeps{
 		selfID:             db.ID,
 		leaderID:           db.Leader,
-		isLeader:           func() bool { return db.leaderState != nil && db.leaderState.IsLeader() },
+		isLeader:           db.IsLeader,
 		memberAPIURL:       db.MemberAPIURL,
 		voters:             db.diskVoters,
 		replicationMatch:   db.diskReplicationMatch,
@@ -421,7 +421,7 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 	// Graceful-shutdown leadership-transfer collaborators (shutdown.go).
 	db.transferLeadershipFn = db.raft.transferLeadership
 	db.shutdownTransferTargetFn = db.shutdownTransferTarget
-	db.isLeaderFn = db.isLeader
+	db.isLeaderFn = db.isRaftLeader
 	db.shutdownTransferTimeout = defaultShutdownTransferTimeout
 
 	// The disk-admission coordinator runs even with no local watcher: this
@@ -1243,6 +1243,17 @@ func (db *DB) ID() uint64 {
 // through to etcd raft's Status() snapshot. Used by the /ready HTTP probe.
 func (db *DB) Leader() uint64 {
 	return db.raft.Leader()
+}
+
+// IsLeader reports whether this node has taken up leadership: its Ready loop
+// has processed the election, so the leader-only work the engine gates on
+// this view — disk-report aggregation, leader-owned workers, the shutdown
+// hand-off's peers — is actually running here. It can lag Leader() (raft's
+// own soft state) by one Ready iteration; a request that reads Leader()==ID
+// and then hits a leader-only path in that window gets the retryable
+// not-leader answer, never a wrong one.
+func (db *DB) IsLeader() bool {
+	return db.leaderState != nil && db.leaderState.IsLeader()
 }
 
 // AddMember adds a voting node to the cluster via a joint-consensus

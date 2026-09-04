@@ -194,11 +194,15 @@ func newEngineFull(t *testing.T, dbOpts []db.Option, httpOpts []http.Option) *en
 	d := db.New(1, peers, s, p, syncCh, ingestCh, opts...)
 	t.Cleanup(func() { _ = d.Close(); _ = s.Close() })
 
-	// Wait out the single-node election: leader-pinned routes (rebuild,
-	// delete) consult Leader()/ID() and would 503 against a node that has
-	// not elected itself yet. Proposals block on commit and hide this;
-	// requests that read leadership first do not.
-	require.Eventually(t, func() bool { return d.Leader() == 1 },
+	// Wait out the single-node election on BOTH leadership views: the
+	// leader-pinned routes (rebuild, delete) consult Leader()/ID() — raft's
+	// own soft state — while leader-only engine work (disk-report
+	// aggregation, leader-owned workers) gates on IsLeader(), the
+	// Ready-processed view that lags it by one iteration. A request landing
+	// in that gap gets the retryable not-leader 503 by design; a test must
+	// not start there. Proposals block on commit and hide this; requests
+	// that read leadership first do not.
+	require.Eventually(t, func() bool { return d.Leader() == 1 && d.IsLeader() },
 		10*time.Second, time.Millisecond, "the single node never elected itself")
 
 	return &engine{h: http.New(d, httpOpts...), d: d, s: s, sink: sink, ingest: ingest, syncParser: recParser}
