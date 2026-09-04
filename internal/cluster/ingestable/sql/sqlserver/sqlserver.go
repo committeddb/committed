@@ -220,32 +220,10 @@ func (d *SQLServerDialect) SourceColumns(config *sql.Config) (columns, generated
 	generated = make(map[string][]string)
 	for _, table := range config.Tables {
 		ref := resolveTableRef(table)
-		rows, err := db.QueryContext(ctx, `
-			SELECT name, is_computed
-			FROM sys.columns
-			WHERE object_id = OBJECT_ID(@p1)
-			ORDER BY column_id`, ref.objectID())
+		cols, gen, err := sourceTableColumns(ctx, db, ref)
 		if err != nil {
 			return nil, nil, fmt.Errorf("[sqlserver] columns of %s: %w", table, err)
 		}
-		var cols, gen []string
-		for rows.Next() {
-			var name string
-			var computed bool
-			if err := rows.Scan(&name, &computed); err != nil {
-				_ = rows.Close()
-				return nil, nil, err
-			}
-			cols = append(cols, name)
-			if computed {
-				gen = append(gen, name)
-			}
-		}
-		if err := rows.Err(); err != nil {
-			_ = rows.Close()
-			return nil, nil, err
-		}
-		_ = rows.Close()
 		if len(cols) == 0 {
 			return nil, nil, fmt.Errorf("[sqlserver] table %s not found (schema %s)", table, ref.schema)
 		}
@@ -255,6 +233,34 @@ func (d *SQLServerDialect) SourceColumns(config *sql.Config) (columns, generated
 		}
 	}
 	return columns, generated, nil
+}
+
+// sourceTableColumns reads one table's column names in source order and its
+// computed-column subset from sys.columns. Empty cols means the table does
+// not exist (OBJECT_ID resolved to NULL). Shared by SourceColumns and the
+// poll loop's key-drift classifier.
+func sourceTableColumns(ctx context.Context, db *gosql.DB, ref tableRef) (cols, generated []string, err error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT name, is_computed
+		FROM sys.columns
+		WHERE object_id = OBJECT_ID(@p1)
+		ORDER BY column_id`, ref.objectID())
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var name string
+		var computed bool
+		if err := rows.Scan(&name, &computed); err != nil {
+			return nil, nil, err
+		}
+		cols = append(cols, name)
+		if computed {
+			generated = append(generated, name)
+		}
+	}
+	return cols, generated, rows.Err()
 }
 
 // Status decodes the checkpoint into a point-in-time IngestableStatus and,

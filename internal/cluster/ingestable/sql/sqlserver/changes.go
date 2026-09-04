@@ -84,6 +84,19 @@ func (d *SQLServerDialect) Ingest(ctx context.Context, config *sql.Config, pos c
 		if err == nil || ctx.Err() != nil {
 			return nil
 		}
+		if errors.Is(err, sql.ErrPrimaryKeyColumnMissing) {
+			// Permanent schema drift: a configured primaryKey column was renamed or
+			// dropped at the source. The CHANGETABLE join names it, so the same
+			// window fails on every retry — forever, at the backoff cap, visible
+			// only in these logs. Return instead so the worker parks (freeze →
+			// supervisor → committed.worker.parked), loud and observable — the
+			// same exit the log-based dialects take. err (the ParkError) names the
+			// affected topic and the missing columns.
+			zap.L().Error("ingest stopping: a primaryKey column is missing from the source schema (renamed or dropped) — worker will park until the ingestable is re-POSTed or the column restored",
+				zap.Error(err),
+			)
+			return err
+		}
 		zap.L().Warn("[sqlserver] ingest error, retrying",
 			zap.Duration("backoff", backoff), zap.Error(err))
 		if werr := waitCtx(ctx, backoff); werr != nil {
@@ -145,6 +158,7 @@ func (d *SQLServerDialect) ingestOnce(
 
 	// --- the poll loop ---
 	interval := pollInterval(config.Options)
+	drift := &schemaDriftGuard{}
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil
@@ -176,7 +190,7 @@ func (d *SQLServerDialect) ingestOnce(
 			continue
 		}
 
-		if err := d.pollWindow(ctx, db, config, *version, current, *epoch, pr); err != nil {
+		if err := d.pollWindow(ctx, db, config, *version, current, *epoch, drift, pr); err != nil {
 			return err
 		}
 
@@ -275,6 +289,7 @@ func (d *SQLServerDialect) pollWindow(
 	config *sql.Config,
 	consumed, current uint64,
 	epoch uint64,
+	drift *schemaDriftGuard,
 	pr chan<- *cluster.Proposal,
 ) error {
 	sub := 0
@@ -344,7 +359,7 @@ func (d *SQLServerDialect) pollWindow(
 		if spec == nil {
 			return fmt.Errorf("no topic-spec routes table %q", table)
 		}
-		if err := d.pollTable(ctx, db, table, spec, consumed, current, flush); err != nil {
+		if err := d.pollTable(ctx, db, table, spec, consumed, current, drift, flush); err != nil {
 			return fmt.Errorf("poll %s: %w", table, err)
 		}
 	}
@@ -360,6 +375,7 @@ func (d *SQLServerDialect) pollTable(
 	table string,
 	spec *sql.TopicSpec,
 	consumed, current uint64,
+	drift *schemaDriftGuard,
 	flush func([]*cluster.Entity, int64) error,
 ) error {
 	ref := resolveTableRef(table)
@@ -382,12 +398,29 @@ func (d *SQLServerDialect) pollTable(
 
 	rows, err := db.QueryContext(ctx, query, int64(consumed), int64(current)) //nolint:gosec // G115: CT versions are non-negative bigints well under int64 max.
 	if err != nil {
+		// The join names every primaryKey column, so a key column renamed or
+		// dropped at the source fails this query before a single row is read —
+		// the reconcile below never runs. Classify by the schema fact, not the
+		// error text: re-read the table's current columns and park when a key
+		// column is gone; anything else (source down, the probe itself failing)
+		// stays the retryable error it was.
+		if perr := keyDriftPark(ctx, db, ref, spec); perr != nil {
+			return perr
+		}
 		return fmt.Errorf("changetable query: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
 	cols, err := rows.Columns()
 	if err != nil {
+		return err
+	}
+	// The window's projection (t.*) is this dialect's schema-change boundary —
+	// change tracking carries no in-band DDL signal (no TableMap event, no
+	// RelationMessage) — so reconcile the config's column contract against it
+	// here: a vanished mapped column diverges (renders null) and warns once; a
+	// vanished key column cannot reach this point (the query fails above).
+	if err := drift.reconcile(table, spec, cols); err != nil {
 		return err
 	}
 	colTypes, err := rows.ColumnTypes()
@@ -469,6 +502,64 @@ func (d *SQLServerDialect) pollTable(
 			zap.Uint64("throughVersion", current))
 	}
 	return nil
+}
+
+// schemaDriftGuard reconciles the config's column contract against the
+// columns each poll window observes. A window recurs every poll interval, so
+// the divergence Warn is deduped to once per (table, column) per session —
+// exactly as the MySQL handler dedups its per-transaction TableMap warn. One
+// guard per ingestOnce session: the dialect value is the registry singleton
+// shared by every ingestable and holds no per-worker state.
+type schemaDriftGuard struct {
+	warned map[string]bool
+}
+
+// reconcile returns the ParkError for a missing primaryKey column and Warns
+// once per missing mapped column. cols are the window projection's column
+// names as the driver reports them (source case; lowercased here).
+func (g *schemaDriftGuard) reconcile(table string, spec *sql.TopicSpec, cols []string) error {
+	observed := make(map[string]bool, len(cols))
+	for _, c := range cols {
+		observed[strings.ToLower(c)] = true
+	}
+	drift := sql.ReconcileSchema(spec, observed)
+	if err := drift.ParkError(); err != nil {
+		return err
+	}
+	for _, col := range drift.MissingMapped {
+		k := table + "\x00" + col
+		if g.warned[k] {
+			continue
+		}
+		if g.warned == nil {
+			g.warned = make(map[string]bool)
+		}
+		g.warned[k] = true
+		zap.L().Warn("mapped column dropped or renamed at the source; it now renders null on the sink, which diverges from the source and must be re-snapshotted to reconcile",
+			zap.String("table", table),
+			zap.String("column", col),
+		)
+	}
+	return nil
+}
+
+// keyDriftPark classifies a failed CHANGETABLE read: it re-reads the table's
+// current columns and returns the ParkError when a configured primaryKey
+// column is no longer among them. nil means "not key drift" — the table is
+// intact, or gone entirely (a different fault, not this class), or the probe
+// itself failed — and the caller keeps its original, retryable error.
+func keyDriftPark(ctx context.Context, db *gosql.DB, ref tableRef, spec *sql.TopicSpec) error {
+	ctx, cancel := context.WithTimeout(ctx, ctLivenessTimeout)
+	defer cancel()
+	cols, _, err := sourceTableColumns(ctx, db, ref)
+	if err != nil || len(cols) == 0 {
+		return nil
+	}
+	observed := make(map[string]bool, len(cols))
+	for _, c := range cols {
+		observed[strings.ToLower(c)] = true
+	}
+	return sql.ReconcileSchema(spec, observed).ParkError()
 }
 
 // rowEntity renders one base-table row as an upsert entity through the shared
