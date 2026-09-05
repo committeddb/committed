@@ -1409,9 +1409,26 @@ func (db *DB) proposeConfChange(ctx context.Context, cc *raftpb.ConfChangeV2, id
 	return db.waitForMembership(ctx, id, target)
 }
 
+// membershipSettleTimeout bounds waitForMembership when the caller's ctx
+// carries no deadline. raft can silently drop a conf change (a previous one
+// still unapplied from raft's view, a leadership move mid-proposal) with
+// nothing but a log line, so an unbounded wait can never return; bounding it
+// turns the drop into ErrMembershipUnsettled, which the operator retries.
+// Generous: a membership change commits in one round trip. A var so tests
+// can shorten it.
+var membershipSettleTimeout = 60 * time.Second
+
+// ErrMembershipUnsettled: a submitted membership change did not take effect
+// within membershipSettleTimeout — raft may have dropped it. Retry.
+var ErrMembershipUnsettled = errors.New("membership change not applied within the settle timeout: raft may have dropped it (a previous change was still applying when it was proposed, or leadership moved) — retry the request")
+
 // waitForMembership blocks until this node's applied raft configuration
 // reaches target — id in the expected set (voter / learner / neither) AND the
-// joint transition complete — ctx is canceled, or the DB is shutting down.
+// joint transition complete — ctx is canceled, the settle timeout elapses,
+// or the DB is shutting down. A wake on the applied broadcast also means
+// raft's own applied index has passed the change (the Ready loop Advances
+// before broadcasting), so the next conf change a caller proposes on return
+// is never dropped by raft as "unapplied".
 // It waits on the same applied-index broadcast (appliedNotify) the Ready loop
 // fires after each apply, re-checking on every wake rather than polling: a
 // membership change advances the applied index when both the enter-joint and
@@ -1419,6 +1436,11 @@ func (db *DB) proposeConfChange(ctx context.Context, cc *raftpb.ConfChangeV2, id
 // joint==false means a successful return reflects the final (non-joint)
 // configuration, not the transient joint state.
 func (db *DB) waitForMembership(ctx context.Context, id uint64, target membershipTarget) error {
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeoutCause(ctx, membershipSettleTimeout, ErrMembershipUnsettled)
+		defer cancel()
+	}
 	settled := func() bool {
 		voters, learners, joint := db.raft.memberStatus()
 		if joint {
@@ -1450,6 +1472,9 @@ func (db *DB) waitForMembership(ctx context.Context, id uint64, target membershi
 		select {
 		case <-ch:
 		case <-ctx.Done():
+			if cause := context.Cause(ctx); errors.Is(cause, ErrMembershipUnsettled) {
+				return cause
+			}
 			return ctx.Err()
 		case <-db.ctx.Done():
 			return db.ctx.Err()

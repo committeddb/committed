@@ -492,6 +492,14 @@ func (n *Raft) applyConfChange(cc raftpb.ConfChangeI, ccCtx []byte) {
 // Both maps are owned by the caller: Status() returns a Clone of the tracker
 // config, so Voters.IDs() and the Learners map are fresh per call. learners is
 // nil when there are none (a nil-map read is a safe miss).
+// raftAppliedCoversStorage reports whether raft's own applied index is at or
+// past the durable applied index — the Ready loop's ordering guarantee (see
+// the Advance placement): whenever a waiter wakes on "applied", raft agrees,
+// so a conf change it proposes next is never dropped as unapplied.
+func (n *Raft) raftAppliedCoversStorage() bool {
+	return n.node.Status().Applied >= n.storage.AppliedIndex()
+}
+
 func (n *Raft) memberStatus() (voters, learners map[uint64]struct{}, joint bool) {
 	cfg := n.node.Status().Config
 	return cfg.Voters.IDs(), cfg.Learners, len(cfg.Voters[1]) > 0
@@ -745,6 +753,26 @@ func (n *Raft) serveChannels() {
 				n.logger.Fatal("apply committed entries", zap.Int("count", len(rd.CommittedEntries)), zap.Error(err))
 			}
 			applyDur := time.Since(applyStart)
+			// Advance HERE — the entries are saved and applied, which is all
+			// raft asks — and before anything below observes "applied":
+			//
+			//   - raft's own applied index moves only at Advance. The applied
+			//     broadcast below wakes waiters that may propose next (a
+			//     membership change proposes the next conf change the moment
+			//     the previous one shows in the configuration), and raft
+			//     silently drops a conf change proposed while its applied
+			//     index has not passed the previous one. Firing the broadcast
+			//     before Advance let exactly that happen (a CI hang,
+			//     2026-09-05). After Advance, "applied" means raft agrees.
+			//   - raft's storage contract forbids compacting past raft's own
+			//     applied index; maybeCompact below compacts relative to the
+			//     durable applied index, which after a batch of more than the
+			//     safety buffer is ahead of raft's until Advance.
+			//
+			// Nothing between here and the old placement fed raft: the
+			// notifiers, metrics, the storage invariant, and compaction all
+			// read storage, which raft already reads concurrently.
+			n.node.Advance()
 			for _, entry := range rd.CommittedEntries {
 				if n.metrics != nil {
 					// Batch-amortized share: per-entry apply is no longer
@@ -801,8 +829,6 @@ func (n *Raft) serveChannels() {
 			// log only exists to move entries between peers and to
 			// satisfy the `appliedIndex` replay window.
 			n.maybeCompact()
-
-			n.node.Advance()
 		case <-n.raftStopC:
 			return
 		case <-n.closeC:

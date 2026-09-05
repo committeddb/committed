@@ -314,22 +314,14 @@ connectionString=%q`, name, dialect, connectionString)
 func addIngestable(t *testing.T, h *http.HTTP, dialect string) string {
 	name := "bar"
 	id := "test-ingestable-id"
+	// The "proposal" ingestable kind (canned proposals, test-only) reads no
+	// section of its own, and the config vocabulary is closed: a [sql]
+	// section under a non-sql type is an unknown section, rejected at POST.
+	_ = dialect
 	body := fmt.Sprintf(`[ingestable]
 type = "proposal"
 name = "%s"
-[sql]
-dialect="%s"
-topic="simple"
-connectionString="%s"
-primaryKey="pk"
-
-[[sql.mappings]]
-jsonName = "pk"
-column = "pk"
-
-[[sql.mappings]]
-jsonName = "one"
-column = "one"`, name, dialect, name)
+`, name)
 
 	req := httptest.NewRequest("POST", fmt.Sprintf("http://localhost/v1/ingestable/%s", id), strings.NewReader(body))
 	req.Header["Content-Type"] = []string{"text/toml"}

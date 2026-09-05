@@ -8,6 +8,7 @@ import (
 	"strconv"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/db"
 )
 
 // MembershipResponse is the body of GET /v1/membership: the raft cluster
@@ -195,6 +196,8 @@ func writeMembershipError(w httpgo.ResponseWriter, err error, action string) {
 		writeError(w, httpgo.StatusBadRequest, "not_a_learner", err.Error())
 	case errors.Is(err, cluster.ErrWouldRemoveLastVoter):
 		writeError(w, httpgo.StatusConflict, "would_remove_last_voter", err.Error())
+	case errors.Is(err, db.ErrMembershipUnsettled):
+		writeError(w, httpgo.StatusServiceUnavailable, "membership_unsettled", err.Error())
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		writeError(w, httpgo.StatusServiceUnavailable, "membership_unconfirmed",
 			"membership change submitted but not confirmed before the request deadline; it may still take effect once a quorum is reachable")

@@ -647,3 +647,22 @@ var (
 	MigrationKeys   = migrationKeys
 	RestatementKeys = restatementKeys
 )
+
+// RaftAppliedCoversStorageForTest reports whether raft's own applied index is
+// at or past the durable applied index — the Ready loop's ordering guarantee
+// a membership caller relies on when it proposes the next change.
+func (db *DB) RaftAppliedCoversStorageForTest() bool { return db.raft.raftAppliedCoversStorage() }
+
+// WaitForVoterForTest drives waitForMembership(memberVoter) directly, for the
+// bounded-wait test.
+func (db *DB) WaitForVoterForTest(ctx context.Context, id uint64) error {
+	return db.waitForMembership(ctx, id, memberVoter)
+}
+
+// SetMembershipSettleTimeoutForTest shortens the settle timeout; returns the
+// restore func.
+func SetMembershipSettleTimeoutForTest(d time.Duration) func() {
+	prev := membershipSettleTimeout
+	membershipSettleTimeout = d
+	return func() { membershipSettleTimeout = prev }
+}
